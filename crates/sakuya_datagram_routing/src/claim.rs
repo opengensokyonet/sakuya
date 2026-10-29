@@ -123,6 +123,7 @@ mod deliverer;
 mod delivery;
 mod erased;
 mod group;
+pub mod queue;
 mod route_match;
 mod shared;
 

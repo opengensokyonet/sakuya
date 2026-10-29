@@ -5,5 +5,6 @@ mod business;
 mod cancellation;
 mod finish;
 mod panics;
+mod receiver;
 mod support;
 mod threads;
