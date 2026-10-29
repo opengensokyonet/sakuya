@@ -15,7 +15,7 @@
 use core::num::NonZeroUsize;
 use nitori_call::ReceiverAccess;
 use nitori_io::{ReadChunk, ReadChunkExt as _, error::Incomplete};
-use snafu::{IntoError, Snafu};
+use snafu::{IntoError, ResultExt, Snafu};
 
 /// Failures of reading a payload field.
 #[derive(Debug, Snafu)]
@@ -77,9 +77,10 @@ where
     let Some(maximum) = NonZeroUsize::new(length) else {
         return Ok(F::Chunk::default());
     };
-    let first = io.read_chunk(maximum).await.map_err(|source| {
-        read_payload_error::ReceiverSnafu { completed: 0usize }.into_error(source)
-    })?;
+    let first = io
+        .read_chunk(maximum)
+        .await
+        .context(read_payload_error::ReceiverSnafu { completed: 0usize })?;
     let Some(first) = first else {
         return Err(Incomplete {
             expected: length,
@@ -118,9 +119,10 @@ where
     F: ReadChunk<Chunk: Default>,
     A: ReceiverAccess<Family = F>,
 {
-    let first = io.read_chunk(NonZeroUsize::MAX).await.map_err(|source| {
-        read_payload_error::ReceiverSnafu { completed: 0usize }.into_error(source)
-    })?;
+    let first = io
+        .read_chunk(NonZeroUsize::MAX)
+        .await
+        .context(read_payload_error::ReceiverSnafu { completed: 0usize })?;
     let Some(first) = first else {
         return Ok(F::Chunk::default());
     };
