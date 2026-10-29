@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use sakuya_link::LinkId;
+use sakuya_wire::connection_id::StatelessResetToken;
 use sakuya_wire::header::v1::LongPacketType;
 use sakuya_wire::version::Version;
 
@@ -217,7 +218,8 @@ fn datagrams_flow_from_the_link_to_connections_through_one_router() {
     let mut reset_packet = short(&cid(4), 24);
     reset_packet.extend([0x77; 16]);
     let token: [u8; 16] = reset_packet[reset_packet.len() - 16..].try_into().unwrap();
-    connection.reset_registration = Some(resets.register(token, connection.reset.clone()));
+    connection.reset_registration =
+        Some(resets.register(StatelessResetToken::new(token), connection.reset.clone()));
 
     assert_eq!(
         dispatch(long(LongPacketType::Handshake, &cid(3), &[], 40)),

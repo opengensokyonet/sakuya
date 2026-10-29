@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use sakuya_wire::connection_id::StatelessResetToken;
 use sakuya_wire::header::v1::LongPacketType;
 use sakuya_wire::version::Version;
 
@@ -77,7 +78,9 @@ fn stateless_reset_hit_ends_ordinary_routing() {
     datagram.extend(short(&cid(1), 30));
     let token: [u8; 16] = datagram[datagram.len() - 16..].try_into().unwrap();
     let probe = ResetProbe::default();
-    let registration = domain.resets.register(token, probe.clone());
+    let registration = domain
+        .resets
+        .register(StatelessResetToken::new(token), probe.clone());
 
     domain.route(datagram.clone(), &link(&binding));
     assert_eq!(counts(&entries), [0, 0, 0]);
@@ -99,7 +102,9 @@ fn datagram_shorter_than_a_token_is_never_a_reset() {
     let mut token = [0; 16];
     token[16 - datagram.len()..].copy_from_slice(&datagram);
     let probe = ResetProbe::default();
-    let _registration = domain.resets.register(token, probe.clone());
+    let _registration = domain
+        .resets
+        .register(StatelessResetToken::new(token), probe.clone());
     domain.route(datagram, &link(&binding));
     assert_eq!(probe.0.load(Ordering::SeqCst), 0);
     assert_eq!(counts(&entries), [1, 0, 0]);

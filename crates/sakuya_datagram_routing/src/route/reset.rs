@@ -20,10 +20,8 @@ use std::sync::{Arc, Weak};
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry as MapEntry;
 use sakuya_link::LinkId;
+use sakuya_wire::connection_id::StatelessResetToken;
 use smallvec::SmallVec;
-
-/// The length of a stateless reset token.
-pub const STATELESS_RESET_TOKEN_LEN: usize = 16;
 
 /// The capability that handles a received stateless reset for its target.
 pub trait StatelessResetTarget {
@@ -52,24 +50,19 @@ pub trait StatelessResetDetector {
     /// What a hit resets.
     type Target: StatelessResetTarget;
 
-    /// Checks the last [`STATELESS_RESET_TOKEN_LEN`] bytes of a datagram that
-    /// arrived on `link`.
+    /// Checks `tail`, the last [`StatelessResetToken::LEN`] bytes of a
+    /// datagram that arrived on `link`, read as a token.
     ///
     /// A hit must carry the target it belongs to, so that the caller never
     /// guesses it again. It must not run the target itself.
-    fn detect(&self, tail: &[u8; STATELESS_RESET_TOKEN_LEN], link: &LinkId)
-    -> Option<Self::Target>;
+    fn detect(&self, tail: &StatelessResetToken, link: &LinkId) -> Option<Self::Target>;
 }
 
 /// No detection: no datagram is a stateless reset.
 impl StatelessResetDetector for () {
     type Target = Infallible;
 
-    fn detect(
-        &self,
-        _tail: &[u8; STATELESS_RESET_TOKEN_LEN],
-        _link: &LinkId,
-    ) -> Option<Infallible> {
+    fn detect(&self, _tail: &StatelessResetToken, _link: &LinkId) -> Option<Infallible> {
         None
     }
 }
@@ -82,7 +75,7 @@ impl StatelessResetDetector for () {
 /// first under the token; no target code runs while the token table is
 /// locked.
 pub struct StatelessResetTokens<Target> {
-    tokens: DashMap<[u8; STATELESS_RESET_TOKEN_LEN], SmallVec<[Arc<Target>; 1]>>,
+    tokens: DashMap<StatelessResetToken, SmallVec<[Arc<Target>; 1]>>,
 }
 
 impl<Target> StatelessResetTokens<Target> {
@@ -96,7 +89,7 @@ impl<Target> StatelessResetTokens<Target> {
     /// Registers `token` for `target` until the registration is dropped.
     pub fn register(
         self: &Arc<Self>,
-        token: [u8; STATELESS_RESET_TOKEN_LEN],
+        token: StatelessResetToken,
         target: Target,
     ) -> StatelessResetRegistration<Target> {
         let target = Arc::new(target);
@@ -111,11 +104,7 @@ impl<Target> StatelessResetTokens<Target> {
         }
     }
 
-    fn remove(
-        &self,
-        token: &[u8; STATELESS_RESET_TOKEN_LEN],
-        target: &Arc<Target>,
-    ) -> Option<Arc<Target>> {
+    fn remove(&self, token: &StatelessResetToken, target: &Arc<Target>) -> Option<Arc<Target>> {
         let MapEntry::Occupied(mut slot) = self.tokens.entry(*token) else {
             return None;
         };
@@ -134,11 +123,7 @@ impl<Target> StatelessResetTokens<Target> {
 impl<Target: StatelessResetTarget> StatelessResetDetector for StatelessResetTokens<Target> {
     type Target = Arc<Target>;
 
-    fn detect(
-        &self,
-        tail: &[u8; STATELESS_RESET_TOKEN_LEN],
-        _link: &LinkId,
-    ) -> Option<Arc<Target>> {
+    fn detect(&self, tail: &StatelessResetToken, _link: &LinkId) -> Option<Arc<Target>> {
         self.tokens.get(tail)?.first().cloned()
     }
 }
@@ -146,11 +131,7 @@ impl<Target: StatelessResetTarget> StatelessResetDetector for StatelessResetToke
 impl<Detector: StatelessResetDetector + ?Sized> StatelessResetDetector for Arc<Detector> {
     type Target = Detector::Target;
 
-    fn detect(
-        &self,
-        tail: &[u8; STATELESS_RESET_TOKEN_LEN],
-        link: &LinkId,
-    ) -> Option<Self::Target> {
+    fn detect(&self, tail: &StatelessResetToken, link: &LinkId) -> Option<Self::Target> {
         (**self).detect(tail, link)
     }
 }
@@ -168,7 +149,7 @@ impl<Target> fmt::Debug for StatelessResetTokens<Target> {
 #[must_use = "dropping the registration revokes the token"]
 pub struct StatelessResetRegistration<Target> {
     detector: Weak<StatelessResetTokens<Target>>,
-    token: [u8; STATELESS_RESET_TOKEN_LEN],
+    token: StatelessResetToken,
     target: Arc<Target>,
 }
 

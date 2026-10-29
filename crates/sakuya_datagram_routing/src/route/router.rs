@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use sakuya_link::LinkId;
-use sakuya_wire::connection_id::{ConnectionId, NonEmptyCid};
+use sakuya_wire::connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken};
 use sakuya_wire::header::v1::LongPacketType;
 use sakuya_wire::header::v1::codec::ReadLongPacketHostExt as _;
 use sakuya_wire::header::{
@@ -26,7 +26,7 @@ use super::datagram::{LinkIdentity, ReceivedDatagram};
 use super::index::{FrozenEntries, OfferedRouteHistory, Recheck, RouteIndex};
 use super::interpretation::{FirstPacketInterpretation, RecognizedInitial};
 use super::recognizer::ConnectionIdRecognizer;
-use super::reset::{STATELESS_RESET_TOKEN_LEN, StatelessResetDetector, StatelessResetTarget};
+use super::reset::{StatelessResetDetector, StatelessResetTarget};
 use crate::claim::deliverer::ExclusiveDatagram;
 use crate::claim::erased::ErasedDatagramDeliverer;
 use crate::claim::finish::{ReleaseUnclaimed, UnclaimedHandoff};
@@ -317,8 +317,8 @@ where
         let bytes = datagram.payload().as_ref();
         let link = datagram.link().link_id();
         let reset = bytes
-            .last_chunk::<STATELESS_RESET_TOKEN_LEN>()
-            .and_then(|tail| self.reset.detect(tail, link));
+            .last_chunk::<{ StatelessResetToken::LEN }>()
+            .and_then(|tail| self.reset.detect(&StatelessResetToken::new(*tail), link));
         if let Some(target) = reset {
             drop(datagram);
             target.stateless_reset_received();
