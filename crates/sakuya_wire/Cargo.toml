@@ -7,3 +7,7 @@ license.workspace = true
 description = "QUIC wire-level value types and header interpretation for sakuya"
 
 [dependencies]
+bytes.workspace = true
+nitori_call.workspace = true
+nitori_io.workspace = true
+snafu.workspace = true
