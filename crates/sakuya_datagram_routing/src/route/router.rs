@@ -6,27 +6,33 @@ use std::sync::Arc;
 
 use sakuya_link::LinkId;
 use sakuya_wire::connection_id::{ConnectionId, NonEmptyCid};
+use sakuya_wire::header::v1::LongPacketType;
 use sakuya_wire::header::v1::codec::ReadLongPacketHostExt as _;
-use sakuya_wire::header::v1::{self, LongPacketType};
 use sakuya_wire::header::{
     HeaderForm,
     codec::{
         ReadLongHeaderHostExt as _, ReadShortHeaderHostExt as _, ReadVersionNegotiationHostExt as _,
     },
 };
-use sakuya_wire::version::Version;
 use smallvec::SmallVec;
 
-use super::index::{FrozenEntries, OfferedRouteHistory, Recheck};
-use super::{
-    ConnectionIdRecognizer, FirstPacketInterpretation, InitialAcceptance, InitialDatagramReceiver,
-    InitialReceiverFactory, LinkIdentity, MatchAssociation, ReceivedDatagram, RecognizedInitial,
-    ReflowProvider, RouteIndex, STATELESS_RESET_TOKEN_LEN, StatelessResetDetector,
-    StatelessResetTarget, UnclaimedWork,
+use super::acceptance::{
+    InitialAcceptance, InitialDatagramReceiver, InitialReceiverFactory, ReflowHandoff,
+    ReflowProvider, UnclaimedWork,
 };
+use super::association::MatchAssociation;
+use super::datagram::{LinkIdentity, ReceivedDatagram};
+use super::index::{FrozenEntries, OfferedRouteHistory, Recheck, RouteIndex};
+use super::interpretation::{FirstPacketInterpretation, RecognizedInitial};
+use super::recognizer::ConnectionIdRecognizer;
+use super::reset::{STATELESS_RESET_TOKEN_LEN, StatelessResetDetector, StatelessResetTarget};
+use crate::claim::deliverer::ExclusiveDatagram;
+use crate::claim::erased::ErasedDatagramDeliverer;
+use crate::claim::finish::{ReleaseUnclaimed, UnclaimedHandoff};
 use crate::claim::group::prepare_claim;
-use crate::claim::shared::{DatagramFinishPolicy, UnclaimedHandoff};
-use crate::claim::{DatagramRouteMatchInfo, ErasedDatagramDeliverer, ExclusiveDatagram};
+use crate::claim::route_match::DatagramRouteMatchInfo;
+use crate::claim::shared::DatagramFinishPolicy;
+use crate::version::Version;
 
 /// Handles datagrams of a version this side does not support.
 ///
@@ -37,45 +43,57 @@ use crate::claim::{DatagramRouteMatchInfo, ErasedDatagramDeliverer, ExclusiveDat
 /// versions; they go to the existing client entries.
 pub trait VersionService<Payload, Link> {
     /// Takes over a datagram whose first packet has the non-zero `version`.
-    fn unsupported_version(&self, version: u32, datagram: ReceivedDatagram<Payload, Link>);
+    fn unsupported_version(&self, version: Version, datagram: ReceivedDatagram<Payload, Link>);
 }
 
 /// No version service: datagrams of unsupported versions are released.
 impl<Payload, Link> VersionService<Payload, Link> for () {
-    fn unsupported_version(&self, _version: u32, _datagram: ReceivedDatagram<Payload, Link>) {}
+    fn unsupported_version(&self, _version: Version, _datagram: ReceivedDatagram<Payload, Link>) {}
 }
 
 pub(super) mod sealed {
     use std::sync::Arc;
 
-    use super::super::index::FrozenEntries;
-    use super::super::{ReceivedDatagram, RecognizedInitial, RouteIndex, UnclaimedWork};
+    use super::super::acceptance::UnclaimedWork;
+    use super::super::datagram::ReceivedDatagram;
+    use super::super::index::{FrozenEntries, RouteIndex};
+    use super::super::interpretation::RecognizedInitial;
+    use crate::claim::finish::UnclaimedHandoff;
     use crate::claim::shared::DatagramFinishPolicy;
 
     /// The routing decisions that depend on Initial acceptance.
     pub trait AcceptanceMode<Payload, Link, Target: ?Sized> {
+        /// What takes over an acceptable Initial that every candidate left.
+        type Handoff: UnclaimedHandoff<ReceivedDatagram<Payload, Link>>;
+
         /// The finish policy of a first-round supported Initial.
         fn first_round(
             &self,
             initial: &RecognizedInitial,
             datagram: &ReceivedDatagram<Payload, Link>,
             frozen: &FrozenEntries<Target>,
-        ) -> DatagramFinishPolicy<ReceivedDatagram<Payload, Link>>;
+        ) -> DatagramFinishPolicy<Self::Handoff>;
 
         /// Runs one reflow round.
-        fn resume(
-            &self,
-            index: &Arc<RouteIndex<Target>>,
-            work: UnclaimedWork<Payload, Link, Target>,
-        );
+        fn resume(&self, index: &Arc<RouteIndex<Target>>, work: UnclaimedWork<Payload, Link>);
     }
 }
 
 /// Whether and how a router accepts new Initial receivers.
 ///
-/// It is implemented by `()`, which never creates a receiver, and by
-/// [`InitialAcceptance`] when the routing domain's deliverers, datagrams and
-/// reflow provider can cross threads, as reflow requires.
+/// It is implemented by `()`, which never creates a receiver and releases
+/// every unclaimed datagram, and by [`InitialAcceptance`]. The mode decides
+/// the [handoff](crate::claim::deliverer::DatagramDeliverer::Handoff) that the
+/// deliverers of the routing domain name:
+///
+/// | Mode | Handoff |
+/// | --- | --- |
+/// | `()` | [`ReleaseUnclaimed`] |
+/// | `InitialAcceptance<Factory, Provider>` | [`ReflowHandoff<Provider>`](ReflowHandoff) |
+///
+/// Neither mode requires `Send`: a routing domain used on one thread accepts
+/// new Initials with local deliverers, datagrams and providers, and a domain
+/// shared between threads is `Send` because its parts are.
 pub trait InitialAcceptanceMode<Payload, Link, Target: ?Sized>:
     sealed::AcceptanceMode<Payload, Link, Target>
 {
@@ -88,53 +106,39 @@ impl<Payload, Link, Target: ?Sized, Mode> InitialAcceptanceMode<Payload, Link, T
 
 /// No acceptance: every Initial is offered to the existing entries only.
 impl<Payload, Link, Target: ?Sized> sealed::AcceptanceMode<Payload, Link, Target> for () {
+    type Handoff = ReleaseUnclaimed;
+
     fn first_round(
         &self,
         _initial: &RecognizedInitial,
         _datagram: &ReceivedDatagram<Payload, Link>,
         _frozen: &FrozenEntries<Target>,
-    ) -> DatagramFinishPolicy<ReceivedDatagram<Payload, Link>> {
+    ) -> DatagramFinishPolicy<ReleaseUnclaimed> {
         DatagramFinishPolicy::LastTakes
     }
 
-    fn resume(&self, _index: &Arc<RouteIndex<Target>>, work: UnclaimedWork<Payload, Link, Target>) {
+    fn resume(&self, _index: &Arc<RouteIndex<Target>>, work: UnclaimedWork<Payload, Link>) {
         drop(work);
     }
-}
-
-/// The handoff of one reflow round: it moves the datagram, with its history
-/// and Initial context, to the provider.
-fn handoff<Payload, Link, Target, Provider>(
-    provider: &Arc<Provider>,
-    offered: OfferedRouteHistory<Target>,
-    initial: RecognizedInitial,
-) -> UnclaimedHandoff<ReceivedDatagram<Payload, Link>>
-where
-    Payload: 'static,
-    Link: 'static,
-    Target: ?Sized + Send + Sync + 'static,
-    Provider: ReflowProvider<Payload, Link, Target> + Send + Sync + 'static,
-{
-    let provider = Arc::clone(provider);
-    Box::new(move |datagram| provider.hand_off(UnclaimedWork::new(datagram, offered, initial)))
 }
 
 impl<Payload, Link, Target, Factory, Provider> sealed::AcceptanceMode<Payload, Link, Target>
     for InitialAcceptance<Factory, Provider>
 where
-    Payload: AsRef<[u8]> + 'static,
-    Link: 'static,
+    Payload: AsRef<[u8]>,
     Target:
-        ?Sized + ErasedDatagramDeliverer<ReceivedDatagram<Payload, Link>> + Send + Sync + 'static,
+        ?Sized + ErasedDatagramDeliverer<ReceivedDatagram<Payload, Link>, ReflowHandoff<Provider>>,
     Factory: InitialReceiverFactory<Payload, Link, Target>,
-    Provider: ReflowProvider<Payload, Link, Target> + Send + Sync + 'static,
+    Provider: ReflowProvider<Payload, Link>,
 {
+    type Handoff = ReflowHandoff<Provider>;
+
     fn first_round(
         &self,
         initial: &RecognizedInitial,
         datagram: &ReceivedDatagram<Payload, Link>,
         frozen: &FrozenEntries<Target>,
-    ) -> DatagramFinishPolicy<ReceivedDatagram<Payload, Link>> {
+    ) -> DatagramFinishPolicy<ReflowHandoff<Provider>> {
         if !self.factory().admits(initial, datagram) {
             return DatagramFinishPolicy::LastTakes;
         }
@@ -142,27 +146,27 @@ where
         for (entry, _, interpretation) in frozen {
             offered.record(entry, *interpretation);
         }
-        DatagramFinishPolicy::OnUnclaimed(handoff(self.provider(), offered, initial.clone()))
+        DatagramFinishPolicy::OnUnclaimed(ReflowHandoff::new(
+            self.provider(),
+            offered,
+            initial.clone(),
+        ))
     }
 
-    fn resume(&self, index: &Arc<RouteIndex<Target>>, work: UnclaimedWork<Payload, Link, Target>) {
+    fn resume(&self, index: &Arc<RouteIndex<Target>>, work: UnclaimedWork<Payload, Link>) {
         let (datagram, mut offered, initial) = work.into_parts();
         // Prepared outside the index; the recheck only moves it in.
-        let (mut deliverer, receiver) = match self.factory().prepare(&initial) {
-            Some(prepared) => {
-                let (deliverer, receiver) = prepared.into_parts();
-                (Some(deliverer), Some(receiver))
-            }
-            None => (None, None),
-        };
-        match index.recheck_initial(&initial, &mut offered, &mut deliverer) {
-            Recheck::Offer(fresh) => {
-                drop((deliverer, receiver));
-                let handoff = handoff(self.provider(), offered, initial);
+        let prepared = self.factory().prepare(&initial);
+        match index.recheck_initial(&initial, &mut offered, prepared) {
+            Recheck::Offer { fresh, unused } => {
+                drop(unused);
+                let handoff = ReflowHandoff::new(self.provider(), offered, initial);
                 dispatch(datagram, DatagramFinishPolicy::OnUnclaimed(handoff), fresh);
             }
-            Recheck::Published(registration) => {
-                let receiver = receiver.expect("a deliverer was published only with its receiver");
+            Recheck::Published {
+                registration,
+                receiver,
+            } => {
                 receiver.receive_first(registration, ExclusiveDatagram::new(datagram), initial);
             }
             Recheck::Release => drop(datagram),
@@ -176,9 +180,11 @@ where
 /// domain is configured with: the short header [`ConnectionIdRecognizer`],
 /// a [`StatelessResetDetector`], a [`VersionService`] and the
 /// [acceptance](InitialAcceptanceMode) of new Initial receivers. The last three
-/// default to `()`, which means "not provided". It has no runtime, task
-/// spawner or polling loop of its own: [`route`](Self::route) and
-/// [`resume`](Self::resume) do their work on the caller's stack and return.
+/// default to `()`, which means "not provided". `Target` is the erased
+/// deliverer type of the domain, whose handoff the acceptance mode decides.
+/// The router has no runtime, task spawner or polling loop of its own:
+/// [`route`](Self::route) and [`resume`](Self::resume) do their work on the
+/// caller's stack and return.
 pub struct DatagramRouter<
     Payload,
     Link,
@@ -278,7 +284,7 @@ impl<Payload, Link, Target, Recognizer, Reset, Versions, Acceptance>
 where
     Payload: AsRef<[u8]>,
     Link: LinkIdentity,
-    Target: ?Sized + ErasedDatagramDeliverer<ReceivedDatagram<Payload, Link>>,
+    Target: ?Sized + ErasedDatagramDeliverer<ReceivedDatagram<Payload, Link>, Acceptance::Handoff>,
     Recognizer: ConnectionIdRecognizer,
     Reset: StatelessResetDetector,
     Versions: VersionService<Payload, Link>,
@@ -323,16 +329,13 @@ where
             Classification::Unsupported(version) => {
                 self.versions.unsupported_version(version, datagram);
             }
-            Classification::Route { queries, initial } => {
-                let mut frozen = FrozenEntries::new();
-                for (association, interpretation) in &queries {
-                    self.index
-                        .collect(association, *interpretation, &mut frozen);
-                }
-                let finish = match &initial {
-                    Some(initial) => self.acceptance.first_round(initial, &datagram, &frozen),
-                    None => DatagramFinishPolicy::LastTakes,
-                };
+            Classification::Route(queries) => {
+                let frozen = self.freeze(&queries);
+                dispatch(datagram, DatagramFinishPolicy::LastTakes, frozen);
+            }
+            Classification::RouteInitial { queries, initial } => {
+                let frozen = self.freeze(&queries);
+                let finish = self.acceptance.first_round(&initial, &datagram, &frozen);
                 dispatch(datagram, finish, frozen);
             }
         }
@@ -346,8 +349,18 @@ where
     /// described in the [`acceptance`](super#accepting-new-initials) section,
     /// and delivers outside the index. A router without acceptance releases
     /// the work.
-    pub fn resume(&self, work: UnclaimedWork<Payload, Link, Target>) {
+    pub fn resume(&self, work: UnclaimedWork<Payload, Link>) {
         self.acceptance.resume(&self.index, work);
+    }
+
+    /// Completes every lookup of one round.
+    fn freeze(&self, queries: &Queries) -> FrozenEntries<Target> {
+        let mut frozen = FrozenEntries::new();
+        for (association, interpretation) in queries {
+            self.index
+                .collect(association, *interpretation, &mut frozen);
+        }
+        frozen
     }
 }
 
@@ -362,12 +375,13 @@ impl<Payload, Link, Target: ?Sized, Recognizer, Reset, Versions, Acceptance> fmt
 }
 
 /// Builds the candidate set of one round and delivers it.
-fn dispatch<Payload, Link, Target>(
+fn dispatch<Payload, Link, Handoff, Target>(
     datagram: ReceivedDatagram<Payload, Link>,
-    finish: DatagramFinishPolicy<ReceivedDatagram<Payload, Link>>,
+    finish: DatagramFinishPolicy<Handoff>,
     frozen: FrozenEntries<Target>,
 ) where
-    Target: ?Sized + ErasedDatagramDeliverer<ReceivedDatagram<Payload, Link>>,
+    Handoff: UnclaimedHandoff<ReceivedDatagram<Payload, Link>>,
+    Target: ?Sized + ErasedDatagramDeliverer<ReceivedDatagram<Payload, Link>, Handoff>,
 {
     let entries = frozen
         .into_iter()
@@ -383,19 +397,17 @@ fn dispatch<Payload, Link, Target>(
 /// The lookups a first packet calls for.
 type Queries = SmallVec<[(MatchAssociation, FirstPacketInterpretation); 4]>;
 
-#[expect(
-    clippy::large_enum_variant,
-    reason = "a classification lives only within one route call"
-)]
 enum Classification {
     /// The fields needed for lookup cannot be read safely.
     Release,
     /// A long header of an unsupported, non-zero version.
-    Unsupported(u32),
-    /// Look these up; a supported Initial also records what was recognized.
-    Route {
+    Unsupported(Version),
+    /// Look these up.
+    Route(Queries),
+    /// A supported Initial: look these up, and keep what was recognized.
+    RouteInitial {
         queries: Queries,
-        initial: Option<RecognizedInitial>,
+        initial: RecognizedInitial,
     },
 }
 
@@ -425,11 +437,11 @@ fn classify(
         HeaderForm::Short => {
             let mut queries = Queries::new();
             for dcid_len in recognizer.short_dcid_lengths(bytes, link) {
-                let Ok(dcid_len) = u8::try_from(dcid_len) else {
+                let Ok(raw_len) = u8::try_from(dcid_len.get()) else {
                     continue;
                 };
                 let mut input = bytes;
-                let Ok(short) = input.sync_read_short_header_unpin(dcid_len) else {
+                let Ok(short) = input.sync_read_short_header_unpin(raw_len) else {
                     continue;
                 };
                 let Ok(dcid) = ConnectionId::try_from(*short.dcid()) else {
@@ -441,61 +453,50 @@ fn classify(
                 }
                 queries.extend(by_dcid(dcid, interpretation, false));
             }
-            Classification::Route {
-                queries,
-                initial: None,
-            }
+            Classification::Route(queries)
         }
         HeaderForm::Long => {
             let mut input = bytes;
             let Ok(long) = input.sync_read_long_header_unpin() else {
                 return Classification::Release;
             };
-            match long.version() {
-                Version::NEGOTIATION => {
-                    let Ok(packet) = input.sync_read_version_negotiation_unpin(long) else {
-                        return Classification::Release;
-                    };
-                    let Ok(dcid) = ConnectionId::try_from(*packet.dcid()) else {
-                        return Classification::Release;
-                    };
-                    Classification::Route {
-                        queries: by_dcid(
-                            dcid,
-                            FirstPacketInterpretation::VersionNegotiation,
-                            false,
-                        ),
-                        initial: None,
-                    }
+            let version = Version::new(long.version().get());
+            if version.is_negotiation() {
+                let Ok(packet) = input.sync_read_version_negotiation_unpin(long) else {
+                    return Classification::Release;
+                };
+                let Ok(dcid) = ConnectionId::try_from(*packet.dcid()) else {
+                    return Classification::Release;
+                };
+                return Classification::Route(by_dcid(
+                    dcid,
+                    FirstPacketInterpretation::VersionNegotiation,
+                    false,
+                ));
+            }
+            if version != Version::V1 {
+                return Classification::Unsupported(version);
+            }
+            let Ok(packet) = input.sync_read_long_packet_unpin(long) else {
+                return Classification::Release;
+            };
+            let packet_type = packet.packet_type();
+            let interpretation = FirstPacketInterpretation::Long {
+                version,
+                packet_type,
+            };
+            let dcid = *packet.dcid();
+            match packet_type {
+                LongPacketType::Initial => Classification::RouteInitial {
+                    queries: by_dcid(dcid, interpretation, true),
+                    initial: RecognizedInitial::new(version, dcid, *packet.scid(), binding.clone()),
+                },
+                LongPacketType::ZeroRtt => {
+                    Classification::Route(by_dcid(dcid, interpretation, true))
                 }
-                v1::VERSION => {
-                    let Ok(packet) = input.sync_read_long_packet_unpin(long) else {
-                        return Classification::Release;
-                    };
-                    let packet_type = packet.packet_type();
-                    let interpretation = FirstPacketInterpretation::Long {
-                        version: v1::VERSION.get(),
-                        packet_type,
-                    };
-                    let dcid = *packet.dcid();
-                    let with_initial = matches!(
-                        packet_type,
-                        LongPacketType::Initial | LongPacketType::ZeroRtt
-                    );
-                    let initial = (packet_type == LongPacketType::Initial).then(|| {
-                        RecognizedInitial::new(
-                            v1::VERSION.get(),
-                            dcid,
-                            *packet.scid(),
-                            binding.clone(),
-                        )
-                    });
-                    Classification::Route {
-                        queries: by_dcid(dcid, interpretation, with_initial),
-                        initial,
-                    }
+                LongPacketType::Handshake | LongPacketType::Retry => {
+                    Classification::Route(by_dcid(dcid, interpretation, false))
                 }
-                version => Classification::Unsupported(version.get()),
             }
         }
     }

@@ -7,25 +7,30 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use sakuya_link::LinkId;
-use sakuya_wire::header::v1::{self, LongPacketType};
+use sakuya_wire::header::v1::LongPacketType;
 
 use super::support::{
-    Datagram, Target, binding, cid, datagram, initial, link, long, nonempty, short,
+    Datagram, Handoff, Target, Work, binding, cid, datagram, initial, lengths, link, long,
+    nonempty, short,
 };
+use crate::claim::candidate::DatagramClaimAttempt;
+use crate::claim::deliverer::{
+    DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramView, ExclusiveDatagram,
+};
+use crate::claim::delivery::DatagramDelivery;
 use crate::claim::queue::{DatagramDeliveryPoster, DatagramDeliveryQueue};
-use crate::claim::{
-    DatagramClaimAccess, DatagramClaimAttempt, DatagramClaimOutcome, DatagramDeliverer,
-    DatagramDelivery, DatagramRouteMatchInfo, DatagramView, ExclusiveDatagram,
+use crate::claim::route_match::DatagramRouteMatchInfo;
+use crate::route::acceptance::{
+    InitialAcceptance, InitialDatagramReceiver, InitialReceiverFactory, PreparedReceiver,
 };
-use crate::route::{
-    ConnectionIdLengths, DatagramRouter, InitialAcceptance, InitialDatagramReceiver,
-    InitialReceiverFactory, MatchAssociation, PacketForms, PreparedReceiver, RecognizedInitial,
-    RouteEntryRegistration, RouteIndex, RouteMatcher, StatelessResetRegistration,
-    StatelessResetTarget, StatelessResetTokens, UnclaimedWork,
-};
+use crate::route::association::{MatchAssociation, PacketForms, RouteMatcher};
+use crate::route::index::{RouteEntryRegistration, RouteIndex};
+use crate::route::interpretation::RecognizedInitial;
+use crate::route::reset::{StatelessResetRegistration, StatelessResetTarget, StatelessResetTokens};
+use crate::route::router::DatagramRouter;
+use crate::version::Version;
 
 type Delivery = DatagramDelivery<Datagram, ConnectionDeliverer>;
-type Work = UnclaimedWork<Vec<u8>, LinkId, Target>;
 
 /// The deliverer of one connection: it claims every datagram while the
 /// connection is open and queues what it is given.
@@ -34,6 +39,7 @@ struct ConnectionDeliverer {
 }
 
 impl DatagramDeliverer<Datagram> for ConnectionDeliverer {
+    type Handoff = Handoff;
     type DelivererDatagramState = ();
 
     fn new_datagram_state(&self, _: DatagramView<'_>, _: &DatagramRouteMatchInfo) {}
@@ -147,7 +153,7 @@ impl InitialReceiverFactory<Vec<u8>, LinkId, Target> for Server {
         &self,
         _: &RecognizedInitial,
     ) -> Option<PreparedReceiver<Target, ConnectionReceiver>> {
-        let queue = DatagramDeliveryQueue::new(NonZeroUsize::new(8).unwrap());
+        let queue = DatagramDeliveryQueue::new(NonZeroUsize::new(8).unwrap()).unwrap();
         let deliverer = Arc::new(ConnectionDeliverer {
             poster: queue.poster(),
         });
@@ -163,10 +169,10 @@ impl InitialReceiverFactory<Vec<u8>, LinkId, Target> for Server {
 #[test]
 fn datagrams_flow_from_the_link_to_connections_through_one_router() {
     let connections = Arc::new(Mutex::new(Vec::new()));
-    let mut reflow = DatagramDeliveryQueue::<Work>::new(NonZeroUsize::new(8).unwrap());
+    let mut reflow = DatagramDeliveryQueue::<Work>::new(NonZeroUsize::new(8).unwrap()).unwrap();
     let resets = StatelessResetTokens::<ResetFlag>::new();
     let index = RouteIndex::<Target>::new();
-    let router = DatagramRouter::new(Arc::clone(&index), ConnectionIdLengths::new(&[8]).unwrap())
+    let router = DatagramRouter::new(Arc::clone(&index), lengths(&[8]))
         .with_stateless_reset(Arc::clone(&resets))
         .with_initial_acceptance(InitialAcceptance::new(
             Server {
@@ -204,7 +210,7 @@ fn datagrams_flow_from_the_link_to_connections_through_one_router() {
         RouteMatcher::new(
             MatchAssociation::LocalCid(nonempty(&cid(3))),
             PacketForms::HANDSHAKE | PacketForms::SHORT,
-            v1::VERSION.get(),
+            Version::V1,
         ),
         Arc::clone(&connection.deliverer) as Arc<Target>,
     ));

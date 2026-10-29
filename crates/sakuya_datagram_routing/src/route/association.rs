@@ -7,7 +7,8 @@ use sakuya_link::BindingId;
 use sakuya_wire::connection_id::NonEmptyCid;
 use sakuya_wire::header::v1::LongPacketType;
 
-use super::FirstPacketInterpretation;
+use super::interpretation::FirstPacketInterpretation;
+use crate::version::Version;
 
 /// The key under which a route entry is found.
 ///
@@ -114,12 +115,12 @@ impl fmt::Debug for PacketForms {
 pub struct RouteMatcher {
     association: MatchAssociation,
     forms: PacketForms,
-    version: u32,
+    version: Version,
 }
 
 impl RouteMatcher {
     /// Matches `association` for the packets in `forms` of `version`.
-    pub fn new(association: MatchAssociation, forms: PacketForms, version: u32) -> Self {
+    pub fn new(association: MatchAssociation, forms: PacketForms, version: Version) -> Self {
         Self {
             association,
             forms,
@@ -138,7 +139,7 @@ impl RouteMatcher {
     }
 
     /// The version the entry applies to for long headers.
-    pub fn version(&self) -> u32 {
+    pub fn version(&self) -> Version {
         self.version
     }
 

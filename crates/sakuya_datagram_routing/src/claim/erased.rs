@@ -1,6 +1,8 @@
 //! Erased deliverers for route tables that hold different deliverer types
 //!
-//! A route table stores deliverers of different Rust types side by side. The
+//! This is the one deliberate erasure boundary of the crate. A route table
+//! stores deliverers of different Rust types side by side, chosen at run time
+//! by whoever registers them, so the table cannot name them in its type. The
 //! erasure happens at registration: the concrete deliverer, its state factory,
 //! its judgment and its strongly typed `deliver` are erased together, by
 //! coercing `Arc<Deliverer>` into one of the trait objects below. When routing
@@ -9,30 +11,36 @@
 //! type and passes it to the original deliverer. Private state is never erased
 //! on its own, and no route key is used to recover a type.
 //!
+//! Both trait objects name the [handoff](DatagramDeliverer::Handoff) of their
+//! routing domain, which defaults to [`ReleaseUnclaimed`]; every deliverer in
+//! one table uses that handoff.
+//!
 //! Erasure keeps instance identity: each `Arc` is its own target, so two
 //! deliverers of the same Rust type stay two targets.
 
 use std::sync::Arc;
 
+use super::candidate::DatagramClaimCandidate;
+use super::deliverer::{DatagramDeliverer, ExclusiveDatagram};
+use super::delivery::{DatagramDelivery, ExclusiveDatagramDelivery, PrivateState};
+use super::finish::{ReleaseUnclaimed, UnclaimedHandoff};
+use super::route_match::DatagramRouteMatchInfo;
 use super::shared::Participation;
-use super::{
-    DatagramClaimCandidate, DatagramDeliverer, DatagramDelivery, DatagramRouteMatchInfo,
-    ExclusiveDatagram, ExclusiveDatagramDelivery,
-};
 
 pub(super) mod sealed {
     use std::sync::Arc;
 
-    use super::super::DatagramRouteMatchInfo;
-    use super::super::ExclusiveDatagram;
+    use super::super::deliverer::ExclusiveDatagram;
+    use super::super::finish::UnclaimedHandoff;
+    use super::super::route_match::DatagramRouteMatchInfo;
     use super::super::shared::Participation;
 
     /// Dispatch into the concrete deliverer behind an erased one.
-    pub trait DispatchDelivery<Inner> {
+    pub trait DispatchDelivery<Inner, Handoff: UnclaimedHandoff<Inner>> {
         /// Builds a competing candidate and delivers it.
         fn deliver_competing(
             self: Arc<Self>,
-            participation: Participation<Inner>,
+            participation: Participation<Inner, Handoff>,
             route: DatagramRouteMatchInfo,
         );
 
@@ -46,10 +54,12 @@ pub(super) mod sealed {
     }
 }
 
-impl<Inner, Deliverer: DatagramDeliverer<Inner>> sealed::DispatchDelivery<Inner> for Deliverer {
+impl<Inner, Deliverer: DatagramDeliverer<Inner>> sealed::DispatchDelivery<Inner, Deliverer::Handoff>
+    for Deliverer
+{
     fn deliver_competing(
         self: Arc<Self>,
-        participation: Participation<Inner>,
+        participation: Participation<Inner, Deliverer::Handoff>,
         route: DatagramRouteMatchInfo,
     ) {
         let candidate = DatagramClaimCandidate::new(participation, route, Arc::clone(&self));
@@ -61,16 +71,23 @@ impl<Inner, Deliverer: DatagramDeliverer<Inner>> sealed::DispatchDelivery<Inner>
         datagram: ExclusiveDatagram<Inner>,
         route: DatagramRouteMatchInfo,
     ) {
-        let delivery = ExclusiveDatagramDelivery::new(datagram, route, None, Arc::clone(&self));
+        let delivery = ExclusiveDatagramDelivery::new(
+            datagram,
+            route,
+            PrivateState::Uninitialized,
+            Arc::clone(&self),
+        );
         self.deliver(DatagramDelivery::Exclusive(delivery));
     }
 }
 
 /// A deliverer of any type, for a route table used on one thread.
 ///
-/// Every [`DatagramDeliverer`] implements it; use it only as a trait object,
-/// `Arc<dyn ErasedDatagramDeliverer<Inner> + 'a>`, obtained by coercing an
-/// `Arc` of the concrete deliverer. It adds no requirement to the deliverer:
+/// Every [`DatagramDeliverer`] implements it for its
+/// [handoff](DatagramDeliverer::Handoff); use it only as a trait object,
+/// `Arc<dyn ErasedDatagramDeliverer<Inner, Handoff> + 'a>`, obtained by
+/// coercing an `Arc` of the concrete deliverer. It adds no requirement to the
+/// deliverer:
 /// local `Rc` state and borrowed deliverers erase as well. The trait object is
 /// neither `Send` nor `Sync`, and nothing can make it so afterwards; a route
 /// table shared between threads uses [`SendDatagramDeliverer`] instead.
@@ -78,7 +95,13 @@ impl<Inner, Deliverer: DatagramDeliverer<Inner>> sealed::DispatchDelivery<Inner>
 /// ```
 /// # use std::rc::Rc;
 /// # use std::sync::Arc;
-/// # use sakuya_datagram_routing::claim::*;
+/// # use sakuya_datagram_routing::claim::candidate::{DatagramClaimCandidate, DatagramClaimFuture};
+/// # use sakuya_datagram_routing::claim::deliverer::{
+/// #     DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramView,
+/// # };
+/// # use sakuya_datagram_routing::claim::delivery::DatagramDelivery;
+/// # use sakuya_datagram_routing::claim::erased::{ErasedDatagramDeliverer, SendDatagramDeliverer};
+/// # use sakuya_datagram_routing::claim::route_match::DatagramRouteMatchInfo;
 /// // A deliverer without fields is `Send + Sync`, yet its state is local.
 /// struct Fieldless;
 ///
@@ -103,18 +126,25 @@ impl<Inner, Deliverer: DatagramDeliverer<Inner>> sealed::DispatchDelivery<Inner>
 ///
 /// let local: Arc<dyn ErasedDatagramDeliverer<Vec<u8>>> = Arc::new(Fieldless);
 /// ```
-pub trait ErasedDatagramDeliverer<Inner>: sealed::DispatchDelivery<Inner> {}
+pub trait ErasedDatagramDeliverer<Inner, Handoff: UnclaimedHandoff<Inner> = ReleaseUnclaimed>:
+    sealed::DispatchDelivery<Inner, Handoff>
+{
+}
 
-impl<Inner, Deliverer: DatagramDeliverer<Inner>> ErasedDatagramDeliverer<Inner> for Deliverer {}
+impl<Inner, Deliverer: DatagramDeliverer<Inner>> ErasedDatagramDeliverer<Inner, Deliverer::Handoff>
+    for Deliverer
+{
+}
 
 /// A deliverer of any type, for a route table shared between threads.
 ///
-/// Use it only as a trait object, `Arc<dyn SendDatagramDeliverer<Inner> +
-/// 'a>`, which is `Send + Sync`. The coercion from `Arc<Deliverer>` succeeds
-/// only where the concrete type shows that everything a dispatch produces can
-/// cross threads: the deliverer is `Send + Sync`, and its private state and the
-/// datagram are `Send`. Candidates, exclusive deliveries and attempt futures of
-/// such a deliverer are therefore `Send`. The private state never needs `Sync`.
+/// Use it only as a trait object, `Arc<dyn SendDatagramDeliverer<Inner,
+/// Handoff> + 'a>`, which is `Send + Sync`. The coercion from `Arc<Deliverer>`
+/// succeeds only where the concrete type shows that everything a dispatch
+/// produces can cross threads: the deliverer is `Send + Sync`, and its private
+/// state, its handoff and the datagram are `Send`. Candidates, exclusive
+/// deliveries and attempt futures of such a deliverer are therefore `Send`.
+/// Neither the private state nor the handoff ever needs `Sync`.
 ///
 /// `Deliverer: Send + Sync` alone is not enough, because it says nothing about
 /// the state its factory returns:
@@ -122,7 +152,13 @@ impl<Inner, Deliverer: DatagramDeliverer<Inner>> ErasedDatagramDeliverer<Inner> 
 /// ```compile_fail,E0277
 /// # use std::rc::Rc;
 /// # use std::sync::Arc;
-/// # use sakuya_datagram_routing::claim::*;
+/// # use sakuya_datagram_routing::claim::candidate::{DatagramClaimCandidate, DatagramClaimFuture};
+/// # use sakuya_datagram_routing::claim::deliverer::{
+/// #     DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramView,
+/// # };
+/// # use sakuya_datagram_routing::claim::delivery::DatagramDelivery;
+/// # use sakuya_datagram_routing::claim::erased::{ErasedDatagramDeliverer, SendDatagramDeliverer};
+/// # use sakuya_datagram_routing::claim::route_match::DatagramRouteMatchInfo;
 /// struct Fieldless;
 ///
 /// impl DatagramDeliverer<Vec<u8>> for Fieldless {
@@ -153,7 +189,13 @@ impl<Inner, Deliverer: DatagramDeliverer<Inner>> ErasedDatagramDeliverer<Inner> 
 /// ```
 /// # use std::cell::Cell;
 /// # use std::sync::Arc;
-/// # use sakuya_datagram_routing::claim::*;
+/// # use sakuya_datagram_routing::claim::candidate::{DatagramClaimCandidate, DatagramClaimFuture};
+/// # use sakuya_datagram_routing::claim::deliverer::{
+/// #     DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramView,
+/// # };
+/// # use sakuya_datagram_routing::claim::delivery::DatagramDelivery;
+/// # use sakuya_datagram_routing::claim::erased::{ErasedDatagramDeliverer, SendDatagramDeliverer};
+/// # use sakuya_datagram_routing::claim::route_match::DatagramRouteMatchInfo;
 /// struct Counting;
 ///
 /// impl DatagramDeliverer<Vec<u8>> for Counting {
@@ -189,7 +231,13 @@ impl<Inner, Deliverer: DatagramDeliverer<Inner>> ErasedDatagramDeliverer<Inner> 
 ///
 /// ```compile_fail,E0277
 /// # use std::sync::Arc;
-/// # use sakuya_datagram_routing::claim::*;
+/// # use sakuya_datagram_routing::claim::candidate::{DatagramClaimCandidate, DatagramClaimFuture};
+/// # use sakuya_datagram_routing::claim::deliverer::{
+/// #     DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramView,
+/// # };
+/// # use sakuya_datagram_routing::claim::delivery::DatagramDelivery;
+/// # use sakuya_datagram_routing::claim::erased::{ErasedDatagramDeliverer, SendDatagramDeliverer};
+/// # use sakuya_datagram_routing::claim::route_match::DatagramRouteMatchInfo;
 /// struct Plain;
 ///
 /// impl DatagramDeliverer<Vec<u8>> for Plain {
@@ -210,12 +258,16 @@ impl<Inner, Deliverer: DatagramDeliverer<Inner>> ErasedDatagramDeliverer<Inner> 
 /// let local: Arc<dyn ErasedDatagramDeliverer<Vec<u8>>> = Arc::new(Plain);
 /// std::thread::spawn(move || drop(local));
 /// ```
-pub trait SendDatagramDeliverer<Inner>: ErasedDatagramDeliverer<Inner> + Send + Sync {}
+pub trait SendDatagramDeliverer<Inner, Handoff: UnclaimedHandoff<Inner> = ReleaseUnclaimed>:
+    ErasedDatagramDeliverer<Inner, Handoff> + Send + Sync
+{
+}
 
-impl<Inner, Deliverer> SendDatagramDeliverer<Inner> for Deliverer
+impl<Inner, Deliverer> SendDatagramDeliverer<Inner, Deliverer::Handoff> for Deliverer
 where
     Inner: Send,
     Deliverer: DatagramDeliverer<Inner> + Send + Sync,
     Deliverer::DelivererDatagramState: Send,
+    Deliverer::Handoff: Send,
 {
 }

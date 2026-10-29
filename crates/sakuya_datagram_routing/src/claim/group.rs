@@ -18,28 +18,37 @@
 //! unwinding, delivers nothing, calls no author code and never hands off: the
 //! datagram and the prepared credentials are simply released.
 
+use std::iter;
 use std::sync::Arc;
 
 use smallvec::SmallVec;
 
-use super::shared::{ClaimCore, DatagramFinishPolicy, Participation, UnclaimedHandoff};
-use super::{DatagramRouteMatchInfo, ErasedDatagramDeliverer, ExclusiveDatagram};
+use super::deliverer::ExclusiveDatagram;
+use super::erased::ErasedDatagramDeliverer;
+use super::finish::UnclaimedHandoff;
+use super::route_match::DatagramRouteMatchInfo;
+use super::shared::{ClaimCore, DatagramFinishPolicy, Participation};
 
 /// The complete candidate set of one datagram, ready to be dispatched.
 #[must_use = "a prepared claim delivers nothing until dispatched"]
-pub(crate) struct PreparedClaim<Inner, Target: ?Sized> {
-    prepared: Prepared<Inner, Target>,
+pub(crate) struct PreparedClaim<Inner, Handoff: UnclaimedHandoff<Inner>, Target: ?Sized> {
+    prepared: Prepared<Inner, Handoff, Target>,
 }
 
 /// Each candidate's deliverer, credential and match information.
-type Candidates<Inner, Target> =
-    SmallVec<[(Arc<Target>, Participation<Inner>, DatagramRouteMatchInfo); 4]>;
+type Candidates<Inner, Handoff, Target> = SmallVec<
+    [(
+        Arc<Target>,
+        Participation<Inner, Handoff>,
+        DatagramRouteMatchInfo,
+    ); 4],
+>;
 
-enum Prepared<Inner, Target: ?Sized> {
+enum Prepared<Inner, Handoff: UnclaimedHandoff<Inner>, Target: ?Sized> {
     Release(Inner),
     Unclaimed {
         datagram: Inner,
-        handoff: UnclaimedHandoff<Inner>,
+        handoff: Handoff,
     },
     Exclusive {
         target: Arc<Target>,
@@ -47,8 +56,8 @@ enum Prepared<Inner, Target: ?Sized> {
         route: DatagramRouteMatchInfo,
     },
     Competing {
-        core: Arc<ClaimCore<Inner>>,
-        candidates: Candidates<Inner, Target>,
+        core: Arc<ClaimCore<Inner, Handoff>>,
+        candidates: Candidates<Inner, Handoff, Target>,
     },
 }
 
@@ -60,44 +69,49 @@ enum Prepared<Inner, Target: ?Sized> {
 /// candidate. No author code runs here, so routing may call this while it still
 /// holds its table locks; it must release them before
 /// [`dispatch`](PreparedClaim::dispatch).
-pub(crate) fn prepare_claim<Inner, Target, Entries>(
+pub(crate) fn prepare_claim<Inner, Handoff, Target, Entries>(
     datagram: Inner,
-    finish: DatagramFinishPolicy<Inner>,
+    finish: DatagramFinishPolicy<Handoff>,
     entries: Entries,
-) -> PreparedClaim<Inner, Target>
+) -> PreparedClaim<Inner, Handoff, Target>
 where
-    Target: ?Sized + ErasedDatagramDeliverer<Inner>,
+    Handoff: UnclaimedHandoff<Inner>,
+    Target: ?Sized + ErasedDatagramDeliverer<Inner, Handoff>,
     Entries: IntoIterator<Item = (Arc<Target>, DatagramRouteMatchInfo)>,
-    Entries::IntoIter: ExactSizeIterator,
 {
     let mut entries = entries.into_iter();
-    let prepared = match (finish, entries.len()) {
-        (DatagramFinishPolicy::LastTakes, 0) => Prepared::Release(datagram),
-        (DatagramFinishPolicy::OnUnclaimed(handoff), 0) => {
+    let prepared = match (finish, entries.next()) {
+        (DatagramFinishPolicy::LastTakes, None) => Prepared::Release(datagram),
+        (DatagramFinishPolicy::OnUnclaimed(handoff), None) => {
             Prepared::Unclaimed { datagram, handoff }
         }
-        (DatagramFinishPolicy::LastTakes, 1) => {
-            let (target, route) = entries.next().expect("the entry count was checked");
-            Prepared::Exclusive {
-                target,
-                datagram: ExclusiveDatagram::new(datagram),
-                route,
+        (finish, Some(first)) => match (finish, entries.next()) {
+            (DatagramFinishPolicy::LastTakes, None) => {
+                let (target, route) = first;
+                Prepared::Exclusive {
+                    target,
+                    datagram: ExclusiveDatagram::new(datagram),
+                    route,
+                }
             }
-        }
-        (finish, _) => {
-            let core = ClaimCore::new(datagram, finish);
-            let candidates = entries
-                .map(|(target, route)| (target, Participation::join(&core), route))
-                .collect();
-            Prepared::Competing { core, candidates }
-        }
+            (finish, second) => {
+                let core = ClaimCore::new(datagram, finish);
+                let candidates = iter::once(first)
+                    .chain(second)
+                    .chain(entries)
+                    .map(|(target, route)| (target, Participation::join(&core), route))
+                    .collect();
+                Prepared::Competing { core, candidates }
+            }
+        },
     };
     PreparedClaim { prepared }
 }
 
-impl<Inner, Target> PreparedClaim<Inner, Target>
+impl<Inner, Handoff, Target> PreparedClaim<Inner, Handoff, Target>
 where
-    Target: ?Sized + ErasedDatagramDeliverer<Inner>,
+    Handoff: UnclaimedHandoff<Inner>,
+    Target: ?Sized + ErasedDatagramDeliverer<Inner, Handoff>,
 {
     /// Commits the set and delivers every candidate to its deliverer, in
     /// order.
@@ -110,7 +124,7 @@ where
     pub(crate) fn dispatch(self) {
         match self.prepared {
             Prepared::Release(datagram) => drop(datagram),
-            Prepared::Unclaimed { datagram, handoff } => handoff(datagram),
+            Prepared::Unclaimed { datagram, handoff } => handoff.hand_off(datagram),
             Prepared::Exclusive {
                 target,
                 datagram,

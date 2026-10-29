@@ -12,23 +12,33 @@ use sakuya_wire::header::v1::{
 };
 use sakuya_wire::var_int::{VarInt, codec::WriteVarIntHostExt as _};
 
+use crate::claim::candidate::DatagramClaimAttempt;
+use crate::claim::deliverer::{
+    DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramView, ExclusiveDatagram,
+};
+use crate::claim::delivery::DatagramDelivery;
+use crate::claim::erased::SendDatagramDeliverer;
 use crate::claim::queue::{DatagramDeliveryPoster, DatagramDeliveryQueue};
-use crate::claim::{
-    DatagramClaimAccess, DatagramClaimAttempt, DatagramClaimOutcome, DatagramDeliverer,
-    DatagramDelivery, DatagramRouteMatchInfo, DatagramView, ExclusiveDatagram,
-    SendDatagramDeliverer,
+use crate::claim::route_match::DatagramRouteMatchInfo;
+use crate::route::acceptance::{
+    InitialAcceptance, InitialDatagramReceiver, InitialReceiverFactory, PreparedReceiver,
+    ReflowHandoff, UnclaimedWork,
 };
-use crate::route::{
-    ConnectionIdLengths, DatagramRouter, FirstPacketInterpretation, InitialAcceptance,
-    InitialDatagramReceiver, InitialReceiverFactory, MatchAssociation, PacketForms,
-    PreparedReceiver, ReceivedDatagram, RecognizedInitial, RouteEntryRegistration, RouteIndex,
-    RouteMatcher, StatelessResetTarget, StatelessResetTokens, UnclaimedWork, VersionService,
-};
+use crate::route::association::{MatchAssociation, PacketForms, RouteMatcher};
+use crate::route::datagram::ReceivedDatagram;
+use crate::route::index::{RouteEntryRegistration, RouteIndex};
+use crate::route::interpretation::{FirstPacketInterpretation, RecognizedInitial};
+use crate::route::recognizer::{ConnectionIdLength, ConnectionIdLengths};
+use crate::route::reset::{StatelessResetTarget, StatelessResetTokens};
+use crate::route::router::{DatagramRouter, VersionService};
+use crate::version::Version;
 
 pub(super) type Datagram = ReceivedDatagram<Vec<u8>, LinkId>;
-pub(super) type Target = dyn SendDatagramDeliverer<Datagram>;
+pub(super) type Work = UnclaimedWork<Vec<u8>, LinkId>;
+pub(super) type Reflow = DatagramDeliveryPoster<Work>;
+pub(super) type Handoff = ReflowHandoff<Reflow>;
+pub(super) type Target = dyn SendDatagramDeliverer<Datagram, Handoff>;
 pub(super) type Index = RouteIndex<Target>;
-pub(super) type Work = UnclaimedWork<Vec<u8>, LinkId, Target>;
 pub(super) type Router = DatagramRouter<
     Vec<u8>,
     LinkId,
@@ -36,7 +46,7 @@ pub(super) type Router = DatagramRouter<
     ConnectionIdLengths,
     Arc<StatelessResetTokens<ResetProbe>>,
     VersionProbe,
-    InitialAcceptance<Factory, DatagramDeliveryPoster<Work>>,
+    InitialAcceptance<Factory, Reflow>,
 >;
 
 pub(super) struct TestLink;
@@ -53,6 +63,15 @@ pub(super) fn binding() -> BindingId {
 
 pub(super) fn datagram(bytes: Vec<u8>, link: &LinkId) -> Datagram {
     ReceivedDatagram::new(bytes, link.clone())
+}
+
+/// A recognizer for the given short header connection ID lengths.
+pub(super) fn lengths(lengths: &[usize]) -> ConnectionIdLengths {
+    ConnectionIdLengths::new(lengths.iter().map(|&length| dcid_len(length)))
+}
+
+pub(super) fn dcid_len(length: usize) -> ConnectionIdLength {
+    ConnectionIdLength::new(length).unwrap()
 }
 
 pub(super) fn cid(label: u8) -> [u8; 8] {
@@ -250,6 +269,7 @@ pub(super) fn route_match(
 }
 
 impl DatagramDeliverer<Datagram> for Recorder {
+    type Handoff = Handoff;
     type DelivererDatagramState = ();
 
     fn new_datagram_state(&self, _datagram: DatagramView<'_>, _route: &DatagramRouteMatchInfo) {}
@@ -291,7 +311,7 @@ pub(super) fn register_forms(
     recorder: &Arc<Recorder>,
 ) -> RouteEntryRegistration<Target> {
     index.register(
-        RouteMatcher::new(association, forms, v1::VERSION.get()),
+        RouteMatcher::new(association, forms, Version::V1),
         Arc::clone(recorder) as Arc<Target>,
     )
 }
@@ -412,10 +432,10 @@ impl InitialReceiverFactory<Vec<u8>, LinkId, Target> for Factory {
 
 /// Records datagrams of unsupported versions.
 #[derive(Clone, Default)]
-pub(super) struct VersionProbe(pub(super) Arc<Mutex<Vec<u32>>>);
+pub(super) struct VersionProbe(pub(super) Arc<Mutex<Vec<Version>>>);
 
 impl VersionService<Vec<u8>, LinkId> for VersionProbe {
-    fn unsupported_version(&self, version: u32, _datagram: Datagram) {
+    fn unsupported_version(&self, version: Version, _datagram: Datagram) {
         self.0.lock().unwrap().push(version);
     }
 }
@@ -441,21 +461,18 @@ pub(super) struct Domain {
 
 impl Domain {
     pub(super) fn new(short_lengths: &[usize]) -> Self {
-        let reflow = DatagramDeliveryQueue::new(NonZeroUsize::new(16).unwrap());
+        let reflow = DatagramDeliveryQueue::new(NonZeroUsize::new(16).unwrap()).unwrap();
         let factory = Factory::new();
         let resets = StatelessResetTokens::new();
         let versions = VersionProbe::default();
         let router = Arc::new(
-            DatagramRouter::new(
-                RouteIndex::new(),
-                ConnectionIdLengths::new(short_lengths).unwrap(),
-            )
-            .with_stateless_reset(Arc::clone(&resets))
-            .with_version_service(versions.clone())
-            .with_initial_acceptance(InitialAcceptance::new(
-                factory.clone(),
-                Arc::new(reflow.poster()),
-            )),
+            DatagramRouter::new(RouteIndex::new(), lengths(short_lengths))
+                .with_stateless_reset(Arc::clone(&resets))
+                .with_version_service(versions.clone())
+                .with_initial_acceptance(InitialAcceptance::new(
+                    factory.clone(),
+                    Arc::new(reflow.poster()),
+                )),
         );
         Self {
             router,

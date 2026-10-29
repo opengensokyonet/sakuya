@@ -3,5 +3,6 @@
 mod acceptance;
 mod classification;
 mod composition;
+mod domains;
 mod index;
 mod support;

@@ -6,18 +6,19 @@ use std::sync::Arc;
 use super::support::{
     Judging, Probe, TestDatagram, UnclaimedSink, WakeCount, drops, poll_with, ready, route,
 };
+use crate::claim::candidate::{DatagramClaimAttempt, DatagramClaimPrecheck};
+use crate::claim::delivery::DatagramDelivery;
+use crate::claim::erased::ErasedDatagramDeliverer;
 use crate::claim::group::prepare_claim;
 use crate::claim::shared::DatagramFinishPolicy;
-use crate::claim::{
-    DatagramClaimAttempt, DatagramClaimPrecheck, DatagramDelivery, ErasedDatagramDeliverer,
-};
 
 #[test]
 fn preparation_without_dispatch_runs_no_author_code() {
     let first = Probe::new(Judging::Accept);
     let second = Probe::new(Judging::Accept);
     let sink = UnclaimedSink::default();
-    let erased = |probe: &Arc<Probe>| -> (Arc<dyn ErasedDatagramDeliverer<TestDatagram>>, _) {
+    type Target = dyn ErasedDatagramDeliverer<TestDatagram, UnclaimedSink>;
+    let erased = |probe: &Arc<Probe>| -> (Arc<Target>, _) {
         (Arc::clone(probe) as _, super::support::route_info())
     };
 
@@ -34,11 +35,11 @@ fn preparation_without_dispatch_runs_no_author_code() {
         vec![erased(&first)],
     ));
     let (datagram, empty_drops) = TestDatagram::new(b"empty");
-    drop(prepare_claim::<
-        _,
-        dyn ErasedDatagramDeliverer<TestDatagram>,
-        Vec<_>,
-    >(datagram, sink.policy(), Vec::new()));
+    drop(prepare_claim::<_, _, Target, Vec<_>>(
+        datagram,
+        sink.policy(),
+        Vec::new(),
+    ));
 
     for probe in [&first, &second] {
         assert_eq!(probe.factory_calls(), 0);

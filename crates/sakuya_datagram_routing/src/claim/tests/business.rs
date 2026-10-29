@@ -14,13 +14,15 @@ use std::task::{Poll, Waker};
 use tokio::sync::Notify;
 
 use super::support::{TestDatagram, UnclaimedSink, WakeCount, poll_with, ready};
-use crate::claim::group::prepare_claim;
-use crate::claim::shared::DatagramFinishPolicy;
-use crate::claim::{
-    DatagramClaimAccess, DatagramClaimAttempt, DatagramClaimCandidate, DatagramClaimOutcome,
-    DatagramDeliverer, DatagramDelivery, DatagramRouteMatchInfo, DatagramView,
-    ErasedDatagramDeliverer, ExclusiveDatagramDelivery,
+use crate::claim::candidate::{DatagramClaimAttempt, DatagramClaimCandidate};
+use crate::claim::deliverer::{
+    DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramView,
 };
+use crate::claim::delivery::{DatagramDelivery, ExclusiveDatagramDelivery};
+use crate::claim::erased::ErasedDatagramDeliverer;
+use crate::claim::group::prepare_claim;
+use crate::claim::route_match::DatagramRouteMatchInfo;
+use crate::claim::shared::DatagramFinishPolicy;
 
 /// The owner of the keys, which registers waiters and announces new keys.
 #[derive(Default)]
@@ -122,6 +124,7 @@ impl Endpoint {
 }
 
 impl DatagramDeliverer<TestDatagram> for Endpoint {
+    type Handoff = UnclaimedSink;
     type DelivererDatagramState = PacketState;
 
     fn new_datagram_state(
@@ -192,13 +195,14 @@ fn protected(key: u8, packet_number: u8) -> TestDatagram {
 
 fn route_to(
     datagram: TestDatagram,
-    finish: DatagramFinishPolicy<TestDatagram>,
+    finish: DatagramFinishPolicy<UnclaimedSink>,
     endpoints: &[&Arc<Endpoint>],
 ) {
     let entries = endpoints
         .iter()
         .map(|endpoint| {
-            let erased: Arc<dyn ErasedDatagramDeliverer<TestDatagram>> = Arc::clone(endpoint) as _;
+            let erased: Arc<dyn ErasedDatagramDeliverer<TestDatagram, UnclaimedSink>> =
+                Arc::clone(endpoint) as _;
             (erased, super::support::route_info())
         })
         .collect::<Vec<_>>();

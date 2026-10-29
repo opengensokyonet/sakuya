@@ -4,13 +4,17 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use super::support::{TestDatagram, drops, ready};
+use crate::claim::candidate::DatagramClaimAttempt;
+use crate::claim::deliverer::{
+    DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramView,
+};
+use crate::claim::delivery::DatagramDelivery;
+use crate::claim::erased::SendDatagramDeliverer;
+use crate::claim::finish::ReleaseUnclaimed;
 use crate::claim::group::prepare_claim;
 use crate::claim::queue::{DatagramDeliveryPoster, DatagramDeliveryQueue};
+use crate::claim::route_match::DatagramRouteMatchInfo;
 use crate::claim::shared::DatagramFinishPolicy;
-use crate::claim::{
-    DatagramClaimAccess, DatagramClaimAttempt, DatagramClaimOutcome, DatagramDeliverer,
-    DatagramDelivery, DatagramRouteMatchInfo, DatagramView, SendDatagramDeliverer,
-};
 
 type Delivery = DatagramDelivery<TestDatagram, Queued>;
 
@@ -45,7 +49,7 @@ impl DatagramDeliverer<TestDatagram> for Queued {
 }
 
 fn receiver() -> (DatagramDeliveryQueue<Delivery>, Arc<Queued>) {
-    let queue = DatagramDeliveryQueue::new(NonZeroUsize::new(4).unwrap());
+    let queue = DatagramDeliveryQueue::new(NonZeroUsize::new(4).unwrap()).unwrap();
     let deliverer = Arc::new(Queued {
         poster: queue.poster(),
     });
@@ -54,7 +58,7 @@ fn receiver() -> (DatagramDeliveryQueue<Delivery>, Arc<Queued>) {
 
 fn route_to(
     datagram: TestDatagram,
-    finish: DatagramFinishPolicy<TestDatagram>,
+    finish: DatagramFinishPolicy<ReleaseUnclaimed>,
     deliverers: &[&Arc<Queued>],
 ) {
     let entries = deliverers

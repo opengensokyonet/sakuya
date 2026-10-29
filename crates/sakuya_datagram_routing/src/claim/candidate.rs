@@ -2,13 +2,15 @@
 
 use std::fmt;
 use std::future::Future;
+use std::mem;
 use std::sync::Arc;
 
-use super::shared::{ClaimCore, Participation};
-use super::{
-    DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramRouteMatchInfo,
-    DatagramView, ExclusiveDatagram, ExclusiveDatagramDelivery,
+use super::deliverer::{
+    DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramView, ExclusiveDatagram,
 };
+use super::delivery::{ExclusiveDatagramDelivery, PrivateState};
+use super::route_match::DatagramRouteMatchInfo;
+use super::shared::{ClaimCore, DatagramSlot, Participation};
 
 /// One deliverer's chance at one datagram.
 ///
@@ -28,9 +30,9 @@ use super::{
 pub struct DatagramClaimCandidate<Inner, Deliverer: DatagramDeliverer<Inner>> {
     // Field order is drop order: the credential is released before the
     // private state and the deliverer reference.
-    participation: Participation<Inner>,
+    participation: Participation<Inner, Deliverer::Handoff>,
     route: DatagramRouteMatchInfo,
-    state: Option<Deliverer::DelivererDatagramState>,
+    state: PrivateState<Deliverer::DelivererDatagramState>,
     deliverer: Arc<Deliverer>,
 }
 
@@ -86,14 +88,14 @@ enum Judgement<Inner> {
 
 impl<Inner, Deliverer: DatagramDeliverer<Inner>> DatagramClaimCandidate<Inner, Deliverer> {
     pub(super) fn new(
-        participation: Participation<Inner>,
+        participation: Participation<Inner, Deliverer::Handoff>,
         route: DatagramRouteMatchInfo,
         deliverer: Arc<Deliverer>,
     ) -> Self {
         Self {
             participation,
             route,
-            state: None,
+            state: PrivateState::Uninitialized,
             deliverer,
         }
     }
@@ -107,7 +109,7 @@ impl<Inner, Deliverer: DatagramDeliverer<Inner>> DatagramClaimCandidate<Inner, D
     /// recorded about its last judgment. It does not tell whether the datagram
     /// is still present.
     pub fn initialized_state(&self) -> Option<&Deliverer::DelivererDatagramState> {
-        self.state.as_ref()
+        self.state.initialized()
     }
 
     /// What routing recorded about this candidate's match.
@@ -116,14 +118,14 @@ impl<Inner, Deliverer: DatagramDeliverer<Inner>> DatagramClaimCandidate<Inner, D
     }
 
     #[cfg(test)]
-    pub(super) fn core(&self) -> &ClaimCore<Inner> {
+    pub(super) fn core(&self) -> &ClaimCore<Inner, Deliverer::Handoff> {
         self.participation.core()
     }
 
     /// An extra strong reference to the core, which the mechanism itself
     /// never creates; tests use it to observe the core from a drop.
     #[cfg(test)]
-    pub(super) fn core_handle(&self) -> Arc<ClaimCore<Inner>> {
+    pub(super) fn core_handle(&self) -> Arc<ClaimCore<Inner, Deliverer::Handoff>> {
         self.participation.core_handle()
     }
 
@@ -224,40 +226,44 @@ impl<Inner: AsRef<[u8]>, Deliverer: DatagramDeliverer<Inner>>
 
 /// The synchronous section of an attempt, run while holding the access.
 fn judge<Inner: AsRef<[u8]>, Deliverer: DatagramDeliverer<Inner>>(
-    slot: &mut Option<Inner>,
-    core: &ClaimCore<Inner>,
+    slot: &mut DatagramSlot<Inner>,
+    core: &ClaimCore<Inner, Deliverer::Handoff>,
     deliverer: &Deliverer,
     route: &DatagramRouteMatchInfo,
-    state: &mut Option<Deliverer::DelivererDatagramState>,
+    state: &mut PrivateState<Deliverer::DelivererDatagramState>,
 ) -> Judgement<Inner> {
-    let Some(datagram) = slot.as_ref() else {
-        return Judgement::ClaimedElsewhere;
-    };
-    let current = match state.take() {
-        Some(current) => current,
-        None => deliverer.new_datagram_state(DatagramView::new(datagram.as_ref()), route),
+    let new_state = |datagram: &Inner| {
+        deliverer.new_datagram_state(DatagramView::new(datagram.as_ref()), route)
     };
     if core.sole_participant_takes() {
-        *state = Some(current);
-        let datagram = slot
-            .take()
-            .expect("the datagram was present at the start of this section");
+        // No other participant can appear, so taking the datagram before the
+        // factory runs is indistinguishable from taking it after.
+        let DatagramSlot::Present(datagram) = mem::replace(slot, DatagramSlot::Taken) else {
+            return Judgement::ClaimedElsewhere;
+        };
+        let current = mem::replace(state, PrivateState::Uninitialized);
+        *state = PrivateState::Initialized(current.into_initialized(|| new_state(&datagram)));
         return Judgement::Claimed(ExclusiveDatagram::new(datagram));
     }
+    let DatagramSlot::Present(datagram) = &*slot else {
+        return Judgement::ClaimedElsewhere;
+    };
+    let current =
+        mem::replace(state, PrivateState::Uninitialized).into_initialized(|| new_state(datagram));
     match deliverer.try_claim(DatagramClaimAccess::new(slot), route, current) {
         // The returned access ends here, before the guard is released.
         DatagramClaimOutcome::Unclaimed {
             access: _,
             state: next,
         } => {
-            *state = Some(next);
+            *state = PrivateState::Initialized(next);
             Judgement::Unclaimed
         }
         DatagramClaimOutcome::Claimed {
             datagram,
             state: next,
         } => {
-            *state = Some(next);
+            *state = PrivateState::Initialized(next);
             Judgement::Claimed(datagram)
         }
     }
@@ -269,7 +275,7 @@ impl<Inner, Deliverer: DatagramDeliverer<Inner>> fmt::Debug
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DatagramClaimCandidate")
             .field("route", &self.route)
-            .field("state_initialized", &self.state.is_some())
+            .field("state_initialized", &self.state.initialized().is_some())
             .finish_non_exhaustive()
     }
 }

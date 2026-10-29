@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::support::{Judging, Probe, TestDatagram, UnclaimedSink, block_on, drops, route};
-use crate::claim::DatagramClaimAttempt;
+use crate::claim::candidate::DatagramClaimAttempt;
 use crate::claim::shared::DatagramFinishPolicy;
 
 const THREADS: usize = 8;

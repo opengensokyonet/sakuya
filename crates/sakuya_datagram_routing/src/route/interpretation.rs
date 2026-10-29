@@ -4,7 +4,9 @@ use sakuya_link::BindingId;
 use sakuya_wire::connection_id::{ConnectionId, NonEmptyCid};
 use sakuya_wire::header::v1::LongPacketType;
 
-use super::{MatchAssociation, PacketForms};
+use super::association::{MatchAssociation, PacketForms};
+use super::recognizer::ConnectionIdLength;
+use crate::version::Version;
 
 /// How a candidate reads the first packet of a datagram.
 ///
@@ -22,7 +24,7 @@ pub enum FirstPacketInterpretation {
     /// A long header of a supported version.
     Long {
         /// The version field.
-        version: u32,
+        version: Version,
         /// The packet type the version defines.
         packet_type: LongPacketType,
     },
@@ -32,7 +34,7 @@ pub enum FirstPacketInterpretation {
     /// A short header whose destination connection ID has this length.
     Short {
         /// The length of the destination connection ID after the first byte.
-        dcid_len: u8,
+        dcid_len: ConnectionIdLength,
     },
 }
 
@@ -55,7 +57,7 @@ impl FirstPacketInterpretation {
 /// authenticated.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecognizedInitial {
-    version: u32,
+    version: Version,
     dcid: ConnectionId,
     scid: ConnectionId,
     binding: BindingId,
@@ -63,7 +65,7 @@ pub struct RecognizedInitial {
 
 impl RecognizedInitial {
     pub(crate) fn new(
-        version: u32,
+        version: Version,
         dcid: ConnectionId,
         scid: ConnectionId,
         binding: BindingId,
@@ -77,7 +79,7 @@ impl RecognizedInitial {
     }
 
     /// The version of the Initial packet.
-    pub fn version(&self) -> u32 {
+    pub fn version(&self) -> Version {
         self.version
     }
 
@@ -107,9 +109,25 @@ impl RecognizedInitial {
     /// The association under which a receiver for this Initial is published:
     /// the destination connection ID, or the link binding when it is empty.
     pub fn association(&self) -> MatchAssociation {
-        match NonEmptyCid::new(self.dcid) {
-            Ok(dcid) => MatchAssociation::InitialDcid(dcid),
-            Err(_) => MatchAssociation::ZeroCid(self.binding.clone()),
+        match self.key() {
+            InitialKey::Dcid(dcid) => MatchAssociation::InitialDcid(dcid),
+            InitialKey::Binding(binding) => MatchAssociation::ZeroCid(binding),
         }
     }
+
+    /// The index key of [`association`](Self::association).
+    pub(crate) fn key(&self) -> InitialKey {
+        match NonEmptyCid::new(self.dcid) {
+            Ok(dcid) => InitialKey::Dcid(dcid),
+            Err(_) => InitialKey::Binding(self.binding.clone()),
+        }
+    }
+}
+
+/// The index key under which a receiver for an Initial is published.
+pub(crate) enum InitialKey {
+    /// A non-empty destination connection ID, under the Initial association.
+    Dcid(NonEmptyCid),
+    /// The link binding of a zero-length destination connection ID.
+    Binding(BindingId),
 }

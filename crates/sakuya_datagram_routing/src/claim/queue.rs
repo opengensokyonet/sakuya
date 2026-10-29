@@ -26,8 +26,12 @@
 //! use std::num::NonZeroUsize;
 //! use std::sync::Arc;
 //!
+//! use sakuya_datagram_routing::claim::deliverer::{
+//!     DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramView,
+//! };
+//! use sakuya_datagram_routing::claim::delivery::DatagramDelivery;
 //! use sakuya_datagram_routing::claim::queue::{DatagramDeliveryPoster, DatagramDeliveryQueue};
-//! use sakuya_datagram_routing::claim::*;
+//! use sakuya_datagram_routing::claim::route_match::DatagramRouteMatchInfo;
 //!
 //! /// Claims every datagram whose first byte matches, and queues deliveries.
 //! struct Queued {
@@ -59,7 +63,7 @@
 //!     }
 //! }
 //!
-//! let mut queue = DatagramDeliveryQueue::new(NonZeroUsize::new(64).unwrap());
+//! let mut queue = DatagramDeliveryQueue::new(NonZeroUsize::new(64).unwrap()).unwrap();
 //! let deliverer = Arc::new(Queued { first_byte: 0x40, poster: queue.poster() });
 //! assert!(queue.try_recv().is_none());
 //! drop(queue);
@@ -71,7 +75,8 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
 
-use tokio::sync::mpsc;
+use snafu::{Snafu, ensure};
+use tokio::sync::{Semaphore, mpsc};
 
 /// The receiving end of a delivery queue, owned by a datagram receiver.
 ///
@@ -84,18 +89,25 @@ pub struct DatagramDeliveryQueue<T> {
 }
 
 impl<T> DatagramDeliveryQueue<T> {
+    /// The largest capacity a queue can have.
+    pub const MAX_CAPACITY: usize = Semaphore::MAX_PERMITS;
+
     /// Creates a queue that holds at most `capacity` items.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `capacity` exceeds the largest capacity the underlying Tokio
-    /// channel supports.
-    pub fn new(capacity: NonZeroUsize) -> Self {
+    /// [`QueueCapacityError`] if `capacity` exceeds
+    /// [`MAX_CAPACITY`](Self::MAX_CAPACITY).
+    pub fn new(capacity: NonZeroUsize) -> Result<Self, QueueCapacityError> {
+        ensure!(
+            capacity.get() <= Self::MAX_CAPACITY,
+            QueueCapacitySnafu { capacity }
+        );
         let (sender, receiver) = mpsc::channel(capacity.get());
-        Self {
+        Ok(Self {
             receiver,
             sender: Arc::new(sender),
-        }
+        })
     }
 
     /// Returns a poster for a deliverer that feeds this queue.
@@ -117,6 +129,8 @@ impl<T> DatagramDeliveryQueue<T> {
     pub fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<T> {
         match self.receiver.poll_recv(cx) {
             Poll::Ready(Some(item)) => Poll::Ready(item),
+            // invariant: the queue owns a sender for as long as it owns the
+            // receiver, so the channel never reports that every sender is gone.
             Poll::Ready(None) => {
                 unreachable!("the queue keeps its own sender, so the channel stays open")
             }
@@ -130,6 +144,17 @@ impl<T> DatagramDeliveryQueue<T> {
     pub async fn recv(&mut self) -> T {
         std::future::poll_fn(|cx| self.poll_recv(cx)).await
     }
+}
+
+/// A queue capacity exceeds [`DatagramDeliveryQueue::MAX_CAPACITY`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display(
+    "queue capacity of {capacity} items exceeds the maximum of {} items",
+    DatagramDeliveryQueue::<()>::MAX_CAPACITY
+))]
+pub struct QueueCapacityError {
+    /// The rejected capacity.
+    pub capacity: NonZeroUsize,
 }
 
 impl<T> fmt::Debug for DatagramDeliveryQueue<T> {
@@ -154,7 +179,7 @@ impl<T> DatagramDeliveryPoster<T> {
     /// The item is dropped when the queue is closed or full; a full queue is
     /// the receiver's admission limit, and the post neither waits nor retries.
     /// There is no failure to report: like
-    /// [`DatagramDeliverer::deliver`](super::DatagramDeliverer::deliver), a
+    /// [`DatagramDeliverer::deliver`](super::deliverer::DatagramDeliverer::deliver), a
     /// post always takes the item over.
     pub fn post(&self, item: T) {
         if let Some(sender) = self.sender.upgrade() {
@@ -198,7 +223,7 @@ mod tests {
     use std::rc::Rc;
     use std::task::{Context, Poll, Waker};
 
-    use super::DatagramDeliveryQueue;
+    use super::{DatagramDeliveryQueue, QueueCapacityError};
 
     struct Tracked(Rc<Cell<usize>>);
 
@@ -208,13 +233,26 @@ mod tests {
         }
     }
 
-    fn capacity(value: usize) -> NonZeroUsize {
-        NonZeroUsize::new(value).unwrap()
+    fn with_capacity<T>(capacity: usize) -> DatagramDeliveryQueue<T> {
+        DatagramDeliveryQueue::new(NonZeroUsize::new(capacity).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn capacity_beyond_the_maximum_is_rejected() {
+        let largest = NonZeroUsize::new(DatagramDeliveryQueue::<()>::MAX_CAPACITY).unwrap();
+        let too_large = largest.checked_add(1).unwrap();
+        assert_eq!(
+            DatagramDeliveryQueue::<()>::new(too_large).unwrap_err(),
+            QueueCapacityError {
+                capacity: too_large
+            }
+        );
+        assert!(DatagramDeliveryQueue::<()>::new(NonZeroUsize::MIN).is_ok());
     }
 
     #[test]
     fn queued_items_arrive_in_order() {
-        let mut queue = DatagramDeliveryQueue::new(capacity(2));
+        let mut queue = with_capacity(2);
         let poster = queue.poster();
         poster.post(1);
         poster.post(2);
@@ -227,7 +265,7 @@ mod tests {
     #[test]
     fn post_after_close_drops_the_item_at_once() {
         let drops = Rc::new(Cell::new(0));
-        let queue = DatagramDeliveryQueue::new(capacity(1));
+        let queue = with_capacity(1);
         let poster = queue.poster();
         drop(queue);
         assert!(poster.is_closed());
@@ -238,7 +276,7 @@ mod tests {
     #[test]
     fn full_queue_drops_the_item_without_retrying() {
         let drops = Rc::new(Cell::new(0));
-        let queue = DatagramDeliveryQueue::new(capacity(1));
+        let queue = with_capacity(1);
         let poster = queue.poster();
         poster.post(Tracked(drops.clone()));
         poster.post(Tracked(drops.clone()));
@@ -252,7 +290,7 @@ mod tests {
         // The interleaving a concurrent post can produce: the poster upgrades,
         // the receiver closes, then the poster sends.
         let drops = Rc::new(Cell::new(0));
-        let queue = DatagramDeliveryQueue::new(capacity(1));
+        let queue = with_capacity(1);
         let poster = queue.poster();
         let temporary = poster.sender.upgrade().unwrap();
         drop(queue);
@@ -266,7 +304,7 @@ mod tests {
     #[test]
     fn item_sent_before_close_is_released_by_the_close() {
         let drops = Rc::new(Cell::new(0));
-        let queue = DatagramDeliveryQueue::new(capacity(1));
+        let queue = with_capacity(1);
         let poster = queue.poster();
         let temporary = poster.sender.upgrade().unwrap();
         temporary.try_send(Tracked(drops.clone())).ok().unwrap();

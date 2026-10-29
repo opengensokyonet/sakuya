@@ -3,18 +3,20 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use sakuya_wire::header::v1::{self, LongPacketType};
+use sakuya_wire::header::v1::LongPacketType;
 
 use super::support::{
-    Domain, Judging, Recorder, ResetProbe, binding, cid, initial, link, long, nonempty,
-    other_version, register, register_forms, short, version_negotiation,
+    Domain, Factory, Judging, Recorder, ResetProbe, binding, cid, dcid_len, initial, lengths, link,
+    long, nonempty, other_version, register, register_forms, short, version_negotiation,
 };
-use crate::claim::DatagramDelivery;
-use crate::route::{FirstPacketInterpretation, MatchAssociation, PacketForms};
+use crate::claim::delivery::DatagramDelivery;
+use crate::route::association::{MatchAssociation, PacketForms};
+use crate::route::interpretation::FirstPacketInterpretation;
+use crate::version::Version;
 
 fn long_interpretation(packet_type: LongPacketType) -> FirstPacketInterpretation {
     FirstPacketInterpretation::Long {
-        version: v1::VERSION.get(),
+        version: Version::V1,
         packet_type,
     }
 }
@@ -25,7 +27,7 @@ struct Entries {
     local: Arc<Recorder>,
     initial: Arc<Recorder>,
     zero: Arc<Recorder>,
-    _registrations: Vec<crate::route::RouteEntryRegistration<super::support::Target>>,
+    _registrations: Vec<crate::route::index::RouteEntryRegistration<super::support::Target>>,
 }
 
 fn entries(domain: &Domain, label: u8, binding: &sakuya_link::BindingId) -> Entries {
@@ -268,15 +270,26 @@ fn unsupported_version_goes_to_the_version_service_only() {
     let entries = entries(&domain, 1, &binding);
     domain.route(other_version(0x6b33_43cf, &cid(1)), &link(&binding));
     assert_eq!(counts(&entries), [0, 0, 0]);
-    assert_eq!(*domain.versions.0.lock().unwrap(), [0x6b33_43cf]);
+    assert_eq!(
+        *domain.versions.0.lock().unwrap(),
+        [Version::new(0x6b33_43cf)]
+    );
 }
 
 #[test]
 fn unsupported_version_without_a_service_is_released() {
-    use crate::route::{ConnectionIdLengths, DatagramRouter, RouteIndex};
+    use std::num::NonZeroUsize;
+
+    use crate::claim::queue::DatagramDeliveryQueue;
+    use crate::route::acceptance::InitialAcceptance;
+    use crate::route::index::RouteIndex;
+    use crate::route::router::DatagramRouter;
 
     let index = RouteIndex::<super::support::Target>::new();
-    let router = DatagramRouter::new(Arc::clone(&index), ConnectionIdLengths::new(&[8]).unwrap());
+    let reflow = DatagramDeliveryQueue::new(NonZeroUsize::MIN).unwrap();
+    let router = DatagramRouter::new(Arc::clone(&index), lengths(&[8])).with_initial_acceptance(
+        InitialAcceptance::new(Factory::new(), Arc::new(reflow.poster())),
+    );
     let binding = binding();
     let local = Recorder::new(1, Judging::Reject);
     let _registration = register(
@@ -300,11 +313,15 @@ fn short_header_offers_zero_length_and_non_empty_readings_side_by_side() {
     assert_eq!(counts(&entries), [1, 0, 1]);
     assert_eq!(
         entries.local.interpretations(),
-        [FirstPacketInterpretation::Short { dcid_len: 8 }]
+        [FirstPacketInterpretation::Short {
+            dcid_len: dcid_len(8)
+        }]
     );
     assert_eq!(
         entries.zero.interpretations(),
-        [FirstPacketInterpretation::Short { dcid_len: 0 }]
+        [FirstPacketInterpretation::Short {
+            dcid_len: dcid_len(0)
+        }]
     );
 }
 
@@ -353,10 +370,10 @@ fn matcher_forms_and_version_limit_where_an_entry_applies() {
         &short_only,
     );
     let _other_version = domain.index().register(
-        crate::route::RouteMatcher::new(
+        crate::route::association::RouteMatcher::new(
             MatchAssociation::LocalCid(nonempty(&cid(5))),
             PacketForms::ALL,
-            2,
+            Version::new(2),
         ),
         Arc::clone(&other_version) as Arc<super::support::Target>,
     );

@@ -1,7 +1,7 @@
 //! The two finish policies
 
 use super::support::{Judging, Probe, TestDatagram, UnclaimedSink, drops, ready, route};
-use crate::claim::DatagramClaimAttempt;
+use crate::claim::candidate::DatagramClaimAttempt;
 use crate::claim::shared::DatagramFinishPolicy;
 
 #[test]

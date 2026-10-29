@@ -10,33 +10,38 @@
 //! author of a deliverer only defines the content of the private state and three
 //! synchronous capabilities:
 //!
-//! - [`new_datagram_state`](DatagramDeliverer::new_datagram_state) builds the
-//!   initial private state from a read-only [`DatagramView`];
-//! - [`try_claim`](DatagramDeliverer::try_claim) decides, within one
+//! - [`new_datagram_state`](deliverer::DatagramDeliverer::new_datagram_state)
+//!   builds the initial private state from a read-only [`DatagramView`];
+//! - [`try_claim`](deliverer::DatagramDeliverer::try_claim) decides, within one
 //!   synchronous access, whether to take the datagram through
 //!   [`DatagramClaimAccess::into_exclusive`];
-//! - [`deliver`](DatagramDeliverer::deliver) consumes a [`DatagramDelivery`]
-//!   and returns unit.
+//! - [`deliver`](deliverer::DatagramDeliverer::deliver) consumes a
+//!   [`DatagramDelivery`] and returns unit.
 //!
-//! None of them waits. Waiting for business conditions, such as keys or
-//! configuration, belongs to whoever holds the candidate.
+//! A deliverer of a routing domain that hands unclaimed datagrams off also
+//! names that domain's [`UnclaimedHandoff`] as its
+//! [`Handoff`](deliverer::DatagramDeliverer::Handoff). None of the capabilities
+//! waits. Waiting for business conditions, such as keys or configuration,
+//! belongs to whoever holds the candidate.
 //!
 //! # One attempt
 //!
 //! [`DatagramClaimCandidate::try_exclusive`] moves the candidate into a lazy
 //! future. On first poll the future waits for the shared access
-//! (`tokio::sync::Mutex<Option<Inner>>`), then, in one synchronous section
-//! without awaiting:
+//! (a `tokio::sync::Mutex` around the datagram slot), then, in one synchronous
+//! section without awaiting:
 //!
 //! 1. if the datagram is already gone, it yields
 //!    [`DatagramClaimAttempt::ClaimedElsewhere`] without calling the factory;
-//! 2. if the candidate's private state is not initialized yet, it calls the
-//!    factory once with a read-only view of the datagram;
-//! 3. if the datagram uses the [last-takes](#finish-policies) finish policy and
+//! 2. if the datagram uses the [last-takes](#finish-policies) finish policy and
 //!    this candidate is the only remaining participant, it takes the datagram
-//!    directly without calling `try_claim`;
-//! 4. otherwise it calls the deliverer's `try_claim`. An unclaimed outcome stores
-//!    the updated state back into the same candidate.
+//!    directly without calling `try_claim`, and then calls the factory once
+//!    with a read-only view of the datagram if the candidate's private state
+//!    is not initialized yet;
+//! 3. otherwise, if the private state is not initialized yet, it calls the
+//!    factory once with a read-only view of the datagram, and then calls the
+//!    deliverer's `try_claim`. An unclaimed outcome stores the updated state
+//!    back into the same candidate.
 //!
 //! The access is released before the attempt completes. Dropping the future
 //! before its first poll leaves the candidate without any author call; dropping
@@ -57,7 +62,7 @@
 //! | Gaining access and finding the datagram gone | none |
 //! | First access while the datagram is present | once; later unclaimed retries reuse the state |
 //! | Immediate attempt | by the same rule when the access is available; none otherwise |
-//! | Single last-takes candidate delivered as exclusive | none at delivery; once at [`consume`](ExclusiveDatagramDelivery::consume) |
+//! | Single last-takes candidate delivered as exclusive | none at delivery; once at [`consume`](delivery::ExclusiveDatagramDelivery::consume) |
 //! | Consuming after a won competition | none |
 //!
 //! # Finish policies
@@ -69,7 +74,7 @@
 //! | --- | --- | --- |
 //! | Several participants | ordinary competition | ordinary competition |
 //! | One participant left, datagram present | may take it directly | still calls `try_claim` |
-//! | All participants exit, datagram present | the datagram is released | the last exit hands the datagram to routing's handoff, once |
+//! | All participants exit, datagram present | the datagram is released | the last exit passes the datagram to the domain's [`UnclaimedHandoff`], once |
 //! | A participant took the datagram | others observe it gone | no handoff |
 //! | The winner later cancels or rejects | not refilled | not refilled, no handoff |
 //!
@@ -97,7 +102,8 @@
 //! | --- | --- |
 //! | Saving and consuming on one thread | nothing; local `Rc` state and scoped borrows work |
 //! | Sharing a deliverer across threads | `Deliverer: Send + Sync` |
-//! | Moving a candidate, delivery or attempt future to another thread | the whole object is `Send`: datagram, route match information, private state, deliverer |
+//! | Moving a candidate, delivery or attempt future to another thread | the whole object is `Send`: datagram, route match information, private state, deliverer, and for a candidate the domain's handoff |
+//! | Handing unclaimed datagrams off | nothing; a local handoff makes the candidates local, a `Send` handoff keeps them `Send` |
 //! | Moving private state with its single owner | `Send` only, never `Sync` |
 //! | Erasing heterogeneous deliverers | checked where the concrete type is visible, see [`SendDatagramDeliverer`] |
 //!
@@ -112,30 +118,36 @@
 //! | Preparing the candidate set | nothing was delivered; the datagram and the prepared credentials are released, no factory ran | the surrounding call unwinds |
 //! | Factory or `try_claim` before the datagram is taken | the datagram stays in the shared slot; the attempt ends and must not be polled again | other candidates keep their chance |
 //! | Author code after the datagram is taken | the slot stays empty; the exclusive owner drops the datagram while unwinding | other candidates observe [`DatagramClaimAttempt::ClaimedElsewhere`] |
-//! | Factory during [`consume`](ExclusiveDatagramDelivery::consume) of a single candidate | the datagram belongs to the exclusive delivery and is released while unwinding | there is no competition |
+//! | Factory of a sole last-takes participant | the datagram was already taken and is released while unwinding, as the participant's exit would release it | there is no other participant |
+//! | Factory during [`consume`](delivery::ExclusiveDatagramDelivery::consume) of a single candidate | the datagram belongs to the exclusive delivery and is released while unwinding | there is no competition |
 //!
 //! A candidate whose attempt panicked is gone with the attempt. The shared
 //! datagram being intact says nothing about whether the deliverer or its
 //! other state is still usable.
+//!
+//! [`DatagramClaimCandidate`]: candidate::DatagramClaimCandidate
+//! [`DatagramClaimCandidate::try_exclusive`]: candidate::DatagramClaimCandidate::try_exclusive
+//! [`DatagramClaimCandidate::try_exclusive_now`]: candidate::DatagramClaimCandidate::try_exclusive_now
+//! [`DatagramClaimAttempt::ClaimedElsewhere`]: candidate::DatagramClaimAttempt::ClaimedElsewhere
+//! [`DatagramDeliverer`]: deliverer::DatagramDeliverer
+//! [`DatagramDeliverer::deliver`]: deliverer::DatagramDeliverer::deliver
+//! [`DatagramView`]: deliverer::DatagramView
+//! [`DatagramClaimAccess::into_exclusive`]: deliverer::DatagramClaimAccess::into_exclusive
+//! [`DatagramDelivery`]: delivery::DatagramDelivery
+//! [`DatagramDelivery::Exclusive`]: delivery::DatagramDelivery::Exclusive
+//! [`DatagramDelivery::Competing`]: delivery::DatagramDelivery::Competing
+//! [`SendDatagramDeliverer`]: erased::SendDatagramDeliverer
+//! [`UnclaimedHandoff`]: finish::UnclaimedHandoff
 
-mod candidate;
-mod deliverer;
-mod delivery;
-mod erased;
+pub mod candidate;
+pub mod deliverer;
+pub mod delivery;
+pub mod erased;
+pub mod finish;
 pub(crate) mod group;
 pub mod queue;
-mod route_match;
+pub mod route_match;
 pub(crate) mod shared;
-
-pub use self::candidate::{
-    DatagramClaimAttempt, DatagramClaimCandidate, DatagramClaimFuture, DatagramClaimPrecheck,
-};
-pub use self::deliverer::{
-    DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramView, ExclusiveDatagram,
-};
-pub use self::delivery::{DatagramAssociatedState, DatagramDelivery, ExclusiveDatagramDelivery};
-pub use self::erased::{ErasedDatagramDeliverer, SendDatagramDeliverer};
-pub use self::route_match::DatagramRouteMatchInfo;
 
 #[cfg(test)]
 mod tests;
