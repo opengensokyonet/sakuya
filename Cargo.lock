@@ -152,6 +152,11 @@ dependencies = [
 [[package]]
 name = "sakuya_stream"
 version = "0.0.0"
+dependencies = [
+ "bytes",
+ "sakuya_wire",
+ "snafu",
+]
 
 [[package]]
 name = "sakuya_wire"
