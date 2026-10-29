@@ -5,10 +5,15 @@
 //! - [`var_int`]: variable-length integers ([`var_int::VarInt`]), decoded from
 //!   and encoded into byte slices, and read and written as `nitori_call`
 //!   operations.
+//! - [`connection_id`]: connection IDs ([`connection_id::ConnectionId`]) and
+//!   their non-empty form ([`connection_id::NonEmptyCid`]).
+//! - [`stream_id`]: stream IDs ([`stream_id::StreamId`]).
 //!
 //! [RFC 9000]: https://www.rfc-editor.org/rfc/rfc9000.html
 #![feature(impl_trait_in_assoc_type)]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod connection_id;
+pub mod stream_id;
 pub mod var_int;
