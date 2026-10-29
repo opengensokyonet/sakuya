@@ -7,12 +7,13 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 
 use crate::claim::group::prepare_claim;
-use crate::claim::shared::{DatagramFinishPolicy, OfferedRouteHistory, ReflowContinuation};
+use crate::claim::shared::DatagramFinishPolicy;
 use crate::claim::{
     DatagramClaimAccess, DatagramClaimCandidate, DatagramClaimOutcome, DatagramDeliverer,
     DatagramDelivery, DatagramRouteMatchInfo, DatagramView, ExclusiveDatagramDelivery,
-    SendDatagramDeliverer, UnclaimedWork,
+    SendDatagramDeliverer,
 };
+use crate::route::{FirstPacketInterpretation, MatchAssociation};
 
 /// A datagram that counts how often it is dropped.
 #[derive(Debug)]
@@ -195,25 +196,31 @@ impl DatagramDeliverer<TestDatagram> for Probe {
 
 /// Collects the work handed off under the on-unclaimed policy.
 #[derive(Clone, Default)]
-pub(super) struct UnclaimedSink(Arc<Mutex<Vec<UnclaimedWork<TestDatagram>>>>);
+pub(super) struct UnclaimedSink(Arc<Mutex<Vec<TestDatagram>>>);
 
 impl UnclaimedSink {
     pub(super) fn policy(&self) -> DatagramFinishPolicy<TestDatagram> {
         let sink = self.0.clone();
-        DatagramFinishPolicy::OnUnclaimed {
-            handoff: Box::new(move |work| sink.lock().unwrap().push(work)),
-            offered: OfferedRouteHistory::new(),
-            continuation: ReflowContinuation::new(),
-        }
+        DatagramFinishPolicy::OnUnclaimed(Box::new(move |datagram| {
+            sink.lock().unwrap().push(datagram);
+        }))
     }
 
     pub(super) fn len(&self) -> usize {
         self.0.lock().unwrap().len()
     }
 
-    pub(super) fn take(&self) -> Vec<UnclaimedWork<TestDatagram>> {
+    pub(super) fn take(&self) -> Vec<TestDatagram> {
         std::mem::take(&mut self.0.lock().unwrap())
     }
+}
+
+/// Match information for a candidate; the claim mechanism does not read it.
+pub(super) fn route_info() -> DatagramRouteMatchInfo {
+    DatagramRouteMatchInfo::new(
+        MatchAssociation::ZeroCid(sakuya_link::BindingId::new::<TestDatagram>()),
+        FirstPacketInterpretation::Short { dcid_len: 0 },
+    )
 }
 
 /// Prepares and dispatches one datagram to `probes`, in order.
@@ -226,9 +233,9 @@ pub(super) fn route(
         .iter()
         .map(|probe| {
             let erased: Arc<dyn SendDatagramDeliverer<TestDatagram>> = Arc::clone(probe) as _;
-            (erased, DatagramRouteMatchInfo::new())
+            (erased, route_info())
         })
-        .collect();
+        .collect::<Vec<_>>();
     prepare_claim(datagram, finish, entries).dispatch();
 }
 

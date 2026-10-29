@@ -49,10 +49,8 @@ fn on_unclaimed_hands_off_once_from_the_last_exit() {
     let work = sink.take();
     assert_eq!(work.len(), 1);
     assert_eq!(drops(&datagram_drops), 0);
-    let work = work.into_iter().next().unwrap();
-    assert_eq!(work.datagram().as_ref(), b"unclaimed");
-    // Routing resumes from the datagram, its history and the continuation.
-    let (datagram, _offered, _continuation) = work.into_parts();
+    let datagram = work.into_iter().next().unwrap();
+    assert_eq!(datagram.as_ref(), b"unclaimed");
     drop(datagram);
     assert_eq!(drops(&datagram_drops), 1);
 }
@@ -79,7 +77,7 @@ fn on_unclaimed_without_entries_hands_off_at_dispatch() {
     let (datagram, datagram_drops) = TestDatagram::new(b"nobody");
     route(datagram, sink.policy(), &[]);
     assert_eq!(sink.len(), 1);
-    let datagram = sink.take().pop().unwrap().into_datagram();
+    let datagram = sink.take().pop().unwrap();
     assert_eq!(drops(&datagram_drops), 0);
     drop(datagram);
     assert_eq!(drops(&datagram_drops), 1);

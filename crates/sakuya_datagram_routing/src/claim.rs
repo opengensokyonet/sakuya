@@ -69,7 +69,7 @@
 //! | --- | --- | --- |
 //! | Several participants | ordinary competition | ordinary competition |
 //! | One participant left, datagram present | may take it directly | still calls `try_claim` |
-//! | All participants exit, datagram present | the datagram is released | the last exit hands the datagram to the continuation, once |
+//! | All participants exit, datagram present | the datagram is released | the last exit hands the datagram to routing's handoff, once |
 //! | A participant took the datagram | others observe it gone | no handoff |
 //! | The winner later cancels or rejects | not refilled | not refilled, no handoff |
 //!
@@ -122,10 +122,10 @@ mod candidate;
 mod deliverer;
 mod delivery;
 mod erased;
-mod group;
+pub(crate) mod group;
 pub mod queue;
 mod route_match;
-mod shared;
+pub(crate) mod shared;
 
 pub use self::candidate::{
     DatagramClaimAttempt, DatagramClaimCandidate, DatagramClaimFuture, DatagramClaimPrecheck,
@@ -136,7 +136,6 @@ pub use self::deliverer::{
 pub use self::delivery::{DatagramAssociatedState, DatagramDelivery, ExclusiveDatagramDelivery};
 pub use self::erased::{ErasedDatagramDeliverer, SendDatagramDeliverer};
 pub use self::route_match::DatagramRouteMatchInfo;
-pub use self::shared::UnclaimedWork;
 
 #[cfg(test)]
 mod tests;

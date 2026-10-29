@@ -55,6 +55,11 @@ impl<Inner, Deliverer: DatagramDeliverer<Inner>> ExclusiveDatagramDelivery<Inner
         }
     }
 
+    /// What routing recorded about this delivery's match.
+    pub fn route_match(&self) -> &DatagramRouteMatchInfo {
+        &self.route
+    }
+
     /// Returns the private state if it was already initialized.
     ///
     /// This only borrows and never calls the factory.

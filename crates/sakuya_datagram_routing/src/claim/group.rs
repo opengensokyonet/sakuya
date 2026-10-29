@@ -10,24 +10,19 @@
 //!
 //! | Frozen entries | Last takes | On unclaimed |
 //! | --- | --- | --- |
-//! | none | the datagram is released at dispatch | the work is handed off at dispatch |
+//! | none | the datagram is released at dispatch | the datagram is handed off at dispatch |
 //! | one | an exclusive delivery with uninitialized state | one competing candidate |
 //! | several | competing candidates | competing candidates |
 //!
 //! Dropping a prepared set without dispatching it, for example while
 //! unwinding, delivers nothing, calls no author code and never hands off: the
 //! datagram and the prepared credentials are simply released.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used only by datagram routing in this crate")
-)]
 
 use std::sync::Arc;
 
-use super::shared::{
-    ClaimCore, DatagramFinishPolicy, OfferedRouteHistory, Participation, ReflowContinuation,
-    UnclaimedHandoff, hand_off_unclaimed,
-};
+use smallvec::SmallVec;
+
+use super::shared::{ClaimCore, DatagramFinishPolicy, Participation, UnclaimedHandoff};
 use super::{DatagramRouteMatchInfo, ErasedDatagramDeliverer, ExclusiveDatagram};
 
 /// The complete candidate set of one datagram, ready to be dispatched.
@@ -36,13 +31,15 @@ pub(crate) struct PreparedClaim<Inner, Target: ?Sized> {
     prepared: Prepared<Inner, Target>,
 }
 
+/// Each candidate's deliverer, credential and match information.
+type Candidates<Inner, Target> =
+    SmallVec<[(Arc<Target>, Participation<Inner>, DatagramRouteMatchInfo); 4]>;
+
 enum Prepared<Inner, Target: ?Sized> {
     Release(Inner),
     Unclaimed {
         datagram: Inner,
         handoff: UnclaimedHandoff<Inner>,
-        offered: OfferedRouteHistory,
-        continuation: ReflowContinuation,
     },
     Exclusive {
         target: Arc<Target>,
@@ -51,7 +48,7 @@ enum Prepared<Inner, Target: ?Sized> {
     },
     Competing {
         core: Arc<ClaimCore<Inner>>,
-        candidates: Vec<(Arc<Target>, Participation<Inner>, DatagramRouteMatchInfo)>,
+        candidates: Candidates<Inner, Target>,
     },
 }
 
@@ -63,34 +60,24 @@ enum Prepared<Inner, Target: ?Sized> {
 /// candidate. No author code runs here, so routing may call this while it still
 /// holds its table locks; it must release them before
 /// [`dispatch`](PreparedClaim::dispatch).
-pub(crate) fn prepare_claim<Inner, Target>(
+pub(crate) fn prepare_claim<Inner, Target, Entries>(
     datagram: Inner,
     finish: DatagramFinishPolicy<Inner>,
-    entries: Vec<(Arc<Target>, DatagramRouteMatchInfo)>,
+    entries: Entries,
 ) -> PreparedClaim<Inner, Target>
 where
     Target: ?Sized + ErasedDatagramDeliverer<Inner>,
+    Entries: IntoIterator<Item = (Arc<Target>, DatagramRouteMatchInfo)>,
+    Entries::IntoIter: ExactSizeIterator,
 {
+    let mut entries = entries.into_iter();
     let prepared = match (finish, entries.len()) {
         (DatagramFinishPolicy::LastTakes, 0) => Prepared::Release(datagram),
-        (
-            DatagramFinishPolicy::OnUnclaimed {
-                handoff,
-                offered,
-                continuation,
-            },
-            0,
-        ) => Prepared::Unclaimed {
-            datagram,
-            handoff,
-            offered,
-            continuation,
-        },
+        (DatagramFinishPolicy::OnUnclaimed(handoff), 0) => {
+            Prepared::Unclaimed { datagram, handoff }
+        }
         (DatagramFinishPolicy::LastTakes, 1) => {
-            let (target, route) = entries
-                .into_iter()
-                .next()
-                .expect("the entry count was checked");
+            let (target, route) = entries.next().expect("the entry count was checked");
             Prepared::Exclusive {
                 target,
                 datagram: ExclusiveDatagram::new(datagram),
@@ -100,7 +87,6 @@ where
         (finish, _) => {
             let core = ClaimCore::new(datagram, finish);
             let candidates = entries
-                .into_iter()
                 .map(|(target, route)| (target, Participation::join(&core), route))
                 .collect();
             Prepared::Competing { core, candidates }
@@ -124,12 +110,7 @@ where
     pub(crate) fn dispatch(self) {
         match self.prepared {
             Prepared::Release(datagram) => drop(datagram),
-            Prepared::Unclaimed {
-                datagram,
-                handoff,
-                offered,
-                continuation,
-            } => hand_off_unclaimed(datagram, handoff, offered, continuation),
+            Prepared::Unclaimed { datagram, handoff } => handoff(datagram),
             Prepared::Exclusive {
                 target,
                 datagram,

@@ -208,7 +208,7 @@ pub struct ExclusiveDatagram<Inner> {
 }
 
 impl<Inner> ExclusiveDatagram<Inner> {
-    pub(super) fn new(datagram: Inner) -> Self {
+    pub(crate) fn new(datagram: Inner) -> Self {
         Self { datagram }
     }
 

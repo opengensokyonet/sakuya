@@ -199,9 +199,9 @@ fn route_to(
         .iter()
         .map(|endpoint| {
             let erased: Arc<dyn ErasedDatagramDeliverer<TestDatagram>> = Arc::clone(endpoint) as _;
-            (erased, DatagramRouteMatchInfo::new())
+            (erased, super::support::route_info())
         })
-        .collect();
+        .collect::<Vec<_>>();
     prepare_claim(datagram, finish, entries).dispatch();
 }
 

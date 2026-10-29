@@ -9,8 +9,7 @@ use super::support::{
 use crate::claim::group::prepare_claim;
 use crate::claim::shared::DatagramFinishPolicy;
 use crate::claim::{
-    DatagramClaimAttempt, DatagramClaimPrecheck, DatagramDelivery, DatagramRouteMatchInfo,
-    ErasedDatagramDeliverer,
+    DatagramClaimAttempt, DatagramClaimPrecheck, DatagramDelivery, ErasedDatagramDeliverer,
 };
 
 #[test]
@@ -19,7 +18,7 @@ fn preparation_without_dispatch_runs_no_author_code() {
     let second = Probe::new(Judging::Accept);
     let sink = UnclaimedSink::default();
     let erased = |probe: &Arc<Probe>| -> (Arc<dyn ErasedDatagramDeliverer<TestDatagram>>, _) {
-        (Arc::clone(probe) as _, DatagramRouteMatchInfo::new())
+        (Arc::clone(probe) as _, super::support::route_info())
     };
 
     let (datagram, competing_drops) = TestDatagram::new(b"competing");
@@ -35,13 +34,11 @@ fn preparation_without_dispatch_runs_no_author_code() {
         vec![erased(&first)],
     ));
     let (datagram, empty_drops) = TestDatagram::new(b"empty");
-    drop(
-        prepare_claim::<_, dyn ErasedDatagramDeliverer<TestDatagram>>(
-            datagram,
-            sink.policy(),
-            Vec::new(),
-        ),
-    );
+    drop(prepare_claim::<
+        _,
+        dyn ErasedDatagramDeliverer<TestDatagram>,
+        Vec<_>,
+    >(datagram, sink.policy(), Vec::new()));
 
     for probe in [&first, &second] {
         assert_eq!(probe.factory_calls(), 0);

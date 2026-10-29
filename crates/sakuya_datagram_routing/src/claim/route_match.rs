@@ -1,27 +1,43 @@
 //! What routing recorded about one candidate's match
 
+use crate::route::{FirstPacketInterpretation, MatchAssociation};
+
 /// What routing recorded about why one route entry matched a datagram.
 ///
-/// Routing produces one value per candidate: the match basis, the connection
-/// ID interpretation it used, the ranges it checked and the association
-/// handles the deliverer needs. The mechanism keeps it with the candidate,
-/// lends it to the factory and to every judgment, and hands it over with the
-/// datagram in [`DatagramAssociatedState`](super::DatagramAssociatedState). It
-/// is not evidence of authentication or acceptance.
+/// Routing produces one value per candidate: the match association it looked
+/// up and the first-packet interpretation under which the entry applied. The
+/// mechanism keeps it with the candidate, lends it to the factory and to every
+/// judgment, and hands it over with the datagram in
+/// [`DatagramAssociatedState`](super::DatagramAssociatedState). It keeps
+/// values, never borrows of the datagram. It is not evidence of
+/// authentication or acceptance: a match only says under which reading the
+/// entry was offered the datagram.
 ///
-/// Only routing creates it. Its contents are filled in by datagram routing;
-/// at present it carries no information.
-#[derive(Debug)]
+/// Only routing creates it.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DatagramRouteMatchInfo {
-    _private: (),
+    association: MatchAssociation,
+    interpretation: FirstPacketInterpretation,
 }
 
 impl DatagramRouteMatchInfo {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "created only by datagram routing in this crate")
-    )]
-    pub(crate) fn new() -> Self {
-        Self { _private: () }
+    pub(crate) fn new(
+        association: MatchAssociation,
+        interpretation: FirstPacketInterpretation,
+    ) -> Self {
+        Self {
+            association,
+            interpretation,
+        }
+    }
+
+    /// The association under which routing found the entry.
+    pub fn association(&self) -> &MatchAssociation {
+        &self.association
+    }
+
+    /// How the candidate reads the first packet of the datagram.
+    pub fn interpretation(&self) -> FirstPacketInterpretation {
+        self.interpretation
     }
 }

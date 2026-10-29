@@ -110,6 +110,11 @@ impl<Inner, Deliverer: DatagramDeliverer<Inner>> DatagramClaimCandidate<Inner, D
         self.state.as_ref()
     }
 
+    /// What routing recorded about this candidate's match.
+    pub fn route_match(&self) -> &DatagramRouteMatchInfo {
+        &self.route
+    }
+
     #[cfg(test)]
     pub(super) fn core(&self) -> &ClaimCore<Inner> {
         self.participation.core()

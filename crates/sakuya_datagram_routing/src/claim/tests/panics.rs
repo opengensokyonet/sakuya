@@ -134,15 +134,15 @@ impl DatagramDeliverer<TestDatagram> for PanickingDeliverer {
 fn deliver_panic_releases_the_candidates_not_yet_delivered() {
     use std::sync::Arc;
 
+    use crate::claim::SendDatagramDeliverer;
     use crate::claim::group::prepare_claim;
-    use crate::claim::{DatagramRouteMatchInfo, SendDatagramDeliverer};
 
     let later = Probe::new(Judging::Accept);
     let sink = UnclaimedSink::default();
     let (datagram, datagram_drops) = TestDatagram::new(b"dispatch");
     let entries: Vec<(Arc<dyn SendDatagramDeliverer<TestDatagram>>, _)> = vec![
-        (Arc::new(PanickingDeliverer), DatagramRouteMatchInfo::new()),
-        (later.clone(), DatagramRouteMatchInfo::new()),
+        (Arc::new(PanickingDeliverer), super::support::route_info()),
+        (later.clone(), super::support::route_info()),
     ];
     let prepared = prepare_claim(datagram, sink.policy(), entries);
     let unwound = catch_unwind(AssertUnwindSafe(|| prepared.dispatch()));

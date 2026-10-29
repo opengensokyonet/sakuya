@@ -22,141 +22,23 @@ use std::sync::{Arc, PoisonError};
 ///
 /// It is called synchronously by the last exit, which may be anywhere
 /// downstream: in a connection loop, a cancelled future or a dropped delivery.
-/// It must only move the work to the outside capability; the next lookup,
-/// preparation or delivery must not run on the current call stack. A closure
-/// type cannot prove this; it is the provider's contract.
-pub(crate) type UnclaimedHandoff<Inner> = Box<dyn FnOnce(UnclaimedWork<Inner>) + Send>;
+/// It must only move the datagram, with whatever routing context it captured,
+/// to an outside capability; the next lookup, preparation or delivery must not
+/// run on the current call stack. A closure type cannot prove this; it is the
+/// provider's contract.
+pub(crate) type UnclaimedHandoff<Inner> = Box<dyn FnOnce(Inner) + Send>;
 
 /// The finish policy of one datagram.
 ///
 /// The two policies are exclusive; see the [module
 /// documentation](super#finish-policies).
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "selected only by datagram routing in this crate")
-)]
-pub(crate) enum DatagramFinishPolicy<Inner> {
+pub enum DatagramFinishPolicy<Inner> {
     /// A sole remaining participant may take the datagram directly; when all
     /// participants exit, the datagram is released.
     LastTakes,
     /// Every participant must judge; when all exit while the datagram is
-    /// present, the last exit hands it over once.
-    OnUnclaimed {
-        /// The outside capability that takes over the unclaimed datagram.
-        handoff: UnclaimedHandoff<Inner>,
-        /// The entries and interpretations that already had their chance.
-        offered: OfferedRouteHistory,
-        /// What the next round needs to continue.
-        continuation: ReflowContinuation,
-    },
-}
-
-/// The route entries and interpretations that already had a chance at a
-/// datagram.
-///
-/// It travels with the datagram across reflow rounds so that an entry that
-/// exited is not offered the same datagram again under the same
-/// interpretation, while new entries still are. Datagram routing fills in its
-/// contents.
-#[derive(Debug)]
-pub(crate) struct OfferedRouteHistory {
-    _private: (),
-}
-
-impl OfferedRouteHistory {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "created only by datagram routing in this crate")
-    )]
-    pub(crate) fn new() -> Self {
-        Self { _private: () }
-    }
-}
-
-/// What the next reflow round needs to continue routing an unclaimed
-/// datagram: the Initial context already identified, and the capabilities to
-/// look up entries, prepare a new receiver and hand the next round off again.
-/// Datagram routing fills in its contents.
-#[derive(Debug)]
-pub(crate) struct ReflowContinuation {
-    _private: (),
-}
-
-impl ReflowContinuation {
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "created only by datagram routing in this crate")
-    )]
-    pub(crate) fn new() -> Self {
-        Self { _private: () }
-    }
-}
-
-/// A datagram that every candidate left unclaimed, with what routing needs to
-/// continue.
-///
-/// Under the on-unclaimed finish policy, the last participant to exit while
-/// the datagram is still present hands one of these to the outside capability
-/// that routing provided, synchronously and exactly once. Taking it over only
-/// moves ownership; it does not promise that anything handles the datagram.
-/// Dropping it releases the datagram and its history.
-#[derive(Debug)]
-pub struct UnclaimedWork<Inner> {
-    datagram: Inner,
-    offered: OfferedRouteHistory,
-    continuation: ReflowContinuation,
-}
-
-impl<Inner> UnclaimedWork<Inner> {
-    /// Returns the unclaimed datagram.
-    pub fn datagram(&self) -> &Inner {
-        &self.datagram
-    }
-
-    /// Returns the unclaimed datagram, dropping the routing history.
-    pub fn into_datagram(self) -> Inner {
-        self.datagram
-    }
-
-    /// Splits the work into the datagram, its history and the continuation.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "resumed only by datagram routing in this crate")
-    )]
-    pub(crate) fn into_parts(self) -> (Inner, OfferedRouteHistory, ReflowContinuation) {
-        (self.datagram, self.offered, self.continuation)
-    }
-}
-
-struct Reflow<Inner> {
-    handoff: UnclaimedHandoff<Inner>,
-    offered: OfferedRouteHistory,
-    continuation: ReflowContinuation,
-}
-
-impl<Inner> Reflow<Inner> {
-    fn hand_off(self, datagram: Inner) {
-        (self.handoff)(UnclaimedWork {
-            datagram,
-            offered: self.offered,
-            continuation: self.continuation,
-        });
-    }
-}
-
-/// Hands an unclaimed datagram straight over, for a set without candidates.
-pub(super) fn hand_off_unclaimed<Inner>(
-    datagram: Inner,
-    handoff: UnclaimedHandoff<Inner>,
-    offered: OfferedRouteHistory,
-    continuation: ReflowContinuation,
-) {
-    Reflow {
-        handoff,
-        offered,
-        continuation,
-    }
-    .hand_off(datagram);
+    /// present, the last exit hands it to the capability, once.
+    OnUnclaimed(UnclaimedHandoff<Inner>),
 }
 
 /// The private core shared by the candidates of one datagram.
@@ -168,33 +50,22 @@ pub(super) struct ClaimCore<Inner> {
     committed: AtomicBool,
     /// Only touched through `&mut self` in `Drop`; the mutex makes the core
     /// `Sync` without requiring the handoff to be `Sync`.
-    reflow: std::sync::Mutex<Option<Reflow<Inner>>>,
+    handoff: std::sync::Mutex<Option<UnclaimedHandoff<Inner>>>,
 }
 
 impl<Inner> ClaimCore<Inner> {
     /// Creates an uncommitted core without participants.
     pub(super) fn new(datagram: Inner, finish: DatagramFinishPolicy<Inner>) -> Arc<Self> {
-        let (last_takes, reflow) = match finish {
+        let (last_takes, handoff) = match finish {
             DatagramFinishPolicy::LastTakes => (true, None),
-            DatagramFinishPolicy::OnUnclaimed {
-                handoff,
-                offered,
-                continuation,
-            } => (
-                false,
-                Some(Reflow {
-                    handoff,
-                    offered,
-                    continuation,
-                }),
-            ),
+            DatagramFinishPolicy::OnUnclaimed(handoff) => (false, Some(handoff)),
         };
         Arc::new(Self {
             input: tokio::sync::Mutex::new(Some(datagram)),
             participants: AtomicUsize::new(0),
             last_takes,
             committed: AtomicBool::new(false),
-            reflow: std::sync::Mutex::new(reflow),
+            handoff: std::sync::Mutex::new(handoff),
         })
     }
 
@@ -227,15 +98,15 @@ impl<Inner> Drop for ClaimCore<Inner> {
     fn drop(&mut self) {
         debug_assert_eq!(*self.participants.get_mut(), 0);
         let datagram = self.input.get_mut().take();
-        let reflow = self
-            .reflow
+        let handoff = self
+            .handoff
             .get_mut()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
         if *self.committed.get_mut()
-            && let (Some(datagram), Some(reflow)) = (datagram, reflow)
+            && let (Some(datagram), Some(handoff)) = (datagram, handoff)
         {
-            reflow.hand_off(datagram);
+            handoff(datagram);
         }
     }
 }

@@ -7,4 +7,8 @@ license.workspace = true
 description = "Datagram routing and claim delivery for sakuya"
 
 [dependencies]
+dashmap.workspace = true
+sakuya_link.workspace = true
+sakuya_wire.workspace = true
+smallvec.workspace = true
 tokio = { workspace = true, features = ["sync"] }
