@@ -6,4 +6,6 @@
 #[warn(missing_docs)]
 pub mod connection_receive_flow;
 #[warn(missing_docs)]
+pub mod receive;
+#[warn(missing_docs)]
 pub mod receive_buffer;
