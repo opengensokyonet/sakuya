@@ -17,6 +17,7 @@ license = "Apache-2.0 OR MIT"
 bytes = "1.12.1"
 nitori_call = { git = "https://github.com/opengensokyonet/nitori", rev = "0255af55bbb58ebe7c0c0545b72faa44b193a72f" }
 nitori_io = { git = "https://github.com/opengensokyonet/nitori", rev = "0255af55bbb58ebe7c0c0545b72faa44b193a72f" }
+ring = { version = "0.17.14", default-features = false }
 sakuya_wire = { path = "crates/sakuya_wire" }
 sakuya_protection = { path = "crates/sakuya_protection" }
 sakuya_datagram_routing = { path = "crates/sakuya_datagram_routing" }
