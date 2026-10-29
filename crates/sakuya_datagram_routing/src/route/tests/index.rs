@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use sakuya_link::LinkId;
-use sakuya_wire::connection_id::{ConnectionId, ConnectionIdLengthError};
+use sakuya_wire::connection_id::ConnectionId;
 use sakuya_wire::header::v1::LongPacketType;
 use sakuya_wire::version::Version;
 
@@ -26,7 +26,7 @@ use crate::route::association::{MatchAssociation, PacketForms, RouteMatcher};
 use crate::route::index::RouteIndex;
 use crate::route::interpretation::FirstPacketInterpretation;
 use crate::route::recognizer::{
-    ConnectionIdGenerator, ConnectionIdLength, ConnectionIdOccupancy, ConnectionIdRecognizer,
+    ConnectionIdGenerator, ConnectionIdOccupancy, ConnectionIdRecognizer,
     LeastOccupiedConnectionIds,
 };
 use crate::route::router::DatagramRouter;
@@ -388,7 +388,7 @@ fn occupancy_observes_both_kinds_and_generation_prefers_free_values() {
 }
 
 #[test]
-fn length_sets_validate_and_keep_ambiguity() {
+fn length_sets_drop_repetitions_and_keep_ambiguity() {
     let lengths = lengths(&[8, 0, 12, 8]);
     let expected = [dcid_len(8), dcid_len(0), dcid_len(12)];
     assert_eq!(lengths.lengths().collect::<Vec<_>>(), expected);
@@ -399,16 +399,6 @@ fn length_sets_validate_and_keep_ambiguity() {
             .collect::<Vec<_>>(),
         expected
     );
-    assert_eq!(
-        ConnectionIdLength::new(21),
-        Err(ConnectionIdLengthError { length: 21 })
-    );
-    assert_eq!(
-        ConnectionIdLength::new(usize::from(u8::MAX) + 1),
-        Err(ConnectionIdLengthError { length: 256 })
-    );
-    assert_eq!(dcid_len(20).get(), 20);
-    assert!(ConnectionIdLength::ZERO.is_zero());
 }
 
 #[test]

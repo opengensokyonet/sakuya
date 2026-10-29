@@ -1,7 +1,8 @@
 //! Connection IDs ([RFC 9000 §5.1]).
 //!
 //! A [`ConnectionId`] is a QUIC version 1 connection ID of 0 to
-//! [`ConnectionId::MAX_LEN`] bytes. A [`NonEmptyCid`] is a connection ID that
+//! [`ConnectionId::MAX_LEN`] bytes, and a [`ConnectionIdLength`] is the
+//! length of one. A [`NonEmptyCid`] is a connection ID that
 //! is known to have at least one byte. A [`RawConnectionId`] is a connection
 //! ID as the version-independent long header carries it, 0 to
 //! [`RawConnectionId::MAX_LEN`] bytes ([RFC 8999 §5.1]); converting it into
@@ -84,6 +85,11 @@ impl ConnectionId {
         self.len as usize
     }
 
+    /// The length as a [`ConnectionIdLength`].
+    pub const fn length(&self) -> ConnectionIdLength {
+        ConnectionIdLength(self.len)
+    }
+
     /// Whether this is the zero-length connection ID.
     pub const fn is_empty(&self) -> bool {
         self.len == 0
@@ -163,6 +169,74 @@ impl fmt::Display for ConnectionId {
 pub struct ConnectionIdLengthError {
     /// The rejected length.
     pub length: usize,
+}
+
+/// The length of a QUIC version 1 connection ID: 0 to
+/// [`ConnectionId::MAX_LEN`] bytes.
+///
+/// Equality, ordering and hashing are those of the number of bytes.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConnectionIdLength(u8);
+
+impl ConnectionIdLength {
+    /// The length of the zero-length connection ID.
+    pub const ZERO: Self = Self(0);
+
+    /// The length of `length` bytes.
+    ///
+    /// This is the `const` form of `ConnectionIdLength::try_from(length)`.
+    ///
+    /// # Errors
+    ///
+    /// [`ConnectionIdLengthError`] if `length` exceeds
+    /// [`ConnectionId::MAX_LEN`].
+    pub const fn new(length: usize) -> Result<Self, ConnectionIdLengthError> {
+        if length > ConnectionId::MAX_LEN {
+            return Err(ConnectionIdLengthError { length });
+        }
+        Ok(Self(length as u8))
+    }
+
+    /// The length in bytes.
+    pub const fn get(self) -> usize {
+        self.0 as usize
+    }
+
+    /// Whether this is the length of the zero-length connection ID.
+    pub const fn is_zero(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl TryFrom<usize> for ConnectionIdLength {
+    type Error = ConnectionIdLengthError;
+
+    /// Accepts lengths up to [`ConnectionId::MAX_LEN`]; see
+    /// [`ConnectionIdLength::new`].
+    fn try_from(length: usize) -> Result<Self, Self::Error> {
+        Self::new(length)
+    }
+}
+
+/// The value of the one-byte length field that precedes a connection ID in
+/// long headers and frames.
+impl From<ConnectionIdLength> for u8 {
+    fn from(length: ConnectionIdLength) -> Self {
+        length.0
+    }
+}
+
+impl From<ConnectionIdLength> for usize {
+    fn from(length: ConnectionIdLength) -> Self {
+        length.get()
+    }
+}
+
+/// Formats the number of bytes, as in `ConnectionIdLength(8)`.
+impl fmt::Debug for ConnectionIdLength {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ConnectionIdLength({})", self.0)
+    }
 }
 
 /// A connection ID of 1 to 20 bytes.

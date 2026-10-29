@@ -17,47 +17,8 @@ use std::fmt;
 use std::num::NonZeroUsize;
 
 use sakuya_link::LinkId;
-use sakuya_wire::connection_id::{ConnectionId, ConnectionIdLengthError, NonEmptyCid};
+use sakuya_wire::connection_id::{ConnectionId, ConnectionIdLength, NonEmptyCid};
 use smallvec::SmallVec;
-
-/// The length of a QUIC version 1 connection ID: 0 to
-/// [`ConnectionId::MAX_LEN`] bytes.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ConnectionIdLength(u8);
-
-impl ConnectionIdLength {
-    /// The zero-length connection ID.
-    pub const ZERO: Self = Self(0);
-
-    /// The length of `length` bytes.
-    ///
-    /// # Errors
-    ///
-    /// [`ConnectionIdLengthError`] if `length` exceeds
-    /// [`ConnectionId::MAX_LEN`].
-    pub fn new(length: usize) -> Result<Self, ConnectionIdLengthError> {
-        match u8::try_from(length) {
-            Ok(byte) if length <= ConnectionId::MAX_LEN => Ok(Self(byte)),
-            _ => Err(ConnectionIdLengthError { length }),
-        }
-    }
-
-    /// The length in bytes.
-    pub fn get(self) -> usize {
-        usize::from(self.0)
-    }
-
-    /// Whether this is the length of the zero-length connection ID.
-    pub const fn is_zero(self) -> bool {
-        self.0 == 0
-    }
-}
-
-impl fmt::Debug for ConnectionIdLength {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ConnectionIdLength({})", self.0)
-    }
-}
 
 /// Reads the destination connection IDs a short header may carry.
 pub trait ConnectionIdRecognizer {

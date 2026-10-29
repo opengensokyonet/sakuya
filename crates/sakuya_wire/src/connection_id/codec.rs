@@ -31,7 +31,7 @@
 // documentation comments; the module documentation above describes them.
 #![allow(missing_docs)]
 
-use super::{ConnectionId, ConnectionIdLengthError, RawConnectionId};
+use super::{ConnectionId, ConnectionIdLength, ConnectionIdLengthError, RawConnectionId};
 use nitori_call::{ReceiverAccess, call};
 use nitori_io::{
     calls::{ReadArrayError, ReadExactError, WriteAllError},
@@ -55,16 +55,13 @@ pub async fn read_connection_id<F: Read, A: ReceiverAccess<Family = F>>(
         .read_array::<1>()
         .await
         .context(read_connection_id_error::LengthFieldSnafu)?;
-    let length = usize::from(length);
-    if length > ConnectionId::MAX_LEN {
-        return Err(ConnectionIdLengthError { length }.into());
-    }
+    let length = ConnectionIdLength::new(usize::from(length))?;
     let mut id = ConnectionId::EMPTY;
-    let mut destination = &mut id.bytes[..length];
-    io.read_exact(&mut destination, length)
+    let mut destination = &mut id.bytes[..length.get()];
+    io.read_exact(&mut destination, length.get())
         .await
         .context(read_connection_id_error::BytesSnafu)?;
-    id.len = length as u8;
+    id.len = u8::from(length);
     Ok(id)
 }
 
@@ -169,7 +166,7 @@ pub async fn write_connection_id<F: Write, A: ReceiverAccess<Family = F>>(
     io: &mut A,
     id: ConnectionId,
 ) -> Result<(), WriteAllError<F::Error>> {
-    let length = [id.len];
+    let length = [u8::from(id.length())];
     io.write_all(bytes::Buf::chain(&length[..], id.as_bytes()))
         .await
 }

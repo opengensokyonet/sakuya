@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use sakuya_link::{BindingId, LinkId};
+use sakuya_wire::connection_id::ConnectionIdLength;
 use sakuya_wire::header::codec::{ReadLongHeaderHostExt as _, ReadShortHeaderHostExt as _};
 use sakuya_wire::header::v1::{
     self, FIXED_BIT, LongPacketType, RETRY_INTEGRITY_TAG_LEN, codec::ReadLongPacketHostExt as _,
@@ -29,7 +30,7 @@ use crate::route::association::{MatchAssociation, PacketForms, RouteMatcher};
 use crate::route::datagram::ReceivedDatagram;
 use crate::route::index::{RouteEntryRegistration, RouteIndex};
 use crate::route::interpretation::{FirstPacketInterpretation, RecognizedInitial};
-use crate::route::recognizer::{ConnectionIdLength, ConnectionIdLengths};
+use crate::route::recognizer::ConnectionIdLengths;
 use crate::route::reset::{StatelessResetTarget, StatelessResetTokens};
 use crate::route::router::{DatagramRouter, VersionService};
 

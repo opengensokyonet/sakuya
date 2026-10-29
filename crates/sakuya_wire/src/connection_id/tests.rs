@@ -1,6 +1,6 @@
 use super::{
-    ConnectionId, ConnectionIdLengthError, EmptyCidError, NonEmptyCid, NonEmptyCidError,
-    RawConnectionId, RawConnectionIdLengthError, StatelessResetToken,
+    ConnectionId, ConnectionIdLength, ConnectionIdLengthError, EmptyCidError, NonEmptyCid,
+    NonEmptyCidError, RawConnectionId, RawConnectionIdLengthError, StatelessResetToken,
     codec::{
         ReadConnectionIdError, ReadConnectionIdHostExt as _, ReadRawConnectionIdHostExt as _,
         WriteConnectionIdHostExt as _,
@@ -32,6 +32,31 @@ fn rejects_longer_slices() {
         ConnectionId::new(&[0; 255]),
         Err(ConnectionIdLengthError { length: 255 })
     );
+}
+
+#[test]
+fn lengths_range_from_zero_to_twenty_bytes() {
+    for length in [0, 1, 8, 20] {
+        let typed = ConnectionIdLength::new(length).unwrap();
+        assert_eq!(typed.get(), length);
+        assert_eq!(usize::from(typed), length);
+        assert_eq!(usize::from(u8::from(typed)), length);
+        assert_eq!(typed.is_zero(), length == 0);
+        assert_eq!(ConnectionIdLength::try_from(length), Ok(typed));
+    }
+    assert_eq!(ConnectionIdLength::new(0), Ok(ConnectionIdLength::ZERO));
+    assert_eq!(
+        ConnectionIdLength::new(21),
+        Err(ConnectionIdLengthError { length: 21 })
+    );
+    assert_eq!(
+        ConnectionIdLength::new(256),
+        Err(ConnectionIdLengthError { length: 256 })
+    );
+    let id = ConnectionId::new(&RFC_DCID).unwrap();
+    assert_eq!(id.length(), ConnectionIdLength::new(8).unwrap());
+    assert_eq!(ConnectionId::EMPTY.length(), ConnectionIdLength::ZERO);
+    assert_eq!(format!("{:?}", id.length()), "ConnectionIdLength(8)");
 }
 
 #[test]

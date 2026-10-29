@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 
+use sakuya_wire::connection_id::ConnectionIdLength;
+
 use crate::claim::candidate::DatagramClaimCandidate;
 use crate::claim::deliverer::{
     DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramView,
@@ -18,7 +20,6 @@ use crate::claim::route_match::DatagramRouteMatchInfo;
 use crate::claim::shared::DatagramFinishPolicy;
 use crate::route::association::MatchAssociation;
 use crate::route::interpretation::FirstPacketInterpretation;
-use crate::route::recognizer::ConnectionIdLength;
 
 /// A datagram that counts how often it is dropped.
 #[derive(Debug)]

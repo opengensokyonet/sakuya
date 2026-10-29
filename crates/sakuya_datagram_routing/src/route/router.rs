@@ -437,11 +437,8 @@ fn classify(
         HeaderForm::Short => {
             let mut queries = Queries::new();
             for dcid_len in recognizer.short_dcid_lengths(bytes, link) {
-                let Ok(raw_len) = u8::try_from(dcid_len.get()) else {
-                    continue;
-                };
                 let mut input = bytes;
-                let Ok(short) = input.sync_read_short_header_unpin(raw_len) else {
+                let Ok(short) = input.sync_read_short_header_unpin(u8::from(dcid_len)) else {
                     continue;
                 };
                 let Ok(dcid) = ConnectionId::try_from(*short.dcid()) else {

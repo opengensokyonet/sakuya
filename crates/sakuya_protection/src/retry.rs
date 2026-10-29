@@ -84,11 +84,9 @@ fn retry_key<B: CryptoBackend>(backend: &B) -> B::AeadKey {
 }
 
 fn pseudo_packet(odcid: &ConnectionId, retry_without_tag: &[u8]) -> Vec<u8> {
-    let odcid = odcid.as_bytes();
     let mut pseudo_packet = Vec::with_capacity(1 + odcid.len() + retry_without_tag.len());
-    // A connection ID is at most 20 bytes, so its length fits the byte.
-    pseudo_packet.push(odcid.len() as u8);
-    pseudo_packet.extend_from_slice(odcid);
+    pseudo_packet.push(u8::from(odcid.length()));
+    pseudo_packet.extend_from_slice(odcid.as_bytes());
     pseudo_packet.extend_from_slice(retry_without_tag);
     pseudo_packet
 }
