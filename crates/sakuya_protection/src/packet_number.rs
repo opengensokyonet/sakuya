@@ -1,6 +1,156 @@
-//! Packet number encoding and decoding (RFC 9000 §17.1, Appendix A.2, A.3).
+//! Packet numbers and the Packet Number field (RFC 9000 §12.3, §17.1,
+//! Appendix A.2, A.3).
 
-use snafu::{Snafu, ensure};
+use core::fmt;
+
+use snafu::{OptionExt, Snafu, ensure};
+
+/// A full packet number: an integer from 0 to 2^62 − 1 (RFC 9000 §12.3).
+///
+/// Each packet number space numbers its packets upwards from zero. A packet
+/// header carries only the least significant bytes of the packet number, as a
+/// [`TruncatedPacketNumber`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PacketNumber(u64);
+
+impl PacketNumber {
+    /// Packet number zero, the first of every packet number space.
+    pub const ZERO: Self = Self(0);
+
+    /// The largest packet number, 2^62 − 1.
+    pub const MAX: Self = Self((1 << 62) - 1);
+
+    /// The packet number `value`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `value` exceeds [`PacketNumber::MAX`].
+    pub const fn new(value: u64) -> Result<Self, PacketNumberTooLarge> {
+        if value <= Self::MAX.0 {
+            Ok(Self(value))
+        } else {
+            Err(PacketNumberTooLarge { value })
+        }
+    }
+
+    /// The packet number as an integer.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// The packet number `rhs` after this one, or `None` when that exceeds
+    /// [`PacketNumber::MAX`].
+    pub const fn checked_add(self, rhs: u64) -> Option<Self> {
+        match self.0.checked_add(rhs) {
+            Some(value) if value <= Self::MAX.0 => Some(Self(value)),
+            _ => None,
+        }
+    }
+}
+
+impl TryFrom<u64> for PacketNumber {
+    type Error = PacketNumberTooLarge;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<PacketNumber> for u64 {
+    fn from(packet_number: PacketNumber) -> Self {
+        packet_number.0
+    }
+}
+
+impl fmt::Display for PacketNumber {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+/// The error returned by [`PacketNumber::new`]: the value exceeds
+/// 2^62 − 1.
+#[derive(Debug, Snafu)]
+#[snafu(display("{value} exceeds the largest packet number 2^62 - 1"))]
+pub struct PacketNumberTooLarge {
+    /// The value given.
+    pub value: u64,
+}
+
+/// The length of a Packet Number field, 1 to 4 bytes.
+///
+/// The two Packet Number Length bits of the unprotected first header byte
+/// hold the length minus one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PacketNumberLength {
+    /// A 1-byte field.
+    One,
+    /// A 2-byte field.
+    Two,
+    /// A 3-byte field.
+    Three,
+    /// A 4-byte field.
+    Four,
+}
+
+impl PacketNumberLength {
+    /// The field length of `len` bytes.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `len` is not 1 to 4.
+    pub const fn new(len: usize) -> Result<Self, InvalidPacketNumberLength> {
+        match len {
+            1 => Ok(Self::One),
+            2 => Ok(Self::Two),
+            3 => Ok(Self::Three),
+            4 => Ok(Self::Four),
+            _ => Err(InvalidPacketNumberLength { len }),
+        }
+    }
+
+    /// The field length that the Packet Number Length bits of an unprotected
+    /// first header byte encode; the other bits are ignored.
+    pub const fn from_first_byte(first_byte: u8) -> Self {
+        match first_byte & 0x03 {
+            0 => Self::One,
+            1 => Self::Two,
+            2 => Self::Three,
+            _ => Self::Four,
+        }
+    }
+
+    /// The length in bytes, 1 to 4.
+    pub const fn get(self) -> usize {
+        match self {
+            Self::One => 1,
+            Self::Two => 2,
+            Self::Three => 3,
+            Self::Four => 4,
+        }
+    }
+
+    /// The value of the Packet Number Length bits for this length, the
+    /// length minus one, which occupies the two least significant bits of
+    /// the first header byte.
+    pub const fn first_byte_bits(self) -> u8 {
+        match self {
+            Self::One => 0,
+            Self::Two => 1,
+            Self::Three => 2,
+            Self::Four => 3,
+        }
+    }
+}
+
+/// The error returned by [`PacketNumberLength::new`]: the length is not 1 to
+/// 4 bytes.
+#[derive(Debug, Snafu)]
+#[snafu(display("packet number field of {len} bytes is not 1 to 4 bytes long"))]
+pub struct InvalidPacketNumberLength {
+    /// The length given.
+    pub len: usize,
+}
 
 /// The value of a Packet Number field: the 1 to 4 least significant bytes of
 /// a full packet number.
@@ -9,10 +159,10 @@ use snafu::{Snafu, ensure};
 /// [`encoded_len`](Self::encoded_len) minus one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TruncatedPacketNumber {
-    /// The field bytes in network byte order, left-aligned.
+    /// The field bytes in network byte order, left-aligned; bytes past `len`
+    /// are zero.
     bytes: [u8; 4],
-    /// Number of meaningful bytes in `bytes`, 1 to 4.
-    len: u8,
+    len: PacketNumberLength,
 }
 
 impl TruncatedPacketNumber {
@@ -20,38 +170,27 @@ impl TruncatedPacketNumber {
     ///
     /// # Errors
     ///
-    /// Fails when `len` is not 1 to 4, or `value` does not fit in `len`
-    /// bytes.
-    pub fn new(value: u32, len: usize) -> Result<Self, TruncatedPacketNumberError> {
+    /// Fails when `value` does not fit in `len` bytes.
+    pub fn new(value: u32, len: PacketNumberLength) -> Result<Self, TruncatedPacketNumberError> {
         ensure!(
-            (1..=4).contains(&len),
-            truncated_packet_number_error::InvalidLengthSnafu { len }
-        );
-        ensure!(
-            u64::from(value) < 1 << (8 * len),
-            truncated_packet_number_error::ValueTooLargeSnafu { value, len }
+            u64::from(value) < 1 << (8 * len.get()),
+            TruncatedPacketNumberSnafu { value, len }
         );
         Ok(Self::from_low_bytes(u64::from(value), len))
     }
 
-    /// Reads a field from its bytes, which are in network byte order.
-    pub(crate) fn from_field(field: &[u8]) -> Self {
-        debug_assert!((1..=4).contains(&field.len()));
-        let mut bytes = [0; 4];
-        bytes[..field.len()].copy_from_slice(field);
-        Self {
-            bytes,
-            len: field.len() as u8,
-        }
+    /// A field from its bytes in network byte order, left-aligned, with the
+    /// bytes past `len` zero.
+    pub(crate) fn from_bytes(bytes: [u8; 4], len: PacketNumberLength) -> Self {
+        debug_assert!(bytes[len.get()..].iter().all(|&byte| byte == 0));
+        Self { bytes, len }
     }
 
-    fn from_low_bytes(value: u64, len: usize) -> Self {
+    fn from_low_bytes(value: u64, len: PacketNumberLength) -> Self {
+        let len_bytes = len.get();
         let mut bytes = [0; 4];
-        bytes[..len].copy_from_slice(&value.to_be_bytes()[8 - len..]);
-        Self {
-            bytes,
-            len: len as u8,
-        }
+        bytes[..len_bytes].copy_from_slice(&value.to_be_bytes()[8 - len_bytes..]);
+        Self { bytes, len }
     }
 
     /// Chooses the field length for sending `full_pn` and truncates it
@@ -70,13 +209,12 @@ impl TruncatedPacketNumber {
     /// - [`EncodePacketNumberError::RangeTooLarge`] when four bytes cannot
     ///   cover the range.
     pub fn encode(
-        full_pn: u64,
-        largest_acked: Option<u64>,
+        full_pn: PacketNumber,
+        largest_acked: Option<PacketNumber>,
     ) -> Result<Self, EncodePacketNumberError> {
         let num_unacked = match largest_acked {
-            None => full_pn
-                .checked_add(1)
-                .expect("packet numbers are below 2^62"),
+            // A packet number is below 2^62, so adding one does not overflow.
+            None => full_pn.get() + 1,
             Some(largest_acked) => {
                 ensure!(
                     full_pn > largest_acked,
@@ -85,82 +223,89 @@ impl TruncatedPacketNumber {
                         largest_acked
                     }
                 );
-                full_pn - largest_acked
+                full_pn.get() - largest_acked.get()
             }
         };
         // One bit more than the bit length of `num_unacked` represents more
-        // than twice that many values.
+        // than twice that many values. `num_unacked` is at least one, so the
+        // byte count is at least one and only lengths above four are refused.
         let min_bits = (u64::BITS - num_unacked.leading_zeros()) as usize + 1;
-        let len = min_bits.div_ceil(8);
-        ensure!(
-            len <= 4,
-            encode_packet_number_error::RangeTooLargeSnafu { num_unacked }
-        );
-        Ok(Self::from_low_bytes(full_pn, len))
+        let len = PacketNumberLength::new(min_bits.div_ceil(8))
+            .ok()
+            .context(encode_packet_number_error::RangeTooLargeSnafu { num_unacked })?;
+        Ok(Self::from_low_bytes(full_pn.get(), len))
     }
 
-    /// Recovers the full packet number closest to `expected_pn`
-    /// (RFC 9000 Appendix A.3).
+    /// Recovers the full packet number closest to the one after
+    /// `largest_processed` (RFC 9000 Appendix A.3).
     ///
-    /// `expected_pn` is one more than the largest packet number successfully
-    /// processed in this packet number space, or zero when there is none. The
-    /// result is a candidate: it becomes the largest processed packet number
-    /// only after the packet is authenticated.
-    pub fn decode(self, expected_pn: u64) -> u64 {
+    /// `largest_processed` is the largest packet number successfully
+    /// processed in this packet number space, or `None` when there is none,
+    /// in which case packet number zero is expected. The result is a
+    /// candidate: it becomes the largest processed packet number only after
+    /// the packet is authenticated.
+    ///
+    /// The result never exceeds [`PacketNumber::MAX`]. After
+    /// [`PacketNumber::MAX`] has been processed, the closest value with the
+    /// field's bits can lie above it; the closest one below is returned
+    /// instead.
+    pub fn decode(self, largest_processed: Option<PacketNumber>) -> PacketNumber {
+        // At most 2^62, so none of the sums below overflows.
+        let expected_pn = largest_processed.map_or(0, |largest| largest.get() + 1);
         let truncated = u64::from(self.value());
-        let pn_win = 1u64 << (8 * self.encoded_len());
+        let pn_win = 1u64 << (8 * self.len.get());
         let pn_hwin = pn_win / 2;
         let pn_mask = pn_win - 1;
         let candidate = (expected_pn & !pn_mask) | truncated;
-        if expected_pn >= pn_hwin
+        let decoded = if expected_pn >= pn_hwin
             && candidate <= expected_pn - pn_hwin
             && candidate < (1 << 62) - pn_win
         {
             candidate + pn_win
-        } else if candidate > expected_pn.saturating_add(pn_hwin) && candidate >= pn_win {
+        } else if candidate > expected_pn + pn_hwin && candidate >= pn_win {
             candidate - pn_win
         } else {
             candidate
-        }
+        };
+        // Only an expected packet number of 2^62 places the candidate at or
+        // above 2^62; one window below lies within range.
+        let decoded = if decoded > PacketNumber::MAX.get() {
+            decoded - pn_win
+        } else {
+            decoded
+        };
+        debug_assert!(decoded <= PacketNumber::MAX.get());
+        PacketNumber(decoded)
     }
 
     /// The field value.
     pub fn value(self) -> u32 {
         let mut value = [0; 4];
-        let len = self.encoded_len();
+        let len = self.len.get();
         value[4 - len..].copy_from_slice(self.as_bytes());
         u32::from_be_bytes(value)
     }
 
-    /// The field length in bytes, 1 to 4.
-    pub fn encoded_len(self) -> usize {
-        usize::from(self.len)
+    /// The field length.
+    pub fn encoded_len(self) -> PacketNumberLength {
+        self.len
     }
 
     /// The field bytes in network byte order, as they appear in the header.
     pub fn as_bytes(&self) -> &[u8] {
-        &self.bytes[..usize::from(self.len)]
+        &self.bytes[..self.len.get()]
     }
 }
 
-/// The error returned by [`TruncatedPacketNumber::new`].
+/// The error returned by [`TruncatedPacketNumber::new`]: the value does not
+/// fit in the field length.
 #[derive(Debug, Snafu)]
-#[snafu(module(truncated_packet_number_error))]
-pub enum TruncatedPacketNumberError {
-    /// The field length is not 1 to 4 bytes.
-    #[snafu(display("packet number field of {len} bytes is not 1 to 4 bytes long"))]
-    InvalidLength {
-        /// The length given.
-        len: usize,
-    },
-    /// The value does not fit in the field length.
-    #[snafu(display("value {value:#x} does not fit in {len} bytes"))]
-    ValueTooLarge {
-        /// The value given.
-        value: u32,
-        /// The length given.
-        len: usize,
-    },
+#[snafu(display("value {value:#x} does not fit in {} bytes", len.get()))]
+pub struct TruncatedPacketNumberError {
+    /// The value given.
+    pub value: u32,
+    /// The field length given.
+    pub len: PacketNumberLength,
 }
 
 /// The error returned by [`TruncatedPacketNumber::encode`].
@@ -173,9 +318,9 @@ pub enum EncodePacketNumberError {
     ))]
     NotAfterLargestAcknowledged {
         /// The packet number to send.
-        full_pn: u64,
+        full_pn: PacketNumber,
         /// The largest acknowledged packet number.
-        largest_acked: u64,
+        largest_acked: PacketNumber,
     },
     /// Four bytes cannot represent twice the unacknowledged range.
     #[snafu(display("{num_unacked} unacknowledged packet numbers exceed the 4-byte encoding"))]
@@ -190,64 +335,119 @@ pub enum EncodePacketNumberError {
 mod tests {
     use super::*;
 
+    fn pn(value: u64) -> PacketNumber {
+        PacketNumber::new(value).unwrap()
+    }
+
+    fn len(bytes: usize) -> PacketNumberLength {
+        PacketNumberLength::new(bytes).unwrap()
+    }
+
+    #[test]
+    fn packet_number_bounds() {
+        assert_eq!(PacketNumber::ZERO.get(), 0);
+        assert_eq!(PacketNumber::MAX.get(), (1 << 62) - 1);
+        assert_eq!(pn((1 << 62) - 1), PacketNumber::MAX);
+        assert_eq!(PacketNumber::new(1 << 62).unwrap_err().value, 1 << 62);
+        assert_eq!(PacketNumber::new(u64::MAX).unwrap_err().value, u64::MAX);
+        assert_eq!(PacketNumber::try_from(7).map(u64::from).unwrap(), 7);
+        assert!(PacketNumber::try_from(1 << 62).is_err());
+        assert!(PacketNumber::ZERO < PacketNumber::MAX);
+        assert_eq!(PacketNumber::MAX.to_string(), "4611686018427387903");
+    }
+
+    #[test]
+    fn packet_number_checked_add() {
+        assert_eq!(PacketNumber::ZERO.checked_add(1), Some(pn(1)));
+        assert_eq!(pn((1 << 62) - 2).checked_add(1), Some(PacketNumber::MAX));
+        assert_eq!(PacketNumber::MAX.checked_add(0), Some(PacketNumber::MAX));
+        assert_eq!(PacketNumber::MAX.checked_add(1), None);
+        assert_eq!(pn(1).checked_add(u64::MAX), None);
+    }
+
+    #[test]
+    fn packet_number_length_bounds() {
+        assert_eq!(PacketNumberLength::new(0).unwrap_err().len, 0);
+        assert_eq!(PacketNumberLength::new(5).unwrap_err().len, 5);
+        for (bytes, expected) in [
+            (1, PacketNumberLength::One),
+            (2, PacketNumberLength::Two),
+            (3, PacketNumberLength::Three),
+            (4, PacketNumberLength::Four),
+        ] {
+            let length = PacketNumberLength::new(bytes).unwrap();
+            assert_eq!(length, expected);
+            assert_eq!(length.get(), bytes);
+            assert_eq!(usize::from(length.first_byte_bits()), bytes - 1);
+            assert_eq!(
+                PacketNumberLength::from_first_byte(length.first_byte_bits()),
+                length
+            );
+        }
+    }
+
+    #[test]
+    fn packet_number_length_from_first_byte_ignores_other_bits() {
+        assert_eq!(
+            PacketNumberLength::from_first_byte(0xfc),
+            PacketNumberLength::One
+        );
+        assert_eq!(
+            PacketNumberLength::from_first_byte(0xc1),
+            PacketNumberLength::Two
+        );
+        assert_eq!(
+            PacketNumberLength::from_first_byte(0x42),
+            PacketNumberLength::Three
+        );
+        assert_eq!(
+            PacketNumberLength::from_first_byte(0xff),
+            PacketNumberLength::Four
+        );
+    }
+
     #[test]
     fn encode_rfc9000_examples() {
         // RFC 9000 Appendix A.2.
-        let pn = TruncatedPacketNumber::encode(0xac5c02, Some(0xabe8b3)).unwrap();
-        assert_eq!(pn.encoded_len(), 2);
-        assert_eq!(pn.as_bytes(), [0x5c, 0x02]);
-        assert_eq!(pn.value(), 0x5c02);
+        let truncated = TruncatedPacketNumber::encode(pn(0xac5c02), Some(pn(0xabe8b3))).unwrap();
+        assert_eq!(truncated.encoded_len(), PacketNumberLength::Two);
+        assert_eq!(truncated.as_bytes(), [0x5c, 0x02]);
+        assert_eq!(truncated.value(), 0x5c02);
 
-        let pn = TruncatedPacketNumber::encode(0xace8fe, Some(0xabe8b3)).unwrap();
-        assert_eq!(pn.encoded_len(), 3);
-        assert_eq!(pn.as_bytes(), [0xac, 0xe8, 0xfe]);
+        let truncated = TruncatedPacketNumber::encode(pn(0xace8fe), Some(pn(0xabe8b3))).unwrap();
+        assert_eq!(truncated.encoded_len(), PacketNumberLength::Three);
+        assert_eq!(truncated.as_bytes(), [0xac, 0xe8, 0xfe]);
     }
 
     #[test]
     fn encode_boundaries() {
-        assert_eq!(
-            TruncatedPacketNumber::encode(0, None)
+        let encoded_len = |full: u64, largest_acked: Option<u64>| {
+            TruncatedPacketNumber::encode(pn(full), largest_acked.map(pn))
                 .unwrap()
-                .encoded_len(),
-            1
-        );
+                .encoded_len()
+                .get()
+        };
+        assert_eq!(encoded_len(0, None), 1);
         // 127 unacknowledged need 8 bits; 128 need 9.
+        assert_eq!(encoded_len(127, Some(0)), 1);
+        assert_eq!(encoded_len(128, Some(0)), 2);
+        assert_eq!(encoded_len(126, None), 1);
+        assert_eq!(encoded_len(127, None), 2);
+        assert_eq!(encoded_len((1 << 31) - 1, Some(0)), 4);
         assert_eq!(
-            TruncatedPacketNumber::encode(127, Some(0))
-                .unwrap()
-                .encoded_len(),
+            encoded_len(PacketNumber::MAX.get(), Some(PacketNumber::MAX.get() - 1)),
             1
-        );
-        assert_eq!(
-            TruncatedPacketNumber::encode(128, Some(0))
-                .unwrap()
-                .encoded_len(),
-            2
-        );
-        assert_eq!(
-            TruncatedPacketNumber::encode(126, None)
-                .unwrap()
-                .encoded_len(),
-            1
-        );
-        assert_eq!(
-            TruncatedPacketNumber::encode(127, None)
-                .unwrap()
-                .encoded_len(),
-            2
-        );
-        assert_eq!(
-            TruncatedPacketNumber::encode((1 << 31) - 1, Some(0))
-                .unwrap()
-                .encoded_len(),
-            4
         );
         assert!(matches!(
-            TruncatedPacketNumber::encode(1 << 31, Some(0)),
+            TruncatedPacketNumber::encode(pn(1 << 31), Some(PacketNumber::ZERO)),
             Err(EncodePacketNumberError::RangeTooLarge { num_unacked }) if num_unacked == 1 << 31
         ));
         assert!(matches!(
-            TruncatedPacketNumber::encode(5, Some(5)),
+            TruncatedPacketNumber::encode(PacketNumber::MAX, None),
+            Err(EncodePacketNumberError::RangeTooLarge { num_unacked }) if num_unacked == 1 << 62
+        ));
+        assert!(matches!(
+            TruncatedPacketNumber::encode(pn(5), Some(pn(5))),
             Err(EncodePacketNumberError::NotAfterLargestAcknowledged { .. })
         ));
     }
@@ -255,24 +455,38 @@ mod tests {
     #[test]
     fn decode_rfc9000_example() {
         // RFC 9000 Appendix A.3: largest processed 0xa82f30ea, 16-bit 0x9b32.
-        let pn = TruncatedPacketNumber::new(0x9b32, 2).unwrap();
-        assert_eq!(pn.decode(0xa82f30ea + 1), 0xa82f9b32);
+        let truncated = TruncatedPacketNumber::new(0x9b32, len(2)).unwrap();
+        assert_eq!(truncated.decode(Some(pn(0xa82f30ea))), pn(0xa82f9b32));
     }
 
     #[test]
     fn decode_window_edges() {
-        let one_byte = |value| TruncatedPacketNumber::new(value, 1).unwrap();
+        let one_byte = |value| TruncatedPacketNumber::new(value, len(1)).unwrap();
         // Nothing processed yet.
-        assert_eq!(one_byte(2).decode(0), 2);
+        assert_eq!(one_byte(2).decode(None), pn(2));
         // Wraps forward past the window.
-        assert_eq!(one_byte(0x01).decode(0xff), 0x101);
+        assert_eq!(one_byte(0x01).decode(Some(pn(0xfe))), pn(0x101));
         // Stays behind when closer.
-        assert_eq!(one_byte(0xfe).decode(0x101), 0xfe);
+        assert_eq!(one_byte(0xfe).decode(Some(pn(0x100))), pn(0xfe));
         // Never below zero.
-        assert_eq!(one_byte(0xf0).decode(0x10), 0xf0);
-        // Never at or above 2^62.
-        let top = (1u64 << 62) - 1;
-        assert_eq!(one_byte(0x00).decode(top), top & !0xff);
+        assert_eq!(one_byte(0xf0).decode(Some(pn(0x0f))), pn(0xf0));
+        // Never above the largest packet number.
+        let max = PacketNumber::MAX.get();
+        assert_eq!(one_byte(0x00).decode(Some(pn(max - 1))), pn(max & !0xff));
+        assert_eq!(one_byte(0xff).decode(Some(pn(max - 1))), PacketNumber::MAX);
+        assert_eq!(
+            one_byte(0x00).decode(Some(PacketNumber::MAX)),
+            pn(max & !0xff)
+        );
+        assert_eq!(
+            one_byte(0x01).decode(Some(PacketNumber::MAX)),
+            pn((max & !0xff) | 0x01)
+        );
+        let four_bytes = TruncatedPacketNumber::new(0, len(4)).unwrap();
+        assert_eq!(
+            four_bytes.decode(Some(PacketNumber::MAX)),
+            pn(max & !0xffff_ffff)
+        );
     }
 
     #[test]
@@ -282,29 +496,28 @@ mod tests {
             (2, None),
             (1000, Some(990)),
             (0x1234_5678, Some(0x1234_0000)),
+            (PacketNumber::MAX.get(), Some(PacketNumber::MAX.get() - 1)),
         ] {
-            let pn = TruncatedPacketNumber::encode(full, largest_acked).unwrap();
-            let expected = largest_acked.map_or(0, |largest| largest + 1);
-            assert_eq!(pn.decode(expected), full);
+            let truncated = TruncatedPacketNumber::encode(pn(full), largest_acked.map(pn)).unwrap();
+            assert_eq!(truncated.decode(largest_acked.map(pn)), pn(full));
         }
     }
 
     #[test]
-    fn new_rejects_invalid_fields() {
-        assert!(matches!(
-            TruncatedPacketNumber::new(0, 0),
-            Err(TruncatedPacketNumberError::InvalidLength { len: 0 })
-        ));
-        assert!(matches!(
-            TruncatedPacketNumber::new(0, 5),
-            Err(TruncatedPacketNumberError::InvalidLength { len: 5 })
-        ));
-        assert!(matches!(
-            TruncatedPacketNumber::new(0x100, 1),
-            Err(TruncatedPacketNumberError::ValueTooLarge { .. })
-        ));
+    fn new_rejects_values_wider_than_the_field() {
+        let error = TruncatedPacketNumber::new(0x100, len(1)).unwrap_err();
+        assert_eq!((error.value, error.len), (0x100, PacketNumberLength::One));
         assert_eq!(
-            TruncatedPacketNumber::new(u32::MAX, 4).unwrap().as_bytes(),
+            TruncatedPacketNumber::new(0xff_ffff, len(3))
+                .unwrap()
+                .as_bytes(),
+            [0xff; 3]
+        );
+        assert!(TruncatedPacketNumber::new(0x100_0000, len(3)).is_err());
+        assert_eq!(
+            TruncatedPacketNumber::new(u32::MAX, len(4))
+                .unwrap()
+                .as_bytes(),
             [0xff; 4]
         );
     }

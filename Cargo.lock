@@ -222,6 +222,7 @@ name = "sakuya_protection"
 version = "0.0.0"
 dependencies = [
  "ring",
+ "sakuya_wire",
  "snafu",
 ]
 

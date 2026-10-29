@@ -12,4 +12,5 @@ ring = ["dep:ring"]
 
 [dependencies]
 ring = { workspace = true, optional = true }
+sakuya_wire.workspace = true
 snafu = { workspace = true }
