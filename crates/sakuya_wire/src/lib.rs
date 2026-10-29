@@ -13,9 +13,16 @@
 //! - [`header`]: the facts a packet header states before packet protection is
 //!   removed: header form, version, connection IDs, the version 1 packet type,
 //!   tokens, packet boundaries and the offset of the packet number field.
+//! - [`frame`]: the frames of a packet payload once protection is removed,
+//!   decoded from and encoded into byte slices, and read and written as
+//!   `nitori_call` operations; with the DATAGRAM and RESET_STREAM_AT
+//!   extensions.
+//! - [`transport_error`]: transport error codes ([`transport_error::TransportErrorCode`]).
 //!
 //! Nothing here interprets protected header fields (reserved bits, packet
-//! number length, Key Phase) or removes packet protection.
+//! number length, Key Phase) or removes packet protection. The frame decoders
+//! check the encoding only; whether a frame is acceptable in the state of a
+//! connection is for the connection to decide.
 //!
 //! [RFC 9000]: https://www.rfc-editor.org/rfc/rfc9000.html
 //! [RFC 8999]: https://www.rfc-editor.org/rfc/rfc8999.html
@@ -24,6 +31,8 @@
 #![warn(missing_docs)]
 
 pub mod connection_id;
+pub mod frame;
 pub mod header;
 pub mod stream_id;
+pub mod transport_error;
 pub mod var_int;
