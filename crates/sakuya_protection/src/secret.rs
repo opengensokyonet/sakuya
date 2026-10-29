@@ -9,10 +9,10 @@ use crate::wipe::wipe;
 /// together with the KDF of the cipher suite that produced it.
 ///
 /// The handshake engine hands traffic secrets over; Initial secrets come from
-/// [`InitialSecrets`](crate::InitialSecrets). Packet protection keys are
+/// [`InitialSecrets`](crate::initial::InitialSecrets). Packet protection keys are
 /// derived from a traffic secret with
-/// [`PacketKey::derive`](crate::PacketKey::derive) and
-/// [`HeaderProtectionKey::derive`](crate::HeaderProtectionKey::derive).
+/// [`PacketKey::derive`](crate::packet_key::PacketKey::derive) and
+/// [`HeaderProtectionKey::derive`](crate::header_protection::HeaderProtectionKey::derive).
 ///
 /// The secret bytes are overwritten when the value is dropped. `Debug` does
 /// not print them.

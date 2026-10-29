@@ -11,11 +11,14 @@ use sakuya_protection::backend::{
     AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadAlgorithm, AeadKey, AuthenticationFailed, CryptoBackend,
     ExpandLabelError, HeaderProtectionCipher, KdfAlgorithm,
 };
-use sakuya_protection::{
-    HeaderProtectionError, HeaderProtectionKey, INITIAL_AEAD, InitialSecrets, OpenPacketError,
-    PacketKey, TrafficSecret, TruncatedPacketNumber, VerifyRetryIntegrityError,
-    compute_retry_integrity_tag, verify_retry_integrity_tag,
+use sakuya_protection::header_protection::{HeaderProtectionError, HeaderProtectionKey};
+use sakuya_protection::initial::{INITIAL_AEAD, INITIAL_SALT, InitialSecrets};
+use sakuya_protection::packet_key::{OpenPacketError, PacketKey};
+use sakuya_protection::packet_number::TruncatedPacketNumber;
+use sakuya_protection::retry::{
+    VerifyRetryIntegrityError, compute_retry_integrity_tag, verify_retry_integrity_tag,
 };
+use sakuya_protection::secret::TrafficSecret;
 
 fn hex(text: &str) -> Vec<u8> {
     let digits: Vec<u8> = text
@@ -133,7 +136,7 @@ fn a1_initial_secret() {
     let mut initial_secret = [0; 32];
     RingBackend.hkdf_extract(
         KdfAlgorithm::HkdfSha256,
-        &sakuya_protection::INITIAL_SALT,
+        &INITIAL_SALT,
         &hex(CLIENT_DCID),
         &mut initial_secret,
     );

@@ -13,7 +13,7 @@ use crate::wipe::wipe;
 /// sealing packet payloads.
 ///
 /// A key update replaces the packet key with one derived from
-/// [`TrafficSecret::next`]; the [`HeaderProtectionKey`](crate::HeaderProtectionKey)
+/// [`TrafficSecret::next`]; the [`HeaderProtectionKey`](crate::header_protection::HeaderProtectionKey)
 /// stays.
 pub struct PacketKey<B: CryptoBackend> {
     key: B::AeadKey,
@@ -25,7 +25,7 @@ impl<B: CryptoBackend> PacketKey<B> {
     /// (`"quic iv"`, 12 bytes) from `secret` (RFC 9001 §5.1).
     ///
     /// `aead` is the AEAD of the cipher suite that produced `secret`, or
-    /// [`INITIAL_AEAD`](crate::INITIAL_AEAD) for Initial secrets.
+    /// [`INITIAL_AEAD`](crate::initial::INITIAL_AEAD) for Initial secrets.
     pub fn derive(backend: &B, aead: AeadAlgorithm, secret: &TrafficSecret) -> Self {
         let mut key = [0; MAX_KEY_LEN];
         let key = &mut key[..aead.key_len()];

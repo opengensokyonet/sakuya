@@ -6,7 +6,7 @@
 //! number encoding and decoding from RFC 9000 Appendix A sits beside header
 //! protection, which yields the truncated packet number.
 //!
-//! All cryptography goes through the [`CryptoBackend`] trait. The
+//! All cryptography goes through the [`backend::CryptoBackend`] trait. The
 //! `backend::ring::RingBackend` implementation is available with the `ring`
 //! feature, which is enabled by default.
 //!
@@ -30,9 +30,10 @@
 //! ```
 //! # #[cfg(feature = "ring")] {
 //! use sakuya_protection::backend::ring::RingBackend;
-//! use sakuya_protection::{
-//!     HeaderProtectionKey, INITIAL_AEAD, InitialSecrets, PacketKey, TruncatedPacketNumber,
-//! };
+//! use sakuya_protection::header_protection::HeaderProtectionKey;
+//! use sakuya_protection::initial::{INITIAL_AEAD, InitialSecrets};
+//! use sakuya_protection::packet_key::PacketKey;
+//! use sakuya_protection::packet_number::TruncatedPacketNumber;
 //!
 //! let backend = RingBackend;
 //! let client_dcid = [0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
@@ -68,24 +69,13 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-pub mod backend;
-mod header_protection;
-mod initial;
-mod packet_key;
-mod packet_number;
-mod retry;
-mod secret;
-mod wipe;
+#![warn(missing_docs)]
 
-pub use backend::CryptoBackend;
-pub use header_protection::{HeaderProtectionError, HeaderProtectionKey};
-pub use initial::{INITIAL_AEAD, INITIAL_SALT, InitialSecrets};
-pub use packet_key::{OpenPacketError, PacketKey, PacketTooShort};
-pub use packet_number::{
-    EncodePacketNumberError, TruncatedPacketNumber, TruncatedPacketNumberError,
-};
-pub use retry::{
-    OriginalConnectionIdTooLong, VerifyRetryIntegrityError, compute_retry_integrity_tag,
-    verify_retry_integrity_tag,
-};
-pub use secret::{SecretLengthMismatch, TrafficSecret};
+pub mod backend;
+pub mod header_protection;
+pub mod initial;
+pub mod packet_key;
+pub mod packet_number;
+pub mod retry;
+pub mod secret;
+mod wipe;
