@@ -204,9 +204,11 @@ name = "sakuya_datagram_routing"
 version = "0.0.0"
 dependencies = [
  "dashmap",
+ "nitori_id",
  "sakuya_link",
  "sakuya_wire",
  "smallvec",
+ "snafu",
  "tokio",
 ]
 

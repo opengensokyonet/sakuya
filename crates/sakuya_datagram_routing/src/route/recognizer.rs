@@ -2,8 +2,9 @@
 //!
 //! A short header does not state the length of its destination connection ID;
 //! only the side that issued the connection ID knows how to read it. Routing
-//! therefore asks a [`ConnectionIdRecognizer`] for every length under which a
-//! short header can be read, and reads each with
+//! therefore asks a [`ConnectionIdRecognizer`] for every
+//! [`ConnectionIdLength`] under which a short header can be read, and reads
+//! each with
 //! [`ShortHeader::parse`](sakuya_wire::header::ShortHeader::parse). Generation
 //! and recognition must agree, which is the implementation's responsibility:
 //! routing keeps no format numbers, length registry or pairing credentials.
@@ -12,26 +13,66 @@
 //! pair: a fixed set of accepted lengths, and generation of one of them that
 //! prefers values few entries use. Neither is a required framework.
 
+use std::fmt;
 use std::num::NonZeroUsize;
 
 use sakuya_link::LinkId;
 use sakuya_wire::connection_id::{ConnectionId, ConnectionIdLengthError, NonEmptyCid};
 use smallvec::SmallVec;
 
+/// The length of a QUIC version 1 connection ID: 0 to
+/// [`ConnectionId::MAX_LEN`] bytes.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConnectionIdLength(u8);
+
+impl ConnectionIdLength {
+    /// The zero-length connection ID.
+    pub const ZERO: Self = Self(0);
+
+    /// The length of `length` bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`ConnectionIdLengthError`] if `length` exceeds
+    /// [`ConnectionId::MAX_LEN`].
+    pub fn new(length: usize) -> Result<Self, ConnectionIdLengthError> {
+        match u8::try_from(length) {
+            Ok(byte) if length <= ConnectionId::MAX_LEN => Ok(Self(byte)),
+            _ => Err(ConnectionIdLengthError { length }),
+        }
+    }
+
+    /// The length in bytes.
+    pub fn get(self) -> usize {
+        usize::from(self.0)
+    }
+
+    /// Whether this is the length of the zero-length connection ID.
+    pub const fn is_zero(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl fmt::Debug for ConnectionIdLength {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "ConnectionIdLength({})", self.0)
+    }
+}
+
 /// Reads the destination connection IDs a short header may carry.
 pub trait ConnectionIdRecognizer {
     /// Yields every destination connection ID length under which the short
     /// header at the start of `datagram`, arriving on `link`, can be read.
     ///
-    /// Each length is a separate interpretation; a length of zero is the
-    /// explicit zero-length interpretation, and it is offered only when the
-    /// recognizer yields it. Yielding a length longer than the datagram, or
-    /// than [`ConnectionId::MAX_LEN`], yields no interpretation for it.
+    /// Each length is a separate interpretation; [`ConnectionIdLength::ZERO`]
+    /// is the explicit zero-length interpretation, and it is offered only when
+    /// the recognizer yields it. A length longer than the datagram yields no
+    /// interpretation.
     fn short_dcid_lengths<'a>(
         &'a self,
         datagram: &'a [u8],
         link: &'a LinkId,
-    ) -> impl Iterator<Item = usize> + 'a;
+    ) -> impl Iterator<Item = ConnectionIdLength> + 'a;
 }
 
 /// A recognizer that accepts a fixed set of connection ID lengths.
@@ -41,30 +82,24 @@ pub trait ConnectionIdRecognizer {
 /// connection IDs on every link.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConnectionIdLengths {
-    lengths: SmallVec<[u8; 4]>,
+    lengths: SmallVec<[ConnectionIdLength; 4]>,
 }
 
 impl ConnectionIdLengths {
     /// Accepts the given lengths, in order, ignoring repetitions.
-    ///
-    /// # Errors
-    ///
-    /// [`ConnectionIdLengthError`] if a length exceeds
-    /// [`ConnectionId::MAX_LEN`].
-    pub fn new(lengths: &[usize]) -> Result<Self, ConnectionIdLengthError> {
+    pub fn new(lengths: impl IntoIterator<Item = ConnectionIdLength>) -> Self {
         let mut accepted = SmallVec::new();
-        for &length in lengths {
-            let byte = valid_length(length)?;
-            if !accepted.contains(&byte) {
-                accepted.push(byte);
+        for length in lengths {
+            if !accepted.contains(&length) {
+                accepted.push(length);
             }
         }
-        Ok(Self { lengths: accepted })
+        Self { lengths: accepted }
     }
 
     /// The accepted lengths.
-    pub fn lengths(&self) -> impl Iterator<Item = usize> + '_ {
-        self.lengths.iter().map(|&length| usize::from(length))
+    pub fn lengths(&self) -> impl Iterator<Item = ConnectionIdLength> + '_ {
+        self.lengths.iter().copied()
     }
 }
 
@@ -73,7 +108,7 @@ impl ConnectionIdRecognizer for ConnectionIdLengths {
         &'a self,
         _datagram: &'a [u8],
         _link: &'a LinkId,
-    ) -> impl Iterator<Item = usize> + 'a {
+    ) -> impl Iterator<Item = ConnectionIdLength> + 'a {
         self.lengths()
     }
 }
@@ -95,7 +130,7 @@ pub trait ConnectionIdGenerator {
     ///
     /// The result is not promised to be unique; the connection ID manager
     /// registers it and discloses it only after the registration took effect.
-    fn generate(&self, occupancy: &dyn ConnectionIdOccupancy) -> ConnectionId;
+    fn generate(&self, occupancy: &impl ConnectionIdOccupancy) -> ConnectionId;
 }
 
 /// Generates connection IDs of one length, preferring the least used of a few
@@ -104,7 +139,7 @@ pub trait ConnectionIdGenerator {
 /// The random bytes come from `fill`, which the owner supplies. A length of
 /// zero always generates the zero-length connection ID.
 pub struct LeastOccupiedConnectionIds<Fill> {
-    length: u8,
+    length: ConnectionIdLength,
     samples: NonZeroUsize,
     fill: Fill,
 }
@@ -112,55 +147,51 @@ pub struct LeastOccupiedConnectionIds<Fill> {
 impl<Fill: Fn(&mut [u8])> LeastOccupiedConnectionIds<Fill> {
     /// Generates connection IDs of `length` bytes from `samples` candidates
     /// each, filled by `fill`.
-    ///
-    /// # Errors
-    ///
-    /// [`ConnectionIdLengthError`] if `length` exceeds
-    /// [`ConnectionId::MAX_LEN`].
-    pub fn new(
-        length: usize,
-        samples: NonZeroUsize,
-        fill: Fill,
-    ) -> Result<Self, ConnectionIdLengthError> {
-        Ok(Self {
-            length: valid_length(length)?,
+    pub fn new(length: ConnectionIdLength, samples: NonZeroUsize, fill: Fill) -> Self {
+        Self {
+            length,
             samples,
             fill,
-        })
+        }
     }
 
     fn sample(&self) -> ConnectionId {
         let mut bytes = [0; ConnectionId::MAX_LEN];
-        let active = &mut bytes[..usize::from(self.length)];
+        let active = &mut bytes[..self.length.get()];
         (self.fill)(active);
-        ConnectionId::new(active).expect("the length was validated")
+        // invariant: a `ConnectionIdLength` never exceeds
+        // `ConnectionId::MAX_LEN`, so `active` is a valid connection ID.
+        ConnectionId::new(active).expect("a connection ID length is at most the maximum")
     }
 }
 
 impl<Fill: Fn(&mut [u8])> ConnectionIdGenerator for LeastOccupiedConnectionIds<Fill> {
-    fn generate(&self, occupancy: &dyn ConnectionIdOccupancy) -> ConnectionId {
-        if self.length == 0 {
+    fn generate(&self, occupancy: &impl ConnectionIdOccupancy) -> ConnectionId {
+        if self.length.is_zero() {
             return ConnectionId::EMPTY;
         }
-        (0..self.samples.get())
-            .map(|_| self.sample())
-            .min_by_key(|cid| NonEmptyCid::new(*cid).map_or(0, |cid| occupancy.occupancy(&cid)))
-            .expect("at least one sample is taken")
+        let occupied =
+            |cid: &ConnectionId| NonEmptyCid::new(*cid).map_or(0, |cid| occupancy.occupancy(&cid));
+        let first = self.sample();
+        let first_occupied = occupied(&first);
+        let (least, _) = (1..self.samples.get()).fold((first, first_occupied), |least, _| {
+            let sample = self.sample();
+            let sample_occupied = occupied(&sample);
+            if sample_occupied < least.1 {
+                (sample, sample_occupied)
+            } else {
+                least
+            }
+        });
+        least
     }
 }
 
-impl<Fill> std::fmt::Debug for LeastOccupiedConnectionIds<Fill> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<Fill> fmt::Debug for LeastOccupiedConnectionIds<Fill> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LeastOccupiedConnectionIds")
             .field("length", &self.length)
             .field("samples", &self.samples)
             .finish_non_exhaustive()
     }
-}
-
-fn valid_length(length: usize) -> Result<u8, ConnectionIdLengthError> {
-    if length > ConnectionId::MAX_LEN {
-        return Err(ConnectionIdLengthError { length });
-    }
-    Ok(u8::try_from(length).expect("connection ID lengths fit in a byte"))
 }

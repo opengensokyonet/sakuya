@@ -1,6 +1,7 @@
 //! What routing recorded about one candidate's match
 
-use crate::route::{FirstPacketInterpretation, MatchAssociation};
+use crate::route::association::MatchAssociation;
+use crate::route::interpretation::FirstPacketInterpretation;
 
 /// What routing recorded about why one route entry matched a datagram.
 ///
@@ -8,7 +9,7 @@ use crate::route::{FirstPacketInterpretation, MatchAssociation};
 /// up and the first-packet interpretation under which the entry applied. The
 /// mechanism keeps it with the candidate, lends it to the factory and to every
 /// judgment, and hands it over with the datagram in
-/// [`DatagramAssociatedState`](super::DatagramAssociatedState). It keeps
+/// [`DatagramAssociatedState`](super::delivery::DatagramAssociatedState). It keeps
 /// values, never borrows of the datagram. It is not evidence of
 /// authentication or acceptance: a match only says under which reading the
 /// entry was offered the datagram.

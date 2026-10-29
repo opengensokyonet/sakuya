@@ -8,7 +8,7 @@ use std::task::Poll;
 use super::support::{
     Judging, Probe, TestDatagram, UnclaimedSink, WakeCount, poll_with, ready, route,
 };
-use crate::claim::DatagramClaimAttempt;
+use crate::claim::candidate::DatagramClaimAttempt;
 use crate::claim::shared::DatagramFinishPolicy;
 
 #[test]

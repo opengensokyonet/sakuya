@@ -3,10 +3,9 @@
 use std::fmt;
 use std::sync::Arc;
 
-use super::{
-    DatagramClaimCandidate, DatagramDeliverer, DatagramRouteMatchInfo, DatagramView,
-    ExclusiveDatagram,
-};
+use super::candidate::DatagramClaimCandidate;
+use super::deliverer::{DatagramDeliverer, DatagramView, ExclusiveDatagram};
+use super::route_match::DatagramRouteMatchInfo;
 
 /// What [`DatagramDeliverer::deliver`] receives for one datagram.
 ///
@@ -36,15 +35,45 @@ pub enum DatagramDelivery<Inner, Deliverer: DatagramDeliverer<Inner>> {
 pub struct ExclusiveDatagramDelivery<Inner, Deliverer: DatagramDeliverer<Inner>> {
     datagram: ExclusiveDatagram<Inner>,
     route: DatagramRouteMatchInfo,
-    state: Option<Deliverer::DelivererDatagramState>,
+    state: PrivateState<Deliverer::DelivererDatagramState>,
     deliverer: Arc<Deliverer>,
+}
+
+/// The deliverer's private state of one candidate or delivery.
+///
+/// It starts uninitialized and is initialized at most once: on the first
+/// access that finds the datagram present, or when an exclusive delivery
+/// that never competed is consumed.
+pub(super) enum PrivateState<State> {
+    /// The factory has not run for this candidate.
+    Uninitialized,
+    /// The factory ran; the state is threaded through every judgment.
+    Initialized(State),
+}
+
+impl<State> PrivateState<State> {
+    /// The state, if it was initialized.
+    pub(super) fn initialized(&self) -> Option<&State> {
+        match self {
+            Self::Uninitialized => None,
+            Self::Initialized(state) => Some(state),
+        }
+    }
+
+    /// The state, initialized with `factory` if it was not yet.
+    pub(super) fn into_initialized(self, factory: impl FnOnce() -> State) -> State {
+        match self {
+            Self::Uninitialized => factory(),
+            Self::Initialized(state) => state,
+        }
+    }
 }
 
 impl<Inner, Deliverer: DatagramDeliverer<Inner>> ExclusiveDatagramDelivery<Inner, Deliverer> {
     pub(super) fn new(
         datagram: ExclusiveDatagram<Inner>,
         route: DatagramRouteMatchInfo,
-        state: Option<Deliverer::DelivererDatagramState>,
+        state: PrivateState<Deliverer::DelivererDatagramState>,
         deliverer: Arc<Deliverer>,
     ) -> Self {
         Self {
@@ -64,7 +93,7 @@ impl<Inner, Deliverer: DatagramDeliverer<Inner>> ExclusiveDatagramDelivery<Inner
     ///
     /// This only borrows and never calls the factory.
     pub fn initialized_state(&self) -> Option<&Deliverer::DelivererDatagramState> {
-        self.state.as_ref()
+        self.state.initialized()
     }
 }
 
@@ -94,10 +123,9 @@ impl<Inner: AsRef<[u8]>, Deliverer: DatagramDeliverer<Inner>>
             state,
             deliverer,
         } = self;
-        let state = match state {
-            Some(state) => state,
-            None => deliverer.new_datagram_state(DatagramView::new(datagram.bytes()), &route),
-        };
+        let state = state.into_initialized(|| {
+            deliverer.new_datagram_state(DatagramView::new(datagram.bytes()), &route)
+        });
         (datagram, DatagramAssociatedState { route, state })
     }
 }
@@ -151,7 +179,7 @@ impl<Inner, Deliverer: DatagramDeliverer<Inner>> fmt::Debug
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ExclusiveDatagramDelivery")
             .field("route", &self.route)
-            .field("state_initialized", &self.state.is_some())
+            .field("state_initialized", &self.state.initialized().is_some())
             .finish_non_exhaustive()
     }
 }

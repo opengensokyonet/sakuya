@@ -9,19 +9,23 @@ use sakuya_link::LinkId;
 use sakuya_wire::header::v1::LongPacketType;
 
 use super::support::{
-    Datagram, Domain, Index, Judging, Recorder, Target, binding, cid, datagram, initial, link,
-    long, nonempty, register,
+    Datagram, Domain, Handoff, Index, Judging, Recorder, Target, binding, cid, datagram, initial,
+    lengths, link, long, nonempty, register,
 };
+use crate::claim::deliverer::{
+    DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramView, ExclusiveDatagram,
+};
+use crate::claim::delivery::DatagramDelivery;
 use crate::claim::queue::DatagramDeliveryQueue;
-use crate::claim::{
-    DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramDelivery,
-    DatagramRouteMatchInfo, DatagramView, ExclusiveDatagram,
+use crate::claim::route_match::DatagramRouteMatchInfo;
+use crate::route::acceptance::{
+    InitialAcceptance, InitialDatagramReceiver, InitialReceiverFactory, PreparedReceiver,
 };
-use crate::route::{
-    ConnectionIdLengths, ConnectionIdOccupancy, DatagramRouter, InitialAcceptance,
-    InitialDatagramReceiver, InitialReceiverFactory, MatchAssociation, PacketForms,
-    PreparedReceiver, RecognizedInitial, RouteEntryRegistration, RouteIndex,
-};
+use crate::route::association::{MatchAssociation, PacketForms};
+use crate::route::index::{RouteEntryRegistration, RouteIndex};
+use crate::route::interpretation::RecognizedInitial;
+use crate::route::recognizer::ConnectionIdOccupancy;
+use crate::route::router::DatagramRouter;
 
 #[test]
 fn unclaimed_initial_is_published_only_after_a_separate_resume() {
@@ -283,7 +287,7 @@ fn closed_or_full_reflow_queue_releases_the_work() {
     let binding = binding();
     drop(std::mem::replace(
         &mut domain.reflow,
-        DatagramDeliveryQueue::new(NonZeroUsize::MIN),
+        DatagramDeliveryQueue::new(NonZeroUsize::MIN).unwrap(),
     ));
     domain.route(initial(&cid(9), &cid(9)), &link(&binding));
     assert_eq!(domain.drain(), 0);
@@ -331,6 +335,7 @@ fn prepared_material_is_dropped_outside_the_index() {
     }
 
     impl DatagramDeliverer<Datagram> for ReadsOnDrop {
+        type Handoff = Handoff;
         type DelivererDatagramState = ();
 
         fn new_datagram_state(&self, _: DatagramView<'_>, _: &DatagramRouteMatchInfo) {}
@@ -385,16 +390,15 @@ fn prepared_material_is_dropped_outside_the_index() {
     let observed = Arc::clone(&dropped);
     std::thread::spawn(move || {
         let index = RouteIndex::<Target>::new();
-        let mut reflow = DatagramDeliveryQueue::new(NonZeroUsize::new(4).unwrap());
-        let router =
-            DatagramRouter::new(Arc::clone(&index), ConnectionIdLengths::new(&[8]).unwrap())
-                .with_initial_acceptance(InitialAcceptance::new(
-                    Preparing {
-                        index: Arc::downgrade(&index),
-                        dropped,
-                    },
-                    Arc::new(reflow.poster()),
-                ));
+        let mut reflow = DatagramDeliveryQueue::new(NonZeroUsize::new(4).unwrap()).unwrap();
+        let router = DatagramRouter::new(Arc::clone(&index), lengths(&[8]))
+            .with_initial_acceptance(InitialAcceptance::new(
+                Preparing {
+                    index: Arc::downgrade(&index),
+                    dropped,
+                },
+                Arc::new(reflow.poster()),
+            ));
         let existing = Recorder::new(1, Judging::Reject);
         let binding = binding();
         router.route(datagram(initial(&cid(11), &cid(9)), &link(&binding)));

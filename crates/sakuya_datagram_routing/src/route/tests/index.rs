@@ -7,21 +7,29 @@ use std::sync::Arc;
 
 use sakuya_link::LinkId;
 use sakuya_wire::connection_id::{ConnectionId, ConnectionIdLengthError};
-use sakuya_wire::header::v1::{self, LongPacketType};
+use sakuya_wire::header::v1::LongPacketType;
 
 use super::support::{
-    Datagram, Domain, Judging, Recorder, binding, cid, link, long, nonempty, register, short,
+    Datagram, Domain, Handoff, Judging, Recorder, binding, cid, dcid_len, lengths, link, long,
+    nonempty, register, short,
 };
+use crate::claim::candidate::DatagramClaimAttempt;
+use crate::claim::deliverer::{
+    DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramView,
+};
+use crate::claim::delivery::DatagramDelivery;
+use crate::claim::erased::ErasedDatagramDeliverer;
 use crate::claim::queue::DatagramDeliveryQueue;
-use crate::claim::{
-    DatagramClaimAccess, DatagramClaimAttempt, DatagramClaimOutcome, DatagramDeliverer,
-    DatagramDelivery, DatagramRouteMatchInfo, DatagramView, ErasedDatagramDeliverer,
+use crate::claim::route_match::DatagramRouteMatchInfo;
+use crate::route::association::{MatchAssociation, PacketForms, RouteMatcher};
+use crate::route::index::RouteIndex;
+use crate::route::interpretation::FirstPacketInterpretation;
+use crate::route::recognizer::{
+    ConnectionIdGenerator, ConnectionIdLength, ConnectionIdOccupancy, ConnectionIdRecognizer,
+    LeastOccupiedConnectionIds,
 };
-use crate::route::{
-    ConnectionIdGenerator, ConnectionIdLengths, ConnectionIdOccupancy, ConnectionIdRecognizer,
-    DatagramRouter, FirstPacketInterpretation, LeastOccupiedConnectionIds, MatchAssociation,
-    PacketForms, RouteIndex, RouteMatcher,
-};
+use crate::route::router::DatagramRouter;
+use crate::version::Version;
 
 #[test]
 fn many_zero_and_local_entries_share_one_short_header() {
@@ -57,7 +65,9 @@ fn many_zero_and_local_entries_share_one_short_header() {
         interpretations
             .iter()
             .filter(|interpretation| **interpretation
-                == FirstPacketInterpretation::Short { dcid_len: 0 })
+                == FirstPacketInterpretation::Short {
+                    dcid_len: dcid_len(0)
+                })
             .count(),
         32
     );
@@ -194,6 +204,7 @@ fn collision_keeps_every_deliverer_even_when_they_share_a_receiver() {
     }
 
     impl DatagramDeliverer<Datagram> for Feeding {
+        type Handoff = Handoff;
         type DelivererDatagramState = ();
 
         fn new_datagram_state(&self, _: DatagramView<'_>, _: &DatagramRouteMatchInfo) {}
@@ -217,14 +228,14 @@ fn collision_keeps_every_deliverer_even_when_they_share_a_receiver() {
 
     let domain = Domain::new(&[8]);
     let binding = binding();
-    let mut queue = DatagramDeliveryQueue::new(NonZeroUsize::new(4).unwrap());
+    let mut queue = DatagramDeliveryQueue::new(NonZeroUsize::new(4).unwrap()).unwrap();
     let _registrations: Vec<_> = (0..2)
         .map(|label| {
             domain.index().register(
                 RouteMatcher::new(
                     MatchAssociation::LocalCid(nonempty(&cid(6))),
                     PacketForms::ALL,
-                    v1::VERSION,
+                    Version::V1,
                 ),
                 Arc::new(Feeding {
                     queue: queue.poster(),
@@ -299,22 +310,22 @@ fn local_routing_domain_does_not_require_send() {
         }
     }
 
-    type ReceivedLocal = crate::route::ReceivedDatagram<Rc<[u8]>, Rc<LinkId>>;
+    type ReceivedLocal = crate::route::datagram::ReceivedDatagram<Rc<[u8]>, Rc<LinkId>>;
 
     let seen = Cell::new(0);
     let index = RouteIndex::<dyn ErasedDatagramDeliverer<ReceivedLocal> + '_>::new();
-    let router = DatagramRouter::new(Arc::clone(&index), ConnectionIdLengths::new(&[8]).unwrap());
+    let router = DatagramRouter::new(Arc::clone(&index), lengths(&[8]));
     let matcher = || {
         RouteMatcher::new(
             MatchAssociation::LocalCid(nonempty(&cid(7))),
             PacketForms::ALL,
-            v1::VERSION,
+            Version::V1,
         )
     };
     let _local = index.register(matcher(), Arc::new(Local { seen: &seen }));
     let _other = index.register(matcher(), Arc::new(Other { seen: &seen }));
     let link = Rc::new(link(&binding()));
-    router.route(crate::route::ReceivedDatagram::new(
+    router.route(crate::route::datagram::ReceivedDatagram::new(
         Rc::from(short(&cid(7), 30)),
         link,
     ));
@@ -346,12 +357,14 @@ fn occupancy_observes_both_kinds_and_generation_prefers_free_values() {
 
     // Samples 1, 2, 3 in turn; the free value 3 wins.
     let next = Cell::new(0_u8);
-    let sampling =
-        LeastOccupiedConnectionIds::new(8, NonZeroUsize::new(3).unwrap(), |bytes: &mut [u8]| {
+    let sampling = LeastOccupiedConnectionIds::new(
+        dcid_len(8),
+        NonZeroUsize::new(3).unwrap(),
+        |bytes: &mut [u8]| {
             next.set(next.get() + 1);
             bytes.fill(next.get());
-        })
-        .unwrap();
+        },
+    );
     assert_eq!(
         sampling.generate(domain.index().as_ref()).as_bytes(),
         cid(3)
@@ -359,11 +372,11 @@ fn occupancy_observes_both_kinds_and_generation_prefers_free_values() {
 
     // With a single sample, a colliding value is still generated and can be
     // registered.
-    let single =
-        LeastOccupiedConnectionIds::new(8, NonZeroUsize::new(1).unwrap(), |bytes: &mut [u8]| {
-            bytes.fill(1)
-        })
-        .unwrap();
+    let single = LeastOccupiedConnectionIds::new(
+        dcid_len(8),
+        NonZeroUsize::new(1).unwrap(),
+        |bytes: &mut [u8]| bytes.fill(1),
+    );
     let collision = single.generate(domain.index().as_ref());
     assert_eq!(collision.as_bytes(), cid(1));
     let _collision = register(
@@ -376,20 +389,26 @@ fn occupancy_observes_both_kinds_and_generation_prefers_free_values() {
 
 #[test]
 fn length_sets_validate_and_keep_ambiguity() {
-    let lengths = ConnectionIdLengths::new(&[8, 0, 12, 8]).unwrap();
-    assert_eq!(lengths.lengths().collect::<Vec<_>>(), [8, 0, 12]);
+    let lengths = lengths(&[8, 0, 12, 8]);
+    let expected = [dcid_len(8), dcid_len(0), dcid_len(12)];
+    assert_eq!(lengths.lengths().collect::<Vec<_>>(), expected);
     let link = link(&binding());
     assert_eq!(
         lengths
             .short_dcid_lengths(&[0x40; 16], &link)
             .collect::<Vec<_>>(),
-        [8, 0, 12]
+        expected
     );
     assert_eq!(
-        ConnectionIdLengths::new(&[21]),
+        ConnectionIdLength::new(21),
         Err(ConnectionIdLengthError { length: 21 })
     );
-    assert!(LeastOccupiedConnectionIds::new(21, NonZeroUsize::MIN, |_: &mut [u8]| {}).is_err());
+    assert_eq!(
+        ConnectionIdLength::new(usize::from(u8::MAX) + 1),
+        Err(ConnectionIdLengthError { length: 256 })
+    );
+    assert_eq!(dcid_len(20).get(), 20);
+    assert!(ConnectionIdLength::ZERO.is_zero());
 }
 
 #[test]
@@ -397,11 +416,11 @@ fn every_generated_length_is_recognized_by_routing() {
     for length in 0..=ConnectionId::MAX_LEN {
         let mut domain = Domain::new(&[length]);
         let binding = binding();
-        let generator =
-            LeastOccupiedConnectionIds::new(length, NonZeroUsize::MIN, |bytes: &mut [u8]| {
-                bytes.fill(0x5a)
-            })
-            .unwrap();
+        let generator = LeastOccupiedConnectionIds::new(
+            dcid_len(length),
+            NonZeroUsize::MIN,
+            |bytes: &mut [u8]| bytes.fill(0x5a),
+        );
         let generated = generator.generate(domain.index().as_ref());
         assert_eq!(generated.len(), length);
         let association = match generated.try_into() {
@@ -414,7 +433,7 @@ fn every_generated_length_is_recognized_by_routing() {
         assert_eq!(
             recorder.interpretations(),
             [FirstPacketInterpretation::Short {
-                dcid_len: u8::try_from(length).unwrap()
+                dcid_len: dcid_len(length)
             }]
         );
         assert!(domain.next_work().is_none());

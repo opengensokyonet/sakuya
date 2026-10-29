@@ -6,14 +6,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 
-use crate::claim::group::prepare_claim;
-use crate::claim::shared::DatagramFinishPolicy;
-use crate::claim::{
-    DatagramClaimAccess, DatagramClaimCandidate, DatagramClaimOutcome, DatagramDeliverer,
-    DatagramDelivery, DatagramRouteMatchInfo, DatagramView, ExclusiveDatagramDelivery,
-    SendDatagramDeliverer,
+use crate::claim::candidate::DatagramClaimCandidate;
+use crate::claim::deliverer::{
+    DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramView,
 };
-use crate::route::{FirstPacketInterpretation, MatchAssociation};
+use crate::claim::delivery::{DatagramDelivery, ExclusiveDatagramDelivery};
+use crate::claim::erased::SendDatagramDeliverer;
+use crate::claim::finish::UnclaimedHandoff;
+use crate::claim::group::prepare_claim;
+use crate::claim::route_match::DatagramRouteMatchInfo;
+use crate::claim::shared::DatagramFinishPolicy;
+use crate::route::association::MatchAssociation;
+use crate::route::interpretation::FirstPacketInterpretation;
+use crate::route::recognizer::ConnectionIdLength;
 
 /// A datagram that counts how often it is dropped.
 #[derive(Debug)]
@@ -145,6 +150,7 @@ impl Probe {
 }
 
 impl DatagramDeliverer<TestDatagram> for Probe {
+    type Handoff = UnclaimedSink;
     type DelivererDatagramState = ProbeState;
 
     fn new_datagram_state(
@@ -194,16 +200,19 @@ impl DatagramDeliverer<TestDatagram> for Probe {
     }
 }
 
-/// Collects the work handed off under the on-unclaimed policy.
+/// Collects the datagrams handed off under the on-unclaimed policy.
 #[derive(Clone, Default)]
 pub(super) struct UnclaimedSink(Arc<Mutex<Vec<TestDatagram>>>);
 
+impl UnclaimedHandoff<TestDatagram> for UnclaimedSink {
+    fn hand_off(self, datagram: TestDatagram) {
+        self.0.lock().unwrap().push(datagram);
+    }
+}
+
 impl UnclaimedSink {
-    pub(super) fn policy(&self) -> DatagramFinishPolicy<TestDatagram> {
-        let sink = self.0.clone();
-        DatagramFinishPolicy::OnUnclaimed(Box::new(move |datagram| {
-            sink.lock().unwrap().push(datagram);
-        }))
+    pub(super) fn policy(&self) -> DatagramFinishPolicy<Self> {
+        DatagramFinishPolicy::OnUnclaimed(self.clone())
     }
 
     pub(super) fn len(&self) -> usize {
@@ -219,20 +228,23 @@ impl UnclaimedSink {
 pub(super) fn route_info() -> DatagramRouteMatchInfo {
     DatagramRouteMatchInfo::new(
         MatchAssociation::ZeroCid(sakuya_link::BindingId::new::<TestDatagram>()),
-        FirstPacketInterpretation::Short { dcid_len: 0 },
+        FirstPacketInterpretation::Short {
+            dcid_len: ConnectionIdLength::ZERO,
+        },
     )
 }
 
 /// Prepares and dispatches one datagram to `probes`, in order.
 pub(super) fn route(
     datagram: TestDatagram,
-    finish: DatagramFinishPolicy<TestDatagram>,
+    finish: DatagramFinishPolicy<UnclaimedSink>,
     probes: &[&Arc<Probe>],
 ) {
     let entries = probes
         .iter()
         .map(|probe| {
-            let erased: Arc<dyn SendDatagramDeliverer<TestDatagram>> = Arc::clone(probe) as _;
+            let erased: Arc<dyn SendDatagramDeliverer<TestDatagram, UnclaimedSink>> =
+                Arc::clone(probe) as _;
             (erased, route_info())
         })
         .collect::<Vec<_>>();

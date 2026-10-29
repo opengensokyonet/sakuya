@@ -5,8 +5,10 @@ use std::pin::pin;
 use std::task::Waker;
 
 use super::support::{Judging, Probe, TestDatagram, UnclaimedSink, drops, poll_with, ready, route};
+use crate::claim::candidate::DatagramClaimAttempt;
+use crate::claim::deliverer::DatagramDeliverer;
+use crate::claim::delivery::DatagramDelivery;
 use crate::claim::shared::DatagramFinishPolicy;
-use crate::claim::{DatagramClaimAttempt, DatagramDeliverer, DatagramDelivery};
 
 #[test]
 fn factory_panic_before_the_take_keeps_the_datagram_for_others() {
@@ -107,22 +109,23 @@ fn factory_panic_while_consuming_a_single_delivery_releases_the_datagram() {
 struct PanickingDeliverer;
 
 impl DatagramDeliverer<TestDatagram> for PanickingDeliverer {
+    type Handoff = UnclaimedSink;
     type DelivererDatagramState = ();
 
     fn new_datagram_state(
         &self,
-        _datagram: crate::claim::DatagramView<'_>,
-        _route: &crate::claim::DatagramRouteMatchInfo,
+        _datagram: crate::claim::deliverer::DatagramView<'_>,
+        _route: &crate::claim::route_match::DatagramRouteMatchInfo,
     ) {
     }
 
     fn try_claim<'access>(
         &self,
-        access: crate::claim::DatagramClaimAccess<'access, TestDatagram>,
-        _route: &crate::claim::DatagramRouteMatchInfo,
+        access: crate::claim::deliverer::DatagramClaimAccess<'access, TestDatagram>,
+        _route: &crate::claim::route_match::DatagramRouteMatchInfo,
         state: (),
-    ) -> crate::claim::DatagramClaimOutcome<'access, TestDatagram, ()> {
-        crate::claim::DatagramClaimOutcome::Unclaimed { access, state }
+    ) -> crate::claim::deliverer::DatagramClaimOutcome<'access, TestDatagram, ()> {
+        crate::claim::deliverer::DatagramClaimOutcome::Unclaimed { access, state }
     }
 
     fn deliver(&self, _delivery: DatagramDelivery<TestDatagram, Self>) {
@@ -134,13 +137,16 @@ impl DatagramDeliverer<TestDatagram> for PanickingDeliverer {
 fn deliver_panic_releases_the_candidates_not_yet_delivered() {
     use std::sync::Arc;
 
-    use crate::claim::SendDatagramDeliverer;
+    use crate::claim::erased::SendDatagramDeliverer;
     use crate::claim::group::prepare_claim;
 
     let later = Probe::new(Judging::Accept);
     let sink = UnclaimedSink::default();
     let (datagram, datagram_drops) = TestDatagram::new(b"dispatch");
-    let entries: Vec<(Arc<dyn SendDatagramDeliverer<TestDatagram>>, _)> = vec![
+    let entries: Vec<(
+        Arc<dyn SendDatagramDeliverer<TestDatagram, UnclaimedSink>>,
+        _,
+    )> = vec![
         (Arc::new(PanickingDeliverer), super::support::route_info()),
         (later.clone(), super::support::route_info()),
     ];

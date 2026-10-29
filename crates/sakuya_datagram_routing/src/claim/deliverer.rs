@@ -1,8 +1,12 @@
 //! The author-implemented deliverer and the views it receives
 
 use std::fmt;
+use std::mem;
 
-use super::{DatagramDelivery, DatagramRouteMatchInfo};
+use super::delivery::DatagramDelivery;
+use super::finish::{ReleaseUnclaimed, UnclaimedHandoff};
+use super::route_match::DatagramRouteMatchInfo;
+use super::shared::DatagramSlot;
 
 /// The capabilities a route entry offers for every datagram it matches.
 ///
@@ -27,6 +31,15 @@ use super::{DatagramDelivery, DatagramRouteMatchInfo};
 /// apply where objects actually cross threads (see the [module
 /// documentation](super#thread-constraints)).
 pub trait DatagramDeliverer<Inner>: Sized {
+    /// What takes over a datagram that every candidate left, in the routing
+    /// domain this deliverer serves.
+    ///
+    /// Every candidate of a datagram carries the handoff of its routing
+    /// domain, so all deliverers registered in one domain share this type.
+    /// The default, [`ReleaseUnclaimed`], suits every domain that never hands
+    /// datagrams off; candidates are `Send` only if the handoff is.
+    type Handoff: UnclaimedHandoff<Inner> = ReleaseUnclaimed;
+
     /// The private state the deliverer keeps for one candidate.
     ///
     /// It is created lazily by [`new_datagram_state`](Self::new_datagram_state),
@@ -42,7 +55,7 @@ pub trait DatagramDeliverer<Inner>: Sized {
     ///
     /// The mechanism calls it at most once per candidate: on the first access
     /// that finds the datagram still present, or at
-    /// [`consume`](super::ExclusiveDatagramDelivery::consume) of a delivery
+    /// [`consume`](super::delivery::ExclusiveDatagramDelivery::consume) of a delivery
     /// whose state was never initialized. It only builds state: it does not
     /// claim, and it does not advance any protocol processing. Values that must
     /// reflect the moment of reception belong in the route match information or
@@ -75,8 +88,10 @@ pub trait DatagramDeliverer<Inner>: Sized {
     ///
     /// Delivery completes when this returns; it does not mean the delivery was
     /// processed. A competing delivery is typically attempted later by the
-    /// receiver with [`try_exclusive`](super::DatagramClaimCandidate::try_exclusive);
-    /// an exclusive one is [consumed](super::ExclusiveDatagramDelivery::consume).
+    /// receiver with
+    /// [`try_exclusive`](super::candidate::DatagramClaimCandidate::try_exclusive);
+    /// an exclusive one is
+    /// [consumed](super::delivery::ExclusiveDatagramDelivery::consume).
     /// Consuming on the spot runs the factory and judgment on the caller's stack.
     /// A deliverer that can no longer accept deliveries drops them.
     fn deliver(&self, delivery: DatagramDelivery<Inner, Self>);
@@ -118,20 +133,26 @@ impl fmt::Debug for DatagramView<'_> {
 /// example to remove header protection or decrypt in place, copies the range
 /// it needs into its private state.
 pub struct DatagramClaimAccess<'access, Inner> {
-    slot: &'access mut Option<Inner>,
+    // invariant: the slot holds the datagram for as long as the access lives.
+    // The mechanism creates an access only for a present datagram, the slot
+    // stays borrowed by the access, and only `into_exclusive`, which consumes
+    // the access, takes the datagram out.
+    slot: &'access mut DatagramSlot<Inner>,
 }
 
 impl<'access, Inner> DatagramClaimAccess<'access, Inner> {
     /// Wraps a slot that the caller has checked to hold the datagram.
-    pub(super) fn new(slot: &'access mut Option<Inner>) -> Self {
-        debug_assert!(slot.is_some());
+    pub(super) fn new(slot: &'access mut DatagramSlot<Inner>) -> Self {
+        debug_assert!(matches!(slot, DatagramSlot::Present(_)));
         Self { slot }
     }
 
     fn datagram(&self) -> &Inner {
-        self.slot
-            .as_ref()
-            .expect("a claim access exists only while the datagram is present")
+        match &*self.slot {
+            DatagramSlot::Present(datagram) => datagram,
+            // invariant: see the field.
+            DatagramSlot::Taken => unreachable!("a claim access outlived its datagram"),
+        }
     }
 
     /// Takes the datagram, so that no other candidate can take it.
@@ -141,11 +162,11 @@ impl<'access, Inner> DatagramClaimAccess<'access, Inner> {
     /// the datagram is authenticated, and it does not hand the datagram to a
     /// receiver. Every other candidate of the datagram observes it gone.
     pub fn into_exclusive(self) -> ExclusiveDatagram<Inner> {
-        ExclusiveDatagram::new(
-            self.slot
-                .take()
-                .expect("a claim access exists only while the datagram is present"),
-        )
+        match mem::replace(self.slot, DatagramSlot::Taken) {
+            DatagramSlot::Present(datagram) => ExclusiveDatagram::new(datagram),
+            // invariant: see the field.
+            DatagramSlot::Taken => unreachable!("a claim access outlived its datagram"),
+        }
     }
 }
 
@@ -166,7 +187,8 @@ impl<Inner> fmt::Debug for DatagramClaimAccess<'_, Inner> {
 /// The result of one [`DatagramDeliverer::try_claim`] call.
 ///
 /// This is the author's view of one judgment. The mechanism's view of a whole
-/// attempt is [`DatagramClaimAttempt`](super::DatagramClaimAttempt), which also
+/// attempt is [`DatagramClaimAttempt`](super::candidate::DatagramClaimAttempt),
+/// which also
 /// covers a datagram already taken and the direct take of a last-takes
 /// candidate.
 #[must_use]

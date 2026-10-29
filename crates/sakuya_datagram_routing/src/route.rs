@@ -43,44 +43,42 @@
 //! # Accepting new Initials
 //!
 //! When every candidate of an acceptable Initial exits, the last exit hands an
-//! [`UnclaimedWork`] to the configured [`ReflowProvider`] without continuing
-//! on that call stack. The outer layer later passes it to
-//! [`DatagramRouter::resume`], which prepares a receiver, rechecks the
-//! Initial's key within one entry access, and either offers the datagram to
-//! entries that had no chance yet, publishes the prepared receiver, or
-//! releases the datagram. See [`InitialAcceptance`].
+//! [`UnclaimedWork`] to the configured [`ReflowProvider`] through the domain's
+//! [`ReflowHandoff`], without continuing on that call stack. The outer layer
+//! later passes it to [`DatagramRouter::resume`], which prepares a receiver,
+//! rechecks the Initial's key within one entry access, and either offers the
+//! datagram to entries that had no chance yet, publishes the prepared
+//! receiver, or releases the datagram. See [`InitialAcceptance`].
 //!
 //! # Stateless resets
 //!
 //! Before any of this, the last 16 bytes of every datagram are checked by the
 //! configured [`StatelessResetDetector`]; a hit ends ordinary routing.
+//!
+//! [`DatagramRouter::route`]: router::DatagramRouter::route
+//! [`DatagramRouter::resume`]: router::DatagramRouter::resume
+//! [`ReceivedDatagram`]: datagram::ReceivedDatagram
+//! [`RouteIndex`]: index::RouteIndex
+//! [`MatchAssociation`]: association::MatchAssociation
+//! [`DatagramRouteEntry`]: index::DatagramRouteEntry
+//! [`RouteMatcher`]: association::RouteMatcher
+//! [`RouteEntryRegistration`]: index::RouteEntryRegistration
+//! [`FirstPacketInterpretation`]: interpretation::FirstPacketInterpretation
+//! [`ConnectionIdRecognizer`]: recognizer::ConnectionIdRecognizer
+//! [`UnclaimedWork`]: acceptance::UnclaimedWork
+//! [`ReflowProvider`]: acceptance::ReflowProvider
+//! [`ReflowHandoff`]: acceptance::ReflowHandoff
+//! [`InitialAcceptance`]: acceptance::InitialAcceptance
+//! [`StatelessResetDetector`]: reset::StatelessResetDetector
 
-mod acceptance;
-mod association;
-mod datagram;
-mod index;
-mod interpretation;
-mod recognizer;
-mod reset;
-mod router;
-
-pub use self::acceptance::{
-    InitialAcceptance, InitialDatagramReceiver, InitialReceiverFactory, PreparedReceiver,
-    ReflowProvider, UnclaimedWork,
-};
-pub use self::association::{MatchAssociation, PacketForms, RouteMatcher};
-pub use self::datagram::{LinkIdentity, ReceivedDatagram};
-pub use self::index::{DatagramRouteEntry, RouteEntryRegistration, RouteIndex};
-pub use self::interpretation::{FirstPacketInterpretation, RecognizedInitial};
-pub use self::recognizer::{
-    ConnectionIdGenerator, ConnectionIdLengths, ConnectionIdOccupancy, ConnectionIdRecognizer,
-    LeastOccupiedConnectionIds,
-};
-pub use self::reset::{
-    STATELESS_RESET_TOKEN_LEN, StatelessResetDetector, StatelessResetRegistration,
-    StatelessResetTarget, StatelessResetTokens,
-};
-pub use self::router::{DatagramRouter, InitialAcceptanceMode, VersionService};
+pub mod acceptance;
+pub mod association;
+pub mod datagram;
+pub mod index;
+pub mod interpretation;
+pub mod recognizer;
+pub mod reset;
+pub mod router;
 
 #[cfg(test)]
 mod tests;
