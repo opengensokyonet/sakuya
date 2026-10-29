@@ -133,6 +133,9 @@ dependencies = [
 [[package]]
 name = "sakuya_datagram_routing"
 version = "0.0.0"
+dependencies = [
+ "tokio",
+]
 
 [[package]]
 name = "sakuya_link"
@@ -152,6 +155,11 @@ dependencies = [
 [[package]]
 name = "sakuya_stream"
 version = "0.0.0"
+dependencies = [
+ "bytes",
+ "sakuya_wire",
+ "snafu",
+]
 
 [[package]]
 name = "sakuya_wire"
@@ -197,6 +205,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "tokio"
+version = "1.54.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
+dependencies = [
+ "pin-project-lite",
 ]
 
 [[package]]
