@@ -6,7 +6,8 @@
 //!
 //! - [`var_int`]: variable-length integers ([`var_int::VarInt`]).
 //! - [`connection_id`]: connection IDs ([`connection_id::ConnectionId`]), their
-//!   non-empty form ([`connection_id::NonEmptyCid`]), the version-independent
+//!   lengths ([`connection_id::ConnectionIdLength`]), their non-empty form
+//!   ([`connection_id::NonEmptyCid`]), the version-independent
 //!   form of long headers ([`connection_id::RawConnectionId`]), and Stateless
 //!   Reset Tokens ([`connection_id::StatelessResetToken`]).
 //! - [`stream_id`]: stream IDs ([`stream_id::StreamId`]).
