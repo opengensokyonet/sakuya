@@ -1,4 +1,13 @@
 //! Datagram routing and claim delivery for sakuya
 //!
-//! This crate is a placeholder in the repository layout; its contents are added
-//! incrementally.
+//! A received UDP datagram is routed to a frozen set of route entries. Each
+//! entry's [`DatagramDeliverer`](claim::DatagramDeliverer) receives a claim
+//! candidate for the datagram, and the candidates compete for the single
+//! original datagram. The [`claim`] module implements that competition: how a
+//! candidate attempts to take the datagram, how the winner gains exclusive
+//! ownership, and how the deliverer's private per-datagram state is created,
+//! kept and handed over. Route registration and lookup build on this mechanism.
+#![feature(type_alias_impl_trait)]
+#![deny(missing_docs)]
+
+pub mod claim;
