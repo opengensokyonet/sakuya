@@ -6,7 +6,7 @@
 //! bytes; their storage is not part of the interface.
 //!
 //! Connection IDs of other QUIC versions may be longer; the version-independent
-//! header interpretation reports them as byte slices.
+//! header interpretation in [`crate::header`] reports them as byte slices.
 //!
 //! [RFC 9000 §5.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-5.1
 use core::{
