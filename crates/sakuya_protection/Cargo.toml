@@ -1,0 +1,9 @@
+[package]
+name = "sakuya_protection"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "QUIC packet protection primitives for sakuya"
+
+[dependencies]
