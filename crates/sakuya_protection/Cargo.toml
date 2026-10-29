@@ -6,4 +6,10 @@ publish.workspace = true
 license.workspace = true
 description = "QUIC packet protection primitives for sakuya"
 
+[features]
+default = ["ring"]
+ring = ["dep:ring"]
+
 [dependencies]
+ring = { workspace = true, optional = true }
+snafu = { workspace = true }
