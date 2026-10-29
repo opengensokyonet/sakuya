@@ -25,6 +25,7 @@ use super::{
     ConnectionFailure, StopRequest, StreamReceiver, flow_control::ReceiveFlowControlPolicy,
     termination::ReceiveTerminationPolicy, termination::TerminationEvent,
 };
+use crate::application_error_code::ApplicationErrorCode;
 use crate::receive_buffer::ReceiveBuffer;
 use core::fmt;
 use sakuya_wire::var_int::VarInt;
@@ -47,9 +48,9 @@ pub enum StopError {
     #[snafu(display("a STOP request with error code {installed} is installed, not {requested}"))]
     StopConflict {
         /// The code of the installed request.
-        installed: VarInt,
+        installed: ApplicationErrorCode,
         /// The code of the rejected request.
-        requested: VarInt,
+        requested: ApplicationErrorCode,
     },
     /// The protocol no longer needs a STOP request.
     #[snafu(display("no STOP request is needed: {reason}"))]
@@ -78,6 +79,12 @@ impl fmt::Display for StopNotNeededReason {
     }
 }
 
+/// [`StreamReceiver::on_stop_sent`] was called without an installed STOP
+/// request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("STOP_SENDING reported sent without an installed request"))]
+pub struct NoStopRequestError;
+
 impl<C> StreamReceiver<C>
 where
     C: ReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy,
@@ -92,7 +99,7 @@ where
     /// # Errors
     ///
     /// See [`StopError`].
-    pub fn stop(&mut self, code: VarInt) -> Result<(), StopError> {
+    pub fn stop(&mut self, code: ApplicationErrorCode) -> Result<(), StopError> {
         if self.check_stop(code)? {
             self.install_stop(code);
             self.notify_termination(TerminationEvent::StopRequested);
@@ -102,12 +109,15 @@ where
 
     /// The error code of a STOP request still waiting to be sent, if it is
     /// still needed.
-    pub fn pending_stop(&self) -> Option<VarInt> {
-        self.stop
-            .filter(|request| {
-                !request.sent && self.failure.is_none() && self.stop_not_needed().is_none()
-            })
-            .map(|request| request.code)
+    pub fn pending_stop(&self) -> Option<ApplicationErrorCode> {
+        match self.stop {
+            StopRequest::Pending(code)
+                if self.failure().is_none() && self.stop_not_needed().is_none() =>
+            {
+                Some(code)
+            }
+            StopRequest::NotRequested | StopRequest::Pending(_) | StopRequest::Sent(_) => None,
+        }
     }
 
     /// Records that the installed STOP request was actually sent.
@@ -116,32 +126,33 @@ where
     /// [`TerminationEvent::StopSent`], which gives it a local reason to
     /// restrict or destroy the receive buffer. Repeated calls do nothing.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if no STOP request is installed.
-    pub fn on_stop_sent(&mut self) {
-        let request = self
-            .stop
-            .as_mut()
-            .expect("STOP_SENDING reported sent without an installed request");
-        if request.sent {
-            return;
+    /// [`NoStopRequestError`] if no STOP request is installed; nothing
+    /// changes then.
+    pub fn on_stop_sent(&mut self) -> Result<(), NoStopRequestError> {
+        match self.stop {
+            StopRequest::NotRequested => NoStopRequestSnafu.fail(),
+            StopRequest::Sent(_) => Ok(()),
+            StopRequest::Pending(code) => {
+                self.stop = StopRequest::Sent(code);
+                self.notify_termination(TerminationEvent::StopSent);
+                Ok(())
+            }
         }
-        request.sent = true;
-        self.notify_termination(TerminationEvent::StopSent);
     }
 
     /// Checks a STOP request; `Ok(true)` means it is to be installed,
     /// `Ok(false)` that the same request is already installed.
-    pub(super) fn check_stop(&self, code: VarInt) -> Result<bool, StopError> {
-        if let Some(failure) = self.failure {
+    pub(super) fn check_stop(&self, code: ApplicationErrorCode) -> Result<bool, StopError> {
+        if let Some(failure) = self.failure() {
             return Err(StopError::Connection { source: failure });
         }
-        if let Some(request) = self.stop {
+        if let Some(installed) = self.stop.code() {
             ensure!(
-                request.code == code,
+                installed == code,
                 StopConflictSnafu {
-                    installed: request.code,
+                    installed,
                     requested: code,
                 }
             );
@@ -153,8 +164,8 @@ where
         Ok(true)
     }
 
-    pub(super) fn install_stop(&mut self, code: VarInt) {
-        self.stop = Some(StopRequest { code, sent: false });
+    pub(super) fn install_stop(&mut self, code: ApplicationErrorCode) {
+        self.stop = StopRequest::Pending(code);
     }
 
     /// Why the protocol needs no STOP request, if it does not.

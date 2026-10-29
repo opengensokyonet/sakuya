@@ -23,13 +23,14 @@
 //! bounded by the delivery limit, and [`ReceiveBuffer::release_from`] and
 //! [`ReceiveBuffer::destroy`] release data that no delivery will need.
 //!
-//! [`fragmented::FragmentedReceiveBuffer`] is the basic implementation, built
-//! on a `BTreeMap` of fragments.
+//! [`fragmented::FragmentedReceiveBuffer`] implements it with a `BTreeMap` of
+//! fragments.
 //!
 //! [RFC 9000 §4.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-4.5
 use bytes::{BufMut, Bytes};
 use core::ops::Range;
 use sakuya_wire::var_int::VarInt;
+use snafu::{Snafu, ensure};
 
 pub mod fragmented;
 
@@ -40,30 +41,52 @@ pub mod fragmented;
 /// the payload is kept. `payload` is the part of the frame data the stream
 /// receive component accepted: a prefix of the frame data, starting at
 /// `offset`, cut where the local acceptance limit ends. It can be empty.
+///
+/// The constructor checks `offset + payload.len() <= end`, so every offset
+/// inside the payload is a [`VarInt`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamDataInput {
     offset: VarInt,
     end: VarInt,
     fin: bool,
     payload: Bytes,
+    payload_end: VarInt,
 }
 
 impl StreamDataInput {
     /// Describes a frame covering `[offset, end)` whose accepted prefix is
     /// `payload`.
     ///
-    /// Returns `None` if `end` is below `offset` or `payload` is longer than
-    /// `[offset, end)`.
-    pub fn new(offset: VarInt, end: VarInt, fin: bool, payload: Bytes) -> Option<Self> {
-        let span = end.get().checked_sub(offset.get())?;
-        if u64::try_from(payload.len()).ok()? > span {
-            return None;
-        }
-        Some(Self {
+    /// # Errors
+    ///
+    /// [`StreamDataInputError`] if `end` is below `offset` or `payload` is
+    /// longer than `[offset, end)`.
+    pub fn new(
+        offset: VarInt,
+        end: VarInt,
+        fin: bool,
+        payload: Bytes,
+    ) -> Result<Self, StreamDataInputError> {
+        ensure!(
+            offset <= end,
+            stream_data_input_error::EndBeforeOffsetSnafu { offset, end }
+        );
+        let payload_end =
+            offset_add(offset, payload.len()).filter(|payload_end| *payload_end <= end);
+        let Some(payload_end) = payload_end else {
+            return stream_data_input_error::PayloadBeyondEndSnafu {
+                offset,
+                end,
+                payload_len: payload.len(),
+            }
+            .fail();
+        };
+        Ok(Self {
             offset,
             end,
             fin,
             payload,
+            payload_end,
         })
     }
 
@@ -87,19 +110,47 @@ impl StreamDataInput {
         &self.payload
     }
 
+    /// The end of the accepted prefix, `offset + payload.len()`; at most
+    /// `end`.
+    pub fn payload_end(&self) -> VarInt {
+        self.payload_end
+    }
+
     /// Splits the input into offset, end, FIN and accepted payload.
     pub fn into_parts(self) -> (VarInt, VarInt, bool, Bytes) {
         (self.offset, self.end, self.fin, self.payload)
     }
 }
 
+/// Failures of [`StreamDataInput::new`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(module(stream_data_input_error), visibility(pub(crate)))]
+pub enum StreamDataInputError {
+    /// The frame's end lies below its offset.
+    #[snafu(display("stream data end {end} lies below its offset {offset}"))]
+    EndBeforeOffset {
+        /// The frame's offset.
+        offset: VarInt,
+        /// The frame's end.
+        end: VarInt,
+    },
+    /// The accepted payload is longer than the frame's data.
+    #[snafu(display("{payload_len} payload bytes at offset {offset} pass the frame end {end}"))]
+    PayloadBeyondEnd {
+        /// The frame's offset.
+        offset: VarInt,
+        /// The frame's end.
+        end: VarInt,
+        /// The length of the accepted payload.
+        payload_len: usize,
+    },
+}
+
 /// Reassembly, in-order delivery and the cumulative receive facts of one
 /// stream.
 ///
-/// Status: the responsibilities and the ownership of `accounted_end` and
-/// `final_size` are settled; the method set is this crate's first
-/// realisation of the encapsulation boundary the design proposes, where the
-/// buffer answers purpose-specific questions instead of exposing its ranges.
+/// The buffer answers purpose-specific questions instead of exposing its
+/// ranges. This method set is provisional.
 ///
 /// # Contract
 ///

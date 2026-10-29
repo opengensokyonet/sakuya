@@ -1,7 +1,8 @@
+use super::composition::{DefaultSendComposition, SendComposition};
 use super::finish::{CloseError, ResetConflictKind, ResetError};
 use super::flow_control::{
-    AdmissionGuard, DefaultSendFlowControlPolicy, SendFlowContext, SendFlowControlPolicy,
-    StreamCreditEvent, WriteAttempt,
+    AdmissionGrantError, AdmissionGuard, DefaultSendFlowControlPolicy, SendFlowContext,
+    SendFlowControlPolicy, StreamCreditEvent, WriteAttempt,
 };
 use super::termination::{
     FinalSizeRequest, SendTerminationContext, SendTerminationEvent, SendTerminationPolicy,
@@ -9,19 +10,28 @@ use super::termination::{
 };
 use super::write::{FlushError, WriteError, WriteOutcome, WriteReport, WriteWait};
 use super::*;
-use crate::send_buffer::{BasicSendBuffer, ExposedEnd};
+use crate::send_buffer::covered_bytes::CoveredBytes;
+use crate::send_buffer::offset_map::OffsetMapSendBuffer;
+use crate::send_buffer::{
+    AppendError, ApplyResetError, ExposedEnd, ResetRetention, Selection, SelectionConstraints,
+    TransmissionReceipt,
+};
 use bytes::{Buf, Bytes};
 
 fn v(value: u32) -> VarInt {
     VarInt::from_u32(value)
 }
 
+fn code(value: u32) -> ApplicationErrorCode {
+    ApplicationErrorCode::new(v(value))
+}
+
 fn stream() -> StreamId {
     StreamId::from(v(4))
 }
 
-const CODE: u32 = 7;
-const OTHER_CODE: u32 = 9;
+const CODE: ApplicationErrorCode = ApplicationErrorCode::new(VarInt::from_u32(7));
+const OTHER_CODE: ApplicationErrorCode = ApplicationErrorCode::new(VarInt::from_u32(9));
 
 // ---------------------------------------------------------------------------
 // Test policies
@@ -33,6 +43,7 @@ struct RecordingFlow {
     grant_cap: Option<VarInt>,
     admit_nothing: bool,
     over_grant: bool,
+    foreign_offset: bool,
     attempts: Vec<WriteAttempt>,
     settlements: Vec<(VarInt, Option<VarInt>)>,
     events: Vec<StreamCreditEvent>,
@@ -48,17 +59,27 @@ impl SendFlowControlPolicy for RecordingFlow {
         self.attempts.push(*attempt);
         let guard = self.inner.admit_write(attempt, context);
         if self.over_grant {
-            return Some(AdmissionGuard::new(
-                attempt,
-                attempt.ceiling.saturating_add(v(1)),
-            ));
+            // A guard built from a widened copy of the attempt.
+            let granted = attempt.ceiling.saturating_add(v(1));
+            let widened = WriteAttempt {
+                ceiling: granted,
+                ..*attempt
+            };
+            return Some(AdmissionGuard::new(&widened, granted).unwrap());
+        }
+        if self.foreign_offset {
+            let shifted = WriteAttempt {
+                offset: attempt.offset.saturating_add(v(1)),
+                ..*attempt
+            };
+            return Some(AdmissionGuard::new(&shifted, attempt.ceiling).unwrap());
         }
         if self.admit_nothing {
             return None;
         }
         match (guard, self.grant_cap) {
             (Some(guard), Some(cap)) => {
-                Some(AdmissionGuard::new(attempt, guard.granted().min(cap)))
+                Some(AdmissionGuard::new(attempt, guard.granted().min(cap)).unwrap())
             }
             (guard, _) => guard,
         }
@@ -82,24 +103,20 @@ impl SendFlowControlPolicy for RecordingFlow {
     }
 }
 
-type Script = Box<
-    dyn FnMut(&SendTerminationEvent, &SendTerminationContext) -> TerminationAction<&'static str>,
->;
-
 /// A termination policy that answers events through a script and records
 /// them; it completes final sizes with the minimum unless `final_size` says
 /// otherwise.
-struct ScriptedTermination {
-    script: Script,
+struct ScriptedTermination<S> {
+    script: S,
     final_size: Option<VarInt>,
     events: Vec<SendTerminationEvent>,
     completions: Vec<FinalSizeRequest>,
 }
 
-impl Default for ScriptedTermination {
-    fn default() -> Self {
+impl<S> ScriptedTermination<S> {
+    fn new(script: S) -> Self {
         Self {
-            script: Box::new(|_, _| TerminationAction::Keep),
+            script,
             final_size: None,
             events: Vec::new(),
             completions: Vec::new(),
@@ -107,7 +124,10 @@ impl Default for ScriptedTermination {
     }
 }
 
-impl SendTerminationPolicy for ScriptedTermination {
+impl<S> SendTerminationPolicy for ScriptedTermination<S>
+where
+    S: FnMut(&SendTerminationEvent, &SendTerminationContext) -> TerminationAction<&'static str>,
+{
     type WriteLimitReason = &'static str;
 
     fn on_termination_event(
@@ -130,33 +150,43 @@ impl SendTerminationPolicy for ScriptedTermination {
     }
 }
 
-type TestSender =
-    StreamSender<SendComposition<BasicSendBuffer, RecordingFlow, ScriptedTermination>>;
+type TestSender<S> =
+    StreamSender<SendComposition<OffsetMapSendBuffer, RecordingFlow, ScriptedTermination<S>>>;
 
-fn test_sender(peer_stream_limit: u32, reset_stream_at: bool) -> TestSender {
+fn keep(_: &SendTerminationEvent, _: &SendTerminationContext) -> TerminationAction<&'static str> {
+    TerminationAction::Keep
+}
+
+fn sender_with<S>(peer_stream_limit: u32, reset_stream_at: bool, script: S) -> TestSender<S>
+where
+    S: FnMut(&SendTerminationEvent, &SendTerminationContext) -> TerminationAction<&'static str>,
+{
     StreamSender::new(
         stream(),
         v(peer_stream_limit),
         reset_stream_at,
         SendComposition::new(
-            BasicSendBuffer::new(),
+            OffsetMapSendBuffer::new(),
             RecordingFlow::default(),
-            ScriptedTermination::default(),
+            ScriptedTermination::new(script),
         ),
     )
 }
 
-fn scripted_sender(
+fn test_sender(
     peer_stream_limit: u32,
-    script: impl FnMut(
-        &SendTerminationEvent,
-        &SendTerminationContext,
-    ) -> TerminationAction<&'static str>
-    + 'static,
-) -> TestSender {
-    let mut sender = test_sender(peer_stream_limit, true);
-    sender.composition.termination.script = Box::new(script);
-    sender
+    reset_stream_at: bool,
+) -> TestSender<
+    impl FnMut(&SendTerminationEvent, &SendTerminationContext) -> TerminationAction<&'static str>,
+> {
+    sender_with(peer_stream_limit, reset_stream_at, keep)
+}
+
+fn scripted_sender<S>(peer_stream_limit: u32, script: S) -> TestSender<S>
+where
+    S: FnMut(&SendTerminationEvent, &SendTerminationContext) -> TerminationAction<&'static str>,
+{
+    sender_with(peer_stream_limit, true, script)
 }
 
 fn default_sender(
@@ -167,7 +197,7 @@ fn default_sender(
         stream(),
         v(peer_stream_limit),
         reset_stream_at,
-        DefaultSendComposition::with_abandon_code(v(0x10c)),
+        DefaultSendComposition::with_abandon_code(code(0x10c)),
     )
 }
 
@@ -210,15 +240,22 @@ fn expose<C>(
         .unwrap();
 }
 
-fn reset_target(error_code: u32, reliable_size: u32, final_size: u32) -> ResetTarget {
+fn reset_target(
+    error_code: ApplicationErrorCode,
+    reliable_size: u32,
+    final_size: u32,
+) -> ResetTarget {
     ResetTarget {
-        error_code: v(error_code),
+        error_code,
         reliable_size: v(reliable_size),
         final_size: v(final_size),
     }
 }
 
-fn end_commits(sender: &TestSender) -> usize {
+fn end_commits<S>(sender: &TestSender<S>) -> usize
+where
+    S: FnMut(&SendTerminationEvent, &SendTerminationContext) -> TerminationAction<&'static str>,
+{
     sender
         .composition
         .termination
@@ -244,7 +281,7 @@ fn narrow_on_stop_sending(
 // ---------------------------------------------------------------------------
 // Write flow
 
-/// `send-side.md`: input and stream limit allow 1000 bytes, the policy grants
+/// Input and stream limit allow 1000 bytes, the policy grants
 /// 600 and the connection has 400 left; 400 are appended with their
 /// reservation, the guard settles 400, and the input keeps the rest.
 #[test]
@@ -362,46 +399,200 @@ fn grant_beyond_the_ceiling_is_a_policy_violation() {
     let _ = sender.write(&mut input, &mut connection);
 }
 
+#[test]
+#[should_panic(expected = "for offset 1, not 0")]
+fn guard_for_another_offset_is_a_policy_violation() {
+    let mut connection = ConnectionSendFlowController::new(v(1000));
+    let mut sender = test_sender(100, false);
+    sender.composition.flow_control.foreign_offset = true;
+    let mut input = source(10);
+    let _ = sender.write(&mut input, &mut connection);
+}
+
+#[test]
+fn admission_guards_are_checked_at_construction() {
+    let attempt = WriteAttempt {
+        offset: v(10),
+        requested: v(50),
+        stream_available: v(40),
+        write_limit_remaining: None,
+        connection_available: v(1000),
+        ceiling: v(40),
+    };
+    let guard = AdmissionGuard::new(&attempt, v(40)).unwrap();
+    assert_eq!((guard.offset(), guard.granted()), (v(10), v(40)));
+    assert_eq!(
+        AdmissionGuard::new(&attempt, v(41)),
+        Err(AdmissionGrantError {
+            granted: v(41),
+            ceiling: v(40),
+        })
+    );
+    assert!(AdmissionGuard::new(&attempt, VarInt::ZERO).is_err());
+}
+
+/// A send buffer that claims its written end has reached `VarInt::MAX`.
+struct ExhaustedBuffer;
+
+impl SendBuffer for ExhaustedBuffer {
+    fn written_end(&self) -> VarInt {
+        VarInt::MAX
+    }
+
+    fn exposure_end(&self) -> VarInt {
+        VarInt::ZERO
+    }
+
+    fn append(&mut self, data: CoveredBytes) -> Result<(), AppendError> {
+        Err(AppendError::WrittenEndOverflow {
+            written_end: VarInt::MAX,
+            data,
+        })
+    }
+
+    fn apply_reset(&mut self, _: ResetRetention) -> Result<(), ApplyResetError> {
+        Ok(())
+    }
+
+    fn expose_usage_through(
+        &mut self,
+        _: VarInt,
+        _: ExposedEnd,
+        _: &mut ConnectionSendFlowController,
+    ) -> Result<VarInt, ExposeUsageError> {
+        Ok(VarInt::ZERO)
+    }
+
+    fn select(&mut self, constraints: SelectionConstraints) -> Selection {
+        match constraints {}
+    }
+
+    fn on_acknowledged(&mut self, receipt: TransmissionReceipt) {
+        match receipt {}
+    }
+
+    fn on_lost(&mut self, receipt: TransmissionReceipt) {
+        match receipt {}
+    }
+}
+
+/// At the largest stream offset a write fails before it consumes input;
+/// growth of the peer's limit cannot help.
+#[test]
+fn write_at_the_largest_offset_is_a_permanent_error() {
+    let mut connection = ConnectionSendFlowController::new(v(1000));
+    let mut sender = StreamSender::new(
+        stream(),
+        VarInt::MAX,
+        false,
+        SendComposition::new(
+            ExhaustedBuffer,
+            RecordingFlow::default(),
+            ScriptedTermination::new(keep),
+        ),
+    );
+    let mut input = source(10);
+    assert!(matches!(
+        sender.write(&mut input, &mut connection),
+        Err(WriteError::StreamSizeExhausted)
+    ));
+    assert_eq!(input.remaining(), 10);
+    assert!(sender.composition.flow_control.attempts.is_empty());
+    assert_eq!(connection.reserved(), VarInt::ZERO);
+    // Empty input still succeeds with zero bytes.
+    assert_eq!(
+        sender.write(&mut Bytes::new(), &mut connection).unwrap(),
+        written(0)
+    );
+}
+
+#[test]
+fn terminal_state_needs_a_committed_end() {
+    let mut sender = test_sender(1000, false);
+    assert_eq!(
+        sender.enter_terminal_state(SendTerminalState::DataRecvd),
+        Err(EndNotCommittedError)
+    );
+    assert_eq!(sender.terminal_state(), None);
+    sender.close().unwrap();
+    sender
+        .enter_terminal_state(SendTerminalState::DataRecvd)
+        .unwrap();
+    // Only the first terminal state is kept.
+    sender
+        .enter_terminal_state(SendTerminalState::ResetRecvd)
+        .unwrap();
+    assert_eq!(sender.terminal_state(), Some(SendTerminalState::DataRecvd));
+}
+
+#[test]
+fn exposure_with_another_controller_fails_without_effect() {
+    let mut connection = ConnectionSendFlowController::new(v(1000));
+    let mut other = ConnectionSendFlowController::new(v(1000));
+    let mut sender = test_sender(1000, false);
+    write_all(&mut sender, &mut connection, 100);
+    assert_eq!(
+        sender.expose_usage_through(v(50), ExposedEnd::Data, &mut other),
+        Err(ExposeUsageError::ForeignReservation)
+    );
+    assert_eq!(sender.exposure_end(), VarInt::ZERO);
+    assert!(
+        !sender
+            .composition
+            .flow_control
+            .events
+            .iter()
+            .any(|event| matches!(event, StreamCreditEvent::FirstExposed { .. }))
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Empty input and flush
 
-/// `send-side.md`, "空输入与 flush（已确认）", one row per state.
+/// A state, a sender in it, and the expected empty-write and flush results.
+type Row<S> = (
+    &'static str,
+    S,
+    Result<(), &'static str>,
+    Result<(), FlushError>,
+);
+
+/// Empty input and flush, one row per state.
 #[test]
 fn empty_input_and_flush_table() {
-    type Row = (
-        &'static str,
-        TestSender,
-        Result<(), &'static str>,
-        Result<(), FlushError>,
-    );
     let mut connection = ConnectionSendFlowController::new(v(10_000));
+    // One script type for every row, so that the rows share a type.
+    let sender =
+        |peer_stream_limit| scripted_sender(peer_stream_limit, narrow_on_stop_sending(100));
 
-    let open = test_sender(1000, true);
+    let open = sender(1000);
 
-    let mut no_credit = test_sender(0, true);
+    let mut no_credit = sender(0);
     no_credit.composition.flow_control.admit_nothing = true;
 
-    let mut limited = scripted_sender(1000, narrow_on_stop_sending(100));
+    let mut limited = sender(1000);
     write_all(&mut limited, &mut connection, 100);
-    limited.on_stop_sending(v(CODE));
+    limited.on_stop_sending(CODE);
     assert_eq!(limited.write_limit_end(), Some(v(100)));
 
-    let mut closed = test_sender(1000, true);
+    let mut closed = sender(1000);
     write_all(&mut closed, &mut connection, 10);
     closed.close().unwrap();
 
-    let mut reset = test_sender(1000, true);
+    let mut reset = sender(1000);
     write_all(&mut reset, &mut connection, 10);
-    reset.reset(v(CODE)).unwrap();
+    reset.reset(CODE).unwrap();
 
-    let mut reset_delivered = test_sender(1000, true);
-    reset_delivered.reset(v(CODE)).unwrap();
-    reset_delivered.enter_terminal_state(SendTerminalState::ResetRecvd);
+    let mut reset_delivered = sender(1000);
+    reset_delivered.reset(CODE).unwrap();
+    reset_delivered
+        .enter_terminal_state(SendTerminalState::ResetRecvd)
+        .unwrap();
 
-    let mut connection_closed = test_sender(1000, true);
+    let mut connection_closed = sender(1000);
     connection_closed.on_connection_closed();
 
-    let rows: Vec<Row> = vec![
+    let rows: Vec<Row<_>> = vec![
         ("open", open, Ok(()), Ok(())),
         ("credit or admission short", no_credit, Ok(()), Ok(())),
         ("write limit reached", limited, Ok(()), Ok(())),
@@ -462,8 +653,8 @@ fn empty_input_and_flush_table() {
 fn unanswered_stop_sending_leaves_writes_open() {
     let mut connection = ConnectionSendFlowController::new(v(1000));
     let mut sender = test_sender(1000, true);
-    sender.on_stop_sending(v(CODE));
-    assert_eq!(sender.stop_sending_code(), Some(v(CODE)));
+    sender.on_stop_sending(CODE);
+    assert_eq!(sender.stop_sending_code(), Some(CODE));
     write_all(&mut sender, &mut connection, 10);
     assert_eq!(sender.flush(), Ok(()));
 }
@@ -477,7 +668,7 @@ fn write_errors_follow_the_check_order() {
 
     // Connection closed before reset.
     let mut sender = test_sender(1000, true);
-    sender.reset(v(CODE)).unwrap();
+    sender.reset(CODE).unwrap();
     sender.on_connection_closed();
     assert!(matches!(
         sender.write(&mut source(1), &mut connection),
@@ -487,7 +678,7 @@ fn write_errors_follow_the_check_order() {
     // Reset before closed, when a reset replaced a close.
     let mut sender = test_sender(1000, true);
     sender.close().unwrap();
-    sender.reset(v(CODE)).unwrap();
+    sender.reset(CODE).unwrap();
     assert!(matches!(
         sender.write(&mut source(1), &mut connection),
         Err(WriteError::Reset)
@@ -495,7 +686,7 @@ fn write_errors_follow_the_check_order() {
 
     // A close before the write limit, when both apply.
     let mut sender = scripted_sender(1000, narrow_on_stop_sending(0));
-    sender.on_stop_sending(v(CODE));
+    sender.on_stop_sending(CODE);
     sender.close().unwrap();
     assert!(matches!(
         sender.write(&mut source(1), &mut connection),
@@ -504,7 +695,7 @@ fn write_errors_follow_the_check_order() {
 
     // The write limit before temporary admission: no attempt is made.
     let mut sender = scripted_sender(0, narrow_on_stop_sending(0));
-    sender.on_stop_sending(v(CODE));
+    sender.on_stop_sending(CODE);
     let error = sender.write(&mut source(1), &mut connection).unwrap_err();
     let WriteError::WriteLimitReached {
         write_limit_end,
@@ -520,7 +711,7 @@ fn write_errors_follow_the_check_order() {
 #[test]
 fn close_errors_follow_the_check_order() {
     let mut sender = test_sender(1000, true);
-    sender.reset(v(CODE)).unwrap();
+    sender.reset(CODE).unwrap();
     assert_eq!(sender.close(), Err(CloseError::AlreadyReset));
     sender.on_connection_closed();
     assert_eq!(sender.close(), Err(CloseError::ConnectionClosed));
@@ -533,16 +724,18 @@ fn reset_errors_follow_the_check_order() {
     // A conflict with the fixed target is reported before the terminal state.
     let mut sender = test_sender(1000, true);
     write_all(&mut sender, &mut connection, 100);
-    sender.reset(v(CODE)).unwrap();
-    sender.enter_terminal_state(SendTerminalState::ResetRecvd);
+    sender.reset(CODE).unwrap();
+    sender
+        .enter_terminal_state(SendTerminalState::ResetRecvd)
+        .unwrap();
     assert!(matches!(
-        sender.reset(v(OTHER_CODE)),
+        sender.reset(OTHER_CODE),
         Err(ResetError::ResetConflict {
             conflict: ResetConflictKind::ErrorCode { .. }
         })
     ));
     assert_eq!(
-        sender.reset_at(v(CODE), VarInt::ZERO),
+        sender.reset_at(CODE, VarInt::ZERO),
         Ok(()),
         "an identical target is a no-op even in a terminal state"
     );
@@ -551,9 +744,11 @@ fn reset_errors_follow_the_check_order() {
     let mut sender = test_sender(1000, false);
     write_all(&mut sender, &mut connection, 100);
     sender.close().unwrap();
-    sender.enter_terminal_state(SendTerminalState::DataRecvd);
+    sender
+        .enter_terminal_state(SendTerminalState::DataRecvd)
+        .unwrap();
     assert_eq!(
-        sender.reset_at(v(CODE), v(50)),
+        sender.reset_at(CODE, v(50)),
         Err(ResetError::ProtocolTerminal {
             state: SendTerminalState::DataRecvd
         })
@@ -563,7 +758,7 @@ fn reset_errors_follow_the_check_order() {
     let mut sender = test_sender(1000, false);
     write_all(&mut sender, &mut connection, 100);
     assert_eq!(
-        sender.reset_at(v(CODE), v(500)),
+        sender.reset_at(CODE, v(500)),
         Err(ResetError::UnsupportedExtension {
             reliable_size: v(500)
         })
@@ -573,14 +768,14 @@ fn reset_errors_follow_the_check_order() {
     let mut sender = test_sender(1000, true);
     write_all(&mut sender, &mut connection, 100);
     assert_eq!(
-        sender.reset_at_with_final_size(v(CODE), v(500), v(2000)),
+        sender.reset_at_with_final_size(CODE, v(500), v(2000)),
         Err(ResetError::ReliablePrefixNotPrepared {
             reliable_size: v(500),
             written_end: v(100),
         })
     );
     assert_eq!(
-        sender.reset_at_with_final_size(v(CODE), v(50), v(2000)),
+        sender.reset_at_with_final_size(CODE, v(50), v(2000)),
         Err(ResetError::InvalidFinalSize {
             final_size: v(2000),
             minimum: v(50),
@@ -596,7 +791,7 @@ fn reset_errors_follow_the_check_order() {
 // ---------------------------------------------------------------------------
 // State transitions, idempotence and conflicts
 
-/// `send-side.md`, "状态迁移、幂等与冲突（已确认）", row by row.
+/// State transitions, idempotence and conflicts, row by row.
 #[test]
 fn state_transition_table() {
     let mut connection = ConnectionSendFlowController::new(v(10_000));
@@ -618,14 +813,14 @@ fn state_transition_table() {
     // Reset, then the identical target: a no-op, also in a terminal state.
     let mut sender = test_sender(1000, true);
     write_all(&mut sender, &mut connection, 100);
-    sender.reset_at(v(CODE), v(60)).unwrap();
+    sender.reset_at(CODE, v(60)).unwrap();
     let target = sender.end_state();
-    sender.reset_at(v(CODE), v(60)).unwrap();
+    sender.reset_at(CODE, v(60)).unwrap();
+    sender.reset_at_with_final_size(CODE, v(60), v(60)).unwrap();
     sender
-        .reset_at_with_final_size(v(CODE), v(60), v(60))
+        .enter_terminal_state(SendTerminalState::ResetRecvd)
         .unwrap();
-    sender.enter_terminal_state(SendTerminalState::ResetRecvd);
-    sender.reset_at(v(CODE), v(60)).unwrap();
+    sender.reset_at(CODE, v(60)).unwrap();
     assert_eq!(sender.end_state(), target);
     assert_eq!(end_commits(&sender), 1);
     assert_eq!(sender.composition.termination.completions.len(), 1);
@@ -633,8 +828,8 @@ fn state_transition_table() {
     // reset_at with the same code and final size and a smaller reliable size.
     let mut sender = test_sender(1000, true);
     write_all(&mut sender, &mut connection, 100);
-    sender.reset_at(v(CODE), v(80)).unwrap();
-    sender.reset_at(v(CODE), v(30)).unwrap();
+    sender.reset_at(CODE, v(80)).unwrap();
+    sender.reset_at(CODE, v(30)).unwrap();
     assert_eq!(
         sender.end_state(),
         SendEndState::Reset {
@@ -646,7 +841,7 @@ fn state_transition_table() {
 
     // A larger reliable size conflicts.
     assert_eq!(
-        sender.reset_at(v(CODE), v(31)),
+        sender.reset_at(CODE, v(31)),
         Err(ResetError::ResetConflict {
             conflict: ResetConflictKind::ReliableSizeIncrease {
                 current: v(30),
@@ -657,16 +852,16 @@ fn state_transition_table() {
 
     // A different error code or final size conflicts.
     assert_eq!(
-        sender.reset_at(v(OTHER_CODE), v(30)),
+        sender.reset_at(OTHER_CODE, v(30)),
         Err(ResetError::ResetConflict {
             conflict: ResetConflictKind::ErrorCode {
-                current: v(CODE),
-                requested: v(OTHER_CODE),
+                current: CODE,
+                requested: OTHER_CODE,
             }
         })
     );
     assert_eq!(
-        sender.reset_at_with_final_size(v(CODE), v(30), v(90)),
+        sender.reset_at_with_final_size(CODE, v(30), v(90)),
         Err(ResetError::ResetConflict {
             conflict: ResetConflictKind::FinalSize {
                 current: v(80),
@@ -679,7 +874,7 @@ fn state_transition_table() {
     let mut sender = test_sender(1000, true);
     write_all(&mut sender, &mut connection, 100);
     sender.close().unwrap();
-    sender.reset_at(v(CODE), v(40)).unwrap();
+    sender.reset_at(CODE, v(40)).unwrap();
     assert_eq!(
         sender.end_state(),
         SendEndState::Reset {
@@ -692,7 +887,7 @@ fn state_transition_table() {
     write_all(&mut closed, &mut connection, 100);
     closed.close().unwrap();
     assert_eq!(
-        closed.reset_with_final_size(v(CODE), v(90)),
+        closed.reset_with_final_size(CODE, v(90)),
         Err(ResetError::ResetConflict {
             conflict: ResetConflictKind::FinalSize {
                 current: v(100),
@@ -705,9 +900,11 @@ fn state_transition_table() {
     assert_eq!(sender.close(), Err(CloseError::AlreadyReset));
 
     // A terminal state after complete delivery takes no new reset.
-    closed.enter_terminal_state(SendTerminalState::DataRecvd);
+    closed
+        .enter_terminal_state(SendTerminalState::DataRecvd)
+        .unwrap();
     assert_eq!(
-        closed.reset(v(CODE)),
+        closed.reset(CODE),
         Err(ResetError::ProtocolTerminal {
             state: SendTerminalState::DataRecvd
         })
@@ -718,7 +915,7 @@ fn state_transition_table() {
     // input.
     sender.on_connection_closed();
     assert_eq!(
-        sender.reset_at(v(CODE), v(40)),
+        sender.reset_at(CODE, v(40)),
         Err(ResetError::ConnectionClosed)
     );
     assert_eq!(sender.close(), Err(CloseError::ConnectionClosed));
@@ -738,10 +935,10 @@ fn conflicts_follow_the_effective_target() {
     let mut connection = ConnectionSendFlowController::new(v(10_000));
     let mut sender = test_sender(1000, true);
     write_all(&mut sender, &mut connection, 1000);
-    sender.reset_at(v(CODE), v(800)).unwrap();
-    sender.reset_at(v(CODE), v(400)).unwrap();
+    sender.reset_at(CODE, v(800)).unwrap();
+    sender.reset_at(CODE, v(400)).unwrap();
     assert!(matches!(
-        sender.reset_at(v(CODE), v(800)),
+        sender.reset_at(CODE, v(800)),
         Err(ResetError::ResetConflict {
             conflict: ResetConflictKind::ReliableSizeIncrease { .. }
         })
@@ -766,7 +963,7 @@ fn active_requests_meet_the_automatic_target_in_effect() {
         _ => TerminationAction::Keep,
     });
     write_all(&mut sender, &mut connection, 1000);
-    sender.reset_at(v(CODE), v(600)).unwrap();
+    sender.reset_at(CODE, v(600)).unwrap();
     assert_eq!(
         sender.end_state(),
         SendEndState::Reset {
@@ -775,10 +972,10 @@ fn active_requests_meet_the_automatic_target_in_effect() {
         }
     );
     assert!(matches!(
-        sender.reset_at(v(CODE), v(600)),
+        sender.reset_at(CODE, v(600)),
         Err(ResetError::ResetConflict { .. })
     ));
-    sender.reset_at(v(CODE), v(400)).unwrap();
+    sender.reset_at(CODE, v(400)).unwrap();
     assert_eq!(
         sender.end_state(),
         SendEndState::Reset {
@@ -791,7 +988,7 @@ fn active_requests_meet_the_automatic_target_in_effect() {
 // ---------------------------------------------------------------------------
 // reset_at and the handed-over prefix
 
-/// `send-side.md`: with 600 written, reset_at(800) fails without effect;
+/// With 600 written, reset_at(800) fails without effect;
 /// after writing 200 more it succeeds.
 #[test]
 fn reset_at_needs_the_prefix_written() {
@@ -799,7 +996,7 @@ fn reset_at_needs_the_prefix_written() {
     let mut sender = test_sender(1000, true);
     write_all(&mut sender, &mut connection, 600);
     assert_eq!(
-        sender.reset_at(v(CODE), v(800)),
+        sender.reset_at(CODE, v(800)),
         Err(ResetError::ReliablePrefixNotPrepared {
             reliable_size: v(800),
             written_end: v(600),
@@ -807,7 +1004,7 @@ fn reset_at_needs_the_prefix_written() {
     );
     assert_eq!(sender.end_state(), SendEndState::Open);
     write_all(&mut sender, &mut connection, 200);
-    sender.reset_at(v(CODE), v(800)).unwrap();
+    sender.reset_at(CODE, v(800)).unwrap();
     assert_eq!(sender.reliable_size(), v(800));
 }
 
@@ -818,14 +1015,14 @@ fn reset_at_beyond_the_write_limit_cannot_be_prepared() {
     let mut connection = ConnectionSendFlowController::new(v(10_000));
     let mut sender = scripted_sender(1000, narrow_on_stop_sending(700));
     write_all(&mut sender, &mut connection, 600);
-    sender.on_stop_sending(v(CODE));
+    sender.on_stop_sending(CODE);
     let mut input = source(200);
     assert_eq!(
         sender.write(&mut input, &mut connection).unwrap(),
         written(100)
     );
     assert!(matches!(
-        sender.reset_at(v(CODE), v(800)),
+        sender.reset_at(CODE, v(800)),
         Err(ResetError::ReliablePrefixNotPrepared { .. })
     ));
 }
@@ -837,16 +1034,16 @@ fn write_limit_below_the_written_end_keeps_the_prefix() {
     let mut connection = ConnectionSendFlowController::new(v(10_000));
     let mut sender = scripted_sender(1000, narrow_on_stop_sending(300));
     write_all(&mut sender, &mut connection, 600);
-    sender.on_stop_sending(v(CODE));
+    sender.on_stop_sending(CODE);
     assert_eq!(sender.write_limit_end(), Some(v(300)));
-    sender.reset_at(v(CODE), v(400)).unwrap();
+    sender.reset_at(CODE, v(400)).unwrap();
     assert_eq!(sender.reliable_size(), v(400));
 }
 
 // ---------------------------------------------------------------------------
 // Final size range and credit retention
 
-/// `send-accounting.md`: written end 1000, exposure end 400, reliable size
+/// Written end 1000, exposure end 400, reliable size
 /// 600; the final size ranges from 600 to 1000.
 #[test]
 fn reset_final_size_range() {
@@ -859,11 +1056,11 @@ fn reset_final_size_range() {
     };
 
     let mut sender = prepare(&mut connection);
-    sender.reset_at(v(CODE), v(600)).unwrap();
+    sender.reset_at(CODE, v(600)).unwrap();
     assert_eq!(
         sender.composition.termination.completions,
         [FinalSizeRequest {
-            error_code: v(CODE),
+            error_code: CODE,
             reliable_size: v(600),
             minimum: v(600),
             maximum: v(1000),
@@ -872,7 +1069,7 @@ fn reset_final_size_range() {
 
     for (final_size, legal) in [(599, false), (600, true), (1000, true), (1001, false)] {
         let mut sender = prepare(&mut connection);
-        let result = sender.reset_at_with_final_size(v(CODE), v(600), v(final_size));
+        let result = sender.reset_at_with_final_size(CODE, v(600), v(final_size));
         if legal {
             assert_eq!(result, Ok(()), "final size {final_size}");
             assert_eq!(sender.end_state().final_size(), Some(v(final_size)));
@@ -894,7 +1091,7 @@ fn reset_final_size_range() {
     // Plain reset: the minimum is the exposure end.
     let mut sender = prepare(&mut connection);
     assert!(matches!(
-        sender.reset_with_final_size(v(CODE), v(399)),
+        sender.reset_with_final_size(CODE, v(399)),
         Err(ResetError::InvalidFinalSize { minimum, .. }) if minimum == v(400)
     ));
 }
@@ -914,7 +1111,7 @@ fn reset_keeps_coverage_up_to_the_final_size() {
     );
 
     sender
-        .reset_at_with_final_size(v(CODE), v(600), v(800))
+        .reset_at_with_final_size(CODE, v(600), v(800))
         .unwrap();
     assert_eq!(
         (connection.reserved(), connection.committed()),
@@ -922,7 +1119,7 @@ fn reset_keeps_coverage_up_to_the_final_size() {
     );
     assert_eq!(connection.available(), v(10_000 - 800));
 
-    sender.reset_at(v(CODE), v(200)).unwrap();
+    sender.reset_at(CODE, v(200)).unwrap();
     assert_eq!(
         (connection.reserved(), connection.committed()),
         (v(400), v(400))
@@ -939,7 +1136,7 @@ fn reset_keeps_coverage_up_to_the_final_size() {
     );
 }
 
-/// `stream-events.md`: L = 100; writing 80, exposing 30 and resetting at the
+/// L = 100: writing 80, exposing 30 and resetting at the
 /// exposure end leaves 70 available.
 #[test]
 fn connection_credit_example_through_a_stream() {
@@ -953,7 +1150,7 @@ fn connection_credit_example_through_a_stream() {
         (v(50), v(30))
     );
     assert_eq!(connection.available(), v(20));
-    sender.reset(v(CODE)).unwrap();
+    sender.reset(CODE).unwrap();
     assert_eq!(sender.end_state().final_size(), Some(v(30)));
     assert_eq!(
         (connection.reserved(), connection.committed()),
@@ -973,7 +1170,7 @@ fn reset_at_after_close_before_the_fin_is_exposed() {
     sender.close().unwrap();
     assert_eq!(connection.available(), v(0));
 
-    sender.reset_at(v(CODE), v(200)).unwrap();
+    sender.reset_at(CODE, v(200)).unwrap();
     assert_eq!(sender.end_state().final_size(), Some(v(1000)));
     assert_eq!(
         (connection.reserved(), connection.committed()),
@@ -1004,7 +1201,7 @@ fn reset_at_after_the_fin_is_exposed() {
     );
     assert_eq!(connection.available(), v(0));
 
-    sender.reset_at(v(CODE), v(200)).unwrap();
+    sender.reset_at(CODE, v(200)).unwrap();
     assert_eq!(
         (connection.reserved(), connection.committed()),
         (v(0), v(1000))
@@ -1066,7 +1263,7 @@ fn write_limit_narrows_and_stops_new_input() {
         _ => TerminationAction::Keep,
     });
     write_all(&mut sender, &mut connection, 600);
-    sender.on_stop_sending(v(CODE));
+    sender.on_stop_sending(CODE);
     assert_eq!(sender.write_limit_end(), Some(v(700)));
 
     let mut input = source(300);
@@ -1116,8 +1313,8 @@ fn widening_the_write_limit_is_a_policy_violation() {
         },
         _ => TerminationAction::Keep,
     });
-    sender.on_stop_sending(v(CODE));
-    sender.on_stop_sending(v(CODE));
+    sender.on_stop_sending(CODE);
+    sender.on_stop_sending(CODE);
 }
 
 #[test]
@@ -1144,7 +1341,7 @@ fn final_size_outside_the_range_is_a_policy_violation() {
     sender.composition.termination.final_size = Some(v(1200));
     write_all(&mut sender, &mut connection, 1000);
     expose(&mut sender, &mut connection, 400);
-    let _ = sender.reset_at(v(CODE), v(600));
+    let _ = sender.reset_at(CODE, v(600));
 }
 
 #[test]
@@ -1153,14 +1350,14 @@ fn changing_the_error_code_automatically_is_a_policy_violation() {
     let mut sender = scripted_sender(1000, |event, context| match (event, context.end_state) {
         (SendTerminationEvent::StopSendingReceived { .. }, SendEndState::Reset { target, .. }) => {
             TerminationAction::Reset(ResetTarget {
-                error_code: v(OTHER_CODE),
+                error_code: OTHER_CODE,
                 ..target
             })
         }
         _ => TerminationAction::Keep,
     });
-    sender.reset(v(CODE)).unwrap();
-    sender.on_stop_sending(v(CODE));
+    sender.reset(CODE).unwrap();
+    sender.on_stop_sending(CODE);
 }
 
 #[test]
@@ -1185,7 +1382,7 @@ fn closing_after_a_reset_is_a_policy_violation() {
         SendTerminationEvent::WriterAbandoned => TerminationAction::Close,
         _ => TerminationAction::Keep,
     });
-    sender.reset(v(CODE)).unwrap();
+    sender.reset(CODE).unwrap();
     sender.on_writer_abandoned();
 }
 
@@ -1292,7 +1489,7 @@ fn default_flow_control_signals_only_when_stream_limited() {
     assert_eq!(sender.stream_data_blocked_limit(), Some(v(800)));
 
     // No signal once the stream is reset.
-    sender.reset(v(CODE)).unwrap();
+    sender.reset(CODE).unwrap();
     assert_eq!(sender.stream_data_blocked_limit(), None);
 }
 
@@ -1302,13 +1499,13 @@ fn default_termination_chooses_the_smallest_final_size() {
     let mut sender = default_sender(1000, true);
     write_all(&mut sender, &mut connection, 1000);
     expose(&mut sender, &mut connection, 400);
-    sender.reset_at(v(CODE), v(600)).unwrap();
+    sender.reset_at(CODE, v(600)).unwrap();
     assert_eq!(sender.end_state().final_size(), Some(v(600)));
 
     let mut sender = default_sender(1000, true);
     write_all(&mut sender, &mut connection, 1000);
     expose(&mut sender, &mut connection, 400);
-    sender.reset(v(CODE)).unwrap();
+    sender.reset(CODE).unwrap();
     assert_eq!(sender.end_state().final_size(), Some(v(400)));
 }
 
@@ -1320,7 +1517,7 @@ fn default_termination_resets_on_stop_sending() {
     let mut sender = default_sender(1000, true);
     write_all(&mut sender, &mut connection, 1000);
     expose(&mut sender, &mut connection, 250);
-    sender.on_stop_sending(v(OTHER_CODE));
+    sender.on_stop_sending(OTHER_CODE);
     assert_eq!(
         sender.end_state(),
         SendEndState::Reset {
@@ -1333,7 +1530,7 @@ fn default_termination_resets_on_stop_sending() {
     let mut sender = default_sender(1000, true);
     write_all(&mut sender, &mut connection, 100);
     sender.close().unwrap();
-    sender.on_stop_sending(v(OTHER_CODE));
+    sender.on_stop_sending(OTHER_CODE);
     assert_eq!(
         sender.end_state(),
         SendEndState::Reset {
@@ -1345,8 +1542,8 @@ fn default_termination_resets_on_stop_sending() {
     // Reset already: keep the code and final size, lower the reliable size.
     let mut sender = default_sender(1000, true);
     write_all(&mut sender, &mut connection, 1000);
-    sender.reset_at(v(CODE), v(600)).unwrap();
-    sender.on_stop_sending(v(OTHER_CODE));
+    sender.reset_at(CODE, v(600)).unwrap();
+    sender.on_stop_sending(OTHER_CODE);
     assert_eq!(
         sender.end_state(),
         SendEndState::Reset {
@@ -1359,8 +1556,10 @@ fn default_termination_resets_on_stop_sending() {
     let mut sender = default_sender(1000, true);
     write_all(&mut sender, &mut connection, 100);
     sender.close().unwrap();
-    sender.enter_terminal_state(SendTerminalState::DataRecvd);
-    sender.on_stop_sending(v(OTHER_CODE));
+    sender
+        .enter_terminal_state(SendTerminalState::DataRecvd)
+        .unwrap();
+    sender.on_stop_sending(OTHER_CODE);
     assert!(matches!(sender.end_state(), SendEndState::Closed { .. }));
 }
 
@@ -1373,7 +1572,7 @@ fn default_termination_resets_an_abandoned_open_writer() {
     assert_eq!(
         sender.end_state(),
         SendEndState::Reset {
-            target: reset_target(0x10c, 0, 0),
+            target: reset_target(code(0x10c), 0, 0),
             source: EndSource::Policy,
         }
     );
@@ -1404,11 +1603,9 @@ fn keeping_an_abandoned_stream_retains_its_data() {
     assert_eq!(sender.end_state(), SendEndState::Open);
     assert_eq!(sender.composition.buffer.retained().count(), 1);
     assert_eq!(connection.reserved(), v(100));
-    sender.on_stop_sending(v(CODE));
+    sender.on_stop_sending(CODE);
     assert_eq!(
         sender.composition.termination.events.last(),
-        Some(&SendTerminationEvent::StopSendingReceived {
-            error_code: v(CODE)
-        })
+        Some(&SendTerminationEvent::StopSendingReceived { error_code: CODE })
     );
 }

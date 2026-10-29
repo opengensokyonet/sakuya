@@ -1,4 +1,8 @@
+use super::covered_bytes::{CoveredBytes, CoveredBytesError};
+use super::offset_map::OffsetMapSendBuffer;
+use super::visibility::{CoverError, FixFinalSizeError, VisibilitySettlement};
 use super::*;
+use crate::connection_send_credit::ConnectionCreditReservation;
 use sakuya_wire::stream_id::StreamId;
 
 fn v(value: u32) -> VarInt {
@@ -11,7 +15,7 @@ fn stream() -> StreamId {
 
 /// Appends `length` bytes, each holding the low byte of its offset.
 fn append(
-    buffer: &mut BasicSendBuffer,
+    buffer: &mut OffsetMapSendBuffer,
     connection: &mut ConnectionSendFlowController,
     length: u32,
 ) -> Bytes {
@@ -20,11 +24,26 @@ fn append(
         .map(|offset| offset as u8)
         .collect();
     let reservation = connection.reserve(stream(), v(length)).unwrap();
-    buffer.append(bytes.clone(), reservation);
+    buffer
+        .append(CoveredBytes::new(bytes.clone(), reservation).unwrap())
+        .unwrap();
     bytes
 }
 
-fn retained_ranges(buffer: &BasicSendBuffer) -> Vec<(u64, usize)> {
+fn covered(connection: &mut ConnectionSendFlowController, bytes: &'static [u8]) -> CoveredBytes {
+    let length = VarInt::try_from(bytes.len()).unwrap();
+    let reservation = connection.reserve(stream(), length).unwrap();
+    CoveredBytes::new(Bytes::from_static(bytes), reservation).unwrap()
+}
+
+fn retention(final_size: u32, reliable_size: u32) -> ResetRetention {
+    ResetRetention {
+        final_size: v(final_size),
+        reliable_size: v(reliable_size),
+    }
+}
+
+fn retained_ranges(buffer: &OffsetMapSendBuffer) -> Vec<(u64, usize)> {
     buffer
         .retained()
         .map(|(offset, bytes)| (offset.get(), bytes.len()))
@@ -34,7 +53,7 @@ fn retained_ranges(buffer: &BasicSendBuffer) -> Vec<(u64, usize)> {
 #[test]
 fn append_moves_bytes_without_copying() {
     let mut connection = ConnectionSendFlowController::new(v(1000));
-    let mut buffer = BasicSendBuffer::new();
+    let mut buffer = OffsetMapSendBuffer::new();
     let first = append(&mut buffer, &mut connection, 100);
     let second = append(&mut buffer, &mut connection, 50);
     assert_eq!(buffer.written_end(), v(150));
@@ -48,44 +67,54 @@ fn append_moves_bytes_without_copying() {
 }
 
 #[test]
-#[should_panic(expected = "cover exactly the appended data")]
-fn append_rejects_a_mismatched_reservation() {
+fn covered_bytes_reject_a_mismatched_reservation_and_return_both() {
     let mut connection = ConnectionSendFlowController::new(v(1000));
-    let mut buffer = BasicSendBuffer::new();
     let reservation = connection.reserve(stream(), v(9)).unwrap();
-    buffer.append(Bytes::from_static(b"ten bytes!"), reservation);
+    let data = Bytes::from_static(b"ten bytes!");
+    let error = CoveredBytes::new(data.clone(), reservation).unwrap_err();
+    assert!(matches!(error, CoveredBytesError::AmountMismatch { len, .. } if len == v(10)));
+    let (bytes, reservation) = error.into_parts();
+    assert_eq!(bytes, data);
+    assert_eq!(reservation.amount(), v(9));
+    assert_eq!(connection.reserved(), v(9));
 }
 
-/// `send-side.md`: with 1000 unexposed bytes, `apply_reset(final_size = 800,
-/// reliable_size = 600)` keeps the data below 600, keeps the reservations
-/// below 800 and cancels the 200 beyond; lowering the reliable size to 200
-/// afterwards keeps the coverage of 800.
+#[test]
+fn covered_bytes_report_their_parts() {
+    let mut connection = ConnectionSendFlowController::new(v(1000));
+    let data = covered(&mut connection, b"abc");
+    assert_eq!(data.len(), v(3));
+    assert!(!data.is_empty());
+    assert_eq!(data.bytes()[..], b"abc"[..]);
+    assert_eq!(data.reservation().amount(), v(3));
+    let (bytes, reservation): (Bytes, ConnectionCreditReservation) = data.into_parts();
+    assert_eq!((bytes.len(), reservation.amount()), (3, v(3)));
+}
+
+/// With 1000 unexposed bytes, `apply_reset(final_size = 800, reliable_size
+/// = 600)` keeps the data below 600, keeps the reservations below 800 and
+/// cancels the 200 beyond; lowering the reliable size to 200 afterwards
+/// keeps the coverage of 800.
 #[test]
 fn reset_retention_keeps_coverage_up_to_the_final_size() {
     let mut connection = ConnectionSendFlowController::new(v(2000));
-    let mut buffer = BasicSendBuffer::new();
+    let mut buffer = OffsetMapSendBuffer::new();
     for _ in 0..4 {
         append(&mut buffer, &mut connection, 250);
     }
     assert_eq!(connection.reserved(), v(1000));
 
-    let retention = ResetRetention {
-        final_size: v(800),
-        reliable_size: v(600),
-    };
-    buffer.apply_reset(retention);
+    let retention = retention(800, 600);
+    buffer.apply_reset(retention).unwrap();
     assert_eq!(retained_ranges(&buffer), [(0, 250), (250, 250), (500, 100)]);
     assert_eq!(connection.reserved(), v(800));
     assert_eq!(buffer.written_end(), v(1000));
 
     // Repeating the same target releases nothing twice.
-    buffer.apply_reset(retention);
+    buffer.apply_reset(retention).unwrap();
     assert_eq!(connection.reserved(), v(800));
 
-    buffer.apply_reset(ResetRetention {
-        final_size: v(800),
-        reliable_size: v(200),
-    });
+    buffer.apply_reset(self::retention(800, 200)).unwrap();
     assert_eq!(retained_ranges(&buffer), [(0, 200)]);
     assert_eq!(connection.reserved(), v(800));
     assert_eq!(connection.committed(), VarInt::ZERO);
@@ -94,12 +123,9 @@ fn reset_retention_keeps_coverage_up_to_the_final_size() {
 #[test]
 fn reset_slices_the_straddling_entry_without_copying() {
     let mut connection = ConnectionSendFlowController::new(v(1000));
-    let mut buffer = BasicSendBuffer::new();
+    let mut buffer = OffsetMapSendBuffer::new();
     let bytes = append(&mut buffer, &mut connection, 100);
-    buffer.apply_reset(ResetRetention {
-        final_size: v(100),
-        reliable_size: v(30),
-    });
+    buffer.apply_reset(retention(100, 30)).unwrap();
     let (offset, kept) = buffer.retained().next().unwrap();
     assert_eq!((offset, kept.len()), (VarInt::ZERO, 30));
     assert_eq!(kept.as_ptr(), bytes.as_ptr());
@@ -107,16 +133,146 @@ fn reset_slices_the_straddling_entry_without_copying() {
 }
 
 #[test]
-#[should_panic(expected = "no data after a reset")]
-fn append_after_reset_panics() {
+fn append_after_reset_fails_and_returns_the_data() {
     let mut connection = ConnectionSendFlowController::new(v(1000));
-    let mut buffer = BasicSendBuffer::new();
+    let mut buffer = OffsetMapSendBuffer::new();
     append(&mut buffer, &mut connection, 10);
-    buffer.apply_reset(ResetRetention {
-        final_size: v(10),
-        reliable_size: v(0),
-    });
+    buffer.apply_reset(retention(10, 0)).unwrap();
+    let error = buffer
+        .append(covered(&mut connection, b"more"))
+        .unwrap_err();
+    assert!(matches!(error, AppendError::AfterReset { .. }));
+    assert_eq!(error.into_data().len(), v(4));
+    assert_eq!(buffer.written_end(), v(10));
+}
+
+#[test]
+fn append_after_an_exposed_fin_fails() {
+    let mut connection = ConnectionSendFlowController::new(v(1000));
+    let mut buffer = OffsetMapSendBuffer::new();
     append(&mut buffer, &mut connection, 10);
+    buffer
+        .expose_usage_through(v(10), ExposedEnd::FinalSize, &mut connection)
+        .unwrap();
+    let error = buffer
+        .append(covered(&mut connection, b"late"))
+        .unwrap_err();
+    assert!(matches!(error, AppendError::AfterFinalSize { final_size, .. } if final_size == v(10)));
+    drop(error);
+    assert_eq!(buffer.written_end(), v(10));
+    assert_eq!(connection.reserved(), VarInt::ZERO);
+}
+
+#[test]
+fn reset_retention_is_checked_before_anything_changes() {
+    let mut connection = ConnectionSendFlowController::new(v(1000));
+    let mut buffer = OffsetMapSendBuffer::new();
+    append(&mut buffer, &mut connection, 100);
+    assert_eq!(
+        buffer.apply_reset(retention(50, 60)),
+        Err(ApplyResetError::ReliableSizeBeyondFinalSize {
+            reliable_size: v(60),
+            final_size: v(50),
+        })
+    );
+    assert_eq!(
+        buffer.apply_reset(retention(101, 0)),
+        Err(ApplyResetError::FinalSizeBeyondWrittenEnd {
+            final_size: v(101),
+            written_end: v(100),
+        })
+    );
+    buffer
+        .expose_usage_through(v(40), ExposedEnd::Data, &mut connection)
+        .unwrap();
+    assert_eq!(
+        buffer.apply_reset(retention(30, 0)),
+        Err(ApplyResetError::FixFinalSize {
+            source: FixFinalSizeError::BelowExposure {
+                final_size: v(30),
+                exposure_end: v(40),
+            },
+        })
+    );
+    buffer.apply_reset(retention(70, 0)).unwrap();
+    assert_eq!(
+        buffer.apply_reset(retention(80, 0)),
+        Err(ApplyResetError::FixFinalSize {
+            source: FixFinalSizeError::Mismatch {
+                final_size: v(80),
+                established: v(70),
+            },
+        })
+    );
+    assert_eq!(buffer.retention(), Some(retention(70, 0)));
+    assert_eq!(connection.reserved(), v(30));
+}
+
+#[test]
+fn settlement_coverage_must_be_contiguous() {
+    let mut connection = ConnectionSendFlowController::new(v(1000));
+    let mut settlement = VisibilitySettlement::new();
+    settlement
+        .cover(VarInt::ZERO, covered(&mut connection, b"abcd"))
+        .unwrap();
+    assert_eq!(settlement.coverage_end(), v(4));
+    let error = settlement
+        .cover(v(5), covered(&mut connection, b"ef"))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        CoverError::NotContiguous { offset, coverage_end, .. }
+            if offset == v(5) && coverage_end == v(4)
+    ));
+    drop(error.into_data());
+    settlement.fix_final_size(v(4)).unwrap();
+    let error = settlement
+        .cover(v(4), covered(&mut connection, b"gh"))
+        .unwrap_err();
+    assert!(
+        matches!(error, CoverError::FinalSizeEstablished { final_size, .. } if final_size == v(4))
+    );
+    drop(error);
+    assert_eq!(settlement.final_size(), Some(v(4)));
+    assert_eq!(settlement.exposed_final_size(), None);
+    assert_eq!(connection.reserved(), v(4));
+}
+
+#[test]
+fn exposure_rejects_coverage_of_another_controller() {
+    let mut granting = ConnectionSendFlowController::new(v(1000));
+    let mut other = ConnectionSendFlowController::new(v(1000));
+    let mut buffer = OffsetMapSendBuffer::new();
+    append(&mut buffer, &mut granting, 100);
+    assert_eq!(
+        buffer.expose_usage_through(v(50), ExposedEnd::Data, &mut other),
+        Err(ExposeUsageError::ForeignReservation)
+    );
+    assert_eq!(buffer.exposure_end(), VarInt::ZERO);
+    assert_eq!(granting.reserved(), v(100));
+    assert_eq!(
+        buffer
+            .expose_usage_through(v(50), ExposedEnd::Data, &mut granting)
+            .unwrap(),
+        v(50)
+    );
+}
+
+#[test]
+fn settlement_exposure_needs_coverage() {
+    let mut connection = ConnectionSendFlowController::new(v(1000));
+    let mut settlement = VisibilitySettlement::new();
+    settlement
+        .cover(VarInt::ZERO, covered(&mut connection, b"abcd"))
+        .unwrap();
+    assert_eq!(
+        settlement.expose_usage_through(v(6), ExposedEnd::Data, v(10), &mut connection),
+        Err(ExposeUsageError::BeyondCoverage {
+            usage_end: v(6),
+            coverage_end: v(4),
+        })
+    );
+    assert_eq!(settlement.covered(), v(4));
 }
 
 /// The settlement commits `max(E, usage_end) − E` and keeps `E` monotone;
@@ -124,7 +280,7 @@ fn append_after_reset_panics() {
 #[test]
 fn exposure_commits_new_usage_once() {
     let mut connection = ConnectionSendFlowController::new(v(1000));
-    let mut buffer = BasicSendBuffer::new();
+    let mut buffer = OffsetMapSendBuffer::new();
     append(&mut buffer, &mut connection, 500);
 
     let exposed = buffer
@@ -158,7 +314,7 @@ fn exposure_commits_new_usage_once() {
 #[test]
 fn exposure_rejects_usage_beyond_the_written_end() {
     let mut connection = ConnectionSendFlowController::new(v(1000));
-    let mut buffer = BasicSendBuffer::new();
+    let mut buffer = OffsetMapSendBuffer::new();
     append(&mut buffer, &mut connection, 100);
     let error = buffer
         .expose_usage_through(v(101), ExposedEnd::Data, &mut connection)
@@ -176,7 +332,7 @@ fn exposure_rejects_usage_beyond_the_written_end() {
 #[test]
 fn exposed_final_size_constrains_later_exposures() {
     let mut connection = ConnectionSendFlowController::new(v(1000));
-    let mut buffer = BasicSendBuffer::new();
+    let mut buffer = OffsetMapSendBuffer::new();
     append(&mut buffer, &mut connection, 100);
     buffer
         .expose_usage_through(v(60), ExposedEnd::Data, &mut connection)
@@ -233,12 +389,9 @@ fn exposed_final_size_constrains_later_exposures() {
 #[test]
 fn reset_final_size_is_exposed_without_data() {
     let mut connection = ConnectionSendFlowController::new(v(1000));
-    let mut buffer = BasicSendBuffer::new();
+    let mut buffer = OffsetMapSendBuffer::new();
     append(&mut buffer, &mut connection, 100);
-    buffer.apply_reset(ResetRetention {
-        final_size: v(70),
-        reliable_size: VarInt::ZERO,
-    });
+    buffer.apply_reset(retention(70, 0)).unwrap();
     assert_eq!(retained_ranges(&buffer), []);
     assert_eq!(connection.reserved(), v(70));
 
@@ -254,4 +407,31 @@ fn reset_final_size_is_exposed_without_data() {
         (connection.reserved(), connection.committed()),
         (v(0), v(70))
     );
+}
+
+/// A FIN exposes the final size while input is still open in the buffer; a
+/// later reset must keep it, and fixing it cancels the coverage beyond.
+#[test]
+fn fixing_an_exposed_final_size_keeps_it() {
+    let mut connection = ConnectionSendFlowController::new(v(1000));
+    let mut buffer = OffsetMapSendBuffer::new();
+    append(&mut buffer, &mut connection, 100);
+    buffer
+        .expose_usage_through(v(80), ExposedEnd::FinalSize, &mut connection)
+        .unwrap();
+    assert_eq!(buffer.visibility().exposed_final_size(), Some(v(80)));
+    assert_eq!(
+        buffer.apply_reset(retention(90, 0)),
+        Err(ApplyResetError::FixFinalSize {
+            source: FixFinalSizeError::Mismatch {
+                final_size: v(90),
+                established: v(80),
+            },
+        })
+    );
+    assert_eq!(connection.reserved(), v(20));
+    buffer.apply_reset(retention(80, 0)).unwrap();
+    assert_eq!(connection.reserved(), VarInt::ZERO);
+    assert_eq!(buffer.visibility().exposed_final_size(), Some(v(80)));
+    assert_eq!(buffer.visibility().covered(), VarInt::ZERO);
 }

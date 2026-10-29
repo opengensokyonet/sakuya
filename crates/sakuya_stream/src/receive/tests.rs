@@ -6,16 +6,18 @@ use super::{
     },
     read::{ReadError, ReadOutcome, RemoteReset},
     termination::{
-        BasicTermination, BoundaryAction, BoundaryUpdate, ReceiveTerminationPolicy,
+        BoundaryAction, BoundaryUpdate, FollowingTermination, ReceiveTerminationPolicy,
         ResetPresentation, TerminationDecision, TerminationEvent, TerminationView,
     },
 };
 use crate::{
+    application_error_code::ApplicationErrorCode,
     connection_receive_flow::ConnectionReceiveFlowController,
     receive_buffer::{ReceiveBuffer, StreamDataInput, fragmented::FragmentedReceiveBuffer},
 };
 use bytes::{BufMut, Bytes};
 use core::{cell::Cell, ops::Range};
+use sakuya_wire::transport_error::TransportErrorCode;
 use sakuya_wire::var_int::VarInt;
 use std::rc::Rc;
 
@@ -27,6 +29,10 @@ mod stop;
 
 fn v(value: u32) -> VarInt {
     VarInt::from_u32(value)
+}
+
+fn c(value: u32) -> ApplicationErrorCode {
+    ApplicationErrorCode::new(v(value))
 }
 
 /// `len` bytes whose values are their stream offsets modulo 251.
@@ -46,26 +52,26 @@ fn stream(offset: u32, len: u32, fin: bool) -> StreamFrame {
 
 fn reset(code: u32, final_size: u32) -> ResetStreamFrame {
     ResetStreamFrame {
-        code: v(code),
+        code: c(code),
         final_size: v(final_size),
     }
 }
 
 fn reset_at(code: u32, final_size: u32, reliable_size: u32) -> ResetStreamAtFrame {
     ResetStreamAtFrame {
-        code: v(code),
+        code: c(code),
         final_size: v(final_size),
         reliable_size: v(reliable_size),
     }
 }
 
-type Script =
-    Box<dyn FnMut(TerminationEvent, &TerminationView) -> TerminationDecision<&'static str>>;
-
 /// A termination policy that answers each event with a closure.
-struct Scripted(Script);
+struct Scripted<S>(S);
 
-impl ReceiveTerminationPolicy for Scripted {
+impl<S> ReceiveTerminationPolicy for Scripted<S>
+where
+    S: FnMut(TerminationEvent, &TerminationView) -> TerminationDecision<&'static str>,
+{
     type Reason = &'static str;
 
     fn on_termination_event(
@@ -77,15 +83,20 @@ impl ReceiveTerminationPolicy for Scripted {
     }
 }
 
-fn scripted(
-    script: impl FnMut(TerminationEvent, &TerminationView) -> TerminationDecision<&'static str>
-    + 'static,
-) -> Scripted {
-    Scripted(Box::new(script))
+fn scripted<S>(script: S) -> Scripted<S>
+where
+    S: FnMut(TerminationEvent, &TerminationView) -> TerminationDecision<&'static str>,
+{
+    Scripted(script)
 }
 
-fn keep_all() -> Scripted {
-    scripted(|_, _| TerminationDecision::keep())
+fn keep(_: TerminationEvent, _: &TerminationView) -> TerminationDecision<&'static str> {
+    TerminationDecision::keep()
+}
+
+fn keep_all()
+-> Scripted<impl FnMut(TerminationEvent, &TerminationView) -> TerminationDecision<&'static str>> {
+    scripted(keep)
 }
 
 fn restrict(
@@ -203,7 +214,7 @@ impl<T: ReceiveTerminationPolicy> ReceiveTerminationPolicy for Parts<T> {
     }
 }
 
-type Receiver<T = Scripted> = StreamReceiver<Parts<T>>;
+type Receiver<T> = StreamReceiver<Parts<T>>;
 
 /// The result of one chunk read.
 type ChunkRead<R = &'static str> = Result<ReadOutcome<Bytes>, ReadError<R>>;
@@ -254,7 +265,7 @@ fn read_all<T: ReceiveTerminationPolicy>(
 fn reset_error<R>(code: u32, final_size: u32, reliable_size: u32, complete: bool) -> ChunkRead<R> {
     Err(ReadError::Reset {
         reset: RemoteReset {
-            code: v(code),
+            code: c(code),
             final_size: v(final_size),
             reliable_size: v(reliable_size),
         },
@@ -269,19 +280,19 @@ fn protocol(failure: ConnectionFailure) -> ProtocolError {
     }
 }
 
-/// The basic composition, end to end.
-mod basic {
+/// The following termination policy, end to end.
+mod following {
     use super::*;
 
     #[test]
     fn reader_drop_requests_stop_with_the_abandon_code() {
-        let (mut receiver, mut connection) = new_receiver(BasicTermination::new(v(9)));
+        let (mut receiver, mut connection) = new_receiver(FollowingTermination::new(c(9)));
         receiver
             .on_stream_frame(stream(0, 100, false), &mut connection)
             .unwrap();
         receiver.reader_dropped();
         assert!(receiver.parts().buffer.is_destroyed());
-        assert_eq!(receiver.pending_stop(), Some(v(9)));
+        assert_eq!(receiver.pending_stop(), Some(c(9)));
         // The protocol duties go on: input is still checked and accounted.
         receiver
             .on_stream_frame(stream(100, 100, false), &mut connection)
@@ -292,18 +303,18 @@ mod basic {
 
     #[test]
     fn reader_drop_keeps_an_installed_stop() {
-        let (mut receiver, mut connection) = new_receiver(BasicTermination::new(v(9)));
+        let (mut receiver, mut connection) = new_receiver(FollowingTermination::new(c(9)));
         receiver
             .on_stream_frame(stream(0, 100, false), &mut connection)
             .unwrap();
-        receiver.stop(v(3)).unwrap();
+        receiver.stop(c(3)).unwrap();
         receiver.reader_dropped();
-        assert_eq!(receiver.pending_stop(), Some(v(3)));
+        assert_eq!(receiver.pending_stop(), Some(c(3)));
     }
 
     #[test]
     fn reader_drop_after_complete_reception_only_cleans_up() {
-        let (mut receiver, mut connection) = new_receiver(BasicTermination::new(v(9)));
+        let (mut receiver, mut connection) = new_receiver(FollowingTermination::new(c(9)));
         receiver
             .on_stream_frame(stream(0, 100, true), &mut connection)
             .unwrap();
@@ -314,7 +325,7 @@ mod basic {
 
     #[test]
     fn plain_reset_uses_late_data_and_reports_completeness() {
-        let (mut receiver, mut connection) = new_receiver(BasicTermination::new(v(9)));
+        let (mut receiver, mut connection) = new_receiver(FollowingTermination::new(c(9)));
         receiver
             .on_stream_frame(stream(0, 100, false), &mut connection)
             .unwrap();
@@ -331,7 +342,7 @@ mod basic {
 
     #[test]
     fn plain_reset_stops_at_a_gap() {
-        let (mut receiver, mut connection) = new_receiver(BasicTermination::new(v(9)));
+        let (mut receiver, mut connection) = new_receiver(FollowingTermination::new(c(9)));
         receiver
             .on_stream_frame(stream(0, 100, false), &mut connection)
             .unwrap();
@@ -348,7 +359,7 @@ mod basic {
 
     #[test]
     fn reliable_prefix_gap_waits() {
-        let (mut receiver, mut connection) = new_receiver(BasicTermination::new(v(9)));
+        let (mut receiver, mut connection) = new_receiver(FollowingTermination::new(c(9)));
         receiver
             .on_reset_stream_at(reset_at(4, 1000, 500), &mut connection)
             .unwrap();

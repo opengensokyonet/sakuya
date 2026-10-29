@@ -103,7 +103,10 @@ fn exceeding_the_stream_limit_is_a_protocol_error() {
             limit: v(1000),
         }
     );
-    assert_eq!(error.transport_error_code(), v(0x03));
+    assert_eq!(
+        error.transport_error_code(),
+        TransportErrorCode::FLOW_CONTROL_ERROR
+    );
     // The connection usage was not charged for the rejected frame.
     assert_eq!(connection.used(), v(900));
     // The failure persists: later input and reads report it first, and the
@@ -148,7 +151,10 @@ fn exceeding_the_connection_limit_is_a_protocol_error() {
         error,
         ProtocolError::ConnectionLimitExceeded { .. }
     ));
-    assert_eq!(error.transport_error_code(), v(0x03));
+    assert_eq!(
+        error.transport_error_code(),
+        TransportErrorCode::FLOW_CONTROL_ERROR
+    );
     assert_eq!(connection.used(), VarInt::ZERO);
 }
 
@@ -245,7 +251,10 @@ fn final_size_errors() {
             received: v(200),
         }
     );
-    assert_eq!(error.transport_error_code(), v(0x06));
+    assert_eq!(
+        error.transport_error_code(),
+        TransportErrorCode::FINAL_SIZE_ERROR
+    );
 
     let (mut receiver, mut connection) = new_receiver(keep_all());
     receiver
@@ -322,11 +331,14 @@ fn reset_errors() {
     assert_eq!(
         error,
         ProtocolError::ResetCodeChanged {
-            code: v(1),
-            received: v(2),
+            code: c(1),
+            received: c(2),
         }
     );
-    assert_eq!(error.transport_error_code(), v(0x05));
+    assert_eq!(
+        error.transport_error_code(),
+        TransportErrorCode::STREAM_STATE_ERROR
+    );
 
     let (mut receiver, mut connection) = new_receiver(keep_all());
     let error = protocol(
@@ -341,7 +353,10 @@ fn reset_errors() {
             final_size: v(100),
         }
     );
-    assert_eq!(error.transport_error_code(), v(0x07));
+    assert_eq!(
+        error.transport_error_code(),
+        TransportErrorCode::FRAME_ENCODING_ERROR
+    );
 }
 
 #[test]
@@ -358,7 +373,10 @@ fn offset_overflow_is_a_frame_encoding_error() {
             .unwrap_err(),
     );
     assert!(matches!(error, ProtocolError::OffsetOverflow { .. }));
-    assert_eq!(error.transport_error_code(), v(0x07));
+    assert_eq!(
+        error.transport_error_code(),
+        TransportErrorCode::FRAME_ENCODING_ERROR
+    );
 }
 
 /// A STREAM frame crossing the acceptance limit hands only the part below it
@@ -371,8 +389,8 @@ fn frame_across_the_acceptance_limit() {
         }
         _ => TerminationDecision::keep(),
     }));
-    receiver.stop(v(1)).unwrap();
-    receiver.on_stop_sent();
+    receiver.stop(c(1)).unwrap();
+    receiver.on_stop_sent().unwrap();
     receiver
         .on_stream_frame(stream(100, 200, false), &mut connection)
         .unwrap();
@@ -397,7 +415,7 @@ fn released_progress_reaches_the_connection() {
     let mut target = vec![0; 0];
     let mut limited = (&mut target).limit(50);
     receiver.read_into(&mut limited).unwrap();
-    receiver.report_release(&mut connection);
+    receiver.report_release(&mut connection).unwrap();
     assert_eq!(connection.released(), v(50));
     // The reset fixes delivery at 150: [150, 300) no longer needs holding.
     receiver
@@ -406,6 +424,29 @@ fn released_progress_reaches_the_connection() {
     assert_eq!(connection.released(), v(200));
     let (read, _) = read_all(&mut receiver);
     assert_eq!(read, data(50, 100));
-    receiver.report_release(&mut connection);
+    receiver.report_release(&mut connection).unwrap();
     assert_eq!(connection.released(), v(300));
+}
+
+/// A release reported to a controller that never recorded the usage fails
+/// and stays due for the controller that did.
+#[test]
+fn release_to_another_controller_fails_and_stays_due() {
+    let (mut receiver, mut connection) = new_receiver(keep_all());
+    receiver
+        .on_stream_frame(stream(0, 100, false), &mut connection)
+        .unwrap();
+    let (read, _) = read_all(&mut receiver);
+    assert_eq!(read.len(), 100);
+    let mut other = ConnectionReceiveFlowController::new(v(1 << 20));
+    assert_eq!(
+        receiver.report_release(&mut other),
+        Err(crate::connection_receive_flow::RecordReleaseError {
+            released: VarInt::ZERO,
+            increase: v(100),
+            used: VarInt::ZERO,
+        })
+    );
+    receiver.report_release(&mut connection).unwrap();
+    assert_eq!(connection.released(), v(100));
 }

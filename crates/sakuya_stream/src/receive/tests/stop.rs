@@ -1,13 +1,13 @@
 //! The local STOP request, row by row of its checks.
 use super::*;
-use crate::receive::stop::{StopError, StopNotNeededReason};
+use crate::receive::stop::{NoStopRequestError, StopError, StopNotNeededReason};
 
 #[test]
 fn connection_closed_fails_the_request() {
     let (mut receiver, _connection) = new_receiver(keep_all());
     receiver.connection_closed();
     assert_eq!(
-        receiver.stop(v(1)),
+        receiver.stop(c(1)),
         Err(StopError::Connection {
             source: ConnectionFailure::Closed,
         })
@@ -22,7 +22,7 @@ fn protocol_failure_fails_the_request() {
         .on_stream_frame(stream(0, 11, false), &mut connection)
         .unwrap_err();
     assert_eq!(
-        receiver.stop(v(1)),
+        receiver.stop(c(1)),
         Err(StopError::Connection { source: failure })
     );
 }
@@ -30,24 +30,24 @@ fn protocol_failure_fails_the_request() {
 #[test]
 fn same_code_is_idempotent() {
     let (mut receiver, _connection) = new_receiver(keep_all());
-    assert_eq!(receiver.stop(v(1)), Ok(()));
-    assert_eq!(receiver.stop(v(1)), Ok(()));
+    assert_eq!(receiver.stop(c(1)), Ok(()));
+    assert_eq!(receiver.stop(c(1)), Ok(()));
     assert_eq!(receiver.parts().count(TerminationEvent::StopRequested), 1);
-    assert_eq!(receiver.pending_stop(), Some(v(1)));
+    assert_eq!(receiver.pending_stop(), Some(c(1)));
 }
 
 #[test]
 fn other_code_conflicts_and_keeps_the_request() {
     let (mut receiver, _connection) = new_receiver(keep_all());
-    receiver.stop(v(1)).unwrap();
+    receiver.stop(c(1)).unwrap();
     assert_eq!(
-        receiver.stop(v(2)),
+        receiver.stop(c(2)),
         Err(StopError::StopConflict {
-            installed: v(1),
-            requested: v(2),
+            installed: c(1),
+            requested: c(2),
         })
     );
-    assert_eq!(receiver.pending_stop(), Some(v(1)));
+    assert_eq!(receiver.pending_stop(), Some(c(1)));
 }
 
 #[test]
@@ -59,11 +59,11 @@ fn complete_reception_needs_no_request() {
     let not_needed = Err(StopError::StopNotNeeded {
         reason: StopNotNeededReason::DataComplete,
     });
-    assert_eq!(receiver.stop(v(1)), not_needed);
+    assert_eq!(receiver.stop(c(1)), not_needed);
     // Also after the normal end was read.
     let (_, end) = read_all(&mut receiver);
     assert_eq!(end, Ok(ReadOutcome::End));
-    assert_eq!(receiver.stop(v(1)), not_needed);
+    assert_eq!(receiver.stop(c(1)), not_needed);
 }
 
 #[test]
@@ -73,7 +73,7 @@ fn plain_reset_needs_no_request() {
         .on_reset_stream(reset(4, 100), &mut connection)
         .unwrap();
     assert_eq!(
-        receiver.stop(v(1)),
+        receiver.stop(c(1)),
         Err(StopError::StopNotNeeded {
             reason: StopNotNeededReason::PeerReset,
         })
@@ -90,7 +90,7 @@ fn received_reliable_prefix_needs_no_request() {
         .on_reset_stream_at(reset_at(4, 1000, 400), &mut connection)
         .unwrap();
     assert_eq!(
-        receiver.stop(v(1)),
+        receiver.stop(c(1)),
         Err(StopError::StopNotNeeded {
             reason: StopNotNeededReason::PeerReset,
         })
@@ -105,8 +105,8 @@ fn allowed_request_is_installed_without_ending_reads() {
     receiver
         .on_stream_frame(stream(0, 100, false), &mut connection)
         .unwrap();
-    assert_eq!(receiver.stop(v(1)), Ok(()));
-    assert_eq!(receiver.pending_stop(), Some(v(1)));
+    assert_eq!(receiver.stop(c(1)), Ok(()));
+    assert_eq!(receiver.pending_stop(), Some(c(1)));
     assert_eq!(receiver.read_chunk(), Ok(ReadOutcome::Data(data(0, 100))));
     receiver
         .on_stream_frame(stream(100, 100, true), &mut connection)
@@ -122,12 +122,12 @@ fn allowed_request_is_installed_without_ending_reads() {
 #[test]
 fn installed_request_outlives_completion_for_retries() {
     let (mut receiver, mut connection) = new_receiver(keep_all());
-    receiver.stop(v(1)).unwrap();
+    receiver.stop(c(1)).unwrap();
     receiver
         .on_stream_frame(stream(0, 100, true), &mut connection)
         .unwrap();
     assert_eq!(receiver.pending_stop(), None);
-    assert_eq!(receiver.stop(v(1)), Ok(()));
+    assert_eq!(receiver.stop(c(1)), Ok(()));
     assert_eq!(receiver.parts().count(TerminationEvent::StopRequested), 1);
 }
 
@@ -139,8 +139,8 @@ fn request_after_local_termination() {
         TerminationEvent::StopSent => destroy("stopped"),
         _ => TerminationDecision::keep(),
     }));
-    receiver.stop(v(1)).unwrap();
-    receiver.on_stop_sent();
+    receiver.stop(c(1)).unwrap();
+    receiver.on_stop_sent().unwrap();
     assert_eq!(
         receiver.read_chunk(),
         Err(ReadError::LocalTermination {
@@ -150,7 +150,7 @@ fn request_after_local_termination() {
         })
     );
     // The same request is confirmed again; the duty to send is done.
-    assert_eq!(receiver.stop(v(1)), Ok(()));
+    assert_eq!(receiver.stop(c(1)), Ok(()));
     assert_eq!(receiver.pending_stop(), None);
 }
 
@@ -158,27 +158,32 @@ fn request_after_local_termination() {
 fn request_is_observed_but_cannot_be_vetoed() {
     let (mut receiver, _connection) = new_receiver(scripted(|event, view| {
         if event == TerminationEvent::StopRequested {
-            assert_eq!(view.stop_code, Some(v(1)));
+            assert_eq!(view.stop_code, Some(c(1)));
             assert!(!view.stop_sent);
         }
         TerminationDecision::keep()
     }));
-    receiver.stop(v(1)).unwrap();
+    receiver.stop(c(1)).unwrap();
     assert_eq!(
         receiver.parts().event_kinds(),
         vec![TerminationEvent::StopRequested]
     );
-    receiver.on_stop_sent();
-    receiver.on_stop_sent();
+    receiver.on_stop_sent().unwrap();
+    receiver.on_stop_sent().unwrap();
     assert_eq!(receiver.parts().count(TerminationEvent::StopSent), 1);
     assert_eq!(receiver.pending_stop(), None);
 }
 
 #[test]
-#[should_panic(expected = "without an installed request")]
-fn stop_sent_without_a_request_panics() {
+fn stop_sent_without_a_request_fails() {
     let (mut receiver, _connection) = new_receiver(keep_all());
-    receiver.on_stop_sent();
+    assert_eq!(receiver.on_stop_sent(), Err(NoStopRequestError));
+    assert!(receiver.parts().events.is_empty());
+    receiver.stop(c(1)).unwrap();
+    receiver.on_stop_sent().unwrap();
+    // A repeated report changes nothing.
+    receiver.on_stop_sent().unwrap();
+    assert_eq!(receiver.parts().count(TerminationEvent::StopSent), 1);
 }
 
 #[test]

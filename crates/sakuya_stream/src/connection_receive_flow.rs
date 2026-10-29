@@ -16,10 +16,8 @@ use snafu::{Snafu, ensure};
 /// Connection-wide receive accounting: the advertised limit, the cumulative
 /// usage of all streams and the cumulative released progress.
 ///
-/// Status: the state is the minimal candidate of the design (`limit`, `used`,
-/// `released`); the name is proposed and the connection-level window growth
-/// (when and how far to raise the limit, sending `MAX_DATA`) is not part of
-/// this type.
+/// Connection-level window growth (when and how far to raise the limit,
+/// sending `MAX_DATA`) is not part of this type.
 ///
 /// - `limit` is the highest connection limit that may have become visible to
 ///   the peer. It only grows.
@@ -94,17 +92,25 @@ impl ConnectionReceiveFlowController {
 
     /// Adds `increase` to the released progress.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the released progress would exceed the usage: a stream can
-    /// release only what it has accounted.
-    pub fn record_release(&mut self, increase: VarInt) {
+    /// Fails, without changing the released progress, if it would exceed the
+    /// usage: a stream can release only what it has accounted.
+    pub fn record_release(&mut self, increase: VarInt) -> Result<(), RecordReleaseError> {
         let released = self
             .released
             .checked_add(increase)
-            .filter(|released| *released <= self.used)
-            .expect("released progress exceeds connection usage");
+            .filter(|released| *released <= self.used);
+        let Some(released) = released else {
+            return RecordReleaseSnafu {
+                released: self.released,
+                increase,
+                used: self.used,
+            }
+            .fail();
+        };
         self.released = released;
+        Ok(())
     }
 }
 
@@ -121,6 +127,21 @@ pub struct RecordUsageError {
     pub increase: VarInt,
     /// The advertised connection limit.
     pub limit: VarInt,
+}
+
+/// [`ConnectionReceiveFlowController::record_release`] would release more
+/// than the connection has used.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display(
+    "released progress would reach {released} + {increase}, beyond the connection usage {used}"
+))]
+pub struct RecordReleaseError {
+    /// The released progress before the rejected increase.
+    pub released: VarInt,
+    /// The rejected increase.
+    pub increase: VarInt,
+    /// The connection usage.
+    pub used: VarInt,
 }
 
 #[cfg(test)]

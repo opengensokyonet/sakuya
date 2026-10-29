@@ -200,8 +200,8 @@ fn stop_truncation_survives_a_larger_reliable_size() {
     receiver
         .on_stream_frame(stream(0, 200, false), &mut connection)
         .unwrap();
-    receiver.stop(v(7)).unwrap();
-    receiver.on_stop_sent();
+    receiver.stop(c(7)).unwrap();
+    receiver.on_stop_sent().unwrap();
     assert_eq!(receiver.delivery_limit(), BoundaryMode::Fixed(v(300)));
     receiver
         .on_stream_frame(stream(200, 600, false), &mut connection)
@@ -221,7 +221,7 @@ fn stop_truncation_survives_a_larger_reliable_size() {
             reason: "stop",
             trigger: TerminationEvent::StopSent,
             remote: Some(RemoteReset {
-                code: v(4),
+                code: c(4),
                 final_size: v(1000),
                 reliable_size: v(800),
             }),
@@ -243,8 +243,8 @@ fn stop_sent_then_plain_reset() {
     receiver
         .on_stream_frame(stream(0, 100, false), &mut connection)
         .unwrap();
-    receiver.stop(v(7)).unwrap();
-    receiver.on_stop_sent();
+    receiver.stop(c(7)).unwrap();
+    receiver.on_stop_sent().unwrap();
     receiver
         .on_reset_stream(reset(4, 500), &mut connection)
         .unwrap();
@@ -268,8 +268,8 @@ fn stop_is_allowed_while_the_prefix_is_missing() {
     receiver
         .on_reset_stream_at(reset_at(4, 1000, 800), &mut connection)
         .unwrap();
-    assert_eq!(receiver.stop(v(5)), Ok(()));
-    assert_eq!(receiver.pending_stop(), Some(v(5)));
+    assert_eq!(receiver.stop(c(5)), Ok(()));
+    assert_eq!(receiver.pending_stop(), Some(c(5)));
     // Once the prefix arrives, the pending request lapses.
     receiver
         .on_stream_frame(stream(500, 300, false), &mut connection)
@@ -292,14 +292,14 @@ fn late_stop_feedback_after_a_reset() {
     receiver
         .on_stream_frame(stream(0, 100, false), &mut connection)
         .unwrap();
-    receiver.stop(v(5)).unwrap();
+    receiver.stop(c(5)).unwrap();
     receiver
         .on_reset_stream(reset(4, 200), &mut connection)
         .unwrap();
     assert_eq!(receiver.pending_stop(), None);
     let (_, end) = read_all(&mut receiver);
     assert_eq!(end, reset_error(4, 200, 0, false));
-    receiver.on_stop_sent();
+    receiver.on_stop_sent().unwrap();
     assert_eq!(receiver.parts().count(TerminationEvent::StopSent), 1);
     assert_eq!(receiver.read_chunk(), end);
 }

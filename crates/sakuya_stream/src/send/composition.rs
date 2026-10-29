@@ -1,3 +1,6 @@
+//! Joining a send buffer and the two policies into one composition
+//! ([`SendComposition`]), and the default choice of the three
+//! ([`DefaultSendComposition`]).
 use super::flow_control::{
     AdmissionGuard, DefaultSendFlowControlPolicy, SendFlowContext, SendFlowControlPolicy,
     StreamCreditEvent, WriteAttempt,
@@ -6,12 +9,14 @@ use super::termination::{
     DefaultSendTerminationPolicy, FinalSizeRequest, SendTerminationContext, SendTerminationEvent,
     SendTerminationPolicy, TerminationAction,
 };
-use crate::connection_send_credit::{ConnectionCreditReservation, ConnectionSendFlowController};
+use crate::application_error_code::ApplicationErrorCode;
+use crate::connection_send_credit::ConnectionSendFlowController;
+use crate::send_buffer::covered_bytes::CoveredBytes;
+use crate::send_buffer::offset_map::OffsetMapSendBuffer;
 use crate::send_buffer::{
-    BasicSendBuffer, ExposeUsageError, ExposedEnd, ResetRetention, Selection, SelectionConstraints,
-    SendBuffer, TransmissionReceipt,
+    AppendError, ApplyResetError, ExposeUsageError, ExposedEnd, ResetRetention, Selection,
+    SelectionConstraints, SendBuffer, TransmissionReceipt,
 };
-use bytes::Bytes;
 use sakuya_wire::var_int::VarInt;
 
 /// A transparent composition of an independent send buffer, flow-control
@@ -30,13 +35,15 @@ pub struct SendComposition<B, F, T> {
     pub termination: T,
 }
 
-/// The default composition: [`BasicSendBuffer`],
+/// The default composition: [`OffsetMapSendBuffer`],
 /// [`DefaultSendFlowControlPolicy`] and [`DefaultSendTerminationPolicy`].
 ///
-/// Status: the default behaviour is confirmed (`send-side.md`, "默认组合（已确认）");
-/// it is a replaceable base, not behaviour every policy must share.
-pub type DefaultSendComposition =
-    SendComposition<BasicSendBuffer, DefaultSendFlowControlPolicy, DefaultSendTerminationPolicy>;
+/// It is a replaceable base, not behaviour every policy must share.
+pub type DefaultSendComposition = SendComposition<
+    OffsetMapSendBuffer,
+    DefaultSendFlowControlPolicy,
+    DefaultSendTerminationPolicy,
+>;
 
 impl<B, F, T> SendComposition<B, F, T> {
     /// Joins the three components.
@@ -52,9 +59,9 @@ impl<B, F, T> SendComposition<B, F, T> {
 impl DefaultSendComposition {
     /// The default composition with an empty buffer; an abandoned stream
     /// writer leads to a reset with `abandon_code`.
-    pub fn with_abandon_code(abandon_code: VarInt) -> Self {
+    pub fn with_abandon_code(abandon_code: ApplicationErrorCode) -> Self {
         Self::new(
-            BasicSendBuffer::new(),
+            OffsetMapSendBuffer::new(),
             DefaultSendFlowControlPolicy::new(),
             DefaultSendTerminationPolicy::new(abandon_code),
         )
@@ -70,12 +77,12 @@ impl<B: SendBuffer, F, T> SendBuffer for SendComposition<B, F, T> {
         self.buffer.exposure_end()
     }
 
-    fn append(&mut self, bytes: Bytes, connection_credit_reservation: ConnectionCreditReservation) {
-        self.buffer.append(bytes, connection_credit_reservation);
+    fn append(&mut self, data: CoveredBytes) -> Result<(), AppendError> {
+        self.buffer.append(data)
     }
 
-    fn apply_reset(&mut self, retention: ResetRetention) {
-        self.buffer.apply_reset(retention);
+    fn apply_reset(&mut self, retention: ResetRetention) -> Result<(), ApplyResetError> {
+        self.buffer.apply_reset(retention)
     }
 
     fn expose_usage_through(

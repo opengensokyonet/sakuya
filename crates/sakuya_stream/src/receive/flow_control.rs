@@ -1,8 +1,7 @@
 //! The receive flow control policy: when to advertise a higher stream limit.
 //!
-//! Status: the representation of the advertisement intent is settled; the
-//! observation contract (which events the policy sees) is a candidate, and
-//! no default algorithm has been chosen, so this crate provides none.
+//! This crate provides no implementation of the policy. The events and the
+//! view it observes are provisional.
 //!
 //! The policy keeps an intent: advertise nothing, or advertise up to an
 //! absolute target limit. Events update it; a query returns the current
@@ -21,8 +20,6 @@ use crate::receive_buffer::ReceiveBuffer;
 use sakuya_wire::var_int::VarInt;
 
 /// The events a receive flow control policy observes.
-///
-/// Status: candidate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ReceiveFlowEvent {
     /// A STREAM or reset frame was accepted; the accounted end may or may not
@@ -46,8 +43,6 @@ pub enum ReceiveFlowEvent {
 }
 
 /// The state a receive flow control policy decides on.
-///
-/// Status: candidate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ReceiveFlowView {
@@ -101,7 +96,7 @@ where
     /// and the stream still needs limit increases: no final size is known and
     /// the connection has not failed.
     pub fn advertisement(&self) -> Option<VarInt> {
-        if self.failure.is_some() || self.parts.final_size().is_some() {
+        if self.failure().is_some() || self.parts.final_size().is_some() {
             return None;
         }
         match self.parts.advertisement_intent() {

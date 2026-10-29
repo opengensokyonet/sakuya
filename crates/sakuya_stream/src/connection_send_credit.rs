@@ -44,11 +44,6 @@ use std::sync::Arc;
 /// the duration of one operation. Reservations dropped elsewhere return their
 /// credit without access to the controller, through a counter they share with
 /// it.
-///
-/// Status: the reserve, commit and release algebra is confirmed
-/// (`stream-events.md`, "连接发送额度：预留、提交与返还（已确认）"); the
-/// controller's name, its sharing with streams and the connection-level
-/// `DATA_BLOCKED` ownership are proposals.
 pub struct ConnectionSendFlowController {
     limit: VarInt,
     committed: VarInt,
@@ -63,9 +58,10 @@ struct ReservationLedger {
 
 impl ReservationLedger {
     fn reserved(&self) -> VarInt {
-        // The amount never exceeds the controller's limit, a `VarInt`.
-        VarInt::new(self.reserved.load(Ordering::Acquire))
-            .expect("reserved credit stays below the connection limit")
+        // invariant: the amount is the sum of live reservations, each taken
+        // within `L − R − C` of a `VarInt` limit, so it never exceeds the
+        // limit. The fallback only keeps a stale read conservative.
+        VarInt::new(self.reserved.load(Ordering::Acquire)).unwrap_or(VarInt::MAX)
     }
 
     fn add(&self, amount: VarInt) {
@@ -119,6 +115,11 @@ impl ConnectionSendFlowController {
             .saturating_sub(self.committed)
     }
 
+    /// Whether this controller granted `reservation`.
+    pub fn owns(&self, reservation: &ConnectionCreditReservation) -> bool {
+        Arc::ptr_eq(&self.ledger, &reservation.ledger)
+    }
+
     /// Applies a `MAX_DATA` value: the limit becomes the larger of the current
     /// limit and `limit`.
     ///
@@ -151,7 +152,7 @@ impl ConnectionSendFlowController {
                 available,
             }
         );
-        Ok(self.reserve_unchecked(stream_id, amount))
+        Ok(self.reserve_available(stream_id, amount))
     }
 
     /// Reserves as much connection credit for `stream_id` as is available, up
@@ -165,10 +166,12 @@ impl ConnectionSendFlowController {
         max_amount: VarInt,
     ) -> Option<ConnectionCreditReservation> {
         let amount = max_amount.min(self.available());
-        (amount > VarInt::ZERO).then(|| self.reserve_unchecked(stream_id, amount))
+        (amount > VarInt::ZERO).then(|| self.reserve_available(stream_id, amount))
     }
 
-    fn reserve_unchecked(
+    /// Reserves `amount`, which the caller checked against
+    /// [`available`](Self::available).
+    fn reserve_available(
         &mut self,
         stream_id: StreamId,
         amount: VarInt,
@@ -188,17 +191,28 @@ impl ConnectionSendFlowController {
     /// [`ConnectionCreditReservation::split_off`]. Returns the committed
     /// amount.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// If `reservation` was granted by another controller.
-    pub fn commit(&mut self, mut reservation: ConnectionCreditReservation) -> VarInt {
-        self.assert_owns(&reservation);
+    /// [`ForeignReservationError`] if another controller granted
+    /// `reservation`; the error hands it back and nothing changes.
+    pub fn commit(
+        &mut self,
+        reservation: ConnectionCreditReservation,
+    ) -> Result<VarInt, ForeignReservationError> {
+        ensure!(
+            self.owns(&reservation),
+            ForeignReservationSnafu { reservation }
+        );
+        Ok(self.commit_owned(reservation))
+    }
+
+    /// Commits `reservation`, which this controller granted.
+    pub(crate) fn commit_owned(&mut self, mut reservation: ConnectionCreditReservation) -> VarInt {
+        debug_assert!(self.owns(&reservation));
         let amount = reservation.take_amount();
         self.ledger.remove(amount);
-        self.committed = self
-            .committed
-            .checked_add(amount)
-            .expect("committed credit stays below the connection limit");
+        // invariant: `amount` was part of `R`, and `R + C <= L`, a `VarInt`.
+        self.committed = self.committed.saturating_add(amount);
         amount
     }
 
@@ -209,21 +223,21 @@ impl ConnectionSendFlowController {
     /// Dropping the reservation has the same effect. Returns the released
     /// amount.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// If `reservation` was granted by another controller.
-    pub fn release(&mut self, mut reservation: ConnectionCreditReservation) -> VarInt {
-        self.assert_owns(&reservation);
+    /// [`ForeignReservationError`] if another controller granted
+    /// `reservation`; the error hands it back and nothing changes.
+    pub fn release(
+        &mut self,
+        mut reservation: ConnectionCreditReservation,
+    ) -> Result<VarInt, ForeignReservationError> {
+        ensure!(
+            self.owns(&reservation),
+            ForeignReservationSnafu { reservation }
+        );
         let amount = reservation.take_amount();
         self.ledger.remove(amount);
-        amount
-    }
-
-    fn assert_owns(&self, reservation: &ConnectionCreditReservation) {
-        assert!(
-            Arc::ptr_eq(&self.ledger, &reservation.ledger),
-            "connection credit reservation belongs to another connection send flow controller"
-        );
+        Ok(amount)
     }
 }
 
@@ -247,10 +261,6 @@ impl fmt::Debug for ConnectionSendFlowController {
 /// the amount it still owns, which becomes available to other writes at once.
 /// Moving the handle, for example into a send buffer together with the data
 /// it covers, is not a cancellation.
-///
-/// Status: the linear form with the controller consuming the handle is the
-/// one chosen among the two equivalent forms of `send-side.md`
-/// ("连接流控额度预留与线性句柄"); the type's name is a proposal.
 pub struct ConnectionCreditReservation {
     stream_id: StreamId,
     amount: VarInt,
@@ -271,14 +281,26 @@ impl ConnectionCreditReservation {
     /// Moves `amount` out of this reservation into a new one for the same
     /// stream.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// If `amount` exceeds [`amount`](Self::amount).
-    pub fn split_off(&mut self, amount: VarInt) -> Self {
-        self.amount = self
-            .amount
-            .checked_sub(amount)
-            .expect("split amount exceeds the connection credit reservation");
+    /// [`SplitOffError`] if `amount` exceeds [`amount`](Self::amount);
+    /// nothing changes then.
+    pub fn split_off(&mut self, amount: VarInt) -> Result<Self, SplitOffError> {
+        ensure!(
+            amount <= self.amount,
+            SplitOffSnafu {
+                requested: amount,
+                owned: self.amount,
+            }
+        );
+        Ok(self.split_owned(amount))
+    }
+
+    /// Moves `amount`, at most [`amount`](Self::amount), into a new
+    /// reservation.
+    pub(crate) fn split_owned(&mut self, amount: VarInt) -> Self {
+        debug_assert!(amount <= self.amount);
+        self.amount = self.amount.saturating_sub(amount);
         Self {
             stream_id: self.stream_id,
             amount,
@@ -288,23 +310,27 @@ impl ConnectionCreditReservation {
 
     /// Merges `other` into this reservation.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// If `other` belongs to another stream or another controller.
-    pub fn absorb(&mut self, mut other: Self) {
-        assert!(
+    /// [`AbsorbError`] if `other` belongs to another controller or another
+    /// stream; the error hands `other` back and nothing changes.
+    pub fn absorb(&mut self, mut other: Self) -> Result<(), AbsorbError> {
+        ensure!(
             Arc::ptr_eq(&self.ledger, &other.ledger),
-            "connection credit reservations of different controllers cannot merge"
+            absorb_error::ForeignControllerSnafu { other }
         );
-        assert_eq!(
-            self.stream_id, other.stream_id,
-            "connection credit reservations of different streams cannot merge"
+        ensure!(
+            self.stream_id == other.stream_id,
+            absorb_error::DifferentStreamSnafu {
+                stream_id: self.stream_id,
+                other,
+            }
         );
         let amount = other.take_amount();
-        self.amount = self
-            .amount
-            .checked_add(amount)
-            .expect("merged reservations stay below the connection limit");
+        // invariant: both amounts are parts of the same controller's `R`,
+        // which never exceeds its `VarInt` limit.
+        self.amount = self.amount.saturating_add(amount);
+        Ok(())
     }
 
     fn take_amount(&mut self) -> VarInt {
@@ -341,6 +367,68 @@ pub struct InsufficientConnectionCreditError {
     pub requested: VarInt,
     /// The credit that was available.
     pub available: VarInt,
+}
+
+/// [`ConnectionSendFlowController::commit`] or
+/// [`ConnectionSendFlowController::release`] received a reservation another
+/// controller granted.
+#[derive(Debug, Snafu)]
+#[snafu(display(
+    "connection credit reservation belongs to another connection send flow controller"
+))]
+pub struct ForeignReservationError {
+    reservation: ConnectionCreditReservation,
+}
+
+impl ForeignReservationError {
+    /// The rejected reservation, unchanged.
+    pub fn into_reservation(self) -> ConnectionCreditReservation {
+        self.reservation
+    }
+}
+
+/// [`ConnectionCreditReservation::split_off`] asked for more than the
+/// reservation owns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("split of {requested} exceeds the reserved amount {owned}"))]
+pub struct SplitOffError {
+    /// The amount asked for.
+    pub requested: VarInt,
+    /// The amount the reservation owns.
+    pub owned: VarInt,
+}
+
+/// Failures of [`ConnectionCreditReservation::absorb`]; each hands the
+/// rejected reservation back.
+#[derive(Debug, Snafu)]
+#[snafu(module(absorb_error), visibility(pub(crate)))]
+pub enum AbsorbError {
+    /// The reservations belong to different controllers.
+    #[snafu(display("connection credit reservations of different controllers cannot merge"))]
+    ForeignController {
+        /// The rejected reservation.
+        other: ConnectionCreditReservation,
+    },
+    /// The reservations belong to different streams.
+    #[snafu(display(
+        "connection credit reservation of stream {} cannot merge into one of stream {stream_id}",
+        other.stream_id()
+    ))]
+    DifferentStream {
+        /// The stream of the reservation absorbing.
+        stream_id: StreamId,
+        /// The rejected reservation.
+        other: ConnectionCreditReservation,
+    },
+}
+
+impl AbsorbError {
+    /// The rejected reservation, unchanged.
+    pub fn into_other(self) -> ConnectionCreditReservation {
+        match self {
+            Self::ForeignController { other } | Self::DifferentStream { other, .. } => other,
+        }
+    }
 }
 
 #[cfg(test)]

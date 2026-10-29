@@ -14,8 +14,8 @@ fn assert_ledger(controller: &ConnectionSendFlowController, reserved: u32, commi
     assert_eq!(controller.committed(), v(committed), "committed");
 }
 
-/// `stream-events.md`: L = 100; reserving 80 leaves 20, committing 30 of it
-/// still leaves 20, and discarding the other 50 at a reset leaves 70.
+/// L = 100: reserving 80 leaves 20, committing 30 of it still leaves 20, and
+/// discarding the other 50 at a reset leaves 70.
 #[test]
 fn reserve_commit_and_discard_example() {
     let mut controller = ConnectionSendFlowController::new(v(100));
@@ -23,8 +23,8 @@ fn reserve_commit_and_discard_example() {
     assert_ledger(&controller, 80, 0);
     assert_eq!(controller.available(), v(20));
 
-    let exposed = reservation.split_off(v(30));
-    assert_eq!(controller.commit(exposed), v(30));
+    let exposed = reservation.split_off(v(30)).unwrap();
+    assert_eq!(controller.commit(exposed).unwrap(), v(30));
     assert_ledger(&controller, 50, 30);
     assert_eq!(controller.available(), v(20));
 
@@ -37,7 +37,7 @@ fn reserve_commit_and_discard_example() {
 fn explicit_release_matches_drop() {
     let mut controller = ConnectionSendFlowController::new(v(100));
     let reservation = controller.reserve(stream(0), v(40)).unwrap();
-    assert_eq!(controller.release(reservation), v(40));
+    assert_eq!(controller.release(reservation).unwrap(), v(40));
     assert_ledger(&controller, 0, 0);
     assert_eq!(controller.available(), v(100));
 }
@@ -46,15 +46,15 @@ fn explicit_release_matches_drop() {
 fn splitting_and_merging_conserve_the_amount() {
     let mut controller = ConnectionSendFlowController::new(v(100));
     let mut first = controller.reserve(stream(0), v(60)).unwrap();
-    let second = first.split_off(v(25));
+    let second = first.split_off(v(25)).unwrap();
     assert_eq!((first.amount(), second.amount()), (v(35), v(25)));
     assert_ledger(&controller, 60, 0);
 
-    first.absorb(second);
+    first.absorb(second).unwrap();
     assert_eq!(first.amount(), v(60));
     assert_ledger(&controller, 60, 0);
 
-    let empty = first.split_off(VarInt::ZERO);
+    let empty = first.split_off(VarInt::ZERO).unwrap();
     drop(empty);
     assert_ledger(&controller, 60, 0);
 }
@@ -100,34 +100,65 @@ fn max_data_only_raises_the_limit() {
 fn committed_credit_survives_the_stream() {
     let mut controller = ConnectionSendFlowController::new(v(100));
     let reservation = controller.reserve(stream(0), v(50)).unwrap();
-    controller.commit(reservation);
+    controller.commit(reservation).unwrap();
     // Nothing of the stream remains, but its usage stays committed.
     assert_ledger(&controller, 0, 50);
     assert_eq!(controller.available(), v(50));
 }
 
 #[test]
-#[should_panic(expected = "another connection send flow controller")]
-fn committing_a_foreign_reservation_panics() {
+fn committing_a_foreign_reservation_fails_and_returns_it() {
     let mut first = ConnectionSendFlowController::new(v(100));
     let mut second = ConnectionSendFlowController::new(v(100));
     let reservation = first.reserve(stream(0), v(10)).unwrap();
-    second.commit(reservation);
+    assert!(!second.owns(&reservation));
+    let reservation = second.commit(reservation).unwrap_err().into_reservation();
+    assert_eq!(reservation.amount(), v(10));
+    let reservation = second.release(reservation).unwrap_err().into_reservation();
+    assert_ledger(&first, 10, 0);
+    assert_ledger(&second, 0, 0);
+    assert_eq!(first.commit(reservation).unwrap(), v(10));
+    assert_ledger(&first, 0, 10);
 }
 
 #[test]
-#[should_panic(expected = "different streams")]
-fn merging_reservations_of_different_streams_panics() {
+fn merging_reservations_of_different_streams_fails_and_returns_them() {
     let mut controller = ConnectionSendFlowController::new(v(100));
     let mut first = controller.reserve(stream(0), v(10)).unwrap();
-    let second = controller.reserve(stream(4), v(10)).unwrap();
-    first.absorb(second);
+    let second = controller.reserve(stream(4), v(15)).unwrap();
+    let error = first.absorb(second).unwrap_err();
+    assert!(
+        matches!(error, AbsorbError::DifferentStream { stream_id, .. } if stream_id == stream(0))
+    );
+    let second = error.into_other();
+    assert_eq!((first.amount(), second.amount()), (v(10), v(15)));
+    assert_ledger(&controller, 25, 0);
 }
 
 #[test]
-#[should_panic(expected = "split amount exceeds")]
-fn splitting_more_than_owned_panics() {
+fn merging_reservations_of_different_controllers_fails() {
+    let mut controller = ConnectionSendFlowController::new(v(100));
+    let mut other = ConnectionSendFlowController::new(v(100));
+    let mut first = controller.reserve(stream(0), v(10)).unwrap();
+    let foreign = other.reserve(stream(0), v(5)).unwrap();
+    let error = first.absorb(foreign).unwrap_err();
+    assert!(matches!(error, AbsorbError::ForeignController { .. }));
+    drop(error);
+    assert_ledger(&other, 0, 0);
+    assert_eq!(first.amount(), v(10));
+}
+
+#[test]
+fn splitting_more_than_owned_fails_without_effect() {
     let mut controller = ConnectionSendFlowController::new(v(100));
     let mut reservation = controller.reserve(stream(0), v(10)).unwrap();
-    let _ = reservation.split_off(v(11));
+    assert_eq!(
+        reservation.split_off(v(11)).unwrap_err(),
+        SplitOffError {
+            requested: v(11),
+            owned: v(10),
+        }
+    );
+    assert_eq!(reservation.amount(), v(10));
+    assert_ledger(&controller, 10, 0);
 }
