@@ -21,8 +21,8 @@
 //! A deliverer of a routing domain that hands unclaimed datagrams off also
 //! names that domain's [`UnclaimedHandoff`] as its
 //! [`Handoff`](deliverer::DatagramDeliverer::Handoff). None of the capabilities
-//! waits. Waiting for business conditions, such as keys or
-//! configuration, belongs to whoever holds the candidate.
+//! waits. Waiting for business conditions, such as keys or configuration,
+//! belongs to whoever holds the candidate.
 //!
 //! # One attempt
 //!
@@ -33,13 +33,15 @@
 //!
 //! 1. if the datagram is already gone, it yields
 //!    [`DatagramClaimAttempt::ClaimedElsewhere`] without calling the factory;
-//! 2. if the candidate's private state is not initialized yet, it calls the
-//!    factory once with a read-only view of the datagram;
-//! 3. if the datagram uses the [last-takes](#finish-policies) finish policy and
+//! 2. if the datagram uses the [last-takes](#finish-policies) finish policy and
 //!    this candidate is the only remaining participant, it takes the datagram
-//!    directly without calling `try_claim`;
-//! 4. otherwise it calls the deliverer's `try_claim`. An unclaimed outcome stores
-//!    the updated state back into the same candidate.
+//!    directly without calling `try_claim`, and then calls the factory once
+//!    with a read-only view of the datagram if the candidate's private state
+//!    is not initialized yet;
+//! 3. otherwise, if the private state is not initialized yet, it calls the
+//!    factory once with a read-only view of the datagram, and then calls the
+//!    deliverer's `try_claim`. An unclaimed outcome stores the updated state
+//!    back into the same candidate.
 //!
 //! The access is released before the attempt completes. Dropping the future
 //! before its first poll leaves the candidate without any author call; dropping
@@ -116,12 +118,12 @@
 //! | Preparing the candidate set | nothing was delivered; the datagram and the prepared credentials are released, no factory ran | the surrounding call unwinds |
 //! | Factory or `try_claim` before the datagram is taken | the datagram stays in the shared slot; the attempt ends and must not be polled again | other candidates keep their chance |
 //! | Author code after the datagram is taken | the slot stays empty; the exclusive owner drops the datagram while unwinding | other candidates observe [`DatagramClaimAttempt::ClaimedElsewhere`] |
+//! | Factory of a sole last-takes participant | the datagram was already taken and is released while unwinding, as the participant's exit would release it | there is no other participant |
 //! | Factory during [`consume`](delivery::ExclusiveDatagramDelivery::consume) of a single candidate | the datagram belongs to the exclusive delivery and is released while unwinding | there is no competition |
 //!
 //! A candidate whose attempt panicked is gone with the attempt. The shared
 //! datagram being intact says nothing about whether the deliverer or its
 //! other state is still usable.
-
 //!
 //! [`DatagramClaimCandidate`]: candidate::DatagramClaimCandidate
 //! [`DatagramClaimCandidate::try_exclusive`]: candidate::DatagramClaimCandidate::try_exclusive

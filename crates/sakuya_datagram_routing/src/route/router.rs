@@ -175,10 +175,10 @@ where
 /// a [`StatelessResetDetector`], a [`VersionService`] and the
 /// [acceptance](InitialAcceptanceMode) of new Initial receivers. The last three
 /// default to `()`, which means "not provided". `Target` is the erased
-/// deliverer type of the domain; its handoff is the one the acceptance mode
-/// decides. It has no runtime, task
-/// spawner or polling loop of its own: [`route`](Self::route) and
-/// [`resume`](Self::resume) do their work on the caller's stack and return.
+/// deliverer type of the domain, whose handoff the acceptance mode decides.
+/// The router has no runtime, task spawner or polling loop of its own:
+/// [`route`](Self::route) and [`resume`](Self::resume) do their work on the
+/// caller's stack and return.
 pub struct DatagramRouter<
     Payload,
     Link,

@@ -179,7 +179,7 @@ impl<T> DatagramDeliveryPoster<T> {
     /// The item is dropped when the queue is closed or full; a full queue is
     /// the receiver's admission limit, and the post neither waits nor retries.
     /// There is no failure to report: like
-    /// [`DatagramDeliverer::deliver`](super::DatagramDeliverer::deliver), a
+    /// [`DatagramDeliverer::deliver`](super::deliverer::DatagramDeliverer::deliver), a
     /// post always takes the item over.
     pub fn post(&self, item: T) {
         if let Some(sender) = self.sender.upgrade() {
