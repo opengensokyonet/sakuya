@@ -24,10 +24,10 @@
 //! would have to wait for credit or admission reports that instead
 //! ([`write::WriteOutcome::Wait`]). Polling, wake-ups, the stream writer
 //! handle, send selection and feedback dispatch are not part of this module.
-use crate::application_error_code::ApplicationErrorCode;
 use crate::connection_send_credit::ConnectionSendFlowController;
 use crate::send_buffer::{ExposeUsageError, ExposedEnd, SendBuffer, expose_usage_error};
 use flow_control::{SendFlowContext, SendFlowControlPolicy, StreamCreditEvent};
+use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::stream_id::StreamId;
 use sakuya_wire::var_int::VarInt;
 use snafu::{Snafu, ensure};

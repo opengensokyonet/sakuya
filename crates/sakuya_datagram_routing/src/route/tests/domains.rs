@@ -5,6 +5,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use sakuya_link::LinkId;
+use sakuya_wire::version::Version;
 
 use super::support::{
     Datagram, Handoff, Index, Recorder, Router, Target, Work, binding, cid, initial, lengths, link,
@@ -26,7 +27,6 @@ use crate::route::datagram::ReceivedDatagram;
 use crate::route::index::{RouteEntryRegistration, RouteIndex};
 use crate::route::interpretation::RecognizedInitial;
 use crate::route::router::DatagramRouter;
-use crate::version::Version;
 
 type LocalPayload = Rc<[u8]>;
 type LocalLink = Rc<LinkId>;

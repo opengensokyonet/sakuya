@@ -11,12 +11,12 @@ use super::{
     },
 };
 use crate::{
-    application_error_code::ApplicationErrorCode,
     connection_receive_flow::ConnectionReceiveFlowController,
     receive_buffer::{ReceiveBuffer, StreamDataInput, fragmented::FragmentedReceiveBuffer},
 };
 use bytes::{BufMut, Bytes};
 use core::{cell::Cell, ops::Range};
+use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::transport_error::TransportErrorCode;
 use sakuya_wire::var_int::VarInt;
 use std::rc::Rc;

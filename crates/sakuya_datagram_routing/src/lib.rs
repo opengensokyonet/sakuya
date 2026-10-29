@@ -15,4 +15,3 @@
 
 pub mod claim;
 pub mod route;
-pub mod version;

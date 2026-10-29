@@ -1,81 +1,11 @@
-//! Packet numbers and the Packet Number field (RFC 9000 §12.3, §17.1,
-//! Appendix A.2, A.3).
+//! The Packet Number field (RFC 9000 §17.1, Appendix A.2, A.3).
+//!
+//! A packet header carries only the least significant bytes of a
+//! [`PacketNumber`], as a [`TruncatedPacketNumber`] whose length is a
+//! [`PacketNumberLength`].
 
-use core::fmt;
-
+use sakuya_wire::packet_number::PacketNumber;
 use snafu::{OptionExt, Snafu, ensure};
-
-/// A full packet number: an integer from 0 to 2^62 − 1 (RFC 9000 §12.3).
-///
-/// Each packet number space numbers its packets upwards from zero. A packet
-/// header carries only the least significant bytes of the packet number, as a
-/// [`TruncatedPacketNumber`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PacketNumber(u64);
-
-impl PacketNumber {
-    /// Packet number zero, the first of every packet number space.
-    pub const ZERO: Self = Self(0);
-
-    /// The largest packet number, 2^62 − 1.
-    pub const MAX: Self = Self((1 << 62) - 1);
-
-    /// The packet number `value`.
-    ///
-    /// # Errors
-    ///
-    /// Fails when `value` exceeds [`PacketNumber::MAX`].
-    pub const fn new(value: u64) -> Result<Self, PacketNumberTooLarge> {
-        if value <= Self::MAX.0 {
-            Ok(Self(value))
-        } else {
-            Err(PacketNumberTooLarge { value })
-        }
-    }
-
-    /// The packet number as an integer.
-    pub const fn get(self) -> u64 {
-        self.0
-    }
-
-    /// The packet number `rhs` after this one, or `None` when that exceeds
-    /// [`PacketNumber::MAX`].
-    pub const fn checked_add(self, rhs: u64) -> Option<Self> {
-        match self.0.checked_add(rhs) {
-            Some(value) if value <= Self::MAX.0 => Some(Self(value)),
-            _ => None,
-        }
-    }
-}
-
-impl TryFrom<u64> for PacketNumber {
-    type Error = PacketNumberTooLarge;
-
-    fn try_from(value: u64) -> Result<Self, Self::Error> {
-        Self::new(value)
-    }
-}
-
-impl From<PacketNumber> for u64 {
-    fn from(packet_number: PacketNumber) -> Self {
-        packet_number.0
-    }
-}
-
-impl fmt::Display for PacketNumber {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.0, f)
-    }
-}
-
-/// The error returned by [`PacketNumber::new`]: the value exceeds
-/// 2^62 − 1.
-#[derive(Debug, Snafu)]
-#[snafu(display("{value} exceeds the largest packet number 2^62 - 1"))]
-pub struct PacketNumberTooLarge {
-    /// The value given.
-    pub value: u64,
-}
 
 /// The length of a Packet Number field, 1 to 4 bytes.
 ///
@@ -274,8 +204,12 @@ impl TruncatedPacketNumber {
         } else {
             decoded
         };
-        debug_assert!(decoded <= PacketNumber::MAX.get());
-        PacketNumber(decoded)
+        match PacketNumber::new(decoded) {
+            Ok(decoded) => decoded,
+            // invariant: the adjustment above keeps `decoded` at or below
+            // `PacketNumber::MAX`.
+            Err(_) => unreachable!("a decoded packet number is at most 2^62 - 1"),
+        }
     }
 
     /// The field value.
@@ -341,28 +275,6 @@ mod tests {
 
     fn len(bytes: usize) -> PacketNumberLength {
         PacketNumberLength::new(bytes).unwrap()
-    }
-
-    #[test]
-    fn packet_number_bounds() {
-        assert_eq!(PacketNumber::ZERO.get(), 0);
-        assert_eq!(PacketNumber::MAX.get(), (1 << 62) - 1);
-        assert_eq!(pn((1 << 62) - 1), PacketNumber::MAX);
-        assert_eq!(PacketNumber::new(1 << 62).unwrap_err().value, 1 << 62);
-        assert_eq!(PacketNumber::new(u64::MAX).unwrap_err().value, u64::MAX);
-        assert_eq!(PacketNumber::try_from(7).map(u64::from).unwrap(), 7);
-        assert!(PacketNumber::try_from(1 << 62).is_err());
-        assert!(PacketNumber::ZERO < PacketNumber::MAX);
-        assert_eq!(PacketNumber::MAX.to_string(), "4611686018427387903");
-    }
-
-    #[test]
-    fn packet_number_checked_add() {
-        assert_eq!(PacketNumber::ZERO.checked_add(1), Some(pn(1)));
-        assert_eq!(pn((1 << 62) - 2).checked_add(1), Some(PacketNumber::MAX));
-        assert_eq!(PacketNumber::MAX.checked_add(0), Some(PacketNumber::MAX));
-        assert_eq!(PacketNumber::MAX.checked_add(1), None);
-        assert_eq!(pn(1).checked_add(u64::MAX), None);
     }
 
     #[test]

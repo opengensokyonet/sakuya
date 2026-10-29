@@ -46,9 +46,9 @@ use super::{
     flow_control::ReceiveFlowControlPolicy, flow_control::ReceiveFlowEvent, read::RemoteReset,
     stop::StopError,
 };
-use crate::application_error_code::ApplicationErrorCode;
 use crate::receive_buffer::ReceiveBuffer;
 use core::{convert::Infallible, fmt};
+use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::var_int::VarInt;
 use snafu::{Report, ResultExt, Snafu, ensure};
 

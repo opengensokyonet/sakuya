@@ -14,6 +14,7 @@ use sakuya_wire::header::{
         ReadLongHeaderHostExt as _, ReadShortHeaderHostExt as _, ReadVersionNegotiationHostExt as _,
     },
 };
+use sakuya_wire::version::Version;
 use smallvec::SmallVec;
 
 use super::acceptance::{
@@ -32,7 +33,6 @@ use crate::claim::finish::{ReleaseUnclaimed, UnclaimedHandoff};
 use crate::claim::group::prepare_claim;
 use crate::claim::route_match::DatagramRouteMatchInfo;
 use crate::claim::shared::DatagramFinishPolicy;
-use crate::version::Version;
 
 /// Handles datagrams of a version this side does not support.
 ///
@@ -460,8 +460,8 @@ fn classify(
             let Ok(long) = input.sync_read_long_header_unpin() else {
                 return Classification::Release;
             };
-            let version = Version::new(long.version().get());
-            if version.is_negotiation() {
+            let version = long.version();
+            if version == Version::NEGOTIATION {
                 let Ok(packet) = input.sync_read_version_negotiation_unpin(long) else {
                     return Classification::Release;
                 };

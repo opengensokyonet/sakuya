@@ -8,8 +8,9 @@
 //!   ([`packet_key::PacketKey`]).
 //! - [`header_protection`]: removing and applying header protection
 //!   ([`header_protection::HeaderProtectionKey`]).
-//! - [`packet_number`]: packet numbers ([`packet_number::PacketNumber`]) and
-//!   their truncation in the Packet Number field from RFC 9000 Appendix A
+//! - [`packet_number`]: the truncation of a
+//!   [`PacketNumber`](sakuya_wire::packet_number::PacketNumber) in the Packet
+//!   Number field from RFC 9000 Appendix A
 //!   ([`packet_number::TruncatedPacketNumber`]), which header protection
 //!   covers.
 //! - [`retry`]: the Retry integrity tag.
@@ -41,8 +42,9 @@
 //! use sakuya_protection::header_protection::HeaderProtectionKey;
 //! use sakuya_protection::initial::{INITIAL_AEAD, InitialSecrets};
 //! use sakuya_protection::packet_key::PacketKey;
-//! use sakuya_protection::packet_number::{PacketNumber, TruncatedPacketNumber};
+//! use sakuya_protection::packet_number::TruncatedPacketNumber;
 //! use sakuya_wire::connection_id::ConnectionId;
+//! use sakuya_wire::packet_number::PacketNumber;
 //!
 //! let backend = RingBackend;
 //! let client_dcid = ConnectionId::new(&[0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08])?;

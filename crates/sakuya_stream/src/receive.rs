@@ -48,7 +48,6 @@
 //! provisional.
 //!
 //! [`ReceiveBuffer`]: crate::receive_buffer::ReceiveBuffer
-use crate::application_error_code::ApplicationErrorCode;
 use crate::connection_receive_flow::{
     ConnectionReceiveFlowController, RecordReleaseError, RecordUsageError,
 };
@@ -56,6 +55,7 @@ use crate::receive_buffer::{ReceiveBuffer, StreamDataInput, offset_add, span};
 use bytes::Bytes;
 use flow_control::{ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView};
 use read::{ReadError, RemoteReset};
+use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::transport_error::TransportErrorCode;
 use sakuya_wire::var_int::VarInt;
 use snafu::{ResultExt, Snafu, ensure};

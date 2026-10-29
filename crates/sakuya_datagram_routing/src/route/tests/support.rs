@@ -11,6 +11,7 @@ use sakuya_wire::header::v1::{
     self, FIXED_BIT, LongPacketType, RETRY_INTEGRITY_TAG_LEN, codec::ReadLongPacketHostExt as _,
 };
 use sakuya_wire::var_int::{VarInt, codec::WriteVarIntHostExt as _};
+use sakuya_wire::version::Version;
 
 use crate::claim::candidate::DatagramClaimAttempt;
 use crate::claim::deliverer::{
@@ -31,7 +32,6 @@ use crate::route::interpretation::{FirstPacketInterpretation, RecognizedInitial}
 use crate::route::recognizer::{ConnectionIdLength, ConnectionIdLengths};
 use crate::route::reset::{StatelessResetTarget, StatelessResetTokens};
 use crate::route::router::{DatagramRouter, VersionService};
-use crate::version::Version;
 
 pub(super) type Datagram = ReceivedDatagram<Vec<u8>, LinkId>;
 pub(super) type Work = UnclaimedWork<Vec<u8>, LinkId>;
@@ -154,7 +154,7 @@ pub(super) fn short(dcid: &[u8], rest: usize) -> Vec<u8> {
 /// A Version Negotiation packet offering version 1.
 pub(super) fn version_negotiation(dcid: &[u8], scid: &[u8]) -> Vec<u8> {
     let mut packet = vec![0x80 | 0x3f];
-    packet.extend(0u32.to_be_bytes());
+    packet.extend(Version::NEGOTIATION.to_be_bytes());
     packet.push(u8::try_from(dcid.len()).unwrap());
     packet.extend(dcid);
     packet.push(u8::try_from(scid.len()).unwrap());
@@ -164,7 +164,7 @@ pub(super) fn version_negotiation(dcid: &[u8], scid: &[u8]) -> Vec<u8> {
 }
 
 /// A long header of another version.
-pub(super) fn other_version(version: u32, dcid: &[u8]) -> Vec<u8> {
+pub(super) fn other_version(version: Version, dcid: &[u8]) -> Vec<u8> {
     let mut packet = vec![0xc0];
     packet.extend(version.to_be_bytes());
     packet.push(u8::try_from(dcid.len()).unwrap());

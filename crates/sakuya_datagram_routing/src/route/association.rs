@@ -6,9 +6,9 @@ use std::ops::BitOr;
 use sakuya_link::BindingId;
 use sakuya_wire::connection_id::NonEmptyCid;
 use sakuya_wire::header::v1::LongPacketType;
+use sakuya_wire::version::Version;
 
 use super::interpretation::FirstPacketInterpretation;
-use crate::version::Version;
 
 /// The key under which a route entry is found.
 ///

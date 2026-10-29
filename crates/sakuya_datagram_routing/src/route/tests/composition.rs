@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use sakuya_link::LinkId;
 use sakuya_wire::header::v1::LongPacketType;
+use sakuya_wire::version::Version;
 
 use super::support::{
     Datagram, Handoff, Target, Work, binding, cid, datagram, initial, lengths, link, long,
@@ -28,7 +29,6 @@ use crate::route::index::{RouteEntryRegistration, RouteIndex};
 use crate::route::interpretation::RecognizedInitial;
 use crate::route::reset::{StatelessResetRegistration, StatelessResetTarget, StatelessResetTokens};
 use crate::route::router::DatagramRouter;
-use crate::version::Version;
 
 type Delivery = DatagramDelivery<Datagram, ConnectionDeliverer>;
 

@@ -15,12 +15,13 @@ use sakuya_protection::backend::{
 use sakuya_protection::header_protection::{HeaderProtectionError, HeaderProtectionKey};
 use sakuya_protection::initial::{INITIAL_AEAD, INITIAL_SALT, InitialSecrets};
 use sakuya_protection::packet_key::{OpenPacketError, PacketKey, SealPacketError};
-use sakuya_protection::packet_number::{PacketNumber, PacketNumberLength, TruncatedPacketNumber};
+use sakuya_protection::packet_number::{PacketNumberLength, TruncatedPacketNumber};
 use sakuya_protection::retry::{
     VerifyRetryIntegrityError, compute_retry_integrity_tag, verify_retry_integrity_tag,
 };
 use sakuya_protection::secret::TrafficSecret;
 use sakuya_wire::connection_id::ConnectionId;
+use sakuya_wire::packet_number::PacketNumber;
 
 fn hex(text: &str) -> Vec<u8> {
     let digits: Vec<u8> = text

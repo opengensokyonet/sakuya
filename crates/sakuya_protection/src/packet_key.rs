@@ -1,12 +1,12 @@
 //! AEAD packet protection (RFC 9001 §5.1, §5.3).
 
+use sakuya_wire::packet_number::PacketNumber;
 use snafu::{OptionExt, ResultExt, Snafu};
 
 use crate::backend::{
     AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadAlgorithm, AeadInputTooLong, AeadKey, AuthenticationFailed,
     CryptoBackend, MAX_KEY_LEN,
 };
-use crate::packet_number::PacketNumber;
 use crate::secret::TrafficSecret;
 use crate::wipe::wipe;
 

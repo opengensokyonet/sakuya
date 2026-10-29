@@ -31,10 +31,10 @@ use super::{
     termination::ReceiveTerminationPolicy, termination::ResetPresentation,
     termination::TerminationEvent,
 };
-use crate::application_error_code::ApplicationErrorCode;
 use crate::receive_buffer::ReceiveBuffer;
 use bytes::BufMut;
 use core::num::NonZeroUsize;
+use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::var_int::VarInt;
 use snafu::Snafu;
 

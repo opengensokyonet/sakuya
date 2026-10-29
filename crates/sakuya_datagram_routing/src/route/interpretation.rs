@@ -3,10 +3,10 @@
 use sakuya_link::BindingId;
 use sakuya_wire::connection_id::{ConnectionId, NonEmptyCid};
 use sakuya_wire::header::v1::LongPacketType;
+use sakuya_wire::version::Version;
 
 use super::association::{MatchAssociation, PacketForms};
 use super::recognizer::ConnectionIdLength;
-use crate::version::Version;
 
 /// How a candidate reads the first packet of a datagram.
 ///

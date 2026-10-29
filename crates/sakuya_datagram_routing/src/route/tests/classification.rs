@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use sakuya_wire::header::v1::LongPacketType;
+use sakuya_wire::version::Version;
 
 use super::support::{
     Domain, Factory, Judging, Recorder, ResetProbe, binding, cid, dcid_len, initial, lengths, link,
@@ -12,7 +13,6 @@ use super::support::{
 use crate::claim::delivery::DatagramDelivery;
 use crate::route::association::{MatchAssociation, PacketForms};
 use crate::route::interpretation::FirstPacketInterpretation;
-use crate::version::Version;
 
 fn long_interpretation(packet_type: LongPacketType) -> FirstPacketInterpretation {
     FirstPacketInterpretation::Long {
@@ -268,7 +268,10 @@ fn unsupported_version_goes_to_the_version_service_only() {
     let domain = Domain::new(&[8]);
     let binding = binding();
     let entries = entries(&domain, 1, &binding);
-    domain.route(other_version(0x6b33_43cf, &cid(1)), &link(&binding));
+    domain.route(
+        other_version(Version::new(0x6b33_43cf), &cid(1)),
+        &link(&binding),
+    );
     assert_eq!(counts(&entries), [0, 0, 0]);
     assert_eq!(
         *domain.versions.0.lock().unwrap(),
@@ -298,7 +301,7 @@ fn unsupported_version_without_a_service_is_released() {
         &local,
     );
     router.route(super::support::datagram(
-        other_version(7, &cid(1)),
+        other_version(Version::new(7), &cid(1)),
         &link(&binding),
     ));
     assert_eq!(local.delivery_count(), 0);

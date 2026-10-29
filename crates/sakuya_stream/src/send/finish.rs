@@ -26,7 +26,6 @@ use super::{
     CommittedEnd, EndPhase, EndSource, ResetTarget, SendEndState, SendTerminalState, StopSending,
     StreamSender, WriteLimit,
 };
-use crate::application_error_code::ApplicationErrorCode;
 use crate::send::flow_control::{SendFlowControlPolicy, StreamCreditEvent};
 use crate::send::termination::{
     FinalSizeRequest, SendTerminationEvent, SendTerminationPolicy, TerminationAction,
@@ -34,6 +33,7 @@ use crate::send::termination::{
 use crate::send::write::SharedWriteLimitReason;
 use crate::send_buffer::{ResetRetention, SendBuffer};
 use core::fmt;
+use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::var_int::VarInt;
 use snafu::{Report, ResultExt, Snafu, ensure};
 

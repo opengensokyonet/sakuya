@@ -9,7 +9,6 @@ use super::termination::{
     DefaultSendTerminationPolicy, FinalSizeRequest, SendTerminationContext, SendTerminationEvent,
     SendTerminationPolicy, TerminationAction,
 };
-use crate::application_error_code::ApplicationErrorCode;
 use crate::connection_send_credit::ConnectionSendFlowController;
 use crate::send_buffer::covered_bytes::CoveredBytes;
 use crate::send_buffer::offset_map::OffsetMapSendBuffer;
@@ -17,6 +16,7 @@ use crate::send_buffer::{
     AppendError, ApplyResetError, ExposeUsageError, ExposedEnd, ResetRetention, Selection,
     SelectionConstraints, SendBuffer, TransmissionReceipt,
 };
+use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::var_int::VarInt;
 
 /// A transparent composition of an independent send buffer, flow-control

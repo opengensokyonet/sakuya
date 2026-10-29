@@ -25,9 +25,9 @@ use super::{
     ConnectionFailure, StopRequest, StreamReceiver, flow_control::ReceiveFlowControlPolicy,
     termination::ReceiveTerminationPolicy, termination::TerminationEvent,
 };
-use crate::application_error_code::ApplicationErrorCode;
 use crate::receive_buffer::ReceiveBuffer;
 use core::fmt;
+use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::var_int::VarInt;
 use snafu::{Snafu, ensure};
 

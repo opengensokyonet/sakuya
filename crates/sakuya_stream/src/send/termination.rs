@@ -37,9 +37,9 @@
 //!
 //! An action equal to the current state counts as keeping it.
 use super::{EndSource, ResetTarget, SendEndState, SendTerminalState};
-use crate::application_error_code::ApplicationErrorCode;
 use core::convert::Infallible;
 use core::ops::Range;
+use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::stream_id::StreamId;
 use sakuya_wire::var_int::VarInt;
 

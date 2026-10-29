@@ -8,6 +8,7 @@ use std::sync::Arc;
 use sakuya_link::LinkId;
 use sakuya_wire::connection_id::{ConnectionId, ConnectionIdLengthError};
 use sakuya_wire::header::v1::LongPacketType;
+use sakuya_wire::version::Version;
 
 use super::support::{
     Datagram, Domain, Handoff, Judging, Recorder, binding, cid, dcid_len, lengths, link, long,
@@ -29,7 +30,6 @@ use crate::route::recognizer::{
     LeastOccupiedConnectionIds,
 };
 use crate::route::router::DatagramRouter;
-use crate::version::Version;
 
 #[test]
 fn many_zero_and_local_entries_share_one_short_header() {

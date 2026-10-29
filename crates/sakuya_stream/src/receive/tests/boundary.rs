@@ -443,7 +443,7 @@ mod violations {
     }
 
     #[test]
-    #[should_panic(expected = "STOP request with code 2")]
+    #[should_panic(expected = "STOP request with code 0x2")]
     fn stop_request_the_protocol_does_not_allow() {
         let (mut receiver, mut connection) = new_receiver(scripted(|event, _| match event {
             TerminationEvent::DataComplete => TerminationDecision::keep().with_stop(c(2)),

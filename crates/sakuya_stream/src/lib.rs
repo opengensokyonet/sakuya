@@ -2,11 +2,11 @@
 //!
 //! The send direction: [`connection_send_credit`], [`send_buffer`] and
 //! [`send`]. The receive direction: [`connection_receive_flow`],
-//! [`receive_buffer`] and [`receive`]. Both directions use the application
-//! protocol error codes of [`application_error_code`].
+//! [`receive_buffer`] and [`receive`]. Both directions carry application
+//! protocol error codes as
+//! [`ApplicationErrorCode`](sakuya_wire::application_error::ApplicationErrorCode).
 #![warn(missing_docs)]
 
-pub mod application_error_code;
 pub mod connection_receive_flow;
 pub mod connection_send_credit;
 pub mod receive;
