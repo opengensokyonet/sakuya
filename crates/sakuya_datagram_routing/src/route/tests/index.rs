@@ -224,7 +224,7 @@ fn collision_keeps_every_deliverer_even_when_they_share_a_receiver() {
                 RouteMatcher::new(
                     MatchAssociation::LocalCid(nonempty(&cid(6))),
                     PacketForms::ALL,
-                    v1::VERSION,
+                    v1::VERSION.get(),
                 ),
                 Arc::new(Feeding {
                     queue: queue.poster(),
@@ -308,7 +308,7 @@ fn local_routing_domain_does_not_require_send() {
         RouteMatcher::new(
             MatchAssociation::LocalCid(nonempty(&cid(7))),
             PacketForms::ALL,
-            v1::VERSION,
+            v1::VERSION.get(),
         )
     };
     let _local = index.register(matcher(), Arc::new(Local { seen: &seen }));

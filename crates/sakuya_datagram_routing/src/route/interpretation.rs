@@ -108,8 +108,8 @@ impl RecognizedInitial {
     /// the destination connection ID, or the link binding when it is empty.
     pub fn association(&self) -> MatchAssociation {
         match NonEmptyCid::new(self.dcid) {
-            Some(dcid) => MatchAssociation::InitialDcid(dcid),
-            None => MatchAssociation::ZeroCid(self.binding.clone()),
+            Ok(dcid) => MatchAssociation::InitialDcid(dcid),
+            Err(_) => MatchAssociation::ZeroCid(self.binding.clone()),
         }
     }
 }

@@ -1,7 +1,7 @@
 //! Transport error codes ([RFC 9000 §20.1]).
 //!
 //! A [`TransportErrorCode`] is the Error Code field of a CONNECTION_CLOSE
-//! frame of type `0x1c`. The decoders in this crate name the code their
+//! frame of type `0x1c`. The readers in this crate name the code their
 //! failures correspond to, so that the connection can close with it.
 //!
 //! [RFC 9000 §20.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-20.1

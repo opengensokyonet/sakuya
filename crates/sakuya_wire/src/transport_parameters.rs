@@ -6,28 +6,44 @@
 //! holds every parameter QUIC version 1 defines, with the defaults of
 //! [RFC 9000 §18.2] for those that are absent, and keeps the parameters it
 //! does not know as [`UnknownParameter`]s, so that extensions can interpret
-//! them.
+//! them. Their values are chunks of the source the parameters were read
+//! from: subslices of a byte slice, or `Bytes` that share the storage of a
+//! `Bytes` source.
 //!
-//! Decoding and encoding take the [`Role`] of the endpoint that sends the
-//! parameters, since a client must not send the parameters that only a server
-//! may send. Both check the values RFC 9000 §18.2 constrains and reject a
-//! parameter that appears twice. Whether the connection ID parameters match
-//! the connection IDs that the packets used ([RFC 9000 §7.3]), and whether
-//! the ones that must be present are, is for the handshake to check. Every
-//! [`DecodeError`] corresponds to TRANSPORT_PARAMETER_ERROR.
+//! [`codec::read_transport_parameters`] and
+//! [`codec::write_transport_parameters`] take the [`Role`] of the endpoint
+//! that sends the parameters, since a client must not send the parameters
+//! that only a server may send. Both check the values RFC 9000 §18.2
+//! constrains and reject a parameter that appears twice. Whether the
+//! connection ID parameters match the connection IDs that the packets used
+//! ([RFC 9000 §7.3]), and whether the ones that must be present are, is for
+//! the handshake to check. Every [`codec::ReadTransportParametersError`]
+//! corresponds to TRANSPORT_PARAMETER_ERROR.
 //!
 //! ```
-//! use sakuya_wire::{role::Role, transport_parameters::TransportParameters, var_int::VarInt};
+//! use sakuya_wire::{
+//!     role::Role,
+//!     transport_parameters::{
+//!         TransportParameters,
+//!         codec::{ReadTransportParametersHostExt as _, WriteTransportParametersHostExt as _},
+//!     },
+//!     var_int::VarInt,
+//! };
 //!
-//! let mut parameters = TransportParameters::default();
+//! let mut parameters = TransportParameters::<&[u8]>::default();
 //! parameters.initial_max_data = VarInt::from(1_048_576u32);
 //! parameters.initial_max_streams_bidi = VarInt::from(100u8);
 //!
 //! let mut encoding = Vec::new();
-//! parameters.encode(Role::Client, &mut encoding).unwrap();
+//! encoding
+//!     .sync_write_transport_parameters_unpin(parameters.clone(), Role::Client)
+//!     .unwrap();
 //! assert_eq!(encoding.len(), parameters.encoded_len());
 //!
-//! let decoded = TransportParameters::decode(&encoding, Role::Client).unwrap();
+//! let decoded = encoding
+//!     .as_slice()
+//!     .sync_read_transport_parameters_unpin(Role::Client)
+//!     .unwrap();
 //! assert_eq!(decoded, parameters);
 //! assert_eq!(decoded.max_udp_payload_size, VarInt::from(65527u16)); // The default.
 //! ```
@@ -36,15 +52,17 @@
 //! [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
 //! [RFC 9000 §7.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-7.3
 use crate::{
-    connection_id::{ConnectionId, NonEmptyCid},
-    frame::{MAX_STREAM_COUNT, STATELESS_RESET_TOKEN_LEN},
+    connection_id::{ConnectionId, StatelessResetToken},
+    frame::MAX_STREAM_COUNT,
     role::Role,
-    transport_error::TransportErrorCode,
     var_int::VarInt,
 };
-use bytes::BufMut;
-use core::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+use bytes::Buf;
+use preferred_address::PreferredAddress;
 use snafu::Snafu;
+
+pub mod codec;
+pub mod preferred_address;
 
 /// The transport parameter IDs of QUIC version 1 ([RFC 9000 §18.2]).
 ///
@@ -107,11 +125,13 @@ const MIN_ACTIVE_CONNECTION_ID_LIMIT: u64 = 2;
 /// `ack_delay_exponent` 3, `max_ack_delay` 25 and
 /// `active_connection_id_limit` 2; the other integers are 0 and
 /// `disable_active_migration` is false. [`Default`] gives these values, and
-/// encoding omits a parameter that has its default value.
+/// encoding omits a parameter that has its default value. `D` holds the
+/// values of unknown parameters: the source's chunk type for parameters that
+/// were read, any [`Buf`] for parameters to write.
 ///
 /// [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TransportParameters<'a> {
+pub struct TransportParameters<D> {
     /// The Destination Connection ID of the client's first Initial packet;
     /// sent only by a server.
     pub original_destination_connection_id: Option<ConnectionId>,
@@ -119,7 +139,7 @@ pub struct TransportParameters<'a> {
     pub max_idle_timeout: VarInt,
     /// The Stateless Reset Token of the connection ID the server chose
     /// during the handshake; sent only by a server.
-    pub stateless_reset_token: Option<[u8; STATELESS_RESET_TOKEN_LEN]>,
+    pub stateless_reset_token: Option<StatelessResetToken>,
     /// The largest UDP payload the endpoint is willing to receive; at least
     /// 1200.
     pub max_udp_payload_size: VarInt,
@@ -161,10 +181,10 @@ pub struct TransportParameters<'a> {
     pub retry_source_connection_id: Option<ConnectionId>,
     /// The parameters this type does not represent, in the order they
     /// appear. Their IDs are distinct and none is an ID of [`id`].
-    pub unknown: Vec<UnknownParameter<'a>>,
+    pub unknown: Vec<UnknownParameter<D>>,
 }
 
-impl Default for TransportParameters<'_> {
+impl<D> Default for TransportParameters<D> {
     fn default() -> Self {
         Self {
             original_destination_connection_id: None,
@@ -189,110 +209,14 @@ impl Default for TransportParameters<'_> {
     }
 }
 
-/// The `preferred_address` parameter ([RFC 9000 §18.2]): an address the
-/// server would like the client to migrate to, with the connection ID to use
-/// there.
-///
-/// An address and port of all zeros means the server has no preferred
-/// address of that family. The connection ID has sequence number 1.
-///
-/// [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct PreferredAddress {
-    /// The IPv4 address and port.
-    pub ipv4: SocketAddrV4,
-    /// The IPv6 address and port. Only the address and port are encoded;
-    /// decoding sets the flow information and scope ID to zero.
-    pub ipv6: SocketAddrV6,
-    /// The connection ID to use at the preferred address.
-    pub connection_id: NonEmptyCid,
-    /// The Stateless Reset Token of that connection ID.
-    pub stateless_reset_token: [u8; STATELESS_RESET_TOKEN_LEN],
-}
-
-impl PreferredAddress {
-    /// The length of the fields other than the connection ID.
-    const FIXED_LEN: usize = 4 + 2 + 16 + 2 + 1 + STATELESS_RESET_TOKEN_LEN;
-
-    fn encoded_len(&self) -> usize {
-        Self::FIXED_LEN + self.connection_id.as_bytes().len()
-    }
-
-    fn put<B: BufMut + ?Sized>(&self, buffer: &mut B) {
-        buffer.put_slice(&self.ipv4.ip().octets());
-        buffer.put_u16(self.ipv4.port());
-        buffer.put_slice(&self.ipv6.ip().octets());
-        buffer.put_u16(self.ipv6.port());
-        let connection_id = self.connection_id.as_bytes();
-        // A connection ID has at most 20 bytes.
-        buffer.put_u8(connection_id.len() as u8);
-        buffer.put_slice(connection_id);
-        buffer.put_slice(&self.stateless_reset_token);
-    }
-
-    /// Decodes the value of the parameter, or returns `None` if its layout is
-    /// wrong.
-    fn decode(value: &[u8]) -> Option<Self> {
-        let (ipv4, rest) = value.split_first_chunk::<4>()?;
-        let (ipv4_port, rest) = rest.split_first_chunk::<2>()?;
-        let (ipv6, rest) = rest.split_first_chunk::<16>()?;
-        let (ipv6_port, rest) = rest.split_first_chunk::<2>()?;
-        let (&length, rest) = rest.split_first()?;
-        let (connection_id, rest) = rest.split_at_checked(usize::from(length))?;
-        let stateless_reset_token = *<&[u8; STATELESS_RESET_TOKEN_LEN]>::try_from(rest).ok()?;
-        Some(Self {
-            ipv4: SocketAddrV4::new(Ipv4Addr::from(*ipv4), u16::from_be_bytes(*ipv4_port)),
-            ipv6: SocketAddrV6::new(Ipv6Addr::from(*ipv6), u16::from_be_bytes(*ipv6_port), 0, 0),
-            connection_id: NonEmptyCid::try_from(connection_id).ok()?,
-            stateless_reset_token,
-        })
-    }
-}
-
 /// A transport parameter that [`TransportParameters`] does not represent,
 /// such as one defined by an extension or a reserved one sent for greasing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct UnknownParameter<'a> {
+pub struct UnknownParameter<D> {
     /// The parameter ID.
     pub id: VarInt,
-    /// The value, borrowed from the decoded input.
-    pub value: &'a [u8],
-}
-
-/// The value of a parameter to encode.
-enum Value<'v> {
-    Integer(VarInt),
-    Bytes(&'v [u8]),
-    PreferredAddress(&'v PreferredAddress),
-}
-
-impl Value<'_> {
-    fn len(&self) -> usize {
-        match self {
-            Self::Integer(value) => value.encoded_len(),
-            Self::Bytes(bytes) => bytes.len(),
-            Self::PreferredAddress(address) => address.encoded_len(),
-        }
-    }
-
-    fn put<B: BufMut + ?Sized>(&self, buffer: &mut B) {
-        match self {
-            Self::Integer(value) => put_var_int(buffer, *value),
-            Self::Bytes(bytes) => buffer.put_slice(bytes),
-            Self::PreferredAddress(address) => address.put(buffer),
-        }
-    }
-}
-
-/// Writes a value into a buffer whose room has been checked.
-fn put_var_int<B: BufMut + ?Sized>(buffer: &mut B, value: VarInt) {
-    let result = value.encode(buffer);
-    debug_assert!(result.is_ok(), "room is checked before writing");
-}
-
-/// The length of a length field for `length` bytes.
-fn len_len(length: usize) -> usize {
-    VarInt::try_from(length).map_or(VarInt::MAX_ENCODED_LEN, VarInt::encoded_len)
+    /// The value.
+    pub value: D,
 }
 
 /// Whether a client must not send the parameter `id`.
@@ -306,104 +230,26 @@ fn server_only(id: VarInt) -> bool {
     .contains(&id)
 }
 
-impl<'a> TransportParameters<'a> {
-    /// Decodes the transport parameters that an endpoint in role `sender`
-    /// sent.
-    ///
-    /// `input` is the whole value of the `quic_transport_parameters` TLS
-    /// extension. Values of unknown parameters borrow from it.
-    ///
-    /// # Errors
-    ///
-    /// [`DecodeError::Truncated`] if `input` ends within a parameter,
-    /// [`DecodeError::Malformed`] for a value whose length does not fit its
-    /// parameter, and [`DecodeError::Invalid`] for a parameter that appears
-    /// twice, that a client sent but only a server may send, or whose value
-    /// is out of range.
-    pub fn decode(input: &'a [u8], sender: Role) -> Result<Self, DecodeError> {
-        let mut parameters = Self::default();
-        let mut seen = 0u32;
-        let mut reader = Reader { input, offset: 0 };
-        while reader.offset < input.len() {
-            let id = reader.var_int()?;
-            let length = reader.var_int()?;
-            let value = reader.take(length.get())?;
-            if id.get() <= id::LAST {
-                let bit = 1 << id.get();
-                if seen & bit != 0 {
-                    return Err(InvalidParameterError::Duplicate { id }.into());
-                }
-                seen |= bit;
-                if sender == Role::Client && server_only(id) {
-                    return Err(InvalidParameterError::ServerOnly { id }.into());
-                }
-                parameters.set(id, value)?;
-            } else {
-                if parameters
-                    .unknown
-                    .iter()
-                    .any(|parameter| parameter.id == id)
-                {
-                    return Err(InvalidParameterError::Duplicate { id }.into());
-                }
-                parameters.unknown.push(UnknownParameter { id, value });
-            }
-        }
-        parameters.check_ranges()?;
-        Ok(parameters)
-    }
+/// The value of a parameter to write.
+pub(crate) enum Value<'v, D> {
+    Integer(VarInt),
+    Bytes(&'v [u8]),
+    PreferredAddress(&'v PreferredAddress),
+    Unknown(&'v D),
+}
 
-    /// Sets the known parameter `id` from its encoded value.
-    fn set(&mut self, id: VarInt, value: &[u8]) -> Result<(), DecodeError> {
-        let malformed = || DecodeError::Malformed {
-            id,
-            length: value.len(),
-        };
-        let integer = || match VarInt::decode(value) {
-            Ok((integer, length)) if length == value.len() => Ok(integer),
-            _ => Err(malformed()),
-        };
-        let connection_id = || ConnectionId::new(value).map_err(|_| malformed());
-        match id {
-            id::ORIGINAL_DESTINATION_CONNECTION_ID => {
-                self.original_destination_connection_id = Some(connection_id()?);
-            }
-            id::MAX_IDLE_TIMEOUT => self.max_idle_timeout = integer()?,
-            id::STATELESS_RESET_TOKEN => {
-                self.stateless_reset_token = Some(value.try_into().map_err(|_| malformed())?);
-            }
-            id::MAX_UDP_PAYLOAD_SIZE => self.max_udp_payload_size = integer()?,
-            id::INITIAL_MAX_DATA => self.initial_max_data = integer()?,
-            id::INITIAL_MAX_STREAM_DATA_BIDI_LOCAL => {
-                self.initial_max_stream_data_bidi_local = integer()?;
-            }
-            id::INITIAL_MAX_STREAM_DATA_BIDI_REMOTE => {
-                self.initial_max_stream_data_bidi_remote = integer()?;
-            }
-            id::INITIAL_MAX_STREAM_DATA_UNI => self.initial_max_stream_data_uni = integer()?,
-            id::INITIAL_MAX_STREAMS_BIDI => self.initial_max_streams_bidi = integer()?,
-            id::INITIAL_MAX_STREAMS_UNI => self.initial_max_streams_uni = integer()?,
-            id::ACK_DELAY_EXPONENT => self.ack_delay_exponent = integer()?,
-            id::MAX_ACK_DELAY => self.max_ack_delay = integer()?,
-            id::DISABLE_ACTIVE_MIGRATION => {
-                if !value.is_empty() {
-                    return Err(malformed());
-                }
-                self.disable_active_migration = true;
-            }
-            id::PREFERRED_ADDRESS => {
-                self.preferred_address =
-                    Some(PreferredAddress::decode(value).ok_or_else(malformed)?);
-            }
-            id::ACTIVE_CONNECTION_ID_LIMIT => self.active_connection_id_limit = integer()?,
-            id::INITIAL_SOURCE_CONNECTION_ID => {
-                self.initial_source_connection_id = Some(connection_id()?);
-            }
-            _ => self.retry_source_connection_id = Some(connection_id()?),
+impl<D: Buf> Value<'_, D> {
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Self::Integer(value) => value.encoded_len(),
+            Self::Bytes(bytes) => bytes.len(),
+            Self::PreferredAddress(address) => address.encoded_len(),
+            Self::Unknown(value) => value.remaining(),
         }
-        Ok(())
     }
+}
 
+impl<D> TransportParameters<D> {
     /// Checks the values RFC 9000 §18.2 constrains.
     fn check_ranges(&self) -> Result<(), InvalidParameterError> {
         let checks = [
@@ -444,102 +290,11 @@ impl<'a> TransportParameters<'a> {
         }
     }
 
-    /// Checks what [`TransportParameters::encode`] checks before writing.
-    ///
-    /// # Errors
-    ///
-    /// [`InvalidParameterError::ServerOnly`] if `sender` is a client and a
-    /// parameter only a server may send is present,
-    /// [`InvalidParameterError::OutOfRange`] for a value out of range, and
-    /// [`InvalidParameterError::Duplicate`] if two unknown parameters share
-    /// an ID or one has an ID of [`id`].
-    pub fn validate(&self, sender: Role) -> Result<(), InvalidParameterError> {
-        if sender == Role::Client {
-            let server_only = [
-                (
-                    id::ORIGINAL_DESTINATION_CONNECTION_ID,
-                    self.original_destination_connection_id.is_some(),
-                ),
-                (
-                    id::STATELESS_RESET_TOKEN,
-                    self.stateless_reset_token.is_some(),
-                ),
-                (id::PREFERRED_ADDRESS, self.preferred_address.is_some()),
-                (
-                    id::RETRY_SOURCE_CONNECTION_ID,
-                    self.retry_source_connection_id.is_some(),
-                ),
-            ];
-            if let Some((id, _)) = server_only.into_iter().find(|&(_, present)| present) {
-                return Err(InvalidParameterError::ServerOnly { id });
-            }
-        }
-        self.check_ranges()?;
-        for (index, parameter) in self.unknown.iter().enumerate() {
-            let id = parameter.id;
-            if id.get() <= id::LAST || self.unknown[..index].iter().any(|other| other.id == id) {
-                return Err(InvalidParameterError::Duplicate { id });
-            }
-            if VarInt::try_from(parameter.value.len()).is_err() {
-                return Err(InvalidParameterError::OutOfRange {
-                    id,
-                    value: VarInt::MAX,
-                });
-            }
-        }
-        Ok(())
-    }
-
-    /// The number of bytes [`TransportParameters::encode`] writes.
-    pub fn encoded_len(&self) -> usize {
-        let mut length = 0usize;
-        self.for_each(|id, value| {
-            let value_len = value.len();
-            length = length.saturating_add(id.encoded_len() + len_len(value_len) + value_len);
-        });
-        length
-    }
-
-    /// Appends the encoding of the parameters, as an endpoint in role
-    /// `sender` sends them, to `buffer`.
-    ///
-    /// Parameters with their default values are omitted; the others are
-    /// written in the order of their IDs, followed by the unknown parameters
-    /// in their order. Nothing is written unless the parameters are valid and
-    /// fit.
-    ///
-    /// # Errors
-    ///
-    /// [`EncodeError::Invalid`] if [`TransportParameters::validate`] fails,
-    /// and [`EncodeError::Capacity`] if `buffer.remaining_mut()` is below
-    /// [`TransportParameters::encoded_len`].
-    pub fn encode<B: BufMut + ?Sized>(
-        &self,
-        sender: Role,
-        buffer: &mut B,
-    ) -> Result<(), EncodeError> {
-        self.validate(sender)?;
-        let required = self.encoded_len();
-        let available = buffer.remaining_mut();
-        if available < required {
-            return Err(EncodeError::Capacity {
-                required,
-                available,
-            });
-        }
-        self.for_each(|id, value| {
-            put_var_int(buffer, id);
-            put_var_int(buffer, VarInt::try_from(value.len()).unwrap_or(VarInt::MAX));
-            value.put(buffer);
-        });
-        Ok(())
-    }
-
-    /// Calls `visit` with each parameter to encode, in order: the known ones
+    /// Calls `visit` with each parameter to write, in order: the known ones
     /// that differ from their defaults by ID, then the unknown ones.
-    fn for_each<'s>(&'s self, mut visit: impl FnMut(VarInt, Value<'s>)) {
-        fn integer<'s>(
-            visit: &mut impl FnMut(VarInt, Value<'s>),
+    pub(crate) fn for_each<'s>(&'s self, mut visit: impl FnMut(VarInt, Value<'s, D>)) {
+        fn integer<'s, D: 's>(
+            visit: &mut impl FnMut(VarInt, Value<'s, D>),
             id: VarInt,
             value: VarInt,
             default: VarInt,
@@ -562,7 +317,7 @@ impl<'a> TransportParameters<'a> {
             defaults.max_idle_timeout,
         );
         if let Some(token) = &self.stateless_reset_token {
-            visit(id::STATELESS_RESET_TOKEN, Value::Bytes(token));
+            visit(id::STATELESS_RESET_TOKEN, Value::Bytes(token.as_bytes()));
         }
         let integers = [
             (
@@ -639,53 +394,69 @@ impl<'a> TransportParameters<'a> {
             );
         }
         for parameter in &self.unknown {
-            visit(parameter.id, Value::Bytes(parameter.value));
+            visit(parameter.id, Value::Unknown(&parameter.value));
         }
     }
 }
 
-/// Reads consecutive fields of the encoded parameters.
-struct Reader<'a> {
-    input: &'a [u8],
-    offset: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn truncated(&self, required: usize) -> DecodeError {
-        DecodeError::Truncated {
-            required,
-            available: self.input.len(),
+impl<D: Buf> TransportParameters<D> {
+    /// Checks what [`codec::write_transport_parameters`] checks before
+    /// writing.
+    ///
+    /// # Errors
+    ///
+    /// [`InvalidParameterError::ServerOnly`] if `sender` is a client and a
+    /// parameter only a server may send is present,
+    /// [`InvalidParameterError::OutOfRange`] for a value out of range, and
+    /// [`InvalidParameterError::Duplicate`] if two unknown parameters share
+    /// an ID or one has an ID of [`id`].
+    pub fn validate(&self, sender: Role) -> Result<(), InvalidParameterError> {
+        if sender == Role::Client {
+            let server_only = [
+                (
+                    id::ORIGINAL_DESTINATION_CONNECTION_ID,
+                    self.original_destination_connection_id.is_some(),
+                ),
+                (
+                    id::STATELESS_RESET_TOKEN,
+                    self.stateless_reset_token.is_some(),
+                ),
+                (id::PREFERRED_ADDRESS, self.preferred_address.is_some()),
+                (
+                    id::RETRY_SOURCE_CONNECTION_ID,
+                    self.retry_source_connection_id.is_some(),
+                ),
+            ];
+            if let Some((id, _)) = server_only.into_iter().find(|&(_, present)| present) {
+                return Err(InvalidParameterError::ServerOnly { id });
+            }
         }
+        self.check_ranges()?;
+        for (index, parameter) in self.unknown.iter().enumerate() {
+            let id = parameter.id;
+            if id.get() <= id::LAST || self.unknown[..index].iter().any(|other| other.id == id) {
+                return Err(InvalidParameterError::Duplicate { id });
+            }
+            if VarInt::try_from(parameter.value.remaining()).is_err() {
+                return Err(InvalidParameterError::OutOfRange {
+                    id,
+                    value: VarInt::MAX,
+                });
+            }
+        }
+        Ok(())
     }
 
-    fn var_int(&mut self) -> Result<VarInt, DecodeError> {
-        let rest = &self.input[self.offset..];
-        match VarInt::decode(rest) {
-            Ok((value, length)) => {
-                self.offset += length;
-                Ok(value)
-            }
-            Err(_) => {
-                let length = rest
-                    .first()
-                    .map_or(1, |&first| VarInt::encoded_len_of(first));
-                Err(self.truncated(self.offset + length))
-            }
-        }
-    }
-
-    fn take(&mut self, length: u64) -> Result<&'a [u8], DecodeError> {
-        let end = usize::try_from(length)
-            .ok()
-            .and_then(|length| self.offset.checked_add(length));
-        match end {
-            Some(end) if end <= self.input.len() => {
-                let field = &self.input[self.offset..end];
-                self.offset = end;
-                Ok(field)
-            }
-            _ => Err(self.truncated(end.unwrap_or(usize::MAX))),
-        }
+    /// The number of bytes [`codec::write_transport_parameters`] writes.
+    pub fn encoded_len(&self) -> usize {
+        let mut length = 0usize;
+        self.for_each(|id, value| {
+            let value_len = value.len();
+            length = length
+                .saturating_add(id.encoded_len() + crate::frame::length_field_len(value_len))
+                .saturating_add(value_len);
+        });
+        length
     }
 }
 
@@ -713,72 +484,6 @@ pub enum InvalidParameterError {
         id: VarInt,
         /// The value.
         value: VarInt,
-    },
-}
-
-/// Failures of [`TransportParameters::decode`].
-///
-/// Every failure corresponds to the transport error
-/// TRANSPORT_PARAMETER_ERROR ([`DecodeError::transport_error_code`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(module(decode_error), visibility(pub(crate)))]
-pub enum DecodeError {
-    /// The input ends within a parameter.
-    #[snafu(display("transport parameters need {required} bytes, but the input has {available}"))]
-    Truncated {
-        /// The input length the next field requires.
-        required: usize,
-        /// The input length.
-        available: usize,
-    },
-    /// The length of a value does not fit the layout of its parameter.
-    #[snafu(display(
-        "transport parameter {:#x} has a malformed value of {length} bytes",
-        id.get()
-    ))]
-    Malformed {
-        /// The parameter ID.
-        id: VarInt,
-        /// The length of the value.
-        length: usize,
-    },
-    /// A parameter is forbidden.
-    #[snafu(transparent)]
-    Invalid {
-        /// Why the parameter is forbidden.
-        source: InvalidParameterError,
-    },
-}
-
-impl DecodeError {
-    /// The transport error the failure corresponds to: always
-    /// TRANSPORT_PARAMETER_ERROR ([RFC 9000 §7.4]).
-    ///
-    /// [RFC 9000 §7.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-7.4
-    pub fn transport_error_code(&self) -> TransportErrorCode {
-        TransportErrorCode::TRANSPORT_PARAMETER_ERROR
-    }
-}
-
-/// Failures of [`TransportParameters::encode`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(module(encode_error), visibility(pub(crate)))]
-pub enum EncodeError {
-    /// The buffer cannot take the whole encoding.
-    #[snafu(display(
-        "transport parameters need {required} bytes, but the buffer has room for {available}"
-    ))]
-    Capacity {
-        /// The length of the encoding.
-        required: usize,
-        /// The room the buffer reported.
-        available: usize,
-    },
-    /// A parameter is forbidden.
-    #[snafu(transparent)]
-    Invalid {
-        /// Why the parameter is forbidden.
-        source: InvalidParameterError,
     },
 }
 

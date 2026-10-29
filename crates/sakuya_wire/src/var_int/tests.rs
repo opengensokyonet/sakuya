@@ -1,7 +1,8 @@
 use super::{
-    DecodeError, EncodeError, OutOfRangeError, VarInt,
-    calls::{ReadVarIntError, ReadVarIntHostExt as _, WriteVarIntError, WriteVarIntHostExt as _},
+    OutOfRangeError, VarInt,
+    codec::{ReadVarIntError, ReadVarIntHostExt as _, WriteVarIntError, WriteVarIntHostExt as _},
 };
+use bytes::Bytes;
 use nitori_io::bridge::Std;
 use std::io;
 
@@ -33,88 +34,76 @@ fn var_int(value: u64) -> VarInt {
 }
 
 #[test]
-fn decodes_rfc_examples_and_boundaries() {
+fn reads_rfc_examples_and_boundaries() {
     for (encoding, value) in RFC_EXAMPLES.into_iter().chain(BOUNDARIES) {
+        let mut input = encoding;
         assert_eq!(
-            VarInt::decode(encoding),
-            Ok((var_int(value), encoding.len())),
+            input.sync_read_var_int_unpin().unwrap(),
+            var_int(value),
             "{encoding:02x?}"
         );
+        assert!(input.is_empty());
+        let mut input = Bytes::copy_from_slice(encoding);
+        assert_eq!(input.sync_read_var_int_unpin().unwrap(), var_int(value));
+        assert!(input.is_empty());
     }
 }
 
 #[test]
-fn encodes_rfc_examples_and_boundaries_shortest() {
+fn writes_rfc_examples_and_boundaries_shortest() {
     for (encoding, value) in RFC_EXAMPLES.into_iter().chain(BOUNDARIES) {
         let value = var_int(value);
         assert_eq!(value.encoded_len(), encoding.len(), "{value}");
-        let mut output = Vec::new();
-        value.encode(&mut output).unwrap();
-        assert_eq!(output, encoding, "{value}");
     }
 }
 
 #[test]
-fn decodes_longer_than_necessary_encodings() {
+fn reads_longer_than_necessary_encodings() {
     // RFC 9000 Appendix A.1: 0x4025 also decodes to 37.
-    assert_eq!(VarInt::decode(&[0x40, 0x25]), Ok((var_int(37), 2)));
-    assert_eq!(
-        VarInt::decode(&[0xc0, 0, 0, 0, 0, 0, 0, 0x25]),
-        Ok((var_int(37), 8))
-    );
+    let mut input = &[0x40, 0x25][..];
+    assert_eq!(input.sync_read_var_int_unpin().unwrap(), var_int(37));
+    let mut input = &[0xc0, 0, 0, 0, 0, 0, 0, 0x25][..];
+    assert_eq!(input.sync_read_var_int_unpin().unwrap(), var_int(37));
+    assert!(input.is_empty());
 }
 
 #[test]
-fn decode_ignores_following_bytes() {
-    assert_eq!(
-        VarInt::decode(&[0x7b, 0xbd, 0x25]),
-        Ok((var_int(15_293), 2))
-    );
+fn reports_each_truncated_length() {
+    let cases: [(&[u8], usize); 4] = [
+        (&[0x40], 2),
+        (&[0x9d, 0x7f, 0x3e], 4),
+        (&[0xc2, 0x19, 0x7c, 0x5e, 0xff, 0x14, 0xe8], 8),
+        (&[0x7b], 2),
+    ];
+    for (encoding, encoded_len) in cases {
+        let mut input = encoding;
+        let error = input.sync_read_var_int_unpin().unwrap_err();
+        let ReadVarIntError::Incomplete { source: incomplete } = &error else {
+            panic!("expected Incomplete, got {error:?}");
+        };
+        assert_eq!(
+            (incomplete.expected, incomplete.completed),
+            (encoded_len, encoding.len()),
+            "{encoding:02x?}"
+        );
+        assert!(error.is_incomplete());
+    }
 }
 
 #[test]
-fn decode_reports_empty_and_truncated_input() {
-    assert_eq!(VarInt::decode(&[]), Err(DecodeError::Empty));
-    assert_eq!(
-        VarInt::decode(&[0x40]),
-        Err(DecodeError::Truncated {
-            encoded_len: 2,
-            available: 1
-        })
-    );
-    assert_eq!(
-        VarInt::decode(&[0x9d, 0x7f, 0x3e]),
-        Err(DecodeError::Truncated {
-            encoded_len: 4,
-            available: 3
-        })
-    );
-    assert_eq!(
-        VarInt::decode(&[0xc2, 0x19, 0x7c, 0x5e, 0xff, 0x14, 0xe8]),
-        Err(DecodeError::Truncated {
-            encoded_len: 8,
-            available: 7
-        })
-    );
-}
-
-#[test]
-fn encode_writes_nothing_without_room() {
+fn write_into_a_full_slice_reports_progress() {
     let mut storage = [0xaa; 3];
     let mut output = &mut storage[..];
-    assert_eq!(
-        var_int(494_878_333).encode(&mut output),
-        Err(EncodeError {
-            required: 4,
-            available: 3
-        })
-    );
-    assert_eq!(output.len(), 3);
-    assert_eq!(storage, [0xaa; 3]);
+    let error = output
+        .sync_write_var_int_unpin(var_int(494_878_333))
+        .unwrap_err();
+    assert!(matches!(error, WriteVarIntError::WriteZero { .. }));
+    assert_eq!(error.completed(), 3);
+    assert_eq!(storage, [0x9d, 0x7f, 0x3e]);
 
     let mut storage = [0; 2];
     let mut output = &mut storage[..];
-    var_int(15_293).encode(&mut output).unwrap();
+    output.sync_write_var_int_unpin(var_int(15_293)).unwrap();
     assert!(output.is_empty());
     assert_eq!(storage, [0x7b, 0xbd]);
 }
@@ -127,7 +116,10 @@ fn constructors_check_the_range() {
         VarInt::try_from(1u64 << 62),
         Err(OutOfRangeError { value: 1 << 62 })
     );
-    assert_eq!(VarInt::new(u64::MAX), None);
+    assert_eq!(
+        VarInt::new(u64::MAX),
+        Err(OutOfRangeError { value: u64::MAX })
+    );
     assert!(VarInt::try_from(usize::MAX).is_err());
     assert_eq!(VarInt::try_from(1200usize), Ok(var_int(1200)));
     assert_eq!(VarInt::from(u32::MAX).get(), u64::from(u32::MAX));

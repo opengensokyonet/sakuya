@@ -6,9 +6,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use sakuya_link::{BindingId, LinkId};
-use sakuya_wire::header::v1::{self, FIXED_BIT, LongPacketType, RETRY_INTEGRITY_TAG_LEN};
-use sakuya_wire::header::{LongHeader, ShortHeader};
-use sakuya_wire::var_int::VarInt;
+use sakuya_wire::header::codec::{ReadLongHeaderHostExt as _, ReadShortHeaderHostExt as _};
+use sakuya_wire::header::v1::{
+    self, FIXED_BIT, LongPacketType, RETRY_INTEGRITY_TAG_LEN, codec::ReadLongPacketHostExt as _,
+};
+use sakuya_wire::var_int::{VarInt, codec::WriteVarIntHostExt as _};
 
 use crate::claim::queue::{DatagramDeliveryPoster, DatagramDeliveryQueue};
 use crate::claim::{
@@ -91,17 +93,21 @@ pub(super) fn long(
         }
         _ => {
             if packet_type == LongPacketType::Initial {
-                VarInt::from_u32(0).encode(&mut packet).unwrap();
+                packet
+                    .sync_write_var_int_unpin(VarInt::from_u32(0))
+                    .unwrap();
             }
             let length = 2 + payload;
-            VarInt::from_u32(u32::try_from(length).unwrap())
-                .encode(&mut packet)
+            packet
+                .sync_write_var_int_unpin(VarInt::from_u32(u32::try_from(length).unwrap()))
                 .unwrap();
             packet.extend(std::iter::repeat_n(0xa5, length));
         }
     }
     if dcid.len() <= 20 && scid.len() <= 20 {
-        let parsed = v1::LongPacket::try_from(LongHeader::parse(&packet).unwrap()).unwrap();
+        let mut input = packet.as_slice();
+        let header = input.sync_read_long_header_unpin().unwrap();
+        let parsed = input.sync_read_long_packet_unpin(header).unwrap();
         assert_eq!(parsed.packet_type(), packet_type);
     }
     packet
@@ -118,10 +124,11 @@ pub(super) fn short(dcid: &[u8], rest: usize) -> Vec<u8> {
     let mut packet = vec![FIXED_BIT | 0x01];
     packet.extend(dcid);
     packet.extend(std::iter::repeat_n(0x3c, rest));
-    assert_eq!(
-        ShortHeader::parse(&packet, dcid.len()).unwrap().dcid(),
-        dcid
-    );
+    let mut input = packet.as_slice();
+    let header = input
+        .sync_read_short_header_unpin(u8::try_from(dcid.len()).unwrap())
+        .unwrap();
+    assert_eq!(header.dcid().as_bytes(), dcid);
     packet
 }
 
@@ -284,7 +291,7 @@ pub(super) fn register_forms(
     recorder: &Arc<Recorder>,
 ) -> RouteEntryRegistration<Target> {
     index.register(
-        RouteMatcher::new(association, forms, v1::VERSION),
+        RouteMatcher::new(association, forms, v1::VERSION.get()),
         Arc::clone(recorder) as Arc<Target>,
     )
 }

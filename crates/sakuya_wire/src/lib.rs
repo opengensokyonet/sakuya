@@ -4,27 +4,38 @@
 //! the version-independent rules of [RFC 8999] first and applies the version 1
 //! layout only to packets that carry version 1.
 //!
-//! - [`var_int`]: variable-length integers ([`var_int::VarInt`]), decoded from
-//!   and encoded into byte slices, and read and written as `nitori_call`
-//!   operations.
-//! - [`connection_id`]: connection IDs ([`connection_id::ConnectionId`]) and
-//!   their non-empty form ([`connection_id::NonEmptyCid`]).
+//! - [`var_int`]: variable-length integers ([`var_int::VarInt`]).
+//! - [`connection_id`]: connection IDs ([`connection_id::ConnectionId`]), their
+//!   non-empty form ([`connection_id::NonEmptyCid`]), the version-independent
+//!   form of long headers ([`connection_id::RawConnectionId`]), and Stateless
+//!   Reset Tokens ([`connection_id::StatelessResetToken`]).
 //! - [`stream_id`]: stream IDs ([`stream_id::StreamId`]).
+//! - [`packet_number`]: packet numbers ([`packet_number::PacketNumber`]).
+//! - [`version`]: QUIC versions ([`version::Version`]).
 //! - [`header`]: the facts a packet header states before packet protection is
 //!   removed: header form, version, connection IDs, the version 1 packet type,
-//!   tokens, packet boundaries and the offset of the packet number field.
+//!   tokens, packet boundaries and the offsets that header protection needs.
 //! - [`frame`]: the frames of a packet payload once protection is removed,
-//!   decoded from and encoded into byte slices, and read and written as
-//!   `nitori_call` operations; with the DATAGRAM and RESET_STREAM_AT
-//!   extensions.
+//!   with the DATAGRAM and RESET_STREAM_AT extensions.
 //! - [`transport_parameters`]: the transport parameters an endpoint sends in
 //!   the TLS handshake.
-//! - [`transport_error`]: transport error codes ([`transport_error::TransportErrorCode`]).
+//! - [`transport_error`] and [`application_error`]: transport error codes
+//!   ([`transport_error::TransportErrorCode`]) and application protocol error
+//!   codes ([`application_error::ApplicationErrorCode`]).
 //! - [`role`]: the client and server roles ([`role::Role`]).
+//! - [`payload`]: how variable-length payload fields are read.
+//!
+//! Every wire format is read and written through `nitori_call` operations, in
+//! the `codec` module of its type. They run on sources and sinks that may wait
+//! between bytes, and synchronously, through their `sync_` host methods, on
+//! byte slices, `Bytes` and other memory hosts; there a source that ends early
+//! is an incomplete failure. Payload fields are chunks of the source, so a
+//! byte slice yields subslices and `Bytes` yields `Bytes` that share its
+//! storage. `encoded_len` methods compute lengths without writing.
 //!
 //! Nothing here interprets protected header fields (reserved bits, packet
 //! number length, Key Phase) or removes packet protection. The frame and
-//! transport parameter decoders check the encoding only; whether a frame or
+//! transport parameter readers check the encoding only; whether a frame or
 //! parameter is acceptable in the state of a connection is for the
 //! connection to decide.
 //!
@@ -34,11 +45,15 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod application_error;
 pub mod connection_id;
 pub mod frame;
 pub mod header;
+pub mod packet_number;
+pub mod payload;
 pub mod role;
 pub mod stream_id;
 pub mod transport_error;
 pub mod transport_parameters;
 pub mod var_int;
+pub mod version;

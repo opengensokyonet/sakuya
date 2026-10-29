@@ -14,7 +14,7 @@ use crate::route::{FirstPacketInterpretation, MatchAssociation, PacketForms};
 
 fn long_interpretation(packet_type: LongPacketType) -> FirstPacketInterpretation {
     FirstPacketInterpretation::Long {
-        version: v1::VERSION,
+        version: v1::VERSION.get(),
         packet_type,
     }
 }

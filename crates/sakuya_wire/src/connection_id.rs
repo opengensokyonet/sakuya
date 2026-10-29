@@ -2,11 +2,21 @@
 //!
 //! A [`ConnectionId`] is a QUIC version 1 connection ID of 0 to
 //! [`ConnectionId::MAX_LEN`] bytes. A [`NonEmptyCid`] is a connection ID that
-//! is known to have at least one byte. Both compare, order and hash as their
-//! bytes; their storage is not part of the interface.
+//! is known to have at least one byte. A [`RawConnectionId`] is a connection
+//! ID as the version-independent long header carries it, 0 to
+//! [`RawConnectionId::MAX_LEN`] bytes ([RFC 8999 §5.1]); converting it into
+//! a [`ConnectionId`] applies the version 1 limit. All three compare, order
+//! and hash as their bytes; their storage is not part of the interface.
 //!
-//! Connection IDs of other QUIC versions may be longer; the version-independent
-//! header interpretation in [`crate::header`] reports them as byte slices.
+//! A [`StatelessResetToken`] is the 16-byte token that NEW_CONNECTION_ID and
+//! the transport parameters associate with a connection ID
+//! ([RFC 9000 §10.3]).
+//!
+//! The [`codec`] module reads and writes the length-prefixed form of
+//! connection IDs that long headers and frames use.
+//!
+//! [RFC 8999 §5.1]: https://www.rfc-editor.org/rfc/rfc8999.html#section-5.1
+//! [RFC 9000 §10.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-10.3
 //!
 //! [RFC 9000 §5.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-5.1
 use core::{
@@ -17,6 +27,8 @@ use core::{
 };
 use snafu::Snafu;
 
+pub mod codec;
+
 /// A QUIC version 1 connection ID: 0 to 20 bytes.
 ///
 /// Equality, ordering and hashing are those of [`ConnectionId::as_bytes`],
@@ -24,8 +36,8 @@ use snafu::Snafu;
 /// [`Borrow<[u8]>`](Borrow). The [`Default`] value is [`ConnectionId::EMPTY`].
 #[derive(Clone, Copy)]
 pub struct ConnectionId {
-    len: u8,
-    bytes: [u8; Self::MAX_LEN],
+    pub(crate) len: u8,
+    pub(crate) bytes: [u8; Self::MAX_LEN],
 }
 
 impl ConnectionId {
@@ -161,9 +173,19 @@ pub struct ConnectionIdLengthError {
 pub struct NonEmptyCid(ConnectionId);
 
 impl NonEmptyCid {
-    /// Returns `id` as a non-empty connection ID, or `None` if it is empty.
-    pub const fn new(id: ConnectionId) -> Option<Self> {
-        if id.is_empty() { None } else { Some(Self(id)) }
+    /// Returns `id` as a non-empty connection ID.
+    ///
+    /// This is the `const` form of `NonEmptyCid::try_from(id)`.
+    ///
+    /// # Errors
+    ///
+    /// [`EmptyCidError`] for the zero-length connection ID.
+    pub const fn new(id: ConnectionId) -> Result<Self, EmptyCidError> {
+        if id.is_empty() {
+            Err(EmptyCidError)
+        } else {
+            Ok(Self(id))
+        }
     }
 
     /// The connection ID.
@@ -188,21 +210,16 @@ impl TryFrom<&[u8]> for NonEmptyCid {
     /// [`NonEmptyCidError::Length`] for one longer than
     /// [`ConnectionId::MAX_LEN`].
     fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
-        let id = ConnectionId::new(bytes)?;
-        Self::new(id).ok_or(NonEmptyCidError::Empty)
+        Ok(Self::new(ConnectionId::new(bytes)?)?)
     }
 }
 
 impl TryFrom<ConnectionId> for NonEmptyCid {
-    type Error = NonEmptyCidError;
+    type Error = EmptyCidError;
 
     /// Accepts a non-empty connection ID; see [`NonEmptyCid::new`].
-    ///
-    /// # Errors
-    ///
-    /// [`NonEmptyCidError::Empty`] for the zero-length connection ID.
     fn try_from(id: ConnectionId) -> Result<Self, Self::Error> {
-        Self::new(id).ok_or(NonEmptyCidError::Empty)
+        Self::new(id)
     }
 }
 
@@ -244,18 +261,228 @@ impl fmt::Display for NonEmptyCid {
     }
 }
 
-/// Failures of converting to a [`NonEmptyCid`].
+/// The connection ID passed to [`NonEmptyCid::new`] is empty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("connection ID is empty"))]
+pub struct EmptyCidError;
+
+/// Failures of converting a byte slice to a [`NonEmptyCid`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 pub enum NonEmptyCidError {
     /// The connection ID has no bytes.
-    #[snafu(display("connection ID is empty"))]
-    Empty,
+    #[snafu(transparent)]
+    Empty {
+        /// The rejected empty connection ID.
+        source: EmptyCidError,
+    },
     /// The bytes are too long for a connection ID.
     #[snafu(transparent)]
     Length {
         /// The rejected length.
         source: ConnectionIdLengthError,
     },
+}
+
+/// A connection ID as the version-independent long header carries it: 0 to
+/// 255 bytes ([RFC 8999 §5.1]).
+///
+/// Equality, ordering and hashing are those of [`RawConnectionId::as_bytes`].
+/// Convert it with [`ConnectionId::try_from`] to apply the QUIC version 1
+/// limit of 20 bytes.
+///
+/// [RFC 8999 §5.1]: https://www.rfc-editor.org/rfc/rfc8999.html#section-5.1
+#[derive(Clone, Copy)]
+pub struct RawConnectionId {
+    pub(crate) len: u8,
+    pub(crate) bytes: [u8; Self::MAX_LEN],
+}
+
+impl RawConnectionId {
+    /// The longest connection ID a long header can carry, in bytes.
+    pub const MAX_LEN: usize = 255;
+
+    /// The zero-length connection ID.
+    pub const EMPTY: Self = Self {
+        len: 0,
+        bytes: [0; Self::MAX_LEN],
+    };
+
+    /// Copies a connection ID from `bytes`.
+    ///
+    /// This is the `const` form of `RawConnectionId::try_from(bytes)`.
+    ///
+    /// # Errors
+    ///
+    /// [`RawConnectionIdLengthError`] if `bytes` is longer than
+    /// [`RawConnectionId::MAX_LEN`].
+    pub const fn new(bytes: &[u8]) -> Result<Self, RawConnectionIdLengthError> {
+        if bytes.len() > Self::MAX_LEN {
+            return Err(RawConnectionIdLengthError {
+                length: bytes.len(),
+            });
+        }
+        let mut id = Self::EMPTY;
+        let (prefix, _) = id.bytes.split_at_mut(bytes.len());
+        prefix.copy_from_slice(bytes);
+        id.len = bytes.len() as u8;
+        Ok(id)
+    }
+
+    /// The bytes of the connection ID.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.len)]
+    }
+
+    /// The length in bytes.
+    pub const fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    /// Whether this is the zero-length connection ID.
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl Default for RawConnectionId {
+    fn default() -> Self {
+        Self::EMPTY
+    }
+}
+
+impl TryFrom<&[u8]> for RawConnectionId {
+    type Error = RawConnectionIdLengthError;
+
+    /// Copies a connection ID from the slice; see [`RawConnectionId::new`].
+    fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+        Self::new(bytes)
+    }
+}
+
+impl From<ConnectionId> for RawConnectionId {
+    fn from(id: ConnectionId) -> Self {
+        let mut raw = Self::EMPTY;
+        raw.bytes[..id.len()].copy_from_slice(id.as_bytes());
+        raw.len = id.len;
+        raw
+    }
+}
+
+impl TryFrom<RawConnectionId> for ConnectionId {
+    type Error = ConnectionIdLengthError;
+
+    /// Applies the QUIC version 1 limit; see [`ConnectionId::new`].
+    fn try_from(id: RawConnectionId) -> Result<Self, Self::Error> {
+        Self::new(id.as_bytes())
+    }
+}
+
+impl AsRef<[u8]> for RawConnectionId {
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+impl Borrow<[u8]> for RawConnectionId {
+    fn borrow(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
+impl PartialEq for RawConnectionId {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_bytes() == other.as_bytes()
+    }
+}
+
+impl Eq for RawConnectionId {}
+
+impl PartialOrd for RawConnectionId {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RawConnectionId {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.as_bytes().cmp(other.as_bytes())
+    }
+}
+
+impl Hash for RawConnectionId {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_bytes().hash(state);
+    }
+}
+
+/// Formats the bytes as lowercase hexadecimal, as in `RawConnectionId(8394c8f0)`.
+impl fmt::Debug for RawConnectionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "RawConnectionId({})", Hex(self.as_bytes()))
+    }
+}
+
+/// Formats the bytes as lowercase hexadecimal; the empty ID formats as nothing.
+impl fmt::Display for RawConnectionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&Hex(self.as_bytes()), f)
+    }
+}
+
+/// A byte slice exceeds [`RawConnectionId::MAX_LEN`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("connection ID of {length} bytes exceeds the long header maximum of 255 bytes"))]
+pub struct RawConnectionIdLengthError {
+    /// The rejected length.
+    pub length: usize,
+}
+
+/// A Stateless Reset Token: the 16 bytes that end a stateless reset for the
+/// connection ID it was issued with ([RFC 9000 §10.3]).
+///
+/// [RFC 9000 §10.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-10.3
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StatelessResetToken([u8; Self::LEN]);
+
+impl StatelessResetToken {
+    /// The length of a token in bytes.
+    pub const LEN: usize = 16;
+
+    /// The token with the bytes `bytes`.
+    pub const fn new(bytes: [u8; Self::LEN]) -> Self {
+        Self(bytes)
+    }
+
+    /// The bytes of the token.
+    pub const fn as_bytes(&self) -> &[u8; Self::LEN] {
+        &self.0
+    }
+}
+
+impl From<[u8; StatelessResetToken::LEN]> for StatelessResetToken {
+    fn from(bytes: [u8; Self::LEN]) -> Self {
+        Self(bytes)
+    }
+}
+
+impl From<StatelessResetToken> for [u8; StatelessResetToken::LEN] {
+    fn from(token: StatelessResetToken) -> Self {
+        token.0
+    }
+}
+
+impl AsRef<[u8]> for StatelessResetToken {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// Formats the bytes as lowercase hexadecimal, as in
+/// `StatelessResetToken(00112233445566778899aabbccddeeff)`.
+impl fmt::Debug for StatelessResetToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "StatelessResetToken({})", Hex(&self.0))
+    }
 }
 
 /// Lowercase hexadecimal formatting of a byte slice.

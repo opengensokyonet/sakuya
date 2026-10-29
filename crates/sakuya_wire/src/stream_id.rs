@@ -6,9 +6,15 @@
 //! ([`Directionality`]), and the remaining bits number the streams of each
 //! of the four resulting types from zero ([`StreamId::index`]).
 //!
+//! The [`codec`] module reads and writes stream IDs as `nitori_call`
+//! operations.
+//!
 //! [RFC 9000 §2.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-2.1
 use crate::var_int::VarInt;
 use core::fmt;
+use snafu::Snafu;
+
+pub mod codec;
 
 /// A QUIC stream ID.
 ///
@@ -23,20 +29,29 @@ impl StreamId {
 
     /// Composes the stream ID of the `index`-th stream of a type.
     ///
-    /// Returns `None` if `index` exceeds [`StreamId::MAX_INDEX`].
+    /// # Errors
+    ///
+    /// [`StreamIndexError`] if `index` exceeds [`StreamId::MAX_INDEX`].
     pub const fn new(
         initiator: Initiator,
         directionality: Directionality,
         index: u64,
-    ) -> Option<Self> {
+    ) -> Result<Self, StreamIndexError> {
         if index > Self::MAX_INDEX {
-            return None;
+            return Err(StreamIndexError { index });
         }
-        let value = index << 2 | directionality.bit() | initiator.bit();
-        match VarInt::new(value) {
-            Some(value) => Some(Self(value)),
-            None => None,
+        match VarInt::new(index << 2 | directionality.bit() | initiator.bit()) {
+            Ok(value) => Ok(Self(value)),
+            // An index of at most 2^60 - 1 shifted by two bits stays below 2^62.
+            Err(_) => Err(StreamIndexError { index }),
         }
+    }
+
+    /// The stream ID a variable-length integer states.
+    ///
+    /// This is the `const` form of `StreamId::from(value)`.
+    pub const fn from_var_int(value: VarInt) -> Self {
+        Self(value)
     }
 
     /// The endpoint that initiated the stream.
@@ -86,6 +101,14 @@ impl fmt::Display for StreamId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&self.0, f)
     }
+}
+
+/// The index passed to [`StreamId::new`] exceeds [`StreamId::MAX_INDEX`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("stream index {index} exceeds the largest index 2^60 - 1"))]
+pub struct StreamIndexError {
+    /// The rejected index.
+    pub index: u64,
 }
 
 /// The endpoint that initiated a stream: bit `0x01` of its stream ID.

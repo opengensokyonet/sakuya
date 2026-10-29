@@ -5,27 +5,22 @@
 //! encoded length, and the remaining bits hold the value in network byte
 //! order.
 //!
-//! Two entry points read and write the encoding:
-//!
-//! - [`VarInt::decode`] and [`VarInt::encode`] work on byte slices and
-//!   [`BufMut`] buffers that already hold or can take the whole encoding.
-//! - [`calls::read_var_int`] and [`calls::write_var_int`] are `nitori_call`
-//!   operations over `nitori_io` capabilities, for sources and sinks that may
-//!   wait between bytes.
+//! [`codec::read_var_int`] and [`codec::write_var_int`] read and write the
+//! encoding as `nitori_call` operations, on sources and sinks that may wait
+//! between bytes as well as on byte slices, through the `sync_` host methods.
 //!
 //! [RFC 9000 §16]: https://www.rfc-editor.org/rfc/rfc9000.html#section-16
-use bytes::BufMut;
 use core::fmt;
 use snafu::Snafu;
 
-pub mod calls;
+pub mod codec;
 
 /// A QUIC variable-length integer: an unsigned value of at most 62 bits.
 ///
 /// Every value of this type is at most [`VarInt::MAX`]; the constructors
 /// enforce that bound. Ordering, equality and hashing are those of the
-/// numeric value. The encoding chosen by [`VarInt::encode`] is always the
-/// shortest one; [`VarInt::decode`] also accepts longer encodings, as
+/// numeric value. [`codec::write_var_int`] always writes the shortest
+/// encoding; [`codec::read_var_int`] also accepts longer encodings, as
 /// RFC 9000 §16 permits.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VarInt(u64);
@@ -43,11 +38,15 @@ impl VarInt {
     /// Returns the value if it is at most [`VarInt::MAX`].
     ///
     /// This is the `const` form of `VarInt::try_from(value)`.
-    pub const fn new(value: u64) -> Option<Self> {
+    ///
+    /// # Errors
+    ///
+    /// [`OutOfRangeError`] if `value` exceeds [`VarInt::MAX`].
+    pub const fn new(value: u64) -> Result<Self, OutOfRangeError> {
         if value <= Self::MAX.0 {
-            Some(Self(value))
+            Ok(Self(value))
         } else {
-            None
+            Err(OutOfRangeError { value })
         }
     }
 
@@ -85,7 +84,10 @@ impl VarInt {
     /// Adds, returning `None` if the sum exceeds [`VarInt::MAX`].
     pub const fn checked_add(self, rhs: Self) -> Option<Self> {
         // Both operands are below 2^62, so the `u64` sum cannot overflow.
-        Self::new(self.0 + rhs.0)
+        match Self::new(self.0 + rhs.0) {
+            Ok(value) => Some(value),
+            Err(_) => None,
+        }
     }
 
     /// Subtracts, returning `None` if the difference would be negative.
@@ -99,7 +101,10 @@ impl VarInt {
     /// Multiplies, returning `None` if the product exceeds [`VarInt::MAX`].
     pub const fn checked_mul(self, rhs: Self) -> Option<Self> {
         match self.0.checked_mul(rhs.0) {
-            Some(value) => Self::new(value),
+            Some(value) => match Self::new(value) {
+                Ok(value) => Some(value),
+                Err(_) => None,
+            },
             None => None,
         }
     }
@@ -117,69 +122,27 @@ impl VarInt {
         Self(self.0.saturating_sub(rhs.0))
     }
 
-    /// Decodes one variable-length integer from the start of `bytes`.
+    /// Decodes an encoding from its first byte and the bytes that follow it.
     ///
-    /// Returns the value and the number of bytes its encoding took; bytes
-    /// after the encoding are not examined. Encodings longer than necessary
-    /// are accepted.
-    ///
-    /// # Errors
-    ///
-    /// [`DecodeError::Empty`] if `bytes` is empty, and
-    /// [`DecodeError::Truncated`] if it is shorter than the length its first
-    /// byte announces.
-    pub fn decode(bytes: &[u8]) -> Result<(Self, usize), DecodeError> {
-        let Some(&first) = bytes.first() else {
-            return Err(DecodeError::Empty);
-        };
-        let encoded_len = Self::encoded_len_of(first);
-        let Some(encoding) = bytes.get(..encoded_len) else {
-            return Err(DecodeError::Truncated {
-                encoded_len,
-                available: bytes.len(),
-            });
-        };
-        Ok((Self::from_encoding(encoding), encoded_len))
-    }
-
-    /// Appends the shortest encoding of this value to `buffer`.
-    ///
-    /// Nothing is written unless the whole encoding fits.
-    ///
-    /// # Errors
-    ///
-    /// [`EncodeError`] if `buffer.remaining_mut()` is below
-    /// [`VarInt::encoded_len`].
-    pub fn encode<B: BufMut + ?Sized>(self, buffer: &mut B) -> Result<(), EncodeError> {
-        let (bytes, encoded_len) = self.to_encoding();
-        let available = buffer.remaining_mut();
-        if available < encoded_len {
-            return Err(EncodeError {
-                required: encoded_len,
-                available,
-            });
+    /// Only the low six bits of `first` are value bits; `rest` holds the
+    /// remaining bytes of the encoding, at most seven, so the value stays
+    /// below 2<sup>62</sup>.
+    pub(crate) const fn from_encoding(first: u8, rest: &[u8]) -> Self {
+        let mut value = (first & 0x3f) as u64;
+        let mut index = 0;
+        while index < rest.len() {
+            value = (value << 8) | rest[index] as u64;
+            index += 1;
         }
-        buffer.put_slice(&bytes[..encoded_len]);
-        Ok(())
-    }
-
-    /// Decodes a complete encoding whose length matches its first byte.
-    fn from_encoding(encoding: &[u8]) -> Self {
-        debug_assert_eq!(encoding.len(), Self::encoded_len_of(encoding[0]));
-        let value = encoding[1..]
-            .iter()
-            .fold(u64::from(encoding[0] & 0x3f), |value, &byte| {
-                (value << 8) | u64::from(byte)
-            });
         Self(value)
     }
 
     /// The shortest encoding, left-aligned in an array, and its length.
-    fn to_encoding(self) -> ([u8; Self::MAX_ENCODED_LEN], usize) {
+    pub(crate) const fn to_encoding(self) -> ([u8; Self::MAX_ENCODED_LEN], usize) {
         let encoded_len = self.encoded_len();
         // The two-bit length prefix is log2 of the encoded length; it occupies
         // the top bits of the encoding, which then moves to the array's start.
-        let prefix = u64::from(encoded_len.trailing_zeros()) << (8 * encoded_len - 2);
+        let prefix = (encoded_len.trailing_zeros() as u64) << (8 * encoded_len - 2);
         let shift = 8 * (Self::MAX_ENCODED_LEN - encoded_len);
         (((prefix | self.0) << shift).to_be_bytes(), encoded_len)
     }
@@ -214,7 +177,7 @@ impl TryFrom<u64> for VarInt {
 
     /// Accepts values up to [`VarInt::MAX`].
     fn try_from(value: u64) -> Result<Self, Self::Error> {
-        Self::new(value).ok_or(OutOfRangeError { value })
+        Self::new(value)
     }
 }
 
@@ -240,37 +203,6 @@ impl From<VarInt> for u64 {
 pub struct OutOfRangeError {
     /// The rejected value.
     pub value: u64,
-}
-
-/// Failures of [`VarInt::decode`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(module(decode_error), visibility(pub(crate)))]
-pub enum DecodeError {
-    /// The input has no bytes.
-    #[snafu(display("no bytes for a variable-length integer"))]
-    Empty,
-    /// The input ends before the length its first byte announces.
-    #[snafu(display(
-        "variable-length integer needs {encoded_len} bytes, but only {available} remain"
-    ))]
-    Truncated {
-        /// The length announced by the first byte.
-        encoded_len: usize,
-        /// The bytes that were available, including the first.
-        available: usize,
-    },
-}
-
-/// The buffer passed to [`VarInt::encode`] cannot take the whole encoding.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(display(
-    "variable-length integer needs {required} bytes, but the buffer has room for {available}"
-))]
-pub struct EncodeError {
-    /// The length of the encoding.
-    pub required: usize,
-    /// The room the buffer reported.
-    pub available: usize,
 }
 
 #[cfg(test)]

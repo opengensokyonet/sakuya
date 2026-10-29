@@ -1,4 +1,11 @@
-use super::{ConnectionId, ConnectionIdLengthError, NonEmptyCid, NonEmptyCidError};
+use super::{
+    ConnectionId, ConnectionIdLengthError, EmptyCidError, NonEmptyCid, NonEmptyCidError,
+    RawConnectionId, RawConnectionIdLengthError, StatelessResetToken,
+    codec::{
+        ReadConnectionIdError, ReadConnectionIdHostExt as _, ReadRawConnectionIdHostExt as _,
+        WriteConnectionIdHostExt as _,
+    },
+};
 use std::collections::{BTreeSet, HashSet};
 
 const RFC_DCID: [u8; 8] = [0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
@@ -58,12 +65,17 @@ fn formats_as_hexadecimal() {
 
 #[test]
 fn non_empty_cid_rejects_the_empty_id() {
-    assert_eq!(NonEmptyCid::new(ConnectionId::EMPTY), None);
+    assert_eq!(NonEmptyCid::new(ConnectionId::EMPTY), Err(EmptyCidError));
     assert_eq!(
         NonEmptyCid::try_from(ConnectionId::EMPTY),
-        Err(NonEmptyCidError::Empty)
+        Err(EmptyCidError)
     );
-    assert_eq!(NonEmptyCid::try_from(&[][..]), Err(NonEmptyCidError::Empty));
+    assert_eq!(
+        NonEmptyCid::try_from(&[][..]),
+        Err(NonEmptyCidError::Empty {
+            source: EmptyCidError
+        })
+    );
     assert_eq!(
         NonEmptyCid::try_from(&[0; 21][..]),
         Err(NonEmptyCidError::Length {
@@ -86,4 +98,103 @@ fn non_empty_cid_keeps_the_connection_id() {
     assert!(set.contains(&RFC_DCID[..]));
     let single = NonEmptyCid::try_from(&[0x00][..]).unwrap();
     assert!(single < non_empty);
+}
+
+#[test]
+fn raw_connection_ids_take_up_to_255_bytes() {
+    for length in [0, 20, 21, 255] {
+        let bytes = vec![0x5a; length];
+        let raw = RawConnectionId::new(&bytes).unwrap();
+        assert_eq!((raw.as_bytes(), raw.len()), (&bytes[..], length));
+        assert_eq!(raw.is_empty(), length == 0);
+        assert_eq!(
+            ConnectionId::try_from(raw),
+            if length <= 20 {
+                Ok(ConnectionId::new(&bytes).unwrap())
+            } else {
+                Err(ConnectionIdLengthError { length })
+            }
+        );
+    }
+    assert_eq!(
+        RawConnectionId::try_from(&[0; 256][..]),
+        Err(RawConnectionIdLengthError { length: 256 })
+    );
+    let id = ConnectionId::new(&RFC_DCID).unwrap();
+    let raw = RawConnectionId::from(id);
+    assert_eq!(raw.as_bytes(), RFC_DCID);
+    assert_eq!(format!("{raw:?}"), "RawConnectionId(8394c8f03e515708)");
+    assert_eq!(raw.to_string(), "8394c8f03e515708");
+    assert_eq!(RawConnectionId::default(), RawConnectionId::EMPTY);
+    let set: HashSet<RawConnectionId> = [raw].into();
+    assert!(set.contains(&RFC_DCID[..]));
+}
+
+#[test]
+fn stateless_reset_token_keeps_its_bytes() {
+    let token = StatelessResetToken::new([0x11; 16]);
+    assert_eq!(token.as_bytes(), &[0x11; 16]);
+    assert_eq!(<[u8; 16]>::from(token), [0x11; 16]);
+    assert_eq!(StatelessResetToken::from([0x11; 16]), token);
+    assert_eq!(
+        format!("{token:?}"),
+        "StatelessResetToken(11111111111111111111111111111111)"
+    );
+}
+
+#[test]
+fn length_prefixed_connection_ids_round_trip() {
+    for length in [0, 1, 8, 20] {
+        let id = ConnectionId::new(&vec![0xaa; length]).unwrap();
+        let mut output = Vec::new();
+        output.sync_write_connection_id_unpin(id).unwrap();
+        assert_eq!(output.len(), 1 + length);
+        assert_eq!(output[0] as usize, length);
+        let mut input = output.as_slice();
+        assert_eq!(input.sync_read_connection_id_unpin().unwrap(), id);
+        let mut input = output.as_slice();
+        assert_eq!(
+            input.sync_read_raw_connection_id_unpin().unwrap(),
+            RawConnectionId::from(id)
+        );
+    }
+}
+
+#[test]
+fn length_prefixed_connection_id_limits() {
+    // A version 1 connection ID is rejected at its length byte.
+    let mut input = &[21, 0xaa, 0xbb][..];
+    let error = input.sync_read_connection_id_unpin().unwrap_err();
+    assert!(matches!(
+        error,
+        ReadConnectionIdError::Length {
+            source: ConnectionIdLengthError { length: 21 }
+        }
+    ));
+    assert_eq!(input, [0xaa, 0xbb]);
+
+    let mut long = vec![255];
+    long.extend([7; 255]);
+    let mut input = long.as_slice();
+    assert_eq!(
+        input.sync_read_raw_connection_id_unpin().unwrap().len(),
+        255
+    );
+
+    for encoding in [&[][..], &[4, 1, 2][..]] {
+        let mut input = encoding;
+        assert!(
+            input
+                .sync_read_connection_id_unpin()
+                .unwrap_err()
+                .is_incomplete()
+        );
+        let mut input = encoding;
+        assert!(
+            input
+                .sync_read_raw_connection_id_unpin()
+                .unwrap_err()
+                .is_incomplete()
+        );
+    }
 }

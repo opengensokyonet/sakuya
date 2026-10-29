@@ -4,7 +4,7 @@
 //! only the side that issued the connection ID knows how to read it. Routing
 //! therefore asks a [`ConnectionIdRecognizer`] for every length under which a
 //! short header can be read, and reads each with
-//! [`ShortHeader::parse`](sakuya_wire::header::ShortHeader::parse). Generation
+//! [`read_short_header`](sakuya_wire::header::codec::read_short_header). Generation
 //! and recognition must agree, which is the implementation's responsibility:
 //! routing keeps no format numbers, length registry or pairing credentials.
 //!

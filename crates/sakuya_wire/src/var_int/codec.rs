@@ -4,13 +4,15 @@
 //! [`ReadVarInt`] and [`WriteVarInt`], with `ReadVarIntExt` and
 //! `WriteVarIntExt` on receiver accesses inside other operations and
 //! `ReadVarIntHostExt` and `WriteVarIntHostExt` on call executors, including
-//! the `sync_` methods for receivers that never wait. Constructing an
-//! operation performs no IO.
+//! the `sync_` methods for receivers that never wait, such as byte slices
+//! and `Bytes`. On those, a source that ends early is an
+//! [`ReadVarIntError::Incomplete`] failure. Constructing an operation
+//! performs no IO.
 //!
 //! ```
 //! use sakuya_wire::var_int::{
 //!     VarInt,
-//!     calls::{ReadVarIntHostExt as _, WriteVarIntHostExt as _},
+//!     codec::{ReadVarIntHostExt as _, WriteVarIntHostExt as _},
 //! };
 //!
 //! let mut output = Vec::new();
@@ -20,6 +22,15 @@
 //! let mut input = &[0x7b, 0xbd, 0x25][..];
 //! assert_eq!(input.sync_read_var_int_unpin().unwrap(), VarInt::from(15293u16));
 //! assert_eq!(input, [0x25]); // The next integer has not been read.
+//!
+//! // Encodings longer than necessary are accepted.
+//! let mut input = &[0x40, 0x25][..];
+//! assert_eq!(input.sync_read_var_int_unpin().unwrap(), VarInt::from(37u8));
+//!
+//! // A source that ends within the encoding is incomplete.
+//! let mut input = &[0x9d, 0x7f][..];
+//! let error = input.sync_read_var_int_unpin().unwrap_err();
+//! assert_eq!(error.completed(), 2);
 //! ```
 // `#[call]` generates constructors, fields and extension traits without
 // documentation comments; the module documentation above describes them.
@@ -50,21 +61,26 @@ use snafu::{IntoError, Snafu};
 pub async fn read_var_int<F: Read, A: ReceiverAccess<Family = F>>(
     io: &mut A,
 ) -> Result<VarInt, ReadVarIntError<F::Error>> {
+    read_var_int_counted(io).await.map(|(value, _)| value)
+}
+
+/// Reads one variable-length integer as [`read_var_int`] does, and returns
+/// it with the length of its encoding.
+pub(crate) async fn read_var_int_counted<F: Read, A: ReceiverAccess<Family = F>>(
+    io: &mut A,
+) -> Result<(VarInt, usize), ReadVarIntError<F::Error>> {
     let [first] = io
         .read_array::<1>()
         .await
         .map_err(|error| ReadVarIntError::after(error, 0, 1))?;
     let encoded_len = VarInt::encoded_len_of(first);
-    let mut encoding = [0; VarInt::MAX_ENCODED_LEN];
-    encoding[0] = first;
-    let rest = &mut encoding[1..encoded_len];
-    match encoded_len {
-        1 => {}
-        2 => rest.copy_from_slice(&read_rest::<1, F, A>(io, encoded_len).await?),
-        4 => rest.copy_from_slice(&read_rest::<3, F, A>(io, encoded_len).await?),
-        _ => rest.copy_from_slice(&read_rest::<7, F, A>(io, encoded_len).await?),
-    }
-    Ok(VarInt::from_encoding(&encoding[..encoded_len]))
+    let value = match encoded_len {
+        1 => VarInt::from_encoding(first, &[]),
+        2 => VarInt::from_encoding(first, &read_rest::<1, F, A>(io, encoded_len).await?),
+        4 => VarInt::from_encoding(first, &read_rest::<3, F, A>(io, encoded_len).await?),
+        _ => VarInt::from_encoding(first, &read_rest::<7, F, A>(io, encoded_len).await?),
+    };
+    Ok((value, encoded_len))
 }
 
 /// Reads the `LENGTH` bytes that follow the first byte of an encoding.
@@ -101,6 +117,11 @@ pub enum ReadVarIntError<E> {
 }
 
 impl<E> ReadVarIntError<E> {
+    /// Whether the source ended before the encoding was complete.
+    pub fn is_incomplete(&self) -> bool {
+        matches!(self, Self::Incomplete { .. })
+    }
+
     /// Bytes of the encoding read before the failure.
     pub fn completed(&self) -> usize {
         match self {

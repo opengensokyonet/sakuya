@@ -1,4 +1,7 @@
-use super::{Directionality, Initiator, StreamId};
+use super::{
+    Directionality, Initiator, StreamId, StreamIndexError,
+    codec::{ReadStreamIdHostExt as _, WriteStreamIdHostExt as _},
+};
 use crate::var_int::VarInt;
 
 fn stream_id(value: u32) -> StreamId {
@@ -22,7 +25,7 @@ fn reads_the_type_bits() {
             assert_eq!(id.index(), u64::from(index), "{id}");
             assert_eq!(
                 StreamId::new(initiator, directionality, u64::from(index)),
-                Some(id)
+                Ok(id)
             );
         }
     }
@@ -45,7 +48,9 @@ fn composes_up_to_the_largest_index() {
             Directionality::Bidirectional,
             StreamId::MAX_INDEX + 1
         ),
-        None
+        Err(StreamIndexError {
+            index: StreamId::MAX_INDEX + 1
+        })
     );
 }
 
@@ -57,4 +62,25 @@ fn converts_and_formats_as_the_number() {
     assert_eq!(id.to_string(), "13");
     assert!(stream_id(4) < stream_id(5));
     assert_eq!(StreamId::default(), stream_id(0));
+    assert_eq!(StreamId::from_var_int(VarInt::from(9u8)), stream_id(9));
+}
+
+#[test]
+fn reads_and_writes_as_a_variable_length_integer() {
+    for value in [0, 63, 64, 1 << 20] {
+        let id = stream_id(value);
+        let mut output = Vec::new();
+        output.sync_write_stream_id_unpin(id).unwrap();
+        assert_eq!(output.len(), id.get().encoded_len());
+        let mut input = output.as_slice();
+        assert_eq!(input.sync_read_stream_id_unpin().unwrap(), id);
+        assert!(input.is_empty());
+    }
+    let mut input = &[0x40][..];
+    assert!(
+        input
+            .sync_read_stream_id_unpin()
+            .unwrap_err()
+            .is_incomplete()
+    );
 }

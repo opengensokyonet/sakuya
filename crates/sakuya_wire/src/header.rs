@@ -4,53 +4,67 @@
 //! define:
 //!
 //! 1. [`HeaderForm::of`] reads the most significant bit of the first byte.
-//! 2. [`LongHeader::parse`] reads the fields every QUIC version shares
+//! 2. [`codec::read_long_header`] reads the fields every QUIC version shares
 //!    ([RFC 8999 §5.1]): version and the two connection IDs, each 0 to 255
-//!    bytes long. [`ShortHeader::parse`] reads the destination connection ID
-//!    of a short header, whose length the caller supplies because the header
-//!    does not carry it ([RFC 8999 §5.2]).
-//! 3. A long header with version 0 converts into a [`VersionNegotiation`]
-//!    packet ([RFC 8999 §6]); one with version 1 converts into a
+//!    bytes long. [`codec::read_short_header`] reads the destination
+//!    connection ID of a short header, whose length the caller supplies
+//!    because the header does not carry it ([RFC 8999 §5.2]).
+//! 3. After a long header with [`Version::NEGOTIATION`],
+//!    [`codec::read_version_negotiation`] reads the rest of a
+//!    [`VersionNegotiation`] packet ([RFC 8999 §6]); after one with
+//!    [`v1::VERSION`], [`v1::codec::read_long_packet`] reads the rest of a
 //!    [`v1::LongPacket`] ([RFC 9000 §17.2]). For any other version, only the
 //!    version-independent fields of the [`LongHeader`] are known.
 //!
-//! The input of each layer is a datagram, or the part of it starting at the
-//! packet to interpret; offsets reported by the layers count from the start of
-//! that input. A version 1 long packet with a Length field reports where it
-//! ends, so a datagram that coalesces several packets can be interpreted packet
-//! by packet from [`v1::LongPacket::remainder`]. Version Negotiation packets,
-//! Retry packets and short headers extend to the end of the datagram.
+//! Each layer is a `nitori_call` operation that continues where the previous
+//! one stopped. The source is a datagram, or the part of it starting at the
+//! packet to interpret, held by a host such as a byte slice or `Bytes`;
+//! offsets reported by the layers count from the first byte of the packet. A
+//! version 1 long packet with a Length field reads exactly its own bytes, so a
+//! datagram that coalesces several packets can be interpreted packet by
+//! packet from what remains in the source. Version Negotiation packets, Retry
+//! packets and short headers extend to the end of the source.
 //!
 //! No layer interprets protected bits or fields. The packet number offset
-//! states where the protected packet number begins; its length, the reserved
-//! bits and the Key Phase bit are known only after header protection is
-//! removed.
+//! states where the protected packet number begins and the sample offset
+//! where header protection takes its sample ([RFC 9001 §5.4.2]); the packet
+//! number length, the reserved bits and the Key Phase bit are known only
+//! after header protection is removed.
 //!
 //! ```
-//! use sakuya_wire::header::{HeaderForm, LongHeader, ShortHeader, VersionNegotiation, v1};
+//! use sakuya_wire::header::{
+//!     HeaderForm,
+//!     codec::{
+//!         ReadLongHeaderHostExt as _, ReadShortHeaderHostExt as _,
+//!         ReadVersionNegotiationHostExt as _,
+//!     },
+//!     v1::{self, codec::ReadLongPacketHostExt as _},
+//! };
+//! use sakuya_wire::version::Version;
 //!
-//! fn describe(datagram: &[u8], short_dcid_len: usize) -> String {
+//! fn describe(datagram: &[u8], short_dcid_len: u8) -> String {
 //!     let Some(&first) = datagram.first() else { return "empty".into() };
+//!     let mut input = datagram;
 //!     match HeaderForm::of(first) {
-//!         HeaderForm::Short => match ShortHeader::parse(datagram, short_dcid_len) {
+//!         HeaderForm::Short => match input.sync_read_short_header_unpin(short_dcid_len) {
 //!             Ok(short) => format!("short, packet number at {}", short.packet_number_offset()),
 //!             Err(error) => error.to_string(),
 //!         },
 //!         HeaderForm::Long => {
-//!             let long = match LongHeader::parse(datagram) {
+//!             let long = match input.sync_read_long_header_unpin() {
 //!                 Ok(long) => long,
 //!                 Err(error) => return error.to_string(),
 //!             };
 //!             match long.version() {
-//!                 VersionNegotiation::VERSION => match VersionNegotiation::try_from(long) {
+//!                 Version::NEGOTIATION => match input.sync_read_version_negotiation_unpin(long) {
 //!                     Ok(packet) => format!("{} versions offered", packet.supported_versions().len()),
 //!                     Err(error) => error.to_string(),
 //!                 },
-//!                 v1::VERSION => match v1::LongPacket::try_from(long) {
+//!                 v1::VERSION => match input.sync_read_long_packet_unpin(long) {
 //!                     Ok(packet) => format!("{:?} ending at {}", packet.packet_type(), packet.end()),
 //!                     Err(error) => error.to_string(),
 //!                 },
-//!                 version => format!("unsupported version {version:#010x}"),
+//!                 version => format!("unsupported version {version}"),
 //!             }
 //!         }
 //!     }
@@ -75,10 +89,12 @@
 //! [RFC 8999 §5.2]: https://www.rfc-editor.org/rfc/rfc8999.html#section-5.2
 //! [RFC 8999 §6]: https://www.rfc-editor.org/rfc/rfc8999.html#section-6
 //! [RFC 9000 §17.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.2
-use crate::var_int::{DecodeError, VarInt};
-use core::{iter::FusedIterator, slice};
-use snafu::Snafu;
+//! [RFC 9001 §5.4.2]: https://www.rfc-editor.org/rfc/rfc9001.html#section-5.4.2
+use crate::{connection_id::RawConnectionId, version::Version};
+use bytes::Buf;
+use core::iter::FusedIterator;
 
+pub mod codec;
 pub mod v1;
 
 /// The Header Form bit: set for long headers.
@@ -86,6 +102,13 @@ const FORM_BIT: u8 = 0x80;
 
 /// The length of a version field.
 const VERSION_LEN: usize = 4;
+
+/// How many bytes after the start of the packet number field header
+/// protection takes its sample: the packet number is taken to be four bytes
+/// long ([RFC 9001 §5.4.2]).
+///
+/// [RFC 9001 §5.4.2]: https://www.rfc-editor.org/rfc/rfc9001.html#section-5.4.2
+pub const SAMPLE_DISTANCE: usize = 4;
 
 /// Whether a packet has a long or a short header: the most significant bit of
 /// its first byte, the only bit whose meaning every QUIC version shares.
@@ -117,114 +140,40 @@ impl HeaderForm {
 ///
 /// [RFC 8999 §5.1]: https://www.rfc-editor.org/rfc/rfc8999.html#section-5.1
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LongHeader<'a> {
-    input: &'a [u8],
-    version: u32,
-    dcid: &'a [u8],
-    scid: &'a [u8],
+pub struct LongHeader {
+    first_byte: u8,
+    version: Version,
+    dcid: RawConnectionId,
+    scid: RawConnectionId,
 }
 
-impl<'a> LongHeader<'a> {
-    /// Reads the version-independent fields of the long header at the start of
-    /// `input`.
-    ///
-    /// `input` is the datagram, or the part of it from the first byte of the
-    /// packet. Only the first byte, version, and the connection IDs with their
-    /// lengths are read.
-    ///
-    /// # Errors
-    ///
-    /// [`LongHeaderError::Empty`] for empty input,
-    /// [`LongHeaderError::ShortForm`] if the first byte announces a short
-    /// header, and [`LongHeaderError::Truncated`] if `input` ends within those
-    /// fields.
-    pub fn parse(input: &'a [u8]) -> Result<Self, LongHeaderError> {
-        let Some(&first) = input.first() else {
-            return Err(LongHeaderError::Empty);
-        };
-        if HeaderForm::of(first) == HeaderForm::Short {
-            return Err(LongHeaderError::ShortForm);
-        }
-        let mut reader = Reader::new(input, 1);
-        let version = reader.take(VERSION_LEN)?;
-        let version = u32::from_be_bytes([version[0], version[1], version[2], version[3]]);
-        let dcid_len = reader.take(1)?[0];
-        let dcid = reader.take(usize::from(dcid_len))?;
-        let scid_len = reader.take(1)?[0];
-        let scid = reader.take(usize::from(scid_len))?;
-        Ok(Self {
-            input,
-            version,
-            dcid,
-            scid,
-        })
-    }
-
+impl LongHeader {
     /// The first byte of the packet. Its low seven bits are version-specific
     /// and may be protected.
     pub fn first_byte(&self) -> u8 {
-        self.input[0]
+        self.first_byte
     }
 
     /// The version field.
-    pub fn version(&self) -> u32 {
+    pub fn version(&self) -> Version {
         self.version
     }
 
     /// The destination connection ID: 0 to 255 bytes.
-    pub fn dcid(&self) -> &'a [u8] {
-        self.dcid
+    pub fn dcid(&self) -> &RawConnectionId {
+        &self.dcid
     }
 
     /// The source connection ID: 0 to 255 bytes.
-    pub fn scid(&self) -> &'a [u8] {
-        self.scid
+    pub fn scid(&self) -> &RawConnectionId {
+        &self.scid
     }
 
     /// The offset of the first version-specific byte after the source
-    /// connection ID.
+    /// connection ID: the number of bytes the header took.
     pub fn version_specific_offset(&self) -> usize {
         1 + VERSION_LEN + 1 + self.dcid.len() + 1 + self.scid.len()
     }
-
-    /// The input this header was read from, starting at its first byte.
-    pub fn input(&self) -> &'a [u8] {
-        self.input
-    }
-
-    /// The bytes of the input after the version-independent fields.
-    pub fn version_specific(&self) -> &'a [u8] {
-        &self.input[self.version_specific_offset()..]
-    }
-}
-
-/// Failures of [`LongHeader::parse`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(module(long_header_error), visibility(pub(crate)))]
-pub enum LongHeaderError {
-    /// The input has no bytes.
-    #[snafu(display("no bytes for a long header"))]
-    Empty,
-    /// The first byte announces a short header.
-    #[snafu(display("first byte announces a short header"))]
-    ShortForm,
-    /// The input ends within the version-independent fields.
-    #[snafu(transparent)]
-    Truncated {
-        /// Where the input ended.
-        source: TruncatedError,
-    },
-}
-
-/// The input ends before a field it announces.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(display("header needs {required} bytes, but the input has {available}"))]
-pub struct TruncatedError {
-    /// The input length the field requires, counted from the start of the
-    /// input.
-    pub required: usize,
-    /// The input length.
-    pub available: usize,
 }
 
 /// A short header with the destination connection ID length the caller
@@ -233,53 +182,29 @@ pub struct TruncatedError {
 /// A short header does not state the length of its destination connection
 /// ID; the endpoint that chose the connection ID knows it. Different lengths
 /// give different interpretations of the same bytes, and the header itself
-/// cannot tell which is right. A short header extends to the end of the
-/// datagram.
+/// cannot tell which is right. A short header packet extends to the end of the
+/// source; `D` is the source's chunk type, which holds the protected rest.
 ///
 /// [RFC 8999 §5.2]: https://www.rfc-editor.org/rfc/rfc8999.html#section-5.2
 /// [RFC 9000 §17.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.3
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ShortHeader<'a> {
-    input: &'a [u8],
-    dcid: &'a [u8],
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShortHeader<D> {
+    first_byte: u8,
+    dcid: RawConnectionId,
+    protected: D,
 }
 
-impl<'a> ShortHeader<'a> {
-    /// Reads the destination connection ID of `dcid_len` bytes that follows
-    /// the first byte of `input`.
-    ///
-    /// `input` is the datagram, or the part of it from the first byte of the
-    /// packet. Nothing after the connection ID is read; whether a packet
-    /// number and enough protected payload follow is for the removal of
-    /// header protection to check.
-    ///
-    /// # Errors
-    ///
-    /// [`ShortHeaderError::Empty`] for empty input,
-    /// [`ShortHeaderError::LongForm`] if the first byte announces a long
-    /// header, and [`ShortHeaderError::Truncated`] if `input` ends within the
-    /// connection ID.
-    pub fn parse(input: &'a [u8], dcid_len: usize) -> Result<Self, ShortHeaderError> {
-        let Some(&first) = input.first() else {
-            return Err(ShortHeaderError::Empty);
-        };
-        if HeaderForm::of(first) == HeaderForm::Long {
-            return Err(ShortHeaderError::LongForm);
-        }
-        let dcid = Reader::new(input, 1).take(dcid_len)?;
-        Ok(Self { input, dcid })
-    }
-
+impl<D: Buf> ShortHeader<D> {
     /// The first byte of the packet. Its low seven bits are version-specific
     /// and some of them are protected.
     pub fn first_byte(&self) -> u8 {
-        self.input[0]
+        self.first_byte
     }
 
     /// The destination connection ID, of the length given to
-    /// [`ShortHeader::parse`].
-    pub fn dcid(&self) -> &'a [u8] {
-        self.dcid
+    /// [`codec::read_short_header`].
+    pub fn dcid(&self) -> &RawConnectionId {
+        &self.dcid
     }
 
     /// The offset of the packet number field, the first byte after the
@@ -291,189 +216,87 @@ impl<'a> ShortHeader<'a> {
         1 + self.dcid.len()
     }
 
-    /// The input this header was read from, starting at its first byte; the
-    /// whole packet, since a short header extends to the end of the datagram.
-    pub fn input(&self) -> &'a [u8] {
-        self.input
+    /// The offset of the header protection sample:
+    /// [`ShortHeader::packet_number_offset`] plus [`SAMPLE_DISTANCE`].
+    pub fn sample_offset(&self) -> usize {
+        self.packet_number_offset() + SAMPLE_DISTANCE
+    }
+
+    /// The offset just past the packet, the end of the source.
+    pub fn end(&self) -> usize {
+        self.packet_number_offset() + self.protected.remaining()
+    }
+
+    /// The protected packet number and payload.
+    pub fn protected(&self) -> &D {
+        &self.protected
+    }
+
+    /// Takes the protected packet number and payload.
+    pub fn into_protected(self) -> D {
+        self.protected
     }
 }
 
-/// Failures of [`ShortHeader::parse`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(module(short_header_error), visibility(pub(crate)))]
-pub enum ShortHeaderError {
-    /// The input has no bytes.
-    #[snafu(display("no bytes for a short header"))]
-    Empty,
-    /// The first byte announces a long header.
-    #[snafu(display("first byte announces a long header"))]
-    LongForm,
-    /// The input ends within the destination connection ID.
-    #[snafu(transparent)]
-    Truncated {
-        /// Where the input ended.
-        source: TruncatedError,
-    },
-}
-
-/// A Version Negotiation packet ([RFC 8999 §6]): a long header with version 0.
+/// A Version Negotiation packet ([RFC 8999 §6]): a long header with
+/// [`Version::NEGOTIATION`].
 ///
 /// The connection IDs echo those of the packet that prompted it and may be up
 /// to 255 bytes long. The supported version list fills the rest of the
-/// datagram. The other bits of the first byte are unused. Whether the packet
-/// answers a packet this endpoint sent is for the client that sent it to
-/// decide.
+/// source; `D` is the source's chunk type, which holds it. The other bits of
+/// the first byte are unused. Whether the packet answers a packet this
+/// endpoint sent is for the client that sent it to decide.
 ///
 /// [RFC 8999 §6]: https://www.rfc-editor.org/rfc/rfc8999.html#section-6
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct VersionNegotiation<'a> {
-    header: LongHeader<'a>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VersionNegotiation<D> {
+    header: LongHeader,
+    versions: D,
 }
 
-impl<'a> VersionNegotiation<'a> {
-    /// The version field of a Version Negotiation packet.
-    pub const VERSION: u32 = 0;
-
+impl<D: Buf + Clone> VersionNegotiation<D> {
     /// The version-independent fields.
-    pub fn header(&self) -> &LongHeader<'a> {
+    pub fn header(&self) -> &LongHeader {
         &self.header
     }
 
     /// The destination connection ID: 0 to 255 bytes.
-    pub fn dcid(&self) -> &'a [u8] {
+    pub fn dcid(&self) -> &RawConnectionId {
         self.header.dcid()
     }
 
     /// The source connection ID: 0 to 255 bytes.
-    pub fn scid(&self) -> &'a [u8] {
+    pub fn scid(&self) -> &RawConnectionId {
         self.header.scid()
     }
 
     /// The versions the list offers, in order. The list may be empty.
-    pub fn supported_versions(&self) -> SupportedVersions<'a> {
-        let (versions, _) = self.header.version_specific().as_chunks::<VERSION_LEN>();
-        SupportedVersions(versions.iter())
+    pub fn supported_versions(&self) -> SupportedVersions<D> {
+        SupportedVersions(self.versions.clone())
     }
-}
-
-impl<'a> TryFrom<LongHeader<'a>> for VersionNegotiation<'a> {
-    type Error = VersionNegotiationError;
-
-    /// Accepts a long header with version 0 whose remaining input is a whole
-    /// number of versions.
-    ///
-    /// # Errors
-    ///
-    /// [`VersionNegotiationError::Version`] for another version and
-    /// [`VersionNegotiationError::VersionList`] if the input after the
-    /// connection IDs is not a multiple of four bytes.
-    fn try_from(header: LongHeader<'a>) -> Result<Self, Self::Error> {
-        if header.version() != Self::VERSION {
-            return Err(VersionNegotiationError::Version {
-                version: header.version(),
-            });
-        }
-        let length = header.version_specific().len();
-        if !length.is_multiple_of(VERSION_LEN) {
-            return Err(VersionNegotiationError::VersionList { length });
-        }
-        Ok(Self { header })
-    }
-}
-
-/// Failures of converting a [`LongHeader`] into a [`VersionNegotiation`]
-/// packet.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(module(version_negotiation_error), visibility(pub(crate)))]
-pub enum VersionNegotiationError {
-    /// The version field is not 0.
-    #[snafu(display("version {version:#010x} is not version negotiation"))]
-    Version {
-        /// The version field.
-        version: u32,
-    },
-    /// The supported version list does not end on a version boundary.
-    #[snafu(display("supported version list of {length} bytes is not a multiple of 4"))]
-    VersionList {
-        /// The length of the input after the connection IDs.
-        length: usize,
-    },
 }
 
 /// The versions a [`VersionNegotiation`] packet offers, in order.
 #[derive(Clone, Debug)]
-pub struct SupportedVersions<'a>(slice::Iter<'a, [u8; VERSION_LEN]>);
+pub struct SupportedVersions<D>(D);
 
-impl Iterator for SupportedVersions<'_> {
-    type Item = u32;
+impl<D: Buf> Iterator for SupportedVersions<D> {
+    type Item = Version;
 
-    fn next(&mut self) -> Option<u32> {
-        self.0.next().copied().map(u32::from_be_bytes)
+    fn next(&mut self) -> Option<Version> {
+        // The list was checked to be a whole number of versions.
+        (self.0.remaining() >= VERSION_LEN).then(|| Version::new(self.0.get_u32()))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        self.0.size_hint()
+        let count = self.0.remaining() / VERSION_LEN;
+        (count, Some(count))
     }
 }
 
-impl DoubleEndedIterator for SupportedVersions<'_> {
-    fn next_back(&mut self) -> Option<u32> {
-        self.0.next_back().copied().map(u32::from_be_bytes)
-    }
-}
+impl<D: Buf> ExactSizeIterator for SupportedVersions<D> {}
 
-impl ExactSizeIterator for SupportedVersions<'_> {}
-
-impl FusedIterator for SupportedVersions<'_> {}
-
-/// Reads consecutive fields of an input, tracking the offset.
-struct Reader<'a> {
-    input: &'a [u8],
-    offset: usize,
-}
-
-impl<'a> Reader<'a> {
-    fn new(input: &'a [u8], offset: usize) -> Self {
-        Self { input, offset }
-    }
-
-    /// Takes the next `length` bytes.
-    fn take(&mut self, length: usize) -> Result<&'a [u8], TruncatedError> {
-        let available = self.input.len();
-        let end = self
-            .offset
-            .checked_add(length)
-            .filter(|&end| end <= available)
-            .ok_or(TruncatedError {
-                required: self.offset.saturating_add(length),
-                available,
-            })?;
-        let field = &self.input[self.offset..end];
-        self.offset = end;
-        Ok(field)
-    }
-
-    /// Takes the next variable-length integer.
-    fn take_var_int(&mut self) -> Result<VarInt, TruncatedError> {
-        let encoded_len = match VarInt::decode(&self.input[self.offset..]) {
-            Ok((value, encoded_len)) => {
-                self.offset += encoded_len;
-                return Ok(value);
-            }
-            Err(DecodeError::Empty) => 1,
-            Err(DecodeError::Truncated { encoded_len, .. }) => encoded_len,
-        };
-        Err(TruncatedError {
-            required: self.offset + encoded_len,
-            available: self.input.len(),
-        })
-    }
-
-    /// The offset of the next field.
-    fn offset(&self) -> usize {
-        self.offset
-    }
-}
+impl<D: Buf> FusedIterator for SupportedVersions<D> {}
 
 #[cfg(test)]
 mod tests;

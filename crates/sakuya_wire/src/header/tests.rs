@@ -1,12 +1,22 @@
 use super::{
-    HeaderForm, LongHeader, LongHeaderError, ShortHeader, ShortHeaderError, TruncatedError,
-    VersionNegotiation, VersionNegotiationError,
-    v1::{self, LongPacket, LongPacketError, LongPacketType, TypeFields},
+    HeaderForm, LongHeader, SAMPLE_DISTANCE,
+    codec::{
+        ReadLongHeaderError, ReadLongHeaderHostExt as _, ReadShortHeaderError,
+        ReadShortHeaderHostExt as _, ReadVersionNegotiationError,
+        ReadVersionNegotiationHostExt as _,
+    },
+    v1::{
+        self, LongPacket, LongPacketType, TypeFields,
+        codec::{ReadLongPacketError, ReadLongPacketHostExt as _},
+    },
 };
 use crate::{
     connection_id::{ConnectionId, ConnectionIdLengthError},
-    var_int::VarInt,
+    payload::ReadPayloadError,
+    var_int::{VarInt, codec::WriteVarIntHostExt as _},
+    version::Version,
 };
+use bytes::Bytes;
 
 /// The protected client Initial packet of RFC 9001 Appendix A.2: 1200 bytes,
 /// an 8-byte destination connection ID, an empty source connection ID, no
@@ -71,13 +81,6 @@ fn client_initial() -> Vec<u8> {
     packet
 }
 
-fn truncated(required: usize, available: usize) -> TruncatedError {
-    TruncatedError {
-        required,
-        available,
-    }
-}
-
 /// A version 1 long header packet with a Length field; `length` covers the
 /// packet number and payload bytes in `rest`.
 fn long_packet(
@@ -92,22 +95,35 @@ fn long_packet(
     packet.push(scid.len() as u8);
     packet.extend_from_slice(scid);
     if let Some(token) = token {
-        VarInt::try_from(token.len())
-            .unwrap()
-            .encode(&mut packet)
+        packet
+            .sync_write_var_int_unpin(VarInt::try_from(token.len()).unwrap())
             .unwrap();
         packet.extend_from_slice(token);
     }
-    VarInt::try_from(rest.len())
-        .unwrap()
-        .encode(&mut packet)
+    packet
+        .sync_write_var_int_unpin(VarInt::try_from(rest.len()).unwrap())
         .unwrap();
     packet.extend_from_slice(rest);
     packet
 }
 
-fn v1_packet(input: &[u8]) -> Result<LongPacket<'_>, LongPacketError> {
-    LongPacket::try_from(LongHeader::parse(input).unwrap())
+fn long_header(input: &mut &[u8]) -> LongHeader {
+    input.sync_read_long_header_unpin().unwrap()
+}
+
+/// Reads a version 1 long packet from the start of `input`, advancing it.
+fn v1_packet<'a>(
+    input: &mut &'a [u8],
+) -> Result<LongPacket<&'a [u8]>, ReadLongPacketError<core::convert::Infallible>> {
+    let header = long_header(input);
+    input.sync_read_long_packet_unpin(header)
+}
+
+fn v1_of(
+    packet: &[u8],
+) -> Result<LongPacket<&[u8]>, ReadLongPacketError<core::convert::Infallible>> {
+    let mut input = packet;
+    v1_packet(&mut input)
 }
 
 #[test]
@@ -121,131 +137,154 @@ fn header_form_is_the_most_significant_bit() {
 #[test]
 fn rfc_client_initial() {
     let datagram = client_initial();
-    let header = LongHeader::parse(&datagram).unwrap();
+    let mut input = datagram.as_slice();
+    let header = long_header(&mut input);
     assert_eq!(header.first_byte(), 0xc0);
     assert_eq!(header.version(), v1::VERSION);
-    assert_eq!(header.dcid(), RFC_DCID);
-    assert_eq!(header.scid(), []);
+    assert_eq!(header.dcid().as_bytes(), RFC_DCID);
+    assert!(header.scid().is_empty());
     assert_eq!(header.version_specific_offset(), 15);
-    assert_eq!(header.input(), datagram);
+    assert_eq!(input.len(), datagram.len() - 15);
 
-    let packet = LongPacket::try_from(header).unwrap();
+    let packet = input.sync_read_long_packet_unpin(header).unwrap();
     assert_eq!(packet.packet_type(), LongPacketType::Initial);
     assert_eq!(packet.dcid(), &ConnectionId::new(&RFC_DCID).unwrap());
     assert_eq!(packet.scid(), &ConnectionId::EMPTY);
     assert!(packet.fixed_bit());
-    let TypeFields::Initial { token, bounds } = *packet.fields() else {
+    let TypeFields::Initial {
+        token,
+        bounds,
+        protected,
+    } = *packet.fields()
+    else {
         panic!("expected Initial fields, got {:?}", packet.fields());
     };
-    assert_eq!(token, []);
+    assert!(token.is_empty());
     assert_eq!(bounds.length(), VarInt::from(1182u16));
     assert_eq!(bounds.packet_number_offset(), 18);
+    assert_eq!(bounds.sample_offset(), 18 + SAMPLE_DISTANCE);
     assert_eq!(bounds.end(), 1200);
     assert_eq!(packet.end(), 1200);
-    assert_eq!(packet.packet(), datagram);
-    assert!(packet.remainder().is_empty());
+    assert_eq!(protected, &datagram[18..]);
+    assert!(input.is_empty());
+}
+
+#[test]
+fn rfc_client_initial_from_bytes_shares_storage() {
+    let datagram = Bytes::from(client_initial());
+    let mut input = datagram.clone();
+    let header = input.sync_read_long_header_unpin().unwrap();
+    let packet = input.sync_read_long_packet_unpin(header).unwrap();
+    let TypeFields::Initial { protected, .. } = packet.into_fields() else {
+        panic!("expected Initial fields");
+    };
+    assert_eq!(protected, datagram.slice(18..));
+    assert_eq!(protected.as_ptr(), datagram[18..].as_ptr());
 }
 
 #[test]
 fn rfc_retry() {
     let datagram = hex(RETRY);
-    let header = LongHeader::parse(&datagram).unwrap();
+    let mut input = datagram.as_slice();
+    let header = long_header(&mut input);
     assert_eq!(header.version(), v1::VERSION);
-    assert_eq!(header.dcid(), []);
-    assert_eq!(header.scid(), hex("f067a5502a4262b5"));
+    assert!(header.dcid().is_empty());
+    assert_eq!(header.scid().as_bytes(), hex("f067a5502a4262b5"));
 
-    let packet = LongPacket::try_from(header).unwrap();
+    let packet = input.sync_read_long_packet_unpin(header).unwrap();
     assert_eq!(packet.packet_type(), LongPacketType::Retry);
     assert_eq!(packet.dcid(), &ConnectionId::EMPTY);
     assert_eq!(packet.scid().as_bytes(), hex("f067a5502a4262b5"));
     let TypeFields::Retry {
         token,
         integrity_tag,
-    } = *packet.fields()
+        end,
+    } = packet.fields()
     else {
         panic!("expected Retry fields, got {:?}", packet.fields());
     };
-    assert_eq!(token, b"token");
+    assert_eq!(token, &b"token"[..]);
     assert_eq!(integrity_tag[..], hex("04a265ba2eff4d829058fb3f0f2496ba"));
+    assert_eq!(*end, datagram.len());
     assert_eq!(packet.end(), datagram.len());
-    assert!(packet.remainder().is_empty());
+    assert!(input.is_empty());
 }
 
 #[test]
 fn empty_input() {
-    assert_eq!(LongHeader::parse(&[]), Err(LongHeaderError::Empty));
-    assert_eq!(ShortHeader::parse(&[], 0), Err(ShortHeaderError::Empty));
+    let mut input = &[][..];
+    let error = input.sync_read_long_header_unpin().unwrap_err();
+    assert!(matches!(error, ReadLongHeaderError::FirstByte { .. }));
+    assert!(error.is_incomplete());
+    let error = input.sync_read_short_header_unpin(0).unwrap_err();
+    assert!(matches!(error, ReadShortHeaderError::FirstByte { .. }));
+    assert!(error.is_incomplete());
 }
 
 #[test]
 fn wrong_header_form() {
-    assert_eq!(
-        LongHeader::parse(&[0x40, 0, 0]),
-        Err(LongHeaderError::ShortForm)
-    );
-    assert_eq!(
-        ShortHeader::parse(&[0xc0, 0, 0], 0),
-        Err(ShortHeaderError::LongForm)
-    );
+    let mut input = &[0x40, 0, 0][..];
+    assert!(matches!(
+        input.sync_read_long_header_unpin(),
+        Err(ReadLongHeaderError::ShortForm)
+    ));
+    let mut input = &[0xc0, 0, 0][..];
+    assert!(matches!(
+        input.sync_read_short_header_unpin(0),
+        Err(ReadShortHeaderError::LongForm)
+    ));
 }
 
 #[test]
 fn truncated_version_independent_fields() {
     let datagram = client_initial();
-    // First byte, version (1..5), DCID length (5), DCID (6..14), SCID length (14).
-    let required = [5, 5, 5, 5, 6, 14, 14, 14, 14, 14, 14, 14, 14, 15];
-    for (end, required) in (1..15).zip(required) {
-        assert_eq!(
-            LongHeader::parse(&datagram[..end]),
-            Err(LongHeaderError::Truncated {
-                source: truncated(required, end)
-            }),
-            "input of {end} bytes"
-        );
+    // First byte (0), version (1..5), DCID length (5), DCID (6..14), SCID length (14).
+    for end in 1..15 {
+        let mut input = &datagram[..end];
+        let error = input.sync_read_long_header_unpin().unwrap_err();
+        assert!(error.is_incomplete(), "input of {end} bytes: {error:?}");
+        let expected = match end {
+            1..5 => matches!(error, ReadLongHeaderError::Version { .. }),
+            5..14 => matches!(error, ReadLongHeaderError::Dcid { .. }),
+            _ => matches!(error, ReadLongHeaderError::Scid { .. }),
+        };
+        assert!(expected, "input of {end} bytes: {error:?}");
     }
-    assert!(LongHeader::parse(&datagram[..15]).is_ok());
+    let mut input = &datagram[..15];
+    assert!(input.sync_read_long_header_unpin().is_ok());
 }
 
 #[test]
 fn truncated_initial_fields() {
     let datagram = client_initial();
-    assert_eq!(
-        v1_packet(&datagram[..15]),
-        Err(LongPacketError::TokenLength {
-            source: truncated(16, 15)
-        })
-    );
-    assert_eq!(
-        v1_packet(&datagram[..16]),
-        Err(LongPacketError::Length {
-            source: truncated(17, 16)
-        })
-    );
+    let error = v1_of(&datagram[..15]).unwrap_err();
+    assert!(matches!(error, ReadLongPacketError::TokenLength { .. }));
+    assert!(error.is_incomplete());
+    let error = v1_of(&datagram[..16]).unwrap_err();
+    assert!(matches!(error, ReadLongPacketError::Length { .. }));
     // The Length field 0x449e takes two bytes.
-    assert_eq!(
-        v1_packet(&datagram[..17]),
-        Err(LongPacketError::Length {
-            source: truncated(18, 17)
-        })
-    );
+    let error = v1_of(&datagram[..17]).unwrap_err();
+    assert!(matches!(error, ReadLongPacketError::Length { .. }));
     for end in [18, 19, 1199] {
-        assert_eq!(
-            v1_packet(&datagram[..end]),
-            Err(LongPacketError::LengthOutOfBounds {
-                length: VarInt::from(1182u16),
-                available: end - 18
-            }),
-            "input of {end} bytes"
-        );
+        let error = v1_of(&datagram[..end]).unwrap_err();
+        let ReadLongPacketError::Protected {
+            length,
+            source: ReadPayloadError::Incomplete { source },
+        } = &error
+        else {
+            panic!("input of {end} bytes: {error:?}");
+        };
+        assert_eq!(*length, VarInt::from(1182u16));
+        assert_eq!((source.expected, source.completed), (1182, end - 18));
     }
 }
 
 #[test]
 fn initial_with_token() {
     let packet = long_packet(0xc1, &[7; 4], &[9; 3], Some(b"abc"), &[0xee; 21]);
-    let parsed = v1_packet(&packet).unwrap();
+    let parsed = v1_of(&packet).unwrap();
     assert_eq!(parsed.scid().as_bytes(), [9; 3]);
-    let TypeFields::Initial { token, bounds } = *parsed.fields() else {
+    let TypeFields::Initial { token, bounds, .. } = *parsed.fields() else {
         panic!("expected Initial fields, got {:?}", parsed.fields());
     };
     assert_eq!(token, b"abc");
@@ -254,12 +293,14 @@ fn initial_with_token() {
     assert_eq!(bounds.end(), packet.len());
 
     // The token occupies bytes 15 to 17; the input ends within it.
-    assert_eq!(
-        v1_packet(&packet[..17]),
-        Err(LongPacketError::Token {
-            source: truncated(18, 17)
-        })
-    );
+    let error = v1_of(&packet[..17]).unwrap_err();
+    let ReadLongPacketError::Token {
+        source: ReadPayloadError::Incomplete { source },
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!((source.expected, source.completed), (3, 2));
 }
 
 #[test]
@@ -269,14 +310,16 @@ fn zero_rtt_and_handshake() {
         (0xe0, LongPacketType::Handshake),
     ] {
         let packet = long_packet(first_byte, &[1; 8], &[2; 8], None, &[0xee; 30]);
-        let parsed = v1_packet(&packet).unwrap();
+        let parsed = v1_of(&packet).unwrap();
         assert_eq!(parsed.packet_type(), packet_type);
-        let bounds = match *parsed.fields() {
-            TypeFields::ZeroRtt { bounds } | TypeFields::Handshake { bounds } => bounds,
-            fields => panic!("expected bounded fields, got {fields:?}"),
+        let (bounds, protected) = match *parsed.fields() {
+            TypeFields::ZeroRtt { bounds, protected }
+            | TypeFields::Handshake { bounds, protected } => (bounds, protected),
+            ref fields => panic!("expected bounded fields, got {fields:?}"),
         };
         assert_eq!(bounds.packet_number_offset(), 1 + 4 + 1 + 8 + 1 + 8 + 1);
         assert_eq!(bounds.length(), VarInt::from(30u8));
+        assert_eq!(protected, [0xee; 30]);
         assert_eq!(parsed.end(), packet.len());
     }
 }
@@ -285,7 +328,7 @@ fn zero_rtt_and_handshake() {
 fn connection_id_lengths() {
     for dcid_len in [0, 1, 8, 20] {
         let packet = long_packet(0xe0, &vec![0xaa; dcid_len], &[0xbb; 20], None, &[0; 20]);
-        let parsed = v1_packet(&packet).unwrap();
+        let parsed = v1_of(&packet).unwrap();
         assert_eq!(parsed.dcid().len(), dcid_len);
         assert_eq!(parsed.scid().len(), 20);
     }
@@ -293,52 +336,49 @@ fn connection_id_lengths() {
     // Longer connection IDs are readable without a version, but not in version 1.
     for dcid_len in [21, 255] {
         let packet = long_packet(0xe0, &vec![0xaa; dcid_len], &[], None, &[0; 20]);
-        let header = LongHeader::parse(&packet).unwrap();
+        let mut input = packet.as_slice();
+        let header = long_header(&mut input);
         assert_eq!(header.dcid().len(), dcid_len);
-        assert_eq!(
-            LongPacket::try_from(header),
-            Err(LongPacketError::DcidLength {
-                source: ConnectionIdLengthError { length: dcid_len }
-            })
-        );
+        assert!(matches!(
+            input.sync_read_long_packet_unpin(header),
+            Err(ReadLongPacketError::DcidLength {
+                source: ConnectionIdLengthError { length }
+            }) if length == dcid_len
+        ));
     }
     let packet = long_packet(0xe0, &[], &[0xbb; 21], None, &[0; 20]);
-    assert_eq!(
-        v1_packet(&packet),
-        Err(LongPacketError::ScidLength {
+    assert!(matches!(
+        v1_of(&packet),
+        Err(ReadLongPacketError::ScidLength {
             source: ConnectionIdLengthError { length: 21 }
         })
-    );
+    ));
 }
 
 #[test]
 fn short_header_with_caller_supplied_lengths() {
     let datagram = [0x41, 1, 2, 3, 4, 5, 6, 7, 8, 0xee, 0xee, 0xee];
     for dcid_len in [0, 1, 8, 11] {
-        let header = ShortHeader::parse(&datagram, dcid_len).unwrap();
+        let mut input = &datagram[..];
+        let header = input.sync_read_short_header_unpin(dcid_len).unwrap();
+        let dcid_len = usize::from(dcid_len);
         assert_eq!(header.first_byte(), 0x41);
-        assert_eq!(header.dcid(), &datagram[1..1 + dcid_len]);
+        assert_eq!(header.dcid().as_bytes(), &datagram[1..1 + dcid_len]);
         assert_eq!(header.packet_number_offset(), 1 + dcid_len);
-        assert_eq!(header.input(), datagram);
+        assert_eq!(header.sample_offset(), 1 + dcid_len + SAMPLE_DISTANCE);
+        assert_eq!(*header.protected(), &datagram[1 + dcid_len..]);
+        assert_eq!(header.end(), datagram.len());
+        assert!(input.is_empty());
     }
-    assert_eq!(
-        ShortHeader::parse(&datagram, 12),
-        Err(ShortHeaderError::Truncated {
-            source: truncated(13, 12)
-        })
-    );
-    assert_eq!(
-        ShortHeader::parse(&datagram[..1], 20),
-        Err(ShortHeaderError::Truncated {
-            source: truncated(21, 1)
-        })
-    );
-    assert_eq!(
-        ShortHeader::parse(&datagram, usize::MAX),
-        Err(ShortHeaderError::Truncated {
-            source: truncated(usize::MAX, 12)
-        })
-    );
+    for (input, dcid_len) in [(&datagram[..], 12), (&datagram[..1], 20)] {
+        let mut input = input;
+        let error = input.sync_read_short_header_unpin(dcid_len).unwrap_err();
+        assert!(
+            matches!(error, ReadShortHeaderError::Dcid { .. }),
+            "{error:?}"
+        );
+        assert!(error.is_incomplete());
+    }
 }
 
 fn version_negotiation_packet(dcid: &[u8], scid: &[u8], versions: &[u8]) -> Vec<u8> {
@@ -357,46 +397,60 @@ fn version_negotiation() {
         &RFC_DCID,
         &[0, 0, 0, 1, 0x6b, 0x33, 0x43, 0xcf, 0x1a, 0x2a, 0x3a, 0x4a],
     );
-    let header = LongHeader::parse(&packet).unwrap();
-    assert_eq!(header.version(), VersionNegotiation::VERSION);
-    let negotiation = VersionNegotiation::try_from(header).unwrap();
-    assert_eq!(negotiation.dcid(), [1; 5]);
-    assert_eq!(negotiation.scid(), RFC_DCID);
+    let mut input = packet.as_slice();
+    let header = long_header(&mut input);
+    assert_eq!(header.version(), Version::NEGOTIATION);
+    let negotiation = input.sync_read_version_negotiation_unpin(header).unwrap();
+    assert_eq!(negotiation.dcid().as_bytes(), [1; 5]);
+    assert_eq!(negotiation.scid().as_bytes(), RFC_DCID);
     assert_eq!(negotiation.header(), &header);
     let versions = negotiation.supported_versions();
     assert_eq!(versions.len(), 3);
-    assert_eq!(versions.collect::<Vec<_>>(), [1, 0x6b33_43cf, 0x1a2a_3a4a]);
     assert_eq!(
-        negotiation.supported_versions().next_back(),
-        Some(0x1a2a_3a4a)
+        versions.collect::<Vec<_>>(),
+        [1, 0x6b33_43cf, 0x1a2a_3a4a].map(Version::new)
     );
+    assert!(Version::new(0x1a2a_3a4a).is_reserved());
     // Version negotiation is not a version 1 packet.
-    assert_eq!(
-        LongPacket::try_from(header),
-        Err(LongPacketError::Version { version: 0 })
-    );
+    let mut input = packet.as_slice();
+    let header = long_header(&mut input);
+    assert!(matches!(
+        input.sync_read_long_packet_unpin(header),
+        Err(ReadLongPacketError::Version {
+            version: Version::NEGOTIATION
+        })
+    ));
 }
 
 #[test]
 fn version_negotiation_reads_long_connection_ids() {
     let packet = version_negotiation_packet(&[1; 255], &[2; 255], &[0, 0, 0, 1]);
-    let negotiation = VersionNegotiation::try_from(LongHeader::parse(&packet).unwrap()).unwrap();
+    let mut input = packet.as_slice();
+    let header = long_header(&mut input);
+    let negotiation = input.sync_read_version_negotiation_unpin(header).unwrap();
     assert_eq!(negotiation.dcid().len(), 255);
     assert_eq!(negotiation.scid().len(), 255);
-    assert_eq!(negotiation.supported_versions().collect::<Vec<_>>(), [1]);
+    assert_eq!(
+        negotiation.supported_versions().collect::<Vec<_>>(),
+        [Version::V1]
+    );
 }
 
 #[test]
 fn version_negotiation_list_shapes() {
     let packet = version_negotiation_packet(&[], &[], &[]);
-    let negotiation = VersionNegotiation::try_from(LongHeader::parse(&packet).unwrap()).unwrap();
+    let mut input = packet.as_slice();
+    let header = long_header(&mut input);
+    let negotiation = input.sync_read_version_negotiation_unpin(header).unwrap();
     assert_eq!(negotiation.supported_versions().len(), 0);
 
     let packet = version_negotiation_packet(&[], &[], &[0, 0, 0, 1, 0, 0]);
-    assert_eq!(
-        VersionNegotiation::try_from(LongHeader::parse(&packet).unwrap()),
-        Err(VersionNegotiationError::VersionList { length: 6 })
-    );
+    let mut input = packet.as_slice();
+    let header = long_header(&mut input);
+    assert!(matches!(
+        input.sync_read_version_negotiation_unpin(header),
+        Err(ReadVersionNegotiationError::VersionList { length: 6 })
+    ));
 }
 
 #[test]
@@ -405,23 +459,22 @@ fn unsupported_version_keeps_version_independent_fields() {
     packet.extend_from_slice(&[3; 30]);
     packet.push(0);
     packet.extend_from_slice(&[0xee; 40]);
-    let header = LongHeader::parse(&packet).unwrap();
-    assert_eq!(header.version(), 0x6b33_43cf);
-    assert_eq!(header.dcid(), [3; 30]);
-    assert_eq!(header.scid(), []);
-    assert_eq!(header.version_specific(), [0xee; 40]);
-    assert_eq!(
-        LongPacket::try_from(header),
-        Err(LongPacketError::Version {
-            version: 0x6b33_43cf
-        })
-    );
-    assert_eq!(
-        VersionNegotiation::try_from(header),
-        Err(VersionNegotiationError::Version {
-            version: 0x6b33_43cf
-        })
-    );
+    let mut input = packet.as_slice();
+    let header = long_header(&mut input);
+    assert_eq!(header.version(), Version::new(0x6b33_43cf));
+    assert_eq!(header.dcid().as_bytes(), [3; 30]);
+    assert!(header.scid().is_empty());
+    assert_eq!(input, [0xee; 40]);
+    assert!(matches!(
+        input.sync_read_long_packet_unpin(header),
+        Err(ReadLongPacketError::Version { version }) if version == Version::new(0x6b33_43cf)
+    ));
+    assert!(matches!(
+        input.sync_read_version_negotiation_unpin(header),
+        Err(ReadVersionNegotiationError::Version { version }) if version == Version::new(0x6b33_43cf)
+    ));
+    // Neither failure read anything.
+    assert_eq!(input, [0xee; 40]);
 }
 
 #[test]
@@ -432,27 +485,30 @@ fn coalesced_packets() {
         0x43, 0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08, 0xee, 0xee,
     ];
     let datagram = [&initial[..], &handshake, &short].concat();
+    let mut input = datagram.as_slice();
 
-    let first = v1_packet(&datagram).unwrap();
+    let first = v1_packet(&mut input).unwrap();
     assert_eq!(first.packet_type(), LongPacketType::Initial);
-    assert_eq!(first.packet(), initial);
     assert_eq!(first.end(), 1200);
+    assert_eq!(input.len(), datagram.len() - 1200);
 
-    let second = v1_packet(first.remainder()).unwrap();
+    let second = v1_packet(&mut input).unwrap();
     assert_eq!(second.packet_type(), LongPacketType::Handshake);
-    assert_eq!(second.packet(), handshake);
-    let TypeFields::Handshake { bounds } = *second.fields() else {
+    assert_eq!(second.end(), handshake.len());
+    let TypeFields::Handshake { bounds, .. } = *second.fields() else {
         panic!("expected Handshake fields, got {:?}", second.fields());
     };
     assert_eq!(bounds.length(), VarInt::from(40u8));
     assert_eq!(bounds.packet_number_offset(), handshake.len() - 40);
     assert_eq!(bounds.end(), handshake.len());
 
-    let rest = second.remainder();
-    assert_eq!(HeaderForm::of(rest[0]), HeaderForm::Short);
-    let third = ShortHeader::parse(rest, RFC_DCID.len()).unwrap();
-    assert_eq!(third.dcid(), RFC_DCID);
+    assert_eq!(HeaderForm::of(input[0]), HeaderForm::Short);
+    let third = input
+        .sync_read_short_header_unpin(RFC_DCID.len() as u8)
+        .unwrap();
+    assert_eq!(third.dcid().as_bytes(), RFC_DCID);
     assert_eq!(third.packet_number_offset(), 9);
+    assert_eq!(third.end(), short.len());
 }
 
 #[test]
@@ -463,57 +519,63 @@ fn coalesced_packet_with_a_corrupt_length() {
     let length_offset = handshake.len() - 40 - 1;
     handshake[length_offset] = 41;
     let datagram = [&initial[..], &handshake].concat();
+    let mut input = datagram.as_slice();
 
-    let first = v1_packet(&datagram).unwrap();
-    assert_eq!(
-        v1_packet(first.remainder()),
-        Err(LongPacketError::LengthOutOfBounds {
-            length: VarInt::from(41u8),
-            available: 40
-        })
-    );
+    v1_packet(&mut input).unwrap();
+    let error = v1_packet(&mut input).unwrap_err();
+    let ReadLongPacketError::Protected {
+        length,
+        source: ReadPayloadError::Incomplete { source },
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(*length, VarInt::from(41u8));
+    assert_eq!((source.expected, source.completed), (41, 40));
 }
 
 #[test]
 fn retry_lengths() {
     let header = [0xf0, 0, 0, 0, 1, 0, 2, 0xab, 0xcd];
     let packet = [&header[..], &[0x11; 16]].concat();
-    let parsed = v1_packet(&packet).unwrap();
+    let parsed = v1_of(&packet).unwrap();
     let TypeFields::Retry {
         token,
         integrity_tag,
-    } = *parsed.fields()
+        ..
+    } = parsed.fields()
     else {
         panic!("expected Retry fields, got {:?}", parsed.fields());
     };
-    assert_eq!(token, []);
+    assert!(token.is_empty());
     assert_eq!(integrity_tag, &[0x11; 16]);
 
     let packet = [&header[..], &[0x11; 15]].concat();
-    assert_eq!(
-        v1_packet(&packet),
-        Err(LongPacketError::RetryIntegrityTag {
-            source: truncated(header.len() + 16, packet.len())
-        })
-    );
+    assert!(matches!(
+        v1_of(&packet),
+        Err(ReadLongPacketError::RetryIntegrityTag { length: 15 })
+    ));
 }
 
 #[test]
 fn errors_describe_the_layer() {
+    let mut input = &[0xc0, 0, 0][..];
     assert_eq!(
-        LongHeaderError::from(truncated(14, 9)).to_string(),
-        "header needs 14 bytes, but the input has 9"
+        input.sync_read_long_header_unpin().unwrap_err().to_string(),
+        "version read failed"
     );
+    let datagram = client_initial();
     assert_eq!(
-        LongPacketError::LengthOutOfBounds {
-            length: VarInt::from(1182u16),
-            available: 1
-        }
-        .to_string(),
-        "Length field 1182 exceeds the 1 bytes after it"
+        v1_of(&datagram[..19]).unwrap_err().to_string(),
+        "the Length field range of 1182 bytes read failed"
     );
+    let mut input = &[0xaa, 0, 0, 0, 1, 0, 0][..];
+    let header = long_header(&mut input);
     assert_eq!(
-        VersionNegotiationError::Version { version: 1 }.to_string(),
+        input
+            .sync_read_version_negotiation_unpin(header)
+            .unwrap_err()
+            .to_string(),
         "version 0x00000001 is not version negotiation"
     );
 }

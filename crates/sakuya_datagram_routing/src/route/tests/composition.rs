@@ -204,7 +204,7 @@ fn datagrams_flow_from_the_link_to_connections_through_one_router() {
         RouteMatcher::new(
             MatchAssociation::LocalCid(nonempty(&cid(3))),
             PacketForms::HANDSHAKE | PacketForms::SHORT,
-            v1::VERSION,
+            v1::VERSION.get(),
         ),
         Arc::clone(&connection.deliverer) as Arc<Target>,
     ));

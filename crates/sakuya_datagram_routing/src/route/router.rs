@@ -6,8 +6,15 @@ use std::sync::Arc;
 
 use sakuya_link::LinkId;
 use sakuya_wire::connection_id::{ConnectionId, NonEmptyCid};
+use sakuya_wire::header::v1::codec::ReadLongPacketHostExt as _;
 use sakuya_wire::header::v1::{self, LongPacketType};
-use sakuya_wire::header::{HeaderForm, LongHeader, ShortHeader, VersionNegotiation};
+use sakuya_wire::header::{
+    HeaderForm,
+    codec::{
+        ReadLongHeaderHostExt as _, ReadShortHeaderHostExt as _, ReadVersionNegotiationHostExt as _,
+    },
+};
+use sakuya_wire::version::Version;
 use smallvec::SmallVec;
 
 use super::index::{FrozenEntries, OfferedRouteHistory, Recheck};
@@ -404,13 +411,13 @@ fn classify(
     let by_dcid = |dcid: ConnectionId, interpretation, with_initial: bool| {
         let mut queries = Queries::new();
         match NonEmptyCid::new(dcid) {
-            Some(cid) => {
+            Ok(cid) => {
                 queries.push((MatchAssociation::LocalCid(cid), interpretation));
                 if with_initial {
                     queries.push((MatchAssociation::InitialDcid(cid), interpretation));
                 }
             }
-            None => queries.push((MatchAssociation::ZeroCid(binding.clone()), interpretation)),
+            Err(_) => queries.push((MatchAssociation::ZeroCid(binding.clone()), interpretation)),
         }
         queries
     };
@@ -418,12 +425,14 @@ fn classify(
         HeaderForm::Short => {
             let mut queries = Queries::new();
             for dcid_len in recognizer.short_dcid_lengths(bytes, link) {
-                let Ok(short) = ShortHeader::parse(bytes, dcid_len) else {
+                let Ok(dcid_len) = u8::try_from(dcid_len) else {
                     continue;
                 };
-                let (Ok(dcid), Ok(dcid_len)) =
-                    (ConnectionId::new(short.dcid()), u8::try_from(dcid_len))
-                else {
+                let mut input = bytes;
+                let Ok(short) = input.sync_read_short_header_unpin(dcid_len) else {
+                    continue;
+                };
+                let Ok(dcid) = ConnectionId::try_from(*short.dcid()) else {
                     continue;
                 };
                 let interpretation = FirstPacketInterpretation::Short { dcid_len };
@@ -438,15 +447,16 @@ fn classify(
             }
         }
         HeaderForm::Long => {
-            let Ok(long) = LongHeader::parse(bytes) else {
+            let mut input = bytes;
+            let Ok(long) = input.sync_read_long_header_unpin() else {
                 return Classification::Release;
             };
             match long.version() {
-                VersionNegotiation::VERSION => {
-                    let Ok(packet) = VersionNegotiation::try_from(long) else {
+                Version::NEGOTIATION => {
+                    let Ok(packet) = input.sync_read_version_negotiation_unpin(long) else {
                         return Classification::Release;
                     };
-                    let Ok(dcid) = ConnectionId::new(packet.dcid()) else {
+                    let Ok(dcid) = ConnectionId::try_from(*packet.dcid()) else {
                         return Classification::Release;
                     };
                     Classification::Route {
@@ -459,12 +469,12 @@ fn classify(
                     }
                 }
                 v1::VERSION => {
-                    let Ok(packet) = v1::LongPacket::try_from(long) else {
+                    let Ok(packet) = input.sync_read_long_packet_unpin(long) else {
                         return Classification::Release;
                     };
                     let packet_type = packet.packet_type();
                     let interpretation = FirstPacketInterpretation::Long {
-                        version: v1::VERSION,
+                        version: v1::VERSION.get(),
                         packet_type,
                     };
                     let dcid = *packet.dcid();
@@ -473,14 +483,19 @@ fn classify(
                         LongPacketType::Initial | LongPacketType::ZeroRtt
                     );
                     let initial = (packet_type == LongPacketType::Initial).then(|| {
-                        RecognizedInitial::new(v1::VERSION, dcid, *packet.scid(), binding.clone())
+                        RecognizedInitial::new(
+                            v1::VERSION.get(),
+                            dcid,
+                            *packet.scid(),
+                            binding.clone(),
+                        )
                     });
                     Classification::Route {
                         queries: by_dcid(dcid, interpretation, with_initial),
                         initial,
                     }
                 }
-                version => Classification::Unsupported(version),
+                version => Classification::Unsupported(version.get()),
             }
         }
     }

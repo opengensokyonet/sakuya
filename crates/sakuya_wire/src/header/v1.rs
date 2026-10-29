@@ -6,22 +6,22 @@
 //! Handshake packets carry a Length field covering the packet number and the
 //! payload, which bounds the packet within the datagram ([`PacketBounds`]); a
 //! Retry packet extends to the end of the datagram and ends with its 16-byte
-//! integrity tag.
+//! integrity tag. [`codec::read_long_packet`] reads these fields after the
+//! long header.
 //!
-//! When a Length field cannot be read or points past the end of the input, the
-//! boundary of the packet is unknown; the error reports this, and nothing here
-//! searches the following bytes for another packet.
+//! When a Length field cannot be read or its range extends past the end of
+//! the source, the boundary of the packet is unknown; the error reports this,
+//! and nothing here searches the following bytes for another packet.
 //!
 //! [RFC 9000 §17.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.2
-use super::{LongHeader, Reader, TruncatedError};
-use crate::{
-    connection_id::{ConnectionId, ConnectionIdLengthError},
-    var_int::VarInt,
-};
-use snafu::{OptionExt, ResultExt, Snafu};
+use super::{LongHeader, SAMPLE_DISTANCE};
+use crate::{connection_id::ConnectionId, var_int::VarInt, version::Version};
+use bytes::Bytes;
+
+pub mod codec;
 
 /// The version field of QUIC version 1.
-pub const VERSION: u32 = 0x0000_0001;
+pub const VERSION: Version = Version::V1;
 
 /// The length of the Retry Integrity Tag ([RFC 9001 §5.8]).
 ///
@@ -65,21 +65,22 @@ impl LongPacketType {
 /// A QUIC version 1 long header packet, as far as its header states without
 /// protection ([RFC 9000 §17.2]).
 ///
-/// Offsets count from the start of the input the [`LongHeader`] was read
-/// from, which is the first byte of this packet.
+/// Offsets count from the first byte of the packet. `D` is the chunk type of
+/// the source the packet was read from; it holds the token and the protected
+/// packet number and payload.
 ///
 /// [RFC 9000 §17.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.2
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct LongPacket<'a> {
-    header: LongHeader<'a>,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LongPacket<D> {
+    header: LongHeader,
     dcid: ConnectionId,
     scid: ConnectionId,
-    fields: TypeFields<'a>,
+    fields: TypeFields<D>,
 }
 
-impl<'a> LongPacket<'a> {
+impl<D> LongPacket<D> {
     /// The version-independent fields.
-    pub fn header(&self) -> &LongHeader<'a> {
+    pub fn header(&self) -> &LongHeader {
         &self.header
     }
 
@@ -104,8 +105,13 @@ impl<'a> LongPacket<'a> {
     }
 
     /// The fields that depend on the packet type.
-    pub fn fields(&self) -> &TypeFields<'a> {
+    pub fn fields(&self) -> &TypeFields<D> {
         &self.fields
+    }
+
+    /// Takes the fields that depend on the packet type.
+    pub fn into_fields(self) -> TypeFields<D> {
+        self.fields
     }
 
     /// Whether the Fixed Bit is set.
@@ -119,168 +125,30 @@ impl<'a> LongPacket<'a> {
     }
 
     /// The offset just past this packet: the end of the Length field's range,
-    /// or the end of the input for a Retry packet.
+    /// or the end of the source for a Retry packet.
     pub fn end(&self) -> usize {
-        match self.fields {
+        match &self.fields {
             TypeFields::Initial { bounds, .. }
-            | TypeFields::ZeroRtt { bounds }
-            | TypeFields::Handshake { bounds } => bounds.end,
-            TypeFields::Retry { .. } => self.header.input().len(),
+            | TypeFields::ZeroRtt { bounds, .. }
+            | TypeFields::Handshake { bounds, .. } => bounds.end,
+            TypeFields::Retry { end, .. } => *end,
         }
     }
-
-    /// The bytes of this packet.
-    pub fn packet(&self) -> &'a [u8] {
-        &self.header.input()[..self.end()]
-    }
-
-    /// The bytes of the input after this packet, where the next coalesced
-    /// packet starts if there is one. Empty for a Retry packet.
-    pub fn remainder(&self) -> &'a [u8] {
-        &self.header.input()[self.end()..]
-    }
-}
-
-impl<'a> TryFrom<LongHeader<'a>> for LongPacket<'a> {
-    type Error = LongPacketError;
-
-    /// Reads the version 1 fields that follow the version-independent ones.
-    ///
-    /// # Errors
-    ///
-    /// - [`LongPacketError::Version`] if the version is not [`VERSION`];
-    /// - [`LongPacketError::DcidLength`] or [`LongPacketError::ScidLength`] if
-    ///   a connection ID exceeds [`ConnectionId::MAX_LEN`];
-    /// - [`LongPacketError::TokenLength`] or [`LongPacketError::Token`] if the
-    ///   input ends within the token of an Initial packet;
-    /// - [`LongPacketError::Length`] if it ends within the Length field, and
-    ///   [`LongPacketError::LengthOutOfBounds`] if that field's range extends
-    ///   past the end of the input;
-    /// - [`LongPacketError::RetryIntegrityTag`] if a Retry packet is too short
-    ///   for its integrity tag.
-    fn try_from(header: LongHeader<'a>) -> Result<Self, Self::Error> {
-        if header.version() != VERSION {
-            return VersionSnafu {
-                version: header.version(),
-            }
-            .fail();
-        }
-        let dcid = ConnectionId::new(header.dcid()).context(DcidLengthSnafu)?;
-        let scid = ConnectionId::new(header.scid()).context(ScidLengthSnafu)?;
-        let input = header.input();
-        let mut reader = Reader::new(input, header.version_specific_offset());
-        let fields = match LongPacketType::of(header.first_byte()) {
-            LongPacketType::Initial => {
-                let token_len = reader.take_var_int().context(TokenLengthSnafu)?;
-                let token = reader
-                    .take(saturating_usize(token_len))
-                    .context(TokenSnafu)?;
-                let bounds = PacketBounds::read(&mut reader)?;
-                TypeFields::Initial { token, bounds }
-            }
-            LongPacketType::ZeroRtt => TypeFields::ZeroRtt {
-                bounds: PacketBounds::read(&mut reader)?,
-            },
-            LongPacketType::Handshake => TypeFields::Handshake {
-                bounds: PacketBounds::read(&mut reader)?,
-            },
-            LongPacketType::Retry => {
-                let start = reader.offset();
-                let tag_offset = input
-                    .len()
-                    .checked_sub(RETRY_INTEGRITY_TAG_LEN)
-                    .filter(|&tag_offset| tag_offset >= start)
-                    .ok_or(TruncatedError {
-                        required: start + RETRY_INTEGRITY_TAG_LEN,
-                        available: input.len(),
-                    })
-                    .context(RetryIntegrityTagSnafu)?;
-                let (token, integrity_tag) = input[start..].split_at(tag_offset - start);
-                TypeFields::Retry {
-                    token,
-                    integrity_tag: integrity_tag
-                        .try_into()
-                        .expect("the tag is the last RETRY_INTEGRITY_TAG_LEN bytes"),
-                }
-            }
-        };
-        Ok(Self {
-            header,
-            dcid,
-            scid,
-            fields,
-        })
-    }
-}
-
-/// Failures of converting a [`LongHeader`] into a version 1 [`LongPacket`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(visibility(pub(crate)))]
-pub enum LongPacketError {
-    /// The version is not QUIC version 1.
-    #[snafu(display("version {version:#010x} is not QUIC version 1"))]
-    Version {
-        /// The version field.
-        version: u32,
-    },
-    /// The destination connection ID is longer than version 1 allows.
-    #[snafu(display("invalid destination connection ID"))]
-    DcidLength {
-        /// The rejected length.
-        source: ConnectionIdLengthError,
-    },
-    /// The source connection ID is longer than version 1 allows.
-    #[snafu(display("invalid source connection ID"))]
-    ScidLength {
-        /// The rejected length.
-        source: ConnectionIdLengthError,
-    },
-    /// The input ends within the Token Length field of an Initial packet.
-    #[snafu(display("truncated Token Length field"))]
-    TokenLength {
-        /// Where the input ended.
-        source: TruncatedError,
-    },
-    /// The input ends within the token of an Initial packet.
-    #[snafu(display("truncated token"))]
-    Token {
-        /// Where the input ended.
-        source: TruncatedError,
-    },
-    /// The input ends within the Length field.
-    #[snafu(display("truncated Length field"))]
-    Length {
-        /// Where the input ended.
-        source: TruncatedError,
-    },
-    /// The range of the Length field extends past the end of the input, so the
-    /// packet's boundary is unknown.
-    #[snafu(display("Length field {length} exceeds the {available} bytes after it"))]
-    LengthOutOfBounds {
-        /// The value of the Length field.
-        length: VarInt,
-        /// The bytes of the input after the Length field.
-        available: usize,
-    },
-    /// A Retry packet is too short for its integrity tag.
-    #[snafu(display("truncated Retry Integrity Tag"))]
-    RetryIntegrityTag {
-        /// Where the input ended.
-        source: TruncatedError,
-    },
 }
 
 /// The fields of a version 1 long header that depend on its packet type.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TypeFields<'a> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TypeFields<D> {
     /// An Initial packet ([RFC 9000 §17.2.2]).
     ///
     /// [RFC 9000 §17.2.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.2.2
     Initial {
         /// The token, empty when the Token Length is zero.
-        token: &'a [u8],
+        token: D,
         /// The Length field and the extent it gives the packet.
         bounds: PacketBounds,
+        /// The protected packet number and payload.
+        protected: D,
     },
     /// A 0-RTT packet ([RFC 9000 §17.2.3]).
     ///
@@ -288,6 +156,8 @@ pub enum TypeFields<'a> {
     ZeroRtt {
         /// The Length field and the extent it gives the packet.
         bounds: PacketBounds,
+        /// The protected packet number and payload.
+        protected: D,
     },
     /// A Handshake packet ([RFC 9000 §17.2.4]).
     ///
@@ -295,19 +165,24 @@ pub enum TypeFields<'a> {
     Handshake {
         /// The Length field and the extent it gives the packet.
         bounds: PacketBounds,
+        /// The protected packet number and payload.
+        protected: D,
     },
     /// A Retry packet ([RFC 9000 §17.2.5]).
     ///
-    /// The packet extends to the end of the input.
+    /// The packet extends to the end of the source.
     ///
     /// [RFC 9000 §17.2.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.2.5
     Retry {
         /// The Retry Token: everything between the source connection ID and
         /// the integrity tag. It may be empty here; a client discards a Retry
-        /// packet with an empty token.
-        token: &'a [u8],
-        /// The Retry Integrity Tag, the last 16 bytes of the input.
-        integrity_tag: &'a [u8; RETRY_INTEGRITY_TAG_LEN],
+        /// packet with an empty token. It shares the source's storage when
+        /// the source is `Bytes` and is copied otherwise.
+        token: Bytes,
+        /// The Retry Integrity Tag, the last 16 bytes of the source.
+        integrity_tag: [u8; RETRY_INTEGRITY_TAG_LEN],
+        /// The offset just past the packet.
+        end: usize,
     },
 }
 
@@ -316,7 +191,7 @@ pub enum TypeFields<'a> {
 ///
 /// Offsets count from the first byte of the packet. The range from
 /// [`PacketBounds::packet_number_offset`] to [`PacketBounds::end`] holds the
-/// protected packet number and payload; it lies within the input but may be
+/// protected packet number and payload; it lies within the source but may be
 /// too short for them, which removing packet protection detects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PacketBounds {
@@ -340,32 +215,15 @@ impl PacketBounds {
         self.packet_number_offset
     }
 
+    /// The offset of the header protection sample:
+    /// [`PacketBounds::packet_number_offset`] plus [`SAMPLE_DISTANCE`].
+    pub fn sample_offset(&self) -> usize {
+        self.packet_number_offset + SAMPLE_DISTANCE
+    }
+
     /// The offset just past the packet:
     /// [`PacketBounds::packet_number_offset`] plus [`PacketBounds::length`].
     pub fn end(&self) -> usize {
         self.end
     }
-
-    /// Reads the Length field and checks that its range lies within the input.
-    fn read(reader: &mut Reader<'_>) -> Result<Self, LongPacketError> {
-        let length = reader.take_var_int().context(LengthSnafu)?;
-        let packet_number_offset = reader.offset();
-        let available = reader.input.len() - packet_number_offset;
-        let end = usize::try_from(length.get())
-            .ok()
-            .filter(|&length| length <= available)
-            .map(|length| packet_number_offset + length)
-            .context(LengthOutOfBoundsSnafu { length, available })?;
-        Ok(Self {
-            length,
-            packet_number_offset,
-            end,
-        })
-    }
-}
-
-/// A variable-length integer as a length in memory, saturating where `usize`
-/// is narrower.
-fn saturating_usize(value: VarInt) -> usize {
-    usize::try_from(value.get()).unwrap_or(usize::MAX)
 }

@@ -2,10 +2,10 @@
 //!
 //! The payload of a QUIC packet, once packet protection is removed, is a
 //! sequence of frames, each starting with a Frame Type field. A frame never
-//! extends past the end of its packet ([RFC 9000 §12.4]), so the decoders here
-//! work on the complete payload of one packet: a frame that the payload cuts
-//! short is a terminal [`DecodeError::Truncated`], not a reason to wait for
-//! more bytes.
+//! extends past the end of its packet ([RFC 9000 §12.4]), so frames are read
+//! from a source that holds the complete payload of one packet: a frame that
+//! the payload cuts short is a terminal incomplete failure, not a reason to
+//! wait for more bytes.
 //!
 //! Besides the frames of RFC 9000, two extensions are supported:
 //!
@@ -14,55 +14,59 @@
 //!   [draft-ietf-quic-reliable-stream-reset-11]. The draft is not an RFC and
 //!   may still change.
 //!
-//! Which extensions the peers negotiated is a run-time fact: the decoders take
-//! an [`Extensions`] set, and a frame of an extension that is not in the set
-//! is reported as an unknown frame type, as RFC 9000 §12.4 requires.
+//! Which extensions the peers negotiated is a run-time fact: reading takes an
+//! [`Extensions`] set, and a frame of an extension that is not in the set is
+//! reported as an unknown frame type, as RFC 9000 §12.4 requires.
 //!
-//! # Decoding
+//! Each frame type has its own module with its struct, the checks its
+//! encoding imposes, and its write operation. [`Frame`] holds any of them.
 //!
-//! [`Frames`] walks a packet payload frame by frame, without collecting the
-//! frames first; [`Frame::decode`] decodes the single frame at the start of a
-//! slice. Payload fields borrow from the input: STREAM, CRYPTO and DATAGRAM
-//! data, NEW_TOKEN tokens, CONNECTION_CLOSE reason phrases, and the connection
-//! ID and Stateless Reset Token of NEW_CONNECTION_ID. The ranges of an ACK
-//! frame are produced by the [`AckRanges`] iterator.
+//! # Reading
 //!
-//! Decoding checks what the encoding alone determines: that every field is
-//! present, that lengths stay within the payload, and the limits the frame
-//! definitions state for single fields, such as the 2<sup>62</sup> − 1 bound
-//! on the end of STREAM and CRYPTO data or the lengths a NEW_CONNECTION_ID
-//! connection ID may have. Whether a frame is allowed in the packet type,
-//! whether a stream exists or may be opened, and flow control are for the
-//! receiver of the frame to check. Every [`DecodeError`] corresponds to
-//! FRAME_ENCODING_ERROR.
+//! [`codec::read_frame`] reads one frame as a `nitori_call` operation.
+//! [`Frames`] walks a packet payload held by a byte slice or `Bytes`, frame
+//! by frame, without collecting the frames first. Payload fields are chunks
+//! of the source, of the type parameter `D`: subslices of a byte slice and
+//! `Bytes` that share the storage of a `Bytes` source, so reading copies no
+//! payload. These are STREAM, CRYPTO and DATAGRAM data, NEW_TOKEN tokens and
+//! CONNECTION_CLOSE reason phrases. The ranges of an ACK frame are collected
+//! into [`ack::AckRanges`].
+//!
+//! Reading checks what the encoding alone determines: that every field is
+//! present, and the limits the frame definitions state for single fields,
+//! such as the 2<sup>62</sup> − 1 bound on the end of STREAM and CRYPTO data
+//! or the lengths a NEW_CONNECTION_ID connection ID may have. Whether a frame
+//! is allowed in the packet type, whether a stream exists or may be opened,
+//! and flow control are for the receiver of the frame to check. Every
+//! [`codec::ReadFrameError`] corresponds to FRAME_ENCODING_ERROR.
 //!
 //! ```
 //! use sakuya_wire::frame::{Extensions, Frame, Frames};
 //!
 //! // PING, then a STREAM frame with LEN and FIN on stream 4.
 //! let payload = [0x01, 0x0b, 0x04, 0x02, b'h', b'i'];
-//! let mut frames = Frames::new(&payload, Extensions::NONE);
+//! let mut frames = Frames::new(&payload[..], Extensions::NONE);
 //! assert!(matches!(frames.next(), Some(Ok(Frame::Ping(_)))));
 //! let Some(Ok(Frame::Stream(stream))) = frames.next() else { panic!() };
 //! assert_eq!((stream.stream_id.get().get(), stream.data, stream.fin), (4, &b"hi"[..], true));
 //! assert!(frames.next().is_none());
 //! ```
 //!
-//! # Encoding
+//! # Writing
 //!
-//! Every frame type has `encoded_len` and `encode`. `encode` appends the
-//! whole frame to a [`BufMut`], such as a `&mut [u8]` holding the rest of a
-//! packet, or fails without writing anything: it first checks the frame
-//! ([`InvalidFrameError`]) and then the room in the buffer. `encoded_len`
+//! Every frame type has `encoded_len` and a write operation in its module's
+//! `codec`, such as [`stream::codec::write_stream`]; [`codec::write_frame`]
+//! writes any [`Frame`]. Writing first checks the frame and writes nothing
+//! if a field breaks a limit of the encoding ([`InvalidFrameError`]); a sink
+//! that stops accepting bytes keeps the bytes it accepted. `encoded_len`
 //! gives the length in advance, so that a packet encoder can choose frames
-//! and payload sizes before writing. [`Stream::max_data_len`] and
-//! [`Crypto::max_data_len`] give the largest amount of data that fits a given
-//! room, taking into account that the Length field grows with the data.
+//! and payload sizes before writing. [`stream::Stream::max_data_len`] and
+//! [`crypto::Crypto::max_data_len`] give the largest amount of data that fits
+//! a given room, taking into account that the Length field grows with the
+//! data. Payload fields are written from any [`bytes::Buf`].
 //!
 //! A STREAM or DATAGRAM frame without a Length field extends to the end of the
 //! packet; whoever writes one must not append anything after it.
-//!
-//! The [`calls`] module reads and writes frames as `nitori_call` operations.
 //!
 //! # Recovery properties
 //!
@@ -75,60 +79,75 @@
 //! [RFC 9221]: https://www.rfc-editor.org/rfc/rfc9221.html
 //! [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html
 //! [RFC 9002 §2]: https://www.rfc-editor.org/rfc/rfc9002.html#section-2
-use crate::{
-    stream_id::{Directionality, StreamId},
-    transport_error::TransportErrorCode,
-    var_int::VarInt,
-};
-use bytes::BufMut;
-use core::{iter::FusedIterator, num::NonZeroUsize, ops::RangeInclusive};
+use crate::var_int::VarInt;
+use bytes::Buf;
+use core::iter::FusedIterator;
+use nitori_call::{Direct, Receiver};
+use nitori_io::{Read, ReadChunk};
 use snafu::Snafu;
 
-pub mod calls;
-mod decode;
-mod encode;
+pub mod ack;
+pub mod codec;
+pub mod connection_close;
+pub mod crypto;
+pub mod data_blocked;
+pub mod datagram;
+pub mod handshake_done;
+pub mod max_data;
+pub mod max_stream_data;
+pub mod max_streams;
+pub mod new_connection_id;
+pub mod new_token;
+pub mod padding;
+pub mod path_challenge;
+pub mod path_response;
+pub mod ping;
+pub mod reset_stream;
+pub mod reset_stream_at;
+pub mod retire_connection_id;
+pub mod stop_sending;
+pub mod stream;
+pub mod stream_data_blocked;
+pub mod streams_blocked;
 
-use decode::decode_at;
-use encode::{Body, body_len, data_limit, encode_body, max_len_with_length_field};
+#[cfg(test)]
+mod tests;
 
 /// Frame Type values.
-mod type_value {
-    pub(super) const PADDING: u64 = 0x00;
-    pub(super) const PING: u64 = 0x01;
-    pub(super) const ACK: u64 = 0x02;
-    pub(super) const ACK_ECN: u64 = 0x03;
-    pub(super) const RESET_STREAM: u64 = 0x04;
-    pub(super) const STOP_SENDING: u64 = 0x05;
-    pub(super) const CRYPTO: u64 = 0x06;
-    pub(super) const NEW_TOKEN: u64 = 0x07;
-    pub(super) const STREAM: u64 = 0x08;
-    pub(super) const MAX_DATA: u64 = 0x10;
-    pub(super) const MAX_STREAM_DATA: u64 = 0x11;
-    pub(super) const MAX_STREAMS_BIDI: u64 = 0x12;
-    pub(super) const MAX_STREAMS_UNI: u64 = 0x13;
-    pub(super) const DATA_BLOCKED: u64 = 0x14;
-    pub(super) const STREAM_DATA_BLOCKED: u64 = 0x15;
-    pub(super) const STREAMS_BLOCKED_BIDI: u64 = 0x16;
-    pub(super) const STREAMS_BLOCKED_UNI: u64 = 0x17;
-    pub(super) const NEW_CONNECTION_ID: u64 = 0x18;
-    pub(super) const RETIRE_CONNECTION_ID: u64 = 0x19;
-    pub(super) const PATH_CHALLENGE: u64 = 0x1a;
-    pub(super) const PATH_RESPONSE: u64 = 0x1b;
-    pub(super) const CONNECTION_CLOSE: u64 = 0x1c;
-    pub(super) const CONNECTION_CLOSE_APPLICATION: u64 = 0x1d;
-    pub(super) const HANDSHAKE_DONE: u64 = 0x1e;
-    pub(super) const RESET_STREAM_AT: u64 = 0x24;
-    pub(super) const DATAGRAM: u64 = 0x30;
-    pub(super) const DATAGRAM_WITH_LENGTH: u64 = 0x31;
+pub(crate) mod type_value {
+    pub(crate) const PADDING: u64 = 0x00;
+    pub(crate) const PING: u64 = 0x01;
+    pub(crate) const ACK: u64 = 0x02;
+    pub(crate) const ACK_ECN: u64 = 0x03;
+    pub(crate) const RESET_STREAM: u64 = 0x04;
+    pub(crate) const STOP_SENDING: u64 = 0x05;
+    pub(crate) const CRYPTO: u64 = 0x06;
+    pub(crate) const NEW_TOKEN: u64 = 0x07;
+    pub(crate) const STREAM: u64 = 0x08;
+    pub(crate) const MAX_DATA: u64 = 0x10;
+    pub(crate) const MAX_STREAM_DATA: u64 = 0x11;
+    pub(crate) const MAX_STREAMS_BIDI: u64 = 0x12;
+    pub(crate) const MAX_STREAMS_UNI: u64 = 0x13;
+    pub(crate) const DATA_BLOCKED: u64 = 0x14;
+    pub(crate) const STREAM_DATA_BLOCKED: u64 = 0x15;
+    pub(crate) const STREAMS_BLOCKED_BIDI: u64 = 0x16;
+    pub(crate) const STREAMS_BLOCKED_UNI: u64 = 0x17;
+    pub(crate) const NEW_CONNECTION_ID: u64 = 0x18;
+    pub(crate) const RETIRE_CONNECTION_ID: u64 = 0x19;
+    pub(crate) const PATH_CHALLENGE: u64 = 0x1a;
+    pub(crate) const PATH_RESPONSE: u64 = 0x1b;
+    pub(crate) const CONNECTION_CLOSE: u64 = 0x1c;
+    pub(crate) const CONNECTION_CLOSE_APPLICATION: u64 = 0x1d;
+    pub(crate) const HANDSHAKE_DONE: u64 = 0x1e;
+    pub(crate) const RESET_STREAM_AT: u64 = 0x24;
+    pub(crate) const DATAGRAM: u64 = 0x30;
+    pub(crate) const DATAGRAM_WITH_LENGTH: u64 = 0x31;
 }
 
-/// The bits of a STREAM frame type ([RFC 9000 §19.8]).
-///
-/// [RFC 9000 §19.8]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.8
-mod stream_bits {
-    pub(super) const OFF: u64 = 0x04;
-    pub(super) const LEN: u64 = 0x02;
-    pub(super) const FIN: u64 = 0x01;
+/// A Frame Type value as a variable-length integer; every value above is
+/// below 2<sup>6</sup>.
+pub(crate) const fn type_var_int(value: u64) -> VarInt {
+    VarInt::from_u32(value as u32)
 }
 
 /// The largest stream count MAX_STREAMS and STREAMS_BLOCKED may carry,
@@ -137,16 +156,8 @@ mod stream_bits {
 /// [RFC 9000 §19.11]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.11
 pub const MAX_STREAM_COUNT: u64 = 1 << 60;
 
-/// The length of a Stateless Reset Token ([RFC 9000 §10.3]).
-///
-/// [RFC 9000 §10.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-10.3
-pub const STATELESS_RESET_TOKEN_LEN: usize = 16;
-
 /// The length of the data of PATH_CHALLENGE and PATH_RESPONSE.
 pub const PATH_DATA_LEN: usize = 8;
-
-/// The longest connection ID NEW_CONNECTION_ID may carry.
-const MAX_CID_LEN: usize = crate::connection_id::ConnectionId::MAX_LEN;
 
 /// The kind of a frame, as its Frame Type field announces it.
 ///
@@ -203,11 +214,17 @@ pub enum FrameType {
 }
 
 impl FrameType {
-    /// The kind a Frame Type value announces, or `None` for a value neither
-    /// RFC 9000 nor a supported extension defines.
-    pub const fn of(value: VarInt) -> Option<Self> {
+    /// The kind a Frame Type value announces.
+    ///
+    /// This is the `const` form of `FrameType::try_from(value)`.
+    ///
+    /// # Errors
+    ///
+    /// [`UnknownFrameTypeError`] for a value neither RFC 9000 nor a
+    /// supported extension defines.
+    pub const fn of(value: VarInt) -> Result<Self, UnknownFrameTypeError> {
         use type_value::*;
-        Some(match value.get() {
+        Ok(match value.get() {
             PADDING => Self::Padding,
             PING => Self::Ping,
             ACK | ACK_ECN => Self::Ack,
@@ -230,7 +247,7 @@ impl FrameType {
             HANDSHAKE_DONE => Self::HandshakeDone,
             RESET_STREAM_AT => Self::ResetStreamAt,
             DATAGRAM | DATAGRAM_WITH_LENGTH => Self::Datagram,
-            _ => return None,
+            _ => return Err(UnknownFrameTypeError { frame_type: value }),
         })
     }
 
@@ -258,12 +275,30 @@ impl FrameType {
     }
 }
 
-/// The extension frames a decoder accepts.
+impl TryFrom<VarInt> for FrameType {
+    type Error = UnknownFrameTypeError;
+
+    /// The kind a Frame Type value announces; see [`FrameType::of`].
+    fn try_from(value: VarInt) -> Result<Self, Self::Error> {
+        Self::of(value)
+    }
+}
+
+/// A Frame Type value that neither RFC 9000 nor a supported extension
+/// defines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("unknown frame type {:#x}", frame_type.get()))]
+pub struct UnknownFrameTypeError {
+    /// The Frame Type value.
+    pub frame_type: VarInt,
+}
+
+/// The extension frames a reader accepts.
 ///
 /// Each extension is negotiated through a transport parameter. A frame of an
-/// extension that is not enabled decodes as an unknown frame type. Sending
-/// and receiving can be permitted separately; pass the set that applies to
-/// the direction being decoded.
+/// extension that is not enabled reads as an unknown frame type. Sending and
+/// receiving can be permitted separately; pass the set that applies to the
+/// direction being read.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Extensions {
     /// Accept DATAGRAM frames ([RFC 9221]).
@@ -298,55 +333,56 @@ impl Extensions {
     }
 }
 
-/// A decoded frame.
+/// A frame of any type.
 ///
-/// Payload fields borrow from the decoded input for `'a`.
+/// `D` is the type of the payload fields: the chunk type of the source a
+/// frame was read from, or any [`Buf`] for a frame to write.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Frame<'a> {
-    /// One or more consecutive PADDING frames.
-    Padding(Padding),
+pub enum Frame<D> {
+    /// PADDING, one or more bytes.
+    Padding(padding::Padding),
     /// A PING frame.
-    Ping(Ping),
+    Ping(ping::Ping),
     /// An ACK frame.
-    Ack(Ack<AckRanges<'a>>),
+    Ack(ack::Ack<ack::AckRanges>),
     /// A RESET_STREAM frame.
-    ResetStream(ResetStream),
+    ResetStream(reset_stream::ResetStream),
     /// A STOP_SENDING frame.
-    StopSending(StopSending),
+    StopSending(stop_sending::StopSending),
     /// A CRYPTO frame.
-    Crypto(Crypto<'a>),
+    Crypto(crypto::Crypto<D>),
     /// A NEW_TOKEN frame.
-    NewToken(NewToken<'a>),
+    NewToken(new_token::NewToken<D>),
     /// A STREAM frame.
-    Stream(Stream<'a>),
+    Stream(stream::Stream<D>),
     /// A MAX_DATA frame.
-    MaxData(MaxData),
+    MaxData(max_data::MaxData),
     /// A MAX_STREAM_DATA frame.
-    MaxStreamData(MaxStreamData),
+    MaxStreamData(max_stream_data::MaxStreamData),
     /// A MAX_STREAMS frame.
-    MaxStreams(MaxStreams),
+    MaxStreams(max_streams::MaxStreams),
     /// A DATA_BLOCKED frame.
-    DataBlocked(DataBlocked),
+    DataBlocked(data_blocked::DataBlocked),
     /// A STREAM_DATA_BLOCKED frame.
-    StreamDataBlocked(StreamDataBlocked),
+    StreamDataBlocked(stream_data_blocked::StreamDataBlocked),
     /// A STREAMS_BLOCKED frame.
-    StreamsBlocked(StreamsBlocked),
+    StreamsBlocked(streams_blocked::StreamsBlocked),
     /// A NEW_CONNECTION_ID frame.
-    NewConnectionId(NewConnectionId<'a>),
+    NewConnectionId(new_connection_id::NewConnectionId),
     /// A RETIRE_CONNECTION_ID frame.
-    RetireConnectionId(RetireConnectionId),
+    RetireConnectionId(retire_connection_id::RetireConnectionId),
     /// A PATH_CHALLENGE frame.
-    PathChallenge(PathChallenge),
+    PathChallenge(path_challenge::PathChallenge),
     /// A PATH_RESPONSE frame.
-    PathResponse(PathResponse),
+    PathResponse(path_response::PathResponse),
     /// A CONNECTION_CLOSE frame.
-    ConnectionClose(ConnectionClose<'a>),
+    ConnectionClose(connection_close::ConnectionClose<D>),
     /// A HANDSHAKE_DONE frame.
-    HandshakeDone(HandshakeDone),
+    HandshakeDone(handshake_done::HandshakeDone),
     /// A RESET_STREAM_AT frame.
-    ResetStreamAt(ResetStreamAt),
+    ResetStreamAt(reset_stream_at::ResetStreamAt),
     /// A DATAGRAM frame.
-    Datagram(Datagram<'a>),
+    Datagram(datagram::Datagram<D>),
 }
 
 /// Applies `$body` to the frame inside each variant of a [`Frame`].
@@ -378,25 +414,8 @@ macro_rules! each_frame {
         }
     };
 }
-use each_frame;
 
-impl<'a> Frame<'a> {
-    /// Decodes the frame at the start of `input`, accepting the extension
-    /// frames in `extensions`.
-    ///
-    /// `input` is the rest of a packet payload: a STREAM or DATAGRAM frame
-    /// without a Length field takes all of it. Returns the frame and the
-    /// number of bytes it took; a run of consecutive PADDING frames decodes
-    /// as one [`Padding`]. Offsets in errors count from the start of `input`.
-    ///
-    /// # Errors
-    ///
-    /// [`DecodeError`] if the frame type is unknown or not enabled, the input
-    /// ends within the frame, or a field breaks a limit of the encoding.
-    pub fn decode(input: &'a [u8], extensions: Extensions) -> Result<(Self, usize), DecodeError> {
-        decode_at(input, 0, extensions)
-    }
-
+impl<D> Frame<D> {
     /// The kind of the frame.
     pub fn frame_type(&self) -> FrameType {
         match self {
@@ -437,808 +456,349 @@ impl<'a> Frame<'a> {
         self.frame_type().counts_in_flight()
     }
 
-    /// The Frame Type value [`Frame::encode`] writes.
+    /// The Frame Type value [`codec::write_frame`] writes.
     pub fn type_value(&self) -> VarInt {
-        each_frame!(self, frame => Body::type_value(frame))
+        each_frame!(self, frame => frame.type_value())
     }
+}
 
-    /// The number of bytes [`Frame::encode`] writes.
+impl<D: Buf> Frame<D> {
+    /// The number of bytes [`codec::write_frame`] writes.
     pub fn encoded_len(&self) -> usize {
-        each_frame!(self, frame => body_len(frame))
+        each_frame!(self, frame => frame.encoded_len())
     }
 
-    /// Checks the limits that [`Frame::encode`] checks before writing.
+    /// Checks the limits that [`codec::write_frame`] checks before writing.
     ///
     /// # Errors
     ///
     /// [`InvalidFrameError`] for a field that breaks a limit of the encoding.
     pub fn validate(&self) -> Result<(), InvalidFrameError> {
-        each_frame!(self, frame => Body::validate(frame))
-    }
-
-    /// Appends the encoding of the frame to `buffer`.
-    ///
-    /// Nothing is written unless the frame is valid and fits.
-    ///
-    /// # Errors
-    ///
-    /// [`EncodeError::Invalid`] if [`Frame::validate`] fails, and
-    /// [`EncodeError::Capacity`] if `buffer.remaining_mut()` is below
-    /// [`Frame::encoded_len`].
-    pub fn encode<B: BufMut + ?Sized>(&self, buffer: &mut B) -> Result<(), EncodeError> {
-        each_frame!(self, frame => encode_body(frame, buffer))
-    }
-}
-
-/// A run of one or more consecutive PADDING frames ([RFC 9000 §19.1]).
-///
-/// Each PADDING frame is the single byte `0x00`. Decoding reports a run of
-/// them as one value, and encoding writes `len` zero bytes.
-///
-/// [RFC 9000 §19.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.1
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Padding {
-    /// The number of bytes, each one PADDING frame.
-    pub len: NonZeroUsize,
-}
-
-/// A PING frame ([RFC 9000 §19.2]).
-///
-/// [RFC 9000 §19.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.2
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct Ping;
-
-/// An ACK frame ([RFC 9000 §19.3]).
-///
-/// `ranges` yields the acknowledged packet numbers as inclusive ranges, from
-/// the largest packet number down: each range lies below the previous one
-/// and is separated from it by at least one unacknowledged packet number. A
-/// decoded frame holds [`AckRanges`]; to encode, any [`Clone`] iterator of
-/// such ranges can be used, for example
-/// `ranges.iter().cloned()` over a slice of ranges.
-///
-/// [RFC 9000 §19.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.3
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Ack<R> {
-    /// The ACK Delay field: the acknowledgment delay in microseconds, divided
-    /// by 2 to the power of the sender's `ack_delay_exponent`.
-    pub ack_delay: VarInt,
-    /// The acknowledged ranges, largest first.
-    pub ranges: R,
-    /// The ECN counts; present in type `0x03`.
-    pub ecn_counts: Option<EcnCounts>,
-}
-
-/// The ECN counts of an ACK frame of type `0x03` ([RFC 9000 §19.3.2]).
-///
-/// [RFC 9000 §19.3.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.3.2
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct EcnCounts {
-    /// ECT0 Count: packets received with the ECT(0) codepoint.
-    pub ect0: VarInt,
-    /// ECT1 Count: packets received with the ECT(1) codepoint.
-    pub ect1: VarInt,
-    /// ECN-CE Count: packets received with the ECN-CE codepoint.
-    pub ce: VarInt,
-}
-
-impl<R: Iterator<Item = RangeInclusive<u64>> + Clone> Ack<R> {
-    /// The largest acknowledged packet number: the end of the first range.
-    pub fn largest_acknowledged(&self) -> Option<u64> {
-        self.ranges.clone().next().map(|range| *range.end())
-    }
-
-    /// The Frame Type value [`Ack::encode`] writes: `0x03` with ECN counts,
-    /// `0x02` without.
-    pub fn type_value(&self) -> VarInt {
-        Body::type_value(self)
-    }
-
-    /// The number of bytes [`Ack::encode`] writes.
-    ///
-    /// Iterates over a clone of the ranges. For ranges that
-    /// [`Ack::validate`] rejects, the value has no meaning.
-    pub fn encoded_len(&self) -> usize {
-        body_len(self)
-    }
-
-    /// Checks that there is at least one range and that the ranges are
-    /// ordered as the encoding requires.
-    ///
-    /// # Errors
-    ///
-    /// [`InvalidFrameError::EmptyAck`] without ranges, and
-    /// [`InvalidFrameError::AckRange`] for the first range that is empty,
-    /// exceeds [`VarInt::MAX`], or does not lie below the previous range with
-    /// at least one packet number between them.
-    pub fn validate(&self) -> Result<(), InvalidFrameError> {
-        Body::validate(self)
-    }
-
-    /// Appends the encoding of the frame to `buffer`, iterating over two
-    /// clones of the ranges.
-    ///
-    /// Nothing is written unless the frame is valid and fits.
-    ///
-    /// # Errors
-    ///
-    /// [`EncodeError::Invalid`] if [`Ack::validate`] fails, and
-    /// [`EncodeError::Capacity`] if `buffer.remaining_mut()` is below
-    /// [`Ack::encoded_len`].
-    pub fn encode<B: BufMut + ?Sized>(&self, buffer: &mut B) -> Result<(), EncodeError> {
-        encode_body(self, buffer)
-    }
-}
-
-/// The ranges of a decoded ACK frame, largest first.
-///
-/// Each item is the inclusive range of packet numbers that one ACK Range
-/// acknowledges, restored from the Largest Acknowledged, First ACK Range and
-/// Gap fields. The decoder checked the whole sequence, so iteration cannot
-/// fail. Equality compares the ranges, not their encoding.
-#[derive(Clone, Debug)]
-pub struct AckRanges<'a> {
-    /// The encoded First ACK Range and ACK Ranges not yet produced.
-    encoded: &'a [u8],
-    /// Largest Acknowledged.
-    largest: u64,
-    /// The smallest packet number of the range produced last.
-    previous_smallest: Option<u64>,
-    /// The ranges not yet produced.
-    remaining: usize,
-}
-
-impl AckRanges<'_> {
-    /// Reads the next encoded value, which the decoder has checked.
-    fn take(&mut self) -> Option<u64> {
-        let (value, len) = VarInt::decode(self.encoded).ok()?;
-        self.encoded = &self.encoded[len..];
-        Some(value.get())
-    }
-
-    fn next_range(&mut self) -> Option<RangeInclusive<u64>> {
-        let largest = match self.previous_smallest {
-            None => self.largest,
-            Some(smallest) => smallest.checked_sub(self.take()?)?.checked_sub(2)?,
-        };
-        let smallest = largest.checked_sub(self.take()?)?;
-        self.previous_smallest = Some(smallest);
-        Some(smallest..=largest)
-    }
-}
-
-impl Iterator for AckRanges<'_> {
-    type Item = RangeInclusive<u64>;
-
-    fn next(&mut self) -> Option<RangeInclusive<u64>> {
-        if self.remaining == 0 {
-            return None;
-        }
-        let range = self.next_range();
-        // The decoder validated every range; a failure here would mean the
-        // input changed, so end the sequence rather than produce garbage.
-        self.remaining = if range.is_some() {
-            self.remaining - 1
-        } else {
-            0
-        };
-        range
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (self.remaining, Some(self.remaining))
-    }
-}
-
-impl ExactSizeIterator for AckRanges<'_> {}
-
-impl FusedIterator for AckRanges<'_> {}
-
-impl PartialEq for AckRanges<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.clone().eq(other.clone())
-    }
-}
-
-impl Eq for AckRanges<'_> {}
-
-/// A RESET_STREAM frame ([RFC 9000 §19.4]).
-///
-/// [RFC 9000 §19.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.4
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ResetStream {
-    /// The stream being terminated.
-    pub stream_id: StreamId,
-    /// The application protocol error code.
-    pub application_error_code: VarInt,
-    /// The final size of the stream, in bytes.
-    pub final_size: VarInt,
-}
-
-/// A STOP_SENDING frame ([RFC 9000 §19.5]).
-///
-/// [RFC 9000 §19.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.5
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct StopSending {
-    /// The stream whose data is being discarded.
-    pub stream_id: StreamId,
-    /// The application protocol error code.
-    pub application_error_code: VarInt,
-}
-
-/// A CRYPTO frame ([RFC 9000 §19.6]).
-///
-/// The Offset and Length fields are always present. The end of the data,
-/// `offset` plus its length, is at most [`VarInt::MAX`].
-///
-/// [RFC 9000 §19.6]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.6
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Crypto<'a> {
-    /// The byte offset of the data in the crypto stream of its level.
-    pub offset: VarInt,
-    /// The cryptographic message data.
-    pub data: &'a [u8],
-}
-
-impl Crypto<'_> {
-    /// The largest data length for which a CRYPTO frame at `offset` takes at
-    /// most `room` bytes, or `None` if not even an empty frame fits.
-    ///
-    /// The length accounts for the Length field growing with the data and
-    /// for the 2<sup>62</sup> − 1 bound on the end of the data.
-    pub fn max_data_len(offset: VarInt, room: usize) -> Option<usize> {
-        let fixed = 1 + offset.encoded_len();
-        max_len_with_length_field(fixed, data_limit(offset), room)
-    }
-}
-
-/// A NEW_TOKEN frame ([RFC 9000 §19.7]).
-///
-/// The token is not empty.
-///
-/// [RFC 9000 §19.7]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.7
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct NewToken<'a> {
-    /// The opaque token for a future Initial packet.
-    pub token: &'a [u8],
-}
-
-/// A STREAM frame ([RFC 9000 §19.8]), of any of the types `0x08..=0x0f`.
-///
-/// The Frame Type is derived from the fields: the OFF bit is set when
-/// `offset` is not zero, the LEN bit when `has_length` is true, and the FIN
-/// bit when `fin` is true. The end of the data, `offset` plus its length, is
-/// at most [`VarInt::MAX`].
-///
-/// [RFC 9000 §19.8]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.8
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Stream<'a> {
-    /// The stream the data belongs to.
-    pub stream_id: StreamId,
-    /// The byte offset of the data in the stream.
-    pub offset: VarInt,
-    /// The stream data.
-    pub data: &'a [u8],
-    /// Whether the data ends the stream.
-    pub fin: bool,
-    /// Whether the frame carries a Length field. Without one, the data
-    /// extends to the end of the packet.
-    pub has_length: bool,
-}
-
-impl Stream<'_> {
-    /// The largest data length for which a STREAM frame takes at most `room`
-    /// bytes, or `None` if not even an empty frame fits.
-    ///
-    /// With `has_length`, the length accounts for the Length field growing
-    /// with the data; without, the frame fills `room` exactly when the data
-    /// is that long. The 2<sup>62</sup> − 1 bound on the end of the data is
-    /// also applied.
-    pub fn max_data_len(
-        stream_id: StreamId,
-        offset: VarInt,
-        has_length: bool,
-        room: usize,
-    ) -> Option<usize> {
-        let offset_len = if offset == VarInt::ZERO {
-            0
-        } else {
-            offset.encoded_len()
-        };
-        let fixed = 1 + stream_id.get().encoded_len() + offset_len;
-        let limit = data_limit(offset);
-        if has_length {
-            max_len_with_length_field(fixed, limit, room)
-        } else {
-            room.checked_sub(fixed).map(|left| left.min(limit))
+        use invalid_frame_error::*;
+        use snafu::ResultExt as _;
+        match self {
+            Self::Ack(frame) => frame.validate().context(AckSnafu),
+            Self::Crypto(frame) => frame.validate().context(CryptoSnafu),
+            Self::NewToken(frame) => frame.validate().context(NewTokenSnafu),
+            Self::Stream(frame) => frame.validate().context(StreamSnafu),
+            Self::MaxStreams(frame) => frame.validate().context(MaxStreamsSnafu),
+            Self::StreamsBlocked(frame) => frame.validate().context(StreamsBlockedSnafu),
+            Self::NewConnectionId(frame) => frame.validate().context(NewConnectionIdSnafu),
+            Self::ConnectionClose(frame) => frame.validate().context(ConnectionCloseSnafu),
+            Self::ResetStreamAt(frame) => frame.validate().context(ResetStreamAtSnafu),
+            Self::Datagram(frame) => frame.validate().context(DatagramSnafu),
+            Self::Padding(_)
+            | Self::Ping(_)
+            | Self::ResetStream(_)
+            | Self::StopSending(_)
+            | Self::MaxData(_)
+            | Self::MaxStreamData(_)
+            | Self::DataBlocked(_)
+            | Self::StreamDataBlocked(_)
+            | Self::RetireConnectionId(_)
+            | Self::PathChallenge(_)
+            | Self::PathResponse(_)
+            | Self::HandshakeDone(_) => Ok(()),
         }
     }
 }
 
-/// A MAX_DATA frame ([RFC 9000 §19.9]).
+/// A frame breaks a limit of its encoding; each variant holds the check of
+/// that frame type.
 ///
-/// [RFC 9000 §19.9]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.9
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct MaxData {
-    /// The maximum amount of data that can be sent on the connection, in bytes.
-    pub maximum_data: VarInt,
+/// These are the limits that reading enforces, so a frame that passes
+/// validation reads back to the same values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(module(invalid_frame_error), visibility(pub(crate)))]
+pub enum InvalidFrameError {
+    /// An invalid ACK frame.
+    #[snafu(display("invalid ACK frame"))]
+    Ack {
+        /// The broken limit.
+        source: ack::InvalidAckError,
+    },
+    /// An invalid CRYPTO frame.
+    #[snafu(display("invalid CRYPTO frame"))]
+    Crypto {
+        /// The broken limit.
+        source: DataEndError,
+    },
+    /// An invalid NEW_TOKEN frame.
+    #[snafu(display("invalid NEW_TOKEN frame"))]
+    NewToken {
+        /// The broken limit.
+        source: new_token::InvalidNewTokenError,
+    },
+    /// An invalid STREAM frame.
+    #[snafu(display("invalid STREAM frame"))]
+    Stream {
+        /// The broken limit.
+        source: DataEndError,
+    },
+    /// An invalid MAX_STREAMS frame.
+    #[snafu(display("invalid MAX_STREAMS frame"))]
+    MaxStreams {
+        /// The broken limit.
+        source: StreamCountError,
+    },
+    /// An invalid STREAMS_BLOCKED frame.
+    #[snafu(display("invalid STREAMS_BLOCKED frame"))]
+    StreamsBlocked {
+        /// The broken limit.
+        source: StreamCountError,
+    },
+    /// An invalid NEW_CONNECTION_ID frame.
+    #[snafu(display("invalid NEW_CONNECTION_ID frame"))]
+    NewConnectionId {
+        /// The broken limit.
+        source: new_connection_id::RetirePriorToError,
+    },
+    /// An invalid CONNECTION_CLOSE frame.
+    #[snafu(display("invalid CONNECTION_CLOSE frame"))]
+    ConnectionClose {
+        /// The broken limit.
+        source: LengthError,
+    },
+    /// An invalid RESET_STREAM_AT frame.
+    #[snafu(display("invalid RESET_STREAM_AT frame"))]
+    ResetStreamAt {
+        /// The broken limit.
+        source: reset_stream_at::ReliableSizeError,
+    },
+    /// An invalid DATAGRAM frame.
+    #[snafu(display("invalid DATAGRAM frame"))]
+    Datagram {
+        /// The broken limit.
+        source: LengthError,
+    },
 }
 
-/// A MAX_STREAM_DATA frame ([RFC 9000 §19.10]).
-///
-/// [RFC 9000 §19.10]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.10
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct MaxStreamData {
-    /// The stream the limit applies to.
-    pub stream_id: StreamId,
-    /// The maximum amount of data that can be sent on the stream, in bytes.
-    pub maximum_stream_data: VarInt,
+/// The data of a STREAM or CRYPTO frame ends beyond 2<sup>62</sup> − 1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("data at offset {offset} of length {length} ends beyond 2^62 - 1"))]
+pub struct DataEndError {
+    /// The Offset field.
+    pub offset: VarInt,
+    /// The length of the data.
+    pub length: u64,
 }
 
-/// A MAX_STREAMS frame ([RFC 9000 §19.11]): type `0x12` for bidirectional
-/// streams, `0x13` for unidirectional ones.
-///
-/// The count is at most [`MAX_STREAM_COUNT`].
-///
-/// [RFC 9000 §19.11]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.11
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct MaxStreams {
-    /// The type of streams the limit applies to.
-    pub directionality: Directionality,
-    /// The cumulative number of streams of that type that can be opened.
-    pub maximum_streams: VarInt,
-}
+impl DataEndError {
+    /// Checks that `length` bytes of data at `offset` end at most at
+    /// 2<sup>62</sup> − 1.
+    pub(crate) fn check(offset: VarInt, length: u64) -> Result<(), Self> {
+        if length > VarInt::MAX.get() - offset.get() {
+            return Err(Self { offset, length });
+        }
+        Ok(())
+    }
 
-/// A DATA_BLOCKED frame ([RFC 9000 §19.12]).
-///
-/// [RFC 9000 §19.12]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.12
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct DataBlocked {
-    /// The connection-level limit at which blocking occurred.
-    pub maximum_data: VarInt,
-}
-
-/// A STREAM_DATA_BLOCKED frame ([RFC 9000 §19.13]).
-///
-/// [RFC 9000 §19.13]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.13
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct StreamDataBlocked {
-    /// The blocked stream.
-    pub stream_id: StreamId,
-    /// The offset of the stream at which blocking occurred.
-    pub maximum_stream_data: VarInt,
-}
-
-/// A STREAMS_BLOCKED frame ([RFC 9000 §19.14]): type `0x16` for
-/// bidirectional streams, `0x17` for unidirectional ones.
-///
-/// The count is at most [`MAX_STREAM_COUNT`].
-///
-/// [RFC 9000 §19.14]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.14
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct StreamsBlocked {
-    /// The type of streams that could not be opened.
-    pub directionality: Directionality,
-    /// The stream limit at the time the frame was sent.
-    pub maximum_streams: VarInt,
-}
-
-/// A NEW_CONNECTION_ID frame ([RFC 9000 §19.15]).
-///
-/// The connection ID is 1 to 20 bytes long, and `retire_prior_to` is at most
-/// `sequence_number`.
-///
-/// [RFC 9000 §19.15]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.15
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct NewConnectionId<'a> {
-    /// The sequence number the sender assigned to the connection ID.
-    pub sequence_number: VarInt,
-    /// The sequence number below which connection IDs are to be retired.
-    pub retire_prior_to: VarInt,
-    /// The connection ID; convert it with
-    /// [`NonEmptyCid::try_from`](crate::connection_id::NonEmptyCid) to keep it.
-    pub connection_id: &'a [u8],
-    /// The Stateless Reset Token for the connection ID.
-    pub stateless_reset_token: &'a [u8; STATELESS_RESET_TOKEN_LEN],
-}
-
-/// A RETIRE_CONNECTION_ID frame ([RFC 9000 §19.16]).
-///
-/// [RFC 9000 §19.16]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.16
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct RetireConnectionId {
-    /// The sequence number of the connection ID being retired.
-    pub sequence_number: VarInt,
-}
-
-/// A PATH_CHALLENGE frame ([RFC 9000 §19.17]).
-///
-/// [RFC 9000 §19.17]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.17
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct PathChallenge {
-    /// The data the peer echoes in PATH_RESPONSE.
-    pub data: [u8; PATH_DATA_LEN],
-}
-
-/// A PATH_RESPONSE frame ([RFC 9000 §19.18]).
-///
-/// [RFC 9000 §19.18]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.18
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct PathResponse {
-    /// The data of the PATH_CHALLENGE being answered.
-    pub data: [u8; PATH_DATA_LEN],
-}
-
-/// A CONNECTION_CLOSE frame ([RFC 9000 §19.19]).
-///
-/// Type `0x1c` signals an error of the QUIC layer and carries the type of the
-/// frame that triggered it; type `0x1d` signals an application error and
-/// carries no frame type.
-///
-/// [RFC 9000 §19.19]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.19
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ConnectionClose<'a> {
-    /// A transport error code for type `0x1c`, an application protocol error
-    /// code for type `0x1d`.
-    pub error_code: VarInt,
-    /// `Some` for type `0x1c`: the Frame Type of the frame that triggered the
-    /// error, or 0 if it is unknown. `None` for type `0x1d`.
-    pub frame_type: Option<VarInt>,
-    /// The reason phrase; UTF-8 is expected but not checked.
-    pub reason_phrase: &'a [u8],
-}
-
-impl ConnectionClose<'_> {
-    /// The error code as a transport error code, for type `0x1c`.
-    pub fn transport_error_code(&self) -> Option<TransportErrorCode> {
-        self.frame_type.map(|_| self.error_code.into())
+    /// The largest data length permitted after `offset`, capped to `usize`.
+    pub(crate) fn limit(offset: VarInt) -> usize {
+        usize::try_from(VarInt::MAX.get() - offset.get()).unwrap_or(usize::MAX)
     }
 }
 
-/// A HANDSHAKE_DONE frame ([RFC 9000 §19.20]).
-///
-/// [RFC 9000 §19.20]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.20
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct HandshakeDone;
-
-/// A RESET_STREAM_AT frame, type `0x24`, as specified by the Internet-Draft
-/// [draft-ietf-quic-reliable-stream-reset-11] §4.
-///
-/// It is a RESET_STREAM that also states how much of the stream must still
-/// be delivered reliably. `reliable_size` is at most `final_size`.
-///
-/// [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html#section-4
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ResetStreamAt {
-    /// The stream being terminated.
-    pub stream_id: StreamId,
-    /// The application protocol error code.
-    pub application_error_code: VarInt,
-    /// The final size of the stream, in bytes.
-    pub final_size: VarInt,
-    /// The amount of data, from the start of the stream, that must be
-    /// delivered to the application despite the reset.
-    pub reliable_size: VarInt,
+/// A MAX_STREAMS or STREAMS_BLOCKED count exceeds [`MAX_STREAM_COUNT`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("stream count {maximum_streams} exceeds 2^60"))]
+pub struct StreamCountError {
+    /// The Maximum Streams field.
+    pub maximum_streams: VarInt,
 }
 
-/// A DATAGRAM frame ([RFC 9221 §4]): type `0x31` with a Length field, `0x30`
-/// without.
-///
-/// [RFC 9221 §4]: https://www.rfc-editor.org/rfc/rfc9221.html#section-4
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Datagram<'a> {
-    /// The application data.
-    pub data: &'a [u8],
-    /// Whether the frame carries a Length field. Without one, the data
-    /// extends to the end of the packet.
-    pub has_length: bool,
+impl StreamCountError {
+    /// Checks a Maximum Streams field.
+    pub(crate) fn check(maximum_streams: VarInt) -> Result<(), Self> {
+        if maximum_streams.get() > MAX_STREAM_COUNT {
+            return Err(Self { maximum_streams });
+        }
+        Ok(())
+    }
 }
 
-/// Iterates over the frames of a packet payload, decoding each when it is
-/// reached.
+/// A payload field is longer than a Length field can state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("field of {length} bytes is longer than 2^62 - 1"))]
+pub struct LengthError {
+    /// The length of the field.
+    pub length: usize,
+}
+
+impl LengthError {
+    /// The Length field for a payload of `length` bytes.
+    pub(crate) fn length_field(length: usize) -> Result<VarInt, Self> {
+        VarInt::try_from(length).map_err(|_| Self { length })
+    }
+}
+
+/// The encoded length of a Length field for `length` bytes; a length that
+/// [`LengthError`] rejects counts as the longest encoding.
+pub(crate) fn length_field_len(length: usize) -> usize {
+    VarInt::try_from(length).map_or(VarInt::MAX_ENCODED_LEN, VarInt::encoded_len)
+}
+
+/// The largest `n` with `fixed + len(n) + n <= room` and `n <= limit`, where
+/// `len(n)` is the length of the Length field.
+pub(crate) fn max_len_with_length_field(fixed: usize, limit: usize, room: usize) -> Option<usize> {
+    const CLASSES: [(usize, u64); 4] = [
+        (1, (1 << 6) - 1),
+        (2, (1 << 14) - 1),
+        (4, (1 << 30) - 1),
+        (8, (1 << 62) - 1),
+    ];
+    CLASSES
+        .iter()
+        .filter_map(|&(field_len, class_max)| {
+            let left = room.checked_sub(fixed + field_len)?;
+            let class_max = usize::try_from(class_max).unwrap_or(usize::MAX);
+            Some(left.min(class_max).min(limit))
+        })
+        .max()
+}
+
+/// The fields of a frame before its payload, encoded for one write.
+///
+/// `N` is the longest encoding of those fields for the frame type.
+pub(crate) struct Head<const N: usize> {
+    bytes: [u8; N],
+    len: usize,
+}
+
+impl<const N: usize> Head<N> {
+    /// A head starting with the Frame Type `frame_type`.
+    pub(crate) fn new(frame_type: VarInt) -> Self {
+        Self {
+            bytes: [0; N],
+            len: 0,
+        }
+        .var_int(frame_type)
+    }
+
+    /// Appends the shortest encoding of `value`.
+    pub(crate) fn var_int(self, value: VarInt) -> Self {
+        let (encoding, encoded_len) = value.to_encoding();
+        self.bytes(&encoding[..encoded_len])
+    }
+
+    /// Appends `bytes`.
+    pub(crate) fn bytes(mut self, bytes: &[u8]) -> Self {
+        // invariant: every frame type sizes `N` for the longest encoding of
+        // its fields, so the bytes fit.
+        self.bytes[self.len..self.len + bytes.len()].copy_from_slice(bytes);
+        self.len += bytes.len();
+        self
+    }
+
+    /// The encoded fields.
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+
+    /// The length of the encoded fields.
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+}
+
+/// Iterates over the frames of a packet payload held by a memory source such
+/// as a byte slice or `Bytes`, reading each when it is reached.
 ///
 /// Each item is a frame or the error that ends the iteration; after an error
 /// the iterator yields `None`. Consecutive PADDING frames are reported as one
-/// [`Padding`]. Offsets in errors count from the start of the payload.
+/// [`padding::Padding`]. Payload fields are chunks of the source; see the
+/// [module documentation](self).
 #[derive(Clone, Debug)]
-pub struct Frames<'a> {
-    payload: &'a [u8],
-    offset: usize,
+pub struct Frames<H> {
+    source: H,
+    consumed: usize,
+    start: usize,
     extensions: Extensions,
     failed: bool,
 }
 
-impl<'a> Frames<'a> {
+impl<H: Buf> Frames<H> {
     /// Iterates over the frames of `payload`, accepting the extension frames
     /// in `extensions`.
-    pub fn new(payload: &'a [u8], extensions: Extensions) -> Self {
+    pub fn new(payload: H, extensions: Extensions) -> Self {
         Self {
-            payload,
-            offset: 0,
+            source: payload,
+            consumed: 0,
+            start: 0,
             extensions,
             failed: false,
         }
     }
 
-    /// The offset in the payload of the next frame.
+    /// The offset in the payload of the next frame, or after a failure of
+    /// the frame that failed.
     pub fn offset(&self) -> usize {
-        self.offset
+        self.start
     }
 
-    /// The payload from the next frame on.
-    pub fn remainder(&self) -> &'a [u8] {
-        &self.payload[self.offset..]
+    /// The payload from the next frame on; after a failure, what the failed
+    /// frame left unread.
+    pub fn remainder(&self) -> &H {
+        &self.source
+    }
+
+    /// Takes the payload from the next frame on.
+    pub fn into_remainder(self) -> H {
+        self.source
     }
 }
 
-impl<'a> Iterator for Frames<'a> {
-    type Item = Result<Frame<'a>, DecodeError>;
+impl<H> Iterator for Frames<H>
+where
+    H: Buf + Receiver<Family = Direct<H>> + Unpin,
+    Direct<H>: ReadChunk<Chunk: Default>,
+{
+    type Item = Result<
+        Frame<<Direct<H> as ReadChunk>::Chunk>,
+        codec::ReadFrameError<<Direct<H> as Read>::Error>,
+    >;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.failed || self.offset == self.payload.len() {
+        use codec::ReadFrameHostExt as _;
+        if self.failed || !self.source.has_remaining() {
             return None;
         }
-        match decode_at(self.payload, self.offset, self.extensions) {
-            Ok((frame, len)) => {
-                self.offset += len;
-                Some(Ok(frame))
-            }
-            Err(error) => {
-                self.failed = true;
-                Some(Err(error))
-            }
+        self.start = self.consumed;
+        let before = self.source.remaining();
+        let result = self.source.sync_read_frame_unpin(self.extensions);
+        let result = result.map(|frame| match frame {
+            Frame::Padding(padding) => Frame::Padding(padding.extend(skip_zeros(&mut self.source))),
+            frame => frame,
+        });
+        self.consumed += before - self.source.remaining();
+        if result.is_err() {
+            self.failed = true;
+        } else {
+            self.start = self.consumed;
+        }
+        Some(result)
+    }
+}
+
+impl<H> FusedIterator for Frames<H>
+where
+    H: Buf + Receiver<Family = Direct<H>> + Unpin,
+    Direct<H>: ReadChunk<Chunk: Default>,
+{
+}
+
+/// Consumes the zero bytes at the start of `source`, each a PADDING frame,
+/// and returns how many there were.
+fn skip_zeros(source: &mut impl Buf) -> usize {
+    let mut count = 0;
+    loop {
+        let chunk = source.chunk();
+        let zeros = chunk.iter().take_while(|&&byte| byte == 0).count();
+        let whole_chunk = zeros == chunk.len();
+        source.advance(zeros);
+        count += zeros;
+        if zeros == 0 || !whole_chunk {
+            return count;
         }
     }
 }
-
-impl FusedIterator for Frames<'_> {}
-
-/// Failures of decoding a frame.
-///
-/// `offset` is where the frame starts. Every failure corresponds to the
-/// transport error FRAME_ENCODING_ERROR ([`DecodeError::transport_error_code`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(module(decode_error), visibility(pub(crate)))]
-pub enum DecodeError {
-    /// The input ends within the frame.
-    #[snafu(display(
-        "frame at offset {offset} needs {required} bytes of input, but there are {available}"
-    ))]
-    Truncated {
-        /// Where the frame starts.
-        offset: usize,
-        /// The Frame Type, if the input holds it completely.
-        frame_type: Option<VarInt>,
-        /// The input length the next field requires, counted from the start
-        /// of the input.
-        required: usize,
-        /// The input length.
-        available: usize,
-    },
-    /// The frame type is neither defined nor an enabled extension.
-    #[snafu(display("unknown frame type {:#x} at offset {offset}", frame_type.get()))]
-    UnknownType {
-        /// Where the frame starts.
-        offset: usize,
-        /// The Frame Type.
-        frame_type: VarInt,
-    },
-    /// An ACK range extends below packet number 0.
-    #[snafu(display(
-        "ACK range {index} of the frame at offset {offset} extends below packet number 0"
-    ))]
-    AckRange {
-        /// Where the frame starts.
-        offset: usize,
-        /// The Frame Type.
-        frame_type: VarInt,
-        /// The position of the range: 0 for the First ACK Range.
-        index: u64,
-    },
-    /// The data of a STREAM or CRYPTO frame ends beyond 2<sup>62</sup> − 1.
-    #[snafu(display(
-        "data of the frame at offset {offset} ends at {}, beyond 2^62 - 1",
-        u128::from(data_offset.get()) + u128::from(*length)
-    ))]
-    DataEnd {
-        /// Where the frame starts.
-        offset: usize,
-        /// The Frame Type.
-        frame_type: VarInt,
-        /// The Offset field.
-        data_offset: VarInt,
-        /// The length of the data.
-        length: u64,
-    },
-    /// A NEW_CONNECTION_ID connection ID length is outside 1 to 20.
-    #[snafu(display(
-        "NEW_CONNECTION_ID at offset {offset} has a connection ID of {length} bytes, outside 1 to 20"
-    ))]
-    ConnectionIdLength {
-        /// Where the frame starts.
-        offset: usize,
-        /// The Length field.
-        length: u8,
-    },
-    /// NEW_CONNECTION_ID retires sequence numbers beyond its own.
-    #[snafu(display(
-        "NEW_CONNECTION_ID at offset {offset} retires prior to {retire_prior_to}, beyond its sequence number {sequence_number}"
-    ))]
-    RetirePriorTo {
-        /// Where the frame starts.
-        offset: usize,
-        /// The Sequence Number field.
-        sequence_number: VarInt,
-        /// The Retire Prior To field.
-        retire_prior_to: VarInt,
-    },
-    /// A MAX_STREAMS or STREAMS_BLOCKED count exceeds 2<sup>60</sup>.
-    #[snafu(display(
-        "stream count {maximum_streams} of the frame at offset {offset} exceeds 2^60"
-    ))]
-    StreamCount {
-        /// Where the frame starts.
-        offset: usize,
-        /// The Frame Type.
-        frame_type: VarInt,
-        /// The Maximum Streams field.
-        maximum_streams: VarInt,
-    },
-    /// A NEW_TOKEN token is empty.
-    #[snafu(display("NEW_TOKEN at offset {offset} has an empty token"))]
-    EmptyToken {
-        /// Where the frame starts.
-        offset: usize,
-    },
-    /// A RESET_STREAM_AT reliable size exceeds its final size.
-    #[snafu(display(
-        "RESET_STREAM_AT at offset {offset} has reliable size {reliable_size} beyond final size {final_size}"
-    ))]
-    ReliableSize {
-        /// Where the frame starts.
-        offset: usize,
-        /// The Final Size field.
-        final_size: VarInt,
-        /// The Reliable Size field.
-        reliable_size: VarInt,
-    },
-}
-
-impl DecodeError {
-    /// Where the frame starts in the input.
-    pub fn offset(&self) -> usize {
-        match *self {
-            Self::Truncated { offset, .. }
-            | Self::UnknownType { offset, .. }
-            | Self::AckRange { offset, .. }
-            | Self::DataEnd { offset, .. }
-            | Self::ConnectionIdLength { offset, .. }
-            | Self::RetirePriorTo { offset, .. }
-            | Self::StreamCount { offset, .. }
-            | Self::EmptyToken { offset }
-            | Self::ReliableSize { offset, .. } => offset,
-        }
-    }
-
-    /// The Frame Type of the frame, if the input holds it completely.
-    ///
-    /// This is the value for the Frame Type field of the CONNECTION_CLOSE
-    /// frame that reports the error.
-    pub fn frame_type(&self) -> Option<VarInt> {
-        match *self {
-            Self::Truncated { frame_type, .. } => frame_type,
-            Self::UnknownType { frame_type, .. }
-            | Self::AckRange { frame_type, .. }
-            | Self::DataEnd { frame_type, .. }
-            | Self::StreamCount { frame_type, .. } => Some(frame_type),
-            Self::ConnectionIdLength { .. } | Self::RetirePriorTo { .. } => {
-                Some(VarInt::from_u32(type_value::NEW_CONNECTION_ID as u32))
-            }
-            Self::EmptyToken { .. } => Some(VarInt::from_u32(type_value::NEW_TOKEN as u32)),
-            Self::ReliableSize { .. } => Some(VarInt::from_u32(type_value::RESET_STREAM_AT as u32)),
-        }
-    }
-
-    /// The transport error the failure corresponds to: always
-    /// FRAME_ENCODING_ERROR ([RFC 9000 §12.4], §19).
-    ///
-    /// [RFC 9000 §12.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.4
-    pub fn transport_error_code(&self) -> TransportErrorCode {
-        TransportErrorCode::FRAME_ENCODING_ERROR
-    }
-}
-
-/// Failures of encoding a frame.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(module(encode_error), visibility(pub(crate)))]
-pub enum EncodeError {
-    /// The buffer cannot take the whole frame.
-    #[snafu(display("frame needs {required} bytes, but the buffer has room for {available}"))]
-    Capacity {
-        /// The length of the frame.
-        required: usize,
-        /// The room the buffer reported.
-        available: usize,
-    },
-    /// A field breaks a limit of the encoding.
-    #[snafu(transparent)]
-    Invalid {
-        /// The broken limit.
-        source: InvalidFrameError,
-    },
-}
-
-/// A frame field breaks a limit of the encoding.
-///
-/// These are the limits that decoding enforces, so a frame that passes
-/// validation decodes back to the same values.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(module(invalid_frame_error), visibility(pub(crate)))]
-pub enum InvalidFrameError {
-    /// The data of a STREAM or CRYPTO frame would end beyond 2<sup>62</sup> − 1.
-    #[snafu(display("data at offset {offset} of length {length} ends beyond 2^62 - 1"))]
-    DataEnd {
-        /// The Frame Type.
-        frame_type: VarInt,
-        /// The offset of the data.
-        offset: VarInt,
-        /// The length of the data.
-        length: usize,
-    },
-    /// A payload field is longer than a Length field can state.
-    #[snafu(display("field of {length} bytes is longer than 2^62 - 1"))]
-    Length {
-        /// The Frame Type.
-        frame_type: VarInt,
-        /// The length of the field.
-        length: usize,
-    },
-    /// A NEW_CONNECTION_ID connection ID length is outside 1 to 20.
-    #[snafu(display("connection ID of {length} bytes is outside 1 to 20"))]
-    ConnectionIdLength {
-        /// The length of the connection ID.
-        length: usize,
-    },
-    /// NEW_CONNECTION_ID would retire sequence numbers beyond its own.
-    #[snafu(display(
-        "retire prior to {retire_prior_to} is beyond sequence number {sequence_number}"
-    ))]
-    RetirePriorTo {
-        /// The sequence number.
-        sequence_number: VarInt,
-        /// The sequence number below which to retire.
-        retire_prior_to: VarInt,
-    },
-    /// A MAX_STREAMS or STREAMS_BLOCKED count exceeds 2<sup>60</sup>.
-    #[snafu(display("stream count {maximum_streams} exceeds 2^60"))]
-    StreamCount {
-        /// The Frame Type.
-        frame_type: VarInt,
-        /// The stream count.
-        maximum_streams: VarInt,
-    },
-    /// A NEW_TOKEN token is empty.
-    #[snafu(display("NEW_TOKEN token is empty"))]
-    EmptyToken,
-    /// A RESET_STREAM_AT reliable size exceeds its final size.
-    #[snafu(display("reliable size {reliable_size} is beyond final size {final_size}"))]
-    ReliableSize {
-        /// The final size.
-        final_size: VarInt,
-        /// The reliable size.
-        reliable_size: VarInt,
-    },
-    /// An ACK frame has no range.
-    #[snafu(display("ACK frame has no range"))]
-    EmptyAck,
-    /// An ACK range is empty, exceeds [`VarInt::MAX`], or does not lie below
-    /// the previous range with at least one packet number between them.
-    #[snafu(display("ACK range {index} is empty, too large, or out of order"))]
-    AckRange {
-        /// The position of the range: 0 for the first.
-        index: usize,
-    },
-}
-
-#[cfg(test)]
-mod tests;

@@ -1,0 +1,105 @@
+//! PADDING frames ([RFC 9000 §19.1]).
+//!
+//! [RFC 9000 §19.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.1
+use super::{type_value, type_var_int};
+use crate::var_int::VarInt;
+use core::num::NonZeroUsize;
+
+/// One or more PADDING frames ([RFC 9000 §19.1]).
+///
+/// A PADDING frame is its Frame Type alone, normally the single byte `0x00`.
+/// A frame read with a longer encoding of the type counts its bytes; reading
+/// with [`Frames`](super::Frames) reports a run of consecutive PADDING frames
+/// as one value. Writing writes `len` zero bytes.
+///
+/// [RFC 9000 §19.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.1
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Padding {
+    /// The number of bytes.
+    pub len: NonZeroUsize,
+}
+
+impl Padding {
+    /// The Frame Type value, zero.
+    pub const fn type_value(&self) -> VarInt {
+        type_var_int(type_value::PADDING)
+    }
+
+    /// The number of bytes [`codec::write_padding`] writes.
+    pub const fn encoded_len(&self) -> usize {
+        self.len.get()
+    }
+
+    /// The run extended by `count` more one-byte PADDING frames.
+    pub(crate) fn extend(self, count: usize) -> Self {
+        Self {
+            len: self.len.saturating_add(count),
+        }
+    }
+}
+
+pub mod codec {
+    //! Writing PADDING as a `nitori_call` operation.
+    //!
+    //! [`write_padding`] is also the operation struct [`WritePadding`], with
+    //! `WritePaddingExt` on receiver accesses and `WritePaddingHostExt` on
+    //! call executors.
+    // `#[call]` generates constructors, fields and extension traits without
+    // documentation comments; the module documentation above describes them.
+    #![allow(missing_docs)]
+
+    use super::Padding;
+    use bytes::Buf;
+    use nitori_call::{ReceiverAccess, call};
+    use nitori_io::{calls::WriteAllError, prelude::*};
+
+    /// Writes `frame.len` zero bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
+    /// bytes accepted before stay written.
+    #[call(sync)]
+    pub async fn write_padding<F: Write, A: ReceiverAccess<Family = F>>(
+        io: &mut A,
+        frame: Padding,
+    ) -> Result<(), WriteAllError<F::Error>> {
+        io.write_all(Zeros(frame.len.get())).await
+    }
+
+    /// A run of zero bytes as a buffer.
+    struct Zeros(usize);
+
+    const ZEROS: [u8; 64] = [0; 64];
+
+    impl Buf for Zeros {
+        fn remaining(&self) -> usize {
+            self.0
+        }
+
+        fn chunk(&self) -> &[u8] {
+            &ZEROS[..self.0.min(ZEROS.len())]
+        }
+
+        fn advance(&mut self, count: usize) {
+            self.0 = self.0.saturating_sub(count);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Padding, codec::WritePaddingHostExt as _};
+    use core::num::NonZeroUsize;
+
+    #[test]
+    fn writes_zero_bytes() {
+        let padding = Padding {
+            len: NonZeroUsize::new(200).unwrap(),
+        };
+        let mut written = Vec::new();
+        written.sync_write_padding_unpin(padding).unwrap();
+        assert_eq!(written, [0; 200]);
+        assert_eq!(padding.encoded_len(), 200);
+    }
+}

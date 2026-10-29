@@ -1,0 +1,86 @@
+//! PATH_RESPONSE frames ([RFC 9000 §19.18]).
+//!
+//! [RFC 9000 §19.18]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.18
+use super::{Head, PATH_DATA_LEN, type_value, type_var_int};
+use crate::var_int::VarInt;
+
+/// A PATH_RESPONSE frame ([RFC 9000 §19.18]).
+///
+/// [RFC 9000 §19.18]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.18
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PathResponse {
+    /// The data of the PATH_CHALLENGE being answered.
+    pub data: [u8; PATH_DATA_LEN],
+}
+
+impl PathResponse {
+    /// The Frame Type value.
+    pub const fn type_value(&self) -> VarInt {
+        type_var_int(type_value::PATH_RESPONSE)
+    }
+
+    /// The number of bytes [`codec::write_path_response`] writes.
+    pub const fn encoded_len(&self) -> usize {
+        1 + PATH_DATA_LEN
+    }
+
+    /// The encoded frame.
+    pub(crate) fn head(&self) -> Head<{ 1 + PATH_DATA_LEN }> {
+        Head::new(self.type_value()).bytes(&self.data)
+    }
+}
+
+pub mod codec {
+    //! Writing PATH_RESPONSE as a `nitori_call` operation; reading is part of
+    //! [`read_frame`](crate::frame::codec::read_frame).
+    //!
+    //! [`write_path_response`] is also the operation struct [`WritePathResponse`], with
+    //! `WritePathResponseExt` on receiver accesses and `WritePathResponseHostExt` on call
+    //! executors.
+    // `#[call]` generates constructors, fields and extension traits without
+    // documentation comments; the module documentation above describes them.
+    #![allow(missing_docs)]
+
+    use super::PathResponse;
+    use crate::frame::PATH_DATA_LEN;
+    use nitori_call::{ReceiverAccess, call};
+    use nitori_io::{
+        calls::{ReadArrayError, WriteAllError},
+        prelude::*,
+    };
+
+    /// Reads the data that follows the Frame Type.
+    pub(crate) async fn read_path_response<F: Read, A: ReceiverAccess<Family = F>>(
+        io: &mut A,
+    ) -> Result<PathResponse, ReadArrayError<F::Error>> {
+        Ok(PathResponse {
+            data: io.read_array::<PATH_DATA_LEN>().await?,
+        })
+    }
+
+    /// Writes the frame.
+    ///
+    /// # Errors
+    ///
+    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
+    /// bytes accepted before stay written.
+    #[call(sync)]
+    pub async fn write_path_response<F: Write, A: ReceiverAccess<Family = F>>(
+        io: &mut A,
+        frame: PathResponse,
+    ) -> Result<(), WriteAllError<F::Error>> {
+        io.write_all(frame.head().as_slice()).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PathResponse;
+    use crate::frame::{Frame, tests::assert_round_trip};
+
+    #[test]
+    fn round_trips() {
+        let encoding = assert_round_trip(Frame::PathResponse(PathResponse { data: *b"response" }));
+        assert_eq!(encoding[1..], *b"response");
+    }
+}
