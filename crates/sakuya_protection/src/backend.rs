@@ -24,7 +24,7 @@ pub const HEADER_PROTECTION_SAMPLE_LEN: usize = 16;
 pub const HEADER_PROTECTION_MASK_LEN: usize = 5;
 
 /// Largest hash output of a supported KDF, in bytes.
-pub(crate) const MAX_HASH_LEN: usize = 48;
+pub const MAX_HASH_LEN: usize = 48;
 
 /// Largest key of a supported AEAD or header protection cipher, in bytes.
 pub(crate) const MAX_KEY_LEN: usize = 32;
@@ -77,9 +77,8 @@ impl KdfAlgorithm {
 
 /// A provider of the cryptographic operations packet protection needs.
 ///
-/// Methods with byte-length preconditions are called by this crate only with
-/// lengths that satisfy them; an implementation may panic when they are
-/// violated.
+/// An operation whose input can be unacceptable returns an error for it;
+/// none panics on its input.
 pub trait CryptoBackend {
     /// An AEAD key ready for sealing and opening.
     type AeadKey: AeadKey;
@@ -87,26 +86,42 @@ pub trait CryptoBackend {
     /// A header protection cipher ready for computing masks.
     type HeaderProtectionCipher: HeaderProtectionCipher;
 
-    /// Writes HKDF-Extract(`salt`, `ikm`) into `prk` (RFC 5869 §2.2).
-    ///
-    /// Precondition: `prk.len()` equals `kdf.hash_len()`.
-    fn hkdf_extract(&self, kdf: KdfAlgorithm, salt: &[u8], ikm: &[u8], prk: &mut [u8]);
+    /// Writes HKDF-Extract(`salt`, `ikm`) (RFC 5869 §2.2) into the first
+    /// `kdf.hash_len()` bytes of `prk` and leaves the rest unchanged.
+    fn hkdf_extract(
+        &self,
+        kdf: KdfAlgorithm,
+        salt: &[u8],
+        ikm: &[u8],
+        prk: &mut [u8; MAX_HASH_LEN],
+    );
 
     /// Fills `output` with HKDF-Expand(`prk`, info, `output.len()`) (RFC 5869
     /// §2.3), where info is the concatenation of the `info` pieces.
     ///
-    /// Preconditions: `prk.len()` is at least `kdf.hash_len()`, and
-    /// `output.len()` is at most 255 times `kdf.hash_len()`.
-    fn hkdf_expand(&self, kdf: KdfAlgorithm, prk: &[u8], info: &[&[u8]], output: &mut [u8]);
+    /// `prk` is a pseudorandom key of at least `kdf.hash_len()` bytes, such as
+    /// the output of [`hkdf_extract`](Self::hkdf_extract) or a traffic
+    /// secret.
+    ///
+    /// # Errors
+    ///
+    /// Fails without writing `output` when it is longer than 255 times
+    /// `kdf.hash_len()`.
+    fn hkdf_expand(
+        &self,
+        kdf: KdfAlgorithm,
+        prk: &[u8],
+        info: &[&[u8]],
+        output: &mut [u8],
+    ) -> Result<(), ExpandOutputTooLong>;
 
     /// Fills `output` with HKDF-Expand-Label(`secret`, `label`, `context`,
     /// `output.len()`) from RFC 8446 §7.1, prefixing `label` with `"tls13 "`.
     ///
     /// The provided implementation checks the lengths and calls
     /// [`hkdf_expand`](Self::hkdf_expand); a backend with its own
-    /// Expand-Label may override it with the same contract.
-    ///
-    /// Precondition: `secret.len()` is at least `kdf.hash_len()`.
+    /// Expand-Label may override it with the same contract. `secret` is a
+    /// secret of at least `kdf.hash_len()` bytes.
     ///
     /// # Errors
     ///
@@ -136,7 +151,7 @@ pub trait CryptoBackend {
         let max_output_len = 255 * kdf.hash_len();
         ensure!(
             output.len() <= max_output_len,
-            expand_label_error::OutputTooLongSnafu {
+            ExpandOutputTooLongSnafu {
                 output_len: output.len(),
                 max_output_len,
             }
@@ -157,24 +172,29 @@ pub trait CryptoBackend {
                 context,
             ],
             output,
-        );
+        )?;
         Ok(())
     }
 
     /// Creates an AEAD key from `key`.
     ///
-    /// Precondition: `key.len()` equals `aead.key_len()`.
-    fn aead_key(&self, aead: AeadAlgorithm, key: &[u8]) -> Self::AeadKey;
+    /// # Errors
+    ///
+    /// Fails when `key` is not `aead.key_len()` bytes long.
+    fn aead_key(&self, aead: AeadAlgorithm, key: &[u8])
+    -> Result<Self::AeadKey, KeyLengthMismatch>;
 
     /// Creates the header protection cipher that `aead` selects, keyed with
     /// `key`.
     ///
-    /// Precondition: `key.len()` equals `aead.key_len()`.
+    /// # Errors
+    ///
+    /// Fails when `key` is not `aead.key_len()` bytes long.
     fn header_protection_cipher(
         &self,
         aead: AeadAlgorithm,
         key: &[u8],
-    ) -> Self::HeaderProtectionCipher;
+    ) -> Result<Self::HeaderProtectionCipher, KeyLengthMismatch>;
 }
 
 /// An AEAD key that seals and opens in place with a detached tag.
@@ -182,21 +202,26 @@ pub trait AeadKey {
     /// Encrypts `in_out` in place, authenticating it together with `aad`, and
     /// writes the authentication tag into `tag`.
     ///
-    /// Precondition: `in_out` is no longer than a QUIC packet can be.
+    /// # Errors
+    ///
+    /// Fails without writing `in_out` or `tag` when `in_out` is longer than
+    /// the AEAD can protect under one nonce. Every supported AEAD accepts
+    /// far more than a QUIC packet can hold.
     fn seal_in_place(
         &self,
         nonce: &[u8; AEAD_NONCE_LEN],
         aad: &[u8],
         in_out: &mut [u8],
         tag: &mut [u8; AEAD_TAG_LEN],
-    );
+    ) -> Result<(), AeadInputTooLong>;
 
     /// Decrypts `in_out` in place after checking `tag` over `aad` and the
     /// ciphertext.
     ///
     /// # Errors
     ///
-    /// Fails when authentication fails. The contents of `in_out` are then
+    /// Fails when authentication fails, including for a ciphertext longer
+    /// than the AEAD can protect. The contents of `in_out` are then
     /// unspecified: an implementation may leave the ciphertext, partly
     /// decrypted data or zeros there.
     fn open_in_place(
@@ -213,6 +238,38 @@ pub trait HeaderProtectionCipher {
     /// Computes the mask for a ciphertext `sample`.
     fn mask(&self, sample: &[u8; HEADER_PROTECTION_SAMPLE_LEN])
     -> [u8; HEADER_PROTECTION_MASK_LEN];
+}
+
+/// The error returned by [`CryptoBackend::hkdf_expand`]: HKDF-Expand cannot
+/// produce that much output.
+#[derive(Debug, Snafu)]
+#[snafu(display("output of {output_len} bytes exceeds the {max_output_len}-byte limit"))]
+pub struct ExpandOutputTooLong {
+    /// Requested output length.
+    pub output_len: usize,
+    /// Largest output the KDF can produce.
+    pub max_output_len: usize,
+}
+
+/// The error returned by [`CryptoBackend::aead_key`] and
+/// [`CryptoBackend::header_protection_cipher`]: the key length does not
+/// match the algorithm.
+#[derive(Debug, Snafu)]
+#[snafu(display("expected a {expected}-byte key, got {actual} bytes"))]
+pub struct KeyLengthMismatch {
+    /// The key length of the algorithm.
+    pub expected: usize,
+    /// The length of the given key.
+    pub actual: usize,
+}
+
+/// The error returned by [`AeadKey::seal_in_place`]: the input is longer
+/// than the AEAD can protect under one nonce.
+#[derive(Debug, Snafu)]
+#[snafu(display("input of {input_len} bytes exceeds the AEAD limit"))]
+pub struct AeadInputTooLong {
+    /// Length of the input.
+    pub input_len: usize,
 }
 
 /// The error returned by [`CryptoBackend::hkdf_expand_label`].
@@ -232,12 +289,10 @@ pub enum ExpandLabelError {
         context_len: usize,
     },
     /// HKDF-Expand cannot produce that much output.
-    #[snafu(display("output of {output_len} bytes exceeds the {max_output_len}-byte limit"))]
+    #[snafu(transparent)]
     OutputTooLong {
-        /// Requested output length.
-        output_len: usize,
-        /// Largest output the KDF can produce.
-        max_output_len: usize,
+        /// The length check that failed.
+        source: ExpandOutputTooLong,
     },
 }
 

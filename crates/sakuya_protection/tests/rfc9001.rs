@@ -8,14 +8,19 @@ use std::rc::Rc;
 
 use sakuya_protection::backend::ring::{RingAeadKey, RingBackend, RingHeaderProtectionCipher};
 use sakuya_protection::backend::{
-    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadAlgorithm, AeadKey, AuthenticationFailed, CryptoBackend,
-    ExpandLabelError, HeaderProtectionCipher, KdfAlgorithm,
+    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadAlgorithm, AeadInputTooLong, AeadKey, AuthenticationFailed,
+    CryptoBackend, ExpandLabelError, ExpandOutputTooLong, HeaderProtectionCipher, KdfAlgorithm,
+    KeyLengthMismatch, MAX_HASH_LEN,
 };
-use sakuya_protection::{
-    HeaderProtectionError, HeaderProtectionKey, INITIAL_AEAD, InitialSecrets, OpenPacketError,
-    PacketKey, TrafficSecret, TruncatedPacketNumber, VerifyRetryIntegrityError,
-    compute_retry_integrity_tag, verify_retry_integrity_tag,
+use sakuya_protection::header_protection::{HeaderProtectionError, HeaderProtectionKey};
+use sakuya_protection::initial::{INITIAL_AEAD, INITIAL_SALT, InitialSecrets};
+use sakuya_protection::packet_key::{OpenPacketError, PacketKey, SealPacketError};
+use sakuya_protection::packet_number::{PacketNumber, PacketNumberLength, TruncatedPacketNumber};
+use sakuya_protection::retry::{
+    VerifyRetryIntegrityError, compute_retry_integrity_tag, verify_retry_integrity_tag,
 };
+use sakuya_protection::secret::TrafficSecret;
+use sakuya_wire::connection_id::ConnectionId;
 
 fn hex(text: &str) -> Vec<u8> {
     let digits: Vec<u8> = text
@@ -27,6 +32,14 @@ fn hex(text: &str) -> Vec<u8> {
         .chunks(2)
         .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
         .collect()
+}
+
+fn cid(text: &str) -> ConnectionId {
+    ConnectionId::new(&hex(text)).unwrap()
+}
+
+fn pn(value: u64) -> PacketNumber {
+    PacketNumber::new(value).unwrap()
 }
 
 /// What a [`Recording`] backend saw.
@@ -53,28 +66,44 @@ impl CryptoBackend for Recording {
     type AeadKey = RecordingAeadKey;
     type HeaderProtectionCipher = RingHeaderProtectionCipher;
 
-    fn hkdf_extract(&self, kdf: KdfAlgorithm, salt: &[u8], ikm: &[u8], prk: &mut [u8]) {
+    fn hkdf_extract(
+        &self,
+        kdf: KdfAlgorithm,
+        salt: &[u8],
+        ikm: &[u8],
+        prk: &mut [u8; MAX_HASH_LEN],
+    ) {
         RingBackend.hkdf_extract(kdf, salt, ikm, prk);
     }
 
-    fn hkdf_expand(&self, kdf: KdfAlgorithm, prk: &[u8], info: &[&[u8]], output: &mut [u8]) {
+    fn hkdf_expand(
+        &self,
+        kdf: KdfAlgorithm,
+        prk: &[u8],
+        info: &[&[u8]],
+        output: &mut [u8],
+    ) -> Result<(), ExpandOutputTooLong> {
         self.log.borrow_mut().expand_infos.push(info.concat());
-        RingBackend.hkdf_expand(kdf, prk, info, output);
+        RingBackend.hkdf_expand(kdf, prk, info, output)
     }
 
-    fn aead_key(&self, aead: AeadAlgorithm, key: &[u8]) -> RecordingAeadKey {
+    fn aead_key(
+        &self,
+        aead: AeadAlgorithm,
+        key: &[u8],
+    ) -> Result<RecordingAeadKey, KeyLengthMismatch> {
         self.log.borrow_mut().aead_keys.push(key.to_vec());
-        RecordingAeadKey {
-            inner: RingBackend.aead_key(aead, key),
+        Ok(RecordingAeadKey {
+            inner: RingBackend.aead_key(aead, key)?,
             log: Rc::clone(&self.log),
-        }
+        })
     }
 
     fn header_protection_cipher(
         &self,
         aead: AeadAlgorithm,
         key: &[u8],
-    ) -> RingHeaderProtectionCipher {
+    ) -> Result<RingHeaderProtectionCipher, KeyLengthMismatch> {
         self.log
             .borrow_mut()
             .header_protection_keys
@@ -90,9 +119,9 @@ impl AeadKey for RecordingAeadKey {
         aad: &[u8],
         in_out: &mut [u8],
         tag: &mut [u8; AEAD_TAG_LEN],
-    ) {
+    ) -> Result<(), AeadInputTooLong> {
         self.log.borrow_mut().nonces.push(*nonce);
-        self.inner.seal_in_place(nonce, aad, in_out, tag);
+        self.inner.seal_in_place(nonce, aad, in_out, tag)
     }
 
     fn open_in_place(
@@ -115,7 +144,7 @@ fn derived_material(aead: AeadAlgorithm, secret: &TrafficSecret) -> (Vec<u8>, [u
     HeaderProtectionKey::derive(&backend, aead, secret);
     // Packet number zero leaves the IV as the nonce.
     let mut packet = [0u8; 1 + AEAD_TAG_LEN];
-    key.seal(0, &mut packet, 1).unwrap();
+    key.seal(PacketNumber::ZERO, &mut packet, 1).unwrap();
     let log = backend.log.borrow();
     (
         log.aead_keys[0].clone(),
@@ -130,15 +159,16 @@ const CLIENT_DCID: &str = "8394c8f03e515708";
 
 #[test]
 fn a1_initial_secret() {
-    let mut initial_secret = [0; 32];
+    let mut initial_secret = [0; MAX_HASH_LEN];
     RingBackend.hkdf_extract(
         KdfAlgorithm::HkdfSha256,
-        &sakuya_protection::INITIAL_SALT,
+        &INITIAL_SALT,
         &hex(CLIENT_DCID),
         &mut initial_secret,
     );
+    assert_eq!(initial_secret[32..], [0; 16]);
     assert_eq!(
-        initial_secret.to_vec(),
+        initial_secret[..32],
         hex("7db5df06e7a69e432496adedb0085192 3595221596ae2ae9fb8115c1e9ed0a44")
     );
 }
@@ -146,7 +176,7 @@ fn a1_initial_secret() {
 #[test]
 fn a1_client_and_server_initial_secrets() {
     let backend = Recording::default();
-    let secrets = InitialSecrets::derive(&backend, &hex(CLIENT_DCID));
+    let secrets = InitialSecrets::derive(&backend, &cid(CLIENT_DCID));
     assert_eq!(secrets.client.kdf(), KdfAlgorithm::HkdfSha256);
     assert_eq!(
         secrets.client.as_bytes(),
@@ -169,7 +199,7 @@ fn a1_client_and_server_initial_secrets() {
 #[test]
 fn a1_packet_protection_labels() {
     let backend = Recording::default();
-    let secrets = InitialSecrets::derive(&RingBackend, &hex(CLIENT_DCID));
+    let secrets = InitialSecrets::derive(&RingBackend, &cid(CLIENT_DCID));
     PacketKey::derive(&backend, INITIAL_AEAD, &secrets.client);
     HeaderProtectionKey::derive(&backend, INITIAL_AEAD, &secrets.client);
     let log = backend.log.borrow();
@@ -185,7 +215,7 @@ fn a1_packet_protection_labels() {
 
 #[test]
 fn a1_client_keys() {
-    let secrets = InitialSecrets::derive(&RingBackend, &hex(CLIENT_DCID));
+    let secrets = InitialSecrets::derive(&RingBackend, &cid(CLIENT_DCID));
     let (key, iv, hp) = derived_material(INITIAL_AEAD, &secrets.client);
     assert_eq!(key, hex("1f369613dd76d5467730efcbe3b1a22d"));
     assert_eq!(iv.to_vec(), hex("fa044b2f42a3fd3b46fb255c"));
@@ -194,7 +224,7 @@ fn a1_client_keys() {
 
 #[test]
 fn a1_server_keys() {
-    let secrets = InitialSecrets::derive(&RingBackend, &hex(CLIENT_DCID));
+    let secrets = InitialSecrets::derive(&RingBackend, &cid(CLIENT_DCID));
     let (key, iv, hp) = derived_material(INITIAL_AEAD, &secrets.server);
     assert_eq!(key, hex("cf3a5331653c364c88f0f379b6067e37"));
     assert_eq!(iv.to_vec(), hex("0ac1493ca1905853b0bba03e"));
@@ -265,7 +295,7 @@ fn client_payload() -> Vec<u8> {
 }
 
 fn client_keys() -> (PacketKey<RingBackend>, HeaderProtectionKey<RingBackend>) {
-    let secrets = InitialSecrets::derive(&RingBackend, &hex(CLIENT_DCID));
+    let secrets = InitialSecrets::derive(&RingBackend, &cid(CLIENT_DCID));
     (
         PacketKey::derive(&RingBackend, INITIAL_AEAD, &secrets.client),
         HeaderProtectionKey::derive(&RingBackend, INITIAL_AEAD, &secrets.client),
@@ -275,7 +305,8 @@ fn client_keys() -> (PacketKey<RingBackend>, HeaderProtectionKey<RingBackend>) {
 #[test]
 fn a2_client_initial_mask() {
     let cipher = RingBackend
-        .header_protection_cipher(INITIAL_AEAD, &hex("9f50449e04a0e810283a1e9933adedd2"));
+        .header_protection_cipher(INITIAL_AEAD, &hex("9f50449e04a0e810283a1e9933adedd2"))
+        .unwrap();
     let sample: [u8; 16] = hex("d1b1c98dd7689fb8ec11d242b123dc9b").try_into().unwrap();
     assert_eq!(cipher.mask(&sample).to_vec(), hex("437b9aec36"));
 }
@@ -289,7 +320,7 @@ fn a2_client_initial_protect() {
     packet.extend([0; AEAD_TAG_LEN]);
     assert_eq!(packet.len(), 1200);
 
-    key.seal(2, &mut packet, header.len()).unwrap();
+    key.seal(pn(2), &mut packet, header.len()).unwrap();
     hp.apply(&mut packet, INITIAL_PN_OFFSET).unwrap();
     assert_eq!(packet, hex(CLIENT_PACKET));
 }
@@ -300,13 +331,13 @@ fn a2_client_initial_unprotect() {
     let mut packet = hex(CLIENT_PACKET);
 
     let truncated = hp.remove(&mut packet, INITIAL_PN_OFFSET).unwrap();
-    assert_eq!(truncated.encoded_len(), 4);
+    assert_eq!(truncated.encoded_len(), PacketNumberLength::Four);
     assert_eq!(truncated.as_bytes(), [0, 0, 0, 2]);
-    let header_len = INITIAL_PN_OFFSET + truncated.encoded_len();
+    let header_len = INITIAL_PN_OFFSET + truncated.encoded_len().get();
     assert_eq!(packet[..header_len], hex(CLIENT_HEADER));
 
-    let packet_number = truncated.decode(0);
-    assert_eq!(packet_number, 2);
+    let packet_number = truncated.decode(None);
+    assert_eq!(packet_number, pn(2));
     let payload = key.open(packet_number, &mut packet, header_len).unwrap();
     assert_eq!(payload, client_payload());
 }
@@ -329,7 +360,7 @@ const SERVER_PACKET: &str = "
     2158407dd074ee";
 
 fn server_keys() -> (PacketKey<RingBackend>, HeaderProtectionKey<RingBackend>) {
-    let secrets = InitialSecrets::derive(&RingBackend, &hex(CLIENT_DCID));
+    let secrets = InitialSecrets::derive(&RingBackend, &cid(CLIENT_DCID));
     (
         PacketKey::derive(&RingBackend, INITIAL_AEAD, &secrets.server),
         HeaderProtectionKey::derive(&RingBackend, INITIAL_AEAD, &secrets.server),
@@ -339,7 +370,8 @@ fn server_keys() -> (PacketKey<RingBackend>, HeaderProtectionKey<RingBackend>) {
 #[test]
 fn a3_server_initial_mask() {
     let cipher = RingBackend
-        .header_protection_cipher(INITIAL_AEAD, &hex("c206b8d9b9f0f37644430b490eeaa314"));
+        .header_protection_cipher(INITIAL_AEAD, &hex("c206b8d9b9f0f37644430b490eeaa314"))
+        .unwrap();
     let sample: [u8; 16] = hex("2cd0991cd25b0aac406a5816b6394100").try_into().unwrap();
     assert_eq!(cipher.mask(&sample).to_vec(), hex("2ec0d8356a"));
 }
@@ -352,7 +384,7 @@ fn a3_server_initial_protect() {
     packet.extend(hex(SERVER_PAYLOAD));
     packet.extend([0; AEAD_TAG_LEN]);
 
-    key.seal(1, &mut packet, header.len()).unwrap();
+    key.seal(pn(1), &mut packet, header.len()).unwrap();
     hp.apply(&mut packet, INITIAL_PN_OFFSET).unwrap();
     assert_eq!(packet, hex(SERVER_PACKET));
 }
@@ -363,13 +395,13 @@ fn a3_server_initial_unprotect() {
     let mut packet = hex(SERVER_PACKET);
 
     let truncated = hp.remove(&mut packet, INITIAL_PN_OFFSET).unwrap();
-    assert_eq!(truncated.encoded_len(), 2);
+    assert_eq!(truncated.encoded_len(), PacketNumberLength::Two);
     assert_eq!(truncated.value(), 1);
-    let header_len = INITIAL_PN_OFFSET + truncated.encoded_len();
+    let header_len = INITIAL_PN_OFFSET + truncated.encoded_len().get();
     assert_eq!(packet[..header_len], hex(SERVER_HEADER));
 
-    let packet_number = truncated.decode(0);
-    assert_eq!(packet_number, 1);
+    let packet_number = truncated.decode(None);
+    assert_eq!(packet_number, pn(1));
     let payload = key.open(packet_number, &mut packet, header_len).unwrap();
     assert_eq!(payload, hex(SERVER_PAYLOAD));
 }
@@ -384,24 +416,23 @@ const RETRY_PACKET: &str = "
 fn a4_retry_tag_compute() {
     let packet = hex(RETRY_PACKET);
     let (retry_without_tag, tag) = packet.split_at(packet.len() - AEAD_TAG_LEN);
-    let computed =
-        compute_retry_integrity_tag(&RingBackend, &hex(CLIENT_DCID), retry_without_tag).unwrap();
+    let computed = compute_retry_integrity_tag(&RingBackend, &cid(CLIENT_DCID), retry_without_tag);
     assert_eq!(computed, tag);
 }
 
 #[test]
 fn a4_retry_tag_verify() {
     let packet = hex(RETRY_PACKET);
-    verify_retry_integrity_tag(&RingBackend, &hex(CLIENT_DCID), &packet).unwrap();
+    verify_retry_integrity_tag(&RingBackend, &cid(CLIENT_DCID), &packet).unwrap();
 
     let mut corrupted = packet.clone();
     corrupted[10] ^= 0x01;
     assert!(matches!(
-        verify_retry_integrity_tag(&RingBackend, &hex(CLIENT_DCID), &corrupted),
+        verify_retry_integrity_tag(&RingBackend, &cid(CLIENT_DCID), &corrupted),
         Err(VerifyRetryIntegrityError::Authentication { .. })
     ));
 
-    let other_odcid = hex("8394c8f03e515709");
+    let other_odcid = cid("8394c8f03e515709");
     assert!(matches!(
         verify_retry_integrity_tag(&RingBackend, &other_odcid, &packet),
         Err(VerifyRetryIntegrityError::Authentication { .. })
@@ -412,19 +443,18 @@ fn a4_retry_tag_verify() {
 fn retry_rejects_malformed_inputs() {
     let packet = hex(RETRY_PACKET);
     assert!(matches!(
-        verify_retry_integrity_tag(&RingBackend, &hex(CLIENT_DCID), &packet[..15]),
+        verify_retry_integrity_tag(&RingBackend, &cid(CLIENT_DCID), &packet[..15]),
         Err(VerifyRetryIntegrityError::PacketTooShort { packet_len: 15 })
     ));
     assert!(matches!(
-        verify_retry_integrity_tag(&RingBackend, &[0; 21], &packet),
-        Err(VerifyRetryIntegrityError::OriginalConnectionIdTooLong { .. })
+        verify_retry_integrity_tag(&RingBackend, &cid(CLIENT_DCID), &[]),
+        Err(VerifyRetryIntegrityError::PacketTooShort { packet_len: 0 })
     ));
-    assert_eq!(
-        compute_retry_integrity_tag(&RingBackend, &[0; 21], &packet)
-            .unwrap_err()
-            .len,
-        21
-    );
+    // The shortest packet holds only a tag; it does not authenticate.
+    assert!(matches!(
+        verify_retry_integrity_tag(&RingBackend, &cid(CLIENT_DCID), &packet[..16]),
+        Err(VerifyRetryIntegrityError::Authentication { .. })
+    ));
 }
 
 // RFC 9001 Appendix A.5.
@@ -474,14 +504,14 @@ fn a5_chacha20_short_header_protect() {
     let backend = Recording::default();
     let key = PacketKey::derive(&backend, AeadAlgorithm::ChaCha20Poly1305, &secret);
     let hp = HeaderProtectionKey::derive(&backend, AeadAlgorithm::ChaCha20Poly1305, &secret);
-    let pn = TruncatedPacketNumber::new(0x00bff4, 3).unwrap();
-    assert_eq!(pn.as_bytes(), [0x00, 0xbf, 0xf4]);
+    let truncated = TruncatedPacketNumber::new(0x00bff4, PacketNumberLength::Three).unwrap();
+    assert_eq!(truncated.as_bytes(), [0x00, 0xbf, 0xf4]);
 
     let header = hex(CHACHA_HEADER);
     let mut packet = header.clone();
     packet.push(0x01);
     packet.extend([0; AEAD_TAG_LEN]);
-    key.seal(CHACHA_PN, &mut packet, header.len()).unwrap();
+    key.seal(pn(CHACHA_PN), &mut packet, header.len()).unwrap();
     assert_eq!(
         backend.log.borrow().nonces,
         [<[u8; 12]>::try_from(hex("e0459b3474bdd0e46d417eb0")).unwrap()]
@@ -503,12 +533,12 @@ fn a5_chacha20_short_header_unprotect() {
     let mut packet = hex(CHACHA_PACKET);
 
     let truncated = hp.remove(&mut packet, 1).unwrap();
-    assert_eq!(truncated.encoded_len(), 3);
+    assert_eq!(truncated.encoded_len(), PacketNumberLength::Three);
     assert_eq!(truncated.value(), 0x00bff4);
     assert_eq!(packet[..4], hex(CHACHA_HEADER));
 
-    let packet_number = truncated.decode(CHACHA_PN);
-    assert_eq!(packet_number, CHACHA_PN);
+    let packet_number = truncated.decode(Some(pn(CHACHA_PN - 1)));
+    assert_eq!(packet_number, pn(CHACHA_PN));
     let payload = key.open(packet_number, &mut packet, 4).unwrap();
     assert_eq!(payload, [0x01]);
 }
@@ -554,14 +584,15 @@ fn key_update_keeps_header_protection_key() {
     sealed.extend([0x01, 0x00, 0x00]);
     sealed.extend([0; AEAD_TAG_LEN]);
     new_key
-        .seal(CHACHA_PN + 1, &mut sealed, header.len())
+        .seal(pn(CHACHA_PN + 1), &mut sealed, header.len())
         .unwrap();
     hp.apply(&mut sealed, 1).unwrap();
 
     let mut packet = sealed.clone();
     let truncated = hp.remove(&mut packet, 1).unwrap();
     assert_eq!(packet[..4], header);
-    let packet_number = truncated.decode(CHACHA_PN + 1);
+    let packet_number = truncated.decode(Some(pn(CHACHA_PN)));
+    assert_eq!(packet_number, pn(CHACHA_PN + 1));
     assert!(matches!(
         old_key.open(packet_number, &mut packet, 4),
         Err(OpenPacketError::Authentication { .. })
@@ -581,15 +612,15 @@ fn key_update_keeps_header_protection_key() {
 fn failed_open_overwrites_payload() {
     let (key, hp) = client_keys();
     let received = hex(CLIENT_PACKET);
-    let other_secrets = InitialSecrets::derive(&RingBackend, &hex("0001020304050607"));
+    let other_secrets = InitialSecrets::derive(&RingBackend, &cid("0001020304050607"));
     let wrong_key = PacketKey::derive(&RingBackend, INITIAL_AEAD, &other_secrets.client);
 
     let mut packet = received.clone();
     let truncated = hp.remove(&mut packet, INITIAL_PN_OFFSET).unwrap();
-    let header_len = INITIAL_PN_OFFSET + truncated.encoded_len();
+    let header_len = INITIAL_PN_OFFSET + truncated.encoded_len().get();
     let ciphertext_end = packet.len() - AEAD_TAG_LEN;
     assert!(matches!(
-        wrong_key.open(2, &mut packet, header_len),
+        wrong_key.open(pn(2), &mut packet, header_len),
         Err(OpenPacketError::Authentication { .. })
     ));
     // The ciphertext is gone: `ring` zeroed the region it decrypted. The
@@ -606,13 +637,13 @@ fn failed_open_overwrites_payload() {
     assert_eq!(packet[..header_len], hex(CLIENT_HEADER));
     assert_eq!(packet[ciphertext_end..], received[ciphertext_end..]);
     // Opening the same buffer with the right key now fails too.
-    assert!(key.open(2, &mut packet, header_len).is_err());
+    assert!(key.open(pn(2), &mut packet, header_len).is_err());
 
     // Rebuilt from the received datagram, the packet opens with the right key.
     let mut packet = received.clone();
     hp.remove(&mut packet, INITIAL_PN_OFFSET).unwrap();
     assert_eq!(
-        key.open(2, &mut packet, header_len).unwrap(),
+        key.open(pn(2), &mut packet, header_len).unwrap(),
         client_payload()
     );
 }
@@ -648,11 +679,20 @@ fn failed_length_checks_leave_buffer_unchanged() {
 
     let mut tiny = received[..30].to_vec();
     assert!(matches!(
-        key.open(2, &mut tiny, 22),
+        key.open(pn(2), &mut tiny, 22),
         Err(OpenPacketError::PacketTooShort { .. })
     ));
-    let error = key.seal(2, &mut tiny, 22).unwrap_err();
-    assert_eq!((error.packet_len, error.header_len), (30, 22));
+    assert!(matches!(
+        key.seal(pn(2), &mut tiny, 22),
+        Err(SealPacketError::PacketTooShort { source })
+            if (source.packet_len, source.header_len) == (30, 22)
+    ));
+    let mut tag_only = received[..16].to_vec();
+    assert!(matches!(
+        key.seal(pn(2), &mut tag_only, 1),
+        Err(SealPacketError::PacketTooShort { .. })
+    ));
+    assert!(key.seal(pn(2), &mut tag_only, 0).is_ok());
     assert_eq!(tiny, received[..30]);
     assert_eq!(packet, received);
 }
@@ -689,11 +729,14 @@ fn derivation_lengths_follow_the_cipher_suite() {
         let mut packet = vec![0x40, 0xaa, 0x07, 0x01, 0x00, 0x00, 0x00];
         packet.extend([0; AEAD_TAG_LEN]);
         let original = packet.clone();
-        packet_key.seal(7, &mut packet, 3).unwrap();
+        packet_key.seal(pn(7), &mut packet, 3).unwrap();
         hp_key.apply(&mut packet, 2).unwrap();
         let truncated = hp_key.remove(&mut packet, 2).unwrap();
-        assert_eq!(truncated.decode(7), 7);
-        assert_eq!(packet_key.open(7, &mut packet, 3).unwrap(), &original[3..7]);
+        assert_eq!(truncated.decode(Some(pn(6))), pn(7));
+        assert_eq!(
+            packet_key.open(pn(7), &mut packet, 3).unwrap(),
+            &original[3..7]
+        );
     }
 }
 
@@ -720,8 +763,10 @@ fn expand_label_rejects_oversized_inputs() {
     assert!(matches!(
         RingBackend.hkdf_expand_label(kdf, &secret, b"quic key", &[], &mut long_output),
         Err(ExpandLabelError::OutputTooLong {
-            output_len: 8161,
-            max_output_len: 8160
+            source: ExpandOutputTooLong {
+                output_len: 8161,
+                max_output_len: 8160
+            }
         })
     ));
     assert!(long_output.iter().all(|&byte| byte == 0));
@@ -732,6 +777,37 @@ fn expand_label_rejects_oversized_inputs() {
             &[b'x'; 249],
             &[0; 255],
             &mut long_output[..8160],
+        )
+        .unwrap();
+}
+
+#[test]
+fn backend_rejects_wrong_lengths() {
+    let error = RingBackend
+        .aead_key(AeadAlgorithm::Aes128Gcm, &[0; 32])
+        .unwrap_err();
+    assert_eq!((error.expected, error.actual), (16, 32));
+    let error = RingBackend
+        .aead_key(AeadAlgorithm::ChaCha20Poly1305, &[0; 16])
+        .unwrap_err();
+    assert_eq!((error.expected, error.actual), (32, 16));
+    let error = RingBackend
+        .header_protection_cipher(AeadAlgorithm::Aes256Gcm, &[0; 16])
+        .unwrap_err();
+    assert_eq!((error.expected, error.actual), (32, 16));
+
+    let mut output = vec![0; 255 * 48 + 1];
+    let error = RingBackend
+        .hkdf_expand(KdfAlgorithm::HkdfSha384, &[0; 48], &[b"info"], &mut output)
+        .unwrap_err();
+    assert_eq!((error.output_len, error.max_output_len), (12241, 12240));
+    assert!(output.iter().all(|&byte| byte == 0));
+    RingBackend
+        .hkdf_expand(
+            KdfAlgorithm::HkdfSha384,
+            &[0; 48],
+            &[b"info"],
+            &mut output[..12240],
         )
         .unwrap();
 }

@@ -9,10 +9,10 @@ use crate::wipe::wipe;
 /// together with the KDF of the cipher suite that produced it.
 ///
 /// The handshake engine hands traffic secrets over; Initial secrets come from
-/// [`InitialSecrets`](crate::InitialSecrets). Packet protection keys are
+/// [`InitialSecrets`](crate::initial::InitialSecrets). Packet protection keys are
 /// derived from a traffic secret with
-/// [`PacketKey::derive`](crate::PacketKey::derive) and
-/// [`HeaderProtectionKey::derive`](crate::HeaderProtectionKey::derive).
+/// [`PacketKey::derive`](crate::packet_key::PacketKey::derive) and
+/// [`HeaderProtectionKey::derive`](crate::header_protection::HeaderProtectionKey::derive).
 ///
 /// The secret bytes are overwritten when the value is dropped. `Debug` does
 /// not print them.
@@ -66,14 +66,17 @@ impl TrafficSecret {
     /// Fills `output` with HKDF-Expand-Label(self, `label`, "",
     /// `output.len()`).
     ///
-    /// Callers pass labels and lengths fixed by RFC 9001, which are within the
-    /// limits of Expand-Label.
+    /// Callers pass a label fixed by RFC 9001 and an output of at most
+    /// `MAX_HASH_LEN` bytes.
     pub(crate) fn expand_label<B: CryptoBackend>(
         &self,
         backend: &B,
         label: &[u8],
         output: &mut [u8],
     ) {
+        // invariant: the RFC 9001 labels are at most 7 bytes and the outputs
+        // at most `MAX_HASH_LEN` bytes, within the 255-byte label limit and
+        // the 255 × 32-byte output limit that Expand-Label checks.
         backend
             .hkdf_expand_label(self.kdf, self.as_bytes(), label, &[], output)
             .expect("RFC 9001 labels and lengths are within the Expand-Label limits");

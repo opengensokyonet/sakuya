@@ -1,10 +1,13 @@
 //! A [`CryptoBackend`] implemented with `ring`.
 
 use ::ring::{aead, hkdf, hmac};
+use snafu::OptionExt;
 
 use super::{
-    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadAlgorithm, AeadKey, AuthenticationFailed, CryptoBackend,
-    HEADER_PROTECTION_MASK_LEN, HEADER_PROTECTION_SAMPLE_LEN, HeaderProtectionCipher, KdfAlgorithm,
+    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadAlgorithm, AeadInputTooLong, AeadInputTooLongSnafu, AeadKey,
+    AuthenticationFailed, AuthenticationFailedSnafu, CryptoBackend, ExpandOutputTooLong,
+    ExpandOutputTooLongSnafu, HEADER_PROTECTION_MASK_LEN, HEADER_PROTECTION_SAMPLE_LEN,
+    HeaderProtectionCipher, KdfAlgorithm, KeyLengthMismatch, KeyLengthMismatchSnafu, MAX_HASH_LEN,
 };
 
 /// The backend built on `ring` 0.17.
@@ -20,39 +23,70 @@ impl CryptoBackend for RingBackend {
     type AeadKey = RingAeadKey;
     type HeaderProtectionCipher = RingHeaderProtectionCipher;
 
-    fn hkdf_extract(&self, kdf: KdfAlgorithm, salt: &[u8], ikm: &[u8], prk: &mut [u8]) {
+    fn hkdf_extract(
+        &self,
+        kdf: KdfAlgorithm,
+        salt: &[u8],
+        ikm: &[u8],
+        prk: &mut [u8; MAX_HASH_LEN],
+    ) {
         // HKDF-Extract is HMAC keyed with the salt; computing it directly
         // exposes the PRK bytes, which `ring::hkdf::Prk` keeps opaque.
         let tag = hmac::sign(&hmac::Key::new(hmac_algorithm(kdf), salt), ikm);
-        prk.copy_from_slice(tag.as_ref());
+        let tag = tag.as_ref();
+        // invariant: the HMAC output is `kdf.hash_len()` bytes, at most
+        // `MAX_HASH_LEN`.
+        prk[..tag.len()].copy_from_slice(tag);
     }
 
-    fn hkdf_expand(&self, kdf: KdfAlgorithm, prk: &[u8], info: &[&[u8]], output: &mut [u8]) {
+    fn hkdf_expand(
+        &self,
+        kdf: KdfAlgorithm,
+        prk: &[u8],
+        info: &[&[u8]],
+        output: &mut [u8],
+    ) -> Result<(), ExpandOutputTooLong> {
+        // `ring` refuses an output length only when it exceeds the
+        // HKDF-Expand limit, before writing any output.
         let prk = hkdf::Prk::new_less_safe(hkdf_algorithm(kdf), prk);
         prk.expand(info, OutputLen(output.len()))
             .and_then(|okm| okm.fill(output))
-            .expect("output length is within the HKDF-Expand limit");
+            .ok()
+            .context(ExpandOutputTooLongSnafu {
+                output_len: output.len(),
+                max_output_len: 255 * kdf.hash_len(),
+            })
     }
 
-    fn aead_key(&self, aead: AeadAlgorithm, key: &[u8]) -> RingAeadKey {
+    fn aead_key(&self, aead: AeadAlgorithm, key: &[u8]) -> Result<RingAeadKey, KeyLengthMismatch> {
+        // `ring` refuses a key only when its length does not match.
         let key = aead::UnboundKey::new(aead_algorithm(aead), key)
-            .expect("key length matches the AEAD algorithm");
-        RingAeadKey(aead::LessSafeKey::new(key))
+            .ok()
+            .context(KeyLengthMismatchSnafu {
+                expected: aead.key_len(),
+                actual: key.len(),
+            })?;
+        Ok(RingAeadKey(aead::LessSafeKey::new(key)))
     }
 
     fn header_protection_cipher(
         &self,
         aead: AeadAlgorithm,
         key: &[u8],
-    ) -> RingHeaderProtectionCipher {
+    ) -> Result<RingHeaderProtectionCipher, KeyLengthMismatch> {
         let algorithm = match aead {
             AeadAlgorithm::Aes128Gcm => &aead::quic::AES_128,
             AeadAlgorithm::Aes256Gcm => &aead::quic::AES_256,
             AeadAlgorithm::ChaCha20Poly1305 => &aead::quic::CHACHA20,
         };
+        // `ring` refuses a key only when its length does not match.
         let key = aead::quic::HeaderProtectionKey::new(algorithm, key)
-            .expect("key length matches the header protection cipher");
-        RingHeaderProtectionCipher(key)
+            .ok()
+            .context(KeyLengthMismatchSnafu {
+                expected: aead.key_len(),
+                actual: key.len(),
+            })?;
+        Ok(RingHeaderProtectionCipher(key))
     }
 }
 
@@ -72,7 +106,10 @@ impl AeadKey for RingAeadKey {
         aad: &[u8],
         in_out: &mut [u8],
         tag: &mut [u8; AEAD_TAG_LEN],
-    ) {
+    ) -> Result<(), AeadInputTooLong> {
+        let input_len = in_out.len();
+        // `ring` refuses to seal only an input beyond the AEAD limit, before
+        // writing it.
         let computed = self
             .0
             .seal_in_place_separate_tag(
@@ -80,8 +117,11 @@ impl AeadKey for RingAeadKey {
                 aead::Aad::from(aad),
                 in_out,
             )
-            .expect("input length is within the AEAD limit");
+            .ok()
+            .context(AeadInputTooLongSnafu { input_len })?;
+        // invariant: every `ring` AEAD tag is 16 bytes.
         tag.copy_from_slice(computed.as_ref());
+        Ok(())
     }
 
     fn open_in_place(
@@ -100,7 +140,8 @@ impl AeadKey for RingAeadKey {
                 0..,
             )
             .map(|_| ())
-            .map_err(|::ring::error::Unspecified| AuthenticationFailed)
+            .ok()
+            .context(AuthenticationFailedSnafu)
     }
 }
 
@@ -119,9 +160,12 @@ impl HeaderProtectionCipher for RingHeaderProtectionCipher {
         &self,
         sample: &[u8; HEADER_PROTECTION_SAMPLE_LEN],
     ) -> [u8; HEADER_PROTECTION_MASK_LEN] {
+        // invariant: `ring` refuses only a sample whose length differs from
+        // the 16 bytes of every QUIC header protection cipher, which the
+        // array type rules out.
         self.0
             .new_mask(sample)
-            .expect("sample length matches the header protection cipher")
+            .expect("a 16-byte sample is accepted")
     }
 }
 

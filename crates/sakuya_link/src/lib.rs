@@ -1,11 +1,10 @@
-//! Link, link binding and link driver abstractions for sakuya
+//! Link, link binding and link driver abstractions for sakuya.
 //!
 //! A link driver binds a local address and produces a link binding; a link
 //! binding produces links, channels that send and receive whole messages
 //! between this side and one peer. The three kinds of object have independent
 //! lifetimes, and old and new link bindings or links may coexist for the same
-//! local address. This crate currently provides their identities; the
-//! abstractions themselves are added incrementally.
+//! local address. This crate provides their identities.
 //!
 //! Code that refers to a link binding or a link without holding it, such as a
 //! delayed notification, a map key or the routing of a datagram by where it
@@ -62,11 +61,11 @@
 //! an external value. `Debug` output is for diagnostics only; its format is
 //! not stable.
 //!
-//! Both types are `Send` and `Sync` and cheap to clone. They are deliberately
-//! not `Copy`, so that their representation can later grow to carry more
-//! information.
+//! Both types are `Send` and `Sync` and cheap to clone. They are not `Copy`,
+//! which leaves their representation free to carry more information.
 
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 use core::{
     cmp::Ordering,

@@ -1,5 +1,7 @@
 //! Initial secrets (RFC 9001 §5.2).
 
+use sakuya_wire::connection_id::ConnectionId;
+
 use crate::backend::{AeadAlgorithm, CryptoBackend, KdfAlgorithm, MAX_HASH_LEN};
 use crate::secret::TrafficSecret;
 use crate::wipe::wipe;
@@ -34,17 +36,17 @@ impl InitialSecrets {
     /// Connection ID field of the client's first Initial packet, or of the
     /// first Initial it sends after a Retry.
     ///
-    /// Any length is accepted; checking the length a connection ID may have
-    /// belongs to the header parser. Both secrets use HKDF with SHA-256, and
-    /// keys derived from them use [`INITIAL_AEAD`].
-    pub fn derive<B: CryptoBackend>(backend: &B, client_dcid: &[u8]) -> Self {
+    /// Whether the connection ID has the length that the client's first
+    /// Initial requires is for the caller to check. Both secrets use HKDF with
+    /// SHA-256, and keys derived from them use [`INITIAL_AEAD`].
+    pub fn derive<B: CryptoBackend>(backend: &B, client_dcid: &ConnectionId) -> Self {
         let len = INITIAL_KDF.hash_len();
         let mut initial_secret = [0; MAX_HASH_LEN];
         backend.hkdf_extract(
             INITIAL_KDF,
             &INITIAL_SALT,
-            client_dcid,
-            &mut initial_secret[..len],
+            client_dcid.as_bytes(),
+            &mut initial_secret,
         );
         let client = expand(backend, &initial_secret[..len], b"client in");
         let server = expand(backend, &initial_secret[..len], b"server in");
@@ -55,6 +57,8 @@ impl InitialSecrets {
 
 fn expand<B: CryptoBackend>(backend: &B, initial_secret: &[u8], label: &[u8]) -> TrafficSecret {
     let mut secret = TrafficSecret::zeroed(INITIAL_KDF);
+    // invariant: the 9-byte Initial labels and the 32-byte output are within
+    // the Expand-Label limits.
     backend
         .hkdf_expand_label(INITIAL_KDF, initial_secret, label, &[], secret.bytes_mut())
         .expect("Initial labels and lengths are within the Expand-Label limits");

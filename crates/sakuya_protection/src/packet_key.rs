@@ -1,11 +1,12 @@
 //! AEAD packet protection (RFC 9001 §5.1, §5.3).
 
-use snafu::{ResultExt, Snafu};
+use snafu::{OptionExt, ResultExt, Snafu};
 
 use crate::backend::{
-    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadAlgorithm, AeadKey, AuthenticationFailed, CryptoBackend,
-    MAX_KEY_LEN,
+    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadAlgorithm, AeadInputTooLong, AeadKey, AuthenticationFailed,
+    CryptoBackend, MAX_KEY_LEN,
 };
+use crate::packet_number::PacketNumber;
 use crate::secret::TrafficSecret;
 use crate::wipe::wipe;
 
@@ -13,7 +14,7 @@ use crate::wipe::wipe;
 /// sealing packet payloads.
 ///
 /// A key update replaces the packet key with one derived from
-/// [`TrafficSecret::next`]; the [`HeaderProtectionKey`](crate::HeaderProtectionKey)
+/// [`TrafficSecret::next`]; the [`HeaderProtectionKey`](crate::header_protection::HeaderProtectionKey)
 /// stays.
 pub struct PacketKey<B: CryptoBackend> {
     key: B::AeadKey,
@@ -25,17 +26,19 @@ impl<B: CryptoBackend> PacketKey<B> {
     /// (`"quic iv"`, 12 bytes) from `secret` (RFC 9001 §5.1).
     ///
     /// `aead` is the AEAD of the cipher suite that produced `secret`, or
-    /// [`INITIAL_AEAD`](crate::INITIAL_AEAD) for Initial secrets.
+    /// [`INITIAL_AEAD`](crate::initial::INITIAL_AEAD) for Initial secrets.
     pub fn derive(backend: &B, aead: AeadAlgorithm, secret: &TrafficSecret) -> Self {
         let mut key = [0; MAX_KEY_LEN];
         let key = &mut key[..aead.key_len()];
         secret.expand_label(backend, b"quic key", key);
         let mut iv = [0; AEAD_NONCE_LEN];
         secret.expand_label(backend, b"quic iv", &mut iv);
-        let packet_key = Self {
-            key: backend.aead_key(aead, key),
-            iv,
-        };
+        // invariant: `key` is `aead.key_len()` bytes, the only length a
+        // backend accepts and the only one it may refuse.
+        let aead_key = backend
+            .aead_key(aead, key)
+            .expect("a key of the AEAD's own length is accepted");
+        let packet_key = Self { key: aead_key, iv };
         wipe(key);
         wipe(&mut iv);
         packet_key
@@ -62,14 +65,15 @@ impl<B: CryptoBackend> PacketKey<B> {
     ///   copy.
     pub fn open<'p>(
         &self,
-        packet_number: u64,
+        packet_number: PacketNumber,
         packet: &'p mut [u8],
         header_len: usize,
     ) -> Result<&'p mut [u8], OpenPacketError> {
-        let payload_end = payload_end(packet.len(), header_len)?;
-        let (header, rest) = packet.split_at_mut(header_len);
-        let (payload, tag) = rest.split_at_mut(payload_end - header_len);
-        let tag: &[u8; AEAD_TAG_LEN] = (&*tag).try_into().expect("tag is 16 bytes");
+        let Regions {
+            header,
+            payload,
+            tag,
+        } = split_packet(packet, header_len)?;
         self.key
             .open_in_place(&self.nonce(packet_number), header, payload, tag)
             .context(open_packet_error::AuthenticationSnafu)?;
@@ -88,29 +92,37 @@ impl<B: CryptoBackend> PacketKey<B> {
     ///
     /// # Errors
     ///
-    /// Fails when `packet` cannot hold the header and the tag; `packet` is
-    /// unchanged.
+    /// - [`SealPacketError::PacketTooShort`] when `packet` cannot hold the
+    ///   header and the tag.
+    /// - [`SealPacketError::PayloadTooLong`] when the payload exceeds what
+    ///   the AEAD can protect under one nonce, far beyond any QUIC packet.
+    ///
+    /// `packet` is unchanged in both cases.
     pub fn seal(
         &self,
-        packet_number: u64,
+        packet_number: PacketNumber,
         packet: &mut [u8],
         header_len: usize,
-    ) -> Result<(), PacketTooShort> {
-        let payload_end = payload_end(packet.len(), header_len)?;
-        let (header, rest) = packet.split_at_mut(header_len);
-        let (payload, tag) = rest.split_at_mut(payload_end - header_len);
-        let tag: &mut [u8; AEAD_TAG_LEN] = tag.try_into().expect("tag is 16 bytes");
+    ) -> Result<(), SealPacketError> {
+        let Regions {
+            header,
+            payload,
+            tag,
+        } = split_packet(packet, header_len)?;
         self.key
-            .seal_in_place(&self.nonce(packet_number), header, payload, tag);
-        Ok(())
+            .seal_in_place(&self.nonce(packet_number), header, payload, tag)
+            .context(seal_packet_error::PayloadTooLongSnafu)
     }
 
     /// The IV exclusive-ored with the packet number, left-padded to the IV
     /// length in network byte order.
-    fn nonce(&self, packet_number: u64) -> [u8; AEAD_NONCE_LEN] {
+    fn nonce(&self, packet_number: PacketNumber) -> [u8; AEAD_NONCE_LEN] {
         let mut nonce = self.iv;
         let offset = AEAD_NONCE_LEN - 8;
-        for (byte, pn) in nonce[offset..].iter_mut().zip(packet_number.to_be_bytes()) {
+        for (byte, pn) in nonce[offset..]
+            .iter_mut()
+            .zip(packet_number.get().to_be_bytes())
+        {
             *byte ^= pn;
         }
         nonce
@@ -129,16 +141,31 @@ impl<B: CryptoBackend> core::fmt::Debug for PacketKey<B> {
     }
 }
 
-fn payload_end(packet_len: usize, header_len: usize) -> Result<usize, PacketTooShort> {
-    let payload_end = packet_len.checked_sub(AEAD_TAG_LEN);
-    match payload_end {
-        Some(end) if end >= header_len => Ok(end),
-        _ => PacketTooShortSnafu {
+/// The regions of a packet buffer that payload protection works on.
+struct Regions<'p> {
+    header: &'p mut [u8],
+    payload: &'p mut [u8],
+    tag: &'p mut [u8; AEAD_TAG_LEN],
+}
+
+/// Splits `packet` into its header of `header_len` bytes, its payload and
+/// its 16-byte tag.
+fn split_packet(packet: &mut [u8], header_len: usize) -> Result<Regions<'_>, PacketTooShort> {
+    let packet_len = packet.len();
+    packet
+        .split_last_chunk_mut::<AEAD_TAG_LEN>()
+        .and_then(|(rest, tag)| {
+            let (header, payload) = rest.split_at_mut_checked(header_len)?;
+            Some(Regions {
+                header,
+                payload,
+                tag,
+            })
+        })
+        .context(PacketTooShortSnafu {
             packet_len,
             header_len,
-        }
-        .fail(),
-    }
+        })
 }
 
 /// A packet buffer cannot hold its header and the 16-byte AEAD tag.
@@ -169,5 +196,23 @@ pub enum OpenPacketError {
     Authentication {
         /// The backend's failure.
         source: AuthenticationFailed,
+    },
+}
+
+/// The error returned by [`PacketKey::seal`].
+#[derive(Debug, Snafu)]
+#[snafu(module(seal_packet_error))]
+pub enum SealPacketError {
+    /// The packet cannot hold its header and the tag.
+    #[snafu(transparent)]
+    PacketTooShort {
+        /// The length check that failed.
+        source: PacketTooShort,
+    },
+    /// The payload is longer than the AEAD can protect under one nonce.
+    #[snafu(display("cannot seal packet payload"))]
+    PayloadTooLong {
+        /// The backend's refusal.
+        source: AeadInputTooLong,
     },
 }

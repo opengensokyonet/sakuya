@@ -1,12 +1,12 @@
 //! Header protection (RFC 9001 §5.4).
 
-use snafu::{Snafu, ensure};
+use snafu::{OptionExt, Snafu, ensure};
 
 use crate::backend::{
     AeadAlgorithm, CryptoBackend, HEADER_PROTECTION_MASK_LEN, HEADER_PROTECTION_SAMPLE_LEN,
     HeaderProtectionCipher, MAX_KEY_LEN,
 };
-use crate::packet_number::TruncatedPacketNumber;
+use crate::packet_number::{PacketNumberLength, TruncatedPacketNumber};
 use crate::secret::TrafficSecret;
 use crate::wipe::wipe;
 
@@ -31,7 +31,11 @@ impl<B: CryptoBackend> HeaderProtectionKey<B> {
         let mut key = [0; MAX_KEY_LEN];
         let key = &mut key[..aead.key_len()];
         secret.expand_label(backend, b"quic hp", key);
-        let cipher = backend.header_protection_cipher(aead, key);
+        // invariant: `key` is `aead.key_len()` bytes, the only length a
+        // backend accepts and the only one it may refuse.
+        let cipher = backend
+            .header_protection_cipher(aead, key)
+            .expect("a key of the AEAD's own length is accepted");
         wipe(key);
         Self { cipher }
     }
@@ -48,7 +52,7 @@ impl<B: CryptoBackend> HeaderProtectionKey<B> {
     ///
     /// On success the first byte and the packet number field are
     /// unprotected; the header ends at `pn_offset` plus
-    /// [`TruncatedPacketNumber::encoded_len`]. Checking the now visible
+    /// [`TruncatedPacketNumber::encoded_len`] bytes. Checking the now visible
     /// Reserved Bits, and reading the Key Phase bit, is left to the caller.
     /// The sample is read from the ciphertext after the field and is not
     /// modified.
@@ -64,13 +68,17 @@ impl<B: CryptoBackend> HeaderProtectionKey<B> {
         pn_offset: usize,
     ) -> Result<TruncatedPacketNumber, HeaderProtectionError> {
         let mask = self.mask(packet, pn_offset)?;
+        // invariant: `mask` succeeded, so the packet extends past
+        // `pn_offset + 4`, which covers the first byte and the longest field.
         packet[0] ^= mask[0] & first_byte_mask(packet[0]);
-        let pn_len = pn_len(packet[0]);
-        let field = &mut packet[pn_offset..pn_offset + pn_len];
-        for (byte, mask) in field.iter_mut().zip(&mask[1..]) {
+        let len = PacketNumberLength::from_first_byte(packet[0]);
+        let field = &mut packet[pn_offset..pn_offset + len.get()];
+        let mut bytes = [0; 4];
+        for ((byte, unmasked), mask) in field.iter_mut().zip(&mut bytes).zip(&mask[1..]) {
             *byte ^= mask;
+            *unmasked = *byte;
         }
-        Ok(TruncatedPacketNumber::from_field(field))
+        Ok(TruncatedPacketNumber::from_bytes(bytes, len))
     }
 
     /// Applies header protection to `packet` in place.
@@ -87,9 +95,11 @@ impl<B: CryptoBackend> HeaderProtectionKey<B> {
     /// sample; `packet` is unchanged.
     pub fn apply(&self, packet: &mut [u8], pn_offset: usize) -> Result<(), HeaderProtectionError> {
         let mask = self.mask(packet, pn_offset)?;
-        let pn_len = pn_len(packet[0]);
+        // invariant: `mask` succeeded, so the packet extends past
+        // `pn_offset + 4`, which covers the first byte and the longest field.
+        let len = PacketNumberLength::from_first_byte(packet[0]);
         packet[0] ^= mask[0] & first_byte_mask(packet[0]);
-        for (byte, mask) in packet[pn_offset..pn_offset + pn_len]
+        for (byte, mask) in packet[pn_offset..pn_offset + len.get()]
             .iter_mut()
             .zip(&mask[1..])
         {
@@ -107,17 +117,14 @@ impl<B: CryptoBackend> HeaderProtectionKey<B> {
             pn_offset > 0,
             header_protection_error::PacketNumberOffsetZeroSnafu
         );
-        let sample_offset = pn_offset.saturating_add(SAMPLE_OFFSET_FROM_PN);
-        let sample = packet
-            .get(sample_offset..sample_offset.saturating_add(HEADER_PROTECTION_SAMPLE_LEN))
-            .and_then(|sample| <&[u8; HEADER_PROTECTION_SAMPLE_LEN]>::try_from(sample).ok());
-        let Some(sample) = sample else {
-            return header_protection_error::SampleOutOfBoundsSnafu {
+        let sample = pn_offset
+            .checked_add(SAMPLE_OFFSET_FROM_PN)
+            .and_then(|sample_offset| packet.get(sample_offset..))
+            .and_then(<[u8]>::first_chunk::<HEADER_PROTECTION_SAMPLE_LEN>)
+            .context(header_protection_error::SampleOutOfBoundsSnafu {
                 pn_offset,
                 packet_len: packet.len(),
-            }
-            .fail();
-        };
+            })?;
         Ok(self.cipher.mask(sample))
     }
 }
@@ -133,11 +140,6 @@ impl<B: CryptoBackend> core::fmt::Debug for HeaderProtectionKey<B> {
 /// for a short header.
 fn first_byte_mask(first_byte: u8) -> u8 {
     if first_byte & 0x80 != 0 { 0x0f } else { 0x1f }
-}
-
-/// The Packet Number field length that an unprotected first byte encodes.
-fn pn_len(first_byte: u8) -> usize {
-    usize::from(first_byte & 0x03) + 1
 }
 
 /// The error returned by [`HeaderProtectionKey::remove`] and
