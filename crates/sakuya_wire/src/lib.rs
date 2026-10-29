@@ -17,12 +17,16 @@
 //!   decoded from and encoded into byte slices, and read and written as
 //!   `nitori_call` operations; with the DATAGRAM and RESET_STREAM_AT
 //!   extensions.
+//! - [`transport_parameters`]: the transport parameters an endpoint sends in
+//!   the TLS handshake.
 //! - [`transport_error`]: transport error codes ([`transport_error::TransportErrorCode`]).
+//! - [`role`]: the client and server roles ([`role::Role`]).
 //!
 //! Nothing here interprets protected header fields (reserved bits, packet
-//! number length, Key Phase) or removes packet protection. The frame decoders
-//! check the encoding only; whether a frame is acceptable in the state of a
-//! connection is for the connection to decide.
+//! number length, Key Phase) or removes packet protection. The frame and
+//! transport parameter decoders check the encoding only; whether a frame or
+//! parameter is acceptable in the state of a connection is for the
+//! connection to decide.
 //!
 //! [RFC 9000]: https://www.rfc-editor.org/rfc/rfc9000.html
 //! [RFC 8999]: https://www.rfc-editor.org/rfc/rfc8999.html
@@ -33,6 +37,8 @@
 pub mod connection_id;
 pub mod frame;
 pub mod header;
+pub mod role;
 pub mod stream_id;
 pub mod transport_error;
+pub mod transport_parameters;
 pub mod var_int;

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "QUIC wire-level value types, header interpretation and frames for sakuya"
+description = "QUIC wire-level value types, header interpretation, frames and transport parameters for sakuya"
 
 [dependencies]
 bytes.workspace = true
