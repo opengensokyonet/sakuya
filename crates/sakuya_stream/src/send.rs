@@ -14,37 +14,31 @@
 //! - [`SendTerminationPolicy`], for automatic end decisions, the write limit,
 //!   and the final size of resets the application leaves open.
 //!
-//! [`SendComposition`] joins three independent components transparently; a
-//! single type may also fulfil several contracts.
+//! [`composition::SendComposition`] joins three independent components
+//! transparently; a single type may also fulfil several contracts.
 //!
 //! Each operation takes `&mut self` and runs to completion: an operation has
 //! exclusive access to the whole stream sender. The connection send flow
 //! controller is passed in by the composing code for the operations that
 //! reserve or commit connection credit. Nothing here waits: an operation that
 //! would have to wait for credit or admission reports that instead
-//! ([`write::WriteOutcome::Wait`]).
-//!
-//! Status: the local business contract of the stream sender is confirmed
-//! (`send-side.md`, settled 2026-09-19). The synchronous operation shapes are
-//! the core of the tentative asynchronous write interface; polling,
-//! wake-ups, the stream writer handle, send selection and feedback dispatch
-//! are not part of this module.
+//! ([`write::WriteOutcome::Wait`]). Polling, wake-ups, the stream writer
+//! handle, send selection and feedback dispatch are not part of this module.
+use crate::application_error_code::ApplicationErrorCode;
 use crate::connection_send_credit::ConnectionSendFlowController;
 use crate::send_buffer::{ExposeUsageError, ExposedEnd, SendBuffer, expose_usage_error};
 use flow_control::{SendFlowContext, SendFlowControlPolicy, StreamCreditEvent};
 use sakuya_wire::stream_id::StreamId;
 use sakuya_wire::var_int::VarInt;
-use snafu::ensure;
+use snafu::{Snafu, ensure};
 use termination::{SendTerminationContext, SendTerminationEvent, SendTerminationPolicy};
 use write::SharedWriteLimitReason;
 
-mod composition;
+pub mod composition;
 pub mod finish;
 pub mod flow_control;
 pub mod termination;
 pub mod write;
-
-pub use composition::{DefaultSendComposition, SendComposition};
 
 /// The stream sender (`StreamSender`): the per-stream send direction state
 /// kept at the connection layer.
@@ -61,11 +55,94 @@ pub struct StreamSender<C: SendTerminationPolicy> {
     peer_stream_limit: VarInt,
     reset_stream_at_supported: bool,
     composition: C,
-    end_state: SendEndState,
-    write_limit: Option<WriteLimit<C::WriteLimitReason>>,
-    stop_sending: Option<VarInt>,
-    terminal_state: Option<SendTerminalState>,
+    end: EndPhase,
+    stop_sending: StopSending<C::WriteLimitReason>,
     connection_closed: bool,
+}
+
+/// The end of the send direction:
+///
+/// ```text
+///          close           reset           reset (lower reliable size)
+///   Open ───────▶ Closed ───────▶ Reset ◀──┐
+///     │                             ▲ └────┘
+///     └──────────── reset ──────────┘
+/// ```
+///
+/// A terminal state can be entered once an end is committed; afterwards the
+/// end no longer changes.
+enum EndPhase {
+    /// Input is open.
+    Open,
+    /// An end is committed.
+    Ended {
+        /// The committed end.
+        end: CommittedEnd,
+        /// The terminal state, once reached.
+        terminal: Option<SendTerminalState>,
+    },
+}
+
+/// A committed close or reset.
+#[derive(Clone, Copy)]
+enum CommittedEnd {
+    Closed {
+        final_size: VarInt,
+        source: EndSource,
+    },
+    Reset {
+        target: ResetTarget,
+        source: EndSource,
+    },
+}
+
+impl EndPhase {
+    fn end_state(&self) -> SendEndState {
+        match self {
+            Self::Open => SendEndState::Open,
+            Self::Ended {
+                end: CommittedEnd::Closed { final_size, source },
+                ..
+            } => SendEndState::Closed {
+                final_size: *final_size,
+                source: *source,
+            },
+            Self::Ended {
+                end: CommittedEnd::Reset { target, source },
+                ..
+            } => SendEndState::Reset {
+                target: *target,
+                source: *source,
+            },
+        }
+    }
+
+    fn terminal_state(&self) -> Option<SendTerminalState> {
+        match self {
+            Self::Open => None,
+            Self::Ended { terminal, .. } => *terminal,
+        }
+    }
+}
+
+/// What the peer's `STOP_SENDING` requested, and the write limit that may
+/// follow from it:
+///
+/// ```text
+///                STOP_SENDING                  narrow (only lower)
+///   NotReceived ──────────────▶ Received ─────────────────────────▶ Received
+///                               (no limit)                         (limit)
+/// ```
+enum StopSending<R> {
+    /// No `STOP_SENDING` arrived.
+    NotReceived,
+    /// The first `STOP_SENDING` arrived with `error_code`.
+    Received {
+        /// The error code of the first `STOP_SENDING`.
+        error_code: ApplicationErrorCode,
+        /// The write limit the termination policy set in response, if any.
+        write_limit: Option<WriteLimit<R>>,
+    },
 }
 
 /// The write limit end and the reason that came with it.
@@ -116,7 +193,7 @@ impl SendEndState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResetTarget {
     /// The application error code.
-    pub error_code: VarInt,
+    pub error_code: ApplicationErrorCode,
     /// The reliable size (`reliable_size`): the prefix that must still be
     /// delivered.
     pub reliable_size: VarInt,
@@ -162,10 +239,8 @@ impl<C: SendTerminationPolicy> StreamSender<C> {
             peer_stream_limit,
             reset_stream_at_supported,
             composition,
-            end_state: SendEndState::Open,
-            write_limit: None,
-            stop_sending: None,
-            terminal_state: None,
+            end: EndPhase::Open,
+            stop_sending: StopSending::NotReceived,
             connection_closed: false,
         }
     }
@@ -182,27 +257,37 @@ impl<C: SendTerminationPolicy> StreamSender<C> {
 
     /// The end state.
     pub fn end_state(&self) -> SendEndState {
-        self.end_state
+        self.end.end_state()
     }
 
     /// The write limit end, if a termination policy has set one.
     pub fn write_limit_end(&self) -> Option<VarInt> {
-        self.write_limit.as_ref().map(|limit| limit.end)
+        self.write_limit().map(|limit| limit.end)
     }
 
     /// The reason of the write limit, if one is set.
     pub fn write_limit_reason(&self) -> Option<&SharedWriteLimitReason<C::WriteLimitReason>> {
-        self.write_limit.as_ref().map(|limit| &limit.reason)
+        self.write_limit().map(|limit| &limit.reason)
     }
 
     /// The error code of the first `STOP_SENDING` received, if any.
-    pub fn stop_sending_code(&self) -> Option<VarInt> {
-        self.stop_sending
+    pub fn stop_sending_code(&self) -> Option<ApplicationErrorCode> {
+        match self.stop_sending {
+            StopSending::NotReceived => None,
+            StopSending::Received { error_code, .. } => Some(error_code),
+        }
     }
 
     /// The terminal state, once reached.
     pub fn terminal_state(&self) -> Option<SendTerminalState> {
-        self.terminal_state
+        self.end.terminal_state()
+    }
+
+    fn write_limit(&self) -> Option<&WriteLimit<C::WriteLimitReason>> {
+        match &self.stop_sending {
+            StopSending::NotReceived => None,
+            StopSending::Received { write_limit, .. } => write_limit.as_ref(),
+        }
     }
 
     /// Whether the connection has closed.
@@ -241,7 +326,7 @@ where
     /// It follows the written end while input is open, equals the final size
     /// after a close, and is the reset's reliable size after a reset.
     pub fn reliable_size(&self) -> VarInt {
-        match self.end_state {
+        match self.end_state() {
             SendEndState::Open => self.written_end(),
             SendEndState::Closed { final_size, .. } => final_size,
             SendEndState::Reset { target, .. } => target.reliable_size,
@@ -269,11 +354,16 @@ where
     /// The request is recorded and given to the termination policy, which
     /// decides whether and how to end the stream; receiving it changes
     /// nothing else. Ignored once the connection has closed.
-    pub fn on_stop_sending(&mut self, error_code: VarInt) {
+    pub fn on_stop_sending(&mut self, error_code: ApplicationErrorCode) {
         if self.connection_closed {
             return;
         }
-        self.stop_sending.get_or_insert(error_code);
+        if let StopSending::NotReceived = self.stop_sending {
+            self.stop_sending = StopSending::Received {
+                error_code,
+                write_limit: None,
+            };
+        }
         self.dispatch_termination(SendTerminationEvent::StopSendingReceived { error_code });
     }
 
@@ -297,35 +387,37 @@ where
         self.dispatch_termination(SendTerminationEvent::ConnectionClosed);
     }
 
-    /// Records that the send direction reached a terminal state.
+    /// Records that the send direction reached a terminal state: all data
+    /// and the final size, or the reset, were acknowledged.
     ///
-    /// Status: seam for the feedback design, which decides when all data and
-    /// the final size, or the reset, count as acknowledged. Only the first
-    /// terminal state is kept.
+    /// Only the first terminal state is kept; later calls succeed without
+    /// effect. This entry is provisional.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// If no end is committed: a terminal state needs a fixed final size.
-    pub fn enter_terminal_state(&mut self, state: SendTerminalState) {
-        assert!(
-            self.end_state.final_size().is_some(),
-            "a send direction reaches a terminal state only after its end is committed"
-        );
-        if self.terminal_state.is_some() {
-            return;
+    /// [`EndNotCommittedError`] if no end is committed: a terminal state
+    /// needs a fixed final size. Nothing changes then.
+    pub fn enter_terminal_state(
+        &mut self,
+        state: SendTerminalState,
+    ) -> Result<(), EndNotCommittedError> {
+        let EndPhase::Ended { terminal, .. } = &mut self.end else {
+            return EndNotCommittedSnafu.fail();
+        };
+        if terminal.is_some() {
+            return Ok(());
         }
-        self.terminal_state = Some(state);
+        *terminal = Some(state);
         self.dispatch_termination(SendTerminationEvent::TerminalStateEntered { state });
+        Ok(())
     }
 
     /// Settles the first exposure of usage up to `usage_end` through the send
     /// buffer, and reports a grown exposure end to both policies afterwards.
     ///
     /// A final size must equal the one the committed end fixed; data must not
-    /// pass it. Returns the newly committed connection credit.
-    ///
-    /// Status: capability placeholder for the send design, as
-    /// [`SendBuffer::expose_usage_through`].
+    /// pass it. Returns the newly committed connection credit. This entry is
+    /// provisional.
     ///
     /// # Errors
     ///
@@ -337,7 +429,7 @@ where
         end: ExposedEnd,
         connection: &mut ConnectionSendFlowController,
     ) -> Result<VarInt, ExposeUsageError> {
-        let fixed_final_size = self.end_state.final_size();
+        let fixed_final_size = self.end_state().final_size();
         match (end, fixed_final_size) {
             (ExposedEnd::FinalSize, None) => {
                 return expose_usage_error::FinalSizeNotFixedSnafu {
@@ -384,8 +476,8 @@ where
     /// [RFC 9000 §3.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-3.3
     pub fn stream_data_blocked_limit(&self) -> Option<VarInt> {
         let allowed = !self.connection_closed
-            && self.terminal_state.is_none()
-            && !matches!(self.end_state, SendEndState::Reset { .. });
+            && self.terminal_state().is_none()
+            && !matches!(self.end_state(), SendEndState::Reset { .. });
         (allowed
             && self
                 .composition
@@ -419,8 +511,8 @@ where
             exposure_end: self.exposure_end(),
             peer_stream_limit: self.peer_stream_limit,
             write_limit_end: self.write_limit_end(),
-            end_state: self.end_state,
-            terminal_state: self.terminal_state,
+            end_state: self.end_state(),
+            terminal_state: self.terminal_state(),
         }
     }
 
@@ -430,11 +522,11 @@ where
             written_end: self.written_end(),
             exposure_end: self.exposure_end(),
             reliable_size: self.reliable_size(),
-            end_state: self.end_state,
-            stop_sending: self.stop_sending,
+            end_state: self.end_state(),
+            stop_sending: self.stop_sending_code(),
             write_limit_end: self.write_limit_end(),
             reset_stream_at_supported: self.reset_stream_at_supported,
-            terminal_state: self.terminal_state,
+            terminal_state: self.terminal_state(),
             connection_closed: self.connection_closed,
         }
     }
@@ -462,6 +554,12 @@ where
         }
     }
 }
+
+/// [`StreamSender::enter_terminal_state`] was called before an end was
+/// committed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("a send direction reaches a terminal state only after its end is committed"))]
+pub struct EndNotCommittedError;
 
 #[cfg(test)]
 mod tests;

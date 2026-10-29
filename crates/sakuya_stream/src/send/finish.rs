@@ -20,10 +20,13 @@
 //! cannot follow a reset. Whether a call conflicts is judged against the
 //! target in effect, regardless of who committed it.
 //!
-//! Status: confirmed (`send-side.md`, "结束操作是本地提交（已确认）" through
-//! "close 后 reset 与完整确认的边界（已确认）"); the signatures of the explicit
-//! final size operations are not settled.
-use super::{EndSource, ResetTarget, SendEndState, SendTerminalState, StreamSender, WriteLimit};
+//! The signatures of the operations that name the final size are
+//! provisional.
+use super::{
+    CommittedEnd, EndPhase, EndSource, ResetTarget, SendEndState, SendTerminalState, StopSending,
+    StreamSender, WriteLimit,
+};
+use crate::application_error_code::ApplicationErrorCode;
 use crate::send::flow_control::{SendFlowControlPolicy, StreamCreditEvent};
 use crate::send::termination::{
     FinalSizeRequest, SendTerminationEvent, SendTerminationPolicy, TerminationAction,
@@ -32,7 +35,7 @@ use crate::send::write::SharedWriteLimitReason;
 use crate::send_buffer::{ResetRetention, SendBuffer};
 use core::fmt;
 use sakuya_wire::var_int::VarInt;
-use snafu::{Snafu, ensure};
+use snafu::{Report, ResultExt, Snafu, ensure};
 
 /// Failures of [`StreamSender::close`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
@@ -99,9 +102,9 @@ pub enum ResetConflictKind {
     /// The error code differs from the effective reset's.
     ErrorCode {
         /// The effective error code.
-        current: VarInt,
+        current: ApplicationErrorCode,
         /// The requested error code.
-        requested: VarInt,
+        requested: ApplicationErrorCode,
     },
     /// The final size differs from the fixed one.
     FinalSize {
@@ -136,7 +139,17 @@ impl fmt::Display for ResetConflictKind {
     }
 }
 
-/// What a validated reset request leads to.
+/// What a reset request leads to once checked against the effective state.
+enum ResetCheck {
+    /// The request equals the effective target.
+    Unchanged,
+    /// The final size is already fixed at this value.
+    FinalSizeFixed(VarInt),
+    /// No final size is fixed; a new one must lie in `minimum..=maximum`.
+    FinalSizeOpen { minimum: VarInt, maximum: VarInt },
+}
+
+/// What a valid application reset request leads to.
 enum ResetPlan {
     /// The request equals the effective target.
     Unchanged,
@@ -144,6 +157,52 @@ enum ResetPlan {
     Install(ResetTarget),
     /// A new target whose final size the termination policy chooses.
     CompleteFinalSize(FinalSizeRequest),
+}
+
+/// A checked termination policy result, ready to commit.
+enum PolicyPlan<R> {
+    /// Nothing changes.
+    Keep,
+    /// Close at the written end.
+    Close,
+    /// Narrow the write limit end strictly.
+    NarrowWriteLimit { write_limit_end: VarInt, reason: R },
+    /// Install a reset target.
+    Reset(ResetTarget),
+}
+
+/// A termination policy result that violates the
+/// [policy contract](crate::send::termination#contract).
+#[derive(Debug, Snafu)]
+#[snafu(module(policy_violation))]
+enum PolicyViolation {
+    #[snafu(display("termination policy closed a stream that was reset"))]
+    CloseAfterReset,
+    #[snafu(display("termination policy closed a stream after the connection closed"))]
+    CloseAfterConnectionClosed,
+    #[snafu(display("termination policy narrowed the write limit of a finished stream"))]
+    NarrowFinished,
+    #[snafu(display("termination policy narrowed the write limit after input was closed"))]
+    NarrowAfterInputClosed,
+    #[snafu(display("termination policy narrowed the write limit without a STOP_SENDING request"))]
+    NarrowWithoutStopSending,
+    #[snafu(display(
+        "termination policy widened the write limit end from {current} to {requested}"
+    ))]
+    WidenWriteLimit { current: VarInt, requested: VarInt },
+    #[snafu(display("termination policy decided an illegal reset {target:?}"))]
+    IllegalReset {
+        target: ResetTarget,
+        source: ResetError,
+    },
+    #[snafu(display(
+        "termination policy chose final size {final_size} outside {minimum}..={maximum}"
+    ))]
+    FinalSizeOutOfRange {
+        final_size: VarInt,
+        minimum: VarInt,
+        maximum: VarInt,
+    },
 }
 
 impl<C> StreamSender<C>
@@ -160,7 +219,7 @@ where
     /// [`CloseError::ConnectionClosed`], then [`CloseError::AlreadyReset`].
     pub fn close(&mut self) -> Result<(), CloseError> {
         ensure!(!self.connection_closed, close_error::ConnectionClosedSnafu);
-        match self.end_state {
+        match self.end_state() {
             SendEndState::Reset { .. } => close_error::AlreadyResetSnafu.fail(),
             SendEndState::Closed { .. } => Ok(()),
             SendEndState::Open => {
@@ -179,7 +238,7 @@ where
     /// # Errors
     ///
     /// See [`reset_at_with_final_size`](Self::reset_at_with_final_size).
-    pub fn reset(&mut self, error_code: VarInt) -> Result<(), ResetError> {
+    pub fn reset(&mut self, error_code: ApplicationErrorCode) -> Result<(), ResetError> {
         self.request_reset(error_code, VarInt::ZERO, None)
     }
 
@@ -193,7 +252,7 @@ where
     /// See [`reset_at_with_final_size`](Self::reset_at_with_final_size).
     pub fn reset_at(
         &mut self,
-        error_code: VarInt,
+        error_code: ApplicationErrorCode,
         reliable_size: VarInt,
     ) -> Result<(), ResetError> {
         self.request_reset(error_code, reliable_size, None)
@@ -201,14 +260,14 @@ where
 
     /// Resets the stream with `error_code` and the explicit `final_size`.
     ///
-    /// Status: extension operation; its signature is not settled.
+    /// This signature is provisional.
     ///
     /// # Errors
     ///
     /// See [`reset_at_with_final_size`](Self::reset_at_with_final_size).
     pub fn reset_with_final_size(
         &mut self,
-        error_code: VarInt,
+        error_code: ApplicationErrorCode,
         final_size: VarInt,
     ) -> Result<(), ResetError> {
         self.request_reset(error_code, VarInt::ZERO, Some(final_size))
@@ -217,7 +276,7 @@ where
     /// Resets the stream with `error_code`, `reliable_size` and the explicit
     /// `final_size`.
     ///
-    /// Status: extension operation; its signature is not settled.
+    /// This signature is provisional.
     ///
     /// # Errors
     ///
@@ -235,7 +294,7 @@ where
     ///    `max(exposure_end, reliable_size) ..= written_end`.
     pub fn reset_at_with_final_size(
         &mut self,
-        error_code: VarInt,
+        error_code: ApplicationErrorCode,
         reliable_size: VarInt,
         final_size: VarInt,
     ) -> Result<(), ResetError> {
@@ -244,7 +303,7 @@ where
 
     fn request_reset(
         &mut self,
-        error_code: VarInt,
+        error_code: ApplicationErrorCode,
         reliable_size: VarInt,
         final_size: Option<VarInt>,
     ) -> Result<(), ResetError> {
@@ -253,18 +312,8 @@ where
             ResetPlan::Install(target) => target,
             ResetPlan::CompleteFinalSize(request) => {
                 let context = self.termination_context();
-                let final_size = self.composition.complete_final_size(request, &context);
-                assert!(
-                    (request.minimum..=request.maximum).contains(&final_size),
-                    "termination policy chose final size {final_size} outside {}..={}",
-                    request.minimum,
-                    request.maximum
-                );
-                ResetTarget {
-                    error_code,
-                    reliable_size,
-                    final_size,
-                }
+                let chosen = self.composition.complete_final_size(request, &context);
+                enforce_policy(check_completed_final_size(request, chosen))
             }
         };
         self.commit_reset(target, EndSource::Application);
@@ -274,22 +323,71 @@ where
         Ok(())
     }
 
-    /// Validates a reset request against the effective state.
+    /// Validates an application reset request against the effective state.
     fn plan_reset(
         &self,
-        error_code: VarInt,
+        error_code: ApplicationErrorCode,
         reliable_size: VarInt,
         final_size: Option<VarInt>,
     ) -> Result<ResetPlan, ResetError> {
+        let target = |final_size| ResetTarget {
+            error_code,
+            reliable_size,
+            final_size,
+        };
+        match self.check_reset(error_code, reliable_size, final_size)? {
+            ResetCheck::Unchanged => Ok(ResetPlan::Unchanged),
+            ResetCheck::FinalSizeFixed(fixed) => Ok(ResetPlan::Install(target(fixed))),
+            ResetCheck::FinalSizeOpen { minimum, maximum } => match final_size {
+                Some(final_size) => {
+                    check_final_size_range(final_size, minimum, maximum)?;
+                    Ok(ResetPlan::Install(target(final_size)))
+                }
+                None => Ok(ResetPlan::CompleteFinalSize(FinalSizeRequest {
+                    error_code,
+                    reliable_size,
+                    minimum,
+                    maximum,
+                })),
+            },
+        }
+    }
+
+    /// Validates a complete reset target against the effective state;
+    /// `None` means it equals the effective target.
+    fn plan_complete_reset(&self, target: ResetTarget) -> Result<Option<ResetTarget>, ResetError> {
+        match self.check_reset(
+            target.error_code,
+            target.reliable_size,
+            Some(target.final_size),
+        )? {
+            ResetCheck::Unchanged => Ok(None),
+            ResetCheck::FinalSizeFixed(_) => Ok(Some(target)),
+            ResetCheck::FinalSizeOpen { minimum, maximum } => {
+                check_final_size_range(target.final_size, minimum, maximum)?;
+                Ok(Some(target))
+            }
+        }
+    }
+
+    /// Checks a reset request against the effective state, up to the choice
+    /// of the final size. An explicit final size must equal a fixed one.
+    fn check_reset(
+        &self,
+        error_code: ApplicationErrorCode,
+        reliable_size: VarInt,
+        final_size: Option<VarInt>,
+    ) -> Result<ResetCheck, ResetError> {
         ensure!(!self.connection_closed, reset_error::ConnectionClosedSnafu);
         let conflict = |conflict| reset_error::ResetConflictSnafu { conflict }.fail();
-        match self.end_state {
+        let end_state = self.end_state();
+        match end_state {
             SendEndState::Reset { target, .. } => {
                 if target.error_code == error_code
                     && target.reliable_size == reliable_size
                     && final_size.is_none_or(|size| size == target.final_size)
                 {
-                    return Ok(ResetPlan::Unchanged);
+                    return Ok(ResetCheck::Unchanged);
                 }
                 if target.error_code != error_code {
                     return conflict(ResetConflictKind::ErrorCode {
@@ -324,7 +422,7 @@ where
             }
             SendEndState::Open => {}
         }
-        if let Some(state) = self.terminal_state {
+        if let Some(state) = self.terminal_state() {
             return reset_error::ProtocolTerminalSnafu { state }.fail();
         }
         ensure!(
@@ -339,146 +437,189 @@ where
                 written_end,
             }
         );
-        if let Some(fixed) = self.end_state.final_size() {
-            return Ok(ResetPlan::Install(ResetTarget {
-                error_code,
-                reliable_size,
-                final_size: fixed,
-            }));
-        }
-        let minimum = self.exposure_end().max(reliable_size);
-        match final_size {
-            Some(final_size) => {
-                ensure!(
-                    minimum <= final_size && final_size <= written_end,
-                    reset_error::InvalidFinalSizeSnafu {
-                        final_size,
-                        minimum,
-                        maximum: written_end,
-                    }
-                );
-                Ok(ResetPlan::Install(ResetTarget {
-                    error_code,
-                    reliable_size,
-                    final_size,
-                }))
-            }
-            None => Ok(ResetPlan::CompleteFinalSize(FinalSizeRequest {
-                error_code,
-                reliable_size,
-                minimum,
+        Ok(match end_state.final_size() {
+            Some(fixed) => ResetCheck::FinalSizeFixed(fixed),
+            None => ResetCheck::FinalSizeOpen {
+                minimum: self.exposure_end().max(reliable_size),
                 maximum: written_end,
-            })),
-        }
+            },
+        })
     }
 
     fn commit_close(&mut self, source: EndSource) {
-        self.end_state = SendEndState::Closed {
+        self.set_end(CommittedEnd::Closed {
             final_size: self.written_end(),
             source,
-        };
+        });
         self.notify_flow_control(StreamCreditEvent::EndCommitted { source });
     }
 
+    /// Installs `target`, which [`check_reset`](Self::check_reset) accepted.
     fn commit_reset(&mut self, target: ResetTarget, source: EndSource) {
-        self.end_state = SendEndState::Reset { target, source };
-        self.composition.apply_reset(ResetRetention {
+        let retention = ResetRetention {
             final_size: target.final_size,
             reliable_size: target.reliable_size,
-        });
+        };
+        if let Err(error) = self.composition.apply_reset(retention) {
+            // invariant: the target was checked against the send buffer's own
+            // written and exposure ends and against the final size the end
+            // state fixed, which is the only one the buffer can have been
+            // shown. A send buffer that still refuses it breaks the
+            // `SendBuffer` contract.
+            unreachable!("send buffer refused a checked reset target {target:?}: {error}");
+        }
+        self.set_end(CommittedEnd::Reset { target, source });
         self.notify_flow_control(StreamCreditEvent::EndCommitted { source });
+    }
+
+    /// Replaces the committed end; a terminal state is never replaced, since
+    /// a send direction in one takes no new end.
+    fn set_end(&mut self, end: CommittedEnd) {
+        let terminal = self.terminal_state();
+        debug_assert!(terminal.is_none());
+        self.end = EndPhase::Ended { end, terminal };
     }
 
     /// Validates and commits an automatic action, returning the event that
     /// reports it, or `None` if it changes nothing.
-    ///
-    /// # Panics
-    ///
-    /// If the action is illegal in the current state.
     pub(super) fn apply_termination_action(
         &mut self,
         action: TerminationAction<C::WriteLimitReason>,
     ) -> Option<SendTerminationEvent> {
-        match action {
-            TerminationAction::Keep => None,
-            TerminationAction::NarrowWriteLimit {
+        match enforce_policy(self.check_termination_action(action)) {
+            PolicyPlan::Keep => None,
+            PolicyPlan::Close => {
+                self.commit_close(EndSource::Policy);
+                Some(SendTerminationEvent::EndCommitted {
+                    source: EndSource::Policy,
+                })
+            }
+            PolicyPlan::NarrowWriteLimit {
                 write_limit_end,
                 reason,
-            } => self.narrow_write_limit(write_limit_end, reason),
-            TerminationAction::Close => match self.end_state {
-                SendEndState::Closed { .. } => None,
-                SendEndState::Reset { .. } => {
-                    panic!("termination policy closed a stream that was reset")
-                }
-                SendEndState::Open => {
-                    assert!(
-                        !self.connection_closed,
-                        "termination policy closed a stream after the connection closed"
-                    );
-                    self.commit_close(EndSource::Policy);
-                    Some(SendTerminationEvent::EndCommitted {
-                        source: EndSource::Policy,
-                    })
-                }
-            },
-            TerminationAction::Reset(target) => {
-                let plan = self
-                    .plan_reset(
-                        target.error_code,
-                        target.reliable_size,
-                        Some(target.final_size),
-                    )
-                    .unwrap_or_else(|error| {
-                        panic!("termination policy decided an illegal reset {target:?}: {error}")
+            } => {
+                if let StopSending::Received { write_limit, .. } = &mut self.stop_sending {
+                    *write_limit = Some(WriteLimit {
+                        end: write_limit_end,
+                        reason: SharedWriteLimitReason::new(reason),
                     });
-                match plan {
-                    ResetPlan::Unchanged => None,
-                    ResetPlan::Install(target) => {
-                        self.commit_reset(target, EndSource::Policy);
-                        Some(SendTerminationEvent::EndCommitted {
-                            source: EndSource::Policy,
-                        })
-                    }
-                    ResetPlan::CompleteFinalSize(_) => {
-                        unreachable!("an automatic reset names its final size")
-                    }
                 }
+                self.notify_flow_control(StreamCreditEvent::WriteLimitNarrowed { write_limit_end });
+                Some(SendTerminationEvent::WriteLimitNarrowed { write_limit_end })
+            }
+            PolicyPlan::Reset(target) => {
+                self.commit_reset(target, EndSource::Policy);
+                Some(SendTerminationEvent::EndCommitted {
+                    source: EndSource::Policy,
+                })
             }
         }
     }
 
-    fn narrow_write_limit(
-        &mut self,
-        write_limit_end: VarInt,
-        reason: C::WriteLimitReason,
-    ) -> Option<SendTerminationEvent> {
-        assert!(
-            !self.connection_closed && self.terminal_state.is_none(),
-            "termination policy narrowed the write limit of a finished stream"
-        );
-        assert!(
-            self.end_state == SendEndState::Open,
-            "termination policy narrowed the write limit after input was closed"
-        );
-        assert!(
-            self.stop_sending.is_some(),
-            "termination policy narrowed the write limit without a STOP_SENDING request"
-        );
-        if let Some(current) = &self.write_limit {
-            assert!(
-                write_limit_end <= current.end,
-                "termination policy widened the write limit end from {} to {write_limit_end}",
-                current.end
-            );
-            if write_limit_end == current.end {
-                return None;
+    /// Checks an automatic action against the
+    /// [policy contract](crate::send::termination#contract) and the current
+    /// state.
+    fn check_termination_action(
+        &self,
+        action: TerminationAction<C::WriteLimitReason>,
+    ) -> Result<PolicyPlan<C::WriteLimitReason>, PolicyViolation> {
+        match action {
+            TerminationAction::Keep => Ok(PolicyPlan::Keep),
+            TerminationAction::Close => match self.end_state() {
+                SendEndState::Closed { .. } => Ok(PolicyPlan::Keep),
+                SendEndState::Reset { .. } => policy_violation::CloseAfterResetSnafu.fail(),
+                SendEndState::Open => {
+                    ensure!(
+                        !self.connection_closed,
+                        policy_violation::CloseAfterConnectionClosedSnafu
+                    );
+                    Ok(PolicyPlan::Close)
+                }
+            },
+            TerminationAction::NarrowWriteLimit {
+                write_limit_end,
+                reason,
+            } => {
+                ensure!(
+                    !self.connection_closed && self.terminal_state().is_none(),
+                    policy_violation::NarrowFinishedSnafu
+                );
+                ensure!(
+                    self.end_state() == SendEndState::Open,
+                    policy_violation::NarrowAfterInputClosedSnafu
+                );
+                ensure!(
+                    self.stop_sending_code().is_some(),
+                    policy_violation::NarrowWithoutStopSendingSnafu
+                );
+                if let Some(current) = self.write_limit_end() {
+                    ensure!(
+                        write_limit_end <= current,
+                        policy_violation::WidenWriteLimitSnafu {
+                            current,
+                            requested: write_limit_end,
+                        }
+                    );
+                    if write_limit_end == current {
+                        return Ok(PolicyPlan::Keep);
+                    }
+                }
+                Ok(PolicyPlan::NarrowWriteLimit {
+                    write_limit_end,
+                    reason,
+                })
             }
+            TerminationAction::Reset(target) => Ok(self
+                .plan_complete_reset(target)
+                .context(policy_violation::IllegalResetSnafu { target })?
+                .map_or(PolicyPlan::Keep, PolicyPlan::Reset)),
         }
-        self.write_limit = Some(WriteLimit {
-            end: write_limit_end,
-            reason: SharedWriteLimitReason::new(reason),
-        });
-        self.notify_flow_control(StreamCreditEvent::WriteLimitNarrowed { write_limit_end });
-        Some(SendTerminationEvent::WriteLimitNarrowed { write_limit_end })
     }
+}
+
+/// Checks the completion entry's `chosen` final size for `request` against
+/// the [policy contract](crate::send::termination#contract).
+fn check_completed_final_size(
+    request: FinalSizeRequest,
+    chosen: VarInt,
+) -> Result<ResetTarget, PolicyViolation> {
+    ensure!(
+        (request.minimum..=request.maximum).contains(&chosen),
+        policy_violation::FinalSizeOutOfRangeSnafu {
+            final_size: chosen,
+            minimum: request.minimum,
+            maximum: request.maximum,
+        }
+    );
+    Ok(ResetTarget {
+        error_code: request.error_code,
+        reliable_size: request.reliable_size,
+        final_size: chosen,
+    })
+}
+
+/// The single place where a termination policy's contract violation ends
+/// the operation: every policy result passes through here after its check
+/// and before anything changes.
+fn enforce_policy<T>(checked: Result<T, PolicyViolation>) -> T {
+    match checked {
+        Ok(plan) => plan,
+        Err(violation) => panic!("{}", Report::from_error(violation)),
+    }
+}
+
+fn check_final_size_range(
+    final_size: VarInt,
+    minimum: VarInt,
+    maximum: VarInt,
+) -> Result<(), ResetError> {
+    ensure!(
+        minimum <= final_size && final_size <= maximum,
+        reset_error::InvalidFinalSizeSnafu {
+            final_size,
+            minimum,
+            maximum,
+        }
+    );
+    Ok(())
 }

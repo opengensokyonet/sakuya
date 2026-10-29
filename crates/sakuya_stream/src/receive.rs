@@ -41,23 +41,22 @@
 //! The reliable size is not a local truncation: it says which gaps are still
 //! worth waiting for, never how far delivery may go.
 //!
-//! # Status
-//!
-//! The order of processing and checking, the before-and-after accounting,
-//! the reader's result priorities, the STOP request and the meaning of the
-//! two limits are settled in the design. The parameterised limit actions
-//! ([`termination::BoundaryAction`]) are provisionally adopted. Waiting and
-//! waking, the asynchronous reader, sending `STOP_SENDING` and
+//! Waiting and waking, the asynchronous reader, sending `STOP_SENDING` and
 //! `MAX_STREAM_DATA`, and propagating connection errors are left to the
 //! surrounding composition; this module offers the synchronous entry points
-//! they will call.
+//! they call. The limit actions ([`termination::BoundaryAction`]) are
+//! provisional.
 //!
 //! [`ReceiveBuffer`]: crate::receive_buffer::ReceiveBuffer
-use crate::connection_receive_flow::{ConnectionReceiveFlowController, RecordUsageError};
+use crate::application_error_code::ApplicationErrorCode;
+use crate::connection_receive_flow::{
+    ConnectionReceiveFlowController, RecordReleaseError, RecordUsageError,
+};
 use crate::receive_buffer::{ReceiveBuffer, StreamDataInput, offset_add, span};
 use bytes::Bytes;
 use flow_control::{ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView};
 use read::{ReadError, RemoteReset};
+use sakuya_wire::transport_error::TransportErrorCode;
 use sakuya_wire::var_int::VarInt;
 use snafu::{ResultExt, Snafu, ensure};
 use termination::{ReceiveTerminationPolicy, ResetPresentation, TerminationEvent, TerminationView};
@@ -87,7 +86,7 @@ pub struct StreamFrame {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResetStreamFrame {
     /// The application protocol error code.
-    pub code: VarInt,
+    pub code: ApplicationErrorCode,
     /// The final size of the stream.
     pub final_size: VarInt,
 }
@@ -102,7 +101,7 @@ pub struct ResetStreamFrame {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResetStreamAtFrame {
     /// The application protocol error code.
-    pub code: VarInt,
+    pub code: ApplicationErrorCode,
     /// The final size of the stream.
     pub final_size: VarInt,
     /// The end of the prefix the sender still delivers reliably.
@@ -217,24 +216,27 @@ pub enum ProtocolError {
     #[snafu(display("reset error code {received} differs from the earlier code {code}"))]
     ResetCodeChanged {
         /// The error code of the earlier reset.
-        code: VarInt,
+        code: ApplicationErrorCode,
         /// The error code the frame states.
-        received: VarInt,
+        received: ApplicationErrorCode,
     },
 }
 
 impl ProtocolError {
     /// The QUIC transport error code to close the connection with.
-    pub fn transport_error_code(&self) -> VarInt {
-        let code: u32 = match self {
-            Self::StreamLimitExceeded { .. } | Self::ConnectionLimitExceeded { .. } => 0x03,
-            Self::ResetCodeChanged { .. } => 0x05,
+    pub fn transport_error_code(&self) -> TransportErrorCode {
+        match self {
+            Self::StreamLimitExceeded { .. } | Self::ConnectionLimitExceeded { .. } => {
+                TransportErrorCode::FLOW_CONTROL_ERROR
+            }
+            Self::ResetCodeChanged { .. } => TransportErrorCode::STREAM_STATE_ERROR,
             Self::FinalSizeChanged { .. }
             | Self::BeyondFinalSize { .. }
-            | Self::FinalSizeBelowReceived { .. } => 0x06,
-            Self::OffsetOverflow { .. } | Self::ReliableSizeExceedsFinalSize { .. } => 0x07,
-        };
-        VarInt::from_u32(code)
+            | Self::FinalSizeBelowReceived { .. } => TransportErrorCode::FINAL_SIZE_ERROR,
+            Self::OffsetOverflow { .. } | Self::ReliableSizeExceedsFinalSize { .. } => {
+                TransportErrorCode::FRAME_ENCODING_ERROR
+            }
+        }
     }
 }
 
@@ -283,16 +285,92 @@ impl<R> Boundary<R> {
     }
 }
 
+/// The local STOP request:
+///
+/// ```text
+///                  stop(code)               sent
+///   NotRequested ──────────────▶ Pending ─────────▶ Sent
+/// ```
 #[derive(Clone, Copy, Debug)]
-struct StopRequest {
-    code: VarInt,
-    sent: bool,
+enum StopRequest {
+    /// No request is installed.
+    NotRequested,
+    /// A request with this code is installed and not yet sent.
+    Pending(ApplicationErrorCode),
+    /// The request with this code was sent.
+    Sent(ApplicationErrorCode),
 }
 
+impl StopRequest {
+    fn code(self) -> Option<ApplicationErrorCode> {
+        match self {
+            Self::NotRequested => None,
+            Self::Pending(code) | Self::Sent(code) => Some(code),
+        }
+    }
+}
+
+/// The reset facts the receive direction keeps: the code and final size of
+/// the first reset, and the smallest reliable size any reset stated.
 #[derive(Clone, Copy, Debug)]
 struct ResetFacts {
-    code: VarInt,
+    code: ApplicationErrorCode,
+    final_size: VarInt,
     reliable_size: VarInt,
+}
+
+/// What happened to the receive buffer and its payload:
+///
+/// ```text
+///          destroy (policy, reader drop, terminal error)
+///   Live ─────────────────────────────────────────────▶ Destroyed
+///     │                                                     │
+///     │ connection fails                   connection fails │
+///     └──────────────────────────▶ Failed ◀─────────────────┘
+/// ```
+///
+/// `Failed` is final: the connection failure is the highest-priority result
+/// of every later operation, and the buffer is destroyed. A destroyed buffer
+/// keeps its first cause.
+#[derive(Clone, Debug)]
+enum BufferPhase<R> {
+    /// The buffer holds payload for delivery.
+    Live,
+    /// The buffer was destroyed.
+    Destroyed(Destruction<R>),
+    /// The connection failed; the buffer is destroyed.
+    Failed(ConnectionFailure),
+}
+
+/// Why the receive buffer was destroyed.
+#[derive(Clone, Debug)]
+enum Destruction<R> {
+    /// The receive termination policy destroyed it for this reason.
+    Policy(Applied<R>),
+    /// The mechanism destroyed it: the reader was dropped or a read
+    /// committed a terminal error.
+    Forced,
+}
+
+/// The reader and its result:
+///
+/// ```text
+///          end or terminal error                 drop
+///   Open ────────────────────────▶ Committed ───────────▶ ReaderDropped
+///     │                                                    ▲ (committed)
+///     └──────────────────────── drop ──────────────────────┘ (not committed)
+/// ```
+#[derive(Clone, Debug)]
+enum Reading<R> {
+    /// The reader may read; no result is committed.
+    Open,
+    /// A read committed this result; repeated reads return it.
+    Committed(Committed<R>),
+    /// The reader was dropped; no more reads happen.
+    ReaderDropped {
+        /// Whether a read had committed a result before.
+        result_committed: bool,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -306,22 +384,16 @@ enum Committed<R> {
 /// `C` implements the receive buffer, the receive flow control policy and
 /// the receive termination policy for this stream. See the [module
 /// documentation](self) for the processing model.
-///
-/// Status: the synchronous core of the settled receive contracts; see the
-/// module documentation for what is provisional and what is left out.
 #[derive(Debug)]
 pub struct StreamReceiver<C: ReceiveTerminationPolicy> {
     parts: C,
     opened_limit: VarInt,
-    failure: Option<ConnectionFailure>,
+    buffer: BufferPhase<C::Reason>,
     reset: Option<ResetFacts>,
     acceptance: Boundary<C::Reason>,
     delivery: Boundary<C::Reason>,
-    destroyed: bool,
-    destroy_applied: Option<Applied<C::Reason>>,
-    committed: Option<Committed<C::Reason>>,
-    stop: Option<StopRequest>,
-    reader_dropped: bool,
+    reading: Reading<C::Reason>,
+    stop: StopRequest,
     data_complete_notified: bool,
     reset_presentation: ResetPresentation,
     released_reported: VarInt,
@@ -341,15 +413,12 @@ where
         Self {
             parts,
             opened_limit: initial_limit,
-            failure: None,
+            buffer: BufferPhase::Live,
             reset: None,
             acceptance: Boundary::Following,
             delivery: Boundary::Following,
-            destroyed: false,
-            destroy_applied: None,
-            committed: None,
-            stop: None,
-            reader_dropped: false,
+            reading: Reading::Open,
+            stop: StopRequest::NotRequested,
             data_complete_notified: false,
             reset_presentation: ResetPresentation::default(),
             released_reported: VarInt::ZERO,
@@ -370,17 +439,17 @@ where
     pub fn remote_reset(&self) -> Option<RemoteReset> {
         self.reset.map(|facts| RemoteReset {
             code: facts.code,
-            final_size: self
-                .parts
-                .final_size()
-                .expect("an accepted reset states the final size"),
+            final_size: facts.final_size,
             reliable_size: facts.reliable_size,
         })
     }
 
     /// The persistent failure, if one occurred.
     pub fn failure(&self) -> Option<ConnectionFailure> {
-        self.failure
+        match self.buffer {
+            BufferPhase::Failed(failure) => Some(failure),
+            BufferPhase::Live | BufferPhase::Destroyed(_) => None,
+        }
     }
 
     /// The data acceptance limit (`acceptance_limit`).
@@ -391,6 +460,22 @@ where
     /// The delivery limit (`delivery_limit`).
     pub fn delivery_limit(&self) -> BoundaryMode {
         self.delivery.mode()
+    }
+
+    fn is_destroyed(&self) -> bool {
+        !matches!(self.buffer, BufferPhase::Live)
+    }
+
+    fn is_reader_dropped(&self) -> bool {
+        matches!(self.reading, Reading::ReaderDropped { .. })
+    }
+
+    fn is_result_committed(&self) -> bool {
+        match self.reading {
+            Reading::Open => false,
+            Reading::Committed(_) => true,
+            Reading::ReaderDropped { result_committed } => result_committed,
+        }
     }
 
     /// Processes a STREAM frame of the stream.
@@ -421,8 +506,12 @@ where
         let old_accounted = self.parts.accounted_end();
         let old_final = self.parts.final_size();
         let payload = self.accepted_payload(offset, data);
-        let input = StreamDataInput::new(offset, end, fin, payload)
-            .expect("the accepted payload is a prefix of the frame data");
+        let input = match StreamDataInput::new(offset, end, fin, payload) {
+            Ok(input) => input,
+            // invariant: the accepted payload is a prefix of the frame data,
+            // which ends at `end`.
+            Err(error) => unreachable!("accepted payload passes the frame: {error}"),
+        };
         self.parts.receive_data(input);
         let checked = check_stream_final_size(old_final, old_accounted, end, fin)
             .and_then(|()| self.account(old_accounted, connection));
@@ -475,7 +564,7 @@ where
     /// Processes a `STREAM_DATA_BLOCKED` frame of the stream: the receive
     /// flow control policy observes it. It grants nothing by itself.
     pub fn on_stream_data_blocked(&mut self, limit: VarInt) {
-        if self.failure.is_none() {
+        if self.failure().is_none() {
             self.notify_flow(ReceiveFlowEvent::PeerBlocked { limit });
         }
     }
@@ -485,11 +574,10 @@ where
     /// Later operations report [`ConnectionFailure::Closed`] unless a
     /// protocol failure was recorded first. The receive buffer is destroyed.
     pub fn connection_closed(&mut self) {
-        if self.failure.is_some() {
+        if self.failure().is_some() {
             return;
         }
-        self.failure = Some(ConnectionFailure::Closed);
-        self.shut_down();
+        self.shut_down(ConnectionFailure::Closed);
     }
 
     /// Records that the stream reader was dropped.
@@ -499,13 +587,15 @@ where
     /// then observes [`TerminationEvent::ReaderDropped`]. The receive
     /// direction keeps its protocol duties — final size, flow control, a
     /// pending STOP — until the protocol lets it go. Reads after this call
-    /// panic.
+    /// fail with [`ReadError::ReaderDropped`].
     pub fn reader_dropped(&mut self) {
-        if self.reader_dropped {
+        if self.is_reader_dropped() {
             return;
         }
-        self.reader_dropped = true;
-        self.destroy_buffer(None);
+        self.reading = Reading::ReaderDropped {
+            result_committed: self.is_result_committed(),
+        };
+        self.destroy_buffer(Destruction::Forced);
         self.notify_flow(ReceiveFlowEvent::ReaderDropped);
         self.notify_termination(TerminationEvent::ReaderDropped);
     }
@@ -517,23 +607,35 @@ where
     /// still holds for delivery to the application: delivered data, data
     /// beyond a fixed delivery limit and everything after the buffer was
     /// destroyed count as released. Frame processing reports by itself;
-    /// reads do not, since they do not see the connection.
-    pub fn report_release(&mut self, connection: &mut ConnectionReceiveFlowController) {
-        if self.failure.is_some() {
-            return;
+    /// reads do not, since they do not see the connection. Nothing is
+    /// reported after a connection failure.
+    ///
+    /// # Errors
+    ///
+    /// [`RecordReleaseError`] if `connection` has not recorded the usage this
+    /// stream releases, which happens when the stream's input was accounted
+    /// with another controller; nothing is reported then. Frame processing
+    /// leaves such a report for the next call of this method.
+    pub fn report_release(
+        &mut self,
+        connection: &mut ConnectionReceiveFlowController,
+    ) -> Result<(), RecordReleaseError> {
+        if self.failure().is_some() {
+            return Ok(());
         }
         let progress = self.release_progress();
         if let Some(increase) = progress.checked_sub(self.released_reported)
             && increase > VarInt::ZERO
         {
-            connection.record_release(increase);
+            connection.record_release(increase)?;
             self.released_reported = progress;
         }
+        Ok(())
     }
 
     fn on_reset(
         &mut self,
-        code: VarInt,
+        code: ApplicationErrorCode,
         final_size: VarInt,
         reliable_size: VarInt,
         connection: &mut ConnectionReceiveFlowController,
@@ -560,6 +662,7 @@ where
             None => {
                 self.reset = Some(ResetFacts {
                     code,
+                    final_size,
                     reliable_size,
                 });
                 Some(TerminationEvent::RemoteReset)
@@ -578,7 +681,7 @@ where
         &self,
         old_final: Option<VarInt>,
         old_accounted: VarInt,
-        code: VarInt,
+        code: ApplicationErrorCode,
         final_size: VarInt,
     ) -> Result<(), ProtocolError> {
         match old_final {
@@ -617,9 +720,10 @@ where
         connection: &mut ConnectionReceiveFlowController,
     ) -> Result<(), ProtocolError> {
         let accounted_end = self.parts.accounted_end();
-        let increase = accounted_end
-            .checked_sub(old_accounted)
-            .expect("the receive buffer lowered its accounted end");
+        // The receive buffer contract keeps the accounted end from falling;
+        // a buffer that breaks it records no increase.
+        debug_assert!(accounted_end >= old_accounted);
+        let increase = accounted_end.saturating_sub(old_accounted);
         ensure!(
             accounted_end <= self.opened_limit,
             StreamLimitExceededSnafu {
@@ -645,12 +749,14 @@ where
             self.data_complete_notified = true;
             self.notify_termination(TerminationEvent::DataComplete);
         }
-        self.report_release(connection);
+        // A report the connection rejects stays due; `report_release`
+        // returns the error to the composing code.
+        let _ = self.report_release(connection);
     }
 
     /// The part of `data`, which starts at `offset`, below both local limits.
     fn accepted_payload(&self, offset: VarInt, mut data: Bytes) -> Bytes {
-        if self.destroyed {
+        if self.is_destroyed() {
             return Bytes::new();
         }
         let limit = self.acceptance.limit().min(self.delivery.limit());
@@ -659,31 +765,35 @@ where
     }
 
     fn check_failure(&self) -> Result<(), ConnectionFailure> {
-        self.failure.map_or(Ok(()), Err)
+        self.failure().map_or(Ok(()), Err)
     }
 
     /// Records a protocol violation as the persistent failure.
     fn fail(&mut self, error: ProtocolError) -> ConnectionFailure {
         let failure = ConnectionFailure::Protocol { source: error };
-        self.failure = Some(failure);
-        self.shut_down();
+        self.shut_down(failure);
         failure
     }
 
-    fn shut_down(&mut self) {
-        self.destroy_buffer(None);
+    /// Records `failure` as the persistent failure and destroys the buffer.
+    fn shut_down(&mut self, failure: ConnectionFailure) {
+        let was_live = !self.is_destroyed();
+        self.buffer = BufferPhase::Failed(failure);
+        if was_live {
+            self.parts.destroy();
+            self.notify_flow(ReceiveFlowEvent::BufferDestroyed);
+        }
         self.notify_termination(TerminationEvent::ConnectionClosed);
     }
 
-    /// Destroys the receive buffer; `applied` is `None` for destruction the
-    /// mechanism forces. A buffer already destroyed keeps its first reason.
-    fn destroy_buffer(&mut self, applied: Option<Applied<C::Reason>>) {
-        if self.destroyed {
+    /// Destroys the receive buffer for `cause`. A buffer already destroyed
+    /// keeps its first cause.
+    fn destroy_buffer(&mut self, cause: Destruction<C::Reason>) {
+        if self.is_destroyed() {
             return;
         }
         self.parts.destroy();
-        self.destroyed = true;
-        self.destroy_applied = applied;
+        self.buffer = BufferPhase::Destroyed(cause);
         self.notify_flow(ReceiveFlowEvent::BufferDestroyed);
     }
 
@@ -694,12 +804,12 @@ where
     }
 
     fn stop_sent(&self) -> bool {
-        self.stop.is_some_and(|request| request.sent)
+        matches!(self.stop, StopRequest::Sent(_))
     }
 
     fn release_progress(&self) -> VarInt {
         let accounted = self.parts.accounted_end();
-        if self.destroyed || self.committed.is_some() {
+        if self.is_destroyed() || self.is_result_committed() {
             return accounted;
         }
         let retained = self
@@ -719,15 +829,15 @@ where
             reset: self.remote_reset(),
             acceptance: self.acceptance.mode(),
             delivery: self.delivery.mode(),
-            destroyed: self.destroyed,
-            read_result_committed: self.committed.is_some(),
-            stop_code: self.stop.map(|request| request.code),
+            destroyed: self.is_destroyed(),
+            read_result_committed: self.is_result_committed(),
+            stop_code: self.stop.code(),
             stop_sent: self.stop_sent(),
-            stop_allowed: self.stop.is_none()
-                && self.failure.is_none()
+            stop_allowed: self.stop.code().is_none()
+                && self.failure().is_none()
                 && self.stop_not_needed().is_none(),
-            reader_dropped: self.reader_dropped,
-            connection_failed: self.failure.is_some(),
+            reader_dropped: self.is_reader_dropped(),
+            connection_failed: self.failure().is_some(),
         }
     }
 
@@ -745,8 +855,8 @@ where
             final_size: self.parts.final_size(),
             acceptance: self.acceptance.mode(),
             delivery: self.delivery.mode(),
-            destroyed: self.destroyed,
-            reader_dropped: self.reader_dropped,
+            destroyed: self.is_destroyed(),
+            reader_dropped: self.is_reader_dropped(),
         };
         self.parts.on_receive_flow_event(event, &view);
     }

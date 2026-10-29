@@ -6,7 +6,10 @@ use super::*;
 fn stopped_with(
     on_stop: TerminationDecision<&'static str>,
     later: impl FnMut(TerminationEvent, &TerminationView) -> TerminationDecision<&'static str> + 'static,
-) -> (Receiver, ConnectionReceiveFlowController) {
+) -> (
+    Receiver<impl ReceiveTerminationPolicy<Reason = &'static str>>,
+    ConnectionReceiveFlowController,
+) {
     let mut on_stop = Some(on_stop);
     let mut later = later;
     let (mut receiver, mut connection) = new_receiver(scripted(move |event, view| {
@@ -19,8 +22,8 @@ fn stopped_with(
     receiver
         .on_stream_frame(stream(0, 500, false), &mut connection)
         .unwrap();
-    receiver.stop(v(1)).unwrap();
-    receiver.on_stop_sent();
+    receiver.stop(c(1)).unwrap();
+    receiver.on_stop_sent().unwrap();
     (receiver, connection)
 }
 
@@ -58,7 +61,7 @@ fn same_limits_are_idempotent() {
             TerminationEvent::RemoteReset => fix_both(300, "second"),
             _ => TerminationDecision::keep(),
         });
-    let changes = |receiver: &Receiver| {
+    let changes = |receiver: &Receiver<_>| {
         receiver
             .parts()
             .flow_events
@@ -157,8 +160,8 @@ fn filling_a_gap_delivers_kept_data_up_to_the_delivery_limit() {
     receiver
         .on_stream_frame(stream(200, 100, false), &mut connection)
         .unwrap();
-    receiver.stop(v(1)).unwrap();
-    receiver.on_stop_sent();
+    receiver.stop(c(1)).unwrap();
+    receiver.on_stop_sent().unwrap();
     receiver
         .on_stream_frame(stream(300, 100, false), &mut connection)
         .unwrap();
@@ -183,8 +186,8 @@ fn limit_below_the_read_position() {
         .on_stream_frame(stream(0, 500, false), &mut connection)
         .unwrap();
     receiver.read_into(&mut (&mut out).limit(300)).unwrap();
-    receiver.stop(v(1)).unwrap();
-    receiver.on_stop_sent();
+    receiver.stop(c(1)).unwrap();
+    receiver.on_stop_sent().unwrap();
     assert_eq!(receiver.parts().delivered_end(), v(300));
     assert_eq!(
         receiver.read_chunk(),
@@ -227,11 +230,20 @@ fn reader_drop_destroys_whatever_the_policy_says() {
 }
 
 #[test]
-#[should_panic(expected = "reader was dropped")]
-fn read_after_reader_drop_panics() {
-    let (mut receiver, _connection) = new_receiver(keep_all());
+fn read_after_reader_drop_fails() {
+    let (mut receiver, mut connection) = new_receiver(keep_all());
+    receiver
+        .on_stream_frame(stream(0, 100, true), &mut connection)
+        .unwrap();
     receiver.reader_dropped();
-    let _ = receiver.read_chunk();
+    assert_eq!(receiver.read_chunk(), Err(ReadError::ReaderDropped));
+    assert_eq!(
+        receiver.read_into(&mut Vec::new()),
+        Err(ReadError::ReaderDropped)
+    );
+    // A later connection failure does not reopen reading.
+    receiver.connection_closed();
+    assert_eq!(receiver.read_chunk(), Err(ReadError::ReaderDropped));
 }
 
 /// A sent STOP request is a local cancellation: the policy may then give up
@@ -248,8 +260,8 @@ fn sent_stop_cancels_the_reliable_prefix() {
     receiver
         .on_reset_stream_at(reset_at(4, 1000, 800), &mut connection)
         .unwrap();
-    receiver.stop(v(1)).unwrap();
-    receiver.on_stop_sent();
+    receiver.stop(c(1)).unwrap();
+    receiver.on_stop_sent().unwrap();
     assert_eq!(receiver.delivery_limit(), BoundaryMode::Fixed(v(100)));
     let (read, end) = read_all(&mut receiver);
     assert_eq!(read, data(0, 100));
@@ -346,7 +358,7 @@ mod violations {
             TerminationEvent::StopRequested => fix_both(0, "requested"),
             _ => TerminationDecision::keep(),
         }));
-        receiver.stop(v(1)).unwrap();
+        receiver.stop(c(1)).unwrap();
     }
 
     #[test]
@@ -434,7 +446,7 @@ mod violations {
     #[should_panic(expected = "STOP request with code 2")]
     fn stop_request_the_protocol_does_not_allow() {
         let (mut receiver, mut connection) = new_receiver(scripted(|event, _| match event {
-            TerminationEvent::DataComplete => TerminationDecision::keep().with_stop(v(2)),
+            TerminationEvent::DataComplete => TerminationDecision::keep().with_stop(c(2)),
             _ => TerminationDecision::keep(),
         }));
         receiver

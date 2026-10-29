@@ -1,4 +1,4 @@
-use super::{ConnectionReceiveFlowController, RecordUsageError};
+use super::{ConnectionReceiveFlowController, RecordReleaseError, RecordUsageError};
 use sakuya_wire::var_int::VarInt;
 
 fn v(value: u32) -> VarInt {
@@ -43,15 +43,24 @@ fn limit_only_grows() {
 fn release_is_tracked_apart_from_usage() {
     let mut controller = ConnectionReceiveFlowController::new(v(100));
     controller.record_usage(v(50)).unwrap();
-    controller.record_release(v(30));
+    controller.record_release(v(30)).unwrap();
     assert_eq!(controller.released(), v(30));
     assert_eq!(controller.used(), v(50));
 }
 
 #[test]
-#[should_panic(expected = "released progress exceeds connection usage")]
-fn release_beyond_usage_panics() {
+fn release_beyond_usage_is_an_error_and_changes_nothing() {
     let mut controller = ConnectionReceiveFlowController::new(v(100));
     controller.record_usage(v(10)).unwrap();
-    controller.record_release(v(11));
+    controller.record_release(v(4)).unwrap();
+    assert_eq!(
+        controller.record_release(v(7)),
+        Err(RecordReleaseError {
+            released: v(4),
+            increase: v(7),
+            used: v(10),
+        })
+    );
+    assert_eq!(controller.released(), v(4));
+    assert!(controller.record_release(VarInt::MAX).is_err());
 }

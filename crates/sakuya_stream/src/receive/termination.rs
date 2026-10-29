@@ -1,18 +1,19 @@
 //! The receive termination policy: local delivery decisions at the end of a
 //! stream's receive direction.
 //!
-//! Status: the policy's role and the basic composition are settled; the
-//! parameterised limit actions follow the send side's monotonic write limit
-//! and are provisionally adopted. Their Rust shape here is this crate's first
-//! realisation.
-//!
 //! On each [`TerminationEvent`] the policy returns a [`TerminationDecision`]:
 //! a [`BoundaryAction`] — keep, restrict the receive buffer, or destroy it —
 //! optionally a STOP request and a reset presentation. The stream receive
 //! component checks the whole decision against the current state, then
-//! applies it in one go. A decision that is invalid for the state the policy
-//! was shown is a bug in the policy and panics before anything changes; it is
-//! not clamped and not turned into a protocol error.
+//! applies it in one go. The shape of the decision is provisional.
+//!
+//! # Contract
+//!
+//! A decision must be valid for the state the policy was shown, by the
+//! permissions below. A decision that is not violates this contract: the
+//! stream receive component detects it before anything changes and panics.
+//! It is a defect of the policy, not clamped and not turned into a protocol
+//! error.
 //!
 //! # Permissions
 //!
@@ -41,12 +42,15 @@
 //! The destruction forced when the reader is dropped or a terminal error is
 //! delivered does not ask the policy.
 use super::{
-    Applied, Boundary, BoundaryMode, StreamReceiver, flow_control::ReceiveFlowControlPolicy,
-    flow_control::ReceiveFlowEvent, read::RemoteReset,
+    Applied, Boundary, BoundaryMode, Destruction, StreamReceiver,
+    flow_control::ReceiveFlowControlPolicy, flow_control::ReceiveFlowEvent, read::RemoteReset,
+    stop::StopError,
 };
+use crate::application_error_code::ApplicationErrorCode;
 use crate::receive_buffer::ReceiveBuffer;
 use core::{convert::Infallible, fmt};
 use sakuya_wire::var_int::VarInt;
+use snafu::{Report, ResultExt, Snafu, ensure};
 
 /// The events a receive termination policy observes.
 ///
@@ -97,7 +101,7 @@ pub struct TerminationView {
     /// Whether a read result has been committed.
     pub read_result_committed: bool,
     /// The code of the installed STOP request, if any.
-    pub stop_code: Option<VarInt>,
+    pub stop_code: Option<ApplicationErrorCode>,
     /// Whether the installed STOP request was sent.
     pub stop_sent: bool,
     /// Whether a new STOP request would be installed.
@@ -160,7 +164,7 @@ pub struct TerminationDecision<R> {
     /// A STOP request to install, with its application error code. It must
     /// be one the protocol allows ([`TerminationView::stop_allowed`]) or the
     /// request already installed.
-    pub stop: Option<VarInt>,
+    pub stop: Option<ApplicationErrorCode>,
     /// A new reset presentation; `None` keeps the current one. It has no
     /// effect once a read result is committed.
     pub reset_presentation: Option<ResetPresentation>,
@@ -182,7 +186,7 @@ impl<R> TerminationDecision<R> {
     }
 
     /// Also installs a STOP request with `code`.
-    pub fn with_stop(mut self, code: VarInt) -> Self {
+    pub fn with_stop(mut self, code: ApplicationErrorCode) -> Self {
         self.stop = Some(code);
         self
     }
@@ -196,8 +200,7 @@ impl<R> TerminationDecision<R> {
 
 /// Local delivery decisions of one stream's receive direction.
 ///
-/// Status: the policy's role is settled; the decision shape is
-/// provisional (see the [module documentation](self)).
+/// Implementations follow the [contract](self#contract).
 pub trait ReceiveTerminationPolicy {
     /// The local reason a policy records with its actions.
     ///
@@ -214,7 +217,7 @@ pub trait ReceiveTerminationPolicy {
     ) -> TerminationDecision<Self::Reason>;
 }
 
-/// The basic receive termination policy.
+/// A receive termination policy that keeps both local limits following.
 ///
 /// - It keeps the current local choices when a STOP request is installed or
 ///   sent.
@@ -229,25 +232,28 @@ pub trait ReceiveTerminationPolicy {
 /// It never restricts or destroys by itself, so its reason type is
 /// uninhabited.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BasicTermination {
-    abandon_code: VarInt,
+pub struct FollowingTermination {
+    abandon_code: ApplicationErrorCode,
 }
 
-impl BasicTermination {
+/// The receive termination policy of the default receive composition.
+pub type DefaultReceiveTermination = FollowingTermination;
+
+impl FollowingTermination {
     /// Creates the policy with the application error code for STOP requests
     /// made when the reader is dropped.
-    pub fn new(abandon_code: VarInt) -> Self {
+    pub fn new(abandon_code: ApplicationErrorCode) -> Self {
         Self { abandon_code }
     }
 
     /// The application error code for STOP requests made when the reader is
     /// dropped.
-    pub fn abandon_code(&self) -> VarInt {
+    pub fn abandon_code(&self) -> ApplicationErrorCode {
         self.abandon_code
     }
 }
 
-impl ReceiveTerminationPolicy for BasicTermination {
+impl ReceiveTerminationPolicy for FollowingTermination {
     type Reason = Infallible;
 
     fn on_termination_event(
@@ -277,38 +283,99 @@ enum Plan<R> {
     Destroy(Applied<R>),
 }
 
-const VIOLATION: &str = "receive termination policy violated its contract";
+/// A checked decision, ready to apply.
+struct DecisionPlan<R> {
+    action: Plan<R>,
+    install_stop: Option<ApplicationErrorCode>,
+    reset_presentation: Option<ResetPresentation>,
+}
+
+/// A decision that violates the [policy contract](self#contract).
+#[derive(Debug, Snafu)]
+#[snafu(module(policy_violation))]
+enum PolicyViolation {
+    #[snafu(display(
+        "receive termination policy violated its contract: {what} the receive buffer on {trigger:?} without a reset, a sent STOP request or a dropped reader"
+    ))]
+    NoBasis {
+        what: &'static str,
+        trigger: TerminationEvent,
+    },
+    #[snafu(display(
+        "receive termination policy violated its contract: destroys the receive buffer on {trigger:?} while the reliable prefix is undelivered"
+    ))]
+    DestroysReliablePrefix { trigger: TerminationEvent },
+    #[snafu(display(
+        "receive termination policy violated its contract: restricts the receive buffer on {trigger:?} after delivery ended"
+    ))]
+    RestrictsAfterEnd { trigger: TerminationEvent },
+    #[snafu(display(
+        "receive termination policy violated its contract: fixes the {name} limit at {limit}, beyond the final size {final_size}"
+    ))]
+    BeyondFinalSize {
+        name: &'static str,
+        limit: VarInt,
+        final_size: VarInt,
+    },
+    #[snafu(display(
+        "receive termination policy violated its contract: raises the fixed {name} limit from {fixed} to {limit}"
+    ))]
+    RaisesFixedLimit {
+        name: &'static str,
+        fixed: VarInt,
+        limit: VarInt,
+    },
+    #[snafu(display(
+        "receive termination policy violated its contract: fixes the delivery limit at {limit} on {trigger:?}, inside the undelivered reliable prefix {reliable_size}"
+    ))]
+    DeliveryInsideReliablePrefix {
+        limit: VarInt,
+        trigger: TerminationEvent,
+        reliable_size: VarInt,
+    },
+    #[snafu(display(
+        "receive termination policy violated its contract: fixes the acceptance limit at {limit} on {trigger:?}, inside the unreceived reliable prefix {reliable_size}"
+    ))]
+    AcceptanceInsideReliablePrefix {
+        limit: VarInt,
+        trigger: TerminationEvent,
+        reliable_size: VarInt,
+    },
+    #[snafu(display(
+        "receive termination policy violated its contract: STOP request with code {code} on {trigger:?}"
+    ))]
+    Stop {
+        code: ApplicationErrorCode,
+        trigger: TerminationEvent,
+        source: StopError,
+    },
+}
 
 impl<C> StreamReceiver<C>
 where
     C: ReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy,
 {
     /// Checks a whole decision, then applies it.
+    ///
+    /// This is the single place where a policy's contract violation ends the
+    /// operation: the check runs before anything changes.
     pub(super) fn apply_decision(
         &mut self,
         trigger: TerminationEvent,
         decision: TerminationDecision<C::Reason>,
     ) {
-        let TerminationDecision {
-            action,
-            stop,
-            reset_presentation,
-        } = decision;
-        let plan = self.check_action(action, trigger);
-        let install = stop.filter(|&code| match self.check_stop(code) {
-            Ok(new) => new,
-            Err(error) => {
-                panic!("{VIOLATION}: STOP request with code {code} on {trigger:?}: {error}")
-            }
-        });
-        if let Some(presentation) = reset_presentation
-            && self.committed.is_none()
+        let plan = match self.check_decision(trigger, decision) {
+            Ok(plan) => plan,
+            Err(violation) => panic!("{}", Report::from_error(violation)),
+        };
+        if let Some(presentation) = plan.reset_presentation
+            && !self.is_result_committed()
         {
             self.reset_presentation = presentation;
         }
-        match plan {
+        match plan.action {
             Plan::Nothing => {}
-            Plan::Destroy(applied) => self.destroy_buffer(Some(applied)),
+            Plan::Destroy(applied) => self.destroy_buffer(Destruction::Policy(applied)),
             Plan::Restrict {
                 acceptance,
                 delivery,
@@ -324,48 +391,72 @@ where
                 self.notify_flow(ReceiveFlowEvent::BoundaryChanged);
             }
         }
-        if let Some(code) = install {
+        if let Some(code) = plan.install_stop {
             self.install_stop(code);
         }
+    }
+
+    /// Checks a whole decision against the
+    /// [policy contract](self#contract) and the current state.
+    fn check_decision(
+        &self,
+        trigger: TerminationEvent,
+        decision: TerminationDecision<C::Reason>,
+    ) -> Result<DecisionPlan<C::Reason>, PolicyViolation> {
+        let TerminationDecision {
+            action,
+            stop,
+            reset_presentation,
+        } = decision;
+        let action = self.check_action(action, trigger)?;
+        let install_stop = match stop {
+            Some(code) => self
+                .check_stop(code)
+                .context(policy_violation::StopSnafu { code, trigger })?
+                .then_some(code),
+            None => None,
+        };
+        Ok(DecisionPlan {
+            action,
+            install_stop,
+            reset_presentation,
+        })
     }
 
     fn check_action(
         &self,
         action: BoundaryAction<C::Reason>,
         trigger: TerminationEvent,
-    ) -> Plan<C::Reason> {
-        let ended = self.destroyed || self.committed.is_some() || self.failure.is_some();
+    ) -> Result<Plan<C::Reason>, PolicyViolation> {
+        let ended = self.is_destroyed() || self.is_result_committed();
         match action {
-            BoundaryAction::Keep => Plan::Nothing,
+            BoundaryAction::Keep => Ok(Plan::Nothing),
             BoundaryAction::Destroy { reason } => {
-                if self.destroyed {
-                    return Plan::Nothing;
+                if self.is_destroyed() {
+                    return Ok(Plan::Nothing);
                 }
                 if !ended {
-                    self.check_basis("destroys", trigger);
-                    assert!(
+                    self.check_basis("destroys", trigger)?;
+                    ensure!(
                         self.local_cancellation() || !self.reliable_prefix_pending(),
-                        "{VIOLATION}: destroys the receive buffer on {trigger:?} while the reliable prefix is undelivered"
+                        policy_violation::DestroysReliablePrefixSnafu { trigger }
                     );
                 }
-                Plan::Destroy(Applied { reason, trigger })
+                Ok(Plan::Destroy(Applied { reason, trigger }))
             }
             BoundaryAction::Restrict {
                 acceptance,
                 delivery,
                 reason,
             } => {
-                let acceptance = self.check_update(&self.acceptance, acceptance, "acceptance");
-                let delivery = self.check_update(&self.delivery, delivery, "delivery");
+                let acceptance = self.check_update(&self.acceptance, acceptance, "acceptance")?;
+                let delivery = self.check_update(&self.delivery, delivery, "delivery")?;
                 if acceptance.is_none() && delivery.is_none() {
-                    return Plan::Nothing;
+                    return Ok(Plan::Nothing);
                 }
-                assert!(
-                    !ended,
-                    "{VIOLATION}: restricts the receive buffer on {trigger:?} after delivery ended"
-                );
-                self.check_basis("restricts", trigger);
-                self.check_reliable_prefix(acceptance, delivery, trigger);
+                ensure!(!ended, policy_violation::RestrictsAfterEndSnafu { trigger });
+                self.check_basis("restricts", trigger)?;
+                self.check_reliable_prefix(acceptance, delivery, trigger)?;
                 let fixed = |limit| Boundary::Fixed {
                     limit,
                     applied: Applied {
@@ -373,10 +464,10 @@ where
                         trigger,
                     },
                 };
-                Plan::Restrict {
+                Ok(Plan::Restrict {
                     acceptance: acceptance.map(fixed),
                     delivery: delivery.map(fixed),
-                }
+                })
             }
         }
     }
@@ -386,34 +477,47 @@ where
         &self,
         current: &Boundary<C::Reason>,
         update: BoundaryUpdate,
-        name: &str,
-    ) -> Option<VarInt> {
+        name: &'static str,
+    ) -> Result<Option<VarInt>, PolicyViolation> {
         let BoundaryUpdate::Fix(limit) = update else {
-            return None;
+            return Ok(None);
         };
         if let Some(final_size) = self.parts.final_size() {
-            assert!(
+            ensure!(
                 limit <= final_size,
-                "{VIOLATION}: fixes the {name} limit at {limit}, beyond the final size {final_size}"
+                policy_violation::BeyondFinalSizeSnafu {
+                    name,
+                    limit,
+                    final_size,
+                }
             );
         }
         match current {
-            Boundary::Following => Some(limit),
+            Boundary::Following => Ok(Some(limit)),
             Boundary::Fixed { limit: fixed, .. } => {
-                assert!(
+                ensure!(
                     limit <= *fixed,
-                    "{VIOLATION}: raises the fixed {name} limit from {fixed} to {limit}"
+                    policy_violation::RaisesFixedLimitSnafu {
+                        name,
+                        fixed: *fixed,
+                        limit,
+                    }
                 );
-                (limit < *fixed).then_some(limit)
+                Ok((limit < *fixed).then_some(limit))
             }
         }
     }
 
-    fn check_basis(&self, what: &str, trigger: TerminationEvent) {
-        assert!(
+    fn check_basis(
+        &self,
+        what: &'static str,
+        trigger: TerminationEvent,
+    ) -> Result<(), PolicyViolation> {
+        ensure!(
             self.reset.is_some() || self.local_cancellation(),
-            "{VIOLATION}: {what} the receive buffer on {trigger:?} without a reset, a sent STOP request or a dropped reader"
+            policy_violation::NoBasisSnafu { what, trigger }
         );
+        Ok(())
     }
 
     fn check_reliable_prefix(
@@ -421,31 +525,40 @@ where
         acceptance: Option<VarInt>,
         delivery: Option<VarInt>,
         trigger: TerminationEvent,
-    ) {
+    ) -> Result<(), PolicyViolation> {
         let Some(reset) = self.reset else {
-            return;
+            return Ok(());
         };
         if self.local_cancellation() || reset.reliable_size == VarInt::ZERO {
-            return;
+            return Ok(());
         }
-        let reliable = reset.reliable_size;
+        let reliable_size = reset.reliable_size;
         if let Some(limit) = delivery {
-            assert!(
-                limit >= reliable || self.parts.delivered_end() >= reliable,
-                "{VIOLATION}: fixes the delivery limit at {limit} on {trigger:?}, inside the undelivered reliable prefix {reliable}"
+            ensure!(
+                limit >= reliable_size || self.parts.delivered_end() >= reliable_size,
+                policy_violation::DeliveryInsideReliablePrefixSnafu {
+                    limit,
+                    trigger,
+                    reliable_size,
+                }
             );
         }
         if let Some(limit) = acceptance {
-            assert!(
-                limit >= reliable || self.parts.is_received(limit..reliable),
-                "{VIOLATION}: fixes the acceptance limit at {limit} on {trigger:?}, inside the unreceived reliable prefix {reliable}"
+            ensure!(
+                limit >= reliable_size || self.parts.is_received(limit..reliable_size),
+                policy_violation::AcceptanceInsideReliablePrefixSnafu {
+                    limit,
+                    trigger,
+                    reliable_size,
+                }
             );
         }
+        Ok(())
     }
 
     /// Whether a local cancellation allows giving up a reliable prefix.
     fn local_cancellation(&self) -> bool {
-        self.stop_sent() || self.reader_dropped
+        self.stop_sent() || self.is_reader_dropped()
     }
 
     fn reliable_prefix_pending(&self) -> bool {

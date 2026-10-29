@@ -19,17 +19,40 @@ use std::collections::BTreeMap;
 /// empty and filters old duplicates), the accounted end, the final size, and
 /// the end of the received prefix `[0, n)`, so that completeness can still be
 /// answered after data has been released.
-///
-/// Status: basic implementation; the design has not chosen a default receive
-/// buffer.
 #[derive(Debug, Default)]
 pub struct FragmentedReceiveBuffer {
-    fragments: BTreeMap<VarInt, Bytes>,
+    storage: Storage,
     delivered: VarInt,
     received_prefix: VarInt,
     accounted_end: VarInt,
     final_size: Option<VarInt>,
-    destroyed: bool,
+}
+
+/// Whether the buffer still holds payload.
+///
+/// ```text
+///            destroy
+///   Holding ─────────▶ Destroyed
+/// ```
+#[derive(Debug)]
+enum Storage {
+    /// Payload is kept, as fragments keyed by their offset.
+    Holding(BTreeMap<VarInt, Fragment>),
+    /// All payload was released and new payload is not kept.
+    Destroyed,
+}
+
+impl Default for Storage {
+    fn default() -> Self {
+        Self::Holding(BTreeMap::new())
+    }
+}
+
+/// The bytes of `[key, end)`.
+#[derive(Debug)]
+struct Fragment {
+    end: VarInt,
+    bytes: Bytes,
 }
 
 impl FragmentedReceiveBuffer {
@@ -40,53 +63,24 @@ impl FragmentedReceiveBuffer {
 
     /// The number of payload bytes currently held.
     pub fn held_len(&self) -> usize {
-        self.fragments.values().map(Bytes::len).sum()
+        match &self.storage {
+            Storage::Holding(fragments) => fragments.values().map(|f| f.bytes.len()).sum(),
+            Storage::Destroyed => 0,
+        }
     }
 
     /// Whether the buffer has been destroyed.
     pub fn is_destroyed(&self) -> bool {
-        self.destroyed
-    }
-
-    fn fragment_end(key: VarInt, bytes: &Bytes) -> VarInt {
-        offset_add(key, bytes.len()).expect("fragment ends are variable-length integers")
-    }
-
-    /// Stores the parts of `payload`, which starts at `offset`, that no
-    /// fragment covers and that have not been delivered.
-    fn insert(&mut self, offset: VarInt, payload: Bytes) {
-        let Some(end) = offset_add(offset, payload.len()) else {
-            return;
-        };
-        let mut start = offset.max(self.delivered);
-        if let Some((&key, bytes)) = self.fragments.range(..start).next_back() {
-            start = start.max(Self::fragment_end(key, bytes));
-        }
-        if start >= end {
-            return;
-        }
-        let mut pieces = Vec::new();
-        let mut cursor = start;
-        for (&key, bytes) in self.fragments.range(start..end) {
-            if key > cursor {
-                pieces.push((cursor, key));
-            }
-            cursor = cursor.max(Self::fragment_end(key, bytes));
-        }
-        if cursor < end {
-            pieces.push((cursor, end));
-        }
-        for (from, to) in pieces {
-            let piece = payload.slice(span(offset, from)..span(offset, to));
-            self.fragments.insert(from, piece);
-        }
+        matches!(self.storage, Storage::Destroyed)
     }
 
     /// The end of the fragment covering `at`, if one does.
     fn covering_end(&self, at: VarInt) -> Option<VarInt> {
-        let (&key, bytes) = self.fragments.range(..=at).next_back()?;
-        let end = Self::fragment_end(key, bytes);
-        (end > at).then_some(end)
+        let Storage::Holding(fragments) = &self.storage else {
+            return None;
+        };
+        let (_, fragment) = fragments.range(..=at).next_back()?;
+        (fragment.end > at).then_some(fragment.end)
     }
 
     fn advance_prefix(&mut self) {
@@ -98,19 +92,64 @@ impl FragmentedReceiveBuffer {
     }
 }
 
+/// Stores the parts of `payload`, which covers `[offset, end)`, that no
+/// fragment covers and that lie at or above `delivered`.
+fn insert(
+    fragments: &mut BTreeMap<VarInt, Fragment>,
+    delivered: VarInt,
+    offset: VarInt,
+    end: VarInt,
+    payload: &Bytes,
+) {
+    let mut start = offset.max(delivered);
+    if let Some((_, fragment)) = fragments.range(..start).next_back() {
+        start = start.max(fragment.end);
+    }
+    if start >= end {
+        return;
+    }
+    let mut pieces = Vec::new();
+    let mut cursor = start;
+    for (&key, fragment) in fragments.range(start..end) {
+        if key > cursor {
+            pieces.push((cursor, key));
+        }
+        cursor = cursor.max(fragment.end);
+    }
+    if cursor < end {
+        pieces.push((cursor, end));
+    }
+    for (from, to) in pieces {
+        let bytes = payload.slice(span(offset, from)..span(offset, to));
+        fragments.insert(from, Fragment { end: to, bytes });
+    }
+}
+
+/// The offset `count` bytes into the fragment `[start, end)`, for a `count`
+/// below the fragment's length.
+fn offset_into(start: VarInt, end: VarInt, count: usize) -> VarInt {
+    // invariant: `count` is below the fragment's length, so the offset lies
+    // below `end`, a `VarInt`; the fallback is never taken.
+    offset_add(start, count).map_or(end, |offset| offset.min(end))
+}
+
 impl ReceiveBuffer for FragmentedReceiveBuffer {
     type Chunk = Bytes;
 
     fn receive_data(&mut self, input: StreamDataInput) {
+        let payload_end = input.payload_end();
         let (offset, end, fin, payload) = input.into_parts();
         self.accounted_end = self.accounted_end.max(end);
         if fin && self.final_size.is_none() {
             self.final_size = Some(end);
         }
-        if self.destroyed || payload.is_empty() {
+        let Storage::Holding(fragments) = &mut self.storage else {
+            return;
+        };
+        if payload.is_empty() {
             return;
         }
-        self.insert(offset, payload);
+        insert(fragments, self.delivered, offset, payload_end, &payload);
         self.advance_prefix();
     }
 
@@ -145,69 +184,80 @@ impl ReceiveBuffer for FragmentedReceiveBuffer {
     }
 
     fn read_chunk(&mut self, limit: VarInt) -> Option<Bytes> {
-        let mut entry = self.fragments.first_entry()?;
+        let Storage::Holding(fragments) = &mut self.storage else {
+            return None;
+        };
+        let mut entry = fragments.first_entry()?;
         if *entry.key() != self.delivered || self.delivered >= limit {
             return None;
         }
         let room = span(self.delivered, limit);
-        let chunk = if entry.get().len() > room {
-            let chunk = entry.get_mut().split_to(room);
+        if entry.get().bytes.len() > room {
+            // The fragment is longer than `room`, so `room` did not saturate
+            // and the rest starts exactly at `limit`.
+            let chunk = entry.get_mut().bytes.split_to(room);
             let rest = entry.remove();
-            self.fragments.insert(
-                offset_add(self.delivered, room).expect("below the fragment end"),
-                rest,
-            );
-            chunk
+            fragments.insert(limit, rest);
+            self.delivered = limit;
+            Some(chunk)
         } else {
-            entry.remove()
-        };
-        self.delivered = offset_add(self.delivered, chunk.len()).expect("below the fragment end");
-        Some(chunk)
+            let fragment = entry.remove();
+            self.delivered = fragment.end;
+            Some(fragment.bytes)
+        }
     }
 
     fn read_into<T: BufMut + ?Sized>(&mut self, limit: VarInt, target: &mut T) -> usize {
+        let Storage::Holding(fragments) = &mut self.storage else {
+            return 0;
+        };
         let mut copied = 0;
         while target.remaining_mut() > 0 && self.delivered < limit {
-            let Some(mut entry) = self.fragments.first_entry() else {
+            let Some(mut entry) = fragments.first_entry() else {
                 break;
             };
             if *entry.key() != self.delivered {
                 break;
             }
-            let count = entry
-                .get()
+            let fragment = entry.get_mut();
+            let count = fragment
+                .bytes
                 .len()
                 .min(target.remaining_mut())
                 .min(span(self.delivered, limit));
-            target.put_slice(&entry.get()[..count]);
-            if count == entry.get().len() {
-                entry.remove();
+            target.put_slice(&fragment.bytes[..count]);
+            if count == fragment.bytes.len() {
+                self.delivered = entry.remove().end;
             } else {
-                let rest = entry.get_mut().split_off(count);
+                let start = offset_into(self.delivered, fragment.end, count);
+                let rest = Fragment {
+                    end: fragment.end,
+                    bytes: fragment.bytes.split_off(count),
+                };
                 entry.remove();
-                self.fragments.insert(
-                    offset_add(self.delivered, count).expect("below the fragment end"),
-                    rest,
-                );
+                fragments.insert(start, rest);
+                self.delivered = start;
             }
-            self.delivered = offset_add(self.delivered, count).expect("below the fragment end");
             copied += count;
         }
         copied
     }
 
     fn release_from(&mut self, end: VarInt) {
+        let Storage::Holding(fragments) = &mut self.storage else {
+            return;
+        };
         let end = end.max(self.delivered);
-        drop(self.fragments.split_off(&end));
-        if let Some((&key, bytes)) = self.fragments.range_mut(..end).next_back()
-            && Self::fragment_end(key, bytes) > end
+        drop(fragments.split_off(&end));
+        if let Some((&key, fragment)) = fragments.range_mut(..end).next_back()
+            && fragment.end > end
         {
-            bytes.truncate(span(key, end));
+            fragment.bytes.truncate(span(key, end));
+            fragment.end = end;
         }
     }
 
     fn destroy(&mut self) {
-        self.fragments.clear();
-        self.destroyed = true;
+        self.storage = Storage::Destroyed;
     }
 }

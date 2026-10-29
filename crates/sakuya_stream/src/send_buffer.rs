@@ -1,6 +1,6 @@
 //! The send buffer contract ([`SendBuffer`]), the per-stream visibility
-//! settlement it uses ([`VisibilitySettlement`]) and a basic implementation
-//! ([`BasicSendBuffer`]).
+//! settlement it uses ([`visibility::VisibilitySettlement`]) and an
+//! implementation keyed by stream offset ([`offset_map::OffsetMapSendBuffer`]).
 //!
 //! A send buffer stores the data a stream sender has accepted, owns the
 //! connection credit reservations that cover it, and maintains the written
@@ -9,25 +9,19 @@
 //! acknowledged data is released.
 //!
 //! The buffer is append-only: callers do not choose offsets. Appending moves
-//! the data and its reservation into the buffer in one step and cannot fail;
-//! anything that can fail is checked before the stream sender consumes its
-//! caller's input.
-//!
-//! Status: append-only storage and the ownership of `written_end` and of the
-//! data-to-reservation correspondence are confirmed (`send-side.md`,
-//! "只追加与状态归属（已确认）"). The method set follows the tentative
-//! "保留与暴露接口（暂定）"; selection and feedback keep a minimal shape until
-//! the send design settles them.
-use crate::connection_send_credit::{ConnectionCreditReservation, ConnectionSendFlowController};
+//! the data and its reservation into the buffer in one step, as one
+//! [`covered_bytes::CoveredBytes`] value whose constructor has already
+//! checked that the reservation covers exactly the data.
+use crate::connection_send_credit::ConnectionSendFlowController;
 use bytes::Bytes;
+use covered_bytes::CoveredBytes;
 use sakuya_wire::var_int::VarInt;
 use snafu::Snafu;
+use visibility::FixFinalSizeError;
 
-mod basic;
-mod visibility;
-
-pub use basic::BasicSendBuffer;
-pub use visibility::VisibilitySettlement;
+pub mod covered_bytes;
+pub mod offset_map;
+pub mod visibility;
 
 /// Storage of the data a stream sender has accepted, together with the
 /// connection credit reservations that cover it.
@@ -36,10 +30,9 @@ pub use visibility::VisibilitySettlement;
 /// offsets keep their contents and splitting never duplicates the ownership
 /// of a reservation.
 ///
-/// Status: tentative interface (`send-side.md`, "保留与暴露接口（暂定）").
 /// [`select`](Self::select), [`on_acknowledged`](Self::on_acknowledged) and
-/// [`on_lost`](Self::on_lost) only fix a shape until the send design
-/// specifies selection and feedback.
+/// [`on_lost`](Self::on_lost) have no callable inputs yet. This interface is
+/// provisional.
 pub trait SendBuffer {
     /// The written end: the cumulative end of all appended data.
     fn written_end(&self) -> VarInt;
@@ -48,25 +41,23 @@ pub trait SendBuffer {
     /// already be visible to the peer, or can no longer be prevented from
     /// becoming visible.
     ///
-    /// Status: an addition to the tentative interface; the stream sender needs
-    /// it to bound the final size of a reset, and the buffer is the proposed
-    /// owner of the per-stream visibility settlement
-    /// (`send-accounting.md`, "每流可见性结算职责（建议待确认）").
+    /// The stream sender uses it to bound the final size of a reset.
     fn exposure_end(&self) -> VarInt;
 
-    /// Appends `bytes` at the written end together with the reservation that
-    /// covers them, and advances the written end by their length.
+    /// Appends `data` at the written end together with the reservation that
+    /// covers it, and advances the written end by its length.
     ///
     /// The whole input is taken; there is no partial acceptance and no
     /// second admission. No credit is committed here.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Implementations panic if the reservation's amount differs from the
-    /// length of `bytes`, or if a reset was applied before.
-    fn append(&mut self, bytes: Bytes, connection_credit_reservation: ConnectionCreditReservation);
+    /// [`AppendError`] if the buffer takes no more data or the written end
+    /// would pass [`VarInt::MAX`]; the error hands `data` back and nothing
+    /// changes.
+    fn append(&mut self, data: CoveredBytes) -> Result<(), AppendError>;
 
-    /// Applies a reset target that the stream sender has already validated.
+    /// Applies a reset target.
     ///
     /// Closes future appends; keeps the data below
     /// [`ResetRetention::reliable_size`] that still has to be delivered and
@@ -76,7 +67,13 @@ pub trait SendBuffer {
     /// is not returned and the written end does not move. A later call may
     /// lower the reliable size with the same final size; repeating a target
     /// releases nothing twice.
-    fn apply_reset(&mut self, retention: ResetRetention);
+    ///
+    /// # Errors
+    ///
+    /// [`ApplyResetError`] if the reliable size exceeds the final size, the
+    /// final size lies beyond the written end or below the exposure end, or
+    /// it differs from a final size established before; nothing changes then.
+    fn apply_reset(&mut self, retention: ResetRetention) -> Result<(), ApplyResetError>;
 
     /// Settles the first exposure of usage up to `usage_end` at an
     /// irrevocable hand-over boundary: commits the coverage between the
@@ -88,14 +85,11 @@ pub trait SendBuffer {
     /// newly committed amount, `max(E, usage_end) − E`; usage at or below the
     /// exposure end commits nothing again.
     ///
-    /// Status: capability placeholder (`send-side.md`); where the send
-    /// mechanism calls it is open. The settlement follows the candidate steps
-    /// of `send-accounting.md`, "统一 STREAM、FIN 和 RESET 的额度影响（候选）".
-    ///
     /// # Errors
     ///
     /// [`ExposeUsageError`] if the exposure is inconsistent with the written
-    /// end or an established final size; nothing changes then.
+    /// end, an established final size or the stored coverage; nothing
+    /// changes then.
     fn expose_usage_through(
         &mut self,
         usage_end: VarInt,
@@ -105,27 +99,99 @@ pub trait SendBuffer {
 
     /// Selects data to hand to the link layer within `constraints`.
     ///
-    /// Status: pending the send design. Selection must not delete data that
-    /// reliable delivery still needs.
+    /// Selection must not delete data that reliable delivery still needs.
+    /// [`SelectionConstraints`] has no values yet, so this method cannot be
+    /// called. This interface is provisional.
     fn select(&mut self, constraints: SelectionConstraints) -> Selection;
 
     /// Applies an acknowledgement of the data a transmission carried.
     ///
-    /// Status: pending the send design. Acknowledged data no longer has to be
-    /// retained; the written end does not move.
+    /// Acknowledged data no longer has to be retained; the written end does
+    /// not move. [`TransmissionReceipt`] has no values yet, so this method
+    /// cannot be called. This interface is provisional.
     fn on_acknowledged(&mut self, receipt: TransmissionReceipt);
 
     /// Applies the loss of the data a transmission carried.
     ///
-    /// Status: pending the send design. Lost, unacknowledged data becomes a
-    /// candidate again; committed credit is not returned and is not committed
-    /// again.
+    /// Lost, unacknowledged data becomes eligible for sending again;
+    /// committed credit is not returned and is not committed again.
+    /// [`TransmissionReceipt`] has no values yet, so this method cannot be
+    /// called. This interface is provisional.
     fn on_lost(&mut self, receipt: TransmissionReceipt);
 }
 
+/// Failures of [`SendBuffer::append`]; each hands the data back through
+/// [`into_data`](Self::into_data).
+#[derive(Debug, Snafu)]
+#[snafu(module(append_error), visibility(pub(crate)))]
+pub enum AppendError {
+    /// A reset was applied; the buffer takes no more data.
+    #[snafu(display("a send buffer takes no data after a reset"))]
+    AfterReset {
+        /// The rejected data.
+        data: CoveredBytes,
+    },
+    /// A FIN or reset exposed the final size; the buffer takes no more data.
+    #[snafu(display("a send buffer takes no data after the final size {final_size} was exposed"))]
+    AfterFinalSize {
+        /// The exposed final size.
+        final_size: VarInt,
+        /// The rejected data.
+        data: CoveredBytes,
+    },
+    /// The written end would pass [`VarInt::MAX`].
+    #[snafu(display(
+        "{} bytes at the written end {written_end} would pass the largest stream offset",
+        data.len()
+    ))]
+    WrittenEndOverflow {
+        /// The written end.
+        written_end: VarInt,
+        /// The rejected data.
+        data: CoveredBytes,
+    },
+}
+
+impl AppendError {
+    /// The rejected data, unchanged.
+    pub fn into_data(self) -> CoveredBytes {
+        match self {
+            Self::AfterReset { data }
+            | Self::AfterFinalSize { data, .. }
+            | Self::WrittenEndOverflow { data, .. } => data,
+        }
+    }
+}
+
+/// Failures of [`SendBuffer::apply_reset`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(module(apply_reset_error), visibility(pub(crate)))]
+pub enum ApplyResetError {
+    /// The reliable size exceeds the final size.
+    #[snafu(display("reliable size {reliable_size} exceeds the final size {final_size}"))]
+    ReliableSizeBeyondFinalSize {
+        /// The requested reliable size.
+        reliable_size: VarInt,
+        /// The requested final size.
+        final_size: VarInt,
+    },
+    /// The final size lies beyond the written end.
+    #[snafu(display("final size {final_size} lies beyond the written end {written_end}"))]
+    FinalSizeBeyondWrittenEnd {
+        /// The requested final size.
+        final_size: VarInt,
+        /// The written end.
+        written_end: VarInt,
+    },
+    /// The final size cannot be fixed.
+    #[snafu(display("cannot fix the final size"))]
+    FixFinalSize {
+        /// Why the final size was rejected.
+        source: FixFinalSizeError,
+    },
+}
+
 /// The retention a reset leaves to a send buffer (`ResetRetention`).
-///
-/// Status: tentative (`send-side.md`, "保留与暴露接口（暂定）").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResetRetention {
     /// The final size of the stream; coverage below it is retained.
@@ -187,18 +253,30 @@ pub enum ExposeUsageError {
         /// The rejected final size.
         final_size: VarInt,
     },
+    /// The stored coverage does not reach the usage end.
+    #[snafu(display("usage end {usage_end} lies beyond the coverage ending at {coverage_end}"))]
+    BeyondCoverage {
+        /// The rejected usage end.
+        usage_end: VarInt,
+        /// The end of the stored coverage.
+        coverage_end: VarInt,
+    },
+    /// Coverage to commit was granted by another connection send flow
+    /// controller than the one passed in.
+    #[snafu(display("coverage belongs to another connection send flow controller"))]
+    ForeignReservation,
 }
 
 /// The constraints a send scheduler passes to [`SendBuffer::select`].
 ///
-/// Status: pending the send design. The type has no values yet, so no
-/// selection can be requested.
+/// The type has no values yet, so no selection can be requested. This
+/// interface is provisional.
 #[derive(Debug)]
 pub enum SelectionConstraints {}
 
 /// The result of [`SendBuffer::select`].
 ///
-/// Status: pending the send design.
+/// This interface is provisional.
 #[derive(Debug)]
 pub enum Selection {
     /// Data was selected.
@@ -209,7 +287,7 @@ pub enum Selection {
 
 /// Data selected for transmission and its position in the stream.
 ///
-/// Status: pending the send design.
+/// This interface is provisional.
 #[derive(Debug)]
 pub struct SelectedData {
     /// The stream offset of the first byte.
@@ -221,7 +299,7 @@ pub struct SelectedData {
 /// The record of which data one transmission carried, passed back with
 /// acknowledgement and loss feedback.
 ///
-/// Status: pending the send design. The type has no values yet.
+/// The type has no values yet. This interface is provisional.
 #[derive(Debug)]
 pub enum TransmissionReceipt {}
 

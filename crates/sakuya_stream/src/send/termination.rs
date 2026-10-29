@@ -16,9 +16,15 @@
 //!   error code or reliable size.
 //!
 //! The stream sender commits an automatic action synchronously, in the same
-//! operation that delivered the event. An action that is illegal for the
-//! context the policy was given is a defect of the policy and panics; it is
-//! never clamped and never reported to the application as an error.
+//! operation that delivered the event.
+//!
+//! # Contract
+//!
+//! An action, or a completed final size, that is illegal for the context the
+//! policy was given violates this contract. The stream sender checks every
+//! result before it changes the end state, discards data or releases credit,
+//! and panics on a violation: it is a defect of the policy, never clamped and
+//! never reported to the application as an error.
 //!
 //! Which actions are legal depends on the end state:
 //!
@@ -30,11 +36,8 @@
 //! | Terminal, or connection closed | keep |
 //!
 //! An action equal to the current state counts as keeping it.
-//!
-//! Status: the two entries, synchronous commitment and panics on violations
-//! are confirmed (`send-side.md`, "流发送侧终结策略（已确认）"); the event set is
-//! a candidate.
 use super::{EndSource, ResetTarget, SendEndState, SendTerminalState};
+use crate::application_error_code::ApplicationErrorCode;
 use core::convert::Infallible;
 use core::ops::Range;
 use sakuya_wire::stream_id::StreamId;
@@ -57,9 +60,7 @@ pub trait SendTerminationPolicy {
     /// The completion entry: chooses the final size of an application reset
     /// within `request.minimum..=request.maximum`.
     ///
-    /// # Panics
-    ///
-    /// The stream sender panics if the returned size lies outside the range.
+    /// A size outside the range violates the [contract](self#contract).
     fn complete_final_size(
         &mut self,
         request: FinalSizeRequest,
@@ -92,17 +93,14 @@ pub enum TerminationAction<R> {
 /// Facts the automatic entry observes (`SendTerminationEvent`).
 ///
 /// Each event follows the change it describes; the context passed along
-/// shows the state after it.
-///
-/// Status: candidate. Acknowledgement and loss facts follow with the
-/// feedback design.
+/// shows the state after it. The set of events is provisional and may grow.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SendTerminationEvent {
     /// A `STOP_SENDING` frame arrived.
     StopSendingReceived {
         /// The error code it carried.
-        error_code: VarInt,
+        error_code: ApplicationErrorCode,
     },
     /// Data entered the send buffer.
     DataAppended {
@@ -150,7 +148,7 @@ pub struct SendTerminationContext {
     /// The end state, with the current target and its source.
     pub end_state: SendEndState,
     /// The error code of the first `STOP_SENDING` received, if any.
-    pub stop_sending: Option<VarInt>,
+    pub stop_sending: Option<ApplicationErrorCode>,
     /// The write limit end, if set.
     pub write_limit_end: Option<VarInt>,
     /// Whether `RESET_STREAM_AT` was negotiated.
@@ -180,7 +178,7 @@ impl SendTerminationContext {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FinalSizeRequest {
     /// The requested error code.
-    pub error_code: VarInt,
+    pub error_code: ApplicationErrorCode,
     /// The requested reliable size; zero for a plain reset.
     pub reliable_size: VarInt,
     /// The smallest legal final size: `max(exposure_end, reliable_size)`.
@@ -189,7 +187,8 @@ pub struct FinalSizeRequest {
     pub maximum: VarInt,
 }
 
-/// The default termination policy.
+/// A termination policy that answers `STOP_SENDING` and an abandoned stream
+/// writer with a reset.
 ///
 /// - Chooses the smallest legal final size.
 /// - Answers `STOP_SENDING` at once with a reset carrying its error code and
@@ -199,23 +198,29 @@ pub struct FinalSizeRequest {
 ///   abandoned while input is open; an abandoned writer of a closed or reset
 ///   stream changes nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DefaultSendTerminationPolicy {
-    abandon_code: VarInt,
+pub struct ResetOnAbandonTermination {
+    abandon_code: ApplicationErrorCode,
 }
 
-impl DefaultSendTerminationPolicy {
+/// The termination policy of the default composition.
+pub type DefaultSendTerminationPolicy = ResetOnAbandonTermination;
+
+impl ResetOnAbandonTermination {
     /// Creates the policy; `abandon_code` is the application error code of
     /// the reset that follows an abandoned stream writer.
-    pub fn new(abandon_code: VarInt) -> Self {
+    pub fn new(abandon_code: ApplicationErrorCode) -> Self {
         Self { abandon_code }
     }
 
     /// The error code used when the stream writer is abandoned.
-    pub fn abandon_code(&self) -> VarInt {
+    pub fn abandon_code(&self) -> ApplicationErrorCode {
         self.abandon_code
     }
 
-    fn reset_without_prefix(error_code: VarInt, context: &SendTerminationContext) -> ResetTarget {
+    fn reset_without_prefix(
+        error_code: ApplicationErrorCode,
+        context: &SendTerminationContext,
+    ) -> ResetTarget {
         ResetTarget {
             error_code,
             reliable_size: VarInt::ZERO,
@@ -224,7 +229,7 @@ impl DefaultSendTerminationPolicy {
     }
 }
 
-impl SendTerminationPolicy for DefaultSendTerminationPolicy {
+impl SendTerminationPolicy for ResetOnAbandonTermination {
     type WriteLimitReason = Infallible;
 
     fn on_termination_event(

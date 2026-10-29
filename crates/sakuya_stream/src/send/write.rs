@@ -4,7 +4,9 @@
 //! takes the prefix of the caller's [`Buf`] that it can accept and leaves the
 //! rest with the caller. In order, an attempt
 //!
-//! 1. checks the connection, the end state, empty input and the write limit;
+//! 1. checks the connection, the end state, empty input, the write limit and
+//!    the room left below the largest stream offset, and caps the attempt by
+//!    them and by the peer's stream limit;
 //! 2. asks the flow-control policy for an admission guard at the current
 //!    written end;
 //! 3. reserves at most the granted amount of connection credit;
@@ -19,15 +21,14 @@
 //! successful write hands the data and its reliable delivery to the
 //! transport; it does not mean the data was sent or acknowledged.
 //!
-//! Status: the attempt's steps, the report and the errors are confirmed
-//! (`send-side.md`, "一次写入的流程（已确认）", "写入报告与错误（已确认）"). The
-//! asynchronous interface (`AsyncBufWrite`) is tentative and not provided
-//! here; [`WriteOutcome::Wait`] is where it will register for wake-ups.
+//! No asynchronous interface is provided here; [`WriteOutcome::Wait`] tells
+//! the caller to retry once the cause may have changed.
 use super::{SendEndState, StreamSender, WriteLimit};
 use crate::connection_send_credit::ConnectionSendFlowController;
-use crate::send::flow_control::{SendFlowControlPolicy, WriteAttempt};
+use crate::send::flow_control::{AdmissionGuard, SendFlowControlPolicy, WriteAttempt};
 use crate::send::termination::{SendTerminationEvent, SendTerminationPolicy};
 use crate::send_buffer::SendBuffer;
+use crate::send_buffer::covered_bytes::CoveredBytes;
 use bytes::Buf;
 use core::fmt;
 use core::ops::Deref;
@@ -95,6 +96,10 @@ pub enum WriteError<R> {
         /// The reason the termination policy gave.
         reason: SharedWriteLimitReason<R>,
     },
+    /// The written end has reached [`VarInt::MAX`]; no stream can carry more
+    /// data, and growth of the peer's limits does not change that.
+    #[snafu(display("the stream has reached the largest stream offset"))]
+    StreamSizeExhausted,
 }
 
 /// A shared handle to a write limit reason.
@@ -158,19 +163,21 @@ where
     ///
     /// Checked in this order: [`WriteError::ConnectionClosed`],
     /// [`WriteError::Reset`], [`WriteError::Closed`], and for non-empty input
-    /// [`WriteError::WriteLimitReached`].
+    /// [`WriteError::WriteLimitReached`] and
+    /// [`WriteError::StreamSizeExhausted`].
     ///
     /// # Panics
     ///
-    /// If the flow-control policy grants beyond the attempt's ceiling or for
-    /// another offset.
+    /// If the flow-control policy returns a guard that it did not build from
+    /// this attempt, which violates the
+    /// [policy contract](SendFlowControlPolicy#contract).
     pub fn write<S: Buf + ?Sized>(
         &mut self,
         source: &mut S,
         connection: &mut ConnectionSendFlowController,
     ) -> Result<WriteOutcome, WriteError<C::WriteLimitReason>> {
         ensure!(!self.connection_closed, write_error::ConnectionClosedSnafu);
-        match self.end_state {
+        match self.end_state() {
             SendEndState::Reset { .. } => return write_error::ResetSnafu.fail(),
             SendEndState::Closed { .. } => return write_error::ClosedSnafu.fail(),
             SendEndState::Open => {}
@@ -182,7 +189,7 @@ where
         }
 
         let offset = self.written_end();
-        let write_limit_remaining = match &self.write_limit {
+        let write_limit_remaining = match self.write_limit() {
             Some(WriteLimit { end, reason }) => {
                 let remaining = end.saturating_sub(offset);
                 ensure!(
@@ -196,11 +203,17 @@ where
             }
             None => None,
         };
+        let size_remaining = VarInt::MAX.saturating_sub(offset);
+        ensure!(
+            size_remaining > VarInt::ZERO,
+            write_error::StreamSizeExhaustedSnafu
+        );
         let requested = VarInt::try_from(source.remaining()).unwrap_or(VarInt::MAX);
         let stream_available = self.peer_stream_limit.saturating_sub(offset);
         let ceiling = write_limit_remaining
             .map_or(requested, |remaining| remaining.min(requested))
-            .min(stream_available);
+            .min(stream_available)
+            .min(size_remaining);
         let attempt = WriteAttempt {
             offset,
             requested,
@@ -218,26 +231,35 @@ where
                 WriteWait::Admission
             }));
         };
-        assert_eq!(
-            guard.offset(),
-            offset,
-            "flow-control policy granted admission for another offset"
-        );
-        assert!(
-            guard.granted() > VarInt::ZERO && guard.granted() <= ceiling,
-            "flow-control policy granted {} bytes outside 1..={ceiling}",
-            guard.granted()
-        );
+        if let Err(violation) = check_grant(&guard, &attempt) {
+            panic!("{violation}");
+        }
 
         let Some(reservation) = connection.reserve_up_to(self.stream_id, guard.granted()) else {
             self.composition.on_admission_abandoned(guard, &context);
             return Ok(WriteOutcome::Wait(WriteWait::ConnectionCredit));
         };
         let used = reservation.amount();
-        let length =
-            usize::try_from(used.get()).expect("the reserved amount fits the input length");
+        // invariant: `used <= granted <= ceiling <= requested`, and `requested`
+        // is the input length unless that exceeds `VarInt::MAX`, so `used`
+        // bytes of input exist and their count is a `usize`.
+        let length = usize::try_from(used.get())
+            .map_or(source.remaining(), |length| length.min(source.remaining()));
         let bytes = source.copy_to_bytes(length);
-        self.composition.append(bytes, reservation);
+        let data = match CoveredBytes::new(bytes, reservation) {
+            Ok(data) => data,
+            // invariant: `length` equals the reservation's amount `used`, a
+            // `VarInt`, by the bound above.
+            Err(error) => unreachable!("consumed input does not match its reservation: {error}"),
+        };
+        match self.composition.append(data) {
+            Ok(()) => {}
+            // invariant: input is open, so no reset was applied and no final
+            // size was exposed; the ceiling keeps the written end within
+            // `VarInt::MAX`. A send buffer that still refuses the data breaks
+            // the `SendBuffer` contract.
+            Err(error) => unreachable!("an open send buffer refused admitted data: {error}"),
+        }
         let end = self.written_end();
         let context = self.flow_context();
         self.composition.on_admission_used(guard, used, &context);
@@ -260,9 +282,47 @@ where
     pub fn flush(&self) -> Result<(), FlushError> {
         ensure!(!self.connection_closed, flush_error::ConnectionClosedSnafu);
         ensure!(
-            !matches!(self.end_state, SendEndState::Reset { .. }),
+            !matches!(self.end_state(), SendEndState::Reset { .. }),
             flush_error::ResetSnafu
         );
         Ok(())
     }
+}
+
+/// A guard that the flow-control policy did not build from the attempt it
+/// was asked about.
+#[derive(Debug, Snafu)]
+#[snafu(module(grant_violation))]
+enum GrantViolation {
+    /// The guard names another offset.
+    #[snafu(display(
+        "flow-control policy granted admission for offset {granted_offset}, not {offset}"
+    ))]
+    Offset {
+        offset: VarInt,
+        granted_offset: VarInt,
+    },
+    /// The guard exceeds the attempt's ceiling.
+    #[snafu(display("flow-control policy granted {granted} bytes outside 1..={ceiling}"))]
+    Ceiling { granted: VarInt, ceiling: VarInt },
+}
+
+/// Checks the [policy contract](SendFlowControlPolicy#contract) for a guard
+/// returned for `attempt`.
+fn check_grant(guard: &AdmissionGuard, attempt: &WriteAttempt) -> Result<(), GrantViolation> {
+    ensure!(
+        guard.offset() == attempt.offset,
+        grant_violation::OffsetSnafu {
+            offset: attempt.offset,
+            granted_offset: guard.offset(),
+        }
+    );
+    ensure!(
+        guard.granted() > VarInt::ZERO && guard.granted() <= attempt.ceiling,
+        grant_violation::CeilingSnafu {
+            granted: guard.granted(),
+            ceiling: attempt.ceiling,
+        }
+    );
+    Ok(())
 }

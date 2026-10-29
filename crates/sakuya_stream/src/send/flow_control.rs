@@ -16,20 +16,23 @@
 //! mechanism queries it at a sending opportunity
 //! ([`SendFlowControlPolicy::wants_stream_data_blocked`]). The frame's limit
 //! is always the current peer stream limit.
-//!
-//! Status: the merged policy and the query scheme are confirmed
-//! (`send-side.md`, "合并的流级策略（已确认）" and "流级 BLOCKED 提示意图（已确认）");
-//! the event set is a candidate ("策略事件（候选）").
 use super::{EndSource, SendEndState, SendTerminalState};
 use sakuya_wire::stream_id::StreamId;
 use sakuya_wire::var_int::VarInt;
+use snafu::{Snafu, ensure};
 
 /// The stream send flow-control policy (`SendFlowControlPolicy`).
 ///
 /// The policy chooses how admission and signalling are used; it cannot
-/// change limits or the ledgers of the stream or the connection. The stream
-/// sender validates every grant and panics on one beyond the attempt's
-/// ceiling: that is a defect of the policy, not an error of the write.
+/// change limits or the ledgers of the stream or the connection.
+///
+/// # Contract
+///
+/// A guard returned from [`admit_write`](Self::admit_write) must have been
+/// built from the attempt passed in, so that it grants at most that
+/// attempt's ceiling at that attempt's offset. The stream sender checks this
+/// before it consumes any input and panics on a guard that violates it: that
+/// is a defect of the policy, not an error of the write.
 pub trait SendFlowControlPolicy {
     /// Decides the admission of one write attempt.
     ///
@@ -81,11 +84,22 @@ pub struct AdmissionGuard {
 
 impl AdmissionGuard {
     /// Grants `granted` bytes to `attempt`.
-    pub fn new(attempt: &WriteAttempt, granted: VarInt) -> Self {
-        Self {
+    ///
+    /// # Errors
+    ///
+    /// [`AdmissionGrantError`] unless `0 < granted <= attempt.ceiling`.
+    pub fn new(attempt: &WriteAttempt, granted: VarInt) -> Result<Self, AdmissionGrantError> {
+        ensure!(
+            granted > VarInt::ZERO && granted <= attempt.ceiling,
+            AdmissionGrantSnafu {
+                granted,
+                ceiling: attempt.ceiling,
+            }
+        );
+        Ok(Self {
             offset: attempt.offset,
             granted,
-        }
+        })
     }
 
     /// The offset the attempt appends at.
@@ -97,6 +111,16 @@ impl AdmissionGuard {
     pub fn granted(&self) -> VarInt {
         self.granted
     }
+}
+
+/// [`AdmissionGuard::new`] was asked for a grant outside `1..=ceiling`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("a grant of {granted} bytes lies outside 1..={ceiling}"))]
+pub struct AdmissionGrantError {
+    /// The rejected grant.
+    pub granted: VarInt,
+    /// The attempt's ceiling.
+    pub ceiling: VarInt,
 }
 
 /// One write attempt, as presented to [`SendFlowControlPolicy::admit_write`].
@@ -114,8 +138,9 @@ pub struct WriteAttempt {
     /// A snapshot of the available connection credit.
     pub connection_available: VarInt,
     /// The most a grant may cover: the smallest of `requested`,
-    /// `stream_available` and `write_limit_remaining`. Connection credit is
-    /// not part of it; it bounds the reservation instead.
+    /// `stream_available` and `write_limit_remaining`, and never past
+    /// [`VarInt::MAX`]. Connection credit is not part of it; it bounds the
+    /// reservation instead.
     pub ceiling: VarInt,
 }
 
@@ -154,12 +179,8 @@ pub struct SendFlowContext {
 /// (`StreamCreditEvent`).
 ///
 /// Each describes a change already in effect; the context passed along shows
-/// the state after it.
-///
-/// Status: candidate (`send-side.md`, "策略事件（候选）"). `WriteLimitNarrowed`
-/// and `EndCommitted` deliver the changes of the write limit and the end
-/// state that the observation contract lists. Appends are not repeated as
-/// events: the guard's settlement reports them.
+/// the state after it. Appends are not repeated as events: the guard's
+/// settlement reports them. The set of events is provisional and may grow.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum StreamCreditEvent {
@@ -197,7 +218,7 @@ pub enum StreamCreditEvent {
     },
 }
 
-/// The default flow-control policy.
+/// A flow-control policy that admits the whole ceiling of each attempt.
 ///
 /// - Admits all the room the attempt's hard constraints leave; it does not
 ///   balance streams against each other.
@@ -206,19 +227,22 @@ pub enum StreamCreditEvent {
 ///   it does not want another for that limit; a growth of the limit clears
 ///   the intent.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct DefaultSendFlowControlPolicy {
+pub struct FullCeilingAdmission {
     wants_signal: bool,
     signalled_limit: Option<VarInt>,
 }
 
-impl DefaultSendFlowControlPolicy {
+/// The flow-control policy of the default composition.
+pub type DefaultSendFlowControlPolicy = FullCeilingAdmission;
+
+impl FullCeilingAdmission {
     /// Creates the policy with no signal intent.
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-impl SendFlowControlPolicy for DefaultSendFlowControlPolicy {
+impl SendFlowControlPolicy for FullCeilingAdmission {
     fn admit_write(
         &mut self,
         attempt: &WriteAttempt,
@@ -227,7 +251,7 @@ impl SendFlowControlPolicy for DefaultSendFlowControlPolicy {
         if attempt.is_stream_limited() && self.signalled_limit != Some(context.peer_stream_limit) {
             self.wants_signal = true;
         }
-        (attempt.ceiling > VarInt::ZERO).then(|| AdmissionGuard::new(attempt, attempt.ceiling))
+        AdmissionGuard::new(attempt, attempt.ceiling).ok()
     }
 
     fn on_admission_used(&mut self, _: AdmissionGuard, _: VarInt, _: &SendFlowContext) {}

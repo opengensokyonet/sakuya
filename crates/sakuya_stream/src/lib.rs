@@ -2,10 +2,11 @@
 //!
 //! The send direction: [`connection_send_credit`], [`send_buffer`] and
 //! [`send`]. The receive direction: [`connection_receive_flow`],
-//! [`receive_buffer`] and [`receive`]. Each module documents which parts of
-//! its contract are settled and which are provisional.
+//! [`receive_buffer`] and [`receive`]. Both directions use the application
+//! protocol error codes of [`application_error_code`].
 #![warn(missing_docs)]
 
+pub mod application_error_code;
 pub mod connection_receive_flow;
 pub mod connection_send_credit;
 pub mod receive;
