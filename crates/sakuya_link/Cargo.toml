@@ -1,0 +1,10 @@
+[package]
+name = "sakuya_link"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Link, link binding and link driver abstractions for sakuya"
+
+[dependencies]
+nitori_id.workspace = true
