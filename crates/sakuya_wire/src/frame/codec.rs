@@ -234,10 +234,11 @@ fn directionality(unidirectional: bool) -> Directionality {
 
 /// Failures that [`read_frame`] can produce.
 ///
-/// Every failure corresponds to the transport error FRAME_ENCODING_ERROR
-/// ([`ReadFrameError::transport_error_code`]). The variants named after a
-/// frame type hold the failure of reading the fields of that type, and its
-/// Frame Type value.
+/// Every failure corresponds to the transport error FRAME_ENCODING_ERROR,
+/// except a DATAGRAM frame that is not enabled, which corresponds to
+/// PROTOCOL_VIOLATION ([`ReadFrameError::transport_error_code`]). The variants
+/// named after a frame type hold the failure of reading the fields of that
+/// type, and its Frame Type value.
 #[derive(Debug, Snafu)]
 #[snafu(module(read_frame_error), visibility(pub(crate)))]
 pub enum ReadFrameError<E> {
@@ -506,12 +507,21 @@ impl<E> ReadFrameError<E> {
         }
     }
 
-    /// The transport error the failure corresponds to: always
-    /// FRAME_ENCODING_ERROR ([RFC 9000 §12.4], §19).
+    /// The transport error the failure corresponds to: FRAME_ENCODING_ERROR
+    /// ([RFC 9000 §12.4], §19), or PROTOCOL_VIOLATION for a DATAGRAM frame
+    /// that is not enabled ([RFC 9221 §3]).
     ///
     /// [RFC 9000 §12.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.4
+    /// [RFC 9221 §3]: https://www.rfc-editor.org/rfc/rfc9221.html#section-3
     pub fn transport_error_code(&self) -> TransportErrorCode {
-        TransportErrorCode::FRAME_ENCODING_ERROR
+        match self {
+            Self::UnknownType { frame_type }
+                if matches!(FrameType::of(*frame_type), Ok(FrameType::Datagram)) =>
+            {
+                TransportErrorCode::PROTOCOL_VIOLATION
+            }
+            _ => TransportErrorCode::FRAME_ENCODING_ERROR,
+        }
     }
 }
 

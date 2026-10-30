@@ -350,10 +350,12 @@ fn unknown_and_disabled_types_are_rejected() {
             matches!(error, ReadFrameError::UnknownType { frame_type: rejected } if rejected == frame_type),
             "{encoding:02x?}: {error:?}"
         );
-        assert_eq!(
-            error.transport_error_code(),
+        let expected = if matches!(frame_type.get(), 0x30 | 0x31) {
+            TransportErrorCode::PROTOCOL_VIOLATION
+        } else {
             TransportErrorCode::FRAME_ENCODING_ERROR
-        );
+        };
+        assert_eq!(error.transport_error_code(), expected);
         assert_eq!(error.frame_type(), Some(frame_type));
         assert!(!error.is_incomplete());
     }

@@ -16,7 +16,9 @@
 //!
 //! Which extensions the peers negotiated is a run-time fact: reading takes an
 //! [`Extensions`] set, and a frame of an extension that is not in the set is
-//! reported as an unknown frame type, as RFC 9000 §12.4 requires.
+//! reported as an unknown frame type. That is a FRAME_ENCODING_ERROR
+//! ([RFC 9000 §12.4]), except for DATAGRAM, for which [RFC 9221] requires
+//! PROTOCOL_VIOLATION.
 //!
 //! Each frame type has its own module with its struct, the checks its
 //! encoding imposes, and its write operation. [`Frame`] holds any of them.
@@ -37,8 +39,9 @@
 //! such as the 2<sup>62</sup> − 1 bound on the end of STREAM and CRYPTO data
 //! or the lengths a NEW_CONNECTION_ID connection ID may have. Whether a frame
 //! is allowed in the packet type, whether a stream exists or may be opened,
-//! and flow control are for the receiver of the frame to check. Every
-//! [`codec::ReadFrameError`] corresponds to FRAME_ENCODING_ERROR.
+//! and flow control are for the receiver of the frame to check.
+//! [`codec::ReadFrameError::transport_error_code`] names the transport error
+//! of a failure.
 //!
 //! ```
 //! use sakuya_wire::frame::{Extensions, Frame, Frames};
