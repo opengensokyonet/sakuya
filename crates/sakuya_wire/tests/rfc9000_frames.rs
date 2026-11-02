@@ -4,13 +4,12 @@ use core::convert::Infallible;
 use sakuya_wire::{
     frame::{
         Extensions, Frame, FrameType,
-        ack::Ack,
         codec::{ReadFrameError, ReadFrameHostExt as _},
     },
     packet_number::PacketNumber,
     stream_id::Directionality,
     transport_error::TransportErrorCode,
-    var_int::{VarInt, codec::WriteVarIntHostExt as _},
+    var_int::{VarInt, VarIntField, VarIntWidth, codec::WriteVarIntHostExt as _},
 };
 
 const MAX: u64 = (1 << 62) - 1;
@@ -66,12 +65,13 @@ fn prefixes_are_incomplete(bytes: &[u8]) {
     }
 }
 
+/// The packet number ranges of an ACK frame, smallest and largest, largest
+/// range first.
 fn ranges(frame: &Frame<&[u8]>) -> Vec<(u64, u64)> {
-    let Frame::Ack(Ack { ranges, .. }) = frame else {
+    let Frame::Ack(ack) = frame else {
         panic!("{frame:?}")
     };
-    ranges
-        .iter()
+    ack.packet_ranges()
         .map(|range| (range.start().get(), range.end().get()))
         .collect()
 }
@@ -158,8 +158,8 @@ fn ack_ranges_reach_the_edges_of_the_packet_numbers() {
     let Frame::Ack(ack) = accepts(&largest) else {
         panic!()
     };
-    assert_eq!(ack.largest_acknowledged(), PacketNumber::MAX);
-    assert_eq!(ack.ack_delay, VarInt::MAX);
+    assert_eq!(ack.largest_acknowledged.get(), PacketNumber::MAX);
+    assert_eq!(ack.ack_delay.get(), VarInt::MAX);
     prefixes_are_incomplete(&largest);
 }
 
@@ -178,7 +178,11 @@ fn ack_ecn_counts_follow_the_ranges() {
     };
     let counts = ack.ecn_counts.unwrap();
     assert_eq!(
-        (counts.ect0.get(), counts.ect1.get(), counts.ce.get()),
+        (
+            counts.ect0.get().get(),
+            counts.ect1.get().get(),
+            counts.ce.get().get()
+        ),
         (1, 2, MAX)
     );
     prefixes_are_incomplete(&bytes);
@@ -194,8 +198,8 @@ fn reset_stream_and_stop_sending_take_the_largest_values() {
     let Frame::ResetStream(reset) = accepts(&bytes) else {
         panic!()
     };
-    assert_eq!(reset.stream_id.get(), VarInt::MAX);
-    assert_eq!(reset.final_size, VarInt::MAX);
+    assert_eq!(reset.stream_id.get().get(), VarInt::MAX);
+    assert_eq!(reset.final_size.get(), VarInt::MAX);
     prefixes_are_incomplete(&bytes);
     let bytes = frame(&[&[0x05], &var(MAX), &var(MAX)]);
     assert!(matches!(accepts(&bytes), Frame::StopSending(_)));
@@ -211,7 +215,7 @@ fn crypto_data_ends_at_the_largest_offset() {
     let Frame::Crypto(crypto) = accepts(&bytes) else {
         panic!()
     };
-    assert_eq!((crypto.offset, crypto.data), (VarInt::MAX, &b""[..]));
+    assert_eq!((crypto.offset.get(), crypto.data), (VarInt::MAX, &b""[..]));
     // The check needs only the fields, not the data.
     rejects(&frame(&[&[0x06], &var(MAX), &[1]]));
     rejects(&frame(&[&[0x06], &var(1), &var(MAX)]));
@@ -247,10 +251,14 @@ fn stream_type_bits_announce_the_fields() {
         let Frame::Stream(stream) = accepts(&bytes) else {
             panic!()
         };
-        assert_eq!(stream.stream_id.get(), VarInt::from(4u8));
-        assert_eq!(stream.offset.get(), if off { 9 } else { 0 });
+        assert_eq!(stream.stream_id.get().get(), VarInt::from(4u8));
+        assert_eq!(
+            stream.offset.map(|offset| offset.get().get()),
+            off.then_some(9)
+        );
+        assert_eq!(stream.data_offset().get(), if off { 9 } else { 0 });
         assert_eq!(stream.data, [0xaa, 0xbb]);
-        assert_eq!((stream.fin, stream.has_length), (fin, len));
+        assert_eq!((stream.fin, stream.length_width.is_some()), (fin, len));
         assert_eq!(accepts(&bytes).type_value().get(), u64::from(type_value));
     }
 }
@@ -268,12 +276,13 @@ fn stream_data_ends_at_the_largest_offset() {
         accepts(&frame(&[&[0x0c], &var(0), &var(MAX)])),
         Frame::Stream(_)
     ));
-    // Offset present with the value zero is the same as absent.
+    // An Offset field with the value zero is kept, with its OFF bit.
     let Frame::Stream(stream) = accepts(&[0x0e, 0, 0, 1, 0xaa]) else {
         panic!()
     };
-    assert_eq!(stream.offset, VarInt::ZERO);
-    assert_eq!(stream.type_value().get(), 0x0a);
+    assert_eq!(stream.offset, Some(VarIntField::shortest(VarInt::ZERO)));
+    assert_eq!(stream.data_offset(), VarInt::ZERO);
+    assert_eq!(stream.type_value().get(), 0x0e);
     prefixes_are_incomplete(&[0x0e, 4, 9, 2, 0xaa, 0xbb]);
 }
 
@@ -374,16 +383,45 @@ fn connection_close_fields_follow_the_type() {
     );
 }
 
-/// RFC 9000 §16: fields other than the Frame Type need not be shortest.
+/// RFC 9000 §16: fields other than the Frame Type need not be shortest. They
+/// read as the same values, and the frame keeps the widths it was read with.
 #[test]
 fn fields_may_use_longer_encodings() {
-    let shortest = accepts(&[0x04, 0x01, 0x02, 0x03]);
+    let Frame::ResetStream(shortest) = accepts(&[0x04, 0x01, 0x02, 0x03]) else {
+        panic!()
+    };
     let longer = [
         0x04, 0x40, 0x01, 0x80, 0, 0, 0x02, 0xc0, 0, 0, 0, 0, 0, 0, 0x03,
     ];
-    assert_eq!(accepts(&longer), shortest);
+    let Frame::ResetStream(reset) = accepts(&longer) else {
+        panic!()
+    };
     assert_eq!(
-        accepts(&[0x07, 0x40, 0x01, 0xaa]),
-        accepts(&[0x07, 1, 0xaa])
+        (
+            reset.stream_id.get(),
+            reset.application_error_code.get(),
+            reset.final_size.get()
+        ),
+        (
+            shortest.stream_id.get(),
+            shortest.application_error_code.get(),
+            shortest.final_size.get()
+        )
     );
+    assert_eq!(
+        (
+            reset.stream_id.width(),
+            reset.application_error_code.width(),
+            reset.final_size.width()
+        ),
+        (VarIntWidth::Two, VarIntWidth::Four, VarIntWidth::Eight)
+    );
+    let (Frame::NewToken(longer), Frame::NewToken(shortest)) = (
+        accepts(&[0x07, 0x40, 0x01, 0xaa]),
+        accepts(&[0x07, 1, 0xaa]),
+    ) else {
+        panic!()
+    };
+    assert_eq!(longer.token, shortest.token);
+    assert_eq!(longer.token_length_width, VarIntWidth::Two);
 }

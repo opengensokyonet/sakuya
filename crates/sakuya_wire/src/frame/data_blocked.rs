@@ -2,15 +2,17 @@
 //!
 //! [RFC 9000 §19.12]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.12
 use super::{Head, type_value, type_var_int};
-use crate::var_int::VarInt;
+use crate::var_int::{VarInt, VarIntField};
 
 /// A DATA_BLOCKED frame ([RFC 9000 §19.12]).
+///
+/// Each field keeps the width of its variable-length integer encoding.
 ///
 /// [RFC 9000 §19.12]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.12
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DataBlocked {
     /// The connection-level limit at which blocking occurred.
-    pub maximum_data: VarInt,
+    pub maximum_data: VarIntField<VarInt>,
 }
 
 impl DataBlocked {
@@ -26,7 +28,7 @@ impl DataBlocked {
 
     /// The encoded frame.
     pub(crate) fn head(&self) -> Head<9> {
-        Head::new(self.type_value()).var_int(self.maximum_data)
+        Head::new(self.type_value()).field(self.maximum_data)
     }
 }
 
@@ -42,7 +44,7 @@ pub mod codec {
     #![allow(missing_docs)]
 
     use super::DataBlocked;
-    use crate::var_int::codec::{ReadVarIntError, ReadVarIntExt as _};
+    use crate::{frame::read_field, var_int::codec::ReadVarIntError};
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{calls::WriteAllError, prelude::*};
 
@@ -51,7 +53,7 @@ pub mod codec {
         io: &mut A,
     ) -> Result<DataBlocked, ReadVarIntError<F::Error>> {
         Ok(DataBlocked {
-            maximum_data: io.read_var_int().await?,
+            maximum_data: read_field(io).await?,
         })
     }
 
@@ -75,13 +77,13 @@ mod tests {
     use super::DataBlocked;
     use crate::{
         frame::{Frame, tests::assert_round_trip},
-        var_int::VarInt,
+        var_int::{VarInt, VarIntField},
     };
 
     #[test]
     fn round_trips() {
         let frame = DataBlocked {
-            maximum_data: VarInt::from(64u8),
+            maximum_data: VarIntField::shortest(VarInt::from(64u8)),
         };
         assert_eq!(
             assert_round_trip(Frame::DataBlocked(frame)),

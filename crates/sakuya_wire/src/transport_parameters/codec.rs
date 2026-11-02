@@ -20,7 +20,7 @@ use super::{
 };
 use crate::{
     connection_id::{ConnectionId, ConnectionIdLengthError, StatelessResetToken},
-    frame::{Head, LengthError},
+    frame::Head,
     payload::{ReadPayloadError, read_payload},
     role::Role,
     stream_count::StreamCount,
@@ -357,7 +357,7 @@ where
     }
     for parameter in parameters.unknown {
         // Validation bounds the length of each value by 2^62 - 1.
-        let length = LengthError::length_field(parameter.value.remaining()).unwrap_or(VarInt::MAX);
+        let length = VarInt::try_from(parameter.value.remaining()).unwrap_or(VarInt::MAX);
         let head = Head::<16>::new(parameter.id).var_int(length);
         put(io, head.as_slice().chain(parameter.value), &mut written)
             .await

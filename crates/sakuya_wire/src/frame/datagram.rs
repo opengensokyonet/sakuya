@@ -1,30 +1,32 @@
 //! DATAGRAM frames ([RFC 9221 §4]).
 //!
 //! [RFC 9221 §4]: https://www.rfc-editor.org/rfc/rfc9221.html#section-4
-use super::{Head, LengthError, length_field_len, type_value, type_var_int};
-use crate::var_int::VarInt;
+use super::{Head, LengthError, type_value, type_var_int};
+use crate::var_int::{VarInt, VarIntWidth};
 use bytes::Buf;
 
 /// A DATAGRAM frame ([RFC 9221 §4]): type `0x31` with a Length field, `0x30`
 /// without.
 ///
-/// `D` holds the data: the source's chunk type for a frame that was read,
-/// any [`Buf`] for one to write.
+/// The Length field holds the length of the data, so only its width is
+/// stored. `D` holds the data: the source's chunk type for a frame that was
+/// read, any [`Buf`] for one to write.
 ///
 /// [RFC 9221 §4]: https://www.rfc-editor.org/rfc/rfc9221.html#section-4
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Datagram<D> {
+    /// The width of the Length field, present in type `0x31`; the field holds
+    /// the length of `data`. Without a Length field, the data extends to the
+    /// end of the packet.
+    pub length_width: Option<VarIntWidth>,
     /// The application data.
     pub data: D,
-    /// Whether the frame carries a Length field. Without one, the data
-    /// extends to the end of the packet.
-    pub has_length: bool,
 }
 
 impl<D> Datagram<D> {
     /// The Frame Type value: `0x31` with a Length field, `0x30` without.
     pub const fn type_value(&self) -> VarInt {
-        type_var_int(if self.has_length {
+        type_var_int(if self.length_width.is_some() {
             type_value::DATAGRAM_WITH_LENGTH
         } else {
             type_value::DATAGRAM
@@ -35,30 +37,32 @@ impl<D> Datagram<D> {
 impl<D: Buf> Datagram<D> {
     /// The number of bytes [`codec::write_datagram`] writes.
     pub fn encoded_len(&self) -> usize {
-        let length = self.data.remaining();
-        1 + if self.has_length {
-            length_field_len(length)
-        } else {
-            0
-        } + length
+        1 + self.length_width.map_or(0, VarIntWidth::encoded_len) + self.data.remaining()
     }
 
-    /// Checks that a Length field can state the length of the data.
+    /// Checks that the Length field, if present, can state the length of the
+    /// data.
     ///
     /// # Errors
     ///
     /// [`LengthError`] for longer data.
     pub fn validate(&self) -> Result<(), LengthError> {
-        LengthError::length_field(self.data.remaining()).map(|_| ())
+        match self.length_width {
+            Some(width) => LengthError::check(self.data.remaining(), width).map(|_| ()),
+            None => Ok(()),
+        }
     }
 
     /// The fields before the data of a frame that passed validation.
     pub(crate) fn head(&self) -> Head<9> {
         let head = Head::new(self.type_value());
-        if self.has_length {
-            head.var_int(LengthError::length_field(self.data.remaining()).unwrap_or(VarInt::MAX))
-        } else {
-            head
+        match self.length_width {
+            Some(width) => {
+                // Validation checked that the width holds the data length.
+                let length = VarInt::try_from(self.data.remaining()).unwrap_or(VarInt::ZERO);
+                head.var_int_of(length, width)
+            }
+            None => head,
         }
     }
 }
@@ -76,9 +80,9 @@ pub mod codec {
 
     use super::Datagram;
     use crate::{
-        frame::LengthError,
+        frame::{LengthError, read_field},
         payload::{ReadPayloadError, read_payload, read_payload_to_end},
-        var_int::codec::{ReadVarIntError, ReadVarIntExt as _},
+        var_int::{VarInt, VarIntField, codec::ReadVarIntError},
     };
     use bytes::Buf;
     use nitori_call::{ReceiverAccess, call};
@@ -96,18 +100,18 @@ pub mod codec {
         F: ReadChunk<Chunk: Default>,
         A: ReceiverAccess<Family = F>,
     {
-        let data = if has_length {
-            let length = io
-                .read_var_int()
+        let (length_width, data) = if has_length {
+            let length: VarIntField<VarInt> = read_field(io)
                 .await
                 .context(read_datagram_error::FieldSnafu)?;
-            let length = usize::try_from(length.get()).unwrap_or(usize::MAX);
-            read_payload(io, length).await
+            let data_len = usize::try_from(length.get().get()).unwrap_or(usize::MAX);
+            let data = read_payload(io, data_len).await;
+            (Some(length.width()), data)
         } else {
-            read_payload_to_end(io).await
-        }
-        .context(read_datagram_error::DataSnafu)?;
-        Ok(Datagram { data, has_length })
+            (None, read_payload_to_end(io).await)
+        };
+        let data = data.context(read_datagram_error::DataSnafu)?;
+        Ok(Datagram { length_width, data })
     }
 
     /// Failures of reading a DATAGRAM frame.
@@ -189,23 +193,31 @@ pub mod codec {
 
 #[cfg(test)]
 mod tests {
-    use super::Datagram;
-    use crate::frame::{
-        Extensions, Frame, Frames,
-        codec::{ReadFrameError, ReadFrameHostExt as _},
-        tests::assert_round_trip,
+    use super::{Datagram, codec::WriteDatagramError, codec::WriteDatagramHostExt as _};
+    use crate::{
+        frame::{
+            Extensions, Frame, Frames, LengthError,
+            codec::{ReadFrameError, ReadFrameHostExt as _},
+            tests::assert_round_trip,
+        },
+        var_int::VarIntWidth,
     };
 
     #[test]
     fn round_trips_with_and_without_length() {
         let with = assert_round_trip(Frame::Datagram(Datagram {
+            length_width: Some(VarIntWidth::One),
             data: &b"datagram"[..],
-            has_length: true,
         }));
         assert_eq!(with[..2], [0x31, 0x08]);
+        let long = assert_round_trip(Frame::Datagram(Datagram {
+            length_width: Some(VarIntWidth::Four),
+            data: &b"datagram"[..],
+        }));
+        assert_eq!(long[..5], [0x31, 0x80, 0, 0, 0x08]);
         let without = assert_round_trip(Frame::Datagram(Datagram {
+            length_width: None,
             data: &b"to the end"[..],
-            has_length: false,
         }));
         assert_eq!(without[0], 0x30);
         // An empty DATAGRAM without a Length field is the type alone.
@@ -213,10 +225,36 @@ mod tests {
         assert_eq!(
             input.sync_read_frame_unpin(Extensions::ALL).unwrap(),
             Frame::Datagram(Datagram {
+                length_width: None,
                 data: &b""[..],
-                has_length: false,
             })
         );
+    }
+
+    #[test]
+    fn narrow_length_fields_are_rejected() {
+        let data = [0; 64];
+        let frame = Datagram {
+            length_width: Some(VarIntWidth::One),
+            data: &data[..],
+        };
+        let expected = LengthError {
+            length: 64,
+            width: VarIntWidth::One,
+        };
+        assert_eq!(frame.validate(), Err(expected));
+        let mut written = Vec::new();
+        assert!(matches!(
+            written.sync_write_datagram_unpin(frame),
+            Err(WriteDatagramError::Invalid { source }) if source == expected
+        ));
+        assert!(written.is_empty());
+        // Without a Length field, any length can be written.
+        let frame = Datagram {
+            length_width: None,
+            data: &data[..],
+        };
+        assert_eq!(frame.validate(), Ok(()));
     }
 
     #[test]

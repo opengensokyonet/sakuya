@@ -1,41 +1,48 @@
 //! CONNECTION_CLOSE frames ([RFC 9000 §19.19]).
 //!
 //! [RFC 9000 §19.19]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.19
-use super::{Head, LengthError, length_field_len, type_value, type_var_int};
+use super::{Head, LengthError, type_value, type_var_int};
 use crate::{
-    application_error::ApplicationErrorCode, transport_error::TransportErrorCode, var_int::VarInt,
+    application_error::ApplicationErrorCode,
+    transport_error::TransportErrorCode,
+    var_int::{VarInt, VarIntField, VarIntWidth},
 };
 use bytes::Buf;
 
 /// A CONNECTION_CLOSE frame ([RFC 9000 §19.19]).
 ///
-/// `D` holds the reason phrase: the source's chunk type for a frame that was
-/// read, any [`Buf`] for one to write.
+/// The Reason Phrase Length field holds the length of the reason phrase, so
+/// only its width is stored; the other variable-length integers keep the
+/// widths of their encodings. `D` holds the reason phrase: the source's
+/// chunk type for a frame that was read, any [`Buf`] for one to write.
 ///
 /// [RFC 9000 §19.19]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.19
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ConnectionClose<D> {
     /// The error that closes the connection; it selects the frame type.
     pub error_code: CloseErrorCode,
+    /// The width of the Reason Phrase Length field, which holds the length
+    /// of `reason_phrase`.
+    pub reason_phrase_length_width: VarIntWidth,
     /// The reason phrase; UTF-8 is expected but not checked.
     pub reason_phrase: D,
 }
 
-/// The error a CONNECTION_CLOSE frame states, which selects its type.
+/// The error fields of a CONNECTION_CLOSE frame, which select its type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CloseErrorCode {
     /// Type `0x1c`: an error of the QUIC layer.
     Transport {
-        /// The transport error code.
-        code: TransportErrorCode,
-        /// The Frame Type of the frame that triggered the error, or 0 if it
-        /// is unknown.
-        frame_type: VarInt,
+        /// The Error Code field: the transport error code.
+        code: VarIntField<TransportErrorCode>,
+        /// The Frame Type field: the type of the frame that triggered the
+        /// error, or 0 if it is unknown.
+        frame_type: VarIntField<VarInt>,
     },
     /// Type `0x1d`: an error of the application.
     Application {
-        /// The application protocol error code.
-        code: ApplicationErrorCode,
+        /// The Error Code field: the application protocol error code.
+        code: VarIntField<ApplicationErrorCode>,
     },
 }
 
@@ -53,35 +60,40 @@ impl<D> ConnectionClose<D> {
 impl<D: Buf> ConnectionClose<D> {
     /// The number of bytes [`codec::write_connection_close`] writes.
     pub fn encoded_len(&self) -> usize {
-        let length = self.reason_phrase.remaining();
-        self.fields().len() + length_field_len(length) + length
+        self.fields().len()
+            + self.reason_phrase_length_width.encoded_len()
+            + self.reason_phrase.remaining()
     }
 
-    /// Checks that a Length field can state the length of the reason phrase.
+    /// Checks that the Reason Phrase Length field can state the length of the
+    /// reason phrase.
     ///
     /// # Errors
     ///
     /// [`LengthError`] for a longer reason phrase.
     pub fn validate(&self) -> Result<(), LengthError> {
-        LengthError::length_field(self.reason_phrase.remaining()).map(|_| ())
+        LengthError::check(
+            self.reason_phrase.remaining(),
+            self.reason_phrase_length_width,
+        )
+        .map(|_| ())
     }
 
     /// The Frame Type and error fields.
     fn fields(&self) -> Head<25> {
         let head = Head::new(self.type_value());
         match self.error_code {
-            CloseErrorCode::Transport { code, frame_type } => {
-                head.var_int(code.get()).var_int(frame_type)
-            }
-            CloseErrorCode::Application { code } => head.var_int(code.get()),
+            CloseErrorCode::Transport { code, frame_type } => head.field(code).field(frame_type),
+            CloseErrorCode::Application { code } => head.field(code),
         }
     }
 
     /// The fields before the reason phrase of a frame that passed validation.
     pub(crate) fn head(&self) -> Head<25> {
-        let length =
-            LengthError::length_field(self.reason_phrase.remaining()).unwrap_or(VarInt::MAX);
-        self.fields().var_int(length)
+        // Validation checked that the width holds the reason phrase length.
+        let length = VarInt::try_from(self.reason_phrase.remaining()).unwrap_or(VarInt::ZERO);
+        self.fields()
+            .var_int_of(length, self.reason_phrase_length_width)
     }
 }
 
@@ -98,16 +110,12 @@ pub mod codec {
 
     use super::{CloseErrorCode, ConnectionClose};
     use crate::{
-        application_error::ApplicationErrorCode,
-        frame::LengthError,
+        frame::{LengthError, read_field},
         payload::{ReadPayloadError, read_payload},
-        transport_error::TransportErrorCode,
-        var_int::{
-            VarInt,
-            codec::{ReadVarIntError, ReadVarIntExt as _},
-        },
+        var_int::{VarInt, VarIntField, codec::ReadVarIntError},
     };
     use bytes::Buf;
+    use core::convert::Infallible;
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{calls::WriteAllError, prelude::*};
     use snafu::{ResultExt, Snafu};
@@ -124,31 +132,37 @@ pub mod codec {
         F: ReadChunk<Chunk: Default>,
         A: ReceiverAccess<Family = F>,
     {
-        let code = field(io).await?;
         let error_code = if application {
             CloseErrorCode::Application {
-                code: ApplicationErrorCode::new(code),
+                code: field(io).await?,
             }
         } else {
             CloseErrorCode::Transport {
-                code: TransportErrorCode::from(code),
+                code: field(io).await?,
                 frame_type: field(io).await?,
             }
         };
-        let length = usize::try_from(field(io).await?.get()).unwrap_or(usize::MAX);
-        let reason_phrase = read_payload(io, length)
+        let length: VarIntField<VarInt> = field(io).await?;
+        let reason_phrase_len = usize::try_from(length.get().get()).unwrap_or(usize::MAX);
+        let reason_phrase = read_payload(io, reason_phrase_len)
             .await
             .context(read_connection_close_error::ReasonPhraseSnafu)?;
         Ok(ConnectionClose {
             error_code,
+            reason_phrase_length_width: length.width(),
             reason_phrase,
         })
     }
 
-    async fn field<F: Read, A: ReceiverAccess<Family = F>>(
+    async fn field<T, F, A>(
         io: &mut A,
-    ) -> Result<VarInt, ReadConnectionCloseError<F::Error>> {
-        io.read_var_int()
+    ) -> Result<VarIntField<T>, ReadConnectionCloseError<F::Error>>
+    where
+        T: Copy + Into<VarInt> + TryFrom<VarInt, Error = Infallible>,
+        F: Read,
+        A: ReceiverAccess<Family = F>,
+    {
+        read_field(io)
             .await
             .context(read_connection_close_error::FieldSnafu)
     }
@@ -233,9 +247,13 @@ mod tests {
     use super::{CloseErrorCode, ConnectionClose};
     use crate::{
         application_error::ApplicationErrorCode,
-        frame::{Extensions, Frame, codec::ReadFrameHostExt as _, tests::assert_round_trip},
+        frame::{
+            Extensions, Frame,
+            codec::ReadFrameHostExt as _,
+            tests::{assert_round_trip, short, wide},
+        },
         transport_error::TransportErrorCode,
-        var_int::VarInt,
+        var_int::{VarInt, VarIntWidth},
     };
 
     #[test]
@@ -251,8 +269,8 @@ mod tests {
         assert_eq!(
             close.error_code,
             CloseErrorCode::Transport {
-                code: TransportErrorCode::FRAME_ENCODING_ERROR,
-                frame_type: VarInt::from(0x06u8),
+                code: short(TransportErrorCode::FRAME_ENCODING_ERROR),
+                frame_type: short(VarInt::from(0x06u8)),
             }
         );
         assert_eq!(close.reason_phrase, b"bad");
@@ -268,11 +286,32 @@ mod tests {
             frame,
             Frame::ConnectionClose(ConnectionClose {
                 error_code: CloseErrorCode::Application {
-                    code: ApplicationErrorCode::new(VarInt::from(0x100u16)),
+                    code: short(ApplicationErrorCode::new(VarInt::from(0x100u16))),
                 },
+                reason_phrase_length_width: VarIntWidth::One,
                 reason_phrase: &b""[..],
             })
         );
         assert_eq!(assert_round_trip(frame), application);
+
+        // The same codes in longer encodings, with a longer Reason Phrase
+        // Length field.
+        let long = [0x1c, 0x80, 0, 0, 0x07, 0x40, 0x06, 0x40, 0x01, b'!'];
+        let frame = long
+            .as_slice()
+            .sync_read_frame_unpin(Extensions::NONE)
+            .unwrap();
+        assert_eq!(
+            frame,
+            Frame::ConnectionClose(ConnectionClose {
+                error_code: CloseErrorCode::Transport {
+                    code: wide(TransportErrorCode::FRAME_ENCODING_ERROR, VarIntWidth::Four),
+                    frame_type: wide(VarInt::from(0x06u8), VarIntWidth::Two),
+                },
+                reason_phrase_length_width: VarIntWidth::Two,
+                reason_phrase: &b"!"[..],
+            })
+        );
+        assert_eq!(assert_round_trip(frame), long);
     }
 }

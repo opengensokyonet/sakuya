@@ -2,23 +2,28 @@
 //!
 //! [RFC 9000 §19.6]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.6
 use super::{
-    DataEndError, Head, length_field_len, max_len_with_length_field, type_value, type_var_int,
+    DataEndError, Head, InvalidDataError, LengthError, max_len_with_length_field, type_value,
+    type_var_int,
 };
-use crate::var_int::VarInt;
+use crate::var_int::{VarInt, VarIntField, VarIntWidth};
 use bytes::Buf;
 
 /// A CRYPTO frame ([RFC 9000 §19.6]).
 ///
-/// The Offset and Length fields are always present. The end of the data,
-/// `offset` plus its length, is at most [`VarInt::MAX`]. `D` holds the data:
-/// the source's chunk type for a frame that was read, any [`Buf`] for one to
-/// write.
+/// The Offset and Length fields are always present. The Length field holds
+/// the length of the data, so only its width is stored; the Offset field
+/// keeps the width of its encoding. The end of the data, the offset plus
+/// its length, is at most [`VarInt::MAX`]. `D` holds the data: the source's
+/// chunk type for a frame that was read, any [`Buf`] for one to write.
 ///
 /// [RFC 9000 §19.6]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.6
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Crypto<D> {
-    /// The byte offset of the data in the crypto stream of its level.
-    pub offset: VarInt,
+    /// The Offset field: the byte offset of the data in the crypto stream of
+    /// its level.
+    pub offset: VarIntField<VarInt>,
+    /// The width of the Length field, which holds the length of `data`.
+    pub length_width: VarIntWidth,
     /// The cryptographic message data.
     pub data: D,
 }
@@ -32,40 +37,48 @@ impl<D> Crypto<D> {
         type_var_int(type_value::CRYPTO)
     }
 
-    /// The largest data length for which a CRYPTO frame at `offset` takes at
-    /// most `room` bytes, or `None` if not even an empty frame fits.
+    /// The largest data length for which a CRYPTO frame with this Offset
+    /// field takes at most `room` bytes, or `None` if not even an empty frame
+    /// fits.
     ///
-    /// The length accounts for the Length field growing with the data and
-    /// for the 2<sup>62</sup> − 1 bound on the end of the data.
-    pub fn max_data_len(offset: VarInt, room: usize) -> Option<usize> {
+    /// The length accounts for the Length field growing with the data: a
+    /// frame with that much data and the shortest Length field,
+    /// [`VarIntWidth::shortest`] of the length, fits `room`. The
+    /// 2<sup>62</sup> − 1 bound on the end of the data is also applied.
+    ///
+    /// This signature is provisional.
+    pub fn max_data_len(offset: VarIntField<VarInt>, room: usize) -> Option<usize> {
         let fixed = 1 + offset.encoded_len();
-        max_len_with_length_field(fixed, DataEndError::limit(offset), room)
+        max_len_with_length_field(fixed, DataEndError::limit(offset.get()), room)
     }
 }
 
 impl<D: Buf> Crypto<D> {
     /// The number of bytes [`codec::write_crypto`] writes.
     pub fn encoded_len(&self) -> usize {
-        let length = self.data.remaining();
-        1 + self.offset.encoded_len() + length_field_len(length) + length
+        1 + self.offset.encoded_len() + self.length_width.encoded_len() + self.data.remaining()
     }
 
-    /// Checks the 2<sup>62</sup> − 1 bound on the end of the data.
+    /// Checks the 2<sup>62</sup> − 1 bound on the end of the data, and that
+    /// the Length field can state the length of the data.
     ///
     /// # Errors
     ///
-    /// [`DataEndError`] if the data ends beyond it.
-    pub fn validate(&self) -> Result<(), DataEndError> {
-        DataEndError::check(self.offset, self.data.remaining() as u64)
+    /// [`InvalidDataError`] for the broken limit.
+    pub fn validate(&self) -> Result<(), InvalidDataError> {
+        let length = self.data.remaining();
+        DataEndError::check(self.offset.get(), length as u64)?;
+        LengthError::check(length, self.length_width)?;
+        Ok(())
     }
 
     /// The fields before the data of a frame that passed validation.
     pub(crate) fn head(&self) -> Head<HEAD_MAX> {
-        // Validation bounds the data length by 2^62 - 1.
-        let length = VarInt::try_from(self.data.remaining()).unwrap_or(VarInt::MAX);
+        // Validation checked that the width holds the data length.
+        let length = VarInt::try_from(self.data.remaining()).unwrap_or(VarInt::ZERO);
         Head::new(self.type_value())
-            .var_int(self.offset)
-            .var_int(length)
+            .field(self.offset)
+            .var_int_of(length, self.length_width)
     }
 }
 
@@ -82,9 +95,9 @@ pub mod codec {
 
     use super::Crypto;
     use crate::{
-        frame::DataEndError,
+        frame::{DataEndError, InvalidDataError, read_field},
         payload::{ReadPayloadError, read_payload},
-        var_int::codec::{ReadVarIntError, ReadVarIntExt as _},
+        var_int::{VarInt, VarIntField, codec::ReadVarIntError},
     };
     use bytes::Buf;
     use nitori_call::{ReceiverAccess, call};
@@ -100,22 +113,24 @@ pub mod codec {
         F: ReadChunk<Chunk: Default>,
         A: ReceiverAccess<Family = F>,
     {
-        let offset = io
-            .read_var_int()
+        let offset: VarIntField<VarInt> = read_field(io)
             .await
             .context(read_crypto_error::FieldSnafu)?;
-        let length = io
-            .read_var_int()
+        let length: VarIntField<VarInt> = read_field(io)
             .await
             .context(read_crypto_error::FieldSnafu)?;
-        DataEndError::check(offset, length.get())?;
+        DataEndError::check(offset.get(), length.get().get())?;
         // The end check bounds the length by 2^62 - 1; where `usize` is
         // narrower, a saturated length exceeds every source.
-        let length = usize::try_from(length.get()).unwrap_or(usize::MAX);
-        let data = read_payload(io, length)
+        let data_len = usize::try_from(length.get().get()).unwrap_or(usize::MAX);
+        let data = read_payload(io, data_len)
             .await
             .context(read_crypto_error::DataSnafu)?;
-        Ok(Crypto { offset, data })
+        Ok(Crypto {
+            offset,
+            length_width: length.width(),
+            data,
+        })
     }
 
     /// Failures of reading a CRYPTO frame.
@@ -187,7 +202,7 @@ pub mod codec {
         #[snafu(transparent)]
         Invalid {
             /// The broken limit.
-            source: DataEndError,
+            source: InvalidDataError,
         },
         /// The receiver stopped accepting bytes or failed.
         #[snafu(display("CRYPTO write failed"))]

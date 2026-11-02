@@ -1,19 +1,23 @@
 //! NEW_TOKEN frames ([RFC 9000 §19.7]).
 //!
 //! [RFC 9000 §19.7]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.7
-use super::{Head, LengthError, length_field_len, type_value, type_var_int};
-use crate::var_int::VarInt;
+use super::{Head, LengthError, type_value, type_var_int};
+use crate::var_int::{VarInt, VarIntWidth};
 use bytes::Buf;
 use snafu::Snafu;
 
 /// A NEW_TOKEN frame ([RFC 9000 §19.7]).
 ///
-/// The token is not empty. `D` holds the token: the source's chunk type for
-/// a frame that was read, any [`Buf`] for one to write.
+/// The token is not empty. The Token Length field holds the length of the
+/// token, so only its width is stored. `D` holds the token: the source's
+/// chunk type for a frame that was read, any [`Buf`] for one to write.
 ///
 /// [RFC 9000 §19.7]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.7
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NewToken<D> {
+    /// The width of the Token Length field, which holds the length of
+    /// `token`.
+    pub token_length_width: VarIntWidth,
     /// The opaque token for a future Initial packet.
     pub token: D,
 }
@@ -28,12 +32,11 @@ impl<D> NewToken<D> {
 impl<D: Buf> NewToken<D> {
     /// The number of bytes [`codec::write_new_token`] writes.
     pub fn encoded_len(&self) -> usize {
-        let length = self.token.remaining();
-        1 + length_field_len(length) + length
+        1 + self.token_length_width.encoded_len() + self.token.remaining()
     }
 
-    /// Checks that the token is not empty and that a Length field can state
-    /// its length.
+    /// Checks that the token is not empty and that the Token Length field can
+    /// state its length.
     ///
     /// # Errors
     ///
@@ -43,14 +46,15 @@ impl<D: Buf> NewToken<D> {
         if length == 0 {
             return Err(InvalidNewTokenError::Empty);
         }
-        LengthError::length_field(length)?;
+        LengthError::check(length, self.token_length_width)?;
         Ok(())
     }
 
     /// The fields before the token of a frame that passed validation.
     pub(crate) fn head(&self) -> Head<9> {
-        let length = LengthError::length_field(self.token.remaining()).unwrap_or(VarInt::MAX);
-        Head::new(self.type_value()).var_int(length)
+        // Validation checked that the width holds the token length.
+        let length = VarInt::try_from(self.token.remaining()).unwrap_or(VarInt::ZERO);
+        Head::new(self.type_value()).var_int_of(length, self.token_length_width)
     }
 }
 
@@ -61,7 +65,7 @@ pub enum InvalidNewTokenError {
     /// The token is empty.
     #[snafu(display("NEW_TOKEN token is empty"))]
     Empty,
-    /// The token is longer than a Length field can state.
+    /// The token is longer than the Token Length field can state.
     #[snafu(transparent)]
     Length {
         /// The broken limit.
@@ -82,8 +86,9 @@ pub mod codec {
 
     use super::{InvalidNewTokenError, NewToken};
     use crate::{
+        frame::read_field,
         payload::{ReadPayloadError, read_payload},
-        var_int::codec::{ReadVarIntError, ReadVarIntExt as _},
+        var_int::{VarInt, VarIntField, codec::ReadVarIntError},
     };
     use bytes::Buf;
     use nitori_call::{ReceiverAccess, call};
@@ -99,18 +104,20 @@ pub mod codec {
         F: ReadChunk<Chunk: Default>,
         A: ReceiverAccess<Family = F>,
     {
-        let length = io
-            .read_var_int()
+        let length: VarIntField<VarInt> = read_field(io)
             .await
             .context(read_new_token_error::FieldSnafu)?;
-        if length.get() == 0 {
+        if length.get() == VarInt::ZERO {
             return read_new_token_error::EmptySnafu.fail();
         }
-        let length = usize::try_from(length.get()).unwrap_or(usize::MAX);
-        let token = read_payload(io, length)
+        let token_len = usize::try_from(length.get().get()).unwrap_or(usize::MAX);
+        let token = read_payload(io, token_len)
             .await
             .context(read_new_token_error::TokenSnafu)?;
-        Ok(NewToken { token })
+        Ok(NewToken {
+            token_length_width: length.width(),
+            token,
+        })
     }
 
     /// Failures of reading a NEW_TOKEN frame.
@@ -196,18 +203,49 @@ mod tests {
         InvalidNewTokenError, NewToken,
         codec::{ReadNewTokenError, WriteNewTokenError, WriteNewTokenHostExt as _},
     };
-    use crate::frame::{
-        Extensions, Frame,
-        codec::{ReadFrameError, ReadFrameHostExt as _},
-        tests::assert_round_trip,
+    use crate::{
+        frame::{
+            Extensions, Frame, LengthError,
+            codec::{ReadFrameError, ReadFrameHostExt as _},
+            tests::assert_round_trip,
+        },
+        var_int::VarIntWidth,
     };
 
     #[test]
     fn round_trips() {
         let encoding = assert_round_trip(Frame::NewToken(NewToken {
+            token_length_width: VarIntWidth::One,
             token: &b"token"[..],
         }));
         assert_eq!(encoding, [0x07, 0x05, b't', b'o', b'k', b'e', b'n']);
+        let encoding = assert_round_trip(Frame::NewToken(NewToken {
+            token_length_width: VarIntWidth::Two,
+            token: &b"token"[..],
+        }));
+        assert_eq!(encoding, [0x07, 0x40, 0x05, b't', b'o', b'k', b'e', b'n']);
+    }
+
+    #[test]
+    fn narrow_token_length_fields_are_rejected() {
+        let token = [0; 64];
+        let frame = NewToken {
+            token_length_width: VarIntWidth::One,
+            token: &token[..],
+        };
+        let expected = InvalidNewTokenError::Length {
+            source: LengthError {
+                length: 64,
+                width: VarIntWidth::One,
+            },
+        };
+        assert_eq!(frame.validate(), Err(expected));
+        let mut written = Vec::new();
+        assert!(matches!(
+            written.sync_write_new_token_unpin(frame),
+            Err(WriteNewTokenError::Invalid { source }) if source == expected
+        ));
+        assert!(written.is_empty());
     }
 
     #[test]
@@ -220,7 +258,10 @@ mod tests {
                 ..
             })
         ));
-        let frame = NewToken { token: &b""[..] };
+        let frame = NewToken {
+            token_length_width: VarIntWidth::One,
+            token: &b""[..],
+        };
         assert_eq!(frame.validate(), Err(InvalidNewTokenError::Empty));
         let mut written = Vec::new();
         assert!(matches!(

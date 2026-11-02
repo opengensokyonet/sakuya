@@ -23,6 +23,34 @@
 //! Each frame type has its own module with its struct, the checks its
 //! encoding imposes, and its write operation. [`Frame`] holds any of them.
 //!
+//! # Frame values and their encoding
+//!
+//! A frame value states every detail of its encoding, and converts to bytes
+//! and back without loss: reading a frame and writing it again reproduces
+//! the bytes that were read, and writing a frame and reading it back gives
+//! the same value.
+//!
+//! - Each variable-length integer field is a [`VarIntField`]: its value and
+//!   the width of its encoding, 1, 2, 4 or 8 bytes. Reading keeps the width
+//!   it finds; writing uses the width the field holds, which need not be the
+//!   shortest. [`VarIntField::shortest`] gives the shortest encoding that a
+//!   sender normally uses.
+//! - A Length field whose value is the length of a payload field (the Length
+//!   of CRYPTO, STREAM and DATAGRAM, the Token Length of NEW_TOKEN, the
+//!   Reason Phrase Length of CONNECTION_CLOSE) stores only its width; the
+//!   ACK Range Count of ACK likewise. Writing checks that the width can
+//!   state the length.
+//! - Optional fields are present or absent as the Frame Type announces them:
+//!   the Offset and Length of STREAM and the Length of DATAGRAM are
+//!   `Option`s, so a STREAM frame with the OFF bit set and offset 0 is
+//!   distinct from one without the bit.
+//! - An ACK frame holds its fields as encoded; [`ack::Ack::packet_ranges`]
+//!   computes the acknowledged packet numbers from them.
+//!
+//! The Frame Type is the exception: it must use its shortest encoding
+//! ([RFC 9000 §12.4]), so a frame value does not store its width. Reading
+//! rejects a longer encoding, and writing always uses the shortest.
+//!
 //! # Reading
 //!
 //! [`codec::read_frame`] reads one frame as a `nitori_call` operation.
@@ -31,13 +59,15 @@
 //! of the source, of the type parameter `D`: subslices of a byte slice and
 //! `Bytes` that share the storage of a `Bytes` source, so reading copies no
 //! payload. These are STREAM, CRYPTO and DATAGRAM data, NEW_TOKEN tokens and
-//! CONNECTION_CLOSE reason phrases. The ranges of an ACK frame are collected
-//! into [`ack::AckRanges`].
+//! CONNECTION_CLOSE reason phrases. The ACK Ranges of an ACK frame are
+//! collected into [`ack::AckRanges`].
 //!
 //! Reading checks what the encoding alone determines: that every field is
 //! present, and the limits the frame definitions state for single fields,
-//! such as the 2<sup>62</sup> − 1 bound on the end of STREAM and CRYPTO data
-//! or the lengths a NEW_CONNECTION_ID connection ID may have. Whether a frame
+//! and the rules that tie fields of one frame together, such as the
+//! 2<sup>62</sup> − 1 bound on the end of STREAM and CRYPTO data, ACK ranges
+//! that do not reach below packet number 0, or a NEW_CONNECTION_ID Retire
+//! Prior To that does not exceed its Sequence Number. Whether a frame
 //! is allowed in the packet type, whether a stream exists or may be opened,
 //! and flow control are for the receiver of the frame to check.
 //!
@@ -48,14 +78,21 @@
 //! not enabled ([RFC 9221]).
 //!
 //! ```
-//! use sakuya_wire::frame::{Extensions, Frame, Frames};
+//! use sakuya_wire::{
+//!     frame::{Extensions, Frame, Frames},
+//!     var_int::VarIntWidth,
+//! };
 //!
-//! // PING, then a STREAM frame with LEN and FIN on stream 4.
-//! let payload = [0x01, 0x0b, 0x04, 0x02, b'h', b'i'];
+//! // PING, then a STREAM frame with LEN and FIN on stream 4, whose Stream ID
+//! // takes two bytes.
+//! let payload = [0x01, 0x0b, 0x40, 0x04, 0x02, b'h', b'i'];
 //! let mut frames = Frames::new(&payload[..], Extensions::NONE);
 //! assert!(matches!(frames.next(), Some(Ok(Frame::Ping(_)))));
 //! let Some(Ok(Frame::Stream(stream))) = frames.next() else { panic!() };
-//! assert_eq!((stream.stream_id.get().get(), stream.data, stream.fin), (4, &b"hi"[..], true));
+//! assert_eq!(stream.stream_id.get().index(), 1);
+//! assert_eq!(stream.stream_id.width(), VarIntWidth::Two);
+//! assert_eq!((stream.offset, stream.length_width), (None, Some(VarIntWidth::One)));
+//! assert_eq!((stream.data, stream.fin), (&b"hi"[..], true));
 //! assert!(frames.next().is_none());
 //! ```
 //!
@@ -63,14 +100,19 @@
 //!
 //! Every frame type has `encoded_len` and a write operation in its module's
 //! `codec`, such as [`stream::codec::write_stream`]; [`codec::write_frame`]
-//! writes any [`Frame`]. Writing first checks the frame and writes nothing
-//! if a field breaks a limit of the encoding ([`InvalidFrameError`]); a sink
-//! that stops accepting bytes keeps the bytes it accepted. `encoded_len`
-//! gives the length in advance, so that a packet encoder can choose frames
-//! and payload sizes before writing. [`stream::Stream::max_data_len`] and
-//! [`crypto::Crypto::max_data_len`] give the largest amount of data that fits
-//! a given room, taking into account that the Length field grows with the
-//! data. Payload fields are written from any [`bytes::Buf`].
+//! writes any [`Frame`]. Writing writes the encoding the value states and
+//! chooses nothing: the width of each field comes from the value. It first
+//! checks the frame and writes nothing if a field breaks a limit of the
+//! encoding ([`InvalidFrameError`]), such as a Length field too narrow for
+//! its payload; a sink that stops accepting bytes keeps the bytes it
+//! accepted. `encoded_len` gives the length in advance, so that a packet
+//! encoder can choose frames and payload sizes before writing.
+//! [`stream::Stream::max_data_len`] and [`crypto::Crypto::max_data_len`]
+//! give the largest amount of data that fits a given room, taking into
+//! account that the shortest Length field grows with the data.
+//! [`ack::Ack::from_packet_ranges`] states packet number ranges as an ACK
+//! frame in the shortest encodings. Payload fields are written from any
+//! [`bytes::Buf`].
 //!
 //! A STREAM or DATAGRAM frame without a Length field extends to the end of the
 //! packet; whoever writes one must not append anything after it.
@@ -86,10 +128,13 @@
 //! [RFC 9221]: https://www.rfc-editor.org/rfc/rfc9221.html
 //! [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html
 //! [RFC 9002 §2]: https://www.rfc-editor.org/rfc/rfc9002.html#section-2
-use crate::var_int::VarInt;
+use crate::var_int::{
+    VarInt, VarIntField, VarIntWidth,
+    codec::{ReadVarIntError, read_var_int_field},
+};
 use bytes::Buf;
-use core::iter::FusedIterator;
-use nitori_call::{Direct, Receiver};
+use core::{convert::Infallible, iter::FusedIterator};
+use nitori_call::{Direct, Receiver, ReceiverAccess};
 use nitori_io::{Read, ReadChunk};
 use snafu::Snafu;
 
@@ -507,8 +552,9 @@ impl<D: Buf> Frame<D> {
 /// A frame breaks a limit of its encoding; each variant holds the check of
 /// that frame type.
 ///
-/// These are the limits that reading enforces, so a frame that passes
-/// validation reads back to the same values.
+/// These are the limits that reading enforces, and the agreement between a
+/// Length field's width and its payload, so a frame that passes validation
+/// reads back to the same value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(module(invalid_frame_error), visibility(pub(crate)))]
 pub enum InvalidFrameError {
@@ -522,7 +568,7 @@ pub enum InvalidFrameError {
     #[snafu(display("invalid CRYPTO frame"))]
     Crypto {
         /// The broken limit.
-        source: DataEndError,
+        source: InvalidDataError,
     },
     /// An invalid NEW_TOKEN frame.
     #[snafu(display("invalid NEW_TOKEN frame"))]
@@ -534,7 +580,7 @@ pub enum InvalidFrameError {
     #[snafu(display("invalid STREAM frame"))]
     Stream {
         /// The broken limit.
-        source: DataEndError,
+        source: InvalidDataError,
     },
     /// An invalid NEW_CONNECTION_ID frame.
     #[snafu(display("invalid NEW_CONNECTION_ID frame"))]
@@ -588,25 +634,65 @@ impl DataEndError {
     }
 }
 
-/// A payload field is longer than a Length field can state.
+/// A payload field is longer than its Length field can state at the
+/// field's width.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(display("field of {length} bytes is longer than 2^62 - 1"))]
+#[snafu(display(
+    "field of {length} bytes is longer than a {}-byte Length field can state",
+    width.encoded_len()
+))]
 pub struct LengthError {
-    /// The length of the field.
+    /// The length of the payload field.
     pub length: usize,
+    /// The width of the Length field.
+    pub width: VarIntWidth,
 }
 
 impl LengthError {
-    /// The Length field for a payload of `length` bytes.
-    pub(crate) fn length_field(length: usize) -> Result<VarInt, Self> {
-        VarInt::try_from(length).map_err(|_| Self { length })
+    /// The value of a Length field of `width` for a payload of `length`
+    /// bytes.
+    pub(crate) fn check(length: usize, width: VarIntWidth) -> Result<VarInt, Self> {
+        match VarInt::try_from(length) {
+            Ok(value) if width.fits(value) => Ok(value),
+            _ => Err(Self { length, width }),
+        }
     }
 }
 
-/// The encoded length of a Length field for `length` bytes; a length that
-/// [`LengthError`] rejects counts as the longest encoding.
+/// The data of a STREAM or CRYPTO frame breaks a limit of the encoding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+pub enum InvalidDataError {
+    /// The data ends beyond 2<sup>62</sup> − 1.
+    #[snafu(transparent)]
+    DataEnd {
+        /// The broken limit.
+        source: DataEndError,
+    },
+    /// The Length field is too narrow for the length of the data.
+    #[snafu(transparent)]
+    Length {
+        /// The broken limit.
+        source: LengthError,
+    },
+}
+
+/// The encoded length of the shortest Length field for `length` bytes; a
+/// length above 2<sup>62</sup> − 1 counts as the longest encoding.
 pub(crate) fn length_field_len(length: usize) -> usize {
     VarInt::try_from(length).map_or(VarInt::MAX_ENCODED_LEN, VarInt::encoded_len)
+}
+
+/// Reads a variable-length integer field of a type that every value
+/// converts into.
+pub(crate) async fn read_field<T, F, A>(
+    io: &mut A,
+) -> Result<VarIntField<T>, ReadVarIntError<F::Error>>
+where
+    T: Copy + Into<VarInt> + TryFrom<VarInt, Error = Infallible>,
+    F: Read,
+    A: ReceiverAccess<Family = F>,
+{
+    read_var_int_field(io).await.map_err(ReadVarIntError::from)
 }
 
 /// The largest `n` with `fixed + len(n) + n <= room` and `n <= limit`, where
@@ -648,8 +734,21 @@ impl<const N: usize> Head<N> {
 
     /// Appends the shortest encoding of `value`.
     pub(crate) fn var_int(self, value: VarInt) -> Self {
-        let (encoding, encoded_len) = value.to_encoding();
+        self.var_int_of(value, VarIntWidth::shortest(value))
+    }
+
+    /// Appends the encoding of `value` of `width`, which holds the value.
+    pub(crate) fn var_int_of(self, value: VarInt, width: VarIntWidth) -> Self {
+        let (encoding, encoded_len) = value.to_encoding_of(width);
         self.bytes(&encoding[..encoded_len])
+    }
+
+    /// Appends the encoding of `field` at its width.
+    pub(crate) fn field<T>(self, field: VarIntField<T>) -> Self
+    where
+        T: Copy + Into<VarInt> + TryFrom<VarInt>,
+    {
+        self.var_int_of(field.to_var_int(), field.width())
     }
 
     /// Appends `bytes`.

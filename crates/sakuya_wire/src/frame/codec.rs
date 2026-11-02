@@ -19,17 +19,22 @@
 //!     max_data::MaxData,
 //!     stream::Stream,
 //! };
-//! use sakuya_wire::{stream_id::StreamId, var_int::VarInt};
+//! use sakuya_wire::{
+//!     stream_id::StreamId,
+//!     var_int::{VarInt, VarIntField, VarIntWidth},
+//! };
 //!
 //! let mut output = Vec::new();
-//! let max_data = Frame::<&[u8]>::MaxData(MaxData { maximum_data: VarInt::from(1_000_000u32) });
+//! let max_data = Frame::<&[u8]>::MaxData(MaxData {
+//!     maximum_data: VarIntField::shortest(VarInt::from(1_000_000u32)),
+//! });
 //! output.sync_write_frame_unpin(max_data.clone()).unwrap();
 //! let stream = Frame::Stream(Stream {
-//!     stream_id: StreamId::from_var_int(VarInt::from(4u8)),
-//!     offset: VarInt::ZERO,
+//!     stream_id: VarIntField::shortest(StreamId::from_var_int(VarInt::from(4u8))),
+//!     offset: None,
+//!     length_width: Some(VarIntWidth::One),
 //!     data: &b"hello"[..],
 //!     fin: true,
-//!     has_length: true,
 //! });
 //! output.sync_write_frame_unpin(stream.clone()).unwrap();
 //!
@@ -42,6 +47,15 @@
 //! // A frame cut short is an incomplete failure.
 //! let mut input = &output[..3];
 //! assert!(input.sync_read_frame_unpin(Extensions::NONE).unwrap_err().is_incomplete());
+//!
+//! // A longer encoding of a field is kept, and written back as it was.
+//! let mut input = &[0x10, 0x80, 0x00, 0x00, 0x05][..];
+//! let frame = input.sync_read_frame_unpin(Extensions::NONE).unwrap();
+//! let Frame::MaxData(max_data) = &frame else { panic!() };
+//! assert_eq!(max_data.maximum_data.width(), VarIntWidth::Four);
+//! let mut output = Vec::new();
+//! output.sync_write_frame_unpin(frame).unwrap();
+//! assert_eq!(output, [0x10, 0x80, 0x00, 0x00, 0x05]);
 //! ```
 // `#[call]` generates constructors, fields and extension traits without
 // documentation comments; the module documentation above describes them.

@@ -2,15 +2,17 @@
 //!
 //! [RFC 9000 §19.16]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.16
 use super::{Head, type_value, type_var_int};
-use crate::var_int::VarInt;
+use crate::var_int::{VarInt, VarIntField};
 
 /// A RETIRE_CONNECTION_ID frame ([RFC 9000 §19.16]).
+///
+/// Each field keeps the width of its variable-length integer encoding.
 ///
 /// [RFC 9000 §19.16]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.16
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RetireConnectionId {
     /// The sequence number of the connection ID being retired.
-    pub sequence_number: VarInt,
+    pub sequence_number: VarIntField<VarInt>,
 }
 
 impl RetireConnectionId {
@@ -26,7 +28,7 @@ impl RetireConnectionId {
 
     /// The encoded frame.
     pub(crate) fn head(&self) -> Head<9> {
-        Head::new(self.type_value()).var_int(self.sequence_number)
+        Head::new(self.type_value()).field(self.sequence_number)
     }
 }
 
@@ -42,7 +44,7 @@ pub mod codec {
     #![allow(missing_docs)]
 
     use super::RetireConnectionId;
-    use crate::var_int::codec::{ReadVarIntError, ReadVarIntExt as _};
+    use crate::{frame::read_field, var_int::codec::ReadVarIntError};
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{calls::WriteAllError, prelude::*};
 
@@ -51,7 +53,7 @@ pub mod codec {
         io: &mut A,
     ) -> Result<RetireConnectionId, ReadVarIntError<F::Error>> {
         Ok(RetireConnectionId {
-            sequence_number: io.read_var_int().await?,
+            sequence_number: read_field(io).await?,
         })
     }
 
@@ -75,13 +77,13 @@ mod tests {
     use super::RetireConnectionId;
     use crate::{
         frame::{Frame, tests::assert_round_trip},
-        var_int::VarInt,
+        var_int::{VarInt, VarIntField},
     };
 
     #[test]
     fn round_trips() {
         let frame = RetireConnectionId {
-            sequence_number: VarInt::from(9u8),
+            sequence_number: VarIntField::shortest(VarInt::from(9u8)),
         };
         assert_eq!(
             assert_round_trip(Frame::RetireConnectionId(frame)),

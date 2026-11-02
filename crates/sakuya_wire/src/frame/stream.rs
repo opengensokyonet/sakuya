@@ -2,9 +2,13 @@
 //!
 //! [RFC 9000 §19.8]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.8
 use super::{
-    DataEndError, Head, length_field_len, max_len_with_length_field, type_value, type_var_int,
+    DataEndError, Head, InvalidDataError, LengthError, max_len_with_length_field, type_value,
+    type_var_int,
 };
-use crate::{stream_id::StreamId, var_int::VarInt};
+use crate::{
+    stream_id::StreamId,
+    var_int::{VarInt, VarIntField, VarIntWidth},
+};
 use bytes::Buf;
 
 /// The bits of a STREAM frame type ([RFC 9000 §19.8]).
@@ -18,26 +22,33 @@ pub(crate) mod bits {
 
 /// A STREAM frame ([RFC 9000 §19.8]), of any of the types `0x08..=0x0f`.
 ///
-/// The Frame Type is derived from the fields: the OFF bit is set when
-/// `offset` is not zero, the LEN bit when `has_length` is true, and the FIN
-/// bit when `fin` is true. The end of the data, `offset` plus its length, is
-/// at most [`VarInt::MAX`]. `D` holds the data: the source's chunk type for a
-/// frame that was read, any [`Buf`] for one to write.
+/// The fields state the Frame Type: the OFF bit is set when the frame has an
+/// Offset field, the LEN bit when it has a Length field, and the FIN bit
+/// when `fin` is true. An Offset field may hold 0, so a frame with the OFF
+/// bit set and offset 0 is distinct from one without the bit. The Length
+/// field holds the length of the data, so only its width is stored. Every
+/// variable-length integer keeps the width of its encoding.
+///
+/// The end of the data, its offset plus its length, is at most
+/// [`VarInt::MAX`]. `D` holds the data: the source's chunk type for a frame
+/// that was read, any [`Buf`] for one to write.
 ///
 /// [RFC 9000 §19.8]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.8
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Stream<D> {
-    /// The stream the data belongs to.
-    pub stream_id: StreamId,
-    /// The byte offset of the data in the stream.
-    pub offset: VarInt,
+    /// The Stream ID field: the stream the data belongs to.
+    pub stream_id: VarIntField<StreamId>,
+    /// The Offset field, present when the OFF bit is set: the byte offset of
+    /// the data in the stream. Without it, the data starts at offset 0.
+    pub offset: Option<VarIntField<VarInt>>,
+    /// The width of the Length field, present when the LEN bit is set; the
+    /// field holds the length of `data`. Without a Length field, the data
+    /// extends to the end of the packet.
+    pub length_width: Option<VarIntWidth>,
     /// The stream data.
     pub data: D,
-    /// Whether the data ends the stream.
+    /// Whether the data ends the stream: the FIN bit.
     pub fin: bool,
-    /// Whether the frame carries a Length field. Without one, the data
-    /// extends to the end of the packet.
-    pub has_length: bool,
 }
 
 /// The longest encoding of the fields before the data.
@@ -47,10 +58,10 @@ impl<D> Stream<D> {
     /// The Frame Type value, which the OFF, LEN and FIN bits complete.
     pub const fn type_value(&self) -> VarInt {
         let mut value = type_value::STREAM;
-        if self.offset.get() != 0 {
+        if self.offset.is_some() {
             value |= bits::OFF;
         }
-        if self.has_length {
+        if self.length_width.is_some() {
             value |= bits::LEN;
         }
         if self.fin {
@@ -59,21 +70,31 @@ impl<D> Stream<D> {
         type_var_int(value)
     }
 
-    /// The largest data length for which a STREAM frame takes at most `room`
-    /// bytes, or `None` if not even an empty frame fits.
+    /// The byte offset of the data in the stream: the Offset field, or 0
+    /// without one.
+    pub fn data_offset(&self) -> VarInt {
+        self.offset.map_or(VarInt::ZERO, |offset| offset.get())
+    }
+
+    /// The largest data length for which a STREAM frame with these Stream ID
+    /// and Offset fields takes at most `room` bytes, or `None` if not even an
+    /// empty frame fits.
     ///
     /// With `has_length`, the length accounts for the Length field growing
-    /// with the data; without, the frame fills `room` exactly when the data
-    /// is that long. The 2<sup>62</sup> − 1 bound on the end of the data is
-    /// also applied.
+    /// with the data: a frame with that much data and the shortest Length
+    /// field, [`VarIntWidth::shortest`] of the length, fits `room`. Without,
+    /// the frame fills `room` exactly when the data is that long. The
+    /// 2<sup>62</sup> − 1 bound on the end of the data is also applied.
+    ///
+    /// This signature is provisional.
     pub fn max_data_len(
-        stream_id: StreamId,
-        offset: VarInt,
+        stream_id: VarIntField<StreamId>,
+        offset: Option<VarIntField<VarInt>>,
         has_length: bool,
         room: usize,
     ) -> Option<usize> {
-        let fixed = 1 + stream_id.get().encoded_len() + offset_len(offset);
-        let limit = DataEndError::limit(offset);
+        let fixed = 1 + stream_id.encoded_len() + offset.map_or(0, |offset| offset.encoded_len());
+        let limit = DataEndError::limit(offset.map_or(VarInt::ZERO, |offset| offset.get()));
         if has_length {
             max_len_with_length_field(fixed, limit, room)
         } else {
@@ -82,45 +103,40 @@ impl<D> Stream<D> {
     }
 }
 
-/// The encoded length of the Offset field, absent for offset zero.
-fn offset_len(offset: VarInt) -> usize {
-    if offset == VarInt::ZERO {
-        0
-    } else {
-        offset.encoded_len()
-    }
-}
-
 impl<D: Buf> Stream<D> {
     /// The number of bytes [`codec::write_stream`] writes.
     pub fn encoded_len(&self) -> usize {
-        let length = self.data.remaining();
-        let length_len = if self.has_length {
-            length_field_len(length)
-        } else {
-            0
-        };
-        1 + self.stream_id.get().encoded_len() + offset_len(self.offset) + length_len + length
+        1 + self.stream_id.encoded_len()
+            + self.offset.map_or(0, |offset| offset.encoded_len())
+            + self.length_width.map_or(0, VarIntWidth::encoded_len)
+            + self.data.remaining()
     }
 
-    /// Checks the 2<sup>62</sup> − 1 bound on the end of the data.
+    /// Checks the 2<sup>62</sup> − 1 bound on the end of the data, and that
+    /// the Length field, if present, can state the length of the data.
     ///
     /// # Errors
     ///
-    /// [`DataEndError`] if the data ends beyond it.
-    pub fn validate(&self) -> Result<(), DataEndError> {
-        DataEndError::check(self.offset, self.data.remaining() as u64)
+    /// [`InvalidDataError`] for the broken limit.
+    pub fn validate(&self) -> Result<(), InvalidDataError> {
+        let length = self.data.remaining();
+        DataEndError::check(self.data_offset(), length as u64)?;
+        if let Some(width) = self.length_width {
+            LengthError::check(length, width)?;
+        }
+        Ok(())
     }
 
     /// The fields before the data of a frame that passed validation.
     pub(crate) fn head(&self) -> Head<HEAD_MAX> {
-        let mut head = Head::new(self.type_value()).var_int(self.stream_id.get());
-        if self.offset != VarInt::ZERO {
-            head = head.var_int(self.offset);
+        let mut head = Head::new(self.type_value()).field(self.stream_id);
+        if let Some(offset) = self.offset {
+            head = head.field(offset);
         }
-        if self.has_length {
-            // Validation bounds the data length by 2^62 - 1.
-            head = head.var_int(VarInt::try_from(self.data.remaining()).unwrap_or(VarInt::MAX));
+        if let Some(width) = self.length_width {
+            // Validation checked that the width holds the data length.
+            let length = VarInt::try_from(self.data.remaining()).unwrap_or(VarInt::ZERO);
+            head = head.var_int_of(length, width);
         }
         head
     }
@@ -139,15 +155,12 @@ pub mod codec {
 
     use super::{Stream, bits};
     use crate::{
-        frame::DataEndError,
+        frame::{DataEndError, InvalidDataError, read_field},
         payload::{ReadPayloadError, read_payload, read_payload_to_end},
-        stream_id::StreamId,
-        var_int::{
-            VarInt,
-            codec::{ReadVarIntError, ReadVarIntExt as _},
-        },
+        var_int::{VarInt, VarIntField, codec::ReadVarIntError},
     };
     use bytes::Buf;
+    use core::convert::Infallible;
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{calls::WriteAllError, prelude::*};
     use snafu::{ResultExt, Snafu};
@@ -164,44 +177,46 @@ pub mod codec {
         A: ReceiverAccess<Family = F>,
     {
         let type_bits = frame_type.get();
-        let stream_id = StreamId::from_var_int(field(io).await?);
+        let stream_id = field(io).await?;
         let offset = if type_bits & bits::OFF != 0 {
-            field(io).await?
+            Some(field(io).await?)
         } else {
-            VarInt::ZERO
+            None
         };
-        let has_length = type_bits & bits::LEN != 0;
-        let data = if has_length {
-            let length = field(io).await?;
-            DataEndError::check(offset, length.get())?;
+        let start = offset.map_or(VarInt::ZERO, |offset: VarIntField<VarInt>| offset.get());
+        let (length_width, data) = if type_bits & bits::LEN != 0 {
+            let length: VarIntField<VarInt> = field(io).await?;
+            DataEndError::check(start, length.get().get())?;
             // The end check bounds the length by 2^62 - 1; where `usize` is
             // narrower, a saturated length exceeds every source.
-            let length = usize::try_from(length.get()).unwrap_or(usize::MAX);
-            read_payload(io, length)
+            let data_len = usize::try_from(length.get().get()).unwrap_or(usize::MAX);
+            let data = read_payload(io, data_len)
                 .await
-                .context(read_stream_error::DataSnafu)?
+                .context(read_stream_error::DataSnafu)?;
+            (Some(length.width()), data)
         } else {
             let data = read_payload_to_end(io)
                 .await
                 .context(read_stream_error::DataSnafu)?;
-            DataEndError::check(offset, data.remaining() as u64)?;
-            data
+            DataEndError::check(start, data.remaining() as u64)?;
+            (None, data)
         };
         Ok(Stream {
             stream_id,
             offset,
+            length_width,
             data,
             fin: type_bits & bits::FIN != 0,
-            has_length,
         })
     }
 
-    async fn field<F: Read, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<VarInt, ReadStreamError<F::Error>> {
-        io.read_var_int()
-            .await
-            .context(read_stream_error::FieldSnafu)
+    async fn field<T, F, A>(io: &mut A) -> Result<VarIntField<T>, ReadStreamError<F::Error>>
+    where
+        T: Copy + Into<VarInt> + TryFrom<VarInt, Error = Infallible>,
+        F: Read,
+        A: ReceiverAccess<Family = F>,
+    {
+        read_field(io).await.context(read_stream_error::FieldSnafu)
     }
 
     /// Failures of reading a STREAM frame.
@@ -276,7 +291,7 @@ pub mod codec {
         #[snafu(transparent)]
         Invalid {
             /// The broken limit.
-            source: DataEndError,
+            source: InvalidDataError,
         },
         /// The receiver stopped accepting bytes or failed.
         #[snafu(display("STREAM write failed"))]

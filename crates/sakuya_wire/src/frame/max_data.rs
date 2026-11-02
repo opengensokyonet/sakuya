@@ -2,15 +2,17 @@
 //!
 //! [RFC 9000 §19.9]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.9
 use super::{Head, type_value, type_var_int};
-use crate::var_int::VarInt;
+use crate::var_int::{VarInt, VarIntField};
 
 /// A MAX_DATA frame ([RFC 9000 §19.9]).
+///
+/// Each field keeps the width of its variable-length integer encoding.
 ///
 /// [RFC 9000 §19.9]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.9
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MaxData {
     /// The maximum amount of data that can be sent on the connection, in bytes.
-    pub maximum_data: VarInt,
+    pub maximum_data: VarIntField<VarInt>,
 }
 
 impl MaxData {
@@ -26,7 +28,7 @@ impl MaxData {
 
     /// The encoded frame.
     pub(crate) fn head(&self) -> Head<9> {
-        Head::new(self.type_value()).var_int(self.maximum_data)
+        Head::new(self.type_value()).field(self.maximum_data)
     }
 }
 
@@ -42,7 +44,7 @@ pub mod codec {
     #![allow(missing_docs)]
 
     use super::MaxData;
-    use crate::var_int::codec::{ReadVarIntError, ReadVarIntExt as _};
+    use crate::{frame::read_field, var_int::codec::ReadVarIntError};
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{calls::WriteAllError, prelude::*};
 
@@ -51,7 +53,7 @@ pub mod codec {
         io: &mut A,
     ) -> Result<MaxData, ReadVarIntError<F::Error>> {
         Ok(MaxData {
-            maximum_data: io.read_var_int().await?,
+            maximum_data: read_field(io).await?,
         })
     }
 
@@ -75,13 +77,13 @@ mod tests {
     use super::MaxData;
     use crate::{
         frame::{Frame, tests::assert_round_trip},
-        var_int::VarInt,
+        var_int::{VarInt, VarIntField},
     };
 
     #[test]
     fn round_trips() {
         let frame = MaxData {
-            maximum_data: VarInt::from(16_384u16),
+            maximum_data: VarIntField::shortest(VarInt::from(16_384u16)),
         };
         assert_eq!(
             assert_round_trip(Frame::MaxData(frame)),

@@ -3,17 +3,19 @@
 //! [RFC 9000 §19.13]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.13
 use super::{Head, type_value, type_var_int};
 use crate::stream_id::StreamId;
-use crate::var_int::VarInt;
+use crate::var_int::{VarInt, VarIntField};
 
 /// A STREAM_DATA_BLOCKED frame ([RFC 9000 §19.13]).
+///
+/// Each field keeps the width of its variable-length integer encoding.
 ///
 /// [RFC 9000 §19.13]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.13
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StreamDataBlocked {
     /// The blocked stream.
-    pub stream_id: StreamId,
+    pub stream_id: VarIntField<StreamId>,
     /// The offset of the stream at which blocking occurred.
-    pub maximum_stream_data: VarInt,
+    pub maximum_stream_data: VarIntField<VarInt>,
 }
 
 impl StreamDataBlocked {
@@ -30,8 +32,8 @@ impl StreamDataBlocked {
     /// The encoded frame.
     pub(crate) fn head(&self) -> Head<17> {
         Head::new(self.type_value())
-            .var_int(VarInt::from(self.stream_id))
-            .var_int(self.maximum_stream_data)
+            .field(self.stream_id)
+            .field(self.maximum_stream_data)
     }
 }
 
@@ -47,8 +49,7 @@ pub mod codec {
     #![allow(missing_docs)]
 
     use super::StreamDataBlocked;
-    use super::StreamId;
-    use crate::var_int::codec::{ReadVarIntError, ReadVarIntExt as _};
+    use crate::{frame::read_field, var_int::codec::ReadVarIntError};
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{calls::WriteAllError, prelude::*};
 
@@ -57,8 +58,8 @@ pub mod codec {
         io: &mut A,
     ) -> Result<StreamDataBlocked, ReadVarIntError<F::Error>> {
         Ok(StreamDataBlocked {
-            stream_id: StreamId::from_var_int(io.read_var_int().await?),
-            maximum_stream_data: io.read_var_int().await?,
+            stream_id: read_field(io).await?,
+            maximum_stream_data: read_field(io).await?,
         })
     }
 
@@ -83,14 +84,14 @@ mod tests {
     use crate::stream_id::StreamId;
     use crate::{
         frame::{Frame, tests::assert_round_trip},
-        var_int::VarInt,
+        var_int::{VarInt, VarIntField},
     };
 
     #[test]
     fn round_trips() {
         let frame = StreamDataBlocked {
-            stream_id: StreamId::from_var_int(VarInt::from(2u8)),
-            maximum_stream_data: VarInt::from(63u8),
+            stream_id: VarIntField::shortest(StreamId::from_var_int(VarInt::from(2u8))),
+            maximum_stream_data: VarIntField::shortest(VarInt::from(63u8)),
         };
         assert_eq!(
             assert_round_trip(Frame::StreamDataBlocked(frame)),

@@ -3,27 +3,32 @@
 //!
 //! [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html#section-4
 use super::{Head, type_value, type_var_int};
-use crate::{application_error::ApplicationErrorCode, stream_id::StreamId, var_int::VarInt};
+use crate::{
+    application_error::ApplicationErrorCode,
+    stream_id::StreamId,
+    var_int::{VarInt, VarIntField},
+};
 use snafu::Snafu;
 
 /// A RESET_STREAM_AT frame, type `0x24`, as specified by the Internet-Draft
 /// [draft-ietf-quic-reliable-stream-reset-11] §4.
 ///
 /// It is a RESET_STREAM that also states how much of the stream must still
-/// be delivered reliably. `reliable_size` is at most `final_size`.
+/// be delivered reliably. `reliable_size` is at most `final_size`. Each field
+/// keeps the width of its variable-length integer encoding.
 ///
 /// [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html#section-4
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ResetStreamAt {
     /// The stream being terminated.
-    pub stream_id: StreamId,
+    pub stream_id: VarIntField<StreamId>,
     /// The application protocol error code.
-    pub application_error_code: ApplicationErrorCode,
+    pub application_error_code: VarIntField<ApplicationErrorCode>,
     /// The final size of the stream, in bytes.
-    pub final_size: VarInt,
+    pub final_size: VarIntField<VarInt>,
     /// The amount of data, from the start of the stream, that must be
     /// delivered to the application despite the reset.
-    pub reliable_size: VarInt,
+    pub reliable_size: VarIntField<VarInt>,
 }
 
 impl ResetStreamAt {
@@ -43,16 +48,16 @@ impl ResetStreamAt {
     ///
     /// [`ReliableSizeError`] otherwise.
     pub fn validate(&self) -> Result<(), ReliableSizeError> {
-        ReliableSizeError::check(self.final_size, self.reliable_size)
+        ReliableSizeError::check(self.final_size.get(), self.reliable_size.get())
     }
 
     /// The encoded frame.
     pub(crate) fn head(&self) -> Head<33> {
         Head::new(self.type_value())
-            .var_int(self.stream_id.get())
-            .var_int(self.application_error_code.get())
-            .var_int(self.final_size)
-            .var_int(self.reliable_size)
+            .field(self.stream_id)
+            .field(self.application_error_code)
+            .field(self.final_size)
+            .field(self.reliable_size)
     }
 }
 
@@ -93,13 +98,10 @@ pub mod codec {
 
     use super::{ReliableSizeError, ResetStreamAt};
     use crate::{
-        application_error::ApplicationErrorCode,
-        stream_id::StreamId,
-        var_int::{
-            VarInt,
-            codec::{ReadVarIntError, ReadVarIntExt as _},
-        },
+        frame::read_field,
+        var_int::{VarInt, VarIntField, codec::ReadVarIntError},
     };
+    use core::convert::Infallible;
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{calls::WriteAllError, prelude::*};
     use snafu::{ResultExt, Snafu};
@@ -108,11 +110,11 @@ pub mod codec {
     pub(crate) async fn read_reset_stream_at<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
     ) -> Result<ResetStreamAt, ReadResetStreamAtError<F::Error>> {
-        let stream_id = StreamId::from_var_int(field(io).await?);
-        let application_error_code = ApplicationErrorCode::new(field(io).await?);
-        let final_size = field(io).await?;
-        let reliable_size = field(io).await?;
-        ReliableSizeError::check(final_size, reliable_size)?;
+        let stream_id = field(io).await?;
+        let application_error_code = field(io).await?;
+        let final_size: VarIntField<VarInt> = field(io).await?;
+        let reliable_size: VarIntField<VarInt> = field(io).await?;
+        ReliableSizeError::check(final_size.get(), reliable_size.get())?;
         Ok(ResetStreamAt {
             stream_id,
             application_error_code,
@@ -121,10 +123,13 @@ pub mod codec {
         })
     }
 
-    async fn field<F: Read, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<VarInt, ReadResetStreamAtError<F::Error>> {
-        io.read_var_int()
+    async fn field<T, F, A>(io: &mut A) -> Result<VarIntField<T>, ReadResetStreamAtError<F::Error>>
+    where
+        T: Copy + Into<VarInt> + TryFrom<VarInt, Error = Infallible>,
+        F: Read,
+        A: ReceiverAccess<Family = F>,
+    {
+        read_field(io)
             .await
             .context(read_reset_stream_at_error::FieldSnafu)
     }
@@ -198,15 +203,17 @@ mod tests {
             tests::assert_round_trip,
         },
         stream_id::StreamId,
-        var_int::VarInt,
+        var_int::{VarInt, VarIntField},
     };
 
     fn frame(final_size: u16, reliable_size: u16) -> ResetStreamAt {
         ResetStreamAt {
-            stream_id: StreamId::from_var_int(VarInt::ZERO),
-            application_error_code: ApplicationErrorCode::new(VarInt::from(1u8)),
-            final_size: VarInt::from(final_size),
-            reliable_size: VarInt::from(reliable_size),
+            stream_id: VarIntField::shortest(StreamId::from_var_int(VarInt::ZERO)),
+            application_error_code: VarIntField::shortest(ApplicationErrorCode::new(VarInt::from(
+                1u8,
+            ))),
+            final_size: VarIntField::shortest(VarInt::from(final_size)),
+            reliable_size: VarIntField::shortest(VarInt::from(reliable_size)),
         }
     }
 

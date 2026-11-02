@@ -4,21 +4,22 @@
 use super::{Head, type_value, type_var_int};
 use crate::{
     connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken},
-    var_int::VarInt,
+    var_int::{VarInt, VarIntField},
 };
 use snafu::Snafu;
 
 /// A NEW_CONNECTION_ID frame ([RFC 9000 §19.15]).
 ///
-/// `retire_prior_to` is at most `sequence_number`.
+/// `retire_prior_to` is at most `sequence_number`. Each variable-length
+/// integer field keeps the width of its encoding.
 ///
 /// [RFC 9000 §19.15]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.15
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NewConnectionId {
     /// The sequence number the sender assigned to the connection ID.
-    pub sequence_number: VarInt,
+    pub sequence_number: VarIntField<VarInt>,
     /// The sequence number below which connection IDs are to be retired.
-    pub retire_prior_to: VarInt,
+    pub retire_prior_to: VarIntField<VarInt>,
     /// The connection ID: 1 to 20 bytes.
     pub connection_id: NonEmptyCid,
     /// The Stateless Reset Token for the connection ID.
@@ -45,7 +46,7 @@ impl NewConnectionId {
     ///
     /// [`RetirePriorToError`] otherwise.
     pub fn validate(&self) -> Result<(), RetirePriorToError> {
-        RetirePriorToError::check(self.sequence_number, self.retire_prior_to)
+        RetirePriorToError::check(self.sequence_number.get(), self.retire_prior_to.get())
     }
 
     /// The encoded frame.
@@ -53,8 +54,8 @@ impl NewConnectionId {
         let connection_id = self.connection_id.as_bytes();
         // A connection ID has at most 20 bytes, so its length fits a byte.
         Head::new(self.type_value())
-            .var_int(self.sequence_number)
-            .var_int(self.retire_prior_to)
+            .field(self.sequence_number)
+            .field(self.retire_prior_to)
             .bytes(&[connection_id.len() as u8])
             .bytes(connection_id)
             .bytes(self.stateless_reset_token.as_bytes())
@@ -102,10 +103,8 @@ pub mod codec {
             EmptyCidError, NonEmptyCid, StatelessResetToken,
             codec::{ReadConnectionIdError, ReadConnectionIdExt as _},
         },
-        var_int::{
-            VarInt,
-            codec::{ReadVarIntError, ReadVarIntExt as _},
-        },
+        frame::read_field,
+        var_int::{VarInt, VarIntField, codec::ReadVarIntError},
     };
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{
@@ -130,7 +129,7 @@ pub mod codec {
             .read_array::<{ StatelessResetToken::LEN }>()
             .await
             .context(read_new_connection_id_error::StatelessResetTokenSnafu)?;
-        RetirePriorToError::check(sequence_number, retire_prior_to)?;
+        RetirePriorToError::check(sequence_number.get(), retire_prior_to.get())?;
         Ok(NewConnectionId {
             sequence_number,
             retire_prior_to,
@@ -141,8 +140,8 @@ pub mod codec {
 
     async fn field<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-    ) -> Result<VarInt, ReadNewConnectionIdError<F::Error>> {
-        io.read_var_int()
+    ) -> Result<VarIntField<VarInt>, ReadNewConnectionIdError<F::Error>> {
+        read_field(io)
             .await
             .context(read_new_connection_id_error::FieldSnafu)
     }
@@ -237,15 +236,15 @@ mod tests {
             codec::{ReadFrameError, ReadFrameHostExt as _},
             tests::assert_round_trip,
         },
-        var_int::VarInt,
+        var_int::{VarInt, VarIntField},
     };
 
     const TOKEN: [u8; 16] = *b"0123456789abcdef";
 
     fn frame(sequence_number: u8, retire_prior_to: u8, cid: &[u8]) -> NewConnectionId {
         NewConnectionId {
-            sequence_number: VarInt::from(sequence_number),
-            retire_prior_to: VarInt::from(retire_prior_to),
+            sequence_number: VarIntField::shortest(VarInt::from(sequence_number)),
+            retire_prior_to: VarIntField::shortest(VarInt::from(retire_prior_to)),
             connection_id: NonEmptyCid::try_from(cid).unwrap(),
             stateless_reset_token: StatelessResetToken::new(TOKEN),
         }

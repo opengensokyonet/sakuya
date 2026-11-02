@@ -2,10 +2,16 @@
 //!
 //! [RFC 9000 §19.14]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.14
 use super::{Head, type_value, type_var_int};
-use crate::{stream_count::StreamCount, stream_id::Directionality, var_int::VarInt};
+use crate::{
+    stream_count::StreamCount,
+    stream_id::Directionality,
+    var_int::{VarInt, VarIntField},
+};
 
 /// A STREAMS_BLOCKED frame ([RFC 9000 §19.14]): type `0x16` for
 /// bidirectional streams, `0x17` for unidirectional ones.
+///
+/// The Maximum Streams field keeps the width of its encoding.
 ///
 /// [RFC 9000 §19.14]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.14
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -13,7 +19,7 @@ pub struct StreamsBlocked {
     /// The type of streams that could not be opened.
     pub directionality: Directionality,
     /// The stream limit at the time the frame was sent.
-    pub maximum_streams: StreamCount,
+    pub maximum_streams: VarIntField<StreamCount>,
 }
 
 impl StreamsBlocked {
@@ -32,7 +38,7 @@ impl StreamsBlocked {
 
     /// The encoded frame.
     pub(crate) fn head(&self) -> Head<9> {
-        Head::new(self.type_value()).var_int(self.maximum_streams.to_var_int())
+        Head::new(self.type_value()).field(self.maximum_streams)
     }
 }
 
@@ -51,11 +57,11 @@ pub mod codec {
     use crate::{
         stream_count::{StreamCount, StreamCountError},
         stream_id::Directionality,
-        var_int::codec::{ReadVarIntError, ReadVarIntExt as _},
+        var_int::codec::{ReadVarIntError, ReadVarIntFieldError, read_var_int_field},
     };
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{calls::WriteAllError, prelude::*};
-    use snafu::{ResultExt, Snafu};
+    use snafu::{IntoError, Snafu};
 
     /// Reads the count that follows the Frame Type of a frame for streams of
     /// `directionality`.
@@ -63,13 +69,18 @@ pub mod codec {
         io: &mut A,
         directionality: Directionality,
     ) -> Result<StreamsBlocked, ReadStreamsBlockedError<F::Error>> {
-        let maximum_streams = io
-            .read_var_int()
-            .await
-            .context(read_streams_blocked_error::FieldSnafu)?;
+        let maximum_streams =
+            read_var_int_field::<StreamCount, _, _>(io)
+                .await
+                .map_err(|error| match error {
+                    ReadVarIntFieldError::VarInt { source } => {
+                        read_streams_blocked_error::FieldSnafu.into_error(source)
+                    }
+                    ReadVarIntFieldError::Value { source, .. } => source.into(),
+                })?;
         Ok(StreamsBlocked {
             directionality,
-            maximum_streams: StreamCount::try_from(maximum_streams)?,
+            maximum_streams,
         })
     }
 
@@ -117,7 +128,7 @@ mod tests {
         },
         stream_count::{StreamCount, StreamCountError},
         stream_id::Directionality,
-        var_int::VarInt,
+        var_int::{VarInt, VarIntField},
     };
 
     #[test]
@@ -128,7 +139,7 @@ mod tests {
         ] {
             let frame = StreamsBlocked {
                 directionality,
-                maximum_streams: StreamCount::MAX,
+                maximum_streams: VarIntField::shortest(StreamCount::MAX),
             };
             let encoding = assert_round_trip(Frame::StreamsBlocked(frame));
             assert_eq!(encoding[0], type_value);
@@ -138,7 +149,7 @@ mod tests {
     fn type_value_of(unidirectional: bool) -> u8 {
         let bidi = StreamsBlocked {
             directionality: Directionality::Bidirectional,
-            maximum_streams: StreamCount::ZERO,
+            maximum_streams: VarIntField::shortest(StreamCount::ZERO),
         }
         .type_value()
         .get() as u8;
