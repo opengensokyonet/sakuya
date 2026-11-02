@@ -10,3 +10,6 @@ description = "Stream send and receive components for sakuya"
 bytes.workspace = true
 sakuya_wire.workspace = true
 snafu.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
