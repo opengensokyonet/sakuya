@@ -27,6 +27,7 @@ use core::{
     hash::{Hash, Hasher},
 };
 use snafu::Snafu;
+use subtle::ConstantTimeEq as _;
 
 pub mod codec;
 
@@ -514,8 +515,12 @@ pub struct RawConnectionIdLengthError {
 /// A Stateless Reset Token: the 16 bytes that end a stateless reset for the
 /// connection ID it was issued with ([RFC 9000 §10.3]).
 ///
+/// Tokens compare in constant time: how long a comparison takes does not
+/// depend on their bytes ([RFC 9000 §10.3.1]).
+///
 /// [RFC 9000 §10.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-10.3
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+/// [RFC 9000 §10.3.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-10.3.1
+#[derive(Clone, Copy, Eq)]
 pub struct StatelessResetToken([u8; Self::LEN]);
 
 impl StatelessResetToken {
@@ -530,6 +535,19 @@ impl StatelessResetToken {
     /// The bytes of the token.
     pub const fn as_bytes(&self) -> &[u8; Self::LEN] {
         &self.0
+    }
+}
+
+impl PartialEq for StatelessResetToken {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.ct_eq(&other.0).into()
+    }
+}
+
+/// Hashes the bytes, consistently with equality.
+impl Hash for StatelessResetToken {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state);
     }
 }
 

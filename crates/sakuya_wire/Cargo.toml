@@ -11,3 +11,4 @@ bytes.workspace = true
 nitori_call.workspace = true
 nitori_io.workspace = true
 snafu.workspace = true
+subtle.workspace = true

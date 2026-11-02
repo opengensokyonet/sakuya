@@ -168,6 +168,20 @@ fn stateless_reset_token_keeps_its_bytes() {
 }
 
 #[test]
+fn stateless_reset_tokens_compare_every_byte() {
+    let token = StatelessResetToken::new([0x11; 16]);
+    for position in 0..StatelessResetToken::LEN {
+        for flipped in [0x01, 0x80] {
+            let mut bytes = [0x11; 16];
+            bytes[position] ^= flipped;
+            assert_ne!(StatelessResetToken::new(bytes), token, "{position}");
+        }
+    }
+    let set: HashSet<StatelessResetToken> = [token].into();
+    assert!(set.contains(&StatelessResetToken::new([0x11; 16])));
+}
+
+#[test]
 fn length_prefixed_connection_ids_round_trip() {
     for length in [0, 1, 8, 20] {
         let id = ConnectionId::new(&vec![0xaa; length]).unwrap();
