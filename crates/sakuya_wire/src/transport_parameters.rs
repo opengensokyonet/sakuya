@@ -23,6 +23,7 @@
 //! ```
 //! use sakuya_wire::{
 //!     role::Role,
+//!     stream_count::StreamCount,
 //!     transport_parameters::{
 //!         TransportParameters,
 //!         codec::{ReadTransportParametersHostExt as _, WriteTransportParametersHostExt as _},
@@ -32,7 +33,7 @@
 //!
 //! let mut parameters = TransportParameters::<&[u8]>::default();
 //! parameters.initial_max_data = VarInt::from(1_048_576u32);
-//! parameters.initial_max_streams_bidi = VarInt::from(100u8);
+//! parameters.initial_max_streams_bidi = StreamCount::new(100).unwrap();
 //!
 //! let mut encoding = Vec::new();
 //! encoding
@@ -53,8 +54,8 @@
 //! [RFC 9000 §7.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-7.3
 use crate::{
     connection_id::{ConnectionId, StatelessResetToken},
-    frame::MAX_STREAM_COUNT,
     role::Role,
+    stream_count::StreamCount,
     var_int::VarInt,
 };
 use bytes::Buf;
@@ -154,12 +155,10 @@ pub struct TransportParameters<D> {
     /// The initial flow control limit for unidirectional streams the peer
     /// opens, in bytes.
     pub initial_max_stream_data_uni: VarInt,
-    /// The initial number of bidirectional streams the peer may open; at
-    /// most 2<sup>60</sup>.
-    pub initial_max_streams_bidi: VarInt,
-    /// The initial number of unidirectional streams the peer may open; at
-    /// most 2<sup>60</sup>.
-    pub initial_max_streams_uni: VarInt,
+    /// The initial number of bidirectional streams the peer may open.
+    pub initial_max_streams_bidi: StreamCount,
+    /// The initial number of unidirectional streams the peer may open.
+    pub initial_max_streams_uni: StreamCount,
     /// The exponent of the ACK Delay field of ACK frames; at most 20.
     pub ack_delay_exponent: VarInt,
     /// The longest time, in milliseconds, the endpoint delays sending
@@ -195,8 +194,8 @@ impl<D> Default for TransportParameters<D> {
             initial_max_stream_data_bidi_local: VarInt::ZERO,
             initial_max_stream_data_bidi_remote: VarInt::ZERO,
             initial_max_stream_data_uni: VarInt::ZERO,
-            initial_max_streams_bidi: VarInt::ZERO,
-            initial_max_streams_uni: VarInt::ZERO,
+            initial_max_streams_bidi: StreamCount::ZERO,
+            initial_max_streams_uni: StreamCount::ZERO,
             ack_delay_exponent: VarInt::from_u32(3),
             max_ack_delay: VarInt::from_u32(25),
             disable_active_migration: false,
@@ -257,16 +256,6 @@ impl<D> TransportParameters<D> {
                 id::MAX_UDP_PAYLOAD_SIZE,
                 self.max_udp_payload_size,
                 self.max_udp_payload_size.get() >= MIN_MAX_UDP_PAYLOAD_SIZE,
-            ),
-            (
-                id::INITIAL_MAX_STREAMS_BIDI,
-                self.initial_max_streams_bidi,
-                self.initial_max_streams_bidi.get() <= MAX_STREAM_COUNT,
-            ),
-            (
-                id::INITIAL_MAX_STREAMS_UNI,
-                self.initial_max_streams_uni,
-                self.initial_max_streams_uni.get() <= MAX_STREAM_COUNT,
             ),
             (
                 id::ACK_DELAY_EXPONENT,
@@ -347,13 +336,13 @@ impl<D> TransportParameters<D> {
             ),
             (
                 id::INITIAL_MAX_STREAMS_BIDI,
-                self.initial_max_streams_bidi,
-                defaults.initial_max_streams_bidi,
+                self.initial_max_streams_bidi.to_var_int(),
+                defaults.initial_max_streams_bidi.to_var_int(),
             ),
             (
                 id::INITIAL_MAX_STREAMS_UNI,
-                self.initial_max_streams_uni,
-                defaults.initial_max_streams_uni,
+                self.initial_max_streams_uni.to_var_int(),
+                defaults.initial_max_streams_uni.to_var_int(),
             ),
             (
                 id::ACK_DELAY_EXPONENT,

@@ -23,6 +23,7 @@ use crate::{
     frame::{Head, LengthError},
     payload::{ReadPayloadError, read_payload},
     role::Role,
+    stream_count::StreamCount,
     transport_error::TransportErrorCode,
     var_int::{
         VarInt,
@@ -147,7 +148,19 @@ fn set<D: Buf + Unpin, E>(
                 Ok(integer) if !value.0.has_remaining() => integer,
                 _ => return IntegerSnafu { id, length }.fail(),
             };
+            let stream_count = |integer| {
+                StreamCount::try_from(integer)
+                    .map_err(|_| InvalidParameterError::OutOfRange { id, value: integer })
+            };
             let field = match id {
+                id::INITIAL_MAX_STREAMS_BIDI => {
+                    parameters.initial_max_streams_bidi = stream_count(integer)?;
+                    return Ok(());
+                }
+                id::INITIAL_MAX_STREAMS_UNI => {
+                    parameters.initial_max_streams_uni = stream_count(integer)?;
+                    return Ok(());
+                }
                 id::MAX_IDLE_TIMEOUT => &mut parameters.max_idle_timeout,
                 id::MAX_UDP_PAYLOAD_SIZE => &mut parameters.max_udp_payload_size,
                 id::INITIAL_MAX_DATA => &mut parameters.initial_max_data,
@@ -158,8 +171,6 @@ fn set<D: Buf + Unpin, E>(
                     &mut parameters.initial_max_stream_data_bidi_remote
                 }
                 id::INITIAL_MAX_STREAM_DATA_UNI => &mut parameters.initial_max_stream_data_uni,
-                id::INITIAL_MAX_STREAMS_BIDI => &mut parameters.initial_max_streams_bidi,
-                id::INITIAL_MAX_STREAMS_UNI => &mut parameters.initial_max_streams_uni,
                 id::ACK_DELAY_EXPONENT => &mut parameters.ack_delay_exponent,
                 id::MAX_ACK_DELAY => &mut parameters.max_ack_delay,
                 // Every other ID up to `id::LAST` is an integer parameter.

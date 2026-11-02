@@ -6,7 +6,10 @@ use super::{
     },
 };
 use crate::{
-    application_error::ApplicationErrorCode, packet_number::PacketNumber, stream_id::StreamId,
+    application_error::ApplicationErrorCode,
+    packet_number::PacketNumber,
+    stream_count::{StreamCount, StreamCountError},
+    stream_id::StreamId,
     transport_error::TransportErrorCode,
 };
 use bytes::Bytes;
@@ -434,6 +437,11 @@ fn field_types_convert_back_and_forth() {
     assert_conversions_agree(values().map(PacketNumber::from_var_int));
     assert_conversions_agree(values().map(ApplicationErrorCode::new));
     assert_conversions_agree(values().map(TransportErrorCode::from));
+    assert_conversions_agree(
+        values()
+            .into_iter()
+            .filter_map(|value| StreamCount::try_from(value).ok()),
+    );
     assert_conversions_agree((0..=u8::MAX).map(Small));
 }
 
@@ -505,6 +513,25 @@ impl TryFrom<VarInt> for Small {
     fn try_from(value: VarInt) -> Result<Self, Self::Error> {
         u8::try_from(value.get()).map(Self)
     }
+}
+
+#[test]
+fn stream_count_fields_stop_at_2_60() {
+    let field = VarIntField::shortest(StreamCount::MAX);
+    assert_eq!(field.width(), VarIntWidth::Eight);
+    let mut above = assert_field_round_trip(field);
+    above[7] += 1;
+    let mut input = above.as_slice();
+    let error = input
+        .sync_read_var_int_field_unpin::<StreamCount>()
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        ReadVarIntFieldError::Value {
+            source: StreamCountError { value },
+            ..
+        } if value == (1 << 60) + 1
+    ));
 }
 
 #[test]

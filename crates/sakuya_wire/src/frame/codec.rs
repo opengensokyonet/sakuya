@@ -546,8 +546,9 @@ where
 {
     use super::{
         ack, connection_close, crypto, data_blocked, datagram, handshake_done, max_data,
-        max_stream_data, new_token, padding, path_challenge, path_response, ping, reset_stream,
-        retire_connection_id, stop_sending, stream, stream_data_blocked,
+        max_stream_data, max_streams, new_token, padding, path_challenge, path_response, ping,
+        reset_stream, retire_connection_id, stop_sending, stream, stream_data_blocked,
+        streams_blocked,
     };
     frame.validate()?;
     let result = match frame {
@@ -563,9 +564,13 @@ where
         Frame::MaxStreamData(frame) => {
             max_stream_data::codec::write_max_stream_data(io, frame).await
         }
+        Frame::MaxStreams(frame) => max_streams::codec::write_max_streams(io, frame).await,
         Frame::DataBlocked(frame) => data_blocked::codec::write_data_blocked(io, frame).await,
         Frame::StreamDataBlocked(frame) => {
             stream_data_blocked::codec::write_stream_data_blocked(io, frame).await
+        }
+        Frame::StreamsBlocked(frame) => {
+            streams_blocked::codec::write_streams_blocked(io, frame).await
         }
         Frame::RetireConnectionId(frame) => {
             retire_connection_id::codec::write_retire_connection_id(io, frame).await
@@ -576,8 +581,6 @@ where
         Frame::HandshakeDone(frame) => handshake_done::codec::write_handshake_done(io, frame).await,
         Frame::Datagram(frame) => datagram::codec::write_body(io, frame).await,
         // These frames were checked above.
-        Frame::MaxStreams(frame) => io.write_all(frame.head().as_slice()).await,
-        Frame::StreamsBlocked(frame) => io.write_all(frame.head().as_slice()).await,
         Frame::NewConnectionId(frame) => io.write_all(frame.head().as_slice()).await,
         Frame::ResetStreamAt(frame) => io.write_all(frame.head().as_slice()).await,
     };

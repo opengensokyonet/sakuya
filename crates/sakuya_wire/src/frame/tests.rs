@@ -1,7 +1,7 @@
 //! Tests that cover every frame type, and the helpers the tests of the frame
 //! modules share.
 use super::{
-    Extensions, Frame, FrameType, Frames, MAX_STREAM_COUNT, UnknownFrameTypeError,
+    Extensions, Frame, FrameType, Frames, UnknownFrameTypeError,
     codec::{ReadFrameError, ReadFrameHostExt as _, WriteFrameError, WriteFrameHostExt as _},
     connection_close::{CloseErrorCode, ConnectionClose},
     crypto::Crypto,
@@ -28,6 +28,7 @@ use super::{
 use crate::{
     application_error::ApplicationErrorCode,
     connection_id::{NonEmptyCid, StatelessResetToken},
+    stream_count::StreamCount,
     stream_id::{Directionality, StreamId},
     transport_error::TransportErrorCode,
     var_int::{VarInt, codec::ReadVarIntHostExt as _},
@@ -132,11 +133,11 @@ fn sample_frames() -> Vec<Frame<&'static [u8]>> {
         }),
         Frame::MaxStreams(MaxStreams {
             directionality: Directionality::Bidirectional,
-            maximum_streams: vi(MAX_STREAM_COUNT),
+            maximum_streams: StreamCount::MAX,
         }),
         Frame::MaxStreams(MaxStreams {
             directionality: Directionality::Unidirectional,
-            maximum_streams: vi(3),
+            maximum_streams: StreamCount::new(3).unwrap(),
         }),
         Frame::DataBlocked(DataBlocked {
             maximum_data: vi(16_384),
@@ -147,11 +148,11 @@ fn sample_frames() -> Vec<Frame<&'static [u8]>> {
         }),
         Frame::StreamsBlocked(StreamsBlocked {
             directionality: Directionality::Bidirectional,
-            maximum_streams: vi(100),
+            maximum_streams: StreamCount::new(100).unwrap(),
         }),
         Frame::StreamsBlocked(StreamsBlocked {
             directionality: Directionality::Unidirectional,
-            maximum_streams: VarInt::ZERO,
+            maximum_streams: StreamCount::ZERO,
         }),
         Frame::NewConnectionId(NewConnectionId {
             sequence_number: vi(2),

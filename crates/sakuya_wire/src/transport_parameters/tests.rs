@@ -16,6 +16,7 @@ use super::{
 use crate::{
     connection_id::{ConnectionId, ConnectionIdLengthError, NonEmptyCid, StatelessResetToken},
     role::Role,
+    stream_count::StreamCount,
     transport_error::TransportErrorCode,
     var_int::{VarInt, codec::WriteVarIntHostExt as _},
 };
@@ -113,8 +114,8 @@ fn server_parameters() -> TransportParameters<&'static [u8]> {
         initial_max_stream_data_bidi_local: vi(1 << 20),
         initial_max_stream_data_bidi_remote: vi(1 << 19),
         initial_max_stream_data_uni: vi(1 << 18),
-        initial_max_streams_bidi: vi(1 << 60),
-        initial_max_streams_uni: vi(3),
+        initial_max_streams_bidi: StreamCount::MAX,
+        initial_max_streams_uni: StreamCount::new(3).unwrap(),
         ack_delay_exponent: vi(20),
         max_ack_delay: vi((1 << 14) - 1),
         disable_active_migration: true,
@@ -298,8 +299,11 @@ fn values_out_of_range_are_rejected() {
         let mut invalid_parameters = parameters.clone();
         match parameter {
             0x03 => invalid_parameters.max_udp_payload_size = vi(invalid_value),
-            0x08 => invalid_parameters.initial_max_streams_bidi = vi(invalid_value),
-            0x09 => invalid_parameters.initial_max_streams_uni = vi(invalid_value),
+            // A stream count above 2^60 cannot be constructed.
+            0x08 | 0x09 => {
+                assert!(StreamCount::new(invalid_value).is_err());
+                continue;
+            }
             0x0a => invalid_parameters.ack_delay_exponent = vi(invalid_value),
             0x0b => invalid_parameters.max_ack_delay = vi(invalid_value),
             _ => invalid_parameters.active_connection_id_limit = vi(invalid_value),

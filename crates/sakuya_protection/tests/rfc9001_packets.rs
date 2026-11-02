@@ -19,6 +19,7 @@ use sakuya_wire::header::v1::codec::ReadLongPacketHostExt as _;
 use sakuya_wire::header::v1::{LongPacketType, TypeFields};
 use sakuya_wire::packet_number::PacketNumber;
 use sakuya_wire::role::Role;
+use sakuya_wire::stream_count::StreamCount;
 use sakuya_wire::transport_parameters::codec::ReadTransportParametersHostExt as _;
 use sakuya_wire::var_int::VarInt;
 
@@ -105,8 +106,9 @@ fn a2_client_initial_end_to_end() {
     assert_eq!(parameters.initial_max_stream_data_bidi_local, limit);
     assert_eq!(parameters.initial_max_stream_data_bidi_remote, limit);
     assert_eq!(parameters.initial_max_stream_data_uni, limit);
-    assert_eq!(parameters.initial_max_streams_bidi, VarInt::from(16u8));
-    assert_eq!(parameters.initial_max_streams_uni, VarInt::from(16u8));
+    let streams = StreamCount::new(16).unwrap();
+    assert_eq!(parameters.initial_max_streams_bidi, streams);
+    assert_eq!(parameters.initial_max_streams_uni, streams);
     assert_eq!(parameters.max_idle_timeout, VarInt::from(30000u16));
     assert_eq!(parameters.initial_source_connection_id, Some(dcid));
     assert!(parameters.unknown.is_empty());

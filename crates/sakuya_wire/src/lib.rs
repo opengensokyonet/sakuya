@@ -11,6 +11,8 @@
 //!   form of long headers ([`connection_id::RawConnectionId`]), and Stateless
 //!   Reset Tokens ([`connection_id::StatelessResetToken`]).
 //! - [`stream_id`]: stream IDs ([`stream_id::StreamId`]).
+//! - [`stream_count`]: cumulative numbers of streams of one type
+//!   ([`stream_count::StreamCount`]), as stream limits state them.
 //! - [`packet_number`]: packet numbers ([`packet_number::PacketNumber`]).
 //! - [`version`]: QUIC versions ([`version::Version`]).
 //! - [`header`]: the facts a packet header states before packet protection is
@@ -53,6 +55,7 @@ pub mod header;
 pub mod packet_number;
 pub mod payload;
 pub mod role;
+pub mod stream_count;
 pub mod stream_id;
 pub mod transport_error;
 pub mod transport_parameters;

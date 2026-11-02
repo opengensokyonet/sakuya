@@ -153,12 +153,6 @@ pub(crate) const fn type_var_int(value: u64) -> VarInt {
     VarInt::from_u32(value as u32)
 }
 
-/// The largest stream count MAX_STREAMS and STREAMS_BLOCKED may carry,
-/// 2<sup>60</sup> ([RFC 9000 §19.11]).
-///
-/// [RFC 9000 §19.11]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.11
-pub const MAX_STREAM_COUNT: u64 = 1 << 60;
-
 /// The length of the data of PATH_CHALLENGE and PATH_RESPONSE.
 pub const PATH_DATA_LEN: usize = 8;
 
@@ -484,8 +478,6 @@ impl<D: Buf> Frame<D> {
             Self::Crypto(frame) => frame.validate().context(CryptoSnafu),
             Self::NewToken(frame) => frame.validate().context(NewTokenSnafu),
             Self::Stream(frame) => frame.validate().context(StreamSnafu),
-            Self::MaxStreams(frame) => frame.validate().context(MaxStreamsSnafu),
-            Self::StreamsBlocked(frame) => frame.validate().context(StreamsBlockedSnafu),
             Self::NewConnectionId(frame) => frame.validate().context(NewConnectionIdSnafu),
             Self::ConnectionClose(frame) => frame.validate().context(ConnectionCloseSnafu),
             Self::ResetStreamAt(frame) => frame.validate().context(ResetStreamAtSnafu),
@@ -496,8 +488,10 @@ impl<D: Buf> Frame<D> {
             | Self::StopSending(_)
             | Self::MaxData(_)
             | Self::MaxStreamData(_)
+            | Self::MaxStreams(_)
             | Self::DataBlocked(_)
             | Self::StreamDataBlocked(_)
+            | Self::StreamsBlocked(_)
             | Self::RetireConnectionId(_)
             | Self::PathChallenge(_)
             | Self::PathResponse(_)
@@ -537,18 +531,6 @@ pub enum InvalidFrameError {
     Stream {
         /// The broken limit.
         source: DataEndError,
-    },
-    /// An invalid MAX_STREAMS frame.
-    #[snafu(display("invalid MAX_STREAMS frame"))]
-    MaxStreams {
-        /// The broken limit.
-        source: StreamCountError,
-    },
-    /// An invalid STREAMS_BLOCKED frame.
-    #[snafu(display("invalid STREAMS_BLOCKED frame"))]
-    StreamsBlocked {
-        /// The broken limit.
-        source: StreamCountError,
     },
     /// An invalid NEW_CONNECTION_ID frame.
     #[snafu(display("invalid NEW_CONNECTION_ID frame"))]
@@ -599,24 +581,6 @@ impl DataEndError {
     /// The largest data length permitted after `offset`, capped to `usize`.
     pub(crate) fn limit(offset: VarInt) -> usize {
         usize::try_from(VarInt::MAX.get() - offset.get()).unwrap_or(usize::MAX)
-    }
-}
-
-/// A MAX_STREAMS or STREAMS_BLOCKED count exceeds [`MAX_STREAM_COUNT`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(display("stream count {maximum_streams} exceeds 2^60"))]
-pub struct StreamCountError {
-    /// The Maximum Streams field.
-    pub maximum_streams: VarInt,
-}
-
-impl StreamCountError {
-    /// Checks a Maximum Streams field.
-    pub(crate) fn check(maximum_streams: VarInt) -> Result<(), Self> {
-        if maximum_streams.get() > MAX_STREAM_COUNT {
-            return Err(Self { maximum_streams });
-        }
-        Ok(())
     }
 }
 
