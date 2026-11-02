@@ -21,9 +21,8 @@ use super::acceptance::{
     InitialAcceptance, InitialDatagramReceiver, InitialReceiverFactory, ReflowHandoff,
     ReflowProvider, UnclaimedWork,
 };
-use super::association::MatchAssociation;
 use super::datagram::{LinkIdentity, ReceivedDatagram};
-use super::index::{FrozenEntries, OfferedRouteHistory, Recheck, RouteIndex};
+use super::index::{FrozenEntries, Lookup, OfferedRouteHistory, Recheck, RouteIndex};
 use super::interpretation::{FirstPacketInterpretation, RecognizedInitial};
 use super::recognizer::ConnectionIdRecognizer;
 use super::reset::{StatelessResetDetector, StatelessResetTarget};
@@ -356,9 +355,8 @@ where
     /// Completes every lookup of one round.
     fn freeze(&self, queries: &Queries) -> FrozenEntries<Target> {
         let mut frozen = FrozenEntries::new();
-        for (association, interpretation) in queries {
-            self.index
-                .collect(association, *interpretation, &mut frozen);
+        for (lookup, interpretation) in queries {
+            self.index.collect(lookup, *interpretation, &mut frozen);
         }
         frozen
     }
@@ -395,7 +393,7 @@ fn dispatch<Payload, Link, Handoff, Target>(
 }
 
 /// The lookups a first packet calls for.
-type Queries = SmallVec<[(MatchAssociation, FirstPacketInterpretation); 4]>;
+type Queries = SmallVec<[(Lookup, FirstPacketInterpretation); 4]>;
 
 enum Classification {
     /// The fields needed for lookup cannot be read safely.
@@ -422,15 +420,12 @@ fn classify(
     let binding = link.binding_id();
     let by_dcid = |dcid: ConnectionId, interpretation, with_initial: bool| {
         let mut queries = Queries::new();
-        match NonEmptyCid::new(dcid) {
-            Ok(cid) => {
-                queries.push((MatchAssociation::LocalCid(cid), interpretation));
-                if with_initial {
-                    queries.push((MatchAssociation::InitialDcid(cid), interpretation));
-                }
-            }
-            Err(_) => queries.push((MatchAssociation::ZeroCid(binding.clone()), interpretation)),
-        }
+        let lookup = match NonEmptyCid::new(dcid) {
+            Ok(cid) if with_initial => Lookup::LocalAndInitial(cid),
+            Ok(cid) => Lookup::Local(cid),
+            Err(_) => Lookup::Zero(binding.clone()),
+        };
+        queries.push((lookup, interpretation));
         queries
     };
     match HeaderForm::of(first) {

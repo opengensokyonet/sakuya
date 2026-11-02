@@ -109,13 +109,6 @@ impl<Target: ?Sized> NonzeroBucket<Target> {
         }
     }
 
-    fn list(&self, kind: NonzeroKind) -> &EntryList<Target> {
-        match kind {
-            NonzeroKind::Local => &self.local,
-            NonzeroKind::Initial => &self.initial,
-        }
-    }
-
     fn list_mut(&mut self, kind: NonzeroKind) -> &mut EntryList<Target> {
         match kind {
             NonzeroKind::Local => &mut self.local,
@@ -149,6 +142,16 @@ pub(crate) type FrozenEntries<Target> = SmallVec<
         FirstPacketInterpretation,
     ); 4],
 >;
+
+/// What one first-packet interpretation looks up.
+pub(crate) enum Lookup {
+    /// The local association of a non-empty connection ID.
+    Local(NonEmptyCid),
+    /// The local and the Initial association of a non-empty connection ID.
+    LocalAndInitial(NonEmptyCid),
+    /// The zero-length association of a link binding.
+    Zero(BindingId),
+}
 
 /// The outcome of the Initial recheck.
 pub(crate) enum Recheck<Target: ?Sized, Receiver> {
@@ -252,16 +255,19 @@ impl<Target: ?Sized> RouteIndex<Target> {
         }
     }
 
-    /// Appends to `frozen` every entry under `association` that applies to
+    /// Appends to `frozen` every entry `lookup` finds that applies to
     /// `interpretation` and is not already there under the same
     /// interpretation.
+    ///
+    /// The lists of one lookup are read under one guard, so that a lookup of
+    /// both associations of a connection ID sees one state of its bucket.
     pub(crate) fn collect(
         &self,
-        association: &MatchAssociation,
+        lookup: &Lookup,
         interpretation: FirstPacketInterpretation,
         frozen: &mut FrozenEntries<Target>,
     ) {
-        let mut push = |list: &EntryList<Target>| {
+        let mut push = |association: MatchAssociation, list: &EntryList<Target>| {
             for entry in list {
                 let seen = frozen.iter().any(|(existing, _, existing_interpretation)| {
                     existing.id == entry.id && *existing_interpretation == interpretation
@@ -271,15 +277,21 @@ impl<Target: ?Sized> RouteIndex<Target> {
                 }
             }
         };
-        match Location::of(association) {
-            Location::Zero(binding) => {
+        match lookup {
+            Lookup::Zero(binding) => {
                 if let Some(list) = self.zero.get(binding) {
-                    push(&list);
+                    push(MatchAssociation::ZeroCid(binding.clone()), &list);
                 }
             }
-            Location::Nonzero(cid, kind) => {
+            Lookup::Local(cid) => {
                 if let Some(bucket) = self.nonzero.get(cid) {
-                    push(bucket.list(kind));
+                    push(MatchAssociation::LocalCid(*cid), &bucket.local);
+                }
+            }
+            Lookup::LocalAndInitial(cid) => {
+                if let Some(bucket) = self.nonzero.get(cid) {
+                    push(MatchAssociation::LocalCid(*cid), &bucket.local);
+                    push(MatchAssociation::InitialDcid(*cid), &bucket.initial);
                 }
             }
         }
