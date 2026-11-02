@@ -1,8 +1,16 @@
 use super::{
-    OutOfRangeError, VarInt,
-    codec::{ReadVarIntError, ReadVarIntHostExt as _, WriteVarIntError, WriteVarIntHostExt as _},
+    OutOfRangeError, VarInt, VarIntField, VarIntWidth, WidthError,
+    codec::{
+        ReadVarIntError, ReadVarIntFieldError, ReadVarIntFieldHostExt as _, ReadVarIntHostExt as _,
+        WriteVarIntError, WriteVarIntFieldHostExt as _, WriteVarIntHostExt as _,
+    },
+};
+use crate::{
+    application_error::ApplicationErrorCode, packet_number::PacketNumber, stream_id::StreamId,
+    transport_error::TransportErrorCode,
 };
 use bytes::Bytes;
+use core::{convert::Infallible, fmt::Debug};
 use nitori_io::bridge::Std;
 use std::io;
 
@@ -318,4 +326,216 @@ fn write_operation_reports_failures_with_progress() {
     assert!(matches!(error, WriteVarIntError::WriteZero { .. }));
     assert_eq!(error.completed(), 2);
     assert!(error.host_error().is_none());
+}
+
+/// Values at the edges of each width, and the largest stream count.
+const EDGES: [u64; 9] = [
+    0,
+    63,
+    64,
+    16_383,
+    16_384,
+    (1 << 30) - 1,
+    1 << 30,
+    1 << 60,
+    (1 << 62) - 1,
+];
+
+#[test]
+fn widths_hold_their_ranges() {
+    let cases = [
+        (VarIntWidth::One, 1, 63),
+        (VarIntWidth::Two, 2, 16_383),
+        (VarIntWidth::Four, 4, (1 << 30) - 1),
+        (VarIntWidth::Eight, 8, (1 << 62) - 1),
+    ];
+    for (width, encoded_len, max) in cases {
+        assert_eq!(width.encoded_len(), encoded_len);
+        assert_eq!(width.max_value(), var_int(max));
+        assert!(width.fits(var_int(max)));
+        if max < VarInt::MAX.get() {
+            assert!(!width.fits(var_int(max + 1)));
+            assert!(VarIntWidth::shortest(var_int(max + 1)) > width);
+        }
+        assert_eq!(VarIntWidth::shortest(var_int(max)), width);
+    }
+    assert_eq!(VarIntWidth::ALL.map(VarIntWidth::encoded_len), [1, 2, 4, 8]);
+    for byte in 0..=u8::MAX {
+        assert_eq!(
+            VarIntWidth::of_first_byte(byte).encoded_len(),
+            VarInt::encoded_len_of(byte)
+        );
+    }
+    for value in EDGES {
+        assert_eq!(
+            VarIntWidth::shortest(var_int(value)).encoded_len(),
+            var_int(value).encoded_len()
+        );
+    }
+}
+
+/// Every width that holds `value`.
+fn widths_for(value: VarInt) -> impl Iterator<Item = VarIntWidth> {
+    VarIntWidth::ALL
+        .into_iter()
+        .filter(move |width| width.fits(value))
+}
+
+#[test]
+fn fields_check_their_width() {
+    for value in EDGES.map(var_int) {
+        let shortest = VarIntField::shortest(value);
+        assert_eq!(shortest.width(), VarIntWidth::shortest(value));
+        assert_eq!(shortest.get(), value);
+        for width in VarIntWidth::ALL {
+            let field = VarIntField::new(value, width);
+            if width.fits(value) {
+                let field = field.unwrap();
+                assert_eq!((field.get(), field.width()), (value, width));
+                assert_eq!(field.encoded_len(), width.encoded_len());
+                assert_eq!(field.to_var_int(), value);
+                assert_eq!(field.into_inner(), value);
+                assert_eq!(field == shortest, width == shortest.width());
+            } else {
+                assert_eq!(field, Err(WidthError { value, width }));
+            }
+        }
+    }
+    let error = VarIntField::new(var_int(64), VarIntWidth::One).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "64 does not fit a 1-byte variable-length integer encoding"
+    );
+    // A domain type is checked by its value as a variable-length integer.
+    let stream_id = StreamId::from_var_int(var_int(16_384));
+    assert!(VarIntField::new(stream_id, VarIntWidth::Two).is_err());
+    assert_eq!(
+        VarIntField::new(stream_id, VarIntWidth::Four).map(|field| field.get()),
+        Ok(stream_id)
+    );
+}
+
+/// Checks `T::try_from(VarInt::from(x)) == Ok(x)` for the values of `T`
+/// that `values` produces.
+fn assert_conversions_agree<T>(values: impl IntoIterator<Item = T>)
+where
+    T: Copy + PartialEq + Debug + Into<VarInt> + TryFrom<VarInt, Error: Debug + PartialEq>,
+{
+    for value in values {
+        assert_eq!(T::try_from(value.into()), Ok(value), "{value:?}");
+    }
+}
+
+#[test]
+fn field_types_convert_back_and_forth() {
+    let values = || EDGES.map(var_int);
+    assert_conversions_agree(values());
+    assert_conversions_agree(values().map(StreamId::from_var_int));
+    assert_conversions_agree(values().map(PacketNumber::from_var_int));
+    assert_conversions_agree(values().map(ApplicationErrorCode::new));
+    assert_conversions_agree(values().map(TransportErrorCode::from));
+    assert_conversions_agree((0..=u8::MAX).map(Small));
+}
+
+/// Writes `field`, checks the length of the encoding, and reads it back from
+/// a byte slice and from `Bytes`.
+fn assert_field_round_trip<T>(field: VarIntField<T>) -> Vec<u8>
+where
+    T: Copy + PartialEq + Debug + Into<VarInt> + TryFrom<VarInt, Error: Debug>,
+{
+    let mut encoding = Vec::new();
+    encoding.sync_write_var_int_field_unpin(field).unwrap();
+    assert_eq!(encoding.len(), field.encoded_len(), "{field:?}");
+    let mut input = encoding.as_slice();
+    let read: VarIntField<T> = input.sync_read_var_int_field_unpin().unwrap();
+    assert_eq!(read, field);
+    assert!(input.is_empty());
+    let mut input = Bytes::from(encoding.clone());
+    let read: VarIntField<T> = input.sync_read_var_int_field_unpin().unwrap();
+    assert_eq!(read, field);
+    // The variable-length integer reader decodes the same value.
+    assert_eq!(
+        encoding.as_slice().sync_read_var_int_unpin().unwrap(),
+        field.to_var_int()
+    );
+    encoding
+}
+
+#[test]
+fn fields_round_trip_at_every_width() {
+    for value in EDGES.map(var_int) {
+        for width in widths_for(value) {
+            let field = VarIntField::new(value, width).unwrap();
+            let encoding = assert_field_round_trip(field);
+            assert_eq!(VarIntWidth::of_first_byte(encoding[0]), width);
+            let stream_id = VarIntField::new(StreamId::from_var_int(value), width).unwrap();
+            assert_eq!(assert_field_round_trip(stream_id), encoding);
+        }
+    }
+    // The examples of RFC 9000 Appendix A.1, including 0x4025 for 37.
+    for (encoding, value) in RFC_EXAMPLES
+        .into_iter()
+        .chain(BOUNDARIES)
+        .chain([(&[0x40, 0x25][..], 37)])
+    {
+        let mut input = encoding;
+        let field: VarIntField<VarInt> = input.sync_read_var_int_field_unpin().unwrap();
+        assert_eq!(field.get(), var_int(value));
+        assert_eq!(field.encoded_len(), encoding.len());
+        let mut rewritten = Vec::new();
+        rewritten.sync_write_var_int_field_unpin(field).unwrap();
+        assert_eq!(rewritten, encoding);
+    }
+}
+
+/// A type that holds only the values that fit a byte, standing in for a
+/// type defined outside this crate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Small(u8);
+
+impl From<Small> for VarInt {
+    fn from(value: Small) -> Self {
+        Self::from(value.0)
+    }
+}
+
+impl TryFrom<VarInt> for Small {
+    type Error = core::num::TryFromIntError;
+
+    fn try_from(value: VarInt) -> Result<Self, Self::Error> {
+        u8::try_from(value.get()).map(Self)
+    }
+}
+
+#[test]
+fn field_reads_report_values_the_type_rejects() {
+    let field = VarIntField::new(Small(200), VarIntWidth::Four).unwrap();
+    assert_eq!(assert_field_round_trip(field), [0x80, 0x00, 0x00, 200]);
+
+    let mut input = &[0x41, 0x00, 0x25][..];
+    let error = input.sync_read_var_int_field_unpin::<Small>().unwrap_err();
+    assert!(
+        matches!(error, ReadVarIntFieldError::Value { value, .. } if value == var_int(256)),
+        "{error:?}"
+    );
+    assert_eq!(
+        error.to_string(),
+        "variable-length integer 256 is outside the range of the field"
+    );
+    // The encoding is consumed; the next byte is not.
+    assert_eq!(input, [0x25]);
+
+    let mut input = &[0x80, 0x00][..];
+    let error = input.sync_read_var_int_field_unpin::<Small>().unwrap_err();
+    assert!(matches!(
+        error,
+        ReadVarIntFieldError::VarInt {
+            source: ReadVarIntError::Incomplete { .. }
+        }
+    ));
+    let mut input = &[0x80, 0x00][..];
+    let error: ReadVarIntFieldError<Infallible, Infallible> =
+        input.sync_read_var_int_field_unpin::<VarInt>().unwrap_err();
+    let error = ReadVarIntError::from(error);
+    assert_eq!(error.completed(), 2);
 }

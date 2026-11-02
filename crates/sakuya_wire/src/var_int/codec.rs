@@ -1,4 +1,5 @@
-//! Reading and writing [`VarInt`] as `nitori_call` operations.
+//! Reading and writing [`VarInt`] and [`VarIntField`] as `nitori_call`
+//! operations.
 //!
 //! [`read_var_int`] and [`write_var_int`] are also the operation structs
 //! [`ReadVarInt`] and [`WriteVarInt`], with `ReadVarIntExt` and
@@ -7,7 +8,9 @@
 //! the `sync_` methods for receivers that never wait, such as byte slices
 //! and `Bytes`. On those, a source that ends early is an
 //! [`ReadVarIntError::Incomplete`] failure. Constructing an operation
-//! performs no IO.
+//! performs no IO. [`read_var_int_field`] and [`write_var_int_field`] are
+//! the operations [`ReadVarIntField`] and [`WriteVarIntField`] in the same
+//! way; they keep the width of the encoding.
 //!
 //! ```
 //! use sakuya_wire::var_int::{
@@ -32,18 +35,36 @@
 //! let error = input.sync_read_var_int_unpin().unwrap_err();
 //! assert_eq!(error.completed(), 2);
 //! ```
+//!
+//! A field keeps the width it was read with and writes it back:
+//!
+//! ```
+//! use sakuya_wire::var_int::{
+//!     VarInt, VarIntField, VarIntWidth,
+//!     codec::{ReadVarIntFieldHostExt as _, WriteVarIntFieldHostExt as _},
+//! };
+//!
+//! let mut input = &[0x40, 0x25][..];
+//! let field: VarIntField<VarInt> = input.sync_read_var_int_field_unpin().unwrap();
+//! assert_eq!((field.get(), field.width()), (VarInt::from(37u8), VarIntWidth::Two));
+//!
+//! let mut output = Vec::new();
+//! output.sync_write_var_int_field_unpin(field).unwrap();
+//! assert_eq!(output, [0x40, 0x25]);
+//! ```
 // `#[call]` generates constructors, fields and extension traits without
 // documentation comments; the module documentation above describes them.
 #![allow(missing_docs)]
 
-use super::VarInt;
+use super::{VarInt, VarIntField, VarIntWidth};
+use core::convert::Infallible;
 use nitori_call::{ReceiverAccess, call};
 use nitori_io::{
     calls::{ReadArrayError, WriteAllError},
     error::{Incomplete, WriteZero},
     prelude::*,
 };
-use snafu::{IntoError, Snafu};
+use snafu::{IntoError, ResultExt, Snafu};
 
 /// Reads one variable-length integer.
 ///
@@ -69,18 +90,34 @@ pub async fn read_var_int<F: Read, A: ReceiverAccess<Family = F>>(
 pub(crate) async fn read_var_int_counted<F: Read, A: ReceiverAccess<Family = F>>(
     io: &mut A,
 ) -> Result<(VarInt, usize), ReadVarIntError<F::Error>> {
+    let (value, width) = read_var_int_with_width(io).await?;
+    Ok((value, width.encoded_len()))
+}
+
+/// Reads one variable-length integer as [`read_var_int`] does, and returns
+/// it with the width of its encoding.
+pub(crate) async fn read_var_int_with_width<F: Read, A: ReceiverAccess<Family = F>>(
+    io: &mut A,
+) -> Result<(VarInt, VarIntWidth), ReadVarIntError<F::Error>> {
     let [first] = io
         .read_array::<1>()
         .await
         .map_err(|error| ReadVarIntError::after(error, 0, 1))?;
-    let encoded_len = VarInt::encoded_len_of(first);
-    let value = match encoded_len {
-        1 => VarInt::from_encoding(first, &[]),
-        2 => VarInt::from_encoding(first, &read_rest::<1, F, A>(io, encoded_len).await?),
-        4 => VarInt::from_encoding(first, &read_rest::<3, F, A>(io, encoded_len).await?),
-        _ => VarInt::from_encoding(first, &read_rest::<7, F, A>(io, encoded_len).await?),
+    let width = VarIntWidth::of_first_byte(first);
+    let encoded_len = width.encoded_len();
+    let value = match width {
+        VarIntWidth::One => VarInt::from_encoding(first, &[]),
+        VarIntWidth::Two => {
+            VarInt::from_encoding(first, &read_rest::<1, F, A>(io, encoded_len).await?)
+        }
+        VarIntWidth::Four => {
+            VarInt::from_encoding(first, &read_rest::<3, F, A>(io, encoded_len).await?)
+        }
+        VarIntWidth::Eight => {
+            VarInt::from_encoding(first, &read_rest::<7, F, A>(io, encoded_len).await?)
+        }
     };
-    Ok((value, encoded_len))
+    Ok((value, width))
 }
 
 /// Reads the `LENGTH` bytes that follow the first byte of an encoding.
@@ -223,4 +260,86 @@ impl<E> From<WriteAllError<E>> for WriteVarIntError<E> {
             }
         }
     }
+}
+
+/// Reads one variable-length integer field: its value as a `T`, and the
+/// width of its encoding.
+///
+/// Reads exactly one encoding, of any width, as [`read_var_int`] does, then
+/// converts the value with `T::try_from`.
+///
+/// # Errors
+///
+/// [`ReadVarIntFieldError::VarInt`] if the encoding cannot be read, and
+/// [`ReadVarIntFieldError::Value`] if `T` rejects the value; the encoding
+/// stays consumed.
+#[call(sync)]
+pub async fn read_var_int_field<T, F, A>(
+    io: &mut A,
+) -> Result<VarIntField<T>, ReadVarIntFieldError<F::Error, <T as TryFrom<VarInt>>::Error>>
+where
+    T: Copy + Into<VarInt> + TryFrom<VarInt>,
+    F: Read,
+    A: ReceiverAccess<Family = F>,
+{
+    let (value, width) = read_var_int_with_width(io).await?;
+    let value = T::try_from(value).context(read_var_int_field_error::ValueSnafu { value })?;
+    // The encoding of `width` holds the value, and `T` converts back to it.
+    Ok(VarIntField { value, width })
+}
+
+/// Failures that [`read_var_int_field`] can produce.
+///
+/// `V` is the error of converting the value into the field's type. For a
+/// type that every value converts into, it is [`Infallible`], and the
+/// failure converts into a [`ReadVarIntError`].
+#[derive(Debug, Snafu)]
+#[snafu(module(read_var_int_field_error), visibility(pub(crate)))]
+pub enum ReadVarIntFieldError<E, V> {
+    /// The encoding could not be read.
+    #[snafu(transparent)]
+    VarInt {
+        /// The failure of reading the encoding.
+        source: ReadVarIntError<E>,
+    },
+    /// The field's type rejects the value.
+    #[snafu(display("variable-length integer {value} is outside the range of the field"))]
+    Value {
+        /// The value that was read.
+        value: VarInt,
+        /// The conversion error.
+        source: V,
+    },
+}
+
+impl<E> From<ReadVarIntFieldError<E, Infallible>> for ReadVarIntError<E> {
+    fn from(error: ReadVarIntFieldError<E, Infallible>) -> Self {
+        match error {
+            ReadVarIntFieldError::VarInt { source } => source,
+            ReadVarIntFieldError::Value { source, .. } => match source {},
+        }
+    }
+}
+
+/// Writes the encoding of `field` at its width completely.
+///
+/// Acceptance by the receiver does not imply flushing or delivery.
+///
+/// # Errors
+///
+/// As [`write_var_int`]: [`WriteVarIntError::WriteZero`] or
+/// [`WriteVarIntError::Receiver`], with the bytes accepted before.
+#[call(sync)]
+pub async fn write_var_int_field<T, F, A>(
+    io: &mut A,
+    field: VarIntField<T>,
+) -> Result<(), WriteVarIntError<F::Error>>
+where
+    T: Copy + Into<VarInt> + TryFrom<VarInt>,
+    F: Write,
+    A: ReceiverAccess<Family = F>,
+{
+    let (encoding, encoded_len) = field.to_var_int().to_encoding_of(field.width());
+    io.write_all(&encoding[..encoded_len]).await?;
+    Ok(())
 }

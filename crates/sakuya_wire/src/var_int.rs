@@ -1,13 +1,21 @@
 //! Variable-length integers ([RFC 9000 §16]).
 //!
 //! A [`VarInt`] holds a value below 2<sup>62</sup>. Its encoding takes 1, 2, 4
-//! or 8 bytes: the two most significant bits of the first byte give the
-//! encoded length, and the remaining bits hold the value in network byte
-//! order.
+//! or 8 bytes, its [`VarIntWidth`]: the two most significant bits of the
+//! first byte give the width, and the remaining bits hold the value in
+//! network byte order. A value has an encoding of every width that can hold
+//! it; RFC 9000 permits encodings longer than necessary.
 //!
 //! [`codec::read_var_int`] and [`codec::write_var_int`] read and write the
 //! encoding as `nitori_call` operations, on sources and sinks that may wait
 //! between bytes as well as on byte slices, through the `sync_` host methods.
+//! They read a value of any width and write the shortest encoding.
+//!
+//! A [`VarIntField`] is a field of a wire format that holds a variable-length
+//! integer: a value together with the width of its encoding.
+//! [`codec::read_var_int_field`] keeps the width it reads, and
+//! [`codec::write_var_int_field`] writes that width, so a field reads back as
+//! it was written and writes back the bytes it was read from.
 //!
 //! [RFC 9000 §16]: https://www.rfc-editor.org/rfc/rfc9000.html#section-16
 use core::fmt;
@@ -19,9 +27,10 @@ pub mod codec;
 ///
 /// Every value of this type is at most [`VarInt::MAX`]; the constructors
 /// enforce that bound. Ordering, equality and hashing are those of the
-/// numeric value. [`codec::write_var_int`] always writes the shortest
-/// encoding; [`codec::read_var_int`] also accepts longer encodings, as
-/// RFC 9000 §16 permits.
+/// numeric value. A `VarInt` has no width: [`codec::write_var_int`] always
+/// writes the shortest encoding, and [`codec::read_var_int`] also accepts
+/// longer encodings, as RFC 9000 §16 permits. [`VarIntField`] keeps the
+/// width.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct VarInt(u64);
 
@@ -61,24 +70,19 @@ impl VarInt {
     }
 
     /// Returns the number of bytes of the shortest encoding: 1, 2, 4 or 8.
+    ///
+    /// This is the length of [`VarIntWidth::shortest`].
     pub const fn encoded_len(self) -> usize {
-        if self.0 < 1 << 6 {
-            1
-        } else if self.0 < 1 << 14 {
-            2
-        } else if self.0 < 1 << 30 {
-            4
-        } else {
-            8
-        }
+        VarIntWidth::shortest(self).encoded_len()
     }
 
     /// Returns the encoded length that a first byte announces: 1, 2, 4 or 8.
     ///
     /// Every byte value announces a length; whether the encoding is complete
-    /// depends on the bytes that follow.
+    /// depends on the bytes that follow. This is the length of
+    /// [`VarIntWidth::of_first_byte`].
     pub const fn encoded_len_of(first_byte: u8) -> usize {
-        1 << (first_byte >> 6)
+        VarIntWidth::of_first_byte(first_byte).encoded_len()
     }
 
     /// Adds, returning `None` if the sum exceeds [`VarInt::MAX`].
@@ -139,13 +143,192 @@ impl VarInt {
 
     /// The shortest encoding, left-aligned in an array, and its length.
     pub(crate) const fn to_encoding(self) -> ([u8; Self::MAX_ENCODED_LEN], usize) {
-        let encoded_len = self.encoded_len();
+        self.to_encoding_of(VarIntWidth::shortest(self))
+    }
+
+    /// The encoding of `width`, left-aligned in an array, and its length.
+    ///
+    /// The value must fit `width`; callers check it with
+    /// [`VarIntWidth::fits`] first.
+    pub(crate) const fn to_encoding_of(
+        self,
+        width: VarIntWidth,
+    ) -> ([u8; Self::MAX_ENCODED_LEN], usize) {
+        debug_assert!(width.fits(self));
+        let encoded_len = width.encoded_len();
         // The two-bit length prefix is log2 of the encoded length; it occupies
         // the top bits of the encoding, which then moves to the array's start.
-        let prefix = (encoded_len.trailing_zeros() as u64) << (8 * encoded_len - 2);
+        let prefix = (width as u64) << (8 * encoded_len - 2);
+        let value = self.0 & width.max_value().0;
         let shift = 8 * (Self::MAX_ENCODED_LEN - encoded_len);
-        (((prefix | self.0) << shift).to_be_bytes(), encoded_len)
+        (((prefix | value) << shift).to_be_bytes(), encoded_len)
     }
+}
+
+/// The number of bytes a variable-length integer encoding takes: 1, 2, 4 or
+/// 8.
+///
+/// A width holds the values up to [`VarIntWidth::max_value`]. Widths are
+/// ordered by their length.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum VarIntWidth {
+    /// One byte, for values up to 2<sup>6</sup> − 1.
+    One = 0,
+    /// Two bytes, for values up to 2<sup>14</sup> − 1.
+    Two = 1,
+    /// Four bytes, for values up to 2<sup>30</sup> − 1.
+    Four = 2,
+    /// Eight bytes, for values up to 2<sup>62</sup> − 1.
+    Eight = 3,
+}
+
+impl VarIntWidth {
+    /// Every width, shortest first.
+    pub const ALL: [Self; 4] = [Self::One, Self::Two, Self::Four, Self::Eight];
+
+    /// The shortest width that holds `value`.
+    pub const fn shortest(value: VarInt) -> Self {
+        if value.0 < 1 << 6 {
+            Self::One
+        } else if value.0 < 1 << 14 {
+            Self::Two
+        } else if value.0 < 1 << 30 {
+            Self::Four
+        } else {
+            Self::Eight
+        }
+    }
+
+    /// The width that the two most significant bits of a first byte
+    /// announce.
+    pub const fn of_first_byte(first_byte: u8) -> Self {
+        match first_byte >> 6 {
+            0 => Self::One,
+            1 => Self::Two,
+            2 => Self::Four,
+            _ => Self::Eight,
+        }
+    }
+
+    /// The number of bytes of the encoding: 1, 2, 4 or 8.
+    pub const fn encoded_len(self) -> usize {
+        1 << self as u32
+    }
+
+    /// The largest value an encoding of this width holds.
+    pub const fn max_value(self) -> VarInt {
+        VarInt((1 << (8 * self.encoded_len() - 2)) - 1)
+    }
+
+    /// Whether an encoding of this width holds `value`.
+    pub const fn fits(self, value: VarInt) -> bool {
+        value.0 <= self.max_value().0
+    }
+}
+
+/// A field of a wire format that holds a variable-length integer: a value of
+/// type `T` and the [`VarIntWidth`] of its encoding.
+///
+/// The value always fits the width. [`VarIntField::shortest`] chooses the
+/// shortest width, as a sender normally does; [`VarIntField::new`] takes any
+/// width that holds the value, as an encoding read from the wire may use.
+/// Equality and hashing cover both the value and the width, so two fields
+/// with the same value and different widths are different fields.
+///
+/// `T` is the type the field carries, such as [`VarInt`] itself or a domain
+/// type like a stream ID. It converts into a `VarInt` for writing and from
+/// one for reading: the constructors and the codec require
+/// `T: Into<VarInt> + TryFrom<VarInt>`. These conversions must agree, so
+/// that a field reads back as the value it was written from: for every value
+/// `x` of `T`, `T::try_from(VarInt::from(x))` is `Ok(x)`. A conversion from
+/// `VarInt` may still fail for values outside the range of `T`; reading then
+/// reports the error of `T`.
+///
+/// ```
+/// use sakuya_wire::var_int::{VarInt, VarIntField, VarIntWidth};
+///
+/// let shortest = VarIntField::shortest(VarInt::from(37u8));
+/// assert_eq!(shortest.width(), VarIntWidth::One);
+///
+/// let long = VarIntField::new(VarInt::from(37u8), VarIntWidth::Two).unwrap();
+/// assert_eq!(long.get(), VarInt::from(37u8));
+/// assert_ne!(long, shortest);
+///
+/// // 64 needs two bytes.
+/// assert!(VarIntField::new(VarInt::from(64u8), VarIntWidth::One).is_err());
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct VarIntField<T> {
+    value: T,
+    width: VarIntWidth,
+}
+
+impl<T> VarIntField<T> {
+    /// The width of the encoding.
+    pub const fn width(&self) -> VarIntWidth {
+        self.width
+    }
+
+    /// The number of bytes of the encoding: the length of its width.
+    pub const fn encoded_len(&self) -> usize {
+        self.width.encoded_len()
+    }
+
+    /// Takes the value.
+    pub fn into_inner(self) -> T {
+        self.value
+    }
+}
+
+impl<T: Copy> VarIntField<T> {
+    /// The value.
+    pub const fn get(&self) -> T {
+        self.value
+    }
+}
+
+impl<T: Copy + Into<VarInt> + TryFrom<VarInt>> VarIntField<T> {
+    /// The field holding `value` in its shortest encoding.
+    pub fn shortest(value: T) -> Self {
+        Self {
+            value,
+            width: VarIntWidth::shortest(value.into()),
+        }
+    }
+
+    /// The field holding `value` in an encoding of `width`.
+    ///
+    /// # Errors
+    ///
+    /// [`WidthError`] if `value` does not fit `width`.
+    pub fn new(value: T, width: VarIntWidth) -> Result<Self, WidthError> {
+        let var_int = value.into();
+        if !width.fits(var_int) {
+            return Err(WidthError {
+                value: var_int,
+                width,
+            });
+        }
+        Ok(Self { value, width })
+    }
+
+    /// The value as a variable-length integer.
+    pub fn to_var_int(&self) -> VarInt {
+        self.value.into()
+    }
+}
+
+/// A value does not fit the width chosen for its encoding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display(
+    "{value} does not fit a {}-byte variable-length integer encoding",
+    width.encoded_len()
+))]
+pub struct WidthError {
+    /// The value.
+    pub value: VarInt,
+    /// The width that cannot hold it.
+    pub width: VarIntWidth,
 }
 
 impl fmt::Display for VarInt {
