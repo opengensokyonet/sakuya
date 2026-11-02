@@ -7,7 +7,10 @@ use super::{
     id,
     preferred_address::{
         PreferredAddress,
-        codec::{ReadPreferredAddressHostExt as _, WritePreferredAddressHostExt as _},
+        codec::{
+            ReadPreferredAddressError, ReadPreferredAddressHostExt as _,
+            WritePreferredAddressHostExt as _,
+        },
     },
 };
 use crate::{
@@ -354,6 +357,57 @@ fn malformed_values_are_rejected_by_parameter() {
     check(0x0d, &long_address, |error| {
         matches!(error, E::PreferredAddressLength { length: 50 })
     });
+}
+
+/// RFC 9000 §18.2: an all-zero address and port stands for a family without
+/// a preferred address. With both families all zeros there is no address.
+#[test]
+fn preferred_address_needs_an_address_of_some_family() {
+    let unspecified_v4 = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0);
+    let unspecified_v6 = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0);
+    let value = |ipv4, ipv6| {
+        let mut value = Vec::new();
+        value
+            .sync_write_preferred_address_unpin(PreferredAddress {
+                ipv4,
+                ipv6,
+                ..preferred_address()
+            })
+            .unwrap();
+        value
+    };
+
+    let error = read(
+        &tlv(0x0d, &value(unspecified_v4, unspecified_v6)),
+        Role::Server,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            ReadTransportParametersError::PreferredAddress {
+                source: ReadPreferredAddressError::NoAddress
+            }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        error.transport_error_code(),
+        TransportErrorCode::TRANSPORT_PARAMETER_ERROR
+    );
+    assert!(!error.is_incomplete());
+
+    // One family alone is enough.
+    let only_v4 = preferred_address().ipv4;
+    let only_v6 = preferred_address().ipv6;
+    for (ipv4, ipv6) in [(only_v4, unspecified_v6), (unspecified_v4, only_v6)] {
+        let encoding = tlv(0x0d, &value(ipv4, ipv6));
+        let address = read(&encoding, Role::Server)
+            .unwrap()
+            .preferred_address
+            .unwrap();
+        assert_eq!((address.ipv4, address.ipv6), (ipv4, ipv6));
+    }
 }
 
 #[test]

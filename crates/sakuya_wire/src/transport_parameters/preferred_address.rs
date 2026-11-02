@@ -9,7 +9,9 @@ use core::net::{SocketAddrV4, SocketAddrV6};
 /// there.
 ///
 /// An address and port of all zeros means the server has no preferred
-/// address of that family. The connection ID has sequence number 1.
+/// address of that family; reading rejects a value in which both families
+/// are all zeros, since it leaves no address to migrate to. The connection
+/// ID has sequence number 1.
 ///
 /// [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -94,8 +96,10 @@ pub mod codec {
     ///
     /// [`ReadPreferredAddressError::Address`] or
     /// [`ReadPreferredAddressError::StatelessResetToken`] if a fixed-length
-    /// field cannot be read, [`ReadPreferredAddressError::ConnectionId`] if
-    /// the connection ID cannot be read or is longer than 20 bytes, and
+    /// field cannot be read, [`ReadPreferredAddressError::NoAddress`] if the
+    /// addresses and ports of both families are all zeros,
+    /// [`ReadPreferredAddressError::ConnectionId`] if the connection ID
+    /// cannot be read or is longer than 20 bytes, and
     /// [`ReadPreferredAddressError::EmptyConnectionId`] if it is empty.
     #[call(sync)]
     pub async fn read_preferred_address<F: Read, A: ReceiverAccess<Family = F>>(
@@ -107,6 +111,11 @@ pub mod codec {
                 .context(read_preferred_address_error::AddressSnafu)?;
         let ipv4 = SocketAddrV4::new(Ipv4Addr::from([a, b, c, d]), u16::from_be_bytes([p0, p1]));
         let ipv6 = SocketAddrV6::new(Ipv6Addr::from(ipv6), u16::from_be_bytes([q0, q1]), 0, 0);
+        let unspecified_v4 = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0);
+        let unspecified_v6 = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0);
+        if ipv4 == unspecified_v4 && ipv6 == unspecified_v6 {
+            return read_preferred_address_error::NoAddressSnafu.fail();
+        }
         let connection_id = io
             .read_connection_id()
             .await
@@ -135,6 +144,12 @@ pub mod codec {
             /// The failure of reading the fields.
             source: ReadArrayError<E>,
         },
+        /// The addresses and ports of both families are all zeros
+        /// ([RFC 9000 §18.2]): there is no address of either family.
+        ///
+        /// [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
+        #[snafu(display("preferred address has no address of either family"))]
+        NoAddress,
         /// The connection ID could not be read, or it is longer than 20 bytes.
         #[snafu(display("preferred address connection ID read failed"))]
         ConnectionId {

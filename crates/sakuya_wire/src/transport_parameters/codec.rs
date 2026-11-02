@@ -266,8 +266,8 @@ pub enum ReadTransportParametersError<E> {
         /// The length of the value.
         length: usize,
     },
-    /// The value of `preferred_address` is shorter than its fields or holds
-    /// an invalid connection ID.
+    /// The value of `preferred_address` is shorter than its fields, holds no
+    /// address of either family or holds an invalid connection ID.
     #[snafu(display("preferred_address value read failed"))]
     PreferredAddress {
         /// The failure of reading the fields from the value.
