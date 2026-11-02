@@ -31,7 +31,10 @@ use crate::{
     stream_count::StreamCount,
     stream_id::{Directionality, StreamId},
     transport_error::TransportErrorCode,
-    var_int::{VarInt, codec::ReadVarIntHostExt as _},
+    var_int::{
+        VarInt, VarIntField, VarIntWidth,
+        codec::{ReadVarIntHostExt as _, WriteVarIntFieldHostExt as _},
+    },
 };
 use bytes::Bytes;
 use core::num::NonZeroUsize;
@@ -309,23 +312,91 @@ fn padding_runs_are_one_value() {
     );
     assert!(frames.next().is_none());
 
-    // A longer encoding of type 0 is one PADDING frame of that length.
-    let mut input = &[0x40, 0x00, 0x01][..];
+    // A longer encoding of type 0 is not PADDING; it ends the run and is
+    // rejected.
+    let payload = [0x00, 0x40, 0x00, 0x01];
+    let mut frames = Frames::new(&payload[..], Extensions::NONE);
     assert_eq!(
-        input.sync_read_frame_unpin(Extensions::NONE).unwrap(),
-        Frame::Padding(Padding {
-            len: NonZeroUsize::new(2).unwrap()
-        })
+        frames.next().map(Result::unwrap),
+        Some(Frame::Padding(Padding {
+            len: NonZeroUsize::MIN
+        }))
     );
-    assert_eq!(input, [0x01]);
+    let error = frames.next().unwrap().unwrap_err();
+    assert!(matches!(
+        error,
+        ReadFrameError::LongerTypeEncoding {
+            frame_type: VarInt::ZERO,
+            width: VarIntWidth::Two
+        }
+    ));
+    assert_eq!(frames.offset(), 1);
+    assert!(frames.next().is_none());
+}
+
+#[test]
+fn longer_frame_type_encodings_are_protocol_violations() {
+    // Every value up to 0x3f has a one-byte shortest encoding; the known
+    // types and an unknown one are rejected alike.
+    for value in (0..=0x31u8).chain([0x3f]) {
+        for width in [VarIntWidth::Two, VarIntWidth::Four, VarIntWidth::Eight] {
+            let mut encoding = Vec::new();
+            encoding
+                .sync_write_var_int_field_unpin(
+                    VarIntField::new(VarInt::from(value), width).unwrap(),
+                )
+                .unwrap();
+            // A field that would follow stays unread.
+            encoding.push(0x01);
+            for extensions in [Extensions::NONE, Extensions::ALL] {
+                let mut input = encoding.as_slice();
+                let error = input.sync_read_frame_unpin(extensions).unwrap_err();
+                assert!(
+                    matches!(
+                        error,
+                        ReadFrameError::LongerTypeEncoding { frame_type, width: rejected }
+                            if frame_type == VarInt::from(value) && rejected == width
+                    ),
+                    "{encoding:02x?}: {error:?}"
+                );
+                assert_eq!(
+                    error.transport_error_code(),
+                    TransportErrorCode::PROTOCOL_VIOLATION
+                );
+                assert_eq!(error.frame_type(), Some(VarInt::from(value)));
+                assert!(!error.is_incomplete());
+                assert_eq!(input, [0x01]);
+            }
+        }
+    }
+    let error = [0x40, 0x08]
+        .as_slice()
+        .sync_read_frame_unpin(Extensions::NONE)
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "frame type 0x8 uses a 2-byte encoding, longer than necessary"
+    );
+    // A type whose shortest encoding takes two bytes is read; 0x4040 is
+    // unknown.
+    let error = [0x40, 0x40]
+        .as_slice()
+        .sync_read_frame_unpin(Extensions::ALL)
+        .unwrap_err();
+    assert!(matches!(error, ReadFrameError::UnknownType { .. }));
+    assert_eq!(
+        error.transport_error_code(),
+        TransportErrorCode::FRAME_ENCODING_ERROR
+    );
 }
 
 #[test]
 fn unknown_and_disabled_types_are_rejected() {
-    let cases: [(&[u8], Extensions); 6] = [
+    let cases: [(&[u8], Extensions); 7] = [
         (&[0x1f], Extensions::ALL),
         (&[0x21, 0x00], Extensions::ALL),
-        (&[0x40, 0x32], Extensions::ALL),
+        (&[0x40, 0x40], Extensions::ALL),
+        (&[0x7f, 0xff], Extensions::ALL),
         (&[0x30, 0x01], Extensions::NONE),
         (
             &[0x31, 0x00],

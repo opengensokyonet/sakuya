@@ -7,10 +7,10 @@ use core::num::NonZeroUsize;
 
 /// One or more PADDING frames ([RFC 9000 §19.1]).
 ///
-/// A PADDING frame is its Frame Type alone, normally the single byte `0x00`.
-/// A frame read with a longer encoding of the type counts its bytes; reading
-/// with [`Frames`](super::Frames) reports a run of consecutive PADDING frames
-/// as one value. Writing writes `len` zero bytes.
+/// A PADDING frame is its Frame Type alone, the single byte `0x00`: like
+/// every Frame Type, it must use its shortest encoding. Reading with
+/// [`Frames`](super::Frames) reports a run of consecutive PADDING frames as
+/// one value. Writing writes `len` zero bytes, `len` PADDING frames.
 ///
 /// [RFC 9000 §19.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.1
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

@@ -78,8 +78,8 @@ use crate::{
     stream_id::Directionality,
     transport_error::TransportErrorCode,
     var_int::{
-        VarInt,
-        codec::{ReadVarIntError, read_var_int_counted},
+        VarInt, VarIntWidth,
+        codec::{ReadVarIntError, read_var_int_with_width},
     },
 };
 use bytes::Buf;
@@ -95,16 +95,21 @@ use snafu::{ResultExt, Snafu};
 ///
 /// The source is the rest of a packet payload: a STREAM or DATAGRAM frame
 /// without a Length field takes all of it. Payload fields are chunks of the
-/// source. A PADDING frame reads only its Frame Type; its length is the
-/// length of that encoding.
+/// source. A PADDING frame reads only its one-byte Frame Type.
+///
+/// The Frame Type must use its shortest encoding ([RFC 9000 §12.4]); a
+/// longer one is rejected before the type is looked up.
 ///
 /// # Errors
 ///
 /// [`ReadFrameError::FrameType`] if the Frame Type cannot be read,
-/// [`ReadFrameError::UnknownType`] for a type that is unknown or not enabled,
-/// and the variant named after the frame type if its fields cannot be read
-/// or break a limit of the encoding. Bytes read before a failure stay
-/// consumed.
+/// [`ReadFrameError::LongerTypeEncoding`] if it uses a longer encoding than
+/// necessary, [`ReadFrameError::UnknownType`] for a type that is unknown or
+/// not enabled, and the variant named after the frame type if its fields
+/// cannot be read or break a limit of the encoding. Bytes read before a
+/// failure stay consumed.
+///
+/// [RFC 9000 §12.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.4
 #[call(sync)]
 pub async fn read_frame<F, A>(
     io: &mut A,
@@ -116,7 +121,10 @@ where
 {
     use read_frame_error::*;
     use type_value::*;
-    let (frame_type, type_len) = read_var_int_counted(io).await.context(FrameTypeSnafu)?;
+    let (frame_type, width) = read_var_int_with_width(io).await.context(FrameTypeSnafu)?;
+    if width != VarIntWidth::shortest(frame_type) {
+        return LongerTypeEncodingSnafu { frame_type, width }.fail();
+    }
     let kind = match FrameType::of(frame_type) {
         Ok(kind) if extensions.permits(kind) => kind,
         _ => return UnknownTypeSnafu { frame_type }.fail(),
@@ -124,7 +132,7 @@ where
     let value = frame_type.get();
     Ok(match kind {
         FrameType::Padding => Frame::Padding(Padding {
-            len: NonZeroUsize::MIN.saturating_add(type_len - 1),
+            len: NonZeroUsize::MIN,
         }),
         FrameType::Ping => Frame::Ping(Ping),
         FrameType::Ack => Frame::Ack(
@@ -235,10 +243,12 @@ fn directionality(unidirectional: bool) -> Directionality {
 /// Failures that [`read_frame`] can produce.
 ///
 /// Every failure corresponds to the transport error FRAME_ENCODING_ERROR,
-/// except a DATAGRAM frame that is not enabled, which corresponds to
-/// PROTOCOL_VIOLATION ([`ReadFrameError::transport_error_code`]). The variants
-/// named after a frame type hold the failure of reading the fields of that
-/// type, and its Frame Type value.
+/// except two that correspond to PROTOCOL_VIOLATION
+/// ([`ReadFrameError::transport_error_code`]):
+/// [`ReadFrameError::LongerTypeEncoding`], and
+/// [`ReadFrameError::UnknownType`] for a DATAGRAM frame that is not enabled.
+/// The variants named after a frame type hold the failure of reading the
+/// fields of that type, and its Frame Type value.
 #[derive(Debug, Snafu)]
 #[snafu(module(read_frame_error), visibility(pub(crate)))]
 pub enum ReadFrameError<E> {
@@ -247,6 +257,21 @@ pub enum ReadFrameError<E> {
     FrameType {
         /// The failure of reading the variable-length integer.
         source: ReadVarIntError<E>,
+    },
+    /// The Frame Type uses a longer encoding than necessary.
+    ///
+    /// RFC 9000 §12.4 requires the shortest encoding of the Frame Type; a
+    /// longer one is a PROTOCOL_VIOLATION, whether or not the type is known.
+    #[snafu(display(
+        "frame type {:#x} uses a {}-byte encoding, longer than necessary",
+        frame_type.get(),
+        width.encoded_len()
+    ))]
+    LongerTypeEncoding {
+        /// The Frame Type.
+        frame_type: VarInt,
+        /// The width of its encoding.
+        width: VarIntWidth,
     },
     /// The frame type is neither defined nor an enabled extension.
     #[snafu(display("unknown frame type {:#x}", frame_type.get()))]
@@ -416,7 +441,8 @@ impl<E> ReadFrameError<E> {
     pub fn frame_type(&self) -> Option<VarInt> {
         match *self {
             Self::FrameType { .. } => None,
-            Self::UnknownType { frame_type }
+            Self::LongerTypeEncoding { frame_type, .. }
+            | Self::UnknownType { frame_type }
             | Self::Ack { frame_type, .. }
             | Self::ResetStream { frame_type, .. }
             | Self::StopSending { frame_type, .. }
@@ -460,7 +486,7 @@ impl<E> ReadFrameError<E> {
             | Self::DataBlocked { source, .. }
             | Self::StreamDataBlocked { source, .. }
             | Self::RetireConnectionId { source, .. } => source.is_incomplete(),
-            Self::UnknownType { .. } => false,
+            Self::LongerTypeEncoding { .. } | Self::UnknownType { .. } => false,
             Self::Ack { source, .. } => {
                 matches!(source, Ack::Field { source } if source.is_incomplete())
             }
@@ -507,14 +533,16 @@ impl<E> ReadFrameError<E> {
         }
     }
 
-    /// The transport error the failure corresponds to: FRAME_ENCODING_ERROR
-    /// ([RFC 9000 §12.4], §19), or PROTOCOL_VIOLATION for a DATAGRAM frame
-    /// that is not enabled ([RFC 9221 §3]).
+    /// The transport error the failure corresponds to ([RFC 9000 §12.4],
+    /// §19): PROTOCOL_VIOLATION for a Frame Type encoded longer than
+    /// necessary and for a DATAGRAM frame that is not enabled ([RFC 9221 §3]),
+    /// FRAME_ENCODING_ERROR for every other failure.
     ///
     /// [RFC 9000 §12.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.4
     /// [RFC 9221 §3]: https://www.rfc-editor.org/rfc/rfc9221.html#section-3
     pub fn transport_error_code(&self) -> TransportErrorCode {
         match self {
+            Self::LongerTypeEncoding { .. } => TransportErrorCode::PROTOCOL_VIOLATION,
             Self::UnknownType { frame_type }
                 if matches!(FrameType::of(*frame_type), Ok(FrameType::Datagram)) =>
             {

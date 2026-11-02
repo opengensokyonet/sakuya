@@ -40,8 +40,12 @@
 //! or the lengths a NEW_CONNECTION_ID connection ID may have. Whether a frame
 //! is allowed in the packet type, whether a stream exists or may be opened,
 //! and flow control are for the receiver of the frame to check.
-//! [`codec::ReadFrameError::transport_error_code`] names the transport error
-//! of a failure.
+//!
+//! Every [`codec::ReadFrameError`] corresponds to FRAME_ENCODING_ERROR, with
+//! two exceptions that correspond to PROTOCOL_VIOLATION
+//! ([`codec::ReadFrameError::transport_error_code`]): a Frame Type encoded
+//! longer than necessary ([RFC 9000 §12.4]), and a DATAGRAM frame that is
+//! not enabled ([RFC 9221]).
 //!
 //! ```
 //! use sakuya_wire::frame::{Extensions, Frame, Frames};

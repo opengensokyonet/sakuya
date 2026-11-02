@@ -112,15 +112,25 @@ fn frame_types_above_one_byte_are_unknown() {
     }
 }
 
-/// RFC 9000 §12.4 makes treating a longer encoding as an error optional.
+/// RFC 9000 §12.4 lets a reader treat a longer encoding of the Frame Type as
+/// a PROTOCOL_VIOLATION; this reader does, for defined types too.
 #[test]
-fn longer_encodings_of_a_type_are_read() {
-    assert_eq!(accepts(&[0x40, 0x01]), accepts(&[0x01]));
-    assert_eq!(accepts(&[0x80, 0, 0, 0x01]), accepts(&[0x01]));
-    let (frame, consumed) = read(&[0xc0, 0, 0, 0, 0, 0, 0, 0x1e]).unwrap();
-    assert_eq!(frame.frame_type(), FrameType::HandshakeDone);
-    assert_eq!(consumed, 8);
-    // The type value of a frame is what the reader saw, for CONNECTION_CLOSE.
+fn longer_encodings_of_a_type_are_protocol_violations() {
+    let encodings: [&[u8]; 3] = [
+        &[0x40, 0x01],
+        &[0x80, 0, 0, 0x01],
+        &[0xc0, 0, 0, 0, 0, 0, 0, 0x1e],
+    ];
+    for bytes in encodings {
+        let error = read(bytes).unwrap_err();
+        assert_eq!(
+            error.transport_error_code(),
+            TransportErrorCode::PROTOCOL_VIOLATION,
+            "{bytes:02x?}"
+        );
+        assert!(!error.is_incomplete(), "{bytes:02x?}");
+    }
+    // The type value of the failure is what the reader saw.
     let error = read(&[0x40, 0x07, 0x00]).unwrap_err();
     assert_eq!(error.frame_type(), Some(VarInt::from(7u8)));
 }
