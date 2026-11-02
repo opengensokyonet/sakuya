@@ -511,7 +511,7 @@ fn terminal_state_needs_a_committed_end() {
     let mut sender = test_sender(1000, false);
     assert_eq!(
         sender.enter_terminal_state(SendTerminalState::DataRecvd),
-        Err(EndNotCommittedError)
+        Err(EnterTerminalStateError::EndNotCommitted)
     );
     assert_eq!(sender.terminal_state(), None);
     sender.close().unwrap();
@@ -520,9 +520,44 @@ fn terminal_state_needs_a_committed_end() {
         .unwrap();
     // Only the first terminal state is kept.
     sender
-        .enter_terminal_state(SendTerminalState::ResetRecvd)
+        .enter_terminal_state(SendTerminalState::DataRecvd)
         .unwrap();
     assert_eq!(sender.terminal_state(), Some(SendTerminalState::DataRecvd));
+}
+
+#[test]
+fn reset_recvd_needs_a_committed_reset() {
+    let mut connection = ConnectionSendFlowController::new(v(1000));
+
+    // Closed and never reset: neither before nor after Data Recvd.
+    let mut sender = test_sender(1000, false);
+    write_all(&mut sender, &mut connection, 10);
+    sender.close().unwrap();
+    let events = sender.composition.termination.events.len();
+    assert_eq!(
+        sender.enter_terminal_state(SendTerminalState::ResetRecvd),
+        Err(EnterTerminalStateError::ResetNotCommitted)
+    );
+    assert_eq!(sender.terminal_state(), None);
+    assert_eq!(sender.composition.termination.events.len(), events);
+    sender
+        .enter_terminal_state(SendTerminalState::DataRecvd)
+        .unwrap();
+    assert_eq!(
+        sender.enter_terminal_state(SendTerminalState::ResetRecvd),
+        Err(EnterTerminalStateError::ResetNotCommitted)
+    );
+    assert_eq!(sender.terminal_state(), Some(SendTerminalState::DataRecvd));
+
+    // A reset that replaced a close can be acknowledged.
+    let mut sender = test_sender(1000, false);
+    write_all(&mut sender, &mut connection, 10);
+    sender.close().unwrap();
+    sender.reset(CODE).unwrap();
+    sender
+        .enter_terminal_state(SendTerminalState::ResetRecvd)
+        .unwrap();
+    assert_eq!(sender.terminal_state(), Some(SendTerminalState::ResetRecvd));
 }
 
 #[test]

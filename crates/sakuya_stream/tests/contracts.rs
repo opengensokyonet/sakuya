@@ -215,7 +215,6 @@ fn repeated_automatic_decisions_end_the_chain() {
 /// RFC 9000 §3.1: "Reset Recvd" is reached from "Reset Sent" only. A stream
 /// that was closed and never reset cannot be in it.
 #[test]
-#[ignore = "known defect: enter_terminal_state accepts any terminal state for any committed end"]
 fn a_terminal_reset_needs_a_reset() {
     let mut connection = ConnectionSendFlowController::new(v(1000));
     let mut stream = sender(|_, _| TerminationAction::Keep);

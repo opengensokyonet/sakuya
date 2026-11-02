@@ -217,7 +217,8 @@ pub enum EndSource {
 pub enum SendTerminalState {
     /// All data and the final size have been acknowledged.
     DataRecvd,
-    /// The reset has been acknowledged.
+    /// The reset has been acknowledged. Only a send direction that was reset
+    /// reaches it.
     ResetRecvd,
 }
 
@@ -390,20 +391,29 @@ where
     /// Records that the send direction reached a terminal state: all data
     /// and the final size, or the reset, were acknowledged.
     ///
-    /// Only the first terminal state is kept; later calls succeed without
-    /// effect. This entry is provisional.
+    /// `state` must be one the committed end can reach: "Reset Recvd" follows
+    /// "Reset Sent" only ([RFC 9000 §3.1]), so a send direction that was
+    /// closed and never reset cannot enter [`SendTerminalState::ResetRecvd`].
+    /// Only the first terminal state is kept; a later call with a state the
+    /// committed end can reach succeeds without effect. This entry is
+    /// provisional.
     ///
     /// # Errors
     ///
-    /// [`EndNotCommittedError`] if no end is committed: a terminal state
-    /// needs a fixed final size. Nothing changes then.
+    /// [`EnterTerminalStateError`] if no end is committed, or if the
+    /// committed end cannot reach `state`. Nothing changes then.
+    ///
+    /// [RFC 9000 §3.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-3.1
     pub fn enter_terminal_state(
         &mut self,
         state: SendTerminalState,
-    ) -> Result<(), EndNotCommittedError> {
-        let EndPhase::Ended { terminal, .. } = &mut self.end else {
-            return EndNotCommittedSnafu.fail();
+    ) -> Result<(), EnterTerminalStateError> {
+        let EndPhase::Ended { end, terminal } = &mut self.end else {
+            return enter_terminal_state_error::EndNotCommittedSnafu.fail();
         };
+        if let (SendTerminalState::ResetRecvd, CommittedEnd::Closed { .. }) = (state, &*end) {
+            return enter_terminal_state_error::ResetNotCommittedSnafu.fail();
+        }
         if terminal.is_some() {
             return Ok(());
         }
@@ -555,11 +565,19 @@ where
     }
 }
 
-/// [`StreamSender::enter_terminal_state`] was called before an end was
-/// committed.
+/// Failures of [`StreamSender::enter_terminal_state`]; none of them changes
+/// any state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(display("a send direction reaches a terminal state only after its end is committed"))]
-pub struct EndNotCommittedError;
+#[snafu(module(enter_terminal_state_error), visibility(pub(crate)))]
+pub enum EnterTerminalStateError {
+    /// No end is committed: a terminal state needs a fixed final size.
+    #[snafu(display("a send direction reaches a terminal state only after its end is committed"))]
+    EndNotCommitted,
+    /// [`SendTerminalState::ResetRecvd`] was requested, but the committed end
+    /// is a close: no reset was committed that could have been acknowledged.
+    #[snafu(display("a send direction that was not reset cannot reach Reset Recvd"))]
+    ResetNotCommitted,
+}
 
 #[cfg(test)]
 mod tests;
