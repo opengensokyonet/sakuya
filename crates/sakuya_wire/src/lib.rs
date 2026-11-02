@@ -4,7 +4,9 @@
 //! the version-independent rules of [RFC 8999] first and applies the version 1
 //! layout only to packets that carry version 1.
 //!
-//! - [`var_int`]: variable-length integers ([`var_int::VarInt`]).
+//! - [`var_int`]: variable-length integers ([`var_int::VarInt`]), the widths
+//!   of their encodings ([`var_int::VarIntWidth`]), and wire fields that hold
+//!   a value with the width it is encoded in ([`var_int::VarIntField`]).
 //! - [`connection_id`]: connection IDs ([`connection_id::ConnectionId`]), their
 //!   lengths ([`connection_id::ConnectionIdLength`]), their non-empty form
 //!   ([`connection_id::NonEmptyCid`]), the version-independent
@@ -19,7 +21,9 @@
 //!   removed: header form, version, connection IDs, the version 1 packet type,
 //!   tokens, packet boundaries and the offsets that header protection needs.
 //! - [`frame`]: the frames of a packet payload once protection is removed,
-//!   with the DATAGRAM and RESET_STREAM_AT extensions.
+//!   with the DATAGRAM and RESET_STREAM_AT extensions. A frame value states
+//!   every detail of its encoding, so frames read and write back byte for
+//!   byte.
 //! - [`transport_parameters`]: the transport parameters an endpoint sends in
 //!   the TLS handshake.
 //! - [`transport_error`] and [`application_error`]: transport error codes
