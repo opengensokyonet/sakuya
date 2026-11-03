@@ -1,16 +1,13 @@
 use super::{
-    OutOfRangeError, VarInt, VarIntField, VarIntWidth, VarIntWidthError,
+    OutOfRangeError, VarInt, VarIntField, VarIntWidth,
     codec::{
         ReadVarIntError, ReadVarIntFieldError, ReadVarIntFieldHostExt as _, ReadVarIntHostExt as _,
         WriteVarIntError, WriteVarIntFieldHostExt as _, WriteVarIntHostExt as _,
     },
 };
 use crate::{
-    application_error::ApplicationErrorCode,
-    packet_number::PacketNumber,
-    stream_count::{StreamCount, StreamCountError},
-    stream_id::StreamId,
-    transport_error::TransportErrorCode,
+    application_error::ApplicationErrorCode, packet_number::PacketNumber,
+    stream_count::StreamCount, stream_id::StreamId, transport_error::TransportErrorCode,
 };
 use bytes::Bytes;
 use core::{convert::Infallible, fmt::Debug};
@@ -400,7 +397,8 @@ fn fields_check_their_width() {
                 assert_eq!(field.into_inner(), value);
                 assert_eq!(field == shortest, width == shortest.width());
             } else {
-                assert_eq!(field, Err(VarIntWidthError { value, width }));
+                let error = field.unwrap_err();
+                assert_eq!((error.value(), error.width()), (value, width));
             }
         }
     }
@@ -528,9 +526,9 @@ fn stream_count_fields_stop_at_2_60() {
     assert!(matches!(
         error,
         ReadVarIntFieldError::Value {
-            source: StreamCountError { value },
+            source,
             ..
-        } if value == (1 << 60) + 1
+        } if source.value() == (1 << 60) + 1
     ));
 }
 

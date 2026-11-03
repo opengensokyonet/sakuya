@@ -149,7 +149,7 @@ mod tests {
             codec::{ReadFrameError, ReadFrameHostExt as _},
             tests::{assert_bytes_round_trip, assert_round_trip},
         },
-        stream_count::{StreamCount, StreamCountError},
+        stream_count::StreamCount,
         stream_id::Directionality,
         var_int::{VarInt, VarIntField},
     };
@@ -196,10 +196,10 @@ mod tests {
             error,
             ReadFrameError::MaxStreams {
                 source: ReadMaxStreamsError::StreamCount {
-                    source: StreamCountError { value }
+                    source
                 },
                 ..
-            } if value == too_many
+            } if source == StreamCount::new(too_many).unwrap_err()
         ));
         assert_eq!(
             error.transport_error_code(),

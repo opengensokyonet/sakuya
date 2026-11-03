@@ -234,10 +234,7 @@ mod tests {
     fn narrow_token_length_fields_are_rejected() {
         let token = [0; 64];
         let expected = InvalidNewTokenError::Length {
-            source: LengthError {
-                length: 64,
-                width: VarIntWidth::One,
-            },
+            source: LengthError::check(64, VarIntWidth::One).unwrap_err(),
         };
         assert_eq!(NewToken::new(VarIntWidth::One, &token[..]), Err(expected));
     }

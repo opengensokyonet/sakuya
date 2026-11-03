@@ -319,16 +319,30 @@ impl<T: Copy + Into<VarInt> + TryFrom<VarInt>> VarIntField<T> {
 }
 
 /// A value does not fit the width chosen for its encoding.
+///
+/// Only [`VarIntField::new`] constructs it, when the value does not fit, so
+/// the width is never 8 bytes and the value always exceeds what the width
+/// holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display(
     "{value} does not fit a {}-byte variable-length integer encoding",
     width.encoded_len()
 ))]
 pub struct VarIntWidthError {
-    /// The value.
-    pub value: VarInt,
-    /// The width that cannot hold it.
-    pub width: VarIntWidth,
+    value: VarInt,
+    width: VarIntWidth,
+}
+
+impl VarIntWidthError {
+    /// The value, which exceeds what [`width`](Self::width) holds.
+    pub const fn value(self) -> VarInt {
+        self.value
+    }
+
+    /// The width that cannot hold the value; never 8 bytes.
+    pub const fn width(self) -> VarIntWidth {
+        self.width
+    }
 }
 
 impl fmt::Display for VarInt {

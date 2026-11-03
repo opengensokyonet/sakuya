@@ -98,16 +98,25 @@ impl fmt::Display for StreamCount {
 }
 
 /// A value exceeds [`StreamCount::MAX`].
+///
+/// Only [`StreamCount::new`] and the conversions into [`StreamCount`]
+/// construct it, so the value it holds always exceeds 2<sup>60</sup>.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("stream count {value} exceeds 2^60"))]
 pub struct StreamCountError {
-    /// The rejected value.
-    pub value: u64,
+    value: u64,
+}
+
+impl StreamCountError {
+    /// The rejected value, above 2<sup>60</sup>.
+    pub const fn value(self) -> u64 {
+        self.value
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{StreamCount, StreamCountError};
+    use super::StreamCount;
     use crate::var_int::VarInt;
 
     #[test]
@@ -127,22 +136,16 @@ mod tests {
             assert_eq!(StreamCount::try_from(value), Ok(count));
         }
         for value in [(1 << 60) + 1, (1 << 62) - 1] {
-            let error = StreamCountError { value };
-            assert_eq!(StreamCount::new(value), Err(error));
+            let error = StreamCount::new(value).unwrap_err();
+            assert_eq!(error.value(), value);
             assert_eq!(
                 StreamCount::try_from(VarInt::try_from(value).unwrap()),
                 Err(error)
             );
         }
+        assert_eq!(StreamCount::new(u64::MAX).unwrap_err().value(), u64::MAX);
         assert_eq!(
-            StreamCount::new(u64::MAX),
-            Err(StreamCountError { value: u64::MAX })
-        );
-        assert_eq!(
-            StreamCountError {
-                value: (1 << 60) + 1
-            }
-            .to_string(),
+            StreamCount::new((1 << 60) + 1).unwrap_err().to_string(),
             "stream count 1152921504606846977 exceeds 2^60"
         );
         assert_eq!(StreamCount::new(100).unwrap().to_string(), "100");

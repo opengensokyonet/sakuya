@@ -4,7 +4,10 @@ use super::{
     Extensions, Frame, FrameType, Frames, InvalidDataError, LengthError, NoLength,
     UnknownFrameTypeError,
     ack::{Ack, AckRange, AckRanges, EcnCounts},
-    codec::{ExtensionTypeValue, ReadFrameError, ReadFrameHostExt as _, WriteFrameHostExt as _},
+    codec::{
+        ExtensionTypeValue, LongerTypeEncodingError, ReadFrameError, ReadFrameHostExt as _,
+        WriteFrameHostExt as _,
+    },
     connection_close::{CloseErrorCode, ConnectionClose},
     crypto::Crypto,
     data_blocked::DataBlocked,
@@ -400,10 +403,8 @@ fn padding_runs_are_one_value() {
     let error = frames.next().unwrap().unwrap_err();
     assert!(matches!(
         error,
-        ReadFrameError::LongerTypeEncoding {
-            frame_type: VarInt::ZERO,
-            width: VarIntWidth::Two
-        }
+        ReadFrameError::LongerTypeEncoding { source }
+            if source == LongerTypeEncodingError::check(VarInt::ZERO, VarIntWidth::Two).unwrap_err()
     ));
     assert_eq!(frames.offset(), 1);
     assert!(frames.next().is_none());
@@ -429,8 +430,8 @@ fn longer_frame_type_encodings_are_protocol_violations() {
                 assert!(
                     matches!(
                         error,
-                        ReadFrameError::LongerTypeEncoding { frame_type, width: rejected }
-                            if frame_type == VarInt::from(value) && rejected == width
+                        ReadFrameError::LongerTypeEncoding { source }
+                            if source.frame_type() == VarInt::from(value) && source.width() == width
                     ),
                     "{encoding:02x?}: {error:?}"
                 );
@@ -1582,7 +1583,7 @@ fn length_fields_must_hold_the_payload_length() {
                 continue;
             }
             // Construction rejects a Length field too narrow for the length.
-            let error = LengthError { length, width };
+            let error = LengthError::check(length, width).unwrap_err();
             assert_eq!(crypto, Err(InvalidDataError::Length { source: error }));
             assert_eq!(stream, Err(InvalidDataError::Length { source: error }));
             assert_eq!(close, Err(error));
@@ -1609,7 +1610,8 @@ fn length_fields_must_hold_the_payload_length() {
         for width in VarIntWidth::ALL {
             let result = LengthError::check(length, width);
             if widest_rejected.is_some_and(|widest| width <= widest) {
-                assert_eq!(result, Err(LengthError { length, width }), "{length}");
+                let error = result.unwrap_err();
+                assert_eq!((error.length(), error.width()), (length, width), "{length}");
             } else {
                 assert_eq!(result, Ok(vi(length as u64)), "{length}");
             }

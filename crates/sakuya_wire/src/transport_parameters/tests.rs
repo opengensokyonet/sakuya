@@ -18,7 +18,7 @@ use super::{
 use crate::{
     connection_id::{ConnectionId, ConnectionIdLengthError, NonEmptyCid, StatelessResetToken},
     role::Role,
-    stream_count::{StreamCount, StreamCountError},
+    stream_count::StreamCount,
     transport_error::TransportErrorCode,
     var_int::{VarInt, codec::WriteVarIntHostExt as _},
 };
@@ -279,7 +279,7 @@ fn server_only_parameters_from_a_client_are_rejected() {
 #[test]
 fn values_out_of_range_are_rejected_by_parameter() {
     use InvalidParameterError as E;
-    let count = |value| StreamCountError { value };
+    let count = |value| StreamCount::new(value).unwrap_err();
     let cases = [
         (0x03, 1199, 1200, E::MaxUdpPayloadSize { value: vi(1199) }),
         (

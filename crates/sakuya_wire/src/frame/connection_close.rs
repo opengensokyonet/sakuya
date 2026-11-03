@@ -425,10 +425,7 @@ mod tests {
         };
         assert_eq!(
             ConnectionClose::new(error_code, VarIntWidth::One, &reason_phrase[..]),
-            Err(LengthError {
-                length: 64,
-                width: VarIntWidth::One,
-            })
+            Err(LengthError::check(64, VarIntWidth::One).unwrap_err())
         );
         let frame = ConnectionClose::new(error_code, VarIntWidth::Two, &reason_phrase[..]);
         assert_eq!(frame.unwrap().into_reason_phrase(), &reason_phrase[..]);

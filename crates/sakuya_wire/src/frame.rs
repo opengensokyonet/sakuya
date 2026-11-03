@@ -654,16 +654,28 @@ pub(crate) fn length_width<L: LengthKind>(length: L) -> Option<VarIntWidth> {
 }
 
 /// The data of a STREAM or CRYPTO frame ends beyond 2<sup>62</sup> − 1.
+///
+/// It is constructed only when the check fails, so its offset plus its
+/// length always exceeds 2<sup>62</sup> − 1.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("data at offset {offset} of length {length} ends beyond 2^62 - 1"))]
 pub struct DataEndError {
-    /// The Offset field.
-    pub offset: VarInt,
-    /// The length of the data.
-    pub length: u64,
+    offset: VarInt,
+    length: u64,
 }
 
 impl DataEndError {
+    /// The Offset field.
+    pub const fn offset(self) -> VarInt {
+        self.offset
+    }
+
+    /// The length of the data, which ends beyond 2<sup>62</sup> − 1 after
+    /// [`offset`](Self::offset).
+    pub const fn length(self) -> u64 {
+        self.length
+    }
+
     /// Checks that `length` bytes of data at `offset` end at most at
     /// 2<sup>62</sup> − 1.
     pub(crate) fn check(offset: VarInt, length: u64) -> Result<(), Self> {
@@ -681,19 +693,31 @@ impl DataEndError {
 
 /// A payload field is longer than its Length field can state at the
 /// field's width.
+///
+/// It is constructed only when the check fails, so the length always
+/// exceeds what the width holds: for an 8-byte width, 2<sup>62</sup> − 1.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display(
     "field of {length} bytes is longer than a {}-byte Length field can state",
     width.encoded_len()
 ))]
 pub struct LengthError {
-    /// The length of the payload field.
-    pub length: usize,
-    /// The width of the Length field.
-    pub width: VarIntWidth,
+    length: usize,
+    width: VarIntWidth,
 }
 
 impl LengthError {
+    /// The length of the payload field, which exceeds what
+    /// [`width`](Self::width) holds.
+    pub const fn length(self) -> usize {
+        self.length
+    }
+
+    /// The width of the Length field.
+    pub const fn width(self) -> VarIntWidth {
+        self.width
+    }
+
     /// The value of a Length field of `width` for a payload of `length`
     /// bytes.
     pub(crate) fn check(length: usize, width: VarIntWidth) -> Result<VarInt, Self> {

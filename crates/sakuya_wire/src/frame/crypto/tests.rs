@@ -39,10 +39,7 @@ fn data_ending_beyond_2_62_is_rejected() {
     let mut encoding = vec![0x06];
     encoding.extend_from_slice(&((max - 1) | 0xc000_0000_0000_0000).to_be_bytes());
     encoding.extend_from_slice(&[0x02, 0xaa, 0xbb]);
-    let expected = DataEndError {
-        offset: vi(max - 1),
-        length: 2,
-    };
+    let expected = DataEndError::check(vi(max - 1), 2).unwrap_err();
     let mut input = encoding.as_slice();
     assert!(matches!(
         input.sync_read_frame_unpin(Extensions::NONE),
@@ -54,10 +51,7 @@ fn data_ending_beyond_2_62_is_rejected() {
 
     // Construction rejects the same fields.
     let expected = InvalidDataError::DataEnd {
-        source: DataEndError {
-            offset: VarInt::MAX,
-            length: 1,
-        },
+        source: DataEndError::check(VarInt::MAX, 1).unwrap_err(),
     };
     assert_eq!(
         Crypto::new(short(VarInt::MAX), VarIntWidth::One, &b"x"[..]),
@@ -69,10 +63,7 @@ fn data_ending_beyond_2_62_is_rejected() {
 fn narrow_length_fields_are_rejected() {
     let data = [0; 64];
     let expected = InvalidDataError::Length {
-        source: LengthError {
-            length: 64,
-            width: VarIntWidth::One,
-        },
+        source: LengthError::check(64, VarIntWidth::One).unwrap_err(),
     };
     assert_eq!(
         Crypto::new(short(VarInt::ZERO), VarIntWidth::One, &data[..]),

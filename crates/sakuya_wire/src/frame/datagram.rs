@@ -412,10 +412,7 @@ mod tests {
     #[test]
     fn narrow_length_fields_are_rejected() {
         let data = [0; 64];
-        let expected = LengthError {
-            length: 64,
-            width: VarIntWidth::One,
-        };
+        let expected = LengthError::check(64, VarIntWidth::One).unwrap_err();
         assert_eq!(
             Datagram::<_, VarIntWidth>::new(VarIntWidth::One, &data[..]),
             Err(expected)

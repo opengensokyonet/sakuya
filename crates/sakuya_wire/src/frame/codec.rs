@@ -154,9 +154,7 @@ where
     use read_frame_error::*;
     use type_value::*;
     let (frame_type, width) = read_var_int_with_width(io).await.context(FrameTypeSnafu)?;
-    if width != VarIntWidth::shortest(frame_type) {
-        return LongerTypeEncodingSnafu { frame_type, width }.fail();
-    }
+    LongerTypeEncodingError::check(frame_type, width)?;
     let kind = FrameType::of(frame_type)?;
     // Every frame type that is not an extension frame type is permitted.
     if let Some(extension) = ExtensionTypeValue::new(frame_type)
@@ -305,6 +303,44 @@ impl From<ExtensionTypeValue> for VarInt {
     }
 }
 
+/// A Frame Type uses a longer encoding than necessary ([RFC 9000 §12.4]).
+///
+/// It is constructed only when the check fails, so its width is always
+/// longer than the shortest encoding of its Frame Type.
+///
+/// [RFC 9000 §12.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.4
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display(
+    "frame type {:#x} uses a {}-byte encoding, longer than necessary",
+    frame_type.get(),
+    width.encoded_len()
+))]
+pub struct LongerTypeEncodingError {
+    frame_type: VarInt,
+    width: VarIntWidth,
+}
+
+impl LongerTypeEncodingError {
+    /// Checks that the Frame Type `frame_type` was read in an encoding of
+    /// `width`, its shortest.
+    pub(crate) fn check(frame_type: VarInt, width: VarIntWidth) -> Result<(), Self> {
+        if width != VarIntWidth::shortest(frame_type) {
+            return Err(Self { frame_type, width });
+        }
+        Ok(())
+    }
+
+    /// The Frame Type.
+    pub const fn frame_type(self) -> VarInt {
+        self.frame_type
+    }
+
+    /// The width of its encoding, longer than the shortest.
+    pub const fn width(self) -> VarIntWidth {
+        self.width
+    }
+}
+
 /// Failures that [`read_frame`] can produce.
 ///
 /// Every failure corresponds to the transport error FRAME_ENCODING_ERROR,
@@ -330,16 +366,10 @@ pub enum ReadFrameError<E> {
     ///
     /// RFC 9000 §12.4 requires the shortest encoding of the Frame Type; a
     /// longer one is a PROTOCOL_VIOLATION, whether or not the type is known.
-    #[snafu(display(
-        "frame type {:#x} uses a {}-byte encoding, longer than necessary",
-        frame_type.get(),
-        width.encoded_len()
-    ))]
+    #[snafu(transparent)]
     LongerTypeEncoding {
-        /// The Frame Type.
-        frame_type: VarInt,
-        /// The width of its encoding.
-        width: VarIntWidth,
+        /// The broken rule.
+        source: LongerTypeEncodingError,
     },
     /// The Frame Type is defined neither by RFC 9000 nor by a supported
     /// extension.
@@ -508,7 +538,7 @@ impl<E> ReadFrameError<E> {
         use type_value::*;
         Some(match *self {
             Self::FrameType { .. } => return None,
-            Self::LongerTypeEncoding { frame_type, .. } => frame_type,
+            Self::LongerTypeEncoding { source } => source.frame_type(),
             Self::Stream { frame_type, .. } => frame_type.get(),
             Self::Datagram { frame_type, .. } => frame_type.get(),
             Self::UnknownType { source } => source.frame_type.get(),

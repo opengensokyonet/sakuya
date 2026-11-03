@@ -108,10 +108,7 @@ fn read_length_fields_are_kept() {
 #[test]
 fn each_kind_of_length_field_checks_its_limits() {
     let data = [0; 64];
-    let narrow = LengthError {
-        length: 64,
-        width: VarIntWidth::One,
-    };
+    let narrow = LengthError::check(64, VarIntWidth::One).unwrap_err();
     // A Length field must hold the length of the data.
     assert_eq!(
         Stream::<_, VarIntWidth>::new(short(sid(0)), None, VarIntWidth::One, &data[..], false),
@@ -161,10 +158,11 @@ fn data_ending_beyond_2_62_is_rejected() {
                 error,
                 ReadFrameError::Stream {
                     source: ReadStreamError::DataEnd {
-                        source: DataEndError { offset, length: 1 }
+                        source
                     },
                     frame_type: rejected,
-                } if offset == VarInt::MAX && rejected.get() == vi(frame_type)
+                } if source == DataEndError::check(VarInt::MAX, 1).unwrap_err()
+                    && rejected.get() == vi(frame_type)
             ),
             "{error:?}"
         );
@@ -179,10 +177,10 @@ fn data_ending_beyond_2_62_is_rejected() {
     assert!(input.sync_read_frame_unpin(Extensions::NONE).is_ok());
 
     // Construction rejects the same fields, for every kind of Length field.
-    let error = DataEndError {
-        offset: VarInt::MAX,
-        length: 1,
-    };
+    let error = DataEndError::check(VarInt::MAX, 1).unwrap_err();
+    assert_eq!((error.offset(), error.length()), (VarInt::MAX, 1));
+    // Data that ends exactly at the bound passes the check.
+    assert_eq!(DataEndError::check(VarInt::MAX, 0), Ok(()));
     let offset = Some(short(VarInt::MAX));
     let data = &b"x"[..];
     assert_eq!(
