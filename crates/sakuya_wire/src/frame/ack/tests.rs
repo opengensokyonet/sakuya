@@ -4,7 +4,7 @@
 
 use super::{
     Ack, AckBelowZeroError, AckRange, AckRanges, EcnCounts, InvalidAckError, PacketRangesError,
-    codec::{ReadAckError, WriteAckHostExt as _},
+    codec::{ReadAckEcnError, ReadAckError, WriteAckHostExt as _},
 };
 use crate::{
     frame::{
@@ -55,15 +55,26 @@ fn write(frame: Ack) -> Vec<u8> {
     written
 }
 
-/// The failure of reading the ACK frame `encoding`, and what it left unread.
-fn read_error(encoding: &[u8]) -> (ReadAckError<Infallible>, &[u8]) {
+/// The failure of reading the ACK frame `encoding`, of either type, and what
+/// it left unread.
+fn read_frame_error(encoding: &[u8]) -> (ReadFrameError<Infallible>, &[u8]) {
     let mut input = encoding;
     let error = input.sync_read_frame_unpin(Extensions::NONE).unwrap_err();
     assert_eq!(error.frame_type(), Some(vi(u64::from(encoding[0]))));
-    let ReadFrameError::Ack { source, .. } = error else {
-        panic!("{encoding:02x?}: {error:?}")
-    };
-    (source, input)
+    (error, input)
+}
+
+/// The failure of reading the ACK frame `encoding` before any ECN count,
+/// and what it left unread.
+fn read_error(encoding: &[u8]) -> (ReadAckError<Infallible>, &[u8]) {
+    let (error, input) = read_frame_error(encoding);
+    match error {
+        ReadFrameError::Ack { source } if encoding[0] == 0x02 => (source, input),
+        ReadFrameError::AckEcn {
+            source: ReadAckEcnError::Ack { source },
+        } if encoding[0] == 0x03 => (source, input),
+        error => panic!("{encoding:02x?}: {error:?}"),
+    }
 }
 
 #[test]
@@ -235,8 +246,9 @@ fn reading_reports_the_field_that_is_cut_short() {
     let full = [
         0x03, 0x05, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03,
     ];
-    // Each field is one byte; a cut before field `n` reports field `n`.
-    let fields: [fn(&ReadAckError<Infallible>) -> bool; 11] = [
+    // Each field is one byte; a cut before field `n` reports field `n`, in
+    // the failure of the frame type that has the field.
+    let fields: [fn(&ReadAckError<Infallible>) -> bool; 8] = [
         |error| matches!(error, ReadAckError::LargestAcknowledged { .. }),
         |error| matches!(error, ReadAckError::AckDelay { .. }),
         |error| matches!(error, ReadAckError::AckRangeCount { .. }),
@@ -245,28 +257,43 @@ fn reading_reports_the_field_that_is_cut_short() {
         |error| matches!(error, ReadAckError::AckRangeLength { index: 1, .. }),
         |error| matches!(error, ReadAckError::Gap { index: 2, .. }),
         |error| matches!(error, ReadAckError::AckRangeLength { index: 2, .. }),
-        |error| matches!(error, ReadAckError::Ect0Count { .. }),
-        |error| matches!(error, ReadAckError::Ect1Count { .. }),
-        |error| matches!(error, ReadAckError::EcnCeCount { .. }),
     ];
+    let without_ecn: Vec<u8> = [0x02].iter().chain(&full[1..9]).copied().collect();
     for (cut, expected) in (1..).zip(fields) {
-        let encoding = &full[..cut];
-        let (error, rest) = read_error(encoding);
-        assert!(expected(&error), "{encoding:02x?}: {error:?}");
-        assert!(rest.is_empty());
-        let mut input = encoding;
-        assert!(
-            input
-                .sync_read_frame_unpin(Extensions::NONE)
-                .unwrap_err()
-                .is_incomplete()
-        );
+        for encoding in [&full[..cut], &without_ecn[..cut]] {
+            let (error, rest) = read_error(encoding);
+            assert!(expected(&error), "{encoding:02x?}: {error:?}");
+            assert!(rest.is_empty());
+            let (error, _) = read_frame_error(encoding);
+            assert!(error.is_incomplete());
+        }
     }
+    let ecn_fields: [fn(&ReadAckEcnError<Infallible>) -> bool; 3] = [
+        |error| matches!(error, ReadAckEcnError::Ect0Count { .. }),
+        |error| matches!(error, ReadAckEcnError::Ect1Count { .. }),
+        |error| matches!(error, ReadAckEcnError::EcnCeCount { .. }),
+    ];
+    for (cut, expected) in (9..).zip(ecn_fields) {
+        let encoding = &full[..cut];
+        let (error, rest) = read_frame_error(encoding);
+        assert!(error.is_incomplete());
+        assert!(rest.is_empty());
+        let ReadFrameError::AckEcn { source } = error else {
+            panic!("{encoding:02x?}: {error:?}")
+        };
+        assert!(expected(&source), "{encoding:02x?}: {source:?}");
+    }
+    // Type 0x02 ends before the ECN counts.
+    assert_round_trip(read_ack(&without_ecn));
     let (error, _) = read_error(&full[..6]);
     assert_eq!(
         error.to_string(),
         "ACK Range Length of ACK Range 1 read failed"
     );
+    let (error, _) = read_frame_error(&full[..10]);
+    assert_eq!(error.to_string(), "ACK frame with ECN counts read failed");
+    let source = std::error::Error::source(&error).map(ToString::to_string);
+    assert_eq!(source.as_deref(), Some("ECT1 Count read failed"));
     // The whole encoding reads.
     assert_round_trip(read_ack(&full));
 }

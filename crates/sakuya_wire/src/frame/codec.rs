@@ -63,8 +63,11 @@
 
 use super::{
     Extensions, Frame, FrameType, UnknownFrameTypeError,
-    ack::codec::{ReadAckError, read_ack},
-    connection_close::codec::{ReadConnectionCloseError, read_connection_close},
+    ack::codec::{ReadAckEcnError, ReadAckError, read_ack, read_ack_ecn},
+    connection_close::codec::{
+        ReadConnectionCloseApplicationError, ReadConnectionCloseTransportError,
+        read_connection_close_application, read_connection_close_transport,
+    },
     crypto::codec::{ReadCryptoError, read_crypto},
     data_blocked::codec::read_data_blocked,
     datagram::codec::{ReadDatagramError, read_datagram},
@@ -159,14 +162,10 @@ where
     Ok(match kind {
         FrameType::Padding => Frame::Padding(Padding::new(NonZeroUsize::MIN)),
         FrameType::Ping => Frame::Ping(Ping),
-        FrameType::Ack => {
-            let ecn_counts = value == ACK_ECN;
-            Frame::Ack(
-                read_ack(io, ecn_counts)
-                    .await
-                    .context(AckSnafu { ecn_counts })?,
-            )
+        FrameType::Ack if value == ACK_ECN => {
+            Frame::Ack(read_ack_ecn(io).await.context(AckEcnSnafu)?)
         }
+        FrameType::Ack => Frame::Ack(read_ack(io).await.context(AckSnafu)?),
         FrameType::ResetStream => {
             Frame::ResetStream(read_reset_stream(io).await.context(ResetStreamSnafu)?)
         }
@@ -224,14 +223,18 @@ where
         FrameType::PathResponse => {
             Frame::PathResponse(read_path_response(io).await.context(PathResponseSnafu)?)
         }
-        FrameType::ConnectionClose => {
-            let application = value == CONNECTION_CLOSE_APPLICATION;
+        FrameType::ConnectionClose if value == CONNECTION_CLOSE_APPLICATION => {
             Frame::ConnectionClose(
-                read_connection_close(io, application)
+                read_connection_close_application(io)
                     .await
-                    .context(ConnectionCloseSnafu { application })?,
+                    .context(ConnectionCloseApplicationSnafu)?,
             )
         }
+        FrameType::ConnectionClose => Frame::ConnectionClose(
+            read_connection_close_transport(io)
+                .await
+                .context(ConnectionCloseTransportSnafu)?,
+        ),
         FrameType::HandshakeDone => Frame::HandshakeDone(HandshakeDone),
         FrameType::ResetStreamAt => {
             Frame::ResetStreamAt(read_reset_stream_at(io).await.context(ResetStreamAtSnafu)?)
@@ -289,9 +292,10 @@ impl From<ExtensionTypeValue> for VarInt {
 /// [`ReadFrameError::LongerTypeEncoding`], and
 /// [`ReadFrameError::ExtensionNotEnabled`] for a DATAGRAM frame. The variants
 /// named after a frame type hold the failure of reading the fields of that
-/// type; for ACK, MAX_STREAMS, STREAMS_BLOCKED and CONNECTION_CLOSE, which
-/// have two Frame Type values each, also which of them was read, and for
-/// STREAM and DATAGRAM the Frame Type value.
+/// type. ACK and CONNECTION_CLOSE have a variant for each of their two Frame
+/// Type values, since the two have different fields; MAX_STREAMS and
+/// STREAMS_BLOCKED say which of their two values was read, and STREAM and
+/// DATAGRAM hold the Frame Type value.
 #[derive(Debug, Snafu)]
 #[snafu(module(read_frame_error), visibility(pub(crate)))]
 pub enum ReadFrameError<E> {
@@ -333,14 +337,17 @@ pub enum ReadFrameError<E> {
         /// The Frame Type.
         frame_type: ExtensionTypeValue,
     },
-    /// An ACK frame could not be read.
+    /// An ACK frame of type `0x02`, without ECN counts, could not be read.
     #[snafu(display("ACK frame read failed"))]
     Ack {
-        /// Whether the Frame Type is `0x03`, with ECN counts, rather than
-        /// `0x02`.
-        ecn_counts: bool,
         /// The failure.
         source: ReadAckError<E>,
+    },
+    /// An ACK frame of type `0x03`, with ECN counts, could not be read.
+    #[snafu(display("ACK frame with ECN counts read failed"))]
+    AckEcn {
+        /// The failure.
+        source: ReadAckEcnError<E>,
     },
     /// A RESET_STREAM frame could not be read.
     #[snafu(display("RESET_STREAM frame read failed"))]
@@ -440,14 +447,19 @@ pub enum ReadFrameError<E> {
         /// The failure.
         source: ReadArrayError<E>,
     },
-    /// A CONNECTION_CLOSE frame could not be read.
+    /// A CONNECTION_CLOSE frame of type `0x1c`, for a transport error,
+    /// could not be read.
     #[snafu(display("CONNECTION_CLOSE frame read failed"))]
-    ConnectionClose {
-        /// Whether the Frame Type is `0x1d`, for an application error,
-        /// rather than `0x1c`, for a transport error.
-        application: bool,
+    ConnectionCloseTransport {
         /// The failure.
-        source: ReadConnectionCloseError<E>,
+        source: ReadConnectionCloseTransportError<E>,
+    },
+    /// A CONNECTION_CLOSE frame of type `0x1d`, for an application error,
+    /// could not be read.
+    #[snafu(display("application CONNECTION_CLOSE frame read failed"))]
+    ConnectionCloseApplication {
+        /// The failure.
+        source: ReadConnectionCloseApplicationError<E>,
     },
     /// A RESET_STREAM_AT frame could not be read.
     #[snafu(display("RESET_STREAM_AT frame read failed"))]
@@ -471,7 +483,7 @@ impl<E> ReadFrameError<E> {
     /// This is the value for the Frame Type field of the CONNECTION_CLOSE
     /// frame that reports the error.
     pub fn frame_type(&self) -> Option<VarInt> {
-        use super::{ack, connection_close, max_streams, streams_blocked};
+        use super::{max_streams, streams_blocked};
         use type_value::*;
         Some(match *self {
             Self::FrameType { .. } => return None,
@@ -480,14 +492,14 @@ impl<E> ReadFrameError<E> {
             | Self::Datagram { frame_type, .. } => frame_type,
             Self::UnknownType { source } => source.frame_type.get(),
             Self::ExtensionNotEnabled { frame_type } => frame_type.get(),
-            Self::Ack { ecn_counts, .. } => ack::type_value_of(ecn_counts),
+            Self::Ack { .. } => type_var_int(ACK),
+            Self::AckEcn { .. } => type_var_int(ACK_ECN),
             Self::MaxStreams { directionality, .. } => max_streams::type_value_of(directionality),
             Self::StreamsBlocked { directionality, .. } => {
                 streams_blocked::type_value_of(directionality)
             }
-            Self::ConnectionClose { application, .. } => {
-                connection_close::type_value_of(application)
-            }
+            Self::ConnectionCloseTransport { .. } => type_var_int(CONNECTION_CLOSE),
+            Self::ConnectionCloseApplication { .. } => type_var_int(CONNECTION_CLOSE_APPLICATION),
             Self::ResetStream { .. } => type_var_int(RESET_STREAM),
             Self::StopSending { .. } => type_var_int(STOP_SENDING),
             Self::Crypto { .. } => type_var_int(CRYPTO),
@@ -507,8 +519,7 @@ impl<E> ReadFrameError<E> {
     /// Whether the source ended within the frame.
     pub fn is_incomplete(&self) -> bool {
         use crate::frame::{
-            ack::codec::ReadAckError as Ack, crypto::codec::ReadCryptoError as Crypto,
-            stream::codec::ReadStreamError as Stream,
+            crypto::codec::ReadCryptoError as Crypto, stream::codec::ReadStreamError as Stream,
         };
         fn payload<E>(error: &ReadPayloadError<E>) -> bool {
             error.is_incomplete()
@@ -545,18 +556,8 @@ impl<E> ReadFrameError<E> {
             Self::LongerTypeEncoding { .. }
             | Self::UnknownType { .. }
             | Self::ExtensionNotEnabled { .. } => false,
-            Self::Ack { source, .. } => match source {
-                Ack::LargestAcknowledged { source }
-                | Ack::AckDelay { source }
-                | Ack::AckRangeCount { source }
-                | Ack::FirstAckRange { source }
-                | Ack::Gap { source, .. }
-                | Ack::AckRangeLength { source, .. }
-                | Ack::Ect0Count { source }
-                | Ack::Ect1Count { source }
-                | Ack::EcnCeCount { source } => source.is_incomplete(),
-                Ack::BelowZero { .. } => false,
-            },
+            Self::Ack { source } => source.is_incomplete(),
+            Self::AckEcn { source } => source.is_incomplete(),
             Self::Crypto { source, .. } => match source {
                 Crypto::Offset { source } | Crypto::Length { source } => source.is_incomplete(),
                 Crypto::Data { source } => payload(source),
@@ -588,12 +589,8 @@ impl<E> ReadFrameError<E> {
                 | ReadNewConnectionIdError::RetirePriorTo { .. } => false,
             },
             Self::PathChallenge { source, .. } | Self::PathResponse { source, .. } => array(source),
-            Self::ConnectionClose { source, .. } => match source {
-                ReadConnectionCloseError::ErrorCode { source }
-                | ReadConnectionCloseError::FrameType { source }
-                | ReadConnectionCloseError::ReasonPhraseLength { source } => source.is_incomplete(),
-                ReadConnectionCloseError::ReasonPhrase { source } => payload(source),
-            },
+            Self::ConnectionCloseTransport { source } => source.is_incomplete(),
+            Self::ConnectionCloseApplication { source } => source.is_incomplete(),
             Self::ResetStreamAt { source, .. } => {
                 matches!(source, ReadResetStreamAtError::Field { source } if source.is_incomplete())
             }

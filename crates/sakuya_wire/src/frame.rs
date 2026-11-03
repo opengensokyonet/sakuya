@@ -90,7 +90,10 @@
 //!
 //! Each failure has a variant of its own. Besides the failures of the Frame
 //! Type, [`codec::ReadFrameError`] has a variant for each frame type, which
-//! holds the error of that type. The error of a frame type has a variant for
+//! holds the error of that type; ACK and CONNECTION_CLOSE have one for each
+//! of their two Frame Type values, whose fields differ, such as
+//! [`codec::ReadFrameError::AckEcn`] for an ACK frame with ECN counts. The
+//! error of a frame type has a variant for
 //! each field that cannot be read, named after the field, such as
 //! [`ack::codec::ReadAckError::LargestAcknowledged`]; the Gap and ACK Range
 //! Length of an ACK Range carry the position of their ACK Range.

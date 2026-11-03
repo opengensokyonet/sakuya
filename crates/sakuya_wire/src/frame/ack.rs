@@ -512,15 +512,66 @@ pub mod codec {
     use nitori_io::{calls::WriteAllError, prelude::*};
     use snafu::{ResultExt, Snafu};
 
-    /// Reads the fields that follow the Frame Type of an ACK frame, with ECN
-    /// counts if `ecn_counts` is set.
+    /// Reads the fields that follow the Frame Type of an ACK frame of type
+    /// `0x02`, without ECN counts.
     ///
     /// Each range is checked as soon as its fields are read, so a range that
     /// extends below packet number 0 is reported before the rest is read.
     pub(crate) async fn read_ack<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-        ecn_counts: bool,
     ) -> Result<Ack, ReadAckError<F::Error>> {
+        Ok(read_ack_fields(io).await?.into_ack(None))
+    }
+
+    /// Reads the fields that follow the Frame Type of an ACK frame of type
+    /// `0x03`, with ECN counts; ranges are checked as [`read_ack`] does.
+    pub(crate) async fn read_ack_ecn<F: Read, A: ReceiverAccess<Family = F>>(
+        io: &mut A,
+    ) -> Result<Ack, ReadAckEcnError<F::Error>> {
+        use read_ack_ecn_error::*;
+        let fields = read_ack_fields(io).await?;
+        let ecn_counts = EcnCounts {
+            ect0: read_field(io).await.context(Ect0CountSnafu)?,
+            ect1: read_field(io).await.context(Ect1CountSnafu)?,
+            ce: read_field(io).await.context(EcnCeCountSnafu)?,
+        };
+        Ok(fields.into_ack(Some(ecn_counts)))
+    }
+
+    /// The fields that both ACK frame types have, as they were read.
+    struct AckFields {
+        largest_acknowledged: VarIntField<PacketNumber>,
+        ack_delay: VarIntField<VarInt>,
+        ack_range_count_width: VarIntWidth,
+        first_ack_range: VarIntField<VarInt>,
+        ranges: Vec<AckRange>,
+    }
+
+    impl AckFields {
+        /// The ACK frame with these fields and `ecn_counts`.
+        fn into_ack(self, ecn_counts: Option<EcnCounts>) -> Ack {
+            let frame = Ack::new(
+                self.largest_acknowledged,
+                self.ack_delay,
+                self.ack_range_count_width,
+                self.first_ack_range,
+                AckRanges {
+                    ranges: self.ranges,
+                },
+                ecn_counts,
+            );
+            // invariant: each range was checked as it was read, and the ACK
+            // Range Count field was read at this width and states the number
+            // of ranges.
+            frame.unwrap_or_else(|error| unreachable!("{error}"))
+        }
+    }
+
+    /// Reads the fields from Largest Acknowledged to the last ACK Range,
+    /// checking each range as soon as its fields are read.
+    async fn read_ack_fields<F: Read, A: ReceiverAccess<Family = F>>(
+        io: &mut A,
+    ) -> Result<AckFields, ReadAckError<F::Error>> {
         use read_ack_error::*;
         let largest_acknowledged: VarIntField<PacketNumber> =
             read_field(io).await.context(LargestAcknowledgedSnafu)?;
@@ -547,30 +598,17 @@ pub mod codec {
             smallest = AckBelowZeroError::check_next(smallest, range, index)?;
             ranges.push(range);
         }
-        let ecn_counts = if ecn_counts {
-            Some(EcnCounts {
-                ect0: read_field(io).await.context(Ect0CountSnafu)?,
-                ect1: read_field(io).await.context(Ect1CountSnafu)?,
-                ce: read_field(io).await.context(EcnCeCountSnafu)?,
-            })
-        } else {
-            None
-        };
-        let frame = Ack::new(
+        Ok(AckFields {
             largest_acknowledged,
             ack_delay,
-            count.width(),
+            ack_range_count_width: count.width(),
             first_ack_range,
-            AckRanges { ranges },
-            ecn_counts,
-        );
-        // invariant: each range was checked as it was read, and the ACK
-        // Range Count field was read at this width and states the number of
-        // ranges.
-        Ok(frame.unwrap_or_else(|error| unreachable!("{error}")))
+            ranges,
+        })
     }
 
-    /// Failures of reading an ACK frame.
+    /// Failures of reading an ACK frame of type `0x02`, and of reading the
+    /// fields before the ECN counts of type `0x03`.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_ack_error), visibility(pub(crate)))]
     pub enum ReadAckError<E> {
@@ -614,6 +652,40 @@ pub mod codec {
             /// The failure of reading the field.
             source: ReadVarIntError<E>,
         },
+        /// A range extends below packet number 0.
+        #[snafu(transparent)]
+        BelowZero {
+            /// The broken rule.
+            source: AckBelowZeroError,
+        },
+    }
+
+    impl<E> ReadAckError<E> {
+        /// Whether the source ended within the frame.
+        pub(crate) fn is_incomplete(&self) -> bool {
+            match self {
+                Self::LargestAcknowledged { source }
+                | Self::AckDelay { source }
+                | Self::AckRangeCount { source }
+                | Self::FirstAckRange { source }
+                | Self::Gap { source, .. }
+                | Self::AckRangeLength { source, .. } => source.is_incomplete(),
+                Self::BelowZero { .. } => false,
+            }
+        }
+    }
+
+    /// Failures of reading an ACK frame of type `0x03`, with ECN counts.
+    #[derive(Debug, Snafu)]
+    #[snafu(module(read_ack_ecn_error), visibility(pub(crate)))]
+    pub enum ReadAckEcnError<E> {
+        /// A field before the ECN counts could not be read, or a range
+        /// extends below packet number 0.
+        #[snafu(transparent)]
+        Ack {
+            /// The failure.
+            source: ReadAckError<E>,
+        },
         /// The ECT0 Count field could not be read.
         #[snafu(display("ECT0 Count read failed"))]
         Ect0Count {
@@ -632,12 +704,18 @@ pub mod codec {
             /// The failure of reading the field.
             source: ReadVarIntError<E>,
         },
-        /// A range extends below packet number 0.
-        #[snafu(transparent)]
-        BelowZero {
-            /// The broken rule.
-            source: AckBelowZeroError,
-        },
+    }
+
+    impl<E> ReadAckEcnError<E> {
+        /// Whether the source ended within the frame.
+        pub(crate) fn is_incomplete(&self) -> bool {
+            match self {
+                Self::Ack { source } => source.is_incomplete(),
+                Self::Ect0Count { source }
+                | Self::Ect1Count { source }
+                | Self::EcnCeCount { source } => source.is_incomplete(),
+            }
+        }
     }
 
     /// Writes `frame`; [`Ack::new`] checked its rules.

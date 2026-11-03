@@ -148,7 +148,7 @@ pub mod codec {
     use crate::{
         frame::read_field,
         payload::{ReadPayloadError, read_payload},
-        var_int::{VarInt, VarIntField, codec::ReadVarIntError},
+        var_int::{VarInt, VarIntField, VarIntWidth, codec::ReadVarIntError},
     };
     use bytes::Buf;
     use nitori_call::{ReceiverAccess, call};
@@ -156,57 +156,147 @@ pub mod codec {
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type of a transport
-    /// (`0x1c`) or, with `application`, an application (`0x1d`)
-    /// CONNECTION_CLOSE frame, and the reason phrase as one chunk of the
-    /// source.
-    pub(crate) async fn read_connection_close<F, A>(
+    /// CONNECTION_CLOSE frame, type `0x1c`, and the reason phrase as one
+    /// chunk of the source.
+    pub(crate) async fn read_connection_close_transport<F, A>(
         io: &mut A,
-        application: bool,
-    ) -> Result<ConnectionClose<F::Chunk>, ReadConnectionCloseError<F::Error>>
+    ) -> Result<ConnectionClose<F::Chunk>, ReadConnectionCloseTransportError<F::Error>>
     where
         F: ReadChunk<Chunk: Default>,
         A: ReceiverAccess<Family = F>,
     {
-        use read_connection_close_error::*;
-        let error_code = if application {
-            CloseErrorCode::Application {
-                code: read_field(io).await.context(ErrorCodeSnafu)?,
-            }
-        } else {
-            CloseErrorCode::Transport {
-                code: read_field(io).await.context(ErrorCodeSnafu)?,
-                frame_type: read_field(io).await.context(FrameTypeSnafu)?,
-            }
+        use read_connection_close_transport_error::*;
+        let error_code = CloseErrorCode::Transport {
+            code: read_field(io).await.context(ErrorCodeSnafu)?,
+            frame_type: read_field(io).await.context(FrameTypeSnafu)?,
         };
+        let (width, reason_phrase) = read_reason_phrase(io).await?;
+        Ok(close(error_code, width, reason_phrase))
+    }
+
+    /// Reads the fields that follow the Frame Type of an application
+    /// CONNECTION_CLOSE frame, type `0x1d`, and the reason phrase as one
+    /// chunk of the source.
+    pub(crate) async fn read_connection_close_application<F, A>(
+        io: &mut A,
+    ) -> Result<ConnectionClose<F::Chunk>, ReadConnectionCloseApplicationError<F::Error>>
+    where
+        F: ReadChunk<Chunk: Default>,
+        A: ReceiverAccess<Family = F>,
+    {
+        use read_connection_close_application_error::*;
+        let error_code = CloseErrorCode::Application {
+            code: read_field(io).await.context(ErrorCodeSnafu)?,
+        };
+        let (width, reason_phrase) = read_reason_phrase(io).await?;
+        Ok(close(error_code, width, reason_phrase))
+    }
+
+    /// Reads the Reason Phrase Length field and the reason phrase, and
+    /// returns the width of the field and the reason phrase.
+    async fn read_reason_phrase<F, A>(
+        io: &mut A,
+    ) -> Result<(VarIntWidth, F::Chunk), ReadReasonPhraseError<F::Error>>
+    where
+        F: ReadChunk<Chunk: Default>,
+        A: ReceiverAccess<Family = F>,
+    {
+        use read_reason_phrase_error::*;
         let length: VarIntField<VarInt> = read_field(io).await.context(ReasonPhraseLengthSnafu)?;
         let reason_phrase_len = usize::try_from(length.get().get()).unwrap_or(usize::MAX);
         let reason_phrase = read_payload(io, reason_phrase_len)
             .await
             .context(ReasonPhraseSnafu)?;
-        let frame = ConnectionClose::new(error_code, length.width(), reason_phrase);
+        Ok((length.width(), reason_phrase))
+    }
+
+    /// The frame with the fields that were read.
+    fn close<D: Buf>(
+        error_code: CloseErrorCode,
+        width: VarIntWidth,
+        reason_phrase: D,
+    ) -> ConnectionClose<D> {
+        let frame = ConnectionClose::new(error_code, width, reason_phrase);
         // invariant: the Reason Phrase Length field was read at this width,
         // and `read_payload` returns a reason phrase of exactly the length it
         // states: it fails on a shorter one and panics on a longer chunk.
-        Ok(frame.unwrap_or_else(|error| unreachable!("{error}")))
+        frame.unwrap_or_else(|error| unreachable!("{error}"))
     }
 
-    /// Failures of reading a CONNECTION_CLOSE frame.
+    /// Failures of reading a transport CONNECTION_CLOSE frame, type `0x1c`.
     #[derive(Debug, Snafu)]
-    #[snafu(module(read_connection_close_error), visibility(pub(crate)))]
-    pub enum ReadConnectionCloseError<E> {
-        /// The Error Code field could not be read.
+    #[snafu(module(read_connection_close_transport_error), visibility(pub(crate)))]
+    pub enum ReadConnectionCloseTransportError<E> {
+        /// The Error Code field, a transport error code, could not be read.
         #[snafu(display("CONNECTION_CLOSE Error Code read failed"))]
         ErrorCode {
             /// The failure of reading the field.
             source: ReadVarIntError<E>,
         },
-        /// The Frame Type field of a transport CONNECTION_CLOSE frame could
-        /// not be read.
+        /// The Frame Type field could not be read.
         #[snafu(display("CONNECTION_CLOSE Frame Type read failed"))]
         FrameType {
             /// The failure of reading the field.
             source: ReadVarIntError<E>,
         },
+        /// The Reason Phrase Length field or the reason phrase could not be
+        /// read.
+        #[snafu(transparent)]
+        ReasonPhrase {
+            /// The failure.
+            source: ReadReasonPhraseError<E>,
+        },
+    }
+
+    impl<E> ReadConnectionCloseTransportError<E> {
+        /// Whether the source ended within the frame.
+        pub(crate) fn is_incomplete(&self) -> bool {
+            match self {
+                Self::ErrorCode { source } | Self::FrameType { source } => source.is_incomplete(),
+                Self::ReasonPhrase { source } => source.is_incomplete(),
+            }
+        }
+    }
+
+    /// Failures of reading an application CONNECTION_CLOSE frame, type
+    /// `0x1d`.
+    #[derive(Debug, Snafu)]
+    #[snafu(
+        module(read_connection_close_application_error),
+        visibility(pub(crate))
+    )]
+    pub enum ReadConnectionCloseApplicationError<E> {
+        /// The Error Code field, an application protocol error code, could
+        /// not be read.
+        #[snafu(display("CONNECTION_CLOSE Error Code read failed"))]
+        ErrorCode {
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
+        /// The Reason Phrase Length field or the reason phrase could not be
+        /// read.
+        #[snafu(transparent)]
+        ReasonPhrase {
+            /// The failure.
+            source: ReadReasonPhraseError<E>,
+        },
+    }
+
+    impl<E> ReadConnectionCloseApplicationError<E> {
+        /// Whether the source ended within the frame.
+        pub(crate) fn is_incomplete(&self) -> bool {
+            match self {
+                Self::ErrorCode { source } => source.is_incomplete(),
+                Self::ReasonPhrase { source } => source.is_incomplete(),
+            }
+        }
+    }
+
+    /// Failures of reading the fields that both CONNECTION_CLOSE frame types
+    /// end with: the Reason Phrase Length field and the reason phrase.
+    #[derive(Debug, Snafu)]
+    #[snafu(module(read_reason_phrase_error), visibility(pub(crate)))]
+    pub enum ReadReasonPhraseError<E> {
         /// The Reason Phrase Length field could not be read.
         #[snafu(display("CONNECTION_CLOSE Reason Phrase Length read failed"))]
         ReasonPhraseLength {
@@ -219,6 +309,16 @@ pub mod codec {
             /// The failure of reading the reason phrase.
             source: ReadPayloadError<E>,
         },
+    }
+
+    impl<E> ReadReasonPhraseError<E> {
+        /// Whether the source ended within the frame.
+        pub(crate) fn is_incomplete(&self) -> bool {
+            match self {
+                Self::ReasonPhraseLength { source } => source.is_incomplete(),
+                Self::ReasonPhrase { source } => source.is_incomplete(),
+            }
+        }
     }
 
     /// Writes `frame`; [`ConnectionClose::new`] checked its limits.

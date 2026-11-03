@@ -546,8 +546,12 @@ fn cut_short(encoding: &[u8]) -> ReadFrameError<core::convert::Infallible> {
 #[test]
 fn a_field_cut_short_is_named_by_its_variant() {
     use super::{
-        connection_close::codec::ReadConnectionCloseError as Close,
-        crypto::codec::ReadCryptoError as Crypto, datagram::codec::ReadDatagramError as Datagram,
+        connection_close::codec::{
+            ReadConnectionCloseApplicationError as ApplicationClose,
+            ReadConnectionCloseTransportError as TransportClose, ReadReasonPhraseError as Reason,
+        },
+        crypto::codec::ReadCryptoError as Crypto,
+        datagram::codec::ReadDatagramError as Datagram,
         max_stream_data::codec::ReadMaxStreamDataError as MaxStreamData,
         new_token::codec::ReadNewTokenError as NewToken,
         reset_stream::codec::ReadResetStreamError as ResetStream,
@@ -557,7 +561,7 @@ fn a_field_cut_short_is_named_by_its_variant() {
     };
     use ReadFrameError as F;
     type Check = fn(&ReadFrameError<core::convert::Infallible>) -> bool;
-    let cases: [(&[u8], Check); 22] = [
+    let cases: [(&[u8], Check); 24] = [
         (&[0x04], |e| {
             matches!(
                 e,
@@ -706,36 +710,44 @@ fn a_field_cut_short_is_named_by_its_variant() {
         (&[0x1c], |e| {
             matches!(
                 e,
-                F::ConnectionClose {
-                    source: Close::ErrorCode { .. },
-                    ..
+                F::ConnectionCloseTransport {
+                    source: TransportClose::ErrorCode { .. },
                 }
             )
         }),
         (&[0x1c, 0x07], |e| {
             matches!(
                 e,
-                F::ConnectionClose {
-                    source: Close::FrameType { .. },
-                    ..
+                F::ConnectionCloseTransport {
+                    source: TransportClose::FrameType { .. },
                 }
             )
         }),
         (&[0x1c, 0x07, 0x00], |e| {
             matches!(
                 e,
-                F::ConnectionClose {
-                    source: Close::ReasonPhraseLength { .. },
-                    ..
+                F::ConnectionCloseTransport {
+                    source: TransportClose::ReasonPhrase {
+                        source: Reason::ReasonPhraseLength { .. },
+                    },
+                }
+            )
+        }),
+        (&[0x1c, 0x07, 0x00, 0x02, b'x'], |e| {
+            matches!(
+                e,
+                F::ConnectionCloseTransport {
+                    source: TransportClose::ReasonPhrase {
+                        source: Reason::ReasonPhrase { .. },
+                    },
                 }
             )
         }),
         (&[0x1d], |e| {
             matches!(
                 e,
-                F::ConnectionClose {
-                    source: Close::ErrorCode { .. },
-                    ..
+                F::ConnectionCloseApplication {
+                    source: ApplicationClose::ErrorCode { .. },
                 }
             )
         }),
@@ -743,9 +755,20 @@ fn a_field_cut_short_is_named_by_its_variant() {
         (&[0x1d, 0x00], |e| {
             matches!(
                 e,
-                F::ConnectionClose {
-                    source: Close::ReasonPhraseLength { .. },
-                    ..
+                F::ConnectionCloseApplication {
+                    source: ApplicationClose::ReasonPhrase {
+                        source: Reason::ReasonPhraseLength { .. },
+                    },
+                }
+            )
+        }),
+        (&[0x1d, 0x00, 0x01], |e| {
+            matches!(
+                e,
+                F::ConnectionCloseApplication {
+                    source: ApplicationClose::ReasonPhrase {
+                        source: Reason::ReasonPhrase { .. },
+                    },
                 }
             )
         }),
@@ -854,7 +877,9 @@ fn frame_type_value_sets() {
 }
 
 /// Every failure after the Frame Type gives the Frame Type value back, and
-/// the variants of frame types with two values say which one was read.
+/// the variants of frame types with two values say which one was read: ACK
+/// and CONNECTION_CLOSE by a variant for each value, MAX_STREAMS and
+/// STREAMS_BLOCKED by their directionality.
 #[test]
 fn failures_give_the_frame_type_value() {
     use ReadFrameError as F;
@@ -872,20 +897,8 @@ fn failures_give_the_frame_type_value() {
         let bidi = Directionality::Bidirectional;
         let uni = Directionality::Unidirectional;
         let attribute = match value {
-            0x02 => matches!(
-                error,
-                F::Ack {
-                    ecn_counts: false,
-                    ..
-                }
-            ),
-            0x03 => matches!(
-                error,
-                F::Ack {
-                    ecn_counts: true,
-                    ..
-                }
-            ),
+            0x02 => matches!(error, F::Ack { .. }),
+            0x03 => matches!(error, F::AckEcn { .. }),
             0x12 => matches!(error, F::MaxStreams { directionality, .. } if directionality == bidi),
             0x13 => matches!(error, F::MaxStreams { directionality, .. } if directionality == uni),
             0x16 => {
@@ -894,20 +907,8 @@ fn failures_give_the_frame_type_value() {
             0x17 => {
                 matches!(error, F::StreamsBlocked { directionality, .. } if directionality == uni)
             }
-            0x1c => matches!(
-                error,
-                F::ConnectionClose {
-                    application: false,
-                    ..
-                }
-            ),
-            0x1d => matches!(
-                error,
-                F::ConnectionClose {
-                    application: true,
-                    ..
-                }
-            ),
+            0x1c => matches!(error, F::ConnectionCloseTransport { .. }),
+            0x1d => matches!(error, F::ConnectionCloseApplication { .. }),
             _ => true,
         };
         assert!(attribute, "{value:#x}: {error:?}");
