@@ -88,6 +88,16 @@
 //! whether a stream exists or may be opened, and flow control are for the
 //! receiver of the frame to check.
 //!
+//! Each failure has a variant of its own. Besides the failures of the Frame
+//! Type, [`codec::ReadFrameError`] has a variant for each frame type, which
+//! holds the error of that type. The error of a frame type has a variant for
+//! each field that cannot be read, named after the field, such as
+//! [`ack::codec::ReadAckError::LargestAcknowledged`]; the Gap and ACK Range
+//! Length of an ACK Range carry the position of their ACK Range.
+//! NEW_CONNECTION_ID and RESET_STREAM_AT report their variable-length
+//! integer fields together, as `Field`. Each broken limit has a variant of
+//! its own as well.
+//!
 //! Every [`codec::ReadFrameError`] corresponds to FRAME_ENCODING_ERROR, with
 //! two exceptions that correspond to PROTOCOL_VIOLATION
 //! ([`codec::ReadFrameError::transport_error_code`]): a Frame Type encoded

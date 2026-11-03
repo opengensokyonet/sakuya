@@ -146,10 +146,10 @@ pub mod codec {
     {
         let offset: VarIntField<VarInt> = read_field(io)
             .await
-            .context(read_crypto_error::FieldSnafu)?;
+            .context(read_crypto_error::OffsetSnafu)?;
         let length: VarIntField<VarInt> = read_field(io)
             .await
-            .context(read_crypto_error::FieldSnafu)?;
+            .context(read_crypto_error::LengthSnafu)?;
         // The end of the data follows from the fields, so a frame that
         // breaks the bound is rejected before its data is read.
         DataEndError::check(offset.get(), length.get().get())?;
@@ -171,9 +171,15 @@ pub mod codec {
     #[derive(Debug, Snafu)]
     #[snafu(module(read_crypto_error), visibility(pub(crate)))]
     pub enum ReadCryptoError<E> {
-        /// The Offset or the Length field could not be read.
-        #[snafu(display("CRYPTO field read failed"))]
-        Field {
+        /// The Offset field could not be read.
+        #[snafu(display("CRYPTO Offset read failed"))]
+        Offset {
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
+        /// The Length field could not be read.
+        #[snafu(display("CRYPTO Length read failed"))]
+        Length {
             /// The failure of reading the field.
             source: ReadVarIntError<E>,
         },

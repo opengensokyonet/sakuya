@@ -513,6 +513,259 @@ fn truncated_frames_are_terminal() {
     assert!(frames.next().is_none());
 }
 
+/// The failure of reading `encoding`, which ends within a field.
+fn cut_short(encoding: &[u8]) -> ReadFrameError<core::convert::Infallible> {
+    let mut input = encoding;
+    let error = input.sync_read_frame_unpin(Extensions::ALL).unwrap_err();
+    assert!(error.is_incomplete(), "{encoding:02x?}: {error:?}");
+    assert_eq!(
+        error.transport_error_code(),
+        TransportErrorCode::FRAME_ENCODING_ERROR
+    );
+    assert!(input.is_empty(), "{encoding:02x?}");
+    error
+}
+
+#[test]
+fn a_field_cut_short_is_named_by_its_variant() {
+    use super::{
+        connection_close::codec::ReadConnectionCloseError as Close,
+        crypto::codec::ReadCryptoError as Crypto, datagram::codec::ReadDatagramError as Datagram,
+        max_stream_data::codec::ReadMaxStreamDataError as MaxStreamData,
+        new_token::codec::ReadNewTokenError as NewToken,
+        reset_stream::codec::ReadResetStreamError as ResetStream,
+        stop_sending::codec::ReadStopSendingError as StopSending,
+        stream::codec::ReadStreamError as Stream,
+        stream_data_blocked::codec::ReadStreamDataBlockedError as StreamDataBlocked,
+    };
+    use ReadFrameError as F;
+    type Check = fn(&ReadFrameError<core::convert::Infallible>) -> bool;
+    let cases: [(&[u8], Check); 22] = [
+        (&[0x04], |e| {
+            matches!(
+                e,
+                F::ResetStream {
+                    source: ResetStream::StreamId { .. },
+                    ..
+                }
+            )
+        }),
+        (&[0x04, 0x00], |e| {
+            matches!(
+                e,
+                F::ResetStream {
+                    source: ResetStream::ApplicationProtocolErrorCode { .. },
+                    ..
+                }
+            )
+        }),
+        (&[0x04, 0x00, 0x00], |e| {
+            matches!(
+                e,
+                F::ResetStream {
+                    source: ResetStream::FinalSize { .. },
+                    ..
+                }
+            )
+        }),
+        (&[0x05, 0x40], |e| {
+            matches!(
+                e,
+                F::StopSending {
+                    source: StopSending::StreamId { .. },
+                    ..
+                }
+            )
+        }),
+        (&[0x05, 0x00, 0x40], |e| {
+            matches!(
+                e,
+                F::StopSending {
+                    source: StopSending::ApplicationProtocolErrorCode { .. },
+                    ..
+                }
+            )
+        }),
+        (&[0x06], |e| {
+            matches!(
+                e,
+                F::Crypto {
+                    source: Crypto::Offset { .. },
+                    ..
+                }
+            )
+        }),
+        (&[0x06, 0x00], |e| {
+            matches!(
+                e,
+                F::Crypto {
+                    source: Crypto::Length { .. },
+                    ..
+                }
+            )
+        }),
+        (&[0x07, 0x80, 0x00], |e| {
+            matches!(
+                e,
+                F::NewToken {
+                    source: NewToken::TokenLength { .. },
+                    ..
+                }
+            )
+        }),
+        (&[0x0e], |e| {
+            matches!(
+                e,
+                F::Stream {
+                    source: Stream::StreamId { .. },
+                    ..
+                }
+            )
+        }),
+        (&[0x0e, 0x04], |e| {
+            matches!(
+                e,
+                F::Stream {
+                    source: Stream::Offset { .. },
+                    ..
+                }
+            )
+        }),
+        (&[0x0e, 0x04, 0x00], |e| {
+            matches!(
+                e,
+                F::Stream {
+                    source: Stream::Length { .. },
+                    ..
+                }
+            )
+        }),
+        // Without OFF, the field after the Stream ID is the Length.
+        (&[0x0a, 0x04, 0x40], |e| {
+            matches!(
+                e,
+                F::Stream {
+                    source: Stream::Length { .. },
+                    ..
+                }
+            )
+        }),
+        (&[0x11], |e| {
+            matches!(
+                e,
+                F::MaxStreamData {
+                    source: MaxStreamData::StreamId { .. },
+                    ..
+                }
+            )
+        }),
+        (&[0x11, 0x00], |e| {
+            matches!(
+                e,
+                F::MaxStreamData {
+                    source: MaxStreamData::MaximumStreamData { .. },
+                    ..
+                }
+            )
+        }),
+        (&[0x15, 0x80], |e| {
+            matches!(
+                e,
+                F::StreamDataBlocked {
+                    source: StreamDataBlocked::StreamId { .. },
+                    ..
+                }
+            )
+        }),
+        (&[0x15, 0x00, 0xc0], |e| {
+            matches!(
+                e,
+                F::StreamDataBlocked {
+                    source: StreamDataBlocked::MaximumStreamData { .. },
+                    ..
+                }
+            )
+        }),
+        (&[0x1c], |e| {
+            matches!(
+                e,
+                F::ConnectionClose {
+                    source: Close::ErrorCode { .. },
+                    ..
+                }
+            )
+        }),
+        (&[0x1c, 0x07], |e| {
+            matches!(
+                e,
+                F::ConnectionClose {
+                    source: Close::FrameType { .. },
+                    ..
+                }
+            )
+        }),
+        (&[0x1c, 0x07, 0x00], |e| {
+            matches!(
+                e,
+                F::ConnectionClose {
+                    source: Close::ReasonPhraseLength { .. },
+                    ..
+                }
+            )
+        }),
+        (&[0x1d], |e| {
+            matches!(
+                e,
+                F::ConnectionClose {
+                    source: Close::ErrorCode { .. },
+                    ..
+                }
+            )
+        }),
+        // An application CONNECTION_CLOSE has no Frame Type field.
+        (&[0x1d, 0x00], |e| {
+            matches!(
+                e,
+                F::ConnectionClose {
+                    source: Close::ReasonPhraseLength { .. },
+                    ..
+                }
+            )
+        }),
+        (&[0x31, 0x40], |e| {
+            matches!(
+                e,
+                F::Datagram {
+                    source: Datagram::Length { .. },
+                    ..
+                }
+            )
+        }),
+    ];
+    for (encoding, expected) in cases {
+        let error = cut_short(encoding);
+        assert!(expected(&error), "{encoding:02x?}: {error:?}");
+        assert_eq!(error.frame_type(), Some(vi(u64::from(encoding[0]))));
+    }
+    let chain = |error: &dyn std::error::Error| {
+        let mut chain = vec![error.to_string()];
+        let mut source = error.source();
+        while let Some(error) = source {
+            chain.push(error.to_string());
+            source = error.source();
+        }
+        chain
+    };
+    assert_eq!(
+        chain(&cut_short(&[0x04, 0x00])),
+        [
+            "RESET_STREAM frame read failed",
+            "RESET_STREAM Application Protocol Error Code read failed",
+            "read incomplete after 0 of 1 bytes"
+        ]
+    );
+}
+
 #[test]
 fn recovery_properties() {
     use FrameType::*;

@@ -202,7 +202,6 @@ pub mod codec {
         var_int::{VarInt, VarIntField, codec::ReadVarIntError},
     };
     use bytes::Buf;
-    use core::convert::Infallible;
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{calls::WriteAllError, prelude::*};
     use snafu::{ResultExt, Snafu};
@@ -218,15 +217,16 @@ pub mod codec {
         F: ReadChunk<Chunk: Default>,
         A: ReceiverAccess<Family = F>,
     {
+        use read_stream_error::*;
         let type_bits = frame_type.get();
-        let stream_id = field(io).await?;
+        let stream_id = read_field(io).await.context(StreamIdSnafu)?;
         let offset = if type_bits & bits::OFF != 0 {
-            Some(field(io).await?)
+            Some(read_field(io).await.context(OffsetSnafu)?)
         } else {
             None
         };
         let (length_width, data) = if type_bits & bits::LEN != 0 {
-            let length: VarIntField<VarInt> = field(io).await?;
+            let length: VarIntField<VarInt> = read_field(io).await.context(LengthSnafu)?;
             // The end of the data follows from the fields, so a frame that
             // breaks the bound is rejected before its data is read.
             let start = offset.map_or(VarInt::ZERO, |offset: VarIntField<VarInt>| offset.get());
@@ -234,14 +234,10 @@ pub mod codec {
             // The end check bounds the length by 2^62 - 1; where `usize` is
             // narrower, a saturated length exceeds every source.
             let data_len = usize::try_from(length.get().get()).unwrap_or(usize::MAX);
-            let data = read_payload(io, data_len)
-                .await
-                .context(read_stream_error::DataSnafu)?;
+            let data = read_payload(io, data_len).await.context(DataSnafu)?;
             (Some(length.width()), data)
         } else {
-            let data = read_payload_to_end(io)
-                .await
-                .context(read_stream_error::DataSnafu)?;
+            let data = read_payload_to_end(io).await.context(DataSnafu)?;
             (None, data)
         };
         let fin = type_bits & bits::FIN != 0;
@@ -253,22 +249,25 @@ pub mod codec {
         })
     }
 
-    async fn field<T, F, A>(io: &mut A) -> Result<VarIntField<T>, ReadStreamError<F::Error>>
-    where
-        T: Copy + Into<VarInt> + TryFrom<VarInt, Error = Infallible>,
-        F: Read,
-        A: ReceiverAccess<Family = F>,
-    {
-        read_field(io).await.context(read_stream_error::FieldSnafu)
-    }
-
     /// Failures of reading a STREAM frame.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_stream_error), visibility(pub(crate)))]
     pub enum ReadStreamError<E> {
-        /// The Stream ID, Offset or Length field could not be read.
-        #[snafu(display("STREAM field read failed"))]
-        Field {
+        /// The Stream ID field could not be read.
+        #[snafu(display("STREAM Stream ID read failed"))]
+        StreamId {
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
+        /// The Offset field could not be read.
+        #[snafu(display("STREAM Offset read failed"))]
+        Offset {
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
+        /// The Length field could not be read.
+        #[snafu(display("STREAM Length read failed"))]
+        Length {
             /// The failure of reading the field.
             source: ReadVarIntError<E>,
         },

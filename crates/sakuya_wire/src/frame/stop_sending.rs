@@ -74,15 +74,36 @@ pub mod codec {
     use crate::{frame::read_field, var_int::codec::ReadVarIntError};
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{calls::WriteAllError, prelude::*};
+    use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type.
     pub(crate) async fn read_stop_sending<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-    ) -> Result<StopSending, ReadVarIntError<F::Error>> {
-        Ok(StopSending::new(
-            read_field(io).await?,
-            read_field(io).await?,
-        ))
+    ) -> Result<StopSending, ReadStopSendingError<F::Error>> {
+        use read_stop_sending_error::*;
+        let stream_id = read_field(io).await.context(StreamIdSnafu)?;
+        let application_error_code = read_field(io)
+            .await
+            .context(ApplicationProtocolErrorCodeSnafu)?;
+        Ok(StopSending::new(stream_id, application_error_code))
+    }
+
+    /// Failures of reading a STOP_SENDING frame.
+    #[derive(Debug, Snafu)]
+    #[snafu(module(read_stop_sending_error), visibility(pub(crate)))]
+    pub enum ReadStopSendingError<E> {
+        /// The Stream ID field could not be read.
+        #[snafu(display("STOP_SENDING Stream ID read failed"))]
+        StreamId {
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
+        /// The Application Protocol Error Code field could not be read.
+        #[snafu(display("STOP_SENDING Application Protocol Error Code read failed"))]
+        ApplicationProtocolErrorCode {
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
     }
 
     /// Writes the frame.

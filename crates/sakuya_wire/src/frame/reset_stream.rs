@@ -83,16 +83,47 @@ pub mod codec {
     use crate::{frame::read_field, var_int::codec::ReadVarIntError};
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{calls::WriteAllError, prelude::*};
+    use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type.
     pub(crate) async fn read_reset_stream<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-    ) -> Result<ResetStream, ReadVarIntError<F::Error>> {
+    ) -> Result<ResetStream, ReadResetStreamError<F::Error>> {
+        use read_reset_stream_error::*;
+        let stream_id = read_field(io).await.context(StreamIdSnafu)?;
+        let application_error_code = read_field(io)
+            .await
+            .context(ApplicationProtocolErrorCodeSnafu)?;
+        let final_size = read_field(io).await.context(FinalSizeSnafu)?;
         Ok(ResetStream::new(
-            read_field(io).await?,
-            read_field(io).await?,
-            read_field(io).await?,
+            stream_id,
+            application_error_code,
+            final_size,
         ))
+    }
+
+    /// Failures of reading a RESET_STREAM frame.
+    #[derive(Debug, Snafu)]
+    #[snafu(module(read_reset_stream_error), visibility(pub(crate)))]
+    pub enum ReadResetStreamError<E> {
+        /// The Stream ID field could not be read.
+        #[snafu(display("RESET_STREAM Stream ID read failed"))]
+        StreamId {
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
+        /// The Application Protocol Error Code field could not be read.
+        #[snafu(display("RESET_STREAM Application Protocol Error Code read failed"))]
+        ApplicationProtocolErrorCode {
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
+        /// The Final Size field could not be read.
+        #[snafu(display("RESET_STREAM Final Size read failed"))]
+        FinalSize {
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
     }
 
     /// Writes the frame.

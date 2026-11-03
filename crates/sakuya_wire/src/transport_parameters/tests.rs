@@ -16,7 +16,7 @@ use super::{
 use crate::{
     connection_id::{ConnectionId, ConnectionIdLengthError, NonEmptyCid, StatelessResetToken},
     role::Role,
-    stream_count::StreamCount,
+    stream_count::{StreamCount, StreamCountError},
     transport_error::TransportErrorCode,
     var_int::{VarInt, codec::WriteVarIntHostExt as _},
 };
@@ -275,25 +275,43 @@ fn server_only_parameters_from_a_client_are_rejected() {
 }
 
 #[test]
-fn values_out_of_range_are_rejected() {
+fn values_out_of_range_are_rejected_by_parameter() {
+    use InvalidParameterError as E;
+    let count = |value| StreamCountError { value };
     let cases = [
-        (0x03, 1199, 1200),
-        (0x08, (1 << 60) + 1, 1 << 60),
-        (0x09, (1 << 60) + 1, 1 << 60),
-        (0x0a, 21, 20),
-        (0x0b, 1 << 14, (1 << 14) - 1),
-        (0x0e, 1, 2),
+        (0x03, 1199, 1200, E::MaxUdpPayloadSize { value: vi(1199) }),
+        (
+            0x08,
+            (1 << 60) + 1,
+            1 << 60,
+            E::InitialMaxStreamsBidi {
+                source: count((1 << 60) + 1),
+            },
+        ),
+        (
+            0x09,
+            (1 << 60) + 1,
+            1 << 60,
+            E::InitialMaxStreamsUni {
+                source: count((1 << 60) + 1),
+            },
+        ),
+        (0x0a, 21, 20, E::AckDelayExponent { value: vi(21) }),
+        (
+            0x0b,
+            1 << 14,
+            (1 << 14) - 1,
+            E::MaxAckDelay { value: vi(1 << 14) },
+        ),
+        (0x0e, 1, 2, E::ActiveConnectionIdLimit { value: vi(1) }),
     ];
-    for (parameter, invalid_value, valid) in cases {
-        let error = InvalidParameterError::OutOfRange {
-            id: vi(parameter),
-            value: vi(invalid_value),
-        };
+    for (parameter, invalid_value, valid, error) in cases {
+        let read_error = read(&tlv(parameter, &integer(invalid_value)), Role::Client).unwrap_err();
         assert_eq!(
-            invalid(read(&tlv(parameter, &integer(invalid_value)), Role::Client).unwrap_err()),
-            error,
-            "{parameter:#x}"
+            read_error.transport_error_code(),
+            TransportErrorCode::TRANSPORT_PARAMETER_ERROR
         );
+        assert_eq!(invalid(read_error), error, "{parameter:#x}");
         let valid_encoding = tlv(parameter, &integer(valid));
         let parameters = read(&valid_encoding, Role::Client).unwrap();
         let mut invalid_parameters = parameters.clone();
@@ -310,6 +328,43 @@ fn values_out_of_range_are_rejected() {
         }
         assert_eq!(write_invalid(invalid_parameters, Role::Client), error);
     }
+}
+
+/// A value that claims more bytes than a Transport Parameter Length field
+/// can state.
+#[cfg(target_pointer_width = "64")]
+struct Huge;
+
+#[cfg(target_pointer_width = "64")]
+impl bytes::Buf for Huge {
+    fn remaining(&self) -> usize {
+        usize::MAX
+    }
+
+    fn chunk(&self) -> &[u8] {
+        &[]
+    }
+
+    fn advance(&mut self, _: usize) {}
+}
+
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn unknown_values_longer_than_a_length_field_states_are_rejected() {
+    let parameters = TransportParameters {
+        unknown: vec![UnknownParameter {
+            id: vi(0x40),
+            value: Huge,
+        }],
+        ..TransportParameters::default()
+    };
+    assert_eq!(
+        parameters.validate(Role::Client),
+        Err(InvalidParameterError::ValueLength {
+            id: vi(0x40),
+            length: usize::MAX,
+        })
+    );
 }
 
 #[test]
@@ -426,10 +481,53 @@ fn truncated_input_is_rejected() {
         let error = read(encoding, Role::Client).unwrap_err();
         assert!(error.is_incomplete(), "{encoding:02x?}: {error:?}");
     }
+    // Each field of a parameter has a variant of its own.
+    assert!(matches!(
+        read(&[0x40], Role::Client),
+        Err(ReadTransportParametersError::Id { .. })
+    ));
+    assert!(matches!(
+        // The second ID is 0 in a two-byte encoding.
+        read(&[0x04, 0x01, 0x01, 0x40, 0x00, 0x80], Role::Client),
+        Err(ReadTransportParametersError::Length { id, .. }) if id == VarInt::ZERO
+    ));
+    assert!(matches!(
+        read(&[0x04], Role::Client),
+        Err(ReadTransportParametersError::Length { id, .. }) if id == vi(0x04)
+    ));
     assert!(matches!(
         read(&[0x04, 0x02, 0x01], Role::Client),
         Err(ReadTransportParametersError::Value { id, .. }) if id == vi(0x04)
     ));
+}
+
+#[test]
+fn preferred_address_fields_cut_short_are_named() {
+    use ReadPreferredAddressError as E;
+    let value = preferred_address_value();
+    type Check = fn(&ReadPreferredAddressError<Infallible>) -> bool;
+    // The value is cut within each fixed-length field.
+    let cases: [(usize, Check); 6] = [
+        (0, |error| matches!(error, E::Ipv4Address { .. })),
+        (5, |error| matches!(error, E::Ipv4Port { .. })),
+        (21, |error| matches!(error, E::Ipv6Address { .. })),
+        (23, |error| matches!(error, E::Ipv6Port { .. })),
+        (24, |error| matches!(error, E::ConnectionId { .. })),
+        (value.len() - 1, |error| {
+            matches!(error, E::StatelessResetToken { .. })
+        }),
+    ];
+    for (cut, expected) in cases {
+        let mut input = &value[..cut];
+        let error = input.sync_read_preferred_address_unpin().unwrap_err();
+        assert!(expected(&error), "{cut}: {error:?}");
+        // Inside the parameter, the same failure is reported.
+        let error = read(&tlv(0x0d, &value[..cut]), Role::Server).unwrap_err();
+        assert!(
+            matches!(&error, ReadTransportParametersError::PreferredAddress { source } if expected(source)),
+            "{cut}: {error:?}"
+        );
+    }
 }
 
 #[test]

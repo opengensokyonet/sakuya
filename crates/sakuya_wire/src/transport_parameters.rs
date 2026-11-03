@@ -55,7 +55,7 @@
 use crate::{
     connection_id::{ConnectionId, StatelessResetToken},
     role::Role,
-    stream_count::StreamCount,
+    stream_count::{StreamCount, StreamCountError},
     var_int::VarInt,
 };
 use bytes::Buf;
@@ -251,32 +251,32 @@ impl<D: Buf> Value<'_, D> {
 impl<D> TransportParameters<D> {
     /// Checks the values RFC 9000 §18.2 constrains.
     fn check_ranges(&self) -> Result<(), InvalidParameterError> {
-        let checks = [
-            (
-                id::MAX_UDP_PAYLOAD_SIZE,
-                self.max_udp_payload_size,
-                self.max_udp_payload_size.get() >= MIN_MAX_UDP_PAYLOAD_SIZE,
-            ),
-            (
-                id::ACK_DELAY_EXPONENT,
-                self.ack_delay_exponent,
-                self.ack_delay_exponent.get() <= MAX_ACK_DELAY_EXPONENT,
-            ),
-            (
-                id::MAX_ACK_DELAY,
-                self.max_ack_delay,
-                self.max_ack_delay.get() < MAX_ACK_DELAY_BOUND,
-            ),
-            (
-                id::ACTIVE_CONNECTION_ID_LIMIT,
-                self.active_connection_id_limit,
-                self.active_connection_id_limit.get() >= MIN_ACTIVE_CONNECTION_ID_LIMIT,
-            ),
-        ];
-        match checks.into_iter().find(|&(_, _, valid)| !valid) {
-            Some((id, value, _)) => Err(InvalidParameterError::OutOfRange { id, value }),
-            None => Ok(()),
+        use invalid_parameter_error::*;
+        if self.max_udp_payload_size.get() < MIN_MAX_UDP_PAYLOAD_SIZE {
+            return MaxUdpPayloadSizeSnafu {
+                value: self.max_udp_payload_size,
+            }
+            .fail();
         }
+        if self.ack_delay_exponent.get() > MAX_ACK_DELAY_EXPONENT {
+            return AckDelayExponentSnafu {
+                value: self.ack_delay_exponent,
+            }
+            .fail();
+        }
+        if self.max_ack_delay.get() >= MAX_ACK_DELAY_BOUND {
+            return MaxAckDelaySnafu {
+                value: self.max_ack_delay,
+            }
+            .fail();
+        }
+        if self.active_connection_id_limit.get() < MIN_ACTIVE_CONNECTION_ID_LIMIT {
+            return ActiveConnectionIdLimitSnafu {
+                value: self.active_connection_id_limit,
+            }
+            .fail();
+        }
+        Ok(())
     }
 
     /// Calls `visit` with each parameter to write, in order: the known ones
@@ -395,10 +395,12 @@ impl<D: Buf> TransportParameters<D> {
     /// # Errors
     ///
     /// [`InvalidParameterError::ServerOnly`] if `sender` is a client and a
-    /// parameter only a server may send is present,
-    /// [`InvalidParameterError::OutOfRange`] for a value out of range, and
-    /// [`InvalidParameterError::Duplicate`] if two unknown parameters share
-    /// an ID or one has an ID of [`id`].
+    /// parameter only a server may send is present; the variant named after
+    /// a parameter, such as [`InvalidParameterError::MaxUdpPayloadSize`], for
+    /// a value out of range; [`InvalidParameterError::Duplicate`] if two
+    /// unknown parameters share an ID or one has an ID of [`id`]; and
+    /// [`InvalidParameterError::ValueLength`] for an unknown parameter whose
+    /// value is longer than its length field can state.
     pub fn validate(&self, sender: Role) -> Result<(), InvalidParameterError> {
         if sender == Role::Client {
             let server_only = [
@@ -426,11 +428,9 @@ impl<D: Buf> TransportParameters<D> {
             if id.get() <= id::LAST || self.unknown[..index].iter().any(|other| other.id == id) {
                 return Err(InvalidParameterError::Duplicate { id });
             }
-            if VarInt::try_from(parameter.value.remaining()).is_err() {
-                return Err(InvalidParameterError::OutOfRange {
-                    id,
-                    value: VarInt::MAX,
-                });
+            let length = parameter.value.remaining();
+            if VarInt::try_from(length).is_err() {
+                return Err(InvalidParameterError::ValueLength { id, length });
             }
         }
         Ok(())
@@ -466,13 +466,54 @@ pub enum InvalidParameterError {
         /// The parameter ID.
         id: VarInt,
     },
-    /// The value is outside the range RFC 9000 §18.2 permits.
-    #[snafu(display("transport parameter {:#x} has out-of-range value {value}", id.get()))]
-    OutOfRange {
-        /// The parameter ID.
-        id: VarInt,
+    /// `max_udp_payload_size` is below 1200.
+    #[snafu(display("max_udp_payload_size {value} is below 1200"))]
+    MaxUdpPayloadSize {
         /// The value.
         value: VarInt,
+    },
+    /// `ack_delay_exponent` exceeds 20.
+    #[snafu(display("ack_delay_exponent {value} exceeds 20"))]
+    AckDelayExponent {
+        /// The value.
+        value: VarInt,
+    },
+    /// `max_ack_delay` is not below 2<sup>14</sup>.
+    #[snafu(display("max_ack_delay {value} is not below 2^14"))]
+    MaxAckDelay {
+        /// The value.
+        value: VarInt,
+    },
+    /// `active_connection_id_limit` is below 2.
+    #[snafu(display("active_connection_id_limit {value} is below 2"))]
+    ActiveConnectionIdLimit {
+        /// The value.
+        value: VarInt,
+    },
+    /// `initial_max_streams_bidi` exceeds 2<sup>60</sup>.
+    #[snafu(display("initial_max_streams_bidi out of range"))]
+    InitialMaxStreamsBidi {
+        /// The rejected count.
+        source: StreamCountError,
+    },
+    /// `initial_max_streams_uni` exceeds 2<sup>60</sup>.
+    #[snafu(display("initial_max_streams_uni out of range"))]
+    InitialMaxStreamsUni {
+        /// The rejected count.
+        source: StreamCountError,
+    },
+    /// The value of an unknown parameter to write is longer than
+    /// 2<sup>62</sup> − 1 bytes, more than its Transport Parameter Length
+    /// field can state.
+    #[snafu(display(
+        "transport parameter {:#x} has a value of {length} bytes, longer than 2^62 - 1",
+        id.get()
+    ))]
+    ValueLength {
+        /// The parameter ID.
+        id: VarInt,
+        /// The length of the value.
+        length: usize,
     },
 }
 

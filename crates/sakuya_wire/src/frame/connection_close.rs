@@ -141,7 +141,6 @@ pub mod codec {
         var_int::{VarInt, VarIntField, codec::ReadVarIntError},
     };
     use bytes::Buf;
-    use core::convert::Infallible;
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{calls::WriteAllError, prelude::*};
     use snafu::{ResultExt, Snafu};
@@ -158,47 +157,48 @@ pub mod codec {
         F: ReadChunk<Chunk: Default>,
         A: ReceiverAccess<Family = F>,
     {
+        use read_connection_close_error::*;
         let error_code = if application {
             CloseErrorCode::Application {
-                code: field(io).await?,
+                code: read_field(io).await.context(ErrorCodeSnafu)?,
             }
         } else {
             CloseErrorCode::Transport {
-                code: field(io).await?,
-                frame_type: field(io).await?,
+                code: read_field(io).await.context(ErrorCodeSnafu)?,
+                frame_type: read_field(io).await.context(FrameTypeSnafu)?,
             }
         };
-        let length: VarIntField<VarInt> = field(io).await?;
+        let length: VarIntField<VarInt> = read_field(io).await.context(ReasonPhraseLengthSnafu)?;
         let reason_phrase_len = usize::try_from(length.get().get()).unwrap_or(usize::MAX);
         let reason_phrase = read_payload(io, reason_phrase_len)
             .await
-            .context(read_connection_close_error::ReasonPhraseSnafu)?;
+            .context(ReasonPhraseSnafu)?;
         let frame = ConnectionClose::new(error_code, length.width(), reason_phrase);
         // invariant: the Reason Phrase Length field was read at this width,
         // and the reason phrase has the length it states.
         Ok(frame.unwrap_or_else(|error| unreachable!("{error}")))
     }
 
-    async fn field<T, F, A>(
-        io: &mut A,
-    ) -> Result<VarIntField<T>, ReadConnectionCloseError<F::Error>>
-    where
-        T: Copy + Into<VarInt> + TryFrom<VarInt, Error = Infallible>,
-        F: Read,
-        A: ReceiverAccess<Family = F>,
-    {
-        read_field(io)
-            .await
-            .context(read_connection_close_error::FieldSnafu)
-    }
-
     /// Failures of reading a CONNECTION_CLOSE frame.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_connection_close_error), visibility(pub(crate)))]
     pub enum ReadConnectionCloseError<E> {
-        /// A field before the reason phrase could not be read.
-        #[snafu(display("CONNECTION_CLOSE field read failed"))]
-        Field {
+        /// The Error Code field could not be read.
+        #[snafu(display("CONNECTION_CLOSE Error Code read failed"))]
+        ErrorCode {
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
+        /// The Frame Type field of a transport CONNECTION_CLOSE frame could
+        /// not be read.
+        #[snafu(display("CONNECTION_CLOSE Frame Type read failed"))]
+        FrameType {
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
+        /// The Reason Phrase Length field could not be read.
+        #[snafu(display("CONNECTION_CLOSE Reason Phrase Length read failed"))]
+        ReasonPhraseLength {
             /// The failure of reading the field.
             source: ReadVarIntError<E>,
         },

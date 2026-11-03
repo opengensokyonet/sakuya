@@ -12,6 +12,7 @@
 
 use super::{
     InvalidParameterError, TransportParameters, UnknownParameter, Value, id,
+    invalid_parameter_error,
     preferred_address::{
         PreferredAddress,
         codec::{ReadPreferredAddressError, ReadPreferredAddressHostExt as _},
@@ -47,7 +48,8 @@ use snafu::{IntoError, ResultExt, Snafu};
 ///
 /// # Errors
 ///
-/// [`ReadTransportParametersError::Field`] or
+/// [`ReadTransportParametersError::Id`],
+/// [`ReadTransportParametersError::Length`] or
 /// [`ReadTransportParametersError::Value`] if the source ends within a
 /// parameter; a variant named after the layout of a known parameter for a
 /// value that does not fit it; and [`ReadTransportParametersError::Invalid`]
@@ -70,9 +72,9 @@ where
             Ok(id) => id,
             // The source ended between parameters.
             Err(error) if error.is_incomplete() && error.completed() == 0 => break,
-            Err(error) => return Err(FieldSnafu.into_error(error)),
+            Err(error) => return Err(IdSnafu.into_error(error)),
         };
-        let length = io.read_var_int().await.context(FieldSnafu)?;
+        let length = io.read_var_int().await.context(LengthSnafu { id })?;
         let length = usize::try_from(length.get()).unwrap_or(usize::MAX);
         let value = read_payload(io, length).await.context(ValueSnafu { id })?;
         if id.get() <= id::LAST {
@@ -148,17 +150,17 @@ fn set<D: Buf + Unpin, E>(
                 Ok(integer) if !value.0.has_remaining() => integer,
                 _ => return IntegerSnafu { id, length }.fail(),
             };
-            let stream_count = |integer| {
-                StreamCount::try_from(integer)
-                    .map_err(|_| InvalidParameterError::OutOfRange { id, value: integer })
-            };
             let field = match id {
                 id::INITIAL_MAX_STREAMS_BIDI => {
-                    parameters.initial_max_streams_bidi = stream_count(integer)?;
+                    let count = StreamCount::try_from(integer)
+                        .context(invalid_parameter_error::InitialMaxStreamsBidiSnafu);
+                    parameters.initial_max_streams_bidi = count?;
                     return Ok(());
                 }
                 id::INITIAL_MAX_STREAMS_UNI => {
-                    parameters.initial_max_streams_uni = stream_count(integer)?;
+                    let count = StreamCount::try_from(integer)
+                        .context(invalid_parameter_error::InitialMaxStreamsUniSnafu);
+                    parameters.initial_max_streams_uni = count?;
                     return Ok(());
                 }
                 id::MAX_IDLE_TIMEOUT => &mut parameters.max_idle_timeout,
@@ -231,9 +233,17 @@ impl<D: Buf + Unpin> Read for ValueSource<D> {
 #[derive(Debug, Snafu)]
 #[snafu(module(read_transport_parameters_error), visibility(pub(crate)))]
 pub enum ReadTransportParametersError<E> {
-    /// The ID or length of a parameter could not be read.
-    #[snafu(display("transport parameter field read failed"))]
-    Field {
+    /// The Transport Parameter ID field could not be read.
+    #[snafu(display("transport parameter ID read failed"))]
+    Id {
+        /// The failure of reading the field.
+        source: ReadVarIntError<E>,
+    },
+    /// The Transport Parameter Length field could not be read.
+    #[snafu(display("transport parameter {:#x} length read failed", id.get()))]
+    Length {
+        /// The parameter ID.
+        id: VarInt,
         /// The failure of reading the field.
         source: ReadVarIntError<E>,
     },
@@ -302,7 +312,7 @@ impl<E> ReadTransportParametersError<E> {
     /// Whether the source ended within a parameter.
     pub fn is_incomplete(&self) -> bool {
         match self {
-            Self::Field { source } => source.is_incomplete(),
+            Self::Id { source } | Self::Length { source, .. } => source.is_incomplete(),
             Self::Value { source, .. } => source.is_incomplete(),
             _ => false,
         }

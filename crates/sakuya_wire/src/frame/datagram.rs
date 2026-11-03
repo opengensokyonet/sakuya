@@ -119,7 +119,7 @@ pub mod codec {
         let (length_width, data) = if has_length {
             let length: VarIntField<VarInt> = read_field(io)
                 .await
-                .context(read_datagram_error::FieldSnafu)?;
+                .context(read_datagram_error::LengthSnafu)?;
             let data_len = usize::try_from(length.get().get()).unwrap_or(usize::MAX);
             let data = read_payload(io, data_len).await;
             (Some(length.width()), data)
@@ -138,8 +138,8 @@ pub mod codec {
     #[snafu(module(read_datagram_error), visibility(pub(crate)))]
     pub enum ReadDatagramError<E> {
         /// The Length field could not be read.
-        #[snafu(display("DATAGRAM field read failed"))]
-        Field {
+        #[snafu(display("DATAGRAM Length read failed"))]
+        Length {
             /// The failure of reading the field.
             source: ReadVarIntError<E>,
         },

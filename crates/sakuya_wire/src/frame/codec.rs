@@ -70,7 +70,7 @@ use super::{
     datagram::codec::{ReadDatagramError, read_datagram},
     handshake_done::HandshakeDone,
     max_data::codec::read_max_data,
-    max_stream_data::codec::read_max_stream_data,
+    max_stream_data::codec::{ReadMaxStreamDataError, read_max_stream_data},
     max_streams::codec::{ReadMaxStreamsError, read_max_streams},
     new_connection_id::codec::{ReadNewConnectionIdError, read_new_connection_id},
     new_token::codec::{ReadNewTokenError, read_new_token},
@@ -78,12 +78,12 @@ use super::{
     path_challenge::codec::read_path_challenge,
     path_response::codec::read_path_response,
     ping::Ping,
-    reset_stream::codec::read_reset_stream,
+    reset_stream::codec::{ReadResetStreamError, read_reset_stream},
     reset_stream_at::codec::{ReadResetStreamAtError, read_reset_stream_at},
     retire_connection_id::codec::read_retire_connection_id,
-    stop_sending::codec::read_stop_sending,
+    stop_sending::codec::{ReadStopSendingError, read_stop_sending},
     stream::codec::{ReadStreamError, read_stream},
-    stream_data_blocked::codec::read_stream_data_blocked,
+    stream_data_blocked::codec::{ReadStreamDataBlockedError, read_stream_data_blocked},
     streams_blocked::codec::{ReadStreamsBlockedError, read_streams_blocked},
     type_value,
 };
@@ -305,7 +305,7 @@ pub enum ReadFrameError<E> {
         /// The Frame Type.
         frame_type: VarInt,
         /// The failure.
-        source: ReadVarIntError<E>,
+        source: ReadResetStreamError<E>,
     },
     /// A STOP_SENDING frame could not be read.
     #[snafu(display("STOP_SENDING frame read failed"))]
@@ -313,7 +313,7 @@ pub enum ReadFrameError<E> {
         /// The Frame Type.
         frame_type: VarInt,
         /// The failure.
-        source: ReadVarIntError<E>,
+        source: ReadStopSendingError<E>,
     },
     /// A CRYPTO frame could not be read.
     #[snafu(display("CRYPTO frame read failed"))]
@@ -353,7 +353,7 @@ pub enum ReadFrameError<E> {
         /// The Frame Type.
         frame_type: VarInt,
         /// The failure.
-        source: ReadVarIntError<E>,
+        source: ReadMaxStreamDataError<E>,
     },
     /// A MAX_STREAMS frame could not be read.
     #[snafu(display("MAX_STREAMS frame read failed"))]
@@ -377,7 +377,7 @@ pub enum ReadFrameError<E> {
         /// The Frame Type.
         frame_type: VarInt,
         /// The failure.
-        source: ReadVarIntError<E>,
+        source: ReadStreamDataBlockedError<E>,
     },
     /// A STREAMS_BLOCKED frame could not be read.
     #[snafu(display("STREAMS_BLOCKED frame read failed"))]
@@ -491,13 +491,30 @@ impl<E> ReadFrameError<E> {
         }
         match self {
             Self::FrameType { source }
-            | Self::ResetStream { source, .. }
-            | Self::StopSending { source, .. }
             | Self::MaxData { source, .. }
-            | Self::MaxStreamData { source, .. }
             | Self::DataBlocked { source, .. }
-            | Self::StreamDataBlocked { source, .. }
             | Self::RetireConnectionId { source, .. } => source.is_incomplete(),
+            Self::ResetStream { source, .. } => match source {
+                ReadResetStreamError::StreamId { source }
+                | ReadResetStreamError::ApplicationProtocolErrorCode { source }
+                | ReadResetStreamError::FinalSize { source } => source.is_incomplete(),
+            },
+            Self::StopSending { source, .. } => match source {
+                ReadStopSendingError::StreamId { source }
+                | ReadStopSendingError::ApplicationProtocolErrorCode { source } => {
+                    source.is_incomplete()
+                }
+            },
+            Self::MaxStreamData { source, .. } => match source {
+                ReadMaxStreamDataError::StreamId { source }
+                | ReadMaxStreamDataError::MaximumStreamData { source } => source.is_incomplete(),
+            },
+            Self::StreamDataBlocked { source, .. } => match source {
+                ReadStreamDataBlockedError::StreamId { source }
+                | ReadStreamDataBlockedError::MaximumStreamData { source } => {
+                    source.is_incomplete()
+                }
+            },
             Self::LongerTypeEncoding { .. } | Self::UnknownType { .. } => false,
             Self::Ack { source, .. } => match source {
                 Ack::LargestAcknowledged { source }
@@ -512,17 +529,19 @@ impl<E> ReadFrameError<E> {
                 Ack::BelowZero { .. } => false,
             },
             Self::Crypto { source, .. } => match source {
-                Crypto::Field { source } => source.is_incomplete(),
+                Crypto::Offset { source } | Crypto::Length { source } => source.is_incomplete(),
                 Crypto::Data { source } => payload(source),
                 Crypto::DataEnd { .. } => false,
             },
             Self::NewToken { source, .. } => match source {
-                ReadNewTokenError::Field { source } => source.is_incomplete(),
+                ReadNewTokenError::TokenLength { source } => source.is_incomplete(),
                 ReadNewTokenError::Token { source } => payload(source),
                 ReadNewTokenError::Empty => false,
             },
             Self::Stream { source, .. } => match source {
-                Stream::Field { source } => source.is_incomplete(),
+                Stream::StreamId { source }
+                | Stream::Offset { source }
+                | Stream::Length { source } => source.is_incomplete(),
                 Stream::Data { source } => payload(source),
                 Stream::DataEnd { .. } => false,
             },
@@ -541,14 +560,16 @@ impl<E> ReadFrameError<E> {
             },
             Self::PathChallenge { source, .. } | Self::PathResponse { source, .. } => array(source),
             Self::ConnectionClose { source, .. } => match source {
-                ReadConnectionCloseError::Field { source } => source.is_incomplete(),
+                ReadConnectionCloseError::ErrorCode { source }
+                | ReadConnectionCloseError::FrameType { source }
+                | ReadConnectionCloseError::ReasonPhraseLength { source } => source.is_incomplete(),
                 ReadConnectionCloseError::ReasonPhrase { source } => payload(source),
             },
             Self::ResetStreamAt { source, .. } => {
                 matches!(source, ReadResetStreamAtError::Field { source } if source.is_incomplete())
             }
             Self::Datagram { source, .. } => match source {
-                ReadDatagramError::Field { source } => source.is_incomplete(),
+                ReadDatagramError::Length { source } => source.is_incomplete(),
                 ReadDatagramError::Data { source } => payload(source),
             },
         }

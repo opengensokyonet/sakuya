@@ -73,15 +73,34 @@ pub mod codec {
     use crate::{frame::read_field, var_int::codec::ReadVarIntError};
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{calls::WriteAllError, prelude::*};
+    use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type.
     pub(crate) async fn read_max_stream_data<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-    ) -> Result<MaxStreamData, ReadVarIntError<F::Error>> {
-        Ok(MaxStreamData::new(
-            read_field(io).await?,
-            read_field(io).await?,
-        ))
+    ) -> Result<MaxStreamData, ReadMaxStreamDataError<F::Error>> {
+        use read_max_stream_data_error::*;
+        let stream_id = read_field(io).await.context(StreamIdSnafu)?;
+        let maximum_stream_data = read_field(io).await.context(MaximumStreamDataSnafu)?;
+        Ok(MaxStreamData::new(stream_id, maximum_stream_data))
+    }
+
+    /// Failures of reading a MAX_STREAM_DATA frame.
+    #[derive(Debug, Snafu)]
+    #[snafu(module(read_max_stream_data_error), visibility(pub(crate)))]
+    pub enum ReadMaxStreamDataError<E> {
+        /// The Stream ID field could not be read.
+        #[snafu(display("MAX_STREAM_DATA Stream ID read failed"))]
+        StreamId {
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
+        /// The Maximum Stream Data field could not be read.
+        #[snafu(display("MAX_STREAM_DATA Maximum Stream Data read failed"))]
+        MaximumStreamData {
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
     }
 
     /// Writes the frame.

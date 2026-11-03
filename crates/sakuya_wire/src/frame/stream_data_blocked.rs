@@ -73,15 +73,34 @@ pub mod codec {
     use crate::{frame::read_field, var_int::codec::ReadVarIntError};
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{calls::WriteAllError, prelude::*};
+    use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type.
     pub(crate) async fn read_stream_data_blocked<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-    ) -> Result<StreamDataBlocked, ReadVarIntError<F::Error>> {
-        Ok(StreamDataBlocked::new(
-            read_field(io).await?,
-            read_field(io).await?,
-        ))
+    ) -> Result<StreamDataBlocked, ReadStreamDataBlockedError<F::Error>> {
+        use read_stream_data_blocked_error::*;
+        let stream_id = read_field(io).await.context(StreamIdSnafu)?;
+        let maximum_stream_data = read_field(io).await.context(MaximumStreamDataSnafu)?;
+        Ok(StreamDataBlocked::new(stream_id, maximum_stream_data))
+    }
+
+    /// Failures of reading a STREAM_DATA_BLOCKED frame.
+    #[derive(Debug, Snafu)]
+    #[snafu(module(read_stream_data_blocked_error), visibility(pub(crate)))]
+    pub enum ReadStreamDataBlockedError<E> {
+        /// The Stream ID field could not be read.
+        #[snafu(display("STREAM_DATA_BLOCKED Stream ID read failed"))]
+        StreamId {
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
+        /// The Maximum Stream Data field could not be read.
+        #[snafu(display("STREAM_DATA_BLOCKED Maximum Stream Data read failed"))]
+        MaximumStreamData {
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
     }
 
     /// Writes the frame.

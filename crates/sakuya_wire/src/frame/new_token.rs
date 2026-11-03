@@ -127,7 +127,7 @@ pub mod codec {
     {
         let length: VarIntField<VarInt> = read_field(io)
             .await
-            .context(read_new_token_error::FieldSnafu)?;
+            .context(read_new_token_error::TokenLengthSnafu)?;
         let token_len = usize::try_from(length.get().get()).unwrap_or(usize::MAX);
         let token = read_payload(io, token_len)
             .await
@@ -145,8 +145,8 @@ pub mod codec {
     #[snafu(module(read_new_token_error), visibility(pub(crate)))]
     pub enum ReadNewTokenError<E> {
         /// The Token Length field could not be read.
-        #[snafu(display("NEW_TOKEN field read failed"))]
-        Field {
+        #[snafu(display("NEW_TOKEN Token Length read failed"))]
+        TokenLength {
             /// The failure of reading the field.
             source: ReadVarIntError<E>,
         },

@@ -94,9 +94,13 @@ pub mod codec {
     ///
     /// # Errors
     ///
-    /// [`ReadPreferredAddressError::Address`] or
-    /// [`ReadPreferredAddressError::StatelessResetToken`] if a fixed-length
-    /// field cannot be read, [`ReadPreferredAddressError::NoAddress`] if the
+    /// [`ReadPreferredAddressError::Ipv4Address`],
+    /// [`ReadPreferredAddressError::Ipv4Port`],
+    /// [`ReadPreferredAddressError::Ipv6Address`],
+    /// [`ReadPreferredAddressError::Ipv6Port`] or
+    /// [`ReadPreferredAddressError::StatelessResetToken`] if that
+    /// fixed-length field cannot be read,
+    /// [`ReadPreferredAddressError::NoAddress`] if the
     /// addresses and ports of both families are all zeros,
     /// [`ReadPreferredAddressError::ConnectionId`] if the connection ID
     /// cannot be read or is longer than 20 bytes, and
@@ -105,27 +109,29 @@ pub mod codec {
     pub async fn read_preferred_address<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
     ) -> Result<PreferredAddress, ReadPreferredAddressError<F::Error>> {
-        let [a, b, c, d, p0, p1, ipv6 @ .., q0, q1] =
-            io.read_array::<{ 4 + 2 + 16 + 2 }>()
-                .await
-                .context(read_preferred_address_error::AddressSnafu)?;
-        let ipv4 = SocketAddrV4::new(Ipv4Addr::from([a, b, c, d]), u16::from_be_bytes([p0, p1]));
-        let ipv6 = SocketAddrV6::new(Ipv6Addr::from(ipv6), u16::from_be_bytes([q0, q1]), 0, 0);
+        use read_preferred_address_error::*;
+        let ipv4_address = io.read_array::<4>().await.context(Ipv4AddressSnafu)?;
+        let ipv4_port = io.read_array::<2>().await.context(Ipv4PortSnafu)?;
+        let ipv6_address = io.read_array::<16>().await.context(Ipv6AddressSnafu)?;
+        let ipv6_port = io.read_array::<2>().await.context(Ipv6PortSnafu)?;
+        let ipv4 = SocketAddrV4::new(Ipv4Addr::from(ipv4_address), u16::from_be_bytes(ipv4_port));
+        let ipv6 = SocketAddrV6::new(
+            Ipv6Addr::from(ipv6_address),
+            u16::from_be_bytes(ipv6_port),
+            0,
+            0,
+        );
         let unspecified_v4 = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0);
         let unspecified_v6 = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0);
         if ipv4 == unspecified_v4 && ipv6 == unspecified_v6 {
-            return read_preferred_address_error::NoAddressSnafu.fail();
+            return NoAddressSnafu.fail();
         }
-        let connection_id = io
-            .read_connection_id()
-            .await
-            .context(read_preferred_address_error::ConnectionIdSnafu)?;
-        let connection_id = NonEmptyCid::new(connection_id)
-            .context(read_preferred_address_error::EmptyConnectionIdSnafu)?;
+        let connection_id = io.read_connection_id().await.context(ConnectionIdSnafu)?;
+        let connection_id = NonEmptyCid::new(connection_id).context(EmptyConnectionIdSnafu)?;
         let stateless_reset_token = io
             .read_array::<{ StatelessResetToken::LEN }>()
             .await
-            .context(read_preferred_address_error::StatelessResetTokenSnafu)?;
+            .context(StatelessResetTokenSnafu)?;
         Ok(PreferredAddress {
             ipv4,
             ipv6,
@@ -138,10 +144,28 @@ pub mod codec {
     #[derive(Debug, Snafu)]
     #[snafu(module(read_preferred_address_error), visibility(pub(crate)))]
     pub enum ReadPreferredAddressError<E> {
-        /// The addresses and ports could not be read.
-        #[snafu(display("preferred address read failed"))]
-        Address {
-            /// The failure of reading the fields.
+        /// The IPv4 Address field could not be read.
+        #[snafu(display("preferred address IPv4 Address read failed"))]
+        Ipv4Address {
+            /// The failure of reading the field.
+            source: ReadArrayError<E>,
+        },
+        /// The IPv4 Port field could not be read.
+        #[snafu(display("preferred address IPv4 Port read failed"))]
+        Ipv4Port {
+            /// The failure of reading the field.
+            source: ReadArrayError<E>,
+        },
+        /// The IPv6 Address field could not be read.
+        #[snafu(display("preferred address IPv6 Address read failed"))]
+        Ipv6Address {
+            /// The failure of reading the field.
+            source: ReadArrayError<E>,
+        },
+        /// The IPv6 Port field could not be read.
+        #[snafu(display("preferred address IPv6 Port read failed"))]
+        Ipv6Port {
+            /// The failure of reading the field.
             source: ReadArrayError<E>,
         },
         /// The addresses and ports of both families are all zeros
