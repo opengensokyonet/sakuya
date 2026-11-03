@@ -32,15 +32,22 @@ pub(crate) mod bits {
 ///
 /// `L` states the Length field, as a [`LengthKind`]: [`VarIntWidth`] for a
 /// frame with a Length field of that width, [`NoLength`] for one without,
-/// whose data extends to the end of the packet, and, by default,
-/// [`Either<NoLength, VarIntWidth>`](Either) for either of the two. Reading
-/// gives `Stream<D>`, the default; `From` converts the other two into it.
+/// whose data extends to the end of the packet, and
+/// [`Either<NoLength, VarIntWidth>`](Either) or
+/// [`Either<VarIntWidth, NoLength>`](Either) for either of the two. Reading
+/// gives `Stream<D>`, the default, `Either<NoLength, VarIntWidth>`. `From`
+/// converts the two single kinds into either `Either` kind, a frame of an
+/// `Either` kind into an `Either` of frames of its two kinds in the same
+/// order and back, and one `Either` kind into the other.
 ///
 /// The end of the data, its offset plus its length, is at most
 /// [`VarInt::MAX`], and the Length field, if present, can state the length
-/// of the data. The `new` of each kind of `L` checks the limits that apply
-/// to it, so every value writes an encoding that reads back to the same
-/// value; the fields are read through methods of the same names. `D` holds
+/// of the data. [`with_length`](Stream::with_length),
+/// [`without_length`](Stream::without_length) and [`new`](Stream::new),
+/// which construct a frame with a Length field, without one, and with
+/// either as a frame that was read, check the limits that apply, so every
+/// value writes an encoding that reads back to the same value; the fields
+/// are read through methods of the same names. `D` holds
 /// the data: the source's chunk type for a frame that was read, any [`Buf`]
 /// for one to write.
 ///
@@ -111,10 +118,12 @@ impl<D, L: LengthKind> Stream<D, L> {
     pub fn data_offset(&self) -> VarInt {
         self.offset.map_or(VarInt::ZERO, |offset| offset.get())
     }
+}
 
+impl<D, L> Stream<D, L> {
     /// The same frame with the Length field stated as `length`, which states
     /// the same field.
-    fn with_length<M: LengthKind>(self, length: M) -> Stream<D, M> {
+    fn restate_length<M>(self, length: M) -> Stream<D, M> {
         Stream {
             stream_id: self.stream_id,
             offset: self.offset,
@@ -160,28 +169,28 @@ fn fixed_len(stream_id: VarIntField<StreamId>, offset: Option<VarIntField<VarInt
 }
 
 impl<D: Buf> Stream<D, VarIntWidth> {
-    /// The STREAM frame with a Length field of width `length` and these
-    /// other fields.
+    /// The STREAM frame with a Length field of width `width` and these other
+    /// fields.
     ///
     /// # Errors
     ///
     /// [`InvalidDataError::DataEnd`] if the data would end beyond
     /// 2<sup>62</sup> − 1, and [`InvalidDataError::Length`] if the Length
     /// field is too narrow for the length of the data.
-    pub fn new(
+    pub fn with_length(
         stream_id: VarIntField<StreamId>,
         offset: Option<VarIntField<VarInt>>,
-        length: VarIntWidth,
+        width: VarIntWidth,
         data: D,
         fin: bool,
     ) -> Result<Self, InvalidDataError> {
         let data_len = data.remaining();
         DataEndError::check(start(offset), data_len as u64)?;
-        LengthError::check(data_len, length)?;
+        LengthError::check(data_len, width)?;
         Ok(Self {
             stream_id,
             offset,
-            length,
+            length: width,
             data,
             fin,
         })
@@ -215,10 +224,9 @@ impl<D: Buf> Stream<D, NoLength> {
     /// # Errors
     ///
     /// [`DataEndError`] if the data would end beyond 2<sup>62</sup> − 1.
-    pub fn new(
+    pub fn without_length(
         stream_id: VarIntField<StreamId>,
         offset: Option<VarIntField<VarInt>>,
-        length: NoLength,
         data: D,
         fin: bool,
     ) -> Result<Self, DataEndError> {
@@ -226,7 +234,7 @@ impl<D: Buf> Stream<D, NoLength> {
         Ok(Self {
             stream_id,
             offset,
-            length,
+            length: NoLength,
             data,
             fin,
         })
@@ -255,7 +263,8 @@ impl<D> Stream<D, NoLength> {
 
 impl<D: Buf> Stream<D> {
     /// The STREAM frame with these fields, with or without a Length field as
-    /// `length` states.
+    /// `length` states: [`with_length`](Stream::with_length) or
+    /// [`without_length`](Stream::without_length), as a frame that was read.
     ///
     /// # Errors
     ///
@@ -271,29 +280,103 @@ impl<D: Buf> Stream<D> {
         fin: bool,
     ) -> Result<Self, InvalidDataError> {
         Ok(match length {
-            Either::Left(length) => {
-                Stream::<D, NoLength>::new(stream_id, offset, length, data, fin)?.into()
-            }
-            Either::Right(length) => {
-                Stream::<D, VarIntWidth>::new(stream_id, offset, length, data, fin)?.into()
+            Either::Left(NoLength) => Stream::without_length(stream_id, offset, data, fin)?.into(),
+            Either::Right(width) => {
+                Stream::with_length(stream_id, offset, width, data, fin)?.into()
             }
         })
     }
 }
 
-impl<D> From<Stream<D, VarIntWidth>> for Stream<D> {
+impl<D> From<Stream<D, VarIntWidth>> for Stream<D, Either<NoLength, VarIntWidth>> {
     /// The same frame, which has a Length field.
     fn from(frame: Stream<D, VarIntWidth>) -> Self {
         let length = Either::Right(frame.length);
-        frame.with_length(length)
+        frame.restate_length(length)
     }
 }
 
-impl<D> From<Stream<D, NoLength>> for Stream<D> {
+impl<D> From<Stream<D, NoLength>> for Stream<D, Either<NoLength, VarIntWidth>> {
     /// The same frame, which has no Length field.
     fn from(frame: Stream<D, NoLength>) -> Self {
         let length = Either::Left(frame.length);
-        frame.with_length(length)
+        frame.restate_length(length)
+    }
+}
+
+impl<D> From<Stream<D, VarIntWidth>> for Stream<D, Either<VarIntWidth, NoLength>> {
+    /// The same frame, which has a Length field.
+    fn from(frame: Stream<D, VarIntWidth>) -> Self {
+        let length = Either::Left(frame.length);
+        frame.restate_length(length)
+    }
+}
+
+impl<D> From<Stream<D, NoLength>> for Stream<D, Either<VarIntWidth, NoLength>> {
+    /// The same frame, which has no Length field.
+    fn from(frame: Stream<D, NoLength>) -> Self {
+        let length = Either::Right(frame.length);
+        frame.restate_length(length)
+    }
+}
+
+impl<D, A, B> From<Stream<D, Either<A, B>>> for Either<Stream<D, A>, Stream<D, B>>
+where
+    A: LengthKind,
+    B: LengthKind,
+    Either<A, B>: LengthKind,
+{
+    /// The same frame as the side of `Either` that its Length field is on:
+    /// `Stream<D, Either<A, B>>` becomes `Either<Stream<D, A>, Stream<D, B>>`,
+    /// in the same order.
+    fn from(frame: Stream<D, Either<A, B>>) -> Self {
+        match frame.length {
+            Either::Left(length) => Either::Left(frame.restate_length(length)),
+            Either::Right(length) => Either::Right(frame.restate_length(length)),
+        }
+    }
+}
+
+impl<D, A, B> From<Either<Stream<D, A>, Stream<D, B>>> for Stream<D, Either<A, B>>
+where
+    A: LengthKind,
+    B: LengthKind,
+    Either<A, B>: LengthKind,
+{
+    /// The frame on either side, with its Length field on the same side:
+    /// `Either<Stream<D, A>, Stream<D, B>>` becomes `Stream<D, Either<A, B>>`,
+    /// in the same order.
+    fn from(frame: Either<Stream<D, A>, Stream<D, B>>) -> Self {
+        match frame {
+            Either::Left(frame) => {
+                let length = Either::Left(frame.length);
+                frame.restate_length(length)
+            }
+            Either::Right(frame) => {
+                let length = Either::Right(frame.length);
+                frame.restate_length(length)
+            }
+        }
+    }
+}
+
+impl<D> From<Stream<D, Either<NoLength, VarIntWidth>>>
+    for Stream<D, Either<VarIntWidth, NoLength>>
+{
+    /// The same frame, with the sides of `Either` swapped.
+    fn from(frame: Stream<D, Either<NoLength, VarIntWidth>>) -> Self {
+        let length = frame.length.flip();
+        frame.restate_length(length)
+    }
+}
+
+impl<D> From<Stream<D, Either<VarIntWidth, NoLength>>>
+    for Stream<D, Either<NoLength, VarIntWidth>>
+{
+    /// The same frame, with the sides of `Either` swapped.
+    fn from(frame: Stream<D, Either<VarIntWidth, NoLength>>) -> Self {
+        let length = frame.length.flip();
+        frame.restate_length(length)
     }
 }
 
@@ -389,7 +472,7 @@ pub mod codec {
             (Either::Left(NoLength), data)
         };
         let fin = frame_type.has(bits::FIN);
-        Stream::<_>::new(stream_id, offset, length, data, fin).map_err(|error| match error {
+        Stream::new(stream_id, offset, length, data, fin).map_err(|error| match error {
             InvalidDataError::DataEnd { source } => ReadStreamError::DataEnd { source },
             // invariant: the Length field was read at this width, and
             // `read_payload` returns data of exactly the length it states: it
@@ -435,8 +518,8 @@ pub mod codec {
     }
 
     /// Writes `frame`, as [`write_stream_with_length`] or
-    /// [`write_stream_without_length`] as its Length field states; its `new`
-    /// checked its limits.
+    /// [`write_stream_without_length`] as its Length field states; its
+    /// constructor checked its limits.
     ///
     /// A frame without a Length field extends to the end of the packet;
     /// nothing may be written after it.
@@ -457,14 +540,16 @@ pub mod codec {
     {
         match frame.length {
             Either::Left(length) => {
-                write_stream_without_length(io, frame.with_length(length)).await
+                write_stream_without_length(io, frame.restate_length(length)).await
             }
-            Either::Right(length) => write_stream_with_length(io, frame.with_length(length)).await,
+            Either::Right(length) => {
+                write_stream_with_length(io, frame.restate_length(length)).await
+            }
         }
     }
 
-    /// Writes `frame`, which has a Length field; its `new` checked its
-    /// limits.
+    /// Writes `frame`, which has a Length field;
+    /// [`Stream::with_length`] checked its limits.
     ///
     /// # Errors
     ///
@@ -484,8 +569,8 @@ pub mod codec {
         io.write_all(head.as_slice().chain(frame.data)).await
     }
 
-    /// Writes `frame`, which has no Length field; its `new` checked its
-    /// limits.
+    /// Writes `frame`, which has no Length field;
+    /// [`Stream::without_length`] checked its limits.
     ///
     /// The frame extends to the end of the packet; nothing may be written
     /// after it.

@@ -56,9 +56,7 @@ fn type_bits() {
         let mut written = Vec::new();
         let converted: Stream<&[u8]> = match stream.length() {
             Either::Left(NoLength) => {
-                let frame =
-                    Stream::<_, NoLength>::new(short(sid(4)), offset, NoLength, &b"ab"[..], fin)
-                        .unwrap();
+                let frame = Stream::without_length(short(sid(4)), offset, &b"ab"[..], fin).unwrap();
                 assert_eq!(frame.type_value(), vi(frame_type.into()));
                 assert_eq!(frame.encoded_len(), encoding.len());
                 written
@@ -68,8 +66,7 @@ fn type_bits() {
             }
             Either::Right(width) => {
                 let frame =
-                    Stream::<_, VarIntWidth>::new(short(sid(4)), offset, width, &b"ab"[..], fin)
-                        .unwrap();
+                    Stream::with_length(short(sid(4)), offset, width, &b"ab"[..], fin).unwrap();
                 assert_eq!(frame.type_value(), vi(frame_type.into()));
                 assert_eq!(frame.encoded_len(), encoding.len());
                 written.sync_write_stream_with_length_unpin(frame).unwrap();
@@ -111,11 +108,11 @@ fn each_kind_of_length_field_checks_its_limits() {
     let narrow = LengthError::check(64, VarIntWidth::One).unwrap_err();
     // A Length field must hold the length of the data.
     assert_eq!(
-        Stream::<_, VarIntWidth>::new(short(sid(0)), None, VarIntWidth::One, &data[..], false),
+        Stream::with_length(short(sid(0)), None, VarIntWidth::One, &data[..], false),
         Err(InvalidDataError::Length { source: narrow })
     );
     assert_eq!(
-        Stream::<_>::new(
+        Stream::new(
             short(sid(0)),
             None,
             Either::Right(VarIntWidth::One),
@@ -124,14 +121,12 @@ fn each_kind_of_length_field_checks_its_limits() {
         ),
         Err(InvalidDataError::Length { source: narrow })
     );
-    let with_length =
-        Stream::<_, VarIntWidth>::new(short(sid(0)), None, VarIntWidth::Two, &data[..], false);
+    let with_length = Stream::with_length(short(sid(0)), None, VarIntWidth::Two, &data[..], false);
     assert_eq!(with_length.unwrap().length(), VarIntWidth::Two);
     // Without a Length field, any length up to the end bound is accepted.
-    let without_length =
-        Stream::<_, NoLength>::new(short(sid(0)), None, NoLength, &data[..], false).unwrap();
+    let without_length = Stream::without_length(short(sid(0)), None, &data[..], false).unwrap();
     assert_eq!(without_length.length(), NoLength);
-    let either = Stream::<_>::new(
+    let either = Stream::new(
         short(sid(0)),
         None,
         Either::Left(NoLength),
@@ -184,11 +179,11 @@ fn data_ending_beyond_2_62_is_rejected() {
     let offset = Some(short(VarInt::MAX));
     let data = &b"x"[..];
     assert_eq!(
-        Stream::<_, NoLength>::new(short(sid(0)), offset, NoLength, data, false),
+        Stream::without_length(short(sid(0)), offset, data, false),
         Err(error)
     );
     assert_eq!(
-        Stream::<_, VarIntWidth>::new(short(sid(0)), offset, VarIntWidth::One, data, false),
+        Stream::with_length(short(sid(0)), offset, VarIntWidth::One, data, false),
         Err(InvalidDataError::DataEnd { source: error })
     );
     for length_width in [Some(VarIntWidth::One), None] {
@@ -197,7 +192,7 @@ fn data_ending_beyond_2_62_is_rejected() {
             Err(InvalidDataError::DataEnd { source: error })
         );
     }
-    let at_limit = Stream::<_, NoLength>::new(short(sid(0)), offset, NoLength, &b""[..], true);
+    let at_limit = Stream::without_length(short(sid(0)), offset, &b""[..], true);
     assert!(at_limit.is_ok());
 }
 
@@ -217,7 +212,7 @@ fn max_data_len_fits_the_room_exactly() {
         for offset in offsets {
             for stream_id in stream_ids {
                 let start = offset.map_or(VarInt::ZERO, |offset| offset.get());
-                let empty = Stream::<_, NoLength>::new(stream_id, offset, NoLength, &[][..], false)
+                let empty = Stream::without_length(stream_id, offset, &[][..], false)
                     .unwrap()
                     .encoded_len();
 
@@ -229,14 +224,9 @@ fn max_data_len_fits_the_room_exactly() {
                 if let Some(max) = max.filter(|&max| max <= 1 << 20) {
                     let data = vec![0; max];
                     let width = VarIntWidth::shortest(VarInt::try_from(max).unwrap());
-                    let frame = Stream::<_, VarIntWidth>::new(
-                        stream_id,
-                        offset,
-                        width,
-                        data.as_slice(),
-                        false,
-                    )
-                    .unwrap();
+                    let frame =
+                        Stream::with_length(stream_id, offset, width, data.as_slice(), false)
+                            .unwrap();
                     assert!(frame.encoded_len() <= room);
                 }
 
@@ -257,4 +247,89 @@ fn stream_ids_and_offsets_keep_their_widths() {
         let encoding = assert_round_trip(Frame::Stream(frame));
         assert_eq!(encoding.len(), 1 + 2 * field.encoded_len());
     }
+}
+
+#[test]
+fn constructors_state_the_length_field_in_the_type() {
+    let with: Stream<&[u8], VarIntWidth> =
+        Stream::with_length(short(sid(4)), None, VarIntWidth::Two, &b"hi"[..], true).unwrap();
+    assert_eq!(with.length(), VarIntWidth::Two);
+    let without: Stream<&[u8], NoLength> =
+        Stream::without_length(short(sid(4)), None, &b"hi"[..], true).unwrap();
+    assert_eq!(without.length(), NoLength);
+    let read: Stream<&[u8]> = Stream::new(
+        short(sid(4)),
+        None,
+        Either::Right(VarIntWidth::Two),
+        &b"hi"[..],
+        true,
+    )
+    .unwrap();
+    assert_eq!(read, with.into());
+    let read: Stream<&[u8]> = Stream::new(
+        short(sid(4)),
+        None,
+        Either::Left(NoLength),
+        &b"hi"[..],
+        true,
+    )
+    .unwrap();
+    assert_eq!(read, without.into());
+}
+
+#[test]
+fn every_kind_of_length_field_writes_the_same_frame() {
+    let with =
+        Stream::with_length(short(sid(4)), None, VarIntWidth::Two, &b"hi"[..], true).unwrap();
+    let without = Stream::without_length(short(sid(4)), None, &b"hi"[..], true).unwrap();
+    for (width, type_value, encoded_len) in [(Some(VarIntWidth::Two), 0x0b, 6), (None, 0x09, 4)] {
+        let read: Stream<&[u8]> = match width {
+            Some(_) => with.into(),
+            None => without.into(),
+        };
+        let swapped: Stream<&[u8], Either<VarIntWidth, NoLength>> = match width {
+            Some(_) => with.into(),
+            None => without.into(),
+        };
+        assert_eq!(
+            swapped.length(),
+            width.map_or(Either::Right(NoLength), Either::Left)
+        );
+        assert_eq!(swapped.type_value(), vi(type_value));
+        assert_eq!(read.type_value(), vi(type_value));
+        assert_eq!(swapped.encoded_len(), encoded_len);
+        assert_eq!(read.encoded_len(), encoded_len);
+        assert_eq!(Stream::<_>::from(swapped), read);
+        assert_eq!(
+            Stream::<_, Either<VarIntWidth, NoLength>>::from(read),
+            swapped
+        );
+    }
+}
+
+#[test]
+fn either_kinds_convert_to_either_of_frames_in_the_same_order() {
+    let with =
+        Stream::with_length(short(sid(4)), None, VarIntWidth::Two, &b"hi"[..], true).unwrap();
+    let without = Stream::without_length(short(sid(4)), None, &b"hi"[..], true).unwrap();
+
+    // `Either<NoLength, VarIntWidth>`, as read.
+    let read: Stream<&[u8]> = without.into();
+    let split: Either<Stream<_, NoLength>, Stream<_, VarIntWidth>> = read.into();
+    assert_eq!(split, Either::Left(without));
+    assert_eq!(Stream::from(split), read);
+    let read: Stream<&[u8]> = with.into();
+    let split: Either<Stream<_, NoLength>, Stream<_, VarIntWidth>> = read.into();
+    assert_eq!(split, Either::Right(with));
+    assert_eq!(Stream::from(split), read);
+
+    // `Either<VarIntWidth, NoLength>`, the other order.
+    let swapped: Stream<&[u8], Either<VarIntWidth, NoLength>> = with.into();
+    let split: Either<Stream<_, VarIntWidth>, Stream<_, NoLength>> = swapped.into();
+    assert_eq!(split, Either::Left(with));
+    assert_eq!(Stream::from(split), swapped);
+    let swapped: Stream<&[u8], Either<VarIntWidth, NoLength>> = without.into();
+    let split: Either<Stream<_, VarIntWidth>, Stream<_, NoLength>> = swapped.into();
+    assert_eq!(split, Either::Right(without));
+    assert_eq!(Stream::from(split), swapped);
 }

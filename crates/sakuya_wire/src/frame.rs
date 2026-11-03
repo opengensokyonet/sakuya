@@ -44,16 +44,18 @@
 //!   set and offset 0 is distinct from one without the bit.
 //! - Whether a STREAM or DATAGRAM frame has a Length field is stated by the
 //!   type parameter `L` of [`stream::Stream`] and [`datagram::Datagram`], a
-//!   [`LengthKind`] of one of three types: [`VarIntWidth`], for a frame with
+//!   [`LengthKind`] of one of four types: [`VarIntWidth`], for a frame with
 //!   a Length field of that width; [`NoLength`], for a frame without one,
 //!   whose data extends to the end of the packet; and
-//!   [`Either<NoLength, VarIntWidth>`](Either), of the `either` crate, for
-//!   either of the two. The
-//!   last is the default and what reading gives, since only the Frame Type
-//!   that was read tells which it is; the first two convert into it with
-//!   `From`. Each of the three has its own `new` and its own write
-//!   operation, so a writer that knows which kind it writes states it in
-//!   the type.
+//!   [`Either<NoLength, VarIntWidth>`](Either) and
+//!   [`Either<VarIntWidth, NoLength>`](Either), of the `either` crate, for
+//!   either of the two. `Either<NoLength, VarIntWidth>` is the default and
+//!   what reading gives, since only the Frame Type that was read tells which
+//!   it is. The kinds convert into one another with `From` as
+//!   [`LengthKind`] describes. A frame with a Length field is constructed by
+//!   `with_length`, one without by `without_length`, and one as reading
+//!   gives it by `new`; each of these kinds has its own write operation, so
+//!   a writer that knows which kind it writes states it in the type.
 //! - An ACK frame holds its fields as encoded, and owns its ACK Ranges in
 //!   [`ack::AckRanges`]; [`ack::Ack::packet_ranges`] computes the
 //!   acknowledged packet numbers from them.
@@ -69,11 +71,11 @@
 //! NEW_CONNECTION_ID does not exceed its Sequence Number, the Reliable Size
 //! of RESET_STREAM_AT does not exceed its Final Size, no range of an ACK
 //! frame extends below packet number 0, and the ACK Range Count field of ACK
-//! can state the number of ACK Ranges. The `new` of these frame types, such
-//! as that of `Stream<D, VarIntWidth>` and [`ack::Ack::new`], returns an
-//! error for fields that break one; a DATAGRAM frame without a Length field
-//! has no such limit. The other frame types have no such limit, and
-//! their `new`, such as [`max_data::MaxData::new`], accepts any fields. The
+//! can state the number of ACK Ranges. The constructors of these frame
+//! types, such as [`stream::Stream::with_length`] and [`ack::Ack::new`],
+//! return an error for fields that break one; a DATAGRAM frame without a
+//! Length field has no such limit. The other frame types have no such limit,
+//! and their `new`, such as [`max_data::MaxData::new`], accepts any fields. The
 //! fields of every frame type are private and are read through methods of
 //! the same names, so every frame value converts to bytes and back without
 //! loss.
@@ -609,15 +611,23 @@ mod sealed {
 /// What a STREAM or DATAGRAM frame states about its Length field, as the
 /// type parameter `L` of [`stream::Stream`] and [`datagram::Datagram`].
 ///
-/// It is implemented by exactly three types:
+/// It is implemented by exactly four types:
 ///
 /// - [`VarIntWidth`]: the frame has a Length field, of this width;
 /// - [`NoLength`]: the frame has no Length field, and its data extends to
 ///   the end of the packet;
 /// - [`Either<NoLength, VarIntWidth>`](Either): either of the two, as a frame
 ///   that was read states it. This is the default, so `Stream<D>` and
-///   `Datagram<D>` are frames as they are read, and the two other kinds
-///   convert into them with `From`.
+///   `Datagram<D>` are frames as they are read;
+/// - [`Either<VarIntWidth, NoLength>`](Either): either of the two, in the
+///   other order.
+///
+/// The two single kinds convert into each `Either` kind with `From`. A frame
+/// of an `Either` kind converts with `From` into an `Either` of frames of
+/// its two kinds, in the same order, such as
+/// `Either<Stream<D, NoLength>, Stream<D, VarIntWidth>>` for `Stream<D>`,
+/// and back; and into a frame of the other `Either` kind, with the sides
+/// swapped.
 pub trait LengthKind: sealed::Sealed {}
 
 impl sealed::Sealed for VarIntWidth {
@@ -646,6 +656,17 @@ impl sealed::Sealed for Either<NoLength, VarIntWidth> {
 }
 
 impl LengthKind for Either<NoLength, VarIntWidth> {}
+
+impl sealed::Sealed for Either<VarIntWidth, NoLength> {
+    fn length_width(self) -> Option<VarIntWidth> {
+        match self {
+            Either::Left(width) => Some(width),
+            Either::Right(NoLength) => None,
+        }
+    }
+}
+
+impl LengthKind for Either<VarIntWidth, NoLength> {}
 
 /// The width of the Length field that `length` states, or `None` without
 /// one.

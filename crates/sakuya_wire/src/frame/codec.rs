@@ -31,14 +31,14 @@
 //! let stream_id = VarIntField::shortest(StreamId::from_var_int(VarInt::from(4u8)));
 //! // A STREAM frame with a Length field. Reading gives `Stream<D>`, which
 //! // states its Length field as `Either`; `into` converts to it.
-//! let stream = Stream::<_, VarIntWidth>::new(stream_id, None, VarIntWidth::One, &b"hello"[..], true);
+//! let stream = Stream::with_length(stream_id, None, VarIntWidth::One, &b"hello"[..], true);
 //! let stream = Frame::Stream(stream.unwrap().into());
 //! output.sync_write_frame_unpin(stream.clone()).unwrap();
 //!
 //! // A STREAM frame checks its fields when it is constructed, so writing it
 //! // checks nothing: a one-byte Length field cannot state 64 bytes of data.
 //! let data = [0; 64];
-//! let long = Stream::<_, VarIntWidth>::new(stream_id, None, VarIntWidth::One, &data[..], true);
+//! let long = Stream::with_length(stream_id, None, VarIntWidth::One, &data[..], true);
 //! assert!(long.is_err());
 //!
 //! // Reading a byte slice yields subslices of it as payload fields.
