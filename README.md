@@ -16,7 +16,7 @@ Byte IO, the call mechanism and process-unique identities come from [nitori](htt
 
 ## Development
 
-Install [rustup](https://rustup.rs/) and clone [nitori](https://github.com/opengensokyonet/nitori) next to this repository, so that it is available as `../nitori`. The repository pins `nightly-2026-09-20` with rustfmt and Clippy in `rust-toolchain.toml`; run commands from the repository root so rustup selects this toolchain. Nightly language features are required. Packages remain unpublished (`publish = false`).
+Install [rustup](https://rustup.rs/) and clone [nitori](https://github.com/opengensokyonet/nitori) next to this repository, so that it is available as `../nitori`. The repository pins `nightly-2026-11-03` with rustfmt and Clippy in `rust-toolchain.toml`; run commands from the repository root so rustup selects this toolchain. Nightly language features are required. Packages remain unpublished (`publish = false`).
 
 During development, `nitori_call`, `nitori_id` and `nitori_io` are path dependencies on that sibling checkout, and `Cargo.lock` records them as path sources. `snafu` is a Git dependency pinned to a specific commit in `Cargo.toml`; Cargo fetches it automatically.
 
