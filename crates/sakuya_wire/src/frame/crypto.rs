@@ -161,8 +161,9 @@ pub mod codec {
             .context(read_crypto_error::DataSnafu)?;
         Crypto::new(offset, length.width(), data).map_err(|error| match error {
             InvalidDataError::DataEnd { source } => ReadCryptoError::DataEnd { source },
-            // invariant: the Length field was read at this width, and the
-            // data has the length it states.
+            // invariant: the Length field was read at this width, and
+            // `read_payload` returns data of exactly the length it states: it
+            // fails on shorter data and panics on a longer chunk.
             InvalidDataError::Length { source } => unreachable!("{source}"),
         })
     }

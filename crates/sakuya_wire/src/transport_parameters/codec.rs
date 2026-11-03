@@ -55,6 +55,11 @@ use snafu::{IntoError, ResultExt, Snafu};
 /// value that does not fit it; and [`ReadTransportParametersError::Invalid`]
 /// for a parameter that appears twice, that a client sent but only a server
 /// may send, or whose value is out of range.
+///
+/// # Panics
+///
+/// If the receiver returns a chunk longer than requested, which breaks the
+/// `ReadChunk` contract of `nitori_io`; see [`payload`](crate::payload).
 #[call(sync)]
 pub async fn read_transport_parameters<F, A>(
     io: &mut A,

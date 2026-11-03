@@ -65,6 +65,11 @@ use snafu::{ResultExt, Snafu};
 /// - [`ReadLongPacketError::Retry`] if the rest of a Retry packet cannot be
 ///   read, and [`ReadLongPacketError::RetryIntegrityTag`] if it is too short
 ///   for its integrity tag.
+///
+/// # Panics
+///
+/// If the receiver returns a chunk longer than requested, which breaks the
+/// `ReadChunk` contract of `nitori_io`; see [`payload`](crate::payload).
 #[call(sync)]
 pub async fn read_long_packet<F, A>(
     io: &mut A,

@@ -175,7 +175,8 @@ pub mod codec {
             .context(ReasonPhraseSnafu)?;
         let frame = ConnectionClose::new(error_code, length.width(), reason_phrase);
         // invariant: the Reason Phrase Length field was read at this width,
-        // and the reason phrase has the length it states.
+        // and `read_payload` returns a reason phrase of exactly the length it
+        // states: it fails on a shorter one and panics on a longer chunk.
         Ok(frame.unwrap_or_else(|error| unreachable!("{error}")))
     }
 

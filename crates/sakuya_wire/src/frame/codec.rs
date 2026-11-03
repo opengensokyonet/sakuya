@@ -123,6 +123,11 @@ use snafu::{ResultExt, Snafu};
 /// cannot be read or break a limit of the encoding. Bytes read before a
 /// failure stay consumed.
 ///
+/// # Panics
+///
+/// If the receiver returns a chunk longer than requested, which breaks the
+/// `ReadChunk` contract of `nitori_io`; see [`payload`](crate::payload).
+///
 /// [RFC 9000 §12.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.4
 #[call(sync)]
 pub async fn read_frame<F, A>(

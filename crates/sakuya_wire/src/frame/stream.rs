@@ -243,8 +243,9 @@ pub mod codec {
         let fin = type_bits & bits::FIN != 0;
         Stream::new(stream_id, offset, length_width, data, fin).map_err(|error| match error {
             InvalidDataError::DataEnd { source } => ReadStreamError::DataEnd { source },
-            // invariant: the Length field was read at this width, and the
-            // data has the length it states.
+            // invariant: the Length field was read at this width, and
+            // `read_payload` returns data of exactly the length it states: it
+            // fails on shorter data and panics on a longer chunk.
             InvalidDataError::Length { source } => unreachable!("{source}"),
         })
     }

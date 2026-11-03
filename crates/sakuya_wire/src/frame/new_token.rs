@@ -135,7 +135,8 @@ pub mod codec {
         NewToken::new(length.width(), token).map_err(|error| match error {
             InvalidNewTokenError::Empty => ReadNewTokenError::Empty,
             // invariant: the Token Length field was read at this width, and
-            // the token has the length it states.
+            // `read_payload` returns a token of exactly the length it states:
+            // it fails on a shorter one and panics on a longer chunk.
             InvalidNewTokenError::Length { source } => unreachable!("{source}"),
         })
     }

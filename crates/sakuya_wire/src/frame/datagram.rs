@@ -128,8 +128,9 @@ pub mod codec {
         };
         let data = data.context(read_datagram_error::DataSnafu)?;
         let frame = Datagram::new(length_width, data);
-        // invariant: the Length field, if any, was read at this width, and the
-        // data has the length it states.
+        // invariant: the Length field, if any, was read at this width, and
+        // `read_payload` returns data of exactly the length it states: it
+        // fails on shorter data and panics on a longer chunk.
         Ok(frame.unwrap_or_else(|error| unreachable!("{error}")))
     }
 
