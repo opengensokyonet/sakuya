@@ -12,17 +12,38 @@ use crate::{
 /// bidirectional streams, `0x17` for unidirectional ones.
 ///
 /// The Maximum Streams field keeps the width of its encoding.
+/// No limit ties the fields together, so [`StreamsBlocked::new`] accepts any
+/// values; the fields are read through methods of the same names.
 ///
 /// [RFC 9000 §19.14]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.14
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StreamsBlocked {
-    /// The type of streams that could not be opened.
-    pub directionality: Directionality,
-    /// The stream limit at the time the frame was sent.
-    pub maximum_streams: VarIntField<StreamCount>,
+    directionality: Directionality,
+    maximum_streams: VarIntField<StreamCount>,
 }
 
 impl StreamsBlocked {
+    /// The STREAMS_BLOCKED frame with these fields.
+    pub const fn new(
+        directionality: Directionality,
+        maximum_streams: VarIntField<StreamCount>,
+    ) -> Self {
+        Self {
+            directionality,
+            maximum_streams,
+        }
+    }
+
+    /// The type of streams that could not be opened.
+    pub const fn directionality(&self) -> Directionality {
+        self.directionality
+    }
+
+    /// The stream limit at the time the frame was sent.
+    pub const fn maximum_streams(&self) -> VarIntField<StreamCount> {
+        self.maximum_streams
+    }
+
     /// The Frame Type value: one for each directionality.
     pub const fn type_value(&self) -> VarInt {
         type_var_int(match self.directionality {
@@ -78,10 +99,7 @@ pub mod codec {
                     }
                     ReadVarIntFieldError::Value { source, .. } => source.into(),
                 })?;
-        Ok(StreamsBlocked {
-            directionality,
-            maximum_streams,
-        })
+        Ok(StreamsBlocked::new(directionality, maximum_streams))
     }
 
     /// Failures of reading a STREAMS_BLOCKED frame.
@@ -124,7 +142,7 @@ mod tests {
         frame::{
             Extensions, Frame,
             codec::{ReadFrameError, ReadFrameHostExt as _},
-            tests::assert_round_trip,
+            tests::{assert_bytes_round_trip, assert_round_trip},
         },
         stream_count::{StreamCount, StreamCountError},
         stream_id::Directionality,
@@ -137,20 +155,23 @@ mod tests {
             (Directionality::Bidirectional, type_value_of(false)),
             (Directionality::Unidirectional, type_value_of(true)),
         ] {
-            let frame = StreamsBlocked {
-                directionality,
-                maximum_streams: VarIntField::shortest(StreamCount::MAX),
-            };
+            let maximum_streams = VarIntField::shortest(StreamCount::MAX);
+            let frame = StreamsBlocked::new(directionality, maximum_streams);
             let encoding = assert_round_trip(Frame::StreamsBlocked(frame));
             assert_eq!(encoding[0], type_value);
+            let Frame::StreamsBlocked(read) = assert_bytes_round_trip(&encoding) else {
+                panic!("{encoding:02x?}")
+            };
+            assert_eq!(read.directionality(), directionality);
+            assert_eq!(read.maximum_streams(), maximum_streams);
         }
     }
 
     fn type_value_of(unidirectional: bool) -> u8 {
-        let bidi = StreamsBlocked {
-            directionality: Directionality::Bidirectional,
-            maximum_streams: VarIntField::shortest(StreamCount::ZERO),
-        }
+        let bidi = StreamsBlocked::new(
+            Directionality::Bidirectional,
+            VarIntField::shortest(StreamCount::ZERO),
+        )
         .type_value()
         .get() as u8;
         bidi + u8::from(unidirectional)

@@ -8,17 +8,38 @@ use crate::var_int::{VarInt, VarIntField};
 /// A STREAM_DATA_BLOCKED frame ([RFC 9000 §19.13]).
 ///
 /// Each field keeps the width of its variable-length integer encoding.
+/// No limit ties the fields together, so [`StreamDataBlocked::new`] accepts any
+/// values; the fields are read through methods of the same names.
 ///
 /// [RFC 9000 §19.13]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.13
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StreamDataBlocked {
-    /// The blocked stream.
-    pub stream_id: VarIntField<StreamId>,
-    /// The offset of the stream at which blocking occurred.
-    pub maximum_stream_data: VarIntField<VarInt>,
+    stream_id: VarIntField<StreamId>,
+    maximum_stream_data: VarIntField<VarInt>,
 }
 
 impl StreamDataBlocked {
+    /// The STREAM_DATA_BLOCKED frame with these fields.
+    pub const fn new(
+        stream_id: VarIntField<StreamId>,
+        maximum_stream_data: VarIntField<VarInt>,
+    ) -> Self {
+        Self {
+            stream_id,
+            maximum_stream_data,
+        }
+    }
+
+    /// The blocked stream.
+    pub const fn stream_id(&self) -> VarIntField<StreamId> {
+        self.stream_id
+    }
+
+    /// The offset of the stream at which blocking occurred.
+    pub const fn maximum_stream_data(&self) -> VarIntField<VarInt> {
+        self.maximum_stream_data
+    }
+
     /// The Frame Type value.
     pub const fn type_value(&self) -> VarInt {
         type_var_int(type_value::STREAM_DATA_BLOCKED)
@@ -57,10 +78,10 @@ pub mod codec {
     pub(crate) async fn read_stream_data_blocked<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
     ) -> Result<StreamDataBlocked, ReadVarIntError<F::Error>> {
-        Ok(StreamDataBlocked {
-            stream_id: read_field(io).await?,
-            maximum_stream_data: read_field(io).await?,
-        })
+        Ok(StreamDataBlocked::new(
+            read_field(io).await?,
+            read_field(io).await?,
+        ))
     }
 
     /// Writes the frame.
@@ -83,19 +104,24 @@ mod tests {
     use super::StreamDataBlocked;
     use crate::stream_id::StreamId;
     use crate::{
-        frame::{Frame, tests::assert_round_trip},
+        frame::{
+            Frame,
+            tests::{assert_bytes_round_trip, assert_round_trip},
+        },
         var_int::{VarInt, VarIntField},
     };
 
     #[test]
     fn round_trips() {
-        let frame = StreamDataBlocked {
-            stream_id: VarIntField::shortest(StreamId::from_var_int(VarInt::from(2u8))),
-            maximum_stream_data: VarIntField::shortest(VarInt::from(63u8)),
+        let stream_id = VarIntField::shortest(StreamId::from_var_int(VarInt::from(2u8)));
+        let maximum_stream_data = VarIntField::shortest(VarInt::from(63u8));
+        let frame = StreamDataBlocked::new(stream_id, maximum_stream_data);
+        let encoding = assert_round_trip(Frame::StreamDataBlocked(frame));
+        assert_eq!(encoding, [0x15, 0x02, 0x3f]);
+        let Frame::StreamDataBlocked(read) = assert_bytes_round_trip(&encoding) else {
+            panic!("{encoding:02x?}")
         };
-        assert_eq!(
-            assert_round_trip(Frame::StreamDataBlocked(frame)),
-            [0x15, 0x02, 0x3f]
-        );
+        assert_eq!(read.stream_id(), stream_id);
+        assert_eq!(read.maximum_stream_data(), maximum_stream_data);
     }
 }

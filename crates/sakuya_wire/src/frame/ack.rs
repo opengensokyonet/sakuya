@@ -8,11 +8,12 @@
 //!
 //! [`Ack`] holds these fields as they are encoded, each variable-length
 //! integer with its width, so that a frame reads back as it was written and
-//! writes back the bytes it was read from. [`Ack::packet_ranges`] computes
-//! the packet number ranges from them, as an iterator.
-//! [`Ack::from_packet_ranges`] goes the other way for a sender: it states
-//! any [`Clone`] iterator of packet number ranges in the shortest encodings,
-//! without collecting them.
+//! writes back the bytes it was read from; the ACK Ranges are collected in
+//! [`AckRanges`]. [`Ack::new`] checks that no range extends below packet
+//! number 0 and that the ACK Range Count field can state the number of ACK
+//! Ranges. [`Ack::packet_ranges`] computes the packet number ranges from the
+//! fields, as an iterator. [`Ack::from_packet_ranges`] goes the other way
+//! for a sender: it states packet number ranges in the shortest encodings.
 //!
 //! [RFC 9000 §19.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.3
 use super::{type_value, type_var_int};
@@ -30,31 +31,24 @@ use snafu::Snafu;
 /// An ACK frame ([RFC 9000 §19.3]): type `0x02`, or `0x03` with ECN counts.
 ///
 /// The fields are those of the encoding, each variable-length integer with
-/// its width. `ranges` yields the [`AckRange`]s that follow First ACK Range,
-/// in order; the ACK Range Count field holds their number, so only its width
-/// is stored. A frame that was read holds [`AckRanges`]; to write, any
-/// [`Clone`] iterator of ACK Ranges can be used, such as the one
-/// [`Ack::from_packet_ranges`] builds.
+/// its width. [`ranges`](Self::ranges) holds the [`AckRange`]s that follow
+/// First ACK Range, in order; the ACK Range Count field holds their number,
+/// so only its width is stored.
+///
+/// No range extends below packet number 0, and the ACK Range Count field can
+/// state the number of ACK Ranges. [`Ack::new`] checks both, so every value
+/// writes an encoding that reads back to the same value; the fields are read
+/// through methods of the same names.
 ///
 /// [RFC 9000 §19.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.3
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Ack<R> {
-    /// The Largest Acknowledged field: the largest packet number the frame
-    /// acknowledges.
-    pub largest_acknowledged: VarIntField<PacketNumber>,
-    /// The ACK Delay field: the acknowledgment delay in microseconds, divided
-    /// by 2 to the power of the sender's `ack_delay_exponent`.
-    pub ack_delay: VarIntField<VarInt>,
-    /// The width of the ACK Range Count field, which holds the number of
-    /// items of `ranges`.
-    pub ack_range_count_width: VarIntWidth,
-    /// The First ACK Range field: how many packet numbers below Largest
-    /// Acknowledged the first range also acknowledges.
-    pub first_ack_range: VarIntField<VarInt>,
-    /// The ACK Ranges after the first range, in order.
-    pub ranges: R,
-    /// The ECN counts; present in type `0x03`.
-    pub ecn_counts: Option<EcnCounts>,
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Ack {
+    largest_acknowledged: VarIntField<PacketNumber>,
+    ack_delay: VarIntField<VarInt>,
+    ack_range_count_width: VarIntWidth,
+    first_ack_range: VarIntField<VarInt>,
+    ranges: AckRanges,
+    ecn_counts: Option<EcnCounts>,
 }
 
 /// One ACK Range of an ACK frame ([RFC 9000 §19.3.1]): a gap of
@@ -88,7 +82,150 @@ pub struct EcnCounts {
 /// The iterator over the ACK Ranges of [`AckRanges`].
 pub type AckRangeIter<'a> = Copied<slice::Iter<'a, AckRange>>;
 
-impl<R> Ack<R> {
+impl Ack {
+    /// The ACK frame with these fields.
+    ///
+    /// # Errors
+    ///
+    /// [`InvalidAckError::RangeCount`] if the number of ACK Ranges does not
+    /// fit the width of the ACK Range Count field, and
+    /// [`InvalidAckError::BelowZero`] for the first range that extends below
+    /// packet number 0.
+    pub fn new(
+        largest_acknowledged: VarIntField<PacketNumber>,
+        ack_delay: VarIntField<VarInt>,
+        ack_range_count_width: VarIntWidth,
+        first_ack_range: VarIntField<VarInt>,
+        ranges: AckRanges,
+        ecn_counts: Option<EcnCounts>,
+    ) -> Result<Self, InvalidAckError> {
+        let count = ranges.len();
+        if !VarInt::try_from(count).is_ok_and(|value| ack_range_count_width.fits(value)) {
+            return Err(InvalidAckError::RangeCount {
+                count,
+                width: ack_range_count_width,
+            });
+        }
+        let mut smallest =
+            AckBelowZeroError::check_first(largest_acknowledged.get(), first_ack_range.get())?;
+        for (index, range) in (1..).zip(ranges.iter()) {
+            smallest = AckBelowZeroError::check_next(smallest, range, index)?;
+        }
+        Ok(Self {
+            largest_acknowledged,
+            ack_delay,
+            ack_range_count_width,
+            first_ack_range,
+            ranges,
+            ecn_counts,
+        })
+    }
+
+    /// The ACK frame that acknowledges `ranges`, with `ack_delay` and
+    /// `ecn_counts` as given and every field derived from the ranges in its
+    /// shortest encoding.
+    ///
+    /// `ranges` yields inclusive ranges of packet numbers, largest first:
+    /// each range lies below the previous one with at least one packet
+    /// number between them. It is iterated over once, to check this and to
+    /// collect the Gap and ACK Range Length of each range after the first
+    /// into [`AckRanges`].
+    ///
+    /// # Errors
+    ///
+    /// [`PacketRangesError::NoRange`] without ranges, and
+    /// [`PacketRangesError::Range`] for the first range that is empty or does
+    /// not lie below the previous one with at least one packet number between
+    /// them.
+    pub fn from_packet_ranges<I>(
+        ranges: I,
+        ack_delay: VarIntField<VarInt>,
+        ecn_counts: Option<EcnCounts>,
+    ) -> Result<Self, PacketRangesError>
+    where
+        I: IntoIterator<Item = RangeInclusive<PacketNumber>>,
+    {
+        let mut ranges = ranges.into_iter();
+        let Some(first) = ranges.next() else {
+            return Err(PacketRangesError::NoRange);
+        };
+        let (smallest, largest) = first.into_inner();
+        if smallest > largest {
+            return Err(PacketRangesError::Range { index: 0 });
+        }
+        let mut previous = smallest;
+        let mut ack_ranges = Vec::new();
+        for (index, range) in (1..).zip(ranges) {
+            let (start, end) = range.into_inner();
+            let below = end.checked_add(2).is_some_and(|limit| limit <= previous);
+            if start > end || !below {
+                return Err(PacketRangesError::Range { index });
+            }
+            // The range is ordered and lies at least two below the smallest
+            // packet number of the previous one, so nothing saturates.
+            let gap = previous
+                .to_var_int()
+                .saturating_sub(end.to_var_int())
+                .saturating_sub(VarInt::from(2u8));
+            let ack_range_length = end.to_var_int().saturating_sub(start.to_var_int());
+            ack_ranges.push(AckRange {
+                gap: VarIntField::shortest(gap),
+                ack_range_length: VarIntField::shortest(ack_range_length),
+            });
+            previous = start;
+        }
+        // The first range was checked to be ordered.
+        let first_ack_range = largest.to_var_int().saturating_sub(smallest.to_var_int());
+        // A count above 2^62 - 1 could not be held in memory.
+        let count = VarInt::try_from(ack_ranges.len()).unwrap_or(VarInt::MAX);
+        let frame = Self::new(
+            VarIntField::shortest(largest),
+            ack_delay,
+            VarIntWidth::shortest(count),
+            VarIntField::shortest(first_ack_range),
+            AckRanges { ranges: ack_ranges },
+            ecn_counts,
+        );
+        // invariant: the ranges were checked to be ordered and separated, so
+        // none extends below packet number 0, and the ACK Range Count field
+        // has the shortest width for the count.
+        Ok(frame.unwrap_or_else(|error| unreachable!("{error}")))
+    }
+
+    /// The Largest Acknowledged field: the largest packet number the frame
+    /// acknowledges.
+    pub const fn largest_acknowledged(&self) -> VarIntField<PacketNumber> {
+        self.largest_acknowledged
+    }
+
+    /// The ACK Delay field: the acknowledgment delay in microseconds, divided
+    /// by 2 to the power of the sender's `ack_delay_exponent`.
+    pub const fn ack_delay(&self) -> VarIntField<VarInt> {
+        self.ack_delay
+    }
+
+    /// The width of the ACK Range Count field, which holds the number of
+    /// [`ranges`](Self::ranges).
+    pub const fn ack_range_count_width(&self) -> VarIntWidth {
+        self.ack_range_count_width
+    }
+
+    /// The First ACK Range field: how many packet numbers below Largest
+    /// Acknowledged the first range also acknowledges.
+    pub const fn first_ack_range(&self) -> VarIntField<VarInt> {
+        self.first_ack_range
+    }
+
+    /// The ACK Ranges after the first range, in order.
+    pub const fn ranges(&self) -> &AckRanges {
+        &self.ranges
+    }
+
+    /// The ECN counts; present in type `0x03`.
+    pub const fn ecn_counts(&self) -> Option<EcnCounts> {
+        self.ecn_counts
+    }
+
     /// The Frame Type value: `0x03` with ECN counts, `0x02` without.
     pub const fn type_value(&self) -> VarInt {
         type_var_int(if self.ecn_counts.is_some() {
@@ -97,65 +234,39 @@ impl<R> Ack<R> {
             type_value::ACK
         })
     }
-}
 
-impl<R: Iterator<Item = AckRange> + Clone> Ack<R> {
     /// The acknowledged packet numbers as inclusive ranges, largest first,
-    /// computed from the fields.
-    ///
-    /// Iterates over a clone of the ACK Ranges. For a frame that
-    /// [`Ack::validate`] rejects because a range extends below packet number
-    /// 0, the iteration ends before that range.
-    pub fn packet_ranges(&self) -> PacketRanges<R> {
-        PacketRanges::new(
-            self.largest_acknowledged.get(),
-            self.first_ack_range.get(),
-            self.ranges.clone(),
-        )
+    /// computed from the fields: one for First ACK Range and one for each
+    /// ACK Range.
+    pub fn packet_ranges(&self) -> PacketRanges<'_> {
+        let range = first_range(self.largest_acknowledged.get(), self.first_ack_range.get());
+        // invariant: construction checked that no range extends below
+        // packet number 0.
+        let range = range.unwrap_or_else(|| unreachable!("ACK range 0 below packet number 0"));
+        PacketRanges {
+            ranges: self.ranges.iter(),
+            state: PacketRangesState::First(range),
+        }
     }
 
     /// The number of bytes [`codec::write_ack`] writes.
-    ///
-    /// Iterates over a clone of the ACK Ranges.
     pub fn encoded_len(&self) -> usize {
         self.fields().map(|(_, width)| width.encoded_len()).sum()
-    }
-
-    /// Checks that no range extends below packet number 0 and that the ACK
-    /// Range Count field can hold the number of ACK Ranges.
-    ///
-    /// # Errors
-    ///
-    /// [`InvalidAckError::BelowZero`] for the first range that extends below
-    /// packet number 0, and [`InvalidAckError::RangeCount`] if the number of
-    /// ACK Ranges does not fit the width of the ACK Range Count field.
-    pub fn validate(&self) -> Result<(), InvalidAckError> {
-        let count = self.ranges.clone().count();
-        let width = self.ack_range_count_width;
-        if !VarInt::try_from(count).is_ok_and(|count| width.fits(count)) {
-            return Err(InvalidAckError::RangeCount { count, width });
-        }
-        // The packet ranges end early at the first range below zero.
-        let reached = self.packet_ranges().count();
-        if reached != count + 1 {
-            return Err(InvalidAckError::BelowZero { index: reached });
-        }
-        Ok(())
     }
 
     /// The fields of the encoding, in order, each a variable-length integer
     /// with its width: Frame Type, Largest Acknowledged, ACK Delay, ACK Range
     /// Count, First ACK Range, the Gap and ACK Range Length of each ACK
     /// Range, and the ECN counts.
-    pub(crate) fn fields(&self) -> impl Iterator<Item = (VarInt, VarIntWidth)> + Clone + use<R> {
+    pub(crate) fn fields(&self) -> impl Iterator<Item = (VarInt, VarIntWidth)> + Clone {
         fn pair<T: Copy + Into<VarInt> + TryFrom<VarInt>>(
             field: VarIntField<T>,
         ) -> (VarInt, VarIntWidth) {
             (field.to_var_int(), field.width())
         }
         let type_value = self.type_value();
-        // A count that validation rejects is never encoded.
-        let count = VarInt::try_from(self.ranges.clone().count()).unwrap_or(VarInt::MAX);
+        // Construction checked that the count fits its width.
+        let count = VarInt::try_from(self.ranges.len()).unwrap_or(VarInt::MAX);
         let prefix = [
             (type_value, VarIntWidth::shortest(type_value)),
             pair(self.largest_acknowledged),
@@ -165,7 +276,7 @@ impl<R: Iterator<Item = AckRange> + Clone> Ack<R> {
         ];
         let ranges = self
             .ranges
-            .clone()
+            .iter()
             .flat_map(|range| [pair(range.gap), pair(range.ack_range_length)]);
         let ecn = self
             .ecn_counts
@@ -175,106 +286,7 @@ impl<R: Iterator<Item = AckRange> + Clone> Ack<R> {
     }
 }
 
-impl Ack<AckRanges> {
-    /// The acknowledged packet numbers as inclusive ranges, largest first, as
-    /// [`Ack::packet_ranges`] computes them for an iterator.
-    pub fn packet_ranges(&self) -> PacketRanges<AckRangeIter<'_>> {
-        self.as_iter().packet_ranges()
-    }
-
-    /// The number of bytes [`codec::write_frame`](super::codec::write_frame)
-    /// writes.
-    pub fn encoded_len(&self) -> usize {
-        self.as_iter().encoded_len()
-    }
-
-    /// Checks the frame as [`Ack::validate`] does for an iterator; a frame
-    /// that was read always passes.
-    ///
-    /// # Errors
-    ///
-    /// [`InvalidAckError`] for the broken rule.
-    pub fn validate(&self) -> Result<(), InvalidAckError> {
-        self.as_iter().validate()
-    }
-
-    /// The same frame with its ACK Ranges as an iterator, as
-    /// [`codec::write_ack`] takes it.
-    pub fn as_iter(&self) -> Ack<AckRangeIter<'_>> {
-        Ack {
-            largest_acknowledged: self.largest_acknowledged,
-            ack_delay: self.ack_delay,
-            ack_range_count_width: self.ack_range_count_width,
-            first_ack_range: self.first_ack_range,
-            ranges: self.ranges.iter(),
-            ecn_counts: self.ecn_counts,
-        }
-    }
-}
-
-impl<I: Iterator<Item = RangeInclusive<PacketNumber>> + Clone> Ack<FromPacketRanges<I>> {
-    /// The ACK frame that acknowledges `ranges`, with `ack_delay` and
-    /// `ecn_counts` as given and every field derived from the ranges in its
-    /// shortest encoding.
-    ///
-    /// `ranges` yields inclusive ranges of packet numbers, largest first:
-    /// each range lies below the previous one with at least one packet
-    /// number between them. It is iterated over once here to check this and
-    /// count the ranges, and again, through clones, whenever the frame is
-    /// measured or written; nothing is collected.
-    ///
-    /// # Errors
-    ///
-    /// [`PacketRangesError::NoRange`] without ranges, and
-    /// [`PacketRangesError::Range`] for the first range that is empty or does
-    /// not lie below the previous one with at least one packet number between
-    /// them.
-    pub fn from_packet_ranges(
-        mut ranges: I,
-        ack_delay: VarIntField<VarInt>,
-        ecn_counts: Option<EcnCounts>,
-    ) -> Result<Self, PacketRangesError> {
-        let Some(first) = ranges.next() else {
-            return Err(PacketRangesError::NoRange);
-        };
-        let (smallest, largest) = first.into_inner();
-        if smallest > largest {
-            return Err(PacketRangesError::Range { index: 0 });
-        }
-        let mut previous = smallest;
-        let mut count = 0usize;
-        for (index, range) in (1..).zip(ranges.clone()) {
-            let below = range
-                .end()
-                .checked_add(2)
-                .is_some_and(|limit| limit <= previous);
-            if range.start() > range.end() || !below {
-                return Err(PacketRangesError::Range { index });
-            }
-            previous = *range.start();
-            count += 1;
-        }
-        // `count` is at most `usize::MAX`; a count above 2^62 - 1 could not
-        // be iterated over.
-        let count = VarInt::try_from(count).unwrap_or(VarInt::MAX);
-        // The first range was checked to be ordered.
-        let first_ack_range = largest
-            .to_var_int()
-            .checked_sub(smallest.to_var_int())
-            .unwrap_or(VarInt::ZERO);
-        Ok(Self {
-            largest_acknowledged: VarIntField::shortest(largest),
-            ack_delay,
-            ack_range_count_width: VarIntWidth::shortest(count),
-            first_ack_range: VarIntField::shortest(first_ack_range),
-            ranges: FromPacketRanges { ranges, smallest },
-            ecn_counts,
-        })
-    }
-}
-
-/// The ACK Ranges of an ACK frame that was read: the ranges after the first
-/// one, in order.
+/// The ACK Ranges of an ACK frame: the ranges after the first one, in order.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct AckRanges {
     ranges: Vec<AckRange>,
@@ -327,99 +339,112 @@ impl<'a> IntoIterator for &'a AckRanges {
 
 /// The packet number ranges that the fields of an ACK frame acknowledge,
 /// largest first; see [`Ack::packet_ranges`].
+///
+/// It yields one range for First ACK Range and one for each ACK Range:
+/// construction of the frame checked that none extends below packet number
+/// 0, so the iteration does not end early.
 #[derive(Clone, Debug)]
-pub struct PacketRanges<R> {
-    ranges: R,
+pub struct PacketRanges<'a> {
+    ranges: AckRangeIter<'a>,
     state: PacketRangesState,
 }
 
 /// Where [`PacketRanges`] stands.
 #[derive(Clone, Debug)]
 enum PacketRangesState {
-    /// The first range is next.
+    /// The range of First ACK Range is next.
     First(RangeInclusive<PacketNumber>),
     /// The next ACK Range lies below this smallest packet number of the
     /// previous range.
     Below(PacketNumber),
-    /// The ranges ended, or the next one would extend below packet number 0.
-    Done,
 }
 
-impl<R> PacketRanges<R> {
-    fn new(largest: PacketNumber, first_ack_range: VarInt, ranges: R) -> Self {
-        let state = match largest.checked_sub(first_ack_range.get()) {
-            Some(smallest) => PacketRangesState::First(smallest..=largest),
-            None => PacketRangesState::Done,
-        };
-        Self { ranges, state }
-    }
-}
-
-impl<R: Iterator<Item = AckRange>> Iterator for PacketRanges<R> {
+impl Iterator for PacketRanges<'_> {
     type Item = RangeInclusive<PacketNumber>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match core::mem::replace(&mut self.state, PacketRangesState::Done) {
+        let previous = match &self.state {
             PacketRangesState::First(range) => {
+                let range = range.clone();
                 self.state = PacketRangesState::Below(*range.start());
-                Some(range)
+                return Some(range);
             }
-            PacketRangesState::Below(previous) => {
-                let range = self.ranges.next()?;
-                let largest = previous
-                    .checked_sub(range.gap.get().get())?
-                    .checked_sub(2)?;
-                let smallest = largest.checked_sub(range.ack_range_length.get().get())?;
-                self.state = PacketRangesState::Below(smallest);
-                Some(smallest..=largest)
-            }
-            PacketRangesState::Done => None,
+            PacketRangesState::Below(previous) => *previous,
+        };
+        let range = next_range(previous, self.ranges.next()?);
+        // invariant: construction checked that no range extends below
+        // packet number 0.
+        let range = range.unwrap_or_else(|| unreachable!("ACK range below packet number 0"));
+        self.state = PacketRangesState::Below(*range.start());
+        Some(range)
+    }
+}
+
+impl FusedIterator for PacketRanges<'_> {}
+
+/// The packet numbers of the range of First ACK Range below Largest
+/// Acknowledged `largest`, or `None` if it would extend below packet number
+/// 0.
+fn first_range(
+    largest: PacketNumber,
+    first_ack_range: VarInt,
+) -> Option<RangeInclusive<PacketNumber>> {
+    let smallest = largest.checked_sub(first_ack_range.get())?;
+    Some(smallest..=largest)
+}
+
+/// The packet numbers of the ACK Range `range` below a range whose smallest
+/// packet number is `previous`, or `None` if it would extend below packet
+/// number 0.
+fn next_range(previous: PacketNumber, range: AckRange) -> Option<RangeInclusive<PacketNumber>> {
+    let largest = previous
+        .checked_sub(range.gap.get().get())?
+        .checked_sub(2)?;
+    let smallest = largest.checked_sub(range.ack_range_length.get().get())?;
+    Some(smallest..=largest)
+}
+
+/// A range of an ACK frame extends below packet number 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("ACK range {index} extends below packet number 0"))]
+pub struct AckBelowZeroError {
+    /// The position of the range: 0 for the range of First ACK Range, `n`
+    /// for the `n`-th ACK Range.
+    pub index: usize,
+}
+
+impl AckBelowZeroError {
+    /// Checks the range of First ACK Range below Largest Acknowledged
+    /// `largest`, and returns its smallest packet number.
+    fn check_first(largest: PacketNumber, first_ack_range: VarInt) -> Result<PacketNumber, Self> {
+        match first_range(largest, first_ack_range) {
+            Some(range) => Ok(*range.start()),
+            None => Err(Self { index: 0 }),
+        }
+    }
+
+    /// Checks the `index`-th ACK Range `range` below a range whose smallest
+    /// packet number is `previous`, and returns its smallest packet number.
+    fn check_next(
+        previous: PacketNumber,
+        range: AckRange,
+        index: usize,
+    ) -> Result<PacketNumber, Self> {
+        match next_range(previous, range) {
+            Some(range) => Ok(*range.start()),
+            None => Err(Self { index }),
         }
     }
 }
 
-impl<R: Iterator<Item = AckRange>> FusedIterator for PacketRanges<R> {}
-
-/// The ACK Ranges of [`Ack::from_packet_ranges`]: each packet number range
-/// after the first, stated as a Gap and an ACK Range Length in their
-/// shortest encodings.
-#[derive(Clone, Debug)]
-pub struct FromPacketRanges<I> {
-    ranges: I,
-    /// The smallest packet number of the previous range.
-    smallest: PacketNumber,
-}
-
-impl<I: Iterator<Item = RangeInclusive<PacketNumber>>> Iterator for FromPacketRanges<I> {
-    type Item = AckRange;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let (start, end) = self.ranges.next()?.into_inner();
-        // The construction checked that each range is ordered and lies at
-        // least two below the smallest packet number of the previous one.
-        let gap = self
-            .smallest
-            .to_var_int()
-            .saturating_sub(end.to_var_int())
-            .saturating_sub(VarInt::from(2u8));
-        let ack_range_length = end.to_var_int().saturating_sub(start.to_var_int());
-        self.smallest = start;
-        Some(AckRange {
-            gap: VarIntField::shortest(gap),
-            ack_range_length: VarIntField::shortest(ack_range_length),
-        })
-    }
-}
-
-/// An ACK frame to write breaks a rule of the encoding.
+/// The fields of an ACK frame break a rule of the encoding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 pub enum InvalidAckError {
     /// A range extends below packet number 0.
-    #[snafu(display("ACK range {index} extends below packet number 0"))]
+    #[snafu(transparent)]
     BelowZero {
-        /// The position of the range: 0 for the range of First ACK Range,
-        /// `n` for the `n`-th ACK Range.
-        index: usize,
+        /// The broken rule.
+        source: AckBelowZeroError,
     },
     /// The ACK Range Count field cannot hold the number of ACK Ranges.
     #[snafu(display(
@@ -461,152 +486,157 @@ pub mod codec {
     // documentation comments; the module documentation above describes them.
     #![allow(missing_docs)]
 
-    use super::{Ack, AckRange, AckRanges, EcnCounts, InvalidAckError};
+    use super::{Ack, AckBelowZeroError, AckRange, AckRanges, EcnCounts};
     use crate::{
         frame::read_field,
         packet_number::PacketNumber,
         var_int::{VarInt, VarIntField, VarIntWidth, codec::ReadVarIntError},
     };
     use bytes::Buf;
-    use core::convert::Infallible;
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{calls::WriteAllError, prelude::*};
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type of an ACK frame, with ECN
     /// counts if `ecn_counts` is set.
+    ///
+    /// Each range is checked as soon as its fields are read, so a range that
+    /// extends below packet number 0 is reported before the rest is read.
     pub(crate) async fn read_ack<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
         ecn_counts: bool,
-    ) -> Result<Ack<AckRanges>, ReadAckError<F::Error>> {
-        let largest_acknowledged: VarIntField<PacketNumber> = field(io).await?;
-        let ack_delay = field(io).await?;
-        let count: VarIntField<VarInt> = field(io).await?;
-        let first_ack_range: VarIntField<VarInt> = field(io).await?;
-        let below_zero = |index| read_ack_error::RangeSnafu { index }.build();
-        let mut smallest = largest_acknowledged
-            .get()
-            .checked_sub(first_ack_range.get().get())
-            .ok_or_else(|| below_zero(0))?;
+    ) -> Result<Ack, ReadAckError<F::Error>> {
+        use read_ack_error::*;
+        let largest_acknowledged: VarIntField<PacketNumber> =
+            read_field(io).await.context(LargestAcknowledgedSnafu)?;
+        let ack_delay = read_field(io).await.context(AckDelaySnafu)?;
+        let count: VarIntField<VarInt> = read_field(io).await.context(AckRangeCountSnafu)?;
+        let first_ack_range: VarIntField<VarInt> =
+            read_field(io).await.context(FirstAckRangeSnafu)?;
+        let mut smallest =
+            AckBelowZeroError::check_first(largest_acknowledged.get(), first_ack_range.get())?;
         // The count is not trusted for the allocation; each range is read
         // before it is stored.
         let count_value = count.get().get();
         let mut ranges = Vec::with_capacity(count_value.min(16) as usize);
-        for index in 1..=count_value {
-            let gap: VarIntField<VarInt> = field(io).await?;
-            let ack_range_length: VarIntField<VarInt> = field(io).await?;
-            let range_largest = smallest
-                .checked_sub(gap.get().get())
-                .and_then(|value| value.checked_sub(2))
-                .ok_or_else(|| below_zero(index))?;
-            smallest = range_largest
-                .checked_sub(ack_range_length.get().get())
-                .ok_or_else(|| below_zero(index))?;
-            ranges.push(AckRange {
+        while (ranges.len() as u64) < count_value {
+            let index = ranges.len() + 1;
+            let gap = read_field(io).await.context(GapSnafu { index })?;
+            let ack_range_length = read_field(io)
+                .await
+                .context(AckRangeLengthSnafu { index })?;
+            let range = AckRange {
                 gap,
                 ack_range_length,
-            });
+            };
+            smallest = AckBelowZeroError::check_next(smallest, range, index)?;
+            ranges.push(range);
         }
         let ecn_counts = if ecn_counts {
             Some(EcnCounts {
-                ect0: field(io).await?,
-                ect1: field(io).await?,
-                ce: field(io).await?,
+                ect0: read_field(io).await.context(Ect0CountSnafu)?,
+                ect1: read_field(io).await.context(Ect1CountSnafu)?,
+                ce: read_field(io).await.context(EcnCeCountSnafu)?,
             })
         } else {
             None
         };
-        Ok(Ack {
+        let frame = Ack::new(
             largest_acknowledged,
             ack_delay,
-            ack_range_count_width: count.width(),
+            count.width(),
             first_ack_range,
-            ranges: AckRanges { ranges },
+            AckRanges { ranges },
             ecn_counts,
-        })
-    }
-
-    async fn field<T, F, A>(io: &mut A) -> Result<VarIntField<T>, ReadAckError<F::Error>>
-    where
-        T: Copy + Into<VarInt> + TryFrom<VarInt, Error = Infallible>,
-        F: Read,
-        A: ReceiverAccess<Family = F>,
-    {
-        read_field(io).await.context(read_ack_error::FieldSnafu)
+        );
+        // invariant: each range was checked as it was read, and the ACK
+        // Range Count field was read at this width and states the number of
+        // ranges.
+        Ok(frame.unwrap_or_else(|error| unreachable!("{error}")))
     }
 
     /// Failures of reading an ACK frame.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_ack_error), visibility(pub(crate)))]
     pub enum ReadAckError<E> {
-        /// A field could not be read.
-        #[snafu(display("ACK field read failed"))]
-        Field {
+        /// The Largest Acknowledged field could not be read.
+        #[snafu(display("ACK Largest Acknowledged read failed"))]
+        LargestAcknowledged {
             /// The failure of reading the field.
             source: ReadVarIntError<E>,
         },
-        /// An ACK range extends below packet number 0.
-        #[snafu(display("ACK range {index} extends below packet number 0"))]
-        Range {
-            /// The position of the range: 0 for the First ACK Range.
-            index: u64,
+        /// The ACK Delay field could not be read.
+        #[snafu(display("ACK Delay read failed"))]
+        AckDelay {
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
+        /// The ACK Range Count field could not be read.
+        #[snafu(display("ACK Range Count read failed"))]
+        AckRangeCount {
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
+        /// The First ACK Range field could not be read.
+        #[snafu(display("First ACK Range read failed"))]
+        FirstAckRange {
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
+        /// The Gap field of an ACK Range could not be read.
+        #[snafu(display("Gap of ACK Range {index} read failed"))]
+        Gap {
+            /// The position of the ACK Range, from 1.
+            index: usize,
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
+        /// The ACK Range Length field of an ACK Range could not be read.
+        #[snafu(display("ACK Range Length of ACK Range {index} read failed"))]
+        AckRangeLength {
+            /// The position of the ACK Range, from 1.
+            index: usize,
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
+        /// The ECT0 Count field could not be read.
+        #[snafu(display("ECT0 Count read failed"))]
+        Ect0Count {
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
+        /// The ECT1 Count field could not be read.
+        #[snafu(display("ECT1 Count read failed"))]
+        Ect1Count {
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
+        /// The ECN-CE Count field could not be read.
+        #[snafu(display("ECN-CE Count read failed"))]
+        EcnCeCount {
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
+        /// A range extends below packet number 0.
+        #[snafu(transparent)]
+        BelowZero {
+            /// The broken rule.
+            source: AckBelowZeroError,
         },
     }
 
-    /// Writes `frame`, after checking it with [`Ack::validate`].
-    ///
-    /// Iterates over clones of the ACK Ranges.
+    /// Writes `frame`; [`Ack::new`] checked its rules.
     ///
     /// # Errors
     ///
-    /// [`WriteAckError::Invalid`] before writing anything, and
-    /// [`WriteAckError::Write`] if the receiver stops accepting bytes or
-    /// fails; bytes accepted before stay written.
+    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
+    /// bytes accepted before stay written.
     #[call(sync)]
-    pub async fn write_ack<F, A, R>(
+    pub async fn write_ack<F: Write, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-        frame: Ack<R>,
-    ) -> Result<(), WriteAckError<F::Error>>
-    where
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-        R: Iterator<Item = AckRange> + Clone,
-    {
-        frame.validate()?;
-        write_body(io, &frame)
-            .await
-            .context(write_ack_error::WriteSnafu)
-    }
-
-    /// Writes a frame that has been checked.
-    pub(crate) async fn write_body<F, A, R>(
-        io: &mut A,
-        frame: &Ack<R>,
-    ) -> Result<(), WriteAllError<F::Error>>
-    where
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-        R: Iterator<Item = AckRange> + Clone,
-    {
+        frame: Ack,
+    ) -> Result<(), WriteAllError<F::Error>> {
         io.write_all(VarInts::new(frame.fields())).await
-    }
-
-    /// Failures that [`write_ack`] can produce.
-    #[derive(Debug, Snafu)]
-    #[snafu(module(write_ack_error), visibility(pub(crate)))]
-    pub enum WriteAckError<E> {
-        /// The frame breaks a limit of the encoding; nothing was written.
-        #[snafu(transparent)]
-        Invalid {
-            /// The broken limit.
-            source: InvalidAckError,
-        },
-        /// The receiver stopped accepting bytes or failed.
-        #[snafu(display("ACK write failed"))]
-        Write {
-            /// The failure of writing.
-            source: WriteAllError<E>,
-        },
     }
 
     /// The encodings of a sequence of variable-length integers, each of its

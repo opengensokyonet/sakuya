@@ -158,8 +158,8 @@ fn ack_ranges_reach_the_edges_of_the_packet_numbers() {
     let Frame::Ack(ack) = accepts(&largest) else {
         panic!()
     };
-    assert_eq!(ack.largest_acknowledged.get(), PacketNumber::MAX);
-    assert_eq!(ack.ack_delay.get(), VarInt::MAX);
+    assert_eq!(ack.largest_acknowledged().get(), PacketNumber::MAX);
+    assert_eq!(ack.ack_delay().get(), VarInt::MAX);
     prefixes_are_incomplete(&largest);
 }
 
@@ -176,7 +176,7 @@ fn ack_ecn_counts_follow_the_ranges() {
     let Frame::Ack(ack) = accepts(&bytes) else {
         panic!()
     };
-    let counts = ack.ecn_counts.unwrap();
+    let counts = ack.ecn_counts().unwrap();
     assert_eq!(
         (
             counts.ect0.get().get(),
@@ -198,8 +198,8 @@ fn reset_stream_and_stop_sending_take_the_largest_values() {
     let Frame::ResetStream(reset) = accepts(&bytes) else {
         panic!()
     };
-    assert_eq!(reset.stream_id.get().get(), VarInt::MAX);
-    assert_eq!(reset.final_size.get(), VarInt::MAX);
+    assert_eq!(reset.stream_id().get().get(), VarInt::MAX);
+    assert_eq!(reset.final_size().get(), VarInt::MAX);
     prefixes_are_incomplete(&bytes);
     let bytes = frame(&[&[0x05], &var(MAX), &var(MAX)]);
     assert!(matches!(accepts(&bytes), Frame::StopSending(_)));
@@ -314,8 +314,8 @@ fn stream_counts_stop_at_2_60() {
     ] {
         let bytes = frame(&[&[type_value], &var(MAX_STREAMS)]);
         match accepts(&bytes) {
-            Frame::MaxStreams(frame) => assert_eq!(frame.directionality, directionality),
-            Frame::StreamsBlocked(frame) => assert_eq!(frame.directionality, directionality),
+            Frame::MaxStreams(frame) => assert_eq!(frame.directionality(), directionality),
+            Frame::StreamsBlocked(frame) => assert_eq!(frame.directionality(), directionality),
             other => panic!("{other:?}"),
         }
         rejects(&frame(&[&[type_value], &var(MAX_STREAMS + 1)]));
@@ -401,21 +401,21 @@ fn fields_may_use_longer_encodings() {
     };
     assert_eq!(
         (
-            reset.stream_id.get(),
-            reset.application_error_code.get(),
-            reset.final_size.get()
+            reset.stream_id().get(),
+            reset.application_error_code().get(),
+            reset.final_size().get()
         ),
         (
-            shortest.stream_id.get(),
-            shortest.application_error_code.get(),
-            shortest.final_size.get()
+            shortest.stream_id().get(),
+            shortest.application_error_code().get(),
+            shortest.final_size().get()
         )
     );
     assert_eq!(
         (
-            reset.stream_id.width(),
-            reset.application_error_code.width(),
-            reset.final_size.width()
+            reset.stream_id().width(),
+            reset.application_error_code().width(),
+            reset.final_size().width()
         ),
         (VarIntWidth::Two, VarIntWidth::Four, VarIntWidth::Eight)
     );

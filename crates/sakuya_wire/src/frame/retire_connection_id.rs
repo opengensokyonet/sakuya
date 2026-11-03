@@ -7,15 +7,26 @@ use crate::var_int::{VarInt, VarIntField};
 /// A RETIRE_CONNECTION_ID frame ([RFC 9000 §19.16]).
 ///
 /// Each field keeps the width of its variable-length integer encoding.
+/// No limit ties the fields together, so [`RetireConnectionId::new`] accepts any
+/// values; the fields are read through methods of the same names.
 ///
 /// [RFC 9000 §19.16]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.16
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RetireConnectionId {
-    /// The sequence number of the connection ID being retired.
-    pub sequence_number: VarIntField<VarInt>,
+    sequence_number: VarIntField<VarInt>,
 }
 
 impl RetireConnectionId {
+    /// The RETIRE_CONNECTION_ID frame with this field.
+    pub const fn new(sequence_number: VarIntField<VarInt>) -> Self {
+        Self { sequence_number }
+    }
+
+    /// The sequence number of the connection ID being retired.
+    pub const fn sequence_number(&self) -> VarIntField<VarInt> {
+        self.sequence_number
+    }
+
     /// The Frame Type value.
     pub const fn type_value(&self) -> VarInt {
         type_var_int(type_value::RETIRE_CONNECTION_ID)
@@ -52,9 +63,7 @@ pub mod codec {
     pub(crate) async fn read_retire_connection_id<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
     ) -> Result<RetireConnectionId, ReadVarIntError<F::Error>> {
-        Ok(RetireConnectionId {
-            sequence_number: read_field(io).await?,
-        })
+        Ok(RetireConnectionId::new(read_field(io).await?))
     }
 
     /// Writes the frame.
@@ -76,18 +85,23 @@ pub mod codec {
 mod tests {
     use super::RetireConnectionId;
     use crate::{
-        frame::{Frame, tests::assert_round_trip},
+        frame::{
+            Frame,
+            tests::{assert_bytes_round_trip, assert_round_trip},
+        },
         var_int::{VarInt, VarIntField},
     };
 
     #[test]
     fn round_trips() {
-        let frame = RetireConnectionId {
-            sequence_number: VarIntField::shortest(VarInt::from(9u8)),
+        let sequence_number = VarIntField::shortest(VarInt::from(9u8));
+        let encoding = assert_round_trip(Frame::RetireConnectionId(RetireConnectionId::new(
+            sequence_number,
+        )));
+        assert_eq!(encoding, [0x19, 0x09]);
+        let Frame::RetireConnectionId(read) = assert_bytes_round_trip(&encoding) else {
+            panic!("{encoding:02x?}")
         };
-        assert_eq!(
-            assert_round_trip(Frame::RetireConnectionId(frame)),
-            [0x19, 0x09]
-        );
+        assert_eq!(read.sequence_number(), sequence_number);
     }
 }

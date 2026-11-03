@@ -7,15 +7,26 @@ use crate::var_int::{VarInt, VarIntField};
 /// A DATA_BLOCKED frame ([RFC 9000 §19.12]).
 ///
 /// Each field keeps the width of its variable-length integer encoding.
+/// No limit ties the fields together, so [`DataBlocked::new`] accepts any
+/// values; the fields are read through methods of the same names.
 ///
 /// [RFC 9000 §19.12]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.12
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DataBlocked {
-    /// The connection-level limit at which blocking occurred.
-    pub maximum_data: VarIntField<VarInt>,
+    maximum_data: VarIntField<VarInt>,
 }
 
 impl DataBlocked {
+    /// The DATA_BLOCKED frame with this field.
+    pub const fn new(maximum_data: VarIntField<VarInt>) -> Self {
+        Self { maximum_data }
+    }
+
+    /// The connection-level limit at which blocking occurred.
+    pub const fn maximum_data(&self) -> VarIntField<VarInt> {
+        self.maximum_data
+    }
+
     /// The Frame Type value.
     pub const fn type_value(&self) -> VarInt {
         type_var_int(type_value::DATA_BLOCKED)
@@ -52,9 +63,7 @@ pub mod codec {
     pub(crate) async fn read_data_blocked<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
     ) -> Result<DataBlocked, ReadVarIntError<F::Error>> {
-        Ok(DataBlocked {
-            maximum_data: read_field(io).await?,
-        })
+        Ok(DataBlocked::new(read_field(io).await?))
     }
 
     /// Writes the frame.
@@ -76,18 +85,21 @@ pub mod codec {
 mod tests {
     use super::DataBlocked;
     use crate::{
-        frame::{Frame, tests::assert_round_trip},
+        frame::{
+            Frame,
+            tests::{assert_bytes_round_trip, assert_round_trip},
+        },
         var_int::{VarInt, VarIntField},
     };
 
     #[test]
     fn round_trips() {
-        let frame = DataBlocked {
-            maximum_data: VarIntField::shortest(VarInt::from(64u8)),
+        let maximum_data = VarIntField::shortest(VarInt::from(64u8));
+        let encoding = assert_round_trip(Frame::DataBlocked(DataBlocked::new(maximum_data)));
+        assert_eq!(encoding, [0x14, 0x40, 0x40]);
+        let Frame::DataBlocked(read) = assert_bytes_round_trip(&encoding) else {
+            panic!("{encoding:02x?}")
         };
-        assert_eq!(
-            assert_round_trip(Frame::DataBlocked(frame)),
-            [0x14, 0x40, 0x40]
-        );
+        assert_eq!(read.maximum_data(), maximum_data);
     }
 }

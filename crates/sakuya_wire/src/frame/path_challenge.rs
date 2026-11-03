@@ -6,14 +6,26 @@ use crate::var_int::VarInt;
 
 /// A PATH_CHALLENGE frame ([RFC 9000 §19.17]).
 ///
+/// [`PathChallenge::new`] accepts any data, which is read through
+/// [`PathChallenge::data`].
+///
 /// [RFC 9000 §19.17]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.17
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PathChallenge {
-    /// The data the peer echoes in PATH_RESPONSE.
-    pub data: [u8; PATH_DATA_LEN],
+    data: [u8; PATH_DATA_LEN],
 }
 
 impl PathChallenge {
+    /// The PATH_CHALLENGE frame with this data.
+    pub const fn new(data: [u8; PATH_DATA_LEN]) -> Self {
+        Self { data }
+    }
+
+    /// The data the peer echoes in PATH_RESPONSE.
+    pub const fn data(&self) -> [u8; PATH_DATA_LEN] {
+        self.data
+    }
+
     /// The Frame Type value.
     pub const fn type_value(&self) -> VarInt {
         type_var_int(type_value::PATH_CHALLENGE)
@@ -53,9 +65,7 @@ pub mod codec {
     pub(crate) async fn read_path_challenge<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
     ) -> Result<PathChallenge, ReadArrayError<F::Error>> {
-        Ok(PathChallenge {
-            data: io.read_array::<PATH_DATA_LEN>().await?,
-        })
+        Ok(PathChallenge::new(io.read_array::<PATH_DATA_LEN>().await?))
     }
 
     /// Writes the frame.
@@ -76,12 +86,18 @@ pub mod codec {
 #[cfg(test)]
 mod tests {
     use super::PathChallenge;
-    use crate::frame::{Frame, tests::assert_round_trip};
+    use crate::frame::{
+        Frame,
+        tests::{assert_bytes_round_trip, assert_round_trip},
+    };
 
     #[test]
     fn round_trips() {
-        let encoding =
-            assert_round_trip(Frame::PathChallenge(PathChallenge { data: *b"challeng" }));
+        let encoding = assert_round_trip(Frame::PathChallenge(PathChallenge::new(*b"challeng")));
         assert_eq!(encoding[1..], *b"challeng");
+        let Frame::PathChallenge(read) = assert_bytes_round_trip(&encoding) else {
+            panic!("{encoding:02x?}")
+        };
+        assert_eq!(read.data(), *b"challeng");
     }
 }

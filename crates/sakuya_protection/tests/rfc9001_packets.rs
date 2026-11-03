@@ -88,7 +88,7 @@ fn a2_client_initial_end_to_end() {
     let Some(Ok(Frame::Padding(padding))) = frames.next() else {
         panic!("padding follows")
     };
-    assert_eq!(padding.len.get(), 1162 - 245);
+    assert_eq!(padding.len().get(), 1162 - 245);
     assert!(frames.next().is_none());
 
     // The ClientHello ends with the quic_transport_parameters extension.
@@ -130,9 +130,9 @@ fn a3_server_initial_end_to_end() {
     let Some(Ok(Frame::Ack(ack))) = frames.next() else {
         panic!("the payload starts with an ACK frame")
     };
-    assert_eq!(ack.largest_acknowledged.get(), PacketNumber::ZERO);
+    assert_eq!(ack.largest_acknowledged().get(), PacketNumber::ZERO);
     assert_eq!(ack.packet_ranges().count(), 1);
-    assert_eq!(ack.ecn_counts, None);
+    assert_eq!(ack.ecn_counts(), None);
     let Some(Ok(Frame::Crypto(crypto))) = frames.next() else {
         panic!("a CRYPTO frame follows")
     };

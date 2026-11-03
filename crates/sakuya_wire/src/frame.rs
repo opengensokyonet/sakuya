@@ -43,25 +43,28 @@
 //!   the Offset and Length of STREAM and the Length of DATAGRAM are
 //!   `Option`s, so a STREAM frame with the OFF bit set and offset 0 is
 //!   distinct from one without the bit.
-//! - An ACK frame holds its fields as encoded; [`ack::Ack::packet_ranges`]
-//!   computes the acknowledged packet numbers from them.
+//! - An ACK frame holds its fields as encoded, and owns its ACK Ranges in
+//!   [`ack::AckRanges`]; [`ack::Ack::packet_ranges`] computes the
+//!   acknowledged packet numbers from them.
 //!
 //! The Frame Type is the exception: it must use its shortest encoding
 //! ([RFC 9000 §12.4]), so a frame value does not store its width. Reading
 //! rejects a longer encoding, and writing always uses the shortest.
 //!
-//! Some limits tie fields of one frame together: the end of STREAM and
-//! CRYPTO data is at most 2<sup>62</sup> − 1, the width of a Length field
-//! can state the length of its payload, a NEW_TOKEN token is not empty, the
-//! Retire Prior To of NEW_CONNECTION_ID does not exceed its Sequence Number,
-//! and the Reliable Size of RESET_STREAM_AT does not exceed its Final Size.
-//! STREAM, CRYPTO, DATAGRAM, NEW_TOKEN, CONNECTION_CLOSE, NEW_CONNECTION_ID
-//! and RESET_STREAM_AT check these limits when they are constructed: their
-//! `new`, such as [`stream::Stream::new`], returns an error for fields that
-//! break one. Their fields are private and are read through methods of the
-//! same names, so every value of these types converts to bytes and back
-//! without loss. An ACK frame keeps its fields public and is checked when it
-//! is written.
+//! Every frame is checked when it is constructed. Some limits tie fields of
+//! one frame together: the end of STREAM and CRYPTO data is at most
+//! 2<sup>62</sup> − 1, the width of a Length field can state the length of
+//! its payload, a NEW_TOKEN token is not empty, the Retire Prior To of
+//! NEW_CONNECTION_ID does not exceed its Sequence Number, the Reliable Size
+//! of RESET_STREAM_AT does not exceed its Final Size, no range of an ACK
+//! frame extends below packet number 0, and the ACK Range Count field of ACK
+//! can state the number of ACK Ranges. The `new` of these frame types, such
+//! as [`stream::Stream::new`] and [`ack::Ack::new`], returns an error for
+//! fields that break one. The other frame types have no such limit, and
+//! their `new`, such as [`max_data::MaxData::new`], accepts any fields. The
+//! fields of every frame type are private and are read through methods of
+//! the same names, so every frame value converts to bytes and back without
+//! loss.
 //!
 //! # Reading
 //!
@@ -75,15 +78,15 @@
 //! collected into [`ack::AckRanges`].
 //!
 //! Reading checks what the encoding alone determines: that every field is
-//! present, and the limits the frame definitions state for single fields,
-//! and the rules that tie fields of one frame together, such as the
-//! 2<sup>62</sup> − 1 bound on the end of STREAM and CRYPTO data, ACK ranges
-//! that do not reach below packet number 0, or a NEW_CONNECTION_ID Retire
-//! Prior To that does not exceed its Sequence Number; a frame that checks
-//! its limits when it is constructed is read through the same checks.
-//! Whether a frame is allowed in the packet type, whether a stream exists
-//! or may be opened, and flow control are for the receiver of the frame to
-//! check.
+//! present, the limits the frame definitions state for single fields, and
+//! the limits that tie fields of one frame together. Each frame is
+//! constructed through its `new`, so a frame that was read meets the same
+//! limits as one constructed to be written. A broken limit is reported as
+//! soon as the fields it depends on are read: the end of STREAM or CRYPTO
+//! data before the data, and an ACK range below packet number 0 before the
+//! ACK Ranges that follow it. Whether a frame is allowed in the packet type,
+//! whether a stream exists or may be opened, and flow control are for the
+//! receiver of the frame to check.
 //!
 //! Every [`codec::ReadFrameError`] corresponds to FRAME_ENCODING_ERROR, with
 //! two exceptions that correspond to PROTOCOL_VIOLATION
@@ -115,12 +118,11 @@
 //! Every frame type has `encoded_len` and a write operation in its module's
 //! `codec`, such as [`stream::codec::write_stream`]; [`codec::write_frame`]
 //! writes any [`Frame`]. Writing writes the encoding the value states and
-//! chooses nothing: the width of each field comes from the value. The frames
-//! that check their limits when they are constructed are written without
-//! further checks. An ACK frame is checked first, and nothing is written if
-//! a field breaks a limit of the encoding ([`InvalidFrameError`]), such as
-//! an ACK Range Count field too narrow for the number of ACK Ranges. A sink
-//! that stops accepting bytes keeps the bytes it accepted. `encoded_len`
+//! chooses nothing: the width of each field comes from the value. Every
+//! frame checked its limits when it was constructed, so writing checks
+//! nothing, and its only failure is that of the receiver: a sink that stops
+//! accepting bytes or fails keeps the bytes it accepted, and the
+//! `WriteAllError` counts them. `encoded_len`
 //! gives the length in advance, so that a packet encoder can choose frames
 //! and payload sizes before writing.
 //! [`stream::Stream::max_data_len`] and [`crypto::Crypto::max_data_len`]
@@ -406,7 +408,7 @@ pub enum Frame<D> {
     /// A PING frame.
     Ping(ping::Ping),
     /// An ACK frame.
-    Ack(ack::Ack<ack::AckRanges>),
+    Ack(ack::Ack),
     /// A RESET_STREAM frame.
     ResetStream(reset_stream::ResetStream),
     /// A STOP_SENDING frame.
@@ -529,60 +531,6 @@ impl<D: Buf> Frame<D> {
     pub fn encoded_len(&self) -> usize {
         each_frame!(self, frame => frame.encoded_len())
     }
-
-    /// Checks the limits that [`codec::write_frame`] checks before writing:
-    /// those of an ACK frame. The other frame types check their limits when
-    /// they are constructed.
-    ///
-    /// # Errors
-    ///
-    /// [`InvalidFrameError`] for a field that breaks a limit of the encoding.
-    pub fn validate(&self) -> Result<(), InvalidFrameError> {
-        use invalid_frame_error::*;
-        use snafu::ResultExt as _;
-        match self {
-            Self::Ack(frame) => frame.validate().context(AckSnafu),
-            Self::Padding(_)
-            | Self::Ping(_)
-            | Self::ResetStream(_)
-            | Self::StopSending(_)
-            | Self::Crypto(_)
-            | Self::NewToken(_)
-            | Self::Stream(_)
-            | Self::MaxData(_)
-            | Self::MaxStreamData(_)
-            | Self::MaxStreams(_)
-            | Self::DataBlocked(_)
-            | Self::StreamDataBlocked(_)
-            | Self::StreamsBlocked(_)
-            | Self::NewConnectionId(_)
-            | Self::RetireConnectionId(_)
-            | Self::PathChallenge(_)
-            | Self::PathResponse(_)
-            | Self::ConnectionClose(_)
-            | Self::HandshakeDone(_)
-            | Self::ResetStreamAt(_)
-            | Self::Datagram(_) => Ok(()),
-        }
-    }
-}
-
-/// A frame breaks a limit of its encoding that writing checks.
-///
-/// Writing checks ACK frames only: the limits that reading enforces, and
-/// that the ACK Range Count field can state the number of ACK Ranges, so a
-/// frame that passes validation reads back to the same value. The other
-/// frame types with limits that tie their fields together check them when
-/// they are constructed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(module(invalid_frame_error), visibility(pub(crate)))]
-pub enum InvalidFrameError {
-    /// An invalid ACK frame.
-    #[snafu(display("invalid ACK frame"))]
-    Ack {
-        /// The broken limit.
-        source: ack::InvalidAckError,
-    },
 }
 
 /// The data of a STREAM or CRYPTO frame ends beyond 2<sup>62</sup> − 1.

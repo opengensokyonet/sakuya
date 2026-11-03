@@ -10,16 +10,26 @@ use core::num::NonZeroUsize;
 /// A PADDING frame is its Frame Type alone, the single byte `0x00`: like
 /// every Frame Type, it must use its shortest encoding. Reading with
 /// [`Frames`](super::Frames) reports a run of consecutive PADDING frames as
-/// one value. Writing writes `len` zero bytes, `len` PADDING frames.
+/// one value. Writing writes [`len`](Self::len) zero bytes, that many
+/// PADDING frames.
 ///
 /// [RFC 9000 §19.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.1
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Padding {
-    /// The number of bytes.
-    pub len: NonZeroUsize,
+    len: NonZeroUsize,
 }
 
 impl Padding {
+    /// The run of `len` PADDING frames.
+    pub const fn new(len: NonZeroUsize) -> Self {
+        Self { len }
+    }
+
+    /// The number of bytes.
+    pub const fn len(&self) -> NonZeroUsize {
+        self.len
+    }
+
     /// The Frame Type value, zero.
     pub const fn type_value(&self) -> VarInt {
         type_var_int(type_value::PADDING)
@@ -53,7 +63,7 @@ pub mod codec {
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{calls::WriteAllError, prelude::*};
 
-    /// Writes `frame.len` zero bytes.
+    /// Writes [`Padding::len`] zero bytes.
     ///
     /// # Errors
     ///
@@ -64,7 +74,7 @@ pub mod codec {
         io: &mut A,
         frame: Padding,
     ) -> Result<(), WriteAllError<F::Error>> {
-        io.write_all(Zeros(frame.len.get())).await
+        io.write_all(Zeros(frame.len().get())).await
     }
 
     /// A run of zero bytes as a buffer.
@@ -94,12 +104,11 @@ mod tests {
 
     #[test]
     fn writes_zero_bytes() {
-        let padding = Padding {
-            len: NonZeroUsize::new(200).unwrap(),
-        };
+        let padding = Padding::new(NonZeroUsize::new(200).unwrap());
         let mut written = Vec::new();
         written.sync_write_padding_unpin(padding).unwrap();
         assert_eq!(written, [0; 200]);
         assert_eq!(padding.encoded_len(), 200);
+        assert_eq!(padding.len().get(), 200);
     }
 }

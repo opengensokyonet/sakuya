@@ -25,9 +25,8 @@
 //! };
 //!
 //! let mut output = Vec::new();
-//! let max_data = Frame::<&[u8]>::MaxData(MaxData {
-//!     maximum_data: VarIntField::shortest(VarInt::from(1_000_000u32)),
-//! });
+//! let maximum_data = VarIntField::shortest(VarInt::from(1_000_000u32));
+//! let max_data = Frame::<&[u8]>::MaxData(MaxData::new(maximum_data));
 //! output.sync_write_frame_unpin(max_data.clone()).unwrap();
 //! let stream_id = VarIntField::shortest(StreamId::from_var_int(VarInt::from(4u8)));
 //! let stream = Stream::new(stream_id, None, Some(VarIntWidth::One), &b"hello"[..], true);
@@ -53,7 +52,7 @@
 //! let mut input = &[0x10, 0x80, 0x00, 0x00, 0x05][..];
 //! let frame = input.sync_read_frame_unpin(Extensions::NONE).unwrap();
 //! let Frame::MaxData(max_data) = &frame else { panic!() };
-//! assert_eq!(max_data.maximum_data.width(), VarIntWidth::Four);
+//! assert_eq!(max_data.maximum_data().width(), VarIntWidth::Four);
 //! let mut output = Vec::new();
 //! output.sync_write_frame_unpin(frame).unwrap();
 //! assert_eq!(output, [0x10, 0x80, 0x00, 0x00, 0x05]);
@@ -63,7 +62,7 @@
 #![allow(missing_docs)]
 
 use super::{
-    Extensions, Frame, FrameType, InvalidFrameError,
+    Extensions, Frame, FrameType,
     ack::codec::{ReadAckError, read_ack},
     connection_close::codec::{ReadConnectionCloseError, read_connection_close},
     crypto::codec::{ReadCryptoError, read_crypto},
@@ -146,9 +145,7 @@ where
     };
     let value = frame_type.get();
     Ok(match kind {
-        FrameType::Padding => Frame::Padding(Padding {
-            len: NonZeroUsize::MIN,
-        }),
+        FrameType::Padding => Frame::Padding(Padding::new(NonZeroUsize::MIN)),
         FrameType::Ping => Frame::Ping(Ping),
         FrameType::Ack => Frame::Ack(
             read_ack(io, value == ACK_ECN)
@@ -502,9 +499,18 @@ impl<E> ReadFrameError<E> {
             | Self::StreamDataBlocked { source, .. }
             | Self::RetireConnectionId { source, .. } => source.is_incomplete(),
             Self::LongerTypeEncoding { .. } | Self::UnknownType { .. } => false,
-            Self::Ack { source, .. } => {
-                matches!(source, Ack::Field { source } if source.is_incomplete())
-            }
+            Self::Ack { source, .. } => match source {
+                Ack::LargestAcknowledged { source }
+                | Ack::AckDelay { source }
+                | Ack::AckRangeCount { source }
+                | Ack::FirstAckRange { source }
+                | Ack::Gap { source, .. }
+                | Ack::AckRangeLength { source, .. }
+                | Ack::Ect0Count { source }
+                | Ack::Ect1Count { source }
+                | Ack::EcnCeCount { source } => source.is_incomplete(),
+                Ack::BelowZero { .. } => false,
+            },
             Self::Crypto { source, .. } => match source {
                 Crypto::Field { source } => source.is_incomplete(),
                 Crypto::Data { source } => payload(source),
@@ -570,21 +576,19 @@ impl<E> ReadFrameError<E> {
 
 /// Writes `frame` completely.
 ///
-/// An ACK frame is first checked with [`Frame::validate`]; the other frame
-/// types check their limits when they are constructed. Acceptance by the
-/// receiver does not imply flushing or delivery.
+/// Every frame type checks its limits when it is constructed, so nothing is
+/// checked here. Acceptance by the receiver does not imply flushing or
+/// delivery.
 ///
 /// # Errors
 ///
-/// [`WriteFrameError::Invalid`] before writing anything if an ACK frame
-/// breaks a limit of the encoding, and [`WriteFrameError::Write`] if the
-/// receiver stops accepting bytes or fails; bytes accepted before stay
-/// written.
+/// [`WriteAllError`] if the receiver stops accepting bytes or fails; bytes
+/// accepted before stay written.
 #[call(sync)]
 pub async fn write_frame<F, A, D>(
     io: &mut A,
     frame: Frame<D>,
-) -> Result<(), WriteFrameError<F::Error>>
+) -> Result<(), WriteAllError<F::Error>>
 where
     F: Write,
     A: ReceiverAccess<Family = F>,
@@ -596,12 +600,10 @@ where
         path_response, ping, reset_stream, reset_stream_at, retire_connection_id, stop_sending,
         stream, stream_data_blocked, streams_blocked,
     };
-    frame.validate()?;
-    let result = match frame {
+    match frame {
         Frame::Padding(frame) => padding::codec::write_padding(io, frame).await,
         Frame::Ping(frame) => ping::codec::write_ping(io, frame).await,
-        // The ACK frame was checked above.
-        Frame::Ack(frame) => ack::codec::write_body(io, &frame.as_iter()).await,
+        Frame::Ack(frame) => ack::codec::write_ack(io, frame).await,
         Frame::ResetStream(frame) => reset_stream::codec::write_reset_stream(io, frame).await,
         Frame::StopSending(frame) => stop_sending::codec::write_stop_sending(io, frame).await,
         Frame::Crypto(frame) => crypto::codec::write_crypto(io, frame).await,
@@ -635,24 +637,5 @@ where
             reset_stream_at::codec::write_reset_stream_at(io, frame).await
         }
         Frame::Datagram(frame) => datagram::codec::write_datagram(io, frame).await,
-    };
-    result.context(write_frame_error::WriteSnafu)
-}
-
-/// Failures that [`write_frame`] can produce.
-#[derive(Debug, Snafu)]
-#[snafu(module(write_frame_error), visibility(pub(crate)))]
-pub enum WriteFrameError<E> {
-    /// An ACK frame breaks a limit of the encoding; nothing was written.
-    #[snafu(transparent)]
-    Invalid {
-        /// The broken limit.
-        source: InvalidFrameError,
-    },
-    /// The receiver stopped accepting bytes or failed.
-    #[snafu(display("frame write failed"))]
-    Write {
-        /// The failure of writing; it reports the bytes accepted before.
-        source: WriteAllError<E>,
-    },
+    }
 }

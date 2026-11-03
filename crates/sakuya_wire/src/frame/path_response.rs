@@ -6,14 +6,26 @@ use crate::var_int::VarInt;
 
 /// A PATH_RESPONSE frame ([RFC 9000 §19.18]).
 ///
+/// [`PathResponse::new`] accepts any data, which is read through
+/// [`PathResponse::data`].
+///
 /// [RFC 9000 §19.18]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.18
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PathResponse {
-    /// The data of the PATH_CHALLENGE being answered.
-    pub data: [u8; PATH_DATA_LEN],
+    data: [u8; PATH_DATA_LEN],
 }
 
 impl PathResponse {
+    /// The PATH_RESPONSE frame with this data.
+    pub const fn new(data: [u8; PATH_DATA_LEN]) -> Self {
+        Self { data }
+    }
+
+    /// The data of the PATH_CHALLENGE being answered.
+    pub const fn data(&self) -> [u8; PATH_DATA_LEN] {
+        self.data
+    }
+
     /// The Frame Type value.
     pub const fn type_value(&self) -> VarInt {
         type_var_int(type_value::PATH_RESPONSE)
@@ -53,9 +65,7 @@ pub mod codec {
     pub(crate) async fn read_path_response<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
     ) -> Result<PathResponse, ReadArrayError<F::Error>> {
-        Ok(PathResponse {
-            data: io.read_array::<PATH_DATA_LEN>().await?,
-        })
+        Ok(PathResponse::new(io.read_array::<PATH_DATA_LEN>().await?))
     }
 
     /// Writes the frame.
@@ -76,11 +86,18 @@ pub mod codec {
 #[cfg(test)]
 mod tests {
     use super::PathResponse;
-    use crate::frame::{Frame, tests::assert_round_trip};
+    use crate::frame::{
+        Frame,
+        tests::{assert_bytes_round_trip, assert_round_trip},
+    };
 
     #[test]
     fn round_trips() {
-        let encoding = assert_round_trip(Frame::PathResponse(PathResponse { data: *b"response" }));
+        let encoding = assert_round_trip(Frame::PathResponse(PathResponse::new(*b"response")));
         assert_eq!(encoding[1..], *b"response");
+        let Frame::PathResponse(read) = assert_bytes_round_trip(&encoding) else {
+            panic!("{encoding:02x?}")
+        };
+        assert_eq!(read.data(), *b"response");
     }
 }

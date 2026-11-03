@@ -9,17 +9,38 @@ use crate::var_int::{VarInt, VarIntField};
 /// A STOP_SENDING frame ([RFC 9000 §19.5]): the receiver asks the peer to stop sending on a stream.
 ///
 /// Each field keeps the width of its variable-length integer encoding.
+/// No limit ties the fields together, so [`StopSending::new`] accepts any
+/// values; the fields are read through methods of the same names.
 ///
 /// [RFC 9000 §19.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.5
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct StopSending {
-    /// The stream whose data is being discarded.
-    pub stream_id: VarIntField<StreamId>,
-    /// The application protocol error code.
-    pub application_error_code: VarIntField<ApplicationErrorCode>,
+    stream_id: VarIntField<StreamId>,
+    application_error_code: VarIntField<ApplicationErrorCode>,
 }
 
 impl StopSending {
+    /// The STOP_SENDING frame with these fields.
+    pub const fn new(
+        stream_id: VarIntField<StreamId>,
+        application_error_code: VarIntField<ApplicationErrorCode>,
+    ) -> Self {
+        Self {
+            stream_id,
+            application_error_code,
+        }
+    }
+
+    /// The stream whose data is being discarded.
+    pub const fn stream_id(&self) -> VarIntField<StreamId> {
+        self.stream_id
+    }
+
+    /// The application protocol error code.
+    pub const fn application_error_code(&self) -> VarIntField<ApplicationErrorCode> {
+        self.application_error_code
+    }
+
     /// The Frame Type value.
     pub const fn type_value(&self) -> VarInt {
         type_var_int(type_value::STOP_SENDING)
@@ -58,10 +79,10 @@ pub mod codec {
     pub(crate) async fn read_stop_sending<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
     ) -> Result<StopSending, ReadVarIntError<F::Error>> {
-        Ok(StopSending {
-            stream_id: read_field(io).await?,
-            application_error_code: read_field(io).await?,
-        })
+        Ok(StopSending::new(
+            read_field(io).await?,
+            read_field(io).await?,
+        ))
     }
 
     /// Writes the frame.
@@ -85,21 +106,23 @@ mod tests {
     use crate::application_error::ApplicationErrorCode;
     use crate::stream_id::StreamId;
     use crate::{
-        frame::{Frame, tests::assert_round_trip},
+        frame::{
+            Frame,
+            tests::{assert_bytes_round_trip, assert_round_trip},
+        },
         var_int::{VarInt, VarIntField},
     };
 
     #[test]
     fn round_trips() {
-        let frame = StopSending {
-            stream_id: VarIntField::shortest(StreamId::from_var_int(VarInt::from(3u8))),
-            application_error_code: VarIntField::shortest(ApplicationErrorCode::new(VarInt::from(
-                7u8,
-            ))),
+        let stream_id = VarIntField::shortest(StreamId::from_var_int(VarInt::from(3u8)));
+        let code = VarIntField::shortest(ApplicationErrorCode::new(VarInt::from(7u8)));
+        let encoding = assert_round_trip(Frame::StopSending(StopSending::new(stream_id, code)));
+        assert_eq!(encoding, [0x05, 0x03, 0x07]);
+        let Frame::StopSending(read) = assert_bytes_round_trip(&encoding) else {
+            panic!("{encoding:02x?}")
         };
-        assert_eq!(
-            assert_round_trip(Frame::StopSending(frame)),
-            [0x05, 0x03, 0x07]
-        );
+        assert_eq!(read.stream_id(), stream_id);
+        assert_eq!(read.application_error_code(), code);
     }
 }

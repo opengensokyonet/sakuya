@@ -3,7 +3,7 @@
 use super::{
     Extensions, Frame, FrameType, Frames, InvalidDataError, LengthError, UnknownFrameTypeError,
     ack::{Ack, AckRange, AckRanges, EcnCounts},
-    codec::{ReadFrameError, ReadFrameHostExt as _, WriteFrameError, WriteFrameHostExt as _},
+    codec::{ReadFrameError, ReadFrameHostExt as _, WriteFrameHostExt as _},
     connection_close::{CloseErrorCode, ConnectionClose},
     crypto::Crypto,
     data_blocked::DataBlocked,
@@ -160,9 +160,7 @@ pub(crate) fn read_ack(encoding: &[u8]) -> Frame<&[u8]> {
 /// One frame of every type and form, in the shortest encodings.
 fn sample_frames() -> Vec<Frame<&'static [u8]>> {
     let mut frames = vec![
-        Frame::Padding(Padding {
-            len: NonZeroUsize::new(3).unwrap(),
-        }),
+        Frame::Padding(Padding::new(NonZeroUsize::new(3).unwrap())),
         Frame::Ping(Ping),
         // Largest 100, delay 5, ranges 97..=100, 90..=94 and 88..=88; ECN
         // counts 1, 2, 3.
@@ -170,50 +168,40 @@ fn sample_frames() -> Vec<Frame<&'static [u8]>> {
             0x03, 0x40, 100, 0x05, 0x02, 0x03, 0x01, 0x04, 0x00, 0x00, 0x01, 0x02, 0x03,
         ]),
         read_ack(&[0x02, 0x00, 0x00, 0x00, 0x00]),
-        Frame::ResetStream(ResetStream {
-            stream_id: short(sid(4)),
-            application_error_code: short(ApplicationErrorCode::new(vi(0x100))),
-            final_size: short(vi(70_000)),
-        }),
-        Frame::StopSending(StopSending {
-            stream_id: short(sid(3)),
-            application_error_code: short(ApplicationErrorCode::new(vi(7))),
-        }),
+        Frame::ResetStream(ResetStream::new(
+            short(sid(4)),
+            short(ApplicationErrorCode::new(vi(0x100))),
+            short(vi(70_000)),
+        )),
+        Frame::StopSending(StopSending::new(
+            short(sid(3)),
+            short(ApplicationErrorCode::new(vi(7))),
+        )),
         Frame::Crypto(
             Crypto::new(short(vi(1000)), VarIntWidth::One, &b"client hello"[..]).unwrap(),
         ),
         Frame::Crypto(Crypto::new(short(VarInt::ZERO), VarIntWidth::One, &b""[..]).unwrap()),
         Frame::NewToken(NewToken::new(VarIntWidth::One, &b"token"[..]).unwrap()),
-        Frame::MaxData(MaxData {
-            maximum_data: short(vi(1 << 40)),
-        }),
-        Frame::MaxStreamData(MaxStreamData {
-            stream_id: short(sid(8)),
-            maximum_stream_data: short(vi(65_536)),
-        }),
-        Frame::MaxStreams(MaxStreams {
-            directionality: Directionality::Bidirectional,
-            maximum_streams: short(StreamCount::MAX),
-        }),
-        Frame::MaxStreams(MaxStreams {
-            directionality: Directionality::Unidirectional,
-            maximum_streams: short(StreamCount::new(3).unwrap()),
-        }),
-        Frame::DataBlocked(DataBlocked {
-            maximum_data: short(vi(16_384)),
-        }),
-        Frame::StreamDataBlocked(StreamDataBlocked {
-            stream_id: short(sid(2)),
-            maximum_stream_data: short(vi(63)),
-        }),
-        Frame::StreamsBlocked(StreamsBlocked {
-            directionality: Directionality::Bidirectional,
-            maximum_streams: short(StreamCount::new(100).unwrap()),
-        }),
-        Frame::StreamsBlocked(StreamsBlocked {
-            directionality: Directionality::Unidirectional,
-            maximum_streams: short(StreamCount::ZERO),
-        }),
+        Frame::MaxData(MaxData::new(short(vi(1 << 40)))),
+        Frame::MaxStreamData(MaxStreamData::new(short(sid(8)), short(vi(65_536)))),
+        Frame::MaxStreams(MaxStreams::new(
+            Directionality::Bidirectional,
+            short(StreamCount::MAX),
+        )),
+        Frame::MaxStreams(MaxStreams::new(
+            Directionality::Unidirectional,
+            short(StreamCount::new(3).unwrap()),
+        )),
+        Frame::DataBlocked(DataBlocked::new(short(vi(16_384)))),
+        Frame::StreamDataBlocked(StreamDataBlocked::new(short(sid(2)), short(vi(63)))),
+        Frame::StreamsBlocked(StreamsBlocked::new(
+            Directionality::Bidirectional,
+            short(StreamCount::new(100).unwrap()),
+        )),
+        Frame::StreamsBlocked(StreamsBlocked::new(
+            Directionality::Unidirectional,
+            short(StreamCount::ZERO),
+        )),
         Frame::NewConnectionId(
             NewConnectionId::new(
                 short(vi(2)),
@@ -232,11 +220,9 @@ fn sample_frames() -> Vec<Frame<&'static [u8]>> {
             )
             .unwrap(),
         ),
-        Frame::RetireConnectionId(RetireConnectionId {
-            sequence_number: short(vi(9)),
-        }),
-        Frame::PathChallenge(PathChallenge { data: *b"challeng" }),
-        Frame::PathResponse(PathResponse { data: *b"response" }),
+        Frame::RetireConnectionId(RetireConnectionId::new(short(vi(9)))),
+        Frame::PathChallenge(PathChallenge::new(*b"challeng")),
+        Frame::PathResponse(PathResponse::new(*b"response")),
         Frame::ConnectionClose(
             ConnectionClose::new(
                 CloseErrorCode::Transport {
@@ -292,7 +278,7 @@ fn every_frame_round_trips() {
             Frame::Padding(padding) => {
                 let mut written = Vec::new();
                 written.sync_write_frame_unpin(frame.clone()).unwrap();
-                assert_eq!(written, vec![0; padding.len.get()]);
+                assert_eq!(written, vec![0; padding.len().get()]);
                 let mut frames = Frames::new(written.as_slice(), Extensions::NONE);
                 assert_eq!(frames.next().map(Result::unwrap), Some(frame));
                 assert!(frames.next().is_none());
@@ -313,10 +299,7 @@ fn writing_into_a_short_slice_keeps_the_accepted_prefix() {
         let mut buffer = vec![0xee; required - 1];
         let mut sink = buffer.as_mut_slice();
         let error = sink.sync_write_frame_unpin(frame.clone()).unwrap_err();
-        let WriteFrameError::Write { source } = &error else {
-            panic!("{frame:?}: {error:?}");
-        };
-        assert_eq!(source.completed(), required - 1, "{frame:?}");
+        assert_eq!(error.completed(), required - 1, "{frame:?}");
         assert_eq!(buffer, encoding[..required - 1], "{frame:?}");
     }
 }
@@ -365,18 +348,14 @@ fn padding_runs_are_one_value() {
     let mut frames = Frames::new(&payload[..], Extensions::NONE);
     assert_eq!(
         frames.next().map(Result::unwrap),
-        Some(Frame::Padding(Padding {
-            len: NonZeroUsize::new(3).unwrap()
-        }))
+        Some(Frame::Padding(Padding::new(NonZeroUsize::new(3).unwrap())))
     );
     assert_eq!(frames.offset(), 3);
     assert_eq!(frames.next().map(Result::unwrap), Some(Frame::Ping(Ping)));
     assert_eq!(*frames.remainder(), [0x00]);
     assert_eq!(
         frames.next().map(Result::unwrap),
-        Some(Frame::Padding(Padding {
-            len: NonZeroUsize::MIN
-        }))
+        Some(Frame::Padding(Padding::new(NonZeroUsize::MIN)))
     );
     assert!(frames.next().is_none());
 
@@ -386,9 +365,7 @@ fn padding_runs_are_one_value() {
     let mut frames = Frames::new(&payload[..], Extensions::NONE);
     assert_eq!(
         frames.next().map(Result::unwrap),
-        Some(Frame::Padding(Padding {
-            len: NonZeroUsize::MIN
-        }))
+        Some(Frame::Padding(Padding::new(NonZeroUsize::MIN)))
     );
     let error = frames.next().unwrap().unwrap_err();
     assert!(matches!(
@@ -638,14 +615,16 @@ fn edge_frames() -> Vec<Frame<&'static [u8]>> {
     let zero = short(VarInt::ZERO);
     let largest = short(PacketNumber::MAX);
     let ack = |largest_acknowledged, ack_delay, first_ack_range, ranges: Vec<AckRange>, ecn| {
-        Frame::Ack(Ack {
+        let ranges = AckRanges::from(ranges);
+        let frame = Ack::new(
             largest_acknowledged,
             ack_delay,
-            ack_range_count_width: VarIntWidth::One,
+            VarIntWidth::One,
             first_ack_range,
-            ranges: AckRanges::from(ranges),
-            ecn_counts: ecn,
-        })
+            ranges,
+            ecn,
+        );
+        Frame::Ack(frame.unwrap())
     };
     let mut frames = Vec::new();
     for x in edge_fields() {
@@ -681,36 +660,19 @@ fn edge_frames() -> Vec<Frame<&'static [u8]>> {
                     ce: x,
                 }),
             ),
-            Frame::ResetStream(ResetStream {
-                stream_id,
-                application_error_code: application_zero,
-                final_size: zero,
-            }),
-            Frame::ResetStream(ResetStream {
-                stream_id: short(sid(0)),
-                application_error_code: application,
-                final_size: x,
-            }),
-            Frame::StopSending(StopSending {
-                stream_id,
-                application_error_code: application,
-            }),
+            Frame::ResetStream(ResetStream::new(stream_id, application_zero, zero)),
+            Frame::ResetStream(ResetStream::new(short(sid(0)), application, x)),
+            Frame::StopSending(StopSending::new(stream_id, application)),
             Frame::Crypto(Crypto::new(x, VarIntWidth::One, data).unwrap()),
             Frame::Stream(Stream::new(stream_id, None, None, &b"hello"[..], false).unwrap()),
             Frame::Stream(
                 Stream::new(short(sid(0)), Some(x), Some(VarIntWidth::One), data, true).unwrap(),
             ),
             Frame::Stream(Stream::new(short(sid(0)), Some(x), None, data, false).unwrap()),
-            Frame::MaxData(MaxData { maximum_data: x }),
-            Frame::MaxStreamData(MaxStreamData {
-                stream_id,
-                maximum_stream_data: x,
-            }),
-            Frame::DataBlocked(DataBlocked { maximum_data: x }),
-            Frame::StreamDataBlocked(StreamDataBlocked {
-                stream_id,
-                maximum_stream_data: x,
-            }),
+            Frame::MaxData(MaxData::new(x)),
+            Frame::MaxStreamData(MaxStreamData::new(stream_id, x)),
+            Frame::DataBlocked(DataBlocked::new(x)),
+            Frame::StreamDataBlocked(StreamDataBlocked::new(stream_id, x)),
             Frame::NewConnectionId(
                 NewConnectionId::new(x, zero, cid, StatelessResetToken::new(TOKEN)).unwrap(),
             ),
@@ -718,7 +680,7 @@ fn edge_frames() -> Vec<Frame<&'static [u8]>> {
                 NewConnectionId::new(short(value), x, cid, StatelessResetToken::new(TOKEN))
                     .unwrap(),
             ),
-            Frame::RetireConnectionId(RetireConnectionId { sequence_number: x }),
+            Frame::RetireConnectionId(RetireConnectionId::new(x)),
             Frame::ConnectionClose(
                 ConnectionClose::new(
                     CloseErrorCode::Transport {
@@ -786,14 +748,8 @@ fn edge_frames() -> Vec<Frame<&'static [u8]>> {
                 Directionality::Unidirectional,
             ] {
                 frames.extend([
-                    Frame::MaxStreams(MaxStreams {
-                        directionality,
-                        maximum_streams: count,
-                    }),
-                    Frame::StreamsBlocked(StreamsBlocked {
-                        directionality,
-                        maximum_streams: count,
-                    }),
+                    Frame::MaxStreams(MaxStreams::new(directionality, count)),
+                    Frame::StreamsBlocked(StreamsBlocked::new(directionality, count)),
                 ]);
             }
         }
@@ -804,14 +760,15 @@ fn edge_frames() -> Vec<Frame<&'static [u8]>> {
             ack_range_length: short(VarInt::ZERO),
         }];
         for ranges in [vec![], one_range] {
-            frames.push(Frame::Ack(Ack {
-                largest_acknowledged: short(PacketNumber::new(10).unwrap()),
-                ack_delay: zero,
-                ack_range_count_width: width,
-                first_ack_range: short(vi(1)),
-                ranges: AckRanges::from(ranges),
-                ecn_counts: None,
-            }));
+            let frame = Ack::new(
+                short(PacketNumber::new(10).unwrap()),
+                zero,
+                width,
+                short(vi(1)),
+                AckRanges::from(ranges),
+                None,
+            );
+            frames.push(Frame::Ack(frame.unwrap()));
         }
         frames.extend([
             Frame::Crypto(Crypto::new(zero, width, &b"hello"[..]).unwrap()),
@@ -862,7 +819,6 @@ fn frames_round_trip_with_every_width_and_edge_value() {
         );
     }
     for frame in frames {
-        assert_eq!(frame.validate(), Ok(()), "{frame:?}");
         assert_round_trip(frame);
     }
 }
@@ -873,9 +829,7 @@ fn longer_field_encodings_read_and_write_back_unchanged() {
     let cases: Vec<(Vec<u8>, Frame<&[u8]>)> = vec![
         (
             vec![0x10, 0x40, 0x05],
-            F::MaxData(MaxData {
-                maximum_data: wide(vi(5), VarIntWidth::Two),
-            }),
+            F::MaxData(MaxData::new(wide(vi(5), VarIntWidth::Two))),
         ),
         (
             // OFF set with a four-byte offset 0, LEN with an eight-byte
@@ -916,86 +870,87 @@ fn longer_field_encodings_read_and_write_back_unchanged() {
             vec![
                 0x02, 0x40, 0x05, 0x80, 0, 0, 0, 0x40, 0x01, 0x40, 0x01, 0x40, 0x00, 0x00,
             ],
-            F::Ack(Ack {
-                largest_acknowledged: wide(PacketNumber::new(5).unwrap(), VarIntWidth::Two),
-                ack_delay: wide(VarInt::ZERO, VarIntWidth::Four),
-                ack_range_count_width: VarIntWidth::Two,
-                first_ack_range: wide(vi(1), VarIntWidth::Two),
-                ranges: AckRanges::from(vec![AckRange {
-                    gap: wide(VarInt::ZERO, VarIntWidth::Two),
-                    ack_range_length: short(VarInt::ZERO),
-                }]),
-                ecn_counts: None,
-            }),
+            F::Ack(
+                Ack::new(
+                    wide(PacketNumber::new(5).unwrap(), VarIntWidth::Two),
+                    wide(VarInt::ZERO, VarIntWidth::Four),
+                    VarIntWidth::Two,
+                    wide(vi(1), VarIntWidth::Two),
+                    AckRanges::from(vec![AckRange {
+                        gap: wide(VarInt::ZERO, VarIntWidth::Two),
+                        ack_range_length: short(VarInt::ZERO),
+                    }]),
+                    None,
+                )
+                .unwrap(),
+            ),
         ),
         (
             vec![
                 0x03, 0x00, 0x00, 0x00, 0x00, 0x40, 0x01, 0x00, 0x80, 0, 0, 3,
             ],
-            F::Ack(Ack {
-                largest_acknowledged: short(PacketNumber::ZERO),
-                ack_delay: short(VarInt::ZERO),
-                ack_range_count_width: VarIntWidth::One,
-                first_ack_range: short(VarInt::ZERO),
-                ranges: AckRanges::default(),
-                ecn_counts: Some(EcnCounts {
-                    ect0: wide(vi(1), VarIntWidth::Two),
-                    ect1: short(VarInt::ZERO),
-                    ce: wide(vi(3), VarIntWidth::Four),
-                }),
-            }),
+            F::Ack(
+                Ack::new(
+                    short(PacketNumber::ZERO),
+                    short(VarInt::ZERO),
+                    VarIntWidth::One,
+                    short(VarInt::ZERO),
+                    AckRanges::default(),
+                    Some(EcnCounts {
+                        ect0: wide(vi(1), VarIntWidth::Two),
+                        ect1: short(VarInt::ZERO),
+                        ce: wide(vi(3), VarIntWidth::Four),
+                    }),
+                )
+                .unwrap(),
+            ),
         ),
         (
             vec![0x04, 0x40, 0x04, 0x40, 0x00, 0x80, 0, 0, 7],
-            F::ResetStream(ResetStream {
-                stream_id: wide(sid(4), VarIntWidth::Two),
-                application_error_code: wide(
-                    ApplicationErrorCode::new(VarInt::ZERO),
-                    VarIntWidth::Two,
-                ),
-                final_size: wide(vi(7), VarIntWidth::Four),
-            }),
+            F::ResetStream(ResetStream::new(
+                wide(sid(4), VarIntWidth::Two),
+                wide(ApplicationErrorCode::new(VarInt::ZERO), VarIntWidth::Two),
+                wide(vi(7), VarIntWidth::Four),
+            )),
         ),
         (
             vec![0x05, 0x40, 0x03, 0x40, 0x07],
-            F::StopSending(StopSending {
-                stream_id: wide(sid(3), VarIntWidth::Two),
-                application_error_code: wide(ApplicationErrorCode::new(vi(7)), VarIntWidth::Two),
-            }),
+            F::StopSending(StopSending::new(
+                wide(sid(3), VarIntWidth::Two),
+                wide(ApplicationErrorCode::new(vi(7)), VarIntWidth::Two),
+            )),
         ),
         (
             vec![0x11, 0x40, 0x08, 0x40, 0x3f],
-            F::MaxStreamData(MaxStreamData {
-                stream_id: wide(sid(8), VarIntWidth::Two),
-                maximum_stream_data: wide(vi(63), VarIntWidth::Two),
-            }),
+            F::MaxStreamData(MaxStreamData::new(
+                wide(sid(8), VarIntWidth::Two),
+                wide(vi(63), VarIntWidth::Two),
+            )),
         ),
         (
             vec![0x12, 0xc0, 0, 0, 0, 0, 0, 0, 0x05],
-            F::MaxStreams(MaxStreams {
-                directionality: Directionality::Bidirectional,
-                maximum_streams: wide(StreamCount::new(5).unwrap(), VarIntWidth::Eight),
-            }),
+            F::MaxStreams(MaxStreams::new(
+                Directionality::Bidirectional,
+                wide(StreamCount::new(5).unwrap(), VarIntWidth::Eight),
+            )),
         ),
         (
             vec![0x14, 0x40, 0x00],
-            F::DataBlocked(DataBlocked {
-                maximum_data: wide(VarInt::ZERO, VarIntWidth::Two),
-            }),
+            F::DataBlocked(DataBlocked::new(wide(VarInt::ZERO, VarIntWidth::Two))),
         ),
         (
             vec![0x15, 0x40, 0x02, 0x40, 0x3f],
-            F::StreamDataBlocked(StreamDataBlocked {
-                stream_id: wide(sid(2), VarIntWidth::Two),
-                maximum_stream_data: wide(vi(63), VarIntWidth::Two),
-            }),
+            F::StreamDataBlocked(StreamDataBlocked::new(
+                wide(sid(2), VarIntWidth::Two),
+                wide(vi(63), VarIntWidth::Two),
+            )),
         ),
         (
             vec![0x17, 0x40, 0x01],
-            F::StreamsBlocked(StreamsBlocked {
-                directionality: Directionality::Unidirectional,
-                maximum_streams: wide(StreamCount::new(1).unwrap(), VarIntWidth::Two),
-            }),
+            F::StreamsBlocked(StreamsBlocked::new(
+                Directionality::Unidirectional,
+                wide(StreamCount::new(1).unwrap(), VarIntWidth::Two),
+            )),
         ),
         (
             [&[0x18, 0x40, 0x02, 0x40, 0x01, 0x01, 0xaa][..], &TOKEN[..]].concat(),
@@ -1011,9 +966,7 @@ fn longer_field_encodings_read_and_write_back_unchanged() {
         ),
         (
             vec![0x19, 0x80, 0, 0, 9],
-            F::RetireConnectionId(RetireConnectionId {
-                sequence_number: wide(vi(9), VarIntWidth::Four),
-            }),
+            F::RetireConnectionId(RetireConnectionId::new(wide(vi(9), VarIntWidth::Four))),
         ),
         (
             vec![0x1c, 0x40, 0x07, 0x40, 0x06, 0x40, 0x00],
@@ -1072,12 +1025,12 @@ fn longer_field_encodings_read_and_write_back_unchanged() {
 fn shortest_len(frame: &Frame<&[u8]>) -> usize {
     match frame {
         Frame::Ack(ack) => {
-            let ecn = ack.ecn_counts.map(|counts| EcnCounts {
+            let ecn = ack.ecn_counts().map(|counts| EcnCounts {
                 ect0: short(counts.ect0.get()),
                 ect1: short(counts.ect1.get()),
                 ce: short(counts.ce.get()),
             });
-            Ack::from_packet_ranges(ack.packet_ranges(), short(ack.ack_delay.get()), ecn)
+            Ack::from_packet_ranges(ack.packet_ranges(), short(ack.ack_delay().get()), ecn)
                 .unwrap()
                 .encoded_len()
         }
@@ -1109,37 +1062,32 @@ fn shortest_frame<'a>(frame: &Frame<&'a [u8]>) -> Frame<&'a [u8]> {
         Frame::NewToken(f) => {
             Frame::NewToken(NewToken::new(length(f.token()), *f.token()).unwrap())
         }
-        Frame::ResetStream(f) => Frame::ResetStream(ResetStream {
-            stream_id: s(f.stream_id),
-            application_error_code: s(f.application_error_code),
-            final_size: s(f.final_size),
-        }),
-        Frame::StopSending(f) => Frame::StopSending(StopSending {
-            stream_id: s(f.stream_id),
-            application_error_code: s(f.application_error_code),
-        }),
-        Frame::MaxData(f) => Frame::MaxData(MaxData {
-            maximum_data: s(f.maximum_data),
-        }),
-        Frame::MaxStreamData(f) => Frame::MaxStreamData(MaxStreamData {
-            stream_id: s(f.stream_id),
-            maximum_stream_data: s(f.maximum_stream_data),
-        }),
-        Frame::MaxStreams(f) => Frame::MaxStreams(MaxStreams {
-            maximum_streams: s(f.maximum_streams),
-            ..f
-        }),
-        Frame::DataBlocked(f) => Frame::DataBlocked(DataBlocked {
-            maximum_data: s(f.maximum_data),
-        }),
-        Frame::StreamDataBlocked(f) => Frame::StreamDataBlocked(StreamDataBlocked {
-            stream_id: s(f.stream_id),
-            maximum_stream_data: s(f.maximum_stream_data),
-        }),
-        Frame::StreamsBlocked(f) => Frame::StreamsBlocked(StreamsBlocked {
-            maximum_streams: s(f.maximum_streams),
-            ..f
-        }),
+        Frame::ResetStream(f) => Frame::ResetStream(ResetStream::new(
+            s(f.stream_id()),
+            s(f.application_error_code()),
+            s(f.final_size()),
+        )),
+        Frame::StopSending(f) => Frame::StopSending(StopSending::new(
+            s(f.stream_id()),
+            s(f.application_error_code()),
+        )),
+        Frame::MaxData(f) => Frame::MaxData(MaxData::new(s(f.maximum_data()))),
+        Frame::MaxStreamData(f) => Frame::MaxStreamData(MaxStreamData::new(
+            s(f.stream_id()),
+            s(f.maximum_stream_data()),
+        )),
+        Frame::MaxStreams(f) => {
+            Frame::MaxStreams(MaxStreams::new(f.directionality(), s(f.maximum_streams())))
+        }
+        Frame::DataBlocked(f) => Frame::DataBlocked(DataBlocked::new(s(f.maximum_data()))),
+        Frame::StreamDataBlocked(f) => Frame::StreamDataBlocked(StreamDataBlocked::new(
+            s(f.stream_id()),
+            s(f.maximum_stream_data()),
+        )),
+        Frame::StreamsBlocked(f) => Frame::StreamsBlocked(StreamsBlocked::new(
+            f.directionality(),
+            s(f.maximum_streams()),
+        )),
         Frame::NewConnectionId(f) => Frame::NewConnectionId(
             NewConnectionId::new(
                 s(f.sequence_number()),
@@ -1149,9 +1097,9 @@ fn shortest_frame<'a>(frame: &Frame<&'a [u8]>) -> Frame<&'a [u8]> {
             )
             .unwrap(),
         ),
-        Frame::RetireConnectionId(f) => Frame::RetireConnectionId(RetireConnectionId {
-            sequence_number: s(f.sequence_number),
-        }),
+        Frame::RetireConnectionId(f) => {
+            Frame::RetireConnectionId(RetireConnectionId::new(s(f.sequence_number())))
+        }
         Frame::ConnectionClose(f) => {
             let error_code = match f.error_code() {
                 CloseErrorCode::Transport { code, frame_type } => CloseErrorCode::Transport {

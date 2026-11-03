@@ -8,17 +8,38 @@ use crate::var_int::{VarInt, VarIntField};
 /// A MAX_STREAM_DATA frame ([RFC 9000 §19.10]).
 ///
 /// Each field keeps the width of its variable-length integer encoding.
+/// No limit ties the fields together, so [`MaxStreamData::new`] accepts any
+/// values; the fields are read through methods of the same names.
 ///
 /// [RFC 9000 §19.10]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.10
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MaxStreamData {
-    /// The stream the limit applies to.
-    pub stream_id: VarIntField<StreamId>,
-    /// The maximum amount of data that can be sent on the stream, in bytes.
-    pub maximum_stream_data: VarIntField<VarInt>,
+    stream_id: VarIntField<StreamId>,
+    maximum_stream_data: VarIntField<VarInt>,
 }
 
 impl MaxStreamData {
+    /// The MAX_STREAM_DATA frame with these fields.
+    pub const fn new(
+        stream_id: VarIntField<StreamId>,
+        maximum_stream_data: VarIntField<VarInt>,
+    ) -> Self {
+        Self {
+            stream_id,
+            maximum_stream_data,
+        }
+    }
+
+    /// The stream the limit applies to.
+    pub const fn stream_id(&self) -> VarIntField<StreamId> {
+        self.stream_id
+    }
+
+    /// The maximum amount of data that can be sent on the stream, in bytes.
+    pub const fn maximum_stream_data(&self) -> VarIntField<VarInt> {
+        self.maximum_stream_data
+    }
+
     /// The Frame Type value.
     pub const fn type_value(&self) -> VarInt {
         type_var_int(type_value::MAX_STREAM_DATA)
@@ -57,10 +78,10 @@ pub mod codec {
     pub(crate) async fn read_max_stream_data<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
     ) -> Result<MaxStreamData, ReadVarIntError<F::Error>> {
-        Ok(MaxStreamData {
-            stream_id: read_field(io).await?,
-            maximum_stream_data: read_field(io).await?,
-        })
+        Ok(MaxStreamData::new(
+            read_field(io).await?,
+            read_field(io).await?,
+        ))
     }
 
     /// Writes the frame.
@@ -83,19 +104,24 @@ mod tests {
     use super::MaxStreamData;
     use crate::stream_id::StreamId;
     use crate::{
-        frame::{Frame, tests::assert_round_trip},
+        frame::{
+            Frame,
+            tests::{assert_bytes_round_trip, assert_round_trip},
+        },
         var_int::{VarInt, VarIntField},
     };
 
     #[test]
     fn round_trips() {
-        let frame = MaxStreamData {
-            stream_id: VarIntField::shortest(StreamId::from_var_int(VarInt::from(8u8))),
-            maximum_stream_data: VarIntField::shortest(VarInt::from(63u8)),
+        let stream_id = VarIntField::shortest(StreamId::from_var_int(VarInt::from(8u8)));
+        let maximum_stream_data = VarIntField::shortest(VarInt::from(63u8));
+        let frame = MaxStreamData::new(stream_id, maximum_stream_data);
+        let encoding = assert_round_trip(Frame::MaxStreamData(frame));
+        assert_eq!(encoding, [0x11, 0x08, 0x3f]);
+        let Frame::MaxStreamData(read) = assert_bytes_round_trip(&encoding) else {
+            panic!("{encoding:02x?}")
         };
-        assert_eq!(
-            assert_round_trip(Frame::MaxStreamData(frame)),
-            [0x11, 0x08, 0x3f]
-        );
+        assert_eq!(read.stream_id(), stream_id);
+        assert_eq!(read.maximum_stream_data(), maximum_stream_data);
     }
 }

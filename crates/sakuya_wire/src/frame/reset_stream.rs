@@ -9,19 +9,46 @@ use crate::var_int::{VarInt, VarIntField};
 /// A RESET_STREAM frame ([RFC 9000 §19.4]): the sender abruptly terminates the sending part of a stream.
 ///
 /// Each field keeps the width of its variable-length integer encoding.
+/// No limit ties the fields together, so [`ResetStream::new`] accepts any
+/// values; the fields are read through methods of the same names.
 ///
 /// [RFC 9000 §19.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.4
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ResetStream {
-    /// The stream being terminated.
-    pub stream_id: VarIntField<StreamId>,
-    /// The application protocol error code.
-    pub application_error_code: VarIntField<ApplicationErrorCode>,
-    /// The final size of the stream, in bytes.
-    pub final_size: VarIntField<VarInt>,
+    stream_id: VarIntField<StreamId>,
+    application_error_code: VarIntField<ApplicationErrorCode>,
+    final_size: VarIntField<VarInt>,
 }
 
 impl ResetStream {
+    /// The RESET_STREAM frame with these fields.
+    pub const fn new(
+        stream_id: VarIntField<StreamId>,
+        application_error_code: VarIntField<ApplicationErrorCode>,
+        final_size: VarIntField<VarInt>,
+    ) -> Self {
+        Self {
+            stream_id,
+            application_error_code,
+            final_size,
+        }
+    }
+
+    /// The stream being terminated.
+    pub const fn stream_id(&self) -> VarIntField<StreamId> {
+        self.stream_id
+    }
+
+    /// The application protocol error code.
+    pub const fn application_error_code(&self) -> VarIntField<ApplicationErrorCode> {
+        self.application_error_code
+    }
+
+    /// The final size of the stream, in bytes.
+    pub const fn final_size(&self) -> VarIntField<VarInt> {
+        self.final_size
+    }
+
     /// The Frame Type value.
     pub const fn type_value(&self) -> VarInt {
         type_var_int(type_value::RESET_STREAM)
@@ -61,11 +88,11 @@ pub mod codec {
     pub(crate) async fn read_reset_stream<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
     ) -> Result<ResetStream, ReadVarIntError<F::Error>> {
-        Ok(ResetStream {
-            stream_id: read_field(io).await?,
-            application_error_code: read_field(io).await?,
-            final_size: read_field(io).await?,
-        })
+        Ok(ResetStream::new(
+            read_field(io).await?,
+            read_field(io).await?,
+            read_field(io).await?,
+        ))
     }
 
     /// Writes the frame.
@@ -89,22 +116,26 @@ mod tests {
     use crate::application_error::ApplicationErrorCode;
     use crate::stream_id::StreamId;
     use crate::{
-        frame::{Frame, tests::assert_round_trip},
+        frame::{
+            Frame,
+            tests::{assert_bytes_round_trip, assert_round_trip},
+        },
         var_int::{VarInt, VarIntField},
     };
 
     #[test]
     fn round_trips() {
-        let frame = ResetStream {
-            stream_id: VarIntField::shortest(StreamId::from_var_int(VarInt::from(4u8))),
-            application_error_code: VarIntField::shortest(ApplicationErrorCode::new(VarInt::from(
-                0x100u16,
-            ))),
-            final_size: VarIntField::shortest(VarInt::from(70_000u32)),
+        let stream_id = VarIntField::shortest(StreamId::from_var_int(VarInt::from(4u8)));
+        let code = VarIntField::shortest(ApplicationErrorCode::new(VarInt::from(0x100u16)));
+        let final_size = VarIntField::shortest(VarInt::from(70_000u32));
+        let frame = ResetStream::new(stream_id, code, final_size);
+        let encoding = assert_round_trip(Frame::ResetStream(frame));
+        assert_eq!(encoding, [0x04, 0x04, 0x41, 0x00, 0x80, 0x01, 0x11, 0x70]);
+        let Frame::ResetStream(read) = assert_bytes_round_trip(&encoding) else {
+            panic!("{encoding:02x?}")
         };
-        assert_eq!(
-            assert_round_trip(Frame::ResetStream(frame)),
-            [0x04, 0x04, 0x41, 0x00, 0x80, 0x01, 0x11, 0x70]
-        );
+        assert_eq!(read.stream_id(), stream_id);
+        assert_eq!(read.application_error_code(), code);
+        assert_eq!(read.final_size(), final_size);
     }
 }
