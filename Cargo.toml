@@ -17,6 +17,7 @@ license = "Apache-2.0 OR MIT"
 [workspace.dependencies]
 bytes = "1.12.1"
 dashmap = "6.1.0"
+either = { version = "1.17.0", default-features = false }
 nitori_call = { path = "../nitori/crates/nitori_call" }
 nitori_id = { path = "../nitori/crates/nitori_id" }
 nitori_io = { path = "../nitori/crates/nitori_io" }

@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     frame::{
-        DataEndError, Either, Extensions, Frame, InvalidDataError, LengthError, NoLength,
+        DataEndError, Extensions, Frame, InvalidDataError, LengthError, NoLength,
         codec::{ReadFrameError, ReadFrameHostExt as _},
         tests::{
             assert_round_trip, check_max, edge_fields, length_field, short, sid, stream_frame, vi,
@@ -17,6 +17,7 @@ use crate::{
     stream_id::StreamId,
     var_int::{VarInt, VarIntField, VarIntWidth},
 };
+use either::Either;
 
 #[test]
 fn type_bits() {

@@ -47,7 +47,8 @@
 //!   [`LengthKind`] of one of three types: [`VarIntWidth`], for a frame with
 //!   a Length field of that width; [`NoLength`], for a frame without one,
 //!   whose data extends to the end of the packet; and
-//!   [`Either<NoLength, VarIntWidth>`](Either), for either of the two. The
+//!   [`Either<NoLength, VarIntWidth>`](Either), of the `either` crate, for
+//!   either of the two. The
 //!   last is the default and what reading gives, since only the Frame Type
 //!   that was read tells which it is; the first two convert into it with
 //!   `From`. Each of the three has its own `new` and its own write
@@ -119,8 +120,9 @@
 //! not enabled ([RFC 9221]).
 //!
 //! ```
+//! use either::Either;
 //! use sakuya_wire::{
-//!     frame::{Either, Extensions, Frame, Frames},
+//!     frame::{Extensions, Frame, Frames},
 //!     var_int::VarIntWidth,
 //! };
 //!
@@ -179,6 +181,7 @@ use crate::var_int::{
 };
 use bytes::Buf;
 use core::{convert::Infallible, iter::FusedIterator};
+use either::Either;
 use nitori_call::{Direct, Receiver, ReceiverAccess};
 use nitori_io::{Read, ReadChunk};
 use snafu::Snafu;
@@ -585,21 +588,6 @@ impl<D: Buf> Frame<D> {
     pub fn encoded_len(&self) -> usize {
         each_frame!(self, frame => frame.encoded_len())
     }
-}
-
-/// One of two values.
-///
-/// The Length field of a STREAM or DATAGRAM frame that was read is
-/// `Either<NoLength, VarIntWidth>`; see [`LengthKind`].
-///
-/// This type is provisional: it may be replaced by the `Either` of the
-/// `either` crate.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Either<L, R> {
-    /// The first kind of value.
-    Left(L),
-    /// The second kind of value.
-    Right(R),
 }
 
 /// The absence of a Length field in a STREAM or DATAGRAM frame: the data

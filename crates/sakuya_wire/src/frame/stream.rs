@@ -2,7 +2,7 @@
 //!
 //! [RFC 9000 §19.8]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.8
 use super::{
-    DataEndError, Either, Head, InvalidDataError, LengthError, LengthKind, NoLength, length_width,
+    DataEndError, Head, InvalidDataError, LengthError, LengthKind, NoLength, length_width,
     max_len_with_length_field, type_value, type_var_int,
 };
 use crate::{
@@ -10,6 +10,7 @@ use crate::{
     var_int::{VarInt, VarIntField, VarIntWidth},
 };
 use bytes::Buf;
+use either::Either;
 
 /// The bits of a STREAM frame type ([RFC 9000 §19.8]).
 ///
@@ -345,11 +346,12 @@ pub mod codec {
 
     use super::{Stream, StreamTypeValue, bits};
     use crate::{
-        frame::{DataEndError, Either, InvalidDataError, NoLength, read_field},
+        frame::{DataEndError, InvalidDataError, NoLength, read_field},
         payload::{ReadPayloadError, read_payload, read_payload_to_end},
         var_int::{VarInt, VarIntField, VarIntWidth, codec::ReadVarIntError},
     };
     use bytes::Buf;
+    use either::Either;
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{calls::WriteAllError, prelude::*};
     use snafu::{ResultExt, Snafu};

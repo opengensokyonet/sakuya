@@ -1,11 +1,10 @@
 //! DATAGRAM frames ([RFC 9221 §4]).
 //!
 //! [RFC 9221 §4]: https://www.rfc-editor.org/rfc/rfc9221.html#section-4
-use super::{
-    Either, Head, LengthError, LengthKind, NoLength, length_width, type_value, type_var_int,
-};
+use super::{Head, LengthError, LengthKind, NoLength, length_width, type_value, type_var_int};
 use crate::var_int::{VarInt, VarIntWidth};
 use bytes::Buf;
+use either::Either;
 
 /// A DATAGRAM frame ([RFC 9221 §4]): type `0x31` with a Length field, `0x30`
 /// without.
@@ -189,11 +188,12 @@ pub mod codec {
 
     use super::{Datagram, DatagramTypeValue};
     use crate::{
-        frame::{Either, NoLength, read_field},
+        frame::{NoLength, read_field},
         payload::{ReadPayloadError, read_payload, read_payload_to_end},
         var_int::{VarInt, VarIntField, VarIntWidth, codec::ReadVarIntError},
     };
     use bytes::Buf;
+    use either::Either;
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{calls::WriteAllError, prelude::*};
     use snafu::{ResultExt, Snafu};
@@ -332,12 +332,13 @@ mod tests {
     };
     use crate::{
         frame::{
-            Either, Extensions, Frame, Frames, LengthError, NoLength,
+            Extensions, Frame, Frames, LengthError, NoLength,
             codec::{ReadFrameError, ReadFrameHostExt as _},
             tests::{assert_round_trip, datagram_frame},
         },
         var_int::{VarInt, VarIntWidth},
     };
+    use either::Either;
 
     #[test]
     fn round_trips_with_and_without_length() {

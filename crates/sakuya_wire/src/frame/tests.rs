@@ -1,7 +1,7 @@
 //! Tests that cover every frame type, and the helpers the tests of the frame
 //! modules share.
 use super::{
-    Either, Extensions, Frame, FrameType, Frames, InvalidDataError, LengthError, NoLength,
+    Extensions, Frame, FrameType, Frames, InvalidDataError, LengthError, NoLength,
     UnknownFrameTypeError,
     ack::{Ack, AckRange, AckRanges, EcnCounts},
     codec::{ExtensionTypeValue, ReadFrameError, ReadFrameHostExt as _, WriteFrameHostExt as _},
@@ -42,6 +42,7 @@ use crate::{
 };
 use bytes::{Buf, Bytes};
 use core::num::NonZeroUsize;
+use either::Either;
 
 /// The STREAM frame as `Stream::<_>::new` constructs it, with a Length field
 /// of width `length` if there is one.

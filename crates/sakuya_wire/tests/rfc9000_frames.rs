@@ -1,9 +1,10 @@
 //! The frames of RFC 9000 §19 at the edges of their fields, through the public
 //! interface.
 use core::convert::Infallible;
+use either::Either;
 use sakuya_wire::{
     frame::{
-        Either, Extensions, Frame, FrameType,
+        Extensions, Frame, FrameType,
         codec::{ReadFrameError, ReadFrameHostExt as _},
     },
     packet_number::PacketNumber,
