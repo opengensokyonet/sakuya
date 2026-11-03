@@ -4,14 +4,14 @@
 
 #![cfg(feature = "ring")]
 
-use sakuya_protection::backend::AeadAlgorithm;
-use sakuya_protection::backend::KdfAlgorithm;
-use sakuya_protection::backend::ring::RingBackend;
-use sakuya_protection::header_protection::HeaderProtectionKey;
-use sakuya_protection::initial::{INITIAL_AEAD, InitialSecrets};
-use sakuya_protection::packet_key::PacketKey;
-use sakuya_protection::retry::verify_retry_integrity_tag;
-use sakuya_protection::secret::TrafficSecret;
+use sakuya_packet_protection::backend::AeadAlgorithm;
+use sakuya_packet_protection::backend::KdfAlgorithm;
+use sakuya_packet_protection::backend::ring::RingBackend;
+use sakuya_packet_protection::header_protection::HeaderProtectionKey;
+use sakuya_packet_protection::initial::{INITIAL_AEAD, InitialSecrets};
+use sakuya_packet_protection::packet_key::PacketKey;
+use sakuya_packet_protection::retry::verify_retry_integrity_tag;
+use sakuya_packet_protection::secret::TrafficSecret;
 use sakuya_wire::connection_id::ConnectionId;
 use sakuya_wire::frame::{Extensions, Frame, Frames};
 use sakuya_wire::header::codec::{ReadLongHeaderHostExt as _, ReadShortHeaderHostExt as _};
