@@ -110,10 +110,10 @@
 //! error of a frame type has a variant for
 //! each field that cannot be read, named after the field, such as
 //! [`ack::codec::ReadAckError::LargestAcknowledged`]; the Gap and ACK Range
-//! Length of an ACK Range carry the position of their ACK Range.
-//! NEW_CONNECTION_ID and RESET_STREAM_AT report their variable-length
-//! integer fields together, as `Field`. Each broken limit has a variant of
-//! its own as well.
+//! Length of an ACK Range carry the position of their ACK Range. Each
+//! broken limit has a variant of its own as well, named after the rule,
+//! such as
+//! [`new_connection_id::codec::ReadNewConnectionIdError::RetirePriorToAboveSequenceNumber`].
 //!
 //! Every [`codec::ReadFrameError`] corresponds to FRAME_ENCODING_ERROR, with
 //! two exceptions that correspond to PROTOCOL_VIOLATION

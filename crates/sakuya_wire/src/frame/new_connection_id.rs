@@ -134,7 +134,7 @@ pub mod codec {
             codec::{ReadConnectionIdError, ReadConnectionIdExt as _},
         },
         frame::read_field,
-        var_int::{VarInt, VarIntField, codec::ReadVarIntError},
+        var_int::codec::ReadVarIntError,
     };
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{
@@ -147,8 +147,12 @@ pub mod codec {
     pub(crate) async fn read_new_connection_id<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
     ) -> Result<NewConnectionId, ReadNewConnectionIdError<F::Error>> {
-        let sequence_number = field(io).await?;
-        let retire_prior_to = field(io).await?;
+        let sequence_number = read_field(io)
+            .await
+            .context(read_new_connection_id_error::SequenceNumberSnafu)?;
+        let retire_prior_to = read_field(io)
+            .await
+            .context(read_new_connection_id_error::RetirePriorToSnafu)?;
         let connection_id = io
             .read_connection_id()
             .await
@@ -168,21 +172,19 @@ pub mod codec {
         Ok(frame)
     }
 
-    async fn field<F: Read, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<VarIntField<VarInt>, ReadNewConnectionIdError<F::Error>> {
-        read_field(io)
-            .await
-            .context(read_new_connection_id_error::FieldSnafu)
-    }
-
     /// Failures of reading a NEW_CONNECTION_ID frame.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_new_connection_id_error), visibility(pub(crate)))]
     pub enum ReadNewConnectionIdError<E> {
-        /// The Sequence Number or Retire Prior To field could not be read.
-        #[snafu(display("NEW_CONNECTION_ID field read failed"))]
-        Field {
+        /// The Sequence Number field could not be read.
+        #[snafu(display("NEW_CONNECTION_ID Sequence Number read failed"))]
+        SequenceNumber {
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
+        /// The Retire Prior To field could not be read.
+        #[snafu(display("NEW_CONNECTION_ID Retire Prior To read failed"))]
+        RetirePriorTo {
             /// The failure of reading the field.
             source: ReadVarIntError<E>,
         },
@@ -206,7 +208,7 @@ pub mod codec {
         },
         /// The frame retires sequence numbers beyond its own.
         #[snafu(transparent)]
-        RetirePriorTo {
+        RetirePriorToAboveSequenceNumber {
             /// The broken rule.
             source: RetirePriorToError,
         },
@@ -301,10 +303,23 @@ mod tests {
         };
         assert!(matches!(
             read(&encoding),
-            ReadNewConnectionIdError::RetirePriorTo { source } if source == expected
+            ReadNewConnectionIdError::RetirePriorToAboveSequenceNumber { source } if source == expected
         ));
         assert_eq!(frame(1, 2, &[1]), Err(expected));
         assert!(frame(2, 2, &[1]).is_ok());
+    }
+
+    #[test]
+    fn each_variable_length_integer_field_has_its_own_failure() {
+        // A two-byte encoding cut short in each field.
+        assert!(matches!(
+            read(&[0x18, 0x40]),
+            ReadNewConnectionIdError::SequenceNumber { source } if source.is_incomplete()
+        ));
+        assert!(matches!(
+            read(&[0x18, 0x01, 0x40]),
+            ReadNewConnectionIdError::RetirePriorTo { source } if source.is_incomplete()
+        ));
     }
 
     #[test]

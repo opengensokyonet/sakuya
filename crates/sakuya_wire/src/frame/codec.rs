@@ -633,18 +633,23 @@ impl<E> ReadFrameError<E> {
                 matches!(source, ReadStreamsBlockedError::Field { source } if source.is_incomplete())
             }
             Self::NewConnectionId { source, .. } => match source {
-                ReadNewConnectionIdError::Field { source } => source.is_incomplete(),
+                ReadNewConnectionIdError::SequenceNumber { source }
+                | ReadNewConnectionIdError::RetirePriorTo { source } => source.is_incomplete(),
                 ReadNewConnectionIdError::ConnectionId { source } => source.is_incomplete(),
                 ReadNewConnectionIdError::StatelessResetToken { source } => array(source),
                 ReadNewConnectionIdError::EmptyConnectionId { .. }
-                | ReadNewConnectionIdError::RetirePriorTo { .. } => false,
+                | ReadNewConnectionIdError::RetirePriorToAboveSequenceNumber { .. } => false,
             },
             Self::PathChallenge { source, .. } | Self::PathResponse { source, .. } => array(source),
             Self::ConnectionCloseTransport { source } => source.is_incomplete(),
             Self::ConnectionCloseApplication { source } => source.is_incomplete(),
-            Self::ResetStreamAt { source, .. } => {
-                matches!(source, ReadResetStreamAtError::Field { source } if source.is_incomplete())
-            }
+            Self::ResetStreamAt { source, .. } => match source {
+                ReadResetStreamAtError::StreamId { source }
+                | ReadResetStreamAtError::ApplicationProtocolErrorCode { source }
+                | ReadResetStreamAtError::FinalSize { source }
+                | ReadResetStreamAtError::ReliableSize { source } => source.is_incomplete(),
+                ReadResetStreamAtError::ReliableSizeAboveFinalSize { .. } => false,
+            },
             Self::Datagram { source, .. } => match source {
                 ReadDatagramError::Length { source } => source.is_incomplete(),
                 ReadDatagramError::Data { source } => payload(source),

@@ -127,11 +127,7 @@ pub mod codec {
     #![allow(missing_docs)]
 
     use super::{ReliableSizeError, ResetStreamAt};
-    use crate::{
-        frame::read_field,
-        var_int::{VarInt, VarIntField, codec::ReadVarIntError},
-    };
-    use core::convert::Infallible;
+    use crate::{frame::read_field, var_int::codec::ReadVarIntError};
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{calls::WriteAllError, prelude::*};
     use snafu::{ResultExt, Snafu};
@@ -140,39 +136,49 @@ pub mod codec {
     pub(crate) async fn read_reset_stream_at<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
     ) -> Result<ResetStreamAt, ReadResetStreamAtError<F::Error>> {
-        let stream_id = field(io).await?;
-        let application_error_code = field(io).await?;
-        let final_size: VarIntField<VarInt> = field(io).await?;
-        let reliable_size: VarIntField<VarInt> = field(io).await?;
+        use read_reset_stream_at_error::*;
+        let stream_id = read_field(io).await.context(StreamIdSnafu)?;
+        let application_error_code = read_field(io)
+            .await
+            .context(ApplicationProtocolErrorCodeSnafu)?;
+        let final_size = read_field(io).await.context(FinalSizeSnafu)?;
+        let reliable_size = read_field(io).await.context(ReliableSizeSnafu)?;
         let frame =
             ResetStreamAt::new(stream_id, application_error_code, final_size, reliable_size)?;
         Ok(frame)
-    }
-
-    async fn field<T, F, A>(io: &mut A) -> Result<VarIntField<T>, ReadResetStreamAtError<F::Error>>
-    where
-        T: Copy + Into<VarInt> + TryFrom<VarInt, Error = Infallible>,
-        F: Read,
-        A: ReceiverAccess<Family = F>,
-    {
-        read_field(io)
-            .await
-            .context(read_reset_stream_at_error::FieldSnafu)
     }
 
     /// Failures of reading a RESET_STREAM_AT frame.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_reset_stream_at_error), visibility(pub(crate)))]
     pub enum ReadResetStreamAtError<E> {
-        /// A field could not be read.
-        #[snafu(display("RESET_STREAM_AT field read failed"))]
-        Field {
+        /// The Stream ID field could not be read.
+        #[snafu(display("RESET_STREAM_AT Stream ID read failed"))]
+        StreamId {
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
+        /// The Application Protocol Error Code field could not be read.
+        #[snafu(display("RESET_STREAM_AT Application Protocol Error Code read failed"))]
+        ApplicationProtocolErrorCode {
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
+        /// The Final Size field could not be read.
+        #[snafu(display("RESET_STREAM_AT Final Size read failed"))]
+        FinalSize {
+            /// The failure of reading the field.
+            source: ReadVarIntError<E>,
+        },
+        /// The Reliable Size field could not be read.
+        #[snafu(display("RESET_STREAM_AT Reliable Size read failed"))]
+        ReliableSize {
             /// The failure of reading the field.
             source: ReadVarIntError<E>,
         },
         /// The reliable size exceeds the final size.
         #[snafu(transparent)]
-        ReliableSize {
+        ReliableSizeAboveFinalSize {
             /// The broken rule.
             source: ReliableSizeError,
         },
@@ -232,19 +238,38 @@ mod tests {
         assert!(matches!(
             input.sync_read_frame_unpin(Extensions::ALL),
             Err(ReadFrameError::ResetStreamAt {
-                source: ReadResetStreamAtError::ReliableSize { source },
+                source: ReadResetStreamAtError::ReliableSizeAboveFinalSize { source },
                 ..
             }) if source == expected
         ));
         assert_eq!(frame(5, 6), Err(expected));
-        // A field cut short.
-        let mut input = &[0x24, 0x05, 0x06][..];
+    }
+
+    #[test]
+    fn each_field_has_its_own_failure() {
+        fn read(encoding: &[u8]) -> ReadResetStreamAtError<core::convert::Infallible> {
+            let mut input = encoding;
+            match input.sync_read_frame_unpin(Extensions::ALL) {
+                Err(ReadFrameError::ResetStreamAt { source, .. }) => source,
+                other => panic!("{other:?}"),
+            }
+        }
+        // A two-byte encoding cut short in each field.
         assert!(matches!(
-            input.sync_read_frame_unpin(Extensions::ALL),
-            Err(ReadFrameError::ResetStreamAt {
-                source: ReadResetStreamAtError::Field { .. },
-                ..
-            })
+            read(&[0x24, 0x40]),
+            ReadResetStreamAtError::StreamId { source } if source.is_incomplete()
+        ));
+        assert!(matches!(
+            read(&[0x24, 0x00, 0x40]),
+            ReadResetStreamAtError::ApplicationProtocolErrorCode { source } if source.is_incomplete()
+        ));
+        assert!(matches!(
+            read(&[0x24, 0x00, 0x00, 0x40]),
+            ReadResetStreamAtError::FinalSize { source } if source.is_incomplete()
+        ));
+        assert!(matches!(
+            read(&[0x24, 0x00, 0x00, 0x05, 0x40]),
+            ReadResetStreamAtError::ReliableSize { source } if source.is_incomplete()
         ));
     }
 }
