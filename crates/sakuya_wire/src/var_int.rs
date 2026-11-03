@@ -300,11 +300,11 @@ impl<T: Copy + Into<VarInt> + TryFrom<VarInt>> VarIntField<T> {
     ///
     /// # Errors
     ///
-    /// [`WidthError`] if `value` does not fit `width`.
-    pub fn new(value: T, width: VarIntWidth) -> Result<Self, WidthError> {
+    /// [`VarIntWidthError`] if `value` does not fit `width`.
+    pub fn new(value: T, width: VarIntWidth) -> Result<Self, VarIntWidthError> {
         let var_int = value.into();
         if !width.fits(var_int) {
-            return Err(WidthError {
+            return Err(VarIntWidthError {
                 value: var_int,
                 width,
             });
@@ -324,7 +324,7 @@ impl<T: Copy + Into<VarInt> + TryFrom<VarInt>> VarIntField<T> {
     "{value} does not fit a {}-byte variable-length integer encoding",
     width.encoded_len()
 ))]
-pub struct WidthError {
+pub struct VarIntWidthError {
     /// The value.
     pub value: VarInt,
     /// The width that cannot hold it.

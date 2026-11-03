@@ -1,5 +1,5 @@
 use super::{
-    OutOfRangeError, VarInt, VarIntField, VarIntWidth, WidthError,
+    OutOfRangeError, VarInt, VarIntField, VarIntWidth, VarIntWidthError,
     codec::{
         ReadVarIntError, ReadVarIntFieldError, ReadVarIntFieldHostExt as _, ReadVarIntHostExt as _,
         WriteVarIntError, WriteVarIntFieldHostExt as _, WriteVarIntHostExt as _,
@@ -400,7 +400,7 @@ fn fields_check_their_width() {
                 assert_eq!(field.into_inner(), value);
                 assert_eq!(field == shortest, width == shortest.width());
             } else {
-                assert_eq!(field, Err(WidthError { value, width }));
+                assert_eq!(field, Err(VarIntWidthError { value, width }));
             }
         }
     }
