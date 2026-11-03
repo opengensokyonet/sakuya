@@ -56,9 +56,7 @@ impl<D: Buf> NewToken<D> {
     /// narrow for the length of the token.
     pub fn new(token_length_width: VarIntWidth, token: D) -> Result<Self, InvalidNewTokenError> {
         let length = token.remaining();
-        if length == 0 {
-            return Err(InvalidNewTokenError::Empty);
-        }
+        EmptyTokenError::check(length)?;
         LengthError::check(length, token_length_width)?;
         Ok(Self {
             token_length_width,
@@ -79,13 +77,35 @@ impl<D: Buf> NewToken<D> {
     }
 }
 
+/// The token of a NEW_TOKEN frame is empty ([RFC 9000 §19.7]).
+///
+/// [`NewToken::new`] reports it as [`InvalidNewTokenError::Empty`], and
+/// reading as [`codec::ReadNewTokenError::Empty`].
+///
+/// [RFC 9000 §19.7]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.7
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("NEW_TOKEN token is empty"))]
+pub struct EmptyTokenError;
+
+impl EmptyTokenError {
+    /// Checks that a token of `length` bytes is not empty.
+    pub(crate) fn check(length: usize) -> Result<(), Self> {
+        if length == 0 {
+            return Err(Self);
+        }
+        Ok(())
+    }
+}
+
 /// A NEW_TOKEN frame would break a rule of the encoding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(module(invalid_new_token_error), visibility(pub(crate)))]
 pub enum InvalidNewTokenError {
     /// The token is empty.
-    #[snafu(display("NEW_TOKEN token is empty"))]
-    Empty,
+    #[snafu(transparent)]
+    Empty {
+        /// The broken rule.
+        source: EmptyTokenError,
+    },
     /// The token is longer than the Token Length field can state.
     #[snafu(transparent)]
     Length {
@@ -105,7 +125,7 @@ pub mod codec {
     // documentation comments; the module documentation above describes them.
     #![allow(missing_docs)]
 
-    use super::{InvalidNewTokenError, NewToken};
+    use super::{EmptyTokenError, InvalidNewTokenError, NewToken};
     use crate::{
         frame::read_field,
         payload::{ReadPayloadError, read_payload},
@@ -133,7 +153,7 @@ pub mod codec {
             .await
             .context(read_new_token_error::TokenSnafu)?;
         NewToken::new(length.width(), token).map_err(|error| match error {
-            InvalidNewTokenError::Empty => ReadNewTokenError::Empty,
+            InvalidNewTokenError::Empty { source } => ReadNewTokenError::Empty { source },
             // invariant: the Token Length field was read at this width, and
             // `read_payload` returns a token of exactly the length it states:
             // it fails on a shorter one and panics on a longer chunk.
@@ -152,8 +172,11 @@ pub mod codec {
             source: ReadVarIntError<E>,
         },
         /// The Token Length is zero.
-        #[snafu(display("NEW_TOKEN token is empty"))]
-        Empty,
+        #[snafu(transparent)]
+        Empty {
+            /// The broken rule.
+            source: EmptyTokenError,
+        },
         /// The token could not be read.
         #[snafu(display("NEW_TOKEN token read failed"))]
         Token {
@@ -185,7 +208,7 @@ pub mod codec {
 
 #[cfg(test)]
 mod tests {
-    use super::{InvalidNewTokenError, NewToken, codec::ReadNewTokenError};
+    use super::{EmptyTokenError, InvalidNewTokenError, NewToken, codec::ReadNewTokenError};
     use crate::{
         frame::{
             Extensions, Frame, LengthError,
@@ -225,13 +248,17 @@ mod tests {
         assert!(matches!(
             input.sync_read_frame_unpin(Extensions::NONE),
             Err(ReadFrameError::NewToken {
-                source: ReadNewTokenError::Empty,
-                ..
+                source: ReadNewTokenError::Empty {
+                    source: EmptyTokenError
+                },
             })
         ));
+        // Construction reports the same failure.
         assert_eq!(
             NewToken::new(VarIntWidth::One, &b""[..]),
-            Err(InvalidNewTokenError::Empty)
+            Err(InvalidNewTokenError::Empty {
+                source: EmptyTokenError
+            })
         );
     }
 }

@@ -565,7 +565,7 @@ impl<E> ReadFrameError<E> {
             Self::NewToken { source, .. } => match source {
                 ReadNewTokenError::TokenLength { source } => source.is_incomplete(),
                 ReadNewTokenError::Token { source } => payload(source),
-                ReadNewTokenError::Empty => false,
+                ReadNewTokenError::Empty { .. } => false,
             },
             Self::Stream { source, .. } => match source {
                 Stream::StreamId { source }
