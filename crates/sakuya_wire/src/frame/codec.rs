@@ -29,14 +29,17 @@
 //! let max_data = Frame::<&[u8]>::MaxData(MaxData::new(maximum_data));
 //! output.sync_write_frame_unpin(max_data.clone()).unwrap();
 //! let stream_id = VarIntField::shortest(StreamId::from_var_int(VarInt::from(4u8)));
-//! let stream = Stream::new(stream_id, None, Some(VarIntWidth::One), &b"hello"[..], true);
-//! let stream = Frame::Stream(stream.unwrap());
+//! // A STREAM frame with a Length field. Reading gives `Stream<D>`, which
+//! // states its Length field as `Either`; `into` converts to it.
+//! let stream = Stream::<_, VarIntWidth>::new(stream_id, None, VarIntWidth::One, &b"hello"[..], true);
+//! let stream = Frame::Stream(stream.unwrap().into());
 //! output.sync_write_frame_unpin(stream.clone()).unwrap();
 //!
 //! // A STREAM frame checks its fields when it is constructed, so writing it
 //! // checks nothing: a one-byte Length field cannot state 64 bytes of data.
 //! let data = [0; 64];
-//! assert!(Stream::new(stream_id, None, Some(VarIntWidth::One), &data[..], true).is_err());
+//! let long = Stream::<_, VarIntWidth>::new(stream_id, None, VarIntWidth::One, &data[..], true);
+//! assert!(long.is_err());
 //!
 //! // Reading a byte slice yields subslices of it as payload fields.
 //! let mut input = output.as_slice();
@@ -70,7 +73,10 @@ use super::{
     },
     crypto::codec::{ReadCryptoError, read_crypto},
     data_blocked::codec::read_data_blocked,
-    datagram::codec::{ReadDatagramError, read_datagram},
+    datagram::{
+        DatagramTypeValue,
+        codec::{ReadDatagramError, read_datagram},
+    },
     handshake_done::HandshakeDone,
     max_data::codec::read_max_data,
     max_stream_data::codec::{ReadMaxStreamDataError, read_max_stream_data},
@@ -85,7 +91,10 @@ use super::{
     reset_stream_at::codec::{ReadResetStreamAtError, read_reset_stream_at},
     retire_connection_id::codec::read_retire_connection_id,
     stop_sending::codec::{ReadStopSendingError, read_stop_sending},
-    stream::codec::{ReadStreamError, read_stream},
+    stream::{
+        StreamTypeValue,
+        codec::{ReadStreamError, read_stream},
+    },
     stream_data_blocked::codec::{ReadStreamDataBlockedError, read_stream_data_blocked},
     streams_blocked::codec::{ReadStreamsBlockedError, read_streams_blocked},
     type_value, type_var_int,
@@ -174,11 +183,17 @@ where
         }
         FrameType::Crypto => Frame::Crypto(read_crypto(io).await.context(CryptoSnafu)?),
         FrameType::NewToken => Frame::NewToken(read_new_token(io).await.context(NewTokenSnafu)?),
-        FrameType::Stream => Frame::Stream(
-            read_stream(io, frame_type)
-                .await
-                .context(StreamSnafu { frame_type })?,
-        ),
+        FrameType::Stream => {
+            let frame_type = StreamTypeValue::new(frame_type);
+            // invariant: `FrameType::of` gives `Stream` for exactly the STREAM
+            // Frame Type values.
+            let frame_type = frame_type.unwrap_or_else(|| unreachable!("STREAM {value:#x}"));
+            Frame::Stream(
+                read_stream(io, frame_type)
+                    .await
+                    .context(StreamSnafu { frame_type })?,
+            )
+        }
         FrameType::MaxData => Frame::MaxData(read_max_data(io).await.context(MaxDataSnafu)?),
         FrameType::MaxStreamData => {
             Frame::MaxStreamData(read_max_stream_data(io).await.context(MaxStreamDataSnafu)?)
@@ -239,11 +254,17 @@ where
         FrameType::ResetStreamAt => {
             Frame::ResetStreamAt(read_reset_stream_at(io).await.context(ResetStreamAtSnafu)?)
         }
-        FrameType::Datagram => Frame::Datagram(
-            read_datagram(io, value == DATAGRAM_WITH_LENGTH)
-                .await
-                .context(DatagramSnafu { frame_type })?,
-        ),
+        FrameType::Datagram => {
+            let frame_type = DatagramTypeValue::new(frame_type);
+            // invariant: `FrameType::of` gives `Datagram` for exactly the
+            // DATAGRAM Frame Type values.
+            let frame_type = frame_type.unwrap_or_else(|| unreachable!("DATAGRAM {value:#x}"));
+            Frame::Datagram(
+                read_datagram(io, frame_type)
+                    .await
+                    .context(DatagramSnafu { frame_type })?,
+            )
+        }
     })
 }
 
@@ -377,7 +398,7 @@ pub enum ReadFrameError<E> {
     #[snafu(display("STREAM frame read failed"))]
     Stream {
         /// The Frame Type.
-        frame_type: VarInt,
+        frame_type: StreamTypeValue,
         /// The failure.
         source: ReadStreamError<E>,
     },
@@ -471,7 +492,7 @@ pub enum ReadFrameError<E> {
     #[snafu(display("DATAGRAM frame read failed"))]
     Datagram {
         /// The Frame Type.
-        frame_type: VarInt,
+        frame_type: DatagramTypeValue,
         /// The failure.
         source: ReadDatagramError<E>,
     },
@@ -487,9 +508,9 @@ impl<E> ReadFrameError<E> {
         use type_value::*;
         Some(match *self {
             Self::FrameType { .. } => return None,
-            Self::LongerTypeEncoding { frame_type, .. }
-            | Self::Stream { frame_type, .. }
-            | Self::Datagram { frame_type, .. } => frame_type,
+            Self::LongerTypeEncoding { frame_type, .. } => frame_type,
+            Self::Stream { frame_type, .. } => frame_type.get(),
+            Self::Datagram { frame_type, .. } => frame_type.get(),
             Self::UnknownType { source } => source.frame_type.get(),
             Self::ExtensionNotEnabled { frame_type } => frame_type.get(),
             Self::Ack { .. } => type_var_int(ACK),

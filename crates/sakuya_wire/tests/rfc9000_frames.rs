@@ -3,7 +3,7 @@
 use core::convert::Infallible;
 use sakuya_wire::{
     frame::{
-        Extensions, Frame, FrameType,
+        Either, Extensions, Frame, FrameType,
         codec::{ReadFrameError, ReadFrameHostExt as _},
     },
     packet_number::PacketNumber,
@@ -269,7 +269,8 @@ fn stream_type_bits_announce_the_fields() {
         );
         assert_eq!(stream.data_offset().get(), if off { 9 } else { 0 });
         assert_eq!(*stream.data(), [0xaa, 0xbb]);
-        assert_eq!((stream.fin(), stream.length_width().is_some()), (fin, len));
+        let has_length = matches!(stream.length(), Either::Right(_));
+        assert_eq!((stream.fin(), has_length), (fin, len));
         assert_eq!(accepts(&bytes).type_value().get(), u64::from(type_value));
     }
 }

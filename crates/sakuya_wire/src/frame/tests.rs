@@ -1,7 +1,8 @@
 //! Tests that cover every frame type, and the helpers the tests of the frame
 //! modules share.
 use super::{
-    Extensions, Frame, FrameType, Frames, InvalidDataError, LengthError, UnknownFrameTypeError,
+    Either, Extensions, Frame, FrameType, Frames, InvalidDataError, LengthError, NoLength,
+    UnknownFrameTypeError,
     ack::{Ack, AckRange, AckRanges, EcnCounts},
     codec::{ExtensionTypeValue, ReadFrameError, ReadFrameHostExt as _, WriteFrameHostExt as _},
     connection_close::{CloseErrorCode, ConnectionClose},
@@ -9,6 +10,7 @@ use super::{
     data_blocked::DataBlocked,
     datagram::Datagram,
     handshake_done::HandshakeDone,
+    length_width,
     max_data::MaxData,
     max_stream_data::MaxStreamData,
     max_streams::MaxStreams,
@@ -38,8 +40,35 @@ use crate::{
         codec::{ReadVarIntHostExt as _, WriteVarIntFieldHostExt as _},
     },
 };
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use core::num::NonZeroUsize;
+
+/// The STREAM frame as `Stream::<_>::new` constructs it, with a Length field
+/// of width `length` if there is one.
+pub(crate) fn stream_frame<D: Buf>(
+    stream_id: VarIntField<StreamId>,
+    offset: Option<VarIntField<VarInt>>,
+    length: Option<VarIntWidth>,
+    data: D,
+    fin: bool,
+) -> Result<Stream<D>, InvalidDataError> {
+    Stream::<_>::new(stream_id, offset, either_length(length), data, fin)
+}
+
+/// The DATAGRAM frame as `Datagram::<_>::new` constructs it, with a Length
+/// field of width `length` if there is one.
+pub(crate) fn datagram_frame<D: Buf>(
+    length: Option<VarIntWidth>,
+    data: D,
+) -> Result<Datagram<D>, LengthError> {
+    Datagram::<_>::new(either_length(length), data)
+}
+
+/// A Length field of width `length`, or none, as a frame that was read
+/// states it.
+pub(crate) fn either_length(length: Option<VarIntWidth>) -> Either<NoLength, VarIntWidth> {
+    length.map_or(Either::Left(NoLength), Either::Right)
+}
 
 pub(crate) fn vi(value: u64) -> VarInt {
     VarInt::try_from(value).unwrap()
@@ -254,11 +283,11 @@ fn sample_frames() -> Vec<Frame<&'static [u8]>> {
             )
             .unwrap(),
         ),
-        Frame::Datagram(Datagram::new(Some(VarIntWidth::One), &b"datagram"[..]).unwrap()),
-        Frame::Datagram(Datagram::new(None, &b"to the end"[..]).unwrap()),
+        Frame::Datagram(datagram_frame(Some(VarIntWidth::One), &b"datagram"[..]).unwrap()),
+        Frame::Datagram(datagram_frame(None, &b"to the end"[..]).unwrap()),
     ];
     for bits in 0..8u64 {
-        let stream = Stream::new(
+        let stream = stream_frame(
             short(sid(4)),
             (bits & 0x04 != 0).then(|| short(vi(1 << 20))),
             (bits & 0x02 != 0).then_some(VarIntWidth::One),
@@ -316,7 +345,7 @@ fn stream_without_length_takes_the_rest_of_the_payload() {
         [
             Frame::Ping(Ping),
             Frame::Stream(
-                Stream::new(
+                stream_frame(
                     short(sid(1)),
                     None,
                     None,
@@ -1049,11 +1078,11 @@ fn edge_frames() -> Vec<Frame<&'static [u8]>> {
             Frame::ResetStream(ResetStream::new(short(sid(0)), application, x)),
             Frame::StopSending(StopSending::new(stream_id, application)),
             Frame::Crypto(Crypto::new(x, VarIntWidth::One, data).unwrap()),
-            Frame::Stream(Stream::new(stream_id, None, None, &b"hello"[..], false).unwrap()),
+            Frame::Stream(stream_frame(stream_id, None, None, &b"hello"[..], false).unwrap()),
             Frame::Stream(
-                Stream::new(short(sid(0)), Some(x), Some(VarIntWidth::One), data, true).unwrap(),
+                stream_frame(short(sid(0)), Some(x), Some(VarIntWidth::One), data, true).unwrap(),
             ),
-            Frame::Stream(Stream::new(short(sid(0)), Some(x), None, data, false).unwrap()),
+            Frame::Stream(stream_frame(short(sid(0)), Some(x), None, data, false).unwrap()),
             Frame::MaxData(MaxData::new(x)),
             Frame::MaxStreamData(MaxStreamData::new(stream_id, x)),
             Frame::DataBlocked(DataBlocked::new(x)),
@@ -1158,7 +1187,7 @@ fn edge_frames() -> Vec<Frame<&'static [u8]>> {
         frames.extend([
             Frame::Crypto(Crypto::new(zero, width, &b"hello"[..]).unwrap()),
             Frame::NewToken(NewToken::new(width, &b"token"[..]).unwrap()),
-            Frame::Stream(Stream::new(short(sid(4)), None, Some(width), &b""[..], true).unwrap()),
+            Frame::Stream(stream_frame(short(sid(4)), None, Some(width), &b""[..], true).unwrap()),
             Frame::ConnectionClose(
                 ConnectionClose::new(
                     CloseErrorCode::Application {
@@ -1169,7 +1198,7 @@ fn edge_frames() -> Vec<Frame<&'static [u8]>> {
                 )
                 .unwrap(),
             ),
-            Frame::Datagram(Datagram::new(Some(width), &b"datagram"[..]).unwrap()),
+            Frame::Datagram(datagram_frame(Some(width), &b"datagram"[..]).unwrap()),
         ]);
     }
     frames
@@ -1223,7 +1252,7 @@ fn longer_field_encodings_read_and_write_back_unchanged() {
                 0x0f, 0x40, 0x04, 0x80, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 2, b'h', b'i',
             ],
             F::Stream(
-                Stream::new(
+                stream_frame(
                     wide(sid(4), VarIntWidth::Two),
                     Some(wide(VarInt::ZERO, VarIntWidth::Four)),
                     Some(VarIntWidth::Eight),
@@ -1394,7 +1423,7 @@ fn longer_field_encodings_read_and_write_back_unchanged() {
         ),
         (
             vec![0x31, 0x40, 0x02, b'h', b'i'],
-            F::Datagram(Datagram::new(Some(VarIntWidth::Two), &b"hi"[..]).unwrap()),
+            F::Datagram(datagram_frame(Some(VarIntWidth::Two), &b"hi"[..]).unwrap()),
         ),
     ];
     for (encoding, expected) in &cases {
@@ -1432,10 +1461,10 @@ fn shortest_frame<'a>(frame: &Frame<&'a [u8]>) -> Frame<&'a [u8]> {
     let length = |data: &[u8]| VarIntWidth::shortest(VarInt::try_from(data.len()).unwrap());
     match *frame {
         Frame::Stream(f) => Frame::Stream(
-            Stream::new(
+            stream_frame(
                 s(f.stream_id()),
                 f.offset().map(s),
-                f.length_width().map(|_| length(f.data())),
+                length_width(f.length()).map(|_| length(f.data())),
                 *f.data(),
                 f.fin(),
             )
@@ -1510,7 +1539,11 @@ fn shortest_frame<'a>(frame: &Frame<&'a [u8]>) -> Frame<&'a [u8]> {
             .unwrap(),
         ),
         Frame::Datagram(f) => Frame::Datagram(
-            Datagram::new(f.length_width().map(|_| length(f.data())), *f.data()).unwrap(),
+            datagram_frame(
+                length_width(f.length()).map(|_| length(f.data())),
+                *f.data(),
+            )
+            .unwrap(),
         ),
         ref other => other.clone(),
     }
@@ -1527,9 +1560,9 @@ fn length_fields_must_hold_the_payload_length() {
         for width in VarIntWidth::ALL {
             let fits = VarInt::try_from(length).is_ok_and(|value| width.fits(value));
             let crypto = Crypto::new(short(VarInt::ZERO), width, data);
-            let stream = Stream::new(short(sid(0)), None, Some(width), data, false);
+            let stream = stream_frame(short(sid(0)), None, Some(width), data, false);
             let close = ConnectionClose::new(application, width, data);
-            let datagram = Datagram::new(Some(width), data);
+            let datagram = datagram_frame(Some(width), data);
             // A token is never empty.
             let token = (length > 0).then(|| NewToken::new(width, data));
             if fits {
@@ -1600,10 +1633,10 @@ fn stream_offset_fields_may_hold_zero() {
     assert_eq!(plain.data_offset(), VarInt::ZERO);
     assert_ne!(stream, plain);
     let with_offset = |offset| {
-        Stream::new(
+        stream_frame(
             stream.stream_id(),
             offset,
-            stream.length_width(),
+            length_width(stream.length()),
             *stream.data(),
             stream.fin(),
         )
@@ -1626,7 +1659,7 @@ fn stream_offset_fields_may_hold_zero() {
         frames,
         [
             Frame::Stream(
-                Stream::new(
+                stream_frame(
                     short(sid(4)),
                     Some(short(VarInt::ZERO)),
                     one,
@@ -1635,7 +1668,7 @@ fn stream_offset_fields_may_hold_zero() {
                 )
                 .unwrap()
             ),
-            Frame::Stream(Stream::new(short(sid(4)), None, one, &b"b"[..], false).unwrap()),
+            Frame::Stream(stream_frame(short(sid(4)), None, one, &b"b"[..], false).unwrap()),
         ]
     );
 }

@@ -39,10 +39,20 @@
 //!   of CRYPTO, STREAM and DATAGRAM, the Token Length of NEW_TOKEN, the
 //!   Reason Phrase Length of CONNECTION_CLOSE) stores only its width; the
 //!   ACK Range Count of ACK likewise.
-//! - Optional fields are present or absent as the Frame Type announces them:
-//!   the Offset and Length of STREAM and the Length of DATAGRAM are
-//!   `Option`s, so a STREAM frame with the OFF bit set and offset 0 is
-//!   distinct from one without the bit.
+//! - Optional fields are present or absent as the Frame Type announces them.
+//!   The Offset of STREAM is an `Option`, so a STREAM frame with the OFF bit
+//!   set and offset 0 is distinct from one without the bit.
+//! - Whether a STREAM or DATAGRAM frame has a Length field is stated by the
+//!   type parameter `L` of [`stream::Stream`] and [`datagram::Datagram`], a
+//!   [`LengthKind`] of one of three types: [`VarIntWidth`], for a frame with
+//!   a Length field of that width; [`NoLength`], for a frame without one,
+//!   whose data extends to the end of the packet; and
+//!   [`Either<NoLength, VarIntWidth>`](Either), for either of the two. The
+//!   last is the default and what reading gives, since only the Frame Type
+//!   that was read tells which it is; the first two convert into it with
+//!   `From`. Each of the three has its own `new` and its own write
+//!   operation, so a writer that knows which kind it writes states it in
+//!   the type.
 //! - An ACK frame holds its fields as encoded, and owns its ACK Ranges in
 //!   [`ack::AckRanges`]; [`ack::Ack::packet_ranges`] computes the
 //!   acknowledged packet numbers from them.
@@ -59,8 +69,9 @@
 //! of RESET_STREAM_AT does not exceed its Final Size, no range of an ACK
 //! frame extends below packet number 0, and the ACK Range Count field of ACK
 //! can state the number of ACK Ranges. The `new` of these frame types, such
-//! as [`stream::Stream::new`] and [`ack::Ack::new`], returns an error for
-//! fields that break one. The other frame types have no such limit, and
+//! as that of `Stream<D, VarIntWidth>` and [`ack::Ack::new`], returns an
+//! error for fields that break one; a DATAGRAM frame without a Length field
+//! has no such limit. The other frame types have no such limit, and
 //! their `new`, such as [`max_data::MaxData::new`], accepts any fields. The
 //! fields of every frame type are private and are read through methods of
 //! the same names, so every frame value converts to bytes and back without
@@ -109,7 +120,7 @@
 //!
 //! ```
 //! use sakuya_wire::{
-//!     frame::{Extensions, Frame, Frames},
+//!     frame::{Either, Extensions, Frame, Frames},
 //!     var_int::VarIntWidth,
 //! };
 //!
@@ -121,7 +132,8 @@
 //! let Some(Ok(Frame::Stream(stream))) = frames.next() else { panic!() };
 //! assert_eq!(stream.stream_id().get().index(), 1);
 //! assert_eq!(stream.stream_id().width(), VarIntWidth::Two);
-//! assert_eq!((stream.offset(), stream.length_width()), (None, Some(VarIntWidth::One)));
+//! assert_eq!(stream.offset(), None);
+//! assert_eq!(stream.length(), Either::Right(VarIntWidth::One));
 //! assert_eq!((*stream.data(), stream.fin()), (&b"hi"[..], true));
 //! assert!(frames.next().is_none());
 //! ```
@@ -129,8 +141,9 @@
 //! # Writing
 //!
 //! Every frame type has `encoded_len` and a write operation in its module's
-//! `codec`, such as [`stream::codec::write_stream`]; [`codec::write_frame`]
-//! writes any [`Frame`]. Writing writes the encoding the value states and
+//! `codec`, such as [`stream::codec::write_stream`], and STREAM and DATAGRAM
+//! have one for each kind of Length field; [`codec::write_frame`] writes any
+//! [`Frame`]. Writing writes the encoding the value states and
 //! chooses nothing: the width of each field comes from the value. Every
 //! frame checked its limits when it was constructed, so writing checks
 //! nothing, and its only failure is that of the receiver: a sink that stops
@@ -138,9 +151,10 @@
 //! `WriteAllError` counts them. `encoded_len`
 //! gives the length in advance, so that a packet encoder can choose frames
 //! and payload sizes before writing.
-//! [`stream::Stream::max_data_len`] and [`crypto::Crypto::max_data_len`]
-//! give the largest amount of data that fits a given room, taking into
-//! account that the shortest Length field grows with the data.
+//! The `max_data_len` of `Stream<D, VarIntWidth>` and of
+//! `Stream<D, NoLength>`, and [`crypto::Crypto::max_data_len`], give the
+//! largest amount of data that fits a given room, taking into account that
+//! the shortest Length field grows with the data.
 //! [`ack::Ack::from_packet_ranges`] states packet number ranges as an ACK
 //! frame in the shortest encodings. Payload fields are written from any
 //! [`bytes::Buf`].
@@ -571,6 +585,84 @@ impl<D: Buf> Frame<D> {
     pub fn encoded_len(&self) -> usize {
         each_frame!(self, frame => frame.encoded_len())
     }
+}
+
+/// One of two values.
+///
+/// The Length field of a STREAM or DATAGRAM frame that was read is
+/// `Either<NoLength, VarIntWidth>`; see [`LengthKind`].
+///
+/// This type is provisional: it may be replaced by the `Either` of the
+/// `either` crate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Either<L, R> {
+    /// The first kind of value.
+    Left(L),
+    /// The second kind of value.
+    Right(R),
+}
+
+/// The absence of a Length field in a STREAM or DATAGRAM frame: the data
+/// extends to the end of the packet.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct NoLength;
+
+mod sealed {
+    use crate::var_int::VarIntWidth;
+
+    /// Restricts [`LengthKind`](super::LengthKind) to the types of this
+    /// crate.
+    pub trait Sealed: Copy {
+        /// The width of the Length field, or `None` without one.
+        fn length_width(self) -> Option<VarIntWidth>;
+    }
+}
+
+/// What a STREAM or DATAGRAM frame states about its Length field, as the
+/// type parameter `L` of [`stream::Stream`] and [`datagram::Datagram`].
+///
+/// It is implemented by exactly three types:
+///
+/// - [`VarIntWidth`]: the frame has a Length field, of this width;
+/// - [`NoLength`]: the frame has no Length field, and its data extends to
+///   the end of the packet;
+/// - [`Either<NoLength, VarIntWidth>`](Either): either of the two, as a frame
+///   that was read states it. This is the default, so `Stream<D>` and
+///   `Datagram<D>` are frames as they are read, and the two other kinds
+///   convert into them with `From`.
+pub trait LengthKind: sealed::Sealed {}
+
+impl sealed::Sealed for VarIntWidth {
+    fn length_width(self) -> Option<VarIntWidth> {
+        Some(self)
+    }
+}
+
+impl LengthKind for VarIntWidth {}
+
+impl sealed::Sealed for NoLength {
+    fn length_width(self) -> Option<VarIntWidth> {
+        None
+    }
+}
+
+impl LengthKind for NoLength {}
+
+impl sealed::Sealed for Either<NoLength, VarIntWidth> {
+    fn length_width(self) -> Option<VarIntWidth> {
+        match self {
+            Either::Left(NoLength) => None,
+            Either::Right(width) => Some(width),
+        }
+    }
+}
+
+impl LengthKind for Either<NoLength, VarIntWidth> {}
+
+/// The width of the Length field that `length` states, or `None` without
+/// one.
+pub(crate) fn length_width<L: LengthKind>(length: L) -> Option<VarIntWidth> {
+    sealed::Sealed::length_width(length)
 }
 
 /// The data of a STREAM or CRYPTO frame ends beyond 2<sup>62</sup> − 1.
