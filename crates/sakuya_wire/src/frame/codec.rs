@@ -62,7 +62,7 @@
 #![allow(missing_docs)]
 
 use super::{
-    Extensions, Frame, FrameType,
+    Extensions, Frame, FrameType, UnknownFrameTypeError,
     ack::codec::{ReadAckError, read_ack},
     connection_close::codec::{ReadConnectionCloseError, read_connection_close},
     crypto::codec::{ReadCryptoError, read_crypto},
@@ -85,7 +85,7 @@ use super::{
     stream::codec::{ReadStreamError, read_stream},
     stream_data_blocked::codec::{ReadStreamDataBlockedError, read_stream_data_blocked},
     streams_blocked::codec::{ReadStreamsBlockedError, read_streams_blocked},
-    type_value,
+    type_value, type_var_int,
 };
 use crate::{
     payload::ReadPayloadError,
@@ -118,10 +118,11 @@ use snafu::{ResultExt, Snafu};
 ///
 /// [`ReadFrameError::FrameType`] if the Frame Type cannot be read,
 /// [`ReadFrameError::LongerTypeEncoding`] if it uses a longer encoding than
-/// necessary, [`ReadFrameError::UnknownType`] for a type that is unknown or
-/// not enabled, and the variant named after the frame type if its fields
-/// cannot be read or break a limit of the encoding. Bytes read before a
-/// failure stay consumed.
+/// necessary, [`ReadFrameError::UnknownType`] for a type that is unknown,
+/// [`ReadFrameError::ExtensionNotEnabled`] for an extension frame type that
+/// `extensions` does not enable, and the variant named after the frame type
+/// if its fields cannot be read or break a limit of the encoding. Bytes read
+/// before a failure stay consumed.
 ///
 /// # Panics
 ///
@@ -144,103 +145,97 @@ where
     if width != VarIntWidth::shortest(frame_type) {
         return LongerTypeEncodingSnafu { frame_type, width }.fail();
     }
-    let kind = match FrameType::of(frame_type) {
-        Ok(kind) if extensions.permits(kind) => kind,
-        _ => return UnknownTypeSnafu { frame_type }.fail(),
-    };
+    let kind = FrameType::of(frame_type)?;
+    // Every frame type that is not an extension frame type is permitted.
+    if let Some(extension) = ExtensionTypeValue::new(frame_type)
+        && !extensions.permits(kind)
+    {
+        return ExtensionNotEnabledSnafu {
+            frame_type: extension,
+        }
+        .fail();
+    }
     let value = frame_type.get();
     Ok(match kind {
         FrameType::Padding => Frame::Padding(Padding::new(NonZeroUsize::MIN)),
         FrameType::Ping => Frame::Ping(Ping),
-        FrameType::Ack => Frame::Ack(
-            read_ack(io, value == ACK_ECN)
-                .await
-                .context(AckSnafu { frame_type })?,
-        ),
-        FrameType::ResetStream => Frame::ResetStream(
-            read_reset_stream(io)
-                .await
-                .context(ResetStreamSnafu { frame_type })?,
-        ),
-        FrameType::StopSending => Frame::StopSending(
-            read_stop_sending(io)
-                .await
-                .context(StopSendingSnafu { frame_type })?,
-        ),
-        FrameType::Crypto => {
-            Frame::Crypto(read_crypto(io).await.context(CryptoSnafu { frame_type })?)
+        FrameType::Ack => {
+            let ecn_counts = value == ACK_ECN;
+            Frame::Ack(
+                read_ack(io, ecn_counts)
+                    .await
+                    .context(AckSnafu { ecn_counts })?,
+            )
         }
-        FrameType::NewToken => Frame::NewToken(
-            read_new_token(io)
-                .await
-                .context(NewTokenSnafu { frame_type })?,
-        ),
+        FrameType::ResetStream => {
+            Frame::ResetStream(read_reset_stream(io).await.context(ResetStreamSnafu)?)
+        }
+        FrameType::StopSending => {
+            Frame::StopSending(read_stop_sending(io).await.context(StopSendingSnafu)?)
+        }
+        FrameType::Crypto => Frame::Crypto(read_crypto(io).await.context(CryptoSnafu)?),
+        FrameType::NewToken => Frame::NewToken(read_new_token(io).await.context(NewTokenSnafu)?),
         FrameType::Stream => Frame::Stream(
             read_stream(io, frame_type)
                 .await
                 .context(StreamSnafu { frame_type })?,
         ),
-        FrameType::MaxData => Frame::MaxData(
-            read_max_data(io)
-                .await
-                .context(MaxDataSnafu { frame_type })?,
-        ),
-        FrameType::MaxStreamData => Frame::MaxStreamData(
-            read_max_stream_data(io)
-                .await
-                .context(MaxStreamDataSnafu { frame_type })?,
-        ),
-        FrameType::MaxStreams => Frame::MaxStreams(
-            read_max_streams(io, directionality(value == MAX_STREAMS_UNI))
-                .await
-                .context(MaxStreamsSnafu { frame_type })?,
-        ),
-        FrameType::DataBlocked => Frame::DataBlocked(
-            read_data_blocked(io)
-                .await
-                .context(DataBlockedSnafu { frame_type })?,
-        ),
+        FrameType::MaxData => Frame::MaxData(read_max_data(io).await.context(MaxDataSnafu)?),
+        FrameType::MaxStreamData => {
+            Frame::MaxStreamData(read_max_stream_data(io).await.context(MaxStreamDataSnafu)?)
+        }
+        FrameType::MaxStreams => {
+            let directionality = directionality(value == MAX_STREAMS_UNI);
+            Frame::MaxStreams(
+                read_max_streams(io, directionality)
+                    .await
+                    .context(MaxStreamsSnafu { directionality })?,
+            )
+        }
+        FrameType::DataBlocked => {
+            Frame::DataBlocked(read_data_blocked(io).await.context(DataBlockedSnafu)?)
+        }
         FrameType::StreamDataBlocked => Frame::StreamDataBlocked(
             read_stream_data_blocked(io)
                 .await
-                .context(StreamDataBlockedSnafu { frame_type })?,
+                .context(StreamDataBlockedSnafu)?,
         ),
-        FrameType::StreamsBlocked => Frame::StreamsBlocked(
-            read_streams_blocked(io, directionality(value == STREAMS_BLOCKED_UNI))
-                .await
-                .context(StreamsBlockedSnafu { frame_type })?,
-        ),
+        FrameType::StreamsBlocked => {
+            let directionality = directionality(value == STREAMS_BLOCKED_UNI);
+            Frame::StreamsBlocked(
+                read_streams_blocked(io, directionality)
+                    .await
+                    .context(StreamsBlockedSnafu { directionality })?,
+            )
+        }
         FrameType::NewConnectionId => Frame::NewConnectionId(
             read_new_connection_id(io)
                 .await
-                .context(NewConnectionIdSnafu { frame_type })?,
+                .context(NewConnectionIdSnafu)?,
         ),
         FrameType::RetireConnectionId => Frame::RetireConnectionId(
             read_retire_connection_id(io)
                 .await
-                .context(RetireConnectionIdSnafu { frame_type })?,
+                .context(RetireConnectionIdSnafu)?,
         ),
-        FrameType::PathChallenge => Frame::PathChallenge(
-            read_path_challenge(io)
-                .await
-                .context(PathChallengeSnafu { frame_type })?,
-        ),
-        FrameType::PathResponse => Frame::PathResponse(
-            read_path_response(io)
-                .await
-                .context(PathResponseSnafu { frame_type })?,
-        ),
-        FrameType::ConnectionClose => Frame::ConnectionClose(
-            read_connection_close(io, value == CONNECTION_CLOSE_APPLICATION)
-                .await
-                .context(ConnectionCloseSnafu { frame_type })?,
-        ),
+        FrameType::PathChallenge => {
+            Frame::PathChallenge(read_path_challenge(io).await.context(PathChallengeSnafu)?)
+        }
+        FrameType::PathResponse => {
+            Frame::PathResponse(read_path_response(io).await.context(PathResponseSnafu)?)
+        }
+        FrameType::ConnectionClose => {
+            let application = value == CONNECTION_CLOSE_APPLICATION;
+            Frame::ConnectionClose(
+                read_connection_close(io, application)
+                    .await
+                    .context(ConnectionCloseSnafu { application })?,
+            )
+        }
         FrameType::HandshakeDone => Frame::HandshakeDone(HandshakeDone),
-        FrameType::ResetStreamAt => Frame::ResetStreamAt(
-            read_reset_stream_at(io)
-                .await
-                .context(ResetStreamAtSnafu { frame_type })?,
-        ),
+        FrameType::ResetStreamAt => {
+            Frame::ResetStreamAt(read_reset_stream_at(io).await.context(ResetStreamAtSnafu)?)
+        }
         FrameType::Datagram => Frame::Datagram(
             read_datagram(io, value == DATAGRAM_WITH_LENGTH)
                 .await
@@ -257,15 +252,46 @@ fn directionality(unidirectional: bool) -> Directionality {
     }
 }
 
+/// A Frame Type value of an extension frame: `0x24` (RESET_STREAM_AT), or
+/// `0x30` and `0x31` (DATAGRAM).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ExtensionTypeValue(VarInt);
+
+impl ExtensionTypeValue {
+    /// The Frame Type value `value` if it is that of an extension frame, and
+    /// `None` otherwise.
+    pub(crate) const fn new(value: VarInt) -> Option<Self> {
+        match value.get() {
+            type_value::RESET_STREAM_AT
+            | type_value::DATAGRAM
+            | type_value::DATAGRAM_WITH_LENGTH => Some(Self(value)),
+            _ => None,
+        }
+    }
+
+    /// The Frame Type value.
+    pub const fn get(self) -> VarInt {
+        self.0
+    }
+}
+
+impl From<ExtensionTypeValue> for VarInt {
+    fn from(value: ExtensionTypeValue) -> Self {
+        value.0
+    }
+}
+
 /// Failures that [`read_frame`] can produce.
 ///
 /// Every failure corresponds to the transport error FRAME_ENCODING_ERROR,
 /// except two that correspond to PROTOCOL_VIOLATION
 /// ([`ReadFrameError::transport_error_code`]):
 /// [`ReadFrameError::LongerTypeEncoding`], and
-/// [`ReadFrameError::UnknownType`] for a DATAGRAM frame that is not enabled.
-/// The variants named after a frame type hold the failure of reading the
-/// fields of that type, and its Frame Type value.
+/// [`ReadFrameError::ExtensionNotEnabled`] for a DATAGRAM frame. The variants
+/// named after a frame type hold the failure of reading the fields of that
+/// type; for ACK, MAX_STREAMS, STREAMS_BLOCKED and CONNECTION_CLOSE, which
+/// have two Frame Type values each, also which of them was read, and for
+/// STREAM and DATAGRAM the Frame Type value.
 #[derive(Debug, Snafu)]
 #[snafu(module(read_frame_error), visibility(pub(crate)))]
 pub enum ReadFrameError<E> {
@@ -290,49 +316,53 @@ pub enum ReadFrameError<E> {
         /// The width of its encoding.
         width: VarIntWidth,
     },
-    /// The frame type is neither defined nor an enabled extension.
-    #[snafu(display("unknown frame type {:#x}", frame_type.get()))]
+    /// The Frame Type is defined neither by RFC 9000 nor by a supported
+    /// extension.
+    #[snafu(transparent)]
     UnknownType {
+        /// The unknown Frame Type value.
+        source: UnknownFrameTypeError,
+    },
+    /// The Frame Type is that of an extension frame, and the extension is
+    /// not enabled.
+    #[snafu(display(
+        "frame type {:#x} belongs to an extension that is not enabled",
+        frame_type.get().get()
+    ))]
+    ExtensionNotEnabled {
         /// The Frame Type.
-        frame_type: VarInt,
+        frame_type: ExtensionTypeValue,
     },
     /// An ACK frame could not be read.
     #[snafu(display("ACK frame read failed"))]
     Ack {
-        /// The Frame Type.
-        frame_type: VarInt,
+        /// Whether the Frame Type is `0x03`, with ECN counts, rather than
+        /// `0x02`.
+        ecn_counts: bool,
         /// The failure.
         source: ReadAckError<E>,
     },
     /// A RESET_STREAM frame could not be read.
     #[snafu(display("RESET_STREAM frame read failed"))]
     ResetStream {
-        /// The Frame Type.
-        frame_type: VarInt,
         /// The failure.
         source: ReadResetStreamError<E>,
     },
     /// A STOP_SENDING frame could not be read.
     #[snafu(display("STOP_SENDING frame read failed"))]
     StopSending {
-        /// The Frame Type.
-        frame_type: VarInt,
         /// The failure.
         source: ReadStopSendingError<E>,
     },
     /// A CRYPTO frame could not be read.
     #[snafu(display("CRYPTO frame read failed"))]
     Crypto {
-        /// The Frame Type.
-        frame_type: VarInt,
         /// The failure.
         source: ReadCryptoError<E>,
     },
     /// A NEW_TOKEN frame could not be read.
     #[snafu(display("NEW_TOKEN frame read failed"))]
     NewToken {
-        /// The Frame Type.
-        frame_type: VarInt,
         /// The failure.
         source: ReadNewTokenError<E>,
     },
@@ -347,96 +377,81 @@ pub enum ReadFrameError<E> {
     /// A MAX_DATA frame could not be read.
     #[snafu(display("MAX_DATA frame read failed"))]
     MaxData {
-        /// The Frame Type.
-        frame_type: VarInt,
         /// The failure.
         source: ReadVarIntError<E>,
     },
     /// A MAX_STREAM_DATA frame could not be read.
     #[snafu(display("MAX_STREAM_DATA frame read failed"))]
     MaxStreamData {
-        /// The Frame Type.
-        frame_type: VarInt,
         /// The failure.
         source: ReadMaxStreamDataError<E>,
     },
     /// A MAX_STREAMS frame could not be read.
     #[snafu(display("MAX_STREAMS frame read failed"))]
     MaxStreams {
-        /// The Frame Type.
-        frame_type: VarInt,
+        /// The type of streams of the Frame Type: `0x12` for bidirectional,
+        /// `0x13` for unidirectional streams.
+        directionality: Directionality,
         /// The failure.
         source: ReadMaxStreamsError<E>,
     },
     /// A DATA_BLOCKED frame could not be read.
     #[snafu(display("DATA_BLOCKED frame read failed"))]
     DataBlocked {
-        /// The Frame Type.
-        frame_type: VarInt,
         /// The failure.
         source: ReadVarIntError<E>,
     },
     /// A STREAM_DATA_BLOCKED frame could not be read.
     #[snafu(display("STREAM_DATA_BLOCKED frame read failed"))]
     StreamDataBlocked {
-        /// The Frame Type.
-        frame_type: VarInt,
         /// The failure.
         source: ReadStreamDataBlockedError<E>,
     },
     /// A STREAMS_BLOCKED frame could not be read.
     #[snafu(display("STREAMS_BLOCKED frame read failed"))]
     StreamsBlocked {
-        /// The Frame Type.
-        frame_type: VarInt,
+        /// The type of streams of the Frame Type: `0x16` for bidirectional,
+        /// `0x17` for unidirectional streams.
+        directionality: Directionality,
         /// The failure.
         source: ReadStreamsBlockedError<E>,
     },
     /// A NEW_CONNECTION_ID frame could not be read.
     #[snafu(display("NEW_CONNECTION_ID frame read failed"))]
     NewConnectionId {
-        /// The Frame Type.
-        frame_type: VarInt,
         /// The failure.
         source: ReadNewConnectionIdError<E>,
     },
     /// A RETIRE_CONNECTION_ID frame could not be read.
     #[snafu(display("RETIRE_CONNECTION_ID frame read failed"))]
     RetireConnectionId {
-        /// The Frame Type.
-        frame_type: VarInt,
         /// The failure.
         source: ReadVarIntError<E>,
     },
     /// A PATH_CHALLENGE frame could not be read.
     #[snafu(display("PATH_CHALLENGE frame read failed"))]
     PathChallenge {
-        /// The Frame Type.
-        frame_type: VarInt,
         /// The failure.
         source: ReadArrayError<E>,
     },
     /// A PATH_RESPONSE frame could not be read.
     #[snafu(display("PATH_RESPONSE frame read failed"))]
     PathResponse {
-        /// The Frame Type.
-        frame_type: VarInt,
         /// The failure.
         source: ReadArrayError<E>,
     },
     /// A CONNECTION_CLOSE frame could not be read.
     #[snafu(display("CONNECTION_CLOSE frame read failed"))]
     ConnectionClose {
-        /// The Frame Type.
-        frame_type: VarInt,
+        /// Whether the Frame Type is `0x1d`, for an application error,
+        /// rather than `0x1c`, for a transport error.
+        application: bool,
         /// The failure.
         source: ReadConnectionCloseError<E>,
     },
     /// A RESET_STREAM_AT frame could not be read.
     #[snafu(display("RESET_STREAM_AT frame read failed"))]
     ResetStreamAt {
-        /// The Frame Type.
-        frame_type: VarInt,
         /// The failure.
         source: ReadResetStreamAtError<E>,
     },
@@ -456,30 +471,37 @@ impl<E> ReadFrameError<E> {
     /// This is the value for the Frame Type field of the CONNECTION_CLOSE
     /// frame that reports the error.
     pub fn frame_type(&self) -> Option<VarInt> {
-        match *self {
-            Self::FrameType { .. } => None,
+        use super::{ack, connection_close, max_streams, streams_blocked};
+        use type_value::*;
+        Some(match *self {
+            Self::FrameType { .. } => return None,
             Self::LongerTypeEncoding { frame_type, .. }
-            | Self::UnknownType { frame_type }
-            | Self::Ack { frame_type, .. }
-            | Self::ResetStream { frame_type, .. }
-            | Self::StopSending { frame_type, .. }
-            | Self::Crypto { frame_type, .. }
-            | Self::NewToken { frame_type, .. }
             | Self::Stream { frame_type, .. }
-            | Self::MaxData { frame_type, .. }
-            | Self::MaxStreamData { frame_type, .. }
-            | Self::MaxStreams { frame_type, .. }
-            | Self::DataBlocked { frame_type, .. }
-            | Self::StreamDataBlocked { frame_type, .. }
-            | Self::StreamsBlocked { frame_type, .. }
-            | Self::NewConnectionId { frame_type, .. }
-            | Self::RetireConnectionId { frame_type, .. }
-            | Self::PathChallenge { frame_type, .. }
-            | Self::PathResponse { frame_type, .. }
-            | Self::ConnectionClose { frame_type, .. }
-            | Self::ResetStreamAt { frame_type, .. }
-            | Self::Datagram { frame_type, .. } => Some(frame_type),
-        }
+            | Self::Datagram { frame_type, .. } => frame_type,
+            Self::UnknownType { source } => source.frame_type.get(),
+            Self::ExtensionNotEnabled { frame_type } => frame_type.get(),
+            Self::Ack { ecn_counts, .. } => ack::type_value_of(ecn_counts),
+            Self::MaxStreams { directionality, .. } => max_streams::type_value_of(directionality),
+            Self::StreamsBlocked { directionality, .. } => {
+                streams_blocked::type_value_of(directionality)
+            }
+            Self::ConnectionClose { application, .. } => {
+                connection_close::type_value_of(application)
+            }
+            Self::ResetStream { .. } => type_var_int(RESET_STREAM),
+            Self::StopSending { .. } => type_var_int(STOP_SENDING),
+            Self::Crypto { .. } => type_var_int(CRYPTO),
+            Self::NewToken { .. } => type_var_int(NEW_TOKEN),
+            Self::MaxData { .. } => type_var_int(MAX_DATA),
+            Self::MaxStreamData { .. } => type_var_int(MAX_STREAM_DATA),
+            Self::DataBlocked { .. } => type_var_int(DATA_BLOCKED),
+            Self::StreamDataBlocked { .. } => type_var_int(STREAM_DATA_BLOCKED),
+            Self::NewConnectionId { .. } => type_var_int(NEW_CONNECTION_ID),
+            Self::RetireConnectionId { .. } => type_var_int(RETIRE_CONNECTION_ID),
+            Self::PathChallenge { .. } => type_var_int(PATH_CHALLENGE),
+            Self::PathResponse { .. } => type_var_int(PATH_RESPONSE),
+            Self::ResetStreamAt { .. } => type_var_int(RESET_STREAM_AT),
+        })
     }
 
     /// Whether the source ended within the frame.
@@ -520,7 +542,9 @@ impl<E> ReadFrameError<E> {
                     source.is_incomplete()
                 }
             },
-            Self::LongerTypeEncoding { .. } | Self::UnknownType { .. } => false,
+            Self::LongerTypeEncoding { .. }
+            | Self::UnknownType { .. }
+            | Self::ExtensionNotEnabled { .. } => false,
             Self::Ack { source, .. } => match source {
                 Ack::LargestAcknowledged { source }
                 | Ack::AckDelay { source }
@@ -590,8 +614,8 @@ impl<E> ReadFrameError<E> {
     pub fn transport_error_code(&self) -> TransportErrorCode {
         match self {
             Self::LongerTypeEncoding { .. } => TransportErrorCode::PROTOCOL_VIOLATION,
-            Self::UnknownType { frame_type }
-                if matches!(FrameType::of(*frame_type), Ok(FrameType::Datagram)) =>
+            Self::ExtensionNotEnabled { frame_type }
+                if matches!(FrameType::of(frame_type.get()), Ok(FrameType::Datagram)) =>
             {
                 TransportErrorCode::PROTOCOL_VIOLATION
             }

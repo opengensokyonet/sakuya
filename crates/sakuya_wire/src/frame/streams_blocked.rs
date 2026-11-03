@@ -46,10 +46,7 @@ impl StreamsBlocked {
 
     /// The Frame Type value: one for each directionality.
     pub const fn type_value(&self) -> VarInt {
-        type_var_int(match self.directionality {
-            Directionality::Bidirectional => type_value::STREAMS_BLOCKED_BIDI,
-            Directionality::Unidirectional => type_value::STREAMS_BLOCKED_UNI,
-        })
+        type_value_of(self.directionality)
     }
 
     /// The number of bytes [`codec::write_streams_blocked`] writes.
@@ -61,6 +58,14 @@ impl StreamsBlocked {
     pub(crate) fn head(&self) -> Head<9> {
         Head::new(self.type_value()).field(self.maximum_streams)
     }
+}
+
+/// The Frame Type value of a STREAMS_BLOCKED frame for streams of `directionality`.
+pub(crate) const fn type_value_of(directionality: Directionality) -> VarInt {
+    type_var_int(match directionality {
+        Directionality::Bidirectional => type_value::STREAMS_BLOCKED_BIDI,
+        Directionality::Unidirectional => type_value::STREAMS_BLOCKED_UNI,
+    })
 }
 
 pub mod codec {

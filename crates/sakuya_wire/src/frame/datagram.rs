@@ -185,7 +185,7 @@ mod tests {
             codec::{ReadFrameError, ReadFrameHostExt as _},
             tests::assert_round_trip,
         },
-        var_int::VarIntWidth,
+        var_int::{VarInt, VarIntWidth},
     };
 
     #[test]
@@ -232,7 +232,8 @@ mod tests {
         let mut frames = Frames::new(&payload[..], Extensions::NONE);
         assert!(matches!(
             frames.next(),
-            Some(Err(ReadFrameError::UnknownType { .. }))
+            Some(Err(ReadFrameError::ExtensionNotEnabled { frame_type }))
+                if frame_type.get() == VarInt::from(0x30u8)
         ));
     }
 }

@@ -218,17 +218,6 @@ pub struct UnknownParameter<D> {
     pub value: D,
 }
 
-/// Whether a client must not send the parameter `id`.
-fn server_only(id: VarInt) -> bool {
-    [
-        id::ORIGINAL_DESTINATION_CONNECTION_ID,
-        id::STATELESS_RESET_TOKEN,
-        id::PREFERRED_ADDRESS,
-        id::RETRY_SOURCE_CONNECTION_ID,
-    ]
-    .contains(&id)
-}
-
 /// The value of a parameter to write.
 pub(crate) enum Value<'v, D> {
     Integer(VarInt),
@@ -403,18 +392,22 @@ impl<D: Buf> TransportParameters<D> {
     /// value is longer than its length field can state.
     pub fn validate(&self, sender: Role) -> Result<(), InvalidParameterError> {
         if sender == Role::Client {
+            // Each ID is one of the four that only a server may send.
             let server_only = [
                 (
-                    id::ORIGINAL_DESTINATION_CONNECTION_ID,
+                    ServerOnlyParameterId(id::ORIGINAL_DESTINATION_CONNECTION_ID),
                     self.original_destination_connection_id.is_some(),
                 ),
                 (
-                    id::STATELESS_RESET_TOKEN,
+                    ServerOnlyParameterId(id::STATELESS_RESET_TOKEN),
                     self.stateless_reset_token.is_some(),
                 ),
-                (id::PREFERRED_ADDRESS, self.preferred_address.is_some()),
                 (
-                    id::RETRY_SOURCE_CONNECTION_ID,
+                    ServerOnlyParameterId(id::PREFERRED_ADDRESS),
+                    self.preferred_address.is_some(),
+                ),
+                (
+                    ServerOnlyParameterId(id::RETRY_SOURCE_CONNECTION_ID),
                     self.retry_source_connection_id.is_some(),
                 ),
             ];
@@ -425,12 +418,16 @@ impl<D: Buf> TransportParameters<D> {
         self.check_ranges()?;
         for (index, parameter) in self.unknown.iter().enumerate() {
             let id = parameter.id;
-            if id.get() <= id::LAST || self.unknown[..index].iter().any(|other| other.id == id) {
+            let repeated = self.unknown[..index].iter().any(|other| other.id == id);
+            let Some(unknown_id) = UnknownParameterId::new(id).filter(|_| !repeated) else {
                 return Err(InvalidParameterError::Duplicate { id });
-            }
+            };
             let length = parameter.value.remaining();
             if VarInt::try_from(length).is_err() {
-                return Err(InvalidParameterError::ValueLength { id, length });
+                return Err(InvalidParameterError::ValueLength {
+                    id: unknown_id,
+                    length,
+                });
             }
         }
         Ok(())
@@ -461,10 +458,13 @@ pub enum InvalidParameterError {
         id: VarInt,
     },
     /// A client sends a parameter that only a server may send.
-    #[snafu(display("transport parameter {:#x} may only be sent by a server", id.get()))]
+    #[snafu(display(
+        "transport parameter {:#x} may only be sent by a server",
+        id.get().get()
+    ))]
     ServerOnly {
         /// The parameter ID.
-        id: VarInt,
+        id: ServerOnlyParameterId,
     },
     /// `max_udp_payload_size` is below 1200.
     #[snafu(display("max_udp_payload_size {value} is below 1200"))]
@@ -507,14 +507,73 @@ pub enum InvalidParameterError {
     /// field can state.
     #[snafu(display(
         "transport parameter {:#x} has a value of {length} bytes, longer than 2^62 - 1",
-        id.get()
+        id.get().get()
     ))]
     ValueLength {
         /// The parameter ID.
-        id: VarInt,
+        id: UnknownParameterId,
         /// The length of the value.
         length: usize,
     },
+}
+
+/// The ID of a parameter that only a server may send:
+/// `original_destination_connection_id`, `stateless_reset_token`,
+/// `preferred_address` or `retry_source_connection_id`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ServerOnlyParameterId(VarInt);
+
+impl ServerOnlyParameterId {
+    /// The ID `id` if only a server may send its parameter, and `None` if a
+    /// client may send it too.
+    pub(crate) const fn new(id: VarInt) -> Option<Self> {
+        match id {
+            id::ORIGINAL_DESTINATION_CONNECTION_ID
+            | id::STATELESS_RESET_TOKEN
+            | id::PREFERRED_ADDRESS
+            | id::RETRY_SOURCE_CONNECTION_ID => Some(Self(id)),
+            _ => None,
+        }
+    }
+
+    /// The parameter ID.
+    pub const fn get(self) -> VarInt {
+        self.0
+    }
+}
+
+impl From<ServerOnlyParameterId> for VarInt {
+    fn from(id: ServerOnlyParameterId) -> Self {
+        id.0
+    }
+}
+
+/// The ID of a parameter that QUIC version 1 does not define: any ID above
+/// `0x10`, the last ID of [`id`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct UnknownParameterId(VarInt);
+
+impl UnknownParameterId {
+    /// The ID `id` if QUIC version 1 does not define it, and `None` if it is
+    /// an ID of [`id`].
+    pub(crate) const fn new(id: VarInt) -> Option<Self> {
+        if id.get() > id::LAST {
+            Some(Self(id))
+        } else {
+            None
+        }
+    }
+
+    /// The parameter ID.
+    pub const fn get(self) -> VarInt {
+        self.0
+    }
+}
+
+impl From<UnknownParameterId> for VarInt {
+    fn from(id: UnknownParameterId) -> Self {
+        id.0
+    }
 }
 
 #[cfg(test)]

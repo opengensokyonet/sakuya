@@ -71,10 +71,10 @@ impl<D> ConnectionClose<D> {
     /// The Frame Type value: `0x1c` for a transport error, `0x1d` for an
     /// application error.
     pub const fn type_value(&self) -> VarInt {
-        type_var_int(match self.error_code {
-            CloseErrorCode::Transport { .. } => type_value::CONNECTION_CLOSE,
-            CloseErrorCode::Application { .. } => type_value::CONNECTION_CLOSE_APPLICATION,
-        })
+        type_value_of(matches!(
+            self.error_code,
+            CloseErrorCode::Application { .. }
+        ))
     }
 }
 
@@ -121,6 +121,16 @@ impl<D: Buf> ConnectionClose<D> {
         self.fields()
             .var_int_of(length, self.reason_phrase_length_width)
     }
+}
+
+/// The Frame Type value of an application CONNECTION_CLOSE frame if
+/// `application` is set: `0x1d`, or `0x1c` for a transport one.
+pub(crate) const fn type_value_of(application: bool) -> VarInt {
+    type_var_int(if application {
+        type_value::CONNECTION_CLOSE_APPLICATION
+    } else {
+        type_value::CONNECTION_CLOSE
+    })
 }
 
 pub mod codec {

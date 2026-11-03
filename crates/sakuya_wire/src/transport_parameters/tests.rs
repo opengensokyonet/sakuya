@@ -1,8 +1,10 @@
 use super::{
-    InvalidParameterError, TransportParameters, UnknownParameter,
+    InvalidParameterError, ServerOnlyParameterId, TransportParameters, UnknownParameter,
+    UnknownParameterId,
     codec::{
-        ReadTransportParametersError, ReadTransportParametersHostExt as _,
-        WriteTransportParametersError, WriteTransportParametersHostExt as _,
+        ConnectionIdParameterId, IntegerParameterId, ReadTransportParametersError,
+        ReadTransportParametersHostExt as _, WriteTransportParametersError,
+        WriteTransportParametersHostExt as _,
     },
     id,
     preferred_address::{
@@ -261,14 +263,14 @@ fn server_only_parameters_from_a_client_are_rejected() {
     ];
     for (parameter, value) in cases {
         let encoding = tlv(parameter, &value);
-        assert_eq!(
-            invalid(read(&encoding, Role::Client).unwrap_err()),
-            InvalidParameterError::ServerOnly { id: vi(parameter) }
-        );
+        let id = ServerOnlyParameterId::new(vi(parameter)).unwrap();
+        let error = invalid(read(&encoding, Role::Client).unwrap_err());
+        assert_eq!(error, InvalidParameterError::ServerOnly { id });
+        assert_eq!(id.get(), vi(parameter));
         let parameters = read(&encoding, Role::Server).unwrap();
         assert_eq!(
             write_invalid(parameters.clone(), Role::Client),
-            InvalidParameterError::ServerOnly { id: vi(parameter) }
+            InvalidParameterError::ServerOnly { id }
         );
         assert_eq!(write(parameters, Role::Server), encoding);
     }
@@ -361,10 +363,101 @@ fn unknown_values_longer_than_a_length_field_states_are_rejected() {
     assert_eq!(
         parameters.validate(Role::Client),
         Err(InvalidParameterError::ValueLength {
-            id: vi(0x40),
+            id: UnknownParameterId::new(vi(0x40)).unwrap(),
             length: usize::MAX,
         })
     );
+}
+
+#[test]
+fn parameter_id_sets() {
+    let integers = [
+        0x01, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0e,
+    ];
+    for value in (0..=0x41).chain([31 * 5 + 27, VarInt::MAX.get()]) {
+        let id = vi(value);
+        let server_only = matches!(value, 0x00 | 0x02 | 0x0d | 0x10);
+        let integer = integers.contains(&value);
+        let connection_id = matches!(value, 0x00 | 0x0f | 0x10);
+        let unknown = value > 0x10;
+        let some = |present: bool| present.then_some(id);
+        assert_eq!(
+            ServerOnlyParameterId::new(id).map(ServerOnlyParameterId::get),
+            some(server_only),
+            "{value:#x}"
+        );
+        assert_eq!(
+            IntegerParameterId::new(id).map(VarInt::from),
+            some(integer),
+            "{value:#x}"
+        );
+        assert_eq!(
+            ConnectionIdParameterId::new(id).map(ConnectionIdParameterId::get),
+            some(connection_id),
+            "{value:#x}"
+        );
+        assert_eq!(
+            UnknownParameterId::new(id).map(VarInt::from),
+            some(unknown),
+            "{value:#x}"
+        );
+        // The other known parameters are `stateless_reset_token`,
+        // `disable_active_migration` and `preferred_address`; the sets
+        // partition every ID.
+        let other = matches!(value, 0x02 | 0x0c | 0x0d);
+        let sets = [unknown, integer, connection_id, other];
+        assert_eq!(
+            sets.iter().filter(|&&member| member).count(),
+            1,
+            "{value:#x}"
+        );
+    }
+}
+
+/// Each integer parameter with a value that is not one integer, and each
+/// connection ID parameter with a value that is too long, names its ID.
+#[test]
+fn malformed_values_name_their_parameter() {
+    for parameter in [
+        0x01, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0e,
+    ] {
+        let error = read(&tlv(parameter, &[0x05, 0x00]), Role::Server).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ReadTransportParametersError::Integer { id, length: 2 } if id.get() == vi(parameter)
+            ),
+            "{parameter:#x}: {error:?}"
+        );
+        assert_eq!(
+            error.transport_error_code(),
+            TransportErrorCode::TRANSPORT_PARAMETER_ERROR
+        );
+    }
+    for parameter in [0x00, 0x0f, 0x10] {
+        let error = read(&tlv(parameter, &[0; 21]), Role::Server).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ReadTransportParametersError::ConnectionId {
+                    id,
+                    source: ConnectionIdLengthError { length: 21 },
+                } if id.get() == vi(parameter)
+            ),
+            "{parameter:#x}: {error:?}"
+        );
+        assert!(!error.is_incomplete());
+        // Twenty bytes are a connection ID.
+        let encoding = tlv(parameter, &[7; 20]);
+        let parameters = read(&encoding, Role::Server).unwrap();
+        let expected = Some(ConnectionId::new(&[7; 20]).unwrap());
+        let connection_id = match parameter {
+            0x00 => parameters.original_destination_connection_id,
+            0x0f => parameters.initial_source_connection_id,
+            _ => parameters.retry_source_connection_id,
+        };
+        assert_eq!(connection_id, expected, "{parameter:#x}");
+    }
 }
 
 #[test]
@@ -380,9 +473,11 @@ fn malformed_values_are_rejected_by_parameter() {
         assert!(expected(&error), "{parameter:#x} {value:02x?}: {error:?}");
         assert!(!error.is_incomplete());
     };
-    check(0x01, &[], |error| {
-        matches!(error, E::Integer { length: 0, .. })
-    });
+    check(
+        0x01,
+        &[],
+        |error| matches!(error, E::Integer { id, length: 0 } if id.get() == vi(0x01)),
+    );
     check(0x01, &[0x05, 0x00], |error| {
         matches!(error, E::Integer { length: 2, .. })
     });
@@ -398,15 +493,7 @@ fn malformed_values_are_rejected_by_parameter() {
     check(0x0c, &[0], |error| {
         matches!(error, E::DisableActiveMigration { length: 1 })
     });
-    check(0x0f, &[0; 21], |error| {
-        matches!(
-            error,
-            E::ConnectionId {
-                source: ConnectionIdLengthError { length: 21 },
-                ..
-            }
-        )
-    });
+
     check(0x0d, &[0; 24], |error| {
         matches!(error, E::PreferredAddress { .. })
     });

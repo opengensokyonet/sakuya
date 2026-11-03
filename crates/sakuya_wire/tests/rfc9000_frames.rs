@@ -90,12 +90,20 @@ fn every_single_byte_type_is_defined_or_unknown() {
         if defined.contains(&value) {
             continue;
         }
-        // Without the extensions enabled, all of these are unknown.
+        // Without the extensions enabled, the extension types are rejected
+        // as not enabled, and the others as unknown.
         let error = read(&[value]).unwrap_err();
-        assert!(
-            matches!(error, ReadFrameError::UnknownType { .. }),
-            "{value:#x}: {error}"
-        );
+        if extension {
+            assert!(
+                matches!(error, ReadFrameError::ExtensionNotEnabled { .. }),
+                "{value:#x}: {error}"
+            );
+        } else {
+            assert!(
+                matches!(error, ReadFrameError::UnknownType { .. }),
+                "{value:#x}: {error}"
+            );
+        }
         assert_eq!(error.frame_type(), Some(VarInt::from(value)));
     }
 }

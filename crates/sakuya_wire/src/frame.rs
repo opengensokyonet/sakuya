@@ -15,8 +15,8 @@
 //!   may still change.
 //!
 //! Which extensions the peers negotiated is a run-time fact: reading takes an
-//! [`Extensions`] set, and a frame of an extension that is not in the set is
-//! reported as an unknown frame type. That is a FRAME_ENCODING_ERROR
+//! [`Extensions`] set, and rejects a frame of an extension that is not in the
+//! set. Like an unknown frame type, that is a FRAME_ENCODING_ERROR
 //! ([RFC 9000 §12.4]), except for DATAGRAM, for which [RFC 9221] requires
 //! PROTOCOL_VIOLATION.
 //!
@@ -321,7 +321,12 @@ impl FrameType {
             HANDSHAKE_DONE => Self::HandshakeDone,
             RESET_STREAM_AT => Self::ResetStreamAt,
             DATAGRAM | DATAGRAM_WITH_LENGTH => Self::Datagram,
-            _ => return Err(UnknownFrameTypeError { frame_type: value }),
+            // Every value not matched above is unknown.
+            _ => {
+                return Err(UnknownFrameTypeError {
+                    frame_type: UnknownTypeValue(value),
+                });
+            }
         })
     }
 
@@ -358,21 +363,43 @@ impl TryFrom<VarInt> for FrameType {
     }
 }
 
-/// A Frame Type value that neither RFC 9000 nor a supported extension
-/// defines.
+/// A Frame Type value is unknown: neither RFC 9000 nor a supported extension
+/// defines it.
+///
+/// [`FrameType::of`] returns it, and reading a frame reports it as
+/// [`codec::ReadFrameError::UnknownType`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(display("unknown frame type {:#x}", frame_type.get()))]
+#[snafu(display("unknown frame type {:#x}", frame_type.get().get()))]
 pub struct UnknownFrameTypeError {
     /// The Frame Type value.
-    pub frame_type: VarInt,
+    pub frame_type: UnknownTypeValue,
+}
+
+/// A Frame Type value that neither RFC 9000 nor a supported extension
+/// defines; [`FrameType::of`] rejects exactly these values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct UnknownTypeValue(VarInt);
+
+impl UnknownTypeValue {
+    /// The Frame Type value.
+    pub const fn get(self) -> VarInt {
+        self.0
+    }
+}
+
+impl From<UnknownTypeValue> for VarInt {
+    fn from(value: UnknownTypeValue) -> Self {
+        value.0
+    }
 }
 
 /// The extension frames a reader accepts.
 ///
-/// Each extension is negotiated through a transport parameter. A frame of an
-/// extension that is not enabled reads as an unknown frame type. Sending and
-/// receiving can be permitted separately; pass the set that applies to the
-/// direction being read.
+/// Each extension is negotiated through a transport parameter. Reading
+/// rejects a frame of an extension that is not enabled with
+/// [`codec::ReadFrameError::ExtensionNotEnabled`]. Sending and receiving can
+/// be permitted separately; pass the set that applies to the direction being
+/// read.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Extensions {
     /// Accept DATAGRAM frames ([RFC 9221]).

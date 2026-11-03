@@ -46,10 +46,7 @@ impl MaxStreams {
 
     /// The Frame Type value: one for each directionality.
     pub const fn type_value(&self) -> VarInt {
-        type_var_int(match self.directionality {
-            Directionality::Bidirectional => type_value::MAX_STREAMS_BIDI,
-            Directionality::Unidirectional => type_value::MAX_STREAMS_UNI,
-        })
+        type_value_of(self.directionality)
     }
 
     /// The number of bytes [`codec::write_max_streams`] writes.
@@ -61,6 +58,14 @@ impl MaxStreams {
     pub(crate) fn head(&self) -> Head<9> {
         Head::new(self.type_value()).field(self.maximum_streams)
     }
+}
+
+/// The Frame Type value of a MAX_STREAMS frame for streams of `directionality`.
+pub(crate) const fn type_value_of(directionality: Directionality) -> VarInt {
+    type_var_int(match directionality {
+        Directionality::Bidirectional => type_value::MAX_STREAMS_BIDI,
+        Directionality::Unidirectional => type_value::MAX_STREAMS_UNI,
+    })
 }
 
 pub mod codec {

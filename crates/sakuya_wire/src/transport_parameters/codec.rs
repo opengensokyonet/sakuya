@@ -11,16 +11,17 @@
 #![allow(missing_docs)]
 
 use super::{
-    InvalidParameterError, TransportParameters, UnknownParameter, Value, id,
+    InvalidParameterError, ServerOnlyParameterId, TransportParameters, UnknownParameter, Value, id,
     invalid_parameter_error,
     preferred_address::{
         PreferredAddress,
         codec::{ReadPreferredAddressError, ReadPreferredAddressHostExt as _},
     },
-    server_only,
 };
 use crate::{
-    connection_id::{ConnectionId, ConnectionIdLengthError, StatelessResetToken},
+    connection_id::{
+        ConnectionId, ConnectionIdLength, ConnectionIdLengthError, StatelessResetToken,
+    },
     frame::Head,
     payload::{ReadPayloadError, read_payload},
     role::Role,
@@ -88,7 +89,9 @@ where
                 return Err(InvalidParameterError::Duplicate { id }.into());
             }
             seen |= bit;
-            if sender == Role::Client && server_only(id) {
+            if sender == Role::Client
+                && let Some(id) = ServerOnlyParameterId::new(id)
+            {
                 return Err(InvalidParameterError::ServerOnly { id }.into());
             }
             set(&mut parameters, id, value)?;
@@ -115,17 +118,57 @@ fn set<D: Buf + Unpin, E>(
 ) -> Result<(), ReadTransportParametersError<E>> {
     use read_transport_parameters_error::*;
     let length = value.remaining();
+    if let Some(id) = ConnectionIdParameterId::new(id) {
+        let connection_id = Some(connection_id(id, value)?);
+        let field = match id.get() {
+            id::ORIGINAL_DESTINATION_CONNECTION_ID => {
+                &mut parameters.original_destination_connection_id
+            }
+            id::INITIAL_SOURCE_CONNECTION_ID => &mut parameters.initial_source_connection_id,
+            // The third connection ID parameter.
+            _ => &mut parameters.retry_source_connection_id,
+        };
+        *field = connection_id;
+        return Ok(());
+    }
     let mut value = ValueSource(value);
+    if let Some(id) = IntegerParameterId::new(id) {
+        let integer = match value.sync_read_var_int_unpin() {
+            Ok(integer) if !value.0.has_remaining() => integer,
+            _ => return IntegerSnafu { id, length }.fail(),
+        };
+        let field = match id.get() {
+            id::INITIAL_MAX_STREAMS_BIDI => {
+                let count = StreamCount::try_from(integer)
+                    .context(invalid_parameter_error::InitialMaxStreamsBidiSnafu);
+                parameters.initial_max_streams_bidi = count?;
+                return Ok(());
+            }
+            id::INITIAL_MAX_STREAMS_UNI => {
+                let count = StreamCount::try_from(integer)
+                    .context(invalid_parameter_error::InitialMaxStreamsUniSnafu);
+                parameters.initial_max_streams_uni = count?;
+                return Ok(());
+            }
+            id::MAX_IDLE_TIMEOUT => &mut parameters.max_idle_timeout,
+            id::MAX_UDP_PAYLOAD_SIZE => &mut parameters.max_udp_payload_size,
+            id::INITIAL_MAX_DATA => &mut parameters.initial_max_data,
+            id::INITIAL_MAX_STREAM_DATA_BIDI_LOCAL => {
+                &mut parameters.initial_max_stream_data_bidi_local
+            }
+            id::INITIAL_MAX_STREAM_DATA_BIDI_REMOTE => {
+                &mut parameters.initial_max_stream_data_bidi_remote
+            }
+            id::INITIAL_MAX_STREAM_DATA_UNI => &mut parameters.initial_max_stream_data_uni,
+            id::ACK_DELAY_EXPONENT => &mut parameters.ack_delay_exponent,
+            id::MAX_ACK_DELAY => &mut parameters.max_ack_delay,
+            // The last integer parameter.
+            _ => &mut parameters.active_connection_id_limit,
+        };
+        *field = integer;
+        return Ok(());
+    }
     match id {
-        id::ORIGINAL_DESTINATION_CONNECTION_ID => {
-            parameters.original_destination_connection_id = Some(connection_id(id, value.0)?);
-        }
-        id::INITIAL_SOURCE_CONNECTION_ID => {
-            parameters.initial_source_connection_id = Some(connection_id(id, value.0)?);
-        }
-        id::RETRY_SOURCE_CONNECTION_ID => {
-            parameters.retry_source_connection_id = Some(connection_id(id, value.0)?);
-        }
         id::STATELESS_RESET_TOKEN => {
             if length != StatelessResetToken::LEN {
                 return StatelessResetTokenSnafu { length }.fail();
@@ -141,7 +184,8 @@ fn set<D: Buf + Unpin, E>(
             }
             parameters.disable_active_migration = true;
         }
-        id::PREFERRED_ADDRESS => {
+        // Every other ID up to `id::LAST` is `preferred_address`.
+        _ => {
             let address = value
                 .sync_read_preferred_address_unpin()
                 .context(PreferredAddressSnafu)?;
@@ -150,60 +194,22 @@ fn set<D: Buf + Unpin, E>(
             }
             parameters.preferred_address = Some(address);
         }
-        _ => {
-            let integer = match value.sync_read_var_int_unpin() {
-                Ok(integer) if !value.0.has_remaining() => integer,
-                _ => return IntegerSnafu { id, length }.fail(),
-            };
-            let field = match id {
-                id::INITIAL_MAX_STREAMS_BIDI => {
-                    let count = StreamCount::try_from(integer)
-                        .context(invalid_parameter_error::InitialMaxStreamsBidiSnafu);
-                    parameters.initial_max_streams_bidi = count?;
-                    return Ok(());
-                }
-                id::INITIAL_MAX_STREAMS_UNI => {
-                    let count = StreamCount::try_from(integer)
-                        .context(invalid_parameter_error::InitialMaxStreamsUniSnafu);
-                    parameters.initial_max_streams_uni = count?;
-                    return Ok(());
-                }
-                id::MAX_IDLE_TIMEOUT => &mut parameters.max_idle_timeout,
-                id::MAX_UDP_PAYLOAD_SIZE => &mut parameters.max_udp_payload_size,
-                id::INITIAL_MAX_DATA => &mut parameters.initial_max_data,
-                id::INITIAL_MAX_STREAM_DATA_BIDI_LOCAL => {
-                    &mut parameters.initial_max_stream_data_bidi_local
-                }
-                id::INITIAL_MAX_STREAM_DATA_BIDI_REMOTE => {
-                    &mut parameters.initial_max_stream_data_bidi_remote
-                }
-                id::INITIAL_MAX_STREAM_DATA_UNI => &mut parameters.initial_max_stream_data_uni,
-                id::ACK_DELAY_EXPONENT => &mut parameters.ack_delay_exponent,
-                id::MAX_ACK_DELAY => &mut parameters.max_ack_delay,
-                // Every other ID up to `id::LAST` is an integer parameter.
-                _ => &mut parameters.active_connection_id_limit,
-            };
-            *field = integer;
-        }
     }
     Ok(())
 }
 
 /// The connection ID that the value of the parameter `id` holds.
 fn connection_id<D: Buf, E>(
-    id: VarInt,
+    id: ConnectionIdParameterId,
     mut value: D,
 ) -> Result<ConnectionId, ReadTransportParametersError<E>> {
-    let length = value.remaining();
-    if length > ConnectionId::MAX_LEN {
-        return Err(read_transport_parameters_error::ConnectionIdSnafu { id }
-            .into_error(ConnectionIdLengthError { length }));
-    }
-    let mut bytes = [0; ConnectionId::MAX_LEN];
-    // invariant: the value holds `length` bytes, at most 20.
-    value.copy_to_slice(&mut bytes[..length]);
-    ConnectionId::new(&bytes[..length])
-        .context(read_transport_parameters_error::ConnectionIdSnafu { id })
+    let length = ConnectionIdLength::new(value.remaining())
+        .context(read_transport_parameters_error::ConnectionIdSnafu { id })?;
+    let mut connection_id = ConnectionId::EMPTY;
+    // The value holds exactly `length` bytes, at most 20.
+    value.copy_to_slice(&mut connection_id.bytes[..length.get()]);
+    connection_id.len = u8::from(length);
+    Ok(connection_id)
 }
 
 /// The value of a known parameter as a source of its own, so that the value
@@ -264,19 +270,22 @@ pub enum ReadTransportParametersError<E> {
     /// integer.
     #[snafu(display(
         "transport parameter {:#x} has a value of {length} bytes that is not one variable-length integer",
-        id.get()
+        id.get().get()
     ))]
     Integer {
         /// The parameter ID.
-        id: VarInt,
+        id: IntegerParameterId,
         /// The length of the value.
         length: usize,
     },
     /// A connection ID parameter is longer than 20 bytes.
-    #[snafu(display("transport parameter {:#x} holds an invalid connection ID", id.get()))]
+    #[snafu(display(
+        "transport parameter {:#x} holds an invalid connection ID",
+        id.get().get()
+    ))]
     ConnectionId {
         /// The parameter ID.
-        id: VarInt,
+        id: ConnectionIdParameterId,
         /// The rejected length.
         source: ConnectionIdLengthError,
     },
@@ -329,6 +338,76 @@ impl<E> ReadTransportParametersError<E> {
     /// [RFC 9000 §7.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-7.4
     pub fn transport_error_code(&self) -> TransportErrorCode {
         TransportErrorCode::TRANSPORT_PARAMETER_ERROR
+    }
+}
+
+/// The ID of a parameter whose value is one variable-length integer:
+/// `max_idle_timeout`, `max_udp_payload_size`, `initial_max_data`, the three
+/// `initial_max_stream_data` parameters, `initial_max_streams_bidi`,
+/// `initial_max_streams_uni`, `ack_delay_exponent`, `max_ack_delay` or
+/// `active_connection_id_limit`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct IntegerParameterId(VarInt);
+
+impl IntegerParameterId {
+    /// The ID `id` if the value of its parameter is an integer, and `None`
+    /// otherwise.
+    pub(crate) const fn new(id: VarInt) -> Option<Self> {
+        match id {
+            id::MAX_IDLE_TIMEOUT
+            | id::MAX_UDP_PAYLOAD_SIZE
+            | id::INITIAL_MAX_DATA
+            | id::INITIAL_MAX_STREAM_DATA_BIDI_LOCAL
+            | id::INITIAL_MAX_STREAM_DATA_BIDI_REMOTE
+            | id::INITIAL_MAX_STREAM_DATA_UNI
+            | id::INITIAL_MAX_STREAMS_BIDI
+            | id::INITIAL_MAX_STREAMS_UNI
+            | id::ACK_DELAY_EXPONENT
+            | id::MAX_ACK_DELAY
+            | id::ACTIVE_CONNECTION_ID_LIMIT => Some(Self(id)),
+            _ => None,
+        }
+    }
+
+    /// The parameter ID.
+    pub const fn get(self) -> VarInt {
+        self.0
+    }
+}
+
+impl From<IntegerParameterId> for VarInt {
+    fn from(id: IntegerParameterId) -> Self {
+        id.0
+    }
+}
+
+/// The ID of a parameter whose value is a connection ID:
+/// `original_destination_connection_id`, `initial_source_connection_id` or
+/// `retry_source_connection_id`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ConnectionIdParameterId(VarInt);
+
+impl ConnectionIdParameterId {
+    /// The ID `id` if the value of its parameter is a connection ID, and
+    /// `None` otherwise.
+    pub(crate) const fn new(id: VarInt) -> Option<Self> {
+        match id {
+            id::ORIGINAL_DESTINATION_CONNECTION_ID
+            | id::INITIAL_SOURCE_CONNECTION_ID
+            | id::RETRY_SOURCE_CONNECTION_ID => Some(Self(id)),
+            _ => None,
+        }
+    }
+
+    /// The parameter ID.
+    pub const fn get(self) -> VarInt {
+        self.0
+    }
+}
+
+impl From<ConnectionIdParameterId> for VarInt {
+    fn from(id: ConnectionIdParameterId) -> Self {
+        id.0
     }
 }
 

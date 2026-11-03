@@ -228,11 +228,7 @@ impl Ack {
 
     /// The Frame Type value: `0x03` with ECN counts, `0x02` without.
     pub const fn type_value(&self) -> VarInt {
-        type_var_int(if self.ecn_counts.is_some() {
-            type_value::ACK_ECN
-        } else {
-            type_value::ACK
-        })
+        type_value_of(self.ecn_counts.is_some())
     }
 
     /// The acknowledged packet numbers as inclusive ranges, largest first,
@@ -402,6 +398,16 @@ fn next_range(previous: PacketNumber, range: AckRange) -> Option<RangeInclusive<
         .checked_sub(2)?;
     let smallest = largest.checked_sub(range.ack_range_length.get().get())?;
     Some(smallest..=largest)
+}
+
+/// The Frame Type value of an ACK frame with ECN counts if `ecn_counts` is
+/// set: `0x03`, or `0x02` without.
+pub(crate) const fn type_value_of(ecn_counts: bool) -> VarInt {
+    type_var_int(if ecn_counts {
+        type_value::ACK_ECN
+    } else {
+        type_value::ACK
+    })
 }
 
 /// A range of an ACK frame extends below packet number 0.

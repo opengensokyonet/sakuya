@@ -3,7 +3,7 @@
 use super::{
     Extensions, Frame, FrameType, Frames, InvalidDataError, LengthError, UnknownFrameTypeError,
     ack::{Ack, AckRange, AckRanges, EcnCounts},
-    codec::{ReadFrameError, ReadFrameHostExt as _, WriteFrameHostExt as _},
+    codec::{ExtensionTypeValue, ReadFrameError, ReadFrameHostExt as _, WriteFrameHostExt as _},
     connection_close::{CloseErrorCode, ConnectionClose},
     crypto::Crypto,
     data_blocked::DataBlocked,
@@ -463,10 +463,27 @@ fn unknown_and_disabled_types_are_rejected() {
         let frame_type = input.sync_read_var_int_unpin().unwrap();
         let mut input = encoding;
         let error = input.sync_read_frame_unpin(extensions).unwrap_err();
-        assert!(
-            matches!(error, ReadFrameError::UnknownType { frame_type: rejected } if rejected == frame_type),
-            "{encoding:02x?}: {error:?}"
-        );
+        let extension = matches!(frame_type.get(), 0x24 | 0x30 | 0x31);
+        if extension {
+            assert!(
+                matches!(
+                    error,
+                    ReadFrameError::ExtensionNotEnabled { frame_type: rejected }
+                        if rejected.get() == frame_type
+                ),
+                "{encoding:02x?}: {error:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    error,
+                    ReadFrameError::UnknownType {
+                        source: UnknownFrameTypeError { frame_type: rejected }
+                    } if rejected.get() == frame_type
+                ),
+                "{encoding:02x?}: {error:?}"
+            );
+        }
         let expected = if matches!(frame_type.get(), 0x30 | 0x31) {
             TransportErrorCode::PROTOCOL_VIOLATION
         } else {
@@ -810,11 +827,125 @@ fn recovery_properties() {
         .count();
     assert_eq!(known, 0x1f + 1 + 2);
     assert_eq!(
-        FrameType::of(vi(0x1f)),
-        Err(UnknownFrameTypeError {
-            frame_type: vi(0x1f)
-        })
+        FrameType::of(vi(0x1f)).map_err(|error| error.frame_type.get()),
+        Err(vi(0x1f))
     );
+}
+
+/// `FrameType::of` rejects exactly the values that no frame type defines,
+/// and `ExtensionTypeValue` holds exactly the values of extension frames.
+#[test]
+fn frame_type_value_sets() {
+    let defined = |value: u64| matches!(value, 0x00..=0x1e | 0x24 | 0x30 | 0x31);
+    for value in (0..=0x4040).chain([VarInt::MAX.get()]) {
+        let frame_type = vi(value);
+        match FrameType::of(frame_type) {
+            Ok(_) => assert!(defined(value), "{value:#x}"),
+            Err(error) => {
+                assert!(!defined(value), "{value:#x}");
+                assert_eq!(error.frame_type.get(), frame_type);
+                assert_eq!(VarInt::from(error.frame_type), frame_type);
+            }
+        }
+        let extension = ExtensionTypeValue::new(frame_type).map(ExtensionTypeValue::get);
+        let expected = matches!(value, 0x24 | 0x30 | 0x31).then_some(frame_type);
+        assert_eq!(extension, expected, "{value:#x}");
+    }
+}
+
+/// Every failure after the Frame Type gives the Frame Type value back, and
+/// the variants of frame types with two values say which one was read.
+#[test]
+fn failures_give_the_frame_type_value() {
+    use ReadFrameError as F;
+    use TransportErrorCode as Code;
+    // Types with fields: only the type byte is present, so the first field
+    // is cut short. DATAGRAM 0x30 takes the rest, so it gets one byte.
+    let values = (0x02..=0x1du64).chain([0x24, 0x31]);
+    for value in values {
+        let encoding = [value as u8];
+        let mut input = &encoding[..];
+        let error = input.sync_read_frame_unpin(Extensions::ALL).unwrap_err();
+        assert!(error.is_incomplete(), "{value:#x}: {error:?}");
+        assert_eq!(error.frame_type(), Some(vi(value)), "{value:#x}");
+        assert_eq!(error.transport_error_code(), Code::FRAME_ENCODING_ERROR);
+        let bidi = Directionality::Bidirectional;
+        let uni = Directionality::Unidirectional;
+        let attribute = match value {
+            0x02 => matches!(
+                error,
+                F::Ack {
+                    ecn_counts: false,
+                    ..
+                }
+            ),
+            0x03 => matches!(
+                error,
+                F::Ack {
+                    ecn_counts: true,
+                    ..
+                }
+            ),
+            0x12 => matches!(error, F::MaxStreams { directionality, .. } if directionality == bidi),
+            0x13 => matches!(error, F::MaxStreams { directionality, .. } if directionality == uni),
+            0x16 => {
+                matches!(error, F::StreamsBlocked { directionality, .. } if directionality == bidi)
+            }
+            0x17 => {
+                matches!(error, F::StreamsBlocked { directionality, .. } if directionality == uni)
+            }
+            0x1c => matches!(
+                error,
+                F::ConnectionClose {
+                    application: false,
+                    ..
+                }
+            ),
+            0x1d => matches!(
+                error,
+                F::ConnectionClose {
+                    application: true,
+                    ..
+                }
+            ),
+            _ => true,
+        };
+        assert!(attribute, "{value:#x}: {error:?}");
+    }
+
+    // Extension frame types that are not enabled keep their value and code.
+    let cases = [
+        (0x24u64, Code::FRAME_ENCODING_ERROR),
+        (0x30, Code::PROTOCOL_VIOLATION),
+        (0x31, Code::PROTOCOL_VIOLATION),
+    ];
+    for (value, code) in cases {
+        let encoding = [value as u8, 0x00];
+        let mut input = &encoding[..];
+        let error = input.sync_read_frame_unpin(Extensions::NONE).unwrap_err();
+        assert!(
+            matches!(error, F::ExtensionNotEnabled { frame_type } if frame_type.get() == vi(value)),
+            "{value:#x}: {error:?}"
+        );
+        assert_eq!(error.frame_type(), Some(vi(value)));
+        assert_eq!(error.transport_error_code(), code, "{value:#x}");
+        assert!(!error.is_incomplete());
+        assert_eq!(input, [0x00]);
+    }
+    let error = [0x30]
+        .as_slice()
+        .sync_read_frame_unpin(Extensions::NONE)
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "frame type 0x30 belongs to an extension that is not enabled"
+    );
+    let error = [0x1f]
+        .as_slice()
+        .sync_read_frame_unpin(Extensions::ALL)
+        .unwrap_err();
+    assert_eq!(error.to_string(), "unknown frame type 0x1f");
+    assert_eq!(error.transport_error_code(), Code::FRAME_ENCODING_ERROR);
 }
 
 #[test]
