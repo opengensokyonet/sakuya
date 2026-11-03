@@ -10,26 +10,65 @@ use snafu::Snafu;
 
 /// A NEW_CONNECTION_ID frame ([RFC 9000 §19.15]).
 ///
-/// `retire_prior_to` is at most `sequence_number`. Each variable-length
-/// integer field keeps the width of its encoding.
+/// `retire_prior_to` is at most `sequence_number`: [`NewConnectionId::new`]
+/// checks it, so every value writes an encoding that reads back to the same
+/// value; the fields are read through methods of the same names. Each
+/// variable-length integer field keeps the width of its encoding.
 ///
 /// [RFC 9000 §19.15]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.15
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct NewConnectionId {
-    /// The sequence number the sender assigned to the connection ID.
-    pub sequence_number: VarIntField<VarInt>,
-    /// The sequence number below which connection IDs are to be retired.
-    pub retire_prior_to: VarIntField<VarInt>,
-    /// The connection ID: 1 to 20 bytes.
-    pub connection_id: NonEmptyCid,
-    /// The Stateless Reset Token for the connection ID.
-    pub stateless_reset_token: StatelessResetToken,
+    sequence_number: VarIntField<VarInt>,
+    retire_prior_to: VarIntField<VarInt>,
+    connection_id: NonEmptyCid,
+    stateless_reset_token: StatelessResetToken,
 }
 
 /// The longest encoding of the frame.
 const ENCODED_MAX: usize = 1 + 8 + 8 + 1 + ConnectionId::MAX_LEN + StatelessResetToken::LEN;
 
 impl NewConnectionId {
+    /// The NEW_CONNECTION_ID frame with these fields.
+    ///
+    /// # Errors
+    ///
+    /// [`RetirePriorToError`] if `retire_prior_to` exceeds
+    /// `sequence_number`.
+    pub fn new(
+        sequence_number: VarIntField<VarInt>,
+        retire_prior_to: VarIntField<VarInt>,
+        connection_id: NonEmptyCid,
+        stateless_reset_token: StatelessResetToken,
+    ) -> Result<Self, RetirePriorToError> {
+        RetirePriorToError::check(sequence_number.get(), retire_prior_to.get())?;
+        Ok(Self {
+            sequence_number,
+            retire_prior_to,
+            connection_id,
+            stateless_reset_token,
+        })
+    }
+
+    /// The sequence number the sender assigned to the connection ID.
+    pub const fn sequence_number(&self) -> VarIntField<VarInt> {
+        self.sequence_number
+    }
+
+    /// The sequence number below which connection IDs are to be retired.
+    pub const fn retire_prior_to(&self) -> VarIntField<VarInt> {
+        self.retire_prior_to
+    }
+
+    /// The connection ID: 1 to 20 bytes.
+    pub const fn connection_id(&self) -> NonEmptyCid {
+        self.connection_id
+    }
+
+    /// The Stateless Reset Token for the connection ID.
+    pub const fn stateless_reset_token(&self) -> StatelessResetToken {
+        self.stateless_reset_token
+    }
+
     /// The Frame Type value, `0x18`.
     pub const fn type_value(&self) -> VarInt {
         type_var_int(type_value::NEW_CONNECTION_ID)
@@ -38,15 +77,6 @@ impl NewConnectionId {
     /// The number of bytes [`codec::write_new_connection_id`] writes.
     pub fn encoded_len(&self) -> usize {
         self.head().len()
-    }
-
-    /// Checks that `retire_prior_to` is at most `sequence_number`.
-    ///
-    /// # Errors
-    ///
-    /// [`RetirePriorToError`] otherwise.
-    pub fn validate(&self) -> Result<(), RetirePriorToError> {
-        RetirePriorToError::check(self.sequence_number.get(), self.retire_prior_to.get())
     }
 
     /// The encoded frame.
@@ -129,13 +159,13 @@ pub mod codec {
             .read_array::<{ StatelessResetToken::LEN }>()
             .await
             .context(read_new_connection_id_error::StatelessResetTokenSnafu)?;
-        RetirePriorToError::check(sequence_number.get(), retire_prior_to.get())?;
-        Ok(NewConnectionId {
+        let frame = NewConnectionId::new(
             sequence_number,
             retire_prior_to,
             connection_id,
-            stateless_reset_token: StatelessResetToken::new(stateless_reset_token),
-        })
+            StatelessResetToken::new(stateless_reset_token),
+        )?;
+        Ok(frame)
     }
 
     async fn field<F: Read, A: ReceiverAccess<Family = F>>(
@@ -182,51 +212,24 @@ pub mod codec {
         },
     }
 
-    /// Writes `frame`, after checking it with [`NewConnectionId::validate`].
+    /// Writes `frame`; [`NewConnectionId::new`] checked its rule.
     ///
     /// # Errors
     ///
-    /// [`WriteNewConnectionIdError::Invalid`] before writing anything, and
-    /// [`WriteNewConnectionIdError::Write`] if the receiver stops accepting
-    /// bytes or fails; bytes accepted before stay written.
+    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
+    /// bytes accepted before stay written.
     #[call(sync)]
     pub async fn write_new_connection_id<F: Write, A: ReceiverAccess<Family = F>>(
         io: &mut A,
         frame: NewConnectionId,
-    ) -> Result<(), WriteNewConnectionIdError<F::Error>> {
-        frame.validate()?;
-        io.write_all(frame.head().as_slice())
-            .await
-            .context(write_new_connection_id_error::WriteSnafu)
-    }
-
-    /// Failures that [`write_new_connection_id`] can produce.
-    #[derive(Debug, Snafu)]
-    #[snafu(module(write_new_connection_id_error), visibility(pub(crate)))]
-    pub enum WriteNewConnectionIdError<E> {
-        /// The frame breaks a rule of the encoding; nothing was written.
-        #[snafu(transparent)]
-        Invalid {
-            /// The broken rule.
-            source: RetirePriorToError,
-        },
-        /// The receiver stopped accepting bytes or failed.
-        #[snafu(display("NEW_CONNECTION_ID write failed"))]
-        Write {
-            /// The failure of writing.
-            source: WriteAllError<E>,
-        },
+    ) -> Result<(), WriteAllError<F::Error>> {
+        io.write_all(frame.head().as_slice()).await
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        NewConnectionId, RetirePriorToError,
-        codec::{
-            ReadNewConnectionIdError, WriteNewConnectionIdError, WriteNewConnectionIdHostExt as _,
-        },
-    };
+    use super::{NewConnectionId, RetirePriorToError, codec::ReadNewConnectionIdError};
     use crate::{
         connection_id::{
             ConnectionIdLengthError, NonEmptyCid, StatelessResetToken, codec::ReadConnectionIdError,
@@ -241,19 +244,23 @@ mod tests {
 
     const TOKEN: [u8; 16] = *b"0123456789abcdef";
 
-    fn frame(sequence_number: u8, retire_prior_to: u8, cid: &[u8]) -> NewConnectionId {
-        NewConnectionId {
-            sequence_number: VarIntField::shortest(VarInt::from(sequence_number)),
-            retire_prior_to: VarIntField::shortest(VarInt::from(retire_prior_to)),
-            connection_id: NonEmptyCid::try_from(cid).unwrap(),
-            stateless_reset_token: StatelessResetToken::new(TOKEN),
-        }
+    fn frame(
+        sequence_number: u8,
+        retire_prior_to: u8,
+        cid: &[u8],
+    ) -> Result<NewConnectionId, RetirePriorToError> {
+        NewConnectionId::new(
+            VarIntField::shortest(VarInt::from(sequence_number)),
+            VarIntField::shortest(VarInt::from(retire_prior_to)),
+            NonEmptyCid::try_from(cid).unwrap(),
+            StatelessResetToken::new(TOKEN),
+        )
     }
 
     #[test]
     fn round_trips_connection_id_lengths() {
         for cid in [&[0xaa; 20][..], &[0x01]] {
-            let encoding = assert_round_trip(Frame::NewConnectionId(frame(2, 1, cid)));
+            let encoding = assert_round_trip(Frame::NewConnectionId(frame(2, 1, cid).unwrap()));
             assert_eq!(encoding.len(), 1 + 1 + 1 + 1 + cid.len() + 16);
             assert_eq!(encoding[3] as usize, cid.len());
         }
@@ -296,14 +303,8 @@ mod tests {
             read(&encoding),
             ReadNewConnectionIdError::RetirePriorTo { source } if source == expected
         ));
-        let invalid = frame(1, 2, &[1]);
-        assert_eq!(invalid.validate(), Err(expected));
-        let mut written = Vec::new();
-        assert!(matches!(
-            written.sync_write_new_connection_id_unpin(invalid),
-            Err(WriteNewConnectionIdError::Invalid { .. })
-        ));
-        assert!(written.is_empty());
+        assert_eq!(frame(1, 2, &[1]), Err(expected));
+        assert!(frame(2, 2, &[1]).is_ok());
     }
 
     #[test]

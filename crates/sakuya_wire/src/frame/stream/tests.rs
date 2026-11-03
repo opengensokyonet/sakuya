@@ -1,6 +1,6 @@
 use super::{
     Stream,
-    codec::{ReadStreamError, WriteStreamError, WriteStreamHostExt as _},
+    codec::{ReadStreamError, WriteStreamHostExt as _},
 };
 use crate::{
     frame::{
@@ -31,13 +31,14 @@ fn type_bits() {
         };
         assert_eq!(
             stream,
-            Stream {
-                stream_id: short(sid(4)),
-                offset: (frame_type & 0x04 != 0).then(|| short(vi(5))),
-                length_width: (frame_type & 0x02 != 0).then_some(VarIntWidth::One),
-                data: &b"ab"[..],
-                fin: frame_type & 0x01 != 0,
-            }
+            Stream::new(
+                short(sid(4)),
+                (frame_type & 0x04 != 0).then(|| short(vi(5))),
+                (frame_type & 0x02 != 0).then_some(VarIntWidth::One),
+                &b"ab"[..],
+                frame_type & 0x01 != 0,
+            )
+            .unwrap()
         );
         assert_eq!(stream.type_value(), vi(frame_type.into()));
         let mut rewritten = Vec::new();
@@ -81,26 +82,29 @@ fn data_ending_beyond_2_62_is_rejected() {
     let mut input = at_limit.as_slice();
     assert!(input.sync_read_frame_unpin(Extensions::NONE).is_ok());
 
-    let frame = Stream {
-        stream_id: short(sid(0)),
-        offset: Some(short(VarInt::MAX)),
-        length_width: Some(VarIntWidth::One),
-        data: &b"x"[..],
-        fin: false,
-    };
+    // Construction rejects the same fields, with and without a Length
+    // field.
     let expected = InvalidDataError::DataEnd {
         source: DataEndError {
             offset: VarInt::MAX,
             length: 1,
         },
     };
-    assert_eq!(frame.validate(), Err(expected));
-    let mut written = Vec::new();
-    assert!(matches!(
-        written.sync_write_stream_unpin(frame),
-        Err(WriteStreamError::Invalid { source }) if source == expected
-    ));
-    assert!(written.is_empty());
+    for length_width in [Some(VarIntWidth::One), None] {
+        let offset = Some(short(VarInt::MAX));
+        assert_eq!(
+            Stream::new(short(sid(0)), offset, length_width, &b"x"[..], false),
+            Err(expected)
+        );
+    }
+    let at_limit = Stream::new(
+        short(sid(0)),
+        Some(short(VarInt::MAX)),
+        None,
+        &b""[..],
+        true,
+    );
+    assert!(at_limit.is_ok());
 }
 
 #[test]
@@ -120,14 +124,10 @@ fn max_data_len_fits_the_room_exactly() {
             for stream_id in stream_ids {
                 for has_length in [false, true] {
                     let frame_len = |len: usize| {
-                        Stream {
-                            stream_id,
-                            offset,
-                            length_width: has_length.then_some(VarIntWidth::One),
-                            data: &[][..],
-                            fin: false,
-                        }
-                        .encoded_len()
+                        let length_width = has_length.then_some(VarIntWidth::One);
+                        Stream::new(stream_id, offset, length_width, &[][..], false)
+                            .unwrap()
+                            .encoded_len()
                             + if has_length { length_field(len) - 1 } else { 0 }
                             + len
                     };
@@ -142,16 +142,12 @@ fn max_data_len_fits_the_room_exactly() {
                     // field takes at most `room`.
                     if let Some(max) = max.filter(|&max| max <= 1 << 20) {
                         let data = vec![0; max];
-                        let frame = Stream {
-                            stream_id,
-                            offset,
-                            length_width: has_length
-                                .then(|| VarIntWidth::shortest(VarInt::try_from(max).unwrap())),
-                            data: data.as_slice(),
-                            fin: false,
-                        };
+                        let length_width = has_length
+                            .then(|| VarIntWidth::shortest(VarInt::try_from(max).unwrap()));
+                        let frame =
+                            Stream::new(stream_id, offset, length_width, data.as_slice(), false)
+                                .unwrap();
                         assert!(frame.encoded_len() <= room);
-                        assert_eq!(frame.validate(), Ok(()));
                     }
                 }
             }
@@ -162,14 +158,9 @@ fn max_data_len_fits_the_room_exactly() {
 #[test]
 fn stream_ids_and_offsets_keep_their_widths() {
     for field in edge_fields() {
-        let frame = Stream {
-            stream_id: VarIntField::new(StreamId::from_var_int(field.get()), field.width())
-                .unwrap(),
-            offset: Some(field),
-            length_width: None,
-            data: &b""[..],
-            fin: true,
-        };
+        let stream_id =
+            VarIntField::new(StreamId::from_var_int(field.get()), field.width()).unwrap();
+        let frame = Stream::new(stream_id, Some(field), None, &b""[..], true).unwrap();
         let encoding = assert_round_trip(Frame::Stream(frame));
         assert_eq!(encoding.len(), 1 + 2 * field.encoded_len());
     }

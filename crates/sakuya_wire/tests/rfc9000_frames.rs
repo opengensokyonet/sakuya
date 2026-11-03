@@ -215,7 +215,10 @@ fn crypto_data_ends_at_the_largest_offset() {
     let Frame::Crypto(crypto) = accepts(&bytes) else {
         panic!()
     };
-    assert_eq!((crypto.offset.get(), crypto.data), (VarInt::MAX, &b""[..]));
+    assert_eq!(
+        (crypto.offset().get(), *crypto.data()),
+        (VarInt::MAX, &b""[..])
+    );
     // The check needs only the fields, not the data.
     rejects(&frame(&[&[0x06], &var(MAX), &[1]]));
     rejects(&frame(&[&[0x06], &var(1), &var(MAX)]));
@@ -251,14 +254,14 @@ fn stream_type_bits_announce_the_fields() {
         let Frame::Stream(stream) = accepts(&bytes) else {
             panic!()
         };
-        assert_eq!(stream.stream_id.get().get(), VarInt::from(4u8));
+        assert_eq!(stream.stream_id().get().get(), VarInt::from(4u8));
         assert_eq!(
-            stream.offset.map(|offset| offset.get().get()),
+            stream.offset().map(|offset| offset.get().get()),
             off.then_some(9)
         );
         assert_eq!(stream.data_offset().get(), if off { 9 } else { 0 });
-        assert_eq!(stream.data, [0xaa, 0xbb]);
-        assert_eq!((stream.fin, stream.length_width.is_some()), (fin, len));
+        assert_eq!(*stream.data(), [0xaa, 0xbb]);
+        assert_eq!((stream.fin(), stream.length_width().is_some()), (fin, len));
         assert_eq!(accepts(&bytes).type_value().get(), u64::from(type_value));
     }
 }
@@ -280,7 +283,7 @@ fn stream_data_ends_at_the_largest_offset() {
     let Frame::Stream(stream) = accepts(&[0x0e, 0, 0, 1, 0xaa]) else {
         panic!()
     };
-    assert_eq!(stream.offset, Some(VarIntField::shortest(VarInt::ZERO)));
+    assert_eq!(stream.offset(), Some(VarIntField::shortest(VarInt::ZERO)));
     assert_eq!(stream.data_offset(), VarInt::ZERO);
     assert_eq!(stream.type_value().get(), 0x0e);
     prefixes_are_incomplete(&[0x0e, 4, 9, 2, 0xaa, 0xbb]);
@@ -340,8 +343,8 @@ fn new_connection_id_lengths_and_retire_prior_to() {
         let Frame::NewConnectionId(new_id) = accepts(&bytes) else {
             panic!()
         };
-        assert_eq!(new_id.connection_id.as_bytes().len(), length);
-        assert_eq!(new_id.stateless_reset_token.as_bytes(), &token);
+        assert_eq!(new_id.connection_id().as_bytes().len(), length);
+        assert_eq!(new_id.stateless_reset_token().as_bytes(), &token);
         prefixes_are_incomplete(&bytes);
     }
     rejects(&with(3, 3, &[]));
@@ -422,6 +425,6 @@ fn fields_may_use_longer_encodings() {
     ) else {
         panic!()
     };
-    assert_eq!(longer.token, shortest.token);
-    assert_eq!(longer.token_length_width, VarIntWidth::Two);
+    assert_eq!(longer.token(), shortest.token());
+    assert_eq!(longer.token_length_width(), VarIntWidth::Two);
 }

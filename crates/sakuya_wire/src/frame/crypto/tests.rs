@@ -1,6 +1,6 @@
 use super::{
     Crypto,
-    codec::{ReadCryptoError, WriteCryptoError, WriteCryptoHostExt as _},
+    codec::{ReadCryptoError, WriteCryptoHostExt as _},
 };
 use crate::{
     frame::{
@@ -13,17 +13,18 @@ use crate::{
 
 #[test]
 fn round_trips() {
-    let encoding = assert_round_trip(Frame::Crypto(Crypto {
-        offset: short(vi(1)),
-        length_width: VarIntWidth::One,
-        data: &b"hello"[..],
-    }));
+    let encoding = assert_round_trip(Frame::Crypto(
+        Crypto::new(short(vi(1)), VarIntWidth::One, &b"hello"[..]).unwrap(),
+    ));
     assert_eq!(encoding, [0x06, 0x01, 0x05, b'h', b'e', b'l', b'l', b'o']);
-    let encoding = assert_round_trip(Frame::Crypto(Crypto {
-        offset: wide(vi(1), VarIntWidth::Four),
-        length_width: VarIntWidth::Two,
-        data: &b"hello"[..],
-    }));
+    let encoding = assert_round_trip(Frame::Crypto(
+        Crypto::new(
+            wide(vi(1), VarIntWidth::Four),
+            VarIntWidth::Two,
+            &b"hello"[..],
+        )
+        .unwrap(),
+    ));
     assert_eq!(
         encoding,
         [
@@ -51,47 +52,32 @@ fn data_ending_beyond_2_62_is_rejected() {
         }) if source == expected
     ));
 
-    let frame = Crypto {
-        offset: short(VarInt::MAX),
-        length_width: VarIntWidth::One,
-        data: &b"x"[..],
-    };
+    // Construction rejects the same fields.
     let expected = InvalidDataError::DataEnd {
         source: DataEndError {
             offset: VarInt::MAX,
             length: 1,
         },
     };
-    assert_eq!(frame.validate(), Err(expected));
-    let mut written = Vec::new();
-    assert!(matches!(
-        written.sync_write_crypto_unpin(frame),
-        Err(WriteCryptoError::Invalid { source }) if source == expected
-    ));
-    assert!(written.is_empty());
+    assert_eq!(
+        Crypto::new(short(VarInt::MAX), VarIntWidth::One, &b"x"[..]),
+        Err(expected)
+    );
 }
 
 #[test]
 fn narrow_length_fields_are_rejected() {
     let data = [0; 64];
-    let frame = Crypto {
-        offset: short(VarInt::ZERO),
-        length_width: VarIntWidth::One,
-        data: &data[..],
-    };
     let expected = InvalidDataError::Length {
         source: LengthError {
             length: 64,
             width: VarIntWidth::One,
         },
     };
-    assert_eq!(frame.validate(), Err(expected));
-    let mut written = Vec::new();
-    assert!(matches!(
-        written.sync_write_crypto_unpin(frame),
-        Err(WriteCryptoError::Invalid { source }) if source == expected
-    ));
-    assert!(written.is_empty());
+    assert_eq!(
+        Crypto::new(short(VarInt::ZERO), VarIntWidth::One, &data[..]),
+        Err(expected)
+    );
     assert_eq!(
         expected.to_string(),
         "field of 64 bytes is longer than a 1-byte Length field can state"
@@ -100,18 +86,11 @@ fn narrow_length_fields_are_rejected() {
 
 #[test]
 fn write_reports_progress_when_the_sink_fills() {
-    let frame = Crypto {
-        offset: short(vi(1)),
-        length_width: VarIntWidth::One,
-        data: &b"0123456789"[..],
-    };
+    let frame = Crypto::new(short(vi(1)), VarIntWidth::One, &b"0123456789"[..]).unwrap();
     let mut buffer = [0u8; 5];
     let mut sink = buffer.as_mut_slice();
     let error = sink.sync_write_crypto_unpin(frame).unwrap_err();
-    let WriteCryptoError::Write { source } = &error else {
-        panic!("{error:?}")
-    };
-    assert_eq!(source.completed(), 5);
+    assert_eq!(error.completed(), 5);
     assert_eq!(buffer, [0x06, 0x01, 0x0a, b'0', b'1']);
 }
 
@@ -128,12 +107,9 @@ fn max_data_len_fits_the_room_exactly() {
     for room in rooms {
         for offset in offsets {
             let frame_len = |len: usize| {
-                Crypto {
-                    offset,
-                    length_width: VarIntWidth::One,
-                    data: &[][..],
-                }
-                .encoded_len()
+                Crypto::new(offset, VarIntWidth::One, &[][..])
+                    .unwrap()
+                    .encoded_len()
                     + length_field(len)
                     - 1
                     + len
@@ -142,13 +118,9 @@ fn max_data_len_fits_the_room_exactly() {
             check_max(room, max, frame_len, offset.get());
             if let Some(max) = max.filter(|&max| max <= 1 << 20) {
                 let data = vec![0; max];
-                let frame = Crypto {
-                    offset,
-                    length_width: VarIntWidth::shortest(VarInt::try_from(max).unwrap()),
-                    data: data.as_slice(),
-                };
+                let length_width = VarIntWidth::shortest(VarInt::try_from(max).unwrap());
+                let frame = Crypto::new(offset, length_width, data.as_slice()).unwrap();
                 assert!(frame.encoded_len() <= room);
-                assert_eq!(frame.validate(), Ok(()));
             }
         }
     }

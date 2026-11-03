@@ -29,14 +29,15 @@
 //!     maximum_data: VarIntField::shortest(VarInt::from(1_000_000u32)),
 //! });
 //! output.sync_write_frame_unpin(max_data.clone()).unwrap();
-//! let stream = Frame::Stream(Stream {
-//!     stream_id: VarIntField::shortest(StreamId::from_var_int(VarInt::from(4u8))),
-//!     offset: None,
-//!     length_width: Some(VarIntWidth::One),
-//!     data: &b"hello"[..],
-//!     fin: true,
-//! });
+//! let stream_id = VarIntField::shortest(StreamId::from_var_int(VarInt::from(4u8)));
+//! let stream = Stream::new(stream_id, None, Some(VarIntWidth::One), &b"hello"[..], true);
+//! let stream = Frame::Stream(stream.unwrap());
 //! output.sync_write_frame_unpin(stream.clone()).unwrap();
+//!
+//! // A STREAM frame checks its fields when it is constructed, so writing it
+//! // checks nothing: a one-byte Length field cannot state 64 bytes of data.
+//! let data = [0; 64];
+//! assert!(Stream::new(stream_id, None, Some(VarIntWidth::One), &data[..], true).is_err());
 //!
 //! // Reading a byte slice yields subslices of it as payload fields.
 //! let mut input = output.as_slice();
@@ -567,15 +568,18 @@ impl<E> ReadFrameError<E> {
     }
 }
 
-/// Writes `frame` completely, after checking it with [`Frame::validate`].
+/// Writes `frame` completely.
 ///
-/// Acceptance by the receiver does not imply flushing or delivery.
+/// An ACK frame is first checked with [`Frame::validate`]; the other frame
+/// types check their limits when they are constructed. Acceptance by the
+/// receiver does not imply flushing or delivery.
 ///
 /// # Errors
 ///
-/// [`WriteFrameError::Invalid`] before writing anything if the frame breaks
-/// a limit of the encoding, and [`WriteFrameError::Write`] if the receiver
-/// stops accepting bytes or fails; bytes accepted before stay written.
+/// [`WriteFrameError::Invalid`] before writing anything if an ACK frame
+/// breaks a limit of the encoding, and [`WriteFrameError::Write`] if the
+/// receiver stops accepting bytes or fails; bytes accepted before stay
+/// written.
 #[call(sync)]
 pub async fn write_frame<F, A, D>(
     io: &mut A,
@@ -588,20 +592,21 @@ where
 {
     use super::{
         ack, connection_close, crypto, data_blocked, datagram, handshake_done, max_data,
-        max_stream_data, max_streams, new_token, padding, path_challenge, path_response, ping,
-        reset_stream, retire_connection_id, stop_sending, stream, stream_data_blocked,
-        streams_blocked,
+        max_stream_data, max_streams, new_connection_id, new_token, padding, path_challenge,
+        path_response, ping, reset_stream, reset_stream_at, retire_connection_id, stop_sending,
+        stream, stream_data_blocked, streams_blocked,
     };
     frame.validate()?;
     let result = match frame {
         Frame::Padding(frame) => padding::codec::write_padding(io, frame).await,
         Frame::Ping(frame) => ping::codec::write_ping(io, frame).await,
+        // The ACK frame was checked above.
         Frame::Ack(frame) => ack::codec::write_body(io, &frame.as_iter()).await,
         Frame::ResetStream(frame) => reset_stream::codec::write_reset_stream(io, frame).await,
         Frame::StopSending(frame) => stop_sending::codec::write_stop_sending(io, frame).await,
-        Frame::Crypto(frame) => crypto::codec::write_body(io, frame).await,
-        Frame::NewToken(frame) => new_token::codec::write_body(io, frame).await,
-        Frame::Stream(frame) => stream::codec::write_body(io, frame).await,
+        Frame::Crypto(frame) => crypto::codec::write_crypto(io, frame).await,
+        Frame::NewToken(frame) => new_token::codec::write_new_token(io, frame).await,
+        Frame::Stream(frame) => stream::codec::write_stream(io, frame).await,
         Frame::MaxData(frame) => max_data::codec::write_max_data(io, frame).await,
         Frame::MaxStreamData(frame) => {
             max_stream_data::codec::write_max_stream_data(io, frame).await
@@ -614,17 +619,22 @@ where
         Frame::StreamsBlocked(frame) => {
             streams_blocked::codec::write_streams_blocked(io, frame).await
         }
+        Frame::NewConnectionId(frame) => {
+            new_connection_id::codec::write_new_connection_id(io, frame).await
+        }
         Frame::RetireConnectionId(frame) => {
             retire_connection_id::codec::write_retire_connection_id(io, frame).await
         }
         Frame::PathChallenge(frame) => path_challenge::codec::write_path_challenge(io, frame).await,
         Frame::PathResponse(frame) => path_response::codec::write_path_response(io, frame).await,
-        Frame::ConnectionClose(frame) => connection_close::codec::write_body(io, frame).await,
+        Frame::ConnectionClose(frame) => {
+            connection_close::codec::write_connection_close(io, frame).await
+        }
         Frame::HandshakeDone(frame) => handshake_done::codec::write_handshake_done(io, frame).await,
-        Frame::Datagram(frame) => datagram::codec::write_body(io, frame).await,
-        // These frames were checked above.
-        Frame::NewConnectionId(frame) => io.write_all(frame.head().as_slice()).await,
-        Frame::ResetStreamAt(frame) => io.write_all(frame.head().as_slice()).await,
+        Frame::ResetStreamAt(frame) => {
+            reset_stream_at::codec::write_reset_stream_at(io, frame).await
+        }
+        Frame::Datagram(frame) => datagram::codec::write_datagram(io, frame).await,
     };
     result.context(write_frame_error::WriteSnafu)
 }
@@ -633,7 +643,7 @@ where
 #[derive(Debug, Snafu)]
 #[snafu(module(write_frame_error), visibility(pub(crate)))]
 pub enum WriteFrameError<E> {
-    /// The frame breaks a limit of the encoding; nothing was written.
+    /// An ACK frame breaks a limit of the encoding; nothing was written.
     #[snafu(transparent)]
     Invalid {
         /// The broken limit.

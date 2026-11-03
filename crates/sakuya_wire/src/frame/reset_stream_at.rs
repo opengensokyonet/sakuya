@@ -14,24 +14,63 @@ use snafu::Snafu;
 /// [draft-ietf-quic-reliable-stream-reset-11] §4.
 ///
 /// It is a RESET_STREAM that also states how much of the stream must still
-/// be delivered reliably. `reliable_size` is at most `final_size`. Each field
-/// keeps the width of its variable-length integer encoding.
+/// be delivered reliably. `reliable_size` is at most `final_size`:
+/// [`ResetStreamAt::new`] checks it, so every value writes an encoding that
+/// reads back to the same value; the fields are read through methods of the
+/// same names. Each field keeps the width of its variable-length integer
+/// encoding.
 ///
 /// [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html#section-4
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ResetStreamAt {
-    /// The stream being terminated.
-    pub stream_id: VarIntField<StreamId>,
-    /// The application protocol error code.
-    pub application_error_code: VarIntField<ApplicationErrorCode>,
-    /// The final size of the stream, in bytes.
-    pub final_size: VarIntField<VarInt>,
-    /// The amount of data, from the start of the stream, that must be
-    /// delivered to the application despite the reset.
-    pub reliable_size: VarIntField<VarInt>,
+    stream_id: VarIntField<StreamId>,
+    application_error_code: VarIntField<ApplicationErrorCode>,
+    final_size: VarIntField<VarInt>,
+    reliable_size: VarIntField<VarInt>,
 }
 
 impl ResetStreamAt {
+    /// The RESET_STREAM_AT frame with these fields.
+    ///
+    /// # Errors
+    ///
+    /// [`ReliableSizeError`] if `reliable_size` exceeds `final_size`.
+    pub fn new(
+        stream_id: VarIntField<StreamId>,
+        application_error_code: VarIntField<ApplicationErrorCode>,
+        final_size: VarIntField<VarInt>,
+        reliable_size: VarIntField<VarInt>,
+    ) -> Result<Self, ReliableSizeError> {
+        ReliableSizeError::check(final_size.get(), reliable_size.get())?;
+        Ok(Self {
+            stream_id,
+            application_error_code,
+            final_size,
+            reliable_size,
+        })
+    }
+
+    /// The stream being terminated.
+    pub const fn stream_id(&self) -> VarIntField<StreamId> {
+        self.stream_id
+    }
+
+    /// The application protocol error code.
+    pub const fn application_error_code(&self) -> VarIntField<ApplicationErrorCode> {
+        self.application_error_code
+    }
+
+    /// The final size of the stream, in bytes.
+    pub const fn final_size(&self) -> VarIntField<VarInt> {
+        self.final_size
+    }
+
+    /// The amount of data, from the start of the stream, that must be
+    /// delivered to the application despite the reset.
+    pub const fn reliable_size(&self) -> VarIntField<VarInt> {
+        self.reliable_size
+    }
+
     /// The Frame Type value, `0x24`.
     pub const fn type_value(&self) -> VarInt {
         type_var_int(type_value::RESET_STREAM_AT)
@@ -40,15 +79,6 @@ impl ResetStreamAt {
     /// The number of bytes [`codec::write_reset_stream_at`] writes.
     pub fn encoded_len(&self) -> usize {
         self.head().len()
-    }
-
-    /// Checks that `reliable_size` is at most `final_size`.
-    ///
-    /// # Errors
-    ///
-    /// [`ReliableSizeError`] otherwise.
-    pub fn validate(&self) -> Result<(), ReliableSizeError> {
-        ReliableSizeError::check(self.final_size.get(), self.reliable_size.get())
     }
 
     /// The encoded frame.
@@ -114,13 +144,9 @@ pub mod codec {
         let application_error_code = field(io).await?;
         let final_size: VarIntField<VarInt> = field(io).await?;
         let reliable_size: VarIntField<VarInt> = field(io).await?;
-        ReliableSizeError::check(final_size.get(), reliable_size.get())?;
-        Ok(ResetStreamAt {
-            stream_id,
-            application_error_code,
-            final_size,
-            reliable_size,
-        })
+        let frame =
+            ResetStreamAt::new(stream_id, application_error_code, final_size, reliable_size)?;
+        Ok(frame)
     }
 
     async fn field<T, F, A>(io: &mut A) -> Result<VarIntField<T>, ReadResetStreamAtError<F::Error>>
@@ -152,49 +178,24 @@ pub mod codec {
         },
     }
 
-    /// Writes `frame`, after checking it with [`ResetStreamAt::validate`].
+    /// Writes `frame`; [`ResetStreamAt::new`] checked its rule.
     ///
     /// # Errors
     ///
-    /// [`WriteResetStreamAtError::Invalid`] before writing anything, and
-    /// [`WriteResetStreamAtError::Write`] if the receiver stops accepting
-    /// bytes or fails; bytes accepted before stay written.
+    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
+    /// bytes accepted before stay written.
     #[call(sync)]
     pub async fn write_reset_stream_at<F: Write, A: ReceiverAccess<Family = F>>(
         io: &mut A,
         frame: ResetStreamAt,
-    ) -> Result<(), WriteResetStreamAtError<F::Error>> {
-        frame.validate()?;
-        io.write_all(frame.head().as_slice())
-            .await
-            .context(write_reset_stream_at_error::WriteSnafu)
-    }
-
-    /// Failures that [`write_reset_stream_at`] can produce.
-    #[derive(Debug, Snafu)]
-    #[snafu(module(write_reset_stream_at_error), visibility(pub(crate)))]
-    pub enum WriteResetStreamAtError<E> {
-        /// The frame breaks a rule of the encoding; nothing was written.
-        #[snafu(transparent)]
-        Invalid {
-            /// The broken rule.
-            source: ReliableSizeError,
-        },
-        /// The receiver stopped accepting bytes or failed.
-        #[snafu(display("RESET_STREAM_AT write failed"))]
-        Write {
-            /// The failure of writing.
-            source: WriteAllError<E>,
-        },
+    ) -> Result<(), WriteAllError<F::Error>> {
+        io.write_all(frame.head().as_slice()).await
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ReliableSizeError, ResetStreamAt,
-        codec::{ReadResetStreamAtError, WriteResetStreamAtError, WriteResetStreamAtHostExt as _},
-    };
+    use super::{ReliableSizeError, ResetStreamAt, codec::ReadResetStreamAtError};
     use crate::{
         application_error::ApplicationErrorCode,
         frame::{
@@ -206,21 +207,19 @@ mod tests {
         var_int::{VarInt, VarIntField},
     };
 
-    fn frame(final_size: u16, reliable_size: u16) -> ResetStreamAt {
-        ResetStreamAt {
-            stream_id: VarIntField::shortest(StreamId::from_var_int(VarInt::ZERO)),
-            application_error_code: VarIntField::shortest(ApplicationErrorCode::new(VarInt::from(
-                1u8,
-            ))),
-            final_size: VarIntField::shortest(VarInt::from(final_size)),
-            reliable_size: VarIntField::shortest(VarInt::from(reliable_size)),
-        }
+    fn frame(final_size: u16, reliable_size: u16) -> Result<ResetStreamAt, ReliableSizeError> {
+        ResetStreamAt::new(
+            VarIntField::shortest(StreamId::from_var_int(VarInt::ZERO)),
+            VarIntField::shortest(ApplicationErrorCode::new(VarInt::from(1u8))),
+            VarIntField::shortest(VarInt::from(final_size)),
+            VarIntField::shortest(VarInt::from(reliable_size)),
+        )
     }
 
     #[test]
     fn round_trips() {
-        assert_round_trip(Frame::ResetStreamAt(frame(800, 300)));
-        assert_round_trip(Frame::ResetStreamAt(frame(5, 5)));
+        assert_round_trip(Frame::ResetStreamAt(frame(800, 300).unwrap()));
+        assert_round_trip(Frame::ResetStreamAt(frame(5, 5).unwrap()));
     }
 
     #[test]
@@ -237,14 +236,7 @@ mod tests {
                 ..
             }) if source == expected
         ));
-        let invalid = frame(5, 6);
-        assert_eq!(invalid.validate(), Err(expected));
-        let mut written = Vec::new();
-        assert!(matches!(
-            written.sync_write_reset_stream_at_unpin(invalid),
-            Err(WriteResetStreamAtError::Invalid { .. })
-        ));
-        assert!(written.is_empty());
+        assert_eq!(frame(5, 6), Err(expected));
         // A field cut short.
         let mut input = &[0x24, 0x05, 0x06][..];
         assert!(matches!(

@@ -12,26 +12,48 @@ use bytes::Buf;
 ///
 /// The Offset and Length fields are always present. The Length field holds
 /// the length of the data, so only its width is stored; the Offset field
-/// keeps the width of its encoding. The end of the data, the offset plus
-/// its length, is at most [`VarInt::MAX`]. `D` holds the data: the source's
-/// chunk type for a frame that was read, any [`Buf`] for one to write.
+/// keeps the width of its encoding.
+///
+/// The end of the data, the offset plus its length, is at most
+/// [`VarInt::MAX`], and the Length field can state the length of the data.
+/// [`Crypto::new`] checks both, so every value writes an encoding that reads
+/// back to the same value; the fields are read through methods of the same
+/// names. `D` holds the data: the source's chunk type for a frame that was
+/// read, any [`Buf`] for one to write.
 ///
 /// [RFC 9000 §19.6]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.6
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Crypto<D> {
-    /// The Offset field: the byte offset of the data in the crypto stream of
-    /// its level.
-    pub offset: VarIntField<VarInt>,
-    /// The width of the Length field, which holds the length of `data`.
-    pub length_width: VarIntWidth,
-    /// The cryptographic message data.
-    pub data: D,
+    offset: VarIntField<VarInt>,
+    length_width: VarIntWidth,
+    data: D,
 }
 
 /// The longest encoding of the fields before the data.
 const HEAD_MAX: usize = 1 + 8 + 8;
 
 impl<D> Crypto<D> {
+    /// The Offset field: the byte offset of the data in the crypto stream of
+    /// its level.
+    pub const fn offset(&self) -> VarIntField<VarInt> {
+        self.offset
+    }
+
+    /// The width of the Length field, which holds the length of the data.
+    pub const fn length_width(&self) -> VarIntWidth {
+        self.length_width
+    }
+
+    /// The cryptographic message data.
+    pub const fn data(&self) -> &D {
+        &self.data
+    }
+
+    /// Takes the cryptographic message data.
+    pub fn into_data(self) -> D {
+        self.data
+    }
+
     /// The Frame Type value, `0x06`.
     pub const fn type_value(&self) -> VarInt {
         type_var_int(type_value::CRYPTO)
@@ -54,27 +76,36 @@ impl<D> Crypto<D> {
 }
 
 impl<D: Buf> Crypto<D> {
+    /// The CRYPTO frame with these fields.
+    ///
+    /// # Errors
+    ///
+    /// [`InvalidDataError::DataEnd`] if the data would end beyond
+    /// 2<sup>62</sup> − 1, and [`InvalidDataError::Length`] if the Length
+    /// field is too narrow for the length of the data.
+    pub fn new(
+        offset: VarIntField<VarInt>,
+        length_width: VarIntWidth,
+        data: D,
+    ) -> Result<Self, InvalidDataError> {
+        let length = data.remaining();
+        DataEndError::check(offset.get(), length as u64)?;
+        LengthError::check(length, length_width)?;
+        Ok(Self {
+            offset,
+            length_width,
+            data,
+        })
+    }
+
     /// The number of bytes [`codec::write_crypto`] writes.
     pub fn encoded_len(&self) -> usize {
         1 + self.offset.encoded_len() + self.length_width.encoded_len() + self.data.remaining()
     }
 
-    /// Checks the 2<sup>62</sup> − 1 bound on the end of the data, and that
-    /// the Length field can state the length of the data.
-    ///
-    /// # Errors
-    ///
-    /// [`InvalidDataError`] for the broken limit.
-    pub fn validate(&self) -> Result<(), InvalidDataError> {
-        let length = self.data.remaining();
-        DataEndError::check(self.offset.get(), length as u64)?;
-        LengthError::check(length, self.length_width)?;
-        Ok(())
-    }
-
-    /// The fields before the data of a frame that passed validation.
+    /// The fields before the data.
     pub(crate) fn head(&self) -> Head<HEAD_MAX> {
-        // Validation checked that the width holds the data length.
+        // Construction checked that the width holds the data length.
         let length = VarInt::try_from(self.data.remaining()).unwrap_or(VarInt::ZERO);
         Head::new(self.type_value())
             .field(self.offset)
@@ -119,6 +150,8 @@ pub mod codec {
         let length: VarIntField<VarInt> = read_field(io)
             .await
             .context(read_crypto_error::FieldSnafu)?;
+        // The end of the data follows from the fields, so a frame that
+        // breaks the bound is rejected before its data is read.
         DataEndError::check(offset.get(), length.get().get())?;
         // The end check bounds the length by 2^62 - 1; where `usize` is
         // narrower, a saturated length exceeds every source.
@@ -126,10 +159,11 @@ pub mod codec {
         let data = read_payload(io, data_len)
             .await
             .context(read_crypto_error::DataSnafu)?;
-        Ok(Crypto {
-            offset,
-            length_width: length.width(),
-            data,
+        Crypto::new(offset, length.width(), data).map_err(|error| match error {
+            InvalidDataError::DataEnd { source } => ReadCryptoError::DataEnd { source },
+            // invariant: the Length field was read at this width, and the
+            // data has the length it states.
+            InvalidDataError::Length { source } => unreachable!("{source}"),
         })
     }
 
@@ -157,31 +191,14 @@ pub mod codec {
         },
     }
 
-    /// Writes `frame`, after checking it with [`Crypto::validate`].
+    /// Writes `frame`; [`Crypto::new`] checked its limits.
     ///
     /// # Errors
     ///
-    /// [`WriteCryptoError::Invalid`] before writing anything, and
-    /// [`WriteCryptoError::Write`] if the receiver stops accepting bytes or
-    /// fails; bytes accepted before stay written.
+    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
+    /// bytes accepted before stay written.
     #[call(sync)]
     pub async fn write_crypto<F, A, D>(
-        io: &mut A,
-        frame: Crypto<D>,
-    ) -> Result<(), WriteCryptoError<F::Error>>
-    where
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-        D: Buf,
-    {
-        frame.validate()?;
-        write_body(io, frame)
-            .await
-            .context(write_crypto_error::WriteSnafu)
-    }
-
-    /// Writes a frame that has been checked.
-    pub(crate) async fn write_body<F, A, D>(
         io: &mut A,
         frame: Crypto<D>,
     ) -> Result<(), WriteAllError<F::Error>>
@@ -192,24 +209,6 @@ pub mod codec {
     {
         let head = frame.head();
         io.write_all(head.as_slice().chain(frame.data)).await
-    }
-
-    /// Failures that [`write_crypto`] can produce.
-    #[derive(Debug, Snafu)]
-    #[snafu(module(write_crypto_error), visibility(pub(crate)))]
-    pub enum WriteCryptoError<E> {
-        /// The frame breaks a limit of the encoding; nothing was written.
-        #[snafu(transparent)]
-        Invalid {
-            /// The broken limit.
-            source: InvalidDataError,
-        },
-        /// The receiver stopped accepting bytes or failed.
-        #[snafu(display("CRYPTO write failed"))]
-        Write {
-            /// The failure of writing.
-            source: WriteAllError<E>,
-        },
     }
 }
 

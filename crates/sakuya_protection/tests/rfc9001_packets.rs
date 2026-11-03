@@ -82,9 +82,9 @@ fn a2_client_initial_end_to_end() {
     let Some(Ok(Frame::Crypto(crypto))) = frames.next() else {
         panic!("the payload starts with a CRYPTO frame")
     };
-    assert_eq!(crypto.offset.get(), VarInt::ZERO);
-    assert_eq!(crypto.data.len(), 241);
-    assert_eq!(crypto.data[..4], [0x01, 0x00, 0x00, 0xed]);
+    assert_eq!(crypto.offset().get(), VarInt::ZERO);
+    assert_eq!(crypto.data().len(), 241);
+    assert_eq!(crypto.data()[..4], [0x01, 0x00, 0x00, 0xed]);
     let Some(Ok(Frame::Padding(padding))) = frames.next() else {
         panic!("padding follows")
     };
@@ -92,9 +92,9 @@ fn a2_client_initial_end_to_end() {
     assert!(frames.next().is_none());
 
     // The ClientHello ends with the quic_transport_parameters extension.
-    let extension = &crypto.data[crypto.data.len() - 0x32..];
+    let extension = &crypto.data()[crypto.data().len() - 0x32..];
     assert_eq!(
-        crypto.data[crypto.data.len() - 0x36..][..4],
+        crypto.data()[crypto.data().len() - 0x36..][..4],
         [0, 0x39, 0, 0x32]
     );
     let mut input = extension;
@@ -136,8 +136,8 @@ fn a3_server_initial_end_to_end() {
     let Some(Ok(Frame::Crypto(crypto))) = frames.next() else {
         panic!("a CRYPTO frame follows")
     };
-    assert_eq!(crypto.data.len(), 90);
-    assert_eq!(crypto.data[0], 0x02, "a ServerHello");
+    assert_eq!(crypto.data().len(), 90);
+    assert_eq!(crypto.data()[0], 0x02, "a ServerHello");
     assert!(frames.next().is_none());
 }
 
