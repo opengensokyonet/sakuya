@@ -395,11 +395,20 @@ impl From<VarInt> for u64 {
 }
 
 /// A value exceeds [`VarInt::MAX`].
+///
+/// Only [`VarInt::new`] and the conversions into [`VarInt`] construct it,
+/// so the value it holds always exceeds 2<sup>62</sup> − 1.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("{value} exceeds the variable-length integer maximum 2^62 - 1"))]
 pub struct OutOfRangeError {
-    /// The rejected value.
-    pub value: u64,
+    value: u64,
+}
+
+impl OutOfRangeError {
+    /// The rejected value, above 2<sup>62</sup> − 1.
+    pub const fn value(self) -> u64 {
+        self.value
+    }
 }
 
 #[cfg(test)]

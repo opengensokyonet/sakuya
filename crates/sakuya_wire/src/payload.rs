@@ -34,13 +34,10 @@ pub enum ReadPayloadError<E> {
         source: Incomplete,
     },
     /// The source delivered the field in more than one chunk.
-    #[snafu(display("payload arrived in more than one chunk, the first of {received} bytes"))]
+    #[snafu(transparent)]
     Split {
-        /// The length of the field, or `None` for a field that extends to
-        /// the end of the source.
-        expected: Option<usize>,
-        /// The length of the first chunk.
-        received: usize,
+        /// The broken rule.
+        source: SplitError,
     },
     /// The receiver failed.
     #[snafu(display("payload read failed after {completed} bytes"))]
@@ -50,6 +47,32 @@ pub enum ReadPayloadError<E> {
         /// Bytes of the field read before the failure.
         completed: usize,
     },
+}
+
+/// The source delivered a payload field in more than one chunk.
+///
+/// It is constructed only when a second chunk follows the first, so for a
+/// field of a known length the first chunk is always shorter than the
+/// field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("payload arrived in more than one chunk, the first of {received} bytes"))]
+pub struct SplitError {
+    expected: Option<usize>,
+    received: usize,
+}
+
+impl SplitError {
+    /// The length of the field, or `None` for a field that extends to the
+    /// end of the source.
+    pub const fn expected(self) -> Option<usize> {
+        self.expected
+    }
+
+    /// The length of the first chunk, shorter than
+    /// [`expected`](Self::expected) when that is known.
+    pub const fn received(self) -> usize {
+        self.received
+    }
 }
 
 impl<E> ReadPayloadError<E> {
@@ -115,11 +138,12 @@ where
             completed: received,
         }
         .into()),
-        Ok(Some(_)) => read_payload_error::SplitSnafu {
+        // invariant: `received` is below `length`, since `rest` is not zero.
+        Ok(Some(_)) => Err(SplitError {
             expected: Some(length),
             received,
         }
-        .fail(),
+        .into()),
         Err(source) => Err(read_payload_error::ReceiverSnafu {
             completed: received,
         }
@@ -146,11 +170,11 @@ where
     let received = bytes::Buf::remaining(&first);
     match io.read_chunk(NonZeroUsize::MAX).await {
         Ok(None) => Ok(first),
-        Ok(Some(_)) => read_payload_error::SplitSnafu {
+        Ok(Some(_)) => Err(SplitError {
             expected: None,
             received,
         }
-        .fail(),
+        .into()),
         Err(source) => Err(read_payload_error::ReceiverSnafu {
             completed: received,
         }
@@ -160,7 +184,13 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::frame::{Extensions, codec::ReadFrameHostExt as _};
+    use super::ReadPayloadError;
+    use crate::frame::{
+        Extensions,
+        codec::{ReadFrameError, ReadFrameHostExt as _},
+        crypto::codec::ReadCryptoError,
+        datagram::codec::ReadDatagramError,
+    };
     use bytes::{Buf, BufMut};
     use core::{
         convert::Infallible,
@@ -208,6 +238,85 @@ mod tests {
             let source = &mut host.get_pin_mut().get_mut().0;
             Poll::Ready(Ok((!source.is_empty()).then(|| core::mem::take(source))))
         }
+    }
+
+    /// A source that keeps the `ReadChunk` contract but delivers at most one
+    /// byte per chunk.
+    struct Bytewise(&'static [u8]);
+
+    nitori_call::family_receiver!(impl [] for Bytewise);
+
+    impl Read for Bytewise {
+        type Error = Infallible;
+
+        fn poll_read<'visit, Output: BufMut + ?Sized>(
+            host: Pin<&mut Self::ReceiverView<'visit>>,
+            _: &mut Context<'_>,
+            mut destination: &mut Output,
+        ) -> Poll<Result<usize, Self::Error>>
+        where
+            Self: 'visit,
+        {
+            let source = &mut host.get_pin_mut().get_mut().0;
+            let count = source.remaining().min(destination.remaining_mut());
+            BufMut::put(&mut destination, source.take(count));
+            Poll::Ready(Ok(count))
+        }
+    }
+
+    impl ReadChunk for Bytewise {
+        type Chunk = &'static [u8];
+
+        fn poll_read_chunk<'visit>(
+            host: Pin<&mut Self::ReceiverView<'visit>>,
+            _: &mut Context<'_>,
+            _: NonZeroUsize,
+        ) -> Poll<Result<Option<Self::Chunk>, Self::Error>>
+        where
+            Self: 'visit,
+        {
+            let source = &mut host.get_pin_mut().get_mut().0;
+            if source.is_empty() {
+                return Poll::Ready(Ok(None));
+            }
+            let (chunk, rest) = source.split_at(1);
+            *source = rest;
+            Poll::Ready(Ok(Some(chunk)))
+        }
+    }
+
+    /// The payload failure of reading one frame from `source`.
+    fn payload_error(source: &'static [u8]) -> ReadPayloadError<Infallible> {
+        let mut source = Bytewise(source);
+        match source.sync_read_frame_unpin(Extensions::ALL) {
+            Err(ReadFrameError::Crypto {
+                source: ReadCryptoError::Data { source },
+                ..
+            })
+            | Err(ReadFrameError::Datagram {
+                source: ReadDatagramError::Data { source },
+                ..
+            }) => source,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_field_in_more_than_one_chunk_is_split() {
+        // A CRYPTO frame with three bytes of data, delivered a byte at a time.
+        let ReadPayloadError::Split { source } = payload_error(&[0x06, 0x00, 0x03, 1, 2, 3]) else {
+            panic!()
+        };
+        assert_eq!((source.expected(), source.received()), (Some(3), 1));
+        assert_eq!(
+            source.to_string(),
+            "payload arrived in more than one chunk, the first of 1 bytes"
+        );
+        // A DATAGRAM frame without a Length field extends to the end.
+        let ReadPayloadError::Split { source } = payload_error(&[0x30, 1, 2]) else {
+            panic!()
+        };
+        assert_eq!((source.expected(), source.received()), (None, 1));
     }
 
     #[test]

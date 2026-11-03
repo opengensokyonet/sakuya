@@ -227,10 +227,7 @@ where
     let versions = read_payload_to_end(io)
         .await
         .context(read_version_negotiation_error::VersionsSnafu)?;
-    let length = versions.remaining();
-    if !length.is_multiple_of(VERSION_LEN) {
-        return read_version_negotiation_error::VersionListSnafu { length }.fail();
-    }
+    VersionListError::check(versions.remaining())?;
     Ok(VersionNegotiation { header, versions })
 }
 
@@ -251,9 +248,35 @@ pub enum ReadVersionNegotiationError<E> {
         source: ReadPayloadError<E>,
     },
     /// The supported version list does not end on a version boundary.
-    #[snafu(display("supported version list of {length} bytes is not a multiple of 4"))]
+    #[snafu(transparent)]
     VersionList {
-        /// The length of the list.
-        length: usize,
+        /// The broken rule.
+        source: VersionListError,
     },
+}
+
+/// The supported version list of a Version Negotiation packet does not end
+/// on a version boundary.
+///
+/// It is constructed only when the check fails, so the length it holds is
+/// never a multiple of 4.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("supported version list of {length} bytes is not a multiple of 4"))]
+pub struct VersionListError {
+    length: usize,
+}
+
+impl VersionListError {
+    /// The length of the list, not a multiple of 4.
+    pub const fn length(self) -> usize {
+        self.length
+    }
+
+    /// Checks that a list of `length` bytes holds whole versions.
+    fn check(length: usize) -> Result<(), Self> {
+        if !length.is_multiple_of(VERSION_LEN) {
+            return Err(Self { length });
+        }
+        Ok(())
+    }
 }

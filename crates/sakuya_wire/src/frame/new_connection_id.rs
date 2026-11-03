@@ -93,18 +93,31 @@ impl NewConnectionId {
 }
 
 /// A NEW_CONNECTION_ID frame retires sequence numbers beyond its own.
+///
+/// Only [`NewConnectionId::new`] constructs it, when the check fails, so its
+/// Retire Prior To always exceeds its Sequence Number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display(
     "NEW_CONNECTION_ID retires prior to {retire_prior_to}, beyond its sequence number {sequence_number}"
 ))]
 pub struct RetirePriorToError {
-    /// The Sequence Number field.
-    pub sequence_number: VarInt,
-    /// The Retire Prior To field.
-    pub retire_prior_to: VarInt,
+    sequence_number: VarInt,
+    retire_prior_to: VarInt,
 }
 
 impl RetirePriorToError {
+    /// The Sequence Number field.
+    pub const fn sequence_number(self) -> VarInt {
+        self.sequence_number
+    }
+
+    /// The Retire Prior To field, which exceeds
+    /// [`sequence_number`](Self::sequence_number).
+    pub const fn retire_prior_to(self) -> VarInt {
+        self.retire_prior_to
+    }
+
+    /// Checks that `retire_prior_to` is at most `sequence_number`.
     fn check(sequence_number: VarInt, retire_prior_to: VarInt) -> Result<(), Self> {
         if retire_prior_to > sequence_number {
             return Err(Self {
@@ -233,9 +246,7 @@ pub mod codec {
 mod tests {
     use super::{NewConnectionId, RetirePriorToError, codec::ReadNewConnectionIdError};
     use crate::{
-        connection_id::{
-            ConnectionIdLengthError, NonEmptyCid, StatelessResetToken, codec::ReadConnectionIdError,
-        },
+        connection_id::{NonEmptyCid, StatelessResetToken, codec::ReadConnectionIdError},
         frame::{
             Extensions, Frame,
             codec::{ReadFrameError, ReadFrameHostExt as _},
@@ -286,10 +297,8 @@ mod tests {
         assert!(matches!(
             read(&[0x18, 0x01, 0x00, 21]),
             ReadNewConnectionIdError::ConnectionId {
-                source: ReadConnectionIdError::Length {
-                    source: ConnectionIdLengthError { length: 21 }
-                }
-            }
+                source: ReadConnectionIdError::Length { source }
+            } if source.length() == 21
         ));
     }
 
@@ -297,10 +306,15 @@ mod tests {
     fn retire_prior_to_beyond_the_sequence_number_is_rejected() {
         let mut encoding = vec![0x18, 0x01, 0x02, 0x01, 0xaa];
         encoding.extend_from_slice(&TOKEN);
-        let expected = RetirePriorToError {
-            sequence_number: VarInt::from(1u8),
-            retire_prior_to: VarInt::from(2u8),
-        };
+        let expected = RetirePriorToError::check(VarInt::from(1u8), VarInt::from(2u8)).unwrap_err();
+        assert_eq!(
+            (expected.sequence_number(), expected.retire_prior_to()),
+            (VarInt::from(1u8), VarInt::from(2u8))
+        );
+        assert_eq!(
+            RetirePriorToError::check(VarInt::from(2u8), VarInt::from(2u8)),
+            Ok(())
+        );
         assert!(matches!(
             read(&encoding),
             ReadNewConnectionIdError::RetirePriorToAboveSequenceNumber { source } if source == expected

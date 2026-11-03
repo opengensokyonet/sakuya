@@ -11,7 +11,7 @@ use super::{
     },
 };
 use crate::{
-    connection_id::{ConnectionId, ConnectionIdLengthError},
+    connection_id::ConnectionId,
     payload::ReadPayloadError,
     var_int::{VarInt, codec::WriteVarIntHostExt as _},
     version::Version,
@@ -341,17 +341,13 @@ fn connection_id_lengths() {
         assert_eq!(header.dcid().len(), dcid_len);
         assert!(matches!(
             input.sync_read_long_packet_unpin(header),
-            Err(ReadLongPacketError::DcidLength {
-                source: ConnectionIdLengthError { length }
-            }) if length == dcid_len
+            Err(ReadLongPacketError::DcidLength { source }) if source.length() == dcid_len
         ));
     }
     let packet = long_packet(0xe0, &[], &[0xbb; 21], None, &[0; 20]);
     assert!(matches!(
         v1_of(&packet),
-        Err(ReadLongPacketError::ScidLength {
-            source: ConnectionIdLengthError { length: 21 }
-        })
+        Err(ReadLongPacketError::ScidLength { source }) if source.length() == 21
     ));
 }
 
@@ -449,7 +445,7 @@ fn version_negotiation_list_shapes() {
     let header = long_header(&mut input);
     assert!(matches!(
         input.sync_read_version_negotiation_unpin(header),
-        Err(ReadVersionNegotiationError::VersionList { length: 6 })
+        Err(ReadVersionNegotiationError::VersionList { source }) if source.length() == 6
     ));
 }
 
@@ -553,7 +549,7 @@ fn retry_lengths() {
     let packet = [&header[..], &[0x11; 15]].concat();
     assert!(matches!(
         v1_of(&packet),
-        Err(ReadLongPacketError::RetryIntegrityTag { length: 15 })
+        Err(ReadLongPacketError::RetryIntegrityTag { source }) if source.length() == 15
     ));
 }
 

@@ -64,10 +64,8 @@ impl ConnectionId {
     /// [`ConnectionIdLengthError`] if `bytes` is longer than
     /// [`ConnectionId::MAX_LEN`].
     pub const fn new(bytes: &[u8]) -> Result<Self, ConnectionIdLengthError> {
-        if bytes.len() > Self::MAX_LEN {
-            return Err(ConnectionIdLengthError {
-                length: bytes.len(),
-            });
+        if let Err(error) = ConnectionIdLength::new(bytes.len()) {
+            return Err(error);
         }
         let mut id = Self::EMPTY;
         let (prefix, _) = id.bytes.split_at_mut(bytes.len());
@@ -165,11 +163,21 @@ impl fmt::Display for ConnectionId {
 }
 
 /// A byte slice exceeds [`ConnectionId::MAX_LEN`].
+///
+/// Only [`ConnectionIdLength::new`] and the constructors of connection IDs
+/// that apply the same limit construct it, so the length it holds always
+/// exceeds 20.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("connection ID of {length} bytes exceeds the QUIC version 1 maximum of 20 bytes"))]
 pub struct ConnectionIdLengthError {
-    /// The rejected length.
-    pub length: usize,
+    length: usize,
+}
+
+impl ConnectionIdLengthError {
+    /// The rejected length, above 20.
+    pub const fn length(self) -> usize {
+        self.length
+    }
 }
 
 /// The length of a QUIC version 1 connection ID: 0 to
@@ -505,11 +513,21 @@ impl fmt::Display for RawConnectionId {
 }
 
 /// A byte slice exceeds [`RawConnectionId::MAX_LEN`].
+///
+/// Only [`RawConnectionId::new`] and the conversions into
+/// [`RawConnectionId`] construct it, so the length it holds always exceeds
+/// 255.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("connection ID of {length} bytes exceeds the long header maximum of 255 bytes"))]
 pub struct RawConnectionIdLengthError {
-    /// The rejected length.
-    pub length: usize,
+    length: usize,
+}
+
+impl RawConnectionIdLengthError {
+    /// The rejected length, above 255.
+    pub const fn length(self) -> usize {
+        self.length
+    }
 }
 
 /// A Stateless Reset Token: the 16 bytes that end a stateless reset for the

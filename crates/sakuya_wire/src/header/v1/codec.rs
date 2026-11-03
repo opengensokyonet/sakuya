@@ -119,9 +119,7 @@ where
                 .await
                 .context(read_long_packet_error::RetrySnafu)?;
             let length = rest.remaining();
-            let Some(token_len) = length.checked_sub(RETRY_INTEGRITY_TAG_LEN) else {
-                return read_long_packet_error::RetryIntegrityTagSnafu { length }.fail();
-            };
+            let token_len = RetryIntegrityTagError::check(length)?;
             // invariant: `rest` holds `token_len` bytes and the tag after them.
             let token = rest.copy_to_bytes(token_len);
             let mut integrity_tag = [0; RETRY_INTEGRITY_TAG_LEN];
@@ -227,13 +225,38 @@ pub enum ReadLongPacketError<E> {
         source: ReadPayloadError<E>,
     },
     /// A Retry packet is too short for its integrity tag.
-    #[snafu(display(
-        "Retry packet has {length} bytes after its header, fewer than its 16-byte integrity tag"
-    ))]
+    #[snafu(transparent)]
     RetryIntegrityTag {
-        /// The bytes after the source connection ID.
-        length: usize,
+        /// The broken rule.
+        source: RetryIntegrityTagError,
     },
+}
+
+/// A Retry packet is too short for its 16-byte integrity tag.
+///
+/// It is constructed only when the check fails, so the length it holds is
+/// always below 16.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display(
+    "Retry packet has {length} bytes after its header, fewer than its 16-byte integrity tag"
+))]
+pub struct RetryIntegrityTagError {
+    length: usize,
+}
+
+impl RetryIntegrityTagError {
+    /// The bytes after the source connection ID, fewer than 16.
+    pub const fn length(self) -> usize {
+        self.length
+    }
+
+    /// The length of the token in the `length` bytes after the source
+    /// connection ID, which end with the integrity tag.
+    fn check(length: usize) -> Result<usize, Self> {
+        length
+            .checked_sub(RETRY_INTEGRITY_TAG_LEN)
+            .ok_or(Self { length })
+    }
 }
 
 impl<E> ReadLongPacketError<E> {

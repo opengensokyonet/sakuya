@@ -42,8 +42,9 @@ impl StreamId {
         }
         match VarInt::new(index << 2 | directionality.bit() | initiator.bit()) {
             Ok(value) => Ok(Self(value)),
-            // An index of at most 2^60 - 1 shifted by two bits stays below 2^62.
-            Err(_) => Err(StreamIndexError { index }),
+            // invariant: an index of at most 2^60 - 1 shifted by two bits,
+            // with the two type bits, stays below 2^62.
+            Err(_) => panic!("a stream index of at most 2^60 - 1 fits a stream ID"),
         }
     }
 
@@ -104,11 +105,20 @@ impl fmt::Display for StreamId {
 }
 
 /// The index passed to [`StreamId::new`] exceeds [`StreamId::MAX_INDEX`].
+///
+/// Only [`StreamId::new`] constructs it, so the index it holds always
+/// exceeds 2<sup>60</sup> − 1.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("stream index {index} exceeds the largest index 2^60 - 1"))]
 pub struct StreamIndexError {
-    /// The rejected index.
-    pub index: u64,
+    index: u64,
+}
+
+impl StreamIndexError {
+    /// The rejected index, above 2<sup>60</sup> − 1.
+    pub const fn index(self) -> u64 {
+        self.index
+    }
 }
 
 /// The endpoint that initiated a stream: bit `0x01` of its stream ID.

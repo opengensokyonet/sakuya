@@ -110,24 +110,35 @@ impl fmt::Display for PacketNumber {
 }
 
 /// A value exceeds [`PacketNumber::MAX`].
+///
+/// Only [`PacketNumber::new`] and the conversions into [`PacketNumber`]
+/// construct it, so the value it holds always exceeds 2<sup>62</sup> − 1.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("{value} exceeds the largest packet number 2^62 - 1"))]
 pub struct OutOfRangeError {
-    /// The rejected value.
-    pub value: u64,
+    value: u64,
+}
+
+impl OutOfRangeError {
+    /// The rejected value, above 2<sup>62</sup> − 1.
+    pub const fn value(self) -> u64 {
+        self.value
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{OutOfRangeError, PacketNumber};
+    use super::PacketNumber;
     use crate::var_int::VarInt;
 
     #[test]
     fn range_and_arithmetic() {
         assert_eq!(PacketNumber::MAX.get(), (1 << 62) - 1);
+        assert_eq!(PacketNumber::new(1 << 62).unwrap_err().value(), 1 << 62);
+        assert_eq!(PacketNumber::new(u64::MAX).unwrap_err().value(), u64::MAX);
         assert_eq!(
-            PacketNumber::new(1 << 62),
-            Err(OutOfRangeError { value: 1 << 62 })
+            PacketNumber::new(1 << 62).unwrap_err().to_string(),
+            "4611686018427387904 exceeds the largest packet number 2^62 - 1"
         );
         assert_eq!(PacketNumber::try_from(7u64).map(u64::from), Ok(7));
         assert_eq!(PacketNumber::MAX.checked_add(1), None);

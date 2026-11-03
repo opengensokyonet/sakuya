@@ -1,6 +1,6 @@
 use super::{
-    ConnectionId, ConnectionIdLength, ConnectionIdLengthError, EmptyCidError, NonEmptyCid,
-    NonEmptyCidError, RawConnectionId, RawConnectionIdLengthError, StatelessResetToken,
+    ConnectionId, ConnectionIdLength, EmptyCidError, NonEmptyCid, NonEmptyCidError,
+    RawConnectionId, StatelessResetToken,
     codec::{
         ReadConnectionIdError, ReadConnectionIdHostExt as _, ReadRawConnectionIdHostExt as _,
         WriteConnectionIdHostExt as _,
@@ -24,14 +24,10 @@ fn accepts_lengths_up_to_twenty_bytes() {
 
 #[test]
 fn rejects_longer_slices() {
-    assert_eq!(
-        ConnectionId::try_from(&[0; 21][..]),
-        Err(ConnectionIdLengthError { length: 21 })
-    );
-    assert_eq!(
-        ConnectionId::new(&[0; 255]),
-        Err(ConnectionIdLengthError { length: 255 })
-    );
+    let error = ConnectionId::try_from(&[0; 21][..]).unwrap_err();
+    assert_eq!(error.length(), 21);
+    assert_eq!(ConnectionIdLength::new(21), Err(error));
+    assert_eq!(ConnectionId::new(&[0; 255]).unwrap_err().length(), 255);
 }
 
 #[test]
@@ -45,13 +41,11 @@ fn lengths_range_from_zero_to_twenty_bytes() {
         assert_eq!(ConnectionIdLength::try_from(length), Ok(typed));
     }
     assert_eq!(ConnectionIdLength::new(0), Ok(ConnectionIdLength::ZERO));
+    assert_eq!(ConnectionIdLength::new(21).unwrap_err().length(), 21);
+    assert_eq!(ConnectionIdLength::new(256).unwrap_err().length(), 256);
     assert_eq!(
-        ConnectionIdLength::new(21),
-        Err(ConnectionIdLengthError { length: 21 })
-    );
-    assert_eq!(
-        ConnectionIdLength::new(256),
-        Err(ConnectionIdLengthError { length: 256 })
+        ConnectionIdLength::new(21).unwrap_err().to_string(),
+        "connection ID of 21 bytes exceeds the QUIC version 1 maximum of 20 bytes"
     );
     let id = ConnectionId::new(&RFC_DCID).unwrap();
     assert_eq!(id.length(), ConnectionIdLength::new(8).unwrap());
@@ -104,7 +98,7 @@ fn non_empty_cid_rejects_the_empty_id() {
     assert_eq!(
         NonEmptyCid::try_from(&[0; 21][..]),
         Err(NonEmptyCidError::Length {
-            source: ConnectionIdLengthError { length: 21 }
+            source: ConnectionIdLength::new(21).unwrap_err()
         })
     );
 }
@@ -137,13 +131,16 @@ fn raw_connection_ids_take_up_to_255_bytes() {
             if length <= 20 {
                 Ok(ConnectionId::new(&bytes).unwrap())
             } else {
-                Err(ConnectionIdLengthError { length })
+                Err(ConnectionIdLength::new(length).unwrap_err())
             }
         );
     }
+    let error = RawConnectionId::try_from(&[0; 256][..]).unwrap_err();
+    assert_eq!(error.length(), 256);
+    assert_eq!(RawConnectionId::new(&[0; 300]).unwrap_err().length(), 300);
     assert_eq!(
-        RawConnectionId::try_from(&[0; 256][..]),
-        Err(RawConnectionIdLengthError { length: 256 })
+        error.to_string(),
+        "connection ID of 256 bytes exceeds the long header maximum of 255 bytes"
     );
     let id = ConnectionId::new(&RFC_DCID).unwrap();
     let raw = RawConnectionId::from(id);
@@ -206,9 +203,7 @@ fn length_prefixed_connection_id_limits() {
     let error = input.sync_read_connection_id_unpin().unwrap_err();
     assert!(matches!(
         error,
-        ReadConnectionIdError::Length {
-            source: ConnectionIdLengthError { length: 21 }
-        }
+        ReadConnectionIdError::Length { source } if source.length() == 21
     ));
     assert_eq!(input, [0xaa, 0xbb]);
 

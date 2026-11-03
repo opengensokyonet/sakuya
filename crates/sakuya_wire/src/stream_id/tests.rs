@@ -1,5 +1,5 @@
 use super::{
-    Directionality, Initiator, StreamId, StreamIndexError,
+    Directionality, Initiator, StreamId,
     codec::{ReadStreamIdHostExt as _, WriteStreamIdHostExt as _},
 };
 use crate::var_int::VarInt;
@@ -42,16 +42,11 @@ fn composes_up_to_the_largest_index() {
     .unwrap();
     assert_eq!(last.get(), VarInt::MAX);
     assert_eq!(last.index(), StreamId::MAX_INDEX);
-    assert_eq!(
-        StreamId::new(
-            Initiator::Client,
-            Directionality::Bidirectional,
-            StreamId::MAX_INDEX + 1
-        ),
-        Err(StreamIndexError {
-            index: StreamId::MAX_INDEX + 1
-        })
-    );
+    for index in [StreamId::MAX_INDEX + 1, u64::MAX] {
+        let error =
+            StreamId::new(Initiator::Client, Directionality::Bidirectional, index).unwrap_err();
+        assert_eq!(error.index(), index);
+    }
 }
 
 #[test]

@@ -92,18 +92,31 @@ impl ResetStreamAt {
 }
 
 /// A RESET_STREAM_AT reliable size exceeds its final size.
+///
+/// Only [`ResetStreamAt::new`] constructs it, when the check fails, so its
+/// Reliable Size always exceeds its Final Size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display(
     "RESET_STREAM_AT reliable size {reliable_size} is beyond final size {final_size}"
 ))]
 pub struct ReliableSizeError {
-    /// The Final Size field.
-    pub final_size: VarInt,
-    /// The Reliable Size field.
-    pub reliable_size: VarInt,
+    final_size: VarInt,
+    reliable_size: VarInt,
 }
 
 impl ReliableSizeError {
+    /// The Final Size field.
+    pub const fn final_size(self) -> VarInt {
+        self.final_size
+    }
+
+    /// The Reliable Size field, which exceeds
+    /// [`final_size`](Self::final_size).
+    pub const fn reliable_size(self) -> VarInt {
+        self.reliable_size
+    }
+
+    /// Checks that `reliable_size` is at most `final_size`.
     fn check(final_size: VarInt, reliable_size: VarInt) -> Result<(), Self> {
         if reliable_size > final_size {
             return Err(Self {
@@ -230,10 +243,15 @@ mod tests {
 
     #[test]
     fn reliable_size_beyond_final_size_is_rejected() {
-        let expected = ReliableSizeError {
-            final_size: VarInt::from(5u8),
-            reliable_size: VarInt::from(6u8),
-        };
+        let expected = ReliableSizeError::check(VarInt::from(5u8), VarInt::from(6u8)).unwrap_err();
+        assert_eq!(
+            (expected.final_size(), expected.reliable_size()),
+            (VarInt::from(5u8), VarInt::from(6u8))
+        );
+        assert_eq!(
+            ReliableSizeError::check(VarInt::from(5u8), VarInt::from(5u8)),
+            Ok(())
+        );
         let mut input = &[0x24, 0x00, 0x00, 0x05, 0x06][..];
         assert!(matches!(
             input.sync_read_frame_unpin(Extensions::ALL),

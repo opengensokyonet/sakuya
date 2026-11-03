@@ -23,6 +23,7 @@ use crate::{
 };
 use core::{
     iter::{Copied, FusedIterator},
+    num::NonZeroUsize,
     ops::RangeInclusive,
     slice,
 };
@@ -96,13 +97,7 @@ impl Ack {
         ranges: AckRanges,
         ecn_counts: Option<EcnCounts>,
     ) -> Result<Self, InvalidAckError> {
-        let count = ranges.len();
-        if !VarInt::try_from(count).is_ok_and(|value| ack_range_count_width.fits(value)) {
-            return Err(InvalidAckError::RangeCount {
-                count,
-                width: ack_range_count_width,
-            });
-        }
+        RangeCountError::check(ranges.len(), ack_range_count_width)?;
         let mut smallest =
             AckBelowZeroError::check_first(largest_acknowledged.get(), first_ack_range.get())?;
         for (index, range) in (1..).zip(ranges.iter()) {
@@ -153,10 +148,12 @@ impl Ack {
         }
         let mut previous = smallest;
         let mut ack_ranges = Vec::new();
-        for (index, range) in (1..).zip(ranges) {
+        let positions =
+            core::iter::successors(Some(NonZeroUsize::MIN), |index| index.checked_add(1));
+        for (index, range) in positions.zip(ranges) {
             let (start, end) = range.into_inner();
             if start > end {
-                return Err(PacketRangesError::EmptyRange { index });
+                return Err(PacketRangesError::EmptyRange { index: index.get() });
             }
             if !end.checked_add(2).is_some_and(|limit| limit <= previous) {
                 return Err(PacketRangesError::NotBelowPrevious { index });
@@ -456,16 +453,47 @@ pub enum InvalidAckError {
         source: AckBelowZeroError,
     },
     /// The ACK Range Count field cannot hold the number of ACK Ranges.
-    #[snafu(display(
-        "{count} ACK ranges do not fit a {}-byte ACK Range Count field",
-        width.encoded_len()
-    ))]
+    #[snafu(transparent)]
     RangeCount {
-        /// The number of ACK Ranges.
-        count: usize,
-        /// The width of the ACK Range Count field.
-        width: VarIntWidth,
+        /// The broken limit.
+        source: RangeCountError,
     },
+}
+
+/// The ACK Range Count field of an ACK frame cannot hold the number of ACK
+/// Ranges at its width.
+///
+/// It is constructed only when the check fails, so the count always exceeds
+/// what the width holds: for an 8-byte width, 2<sup>62</sup> − 1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display(
+    "{count} ACK ranges do not fit a {}-byte ACK Range Count field",
+    width.encoded_len()
+))]
+pub struct RangeCountError {
+    count: usize,
+    width: VarIntWidth,
+}
+
+impl RangeCountError {
+    /// The number of ACK Ranges, which exceeds what [`width`](Self::width)
+    /// holds.
+    pub const fn count(self) -> usize {
+        self.count
+    }
+
+    /// The width of the ACK Range Count field.
+    pub const fn width(self) -> VarIntWidth {
+        self.width
+    }
+
+    /// Checks that an ACK Range Count field of `width` holds `count`.
+    fn check(count: usize, width: VarIntWidth) -> Result<(), Self> {
+        if !VarInt::try_from(count).is_ok_and(|value| width.fits(value)) {
+            return Err(Self { count, width });
+        }
+        Ok(())
+    }
 }
 
 /// The packet number ranges given to [`Ack::from_packet_ranges`] cannot be
@@ -485,8 +513,9 @@ pub enum PacketRangesError {
     /// packet number between them.
     #[snafu(display("packet number range {index} does not lie below the previous one with a gap"))]
     NotBelowPrevious {
-        /// The position of the range, from 1.
-        index: usize,
+        /// The position of the range, from 1: the first range has no
+        /// previous one.
+        index: NonZeroUsize,
     },
 }
 

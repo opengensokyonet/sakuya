@@ -240,31 +240,10 @@ impl<D: Buf> Value<'_, D> {
 impl<D> TransportParameters<D> {
     /// Checks the values RFC 9000 §18.2 constrains.
     fn check_ranges(&self) -> Result<(), InvalidParameterError> {
-        use invalid_parameter_error::*;
-        if self.max_udp_payload_size.get() < MIN_MAX_UDP_PAYLOAD_SIZE {
-            return MaxUdpPayloadSizeSnafu {
-                value: self.max_udp_payload_size,
-            }
-            .fail();
-        }
-        if self.ack_delay_exponent.get() > MAX_ACK_DELAY_EXPONENT {
-            return AckDelayExponentSnafu {
-                value: self.ack_delay_exponent,
-            }
-            .fail();
-        }
-        if self.max_ack_delay.get() >= MAX_ACK_DELAY_BOUND {
-            return MaxAckDelaySnafu {
-                value: self.max_ack_delay,
-            }
-            .fail();
-        }
-        if self.active_connection_id_limit.get() < MIN_ACTIVE_CONNECTION_ID_LIMIT {
-            return ActiveConnectionIdLimitSnafu {
-                value: self.active_connection_id_limit,
-            }
-            .fail();
-        }
+        MaxUdpPayloadSizeError::check(self.max_udp_payload_size)?;
+        AckDelayExponentError::check(self.ack_delay_exponent)?;
+        MaxAckDelayError::check(self.max_ack_delay)?;
+        ActiveConnectionIdLimitError::check(self.active_connection_id_limit)?;
         Ok(())
     }
 
@@ -422,13 +401,7 @@ impl<D: Buf> TransportParameters<D> {
             let Some(unknown_id) = UnknownParameterId::new(id).filter(|_| !repeated) else {
                 return Err(InvalidParameterError::Duplicate { id });
             };
-            let length = parameter.value.remaining();
-            if VarInt::try_from(length).is_err() {
-                return Err(InvalidParameterError::ValueLength {
-                    id: unknown_id,
-                    length,
-                });
-            }
+            ValueLengthError::check(unknown_id, parameter.value.remaining())?;
         }
         Ok(())
     }
@@ -467,28 +440,28 @@ pub enum InvalidParameterError {
         id: ServerOnlyParameterId,
     },
     /// `max_udp_payload_size` is below 1200.
-    #[snafu(display("max_udp_payload_size {value} is below 1200"))]
+    #[snafu(transparent)]
     MaxUdpPayloadSize {
-        /// The value.
-        value: VarInt,
+        /// The broken limit.
+        source: MaxUdpPayloadSizeError,
     },
     /// `ack_delay_exponent` exceeds 20.
-    #[snafu(display("ack_delay_exponent {value} exceeds 20"))]
+    #[snafu(transparent)]
     AckDelayExponent {
-        /// The value.
-        value: VarInt,
+        /// The broken limit.
+        source: AckDelayExponentError,
     },
     /// `max_ack_delay` is not below 2<sup>14</sup>.
-    #[snafu(display("max_ack_delay {value} is not below 2^14"))]
+    #[snafu(transparent)]
     MaxAckDelay {
-        /// The value.
-        value: VarInt,
+        /// The broken limit.
+        source: MaxAckDelayError,
     },
     /// `active_connection_id_limit` is below 2.
-    #[snafu(display("active_connection_id_limit {value} is below 2"))]
+    #[snafu(transparent)]
     ActiveConnectionIdLimit {
-        /// The value.
-        value: VarInt,
+        /// The broken limit.
+        source: ActiveConnectionIdLimitError,
     },
     /// `initial_max_streams_bidi` exceeds 2<sup>60</sup>.
     #[snafu(display("initial_max_streams_bidi out of range"))]
@@ -505,16 +478,156 @@ pub enum InvalidParameterError {
     /// The value of an unknown parameter to write is longer than
     /// 2<sup>62</sup> − 1 bytes, more than its Transport Parameter Length
     /// field can state.
-    #[snafu(display(
-        "transport parameter {:#x} has a value of {length} bytes, longer than 2^62 - 1",
-        id.get().get()
-    ))]
+    #[snafu(transparent)]
     ValueLength {
-        /// The parameter ID.
-        id: UnknownParameterId,
-        /// The length of the value.
-        length: usize,
+        /// The broken limit.
+        source: ValueLengthError,
     },
+}
+
+/// `max_udp_payload_size` is below 1200 ([RFC 9000 §18.2]).
+///
+/// It is constructed only when the check fails, so the value it holds is
+/// always below 1200.
+///
+/// [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("max_udp_payload_size {value} is below 1200"))]
+pub struct MaxUdpPayloadSizeError {
+    value: VarInt,
+}
+
+impl MaxUdpPayloadSizeError {
+    /// The value, below 1200.
+    pub const fn value(self) -> VarInt {
+        self.value
+    }
+
+    /// Checks that `value` is at least 1200.
+    fn check(value: VarInt) -> Result<(), Self> {
+        if value.get() < MIN_MAX_UDP_PAYLOAD_SIZE {
+            return Err(Self { value });
+        }
+        Ok(())
+    }
+}
+
+/// `ack_delay_exponent` exceeds 20 ([RFC 9000 §18.2]).
+///
+/// It is constructed only when the check fails, so the value it holds
+/// always exceeds 20.
+///
+/// [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("ack_delay_exponent {value} exceeds 20"))]
+pub struct AckDelayExponentError {
+    value: VarInt,
+}
+
+impl AckDelayExponentError {
+    /// The value, above 20.
+    pub const fn value(self) -> VarInt {
+        self.value
+    }
+
+    /// Checks that `value` is at most 20.
+    fn check(value: VarInt) -> Result<(), Self> {
+        if value.get() > MAX_ACK_DELAY_EXPONENT {
+            return Err(Self { value });
+        }
+        Ok(())
+    }
+}
+
+/// `max_ack_delay` is not below 2<sup>14</sup> ([RFC 9000 §18.2]).
+///
+/// It is constructed only when the check fails, so the value it holds is
+/// always at least 2<sup>14</sup>.
+///
+/// [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("max_ack_delay {value} is not below 2^14"))]
+pub struct MaxAckDelayError {
+    value: VarInt,
+}
+
+impl MaxAckDelayError {
+    /// The value, at least 2<sup>14</sup>.
+    pub const fn value(self) -> VarInt {
+        self.value
+    }
+
+    /// Checks that `value` is below 2<sup>14</sup>.
+    fn check(value: VarInt) -> Result<(), Self> {
+        if value.get() >= MAX_ACK_DELAY_BOUND {
+            return Err(Self { value });
+        }
+        Ok(())
+    }
+}
+
+/// `active_connection_id_limit` is below 2 ([RFC 9000 §18.2]).
+///
+/// It is constructed only when the check fails, so the value it holds is
+/// always 0 or 1.
+///
+/// [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("active_connection_id_limit {value} is below 2"))]
+pub struct ActiveConnectionIdLimitError {
+    value: VarInt,
+}
+
+impl ActiveConnectionIdLimitError {
+    /// The value, 0 or 1.
+    pub const fn value(self) -> VarInt {
+        self.value
+    }
+
+    /// Checks that `value` is at least 2.
+    fn check(value: VarInt) -> Result<(), Self> {
+        if value.get() < MIN_ACTIVE_CONNECTION_ID_LIMIT {
+            return Err(Self { value });
+        }
+        Ok(())
+    }
+}
+
+/// The value of an unknown parameter to write is longer than
+/// 2<sup>62</sup> − 1 bytes, more than its Transport Parameter Length field
+/// can state.
+///
+/// It is constructed only when the check fails, so the length it holds
+/// always exceeds 2<sup>62</sup> − 1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display(
+    "transport parameter {:#x} has a value of {length} bytes, longer than 2^62 - 1",
+    id.get().get()
+))]
+pub struct ValueLengthError {
+    id: UnknownParameterId,
+    length: usize,
+}
+
+impl ValueLengthError {
+    /// The parameter ID.
+    pub const fn id(self) -> UnknownParameterId {
+        self.id
+    }
+
+    /// The length of the value, above 2<sup>62</sup> − 1.
+    pub const fn length(self) -> usize {
+        self.length
+    }
+
+    /// Checks that a value of `length` bytes for the parameter `id` fits a
+    /// Transport Parameter Length field.
+    fn check(id: UnknownParameterId, length: usize) -> Result<(), Self> {
+        if VarInt::try_from(length).is_err() {
+            return Err(Self { id, length });
+        }
+        Ok(())
+    }
 }
 
 /// The ID of a parameter that only a server may send:

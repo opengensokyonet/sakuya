@@ -4,6 +4,7 @@
 
 use super::{
     Ack, AckBelowZeroError, AckRange, AckRanges, EcnCounts, InvalidAckError, PacketRangesError,
+    RangeCountError,
     codec::{ReadAckEcnError, ReadAckError, WriteAckHostExt as _},
 };
 use crate::{
@@ -15,7 +16,7 @@ use crate::{
     packet_number::PacketNumber,
     var_int::{VarInt, VarIntField, VarIntWidth},
 };
-use core::{convert::Infallible, ops::RangeInclusive};
+use core::{convert::Infallible, num::NonZeroUsize, ops::RangeInclusive};
 
 fn pn(value: u64) -> PacketNumber {
     PacketNumber::new(value).unwrap()
@@ -318,10 +319,12 @@ fn construction_rejects_ranges_below_zero_and_narrow_counts() {
     assert_eq!(
         ack(max, 0, sixty_four().as_slice().to_vec()),
         Err(InvalidAckError::RangeCount {
-            count: 64,
-            width: VarIntWidth::One,
+            source: RangeCountError::check(64, VarIntWidth::One).unwrap_err()
         })
     );
+    let error = RangeCountError::check(64, VarIntWidth::One).unwrap_err();
+    assert_eq!((error.count(), error.width()), (64, VarIntWidth::One));
+    assert_eq!(RangeCountError::check(63, VarIntWidth::One), Ok(()));
     // 64 ranges fit a two-byte count.
     let frame = Ack::new(
         short(PacketNumber::MAX),
@@ -349,16 +352,22 @@ fn building_rejects_unordered_ranges() {
         (&[5..=3], PacketRangesError::EmptyRange { index: 0 }),
         (
             &[1..=1, 5..=6],
-            PacketRangesError::NotBelowPrevious { index: 1 },
+            PacketRangesError::NotBelowPrevious {
+                index: NonZeroUsize::MIN,
+            },
         ),
         // Adjacent ranges have no packet number between them.
         (
             &[5..=6, 3..=4],
-            PacketRangesError::NotBelowPrevious { index: 1 },
+            PacketRangesError::NotBelowPrevious {
+                index: NonZeroUsize::MIN,
+            },
         ),
         (
             &[5..=6, 3..=5],
-            PacketRangesError::NotBelowPrevious { index: 1 },
+            PacketRangesError::NotBelowPrevious {
+                index: NonZeroUsize::MIN,
+            },
         ),
         // An empty range is reported as empty, wherever it lies.
         (

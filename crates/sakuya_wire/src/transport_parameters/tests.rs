@@ -1,6 +1,7 @@
 use super::{
-    InvalidParameterError, ServerOnlyParameterId, TransportParameters, UnknownParameter,
-    UnknownParameterId,
+    AckDelayExponentError, ActiveConnectionIdLimitError, InvalidParameterError, MaxAckDelayError,
+    MaxUdpPayloadSizeError, ServerOnlyParameterId, TransportParameters, UnknownParameter,
+    UnknownParameterId, ValueLengthError,
     codec::{
         ConnectionIdParameterId, IntegerParameterId, ReadTransportParametersError,
         ReadTransportParametersHostExt as _, WriteTransportParametersError,
@@ -16,7 +17,7 @@ use super::{
     },
 };
 use crate::{
-    connection_id::{ConnectionId, ConnectionIdLengthError, NonEmptyCid, StatelessResetToken},
+    connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken},
     role::Role,
     stream_count::StreamCount,
     transport_error::TransportErrorCode,
@@ -277,11 +278,50 @@ fn server_only_parameters_from_a_client_are_rejected() {
 }
 
 #[test]
+fn range_errors_hold_only_values_out_of_range() {
+    for value in [0, 1199] {
+        let error = MaxUdpPayloadSizeError::check(vi(value)).unwrap_err();
+        assert_eq!(error.value(), vi(value));
+    }
+    assert_eq!(MaxUdpPayloadSizeError::check(vi(1200)), Ok(()));
+    for value in [21, VarInt::MAX.get()] {
+        let error = AckDelayExponentError::check(vi(value)).unwrap_err();
+        assert_eq!(error.value(), vi(value));
+    }
+    assert_eq!(AckDelayExponentError::check(vi(20)), Ok(()));
+    for value in [1 << 14, VarInt::MAX.get()] {
+        let error = MaxAckDelayError::check(vi(value)).unwrap_err();
+        assert_eq!(error.value(), vi(value));
+    }
+    assert_eq!(MaxAckDelayError::check(vi((1 << 14) - 1)), Ok(()));
+    for value in [0, 1] {
+        let error = ActiveConnectionIdLimitError::check(vi(value)).unwrap_err();
+        assert_eq!(error.value(), vi(value));
+    }
+    assert_eq!(ActiveConnectionIdLimitError::check(vi(2)), Ok(()));
+    let id = UnknownParameterId::new(vi(0x40)).unwrap();
+    assert_eq!(ValueLengthError::check(id, 1 << 20), Ok(()));
+    assert_eq!(
+        MaxUdpPayloadSizeError::check(vi(1199))
+            .unwrap_err()
+            .to_string(),
+        "max_udp_payload_size 1199 is below 1200"
+    );
+}
+
+#[test]
 fn values_out_of_range_are_rejected_by_parameter() {
     use InvalidParameterError as E;
     let count = |value| StreamCount::new(value).unwrap_err();
     let cases = [
-        (0x03, 1199, 1200, E::MaxUdpPayloadSize { value: vi(1199) }),
+        (
+            0x03,
+            1199,
+            1200,
+            E::MaxUdpPayloadSize {
+                source: MaxUdpPayloadSizeError::check(vi(1199)).unwrap_err(),
+            },
+        ),
         (
             0x08,
             (1 << 60) + 1,
@@ -298,14 +338,30 @@ fn values_out_of_range_are_rejected_by_parameter() {
                 source: count((1 << 60) + 1),
             },
         ),
-        (0x0a, 21, 20, E::AckDelayExponent { value: vi(21) }),
+        (
+            0x0a,
+            21,
+            20,
+            E::AckDelayExponent {
+                source: AckDelayExponentError::check(vi(21)).unwrap_err(),
+            },
+        ),
         (
             0x0b,
             1 << 14,
             (1 << 14) - 1,
-            E::MaxAckDelay { value: vi(1 << 14) },
+            E::MaxAckDelay {
+                source: MaxAckDelayError::check(vi(1 << 14)).unwrap_err(),
+            },
         ),
-        (0x0e, 1, 2, E::ActiveConnectionIdLimit { value: vi(1) }),
+        (
+            0x0e,
+            1,
+            2,
+            E::ActiveConnectionIdLimit {
+                source: ActiveConnectionIdLimitError::check(vi(1)).unwrap_err(),
+            },
+        ),
     ];
     for (parameter, invalid_value, valid, error) in cases {
         let read_error = read(&tlv(parameter, &integer(invalid_value)), Role::Client).unwrap_err();
@@ -360,12 +416,15 @@ fn unknown_values_longer_than_a_length_field_states_are_rejected() {
         }],
         ..TransportParameters::default()
     };
+    let Err(InvalidParameterError::ValueLength { source }) = parameters.validate(Role::Client)
+    else {
+        panic!()
+    };
+    assert_eq!(source.id(), UnknownParameterId::new(vi(0x40)).unwrap());
+    assert_eq!(source.length(), usize::MAX);
     assert_eq!(
-        parameters.validate(Role::Client),
-        Err(InvalidParameterError::ValueLength {
-            id: UnknownParameterId::new(vi(0x40)).unwrap(),
-            length: usize::MAX,
-        })
+        ValueLengthError::check(source.id(), usize::MAX),
+        Err(source)
     );
 }
 
@@ -441,8 +500,8 @@ fn malformed_values_name_their_parameter() {
                 error,
                 ReadTransportParametersError::ConnectionId {
                     id,
-                    source: ConnectionIdLengthError { length: 21 },
-                } if id.get() == vi(parameter)
+                    source,
+                } if id.get() == vi(parameter) && source.length() == 21
             ),
             "{parameter:#x}: {error:?}"
         );
@@ -484,15 +543,21 @@ fn malformed_values_are_rejected_by_parameter() {
     check(0x01, &[0x40], |error| {
         matches!(error, E::Integer { length: 1, .. })
     });
-    check(0x02, &[0; 15], |error| {
-        matches!(error, E::StatelessResetToken { length: 15 })
-    });
-    check(0x02, &[0; 17], |error| {
-        matches!(error, E::StatelessResetToken { length: 17 })
-    });
-    check(0x0c, &[0], |error| {
-        matches!(error, E::DisableActiveMigration { length: 1 })
-    });
+    check(
+        0x02,
+        &[0; 15],
+        |error| matches!(error, E::StatelessResetToken { source } if source.length() == 15),
+    );
+    check(
+        0x02,
+        &[0; 17],
+        |error| matches!(error, E::StatelessResetToken { source } if source.length() == 17),
+    );
+    check(
+        0x0c,
+        &[0],
+        |error| matches!(error, E::DisableActiveMigration { length } if length.get() == 1),
+    );
 
     check(0x0d, &[0; 24], |error| {
         matches!(error, E::PreferredAddress { .. })
@@ -500,9 +565,11 @@ fn malformed_values_are_rejected_by_parameter() {
     check(0x0d, &zero_cid_address, |error| {
         matches!(error, E::PreferredAddress { .. })
     });
-    check(0x0d, &long_address, |error| {
-        matches!(error, E::PreferredAddressLength { length: 50 })
-    });
+    check(
+        0x0d,
+        &long_address,
+        |error| matches!(error, E::PreferredAddressLength { source } if source.length() == 50),
+    );
 }
 
 /// RFC 9000 §18.2: an all-zero address and port stands for a family without

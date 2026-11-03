@@ -1,5 +1,5 @@
 use super::{
-    OutOfRangeError, VarInt, VarIntField, VarIntWidth,
+    VarInt, VarIntField, VarIntWidth,
     codec::{
         ReadVarIntError, ReadVarIntFieldError, ReadVarIntFieldHostExt as _, ReadVarIntHostExt as _,
         WriteVarIntError, WriteVarIntFieldHostExt as _, WriteVarIntHostExt as _,
@@ -120,14 +120,10 @@ fn write_into_a_full_slice_reports_progress() {
 fn constructors_check_the_range() {
     assert_eq!(VarInt::MAX.get(), (1 << 62) - 1);
     assert_eq!(VarInt::try_from((1u64 << 62) - 1), Ok(VarInt::MAX));
-    assert_eq!(
-        VarInt::try_from(1u64 << 62),
-        Err(OutOfRangeError { value: 1 << 62 })
-    );
-    assert_eq!(
-        VarInt::new(u64::MAX),
-        Err(OutOfRangeError { value: u64::MAX })
-    );
+    let error = VarInt::try_from(1u64 << 62).unwrap_err();
+    assert_eq!(error.value(), 1 << 62);
+    assert_eq!(VarInt::new(1 << 62), Err(error));
+    assert_eq!(VarInt::new(u64::MAX).unwrap_err().value(), u64::MAX);
     assert!(VarInt::try_from(usize::MAX).is_err());
     assert_eq!(VarInt::try_from(1200usize), Ok(var_int(1200)));
     assert_eq!(VarInt::from(u32::MAX).get(), u64::from(u32::MAX));

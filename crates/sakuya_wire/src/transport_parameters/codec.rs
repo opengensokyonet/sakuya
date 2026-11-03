@@ -35,6 +35,7 @@ use crate::{
 use bytes::{Buf, BufMut};
 use core::{
     convert::Infallible,
+    num::NonZeroUsize,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -170,16 +171,14 @@ fn set<D: Buf + Unpin, E>(
     }
     match id {
         id::STATELESS_RESET_TOKEN => {
-            if length != StatelessResetToken::LEN {
-                return StatelessResetTokenSnafu { length }.fail();
-            }
+            StatelessResetTokenLengthError::check(length)?;
             let mut token = [0; StatelessResetToken::LEN];
             // invariant: the value was checked to hold exactly the token.
             value.0.copy_to_slice(&mut token);
             parameters.stateless_reset_token = Some(StatelessResetToken::new(token));
         }
         id::DISABLE_ACTIVE_MIGRATION => {
-            if length != 0 {
+            if let Some(length) = NonZeroUsize::new(length) {
                 return DisableActiveMigrationSnafu { length }.fail();
             }
             parameters.disable_active_migration = true;
@@ -189,9 +188,7 @@ fn set<D: Buf + Unpin, E>(
             let address = value
                 .sync_read_preferred_address_unpin()
                 .context(PreferredAddressSnafu)?;
-            if value.0.has_remaining() {
-                return PreferredAddressLengthSnafu { length }.fail();
-            }
+            PreferredAddressLengthError::check(length, value.0.remaining())?;
             parameters.preferred_address = Some(address);
         }
     }
@@ -290,16 +287,16 @@ pub enum ReadTransportParametersError<E> {
         source: ConnectionIdLengthError,
     },
     /// The value of `stateless_reset_token` is not 16 bytes long.
-    #[snafu(display("stateless_reset_token value of {length} bytes is not 16 bytes"))]
+    #[snafu(transparent)]
     StatelessResetToken {
-        /// The length of the value.
-        length: usize,
+        /// The broken rule.
+        source: StatelessResetTokenLengthError,
     },
     /// `disable_active_migration` has a value.
     #[snafu(display("disable_active_migration has a value of {length} bytes"))]
     DisableActiveMigration {
-        /// The length of the value.
-        length: usize,
+        /// The length of the value, which is not empty.
+        length: NonZeroUsize,
     },
     /// The value of `preferred_address` is shorter than its fields, holds no
     /// address of either family or holds an invalid connection ID.
@@ -309,10 +306,10 @@ pub enum ReadTransportParametersError<E> {
         source: ReadPreferredAddressError<Infallible>,
     },
     /// The value of `preferred_address` is longer than its fields.
-    #[snafu(display("preferred_address value of {length} bytes is longer than its fields"))]
+    #[snafu(transparent)]
     PreferredAddressLength {
-        /// The length of the value.
-        length: usize,
+        /// The broken rule.
+        source: PreferredAddressLengthError,
     },
     /// A parameter is forbidden.
     #[snafu(transparent)]
@@ -320,6 +317,58 @@ pub enum ReadTransportParametersError<E> {
         /// Why the parameter is forbidden.
         source: InvalidParameterError,
     },
+}
+
+/// The value of `stateless_reset_token` is not 16 bytes long.
+///
+/// It is constructed only when the check fails, so the length it holds is
+/// never 16.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("stateless_reset_token value of {length} bytes is not 16 bytes"))]
+pub struct StatelessResetTokenLengthError {
+    length: usize,
+}
+
+impl StatelessResetTokenLengthError {
+    /// The length of the value, other than 16.
+    pub const fn length(self) -> usize {
+        self.length
+    }
+
+    /// Checks that a value of `length` bytes holds exactly a token.
+    fn check(length: usize) -> Result<(), Self> {
+        if length != StatelessResetToken::LEN {
+            return Err(Self { length });
+        }
+        Ok(())
+    }
+}
+
+/// The value of `preferred_address` is longer than its fields.
+///
+/// It is constructed only when the check fails, after the fields were read
+/// from the value, so the length it holds always exceeds the length of the
+/// fields: at least 43 bytes, since the fields take at least 42.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("preferred_address value of {length} bytes is longer than its fields"))]
+pub struct PreferredAddressLengthError {
+    length: usize,
+}
+
+impl PreferredAddressLengthError {
+    /// The length of the value, longer than its fields.
+    pub const fn length(self) -> usize {
+        self.length
+    }
+
+    /// Checks that nothing of a value of `length` bytes is left once its
+    /// fields have been read, with `left` bytes left.
+    fn check(length: usize, left: usize) -> Result<(), Self> {
+        if left != 0 {
+            return Err(Self { length });
+        }
+        Ok(())
+    }
 }
 
 impl<E> ReadTransportParametersError<E> {
