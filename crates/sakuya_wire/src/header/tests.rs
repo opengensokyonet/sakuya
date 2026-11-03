@@ -412,9 +412,7 @@ fn version_negotiation() {
     let header = long_header(&mut input);
     assert!(matches!(
         input.sync_read_long_packet_unpin(header),
-        Err(ReadLongPacketError::Version {
-            version: Version::NEGOTIATION
-        })
+        Err(ReadLongPacketError::Version { source }) if source.version() == Version::NEGOTIATION
     ));
 }
 
@@ -461,16 +459,73 @@ fn unsupported_version_keeps_version_independent_fields() {
     assert_eq!(header.dcid().as_bytes(), [3; 30]);
     assert!(header.scid().is_empty());
     assert_eq!(input, [0xee; 40]);
-    assert!(matches!(
-        input.sync_read_long_packet_unpin(header),
-        Err(ReadLongPacketError::Version { version }) if version == Version::new(0x6b33_43cf)
-    ));
-    assert!(matches!(
-        input.sync_read_version_negotiation_unpin(header),
-        Err(ReadVersionNegotiationError::Version { version }) if version == Version::new(0x6b33_43cf)
-    ));
+    let Err(ReadLongPacketError::Version { source }) = input.sync_read_long_packet_unpin(header)
+    else {
+        panic!()
+    };
+    assert_eq!(source.version(), Version::new(0x6b33_43cf));
+    assert_eq!(
+        source.to_string(),
+        "version 0x6b3343cf is not QUIC version 1"
+    );
+    let Err(ReadVersionNegotiationError::Version { source }) =
+        input.sync_read_version_negotiation_unpin(header)
+    else {
+        panic!()
+    };
+    assert_eq!(source.version(), Version::new(0x6b33_43cf));
+    assert_eq!(
+        source.to_string(),
+        "version 0x6b3343cf is not version negotiation"
+    );
     // Neither failure read anything.
     assert_eq!(input, [0xee; 40]);
+}
+
+#[test]
+fn version_errors_hold_only_other_versions() {
+    // A Retry packet with empty connection IDs and an integrity tag, so that
+    // version 1 reads it.
+    let packet_of = |version: Version| {
+        let mut packet = vec![0xf0];
+        packet.extend_from_slice(&version.to_be_bytes());
+        packet.extend_from_slice(&[0, 0]);
+        packet.extend_from_slice(&[0xee; 16]);
+        packet
+    };
+    for value in [1, 2, 0x6b33_43cf, u32::MAX] {
+        let version = Version::new(value);
+        let packet = packet_of(version);
+        let mut input = packet.as_slice();
+        let header = long_header(&mut input);
+        let Err(ReadVersionNegotiationError::Version { source }) =
+            input.sync_read_version_negotiation_unpin(header)
+        else {
+            panic!("{version}")
+        };
+        assert_eq!(source.version(), version);
+    }
+    for value in [0, 2, 0x6b33_43cf, u32::MAX] {
+        let version = Version::new(value);
+        let packet = packet_of(version);
+        let mut input = packet.as_slice();
+        let header = long_header(&mut input);
+        let Err(ReadLongPacketError::Version { source }) =
+            input.sync_read_long_packet_unpin(header)
+        else {
+            panic!("{version}")
+        };
+        assert_eq!(source.version(), version);
+    }
+    // The versions the checks accept read.
+    let packet = packet_of(Version::NEGOTIATION);
+    let mut input = packet.as_slice();
+    let header = long_header(&mut input);
+    assert!(input.sync_read_version_negotiation_unpin(header).is_ok());
+    let packet = packet_of(Version::V1);
+    let mut input = packet.as_slice();
+    let header = long_header(&mut input);
+    assert!(input.sync_read_long_packet_unpin(header).is_ok());
 }
 
 #[test]

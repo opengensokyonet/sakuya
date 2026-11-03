@@ -18,7 +18,7 @@
 //! as a STREAM frame whose Length field must state the length of its data.
 //! A receiver that returns a longer chunk breaks the contract, and reading
 //! panics.
-use core::num::NonZeroUsize;
+use core::{fmt, num::NonZeroUsize};
 use nitori_call::ReceiverAccess;
 use nitori_io::{ReadChunk, ReadChunkExt as _, error::Incomplete};
 use snafu::{IntoError, ResultExt, Snafu};
@@ -45,8 +45,74 @@ pub enum ReadPayloadError<E> {
         /// The receiver's error.
         source: E,
         /// Bytes of the field read before the failure.
-        completed: usize,
+        completed: PayloadCompleted,
     },
+}
+
+/// The number of bytes of a payload field read before the receiver failed.
+///
+/// For a field of a known length it is always below that length, since a
+/// failure leaves at least one byte of the field unread; a field that
+/// extends to the end of the source has no such bound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PayloadCompleted {
+    expected: Option<usize>,
+    completed: usize,
+}
+
+impl PayloadCompleted {
+    /// `completed` bytes of a field of `expected` bytes, or of a field that
+    /// extends to the end of the source for `None`; `None` if `completed` is
+    /// not below `expected`.
+    pub const fn new(expected: Option<usize>, completed: usize) -> Option<Self> {
+        if let Some(expected) = expected
+            && completed >= expected
+        {
+            return None;
+        }
+        Some(Self {
+            expected,
+            completed,
+        })
+    }
+
+    /// The length of the field, or `None` for a field that extends to the
+    /// end of the source.
+    pub const fn expected(self) -> Option<usize> {
+        self.expected
+    }
+
+    /// The number of bytes, below [`expected`](Self::expected) when that is
+    /// known.
+    pub const fn completed(self) -> usize {
+        self.completed
+    }
+
+    /// The bytes read before a failure within a field of `length` bytes.
+    fn of_field(length: usize, completed: usize) -> Self {
+        match Self::new(Some(length), completed) {
+            Some(completed) => completed,
+            // invariant: the receiver is asked for more bytes only while
+            // bytes of the field remain.
+            None => panic!("a failure within a field leaves fewer bytes than its length read"),
+        }
+    }
+
+    /// The bytes read before a failure within a field that extends to the end
+    /// of the source.
+    const fn to_end(completed: usize) -> Self {
+        Self {
+            expected: None,
+            completed,
+        }
+    }
+}
+
+/// Formats the number of bytes.
+impl fmt::Display for PayloadCompleted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.completed.fmt(f)
+    }
 }
 
 /// The source delivered a payload field in more than one chunk.
@@ -115,7 +181,9 @@ where
     let first = io
         .read_chunk(maximum)
         .await
-        .context(read_payload_error::ReceiverSnafu { completed: 0usize })?;
+        .context(read_payload_error::ReceiverSnafu {
+            completed: PayloadCompleted::of_field(length, 0),
+        })?;
     let Some(first) = first else {
         return Err(Incomplete {
             expected: length,
@@ -145,7 +213,7 @@ where
         }
         .into()),
         Err(source) => Err(read_payload_error::ReceiverSnafu {
-            completed: received,
+            completed: PayloadCompleted::of_field(length, received),
         }
         .into_error(source)),
     }
@@ -160,10 +228,12 @@ where
     F: ReadChunk<Chunk: Default>,
     A: ReceiverAccess<Family = F>,
 {
-    let first = io
-        .read_chunk(NonZeroUsize::MAX)
-        .await
-        .context(read_payload_error::ReceiverSnafu { completed: 0usize })?;
+    let first =
+        io.read_chunk(NonZeroUsize::MAX)
+            .await
+            .context(read_payload_error::ReceiverSnafu {
+                completed: PayloadCompleted::to_end(0),
+            })?;
     let Some(first) = first else {
         return Ok(F::Chunk::default());
     };
@@ -176,7 +246,7 @@ where
         }
         .into()),
         Err(source) => Err(read_payload_error::ReceiverSnafu {
-            completed: received,
+            completed: PayloadCompleted::to_end(received),
         }
         .into_error(source)),
     }
@@ -184,7 +254,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::ReadPayloadError;
+    use super::{PayloadCompleted, ReadPayloadError};
     use crate::frame::{
         Extensions,
         codec::{ReadFrameError, ReadFrameHostExt as _},
@@ -194,6 +264,7 @@ mod tests {
     use bytes::{Buf, BufMut};
     use core::{
         convert::Infallible,
+        fmt::Debug,
         num::NonZeroUsize,
         pin::Pin,
         task::{Context, Poll},
@@ -285,10 +356,72 @@ mod tests {
         }
     }
 
+    /// The error of [`Failing`].
+    #[derive(Debug, PartialEq, Eq)]
+    struct SourceFailed;
+
+    /// A source that keeps the `ReadChunk` contract and fails, rather than
+    /// ends, once its bytes are read.
+    struct Failing(&'static [u8]);
+
+    nitori_call::family_receiver!(impl [] for Failing);
+
+    impl Read for Failing {
+        type Error = SourceFailed;
+
+        fn poll_read<'visit, Output: BufMut + ?Sized>(
+            host: Pin<&mut Self::ReceiverView<'visit>>,
+            _: &mut Context<'_>,
+            mut destination: &mut Output,
+        ) -> Poll<Result<usize, Self::Error>>
+        where
+            Self: 'visit,
+        {
+            let source = &mut host.get_pin_mut().get_mut().0;
+            if source.is_empty() {
+                return Poll::Ready(Err(SourceFailed));
+            }
+            let count = source.remaining().min(destination.remaining_mut());
+            BufMut::put(&mut destination, source.take(count));
+            Poll::Ready(Ok(count))
+        }
+    }
+
+    impl ReadChunk for Failing {
+        type Chunk = &'static [u8];
+
+        fn poll_read_chunk<'visit>(
+            host: Pin<&mut Self::ReceiverView<'visit>>,
+            _: &mut Context<'_>,
+            maximum: NonZeroUsize,
+        ) -> Poll<Result<Option<Self::Chunk>, Self::Error>>
+        where
+            Self: 'visit,
+        {
+            let source = &mut host.get_pin_mut().get_mut().0;
+            if source.is_empty() {
+                return Poll::Ready(Err(SourceFailed));
+            }
+            let (chunk, rest) = source.split_at(source.len().min(maximum.get()));
+            *source = rest;
+            Poll::Ready(Ok(Some(chunk)))
+        }
+    }
+
     /// The payload failure of reading one frame from `source`.
     fn payload_error(source: &'static [u8]) -> ReadPayloadError<Infallible> {
-        let mut source = Bytewise(source);
-        match source.sync_read_frame_unpin(Extensions::ALL) {
+        data_error(Bytewise(source).sync_read_frame_unpin(Extensions::ALL))
+    }
+
+    /// The payload failure of reading one frame from `source`, which fails
+    /// after its bytes.
+    fn receiver_error(source: &'static [u8]) -> ReadPayloadError<SourceFailed> {
+        data_error(Failing(source).sync_read_frame_unpin(Extensions::ALL))
+    }
+
+    /// The failure of reading the data of a CRYPTO or DATAGRAM frame.
+    fn data_error<T: Debug, E: Debug>(result: Result<T, ReadFrameError<E>>) -> ReadPayloadError<E> {
+        match result {
             Err(ReadFrameError::Crypto {
                 source: ReadCryptoError::Data { source },
                 ..
@@ -317,6 +450,45 @@ mod tests {
             panic!()
         };
         assert_eq!((source.expected(), source.received()), (None, 1));
+    }
+
+    #[test]
+    fn completed_bytes_stay_below_a_known_length() {
+        for (expected, completed) in [(Some(1), 0), (Some(3), 2), (None, 0), (None, usize::MAX)] {
+            let progress = PayloadCompleted::new(expected, completed).unwrap();
+            assert_eq!(
+                (progress.expected(), progress.completed()),
+                (expected, completed)
+            );
+            assert_eq!(progress.to_string(), completed.to_string());
+        }
+        for (expected, completed) in [(0, 0), (3, 3), (3, 4)] {
+            assert_eq!(PayloadCompleted::new(Some(expected), completed), None);
+        }
+    }
+
+    #[test]
+    fn a_receiver_failure_keeps_the_bytes_read() {
+        // A CRYPTO frame whose Length of 3 the source fails within.
+        let ReadPayloadError::Receiver { source, completed } =
+            receiver_error(&[0x06, 0x00, 0x03, 1])
+        else {
+            panic!()
+        };
+        assert_eq!(source, SourceFailed);
+        assert_eq!((completed.expected(), completed.completed()), (Some(3), 1));
+        // The source fails before the first byte of the data.
+        let error = receiver_error(&[0x06, 0x00, 0x03]);
+        let ReadPayloadError::Receiver { completed, .. } = &error else {
+            panic!()
+        };
+        assert_eq!((completed.expected(), completed.completed()), (Some(3), 0));
+        assert_eq!(error.to_string(), "payload read failed after 0 bytes");
+        // A DATAGRAM frame without a Length field extends to the end.
+        let ReadPayloadError::Receiver { completed, .. } = receiver_error(&[0x30, 1, 2]) else {
+            panic!()
+        };
+        assert_eq!((completed.expected(), completed.completed()), (None, 2));
     }
 
     #[test]

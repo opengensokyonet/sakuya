@@ -218,12 +218,7 @@ where
     F: ReadChunk<Chunk: Default>,
     A: ReceiverAccess<Family = F>,
 {
-    if header.version() != Version::NEGOTIATION {
-        return read_version_negotiation_error::VersionSnafu {
-            version: header.version(),
-        }
-        .fail();
-    }
+    NotNegotiationVersionError::check(header.version())?;
     let versions = read_payload_to_end(io)
         .await
         .context(read_version_negotiation_error::VersionsSnafu)?;
@@ -236,10 +231,10 @@ where
 #[snafu(module(read_version_negotiation_error), visibility(pub(crate)))]
 pub enum ReadVersionNegotiationError<E> {
     /// The version field is not zero.
-    #[snafu(display("version {version} is not version negotiation"))]
+    #[snafu(transparent)]
     Version {
-        /// The version field.
-        version: Version,
+        /// The broken rule.
+        source: NotNegotiationVersionError,
     },
     /// The supported version list could not be read.
     #[snafu(display("supported version list read failed"))]
@@ -253,6 +248,32 @@ pub enum ReadVersionNegotiationError<E> {
         /// The broken rule.
         source: VersionListError,
     },
+}
+
+/// The Version field of a long header read as a Version Negotiation packet
+/// is not zero.
+///
+/// It is constructed only when the check fails, so the version it holds is
+/// never [`Version::NEGOTIATION`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("version {version} is not version negotiation"))]
+pub struct NotNegotiationVersionError {
+    version: Version,
+}
+
+impl NotNegotiationVersionError {
+    /// The version field, not [`Version::NEGOTIATION`].
+    pub const fn version(self) -> Version {
+        self.version
+    }
+
+    /// Checks that `version` marks a Version Negotiation packet.
+    fn check(version: Version) -> Result<(), Self> {
+        if version != Version::NEGOTIATION {
+            return Err(Self { version });
+        }
+        Ok(())
+    }
 }
 
 /// The supported version list of a Version Negotiation packet does not end

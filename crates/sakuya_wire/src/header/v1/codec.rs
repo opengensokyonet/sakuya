@@ -79,12 +79,7 @@ where
     F: ReadChunk<Chunk: Default>,
     A: ReceiverAccess<Family = F>,
 {
-    if header.version() != VERSION {
-        return read_long_packet_error::VersionSnafu {
-            version: header.version(),
-        }
-        .fail();
-    }
+    NotV1VersionError::check(header.version())?;
     let dcid =
         ConnectionId::try_from(*header.dcid()).context(read_long_packet_error::DcidLengthSnafu)?;
     let scid =
@@ -174,10 +169,10 @@ fn saturating_usize(value: VarInt) -> usize {
 #[snafu(module(read_long_packet_error), visibility(pub(crate)))]
 pub enum ReadLongPacketError<E> {
     /// The version is not QUIC version 1.
-    #[snafu(display("version {version} is not QUIC version 1"))]
+    #[snafu(transparent)]
     Version {
-        /// The version field.
-        version: Version,
+        /// The broken rule.
+        source: NotV1VersionError,
     },
     /// The destination connection ID is longer than version 1 allows.
     #[snafu(display("invalid destination connection ID"))]
@@ -230,6 +225,32 @@ pub enum ReadLongPacketError<E> {
         /// The broken rule.
         source: RetryIntegrityTagError,
     },
+}
+
+/// The Version field of a long header read as a version 1 packet is not
+/// [`VERSION`].
+///
+/// It is constructed only when the check fails, so the version it holds is
+/// never [`Version::V1`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("version {version} is not QUIC version 1"))]
+pub struct NotV1VersionError {
+    version: Version,
+}
+
+impl NotV1VersionError {
+    /// The version field, not [`Version::V1`].
+    pub const fn version(self) -> Version {
+        self.version
+    }
+
+    /// Checks that `version` is QUIC version 1.
+    fn check(version: Version) -> Result<(), Self> {
+        if version != VERSION {
+            return Err(Self { version });
+        }
+        Ok(())
+    }
 }
 
 /// A Retry packet is too short for its 16-byte integrity tag.

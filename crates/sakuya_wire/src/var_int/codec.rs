@@ -57,7 +57,7 @@
 #![allow(missing_docs)]
 
 use super::{VarInt, VarIntField, VarIntWidth};
-use core::convert::Infallible;
+use core::{convert::Infallible, fmt};
 use nitori_call::{ReceiverAccess, call};
 use nitori_io::{
     calls::{ReadArrayError, WriteAllError},
@@ -149,7 +149,7 @@ pub enum ReadVarIntError<E> {
         /// The receiver's error.
         source: E,
         /// Bytes of the encoding read before the failure.
-        completed: usize,
+        completed: VarIntCompleted,
     },
 }
 
@@ -163,7 +163,7 @@ impl<E> ReadVarIntError<E> {
     pub fn completed(&self) -> usize {
         match self {
             Self::Incomplete { source } => source.completed,
-            Self::Receiver { completed, .. } => *completed,
+            Self::Receiver { completed, .. } => completed.get(),
         }
     }
 
@@ -186,10 +186,45 @@ impl<E> ReadVarIntError<E> {
                 },
             },
             ReadArrayError::Receiver { source, completed } => read_var_int_error::ReceiverSnafu {
-                completed: offset + completed,
+                completed: VarIntCompleted::of_failure(offset + completed),
             }
             .into_error(source),
         }
+    }
+}
+
+/// The number of bytes of a variable-length integer encoding read or
+/// accepted before the receiver failed: 0 to 7.
+///
+/// An encoding has at most 8 bytes, and a failure leaves at least one of
+/// them unread or unwritten.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VarIntCompleted(usize);
+
+impl VarIntCompleted {
+    /// `count` bytes, or `None` if `count` is 8 or more.
+    pub const fn new(count: usize) -> Option<Self> {
+        if count < 8 { Some(Self(count)) } else { None }
+    }
+
+    /// The number of bytes, below 8.
+    pub const fn get(self) -> usize {
+        self.0
+    }
+
+    /// The bytes completed before a failure within an encoding of at most 8
+    /// bytes.
+    fn of_failure(count: usize) -> Self {
+        // invariant: `nitori_io` reports a failure only while bytes of the
+        // requested encoding remain, so fewer than 8 have been completed.
+        Self::new(count).expect("a failure within an encoding leaves fewer than 8 bytes completed")
+    }
+}
+
+/// Formats the number of bytes.
+impl fmt::Display for VarIntCompleted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
     }
 }
 
@@ -229,7 +264,7 @@ pub enum WriteVarIntError<E> {
         /// The receiver's error.
         source: E,
         /// Bytes of the encoding accepted before the failure.
-        completed: usize,
+        completed: VarIntCompleted,
     },
 }
 
@@ -238,7 +273,7 @@ impl<E> WriteVarIntError<E> {
     pub fn completed(&self) -> usize {
         match self {
             Self::WriteZero { source } => source.completed,
-            Self::Receiver { completed, .. } => *completed,
+            Self::Receiver { completed, .. } => completed.get(),
         }
     }
 
@@ -255,9 +290,10 @@ impl<E> From<WriteAllError<E>> for WriteVarIntError<E> {
     fn from(error: WriteAllError<E>) -> Self {
         match error {
             WriteAllError::WriteZero { source } => source.into(),
-            WriteAllError::Receiver { source, completed } => {
-                write_var_int_error::ReceiverSnafu { completed }.into_error(source)
+            WriteAllError::Receiver { source, completed } => write_var_int_error::ReceiverSnafu {
+                completed: VarIntCompleted::of_failure(completed),
             }
+            .into_error(source),
         }
     }
 }

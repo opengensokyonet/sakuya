@@ -2,7 +2,7 @@ use super::{
     VarInt, VarIntField, VarIntWidth,
     codec::{
         ReadVarIntError, ReadVarIntFieldError, ReadVarIntFieldHostExt as _, ReadVarIntHostExt as _,
-        WriteVarIntError, WriteVarIntFieldHostExt as _, WriteVarIntHostExt as _,
+        VarIntCompleted, WriteVarIntError, WriteVarIntFieldHostExt as _, WriteVarIntHostExt as _,
     },
 };
 use crate::{
@@ -235,17 +235,43 @@ fn read_operation_keeps_the_receiver_error() {
     let error = source.sync_read_var_int_unpin().unwrap_err();
     assert!(matches!(
         error,
-        ReadVarIntError::Receiver { completed: 3, .. }
+        ReadVarIntError::Receiver { completed, .. } if completed.get() == 3
     ));
     assert_eq!(error.completed(), 3);
     assert_eq!(error.host_error().unwrap().to_string(), "source failed");
+    assert_eq!(
+        error.to_string(),
+        "variable-length integer read failed after 3 bytes"
+    );
 
     let mut source = Std::new(Trickle { bytes: &[] });
     let error = source.sync_read_var_int_unpin().unwrap_err();
     assert!(matches!(
         error,
-        ReadVarIntError::Receiver { completed: 0, .. }
+        ReadVarIntError::Receiver { completed, .. } if completed.get() == 0
     ));
+
+    // A failure before the last byte of the longest encoding.
+    let mut source = Std::new(Trickle {
+        bytes: &[0xc2, 0x19, 0x7c, 0x5e, 0xff, 0x14, 0xe8],
+    });
+    let error = source.sync_read_var_int_unpin().unwrap_err();
+    assert!(matches!(
+        error,
+        ReadVarIntError::Receiver { completed, .. } if completed.get() == 7
+    ));
+}
+
+#[test]
+fn completed_bytes_stay_below_the_longest_encoding() {
+    for count in 0..8 {
+        let completed = VarIntCompleted::new(count).unwrap();
+        assert_eq!(completed.get(), count);
+        assert_eq!(completed.to_string(), count.to_string());
+    }
+    for count in [8, 9, usize::MAX] {
+        assert_eq!(VarIntCompleted::new(count), None, "{count}");
+    }
 }
 
 #[test]
@@ -309,9 +335,14 @@ fn write_operation_reports_failures_with_progress() {
     let error = sink.sync_write_var_int_unpin(value).unwrap_err();
     assert!(matches!(
         error,
-        WriteVarIntError::Receiver { completed: 5, .. }
+        WriteVarIntError::Receiver { completed, .. } if completed.get() == 5
     ));
+    assert_eq!(error.completed(), 5);
     assert_eq!(error.host_error().unwrap().to_string(), "sink failed");
+    assert_eq!(
+        error.to_string(),
+        "variable-length integer write failed after 5 bytes"
+    );
 
     let mut sink = Std::new(Narrow {
         accepted: Vec::new(),
