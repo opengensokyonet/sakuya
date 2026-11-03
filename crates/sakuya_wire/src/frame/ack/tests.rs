@@ -317,16 +317,30 @@ fn construction_rejects_ranges_below_zero_and_narrow_counts() {
 
 #[test]
 fn building_rejects_unordered_ranges() {
-    let cases: [(&[RangeInclusive<u64>], PacketRangesError); 6] = [
-        (&[], PacketRangesError::NoRange),
-        (&[5..=3], PacketRangesError::Range { index: 0 }),
-        (&[1..=1, 5..=6], PacketRangesError::Range { index: 1 }),
+    let cases: [(&[RangeInclusive<u64>], PacketRangesError); 7] = [
+        (&[], PacketRangesError::NoRanges),
+        (&[5..=3], PacketRangesError::EmptyRange { index: 0 }),
+        (
+            &[1..=1, 5..=6],
+            PacketRangesError::NotBelowPrevious { index: 1 },
+        ),
         // Adjacent ranges have no packet number between them.
-        (&[5..=6, 3..=4], PacketRangesError::Range { index: 1 }),
-        (&[5..=6, 3..=5], PacketRangesError::Range { index: 1 }),
+        (
+            &[5..=6, 3..=4],
+            PacketRangesError::NotBelowPrevious { index: 1 },
+        ),
+        (
+            &[5..=6, 3..=5],
+            PacketRangesError::NotBelowPrevious { index: 1 },
+        ),
+        // An empty range is reported as empty, wherever it lies.
         (
             &[9..=9, 5..=6, 4..=2],
-            PacketRangesError::Range { index: 2 },
+            PacketRangesError::EmptyRange { index: 2 },
+        ),
+        (
+            &[9..=9, 12..=10],
+            PacketRangesError::EmptyRange { index: 1 },
         ),
     ];
     for (ranges_in, error) in cases {

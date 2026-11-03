@@ -79,9 +79,6 @@ pub struct EcnCounts {
     pub ce: VarIntField<VarInt>,
 }
 
-/// The iterator over the ACK Ranges of [`AckRanges`].
-pub type AckRangeIter<'a> = Copied<slice::Iter<'a, AckRange>>;
-
 impl Ack {
     /// The ACK frame with these fields.
     ///
@@ -133,10 +130,11 @@ impl Ack {
     ///
     /// # Errors
     ///
-    /// [`PacketRangesError::NoRange`] without ranges, and
-    /// [`PacketRangesError::Range`] for the first range that is empty or does
-    /// not lie below the previous one with at least one packet number between
-    /// them.
+    /// [`PacketRangesError::NoRanges`] without ranges,
+    /// [`PacketRangesError::EmptyRange`] for the first range that is empty,
+    /// and [`PacketRangesError::NotBelowPrevious`] for the first range that
+    /// does not lie below the previous one with at least one packet number
+    /// between them.
     pub fn from_packet_ranges<I>(
         ranges: I,
         ack_delay: VarIntField<VarInt>,
@@ -147,19 +145,21 @@ impl Ack {
     {
         let mut ranges = ranges.into_iter();
         let Some(first) = ranges.next() else {
-            return Err(PacketRangesError::NoRange);
+            return Err(PacketRangesError::NoRanges);
         };
         let (smallest, largest) = first.into_inner();
         if smallest > largest {
-            return Err(PacketRangesError::Range { index: 0 });
+            return Err(PacketRangesError::EmptyRange { index: 0 });
         }
         let mut previous = smallest;
         let mut ack_ranges = Vec::new();
         for (index, range) in (1..).zip(ranges) {
             let (start, end) = range.into_inner();
-            let below = end.checked_add(2).is_some_and(|limit| limit <= previous);
-            if start > end || !below {
-                return Err(PacketRangesError::Range { index });
+            if start > end {
+                return Err(PacketRangesError::EmptyRange { index });
+            }
+            if !end.checked_add(2).is_some_and(|limit| limit <= previous) {
+                return Err(PacketRangesError::NotBelowPrevious { index });
             }
             // The range is ordered and lies at least two below the smallest
             // packet number of the previous one, so nothing saturates.
@@ -240,7 +240,7 @@ impl Ack {
         // packet number 0.
         let range = range.unwrap_or_else(|| unreachable!("ACK range 0 below packet number 0"));
         PacketRanges {
-            ranges: self.ranges.iter(),
+            ranges: self.ranges.ranges.iter().copied(),
             state: PacketRangesState::First(range),
         }
     }
@@ -290,7 +290,10 @@ pub struct AckRanges {
 
 impl AckRanges {
     /// The ACK Ranges, in order.
-    pub fn iter(&self) -> AckRangeIter<'_> {
+    pub fn iter(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = AckRange> + ExactSizeIterator + FusedIterator + Clone + '_
+    {
         self.ranges.iter().copied()
     }
 
@@ -326,10 +329,10 @@ impl FromIterator<AckRange> for AckRanges {
 
 impl<'a> IntoIterator for &'a AckRanges {
     type Item = AckRange;
-    type IntoIter = AckRangeIter<'a>;
+    type IntoIter = Copied<slice::Iter<'a, AckRange>>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.iter()
+        self.ranges.iter().copied()
     }
 }
 
@@ -341,7 +344,7 @@ impl<'a> IntoIterator for &'a AckRanges {
 /// 0, so the iteration does not end early.
 #[derive(Clone, Debug)]
 pub struct PacketRanges<'a> {
-    ranges: AckRangeIter<'a>,
+    ranges: Copied<slice::Iter<'a, AckRange>>,
     state: PacketRangesState,
 }
 
@@ -470,13 +473,19 @@ pub enum InvalidAckError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 pub enum PacketRangesError {
     /// There is no range.
-    #[snafu(display("ACK frame has no range"))]
-    NoRange,
-    /// A range is empty, or does not lie below the previous range with at
-    /// least one packet number between them.
-    #[snafu(display("ACK range {index} is empty or out of order"))]
-    Range {
+    #[snafu(display("ACK frame has no ranges"))]
+    NoRanges,
+    /// A range is empty: its start is above its end.
+    #[snafu(display("packet number range {index} is empty"))]
+    EmptyRange {
         /// The position of the range: 0 for the first.
+        index: usize,
+    },
+    /// A range does not lie below the previous range with at least one
+    /// packet number between them.
+    #[snafu(display("packet number range {index} does not lie below the previous one with a gap"))]
+    NotBelowPrevious {
+        /// The position of the range, from 1.
         index: usize,
     },
 }
