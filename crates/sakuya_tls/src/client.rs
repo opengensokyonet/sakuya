@@ -1,8 +1,13 @@
 //! The capabilities a client's handshake consults, with implementations
-//! for plain Web connections.
+//! for plain Web connections, and the client's handshake engine.
 //!
 //! - [`offering`]: what the ClientHello offers: cipher suites, groups and
 //!   key shares, signature schemes.
+//! - [`ticket`]: the tickets a client keeps, per target.
+//!
+//! [`engine`] is the client's handshake engine, which takes these
+//! capabilities and a certificate verifier from
+//! [`verify`](crate::verify).
 //!
 //! A client connects to a [`ServerTarget`]; the capabilities answer per
 //! target.
@@ -10,6 +15,7 @@
 use rustls_pki_types::DnsName;
 use snafu::Snafu;
 
+pub mod engine;
 pub mod offering;
 pub mod ticket;
 

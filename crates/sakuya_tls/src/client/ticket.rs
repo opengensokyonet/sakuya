@@ -9,7 +9,7 @@
 
 use crate::{
     cipher_suite::CipherSuite, client::ServerTarget, clock::Clock, extension::alpn::ProtocolName,
-    message::new_session_ticket::TicketLifetime, schedule::ResumptionPsk,
+    message::new_session_ticket::TicketLifetime, schedule::ResumptionPsk, verify::SubjectPublicKey,
 };
 use bytes::Bytes;
 use std::{
@@ -40,6 +40,10 @@ pub struct StoredTicket {
     /// The server's transport parameters of that connection, which 0-RTT
     /// remembers (RFC 9000 §7.4.1).
     pub transport_parameters: Bytes,
+    /// The public key the server authenticated with on that connection,
+    /// which a connection resumed with the ticket keeps as the server's
+    /// identity.
+    pub identity: SubjectPublicKey,
 }
 
 impl StoredTicket {
@@ -79,6 +83,26 @@ pub trait ClientTicketStore {
 
     /// Keeps `ticket`, received from `target`.
     fn store(&self, target: &ServerTarget, ticket: StoredTicket);
+}
+
+impl<S: ClientTicketStore + ?Sized> ClientTicketStore for &S {
+    fn take(&self, target: &ServerTarget) -> Option<StoredTicket> {
+        (**self).take(target)
+    }
+
+    fn store(&self, target: &ServerTarget, ticket: StoredTicket) {
+        (**self).store(target, ticket);
+    }
+}
+
+impl<S: ClientTicketStore + ?Sized> ClientTicketStore for std::sync::Arc<S> {
+    fn take(&self, target: &ServerTarget) -> Option<StoredTicket> {
+        (**self).take(target)
+    }
+
+    fn store(&self, target: &ServerTarget, ticket: StoredTicket) {
+        (**self).store(target, ticket);
+    }
 }
 
 /// Tickets in memory, a queue per target, each handed out once.
@@ -150,10 +174,18 @@ mod tests {
     use crate::{
         cipher_suite::CipherSuite, client::ServerTarget, clock::ManualClock,
         message::new_session_ticket::TicketLifetime, schedule::ResumptionPsk,
+        verify::SubjectPublicKey,
     };
     use bytes::Bytes;
     use nitori_crypto::Secret;
     use std::time::{Duration, SystemTime};
+
+    /// An Ed25519 SubjectPublicKeyInfo.
+    const ED25519_SPKI: &[u8] = &[
+        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00, 1, 2, 3, 4, 5, 6,
+        7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
+        30, 31, 32,
+    ];
 
     fn start() -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000)
@@ -170,6 +202,7 @@ mod tests {
             early_data: false,
             application_protocol: None,
             transport_parameters: Bytes::new(),
+            identity: SubjectPublicKey::from_spki(ED25519_SPKI).unwrap(),
         }
     }
 

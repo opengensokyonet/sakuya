@@ -688,3 +688,13 @@ where
         }
     }
 }
+
+impl<R, T> crate::alert::CallsForAlert for VerifyError<R, T>
+where
+    R: core::error::Error + 'static,
+    T: core::error::Error + 'static,
+{
+    fn alert(&self) -> AlertDescription {
+        VerifyError::alert(self)
+    }
+}
