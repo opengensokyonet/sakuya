@@ -236,8 +236,8 @@ pub enum UnsolicitedExtension {
 ///
 /// `V` is the failure of the certificate verifier.
 #[derive(Debug, Snafu)]
-#[snafu(module(client_failure), visibility(pub(crate)))]
-pub enum ClientFailure<V> {
+#[snafu(module(client_alert_error), visibility(pub(crate)))]
+pub enum ClientAlertError<V> {
     /// The offering leaves nothing to offer.
     #[snafu(display("nothing to offer"))]
     Offer {
@@ -447,7 +447,7 @@ pub enum ClientFailure<V> {
     },
 }
 
-impl<V: CallsForAlert> CallsForAlert for ClientFailure<V> {
+impl<V: CallsForAlert> CallsForAlert for ClientAlertError<V> {
     /// The alert the failure calls for: unexpected_message for a second
     /// HelloRetryRequest; protocol_version when the server selected a
     /// version before TLS 1.3; missing_extension without transport
@@ -519,7 +519,7 @@ async fn read_message<F, A, V, E>(
     input: &mut A,
     limits: MessageLimits,
     hash: Option<HashAlgorithm>,
-) -> Result<HandshakeMessage, HandshakeError<ClientFailure<V>, E>>
+) -> Result<HandshakeMessage, HandshakeError<ClientAlertError<V>, E>>
 where
     F: Read,
     A: ReceiverAccess<Family = F>,
@@ -529,7 +529,7 @@ where
         .read_handshake_message(limits, hash)
         .await
         .map_err(|error| match split_read(error) {
-            Ok(source) => alert(ClientFailure::Message { source }),
+            Ok(source) => alert(ClientAlertError::Message { source }),
             Err(error) => connection(error),
         })
 }
@@ -538,7 +538,7 @@ where
 async fn write_message<F, A, V, E>(
     output: &mut A,
     message: &[u8],
-) -> Result<(), HandshakeError<ClientFailure<V>, E>>
+) -> Result<(), HandshakeError<ClientAlertError<V>, E>>
 where
     F: Write,
     A: ReceiverAccess<Family = F>,
@@ -548,7 +548,7 @@ where
         .write_all(message)
         .await
         .map_err(|error| match split_write(error) {
-            Ok(source) => alert(ClientFailure::OutputStopped { source }),
+            Ok(source) => alert(ClientAlertError::OutputStopped { source }),
             Err(error) => connection(error),
         })
 }
@@ -585,9 +585,9 @@ impl<C> HelloParts<'_, C> {
         cookie: Option<&Cookie<Bytes>>,
         early_data: bool,
         ticket: Option<(&StoredTicket, HashAlgorithm, u32)>,
-    ) -> Result<ClientHello<Bytes>, ClientFailure<V>> {
+    ) -> Result<ClientHello<Bytes>, ClientAlertError<V>> {
         use ClientHelloExtension as X;
-        let list = |source| ClientFailure::OfferList { source };
+        let list = |source| ClientAlertError::OfferList { source };
         let suites = CodePointList::new(
             self.offer
                 .suites()
@@ -660,12 +660,12 @@ impl<C> HelloParts<'_, C> {
                 extensions.push(X::EarlyData);
             }
             let identity = PskIdentity::new(ticket.ticket.clone(), age)
-                .map_err(|source| ClientFailure::TicketIdentity { source })?;
+                .map_err(|source| ClientAlertError::TicketIdentity { source })?;
             let binder = PskBinder::new(Bytes::from(vec![0; hash.output_len()]))
                 // invariant: a hash is 32 to 255 bytes.
                 .expect("a binder as long as a hash");
             let offered = OfferedPsks::new(vec![identity], vec![binder])
-                .map_err(|source| ClientFailure::OfferedPsks { source })?;
+                .map_err(|source| ClientAlertError::OfferedPsks { source })?;
             extensions.push(X::PreSharedKey(offered));
         }
         ClientHello::new(
@@ -675,7 +675,7 @@ impl<C> HelloParts<'_, C> {
             suites,
             extensions,
         )
-        .map_err(|source| ClientFailure::ClientHello { source })
+        .map_err(|source| ClientAlertError::ClientHello { source })
     }
 }
 
@@ -746,7 +746,7 @@ enum Sent<C: TlsCrypto> {
 ///
 /// # Errors
 ///
-/// [`HandshakeError::Alert`] with a [`ClientFailure`], and
+/// [`HandshakeError::Alert`] with a [`ClientAlertError`], and
 /// [`HandshakeError::Transport`] when a receiver fails.
 #[call(yields = ClientHandshakeEvent<B>)]
 #[allow(clippy::too_many_arguments)]
@@ -762,7 +762,7 @@ pub async fn client_handshake<I, O, T, B, F, K, V, Z>(
     target: ServerTarget,
     application_protocols: Option<ProtocolNameList<Bytes>>,
     settings: ClientHandshakeSettings,
-) -> Result<(), HandshakeError<ClientFailure<V::Error>, <T as ClientTransport>::Error>>
+) -> Result<(), HandshakeError<ClientAlertError<V::Error>, <T as ClientTransport>::Error>>
 where
     I: CryptoInput,
     O: CryptoOutput,
@@ -781,7 +781,7 @@ where
     // What to offer, and the ticket.
     let (offer, attempt) = offering
         .offer(&backend, &target, &verifier.support())
-        .map_err(|source| alert(ClientFailure::Offer { source }))?;
+        .map_err(|source| alert(ClientAlertError::Offer { source }))?;
     let ticket = tickets.take(&target).and_then(|ticket| {
         let hash = offer
             .suites()
@@ -815,9 +815,9 @@ where
         .iter()
         .map(|&group| KeyExchange::start(&backend, group))
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|source| alert(ClientFailure::KeyGeneration { source }))?;
+        .map_err(|source| alert(ClientAlertError::KeyGeneration { source }))?;
     let random: [u8; 32] =
-        Random::random(&backend).map_err(|source| alert(ClientFailure::Random { source }))?;
+        Random::random(&backend).map_err(|source| alert(ClientAlertError::Random { source }))?;
     let parts = HelloParts {
         target: &target,
         offer: &offer,
@@ -880,7 +880,7 @@ where
         if version == Some(ProtocolVersion::TLS_1_3) {
             Ok(())
         } else {
-            Err(alert(ClientFailure::Version { version }))
+            Err(alert(ClientAlertError::Version { version }))
         }
     };
     let offered_suite = |suite: CipherSuite| {
@@ -889,7 +889,7 @@ where
             .iter()
             .find(|offered| offered.suite() == suite)
             .copied()
-            .ok_or(alert(ClientFailure::UnofferedSuite { suite }))
+            .ok_or(alert(ClientAlertError::UnofferedSuite { suite }))
     };
     let mut attempt = Some(attempt);
     let (server_hello, encoded_server_hello) = loop {
@@ -898,7 +898,7 @@ where
             .encoded()
             .clone()
             .sync_read_server_hello_unpin()
-            .map_err(|source| alert(ClientFailure::ServerHello { source }))?;
+            .map_err(|source| alert(ClientAlertError::ServerHello { source }))?;
         let retry = match reply {
             ServerHelloMessage::ServerHello(server_hello) => {
                 break (server_hello, message.into_encoded());
@@ -906,7 +906,7 @@ where
             ServerHelloMessage::HelloRetryRequest(retry) => retry,
         };
         let Sent::First { hello: first, .. } = &sent else {
-            return Err(alert(ClientFailure::SecondRetry));
+            return Err(alert(ClientAlertError::SecondRetry));
         };
         check_version(
             retry
@@ -918,7 +918,7 @@ where
                 }),
         )?;
         if retry.legacy_session_id_echo() != &LegacySessionId::EMPTY {
-            return Err(alert(ClientFailure::SessionIdEcho));
+            return Err(alert(ClientAlertError::SessionIdEcho));
         }
         let suite = offered_suite(retry.cipher_suite())?;
         let cookie = retry.cookie();
@@ -930,16 +930,16 @@ where
                     .find(|offered| offered.algorithm() == group)
                     .copied()
                     .filter(|offered| !offer.key_share_groups().contains(offered))
-                    .ok_or(alert(ClientFailure::RetryGroup { group }))?;
+                    .ok_or(alert(ClientAlertError::RetryGroup { group }))?;
                 if let Some(attempt) = attempt.take() {
                     attempt.retried(supported);
                 }
                 exchanges = vec![
                     KeyExchange::start(&backend, supported)
-                        .map_err(|source| alert(ClientFailure::KeyGeneration { source }))?,
+                        .map_err(|source| alert(ClientAlertError::KeyGeneration { source }))?,
                 ];
             }
-            None if cookie.is_none() => return Err(alert(ClientFailure::RetryWithoutChange)),
+            None if cookie.is_none() => return Err(alert(ClientAlertError::RetryWithoutChange)),
             None => {}
         }
         let transcript = Transcript::<Client, B>::new(&backend, suite.hash())
@@ -966,32 +966,32 @@ where
     drop(attempt);
     check_version(server_hello.supported_versions())?;
     if server_hello.legacy_session_id_echo() != &LegacySessionId::EMPTY {
-        return Err(alert(ClientFailure::SessionIdEcho));
+        return Err(alert(ClientAlertError::SessionIdEcho));
     }
     let suite = offered_suite(server_hello.cipher_suite())?;
     if let Sent::Second { suite: retried, .. } = &sent
         && *retried != suite.suite()
     {
-        return Err(alert(ClientFailure::RetrySuite {
+        return Err(alert(ClientAlertError::RetrySuite {
             suite: suite.suite(),
         }));
     }
     let server_share = server_hello
         .key_share()
-        .ok_or(alert(ClientFailure::MissingServerShare))?;
+        .ok_or(alert(ClientAlertError::MissingServerShare))?;
     let position = exchanges
         .iter()
         .position(|exchange| exchange.group() == server_share.group())
-        .ok_or(alert(ClientFailure::UnsharedGroup {
+        .ok_or(alert(ClientAlertError::UnsharedGroup {
             group: server_share.group(),
         }))?;
     let shared = exchanges
         .swap_remove(position)
         .complete(server_share.key_exchange().as_ref())
-        .map_err(|source| alert(ClientFailure::KeyExchange { source }))?;
+        .map_err(|source| alert(ClientAlertError::KeyExchange { source }))?;
     drop(exchanges);
     let selected_psk = server_hello.pre_shared_key();
-    let psk_error = |source| alert(ClientFailure::Psk { source });
+    let psk_error = |source| alert(ClientAlertError::Psk { source });
     let (handshake, keys) = match sent {
         Sent::First { hello, psk } => match psk {
             Some(early)
@@ -1000,7 +1000,7 @@ where
             {
                 early.server_hello(shared, &encoded_server_hello, selected_psk)
             }
-            Some(_) if selected_psk.is_some() => return Err(alert(ClientFailure::PskHash)),
+            Some(_) if selected_psk.is_some() => return Err(alert(ClientAlertError::PskHash)),
             _ => Transcript::<Client, B>::new(&backend, suite.hash())
                 .add(&hello)
                 .early_secret()
@@ -1032,10 +1032,10 @@ where
         .encoded()
         .clone()
         .sync_read_encrypted_extensions_unpin()
-        .map_err(|source| alert(ClientFailure::EncryptedExtensions { source }))?;
+        .map_err(|source| alert(ClientAlertError::EncryptedExtensions { source }))?;
     let peer_parameters = extensions
         .quic_transport_parameters()
-        .ok_or(alert(ClientFailure::MissingTransportParameters))?
+        .ok_or(alert(ClientAlertError::MissingTransportParameters))?
         .clone();
     let selected_protocol = extensions
         .extensions()
@@ -1049,18 +1049,18 @@ where
     match (&application_protocols, &selected_protocol) {
         (None, None) => {}
         (None, Some(_)) => {
-            return Err(alert(ClientFailure::Unsolicited {
+            return Err(alert(ClientAlertError::Unsolicited {
                 extension: UnsolicitedExtension::ApplicationLayerProtocolNegotiation,
             }));
         }
-        (Some(_), None) => return Err(alert(ClientFailure::NoApplicationProtocol)),
+        (Some(_), None) => return Err(alert(ClientAlertError::NoApplicationProtocol)),
         (Some(protocols), Some(selected)) => {
             if !protocols
                 .names()
                 .iter()
                 .any(|name| name.name().as_ref() == selected.name().as_ref())
             {
-                return Err(alert(ClientFailure::UnofferedProtocol));
+                return Err(alert(ClientAlertError::UnofferedProtocol));
             }
         }
     }
@@ -1071,12 +1071,12 @@ where
     let early_data = match (early_offered, early_accepted) {
         (false, false) => EarlyDataOutcome::NotOffered,
         (false, true) => {
-            return Err(alert(ClientFailure::Unsolicited {
+            return Err(alert(ClientAlertError::Unsolicited {
                 extension: UnsolicitedExtension::EarlyData,
             }));
         }
         (true, true) if selected_psk != Some(PskIndex::new(0)) => {
-            return Err(alert(ClientFailure::EarlyDataWithoutPsk));
+            return Err(alert(ClientAlertError::EarlyDataWithoutPsk));
         }
         (true, true) => EarlyDataOutcome::Accepted,
         (true, false) => EarlyDataOutcome::Rejected,
@@ -1096,7 +1096,7 @@ where
                     .encoded()
                     .clone()
                     .sync_read_certificate_request_unpin()
-                    .map_err(|source| alert(ClientFailure::CertificateRequest { source }))?;
+                    .map_err(|source| alert(ClientAlertError::CertificateRequest { source }))?;
                 requested = Some(request.certificate_request_context().clone());
                 authentication = authentication.add(message.encoded());
                 message = read_message(input, limits, hash).await?;
@@ -1105,11 +1105,11 @@ where
                 .encoded()
                 .clone()
                 .sync_read_certificate_unpin(CertificateFormat::X509)
-                .map_err(|source| alert(ClientFailure::Certificate { source }))?;
+                .map_err(|source| alert(ClientAlertError::Certificate { source }))?;
             let leaf = verifier
                 .verify(&target, certificate.certificates().entries())
                 .await
-                .map_err(|source| alert(ClientFailure::Verify { source }))?;
+                .map_err(|source| alert(ClientAlertError::Verify { source }))?;
             let authentication = authentication.add(message.encoded());
             let message = read_message(input, limits, hash).await?;
             let verify = message
@@ -1117,7 +1117,7 @@ where
                 .clone()
                 .sync_read_certificate_verify_unpin()
                 .map_err(|source| {
-                    alert(ClientFailure::CertificateVerify {
+                    alert(ClientAlertError::CertificateVerify {
                         source: CertificateVerifyError::Read { source },
                     })
                 })?;
@@ -1127,13 +1127,13 @@ where
                 .iter()
                 .any(|offered| offered.algorithm() == scheme)
             {
-                return Err(alert(ClientFailure::UnofferedScheme { scheme }));
+                return Err(alert(ClientAlertError::UnofferedScheme { scheme }));
             }
             leaf.check_certificate_verify_scheme(scheme)
-                .map_err(|source| alert(ClientFailure::SchemeKey { source }))?;
+                .map_err(|source| alert(ClientAlertError::SchemeKey { source }))?;
             let authenticated = authentication
                 .verify_certificate_verify(&message, leaf.key())
-                .map_err(|source| alert(ClientFailure::CertificateVerify { source }))?;
+                .map_err(|source| alert(ClientAlertError::CertificateVerify { source }))?;
             (authenticated, ServerIdentity::Verified(leaf), requested)
         }
         Authentication::Resumed(authenticated) => {
@@ -1152,7 +1152,7 @@ where
     let message = read_message(input, limits, hash).await?;
     let (mut master, one_rtt) = authenticated
         .server_finished(&message)
-        .map_err(|source| alert(ClientFailure::Finished { source }))?;
+        .map_err(|source| alert(ClientAlertError::Finished { source }))?;
     if let Some(context) = requested {
         let certificate = Certificate::new(context, CertificateList::X509(Vec::new()))
             // invariant: a context read from a CertificateRequest fits.
@@ -1186,7 +1186,7 @@ where
             .encoded()
             .clone()
             .sync_read_new_session_ticket_unpin()
-            .map_err(|source| alert(ClientFailure::NewSessionTicket { source }))?;
+            .map_err(|source| alert(ClientAlertError::NewSessionTicket { source }))?;
         let early_data = match received
             .extensions()
             .iter()
@@ -1195,7 +1195,7 @@ where
                 NewSessionTicketExtension::Unknown(_) => None,
             }) {
             Some(MaxEarlyDataSize::QUIC) => true,
-            Some(size) => return Err(alert(ClientFailure::EarlyDataSize { size })),
+            Some(size) => return Err(alert(ClientAlertError::EarlyDataSize { size })),
             None => false,
         };
         if received.ticket_lifetime().seconds() == 0 {

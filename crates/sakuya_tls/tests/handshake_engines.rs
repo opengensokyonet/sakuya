@@ -25,7 +25,7 @@ use sakuya_tls::{
     client::{
         ServerTarget,
         engine::{
-            ClientFailure, ClientHandshake, ClientHandshakeEvent, ClientHandshakeSettings,
+            ClientAlertError, ClientHandshake, ClientHandshakeEvent, ClientHandshakeSettings,
             ClientTransport, EarlyDataOutcome, ServerIdentity,
         },
         offering::{Offering, PreferenceOffering},
@@ -42,7 +42,7 @@ use sakuya_tls::{
     server::{
         choice::{GroupPreference, PreferenceTable},
         engine::{
-            Negotiated, ServerFailure, ServerHandshake, ServerHandshakeEvent,
+            Negotiated, ServerAlertError, ServerHandshake, ServerHandshakeEvent,
             ServerHandshakeSettings, ServerTransport,
         },
         identity::CertifiedKey,
@@ -1011,7 +1011,7 @@ fn a_changed_server_finished_fails_with_decrypt_error() {
     let end = connection.client_end;
     assert!(matches!(
         end.as_ref().and_then(|end| end.as_ref().err()?.failure()),
-        Some(ClientFailure::Finished {
+        Some(ClientAlertError::Finished {
             source: FinishedError::Mismatch
         })
     ));
@@ -1034,7 +1034,7 @@ fn a_changed_client_finished_fails_with_decrypt_error() {
     let end = connection.server_end;
     assert!(matches!(
         end.as_ref().and_then(|end| end.as_ref().err()?.failure()),
-        Some(ServerFailure::Finished {
+        Some(ServerAlertError::Finished {
             source: FinishedError::Mismatch
         })
     ));
@@ -1063,7 +1063,7 @@ fn a_changed_signature_fails_with_decrypt_error() {
     let end = connection.client_end;
     assert!(matches!(
         end.as_ref().and_then(|end| end.as_ref().err()?.failure()),
-        Some(ClientFailure::CertificateVerify {
+        Some(ClientAlertError::CertificateVerify {
             source: CertificateVerifyError::Signature { .. }
         })
     ));
@@ -1091,7 +1091,7 @@ fn a_scheme_that_does_not_fit_the_key_fails_with_illegal_parameter() {
     let end = connection.client_end;
     assert!(matches!(
         end.as_ref().and_then(|end| end.as_ref().err()?.failure()),
-        Some(ClientFailure::SchemeKey { .. })
+        Some(ClientAlertError::SchemeKey { .. })
     ));
     assert_eq!(alert_of(end), AlertDescription::ILLEGAL_PARAMETER);
 }
@@ -1137,7 +1137,7 @@ fn a_changed_binder_fails_with_decrypt_error() {
     let end = second.server_end;
     assert!(matches!(
         end.as_ref().and_then(|end| end.as_ref().err()?.failure()),
-        Some(ServerFailure::Binder { .. })
+        Some(ServerAlertError::Binder { .. })
     ));
     assert_eq!(alert_of(end), AlertDescription::DECRYPT_ERROR);
 }

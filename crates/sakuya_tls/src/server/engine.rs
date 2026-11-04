@@ -228,8 +228,8 @@ pub enum RequiredExtension {
 /// `L`, `S`, `G` and `K` are the failures of opening the layers, selecting
 /// the target, signing and sealing a ticket.
 #[derive(Debug, Snafu)]
-#[snafu(module(server_failure), visibility(pub(crate)))]
-pub enum ServerFailure<L, S, G, K> {
+#[snafu(module(server_alert_error), visibility(pub(crate)))]
+pub enum ServerAlertError<L, S, G, K> {
     /// A handshake message could not be collected.
     #[snafu(display("handshake message read failed"))]
     Message {
@@ -361,7 +361,7 @@ pub enum ServerFailure<L, S, G, K> {
     },
 }
 
-impl<L: CallsForAlert, S: CallsForAlert, G, K> CallsForAlert for ServerFailure<L, S, G, K> {
+impl<L: CallsForAlert, S: CallsForAlert, G, K> CallsForAlert for ServerAlertError<L, S, G, K> {
     /// The alert the failure calls for: protocol_version without TLS 1.3
     /// (RFC 8446 §4.2.1), missing_extension for a required extension
     /// (§9.2), illegal_parameter for a second ClientHello that does not
@@ -403,7 +403,7 @@ impl<L: CallsForAlert, S: CallsForAlert, G, K> CallsForAlert for ServerFailure<L
 /// The failures of [`server_handshake`] with the capabilities `L`, `S`,
 /// `P` and `K` and the connection's error `E`.
 type Failed<E, L, S, P, K> = HandshakeError<
-    ServerFailure<
+    ServerAlertError<
         <L as HelloLayers>::Error,
         <S as TargetSelection>::Error,
         <<P as Identity<<S as TargetSelection>::Target>>::Key as SigningKey>::Error,
@@ -427,7 +427,7 @@ async fn read_message<F, A, L, S, G, K, E>(
     input: &mut A,
     limits: MessageLimits,
     hash: Option<HashAlgorithm>,
-) -> Result<HandshakeMessage, HandshakeError<ServerFailure<L, S, G, K>, E>>
+) -> Result<HandshakeMessage, HandshakeError<ServerAlertError<L, S, G, K>, E>>
 where
     F: Read,
     A: ReceiverAccess<Family = F>,
@@ -437,7 +437,7 @@ where
         .read_handshake_message(limits, hash)
         .await
         .map_err(|error| match split_read(error) {
-            Ok(source) => alert(ServerFailure::Message { source }),
+            Ok(source) => alert(ServerAlertError::Message { source }),
             Err(error) => connection(error),
         })
 }
@@ -446,7 +446,7 @@ where
 async fn write_message<F, A, L, S, G, K, E>(
     output: &mut A,
     message: &[u8],
-) -> Result<(), HandshakeError<ServerFailure<L, S, G, K>, E>>
+) -> Result<(), HandshakeError<ServerAlertError<L, S, G, K>, E>>
 where
     F: Write,
     A: ReceiverAccess<Family = F>,
@@ -456,7 +456,7 @@ where
         .write_all(message)
         .await
         .map_err(|error| match split_write(error) {
-            Ok(source) => alert(ServerFailure::OutputStopped { source }),
+            Ok(source) => alert(ServerAlertError::OutputStopped { source }),
             Err(error) => connection(error),
         })
 }
@@ -464,12 +464,12 @@ where
 /// Reads the ClientHello of a whole message.
 fn read_hello<L, S, G, K>(
     message: &HandshakeMessage,
-) -> Result<ClientHello<Bytes>, ServerFailure<L, S, G, K>> {
+) -> Result<ClientHello<Bytes>, ServerAlertError<L, S, G, K>> {
     message
         .encoded()
         .clone()
         .sync_read_client_hello_unpin()
-        .map_err(|source| ServerFailure::ClientHello { source })
+        .map_err(|source| ServerAlertError::ClientHello { source })
 }
 
 /// The `quic_transport_parameters` of a ClientHello.
@@ -496,15 +496,15 @@ fn psk_modes(hello: &ClientHello<Bytes>) -> Option<&[PskKeyExchangeMode]> {
 
 /// Checks what every ClientHello the server continues with must have:
 /// TLS 1.3, (EC)DHE groups and shares, and transport parameters.
-fn check_hello<L, S, G, K>(hello: &ClientHello<Bytes>) -> Result<(), ServerFailure<L, S, G, K>> {
+fn check_hello<L, S, G, K>(hello: &ClientHello<Bytes>) -> Result<(), ServerAlertError<L, S, G, K>> {
     let tls13 = hello.extensions().iter().any(|extension| {
         matches!(extension, ClientHelloExtension::SupportedVersions(versions)
             if versions.as_slice().contains(&ProtocolVersion::TLS_1_3))
     });
     if !tls13 {
-        return Err(ServerFailure::UnsupportedVersion);
+        return Err(ServerAlertError::UnsupportedVersion);
     }
-    let missing = |extension| ServerFailure::MissingExtension { extension };
+    let missing = |extension| ServerAlertError::MissingExtension { extension };
     if hello.supported_groups().is_none() {
         return Err(missing(RequiredExtension::SupportedGroups));
     }
@@ -559,7 +559,7 @@ fn ticket_age_fits<T>(
 ///
 /// # Errors
 ///
-/// [`HandshakeError::Alert`] with a [`ServerFailure`], and
+/// [`HandshakeError::Alert`] with a [`ServerAlertError`], and
 /// [`HandshakeError::Transport`] when a receiver fails.
 #[call(yields = ServerHandshakeEvent<B, <S as TargetSelection>::Target>)]
 #[allow(clippy::too_many_arguments)]
@@ -604,23 +604,23 @@ where
     let accepted = layers
         .open(first, hello)
         .await
-        .map_err(|source| alert(ServerFailure::Layers { source }))?;
+        .map_err(|source| alert(ServerAlertError::Layers { source }))?;
     check_hello(accepted.client_hello()).map_err(alert)?;
     let selected = targets
         .select(accepted.client_hello())
         .await
-        .map_err(|source| alert(ServerFailure::Target { source }))?;
+        .map_err(|source| alert(ServerAlertError::Target { source }))?;
     let (chosen, needs_retry) = {
         let offer = ClientOffer::from_client_hello(accepted.client_hello());
         let chosen = choice
             .choose(&backend, &offer, &selected)
-            .map_err(|source| alert(ServerFailure::NoCommonParameters { source }))?;
+            .map_err(|source| alert(ServerAlertError::NoCommonParameters { source }))?;
         if !offer.cipher_suites().contains(&chosen.suite().suite())
             || !offer
                 .supported_groups()
                 .contains(&chosen.group().algorithm())
         {
-            return Err(alert(ServerFailure::ChoiceNotOffered));
+            return Err(alert(ServerAlertError::ChoiceNotOffered));
         }
         (chosen, !offer.has_key_share(chosen.group().algorithm()))
     };
@@ -652,17 +652,17 @@ where
         let accepted = layers
             .open(second, hello)
             .await
-            .map_err(|source| alert(ServerFailure::Layers { source }))?;
+            .map_err(|source| alert(ServerAlertError::Layers { source }))?;
         let hello = accepted.client_hello();
         check_hello(hello).map_err(alert)?;
         let offer = ClientOffer::from_client_hello(hello);
         if !offer.cipher_suites().contains(&suite.suite())
             || !offer.supported_groups().contains(&group.algorithm())
         {
-            return Err(alert(ServerFailure::RetryOffer));
+            return Err(alert(ServerAlertError::RetryOffer));
         }
         if offer.key_share_groups() != [group.algorithm()] {
-            return Err(alert(ServerFailure::RetryKeyShare));
+            return Err(alert(ServerAlertError::RetryKeyShare));
         }
         (accepted, transcript, true)
     } else {
@@ -696,7 +696,7 @@ where
         Some(offered) => match tickets.open(offered).await {
             Some((index, opened)) => {
                 if usize::from(index.get()) >= offered.identities().len() {
-                    return Err(alert(ServerFailure::TicketIndex { index }));
+                    return Err(alert(ServerAlertError::TicketIndex { index }));
                 }
                 let state = opened.state();
                 let fits = state.resumable.suite.hash() == Some(suite.hash().algorithm())
@@ -719,7 +719,7 @@ where
             let binder = &offered.expect("an offer").binders()[usize::from(index.get())];
             early
                 .verify_binder(binder.binder().as_ref())
-                .map_err(|source| alert(ServerFailure::Binder { source }))?;
+                .map_err(|source| alert(ServerAlertError::Binder { source }))?;
             Early::Psk(early.add(&encoded[covered..]), *index)
         }
         None => Early::Plain(transcript.add(&encoded).early_secret()),
@@ -772,9 +772,9 @@ where
     // The ServerHello and the Handshake secrets.
     let (server_share, shared) =
         KeyExchange::server_share(&backend, group, client_share.key_exchange().as_ref())
-            .map_err(|source| alert(ServerFailure::KeyExchange { source }))?;
+            .map_err(|source| alert(ServerAlertError::KeyExchange { source }))?;
     let random: [u8; 32] =
-        Random::random(&backend).map_err(|source| alert(ServerFailure::Random { source }))?;
+        Random::random(&backend).map_err(|source| alert(ServerAlertError::Random { source }))?;
     if let Some(never) = accepted.confirmation() {
         match *never {}
     }
@@ -836,7 +836,7 @@ where
         negotiated.local.clone(),
     ));
     let encrypted = EncryptedExtensions::new(extensions)
-        .map_err(|source| alert(ServerFailure::EncryptedExtensions { source }))?;
+        .map_err(|source| alert(ServerAlertError::EncryptedExtensions { source }))?;
     let encoded = encode(encrypted.encoded_len(), |sink| {
         sink.sync_write_encrypted_extensions_unpin(&encrypted)
     });
@@ -851,20 +851,20 @@ where
         let offered =
             hello
                 .signature_algorithms()
-                .ok_or(alert(ServerFailure::MissingExtension {
+                .ok_or(alert(ServerAlertError::MissingExtension {
                     extension: RequiredExtension::SignatureAlgorithms,
                 }))?;
         let presented = identity
             .present(&selected, offered.as_slice())
-            .map_err(|source| alert(ServerFailure::NoCommonScheme { source }))?;
+            .map_err(|source| alert(ServerAlertError::NoCommonScheme { source }))?;
         let entries = presented
             .certificates()
             .iter()
             .map(|certificate| CertificateEntry::new(certificate.clone(), Vec::new()))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|source| alert(ServerFailure::CertificateEntry { source }))?;
+            .map_err(|source| alert(ServerAlertError::CertificateEntry { source }))?;
         let certificate = Certificate::new(Bytes::new(), CertificateList::X509(entries))
-            .map_err(|source| alert(ServerFailure::Certificate { source }))?;
+            .map_err(|source| alert(ServerAlertError::Certificate { source }))?;
         let encoded = encode(certificate.encoded_len(), |sink| {
             sink.sync_write_certificate_unpin(&certificate)
         });
@@ -874,12 +874,12 @@ where
         let signature = presented
             .sign(content.as_bytes())
             .await
-            .map_err(|source| alert(ServerFailure::Signing { source }))?;
+            .map_err(|source| alert(ServerAlertError::Signing { source }))?;
         let verify = CertificateVerify::new(
             presented.scheme(),
             Bytes::copy_from_slice(signature.as_bytes()),
         )
-        .map_err(|source| alert(ServerFailure::SignatureLength { source }))?;
+        .map_err(|source| alert(ServerAlertError::SignatureLength { source }))?;
         let encoded = encode(verify.encoded_len(), |sink| {
             sink.sync_write_certificate_verify_unpin(&verify)
         });
@@ -894,7 +894,7 @@ where
     let received = read_message(input, limits, Some(suite.hash().algorithm())).await?;
     let (resumption, completed) = master
         .client_finished(&received)
-        .map_err(|source| alert(ServerFailure::Finished { source }))?;
+        .map_err(|source| alert(ServerAlertError::Finished { source }))?;
     yield ServerHandshakeEvent::Completed {
         one_rtt_receive: completed.one_rtt_receive,
         exporter: completed.exporter,
@@ -919,12 +919,13 @@ where
             .expect("an eight-byte nonce");
         count += 1;
         let ticket_age_add = u32::from_be_bytes(
-            Random::random(&backend).map_err(|source| alert(ServerFailure::Random { source }))?,
+            Random::random(&backend)
+                .map_err(|source| alert(ServerAlertError::Random { source }))?,
         );
         let ticket = slot
             .seal(resumption.ticket_psk(&nonce), &nonce, ticket_age_add)
             .await
-            .map_err(|source| alert(ServerFailure::Ticket { source }))?;
+            .map_err(|source| alert(ServerAlertError::Ticket { source }))?;
         let mut extensions = Vec::new();
         if ticket.early_data() {
             extensions.push(NewSessionTicketExtension::EarlyData(MaxEarlyDataSize::QUIC));
