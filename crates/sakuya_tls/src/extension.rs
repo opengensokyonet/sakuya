@@ -19,13 +19,18 @@
 //! The structured data of the recognized extensions lives in the child
 //! modules; extensions whose data is a list of code points use the lists of
 //! [`code_point`](crate::code_point). `quic_transport_parameters` and
-//! `encrypted_client_hello` are kept as opaque bytes.
+//! `encrypted_client_hello` are kept as opaque bytes, in [`OpaqueData`].
+//!
+//! Bytes left over once the data of a recognized extension has been read
+//! are excess; each message names the extensions whose data has a
+//! structure, so that bytes can follow it, in an enum of its own, which is
+//! the payload of its excess failure.
 
 use crate::{
     alert::AlertDescription,
     code_point::code_point,
     message::MessageSource,
-    vector::{LengthOutOfRange, ReadVectorError, read_u16, read_vector},
+    vector::{ExcessBytes, LengthOutOfRange, ReadVectorError, read_u16, read_vector},
     width::Width,
 };
 use bytes::Buf;
@@ -201,6 +206,36 @@ impl RestrictedExtension {
     }
 }
 
+/// The data of an extension kept as opaque bytes, such as
+/// `quic_transport_parameters`: at most 65535 bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct OpaqueData<C> {
+    data: C,
+}
+
+impl<C: AsRef<[u8]>> OpaqueData<C> {
+    /// The data `data`.
+    ///
+    /// # Errors
+    ///
+    /// [`LengthOutOfRange`] for data above 65535 bytes.
+    pub fn new(data: C) -> Result<Self, LengthOutOfRange> {
+        LengthOutOfRange::check(data.as_ref().len(), 0..=Width::U16.max())?;
+        Ok(Self { data })
+    }
+}
+
+impl<C> OpaqueData<C> {
+    pub(crate) fn read(data: C) -> Self {
+        Self { data }
+    }
+
+    /// The bytes.
+    pub fn data(&self) -> &C {
+        &self.data
+    }
+}
+
 /// An extension of a type the readers do not recognize, with its data as
 /// it is.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -319,9 +354,10 @@ impl<X: Copy + core::fmt::Debug> ExtensionNotAllowed<X> {
     }
 }
 
-/// Defines the enum of the recognized extensions a message may not carry,
-/// each variant named as in [`RestrictedExtension`].
-macro_rules! disallowed_extensions {
+/// Defines an enum of some of the recognized extensions, each variant named
+/// as in [`RestrictedExtension`]: those a message may not carry, or those
+/// whose data has a structure a message's reader can leave bytes of.
+macro_rules! extension_subset {
     (
         $(#[$meta:meta])*
         $name:ident { $($variant:ident,)* }
@@ -346,7 +382,7 @@ macro_rules! disallowed_extensions {
                 self.restricted().extension_type()
             }
 
-            /// `extension`, if the message may not carry it.
+            /// `extension`, if the enum holds it.
             pub(crate) const fn of(
                 extension: $crate::extension::RestrictedExtension,
             ) -> Option<Self> {
@@ -359,7 +395,25 @@ macro_rules! disallowed_extensions {
     };
 }
 
-pub(crate) use disallowed_extensions;
+pub(crate) use extension_subset;
+
+/// The excess bytes of the data of the recognized extension `extension`,
+/// of which its reader left `left`, or `None` when none are left. `of` is
+/// the `of` of the message's enum of extensions whose data has a structure;
+/// the data of every other extension is taken whole.
+pub(crate) fn excess<X>(
+    extension: RestrictedExtension,
+    left: usize,
+    of: fn(RestrictedExtension) -> Option<X>,
+) -> Option<(X, ExcessBytes)> {
+    let excess = ExcessBytes::check(left).err()?;
+    match of(extension) {
+        Some(extension) => Some((extension, excess)),
+        // invariant: a reader takes the whole data of an extension without a
+        // structure, so nothing is left of it.
+        None => unreachable!("{extension:?} data is taken whole"),
+    }
+}
 
 /// The failure for `extension`, which a message may not carry; `of` is the
 /// `of` of the message's disallowed enum.
@@ -431,14 +485,6 @@ pub enum InvalidExtensions {
         /// The type.
         source: DuplicateExtension,
     },
-    /// The data of an extension is longer than 2<sup>16</sup> − 1 bytes.
-    #[snafu(display("{extension:?} data too long"))]
-    Data {
-        /// The extension type.
-        extension: ExtensionType,
-        /// The broken range.
-        source: LengthOutOfRange,
-    },
     /// The block is shorter or longer than the message allows.
     #[snafu(display("extension block length out of range"))]
     Length {
@@ -468,11 +514,9 @@ pub(crate) fn check_block<X: BlockEntry>(
         let extension_type = extension.extension_type();
         seen.insert(extension_type)?;
         let data_len = extension.data_len();
-        LengthOutOfRange::check(data_len, 0..=Width::U16.max()).context(
-            invalid_extensions::DataSnafu {
-                extension: extension_type,
-            },
-        )?;
+        // invariant: the value of every extension is built within the
+        // 2^16 - 1 bytes of extension data.
+        debug_assert!(data_len <= Width::U16.max(), "{extension_type:?}");
         len += 4 + data_len;
     }
     LengthOutOfRange::check(len, range).context(invalid_extensions::LengthSnafu)?;

@@ -1,5 +1,5 @@
 use super::{
-    HandshakeType, MessageLimit, MessageLimits,
+    HandshakeType, MessageLimit, MessageLimits, ReceivedMessage,
     codec::{ReadHandshakeMessageError, ReadHandshakeMessageHostExt as _},
 };
 use crate::{alert::AlertDescription, test_support::message};
@@ -89,7 +89,7 @@ fn a_length_above_the_limit_fails_before_the_body() {
     };
     assert_eq!(
         (source.message(), source.length(), source.limit()),
-        (HandshakeType::CERTIFICATE_VERIFY, 5, 4)
+        (ReceivedMessage::CertificateVerify, 5, 4)
     );
     assert_eq!(error.alert(), AlertDescription::ILLEGAL_PARAMETER);
     assert_eq!(input, [1, 2, 3, 4, 5]);
@@ -150,19 +150,19 @@ fn a_stream_that_ends_within_a_message_is_a_decode_error() {
 fn limits_default_and_are_bounded() {
     let limits = MessageLimits::default();
     assert_eq!(
-        limits.limit(HandshakeType::CLIENT_HELLO, None),
+        limits.limit(ReceivedMessage::ClientHello, None),
         Some(16 * 1024)
     );
     assert_eq!(
-        limits.limit(HandshakeType::CERTIFICATE, None),
+        limits.limit(ReceivedMessage::Certificate, None),
         Some(64 * 1024)
     );
     assert_eq!(
-        limits.limit(HandshakeType::CERTIFICATE_VERIFY, None),
+        limits.limit(ReceivedMessage::CertificateVerify, None),
         Some(8 * 1024)
     );
     assert_eq!(
-        limits.limit(HandshakeType::FINISHED, Some(HashAlgorithm::Sha384)),
+        limits.limit(ReceivedMessage::Finished, Some(HashAlgorithm::Sha384)),
         Some(48)
     );
     assert_eq!(MessageLimit::new(0xff_ffff).unwrap(), MessageLimit::MAX);
@@ -176,7 +176,7 @@ fn limits_default_and_are_bounded() {
 /// recognized extensions RFC 8446 §4.2, RFC 9001 §8.2 and RFC 9849 do not
 /// list for that message.
 #[test]
-fn disallowed_extensions_follow_the_table() {
+fn extension_subset_follow_the_table() {
     use super::{
         certificate::CertificateEntryDisallowedExtension,
         certificate_request::CertificateRequestDisallowedExtension,
@@ -244,5 +244,77 @@ fn disallowed_extensions_follow_the_table() {
         NewSessionTicketDisallowedExtension::of,
         NewSessionTicketDisallowedExtension::restricted,
         &[EarlyData],
+    );
+}
+
+/// Each message's enum of extensions whose data has a structure holds
+/// exactly the extensions the message may carry, but for those whose data
+/// is kept whole.
+#[test]
+fn structured_extensions_are_the_allowed_ones_with_a_structure() {
+    use super::{
+        certificate_request::CertificateRequestStructuredExtension,
+        client_hello::ClientHelloStructuredExtension,
+        encrypted_extensions::EncryptedExtensionsStructuredExtension,
+        server_hello::{HelloRetryRequestStructuredExtension, ServerHelloStructuredExtension},
+    };
+    use crate::extension::RestrictedExtension::{self, *};
+
+    fn check<X: Copy + core::fmt::Debug>(
+        of: fn(RestrictedExtension) -> Option<X>,
+        restricted: fn(X) -> RestrictedExtension,
+        structured: &[RestrictedExtension],
+    ) {
+        for extension in RestrictedExtension::ALL {
+            match of(extension) {
+                Some(value) => {
+                    assert!(structured.contains(&extension), "{extension:?}");
+                    assert_eq!(restricted(value), extension);
+                }
+                None => assert!(!structured.contains(&extension), "{extension:?}"),
+            }
+        }
+    }
+
+    let opaque = [QuicTransportParameters, EncryptedClientHello];
+    let every: Vec<_> = RestrictedExtension::ALL
+        .into_iter()
+        .filter(|extension| !opaque.contains(extension))
+        .collect();
+    check(
+        ClientHelloStructuredExtension::of,
+        ClientHelloStructuredExtension::restricted,
+        &every,
+    );
+    check(
+        ServerHelloStructuredExtension::of,
+        ServerHelloStructuredExtension::restricted,
+        &[KeyShare, PreSharedKey, SupportedVersions],
+    );
+    check(
+        HelloRetryRequestStructuredExtension::of,
+        HelloRetryRequestStructuredExtension::restricted,
+        &[KeyShare, Cookie, SupportedVersions],
+    );
+    check(
+        EncryptedExtensionsStructuredExtension::of,
+        EncryptedExtensionsStructuredExtension::restricted,
+        &[
+            ServerName,
+            SupportedGroups,
+            ApplicationLayerProtocolNegotiation,
+            ClientCertificateType,
+            ServerCertificateType,
+            EarlyData,
+        ],
+    );
+    check(
+        CertificateRequestStructuredExtension::of,
+        CertificateRequestStructuredExtension::restricted,
+        &[
+            SignatureAlgorithms,
+            SignatureAlgorithmsCert,
+            SignedCertificateTimestamp,
+        ],
     );
 }

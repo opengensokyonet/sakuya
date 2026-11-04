@@ -160,23 +160,16 @@ impl ReadHeaderError {
     }
 }
 
-/// A message is not of the type a reader reads.
-///
-/// It is constructed only when the types differ.
+/// A message is not of the type a reader reads; the error of each reader
+/// says which type that is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(display("expected a {expected:?} message, found {found:?}"))]
+#[snafu(display("message of another type, {found:?}"))]
 pub struct UnexpectedType {
-    expected: HandshakeType,
     found: HandshakeType,
 }
 
 impl UnexpectedType {
-    /// The type the reader reads.
-    pub const fn expected(self) -> HandshakeType {
-        self.expected
-    }
-
-    /// The type of the message, never [`expected`](Self::expected).
+    /// The type of the message.
     pub const fn found(self) -> HandshakeType {
         self.found
     }
@@ -190,7 +183,7 @@ pub(crate) async fn read_body<F: MessageSource, A: ReceiverAccess<Family = F>>(
     use read_header_error::*;
     let found = HandshakeType(read_u8(io).await.context(TypeSnafu)?);
     if found != expected {
-        return Err(UnexpectedType { expected, found }.into());
+        return Err(UnexpectedType { found }.into());
     }
     let len = read_u24(io).await.context(LengthSnafu)?;
     read_bytes(io, len as usize).await.context(BodySnafu)
@@ -358,23 +351,72 @@ impl Default for MessageLimits {
 
 impl MessageLimits {
     /// The limit on the body of a message of type `message`, with the hash
-    /// of the cipher suite once it is known, or `None` for a type that QUIC
-    /// does not carry or, for Finished, before the suite is known.
-    pub const fn limit(&self, message: HandshakeType, hash: Option<HashAlgorithm>) -> Option<u32> {
+    /// of the cipher suite once it is known, or `None` for Finished before
+    /// the suite is known.
+    pub const fn limit(
+        &self,
+        message: ReceivedMessage,
+        hash: Option<HashAlgorithm>,
+    ) -> Option<u32> {
         Some(match message {
-            HandshakeType::CLIENT_HELLO => self.client_hello.0,
-            HandshakeType::SERVER_HELLO => self.server_hello.0,
-            HandshakeType::ENCRYPTED_EXTENSIONS => self.encrypted_extensions.0,
-            HandshakeType::CERTIFICATE_REQUEST => self.certificate_request.0,
-            HandshakeType::CERTIFICATE => self.certificate.0,
-            HandshakeType::CERTIFICATE_VERIFY => self.certificate_verify.0,
-            HandshakeType::NEW_SESSION_TICKET => self.new_session_ticket.0,
-            HandshakeType::FINISHED => match hash {
+            ReceivedMessage::ClientHello => self.client_hello.0,
+            ReceivedMessage::ServerHello => self.server_hello.0,
+            ReceivedMessage::EncryptedExtensions => self.encrypted_extensions.0,
+            ReceivedMessage::CertificateRequest => self.certificate_request.0,
+            ReceivedMessage::Certificate => self.certificate.0,
+            ReceivedMessage::CertificateVerify => self.certificate_verify.0,
+            ReceivedMessage::NewSessionTicket => self.new_session_ticket.0,
+            ReceivedMessage::Finished => match hash {
                 Some(hash) => hash.output_len() as u32,
                 None => return None,
             },
+        })
+    }
+}
+
+/// A type of handshake message that QUIC carries in CRYPTO frames, so that
+/// an endpoint receives it and limits its length.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[allow(missing_docs)]
+pub enum ReceivedMessage {
+    ClientHello,
+    ServerHello,
+    EncryptedExtensions,
+    CertificateRequest,
+    Certificate,
+    CertificateVerify,
+    Finished,
+    NewSessionTicket,
+}
+
+impl ReceivedMessage {
+    /// The message type `message`, or `None` for a type QUIC does not carry.
+    pub const fn new(message: HandshakeType) -> Option<Self> {
+        Some(match message {
+            HandshakeType::CLIENT_HELLO => Self::ClientHello,
+            HandshakeType::SERVER_HELLO => Self::ServerHello,
+            HandshakeType::ENCRYPTED_EXTENSIONS => Self::EncryptedExtensions,
+            HandshakeType::CERTIFICATE_REQUEST => Self::CertificateRequest,
+            HandshakeType::CERTIFICATE => Self::Certificate,
+            HandshakeType::CERTIFICATE_VERIFY => Self::CertificateVerify,
+            HandshakeType::FINISHED => Self::Finished,
+            HandshakeType::NEW_SESSION_TICKET => Self::NewSessionTicket,
             _ => return None,
         })
+    }
+
+    /// The message type.
+    pub const fn handshake_type(self) -> HandshakeType {
+        match self {
+            Self::ClientHello => HandshakeType::CLIENT_HELLO,
+            Self::ServerHello => HandshakeType::SERVER_HELLO,
+            Self::EncryptedExtensions => HandshakeType::ENCRYPTED_EXTENSIONS,
+            Self::CertificateRequest => HandshakeType::CERTIFICATE_REQUEST,
+            Self::Certificate => HandshakeType::CERTIFICATE,
+            Self::CertificateVerify => HandshakeType::CERTIFICATE_VERIFY,
+            Self::Finished => HandshakeType::FINISHED,
+            Self::NewSessionTicket => HandshakeType::NEW_SESSION_TICKET,
+        }
     }
 }
 
@@ -422,7 +464,7 @@ pub mod codec {
     // documentation comments; the module documentation above describes them.
     #![allow(missing_docs)]
 
-    use super::{HandshakeMessage, HandshakeType, MessageLimits};
+    use super::{HandshakeMessage, HandshakeType, MessageLimits, ReceivedMessage};
     use crate::alert::AlertDescription;
     use bytes::{BufMut, BytesMut};
     use nitori_call::{ReceiverAccess, call};
@@ -451,10 +493,19 @@ pub mod codec {
     ) -> Result<HandshakeMessage, ReadHandshakeMessageError<F::Error>> {
         use read_handshake_message_error::*;
         let header = io.read_array::<4>().await.context(HeaderSnafu)?;
-        let message = HandshakeType(header[0]);
+        let message_type = HandshakeType(header[0]);
         let len = u32::from_be_bytes([0, header[1], header[2], header[3]]);
+        let Some(message) = ReceivedMessage::new(message_type) else {
+            return Err(UnexpectedMessage {
+                message: message_type,
+            }
+            .into());
+        };
         let Some(limit) = limits.limit(message, hash) else {
-            return Err(UnexpectedMessage { message }.into());
+            return Err(UnexpectedMessage {
+                message: message_type,
+            }
+            .into());
         };
         if len > limit {
             return Err(MessageTooLong {
@@ -561,14 +612,14 @@ pub mod codec {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
     #[snafu(display("{message:?} message of {len} bytes exceeds the limit of {limit} bytes"))]
     pub struct MessageTooLong {
-        message: HandshakeType,
+        message: ReceivedMessage,
         len: u32,
         limit: u32,
     }
 
     impl MessageTooLong {
         /// The type of the message.
-        pub const fn message(self) -> HandshakeType {
+        pub const fn message(self) -> ReceivedMessage {
             self.message
         }
 

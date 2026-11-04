@@ -7,8 +7,7 @@ use crate::{
     cipher_suite::CipherSuite,
     code_point::{CodePointList, codec::ReadCodePointListError},
     extension::{
-        ExtensionBlockError, ExtensionType, InvalidExtensions, RestrictedExtension,
-        UnknownExtension,
+        ExtensionBlockError, ExtensionType, InvalidExtensions, OpaqueData, UnknownExtension,
         key_share::codec::ReadClientSharesError,
         pre_shared_key::{OfferedPsks, PskBinder, PskIdentity},
     },
@@ -183,7 +182,7 @@ fn extension_data_is_checked() {
     };
     assert_eq!(
         (excess, source.excess().get()),
-        (RestrictedExtension::EarlyData, 1)
+        (super::ClientHelloStructuredExtension::EarlyData, 1)
     );
 
     let share = [0x00, 0x1d, 0x00, 0x01, 0x09];
@@ -221,14 +220,14 @@ fn opaque_and_unknown_extensions_are_kept() {
         &extension(0x7777, &[5, 6]),
     ]));
     let hello = read(&bytes).unwrap();
-    assert!(matches!(
-        hello.extensions()[1],
-        ClientHelloExtension::QuicTransportParameters([1, 2, 3])
-    ));
-    assert!(matches!(
-        hello.extensions()[2],
-        ClientHelloExtension::EncryptedClientHello([4])
-    ));
+    let ClientHelloExtension::QuicTransportParameters(parameters) = &hello.extensions()[1] else {
+        panic!()
+    };
+    assert_eq!(*parameters.data(), [1, 2, 3]);
+    let ClientHelloExtension::EncryptedClientHello(ech) = &hello.extensions()[2] else {
+        panic!()
+    };
+    assert_eq!(*ech.data(), [4]);
     let ClientHelloExtension::Unknown(unknown) = &hello.extensions()[3] else {
         panic!()
     };
@@ -281,19 +280,7 @@ fn construction_checks_the_block() {
         }
     ));
     let long = vec![0; 0x1_0000];
-    let error = ClientHello::<&[u8]>::new(
-        ProtocolVersion::TLS_1_2,
-        HelloRandom([0; 32]),
-        LegacySessionId::EMPTY,
-        suites.clone(),
-        vec![ClientHelloExtension::QuicTransportParameters(&long)],
-    )
-    .unwrap_err();
-    assert!(matches!(
-        error,
-        InvalidClientHello::Extensions {
-            source: InvalidExtensions::Data { .. }
-        }
-    ));
+    assert_eq!(OpaqueData::new(&long[..]).unwrap_err().length(), 0x1_0000);
+    assert!(OpaqueData::new(&long[1..]).is_ok());
     assert!(UnknownExtension::new(ExtensionType::KEY_SHARE, &[][..]).is_err());
 }

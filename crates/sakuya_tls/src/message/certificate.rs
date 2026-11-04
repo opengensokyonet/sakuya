@@ -5,7 +5,7 @@
 //! (RFC 7250); the encoding does not say which, so the reader takes the
 //! [`CertificateFormat`] the handshake negotiated.
 
-use crate::extension::disallowed_extensions;
+use crate::extension::extension_subset;
 use crate::{
     extension::{
         BlockEntry, ExtensionType, InvalidExtensions, UnknownExtension,
@@ -77,8 +77,7 @@ impl<C: AsRef<[u8]>> CertificateEntry<C> {
     ///
     /// [`InvalidCertificateEntry::Data`] for empty data or data above
     /// 2<sup>24</sup> − 1 bytes, and [`InvalidCertificateEntry::Extensions`]
-    /// for an extension type that appears twice, data too long for an
-    /// extension or a block above 65535 bytes.
+    /// for an extension type that appears twice or a block above 65535 bytes.
     pub fn new(
         data: C,
         extensions: Vec<CertificateEntryExtension<C>>,
@@ -243,7 +242,7 @@ pub enum InvalidCertificate {
     },
 }
 
-disallowed_extensions! {
+extension_subset! {
     /// A recognized extension that a certificate entry of a Certificate message may not carry:
     /// every one but `signed_certificate_timestamp`.
     CertificateEntryDisallowedExtension {
@@ -375,9 +374,9 @@ pub mod codec {
                     return Err(not_allowed(other, CertificateEntryDisallowedExtension::of).into());
                 }
             });
-            ExcessBytes::check(data.remaining()).context(ExtensionExcessSnafu {
-                extension: restricted,
-            })?;
+            // signed_certificate_timestamp is the one recognized extension an
+            // entry may carry, and the only one read here.
+            ExcessBytes::check(data.remaining()).context(SignedCertificateTimestampExcessSnafu)?;
         }
         Ok(CertificateEntry { data, extensions })
     }
@@ -458,11 +457,10 @@ pub mod codec {
             /// The extension.
             source: ExtensionNotAllowed<CertificateEntryDisallowedExtension>,
         },
-        /// The data of a recognized extension is longer than its fields.
-        #[snafu(display("{extension:?} data has excess bytes"))]
-        ExtensionExcess {
-            /// The extension.
-            extension: RestrictedExtension,
+        /// The data of `signed_certificate_timestamp`, the one recognized
+        /// extension an entry may carry, is longer than its fields.
+        #[snafu(display("signed_certificate_timestamp data has excess bytes"))]
+        SignedCertificateTimestampExcess {
             /// The excess.
             source: ExcessBytes,
         },
@@ -483,7 +481,7 @@ pub mod codec {
                 Self::Extensions { source } => source.alert(),
                 Self::ExtensionNotAllowed { source } => source.alert(),
                 Self::Data { .. }
-                | Self::ExtensionExcess { .. }
+                | Self::SignedCertificateTimestampExcess { .. }
                 | Self::SignedCertificateTimestamp { .. } => AlertDescription::DECODE_ERROR,
             }
         }
@@ -632,5 +630,17 @@ mod tests {
             super::CertificateEntryDisallowedExtension::ApplicationLayerProtocolNegotiation
         );
         assert_eq!(error.alert(), AlertDescription::ILLEGAL_PARAMETER);
+        let sct = extension(18, &[0x00, 0x04, 0x00, 0x02, 0xab, 0xcd, 0x00]);
+        let bytes = certificate(&entry(&[1], &sct));
+        let error = bytes
+            .as_slice()
+            .sync_read_certificate_unpin(CertificateFormat::X509)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ReadCertificateError::Entry {
+                source: ReadCertificateEntryError::SignedCertificateTimestampExcess { .. }
+            }
+        ));
     }
 }

@@ -5,7 +5,6 @@ use super::{
 use crate::{
     alert::AlertDescription,
     cipher_suite::CipherSuite,
-    extension::RestrictedExtension,
     message::LegacySessionId,
     test_support::{concat, extension, message, vector},
     version::ProtocolVersion,
@@ -88,6 +87,20 @@ fn each_message_allows_its_extensions() {
     );
     assert_eq!(error.alert(), AlertDescription::ILLEGAL_PARAMETER);
     assert!(read(server_hello(&[7; 32], 0, &concat(&[VERSION, &psk]))).is_ok());
+    // A cookie with a byte after it is excess in a HelloRetryRequest.
+    let error = read(server_hello(
+        &HELLO_RETRY_REQUEST_RANDOM.0,
+        0,
+        &concat(&[VERSION, &extension(44, &[0x00, 0x01, 0x09, 0x00])]),
+    ))
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        ReadServerHelloError::RetryExtensionExcess {
+            extension: super::HelloRetryRequestStructuredExtension::Cookie,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -107,7 +120,7 @@ fn field_rules() {
     assert!(matches!(
         error,
         ReadServerHelloError::ExtensionExcess {
-            extension: RestrictedExtension::SupportedVersions,
+            extension: super::ServerHelloStructuredExtension::SupportedVersions,
             ..
         }
     ));

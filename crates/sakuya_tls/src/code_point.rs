@@ -137,8 +137,10 @@ byte_code_point! {
 
 /// A nonempty list of two-byte code points, in the order of the wire.
 ///
-/// The list holds at most as many code points as its length field can
-/// count: 32767 with a two-byte field, 127 with a one-byte field.
+/// A list built here holds at most 32766 code points with a two-byte
+/// length field, so that it fits the data of an extension, and 127 with a
+/// one-byte field; a list read from a message holds what its length field
+/// counts.
 /// Duplicates are kept as they are.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CodePointList<T> {
@@ -157,9 +159,10 @@ impl<T: CodePoint> CodePointList<T> {
         Ok(Self { items })
     }
 
-    /// The encoded lengths a list can have, without its length field.
+    /// The encoded lengths a list can have, without its length field: with
+    /// its length field, the list fits the data of an extension.
     fn byte_range() -> core::ops::RangeInclusive<usize> {
-        2..=T::LIST_LENGTH.max() & !1
+        2..=T::LIST_LENGTH.max().min(Width::U16.max() - 2) & !1
     }
 
     /// The number of bytes [`codec::write_code_point_list`] writes.
@@ -446,9 +449,9 @@ mod tests {
     #[test]
     fn construction_checks_the_count() {
         assert!(CodePointList::<CipherSuite>::new(Vec::new()).is_err());
-        assert!(CodePointList::new(vec![CipherSuite::TLS_AES_128_GCM_SHA256; 32767]).is_ok());
+        assert!(CodePointList::new(vec![CipherSuite::TLS_AES_128_GCM_SHA256; 32766]).is_ok());
         let error =
-            CodePointList::new(vec![CipherSuite::TLS_AES_128_GCM_SHA256; 32768]).unwrap_err();
-        assert_eq!((error.length(), error.max()), (65536, 65534));
+            CodePointList::new(vec![CipherSuite::TLS_AES_128_GCM_SHA256; 32767]).unwrap_err();
+        assert_eq!((error.length(), error.max()), (65534, 65532));
     }
 }

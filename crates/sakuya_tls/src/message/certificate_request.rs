@@ -1,6 +1,6 @@
 //! CertificateRequest (RFC 8446 §4.3.2).
 
-use crate::extension::disallowed_extensions;
+use crate::extension::extension_subset;
 use crate::{
     code_point::CodePointList,
     extension::{BlockEntry, ExtensionType, InvalidExtensions, UnknownExtension, check_block},
@@ -61,7 +61,7 @@ impl<C: AsRef<[u8]>> CertificateRequest<C> {
     ///
     /// [`InvalidCertificateRequest::Context`] for a context above 255 bytes,
     /// and [`InvalidCertificateRequest::Extensions`] for an extension type
-    /// that appears twice, data too long for an extension or a block outside
+    /// that appears twice or a block outside
     /// 2 to 65535 bytes.
     pub fn new(
         certificate_request_context: C,
@@ -127,7 +127,7 @@ pub enum InvalidCertificateRequest {
     },
 }
 
-disallowed_extensions! {
+extension_subset! {
     /// A recognized extension that a CertificateRequest may not carry: every one but
     /// `signature_algorithms`, `signature_algorithms_cert` and `signed_certificate_timestamp`.
     CertificateRequestDisallowedExtension {
@@ -144,6 +144,16 @@ disallowed_extensions! {
         KeyShare,
         QuicTransportParameters,
         EncryptedClientHello,
+    }
+}
+
+extension_subset! {
+    /// An extension a CertificateRequest may carry whose data has a structure, so that bytes can
+    /// follow it: every extension it may carry.
+    CertificateRequestStructuredExtension {
+        SignatureAlgorithms,
+        SignedCertificateTimestamp,
+        SignatureAlgorithmsCert,
     }
 }
 
@@ -167,7 +177,7 @@ pub mod codec {
         code_point::codec::{ReadCodePointListError, ReadCodePointListHostExt as _},
         extension::{
             BlockEntry as _, BlockReader, ExtensionBlockError, ExtensionNotAllowed,
-            RestrictedExtension, UnknownExtension, not_allowed, read_extension_block,
+            RestrictedExtension, UnknownExtension, excess, not_allowed, read_extension_block,
         },
         message::{HandshakeType, MessageSource, ReadHeaderError, read_body},
         vector::{ExcessBytes, LengthOutOfRange, Out, ReadVectorError, read_vector},
@@ -227,9 +237,10 @@ pub mod codec {
                     );
                 }
             });
-            ExcessBytes::check(data.remaining()).context(ExtensionExcessSnafu {
-                extension: restricted,
-            })?;
+            let of = super::CertificateRequestStructuredExtension::of;
+            if let Some((extension, source)) = excess(restricted, data.remaining(), of) {
+                return Err(ReadCertificateRequestError::ExtensionExcess { extension, source });
+            }
         }
         Ok(CertificateRequest {
             certificate_request_context,
@@ -281,7 +292,7 @@ pub mod codec {
         #[snafu(display("{extension:?} data has excess bytes"))]
         ExtensionExcess {
             /// The extension.
-            extension: RestrictedExtension,
+            extension: crate::message::certificate_request::CertificateRequestStructuredExtension,
             /// The excess.
             source: ExcessBytes,
         },

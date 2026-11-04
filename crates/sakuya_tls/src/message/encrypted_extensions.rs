@@ -1,6 +1,6 @@
 //! EncryptedExtensions (RFC 8446 §4.3.1).
 
-use crate::extension::disallowed_extensions;
+use crate::extension::{OpaqueData, extension_subset};
 use crate::{
     code_point::CodePointList,
     extension::{
@@ -34,9 +34,9 @@ pub enum EncryptedExtensionsExtension<C> {
     /// `early_data`, with empty data: the server accepts 0-RTT.
     EarlyData,
     /// `quic_transport_parameters`, as opaque bytes.
-    QuicTransportParameters(C),
+    QuicTransportParameters(OpaqueData<C>),
     /// `encrypted_client_hello`: the retry configurations, as opaque bytes.
-    EncryptedClientHello(C),
+    EncryptedClientHello(OpaqueData<C>),
     /// An extension the readers do not recognize.
     Unknown(UnknownExtension<C>),
 }
@@ -65,7 +65,7 @@ impl<C: AsRef<[u8]>> BlockEntry for EncryptedExtensionsExtension<C> {
             Self::ApplicationLayerProtocolNegotiation(name) => name.encoded_len(),
             Self::ClientCertificateType(_) | Self::ServerCertificateType(_) => 1,
             Self::QuicTransportParameters(data) | Self::EncryptedClientHello(data) => {
-                data.as_ref().len()
+                data.data().as_ref().len()
             }
             Self::Unknown(extension) => extension.data().as_ref().len(),
         }
@@ -77,8 +77,7 @@ impl<C: AsRef<[u8]>> EncryptedExtensions<C> {
     ///
     /// # Errors
     ///
-    /// [`InvalidExtensions`] for an extension type that appears twice, data
-    /// too long for an extension or a block above 65535 bytes.
+    /// [`InvalidExtensions`] for an extension type that appears twice or a block above 65535 bytes.
     pub fn new(
         extensions: Vec<EncryptedExtensionsExtension<C>>,
     ) -> Result<Self, InvalidExtensions> {
@@ -111,13 +110,13 @@ impl<C> EncryptedExtensions<C> {
         self.extensions
             .iter()
             .find_map(|extension| match extension {
-                EncryptedExtensionsExtension::QuicTransportParameters(data) => Some(data),
+                EncryptedExtensionsExtension::QuicTransportParameters(data) => Some(data.data()),
                 _ => None,
             })
     }
 }
 
-disallowed_extensions! {
+extension_subset! {
     /// A recognized extension that EncryptedExtensions may not carry: every one but `server_name`,
     /// `supported_groups`, `application_layer_protocol_negotiation`, `client_certificate_type`,
     /// `server_certificate_type`, `early_data`, `quic_transport_parameters` and
@@ -131,6 +130,20 @@ disallowed_extensions! {
         PskKeyExchangeModes,
         SignatureAlgorithmsCert,
         KeyShare,
+    }
+}
+
+extension_subset! {
+    /// An extension EncryptedExtensions may carry whose data has a structure, so that bytes can
+    /// follow it: every extension it may carry but `quic_transport_parameters` and
+    /// `encrypted_client_hello`, whose data is kept whole.
+    EncryptedExtensionsStructuredExtension {
+        ServerName,
+        SupportedGroups,
+        ApplicationLayerProtocolNegotiation,
+        ClientCertificateType,
+        ServerCertificateType,
+        EarlyData,
     }
 }
 
@@ -156,7 +169,7 @@ pub mod codec {
             ReadExtensionBlockHostExt as _, RestrictedExtension, UnknownExtension,
             alpn::codec::{ReadSelectedProtocolError, ReadSelectedProtocolHostExt as _},
             certificate_type::CertificateType,
-            not_allowed,
+            excess, not_allowed,
         },
         message::{HandshakeType, MessageSource, ReadHeaderError, read_body},
         vector::{ExcessBytes, Out, read_u8},
@@ -191,9 +204,10 @@ pub mod codec {
                 continue;
             };
             extensions.push(read_extension(restricted, &mut data)?);
-            ExcessBytes::check(data.remaining()).context(ExtensionExcessSnafu {
-                extension: restricted,
-            })?;
+            let of = super::EncryptedExtensionsStructuredExtension::of;
+            if let Some((extension, source)) = excess(restricted, data.remaining(), of) {
+                return Err(ReadEncryptedExtensionsError::ExtensionExcess { extension, source });
+            }
         }
         Ok(EncryptedExtensions { extensions })
     }
@@ -228,8 +242,12 @@ pub mod codec {
                     .context(ServerCertificateTypeSnafu)?,
             )),
             R::EarlyData => X::EarlyData,
-            R::QuicTransportParameters => X::QuicTransportParameters(core::mem::take(data)),
-            R::EncryptedClientHello => X::EncryptedClientHello(core::mem::take(data)),
+            R::QuicTransportParameters => X::QuicTransportParameters(
+                crate::extension::OpaqueData::read(core::mem::take(data)),
+            ),
+            R::EncryptedClientHello => {
+                X::EncryptedClientHello(crate::extension::OpaqueData::read(core::mem::take(data)))
+            }
             other => {
                 return Err(not_allowed(other, EncryptedExtensionsDisallowedExtension::of).into());
             }
@@ -275,7 +293,7 @@ pub mod codec {
         #[snafu(display("{extension:?} data has excess bytes"))]
         ExtensionExcess {
             /// The extension.
-            extension: RestrictedExtension,
+            extension: crate::message::encrypted_extensions::EncryptedExtensionsStructuredExtension,
             /// The excess.
             source: ExcessBytes,
         },
@@ -363,7 +381,7 @@ pub mod codec {
                     out.u8(kind.get()).await?
                 }
                 X::QuicTransportParameters(data) | X::EncryptedClientHello(data) => {
-                    out.put(data.as_ref()).await?
+                    out.put(data.data().as_ref()).await?
                 }
                 X::Unknown(extension) => out.put(extension.data().as_ref()).await?,
             }

@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{
     alert::AlertDescription,
-    extension::{RestrictedExtension, alpn::codec::ReadSelectedProtocolError},
+    extension::alpn::codec::ReadSelectedProtocolError,
     test_support::{concat, extension, message, vector},
 };
 
@@ -34,7 +34,9 @@ fn read(
                         )
                     }
                     EncryptedExtensionsExtension::QuicTransportParameters(data) => {
-                        EncryptedExtensionsExtension::QuicTransportParameters(data.to_vec())
+                        EncryptedExtensionsExtension::QuicTransportParameters(
+                            crate::extension::OpaqueData::new(data.data().to_vec()).unwrap(),
+                        )
                     }
                     EncryptedExtensionsExtension::ServerName => {
                         EncryptedExtensionsExtension::ServerName
@@ -104,7 +106,7 @@ fn server_name_is_empty() {
     assert!(matches!(
         error,
         ReadEncryptedExtensionsError::ExtensionExcess {
-            extension: RestrictedExtension::ServerName,
+            extension: super::EncryptedExtensionsStructuredExtension::ServerName,
             ..
         }
     ));

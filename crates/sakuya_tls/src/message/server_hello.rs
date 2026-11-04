@@ -4,7 +4,7 @@
 //! random is [`HELLO_RETRY_REQUEST_RANDOM`]. [`codec::read_server_hello`]
 //! tells them apart and reads the extensions each may carry.
 
-use crate::extension::disallowed_extensions;
+use crate::extension::{OpaqueData, extension_subset};
 use crate::{
     cipher_suite::CipherSuite,
     extension::{
@@ -79,7 +79,7 @@ impl<C: AsRef<[u8]>> ServerHello<C> {
     ///
     /// [`InvalidServerHello::RetryRandom`] for the random of a
     /// HelloRetryRequest, and [`InvalidServerHello::Extensions`] for an
-    /// extension type that appears twice, data too long for an extension or
+    /// extension type that appears twice or
     /// a block outside 6 to 65535 bytes.
     pub fn new(
         legacy_version: ProtocolVersion,
@@ -208,7 +208,7 @@ pub enum HelloRetryRequestExtension<C> {
     /// `supported_versions`: the selected version.
     SupportedVersions(ProtocolVersion),
     /// `encrypted_client_hello`, as opaque bytes.
-    EncryptedClientHello(C),
+    EncryptedClientHello(OpaqueData<C>),
     /// An extension the readers do not recognize.
     Unknown(UnknownExtension<C>),
 }
@@ -228,7 +228,7 @@ impl<C: AsRef<[u8]>> BlockEntry for HelloRetryRequestExtension<C> {
         match self {
             Self::KeyShare(_) | Self::SupportedVersions(_) => 2,
             Self::Cookie(cookie) => cookie.encoded_len(),
-            Self::EncryptedClientHello(data) => data.as_ref().len(),
+            Self::EncryptedClientHello(data) => data.data().as_ref().len(),
             Self::Unknown(extension) => extension.data().as_ref().len(),
         }
     }
@@ -239,8 +239,7 @@ impl<C: AsRef<[u8]>> HelloRetryRequest<C> {
     ///
     /// # Errors
     ///
-    /// [`InvalidExtensions`] for an extension type that appears twice, data
-    /// too long for an extension or a block outside 6 to 65535 bytes.
+    /// [`InvalidExtensions`] for an extension type that appears twice or a block outside 6 to 65535 bytes.
     pub fn new(
         legacy_version: ProtocolVersion,
         legacy_session_id_echo: LegacySessionId,
@@ -333,7 +332,7 @@ fn body_len(session_id: &LegacySessionId, block_len: usize) -> usize {
     2 + 32 + session_id.encoded_len() + 2 + 1 + 2 + block_len
 }
 
-disallowed_extensions! {
+extension_subset! {
     /// A recognized extension that a ServerHello may not carry: every one but `key_share`,
     /// `pre_shared_key` and `supported_versions`.
     ServerHelloDisallowedExtension {
@@ -353,7 +352,7 @@ disallowed_extensions! {
     }
 }
 
-disallowed_extensions! {
+extension_subset! {
     /// A recognized extension that a HelloRetryRequest may not carry: every one but `key_share`,
     /// `cookie`, `supported_versions` and `encrypted_client_hello`.
     HelloRetryRequestDisallowedExtension {
@@ -369,6 +368,27 @@ disallowed_extensions! {
         PskKeyExchangeModes,
         SignatureAlgorithmsCert,
         QuicTransportParameters,
+    }
+}
+
+extension_subset! {
+    /// An extension a ServerHello may carry whose data has a structure, so that bytes can follow
+    /// it: every extension it may carry.
+    ServerHelloStructuredExtension {
+        PreSharedKey,
+        SupportedVersions,
+        KeyShare,
+    }
+}
+
+extension_subset! {
+    /// An extension a HelloRetryRequest may carry whose data has a structure, so that bytes can
+    /// follow it: every extension it may carry but `encrypted_client_hello`, whose data is kept
+    /// whole.
+    HelloRetryRequestStructuredExtension {
+        SupportedVersions,
+        Cookie,
+        KeyShare,
     }
 }
 
@@ -396,6 +416,7 @@ pub mod codec {
             BlockEntry as _, BlockReader, ExtensionBlockError, ExtensionNotAllowed,
             RestrictedExtension, UnknownExtension,
             cookie::codec::ReadCookieHostExt as _,
+            excess,
             key_share::codec::{ReadKeyShareEntryError, ReadKeyShareEntryHostExt as _},
             not_allowed,
             pre_shared_key::PskIndex,
@@ -461,12 +482,26 @@ pub mod codec {
                 continue;
             };
             match retry {
-                false => server.push(read_server_extension(restricted, &mut data)?),
-                true => retry_extensions.push(read_retry_extension(restricted, &mut data)?),
+                false => {
+                    server.push(read_server_extension(restricted, &mut data)?);
+                    let left = data.remaining();
+                    let of = super::ServerHelloStructuredExtension::of;
+                    if let Some((extension, source)) = excess(restricted, left, of) {
+                        return Err(ReadServerHelloError::ExtensionExcess { extension, source });
+                    }
+                }
+                true => {
+                    retry_extensions.push(read_retry_extension(restricted, &mut data)?);
+                    let left = data.remaining();
+                    let of = super::HelloRetryRequestStructuredExtension::of;
+                    if let Some((extension, source)) = excess(restricted, left, of) {
+                        return Err(ReadServerHelloError::RetryExtensionExcess {
+                            extension,
+                            source,
+                        });
+                    }
+                }
             }
-            ExcessBytes::check(data.remaining()).context(ExtensionExcessSnafu {
-                extension: restricted,
-            })?;
         }
         Ok(match retry {
             false => ServerHelloMessage::ServerHello(ServerHello {
@@ -536,9 +571,9 @@ pub mod codec {
                         .context(SelectedVersionSnafu)?,
                 ))
             }
-            R::EncryptedClientHello => {
-                HelloRetryRequestExtension::EncryptedClientHello(core::mem::take(data))
-            }
+            R::EncryptedClientHello => HelloRetryRequestExtension::EncryptedClientHello(
+                crate::extension::OpaqueData::read(core::mem::take(data)),
+            ),
             other => {
                 return Err(not_allowed(other, HelloRetryRequestDisallowedExtension::of).into());
             }
@@ -627,11 +662,21 @@ pub mod codec {
             /// The extension.
             source: ExtensionNotAllowed<HelloRetryRequestDisallowedExtension>,
         },
-        /// The data of a recognized extension is longer than its fields.
+        /// The data of an extension of a ServerHello is longer than its
+        /// fields.
         #[snafu(display("{extension:?} data has excess bytes"))]
         ExtensionExcess {
             /// The extension.
-            extension: RestrictedExtension,
+            extension: crate::message::server_hello::ServerHelloStructuredExtension,
+            /// The excess.
+            source: ExcessBytes,
+        },
+        /// The data of an extension of a HelloRetryRequest is longer than its
+        /// fields.
+        #[snafu(display("{extension:?} data has excess bytes"))]
+        RetryExtensionExcess {
+            /// The extension.
+            extension: crate::message::server_hello::HelloRetryRequestStructuredExtension,
             /// The excess.
             source: ExcessBytes,
         },
@@ -689,6 +734,7 @@ pub mod codec {
                 | Self::CompressionMethod { .. }
                 | Self::ExtensionsLength { .. }
                 | Self::ExtensionExcess { .. }
+                | Self::RetryExtensionExcess { .. }
                 | Self::KeyShare { .. }
                 | Self::SelectedGroup { .. }
                 | Self::SelectedIdentity { .. }
@@ -773,7 +819,7 @@ pub mod codec {
                     out.u16(version.get()).await?
                 }
                 HelloRetryRequestExtension::EncryptedClientHello(data) => {
-                    out.put(data.as_ref()).await?
+                    out.put(data.data().as_ref()).await?
                 }
                 HelloRetryRequestExtension::Unknown(extension) => {
                     out.put(extension.data().as_ref()).await?

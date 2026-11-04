@@ -5,6 +5,7 @@
 //! checked as a whole, so that no type appears twice and `pre_shared_key`
 //! is the last extension (RFC 8446 §4.2, §4.2.11).
 
+use crate::extension::{OpaqueData, extension_subset};
 use crate::{
     cipher_suite::CipherSuite,
     code_point::{ByteCodePointList, CodePointList},
@@ -67,9 +68,9 @@ pub enum ClientHelloExtension<C> {
     /// `key_share`.
     KeyShare(ClientShares<C>),
     /// `quic_transport_parameters`, as opaque bytes.
-    QuicTransportParameters(C),
+    QuicTransportParameters(OpaqueData<C>),
     /// `encrypted_client_hello`, as opaque bytes.
-    EncryptedClientHello(C),
+    EncryptedClientHello(OpaqueData<C>),
     /// An extension the readers do not recognize.
     Unknown(UnknownExtension<C>),
 }
@@ -124,7 +125,7 @@ impl<C: AsRef<[u8]>> BlockEntry for ClientHelloExtension<C> {
             Self::PskKeyExchangeModes(list) => list.encoded_len(),
             Self::KeyShare(shares) => shares.encoded_len(),
             Self::QuicTransportParameters(data) | Self::EncryptedClientHello(data) => {
-                data.as_ref().len()
+                data.data().as_ref().len()
             }
             Self::Unknown(extension) => extension.data().as_ref().len(),
         }
@@ -140,7 +141,7 @@ impl<C: AsRef<[u8]>> ClientHello<C> {
     /// # Errors
     ///
     /// [`InvalidClientHello::Extensions`] for an extension type that appears
-    /// twice, data too long for an extension or a block outside 8 to 65535
+    /// twice or a block outside 8 to 65535
     /// bytes, and [`InvalidClientHello::PreSharedKeyNotLast`] if
     /// `pre_shared_key` is not the last extension.
     pub fn new(
@@ -259,6 +260,28 @@ pub enum InvalidClientHello {
     PreSharedKeyNotLast,
 }
 
+extension_subset! {
+    /// An extension a ClientHello may carry whose data has a structure, so that bytes can follow
+    /// it: every recognized extension but `quic_transport_parameters` and `encrypted_client_hello`,
+    /// whose data is kept whole.
+    ClientHelloStructuredExtension {
+        ServerName,
+        SupportedGroups,
+        SignatureAlgorithms,
+        ApplicationLayerProtocolNegotiation,
+        SignedCertificateTimestamp,
+        ClientCertificateType,
+        ServerCertificateType,
+        PreSharedKey,
+        EarlyData,
+        SupportedVersions,
+        Cookie,
+        PskKeyExchangeModes,
+        SignatureAlgorithmsCert,
+        KeyShare,
+    }
+}
+
 pub mod codec {
     //! Reading and writing ClientHello messages as `nitori_call` operations.
     //!
@@ -269,7 +292,7 @@ pub mod codec {
     // documentation comments; the module documentation above describes them.
     #![allow(missing_docs)]
 
-    use super::{BLOCK, ClientHello, ClientHelloExtension};
+    use super::{BLOCK, ClientHello, ClientHelloExtension, ClientHelloStructuredExtension};
     use crate::{
         alert::AlertDescription,
         cipher_suite::CipherSuite,
@@ -278,7 +301,7 @@ pub mod codec {
         },
         extension::{
             BlockEntry as _, BlockReader, ExtensionBlockError, RestrictedExtension,
-            UnknownExtension, alpn::codec::ReadProtocolNameListError,
+            UnknownExtension, alpn::codec::ReadProtocolNameListError, excess,
             key_share::codec::ReadClientSharesError, pre_shared_key::codec::ReadOfferedPsksError,
             read_extension_block, server_name::codec::ReadServerNameError,
         },
@@ -346,9 +369,13 @@ pub mod codec {
                 continue;
             };
             let extension = read_extension(restricted, &mut data)?;
-            ExcessBytes::check(data.remaining()).context(ExtensionExcessSnafu {
-                extension: restricted,
-            })?;
+            if let Some((extension, source)) = excess(
+                restricted,
+                data.remaining(),
+                ClientHelloStructuredExtension::of,
+            ) {
+                return Err(ReadClientHelloError::ExtensionExcess { extension, source });
+            }
             extensions.push(extension);
         }
         Ok(ClientHello {
@@ -429,8 +456,12 @@ pub mod codec {
                 data.sync_read_client_shares_unpin()
                     .context(KeyShareSnafu)?,
             ),
-            R::QuicTransportParameters => X::QuicTransportParameters(core::mem::take(data)),
-            R::EncryptedClientHello => X::EncryptedClientHello(core::mem::take(data)),
+            R::QuicTransportParameters => X::QuicTransportParameters(
+                crate::extension::OpaqueData::read(core::mem::take(data)),
+            ),
+            R::EncryptedClientHello => {
+                X::EncryptedClientHello(crate::extension::OpaqueData::read(core::mem::take(data)))
+            }
         })
     }
 
@@ -503,7 +534,7 @@ pub mod codec {
         #[snafu(display("{extension:?} data has excess bytes"))]
         ExtensionExcess {
             /// The extension.
-            extension: RestrictedExtension,
+            extension: ClientHelloStructuredExtension,
             /// The excess.
             source: ExcessBytes,
         },
@@ -673,7 +704,7 @@ pub mod codec {
             X::PskKeyExchangeModes(list) => out.byte_code_point_list(list).await,
             X::KeyShare(shares) => shares.encode(out).await,
             X::QuicTransportParameters(data) | X::EncryptedClientHello(data) => {
-                out.put(data.as_ref()).await
+                out.put(data.data().as_ref()).await
             }
             X::Unknown(extension) => out.put(extension.data().as_ref()).await,
         }

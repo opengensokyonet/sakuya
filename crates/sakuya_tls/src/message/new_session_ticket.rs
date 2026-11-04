@@ -1,6 +1,6 @@
 //! NewSessionTicket (RFC 8446 §4.6.1).
 
-use crate::extension::disallowed_extensions;
+use crate::extension::extension_subset;
 use crate::{
     extension::{
         BlockEntry, ExtensionType, InvalidExtensions, UnknownExtension, check_block,
@@ -127,7 +127,7 @@ impl<C: AsRef<[u8]>> NewSessionTicket<C> {
     ///
     /// [`InvalidNewSessionTicket::Ticket`] for an empty ticket or one above
     /// 65535 bytes, and [`InvalidNewSessionTicket::Extensions`] for an
-    /// extension type that appears twice, data too long for an extension or
+    /// extension type that appears twice or
     /// a block above 65534 bytes.
     pub fn new(
         ticket_lifetime: TicketLifetime,
@@ -218,7 +218,7 @@ pub enum InvalidNewSessionTicket {
     },
 }
 
-disallowed_extensions! {
+extension_subset! {
     /// A recognized extension that a NewSessionTicket may not carry: every one but `early_data`.
     NewSessionTicketDisallowedExtension {
         ServerName,
@@ -323,9 +323,9 @@ pub mod codec {
                     return Err(not_allowed(other, NewSessionTicketDisallowedExtension::of).into());
                 }
             });
-            ExcessBytes::check(data.remaining()).context(ExtensionExcessSnafu {
-                extension: restricted,
-            })?;
+            // early_data is the one recognized extension a NewSessionTicket
+            // may carry, and the only one read here.
+            ExcessBytes::check(data.remaining()).context(EarlyDataExcessSnafu)?;
         }
         Ok(NewSessionTicket {
             ticket_lifetime,
@@ -407,11 +407,10 @@ pub mod codec {
             /// The extension.
             source: ExtensionNotAllowed<NewSessionTicketDisallowedExtension>,
         },
-        /// The data of a recognized extension is longer than its fields.
-        #[snafu(display("{extension:?} data has excess bytes"))]
-        ExtensionExcess {
-            /// The extension.
-            extension: RestrictedExtension,
+        /// The data of `early_data`, the one recognized extension this
+        /// message may carry, is longer than its four bytes.
+        #[snafu(display("early_data data has excess bytes"))]
+        EarlyDataExcess {
             /// The excess.
             source: ExcessBytes,
         },
@@ -440,7 +439,7 @@ pub mod codec {
                 | Self::Nonce { .. }
                 | Self::Ticket { .. }
                 | Self::ExtensionsLength { .. }
-                | Self::ExtensionExcess { .. }
+                | Self::EarlyDataExcess { .. }
                 | Self::EarlyData { .. } => AlertDescription::DECODE_ERROR,
             }
         }
@@ -541,6 +540,14 @@ mod tests {
             .sync_read_new_session_ticket_unpin()
             .unwrap_err();
         assert!(matches!(error, ReadNewSessionTicketError::EarlyData { .. }));
+        let error = ticket(1, &[1], &extension(42, &[0xff; 5]))
+            .as_slice()
+            .sync_read_new_session_ticket_unpin()
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ReadNewSessionTicketError::EarlyDataExcess { .. }
+        ));
         let error = ticket(1, &[1], &extension(41, &[0, 0]))
             .as_slice()
             .sync_read_new_session_ticket_unpin()
