@@ -155,14 +155,40 @@ impl Ledger {
     /// Reserves `min(max_amount, available)`, which is zero if nothing can
     /// be reserved, and returns the reserved amount.
     fn reserve_up_to(&self, max_amount: VarInt) -> VarInt {
+        let reserved = self
+            .reserve_with(|available| Ok(max_amount.get().min(available)))
+            .unwrap_or(0);
+        // invariant: `reserved <= max_amount`, a `VarInt`.
+        VarInt::new(reserved).unwrap_or(VarInt::MAX)
+    }
+
+    /// Reserves exactly `amount`, or nothing and returns the available
+    /// credit if `amount` exceeds it.
+    fn reserve_exact(&self, amount: VarInt) -> Result<(), VarInt> {
+        self.reserve_with(|available| {
+            if amount.get() <= available {
+                Ok(amount.get())
+            } else {
+                Err(available)
+            }
+        })
+        .map(|_| ())
+        // invariant: the available credit is at most `L`, a `VarInt`.
+        .map_err(|available| VarInt::new(available).unwrap_or(VarInt::MAX))
+    }
+
+    /// Reserves the amount `choose` picks from the available credit in one
+    /// step, so a concurrent reservation never sees credit this one hands
+    /// back. `choose` returning `Err` reserves nothing.
+    fn reserve_with(&self, choose: impl Fn(u64) -> Result<u64, u64>) -> Result<u64, u64> {
         loop {
             let reserved = self.reserved.load(Ordering::SeqCst);
             let committed = self.committed.load(Ordering::SeqCst);
             let limit = self.limit.load(Ordering::SeqCst);
             let available = limit.saturating_sub(reserved).saturating_sub(committed);
-            let amount = max_amount.get().min(available);
+            let amount = choose(available)?;
             if amount == 0 {
-                return VarInt::ZERO;
+                return Ok(0);
             }
             if self
                 .reserved
@@ -174,8 +200,7 @@ impl Ledger {
                 )
                 .is_ok()
             {
-                // invariant: `amount <= max_amount`, a `VarInt`.
-                return VarInt::new(amount).unwrap_or(VarInt::MAX);
+                return Ok(amount);
             }
         }
     }
@@ -254,18 +279,14 @@ impl AtomicConnectionSendFlowController {
         stream_id: StreamId,
         amount: VarInt,
     ) -> Result<AtomicConnectionCreditReservation, InsufficientConnectionCreditError> {
-        let reserved = self.ledger.reserve_up_to(amount);
-        if reserved < amount {
-            // `reserved` is all that was available. Hand it back: the
-            // request is all or nothing.
-            self.ledger.remove_reserved(reserved);
+        if let Err(available) = self.ledger.reserve_exact(amount) {
             return InsufficientConnectionCreditSnafu {
                 requested: amount,
-                available: reserved,
+                available,
             }
             .fail();
         }
-        Ok(self.reservation(stream_id, reserved))
+        Ok(self.reservation(stream_id, amount))
     }
 
     fn reservation(
