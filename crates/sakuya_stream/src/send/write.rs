@@ -305,7 +305,7 @@ where
 /// was asked about.
 #[derive(Debug, Snafu)]
 #[snafu(module(grant_violation))]
-enum GrantViolation {
+enum GrantViolationError {
     /// The guard names another offset.
     #[snafu(display(
         "flow-control policy granted admission for offset {granted_offset}, not {offset}"
@@ -321,7 +321,7 @@ enum GrantViolation {
 
 /// Checks the [policy contract](SendFlowControlPolicy#contract) for a guard
 /// returned for `attempt`.
-fn check_grant(guard: &AdmissionGuard, attempt: &WriteAttempt) -> Result<(), GrantViolation> {
+fn check_grant(guard: &AdmissionGuard, attempt: &WriteAttempt) -> Result<(), GrantViolationError> {
     ensure!(
         guard.offset() == attempt.offset,
         grant_violation::OffsetSnafu {

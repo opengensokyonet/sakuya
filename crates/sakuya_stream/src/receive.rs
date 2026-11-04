@@ -240,7 +240,7 @@ impl ProtocolError {
 /// It is the highest-priority result of every later operation on the
 /// stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-pub enum ConnectionFailure {
+pub enum ConnectionFailureError {
     /// The connection was closed.
     #[snafu(transparent)]
     Closed {
@@ -337,7 +337,7 @@ enum BufferPhase<R> {
     /// The buffer was destroyed.
     Destroyed(Destruction<R>),
     /// The connection failed; the buffer is destroyed.
-    Failed(ConnectionFailure),
+    Failed(ConnectionFailureError),
 }
 
 /// Why the receive buffer was destroyed.
@@ -443,7 +443,7 @@ where
     }
 
     /// The persistent failure, if one occurred.
-    pub fn failure(&self) -> Option<ConnectionFailure> {
+    pub fn failure(&self) -> Option<ConnectionFailureError> {
         match self.buffer {
             BufferPhase::Failed(failure) => Some(failure),
             BufferPhase::Live | BufferPhase::Destroyed(_) => None,
@@ -484,13 +484,13 @@ where
     /// # Errors
     ///
     /// Returns the persistent failure if one occurred earlier, or the new
-    /// [`ConnectionFailure::Protocol`] if this frame violates the protocol;
+    /// [`ConnectionFailureError::Protocol`] if this frame violates the protocol;
     /// the caller must close the connection with it.
     pub fn on_stream_frame(
         &mut self,
         frame: StreamFrame,
         connection: &mut ConnectionReceiveFlowController,
-    ) -> Result<(), ConnectionFailure> {
+    ) -> Result<(), ConnectionFailureError> {
         self.check_failure()?;
         let StreamFrame { offset, data, fin } = frame;
         let Some(end) = offset_add(offset, data.len()) else {
@@ -534,7 +534,7 @@ where
         &mut self,
         frame: ResetStreamFrame,
         connection: &mut ConnectionReceiveFlowController,
-    ) -> Result<(), ConnectionFailure> {
+    ) -> Result<(), ConnectionFailureError> {
         self.on_reset(frame.code, frame.final_size, VarInt::ZERO, connection)
     }
 
@@ -550,7 +550,7 @@ where
         &mut self,
         frame: ResetStreamAtFrame,
         connection: &mut ConnectionReceiveFlowController,
-    ) -> Result<(), ConnectionFailure> {
+    ) -> Result<(), ConnectionFailureError> {
         self.on_reset(
             frame.code,
             frame.final_size,
@@ -569,13 +569,13 @@ where
 
     /// Records that the connection is closed.
     ///
-    /// Later operations report [`ConnectionFailure::Closed`] unless a
+    /// Later operations report [`ConnectionFailureError::Closed`] unless a
     /// protocol failure was recorded first. The receive buffer is destroyed.
     pub fn connection_closed(&mut self) {
         if self.failure().is_some() {
             return;
         }
-        self.shut_down(ConnectionFailure::Closed {
+        self.shut_down(ConnectionFailureError::Closed {
             source: ConnectionClosedError::new(),
         });
     }
@@ -639,7 +639,7 @@ where
         final_size: VarInt,
         reliable_size: VarInt,
         connection: &mut ConnectionReceiveFlowController,
-    ) -> Result<(), ConnectionFailure> {
+    ) -> Result<(), ConnectionFailureError> {
         self.check_failure()?;
         if let Err(error) = ReliableSizeError::check(final_size, reliable_size)
             .context(ReliableSizeExceedsFinalSizeSnafu)
@@ -751,19 +751,19 @@ where
         data
     }
 
-    fn check_failure(&self) -> Result<(), ConnectionFailure> {
+    fn check_failure(&self) -> Result<(), ConnectionFailureError> {
         self.failure().map_or(Ok(()), Err)
     }
 
     /// Records a protocol violation as the persistent failure.
-    fn fail(&mut self, error: ProtocolError) -> ConnectionFailure {
-        let failure = ConnectionFailure::Protocol { source: error };
+    fn fail(&mut self, error: ProtocolError) -> ConnectionFailureError {
+        let failure = ConnectionFailureError::Protocol { source: error };
         self.shut_down(failure);
         failure
     }
 
     /// Records `failure` as the persistent failure and destroys the buffer.
-    fn shut_down(&mut self, failure: ConnectionFailure) {
+    fn shut_down(&mut self, failure: ConnectionFailureError) {
         let was_live = !self.is_destroyed();
         self.buffer = BufferPhase::Failed(failure);
         if was_live {

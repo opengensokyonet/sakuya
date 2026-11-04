@@ -542,7 +542,7 @@ enum PolicyPlan<R> {
 /// [policy contract](crate::send::termination#contract).
 #[derive(Debug, Snafu)]
 #[snafu(module(policy_violation))]
-enum PolicyViolation {
+enum PolicyViolationError {
     #[snafu(display("termination policy closed a stream that was reset"))]
     CloseAfterReset,
     #[snafu(display("termination policy closed a stream after the connection closed"))]
@@ -907,7 +907,7 @@ where
     fn check_termination_action(
         &self,
         action: TerminationAction<C::WriteLimitReason>,
-    ) -> Result<PolicyPlan<C::WriteLimitReason>, PolicyViolation> {
+    ) -> Result<PolicyPlan<C::WriteLimitReason>, PolicyViolationError> {
         match action {
             TerminationAction::Keep => Ok(PolicyPlan::Keep),
             TerminationAction::Close => match self.end_state() {
@@ -969,7 +969,7 @@ fn check_completed_final_size(
     error_code: ApplicationErrorCode,
     bounds: FinalSizeBounds,
     chosen: VarInt,
-) -> Result<ResetTarget, PolicyViolation> {
+) -> Result<ResetTarget, PolicyViolationError> {
     ReliableSizeError::check(chosen, bounds.reliable_size)
         .context(policy_violation::ChosenFinalSizeBelowReliableSizeSnafu)?;
     FinalSizeBelowExposureError::check(chosen, bounds.exposure_end)
@@ -986,7 +986,7 @@ fn check_completed_final_size(
 /// The single place where a termination policy's contract violation ends
 /// the operation: every policy result passes through here after its check
 /// and before anything changes.
-fn enforce_policy<T>(checked: Result<T, PolicyViolation>) -> T {
+fn enforce_policy<T>(checked: Result<T, PolicyViolationError>) -> T {
     match checked {
         Ok(plan) => plan,
         Err(violation) => panic!("{}", Report::from_error(violation)),

@@ -10,9 +10,9 @@ use sakuya_packet_protection::backend::ring::{
     RingAeadKey, RingBackend, RingHeaderProtectionCipher,
 };
 use sakuya_packet_protection::backend::{
-    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadAlgorithm, AeadInputTooLong, AeadKey, AeadOpenError,
-    CryptoBackend, ExpandLabelError, ExpandOutputTooLong, HeaderProtectionCipher, KdfAlgorithm,
-    KeyLengthMismatch, MAX_HASH_LEN,
+    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadAlgorithm, AeadInputTooLongError, AeadKey, AeadOpenError,
+    CryptoBackend, ExpandLabelError, ExpandOutputTooLongError, HeaderProtectionCipher,
+    KdfAlgorithm, KeyLengthMismatchError, MAX_HASH_LEN,
 };
 use sakuya_packet_protection::header_protection::{HeaderProtectionError, HeaderProtectionKey};
 use sakuya_packet_protection::initial::{INITIAL_AEAD, INITIAL_SALT, InitialSecrets};
@@ -85,7 +85,7 @@ impl CryptoBackend for Recording {
         prk: &[u8],
         info: &[&[u8]],
         output: &mut [u8],
-    ) -> Result<(), ExpandOutputTooLong> {
+    ) -> Result<(), ExpandOutputTooLongError> {
         self.log.borrow_mut().expand_infos.push(info.concat());
         RingBackend.hkdf_expand(kdf, prk, info, output)
     }
@@ -94,7 +94,7 @@ impl CryptoBackend for Recording {
         &self,
         aead: AeadAlgorithm,
         key: &[u8],
-    ) -> Result<RecordingAeadKey, KeyLengthMismatch> {
+    ) -> Result<RecordingAeadKey, KeyLengthMismatchError> {
         self.log.borrow_mut().aead_keys.push(key.to_vec());
         Ok(RecordingAeadKey {
             inner: RingBackend.aead_key(aead, key)?,
@@ -106,7 +106,7 @@ impl CryptoBackend for Recording {
         &self,
         aead: AeadAlgorithm,
         key: &[u8],
-    ) -> Result<RingHeaderProtectionCipher, KeyLengthMismatch> {
+    ) -> Result<RingHeaderProtectionCipher, KeyLengthMismatchError> {
         self.log
             .borrow_mut()
             .header_protection_keys
@@ -122,7 +122,7 @@ impl AeadKey for RecordingAeadKey {
         aad: &[u8],
         in_out: &mut [u8],
         tag: &mut [u8; AEAD_TAG_LEN],
-    ) -> Result<(), AeadInputTooLong> {
+    ) -> Result<(), AeadInputTooLongError> {
         self.log.borrow_mut().nonces.push(*nonce);
         self.inner.seal_in_place(nonce, aad, in_out, tag)
     }
@@ -766,7 +766,7 @@ fn expand_label_rejects_oversized_inputs() {
     assert!(matches!(
         RingBackend.hkdf_expand_label(kdf, &secret, b"quic key", &[], &mut long_output),
         Err(ExpandLabelError::OutputTooLong {
-            source: ExpandOutputTooLong {
+            source: ExpandOutputTooLongError {
                 output_len: 8161,
                 max_output_len: 8160
             }

@@ -10,7 +10,7 @@ fn connection_closed_fails_the_request() {
     assert_eq!(
         receiver.stop(c(1)),
         Err(StopError::Connection {
-            source: ConnectionFailure::Closed {
+            source: ConnectionFailureError::Closed {
                 source: ConnectionClosedError::new()
             },
         })

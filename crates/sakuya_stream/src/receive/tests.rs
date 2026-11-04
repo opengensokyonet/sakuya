@@ -1,5 +1,5 @@
 use super::{
-    BoundaryMode, ConnectionFailure, ProtocolError, ResetStreamAtFrame, ResetStreamFrame,
+    BoundaryMode, ConnectionFailureError, ProtocolError, ResetStreamAtFrame, ResetStreamFrame,
     StreamFrame, StreamReceiver,
     flow_control::{
         AdvertisementIntent, ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView,
@@ -273,10 +273,10 @@ fn reset_error<R>(code: u32, final_size: u32, reliable_size: u32, complete: bool
     })
 }
 
-fn protocol(failure: ConnectionFailure) -> ProtocolError {
+fn protocol(failure: ConnectionFailureError) -> ProtocolError {
     match failure {
-        ConnectionFailure::Protocol { source } => source,
-        ConnectionFailure::Closed { .. } => panic!("expected a protocol failure"),
+        ConnectionFailureError::Protocol { source } => source,
+        ConnectionFailureError::Closed { .. } => panic!("expected a protocol failure"),
     }
 }
 

@@ -113,7 +113,7 @@ pub trait CryptoBackend {
         prk: &[u8],
         info: &[&[u8]],
         output: &mut [u8],
-    ) -> Result<(), ExpandOutputTooLong>;
+    ) -> Result<(), ExpandOutputTooLongError>;
 
     /// Fills `output` with HKDF-Expand-Label(`secret`, `label`, `context`,
     /// `output.len()`) from RFC 8446 §7.1, prefixing `label` with `"tls13 "`.
@@ -136,8 +136,9 @@ pub trait CryptoBackend {
         context: &[u8],
         output: &mut [u8],
     ) -> Result<(), ExpandLabelError> {
-        ExpandLabelTooLong::check(label).context(expand_label_error::LabelTooLongSnafu)?;
-        ExpandContextTooLong::check(context).context(expand_label_error::ContextTooLongSnafu)?;
+        ExpandLabelTooLongError::check(label).context(expand_label_error::LabelTooLongSnafu)?;
+        ExpandContextTooLongError::check(context)
+            .context(expand_label_error::ContextTooLongSnafu)?;
         let label_len = EXPAND_LABEL_PREFIX.len() + label.len();
         let max_output_len = 255 * kdf.hash_len();
         ensure!(
@@ -172,8 +173,11 @@ pub trait CryptoBackend {
     /// # Errors
     ///
     /// Fails when `key` is not `aead.key_len()` bytes long.
-    fn aead_key(&self, aead: AeadAlgorithm, key: &[u8])
-    -> Result<Self::AeadKey, KeyLengthMismatch>;
+    fn aead_key(
+        &self,
+        aead: AeadAlgorithm,
+        key: &[u8],
+    ) -> Result<Self::AeadKey, KeyLengthMismatchError>;
 
     /// Creates the header protection cipher that `aead` selects, keyed with
     /// `key`.
@@ -185,7 +189,7 @@ pub trait CryptoBackend {
         &self,
         aead: AeadAlgorithm,
         key: &[u8],
-    ) -> Result<Self::HeaderProtectionCipher, KeyLengthMismatch>;
+    ) -> Result<Self::HeaderProtectionCipher, KeyLengthMismatchError>;
 }
 
 /// An AEAD key that seals and opens in place with a detached tag.
@@ -204,7 +208,7 @@ pub trait AeadKey {
         aad: &[u8],
         in_out: &mut [u8],
         tag: &mut [u8; AEAD_TAG_LEN],
-    ) -> Result<(), AeadInputTooLong>;
+    ) -> Result<(), AeadInputTooLongError>;
 
     /// Decrypts `in_out` in place after checking `tag` over `aad` and the
     /// ciphertext.
@@ -237,7 +241,7 @@ pub trait HeaderProtectionCipher {
 /// produce that much output.
 #[derive(Debug, Snafu)]
 #[snafu(display("output of {output_len} bytes exceeds the {max_output_len}-byte limit"))]
-pub struct ExpandOutputTooLong {
+pub struct ExpandOutputTooLongError {
     /// Requested output length.
     pub output_len: usize,
     /// Largest output the KDF can produce.
@@ -249,7 +253,7 @@ pub struct ExpandOutputTooLong {
 /// match the algorithm.
 #[derive(Debug, Snafu)]
 #[snafu(display("expected a {expected}-byte key, got {actual} bytes"))]
-pub struct KeyLengthMismatch {
+pub struct KeyLengthMismatchError {
     /// The key length of the algorithm.
     pub expected: usize,
     /// The length of the given key.
@@ -260,7 +264,7 @@ pub struct KeyLengthMismatch {
 /// longer than the AEAD can protect under one nonce.
 #[derive(Debug, Snafu)]
 #[snafu(display("input of {input_len} bytes exceeds the AEAD limit"))]
-pub struct AeadInputTooLong {
+pub struct AeadInputTooLongError {
     /// Length of the input.
     pub input_len: usize,
 }
@@ -273,19 +277,19 @@ pub enum ExpandLabelError {
     #[snafu(display("cannot expand the label"))]
     LabelTooLong {
         /// The length check that failed.
-        source: ExpandLabelTooLong,
+        source: ExpandLabelTooLongError,
     },
     /// The context does not fit its one-byte length.
     #[snafu(display("cannot expand the label"))]
     ContextTooLong {
         /// The length check that failed.
-        source: ExpandContextTooLong,
+        source: ExpandContextTooLongError,
     },
     /// HKDF-Expand cannot produce that much output.
     #[snafu(transparent)]
     OutputTooLong {
         /// The length check that failed.
-        source: ExpandOutputTooLong,
+        source: ExpandOutputTooLongError,
     },
 }
 
@@ -298,16 +302,16 @@ const EXPAND_LABEL_PREFIX: &[u8] = b"tls13 ";
 /// Only [`check`](Self::check) constructs it, when the check fails.
 #[derive(Debug, Snafu)]
 #[snafu(display("label of {label_len} bytes with its prefix exceeds 255 bytes"))]
-pub struct ExpandLabelTooLong {
+pub struct ExpandLabelTooLongError {
     label_len: usize,
 }
 
-impl ExpandLabelTooLong {
+impl ExpandLabelTooLongError {
     /// Checks that `label`, with the `"tls13 "` prefix, fits in 255 bytes.
     ///
     /// # Errors
     ///
-    /// [`ExpandLabelTooLong`] if the prefixed label is longer.
+    /// [`ExpandLabelTooLongError`] if the prefixed label is longer.
     pub fn check(label: &[u8]) -> Result<(), Self> {
         let label_len = EXPAND_LABEL_PREFIX.len().saturating_add(label.len());
         ensure!(label_len <= 255, ExpandLabelTooLongSnafu { label_len });
@@ -326,16 +330,16 @@ impl ExpandLabelTooLong {
 /// Only [`check`](Self::check) constructs it, when the check fails.
 #[derive(Debug, Snafu)]
 #[snafu(display("context of {context_len} bytes exceeds 255 bytes"))]
-pub struct ExpandContextTooLong {
+pub struct ExpandContextTooLongError {
     context_len: usize,
 }
 
-impl ExpandContextTooLong {
+impl ExpandContextTooLongError {
     /// Checks that `context` fits in 255 bytes.
     ///
     /// # Errors
     ///
-    /// [`ExpandContextTooLong`] if `context` is longer.
+    /// [`ExpandContextTooLongError`] if `context` is longer.
     pub fn check(context: &[u8]) -> Result<(), Self> {
         let context_len = context.len();
         ensure!(
@@ -355,7 +359,7 @@ impl ExpandContextTooLong {
 /// associated data under this key and nonce.
 #[derive(Debug, Snafu)]
 #[snafu(display("AEAD authentication failed"))]
-pub struct AuthenticationFailed;
+pub struct AuthenticationError;
 
 /// The error returned by [`AeadKey::open_in_place`].
 #[derive(Debug, Snafu)]
@@ -365,12 +369,12 @@ pub enum AeadOpenError {
     #[snafu(display("cannot open the ciphertext"))]
     InputTooLong {
         /// The length check that failed.
-        source: AeadInputTooLong,
+        source: AeadInputTooLongError,
     },
     /// The tag does not match.
     #[snafu(display("cannot open the ciphertext"))]
     Authentication {
         /// The failed authentication.
-        source: AuthenticationFailed,
+        source: AuthenticationError,
     },
 }

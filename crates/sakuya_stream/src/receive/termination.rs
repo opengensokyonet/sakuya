@@ -293,7 +293,7 @@ struct DecisionPlan<R> {
 /// A decision that violates the [policy contract](self#contract).
 #[derive(Debug, Snafu)]
 #[snafu(module(policy_violation))]
-enum PolicyViolation {
+enum PolicyViolationError {
     #[snafu(display(
         "receive termination policy violated its contract: {what} the receive buffer on {trigger:?} without a reset, a sent STOP request or a dropped reader"
     ))]
@@ -402,7 +402,7 @@ where
         &self,
         trigger: TerminationEvent,
         decision: TerminationDecision<C::Reason>,
-    ) -> Result<DecisionPlan<C::Reason>, PolicyViolation> {
+    ) -> Result<DecisionPlan<C::Reason>, PolicyViolationError> {
         let TerminationDecision {
             action,
             stop,
@@ -427,7 +427,7 @@ where
         &self,
         action: BoundaryAction<C::Reason>,
         trigger: TerminationEvent,
-    ) -> Result<Plan<C::Reason>, PolicyViolation> {
+    ) -> Result<Plan<C::Reason>, PolicyViolationError> {
         let ended = self.is_destroyed() || self.is_result_committed();
         match action {
             BoundaryAction::Keep => Ok(Plan::Nothing),
@@ -478,7 +478,7 @@ where
         current: &Boundary<C::Reason>,
         update: BoundaryUpdate,
         name: &'static str,
-    ) -> Result<Option<VarInt>, PolicyViolation> {
+    ) -> Result<Option<VarInt>, PolicyViolationError> {
         let BoundaryUpdate::Fix(limit) = update else {
             return Ok(None);
         };
@@ -512,7 +512,7 @@ where
         &self,
         what: &'static str,
         trigger: TerminationEvent,
-    ) -> Result<(), PolicyViolation> {
+    ) -> Result<(), PolicyViolationError> {
         ensure!(
             self.reset.is_some() || self.local_cancellation(),
             policy_violation::NoBasisSnafu { what, trigger }
@@ -525,7 +525,7 @@ where
         acceptance: Option<VarInt>,
         delivery: Option<VarInt>,
         trigger: TerminationEvent,
-    ) -> Result<(), PolicyViolation> {
+    ) -> Result<(), PolicyViolationError> {
         let Some(reset) = self.reset else {
             return Ok(());
         };

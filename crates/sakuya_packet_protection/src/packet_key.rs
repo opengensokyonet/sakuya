@@ -4,8 +4,8 @@ use sakuya_wire::packet_number::PacketNumber;
 use snafu::{IntoError, OptionExt, ResultExt, Snafu};
 
 use crate::backend::{
-    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadAlgorithm, AeadInputTooLong, AeadKey, AeadOpenError,
-    AuthenticationFailed, CryptoBackend, MAX_KEY_LEN,
+    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadAlgorithm, AeadInputTooLongError, AeadKey, AeadOpenError,
+    AuthenticationError, CryptoBackend, MAX_KEY_LEN,
 };
 use crate::secret::TrafficSecret;
 use crate::wipe::wipe;
@@ -161,7 +161,7 @@ struct Regions<'p> {
 
 /// Splits `packet` into its header of `header_len` bytes, its payload and
 /// its 16-byte tag.
-fn split_packet(packet: &mut [u8], header_len: usize) -> Result<Regions<'_>, PacketTooShort> {
+fn split_packet(packet: &mut [u8], header_len: usize) -> Result<Regions<'_>, PacketTooShortError> {
     let packet_len = packet.len();
     packet
         .split_last_chunk_mut::<AEAD_TAG_LEN>()
@@ -184,7 +184,7 @@ fn split_packet(packet: &mut [u8], header_len: usize) -> Result<Regions<'_>, Pac
 #[snafu(display(
     "packet of {packet_len} bytes cannot hold a {header_len}-byte header and a 16-byte tag"
 ))]
-pub struct PacketTooShort {
+pub struct PacketTooShortError {
     /// Length of the packet buffer.
     pub packet_len: usize,
     /// The header length given.
@@ -199,20 +199,20 @@ pub enum OpenPacketError {
     #[snafu(transparent)]
     PacketTooShort {
         /// The length check that failed.
-        source: PacketTooShort,
+        source: PacketTooShortError,
     },
     /// The payload is longer than the AEAD can protect under one nonce.
     #[snafu(display("cannot open packet payload"))]
     PayloadTooLong {
         /// The backend's refusal.
-        source: AeadInputTooLong,
+        source: AeadInputTooLongError,
     },
     /// The payload did not authenticate under this key; the payload region
     /// may have been overwritten.
     #[snafu(display("cannot open packet payload"))]
     Authentication {
         /// The backend's failure.
-        source: AuthenticationFailed,
+        source: AuthenticationError,
     },
 }
 
@@ -224,12 +224,12 @@ pub enum SealPacketError {
     #[snafu(transparent)]
     PacketTooShort {
         /// The length check that failed.
-        source: PacketTooShort,
+        source: PacketTooShortError,
     },
     /// The payload is longer than the AEAD can protect under one nonce.
     #[snafu(display("cannot seal packet payload"))]
     PayloadTooLong {
         /// The backend's refusal.
-        source: AeadInputTooLong,
+        source: AeadInputTooLongError,
     },
 }

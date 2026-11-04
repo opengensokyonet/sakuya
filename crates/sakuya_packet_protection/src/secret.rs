@@ -27,7 +27,7 @@ impl TrafficSecret {
     /// # Errors
     ///
     /// Fails when `secret` is not exactly `kdf.hash_len()` bytes long.
-    pub fn new(kdf: KdfAlgorithm, secret: &[u8]) -> Result<Self, SecretLengthMismatch> {
+    pub fn new(kdf: KdfAlgorithm, secret: &[u8]) -> Result<Self, SecretLengthMismatchError> {
         let expected = kdf.hash_len();
         ensure!(
             secret.len() == expected,
@@ -114,7 +114,7 @@ impl core::fmt::Debug for TrafficSecret {
 /// A secret's length does not match the hash length of its KDF.
 #[derive(Debug, Snafu)]
 #[snafu(display("expected a {expected}-byte secret, got {actual} bytes"))]
-pub struct SecretLengthMismatch {
+pub struct SecretLengthMismatchError {
     /// The hash length of the KDF.
     pub expected: usize,
     /// The length of the given secret.

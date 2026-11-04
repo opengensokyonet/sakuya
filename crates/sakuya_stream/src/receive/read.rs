@@ -26,7 +26,7 @@
 //!
 //! [`read_into`]: StreamReceiver::read_into
 use super::{
-    Applied, Boundary, BufferPhase, Committed, ConnectionFailure, Destruction, Reading,
+    Applied, Boundary, BufferPhase, Committed, ConnectionFailureError, Destruction, Reading,
     StreamReceiver, flow_control::ReceiveFlowControlPolicy, flow_control::ReceiveFlowEvent,
     termination::ReceiveTerminationPolicy, termination::ResetPresentation,
     termination::TerminationEvent,
@@ -78,7 +78,7 @@ pub enum ReadError<R> {
     #[snafu(display("connection failed"))]
     Connection {
         /// The failure.
-        source: ConnectionFailure,
+        source: ConnectionFailureError,
     },
     /// The peer reset the stream.
     ///

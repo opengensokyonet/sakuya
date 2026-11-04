@@ -22,7 +22,7 @@ use sakuya_stream::receive::termination::{
     TerminationDecision, TerminationEvent, TerminationView,
 };
 use sakuya_stream::receive::{
-    BoundaryMode, ConnectionFailure, ProtocolError, ResetStreamAtFrame, ResetStreamFrame,
+    BoundaryMode, ConnectionFailureError, ProtocolError, ResetStreamAtFrame, ResetStreamFrame,
     StreamFrame, StreamReceiver,
 };
 use sakuya_stream::receive_buffer::fragmented::FragmentedReceiveBuffer;
@@ -392,7 +392,7 @@ impl Stop {
 enum Phase {
     Live,
     Destroyed(Option<(u32, TerminationEvent)>),
-    Failed(ConnectionFailure),
+    Failed(ConnectionFailureError),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -470,7 +470,7 @@ impl Model {
         }
     }
 
-    fn failure(&self) -> Option<ConnectionFailure> {
+    fn failure(&self) -> Option<ConnectionFailureError> {
         match self.phase {
             Phase::Failed(failure) => Some(failure),
             Phase::Live | Phase::Destroyed(_) => None,
@@ -613,7 +613,7 @@ impl Model {
         self.report(connection);
     }
 
-    fn fail(&mut self, failure: ConnectionFailure) {
+    fn fail(&mut self, failure: ConnectionFailureError) {
         let was_live = !self.destroyed();
         self.phase = Phase::Failed(failure);
         if was_live {
@@ -649,7 +649,7 @@ impl Model {
         len: u64,
         fin: bool,
         connection: &mut ModelConnection,
-    ) -> Result<(), ConnectionFailure> {
+    ) -> Result<(), ConnectionFailureError> {
         if let Some(failure) = self.failure() {
             return Err(failure);
         }
@@ -693,7 +693,7 @@ impl Model {
         }
         .and_then(|()| self.account(old_accounted, connection));
         if let Err(source) = checked {
-            let failure = ConnectionFailure::Protocol { source };
+            let failure = ConnectionFailureError::Protocol { source };
             self.fail(failure);
             return Err(failure);
         }
@@ -707,12 +707,12 @@ impl Model {
         final_size: u64,
         reliable: u64,
         connection: &mut ModelConnection,
-    ) -> Result<(), ConnectionFailure> {
+    ) -> Result<(), ConnectionFailureError> {
         if let Some(failure) = self.failure() {
             return Err(failure);
         }
         if reliable > final_size {
-            let failure = ConnectionFailure::Protocol {
+            let failure = ConnectionFailureError::Protocol {
                 source: ProtocolError::ReliableSizeExceedsFinalSize {
                     source: ReliableSizeError::check(v(final_size), v(reliable)).unwrap_err(),
                 },
@@ -742,7 +742,7 @@ impl Model {
         }
         .and_then(|()| self.account(old_accounted, connection));
         if let Err(source) = checked {
-            let failure = ConnectionFailure::Protocol { source };
+            let failure = ConnectionFailureError::Protocol { source };
             self.fail(failure);
             return Err(failure);
         }
@@ -1067,7 +1067,7 @@ fn step(
             receivers[stream].connection_closed();
             let model = &mut models[stream];
             if model.failure().is_none() {
-                model.fail(ConnectionFailure::Closed {
+                model.fail(ConnectionFailureError::Closed {
                     source: ConnectionClosedError::new(),
                 });
             }

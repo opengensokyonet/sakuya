@@ -22,7 +22,7 @@
 //!
 //! [RFC 9000 §3.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-3.5
 use super::{
-    ConnectionFailure, StopRequest, StreamReceiver, flow_control::ReceiveFlowControlPolicy,
+    ConnectionFailureError, StopRequest, StreamReceiver, flow_control::ReceiveFlowControlPolicy,
     termination::ReceiveTerminationPolicy, termination::TerminationEvent,
 };
 use crate::receive_buffer::ReceiveBuffer;
@@ -41,7 +41,7 @@ pub enum StopError {
     #[snafu(display("connection failed"))]
     Connection {
         /// The failure.
-        source: ConnectionFailure,
+        source: ConnectionFailureError,
     },
     /// A STOP request with another error code is already installed; it is
     /// kept.

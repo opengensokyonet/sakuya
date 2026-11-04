@@ -29,13 +29,13 @@ impl PacketNumberLength {
     /// # Errors
     ///
     /// Fails when `len` is not 1 to 4.
-    pub const fn new(len: usize) -> Result<Self, InvalidPacketNumberLength> {
+    pub const fn new(len: usize) -> Result<Self, PacketNumberLengthError> {
         match len {
             1 => Ok(Self::One),
             2 => Ok(Self::Two),
             3 => Ok(Self::Three),
             4 => Ok(Self::Four),
-            _ => Err(InvalidPacketNumberLength { length: len }),
+            _ => Err(PacketNumberLengthError { length: len }),
         }
     }
 
@@ -79,11 +79,11 @@ impl PacketNumberLength {
 /// Only [`PacketNumberLength::new`] constructs it, for a length it refuses.
 #[derive(Debug, Snafu)]
 #[snafu(display("packet number field of {length} bytes is not 1 to 4 bytes long"))]
-pub struct InvalidPacketNumberLength {
+pub struct PacketNumberLengthError {
     length: usize,
 }
 
-impl InvalidPacketNumberLength {
+impl PacketNumberLengthError {
     /// The length given, which is zero or above four.
     pub const fn length(&self) -> usize {
         self.length
@@ -282,7 +282,7 @@ pub enum EncodePacketNumberError {
     #[snafu(display("cannot encode the packet number"))]
     RangeTooLarge {
         /// The size of the range.
-        source: PacketNumberRangeTooLarge,
+        source: PacketNumberRangeTooLargeError,
     },
 }
 
@@ -293,11 +293,11 @@ pub enum EncodePacketNumberError {
 /// least 2<sup>31</sup> packet numbers.
 #[derive(Debug, Snafu)]
 #[snafu(display("{num_unacked} unacknowledged packet numbers exceed the 4-byte encoding"))]
-pub struct PacketNumberRangeTooLarge {
+pub struct PacketNumberRangeTooLargeError {
     num_unacked: u64,
 }
 
-impl PacketNumberRangeTooLarge {
+impl PacketNumberRangeTooLargeError {
     /// Number of packet numbers after the largest acknowledged one, up to and
     /// including the one to send: at least 2<sup>31</sup> and at most
     /// 2<sup>62</sup>.

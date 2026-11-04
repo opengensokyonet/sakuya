@@ -4,7 +4,7 @@ use sakuya_wire::connection_id::ConnectionId;
 use snafu::{IntoError, OptionExt, ResultExt, Snafu};
 
 use crate::backend::{
-    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadAlgorithm, AeadKey, AeadOpenError, AuthenticationFailed,
+    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadAlgorithm, AeadKey, AeadOpenError, AuthenticationError,
     CryptoBackend,
 };
 
@@ -110,13 +110,13 @@ pub enum VerifyRetryIntegrityError {
     #[snafu(display("cannot verify the retry integrity tag"))]
     PacketTooShort {
         /// The length check that failed.
-        source: RetryPacketTooShort,
+        source: RetryPacketTooShortError,
     },
     /// The tag does not match.
     #[snafu(display("retry integrity tag does not match"))]
     Authentication {
         /// The backend's failure.
-        source: AuthenticationFailed,
+        source: AuthenticationError,
     },
 }
 
@@ -126,11 +126,11 @@ pub enum VerifyRetryIntegrityError {
 /// than the tag.
 #[derive(Debug, Snafu)]
 #[snafu(display("retry packet of {packet_len} bytes is shorter than its 16-byte tag"))]
-pub struct RetryPacketTooShort {
+pub struct RetryPacketTooShortError {
     packet_len: usize,
 }
 
-impl RetryPacketTooShort {
+impl RetryPacketTooShortError {
     /// Length of the packet given, below 16.
     pub const fn packet_len(&self) -> usize {
         self.packet_len
