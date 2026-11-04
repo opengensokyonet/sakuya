@@ -16,6 +16,9 @@
 //! - [`cipher_suite`], [`version`], [`alert`]: cipher suites, protocol
 //!   versions and alert descriptions.
 //! - [`vector`]: failures shared by the length-prefixed fields.
+//! - [`server`], [`client`]: the capabilities each role's handshake
+//!   consults, such as the choice of parameters and what a ClientHello
+//!   offers, with implementations for plain Web connections.
 //!
 //! Every wire format is read and written through `nitori_call` operations,
 //! in the `codec` module of its type. The readers run on the bytes of a
@@ -32,12 +35,14 @@
 
 pub mod alert;
 pub mod cipher_suite;
+pub mod client;
 pub mod code_point;
 pub mod crypto;
 pub mod extension;
 pub mod message;
 pub mod role;
 pub mod schedule;
+pub mod server;
 #[cfg(test)]
 mod test_support;
 pub mod vector;

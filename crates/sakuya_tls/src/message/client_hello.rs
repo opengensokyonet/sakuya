@@ -236,6 +236,46 @@ impl<C> ClientHello<C> {
             })
     }
 
+    /// The data of `server_name`, if present.
+    pub fn server_name(&self) -> Option<&ServerName<C>> {
+        self.extensions
+            .iter()
+            .find_map(|extension| match extension {
+                ClientHelloExtension::ServerName(name) => Some(name),
+                _ => None,
+            })
+    }
+
+    /// The data of `supported_groups`, if present.
+    pub fn supported_groups(&self) -> Option<&CodePointList<NamedGroup>> {
+        self.extensions
+            .iter()
+            .find_map(|extension| match extension {
+                ClientHelloExtension::SupportedGroups(groups) => Some(groups),
+                _ => None,
+            })
+    }
+
+    /// The data of `signature_algorithms`, if present.
+    pub fn signature_algorithms(&self) -> Option<&CodePointList<SignatureScheme>> {
+        self.extensions
+            .iter()
+            .find_map(|extension| match extension {
+                ClientHelloExtension::SignatureAlgorithms(schemes) => Some(schemes),
+                _ => None,
+            })
+    }
+
+    /// The data of `application_layer_protocol_negotiation`, if present.
+    pub fn application_layer_protocol_negotiation(&self) -> Option<&ProtocolNameList<C>> {
+        self.extensions
+            .iter()
+            .find_map(|extension| match extension {
+                ClientHelloExtension::ApplicationLayerProtocolNegotiation(names) => Some(names),
+                _ => None,
+            })
+    }
+
     /// The data of `pre_shared_key`, if present.
     pub fn pre_shared_key(&self) -> Option<&OfferedPsks<C>> {
         match self.extensions.last() {

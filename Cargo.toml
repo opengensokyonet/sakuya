@@ -26,6 +26,7 @@ nitori_id = { path = "../nitori/crates/nitori_id" }
 nitori_io = { path = "../nitori/crates/nitori_io" }
 proptest = "1.12.0"
 ring = { version = "0.17.14", default-features = false }
+rustls-pki-types = { version = "1.15.1", default-features = false, features = ["alloc"] }
 sakuya_wire = { path = "crates/sakuya_wire" }
 sakuya_packet_protection = { path = "crates/sakuya_packet_protection", default-features = false }
 sakuya_link = { path = "crates/sakuya_link" }

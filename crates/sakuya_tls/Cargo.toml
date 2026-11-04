@@ -11,6 +11,7 @@ bytes.workspace = true
 nitori_call.workspace = true
 nitori_crypto.workspace = true
 nitori_io.workspace = true
+rustls-pki-types.workspace = true
 sakuya_packet_protection.workspace = true
 smallvec.workspace = true
 snafu.workspace = true
