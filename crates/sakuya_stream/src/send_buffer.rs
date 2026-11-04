@@ -84,8 +84,10 @@ pub trait SendBuffer {
     /// current exposure end and `usage_end` and advances the exposure end
     /// monotonically.
     ///
-    /// Data uses the end of the range it carries; a FIN or a reset uses the
-    /// final size, with `end` set to [`ExposedEnd::FinalSize`]. Returns the
+    /// Data uses the end of the range it carries, with `content` set to
+    /// [`ExposedContent::Data`]; a FIN, a `RESET_STREAM` or a
+    /// `RESET_STREAM_AT` uses the final size, with `content` naming the
+    /// frame, even when no data is left to send. Returns the
     /// newly committed amount, `max(E, usage_end) − E`; usage at or below the
     /// exposure end commits nothing again.
     ///
@@ -97,7 +99,7 @@ pub trait SendBuffer {
     fn expose_usage_through(
         &mut self,
         usage_end: VarInt,
-        end: ExposedEnd,
+        content: ExposedContent,
         connection: &mut ConnectionSendFlowController,
     ) -> Result<VarInt, ExposeUsageError>;
 
@@ -241,14 +243,31 @@ pub struct ResetRetention {
     pub reliable_size: VarInt,
 }
 
-/// What an exposure announces besides usage (`ExposedEnd`).
+/// What an exposure carries besides usage (`ExposedContent`): stream data,
+/// or which frame ends the stream.
+///
+/// The three end frames each announce a final size equal to the usage end.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExposedEnd {
+pub enum ExposedContent {
     /// Stream data whose range ends at the usage end; no final size.
     Data,
-    /// A final size equal to the usage end: a FIN, a `RESET_STREAM` or a
-    /// `RESET_STREAM_AT`.
-    FinalSize,
+    /// A STREAM frame with the FIN bit.
+    Fin,
+    /// A `RESET_STREAM` frame.
+    ResetStream,
+    /// A `RESET_STREAM_AT` frame.
+    ///
+    /// A stream that has sent `RESET_STREAM_AT` keeps ending with it, also
+    /// when its reliable size later drops to zero, rather than switching to
+    /// `RESET_STREAM`.
+    ResetStreamAt,
+}
+
+impl ExposedContent {
+    /// Whether the exposure announces a final size.
+    pub(crate) const fn announces_final_size(self) -> bool {
+        !matches!(self, Self::Data)
+    }
 }
 
 /// Failures of [`SendBuffer::expose_usage_through`].

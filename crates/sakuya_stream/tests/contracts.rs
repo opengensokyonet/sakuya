@@ -29,7 +29,7 @@ use sakuya_stream::send::termination::{
 use sakuya_stream::send::write::WriteOutcome;
 use sakuya_stream::send::{ResetTarget, SendEndState, SendTerminalState, StreamSender};
 use sakuya_stream::send_buffer::offset_map::OffsetMapSendBuffer;
-use sakuya_stream::send_buffer::{ExposedEnd, ResetRetention};
+use sakuya_stream::send_buffer::{ExposedContent, ResetRetention};
 use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::stream_id::StreamId;
 use sakuya_wire::var_int::VarInt;
@@ -221,7 +221,7 @@ fn a_terminal_reset_needs_a_reset() {
     write(&mut stream, &mut connection, 10);
     stream.close().unwrap();
     stream
-        .expose_usage_through(v(10), ExposedEnd::FinalSize, &mut connection)
+        .expose_usage_through(v(10), ExposedContent::Fin, &mut connection)
         .unwrap();
     assert!(
         stream

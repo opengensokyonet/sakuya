@@ -26,13 +26,13 @@ use sakuya_stream::send::termination::{
 };
 use sakuya_stream::send::write::{FlushError, WriteError, WriteOutcome, WriteWait};
 use sakuya_stream::send::{
-    EndSource, ResetTarget, SendEndState, SendTerminalState, SenderExposeUsageError,
-    StreamResetError, StreamSender,
+    EndSource, EnterTerminalStateError, ResetTarget, SendEndState, SendTerminalState,
+    SenderExposeUsageError, StreamResetError, StreamSender,
 };
 use sakuya_stream::send_buffer::offset_map::OffsetMapSendBuffer;
 use sakuya_stream::send_buffer::visibility::FinalSizeBelowExposureError;
 use sakuya_stream::send_buffer::{
-    ExposedEnd, FinalSizeBeyondWrittenEndError, UsageBeyondWrittenEndError,
+    ExposedContent, FinalSizeBeyondWrittenEndError, UsageBeyondWrittenEndError,
 };
 use sakuya_stream::stream_end::{BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError};
 use sakuya_wire::application_error::ApplicationErrorCode;
@@ -85,6 +85,7 @@ enum Op {
     ExposeFinal {
         stream: usize,
         usage_end: Option<u64>,
+        frame: ExposedContent,
     },
     Close {
         stream: usize,
@@ -114,6 +115,14 @@ enum Op {
     },
 }
 
+fn end_frame() -> impl Strategy<Value = ExposedContent> {
+    prop_oneof![
+        Just(ExposedContent::Fin),
+        Just(ExposedContent::ResetStream),
+        Just(ExposedContent::ResetStreamAt),
+    ]
+}
+
 fn op() -> impl Strategy<Value = Op> {
     let stream = 0..STREAMS;
     prop_oneof![
@@ -124,8 +133,13 @@ fn op() -> impl Strategy<Value = Op> {
         2 => (0u64..900).prop_map(|limit| Op::MaxData { limit }),
         5 => (stream.clone(), 0u64..500)
             .prop_map(|(stream, usage_end)| Op::ExposeData { stream, usage_end }),
-        2 => (stream.clone(), prop::option::of(0u64..500))
-            .prop_map(|(stream, usage_end)| Op::ExposeFinal { stream, usage_end }),
+        2 => (stream.clone(), prop::option::of(0u64..500), end_frame()).prop_map(
+            |(stream, usage_end, frame)| Op::ExposeFinal {
+                stream,
+                usage_end,
+                frame
+            }
+        ),
         2 => stream.clone().prop_map(|stream| Op::Close { stream }),
         4 => (stream.clone(), 1u32..4, 0u64..300, prop::option::of(0u64..400)).prop_map(
             |(stream, code, reliable, final_size)| Op::Reset {
@@ -327,6 +341,10 @@ struct ModelStream {
     end: ModelEnd,
     end_source: EndSource,
     exposed_final: Option<u64>,
+    /// The end frames whose exposure succeeded.
+    sent_fin: bool,
+    sent_reset_stream: bool,
+    sent_reset_stream_at: bool,
     terminal: Option<SendTerminalState>,
     stop_code: Option<u32>,
     stops: u64,
@@ -346,6 +364,9 @@ impl ModelStream {
             end: ModelEnd::Open,
             end_source: EndSource::Application,
             exposed_final: None,
+            sent_fin: false,
+            sent_reset_stream: false,
+            sent_reset_stream_at: false,
             terminal: None,
             stop_code: None,
             stops: 0,
@@ -420,7 +441,7 @@ trait Sender {
     fn expose(
         &mut self,
         usage_end: VarInt,
-        end: ExposedEnd,
+        end: ExposedContent,
         connection: &mut ConnectionSendFlowController,
     ) -> Result<VarInt, SenderExposeUsageError>;
     fn sender_close(&mut self) -> Result<(), CloseError>;
@@ -434,7 +455,7 @@ trait Sender {
     fn abandon(&mut self);
     fn blocked_limit(&self) -> Option<VarInt>;
     fn blocked_sent(&mut self, limit: VarInt);
-    fn terminal(&mut self, state: SendTerminalState) -> bool;
+    fn terminal(&mut self, state: SendTerminalState) -> Result<(), EnterTerminalStateError>;
     fn close_connection(&mut self);
     fn snapshot(&self) -> Snapshot;
 }
@@ -554,7 +575,7 @@ macro_rules! impl_sender {
             fn expose(
                 &mut self,
                 usage_end: VarInt,
-                end: ExposedEnd,
+                end: ExposedContent,
                 connection: &mut ConnectionSendFlowController,
             ) -> Result<VarInt, SenderExposeUsageError> {
                 self.expose_usage_through(usage_end, end, connection)
@@ -596,8 +617,11 @@ macro_rules! impl_sender {
                 self.on_stream_data_blocked_sent(limit);
             }
 
-            fn terminal(&mut self, state: SendTerminalState) -> bool {
-                self.enter_terminal_state(state).is_ok()
+            fn terminal(
+                &mut self,
+                state: SendTerminalState,
+            ) -> Result<(), EnterTerminalStateError> {
+                self.enter_terminal_state(state)
             }
 
             fn close_connection(&mut self) {
@@ -679,23 +703,20 @@ fn step<S: Sender, P: PolicyModel>(
             expose(
                 stream,
                 usage_end,
-                ExposedEnd::Data,
+                ExposedContent::Data,
                 model,
                 senders,
                 connection,
             );
         }
-        Op::ExposeFinal { stream, usage_end } => {
+        Op::ExposeFinal {
+            stream,
+            usage_end,
+            frame,
+        } => {
             let s = &model.streams[stream];
             let usage_end = usage_end.or(s.final_size()).unwrap_or(s.written);
-            expose(
-                stream,
-                usage_end,
-                ExposedEnd::FinalSize,
-                model,
-                senders,
-                connection,
-            );
+            expose(stream, usage_end, frame, model, senders, connection);
         }
         Op::Close { stream } => {
             let s = &mut model.streams[stream];
@@ -763,17 +784,23 @@ fn step<S: Sender, P: PolicyModel>(
             } else {
                 SendTerminalState::DataRecvd
             };
-            // A terminal state follows the exposed end it acknowledges.
+            // A terminal state needs a committed end that can reach it, then
+            // the end frame it acknowledges: a FIN or a RESET_STREAM_AT for
+            // Data Recvd, a RESET_STREAM for Reset Recvd.
             let s = &mut model.streams[stream];
-            let legal = match s.end {
-                ModelEnd::Open => false,
-                ModelEnd::Closed { .. } => !reset && s.exposed_final.is_some(),
-                ModelEnd::Reset { .. } => s.exposed_final.is_some(),
+            let expected = match (s.end, reset) {
+                (ModelEnd::Open, _) => Err(EnterTerminalStateError::EndNotCommitted),
+                (ModelEnd::Closed { .. }, true) => Err(EnterTerminalStateError::ResetNotCommitted),
+                (_, false) if !(s.sent_fin || s.sent_reset_stream_at) => {
+                    Err(EnterTerminalStateError::FinOrResetStreamAtNotSent)
+                }
+                (_, true) if !s.sent_reset_stream => {
+                    Err(EnterTerminalStateError::ResetStreamNotSent)
+                }
+                _ => Ok(()),
             };
-            if s.end == ModelEnd::Open {
-                assert!(!senders[stream].terminal(state));
-            } else if legal {
-                assert!(senders[stream].terminal(state));
+            assert_eq!(senders[stream].terminal(state), expected);
+            if expected.is_ok() {
                 s.terminal.get_or_insert(state);
             }
         }
@@ -857,23 +884,24 @@ fn write<S: Sender, P: PolicyModel>(
 fn expose<S: Sender, P: PolicyModel>(
     stream: usize,
     usage_end: u64,
-    end: ExposedEnd,
+    end: ExposedContent,
     model: &mut Model<P>,
     senders: &mut [S; STREAMS],
     connection: &mut ConnectionSendFlowController,
 ) {
     let s = &mut model.streams[stream];
     let fixed = s.final_size();
-    let expected = match (end, fixed) {
-        (ExposedEnd::FinalSize, None) => Err(SenderExposeUsageError::FinalSizeNotFixed {
+    let announces_final_size = end != ExposedContent::Data;
+    let expected = match (announces_final_size, fixed) {
+        (true, None) => Err(SenderExposeUsageError::FinalSizeNotFixed {
             final_size: v(usage_end),
         }),
-        (ExposedEnd::FinalSize, Some(final_size)) if usage_end != final_size => {
+        (true, Some(final_size)) if usage_end != final_size => {
             Err(SenderExposeUsageError::FinalSizeMismatch {
                 source: FinalSizeChangeError::check(v(final_size), v(usage_end)).unwrap_err(),
             })
         }
-        (ExposedEnd::Data, Some(final_size)) if usage_end > final_size => {
+        (false, Some(final_size)) if usage_end > final_size => {
             Err(SenderExposeUsageError::BeyondFinalSize {
                 source: BeyondFinalSizeError::check(v(final_size), v(usage_end)).unwrap_err(),
             })
@@ -887,7 +915,13 @@ fn expose<S: Sender, P: PolicyModel>(
     assert_eq!(actual, expected.map(v));
     if let Ok(newly) = expected {
         s.exposure += newly;
-        if end == ExposedEnd::FinalSize {
+        match end {
+            ExposedContent::Data => {}
+            ExposedContent::Fin => s.sent_fin = true,
+            ExposedContent::ResetStream => s.sent_reset_stream = true,
+            ExposedContent::ResetStreamAt => s.sent_reset_stream_at = true,
+        }
+        if announces_final_size {
             s.exposed_final = Some(usage_end);
         }
     }

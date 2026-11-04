@@ -13,7 +13,7 @@ use crate::connection_send_credit::ConnectionSendFlowController;
 use crate::send_buffer::covered_bytes::CoveredBytes;
 use crate::send_buffer::offset_map::OffsetMapSendBuffer;
 use crate::send_buffer::{
-    AppendError, ApplyResetError, ExposeUsageError, ExposedEnd, ResetRetention, Selection,
+    AppendError, ApplyResetError, ExposeUsageError, ExposedContent, ResetRetention, Selection,
     SelectionConstraints, SendBuffer, TransmissionReceipt,
 };
 use sakuya_wire::application_error::ApplicationErrorCode;
@@ -88,10 +88,11 @@ impl<B: SendBuffer, F, T> SendBuffer for SendComposition<B, F, T> {
     fn expose_usage_through(
         &mut self,
         usage_end: VarInt,
-        end: ExposedEnd,
+        content: ExposedContent,
         connection: &mut ConnectionSendFlowController,
     ) -> Result<VarInt, ExposeUsageError> {
-        self.buffer.expose_usage_through(usage_end, end, connection)
+        self.buffer
+            .expose_usage_through(usage_end, content, connection)
     }
 
     fn select(&mut self, constraints: SelectionConstraints) -> Selection {

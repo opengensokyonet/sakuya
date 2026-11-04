@@ -23,8 +23,8 @@
 //! The signatures of the operations that name the final size are
 //! provisional.
 use super::{
-    CommittedEnd, EndPhase, EndSource, ResetTarget, SendEndState, SendTerminalState, StopSending,
-    StreamResetError, StreamSender, WriteLimit,
+    CommittedEnd, EndPhase, EndSource, ResetTarget, SendEndState, SendTerminalState, SentEndFrames,
+    StopSending, StreamResetError, StreamSender, WriteLimit,
 };
 use crate::connection::ConnectionClosedError;
 use crate::send::flow_control::{SendFlowControlPolicy, StreamCreditEvent};
@@ -602,7 +602,10 @@ where
     /// Resets the stream with `error_code` and reliable size zero
     /// (`RESET_STREAM`).
     ///
-    /// While no final size is fixed, the termination policy chooses it.
+    /// While no final size is fixed, the termination policy chooses it. A
+    /// stream that has already sent `RESET_STREAM_AT` keeps ending with
+    /// `RESET_STREAM_AT` at reliable size zero; see
+    /// [`StreamSender::expose_usage_through`].
     ///
     /// # Errors
     ///
@@ -862,7 +865,15 @@ where
     fn set_end(&mut self, end: CommittedEnd) {
         let terminal = self.terminal_state();
         debug_assert!(terminal.is_none());
-        self.end = EndPhase::Ended { end, terminal };
+        let sent = match &self.end {
+            EndPhase::Open => SentEndFrames::default(),
+            EndPhase::Ended { sent, .. } => *sent,
+        };
+        self.end = EndPhase::Ended {
+            end,
+            sent,
+            terminal,
+        };
     }
 
     /// Validates and commits an automatic action, returning the event that

@@ -2,7 +2,7 @@
 use super::covered_bytes::CoveredBytes;
 use super::visibility::{CoverError, VisibilitySettlement};
 use super::{
-    AppendError, ApplyResetError, ExposeUsageError, ExposedEnd, FinalSizeBeyondWrittenEndError,
+    AppendError, ApplyResetError, ExposeUsageError, ExposedContent, FinalSizeBeyondWrittenEndError,
     ResetRetention, Selection, SelectionConstraints, SendBuffer, TransmissionReceipt, append_error,
     apply_reset_error,
 };
@@ -141,11 +141,11 @@ impl SendBuffer for OffsetMapSendBuffer {
     fn expose_usage_through(
         &mut self,
         usage_end: VarInt,
-        end: ExposedEnd,
+        content: ExposedContent,
         connection: &mut ConnectionSendFlowController,
     ) -> Result<VarInt, ExposeUsageError> {
         self.visibility
-            .expose_usage_through(usage_end, end, self.written_end, connection)
+            .expose_usage_through(usage_end, content, self.written_end, connection)
     }
 
     fn select(&mut self, constraints: SelectionConstraints) -> Selection {

@@ -157,7 +157,7 @@ fn append_after_an_exposed_fin_fails() {
     let mut buffer = OffsetMapSendBuffer::new();
     append(&mut buffer, &mut connection, 10);
     buffer
-        .expose_usage_through(v(10), ExposedEnd::FinalSize, &mut connection)
+        .expose_usage_through(v(10), ExposedContent::Fin, &mut connection)
         .unwrap();
     let error = buffer
         .append(covered(&mut connection, b"late"))
@@ -186,7 +186,7 @@ fn reset_retention_is_checked_before_anything_changes() {
         })
     );
     buffer
-        .expose_usage_through(v(40), ExposedEnd::Data, &mut connection)
+        .expose_usage_through(v(40), ExposedContent::Data, &mut connection)
         .unwrap();
     assert_eq!(
         buffer.apply_reset(retention(30, 0)),
@@ -246,14 +246,14 @@ fn exposure_rejects_coverage_of_another_controller() {
     let mut buffer = OffsetMapSendBuffer::new();
     append(&mut buffer, &mut granting, 100);
     assert!(matches!(
-        buffer.expose_usage_through(v(50), ExposedEnd::Data, &mut other),
+        buffer.expose_usage_through(v(50), ExposedContent::Data, &mut other),
         Err(ExposeUsageError::ForeignReservation { .. })
     ));
     assert_eq!(buffer.exposure_end(), VarInt::ZERO);
     assert_eq!(granting.reserved(), v(100));
     assert_eq!(
         buffer
-            .expose_usage_through(v(50), ExposedEnd::Data, &mut granting)
+            .expose_usage_through(v(50), ExposedContent::Data, &mut granting)
             .unwrap(),
         v(50)
     );
@@ -267,7 +267,7 @@ fn settlement_exposure_needs_coverage() {
         .cover(VarInt::ZERO, covered(&mut connection, b"abcd"))
         .unwrap();
     assert_eq!(
-        settlement.expose_usage_through(v(6), ExposedEnd::Data, v(10), &mut connection),
+        settlement.expose_usage_through(v(6), ExposedContent::Data, v(10), &mut connection),
         Err(ExposeUsageError::BeyondCoverage {
             source: UsageBeyondCoverageError::check(v(6), v(4)).unwrap_err(),
         })
@@ -284,7 +284,7 @@ fn exposure_commits_new_usage_once() {
     append(&mut buffer, &mut connection, 500);
 
     let exposed = buffer
-        .expose_usage_through(v(300), ExposedEnd::Data, &mut connection)
+        .expose_usage_through(v(300), ExposedContent::Data, &mut connection)
         .unwrap();
     assert_eq!(exposed, v(300));
     assert_eq!(buffer.exposure_end(), v(300));
@@ -295,13 +295,13 @@ fn exposure_commits_new_usage_once() {
 
     // A retransmission or an earlier range commits nothing again.
     let exposed = buffer
-        .expose_usage_through(v(100), ExposedEnd::Data, &mut connection)
+        .expose_usage_through(v(100), ExposedContent::Data, &mut connection)
         .unwrap();
     assert_eq!(exposed, VarInt::ZERO);
     assert_eq!(buffer.exposure_end(), v(300));
 
     let exposed = buffer
-        .expose_usage_through(v(450), ExposedEnd::Data, &mut connection)
+        .expose_usage_through(v(450), ExposedContent::Data, &mut connection)
         .unwrap();
     assert_eq!(exposed, v(150));
     assert_eq!(
@@ -317,7 +317,7 @@ fn exposure_rejects_usage_beyond_the_written_end() {
     let mut buffer = OffsetMapSendBuffer::new();
     append(&mut buffer, &mut connection, 100);
     let error = buffer
-        .expose_usage_through(v(101), ExposedEnd::Data, &mut connection)
+        .expose_usage_through(v(101), ExposedContent::Data, &mut connection)
         .unwrap_err();
     assert_eq!(
         error,
@@ -334,11 +334,11 @@ fn exposed_final_size_constrains_later_exposures() {
     let mut buffer = OffsetMapSendBuffer::new();
     append(&mut buffer, &mut connection, 100);
     buffer
-        .expose_usage_through(v(60), ExposedEnd::Data, &mut connection)
+        .expose_usage_through(v(60), ExposedContent::Data, &mut connection)
         .unwrap();
 
     let error = buffer
-        .expose_usage_through(v(50), ExposedEnd::FinalSize, &mut connection)
+        .expose_usage_through(v(50), ExposedContent::Fin, &mut connection)
         .unwrap_err();
     assert_eq!(
         error,
@@ -349,13 +349,13 @@ fn exposed_final_size_constrains_later_exposures() {
 
     // A FIN at 80 fixes the exposed final size and commits up to it.
     let exposed = buffer
-        .expose_usage_through(v(80), ExposedEnd::FinalSize, &mut connection)
+        .expose_usage_through(v(80), ExposedContent::Fin, &mut connection)
         .unwrap();
     assert_eq!(exposed, v(20));
     assert_eq!(buffer.visibility().exposed_final_size(), Some(v(80)));
 
     let error = buffer
-        .expose_usage_through(v(90), ExposedEnd::Data, &mut connection)
+        .expose_usage_through(v(90), ExposedContent::Data, &mut connection)
         .unwrap_err();
     assert_eq!(
         error,
@@ -364,7 +364,7 @@ fn exposed_final_size_constrains_later_exposures() {
         }
     );
     let error = buffer
-        .expose_usage_through(v(100), ExposedEnd::FinalSize, &mut connection)
+        .expose_usage_through(v(100), ExposedContent::ResetStream, &mut connection)
         .unwrap_err();
     assert_eq!(
         error,
@@ -372,9 +372,9 @@ fn exposed_final_size_constrains_later_exposures() {
             source: FinalSizeChangeError::check(v(80), v(100)).unwrap_err(),
         }
     );
-    // Exposing the same final size again commits nothing.
+    // Exposing the same final size again, by any end frame, commits nothing.
     let exposed = buffer
-        .expose_usage_through(v(80), ExposedEnd::FinalSize, &mut connection)
+        .expose_usage_through(v(80), ExposedContent::ResetStreamAt, &mut connection)
         .unwrap();
     assert_eq!(exposed, VarInt::ZERO);
     assert_eq!(connection.committed(), v(80));
@@ -392,11 +392,11 @@ fn reset_final_size_is_exposed_without_data() {
     assert_eq!(connection.reserved(), v(70));
 
     let error = buffer
-        .expose_usage_through(v(80), ExposedEnd::Data, &mut connection)
+        .expose_usage_through(v(80), ExposedContent::Data, &mut connection)
         .unwrap_err();
     assert!(matches!(error, ExposeUsageError::BeyondFinalSize { .. }));
     let exposed = buffer
-        .expose_usage_through(v(70), ExposedEnd::FinalSize, &mut connection)
+        .expose_usage_through(v(70), ExposedContent::ResetStream, &mut connection)
         .unwrap();
     assert_eq!(exposed, v(70));
     assert_eq!(
@@ -413,7 +413,7 @@ fn fixing_an_exposed_final_size_keeps_it() {
     let mut buffer = OffsetMapSendBuffer::new();
     append(&mut buffer, &mut connection, 100);
     buffer
-        .expose_usage_through(v(80), ExposedEnd::FinalSize, &mut connection)
+        .expose_usage_through(v(80), ExposedContent::Fin, &mut connection)
         .unwrap();
     assert_eq!(buffer.visibility().exposed_final_size(), Some(v(80)));
     assert_eq!(

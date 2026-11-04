@@ -19,7 +19,7 @@ use crate::send_buffer::covered_bytes::CoveredBytes;
 use crate::send_buffer::offset_map::OffsetMapSendBuffer;
 use crate::send_buffer::visibility::FinalSizeBelowExposureError;
 use crate::send_buffer::{
-    AppendError, ApplyResetError, ExposedEnd, FinalSizeBeyondWrittenEndError, ResetRetention,
+    AppendError, ApplyResetError, ExposedContent, FinalSizeBeyondWrittenEndError, ResetRetention,
     Selection, SelectionConstraints, TransmissionReceipt,
 };
 use crate::stream_end::{FinalSizeChangeError, ResetCodeChangeError};
@@ -252,7 +252,22 @@ fn expose<C>(
     C: SendBuffer + SendFlowControlPolicy + SendTerminationPolicy,
 {
     sender
-        .expose_usage_through(v(usage_end), ExposedEnd::Data, connection)
+        .expose_usage_through(v(usage_end), ExposedContent::Data, connection)
+        .unwrap();
+}
+
+/// Settles the exposure of the end frame `content` at the committed final
+/// size.
+fn send_end<C>(
+    sender: &mut StreamSender<C>,
+    connection: &mut ConnectionSendFlowController,
+    content: ExposedContent,
+) where
+    C: SendBuffer + SendFlowControlPolicy + SendTerminationPolicy,
+{
+    let final_size = sender.end_state().final_size().unwrap();
+    sender
+        .expose_usage_through(final_size, content, connection)
         .unwrap();
 }
 
@@ -473,7 +488,7 @@ impl SendBuffer for ExhaustedBuffer {
     fn expose_usage_through(
         &mut self,
         _: VarInt,
-        _: ExposedEnd,
+        _: ExposedContent,
         _: &mut ConnectionSendFlowController,
     ) -> Result<VarInt, ExposeUsageError> {
         Ok(VarInt::ZERO)
@@ -524,6 +539,7 @@ fn write_at_the_largest_offset_is_a_permanent_error() {
 
 #[test]
 fn terminal_state_needs_a_committed_end() {
+    let mut connection = ConnectionSendFlowController::new(v(1000));
     let mut sender = test_sender(1000, false);
     assert_eq!(
         sender.enter_terminal_state(SendTerminalState::DataRecvd),
@@ -531,6 +547,13 @@ fn terminal_state_needs_a_committed_end() {
     );
     assert_eq!(sender.terminal_state(), None);
     sender.close().unwrap();
+    // The committed close is not enough: its FIN must have been sent.
+    assert_eq!(
+        sender.enter_terminal_state(SendTerminalState::DataRecvd),
+        Err(EnterTerminalStateError::FinOrResetStreamAtNotSent)
+    );
+    assert_eq!(sender.terminal_state(), None);
+    send_end(&mut sender, &mut connection, ExposedContent::Fin);
     sender
         .enter_terminal_state(SendTerminalState::DataRecvd)
         .unwrap();
@@ -556,6 +579,7 @@ fn reset_recvd_needs_a_committed_reset() {
     );
     assert_eq!(sender.terminal_state(), None);
     assert_eq!(sender.composition.termination.events.len(), events);
+    send_end(&mut sender, &mut connection, ExposedContent::Fin);
     sender
         .enter_terminal_state(SendTerminalState::DataRecvd)
         .unwrap();
@@ -570,10 +594,77 @@ fn reset_recvd_needs_a_committed_reset() {
     write_all(&mut sender, &mut connection, 10);
     sender.close().unwrap();
     sender.reset(CODE).unwrap();
+    // The committed reset is not enough: its RESET_STREAM must have been
+    // sent.
+    assert_eq!(
+        sender.enter_terminal_state(SendTerminalState::ResetRecvd),
+        Err(EnterTerminalStateError::ResetStreamNotSent)
+    );
+    assert_eq!(sender.terminal_state(), None);
+    send_end(&mut sender, &mut connection, ExposedContent::ResetStream);
     sender
         .enter_terminal_state(SendTerminalState::ResetRecvd)
         .unwrap();
     assert_eq!(sender.terminal_state(), Some(SendTerminalState::ResetRecvd));
+}
+
+/// After a plain reset, Data Recvd needs the FIN sent before: a
+/// `RESET_STREAM` does not let the peer learn that all data arrived.
+#[test]
+fn data_recvd_after_a_plain_reset_needs_the_fin() {
+    let mut connection = ConnectionSendFlowController::new(v(1000));
+
+    let mut sender = test_sender(1000, false);
+    write_all(&mut sender, &mut connection, 10);
+    sender.close().unwrap();
+    sender.reset(CODE).unwrap();
+    send_end(&mut sender, &mut connection, ExposedContent::ResetStream);
+    assert_eq!(
+        sender.enter_terminal_state(SendTerminalState::DataRecvd),
+        Err(EnterTerminalStateError::FinOrResetStreamAtNotSent)
+    );
+    assert_eq!(sender.terminal_state(), None);
+
+    // FIN sent, then reset: all data with the FIN acknowledged.
+    let mut sender = test_sender(1000, false);
+    write_all(&mut sender, &mut connection, 10);
+    sender.close().unwrap();
+    send_end(&mut sender, &mut connection, ExposedContent::Fin);
+    sender.reset(CODE).unwrap();
+    sender
+        .enter_terminal_state(SendTerminalState::DataRecvd)
+        .unwrap();
+    assert_eq!(sender.terminal_state(), Some(SendTerminalState::DataRecvd));
+}
+
+/// A stream ended by `RESET_STREAM_AT` reaches Data Recvd, not Reset Recvd,
+/// once the frame and the reliable prefix are acknowledged.
+#[test]
+fn reset_stream_at_reaches_data_recvd() {
+    let mut connection = ConnectionSendFlowController::new(v(1000));
+    let mut sender = test_sender(1000, true);
+    write_all(&mut sender, &mut connection, 100);
+    sender
+        .reset_at_with_final_size(CODE, v(40), v(100))
+        .unwrap();
+    assert_eq!(
+        sender.enter_terminal_state(SendTerminalState::DataRecvd),
+        Err(EnterTerminalStateError::FinOrResetStreamAtNotSent)
+    );
+    expose(&mut sender, &mut connection, 40);
+    send_end(&mut sender, &mut connection, ExposedContent::ResetStreamAt);
+    assert_eq!(
+        sender.enter_terminal_state(SendTerminalState::ResetRecvd),
+        Err(EnterTerminalStateError::ResetStreamNotSent)
+    );
+    // Lowering the reliable size to zero keeps the stream on
+    // RESET_STREAM_AT.
+    sender.reset_at(CODE, VarInt::ZERO).unwrap();
+    send_end(&mut sender, &mut connection, ExposedContent::ResetStreamAt);
+    sender
+        .enter_terminal_state(SendTerminalState::DataRecvd)
+        .unwrap();
+    assert_eq!(sender.terminal_state(), Some(SendTerminalState::DataRecvd));
 }
 
 #[test]
@@ -583,7 +674,7 @@ fn exposure_with_another_controller_fails_without_effect() {
     let mut sender = test_sender(1000, false);
     write_all(&mut sender, &mut connection, 100);
     assert!(matches!(
-        sender.expose_usage_through(v(50), ExposedEnd::Data, &mut other),
+        sender.expose_usage_through(v(50), ExposedContent::Data, &mut other),
         Err(SenderExposeUsageError::ForeignReservation { .. })
     ));
     assert_eq!(sender.exposure_end(), VarInt::ZERO);
@@ -636,6 +727,11 @@ fn empty_input_and_flush_table() {
 
     let mut reset_delivered = sender(1000);
     reset_delivered.reset(CODE).unwrap();
+    send_end(
+        &mut reset_delivered,
+        &mut connection,
+        ExposedContent::ResetStream,
+    );
     reset_delivered
         .enter_terminal_state(SendTerminalState::ResetRecvd)
         .unwrap();
@@ -801,6 +897,7 @@ fn reset_errors_follow_the_check_order() {
     let mut sender = test_sender(1000, true);
     write_all(&mut sender, &mut connection, 100);
     sender.reset(CODE).unwrap();
+    send_end(&mut sender, &mut connection, ExposedContent::ResetStream);
     sender
         .enter_terminal_state(SendTerminalState::ResetRecvd)
         .unwrap();
@@ -818,6 +915,7 @@ fn reset_errors_follow_the_check_order() {
     let mut sender = test_sender(1000, false);
     write_all(&mut sender, &mut connection, 100);
     sender.close().unwrap();
+    send_end(&mut sender, &mut connection, ExposedContent::Fin);
     sender
         .enter_terminal_state(SendTerminalState::DataRecvd)
         .unwrap();
@@ -888,8 +986,9 @@ fn state_transition_table() {
     let target = sender.end_state();
     sender.reset_at(CODE, v(60)).unwrap();
     sender.reset_at_with_final_size(CODE, v(60), v(60)).unwrap();
+    send_end(&mut sender, &mut connection, ExposedContent::ResetStreamAt);
     sender
-        .enter_terminal_state(SendTerminalState::ResetRecvd)
+        .enter_terminal_state(SendTerminalState::DataRecvd)
         .unwrap();
     sender.reset_at(CODE, v(60)).unwrap();
     assert_eq!(sender.end_state(), target);
@@ -971,6 +1070,7 @@ fn state_transition_table() {
     );
 
     // A terminal state after complete delivery takes no new reset.
+    send_end(&mut closed, &mut connection, ExposedContent::Fin);
     closed
         .enter_terminal_state(SendTerminalState::DataRecvd)
         .unwrap();
@@ -1276,7 +1376,7 @@ fn reset_keeps_coverage_up_to_the_final_size() {
 
     // Exposing the reset's final size commits the retained coverage.
     sender
-        .expose_usage_through(v(800), ExposedEnd::FinalSize, &mut connection)
+        .expose_usage_through(v(800), ExposedContent::ResetStreamAt, &mut connection)
         .unwrap();
     assert_eq!(
         (connection.reserved(), connection.committed()),
@@ -1325,7 +1425,7 @@ fn reset_at_after_close_before_the_fin_is_exposed() {
         (v(700), v(300))
     );
     sender
-        .expose_usage_through(v(1000), ExposedEnd::FinalSize, &mut connection)
+        .expose_usage_through(v(1000), ExposedContent::ResetStreamAt, &mut connection)
         .unwrap();
     assert_eq!(
         (connection.reserved(), connection.committed()),
@@ -1343,7 +1443,7 @@ fn reset_at_after_the_fin_is_exposed() {
     sender.close().unwrap();
     assert_eq!(
         sender
-            .expose_usage_through(v(1000), ExposedEnd::FinalSize, &mut connection)
+            .expose_usage_through(v(1000), ExposedContent::Fin, &mut connection)
             .unwrap(),
         v(1000)
     );
@@ -1356,12 +1456,12 @@ fn reset_at_after_the_fin_is_exposed() {
     );
     assert_eq!(
         sender
-            .expose_usage_through(v(1000), ExposedEnd::FinalSize, &mut connection)
+            .expose_usage_through(v(1000), ExposedContent::ResetStreamAt, &mut connection)
             .unwrap(),
         VarInt::ZERO
     );
     assert!(matches!(
-        sender.expose_usage_through(v(900), ExposedEnd::FinalSize, &mut connection),
+        sender.expose_usage_through(v(900), ExposedContent::ResetStreamAt, &mut connection),
         Err(SenderExposeUsageError::FinalSizeMismatch { .. })
     ));
 }
@@ -1372,7 +1472,7 @@ fn exposure_needs_a_fixed_final_size() {
     let mut sender = test_sender(1000, true);
     write_all(&mut sender, &mut connection, 100);
     assert_eq!(
-        sender.expose_usage_through(v(100), ExposedEnd::FinalSize, &mut connection),
+        sender.expose_usage_through(v(100), ExposedContent::Fin, &mut connection),
         Err(SenderExposeUsageError::FinalSizeNotFixed { final_size: v(100) })
     );
     expose(&mut sender, &mut connection, 50);
@@ -1726,6 +1826,7 @@ fn default_termination_resets_on_stop_sending() {
     let mut sender = default_sender(1000, true);
     write_all(&mut sender, &mut connection, 100);
     sender.close().unwrap();
+    send_end(&mut sender, &mut connection, ExposedContent::Fin);
     sender
         .enter_terminal_state(SendTerminalState::DataRecvd)
         .unwrap();

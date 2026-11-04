@@ -1,6 +1,6 @@
 //! The per-stream visibility settlement ([`VisibilitySettlement`]).
 use super::covered_bytes::CoveredBytes;
-use super::{ExposeUsageError, ExposedEnd, UsageBeyondWrittenEndError, expose_usage_error};
+use super::{ExposeUsageError, ExposedContent, UsageBeyondWrittenEndError, expose_usage_error};
 use crate::connection_send_credit::{ConnectionCreditReservation, ConnectionSendFlowController};
 use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
 use bytes::Bytes;
@@ -188,7 +188,7 @@ impl VisibilitySettlement {
     /// with an established one and is not below the exposure end, and that
     /// the coverage reaches the usage end with reservations `connection`
     /// granted. Then commits the coverage, advances the exposure end and, for
-    /// [`ExposedEnd::FinalSize`], records the exposed final size.
+    /// an end frame, records the exposed final size.
     ///
     /// # Errors
     ///
@@ -196,21 +196,22 @@ impl VisibilitySettlement {
     pub fn expose_usage_through(
         &mut self,
         usage_end: VarInt,
-        end: ExposedEnd,
+        content: ExposedContent,
         written_end: VarInt,
         connection: &mut ConnectionSendFlowController,
     ) -> Result<VarInt, ExposeUsageError> {
         UsageBeyondWrittenEndError::check(usage_end, written_end)
             .context(expose_usage_error::BeyondWrittenEndSnafu)?;
         if let Some(final_size) = self.final_size.established() {
-            match end {
-                ExposedEnd::Data => BeyondFinalSizeError::check(final_size, usage_end)
-                    .context(expose_usage_error::BeyondFinalSizeSnafu)?,
-                ExposedEnd::FinalSize => FinalSizeChangeError::check(final_size, usage_end)
-                    .context(expose_usage_error::FinalSizeMismatchSnafu)?,
+            if content.announces_final_size() {
+                FinalSizeChangeError::check(final_size, usage_end)
+                    .context(expose_usage_error::FinalSizeMismatchSnafu)?;
+            } else {
+                BeyondFinalSizeError::check(final_size, usage_end)
+                    .context(expose_usage_error::BeyondFinalSizeSnafu)?;
             }
         }
-        if end == ExposedEnd::FinalSize {
+        if content.announces_final_size() {
             FinalSizeBelowExposureError::check(usage_end, self.exposure_end)
                 .context(expose_usage_error::FinalSizeBelowExposureSnafu)?;
         }
@@ -223,7 +224,7 @@ impl VisibilitySettlement {
             self.commit_front(newly_exposed, connection);
             self.exposure_end = usage_end;
         }
-        if end == ExposedEnd::FinalSize {
+        if content.announces_final_size() {
             self.final_size = FinalSizeState::Exposed(usage_end);
         }
         Ok(newly_exposed)
