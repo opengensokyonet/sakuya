@@ -3,10 +3,15 @@
 //!
 //! Each capability is a trait the server's handshake takes as a parameter:
 //!
+//! - [`layers`]: the encrypted layers of a ClientHello, opened before the
+//!   handshake handles it.
 //! - [`choice`]: which cipher suite and key exchange group to use, from what
 //!   the ClientHello offers.
 //! - [`targets`]: which target the ClientHello asks for, and its
 //!   application protocol.
+//! - [`identity`]: the certificate chain a server presents, and its
+//!   signature.
+//! - [`peer`]: whether to ask the client for a certificate.
 //! - [`ticket`]: which session tickets to issue, and which offered ones to
 //!   accept.
 //!
@@ -14,5 +19,8 @@
 //! an implementation decides within the rules and does not enforce them.
 
 pub mod choice;
+pub mod identity;
+pub mod layers;
+pub mod peer;
 pub mod targets;
 pub mod ticket;

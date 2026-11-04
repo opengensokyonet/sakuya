@@ -53,3 +53,39 @@ pub(crate) fn client_hello_body(
 pub(crate) fn client_hello(extensions: &[u8]) -> Vec<u8> {
     message(1, &client_hello_body(&[], &[0x13, 0x01], &[0], extensions))
 }
+
+/// The output of a future that is ready at once.
+pub(crate) fn ready_now<F: core::future::Future>(future: F) -> F::Output {
+    use core::task::{Context, Poll, Waker};
+    let mut future = core::pin::pin!(future);
+    match future
+        .as_mut()
+        .poll(&mut Context::from_waker(Waker::noop()))
+    {
+        Poll::Ready(output) => output,
+        Poll::Pending => panic!("future not ready"),
+    }
+}
+
+/// A ClientHello read from `bytes` as the handshake reads it: the whole
+/// message and the parsed hello over it.
+pub(crate) fn received_client_hello(
+    bytes: &[u8],
+) -> (
+    crate::message::HandshakeMessage,
+    crate::message::client_hello::ClientHello<bytes::Bytes>,
+) {
+    use crate::message::{
+        MessageLimits, client_hello::codec::ReadClientHelloHostExt as _,
+        codec::ReadHandshakeMessageHostExt as _,
+    };
+    let message = { bytes }
+        .sync_read_handshake_message_unpin(MessageLimits::default(), None)
+        .unwrap();
+    let hello = message
+        .encoded()
+        .clone()
+        .sync_read_client_hello_unpin()
+        .unwrap();
+    (message, hello)
+}

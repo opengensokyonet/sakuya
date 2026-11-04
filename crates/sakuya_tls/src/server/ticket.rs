@@ -521,28 +521,15 @@ mod tests {
         extension::pre_shared_key::{OfferedPsks, PskBinder, PskIdentity, PskIndex},
         message::new_session_ticket::{TicketLifetime, TicketNonce},
         schedule::ResumptionPsk,
+        test_support::ready_now as now,
     };
     use bytes::Bytes;
-    use core::future::Future;
     use nitori_crypto::{Digest, HashAlgorithm, Secret};
     use nitori_crypto_aws_lc::AwsLcBackend;
     use std::{
         sync::Arc,
-        task::{Context, Poll, Waker},
         time::{Duration, SystemTime},
     };
-
-    /// The output of a future that is ready at once.
-    fn now<F: Future>(future: F) -> F::Output {
-        let mut future = core::pin::pin!(future);
-        match future
-            .as_mut()
-            .poll(&mut Context::from_waker(Waker::noop()))
-        {
-            Poll::Ready(output) => output,
-            Poll::Pending => panic!("future not ready"),
-        }
-    }
 
     type Table = SingleUseTicketTable<&'static str, AwsLcBackend, Arc<ManualClock>>;
 
