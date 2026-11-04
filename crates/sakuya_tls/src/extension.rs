@@ -9,12 +9,12 @@
 //! The readers recognize the extensions of [`RestrictedExtension`]. Each of
 //! them may appear only in the messages RFC 8446 §4.2, RFC 9001 §8.2 and
 //! RFC 9849 list for it, and a recognized extension in another message is
-//! [`ExtensionNotAllowed`], which calls for illegal_parameter; each message
+//! [`ExtensionNotAllowedError`], which calls for illegal_parameter; each message
 //! names the recognized extensions it may not carry in an enum of its own,
 //! which is the payload of that failure. An extension
 //! of any other type is kept as an [`UnknownExtension`], with its data as it
 //! is, for the handshake to ignore (RFC 8446 §9.3). No type may appear twice
-//! in a block ([`DuplicateExtension`]).
+//! in a block ([`DuplicateExtensionError`]).
 //!
 //! The structured data of the recognized extensions lives in the child
 //! modules; extensions whose data is a list of code points use the lists of
@@ -30,7 +30,7 @@ use crate::{
     alert::AlertDescription,
     code_point::code_point,
     message::MessageSource,
-    vector::{ExcessBytes, LengthOutOfRange, ReadVectorError, read_u16, read_vector},
+    vector::{ExcessBytesError, LengthOutOfRangeError, ReadVectorError, read_u16, read_vector},
     width::Width,
 };
 use bytes::Buf;
@@ -218,9 +218,9 @@ impl<C: AsRef<[u8]>> OpaqueData<C> {
     ///
     /// # Errors
     ///
-    /// [`LengthOutOfRange`] for data above 65535 bytes.
-    pub fn new(data: C) -> Result<Self, LengthOutOfRange> {
-        LengthOutOfRange::check(data.as_ref().len(), 0..=Width::U16.max())?;
+    /// [`LengthOutOfRangeError`] for data above 65535 bytes.
+    pub fn new(data: C) -> Result<Self, LengthOutOfRangeError> {
+        LengthOutOfRangeError::check(data.as_ref().len(), 0..=Width::U16.max())?;
         Ok(Self { data })
     }
 }
@@ -249,15 +249,18 @@ impl<C: AsRef<[u8]>> UnknownExtension<C> {
     ///
     /// # Errors
     ///
-    /// [`InvalidUnknownExtension::Recognized`] for a type the readers
+    /// [`InvalidUnknownExtensionError::Recognized`] for a type the readers
     /// recognize, whose data they would read in its structured form, and
-    /// [`InvalidUnknownExtension::Data`] for data above 2<sup>16</sup> − 1
+    /// [`InvalidUnknownExtensionError::Data`] for data above 2<sup>16</sup> − 1
     /// bytes.
-    pub fn new(extension_type: ExtensionType, data: C) -> Result<Self, InvalidUnknownExtension> {
+    pub fn new(
+        extension_type: ExtensionType,
+        data: C,
+    ) -> Result<Self, InvalidUnknownExtensionError> {
         if let Some(extension) = extension_type.restricted() {
-            return Err(InvalidUnknownExtension::Recognized { extension });
+            return Err(InvalidUnknownExtensionError::Recognized { extension });
         }
-        LengthOutOfRange::check(data.as_ref().len(), 0..=Width::U16.max())
+        LengthOutOfRangeError::check(data.as_ref().len(), 0..=Width::U16.max())
             .context(invalid_unknown_extension::DataSnafu)?;
         Ok(Self {
             extension_type,
@@ -293,7 +296,7 @@ impl<C> UnknownExtension<C> {
 /// Failures of [`UnknownExtension::new`].
 #[derive(Debug, Snafu)]
 #[snafu(module(invalid_unknown_extension), visibility(pub(crate)))]
-pub enum InvalidUnknownExtension {
+pub enum InvalidUnknownExtensionError {
     /// The type is one the readers recognize.
     #[snafu(display("{extension:?} is a recognized extension"))]
     Recognized {
@@ -304,18 +307,18 @@ pub enum InvalidUnknownExtension {
     #[snafu(display("unknown extension data too long"))]
     Data {
         /// The broken range.
-        source: LengthOutOfRange,
+        source: LengthOutOfRangeError,
     },
 }
 
 /// An extension type appears twice in one block (RFC 8446 §4.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("{extension:?} appears more than once"))]
-pub struct DuplicateExtension {
+pub struct DuplicateExtensionError {
     extension: ExtensionType,
 }
 
-impl DuplicateExtension {
+impl DuplicateExtensionError {
     /// The extension type.
     pub const fn extension(self) -> ExtensionType {
         self.extension
@@ -334,11 +337,11 @@ impl DuplicateExtension {
 /// extensions that message may not carry, and only those.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("{extension:?} is not allowed in this message"))]
-pub struct ExtensionNotAllowed<X: core::fmt::Debug> {
+pub struct ExtensionNotAllowedError<X: core::fmt::Debug> {
     extension: X,
 }
 
-impl<X: Copy + core::fmt::Debug> ExtensionNotAllowed<X> {
+impl<X: Copy + core::fmt::Debug> ExtensionNotAllowedError<X> {
     pub(crate) fn new(extension: X) -> Self {
         Self { extension }
     }
@@ -405,8 +408,8 @@ pub(crate) fn excess<X>(
     extension: RestrictedExtension,
     left: usize,
     of: fn(RestrictedExtension) -> Option<X>,
-) -> Option<(X, ExcessBytes)> {
-    let excess = ExcessBytes::check(left).err()?;
+) -> Option<(X, ExcessBytesError)> {
+    let excess = ExcessBytesError::check(left).err()?;
     match of(extension) {
         Some(extension) => Some((extension, excess)),
         // invariant: a reader takes the whole data of an extension without a
@@ -420,9 +423,9 @@ pub(crate) fn excess<X>(
 pub(crate) fn not_allowed<X: Copy + core::fmt::Debug>(
     extension: RestrictedExtension,
     of: fn(RestrictedExtension) -> Option<X>,
-) -> ExtensionNotAllowed<X> {
+) -> ExtensionNotAllowedError<X> {
     match of(extension) {
-        Some(extension) => ExtensionNotAllowed::new(extension),
+        Some(extension) => ExtensionNotAllowedError::new(extension),
         // invariant: the caller has matched every extension the message may
         // carry, and the disallowed enum names every other one.
         None => unreachable!("{extension:?} may appear in this message"),
@@ -458,7 +461,7 @@ pub enum ExtensionBlockError {
     #[snafu(transparent)]
     Duplicate {
         /// The type.
-        source: DuplicateExtension,
+        source: DuplicateExtensionError,
     },
 }
 
@@ -478,18 +481,18 @@ impl ExtensionBlockError {
 /// Failures of building the extension block of a message to write.
 #[derive(Debug, Snafu)]
 #[snafu(module(invalid_extensions), visibility(pub(crate)))]
-pub enum InvalidExtensions {
+pub enum InvalidExtensionsError {
     /// An extension type appears twice.
     #[snafu(transparent)]
     Duplicate {
         /// The type.
-        source: DuplicateExtension,
+        source: DuplicateExtensionError,
     },
     /// The block is shorter or longer than the message allows.
     #[snafu(display("extension block length out of range"))]
     Length {
         /// The broken range.
-        source: LengthOutOfRange,
+        source: LengthOutOfRangeError,
     },
 }
 
@@ -507,7 +510,7 @@ pub(crate) trait BlockEntry {
 pub(crate) fn check_block<X: BlockEntry>(
     extensions: &[X],
     range: core::ops::RangeInclusive<usize>,
-) -> Result<usize, InvalidExtensions> {
+) -> Result<usize, InvalidExtensionsError> {
     let mut seen = Seen::default();
     let mut len = 0;
     for extension in extensions {
@@ -519,7 +522,7 @@ pub(crate) fn check_block<X: BlockEntry>(
         debug_assert!(data_len <= Width::U16.max(), "{extension_type:?}");
         len += 4 + data_len;
     }
-    LengthOutOfRange::check(len, range).context(invalid_extensions::LengthSnafu)?;
+    LengthOutOfRangeError::check(len, range).context(invalid_extensions::LengthSnafu)?;
     Ok(len)
 }
 
@@ -529,9 +532,12 @@ pub(crate) struct Seen(SmallVec<[ExtensionType; 24]>);
 
 impl Seen {
     /// Records `extension`, which must not have been seen before.
-    pub(crate) fn insert(&mut self, extension: ExtensionType) -> Result<(), DuplicateExtension> {
+    pub(crate) fn insert(
+        &mut self,
+        extension: ExtensionType,
+    ) -> Result<(), DuplicateExtensionError> {
         if self.0.contains(&extension) {
-            return Err(DuplicateExtension { extension });
+            return Err(DuplicateExtensionError { extension });
         }
         self.0.push(extension);
         Ok(())

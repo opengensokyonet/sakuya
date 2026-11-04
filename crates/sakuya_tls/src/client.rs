@@ -34,10 +34,10 @@ impl ServerTarget {
     ///
     /// # Errors
     ///
-    /// [`InvalidHostName`] when `name` is not a syntactically valid DNS
+    /// [`InvalidHostNameError`] when `name` is not a syntactically valid DNS
     /// name, such as an IP address or a name with an empty label.
-    pub fn from_host_name(name: &str) -> Result<Self, InvalidHostName> {
-        let parsed = DnsName::try_from(name).map_err(|_| InvalidHostName {
+    pub fn from_host_name(name: &str) -> Result<Self, InvalidHostNameError> {
+        let parsed = DnsName::try_from(name).map_err(|_| InvalidHostNameError {
             name: name.to_owned(),
         })?;
         Ok(Self {
@@ -58,11 +58,11 @@ impl ServerTarget {
 /// A string is not a valid DNS host name.
 #[derive(Clone, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("{name:?} is not a valid DNS host name"))]
-pub struct InvalidHostName {
+pub struct InvalidHostNameError {
     name: String,
 }
 
-impl InvalidHostName {
+impl InvalidHostNameError {
     /// The string that was given.
     pub fn name(&self) -> &str {
         &self.name

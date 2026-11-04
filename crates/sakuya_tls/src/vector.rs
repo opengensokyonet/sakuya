@@ -4,7 +4,7 @@
 //! followed by that many bytes (RFC 8446 §3.4). [`ReadVectorError`] is the
 //! failure of reading such a field, [`ReadBoundedVectorError`] that of a
 //! field whose length has a narrower range than its length field allows,
-//! with [`LengthOutOfRange`] for the range. [`ExcessBytes`] reports bytes
+//! with [`LengthOutOfRangeError`] for the range. [`ExcessBytesError`] reports bytes
 //! left over once a structure of known length has been read.
 
 use crate::{
@@ -29,13 +29,13 @@ use snafu::{ResultExt, Snafu};
 /// outside [`min`](Self::min)`..=`[`max`](Self::max).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("length {len} is outside {min}..={max}"))]
-pub struct LengthOutOfRange {
+pub struct LengthOutOfRangeError {
     len: usize,
     min: usize,
     max: usize,
 }
 
-impl LengthOutOfRange {
+impl LengthOutOfRangeError {
     /// The length.
     pub const fn length(self) -> usize {
         self.len
@@ -69,11 +69,11 @@ impl LengthOutOfRange {
 /// It is constructed only when bytes are left, so the excess is never zero.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("{excess} bytes follow the last field"))]
-pub struct ExcessBytes {
+pub struct ExcessBytesError {
     excess: NonZeroUsize,
 }
 
-impl ExcessBytes {
+impl ExcessBytesError {
     /// The number of bytes left over.
     pub const fn excess(self) -> NonZeroUsize {
         self.excess
@@ -129,7 +129,7 @@ pub enum ReadBoundedVectorError {
     #[snafu(transparent)]
     Range {
         /// The broken range.
-        source: LengthOutOfRange,
+        source: LengthOutOfRangeError,
     },
     /// The bytes the length field states are not all there.
     #[snafu(display("vector read failed"))]
@@ -252,7 +252,7 @@ pub(crate) async fn read_bounded_vector<F: MessageSource, A: ReceiverAccess<Fami
     let len = read_length(io, width)
         .await
         .context(read_bounded_vector_error::LengthSnafu)?;
-    LengthOutOfRange::check(len, range)?;
+    LengthOutOfRangeError::check(len, range)?;
     read_bytes(io, len)
         .await
         .context(read_bounded_vector_error::BytesSnafu)

@@ -4,7 +4,7 @@
 //! offers; in a ServerHello it is the one [`KeyShareEntry`] of the server; in
 //! a HelloRetryRequest it is the `NamedGroup` the server selected.
 
-use crate::{vector::LengthOutOfRange, width::Width};
+use crate::{vector::LengthOutOfRangeError, width::Width};
 use nitori_crypto::NamedGroup;
 use snafu::{ResultExt, Snafu};
 
@@ -20,10 +20,10 @@ impl<C: AsRef<[u8]>> KeyShareEntry<C> {
     ///
     /// # Errors
     ///
-    /// [`LengthOutOfRange`] if `key_exchange` is empty or longer than 65531
+    /// [`LengthOutOfRangeError`] if `key_exchange` is empty or longer than 65531
     /// bytes, so that the entry fits the extension.
-    pub fn new(group: NamedGroup, key_exchange: C) -> Result<Self, LengthOutOfRange> {
-        LengthOutOfRange::check(key_exchange.as_ref().len(), 1..=Width::U16.max() - 4)?;
+    pub fn new(group: NamedGroup, key_exchange: C) -> Result<Self, LengthOutOfRangeError> {
+        LengthOutOfRangeError::check(key_exchange.as_ref().len(), 1..=Width::U16.max() - 4)?;
         Ok(Self {
             group,
             key_exchange,
@@ -62,13 +62,13 @@ impl<C: AsRef<[u8]>> ClientShares<C> {
     ///
     /// # Errors
     ///
-    /// [`InvalidClientShares::DuplicateGroup`] if two entries share a group,
-    /// and [`InvalidClientShares::Length`] if the encoding is longer than
+    /// [`InvalidClientSharesError::DuplicateGroup`] if two entries share a group,
+    /// and [`InvalidClientSharesError::Length`] if the encoding is longer than
     /// 65533 bytes, so that the list fits the extension.
-    pub fn new(entries: Vec<KeyShareEntry<C>>) -> Result<Self, InvalidClientShares> {
+    pub fn new(entries: Vec<KeyShareEntry<C>>) -> Result<Self, InvalidClientSharesError> {
         check_groups(&entries)?;
         let len = entries.iter().map(KeyShareEntry::encoded_len).sum();
-        LengthOutOfRange::check(len, 0..=Width::U16.max() - 2)
+        LengthOutOfRangeError::check(len, 0..=Width::U16.max() - 2)
             .context(invalid_client_shares::LengthSnafu)?;
         Ok(Self { entries })
     }
@@ -96,13 +96,13 @@ impl<C> ClientShares<C> {
 }
 
 /// Checks that no two entries share a group.
-fn check_groups<C>(entries: &[KeyShareEntry<C>]) -> Result<(), DuplicateGroup> {
+fn check_groups<C>(entries: &[KeyShareEntry<C>]) -> Result<(), DuplicateGroupError> {
     for (index, entry) in entries.iter().enumerate() {
         if entries[..index]
             .iter()
             .any(|seen| seen.group == entry.group)
         {
-            return Err(DuplicateGroup { group: entry.group });
+            return Err(DuplicateGroupError { group: entry.group });
         }
     }
     Ok(())
@@ -111,11 +111,11 @@ fn check_groups<C>(entries: &[KeyShareEntry<C>]) -> Result<(), DuplicateGroup> {
 /// Two shares of a client are of the same group (RFC 8446 §4.2.8).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("more than one key share of {group:?}"))]
-pub struct DuplicateGroup {
+pub struct DuplicateGroupError {
     group: NamedGroup,
 }
 
-impl DuplicateGroup {
+impl DuplicateGroupError {
     /// The group.
     pub const fn group(self) -> NamedGroup {
         self.group
@@ -125,18 +125,18 @@ impl DuplicateGroup {
 /// Failures of [`ClientShares::new`].
 #[derive(Debug, Snafu)]
 #[snafu(module(invalid_client_shares), visibility(pub(crate)))]
-pub enum InvalidClientShares {
+pub enum InvalidClientSharesError {
     /// Two entries share a group.
     #[snafu(transparent)]
     DuplicateGroup {
         /// The group.
-        source: DuplicateGroup,
+        source: DuplicateGroupError,
     },
     /// The list is too long.
     #[snafu(display("key share list too long"))]
     Length {
         /// The broken range.
-        source: LengthOutOfRange,
+        source: LengthOutOfRangeError,
     },
 }
 
@@ -146,7 +146,7 @@ pub mod codec {
     // documentation comments; the module documentation above describes them.
     #![allow(missing_docs)]
 
-    use super::{ClientShares, DuplicateGroup, KeyShareEntry, check_groups};
+    use super::{ClientShares, DuplicateGroupError, KeyShareEntry, check_groups};
     use crate::{
         alert::AlertDescription,
         message::MessageSource,
@@ -260,7 +260,7 @@ pub mod codec {
         #[snafu(transparent)]
         DuplicateGroup {
             /// The group.
-            source: DuplicateGroup,
+            source: DuplicateGroupError,
         },
     }
 

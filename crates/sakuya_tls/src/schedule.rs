@@ -49,7 +49,7 @@ use crate::{
         new_session_ticket::TicketNonce,
     },
     role::{Client, HandshakeRole, Server},
-    vector::LengthOutOfRange,
+    vector::LengthOutOfRangeError,
     width::Width,
 };
 use bytes::Bytes;
@@ -393,16 +393,16 @@ impl<C: TlsCrypto + Clone> EarlySecret<Client, C> {
     ///
     /// # Errors
     ///
-    /// [`UnofferedPsk`] if the ServerHello selects a PSK, since the client
+    /// [`UnofferedPskError`] if the ServerHello selects a PSK, since the client
     /// offered none.
     pub fn server_hello(
         self,
         shared: Secret,
         server_hello: &[u8],
         selected: Option<PskIndex>,
-    ) -> Result<(HandshakeSecret<Client, C>, HandshakeTrafficSecrets), UnofferedPsk> {
+    ) -> Result<(HandshakeSecret<Client, C>, HandshakeTrafficSecrets), UnofferedPskError> {
         if let Some(index) = selected {
-            return Err(UnofferedPsk { index });
+            return Err(UnofferedPskError { index });
         }
         Ok(handshake(
             self.chain,
@@ -466,15 +466,15 @@ impl<C: TlsCrypto + Clone> PskEarlySecret<Client, C> {
     ///
     /// # Errors
     ///
-    /// [`UnofferedPsk`] for an index other than 0, the one PSK offered.
+    /// [`UnofferedPskError`] for an index other than 0, the one PSK offered.
     pub fn server_hello(
         self,
         shared: Secret,
         server_hello: &[u8],
         selected: Option<PskIndex>,
-    ) -> Result<(HandshakeSecret<Client, C>, HandshakeTrafficSecrets), UnofferedPsk> {
+    ) -> Result<(HandshakeSecret<Client, C>, HandshakeTrafficSecrets), UnofferedPskError> {
         match selected {
-            Some(index) if index != PskIndex::new(0) => Err(UnofferedPsk { index }),
+            Some(index) if index != PskIndex::new(0) => Err(UnofferedPskError { index }),
             Some(_) => Ok(handshake(
                 self.chain,
                 &self.early,
@@ -505,11 +505,11 @@ impl<C: TlsCrypto + Clone> PskEarlySecret<Server, C> {
     ///
     /// # Errors
     ///
-    /// [`BinderMismatch`] if it is not the binder.
-    pub fn verify_binder(&self, binder: &[u8]) -> Result<(), BinderMismatch> {
+    /// [`BinderMismatchError`] if it is not the binder.
+    pub fn verify_binder(&self, binder: &[u8]) -> Result<(), BinderMismatchError> {
         self.chain
             .check_verify_data(&self.binder_key(), binder)
-            .map_err(|TagMismatch| BinderMismatch)
+            .map_err(|TagMismatch| BinderMismatchError)
     }
 
     /// The 0-RTT secret the server receives with, once the whole ClientHello
@@ -752,9 +752,9 @@ impl<L: AsRef<[u8]>> ExporterLabel<L> {
     ///
     /// # Errors
     ///
-    /// [`LengthOutOfRange`] for an empty label or one above 249 bytes.
-    pub fn new(label: L) -> Result<Self, LengthOutOfRange> {
-        LengthOutOfRange::check(label.as_ref().len(), 1..=LABEL_MAX)?;
+    /// [`LengthOutOfRangeError`] for an empty label or one above 249 bytes.
+    pub fn new(label: L) -> Result<Self, LengthOutOfRangeError> {
+        LengthOutOfRangeError::check(label.as_ref().len(), 1..=LABEL_MAX)?;
         Ok(Self { label })
     }
 }
@@ -941,9 +941,9 @@ impl FinishedError {
 /// A binder the client sent is not the binder of its PSK.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("PSK binder does not match the ClientHello"))]
-pub struct BinderMismatch;
+pub struct BinderMismatchError;
 
-impl BinderMismatch {
+impl BinderMismatchError {
     /// The alert the failure calls for: decrypt_error (RFC 8446 §6.2).
     pub fn alert(&self) -> crate::alert::AlertDescription {
         crate::alert::AlertDescription::DECRYPT_ERROR
@@ -953,11 +953,11 @@ impl BinderMismatch {
 /// The ServerHello selects a PSK the client did not offer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("server selected PSK {}, which was not offered", index.get()))]
-pub struct UnofferedPsk {
+pub struct UnofferedPskError {
     index: PskIndex,
 }
 
-impl UnofferedPsk {
+impl UnofferedPskError {
     /// The index the server selected.
     pub const fn index(self) -> PskIndex {
         self.index

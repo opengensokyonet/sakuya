@@ -3,10 +3,10 @@
 use crate::extension::extension_subset;
 use crate::{
     extension::{
-        BlockEntry, ExtensionType, InvalidExtensions, UnknownExtension, check_block,
+        BlockEntry, ExtensionType, InvalidExtensionsError, UnknownExtension, check_block,
         early_data::MaxEarlyDataSize,
     },
-    vector::LengthOutOfRange,
+    vector::LengthOutOfRangeError,
     width::Width,
 };
 use snafu::{ResultExt, Snafu};
@@ -27,10 +27,10 @@ impl TicketLifetime {
     ///
     /// # Errors
     ///
-    /// [`TicketLifetimeTooLong`] for more than seven days.
-    pub const fn new(seconds: u32) -> Result<Self, TicketLifetimeTooLong> {
+    /// [`TicketLifetimeTooLongError`] for more than seven days.
+    pub const fn new(seconds: u32) -> Result<Self, TicketLifetimeTooLongError> {
         if seconds > Self::MAX.0 {
-            return Err(TicketLifetimeTooLong { seconds });
+            return Err(TicketLifetimeTooLongError { seconds });
         }
         Ok(Self(seconds))
     }
@@ -47,11 +47,11 @@ impl TicketLifetime {
 /// above 604800 seconds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("ticket lifetime of {seconds} seconds exceeds 604800"))]
-pub struct TicketLifetimeTooLong {
+pub struct TicketLifetimeTooLongError {
     seconds: u32,
 }
 
-impl TicketLifetimeTooLong {
+impl TicketLifetimeTooLongError {
     /// The rejected lifetime.
     pub const fn seconds(self) -> u32 {
         self.seconds
@@ -70,9 +70,9 @@ impl<C: AsRef<[u8]>> TicketNonce<C> {
     ///
     /// # Errors
     ///
-    /// [`LengthOutOfRange`] for a nonce above 255 bytes.
-    pub fn new(nonce: C) -> Result<Self, LengthOutOfRange> {
-        LengthOutOfRange::check(nonce.as_ref().len(), 0..=Width::U8.max())?;
+    /// [`LengthOutOfRangeError`] for a nonce above 255 bytes.
+    pub fn new(nonce: C) -> Result<Self, LengthOutOfRangeError> {
+        LengthOutOfRangeError::check(nonce.as_ref().len(), 0..=Width::U8.max())?;
         Ok(Self { nonce })
     }
 }
@@ -125,8 +125,8 @@ impl<C: AsRef<[u8]>> NewSessionTicket<C> {
     ///
     /// # Errors
     ///
-    /// [`InvalidNewSessionTicket::Ticket`] for an empty ticket or one above
-    /// 65535 bytes, and [`InvalidNewSessionTicket::Extensions`] for an
+    /// [`InvalidNewSessionTicketError::Ticket`] for an empty ticket or one above
+    /// 65535 bytes, and [`InvalidNewSessionTicketError::Extensions`] for an
     /// extension type that appears twice or
     /// a block above 65534 bytes.
     pub fn new(
@@ -135,9 +135,9 @@ impl<C: AsRef<[u8]>> NewSessionTicket<C> {
         ticket_nonce: TicketNonce<C>,
         ticket: C,
         extensions: Vec<NewSessionTicketExtension<C>>,
-    ) -> Result<Self, InvalidNewSessionTicket> {
+    ) -> Result<Self, InvalidNewSessionTicketError> {
         use invalid_new_session_ticket::*;
-        LengthOutOfRange::check(ticket.as_ref().len(), 1..=Width::U16.max())
+        LengthOutOfRangeError::check(ticket.as_ref().len(), 1..=Width::U16.max())
             .context(TicketSnafu)?;
         check_block(&extensions, BLOCK).context(ExtensionsSnafu)?;
         Ok(Self {
@@ -203,18 +203,18 @@ impl<C> NewSessionTicket<C> {
 /// Failures of [`NewSessionTicket::new`].
 #[derive(Debug, Snafu)]
 #[snafu(module(invalid_new_session_ticket), visibility(pub(crate)))]
-pub enum InvalidNewSessionTicket {
+pub enum InvalidNewSessionTicketError {
     /// The ticket is empty or too long.
     #[snafu(display("ticket length out of range"))]
     Ticket {
         /// The broken range.
-        source: LengthOutOfRange,
+        source: LengthOutOfRangeError,
     },
     /// The extension block is invalid.
     #[snafu(display("NewSessionTicket extensions invalid"))]
     Extensions {
         /// Why.
-        source: InvalidExtensions,
+        source: InvalidExtensionsError,
     },
 }
 
@@ -252,18 +252,18 @@ pub mod codec {
 
     use super::{
         BLOCK, NewSessionTicket, NewSessionTicketDisallowedExtension, NewSessionTicketExtension,
-        TicketLifetime, TicketLifetimeTooLong, TicketNonce,
+        TicketLifetime, TicketLifetimeTooLongError, TicketNonce,
     };
     use crate::{
         alert::AlertDescription,
         extension::{
-            BlockEntry as _, BlockReader, ExtensionBlockError, ExtensionNotAllowed,
+            BlockEntry as _, BlockReader, ExtensionBlockError, ExtensionNotAllowedError,
             RestrictedExtension, UnknownExtension, early_data::MaxEarlyDataSize, not_allowed,
             read_extension_block,
         },
         message::{HandshakeType, MessageSource, ReadHeaderError, read_body},
         vector::{
-            ExcessBytes, LengthOutOfRange, Out, ReadBoundedVectorError, ReadVectorError,
+            ExcessBytesError, LengthOutOfRangeError, Out, ReadBoundedVectorError, ReadVectorError,
             read_bounded_vector, read_u32, read_vector,
         },
         width::Width,
@@ -284,7 +284,8 @@ pub mod codec {
     ) -> Result<NewSessionTicket<F::Bytes>, ReadNewSessionTicketError> {
         let mut body = read_body(io, HandshakeType::NEW_SESSION_TICKET).await?;
         let ticket = body.sync_read_new_session_ticket_body_unpin()?;
-        ExcessBytes::check(body.remaining()).context(read_new_session_ticket_error::ExcessSnafu)?;
+        ExcessBytesError::check(body.remaining())
+            .context(read_new_session_ticket_error::ExcessSnafu)?;
         Ok(ticket)
     }
 
@@ -301,7 +302,7 @@ pub mod codec {
             .await
             .context(TicketSnafu)?;
         let block = read_extension_block(io).await.context(ExtensionsSnafu)?;
-        LengthOutOfRange::check(block.remaining(), BLOCK).context(ExtensionsLengthSnafu)?;
+        LengthOutOfRangeError::check(block.remaining(), BLOCK).context(ExtensionsLengthSnafu)?;
         let mut block = BlockReader::new(block);
         let mut extensions = Vec::new();
         while let Some((extension_type, mut data)) = block.next().context(ExtensionsSnafu)? {
@@ -325,7 +326,7 @@ pub mod codec {
             });
             // early_data is the one recognized extension a NewSessionTicket
             // may carry, and the only one read here.
-            ExcessBytes::check(data.remaining()).context(EarlyDataExcessSnafu)?;
+            ExcessBytesError::check(data.remaining()).context(EarlyDataExcessSnafu)?;
         }
         Ok(NewSessionTicket {
             ticket_lifetime,
@@ -357,7 +358,7 @@ pub mod codec {
         #[snafu(display("NewSessionTicket body has excess bytes"))]
         Excess {
             /// The excess.
-            source: ExcessBytes,
+            source: ExcessBytesError,
         },
         /// ticket_lifetime could not be read.
         #[snafu(display("ticket_lifetime read failed"))]
@@ -369,7 +370,7 @@ pub mod codec {
         #[snafu(transparent)]
         LifetimeTooLong {
             /// The lifetime.
-            source: TicketLifetimeTooLong,
+            source: TicketLifetimeTooLongError,
         },
         /// ticket_age_add could not be read.
         #[snafu(display("ticket_age_add read failed"))]
@@ -399,20 +400,20 @@ pub mod codec {
         #[snafu(display("NewSessionTicket extension block length out of range"))]
         ExtensionsLength {
             /// The broken range.
-            source: LengthOutOfRange,
+            source: LengthOutOfRangeError,
         },
         /// A recognized extension that this message may not carry.
         #[snafu(transparent)]
         ExtensionNotAllowed {
             /// The extension.
-            source: ExtensionNotAllowed<NewSessionTicketDisallowedExtension>,
+            source: ExtensionNotAllowedError<NewSessionTicketDisallowedExtension>,
         },
         /// The data of `early_data`, the one recognized extension this
         /// message may carry, is longer than its four bytes.
         #[snafu(display("early_data data has excess bytes"))]
         EarlyDataExcess {
             /// The excess.
-            source: ExcessBytes,
+            source: ExcessBytesError,
         },
         /// `early_data` could not be read.
         #[snafu(display("early_data max_early_data_size read failed"))]

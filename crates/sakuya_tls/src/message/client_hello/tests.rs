@@ -1,5 +1,5 @@
 use super::{
-    ClientHello, ClientHelloExtension, InvalidClientHello,
+    ClientHello, ClientHelloExtension, InvalidClientHelloError,
     codec::{ReadClientHelloError, ReadClientHelloHostExt as _, WriteClientHelloHostExt as _},
 };
 use crate::{
@@ -7,7 +7,7 @@ use crate::{
     cipher_suite::CipherSuite,
     code_point::{CodePointList, codec::ReadCodePointListError},
     extension::{
-        ExtensionBlockError, ExtensionType, InvalidExtensions, OpaqueData, UnknownExtension,
+        ExtensionBlockError, ExtensionType, InvalidExtensionsError, OpaqueData, UnknownExtension,
         key_share::codec::ReadClientSharesError,
         pre_shared_key::{OfferedPsks, PskBinder, PskIdentity},
     },
@@ -260,7 +260,10 @@ fn construction_checks_the_block() {
         ClientHelloExtension::SupportedVersions(versions.clone()),
     ])
     .unwrap_err();
-    assert!(matches!(error, InvalidClientHello::PreSharedKeyNotLast));
+    assert!(matches!(
+        error,
+        InvalidClientHelloError::PreSharedKeyNotLast
+    ));
     let error = new(vec![
         ClientHelloExtension::SupportedVersions(versions.clone()),
         ClientHelloExtension::SupportedVersions(versions.clone()),
@@ -268,15 +271,15 @@ fn construction_checks_the_block() {
     .unwrap_err();
     assert!(matches!(
         error,
-        InvalidClientHello::Extensions {
-            source: InvalidExtensions::Duplicate { .. }
+        InvalidClientHelloError::Extensions {
+            source: InvalidExtensionsError::Duplicate { .. }
         }
     ));
     let error = new(vec![ClientHelloExtension::EarlyData]).unwrap_err();
     assert!(matches!(
         error,
-        InvalidClientHello::Extensions {
-            source: InvalidExtensions::Length { .. }
+        InvalidClientHelloError::Extensions {
+            source: InvalidExtensionsError::Length { .. }
         }
     ));
     let long = vec![0; 0x1_0000];

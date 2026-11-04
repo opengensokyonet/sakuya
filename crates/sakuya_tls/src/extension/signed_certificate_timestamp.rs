@@ -5,7 +5,7 @@
 //! [`SignedCertificateTimestamps`], the serialized SCTs for the
 //! certificate, which this crate does not interpret.
 
-use crate::{vector::LengthOutOfRange, width::Width};
+use crate::{vector::LengthOutOfRangeError, width::Width};
 
 /// A nonempty list of serialized SCTs, each of 1 to 65535 bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -18,15 +18,15 @@ impl<C: AsRef<[u8]>> SignedCertificateTimestamps<C> {
     ///
     /// # Errors
     ///
-    /// [`LengthOutOfRange`] if the list is empty, a timestamp is empty, or
+    /// [`LengthOutOfRangeError`] if the list is empty, a timestamp is empty, or
     /// the encoding is longer than 65533 bytes, so that the list fits the
     /// extension.
-    pub fn new(timestamps: Vec<C>) -> Result<Self, LengthOutOfRange> {
+    pub fn new(timestamps: Vec<C>) -> Result<Self, LengthOutOfRangeError> {
         for timestamp in &timestamps {
-            LengthOutOfRange::check(timestamp.as_ref().len(), 1..=Width::U16.max())?;
+            LengthOutOfRangeError::check(timestamp.as_ref().len(), 1..=Width::U16.max())?;
         }
         let len = timestamps.iter().map(|sct| 2 + sct.as_ref().len()).sum();
-        LengthOutOfRange::check(len, 1..=Width::U16.max() - 2)?;
+        LengthOutOfRangeError::check(len, 1..=Width::U16.max() - 2)?;
         Ok(Self { timestamps })
     }
 

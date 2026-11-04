@@ -33,7 +33,7 @@ use crate::{
     alert::AlertDescription,
     code_point::code_point,
     vector::{
-        LengthOutOfRange, ReadBoundedVectorError, read_bounded_vector, read_bytes, read_u8,
+        LengthOutOfRangeError, ReadBoundedVectorError, read_bounded_vector, read_bytes, read_u8,
         read_u24,
     },
     width::Width,
@@ -131,7 +131,7 @@ pub enum ReadHeaderError {
     #[snafu(transparent)]
     UnexpectedType {
         /// The types.
-        source: UnexpectedType,
+        source: UnexpectedTypeError,
     },
     /// The length could not be read.
     #[snafu(display("handshake message length read failed"))]
@@ -164,11 +164,11 @@ impl ReadHeaderError {
 /// says which type that is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("message of another type, {found:?}"))]
-pub struct UnexpectedType {
+pub struct UnexpectedTypeError {
     found: HandshakeType,
 }
 
-impl UnexpectedType {
+impl UnexpectedTypeError {
     /// The type of the message.
     pub const fn found(self) -> HandshakeType {
         self.found
@@ -183,7 +183,7 @@ pub(crate) async fn read_body<F: MessageSource, A: ReceiverAccess<Family = F>>(
     use read_header_error::*;
     let found = HandshakeType(read_u8(io).await.context(TypeSnafu)?);
     if found != expected {
-        return Err(UnexpectedType { found }.into());
+        return Err(UnexpectedTypeError { found }.into());
     }
     let len = read_u24(io).await.context(LengthSnafu)?;
     read_bytes(io, len as usize).await.context(BodySnafu)
@@ -218,9 +218,9 @@ impl LegacySessionId {
     ///
     /// # Errors
     ///
-    /// [`LengthOutOfRange`] if `bytes` is longer than 32.
-    pub fn new(bytes: &[u8]) -> Result<Self, LengthOutOfRange> {
-        LengthOutOfRange::check(bytes.len(), 0..=Self::MAX_LEN)?;
+    /// [`LengthOutOfRangeError`] if `bytes` is longer than 32.
+    pub fn new(bytes: &[u8]) -> Result<Self, LengthOutOfRangeError> {
+        LengthOutOfRangeError::check(bytes.len(), 0..=Self::MAX_LEN)?;
         let mut id = Self::EMPTY;
         id.bytes[..bytes.len()].copy_from_slice(bytes);
         id.len = bytes.len() as u8;
@@ -270,10 +270,10 @@ impl MessageLimit {
     ///
     /// # Errors
     ///
-    /// [`MessageLimitTooLarge`] if `len` is above 2<sup>24</sup> − 1.
-    pub const fn new(len: u32) -> Result<Self, MessageLimitTooLarge> {
+    /// [`MessageLimitTooLargeError`] if `len` is above 2<sup>24</sup> − 1.
+    pub const fn new(len: u32) -> Result<Self, MessageLimitTooLargeError> {
         if len > Self::MAX.0 {
-            return Err(MessageLimitTooLarge { len });
+            return Err(MessageLimitTooLargeError { len });
         }
         Ok(Self(len))
     }
@@ -295,11 +295,11 @@ impl MessageLimit {
 /// above 2<sup>24</sup> − 1.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("message limit of {len} bytes exceeds 16777215"))]
-pub struct MessageLimitTooLarge {
+pub struct MessageLimitTooLargeError {
     len: u32,
 }
 
-impl MessageLimitTooLarge {
+impl MessageLimitTooLargeError {
     /// The rejected length.
     pub const fn length(self) -> u32 {
         self.len
@@ -496,19 +496,19 @@ pub mod codec {
         let message_type = HandshakeType(header[0]);
         let len = u32::from_be_bytes([0, header[1], header[2], header[3]]);
         let Some(message) = ReceivedMessage::new(message_type) else {
-            return Err(UnexpectedMessage {
+            return Err(UnexpectedMessageError {
                 message: message_type,
             }
             .into());
         };
         let Some(limit) = limits.limit(message, hash) else {
-            return Err(UnexpectedMessage {
+            return Err(UnexpectedMessageError {
                 message: message_type,
             }
             .into());
         };
         if len > limit {
-            return Err(MessageTooLong {
+            return Err(MessageTooLongError {
                 message,
                 len,
                 limit,
@@ -549,13 +549,13 @@ pub mod codec {
         #[snafu(transparent)]
         Unexpected {
             /// The type.
-            source: UnexpectedMessage,
+            source: UnexpectedMessageError,
         },
         /// The message is longer than the limit for its type.
         #[snafu(transparent)]
         TooLong {
             /// The length and the limit.
-            source: MessageTooLong,
+            source: MessageTooLongError,
         },
         /// The body could not be read.
         #[snafu(display("handshake message body read failed"))]
@@ -594,11 +594,11 @@ pub mod codec {
     /// before the cipher suite is known.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
     #[snafu(display("{message:?} message is not received here"))]
-    pub struct UnexpectedMessage {
+    pub struct UnexpectedMessageError {
         message: HandshakeType,
     }
 
-    impl UnexpectedMessage {
+    impl UnexpectedMessageError {
         /// The type of the message.
         pub const fn message(self) -> HandshakeType {
             self.message
@@ -611,13 +611,13 @@ pub mod codec {
     /// above the limit.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
     #[snafu(display("{message:?} message of {len} bytes exceeds the limit of {limit} bytes"))]
-    pub struct MessageTooLong {
+    pub struct MessageTooLongError {
         message: ReceivedMessage,
         len: u32,
         limit: u32,
     }
 
-    impl MessageTooLong {
+    impl MessageTooLongError {
         /// The type of the message.
         pub const fn message(self) -> ReceivedMessage {
             self.message

@@ -12,7 +12,7 @@ use time::UtcDateTime;
 /// DER that does not have the expected structure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("malformed DER"))]
-pub struct MalformedDer;
+pub struct MalformedDerError;
 
 pub(crate) const SEQUENCE: u8 = 0x30;
 pub(crate) const OBJECT_IDENTIFIER: u8 = 0x06;
@@ -55,20 +55,20 @@ impl<'a> Reader<'a> {
         self.rest.first().copied()
     }
 
-    pub(crate) fn read(&mut self) -> Result<Element<'a>, MalformedDer> {
+    pub(crate) fn read(&mut self) -> Result<Element<'a>, MalformedDerError> {
         let bytes = self.rest;
-        let (&tag, after_tag) = bytes.split_first().ok_or(MalformedDer)?;
+        let (&tag, after_tag) = bytes.split_first().ok_or(MalformedDerError)?;
         // High tag numbers do not occur in X.509.
         if tag & 0x1f == 0x1f {
-            return Err(MalformedDer);
+            return Err(MalformedDerError);
         }
-        let (&first, mut after_len) = after_tag.split_first().ok_or(MalformedDer)?;
+        let (&first, mut after_len) = after_tag.split_first().ok_or(MalformedDerError)?;
         let len = match first {
             0..=0x7f => usize::from(first),
             0x81..=0x83 => {
                 let count = usize::from(first & 0x7f);
                 if after_len.len() < count {
-                    return Err(MalformedDer);
+                    return Err(MalformedDerError);
                 }
                 let (len_bytes, rest) = after_len.split_at(count);
                 after_len = rest;
@@ -78,10 +78,10 @@ impl<'a> Reader<'a> {
             }
             // Indefinite lengths are not DER, and longer lengths do not fit
             // a handshake message.
-            _ => return Err(MalformedDer),
+            _ => return Err(MalformedDerError),
         };
         if after_len.len() < len {
-            return Err(MalformedDer);
+            return Err(MalformedDerError);
         }
         let header = bytes.len() - after_len.len();
         let (encoded, rest) = bytes.split_at(header + len);
@@ -93,16 +93,16 @@ impl<'a> Reader<'a> {
         })
     }
 
-    pub(crate) fn expect(&mut self, tag: u8) -> Result<Element<'a>, MalformedDer> {
+    pub(crate) fn expect(&mut self, tag: u8) -> Result<Element<'a>, MalformedDerError> {
         let element = self.read()?;
         if element.tag != tag {
-            return Err(MalformedDer);
+            return Err(MalformedDerError);
         }
         Ok(element)
     }
 
     /// Reads the element only if its tag is `tag`.
-    pub(crate) fn optional(&mut self, tag: u8) -> Result<Option<Element<'a>>, MalformedDer> {
+    pub(crate) fn optional(&mut self, tag: u8) -> Result<Option<Element<'a>>, MalformedDerError> {
         if self.peek_tag() == Some(tag) {
             self.read().map(Some)
         } else {
@@ -111,11 +111,11 @@ impl<'a> Reader<'a> {
     }
 
     /// The contents of the one element of `bytes`, of tag `tag`.
-    pub(crate) fn single(bytes: &'a [u8], tag: u8) -> Result<&'a [u8], MalformedDer> {
+    pub(crate) fn single(bytes: &'a [u8], tag: u8) -> Result<&'a [u8], MalformedDerError> {
         let mut reader = Self::new(bytes);
         let element = reader.expect(tag)?;
         if !reader.is_empty() {
-            return Err(MalformedDer);
+            return Err(MalformedDerError);
         }
         Ok(element.contents)
     }
@@ -148,7 +148,7 @@ pub(crate) fn wrap(tag: u8, contents: &[u8]) -> Vec<u8> {
 
 /// A UTCTime or GeneralizedTime in the forms X.509 allows: seconds, no
 /// fraction, in UTC (RFC 5280 §4.1.2.5).
-pub(crate) fn read_time(element: Element<'_>) -> Result<UtcDateTime, MalformedDer> {
+pub(crate) fn read_time(element: Element<'_>) -> Result<UtcDateTime, MalformedDerError> {
     let digits = element.contents;
     let (year, rest) = match (element.tag, digits.len()) {
         (UTC_TIME, 13) => {
@@ -160,10 +160,10 @@ pub(crate) fn read_time(element: Element<'_>) -> Result<UtcDateTime, MalformedDe
             )
         }
         (GENERALIZED_TIME, 15) => (number(&digits[..4])?, &digits[4..]),
-        _ => return Err(MalformedDer),
+        _ => return Err(MalformedDerError),
     };
     if rest[10] != b'Z' {
-        return Err(MalformedDer);
+        return Err(MalformedDerError);
     }
     let month = number(&rest[0..2])?;
     let day = number(&rest[2..4])?;
@@ -177,24 +177,24 @@ pub(crate) fn read_time(element: Element<'_>) -> Result<UtcDateTime, MalformedDe
         || minute > 59
         || second > 59
     {
-        return Err(MalformedDer);
+        return Err(MalformedDerError);
     }
     let days = days_from_civil(year, month, day);
     let seconds = days * 86_400 + hour * 3600 + minute * 60 + second;
     // Years before 1970 do not occur in certificates this verifier
     // accepts; they are malformed here.
     if seconds < 0 {
-        return Err(MalformedDer);
+        return Err(MalformedDerError);
     }
-    UtcDateTime::from_unix_timestamp(seconds).map_err(|_| MalformedDer)
+    UtcDateTime::from_unix_timestamp(seconds).map_err(|_| MalformedDerError)
 }
 
-fn number(digits: &[u8]) -> Result<i64, MalformedDer> {
+fn number(digits: &[u8]) -> Result<i64, MalformedDerError> {
     digits.iter().try_fold(0, |value, &digit| {
         if digit.is_ascii_digit() {
             Ok(value * 10 + i64::from(digit - b'0'))
         } else {
-            Err(MalformedDer)
+            Err(MalformedDerError)
         }
     })
 }
@@ -222,11 +222,11 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        Element, GENERALIZED_TIME, MalformedDer, Reader, SEQUENCE, UTC_TIME, read_time, wrap,
+        Element, GENERALIZED_TIME, MalformedDerError, Reader, SEQUENCE, UTC_TIME, read_time, wrap,
     };
     use time::UtcDateTime;
 
-    fn time(tag: u8, text: &str) -> Result<UtcDateTime, MalformedDer> {
+    fn time(tag: u8, text: &str) -> Result<UtcDateTime, MalformedDerError> {
         let encoded = wrap(tag, text.as_bytes());
         read_time(Element {
             tag,
@@ -262,7 +262,7 @@ mod tests {
             &[0x1f, 0x01, 0x00],
             &[0x30, 0x81],
         ] {
-            assert_eq!(Reader::new(bytes).read().unwrap_err(), MalformedDer);
+            assert_eq!(Reader::new(bytes).read().unwrap_err(), MalformedDerError);
         }
         assert!(Reader::new(&[0x02, 0x00]).expect(SEQUENCE).is_err());
         assert!(Reader::single(&[0x30, 0x00, 0x30, 0x00], SEQUENCE).is_err());

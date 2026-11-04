@@ -8,11 +8,11 @@
 use crate::extension::extension_subset;
 use crate::{
     extension::{
-        BlockEntry, ExtensionType, InvalidExtensions, UnknownExtension,
+        BlockEntry, ExtensionType, InvalidExtensionsError, UnknownExtension,
         certificate_type::CertificateType, check_block,
         signed_certificate_timestamp::SignedCertificateTimestamps,
     },
-    vector::LengthOutOfRange,
+    vector::LengthOutOfRangeError,
     width::Width,
 };
 use snafu::{ResultExt, Snafu};
@@ -75,14 +75,14 @@ impl<C: AsRef<[u8]>> CertificateEntry<C> {
     ///
     /// # Errors
     ///
-    /// [`InvalidCertificateEntry::Data`] for empty data or data above
-    /// 2<sup>24</sup> − 1 bytes, and [`InvalidCertificateEntry::Extensions`]
+    /// [`InvalidCertificateEntryError::Data`] for empty data or data above
+    /// 2<sup>24</sup> − 1 bytes, and [`InvalidCertificateEntryError::Extensions`]
     /// for an extension type that appears twice or a block above 65535 bytes.
     pub fn new(
         data: C,
         extensions: Vec<CertificateEntryExtension<C>>,
-    ) -> Result<Self, InvalidCertificateEntry> {
-        LengthOutOfRange::check(data.as_ref().len(), 1..=Width::U24.max())
+    ) -> Result<Self, InvalidCertificateEntryError> {
+        LengthOutOfRangeError::check(data.as_ref().len(), 1..=Width::U24.max())
             .context(invalid_certificate_entry::DataSnafu)?;
         check_block(&extensions, 0..=Width::U16.max())
             .context(invalid_certificate_entry::ExtensionsSnafu)?;
@@ -116,18 +116,18 @@ impl<C> CertificateEntry<C> {
 /// Failures of [`CertificateEntry::new`].
 #[derive(Debug, Snafu)]
 #[snafu(module(invalid_certificate_entry), visibility(pub(crate)))]
-pub enum InvalidCertificateEntry {
+pub enum InvalidCertificateEntryError {
     /// The data is empty or too long.
     #[snafu(display("certificate entry data length out of range"))]
     Data {
         /// The broken range.
-        source: LengthOutOfRange,
+        source: LengthOutOfRangeError,
     },
     /// The extension block is invalid.
     #[snafu(display("certificate entry extensions invalid"))]
     Extensions {
         /// Why.
-        source: InvalidExtensions,
+        source: InvalidExtensionsError,
     },
 }
 
@@ -172,14 +172,14 @@ impl<C: AsRef<[u8]>> Certificate<C> {
     ///
     /// # Errors
     ///
-    /// [`InvalidCertificate::Context`] for a context above 255 bytes, and
-    /// [`InvalidCertificate::Length`] for a message body above
+    /// [`InvalidCertificateError::Context`] for a context above 255 bytes, and
+    /// [`InvalidCertificateError::Length`] for a message body above
     /// 2<sup>24</sup> − 1 bytes.
     pub fn new(
         certificate_request_context: C,
         certificates: CertificateList<C>,
-    ) -> Result<Self, InvalidCertificate> {
-        LengthOutOfRange::check(
+    ) -> Result<Self, InvalidCertificateError> {
+        LengthOutOfRangeError::check(
             certificate_request_context.as_ref().len(),
             0..=Width::U8.max(),
         )
@@ -188,7 +188,7 @@ impl<C: AsRef<[u8]>> Certificate<C> {
             certificate_request_context,
             certificates,
         };
-        LengthOutOfRange::check(certificate.body_len(), 0..=Width::U24.max())
+        LengthOutOfRangeError::check(certificate.body_len(), 0..=Width::U24.max())
             .context(invalid_certificate::LengthSnafu)?;
         Ok(certificate)
     }
@@ -227,18 +227,18 @@ impl<C> Certificate<C> {
 /// Failures of [`Certificate::new`].
 #[derive(Debug, Snafu)]
 #[snafu(module(invalid_certificate), visibility(pub(crate)))]
-pub enum InvalidCertificate {
+pub enum InvalidCertificateError {
     /// The context is too long.
     #[snafu(display("certificate_request_context too long"))]
     Context {
         /// The broken range.
-        source: LengthOutOfRange,
+        source: LengthOutOfRangeError,
     },
     /// The message body is too long.
     #[snafu(display("Certificate message too long"))]
     Length {
         /// The broken range.
-        source: LengthOutOfRange,
+        source: LengthOutOfRangeError,
     },
 }
 
@@ -281,7 +281,7 @@ pub mod codec {
     use crate::{
         alert::AlertDescription,
         extension::{
-            BlockEntry as _, BlockReader, ExtensionBlockError, ExtensionNotAllowed,
+            BlockEntry as _, BlockReader, ExtensionBlockError, ExtensionNotAllowedError,
             RestrictedExtension, UnknownExtension, not_allowed, read_extension_block,
             signed_certificate_timestamp::codec::{
                 ReadSignedCertificateTimestampsError, ReadSignedCertificateTimestampsHostExt as _,
@@ -289,7 +289,7 @@ pub mod codec {
         },
         message::{HandshakeType, MessageSource, ReadHeaderError, read_body},
         vector::{
-            ExcessBytes, Out, ReadBoundedVectorError, ReadVectorError, read_bounded_vector,
+            ExcessBytesError, Out, ReadBoundedVectorError, ReadVectorError, read_bounded_vector,
             read_vector,
         },
         width::Width,
@@ -313,7 +313,7 @@ pub mod codec {
         use read_certificate_error::*;
         let mut body = read_body(io, HandshakeType::CERTIFICATE).await?;
         let (certificate_request_context, mut list) = body.sync_read_certificate_fields_unpin()?;
-        ExcessBytes::check(body.remaining()).context(ExcessSnafu)?;
+        ExcessBytesError::check(body.remaining()).context(ExcessSnafu)?;
         let mut entries = Vec::new();
         while list.has_remaining() {
             entries.push(
@@ -376,7 +376,8 @@ pub mod codec {
             });
             // signed_certificate_timestamp is the one recognized extension an
             // entry may carry, and the only one read here.
-            ExcessBytes::check(data.remaining()).context(SignedCertificateTimestampExcessSnafu)?;
+            ExcessBytesError::check(data.remaining())
+                .context(SignedCertificateTimestampExcessSnafu)?;
         }
         Ok(CertificateEntry { data, extensions })
     }
@@ -395,7 +396,7 @@ pub mod codec {
         #[snafu(display("Certificate body has excess bytes"))]
         Excess {
             /// The excess.
-            source: ExcessBytes,
+            source: ExcessBytesError,
         },
         /// certificate_request_context could not be read.
         #[snafu(display("certificate_request_context read failed"))]
@@ -455,14 +456,14 @@ pub mod codec {
         #[snafu(transparent)]
         ExtensionNotAllowed {
             /// The extension.
-            source: ExtensionNotAllowed<CertificateEntryDisallowedExtension>,
+            source: ExtensionNotAllowedError<CertificateEntryDisallowedExtension>,
         },
         /// The data of `signed_certificate_timestamp`, the one recognized
         /// extension an entry may carry, is longer than its fields.
         #[snafu(display("signed_certificate_timestamp data has excess bytes"))]
         SignedCertificateTimestampExcess {
             /// The excess.
-            source: ExcessBytes,
+            source: ExcessBytesError,
         },
         /// `signed_certificate_timestamp` could not be read.
         #[snafu(display("signed_certificate_timestamp read failed"))]

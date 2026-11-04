@@ -11,8 +11,8 @@
 //! Chrome's CT policy.
 
 use super::{
-    der::{self, MalformedDer, Reader},
-    public_key::{InvalidPublicKey, PublicKeyAlgorithm, SubjectPublicKey},
+    der::{self, MalformedDerError, Reader},
+    public_key::{InvalidPublicKeyError, PublicKeyAlgorithm, SubjectPublicKey},
 };
 use crate::clock::elapsed;
 use crate::extension::signed_certificate_timestamp::codec::{
@@ -87,14 +87,14 @@ impl CtLog {
     ///
     /// # Errors
     ///
-    /// [`InvalidLogKey`] when `key` is not an ECDSA P-256 or RSA key, the
+    /// [`InvalidLogKeyError`] when `key` is not an ECDSA P-256 or RSA key, the
     /// two kinds RFC 6962 §2.1.4 allows.
     pub fn new(
         id: LogId,
         key: &[u8],
         operator: impl Into<String>,
         state: LogState,
-    ) -> Result<Self, InvalidLogKey> {
+    ) -> Result<Self, InvalidLogKeyError> {
         let key = SubjectPublicKey::from_spki(key).context(invalid_log_key::KeySnafu)?;
         if !matches!(
             key.algorithm(),
@@ -142,12 +142,12 @@ impl CtLog {
 /// The key of a [`CtLog`] is not one a log may have.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(module(invalid_log_key), visibility(pub(crate)))]
-pub enum InvalidLogKey {
+pub enum InvalidLogKeyError {
     /// The key is not a key this crate reads.
     #[snafu(display("log key invalid"))]
     Key {
         /// The failure.
-        source: InvalidPublicKey,
+        source: InvalidPublicKeyError,
     },
     /// The key is neither ECDSA P-256 nor RSA.
     #[snafu(display("log key of {algorithm:?}, not ECDSA P-256 or RSA"))]
@@ -361,7 +361,7 @@ pub enum TransparencyError {
     #[snafu(display("certificate malformed"))]
     MalformedCertificate {
         /// The failure.
-        source: MalformedDer,
+        source: MalformedDerError,
     },
     /// The embedded SCT list could not be read.
     #[snafu(display("embedded SCT list malformed"))]
@@ -397,7 +397,7 @@ struct Leaf<'a> {
 }
 
 impl<'a> Leaf<'a> {
-    fn parse(certificate: &'a [u8]) -> Result<Self, MalformedDer> {
+    fn parse(certificate: &'a [u8]) -> Result<Self, MalformedDerError> {
         let mut parts = Reader::new(Reader::single(certificate, der::SEQUENCE)?);
         let tbs = parts.expect(der::SEQUENCE)?.contents;
         let mut fields = Reader::new(tbs);
@@ -409,7 +409,7 @@ impl<'a> Leaf<'a> {
         let not_before = der::read_time(validity.read()?)?;
         let not_after = der::read_time(validity.read()?)?;
         if !validity.is_empty() {
-            return Err(MalformedDer);
+            return Err(MalformedDerError);
         }
         fields.expect(der::SEQUENCE)?;
         fields.expect(der::SEQUENCE)?;
@@ -418,7 +418,7 @@ impl<'a> Leaf<'a> {
         let before_extensions = &tbs[..tbs.len() - fields.rest().len()];
         let extensions = fields.optional(0xa3)?;
         if !fields.is_empty() {
-            return Err(MalformedDer);
+            return Err(MalformedDerError);
         }
         let mut kept = Vec::new();
         let mut timestamps = None;
@@ -434,7 +434,7 @@ impl<'a> Leaf<'a> {
                 extension.optional(der::BOOLEAN)?;
                 let value = extension.expect(der::OCTET_STRING)?.contents;
                 if !extension.is_empty() || timestamps.is_some() {
-                    return Err(MalformedDer);
+                    return Err(MalformedDerError);
                 }
                 timestamps = Some(Reader::single(value, der::OCTET_STRING)?);
             }

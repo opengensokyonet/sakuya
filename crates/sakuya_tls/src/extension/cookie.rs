@@ -1,6 +1,6 @@
 //! The `cookie` extension (RFC 8446 §4.2.2).
 
-use crate::{vector::LengthOutOfRange, width::Width};
+use crate::{vector::LengthOutOfRangeError, width::Width};
 
 /// The data of a `cookie` extension: an opaque value of 1 to 65533 bytes, so
 /// that the extension data fits its two-byte length.
@@ -14,9 +14,9 @@ impl<C: AsRef<[u8]>> Cookie<C> {
     ///
     /// # Errors
     ///
-    /// [`LengthOutOfRange`] if `cookie` is empty or longer than 65533 bytes.
-    pub fn new(cookie: C) -> Result<Self, LengthOutOfRange> {
-        LengthOutOfRange::check(cookie.as_ref().len(), 1..=Width::U16.max() - 2)?;
+    /// [`LengthOutOfRangeError`] if `cookie` is empty or longer than 65533 bytes.
+    pub fn new(cookie: C) -> Result<Self, LengthOutOfRangeError> {
+        LengthOutOfRangeError::check(cookie.as_ref().len(), 1..=Width::U16.max() - 2)?;
         Ok(Self { cookie })
     }
 

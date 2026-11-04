@@ -11,7 +11,7 @@
 //! the modes of `psk_key_exchange_modes`. The [`codec`] module reads and
 //! writes both.
 
-use crate::{vector::LengthOutOfRange, width::Width};
+use crate::{vector::LengthOutOfRangeError, width::Width};
 use nitori_crypto::{NamedGroup, SignatureScheme};
 use snafu::Snafu;
 
@@ -152,10 +152,10 @@ impl<T: CodePoint> CodePointList<T> {
     ///
     /// # Errors
     ///
-    /// [`LengthOutOfRange`], in bytes, if `items` is empty or too long for
+    /// [`LengthOutOfRangeError`], in bytes, if `items` is empty or too long for
     /// the length field.
-    pub fn new(items: Vec<T>) -> Result<Self, LengthOutOfRange> {
-        LengthOutOfRange::check(2 * items.len(), Self::byte_range())?;
+    pub fn new(items: Vec<T>) -> Result<Self, LengthOutOfRangeError> {
+        LengthOutOfRangeError::check(2 * items.len(), Self::byte_range())?;
         Ok(Self { items })
     }
 
@@ -194,9 +194,9 @@ impl<T: ByteCodePoint> ByteCodePointList<T> {
     ///
     /// # Errors
     ///
-    /// [`LengthOutOfRange`] if `items` is empty or longer than 255.
-    pub fn new(items: Vec<T>) -> Result<Self, LengthOutOfRange> {
-        LengthOutOfRange::check(items.len(), 1..=Width::U8.max())?;
+    /// [`LengthOutOfRangeError`] if `items` is empty or longer than 255.
+    pub fn new(items: Vec<T>) -> Result<Self, LengthOutOfRangeError> {
+        LengthOutOfRangeError::check(items.len(), 1..=Width::U8.max())?;
         Ok(Self { items })
     }
 
@@ -223,11 +223,11 @@ impl<T> ByteCodePointList<T> {
 /// It is constructed only when the check fails, so the length is always odd.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("list of two-byte code points has an odd length of {len} bytes"))]
-pub struct OddLength {
+pub struct OddLengthError {
     len: usize,
 }
 
-impl OddLength {
+impl OddLengthError {
     /// The length, in bytes.
     pub const fn length(self) -> usize {
         self.len
@@ -251,7 +251,7 @@ pub mod codec {
     // documentation comments; the module documentation above describes them.
     #![allow(missing_docs)]
 
-    use super::{ByteCodePoint, ByteCodePointList, CodePoint, CodePointList, OddLength};
+    use super::{ByteCodePoint, ByteCodePointList, CodePoint, CodePointList, OddLengthError};
     use crate::{
         alert::AlertDescription,
         message::MessageSource,
@@ -282,7 +282,7 @@ pub mod codec {
         if len == 0 {
             return EmptySnafu.fail();
         }
-        OddLength::check(len)?;
+        OddLengthError::check(len)?;
         let mut items = read_bytes(io, len).await.context(ItemsSnafu)?;
         let mut list = Vec::with_capacity(len / 2);
         while items.has_remaining() {
@@ -308,7 +308,7 @@ pub mod codec {
         #[snafu(transparent)]
         OddLength {
             /// The broken rule.
-            source: OddLength,
+            source: OddLengthError,
         },
         /// The code points could not be read.
         #[snafu(display("code point list read failed"))]
@@ -419,7 +419,7 @@ pub mod codec {
 #[cfg(test)]
 mod tests {
     use super::{
-        CodePointList, OddLength,
+        CodePointList, OddLengthError,
         codec::{ReadCodePointListError, ReadCodePointListHostExt as _},
     };
     use crate::cipher_suite::CipherSuite;
@@ -432,7 +432,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             error,
-            ReadCodePointListError::OddLength { source } if source == OddLength { len: 3 }
+            ReadCodePointListError::OddLength { source } if source == OddLengthError { len: 3 }
         ));
         let mut input = &[0x00, 0x00][..];
         let error = input

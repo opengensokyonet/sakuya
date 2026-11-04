@@ -57,7 +57,7 @@ use crate::{
         HandshakeError, LegacySessionIdError, encode, split_read, split_write,
     },
     extension::{
-        InvalidExtensions, OpaqueData,
+        InvalidExtensionsError, OpaqueData,
         early_data::MaxEarlyDataSize,
         key_share::KeyShareEntry,
         pre_shared_key::{OfferedPsks, PskIndex},
@@ -66,8 +66,8 @@ use crate::{
     message::{
         HandshakeMessage, HelloRandom, MessageLimits,
         certificate::{
-            Certificate, CertificateEntry, CertificateList, InvalidCertificate,
-            InvalidCertificateEntry, codec::WriteCertificateHostExt as _,
+            Certificate, CertificateEntry, CertificateList, InvalidCertificateEntryError,
+            InvalidCertificateError, codec::WriteCertificateHostExt as _,
         },
         certificate_verify::{CertificateVerify, codec::WriteCertificateVerifyHostExt as _},
         client_hello::{
@@ -90,13 +90,13 @@ use crate::{
     },
     role::Server,
     schedule::{
-        BinderMismatch, EarlySecret, Exporter, FinishedError, HandshakeTrafficSecrets,
+        BinderMismatchError, EarlySecret, Exporter, FinishedError, HandshakeTrafficSecrets,
         OneRttReceiveTrafficSecret, OneRttSendTrafficSecret, PskEarlySecret, ResumptionPsk,
         Transcript, ZeroRttReceiveTrafficSecret,
     },
     server::{
-        choice::{ClientOffer, NoCommonParameters, ParameterChoice},
-        identity::{Identity, NoCommonScheme},
+        choice::{ClientOffer, NoCommonParametersError, ParameterChoice},
+        identity::{Identity, NoCommonSchemeError},
         layers::{AcceptedHello, HelloLayers},
         peer::PeerAuthentication,
         targets::{Selected, TargetSelection},
@@ -104,7 +104,7 @@ use crate::{
             ClientHelloKey, Issuing, Opened, Resumable, TicketPolicy, TicketSlot, TicketState,
         },
     },
-    vector::LengthOutOfRange,
+    vector::LengthOutOfRangeError,
     version::ProtocolVersion,
 };
 use bytes::Bytes;
@@ -274,7 +274,7 @@ pub enum ServerAlertError<L, S, G, K> {
     #[snafu(display("no common parameters"))]
     NoCommonParameters {
         /// Which.
-        source: NoCommonParameters,
+        source: NoCommonParametersError,
     },
     /// The parameter choice picked a suite or group the client did not
     /// offer.
@@ -298,7 +298,7 @@ pub enum ServerAlertError<L, S, G, K> {
     #[snafu(display("PSK binder rejected"))]
     Binder {
         /// The failure.
-        source: BinderMismatch,
+        source: BinderMismatchError,
     },
     /// The key exchange failed.
     #[snafu(display("key exchange failed"))]
@@ -316,25 +316,25 @@ pub enum ServerAlertError<L, S, G, K> {
     #[snafu(display("EncryptedExtensions too long"))]
     EncryptedExtensions {
         /// The failure.
-        source: InvalidExtensions,
+        source: InvalidExtensionsError,
     },
     /// The key signs with none of the client's schemes.
     #[snafu(display("no common signature scheme"))]
     NoCommonScheme {
         /// The failure.
-        source: NoCommonScheme,
+        source: NoCommonSchemeError,
     },
     /// A certificate of the chain cannot be sent.
     #[snafu(display("certificate of the chain cannot be sent"))]
     CertificateEntry {
         /// The failure.
-        source: InvalidCertificateEntry,
+        source: InvalidCertificateEntryError,
     },
     /// The chain does not fit a Certificate message.
     #[snafu(display("certificate chain too long"))]
     Certificate {
         /// The failure.
-        source: InvalidCertificate,
+        source: InvalidCertificateError,
     },
     /// The signature of CertificateVerify could not be made.
     #[snafu(display("CertificateVerify signing failed"))]
@@ -346,7 +346,7 @@ pub enum ServerAlertError<L, S, G, K> {
     #[snafu(display("signature length out of range"))]
     SignatureLength {
         /// The failure.
-        source: LengthOutOfRange,
+        source: LengthOutOfRangeError,
     },
     /// The client's Finished is not valid.
     #[snafu(display("client Finished rejected"))]

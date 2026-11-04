@@ -1,5 +1,5 @@
 use super::{
-    HELLO_RETRY_REQUEST_RANDOM, InvalidServerHello, ServerHello, ServerHelloMessage,
+    HELLO_RETRY_REQUEST_RANDOM, InvalidServerHelloError, ServerHello, ServerHelloMessage,
     codec::{ReadServerHelloError, ReadServerHelloHostExt as _},
 };
 use crate::{
@@ -149,5 +149,5 @@ fn construction_rejects_the_retry_random() {
         )],
     )
     .unwrap_err();
-    assert!(matches!(error, InvalidServerHello::RetryRandom));
+    assert!(matches!(error, InvalidServerHelloError::RetryRandom));
 }

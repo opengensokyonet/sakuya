@@ -9,7 +9,7 @@
 //! ClientHello with binders of the right lengths, computes the binders over
 //! the bytes before [`OfferedPsks::binders_len`] and writes them in place.
 
-use crate::{vector::LengthOutOfRange, width::Width};
+use crate::{vector::LengthOutOfRangeError, width::Width};
 use snafu::{ResultExt, Snafu};
 
 /// One offered identity: an opaque label, such as a ticket, and the
@@ -25,10 +25,10 @@ impl<C: AsRef<[u8]>> PskIdentity<C> {
     ///
     /// # Errors
     ///
-    /// [`LengthOutOfRange`] if `identity` is empty or longer than 65535
+    /// [`LengthOutOfRangeError`] if `identity` is empty or longer than 65535
     /// bytes.
-    pub fn new(identity: C, obfuscated_ticket_age: u32) -> Result<Self, LengthOutOfRange> {
-        LengthOutOfRange::check(identity.as_ref().len(), 1..=Width::U16.max())?;
+    pub fn new(identity: C, obfuscated_ticket_age: u32) -> Result<Self, LengthOutOfRangeError> {
+        LengthOutOfRangeError::check(identity.as_ref().len(), 1..=Width::U16.max())?;
         Ok(Self {
             identity,
             obfuscated_ticket_age,
@@ -63,10 +63,10 @@ impl<C: AsRef<[u8]>> PskBinder<C> {
     ///
     /// # Errors
     ///
-    /// [`LengthOutOfRange`] if `binder` is shorter than 32 or longer than
+    /// [`LengthOutOfRangeError`] if `binder` is shorter than 32 or longer than
     /// 255 bytes.
-    pub fn new(binder: C) -> Result<Self, LengthOutOfRange> {
-        LengthOutOfRange::check(binder.as_ref().len(), 32..=Width::U8.max())?;
+    pub fn new(binder: C) -> Result<Self, LengthOutOfRangeError> {
+        LengthOutOfRangeError::check(binder.as_ref().len(), 32..=Width::U8.max())?;
         Ok(Self { binder })
     }
 
@@ -111,19 +111,19 @@ impl<C: AsRef<[u8]>> OfferedPsks<C> {
     ///
     /// # Errors
     ///
-    /// [`InvalidOfferedPsks::CountMismatch`] if the counts differ, and
-    /// [`InvalidOfferedPsks::Length`] if there is no identity or the
+    /// [`InvalidOfferedPsksError::CountMismatch`] if the counts differ, and
+    /// [`InvalidOfferedPsksError::Length`] if there is no identity or the
     /// encoding is longer than the 65535 bytes of the extension.
     pub fn new(
         identities: Vec<PskIdentity<C>>,
         binders: Vec<PskBinder<C>>,
-    ) -> Result<Self, InvalidOfferedPsks> {
-        PskCountMismatch::check(identities.len(), binders.len())?;
+    ) -> Result<Self, InvalidOfferedPsksError> {
+        PskCountMismatchError::check(identities.len(), binders.len())?;
         let offered = Self {
             identities,
             binders,
         };
-        LengthOutOfRange::check(offered.encoded_len(), 44..=Width::U16.max())
+        LengthOutOfRangeError::check(offered.encoded_len(), 44..=Width::U16.max())
             .context(invalid_offered_psks::LengthSnafu)?;
         Ok(offered)
     }
@@ -159,12 +159,12 @@ impl<C> OfferedPsks<C> {
 /// It is constructed only when they differ.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("{identities} PSK identities with {binders} binders"))]
-pub struct PskCountMismatch {
+pub struct PskCountMismatchError {
     identities: usize,
     binders: usize,
 }
 
-impl PskCountMismatch {
+impl PskCountMismatchError {
     /// The number of identities.
     pub const fn identities(self) -> usize {
         self.identities
@@ -189,18 +189,18 @@ impl PskCountMismatch {
 /// Failures of [`OfferedPsks::new`].
 #[derive(Debug, Snafu)]
 #[snafu(module(invalid_offered_psks), visibility(pub(crate)))]
-pub enum InvalidOfferedPsks {
+pub enum InvalidOfferedPsksError {
     /// The counts differ.
     #[snafu(transparent)]
     CountMismatch {
         /// The counts.
-        source: PskCountMismatch,
+        source: PskCountMismatchError,
     },
     /// There is no identity, or the encoding is too long.
     #[snafu(display("offered PSKs length out of range"))]
     Length {
         /// The broken range.
-        source: LengthOutOfRange,
+        source: LengthOutOfRangeError,
     },
 }
 
@@ -210,7 +210,7 @@ pub mod codec {
     // documentation comments; the module documentation above describes them.
     #![allow(missing_docs)]
 
-    use super::{OfferedPsks, PskBinder, PskCountMismatch, PskIdentity};
+    use super::{OfferedPsks, PskBinder, PskCountMismatchError, PskIdentity};
     use crate::{
         alert::AlertDescription,
         message::MessageSource,
@@ -246,7 +246,7 @@ pub mod codec {
         while list.has_remaining() {
             binders.push(list.sync_read_psk_binder_unpin()?);
         }
-        PskCountMismatch::check(identities.len(), binders.len())?;
+        PskCountMismatchError::check(identities.len(), binders.len())?;
         Ok(OfferedPsks {
             identities,
             binders,
@@ -316,7 +316,7 @@ pub mod codec {
         #[snafu(transparent)]
         CountMismatch {
             /// The counts.
-            source: PskCountMismatch,
+            source: PskCountMismatchError,
         },
     }
 

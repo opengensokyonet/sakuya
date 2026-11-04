@@ -49,7 +49,7 @@ use crate::{
     cipher_suite::{CipherSuite, SupportedSuite},
     client::{
         ServerTarget,
-        offering::{InvalidOffer, Offer, OfferAttempt, Offering},
+        offering::{InvalidOfferError, Offer, OfferAttempt, Offering},
         ticket::{ClientTicketStore, StoredTicket},
     },
     clock::Clock,
@@ -64,7 +64,7 @@ use crate::{
         alpn::{ProtocolName, ProtocolNameList},
         cookie::Cookie,
         key_share::{ClientShares, KeyShareEntry},
-        pre_shared_key::{InvalidOfferedPsks, OfferedPsks, PskBinder, PskIdentity, PskIndex},
+        pre_shared_key::{InvalidOfferedPsksError, OfferedPsks, PskBinder, PskIdentity, PskIndex},
         psk_key_exchange_modes::PskKeyExchangeMode,
         server_name::ServerName,
     },
@@ -81,7 +81,7 @@ use crate::{
         },
         certificate_verify::codec::ReadCertificateVerifyHostExt as _,
         client_hello::{
-            ClientHello, ClientHelloExtension, InvalidClientHello,
+            ClientHello, ClientHelloExtension, InvalidClientHelloError,
             codec::WriteClientHelloHostExt as _,
         },
         codec::{ReadHandshakeMessageError, ReadHandshakeMessageExt as _},
@@ -101,11 +101,11 @@ use crate::{
     role::Client,
     schedule::{
         Authentication, CertificateVerifyError, Exporter, FinishedError, HandshakeTrafficSecrets,
-        OneRttTrafficSecrets, PskEarlySecret, ResumptionPsk, Transcript, UnofferedPsk,
+        OneRttTrafficSecrets, PskEarlySecret, ResumptionPsk, Transcript, UnofferedPskError,
         ZeroRttSendTrafficSecret,
     },
-    vector::LengthOutOfRange,
-    verify::{CertificateVerifier, SubjectPublicKey, public_key::SchemeKeyMismatch},
+    vector::LengthOutOfRangeError,
+    verify::{CertificateVerifier, SubjectPublicKey, public_key::SchemeKeyMismatchError},
     version::ProtocolVersion,
 };
 use bytes::Bytes;
@@ -247,7 +247,7 @@ pub enum ClientAlertError<V> {
     #[snafu(display("nothing to offer"))]
     Offer {
         /// The failure.
-        source: InvalidOffer,
+        source: InvalidOfferError,
     },
     /// A key share could not be generated.
     #[snafu(display("key share generation failed"))]
@@ -265,25 +265,25 @@ pub enum ClientAlertError<V> {
     #[snafu(display("offered list too long"))]
     OfferList {
         /// The failure.
-        source: LengthOutOfRange,
+        source: LengthOutOfRangeError,
     },
     /// The ticket cannot be offered as a PSK identity.
     #[snafu(display("ticket cannot be offered"))]
     TicketIdentity {
         /// The failure.
-        source: LengthOutOfRange,
+        source: LengthOutOfRangeError,
     },
     /// The PSK of the ticket does not fit `pre_shared_key`.
     #[snafu(display("pre_shared_key too long"))]
     OfferedPsks {
         /// The failure.
-        source: InvalidOfferedPsks,
+        source: InvalidOfferedPsksError,
     },
     /// The ClientHello does not fit its extension block.
     #[snafu(display("ClientHello invalid"))]
     ClientHello {
         /// The failure.
-        source: InvalidClientHello,
+        source: InvalidClientHelloError,
     },
     /// A handshake message could not be collected.
     #[snafu(display("handshake message read failed"))]
@@ -354,7 +354,7 @@ pub enum ClientAlertError<V> {
     #[snafu(display("server selected an unoffered PSK"))]
     Psk {
         /// The failure.
-        source: UnofferedPsk,
+        source: UnofferedPskError,
     },
     /// The server selected the PSK with a cipher suite of another hash
     /// (RFC 8446 §4.2.11).
@@ -417,7 +417,7 @@ pub enum ClientAlertError<V> {
     #[snafu(display("CertificateVerify scheme does not fit the key"))]
     SchemeKey {
         /// The failure.
-        source: SchemeKeyMismatch,
+        source: SchemeKeyMismatchError,
     },
     /// CertificateVerify does not verify.
     #[snafu(display("CertificateVerify rejected"))]

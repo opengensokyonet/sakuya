@@ -27,12 +27,12 @@ pub trait Identity<T> {
     ///
     /// # Errors
     ///
-    /// [`NoCommonScheme`] when the key signs with none of `offered`.
+    /// [`NoCommonSchemeError`] when the key signs with none of `offered`.
     fn present(
         &self,
         selected: &Selected<T>,
         offered: &[SignatureScheme],
-    ) -> Result<Presented<'_, Self::Key>, NoCommonScheme>;
+    ) -> Result<Presented<'_, Self::Key>, NoCommonSchemeError>;
 }
 
 /// A certificate chain to send, with the key and scheme that sign
@@ -64,9 +64,9 @@ impl<'a, K: SigningKey> Presented<'a, K> {
 /// The key signs with none of the schemes the client offered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("no offered signature scheme fits the key"))]
-pub struct NoCommonScheme;
+pub struct NoCommonSchemeError;
 
-impl NoCommonScheme {
+impl NoCommonSchemeError {
     /// The alert the failure calls for: handshake_failure.
     pub fn alert(&self) -> AlertDescription {
         AlertDescription::HANDSHAKE_FAILURE
@@ -94,10 +94,10 @@ impl<K> CertifiedKey<K> {
     ///
     /// # Errors
     ///
-    /// [`EmptyChain`] when `certificates` is empty.
-    pub fn new(certificates: Vec<Bytes>, key: K) -> Result<Self, EmptyChain> {
+    /// [`EmptyChainError`] when `certificates` is empty.
+    pub fn new(certificates: Vec<Bytes>, key: K) -> Result<Self, EmptyChainError> {
         if certificates.is_empty() {
-            return Err(EmptyChain);
+            return Err(EmptyChainError);
         }
         Ok(Self { certificates, key })
     }
@@ -116,7 +116,7 @@ impl<K> CertifiedKey<K> {
 /// A [`CertifiedKey`] needs at least the leaf certificate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("certificate chain is empty"))]
-pub struct EmptyChain;
+pub struct EmptyChainError;
 
 impl<K: SigningKey, T> Identity<T> for CertifiedKey<K> {
     type Key = K;
@@ -125,7 +125,7 @@ impl<K: SigningKey, T> Identity<T> for CertifiedKey<K> {
         &self,
         _selected: &Selected<T>,
         offered: &[SignatureScheme],
-    ) -> Result<Presented<'_, K>, NoCommonScheme> {
+    ) -> Result<Presented<'_, K>, NoCommonSchemeError> {
         let scheme = self
             .key
             .schemes()
@@ -133,7 +133,7 @@ impl<K: SigningKey, T> Identity<T> for CertifiedKey<K> {
             .copied()
             .filter(|scheme| !NOT_FOR_CERTIFICATE_VERIFY.contains(&scheme.get()))
             .find(|scheme| offered.contains(scheme))
-            .ok_or(NoCommonScheme)?;
+            .ok_or(NoCommonSchemeError)?;
         Ok(Presented {
             certificates: &self.certificates,
             key: &self.key,
@@ -144,7 +144,7 @@ impl<K: SigningKey, T> Identity<T> for CertifiedKey<K> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CertifiedKey, EmptyChain, Identity, NoCommonScheme};
+    use super::{CertifiedKey, EmptyChainError, Identity, NoCommonSchemeError};
     use crate::{server::targets::Selected, test_support::ready_now};
     use bytes::Bytes;
     use core::{
@@ -216,14 +216,14 @@ mod tests {
             &[SignatureScheme::RSA_PKCS1_SHA256, SignatureScheme::ED25519],
         )
         .unwrap_err();
-        assert_eq!(error, NoCommonScheme);
+        assert_eq!(error, NoCommonSchemeError);
         assert_eq!(
             error.alert(),
             crate::alert::AlertDescription::HANDSHAKE_FAILURE
         );
         assert_eq!(
             CertifiedKey::new(vec![], EchoKey(vec![])).unwrap_err(),
-            EmptyChain
+            EmptyChainError
         );
     }
 }

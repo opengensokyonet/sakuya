@@ -8,7 +8,7 @@ use crate::extension::{OpaqueData, extension_subset};
 use crate::{
     cipher_suite::CipherSuite,
     extension::{
-        BlockEntry, ExtensionType, InvalidExtensions, UnknownExtension, check_block,
+        BlockEntry, ExtensionType, InvalidExtensionsError, UnknownExtension, check_block,
         cookie::Cookie, key_share::KeyShareEntry, pre_shared_key::PskIndex,
     },
     message::{HelloRandom, LegacySessionId},
@@ -77,8 +77,8 @@ impl<C: AsRef<[u8]>> ServerHello<C> {
     ///
     /// # Errors
     ///
-    /// [`InvalidServerHello::RetryRandom`] for the random of a
-    /// HelloRetryRequest, and [`InvalidServerHello::Extensions`] for an
+    /// [`InvalidServerHelloError::RetryRandom`] for the random of a
+    /// HelloRetryRequest, and [`InvalidServerHelloError::Extensions`] for an
     /// extension type that appears twice or
     /// a block outside 6 to 65535 bytes.
     pub fn new(
@@ -87,7 +87,7 @@ impl<C: AsRef<[u8]>> ServerHello<C> {
         legacy_session_id_echo: LegacySessionId,
         cipher_suite: CipherSuite,
         extensions: Vec<ServerHelloExtension<C>>,
-    ) -> Result<Self, InvalidServerHello> {
+    ) -> Result<Self, InvalidServerHelloError> {
         if random == HELLO_RETRY_REQUEST_RANDOM {
             return invalid_server_hello::RetryRandomSnafu.fail();
         }
@@ -176,7 +176,7 @@ impl<C> ServerHello<C> {
 /// Failures of [`ServerHello::new`].
 #[derive(Debug, Snafu)]
 #[snafu(module(invalid_server_hello), visibility(pub(crate)))]
-pub enum InvalidServerHello {
+pub enum InvalidServerHelloError {
     /// The random is that of a HelloRetryRequest.
     #[snafu(display("ServerHello random is that of a HelloRetryRequest"))]
     RetryRandom,
@@ -184,7 +184,7 @@ pub enum InvalidServerHello {
     #[snafu(display("ServerHello extensions invalid"))]
     Extensions {
         /// Why.
-        source: InvalidExtensions,
+        source: InvalidExtensionsError,
     },
 }
 
@@ -239,13 +239,13 @@ impl<C: AsRef<[u8]>> HelloRetryRequest<C> {
     ///
     /// # Errors
     ///
-    /// [`InvalidExtensions`] for an extension type that appears twice or a block outside 6 to 65535 bytes.
+    /// [`InvalidExtensionsError`] for an extension type that appears twice or a block outside 6 to 65535 bytes.
     pub fn new(
         legacy_version: ProtocolVersion,
         legacy_session_id_echo: LegacySessionId,
         cipher_suite: CipherSuite,
         extensions: Vec<HelloRetryRequestExtension<C>>,
-    ) -> Result<Self, InvalidExtensions> {
+    ) -> Result<Self, InvalidExtensionsError> {
         check_block(&extensions, BLOCK)?;
         Ok(Self {
             legacy_version,
@@ -413,7 +413,7 @@ pub mod codec {
         alert::AlertDescription,
         cipher_suite::CipherSuite,
         extension::{
-            BlockEntry as _, BlockReader, ExtensionBlockError, ExtensionNotAllowed,
+            BlockEntry as _, BlockReader, ExtensionBlockError, ExtensionNotAllowedError,
             RestrictedExtension, UnknownExtension,
             cookie::codec::ReadCookieHostExt as _,
             excess,
@@ -426,8 +426,8 @@ pub mod codec {
             HandshakeType, HelloRandom, MessageSource, ReadHeaderError, read_body, read_session_id,
         },
         vector::{
-            ExcessBytes, LengthOutOfRange, Out, ReadBoundedVectorError, read_array, read_u8,
-            read_u16,
+            ExcessBytesError, LengthOutOfRangeError, Out, ReadBoundedVectorError, read_array,
+            read_u8, read_u16,
         },
         version::ProtocolVersion,
         width::Width,
@@ -450,7 +450,7 @@ pub mod codec {
     ) -> Result<ServerHelloMessage<F::Bytes>, ReadServerHelloError> {
         let mut body = read_body(io, HandshakeType::SERVER_HELLO).await?;
         let hello = body.sync_read_server_hello_body_unpin()?;
-        ExcessBytes::check(body.remaining()).context(read_server_hello_error::ExcessSnafu)?;
+        ExcessBytesError::check(body.remaining()).context(read_server_hello_error::ExcessSnafu)?;
         Ok(hello)
     }
 
@@ -467,7 +467,7 @@ pub mod codec {
             return CompressionMethodNotNullSnafu.fail();
         }
         let block = read_extension_block(io).await.context(ExtensionsSnafu)?;
-        LengthOutOfRange::check(block.remaining(), BLOCK).context(ExtensionsLengthSnafu)?;
+        LengthOutOfRangeError::check(block.remaining(), BLOCK).context(ExtensionsLengthSnafu)?;
         let mut block = BlockReader::new(block);
         let retry = random == HELLO_RETRY_REQUEST_RANDOM;
         let mut server = Vec::new();
@@ -602,7 +602,7 @@ pub mod codec {
         #[snafu(display("ServerHello body has excess bytes"))]
         Excess {
             /// The excess.
-            source: ExcessBytes,
+            source: ExcessBytesError,
         },
         /// legacy_version could not be read.
         #[snafu(display("ServerHello legacy_version read failed"))]
@@ -648,19 +648,19 @@ pub mod codec {
         #[snafu(display("ServerHello extension block length out of range"))]
         ExtensionsLength {
             /// The broken range.
-            source: LengthOutOfRange,
+            source: LengthOutOfRangeError,
         },
         /// A recognized extension that a ServerHello may not carry.
         #[snafu(transparent)]
         ExtensionNotAllowed {
             /// The extension.
-            source: ExtensionNotAllowed<ServerHelloDisallowedExtension>,
+            source: ExtensionNotAllowedError<ServerHelloDisallowedExtension>,
         },
         /// A recognized extension that a HelloRetryRequest may not carry.
         #[snafu(transparent)]
         RetryExtensionNotAllowed {
             /// The extension.
-            source: ExtensionNotAllowed<HelloRetryRequestDisallowedExtension>,
+            source: ExtensionNotAllowedError<HelloRetryRequestDisallowedExtension>,
         },
         /// The data of an extension of a ServerHello is longer than its
         /// fields.
@@ -669,7 +669,7 @@ pub mod codec {
             /// The extension.
             extension: crate::message::server_hello::ServerHelloStructuredExtension,
             /// The excess.
-            source: ExcessBytes,
+            source: ExcessBytesError,
         },
         /// The data of an extension of a HelloRetryRequest is longer than its
         /// fields.
@@ -678,7 +678,7 @@ pub mod codec {
             /// The extension.
             extension: crate::message::server_hello::HelloRetryRequestStructuredExtension,
             /// The excess.
-            source: ExcessBytes,
+            source: ExcessBytesError,
         },
         /// `key_share` of a ServerHello could not be read.
         #[snafu(display("key_share read failed"))]

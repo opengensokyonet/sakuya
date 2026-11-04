@@ -60,7 +60,7 @@ pub mod transparency;
 #[cfg(test)]
 mod tests;
 
-pub use der::MalformedDer;
+pub use der::MalformedDerError;
 pub use public_key::SubjectPublicKey;
 
 /// How a client verifies the certificate chain of a server.
@@ -157,10 +157,10 @@ impl AnchorStore {
     ///
     /// # Errors
     ///
-    /// [`InvalidAnchor`] for a certificate webpki cannot read as an anchor.
+    /// [`InvalidAnchorError`] for a certificate webpki cannot read as an anchor.
     pub fn from_certificates<'a>(
         certificates: impl IntoIterator<Item = &'a [u8]>,
-    ) -> Result<Self, InvalidAnchor> {
+    ) -> Result<Self, InvalidAnchorError> {
         Ok(Self {
             anchors: RwLock::new(anchors(certificates)?),
         })
@@ -171,12 +171,12 @@ impl AnchorStore {
     ///
     /// # Errors
     ///
-    /// [`InvalidAnchor`] for a certificate webpki cannot read as an anchor;
+    /// [`InvalidAnchorError`] for a certificate webpki cannot read as an anchor;
     /// the anchors are then left as they were.
     pub fn replace<'a>(
         &self,
         certificates: impl IntoIterator<Item = &'a [u8]>,
-    ) -> Result<(), InvalidAnchor> {
+    ) -> Result<(), InvalidAnchorError> {
         let anchors = anchors(certificates)?;
         *self.anchors.write().unwrap_or_else(PoisonError::into_inner) = anchors;
         Ok(())
@@ -185,7 +185,7 @@ impl AnchorStore {
 
 fn anchors<'a>(
     certificates: impl IntoIterator<Item = &'a [u8]>,
-) -> Result<Arc<[TrustAnchor<'static>]>, InvalidAnchor> {
+) -> Result<Arc<[TrustAnchor<'static>]>, InvalidAnchorError> {
     certificates
         .into_iter()
         .enumerate()
@@ -210,12 +210,12 @@ impl TrustAnchors for AnchorStore {
 /// A certificate given as a trust anchor cannot be read as one.
 #[derive(Debug, Snafu)]
 #[snafu(display("trust anchor {index} invalid"))]
-pub struct InvalidAnchor {
+pub struct InvalidAnchorError {
     index: usize,
     source: webpki::Error,
 }
 
-impl InvalidAnchor {
+impl InvalidAnchorError {
     /// The position of the certificate among those given.
     pub fn index(&self) -> usize {
         self.index
@@ -655,7 +655,7 @@ where
     #[snafu(display("end entity key unsupported"))]
     LeafKey {
         /// The failure.
-        source: public_key::InvalidPublicKey,
+        source: public_key::InvalidPublicKeyError,
     },
 }
 

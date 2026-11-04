@@ -3,8 +3,8 @@
 use crate::extension::extension_subset;
 use crate::{
     code_point::CodePointList,
-    extension::{BlockEntry, ExtensionType, InvalidExtensions, UnknownExtension, check_block},
-    vector::LengthOutOfRange,
+    extension::{BlockEntry, ExtensionType, InvalidExtensionsError, UnknownExtension, check_block},
+    vector::LengthOutOfRangeError,
     width::Width,
 };
 use nitori_crypto::SignatureScheme;
@@ -59,15 +59,15 @@ impl<C: AsRef<[u8]>> CertificateRequest<C> {
     ///
     /// # Errors
     ///
-    /// [`InvalidCertificateRequest::Context`] for a context above 255 bytes,
-    /// and [`InvalidCertificateRequest::Extensions`] for an extension type
+    /// [`InvalidCertificateRequestError::Context`] for a context above 255 bytes,
+    /// and [`InvalidCertificateRequestError::Extensions`] for an extension type
     /// that appears twice or a block outside
     /// 2 to 65535 bytes.
     pub fn new(
         certificate_request_context: C,
         extensions: Vec<CertificateRequestExtension<C>>,
-    ) -> Result<Self, InvalidCertificateRequest> {
-        LengthOutOfRange::check(
+    ) -> Result<Self, InvalidCertificateRequestError> {
+        LengthOutOfRangeError::check(
             certificate_request_context.as_ref().len(),
             0..=Width::U8.max(),
         )
@@ -112,18 +112,18 @@ impl<C> CertificateRequest<C> {
 /// Failures of [`CertificateRequest::new`].
 #[derive(Debug, Snafu)]
 #[snafu(module(invalid_certificate_request), visibility(pub(crate)))]
-pub enum InvalidCertificateRequest {
+pub enum InvalidCertificateRequestError {
     /// The context is too long.
     #[snafu(display("certificate_request_context too long"))]
     Context {
         /// The broken range.
-        source: LengthOutOfRange,
+        source: LengthOutOfRangeError,
     },
     /// The extension block is invalid.
     #[snafu(display("CertificateRequest extensions invalid"))]
     Extensions {
         /// Why.
-        source: InvalidExtensions,
+        source: InvalidExtensionsError,
     },
 }
 
@@ -176,11 +176,11 @@ pub mod codec {
         alert::AlertDescription,
         code_point::codec::{ReadCodePointListError, ReadCodePointListHostExt as _},
         extension::{
-            BlockEntry as _, BlockReader, ExtensionBlockError, ExtensionNotAllowed,
+            BlockEntry as _, BlockReader, ExtensionBlockError, ExtensionNotAllowedError,
             RestrictedExtension, UnknownExtension, excess, not_allowed, read_extension_block,
         },
         message::{HandshakeType, MessageSource, ReadHeaderError, read_body},
-        vector::{ExcessBytes, LengthOutOfRange, Out, ReadVectorError, read_vector},
+        vector::{ExcessBytesError, LengthOutOfRangeError, Out, ReadVectorError, read_vector},
         width::Width,
     };
     use bytes::Buf;
@@ -199,7 +199,7 @@ pub mod codec {
     ) -> Result<CertificateRequest<F::Bytes>, ReadCertificateRequestError> {
         let mut body = read_body(io, HandshakeType::CERTIFICATE_REQUEST).await?;
         let request = body.sync_read_certificate_request_body_unpin()?;
-        ExcessBytes::check(body.remaining())
+        ExcessBytesError::check(body.remaining())
             .context(read_certificate_request_error::ExcessSnafu)?;
         Ok(request)
     }
@@ -213,7 +213,7 @@ pub mod codec {
         use read_certificate_request_error::*;
         let certificate_request_context = read_vector(io, Width::U8).await.context(ContextSnafu)?;
         let block = read_extension_block(io).await.context(ExtensionsSnafu)?;
-        LengthOutOfRange::check(block.remaining(), BLOCK).context(ExtensionsLengthSnafu)?;
+        LengthOutOfRangeError::check(block.remaining(), BLOCK).context(ExtensionsLengthSnafu)?;
         let mut block = BlockReader::new(block);
         let mut extensions = Vec::new();
         while let Some((extension_type, mut data)) = block.next().context(ExtensionsSnafu)? {
@@ -262,7 +262,7 @@ pub mod codec {
         #[snafu(display("CertificateRequest body has excess bytes"))]
         Excess {
             /// The excess.
-            source: ExcessBytes,
+            source: ExcessBytesError,
         },
         /// certificate_request_context could not be read.
         #[snafu(display("certificate_request_context read failed"))]
@@ -280,13 +280,13 @@ pub mod codec {
         #[snafu(display("CertificateRequest extension block length out of range"))]
         ExtensionsLength {
             /// The broken range.
-            source: LengthOutOfRange,
+            source: LengthOutOfRangeError,
         },
         /// A recognized extension that this message may not carry.
         #[snafu(transparent)]
         ExtensionNotAllowed {
             /// The extension.
-            source: ExtensionNotAllowed<CertificateRequestDisallowedExtension>,
+            source: ExtensionNotAllowedError<CertificateRequestDisallowedExtension>,
         },
         /// The data of a recognized extension is longer than its fields.
         #[snafu(display("{extension:?} data has excess bytes"))]
@@ -294,7 +294,7 @@ pub mod codec {
             /// The extension.
             extension: crate::message::certificate_request::CertificateRequestStructuredExtension,
             /// The excess.
-            source: ExcessBytes,
+            source: ExcessBytesError,
         },
         /// `signature_algorithms` could not be read.
         #[snafu(display("signature_algorithms read failed"))]

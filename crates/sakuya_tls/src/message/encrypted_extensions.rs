@@ -4,7 +4,7 @@ use crate::extension::{OpaqueData, extension_subset};
 use crate::{
     code_point::CodePointList,
     extension::{
-        BlockEntry, ExtensionType, InvalidExtensions, UnknownExtension, alpn::ProtocolName,
+        BlockEntry, ExtensionType, InvalidExtensionsError, UnknownExtension, alpn::ProtocolName,
         certificate_type::CertificateType, check_block,
     },
     width::Width,
@@ -77,10 +77,10 @@ impl<C: AsRef<[u8]>> EncryptedExtensions<C> {
     ///
     /// # Errors
     ///
-    /// [`InvalidExtensions`] for an extension type that appears twice or a block above 65535 bytes.
+    /// [`InvalidExtensionsError`] for an extension type that appears twice or a block above 65535 bytes.
     pub fn new(
         extensions: Vec<EncryptedExtensionsExtension<C>>,
-    ) -> Result<Self, InvalidExtensions> {
+    ) -> Result<Self, InvalidExtensionsError> {
         check_block(&extensions, 0..=Width::U16.max())?;
         Ok(Self { extensions })
     }
@@ -165,14 +165,14 @@ pub mod codec {
         alert::AlertDescription,
         code_point::codec::{ReadCodePointListError, ReadCodePointListHostExt as _},
         extension::{
-            BlockEntry as _, BlockReader, ExtensionBlockError, ExtensionNotAllowed,
+            BlockEntry as _, BlockReader, ExtensionBlockError, ExtensionNotAllowedError,
             ReadExtensionBlockHostExt as _, RestrictedExtension, UnknownExtension,
             alpn::codec::{ReadSelectedProtocolError, ReadSelectedProtocolHostExt as _},
             certificate_type::CertificateType,
             excess, not_allowed,
         },
         message::{HandshakeType, MessageSource, ReadHeaderError, read_body},
-        vector::{ExcessBytes, Out, read_u8},
+        vector::{ExcessBytesError, Out, read_u8},
         width::Width,
     };
     use bytes::Buf;
@@ -194,7 +194,7 @@ pub mod codec {
         let block = body
             .sync_read_extension_block_unpin()
             .context(ExtensionsSnafu)?;
-        ExcessBytes::check(body.remaining()).context(ExcessSnafu)?;
+        ExcessBytesError::check(body.remaining()).context(ExcessSnafu)?;
         let mut block = BlockReader::new(block);
         let mut extensions = Vec::new();
         while let Some((extension_type, mut data)) = block.next().context(ExtensionsSnafu)? {
@@ -275,7 +275,7 @@ pub mod codec {
         #[snafu(display("EncryptedExtensions body has excess bytes"))]
         Excess {
             /// The excess.
-            source: ExcessBytes,
+            source: ExcessBytesError,
         },
         /// The extension block could not be read, or a type appears twice.
         #[snafu(display("EncryptedExtensions extensions read failed"))]
@@ -287,7 +287,7 @@ pub mod codec {
         #[snafu(transparent)]
         ExtensionNotAllowed {
             /// The extension.
-            source: ExtensionNotAllowed<EncryptedExtensionsDisallowedExtension>,
+            source: ExtensionNotAllowedError<EncryptedExtensionsDisallowedExtension>,
         },
         /// The data of a recognized extension is longer than its fields.
         #[snafu(display("{extension:?} data has excess bytes"))]
@@ -295,7 +295,7 @@ pub mod codec {
             /// The extension.
             extension: crate::message::encrypted_extensions::EncryptedExtensionsStructuredExtension,
             /// The excess.
-            source: ExcessBytes,
+            source: ExcessBytesError,
         },
         /// `supported_groups` could not be read.
         #[snafu(display("supported_groups read failed"))]

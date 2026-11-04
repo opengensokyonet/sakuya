@@ -4,7 +4,7 @@
 //! in EncryptedExtensions it is a list of exactly one name, the
 //! [`ProtocolName`] the server selected.
 
-use crate::{vector::LengthOutOfRange, width::Width};
+use crate::{vector::LengthOutOfRangeError, width::Width};
 use snafu::Snafu;
 
 /// An application protocol name: 1 to 255 bytes.
@@ -18,9 +18,9 @@ impl<C: AsRef<[u8]>> ProtocolName<C> {
     ///
     /// # Errors
     ///
-    /// [`LengthOutOfRange`] if `name` is empty or longer than 255 bytes.
-    pub fn new(name: C) -> Result<Self, LengthOutOfRange> {
-        LengthOutOfRange::check(name.as_ref().len(), 1..=Width::U8.max())?;
+    /// [`LengthOutOfRangeError`] if `name` is empty or longer than 255 bytes.
+    pub fn new(name: C) -> Result<Self, LengthOutOfRangeError> {
+        LengthOutOfRangeError::check(name.as_ref().len(), 1..=Width::U8.max())?;
         Ok(Self { name })
     }
 
@@ -53,11 +53,11 @@ impl<C: AsRef<[u8]>> ProtocolNameList<C> {
     ///
     /// # Errors
     ///
-    /// [`LengthOutOfRange`] if `names` is empty or its encoding is longer
+    /// [`LengthOutOfRangeError`] if `names` is empty or its encoding is longer
     /// than 65533 bytes, so that the list fits the extension.
-    pub fn new(names: Vec<ProtocolName<C>>) -> Result<Self, LengthOutOfRange> {
+    pub fn new(names: Vec<ProtocolName<C>>) -> Result<Self, LengthOutOfRangeError> {
         let len = names.iter().map(ProtocolName::entry_len).sum();
-        LengthOutOfRange::check(len, 2..=Width::U16.max() - 2)?;
+        LengthOutOfRangeError::check(len, 2..=Width::U16.max() - 2)?;
         Ok(Self { names })
     }
 
@@ -83,11 +83,11 @@ impl<C> ProtocolNameList<C> {
 /// It is constructed only when the check fails, so the count is at least 2.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("selected protocol list holds {count} names instead of one"))]
-pub struct ProtocolsNotSingle {
+pub struct ProtocolsNotSingleError {
     count: usize,
 }
 
-impl ProtocolsNotSingle {
+impl ProtocolsNotSingleError {
     /// The number of names in the list.
     pub const fn count(self) -> usize {
         self.count
@@ -100,7 +100,7 @@ pub mod codec {
     // documentation comments; the module documentation above describes them.
     #![allow(missing_docs)]
 
-    use super::{ProtocolName, ProtocolNameList, ProtocolsNotSingle};
+    use super::{ProtocolName, ProtocolNameList, ProtocolsNotSingleError};
     use crate::{
         alert::AlertDescription,
         message::MessageSource,
@@ -197,7 +197,7 @@ pub mod codec {
         let mut list = read_protocol_name_list(io).await?;
         if list.names.len() != 1 {
             let count = list.names.len();
-            return Err(ProtocolsNotSingle { count }.into());
+            return Err(ProtocolsNotSingleError { count }.into());
         }
         // invariant: the list holds exactly one name.
         Ok(list.names.pop().expect("one name"))
@@ -217,7 +217,7 @@ pub mod codec {
         #[snafu(transparent)]
         NotSingle {
             /// The number of names.
-            source: ProtocolsNotSingle,
+            source: ProtocolsNotSingleError,
         },
     }
 

@@ -127,7 +127,7 @@ impl<C> core::fmt::Debug for Choice<C> {
 
 /// The ClientHello and the server have no parameter in common.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-pub enum NoCommonParameters {
+pub enum NoCommonParametersError {
     /// No cipher suite the client offers is one the server accepts and
     /// the backend supports.
     #[snafu(display("no common cipher suite"))]
@@ -138,7 +138,7 @@ pub enum NoCommonParameters {
     NoCommonGroup,
 }
 
-impl NoCommonParameters {
+impl NoCommonParametersError {
     /// The alert the failure calls for: handshake_failure, one of the two
     /// RFC 8446 §4.1.1 allows.
     pub fn alert(&self) -> AlertDescription {
@@ -157,13 +157,13 @@ pub trait ParameterChoice<C, T> {
     ///
     /// # Errors
     ///
-    /// [`NoCommonParameters`] when no suite or no group fits.
+    /// [`NoCommonParametersError`] when no suite or no group fits.
     fn choose(
         &self,
         backend: &C,
         offer: &ClientOffer<'_>,
         selected: &Selected<T>,
-    ) -> Result<Choice<C>, NoCommonParameters>;
+    ) -> Result<Choice<C>, NoCommonParametersError>;
 }
 
 /// Which group a [`PreferenceTable`] takes among those both sides accept.
@@ -226,13 +226,13 @@ impl<C: Hash + KeyExchange, T> ParameterChoice<C, T> for PreferenceTable {
         backend: &C,
         offer: &ClientOffer<'_>,
         _selected: &Selected<T>,
-    ) -> Result<Choice<C>, NoCommonParameters> {
+    ) -> Result<Choice<C>, NoCommonParametersError> {
         let suite = self
             .suites
             .iter()
             .filter(|suite| offer.cipher_suites().contains(suite))
             .find_map(|&suite| SupportedSuite::new(backend, suite))
-            .ok_or(NoCommonParameters::NoCommonSuite)?;
+            .ok_or(NoCommonParametersError::NoCommonSuite)?;
         let mut common = self
             .groups
             .iter()
@@ -249,7 +249,7 @@ impl<C: Hash + KeyExchange, T> ParameterChoice<C, T> for PreferenceTable {
                     .copied()
             }
         }
-        .ok_or(NoCommonParameters::NoCommonGroup)?;
+        .ok_or(NoCommonParametersError::NoCommonGroup)?;
         Ok(Choice::new(suite, group))
     }
 }
@@ -257,7 +257,7 @@ impl<C: Hash + KeyExchange, T> ParameterChoice<C, T> for PreferenceTable {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClientOffer, GroupPreference, NoCommonParameters, ParameterChoice, PreferenceTable,
+        ClientOffer, GroupPreference, NoCommonParametersError, ParameterChoice, PreferenceTable,
     };
     use crate::{
         cipher_suite::CipherSuite,
@@ -335,13 +335,13 @@ mod tests {
             table
                 .choose(&AwsLcBackend, &no_suite, &selected())
                 .unwrap_err(),
-            NoCommonParameters::NoCommonSuite
+            NoCommonParametersError::NoCommonSuite
         );
         let no_group = ClientOffer::new(SUITES, &[NamedGroup::SECP384R1], []);
         let error = table
             .choose(&AwsLcBackend, &no_group, &selected())
             .unwrap_err();
-        assert_eq!(error, NoCommonParameters::NoCommonGroup);
+        assert_eq!(error, NoCommonParametersError::NoCommonGroup);
         assert_eq!(
             error.alert(),
             crate::alert::AlertDescription::HANDSHAKE_FAILURE

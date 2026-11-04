@@ -1,6 +1,6 @@
 //! The public key a peer authenticates with, from its SubjectPublicKeyInfo.
 
-use super::der::{self, MalformedDer, Reader};
+use super::der::{self, MalformedDerError, Reader};
 use crate::alert::AlertDescription;
 use bytes::Bytes;
 use nitori_crypto::SignatureScheme;
@@ -48,12 +48,12 @@ impl SubjectPublicKey {
     ///
     /// # Errors
     ///
-    /// [`InvalidPublicKey`] when `spki` is not a SubjectPublicKeyInfo or its
+    /// [`InvalidPublicKeyError`] when `spki` is not a SubjectPublicKeyInfo or its
     /// algorithm is not one of [`PublicKeyAlgorithm`].
-    pub fn from_spki(spki: &[u8]) -> Result<Self, InvalidPublicKey> {
+    pub fn from_spki(spki: &[u8]) -> Result<Self, InvalidPublicKeyError> {
         use invalid_public_key::*;
         let (algorithm, key) = parse(spki).context(MalformedSnafu)?;
-        let algorithm = algorithm.ok_or(InvalidPublicKey::UnsupportedAlgorithm)?;
+        let algorithm = algorithm.ok_or(InvalidPublicKeyError::UnsupportedAlgorithm)?;
         Ok(Self {
             algorithm,
             key: Bytes::copy_from_slice(key),
@@ -78,11 +78,11 @@ impl SubjectPublicKey {
     ///
     /// # Errors
     ///
-    /// [`SchemeKeyMismatch`] otherwise.
+    /// [`SchemeKeyMismatchError`] otherwise.
     pub fn check_certificate_verify_scheme(
         &self,
         scheme: SignatureScheme,
-    ) -> Result<(), SchemeKeyMismatch> {
+    ) -> Result<(), SchemeKeyMismatchError> {
         let matches = match self.algorithm {
             PublicKeyAlgorithm::EcdsaP256 => scheme == SignatureScheme::ECDSA_SECP256R1_SHA256,
             PublicKeyAlgorithm::EcdsaP384 => scheme == SignatureScheme::ECDSA_SECP384R1_SHA384,
@@ -96,7 +96,7 @@ impl SubjectPublicKey {
             .contains(&scheme),
         };
         if !matches {
-            return Err(SchemeKeyMismatch {
+            return Err(SchemeKeyMismatchError {
                 scheme,
                 algorithm: self.algorithm,
             });
@@ -107,16 +107,16 @@ impl SubjectPublicKey {
 
 /// The algorithm, when it is one of [`PublicKeyAlgorithm`], and the key
 /// bytes of a SubjectPublicKeyInfo.
-fn parse(spki: &[u8]) -> Result<(Option<PublicKeyAlgorithm>, &[u8]), MalformedDer> {
+fn parse(spki: &[u8]) -> Result<(Option<PublicKeyAlgorithm>, &[u8]), MalformedDerError> {
     let mut fields = Reader::new(Reader::single(spki, der::SEQUENCE)?);
     let mut identifier = Reader::new(fields.expect(der::SEQUENCE)?.contents);
     let bits = fields.expect(der::BIT_STRING)?.contents;
     if !fields.is_empty() {
-        return Err(MalformedDer);
+        return Err(MalformedDerError);
     }
-    let (&unused, key) = bits.split_first().ok_or(MalformedDer)?;
+    let (&unused, key) = bits.split_first().ok_or(MalformedDerError)?;
     if unused != 0 {
-        return Err(MalformedDer);
+        return Err(MalformedDerError);
     }
     let oid = identifier.expect(der::OBJECT_IDENTIFIER)?.contents;
     let parameters = identifier.rest();
@@ -140,12 +140,12 @@ fn parse(spki: &[u8]) -> Result<(Option<PublicKeyAlgorithm>, &[u8]), MalformedDe
 /// A SubjectPublicKeyInfo does not give a key this crate uses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(module(invalid_public_key), visibility(pub(crate)))]
-pub enum InvalidPublicKey {
+pub enum InvalidPublicKeyError {
     /// The bytes are not a SubjectPublicKeyInfo.
     #[snafu(display("SubjectPublicKeyInfo malformed"))]
     Malformed {
         /// The failure.
-        source: MalformedDer,
+        source: MalformedDerError,
     },
     /// The key's algorithm is not one of [`PublicKeyAlgorithm`].
     #[snafu(display("public key algorithm not supported"))]
@@ -155,12 +155,12 @@ pub enum InvalidPublicKey {
 /// A CertificateVerify scheme does not fit the key it is verified with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("{scheme:?} does not sign with a key of {algorithm:?}"))]
-pub struct SchemeKeyMismatch {
+pub struct SchemeKeyMismatchError {
     scheme: SignatureScheme,
     algorithm: PublicKeyAlgorithm,
 }
 
-impl SchemeKeyMismatch {
+impl SchemeKeyMismatchError {
     /// The scheme of the CertificateVerify.
     pub fn scheme(self) -> SignatureScheme {
         self.scheme
@@ -180,8 +180,8 @@ impl SchemeKeyMismatch {
 
 #[cfg(test)]
 mod tests {
-    use super::{InvalidPublicKey, PublicKeyAlgorithm, SubjectPublicKey};
-    use crate::verify::der::MalformedDer;
+    use super::{InvalidPublicKeyError, PublicKeyAlgorithm, SubjectPublicKey};
+    use crate::verify::der::MalformedDerError;
     use nitori_crypto::SignatureScheme;
 
     const XENON_KEY: &[u8] = include_bytes!("../../testdata/docsrs/google-xenon2027h1.spki.der");
@@ -234,7 +234,7 @@ mod tests {
         ];
         assert_eq!(
             SubjectPublicKey::from_spki(&ed448).unwrap_err(),
-            InvalidPublicKey::UnsupportedAlgorithm
+            InvalidPublicKeyError::UnsupportedAlgorithm
         );
         // A bit string with unused bits.
         let unused = [
@@ -242,8 +242,8 @@ mod tests {
         ];
         assert_eq!(
             SubjectPublicKey::from_spki(&unused).unwrap_err(),
-            InvalidPublicKey::Malformed {
-                source: MalformedDer
+            InvalidPublicKeyError::Malformed {
+                source: MalformedDerError
             }
         );
         let mut trailing = XENON_KEY.to_vec();

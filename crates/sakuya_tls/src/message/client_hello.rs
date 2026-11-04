@@ -10,10 +10,10 @@ use crate::{
     cipher_suite::CipherSuite,
     code_point::{ByteCodePointList, CodePointList},
     extension::{
-        BlockEntry, ExtensionType, InvalidExtensions, UnknownExtension, alpn::ProtocolNameList,
-        certificate_type::CertificateType, check_block, cookie::Cookie, key_share::ClientShares,
-        pre_shared_key::OfferedPsks, psk_key_exchange_modes::PskKeyExchangeMode,
-        server_name::ServerName,
+        BlockEntry, ExtensionType, InvalidExtensionsError, UnknownExtension,
+        alpn::ProtocolNameList, certificate_type::CertificateType, check_block, cookie::Cookie,
+        key_share::ClientShares, pre_shared_key::OfferedPsks,
+        psk_key_exchange_modes::PskKeyExchangeMode, server_name::ServerName,
     },
     message::{HelloRandom, LegacySessionId},
     version::ProtocolVersion,
@@ -140,9 +140,9 @@ impl<C: AsRef<[u8]>> ClientHello<C> {
     ///
     /// # Errors
     ///
-    /// [`InvalidClientHello::Extensions`] for an extension type that appears
+    /// [`InvalidClientHelloError::Extensions`] for an extension type that appears
     /// twice or a block outside 8 to 65535
-    /// bytes, and [`InvalidClientHello::PreSharedKeyNotLast`] if
+    /// bytes, and [`InvalidClientHelloError::PreSharedKeyNotLast`] if
     /// `pre_shared_key` is not the last extension.
     pub fn new(
         legacy_version: ProtocolVersion,
@@ -150,7 +150,7 @@ impl<C: AsRef<[u8]>> ClientHello<C> {
         legacy_session_id: LegacySessionId,
         cipher_suites: CodePointList<CipherSuite>,
         extensions: Vec<ClientHelloExtension<C>>,
-    ) -> Result<Self, InvalidClientHello> {
+    ) -> Result<Self, InvalidClientHelloError> {
         check_block(&extensions, BLOCK).context(invalid_client_hello::ExtensionsSnafu)?;
         if let Some(position) = extensions
             .iter()
@@ -288,12 +288,12 @@ impl<C> ClientHello<C> {
 /// Failures of [`ClientHello::new`].
 #[derive(Debug, Snafu)]
 #[snafu(module(invalid_client_hello), visibility(pub(crate)))]
-pub enum InvalidClientHello {
+pub enum InvalidClientHelloError {
     /// The extension block is invalid.
     #[snafu(display("ClientHello extensions invalid"))]
     Extensions {
         /// Why.
-        source: InvalidExtensions,
+        source: InvalidExtensionsError,
     },
     /// `pre_shared_key` is not the last extension.
     #[snafu(display("pre_shared_key is not the last ClientHello extension"))]
@@ -347,7 +347,7 @@ pub mod codec {
         },
         message::{HandshakeType, MessageSource, ReadHeaderError, read_body, read_session_id},
         vector::{
-            ExcessBytes, LengthOutOfRange, Out, ReadBoundedVectorError, read_array,
+            ExcessBytesError, LengthOutOfRangeError, Out, ReadBoundedVectorError, read_array,
             read_bounded_vector, read_u16,
         },
         version::ProtocolVersion,
@@ -369,7 +369,7 @@ pub mod codec {
     ) -> Result<ClientHello<F::Bytes>, ReadClientHelloError> {
         let mut body = read_body(io, HandshakeType::CLIENT_HELLO).await?;
         let hello = body.sync_read_client_hello_body_unpin()?;
-        ExcessBytes::check(body.remaining()).context(read_client_hello_error::ExcessSnafu)?;
+        ExcessBytesError::check(body.remaining()).context(read_client_hello_error::ExcessSnafu)?;
         Ok(hello)
     }
 
@@ -391,7 +391,7 @@ pub mod codec {
             return CompressionMethodsNotNullSnafu.fail();
         }
         let block = read_extension_block(io).await.context(ExtensionsSnafu)?;
-        LengthOutOfRange::check(block.remaining(), BLOCK).context(ExtensionsLengthSnafu)?;
+        LengthOutOfRangeError::check(block.remaining(), BLOCK).context(ExtensionsLengthSnafu)?;
         let mut block = BlockReader::new(block);
         let mut extensions = Vec::new();
         while let Some((extension_type, mut data)) = block.next().context(ExtensionsSnafu)? {
@@ -519,7 +519,7 @@ pub mod codec {
         #[snafu(display("ClientHello body has excess bytes"))]
         Excess {
             /// The excess.
-            source: ExcessBytes,
+            source: ExcessBytesError,
         },
         /// legacy_version could not be read.
         #[snafu(display("ClientHello legacy_version read failed"))]
@@ -565,7 +565,7 @@ pub mod codec {
         #[snafu(display("ClientHello extension block length out of range"))]
         ExtensionsLength {
             /// The broken range.
-            source: LengthOutOfRange,
+            source: LengthOutOfRangeError,
         },
         /// `pre_shared_key` is not the last extension (RFC 8446 §4.2.11).
         #[snafu(display("pre_shared_key is not the last ClientHello extension"))]
@@ -576,7 +576,7 @@ pub mod codec {
             /// The extension.
             extension: ClientHelloStructuredExtension,
             /// The excess.
-            source: ExcessBytes,
+            source: ExcessBytesError,
         },
         /// `server_name` could not be read.
         #[snafu(display("server_name read failed"))]

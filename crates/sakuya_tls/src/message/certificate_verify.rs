@@ -1,6 +1,6 @@
 //! CertificateVerify (RFC 8446 §4.4.3).
 
-use crate::{vector::LengthOutOfRange, width::Width};
+use crate::{vector::LengthOutOfRangeError, width::Width};
 use nitori_crypto::SignatureScheme;
 
 /// A CertificateVerify: a signature over the transcript, with its scheme.
@@ -15,9 +15,9 @@ impl<C: AsRef<[u8]>> CertificateVerify<C> {
     ///
     /// # Errors
     ///
-    /// [`LengthOutOfRange`] for a signature above 65535 bytes.
-    pub fn new(algorithm: SignatureScheme, signature: C) -> Result<Self, LengthOutOfRange> {
-        LengthOutOfRange::check(signature.as_ref().len(), 0..=Width::U16.max())?;
+    /// [`LengthOutOfRangeError`] for a signature above 65535 bytes.
+    pub fn new(algorithm: SignatureScheme, signature: C) -> Result<Self, LengthOutOfRangeError> {
+        LengthOutOfRangeError::check(signature.as_ref().len(), 0..=Width::U16.max())?;
         Ok(Self {
             algorithm,
             signature,
@@ -62,7 +62,7 @@ pub mod codec {
     use crate::{
         alert::AlertDescription,
         message::{HandshakeType, MessageSource, ReadHeaderError, read_body},
-        vector::{ExcessBytes, Out, ReadVectorError, read_u16, read_vector},
+        vector::{ExcessBytesError, Out, ReadVectorError, read_u16, read_vector},
         width::Width,
     };
     use bytes::Buf;
@@ -82,7 +82,8 @@ pub mod codec {
     ) -> Result<CertificateVerify<F::Bytes>, ReadCertificateVerifyError> {
         let mut body = read_body(io, HandshakeType::CERTIFICATE_VERIFY).await?;
         let verify = body.sync_read_certificate_verify_body_unpin()?;
-        ExcessBytes::check(body.remaining()).context(read_certificate_verify_error::ExcessSnafu)?;
+        ExcessBytesError::check(body.remaining())
+            .context(read_certificate_verify_error::ExcessSnafu)?;
         Ok(verify)
     }
 
@@ -113,7 +114,7 @@ pub mod codec {
         #[snafu(display("CertificateVerify body has excess bytes"))]
         Excess {
             /// The excess.
-            source: ExcessBytes,
+            source: ExcessBytesError,
         },
         /// algorithm could not be read.
         #[snafu(display("CertificateVerify algorithm read failed"))]

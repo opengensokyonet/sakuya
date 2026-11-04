@@ -28,7 +28,7 @@ use crate::{
     extension::{alpn::ProtocolName, pre_shared_key::OfferedPsks, pre_shared_key::PskIndex},
     message::new_session_ticket::{TicketLifetime, TicketNonce},
     schedule::ResumptionPsk,
-    vector::LengthOutOfRange,
+    vector::LengthOutOfRangeError,
     width::Width,
 };
 use bytes::Bytes;
@@ -75,13 +75,13 @@ impl Ticket {
     ///
     /// # Errors
     ///
-    /// [`LengthOutOfRange`] for an empty ticket or one above 65535 bytes.
+    /// [`LengthOutOfRangeError`] for an empty ticket or one above 65535 bytes.
     pub fn new(
         lifetime: TicketLifetime,
         ticket: Bytes,
         early_data: bool,
-    ) -> Result<Self, LengthOutOfRange> {
-        LengthOutOfRange::check(ticket.len(), 1..=Width::U16.max())?;
+    ) -> Result<Self, LengthOutOfRangeError> {
+        LengthOutOfRangeError::check(ticket.len(), 1..=Width::U16.max())?;
         Ok(Self {
             lifetime,
             ticket,

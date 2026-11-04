@@ -72,7 +72,7 @@ impl<C> Offer<C> {
     ///
     /// # Errors
     ///
-    /// [`InvalidOffer`] when a list a ClientHello cannot send empty is
+    /// [`InvalidOfferError`] when a list a ClientHello cannot send empty is
     /// empty, or a key share is not of a listed group or not the only one
     /// of its group.
     pub fn new(
@@ -81,7 +81,7 @@ impl<C> Offer<C> {
         key_share_groups: Vec<Supported<C, NamedGroup>>,
         signature_schemes: Vec<Supported<C, SignatureScheme>>,
         signed_certificate_timestamps: bool,
-    ) -> Result<Self, InvalidOffer> {
+    ) -> Result<Self, InvalidOfferError> {
         use invalid_offer::*;
         ensure!(!suites.is_empty(), NoSuiteSnafu);
         ensure!(!groups.is_empty(), NoGroupSnafu);
@@ -149,7 +149,7 @@ impl<C> core::fmt::Debug for Offer<C> {
 /// Failures of [`Offer::new`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(module(invalid_offer), visibility(pub(crate)))]
-pub enum InvalidOffer {
+pub enum InvalidOfferError {
     /// No cipher suite: `cipher_suites` cannot be empty (RFC 8446 §4.1.2).
     #[snafu(display("offer has no cipher suite"))]
     NoSuite,
@@ -191,14 +191,14 @@ pub trait Offering<C> {
     ///
     /// # Errors
     ///
-    /// [`InvalidOffer`] when the backend and the verifier leave nothing to
+    /// [`InvalidOfferError`] when the backend and the verifier leave nothing to
     /// offer.
     fn offer(
         &self,
         backend: &C,
         target: &ServerTarget,
         verifier: &VerifierSupport,
-    ) -> Result<(Offer<C>, Self::Attempt), InvalidOffer>;
+    ) -> Result<(Offer<C>, Self::Attempt), InvalidOfferError>;
 }
 
 /// The outcome of one offer.
@@ -237,17 +237,17 @@ impl PreferenceOffering {
     ///
     /// # Errors
     ///
-    /// [`KeyShareNotListed`] for a key share group that is not in `groups`.
+    /// [`KeyShareNotListedError`] for a key share group that is not in `groups`.
     pub fn new(
         suites: Vec<CipherSuite>,
         groups: Vec<NamedGroup>,
         key_share_groups: Vec<NamedGroup>,
-    ) -> Result<Self, KeyShareNotListed> {
+    ) -> Result<Self, KeyShareNotListedError> {
         if let Some(&group) = key_share_groups
             .iter()
             .find(|group| !groups.contains(group))
         {
-            return Err(KeyShareNotListed { group });
+            return Err(KeyShareNotListedError { group });
         }
         Ok(Self {
             suites,
@@ -266,11 +266,11 @@ impl PreferenceOffering {
 /// A key share group of a [`PreferenceOffering`] is not among its groups.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("key share group {group:?} is not among the offered groups"))]
-pub struct KeyShareNotListed {
+pub struct KeyShareNotListedError {
     group: NamedGroup,
 }
 
-impl KeyShareNotListed {
+impl KeyShareNotListedError {
     /// The group.
     pub fn group(self) -> NamedGroup {
         self.group
@@ -285,7 +285,7 @@ impl<C: Hash + KeyExchange + SignatureVerify> Offering<C> for PreferenceOffering
         backend: &C,
         target: &ServerTarget,
         verifier: &VerifierSupport,
-    ) -> Result<(Offer<C>, PreferenceAttempt), InvalidOffer> {
+    ) -> Result<(Offer<C>, PreferenceAttempt), InvalidOfferError> {
         let suites = self
             .suites
             .iter()
@@ -358,8 +358,8 @@ impl<C> OfferAttempt<C> for PreferenceAttempt {
 #[cfg(test)]
 mod tests {
     use super::{
-        InvalidOffer, KeyShareNotListed, Offer, OfferAttempt, Offering, PreferenceOffering,
-        VerifierSupport,
+        InvalidOfferError, KeyShareNotListedError, Offer, OfferAttempt, Offering,
+        PreferenceOffering, VerifierSupport,
     };
     use crate::{
         cipher_suite::{CipherSuite, SupportedSuite},
@@ -470,7 +470,7 @@ mod tests {
                 vec![NamedGroup::SECP256R1]
             )
             .unwrap_err(),
-            KeyShareNotListed {
+            KeyShareNotListedError {
                 group: NamedGroup::SECP256R1
             }
         );
@@ -481,7 +481,7 @@ mod tests {
         let scheme = backend.signature_scheme(SignatureScheme::ED25519).unwrap();
         assert_eq!(
             Offer::new(vec![suite], vec![x25519], vec![p256], vec![scheme], false).unwrap_err(),
-            InvalidOffer::KeyShareNotListed {
+            InvalidOfferError::KeyShareNotListed {
                 group: NamedGroup::SECP256R1
             }
         );
@@ -494,17 +494,17 @@ mod tests {
                 false
             )
             .unwrap_err(),
-            InvalidOffer::DuplicateKeyShare {
+            InvalidOfferError::DuplicateKeyShare {
                 group: NamedGroup::X25519
             }
         );
         assert_eq!(
             Offer::new(vec![], vec![x25519], vec![], vec![scheme], false).unwrap_err(),
-            InvalidOffer::NoSuite
+            InvalidOfferError::NoSuite
         );
         assert_eq!(
             Offer::new(vec![suite], vec![x25519], vec![], vec![], false).unwrap_err(),
-            InvalidOffer::NoSignatureScheme
+            InvalidOfferError::NoSignatureScheme
         );
         assert!(Offer::new(vec![suite], vec![x25519, p256], vec![], vec![scheme], true).is_ok());
     }

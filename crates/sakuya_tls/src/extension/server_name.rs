@@ -4,7 +4,7 @@
 //! type, and a list may hold at most one name of each type, so the data is
 //! one [`ServerName`]. In EncryptedExtensions the data is empty.
 
-use crate::{vector::LengthOutOfRange, width::Width};
+use crate::{vector::LengthOutOfRangeError, width::Width};
 use snafu::Snafu;
 
 /// The data of a `server_name` extension in a ClientHello: one host_name.
@@ -21,10 +21,10 @@ impl<C: AsRef<[u8]>> ServerName<C> {
     ///
     /// # Errors
     ///
-    /// [`LengthOutOfRange`] if `host_name` is empty or longer than 65530
+    /// [`LengthOutOfRangeError`] if `host_name` is empty or longer than 65530
     /// bytes, so that the list fits the extension.
-    pub fn new(host_name: C) -> Result<Self, LengthOutOfRange> {
-        LengthOutOfRange::check(host_name.as_ref().len(), 1..=Width::U16.max() - 5)?;
+    pub fn new(host_name: C) -> Result<Self, LengthOutOfRangeError> {
+        LengthOutOfRangeError::check(host_name.as_ref().len(), 1..=Width::U16.max() - 5)?;
         Ok(Self { host_name })
     }
 
@@ -47,11 +47,11 @@ impl<C> ServerName<C> {
 /// It is constructed only for another type, so the type is never 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("server name of unknown type {name_type}"))]
-pub struct UnknownNameType {
+pub struct UnknownNameTypeError {
     name_type: u8,
 }
 
-impl UnknownNameType {
+impl UnknownNameTypeError {
     /// The name type.
     pub const fn name_type(self) -> u8 {
         self.name_type
@@ -64,7 +64,7 @@ pub mod codec {
     // documentation comments; the module documentation above describes them.
     #![allow(missing_docs)]
 
-    use super::{HOST_NAME, ServerName, UnknownNameType};
+    use super::{HOST_NAME, ServerName, UnknownNameTypeError};
     use crate::{
         alert::AlertDescription,
         message::MessageSource,
@@ -111,7 +111,7 @@ pub mod codec {
         use read_server_name_error::*;
         let name_type = read_u8(io).await.context(NameTypeSnafu)?;
         if name_type != HOST_NAME {
-            return Err(UnknownNameType { name_type }.into());
+            return Err(UnknownNameTypeError { name_type }.into());
         }
         read_bounded_vector(io, Width::U16, 1..=Width::U16.max())
             .await
@@ -138,7 +138,7 @@ pub mod codec {
         #[snafu(transparent)]
         UnknownNameType {
             /// The type.
-            source: UnknownNameType,
+            source: UnknownNameTypeError,
         },
         /// A host name could not be read.
         #[snafu(display("host name read failed"))]
