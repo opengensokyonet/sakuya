@@ -16,7 +16,7 @@
 //!
 //! [RFC 9000 §4.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-4.1
 use super::{BoundaryMode, StreamReceiver, termination::ReceiveTerminationPolicy};
-use crate::receive_buffer::ReceiveBuffer;
+use crate::receive_buffer::StreamReceiveBuffer;
 use sakuya_wire::var_int::VarInt;
 
 /// The events a receive flow control policy observes.
@@ -88,7 +88,7 @@ pub trait ReceiveFlowControlPolicy {
 
 impl<C> StreamReceiver<C>
 where
-    C: ReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy,
+    C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy,
 {
     /// The stream limit to advertise now, if any.
     ///

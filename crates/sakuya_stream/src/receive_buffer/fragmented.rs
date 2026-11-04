@@ -1,12 +1,12 @@
 //! A receive buffer holding received data as non-overlapping fragments in a
 //! `BTreeMap`.
-use super::{ReceiveBuffer, StreamDataInput, offset_add, span};
+use super::{StreamDataInput, StreamReceiveBuffer, offset_add, span};
 use bytes::{BufMut, Bytes};
 use core::ops::Range;
 use sakuya_wire::var_int::VarInt;
 use std::collections::BTreeMap;
 
-/// A [`ReceiveBuffer`] that holds received data as fragments keyed by offset.
+/// A [`StreamReceiveBuffer`] that holds received data as fragments keyed by offset.
 ///
 /// Each entry of the map holds the bytes of `[key, key + len)`. Entries are
 /// non-empty and never overlap, and delivered data is not held; adjacent
@@ -133,7 +133,7 @@ fn offset_into(start: VarInt, end: VarInt, count: usize) -> VarInt {
     offset_add(start, count).map_or(end, |offset| offset.min(end))
 }
 
-impl ReceiveBuffer for FragmentedReceiveBuffer {
+impl StreamReceiveBuffer for FragmentedReceiveBuffer {
     type Chunk = Bytes;
 
     fn receive_data(&mut self, input: StreamDataInput) {

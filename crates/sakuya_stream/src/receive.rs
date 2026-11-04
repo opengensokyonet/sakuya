@@ -6,7 +6,7 @@
 //! `STREAM_DATA_BLOCKED` — already parsed and attributed to the stream, and
 //! the operations of the stream reader: reads, the local STOP request and the
 //! reader being dropped. It composes three contracts that one type `C`
-//! implements: the receive buffer ([`ReceiveBuffer`]), the receive flow
+//! implements: the receive buffer ([`StreamReceiveBuffer`]), the receive flow
 //! control policy ([`ReceiveFlowControlPolicy`]) and the receive termination
 //! policy ([`ReceiveTerminationPolicy`]). The type may hold three independent
 //! components or let the buffer double as the flow control policy; it must
@@ -47,12 +47,12 @@
 //! they call. The limit actions ([`termination::BoundaryAction`]) are
 //! provisional.
 //!
-//! [`ReceiveBuffer`]: crate::receive_buffer::ReceiveBuffer
+//! [`StreamReceiveBuffer`]: crate::receive_buffer::StreamReceiveBuffer
 use crate::connection::{CloseReason, ConnectionClosedError};
 use crate::connection_receive_flow::{
     ConnectionReceiveFlowController, RecordReleaseError, RecordUsageError,
 };
-use crate::receive_buffer::{ReceiveBuffer, StreamDataInput, offset_add, span};
+use crate::receive_buffer::{StreamDataInput, StreamReceiveBuffer, offset_add, span};
 use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError};
 use bytes::Bytes;
 use flow_control::{ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView};
@@ -408,7 +408,7 @@ pub struct StreamReceiver<C: ReceiveTerminationPolicy> {
 
 impl<C> StreamReceiver<C>
 where
-    C: ReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy,
+    C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy,
 {
     /// Creates the receive direction of a stream from its components and the
     /// stream limit the peer may already use.

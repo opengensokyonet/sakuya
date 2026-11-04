@@ -46,7 +46,7 @@ use super::{
     flow_control::ReceiveFlowControlPolicy, flow_control::ReceiveFlowEvent, read::RemoteReset,
     read::SharedTerminationReason, stop::StopError,
 };
-use crate::receive_buffer::ReceiveBuffer;
+use crate::receive_buffer::StreamReceiveBuffer;
 use core::convert::Infallible;
 use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::var_int::VarInt;
@@ -354,7 +354,7 @@ enum PolicyViolationError {
 
 impl<C> StreamReceiver<C>
 where
-    C: ReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy,
+    C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy,
 {
     /// Checks a whole decision, then applies it.
     ///

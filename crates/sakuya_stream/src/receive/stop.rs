@@ -25,7 +25,7 @@ use super::{
     ConnectionFailureError, StopRequest, StreamReceiver, flow_control::ReceiveFlowControlPolicy,
     termination::ReceiveTerminationPolicy, termination::TerminationEvent,
 };
-use crate::receive_buffer::ReceiveBuffer;
+use crate::receive_buffer::StreamReceiveBuffer;
 use core::fmt;
 use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::var_int::VarInt;
@@ -87,7 +87,7 @@ pub struct NoStopRequestError;
 
 impl<C> StreamReceiver<C>
 where
-    C: ReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy,
+    C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy,
 {
     /// Installs a request that the peer stop sending, with application error
     /// code `code`.

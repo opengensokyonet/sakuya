@@ -31,7 +31,7 @@ use super::{
     termination::ReceiveTerminationPolicy, termination::ResetPresentation,
     termination::TerminationEvent,
 };
-use crate::receive_buffer::ReceiveBuffer;
+use crate::receive_buffer::StreamReceiveBuffer;
 use bytes::BufMut;
 use core::fmt;
 use core::num::NonZeroUsize;
@@ -188,7 +188,7 @@ impl<R> ReadError<R> {
 
 impl<C> StreamReceiver<C>
 where
-    C: ReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy,
+    C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy,
 {
     /// Reads the next block of contiguous data.
     ///

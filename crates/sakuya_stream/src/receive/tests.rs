@@ -13,7 +13,7 @@ use super::{
 use crate::connection::{CloseReason, ImmediateClose};
 use crate::{
     connection_receive_flow::ConnectionReceiveFlowController,
-    receive_buffer::{ReceiveBuffer, StreamDataInput, fragmented::FragmentedReceiveBuffer},
+    receive_buffer::{StreamDataInput, StreamReceiveBuffer, fragmented::FragmentedReceiveBuffer},
 };
 use bytes::{BufMut, Bytes};
 use core::{cell::Cell, ops::Range};
@@ -157,7 +157,7 @@ impl<T> Parts<T> {
     }
 }
 
-impl<T> ReceiveBuffer for Parts<T> {
+impl<T> StreamReceiveBuffer for Parts<T> {
     type Chunk = Bytes;
 
     fn receive_data(&mut self, input: StreamDataInput) {

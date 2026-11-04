@@ -16,7 +16,7 @@ use sakuya_stream::receive::termination::{
 };
 use sakuya_stream::receive::{StreamFrame, StreamReceiver};
 use sakuya_stream::receive_buffer::fragmented::FragmentedReceiveBuffer;
-use sakuya_stream::receive_buffer::{ReceiveBuffer, StreamDataInput};
+use sakuya_stream::receive_buffer::{StreamDataInput, StreamReceiveBuffer};
 use sakuya_stream::send::composition::SendComposition;
 use sakuya_stream::send::flow_control::{
     AdmissionGuard, FullCeilingAdmission, SendFlowContext, SendFlowControlPolicy,
@@ -237,7 +237,7 @@ struct BaseReceive {
     events: Vec<TerminationEvent>,
 }
 
-impl ReceiveBuffer for BaseReceive {
+impl StreamReceiveBuffer for BaseReceive {
     type Chunk = Bytes;
 
     fn receive_data(&mut self, input: StreamDataInput) {

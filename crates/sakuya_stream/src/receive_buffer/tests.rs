@@ -1,5 +1,5 @@
 use super::{
-    ReceiveBuffer, StreamDataInput, StreamDataInputError, fragmented::FragmentedReceiveBuffer,
+    StreamDataInput, StreamDataInputError, StreamReceiveBuffer, fragmented::FragmentedReceiveBuffer,
 };
 use bytes::Bytes;
 use sakuya_wire::var_int::VarInt;

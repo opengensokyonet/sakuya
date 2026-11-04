@@ -1,6 +1,6 @@
 //! Receive buffers: reassembly and in-order delivery of one stream's data.
 //!
-//! A [`ReceiveBuffer`] reassembles the data of one stream from STREAM frames
+//! A [`StreamReceiveBuffer`] reassembles the data of one stream from STREAM frames
 //! that may arrive out of order, duplicated or overlapping, and delivers it in
 //! order, each byte at most once. It is also the only authority for two
 //! cumulative facts of the stream:
@@ -20,8 +20,8 @@
 //! The buffer is told about the local delivery limits only through its
 //! inputs: STREAM payloads arrive already trimmed to the data acceptance limit
 //! (while still carrying the frame's original offset, end and FIN), reads are
-//! bounded by the delivery limit, and [`ReceiveBuffer::release_from`] and
-//! [`ReceiveBuffer::destroy`] release data that no delivery will need.
+//! bounded by the delivery limit, and [`StreamReceiveBuffer::release_from`] and
+//! [`StreamReceiveBuffer::destroy`] release data that no delivery will need.
 //!
 //! [`fragmented::FragmentedReceiveBuffer`] implements it with a `BTreeMap` of
 //! fragments.
@@ -175,7 +175,7 @@ pub enum StreamDataInputError {
 ///
 /// [`release_from`]: Self::release_from
 /// [`destroy`]: Self::destroy
-pub trait ReceiveBuffer {
+pub trait StreamReceiveBuffer {
     /// The block type handed out by [`read_chunk`](Self::read_chunk).
     type Chunk;
 
