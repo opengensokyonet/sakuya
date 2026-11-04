@@ -5,6 +5,7 @@
 //! (RFC 7250); the encoding does not say which, so the reader takes the
 //! [`CertificateFormat`] the handshake negotiated.
 
+use crate::extension::disallowed_extensions;
 use crate::{
     extension::{
         BlockEntry, ExtensionType, InvalidExtensions, UnknownExtension,
@@ -242,6 +243,28 @@ pub enum InvalidCertificate {
     },
 }
 
+disallowed_extensions! {
+    /// A recognized extension that a certificate entry of a Certificate message may not carry:
+    /// every one but `signed_certificate_timestamp`.
+    CertificateEntryDisallowedExtension {
+        ServerName,
+        SupportedGroups,
+        SignatureAlgorithms,
+        ApplicationLayerProtocolNegotiation,
+        ClientCertificateType,
+        ServerCertificateType,
+        PreSharedKey,
+        EarlyData,
+        SupportedVersions,
+        Cookie,
+        PskKeyExchangeModes,
+        SignatureAlgorithmsCert,
+        KeyShare,
+        QuicTransportParameters,
+        EncryptedClientHello,
+    }
+}
+
 pub mod codec {
     //! Reading and writing Certificate messages as `nitori_call` operations.
     //!
@@ -253,14 +276,14 @@ pub mod codec {
     #![allow(missing_docs)]
 
     use super::{
-        Certificate, CertificateEntry, CertificateEntryExtension, CertificateFormat,
-        CertificateList,
+        Certificate, CertificateEntry, CertificateEntryDisallowedExtension,
+        CertificateEntryExtension, CertificateFormat, CertificateList,
     };
     use crate::{
         alert::AlertDescription,
         extension::{
             BlockEntry as _, BlockReader, ExtensionBlockError, ExtensionNotAllowed,
-            RestrictedExtension, UnknownExtension, read_extension_block,
+            RestrictedExtension, UnknownExtension, not_allowed, read_extension_block,
             signed_certificate_timestamp::codec::{
                 ReadSignedCertificateTimestampsError, ReadSignedCertificateTimestampsHostExt as _,
             },
@@ -348,7 +371,9 @@ pub mod codec {
                     data.sync_read_signed_certificate_timestamps_unpin()
                         .context(SignedCertificateTimestampSnafu)?,
                 ),
-                other => return Err(ExtensionNotAllowed::new(other).into()),
+                other => {
+                    return Err(not_allowed(other, CertificateEntryDisallowedExtension::of).into());
+                }
             });
             ExcessBytes::check(data.remaining()).context(ExtensionExcessSnafu {
                 extension: restricted,
@@ -431,7 +456,7 @@ pub mod codec {
         #[snafu(transparent)]
         ExtensionNotAllowed {
             /// The extension.
-            source: ExtensionNotAllowed,
+            source: ExtensionNotAllowed<CertificateEntryDisallowedExtension>,
         },
         /// The data of a recognized extension is longer than its fields.
         #[snafu(display("{extension:?} data has excess bytes"))]
@@ -516,7 +541,6 @@ mod tests {
     };
     use crate::{
         alert::AlertDescription,
-        extension::RestrictedExtension,
         test_support::{concat, extension, message, vector},
     };
 
@@ -605,7 +629,7 @@ mod tests {
         };
         assert_eq!(
             source.extension(),
-            RestrictedExtension::ApplicationLayerProtocolNegotiation
+            super::CertificateEntryDisallowedExtension::ApplicationLayerProtocolNegotiation
         );
         assert_eq!(error.alert(), AlertDescription::ILLEGAL_PARAMETER);
     }

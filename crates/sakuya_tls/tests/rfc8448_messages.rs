@@ -344,7 +344,7 @@ fn new_session_ticket() {
         sync_write_new_session_ticket_unpin
     );
     assert_eq!(ticket.ticket_lifetime().seconds(), 30);
-    assert_eq!(ticket.ticket_nonce().as_ref(), [0, 0]);
+    assert_eq!(ticket.ticket_nonce().nonce().as_ref(), [0, 0]);
     assert_eq!(ticket.ticket().len(), 0xb2);
     assert_eq!(ticket.extensions().len(), 1);
 }

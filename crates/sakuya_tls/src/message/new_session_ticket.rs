@@ -1,5 +1,6 @@
 //! NewSessionTicket (RFC 8446 §4.6.1).
 
+use crate::extension::disallowed_extensions;
 use crate::{
     extension::{
         BlockEntry, ExtensionType, InvalidExtensions, UnknownExtension, check_block,
@@ -57,12 +58,38 @@ impl TicketLifetimeTooLong {
     }
 }
 
+/// The nonce of a ticket: 0 to 255 bytes, from which the ticket's PSK is
+/// derived (RFC 8446 §4.6.1).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TicketNonce<C> {
+    nonce: C,
+}
+
+impl<C: AsRef<[u8]>> TicketNonce<C> {
+    /// The nonce `nonce`.
+    ///
+    /// # Errors
+    ///
+    /// [`LengthOutOfRange`] for a nonce above 255 bytes.
+    pub fn new(nonce: C) -> Result<Self, LengthOutOfRange> {
+        LengthOutOfRange::check(nonce.as_ref().len(), 0..=Width::U8.max())?;
+        Ok(Self { nonce })
+    }
+}
+
+impl<C> TicketNonce<C> {
+    /// The nonce.
+    pub fn nonce(&self) -> &C {
+        &self.nonce
+    }
+}
+
 /// A NewSessionTicket.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NewSessionTicket<C> {
     ticket_lifetime: TicketLifetime,
     ticket_age_add: u32,
-    ticket_nonce: C,
+    ticket_nonce: TicketNonce<C>,
     ticket: C,
     extensions: Vec<NewSessionTicketExtension<C>>,
 }
@@ -98,7 +125,6 @@ impl<C: AsRef<[u8]>> NewSessionTicket<C> {
     ///
     /// # Errors
     ///
-    /// [`InvalidNewSessionTicket::Nonce`] for a nonce above 255 bytes,
     /// [`InvalidNewSessionTicket::Ticket`] for an empty ticket or one above
     /// 65535 bytes, and [`InvalidNewSessionTicket::Extensions`] for an
     /// extension type that appears twice, data too long for an extension or
@@ -106,13 +132,11 @@ impl<C: AsRef<[u8]>> NewSessionTicket<C> {
     pub fn new(
         ticket_lifetime: TicketLifetime,
         ticket_age_add: u32,
-        ticket_nonce: C,
+        ticket_nonce: TicketNonce<C>,
         ticket: C,
         extensions: Vec<NewSessionTicketExtension<C>>,
     ) -> Result<Self, InvalidNewSessionTicket> {
         use invalid_new_session_ticket::*;
-        LengthOutOfRange::check(ticket_nonce.as_ref().len(), 0..=Width::U8.max())
-            .context(NonceSnafu)?;
         LengthOutOfRange::check(ticket.as_ref().len(), 1..=Width::U16.max())
             .context(TicketSnafu)?;
         check_block(&extensions, BLOCK).context(ExtensionsSnafu)?;
@@ -135,7 +159,7 @@ impl<C: AsRef<[u8]>> NewSessionTicket<C> {
     fn body_len(&self) -> usize {
         4 + 4
             + 1
-            + self.ticket_nonce.as_ref().len()
+            + self.ticket_nonce.nonce.as_ref().len()
             + 2
             + self.ticket.as_ref().len()
             + 2
@@ -161,7 +185,7 @@ impl<C> NewSessionTicket<C> {
     }
 
     /// The ticket_nonce field.
-    pub fn ticket_nonce(&self) -> &C {
+    pub fn ticket_nonce(&self) -> &TicketNonce<C> {
         &self.ticket_nonce
     }
 
@@ -180,12 +204,6 @@ impl<C> NewSessionTicket<C> {
 #[derive(Debug, Snafu)]
 #[snafu(module(invalid_new_session_ticket), visibility(pub(crate)))]
 pub enum InvalidNewSessionTicket {
-    /// The nonce is too long.
-    #[snafu(display("ticket_nonce too long"))]
-    Nonce {
-        /// The broken range.
-        source: LengthOutOfRange,
-    },
     /// The ticket is empty or too long.
     #[snafu(display("ticket length out of range"))]
     Ticket {
@@ -200,6 +218,27 @@ pub enum InvalidNewSessionTicket {
     },
 }
 
+disallowed_extensions! {
+    /// A recognized extension that a NewSessionTicket may not carry: every one but `early_data`.
+    NewSessionTicketDisallowedExtension {
+        ServerName,
+        SupportedGroups,
+        SignatureAlgorithms,
+        ApplicationLayerProtocolNegotiation,
+        SignedCertificateTimestamp,
+        ClientCertificateType,
+        ServerCertificateType,
+        PreSharedKey,
+        SupportedVersions,
+        Cookie,
+        PskKeyExchangeModes,
+        SignatureAlgorithmsCert,
+        KeyShare,
+        QuicTransportParameters,
+        EncryptedClientHello,
+    }
+}
+
 pub mod codec {
     //! Reading and writing NewSessionTicket messages as `nitori_call`
     //! operations.
@@ -212,13 +251,14 @@ pub mod codec {
     #![allow(missing_docs)]
 
     use super::{
-        BLOCK, NewSessionTicket, NewSessionTicketExtension, TicketLifetime, TicketLifetimeTooLong,
+        BLOCK, NewSessionTicket, NewSessionTicketDisallowedExtension, NewSessionTicketExtension,
+        TicketLifetime, TicketLifetimeTooLong, TicketNonce,
     };
     use crate::{
         alert::AlertDescription,
         extension::{
             BlockEntry as _, BlockReader, ExtensionBlockError, ExtensionNotAllowed,
-            RestrictedExtension, UnknownExtension, early_data::MaxEarlyDataSize,
+            RestrictedExtension, UnknownExtension, early_data::MaxEarlyDataSize, not_allowed,
             read_extension_block,
         },
         message::{HandshakeType, MessageSource, ReadHeaderError, read_body},
@@ -255,7 +295,8 @@ pub mod codec {
         use read_new_session_ticket_error::*;
         let ticket_lifetime = TicketLifetime::new(read_u32(io).await.context(LifetimeSnafu)?)?;
         let ticket_age_add = read_u32(io).await.context(AgeAddSnafu)?;
-        let ticket_nonce = read_vector(io, Width::U8).await.context(NonceSnafu)?;
+        let nonce = read_vector(io, Width::U8).await.context(NonceSnafu)?;
+        let ticket_nonce = TicketNonce { nonce };
         let ticket = read_bounded_vector(io, Width::U16, 1..=Width::U16.max())
             .await
             .context(TicketSnafu)?;
@@ -278,7 +319,9 @@ pub mod codec {
                             .context(EarlyDataSnafu)?,
                     ))
                 }
-                other => return Err(ExtensionNotAllowed::new(other).into()),
+                other => {
+                    return Err(not_allowed(other, NewSessionTicketDisallowedExtension::of).into());
+                }
             });
             ExcessBytes::check(data.remaining()).context(ExtensionExcessSnafu {
                 extension: restricted,
@@ -362,7 +405,7 @@ pub mod codec {
         #[snafu(transparent)]
         ExtensionNotAllowed {
             /// The extension.
-            source: ExtensionNotAllowed,
+            source: ExtensionNotAllowed<NewSessionTicketDisallowedExtension>,
         },
         /// The data of a recognized extension is longer than its fields.
         #[snafu(display("{extension:?} data has excess bytes"))]
@@ -424,7 +467,8 @@ pub mod codec {
             .await?;
         out.u32(ticket.ticket_lifetime.seconds()).await?;
         out.u32(ticket.ticket_age_add).await?;
-        out.vector(Width::U8, ticket.ticket_nonce.as_ref()).await?;
+        out.vector(Width::U8, ticket.ticket_nonce.nonce.as_ref())
+            .await?;
         out.vector(Width::U16, ticket.ticket.as_ref()).await?;
         out.length(Width::U16, ticket.block_len()).await?;
         for extension in &ticket.extensions {

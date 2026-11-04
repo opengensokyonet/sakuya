@@ -171,3 +171,78 @@ fn limits_default_and_are_bounded() {
         0x100_0000
     );
 }
+
+/// Each message's enum of disallowed extensions holds exactly the
+/// recognized extensions RFC 8446 §4.2, RFC 9001 §8.2 and RFC 9849 do not
+/// list for that message.
+#[test]
+fn disallowed_extensions_follow_the_table() {
+    use super::{
+        certificate::CertificateEntryDisallowedExtension,
+        certificate_request::CertificateRequestDisallowedExtension,
+        encrypted_extensions::EncryptedExtensionsDisallowedExtension,
+        new_session_ticket::NewSessionTicketDisallowedExtension,
+        server_hello::{HelloRetryRequestDisallowedExtension, ServerHelloDisallowedExtension},
+    };
+    use crate::extension::RestrictedExtension::{self, *};
+
+    fn check<X: Copy + core::fmt::Debug>(
+        of: fn(RestrictedExtension) -> Option<X>,
+        restricted: fn(X) -> RestrictedExtension,
+        allowed: &[RestrictedExtension],
+    ) {
+        for extension in RestrictedExtension::ALL {
+            match of(extension) {
+                Some(disallowed) => {
+                    assert!(!allowed.contains(&extension), "{extension:?}");
+                    assert_eq!(restricted(disallowed), extension);
+                }
+                None => assert!(allowed.contains(&extension), "{extension:?}"),
+            }
+        }
+    }
+
+    check(
+        ServerHelloDisallowedExtension::of,
+        ServerHelloDisallowedExtension::restricted,
+        &[KeyShare, PreSharedKey, SupportedVersions],
+    );
+    check(
+        HelloRetryRequestDisallowedExtension::of,
+        HelloRetryRequestDisallowedExtension::restricted,
+        &[KeyShare, Cookie, SupportedVersions, EncryptedClientHello],
+    );
+    check(
+        EncryptedExtensionsDisallowedExtension::of,
+        EncryptedExtensionsDisallowedExtension::restricted,
+        &[
+            ServerName,
+            SupportedGroups,
+            ApplicationLayerProtocolNegotiation,
+            ClientCertificateType,
+            ServerCertificateType,
+            EarlyData,
+            QuicTransportParameters,
+            EncryptedClientHello,
+        ],
+    );
+    check(
+        CertificateRequestDisallowedExtension::of,
+        CertificateRequestDisallowedExtension::restricted,
+        &[
+            SignatureAlgorithms,
+            SignatureAlgorithmsCert,
+            SignedCertificateTimestamp,
+        ],
+    );
+    check(
+        CertificateEntryDisallowedExtension::of,
+        CertificateEntryDisallowedExtension::restricted,
+        &[SignedCertificateTimestamp],
+    );
+    check(
+        NewSessionTicketDisallowedExtension::of,
+        NewSessionTicketDisallowedExtension::restricted,
+        &[EarlyData],
+    );
+}

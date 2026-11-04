@@ -74,7 +74,7 @@ fn server_extensions_read_and_write_back() {
 fn a_client_extension_is_not_allowed() {
     let error = read(&extension(51, &[0x00, 0x00])).unwrap_err();
     assert!(
-        matches!(error, ReadEncryptedExtensionsError::ExtensionNotAllowed { source } if source.extension() == RestrictedExtension::KeyShare)
+        matches!(error, ReadEncryptedExtensionsError::ExtensionNotAllowed { source } if source.extension() == super::EncryptedExtensionsDisallowedExtension::KeyShare)
     );
     assert_eq!(error.alert(), AlertDescription::ILLEGAL_PARAMETER);
 }

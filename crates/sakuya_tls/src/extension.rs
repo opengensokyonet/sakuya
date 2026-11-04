@@ -9,7 +9,9 @@
 //! The readers recognize the extensions of [`RestrictedExtension`]. Each of
 //! them may appear only in the messages RFC 8446 §4.2, RFC 9001 §8.2 and
 //! RFC 9849 list for it, and a recognized extension in another message is
-//! [`ExtensionNotAllowed`], which calls for illegal_parameter. An extension
+//! [`ExtensionNotAllowed`], which calls for illegal_parameter; each message
+//! names the recognized extensions it may not carry in an enum of its own,
+//! which is the payload of that failure. An extension
 //! of any other type is kept as an [`UnknownExtension`], with its data as it
 //! is, for the handshake to ignore (RFC 8446 §9.3). No type may appear twice
 //! in a block ([`DuplicateExtension`]).
@@ -153,6 +155,27 @@ pub enum RestrictedExtension {
 }
 
 impl RestrictedExtension {
+    /// Every recognized extension.
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 16] = [
+        Self::ServerName,
+        Self::SupportedGroups,
+        Self::SignatureAlgorithms,
+        Self::ApplicationLayerProtocolNegotiation,
+        Self::SignedCertificateTimestamp,
+        Self::ClientCertificateType,
+        Self::ServerCertificateType,
+        Self::PreSharedKey,
+        Self::EarlyData,
+        Self::SupportedVersions,
+        Self::Cookie,
+        Self::PskKeyExchangeModes,
+        Self::SignatureAlgorithmsCert,
+        Self::KeyShare,
+        Self::QuicTransportParameters,
+        Self::EncryptedClientHello,
+    ];
+
     /// The extension type.
     pub const fn extension_type(self) -> ExtensionType {
         match self {
@@ -271,25 +294,84 @@ impl DuplicateExtension {
 
 /// A recognized extension appears in a message it may not appear in
 /// (RFC 8446 §4.2).
+///
+/// `X` is the enum of the message's disallowed extensions: the recognized
+/// extensions that message may not carry, and only those.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("{extension:?} is not allowed in this message"))]
-pub struct ExtensionNotAllowed {
-    extension: RestrictedExtension,
+pub struct ExtensionNotAllowed<X: core::fmt::Debug> {
+    extension: X,
 }
 
-impl ExtensionNotAllowed {
-    pub(crate) fn new(extension: RestrictedExtension) -> Self {
+impl<X: Copy + core::fmt::Debug> ExtensionNotAllowed<X> {
+    pub(crate) fn new(extension: X) -> Self {
         Self { extension }
     }
 
     /// The extension.
-    pub const fn extension(self) -> RestrictedExtension {
+    pub const fn extension(self) -> X {
         self.extension
     }
 
     /// The alert the failure calls for: illegal_parameter.
     pub fn alert(&self) -> AlertDescription {
         AlertDescription::ILLEGAL_PARAMETER
+    }
+}
+
+/// Defines the enum of the recognized extensions a message may not carry,
+/// each variant named as in [`RestrictedExtension`].
+macro_rules! disallowed_extensions {
+    (
+        $(#[$meta:meta])*
+        $name:ident { $($variant:ident,)* }
+    ) => {
+        $(#[$meta])*
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+        #[allow(missing_docs)]
+        pub enum $name {
+            $($variant,)*
+        }
+
+        impl $name {
+            /// The recognized extension.
+            pub const fn restricted(self) -> $crate::extension::RestrictedExtension {
+                match self {
+                    $(Self::$variant => $crate::extension::RestrictedExtension::$variant,)*
+                }
+            }
+
+            /// The extension type.
+            pub const fn extension_type(self) -> $crate::extension::ExtensionType {
+                self.restricted().extension_type()
+            }
+
+            /// `extension`, if the message may not carry it.
+            pub(crate) const fn of(
+                extension: $crate::extension::RestrictedExtension,
+            ) -> Option<Self> {
+                match extension {
+                    $($crate::extension::RestrictedExtension::$variant => Some(Self::$variant),)*
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+pub(crate) use disallowed_extensions;
+
+/// The failure for `extension`, which a message may not carry; `of` is the
+/// `of` of the message's disallowed enum.
+pub(crate) fn not_allowed<X: Copy + core::fmt::Debug>(
+    extension: RestrictedExtension,
+    of: fn(RestrictedExtension) -> Option<X>,
+) -> ExtensionNotAllowed<X> {
+    match of(extension) {
+        Some(extension) => ExtensionNotAllowed::new(extension),
+        // invariant: the caller has matched every extension the message may
+        // carry, and the disallowed enum names every other one.
+        None => unreachable!("{extension:?} may appear in this message"),
     }
 }
 

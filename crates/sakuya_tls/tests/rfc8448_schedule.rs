@@ -20,10 +20,14 @@ use sakuya_packet_protection::secret::TrafficSecret;
 use sakuya_tls::{
     alert::AlertDescription,
     extension::pre_shared_key::PskIndex,
-    message::{HandshakeMessage, MessageLimits, codec::ReadHandshakeMessageHostExt as _},
+    message::{
+        HandshakeMessage, MessageLimits, codec::ReadHandshakeMessageHostExt as _,
+        new_session_ticket::TicketNonce,
+    },
     role::{Client, Server},
     schedule::{
-        Authentication, CertificateVerifyError, Exporter, FinishedError, ResumptionPsk, Transcript,
+        Authentication, CertificateVerifyError, Exporter, ExporterLabel, FinishedError,
+        ResumptionPsk, Transcript,
     },
 };
 
@@ -81,11 +85,12 @@ fn assert_exporter(exporter: &Exporter<TraceBackend>, expected: &str) {
     let label = b"EXPORTER-sakuya test";
     let derived = expand_label(&hex(expected), label, &sha256(&[]), 32);
     let value = expand_label(&derived, b"exporter", &sha256(&[b"context"]), 32);
-    let exported = exporter
-        .export(label, b"context", ExpandLength::new(32).unwrap())
-        .unwrap();
+    let exported = exporter.export(
+        &ExporterLabel::new(label).unwrap(),
+        b"context",
+        ExpandLength::new(32).unwrap(),
+    );
     assert_eq!(exported.as_bytes(), value);
-    assert!(exporter.export(&[0; 250], b"", ExpandLength::MIN).is_err());
 }
 
 /// The ticket PSK of nonce 00 00 from the resumption_master_secret
@@ -108,6 +113,19 @@ fn signature(certificate_verify: &str) -> Vec<u8> {
 }
 
 const PUBLIC_KEY: &[u8] = b"the leaf key";
+
+/// The nonce of the ticket of §3.
+fn nonce() -> TicketNonce<&'static [u8]> {
+    TicketNonce::new(&[0, 0][..]).unwrap()
+}
+
+#[test]
+fn labels_and_nonces_are_bounded() {
+    assert!(ExporterLabel::new(&[0; 249][..]).is_ok());
+    assert_eq!(ExporterLabel::new(&[0; 250][..]).unwrap_err().length(), 250);
+    assert!(TicketNonce::new(&[0; 255][..]).is_ok());
+    assert_eq!(TicketNonce::new(&[0; 256][..]).unwrap_err().length(), 256);
+}
 
 #[test]
 fn s3_server() {
@@ -149,10 +167,9 @@ fn s3_server() {
         .unwrap();
     assert_secret(&completed.one_rtt_receive, s3::CLIENT_APPLICATION_TRAFFIC);
     assert_exporter(&completed.exporter, s3::EXPORTER_MASTER);
-    let psk = resumption.ticket_psk(&[0, 0]).unwrap();
+    let psk = resumption.ticket_psk(&nonce());
     assert_eq!(psk.secret().as_bytes(), hex(s3::TICKET_PSK));
     assert_eq!(ticket_psk(s3::RESUMPTION_MASTER), hex(s3::TICKET_PSK));
-    assert!(resumption.ticket_psk(&[0; 256]).is_err());
 }
 
 /// The server's chain of §3 up to the client's Finished.
@@ -243,7 +260,7 @@ fn s3_client() {
     assert_exporter(&master.exporter(), s3::EXPORTER_MASTER);
     let (resumption, finished) = master.client_finished();
     assert_eq!(finished.encoded().as_ref(), hex(s3::CLIENT_FINISHED));
-    let psk = resumption.ticket_psk(&[0, 0]).unwrap();
+    let psk = resumption.ticket_psk(&nonce());
     assert_eq!(psk.secret().as_bytes(), hex(s3::TICKET_PSK));
 }
 
@@ -350,7 +367,7 @@ fn s4_server() {
         .unwrap();
     assert_secret(&completed.one_rtt_receive, s4::CLIENT_APPLICATION_TRAFFIC);
     assert_exporter(&completed.exporter, s4::EXPORTER_MASTER);
-    let psk = resumption.ticket_psk(&[0, 0]).unwrap();
+    let psk = resumption.ticket_psk(&nonce());
     assert_eq!(psk.secret().as_bytes(), ticket_psk(s4::RESUMPTION_MASTER));
 }
 
@@ -385,7 +402,7 @@ fn s4_client() {
     assert_secret(&keys.receive, s4::SERVER_APPLICATION_TRAFFIC);
     let (resumption, finished) = master.add(&hex(s4::END_OF_EARLY_DATA)).client_finished();
     assert_eq!(finished.encoded().as_ref(), hex(s4::CLIENT_FINISHED));
-    let psk = resumption.ticket_psk(&[0, 0]).unwrap();
+    let psk = resumption.ticket_psk(&nonce());
     assert_eq!(psk.secret().as_bytes(), ticket_psk(s4::RESUMPTION_MASTER));
 }
 
@@ -472,7 +489,7 @@ fn s5_server() {
         .unwrap();
     assert_secret(&completed.one_rtt_receive, s5::CLIENT_APPLICATION_TRAFFIC);
     assert_exporter(&completed.exporter, s5::EXPORTER_MASTER);
-    let psk = resumption.ticket_psk(&[0, 0]).unwrap();
+    let psk = resumption.ticket_psk(&nonce());
     assert_eq!(psk.secret().as_bytes(), ticket_psk(s5::RESUMPTION_MASTER));
 }
 

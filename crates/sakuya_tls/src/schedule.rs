@@ -45,6 +45,7 @@ use crate::{
             codec::{ReadFinishedError, ReadFinishedHostExt as _, WriteFinishedHostExt as _},
         },
         message_hash::{MessageHash, codec::WriteMessageHashHostExt as _},
+        new_session_ticket::TicketNonce,
     },
     role::{Client, HandshakeRole, Server},
     vector::LengthOutOfRange,
@@ -701,21 +702,16 @@ impl<R: HandshakeRole, C: TlsCrypto> Resumption<R, C> {
     /// The PSK of the ticket with `nonce`:
     /// HKDF-Expand-Label(resumption_master_secret, "resumption", nonce,
     /// Hash.length) (RFC 8446 §4.6.1).
-    ///
-    /// # Errors
-    ///
-    /// [`LengthOutOfRange`] for a nonce above 255 bytes.
-    pub fn ticket_psk(&self, nonce: &[u8]) -> Result<ResumptionPsk, LengthOutOfRange> {
-        LengthOutOfRange::check(nonce.len(), 0..=Width::U8.max())?;
+    pub fn ticket_psk<N: AsRef<[u8]>>(&self, nonce: &TicketNonce<N>) -> ResumptionPsk {
         let len = ExpandLength::hash_len(self.hash.algorithm());
-        Ok(ResumptionPsk(expand_label(
+        ResumptionPsk(expand_label(
             &self.backend,
             self.hash,
             &self.resumption_master,
             b"resumption",
-            nonce,
+            nonce.nonce().as_ref(),
             len,
-        )))
+        ))
     }
 }
 
@@ -734,6 +730,32 @@ impl ResumptionPsk {
     }
 }
 
+/// The label of an exported value: at most 249 bytes, so that it fits an
+/// HkdfLabel with the "tls13 " prefix (RFC 8446 §7.1, §7.5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ExporterLabel<L> {
+    label: L,
+}
+
+impl<L: AsRef<[u8]>> ExporterLabel<L> {
+    /// The label `label`.
+    ///
+    /// # Errors
+    ///
+    /// [`LengthOutOfRange`] for a label above 249 bytes.
+    pub fn new(label: L) -> Result<Self, LengthOutOfRange> {
+        LengthOutOfRange::check(label.as_ref().len(), 0..=LABEL_MAX)?;
+        Ok(Self { label })
+    }
+}
+
+impl<L> ExporterLabel<L> {
+    /// The label.
+    pub fn label(&self) -> &L {
+        &self.label
+    }
+}
+
 /// The exporter of a connection (RFC 8446 §7.5): exporter_master_secret
 /// with the hash and the backend.
 pub struct Exporter<C: TlsCrypto> {
@@ -746,18 +768,13 @@ impl<C: TlsCrypto> Exporter<C> {
     /// TLS-Exporter(label, context, len): HKDF-Expand-Label of
     /// Derive-Secret(exporter_master_secret, label, "") with "exporter" and
     /// the hash of `context`.
-    ///
-    /// # Errors
-    ///
-    /// [`LengthOutOfRange`] for a label above 249 bytes, which does not fit
-    /// an HkdfLabel.
-    pub fn export(
+    pub fn export<L: AsRef<[u8]>>(
         &self,
-        label: &[u8],
+        label: &ExporterLabel<L>,
         context: &[u8],
         len: ExpandLength,
-    ) -> Result<Secret, LengthOutOfRange> {
-        LengthOutOfRange::check(label.len(), 0..=LABEL_MAX)?;
+    ) -> Secret {
+        let label = label.label.as_ref();
         let hash_len = ExpandLength::hash_len(self.hash.algorithm());
         let empty = Hash::start(&self.backend, self.hash).finish();
         let derived = expand_label(
@@ -770,14 +787,14 @@ impl<C: TlsCrypto> Exporter<C> {
         );
         let mut context_hash = Hash::start(&self.backend, self.hash);
         context_hash.update(context);
-        Ok(expand_label(
+        expand_label(
             &self.backend,
             self.hash,
             &derived,
             b"exporter",
             context_hash.finish().as_bytes(),
             len,
-        ))
+        )
     }
 }
 

@@ -1,5 +1,6 @@
 //! CertificateRequest (RFC 8446 §4.3.2).
 
+use crate::extension::disallowed_extensions;
 use crate::{
     code_point::CodePointList,
     extension::{BlockEntry, ExtensionType, InvalidExtensions, UnknownExtension, check_block},
@@ -126,6 +127,26 @@ pub enum InvalidCertificateRequest {
     },
 }
 
+disallowed_extensions! {
+    /// A recognized extension that a CertificateRequest may not carry: every one but
+    /// `signature_algorithms`, `signature_algorithms_cert` and `signed_certificate_timestamp`.
+    CertificateRequestDisallowedExtension {
+        ServerName,
+        SupportedGroups,
+        ApplicationLayerProtocolNegotiation,
+        ClientCertificateType,
+        ServerCertificateType,
+        PreSharedKey,
+        EarlyData,
+        SupportedVersions,
+        Cookie,
+        PskKeyExchangeModes,
+        KeyShare,
+        QuicTransportParameters,
+        EncryptedClientHello,
+    }
+}
+
 pub mod codec {
     //! Reading and writing CertificateRequest messages as `nitori_call`
     //! operations.
@@ -137,13 +158,16 @@ pub mod codec {
     // documentation comments; the module documentation above describes them.
     #![allow(missing_docs)]
 
-    use super::{BLOCK, CertificateRequest, CertificateRequestExtension};
+    use super::{
+        BLOCK, CertificateRequest, CertificateRequestDisallowedExtension,
+        CertificateRequestExtension,
+    };
     use crate::{
         alert::AlertDescription,
         code_point::codec::{ReadCodePointListError, ReadCodePointListHostExt as _},
         extension::{
             BlockEntry as _, BlockReader, ExtensionBlockError, ExtensionNotAllowed,
-            RestrictedExtension, UnknownExtension, read_extension_block,
+            RestrictedExtension, UnknownExtension, not_allowed, read_extension_block,
         },
         message::{HandshakeType, MessageSource, ReadHeaderError, read_body},
         vector::{ExcessBytes, LengthOutOfRange, Out, ReadVectorError, read_vector},
@@ -197,7 +221,11 @@ pub mod codec {
                         .context(SignatureAlgorithmsCertSnafu)?,
                 ),
                 R::SignedCertificateTimestamp => X::SignedCertificateTimestamp,
-                other => return Err(ExtensionNotAllowed::new(other).into()),
+                other => {
+                    return Err(
+                        not_allowed(other, CertificateRequestDisallowedExtension::of).into(),
+                    );
+                }
             });
             ExcessBytes::check(data.remaining()).context(ExtensionExcessSnafu {
                 extension: restricted,
@@ -247,7 +275,7 @@ pub mod codec {
         #[snafu(transparent)]
         ExtensionNotAllowed {
             /// The extension.
-            source: ExtensionNotAllowed,
+            source: ExtensionNotAllowed<CertificateRequestDisallowedExtension>,
         },
         /// The data of a recognized extension is longer than its fields.
         #[snafu(display("{extension:?} data has excess bytes"))]

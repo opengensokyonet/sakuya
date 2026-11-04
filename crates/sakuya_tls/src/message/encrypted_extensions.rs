@@ -1,5 +1,6 @@
 //! EncryptedExtensions (RFC 8446 §4.3.1).
 
+use crate::extension::disallowed_extensions;
 use crate::{
     code_point::CodePointList,
     extension::{
@@ -116,6 +117,23 @@ impl<C> EncryptedExtensions<C> {
     }
 }
 
+disallowed_extensions! {
+    /// A recognized extension that EncryptedExtensions may not carry: every one but `server_name`,
+    /// `supported_groups`, `application_layer_protocol_negotiation`, `client_certificate_type`,
+    /// `server_certificate_type`, `early_data`, `quic_transport_parameters` and
+    /// `encrypted_client_hello`.
+    EncryptedExtensionsDisallowedExtension {
+        SignatureAlgorithms,
+        SignedCertificateTimestamp,
+        PreSharedKey,
+        SupportedVersions,
+        Cookie,
+        PskKeyExchangeModes,
+        SignatureAlgorithmsCert,
+        KeyShare,
+    }
+}
+
 pub mod codec {
     //! Reading and writing EncryptedExtensions messages as `nitori_call`
     //! operations.
@@ -127,7 +145,9 @@ pub mod codec {
     // documentation comments; the module documentation above describes them.
     #![allow(missing_docs)]
 
-    use super::{EncryptedExtensions, EncryptedExtensionsExtension};
+    use super::{
+        EncryptedExtensions, EncryptedExtensionsDisallowedExtension, EncryptedExtensionsExtension,
+    };
     use crate::{
         alert::AlertDescription,
         code_point::codec::{ReadCodePointListError, ReadCodePointListHostExt as _},
@@ -136,6 +156,7 @@ pub mod codec {
             ReadExtensionBlockHostExt as _, RestrictedExtension, UnknownExtension,
             alpn::codec::{ReadSelectedProtocolError, ReadSelectedProtocolHostExt as _},
             certificate_type::CertificateType,
+            not_allowed,
         },
         message::{HandshakeType, MessageSource, ReadHeaderError, read_body},
         vector::{ExcessBytes, Out, read_u8},
@@ -209,7 +230,9 @@ pub mod codec {
             R::EarlyData => X::EarlyData,
             R::QuicTransportParameters => X::QuicTransportParameters(core::mem::take(data)),
             R::EncryptedClientHello => X::EncryptedClientHello(core::mem::take(data)),
-            other => return Err(ExtensionNotAllowed::new(other).into()),
+            other => {
+                return Err(not_allowed(other, EncryptedExtensionsDisallowedExtension::of).into());
+            }
         })
     }
 
@@ -246,7 +269,7 @@ pub mod codec {
         #[snafu(transparent)]
         ExtensionNotAllowed {
             /// The extension.
-            source: ExtensionNotAllowed,
+            source: ExtensionNotAllowed<EncryptedExtensionsDisallowedExtension>,
         },
         /// The data of a recognized extension is longer than its fields.
         #[snafu(display("{extension:?} data has excess bytes"))]

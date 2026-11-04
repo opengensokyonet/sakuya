@@ -58,7 +58,10 @@ fn each_message_allows_its_extensions() {
     let ReadServerHelloError::ExtensionNotAllowed { source } = &error else {
         panic!("{error:?}")
     };
-    assert_eq!(source.extension(), RestrictedExtension::Cookie);
+    assert_eq!(
+        source.extension(),
+        super::ServerHelloDisallowedExtension::Cookie
+    );
     assert_eq!(error.alert(), AlertDescription::ILLEGAL_PARAMETER);
     assert!(
         read(server_hello(
@@ -76,10 +79,14 @@ fn each_message_allows_its_extensions() {
         &concat(&[VERSION, &psk]),
     ))
     .unwrap_err();
-    assert!(matches!(
-        error,
-        ReadServerHelloError::ExtensionNotAllowed { .. }
-    ));
+    let ReadServerHelloError::RetryExtensionNotAllowed { source } = &error else {
+        panic!("{error:?}")
+    };
+    assert_eq!(
+        source.extension(),
+        super::HelloRetryRequestDisallowedExtension::PreSharedKey
+    );
+    assert_eq!(error.alert(), AlertDescription::ILLEGAL_PARAMETER);
     assert!(read(server_hello(&[7; 32], 0, &concat(&[VERSION, &psk]))).is_ok());
 }
 
