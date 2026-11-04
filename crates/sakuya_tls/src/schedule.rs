@@ -1,0 +1,940 @@
+//! The transcript and the key schedule of TLS 1.3 (RFC 8446 §4.4.1, §7.1),
+//! as one chain of values that move.
+//!
+//! Each value holds the backend, the hash of the cipher suite and the
+//! running transcript hash, and its methods are what the protocol can do at
+//! that point; a step consumes the value before it. Without a ServerHello
+//! there is no Handshake traffic secret, and without the server's Finished
+//! there is no 1-RTT traffic secret.
+//!
+//! ```text
+//! Transcript ── early_secret ──────────▶ EarlySecret ────┐
+//!            └─ early_secret_with_psk ─▶ PskEarlySecret ─┴─ server_hello ─▶ HandshakeSecret
+//!
+//! server: HandshakeSecret<Server> ── server_finished ─▶ MasterSecret<Server>
+//!             ── client_finished(received)? ─▶ Resumption<Server> + Completed
+//! client: HandshakeSecret<Client> ── authentication ─▶ CertificateAuth ── verify_certificate_verify? ─┐
+//!                                                  └─▶ Authenticated ◀─────────────────────────────────┘
+//!             Authenticated ── server_finished(received)? ─▶ MasterSecret<Client>
+//!             ── client_finished ─▶ Resumption<Client>
+//! ```
+//!
+//! The bytes of a message go into the transcript as they are, the same
+//! bytes that are sent or were received: the caller adds them with `add`,
+//! and the steps that produce a Finished message hand out its encoding.
+//! Forks, such as a PSK binder, hash a clone of the running hash and leave
+//! the chain as it is. Secrets are dropped as their steps consume them, and
+//! a dropped secret is overwritten.
+//!
+//! The chain takes the backend's answer that it supports the hash, so no
+//! step fails for lack of support. Traffic secrets leave the chain as
+//! packet protection's `TrafficSecret`.
+
+// `add` of each step adds a message to the transcript and returns the same
+// step by value; it is not addition.
+#![allow(clippy::should_implement_trait)]
+
+use crate::{
+    crypto::TlsCrypto,
+    extension::pre_shared_key::PskIndex,
+    message::{
+        HandshakeMessage,
+        certificate_verify::codec::ReadCertificateVerifyHostExt as _,
+        finished::{
+            Finished,
+            codec::{ReadFinishedError, ReadFinishedHostExt as _, WriteFinishedHostExt as _},
+        },
+        message_hash::{MessageHash, codec::WriteMessageHashHostExt as _},
+    },
+    role::{Client, HandshakeRole, Server},
+    vector::LengthOutOfRange,
+    width::Width,
+};
+use bytes::Bytes;
+use core::marker::PhantomData;
+use nitori_crypto::{
+    Digest, ExpandLength, Hash, HashAlgorithm, Hmac, RunningHash, Secret, SignatureVerify,
+    Supported, TagMismatch,
+};
+use sakuya_packet_protection::{backend::KdfAlgorithm, secret::TrafficSecret};
+use snafu::{ResultExt, Snafu};
+
+mod client;
+
+pub use client::{Authenticated, Authentication, CertificateAuth, CertificateVerifyError};
+
+/// The longest label an HkdfLabel holds after its "tls13 " prefix.
+const LABEL_MAX: usize = Width::U8.max() - 6;
+
+/// What every value of the chain holds: the backend, the hash and the
+/// running transcript hash.
+struct Chain<C: TlsCrypto> {
+    backend: C,
+    hash: Supported<C, HashAlgorithm>,
+    transcript: C::Running,
+}
+
+impl<C: TlsCrypto + Clone> Clone for Chain<C> {
+    fn clone(&self) -> Self {
+        Self {
+            backend: self.backend.clone(),
+            hash: self.hash,
+            transcript: self.transcript.clone(),
+        }
+    }
+}
+
+impl<C: TlsCrypto> Chain<C> {
+    fn algorithm(&self) -> HashAlgorithm {
+        self.hash.algorithm()
+    }
+
+    fn hash_len(&self) -> ExpandLength {
+        ExpandLength::hash_len(self.algorithm())
+    }
+
+    fn add(&mut self, message: &[u8]) {
+        self.transcript.update(message);
+    }
+
+    /// The hash of the transcript so far, from a fork of the running hash.
+    fn current(&self) -> Digest {
+        self.transcript.clone().finish()
+    }
+
+    fn empty_hash(&self) -> Digest {
+        Hash::start(&self.backend, self.hash).finish()
+    }
+
+    fn extract(&self, salt: &[u8], ikm: &[u8]) -> Secret {
+        self.backend.extract(self.hash, salt, ikm)
+    }
+
+    /// A string of zeros as long as the hash, the salt and input of the
+    /// extractions without a PSK or a shared secret.
+    fn zeros(&self) -> Secret {
+        Secret::zeroed(self.hash_len())
+    }
+
+    fn expand_label(
+        &self,
+        secret: &Secret,
+        label: &[u8],
+        context: &[u8],
+        len: ExpandLength,
+    ) -> Secret {
+        expand_label(&self.backend, self.hash, secret, label, context, len)
+    }
+
+    fn derive_secret(&self, secret: &Secret, label: &[u8], hash: &Digest) -> Secret {
+        self.expand_label(secret, label, hash.as_bytes(), self.hash_len())
+    }
+
+    /// HMAC under the Finished key of `base` over the transcript so far: a
+    /// Finished message and a PSK binder are both this
+    /// (RFC 8446 §4.4.4, §4.2.11.2).
+    fn verify_data(&self, base: &Secret) -> Digest {
+        let key = self.expand_label(base, b"finished", &[], self.hash_len());
+        Hmac::sign(
+            &self.backend,
+            self.hash,
+            key.as_bytes(),
+            self.current().as_bytes(),
+        )
+    }
+
+    /// Checks `received` against [`Chain::verify_data`] in constant time.
+    fn check_verify_data(&self, base: &Secret, received: &[u8]) -> Result<(), TagMismatch> {
+        let key = self.expand_label(base, b"finished", &[], self.hash_len());
+        Hmac::verify(
+            &self.backend,
+            self.hash,
+            key.as_bytes(),
+            self.current().as_bytes(),
+            received,
+        )
+    }
+
+    fn traffic(&self, secret: &Secret) -> TrafficSecret {
+        traffic(self.algorithm(), secret)
+    }
+
+    /// The encoding of the Finished message for `base`, added to the
+    /// transcript.
+    fn write_finished(&mut self, base: &Secret) -> HandshakeMessage {
+        let finished = Finished::new(self.verify_data(base));
+        let mut encoded = Vec::with_capacity(finished.encoded_len());
+        match encoded.sync_write_finished_unpin(&finished) {
+            Ok(()) => {}
+            Err(error) => match error.host_error() {
+                Some(never) => match *never {},
+                // invariant: a vector accepts every byte.
+                None => unreachable!("{error}"),
+            },
+        }
+        self.add(&encoded);
+        HandshakeMessage::from_encoded(Bytes::from(encoded))
+    }
+
+    /// Reads a received Finished message and checks it against the
+    /// Finished key of `base`, then adds it to the transcript.
+    fn read_finished(
+        &mut self,
+        base: &Secret,
+        received: &HandshakeMessage,
+    ) -> Result<(), FinishedError> {
+        let encoded = received.encoded().as_ref();
+        let finished = { encoded }
+            .sync_read_finished_unpin(self.algorithm())
+            .context(finished_error::ReadSnafu)?;
+        self.check_verify_data(base, finished.verify_data().as_bytes())
+            .map_err(|TagMismatch| FinishedError::Mismatch)?;
+        self.add(encoded);
+        Ok(())
+    }
+}
+
+/// HKDF-Expand-Label (RFC 8446 §7.1). The "tls13 " prefix belongs to TLS,
+/// not to the backend. The caller keeps `label` within [`LABEL_MAX`] bytes
+/// and `context` within 255.
+fn expand_label<C: TlsCrypto>(
+    backend: &C,
+    hash: Supported<C, HashAlgorithm>,
+    secret: &Secret,
+    label: &[u8],
+    context: &[u8],
+    len: ExpandLength,
+) -> Secret {
+    debug_assert!(label.len() <= LABEL_MAX && context.len() <= Width::U8.max());
+    let length = u16::from(len.get()).to_be_bytes();
+    let label_len = [(6 + label.len()) as u8];
+    let context_len = [context.len() as u8];
+    backend.expand(
+        hash,
+        secret,
+        &[&length, &label_len, b"tls13 ", label, &context_len, context],
+        len,
+    )
+}
+
+/// The KDF of packet protection for `hash`.
+fn kdf(hash: HashAlgorithm) -> KdfAlgorithm {
+    match hash {
+        HashAlgorithm::Sha256 => KdfAlgorithm::HkdfSha256,
+        HashAlgorithm::Sha384 => KdfAlgorithm::HkdfSha384,
+    }
+}
+
+/// A traffic secret for packet protection.
+fn traffic(hash: HashAlgorithm, secret: &Secret) -> TrafficSecret {
+    // invariant: every traffic secret is derived as long as the hash.
+    TrafficSecret::new(kdf(hash), secret.as_bytes()).expect("a secret as long as the hash")
+}
+
+/// The start of the chain: the transcript before the Early Secret.
+///
+/// It holds no secret, so it can be cloned to fork the transcript, as a
+/// client does to compute the binder of its first ClientHello while keeping
+/// the transcript for a HelloRetryRequest.
+pub struct Transcript<R, C: TlsCrypto> {
+    chain: Chain<C>,
+    role: PhantomData<R>,
+}
+
+impl<R, C: TlsCrypto + Clone> Clone for Transcript<R, C> {
+    fn clone(&self) -> Self {
+        Self {
+            chain: self.chain.clone(),
+            role: PhantomData,
+        }
+    }
+}
+
+impl<R: HandshakeRole, C: TlsCrypto + Clone> Transcript<R, C> {
+    /// An empty transcript that hashes with `hash`, the hash of the selected
+    /// cipher suite.
+    pub fn new(backend: &C, hash: Supported<C, HashAlgorithm>) -> Self {
+        Self {
+            chain: Chain {
+                backend: backend.clone(),
+                hash,
+                transcript: Hash::start(backend, hash),
+            },
+            role: PhantomData,
+        }
+    }
+
+    /// Adds the bytes of a message, or of a part of one.
+    pub fn add(mut self, message: &[u8]) -> Self {
+        self.chain.add(message);
+        self
+    }
+
+    /// Replaces the first ClientHello, which the transcript holds alone,
+    /// with the message_hash message that stands for it, and adds the
+    /// HelloRetryRequest (RFC 8446 §4.4.1).
+    pub fn retry(mut self, hello_retry_request: &[u8]) -> Self {
+        let message = MessageHash::new(self.chain.current());
+        let mut buffer = [0; 4 + 48];
+        let mut sink = &mut buffer[..];
+        match sink.sync_write_message_hash_unpin(&message) {
+            Ok(()) => {}
+            Err(error) => match error.host_error() {
+                Some(never) => match *never {},
+                // invariant: the buffer holds the longest hash.
+                None => unreachable!("{error}"),
+            },
+        }
+        let mut transcript = Hash::start(&self.chain.backend, self.chain.hash);
+        transcript.update(&buffer[..message.encoded_len()]);
+        transcript.update(hello_retry_request);
+        self.chain.transcript = transcript;
+        self
+    }
+
+    /// The Early Secret without a PSK: HKDF-Extract(0, 0) (RFC 8446 §7.1).
+    pub fn early_secret(self) -> EarlySecret<R, C> {
+        let zeros = self.chain.zeros();
+        let early = self.chain.extract(zeros.as_bytes(), zeros.as_bytes());
+        EarlySecret {
+            chain: self.chain,
+            early,
+            role: PhantomData,
+        }
+    }
+
+    /// The Early Secret of a resumption PSK, which this step consumes.
+    ///
+    /// The transcript holds the ClientHello up to its binders, which the
+    /// binder covers; the rest of it is added to the value this returns.
+    pub fn early_secret_with_psk(self, psk: ResumptionPsk) -> PskEarlySecret<R, C> {
+        let zeros = self.chain.zeros();
+        let early = self.chain.extract(zeros.as_bytes(), psk.0.as_bytes());
+        PskEarlySecret {
+            chain: self.chain,
+            early,
+            role: PhantomData,
+        }
+    }
+}
+
+/// The Early Secret without a PSK.
+pub struct EarlySecret<R, C: TlsCrypto> {
+    chain: Chain<C>,
+    early: Secret,
+    role: PhantomData<R>,
+}
+
+/// How the server authenticates in a handshake: with a certificate, or with
+/// the PSK it accepted (RFC 8446 §4.1.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    Certificate,
+    Psk,
+}
+
+/// Derives the Handshake Secret from the Early Secret `early` and the
+/// shared secret, after adding the ServerHello.
+fn handshake<R: HandshakeRole, C: TlsCrypto>(
+    mut chain: Chain<C>,
+    early: &Secret,
+    shared: Secret,
+    server_hello: &[u8],
+    mode: Mode,
+) -> (HandshakeSecret<R, C>, HandshakeKeys) {
+    let derived = chain.derive_secret(early, b"derived", &chain.empty_hash());
+    let handshake = chain.extract(derived.as_bytes(), shared.as_bytes());
+    drop(shared);
+    chain.add(server_hello);
+    let hash = chain.current();
+    let client = chain.derive_secret(&handshake, b"c hs traffic", &hash);
+    let server = chain.derive_secret(&handshake, b"s hs traffic", &hash);
+    let (send, receive) = R::send_receive(chain.traffic(&client), chain.traffic(&server));
+    (
+        HandshakeSecret {
+            chain,
+            handshake,
+            client,
+            server,
+            mode,
+            role: PhantomData,
+        },
+        HandshakeKeys { send, receive },
+    )
+}
+
+impl<C: TlsCrypto + Clone> EarlySecret<Server, C> {
+    /// Adds the ServerHello the server wrote and derives the Handshake
+    /// Secret from the shared secret, which this step consumes.
+    pub fn server_hello(
+        self,
+        shared: Secret,
+        server_hello: &[u8],
+    ) -> (HandshakeSecret<Server, C>, HandshakeKeys) {
+        handshake(
+            self.chain,
+            &self.early,
+            shared,
+            server_hello,
+            Mode::Certificate,
+        )
+    }
+}
+
+impl<C: TlsCrypto + Clone> EarlySecret<Client, C> {
+    /// Adds the ServerHello the client read and derives the Handshake Secret
+    /// from the shared secret, which this step consumes.
+    ///
+    /// `selected` is the `pre_shared_key` of the ServerHello.
+    ///
+    /// # Errors
+    ///
+    /// [`UnofferedPsk`] if the ServerHello selects a PSK, since the client
+    /// offered none.
+    pub fn server_hello(
+        self,
+        shared: Secret,
+        server_hello: &[u8],
+        selected: Option<PskIndex>,
+    ) -> Result<(HandshakeSecret<Client, C>, HandshakeKeys), UnofferedPsk> {
+        if let Some(index) = selected {
+            return Err(UnofferedPsk { index });
+        }
+        Ok(handshake(
+            self.chain,
+            &self.early,
+            shared,
+            server_hello,
+            Mode::Certificate,
+        ))
+    }
+}
+
+/// The Early Secret of a resumption PSK. Only this Early Secret has PSK
+/// binders and 0-RTT.
+pub struct PskEarlySecret<R, C: TlsCrypto> {
+    chain: Chain<C>,
+    early: Secret,
+    role: PhantomData<R>,
+}
+
+impl<R: HandshakeRole, C: TlsCrypto + Clone> PskEarlySecret<R, C> {
+    /// Adds the bytes of a message, or of a part of one: the binders and
+    /// what follows them, once the binder is computed or checked.
+    pub fn add(mut self, message: &[u8]) -> Self {
+        self.chain.add(message);
+        self
+    }
+
+    fn binder_key(&self) -> Secret {
+        let chain = &self.chain;
+        chain.derive_secret(&self.early, b"res binder", &chain.empty_hash())
+    }
+
+    /// client_early_traffic_secret, over the whole ClientHello.
+    fn client_early_traffic(&self) -> TrafficSecret {
+        let chain = &self.chain;
+        let secret = chain.derive_secret(&self.early, b"c e traffic", &chain.current());
+        chain.traffic(&secret)
+    }
+}
+
+impl<C: TlsCrypto + Clone> PskEarlySecret<Client, C> {
+    /// The binder of the PSK over the transcript so far, the ClientHello up
+    /// to its binders (RFC 8446 §4.2.11.2).
+    pub fn binder(&self) -> Digest {
+        self.chain.verify_data(&self.binder_key())
+    }
+
+    /// The 0-RTT secret the client sends with, once the whole ClientHello is
+    /// in the transcript.
+    pub fn early_send(&self) -> ZeroRttSend {
+        ZeroRttSend(self.client_early_traffic())
+    }
+
+    /// Adds the ServerHello the client read and derives the Handshake Secret
+    /// from the shared secret, which this step consumes.
+    ///
+    /// `selected` is the `pre_shared_key` of the ServerHello: with the one
+    /// PSK offered, the server authenticates with it; without, the server
+    /// declined it and authenticates with a certificate, and the Handshake
+    /// Secret comes from the Early Secret without a PSK.
+    ///
+    /// # Errors
+    ///
+    /// [`UnofferedPsk`] for an index other than 0, the one PSK offered.
+    pub fn server_hello(
+        self,
+        shared: Secret,
+        server_hello: &[u8],
+        selected: Option<PskIndex>,
+    ) -> Result<(HandshakeSecret<Client, C>, HandshakeKeys), UnofferedPsk> {
+        match selected {
+            Some(index) if index != PskIndex::new(0) => Err(UnofferedPsk { index }),
+            Some(_) => Ok(handshake(
+                self.chain,
+                &self.early,
+                shared,
+                server_hello,
+                Mode::Psk,
+            )),
+            None => {
+                drop(self.early);
+                let zeros = self.chain.zeros();
+                let early = self.chain.extract(zeros.as_bytes(), zeros.as_bytes());
+                Ok(handshake(
+                    self.chain,
+                    &early,
+                    shared,
+                    server_hello,
+                    Mode::Certificate,
+                ))
+            }
+        }
+    }
+}
+
+impl<C: TlsCrypto + Clone> PskEarlySecret<Server, C> {
+    /// Checks the binder the client sent for the PSK over the transcript so
+    /// far, the ClientHello up to its binders, in constant time
+    /// (RFC 8446 §4.2.11).
+    ///
+    /// # Errors
+    ///
+    /// [`BinderMismatch`] if it is not the binder.
+    pub fn verify_binder(&self, binder: &[u8]) -> Result<(), BinderMismatch> {
+        self.chain
+            .check_verify_data(&self.binder_key(), binder)
+            .map_err(|TagMismatch| BinderMismatch)
+    }
+
+    /// The 0-RTT secret the server receives with, once the whole ClientHello
+    /// is in the transcript.
+    pub fn early_receive(&self) -> ZeroRttReceive {
+        ZeroRttReceive(self.client_early_traffic())
+    }
+
+    /// Adds the ServerHello the server wrote, which accepts the PSK, and
+    /// derives the Handshake Secret from the shared secret, which this step
+    /// consumes.
+    pub fn server_hello(
+        self,
+        shared: Secret,
+        server_hello: &[u8],
+    ) -> (HandshakeSecret<Server, C>, HandshakeKeys) {
+        handshake(self.chain, &self.early, shared, server_hello, Mode::Psk)
+    }
+}
+
+/// The Handshake Secret: from the ServerHello to the server's Finished.
+pub struct HandshakeSecret<R, C: TlsCrypto> {
+    chain: Chain<C>,
+    handshake: Secret,
+    client: Secret,
+    server: Secret,
+    mode: Mode,
+    role: PhantomData<R>,
+}
+
+impl<R: HandshakeRole, C: TlsCrypto + Clone> HandshakeSecret<R, C> {
+    /// Adds the bytes of a message: EncryptedExtensions, CertificateRequest,
+    /// Certificate and CertificateVerify as they are sent or received.
+    pub fn add(mut self, message: &[u8]) -> Self {
+        self.chain.add(message);
+        self
+    }
+
+    /// Whether the server authenticates with the PSK rather than a
+    /// certificate.
+    pub fn resumed(&self) -> bool {
+        self.mode == Mode::Psk
+    }
+
+    /// Derives the Master Secret and the 1-RTT secrets, with the server's
+    /// Finished in the transcript.
+    fn master(self) -> (MasterParts<C>, TrafficSecret, TrafficSecret) {
+        let chain = self.chain;
+        let derived = chain.derive_secret(&self.handshake, b"derived", &chain.empty_hash());
+        let zeros = chain.zeros();
+        let master = chain.extract(derived.as_bytes(), zeros.as_bytes());
+        let hash = chain.current();
+        let client = chain.derive_secret(&master, b"c ap traffic", &hash);
+        let server = chain.derive_secret(&master, b"s ap traffic", &hash);
+        let exporter_master = chain.derive_secret(&master, b"exp master", &hash);
+        let (client, server) = (chain.traffic(&client), chain.traffic(&server));
+        (
+            MasterParts {
+                chain,
+                master,
+                client_handshake: self.client,
+                exporter_master,
+            },
+            client,
+            server,
+        )
+    }
+}
+
+impl<C: TlsCrypto + Clone> HandshakeSecret<Server, C> {
+    /// The content the server signs for its CertificateVerify, over the
+    /// transcript up to its Certificate (RFC 8446 §4.4.3).
+    pub fn certificate_verify_content(&self) -> CertificateVerifyContent {
+        CertificateVerifyContent::server(&self.chain.current())
+    }
+
+    /// Writes the server's Finished, which comes before the client's, and
+    /// derives the Master Secret: the encoding of the Finished message, in
+    /// the transcript now, and the server's 1-RTT secret to send with.
+    pub fn server_finished(mut self) -> (MasterSecret<Server, C>, HandshakeMessage, OneRttSend) {
+        let finished = self.chain.write_finished(&self.server);
+        let (parts, client, server) = self.master();
+        (
+            MasterSecret {
+                parts,
+                withheld: client,
+            },
+            finished,
+            OneRttSend(server),
+        )
+    }
+}
+
+/// What the Master Secret step holds for both roles.
+struct MasterParts<C: TlsCrypto> {
+    chain: Chain<C>,
+    master: Secret,
+    client_handshake: Secret,
+    exporter_master: Secret,
+}
+
+/// The Master Secret: from the server's Finished to the client's.
+pub struct MasterSecret<R: HandshakeRole, C: TlsCrypto> {
+    parts: MasterParts<C>,
+    withheld: R::Withheld,
+}
+
+impl<R: HandshakeRole, C: TlsCrypto + Clone> MasterSecret<R, C> {
+    /// Adds the bytes of a message: the client's Certificate and
+    /// CertificateVerify, as they are sent or received.
+    pub fn add(mut self, message: &[u8]) -> Self {
+        self.parts.chain.add(message);
+        self
+    }
+
+    /// The exporter of the connection, with a copy of
+    /// exporter_master_secret.
+    pub fn exporter(&self) -> Exporter<C> {
+        let chain = &self.parts.chain;
+        Exporter {
+            backend: chain.backend.clone(),
+            hash: chain.hash,
+            // invariant: the secret is as long as the hash, which a secret
+            // holds.
+            secret: Secret::new(self.parts.exporter_master.as_bytes()).expect("a hash-long secret"),
+        }
+    }
+}
+
+impl<C: TlsCrypto> MasterParts<C> {
+    /// Derives resumption_master_secret, with the client's Finished in the
+    /// transcript.
+    fn resumption<R>(self) -> Resumption<R, C> {
+        let chain = self.chain;
+        let resumption_master = chain.derive_secret(&self.master, b"res master", &chain.current());
+        Resumption {
+            backend: chain.backend,
+            hash: chain.hash,
+            resumption_master,
+            role: PhantomData,
+        }
+    }
+}
+
+impl<C: TlsCrypto + Clone> MasterSecret<Server, C> {
+    /// Checks the client's Finished and adds it: the handshake is complete,
+    /// and the client's 1-RTT secret is handed over with the exporter.
+    ///
+    /// # Errors
+    ///
+    /// [`FinishedError`] if `received` is not a Finished message of the
+    /// suite's hash or not the client's Finished.
+    pub fn client_finished(
+        mut self,
+        received: &HandshakeMessage,
+    ) -> Result<(Resumption<Server, C>, Completed<C>), FinishedError> {
+        let parts = &mut self.parts;
+        parts
+            .chain
+            .read_finished(&parts.client_handshake, received)?;
+        let exporter = self.exporter();
+        let Self { parts, withheld } = self;
+        Ok((
+            parts.resumption(),
+            Completed {
+                one_rtt_receive: withheld,
+                exporter,
+            },
+        ))
+    }
+}
+
+impl<C: TlsCrypto + Clone> MasterSecret<Client, C> {
+    /// Writes the client's Finished, which comes after the server's: the
+    /// encoding of the Finished message, in the transcript now.
+    pub fn client_finished(mut self) -> (Resumption<Client, C>, HandshakeMessage) {
+        let parts = &mut self.parts;
+        let finished = parts.chain.write_finished(&parts.client_handshake);
+        (self.parts.resumption(), finished)
+    }
+}
+
+/// After the client's Finished: resumption_master_secret, from which the
+/// PSK of each ticket is derived.
+pub struct Resumption<R, C: TlsCrypto> {
+    backend: C,
+    hash: Supported<C, HashAlgorithm>,
+    resumption_master: Secret,
+    role: PhantomData<R>,
+}
+
+impl<R: HandshakeRole, C: TlsCrypto> Resumption<R, C> {
+    /// The PSK of the ticket with `nonce`:
+    /// HKDF-Expand-Label(resumption_master_secret, "resumption", nonce,
+    /// Hash.length) (RFC 8446 §4.6.1).
+    ///
+    /// # Errors
+    ///
+    /// [`LengthOutOfRange`] for a nonce above 255 bytes.
+    pub fn ticket_psk(&self, nonce: &[u8]) -> Result<ResumptionPsk, LengthOutOfRange> {
+        LengthOutOfRange::check(nonce.len(), 0..=Width::U8.max())?;
+        let len = ExpandLength::hash_len(self.hash.algorithm());
+        Ok(ResumptionPsk(expand_label(
+            &self.backend,
+            self.hash,
+            &self.resumption_master,
+            b"resumption",
+            nonce,
+            len,
+        )))
+    }
+}
+
+/// A resumption PSK: the secret of a ticket.
+pub struct ResumptionPsk(Secret);
+
+impl ResumptionPsk {
+    /// The PSK `secret`, such as one a ticket store kept.
+    pub fn new(secret: Secret) -> Self {
+        Self(secret)
+    }
+
+    /// The secret, for storing with its ticket.
+    pub fn secret(&self) -> &Secret {
+        &self.0
+    }
+}
+
+/// The exporter of a connection (RFC 8446 §7.5): exporter_master_secret
+/// with the hash and the backend.
+pub struct Exporter<C: TlsCrypto> {
+    backend: C,
+    hash: Supported<C, HashAlgorithm>,
+    secret: Secret,
+}
+
+impl<C: TlsCrypto> Exporter<C> {
+    /// TLS-Exporter(label, context, len): HKDF-Expand-Label of
+    /// Derive-Secret(exporter_master_secret, label, "") with "exporter" and
+    /// the hash of `context`.
+    ///
+    /// # Errors
+    ///
+    /// [`LengthOutOfRange`] for a label above 249 bytes, which does not fit
+    /// an HkdfLabel.
+    pub fn export(
+        &self,
+        label: &[u8],
+        context: &[u8],
+        len: ExpandLength,
+    ) -> Result<Secret, LengthOutOfRange> {
+        LengthOutOfRange::check(label.len(), 0..=LABEL_MAX)?;
+        let hash_len = ExpandLength::hash_len(self.hash.algorithm());
+        let empty = Hash::start(&self.backend, self.hash).finish();
+        let derived = expand_label(
+            &self.backend,
+            self.hash,
+            &self.secret,
+            label,
+            empty.as_bytes(),
+            hash_len,
+        );
+        let mut context_hash = Hash::start(&self.backend, self.hash);
+        context_hash.update(context);
+        Ok(expand_label(
+            &self.backend,
+            self.hash,
+            &derived,
+            b"exporter",
+            context_hash.finish().as_bytes(),
+            len,
+        ))
+    }
+}
+
+/// The Handshake traffic secrets, as the role sends and receives.
+pub struct HandshakeKeys {
+    /// The secret this endpoint sends with.
+    pub send: TrafficSecret,
+    /// The secret this endpoint receives with.
+    pub receive: TrafficSecret,
+}
+
+/// The 1-RTT secret a server sends with once it has written its Finished.
+pub struct OneRttSend(pub TrafficSecret);
+
+/// The 1-RTT secrets of a client that has verified the server's Finished.
+pub struct OneRttKeys {
+    /// The secret the client sends with.
+    pub send: TrafficSecret,
+    /// The secret the client receives with.
+    pub receive: TrafficSecret,
+}
+
+/// client_early_traffic_secret, as a client sends 0-RTT with it.
+pub struct ZeroRttSend(pub TrafficSecret);
+
+/// client_early_traffic_secret, as a server receives 0-RTT with it.
+pub struct ZeroRttReceive(pub TrafficSecret);
+
+/// What a server hands over when its handshake completes.
+pub struct Completed<C: TlsCrypto> {
+    /// The client's 1-RTT secret, the server's to receive with.
+    pub one_rtt_receive: TrafficSecret,
+    /// The exporter of the connection.
+    pub exporter: Exporter<C>,
+}
+
+/// The content a server's CertificateVerify signs: 64 spaces, the context
+/// string of a server, a zero byte and the transcript hash
+/// (RFC 8446 §4.4.3).
+#[derive(Clone, Copy)]
+pub struct CertificateVerifyContent {
+    bytes: [u8; 64 + 33 + 1 + 48],
+    len: u8,
+}
+
+impl CertificateVerifyContent {
+    fn server(hash: &Digest) -> Self {
+        let context = b"TLS 1.3, server CertificateVerify";
+        let mut bytes = [0x20; 64 + 33 + 1 + 48];
+        bytes[64..97].copy_from_slice(context);
+        bytes[97] = 0;
+        let hash = hash.as_bytes();
+        bytes[98..98 + hash.len()].copy_from_slice(hash);
+        Self {
+            bytes,
+            len: (98 + hash.len()) as u8,
+        }
+    }
+
+    /// The bytes to sign.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.len)]
+    }
+}
+
+impl core::fmt::Debug for CertificateVerifyContent {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CertificateVerifyContent")
+            .field("len", &self.len)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Checks a CertificateVerify the server sent, over the transcript so far,
+/// with `public_key`, and adds it.
+fn verify_server_signature<C: TlsCrypto>(
+    chain: &mut Chain<C>,
+    certificate_verify: &HandshakeMessage,
+    public_key: &[u8],
+) -> Result<(), CertificateVerifyError> {
+    use client::certificate_verify_error::*;
+    let encoded = certificate_verify.encoded().as_ref();
+    let message = { encoded }
+        .sync_read_certificate_verify_unpin()
+        .context(ReadSnafu)?;
+    let scheme = message.algorithm();
+    let Some(supported) = chain.backend.signature_scheme(scheme) else {
+        return UnsupportedSchemeSnafu { scheme }.fail();
+    };
+    let content = CertificateVerifyContent::server(&chain.current());
+    SignatureVerify::verify(
+        &chain.backend,
+        supported,
+        public_key,
+        content.as_bytes(),
+        message.signature(),
+    )
+    .context(SignatureSnafu)?;
+    chain.add(encoded);
+    Ok(())
+}
+
+/// A received Finished message is not the peer's Finished.
+#[derive(Debug, Snafu)]
+#[snafu(module(finished_error), visibility(pub(crate)))]
+pub enum FinishedError {
+    /// The message is not a Finished message of the suite's hash.
+    #[snafu(display("Finished read failed"))]
+    Read {
+        /// The failure.
+        source: ReadFinishedError,
+    },
+    /// The verify_data is not the HMAC of the transcript.
+    #[snafu(display("Finished verify_data does not match the transcript"))]
+    Mismatch,
+}
+
+impl FinishedError {
+    /// The alert the failure calls for: decrypt_error for verify_data that
+    /// does not match (RFC 8446 §4.4.4), and that of the read failure
+    /// otherwise.
+    pub fn alert(&self) -> crate::alert::AlertDescription {
+        match self {
+            Self::Read { source } => source.alert(),
+            Self::Mismatch => crate::alert::AlertDescription::DECRYPT_ERROR,
+        }
+    }
+}
+
+/// A binder the client sent is not the binder of its PSK.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("PSK binder does not match the ClientHello"))]
+pub struct BinderMismatch;
+
+impl BinderMismatch {
+    /// The alert the failure calls for: decrypt_error (RFC 8446 §6.2).
+    pub fn alert(&self) -> crate::alert::AlertDescription {
+        crate::alert::AlertDescription::DECRYPT_ERROR
+    }
+}
+
+/// The ServerHello selects a PSK the client did not offer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("server selected PSK {}, which was not offered", index.get()))]
+pub struct UnofferedPsk {
+    index: PskIndex,
+}
+
+impl UnofferedPsk {
+    /// The index the server selected.
+    pub const fn index(self) -> PskIndex {
+        self.index
+    }
+
+    /// The alert the failure calls for: illegal_parameter
+    /// (RFC 8446 §4.2.11).
+    pub fn alert(&self) -> crate::alert::AlertDescription {
+        crate::alert::AlertDescription::ILLEGAL_PARAMETER
+    }
+}

@@ -389,6 +389,12 @@ pub struct HandshakeMessage {
 }
 
 impl HandshakeMessage {
+    /// A message from its whole encoding, which the caller has written.
+    pub(crate) fn from_encoded(encoded: Bytes) -> Self {
+        debug_assert!(encoded.len() >= 4);
+        Self { encoded }
+    }
+
     /// The type of the message.
     pub fn handshake_type(&self) -> HandshakeType {
         HandshakeType(self.encoded[0])
