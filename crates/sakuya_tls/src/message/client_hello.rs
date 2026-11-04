@@ -1,0 +1,684 @@
+//! ClientHello (RFC 8446 §4.1.2).
+//!
+//! A ClientHello is read whole: the transcript hashes its exact bytes, a PSK
+//! binder covers the bytes before the binders, and the extension block is
+//! checked as a whole, so that no type appears twice and `pre_shared_key`
+//! is the last extension (RFC 8446 §4.2, §4.2.11).
+
+use crate::{
+    cipher_suite::CipherSuite,
+    code_point::{ByteCodePointList, CodePointList},
+    extension::{
+        BlockEntry, ExtensionType, InvalidExtensions, UnknownExtension, alpn::ProtocolNameList,
+        certificate_type::CertificateType, check_block, cookie::Cookie, key_share::ClientShares,
+        pre_shared_key::OfferedPsks, psk_key_exchange_modes::PskKeyExchangeMode,
+        server_name::ServerName,
+    },
+    message::{HelloRandom, LegacySessionId},
+    version::ProtocolVersion,
+    width::Width,
+};
+use nitori_crypto::{NamedGroup, SignatureScheme};
+use snafu::{ResultExt, Snafu};
+
+/// A ClientHello.
+///
+/// `legacy_compression_methods` is always the single null method, so the
+/// value does not hold it. The extensions keep their order on the wire.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ClientHello<C> {
+    legacy_version: ProtocolVersion,
+    random: HelloRandom,
+    legacy_session_id: LegacySessionId,
+    cipher_suites: CodePointList<CipherSuite>,
+    extensions: Vec<ClientHelloExtension<C>>,
+}
+
+/// An extension of a ClientHello. Every recognized extension may appear in
+/// a ClientHello.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ClientHelloExtension<C> {
+    /// `server_name`.
+    ServerName(ServerName<C>),
+    /// `supported_groups`.
+    SupportedGroups(CodePointList<NamedGroup>),
+    /// `signature_algorithms`.
+    SignatureAlgorithms(CodePointList<SignatureScheme>),
+    /// `application_layer_protocol_negotiation`.
+    ApplicationLayerProtocolNegotiation(ProtocolNameList<C>),
+    /// `signed_certificate_timestamp`, a request with empty data.
+    SignedCertificateTimestamp,
+    /// `client_certificate_type`.
+    ClientCertificateType(ByteCodePointList<CertificateType>),
+    /// `server_certificate_type`.
+    ServerCertificateType(ByteCodePointList<CertificateType>),
+    /// `pre_shared_key`.
+    PreSharedKey(OfferedPsks<C>),
+    /// `early_data`, with empty data.
+    EarlyData,
+    /// `supported_versions`.
+    SupportedVersions(CodePointList<ProtocolVersion>),
+    /// `cookie`.
+    Cookie(Cookie<C>),
+    /// `psk_key_exchange_modes`.
+    PskKeyExchangeModes(ByteCodePointList<PskKeyExchangeMode>),
+    /// `signature_algorithms_cert`.
+    SignatureAlgorithmsCert(CodePointList<SignatureScheme>),
+    /// `key_share`.
+    KeyShare(ClientShares<C>),
+    /// `quic_transport_parameters`, as opaque bytes.
+    QuicTransportParameters(C),
+    /// `encrypted_client_hello`, as opaque bytes.
+    EncryptedClientHello(C),
+    /// An extension the readers do not recognize.
+    Unknown(UnknownExtension<C>),
+}
+
+impl<C> ClientHelloExtension<C> {
+    /// The extension type.
+    pub fn extension_type(&self) -> ExtensionType {
+        match self {
+            Self::ServerName(_) => ExtensionType::SERVER_NAME,
+            Self::SupportedGroups(_) => ExtensionType::SUPPORTED_GROUPS,
+            Self::SignatureAlgorithms(_) => ExtensionType::SIGNATURE_ALGORITHMS,
+            Self::ApplicationLayerProtocolNegotiation(_) => {
+                ExtensionType::APPLICATION_LAYER_PROTOCOL_NEGOTIATION
+            }
+            Self::SignedCertificateTimestamp => ExtensionType::SIGNED_CERTIFICATE_TIMESTAMP,
+            Self::ClientCertificateType(_) => ExtensionType::CLIENT_CERTIFICATE_TYPE,
+            Self::ServerCertificateType(_) => ExtensionType::SERVER_CERTIFICATE_TYPE,
+            Self::PreSharedKey(_) => ExtensionType::PRE_SHARED_KEY,
+            Self::EarlyData => ExtensionType::EARLY_DATA,
+            Self::SupportedVersions(_) => ExtensionType::SUPPORTED_VERSIONS,
+            Self::Cookie(_) => ExtensionType::COOKIE,
+            Self::PskKeyExchangeModes(_) => ExtensionType::PSK_KEY_EXCHANGE_MODES,
+            Self::SignatureAlgorithmsCert(_) => ExtensionType::SIGNATURE_ALGORITHMS_CERT,
+            Self::KeyShare(_) => ExtensionType::KEY_SHARE,
+            Self::QuicTransportParameters(_) => ExtensionType::QUIC_TRANSPORT_PARAMETERS,
+            Self::EncryptedClientHello(_) => ExtensionType::ENCRYPTED_CLIENT_HELLO,
+            Self::Unknown(extension) => extension.extension_type(),
+        }
+    }
+}
+
+impl<C: AsRef<[u8]>> BlockEntry for ClientHelloExtension<C> {
+    fn extension_type(&self) -> ExtensionType {
+        ClientHelloExtension::extension_type(self)
+    }
+
+    fn data_len(&self) -> usize {
+        match self {
+            Self::ServerName(name) => name.encoded_len(),
+            Self::SupportedGroups(list) => list.encoded_len(),
+            Self::SignatureAlgorithms(list) | Self::SignatureAlgorithmsCert(list) => {
+                list.encoded_len()
+            }
+            Self::ApplicationLayerProtocolNegotiation(list) => list.encoded_len(),
+            Self::SignedCertificateTimestamp | Self::EarlyData => 0,
+            Self::ClientCertificateType(list) | Self::ServerCertificateType(list) => {
+                list.encoded_len()
+            }
+            Self::PreSharedKey(offered) => offered.encoded_len(),
+            Self::SupportedVersions(list) => list.encoded_len(),
+            Self::Cookie(cookie) => cookie.encoded_len(),
+            Self::PskKeyExchangeModes(list) => list.encoded_len(),
+            Self::KeyShare(shares) => shares.encoded_len(),
+            Self::QuicTransportParameters(data) | Self::EncryptedClientHello(data) => {
+                data.as_ref().len()
+            }
+            Self::Unknown(extension) => extension.data().as_ref().len(),
+        }
+    }
+}
+
+/// The lengths an extension block of a ClientHello may have.
+const BLOCK: core::ops::RangeInclusive<usize> = 8..=Width::U16.max();
+
+impl<C: AsRef<[u8]>> ClientHello<C> {
+    /// The ClientHello with these fields.
+    ///
+    /// # Errors
+    ///
+    /// [`InvalidClientHello::Extensions`] for an extension type that appears
+    /// twice, data too long for an extension or a block outside 8 to 65535
+    /// bytes, and [`InvalidClientHello::PreSharedKeyNotLast`] if
+    /// `pre_shared_key` is not the last extension.
+    pub fn new(
+        legacy_version: ProtocolVersion,
+        random: HelloRandom,
+        legacy_session_id: LegacySessionId,
+        cipher_suites: CodePointList<CipherSuite>,
+        extensions: Vec<ClientHelloExtension<C>>,
+    ) -> Result<Self, InvalidClientHello> {
+        check_block(&extensions, BLOCK).context(invalid_client_hello::ExtensionsSnafu)?;
+        if let Some(position) = extensions
+            .iter()
+            .position(|extension| matches!(extension, ClientHelloExtension::PreSharedKey(_)))
+            && position + 1 != extensions.len()
+        {
+            return invalid_client_hello::PreSharedKeyNotLastSnafu.fail();
+        }
+        Ok(Self {
+            legacy_version,
+            random,
+            legacy_session_id,
+            cipher_suites,
+            extensions,
+        })
+    }
+
+    fn block_len(&self) -> usize {
+        self.extensions
+            .iter()
+            .map(|extension| 4 + extension.data_len())
+            .sum()
+    }
+
+    fn body_len(&self) -> usize {
+        2 + 32
+            + self.legacy_session_id.encoded_len()
+            + self.cipher_suites.encoded_len()
+            + 2
+            + 2
+            + self.block_len()
+    }
+
+    /// The number of bytes [`codec::write_client_hello`] writes, the
+    /// message header included.
+    pub fn encoded_len(&self) -> usize {
+        4 + self.body_len()
+    }
+
+    /// The number of bytes the binders of `pre_shared_key` take at the end
+    /// of the encoding, or `None` without that extension.
+    ///
+    /// A binder covers the encoding without these bytes
+    /// (RFC 8446 §4.2.11.2).
+    pub fn binders_len(&self) -> Option<usize> {
+        self.pre_shared_key().map(OfferedPsks::binders_len)
+    }
+}
+
+impl<C> ClientHello<C> {
+    /// The legacy_version field.
+    pub fn legacy_version(&self) -> ProtocolVersion {
+        self.legacy_version
+    }
+
+    /// The random field.
+    pub fn random(&self) -> &HelloRandom {
+        &self.random
+    }
+
+    /// The legacy_session_id field.
+    pub fn legacy_session_id(&self) -> &LegacySessionId {
+        &self.legacy_session_id
+    }
+
+    /// The cipher suites, in the client's preference order.
+    pub fn cipher_suites(&self) -> &CodePointList<CipherSuite> {
+        &self.cipher_suites
+    }
+
+    /// The extensions, in the order of the wire.
+    pub fn extensions(&self) -> &[ClientHelloExtension<C>] {
+        &self.extensions
+    }
+
+    /// The data of `key_share`, if present.
+    pub fn key_share(&self) -> Option<&ClientShares<C>> {
+        self.extensions
+            .iter()
+            .find_map(|extension| match extension {
+                ClientHelloExtension::KeyShare(shares) => Some(shares),
+                _ => None,
+            })
+    }
+
+    /// The data of `pre_shared_key`, if present.
+    pub fn pre_shared_key(&self) -> Option<&OfferedPsks<C>> {
+        match self.extensions.last() {
+            Some(ClientHelloExtension::PreSharedKey(offered)) => Some(offered),
+            _ => None,
+        }
+    }
+}
+
+/// Failures of [`ClientHello::new`].
+#[derive(Debug, Snafu)]
+#[snafu(module(invalid_client_hello), visibility(pub(crate)))]
+pub enum InvalidClientHello {
+    /// The extension block is invalid.
+    #[snafu(display("ClientHello extensions invalid"))]
+    Extensions {
+        /// Why.
+        source: InvalidExtensions,
+    },
+    /// `pre_shared_key` is not the last extension.
+    #[snafu(display("pre_shared_key is not the last ClientHello extension"))]
+    PreSharedKeyNotLast,
+}
+
+pub mod codec {
+    //! Reading and writing ClientHello messages as `nitori_call` operations.
+    //!
+    //! [`read_client_hello`] and [`write_client_hello`] are also operation
+    //! structs, with `{Name}Ext` on receiver accesses and `{Name}HostExt` on
+    //! call executors, including the `sync_` methods.
+    // `#[call]` generates constructors, fields and extension traits without
+    // documentation comments; the module documentation above describes them.
+    #![allow(missing_docs)]
+
+    use super::{BLOCK, ClientHello, ClientHelloExtension};
+    use crate::{
+        alert::AlertDescription,
+        cipher_suite::CipherSuite,
+        code_point::codec::{
+            ReadByteCodePointListError, ReadCodePointListError, read_code_point_list,
+        },
+        extension::{
+            BlockEntry as _, BlockReader, ExtensionBlockError, RestrictedExtension,
+            UnknownExtension, alpn::codec::ReadProtocolNameListError,
+            key_share::codec::ReadClientSharesError, pre_shared_key::codec::ReadOfferedPsksError,
+            read_extension_block, server_name::codec::ReadServerNameError,
+        },
+        message::{HandshakeType, MessageSource, ReadHeaderError, read_body, read_session_id},
+        vector::{
+            ExcessBytes, LengthOutOfRange, Out, ReadBoundedVectorError, read_array,
+            read_bounded_vector, read_u16,
+        },
+        version::ProtocolVersion,
+        width::Width,
+    };
+    use bytes::Buf;
+    use nitori_call::{ReceiverAccess, call};
+    use nitori_io::{Write, calls::WriteAllError, error::Incomplete};
+    use snafu::{ResultExt, Snafu};
+
+    /// Reads a ClientHello message, header included.
+    ///
+    /// # Errors
+    ///
+    /// [`ReadClientHelloError`].
+    #[call(sync)]
+    pub async fn read_client_hello<F: MessageSource, A: ReceiverAccess<Family = F>>(
+        io: &mut A,
+    ) -> Result<ClientHello<F::Bytes>, ReadClientHelloError> {
+        let mut body = read_body(io, HandshakeType::CLIENT_HELLO).await?;
+        let hello = body.sync_read_client_hello_body_unpin()?;
+        ExcessBytes::check(body.remaining()).context(read_client_hello_error::ExcessSnafu)?;
+        Ok(hello)
+    }
+
+    #[call(sync)]
+    async fn read_client_hello_body<F: MessageSource, A: ReceiverAccess<Family = F>>(
+        io: &mut A,
+    ) -> Result<ClientHello<F::Bytes>, ReadClientHelloError> {
+        use read_client_hello_error::*;
+        let legacy_version = ProtocolVersion::new(read_u16(io).await.context(LegacyVersionSnafu)?);
+        let random = super::HelloRandom(read_array(io).await.context(RandomSnafu)?);
+        let legacy_session_id = read_session_id(io).await.context(SessionIdSnafu)?;
+        let cipher_suites = read_code_point_list::<CipherSuite, _, _>(io)
+            .await
+            .context(CipherSuitesSnafu)?;
+        let compression = read_bounded_vector(io, Width::U8, 1..=Width::U8.max())
+            .await
+            .context(CompressionMethodsSnafu)?;
+        if compression.as_ref() != [0] {
+            return CompressionMethodsNotNullSnafu.fail();
+        }
+        let block = read_extension_block(io).await.context(ExtensionsSnafu)?;
+        LengthOutOfRange::check(block.remaining(), BLOCK).context(ExtensionsLengthSnafu)?;
+        let mut block = BlockReader::new(block);
+        let mut extensions = Vec::new();
+        while let Some((extension_type, mut data)) = block.next().context(ExtensionsSnafu)? {
+            if matches!(
+                extensions.last(),
+                Some(ClientHelloExtension::PreSharedKey(_))
+            ) {
+                return PreSharedKeyNotLastSnafu.fail();
+            }
+            let Some(restricted) = extension_type.restricted() else {
+                extensions.push(ClientHelloExtension::Unknown(UnknownExtension::read(
+                    extension_type,
+                    data,
+                )));
+                continue;
+            };
+            let extension = read_extension(restricted, &mut data)?;
+            ExcessBytes::check(data.remaining()).context(ExtensionExcessSnafu {
+                extension: restricted,
+            })?;
+            extensions.push(extension);
+        }
+        Ok(ClientHello {
+            legacy_version,
+            random,
+            legacy_session_id,
+            cipher_suites,
+            extensions,
+        })
+    }
+
+    /// Reads the data of the recognized extension `extension` from `data`.
+    fn read_extension<B>(
+        extension: RestrictedExtension,
+        data: &mut B,
+    ) -> Result<ClientHelloExtension<B>, ReadClientHelloError>
+    where
+        B: Buf + nitori_call::Receiver<Family: MessageSource<Bytes = B>> + Unpin + Default,
+    {
+        use crate::{
+            code_point::codec::{ReadByteCodePointListHostExt as _, ReadCodePointListHostExt as _},
+            extension::{
+                alpn::codec::ReadProtocolNameListHostExt as _,
+                cookie::codec::ReadCookieHostExt as _,
+                key_share::codec::ReadClientSharesHostExt as _,
+                pre_shared_key::codec::ReadOfferedPsksHostExt as _,
+                server_name::codec::ReadServerNameHostExt as _,
+            },
+        };
+        use ClientHelloExtension as X;
+        use RestrictedExtension as R;
+        use read_client_hello_error::*;
+        Ok(match extension {
+            R::ServerName => X::ServerName(
+                data.sync_read_server_name_unpin()
+                    .context(ServerNameSnafu)?,
+            ),
+            R::SupportedGroups => X::SupportedGroups(
+                data.sync_read_code_point_list_unpin()
+                    .context(SupportedGroupsSnafu)?,
+            ),
+            R::SignatureAlgorithms => X::SignatureAlgorithms(
+                data.sync_read_code_point_list_unpin()
+                    .context(SignatureAlgorithmsSnafu)?,
+            ),
+            R::ApplicationLayerProtocolNegotiation => X::ApplicationLayerProtocolNegotiation(
+                data.sync_read_protocol_name_list_unpin()
+                    .context(ApplicationLayerProtocolNegotiationSnafu)?,
+            ),
+            R::SignedCertificateTimestamp => X::SignedCertificateTimestamp,
+            R::ClientCertificateType => X::ClientCertificateType(
+                data.sync_read_byte_code_point_list_unpin()
+                    .context(ClientCertificateTypeSnafu)?,
+            ),
+            R::ServerCertificateType => X::ServerCertificateType(
+                data.sync_read_byte_code_point_list_unpin()
+                    .context(ServerCertificateTypeSnafu)?,
+            ),
+            R::PreSharedKey => X::PreSharedKey(
+                data.sync_read_offered_psks_unpin()
+                    .context(PreSharedKeySnafu)?,
+            ),
+            R::EarlyData => X::EarlyData,
+            R::SupportedVersions => X::SupportedVersions(
+                data.sync_read_code_point_list_unpin()
+                    .context(SupportedVersionsSnafu)?,
+            ),
+            R::Cookie => X::Cookie(data.sync_read_cookie_unpin().context(CookieSnafu)?),
+            R::PskKeyExchangeModes => X::PskKeyExchangeModes(
+                data.sync_read_byte_code_point_list_unpin()
+                    .context(PskKeyExchangeModesSnafu)?,
+            ),
+            R::SignatureAlgorithmsCert => X::SignatureAlgorithmsCert(
+                data.sync_read_code_point_list_unpin()
+                    .context(SignatureAlgorithmsCertSnafu)?,
+            ),
+            R::KeyShare => X::KeyShare(
+                data.sync_read_client_shares_unpin()
+                    .context(KeyShareSnafu)?,
+            ),
+            R::QuicTransportParameters => X::QuicTransportParameters(core::mem::take(data)),
+            R::EncryptedClientHello => X::EncryptedClientHello(core::mem::take(data)),
+        })
+    }
+
+    /// Failures that [`read_client_hello`] can produce.
+    #[derive(Debug, Snafu)]
+    #[snafu(module(read_client_hello_error), visibility(pub(crate)))]
+    pub enum ReadClientHelloError {
+        /// The header could not be read, or the message is of another type.
+        #[snafu(transparent)]
+        Header {
+            /// The failure.
+            source: ReadHeaderError,
+        },
+        /// The body is longer than its fields.
+        #[snafu(display("ClientHello body has excess bytes"))]
+        Excess {
+            /// The excess.
+            source: ExcessBytes,
+        },
+        /// legacy_version could not be read.
+        #[snafu(display("ClientHello legacy_version read failed"))]
+        LegacyVersion {
+            /// The shortfall.
+            source: Incomplete,
+        },
+        /// random could not be read.
+        #[snafu(display("ClientHello random read failed"))]
+        Random {
+            /// The shortfall.
+            source: Incomplete,
+        },
+        /// legacy_session_id could not be read or is longer than 32 bytes.
+        #[snafu(display("ClientHello legacy_session_id read failed"))]
+        SessionId {
+            /// The failure of reading the field.
+            source: ReadBoundedVectorError,
+        },
+        /// cipher_suites could not be read.
+        #[snafu(display("ClientHello cipher_suites read failed"))]
+        CipherSuites {
+            /// The failure of reading the list.
+            source: ReadCodePointListError,
+        },
+        /// legacy_compression_methods could not be read.
+        #[snafu(display("ClientHello legacy_compression_methods read failed"))]
+        CompressionMethods {
+            /// The failure of reading the field.
+            source: ReadBoundedVectorError,
+        },
+        /// legacy_compression_methods is not the single null method
+        /// (RFC 8446 §4.1.2).
+        #[snafu(display("ClientHello legacy_compression_methods is not the null method"))]
+        CompressionMethodsNotNull,
+        /// The extension block could not be read, or a type appears twice.
+        #[snafu(display("ClientHello extensions read failed"))]
+        Extensions {
+            /// The failure.
+            source: ExtensionBlockError,
+        },
+        /// The extension block is shorter than 8 bytes.
+        #[snafu(display("ClientHello extension block length out of range"))]
+        ExtensionsLength {
+            /// The broken range.
+            source: LengthOutOfRange,
+        },
+        /// `pre_shared_key` is not the last extension (RFC 8446 §4.2.11).
+        #[snafu(display("pre_shared_key is not the last ClientHello extension"))]
+        PreSharedKeyNotLast,
+        /// The data of a recognized extension is longer than its fields.
+        #[snafu(display("{extension:?} data has excess bytes"))]
+        ExtensionExcess {
+            /// The extension.
+            extension: RestrictedExtension,
+            /// The excess.
+            source: ExcessBytes,
+        },
+        /// `server_name` could not be read.
+        #[snafu(display("server_name read failed"))]
+        ServerName {
+            /// The failure.
+            source: ReadServerNameError,
+        },
+        /// `supported_groups` could not be read.
+        #[snafu(display("supported_groups read failed"))]
+        SupportedGroups {
+            /// The failure.
+            source: ReadCodePointListError,
+        },
+        /// `signature_algorithms` could not be read.
+        #[snafu(display("signature_algorithms read failed"))]
+        SignatureAlgorithms {
+            /// The failure.
+            source: ReadCodePointListError,
+        },
+        /// `application_layer_protocol_negotiation` could not be read.
+        #[snafu(display("application_layer_protocol_negotiation read failed"))]
+        ApplicationLayerProtocolNegotiation {
+            /// The failure.
+            source: ReadProtocolNameListError,
+        },
+        /// `client_certificate_type` could not be read.
+        #[snafu(display("client_certificate_type read failed"))]
+        ClientCertificateType {
+            /// The failure.
+            source: ReadByteCodePointListError,
+        },
+        /// `server_certificate_type` could not be read.
+        #[snafu(display("server_certificate_type read failed"))]
+        ServerCertificateType {
+            /// The failure.
+            source: ReadByteCodePointListError,
+        },
+        /// `pre_shared_key` could not be read.
+        #[snafu(display("pre_shared_key read failed"))]
+        PreSharedKey {
+            /// The failure.
+            source: ReadOfferedPsksError,
+        },
+        /// `supported_versions` could not be read.
+        #[snafu(display("supported_versions read failed"))]
+        SupportedVersions {
+            /// The failure.
+            source: ReadCodePointListError,
+        },
+        /// `cookie` could not be read.
+        #[snafu(display("cookie read failed"))]
+        Cookie {
+            /// The failure.
+            source: ReadBoundedVectorError,
+        },
+        /// `psk_key_exchange_modes` could not be read.
+        #[snafu(display("psk_key_exchange_modes read failed"))]
+        PskKeyExchangeModes {
+            /// The failure.
+            source: ReadByteCodePointListError,
+        },
+        /// `signature_algorithms_cert` could not be read.
+        #[snafu(display("signature_algorithms_cert read failed"))]
+        SignatureAlgorithmsCert {
+            /// The failure.
+            source: ReadCodePointListError,
+        },
+        /// `key_share` could not be read.
+        #[snafu(display("key_share read failed"))]
+        KeyShare {
+            /// The failure.
+            source: ReadClientSharesError,
+        },
+    }
+
+    impl ReadClientHelloError {
+        /// The alert the failure calls for.
+        ///
+        /// illegal_parameter for compression methods other than the null
+        /// method and for `pre_shared_key` before another extension
+        /// (RFC 8446 §4.1.2, §4.2.11), for a type that appears twice and for
+        /// the rules within an extension that name it; decode_error for every
+        /// failure to decode.
+        pub fn alert(&self) -> AlertDescription {
+            match self {
+                Self::Header { source } => source.alert(),
+                Self::CompressionMethodsNotNull | Self::PreSharedKeyNotLast => {
+                    AlertDescription::ILLEGAL_PARAMETER
+                }
+                Self::Extensions { source } => source.alert(),
+                Self::ServerName { source } => source.alert(),
+                Self::PreSharedKey { source } => source.alert(),
+                Self::KeyShare { source } => source.alert(),
+                Self::Excess { .. }
+                | Self::LegacyVersion { .. }
+                | Self::Random { .. }
+                | Self::SessionId { .. }
+                | Self::CipherSuites { .. }
+                | Self::CompressionMethods { .. }
+                | Self::ExtensionsLength { .. }
+                | Self::ExtensionExcess { .. }
+                | Self::SupportedGroups { .. }
+                | Self::SignatureAlgorithms { .. }
+                | Self::ApplicationLayerProtocolNegotiation { .. }
+                | Self::ClientCertificateType { .. }
+                | Self::ServerCertificateType { .. }
+                | Self::SupportedVersions { .. }
+                | Self::Cookie { .. }
+                | Self::PskKeyExchangeModes { .. }
+                | Self::SignatureAlgorithmsCert { .. } => AlertDescription::DECODE_ERROR,
+            }
+        }
+    }
+
+    /// Writes `hello`, header included.
+    ///
+    /// # Errors
+    ///
+    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
+    /// bytes accepted before stay written, and the error counts them over the
+    /// whole message.
+    #[call(sync)]
+    pub async fn write_client_hello<F: Write, A: ReceiverAccess<Family = F>, C: AsRef<[u8]>>(
+        io: &mut A,
+        hello: &ClientHello<C>,
+    ) -> Result<(), WriteAllError<F::Error>> {
+        let mut out = Out::new(io);
+        out.header(HandshakeType::CLIENT_HELLO, hello.body_len())
+            .await?;
+        out.u16(hello.legacy_version.get()).await?;
+        out.put(&hello.random.0[..]).await?;
+        out.vector(Width::U8, hello.legacy_session_id.as_bytes())
+            .await?;
+        out.code_point_list(&hello.cipher_suites).await?;
+        out.put(&[1, 0][..]).await?;
+        out.length(Width::U16, hello.block_len()).await?;
+        for extension in &hello.extensions {
+            out.u16(extension.extension_type().get()).await?;
+            out.length(Width::U16, extension.data_len()).await?;
+            write_extension(&mut out, extension).await?;
+        }
+        Ok(())
+    }
+
+    /// Writes the data of `extension`.
+    async fn write_extension<F: Write, A: ReceiverAccess<Family = F>, C: AsRef<[u8]>>(
+        out: &mut Out<'_, A>,
+        extension: &ClientHelloExtension<C>,
+    ) -> Result<(), WriteAllError<F::Error>> {
+        use ClientHelloExtension as X;
+        match extension {
+            X::ServerName(name) => name.encode(out).await,
+            X::SupportedGroups(list) => out.code_point_list(list).await,
+            X::SignatureAlgorithms(list) | X::SignatureAlgorithmsCert(list) => {
+                out.code_point_list(list).await
+            }
+            X::ApplicationLayerProtocolNegotiation(list) => list.encode(out).await,
+            X::SignedCertificateTimestamp | X::EarlyData => Ok(()),
+            X::ClientCertificateType(list) | X::ServerCertificateType(list) => {
+                out.byte_code_point_list(list).await
+            }
+            X::PreSharedKey(offered) => offered.encode(out).await,
+            X::SupportedVersions(list) => out.code_point_list(list).await,
+            X::Cookie(cookie) => cookie.encode(out).await,
+            X::PskKeyExchangeModes(list) => out.byte_code_point_list(list).await,
+            X::KeyShare(shares) => shares.encode(out).await,
+            X::QuicTransportParameters(data) | X::EncryptedClientHello(data) => {
+                out.put(data.as_ref()).await
+            }
+            X::Unknown(extension) => out.put(extension.data().as_ref()).await,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

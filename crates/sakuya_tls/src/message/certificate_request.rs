@@ -1,0 +1,363 @@
+//! CertificateRequest (RFC 8446 §4.3.2).
+
+use crate::{
+    code_point::CodePointList,
+    extension::{BlockEntry, ExtensionType, InvalidExtensions, UnknownExtension, check_block},
+    vector::LengthOutOfRange,
+    width::Width,
+};
+use nitori_crypto::SignatureScheme;
+use snafu::{ResultExt, Snafu};
+
+/// The lengths an extension block of a CertificateRequest may have.
+const BLOCK: core::ops::RangeInclusive<usize> = 2..=Width::U16.max();
+
+/// A CertificateRequest.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CertificateRequest<C> {
+    certificate_request_context: C,
+    extensions: Vec<CertificateRequestExtension<C>>,
+}
+
+/// An extension of a CertificateRequest.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum CertificateRequestExtension<C> {
+    /// `signature_algorithms`.
+    SignatureAlgorithms(CodePointList<SignatureScheme>),
+    /// `signature_algorithms_cert`.
+    SignatureAlgorithmsCert(CodePointList<SignatureScheme>),
+    /// `signed_certificate_timestamp`, a request with empty data.
+    SignedCertificateTimestamp,
+    /// An extension the readers do not recognize.
+    Unknown(UnknownExtension<C>),
+}
+
+impl<C: AsRef<[u8]>> BlockEntry for CertificateRequestExtension<C> {
+    fn extension_type(&self) -> ExtensionType {
+        match self {
+            Self::SignatureAlgorithms(_) => ExtensionType::SIGNATURE_ALGORITHMS,
+            Self::SignatureAlgorithmsCert(_) => ExtensionType::SIGNATURE_ALGORITHMS_CERT,
+            Self::SignedCertificateTimestamp => ExtensionType::SIGNED_CERTIFICATE_TIMESTAMP,
+            Self::Unknown(extension) => extension.extension_type(),
+        }
+    }
+
+    fn data_len(&self) -> usize {
+        match self {
+            Self::SignatureAlgorithms(list) | Self::SignatureAlgorithmsCert(list) => {
+                list.encoded_len()
+            }
+            Self::SignedCertificateTimestamp => 0,
+            Self::Unknown(extension) => extension.data().as_ref().len(),
+        }
+    }
+}
+
+impl<C: AsRef<[u8]>> CertificateRequest<C> {
+    /// The request with `certificate_request_context` and `extensions`.
+    ///
+    /// # Errors
+    ///
+    /// [`InvalidCertificateRequest::Context`] for a context above 255 bytes,
+    /// and [`InvalidCertificateRequest::Extensions`] for an extension type
+    /// that appears twice, data too long for an extension or a block outside
+    /// 2 to 65535 bytes.
+    pub fn new(
+        certificate_request_context: C,
+        extensions: Vec<CertificateRequestExtension<C>>,
+    ) -> Result<Self, InvalidCertificateRequest> {
+        LengthOutOfRange::check(
+            certificate_request_context.as_ref().len(),
+            0..=Width::U8.max(),
+        )
+        .context(invalid_certificate_request::ContextSnafu)?;
+        check_block(&extensions, BLOCK).context(invalid_certificate_request::ExtensionsSnafu)?;
+        Ok(Self {
+            certificate_request_context,
+            extensions,
+        })
+    }
+
+    fn block_len(&self) -> usize {
+        self.extensions
+            .iter()
+            .map(|extension| 4 + extension.data_len())
+            .sum()
+    }
+
+    fn body_len(&self) -> usize {
+        1 + self.certificate_request_context.as_ref().len() + 2 + self.block_len()
+    }
+
+    /// The number of bytes [`codec::write_certificate_request`] writes, the
+    /// message header included.
+    pub fn encoded_len(&self) -> usize {
+        4 + self.body_len()
+    }
+}
+
+impl<C> CertificateRequest<C> {
+    /// The certificate_request_context field.
+    pub fn certificate_request_context(&self) -> &C {
+        &self.certificate_request_context
+    }
+
+    /// The extensions, in the order of the wire.
+    pub fn extensions(&self) -> &[CertificateRequestExtension<C>] {
+        &self.extensions
+    }
+}
+
+/// Failures of [`CertificateRequest::new`].
+#[derive(Debug, Snafu)]
+#[snafu(module(invalid_certificate_request), visibility(pub(crate)))]
+pub enum InvalidCertificateRequest {
+    /// The context is too long.
+    #[snafu(display("certificate_request_context too long"))]
+    Context {
+        /// The broken range.
+        source: LengthOutOfRange,
+    },
+    /// The extension block is invalid.
+    #[snafu(display("CertificateRequest extensions invalid"))]
+    Extensions {
+        /// Why.
+        source: InvalidExtensions,
+    },
+}
+
+pub mod codec {
+    //! Reading and writing CertificateRequest messages as `nitori_call`
+    //! operations.
+    //!
+    //! [`read_certificate_request`] and [`write_certificate_request`] are
+    //! also operation structs, with `{Name}Ext` on receiver accesses and
+    //! `{Name}HostExt` on call executors, including the `sync_` methods.
+    // `#[call]` generates constructors, fields and extension traits without
+    // documentation comments; the module documentation above describes them.
+    #![allow(missing_docs)]
+
+    use super::{BLOCK, CertificateRequest, CertificateRequestExtension};
+    use crate::{
+        alert::AlertDescription,
+        code_point::codec::{ReadCodePointListError, ReadCodePointListHostExt as _},
+        extension::{
+            BlockEntry as _, BlockReader, ExtensionBlockError, ExtensionNotAllowed,
+            RestrictedExtension, UnknownExtension, read_extension_block,
+        },
+        message::{HandshakeType, MessageSource, ReadHeaderError, read_body},
+        vector::{ExcessBytes, LengthOutOfRange, Out, ReadVectorError, read_vector},
+        width::Width,
+    };
+    use bytes::Buf;
+    use nitori_call::{ReceiverAccess, call};
+    use nitori_io::{Write, calls::WriteAllError};
+    use snafu::{ResultExt, Snafu};
+
+    /// Reads a CertificateRequest message, header included.
+    ///
+    /// # Errors
+    ///
+    /// [`ReadCertificateRequestError`].
+    #[call(sync)]
+    pub async fn read_certificate_request<F: MessageSource, A: ReceiverAccess<Family = F>>(
+        io: &mut A,
+    ) -> Result<CertificateRequest<F::Bytes>, ReadCertificateRequestError> {
+        let mut body = read_body(io, HandshakeType::CERTIFICATE_REQUEST).await?;
+        let request = body.sync_read_certificate_request_body_unpin()?;
+        ExcessBytes::check(body.remaining())
+            .context(read_certificate_request_error::ExcessSnafu)?;
+        Ok(request)
+    }
+
+    #[call(sync)]
+    async fn read_certificate_request_body<F: MessageSource, A: ReceiverAccess<Family = F>>(
+        io: &mut A,
+    ) -> Result<CertificateRequest<F::Bytes>, ReadCertificateRequestError> {
+        use CertificateRequestExtension as X;
+        use RestrictedExtension as R;
+        use read_certificate_request_error::*;
+        let certificate_request_context = read_vector(io, Width::U8).await.context(ContextSnafu)?;
+        let block = read_extension_block(io).await.context(ExtensionsSnafu)?;
+        LengthOutOfRange::check(block.remaining(), BLOCK).context(ExtensionsLengthSnafu)?;
+        let mut block = BlockReader::new(block);
+        let mut extensions = Vec::new();
+        while let Some((extension_type, mut data)) = block.next().context(ExtensionsSnafu)? {
+            let Some(restricted) = extension_type.restricted() else {
+                extensions.push(X::Unknown(UnknownExtension::read(extension_type, data)));
+                continue;
+            };
+            extensions.push(match restricted {
+                R::SignatureAlgorithms => X::SignatureAlgorithms(
+                    data.sync_read_code_point_list_unpin()
+                        .context(SignatureAlgorithmsSnafu)?,
+                ),
+                R::SignatureAlgorithmsCert => X::SignatureAlgorithmsCert(
+                    data.sync_read_code_point_list_unpin()
+                        .context(SignatureAlgorithmsCertSnafu)?,
+                ),
+                R::SignedCertificateTimestamp => X::SignedCertificateTimestamp,
+                other => return Err(ExtensionNotAllowed::new(other).into()),
+            });
+            ExcessBytes::check(data.remaining()).context(ExtensionExcessSnafu {
+                extension: restricted,
+            })?;
+        }
+        Ok(CertificateRequest {
+            certificate_request_context,
+            extensions,
+        })
+    }
+
+    /// Failures that [`read_certificate_request`] can produce.
+    #[derive(Debug, Snafu)]
+    #[snafu(module(read_certificate_request_error), visibility(pub(crate)))]
+    pub enum ReadCertificateRequestError {
+        /// The header could not be read, or the message is of another type.
+        #[snafu(transparent)]
+        Header {
+            /// The failure.
+            source: ReadHeaderError,
+        },
+        /// The body is longer than its fields.
+        #[snafu(display("CertificateRequest body has excess bytes"))]
+        Excess {
+            /// The excess.
+            source: ExcessBytes,
+        },
+        /// certificate_request_context could not be read.
+        #[snafu(display("certificate_request_context read failed"))]
+        Context {
+            /// The failure.
+            source: ReadVectorError,
+        },
+        /// The extension block could not be read, or a type appears twice.
+        #[snafu(display("CertificateRequest extensions read failed"))]
+        Extensions {
+            /// The failure.
+            source: ExtensionBlockError,
+        },
+        /// The extension block is shorter than 2 bytes.
+        #[snafu(display("CertificateRequest extension block length out of range"))]
+        ExtensionsLength {
+            /// The broken range.
+            source: LengthOutOfRange,
+        },
+        /// A recognized extension that this message may not carry.
+        #[snafu(transparent)]
+        ExtensionNotAllowed {
+            /// The extension.
+            source: ExtensionNotAllowed,
+        },
+        /// The data of a recognized extension is longer than its fields.
+        #[snafu(display("{extension:?} data has excess bytes"))]
+        ExtensionExcess {
+            /// The extension.
+            extension: RestrictedExtension,
+            /// The excess.
+            source: ExcessBytes,
+        },
+        /// `signature_algorithms` could not be read.
+        #[snafu(display("signature_algorithms read failed"))]
+        SignatureAlgorithms {
+            /// The failure.
+            source: ReadCodePointListError,
+        },
+        /// `signature_algorithms_cert` could not be read.
+        #[snafu(display("signature_algorithms_cert read failed"))]
+        SignatureAlgorithmsCert {
+            /// The failure.
+            source: ReadCodePointListError,
+        },
+    }
+
+    impl ReadCertificateRequestError {
+        /// The alert the failure calls for: illegal_parameter for a type that
+        /// appears twice and for a recognized extension this message may not
+        /// carry, decode_error for every failure to decode.
+        pub fn alert(&self) -> AlertDescription {
+            match self {
+                Self::Header { source } => source.alert(),
+                Self::Extensions { source } => source.alert(),
+                Self::ExtensionNotAllowed { source } => source.alert(),
+                Self::Excess { .. }
+                | Self::Context { .. }
+                | Self::ExtensionsLength { .. }
+                | Self::ExtensionExcess { .. }
+                | Self::SignatureAlgorithms { .. }
+                | Self::SignatureAlgorithmsCert { .. } => AlertDescription::DECODE_ERROR,
+            }
+        }
+    }
+
+    /// Writes `request`, header included.
+    ///
+    /// # Errors
+    ///
+    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
+    /// bytes accepted before stay written, and the error counts them over the
+    /// whole message.
+    #[call(sync)]
+    pub async fn write_certificate_request<
+        F: Write,
+        A: ReceiverAccess<Family = F>,
+        C: AsRef<[u8]>,
+    >(
+        io: &mut A,
+        request: &CertificateRequest<C>,
+    ) -> Result<(), WriteAllError<F::Error>> {
+        use CertificateRequestExtension as X;
+        let mut out = Out::new(io);
+        out.header(HandshakeType::CERTIFICATE_REQUEST, request.body_len())
+            .await?;
+        out.vector(Width::U8, request.certificate_request_context.as_ref())
+            .await?;
+        out.length(Width::U16, request.block_len()).await?;
+        for extension in &request.extensions {
+            out.u16(extension.extension_type().get()).await?;
+            out.length(Width::U16, extension.data_len()).await?;
+            match extension {
+                X::SignatureAlgorithms(list) | X::SignatureAlgorithmsCert(list) => {
+                    out.code_point_list(list).await?
+                }
+                X::SignedCertificateTimestamp => {}
+                X::Unknown(extension) => out.put(extension.data().as_ref()).await?,
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::codec::{ReadCertificateRequestError, ReadCertificateRequestHostExt as _};
+    use crate::{
+        alert::AlertDescription,
+        test_support::{concat, extension, message, vector},
+    };
+
+    fn read(extensions: &[u8]) -> Result<(), ReadCertificateRequestError> {
+        let bytes = message(13, &concat(&[&[0], &vector(2, extensions)]));
+        bytes
+            .as_slice()
+            .sync_read_certificate_request_unpin()
+            .map(|_| ())
+    }
+
+    #[test]
+    fn request_rules() {
+        let algorithms = extension(13, &[0x00, 0x02, 0x08, 0x04]);
+        read(&algorithms).unwrap();
+        let error = read(&[]).unwrap_err();
+        assert!(matches!(
+            error,
+            ReadCertificateRequestError::ExtensionsLength { .. }
+        ));
+        let error = read(&concat(&[&algorithms, &extension(51, &[])])).unwrap_err();
+        assert!(matches!(
+            error,
+            ReadCertificateRequestError::ExtensionNotAllowed { .. }
+        ));
+        assert_eq!(error.alert(), AlertDescription::ILLEGAL_PARAMETER);
+    }
+}
