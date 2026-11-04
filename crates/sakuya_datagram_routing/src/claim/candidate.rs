@@ -264,15 +264,10 @@ where
         return Judgement::ClaimedElsewhere;
     }
     match try_claim(DatagramClaimAccess::new(slot), route) {
-        DatagramClaimOutcome::Claimed(datagram, value) => {
-            // A claimed datagram comes from this access, which empties the
-            // slot; a slot still holding the datagram means the judgment
-            // returned another one.
-            debug_assert!(
-                matches!(slot, DatagramSlot::Taken),
-                "a judgment claimed a datagram not taken from its access"
-            );
-            Judgement::Claimed(datagram, value)
+        // The claimed datagram can only come from this access, which emptied
+        // the slot.
+        DatagramClaimOutcome::Claimed(claimed, value) => {
+            Judgement::Claimed(claimed.into_datagram(), value)
         }
         // The returned access ends with this arm, before the guard is
         // released.

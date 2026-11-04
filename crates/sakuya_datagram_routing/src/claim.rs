@@ -47,8 +47,10 @@
 //!
 //! The access is released before the attempt completes. The judgment must
 //! accept the access for every lifetime, and the values it returns have
-//! types chosen outside it, so the access cannot leave the judgment; it is
-//! also neither `Send` nor `Sync`. The judgment may capture anything, for
+//! types chosen outside it, so neither the access nor the
+//! [`ClaimedDatagram`] taken from it can leave the judgment, and `Claimed`
+//! accepts no datagram other than the one taken from this access. The access
+//! is also neither `Send` nor `Sync`. The judgment may capture anything, for
 //! example a handle to its caller's state that it reads while it decides.
 //!
 //! Dropping the future before its first poll exits the candidate without a
@@ -126,6 +128,7 @@
 //! [`DatagramClaimAttempt::Exclusive`]: candidate::DatagramClaimAttempt::Exclusive
 //! [`DatagramClaimAttempt::ClaimedElsewhere`]: candidate::DatagramClaimAttempt::ClaimedElsewhere
 //! [`DatagramClaimAttempt`]: candidate::DatagramClaimAttempt
+//! [`ClaimedDatagram`]: deliverer::ClaimedDatagram
 //! [`DatagramClaimAccess`]: deliverer::DatagramClaimAccess
 //! [`DatagramClaimOutcome`]: deliverer::DatagramClaimOutcome
 //! [`DatagramDeliverer`]: deliverer::DatagramDeliverer

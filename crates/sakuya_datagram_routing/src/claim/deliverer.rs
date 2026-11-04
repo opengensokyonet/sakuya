@@ -66,14 +66,17 @@ pub trait DatagramDeliverer<Inner> {
 ///
 /// ```compile_fail
 /// # use sakuya_datagram_routing::claim::candidate::DatagramClaimCandidate;
-/// # use sakuya_datagram_routing::claim::deliverer::{DatagramClaimOutcome, ExclusiveDatagram};
+/// # use sakuya_datagram_routing::claim::deliverer::{ClaimedDatagram, DatagramClaimOutcome};
 /// # use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
-/// fn attempt(
-///     candidate: DatagramClaimCandidate<Vec<u8>, ReleaseUnclaimed>,
-///     earlier: ExclusiveDatagram<Vec<u8>>,
-/// ) {
+/// // Stands in for a second claimed datagram of the same access, which
+/// // cannot exist; only the value is under test.
+/// fn second_claim<'access>() -> ClaimedDatagram<'access, Vec<u8>> {
+///     unimplemented!()
+/// }
+///
+/// fn attempt(candidate: DatagramClaimCandidate<Vec<u8>, ReleaseUnclaimed>) {
 ///     let _ = candidate.try_exclusive(|access, _route| {
-///         DatagramClaimOutcome::<_, (), _>::Claimed(earlier, access)
+///         DatagramClaimOutcome::<_, (), _>::Claimed(second_claim(), access)
 ///     });
 /// }
 /// ```
@@ -156,10 +159,15 @@ impl<'access, Inner> DatagramClaimAccess<'access, Inner> {
     /// This happens within the same synchronous access and cannot fail. It
     /// proves that ownership of the datagram is unique; it does not prove that
     /// the datagram is authenticated, and it does not hand the datagram to a
-    /// receiver. Every other candidate of the datagram observes it gone.
-    pub fn into_exclusive(self) -> ExclusiveDatagram<Inner> {
+    /// receiver. Every other candidate of the datagram observes it gone. The
+    /// claimed datagram is bound to this access, so the judgment can only
+    /// return it in [`DatagramClaimOutcome::Claimed`] of the same call.
+    pub fn into_exclusive(self) -> ClaimedDatagram<'access, Inner> {
         match mem::replace(self.slot, DatagramSlot::Taken) {
-            DatagramSlot::Present(datagram) => ExclusiveDatagram::new(datagram),
+            DatagramSlot::Present(datagram) => ClaimedDatagram {
+                datagram: ExclusiveDatagram::new(datagram),
+                access: PhantomData,
+            },
             // invariant: see the field.
             DatagramSlot::Taken => unreachable!("a claim access outlived its datagram"),
         }
@@ -190,10 +198,10 @@ impl<Inner> fmt::Debug for DatagramClaimAccess<'_, Inner> {
 pub enum DatagramClaimOutcome<'access, T, U, Inner> {
     /// The judgment took the datagram, with a value for the caller.
     ///
-    /// The datagram must be the one obtained from this call's
-    /// [`access.into_exclusive()`](DatagramClaimAccess::into_exclusive);
-    /// returning any other breaks the contract of the mechanism.
-    Claimed(ExclusiveDatagram<Inner>, T),
+    /// The claimed datagram comes from this call's
+    /// [`access.into_exclusive()`](DatagramClaimAccess::into_exclusive); no
+    /// other datagram has its type.
+    Claimed(ClaimedDatagram<'access, Inner>, T),
     /// The judgment leaves the datagram this time and hands the unchanged
     /// access back; the candidate stays with its holder.
     Unclaimed(DatagramClaimAccess<'access, Inner>),
@@ -209,6 +217,103 @@ impl<T, U, Inner> fmt::Debug for DatagramClaimOutcome<'_, T, U, Inner> {
             Self::Unclaimed(_) => f.write_str("Unclaimed"),
             Self::Abandoned(_) => f.write_str("Abandoned"),
         }
+    }
+}
+
+/// The datagram a judgment took from its access, on its way to the mechanism.
+///
+/// Only [`DatagramClaimAccess::into_exclusive`] creates one, and it carries
+/// the lifetime of that access: like the access, it is valid only within the
+/// judgment that took it, and the judgment can do nothing with it but return
+/// it in [`DatagramClaimOutcome::Claimed`]. The mechanism then hands the
+/// datagram over as an [`ExclusiveDatagram`] in the exclusive delivery of
+/// [`DatagramClaimAttempt::Claimed`](super::candidate::DatagramClaimAttempt::Claimed).
+/// Dropping it inside the judgment releases the datagram; it is never put
+/// back for other candidates.
+///
+/// A judgment cannot claim with a datagram it did not take from its own
+/// access:
+///
+/// ```compile_fail,E0308
+/// # use sakuya_datagram_routing::claim::candidate::DatagramClaimCandidate;
+/// # use sakuya_datagram_routing::claim::deliverer::{DatagramClaimOutcome, ExclusiveDatagram};
+/// # use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
+/// fn attempt(
+///     candidate: DatagramClaimCandidate<Vec<u8>, ReleaseUnclaimed>,
+///     earlier: ExclusiveDatagram<Vec<u8>>,
+/// ) {
+///     let _ = candidate.try_exclusive(|_access, _route| {
+///         DatagramClaimOutcome::<(), (), _>::Claimed(earlier, ())
+///     });
+/// }
+/// ```
+///
+/// A judgment cannot hand the claimed datagram out through the values it
+/// returns, whose types are chosen outside the judgment, whether claiming:
+///
+/// ```compile_fail
+/// # use sakuya_datagram_routing::claim::candidate::DatagramClaimCandidate;
+/// # use sakuya_datagram_routing::claim::deliverer::{ClaimedDatagram, DatagramClaimOutcome};
+/// # use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
+/// // Stands in for a second claimed datagram of the same access, which
+/// // cannot exist; only the value is under test.
+/// fn second_claim<'access>() -> ClaimedDatagram<'access, Vec<u8>> {
+///     unimplemented!()
+/// }
+///
+/// fn attempt(candidate: DatagramClaimCandidate<Vec<u8>, ReleaseUnclaimed>) {
+///     let _ = candidate.try_exclusive(|access, _route| {
+///         DatagramClaimOutcome::<_, (), _>::Claimed(second_claim(), access.into_exclusive())
+///     });
+/// }
+/// ```
+///
+/// or abandoning:
+///
+/// ```compile_fail
+/// # use sakuya_datagram_routing::claim::candidate::DatagramClaimCandidate;
+/// # use sakuya_datagram_routing::claim::deliverer::DatagramClaimOutcome;
+/// # use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
+/// fn attempt(candidate: DatagramClaimCandidate<Vec<u8>, ReleaseUnclaimed>) {
+///     let _ = candidate.try_exclusive(|access, _route| {
+///         DatagramClaimOutcome::<(), _, _>::Abandoned(access.into_exclusive())
+///     });
+/// }
+/// ```
+///
+/// nor store it in state it captures:
+///
+/// ```compile_fail,E0521
+/// # use sakuya_datagram_routing::claim::candidate::DatagramClaimCandidate;
+/// # use sakuya_datagram_routing::claim::deliverer::{ClaimedDatagram, DatagramClaimOutcome};
+/// # use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
+/// fn attempt<'kept>(
+///     candidate: DatagramClaimCandidate<Vec<u8>, ReleaseUnclaimed>,
+///     kept: &mut Option<ClaimedDatagram<'kept, Vec<u8>>>,
+/// ) {
+///     let _ = candidate.try_exclusive(|access, _route| {
+///         *kept = Some(access.into_exclusive());
+///         DatagramClaimOutcome::<(), (), _>::Abandoned(())
+///     });
+/// }
+/// ```
+pub struct ClaimedDatagram<'access, Inner> {
+    datagram: ExclusiveDatagram<Inner>,
+    /// Binds the claim to the access it came from. The lifetime is
+    /// invariant, so a claim can never pass for one of another access.
+    access: PhantomData<fn(&'access ()) -> &'access ()>,
+}
+
+impl<Inner> ClaimedDatagram<'_, Inner> {
+    /// Unwraps the datagram for the exclusive delivery of a claimed attempt.
+    pub(super) fn into_datagram(self) -> ExclusiveDatagram<Inner> {
+        self.datagram
+    }
+}
+
+impl<Inner> fmt::Debug for ClaimedDatagram<'_, Inner> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClaimedDatagram").finish_non_exhaustive()
     }
 }
 

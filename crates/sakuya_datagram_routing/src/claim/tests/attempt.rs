@@ -441,27 +441,3 @@ fn judgment_reads_and_updates_state_it_captures() {
     }
     assert_eq!(levels.judged, b"cc");
 }
-
-#[cfg(debug_assertions)]
-#[test]
-#[should_panic = "a judgment claimed a datagram not taken from its access"]
-fn claiming_a_foreign_datagram_is_detected_in_debug_builds() {
-    let first = Probe::new(Judging::Accept);
-    let second = Probe::new(Judging::Accept);
-    let (datagram, _) = TestDatagram::new(b"one");
-    route(datagram, DatagramFinishPolicy::LastTakes, &[&first]);
-    let (foreign, _) = first.take_exclusive().consume();
-
-    let (datagram, _) = TestDatagram::new(b"two");
-    route(
-        datagram,
-        DatagramFinishPolicy::LastTakes,
-        &[&first, &second],
-    );
-    let candidate = first.take_candidate();
-    let _other = second.take_candidate();
-    let _ =
-        ready(candidate.try_exclusive(|_access, _route| {
-            DatagramClaimOutcome::<(), (), _>::Claimed(foreign, ())
-        }));
-}
