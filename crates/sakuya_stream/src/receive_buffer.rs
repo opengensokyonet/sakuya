@@ -23,7 +23,7 @@
 //! bounded by the delivery limit, and [`StreamReceiveBuffer::release_from`] and
 //! [`StreamReceiveBuffer::destroy`] release data that no delivery will need.
 //!
-//! [`fragmented::FragmentedReceiveBuffer`] implements it with a `BTreeMap` of
+//! [`fragmented::FragmentedStreamReceiveBuffer`] implements it with a `BTreeMap` of
 //! fragments.
 //!
 //! [RFC 9000 §4.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-4.5

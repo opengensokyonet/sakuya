@@ -33,7 +33,7 @@ use crate::send::termination::{
 };
 use crate::send::write::SharedWriteLimitReason;
 use crate::send_buffer::visibility::FinalSizeBelowExposureError;
-use crate::send_buffer::{FinalSizeBeyondWrittenEndError, ResetRetention, SendBuffer};
+use crate::send_buffer::{FinalSizeBeyondWrittenEndError, ResetRetention, StreamSendBuffer};
 use crate::stream_end::{FinalSizeChangeError, ResetCodeChangeError};
 use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
@@ -574,7 +574,7 @@ enum PolicyViolationError {
 
 impl<C> StreamSender<C>
 where
-    C: SendBuffer + SendFlowControlPolicy + SendTerminationPolicy,
+    C: StreamSendBuffer + SendFlowControlPolicy + SendTerminationPolicy,
 {
     /// Closes the stream normally at the written end.
     ///
@@ -853,7 +853,7 @@ where
             // written and exposure ends and against the final size the end
             // state fixed, which is the only one the buffer can have been
             // shown. A send buffer that still refuses it breaks the
-            // `SendBuffer` contract.
+            // `StreamSendBuffer` contract.
             unreachable!("send buffer refused a checked reset target {target:?}: {error}");
         }
         self.set_end(CommittedEnd::Reset { target, source });

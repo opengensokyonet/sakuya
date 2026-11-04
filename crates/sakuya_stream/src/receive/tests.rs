@@ -13,7 +13,9 @@ use super::{
 use crate::connection::{CloseReason, ImmediateClose};
 use crate::{
     connection_receive_flow::ConnectionReceiveFlowController,
-    receive_buffer::{StreamDataInput, StreamReceiveBuffer, fragmented::FragmentedReceiveBuffer},
+    receive_buffer::{
+        StreamDataInput, StreamReceiveBuffer, fragmented::FragmentedStreamReceiveBuffer,
+    },
 };
 use bytes::{BufMut, Bytes};
 use core::{cell::Cell, ops::Range};
@@ -137,7 +139,7 @@ fn destroy(reason: &'static str) -> TerminationDecision<&'static str> {
 /// flow control policy whose intent the test sets, and a termination policy.
 /// Both policies log what they observe.
 struct Parts<T> {
-    buffer: FragmentedReceiveBuffer,
+    buffer: FragmentedStreamReceiveBuffer,
     intent: Rc<Cell<AdvertisementIntent>>,
     flow_events: Vec<ReceiveFlowEvent>,
     termination: T,
@@ -237,7 +239,7 @@ fn receiver_with<T: ReceiveTerminationPolicy>(
     connection_limit: u32,
 ) -> (Receiver<T>, ConnectionReceiveFlowController) {
     let parts = Parts {
-        buffer: FragmentedReceiveBuffer::new(),
+        buffer: FragmentedStreamReceiveBuffer::new(),
         intent: Rc::default(),
         flow_events: Vec::new(),
         termination,

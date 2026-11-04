@@ -1,10 +1,10 @@
-//! A byte-array model of [`FragmentedReceiveBuffer`] under generated inputs:
+//! A byte-array model of [`FragmentedStreamReceiveBuffer`] under generated inputs:
 //! out-of-order, overlapping and duplicated frames, trimmed payloads, reads
 //! bounded by a limit, releases and destruction.
 
 use bytes::{BufMut, Bytes, BytesMut};
 use proptest::prelude::*;
-use sakuya_stream::receive_buffer::fragmented::FragmentedReceiveBuffer;
+use sakuya_stream::receive_buffer::fragmented::FragmentedStreamReceiveBuffer;
 use sakuya_stream::receive_buffer::{StreamDataInput, StreamReceiveBuffer};
 use sakuya_wire::var_int::VarInt;
 
@@ -94,7 +94,7 @@ impl Model {
     }
 }
 
-fn check(buffer: &FragmentedReceiveBuffer, model: &Model) {
+fn check(buffer: &FragmentedStreamReceiveBuffer, model: &Model) {
     assert_eq!(buffer.delivered_end(), v(model.delivered));
     assert_eq!(buffer.accounted_end(), v(model.accounted));
     assert_eq!(buffer.final_size(), model.final_size.map(v));
@@ -121,7 +121,7 @@ fn check(buffer: &FragmentedReceiveBuffer, model: &Model) {
     assert!(buffer.is_received(v(7)..v(7)));
 }
 
-fn step(buffer: &mut FragmentedReceiveBuffer, model: &mut Model, op: &Op) {
+fn step(buffer: &mut FragmentedStreamReceiveBuffer, model: &mut Model, op: &Op) {
     match *op {
         Op::Data {
             offset,
@@ -208,7 +208,7 @@ proptest! {
 
     #[test]
     fn fragmented_buffer_follows_the_model(ops in prop::collection::vec(op(), 0..80)) {
-        let mut buffer = FragmentedReceiveBuffer::new();
+        let mut buffer = FragmentedStreamReceiveBuffer::new();
         let mut model = Model::new();
         for op in &ops {
             let accounted = model.accounted;
@@ -235,7 +235,7 @@ proptest! {
         cuts.sort_unstable();
         cuts.dedup();
         let pieces: Vec<_> = cuts.windows(2).map(|w| (w[0], w[1])).collect();
-        let mut buffer = FragmentedReceiveBuffer::new();
+        let mut buffer = FragmentedStreamReceiveBuffer::new();
         // Duplicates in a random order, then every piece once in reverse, so
         // that the whole stream has arrived.
         let repeats = order.iter().map(|index| pieces[index.index(pieces.len())]);

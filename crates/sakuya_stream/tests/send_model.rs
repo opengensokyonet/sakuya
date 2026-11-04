@@ -29,7 +29,7 @@ use sakuya_stream::send::{
     EndSource, EnterTerminalStateError, ResetTarget, SendEndState, SendTerminalState,
     SenderExposeUsageError, StreamResetError, StreamSender,
 };
-use sakuya_stream::send_buffer::offset_map::OffsetMapSendBuffer;
+use sakuya_stream::send_buffer::offset_map::OffsetMapStreamSendBuffer;
 use sakuya_stream::send_buffer::visibility::FinalSizeBelowExposureError;
 use sakuya_stream::send_buffer::{
     ExposedContent, FinalSizeBeyondWrittenEndError, UsageBeyondWrittenEndError,
@@ -655,7 +655,7 @@ macro_rules! impl_sender {
     };
 }
 
-type Patient = SendComposition<OffsetMapSendBuffer, Chunked, Narrowing>;
+type Patient = SendComposition<OffsetMapStreamSendBuffer, Chunked, Narrowing>;
 impl_sender!(
     DefaultSendComposition,
     |reason: &core::convert::Infallible| match *reason {}
@@ -1244,7 +1244,7 @@ proptest! {
                 v(limit),
                 true,
                 SendComposition::new(
-                    OffsetMapSendBuffer::new(),
+                    OffsetMapStreamSendBuffer::new(),
                     Chunked { chunk },
                     Narrowing { headroom, stops: 0 },
                 ),

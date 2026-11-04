@@ -1,5 +1,5 @@
 use super::covered_bytes::{CoveredBytes, CoveredBytesError};
-use super::offset_map::OffsetMapSendBuffer;
+use super::offset_map::OffsetMapStreamSendBuffer;
 use super::visibility::{
     CoverError, FinalSizeBelowExposureError, FixFinalSizeError, UsageBeyondCoverageError,
     VisibilitySettlement,
@@ -20,7 +20,7 @@ fn stream() -> StreamId {
 
 /// Appends `length` bytes, each holding the low byte of its offset.
 fn append(
-    buffer: &mut OffsetMapSendBuffer,
+    buffer: &mut OffsetMapStreamSendBuffer,
     connection: &mut ConnectionSendFlowController,
     length: u32,
 ) -> Bytes {
@@ -48,7 +48,7 @@ fn retention(final_size: u32, reliable_size: u32) -> ResetRetention {
     }
 }
 
-fn retained_ranges(buffer: &OffsetMapSendBuffer) -> Vec<(u64, usize)> {
+fn retained_ranges(buffer: &OffsetMapStreamSendBuffer) -> Vec<(u64, usize)> {
     buffer
         .retained()
         .map(|(offset, bytes)| (offset.get(), bytes.len()))
@@ -58,7 +58,7 @@ fn retained_ranges(buffer: &OffsetMapSendBuffer) -> Vec<(u64, usize)> {
 #[test]
 fn append_moves_bytes_without_copying() {
     let mut connection = ConnectionSendFlowController::new(v(1000));
-    let mut buffer = OffsetMapSendBuffer::new();
+    let mut buffer = OffsetMapStreamSendBuffer::new();
     let first = append(&mut buffer, &mut connection, 100);
     let second = append(&mut buffer, &mut connection, 50);
     assert_eq!(buffer.written_end(), v(150));
@@ -103,7 +103,7 @@ fn covered_bytes_report_their_parts() {
 #[test]
 fn reset_retention_keeps_coverage_up_to_the_final_size() {
     let mut connection = ConnectionSendFlowController::new(v(2000));
-    let mut buffer = OffsetMapSendBuffer::new();
+    let mut buffer = OffsetMapStreamSendBuffer::new();
     for _ in 0..4 {
         append(&mut buffer, &mut connection, 250);
     }
@@ -128,7 +128,7 @@ fn reset_retention_keeps_coverage_up_to_the_final_size() {
 #[test]
 fn reset_slices_the_straddling_entry_without_copying() {
     let mut connection = ConnectionSendFlowController::new(v(1000));
-    let mut buffer = OffsetMapSendBuffer::new();
+    let mut buffer = OffsetMapStreamSendBuffer::new();
     let bytes = append(&mut buffer, &mut connection, 100);
     buffer.apply_reset(retention(100, 30)).unwrap();
     let (offset, kept) = buffer.retained().next().unwrap();
@@ -140,7 +140,7 @@ fn reset_slices_the_straddling_entry_without_copying() {
 #[test]
 fn append_after_reset_fails_and_returns_the_data() {
     let mut connection = ConnectionSendFlowController::new(v(1000));
-    let mut buffer = OffsetMapSendBuffer::new();
+    let mut buffer = OffsetMapStreamSendBuffer::new();
     append(&mut buffer, &mut connection, 10);
     buffer.apply_reset(retention(10, 0)).unwrap();
     let error = buffer
@@ -154,7 +154,7 @@ fn append_after_reset_fails_and_returns_the_data() {
 #[test]
 fn append_after_an_exposed_fin_fails() {
     let mut connection = ConnectionSendFlowController::new(v(1000));
-    let mut buffer = OffsetMapSendBuffer::new();
+    let mut buffer = OffsetMapStreamSendBuffer::new();
     append(&mut buffer, &mut connection, 10);
     buffer
         .expose_usage_through(v(10), ExposedContent::Fin, &mut connection)
@@ -171,7 +171,7 @@ fn append_after_an_exposed_fin_fails() {
 #[test]
 fn reset_retention_is_checked_before_anything_changes() {
     let mut connection = ConnectionSendFlowController::new(v(1000));
-    let mut buffer = OffsetMapSendBuffer::new();
+    let mut buffer = OffsetMapStreamSendBuffer::new();
     append(&mut buffer, &mut connection, 100);
     assert_eq!(
         buffer.apply_reset(retention(50, 60)),
@@ -243,7 +243,7 @@ fn settlement_coverage_must_be_contiguous() {
 fn exposure_rejects_coverage_of_another_controller() {
     let mut granting = ConnectionSendFlowController::new(v(1000));
     let mut other = ConnectionSendFlowController::new(v(1000));
-    let mut buffer = OffsetMapSendBuffer::new();
+    let mut buffer = OffsetMapStreamSendBuffer::new();
     append(&mut buffer, &mut granting, 100);
     assert!(matches!(
         buffer.expose_usage_through(v(50), ExposedContent::Data, &mut other),
@@ -280,7 +280,7 @@ fn settlement_exposure_needs_coverage() {
 #[test]
 fn exposure_commits_new_usage_once() {
     let mut connection = ConnectionSendFlowController::new(v(1000));
-    let mut buffer = OffsetMapSendBuffer::new();
+    let mut buffer = OffsetMapStreamSendBuffer::new();
     append(&mut buffer, &mut connection, 500);
 
     let exposed = buffer
@@ -314,7 +314,7 @@ fn exposure_commits_new_usage_once() {
 #[test]
 fn exposure_rejects_usage_beyond_the_written_end() {
     let mut connection = ConnectionSendFlowController::new(v(1000));
-    let mut buffer = OffsetMapSendBuffer::new();
+    let mut buffer = OffsetMapStreamSendBuffer::new();
     append(&mut buffer, &mut connection, 100);
     let error = buffer
         .expose_usage_through(v(101), ExposedContent::Data, &mut connection)
@@ -331,7 +331,7 @@ fn exposure_rejects_usage_beyond_the_written_end() {
 #[test]
 fn exposed_final_size_constrains_later_exposures() {
     let mut connection = ConnectionSendFlowController::new(v(1000));
-    let mut buffer = OffsetMapSendBuffer::new();
+    let mut buffer = OffsetMapStreamSendBuffer::new();
     append(&mut buffer, &mut connection, 100);
     buffer
         .expose_usage_through(v(60), ExposedContent::Data, &mut connection)
@@ -385,7 +385,7 @@ fn exposed_final_size_constrains_later_exposures() {
 #[test]
 fn reset_final_size_is_exposed_without_data() {
     let mut connection = ConnectionSendFlowController::new(v(1000));
-    let mut buffer = OffsetMapSendBuffer::new();
+    let mut buffer = OffsetMapStreamSendBuffer::new();
     append(&mut buffer, &mut connection, 100);
     buffer.apply_reset(retention(70, 0)).unwrap();
     assert_eq!(retained_ranges(&buffer), []);
@@ -410,7 +410,7 @@ fn reset_final_size_is_exposed_without_data() {
 #[test]
 fn fixing_an_exposed_final_size_keeps_it() {
     let mut connection = ConnectionSendFlowController::new(v(1000));
-    let mut buffer = OffsetMapSendBuffer::new();
+    let mut buffer = OffsetMapStreamSendBuffer::new();
     append(&mut buffer, &mut connection, 100);
     buffer
         .expose_usage_through(v(80), ExposedContent::Fin, &mut connection)

@@ -7,7 +7,7 @@
 //! (`write_limit_end`) and the protocol facts that constrain resets. It
 //! requires one composition type to fulfil three contracts at once:
 //!
-//! - [`SendBuffer`], for storage, the written end and the coverage of
+//! - [`StreamSendBuffer`], for storage, the written end and the coverage of
 //!   connection credit;
 //! - [`SendFlowControlPolicy`], for write admission and the
 //!   `STREAM_DATA_BLOCKED` signal intent;
@@ -28,7 +28,7 @@ use crate::connection::{CloseReason, ConnectionClosedError};
 use crate::connection_send_credit::ConnectionSendFlowController;
 use crate::send_buffer::visibility::{ForeignCoverageError, UsageBeyondCoverageError};
 use crate::send_buffer::{
-    ExposeUsageError, ExposedContent, SendBuffer, UsageBeyondWrittenEndError,
+    ExposeUsageError, ExposedContent, StreamSendBuffer, UsageBeyondWrittenEndError,
 };
 use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
 use flow_control::{SendFlowContext, SendFlowControlPolicy, StreamCreditEvent};
@@ -48,7 +48,7 @@ pub mod write;
 /// The stream sender (`StreamSender`): the per-stream send direction state
 /// kept at the connection layer.
 ///
-/// `C` is the composition of a [`SendBuffer`], a
+/// `C` is the composition of a [`StreamSendBuffer`], a
 /// [`SendFlowControlPolicy`] and a [`SendTerminationPolicy`] that act on this
 /// stream and on the same data.
 ///
@@ -339,7 +339,7 @@ impl<C: SendTerminationPolicy> StreamSender<C> {
 
 impl<C> StreamSender<C>
 where
-    C: SendBuffer + SendFlowControlPolicy + SendTerminationPolicy,
+    C: StreamSendBuffer + SendFlowControlPolicy + SendTerminationPolicy,
 {
     /// The written end (`written_end`), as the send buffer keeps it.
     pub fn written_end(&self) -> VarInt {
@@ -554,7 +554,7 @@ where
                 // the one the committed end fixed, which the checks above
                 // compared, and data exposure never passes it, so the
                 // exposure end stays at or below it. A send buffer that still
-                // refuses the final size breaks the `SendBuffer` contract.
+                // refuses the final size breaks the `StreamSendBuffer` contract.
                 unreachable!("send buffer refused a checked exposure through {usage_end}: {error}")
             }
         };

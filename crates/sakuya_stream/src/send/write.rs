@@ -28,7 +28,7 @@ use crate::connection::ConnectionClosedError;
 use crate::connection_send_credit::ConnectionSendFlowController;
 use crate::send::flow_control::{AdmissionGuard, SendFlowControlPolicy, WriteAttempt};
 use crate::send::termination::{SendTerminationEvent, SendTerminationPolicy};
-use crate::send_buffer::SendBuffer;
+use crate::send_buffer::StreamSendBuffer;
 use crate::send_buffer::covered_bytes::CoveredBytes;
 use bytes::Buf;
 use core::fmt;
@@ -161,7 +161,7 @@ pub enum FlushError {
 
 impl<C> StreamSender<C>
 where
-    C: SendBuffer + SendFlowControlPolicy + SendTerminationPolicy,
+    C: StreamSendBuffer + SendFlowControlPolicy + SendTerminationPolicy,
 {
     /// Makes one write attempt with `source`: hands the prefix that admission
     /// and connection credit allow to the send buffer and advances `source`
@@ -270,7 +270,7 @@ where
             // invariant: input is open, so no reset was applied and no final
             // size was exposed; the ceiling keeps the written end within
             // `VarInt::MAX`. A send buffer that still refuses the data breaks
-            // the `SendBuffer` contract.
+            // the `StreamSendBuffer` contract.
             Err(error) => unreachable!("an open send buffer refused admitted data: {error}"),
         }
         let end = self.written_end();

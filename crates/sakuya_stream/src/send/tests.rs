@@ -16,7 +16,7 @@ use super::write::{FlushError, WriteError, WriteOutcome, WriteReport, WriteWait}
 use super::*;
 use crate::connection::{CloseReason, ConnectionClosedError, ImmediateClose};
 use crate::send_buffer::covered_bytes::CoveredBytes;
-use crate::send_buffer::offset_map::OffsetMapSendBuffer;
+use crate::send_buffer::offset_map::OffsetMapStreamSendBuffer;
 use crate::send_buffer::visibility::FinalSizeBelowExposureError;
 use crate::send_buffer::{
     AppendError, ApplyResetError, ExposedContent, FinalSizeBeyondWrittenEndError, ResetRetention,
@@ -167,7 +167,7 @@ where
 }
 
 type TestSender<S> =
-    StreamSender<SendComposition<OffsetMapSendBuffer, RecordingFlow, ScriptedTermination<S>>>;
+    StreamSender<SendComposition<OffsetMapStreamSendBuffer, RecordingFlow, ScriptedTermination<S>>>;
 
 fn keep(_: &SendTerminationEvent, _: &SendTerminationContext) -> TerminationAction<&'static str> {
     TerminationAction::Keep
@@ -182,7 +182,7 @@ where
         v(peer_stream_limit),
         reset_stream_at,
         SendComposition::new(
-            OffsetMapSendBuffer::new(),
+            OffsetMapStreamSendBuffer::new(),
             RecordingFlow::default(),
             ScriptedTermination::new(script),
         ),
@@ -233,7 +233,7 @@ fn write_all<C>(
     connection: &mut ConnectionSendFlowController,
     length: u32,
 ) where
-    C: SendBuffer + SendFlowControlPolicy + SendTerminationPolicy,
+    C: StreamSendBuffer + SendFlowControlPolicy + SendTerminationPolicy,
     C::WriteLimitReason: core::fmt::Debug,
 {
     let mut input = source(length as usize);
@@ -249,7 +249,7 @@ fn expose<C>(
     connection: &mut ConnectionSendFlowController,
     usage_end: u32,
 ) where
-    C: SendBuffer + SendFlowControlPolicy + SendTerminationPolicy,
+    C: StreamSendBuffer + SendFlowControlPolicy + SendTerminationPolicy,
 {
     sender
         .expose_usage_through(v(usage_end), ExposedContent::Data, connection)
@@ -263,7 +263,7 @@ fn send_end<C>(
     connection: &mut ConnectionSendFlowController,
     content: ExposedContent,
 ) where
-    C: SendBuffer + SendFlowControlPolicy + SendTerminationPolicy,
+    C: StreamSendBuffer + SendFlowControlPolicy + SendTerminationPolicy,
 {
     let final_size = sender.end_state().final_size().unwrap();
     sender
@@ -465,7 +465,7 @@ fn admission_guards_are_checked_at_construction() {
 /// A send buffer that claims its written end has reached `VarInt::MAX`.
 struct ExhaustedBuffer;
 
-impl SendBuffer for ExhaustedBuffer {
+impl StreamSendBuffer for ExhaustedBuffer {
     fn written_end(&self) -> VarInt {
         VarInt::MAX
     }

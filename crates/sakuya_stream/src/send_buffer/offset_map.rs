@@ -1,10 +1,10 @@
-//! A send buffer keyed by stream offset ([`OffsetMapSendBuffer`]).
+//! A send buffer keyed by stream offset ([`OffsetMapStreamSendBuffer`]).
 use super::covered_bytes::CoveredBytes;
 use super::visibility::{CoverError, VisibilitySettlement};
 use super::{
     AppendError, ApplyResetError, ExposeUsageError, ExposedContent, FinalSizeBeyondWrittenEndError,
-    ResetRetention, Selection, SelectionConstraints, SendBuffer, TransmissionReceipt, append_error,
-    apply_reset_error,
+    ResetRetention, Selection, SelectionConstraints, StreamSendBuffer, TransmissionReceipt,
+    append_error, apply_reset_error,
 };
 use crate::connection_send_credit::ConnectionSendFlowController;
 use bytes::Bytes;
@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 ///
 /// Selection and feedback take inputs that have no values yet.
 #[derive(Debug, Default)]
-pub struct OffsetMapSendBuffer {
+pub struct OffsetMapStreamSendBuffer {
     written_end: VarInt,
     retained: BTreeMap<VarInt, Bytes>,
     visibility: VisibilitySettlement,
@@ -39,7 +39,7 @@ enum Input {
     Reset(ResetRetention),
 }
 
-impl OffsetMapSendBuffer {
+impl OffsetMapStreamSendBuffer {
     /// Creates an empty buffer.
     pub fn new() -> Self {
         Self::default()
@@ -65,7 +65,7 @@ impl OffsetMapSendBuffer {
     }
 }
 
-impl SendBuffer for OffsetMapSendBuffer {
+impl StreamSendBuffer for OffsetMapStreamSendBuffer {
     fn written_end(&self) -> VarInt {
         self.written_end
     }

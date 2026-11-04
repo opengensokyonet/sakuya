@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 /// the end of the received prefix `[0, n)`, so that completeness can still be
 /// answered after data has been released.
 #[derive(Debug, Default)]
-pub struct FragmentedReceiveBuffer {
+pub struct FragmentedStreamReceiveBuffer {
     storage: Storage,
     delivered: VarInt,
     received_prefix: VarInt,
@@ -55,7 +55,7 @@ struct Fragment {
     bytes: Bytes,
 }
 
-impl FragmentedReceiveBuffer {
+impl FragmentedStreamReceiveBuffer {
     /// Creates an empty buffer.
     pub fn new() -> Self {
         Self::default()
@@ -133,7 +133,7 @@ fn offset_into(start: VarInt, end: VarInt, count: usize) -> VarInt {
     offset_add(start, count).map_or(end, |offset| offset.min(end))
 }
 
-impl StreamReceiveBuffer for FragmentedReceiveBuffer {
+impl StreamReceiveBuffer for FragmentedStreamReceiveBuffer {
     type Chunk = Bytes;
 
     fn receive_data(&mut self, input: StreamDataInput) {

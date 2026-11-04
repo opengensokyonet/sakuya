@@ -11,10 +11,10 @@ use super::termination::{
 };
 use crate::connection_send_credit::ConnectionSendFlowController;
 use crate::send_buffer::covered_bytes::CoveredBytes;
-use crate::send_buffer::offset_map::OffsetMapSendBuffer;
+use crate::send_buffer::offset_map::OffsetMapStreamSendBuffer;
 use crate::send_buffer::{
     AppendError, ApplyResetError, ExposeUsageError, ExposedContent, ResetRetention, Selection,
-    SelectionConstraints, SendBuffer, TransmissionReceipt,
+    SelectionConstraints, StreamSendBuffer, TransmissionReceipt,
 };
 use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::var_int::VarInt;
@@ -35,12 +35,12 @@ pub struct SendComposition<B, F, T> {
     pub termination: T,
 }
 
-/// The default composition: [`OffsetMapSendBuffer`],
+/// The default composition: [`OffsetMapStreamSendBuffer`],
 /// [`DefaultSendFlowControlPolicy`] and [`DefaultSendTerminationPolicy`].
 ///
 /// It is a replaceable base, not behaviour every policy must share.
 pub type DefaultSendComposition = SendComposition<
-    OffsetMapSendBuffer,
+    OffsetMapStreamSendBuffer,
     DefaultSendFlowControlPolicy,
     DefaultSendTerminationPolicy,
 >;
@@ -61,14 +61,14 @@ impl DefaultSendComposition {
     /// writer leads to a reset with `abandon_code`.
     pub fn with_abandon_code(abandon_code: ApplicationErrorCode) -> Self {
         Self::new(
-            OffsetMapSendBuffer::new(),
+            OffsetMapStreamSendBuffer::new(),
             DefaultSendFlowControlPolicy::new(),
             DefaultSendTerminationPolicy::new(abandon_code),
         )
     }
 }
 
-impl<B: SendBuffer, F, T> SendBuffer for SendComposition<B, F, T> {
+impl<B: StreamSendBuffer, F, T> StreamSendBuffer for SendComposition<B, F, T> {
     fn written_end(&self) -> VarInt {
         self.buffer.written_end()
     }

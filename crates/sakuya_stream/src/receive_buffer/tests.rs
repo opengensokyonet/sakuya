@@ -1,5 +1,6 @@
 use super::{
-    StreamDataInput, StreamDataInputError, StreamReceiveBuffer, fragmented::FragmentedReceiveBuffer,
+    StreamDataInput, StreamDataInputError, StreamReceiveBuffer,
+    fragmented::FragmentedStreamReceiveBuffer,
 };
 use bytes::Bytes;
 use sakuya_wire::var_int::VarInt;
@@ -19,7 +20,7 @@ fn frame(offset: u32, len: u32, fin: bool) -> StreamDataInput {
     StreamDataInput::new(v(offset), v(offset + len), fin, data(offset, len)).unwrap()
 }
 
-fn read_all(buffer: &mut FragmentedReceiveBuffer, limit: VarInt) -> Vec<u8> {
+fn read_all(buffer: &mut FragmentedStreamReceiveBuffer, limit: VarInt) -> Vec<u8> {
     let mut out = Vec::new();
     while let Some(chunk) = buffer.read_chunk(limit) {
         assert!(!chunk.is_empty());
@@ -59,7 +60,7 @@ fn input_rejects_inconsistent_shapes() {
 /// second frame; everything is delivered once 200 is read.
 #[test]
 fn out_of_order_fin_then_fill() {
-    let mut buffer = FragmentedReceiveBuffer::new();
+    let mut buffer = FragmentedStreamReceiveBuffer::new();
     buffer.receive_data(frame(100, 100, true));
     assert_eq!(buffer.final_size(), Some(v(200)));
     assert_eq!(buffer.accounted_end(), v(200));
@@ -76,7 +77,7 @@ fn out_of_order_fin_then_fill() {
 /// The accounted end follows the highest end, not the stored bytes.
 #[test]
 fn accounted_end_follows_highest_end() {
-    let mut buffer = FragmentedReceiveBuffer::new();
+    let mut buffer = FragmentedStreamReceiveBuffer::new();
     buffer.receive_data(frame(100, 10, false));
     assert_eq!(buffer.accounted_end(), v(110));
     buffer.receive_data(frame(0, 100, false));
@@ -93,7 +94,7 @@ fn accounted_end_follows_highest_end() {
 /// is 768, and it stays 768 after reading.
 #[test]
 fn readable_end_differs_from_accounted_end() {
-    let mut buffer = FragmentedReceiveBuffer::new();
+    let mut buffer = FragmentedStreamReceiveBuffer::new();
     buffer.receive_data(frame(512, 256, false));
     buffer.receive_data(frame(0, 256, false));
     assert_eq!(read_all(&mut buffer, VarInt::MAX), data(0, 256));
@@ -107,7 +108,7 @@ fn readable_end_differs_from_accounted_end() {
 /// with final size 1024 then accounts up to 1024 while data stops at 768.
 #[test]
 fn release_keeps_history_and_reset_extends_accounting() {
-    let mut buffer = FragmentedReceiveBuffer::new();
+    let mut buffer = FragmentedStreamReceiveBuffer::new();
     buffer.receive_data(frame(0, 768, false));
     buffer.release_from(v(256));
     assert_eq!(buffer.held_len(), 256);
@@ -122,7 +123,7 @@ fn release_keeps_history_and_reset_extends_accounting() {
 
 #[test]
 fn shorter_duplicate_does_not_replace_longer_data() {
-    let mut buffer = FragmentedReceiveBuffer::new();
+    let mut buffer = FragmentedStreamReceiveBuffer::new();
     buffer.receive_data(frame(0, 100, false));
     let other = Bytes::from(vec![0xee; 50]);
     buffer.receive_data(StreamDataInput::new(v(0), v(50), false, other).unwrap());
@@ -132,7 +133,7 @@ fn shorter_duplicate_does_not_replace_longer_data() {
 
 #[test]
 fn overlapping_inputs_store_only_uncovered_pieces() {
-    let mut buffer = FragmentedReceiveBuffer::new();
+    let mut buffer = FragmentedStreamReceiveBuffer::new();
     buffer.receive_data(frame(10, 10, false));
     buffer.receive_data(frame(30, 10, false));
     // Covers both fragments and the gaps around them, with different bytes.
@@ -150,7 +151,7 @@ fn overlapping_inputs_store_only_uncovered_pieces() {
 /// With an empty map the read position still filters old duplicates.
 #[test]
 fn delivered_data_is_not_stored_again() {
-    let mut buffer = FragmentedReceiveBuffer::new();
+    let mut buffer = FragmentedStreamReceiveBuffer::new();
     buffer.receive_data(frame(0, 100, false));
     assert_eq!(read_all(&mut buffer, VarInt::MAX).len(), 100);
     buffer.receive_data(frame(0, 100, false));
@@ -161,7 +162,7 @@ fn delivered_data_is_not_stored_again() {
 
 #[test]
 fn reads_stop_at_the_limit() {
-    let mut buffer = FragmentedReceiveBuffer::new();
+    let mut buffer = FragmentedStreamReceiveBuffer::new();
     buffer.receive_data(frame(0, 100, false));
     let chunk = buffer.read_chunk(v(30)).unwrap();
     assert_eq!(chunk, data(0, 30));
@@ -184,7 +185,7 @@ fn reads_stop_at_the_limit() {
 
 #[test]
 fn read_into_spans_fragments() {
-    let mut buffer = FragmentedReceiveBuffer::new();
+    let mut buffer = FragmentedStreamReceiveBuffer::new();
     buffer.receive_data(frame(0, 10, false));
     buffer.receive_data(frame(10, 10, false));
     buffer.receive_data(frame(30, 10, false));
@@ -195,7 +196,7 @@ fn read_into_spans_fragments() {
 
 #[test]
 fn release_truncates_a_straddling_fragment() {
-    let mut buffer = FragmentedReceiveBuffer::new();
+    let mut buffer = FragmentedStreamReceiveBuffer::new();
     buffer.receive_data(frame(0, 100, false));
     buffer.receive_data(frame(150, 100, false));
     buffer.release_from(v(50));
@@ -207,7 +208,7 @@ fn release_truncates_a_straddling_fragment() {
 
 #[test]
 fn destroy_keeps_scalars_and_ignores_payload() {
-    let mut buffer = FragmentedReceiveBuffer::new();
+    let mut buffer = FragmentedStreamReceiveBuffer::new();
     buffer.receive_data(frame(0, 100, false));
     buffer.destroy();
     assert!(buffer.is_destroyed());
@@ -222,7 +223,7 @@ fn destroy_keeps_scalars_and_ignores_payload() {
 
 #[test]
 fn first_final_size_is_kept() {
-    let mut buffer = FragmentedReceiveBuffer::new();
+    let mut buffer = FragmentedStreamReceiveBuffer::new();
     buffer.receive_data(frame(0, 10, true));
     buffer.receive_final_size(v(20));
     assert_eq!(buffer.final_size(), Some(v(10)));
@@ -231,7 +232,7 @@ fn first_final_size_is_kept() {
 
 #[test]
 fn trimmed_payload_still_accounts_the_whole_frame() {
-    let mut buffer = FragmentedReceiveBuffer::new();
+    let mut buffer = FragmentedStreamReceiveBuffer::new();
     let input = StreamDataInput::new(v(0), v(100), true, data(0, 40)).unwrap();
     buffer.receive_data(input);
     assert_eq!(buffer.accounted_end(), v(100));

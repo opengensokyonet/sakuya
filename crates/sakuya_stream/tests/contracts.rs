@@ -15,7 +15,7 @@ use sakuya_stream::receive::termination::{
     TerminationView,
 };
 use sakuya_stream::receive::{StreamFrame, StreamReceiver};
-use sakuya_stream::receive_buffer::fragmented::FragmentedReceiveBuffer;
+use sakuya_stream::receive_buffer::fragmented::FragmentedStreamReceiveBuffer;
 use sakuya_stream::receive_buffer::{StreamDataInput, StreamReceiveBuffer};
 use sakuya_stream::send::composition::SendComposition;
 use sakuya_stream::send::flow_control::{
@@ -28,7 +28,7 @@ use sakuya_stream::send::termination::{
 };
 use sakuya_stream::send::write::WriteOutcome;
 use sakuya_stream::send::{ResetTarget, SendEndState, SendTerminalState, StreamSender};
-use sakuya_stream::send_buffer::offset_map::OffsetMapSendBuffer;
+use sakuya_stream::send_buffer::offset_map::OffsetMapStreamSendBuffer;
 use sakuya_stream::send_buffer::{ExposedContent, ResetRetention};
 use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::stream_id::StreamId;
@@ -68,7 +68,8 @@ where
     }
 }
 
-type Composition<F> = SendComposition<OffsetMapSendBuffer, FullCeilingAdmission, Answering<F>>;
+type Composition<F> =
+    SendComposition<OffsetMapStreamSendBuffer, FullCeilingAdmission, Answering<F>>;
 
 fn sender<F>(answer: F) -> StreamSender<Composition<F>>
 where
@@ -79,7 +80,7 @@ where
         v(1000),
         true,
         SendComposition::new(
-            OffsetMapSendBuffer::new(),
+            OffsetMapStreamSendBuffer::new(),
             FullCeilingAdmission::new(),
             Answering(answer),
         ),
@@ -173,7 +174,7 @@ fn a_stale_guard_consumes_nothing_before_the_panic() {
         v(1000),
         true,
         SendComposition::new(
-            OffsetMapSendBuffer::new(),
+            OffsetMapStreamSendBuffer::new(),
             StaleOffset,
             Answering(|_: &SendTerminationEvent, _: &SendTerminationContext| {
                 TerminationAction::<()>::Keep
@@ -232,7 +233,7 @@ fn a_terminal_reset_needs_a_reset() {
 
 /// The base composition of the receive direction.
 struct BaseReceive {
-    buffer: FragmentedReceiveBuffer,
+    buffer: FragmentedStreamReceiveBuffer,
     termination: FollowingTermination,
     events: Vec<TerminationEvent>,
 }
@@ -313,7 +314,7 @@ fn reception_completes_after_the_reader_is_gone() {
     let mut connection = ConnectionReceiveFlowController::new(v(1000));
     let mut receiver = StreamReceiver::new(
         BaseReceive {
-            buffer: FragmentedReceiveBuffer::new(),
+            buffer: FragmentedStreamReceiveBuffer::new(),
             termination: FollowingTermination::new(code(9)),
             events: Vec::new(),
         },

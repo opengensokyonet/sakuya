@@ -25,7 +25,7 @@ use sakuya_stream::receive::{
     BoundaryMode, ConnectionFailureError, ProtocolError, ResetStreamAtFrame, ResetStreamFrame,
     StreamFrame, StreamReceiver,
 };
-use sakuya_stream::receive_buffer::fragmented::FragmentedReceiveBuffer;
+use sakuya_stream::receive_buffer::fragmented::FragmentedStreamReceiveBuffer;
 use sakuya_stream::receive_buffer::{StreamDataInput, StreamReceiveBuffer};
 use sakuya_stream::stream_end::{BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError};
 use sakuya_wire::application_error::ApplicationErrorCode;
@@ -180,7 +180,7 @@ fn restrict(acceptance: Option<u64>, delivery: Option<u64>, reason: u32, facts: 
 
 /// The components: buffer, a fixed advertisement intent, and the script.
 struct Parts {
-    buffer: FragmentedReceiveBuffer,
+    buffer: FragmentedStreamReceiveBuffer,
     intent: AdvertisementIntent,
     script: Script,
 }
@@ -1265,7 +1265,7 @@ fn run(
     let make = |limit| {
         StreamReceiver::new(
             Parts {
-                buffer: FragmentedReceiveBuffer::new(),
+                buffer: FragmentedStreamReceiveBuffer::new(),
                 intent: AdvertisementIntent::Advertise {
                     target_limit: v(target),
                 },

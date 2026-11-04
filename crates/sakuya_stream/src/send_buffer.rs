@@ -1,6 +1,6 @@
-//! The send buffer contract ([`SendBuffer`]), the per-stream visibility
+//! The send buffer contract ([`StreamSendBuffer`]), the per-stream visibility
 //! settlement it uses ([`visibility::VisibilitySettlement`]) and an
-//! implementation keyed by stream offset ([`offset_map::OffsetMapSendBuffer`]).
+//! implementation keyed by stream offset ([`offset_map::OffsetMapStreamSendBuffer`]).
 //!
 //! A send buffer stores the data a stream sender has accepted, owns the
 //! connection credit reservations that cover it, and maintains the written
@@ -37,7 +37,7 @@ pub mod visibility;
 /// [`select`](Self::select), [`on_acknowledged`](Self::on_acknowledged) and
 /// [`on_lost`](Self::on_lost) have no callable inputs yet. This interface is
 /// provisional.
-pub trait SendBuffer {
+pub trait StreamSendBuffer {
     /// The written end: the cumulative end of all appended data.
     fn written_end(&self) -> VarInt;
 
@@ -126,7 +126,7 @@ pub trait SendBuffer {
     fn on_lost(&mut self, receipt: TransmissionReceipt);
 }
 
-/// Failures of [`SendBuffer::append`]; each hands the data back through
+/// Failures of [`StreamSendBuffer::append`]; each hands the data back through
 /// [`into_data`](Self::into_data).
 #[derive(Debug, Snafu)]
 #[snafu(module(append_error), visibility(pub(crate)))]
@@ -169,7 +169,7 @@ impl AppendError {
     }
 }
 
-/// Failures of [`SendBuffer::apply_reset`].
+/// Failures of [`StreamSendBuffer::apply_reset`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(module(apply_reset_error), visibility(pub(crate)))]
 pub enum ApplyResetError {
@@ -270,7 +270,7 @@ impl ExposedContent {
     }
 }
 
-/// Failures of [`SendBuffer::expose_usage_through`].
+/// Failures of [`StreamSendBuffer::expose_usage_through`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(module(expose_usage_error), visibility(pub(crate)))]
 pub enum ExposeUsageError {
@@ -351,14 +351,14 @@ impl UsageBeyondWrittenEndError {
     }
 }
 
-/// The constraints a send scheduler passes to [`SendBuffer::select`].
+/// The constraints a send scheduler passes to [`StreamSendBuffer::select`].
 ///
 /// The type has no values yet, so no selection can be requested. This
 /// interface is provisional.
 #[derive(Debug)]
 pub enum SelectionConstraints {}
 
-/// The result of [`SendBuffer::select`].
+/// The result of [`StreamSendBuffer::select`].
 ///
 /// This interface is provisional.
 #[derive(Debug)]
