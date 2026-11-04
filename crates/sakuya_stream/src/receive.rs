@@ -48,6 +48,7 @@
 //! provisional.
 //!
 //! [`ReceiveBuffer`]: crate::receive_buffer::ReceiveBuffer
+use crate::connection::ConnectionClosedError;
 use crate::connection_receive_flow::{
     ConnectionReceiveFlowController, RecordReleaseError, RecordUsageError,
 };
@@ -241,8 +242,11 @@ impl ProtocolError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 pub enum ConnectionFailure {
     /// The connection was closed.
-    #[snafu(display("connection closed"))]
-    Closed,
+    #[snafu(transparent)]
+    Closed {
+        /// The closed connection.
+        source: ConnectionClosedError,
+    },
     /// Input of this stream violated the protocol; the connection must be
     /// closed with the error's transport error code.
     #[snafu(display("protocol violation on the stream's receive direction"))]
@@ -571,7 +575,9 @@ where
         if self.failure().is_some() {
             return;
         }
-        self.shut_down(ConnectionFailure::Closed);
+        self.shut_down(ConnectionFailure::Closed {
+            source: ConnectionClosedError::new(),
+        });
     }
 
     /// Records that the stream reader was dropped.

@@ -26,6 +26,7 @@ use super::{
     CommittedEnd, EndPhase, EndSource, ResetTarget, SendEndState, SendTerminalState, StopSending,
     StreamSender, WriteLimit,
 };
+use crate::connection::ConnectionClosedError;
 use crate::send::flow_control::{SendFlowControlPolicy, StreamCreditEvent};
 use crate::send::termination::{
     FinalSizeRequest, SendTerminationEvent, SendTerminationPolicy, TerminationAction,
@@ -44,8 +45,11 @@ use snafu::{Report, ResultExt, Snafu, ensure};
 #[snafu(module(close_error), visibility(pub(crate)))]
 pub enum CloseError {
     /// The connection has closed.
-    #[snafu(display("the connection is closed"))]
-    ConnectionClosed,
+    #[snafu(transparent)]
+    ConnectionClosed {
+        /// The closed connection.
+        source: ConnectionClosedError,
+    },
     /// A reset is in effect; a close cannot replace it.
     #[snafu(display("the stream was already reset"))]
     AlreadyReset,
@@ -56,8 +60,11 @@ pub enum CloseError {
 #[snafu(module(reset_error), visibility(pub(crate)))]
 pub enum ResetError {
     /// The connection has closed.
-    #[snafu(display("the connection is closed"))]
-    ConnectionClosed,
+    #[snafu(transparent)]
+    ConnectionClosed {
+        /// The closed connection.
+        source: ConnectionClosedError,
+    },
     /// The error code differs from the effective reset's.
     #[snafu(display("the reset conflicts with the effective reset"))]
     ErrorCodeConflict {
@@ -77,8 +84,11 @@ pub enum ResetError {
 #[snafu(module(reset_at_error), visibility(pub(crate)))]
 pub enum ResetAtError {
     /// The connection has closed.
-    #[snafu(display("the connection is closed"))]
-    ConnectionClosed,
+    #[snafu(transparent)]
+    ConnectionClosed {
+        /// The closed connection.
+        source: ConnectionClosedError,
+    },
     /// The error code differs from the effective reset's.
     #[snafu(display("the reset conflicts with the effective reset"))]
     ErrorCodeConflict {
@@ -118,8 +128,11 @@ pub enum ResetAtError {
 #[snafu(module(reset_with_final_size_error), visibility(pub(crate)))]
 pub enum ResetWithFinalSizeError {
     /// The connection has closed.
-    #[snafu(display("the connection is closed"))]
-    ConnectionClosed,
+    #[snafu(transparent)]
+    ConnectionClosed {
+        /// The closed connection.
+        source: ConnectionClosedError,
+    },
     /// The error code differs from the effective reset's.
     #[snafu(display("the reset conflicts with the effective reset"))]
     ErrorCodeConflict {
@@ -167,8 +180,11 @@ pub enum ResetWithFinalSizeError {
 #[snafu(module(reset_at_with_final_size_error), visibility(pub(crate)))]
 pub enum ResetAtWithFinalSizeError {
     /// The connection has closed.
-    #[snafu(display("the connection is closed"))]
-    ConnectionClosed,
+    #[snafu(transparent)]
+    ConnectionClosed {
+        /// The closed connection.
+        source: ConnectionClosedError,
+    },
     /// The error code differs from the effective reset's.
     #[snafu(display("the reset conflicts with the effective reset"))]
     ErrorCodeConflict {
@@ -237,7 +253,7 @@ impl ResetError {
     fn narrow(error: ResetAtWithFinalSizeError) -> Self {
         use ResetAtWithFinalSizeError as General;
         match error {
-            General::ConnectionClosed => Self::ConnectionClosed,
+            General::ConnectionClosed { source } => Self::ConnectionClosed { source },
             General::ErrorCodeConflict { source } => Self::ErrorCodeConflict { source },
             General::ProtocolTerminal { source } => Self::ProtocolTerminal { source },
             // invariant: a reliable size of zero never exceeds an effective
@@ -263,7 +279,7 @@ impl ResetAtError {
     fn narrow(error: ResetAtWithFinalSizeError) -> Self {
         use ResetAtWithFinalSizeError as General;
         match error {
-            General::ConnectionClosed => Self::ConnectionClosed,
+            General::ConnectionClosed { source } => Self::ConnectionClosed { source },
             General::ErrorCodeConflict { source } => Self::ErrorCodeConflict { source },
             General::ReliableSizeIncrease { source } => Self::ReliableSizeIncrease { source },
             General::ProtocolTerminal { source } => Self::ProtocolTerminal { source },
@@ -289,7 +305,7 @@ impl ResetWithFinalSizeError {
     fn narrow(error: ResetAtWithFinalSizeError) -> Self {
         use ResetAtWithFinalSizeError as General;
         match error {
-            General::ConnectionClosed => Self::ConnectionClosed,
+            General::ConnectionClosed { source } => Self::ConnectionClosed { source },
             General::ErrorCodeConflict { source } => Self::ErrorCodeConflict { source },
             General::FinalSizeConflictsWithReset { source } => {
                 Self::FinalSizeConflictsWithReset { source }
@@ -566,7 +582,7 @@ where
     ///
     /// [`CloseError::ConnectionClosed`], then [`CloseError::AlreadyReset`].
     pub fn close(&mut self) -> Result<(), CloseError> {
-        ensure!(!self.connection_closed, close_error::ConnectionClosedSnafu);
+        self.check_connection_open()?;
         match self.end_state() {
             SendEndState::Reset { .. } => close_error::AlreadyResetSnafu.fail(),
             SendEndState::Closed { .. } => Ok(()),
@@ -767,7 +783,7 @@ where
         final_size: Option<VarInt>,
     ) -> Result<ResetCheck, ResetAtWithFinalSizeError> {
         use reset_at_with_final_size_error as e;
-        ensure!(!self.connection_closed, e::ConnectionClosedSnafu);
+        self.check_connection_open()?;
         let end_state = self.end_state();
         match end_state {
             SendEndState::Reset { target, .. } => {

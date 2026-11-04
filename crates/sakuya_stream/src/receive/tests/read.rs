@@ -1,5 +1,6 @@
 //! Read results and their priorities.
 use super::*;
+use crate::connection::ConnectionClosedError;
 use core::num::NonZeroUsize;
 
 fn nz(value: usize) -> NonZeroUsize {
@@ -14,7 +15,9 @@ fn connection_failure_is_not_hidden_by_held_data() {
         .unwrap();
     receiver.connection_closed();
     let closed = Err(ReadError::Connection {
-        source: ConnectionFailure::Closed,
+        source: ConnectionFailure::Closed {
+            source: ConnectionClosedError::new(),
+        },
     });
     assert_eq!(receiver.read_chunk(), closed);
     // Not by an empty target either.
@@ -22,7 +25,9 @@ fn connection_failure_is_not_hidden_by_held_data() {
     assert_eq!(
         receiver.read_into(&mut &mut empty[..]),
         Err(ReadError::Connection {
-            source: ConnectionFailure::Closed,
+            source: ConnectionFailure::Closed {
+                source: ConnectionClosedError::new()
+            },
         })
     );
     assert!(receiver.parts().buffer.is_destroyed());
@@ -40,7 +45,9 @@ fn connection_failure_overrides_a_committed_result() {
     assert_eq!(
         receiver.read_chunk(),
         Err(ReadError::Connection {
-            source: ConnectionFailure::Closed,
+            source: ConnectionFailure::Closed {
+                source: ConnectionClosedError::new()
+            },
         })
     );
 }
@@ -218,9 +225,11 @@ fn waits_for_expected_data_only() {
 #[test]
 fn read_error_reports_its_layer() {
     let error: ReadError<&str> = ReadError::Connection {
-        source: ConnectionFailure::Closed,
+        source: ConnectionFailure::Closed {
+            source: ConnectionClosedError::new(),
+        },
     };
     assert_eq!(error.to_string(), "connection failed");
     let report = snafu::Report::from_error(error).to_string();
-    assert!(report.contains("connection closed"), "{report}");
+    assert!(report.contains("the connection is closed"), "{report}");
 }

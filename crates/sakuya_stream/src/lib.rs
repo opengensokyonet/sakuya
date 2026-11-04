@@ -8,6 +8,7 @@
 //! and apply the rules of [`stream_end`].
 #![warn(missing_docs)]
 
+pub mod connection;
 pub mod connection_receive_flow;
 pub mod connection_send_credit;
 pub mod receive;

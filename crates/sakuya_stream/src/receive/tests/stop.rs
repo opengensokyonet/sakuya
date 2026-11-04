@@ -1,5 +1,6 @@
 //! The local STOP request, row by row of its checks.
 use super::*;
+use crate::connection::ConnectionClosedError;
 use crate::receive::stop::{NoStopRequestError, StopError, StopNotNeededReason};
 
 #[test]
@@ -9,7 +10,9 @@ fn connection_closed_fails_the_request() {
     assert_eq!(
         receiver.stop(c(1)),
         Err(StopError::Connection {
-            source: ConnectionFailure::Closed,
+            source: ConnectionFailure::Closed {
+                source: ConnectionClosedError::new()
+            },
         })
     );
     assert_eq!(receiver.pending_stop(), None);

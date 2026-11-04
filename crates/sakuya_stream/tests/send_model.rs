@@ -9,6 +9,7 @@
 
 use bytes::{Buf, Bytes};
 use proptest::prelude::*;
+use sakuya_stream::connection::ConnectionClosedError;
 use sakuya_stream::connection_send_credit::ConnectionSendFlowController;
 use sakuya_stream::send::composition::{DefaultSendComposition, SendComposition};
 use sakuya_stream::send::finish::{
@@ -441,7 +442,7 @@ trait Sender {
 fn widen_reset(error: ResetError) -> ResetAtWithFinalSizeError {
     use ResetAtWithFinalSizeError as General;
     match error {
-        ResetError::ConnectionClosed => General::ConnectionClosed,
+        ResetError::ConnectionClosed { source } => General::ConnectionClosed { source },
         ResetError::ErrorCodeConflict { source } => General::ErrorCodeConflict { source },
         ResetError::ProtocolTerminal { source } => General::ProtocolTerminal { source },
     }
@@ -451,7 +452,7 @@ fn widen_reset(error: ResetError) -> ResetAtWithFinalSizeError {
 fn widen_reset_at(error: ResetAtError) -> ResetAtWithFinalSizeError {
     use ResetAtWithFinalSizeError as General;
     match error {
-        ResetAtError::ConnectionClosed => General::ConnectionClosed,
+        ResetAtError::ConnectionClosed { source } => General::ConnectionClosed { source },
         ResetAtError::ErrorCodeConflict { source } => General::ErrorCodeConflict { source },
         ResetAtError::ReliableSizeIncrease { source } => General::ReliableSizeIncrease { source },
         ResetAtError::ProtocolTerminal { source } => General::ProtocolTerminal { source },
@@ -467,7 +468,9 @@ fn widen_reset_at(error: ResetAtError) -> ResetAtWithFinalSizeError {
 fn widen_reset_with_final_size(error: ResetWithFinalSizeError) -> ResetAtWithFinalSizeError {
     use ResetAtWithFinalSizeError as General;
     match error {
-        ResetWithFinalSizeError::ConnectionClosed => General::ConnectionClosed,
+        ResetWithFinalSizeError::ConnectionClosed { source } => {
+            General::ConnectionClosed { source }
+        }
         ResetWithFinalSizeError::ErrorCodeConflict { source } => {
             General::ErrorCodeConflict { source }
         }
@@ -525,7 +528,7 @@ macro_rules! impl_sender {
             ) -> Result<WriteOutcome, WriteFailure> {
                 #[allow(clippy::redundant_closure_call)]
                 self.write(source, connection).map_err(|error| match error {
-                    WriteError::ConnectionClosed => WriteFailure::ConnectionClosed,
+                    WriteError::ConnectionClosed { .. } => WriteFailure::ConnectionClosed,
                     WriteError::Reset => WriteFailure::Reset,
                     WriteError::Closed => WriteFailure::Closed,
                     WriteError::WriteLimitReached {
@@ -646,7 +649,9 @@ fn step<S: Sender, P: PolicyModel>(
         Op::Flush { stream } => {
             let s = &model.streams[stream];
             let expected = if s.connection_closed {
-                Err(FlushError::ConnectionClosed)
+                Err(FlushError::ConnectionClosed {
+                    source: ConnectionClosedError::new(),
+                })
             } else if matches!(s.end, ModelEnd::Reset { .. }) {
                 Err(FlushError::Reset)
             } else {
@@ -692,7 +697,9 @@ fn step<S: Sender, P: PolicyModel>(
         Op::Close { stream } => {
             let s = &mut model.streams[stream];
             let expected = if s.connection_closed {
-                Err(CloseError::ConnectionClosed)
+                Err(CloseError::ConnectionClosed {
+                    source: ConnectionClosedError::new(),
+                })
             } else if matches!(s.end, ModelEnd::Reset { .. }) {
                 Err(CloseError::AlreadyReset)
             } else {
@@ -897,7 +904,9 @@ fn reset<S: Sender, P: PolicyModel>(
     let expected: Result<Option<(u64, u64)>, ResetAtWithFinalSizeError> = (|| {
         use ResetAtWithFinalSizeError as E;
         if s.connection_closed {
-            return Err(E::ConnectionClosed);
+            return Err(E::ConnectionClosed {
+                source: ConnectionClosedError::new(),
+            });
         }
         match s.end {
             ModelEnd::Reset {

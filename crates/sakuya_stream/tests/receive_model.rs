@@ -10,6 +10,7 @@
 
 use bytes::{BufMut, Bytes, BytesMut};
 use proptest::prelude::*;
+use sakuya_stream::connection::ConnectionClosedError;
 use sakuya_stream::connection_receive_flow::{ConnectionReceiveFlowController, RecordUsageError};
 use sakuya_stream::receive::flow_control::{
     AdvertisementIntent, ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView,
@@ -1066,7 +1067,9 @@ fn step(
             receivers[stream].connection_closed();
             let model = &mut models[stream];
             if model.failure().is_none() {
-                model.fail(ConnectionFailure::Closed);
+                model.fail(ConnectionFailure::Closed {
+                    source: ConnectionClosedError::new(),
+                });
             }
         }
         Op::OpenLimit { stream, limit } => {

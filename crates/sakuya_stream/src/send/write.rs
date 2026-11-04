@@ -24,6 +24,7 @@
 //! No asynchronous interface is provided here; [`WriteOutcome::Wait`] tells
 //! the caller to retry once the cause may have changed.
 use super::{SendEndState, StreamSender, WriteLimit};
+use crate::connection::ConnectionClosedError;
 use crate::connection_send_credit::ConnectionSendFlowController;
 use crate::send::flow_control::{AdmissionGuard, SendFlowControlPolicy, WriteAttempt};
 use crate::send::termination::{SendTerminationEvent, SendTerminationPolicy};
@@ -79,8 +80,11 @@ pub enum WriteWait {
 #[snafu(module(write_error), visibility(pub(crate)))]
 pub enum WriteError<R> {
     /// The connection has closed.
-    #[snafu(display("the connection is closed"))]
-    ConnectionClosed,
+    #[snafu(transparent)]
+    ConnectionClosed {
+        /// The closed connection.
+        source: ConnectionClosedError,
+    },
     /// The stream was reset.
     #[snafu(display("the stream was reset"))]
     Reset,
@@ -139,8 +143,11 @@ impl<R: fmt::Debug> fmt::Debug for SharedWriteLimitReason<R> {
 #[snafu(module(flush_error), visibility(pub(crate)))]
 pub enum FlushError {
     /// The connection has closed.
-    #[snafu(display("the connection is closed"))]
-    ConnectionClosed,
+    #[snafu(transparent)]
+    ConnectionClosed {
+        /// The closed connection.
+        source: ConnectionClosedError,
+    },
     /// The stream was reset.
     #[snafu(display("the stream was reset"))]
     Reset,
@@ -176,7 +183,7 @@ where
         source: &mut S,
         connection: &mut ConnectionSendFlowController,
     ) -> Result<WriteOutcome, WriteError<C::WriteLimitReason>> {
-        ensure!(!self.connection_closed, write_error::ConnectionClosedSnafu);
+        self.check_connection_open()?;
         match self.end_state() {
             SendEndState::Reset { .. } => return write_error::ResetSnafu.fail(),
             SendEndState::Closed { .. } => return write_error::ClosedSnafu.fail(),
@@ -280,7 +287,7 @@ where
     /// [`FlushError::ConnectionClosed`], then [`FlushError::Reset`] once a
     /// reset is in effect, even if nothing remains to deliver.
     pub fn flush(&self) -> Result<(), FlushError> {
-        ensure!(!self.connection_closed, flush_error::ConnectionClosedSnafu);
+        self.check_connection_open()?;
         ensure!(
             !matches!(self.end_state(), SendEndState::Reset { .. }),
             flush_error::ResetSnafu

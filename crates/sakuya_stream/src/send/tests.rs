@@ -14,6 +14,7 @@ use super::termination::{
 };
 use super::write::{FlushError, WriteError, WriteOutcome, WriteReport, WriteWait};
 use super::*;
+use crate::connection::ConnectionClosedError;
 use crate::send_buffer::covered_bytes::CoveredBytes;
 use crate::send_buffer::offset_map::OffsetMapSendBuffer;
 use crate::send_buffer::visibility::FinalSizeBelowExposureError;
@@ -650,7 +651,9 @@ fn empty_input_and_flush_table() {
             "connection closed",
             connection_closed,
             Err("connection closed"),
-            Err(FlushError::ConnectionClosed),
+            Err(FlushError::ConnectionClosed {
+                source: ConnectionClosedError::new(),
+            }),
         ),
     ];
     for (state, mut sender, empty_write, flush) in rows {
@@ -667,7 +670,7 @@ fn empty_input_and_flush_table() {
             }
             Err(WriteError::Closed) => Err("closed"),
             Err(WriteError::Reset) => Err("reset"),
-            Err(WriteError::ConnectionClosed) => Err("connection closed"),
+            Err(WriteError::ConnectionClosed { .. }) => Err("connection closed"),
             Err(error) => panic!("{state}: unexpected {error:?}"),
         };
         assert_eq!(result, empty_write, "{state}: empty write");
@@ -714,7 +717,7 @@ fn write_errors_follow_the_check_order() {
     sender.on_connection_closed();
     assert!(matches!(
         sender.write(&mut source(1), &mut connection),
-        Err(WriteError::ConnectionClosed)
+        Err(WriteError::ConnectionClosed { .. })
     ));
 
     // Reset before closed, when a reset replaced a close.
@@ -756,7 +759,12 @@ fn close_errors_follow_the_check_order() {
     sender.reset(CODE).unwrap();
     assert_eq!(sender.close(), Err(CloseError::AlreadyReset));
     sender.on_connection_closed();
-    assert_eq!(sender.close(), Err(CloseError::ConnectionClosed));
+    assert_eq!(
+        sender.close(),
+        Err(CloseError::ConnectionClosed {
+            source: ConnectionClosedError::new()
+        })
+    );
 }
 
 #[test]
@@ -948,16 +956,33 @@ fn state_transition_table() {
     sender.on_connection_closed();
     assert_eq!(
         sender.reset_at(CODE, v(40)),
-        Err(ResetAtError::ConnectionClosed)
+        Err(ResetAtError::ConnectionClosed {
+            source: ConnectionClosedError::new()
+        })
     );
-    assert_eq!(sender.close(), Err(CloseError::ConnectionClosed));
+    assert_eq!(
+        sender.close(),
+        Err(CloseError::ConnectionClosed {
+            source: ConnectionClosedError::new()
+        })
+    );
     assert!(matches!(
         sender.write(&mut Bytes::new(), &mut connection),
-        Err(WriteError::ConnectionClosed)
+        Err(WriteError::ConnectionClosed { .. })
     ));
-    assert_eq!(sender.flush(), Err(FlushError::ConnectionClosed));
+    assert_eq!(
+        sender.flush(),
+        Err(FlushError::ConnectionClosed {
+            source: ConnectionClosedError::new()
+        })
+    );
     closed.on_connection_closed();
-    assert_eq!(closed.close(), Err(CloseError::ConnectionClosed));
+    assert_eq!(
+        closed.close(),
+        Err(CloseError::ConnectionClosed {
+            source: ConnectionClosedError::new()
+        })
+    );
 }
 
 /// Whether a request conflicts depends on the effective target, not on the

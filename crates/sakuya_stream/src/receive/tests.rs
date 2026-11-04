@@ -276,7 +276,7 @@ fn reset_error<R>(code: u32, final_size: u32, reliable_size: u32, complete: bool
 fn protocol(failure: ConnectionFailure) -> ProtocolError {
     match failure {
         ConnectionFailure::Protocol { source } => source,
-        ConnectionFailure::Closed => panic!("expected a protocol failure"),
+        ConnectionFailure::Closed { .. } => panic!("expected a protocol failure"),
     }
 }
 

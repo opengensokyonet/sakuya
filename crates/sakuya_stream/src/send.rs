@@ -24,6 +24,7 @@
 //! would have to wait for credit or admission reports that instead
 //! ([`write::WriteOutcome::Wait`]). Polling, wake-ups, the stream writer
 //! handle, send selection and feedback dispatch are not part of this module.
+use crate::connection::ConnectionClosedError;
 use crate::connection_send_credit::ConnectionSendFlowController;
 use crate::send_buffer::visibility::{ForeignCoverageError, UsageBeyondCoverageError};
 use crate::send_buffer::{ExposeUsageError, ExposedEnd, SendBuffer, UsageBeyondWrittenEndError};
@@ -532,6 +533,14 @@ where
         self.notify_flow_control(StreamCreditEvent::StreamBlockedSignalAcknowledged {
             stream_data_limit,
         });
+    }
+
+    /// Fails once the connection has closed.
+    fn check_connection_open(&self) -> Result<(), ConnectionClosedError> {
+        if self.connection_closed {
+            return Err(ConnectionClosedError::new());
+        }
+        Ok(())
     }
 
     fn flow_context(&self) -> SendFlowContext {
