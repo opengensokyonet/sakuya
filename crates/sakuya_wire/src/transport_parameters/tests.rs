@@ -9,7 +9,7 @@ use super::{
     },
     id,
     preferred_address::{
-        PreferredAddress,
+        PreferredAddress, PreferredAddressFamilies,
         codec::{
             ReadPreferredAddressError, ReadPreferredAddressHostExt as _,
             WritePreferredAddressHostExt as _,
@@ -50,10 +50,17 @@ fn integer(value: u64) -> Vec<u8> {
     encoding
 }
 
+fn ipv4() -> SocketAddrV4 {
+    SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 443)
+}
+
+fn ipv6() -> SocketAddrV6 {
+    SocketAddrV6::new(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1), 4433, 0, 0)
+}
+
 fn preferred_address() -> PreferredAddress {
     PreferredAddress {
-        ipv4: SocketAddrV4::new(Ipv4Addr::new(192, 0, 2, 1), 443),
-        ipv6: SocketAddrV6::new(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1), 4433, 0, 0),
+        addresses: PreferredAddressFamilies::Both(ipv4(), ipv6()),
         connection_id: NonEmptyCid::try_from(&[0x5a; 8][..]).unwrap(),
         stateless_reset_token: StatelessResetToken::new([0x11; 16]),
     }
@@ -576,25 +583,10 @@ fn malformed_values_are_rejected_by_parameter() {
 /// a preferred address. With both families all zeros there is no address.
 #[test]
 fn preferred_address_needs_an_address_of_some_family() {
-    let unspecified_v4 = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0);
-    let unspecified_v6 = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0);
-    let value = |ipv4, ipv6| {
-        let mut value = Vec::new();
-        value
-            .sync_write_preferred_address_unpin(PreferredAddress {
-                ipv4,
-                ipv6,
-                ..preferred_address()
-            })
-            .unwrap();
-        value
-    };
-
-    let error = read(
-        &tlv(0x0d, &value(unspecified_v4, unspecified_v6)),
-        Role::Server,
-    )
-    .unwrap_err();
+    let mut value = preferred_address_value();
+    // The IPv4 address and port, then the IPv6 address and port.
+    value[..4 + 2 + 16 + 2].fill(0);
+    let error = read(&tlv(0x0d, &value), Role::Server).unwrap_err();
     assert!(
         matches!(
             error,
@@ -609,17 +601,58 @@ fn preferred_address_needs_an_address_of_some_family() {
         TransportErrorCode::TRANSPORT_PARAMETER_ERROR
     );
     assert!(!error.is_incomplete());
+}
 
-    // One family alone is enough.
-    let only_v4 = preferred_address().ipv4;
-    let only_v6 = preferred_address().ipv6;
-    for (ipv4, ipv6) in [(only_v4, unspecified_v6), (unspecified_v4, only_v6)] {
-        let encoding = tlv(0x0d, &value(ipv4, ipv6));
-        let address = read(&encoding, Role::Server)
+/// Each family alone, and both, are written with the all-zero marker in
+/// place of a missing family and read back.
+#[test]
+fn preferred_address_families_round_trip() {
+    let unspecified_v4 = [0u8; 4 + 2];
+    let unspecified_v6 = [0u8; 16 + 2];
+    let cases = [
+        (PreferredAddressFamilies::Both(ipv4(), ipv6()), true, true),
+        (PreferredAddressFamilies::Ipv4(ipv4()), true, false),
+        (PreferredAddressFamilies::Ipv6(ipv6()), false, true),
+    ];
+    for (addresses, has_v4, has_v6) in cases {
+        let address = PreferredAddress {
+            addresses,
+            ..preferred_address()
+        };
+        let mut value = Vec::new();
+        value.sync_write_preferred_address_unpin(address).unwrap();
+        assert_eq!(value.len(), address.encoded_len());
+        assert_eq!(value[..6] == unspecified_v4, !has_v4, "{addresses:?}");
+        assert_eq!(value[6..24] == unspecified_v6, !has_v6, "{addresses:?}");
+        let mut input = value.as_slice();
+        assert_eq!(input.sync_read_preferred_address_unpin().unwrap(), address);
+        assert!(input.is_empty());
+        let read_back = read(&tlv(0x0d, &value), Role::Server)
             .unwrap()
             .preferred_address
             .unwrap();
-        assert_eq!((address.ipv4, address.ipv6), (ipv4, ipv6));
+        assert_eq!(read_back, address);
+    }
+}
+
+/// An all-zero address with a nonzero port is an address of its family.
+#[test]
+fn preferred_address_with_a_zero_address_and_a_port_has_that_family() {
+    let zero_v4 = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 443);
+    let zero_v6 = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 4433, 0, 0);
+    for addresses in [
+        PreferredAddressFamilies::Ipv4(zero_v4),
+        PreferredAddressFamilies::Ipv6(zero_v6),
+        PreferredAddressFamilies::Both(zero_v4, zero_v6),
+    ] {
+        let address = PreferredAddress {
+            addresses,
+            ..preferred_address()
+        };
+        let mut value = Vec::new();
+        value.sync_write_preferred_address_unpin(address).unwrap();
+        let mut input = value.as_slice();
+        assert_eq!(input.sync_read_preferred_address_unpin().unwrap(), address);
     }
 }
 

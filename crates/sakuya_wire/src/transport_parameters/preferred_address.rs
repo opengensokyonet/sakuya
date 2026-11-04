@@ -2,29 +2,75 @@
 //!
 //! [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
 use crate::connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken};
-use core::net::{SocketAddrV4, SocketAddrV6};
+use core::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 
 /// The `preferred_address` parameter ([RFC 9000 §18.2]): an address the
 /// server would like the client to migrate to, with the connection ID to use
 /// there.
 ///
-/// An address and port of all zeros means the server has no preferred
-/// address of that family; reading rejects a value in which both families
-/// are all zeros, since it leaves no address to migrate to. The connection
-/// ID has sequence number 1.
+/// The connection ID has sequence number 1.
 ///
 /// [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PreferredAddress {
-    /// The IPv4 address and port.
-    pub ipv4: SocketAddrV4,
-    /// The IPv6 address and port. Only the address and port are encoded;
-    /// reading sets the flow information and scope ID to zero.
-    pub ipv6: SocketAddrV6,
+    /// The addresses, of one family or of both.
+    pub addresses: PreferredAddressFamilies,
     /// The connection ID to use at the preferred address.
     pub connection_id: NonEmptyCid,
     /// The Stateless Reset Token of that connection ID.
     pub stateless_reset_token: StatelessResetToken,
+}
+
+/// The address families a preferred address has an address of
+/// ([RFC 9000 §18.2]), with the address and port of each.
+///
+/// The encoding marks a missing family with an address and port of all
+/// zeros (`0.0.0.0:0` or `[::]:0`); that marker appears only in the
+/// encoding. Writing puts it in the place of a missing family. Reading
+/// takes a family whose address and port are all zeros as missing, and
+/// rejects a value in which both are; an all-zero address with a nonzero
+/// port is an address of its family. An address given here that is itself
+/// all zeros with port zero is written as the marker.
+///
+/// For IPv6 only the address and port are encoded; reading sets the flow
+/// information and scope ID to zero.
+///
+/// [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PreferredAddressFamilies {
+    /// An IPv4 address only.
+    Ipv4(SocketAddrV4),
+    /// An IPv6 address only.
+    Ipv6(SocketAddrV6),
+    /// An address of each family.
+    Both(SocketAddrV4, SocketAddrV6),
+}
+
+/// The IPv4 address and port that mark a missing IPv4 address.
+const NO_IPV4: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0);
+/// The IPv6 address and port that mark a missing IPv6 address.
+const NO_IPV6: SocketAddrV6 = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0);
+
+impl PreferredAddressFamilies {
+    /// The families from the two encoded addresses, `None` if both are the
+    /// marker of a missing family.
+    fn from_encoded(ipv4: SocketAddrV4, ipv6: SocketAddrV6) -> Option<Self> {
+        match (ipv4 == NO_IPV4, ipv6 == NO_IPV6) {
+            (true, true) => None,
+            (false, true) => Some(Self::Ipv4(ipv4)),
+            (true, false) => Some(Self::Ipv6(ipv6)),
+            (false, false) => Some(Self::Both(ipv4, ipv6)),
+        }
+    }
+
+    /// The two encoded addresses, with the marker for a missing family.
+    fn to_encoded(self) -> (SocketAddrV4, SocketAddrV6) {
+        match self {
+            Self::Ipv4(ipv4) => (ipv4, NO_IPV6),
+            Self::Ipv6(ipv6) => (NO_IPV4, ipv6),
+            Self::Both(ipv4, ipv6) => (ipv4, ipv6),
+        }
+    }
 }
 
 /// The length of the fields other than the connection ID.
@@ -43,11 +89,12 @@ impl PreferredAddress {
     pub(crate) fn to_encoding(self) -> ([u8; Self::MAX_LEN], usize) {
         let mut bytes = [0; Self::MAX_LEN];
         let connection_id = self.connection_id.as_bytes();
+        let (ipv4, ipv6) = self.addresses.to_encoded();
         let parts: [&[u8]; 7] = [
-            &self.ipv4.ip().octets(),
-            &self.ipv4.port().to_be_bytes(),
-            &self.ipv6.ip().octets(),
-            &self.ipv6.port().to_be_bytes(),
+            &ipv4.ip().octets(),
+            &ipv4.port().to_be_bytes(),
+            &ipv6.ip().octets(),
+            &ipv6.port().to_be_bytes(),
             // A connection ID has at most 20 bytes, so its length fits a byte.
             &[connection_id.len() as u8],
             connection_id,
@@ -77,7 +124,7 @@ pub mod codec {
     // documentation comments; the module documentation above describes them.
     #![allow(missing_docs)]
 
-    use super::PreferredAddress;
+    use super::{PreferredAddress, PreferredAddressFamilies};
     use crate::connection_id::{
         EmptyCidError, NonEmptyCid, StatelessResetToken,
         codec::{ReadConnectionIdError, ReadConnectionIdExt as _},
@@ -88,7 +135,7 @@ pub mod codec {
         calls::{ReadArrayError, WriteAllError},
         prelude::*,
     };
-    use snafu::{ResultExt, Snafu};
+    use snafu::{OptionExt, ResultExt, Snafu};
 
     /// Reads the fields of a preferred address, and nothing after them.
     ///
@@ -121,11 +168,8 @@ pub mod codec {
             0,
             0,
         );
-        let unspecified_v4 = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0);
-        let unspecified_v6 = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0);
-        if ipv4 == unspecified_v4 && ipv6 == unspecified_v6 {
-            return NoAddressSnafu.fail();
-        }
+        let addresses =
+            PreferredAddressFamilies::from_encoded(ipv4, ipv6).context(NoAddressSnafu)?;
         let connection_id = io.read_connection_id().await.context(ConnectionIdSnafu)?;
         let connection_id = NonEmptyCid::new(connection_id).context(EmptyConnectionIdSnafu)?;
         let stateless_reset_token = io
@@ -133,8 +177,7 @@ pub mod codec {
             .await
             .context(StatelessResetTokenSnafu)?;
         Ok(PreferredAddress {
-            ipv4,
-            ipv6,
+            addresses,
             connection_id,
             stateless_reset_token: StatelessResetToken::new(stateless_reset_token),
         })
