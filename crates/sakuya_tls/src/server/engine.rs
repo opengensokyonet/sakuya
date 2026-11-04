@@ -90,7 +90,7 @@ use crate::{
     },
     role::Server,
     schedule::{
-        BinderMismatch, EarlySecret, Exporter, FinishedError, HandshakeKeys, OneRttSend,
+        BinderMismatch, EarlySecret, Exporter, FinishedError, HandshakeTrafficSecrets, OneRttSend,
         PskEarlySecret, ResumptionPsk, Transcript, ZeroRttReceive,
     },
     server::{
@@ -190,7 +190,7 @@ pub enum ServerHandshakeEvent<C: TlsCrypto, T> {
         /// The AEAD of the cipher suite, for every secret of the handshake.
         aead: AeadAlgorithm,
         /// The Handshake traffic secrets.
-        keys: HandshakeKeys,
+        keys: HandshakeTrafficSecrets,
         /// The 0-RTT secret, `None` when 0-RTT is not admitted.
         zero_rtt: Option<ZeroRttReceive>,
     },

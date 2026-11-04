@@ -11,7 +11,8 @@
 #![allow(clippy::should_implement_trait)]
 
 use super::{
-    FinishedError, HandshakeSecret, MasterSecret, Mode, OneRttKeys, verify_server_signature,
+    FinishedError, HandshakeSecret, MasterSecret, Mode, OneRttTrafficSecrets,
+    verify_server_signature,
 };
 use crate::{
     alert::AlertDescription,
@@ -90,7 +91,7 @@ impl<C: TlsCrypto + Clone> Authenticated<C> {
     pub fn server_finished(
         self,
         received: &HandshakeMessage,
-    ) -> Result<(MasterSecret<Client, C>, OneRttKeys), FinishedError> {
+    ) -> Result<(MasterSecret<Client, C>, OneRttTrafficSecrets), FinishedError> {
         let mut handshake = self.handshake;
         handshake.chain.read_finished(&handshake.server, received)?;
         let (parts, send, receive) = handshake.master();
@@ -99,7 +100,7 @@ impl<C: TlsCrypto + Clone> Authenticated<C> {
                 parts,
                 withheld: (),
             },
-            OneRttKeys { send, receive },
+            OneRttTrafficSecrets { send, receive },
         ))
     }
 }

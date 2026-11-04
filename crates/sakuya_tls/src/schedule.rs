@@ -342,7 +342,7 @@ fn handshake<R: HandshakeRole, C: TlsCrypto>(
     shared: Secret,
     server_hello: &[u8],
     mode: Mode,
-) -> (HandshakeSecret<R, C>, HandshakeKeys) {
+) -> (HandshakeSecret<R, C>, HandshakeTrafficSecrets) {
     let derived = chain.derive_secret(early, b"derived", &chain.empty_hash());
     let handshake = chain.extract(derived.as_bytes(), shared.as_bytes());
     drop(shared);
@@ -360,7 +360,7 @@ fn handshake<R: HandshakeRole, C: TlsCrypto>(
             mode,
             role: PhantomData,
         },
-        HandshakeKeys { send, receive },
+        HandshakeTrafficSecrets { send, receive },
     )
 }
 
@@ -371,7 +371,7 @@ impl<C: TlsCrypto + Clone> EarlySecret<Server, C> {
         self,
         shared: Secret,
         server_hello: &[u8],
-    ) -> (HandshakeSecret<Server, C>, HandshakeKeys) {
+    ) -> (HandshakeSecret<Server, C>, HandshakeTrafficSecrets) {
         handshake(
             self.chain,
             &self.early,
@@ -397,7 +397,7 @@ impl<C: TlsCrypto + Clone> EarlySecret<Client, C> {
         shared: Secret,
         server_hello: &[u8],
         selected: Option<PskIndex>,
-    ) -> Result<(HandshakeSecret<Client, C>, HandshakeKeys), UnofferedPsk> {
+    ) -> Result<(HandshakeSecret<Client, C>, HandshakeTrafficSecrets), UnofferedPsk> {
         if let Some(index) = selected {
             return Err(UnofferedPsk { index });
         }
@@ -469,7 +469,7 @@ impl<C: TlsCrypto + Clone> PskEarlySecret<Client, C> {
         shared: Secret,
         server_hello: &[u8],
         selected: Option<PskIndex>,
-    ) -> Result<(HandshakeSecret<Client, C>, HandshakeKeys), UnofferedPsk> {
+    ) -> Result<(HandshakeSecret<Client, C>, HandshakeTrafficSecrets), UnofferedPsk> {
         match selected {
             Some(index) if index != PskIndex::new(0) => Err(UnofferedPsk { index }),
             Some(_) => Ok(handshake(
@@ -522,7 +522,7 @@ impl<C: TlsCrypto + Clone> PskEarlySecret<Server, C> {
         self,
         shared: Secret,
         server_hello: &[u8],
-    ) -> (HandshakeSecret<Server, C>, HandshakeKeys) {
+    ) -> (HandshakeSecret<Server, C>, HandshakeTrafficSecrets) {
         handshake(self.chain, &self.early, shared, server_hello, Mode::Psk)
     }
 }
@@ -799,7 +799,7 @@ impl<C: TlsCrypto> Exporter<C> {
 }
 
 /// The Handshake traffic secrets, as the role sends and receives.
-pub struct HandshakeKeys {
+pub struct HandshakeTrafficSecrets {
     /// The secret this endpoint sends with.
     pub send: TrafficSecret,
     /// The secret this endpoint receives with.
@@ -810,7 +810,7 @@ pub struct HandshakeKeys {
 pub struct OneRttSend(pub TrafficSecret);
 
 /// The 1-RTT secrets of a client that has verified the server's Finished.
-pub struct OneRttKeys {
+pub struct OneRttTrafficSecrets {
     /// The secret the client sends with.
     pub send: TrafficSecret,
     /// The secret the client receives with.

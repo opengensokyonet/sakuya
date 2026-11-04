@@ -100,8 +100,8 @@ use crate::{
     },
     role::Client,
     schedule::{
-        Authentication, CertificateVerifyError, Exporter, FinishedError, HandshakeKeys, OneRttKeys,
-        PskEarlySecret, ResumptionPsk, Transcript, UnofferedPsk, ZeroRttSend,
+        Authentication, CertificateVerifyError, Exporter, FinishedError, HandshakeTrafficSecrets,
+        OneRttTrafficSecrets, PskEarlySecret, ResumptionPsk, Transcript, UnofferedPsk, ZeroRttSend,
     },
     vector::LengthOutOfRange,
     verify::{CertificateVerifier, SubjectPublicKey, public_key::SchemeKeyMismatch},
@@ -206,13 +206,13 @@ pub enum ClientHandshakeEvent<C: TlsCrypto> {
         /// The AEAD of the cipher suite, for every later secret.
         aead: AeadAlgorithm,
         /// The Handshake traffic secrets.
-        keys: HandshakeKeys,
+        keys: HandshakeTrafficSecrets,
     },
     /// The server's Finished is verified and the client's written: the
     /// handshake is complete. Both streams move to 1-RTT after this item.
     Completed {
         /// The 1-RTT secrets.
-        keys: OneRttKeys,
+        keys: OneRttTrafficSecrets,
         /// The exporter of the connection.
         exporter: Exporter<C>,
         /// Who the server is.
