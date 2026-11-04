@@ -310,8 +310,8 @@ where
     ///
     /// Entries registered after the set was frozen do not join this round.
     /// The call returns once every candidate was delivered; it does not wait
-    /// for the competition. Deliverers that consume on the spot run their
-    /// factory and judgment on this call stack.
+    /// for the competition. Deliverers that attempt or consume on the spot run
+    /// that work on this call stack.
     pub fn route(&self, datagram: ReceivedDatagram<Payload, Link>) {
         let bytes = datagram.payload().as_ref();
         let link = datagram.link().link_id();

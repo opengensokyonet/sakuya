@@ -16,12 +16,9 @@ use super::support::{
     nonempty, short,
 };
 use crate::claim::candidate::DatagramClaimAttempt;
-use crate::claim::deliverer::{
-    DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramView, ExclusiveDatagram,
-};
+use crate::claim::deliverer::{DatagramClaimOutcome, DatagramDeliverer, ExclusiveDatagram};
 use crate::claim::delivery::DatagramDelivery;
 use crate::claim::queue::{DatagramDeliveryPoster, DatagramDeliveryQueue};
-use crate::claim::route_match::DatagramRouteMatchInfo;
 use crate::route::acceptance::{
     InitialAcceptance, InitialDatagramReceiver, InitialReceiverFactory, PreparedReceiver,
 };
@@ -31,34 +28,16 @@ use crate::route::interpretation::RecognizedInitial;
 use crate::route::reset::{StatelessResetRegistration, StatelessResetTarget, StatelessResetTokens};
 use crate::route::router::DatagramRouter;
 
-type Delivery = DatagramDelivery<Datagram, ConnectionDeliverer>;
+type Delivery = DatagramDelivery<Datagram, Handoff>;
 
-/// The deliverer of one connection: it claims every datagram while the
-/// connection is open and queues what it is given.
+/// The deliverer of one connection: it queues what it is given for the
+/// connection, which claims every datagram it attempts.
 struct ConnectionDeliverer {
     poster: DatagramDeliveryPoster<Delivery>,
 }
 
 impl DatagramDeliverer<Datagram> for ConnectionDeliverer {
     type Handoff = Handoff;
-    type DelivererDatagramState = ();
-
-    fn new_datagram_state(&self, _: DatagramView<'_>, _: &DatagramRouteMatchInfo) {}
-
-    fn try_claim<'access>(
-        &self,
-        access: DatagramClaimAccess<'access, Datagram>,
-        _: &DatagramRouteMatchInfo,
-        state: (),
-    ) -> DatagramClaimOutcome<'access, Datagram, ()> {
-        if self.poster.is_closed() {
-            return DatagramClaimOutcome::Unclaimed { access, state };
-        }
-        DatagramClaimOutcome::Claimed {
-            datagram: access.into_exclusive(),
-            state,
-        }
-    }
 
     fn deliver(&self, delivery: Delivery) {
         self.poster.post(delivery);
@@ -87,16 +66,21 @@ struct Connection {
 }
 
 impl Connection {
-    /// Processes every queued delivery: attempts competing ones, consumes
-    /// exclusive ones.
+    /// Processes every queued delivery: attempts competing ones with a
+    /// judgment that claims, consumes exclusive ones.
     fn poll(&mut self) {
         while let Some(delivery) = self.queue.try_recv() {
             let exclusive = match delivery {
                 DatagramDelivery::Exclusive(exclusive) => exclusive,
                 DatagramDelivery::Competing(candidate) => {
-                    match super::support::ready(candidate.try_exclusive()) {
-                        DatagramClaimAttempt::Claimed(exclusive) => exclusive,
+                    let attempt = candidate.try_exclusive(|access, _route| {
+                        DatagramClaimOutcome::<(), (), _>::Claimed(access.into_exclusive(), ())
+                    });
+                    match super::support::ready(attempt) {
+                        DatagramClaimAttempt::Claimed(exclusive, ())
+                        | DatagramClaimAttempt::Exclusive(exclusive) => exclusive,
                         DatagramClaimAttempt::Unclaimed(_)
+                        | DatagramClaimAttempt::Abandoned(())
                         | DatagramClaimAttempt::ClaimedElsewhere => {
                             continue;
                         }

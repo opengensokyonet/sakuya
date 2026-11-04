@@ -12,12 +12,9 @@ use super::support::{
     Datagram, Domain, Handoff, Index, Judging, Recorder, Target, binding, cid, datagram, initial,
     lengths, link, long, nonempty, register,
 };
-use crate::claim::deliverer::{
-    DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramView, ExclusiveDatagram,
-};
+use crate::claim::deliverer::{DatagramClaimOutcome, DatagramDeliverer, ExclusiveDatagram};
 use crate::claim::delivery::DatagramDelivery;
 use crate::claim::queue::DatagramDeliveryQueue;
-use crate::claim::route_match::DatagramRouteMatchInfo;
 use crate::route::acceptance::{
     InitialAcceptance, InitialDatagramReceiver, InitialReceiverFactory, PreparedReceiver,
 };
@@ -336,20 +333,8 @@ fn prepared_material_is_dropped_outside_the_index() {
 
     impl DatagramDeliverer<Datagram> for ReadsOnDrop {
         type Handoff = Handoff;
-        type DelivererDatagramState = ();
 
-        fn new_datagram_state(&self, _: DatagramView<'_>, _: &DatagramRouteMatchInfo) {}
-
-        fn try_claim<'access>(
-            &self,
-            access: DatagramClaimAccess<'access, Datagram>,
-            _: &DatagramRouteMatchInfo,
-            state: (),
-        ) -> DatagramClaimOutcome<'access, Datagram, ()> {
-            DatagramClaimOutcome::Unclaimed { access, state }
-        }
-
-        fn deliver(&self, _delivery: DatagramDelivery<Datagram, Self>) {}
+        fn deliver(&self, _delivery: DatagramDelivery<Datagram, Handoff>) {}
     }
 
     struct Ignored;
@@ -442,7 +427,11 @@ fn cancelled_attempts_reflow_and_a_winner_that_drops_its_datagram_does_not() {
         let DatagramDelivery::Competing(candidate) = delivery else {
             panic!("two entries compete");
         };
-        drop(candidate.try_exclusive());
+        drop(
+            candidate.try_exclusive(|access, _route| {
+                DatagramClaimOutcome::<(), (), _>::Unclaimed(access)
+            }),
+        );
     }
     assert!(domain.next_work().is_some());
 

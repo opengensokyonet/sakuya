@@ -3,113 +3,104 @@
 use std::fmt;
 use std::future::Future;
 use std::mem;
-use std::sync::Arc;
 
-use super::deliverer::{
-    DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramView, ExclusiveDatagram,
-};
-use super::delivery::{ExclusiveDatagramDelivery, PrivateState};
+use super::deliverer::{DatagramClaimAccess, DatagramClaimOutcome, ExclusiveDatagram};
+use super::delivery::ExclusiveDatagramDelivery;
+use super::finish::UnclaimedHandoff;
 use super::route_match::DatagramRouteMatchInfo;
 use super::shared::{ClaimCore, DatagramSlot, Participation};
 
-/// One deliverer's chance at one datagram.
+/// One route entry's chance at one datagram.
 ///
-/// A candidate binds the shared core of one datagram to one deliverer, the
-/// route match information routing recorded for it, and the deliverer's private
-/// state, which stays uninitialized until the first access that finds the
-/// datagram present. The mechanism builds every candidate of a datagram before
+/// A candidate binds the shared core of one datagram to the route match
+/// information routing recorded for one entry. It refers to no deliverer and
+/// keeps no judgment state: whoever holds it passes a judgment to each
+/// attempt. The mechanism builds every candidate of a datagram before
 /// delivering any of them; nothing else can create one, and it cannot be
 /// cloned.
 ///
 /// Holding a candidate keeps its participation and keeps the datagram alive;
 /// holding it indefinitely keeps the datagram indefinitely, so the holder
-/// decides how long to wait. Dropping it exits: no other deliverer is called,
-/// nothing is rerouted and no packet is produced. Exiting releases the
-/// participation credential first and then the private state and the
-/// reference to the deliverer.
-pub struct DatagramClaimCandidate<Inner, Deliverer: DatagramDeliverer<Inner>> {
-    // Field order is drop order: the credential is released before the
-    // private state and the deliverer reference.
-    participation: Participation<Inner, Deliverer::Handoff>,
+/// decides how long to wait. Dropping it exits: no deliverer is called,
+/// nothing is rerouted and no packet is produced.
+pub struct DatagramClaimCandidate<Inner, Handoff: UnclaimedHandoff<Inner>> {
+    participation: Participation<Inner, Handoff>,
     route: DatagramRouteMatchInfo,
-    state: PrivateState<Deliverer::DelivererDatagramState>,
-    deliverer: Arc<Deliverer>,
 }
 
 /// The future of one attempt, returned by
 /// [`DatagramClaimCandidate::try_exclusive`].
 ///
-/// It owns the candidate. It does nothing until first polled, and it is `Send`
-/// exactly when the candidate is. Keep the same pinned future to pause an
-/// attempt; dropping it exits the candidate. After it completes or panics it
-/// must not be polled again.
-pub type DatagramClaimFuture<Inner: AsRef<[u8]>, Deliverer: DatagramDeliverer<Inner>> =
-    impl Future<Output = DatagramClaimAttempt<Inner, Deliverer>>;
+/// It owns the candidate and the judgment. It does nothing until first
+/// polled, and it is `Send` exactly when the candidate and the judgment are.
+/// Keep the same pinned future to pause an attempt; dropping it exits the
+/// candidate. After it completes or panics it must not be polled again.
+pub type DatagramClaimFuture<Inner, Handoff: UnclaimedHandoff<Inner>, T, U, F>
+where
+    F: for<'access> FnOnce(
+        DatagramClaimAccess<'access, Inner>,
+        &DatagramRouteMatchInfo,
+    ) -> DatagramClaimOutcome<'access, T, U, Inner>,
+= impl Future<Output = DatagramClaimAttempt<T, U, Inner, Handoff>>;
 
 /// The result of one attempt by the mechanism.
 ///
-/// Every variant ends the attempt. Unlike the author's
-/// [`DatagramClaimOutcome`], a claimed attempt does not imply that
-/// [`DatagramDeliverer::try_claim`] ran: a sole last-takes participant takes
-/// the datagram directly.
+/// Every variant ends the attempt. [`Claimed`](Self::Claimed) always comes
+/// from a judgment that claimed; taking the datagram without a judgment is
+/// [`Exclusive`](Self::Exclusive), in line with
+/// [`DatagramDelivery::Exclusive`](super::delivery::DatagramDelivery::Exclusive).
 #[must_use]
-pub enum DatagramClaimAttempt<Inner, Deliverer: DatagramDeliverer<Inner>> {
-    /// This candidate took the datagram; the delivery carries it with the
-    /// deliverer, the route match information and the current private state.
-    /// It proves sole ownership, not authentication.
-    Claimed(ExclusiveDatagramDelivery<Inner, Deliverer>),
-    /// The deliverer judged and left the datagram; the same candidate comes
-    /// back with its updated state. Retrying is the holder's decision; the
+pub enum DatagramClaimAttempt<T, U, Inner, Handoff: UnclaimedHandoff<Inner>> {
+    /// The judgment took the datagram; the delivery carries it with the route
+    /// match information, next to the judgment's value. It proves sole
+    /// ownership, not authentication.
+    Claimed(ExclusiveDatagramDelivery<Inner>, T),
+    /// The judgment left the datagram; the mechanism released the access and
+    /// the same candidate comes back. Retrying is the holder's decision; the
     /// mechanism never retries by itself.
-    Unclaimed(DatagramClaimCandidate<Inner, Deliverer>),
-    /// Another candidate already took the datagram; this candidate's
-    /// participation has ended. This says nothing about authentication,
-    /// processing or protocol errors.
+    Unclaimed(DatagramClaimCandidate<Inner, Handoff>),
+    /// The judgment gave up; this candidate's participation has ended and the
+    /// judgment's value comes back.
+    Abandoned(U),
+    /// This candidate was the only participant left under the last-takes
+    /// policy and took the datagram without a judgment. It does not promise
+    /// authentication.
+    Exclusive(ExclusiveDatagramDelivery<Inner>),
+    /// Another candidate already took the datagram; no judgment ran and this
+    /// candidate's participation has ended. This says nothing about
+    /// authentication, processing or protocol errors.
     ClaimedElsewhere,
 }
 
 /// The result of an immediate attempt, returned by
 /// [`DatagramClaimCandidate::try_exclusive_now`].
 #[must_use]
-pub enum DatagramClaimPrecheck<Inner, Deliverer: DatagramDeliverer<Inner>> {
+pub enum DatagramClaimPrecheck<T, U, Inner, Handoff: UnclaimedHandoff<Inner>, F> {
     /// The access was immediately available and the attempt ran in full.
-    Completed(DatagramClaimAttempt<Inner, Deliverer>),
-    /// The access was busy; the candidate comes back untouched, without any
-    /// author call or state change, and without a registered wait.
-    Deferred(DatagramClaimCandidate<Inner, Deliverer>),
+    Completed(DatagramClaimAttempt<T, U, Inner, Handoff>),
+    /// The access was busy; the candidate and the judgment come back
+    /// untouched, without a judgment call and without a registered wait.
+    Deferred(DatagramClaimCandidate<Inner, Handoff>, F),
 }
 
 /// What the synchronous section decided, before the access is released.
-enum Judgement<Inner> {
-    Claimed(ExclusiveDatagram<Inner>),
+enum Judgement<T, U, Inner> {
+    Claimed(ExclusiveDatagram<Inner>, T),
     Unclaimed,
+    Abandoned(U),
+    Exclusive(ExclusiveDatagram<Inner>),
     ClaimedElsewhere,
 }
 
-impl<Inner, Deliverer: DatagramDeliverer<Inner>> DatagramClaimCandidate<Inner, Deliverer> {
+impl<Inner, Handoff: UnclaimedHandoff<Inner>> DatagramClaimCandidate<Inner, Handoff> {
     pub(super) fn new(
-        participation: Participation<Inner, Deliverer::Handoff>,
+        participation: Participation<Inner, Handoff>,
         route: DatagramRouteMatchInfo,
-        deliverer: Arc<Deliverer>,
     ) -> Self {
         Self {
             participation,
             route,
-            state: PrivateState::Uninitialized,
-            deliverer,
         }
-    }
-
-    /// Returns the private state if it was already initialized.
-    ///
-    /// This only borrows: it neither calls the factory nor touches the shared
-    /// access. It returns `None` before the first access that found the
-    /// datagram present; a candidate returned by an unclaimed attempt always
-    /// has its state. Use it between attempts to read what the deliverer
-    /// recorded about its last judgment. It does not tell whether the datagram
-    /// is still present.
-    pub fn initialized_state(&self) -> Option<&Deliverer::DelivererDatagramState> {
-        self.state.initialized()
     }
 
     /// What routing recorded about this candidate's match.
@@ -118,75 +109,64 @@ impl<Inner, Deliverer: DatagramDeliverer<Inner>> DatagramClaimCandidate<Inner, D
     }
 
     #[cfg(test)]
-    pub(super) fn core(&self) -> &ClaimCore<Inner, Deliverer::Handoff> {
+    pub(super) fn core(&self) -> &ClaimCore<Inner, Handoff> {
         self.participation.core()
     }
 
     /// An extra strong reference to the core, which the mechanism itself
     /// never creates; tests use it to observe the core from a drop.
     #[cfg(test)]
-    pub(super) fn core_handle(&self) -> Arc<ClaimCore<Inner, Deliverer::Handoff>> {
+    pub(super) fn core_handle(&self) -> std::sync::Arc<ClaimCore<Inner, Handoff>> {
         self.participation.core_handle()
     }
 
-    fn conclude(self, judgement: Judgement<Inner>) -> DatagramClaimAttempt<Inner, Deliverer> {
-        match judgement {
-            Judgement::Unclaimed => DatagramClaimAttempt::Unclaimed(self),
-            Judgement::Claimed(datagram) => {
-                let Self {
-                    participation,
-                    route,
-                    state,
-                    deliverer,
-                } = self;
-                drop(participation);
-                DatagramClaimAttempt::Claimed(ExclusiveDatagramDelivery::new(
-                    datagram, route, state, deliverer,
-                ))
-            }
-            Judgement::ClaimedElsewhere => {
-                drop(self);
-                DatagramClaimAttempt::ClaimedElsewhere
-            }
-        }
-    }
-}
-
-impl<Inner: AsRef<[u8]>, Deliverer: DatagramDeliverer<Inner>>
-    DatagramClaimCandidate<Inner, Deliverer>
-{
-    /// Attempts to take the datagram, waiting for the shared access.
+    /// Attempts to take the datagram with `try_claim`, waiting for the shared
+    /// access.
     ///
-    /// The candidate moves into the returned future, which does nothing until
-    /// first polled. Polling waits for the shared access only; it never waits
-    /// for keys, configuration or other business conditions. Once the access is
-    /// obtained, one synchronous section decides the result as described in the
-    /// [module documentation](super#one-attempt), and the access is released
-    /// before the future completes.
+    /// The candidate and the judgment move into the returned future, which
+    /// does nothing until first polled. Polling waits for the shared access
+    /// only; it never waits for keys, configuration or other business
+    /// conditions. Once the access is obtained, one synchronous section
+    /// decides the result as described in the [module
+    /// documentation](super#one-attempt), and the access is released before
+    /// the future completes.
+    ///
+    /// The judgment is synchronous and may capture anything, including
+    /// handles to its caller's state. It receives the access and this
+    /// candidate's route match information, and must not wait for or re-enter
+    /// the shared access of the same datagram, for example by attempting
+    /// another candidate of it.
     ///
     /// Dropping the future before its first poll exits the candidate without
-    /// any author call. Dropping it while it waits withdraws the wait first, so
+    /// a judgment. Dropping it while it waits withdraws the wait first, so
     /// that the next waiter can proceed, and then exits the candidate.
     /// Cancellation does not interrupt a judgment that is already running, and
     /// it does not undo side effects of earlier unclaimed attempts. Woken
     /// futures that are neither polled nor dropped delay the other waiters.
     ///
-    /// If the factory or [`try_claim`](DatagramDeliverer::try_claim) panics,
-    /// the panic propagates out of `poll`, the access is released, and the
-    /// candidate is dropped while unwinding; the future must not be polled
-    /// again.
+    /// If the judgment panics, the panic propagates out of `poll`, the access
+    /// is released, and the candidate is dropped while unwinding; the future
+    /// must not be polled again.
     #[define_opaque(DatagramClaimFuture)]
-    pub fn try_exclusive(self) -> DatagramClaimFuture<Inner, Deliverer> {
+    pub fn try_exclusive<T, U, F>(
+        self,
+        try_claim: F,
+    ) -> DatagramClaimFuture<Inner, Handoff, T, U, F>
+    where
+        F: for<'access> FnOnce(
+            DatagramClaimAccess<'access, Inner>,
+            &DatagramRouteMatchInfo,
+        ) -> DatagramClaimOutcome<'access, T, U, Inner>,
+    {
         async move {
-            let mut candidate = self;
+            let candidate = self;
             let judgement = {
                 let mut slot = candidate.participation.core().input.lock().await;
                 let judgement = judge(
                     &mut slot,
                     candidate.participation.core(),
-                    &*candidate.deliverer,
                     &candidate.route,
-                    &mut candidate.state,
+                    try_claim,
                 );
                 drop(slot);
                 judgement
@@ -195,110 +175,150 @@ impl<Inner: AsRef<[u8]>, Deliverer: DatagramDeliverer<Inner>>
         }
     }
 
-    /// Attempts to take the datagram only if the shared access is free right
-    /// now.
+    /// Attempts to take the datagram with `try_claim` only if the shared
+    /// access is free right now.
     ///
     /// When the access is immediately available, this runs the same
     /// synchronous section as [`try_exclusive`](Self::try_exclusive) and
     /// returns [`DatagramClaimPrecheck::Completed`]. Otherwise it returns the
-    /// candidate unchanged in [`DatagramClaimPrecheck::Deferred`] without
-    /// calling the deliverer or registering a wait. An uncontended access is not
-    /// free of work: the factory and the judgment still run on the calling
-    /// thread.
-    pub fn try_exclusive_now(mut self) -> DatagramClaimPrecheck<Inner, Deliverer> {
+    /// candidate and the judgment unchanged in
+    /// [`DatagramClaimPrecheck::Deferred`] without calling the judgment or
+    /// registering a wait. An uncontended access is not free of work: the
+    /// judgment still runs on the calling thread.
+    pub fn try_exclusive_now<T, U, F>(
+        self,
+        try_claim: F,
+    ) -> DatagramClaimPrecheck<T, U, Inner, Handoff, F>
+    where
+        F: for<'access> FnOnce(
+            DatagramClaimAccess<'access, Inner>,
+            &DatagramRouteMatchInfo,
+        ) -> DatagramClaimOutcome<'access, T, U, Inner>,
+    {
         let judgement = {
             let Ok(mut slot) = self.participation.core().input.try_lock() else {
-                return DatagramClaimPrecheck::Deferred(self);
+                return DatagramClaimPrecheck::Deferred(self, try_claim);
             };
-            let judgement = judge(
-                &mut slot,
-                self.participation.core(),
-                &*self.deliverer,
-                &self.route,
-                &mut self.state,
-            );
+            let judgement = judge(&mut slot, self.participation.core(), &self.route, try_claim);
             drop(slot);
             judgement
         };
         DatagramClaimPrecheck::Completed(self.conclude(judgement))
     }
+
+    fn conclude<T, U>(
+        self,
+        judgement: Judgement<T, U, Inner>,
+    ) -> DatagramClaimAttempt<T, U, Inner, Handoff> {
+        match judgement {
+            Judgement::Claimed(datagram, value) => {
+                DatagramClaimAttempt::Claimed(self.into_delivery(datagram), value)
+            }
+            Judgement::Unclaimed => DatagramClaimAttempt::Unclaimed(self),
+            Judgement::Abandoned(value) => {
+                drop(self);
+                DatagramClaimAttempt::Abandoned(value)
+            }
+            Judgement::Exclusive(datagram) => {
+                DatagramClaimAttempt::Exclusive(self.into_delivery(datagram))
+            }
+            Judgement::ClaimedElsewhere => {
+                drop(self);
+                DatagramClaimAttempt::ClaimedElsewhere
+            }
+        }
+    }
+
+    /// Ends the participation and hands the taken datagram over.
+    fn into_delivery(self, datagram: ExclusiveDatagram<Inner>) -> ExclusiveDatagramDelivery<Inner> {
+        let Self {
+            participation,
+            route,
+        } = self;
+        drop(participation);
+        ExclusiveDatagramDelivery::new(datagram, route)
+    }
 }
 
 /// The synchronous section of an attempt, run while holding the access.
-fn judge<Inner: AsRef<[u8]>, Deliverer: DatagramDeliverer<Inner>>(
+fn judge<T, U, Inner, Handoff, F>(
     slot: &mut DatagramSlot<Inner>,
-    core: &ClaimCore<Inner, Deliverer::Handoff>,
-    deliverer: &Deliverer,
+    core: &ClaimCore<Inner, Handoff>,
     route: &DatagramRouteMatchInfo,
-    state: &mut PrivateState<Deliverer::DelivererDatagramState>,
-) -> Judgement<Inner> {
-    let new_state = |datagram: &Inner| {
-        deliverer.new_datagram_state(DatagramView::new(datagram.as_ref()), route)
-    };
+    try_claim: F,
+) -> Judgement<T, U, Inner>
+where
+    Handoff: UnclaimedHandoff<Inner>,
+    F: for<'access> FnOnce(
+        DatagramClaimAccess<'access, Inner>,
+        &DatagramRouteMatchInfo,
+    ) -> DatagramClaimOutcome<'access, T, U, Inner>,
+{
     if core.sole_participant_takes() {
-        // No other participant can appear, so taking the datagram before the
-        // factory runs is indistinguishable from taking it after.
         let DatagramSlot::Present(datagram) = mem::replace(slot, DatagramSlot::Taken) else {
             return Judgement::ClaimedElsewhere;
         };
-        let current = mem::replace(state, PrivateState::Uninitialized);
-        *state = PrivateState::Initialized(current.into_initialized(|| new_state(&datagram)));
-        return Judgement::Claimed(ExclusiveDatagram::new(datagram));
+        return Judgement::Exclusive(ExclusiveDatagram::new(datagram));
     }
-    let DatagramSlot::Present(datagram) = &*slot else {
+    if matches!(slot, DatagramSlot::Taken) {
         return Judgement::ClaimedElsewhere;
-    };
-    let current =
-        mem::replace(state, PrivateState::Uninitialized).into_initialized(|| new_state(datagram));
-    match deliverer.try_claim(DatagramClaimAccess::new(slot), route, current) {
-        // The returned access ends here, before the guard is released.
-        DatagramClaimOutcome::Unclaimed {
-            access: _,
-            state: next,
-        } => {
-            *state = PrivateState::Initialized(next);
-            Judgement::Unclaimed
+    }
+    match try_claim(DatagramClaimAccess::new(slot), route) {
+        DatagramClaimOutcome::Claimed(datagram, value) => {
+            // A claimed datagram comes from this access, which empties the
+            // slot; a slot still holding the datagram means the judgment
+            // returned another one.
+            debug_assert!(
+                matches!(slot, DatagramSlot::Taken),
+                "a judgment claimed a datagram not taken from its access"
+            );
+            Judgement::Claimed(datagram, value)
         }
-        DatagramClaimOutcome::Claimed {
-            datagram,
-            state: next,
-        } => {
-            *state = PrivateState::Initialized(next);
-            Judgement::Claimed(datagram)
-        }
+        // The returned access ends with this arm, before the guard is
+        // released.
+        DatagramClaimOutcome::Unclaimed(_access) => Judgement::Unclaimed,
+        DatagramClaimOutcome::Abandoned(value) => Judgement::Abandoned(value),
     }
 }
 
-impl<Inner, Deliverer: DatagramDeliverer<Inner>> fmt::Debug
-    for DatagramClaimCandidate<Inner, Deliverer>
+impl<Inner, Handoff: UnclaimedHandoff<Inner>> fmt::Debug
+    for DatagramClaimCandidate<Inner, Handoff>
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DatagramClaimCandidate")
             .field("route", &self.route)
-            .field("state_initialized", &self.state.initialized().is_some())
             .finish_non_exhaustive()
     }
 }
 
-impl<Inner, Deliverer: DatagramDeliverer<Inner>> fmt::Debug
-    for DatagramClaimAttempt<Inner, Deliverer>
+impl<T: fmt::Debug, U: fmt::Debug, Inner, Handoff: UnclaimedHandoff<Inner>> fmt::Debug
+    for DatagramClaimAttempt<T, U, Inner, Handoff>
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Claimed(delivery) => f.debug_tuple("Claimed").field(delivery).finish(),
+            Self::Claimed(delivery, value) => f
+                .debug_tuple("Claimed")
+                .field(delivery)
+                .field(value)
+                .finish(),
             Self::Unclaimed(candidate) => f.debug_tuple("Unclaimed").field(candidate).finish(),
+            Self::Abandoned(value) => f.debug_tuple("Abandoned").field(value).finish(),
+            Self::Exclusive(delivery) => f.debug_tuple("Exclusive").field(delivery).finish(),
             Self::ClaimedElsewhere => f.write_str("ClaimedElsewhere"),
         }
     }
 }
 
-impl<Inner, Deliverer: DatagramDeliverer<Inner>> fmt::Debug
-    for DatagramClaimPrecheck<Inner, Deliverer>
+impl<T: fmt::Debug, U: fmt::Debug, Inner, Handoff: UnclaimedHandoff<Inner>, F> fmt::Debug
+    for DatagramClaimPrecheck<T, U, Inner, Handoff, F>
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Completed(attempt) => f.debug_tuple("Completed").field(attempt).finish(),
-            Self::Deferred(candidate) => f.debug_tuple("Deferred").field(candidate).finish(),
+            Self::Deferred(candidate, _) => f
+                .debug_tuple("Deferred")
+                .field(candidate)
+                .finish_non_exhaustive(),
         }
     }
 }

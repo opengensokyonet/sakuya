@@ -12,11 +12,8 @@ use sakuya_wire::header::v1::LongPacketType;
 use sakuya_wire::version::Version;
 
 use super::support::*;
-use crate::claim::deliverer::{
-    DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramView,
-};
+use crate::claim::deliverer::DatagramDeliverer;
 use crate::claim::delivery::DatagramDelivery;
-use crate::claim::route_match::DatagramRouteMatchInfo;
 use crate::route::association::{MatchAssociation, PacketForms, RouteMatcher};
 use crate::route::datagram::ReceivedDatagram;
 use crate::route::index::RouteEntryRegistration;
@@ -27,20 +24,8 @@ struct Counter(Arc<AtomicUsize>);
 
 impl DatagramDeliverer<Datagram> for Counter {
     type Handoff = Handoff;
-    type DelivererDatagramState = ();
 
-    fn new_datagram_state(&self, _: DatagramView<'_>, _: &DatagramRouteMatchInfo) {}
-
-    fn try_claim<'access>(
-        &self,
-        access: DatagramClaimAccess<'access, Datagram>,
-        _: &DatagramRouteMatchInfo,
-        state: (),
-    ) -> DatagramClaimOutcome<'access, Datagram, ()> {
-        DatagramClaimOutcome::Unclaimed { access, state }
-    }
-
-    fn deliver(&self, _delivery: DatagramDelivery<Datagram, Self>) {
+    fn deliver(&self, _delivery: DatagramDelivery<Datagram, Handoff>) {
         self.0.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -122,20 +107,8 @@ impl Drop for ReadsIndex {
 
 impl DatagramDeliverer<Datagram> for ReadsIndex {
     type Handoff = Handoff;
-    type DelivererDatagramState = ();
 
-    fn new_datagram_state(&self, _: DatagramView<'_>, _: &DatagramRouteMatchInfo) {}
-
-    fn try_claim<'access>(
-        &self,
-        access: DatagramClaimAccess<'access, Datagram>,
-        _: &DatagramRouteMatchInfo,
-        state: (),
-    ) -> DatagramClaimOutcome<'access, Datagram, ()> {
-        DatagramClaimOutcome::Unclaimed { access, state }
-    }
-
-    fn deliver(&self, delivery: DatagramDelivery<Datagram, Self>) {
+    fn deliver(&self, delivery: DatagramDelivery<Datagram, Handoff>) {
         if let Some(index) = self.index.upgrade() {
             assert!(index.occupancy(&self.cid) >= 1);
         }
@@ -178,20 +151,8 @@ struct RegistersDuringDelivery {
 
 impl DatagramDeliverer<Datagram> for RegistersDuringDelivery {
     type Handoff = Handoff;
-    type DelivererDatagramState = ();
 
-    fn new_datagram_state(&self, _: DatagramView<'_>, _: &DatagramRouteMatchInfo) {}
-
-    fn try_claim<'access>(
-        &self,
-        access: DatagramClaimAccess<'access, Datagram>,
-        _: &DatagramRouteMatchInfo,
-        state: (),
-    ) -> DatagramClaimOutcome<'access, Datagram, ()> {
-        DatagramClaimOutcome::Unclaimed { access, state }
-    }
-
-    fn deliver(&self, delivery: DatagramDelivery<Datagram, Self>) {
+    fn deliver(&self, delivery: DatagramDelivery<Datagram, Handoff>) {
         let registration = register(
             &self.index,
             MatchAssociation::InitialDcid(nonempty(&cid(0x32))),

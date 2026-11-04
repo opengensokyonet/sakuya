@@ -1,36 +1,33 @@
-//! The author-implemented deliverer and the views it receives
+//! The author-implemented deliverer, and the access a judgment receives
 
 use std::fmt;
+use std::marker::PhantomData;
 use std::mem;
 
 use super::delivery::DatagramDelivery;
 use super::finish::{ReleaseUnclaimed, UnclaimedHandoff};
-use super::route_match::DatagramRouteMatchInfo;
 use super::shared::DatagramSlot;
 
-/// The capabilities a route entry offers for every datagram it matches.
+/// The capability a route entry offers for every datagram it matches.
 ///
 /// A deliverer is bound to one route entry. For each datagram routed to that
-/// entry it receives one claim candidate, decides whether the datagram belongs
-/// to it, and passes what it claims on to its datagram receiver. Several
-/// deliverers may feed the same receiver; a receiver shared by deliverers never
-/// merges their candidates or their private state.
+/// entry it receives one delivery and passes it on, typically to its datagram
+/// receiver. Several deliverers may feed the same receiver; a receiver shared
+/// by deliverers never merges their candidates.
 ///
-/// All three methods are synchronous and must not wait. The mechanism calls
-/// [`new_datagram_state`](Self::new_datagram_state) and
-/// [`try_claim`](Self::try_claim) while it holds the shared access to the
-/// datagram, so they must not wait for or re-enter the access of the same
-/// datagram, for example by attempting another candidate of it.
+/// A deliverer only delivers. It does not judge whether a datagram belongs to
+/// it: whoever holds a competing candidate passes its own judgment to
+/// [`try_exclusive`](super::candidate::DatagramClaimCandidate::try_exclusive)
+/// after delivery, so the judgment can use state the deliverer cannot reach.
+/// Candidates and exclusive deliveries do not refer back to the deliverer.
 ///
-/// A deliverer whose backend is no longer available keeps these calls safe
-/// and keeps the contract: `try_claim` returns
-/// [`DatagramClaimOutcome::Unclaimed`] with the access and the state, and
-/// `deliver` drops the delivery. There is no error path for this case.
+/// A deliverer whose backend is no longer available drops its deliveries.
+/// There is no error path for this case.
 ///
 /// The trait requires neither `Send`, `Sync` nor `'static`; thread constraints
 /// apply where objects actually cross threads (see the [module
 /// documentation](super#thread-constraints)).
-pub trait DatagramDeliverer<Inner>: Sized {
+pub trait DatagramDeliverer<Inner> {
     /// What takes over a datagram that every candidate left, in the routing
     /// domain this deliverer serves.
     ///
@@ -40,111 +37,110 @@ pub trait DatagramDeliverer<Inner>: Sized {
     /// datagrams off; candidates are `Send` only if the handoff is.
     type Handoff: UnclaimedHandoff<Inner> = ReleaseUnclaimed;
 
-    /// The private state the deliverer keeps for one candidate.
-    ///
-    /// It is created lazily by [`new_datagram_state`](Self::new_datagram_state),
-    /// threaded by value through every [`try_claim`](Self::try_claim) of the
-    /// same candidate, and handed over with the claimed datagram. It cannot
-    /// borrow the datagram or the route match information; it can own data,
-    /// offsets, and whatever outside references its own type allows. No
-    /// `Clone`, `Default`, `Send`, `Sync`, `Unpin` or `'static` bound is
-    /// required.
-    type DelivererDatagramState;
-
-    /// Builds the initial private state of one candidate.
-    ///
-    /// The mechanism calls it at most once per candidate: on the first access
-    /// that finds the datagram still present, or at
-    /// [`consume`](super::delivery::ExclusiveDatagramDelivery::consume) of a delivery
-    /// whose state was never initialized. It only builds state: it does not
-    /// claim, and it does not advance any protocol processing. Values that must
-    /// reflect the moment of reception belong in the route match information or
-    /// the datagram, because the factory may run later than the arrival.
-    fn new_datagram_state(
-        &self,
-        datagram: DatagramView<'_>,
-        route: &DatagramRouteMatchInfo,
-    ) -> Self::DelivererDatagramState;
-
-    /// Decides within one synchronous access whether to take the datagram.
-    ///
-    /// Return [`DatagramClaimOutcome::Claimed`] with the datagram obtained from
-    /// [`access.into_exclusive()`](DatagramClaimAccess::into_exclusive) to take
-    /// it, or [`DatagramClaimOutcome::Unclaimed`] with the unchanged access to
-    /// leave it for the other candidates. Either way the updated state is
-    /// returned. Unclaimed only means "not this time"; it does not exclude the
-    /// candidate or ask for an immediate retry.
-    ///
-    /// Returning a claimed datagram that was not obtained from this access
-    /// breaks the contract of the mechanism.
-    fn try_claim<'access>(
-        &self,
-        access: DatagramClaimAccess<'access, Inner>,
-        route: &DatagramRouteMatchInfo,
-        state: Self::DelivererDatagramState,
-    ) -> DatagramClaimOutcome<'access, Inner, Self::DelivererDatagramState>;
-
     /// Takes over one delivery for this deliverer.
     ///
-    /// Delivery completes when this returns; it does not mean the delivery was
-    /// processed. A competing delivery is typically attempted later by the
-    /// receiver with
+    /// It is synchronous and must not wait. Delivery completes when this
+    /// returns; it does not mean the delivery was processed. A competing
+    /// delivery is typically attempted later by the receiver with
     /// [`try_exclusive`](super::candidate::DatagramClaimCandidate::try_exclusive);
     /// an exclusive one is
     /// [consumed](super::delivery::ExclusiveDatagramDelivery::consume).
-    /// Consuming on the spot runs the factory and judgment on the caller's stack.
-    /// A deliverer that can no longer accept deliveries drops them.
-    fn deliver(&self, delivery: DatagramDelivery<Inner, Self>);
+    /// Attempting or consuming on the spot runs that work on the caller's
+    /// stack. A deliverer that can no longer accept deliveries drops them.
+    fn deliver(&self, delivery: DatagramDelivery<Inner, Self::Handoff>);
 }
 
-/// A read-only view of the datagram for the state factory.
+/// Temporary access to the shared datagram during one judgment.
 ///
-/// The view lives only for one factory call; the state cannot keep it.
-#[derive(Clone, Copy)]
-pub struct DatagramView<'datagram> {
-    bytes: &'datagram [u8],
-}
-
-impl<'datagram> DatagramView<'datagram> {
-    pub(super) fn new(bytes: &'datagram [u8]) -> Self {
-        Self { bytes }
-    }
-
-    /// Returns the complete datagram bytes.
-    pub fn bytes(&self) -> &'datagram [u8] {
-        self.bytes
-    }
-}
-
-impl fmt::Debug for DatagramView<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DatagramView")
-            .field("len", &self.bytes.len())
-            .finish()
-    }
-}
-
-/// Temporary access to the shared datagram during one claim judgment.
+/// The mechanism hands it to the judgment while it holds the shared access,
+/// and it is valid only for that call: the judgment must accept it for every
+/// lifetime `'access`, and the values the judgment returns are chosen outside
+/// it, so the access cannot leave the call. It is neither `Send` nor `Sync`.
+/// It offers a read-only look at the datagram and the one-way conversion that
+/// takes it. The shared datagram is never mutable: a judgment that needs
+/// writable bytes, for example to remove header protection or decrypt in
+/// place, copies the range it needs into a buffer of its caller.
 ///
-/// It is handed to [`DatagramDeliverer::try_claim`] while the mechanism holds
-/// the shared access, and is valid only for that call. It offers a read-only
-/// look at the datagram and the one-way conversion that takes it. The shared
-/// datagram is never mutable: a judgment that needs writable bytes, for
-/// example to remove header protection or decrypt in place, copies the range
-/// it needs into its private state.
+/// A judgment cannot hand the access out through the values it returns, whose
+/// types are chosen outside the judgment, whether claiming:
+///
+/// ```compile_fail
+/// # use sakuya_datagram_routing::claim::candidate::DatagramClaimCandidate;
+/// # use sakuya_datagram_routing::claim::deliverer::{DatagramClaimOutcome, ExclusiveDatagram};
+/// # use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
+/// fn attempt(
+///     candidate: DatagramClaimCandidate<Vec<u8>, ReleaseUnclaimed>,
+///     earlier: ExclusiveDatagram<Vec<u8>>,
+/// ) {
+///     let _ = candidate.try_exclusive(|access, _route| {
+///         DatagramClaimOutcome::<_, (), _>::Claimed(earlier, access)
+///     });
+/// }
+/// ```
+///
+/// or abandoning:
+///
+/// ```compile_fail
+/// # use sakuya_datagram_routing::claim::candidate::DatagramClaimCandidate;
+/// # use sakuya_datagram_routing::claim::deliverer::DatagramClaimOutcome;
+/// # use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
+/// fn attempt(candidate: DatagramClaimCandidate<Vec<u8>, ReleaseUnclaimed>) {
+///     let _ = candidate.try_exclusive(|access, _route| {
+///         DatagramClaimOutcome::<(), _, _>::Abandoned(access)
+///     });
+/// }
+/// ```
+///
+/// nor store it in state it captures:
+///
+/// ```compile_fail,E0521
+/// # use sakuya_datagram_routing::claim::candidate::DatagramClaimCandidate;
+/// # use sakuya_datagram_routing::claim::deliverer::{DatagramClaimAccess, DatagramClaimOutcome};
+/// # use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
+/// fn attempt<'kept>(
+///     candidate: DatagramClaimCandidate<Vec<u8>, ReleaseUnclaimed>,
+///     kept: &mut Option<DatagramClaimAccess<'kept, Vec<u8>>>,
+/// ) {
+///     let _ = candidate.try_exclusive(|access, _route| {
+///         *kept = Some(access);
+///         DatagramClaimOutcome::<(), (), _>::Abandoned(())
+///     });
+/// }
+/// ```
+///
+/// It is not `Send`:
+///
+/// ```compile_fail,E0277
+/// # use sakuya_datagram_routing::claim::deliverer::DatagramClaimAccess;
+/// fn assert_send<T: Send>() {}
+/// assert_send::<DatagramClaimAccess<'static, Vec<u8>>>();
+/// ```
+///
+/// and not `Sync`:
+///
+/// ```compile_fail,E0277
+/// # use sakuya_datagram_routing::claim::deliverer::DatagramClaimAccess;
+/// fn assert_sync<T: Sync>() {}
+/// assert_sync::<DatagramClaimAccess<'static, Vec<u8>>>();
+/// ```
 pub struct DatagramClaimAccess<'access, Inner> {
     // invariant: the slot holds the datagram for as long as the access lives.
     // The mechanism creates an access only for a present datagram, the slot
     // stays borrowed by the access, and only `into_exclusive`, which consumes
     // the access, takes the datagram out.
     slot: &'access mut DatagramSlot<Inner>,
+    /// Keeps the access on the thread that holds the shared access.
+    local: PhantomData<*const ()>,
 }
 
 impl<'access, Inner> DatagramClaimAccess<'access, Inner> {
     /// Wraps a slot that the caller has checked to hold the datagram.
     pub(super) fn new(slot: &'access mut DatagramSlot<Inner>) -> Self {
         debug_assert!(matches!(slot, DatagramSlot::Present(_)));
-        Self { slot }
+        Self {
+            slot,
+            local: PhantomData,
+        }
     }
 
     fn datagram(&self) -> &Inner {
@@ -184,36 +180,34 @@ impl<Inner> fmt::Debug for DatagramClaimAccess<'_, Inner> {
     }
 }
 
-/// The result of one [`DatagramDeliverer::try_claim`] call.
+/// The result of one judgment.
 ///
-/// This is the author's view of one judgment. The mechanism's view of a whole
-/// attempt is [`DatagramClaimAttempt`](super::candidate::DatagramClaimAttempt),
-/// which also
-/// covers a datagram already taken and the direct take of a last-takes
-/// candidate.
+/// This is the judgment's view. The mechanism's view of a whole attempt is
+/// [`DatagramClaimAttempt`](super::candidate::DatagramClaimAttempt), which also covers a datagram already taken and
+/// the direct take of a last-takes candidate. Taking and abandoning each carry
+/// a value of the caller's choice, and the two types may differ.
 #[must_use]
-pub enum DatagramClaimOutcome<'access, Inner, State> {
-    /// The datagram was not taken; the access goes back to the mechanism.
-    Unclaimed {
-        /// The unchanged access from this call.
-        access: DatagramClaimAccess<'access, Inner>,
-        /// The updated private state, stored back into the same candidate.
-        state: State,
-    },
-    /// The datagram was taken by this deliverer.
-    Claimed {
-        /// The datagram, obtained from this call's access.
-        datagram: ExclusiveDatagram<Inner>,
-        /// The private state, handed over with the datagram.
-        state: State,
-    },
+pub enum DatagramClaimOutcome<'access, T, U, Inner> {
+    /// The judgment took the datagram, with a value for the caller.
+    ///
+    /// The datagram must be the one obtained from this call's
+    /// [`access.into_exclusive()`](DatagramClaimAccess::into_exclusive);
+    /// returning any other breaks the contract of the mechanism.
+    Claimed(ExclusiveDatagram<Inner>, T),
+    /// The judgment leaves the datagram this time and hands the unchanged
+    /// access back; the candidate stays with its holder.
+    Unclaimed(DatagramClaimAccess<'access, Inner>),
+    /// The judgment gives up; the access was dropped inside the judgment, the
+    /// candidate exits, and the value goes to the caller.
+    Abandoned(U),
 }
 
-impl<Inner, State> fmt::Debug for DatagramClaimOutcome<'_, Inner, State> {
+impl<T, U, Inner> fmt::Debug for DatagramClaimOutcome<'_, T, U, Inner> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unclaimed { .. } => f.write_str("Unclaimed"),
-            Self::Claimed { .. } => f.write_str("Claimed"),
+            Self::Claimed(..) => f.write_str("Claimed"),
+            Self::Unclaimed(_) => f.write_str("Unclaimed"),
+            Self::Abandoned(_) => f.write_str("Abandoned"),
         }
     }
 }
@@ -221,9 +215,10 @@ impl<Inner, State> fmt::Debug for DatagramClaimOutcome<'_, Inner, State> {
 /// Sole ownership of one datagram.
 ///
 /// It is obtained only by taking the datagram, either through
-/// [`DatagramClaimAccess::into_exclusive`] or when the mechanism takes it for
-/// a last-takes candidate. Dropping it releases the datagram; it is never put
-/// back for other candidates. It says nothing about authentication.
+/// [`DatagramClaimAccess::into_exclusive`]
+/// or when the mechanism takes it for a last-takes candidate. Dropping it
+/// releases the datagram; it is never put back for other candidates. It says
+/// nothing about authentication.
 #[derive(Debug)]
 pub struct ExclusiveDatagram<Inner> {
     datagram: Inner,

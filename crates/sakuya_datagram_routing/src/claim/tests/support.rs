@@ -1,4 +1,5 @@
-//! Shared fixtures: a recording deliverer, a tracked datagram and manual polling
+//! Shared fixtures: a recording deliverer and its judgment, a tracked datagram
+//! and manual polling
 
 use std::future::Future;
 use std::pin::Pin;
@@ -9,9 +10,7 @@ use std::task::{Context, Poll, Wake, Waker};
 use sakuya_wire::connection_id::ConnectionIdLength;
 
 use crate::claim::candidate::DatagramClaimCandidate;
-use crate::claim::deliverer::{
-    DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramView,
-};
+use crate::claim::deliverer::{DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer};
 use crate::claim::delivery::{DatagramDelivery, ExclusiveDatagramDelivery};
 use crate::claim::erased::SendDatagramDeliverer;
 use crate::claim::finish::UnclaimedHandoff;
@@ -53,52 +52,38 @@ impl Drop for TestDatagram {
     }
 }
 
-/// How a [`Probe`] judges.
+/// How a [`Probe`]'s judgment decides.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Judging {
     Reject,
     Accept,
+    Abandon,
     PanicBeforeTake,
     PanicAfterTake,
 }
 
-/// The private state of a [`Probe`] candidate.
-pub(super) struct ProbeState {
-    /// How many judgments used this state.
-    pub(super) judgments: usize,
-    on_drop: Option<Box<dyn FnOnce() + Send>>,
-    drops: Arc<AtomicUsize>,
-}
+/// What every probe receives.
+pub(super) type Delivery = DatagramDelivery<TestDatagram, UnclaimedSink>;
 
-impl Drop for ProbeState {
-    fn drop(&mut self) {
-        self.drops.fetch_add(1, Ordering::SeqCst);
-        if let Some(on_drop) = self.on_drop.take() {
-            on_drop();
-        }
-    }
-}
+/// What every probe's candidate is.
+pub(super) type Candidate = DatagramClaimCandidate<TestDatagram, UnclaimedSink>;
 
-/// A deliverer that records every call and keeps every delivery.
+/// A deliverer that keeps every delivery, together with the judgment its
+/// receiver passes to attempts.
+///
+/// The deliverer itself only stores deliveries; [`judgment`](Self::judgment)
+/// stands for the receiver's state, which the deliverer never sees.
 pub(super) struct Probe {
     judging: Mutex<Judging>,
-    panic_in_factory: Mutex<bool>,
-    state_on_drop: Mutex<Option<Box<dyn FnOnce() + Send>>>,
-    pub(super) factory_calls: AtomicUsize,
-    pub(super) claim_calls: AtomicUsize,
-    pub(super) state_drops: Arc<AtomicUsize>,
-    deliveries: Mutex<Vec<DatagramDelivery<TestDatagram, Probe>>>,
+    claim_calls: AtomicUsize,
+    deliveries: Mutex<Vec<Delivery>>,
 }
 
 impl Probe {
     pub(super) fn new(judging: Judging) -> Arc<Self> {
         Arc::new(Self {
             judging: Mutex::new(judging),
-            panic_in_factory: Mutex::new(false),
-            state_on_drop: Mutex::new(None),
-            factory_calls: AtomicUsize::new(0),
             claim_calls: AtomicUsize::new(0),
-            state_drops: Arc::new(AtomicUsize::new(0)),
             deliveries: Mutex::new(Vec::new()),
         })
     }
@@ -107,25 +92,42 @@ impl Probe {
         *self.judging.lock().unwrap() = judging;
     }
 
-    pub(super) fn panic_in_factory(&self) {
-        *self.panic_in_factory.lock().unwrap() = true;
-    }
-
-    /// Runs `on_drop` when the next state this probe creates is dropped.
-    pub(super) fn on_state_drop(&self, on_drop: impl FnOnce() + Send + 'static) {
-        *self.state_on_drop.lock().unwrap() = Some(Box::new(on_drop));
-    }
-
-    pub(super) fn factory_calls(&self) -> usize {
-        self.factory_calls.load(Ordering::SeqCst)
-    }
-
+    /// How many judgments of this probe ran.
     pub(super) fn claim_calls(&self) -> usize {
         self.claim_calls.load(Ordering::SeqCst)
     }
 
+    /// A judgment that counts its call and decides by the current mode.
+    ///
+    /// Claiming and abandoning both carry the number of the call.
+    pub(super) fn judgment(
+        self: &Arc<Self>,
+    ) -> impl for<'access> FnOnce(
+        DatagramClaimAccess<'access, TestDatagram>,
+        &DatagramRouteMatchInfo,
+    ) -> DatagramClaimOutcome<'access, usize, usize, TestDatagram>
+    + Send
+    + 'static {
+        let probe = Arc::clone(self);
+        move |access, _route| {
+            let call = probe.claim_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            assert!(!access.bytes().is_empty());
+            let judging = *probe.judging.lock().unwrap();
+            match judging {
+                Judging::Reject => DatagramClaimOutcome::Unclaimed(access),
+                Judging::Accept => DatagramClaimOutcome::Claimed(access.into_exclusive(), call),
+                Judging::Abandon => DatagramClaimOutcome::Abandoned(call),
+                Judging::PanicBeforeTake => panic!("simulated judgment panic"),
+                Judging::PanicAfterTake => {
+                    let _datagram = access.into_exclusive();
+                    panic!("simulated panic after taking the datagram")
+                }
+            }
+        }
+    }
+
     /// Takes the single delivery this probe received.
-    pub(super) fn take_delivery(&self) -> DatagramDelivery<TestDatagram, Probe> {
+    pub(super) fn take_delivery(&self) -> Delivery {
         let mut deliveries = self.deliveries.lock().unwrap();
         assert_eq!(deliveries.len(), 1, "expected exactly one delivery");
         deliveries.pop().unwrap()
@@ -135,14 +137,14 @@ impl Probe {
         self.deliveries.lock().unwrap().len()
     }
 
-    pub(super) fn take_candidate(&self) -> DatagramClaimCandidate<TestDatagram, Probe> {
+    pub(super) fn take_candidate(&self) -> Candidate {
         match self.take_delivery() {
             DatagramDelivery::Competing(candidate) => candidate,
             DatagramDelivery::Exclusive(_) => panic!("expected a competing delivery"),
         }
     }
 
-    pub(super) fn take_exclusive(&self) -> ExclusiveDatagramDelivery<TestDatagram, Probe> {
+    pub(super) fn take_exclusive(&self) -> ExclusiveDatagramDelivery<TestDatagram> {
         match self.take_delivery() {
             DatagramDelivery::Exclusive(delivery) => delivery,
             DatagramDelivery::Competing(_) => panic!("expected an exclusive delivery"),
@@ -152,51 +154,8 @@ impl Probe {
 
 impl DatagramDeliverer<TestDatagram> for Probe {
     type Handoff = UnclaimedSink;
-    type DelivererDatagramState = ProbeState;
 
-    fn new_datagram_state(
-        &self,
-        datagram: DatagramView<'_>,
-        _route: &DatagramRouteMatchInfo,
-    ) -> ProbeState {
-        self.factory_calls.fetch_add(1, Ordering::SeqCst);
-        assert!(!datagram.bytes().is_empty());
-        assert!(
-            !*self.panic_in_factory.lock().unwrap(),
-            "simulated factory panic"
-        );
-        ProbeState {
-            judgments: 0,
-            on_drop: self.state_on_drop.lock().unwrap().take(),
-            drops: self.state_drops.clone(),
-        }
-    }
-
-    fn try_claim<'access>(
-        &self,
-        access: DatagramClaimAccess<'access, TestDatagram>,
-        _route: &DatagramRouteMatchInfo,
-        mut state: ProbeState,
-    ) -> DatagramClaimOutcome<'access, TestDatagram, ProbeState> {
-        self.claim_calls.fetch_add(1, Ordering::SeqCst);
-        state.judgments += 1;
-        assert!(!access.bytes().is_empty());
-        let judging = *self.judging.lock().unwrap();
-        match judging {
-            Judging::Reject => DatagramClaimOutcome::Unclaimed { access, state },
-            Judging::Accept => DatagramClaimOutcome::Claimed {
-                datagram: access.into_exclusive(),
-                state,
-            },
-            Judging::PanicBeforeTake => panic!("simulated judgment panic"),
-            Judging::PanicAfterTake => {
-                let _datagram = access.into_exclusive();
-                panic!("simulated panic after taking the datagram")
-            }
-        }
-    }
-
-    fn deliver(&self, delivery: DatagramDelivery<TestDatagram, Self>) {
+    fn deliver(&self, delivery: Delivery) {
         self.deliveries.lock().unwrap().push(delivery);
     }
 }

@@ -9,11 +9,10 @@
 //! binding.
 //!
 //! Every operation holds at most one map guard at a time and does only
-//! controlled index work under it: no deliverer method, state factory,
-//! `deliver`, reflow handoff or receiver construction runs there. Lookups copy
-//! the entry references out of the guard; removed references are carried out
-//! of the guard before they are dropped, so that no deliverer or state is
-//! destroyed inside the index.
+//! controlled index work under it: no `deliver`, judgment, reflow handoff or
+//! receiver construction runs there. Lookups copy the entry references out of
+//! the guard; removed references are carried out of the guard before they are
+//! dropped, so that no deliverer is destroyed inside the index.
 
 use std::fmt;
 use std::sync::{Arc, Weak};

@@ -23,7 +23,8 @@ fn concurrent_exits_hand_off_exactly_once() {
     std::thread::scope(|scope| {
         for probe in &probes {
             let candidate = probe.take_candidate();
-            scope.spawn(move || match block_on(candidate.try_exclusive()) {
+            let judgment = probe.judgment();
+            scope.spawn(move || match block_on(candidate.try_exclusive(judgment)) {
                 DatagramClaimAttempt::Unclaimed(candidate) => drop(candidate),
                 _ => panic!("every judgment rejects"),
             });
@@ -47,25 +48,27 @@ fn concurrent_attempts_have_exactly_one_winner() {
     std::thread::scope(|scope| {
         for probe in &probes {
             let candidate = probe.take_candidate();
+            let judgment = probe.judgment();
             let (claimed, elsewhere) = (&claimed, &elsewhere);
-            scope.spawn(move || match block_on(candidate.try_exclusive()) {
-                DatagramClaimAttempt::Claimed(delivery) => {
+            scope.spawn(move || match block_on(candidate.try_exclusive(judgment)) {
+                DatagramClaimAttempt::Claimed(delivery, _)
+                | DatagramClaimAttempt::Exclusive(delivery) => {
                     claimed.fetch_add(1, Ordering::SeqCst);
                     drop(delivery.consume());
                 }
                 DatagramClaimAttempt::ClaimedElsewhere => {
                     elsewhere.fetch_add(1, Ordering::SeqCst);
                 }
-                DatagramClaimAttempt::Unclaimed(_) => panic!("every judgment accepts"),
+                DatagramClaimAttempt::Unclaimed(_) | DatagramClaimAttempt::Abandoned(_) => {
+                    panic!("every judgment accepts")
+                }
             });
         }
     });
     assert_eq!(claimed.load(Ordering::SeqCst), 1);
     assert_eq!(elsewhere.load(Ordering::SeqCst), THREADS - 1);
     assert_eq!(drops(&datagram_drops), 1);
-    // Only the attempt that found the datagram ran the factory.
-    let factory_calls: usize = probes.iter().map(|probe| probe.factory_calls()).sum();
+    // Only the attempt that found the datagram ran its judgment.
     let claim_calls: usize = probes.iter().map(|probe| probe.claim_calls()).sum();
-    assert_eq!(factory_calls, 1);
     assert!(claim_calls <= 1);
 }

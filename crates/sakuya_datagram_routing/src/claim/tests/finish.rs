@@ -14,7 +14,8 @@ fn last_takes_releases_the_datagram_when_all_exit() {
         DatagramFinishPolicy::LastTakes,
         &[&first, &second],
     );
-    let DatagramClaimAttempt::Unclaimed(candidate) = ready(first.take_candidate().try_exclusive())
+    let DatagramClaimAttempt::Unclaimed(candidate) =
+        ready(first.take_candidate().try_exclusive(first.judgment()))
     else {
         panic!("two participants still compete");
     };
@@ -33,12 +34,12 @@ fn on_unclaimed_hands_off_once_from_the_last_exit() {
     route(datagram, sink.policy(), &[&first, &second]);
 
     let DatagramClaimAttempt::Unclaimed(first_candidate) =
-        ready(first.take_candidate().try_exclusive())
+        ready(first.take_candidate().try_exclusive(first.judgment()))
     else {
         panic!("the judgment rejects");
     };
     let DatagramClaimAttempt::Unclaimed(second_candidate) =
-        ready(second.take_candidate().try_exclusive())
+        ready(second.take_candidate().try_exclusive(second.judgment()))
     else {
         panic!("the sole participant still judges under on-unclaimed");
     };
@@ -62,7 +63,8 @@ fn single_on_unclaimed_entry_competes_and_judges() {
     let (datagram, _) = TestDatagram::new(b"single");
     route(datagram, sink.policy(), &[&only]);
 
-    let DatagramClaimAttempt::Unclaimed(candidate) = ready(only.take_candidate().try_exclusive())
+    let DatagramClaimAttempt::Unclaimed(candidate) =
+        ready(only.take_candidate().try_exclusive(only.judgment()))
     else {
         panic!("a single on-unclaimed participant is judged");
     };
@@ -99,7 +101,8 @@ fn winner_dropping_its_datagram_neither_refills_nor_hands_off() {
     route(datagram, sink.policy(), &[&winner, &other]);
     let losing = other.take_candidate();
 
-    let DatagramClaimAttempt::Claimed(delivery) = ready(winner.take_candidate().try_exclusive())
+    let DatagramClaimAttempt::Claimed(delivery, _) =
+        ready(winner.take_candidate().try_exclusive(winner.judgment()))
     else {
         panic!("the judgment accepts");
     };
@@ -107,7 +110,7 @@ fn winner_dropping_its_datagram_neither_refills_nor_hands_off() {
     drop(delivery);
     assert_eq!(drops(&datagram_drops), 1);
     assert!(matches!(
-        ready(losing.try_exclusive()),
+        ready(losing.try_exclusive(other.judgment())),
         DatagramClaimAttempt::ClaimedElsewhere
     ));
     assert_eq!(sink.len(), 0);
@@ -121,7 +124,8 @@ fn losers_exiting_after_a_win_do_not_hand_off() {
     let (datagram, _) = TestDatagram::new(b"won");
     route(datagram, sink.policy(), &[&winner, &other]);
     let losing = other.take_candidate();
-    let DatagramClaimAttempt::Claimed(_delivery) = ready(winner.take_candidate().try_exclusive())
+    let DatagramClaimAttempt::Claimed(_delivery, _) =
+        ready(winner.take_candidate().try_exclusive(winner.judgment()))
     else {
         panic!("the judgment accepts");
     };

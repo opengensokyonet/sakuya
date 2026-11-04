@@ -1,26 +1,26 @@
 //! Business conditions around an attempt: keys that arrive later, and protocol
 //! state that only the processing owner commits
 //!
-//! The deliverer here follows the shape of the reference QUIC state: an
-//! `Unprepared` state with a scratch buffer and the last attempt's result, and
-//! an `Authenticated` state holding the prepared packet. Protection is a toy:
-//! a datagram is `[tag, packet_number, payload...]`, authentic when the tag
-//! equals the key, and its payload is masked with the key.
+//! The judgment here follows the reference QUIC shape: the path receiver owns
+//! the keys, a reusable scratch buffer and the reason of its last attempt, and
+//! the judgment captures a handle to it. The deliverer only delivers.
+//! Protection is a toy: a datagram is `[tag, packet_number, payload...]`,
+//! authentic when the tag equals the key, and its payload is masked with the
+//! key.
 
+use std::mem;
 use std::pin::pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
 
 use tokio::sync::Notify;
 
-use super::support::{TestDatagram, UnclaimedSink, WakeCount, poll_with, ready};
-use crate::claim::candidate::{DatagramClaimAttempt, DatagramClaimCandidate};
-use crate::claim::deliverer::{
-    DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramView,
+use super::support::{
+    Judging, Probe, TestDatagram, UnclaimedSink, WakeCount, poll_with, ready, route,
 };
-use crate::claim::delivery::{DatagramDelivery, ExclusiveDatagramDelivery};
-use crate::claim::erased::ErasedDatagramDeliverer;
-use crate::claim::group::prepare_claim;
+use crate::claim::candidate::DatagramClaimAttempt;
+use crate::claim::deliverer::{DatagramClaimAccess, DatagramClaimOutcome};
+use crate::claim::delivery::ExclusiveDatagramDelivery;
 use crate::claim::route_match::DatagramRouteMatchInfo;
 use crate::claim::shared::DatagramFinishPolicy;
 
@@ -42,148 +42,98 @@ impl KeyStore {
     }
 }
 
-/// The protocol state that only processing may change.
-#[derive(Default)]
-struct Connection {
-    largest_packet_number: Mutex<Option<u8>>,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LastAttempt {
     MissingKey,
     WrongKey,
 }
 
-enum PacketState {
-    Unprepared {
-        scratch: Vec<u8>,
-        last_attempt: Option<LastAttempt>,
-    },
-    Authenticated {
-        packet_number: u8,
-        plaintext: Vec<u8>,
-    },
+/// What a claiming judgment hands over: the packet it authenticated.
+#[derive(Debug)]
+struct Authenticated {
+    packet_number: u8,
+    plaintext: Vec<u8>,
 }
 
-impl PacketState {
-    fn last_attempt(&self) -> Option<LastAttempt> {
-        match self {
-            Self::Unprepared { last_attempt, .. } => *last_attempt,
-            Self::Authenticated { .. } => None,
-        }
-    }
-}
-
-struct Endpoint {
+/// The caller of the attempts, holding everything the judgment needs.
+struct PathReceiver {
     keys: Arc<KeyStore>,
-    connection: Arc<Connection>,
-    deliveries: Mutex<Vec<DatagramDelivery<TestDatagram, Endpoint>>>,
+    scratch: Vec<u8>,
+    last_attempt: Option<LastAttempt>,
+    /// The protocol state that only processing may change.
+    largest_packet_number: Option<u8>,
 }
 
-impl Endpoint {
-    fn new(keys: &Arc<KeyStore>) -> Arc<Self> {
-        Arc::new(Self {
+impl PathReceiver {
+    fn new(keys: &Arc<KeyStore>) -> Self {
+        Self {
             keys: keys.clone(),
-            connection: Arc::default(),
-            deliveries: Mutex::default(),
-        })
-    }
-
-    fn take_candidate(&self) -> DatagramClaimCandidate<TestDatagram, Self> {
-        match self.deliveries.lock().unwrap().pop() {
-            Some(DatagramDelivery::Competing(candidate)) => candidate,
-            _ => panic!("expected a competing delivery"),
+            scratch: Vec::new(),
+            last_attempt: None,
+            largest_packet_number: None,
         }
     }
 
-    fn largest(&self) -> Option<u8> {
-        *self.connection.largest_packet_number.lock().unwrap()
+    /// A judgment that reads and updates this receiver.
+    ///
+    /// Abandoning hands the scratch buffer back for reuse.
+    fn judgment(
+        &mut self,
+    ) -> impl for<'access> FnOnce(
+        DatagramClaimAccess<'access, TestDatagram>,
+        &DatagramRouteMatchInfo,
+    ) -> DatagramClaimOutcome<
+        'access,
+        Authenticated,
+        Vec<u8>,
+        TestDatagram,
+    > + '_ {
+        move |access, _route| {
+            let Some(key) = self.keys.current() else {
+                self.last_attempt = Some(LastAttempt::MissingKey);
+                return DatagramClaimOutcome::Unclaimed(access);
+            };
+            // Restore from the read-only original; an earlier failure may have
+            // overwritten the scratch buffer.
+            let mut scratch = mem::take(&mut self.scratch);
+            scratch.clear();
+            scratch.extend_from_slice(access.bytes());
+            for byte in &mut scratch[2..] {
+                *byte ^= key;
+            }
+            if scratch[0] != key {
+                self.last_attempt = Some(LastAttempt::WrongKey);
+                return DatagramClaimOutcome::Abandoned(scratch);
+            }
+            // Authenticated: prepare the result, then take the datagram. The
+            // packet number is only a candidate; the connection is not touched.
+            let packet_number = scratch[1];
+            scratch.drain(..2);
+            let packet = Authenticated {
+                packet_number,
+                plaintext: scratch,
+            };
+            DatagramClaimOutcome::Claimed(access.into_exclusive(), packet)
+        }
     }
 
     /// Processing by the owner of the connection: checks the current
     /// acceptance rules, then commits.
-    fn process(&self, delivery: ExclusiveDatagramDelivery<TestDatagram, Self>) -> bool {
-        let (_datagram, state) = delivery.consume();
-        let PacketState::Authenticated {
-            packet_number,
-            plaintext,
-        } = state.into_parts().1
-        else {
-            // A directly taken datagram was never judged; this toy processing
-            // does not authenticate it after the fact.
-            return false;
-        };
-        assert_eq!(plaintext, b"payload");
-        let mut largest = self.connection.largest_packet_number.lock().unwrap();
-        if largest.is_some_and(|largest| packet_number <= largest) {
+    fn process(
+        &mut self,
+        delivery: ExclusiveDatagramDelivery<TestDatagram>,
+        packet: Authenticated,
+    ) -> bool {
+        let (_datagram, _route) = delivery.consume();
+        assert_eq!(packet.plaintext, b"payload");
+        if self
+            .largest_packet_number
+            .is_some_and(|largest| packet.packet_number <= largest)
+        {
             return false;
         }
-        *largest = Some(packet_number);
+        self.largest_packet_number = Some(packet.packet_number);
         true
-    }
-}
-
-impl DatagramDeliverer<TestDatagram> for Endpoint {
-    type Handoff = UnclaimedSink;
-    type DelivererDatagramState = PacketState;
-
-    fn new_datagram_state(
-        &self,
-        _datagram: DatagramView<'_>,
-        _route: &DatagramRouteMatchInfo,
-    ) -> PacketState {
-        PacketState::Unprepared {
-            scratch: Vec::new(),
-            last_attempt: None,
-        }
-    }
-
-    fn try_claim<'access>(
-        &self,
-        access: DatagramClaimAccess<'access, TestDatagram>,
-        _route: &DatagramRouteMatchInfo,
-        state: PacketState,
-    ) -> DatagramClaimOutcome<'access, TestDatagram, PacketState> {
-        let PacketState::Unprepared { mut scratch, .. } = state else {
-            unreachable!("an authenticated state is always claimed")
-        };
-        let Some(key) = self.keys.current() else {
-            let state = PacketState::Unprepared {
-                scratch,
-                last_attempt: Some(LastAttempt::MissingKey),
-            };
-            return DatagramClaimOutcome::Unclaimed { access, state };
-        };
-        // Restore from the read-only original; an earlier failure may have
-        // overwritten the scratch buffer.
-        scratch.clear();
-        scratch.extend_from_slice(access.bytes());
-        for byte in &mut scratch[2..] {
-            *byte ^= key;
-        }
-        if scratch[0] != key {
-            let state = PacketState::Unprepared {
-                scratch,
-                last_attempt: Some(LastAttempt::WrongKey),
-            };
-            return DatagramClaimOutcome::Unclaimed { access, state };
-        }
-        // Authenticated: prepare the result, then take the datagram. The
-        // packet number is only a candidate; the connection is not touched.
-        let packet_number = scratch[1];
-        scratch.drain(..2);
-        let state = PacketState::Authenticated {
-            packet_number,
-            plaintext: scratch,
-        };
-        DatagramClaimOutcome::Claimed {
-            datagram: access.into_exclusive(),
-            state,
-        }
-    }
-
-    fn deliver(&self, delivery: DatagramDelivery<TestDatagram, Self>) {
-        self.deliveries.lock().unwrap().push(delivery);
     }
 }
 
@@ -193,20 +143,9 @@ fn protected(key: u8, packet_number: u8) -> TestDatagram {
     TestDatagram::new(&bytes).0
 }
 
-fn route_to(
-    datagram: TestDatagram,
-    finish: DatagramFinishPolicy<UnclaimedSink>,
-    endpoints: &[&Arc<Endpoint>],
-) {
-    let entries = endpoints
-        .iter()
-        .map(|endpoint| {
-            let erased: Arc<dyn ErasedDatagramDeliverer<TestDatagram, UnclaimedSink>> =
-                Arc::clone(endpoint) as _;
-            (erased, super::support::route_info())
-        })
-        .collect::<Vec<_>>();
-    prepare_claim(datagram, finish, entries).dispatch();
+/// A deliverer that only stores its deliveries.
+fn deliverer() -> Arc<Probe> {
+    Probe::new(Judging::Reject)
 }
 
 const KEY: u8 = 0x5a;
@@ -214,17 +153,17 @@ const KEY: u8 = 0x5a;
 #[test]
 fn key_installed_before_the_wait_is_found_by_the_recheck() {
     let keys = Arc::new(KeyStore::default());
-    let endpoint = Endpoint::new(&keys);
+    let endpoint = deliverer();
+    let mut path = PathReceiver::new(&keys);
     let sink = UnclaimedSink::default();
-    route_to(protected(KEY, 1), sink.policy(), &[&endpoint]);
+    route(protected(KEY, 1), sink.policy(), &[&endpoint]);
 
     let DatagramClaimAttempt::Unclaimed(candidate) =
-        ready(endpoint.take_candidate().try_exclusive())
+        ready(endpoint.take_candidate().try_exclusive(path.judgment()))
     else {
         panic!("no key yet");
     };
-    let last = candidate.initialized_state().unwrap().last_attempt();
-    assert_eq!(last, Some(LastAttempt::MissingKey));
+    assert_eq!(path.last_attempt, Some(LastAttempt::MissingKey));
 
     // Checking first and registering afterwards would sleep forever: the key
     // arrives between the check and the registration.
@@ -238,21 +177,24 @@ fn key_installed_before_the_wait_is_found_by_the_recheck() {
     let mut installed = pin!(keys.installed.notified());
     installed.as_mut().enable();
     assert_eq!(keys.current(), Some(KEY));
-    let DatagramClaimAttempt::Claimed(delivery) = ready(candidate.try_exclusive()) else {
+    let DatagramClaimAttempt::Claimed(delivery, packet) =
+        ready(candidate.try_exclusive(path.judgment()))
+    else {
         panic!("the key is available now");
     };
-    assert!(endpoint.process(delivery));
+    assert!(path.process(delivery, packet));
     assert_eq!(sink.len(), 0);
 }
 
 #[test]
 fn key_installed_after_registering_wakes_the_receiver() {
     let keys = Arc::new(KeyStore::default());
-    let endpoint = Endpoint::new(&keys);
+    let endpoint = deliverer();
+    let mut path = PathReceiver::new(&keys);
     let sink = UnclaimedSink::default();
-    route_to(protected(KEY, 1), sink.policy(), &[&endpoint]);
+    route(protected(KEY, 1), sink.policy(), &[&endpoint]);
     let DatagramClaimAttempt::Unclaimed(candidate) =
-        ready(endpoint.take_candidate().try_exclusive())
+        ready(endpoint.take_candidate().try_exclusive(path.judgment()))
     else {
         panic!("no key yet");
     };
@@ -269,10 +211,12 @@ fn key_installed_after_registering_wakes_the_receiver() {
         poll_with(installed.as_mut(), &waker),
         Poll::Ready(())
     ));
-    let DatagramClaimAttempt::Claimed(delivery) = ready(candidate.try_exclusive()) else {
+    let DatagramClaimAttempt::Claimed(delivery, packet) =
+        ready(candidate.try_exclusive(path.judgment()))
+    else {
         panic!("the key is available now");
     };
-    assert!(endpoint.process(delivery));
+    assert!(path.process(delivery, packet));
 }
 
 #[test]
@@ -281,57 +225,72 @@ fn authentication_prepares_without_committing_protocol_state() {
     let other_keys = Arc::new(KeyStore::default());
     keys.install(KEY);
     other_keys.install(KEY ^ 0xff);
-    let owner = Endpoint::new(&keys);
-    let stranger = Endpoint::new(&other_keys);
-    route_to(
+    let owner = deliverer();
+    let stranger = deliverer();
+    let mut owner_path = PathReceiver::new(&keys);
+    let mut stranger_path = PathReceiver::new(&other_keys);
+    route(
         protected(KEY, 7),
         DatagramFinishPolicy::LastTakes,
         &[&stranger, &owner],
     );
 
-    let DatagramClaimAttempt::Unclaimed(rejected) =
-        ready(stranger.take_candidate().try_exclusive())
-    else {
+    let DatagramClaimAttempt::Abandoned(scratch) = ready(
+        stranger
+            .take_candidate()
+            .try_exclusive(stranger_path.judgment()),
+    ) else {
         panic!("the other key does not authenticate");
     };
-    assert_eq!(
-        rejected.initialized_state().unwrap().last_attempt(),
-        Some(LastAttempt::WrongKey)
-    );
-    assert_eq!(stranger.largest(), None);
+    assert_eq!(stranger_path.last_attempt, Some(LastAttempt::WrongKey));
+    // The buffer comes back for the next judgment; its contents mean nothing.
+    assert!(scratch.capacity() > 0);
+    stranger_path.scratch = scratch;
+    assert_eq!(stranger_path.largest_packet_number, None);
 
-    let DatagramClaimAttempt::Claimed(delivery) = ready(owner.take_candidate().try_exclusive())
+    // The stranger left, so the owner is the only participant and takes the
+    // datagram without a judgment; nothing was authenticated.
+    let DatagramClaimAttempt::Exclusive(unjudged) =
+        ready(owner.take_candidate().try_exclusive(owner_path.judgment()))
     else {
-        panic!("the right key authenticates");
+        panic!("the sole participant takes the datagram");
     };
-    assert!(matches!(
-        delivery.initialized_state(),
-        Some(PacketState::Authenticated {
-            packet_number: 7,
-            ..
-        })
-    ));
-    assert_eq!(owner.largest(), None, "claiming commits nothing");
-    assert!(matches!(
-        ready(rejected.try_exclusive()),
-        DatagramClaimAttempt::ClaimedElsewhere
-    ));
+    drop(unjudged);
+    assert_eq!(owner_path.last_attempt, None);
 
-    assert!(owner.process(delivery));
-    assert_eq!(owner.largest(), Some(7));
-
-    // A replay authenticates and is claimed again, but processing applies the
-    // current rules and refuses it.
-    route_to(
-        protected(KEY, 7),
+    // With competition left in place, the owner's judgment runs.
+    route(
+        protected(KEY, 8),
         DatagramFinishPolicy::LastTakes,
         &[&stranger, &owner],
     );
     let _competing = stranger.take_candidate();
-    let DatagramClaimAttempt::Claimed(replay) = ready(owner.take_candidate().try_exclusive())
+    let DatagramClaimAttempt::Claimed(delivery, packet) =
+        ready(owner.take_candidate().try_exclusive(owner_path.judgment()))
     else {
         panic!("the right key authenticates");
     };
-    assert!(!owner.process(replay));
-    assert_eq!(owner.largest(), Some(7));
+    assert_eq!(packet.packet_number, 8);
+    assert_eq!(
+        owner_path.largest_packet_number, None,
+        "claiming commits nothing"
+    );
+    assert!(owner_path.process(delivery, packet));
+    assert_eq!(owner_path.largest_packet_number, Some(8));
+
+    // A replay authenticates and is claimed again, but processing applies the
+    // current rules and refuses it.
+    route(
+        protected(KEY, 8),
+        DatagramFinishPolicy::LastTakes,
+        &[&stranger, &owner],
+    );
+    let _competing = stranger.take_candidate();
+    let DatagramClaimAttempt::Claimed(replay, packet) =
+        ready(owner.take_candidate().try_exclusive(owner_path.judgment()))
+    else {
+        panic!("the right key authenticates");
+    };
+    assert!(!owner_path.process(replay, packet));
+    assert_eq!(owner_path.largest_packet_number, Some(8));
 }

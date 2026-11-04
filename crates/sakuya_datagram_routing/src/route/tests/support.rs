@@ -16,7 +16,7 @@ use sakuya_wire::version::Version;
 
 use crate::claim::candidate::DatagramClaimAttempt;
 use crate::claim::deliverer::{
-    DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramView, ExclusiveDatagram,
+    DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, ExclusiveDatagram,
 };
 use crate::claim::delivery::DatagramDelivery;
 use crate::claim::erased::SendDatagramDeliverer;
@@ -182,12 +182,13 @@ pub(super) enum Judging {
     Accept,
 }
 
-/// A deliverer that keeps every delivery.
+/// A deliverer that keeps every delivery, together with the judgment its
+/// receiver passes to attempts.
 pub(super) struct Recorder {
     pub(super) label: u32,
     judging: Mutex<Judging>,
     claims: AtomicUsize,
-    deliveries: Mutex<Vec<DatagramDelivery<Datagram, Recorder>>>,
+    deliveries: Mutex<Vec<DatagramDelivery<Datagram, Handoff>>>,
 }
 
 impl Recorder {
@@ -212,7 +213,7 @@ impl Recorder {
         self.deliveries.lock().unwrap().len()
     }
 
-    pub(super) fn take(&self) -> Vec<DatagramDelivery<Datagram, Recorder>> {
+    pub(super) fn take(&self) -> Vec<DatagramDelivery<Datagram, Handoff>> {
         std::mem::take(&mut self.deliveries.lock().unwrap())
     }
 
@@ -226,21 +227,39 @@ impl Recorder {
             .collect()
     }
 
-    /// Attempts every competing delivery and consumes every exclusive one,
-    /// returning the datagrams this deliverer ended up owning.
+    /// The judgment of this recorder's receiver: counts the call and decides
+    /// by the current mode.
+    pub(super) fn judge<'access>(
+        &self,
+        access: DatagramClaimAccess<'access, Datagram>,
+    ) -> DatagramClaimOutcome<'access, (), (), Datagram> {
+        self.claims.fetch_add(1, Ordering::SeqCst);
+        match *self.judging.lock().unwrap() {
+            Judging::Reject => DatagramClaimOutcome::Unclaimed(access),
+            Judging::Accept => DatagramClaimOutcome::Claimed(access.into_exclusive(), ()),
+        }
+    }
+
+    /// Attempts every competing delivery with [`judge`](Self::judge) and
+    /// consumes every exclusive one, returning the datagrams this deliverer
+    /// ended up owning.
     pub(super) fn settle(&self) -> Vec<Datagram> {
         let mut owned = Vec::new();
         for delivery in self.take() {
             let exclusive = match delivery {
                 DatagramDelivery::Exclusive(exclusive) => exclusive,
-                DatagramDelivery::Competing(candidate) => match ready(candidate.try_exclusive()) {
-                    DatagramClaimAttempt::Claimed(exclusive) => exclusive,
-                    DatagramClaimAttempt::Unclaimed(candidate) => {
-                        drop(candidate);
-                        continue;
+                DatagramDelivery::Competing(candidate) => {
+                    match ready(candidate.try_exclusive(|access, _route| self.judge(access))) {
+                        DatagramClaimAttempt::Claimed(exclusive, ())
+                        | DatagramClaimAttempt::Exclusive(exclusive) => exclusive,
+                        DatagramClaimAttempt::Unclaimed(candidate) => {
+                            drop(candidate);
+                            continue;
+                        }
+                        DatagramClaimAttempt::Abandoned(())
+                        | DatagramClaimAttempt::ClaimedElsewhere => continue,
                     }
-                    DatagramClaimAttempt::ClaimedElsewhere => continue,
-                },
+                }
             };
             owned.push(exclusive.consume().0.into_inner());
         }
@@ -261,7 +280,7 @@ pub(super) fn ready<F: std::future::Future>(future: F) -> F::Output {
 }
 
 pub(super) fn route_match(
-    delivery: &DatagramDelivery<Datagram, Recorder>,
+    delivery: &DatagramDelivery<Datagram, Handoff>,
 ) -> &DatagramRouteMatchInfo {
     match delivery {
         DatagramDelivery::Competing(candidate) => candidate.route_match(),
@@ -271,27 +290,8 @@ pub(super) fn route_match(
 
 impl DatagramDeliverer<Datagram> for Recorder {
     type Handoff = Handoff;
-    type DelivererDatagramState = ();
 
-    fn new_datagram_state(&self, _datagram: DatagramView<'_>, _route: &DatagramRouteMatchInfo) {}
-
-    fn try_claim<'access>(
-        &self,
-        access: DatagramClaimAccess<'access, Datagram>,
-        _route: &DatagramRouteMatchInfo,
-        state: (),
-    ) -> DatagramClaimOutcome<'access, Datagram, ()> {
-        self.claims.fetch_add(1, Ordering::SeqCst);
-        match *self.judging.lock().unwrap() {
-            Judging::Reject => DatagramClaimOutcome::Unclaimed { access, state },
-            Judging::Accept => DatagramClaimOutcome::Claimed {
-                datagram: access.into_exclusive(),
-                state,
-            },
-        }
-    }
-
-    fn deliver(&self, delivery: DatagramDelivery<Datagram, Self>) {
+    fn deliver(&self, delivery: DatagramDelivery<Datagram, Handoff>) {
         self.deliveries.lock().unwrap().push(delivery);
     }
 }

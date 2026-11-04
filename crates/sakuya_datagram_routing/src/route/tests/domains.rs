@@ -8,12 +8,12 @@ use sakuya_link::LinkId;
 use sakuya_wire::version::Version;
 
 use super::support::{
-    Datagram, Handoff, Index, Recorder, Router, Target, Work, binding, cid, initial, lengths, link,
-    nonempty, ready,
+    Datagram, Handoff, Index, Router, Target, Work, binding, cid, initial, lengths, link, nonempty,
+    ready,
 };
 use crate::claim::candidate::{DatagramClaimAttempt, DatagramClaimCandidate, DatagramClaimFuture};
 use crate::claim::deliverer::{
-    DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramView, ExclusiveDatagram,
+    DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, ExclusiveDatagram,
 };
 use crate::claim::delivery::DatagramDelivery;
 use crate::claim::erased::ErasedDatagramDeliverer;
@@ -46,9 +46,9 @@ impl ReflowProvider<LocalPayload, LocalLink> for LocalReflow {
     }
 }
 
-/// A deliverer whose private state and deliveries stay on this thread.
+/// A deliverer whose deliveries stay on this thread.
 struct LocalDeliverer {
-    deliveries: RefCell<Vec<DatagramDelivery<LocalDatagram, Self>>>,
+    deliveries: RefCell<Vec<DatagramDelivery<LocalDatagram, LocalHandoff>>>,
 }
 
 impl LocalDeliverer {
@@ -65,27 +65,8 @@ impl LocalDeliverer {
 
 impl DatagramDeliverer<LocalDatagram> for LocalDeliverer {
     type Handoff = LocalHandoff;
-    type DelivererDatagramState = Rc<Cell<usize>>;
 
-    fn new_datagram_state(
-        &self,
-        _: DatagramView<'_>,
-        _: &DatagramRouteMatchInfo,
-    ) -> Rc<Cell<usize>> {
-        Rc::default()
-    }
-
-    fn try_claim<'access>(
-        &self,
-        access: DatagramClaimAccess<'access, LocalDatagram>,
-        _: &DatagramRouteMatchInfo,
-        state: Rc<Cell<usize>>,
-    ) -> DatagramClaimOutcome<'access, LocalDatagram, Rc<Cell<usize>>> {
-        state.set(state.get() + 1);
-        DatagramClaimOutcome::Unclaimed { access, state }
-    }
-
-    fn deliver(&self, delivery: DatagramDelivery<LocalDatagram, Self>) {
+    fn deliver(&self, delivery: DatagramDelivery<LocalDatagram, LocalHandoff>) {
         self.deliveries.borrow_mut().push(delivery);
     }
 }
@@ -181,10 +162,16 @@ fn local_routing_domain_accepts_new_initials_without_send() {
     else {
         panic!("an acceptable Initial competes");
     };
-    let DatagramClaimAttempt::Unclaimed(candidate) = ready(candidate.try_exclusive()) else {
+    // The judgment keeps its own local state.
+    let judged = Rc::new(Cell::new(0));
+    let attempt = candidate.try_exclusive(|access, _route| {
+        judged.set(judged.get() + 1);
+        DatagramClaimOutcome::<(), (), _>::Unclaimed(access)
+    });
+    let DatagramClaimAttempt::Unclaimed(candidate) = ready(attempt) else {
         panic!("the existing entry leaves the datagram");
     };
-    assert_eq!(candidate.initialized_state().unwrap().get(), 1);
+    assert_eq!(judged.get(), 1);
     assert!(queue.borrow().is_empty());
     drop(candidate);
     assert_eq!(queue.borrow().len(), 1);
@@ -212,6 +199,10 @@ fn local_routing_domain_accepts_new_initials_without_send() {
 fn routing_domain_shared_between_threads_is_send() {
     fn send<T: Send>() {}
     fn send_sync<T: ?Sized + Send + Sync>() {}
+    type Judgment = for<'access, 'route> fn(
+        DatagramClaimAccess<'access, Datagram>,
+        &'route DatagramRouteMatchInfo,
+    ) -> DatagramClaimOutcome<'access, (), (), Datagram>;
 
     send_sync::<Router>();
     send_sync::<Index>();
@@ -219,7 +210,7 @@ fn routing_domain_shared_between_threads_is_send() {
     send::<Handoff>();
     send::<Work>();
     send::<RouteEntryRegistration<Target>>();
-    send::<DatagramClaimCandidate<Datagram, Recorder>>();
-    send::<DatagramClaimFuture<Datagram, Recorder>>();
-    send::<DatagramDelivery<Datagram, Recorder>>();
+    send::<DatagramClaimCandidate<Datagram, Handoff>>();
+    send::<DatagramClaimFuture<Datagram, Handoff, (), (), Judgment>>();
+    send::<DatagramDelivery<Datagram, Handoff>>();
 }

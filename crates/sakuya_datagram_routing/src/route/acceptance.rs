@@ -11,9 +11,8 @@
 //! Nothing here requires `Send`. A routing domain used on one thread can
 //! accept new Initials with local deliverers, datagrams and providers; a
 //! domain shared between threads uses a `Send + Sync` provider, which makes
-//! its [`ReflowHandoff`] `Send`, as
-//! [`SendDatagramDeliverer`](crate::claim::erased::SendDatagramDeliverer)
-//! requires.
+//! its [`ReflowHandoff`] `Send`, so that the candidates of its datagrams can
+//! move between threads.
 //!
 //! Resuming prepares a new receiver with the [`InitialReceiverFactory`]
 //! first, outside the index, and then rechecks the key of the Initial within

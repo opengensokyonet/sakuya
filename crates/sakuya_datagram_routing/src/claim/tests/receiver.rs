@@ -5,44 +5,22 @@ use std::sync::Arc;
 
 use super::support::{TestDatagram, drops, ready};
 use crate::claim::candidate::DatagramClaimAttempt;
-use crate::claim::deliverer::{
-    DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramView,
-};
+use crate::claim::deliverer::{DatagramClaimOutcome, DatagramDeliverer};
 use crate::claim::delivery::DatagramDelivery;
 use crate::claim::erased::SendDatagramDeliverer;
 use crate::claim::finish::ReleaseUnclaimed;
 use crate::claim::group::prepare_claim;
 use crate::claim::queue::{DatagramDeliveryPoster, DatagramDeliveryQueue};
-use crate::claim::route_match::DatagramRouteMatchInfo;
 use crate::claim::shared::DatagramFinishPolicy;
 
-type Delivery = DatagramDelivery<TestDatagram, Queued>;
+type Delivery = DatagramDelivery<TestDatagram, ReleaseUnclaimed>;
 
-/// Claims every datagram while its receiver is open.
+/// Queues every delivery for its receiver.
 struct Queued {
     poster: DatagramDeliveryPoster<Delivery>,
 }
 
 impl DatagramDeliverer<TestDatagram> for Queued {
-    type DelivererDatagramState = ();
-
-    fn new_datagram_state(&self, _datagram: DatagramView<'_>, _route: &DatagramRouteMatchInfo) {}
-
-    fn try_claim<'access>(
-        &self,
-        access: DatagramClaimAccess<'access, TestDatagram>,
-        _route: &DatagramRouteMatchInfo,
-        state: (),
-    ) -> DatagramClaimOutcome<'access, TestDatagram, ()> {
-        if self.poster.is_closed() {
-            return DatagramClaimOutcome::Unclaimed { access, state };
-        }
-        DatagramClaimOutcome::Claimed {
-            datagram: access.into_exclusive(),
-            state,
-        }
-    }
-
     fn deliver(&self, delivery: Delivery) {
         self.poster.post(delivery);
     }
@@ -85,8 +63,11 @@ fn queued_competing_delivery_is_claimed_and_consumed_by_the_receiver() {
     let Some(DatagramDelivery::Competing(candidate)) = queue.try_recv() else {
         panic!("the delivery waits in the queue");
     };
-    let DatagramClaimAttempt::Claimed(delivery) = ready(candidate.try_exclusive()) else {
-        panic!("an open receiver claims");
+    let attempt = candidate.try_exclusive(|access, _route| {
+        DatagramClaimOutcome::<_, (), _>::Claimed(access.into_exclusive(), ())
+    });
+    let DatagramClaimAttempt::Claimed(delivery, ()) = ready(attempt) else {
+        panic!("the receiver's judgment claims");
     };
     let (datagram, _) = delivery.consume();
     assert_eq!(datagram.bytes(), b"queued");
@@ -95,7 +76,7 @@ fn queued_competing_delivery_is_claimed_and_consumed_by_the_receiver() {
 }
 
 #[test]
-fn closed_receiver_drops_deliveries_and_stops_claiming() {
+fn closed_receiver_drops_its_deliveries_and_candidates() {
     let (queue, deliverer) = receiver();
     let (mut other_queue, other) = receiver();
     drop(queue);
@@ -105,28 +86,24 @@ fn closed_receiver_drops_deliveries_and_stops_claiming() {
     route_to(datagram, DatagramFinishPolicy::LastTakes, &[&deliverer]);
     assert_eq!(drops(&single_drops), 1);
 
-    // A candidate the closed receiver still holds no longer claims.
-    let (mut queue, deliverer) = receiver();
+    // A candidate queued for a receiver that then closes exits with the
+    // queue, so the other candidate is left alone with the datagram.
+    let (queue, deliverer) = receiver();
     let (datagram, datagram_drops) = TestDatagram::new(b"held");
     route_to(
         datagram,
         DatagramFinishPolicy::LastTakes,
         &[&deliverer, &other],
     );
-    let Some(DatagramDelivery::Competing(held)) = queue.try_recv() else {
-        panic!("the delivery waits in the queue");
-    };
     drop(queue);
-    let DatagramClaimAttempt::Unclaimed(held) = ready(held.try_exclusive()) else {
-        panic!("a failed deliverer leaves the datagram");
-    };
-    drop(held);
     let Some(DatagramDelivery::Competing(candidate)) = other_queue.try_recv() else {
         panic!("the other receiver got its delivery");
     };
     assert!(matches!(
-        ready(candidate.try_exclusive()),
-        DatagramClaimAttempt::Claimed(_)
+        ready(candidate.try_exclusive(|access, _route| {
+            DatagramClaimOutcome::<(), (), _>::Unclaimed(access)
+        })),
+        DatagramClaimAttempt::Exclusive(_)
     ));
     assert_eq!(drops(&datagram_drops), 1);
 }
@@ -143,11 +120,10 @@ fn queued_deliveries_keep_neither_the_receiver_nor_the_deliverer_alive() {
     );
     let weak = Arc::downgrade(&deliverer);
     drop(deliverer);
-    // The queued candidate holds the deliverer, but not the queue.
-    assert!(weak.upgrade().is_some());
+    // The queued candidate does not refer to the deliverer.
+    assert!(weak.upgrade().is_none());
 
     drop(queue);
-    assert!(weak.upgrade().is_none());
     assert_eq!(
         drops(&datagram_drops),
         0,

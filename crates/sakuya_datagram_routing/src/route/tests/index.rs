@@ -15,13 +15,11 @@ use super::support::{
     nonempty, register, short,
 };
 use crate::claim::candidate::DatagramClaimAttempt;
-use crate::claim::deliverer::{
-    DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramView,
-};
+use crate::claim::deliverer::DatagramDeliverer;
 use crate::claim::delivery::DatagramDelivery;
 use crate::claim::erased::ErasedDatagramDeliverer;
+use crate::claim::finish::ReleaseUnclaimed;
 use crate::claim::queue::DatagramDeliveryQueue;
-use crate::claim::route_match::DatagramRouteMatchInfo;
 use crate::route::association::{MatchAssociation, PacketForms, RouteMatcher};
 use crate::route::index::RouteIndex;
 use crate::route::interpretation::FirstPacketInterpretation;
@@ -149,8 +147,8 @@ fn revoking_removes_only_its_instance_and_keeps_delivered_candidates() {
         panic!("two entries compete");
     };
     assert!(matches!(
-        super::support::ready(candidate.try_exclusive()),
-        DatagramClaimAttempt::Claimed(_)
+        super::support::ready(candidate.try_exclusive(|access, _route| old.judge(access))),
+        DatagramClaimAttempt::Claimed(..)
     ));
 }
 
@@ -205,20 +203,8 @@ fn collision_keeps_every_deliverer_even_when_they_share_a_receiver() {
 
     impl DatagramDeliverer<Datagram> for Feeding {
         type Handoff = Handoff;
-        type DelivererDatagramState = ();
 
-        fn new_datagram_state(&self, _: DatagramView<'_>, _: &DatagramRouteMatchInfo) {}
-
-        fn try_claim<'access>(
-            &self,
-            access: DatagramClaimAccess<'access, Datagram>,
-            _: &DatagramRouteMatchInfo,
-            state: (),
-        ) -> DatagramClaimOutcome<'access, Datagram, ()> {
-            DatagramClaimOutcome::Unclaimed { access, state }
-        }
-
-        fn deliver(&self, delivery: DatagramDelivery<Datagram, Self>) {
+        fn deliver(&self, delivery: DatagramDelivery<Datagram, Handoff>) {
             self.queue.post((
                 self.label,
                 matches!(delivery, DatagramDelivery::Competing(_)),
@@ -262,26 +248,7 @@ fn local_routing_domain_does_not_require_send() {
     }
 
     impl DatagramDeliverer<ReceivedLocal> for Local<'_> {
-        type DelivererDatagramState = Rc<Vec<u8>>;
-
-        fn new_datagram_state(
-            &self,
-            datagram: DatagramView<'_>,
-            _: &DatagramRouteMatchInfo,
-        ) -> Rc<Vec<u8>> {
-            Rc::new(datagram.bytes().to_vec())
-        }
-
-        fn try_claim<'access>(
-            &self,
-            access: DatagramClaimAccess<'access, ReceivedLocal>,
-            _: &DatagramRouteMatchInfo,
-            state: Rc<Vec<u8>>,
-        ) -> DatagramClaimOutcome<'access, ReceivedLocal, Rc<Vec<u8>>> {
-            DatagramClaimOutcome::Unclaimed { access, state }
-        }
-
-        fn deliver(&self, _delivery: DatagramDelivery<ReceivedLocal, Self>) {
+        fn deliver(&self, _delivery: DatagramDelivery<ReceivedLocal, ReleaseUnclaimed>) {
             self.seen.set(self.seen.get() + 1);
         }
     }
@@ -292,20 +259,7 @@ fn local_routing_domain_does_not_require_send() {
     }
 
     impl DatagramDeliverer<ReceivedLocal> for Other<'_> {
-        type DelivererDatagramState = ();
-
-        fn new_datagram_state(&self, _: DatagramView<'_>, _: &DatagramRouteMatchInfo) {}
-
-        fn try_claim<'access>(
-            &self,
-            access: DatagramClaimAccess<'access, ReceivedLocal>,
-            _: &DatagramRouteMatchInfo,
-            state: (),
-        ) -> DatagramClaimOutcome<'access, ReceivedLocal, ()> {
-            DatagramClaimOutcome::Unclaimed { access, state }
-        }
-
-        fn deliver(&self, _delivery: DatagramDelivery<ReceivedLocal, Self>) {
+        fn deliver(&self, _delivery: DatagramDelivery<ReceivedLocal, ReleaseUnclaimed>) {
             self.seen.set(self.seen.get() + 10);
         }
     }

@@ -4,14 +4,14 @@
 //! it, freezes the matched entries, and then calls [`prepare_claim`] with the
 //! datagram, its finish policy and the frozen entries. Preparation builds only
 //! light objects: the shared core and one participation credential per entry,
-//! never private state, and it calls no author code. Routing then releases its
+//! and it calls no author code and no judgment. Routing then releases its
 //! table locks and calls [`PreparedClaim::dispatch`], which commits the set and
 //! delivers each candidate to its deliverer in order.
 //!
 //! | Frozen entries | Last takes | On unclaimed |
 //! | --- | --- | --- |
 //! | none | the datagram is released at dispatch | the datagram is handed off at dispatch |
-//! | one | an exclusive delivery with uninitialized state | one competing candidate |
+//! | one | an exclusive delivery | one competing candidate |
 //! | several | competing candidates | competing candidates |
 //!
 //! Dropping a prepared set without dispatching it, for example while
@@ -23,7 +23,9 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 
+use super::candidate::DatagramClaimCandidate;
 use super::deliverer::ExclusiveDatagram;
+use super::delivery::{DatagramDelivery, ExclusiveDatagramDelivery};
 use super::erased::ErasedDatagramDeliverer;
 use super::finish::UnclaimedHandoff;
 use super::route_match::DatagramRouteMatchInfo;
@@ -129,12 +131,15 @@ where
                 target,
                 datagram,
                 route,
-            } => target.deliver_exclusive(datagram, route),
+            } => target.dispatch_delivery(DatagramDelivery::Exclusive(
+                ExclusiveDatagramDelivery::new(datagram, route),
+            )),
             Prepared::Competing { core, candidates } => {
                 core.commit();
                 drop(core);
                 for (target, participation, route) in candidates {
-                    target.deliver_competing(participation, route);
+                    let candidate = DatagramClaimCandidate::new(participation, route);
+                    target.dispatch_delivery(DatagramDelivery::Competing(candidate));
                 }
             }
         }

@@ -1,13 +1,14 @@
 //! A delivery queue for queue-style deliverers
 //!
 //! A queue-style deliverer passes each delivery to its datagram receiver
-//! through a queue instead of processing it on the dispatch stack. Ownership
-//! must not form a cycle in which the deliverer keeps the queue alive, the
-//! queue keeps queued deliveries alive, and every delivery keeps the deliverer
-//! alive. So the receiver owns the queue, [`DatagramDeliveryQueue`], together
-//! with the only long-lived sender, and the deliverer holds a
-//! [`DatagramDeliveryPoster`], which reaches the sender through a standard
-//! library [`Weak`] and upgrades it only for the duration of one send.
+//! through a queue instead of processing it on the dispatch stack. The
+//! deliverer belongs to its route entry, and route entries and query
+//! snapshots may keep it alive after the receiver is gone; the receiver's
+//! queue must not live as long as that. So the receiver owns the queue,
+//! [`DatagramDeliveryQueue`], together with the only long-lived sender, and
+//! the deliverer holds a [`DatagramDeliveryPoster`], which reaches the sender
+//! through a standard library [`Weak`] and upgrades it only for the duration
+//! of one send.
 //!
 //! Closing is dropping the queue. Sending and closing meet at the queue's own
 //! synchronization: a successful upgrade does not mean the queue still
@@ -20,51 +21,59 @@
 //! Tokio's `WeakSender` is not used: with it, a queue whose receiver is gone
 //! can still retain a sent item for as long as another sender exists.
 //!
-//! A deliverer built on this module:
+//! A deliverer built on this module, and a receiver that judges the queued
+//! candidates itself:
 //!
 //! ```
 //! use std::num::NonZeroUsize;
 //! use std::sync::Arc;
 //!
-//! use sakuya_datagram_routing::claim::deliverer::{
-//!     DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, DatagramView,
-//! };
+//! use sakuya_datagram_routing::claim::candidate::DatagramClaimAttempt;
+//! use sakuya_datagram_routing::claim::deliverer::{DatagramClaimOutcome, DatagramDeliverer};
 //! use sakuya_datagram_routing::claim::delivery::DatagramDelivery;
+//! use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
 //! use sakuya_datagram_routing::claim::queue::{DatagramDeliveryPoster, DatagramDeliveryQueue};
-//! use sakuya_datagram_routing::claim::route_match::DatagramRouteMatchInfo;
 //!
-//! /// Claims every datagram whose first byte matches, and queues deliveries.
+//! type Delivery = DatagramDelivery<Vec<u8>, ReleaseUnclaimed>;
+//!
+//! /// Queues every delivery for its receiver.
 //! struct Queued {
-//!     first_byte: u8,
-//!     poster: DatagramDeliveryPoster<DatagramDelivery<Vec<u8>, Queued>>,
+//!     poster: DatagramDeliveryPoster<Delivery>,
 //! }
 //!
 //! impl DatagramDeliverer<Vec<u8>> for Queued {
-//!     type DelivererDatagramState = ();
-//!
-//!     fn new_datagram_state(&self, _: DatagramView<'_>, _: &DatagramRouteMatchInfo) {}
-//!
-//!     fn try_claim<'access>(
-//!         &self,
-//!         access: DatagramClaimAccess<'access, Vec<u8>>,
-//!         _: &DatagramRouteMatchInfo,
-//!         state: (),
-//!     ) -> DatagramClaimOutcome<'access, Vec<u8>, ()> {
-//!         // A closed receiver no longer claims anything.
-//!         if self.poster.is_closed() || access.bytes().first() != Some(&self.first_byte) {
-//!             return DatagramClaimOutcome::Unclaimed { access, state };
-//!         }
-//!         DatagramClaimOutcome::Claimed { datagram: access.into_exclusive(), state }
-//!     }
-//!
-//!     fn deliver(&self, delivery: DatagramDelivery<Vec<u8>, Self>) {
+//!     fn deliver(&self, delivery: Delivery) {
 //!         // After the receiver closed, this takes the delivery and drops it.
 //!         self.poster.post(delivery);
 //!     }
 //! }
 //!
+//! /// What the receiver does with one queued delivery.
+//! async fn receive(delivery: Delivery, first_byte: u8) -> Option<Vec<u8>> {
+//!     let exclusive = match delivery {
+//!         DatagramDelivery::Exclusive(exclusive) => exclusive,
+//!         DatagramDelivery::Competing(candidate) => {
+//!             let attempt = candidate.try_exclusive(|access, _route| {
+//!                 if access.bytes().first() == Some(&first_byte) {
+//!                     DatagramClaimOutcome::Claimed(access.into_exclusive(), ())
+//!                 } else {
+//!                     DatagramClaimOutcome::Abandoned(())
+//!                 }
+//!             });
+//!             match attempt.await {
+//!                 DatagramClaimAttempt::Claimed(exclusive, ())
+//!                 | DatagramClaimAttempt::Exclusive(exclusive) => exclusive,
+//!                 DatagramClaimAttempt::Unclaimed(_)
+//!                 | DatagramClaimAttempt::Abandoned(())
+//!                 | DatagramClaimAttempt::ClaimedElsewhere => return None,
+//!             }
+//!         }
+//!     };
+//!     Some(exclusive.consume().0.into_inner())
+//! }
+//!
 //! let mut queue = DatagramDeliveryQueue::new(NonZeroUsize::new(64).unwrap()).unwrap();
-//! let deliverer = Arc::new(Queued { first_byte: 0x40, poster: queue.poster() });
+//! let deliverer = Arc::new(Queued { poster: queue.poster() });
 //! assert!(queue.try_recv().is_none());
 //! drop(queue);
 //! assert!(deliverer.poster.is_closed());
