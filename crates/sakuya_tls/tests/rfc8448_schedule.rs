@@ -165,7 +165,7 @@ fn s3_server() {
     let (resumption, completed) = master
         .client_finished(&message(s3::CLIENT_FINISHED))
         .unwrap();
-    assert_secret(&completed.one_rtt_receive, s3::CLIENT_APPLICATION_TRAFFIC);
+    assert_secret(&completed.one_rtt_receive.0, s3::CLIENT_APPLICATION_TRAFFIC);
     assert_exporter(&completed.exporter, s3::EXPORTER_MASTER);
     let psk = resumption.ticket_psk(&nonce());
     assert_eq!(psk.secret().as_bytes(), hex(s3::TICKET_PSK));
@@ -365,7 +365,7 @@ fn s4_server() {
         .add(&hex(s4::END_OF_EARLY_DATA))
         .client_finished(&message(s4::CLIENT_FINISHED))
         .unwrap();
-    assert_secret(&completed.one_rtt_receive, s4::CLIENT_APPLICATION_TRAFFIC);
+    assert_secret(&completed.one_rtt_receive.0, s4::CLIENT_APPLICATION_TRAFFIC);
     assert_exporter(&completed.exporter, s4::EXPORTER_MASTER);
     let psk = resumption.ticket_psk(&nonce());
     assert_eq!(psk.secret().as_bytes(), ticket_psk(s4::RESUMPTION_MASTER));
@@ -487,7 +487,7 @@ fn s5_server() {
     let (resumption, completed) = master
         .client_finished(&message(s5::CLIENT_FINISHED))
         .unwrap();
-    assert_secret(&completed.one_rtt_receive, s5::CLIENT_APPLICATION_TRAFFIC);
+    assert_secret(&completed.one_rtt_receive.0, s5::CLIENT_APPLICATION_TRAFFIC);
     assert_exporter(&completed.exporter, s5::EXPORTER_MASTER);
     let psk = resumption.ticket_psk(&nonce());
     assert_eq!(psk.secret().as_bytes(), ticket_psk(s5::RESUMPTION_MASTER));

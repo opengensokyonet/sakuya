@@ -101,7 +101,8 @@ use crate::{
     role::Client,
     schedule::{
         Authentication, CertificateVerifyError, Exporter, FinishedError, HandshakeTrafficSecrets,
-        OneRttTrafficSecrets, PskEarlySecret, ResumptionPsk, Transcript, UnofferedPsk, ZeroRttSend,
+        OneRttTrafficSecrets, PskEarlySecret, ResumptionPsk, Transcript, UnofferedPsk,
+        ZeroRttSendTrafficSecret,
     },
     vector::LengthOutOfRange,
     verify::{CertificateVerifier, SubjectPublicKey, public_key::SchemeKeyMismatch},
@@ -189,12 +190,12 @@ pub enum EarlyDataOutcome {
 pub enum ClientHandshakeEvent<C: TlsCrypto> {
     /// The ClientHello offering 0-RTT is written: the secret to send 0-RTT
     /// with, and what the ticket remembers of the server.
-    #[doc(alias = "ZeroRttSend")]
+    #[doc(alias = "ZeroRttSendTrafficSecret")]
     EarlyDataOffered {
         /// The AEAD of the ticket's cipher suite.
         aead: AeadAlgorithm,
         /// The 0-RTT secret.
-        secret: ZeroRttSend,
+        secret: ZeroRttSendTrafficSecret,
         /// The server's transport parameters of the ticket's connection,
         /// which 0-RTT keeps to (RFC 9000 §7.4.1).
         transport_parameters: Bytes,

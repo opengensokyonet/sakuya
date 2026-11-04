@@ -427,7 +427,7 @@ fn agreed(server_events: &[ServerEvent], client_events: &[ClientEvent]) -> Agree
     };
     assert!(server.next().is_none() && client.next().is_none());
     assert_eq!(server_send.0.as_bytes(), secrets.receive.as_bytes());
-    assert_eq!(one_rtt_receive.as_bytes(), secrets.send.as_bytes());
+    assert_eq!(one_rtt_receive.0.as_bytes(), secrets.send.as_bytes());
     assert_ne!(secrets.send.as_bytes(), client_secrets.send.as_bytes());
     assert_eq!(
         server_exporter.export(&label, b"context", len).as_bytes(),

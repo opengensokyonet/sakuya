@@ -449,8 +449,8 @@ impl<C: TlsCrypto + Clone> PskEarlySecret<Client, C> {
 
     /// The 0-RTT secret the client sends with, once the whole ClientHello is
     /// in the transcript.
-    pub fn early_send(&self) -> ZeroRttSend {
-        ZeroRttSend(self.client_early_traffic())
+    pub fn early_send(&self) -> ZeroRttSendTrafficSecret {
+        ZeroRttSendTrafficSecret(self.client_early_traffic())
     }
 
     /// Adds the ServerHello the client read and derives the Handshake Secret
@@ -511,8 +511,8 @@ impl<C: TlsCrypto + Clone> PskEarlySecret<Server, C> {
 
     /// The 0-RTT secret the server receives with, once the whole ClientHello
     /// is in the transcript.
-    pub fn early_receive(&self) -> ZeroRttReceive {
-        ZeroRttReceive(self.client_early_traffic())
+    pub fn early_receive(&self) -> ZeroRttReceiveTrafficSecret {
+        ZeroRttReceiveTrafficSecret(self.client_early_traffic())
     }
 
     /// Adds the ServerHello the server wrote, which accepts the PSK, and
@@ -586,7 +586,13 @@ impl<C: TlsCrypto + Clone> HandshakeSecret<Server, C> {
     /// Writes the server's Finished, which comes before the client's, and
     /// derives the Master Secret: the encoding of the Finished message, in
     /// the transcript now, and the server's 1-RTT secret to send with.
-    pub fn server_finished(mut self) -> (MasterSecret<Server, C>, HandshakeMessage, OneRttSend) {
+    pub fn server_finished(
+        mut self,
+    ) -> (
+        MasterSecret<Server, C>,
+        HandshakeMessage,
+        OneRttSendTrafficSecret,
+    ) {
         let finished = self.chain.write_finished(&self.server);
         let (parts, client, server) = self.master();
         (
@@ -595,7 +601,7 @@ impl<C: TlsCrypto + Clone> HandshakeSecret<Server, C> {
                 withheld: client,
             },
             finished,
-            OneRttSend(server),
+            OneRttSendTrafficSecret(server),
         )
     }
 }
@@ -672,7 +678,7 @@ impl<C: TlsCrypto + Clone> MasterSecret<Server, C> {
         Ok((
             parts.resumption(),
             Completed {
-                one_rtt_receive: withheld,
+                one_rtt_receive: OneRttReceiveTrafficSecret(withheld),
                 exporter,
             },
         ))
@@ -807,7 +813,7 @@ pub struct HandshakeTrafficSecrets {
 }
 
 /// The 1-RTT secret a server sends with once it has written its Finished.
-pub struct OneRttSend(pub TrafficSecret);
+pub struct OneRttSendTrafficSecret(pub TrafficSecret);
 
 /// The 1-RTT secrets of a client that has verified the server's Finished.
 pub struct OneRttTrafficSecrets {
@@ -817,16 +823,20 @@ pub struct OneRttTrafficSecrets {
     pub receive: TrafficSecret,
 }
 
+/// The client's 1-RTT secret, as a server receives with it once it has
+/// verified the client's Finished.
+pub struct OneRttReceiveTrafficSecret(pub TrafficSecret);
+
 /// client_early_traffic_secret, as a client sends 0-RTT with it.
-pub struct ZeroRttSend(pub TrafficSecret);
+pub struct ZeroRttSendTrafficSecret(pub TrafficSecret);
 
 /// client_early_traffic_secret, as a server receives 0-RTT with it.
-pub struct ZeroRttReceive(pub TrafficSecret);
+pub struct ZeroRttReceiveTrafficSecret(pub TrafficSecret);
 
 /// What a server hands over when its handshake completes.
 pub struct Completed<C: TlsCrypto> {
     /// The client's 1-RTT secret, the server's to receive with.
-    pub one_rtt_receive: TrafficSecret,
+    pub one_rtt_receive: OneRttReceiveTrafficSecret,
     /// The exporter of the connection.
     pub exporter: Exporter<C>,
 }

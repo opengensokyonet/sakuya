@@ -401,7 +401,7 @@ mod server_engine {
         logged.check("SERVER_HANDSHAKE_TRAFFIC_SECRET", &secrets.send);
         logged.check("CLIENT_HANDSHAKE_TRAFFIC_SECRET", &secrets.receive);
         logged.check("SERVER_TRAFFIC_SECRET_0", &one_rtt_send.0);
-        logged.check("CLIENT_TRAFFIC_SECRET_0", one_rtt_receive);
+        logged.check("CLIENT_TRAFFIC_SECRET_0", &one_rtt_receive.0);
         if let Some(zero_rtt) = zero_rtt {
             logged.check("CLIENT_EARLY_TRAFFIC_SECRET", &zero_rtt.0);
         }

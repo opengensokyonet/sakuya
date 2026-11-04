@@ -90,8 +90,9 @@ use crate::{
     },
     role::Server,
     schedule::{
-        BinderMismatch, EarlySecret, Exporter, FinishedError, HandshakeTrafficSecrets, OneRttSend,
-        PskEarlySecret, ResumptionPsk, Transcript, ZeroRttReceive,
+        BinderMismatch, EarlySecret, Exporter, FinishedError, HandshakeTrafficSecrets,
+        OneRttReceiveTrafficSecret, OneRttSendTrafficSecret, PskEarlySecret, ResumptionPsk,
+        Transcript, ZeroRttReceiveTrafficSecret,
     },
     server::{
         choice::{ClientOffer, NoCommonParameters, ParameterChoice},
@@ -193,16 +194,16 @@ pub enum ServerHandshakeEvent<C: TlsCrypto, T> {
         /// The Handshake traffic secrets.
         secrets: HandshakeTrafficSecrets,
         /// The 0-RTT secret, `None` when 0-RTT is not admitted.
-        zero_rtt: Option<ZeroRttReceive>,
+        zero_rtt: Option<ZeroRttReceiveTrafficSecret>,
     },
     /// The server's Finished is written: the 1-RTT secret to send with.
-    #[doc(alias = "OneRttSend")]
-    ServerFinishedWritten(OneRttSend),
+    #[doc(alias = "OneRttSendTrafficSecret")]
+    ServerFinishedWritten(OneRttSendTrafficSecret),
     /// The client's Finished is verified, and the handshake is complete.
     /// Both streams move to 1-RTT after this item.
     Completed {
         /// The client's 1-RTT secret, the server's to receive with.
-        one_rtt_receive: sakuya_packet_protection::secret::TrafficSecret,
+        one_rtt_receive: OneRttReceiveTrafficSecret,
         /// The exporter of the connection.
         exporter: Exporter<C>,
         /// The selected target and application protocol.
