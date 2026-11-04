@@ -287,6 +287,13 @@ enum Plan<R> {
     Destroy(Applied<R>),
 }
 
+/// Which of the two limits an update names.
+#[derive(Clone, Copy)]
+enum Limit {
+    Acceptance,
+    Delivery,
+}
+
 /// A checked decision, ready to apply.
 struct DecisionPlan<R> {
     action: Plan<R>,
@@ -299,12 +306,13 @@ struct DecisionPlan<R> {
 #[snafu(module(policy_violation))]
 enum PolicyViolationError {
     #[snafu(display(
-        "receive termination policy violated its contract: {what} the receive buffer on {trigger:?} without a reset, a sent STOP request or a dropped reader"
+        "receive termination policy violated its contract: destroys the receive buffer on {trigger:?} without a reset, a sent STOP request or a dropped reader"
     ))]
-    NoBasis {
-        what: &'static str,
-        trigger: TerminationEvent,
-    },
+    DestroysWithoutBasis { trigger: TerminationEvent },
+    #[snafu(display(
+        "receive termination policy violated its contract: restricts the receive buffer on {trigger:?} without a reset, a sent STOP request or a dropped reader"
+    ))]
+    RestrictsWithoutBasis { trigger: TerminationEvent },
     #[snafu(display(
         "receive termination policy violated its contract: destroys the receive buffer on {trigger:?} while the reliable prefix is undelivered"
     ))]
@@ -314,21 +322,21 @@ enum PolicyViolationError {
     ))]
     RestrictsAfterEnd { trigger: TerminationEvent },
     #[snafu(display(
-        "receive termination policy violated its contract: fixes the {name} limit at {limit}, beyond the final size {final_size}"
+        "receive termination policy violated its contract: fixes the acceptance limit at {limit}, beyond the final size {final_size}"
     ))]
-    BeyondFinalSize {
-        name: &'static str,
-        limit: VarInt,
-        final_size: VarInt,
-    },
+    AcceptanceBeyondFinalSize { limit: VarInt, final_size: VarInt },
     #[snafu(display(
-        "receive termination policy violated its contract: raises the fixed {name} limit from {fixed} to {limit}"
+        "receive termination policy violated its contract: fixes the delivery limit at {limit}, beyond the final size {final_size}"
     ))]
-    RaisesFixedLimit {
-        name: &'static str,
-        fixed: VarInt,
-        limit: VarInt,
-    },
+    DeliveryBeyondFinalSize { limit: VarInt, final_size: VarInt },
+    #[snafu(display(
+        "receive termination policy violated its contract: raises the fixed acceptance limit from {fixed} to {limit}"
+    ))]
+    RaisesFixedAcceptance { fixed: VarInt, limit: VarInt },
+    #[snafu(display(
+        "receive termination policy violated its contract: raises the fixed delivery limit from {fixed} to {limit}"
+    ))]
+    RaisesFixedDelivery { fixed: VarInt, limit: VarInt },
     #[snafu(display(
         "receive termination policy violated its contract: fixes the delivery limit at {limit} on {trigger:?}, inside the undelivered reliable prefix {reliable_size}"
     ))]
@@ -440,7 +448,10 @@ where
                     return Ok(Plan::Nothing);
                 }
                 if !ended {
-                    self.check_basis("destroys", trigger)?;
+                    ensure!(
+                        self.has_basis(),
+                        policy_violation::DestroysWithoutBasisSnafu { trigger }
+                    );
                     ensure!(
                         self.local_cancellation() || !self.reliable_prefix_pending(),
                         policy_violation::DestroysReliablePrefixSnafu { trigger }
@@ -456,13 +467,16 @@ where
                 delivery,
                 reason,
             } => {
-                let acceptance = self.check_update(&self.acceptance, acceptance, "acceptance")?;
-                let delivery = self.check_update(&self.delivery, delivery, "delivery")?;
+                let acceptance = self.check_update(Limit::Acceptance, acceptance)?;
+                let delivery = self.check_update(Limit::Delivery, delivery)?;
                 if acceptance.is_none() && delivery.is_none() {
                     return Ok(Plan::Nothing);
                 }
                 ensure!(!ended, policy_violation::RestrictsAfterEndSnafu { trigger });
-                self.check_basis("restricts", trigger)?;
+                ensure!(
+                    self.has_basis(),
+                    policy_violation::RestrictsWithoutBasisSnafu { trigger }
+                );
                 self.check_reliable_prefix(acceptance, delivery, trigger)?;
                 let reason = SharedTerminationReason::new(reason);
                 let fixed = |limit| Boundary::Fixed {
@@ -483,49 +497,51 @@ where
     /// The new fixed value of a limit, if the update changes it.
     fn check_update(
         &self,
-        current: &Boundary<C::Reason>,
+        limit_kind: Limit,
         update: BoundaryUpdate,
-        name: &'static str,
     ) -> Result<Option<VarInt>, PolicyViolationError> {
         let BoundaryUpdate::Fix(limit) = update else {
             return Ok(None);
         };
         if let Some(final_size) = self.parts.final_size() {
-            ensure!(
-                limit <= final_size,
-                policy_violation::BeyondFinalSizeSnafu {
-                    name,
-                    limit,
-                    final_size,
-                }
-            );
+            match limit_kind {
+                Limit::Acceptance => ensure!(
+                    limit <= final_size,
+                    policy_violation::AcceptanceBeyondFinalSizeSnafu { limit, final_size }
+                ),
+                Limit::Delivery => ensure!(
+                    limit <= final_size,
+                    policy_violation::DeliveryBeyondFinalSizeSnafu { limit, final_size }
+                ),
+            }
         }
+        let current = match limit_kind {
+            Limit::Acceptance => &self.acceptance,
+            Limit::Delivery => &self.delivery,
+        };
         match current {
             Boundary::Following => Ok(Some(limit)),
             Boundary::Fixed { limit: fixed, .. } => {
-                ensure!(
-                    limit <= *fixed,
-                    policy_violation::RaisesFixedLimitSnafu {
-                        name,
-                        fixed: *fixed,
-                        limit,
-                    }
-                );
-                Ok((limit < *fixed).then_some(limit))
+                let fixed = *fixed;
+                match limit_kind {
+                    Limit::Acceptance => ensure!(
+                        limit <= fixed,
+                        policy_violation::RaisesFixedAcceptanceSnafu { fixed, limit }
+                    ),
+                    Limit::Delivery => ensure!(
+                        limit <= fixed,
+                        policy_violation::RaisesFixedDeliverySnafu { fixed, limit }
+                    ),
+                }
+                Ok((limit < fixed).then_some(limit))
             }
         }
     }
 
-    fn check_basis(
-        &self,
-        what: &'static str,
-        trigger: TerminationEvent,
-    ) -> Result<(), PolicyViolationError> {
-        ensure!(
-            self.reset.is_some() || self.local_cancellation(),
-            policy_violation::NoBasisSnafu { what, trigger }
-        );
-        Ok(())
+    /// Whether a reset, a sent STOP request or a dropped reader allows
+    /// restricting or destroying the receive buffer.
+    fn has_basis(&self) -> bool {
+        self.reset.is_some() || self.local_cancellation()
     }
 
     fn check_reliable_prefix(

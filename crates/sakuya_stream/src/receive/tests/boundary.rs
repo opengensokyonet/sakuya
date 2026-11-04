@@ -408,8 +408,23 @@ mod violations {
     use super::*;
 
     #[test]
+    #[should_panic(expected = "raises the fixed acceptance limit from 300 to 400")]
+    fn raising_a_fixed_acceptance_limit() {
+        let (mut receiver, mut connection) =
+            stopped_with(fix_both(300, "stop"), |event, _| match event {
+                TerminationEvent::RemoteReset => {
+                    restrict(BoundaryUpdate::Fix(v(400)), BoundaryUpdate::Keep, "again")
+                }
+                _ => TerminationDecision::keep(),
+            });
+        receiver
+            .on_reset_stream(reset(4, 1000), &mut connection)
+            .unwrap();
+    }
+
+    #[test]
     #[should_panic(expected = "raises the fixed delivery limit from 300 to 400")]
-    fn raising_a_fixed_limit() {
+    fn raising_a_fixed_delivery_limit() {
         let (mut receiver, mut connection) =
             stopped_with(fix_both(300, "stop"), |event, _| match event {
                 TerminationEvent::RemoteReset => {
@@ -423,7 +438,9 @@ mod violations {
     }
 
     #[test]
-    #[should_panic(expected = "without a reset, a sent STOP request or a dropped reader")]
+    #[should_panic(
+        expected = "restricts the receive buffer on DataComplete without a reset, a sent STOP request or a dropped reader"
+    )]
     fn restricting_without_a_basis() {
         let (mut receiver, mut connection) = new_receiver(scripted(|event, _| match event {
             TerminationEvent::DataComplete => fix_both(50, "complete"),
@@ -435,7 +452,9 @@ mod violations {
     }
 
     #[test]
-    #[should_panic(expected = "without a reset, a sent STOP request or a dropped reader")]
+    #[should_panic(
+        expected = "restricts the receive buffer on StopRequested without a reset, a sent STOP request or a dropped reader"
+    )]
     fn restricting_on_the_stop_request_alone() {
         let (mut receiver, _connection) = new_receiver(scripted(|event, _| match event {
             TerminationEvent::StopRequested => fix_both(0, "requested"),
@@ -471,14 +490,42 @@ mod violations {
     }
 
     #[test]
-    #[should_panic(expected = "beyond the final size 1000")]
-    fn fixing_beyond_the_final_size() {
+    #[should_panic(expected = "fixes the acceptance limit at 1001, beyond the final size 1000")]
+    fn fixing_acceptance_beyond_the_final_size() {
         let (mut receiver, mut connection) = new_receiver(scripted(|event, _| match event {
             TerminationEvent::RemoteReset => fix_both(1001, "reset"),
             _ => TerminationDecision::keep(),
         }));
         receiver
             .on_reset_stream(reset(4, 1000), &mut connection)
+            .unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "fixes the delivery limit at 1001, beyond the final size 1000")]
+    fn fixing_delivery_beyond_the_final_size() {
+        let (mut receiver, mut connection) = new_receiver(scripted(|event, _| match event {
+            TerminationEvent::RemoteReset => {
+                restrict(BoundaryUpdate::Keep, BoundaryUpdate::Fix(v(1001)), "reset")
+            }
+            _ => TerminationDecision::keep(),
+        }));
+        receiver
+            .on_reset_stream(reset(4, 1000), &mut connection)
+            .unwrap();
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "destroys the receive buffer on DataComplete without a reset, a sent STOP request or a dropped reader"
+    )]
+    fn destroying_without_a_basis() {
+        let (mut receiver, mut connection) = new_receiver(scripted(|event, _| match event {
+            TerminationEvent::DataComplete => destroy("complete"),
+            _ => TerminationDecision::keep(),
+        }));
+        receiver
+            .on_stream_frame(stream(0, 100, true), &mut connection)
             .unwrap();
     }
 
