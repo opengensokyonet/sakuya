@@ -186,6 +186,12 @@ impl SelectTargetError {
     }
 }
 
+impl crate::alert::CallsForAlert for SelectTargetError {
+    fn alert(&self) -> AlertDescription {
+        SelectTargetError::alert(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{SelectTargetError, Selected, SniTargets, TargetSelection};

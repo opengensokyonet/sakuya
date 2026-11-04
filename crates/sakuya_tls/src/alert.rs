@@ -69,3 +69,19 @@ code_point! {
     /// ech_required (RFC 9849).
     ECH_REQUIRED = 121 => "ech_required",
 }
+
+/// A failure that ends a handshake with an alert, which it names.
+///
+/// The handshake engines take the failures of their capabilities, such as
+/// target selection or certificate verification, as sources, and close with
+/// the alert each calls for.
+pub trait CallsForAlert {
+    /// The alert the failure calls for.
+    fn alert(&self) -> AlertDescription;
+}
+
+impl CallsForAlert for core::convert::Infallible {
+    fn alert(&self) -> AlertDescription {
+        match *self {}
+    }
+}

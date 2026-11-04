@@ -1,5 +1,5 @@
 //! The capabilities a server's handshake consults, with implementations
-//! for plain Web connections.
+//! for plain Web connections, and the server's handshake engine.
 //!
 //! Each capability is a trait the server's handshake takes as a parameter:
 //!
@@ -17,8 +17,12 @@
 //!
 //! The handshake checks what a capability returns against the protocol, so
 //! an implementation decides within the rules and does not enforce them.
+//!
+//! [`engine`] is the server's handshake engine, which takes these
+//! capabilities.
 
 pub mod choice;
+pub mod engine;
 pub mod identity;
 pub mod layers;
 pub mod peer;

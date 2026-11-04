@@ -22,6 +22,8 @@
 //! - [`server`], [`client`]: the capabilities each role's handshake
 //!   consults, such as the choice of parameters and what a ClientHello
 //!   offers, with implementations for plain Web connections.
+//! - [`engine`]: what the two engines share: the CRYPTO streams they read
+//!   and write at the current encryption level, and how a handshake fails.
 //!
 //! Every wire format is read and written through `nitori_call` operations,
 //! in the `codec` module of its type. The readers run on the bytes of a
@@ -32,7 +34,7 @@
 //!
 //! [RFC 8446]: https://www.rfc-editor.org/rfc/rfc8446.html
 //! [RFC 9001]: https://www.rfc-editor.org/rfc/rfc9001.html
-#![feature(impl_trait_in_assoc_type)]
+#![feature(impl_trait_in_assoc_type, yield_expr)]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -42,6 +44,7 @@ pub mod client;
 pub mod clock;
 pub mod code_point;
 pub mod crypto;
+pub mod engine;
 pub mod extension;
 pub mod message;
 pub mod role;
