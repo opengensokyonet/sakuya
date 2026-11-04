@@ -211,10 +211,6 @@ impl StreamReceiveBuffer for Parts {
         self.buffer.delivered_end()
     }
 
-    fn is_received(&self, range: core::ops::Range<VarInt>) -> bool {
-        self.buffer.is_received(range)
-    }
-
     fn read_chunk(&mut self, limit: VarInt) -> Option<Bytes> {
         self.buffer.read_chunk(limit)
     }
@@ -582,7 +578,9 @@ struct Model {
     total: u64,
     script: Script,
     held: Vec<bool>,
-    prefix: u64,
+    /// Offsets some accepted STREAM frame covered, whatever became of the
+    /// payload.
+    arrived: Vec<bool>,
     delivered: u64,
     accounted: u64,
     final_size: Option<u64>,
@@ -605,7 +603,7 @@ impl Model {
             total,
             script,
             held: vec![false; 600],
-            prefix: 0,
+            arrived: vec![false; 600],
             delivered: 0,
             accounted: 0,
             final_size: None,
@@ -648,7 +646,7 @@ impl Model {
     }
 
     fn is_received(&self, start: u64, end: u64) -> bool {
-        (start..end).all(|at| at < self.prefix || self.held[at as usize])
+        (start..end).all(|at| self.arrived[at as usize])
     }
 
     fn fully_received(&self) -> bool {
@@ -818,6 +816,9 @@ impl Model {
             self.link = Link::Violated;
             return Err(violation);
         }
+        for at in offset..end {
+            self.arrived[at as usize] = true;
+        }
         if !self.destroyed() {
             let limit = [self.acceptance, self.delivery]
                 .iter()
@@ -828,12 +829,6 @@ impl Model {
             let kept_end = end.min(limit);
             for at in offset.max(self.delivered)..kept_end {
                 self.held[at as usize] = true;
-            }
-            if kept_end > offset {
-                self.prefix = self.prefix.max(self.delivered);
-                while self.held[self.prefix as usize] {
-                    self.prefix += 1;
-                }
             }
         }
         connection.used += end.max(self.accounted) - self.accounted;

@@ -17,7 +17,7 @@ use crate::{
     },
 };
 use bytes::{BufMut, Bytes};
-use core::{cell::Cell, ops::Range};
+use core::cell::Cell;
 use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::transport_error::TransportErrorCode;
 use sakuya_wire::var_int::VarInt;
@@ -180,10 +180,6 @@ impl<T> StreamReceiveBuffer for Parts<T> {
 
     fn delivered_end(&self) -> VarInt {
         self.buffer.delivered_end()
-    }
-
-    fn is_received(&self, range: Range<VarInt>) -> bool {
-        self.buffer.is_received(range)
     }
 
     fn read_chunk(&mut self, limit: VarInt) -> Option<Bytes> {

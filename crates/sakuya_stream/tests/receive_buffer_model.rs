@@ -62,10 +62,6 @@ struct Model {
     delivered: usize,
     accounted: usize,
     final_size: Option<usize>,
-    /// The highest end of a contiguous prefix observed so far.
-    prefix: usize,
-    /// Bytes that truly arrived at some point, for soundness of `is_received`.
-    arrived: Vec<bool>,
     destroyed: bool,
 }
 
@@ -77,8 +73,6 @@ impl Model {
             delivered: 0,
             accounted: 0,
             final_size: None,
-            prefix: 0,
-            arrived: vec![false; bytes],
             destroyed: false,
         }
     }
@@ -100,25 +94,6 @@ fn check(buffer: &FragmentedStreamReceiveBuffer, model: &Model) {
     assert_eq!(buffer.final_size(), model.final_size.map(v));
     assert_eq!(buffer.held_len(), model.held_len());
     assert_eq!(buffer.is_destroyed(), model.destroyed);
-    // Soundness: `is_received` never claims bytes that did not arrive, an
-    // empty range is received, and held or delivered bytes count.
-    for (start, end) in [
-        (0, model.delivered),
-        (0, model.prefix),
-        (3, 40),
-        (40, 90),
-        (0, SPAN),
-    ] {
-        let claimed = buffer.is_received(v(start)..v(end));
-        let true_arrival = (start..end).all(|at| model.arrived[at]);
-        assert!(
-            !claimed || true_arrival,
-            "claimed {start}..{end} without arrival"
-        );
-        let certain = (start..end).all(|at| at < model.prefix || model.held[at]);
-        assert_eq!(claimed, certain, "is_received {start}..{end}");
-    }
-    assert!(buffer.is_received(v(7)..v(7)));
 }
 
 fn step(buffer: &mut FragmentedStreamReceiveBuffer, model: &mut Model, op: &Op) {
@@ -140,13 +115,6 @@ fn step(buffer: &mut FragmentedStreamReceiveBuffer, model: &mut Model, op: &Op) 
             if !model.destroyed {
                 for at in offset.max(model.delivered)..offset + kept {
                     model.held[at] = true;
-                }
-                model.arrived[offset..offset + kept].fill(true);
-                if kept > 0 {
-                    model.prefix = model.prefix.max(model.delivered);
-                    while model.held[model.prefix] {
-                        model.prefix += 1;
-                    }
                 }
             }
         }
@@ -246,7 +214,6 @@ proptest! {
             buffer.receive_data(input);
         }
         prop_assert_eq!(buffer.final_size(), Some(v(len)));
-        prop_assert!(buffer.is_received(v(0)..v(len)));
         prop_assert_eq!(buffer.held_len(), len);
         let mut read = Vec::new();
         if chunked {

@@ -14,8 +14,10 @@
 //! The ranges held, the gaps between them, the end of the contiguous readable
 //! data and the read cursor stay inside the buffer. The stream receive
 //! component asks the questions it needs answered — what can be delivered now,
-//! how far delivery has progressed, whether a range has been received — and
-//! does not recompute them from a range table.
+//! how far delivery has progressed — and does not recompute them from a range
+//! table. The buffer does not answer which ranges have arrived: that is a
+//! protocol fact the stream receive component keeps from the frames' metadata,
+//! whatever happens to the data.
 //!
 //! The buffer is told about the local delivery limits only through its
 //! inputs: STREAM payloads arrive already trimmed to the data acceptance limit
@@ -28,7 +30,6 @@
 //!
 //! [RFC 9000 §4.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-4.5
 use bytes::{BufMut, Bytes};
-use core::ops::Range;
 use sakuya_wire::var_int::VarInt;
 use snafu::{Snafu, ensure};
 
@@ -171,7 +172,10 @@ pub enum StreamDataInputError {
 ///   ignored; a shorter duplicate never replaces longer held data.
 /// - **Release.** After [`release_from`] or [`destroy`] the released data is
 ///   gone for good, and payload arriving after `destroy` is not kept; the
-///   cumulative facts keep being maintained from input metadata.
+///   accounted end and the final size keep being maintained from input
+///   metadata. The buffer keeps no record of which ranges arrived: the
+///   ranges are a protocol fact that the stream receive component keeps from
+///   the frames' metadata, not something that is lost with the data.
 ///
 /// [`release_from`]: Self::release_from
 /// [`destroy`]: Self::destroy
@@ -197,13 +201,6 @@ pub trait StreamReceiveBuffer {
     /// been delivered, none at or above it.
     fn delivered_end(&self) -> VarInt;
 
-    /// Whether every byte of `range` has been received.
-    ///
-    /// Delivered bytes count as received. Bytes the buffer released may be
-    /// reported as not received; the answer never claims bytes that did not
-    /// arrive. An empty range is received.
-    fn is_received(&self, range: Range<VarInt>) -> bool;
-
     /// Hands out the next contiguous block below `limit`, if one is held at
     /// [`delivered_end`](Self::delivered_end).
     fn read_chunk(&mut self, limit: VarInt) -> Option<Self::Chunk>;
@@ -216,7 +213,10 @@ pub trait StreamReceiveBuffer {
     /// deliverable.
     fn release_from(&mut self, end: VarInt);
 
-    /// Releases all held data and stops keeping payload.
+    /// Destroys the data: releases all held data and stops keeping payload.
+    ///
+    /// Only the data is destroyed. Which ranges arrived is not the buffer's
+    /// to keep, so nothing about them is lost here.
     fn destroy(&mut self);
 }
 

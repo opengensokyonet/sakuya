@@ -569,7 +569,7 @@ where
         }
         if let Some(limit) = acceptance {
             ensure!(
-                limit >= reliable_size || self.parts.is_received(limit..reliable_size),
+                limit >= reliable_size || self.received.covers(limit..reliable_size),
                 policy_violation::AcceptanceInsideReliablePrefixSnafu {
                     limit,
                     trigger,

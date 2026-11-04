@@ -181,8 +181,8 @@ where
             return Some(StopNotNeededReason::DataComplete);
         }
         let reset = self.reset?;
-        self.parts
-            .is_received(VarInt::ZERO..reset.reliable_size)
+        self.received
+            .covers(VarInt::ZERO..reset.reliable_size)
             .then_some(StopNotNeededReason::PeerReset)
     }
 }

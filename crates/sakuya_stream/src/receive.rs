@@ -70,6 +70,7 @@ use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError, ResetCodeCha
 use bytes::Bytes;
 use flow_control::{ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView};
 use read::{ReadError, RemoteReset, SharedTerminationReason};
+use received_ranges::ReceivedRanges;
 use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
 use sakuya_wire::var_int::VarInt;
@@ -81,6 +82,7 @@ use violation::{
 
 pub mod flow_control;
 pub mod read;
+mod received_ranges;
 pub mod stop;
 pub mod termination;
 pub mod violation;
@@ -227,7 +229,9 @@ struct ResetFacts {
 ///   Live ───────────────────────────────────────────────────────────────▶ Destroyed
 /// ```
 ///
-/// A destroyed buffer keeps its first cause.
+/// A destroyed buffer keeps its first cause. Destroying releases the data
+/// only: the ranges the frames stated stay recorded in the receiver, so
+/// reception can still complete.
 #[derive(Clone, Debug)]
 enum BufferPhase<R> {
     /// The buffer holds payload for delivery.
@@ -309,6 +313,7 @@ pub struct StreamReceiver<C: ReceiveTerminationPolicy> {
     opened_limit: VarInt,
     buffer: BufferPhase<C::Reason>,
     connection: ConnectionPhase,
+    received: ReceivedRanges,
     reset: Option<ResetFacts>,
     acceptance: Boundary<C::Reason>,
     delivery: Boundary<C::Reason>,
@@ -335,6 +340,7 @@ where
             opened_limit: initial_limit,
             buffer: BufferPhase::Live,
             connection: ConnectionPhase::Open,
+            received: ReceivedRanges::default(),
             reset: None,
             acceptance: Boundary::Following,
             delivery: Boundary::Following,
@@ -598,6 +604,7 @@ where
             // which ends at `end`.
             Err(error) => unreachable!("accepted payload passes the frame: {error}"),
         };
+        self.received.insert(offset, end);
         self.parts.receive_data(input);
         debug_assert_eq!(self.parts.accounted_end(), accounted_end);
         self.after_input(None, connection);
@@ -739,7 +746,7 @@ where
     fn fully_received(&self) -> bool {
         self.parts
             .final_size()
-            .is_some_and(|final_size| self.parts.is_received(VarInt::ZERO..final_size))
+            .is_some_and(|final_size| self.received.covers(VarInt::ZERO..final_size))
     }
 
     fn stop_sent(&self) -> bool {

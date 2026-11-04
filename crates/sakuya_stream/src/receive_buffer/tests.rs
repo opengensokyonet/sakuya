@@ -65,10 +65,8 @@ fn out_of_order_fin_then_fill() {
     assert_eq!(buffer.final_size(), Some(v(200)));
     assert_eq!(buffer.accounted_end(), v(200));
     assert!(buffer.read_chunk(VarInt::MAX).is_none());
-    assert!(!buffer.is_received(v(0)..v(200)));
 
     buffer.receive_data(frame(0, 100, false));
-    assert!(buffer.is_received(v(0)..v(200)));
     assert_eq!(read_all(&mut buffer, VarInt::MAX), data(0, 200));
     assert_eq!(buffer.delivered_end(), v(200));
     assert_eq!(buffer.held_len(), 0);
@@ -100,8 +98,6 @@ fn readable_end_differs_from_accounted_end() {
     assert_eq!(read_all(&mut buffer, VarInt::MAX), data(0, 256));
     assert_eq!(buffer.delivered_end(), v(256));
     assert_eq!(buffer.accounted_end(), v(768));
-    assert!(buffer.is_received(v(512)..v(768)));
-    assert!(!buffer.is_received(v(256)..v(512)));
 }
 
 /// Releasing the undelivered tail keeps 768 as the accounted end; a reset
@@ -116,9 +112,6 @@ fn release_keeps_history_and_reset_extends_accounting() {
     buffer.receive_final_size(v(1024));
     assert_eq!(buffer.accounted_end(), v(1024));
     assert_eq!(read_all(&mut buffer, VarInt::MAX), data(0, 256));
-    // Received history survives the release.
-    assert!(buffer.is_received(v(0)..v(768)));
-    assert!(!buffer.is_received(v(0)..v(1024)));
 }
 
 #[test]
@@ -217,8 +210,6 @@ fn destroy_keeps_scalars_and_ignores_payload() {
     assert_eq!(buffer.held_len(), 0);
     assert_eq!(buffer.accounted_end(), v(200));
     assert_eq!(buffer.final_size(), Some(v(200)));
-    assert!(buffer.is_received(v(0)..v(100)));
-    assert!(!buffer.is_received(v(0)..v(200)));
 }
 
 #[test]
@@ -238,5 +229,4 @@ fn trimmed_payload_still_accounts_the_whole_frame() {
     assert_eq!(buffer.accounted_end(), v(100));
     assert_eq!(buffer.final_size(), Some(v(100)));
     assert_eq!(buffer.held_len(), 40);
-    assert!(!buffer.is_received(v(0)..v(100)));
 }

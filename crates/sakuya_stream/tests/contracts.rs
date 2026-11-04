@@ -273,10 +273,6 @@ impl StreamReceiveBuffer for BaseReceive {
         self.buffer.delivered_end()
     }
 
-    fn is_received(&self, range: core::ops::Range<VarInt>) -> bool {
-        self.buffer.is_received(range)
-    }
-
     fn read_chunk(&mut self, limit: VarInt) -> Option<Bytes> {
         self.buffer.read_chunk(limit)
     }
@@ -318,10 +314,9 @@ impl ReceiveTerminationPolicy for BaseReceive {
 /// RFC 9000 §3.2 leaves "Size Known" for "Data Recvd" once all data arrived,
 /// and §3.5 makes `STOP_SENDING` unnecessary from then on. Whether all data
 /// arrived cannot be answered from the highest received end alone, so the
-/// buffer must keep tracking which ranges arrived after it stopped keeping
+/// receiver keeps which ranges arrived after the buffer stopped keeping
 /// payload.
 #[test]
-#[ignore = "known defect: a receiver whose buffer was destroyed does not learn that all data arrived"]
 fn reception_completes_after_the_reader_is_gone() {
     let mut connection = ConnectionReceiveFlowController::new(v(1000));
     let mut receiver = StreamReceiver::new(

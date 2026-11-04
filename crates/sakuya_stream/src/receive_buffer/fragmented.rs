@@ -2,7 +2,6 @@
 //! `BTreeMap`.
 use super::{StreamDataInput, StreamReceiveBuffer, offset_add, span};
 use bytes::{BufMut, Bytes};
-use core::ops::Range;
 use sakuya_wire::var_int::VarInt;
 use std::collections::BTreeMap;
 
@@ -16,14 +15,13 @@ use std::collections::BTreeMap;
 ///
 /// Besides the map the buffer keeps scalars that outlive the data: the read
 /// position (which tells "never received" from "all delivered" when the map is
-/// empty and filters old duplicates), the accounted end, the final size, and
-/// the end of the received prefix `[0, n)`, so that completeness can still be
-/// answered after data has been released.
+/// empty and filters old duplicates), the accounted end and the final size.
+/// It keeps no record of which ranges arrived; that is the stream receive
+/// component's.
 #[derive(Debug, Default)]
 pub struct FragmentedStreamReceiveBuffer {
     storage: Storage,
     delivered: VarInt,
-    received_prefix: VarInt,
     accounted_end: VarInt,
     final_size: Option<VarInt>,
 }
@@ -72,23 +70,6 @@ impl FragmentedStreamReceiveBuffer {
     /// Whether the buffer has been destroyed.
     pub fn is_destroyed(&self) -> bool {
         matches!(self.storage, Storage::Destroyed)
-    }
-
-    /// The end of the fragment covering `at`, if one does.
-    fn covering_end(&self, at: VarInt) -> Option<VarInt> {
-        let Storage::Holding(fragments) = &self.storage else {
-            return None;
-        };
-        let (_, fragment) = fragments.range(..=at).next_back()?;
-        (fragment.end > at).then_some(fragment.end)
-    }
-
-    fn advance_prefix(&mut self) {
-        let mut prefix = self.received_prefix.max(self.delivered);
-        while let Some(end) = self.covering_end(prefix) {
-            prefix = end;
-        }
-        self.received_prefix = prefix;
     }
 }
 
@@ -150,7 +131,6 @@ impl StreamReceiveBuffer for FragmentedStreamReceiveBuffer {
             return;
         }
         insert(fragments, self.delivered, offset, payload_end, &payload);
-        self.advance_prefix();
     }
 
     fn receive_final_size(&mut self, final_size: VarInt) {
@@ -170,17 +150,6 @@ impl StreamReceiveBuffer for FragmentedStreamReceiveBuffer {
 
     fn delivered_end(&self) -> VarInt {
         self.delivered
-    }
-
-    fn is_received(&self, range: Range<VarInt>) -> bool {
-        let mut cursor = range.start.max(self.received_prefix);
-        while cursor < range.end {
-            match self.covering_end(cursor) {
-                Some(end) => cursor = end,
-                None => return false,
-            }
-        }
-        true
     }
 
     fn read_chunk(&mut self, limit: VarInt) -> Option<Bytes> {
