@@ -640,12 +640,21 @@ fn empty_input_and_flush_table() {
         ("credit or admission short", no_credit, Ok(()), Ok(())),
         ("write limit reached", limited, Ok(()), Ok(())),
         ("closed", closed, Err("closed"), Ok(())),
-        ("reset", reset, Err("reset"), Err(FlushError::Reset)),
+        (
+            "reset",
+            reset,
+            Err("reset"),
+            Err(FlushError::Reset {
+                source: StreamResetError,
+            }),
+        ),
         (
             "reset, nothing left to deliver",
             reset_delivered,
             Err("reset"),
-            Err(FlushError::Reset),
+            Err(FlushError::Reset {
+                source: StreamResetError,
+            }),
         ),
         (
             "connection closed",
@@ -669,7 +678,9 @@ fn empty_input_and_flush_table() {
                 Ok(())
             }
             Err(WriteError::Closed) => Err("closed"),
-            Err(WriteError::Reset) => Err("reset"),
+            Err(WriteError::Reset {
+                source: StreamResetError,
+            }) => Err("reset"),
             Err(WriteError::ConnectionClosed { .. }) => Err("connection closed"),
             Err(error) => panic!("{state}: unexpected {error:?}"),
         };
@@ -726,7 +737,9 @@ fn write_errors_follow_the_check_order() {
     sender.reset(CODE).unwrap();
     assert!(matches!(
         sender.write(&mut source(1), &mut connection),
-        Err(WriteError::Reset)
+        Err(WriteError::Reset {
+            source: StreamResetError
+        })
     ));
 
     // A close before the write limit, when both apply.
@@ -757,7 +770,12 @@ fn write_errors_follow_the_check_order() {
 fn close_errors_follow_the_check_order() {
     let mut sender = test_sender(1000, true);
     sender.reset(CODE).unwrap();
-    assert_eq!(sender.close(), Err(CloseError::AlreadyReset));
+    assert_eq!(
+        sender.close(),
+        Err(CloseError::AlreadyReset {
+            source: StreamResetError
+        })
+    );
     sender.on_connection_closed();
     assert_eq!(
         sender.close(),
@@ -937,7 +955,12 @@ fn state_transition_table() {
     );
 
     // Reset, then close: an error.
-    assert_eq!(sender.close(), Err(CloseError::AlreadyReset));
+    assert_eq!(
+        sender.close(),
+        Err(CloseError::AlreadyReset {
+            source: StreamResetError
+        })
+    );
 
     // A terminal state after complete delivery takes no new reset.
     closed

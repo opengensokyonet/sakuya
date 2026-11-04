@@ -26,7 +26,8 @@ use sakuya_stream::send::termination::{
 };
 use sakuya_stream::send::write::{FlushError, WriteError, WriteOutcome, WriteWait};
 use sakuya_stream::send::{
-    EndSource, ResetTarget, SendEndState, SendTerminalState, SenderExposeUsageError, StreamSender,
+    EndSource, ResetTarget, SendEndState, SendTerminalState, SenderExposeUsageError,
+    StreamResetError, StreamSender,
 };
 use sakuya_stream::send_buffer::offset_map::OffsetMapSendBuffer;
 use sakuya_stream::send_buffer::visibility::FinalSizeBelowExposureError;
@@ -529,7 +530,7 @@ macro_rules! impl_sender {
                 #[allow(clippy::redundant_closure_call)]
                 self.write(source, connection).map_err(|error| match error {
                     WriteError::ConnectionClosed { .. } => WriteFailure::ConnectionClosed,
-                    WriteError::Reset => WriteFailure::Reset,
+                    WriteError::Reset { .. } => WriteFailure::Reset,
                     WriteError::Closed => WriteFailure::Closed,
                     WriteError::WriteLimitReached {
                         write_limit_end,
@@ -653,7 +654,9 @@ fn step<S: Sender, P: PolicyModel>(
                     source: ConnectionClosedError::new(),
                 })
             } else if matches!(s.end, ModelEnd::Reset { .. }) {
-                Err(FlushError::Reset)
+                Err(FlushError::Reset {
+                    source: StreamResetError,
+                })
             } else {
                 Ok(())
             };
@@ -701,7 +704,9 @@ fn step<S: Sender, P: PolicyModel>(
                     source: ConnectionClosedError::new(),
                 })
             } else if matches!(s.end, ModelEnd::Reset { .. }) {
-                Err(CloseError::AlreadyReset)
+                Err(CloseError::AlreadyReset {
+                    source: StreamResetError,
+                })
             } else {
                 if s.end == ModelEnd::Open {
                     s.end = ModelEnd::Closed {

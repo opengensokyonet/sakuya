@@ -24,7 +24,7 @@
 //! provisional.
 use super::{
     CommittedEnd, EndPhase, EndSource, ResetTarget, SendEndState, SendTerminalState, StopSending,
-    StreamSender, WriteLimit,
+    StreamResetError, StreamSender, WriteLimit,
 };
 use crate::connection::ConnectionClosedError;
 use crate::send::flow_control::{SendFlowControlPolicy, StreamCreditEvent};
@@ -51,8 +51,11 @@ pub enum CloseError {
         source: ConnectionClosedError,
     },
     /// A reset is in effect; a close cannot replace it.
-    #[snafu(display("the stream was already reset"))]
-    AlreadyReset,
+    #[snafu(transparent)]
+    AlreadyReset {
+        /// The reset in effect.
+        source: StreamResetError,
+    },
 }
 
 /// Failures of [`StreamSender::reset`]; none of them changes any state.
@@ -584,7 +587,7 @@ where
     pub fn close(&mut self) -> Result<(), CloseError> {
         self.check_connection_open()?;
         match self.end_state() {
-            SendEndState::Reset { .. } => close_error::AlreadyResetSnafu.fail(),
+            SendEndState::Reset { .. } => Err(StreamResetError.into()),
             SendEndState::Closed { .. } => Ok(()),
             SendEndState::Open => {
                 self.commit_close(EndSource::Application);

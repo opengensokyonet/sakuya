@@ -594,6 +594,14 @@ where
     }
 }
 
+/// A reset is in effect: the stream takes no more data and no close.
+///
+/// Writing, flushing and closing report it through their own errors, which
+/// hold this one as their source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("the stream was reset"))]
+pub struct StreamResetError;
+
 /// Failures of [`StreamSender::expose_usage_through`]; none of them changes
 /// any state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]

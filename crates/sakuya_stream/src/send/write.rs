@@ -23,7 +23,7 @@
 //!
 //! No asynchronous interface is provided here; [`WriteOutcome::Wait`] tells
 //! the caller to retry once the cause may have changed.
-use super::{SendEndState, StreamSender, WriteLimit};
+use super::{SendEndState, StreamResetError, StreamSender, WriteLimit};
 use crate::connection::ConnectionClosedError;
 use crate::connection_send_credit::ConnectionSendFlowController;
 use crate::send::flow_control::{AdmissionGuard, SendFlowControlPolicy, WriteAttempt};
@@ -86,8 +86,11 @@ pub enum WriteError<R> {
         source: ConnectionClosedError,
     },
     /// The stream was reset.
-    #[snafu(display("the stream was reset"))]
-    Reset,
+    #[snafu(transparent)]
+    Reset {
+        /// The reset in effect.
+        source: StreamResetError,
+    },
     /// The stream was closed.
     #[snafu(display("the stream was closed"))]
     Closed,
@@ -149,8 +152,11 @@ pub enum FlushError {
         source: ConnectionClosedError,
     },
     /// The stream was reset.
-    #[snafu(display("the stream was reset"))]
-    Reset,
+    #[snafu(transparent)]
+    Reset {
+        /// The reset in effect.
+        source: StreamResetError,
+    },
 }
 
 impl<C> StreamSender<C>
@@ -185,7 +191,7 @@ where
     ) -> Result<WriteOutcome, WriteError<C::WriteLimitReason>> {
         self.check_connection_open()?;
         match self.end_state() {
-            SendEndState::Reset { .. } => return write_error::ResetSnafu.fail(),
+            SendEndState::Reset { .. } => return Err(StreamResetError.into()),
             SendEndState::Closed { .. } => return write_error::ClosedSnafu.fail(),
             SendEndState::Open => {}
         }
@@ -288,10 +294,9 @@ where
     /// reset is in effect, even if nothing remains to deliver.
     pub fn flush(&self) -> Result<(), FlushError> {
         self.check_connection_open()?;
-        ensure!(
-            !matches!(self.end_state(), SendEndState::Reset { .. }),
-            flush_error::ResetSnafu
-        );
+        if let SendEndState::Reset { .. } = self.end_state() {
+            return Err(StreamResetError.into());
+        }
         Ok(())
     }
 }
