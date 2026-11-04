@@ -282,7 +282,7 @@ fn read_after_reader_drop_fails() {
         receiver.read_into(&mut Vec::new()),
         Err(ReadError::ReaderDropped)
     );
-    // A later connection failure does not reopen reading.
+    // A later connection close does not reopen reading.
     receiver.connection_closed(close_reason());
     assert_eq!(receiver.read_chunk(), Err(ReadError::ReaderDropped));
 }

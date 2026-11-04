@@ -546,7 +546,7 @@ where
     /// beyond a fixed delivery limit and everything after the buffer was
     /// destroyed count as released. Frame processing reports by itself;
     /// reads do not, since they do not see the connection. Nothing is
-    /// reported after a connection failure.
+    /// reported after the connection closed.
     ///
     /// # Errors
     ///
@@ -776,7 +776,7 @@ where
                 && self.closed().is_none()
                 && self.stop_not_needed().is_none(),
             reader_dropped: self.is_reader_dropped(),
-            connection_failed: self.closed().is_some(),
+            connection_closed: self.closed().is_some(),
         }
     }
 

@@ -109,7 +109,7 @@ pub struct TerminationView {
     /// Whether the reader was dropped.
     pub reader_dropped: bool,
     /// Whether the connection closed.
-    pub connection_failed: bool,
+    pub connection_closed: bool,
 }
 
 /// Whether a completely delivered stream that the peer reset ends with the

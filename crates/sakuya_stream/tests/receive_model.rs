@@ -265,7 +265,7 @@ impl ReceiveTerminationPolicy for Parts {
             committed: view.read_result_committed,
             stop_sent: view.stop_sent,
             reader_dropped: view.reader_dropped,
-            failed: view.connection_failed,
+            failed: view.connection_closed,
             stop_allowed: view.stop_allowed,
         };
         let choice = self.script.decide(event, &facts);
