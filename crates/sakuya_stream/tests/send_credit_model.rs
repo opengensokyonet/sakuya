@@ -220,9 +220,11 @@ fn concurrent_reservations_never_exceed_the_limit() {
                             continue;
                         };
                         assert!(reservation.amount().get() <= amount);
-                        assert!(
-                            connection.reserved().get() + connection.committed().get() <= LIMIT
-                        );
+                        // A commit adds to `C` before it leaves `R`, so a sum of
+                        // two separate loads can count it twice; conservation is
+                        // checked once the workers are done.
+                        assert!(connection.reserved().get() <= LIMIT);
+                        assert!(connection.committed().get() <= LIMIT);
                         // Commit every third reservation, release the rest.
                         if round % 3 == 0 {
                             committed += reservation.commit().get();
