@@ -19,3 +19,4 @@ snafu.workspace = true
 
 [dev-dependencies]
 nitori_crypto_aws_lc = { workspace = true, features = ["fixed-x25519"] }
+rustls.workspace = true

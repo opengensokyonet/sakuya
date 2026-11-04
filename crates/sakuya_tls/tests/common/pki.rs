@@ -62,14 +62,20 @@ fn extension(oid: &[u8], critical: bool, value: &[u8]) -> Vec<u8> {
     seq(&[&tlv(0x06, oid), &critical, &tlv(0x04, value)])
 }
 
-/// The key of a 32-byte Ed25519 seed, from a PKCS#8 v1 document.
-pub fn key(seed: u8) -> Ed25519SigningKey {
+/// The PKCS#8 v1 document of the Ed25519 key with the 32-byte seed
+/// `[seed; 32]`.
+pub fn pkcs8(seed: u8) -> Vec<u8> {
     let mut pkcs8 = vec![
         0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04,
         0x20,
     ];
     pkcs8.extend([seed; 32]);
-    Ed25519SigningKey::from_pkcs8(&pkcs8).unwrap()
+    pkcs8
+}
+
+/// The key of `pkcs8(seed)`.
+pub fn key(seed: u8) -> Ed25519SigningKey {
+    Ed25519SigningKey::from_pkcs8(&pkcs8(seed)).unwrap()
 }
 
 fn certificate(

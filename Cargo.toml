@@ -26,6 +26,7 @@ nitori_id = { git = "https://github.com/opengensokyonet/nitori", rev = "a18e915b
 nitori_io = { git = "https://github.com/opengensokyonet/nitori", rev = "a18e915ba930d60485b332017a43c2c1a2e7a1e1" }
 proptest = "1.12.0"
 ring = { version = "0.17.14", default-features = false }
+rustls = { version = "0.23.46", default-features = false, features = ["std", "aws_lc_rs"] }
 rustls-pki-types = { version = "1.15.1", default-features = false, features = ["std"] }
 rustls-webpki = { version = "0.103.16", default-features = false, features = ["std"] }
 sakuya_wire = { path = "crates/sakuya_wire" }
