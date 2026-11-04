@@ -19,11 +19,11 @@ license = "Apache-2.0 OR MIT"
 bytes = "1.12.1"
 dashmap = "6.1.0"
 either = { version = "1.17.0", default-features = false }
-nitori_call = { path = "../nitori/crates/nitori_call" }
-nitori_crypto = { path = "../nitori/crates/nitori_crypto" }
-nitori_crypto_aws_lc = { path = "../nitori/crates/nitori_crypto_aws_lc" }
-nitori_id = { path = "../nitori/crates/nitori_id" }
-nitori_io = { path = "../nitori/crates/nitori_io" }
+nitori_call = { git = "https://github.com/opengensokyonet/nitori", rev = "a18e915ba930d60485b332017a43c2c1a2e7a1e1" }
+nitori_crypto = { git = "https://github.com/opengensokyonet/nitori", rev = "a18e915ba930d60485b332017a43c2c1a2e7a1e1" }
+nitori_crypto_aws_lc = { git = "https://github.com/opengensokyonet/nitori", rev = "a18e915ba930d60485b332017a43c2c1a2e7a1e1" }
+nitori_id = { git = "https://github.com/opengensokyonet/nitori", rev = "a18e915ba930d60485b332017a43c2c1a2e7a1e1" }
+nitori_io = { git = "https://github.com/opengensokyonet/nitori", rev = "a18e915ba930d60485b332017a43c2c1a2e7a1e1" }
 proptest = "1.12.0"
 ring = { version = "0.17.14", default-features = false }
 rustls-pki-types = { version = "1.15.1", default-features = false, features = ["std"] }

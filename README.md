@@ -17,9 +17,9 @@ Byte IO, the call mechanism, process-unique identities and cryptographic capabil
 
 ## Development
 
-Install [rustup](https://rustup.rs/) and clone [nitori](https://github.com/opengensokyonet/nitori) next to this repository, so that it is available as `../nitori`. The repository pins `nightly-2026-11-03` with rustfmt and Clippy in `rust-toolchain.toml`; run commands from the repository root so rustup selects this toolchain. Nightly language features are required. Packages remain unpublished (`publish = false`).
+Install [rustup](https://rustup.rs/). The repository pins `nightly-2026-11-03` with rustfmt and Clippy in `rust-toolchain.toml`; run commands from the repository root so rustup selects this toolchain. Nightly language features are required. Packages remain unpublished (`publish = false`).
 
-During development, `nitori_call`, `nitori_crypto`, `nitori_id` and `nitori_io` are path dependencies on that sibling checkout, and `Cargo.lock` records them as path sources. The tests of `sakuya_tls` also use `nitori_crypto_aws_lc` from that checkout, which builds aws-lc-rs from C sources and needs a C compiler and CMake. `snafu` is a Git dependency pinned to a specific commit in `Cargo.toml`; Cargo fetches it automatically.
+`nitori_call`, `nitori_crypto`, `nitori_id` and `nitori_io` are Git dependencies on [nitori](https://github.com/opengensokyonet/nitori), and `snafu` is a Git dependency, each pinned to a specific commit in `Cargo.toml`; Cargo fetches them automatically. The tests of `sakuya_tls` also use `nitori_crypto_aws_lc`, which builds aws-lc-rs from C sources and needs a C compiler and CMake.
 
 From the repository root:
 
@@ -32,7 +32,7 @@ cargo test --locked --workspace --all-targets --all-features
 cargo test --locked --workspace --doc
 ```
 
-For development against a local checkout of SNAFU, an ignored `.cargo/config.toml` may patch its Git source to a local path under `[patch."https://github.com/opengensokyonet/snafu"]`. Keep that configuration and the resulting lockfile changes out of commits; the committed lockfile records the public SNAFU source.
+For development against local checkouts of nitori or SNAFU, an ignored `.cargo/config.toml` may patch their Git sources to local paths under `[patch."https://github.com/opengensokyonet/nitori"]` and `[patch."https://github.com/opengensokyonet/snafu"]`. Keep that configuration and the resulting lockfile changes out of commits; the committed lockfile records the public sources.
 
 ## License
 
