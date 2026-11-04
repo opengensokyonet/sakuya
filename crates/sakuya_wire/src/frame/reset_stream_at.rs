@@ -93,7 +93,7 @@ impl ResetStreamAt {
 
 /// A RESET_STREAM_AT reliable size exceeds its final size.
 ///
-/// Only [`ResetStreamAt::new`] constructs it, when the check fails, so its
+/// Only [`check`](Self::check) constructs it, when the check fails, so its
 /// Reliable Size always exceeds its Final Size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display(
@@ -116,8 +116,13 @@ impl ReliableSizeError {
         self.reliable_size
     }
 
-    /// Checks that `reliable_size` is at most `final_size`.
-    fn check(final_size: VarInt, reliable_size: VarInt) -> Result<(), Self> {
+    /// Checks that `reliable_size` is at most `final_size`, the rule
+    /// [`ResetStreamAt::new`] applies.
+    ///
+    /// # Errors
+    ///
+    /// [`ReliableSizeError`] if `reliable_size` exceeds `final_size`.
+    pub fn check(final_size: VarInt, reliable_size: VarInt) -> Result<(), Self> {
         if reliable_size > final_size {
             return Err(Self {
                 final_size,
