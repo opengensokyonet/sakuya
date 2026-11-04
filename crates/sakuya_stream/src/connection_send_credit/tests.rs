@@ -89,10 +89,10 @@ fn reserve_up_to_takes_what_is_available() {
 #[test]
 fn max_data_only_raises_the_limit() {
     let controller = AtomicConnectionSendFlowController::new(v(100));
-    assert_eq!(controller.on_max_data(v(80)), None);
-    assert_eq!(controller.on_max_data(v(100)), None);
+    assert!(!controller.on_max_data(v(80)));
+    assert!(!controller.on_max_data(v(100)));
     assert_eq!(controller.limit(), v(100));
-    assert_eq!(controller.on_max_data(v(150)), Some(v(100)));
+    assert!(controller.on_max_data(v(150)));
     assert_eq!(controller.limit(), v(150));
 }
 

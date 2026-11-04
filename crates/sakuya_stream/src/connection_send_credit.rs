@@ -60,6 +60,14 @@ pub trait ConnectionSendFlowController {
     /// Returns `None` if no credit is available or `amount` is zero; the
     /// returned reservation's amount is never zero.
     fn reserve_up_to(&self, stream_id: StreamId, amount: VarInt) -> Option<Self::Reservation>;
+
+    /// Applies a `MAX_DATA` value: the limit becomes the larger of the
+    /// current limit and `maximum`.
+    ///
+    /// Returns `true` if the limit grew. A value that is equal to or below
+    /// the current limit is ignored and returns `false`
+    /// ([RFC 9000 §4.1](https://www.rfc-editor.org/rfc/rfc9000.html#section-4.1)).
+    fn on_max_data(&self, maximum: VarInt) -> bool;
 }
 
 /// A connection credit reservation (`connection_credit_reservation`):
@@ -256,17 +264,6 @@ impl AtomicConnectionSendFlowController {
         self.ledger.committed()
     }
 
-    /// Applies a `MAX_DATA` value: the limit becomes the larger of the current
-    /// limit and `limit`.
-    ///
-    /// Returns the previous limit if the limit grew, and `None` if `limit` did
-    /// not exceed it.
-    pub fn on_max_data(&self, limit: VarInt) -> Option<VarInt> {
-        let previous = self.ledger.limit.fetch_max(limit.get(), Ordering::SeqCst);
-        // invariant: the counter only holds values stored from a `VarInt`.
-        (limit.get() > previous).then(|| VarInt::new(previous).unwrap_or(VarInt::MAX))
-    }
-
     /// Reserves exactly `amount` of connection credit for `stream_id`.
     ///
     /// # Errors
@@ -312,6 +309,11 @@ impl ConnectionSendFlowController for AtomicConnectionSendFlowController {
     fn reserve_up_to(&self, stream_id: StreamId, amount: VarInt) -> Option<Self::Reservation> {
         let reserved = self.ledger.reserve_up_to(amount);
         (reserved > VarInt::ZERO).then(|| self.reservation(stream_id, reserved))
+    }
+
+    fn on_max_data(&self, maximum: VarInt) -> bool {
+        let previous = self.ledger.limit.fetch_max(maximum.get(), Ordering::SeqCst);
+        maximum.get() > previous
     }
 }
 

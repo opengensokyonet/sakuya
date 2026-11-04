@@ -154,7 +154,7 @@ proptest! {
                 }
                 Op::MaxData { limit: value } => {
                     let grew = connection.on_max_data(v(value));
-                    prop_assert_eq!(grew, (value > limit).then(|| v(limit)));
+                    prop_assert_eq!(grew, value > limit);
                     limit = limit.max(value);
                 }
             }

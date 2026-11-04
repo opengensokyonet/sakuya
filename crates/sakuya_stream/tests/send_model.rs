@@ -716,7 +716,7 @@ fn step<S: Sender, P: PolicyModel>(
         }
         Op::MaxData { limit } => {
             let grew = connection.on_max_data(v(limit));
-            assert_eq!(grew.is_some(), limit > model.limit);
+            assert_eq!(grew, limit > model.limit);
             model.limit = model.limit.max(limit);
         }
         Op::ExposeData { stream, usage_end } => {
