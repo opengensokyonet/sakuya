@@ -24,7 +24,7 @@
 
 use crate::{
     cipher_suite::CipherSuite,
-    clock::Clock,
+    clock::{Clock, elapsed},
     extension::{alpn::ProtocolName, pre_shared_key::OfferedPsks, pre_shared_key::PskIndex},
     message::new_session_ticket::{TicketLifetime, TicketNonce},
     schedule::ResumptionPsk,
@@ -38,8 +38,9 @@ use snafu::{ResultExt, Snafu};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, PoisonError},
-    time::{Duration, SystemTime},
+    time::Duration,
 };
+use time::UtcDateTime;
 
 /// What a resumed connection must find again, as the handshake knows it
 /// when it issues tickets (RFC 8446 §4.6.1, RFC 9000 §7.4.1,
@@ -115,7 +116,7 @@ pub struct TicketState<T> {
     /// obfuscated age a client sends.
     pub ticket_age_add: u32,
     /// When the ticket was issued.
-    pub issued_at: SystemTime,
+    pub issued_at: UtcDateTime,
     /// How long the ticket is valid.
     pub lifetime: TicketLifetime,
     /// Whether the ticket allows 0-RTT.
@@ -270,10 +271,9 @@ impl StoredPsk {
 }
 
 impl<T> Entry<T> {
-    fn expired(&self, now: SystemTime) -> bool {
+    fn expired(&self, now: UtcDateTime) -> bool {
         let lifetime = Duration::from_secs(u64::from(self.state.lifetime.seconds()));
-        now.duration_since(self.state.issued_at)
-            .is_ok_and(|age| age >= lifetime)
+        elapsed(self.state.issued_at, now).is_some_and(|age| age >= lifetime)
     }
 }
 
@@ -526,10 +526,8 @@ mod tests {
     use bytes::Bytes;
     use nitori_crypto::{Digest, HashAlgorithm, Secret};
     use nitori_crypto_aws_lc::AwsLcBackend;
-    use std::{
-        sync::Arc,
-        time::{Duration, SystemTime},
-    };
+    use std::{sync::Arc, time::Duration};
+    use time::UtcDateTime;
 
     type Table = SingleUseTicketTable<&'static str, AwsLcBackend, Arc<ManualClock>>;
 
@@ -546,7 +544,7 @@ mod tests {
 
     fn clock() -> Arc<ManualClock> {
         Arc::new(ManualClock::new(
-            SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+            UtcDateTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000),
         ))
     }
 

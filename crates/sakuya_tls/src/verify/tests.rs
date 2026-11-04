@@ -36,7 +36,8 @@ use bytes::Bytes;
 use core::convert::Infallible;
 use nitori_crypto::{Hash, HashAlgorithm, RunningHash, SignatureScheme};
 use nitori_crypto_aws_lc::AwsLcBackend;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
+use time::UtcDateTime;
 
 const LEAF: &[u8] = include_bytes!("../../testdata/docsrs/docsrs-com.der");
 const INTERMEDIATE: &[u8] = include_bytes!("../../testdata/docsrs/amazon-rsa-2048-m04.der");
@@ -52,8 +53,8 @@ const NOW: u64 = 1_793_750_400;
 /// 2027-04-14T23:59:59Z, the last second of the leaf's validity.
 const NOT_AFTER: u64 = 1_807_747_199;
 
-fn at(seconds: u64) -> SystemTime {
-    SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)
+fn at(seconds: u64) -> UtcDateTime {
+    UtcDateTime::UNIX_EPOCH + Duration::from_secs(seconds)
 }
 
 fn log_id(key: &[u8]) -> LogId {
@@ -105,7 +106,7 @@ type Verifier = WebPkiVerifier<
     ManualClock,
 >;
 
-fn verifier(policy: EmbeddedSctPolicy, now: SystemTime) -> Verifier {
+fn verifier(policy: EmbeddedSctPolicy, now: UtcDateTime) -> Verifier {
     WebPkiVerifier::new(
         AwsLcBackend,
         AnchorStore::from_certificates([ROOT]).unwrap(),
@@ -247,7 +248,7 @@ fn an_unknown_root_fails() {
     assert_eq!(error.alert(), AlertDescription::DECODE_ERROR);
 }
 
-fn transparency_error(policy: EmbeddedSctPolicy, now: SystemTime) -> TransparencyError {
+fn transparency_error(policy: EmbeddedSctPolicy, now: UtcDateTime) -> TransparencyError {
     match verify(&verifier(policy, now), "docsrs.com").unwrap_err() {
         VerifyError::Transparency { source } => source,
         error => panic!("{error:?}"),

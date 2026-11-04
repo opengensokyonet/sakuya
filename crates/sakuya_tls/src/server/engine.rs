@@ -50,7 +50,7 @@
 use crate::{
     alert::{AlertDescription, CallsForAlert},
     cipher_suite::SupportedSuite,
-    clock::Clock,
+    clock::{Clock, elapsed},
     crypto::TlsCrypto,
     engine::{
         CryptoInput, CryptoInputExt as _, CryptoLevel, CryptoOutput, CryptoOutputExt as _,
@@ -116,6 +116,7 @@ use nitori_crypto::{
 use nitori_io::{Read, Write, calls::WriteAllExt as _, error::WriteZero};
 use sakuya_packet_protection::backend::AeadAlgorithm;
 use snafu::Snafu;
+use time::UtcDateTime;
 
 /// The connection's side of the transport parameters, as a server's
 /// handshake asks for it.
@@ -552,12 +553,12 @@ enum Early<C: TlsCrypto> {
 fn ticket_age_fits<T>(
     state: &TicketState<T>,
     obfuscated_age: u32,
-    now: std::time::SystemTime,
+    now: UtcDateTime,
     tolerance: Duration,
 ) -> bool {
     let stated =
         Duration::from_millis(u64::from(obfuscated_age.wrapping_sub(state.ticket_age_add)));
-    let Ok(measured) = now.duration_since(state.issued_at) else {
+    let Some(measured) = elapsed(state.issued_at, now) else {
         return false;
     };
     stated.abs_diff(measured) <= tolerance

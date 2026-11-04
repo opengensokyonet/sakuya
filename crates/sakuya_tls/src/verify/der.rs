@@ -7,7 +7,7 @@
 //! structure can be rebuilt from its parts unchanged.
 
 use snafu::Snafu;
-use std::time::{Duration, SystemTime};
+use time::UtcDateTime;
 
 /// DER that does not have the expected structure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
@@ -148,7 +148,7 @@ pub(crate) fn wrap(tag: u8, contents: &[u8]) -> Vec<u8> {
 
 /// A UTCTime or GeneralizedTime in the forms X.509 allows: seconds, no
 /// fraction, in UTC (RFC 5280 §4.1.2.5).
-pub(crate) fn read_time(element: Element<'_>) -> Result<SystemTime, MalformedDer> {
+pub(crate) fn read_time(element: Element<'_>) -> Result<UtcDateTime, MalformedDer> {
     let digits = element.contents;
     let (year, rest) = match (element.tag, digits.len()) {
         (UTC_TIME, 13) => {
@@ -183,8 +183,10 @@ pub(crate) fn read_time(element: Element<'_>) -> Result<SystemTime, MalformedDer
     let seconds = days * 86_400 + hour * 3600 + minute * 60 + second;
     // Years before 1970 do not occur in certificates this verifier
     // accepts; they are malformed here.
-    let seconds = u64::try_from(seconds).map_err(|_| MalformedDer)?;
-    Ok(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds))
+    if seconds < 0 {
+        return Err(MalformedDer);
+    }
+    UtcDateTime::from_unix_timestamp(seconds).map_err(|_| MalformedDer)
 }
 
 fn number(digits: &[u8]) -> Result<i64, MalformedDer> {
@@ -222,9 +224,9 @@ mod tests {
     use super::{
         Element, GENERALIZED_TIME, MalformedDer, Reader, SEQUENCE, UTC_TIME, read_time, wrap,
     };
-    use std::time::{Duration, SystemTime};
+    use time::UtcDateTime;
 
-    fn time(tag: u8, text: &str) -> Result<SystemTime, MalformedDer> {
+    fn time(tag: u8, text: &str) -> Result<UtcDateTime, MalformedDer> {
         let encoded = wrap(tag, text.as_bytes());
         read_time(Element {
             tag,
@@ -233,8 +235,8 @@ mod tests {
         })
     }
 
-    fn at(seconds: u64) -> SystemTime {
-        SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)
+    fn at(seconds: i64) -> UtcDateTime {
+        UtcDateTime::from_unix_timestamp(seconds).unwrap()
     }
 
     #[test]

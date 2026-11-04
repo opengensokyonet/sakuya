@@ -12,10 +12,8 @@ use sakuya_tls::{
         transparency::{EmbeddedSctPolicy, LogList, StaleLogList},
     },
 };
-use std::{
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
+use std::{sync::Arc, time::Duration};
+use time::UtcDateTime;
 
 fn tlv(tag: u8, content: &[u8]) -> Vec<u8> {
     let mut out = vec![tag];
@@ -154,7 +152,7 @@ pub fn verifier(clock: &Arc<ManualClock>) -> Verifier {
     // The certificates carry no SCTs: a log list past its age skips the CT
     // check.
     let transparency = EmbeddedSctPolicy::with_list_age(
-        LogList::new(Vec::new(), SystemTime::UNIX_EPOCH),
+        LogList::new(Vec::new(), UtcDateTime::UNIX_EPOCH),
         Duration::ZERO,
         StaleLogList::SkipCheck,
     );

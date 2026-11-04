@@ -16,6 +16,7 @@ rustls-webpki.workspace = true
 sakuya_packet_protection.workspace = true
 smallvec.workspace = true
 snafu.workspace = true
+time = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 nitori_crypto_aws_lc = { workspace = true, features = ["fixed-x25519"] }

@@ -14,6 +14,7 @@ use super::{
     der::{self, MalformedDer, Reader},
     public_key::{InvalidPublicKey, PublicKeyAlgorithm, SubjectPublicKey},
 };
+use crate::clock::elapsed;
 use crate::extension::signed_certificate_timestamp::codec::{
     ReadSignedCertificateTimestampsError, ReadSignedCertificateTimestampsHostExt as _,
 };
@@ -21,8 +22,9 @@ use nitori_crypto::{Hash, HashAlgorithm, RunningHash, SignatureScheme, Signature
 use snafu::{ResultExt, Snafu};
 use std::{
     sync::{Arc, PoisonError, RwLock},
-    time::{Duration, SystemTime},
+    time::Duration,
 };
+use time::UtcDateTime;
 
 /// The extension that holds the embedded SCT list,
 /// 1.3.6.1.4.1.11129.2.4.2.
@@ -48,7 +50,7 @@ pub enum LogState {
     /// count.
     Retired {
         /// When the log was retired.
-        at: SystemTime,
+        at: UtcDateTime,
     },
     /// Never trusted, or no longer at all; its SCTs do not count.
     Rejected,
@@ -56,7 +58,7 @@ pub enum LogState {
 
 impl LogState {
     /// Whether an SCT of this log with `timestamp` counts.
-    fn counts(self, timestamp: SystemTime) -> bool {
+    fn counts(self, timestamp: UtcDateTime) -> bool {
         match self {
             Self::Qualified | Self::Usable | Self::ReadOnly => true,
             Self::Retired { at } => timestamp < at,
@@ -159,12 +161,12 @@ pub enum InvalidLogKey {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LogList {
     logs: Vec<CtLog>,
-    published_at: SystemTime,
+    published_at: UtcDateTime,
 }
 
 impl LogList {
     /// The list of `logs`, published at `published_at`.
-    pub fn new(logs: Vec<CtLog>, published_at: SystemTime) -> Self {
+    pub fn new(logs: Vec<CtLog>, published_at: UtcDateTime) -> Self {
         Self { logs, published_at }
     }
 
@@ -174,7 +176,7 @@ impl LogList {
     }
 
     /// When the list was published.
-    pub fn published_at(&self) -> SystemTime {
+    pub fn published_at(&self) -> UtcDateTime {
         self.published_at
     }
 
@@ -259,11 +261,11 @@ impl<C: Hash + SignatureVerify> super::Transparency<C> for EmbeddedSctPolicy {
         backend: &C,
         leaf: &[u8],
         issuer_spki: &[u8],
-        now: SystemTime,
+        now: UtcDateTime,
     ) -> Result<(), TransparencyError> {
         use transparency_error::*;
         let list = self.list();
-        let age = now.duration_since(list.published_at).unwrap_or_default();
+        let age = elapsed(list.published_at, now).unwrap_or_default();
         if age > self.max_list_age {
             return match self.when_stale {
                 StaleLogList::Reject => StaleLogListSnafu { age }.fail(),
@@ -289,7 +291,12 @@ impl<C: Hash + SignatureVerify> super::Transparency<C> for EmbeddedSctPolicy {
                 let Some(log) = list.find(&sct.log_id) else {
                     continue;
                 };
-                let timestamp = SystemTime::UNIX_EPOCH + Duration::from_millis(sct.timestamp);
+                // A timestamp past the years a date can hold is in the future.
+                let Ok(timestamp) =
+                    UtcDateTime::from_unix_timestamp_nanos(i128::from(sct.timestamp) * 1_000_000)
+                else {
+                    continue;
+                };
                 if timestamp > now
                     || !log.state.counts(timestamp)
                     || counted.iter().any(|seen| seen.id == log.id)
@@ -310,10 +317,7 @@ impl<C: Hash + SignatureVerify> super::Transparency<C> for EmbeddedSctPolicy {
                 }
             }
         }
-        let validity = leaf
-            .not_after
-            .duration_since(leaf.not_before)
-            .unwrap_or_default();
+        let validity = elapsed(leaf.not_before, leaf.not_after).unwrap_or_default();
         let required = if validity <= Self::SHORT_VALIDITY {
             2
         } else {
@@ -388,8 +392,8 @@ struct Leaf<'a> {
     precert_tbs: Vec<u8>,
     /// The TLS encoding of the embedded SCT list, if there is one.
     timestamps: Option<&'a [u8]>,
-    not_before: SystemTime,
-    not_after: SystemTime,
+    not_before: UtcDateTime,
+    not_after: UtcDateTime,
 }
 
 impl<'a> Leaf<'a> {

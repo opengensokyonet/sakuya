@@ -38,6 +38,7 @@ use core::{
     cell::RefCell,
     convert::Infallible,
     future::{Future, Ready, ready},
+    time::Duration,
 };
 use nitori_crypto::{Hash, SignatureScheme, SignatureVerify, Supported};
 use rustls_pki_types::{
@@ -48,8 +49,8 @@ use snafu::{ResultExt, Snafu};
 use std::{
     collections::BTreeSet,
     sync::{Arc, PoisonError, RwLock},
-    time::SystemTime,
 };
+use time::UtcDateTime;
 use webpki::{EndEntityCert, KeyUsage, VerifiedPath};
 
 mod der;
@@ -131,7 +132,7 @@ pub trait Transparency<C> {
         backend: &C,
         leaf: &[u8],
         issuer_spki: &[u8],
-        now: SystemTime,
+        now: UtcDateTime,
     ) -> Result<(), Self::Error>;
 }
 
@@ -492,9 +493,9 @@ where
             .collect();
         let anchors = self.anchors.snapshot();
         let now = self.clock.now();
-        let since_epoch = now
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default();
+        // Years before 1970 are past every certificate's validity.
+        let since_epoch =
+            Duration::from_secs(u64::try_from(now.unix_timestamp()).unwrap_or_default());
         let refusal = RefCell::new(None);
         let check = |path: &VerifiedPath<'_>| -> Result<(), webpki::Error> {
             match self.check_path(path, leaf.data(), now) {
@@ -534,7 +535,7 @@ where
         &self,
         path: &VerifiedPath<'_>,
         leaf: &Bytes,
-        now: SystemTime,
+        now: UtcDateTime,
     ) -> Result<(), Refusal<R::Error, T::Error>> {
         let anchor_spki = der::wrap(
             der::SEQUENCE,

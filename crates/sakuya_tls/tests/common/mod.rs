@@ -13,12 +13,13 @@ use core::{
     pin::pin,
     task::{Context, Poll, Waker},
 };
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
+use time::UtcDateTime;
 
 /// 2026-11-04T00:00:00Z.
 #[allow(dead_code)]
-pub fn now() -> SystemTime {
-    SystemTime::UNIX_EPOCH + Duration::from_secs(1_793_750_400)
+pub fn now() -> UtcDateTime {
+    UtcDateTime::UNIX_EPOCH + Duration::from_secs(1_793_750_400)
 }
 
 /// The output of a future that is ready at once.

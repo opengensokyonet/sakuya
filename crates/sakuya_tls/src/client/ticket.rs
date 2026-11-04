@@ -8,15 +8,21 @@
 //! it came from; [`TakeOnceTicketMap`] keeps them in memory.
 
 use crate::{
-    cipher_suite::CipherSuite, client::ServerTarget, clock::Clock, extension::alpn::ProtocolName,
-    message::new_session_ticket::TicketLifetime, schedule::ResumptionPsk, verify::SubjectPublicKey,
+    cipher_suite::CipherSuite,
+    client::ServerTarget,
+    clock::{Clock, elapsed},
+    extension::alpn::ProtocolName,
+    message::new_session_ticket::TicketLifetime,
+    schedule::ResumptionPsk,
+    verify::SubjectPublicKey,
 };
 use bytes::Bytes;
 use std::{
     collections::{HashMap, VecDeque},
     sync::{Mutex, PoisonError},
-    time::{Duration, SystemTime},
+    time::Duration,
 };
+use time::UtcDateTime;
 
 /// A ticket a client received, with what it needs to resume with it.
 pub struct StoredTicket {
@@ -32,7 +38,7 @@ pub struct StoredTicket {
     /// How long the server said the ticket is valid.
     pub lifetime: TicketLifetime,
     /// When the client received the ticket.
-    pub received_at: SystemTime,
+    pub received_at: UtcDateTime,
     /// Whether the ticket allows 0-RTT.
     pub early_data: bool,
     /// The application protocol of the connection the ticket came from.
@@ -51,16 +57,15 @@ impl StoredTicket {
     /// `ticket_age_add`, modulo 2<sup>32</sup> (RFC 8446 §4.2.11.1).
     ///
     /// A `now` before the ticket was received counts as an age of zero.
-    pub fn obfuscated_age(&self, now: SystemTime) -> u32 {
-        let age = now.duration_since(self.received_at).unwrap_or_default();
+    pub fn obfuscated_age(&self, now: UtcDateTime) -> u32 {
+        let age = elapsed(self.received_at, now).unwrap_or_default();
         // The age is taken modulo 2^32 milliseconds, as the field holds it.
         (age.as_millis() as u32).wrapping_add(self.ticket_age_add)
     }
 
-    fn usable_at(&self, now: SystemTime, max_age: Duration) -> bool {
+    fn usable_at(&self, now: UtcDateTime, max_age: Duration) -> bool {
         let lifetime = Duration::from_secs(u64::from(self.lifetime.seconds())).min(max_age);
-        now.duration_since(self.received_at)
-            .map_or(true, |age| age < lifetime)
+        elapsed(self.received_at, now).is_none_or(|age| age < lifetime)
     }
 }
 
@@ -178,7 +183,8 @@ mod tests {
     };
     use bytes::Bytes;
     use nitori_crypto::Secret;
-    use std::time::{Duration, SystemTime};
+    use std::time::Duration;
+    use time::UtcDateTime;
 
     /// An Ed25519 SubjectPublicKeyInfo.
     const ED25519_SPKI: &[u8] = &[
@@ -187,11 +193,11 @@ mod tests {
         30, 31, 32,
     ];
 
-    fn start() -> SystemTime {
-        SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000)
+    fn start() -> UtcDateTime {
+        UtcDateTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000)
     }
 
-    fn ticket(byte: u8, received_at: SystemTime) -> StoredTicket {
+    fn ticket(byte: u8, received_at: UtcDateTime) -> StoredTicket {
         StoredTicket {
             ticket: Bytes::from(vec![byte; 8]),
             psk: ResumptionPsk::new(Secret::new(&[byte; 32]).unwrap()),
