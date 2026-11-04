@@ -19,7 +19,7 @@
 use super::{EndSource, SendEndState, SendTerminalState};
 use sakuya_wire::stream_id::StreamId;
 use sakuya_wire::var_int::VarInt;
-use snafu::{Snafu, ensure};
+use snafu::{ResultExt, Snafu, ensure};
 
 /// The stream send flow-control policy (`SendFlowControlPolicy`).
 ///
@@ -87,15 +87,13 @@ impl AdmissionGuard {
     ///
     /// # Errors
     ///
-    /// [`AdmissionGrantError`] unless `0 < granted <= attempt.ceiling`.
+    /// [`AdmissionGrantError::Zero`] if `granted` is zero, then
+    /// [`AdmissionGrantError::AboveCeiling`] if it exceeds
+    /// `attempt.ceiling`.
     pub fn new(attempt: &WriteAttempt, granted: VarInt) -> Result<Self, AdmissionGrantError> {
-        ensure!(
-            granted > VarInt::ZERO && granted <= attempt.ceiling,
-            AdmissionGrantSnafu {
-                granted,
-                ceiling: attempt.ceiling,
-            }
-        );
+        ensure!(granted > VarInt::ZERO, admission_grant_error::ZeroSnafu);
+        GrantAboveCeilingError::check(granted, attempt.ceiling)
+            .context(admission_grant_error::AboveCeilingSnafu)?;
         Ok(Self {
             offset: attempt.offset,
             granted,
@@ -111,16 +109,61 @@ impl AdmissionGuard {
     pub fn granted(&self) -> VarInt {
         self.granted
     }
+
+    /// A guard that skips the checks of [`new`](Self::new).
+    #[cfg(test)]
+    pub(crate) fn new_unchecked(offset: VarInt, granted: VarInt) -> Self {
+        Self { offset, granted }
+    }
 }
 
 /// [`AdmissionGuard::new`] was asked for a grant outside `1..=ceiling`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(display("a grant of {granted} bytes lies outside 1..={ceiling}"))]
-pub struct AdmissionGrantError {
-    /// The rejected grant.
-    pub granted: VarInt,
+#[snafu(module(admission_grant_error), visibility(pub(crate)))]
+pub enum AdmissionGrantError {
+    /// The grant is zero; a policy that admits nothing returns `None`
+    /// instead of granting zero bytes.
+    #[snafu(display("a grant of zero bytes is no admission"))]
+    Zero,
+    /// The grant exceeds the attempt's ceiling.
+    #[snafu(display("the grant exceeds the attempt's ceiling"))]
+    AboveCeiling {
+        /// The rejected grant and the ceiling.
+        source: GrantAboveCeilingError,
+    },
+}
+
+/// A grant exceeds the ceiling of the attempt it was made for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("a grant of {granted} bytes exceeds the ceiling {ceiling}"))]
+pub struct GrantAboveCeilingError {
+    granted: VarInt,
+    ceiling: VarInt,
+}
+
+impl GrantAboveCeilingError {
+    /// Checks that `granted` does not exceed `ceiling`.
+    ///
+    /// # Errors
+    ///
+    /// [`GrantAboveCeilingError`] if `granted` exceeds `ceiling`.
+    pub(crate) fn check(granted: VarInt, ceiling: VarInt) -> Result<(), Self> {
+        ensure!(
+            granted <= ceiling,
+            GrantAboveCeilingSnafu { granted, ceiling }
+        );
+        Ok(())
+    }
+
+    /// The rejected grant, which exceeds [`ceiling`](Self::ceiling).
+    pub const fn granted(self) -> VarInt {
+        self.granted
+    }
+
     /// The attempt's ceiling.
-    pub ceiling: VarInt,
+    pub const fn ceiling(self) -> VarInt {
+        self.ceiling
+    }
 }
 
 /// One write attempt, as presented to [`SendFlowControlPolicy::admit_write`].

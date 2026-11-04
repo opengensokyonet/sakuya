@@ -26,7 +26,9 @@
 use super::{SendEndState, StreamResetError, StreamSender, WriteLimit};
 use crate::connection::ConnectionClosedError;
 use crate::connection_send_credit::{ConnectionCreditReservation, ConnectionSendFlowController};
-use crate::send::flow_control::{AdmissionGuard, SendFlowControlPolicy, WriteAttempt};
+use crate::send::flow_control::{
+    AdmissionGuard, GrantAboveCeilingError, SendFlowControlPolicy, WriteAttempt,
+};
 use crate::send::termination::{SendTerminationEvent, SendTerminationPolicy};
 use crate::send_buffer::StreamSendBuffer;
 use crate::send_buffer::covered_bytes::CoveredBytes;
@@ -34,7 +36,7 @@ use bytes::Buf;
 use core::fmt;
 use core::ops::Deref;
 use sakuya_wire::var_int::VarInt;
-use snafu::{Snafu, ensure};
+use snafu::{Report, ResultExt, Snafu, ensure};
 use std::sync::Arc;
 
 /// The outcome of a write attempt that did not fail.
@@ -249,7 +251,7 @@ where
             }));
         };
         if let Err(violation) = check_grant(&guard, &attempt) {
-            panic!("{violation}");
+            panic!("{}", Report::from_error(violation));
         }
 
         let Some(reservation) = self
@@ -321,9 +323,12 @@ enum GrantViolationError {
         offset: VarInt,
         granted_offset: VarInt,
     },
+    /// The guard grants zero bytes.
+    #[snafu(display("flow-control policy granted zero bytes"))]
+    Zero,
     /// The guard exceeds the attempt's ceiling.
-    #[snafu(display("flow-control policy granted {granted} bytes outside 1..={ceiling}"))]
-    Ceiling { granted: VarInt, ceiling: VarInt },
+    #[snafu(display("flow-control policy granted admission above the ceiling"))]
+    Ceiling { source: GrantAboveCeilingError },
 }
 
 /// Checks the [policy contract](SendFlowControlPolicy#contract) for a guard
@@ -336,12 +341,8 @@ fn check_grant(guard: &AdmissionGuard, attempt: &WriteAttempt) -> Result<(), Gra
             granted_offset: guard.offset(),
         }
     );
-    ensure!(
-        guard.granted() > VarInt::ZERO && guard.granted() <= attempt.ceiling,
-        grant_violation::CeilingSnafu {
-            granted: guard.granted(),
-            ceiling: attempt.ceiling,
-        }
-    );
+    ensure!(guard.granted() > VarInt::ZERO, grant_violation::ZeroSnafu);
+    GrantAboveCeilingError::check(guard.granted(), attempt.ceiling)
+        .context(grant_violation::CeilingSnafu)?;
     Ok(())
 }

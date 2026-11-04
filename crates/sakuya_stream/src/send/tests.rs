@@ -64,6 +64,7 @@ struct RecordingFlow {
     grant_cap: Option<VarInt>,
     admit_nothing: bool,
     over_grant: bool,
+    zero_grant: bool,
     foreign_offset: bool,
     attempts: Vec<WriteAttempt>,
     settlements: Vec<(VarInt, Option<VarInt>)>,
@@ -87,6 +88,9 @@ impl SendFlowControlPolicy for RecordingFlow {
                 ..*attempt
             };
             return Some(AdmissionGuard::new(&widened, granted).unwrap());
+        }
+        if self.zero_grant {
+            return Some(AdmissionGuard::new_unchecked(attempt.offset, VarInt::ZERO));
         }
         if self.foreign_offset {
             let shifted = WriteAttempt {
@@ -425,7 +429,7 @@ fn write_accepts_a_prefix_of_a_chained_source() {
 }
 
 #[test]
-#[should_panic(expected = "outside 1..=")]
+#[should_panic(expected = "1: a grant of 11 bytes exceeds the ceiling 10")]
 fn grant_beyond_the_ceiling_is_a_policy_violation() {
     let connection = new_connection(1000);
     let mut sender = test_sender(&connection, 100, false);
@@ -456,14 +460,25 @@ fn admission_guards_are_checked_at_construction() {
     };
     let guard = AdmissionGuard::new(&attempt, v(40)).unwrap();
     assert_eq!((guard.offset(), guard.granted()), (v(10), v(40)));
+    let Err(AdmissionGrantError::AboveCeiling { source }) = AdmissionGuard::new(&attempt, v(41))
+    else {
+        panic!("a grant above the ceiling is rejected");
+    };
+    assert_eq!((source.granted(), source.ceiling()), (v(41), v(40)));
     assert_eq!(
-        AdmissionGuard::new(&attempt, v(41)),
-        Err(AdmissionGrantError {
-            granted: v(41),
-            ceiling: v(40),
-        })
+        AdmissionGuard::new(&attempt, VarInt::ZERO),
+        Err(AdmissionGrantError::Zero)
     );
-    assert!(AdmissionGuard::new(&attempt, VarInt::ZERO).is_err());
+}
+
+#[test]
+#[should_panic(expected = "flow-control policy granted zero bytes")]
+fn zero_grant_is_a_policy_violation() {
+    let connection = new_connection(1000);
+    let mut sender = test_sender(&connection, 100, false);
+    sender.composition.flow_control.zero_grant = true;
+    let mut input = source(10);
+    let _ = sender.write(&mut input);
 }
 
 /// A send buffer that claims its written end has reached `VarInt::MAX`.
@@ -2030,7 +2045,7 @@ fn automatic_reset_below_the_exposure_end_is_a_policy_violation() {
 }
 
 #[test]
-#[should_panic(expected = "closed a stream that was reset")]
+#[should_panic(expected = "1: the stream was reset")]
 fn closing_after_a_reset_is_a_policy_violation() {
     let connection = new_connection(10_000);
     let mut sender = scripted_sender(&connection, 1000, |event, _| match event {
@@ -2039,6 +2054,17 @@ fn closing_after_a_reset_is_a_policy_violation() {
     });
     sender.reset(CODE).unwrap();
     sender.on_writer_abandoned();
+}
+
+#[test]
+#[should_panic(expected = "1: the connection is closed")]
+fn closing_after_the_connection_closed_is_a_policy_violation() {
+    let connection = new_connection(10_000);
+    let mut sender = scripted_sender(&connection, 1000, |event, _| match event {
+        SendTerminationEvent::ConnectionClosed => TerminationAction::Close,
+        _ => TerminationAction::Keep,
+    });
+    sender.on_connection_closed(close_reason());
 }
 
 #[test]

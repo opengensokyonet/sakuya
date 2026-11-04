@@ -633,9 +633,9 @@ enum PolicyPlan<R> {
 #[snafu(module(policy_violation))]
 enum PolicyViolationError {
     #[snafu(display("termination policy closed a stream that was reset"))]
-    CloseAfterReset,
+    CloseAfterReset { source: StreamResetError },
     #[snafu(display("termination policy closed a stream after the connection closed"))]
-    CloseAfterConnectionClosed,
+    CloseAfterConnectionClosed { source: ConnectionClosedError },
     #[snafu(display("termination policy narrowed the write limit of a finished stream"))]
     NarrowFinished,
     #[snafu(display("termination policy narrowed the write limit after input was closed"))]
@@ -1050,13 +1050,11 @@ where
             TerminationAction::Close => match self.end_state() {
                 SendEndState::Closed { .. } => Ok(PolicyPlan::Keep),
                 SendEndState::Reset { .. } | SendEndState::ResetAt { .. } => {
-                    policy_violation::CloseAfterResetSnafu.fail()
+                    Err(StreamResetError).context(policy_violation::CloseAfterResetSnafu)
                 }
                 SendEndState::Open => {
-                    ensure!(
-                        !self.is_connection_closed(),
-                        policy_violation::CloseAfterConnectionClosedSnafu
-                    );
+                    self.check_connection_open()
+                        .context(policy_violation::CloseAfterConnectionClosedSnafu)?;
                     Ok(PolicyPlan::Close)
                 }
             },
