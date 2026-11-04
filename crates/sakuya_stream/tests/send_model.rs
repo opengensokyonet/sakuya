@@ -23,6 +23,7 @@ use sakuya_stream::send::write::{FlushError, WriteError, WriteOutcome, WriteWait
 use sakuya_stream::send::{EndSource, ResetTarget, SendEndState, SendTerminalState, StreamSender};
 use sakuya_stream::send_buffer::offset_map::OffsetMapSendBuffer;
 use sakuya_stream::send_buffer::{ExposeUsageError, ExposedEnd};
+use sakuya_stream::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
 use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::stream_id::StreamId;
 use sakuya_wire::var_int::VarInt;
@@ -793,14 +794,12 @@ fn expose<S: Sender, P: PolicyModel>(
         }),
         (ExposedEnd::FinalSize, Some(final_size)) if usage_end != final_size => {
             Err(ExposeUsageError::FinalSizeMismatch {
-                final_size: v(usage_end),
-                established: v(final_size),
+                source: FinalSizeChangeError::check(v(final_size), v(usage_end)).unwrap_err(),
             })
         }
         (ExposedEnd::Data, Some(final_size)) if usage_end > final_size => {
             Err(ExposeUsageError::BeyondFinalSize {
-                usage_end: v(usage_end),
-                final_size: v(final_size),
+                source: BeyondFinalSizeError::check(v(final_size), v(usage_end)).unwrap_err(),
             })
         }
         _ if usage_end > s.written => Err(ExposeUsageError::BeyondWrittenEnd {

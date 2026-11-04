@@ -7,6 +7,7 @@ use super::{
 };
 use crate::connection_send_credit::ConnectionSendFlowController;
 use bytes::Bytes;
+use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
 use sakuya_wire::var_int::VarInt;
 use snafu::{ResultExt, ensure};
 use std::collections::BTreeMap;
@@ -113,13 +114,8 @@ impl SendBuffer for OffsetMapSendBuffer {
             final_size,
             reliable_size,
         } = retention;
-        ensure!(
-            reliable_size <= final_size,
-            apply_reset_error::ReliableSizeBeyondFinalSizeSnafu {
-                reliable_size,
-                final_size,
-            }
-        );
+        ReliableSizeError::check(final_size, reliable_size)
+            .context(apply_reset_error::ReliableSizeBeyondFinalSizeSnafu)?;
         ensure!(
             final_size <= self.written_end,
             apply_reset_error::FinalSizeBeyondWrittenEndSnafu {

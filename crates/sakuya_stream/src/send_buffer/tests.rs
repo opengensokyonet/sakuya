@@ -3,6 +3,8 @@ use super::offset_map::OffsetMapSendBuffer;
 use super::visibility::{CoverError, FixFinalSizeError, VisibilitySettlement};
 use super::*;
 use crate::connection_send_credit::ConnectionCreditReservation;
+use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
+use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
 use sakuya_wire::stream_id::StreamId;
 
 fn v(value: u32) -> VarInt {
@@ -171,8 +173,7 @@ fn reset_retention_is_checked_before_anything_changes() {
     assert_eq!(
         buffer.apply_reset(retention(50, 60)),
         Err(ApplyResetError::ReliableSizeBeyondFinalSize {
-            reliable_size: v(60),
-            final_size: v(50),
+            source: ReliableSizeError::check(v(50), v(60)).unwrap_err(),
         })
     );
     assert_eq!(
@@ -199,8 +200,7 @@ fn reset_retention_is_checked_before_anything_changes() {
         buffer.apply_reset(retention(80, 0)),
         Err(ApplyResetError::FixFinalSize {
             source: FixFinalSizeError::Mismatch {
-                final_size: v(80),
-                established: v(70),
+                source: FinalSizeChangeError::check(v(70), v(80)).unwrap_err(),
             },
         })
     );
@@ -362,8 +362,7 @@ fn exposed_final_size_constrains_later_exposures() {
     assert_eq!(
         error,
         ExposeUsageError::BeyondFinalSize {
-            usage_end: v(90),
-            final_size: v(80),
+            source: BeyondFinalSizeError::check(v(80), v(90)).unwrap_err(),
         }
     );
     let error = buffer
@@ -372,8 +371,7 @@ fn exposed_final_size_constrains_later_exposures() {
     assert_eq!(
         error,
         ExposeUsageError::FinalSizeMismatch {
-            final_size: v(100),
-            established: v(80),
+            source: FinalSizeChangeError::check(v(80), v(100)).unwrap_err(),
         }
     );
     // Exposing the same final size again commits nothing.
@@ -424,8 +422,7 @@ fn fixing_an_exposed_final_size_keeps_it() {
         buffer.apply_reset(retention(90, 0)),
         Err(ApplyResetError::FixFinalSize {
             source: FixFinalSizeError::Mismatch {
-                final_size: v(90),
-                established: v(80),
+                source: FinalSizeChangeError::check(v(80), v(90)).unwrap_err(),
             },
         })
     );

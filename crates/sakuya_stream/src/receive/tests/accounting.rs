@@ -1,5 +1,7 @@
 //! Acceptance, accounting and the protocol errors it detects.
 use super::*;
+use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError};
+use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
 
 /// [100, 200) with FIN, then [0, 100): data is contiguous only after the
 /// second frame, and the end of stream comes after reading to 200.
@@ -247,8 +249,7 @@ fn final_size_errors() {
     assert_eq!(
         error,
         ProtocolError::FinalSizeChanged {
-            final_size: v(100),
-            received: v(200),
+            source: FinalSizeChangeError::check(v(100), v(200)).unwrap_err(),
         }
     );
     assert_eq!(
@@ -263,8 +264,7 @@ fn final_size_errors() {
     assert_eq!(
         fails(&mut receiver, &mut connection, stream(90, 20, false)),
         ProtocolError::BeyondFinalSize {
-            final_size: v(100),
-            end: v(110),
+            source: BeyondFinalSizeError::check(v(100), v(110)).unwrap_err(),
         }
     );
 
@@ -331,8 +331,7 @@ fn reset_errors() {
     assert_eq!(
         error,
         ProtocolError::ResetCodeChanged {
-            code: c(1),
-            received: c(2),
+            source: ResetCodeChangeError::check(c(1), c(2)).unwrap_err(),
         }
     );
     assert_eq!(
@@ -349,8 +348,7 @@ fn reset_errors() {
     assert_eq!(
         error,
         ProtocolError::ReliableSizeExceedsFinalSize {
-            reliable_size: v(101),
-            final_size: v(100),
+            source: ReliableSizeError::check(v(100), v(101)).unwrap_err(),
         }
     );
     assert_eq!(

@@ -26,11 +26,12 @@
 //! handle, send selection and feedback dispatch are not part of this module.
 use crate::connection_send_credit::ConnectionSendFlowController;
 use crate::send_buffer::{ExposeUsageError, ExposedEnd, SendBuffer, expose_usage_error};
+use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
 use flow_control::{SendFlowContext, SendFlowControlPolicy, StreamCreditEvent};
 use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::stream_id::StreamId;
 use sakuya_wire::var_int::VarInt;
-use snafu::{Snafu, ensure};
+use snafu::{ResultExt, Snafu};
 use termination::{SendTerminationContext, SendTerminationEvent, SendTerminationPolicy};
 use write::SharedWriteLimitReason;
 
@@ -447,20 +448,14 @@ where
                 }
                 .fail();
             }
-            (ExposedEnd::FinalSize, Some(final_size)) => ensure!(
-                usage_end == final_size,
-                expose_usage_error::FinalSizeMismatchSnafu {
-                    final_size: usage_end,
-                    established: final_size,
-                }
-            ),
-            (ExposedEnd::Data, Some(final_size)) => ensure!(
-                usage_end <= final_size,
-                expose_usage_error::BeyondFinalSizeSnafu {
-                    usage_end,
-                    final_size,
-                }
-            ),
+            (ExposedEnd::FinalSize, Some(final_size)) => {
+                FinalSizeChangeError::check(final_size, usage_end)
+                    .context(expose_usage_error::FinalSizeMismatchSnafu)?;
+            }
+            (ExposedEnd::Data, Some(final_size)) => {
+                BeyondFinalSizeError::check(final_size, usage_end)
+                    .context(expose_usage_error::BeyondFinalSizeSnafu)?;
+            }
             (ExposedEnd::Data, None) => {}
         }
         let previous = self.exposure_end();

@@ -2,9 +2,10 @@
 use super::covered_bytes::CoveredBytes;
 use super::{ExposeUsageError, ExposedEnd, expose_usage_error};
 use crate::connection_send_credit::{ConnectionCreditReservation, ConnectionSendFlowController};
+use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
 use bytes::Bytes;
 use sakuya_wire::var_int::VarInt;
-use snafu::{Snafu, ensure};
+use snafu::{ResultExt, Snafu, ensure};
 use std::collections::VecDeque;
 
 /// The per-stream visibility settlement: the exposure end, the final size
@@ -158,13 +159,8 @@ impl VisibilitySettlement {
             }
         );
         if let Some(established) = self.final_size.established() {
-            ensure!(
-                established == final_size,
-                fix_final_size_error::MismatchSnafu {
-                    final_size,
-                    established,
-                }
-            );
+            FinalSizeChangeError::check(established, final_size)
+                .context(fix_final_size_error::MismatchSnafu)?;
         } else {
             self.final_size = FinalSizeState::Fixed(final_size);
         }
@@ -218,20 +214,10 @@ impl VisibilitySettlement {
         );
         if let Some(final_size) = self.final_size.established() {
             match end {
-                ExposedEnd::Data => ensure!(
-                    usage_end <= final_size,
-                    expose_usage_error::BeyondFinalSizeSnafu {
-                        usage_end,
-                        final_size,
-                    }
-                ),
-                ExposedEnd::FinalSize => ensure!(
-                    usage_end == final_size,
-                    expose_usage_error::FinalSizeMismatchSnafu {
-                        final_size: usage_end,
-                        established: final_size,
-                    }
-                ),
+                ExposedEnd::Data => BeyondFinalSizeError::check(final_size, usage_end)
+                    .context(expose_usage_error::BeyondFinalSizeSnafu)?,
+                ExposedEnd::FinalSize => FinalSizeChangeError::check(final_size, usage_end)
+                    .context(expose_usage_error::FinalSizeMismatchSnafu)?,
             }
         }
         if end == ExposedEnd::FinalSize {
@@ -364,11 +350,9 @@ pub enum FixFinalSizeError {
         exposure_end: VarInt,
     },
     /// The final size differs from the one fixed or exposed before.
-    #[snafu(display("final size {final_size} differs from the established {established}"))]
+    #[snafu(display("a reset changes the final size"))]
     Mismatch {
-        /// The rejected final size.
-        final_size: VarInt,
-        /// The final size fixed or exposed before.
-        established: VarInt,
+        /// The final size fixed or exposed before and the rejected one.
+        source: FinalSizeChangeError,
     },
 }

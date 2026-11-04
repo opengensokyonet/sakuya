@@ -52,10 +52,12 @@ use crate::connection_receive_flow::{
     ConnectionReceiveFlowController, RecordReleaseError, RecordUsageError,
 };
 use crate::receive_buffer::{ReceiveBuffer, StreamDataInput, offset_add, span};
+use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError};
 use bytes::Bytes;
 use flow_control::{ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView};
 use read::{ReadError, RemoteReset};
 use sakuya_wire::application_error::ApplicationErrorCode;
+use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
 use sakuya_wire::transport_error::TransportErrorCode;
 use sakuya_wire::var_int::VarInt;
 use snafu::{ResultExt, Snafu, ensure};
@@ -149,20 +151,16 @@ pub enum ProtocolError {
     /// (`FINAL_SIZE_ERROR`, [RFC 9000 §4.5]).
     ///
     /// [RFC 9000 §4.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-4.5
-    #[snafu(display("final size {received} differs from the known final size {final_size}"))]
+    #[snafu(display("a frame changes the final size"))]
     FinalSizeChanged {
-        /// The known final size.
-        final_size: VarInt,
-        /// The final size the frame states.
-        received: VarInt,
+        /// The known final size and the one the frame states.
+        source: FinalSizeChangeError,
     },
     /// STREAM data ends beyond the known final size (`FINAL_SIZE_ERROR`).
-    #[snafu(display("stream data ends at {end}, beyond the final size {final_size}"))]
+    #[snafu(display("a STREAM frame passes the final size"))]
     BeyondFinalSize {
-        /// The known final size.
-        final_size: VarInt,
-        /// The end of the frame's data.
-        end: VarInt,
+        /// The known final size and the end of the frame's data.
+        source: BeyondFinalSizeError,
     },
     /// A FIN or reset states a final size below data already received
     /// (`FINAL_SIZE_ERROR`).
@@ -204,21 +202,17 @@ pub enum ProtocolError {
     },
     /// A `RESET_STREAM_AT` states a reliable size above its final size
     /// (`FRAME_ENCODING_ERROR`, draft-ietf-quic-reliable-stream-reset-11 §4).
-    #[snafu(display("reliable size {reliable_size} exceeds the final size {final_size}"))]
+    #[snafu(display("a RESET_STREAM_AT frame states a reliable size beyond its final size"))]
     ReliableSizeExceedsFinalSize {
-        /// The reliable size the frame states.
-        reliable_size: VarInt,
-        /// The final size the frame states.
-        final_size: VarInt,
+        /// The reliable size and the final size the frame states.
+        source: ReliableSizeError,
     },
     /// A reset states an error code different from an earlier reset's
     /// (`STREAM_STATE_ERROR`, draft-ietf-quic-reliable-stream-reset-11 §5).
-    #[snafu(display("reset error code {received} differs from the earlier code {code}"))]
+    #[snafu(display("a reset frame changes the error code"))]
     ResetCodeChanged {
-        /// The error code of the earlier reset.
-        code: ApplicationErrorCode,
-        /// The error code the frame states.
-        received: ApplicationErrorCode,
+        /// The error code of the earlier reset and the one the frame states.
+        source: ResetCodeChangeError,
     },
 }
 
@@ -641,12 +635,9 @@ where
         connection: &mut ConnectionReceiveFlowController,
     ) -> Result<(), ConnectionFailure> {
         self.check_failure()?;
-        if reliable_size > final_size {
-            let error = ReliableSizeExceedsFinalSizeSnafu {
-                reliable_size,
-                final_size,
-            }
-            .build();
+        if let Err(error) = ReliableSizeError::check(final_size, reliable_size)
+            .context(ReliableSizeExceedsFinalSizeSnafu)
+        {
             return Err(self.fail(error));
         }
         let old_accounted = self.parts.accounted_end();
@@ -685,13 +676,9 @@ where
         final_size: VarInt,
     ) -> Result<(), ProtocolError> {
         match old_final {
-            Some(known) => ensure!(
-                final_size == known,
-                FinalSizeChangedSnafu {
-                    final_size: known,
-                    received: final_size,
-                }
-            ),
+            Some(known) => {
+                FinalSizeChangeError::check(known, final_size).context(FinalSizeChangedSnafu)?;
+            }
             None => ensure!(
                 final_size >= old_accounted,
                 FinalSizeBelowReceivedSnafu {
@@ -701,13 +688,7 @@ where
             ),
         }
         if let Some(facts) = self.reset {
-            ensure!(
-                facts.code == code,
-                ResetCodeChangedSnafu {
-                    code: facts.code,
-                    received: code,
-                }
-            );
+            ResetCodeChangeError::check(facts.code, code).context(ResetCodeChangedSnafu)?;
         }
         Ok(())
     }
@@ -870,14 +851,10 @@ fn check_stream_final_size(
 ) -> Result<(), ProtocolError> {
     match old_final {
         Some(final_size) => {
-            ensure!(
-                !fin || end == final_size,
-                FinalSizeChangedSnafu {
-                    final_size,
-                    received: end,
-                }
-            );
-            ensure!(end <= final_size, BeyondFinalSizeSnafu { final_size, end });
+            if fin {
+                FinalSizeChangeError::check(final_size, end).context(FinalSizeChangedSnafu)?;
+            }
+            BeyondFinalSizeError::check(final_size, end).context(BeyondFinalSizeSnafu)?;
         }
         None => ensure!(
             !fin || end >= old_accounted,

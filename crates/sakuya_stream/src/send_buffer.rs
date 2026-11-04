@@ -13,8 +13,10 @@
 //! [`covered_bytes::CoveredBytes`] value whose constructor has already
 //! checked that the reservation covers exactly the data.
 use crate::connection_send_credit::ConnectionSendFlowController;
+use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
 use bytes::Bytes;
 use covered_bytes::CoveredBytes;
+use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
 use sakuya_wire::var_int::VarInt;
 use snafu::Snafu;
 use visibility::FixFinalSizeError;
@@ -168,12 +170,10 @@ impl AppendError {
 #[snafu(module(apply_reset_error), visibility(pub(crate)))]
 pub enum ApplyResetError {
     /// The reliable size exceeds the final size.
-    #[snafu(display("reliable size {reliable_size} exceeds the final size {final_size}"))]
+    #[snafu(display("the reset retention keeps a reliable size beyond its final size"))]
     ReliableSizeBeyondFinalSize {
-        /// The requested reliable size.
-        reliable_size: VarInt,
-        /// The requested final size.
-        final_size: VarInt,
+        /// The requested reliable size and final size.
+        source: ReliableSizeError,
     },
     /// The final size lies beyond the written end.
     #[snafu(display("final size {final_size} lies beyond the written end {written_end}"))]
@@ -224,20 +224,16 @@ pub enum ExposeUsageError {
         written_end: VarInt,
     },
     /// The usage end lies beyond the final size already fixed or exposed.
-    #[snafu(display("usage end {usage_end} lies beyond the final size {final_size}"))]
+    #[snafu(display("data exposure passes the final size"))]
     BeyondFinalSize {
-        /// The rejected usage end.
-        usage_end: VarInt,
-        /// The final size.
-        final_size: VarInt,
+        /// The final size and the rejected usage end.
+        source: BeyondFinalSizeError,
     },
     /// A final size differs from the one already fixed or exposed.
-    #[snafu(display("final size {final_size} differs from the established {established}"))]
+    #[snafu(display("exposure changes the final size"))]
     FinalSizeMismatch {
-        /// The rejected final size.
-        final_size: VarInt,
-        /// The final size already fixed or exposed.
-        established: VarInt,
+        /// The final size already fixed or exposed and the rejected one.
+        source: FinalSizeChangeError,
     },
     /// A final size lies below the exposure end.
     #[snafu(display("final size {final_size} lies below the exposure end {exposure_end}"))]

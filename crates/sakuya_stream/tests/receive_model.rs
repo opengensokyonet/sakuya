@@ -26,7 +26,9 @@ use sakuya_stream::receive::{
 };
 use sakuya_stream::receive_buffer::fragmented::FragmentedReceiveBuffer;
 use sakuya_stream::receive_buffer::{ReceiveBuffer, StreamDataInput};
+use sakuya_stream::stream_end::{BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError};
 use sakuya_wire::application_error::ApplicationErrorCode;
+use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
 use sakuya_wire::var_int::VarInt;
 
 const STREAMS: usize = 2;
@@ -677,12 +679,10 @@ impl Model {
         }
         let checked = match old_final {
             Some(final_size) if fin && end != final_size => Err(ProtocolError::FinalSizeChanged {
-                final_size: v(final_size),
-                received: v(end),
+                source: FinalSizeChangeError::check(v(final_size), v(end)).unwrap_err(),
             }),
             Some(final_size) if end > final_size => Err(ProtocolError::BeyondFinalSize {
-                final_size: v(final_size),
-                end: v(end),
+                source: BeyondFinalSizeError::check(v(final_size), v(end)).unwrap_err(),
             }),
             None if fin && end < old_accounted => Err(ProtocolError::FinalSizeBelowReceived {
                 final_size: v(end),
@@ -713,8 +713,7 @@ impl Model {
         if reliable > final_size {
             let failure = ConnectionFailure::Protocol {
                 source: ProtocolError::ReliableSizeExceedsFinalSize {
-                    reliable_size: v(reliable),
-                    final_size: v(final_size),
+                    source: ReliableSizeError::check(v(final_size), v(reliable)).unwrap_err(),
                 },
             };
             self.fail(failure);
@@ -726,8 +725,7 @@ impl Model {
         self.final_size.get_or_insert(final_size);
         let checked = match old_final {
             Some(known) if final_size != known => Err(ProtocolError::FinalSizeChanged {
-                final_size: v(known),
-                received: v(final_size),
+                source: FinalSizeChangeError::check(v(known), v(final_size)).unwrap_err(),
             }),
             None if final_size < old_accounted => Err(ProtocolError::FinalSizeBelowReceived {
                 final_size: v(final_size),
@@ -735,8 +733,8 @@ impl Model {
             }),
             _ => match self.reset {
                 Some(facts) if facts.code != code_value => Err(ProtocolError::ResetCodeChanged {
-                    code: code(facts.code),
-                    received: code(code_value),
+                    source: ResetCodeChangeError::check(code(facts.code), code(code_value))
+                        .unwrap_err(),
                 }),
                 _ => Ok(()),
             },

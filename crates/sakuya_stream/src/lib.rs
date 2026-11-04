@@ -4,7 +4,8 @@
 //! [`send`]. The receive direction: [`connection_receive_flow`],
 //! [`receive_buffer`] and [`receive`]. Both directions carry application
 //! protocol error codes as
-//! [`ApplicationErrorCode`](sakuya_wire::application_error::ApplicationErrorCode).
+//! [`ApplicationErrorCode`](sakuya_wire::application_error::ApplicationErrorCode)
+//! and apply the rules of [`stream_end`].
 #![warn(missing_docs)]
 
 pub mod connection_receive_flow;
@@ -13,3 +14,4 @@ pub mod receive;
 pub mod receive_buffer;
 pub mod send;
 pub mod send_buffer;
+pub mod stream_end;
