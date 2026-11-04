@@ -19,7 +19,10 @@ use covered_bytes::CoveredBytes;
 use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
 use sakuya_wire::var_int::VarInt;
 use snafu::{Snafu, ensure};
-use visibility::{FinalSizeBelowExposureError, FixFinalSizeError, UsageBeyondCoverageError};
+use visibility::{
+    FinalSizeBelowExposureError, FinalSizeEstablishedError, FixFinalSizeError,
+    UsageBeyondCoverageError,
+};
 
 pub mod covered_bytes;
 pub mod offset_map;
@@ -143,10 +146,10 @@ pub enum AppendError<R> {
         data: CoveredBytes<R>,
     },
     /// A FIN or reset exposed the final size; the buffer takes no more data.
-    #[snafu(display("a send buffer takes no data after the final size {final_size} was exposed"))]
+    #[snafu(display("a send buffer takes no data after the final size was exposed"))]
     AfterFinalSize {
         /// The exposed final size.
-        final_size: VarInt,
+        source: FinalSizeEstablishedError,
         /// The rejected data.
         data: CoveredBytes<R>,
     },

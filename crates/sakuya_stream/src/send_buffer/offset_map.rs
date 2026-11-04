@@ -10,7 +10,7 @@ use crate::connection_send_credit::ConnectionCreditReservation;
 use bytes::Bytes;
 use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
 use sakuya_wire::var_int::VarInt;
-use snafu::ResultExt;
+use snafu::{IntoError, ResultExt};
 use std::collections::BTreeMap;
 
 /// A send buffer that keeps each appended [`Bytes`] as it arrived, keyed by
@@ -101,10 +101,10 @@ impl<R: ConnectionCreditReservation> StreamSendBuffer for OffsetMapStreamSendBuf
         };
         let bytes = match self.visibility.cover(offset, data) {
             Ok(bytes) => bytes,
-            Err(CoverError::FinalSizeEstablished { final_size, data }) => {
+            Err(CoverError::FinalSizeEstablished { source, data }) => {
                 // Only `apply_reset` fixes a final size, and it closes input
                 // above, so this one was exposed by a FIN.
-                return append_error::AfterFinalSizeSnafu { final_size, data }.fail();
+                return Err(append_error::AfterFinalSizeSnafu { data }.into_error(source));
             }
             Err(CoverError::NotContiguous { data, .. } | CoverError::EndOverflow { data, .. }) => {
                 // invariant: while input is open the coverage starts at the

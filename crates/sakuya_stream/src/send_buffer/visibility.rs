@@ -5,7 +5,7 @@ use crate::connection_send_credit::ConnectionCreditReservation;
 use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
 use bytes::Bytes;
 use sakuya_wire::var_int::VarInt;
-use snafu::{ResultExt, Snafu, ensure};
+use snafu::{IntoError, ResultExt, Snafu, ensure};
 use std::collections::VecDeque;
 
 /// The per-stream visibility settlement: the exposure end, the final size
@@ -125,7 +125,8 @@ impl<R: ConnectionCreditReservation> VisibilitySettlement<R> {
     /// changes.
     pub fn cover(&mut self, offset: VarInt, data: CoveredBytes<R>) -> Result<Bytes, CoverError<R>> {
         if let Some(final_size) = self.final_size.established() {
-            return cover_error::FinalSizeEstablishedSnafu { final_size, data }.fail();
+            let source = FinalSizeEstablishedSnafu { final_size }.build();
+            return Err(cover_error::FinalSizeEstablishedSnafu { data }.into_error(source));
         }
         let coverage_end = self.coverage_end();
         ensure!(
@@ -275,10 +276,10 @@ impl<R: ConnectionCreditReservation> VisibilitySettlement<R> {
 #[snafu(module(cover_error), visibility(pub(crate)))]
 pub enum CoverError<R> {
     /// A final size is fixed or exposed; coverage no longer grows.
-    #[snafu(display("coverage cannot grow after the final size {final_size} is established"))]
+    #[snafu(display("coverage cannot grow after the final size is established"))]
     FinalSizeEstablished {
         /// The established final size.
-        final_size: VarInt,
+        source: FinalSizeEstablishedError,
         /// The rejected data.
         data: CoveredBytes<R>,
     },
@@ -302,6 +303,26 @@ pub enum CoverError<R> {
         /// The rejected data.
         data: CoveredBytes<R>,
     },
+}
+
+/// A final size is fixed or exposed, so the usage ends there and no more
+/// data can follow it.
+///
+/// [`VisibilitySettlement::cover`] reports it through [`CoverError`], and
+/// send buffers that embed the settlement through
+/// [`AppendError`](super::AppendError); the error hands back no data, which
+/// the carrying error holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("the final size {final_size} is established"))]
+pub struct FinalSizeEstablishedError {
+    final_size: VarInt,
+}
+
+impl FinalSizeEstablishedError {
+    /// The established final size.
+    pub const fn final_size(self) -> VarInt {
+        self.final_size
+    }
 }
 
 impl<R> CoverError<R> {

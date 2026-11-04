@@ -164,8 +164,10 @@ fn append_after_an_exposed_fin_fails() {
         .expose_usage_through(v(10), ExposedContent::FinalSize)
         .unwrap();
     let error = buffer.append(covered(&connection, b"late")).unwrap_err();
-    assert!(matches!(error, AppendError::AfterFinalSize { final_size, .. } if final_size == v(10)));
-    drop(error);
+    assert!(
+        matches!(&error, AppendError::AfterFinalSize { source, .. } if source.final_size() == v(10))
+    );
+    drop(error.into_data());
     assert_eq!(buffer.written_end(), v(10));
     assert_eq!(connection.reserved(), VarInt::ZERO);
 }
@@ -233,9 +235,9 @@ fn settlement_coverage_must_be_contiguous() {
         .cover(v(4), covered(&connection, b"gh"))
         .unwrap_err();
     assert!(
-        matches!(error, CoverError::FinalSizeEstablished { final_size, .. } if final_size == v(4))
+        matches!(&error, CoverError::FinalSizeEstablished { source, .. } if source.final_size() == v(4))
     );
-    drop(error);
+    drop(error.into_data());
     assert_eq!(settlement.final_size(), Some(v(4)));
     assert_eq!(settlement.exposed_final_size(), None);
     assert_eq!(connection.reserved(), v(4));
