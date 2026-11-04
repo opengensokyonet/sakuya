@@ -498,14 +498,32 @@ mod client_engine {
         }
     }
 
-    /// The rustls server of every connection, and the secrets it logs.
+    /// The rustls server of every connection, and the secrets it logs;
+    /// with `request_certificate` it sends a CertificateRequest and accepts
+    /// a client without a certificate.
     fn server(
         kx_groups: Option<Vec<&'static dyn rustls::crypto::SupportedKxGroup>>,
+        request_certificate: bool,
     ) -> (Arc<ServerConfig>, Arc<Secrets>) {
-        let mut config = ServerConfig::builder_with_provider(provider(kx_groups))
+        let provider = provider(kx_groups);
+        let builder = ServerConfig::builder_with_provider(Arc::clone(&provider))
             .with_protocol_versions(&[&rustls::version::TLS13])
-            .unwrap()
-            .with_no_client_auth()
+            .unwrap();
+        let builder = if request_certificate {
+            let mut roots = RootCertStore::empty();
+            roots.add(CertificateDer::from(pki::root())).unwrap();
+            let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+                Arc::new(roots),
+                provider,
+            )
+            .allow_unauthenticated()
+            .build()
+            .unwrap();
+            builder.with_client_cert_verifier(verifier)
+        } else {
+            builder.with_no_client_auth()
+        };
+        let mut config = builder
             .with_single_cert(
                 vec![CertificateDer::from(pki::leaf())],
                 PrivateKeyDer::Pkcs8(pki::pkcs8(2).into()),
@@ -631,7 +649,7 @@ mod client_engine {
     #[test]
     fn a_full_handshake_with_a_rustls_server() {
         let client = Client::new();
-        let (server, secrets) = server(None);
+        let (server, secrets) = server(None, false);
         let connection = connect(&client, &server);
         assert_eq!(
             check(&connection, &secrets.take()),
@@ -647,9 +665,27 @@ mod client_engine {
     }
 
     #[test]
+    fn the_client_answers_a_certificate_request_with_an_empty_certificate() {
+        let client = Client::new();
+        let (server, secrets) = server(None, true);
+        let connection = connect(&client, &server);
+        assert_eq!(
+            check(&connection, &secrets.take()),
+            (
+                ServerIdentity::Verified(leaf_key()),
+                EarlyDataOutcome::NotOffered
+            )
+        );
+        let quic::Connection::Server(peer) = &connection.peer.connection else {
+            panic!("the peer is not a server")
+        };
+        assert!(peer.peer_certificates().is_none());
+    }
+
+    #[test]
     fn the_client_retries_with_the_group_a_rustls_server_asks_for() {
         let client = Client::new();
-        let (server, secrets) = server(Some(vec![kx_group::SECP256R1]));
+        let (server, secrets) = server(Some(vec![kx_group::SECP256R1]), false);
         let connection = connect(&client, &server);
         assert_eq!(
             check(&connection, &secrets.take()),
@@ -672,7 +708,7 @@ mod client_engine {
     #[test]
     fn the_client_resumes_a_rustls_ticket_with_0_rtt() {
         let client = Client::new();
-        let (server, secrets) = server(None);
+        let (server, secrets) = server(None, false);
         let first = connect(&client, &server);
         check(&first, &secrets.take());
         let second = connect(&client, &server);
