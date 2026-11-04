@@ -42,7 +42,7 @@ use sakuya_tls::{
     server::{
         choice::{GroupPreference, PreferenceTable},
         engine::{
-            Negotiated, ServerAlertError, ServerHandshake, ServerHandshakeEvent,
+            Negotiated, RequiredExtension, ServerAlertError, ServerHandshake, ServerHandshakeEvent,
             ServerHandshakeSettings, ServerTransport,
         },
         identity::CertifiedKey,
@@ -1199,6 +1199,72 @@ fn a_key_update_after_the_handshake_fails_with_unexpected_message() {
         alert_of(connection.client_end),
         AlertDescription::UNEXPECTED_MESSAGE
     );
+}
+
+/// Replaces the first occurrence of `pattern` in `bytes` with `replacement`
+/// of the same length.
+fn replace(bytes: &mut [u8], pattern: &[u8], replacement: &[u8]) {
+    let at = bytes
+        .windows(pattern.len())
+        .position(|window| window == pattern)
+        .expect("the pattern");
+    bytes[at..at + pattern.len()].copy_from_slice(replacement);
+}
+
+/// The quic_transport_parameters extension of the client: its type and the
+/// length of "client parameters".
+const CLIENT_PARAMETERS: [u8; 4] = [0x00, 0x39, 0x00, 0x11];
+
+#[test]
+fn a_client_hello_without_tls_1_3_fails_with_protocol_version() {
+    let endpoints = Endpoints::new();
+    let connection = connect!(&endpoints, Wire::new(), "example.com", |from,
+                                                                       _,
+                                                                       bytes: &mut Vec<
+        u8,
+    >| {
+        if from == Sender::Client
+            && messages(bytes).first().map(|m| m.0) == Some(HandshakeType::CLIENT_HELLO)
+        {
+            // supported_versions with TLS 1.3 alone becomes TLS 1.2 alone.
+            replace(
+                bytes,
+                &[0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x04],
+                &[0x00, 0x2b, 0x00, 0x03, 0x02, 0x03, 0x03],
+            );
+        }
+    });
+    let end = connection.server_end;
+    assert!(matches!(
+        end.as_ref().and_then(|end| end.as_ref().err()?.failure()),
+        Some(ServerAlertError::UnsupportedVersion)
+    ));
+    assert_eq!(alert_of(end), AlertDescription::PROTOCOL_VERSION);
+}
+
+#[test]
+fn a_client_hello_without_transport_parameters_fails_with_missing_extension() {
+    let endpoints = Endpoints::new();
+    let connection = connect!(&endpoints, Wire::new(), "example.com", |from,
+                                                                       _,
+                                                                       bytes: &mut Vec<
+        u8,
+    >| {
+        if from == Sender::Client
+            && messages(bytes).first().map(|m| m.0) == Some(HandshakeType::CLIENT_HELLO)
+        {
+            // The extension becomes one of an unknown type.
+            replace(bytes, &CLIENT_PARAMETERS, &[0x7a, 0x7a, 0x00, 0x11]);
+        }
+    });
+    let end = connection.server_end;
+    assert!(matches!(
+        end.as_ref().and_then(|end| end.as_ref().err()?.failure()),
+        Some(ServerAlertError::MissingExtension {
+            extension: RequiredExtension::QuicTransportParameters
+        })
+    ));
+    assert_eq!(alert_of(end), AlertDescription::MISSING_EXTENSION);
 }
 
 #[test]
