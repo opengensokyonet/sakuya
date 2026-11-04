@@ -48,7 +48,7 @@
 //! provisional.
 //!
 //! [`ReceiveBuffer`]: crate::receive_buffer::ReceiveBuffer
-use crate::connection::ConnectionClosedError;
+use crate::connection::{CloseReason, ConnectionClosedError};
 use crate::connection_receive_flow::{
     ConnectionReceiveFlowController, RecordReleaseError, RecordUsageError,
 };
@@ -239,7 +239,7 @@ impl ProtocolError {
 ///
 /// It is the highest-priority result of every later operation on the
 /// stream.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[derive(Clone, Debug, PartialEq, Eq, Snafu)]
 pub enum ConnectionFailureError {
     /// The connection was closed.
     #[snafu(transparent)]
@@ -444,8 +444,8 @@ where
 
     /// The persistent failure, if one occurred.
     pub fn failure(&self) -> Option<ConnectionFailureError> {
-        match self.buffer {
-            BufferPhase::Failed(failure) => Some(failure),
+        match &self.buffer {
+            BufferPhase::Failed(failure) => Some(failure.clone()),
             BufferPhase::Live | BufferPhase::Destroyed(_) => None,
         }
     }
@@ -567,16 +567,18 @@ where
         }
     }
 
-    /// Records that the connection is closed.
+    /// Records that the connection closed for `reason`.
     ///
-    /// Later operations report [`ConnectionFailureError::Closed`] unless a
-    /// protocol failure was recorded first. The receive buffer is destroyed.
-    pub fn connection_closed(&mut self) {
+    /// Later operations report [`ConnectionFailureError::Closed`], carrying
+    /// `reason`, unless a protocol failure was recorded first. The receive
+    /// buffer is destroyed. Only the first failure is kept; a later call has
+    /// no effect.
+    pub fn connection_closed(&mut self, reason: CloseReason) {
         if self.failure().is_some() {
             return;
         }
         self.shut_down(ConnectionFailureError::Closed {
-            source: ConnectionClosedError::new(),
+            source: ConnectionClosedError::new(reason),
         });
     }
 
@@ -758,7 +760,7 @@ where
     /// Records a protocol violation as the persistent failure.
     fn fail(&mut self, error: ProtocolError) -> ConnectionFailureError {
         let failure = ConnectionFailureError::Protocol { source: error };
-        self.shut_down(failure);
+        self.shut_down(failure.clone());
         failure
     }
 

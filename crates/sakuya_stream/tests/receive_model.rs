@@ -10,7 +10,7 @@
 
 use bytes::{BufMut, Bytes, BytesMut};
 use proptest::prelude::*;
-use sakuya_stream::connection::ConnectionClosedError;
+use sakuya_stream::connection::{CloseReason, ConnectionClosedError, ImmediateClose};
 use sakuya_stream::connection_receive_flow::{ConnectionReceiveFlowController, RecordUsageError};
 use sakuya_stream::receive::flow_control::{
     AdvertisementIntent, ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView,
@@ -30,6 +30,7 @@ use sakuya_stream::receive_buffer::{ReceiveBuffer, StreamDataInput};
 use sakuya_stream::stream_end::{BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError};
 use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
+use sakuya_wire::transport_error::TransportErrorCode;
 use sakuya_wire::var_int::VarInt;
 
 const STREAMS: usize = 2;
@@ -471,8 +472,8 @@ impl Model {
     }
 
     fn failure(&self) -> Option<ConnectionFailureError> {
-        match self.phase {
-            Phase::Failed(failure) => Some(failure),
+        match &self.phase {
+            Phase::Failed(failure) => Some(failure.clone()),
             Phase::Live | Phase::Destroyed(_) => None,
         }
     }
@@ -694,7 +695,7 @@ impl Model {
         .and_then(|()| self.account(old_accounted, connection));
         if let Err(source) = checked {
             let failure = ConnectionFailureError::Protocol { source };
-            self.fail(failure);
+            self.fail(failure.clone());
             return Err(failure);
         }
         self.after_input(None, connection);
@@ -717,7 +718,7 @@ impl Model {
                     source: ReliableSizeError::check(v(final_size), v(reliable)).unwrap_err(),
                 },
             };
-            self.fail(failure);
+            self.fail(failure.clone());
             return Err(failure);
         }
         let old_accounted = self.accounted;
@@ -743,7 +744,7 @@ impl Model {
         .and_then(|()| self.account(old_accounted, connection));
         if let Err(source) = checked {
             let failure = ConnectionFailureError::Protocol { source };
-            self.fail(failure);
+            self.fail(failure.clone());
             return Err(failure);
         }
         let event = match &mut self.reset {
@@ -1064,11 +1065,11 @@ fn step(
             }
         }
         Op::ConnectionClosed { stream } => {
-            receivers[stream].connection_closed();
+            receivers[stream].connection_closed(close_reason());
             let model = &mut models[stream];
             if model.failure().is_none() {
                 model.fail(ConnectionFailureError::Closed {
-                    source: ConnectionClosedError::new(),
+                    source: ConnectionClosedError::new(close_reason()),
                 });
             }
         }
@@ -1331,4 +1332,13 @@ proptest! {
     ) {
         run(&ops, script, totals, limits, connection_limit, 0);
     }
+}
+
+/// The reason the tests close connections for.
+fn close_reason() -> CloseReason {
+    CloseReason::Peer(ImmediateClose::Transport {
+        code: TransportErrorCode::PROTOCOL_VIOLATION,
+        frame_type: Some(VarInt::from(0x08u8)),
+        reason_phrase: Bytes::from_static(b"bad stream"),
+    })
 }

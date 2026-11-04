@@ -97,7 +97,7 @@ fn exceeding_the_stream_limit_is_a_protocol_error() {
     let failure = receiver
         .on_stream_frame(stream(900, 101, false), &mut connection)
         .unwrap_err();
-    let error = protocol(failure);
+    let error = protocol(failure.clone());
     assert_eq!(
         error,
         ProtocolError::StreamLimitExceeded {
@@ -115,11 +115,13 @@ fn exceeding_the_stream_limit_is_a_protocol_error() {
     // data held before is not readable.
     assert_eq!(
         receiver.on_stream_frame(stream(0, 10, false), &mut connection),
-        Err(failure)
+        Err(failure.clone())
     );
     assert_eq!(
         receiver.read_chunk(),
-        Err(ReadError::Connection { source: failure })
+        Err(ReadError::Connection {
+            source: failure.clone()
+        })
     );
     assert_eq!(receiver.failure(), Some(failure));
     assert!(

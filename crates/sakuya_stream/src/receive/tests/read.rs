@@ -8,15 +8,29 @@ fn nz(value: usize) -> NonZeroUsize {
 }
 
 #[test]
+fn connection_closed_keeps_the_first_reason() {
+    let (mut receiver, _connection) = new_receiver(keep_all());
+    receiver.connection_closed(close_reason());
+    receiver.connection_closed(CloseReason::StatelessReset);
+    let Err(ReadError::Connection {
+        source: ConnectionFailureError::Closed { source },
+    }) = receiver.read_chunk()
+    else {
+        panic!("expected a closed connection");
+    };
+    assert_eq!(source.reason(), &close_reason());
+}
+
+#[test]
 fn connection_failure_is_not_hidden_by_held_data() {
     let (mut receiver, mut connection) = new_receiver(keep_all());
     receiver
         .on_stream_frame(stream(0, 100, false), &mut connection)
         .unwrap();
-    receiver.connection_closed();
+    receiver.connection_closed(close_reason());
     let closed = Err(ReadError::Connection {
         source: ConnectionFailureError::Closed {
-            source: ConnectionClosedError::new(),
+            source: ConnectionClosedError::new(close_reason()),
         },
     });
     assert_eq!(receiver.read_chunk(), closed);
@@ -26,7 +40,7 @@ fn connection_failure_is_not_hidden_by_held_data() {
         receiver.read_into(&mut &mut empty[..]),
         Err(ReadError::Connection {
             source: ConnectionFailureError::Closed {
-                source: ConnectionClosedError::new()
+                source: ConnectionClosedError::new(close_reason())
             },
         })
     );
@@ -41,12 +55,12 @@ fn connection_failure_overrides_a_committed_result() {
         .unwrap();
     let (_, end) = read_all(&mut receiver);
     assert_eq!(end, Ok(ReadOutcome::End));
-    receiver.connection_closed();
+    receiver.connection_closed(close_reason());
     assert_eq!(
         receiver.read_chunk(),
         Err(ReadError::Connection {
             source: ConnectionFailureError::Closed {
-                source: ConnectionClosedError::new()
+                source: ConnectionClosedError::new(close_reason())
             },
         })
     );
@@ -226,7 +240,7 @@ fn waits_for_expected_data_only() {
 fn read_error_reports_its_layer() {
     let error: ReadError<&str> = ReadError::Connection {
         source: ConnectionFailureError::Closed {
-            source: ConnectionClosedError::new(),
+            source: ConnectionClosedError::new(close_reason()),
         },
     };
     assert_eq!(error.to_string(), "connection failed");

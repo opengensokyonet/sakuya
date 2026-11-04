@@ -6,12 +6,12 @@ use crate::receive::stop::{NoStopRequestError, StopError, StopNotNeededReason};
 #[test]
 fn connection_closed_fails_the_request() {
     let (mut receiver, _connection) = new_receiver(keep_all());
-    receiver.connection_closed();
+    receiver.connection_closed(close_reason());
     assert_eq!(
         receiver.stop(c(1)),
         Err(StopError::Connection {
             source: ConnectionFailureError::Closed {
-                source: ConnectionClosedError::new()
+                source: ConnectionClosedError::new(close_reason())
             },
         })
     );

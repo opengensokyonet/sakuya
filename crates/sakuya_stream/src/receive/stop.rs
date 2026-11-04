@@ -35,7 +35,7 @@ use snafu::{Snafu, ensure};
 ///
 /// A failed request does not end reading and does not change the local
 /// limits.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[derive(Clone, Debug, PartialEq, Eq, Snafu)]
 pub enum StopError {
     /// The connection closed, or input of the stream violated the protocol.
     #[snafu(display("connection failed"))]

@@ -242,7 +242,7 @@ fn read_after_reader_drop_fails() {
         Err(ReadError::ReaderDropped)
     );
     // A later connection failure does not reopen reading.
-    receiver.connection_closed();
+    receiver.connection_closed(close_reason());
     assert_eq!(receiver.read_chunk(), Err(ReadError::ReaderDropped));
 }
 

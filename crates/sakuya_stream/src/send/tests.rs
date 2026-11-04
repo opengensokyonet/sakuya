@@ -14,7 +14,7 @@ use super::termination::{
 };
 use super::write::{FlushError, WriteError, WriteOutcome, WriteReport, WriteWait};
 use super::*;
-use crate::connection::ConnectionClosedError;
+use crate::connection::{CloseReason, ConnectionClosedError, ImmediateClose};
 use crate::send_buffer::covered_bytes::CoveredBytes;
 use crate::send_buffer::offset_map::OffsetMapSendBuffer;
 use crate::send_buffer::visibility::FinalSizeBelowExposureError;
@@ -40,6 +40,14 @@ fn stream() -> StreamId {
 
 const CODE: ApplicationErrorCode = ApplicationErrorCode::new(VarInt::from_u32(7));
 const OTHER_CODE: ApplicationErrorCode = ApplicationErrorCode::new(VarInt::from_u32(9));
+
+/// The reason the tests close connections for.
+fn close_reason() -> CloseReason {
+    CloseReason::Local(ImmediateClose::Application {
+        code: ApplicationErrorCode::new(VarInt::from_u32(9)),
+        reason_phrase: Bytes::from_static(b"done"),
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Test policies
@@ -633,7 +641,7 @@ fn empty_input_and_flush_table() {
         .unwrap();
 
     let mut connection_closed = sender(1000);
-    connection_closed.on_connection_closed();
+    connection_closed.on_connection_closed(close_reason());
 
     let rows: Vec<Row<_>> = vec![
         ("open", open, Ok(()), Ok(())),
@@ -661,7 +669,7 @@ fn empty_input_and_flush_table() {
             connection_closed,
             Err("connection closed"),
             Err(FlushError::ConnectionClosed {
-                source: ConnectionClosedError::new(),
+                source: ConnectionClosedError::new(close_reason()),
             }),
         ),
     ];
@@ -725,7 +733,7 @@ fn write_errors_follow_the_check_order() {
     // Connection closed before reset.
     let mut sender = test_sender(1000, true);
     sender.reset(CODE).unwrap();
-    sender.on_connection_closed();
+    sender.on_connection_closed(close_reason());
     assert!(matches!(
         sender.write(&mut source(1), &mut connection),
         Err(WriteError::ConnectionClosed { .. })
@@ -776,11 +784,11 @@ fn close_errors_follow_the_check_order() {
             source: StreamResetError
         })
     );
-    sender.on_connection_closed();
+    sender.on_connection_closed(close_reason());
     assert_eq!(
         sender.close(),
         Err(CloseError::ConnectionClosed {
-            source: ConnectionClosedError::new()
+            source: ConnectionClosedError::new(close_reason())
         })
     );
 }
@@ -976,17 +984,17 @@ fn state_transition_table() {
 
     // A closed connection fails every new call, ahead of no-ops and empty
     // input.
-    sender.on_connection_closed();
+    sender.on_connection_closed(close_reason());
     assert_eq!(
         sender.reset_at(CODE, v(40)),
         Err(ResetAtError::ConnectionClosed {
-            source: ConnectionClosedError::new()
+            source: ConnectionClosedError::new(close_reason())
         })
     );
     assert_eq!(
         sender.close(),
         Err(CloseError::ConnectionClosed {
-            source: ConnectionClosedError::new()
+            source: ConnectionClosedError::new(close_reason())
         })
     );
     assert!(matches!(
@@ -996,16 +1004,41 @@ fn state_transition_table() {
     assert_eq!(
         sender.flush(),
         Err(FlushError::ConnectionClosed {
-            source: ConnectionClosedError::new()
+            source: ConnectionClosedError::new(close_reason())
         })
     );
-    closed.on_connection_closed();
+    closed.on_connection_closed(close_reason());
     assert_eq!(
         closed.close(),
         Err(CloseError::ConnectionClosed {
-            source: ConnectionClosedError::new()
+            source: ConnectionClosedError::new(close_reason())
         })
     );
+}
+
+#[test]
+fn connection_closed_error_carries_the_first_reason() {
+    let mut sender = test_sender(1000, false);
+    sender.on_connection_closed(close_reason());
+    sender.on_connection_closed(CloseReason::IdleTimeout);
+    let Err(CloseError::ConnectionClosed { source }) = sender.close() else {
+        panic!("expected a closed connection");
+    };
+    assert_eq!(source.reason(), &close_reason());
+    assert_eq!(
+        source.to_string(),
+        "the connection is closed: closed locally with application error 0x9"
+    );
+    let peer = ConnectionClosedError::new(CloseReason::Peer(ImmediateClose::Transport {
+        code: sakuya_wire::transport_error::TransportErrorCode::PROTOCOL_VIOLATION,
+        frame_type: None,
+        reason_phrase: Bytes::new(),
+    }));
+    assert!(
+        peer.to_string()
+            .starts_with("the connection is closed: closed by the peer with transport error")
+    );
+    assert!(!peer.to_string().contains("frame type"));
 }
 
 /// Whether a request conflicts depends on the effective target, not on the
@@ -1532,7 +1565,7 @@ fn acting_after_the_connection_closed_is_a_policy_violation() {
         }
         _ => TerminationAction::Keep,
     });
-    sender.on_connection_closed();
+    sender.on_connection_closed(close_reason());
 }
 
 /// An automatic action committed after data was appended does not turn the

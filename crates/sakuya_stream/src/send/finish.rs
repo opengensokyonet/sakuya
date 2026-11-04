@@ -41,7 +41,7 @@ use sakuya_wire::var_int::VarInt;
 use snafu::{Report, ResultExt, Snafu, ensure};
 
 /// Failures of [`StreamSender::close`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[derive(Clone, Debug, PartialEq, Eq, Snafu)]
 #[snafu(module(close_error), visibility(pub(crate)))]
 pub enum CloseError {
     /// The connection has closed.
@@ -59,7 +59,7 @@ pub enum CloseError {
 }
 
 /// Failures of [`StreamSender::reset`]; none of them changes any state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[derive(Clone, Debug, PartialEq, Eq, Snafu)]
 #[snafu(module(reset_error), visibility(pub(crate)))]
 pub enum ResetError {
     /// The connection has closed.
@@ -83,7 +83,7 @@ pub enum ResetError {
 }
 
 /// Failures of [`StreamSender::reset_at`]; none of them changes any state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[derive(Clone, Debug, PartialEq, Eq, Snafu)]
 #[snafu(module(reset_at_error), visibility(pub(crate)))]
 pub enum ResetAtError {
     /// The connection has closed.
@@ -127,7 +127,7 @@ pub enum ResetAtError {
 
 /// Failures of [`StreamSender::reset_with_final_size`]; none of them
 /// changes any state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[derive(Clone, Debug, PartialEq, Eq, Snafu)]
 #[snafu(module(reset_with_final_size_error), visibility(pub(crate)))]
 pub enum ResetWithFinalSizeError {
     /// The connection has closed.
@@ -179,7 +179,7 @@ pub enum ResetWithFinalSizeError {
 ///
 /// Every failure of a reset request is one of these; the other reset
 /// operations fail with the variants their requests can reach.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[derive(Clone, Debug, PartialEq, Eq, Snafu)]
 #[snafu(module(reset_at_with_final_size_error), visibility(pub(crate)))]
 pub enum ResetAtWithFinalSizeError {
     /// The connection has closed.
@@ -915,7 +915,7 @@ where
                 SendEndState::Reset { .. } => policy_violation::CloseAfterResetSnafu.fail(),
                 SendEndState::Open => {
                     ensure!(
-                        !self.connection_closed,
+                        !self.is_connection_closed(),
                         policy_violation::CloseAfterConnectionClosedSnafu
                     );
                     Ok(PolicyPlan::Close)
@@ -926,7 +926,7 @@ where
                 reason,
             } => {
                 ensure!(
-                    !self.connection_closed && self.terminal_state().is_none(),
+                    !self.is_connection_closed() && self.terminal_state().is_none(),
                     policy_violation::NarrowFinishedSnafu
                 );
                 ensure!(

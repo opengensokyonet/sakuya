@@ -24,7 +24,7 @@
 //! would have to wait for credit or admission reports that instead
 //! ([`write::WriteOutcome::Wait`]). Polling, wake-ups, the stream writer
 //! handle, send selection and feedback dispatch are not part of this module.
-use crate::connection::ConnectionClosedError;
+use crate::connection::{CloseReason, ConnectionClosedError};
 use crate::connection_send_credit::ConnectionSendFlowController;
 use crate::send_buffer::visibility::{ForeignCoverageError, UsageBeyondCoverageError};
 use crate::send_buffer::{ExposeUsageError, ExposedEnd, SendBuffer, UsageBeyondWrittenEndError};
@@ -60,7 +60,7 @@ pub struct StreamSender<C: SendTerminationPolicy> {
     composition: C,
     end: EndPhase,
     stop_sending: StopSending<C::WriteLimitReason>,
-    connection_closed: bool,
+    close_reason: Option<CloseReason>,
 }
 
 /// The end of the send direction:
@@ -245,7 +245,7 @@ impl<C: SendTerminationPolicy> StreamSender<C> {
             composition,
             end: EndPhase::Open,
             stop_sending: StopSending::NotReceived,
-            connection_closed: false,
+            close_reason: None,
         }
     }
 
@@ -296,7 +296,7 @@ impl<C: SendTerminationPolicy> StreamSender<C> {
 
     /// Whether the connection has closed.
     pub fn is_connection_closed(&self) -> bool {
-        self.connection_closed
+        self.close_reason.is_some()
     }
 
     /// Whether the handshake negotiated `RESET_STREAM_AT`.
@@ -359,7 +359,7 @@ where
     /// decides whether and how to end the stream; receiving it changes
     /// nothing else. Ignored once the connection has closed.
     pub fn on_stop_sending(&mut self, error_code: ApplicationErrorCode) {
-        if self.connection_closed {
+        if self.is_connection_closed() {
             return;
         }
         if let StopSending::NotReceived = self.stop_sending {
@@ -379,15 +379,16 @@ where
         self.dispatch_termination(SendTerminationEvent::WriterAbandoned);
     }
 
-    /// Records that the connection has closed.
+    /// Records that the connection has closed for `reason`.
     ///
-    /// Every later operation fails with a connection-closed error; results
-    /// returned before are not changed.
-    pub fn on_connection_closed(&mut self) {
-        if self.connection_closed {
+    /// Every later operation fails with a [`ConnectionClosedError`] that
+    /// carries `reason`; results returned before are not changed. Only the
+    /// first reason is kept; a later call has no effect.
+    pub fn on_connection_closed(&mut self, reason: CloseReason) {
+        if self.is_connection_closed() {
             return;
         }
-        self.connection_closed = true;
+        self.close_reason = Some(reason);
         self.dispatch_termination(SendTerminationEvent::ConnectionClosed);
     }
 
@@ -506,7 +507,7 @@ where
     ///
     /// [RFC 9000 §3.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-3.3
     pub fn stream_data_blocked_limit(&self) -> Option<VarInt> {
-        let allowed = !self.connection_closed
+        let allowed = !self.is_connection_closed()
             && self.terminal_state().is_none()
             && !matches!(self.end_state(), SendEndState::Reset { .. });
         (allowed
@@ -537,10 +538,10 @@ where
 
     /// Fails once the connection has closed.
     fn check_connection_open(&self) -> Result<(), ConnectionClosedError> {
-        if self.connection_closed {
-            return Err(ConnectionClosedError::new());
+        match &self.close_reason {
+            Some(reason) => Err(ConnectionClosedError::new(reason.clone())),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     fn flow_context(&self) -> SendFlowContext {
@@ -566,7 +567,7 @@ where
             write_limit_end: self.write_limit_end(),
             reset_stream_at_supported: self.reset_stream_at_supported,
             terminal_state: self.terminal_state(),
-            connection_closed: self.connection_closed,
+            connection_closed: self.is_connection_closed(),
         }
     }
 

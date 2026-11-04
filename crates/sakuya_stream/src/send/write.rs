@@ -142,7 +142,7 @@ impl<R: fmt::Debug> fmt::Debug for SharedWriteLimitReason<R> {
 }
 
 /// Failures of [`StreamSender::flush`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[derive(Clone, Debug, PartialEq, Eq, Snafu)]
 #[snafu(module(flush_error), visibility(pub(crate)))]
 pub enum FlushError {
     /// The connection has closed.

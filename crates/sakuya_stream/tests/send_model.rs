@@ -9,7 +9,7 @@
 
 use bytes::{Buf, Bytes};
 use proptest::prelude::*;
-use sakuya_stream::connection::ConnectionClosedError;
+use sakuya_stream::connection::{CloseReason, ConnectionClosedError, ImmediateClose};
 use sakuya_stream::connection_send_credit::ConnectionSendFlowController;
 use sakuya_stream::send::composition::{DefaultSendComposition, SendComposition};
 use sakuya_stream::send::finish::{
@@ -601,7 +601,7 @@ macro_rules! impl_sender {
             }
 
             fn close_connection(&mut self) {
-                self.on_connection_closed();
+                self.on_connection_closed(close_reason());
             }
 
             #[allow(clippy::redundant_closure_call)]
@@ -651,7 +651,7 @@ fn step<S: Sender, P: PolicyModel>(
             let s = &model.streams[stream];
             let expected = if s.connection_closed {
                 Err(FlushError::ConnectionClosed {
-                    source: ConnectionClosedError::new(),
+                    source: ConnectionClosedError::new(close_reason()),
                 })
             } else if matches!(s.end, ModelEnd::Reset { .. }) {
                 Err(FlushError::Reset {
@@ -701,7 +701,7 @@ fn step<S: Sender, P: PolicyModel>(
             let s = &mut model.streams[stream];
             let expected = if s.connection_closed {
                 Err(CloseError::ConnectionClosed {
-                    source: ConnectionClosedError::new(),
+                    source: ConnectionClosedError::new(close_reason()),
                 })
             } else if matches!(s.end, ModelEnd::Reset { .. }) {
                 Err(CloseError::AlreadyReset {
@@ -910,7 +910,7 @@ fn reset<S: Sender, P: PolicyModel>(
         use ResetAtWithFinalSizeError as E;
         if s.connection_closed {
             return Err(E::ConnectionClosed {
-                source: ConnectionClosedError::new(),
+                source: ConnectionClosedError::new(close_reason()),
             });
         }
         match s.end {
@@ -999,7 +999,7 @@ fn reset<S: Sender, P: PolicyModel>(
         Ok(Some((reliable, chosen)))
     })();
     let actual = senders[stream].request(code_value, v(reliable), final_size.map(v));
-    assert_eq!(actual, expected.map(|_| ()));
+    assert_eq!(actual, expected.clone().map(|_| ()));
     if let Ok(Some((reliable, chosen))) = expected {
         model.streams[stream].commit_reset(requested, reliable, chosen, EndSource::Application);
     }
@@ -1220,4 +1220,12 @@ proptest! {
             true,
         );
     }
+}
+
+/// The reason the tests close connections for.
+fn close_reason() -> CloseReason {
+    CloseReason::Local(ImmediateClose::Application {
+        code: ApplicationErrorCode::new(VarInt::from_u32(9)),
+        reason_phrase: Bytes::from_static(b"done"),
+    })
 }

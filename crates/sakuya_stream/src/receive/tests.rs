@@ -10,6 +10,7 @@ use super::{
         ResetPresentation, TerminationDecision, TerminationEvent, TerminationView,
     },
 };
+use crate::connection::{CloseReason, ImmediateClose};
 use crate::{
     connection_receive_flow::ConnectionReceiveFlowController,
     receive_buffer::{ReceiveBuffer, StreamDataInput, fragmented::FragmentedReceiveBuffer},
@@ -26,6 +27,15 @@ mod boundary;
 mod order;
 mod read;
 mod stop;
+
+/// The reason the tests close connections for.
+fn close_reason() -> CloseReason {
+    CloseReason::Peer(ImmediateClose::Transport {
+        code: TransportErrorCode::PROTOCOL_VIOLATION,
+        frame_type: Some(VarInt::from(0x08u8)),
+        reason_phrase: Bytes::from_static(b"bad stream"),
+    })
+}
 
 fn v(value: u32) -> VarInt {
     VarInt::from_u32(value)
