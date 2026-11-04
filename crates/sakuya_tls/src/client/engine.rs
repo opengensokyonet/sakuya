@@ -11,7 +11,8 @@
 //!
 //! 1. takes what to offer from the [`Offering`] and a ticket from the
 //!    [`ClientTicketStore`], and writes the ClientHello at Initial, with the
-//!    binder of the ticket; when it offers 0-RTT, it yields
+//!    binder of the ticket; the hello names psk_dhe_ke with or without a
+//!    ticket, for the server to send tickets; when it offers 0-RTT, it yields
 //!    [`ClientHandshakeEvent::ZeroRttKeys`];
 //! 2. reads the ServerHello, or a HelloRetryRequest, after which it writes
 //!    the second ClientHello and reads the ServerHello; it yields
@@ -642,11 +643,14 @@ impl<C> HelloParts<'_, C> {
         if let Some(cookie) = cookie {
             extensions.push(X::Cookie(cookie.clone()));
         }
+        // Every hello names psk_dhe_ke: the mode restricts the tickets the
+        // server sends too, and a server may send none without it (RFC 8446
+        // §4.2.9).
+        extensions.push(X::PskKeyExchangeModes(
+            // invariant: one mode fits.
+            ByteCodePointList::new(vec![PskKeyExchangeMode::PSK_DHE_KE]).expect("one mode"),
+        ));
         if let Some((ticket, hash, age)) = ticket {
-            extensions.push(X::PskKeyExchangeModes(
-                // invariant: one mode fits.
-                ByteCodePointList::new(vec![PskKeyExchangeMode::PSK_DHE_KE]).expect("one mode"),
-            ));
             if early_data {
                 extensions.push(X::EarlyData);
             }

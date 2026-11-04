@@ -26,7 +26,8 @@
 //!    [`ServerHandshakeEvent::Completed`] with the exporter and the client's
 //!    1-RTT secret, which it held back until now (RFC 9001 §5.7), then
 //!    moves both streams to 1-RTT;
-//! 7. issues the session tickets of its ticket policy, and ends.
+//! 7. issues the session tickets of its ticket policy, and ends; it issues
+//!    none when the client did not name psk_dhe_ke (RFC 8446 §4.2.9).
 //!
 //! A failure ends the call with a [`HandshakeError`]; a ClientHello with a
 //! non-empty legacy_session_id ends it with
@@ -698,16 +699,14 @@ where
         .expect("transport parameters")
         .clone();
 
+    // Whether the client resumes with psk_dhe_ke, the one mode the server
+    // takes: it restricts both the offered tickets and the issued ones
+    // (RFC 8446 §4.2.9).
+    let psk_dhe =
+        psk_modes(hello).is_some_and(|modes| modes.contains(&PskKeyExchangeMode::PSK_DHE_KE));
+
     // An offered ticket, with its binder.
-    let offered: Option<&OfferedPsks<Bytes>> = match hello.pre_shared_key() {
-        Some(offered)
-            if psk_modes(hello)
-                .is_some_and(|modes| modes.contains(&PskKeyExchangeMode::PSK_DHE_KE)) =>
-        {
-            Some(offered)
-        }
-        _ => None,
-    };
+    let offered: Option<&OfferedPsks<Bytes>> = hello.pre_shared_key().filter(|_| psk_dhe);
     let opened = match offered {
         Some(offered) => match tickets.open(offered).await {
             Some((index, opened)) => {
@@ -920,7 +919,10 @@ where
     output.move_to(CryptoLevel::OneRtt);
     input.move_to(CryptoLevel::OneRtt).map_err(connection)?;
 
-    // The tickets.
+    // The tickets, none when the client cannot resume with them.
+    if !psk_dhe {
+        return Ok(());
+    }
     let session = Resumable {
         suite: suite.suite(),
         application_protocol: selected.application_protocol.clone(),
