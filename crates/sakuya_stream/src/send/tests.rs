@@ -573,10 +573,10 @@ fn exposure_with_another_controller_fails_without_effect() {
     let mut other = ConnectionSendFlowController::new(v(1000));
     let mut sender = test_sender(1000, false);
     write_all(&mut sender, &mut connection, 100);
-    assert_eq!(
+    assert!(matches!(
         sender.expose_usage_through(v(50), ExposedEnd::Data, &mut other),
-        Err(ExposeUsageError::ForeignReservation)
-    );
+        Err(SenderExposeUsageError::ForeignReservation { .. })
+    ));
     assert_eq!(sender.exposure_end(), VarInt::ZERO);
     assert!(
         !sender
@@ -1281,7 +1281,7 @@ fn reset_at_after_the_fin_is_exposed() {
     );
     assert!(matches!(
         sender.expose_usage_through(v(900), ExposedEnd::FinalSize, &mut connection),
-        Err(ExposeUsageError::FinalSizeMismatch { .. })
+        Err(SenderExposeUsageError::FinalSizeMismatch { .. })
     ));
 }
 
@@ -1292,7 +1292,7 @@ fn exposure_needs_a_fixed_final_size() {
     write_all(&mut sender, &mut connection, 100);
     assert_eq!(
         sender.expose_usage_through(v(100), ExposedEnd::FinalSize, &mut connection),
-        Err(ExposeUsageError::FinalSizeNotFixed { final_size: v(100) })
+        Err(SenderExposeUsageError::FinalSizeNotFixed { final_size: v(100) })
     );
     expose(&mut sender, &mut connection, 50);
     assert_eq!(

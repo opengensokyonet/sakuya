@@ -25,13 +25,14 @@
 //! ([`write::WriteOutcome::Wait`]). Polling, wake-ups, the stream writer
 //! handle, send selection and feedback dispatch are not part of this module.
 use crate::connection_send_credit::ConnectionSendFlowController;
-use crate::send_buffer::{ExposeUsageError, ExposedEnd, SendBuffer, expose_usage_error};
+use crate::send_buffer::visibility::{ForeignCoverageError, UsageBeyondCoverageError};
+use crate::send_buffer::{ExposeUsageError, ExposedEnd, SendBuffer, UsageBeyondWrittenEndError};
 use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
 use flow_control::{SendFlowContext, SendFlowControlPolicy, StreamCreditEvent};
 use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::stream_id::StreamId;
 use sakuya_wire::var_int::VarInt;
-use snafu::{ResultExt, Snafu};
+use snafu::{IntoError, ResultExt, Snafu};
 use termination::{SendTerminationContext, SendTerminationEvent, SendTerminationPolicy};
 use write::SharedWriteLimitReason;
 
@@ -432,36 +433,60 @@ where
     ///
     /// # Errors
     ///
-    /// [`ExposeUsageError`] if the exposure is inconsistent with the end
-    /// state or the send buffer; nothing changes then.
+    /// [`SenderExposeUsageError`] if the exposure is inconsistent with the
+    /// end state, then if the send buffer refuses it; nothing changes then.
     pub fn expose_usage_through(
         &mut self,
         usage_end: VarInt,
         end: ExposedEnd,
         connection: &mut ConnectionSendFlowController,
-    ) -> Result<VarInt, ExposeUsageError> {
-        let fixed_final_size = self.end_state().final_size();
-        match (end, fixed_final_size) {
+    ) -> Result<VarInt, SenderExposeUsageError> {
+        use sender_expose_usage_error as e;
+        match (end, self.end_state().final_size()) {
             (ExposedEnd::FinalSize, None) => {
-                return expose_usage_error::FinalSizeNotFixedSnafu {
+                return e::FinalSizeNotFixedSnafu {
                     final_size: usage_end,
                 }
                 .fail();
             }
             (ExposedEnd::FinalSize, Some(final_size)) => {
                 FinalSizeChangeError::check(final_size, usage_end)
-                    .context(expose_usage_error::FinalSizeMismatchSnafu)?;
+                    .context(e::FinalSizeMismatchSnafu)?;
             }
             (ExposedEnd::Data, Some(final_size)) => {
                 BeyondFinalSizeError::check(final_size, usage_end)
-                    .context(expose_usage_error::BeyondFinalSizeSnafu)?;
+                    .context(e::BeyondFinalSizeSnafu)?;
             }
             (ExposedEnd::Data, None) => {}
         }
         let previous = self.exposure_end();
-        let committed = self
+        let committed = match self
             .composition
-            .expose_usage_through(usage_end, end, connection)?;
+            .expose_usage_through(usage_end, end, connection)
+        {
+            Ok(committed) => committed,
+            Err(ExposeUsageError::BeyondWrittenEnd { source }) => {
+                return Err(e::BeyondWrittenEndSnafu.into_error(source));
+            }
+            Err(ExposeUsageError::BeyondCoverage { source }) => {
+                return Err(e::BeyondCoverageSnafu.into_error(source));
+            }
+            Err(ExposeUsageError::ForeignReservation { source }) => {
+                return Err(e::ForeignReservationSnafu.into_error(source));
+            }
+            Err(
+                error @ (ExposeUsageError::BeyondFinalSize { .. }
+                | ExposeUsageError::FinalSizeMismatch { .. }
+                | ExposeUsageError::FinalSizeBelowExposure { .. }),
+            ) => {
+                // invariant: the only final size the send buffer can know is
+                // the one the committed end fixed, which the checks above
+                // compared, and data exposure never passes it, so the
+                // exposure end stays at or below it. A send buffer that still
+                // refuses the final size breaks the `SendBuffer` contract.
+                unreachable!("send buffer refused a checked exposure through {usage_end}: {error}")
+            }
+        };
         let exposure_end = self.exposure_end();
         if exposure_end > previous {
             self.notify_flow_control(StreamCreditEvent::FirstExposed { exposure_end });
@@ -558,6 +583,50 @@ where
             }
         }
     }
+}
+
+/// Failures of [`StreamSender::expose_usage_through`]; none of them changes
+/// any state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(module(sender_expose_usage_error), visibility(pub(crate)))]
+pub enum SenderExposeUsageError {
+    /// A final size is exposed while no end is committed.
+    #[snafu(display("final size {final_size} exposed before the stream ended"))]
+    FinalSizeNotFixed {
+        /// The rejected final size.
+        final_size: VarInt,
+    },
+    /// A final size differs from the one the committed end fixed.
+    #[snafu(display("exposure changes the final size"))]
+    FinalSizeMismatch {
+        /// The fixed final size and the rejected one.
+        source: FinalSizeChangeError,
+    },
+    /// Data passes the final size the committed end fixed.
+    #[snafu(display("data exposure passes the final size"))]
+    BeyondFinalSize {
+        /// The fixed final size and the rejected usage end.
+        source: BeyondFinalSizeError,
+    },
+    /// The usage end lies beyond the written end.
+    #[snafu(display("cannot expose usage that was not written"))]
+    BeyondWrittenEnd {
+        /// The rejected usage end and the written end.
+        source: UsageBeyondWrittenEndError,
+    },
+    /// The send buffer's stored coverage does not reach the usage end.
+    #[snafu(display("cannot expose usage without stored coverage"))]
+    BeyondCoverage {
+        /// The rejected usage end and the end of the stored coverage.
+        source: UsageBeyondCoverageError,
+    },
+    /// Coverage to commit was granted by another connection send flow
+    /// controller than the one passed in.
+    #[snafu(display("cannot commit the coverage of the exposed usage"))]
+    ForeignReservation {
+        /// The failed ownership check.
+        source: ForeignCoverageError,
+    },
 }
 
 /// Failures of [`StreamSender::enter_terminal_state`]; none of them changes

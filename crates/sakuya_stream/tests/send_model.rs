@@ -24,10 +24,14 @@ use sakuya_stream::send::termination::{
     TerminationAction,
 };
 use sakuya_stream::send::write::{FlushError, WriteError, WriteOutcome, WriteWait};
-use sakuya_stream::send::{EndSource, ResetTarget, SendEndState, SendTerminalState, StreamSender};
+use sakuya_stream::send::{
+    EndSource, ResetTarget, SendEndState, SendTerminalState, SenderExposeUsageError, StreamSender,
+};
 use sakuya_stream::send_buffer::offset_map::OffsetMapSendBuffer;
 use sakuya_stream::send_buffer::visibility::FinalSizeBelowExposureError;
-use sakuya_stream::send_buffer::{ExposeUsageError, ExposedEnd, FinalSizeBeyondWrittenEndError};
+use sakuya_stream::send_buffer::{
+    ExposedEnd, FinalSizeBeyondWrittenEndError, UsageBeyondWrittenEndError,
+};
 use sakuya_stream::stream_end::{BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError};
 use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
@@ -416,7 +420,7 @@ trait Sender {
         usage_end: VarInt,
         end: ExposedEnd,
         connection: &mut ConnectionSendFlowController,
-    ) -> Result<VarInt, ExposeUsageError>;
+    ) -> Result<VarInt, SenderExposeUsageError>;
     fn sender_close(&mut self) -> Result<(), CloseError>;
     fn request(
         &mut self,
@@ -548,7 +552,7 @@ macro_rules! impl_sender {
                 usage_end: VarInt,
                 end: ExposedEnd,
                 connection: &mut ConnectionSendFlowController,
-            ) -> Result<VarInt, ExposeUsageError> {
+            ) -> Result<VarInt, SenderExposeUsageError> {
                 self.expose_usage_through(usage_end, end, connection)
             }
 
@@ -849,22 +853,21 @@ fn expose<S: Sender, P: PolicyModel>(
     let s = &mut model.streams[stream];
     let fixed = s.final_size();
     let expected = match (end, fixed) {
-        (ExposedEnd::FinalSize, None) => Err(ExposeUsageError::FinalSizeNotFixed {
+        (ExposedEnd::FinalSize, None) => Err(SenderExposeUsageError::FinalSizeNotFixed {
             final_size: v(usage_end),
         }),
         (ExposedEnd::FinalSize, Some(final_size)) if usage_end != final_size => {
-            Err(ExposeUsageError::FinalSizeMismatch {
+            Err(SenderExposeUsageError::FinalSizeMismatch {
                 source: FinalSizeChangeError::check(v(final_size), v(usage_end)).unwrap_err(),
             })
         }
         (ExposedEnd::Data, Some(final_size)) if usage_end > final_size => {
-            Err(ExposeUsageError::BeyondFinalSize {
+            Err(SenderExposeUsageError::BeyondFinalSize {
                 source: BeyondFinalSizeError::check(v(final_size), v(usage_end)).unwrap_err(),
             })
         }
-        _ if usage_end > s.written => Err(ExposeUsageError::BeyondWrittenEnd {
-            usage_end: v(usage_end),
-            written_end: v(s.written),
+        _ if usage_end > s.written => Err(SenderExposeUsageError::BeyondWrittenEnd {
+            source: UsageBeyondWrittenEndError::check(v(usage_end), v(s.written)).unwrap_err(),
         }),
         _ => Ok(usage_end.saturating_sub(s.exposure)),
     };

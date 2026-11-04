@@ -1,6 +1,6 @@
 //! The per-stream visibility settlement ([`VisibilitySettlement`]).
 use super::covered_bytes::CoveredBytes;
-use super::{ExposeUsageError, ExposedEnd, expose_usage_error};
+use super::{ExposeUsageError, ExposedEnd, UsageBeyondWrittenEndError, expose_usage_error};
 use crate::connection_send_credit::{ConnectionCreditReservation, ConnectionSendFlowController};
 use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
 use bytes::Bytes;
@@ -200,13 +200,8 @@ impl VisibilitySettlement {
         written_end: VarInt,
         connection: &mut ConnectionSendFlowController,
     ) -> Result<VarInt, ExposeUsageError> {
-        ensure!(
-            usage_end <= written_end,
-            expose_usage_error::BeyondWrittenEndSnafu {
-                usage_end,
-                written_end,
-            }
-        );
+        UsageBeyondWrittenEndError::check(usage_end, written_end)
+            .context(expose_usage_error::BeyondWrittenEndSnafu)?;
         if let Some(final_size) = self.final_size.established() {
             match end {
                 ExposedEnd::Data => BeyondFinalSizeError::check(final_size, usage_end)
@@ -222,13 +217,8 @@ impl VisibilitySettlement {
 
         let newly_exposed = usage_end.saturating_sub(self.exposure_end);
         if newly_exposed > VarInt::ZERO {
-            ensure!(
-                newly_exposed <= self.covered,
-                expose_usage_error::BeyondCoverageSnafu {
-                    usage_end,
-                    coverage_end: self.coverage_end(),
-                }
-            );
+            UsageBeyondCoverageError::check(usage_end, self.coverage_end())
+                .context(expose_usage_error::BeyondCoverageSnafu)?;
             self.check_owner(newly_exposed, connection)?;
             self.commit_front(newly_exposed, connection);
             self.exposure_end = usage_end;
@@ -251,10 +241,8 @@ impl VisibilitySettlement {
             if remaining == VarInt::ZERO {
                 break;
             }
-            ensure!(
-                connection.owns(reservation),
-                expose_usage_error::ForeignReservationSnafu
-            );
+            ForeignCoverageError::check(connection, reservation)
+                .context(expose_usage_error::ForeignReservationSnafu)?;
             remaining = remaining.saturating_sub(reservation.amount());
         }
         Ok(())
@@ -384,5 +372,70 @@ impl FinalSizeBelowExposureError {
     /// The exposure end.
     pub const fn exposure_end(self) -> VarInt {
         self.exposure_end
+    }
+}
+
+/// A usage end lies beyond the end of the stored coverage: no reservation
+/// covers the usage to commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("usage end {usage_end} lies beyond the coverage ending at {coverage_end}"))]
+pub struct UsageBeyondCoverageError {
+    usage_end: VarInt,
+    coverage_end: VarInt,
+}
+
+impl UsageBeyondCoverageError {
+    /// Checks that `usage_end` is at most `coverage_end`.
+    ///
+    /// # Errors
+    ///
+    /// [`UsageBeyondCoverageError`] if `usage_end` lies beyond
+    /// `coverage_end`.
+    pub fn check(usage_end: VarInt, coverage_end: VarInt) -> Result<(), Self> {
+        ensure!(
+            usage_end <= coverage_end,
+            UsageBeyondCoverageSnafu {
+                usage_end,
+                coverage_end,
+            }
+        );
+        Ok(())
+    }
+
+    /// The rejected usage end, beyond [`coverage_end`](Self::coverage_end).
+    pub const fn usage_end(self) -> VarInt {
+        self.usage_end
+    }
+
+    /// The end of the stored coverage.
+    pub const fn coverage_end(self) -> VarInt {
+        self.coverage_end
+    }
+}
+
+/// Coverage to commit was granted by another connection send flow
+/// controller than the one passed in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("coverage belongs to another connection send flow controller"))]
+pub struct ForeignCoverageError {
+    // Keeps the error constructible only by `check`.
+    _private: (),
+}
+
+impl ForeignCoverageError {
+    /// Checks that `connection` granted `reservation`.
+    ///
+    /// # Errors
+    ///
+    /// [`ForeignCoverageError`] if another controller granted it.
+    pub fn check(
+        connection: &ConnectionSendFlowController,
+        reservation: &ConnectionCreditReservation,
+    ) -> Result<(), Self> {
+        ensure!(
+            connection.owns(reservation),
+            ForeignCoverageSnafu { _private: () }
+        );
+        Ok(())
     }
 }

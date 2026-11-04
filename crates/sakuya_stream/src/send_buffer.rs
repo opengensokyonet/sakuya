@@ -19,7 +19,9 @@ use covered_bytes::CoveredBytes;
 use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
 use sakuya_wire::var_int::VarInt;
 use snafu::{Snafu, ensure};
-use visibility::{FinalSizeBelowExposureError, FixFinalSizeError};
+use visibility::{
+    FinalSizeBelowExposureError, FixFinalSizeError, ForeignCoverageError, UsageBeyondCoverageError,
+};
 
 pub mod covered_bytes;
 pub mod offset_map;
@@ -249,18 +251,15 @@ pub enum ExposedEnd {
     FinalSize,
 }
 
-/// Failures of [`SendBuffer::expose_usage_through`] and of the stream
-/// sender's exposure entry.
+/// Failures of [`SendBuffer::expose_usage_through`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(module(expose_usage_error), visibility(pub(crate)))]
 pub enum ExposeUsageError {
     /// The usage end lies beyond the written end.
-    #[snafu(display("usage end {usage_end} lies beyond the written end {written_end}"))]
+    #[snafu(display("cannot expose usage that was not written"))]
     BeyondWrittenEnd {
-        /// The rejected usage end.
-        usage_end: VarInt,
-        /// The written end.
-        written_end: VarInt,
+        /// The rejected usage end and the written end.
+        source: UsageBeyondWrittenEndError,
     },
     /// The usage end lies beyond the final size already fixed or exposed.
     #[snafu(display("data exposure passes the final size"))]
@@ -280,24 +279,57 @@ pub enum ExposeUsageError {
         /// The rejected final size and the exposure end.
         source: FinalSizeBelowExposureError,
     },
-    /// A final size is exposed while the stream has no fixed final size.
-    #[snafu(display("final size {final_size} exposed before the stream ended"))]
-    FinalSizeNotFixed {
-        /// The rejected final size.
-        final_size: VarInt,
-    },
     /// The stored coverage does not reach the usage end.
-    #[snafu(display("usage end {usage_end} lies beyond the coverage ending at {coverage_end}"))]
+    #[snafu(display("cannot expose usage without stored coverage"))]
     BeyondCoverage {
-        /// The rejected usage end.
-        usage_end: VarInt,
-        /// The end of the stored coverage.
-        coverage_end: VarInt,
+        /// The rejected usage end and the end of the stored coverage.
+        source: UsageBeyondCoverageError,
     },
     /// Coverage to commit was granted by another connection send flow
     /// controller than the one passed in.
-    #[snafu(display("coverage belongs to another connection send flow controller"))]
-    ForeignReservation,
+    #[snafu(display("cannot commit the coverage of the exposed usage"))]
+    ForeignReservation {
+        /// The failed ownership check.
+        source: ForeignCoverageError,
+    },
+}
+
+/// A usage end lies beyond the written end: usage that was never handed
+/// over cannot be exposed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("usage end {usage_end} lies beyond the written end {written_end}"))]
+pub struct UsageBeyondWrittenEndError {
+    usage_end: VarInt,
+    written_end: VarInt,
+}
+
+impl UsageBeyondWrittenEndError {
+    /// Checks that `usage_end` is at most `written_end`.
+    ///
+    /// # Errors
+    ///
+    /// [`UsageBeyondWrittenEndError`] if `usage_end` lies beyond
+    /// `written_end`.
+    pub fn check(usage_end: VarInt, written_end: VarInt) -> Result<(), Self> {
+        ensure!(
+            usage_end <= written_end,
+            UsageBeyondWrittenEndSnafu {
+                usage_end,
+                written_end,
+            }
+        );
+        Ok(())
+    }
+
+    /// The rejected usage end, beyond [`written_end`](Self::written_end).
+    pub const fn usage_end(self) -> VarInt {
+        self.usage_end
+    }
+
+    /// The written end.
+    pub const fn written_end(self) -> VarInt {
+        self.written_end
+    }
 }
 
 /// The constraints a send scheduler passes to [`SendBuffer::select`].

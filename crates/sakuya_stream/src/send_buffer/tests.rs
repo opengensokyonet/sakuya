@@ -1,7 +1,8 @@
 use super::covered_bytes::{CoveredBytes, CoveredBytesError};
 use super::offset_map::OffsetMapSendBuffer;
 use super::visibility::{
-    CoverError, FinalSizeBelowExposureError, FixFinalSizeError, VisibilitySettlement,
+    CoverError, FinalSizeBelowExposureError, FixFinalSizeError, UsageBeyondCoverageError,
+    VisibilitySettlement,
 };
 use super::*;
 use crate::connection_send_credit::ConnectionCreditReservation;
@@ -244,10 +245,10 @@ fn exposure_rejects_coverage_of_another_controller() {
     let mut other = ConnectionSendFlowController::new(v(1000));
     let mut buffer = OffsetMapSendBuffer::new();
     append(&mut buffer, &mut granting, 100);
-    assert_eq!(
+    assert!(matches!(
         buffer.expose_usage_through(v(50), ExposedEnd::Data, &mut other),
-        Err(ExposeUsageError::ForeignReservation)
-    );
+        Err(ExposeUsageError::ForeignReservation { .. })
+    ));
     assert_eq!(buffer.exposure_end(), VarInt::ZERO);
     assert_eq!(granting.reserved(), v(100));
     assert_eq!(
@@ -268,8 +269,7 @@ fn settlement_exposure_needs_coverage() {
     assert_eq!(
         settlement.expose_usage_through(v(6), ExposedEnd::Data, v(10), &mut connection),
         Err(ExposeUsageError::BeyondCoverage {
-            usage_end: v(6),
-            coverage_end: v(4),
+            source: UsageBeyondCoverageError::check(v(6), v(4)).unwrap_err(),
         })
     );
     assert_eq!(settlement.covered(), v(4));
@@ -322,8 +322,7 @@ fn exposure_rejects_usage_beyond_the_written_end() {
     assert_eq!(
         error,
         ExposeUsageError::BeyondWrittenEnd {
-            usage_end: v(101),
-            written_end: v(100),
+            source: UsageBeyondWrittenEndError::check(v(101), v(100)).unwrap_err(),
         }
     );
     assert_eq!(connection.committed(), VarInt::ZERO);
