@@ -1,5 +1,5 @@
-//! TLS 1.3 handshake messages, extensions and key schedule for QUIC in
-//! sakuya.
+//! TLS 1.3 handshake messages, extensions, key schedule and handshake
+//! engines for QUIC in sakuya.
 //!
 //! The baseline is TLS 1.3 ([RFC 8446]) as QUIC version 1 uses it
 //! ([RFC 9001]): handshake messages travel in CRYPTO frames, without the
@@ -21,7 +21,8 @@
 //!   rustls-webpki and Certificate Transparency.
 //! - [`server`], [`client`]: the capabilities each role's handshake
 //!   consults, such as the choice of parameters and what a ClientHello
-//!   offers, with implementations for plain Web connections.
+//!   offers, with implementations for plain Web connections, and each
+//!   role's handshake engine, [`server::engine`] and [`client::engine`].
 //! - [`engine`]: what the two engines share: the CRYPTO streams they read
 //!   and write at the current encryption level, and how a handshake fails.
 //!
