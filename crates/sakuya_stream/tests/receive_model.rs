@@ -492,10 +492,19 @@ enum Expected {
         complete: bool,
     },
     Local {
+        cause: LocalCause,
         reason: u32,
         trigger: TerminationEvent,
         remote: Option<RemoteReset>,
     },
+}
+
+/// Which local termination a read error reports.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum LocalCause {
+    BufferDestroyed,
+    DeliveryLimitReached,
+    AcceptanceLimitReached,
 }
 
 /// The model's view of a read error of the stream receiver.
@@ -504,11 +513,32 @@ fn observed(error: ReadError<u32>) -> Expected {
         ReadError::ReaderDropped => Expected::ReaderDropped,
         ReadError::ConnectionClosed { source } => Expected::ConnectionClosed(source),
         ReadError::Reset { reset, complete } => Expected::Reset { reset, complete },
-        ReadError::LocalTermination {
+        ReadError::BufferDestroyed {
             reason,
             trigger,
             remote,
         } => Expected::Local {
+            cause: LocalCause::BufferDestroyed,
+            reason: *reason,
+            trigger,
+            remote,
+        },
+        ReadError::DeliveryLimitReached {
+            reason,
+            trigger,
+            remote,
+        } => Expected::Local {
+            cause: LocalCause::DeliveryLimitReached,
+            reason: *reason,
+            trigger,
+            remote,
+        },
+        ReadError::AcceptanceLimitReached {
+            reason,
+            trigger,
+            remote,
+        } => Expected::Local {
+            cause: LocalCause::AcceptanceLimitReached,
             reason: *reason,
             trigger,
             remote,
@@ -902,6 +932,7 @@ impl Model {
         }
         if let Phase::Destroyed(Some((reason, trigger))) = self.phase {
             let error = Expected::Local {
+                cause: LocalCause::BufferDestroyed,
                 reason,
                 trigger,
                 remote: self.reset.map(Reset::remote),
@@ -934,13 +965,14 @@ impl Model {
                 }
             };
         }
-        let local = |limit: Limit| Expected::Local {
+        let local = |cause: LocalCause, limit: Limit| Expected::Local {
+            cause,
             reason: limit.reason,
             trigger: limit.trigger,
             remote,
         };
         if let Some(limit) = self.delivery.filter(|limit| self.delivered >= limit.at) {
-            return Err(self.commit_error(local(limit)));
+            return Err(self.commit_error(local(LocalCause::DeliveryLimitReached, limit)));
         }
         if let Some(reset) = remote.filter(|reset| self.delivered >= reset.reliable_size.get()) {
             return Err(self.commit_error(Expected::Reset {
@@ -949,7 +981,7 @@ impl Model {
             }));
         }
         if let Some(limit) = self.acceptance.filter(|limit| self.delivered >= limit.at) {
-            return Err(self.commit_error(local(limit)));
+            return Err(self.commit_error(local(LocalCause::AcceptanceLimitReached, limit)));
         }
         Ok(ReadOutcome::Wait)
     }

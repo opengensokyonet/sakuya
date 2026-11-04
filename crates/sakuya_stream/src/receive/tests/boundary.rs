@@ -27,12 +27,36 @@ fn stopped_with(
     (receiver, connection)
 }
 
-fn local(
+fn delivery_limit(
     reason: &'static str,
     trigger: TerminationEvent,
     remote: Option<RemoteReset>,
 ) -> ChunkRead {
-    Err(ReadError::LocalTermination {
+    Err(ReadError::DeliveryLimitReached {
+        reason: SharedTerminationReason::new(reason),
+        trigger,
+        remote,
+    })
+}
+
+fn acceptance_limit(
+    reason: &'static str,
+    trigger: TerminationEvent,
+    remote: Option<RemoteReset>,
+) -> ChunkRead {
+    Err(ReadError::AcceptanceLimitReached {
+        reason: SharedTerminationReason::new(reason),
+        trigger,
+        remote,
+    })
+}
+
+fn destroyed(
+    reason: &'static str,
+    trigger: TerminationEvent,
+    remote: Option<RemoteReset>,
+) -> ChunkRead {
+    Err(ReadError::BufferDestroyed {
         reason: SharedTerminationReason::new(reason),
         trigger,
         remote,
@@ -77,7 +101,10 @@ fn same_limits_are_idempotent() {
     let (read, end) = read_all(&mut receiver);
     assert_eq!(read.len(), 300);
     let remote = receiver.remote_reset();
-    assert_eq!(end, local("first", TerminationEvent::StopSent, remote));
+    assert_eq!(
+        end,
+        delivery_limit("first", TerminationEvent::StopSent, remote)
+    );
 }
 
 /// A tighter limit records the new reason and trigger; the other limit
@@ -112,7 +139,10 @@ fn tightening_records_the_new_reason_per_limit() {
     let (read, end) = read_all(&mut receiver);
     assert_eq!(read.len(), 500);
     let remote = receiver.remote_reset();
-    assert_eq!(end, local("first", TerminationEvent::StopSent, remote));
+    assert_eq!(
+        end,
+        acceptance_limit("first", TerminationEvent::StopSent, remote)
+    );
 
     // Reading ends at the tightened delivery limit, with the second reason.
     let (mut receiver, mut connection) = tighten_delivery_to(400);
@@ -120,7 +150,10 @@ fn tightening_records_the_new_reason_per_limit() {
     let (read, end) = read_all(&mut receiver);
     assert_eq!(read.len(), 400);
     let remote = receiver.remote_reset();
-    assert_eq!(end, local("second", TerminationEvent::RemoteReset, remote));
+    assert_eq!(
+        end,
+        delivery_limit("second", TerminationEvent::RemoteReset, remote)
+    );
 }
 
 #[test]
@@ -138,7 +171,10 @@ fn tightening_the_delivery_limit_releases_held_data() {
     assert_eq!(connection.used(), v(600));
     let (read, end) = read_all(&mut receiver);
     assert_eq!(read, data(0, 200));
-    assert_eq!(end, local("stop", TerminationEvent::StopSent, None));
+    assert_eq!(
+        end,
+        delivery_limit("stop", TerminationEvent::StopSent, None)
+    );
 }
 
 /// With [0, 100) and [200, 300) held, an acceptance limit at 200 and a
@@ -171,7 +207,10 @@ fn filling_a_gap_delivers_kept_data_up_to_the_delivery_limit() {
     assert_eq!(receiver.parts().buffer.held_len(), 300);
     let (read, end) = read_all(&mut receiver);
     assert_eq!(read, data(0, 300));
-    assert_eq!(end, local("stop", TerminationEvent::StopSent, None));
+    assert_eq!(
+        end,
+        delivery_limit("stop", TerminationEvent::StopSent, None)
+    );
 }
 
 /// A limit below the read position does not take back delivered data.
@@ -191,7 +230,7 @@ fn limit_below_the_read_position() {
     assert_eq!(receiver.parts().delivered_end(), v(300));
     assert_eq!(
         receiver.read_chunk(),
-        local("stop", TerminationEvent::StopSent, None)
+        delivery_limit("stop", TerminationEvent::StopSent, None)
     );
 }
 
@@ -202,7 +241,7 @@ fn policy_destroy_ends_reading_with_its_reason() {
         _ => TerminationDecision::keep(),
     });
     assert!(receiver.parts().buffer.is_destroyed());
-    let error = local("first", TerminationEvent::StopSent, None);
+    let error = destroyed("first", TerminationEvent::StopSent, None);
     assert_eq!(receiver.read_chunk(), error);
     assert_eq!(receiver.read_chunk(), error);
 }
@@ -237,8 +276,8 @@ fn repeated_reads_share_one_reason_that_needs_no_clone() {
         .on_reset_stream(reset(4, 1000), &mut connection)
         .unwrap();
     let reason = |receiver: &mut Receiver<DestroyOnReset>| {
-        let Err(ReadError::LocalTermination { reason, .. }) = receiver.read_chunk() else {
-            panic!("expected a local termination");
+        let Err(ReadError::BufferDestroyed { reason, .. }) = receiver.read_chunk() else {
+            panic!("expected a destroyed buffer");
         };
         reason
     };
@@ -307,7 +346,10 @@ fn sent_stop_cancels_the_reliable_prefix() {
     let (read, end) = read_all(&mut receiver);
     assert_eq!(read, data(0, 100));
     let remote = receiver.remote_reset();
-    assert_eq!(end, local("stop", TerminationEvent::StopSent, remote));
+    assert_eq!(
+        end,
+        delivery_limit("stop", TerminationEvent::StopSent, remote)
+    );
 }
 
 /// With the whole reliable prefix received and held, the acceptance limit

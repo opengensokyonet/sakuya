@@ -217,7 +217,7 @@ fn stop_truncation_survives_a_larger_reliable_size() {
     assert_eq!(read, data(0, 300));
     assert_eq!(
         end,
-        Err(ReadError::LocalTermination {
+        Err(ReadError::DeliveryLimitReached {
             reason: SharedTerminationReason::new("stop"),
             trigger: TerminationEvent::StopSent,
             remote: Some(RemoteReset {

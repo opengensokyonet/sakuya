@@ -56,7 +56,10 @@ use snafu::{Report, ResultExt, Snafu, ensure};
 ///
 /// An event is delivered after the fact it reports took effect. The same
 /// value names the trigger of a local termination in
-/// [`ReadError::LocalTermination`](super::read::ReadError::LocalTermination).
+/// [`ReadError::BufferDestroyed`](super::read::ReadError::BufferDestroyed),
+/// [`ReadError::DeliveryLimitReached`](super::read::ReadError::DeliveryLimitReached)
+/// and
+/// [`ReadError::AcceptanceLimitReached`](super::read::ReadError::AcceptanceLimitReached).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TerminationEvent {
     /// The first `RESET_STREAM` or `RESET_STREAM_AT` was received.

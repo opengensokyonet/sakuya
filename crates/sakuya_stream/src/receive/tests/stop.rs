@@ -132,7 +132,7 @@ fn request_after_local_termination() {
     receiver.on_stop_sent().unwrap();
     assert_eq!(
         receiver.read_chunk(),
-        Err(ReadError::LocalTermination {
+        Err(ReadError::BufferDestroyed {
             reason: SharedTerminationReason::new("stopped"),
             trigger: TerminationEvent::StopSent,
             remote: None,

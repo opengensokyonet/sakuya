@@ -142,13 +142,35 @@ pub enum ReadError<R> {
         /// Whether all of `[0, final_size)` was delivered.
         complete: bool,
     },
-    /// Delivery ended locally: a local limit was reached, or the receive
-    /// buffer was destroyed, before the whole stream was delivered.
-    #[snafu(display("delivery of the stream ended locally"))]
-    LocalTermination {
+    /// The receive termination policy destroyed the receive buffer before
+    /// the whole stream was delivered.
+    #[snafu(display("the receive buffer was destroyed locally"))]
+    BufferDestroyed {
         /// The receive termination policy's reason.
         reason: SharedTerminationReason<R>,
-        /// The event during which the limit or destruction took effect.
+        /// The event during which the destruction took effect.
+        trigger: TerminationEvent,
+        /// The reset facts, if the peer reset the stream too.
+        remote: Option<RemoteReset>,
+    },
+    /// Delivery reached the fixed delivery limit before the whole stream was
+    /// delivered.
+    #[snafu(display("delivery of the stream reached the delivery limit"))]
+    DeliveryLimitReached {
+        /// The receive termination policy's reason.
+        reason: SharedTerminationReason<R>,
+        /// The event during which the limit took effect.
+        trigger: TerminationEvent,
+        /// The reset facts, if the peer reset the stream too.
+        remote: Option<RemoteReset>,
+    },
+    /// The gap at the read position lies beyond the fixed acceptance limit
+    /// and can no longer be filled.
+    #[snafu(display("the gap at the read position lies beyond the acceptance limit"))]
+    AcceptanceLimitReached {
+        /// The receive termination policy's reason.
+        reason: SharedTerminationReason<R>,
+        /// The event during which the limit took effect.
         trigger: TerminationEvent,
         /// The reset facts, if the peer reset the stream too.
         remote: Option<RemoteReset>,
@@ -166,11 +188,29 @@ impl<R> Clone for ReadError<R> {
                 reset: *reset,
                 complete: *complete,
             },
-            Self::LocalTermination {
+            Self::BufferDestroyed {
                 reason,
                 trigger,
                 remote,
-            } => Self::LocalTermination {
+            } => Self::BufferDestroyed {
+                reason: reason.clone(),
+                trigger: *trigger,
+                remote: *remote,
+            },
+            Self::DeliveryLimitReached {
+                reason,
+                trigger,
+                remote,
+            } => Self::DeliveryLimitReached {
+                reason: reason.clone(),
+                trigger: *trigger,
+                remote: *remote,
+            },
+            Self::AcceptanceLimitReached {
+                reason,
+                trigger,
+                remote,
+            } => Self::AcceptanceLimitReached {
                 reason: reason.clone(),
                 trigger: *trigger,
                 remote: *remote,
@@ -180,8 +220,24 @@ impl<R> Clone for ReadError<R> {
 }
 
 impl<R> ReadError<R> {
-    fn local(applied: Applied<R>, remote: Option<RemoteReset>) -> Self {
-        Self::LocalTermination {
+    fn buffer_destroyed(applied: Applied<R>, remote: Option<RemoteReset>) -> Self {
+        Self::BufferDestroyed {
+            reason: applied.reason,
+            trigger: applied.trigger,
+            remote,
+        }
+    }
+
+    fn delivery_limit_reached(applied: Applied<R>, remote: Option<RemoteReset>) -> Self {
+        Self::DeliveryLimitReached {
+            reason: applied.reason,
+            trigger: applied.trigger,
+            remote,
+        }
+    }
+
+    fn acceptance_limit_reached(applied: Applied<R>, remote: Option<RemoteReset>) -> Self {
+        Self::AcceptanceLimitReached {
             reason: applied.reason,
             trigger: applied.trigger,
             remote,
@@ -281,7 +337,7 @@ where
         }
         match &self.buffer {
             BufferPhase::Destroyed(Destruction::Policy(applied)) => {
-                let error = ReadError::local(applied.clone(), self.remote_reset());
+                let error = ReadError::buffer_destroyed(applied.clone(), self.remote_reset());
                 Some(Err(self.commit_error(error)))
             }
             // invariant: the mechanism destroys the buffer only together with
@@ -314,7 +370,7 @@ where
         if let Boundary::Fixed { limit, applied } = &self.delivery
             && delivered >= *limit
         {
-            let error = ReadError::local(applied.clone(), remote);
+            let error = ReadError::delivery_limit_reached(applied.clone(), remote);
             return Err(self.commit_error(error));
         }
         if let Some(reset) = remote
@@ -330,7 +386,7 @@ where
         if let Boundary::Fixed { limit, applied } = &self.acceptance
             && delivered >= *limit
         {
-            let error = ReadError::local(applied.clone(), remote);
+            let error = ReadError::acceptance_limit_reached(applied.clone(), remote);
             return Err(self.commit_error(error));
         }
         Ok(ReadOutcome::Wait)
