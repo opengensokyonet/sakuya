@@ -47,8 +47,9 @@ use bytes::{Buf, Bytes};
 use core::num::NonZeroUsize;
 use either::Either;
 
-/// The STREAM frame as `StreamFrame::new` constructs it, with a Length field
-/// of width `length` if there is one.
+/// The STREAM frame as `StreamFrame::new` and a decision of its Length field
+/// construct it, with a Length field of width `length` if there is one, as a
+/// frame that was read.
 pub(crate) fn stream_frame<D: Buf>(
     stream_id: VarIntField<StreamId>,
     offset: Option<VarIntField<VarInt>>,
@@ -56,7 +57,11 @@ pub(crate) fn stream_frame<D: Buf>(
     data: D,
     fin: bool,
 ) -> Result<StreamFrame<D>, InvalidDataError> {
-    StreamFrame::new(stream_id, offset, either_length(length), data, fin)
+    let frame = StreamFrame::new(stream_id, offset, data, fin)?;
+    Ok(match length {
+        None => frame.into_without_length().into(),
+        Some(width) => frame.into_with_length(width)?.into(),
+    })
 }
 
 /// The DATAGRAM frame as `DatagramFrame::new` constructs it, with a Length

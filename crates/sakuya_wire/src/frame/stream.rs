@@ -2,8 +2,8 @@
 //!
 //! [RFC 9000 §19.8]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.8
 use super::{
-    DataEndError, Head, InvalidDataError, LengthError, LengthKind, NoLength, length_width,
-    max_len_with_length_field, type_value, type_var_int,
+    DataEndError, Head, InvalidDataError, LengthError, LengthKind, NoLength, UndecidedLength,
+    length_width, max_len_with_length_field, type_value, type_var_int,
 };
 use crate::{
     stream_id::StreamId,
@@ -34,7 +34,11 @@ pub(crate) mod bits {
 /// frame with a Length field of that width, [`NoLength`] for one without,
 /// whose data extends to the end of the packet, and
 /// [`Either<NoLength, VarIntWidth>`](Either) or
-/// [`Either<VarIntWidth, NoLength>`](Either) for either of the two. Reading
+/// [`Either<VarIntWidth, NoLength>`](Either) for either of the two, and
+/// [`UndecidedLength`] for a frame whose Length field is not decided yet,
+/// which cannot be written until
+/// [`into_with_length`](StreamFrame::into_with_length) or
+/// [`into_without_length`](StreamFrame::into_without_length) decides it. Reading
 /// gives `StreamFrame<D>`, the default, `Either<NoLength, VarIntWidth>`. `From`
 /// converts the two single kinds into either `Either` kind, a frame of an
 /// `Either` kind into an `Either` of frames of its two kinds in the same
@@ -44,8 +48,8 @@ pub(crate) mod bits {
 /// [`VarInt::MAX`], and the Length field, if present, can state the length
 /// of the data. [`with_length`](StreamFrame::with_length),
 /// [`without_length`](StreamFrame::without_length) and [`new`](StreamFrame::new),
-/// which construct a frame with a Length field, without one, and with
-/// either as a frame that was read, check the limits that apply, so every
+/// which construct a frame with a Length field, without one, and with the
+/// Length field not decided yet, check the limits that apply, so every
 /// value writes an encoding that reads back to the same value; the fields
 /// are read through methods of the same names. `D` holds
 /// the data: the source's chunk type for a frame that was read, any [`Buf`]
@@ -64,7 +68,7 @@ pub struct StreamFrame<D, L = Either<NoLength, VarIntWidth>> {
 /// The longest encoding of the fields before the data.
 const HEAD_MAX: usize = 1 + 8 + 8 + 8;
 
-impl<D, L: LengthKind> StreamFrame<D, L> {
+impl<D, L> StreamFrame<D, L> {
     /// The Stream ID field: the stream the data belongs to.
     pub const fn stream_id(&self) -> VarIntField<StreamId> {
         self.stream_id
@@ -74,13 +78,6 @@ impl<D, L: LengthKind> StreamFrame<D, L> {
     /// the data in the stream. Without it, the data starts at offset 0.
     pub const fn offset(&self) -> Option<VarIntField<VarInt>> {
         self.offset
-    }
-
-    /// The Length field, present when the LEN bit is set: its width, since
-    /// the field holds the length of the data, or [`NoLength`] without it,
-    /// when the data extends to the end of the packet.
-    pub const fn length(&self) -> L {
-        self.length
     }
 
     /// The stream data.
@@ -98,6 +95,21 @@ impl<D, L: LengthKind> StreamFrame<D, L> {
         self.fin
     }
 
+    /// The byte offset of the data in the stream: the Offset field, or 0
+    /// without one.
+    pub fn data_offset(&self) -> VarInt {
+        self.offset.map_or(VarInt::ZERO, |offset| offset.get())
+    }
+}
+
+impl<D, L: LengthKind> StreamFrame<D, L> {
+    /// The Length field, present when the LEN bit is set: its width, since
+    /// the field holds the length of the data, or [`NoLength`] without it,
+    /// when the data extends to the end of the packet.
+    pub const fn length(&self) -> L {
+        self.length
+    }
+
     /// The Frame Type value, which the OFF, LEN and FIN bits complete.
     pub fn type_value(&self) -> VarInt {
         let mut value = type_value::STREAM;
@@ -111,12 +123,6 @@ impl<D, L: LengthKind> StreamFrame<D, L> {
             value |= bits::FIN;
         }
         type_var_int(value)
-    }
-
-    /// The byte offset of the data in the stream: the Offset field, or 0
-    /// without one.
-    pub fn data_offset(&self) -> VarInt {
-        self.offset.map_or(VarInt::ZERO, |offset| offset.get())
     }
 }
 
@@ -261,32 +267,48 @@ impl<D> StreamFrame<D, NoLength> {
     }
 }
 
-impl<D: Buf> StreamFrame<D> {
-    /// The STREAM frame with these fields, with or without a Length field as
-    /// `length` states: [`with_length`](StreamFrame::with_length) or
-    /// [`without_length`](StreamFrame::without_length), as a frame that was read.
+impl<D: Buf> StreamFrame<D, UndecidedLength> {
+    /// The STREAM frame with these fields, whose Length field is not decided
+    /// yet: [`into_with_length`](Self::into_with_length) or
+    /// [`into_without_length`](Self::into_without_length) decides it.
     ///
     /// # Errors
     ///
-    /// [`InvalidDataError::DataEnd`] if the data would end beyond
-    /// 2<sup>62</sup> − 1, and, with a Length field,
-    /// [`InvalidDataError::Length`] if it is too narrow for the length of the
-    /// data.
+    /// [`DataEndError`] if the data would end beyond 2<sup>62</sup> − 1.
     pub fn new(
         stream_id: VarIntField<StreamId>,
         offset: Option<VarIntField<VarInt>>,
-        length: Either<NoLength, VarIntWidth>,
         data: D,
         fin: bool,
-    ) -> Result<Self, InvalidDataError> {
-        Ok(match length {
-            Either::Left(NoLength) => {
-                StreamFrame::without_length(stream_id, offset, data, fin)?.into()
-            }
-            Either::Right(width) => {
-                StreamFrame::with_length(stream_id, offset, width, data, fin)?.into()
-            }
+    ) -> Result<Self, DataEndError> {
+        DataEndError::check(start(offset), data.remaining() as u64)?;
+        Ok(Self {
+            stream_id,
+            offset,
+            length: UndecidedLength,
+            data,
+            fin,
         })
+    }
+
+    /// The same frame with a Length field of width `width`.
+    ///
+    /// # Errors
+    ///
+    /// [`LengthError`] if the Length field is too narrow for the length of
+    /// the data.
+    pub fn into_with_length(
+        self,
+        width: VarIntWidth,
+    ) -> Result<StreamFrame<D, VarIntWidth>, LengthError> {
+        LengthError::check(self.data.remaining(), width)?;
+        Ok(self.restate_length(width))
+    }
+
+    /// The same frame without a Length field: its data extends to the end of
+    /// the packet.
+    pub fn into_without_length(self) -> StreamFrame<D, NoLength> {
+        self.restate_length(NoLength)
     }
 }
 
@@ -431,7 +453,7 @@ pub mod codec {
 
     use super::{StreamFrame, StreamTypeValue, bits};
     use crate::{
-        frame::{DataEndError, InvalidDataError, NoLength, read_field},
+        frame::{DataEndError, NoLength, read_field},
         payload::{ReadPayloadError, read_payload, read_payload_to_end},
         var_int::{VarInt, VarIntField, VarIntWidth, codec::ReadVarIntError},
     };
@@ -474,12 +496,16 @@ pub mod codec {
             (Either::Left(NoLength), data)
         };
         let fin = frame_type.has(bits::FIN);
-        StreamFrame::new(stream_id, offset, length, data, fin).map_err(|error| match error {
-            InvalidDataError::DataEnd { source } => ReadStreamFrameError::DataEnd { source },
+        let frame = StreamFrame::new(stream_id, offset, data, fin)?;
+        Ok(match length {
+            Either::Left(NoLength) => frame.into_without_length().into(),
             // invariant: the Length field was read at this width, and
             // `read_payload` returns data of exactly the length it states: it
             // fails on shorter data and panics on a longer chunk.
-            InvalidDataError::Length { source } => unreachable!("{source}"),
+            Either::Right(width) => frame
+                .into_with_length(width)
+                .unwrap_or_else(|error| unreachable!("{error}"))
+                .into(),
         })
     }
 

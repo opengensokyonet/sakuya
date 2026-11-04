@@ -53,9 +53,12 @@
 //!   what reading gives, since only the Frame Type that was read tells which
 //!   it is. The kinds convert into one another with `From` as
 //!   [`LengthKind`] describes. A frame with a Length field is constructed by
-//!   `with_length`, one without by `without_length`, and one as reading
-//!   gives it by `new`; each of these kinds has its own write operation, so
-//!   a writer that knows which kind it writes states it in the type.
+//!   `with_length`, one without by `without_length`, and a STREAM frame
+//!   whose Length field is not decided yet, of the type [`UndecidedLength`]
+//!   that has no write operation, by `new`, followed by `into_with_length`
+//!   or `into_without_length`; each of the decided kinds has its own write
+//!   operation, so a writer that knows which kind it writes states it in the
+//!   type.
 //! - An ACK frame holds its fields as encoded, and owns its ACK Ranges in
 //!   [`ack::AckRanges`]; [`ack::AckFrame::packet_ranges`] computes the
 //!   acknowledged packet numbers from them.
@@ -596,6 +599,17 @@ impl<D: Buf> Frame<D> {
 /// extends to the end of the packet.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct NoLength;
+
+/// A STREAM frame whose Length field is not decided yet, as the type
+/// parameter `L` of [`stream::StreamFrame`].
+///
+/// It is not a [`LengthKind`]: a frame of this kind has no write operation, so
+/// the types stop a frame from being written before its Length field is
+/// decided. [`StreamFrame::into_with_length`](stream::StreamFrame::into_with_length)
+/// and [`StreamFrame::into_without_length`](stream::StreamFrame::into_without_length)
+/// decide it. Reading never gives this kind.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct UndecidedLength;
 
 mod sealed {
     use crate::var_int::VarIntWidth;

@@ -115,14 +115,10 @@ fn each_kind_of_length_field_checks_its_limits() {
         Err(InvalidDataError::Length { source: narrow })
     );
     assert_eq!(
-        StreamFrame::new(
-            short(sid(0)),
-            None,
-            Either::Right(VarIntWidth::One),
-            &data[..],
-            false
-        ),
-        Err(InvalidDataError::Length { source: narrow })
+        StreamFrame::new(short(sid(0)), None, &data[..], false)
+            .unwrap()
+            .into_with_length(VarIntWidth::One),
+        Err(narrow)
     );
     let with_length =
         StreamFrame::with_length(short(sid(0)), None, VarIntWidth::Two, &data[..], false);
@@ -131,14 +127,8 @@ fn each_kind_of_length_field_checks_its_limits() {
     let without_length =
         StreamFrame::without_length(short(sid(0)), None, &data[..], false).unwrap();
     assert_eq!(without_length.length(), NoLength);
-    let either = StreamFrame::new(
-        short(sid(0)),
-        None,
-        Either::Left(NoLength),
-        &data[..],
-        false,
-    );
-    assert_eq!(either, Ok(without_length.into()));
+    let undecided = StreamFrame::new(short(sid(0)), None, &data[..], false).unwrap();
+    assert_eq!(undecided.into_without_length(), without_length);
 }
 
 #[test]
@@ -197,8 +187,51 @@ fn data_ending_beyond_2_62_is_rejected() {
             Err(InvalidDataError::DataEnd { source: error })
         );
     }
+    assert_eq!(
+        StreamFrame::new(short(sid(0)), offset, data, false),
+        Err(error)
+    );
     let at_limit = StreamFrame::without_length(short(sid(0)), offset, &b""[..], true);
     assert!(at_limit.is_ok());
+    assert!(StreamFrame::new(short(sid(0)), offset, &b""[..], true).is_ok());
+}
+
+#[test]
+fn undecided_length_is_decided_into_either_kind() {
+    let data = [7; 300];
+    let undecided = StreamFrame::new(short(sid(4)), Some(short(vi(9))), &data[..], true).unwrap();
+    assert_eq!(
+        (undecided.stream_id(), undecided.offset(), undecided.fin()),
+        (short(sid(4)), Some(short(vi(9))), true)
+    );
+    assert_eq!(*undecided.data(), &data[..]);
+    assert_eq!(undecided.data_offset(), vi(9));
+
+    // Without a Length field, the frame writes exactly what the decided
+    // constructor writes.
+    let without = undecided.into_without_length();
+    assert_eq!(
+        without,
+        StreamFrame::without_length(short(sid(4)), Some(short(vi(9))), &data[..], true).unwrap()
+    );
+
+    // A Length field decides by width: 300 does not fit one byte.
+    let narrow = LengthError::check(300, VarIntWidth::One).unwrap_err();
+    assert_eq!(undecided.into_with_length(VarIntWidth::One), Err(narrow));
+    for width in [VarIntWidth::Two, VarIntWidth::Four, VarIntWidth::Eight] {
+        let with = undecided.into_with_length(width).unwrap();
+        assert_eq!(with.length(), width);
+        assert_eq!(
+            with,
+            StreamFrame::with_length(short(sid(4)), Some(short(vi(9))), width, &data[..], true)
+                .unwrap()
+        );
+        let mut written = Vec::new();
+        written
+            .sync_write_stream_frame_with_length_unpin(with)
+            .unwrap();
+        assert_eq!(written.len(), with.encoded_len());
+    }
 }
 
 #[test]
@@ -262,24 +295,9 @@ fn constructors_state_the_length_field_in_the_type() {
     let without: StreamFrame<&[u8], NoLength> =
         StreamFrame::without_length(short(sid(4)), None, &b"hi"[..], true).unwrap();
     assert_eq!(without.length(), NoLength);
-    let read: StreamFrame<&[u8]> = StreamFrame::new(
-        short(sid(4)),
-        None,
-        Either::Right(VarIntWidth::Two),
-        &b"hi"[..],
-        true,
-    )
-    .unwrap();
-    assert_eq!(read, with.into());
-    let read: StreamFrame<&[u8]> = StreamFrame::new(
-        short(sid(4)),
-        None,
-        Either::Left(NoLength),
-        &b"hi"[..],
-        true,
-    )
-    .unwrap();
-    assert_eq!(read, without.into());
+    let undecided = StreamFrame::new(short(sid(4)), None, &b"hi"[..], true).unwrap();
+    assert_eq!(undecided.into_with_length(VarIntWidth::Two), Ok(with));
+    assert_eq!(undecided.into_without_length(), without);
 }
 
 #[test]
