@@ -9,25 +9,11 @@ fn connection_closed_fails_the_request() {
     receiver.connection_closed(close_reason());
     assert_eq!(
         receiver.stop(c(1)),
-        Err(StopError::Connection {
-            source: ConnectionFailureError::Closed {
-                source: ConnectionClosedError::new(close_reason())
-            },
+        Err(StopError::ConnectionClosed {
+            source: ConnectionClosedError::new(close_reason())
         })
     );
     assert_eq!(receiver.pending_stop(), None);
-}
-
-#[test]
-fn protocol_failure_fails_the_request() {
-    let (mut receiver, mut connection) = receiver_with(keep_all(), 10, 1 << 20);
-    let failure = receiver
-        .on_stream_frame(stream(0, 11, false), &mut connection)
-        .unwrap_err();
-    assert_eq!(
-        receiver.stop(c(1)),
-        Err(StopError::Connection { source: failure })
-    );
 }
 
 #[test]

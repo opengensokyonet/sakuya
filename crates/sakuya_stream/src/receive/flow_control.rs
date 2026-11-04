@@ -11,7 +11,7 @@
 //! The stream receive component keeps a separate fact, the stream limit
 //! opened to the peer: the highest limit that may be visible to the peer,
 //! starting from the transport parameters. It only grows
-//! ([RFC 9000 §4.1]); input beyond it is a protocol error. Replacing or
+//! ([RFC 9000 §4.1]); input beyond it is a protocol violation. Replacing or
 //! withdrawing an intent never lowers it.
 //!
 //! [RFC 9000 §4.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-4.1
@@ -94,9 +94,9 @@ where
     ///
     /// It is the policy's target when that is above the opened stream limit
     /// and the stream still needs limit increases: no final size is known and
-    /// the connection has not failed.
+    /// the connection has not closed.
     pub fn advertisement(&self) -> Option<VarInt> {
-        if self.failure().is_some() || self.parts.final_size().is_some() {
+        if self.closed().is_some() || self.parts.final_size().is_some() {
             return None;
         }
         match self.parts.advertisement_intent() {

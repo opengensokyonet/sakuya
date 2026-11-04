@@ -7,30 +7,33 @@
 //! result. A read returns, in this order of priority:
 //!
 //! 1. [`ReadError::ReaderDropped`] once the reader was dropped;
-//! 2. the connection failure, if the connection closed or input of the
-//!    stream violated the protocol;
-//! 3. the committed terminal result (end of stream or a terminal error), or
-//!    the result of a buffer destruction that already took effect;
-//! 4. no progress, for an empty target ([`read_into`] only);
-//! 5. the contiguous data that can be delivered now, without waiting to fill
+//! 2. [`ReadError::ConnectionClosed`], once the connection closed;
+//! 3. the committed terminal result (end of stream or a terminal error);
+//! 4. [`ReadOutcome::Wait`], while the stream waits for the connection to
+//!    close after a frame violated the protocol: the read does not complete,
+//!    exactly as if no new data had arrived, and nothing wakes the reader;
+//! 5. the result of a buffer destruction that already took effect;
+//! 6. no progress, for an empty target ([`read_into`] only);
+//! 7. the contiguous data that can be delivered now, without waiting to fill
 //!    the target;
-//! 6. end of stream or a terminal error, judged from the final size, the
+//! 8. end of stream or a terminal error, judged from the final size, the
 //!    local limits and the reset facts;
-//! 7. otherwise, [`ReadOutcome::Wait`].
+//! 9. otherwise, [`ReadOutcome::Wait`].
 //!
 //! A call that delivers data never also reports the end; the next call does.
 //! The call that delivers a terminal error destroys the receive buffer, and
-//! repeated reads return the same result, unless a connection failure appears
-//! later. An empty target never commits a result, so a read that cannot take
-//! a byte does not end a stream that late data could still complete.
+//! repeated reads return the same result, unless the connection closes later.
+//! An empty target never commits a result, so a read that cannot take a byte
+//! does not end a stream that late data could still complete.
 //!
 //! [`read_into`]: StreamReceiver::read_into
 use super::{
-    Applied, Boundary, BufferPhase, Committed, ConnectionFailureError, Destruction, Reading,
-    StreamReceiver, flow_control::ReceiveFlowControlPolicy, flow_control::ReceiveFlowEvent,
+    Applied, Boundary, BufferPhase, Committed, Destruction, Reading, StreamReceiver,
+    flow_control::ReceiveFlowControlPolicy, flow_control::ReceiveFlowEvent,
     termination::ReceiveTerminationPolicy, termination::ResetPresentation,
     termination::TerminationEvent,
 };
+use crate::connection::ConnectionClosedError;
 use crate::receive_buffer::StreamReceiveBuffer;
 use bytes::BufMut;
 use core::fmt;
@@ -120,11 +123,11 @@ pub enum ReadError<R> {
     /// reads.
     #[snafu(display("the stream reader was dropped"))]
     ReaderDropped,
-    /// The connection closed, or input of the stream violated the protocol.
-    #[snafu(display("connection failed"))]
-    Connection {
-        /// The failure.
-        source: ConnectionFailureError,
+    /// The connection has closed.
+    #[snafu(transparent)]
+    ConnectionClosed {
+        /// The closed connection.
+        source: ConnectionClosedError,
     },
     /// The peer reset the stream.
     ///
@@ -156,7 +159,7 @@ impl<R> Clone for ReadError<R> {
     fn clone(&self) -> Self {
         match self {
             Self::ReaderDropped => Self::ReaderDropped,
-            Self::Connection { source } => Self::Connection {
+            Self::ConnectionClosed { source } => Self::ConnectionClosed {
                 source: source.clone(),
             },
             Self::Reset { reset, complete } => Self::Reset {
@@ -186,6 +189,25 @@ impl<R> ReadError<R> {
     }
 }
 
+/// A read result known without looking at the data.
+#[derive(Clone, Copy)]
+enum Settled {
+    /// The end of stream, committed by an earlier read.
+    End,
+    /// The read does not complete: the stream waits for the connection to
+    /// close.
+    Wait,
+}
+
+impl Settled {
+    fn outcome<T>(self) -> ReadOutcome<T> {
+        match self {
+            Self::End => ReadOutcome::End,
+            Self::Wait => ReadOutcome::Wait,
+        }
+    }
+}
+
 impl<C> StreamReceiver<C>
 where
     C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy,
@@ -200,7 +222,7 @@ where
     /// documentation](self) for priorities.
     pub fn read_chunk(&mut self) -> Result<ReadOutcome<C::Chunk>, ReadError<C::Reason>> {
         if let Some(settled) = self.settled_read() {
-            return settled.map(|()| ReadOutcome::End);
+            return settled.map(Settled::outcome);
         }
         match self.parts.read_chunk(self.delivery.limit()) {
             Some(chunk) => {
@@ -222,7 +244,7 @@ where
         target: &mut T,
     ) -> Result<ReadOutcome<NonZeroUsize>, ReadError<C::Reason>> {
         if let Some(settled) = self.settled_read() {
-            return settled.map(|()| ReadOutcome::End);
+            return settled.map(Settled::outcome);
         }
         if target.remaining_mut() == 0 {
             return Ok(ReadOutcome::NoProgress);
@@ -237,19 +259,25 @@ where
         }
     }
 
-    /// The result of the first three priorities: `Some(Ok(()))` for a
-    /// committed end of stream.
-    fn settled_read(&mut self) -> Option<Result<(), ReadError<C::Reason>>> {
+    /// The result of the first five priorities.
+    fn settled_read(&mut self) -> Option<Result<Settled, ReadError<C::Reason>>> {
         if self.is_reader_dropped() {
             return Some(Err(ReadError::ReaderDropped));
         }
-        if let Some(failure) = self.failure() {
-            return Some(Err(ReadError::Connection { source: failure }));
+        if let Some(closed) = self.closed() {
+            return Some(Err(ReadError::ConnectionClosed {
+                source: closed.clone(),
+            }));
         }
         match &self.reading {
-            Reading::Committed(Committed::End) => return Some(Ok(())),
+            Reading::Committed(Committed::End) => return Some(Ok(Settled::End)),
             Reading::Committed(Committed::Error(error)) => return Some(Err(error.clone())),
             Reading::Open | Reading::ReaderDropped { .. } => {}
+        }
+        // A result judged now would be a new one, and the connection is
+        // about to close for the violation.
+        if self.is_violated() {
+            return Some(Ok(Settled::Wait));
         }
         match &self.buffer {
             BufferPhase::Destroyed(Destruction::Policy(applied)) => {
@@ -259,9 +287,7 @@ where
             // invariant: the mechanism destroys the buffer only together with
             // dropping the reader or committing a result, both handled above,
             // so an open reader never meets a forced destruction.
-            BufferPhase::Destroyed(Destruction::Forced)
-            | BufferPhase::Live
-            | BufferPhase::Failed(_) => None,
+            BufferPhase::Destroyed(Destruction::Forced) | BufferPhase::Live => None,
         }
     }
 

@@ -16,12 +16,25 @@
 //!
 //! Every method takes `&mut self`: one operation has the whole receive
 //! direction to itself, and buffer and policy calls happen inside it. A frame
-//! is first handed to the receive buffer and checked afterwards: the
-//! component queries the buffer's accounted end before and after, checks the
-//! stream limit, and records the increase with the
-//! [`ConnectionReceiveFlowController`] passed in. A failed check is kept as a
-//! persistent failure without undoing what the buffer did; every later
-//! operation reports it first.
+//! is checked before anything changes: the component works out the accounted
+//! end the frame would reach from the buffer's current one, checks the final
+//! size rules and the stream limit, and records the increase with the
+//! [`ConnectionReceiveFlowController`] passed in; only a frame that passed
+//! every check is handed to the receive buffer. A frame that fails a check
+//! leaves nothing of itself behind.
+//!
+//! # Violations and connection closure
+//!
+//! The frame methods return the violations of their own frame (see
+//! [`violation`]) and keep no failure the application can see. After a
+//! violation the stream waits for the connection to close
+//! ([`connection_closed`](StreamReceiver::connection_closed)), which the
+//! caller does for the first reason the connection records. In between, the
+//! stream exposes no new result to the application: a read does not complete,
+//! and further frames are ignored. Once the connection has closed, every
+//! operation of the application fails with [`ConnectionClosedError`], which
+//! carries the reason. The connection side pushes the reason into each stream
+//! in the poll that records it; a stream never reads it from anywhere.
 //!
 //! # Three independent dimensions
 //!
@@ -59,15 +72,18 @@ use flow_control::{ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView};
 use read::{ReadError, RemoteReset, SharedTerminationReason};
 use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
-use sakuya_wire::transport_error::TransportErrorCode;
 use sakuya_wire::var_int::VarInt;
-use snafu::{ResultExt, Snafu, ensure};
 use termination::{ReceiveTerminationPolicy, ResetPresentation, TerminationEvent, TerminationView};
+use violation::{
+    FinalSizeBelowReceivedError, OffsetOverflowSnafu, OnResetStreamAtError, OnResetStreamError,
+    OnStreamFrameError, StreamLimitExceededError,
+};
 
 pub mod flow_control;
 pub mod read;
 pub mod stop;
 pub mod termination;
+pub mod violation;
 
 /// A STREAM frame of the stream ([RFC 9000 §19.8]).
 ///
@@ -132,128 +148,6 @@ impl BoundaryMode {
             Self::Fixed(limit) => limit,
         }
     }
-}
-
-/// A protocol violation detected on the receive direction of a stream.
-///
-/// Every variant is a connection error ([RFC 9000 §11]): it closes the
-/// connection with the transport error code of
-/// [`transport_error_code`](Self::transport_error_code). The variants keep
-/// apart what was violated, so that the stream-level limit
-/// ([`StreamLimitExceeded`](Self::StreamLimitExceeded)) and the
-/// connection-level limit
-/// ([`ConnectionLimitExceeded`](Self::ConnectionLimitExceeded)) stay
-/// distinguishable although both are `FLOW_CONTROL_ERROR`.
-///
-/// [RFC 9000 §11]: https://www.rfc-editor.org/rfc/rfc9000.html#section-11
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-pub enum ProtocolError {
-    /// A FIN or reset states a final size different from the known one
-    /// (`FINAL_SIZE_ERROR`, [RFC 9000 §4.5]).
-    ///
-    /// [RFC 9000 §4.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-4.5
-    #[snafu(display("a frame changes the final size"))]
-    FinalSizeChanged {
-        /// The known final size and the one the frame states.
-        source: FinalSizeChangeError,
-    },
-    /// STREAM data ends beyond the known final size (`FINAL_SIZE_ERROR`).
-    #[snafu(display("a STREAM frame passes the final size"))]
-    BeyondFinalSize {
-        /// The known final size and the end of the frame's data.
-        source: BeyondFinalSizeError,
-    },
-    /// A FIN or reset states a final size below data already received
-    /// (`FINAL_SIZE_ERROR`).
-    #[snafu(display("final size {final_size} is below the received end {accounted_end}"))]
-    FinalSizeBelowReceived {
-        /// The final size the frame states.
-        final_size: VarInt,
-        /// The highest end received before.
-        accounted_end: VarInt,
-    },
-    /// The stream's accounted end exceeds the stream limit opened to the peer
-    /// (`FLOW_CONTROL_ERROR`, [RFC 9000 §4.1]).
-    ///
-    /// [RFC 9000 §4.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-4.1
-    #[snafu(display("stream data reaches {accounted_end}, beyond the stream limit {limit}"))]
-    StreamLimitExceeded {
-        /// The accounted end after the frame.
-        accounted_end: VarInt,
-        /// The stream limit opened to the peer.
-        limit: VarInt,
-    },
-    /// The connection's usage exceeds the connection limit
-    /// (`FLOW_CONTROL_ERROR`).
-    #[snafu(display("connection flow control violated"))]
-    ConnectionLimitExceeded {
-        /// The rejected usage increase.
-        source: RecordUsageError,
-    },
-    /// A STREAM frame's offset plus length exceeds 2<sup>62</sup> − 1
-    /// (`FRAME_ENCODING_ERROR`, [RFC 9000 §19.8]).
-    ///
-    /// [RFC 9000 §19.8]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.8
-    #[snafu(display("stream data at offset {offset} with length {len} ends beyond 2^62 - 1"))]
-    OffsetOverflow {
-        /// The frame's offset.
-        offset: VarInt,
-        /// The frame's data length.
-        len: usize,
-    },
-    /// A `RESET_STREAM_AT` states a reliable size above its final size
-    /// (`FRAME_ENCODING_ERROR`, draft-ietf-quic-reliable-stream-reset-11 §4).
-    #[snafu(display("a RESET_STREAM_AT frame states a reliable size beyond its final size"))]
-    ReliableSizeExceedsFinalSize {
-        /// The reliable size and the final size the frame states.
-        source: ReliableSizeError,
-    },
-    /// A reset states an error code different from an earlier reset's
-    /// (`STREAM_STATE_ERROR`, draft-ietf-quic-reliable-stream-reset-11 §5).
-    #[snafu(display("a reset frame changes the error code"))]
-    ResetCodeChanged {
-        /// The error code of the earlier reset and the one the frame states.
-        source: ResetCodeChangeError,
-    },
-}
-
-impl ProtocolError {
-    /// The QUIC transport error code to close the connection with.
-    pub fn transport_error_code(&self) -> TransportErrorCode {
-        match self {
-            Self::StreamLimitExceeded { .. } | Self::ConnectionLimitExceeded { .. } => {
-                TransportErrorCode::FLOW_CONTROL_ERROR
-            }
-            Self::ResetCodeChanged { .. } => TransportErrorCode::STREAM_STATE_ERROR,
-            Self::FinalSizeChanged { .. }
-            | Self::BeyondFinalSize { .. }
-            | Self::FinalSizeBelowReceived { .. } => TransportErrorCode::FINAL_SIZE_ERROR,
-            Self::OffsetOverflow { .. } | Self::ReliableSizeExceedsFinalSize { .. } => {
-                TransportErrorCode::FRAME_ENCODING_ERROR
-            }
-        }
-    }
-}
-
-/// A failure of the connection as seen by one stream's receive direction.
-///
-/// It is the highest-priority result of every later operation on the
-/// stream.
-#[derive(Clone, Debug, PartialEq, Eq, Snafu)]
-pub enum ConnectionFailureError {
-    /// The connection was closed.
-    #[snafu(transparent)]
-    Closed {
-        /// The closed connection.
-        source: ConnectionClosedError,
-    },
-    /// Input of this stream violated the protocol; the connection must be
-    /// closed with the error's transport error code.
-    #[snafu(display("protocol violation on the stream's receive direction"))]
-    Protocol {
-        /// The violation.
-        source: ProtocolError,
-    },
 }
 
 /// A local reason, and the event during which it took effect.
@@ -329,24 +223,42 @@ struct ResetFacts {
 /// What happened to the receive buffer and its payload:
 ///
 /// ```text
-///          destroy (policy, reader drop, terminal error)
-///   Live ─────────────────────────────────────────────▶ Destroyed
-///     │                                                     │
-///     │ connection fails                   connection fails │
-///     └──────────────────────────▶ Failed ◀─────────────────┘
+///          destroy (policy, reader drop, terminal error, connection closed)
+///   Live ───────────────────────────────────────────────────────────────▶ Destroyed
 /// ```
 ///
-/// `Failed` is final: the connection failure is the highest-priority result
-/// of every later operation, and the buffer is destroyed. A destroyed buffer
-/// keeps its first cause.
+/// A destroyed buffer keeps its first cause.
 #[derive(Clone, Debug)]
 enum BufferPhase<R> {
     /// The buffer holds payload for delivery.
     Live,
     /// The buffer was destroyed.
     Destroyed(Destruction<R>),
-    /// The connection failed; the buffer is destroyed.
-    Failed(ConnectionFailureError),
+}
+
+/// How far the connection's end has reached this stream:
+///
+/// ```text
+///            frame violation               connection_closed
+///   Open ───────────────────▶ Violated ───────────────────────▶ Closed
+///     │                                                           ▲
+///     └──────────────────── connection_closed ────────────────────┘
+/// ```
+///
+/// `Violated` is the stream between a violation returned by a frame method
+/// and the connection's closure: the caller is closing the connection with
+/// the violation, and the stream exposes no new result to the application
+/// meanwhile. `Closed` is final: the closure is the highest-priority result
+/// of every later operation, and the buffer is destroyed.
+#[derive(Clone, Debug)]
+enum ConnectionPhase {
+    /// Nothing ended the connection as far as this stream knows.
+    Open,
+    /// A frame violated the protocol; the stream waits for the connection to
+    /// close.
+    Violated,
+    /// The connection closed; the first reason is kept.
+    Closed(ConnectionClosedError),
 }
 
 /// Why the receive buffer was destroyed.
@@ -396,6 +308,7 @@ pub struct StreamReceiver<C: ReceiveTerminationPolicy> {
     parts: C,
     opened_limit: VarInt,
     buffer: BufferPhase<C::Reason>,
+    connection: ConnectionPhase,
     reset: Option<ResetFacts>,
     acceptance: Boundary<C::Reason>,
     delivery: Boundary<C::Reason>,
@@ -421,6 +334,7 @@ where
             parts,
             opened_limit: initial_limit,
             buffer: BufferPhase::Live,
+            connection: ConnectionPhase::Open,
             reset: None,
             acceptance: Boundary::Following,
             delivery: Boundary::Following,
@@ -451,11 +365,12 @@ where
         })
     }
 
-    /// The persistent failure, if one occurred.
-    pub fn failure(&self) -> Option<ConnectionFailureError> {
-        match &self.buffer {
-            BufferPhase::Failed(failure) => Some(failure.clone()),
-            BufferPhase::Live | BufferPhase::Destroyed(_) => None,
+    /// The closure of the connection, once
+    /// [`connection_closed`](Self::connection_closed) recorded it.
+    pub fn closed(&self) -> Option<&ConnectionClosedError> {
+        match &self.connection {
+            ConnectionPhase::Closed(closed) => Some(closed),
+            ConnectionPhase::Open | ConnectionPhase::Violated => None,
         }
     }
 
@@ -467,6 +382,16 @@ where
     /// The delivery limit (`delivery_limit`).
     pub fn delivery_limit(&self) -> BoundaryMode {
         self.delivery.mode()
+    }
+
+    /// Whether the stream still takes frames: no violation was returned and
+    /// the connection has not closed.
+    fn takes_frames(&self) -> bool {
+        matches!(self.connection, ConnectionPhase::Open)
+    }
+
+    fn is_violated(&self) -> bool {
+        matches!(self.connection, ConnectionPhase::Violated)
     }
 
     fn is_destroyed(&self) -> bool {
@@ -488,45 +413,32 @@ where
     /// Processes a STREAM frame of the stream.
     ///
     /// The part of the data below both local limits goes to the receive
-    /// buffer; the frame's offset, end and FIN are processed in full.
+    /// buffer; the frame's offset, end and FIN are processed in full. Every
+    /// check runs before anything changes, so a frame that violates the
+    /// protocol leaves no trace in the buffer, the policies or the
+    /// connection's flow control.
+    ///
+    /// Once a frame has returned a violation, or the connection has closed,
+    /// the connection is closing and the frame cannot change its outcome: this
+    /// and the other frame methods then do nothing and return `Ok(())`.
     ///
     /// # Errors
     ///
-    /// Returns the persistent failure if one occurred earlier, or the new
-    /// [`ConnectionFailureError::Protocol`] if this frame violates the protocol;
-    /// the caller must close the connection with it.
+    /// [`OnStreamFrameError`] if this frame violates the protocol; the caller
+    /// must close the connection with its
+    /// [`transport_error_code`](OnStreamFrameError::transport_error_code).
+    /// The stream then exposes no new result to the application until
+    /// [`connection_closed`](Self::connection_closed).
     pub fn on_stream_frame(
         &mut self,
         frame: StreamFrame,
         connection: &mut ConnectionReceiveFlowController,
-    ) -> Result<(), ConnectionFailureError> {
-        self.check_failure()?;
-        let StreamFrame { offset, data, fin } = frame;
-        let Some(end) = offset_add(offset, data.len()) else {
-            let error = OffsetOverflowSnafu {
-                offset,
-                len: data.len(),
-            }
-            .build();
-            return Err(self.fail(error));
-        };
-        let old_accounted = self.parts.accounted_end();
-        let old_final = self.parts.final_size();
-        let payload = self.accepted_payload(offset, data);
-        let input = match StreamDataInput::new(offset, end, fin, payload) {
-            Ok(input) => input,
-            // invariant: the accepted payload is a prefix of the frame data,
-            // which ends at `end`.
-            Err(error) => unreachable!("accepted payload passes the frame: {error}"),
-        };
-        self.parts.receive_data(input);
-        let checked = check_stream_final_size(old_final, old_accounted, end, fin)
-            .and_then(|()| self.account(old_accounted, connection));
-        if let Err(error) = checked {
-            return Err(self.fail(error));
+    ) -> Result<(), OnStreamFrameError> {
+        if !self.takes_frames() {
+            return Ok(());
         }
-        self.after_input(None, connection);
-        Ok(())
+        self.accept_stream_frame(frame, connection)
+            .inspect_err(|_| self.connection = ConnectionPhase::Violated)
     }
 
     /// Processes a `RESET_STREAM` frame of the stream.
@@ -534,61 +446,76 @@ where
     /// It establishes the reset facts with a reliable size of zero, or lowers
     /// an earlier `RESET_STREAM_AT`'s reliable size to zero. What remains
     /// deliverable is up to the receive termination policy; reading stops at
-    /// the first gap.
+    /// the first gap. As for [`on_stream_frame`](Self::on_stream_frame), a
+    /// violating frame leaves no trace, and a frame after a violation or
+    /// after the connection closed is ignored.
     ///
     /// # Errors
     ///
-    /// As [`on_stream_frame`](Self::on_stream_frame).
+    /// [`OnResetStreamError`] if this frame violates the protocol; the caller
+    /// must close the connection with its
+    /// [`transport_error_code`](OnResetStreamError::transport_error_code).
     pub fn on_reset_stream(
         &mut self,
         frame: ResetStreamFrame,
         connection: &mut ConnectionReceiveFlowController,
-    ) -> Result<(), ConnectionFailureError> {
-        self.on_reset(frame.code, frame.final_size, VarInt::ZERO, connection)
+    ) -> Result<(), OnResetStreamError> {
+        if !self.takes_frames() {
+            return Ok(());
+        }
+        self.accept_reset(frame.code, frame.final_size, VarInt::ZERO, connection)
+            .inspect_err(|_| self.connection = ConnectionPhase::Violated)
     }
 
     /// Processes a `RESET_STREAM_AT` frame of the stream.
     ///
     /// The effective reliable size becomes the smallest one received; a
-    /// larger one arriving later does not raise it.
+    /// larger one arriving later does not raise it. As for
+    /// [`on_stream_frame`](Self::on_stream_frame), a violating frame leaves no
+    /// trace, and a frame after a violation or after the connection closed is
+    /// ignored.
     ///
     /// # Errors
     ///
-    /// As [`on_stream_frame`](Self::on_stream_frame).
+    /// [`OnResetStreamAtError`] if this frame violates the protocol; the
+    /// caller must close the connection with its
+    /// [`transport_error_code`](OnResetStreamAtError::transport_error_code).
     pub fn on_reset_stream_at(
         &mut self,
         frame: ResetStreamAtFrame,
         connection: &mut ConnectionReceiveFlowController,
-    ) -> Result<(), ConnectionFailureError> {
-        self.on_reset(
-            frame.code,
-            frame.final_size,
-            frame.reliable_size,
-            connection,
-        )
+    ) -> Result<(), OnResetStreamAtError> {
+        if !self.takes_frames() {
+            return Ok(());
+        }
+        self.accept_reset_at(frame, connection)
+            .inspect_err(|_| self.connection = ConnectionPhase::Violated)
     }
 
     /// Processes a `STREAM_DATA_BLOCKED` frame of the stream: the receive
     /// flow control policy observes it. It grants nothing by itself.
+    ///
+    /// The policy does not observe it once a violation was returned or the
+    /// connection has closed.
     pub fn on_stream_data_blocked(&mut self, limit: VarInt) {
-        if self.failure().is_none() {
+        if self.takes_frames() {
             self.notify_flow(ReceiveFlowEvent::PeerBlocked { limit });
         }
     }
 
     /// Records that the connection closed for `reason`.
     ///
-    /// Later operations report [`ConnectionFailureError::Closed`], carrying
-    /// `reason`, unless a protocol failure was recorded first. The receive
-    /// buffer is destroyed. Only the first failure is kept; a later call has
-    /// no effect.
+    /// The connection side calls this on every stream in the poll in which the
+    /// connection records its first close reason, whichever its source, and
+    /// also for a stream that returned a violation. Later operations of the
+    /// application fail with [`ConnectionClosedError`], carrying `reason`. The
+    /// receive buffer is destroyed. Only the first reason is kept; a later
+    /// call has no effect.
     pub fn connection_closed(&mut self, reason: CloseReason) {
-        if self.failure().is_some() {
+        if self.closed().is_some() {
             return;
         }
-        self.shut_down(ConnectionFailureError::Closed {
-            source: ConnectionClosedError::new(reason),
-        });
+        self.shut_down(ConnectionClosedError::new(reason));
     }
 
     /// Records that the stream reader was dropped.
@@ -631,7 +558,7 @@ where
         &mut self,
         connection: &mut ConnectionReceiveFlowController,
     ) -> Result<(), RecordReleaseError> {
-        if self.failure().is_some() {
+        if self.closed().is_some() {
             return Ok(());
         }
         let progress = self.release_progress();
@@ -644,28 +571,70 @@ where
         Ok(())
     }
 
-    fn on_reset(
+    fn accept_stream_frame(
+        &mut self,
+        frame: StreamFrame,
+        connection: &mut ConnectionReceiveFlowController,
+    ) -> Result<(), OnStreamFrameError> {
+        let StreamFrame { offset, data, fin } = frame;
+        let Some(end) = offset_add(offset, data.len()) else {
+            return OffsetOverflowSnafu {
+                offset,
+                len: data.len(),
+            }
+            .fail();
+        };
+        let old_accounted = self.parts.accounted_end();
+        check_stream_final_size(self.parts.final_size(), old_accounted, end, fin)?;
+        // The receive buffer contract: the accounted end is the maximum of
+        // every end it has been given.
+        let accounted_end = old_accounted.max(end);
+        self.account::<OnStreamFrameError>(old_accounted, accounted_end, connection)?;
+        // The frame passed every check: nothing below fails.
+        let payload = self.accepted_payload(offset, data);
+        let input = match StreamDataInput::new(offset, end, fin, payload) {
+            Ok(input) => input,
+            // invariant: the accepted payload is a prefix of the frame data,
+            // which ends at `end`.
+            Err(error) => unreachable!("accepted payload passes the frame: {error}"),
+        };
+        self.parts.receive_data(input);
+        debug_assert_eq!(self.parts.accounted_end(), accounted_end);
+        self.after_input(None, connection);
+        Ok(())
+    }
+
+    fn accept_reset_at(
+        &mut self,
+        frame: ResetStreamAtFrame,
+        connection: &mut ConnectionReceiveFlowController,
+    ) -> Result<(), OnResetStreamAtError> {
+        ReliableSizeError::check(frame.final_size, frame.reliable_size)?;
+        self.accept_reset(
+            frame.code,
+            frame.final_size,
+            frame.reliable_size,
+            connection,
+        )?;
+        Ok(())
+    }
+
+    fn accept_reset(
         &mut self,
         code: ApplicationErrorCode,
         final_size: VarInt,
         reliable_size: VarInt,
         connection: &mut ConnectionReceiveFlowController,
-    ) -> Result<(), ConnectionFailureError> {
-        self.check_failure()?;
-        if let Err(error) = ReliableSizeError::check(final_size, reliable_size)
-            .context(ReliableSizeExceedsFinalSizeSnafu)
-        {
-            return Err(self.fail(error));
-        }
+    ) -> Result<(), OnResetStreamError> {
         let old_accounted = self.parts.accounted_end();
-        let old_final = self.parts.final_size();
+        self.check_reset(self.parts.final_size(), old_accounted, code, final_size)?;
+        // The receive buffer contract: the accounted end is the maximum of
+        // every final size it has been given.
+        let accounted_end = old_accounted.max(final_size);
+        self.account::<OnResetStreamError>(old_accounted, accounted_end, connection)?;
+        // The frame passed every check: nothing below fails.
         self.parts.receive_final_size(final_size);
-        let checked = self
-            .check_reset(old_final, old_accounted, code, final_size)
-            .and_then(|()| self.account(old_accounted, connection));
-        if let Err(error) = checked {
-            return Err(self.fail(error));
-        }
+        debug_assert_eq!(self.parts.accounted_end(), accounted_end);
         let event = match &mut self.reset {
             None => {
                 self.reset = Some(ResetFacts {
@@ -691,47 +660,34 @@ where
         old_accounted: VarInt,
         code: ApplicationErrorCode,
         final_size: VarInt,
-    ) -> Result<(), ProtocolError> {
+    ) -> Result<(), OnResetStreamError> {
         match old_final {
-            Some(known) => {
-                FinalSizeChangeError::check(known, final_size).context(FinalSizeChangedSnafu)?;
-            }
-            None => ensure!(
-                final_size >= old_accounted,
-                FinalSizeBelowReceivedSnafu {
-                    final_size,
-                    accounted_end: old_accounted,
-                }
-            ),
+            Some(known) => FinalSizeChangeError::check(known, final_size)?,
+            None => FinalSizeBelowReceivedError::check(final_size, old_accounted)?,
         }
         if let Some(facts) = self.reset {
-            ResetCodeChangeError::check(facts.code, code).context(ResetCodeChangedSnafu)?;
+            ResetCodeChangeError::check(facts.code, code)?;
         }
         Ok(())
     }
 
-    /// Checks the stream limit and records the accounted end's increase with
-    /// the connection.
-    fn account(
+    /// Checks the stream limit against the accounted end a frame would reach
+    /// and records the increase over `old_accounted` with the connection.
+    ///
+    /// The connection is charged last and only when every check passed, so a
+    /// failure leaves it unchanged.
+    fn account<E>(
         &self,
         old_accounted: VarInt,
+        accounted_end: VarInt,
         connection: &mut ConnectionReceiveFlowController,
-    ) -> Result<(), ProtocolError> {
-        let accounted_end = self.parts.accounted_end();
-        // The receive buffer contract keeps the accounted end from falling;
-        // a buffer that breaks it records no increase.
-        debug_assert!(accounted_end >= old_accounted);
-        let increase = accounted_end.saturating_sub(old_accounted);
-        ensure!(
-            accounted_end <= self.opened_limit,
-            StreamLimitExceededSnafu {
-                accounted_end,
-                limit: self.opened_limit,
-            }
-        );
-        connection
-            .record_usage(increase)
-            .context(ConnectionLimitExceededSnafu)
+    ) -> Result<(), E>
+    where
+        E: From<StreamLimitExceededError> + From<RecordUsageError>,
+    {
+        StreamLimitExceededError::check(accounted_end, self.opened_limit)?;
+        connection.record_usage(accounted_end.saturating_sub(old_accounted))?;
+        Ok(())
     }
 
     fn after_input(
@@ -762,25 +718,10 @@ where
         data
     }
 
-    fn check_failure(&self) -> Result<(), ConnectionFailureError> {
-        self.failure().map_or(Ok(()), Err)
-    }
-
-    /// Records a protocol violation as the persistent failure.
-    fn fail(&mut self, error: ProtocolError) -> ConnectionFailureError {
-        let failure = ConnectionFailureError::Protocol { source: error };
-        self.shut_down(failure.clone());
-        failure
-    }
-
-    /// Records `failure` as the persistent failure and destroys the buffer.
-    fn shut_down(&mut self, failure: ConnectionFailureError) {
-        let was_live = !self.is_destroyed();
-        self.buffer = BufferPhase::Failed(failure);
-        if was_live {
-            self.parts.destroy();
-            self.notify_flow(ReceiveFlowEvent::BufferDestroyed);
-        }
+    /// Records the closure of the connection and destroys the buffer.
+    fn shut_down(&mut self, closed: ConnectionClosedError) {
+        self.connection = ConnectionPhase::Closed(closed);
+        self.destroy_buffer(Destruction::Forced);
         self.notify_termination(TerminationEvent::ConnectionClosed);
     }
 
@@ -832,10 +773,10 @@ where
             stop_code: self.stop.code(),
             stop_sent: self.stop_sent(),
             stop_allowed: self.stop.code().is_none()
-                && self.failure().is_none()
+                && self.closed().is_none()
                 && self.stop_not_needed().is_none(),
             reader_dropped: self.is_reader_dropped(),
-            connection_failed: self.failure().is_some(),
+            connection_failed: self.closed().is_some(),
         }
     }
 
@@ -865,21 +806,16 @@ fn check_stream_final_size(
     old_accounted: VarInt,
     end: VarInt,
     fin: bool,
-) -> Result<(), ProtocolError> {
+) -> Result<(), OnStreamFrameError> {
     match old_final {
         Some(final_size) => {
             if fin {
-                FinalSizeChangeError::check(final_size, end).context(FinalSizeChangedSnafu)?;
+                FinalSizeChangeError::check(final_size, end)?;
             }
-            BeyondFinalSizeError::check(final_size, end).context(BeyondFinalSizeSnafu)?;
+            BeyondFinalSizeError::check(final_size, end)?;
         }
-        None => ensure!(
-            !fin || end >= old_accounted,
-            FinalSizeBelowReceivedSnafu {
-                final_size: end,
-                accounted_end: old_accounted,
-            }
-        ),
+        None if fin => FinalSizeBelowReceivedError::check(end, old_accounted)?,
+        None => {}
     }
     Ok(())
 }

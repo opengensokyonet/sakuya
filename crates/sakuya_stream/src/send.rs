@@ -475,6 +475,10 @@ where
 
     /// Records that the connection has closed for `reason`.
     ///
+    /// The connection side calls this on every stream in the poll in which
+    /// the connection records its first close reason, whichever its source;
+    /// the stream never reads the reason from anywhere else.
+    ///
     /// Every later operation fails with a [`ConnectionClosedError`] that
     /// carries `reason`; results returned before are not changed. Only the
     /// first reason is kept; a later call has no effect.

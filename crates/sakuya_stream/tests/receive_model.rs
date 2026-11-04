@@ -21,9 +21,12 @@ use sakuya_stream::receive::termination::{
     BoundaryAction, BoundaryUpdate, ReceiveTerminationPolicy, ResetPresentation,
     TerminationDecision, TerminationEvent, TerminationView,
 };
+use sakuya_stream::receive::violation::{
+    FinalSizeBelowReceivedError, OnResetStreamAtError, OnResetStreamError, OnStreamFrameError,
+    StreamLimitExceededError,
+};
 use sakuya_stream::receive::{
-    BoundaryMode, ConnectionFailureError, ProtocolError, ResetStreamAtFrame, ResetStreamFrame,
-    StreamFrame, StreamReceiver,
+    BoundaryMode, ResetStreamAtFrame, ResetStreamFrame, StreamFrame, StreamReceiver,
 };
 use sakuya_stream::receive_buffer::fragmented::FragmentedStreamReceiveBuffer;
 use sakuya_stream::receive_buffer::{StreamDataInput, StreamReceiveBuffer};
@@ -393,14 +396,97 @@ impl Stop {
 enum Phase {
     Live,
     Destroyed(Option<(u32, TerminationEvent)>),
-    Failed(ConnectionFailureError),
+}
+
+/// How far the connection's end has reached the stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Link {
+    Open,
+    /// A frame violated the protocol; the connection has not closed yet.
+    Violated,
+    Closed,
+}
+
+/// A violation as the model finds it, before it takes the shape of the
+/// error of one frame method.
+#[derive(Clone, Copy, Debug)]
+enum Violation {
+    FinalSizeChanged(FinalSizeChangeError),
+    BeyondFinalSize(BeyondFinalSizeError),
+    FinalSizeBelowReceived(FinalSizeBelowReceivedError),
+    StreamLimitExceeded(StreamLimitExceededError),
+    ConnectionLimitExceeded(RecordUsageError),
+    ResetCodeChanged(ResetCodeChangeError),
+    ReliableSizeExceedsFinalSize(ReliableSizeError),
+}
+
+impl Violation {
+    fn on_stream_frame(self) -> OnStreamFrameError {
+        match self {
+            Self::FinalSizeChanged(source) => OnStreamFrameError::FinalSizeChanged { source },
+            Self::BeyondFinalSize(source) => OnStreamFrameError::BeyondFinalSize { source },
+            Self::FinalSizeBelowReceived(source) => {
+                OnStreamFrameError::FinalSizeBelowReceived { source }
+            }
+            Self::StreamLimitExceeded(source) => OnStreamFrameError::StreamLimitExceeded { source },
+            Self::ConnectionLimitExceeded(source) => {
+                OnStreamFrameError::ConnectionLimitExceeded { source }
+            }
+            Self::ResetCodeChanged(_) | Self::ReliableSizeExceedsFinalSize(_) => {
+                panic!("a STREAM frame cannot commit {self:?}")
+            }
+        }
+    }
+
+    fn on_reset_stream(self) -> OnResetStreamError {
+        match self {
+            Self::FinalSizeChanged(source) => OnResetStreamError::FinalSizeChanged { source },
+            Self::FinalSizeBelowReceived(source) => {
+                OnResetStreamError::FinalSizeBelowReceived { source }
+            }
+            Self::ResetCodeChanged(source) => OnResetStreamError::ResetCodeChanged { source },
+            Self::StreamLimitExceeded(source) => OnResetStreamError::StreamLimitExceeded { source },
+            Self::ConnectionLimitExceeded(source) => {
+                OnResetStreamError::ConnectionLimitExceeded { source }
+            }
+            Self::BeyondFinalSize(_) | Self::ReliableSizeExceedsFinalSize(_) => {
+                panic!("a RESET_STREAM frame cannot commit {self:?}")
+            }
+        }
+    }
+
+    fn on_reset_stream_at(self) -> OnResetStreamAtError {
+        match self {
+            Self::ReliableSizeExceedsFinalSize(source) => {
+                OnResetStreamAtError::ReliableSizeExceedsFinalSize { source }
+            }
+            Self::BeyondFinalSize(_) => panic!("a RESET_STREAM_AT frame cannot commit {self:?}"),
+            other => other.on_reset_stream().into(),
+        }
+    }
+}
+
+/// A read result that does not need the data.
+#[derive(Clone, Copy, Debug)]
+enum Settled {
+    End,
+    Wait,
+}
+
+impl Settled {
+    fn outcome<T>(self) -> ReadOutcome<T> {
+        match self {
+            Self::End => ReadOutcome::End,
+            Self::Wait => ReadOutcome::Wait,
+        }
+    }
 }
 
 /// A read error as the model predicts it, with the local reason unshared.
 #[derive(Clone, Debug, PartialEq)]
 enum Expected {
     ReaderDropped,
-    Connection(ConnectionFailureError),
+    ConnectionClosed(ConnectionClosedError),
     Reset {
         reset: RemoteReset,
         complete: bool,
@@ -416,7 +502,7 @@ enum Expected {
 fn observed(error: ReadError<u32>) -> Expected {
     match error {
         ReadError::ReaderDropped => Expected::ReaderDropped,
-        ReadError::Connection { source } => Expected::Connection(source),
+        ReadError::ConnectionClosed { source } => Expected::ConnectionClosed(source),
         ReadError::Reset { reset, complete } => Expected::Reset { reset, complete },
         ReadError::LocalTermination {
             reason,
@@ -476,6 +562,7 @@ struct Model {
     delivery: Option<Limit>,
     presentation: ResetPresentation,
     phase: Phase,
+    link: Link,
     reading: Reading,
     data_complete_notified: bool,
     opened_limit: u64,
@@ -498,6 +585,7 @@ impl Model {
             delivery: None,
             presentation: ResetPresentation::Report,
             phase: Phase::Live,
+            link: Link::Open,
             reading: Reading::Open,
             data_complete_notified: false,
             opened_limit,
@@ -505,11 +593,12 @@ impl Model {
         }
     }
 
-    fn failure(&self) -> Option<ConnectionFailureError> {
-        match &self.phase {
-            Phase::Failed(failure) => Some(failure.clone()),
-            Phase::Live | Phase::Destroyed(_) => None,
-        }
+    fn closed(&self) -> bool {
+        self.link == Link::Closed
+    }
+
+    fn takes_frames(&self) -> bool {
+        self.link == Link::Open
     }
 
     fn destroyed(&self) -> bool {
@@ -557,9 +646,9 @@ impl Model {
             committed: self.committed(),
             stop_sent: matches!(self.stop, Stop::Sent(_)),
             reader_dropped: self.reader_dropped(),
-            failed: self.failure().is_some(),
+            failed: self.closed(),
             stop_allowed: self.stop.code().is_none()
-                && self.failure().is_none()
+                && !self.closed()
                 && self.stop_not_needed().is_none(),
         }
     }
@@ -627,7 +716,7 @@ impl Model {
     }
 
     fn report(&mut self, connection: &mut ModelConnection) {
-        if self.failure().is_some() {
+        if self.closed() {
             return;
         }
         let progress = self.progress();
@@ -648,33 +737,25 @@ impl Model {
         self.report(connection);
     }
 
-    fn fail(&mut self, failure: ConnectionFailureError) {
-        let was_live = !self.destroyed();
-        self.phase = Phase::Failed(failure);
-        if was_live {
-            self.clear_held();
-        }
+    fn close(&mut self) {
+        self.link = Link::Closed;
+        self.destroy(None);
         self.event(TerminationEvent::ConnectionClosed);
     }
 
-    fn account(&self, old: u64, connection: &mut ModelConnection) -> Result<(), ProtocolError> {
-        if self.accounted > self.opened_limit {
-            return Err(ProtocolError::StreamLimitExceeded {
-                accounted_end: v(self.accounted),
-                limit: v(self.opened_limit),
-            });
-        }
-        let increase = self.accounted - old;
+    /// Checks the stream limit and the connection limit for an accounted end
+    /// of `accounted`; changes nothing.
+    fn check_account(&self, accounted: u64, connection: &ModelConnection) -> Result<(), Violation> {
+        StreamLimitExceededError::check(v(accounted), v(self.opened_limit))
+            .map_err(Violation::StreamLimitExceeded)?;
+        let increase = accounted.max(self.accounted) - self.accounted;
         if connection.used + increase > connection.limit {
-            return Err(ProtocolError::ConnectionLimitExceeded {
-                source: RecordUsageError {
-                    used: v(connection.used),
-                    increase: v(increase),
-                    limit: v(connection.limit),
-                },
-            });
+            return Err(Violation::ConnectionLimitExceeded(RecordUsageError {
+                used: v(connection.used),
+                increase: v(increase),
+                limit: v(connection.limit),
+            }));
         }
-        connection.used += increase;
         Ok(())
     }
 
@@ -684,13 +765,29 @@ impl Model {
         len: u64,
         fin: bool,
         connection: &mut ModelConnection,
-    ) -> Result<(), ConnectionFailureError> {
-        if let Some(failure) = self.failure() {
-            return Err(failure);
+    ) -> Result<(), Violation> {
+        if !self.takes_frames() {
+            return Ok(());
         }
         let end = offset + len;
-        let old_accounted = self.accounted;
-        let old_final = self.final_size;
+        let checked = match self.final_size {
+            Some(final_size) if fin && end != final_size => Err(Violation::FinalSizeChanged(
+                FinalSizeChangeError::check(v(final_size), v(end)).unwrap_err(),
+            )),
+            Some(final_size) if end > final_size => Err(Violation::BeyondFinalSize(
+                BeyondFinalSizeError::check(v(final_size), v(end)).unwrap_err(),
+            )),
+            None if fin && end < self.accounted => Err(Violation::FinalSizeBelowReceived(
+                FinalSizeBelowReceivedError::check(v(end), v(self.accounted)).unwrap_err(),
+            )),
+            _ => Ok(()),
+        }
+        .and_then(|()| self.check_account(self.accounted.max(end), connection));
+        if let Err(violation) = checked {
+            // The violating frame leaves nothing behind.
+            self.link = Link::Violated;
+            return Err(violation);
+        }
         if !self.destroyed() {
             let limit = [self.acceptance, self.delivery]
                 .iter()
@@ -709,28 +806,10 @@ impl Model {
                 }
             }
         }
+        connection.used += end.max(self.accounted) - self.accounted;
         self.accounted = self.accounted.max(end);
         if fin && self.final_size.is_none() {
             self.final_size = Some(end);
-        }
-        let checked = match old_final {
-            Some(final_size) if fin && end != final_size => Err(ProtocolError::FinalSizeChanged {
-                source: FinalSizeChangeError::check(v(final_size), v(end)).unwrap_err(),
-            }),
-            Some(final_size) if end > final_size => Err(ProtocolError::BeyondFinalSize {
-                source: BeyondFinalSizeError::check(v(final_size), v(end)).unwrap_err(),
-            }),
-            None if fin && end < old_accounted => Err(ProtocolError::FinalSizeBelowReceived {
-                final_size: v(end),
-                accounted_end: v(old_accounted),
-            }),
-            _ => Ok(()),
-        }
-        .and_then(|()| self.account(old_accounted, connection));
-        if let Err(source) = checked {
-            let failure = ConnectionFailureError::Protocol { source };
-            self.fail(failure.clone());
-            return Err(failure);
         }
         self.after_input(None, connection);
         Ok(())
@@ -742,45 +821,41 @@ impl Model {
         final_size: u64,
         reliable: u64,
         connection: &mut ModelConnection,
-    ) -> Result<(), ConnectionFailureError> {
-        if let Some(failure) = self.failure() {
-            return Err(failure);
+    ) -> Result<(), Violation> {
+        if !self.takes_frames() {
+            return Ok(());
         }
-        if reliable > final_size {
-            let failure = ConnectionFailureError::Protocol {
-                source: ProtocolError::ReliableSizeExceedsFinalSize {
-                    source: ReliableSizeError::check(v(final_size), v(reliable)).unwrap_err(),
+        let checked = if reliable > final_size {
+            Err(Violation::ReliableSizeExceedsFinalSize(
+                ReliableSizeError::check(v(final_size), v(reliable)).unwrap_err(),
+            ))
+        } else {
+            match self.final_size {
+                Some(known) if final_size != known => Err(Violation::FinalSizeChanged(
+                    FinalSizeChangeError::check(v(known), v(final_size)).unwrap_err(),
+                )),
+                None if final_size < self.accounted => Err(Violation::FinalSizeBelowReceived(
+                    FinalSizeBelowReceivedError::check(v(final_size), v(self.accounted))
+                        .unwrap_err(),
+                )),
+                _ => match self.reset {
+                    Some(facts) if facts.code != code_value => Err(Violation::ResetCodeChanged(
+                        ResetCodeChangeError::check(code(facts.code), code(code_value))
+                            .unwrap_err(),
+                    )),
+                    _ => Ok(()),
                 },
-            };
-            self.fail(failure.clone());
-            return Err(failure);
+            }
+            .and_then(|()| self.check_account(self.accounted.max(final_size), connection))
+        };
+        if let Err(violation) = checked {
+            // The violating frame leaves nothing behind.
+            self.link = Link::Violated;
+            return Err(violation);
         }
-        let old_accounted = self.accounted;
-        let old_final = self.final_size;
+        connection.used += final_size.max(self.accounted) - self.accounted;
         self.accounted = self.accounted.max(final_size);
         self.final_size.get_or_insert(final_size);
-        let checked = match old_final {
-            Some(known) if final_size != known => Err(ProtocolError::FinalSizeChanged {
-                source: FinalSizeChangeError::check(v(known), v(final_size)).unwrap_err(),
-            }),
-            None if final_size < old_accounted => Err(ProtocolError::FinalSizeBelowReceived {
-                final_size: v(final_size),
-                accounted_end: v(old_accounted),
-            }),
-            _ => match self.reset {
-                Some(facts) if facts.code != code_value => Err(ProtocolError::ResetCodeChanged {
-                    source: ResetCodeChangeError::check(code(facts.code), code(code_value))
-                        .unwrap_err(),
-                }),
-                _ => Ok(()),
-            },
-        }
-        .and_then(|()| self.account(old_accounted, connection));
-        if let Err(source) = checked {
-            let failure = ConnectionFailureError::Protocol { source };
-            self.fail(failure.clone());
-            return Err(failure);
-        }
         let event = match &mut self.reset {
             None => {
                 self.reset = Some(Reset {
@@ -807,18 +882,23 @@ impl Model {
         error
     }
 
-    /// The first three read priorities.
-    fn settled(&mut self) -> Option<Result<(), Expected>> {
+    /// The first read priorities, those that need no look at the data.
+    fn settled(&mut self) -> Option<Result<Settled, Expected>> {
         if self.reader_dropped() {
             return Some(Err(Expected::ReaderDropped));
         }
-        if let Some(failure) = self.failure() {
-            return Some(Err(Expected::Connection(failure)));
+        if self.closed() {
+            return Some(Err(Expected::ConnectionClosed(ConnectionClosedError::new(
+                close_reason(),
+            ))));
         }
         match &self.reading {
-            Reading::End => return Some(Ok(())),
+            Reading::End => return Some(Ok(Settled::End)),
             Reading::Error(error) => return Some(Err(error.clone())),
             Reading::Open | Reading::Dropped { .. } => {}
+        }
+        if self.link == Link::Violated {
+            return Some(Ok(Settled::Wait));
         }
         if let Phase::Destroyed(Some((reason, trigger))) = self.phase {
             let error = Expected::Local {
@@ -896,7 +976,7 @@ fn read_chunk(
 ) -> Result<ReadOutcome<Bytes>, ReadError<u32>> {
     let actual = receiver.read_chunk();
     let expected = match model.settled() {
-        Some(settled) => settled.map(|()| ReadOutcome::End),
+        Some(settled) => settled.map(Settled::outcome),
         None => {
             let run = model.deliverable();
             if run > 0 {
@@ -937,7 +1017,7 @@ fn read_into(
         });
     let bytes = target.into_inner().freeze();
     let expected = match model.settled() {
-        Some(settled) => settled.map(|()| ReadOutcome::End),
+        Some(settled) => settled.map(Settled::outcome),
         None if room == 0 => Ok(ReadOutcome::NoProgress),
         None => {
             let run = model.deliverable();
@@ -981,7 +1061,8 @@ fn step(
                 fin,
             };
             let actual = receivers[stream].on_stream_frame(frame, connection);
-            assert_eq!(actual, models[stream].on_frame(offset, len, fin, ledger));
+            let expected = models[stream].on_frame(offset, len, fin, ledger);
+            assert_eq!(actual, expected.map_err(Violation::on_stream_frame));
         }
         Op::Wild {
             stream,
@@ -995,7 +1076,8 @@ fn step(
                 fin,
             };
             let actual = receivers[stream].on_stream_frame(frame, connection);
-            assert_eq!(actual, models[stream].on_frame(offset, len, fin, ledger));
+            let expected = models[stream].on_frame(offset, len, fin, ledger);
+            assert_eq!(actual, expected.map_err(Violation::on_stream_frame));
         }
         Op::Reset {
             stream,
@@ -1008,7 +1090,8 @@ fn step(
                 final_size: v(size),
             };
             let actual = receivers[stream].on_reset_stream(frame, connection);
-            assert_eq!(actual, models[stream].on_reset(value, size, 0, ledger));
+            let expected = models[stream].on_reset(value, size, 0, ledger);
+            assert_eq!(actual, expected.map_err(Violation::on_reset_stream));
         }
         Op::ResetAt {
             stream,
@@ -1028,10 +1111,8 @@ fn step(
                 reliable_size: v(reliable),
             };
             let actual = receivers[stream].on_reset_stream_at(frame, connection);
-            assert_eq!(
-                actual,
-                models[stream].on_reset(value, size, reliable, ledger)
-            );
+            let expected = models[stream].on_reset(value, size, reliable, ledger);
+            assert_eq!(actual, expected.map_err(Violation::on_reset_stream_at));
         }
         Op::ReadChunk { stream } => {
             drop(read_chunk(
@@ -1054,8 +1135,10 @@ fn step(
         } => {
             let actual = receivers[stream].stop(code(value));
             let model = &mut models[stream];
-            let expected = if let Some(failure) = model.failure() {
-                Err(StopError::Connection { source: failure })
+            let expected = if model.closed() {
+                Err(StopError::ConnectionClosed {
+                    source: ConnectionClosedError::new(close_reason()),
+                })
             } else if let Some(installed) = model.stop.code() {
                 if installed == value {
                     Ok(())
@@ -1101,10 +1184,8 @@ fn step(
         Op::ConnectionClosed { stream } => {
             receivers[stream].connection_closed(close_reason());
             let model = &mut models[stream];
-            if model.failure().is_none() {
-                model.fail(ConnectionFailureError::Closed {
-                    source: ConnectionClosedError::new(close_reason()),
-                });
+            if !model.closed() {
+                model.close();
             }
         }
         Op::OpenLimit { stream, limit } => {
@@ -1154,7 +1235,13 @@ fn check(
             "held bytes"
         );
         assert_eq!(buffer.is_destroyed(), model.destroyed(), "destroyed");
-        assert_eq!(receiver.failure(), model.failure(), "failure");
+        assert_eq!(
+            receiver.closed().cloned(),
+            model
+                .closed()
+                .then(|| ConnectionClosedError::new(close_reason())),
+            "closure"
+        );
         assert_eq!(
             receiver.remote_reset(),
             model.reset.map(Reset::remote),
@@ -1170,23 +1257,19 @@ fn check(
         );
         assert_eq!(receiver.opened_limit().get(), model.opened_limit);
         let pending = match model.stop {
-            Stop::Pending(value)
-                if model.failure().is_none() && model.stop_not_needed().is_none() =>
-            {
+            Stop::Pending(value) if !model.closed() && model.stop_not_needed().is_none() => {
                 Some(code(value))
             }
             _ => None,
         };
         assert_eq!(receiver.pending_stop(), pending, "pending STOP");
-        let advertised = (model.failure().is_none()
-            && model.final_size.is_none()
-            && target > model.opened_limit)
-            .then(|| v(target));
+        let advertised =
+            (!model.closed() && model.final_size.is_none() && target > model.opened_limit)
+                .then(|| v(target));
         assert_eq!(receiver.advertisement(), advertised, "advertisement");
-        // RFC 9000 §4.5: everything delivered lies within the final size.
-        if let Some(final_size) = model.final_size
-            && model.failure().is_none()
-        {
+        // RFC 9000 §4.5: everything delivered lies within the final size, also
+        // after a violation, which leaves no trace.
+        if let Some(final_size) = model.final_size {
             assert!(model.delivered <= final_size);
             assert!(model.accounted <= final_size);
         }
@@ -1212,7 +1295,7 @@ fn drain(
     connection: &mut ConnectionReceiveFlowController,
     ledger: &mut ModelConnection,
 ) {
-    if model.failure().is_some() {
+    if model.link != Link::Open {
         return;
     }
     // The limits that belong to the peer are not what is tested here.
@@ -1232,7 +1315,8 @@ fn drain(
         fin: true,
     };
     let actual = receiver.on_stream_frame(frame, connection);
-    assert_eq!(actual, model.on_frame(0, total, true, ledger));
+    let expected = model.on_frame(0, total, true, ledger);
+    assert_eq!(actual, expected.map_err(Violation::on_stream_frame));
     if actual.is_err() {
         return;
     }

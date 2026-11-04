@@ -1,6 +1,5 @@
 use super::{
-    BoundaryMode, ConnectionFailureError, ProtocolError, ResetStreamAtFrame, ResetStreamFrame,
-    StreamFrame, StreamReceiver,
+    BoundaryMode, ResetStreamAtFrame, ResetStreamFrame, StreamFrame, StreamReceiver,
     flow_control::{
         AdvertisementIntent, ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView,
     },
@@ -29,6 +28,7 @@ mod boundary;
 mod order;
 mod read;
 mod stop;
+mod violation;
 
 /// The reason the tests close connections for.
 fn close_reason() -> CloseReason {
@@ -283,13 +283,6 @@ fn reset_error<R>(code: u32, final_size: u32, reliable_size: u32, complete: bool
         },
         complete,
     })
-}
-
-fn protocol(failure: ConnectionFailureError) -> ProtocolError {
-    match failure {
-        ConnectionFailureError::Protocol { source } => source,
-        ConnectionFailureError::Closed { .. } => panic!("expected a protocol failure"),
-    }
 }
 
 /// The following termination policy, end to end.

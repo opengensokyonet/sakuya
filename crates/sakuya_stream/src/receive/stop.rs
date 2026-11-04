@@ -11,7 +11,7 @@
 //!
 //! | State | Result |
 //! | --- | --- |
-//! | connection closed or persistent protocol failure | [`StopError::Connection`] |
+//! | connection closed | [`StopError::ConnectionClosed`] |
 //! | a request with the same code is installed | success, nothing new happens |
 //! | a request with another code is installed | [`StopError::StopConflict`], the request stays |
 //! | no request, and all data was received or the peer reset the stream | [`StopError::StopNotNeeded`] |
@@ -20,11 +20,16 @@
 //! A `RESET_STREAM_AT` whose reliable prefix has not been received yet still
 //! allows a request; once the prefix is received, none is needed.
 //!
+//! While the stream waits for the connection to close after a frame
+//! violated the protocol, a request is checked and installed as usual: it
+//! is not a result about the connection.
+//!
 //! [RFC 9000 §3.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-3.5
 use super::{
-    ConnectionFailureError, StopRequest, StreamReceiver, flow_control::ReceiveFlowControlPolicy,
+    StopRequest, StreamReceiver, flow_control::ReceiveFlowControlPolicy,
     termination::ReceiveTerminationPolicy, termination::TerminationEvent,
 };
+use crate::connection::ConnectionClosedError;
 use crate::receive_buffer::StreamReceiveBuffer;
 use core::fmt;
 use sakuya_wire::application_error::ApplicationErrorCode;
@@ -37,11 +42,11 @@ use snafu::{Snafu, ensure};
 /// limits.
 #[derive(Clone, Debug, PartialEq, Eq, Snafu)]
 pub enum StopError {
-    /// The connection closed, or input of the stream violated the protocol.
-    #[snafu(display("connection failed"))]
-    Connection {
-        /// The failure.
-        source: ConnectionFailureError,
+    /// The connection has closed.
+    #[snafu(transparent)]
+    ConnectionClosed {
+        /// The closed connection.
+        source: ConnectionClosedError,
     },
     /// A STOP request with another error code is already installed; it is
     /// kept.
@@ -112,7 +117,7 @@ where
     pub fn pending_stop(&self) -> Option<ApplicationErrorCode> {
         match self.stop {
             StopRequest::Pending(code)
-                if self.failure().is_none() && self.stop_not_needed().is_none() =>
+                if self.closed().is_none() && self.stop_not_needed().is_none() =>
             {
                 Some(code)
             }
@@ -145,8 +150,10 @@ where
     /// Checks a STOP request; `Ok(true)` means it is to be installed,
     /// `Ok(false)` that the same request is already installed.
     pub(super) fn check_stop(&self, code: ApplicationErrorCode) -> Result<bool, StopError> {
-        if let Some(failure) = self.failure() {
-            return Err(StopError::Connection { source: failure });
+        if let Some(closed) = self.closed() {
+            return Err(StopError::ConnectionClosed {
+                source: closed.clone(),
+            });
         }
         if let Some(installed) = self.stop.code() {
             ensure!(

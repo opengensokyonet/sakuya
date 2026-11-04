@@ -12,10 +12,7 @@ fn connection_closed_keeps_the_first_reason() {
     let (mut receiver, _connection) = new_receiver(keep_all());
     receiver.connection_closed(close_reason());
     receiver.connection_closed(CloseReason::StatelessReset);
-    let Err(ReadError::Connection {
-        source: ConnectionFailureError::Closed { source },
-    }) = receiver.read_chunk()
-    else {
+    let Err(ReadError::ConnectionClosed { source }) = receiver.read_chunk() else {
         panic!("expected a closed connection");
     };
     assert_eq!(source.reason(), &close_reason());
@@ -28,20 +25,16 @@ fn connection_failure_is_not_hidden_by_held_data() {
         .on_stream_frame(stream(0, 100, false), &mut connection)
         .unwrap();
     receiver.connection_closed(close_reason());
-    let closed = Err(ReadError::Connection {
-        source: ConnectionFailureError::Closed {
-            source: ConnectionClosedError::new(close_reason()),
-        },
+    let closed = Err(ReadError::ConnectionClosed {
+        source: ConnectionClosedError::new(close_reason()),
     });
     assert_eq!(receiver.read_chunk(), closed);
     // Not by an empty target either.
     let mut empty = [0u8; 0];
     assert_eq!(
         receiver.read_into(&mut &mut empty[..]),
-        Err(ReadError::Connection {
-            source: ConnectionFailureError::Closed {
-                source: ConnectionClosedError::new(close_reason())
-            },
+        Err(ReadError::ConnectionClosed {
+            source: ConnectionClosedError::new(close_reason()),
         })
     );
     assert!(receiver.parts().buffer.is_destroyed());
@@ -58,10 +51,8 @@ fn connection_failure_overrides_a_committed_result() {
     receiver.connection_closed(close_reason());
     assert_eq!(
         receiver.read_chunk(),
-        Err(ReadError::Connection {
-            source: ConnectionFailureError::Closed {
-                source: ConnectionClosedError::new(close_reason())
-            },
+        Err(ReadError::ConnectionClosed {
+            source: ConnectionClosedError::new(close_reason()),
         })
     );
 }
@@ -237,13 +228,14 @@ fn waits_for_expected_data_only() {
 }
 
 #[test]
-fn read_error_reports_its_layer() {
-    let error: ReadError<&str> = ReadError::Connection {
-        source: ConnectionFailureError::Closed {
-            source: ConnectionClosedError::new(close_reason()),
-        },
+fn read_error_delegates_to_the_closed_connection() {
+    let error: ReadError<&str> = ReadError::ConnectionClosed {
+        source: ConnectionClosedError::new(close_reason()),
     };
-    assert_eq!(error.to_string(), "connection failed");
+    assert_eq!(
+        error.to_string(),
+        ConnectionClosedError::new(close_reason()).to_string()
+    );
     let report = snafu::Report::from_error(error).to_string();
     assert!(report.contains("the connection is closed"), "{report}");
 }

@@ -23,7 +23,7 @@
 //! - A fixed limit can stay or tighten, never rise, and never exceed a known
 //!   final size; a following limit can be fixed at any legal offset.
 //! - Once the buffer is destroyed, a read result is committed or the
-//!   connection failed, only keeping and destroying (as clean-up) remain.
+//!   connection closed, only keeping and destroying (as clean-up) remain.
 //! - While a `RESET_STREAM_AT` reliable prefix still needs delivery or gap
 //!   filling, breaking it — fixing the delivery limit below it, fixing the
 //!   acceptance limit below a part of it not yet received, or destroying —
@@ -74,7 +74,7 @@ pub enum TerminationEvent {
     ReaderDropped,
     /// A read committed the end of stream or a terminal error.
     ReadResultCommitted,
-    /// The connection closed, or input of the stream violated the protocol.
+    /// The connection closed.
     ConnectionClosed,
 }
 
@@ -108,7 +108,7 @@ pub struct TerminationView {
     pub stop_allowed: bool,
     /// Whether the reader was dropped.
     pub reader_dropped: bool,
-    /// Whether the connection failed.
+    /// Whether the connection closed.
     pub connection_failed: bool,
 }
 
