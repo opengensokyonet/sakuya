@@ -447,11 +447,11 @@ fn retry_rejects_malformed_inputs() {
     let packet = hex(RETRY_PACKET);
     assert!(matches!(
         verify_retry_integrity_tag(&RingBackend, &cid(CLIENT_DCID), &packet[..15]),
-        Err(VerifyRetryIntegrityError::PacketTooShort { packet_len: 15 })
+        Err(VerifyRetryIntegrityError::PacketTooShort { source }) if source.packet_len() == 15
     ));
     assert!(matches!(
         verify_retry_integrity_tag(&RingBackend, &cid(CLIENT_DCID), &[]),
-        Err(VerifyRetryIntegrityError::PacketTooShort { packet_len: 0 })
+        Err(VerifyRetryIntegrityError::PacketTooShort { source }) if source.packet_len() == 0
     ));
     // The shortest packet holds only a tag; it does not authenticate.
     assert!(matches!(
@@ -756,11 +756,11 @@ fn expand_label_rejects_oversized_inputs() {
     let mut output = [0; 16];
     assert!(matches!(
         RingBackend.hkdf_expand_label(kdf, &secret, &[b'x'; 250], &[], &mut output),
-        Err(ExpandLabelError::LabelTooLong { label_len: 256 })
+        Err(ExpandLabelError::LabelTooLong { source }) if source.label_len() == 256
     ));
     assert!(matches!(
         RingBackend.hkdf_expand_label(kdf, &secret, b"quic key", &[0; 256], &mut output),
-        Err(ExpandLabelError::ContextTooLong { context_len: 256 })
+        Err(ExpandLabelError::ContextTooLong { source }) if source.context_len() == 256
     ));
     let mut long_output = vec![0; 255 * 32 + 1];
     assert!(matches!(

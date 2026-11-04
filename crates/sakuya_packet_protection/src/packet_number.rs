@@ -5,7 +5,7 @@
 //! [`PacketNumberLength`].
 
 use sakuya_wire::packet_number::PacketNumber;
-use snafu::{OptionExt, Snafu, ensure};
+use snafu::{OptionExt, ResultExt, Snafu, ensure};
 
 /// The length of a Packet Number field, 1 to 4 bytes.
 ///
@@ -35,7 +35,7 @@ impl PacketNumberLength {
             2 => Ok(Self::Two),
             3 => Ok(Self::Three),
             4 => Ok(Self::Four),
-            _ => Err(InvalidPacketNumberLength { len }),
+            _ => Err(InvalidPacketNumberLength { length: len }),
         }
     }
 
@@ -75,11 +75,19 @@ impl PacketNumberLength {
 
 /// The error returned by [`PacketNumberLength::new`]: the length is not 1 to
 /// 4 bytes.
+///
+/// Only [`PacketNumberLength::new`] constructs it, for a length it refuses.
 #[derive(Debug, Snafu)]
-#[snafu(display("packet number field of {len} bytes is not 1 to 4 bytes long"))]
+#[snafu(display("packet number field of {length} bytes is not 1 to 4 bytes long"))]
 pub struct InvalidPacketNumberLength {
-    /// The length given.
-    pub len: usize,
+    length: usize,
+}
+
+impl InvalidPacketNumberLength {
+    /// The length given, which is zero or above four.
+    pub const fn length(&self) -> usize {
+        self.length
+    }
 }
 
 /// The value of a Packet Number field: the 1 to 4 least significant bytes of
@@ -104,7 +112,7 @@ impl TruncatedPacketNumber {
     pub fn new(value: u32, len: PacketNumberLength) -> Result<Self, TruncatedPacketNumberError> {
         ensure!(
             u64::from(value) < 1 << (8 * len.get()),
-            TruncatedPacketNumberSnafu { value, len }
+            TruncatedPacketNumberSnafu { value, length: len }
         );
         Ok(Self::from_low_bytes(u64::from(value), len))
     }
@@ -162,7 +170,8 @@ impl TruncatedPacketNumber {
         let min_bits = (u64::BITS - num_unacked.leading_zeros()) as usize + 1;
         let len = PacketNumberLength::new(min_bits.div_ceil(8))
             .ok()
-            .context(encode_packet_number_error::RangeTooLargeSnafu { num_unacked })?;
+            .context(PacketNumberRangeTooLargeSnafu { num_unacked })
+            .context(encode_packet_number_error::RangeTooLargeSnafu)?;
         Ok(Self::from_low_bytes(full_pn.get(), len))
     }
 
@@ -233,13 +242,26 @@ impl TruncatedPacketNumber {
 
 /// The error returned by [`TruncatedPacketNumber::new`]: the value does not
 /// fit in the field length.
+///
+/// Only [`TruncatedPacketNumber::new`] constructs it, for a value that does
+/// not fit, so its length is never four bytes.
 #[derive(Debug, Snafu)]
-#[snafu(display("value {value:#x} does not fit in {} bytes", len.get()))]
+#[snafu(display("value {value:#x} does not fit in {} bytes", length.get()))]
 pub struct TruncatedPacketNumberError {
+    value: u32,
+    length: PacketNumberLength,
+}
+
+impl TruncatedPacketNumberError {
     /// The value given.
-    pub value: u32,
-    /// The field length given.
-    pub len: PacketNumberLength,
+    pub const fn value(&self) -> u32 {
+        self.value
+    }
+
+    /// The field length given, one to three bytes.
+    pub const fn length(&self) -> PacketNumberLength {
+        self.length
+    }
 }
 
 /// The error returned by [`TruncatedPacketNumber::encode`].
@@ -257,12 +279,31 @@ pub enum EncodePacketNumberError {
         largest_acked: PacketNumber,
     },
     /// Four bytes cannot represent twice the unacknowledged range.
-    #[snafu(display("{num_unacked} unacknowledged packet numbers exceed the 4-byte encoding"))]
+    #[snafu(display("cannot encode the packet number"))]
     RangeTooLarge {
-        /// Number of packet numbers after the largest acknowledged one, up to
-        /// and including the one to send.
-        num_unacked: u64,
+        /// The size of the range.
+        source: PacketNumberRangeTooLarge,
     },
+}
+
+/// Four bytes cannot represent twice the number of packet numbers after the
+/// largest acknowledged one.
+///
+/// Only [`TruncatedPacketNumber::encode`] constructs it, for a range of at
+/// least 2<sup>31</sup> packet numbers.
+#[derive(Debug, Snafu)]
+#[snafu(display("{num_unacked} unacknowledged packet numbers exceed the 4-byte encoding"))]
+pub struct PacketNumberRangeTooLarge {
+    num_unacked: u64,
+}
+
+impl PacketNumberRangeTooLarge {
+    /// Number of packet numbers after the largest acknowledged one, up to and
+    /// including the one to send: at least 2<sup>31</sup> and at most
+    /// 2<sup>62</sup>.
+    pub const fn num_unacked(&self) -> u64 {
+        self.num_unacked
+    }
 }
 
 #[cfg(test)]
@@ -279,8 +320,8 @@ mod tests {
 
     #[test]
     fn packet_number_length_bounds() {
-        assert_eq!(PacketNumberLength::new(0).unwrap_err().len, 0);
-        assert_eq!(PacketNumberLength::new(5).unwrap_err().len, 5);
+        assert_eq!(PacketNumberLength::new(0).unwrap_err().length(), 0);
+        assert_eq!(PacketNumberLength::new(5).unwrap_err().length(), 5);
         for (bytes, expected) in [
             (1, PacketNumberLength::One),
             (2, PacketNumberLength::Two),
@@ -352,11 +393,11 @@ mod tests {
         );
         assert!(matches!(
             TruncatedPacketNumber::encode(pn(1 << 31), Some(PacketNumber::ZERO)),
-            Err(EncodePacketNumberError::RangeTooLarge { num_unacked }) if num_unacked == 1 << 31
+            Err(EncodePacketNumberError::RangeTooLarge { source }) if source.num_unacked() == 1 << 31
         ));
         assert!(matches!(
             TruncatedPacketNumber::encode(PacketNumber::MAX, None),
-            Err(EncodePacketNumberError::RangeTooLarge { num_unacked }) if num_unacked == 1 << 62
+            Err(EncodePacketNumberError::RangeTooLarge { source }) if source.num_unacked() == 1 << 62
         ));
         assert!(matches!(
             TruncatedPacketNumber::encode(pn(5), Some(pn(5))),
@@ -418,7 +459,10 @@ mod tests {
     #[test]
     fn new_rejects_values_wider_than_the_field() {
         let error = TruncatedPacketNumber::new(0x100, len(1)).unwrap_err();
-        assert_eq!((error.value, error.len), (0x100, PacketNumberLength::One));
+        assert_eq!(
+            (error.value(), error.length()),
+            (0x100, PacketNumberLength::One)
+        );
         assert_eq!(
             TruncatedPacketNumber::new(0xff_ffff, len(3))
                 .unwrap()

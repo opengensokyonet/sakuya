@@ -1,7 +1,7 @@
 //! The Retry integrity tag (RFC 9001 §5.8).
 
 use sakuya_wire::connection_id::ConnectionId;
-use snafu::{IntoError, OptionExt, Snafu};
+use snafu::{IntoError, OptionExt, ResultExt, Snafu};
 
 use crate::backend::{
     AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadAlgorithm, AeadKey, AeadOpenError, AuthenticationFailed,
@@ -61,11 +61,12 @@ pub fn verify_retry_integrity_tag<B: CryptoBackend>(
     odcid: &ConnectionId,
     retry_packet: &[u8],
 ) -> Result<(), VerifyRetryIntegrityError> {
-    let (retry_without_tag, tag) = retry_packet.split_last_chunk::<AEAD_TAG_LEN>().context(
-        verify_retry_integrity_error::PacketTooShortSnafu {
+    let (retry_without_tag, tag) = retry_packet
+        .split_last_chunk::<AEAD_TAG_LEN>()
+        .context(RetryPacketTooShortSnafu {
             packet_len: retry_packet.len(),
-        },
-    )?;
+        })
+        .context(verify_retry_integrity_error::PacketTooShortSnafu)?;
     match retry_key(backend).open_in_place(
         &RETRY_NONCE,
         &pseudo_packet(odcid, retry_without_tag),
@@ -106,10 +107,10 @@ fn pseudo_packet(odcid: &ConnectionId, retry_without_tag: &[u8]) -> Vec<u8> {
 #[snafu(module(verify_retry_integrity_error))]
 pub enum VerifyRetryIntegrityError {
     /// The packet is shorter than the tag.
-    #[snafu(display("retry packet of {packet_len} bytes is shorter than its 16-byte tag"))]
+    #[snafu(display("cannot verify the retry integrity tag"))]
     PacketTooShort {
-        /// Length of the packet given.
-        packet_len: usize,
+        /// The length check that failed.
+        source: RetryPacketTooShort,
     },
     /// The tag does not match.
     #[snafu(display("retry integrity tag does not match"))]
@@ -117,6 +118,23 @@ pub enum VerifyRetryIntegrityError {
         /// The backend's failure.
         source: AuthenticationFailed,
     },
+}
+
+/// A Retry packet is shorter than its 16-byte integrity tag.
+///
+/// Only [`verify_retry_integrity_tag`] constructs it, for a packet shorter
+/// than the tag.
+#[derive(Debug, Snafu)]
+#[snafu(display("retry packet of {packet_len} bytes is shorter than its 16-byte tag"))]
+pub struct RetryPacketTooShort {
+    packet_len: usize,
+}
+
+impl RetryPacketTooShort {
+    /// Length of the packet given, below 16.
+    pub const fn packet_len(&self) -> usize {
+        self.packet_len
+    }
 }
 
 #[cfg(all(test, feature = "ring"))]

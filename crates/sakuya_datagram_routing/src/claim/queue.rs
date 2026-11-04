@@ -147,14 +147,24 @@ impl<T> DatagramDeliveryQueue<T> {
 }
 
 /// A queue capacity exceeds [`DatagramDeliveryQueue::MAX_CAPACITY`].
+///
+/// Only [`DatagramDeliveryQueue::new`] constructs it, for a capacity it
+/// refuses.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display(
     "queue capacity of {capacity} items exceeds the maximum of {} items",
     DatagramDeliveryQueue::<()>::MAX_CAPACITY
 ))]
 pub struct QueueCapacityError {
-    /// The rejected capacity.
-    pub capacity: NonZeroUsize,
+    capacity: NonZeroUsize,
+}
+
+impl QueueCapacityError {
+    /// The rejected capacity, above
+    /// [`DatagramDeliveryQueue::MAX_CAPACITY`].
+    pub const fn capacity(self) -> NonZeroUsize {
+        self.capacity
+    }
 }
 
 impl<T> fmt::Debug for DatagramDeliveryQueue<T> {
@@ -223,7 +233,7 @@ mod tests {
     use std::rc::Rc;
     use std::task::{Context, Poll, Waker};
 
-    use super::{DatagramDeliveryQueue, QueueCapacityError};
+    use super::DatagramDeliveryQueue;
 
     struct Tracked(Rc<Cell<usize>>);
 
@@ -242,10 +252,10 @@ mod tests {
         let largest = NonZeroUsize::new(DatagramDeliveryQueue::<()>::MAX_CAPACITY).unwrap();
         let too_large = largest.checked_add(1).unwrap();
         assert_eq!(
-            DatagramDeliveryQueue::<()>::new(too_large).unwrap_err(),
-            QueueCapacityError {
-                capacity: too_large
-            }
+            DatagramDeliveryQueue::<()>::new(too_large)
+                .unwrap_err()
+                .capacity(),
+            too_large
         );
         assert!(DatagramDeliveryQueue::<()>::new(NonZeroUsize::MIN).is_ok());
     }

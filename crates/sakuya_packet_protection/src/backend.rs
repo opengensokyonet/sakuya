@@ -5,7 +5,7 @@
 //! updates, header protection, payload protection and the Retry integrity
 //! tag — uses cryptography only through it.
 
-use snafu::{Snafu, ensure};
+use snafu::{ResultExt, Snafu, ensure};
 
 #[cfg(feature = "ring")]
 pub mod ring;
@@ -136,18 +136,9 @@ pub trait CryptoBackend {
         context: &[u8],
         output: &mut [u8],
     ) -> Result<(), ExpandLabelError> {
-        const PREFIX: &[u8] = b"tls13 ";
-        let label_len = PREFIX.len() + label.len();
-        ensure!(
-            label_len <= 255,
-            expand_label_error::LabelTooLongSnafu { label_len }
-        );
-        ensure!(
-            context.len() <= 255,
-            expand_label_error::ContextTooLongSnafu {
-                context_len: context.len()
-            }
-        );
+        ExpandLabelTooLong::check(label).context(expand_label_error::LabelTooLongSnafu)?;
+        ExpandContextTooLong::check(context).context(expand_label_error::ContextTooLongSnafu)?;
+        let label_len = EXPAND_LABEL_PREFIX.len() + label.len();
         let max_output_len = 255 * kdf.hash_len();
         ensure!(
             output.len() <= max_output_len,
@@ -166,7 +157,7 @@ pub trait CryptoBackend {
             &[
                 &length,
                 &[label_len],
-                PREFIX,
+                EXPAND_LABEL_PREFIX,
                 label,
                 &[context_len],
                 context,
@@ -279,16 +270,16 @@ pub struct AeadInputTooLong {
 #[snafu(module(expand_label_error))]
 pub enum ExpandLabelError {
     /// The label with its `"tls13 "` prefix does not fit its one-byte length.
-    #[snafu(display("label of {label_len} bytes with its prefix exceeds 255 bytes"))]
+    #[snafu(display("cannot expand the label"))]
     LabelTooLong {
-        /// Length of the prefixed label.
-        label_len: usize,
+        /// The length check that failed.
+        source: ExpandLabelTooLong,
     },
     /// The context does not fit its one-byte length.
-    #[snafu(display("context of {context_len} bytes exceeds 255 bytes"))]
+    #[snafu(display("cannot expand the label"))]
     ContextTooLong {
-        /// Length of the context.
-        context_len: usize,
+        /// The length check that failed.
+        source: ExpandContextTooLong,
     },
     /// HKDF-Expand cannot produce that much output.
     #[snafu(transparent)]
@@ -296,6 +287,68 @@ pub enum ExpandLabelError {
         /// The length check that failed.
         source: ExpandOutputTooLong,
     },
+}
+
+/// The prefix HKDF-Expand-Label puts before every label (RFC 8446 §7.1).
+const EXPAND_LABEL_PREFIX: &[u8] = b"tls13 ";
+
+/// An HKDF-Expand-Label label with its `"tls13 "` prefix exceeds the 255
+/// bytes its one-byte length can state.
+///
+/// Only [`check`](Self::check) constructs it, when the check fails.
+#[derive(Debug, Snafu)]
+#[snafu(display("label of {label_len} bytes with its prefix exceeds 255 bytes"))]
+pub struct ExpandLabelTooLong {
+    label_len: usize,
+}
+
+impl ExpandLabelTooLong {
+    /// Checks that `label`, with the `"tls13 "` prefix, fits in 255 bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`ExpandLabelTooLong`] if the prefixed label is longer.
+    pub fn check(label: &[u8]) -> Result<(), Self> {
+        let label_len = EXPAND_LABEL_PREFIX.len().saturating_add(label.len());
+        ensure!(label_len <= 255, ExpandLabelTooLongSnafu { label_len });
+        Ok(())
+    }
+
+    /// Length of the prefixed label, above 255.
+    pub const fn label_len(&self) -> usize {
+        self.label_len
+    }
+}
+
+/// An HKDF-Expand-Label context exceeds the 255 bytes its one-byte length
+/// can state.
+///
+/// Only [`check`](Self::check) constructs it, when the check fails.
+#[derive(Debug, Snafu)]
+#[snafu(display("context of {context_len} bytes exceeds 255 bytes"))]
+pub struct ExpandContextTooLong {
+    context_len: usize,
+}
+
+impl ExpandContextTooLong {
+    /// Checks that `context` fits in 255 bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`ExpandContextTooLong`] if `context` is longer.
+    pub fn check(context: &[u8]) -> Result<(), Self> {
+        let context_len = context.len();
+        ensure!(
+            context_len <= 255,
+            ExpandContextTooLongSnafu { context_len }
+        );
+        Ok(())
+    }
+
+    /// Length of the context, above 255.
+    pub const fn context_len(&self) -> usize {
+        self.context_len
+    }
 }
 
 /// AEAD authentication failed: the tag does not match the ciphertext and the
