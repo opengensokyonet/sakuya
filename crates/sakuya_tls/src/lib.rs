@@ -16,6 +16,7 @@
 //! - [`cipher_suite`], [`version`], [`alert`]: cipher suites, protocol
 //!   versions and alert descriptions.
 //! - [`vector`]: failures shared by the length-prefixed fields.
+//! - [`clock`]: the current time, as a capability.
 //! - [`server`], [`client`]: the capabilities each role's handshake
 //!   consults, such as the choice of parameters and what a ClientHello
 //!   offers, with implementations for plain Web connections.
@@ -36,6 +37,7 @@
 pub mod alert;
 pub mod cipher_suite;
 pub mod client;
+pub mod clock;
 pub mod code_point;
 pub mod crypto;
 pub mod extension;

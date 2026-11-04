@@ -11,6 +11,7 @@ use rustls_pki_types::DnsName;
 use snafu::Snafu;
 
 pub mod offering;
+pub mod ticket;
 
 /// The server a client connects to: a DNS host name, which the ClientHello
 /// sends in `server_name` and the server's certificate must be valid for.
