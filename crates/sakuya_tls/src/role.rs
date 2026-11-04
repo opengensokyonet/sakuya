@@ -18,7 +18,7 @@ mod sealed {
 
 /// A role of a handshake: implemented by [`Server`] and [`Client`] alone.
 pub trait HandshakeRole: sealed::Sealed + 'static {
-    /// What the role holds back from the Master Secret step until the
+    /// What the role holds back from the Main Secret step until the
     /// handshake completes.
     ///
     /// A server must not process 1-RTT packets before the handshake completes

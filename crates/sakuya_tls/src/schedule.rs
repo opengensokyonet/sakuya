@@ -11,12 +11,12 @@
 //! Transcript ── early_secret ──────────▶ EarlySecret ────┐
 //!            └─ early_secret_with_psk ─▶ PskEarlySecret ─┴─ server_hello ─▶ HandshakeSecret
 //!
-//! server: HandshakeSecret<Server> ── server_finished ─▶ MasterSecret<Server>
-//!             ── client_finished(received)? ─▶ Resumption<Server> + Completed
+//! server: HandshakeSecret<Server> ── server_finished ─▶ MainSecret<Server>
+//!             ── client_finished(received)? ─▶ ResumptionSecret<Server> + Completed
 //! client: HandshakeSecret<Client> ── authentication ─▶ CertificateAuth ── verify_certificate_verify? ─┐
 //!                                                  └─▶ Authenticated ◀─────────────────────────────────┘
-//!             Authenticated ── server_finished(received)? ─▶ MasterSecret<Client>
-//!             ── client_finished ─▶ Resumption<Client>
+//!             Authenticated ── server_finished(received)? ─▶ MainSecret<Client>
+//!             ── client_finished ─▶ ResumptionSecret<Client>
 //! ```
 //!
 //! The bytes of a message go into the transcript as they are, the same
@@ -551,24 +551,24 @@ impl<R: HandshakeRole, C: TlsCrypto + Clone> HandshakeSecret<R, C> {
         self.mode == Mode::Psk
     }
 
-    /// Derives the Master Secret and the 1-RTT secrets, with the server's
+    /// Derives the Main Secret and the 1-RTT secrets, with the server's
     /// Finished in the transcript.
-    fn master(self) -> (MasterParts<C>, TrafficSecret, TrafficSecret) {
+    fn main_secret(self) -> (MainParts<C>, TrafficSecret, TrafficSecret) {
         let chain = self.chain;
         let derived = chain.derive_secret(&self.handshake, b"derived", &chain.empty_hash());
         let zeros = chain.zeros();
-        let master = chain.extract(derived.as_bytes(), zeros.as_bytes());
+        let main = chain.extract(derived.as_bytes(), zeros.as_bytes());
         let hash = chain.current();
-        let client = chain.derive_secret(&master, b"c ap traffic", &hash);
-        let server = chain.derive_secret(&master, b"s ap traffic", &hash);
-        let exporter_master = chain.derive_secret(&master, b"exp master", &hash);
+        let client = chain.derive_secret(&main, b"c ap traffic", &hash);
+        let server = chain.derive_secret(&main, b"s ap traffic", &hash);
+        let exporter = chain.derive_secret(&main, b"exp master", &hash);
         let (client, server) = (chain.traffic(&client), chain.traffic(&server));
         (
-            MasterParts {
+            MainParts {
                 chain,
-                master,
+                main,
                 client_handshake: self.client,
-                exporter_master,
+                exporter,
             },
             client,
             server,
@@ -584,19 +584,19 @@ impl<C: TlsCrypto + Clone> HandshakeSecret<Server, C> {
     }
 
     /// Writes the server's Finished, which comes before the client's, and
-    /// derives the Master Secret: the encoding of the Finished message, in
+    /// derives the Main Secret: the encoding of the Finished message, in
     /// the transcript now, and the server's 1-RTT secret to send with.
     pub fn server_finished(
         mut self,
     ) -> (
-        MasterSecret<Server, C>,
+        MainSecret<Server, C>,
         HandshakeMessage,
         OneRttSendTrafficSecret,
     ) {
         let finished = self.chain.write_finished(&self.server);
-        let (parts, client, server) = self.master();
+        let (parts, client, server) = self.main_secret();
         (
-            MasterSecret {
+            MainSecret {
                 parts,
                 withheld: client,
             },
@@ -606,21 +606,21 @@ impl<C: TlsCrypto + Clone> HandshakeSecret<Server, C> {
     }
 }
 
-/// What the Master Secret step holds for both roles.
-struct MasterParts<C: TlsCrypto> {
+/// What the Main Secret step holds for both roles.
+struct MainParts<C: TlsCrypto> {
     chain: Chain<C>,
-    master: Secret,
+    main: Secret,
     client_handshake: Secret,
-    exporter_master: Secret,
+    exporter: Secret,
 }
 
-/// The Master Secret: from the server's Finished to the client's.
-pub struct MasterSecret<R: HandshakeRole, C: TlsCrypto> {
-    parts: MasterParts<C>,
+/// The Main Secret: from the server's Finished to the client's.
+pub struct MainSecret<R: HandshakeRole, C: TlsCrypto> {
+    parts: MainParts<C>,
     withheld: R::Withheld,
 }
 
-impl<R: HandshakeRole, C: TlsCrypto + Clone> MasterSecret<R, C> {
+impl<R: HandshakeRole, C: TlsCrypto + Clone> MainSecret<R, C> {
     /// Adds the bytes of a message: the client's Certificate and
     /// CertificateVerify, as they are sent or received.
     pub fn add(mut self, message: &[u8]) -> Self {
@@ -629,7 +629,7 @@ impl<R: HandshakeRole, C: TlsCrypto + Clone> MasterSecret<R, C> {
     }
 
     /// The exporter of the connection, with a copy of
-    /// exporter_master_secret.
+    /// exporter_secret.
     pub fn exporter(&self) -> Exporter<C> {
         let chain = &self.parts.chain;
         Exporter {
@@ -637,27 +637,27 @@ impl<R: HandshakeRole, C: TlsCrypto + Clone> MasterSecret<R, C> {
             hash: chain.hash,
             // invariant: the secret is as long as the hash, which a secret
             // holds.
-            secret: Secret::new(self.parts.exporter_master.as_bytes()).expect("a hash-long secret"),
+            secret: Secret::new(self.parts.exporter.as_bytes()).expect("a hash-long secret"),
         }
     }
 }
 
-impl<C: TlsCrypto> MasterParts<C> {
-    /// Derives resumption_master_secret, with the client's Finished in the
+impl<C: TlsCrypto> MainParts<C> {
+    /// Derives resumption_secret, with the client's Finished in the
     /// transcript.
-    fn resumption<R>(self) -> Resumption<R, C> {
+    fn resumption<R>(self) -> ResumptionSecret<R, C> {
         let chain = self.chain;
-        let resumption_master = chain.derive_secret(&self.master, b"res master", &chain.current());
-        Resumption {
+        let resumption = chain.derive_secret(&self.main, b"res master", &chain.current());
+        ResumptionSecret {
             backend: chain.backend,
             hash: chain.hash,
-            resumption_master,
+            resumption,
             role: PhantomData,
         }
     }
 }
 
-impl<C: TlsCrypto + Clone> MasterSecret<Server, C> {
+impl<C: TlsCrypto + Clone> MainSecret<Server, C> {
     /// Checks the client's Finished and adds it: the handshake is complete,
     /// and the client's 1-RTT secret is handed over with the exporter.
     ///
@@ -668,7 +668,7 @@ impl<C: TlsCrypto + Clone> MasterSecret<Server, C> {
     pub fn client_finished(
         mut self,
         received: &HandshakeMessage,
-    ) -> Result<(Resumption<Server, C>, Completed<C>), FinishedError> {
+    ) -> Result<(ResumptionSecret<Server, C>, Completed<C>), FinishedError> {
         let parts = &mut self.parts;
         parts
             .chain
@@ -685,35 +685,35 @@ impl<C: TlsCrypto + Clone> MasterSecret<Server, C> {
     }
 }
 
-impl<C: TlsCrypto + Clone> MasterSecret<Client, C> {
+impl<C: TlsCrypto + Clone> MainSecret<Client, C> {
     /// Writes the client's Finished, which comes after the server's: the
     /// encoding of the Finished message, in the transcript now.
-    pub fn client_finished(mut self) -> (Resumption<Client, C>, HandshakeMessage) {
+    pub fn client_finished(mut self) -> (ResumptionSecret<Client, C>, HandshakeMessage) {
         let parts = &mut self.parts;
         let finished = parts.chain.write_finished(&parts.client_handshake);
         (self.parts.resumption(), finished)
     }
 }
 
-/// After the client's Finished: resumption_master_secret, from which the
+/// After the client's Finished: resumption_secret, from which the
 /// PSK of each ticket is derived.
-pub struct Resumption<R, C: TlsCrypto> {
+pub struct ResumptionSecret<R, C: TlsCrypto> {
     backend: C,
     hash: Supported<C, HashAlgorithm>,
-    resumption_master: Secret,
+    resumption: Secret,
     role: PhantomData<R>,
 }
 
-impl<R: HandshakeRole, C: TlsCrypto> Resumption<R, C> {
+impl<R: HandshakeRole, C: TlsCrypto> ResumptionSecret<R, C> {
     /// The PSK of the ticket with `nonce`:
-    /// HKDF-Expand-Label(resumption_master_secret, "resumption", nonce,
+    /// HKDF-Expand-Label(resumption_secret, "resumption", nonce,
     /// Hash.length) (RFC 8446 §4.6.1).
     pub fn ticket_psk<N: AsRef<[u8]>>(&self, nonce: &TicketNonce<N>) -> ResumptionPsk {
         let len = ExpandLength::hash_len(self.hash.algorithm());
         ResumptionPsk(expand_label(
             &self.backend,
             self.hash,
-            &self.resumption_master,
+            &self.resumption,
             b"resumption",
             nonce.nonce().as_ref(),
             len,
@@ -763,7 +763,7 @@ impl<L> ExporterLabel<L> {
     }
 }
 
-/// The exporter of a connection (RFC 8446 §7.5): exporter_master_secret
+/// The exporter of a connection (RFC 8446 §7.5): exporter_secret
 /// with the hash and the backend.
 pub struct Exporter<C: TlsCrypto> {
     backend: C,
@@ -773,7 +773,7 @@ pub struct Exporter<C: TlsCrypto> {
 
 impl<C: TlsCrypto> Exporter<C> {
     /// TLS-Exporter(label, context, len): HKDF-Expand-Label of
-    /// Derive-Secret(exporter_master_secret, label, "") with "exporter" and
+    /// Derive-Secret(exporter_secret, label, "") with "exporter" and
     /// the hash of `context`.
     pub fn export<L: AsRef<[u8]>>(
         &self,

@@ -175,7 +175,7 @@ fn s3_server() {
 }
 
 /// The server's chain of §3 up to the client's Finished.
-fn s3_server_master() -> sakuya_tls::schedule::MasterSecret<Server, TraceBackend> {
+fn s3_server_master() -> sakuya_tls::schedule::MainSecret<Server, TraceBackend> {
     let backend = TraceBackend::new(key(s3::SERVER_PRIVATE), None);
     Transcript::<Server, _>::new(&backend, backend.sha256())
         .add(&hex(s3::CLIENT_HELLO))
