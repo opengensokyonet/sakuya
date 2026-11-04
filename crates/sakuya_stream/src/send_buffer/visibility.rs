@@ -1,7 +1,7 @@
 //! The per-stream visibility settlement ([`VisibilitySettlement`]).
 use super::covered_bytes::CoveredBytes;
 use super::{ExposeUsageError, ExposedContent, UsageBeyondWrittenEndError, expose_usage_error};
-use crate::connection_send_credit::{ConnectionCreditReservation, ConnectionSendFlowController};
+use crate::connection_send_credit::ConnectionCreditReservation;
 use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
 use bytes::Bytes;
 use sakuya_wire::var_int::VarInt;
@@ -34,12 +34,12 @@ use std::collections::VecDeque;
 /// Coverage grows only while the final size is open. Fixing cancels the
 /// coverage beyond the final size; fixing an exposed final size again with
 /// the same value cancels what remains beyond it.
-#[derive(Debug, Default)]
-pub struct VisibilitySettlement {
+#[derive(Debug)]
+pub struct VisibilitySettlement<R> {
     exposure_end: VarInt,
     final_size: FinalSizeState,
     /// The reservations above the exposure end, in stream order.
-    coverage: VecDeque<ConnectionCreditReservation>,
+    coverage: VecDeque<R>,
     /// The sum of the amounts in `coverage`.
     covered: VarInt,
 }
@@ -65,7 +65,18 @@ impl FinalSizeState {
     }
 }
 
-impl VisibilitySettlement {
+impl<R> Default for VisibilitySettlement<R> {
+    fn default() -> Self {
+        Self {
+            exposure_end: VarInt::ZERO,
+            final_size: FinalSizeState::Open,
+            coverage: VecDeque::new(),
+            covered: VarInt::ZERO,
+        }
+    }
+}
+
+impl<R: ConnectionCreditReservation> VisibilitySettlement<R> {
     /// Creates the settlement of a stream with nothing exposed or covered.
     pub fn new() -> Self {
         Self::default()
@@ -112,7 +123,7 @@ impl VisibilitySettlement {
     /// [`coverage_end`](Self::coverage_end), or if the coverage would end
     /// beyond [`VarInt::MAX`]; the error hands `data` back and nothing
     /// changes.
-    pub fn cover(&mut self, offset: VarInt, data: CoveredBytes) -> Result<Bytes, CoverError> {
+    pub fn cover(&mut self, offset: VarInt, data: CoveredBytes<R>) -> Result<Bytes, CoverError<R>> {
         if let Some(final_size) = self.final_size.established() {
             return cover_error::FinalSizeEstablishedSnafu { final_size, data }.fail();
         }
@@ -171,7 +182,13 @@ impl VisibilitySettlement {
                 self.coverage.pop_back();
                 amount
             } else {
-                drop(last.split_owned(beyond));
+                match last.split_off(beyond) {
+                    Ok(part) => drop(part),
+                    // invariant: `beyond` is below the amount `last` owns.
+                    Err(error) => {
+                        unreachable!("cannot cancel coverage beyond the final size: {error}")
+                    }
+                }
                 beyond
             };
             beyond = beyond.saturating_sub(cancelled);
@@ -186,8 +203,7 @@ impl VisibilitySettlement {
     /// Checks, before anything changes, that the usage end does not pass the
     /// written end or a fixed or exposed final size, that a final size agrees
     /// with an established one and is not below the exposure end, and that
-    /// the coverage reaches the usage end with reservations `connection`
-    /// granted. Then commits the coverage, advances the exposure end and, for
+    /// the coverage reaches the usage end. Then commits the coverage, advances the exposure end and, for
     /// an end frame, records the exposed final size.
     ///
     /// # Errors
@@ -198,7 +214,6 @@ impl VisibilitySettlement {
         usage_end: VarInt,
         content: ExposedContent,
         written_end: VarInt,
-        connection: &mut ConnectionSendFlowController,
     ) -> Result<VarInt, ExposeUsageError> {
         UsageBeyondWrittenEndError::check(usage_end, written_end)
             .context(expose_usage_error::BeyondWrittenEndSnafu)?;
@@ -220,8 +235,7 @@ impl VisibilitySettlement {
         if newly_exposed > VarInt::ZERO {
             UsageBeyondCoverageError::check(usage_end, self.coverage_end())
                 .context(expose_usage_error::BeyondCoverageSnafu)?;
-            self.check_owner(newly_exposed, connection)?;
-            self.commit_front(newly_exposed, connection);
+            self.commit_front(newly_exposed);
             self.exposure_end = usage_end;
         }
         if content.announces_final_size() {
@@ -230,27 +244,8 @@ impl VisibilitySettlement {
         Ok(newly_exposed)
     }
 
-    /// Checks that `connection` granted every reservation the first `amount`
-    /// of coverage takes from.
-    fn check_owner(
-        &self,
-        amount: VarInt,
-        connection: &ConnectionSendFlowController,
-    ) -> Result<(), ExposeUsageError> {
-        let mut remaining = amount;
-        for reservation in &self.coverage {
-            if remaining == VarInt::ZERO {
-                break;
-            }
-            ForeignCoverageError::check(connection, reservation)
-                .context(expose_usage_error::ForeignReservationSnafu)?;
-            remaining = remaining.saturating_sub(reservation.amount());
-        }
-        Ok(())
-    }
-
     /// Commits the first `amount` of coverage, which the caller checked.
-    fn commit_front(&mut self, amount: VarInt, connection: &mut ConnectionSendFlowController) {
+    fn commit_front(&mut self, amount: VarInt) {
         let mut remaining = amount;
         while remaining > VarInt::ZERO {
             let Some(front) = self.coverage.front_mut() else {
@@ -259,10 +254,14 @@ impl VisibilitySettlement {
             let part = if front.amount() <= remaining {
                 self.coverage.pop_front()
             } else {
-                Some(front.split_owned(remaining))
+                match front.split_off(remaining) {
+                    Ok(part) => Some(part),
+                    // invariant: `remaining` is below the amount `front` owns.
+                    Err(error) => unreachable!("cannot split coverage to commit: {error}"),
+                }
             };
             let Some(part) = part else { break };
-            let committed = connection.commit_owned(part);
+            let committed = part.commit();
             remaining = remaining.saturating_sub(committed);
             self.covered = self.covered.saturating_sub(committed);
         }
@@ -274,14 +273,14 @@ impl VisibilitySettlement {
 /// through [`into_data`](Self::into_data).
 #[derive(Debug, Snafu)]
 #[snafu(module(cover_error), visibility(pub(crate)))]
-pub enum CoverError {
+pub enum CoverError<R> {
     /// A final size is fixed or exposed; coverage no longer grows.
     #[snafu(display("coverage cannot grow after the final size {final_size} is established"))]
     FinalSizeEstablished {
         /// The established final size.
         final_size: VarInt,
         /// The rejected data.
-        data: CoveredBytes,
+        data: CoveredBytes<R>,
     },
     /// The data does not start at the coverage end.
     #[snafu(display(
@@ -293,7 +292,7 @@ pub enum CoverError {
         /// The coverage end.
         coverage_end: VarInt,
         /// The rejected data.
-        data: CoveredBytes,
+        data: CoveredBytes<R>,
     },
     /// The coverage would end beyond [`VarInt::MAX`].
     #[snafu(display("data at offset {offset} would end beyond the largest stream offset"))]
@@ -301,13 +300,13 @@ pub enum CoverError {
         /// The offset given for the data.
         offset: VarInt,
         /// The rejected data.
-        data: CoveredBytes,
+        data: CoveredBytes<R>,
     },
 }
 
-impl CoverError {
+impl<R> CoverError<R> {
     /// The rejected data, unchanged.
-    pub fn into_data(self) -> CoveredBytes {
+    pub fn into_data(self) -> CoveredBytes<R> {
         match self {
             Self::FinalSizeEstablished { data, .. }
             | Self::NotContiguous { data, .. }
@@ -411,32 +410,5 @@ impl UsageBeyondCoverageError {
     /// The end of the stored coverage.
     pub const fn coverage_end(self) -> VarInt {
         self.coverage_end
-    }
-}
-
-/// Coverage to commit was granted by another connection send flow
-/// controller than the one passed in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(display("coverage belongs to another connection send flow controller"))]
-pub struct ForeignCoverageError {
-    // Keeps the error constructible only by `check`.
-    _private: (),
-}
-
-impl ForeignCoverageError {
-    /// Checks that `connection` granted `reservation`.
-    ///
-    /// # Errors
-    ///
-    /// [`ForeignCoverageError`] if another controller granted it.
-    pub fn check(
-        connection: &ConnectionSendFlowController,
-        reservation: &ConnectionCreditReservation,
-    ) -> Result<(), Self> {
-        ensure!(
-            connection.owns(reservation),
-            ForeignCoverageSnafu { _private: () }
-        );
-        Ok(())
     }
 }

@@ -9,7 +9,9 @@ use super::termination::{
     DefaultSendTerminationPolicy, FinalSizeRequest, SendTerminationContext, SendTerminationEvent,
     SendTerminationPolicy, TerminationAction,
 };
-use crate::connection_send_credit::ConnectionSendFlowController;
+use crate::connection_send_credit::{
+    AtomicConnectionCreditReservation, ConnectionCreditReservation,
+};
 use crate::send_buffer::covered_bytes::CoveredBytes;
 use crate::send_buffer::offset_map::OffsetMapStreamSendBuffer;
 use crate::send_buffer::{
@@ -36,11 +38,13 @@ pub struct SendComposition<B, F, T> {
 }
 
 /// The default composition: [`OffsetMapStreamSendBuffer`],
-/// [`DefaultSendFlowControlPolicy`] and [`DefaultSendTerminationPolicy`].
+/// [`DefaultSendFlowControlPolicy`] and [`DefaultSendTerminationPolicy`],
+/// over the connection credit reservation `R`
+/// ([`AtomicConnectionCreditReservation`] by default).
 ///
 /// It is a replaceable base, not behaviour every policy must share.
-pub type DefaultSendComposition = SendComposition<
-    OffsetMapStreamSendBuffer,
+pub type DefaultSendComposition<R = AtomicConnectionCreditReservation> = SendComposition<
+    OffsetMapStreamSendBuffer<R>,
     DefaultSendFlowControlPolicy,
     DefaultSendTerminationPolicy,
 >;
@@ -56,7 +60,7 @@ impl<B, F, T> SendComposition<B, F, T> {
     }
 }
 
-impl DefaultSendComposition {
+impl<R: ConnectionCreditReservation> DefaultSendComposition<R> {
     /// The default composition with an empty buffer; an abandoned stream
     /// writer leads to a reset with `abandon_code`.
     pub fn with_abandon_code(abandon_code: ApplicationErrorCode) -> Self {
@@ -69,6 +73,8 @@ impl DefaultSendComposition {
 }
 
 impl<B: StreamSendBuffer, F, T> StreamSendBuffer for SendComposition<B, F, T> {
+    type Reservation = B::Reservation;
+
     fn written_end(&self) -> VarInt {
         self.buffer.written_end()
     }
@@ -77,7 +83,10 @@ impl<B: StreamSendBuffer, F, T> StreamSendBuffer for SendComposition<B, F, T> {
         self.buffer.exposure_end()
     }
 
-    fn append(&mut self, data: CoveredBytes) -> Result<(), AppendError> {
+    fn append(
+        &mut self,
+        data: CoveredBytes<B::Reservation>,
+    ) -> Result<(), AppendError<B::Reservation>> {
         self.buffer.append(data)
     }
 
@@ -89,10 +98,8 @@ impl<B: StreamSendBuffer, F, T> StreamSendBuffer for SendComposition<B, F, T> {
         &mut self,
         usage_end: VarInt,
         content: ExposedContent,
-        connection: &mut ConnectionSendFlowController,
     ) -> Result<VarInt, ExposeUsageError> {
-        self.buffer
-            .expose_usage_through(usage_end, content, connection)
+        self.buffer.expose_usage_through(usage_end, content)
     }
 
     fn select(&mut self, constraints: SelectionConstraints) -> Selection {

@@ -25,7 +25,7 @@
 //! the caller to retry once the cause may have changed.
 use super::{SendEndState, StreamResetError, StreamSender, WriteLimit};
 use crate::connection::ConnectionClosedError;
-use crate::connection_send_credit::ConnectionSendFlowController;
+use crate::connection_send_credit::{ConnectionCreditReservation, ConnectionSendFlowController};
 use crate::send::flow_control::{AdmissionGuard, SendFlowControlPolicy, WriteAttempt};
 use crate::send::termination::{SendTerminationEvent, SendTerminationPolicy};
 use crate::send_buffer::StreamSendBuffer;
@@ -159,9 +159,12 @@ pub enum FlushError {
     },
 }
 
-impl<C> StreamSender<C>
+impl<C, K> StreamSender<C, K>
 where
-    C: StreamSendBuffer + SendFlowControlPolicy + SendTerminationPolicy,
+    K: ConnectionSendFlowController,
+    C: StreamSendBuffer<Reservation = K::Reservation>
+        + SendFlowControlPolicy
+        + SendTerminationPolicy,
 {
     /// Makes one write attempt with `source`: hands the prefix that admission
     /// and connection credit allow to the send buffer and advances `source`
@@ -187,11 +190,12 @@ where
     pub fn write<S: Buf + ?Sized>(
         &mut self,
         source: &mut S,
-        connection: &mut ConnectionSendFlowController,
     ) -> Result<WriteOutcome, WriteError<C::WriteLimitReason>> {
         self.check_connection_open()?;
         match self.end_state() {
-            SendEndState::Reset { .. } => return Err(StreamResetError.into()),
+            SendEndState::Reset { .. } | SendEndState::ResetAt { .. } => {
+                return Err(StreamResetError.into());
+            }
             SendEndState::Closed { .. } => return write_error::ClosedSnafu.fail(),
             SendEndState::Open => {}
         }
@@ -232,7 +236,7 @@ where
             requested,
             stream_available,
             write_limit_remaining,
-            connection_available: connection.available(),
+            connection_available: self.connection.available(),
             ceiling,
         };
 
@@ -248,7 +252,10 @@ where
             panic!("{violation}");
         }
 
-        let Some(reservation) = connection.reserve_up_to(self.stream_id, guard.granted()) else {
+        let Some(reservation) = self
+            .connection
+            .reserve_up_to(self.stream_id, guard.granted())
+        else {
             self.composition.on_admission_abandoned(guard, &context);
             return Ok(WriteOutcome::Wait(WriteWait::ConnectionCredit));
         };
@@ -294,7 +301,7 @@ where
     /// reset is in effect, even if nothing remains to deliver.
     pub fn flush(&self) -> Result<(), FlushError> {
         self.check_connection_open()?;
-        if let SendEndState::Reset { .. } = self.end_state() {
+        if let SendEndState::Reset { .. } | SendEndState::ResetAt { .. } = self.end_state() {
             return Err(StreamResetError.into());
         }
         Ok(())

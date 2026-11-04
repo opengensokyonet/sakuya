@@ -19,23 +19,31 @@
 //!
 //! Each operation takes `&mut self` and runs to completion: an operation has
 //! exclusive access to the whole stream sender. The connection send flow
-//! controller is passed in by the composing code for the operations that
-//! reserve or commit connection credit. Nothing here waits: an operation that
+//! controller ([`ConnectionSendFlowController`]) is shared by all streams of
+//! the connection; the stream sender holds a shared handle to it, given when
+//! it is created, for the operations that reserve connection credit. Nothing
+//! here waits: an operation that
 //! would have to wait for credit or admission reports that instead
 //! ([`write::WriteOutcome::Wait`]). Polling, wake-ups, the stream writer
 //! handle, send selection and feedback dispatch are not part of this module.
 use crate::connection::{CloseReason, ConnectionClosedError};
 use crate::connection_send_credit::ConnectionSendFlowController;
-use crate::send_buffer::visibility::{ForeignCoverageError, UsageBeyondCoverageError};
+use crate::send_buffer::visibility::UsageBeyondCoverageError;
 use crate::send_buffer::{
     ExposeUsageError, ExposedContent, StreamSendBuffer, UsageBeyondWrittenEndError,
 };
-use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
+use crate::stream_end::BeyondFinalSizeError;
+use core::ops::Deref;
 use flow_control::{SendFlowContext, SendFlowControlPolicy, StreamCreditEvent};
 use sakuya_wire::application_error::ApplicationErrorCode;
+use sakuya_wire::frame::{
+    UndecidedLength, reset_stream::ResetStreamFrame, reset_stream_at::ResetStreamAtFrame,
+    stream::StreamFrame,
+};
 use sakuya_wire::stream_id::StreamId;
-use sakuya_wire::var_int::VarInt;
+use sakuya_wire::var_int::{VarInt, VarIntField};
 use snafu::{IntoError, ResultExt, Snafu};
+use std::sync::Arc;
 use termination::{SendTerminationContext, SendTerminationEvent, SendTerminationPolicy};
 use write::SharedWriteLimitReason;
 
@@ -50,16 +58,18 @@ pub mod write;
 ///
 /// `C` is the composition of a [`StreamSendBuffer`], a
 /// [`SendFlowControlPolicy`] and a [`SendTerminationPolicy`] that act on this
-/// stream and on the same data.
+/// stream and on the same data; `K` is the connection send flow controller
+/// that grants the reservations the buffer takes.
 ///
 /// Operations are grouped by subject: writing and flushing in [`write`](mod@write),
 /// close and reset in [`finish`]; peer and feedback facts are applied by the
 /// `on_*` methods here.
-pub struct StreamSender<C: SendTerminationPolicy> {
+pub struct StreamSender<C: SendTerminationPolicy, K: ConnectionSendFlowController> {
     stream_id: StreamId,
     peer_stream_limit: VarInt,
     reset_stream_at_supported: bool,
     composition: C,
+    connection: Arc<K>,
     end: EndPhase,
     stop_sending: StopSending<C::WriteLimitReason>,
     close_reason: Option<CloseReason>,
@@ -68,11 +78,14 @@ pub struct StreamSender<C: SendTerminationPolicy> {
 /// The end of the send direction:
 ///
 /// ```text
-///          close           reset           reset (lower reliable size)
-///   Open ───────▶ Closed ───────▶ Reset ◀──┐
-///     │                             ▲ └────┘
-///     └──────────── reset ──────────┘
+/// Open ──close──▶ Closed
+/// Open, Closed ──reset_at──▶ ResetAt ──reset_at (lower reliable size)──▶ ResetAt
+/// Open, Closed, ResetAt ──reset──▶ Reset
 /// ```
+///
+/// `reset` ends with `RESET_STREAM` and `reset_at` with `RESET_STREAM_AT`.
+/// A `reset_at` in effect may be replaced by `reset`; a `reset` in effect
+/// cannot be followed by `reset_at`.
 ///
 /// A terminal state can be entered once an end is committed; afterwards the
 /// end no longer changes.
@@ -91,25 +104,43 @@ enum EndPhase {
     },
 }
 
-/// The end frames whose first exposure was settled through
-/// [`StreamSender::expose_usage_through`]. Each is recorded independently:
-/// a FIN may be followed by a reset, and a reset may be sent again.
+/// A reset frame as it was exposed: its kind and, for `RESET_STREAM_AT`, the
+/// reliable size it carried.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExposedReset {
+    ResetStream,
+    ResetStreamAt { reliable_size: VarInt },
+}
+
+/// The end frames exposed so far through [`PreparedEndFrame::expose`]. A FIN
+/// may be followed by a reset, and a reset frame is exposed again when the
+/// reliable size drops or the kind changes.
 #[derive(Clone, Copy, Default)]
 struct SentEndFrames {
     fin: bool,
-    reset_stream: bool,
+    /// Whether a `RESET_STREAM_AT` was exposed, also if a `RESET_STREAM`
+    /// replaced it later.
     reset_stream_at: bool,
+    /// The reset frame exposed last.
+    last_reset: Option<ExposedReset>,
 }
 
 impl SentEndFrames {
-    /// Records the end frame `content` names, if it names one.
-    fn record(&mut self, content: ExposedContent) {
-        match content {
-            ExposedContent::Data => {}
-            ExposedContent::Fin => self.fin = true,
-            ExposedContent::ResetStream => self.reset_stream = true,
-            ExposedContent::ResetStreamAt => self.reset_stream_at = true,
+    /// Whether a `RESET_STREAM` was exposed. A `RESET_STREAM_AT` cannot
+    /// follow one, so it is the last reset frame then.
+    fn reset_stream(&self) -> bool {
+        self.last_reset == Some(ExposedReset::ResetStream)
+    }
+
+    fn record_fin(&mut self) {
+        self.fin = true;
+    }
+
+    fn record_reset(&mut self, reset: ExposedReset) {
+        if let ExposedReset::ResetStreamAt { .. } = reset {
+            self.reset_stream_at = true;
         }
+        self.last_reset = Some(reset);
     }
 }
 
@@ -121,6 +152,11 @@ enum CommittedEnd {
         source: EndSource,
     },
     Reset {
+        error_code: ApplicationErrorCode,
+        final_size: VarInt,
+        source: EndSource,
+    },
+    ResetAt {
         target: ResetTarget,
         source: EndSource,
     },
@@ -138,9 +174,22 @@ impl EndPhase {
                 source: *source,
             },
             Self::Ended {
-                end: CommittedEnd::Reset { target, source },
+                end:
+                    CommittedEnd::Reset {
+                        error_code,
+                        final_size,
+                        source,
+                    },
                 ..
             } => SendEndState::Reset {
+                error_code: *error_code,
+                final_size: *final_size,
+                source: *source,
+            },
+            Self::Ended {
+                end: CommittedEnd::ResetAt { target, source },
+                ..
+            } => SendEndState::ResetAt {
                 target: *target,
                 source: *source,
             },
@@ -196,8 +245,19 @@ pub enum SendEndState {
         /// Who committed the close.
         source: EndSource,
     },
-    /// A reset is committed; it may have replaced a close.
+    /// A reset is committed with `reset` (`RESET_STREAM`); it may have
+    /// replaced a close or a `reset_at`.
     Reset {
+        /// The application error code.
+        error_code: ApplicationErrorCode,
+        /// The final size.
+        final_size: VarInt,
+        /// Who committed the current target.
+        source: EndSource,
+    },
+    /// A reset is committed with `reset_at` (`RESET_STREAM_AT`); it may have
+    /// replaced a close.
+    ResetAt {
         /// The effective reset target.
         target: ResetTarget,
         /// Who committed the current target.
@@ -211,15 +271,14 @@ impl SendEndState {
         match self {
             Self::Open => None,
             Self::Closed { final_size, .. } => Some(*final_size),
-            Self::Reset { target, .. } => Some(target.final_size),
+            Self::Reset { final_size, .. } => Some(*final_size),
+            Self::ResetAt { target, .. } => Some(target.final_size),
         }
     }
 }
 
-/// A complete reset target: error code, reliable size and final size.
-///
-/// A plain reset has reliable size zero; a reliable size above zero needs the
-/// `RESET_STREAM_AT` extension.
+/// A complete target of a reset at a reliable size (`reset_at`): error code,
+/// reliable size and final size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResetTarget {
     /// The application error code.
@@ -252,24 +311,28 @@ pub enum SendTerminalState {
     ResetRecvd,
 }
 
-impl<C: SendTerminationPolicy> StreamSender<C> {
+impl<C: SendTerminationPolicy, K: ConnectionSendFlowController> StreamSender<C, K> {
     /// Creates the send direction of `stream_id`.
     ///
     /// `peer_stream_limit` is the initial stream data limit that the peer's
     /// transport parameters grant this stream, or a later `MAX_STREAM_DATA`
     /// value already in effect. `reset_stream_at_supported` tells whether the
-    /// handshake negotiated the `RESET_STREAM_AT` extension.
+    /// handshake negotiated the `RESET_STREAM_AT` extension. `connection` is
+    /// the connection send flow controller shared by the streams of the
+    /// connection.
     pub fn new(
         stream_id: StreamId,
         peer_stream_limit: VarInt,
         reset_stream_at_supported: bool,
         composition: C,
+        connection: Arc<K>,
     ) -> Self {
         Self {
             stream_id,
             peer_stream_limit,
             reset_stream_at_supported,
             composition,
+            connection,
             end: EndPhase::Open,
             stop_sending: StopSending::NotReceived,
             close_reason: None,
@@ -337,9 +400,12 @@ impl<C: SendTerminationPolicy> StreamSender<C> {
     }
 }
 
-impl<C> StreamSender<C>
+impl<C, K> StreamSender<C, K>
 where
-    C: StreamSendBuffer + SendFlowControlPolicy + SendTerminationPolicy,
+    K: ConnectionSendFlowController,
+    C: StreamSendBuffer<Reservation = K::Reservation>
+        + SendFlowControlPolicy
+        + SendTerminationPolicy,
 {
     /// The written end (`written_end`), as the send buffer keeps it.
     pub fn written_end(&self) -> VarInt {
@@ -360,7 +426,8 @@ where
         match self.end_state() {
             SendEndState::Open => self.written_end(),
             SendEndState::Closed { final_size, .. } => final_size,
-            SendEndState::Reset { target, .. } => target.reliable_size,
+            SendEndState::Reset { .. } => VarInt::ZERO,
+            SendEndState::ResetAt { target, .. } => target.reliable_size,
         }
     }
 
@@ -426,16 +493,17 @@ where
     /// "Reset Sent" only ([RFC 9000 §3.1]), so a send direction that was
     /// closed and never reset cannot enter [`SendTerminalState::ResetRecvd`].
     /// The frame that carries the acknowledged end must also have been sent,
-    /// as recorded by [`expose_usage_through`](Self::expose_usage_through):
+    /// as recorded by [`PreparedEndFrame::expose`]:
     ///
-    /// - [`SendTerminalState::DataRecvd`] needs a FIN or a
-    ///   `RESET_STREAM_AT`. After a plain reset, the caller enters it only
-    ///   when the FIN was sent and all data with the FIN was acknowledged;
-    ///   otherwise the stream waits for its `RESET_STREAM` to be acknowledged
-    ///   ([RFC 9000 §13.3]). A stream ended by `RESET_STREAM_AT` enters it
-    ///   once the frame with the smallest reliable size and all data up to
-    ///   that size were acknowledged (reliable stream reset draft, §5.3), so
-    ///   it does not imply that all data arrived.
+    /// - [`SendTerminalState::DataRecvd`] needs a FIN, or a
+    ///   `RESET_STREAM_AT` with no `RESET_STREAM` sent after it. After a
+    ///   `RESET_STREAM`, the caller enters it only when the FIN was sent and
+    ///   all data with the FIN was acknowledged; otherwise the stream waits
+    ///   for its `RESET_STREAM` to be acknowledged ([RFC 9000 §13.3]). A
+    ///   stream ended by `RESET_STREAM_AT` enters it once the frame with the
+    ///   smallest reliable size and all data up to that size were acknowledged
+    ///   (reliable stream reset draft, §5.3), so it does not imply that all
+    ///   data arrived.
     /// - [`SendTerminalState::ResetRecvd`] needs a `RESET_STREAM`.
     ///
     /// Only the first terminal state is kept; a later call with a state the
@@ -467,10 +535,12 @@ where
             return e::ResetNotCommittedSnafu.fail();
         }
         match state {
-            SendTerminalState::DataRecvd if !(sent.fin || sent.reset_stream_at) => {
+            SendTerminalState::DataRecvd
+                if !(sent.fin || (sent.reset_stream_at && !sent.reset_stream())) =>
+            {
                 return e::FinOrResetStreamAtNotSentSnafu.fail();
             }
-            SendTerminalState::ResetRecvd if !sent.reset_stream => {
+            SendTerminalState::ResetRecvd if !sent.reset_stream() => {
                 return e::ResetStreamNotSentSnafu.fail();
             }
             SendTerminalState::DataRecvd | SendTerminalState::ResetRecvd => {}
@@ -483,21 +553,14 @@ where
         Ok(())
     }
 
-    /// Settles the first exposure of usage up to `usage_end` through the send
-    /// buffer, and reports a grown exposure end to both policies afterwards.
+    /// Settles the first exposure of the data up to `usage_end` through the
+    /// send buffer, and reports a grown exposure end to both policies
+    /// afterwards.
     ///
-    /// `content` says what the exposure carries: data, or the end frame
-    /// being sent. A final size must equal the one the committed end fixed;
-    /// data must not pass it. The end frame is recorded for
-    /// [`enter_terminal_state`](Self::enter_terminal_state). Returns the
-    /// newly committed connection credit. This entry is provisional.
-    ///
-    /// Which end frame to send is the caller's choice within the committed
-    /// end. A stream that has sent `RESET_STREAM_AT` keeps sending
-    /// `RESET_STREAM_AT`, with a reliable size of zero if the reliable size
-    /// drops to zero, and does not switch to `RESET_STREAM`: the draft allows
-    /// both, and staying avoids the unclear state transitions after a switch
-    /// (reliable stream reset draft, §5 and §5.2).
+    /// Data must not pass the final size the committed end fixed. The end
+    /// frames are not exposed here but through
+    /// [`prepare_end_frame`](Self::prepare_end_frame). Returns the newly
+    /// committed connection credit. This entry is provisional.
     ///
     /// # Errors
     ///
@@ -506,44 +569,18 @@ where
     pub fn expose_usage_through(
         &mut self,
         usage_end: VarInt,
-        content: ExposedContent,
-        connection: &mut ConnectionSendFlowController,
     ) -> Result<VarInt, SenderExposeUsageError> {
         use sender_expose_usage_error as e;
-        match (
-            content.announces_final_size(),
-            self.end_state().final_size(),
-        ) {
-            (true, None) => {
-                return e::FinalSizeNotFixedSnafu {
-                    final_size: usage_end,
-                }
-                .fail();
-            }
-            (true, Some(final_size)) => {
-                FinalSizeChangeError::check(final_size, usage_end)
-                    .context(e::FinalSizeMismatchSnafu)?;
-            }
-            (false, Some(final_size)) => {
-                BeyondFinalSizeError::check(final_size, usage_end)
-                    .context(e::BeyondFinalSizeSnafu)?;
-            }
-            (false, None) => {}
+        if let Some(final_size) = self.end_state().final_size() {
+            BeyondFinalSizeError::check(final_size, usage_end).context(e::BeyondFinalSizeSnafu)?;
         }
-        let previous = self.exposure_end();
-        let committed = match self
-            .composition
-            .expose_usage_through(usage_end, content, connection)
-        {
-            Ok(committed) => committed,
+        match self.settle_exposure(usage_end, ExposedContent::Data) {
+            Ok(committed) => Ok(committed),
             Err(ExposeUsageError::BeyondWrittenEnd { source }) => {
-                return Err(e::BeyondWrittenEndSnafu.into_error(source));
+                Err(e::BeyondWrittenEndSnafu.into_error(source))
             }
             Err(ExposeUsageError::BeyondCoverage { source }) => {
-                return Err(e::BeyondCoverageSnafu.into_error(source));
-            }
-            Err(ExposeUsageError::ForeignReservation { source }) => {
-                return Err(e::ForeignReservationSnafu.into_error(source));
+                Err(e::BeyondCoverageSnafu.into_error(source))
             }
             Err(
                 error @ (ExposeUsageError::BeyondFinalSize { .. }
@@ -551,22 +588,110 @@ where
                 | ExposeUsageError::FinalSizeBelowExposure { .. }),
             ) => {
                 // invariant: the only final size the send buffer can know is
-                // the one the committed end fixed, which the checks above
+                // the one the committed end fixed, which the check above
                 // compared, and data exposure never passes it, so the
                 // exposure end stays at or below it. A send buffer that still
                 // refuses the final size breaks the `StreamSendBuffer` contract.
                 unreachable!("send buffer refused a checked exposure through {usage_end}: {error}")
             }
-        };
-        if let EndPhase::Ended { sent, .. } = &mut self.end {
-            sent.record(content);
         }
+    }
+
+    /// Exposes through the send buffer and reports a grown exposure end to
+    /// both policies.
+    fn settle_exposure(
+        &mut self,
+        usage_end: VarInt,
+        content: ExposedContent,
+    ) -> Result<VarInt, ExposeUsageError> {
+        let previous = self.exposure_end();
+        let committed = self.composition.expose_usage_through(usage_end, content)?;
         let exposure_end = self.exposure_end();
         if exposure_end > previous {
             self.notify_flow_control(StreamCreditEvent::FirstExposed { exposure_end });
             self.dispatch_termination(SendTerminationEvent::FirstExposed { exposure_end });
         }
         Ok(committed)
+    }
+
+    /// Prepares the end frame the stream has to send now, if any.
+    ///
+    /// The frame follows from the committed end and from the end frames
+    /// exposed before:
+    ///
+    /// - a reset is in effect and the reset frame of its kind and reliable
+    ///   size was not exposed yet: the `RESET_STREAM` for a `reset`, the
+    ///   `RESET_STREAM_AT` for a `reset_at`, also if a close was replaced and
+    ///   its FIN was exposed;
+    /// - a close is in effect and the FIN was not exposed yet: the FIN.
+    ///
+    /// No frame is due once the connection has closed or a terminal state was
+    /// entered. The returned guard holds the stream sender: it gives the
+    /// frame to write, and [`PreparedEndFrame::expose`] settles its
+    /// exposure after the frame was written to a packet. Dropping the guard
+    /// changes nothing. This entry is provisional.
+    pub fn prepare_end_frame(&mut self) -> Option<PreparedEndFrame<'_, C, K>> {
+        if self.is_connection_closed() || self.terminal_state().is_some() {
+            return None;
+        }
+        let EndPhase::Ended { end, sent, .. } = &self.end else {
+            return None;
+        };
+        let stream_id = VarIntField::shortest(self.stream_id);
+        let (frame, exposed) = match *end {
+            CommittedEnd::Closed { final_size, .. } => {
+                if sent.fin {
+                    return None;
+                }
+                (EndFrame::fin(stream_id, final_size), ExposedEndFrame::Fin)
+            }
+            CommittedEnd::Reset {
+                error_code,
+                final_size,
+                ..
+            } => {
+                if sent.last_reset == Some(ExposedReset::ResetStream) {
+                    return None;
+                }
+                let frame = ResetStreamFrame::new(
+                    stream_id,
+                    VarIntField::shortest(error_code),
+                    VarIntField::shortest(final_size),
+                );
+                (
+                    EndFrame::ResetStream(frame),
+                    ExposedEndFrame::Reset(ExposedReset::ResetStream),
+                )
+            }
+            CommittedEnd::ResetAt { target, .. } => {
+                let exposed = ExposedReset::ResetStreamAt {
+                    reliable_size: target.reliable_size,
+                };
+                if sent.last_reset == Some(exposed) {
+                    return None;
+                }
+                let frame = match ResetStreamAtFrame::new(
+                    stream_id,
+                    VarIntField::shortest(target.error_code),
+                    VarIntField::shortest(target.final_size),
+                    VarIntField::shortest(target.reliable_size),
+                ) {
+                    Ok(frame) => frame,
+                    // invariant: a reset target was checked to keep a
+                    // reliable size within its final size.
+                    Err(error) => unreachable!("committed reset target {target:?}: {error}"),
+                };
+                (
+                    EndFrame::ResetStreamAt(frame),
+                    ExposedEndFrame::Reset(exposed),
+                )
+            }
+        };
+        Some(PreparedEndFrame {
+            sender: self,
+            frame,
+            exposed,
+        })
     }
 
     /// The limit to carry in a `STREAM_DATA_BLOCKED` frame, if the
@@ -581,7 +706,10 @@ where
     pub fn stream_data_blocked_limit(&self) -> Option<VarInt> {
         let allowed = !self.is_connection_closed()
             && self.terminal_state().is_none()
-            && !matches!(self.end_state(), SendEndState::Reset { .. });
+            && !matches!(
+                self.end_state(),
+                SendEndState::Reset { .. } | SendEndState::ResetAt { .. }
+            );
         (allowed
             && self
                 .composition
@@ -680,18 +808,6 @@ pub struct StreamResetError;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(module(sender_expose_usage_error), visibility(pub(crate)))]
 pub enum SenderExposeUsageError {
-    /// A final size is exposed while no end is committed.
-    #[snafu(display("final size {final_size} exposed before the stream ended"))]
-    FinalSizeNotFixed {
-        /// The rejected final size.
-        final_size: VarInt,
-    },
-    /// A final size differs from the one the committed end fixed.
-    #[snafu(display("exposure changes the final size"))]
-    FinalSizeMismatch {
-        /// The fixed final size and the rejected one.
-        source: FinalSizeChangeError,
-    },
     /// Data passes the final size the committed end fixed.
     #[snafu(display("data exposure passes the final size"))]
     BeyondFinalSize {
@@ -710,13 +826,111 @@ pub enum SenderExposeUsageError {
         /// The rejected usage end and the end of the stored coverage.
         source: UsageBeyondCoverageError,
     },
-    /// Coverage to commit was granted by another connection send flow
-    /// controller than the one passed in.
-    #[snafu(display("cannot commit the coverage of the exposed usage"))]
-    ForeignReservation {
-        /// The failed ownership check.
-        source: ForeignCoverageError,
-    },
+}
+
+/// The end frame a stream has to send (`EndFrame`): the wire frame that
+/// carries the committed end, as [`StreamSender::prepare_end_frame`] gives it.
+///
+/// The frames hold their fields in the shortest encodings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EndFrame {
+    /// A STREAM frame with the FIN bit, no data and an offset equal to the
+    /// final size. Its Length field is not decided: the packet writer decides
+    /// it by the position of the frame in the packet.
+    Fin(StreamFrame<&'static [u8], UndecidedLength>),
+    /// A `RESET_STREAM` frame.
+    ResetStream(ResetStreamFrame),
+    /// A `RESET_STREAM_AT` frame.
+    ResetStreamAt(ResetStreamAtFrame),
+}
+
+impl EndFrame {
+    /// The FIN of the stream `stream_id` that ends at `final_size`.
+    fn fin(stream_id: VarIntField<StreamId>, final_size: VarInt) -> Self {
+        // An absent Offset field states offset zero in one byte less.
+        let offset = (final_size > VarInt::ZERO).then(|| VarIntField::shortest(final_size));
+        match StreamFrame::new(stream_id, offset, &[][..], true) {
+            Ok(frame) => Self::Fin(frame),
+            // invariant: the frame carries no data, so it ends at its offset,
+            // a `VarInt`.
+            Err(error) => unreachable!("FIN at {final_size}: {error}"),
+        }
+    }
+}
+
+/// The end frame a [`PreparedEndFrame`] stands for, as the stream sender
+/// records it once exposed.
+#[derive(Clone, Copy)]
+enum ExposedEndFrame {
+    Fin,
+    Reset(ExposedReset),
+}
+
+/// An end frame prepared by [`StreamSender::prepare_end_frame`]
+/// (`PreparedEndFrame`): the guard holds the stream sender until the frame is
+/// exposed or the guard is dropped.
+///
+/// It dereferences to the [`EndFrame`] to write. After the frame was written
+/// to a packet, [`expose`](Self::expose) settles its first exposure; it does
+/// not fail. Dropping the guard changes nothing.
+pub struct PreparedEndFrame<'a, C: SendTerminationPolicy, K: ConnectionSendFlowController> {
+    sender: &'a mut StreamSender<C, K>,
+    frame: EndFrame,
+    exposed: ExposedEndFrame,
+}
+
+impl<C: SendTerminationPolicy, K: ConnectionSendFlowController> Deref
+    for PreparedEndFrame<'_, C, K>
+{
+    type Target = EndFrame;
+
+    fn deref(&self) -> &EndFrame {
+        &self.frame
+    }
+}
+
+impl<C, K> PreparedEndFrame<'_, C, K>
+where
+    K: ConnectionSendFlowController,
+    C: StreamSendBuffer<Reservation = K::Reservation>
+        + SendFlowControlPolicy
+        + SendTerminationPolicy,
+{
+    /// Settles the first exposure of the frame, which was written to a
+    /// packet: the credit that covers the usage up to the final size is
+    /// committed, the frame is recorded as exposed for
+    /// [`enter_terminal_state`](StreamSender::enter_terminal_state), and a
+    /// grown exposure end is reported to both policies.
+    ///
+    /// Returns the newly committed connection credit.
+    pub fn expose(self) -> VarInt {
+        let Self {
+            sender,
+            frame: _,
+            exposed,
+        } = self;
+        // invariant: the frame is due only while an end is committed, and the
+        // end fixes the final size.
+        let Some(final_size) = sender.end_state().final_size() else {
+            unreachable!("an end frame is prepared only after an end is committed")
+        };
+        let committed = match sender.settle_exposure(final_size, ExposedContent::FinalSize) {
+            Ok(committed) => committed,
+            // invariant: a committed end keeps its final size within the
+            // written end, at or above the exposure end and covered by the
+            // buffer's stored coverage, and the buffer knows no other final
+            // size. A send buffer that still refuses it breaks the
+            // `StreamSendBuffer` contract.
+            Err(error) => unreachable!("send buffer refused the final size {final_size}: {error}"),
+        };
+        if let EndPhase::Ended { sent, .. } = &mut sender.end {
+            match exposed {
+                ExposedEndFrame::Fin => sent.record_fin(),
+                ExposedEndFrame::Reset(reset) => sent.record_reset(reset),
+            }
+        }
+        committed
+    }
 }
 
 /// Failures of [`StreamSender::enter_terminal_state`]; none of them changes
@@ -731,11 +945,12 @@ pub enum EnterTerminalStateError {
     /// is a close: no reset was committed that could have been acknowledged.
     #[snafu(display("a send direction that was not reset cannot reach Reset Recvd"))]
     ResetNotCommitted,
-    /// [`SendTerminalState::DataRecvd`] was requested, but neither a FIN nor
-    /// a `RESET_STREAM_AT` was sent: the peer cannot have acknowledged the
-    /// final size.
+    /// [`SendTerminalState::DataRecvd`] was requested, but no FIN was sent
+    /// and no `RESET_STREAM_AT` was sent without a `RESET_STREAM` after it:
+    /// the peer cannot have acknowledged the final size in a way that
+    /// reaches Data Recvd.
     #[snafu(display(
-        "a send direction reaches Data Recvd only after a FIN or a RESET_STREAM_AT was sent"
+        "a send direction reaches Data Recvd only after a FIN or a RESET_STREAM_AT without a later RESET_STREAM was sent"
     ))]
     FinOrResetStreamAtNotSent,
     /// [`SendTerminalState::ResetRecvd`] was requested, but no `RESET_STREAM`

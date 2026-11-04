@@ -6,7 +6,7 @@ use super::{
     ResetRetention, Selection, SelectionConstraints, StreamSendBuffer, TransmissionReceipt,
     append_error, apply_reset_error,
 };
-use crate::connection_send_credit::ConnectionSendFlowController;
+use crate::connection_send_credit::ConnectionCreditReservation;
 use bytes::Bytes;
 use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
 use sakuya_wire::var_int::VarInt;
@@ -21,11 +21,11 @@ use std::collections::BTreeMap;
 /// coverage is kept in an embedded [`VisibilitySettlement`].
 ///
 /// Selection and feedback take inputs that have no values yet.
-#[derive(Debug, Default)]
-pub struct OffsetMapStreamSendBuffer {
+#[derive(Debug)]
+pub struct OffsetMapStreamSendBuffer<R> {
     written_end: VarInt,
     retained: BTreeMap<VarInt, Bytes>,
-    visibility: VisibilitySettlement,
+    visibility: VisibilitySettlement<R>,
     input: Input,
 }
 
@@ -39,7 +39,18 @@ enum Input {
     Reset(ResetRetention),
 }
 
-impl OffsetMapStreamSendBuffer {
+impl<R> Default for OffsetMapStreamSendBuffer<R> {
+    fn default() -> Self {
+        Self {
+            written_end: VarInt::ZERO,
+            retained: BTreeMap::new(),
+            visibility: VisibilitySettlement::default(),
+            input: Input::Open,
+        }
+    }
+}
+
+impl<R: ConnectionCreditReservation> OffsetMapStreamSendBuffer<R> {
     /// Creates an empty buffer.
     pub fn new() -> Self {
         Self::default()
@@ -52,7 +63,7 @@ impl OffsetMapStreamSendBuffer {
 
     /// The visibility settlement: exposure end, final size and uncommitted
     /// coverage.
-    pub fn visibility(&self) -> &VisibilitySettlement {
+    pub fn visibility(&self) -> &VisibilitySettlement<R> {
         &self.visibility
     }
 
@@ -65,7 +76,9 @@ impl OffsetMapStreamSendBuffer {
     }
 }
 
-impl StreamSendBuffer for OffsetMapStreamSendBuffer {
+impl<R: ConnectionCreditReservation> StreamSendBuffer for OffsetMapStreamSendBuffer<R> {
+    type Reservation = R;
+
     fn written_end(&self) -> VarInt {
         self.written_end
     }
@@ -74,7 +87,7 @@ impl StreamSendBuffer for OffsetMapStreamSendBuffer {
         self.visibility.exposure_end()
     }
 
-    fn append(&mut self, data: CoveredBytes) -> Result<(), AppendError> {
+    fn append(&mut self, data: CoveredBytes<R>) -> Result<(), AppendError<R>> {
         if let Input::Reset(_) = self.input {
             return append_error::AfterResetSnafu { data }.fail();
         }
@@ -142,10 +155,9 @@ impl StreamSendBuffer for OffsetMapStreamSendBuffer {
         &mut self,
         usage_end: VarInt,
         content: ExposedContent,
-        connection: &mut ConnectionSendFlowController,
     ) -> Result<VarInt, ExposeUsageError> {
         self.visibility
-            .expose_usage_through(usage_end, content, self.written_end, connection)
+            .expose_usage_through(usage_end, content, self.written_end)
     }
 
     fn select(&mut self, constraints: SelectionConstraints) -> Selection {

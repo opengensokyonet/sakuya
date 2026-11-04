@@ -30,9 +30,10 @@
 //!
 //! | End state | Legal actions |
 //! | --- | --- |
-//! | Open | keep; narrow the write limit once `STOP_SENDING` arrived; close; reset |
-//! | Closed | keep; reset with the fixed final size |
-//! | Reset | keep; lower the reliable size with the same error code and final size |
+//! | Open | keep; narrow the write limit once `STOP_SENDING` arrived; close; reset; reset at a reliable size |
+//! | Closed | keep; reset or reset at a reliable size, with the fixed final size |
+//! | Reset | keep |
+//! | Reset at | keep; lower the reliable size, or switch to a plain reset, with the same error code and final size |
 //! | Terminal, or connection closed | keep |
 //!
 //! An action equal to the current state counts as keeping it.
@@ -86,8 +87,20 @@ pub enum TerminationAction<R> {
     },
     /// Close normally at the written end.
     Close,
-    /// Reset with a complete target.
-    Reset(ResetTarget),
+    /// Reset as the application's `reset` does: `RESET_STREAM`, with a
+    /// complete target of an error code and a final size.
+    ///
+    /// A `RESET_STREAM_AT` in effect may be replaced by it; a
+    /// [`ResetAt`](Self::ResetAt) cannot follow it.
+    Reset {
+        /// The application error code.
+        error_code: ApplicationErrorCode,
+        /// The final size.
+        final_size: VarInt,
+    },
+    /// Reset as the application's `reset_at` does: `RESET_STREAM_AT`, with a
+    /// complete target. Needs the extension negotiated.
+    ResetAt(ResetTarget),
 }
 
 /// Facts the automatic entry observes (`SendTerminationEvent`).
@@ -165,7 +178,8 @@ impl SendTerminationContext {
         self.end_state.final_size()
     }
 
-    /// The smallest legal final size of a reset that keeps `reliable_size`:
+    /// The smallest legal final size of a reset that keeps `reliable_size`
+    /// (zero for a plain reset):
     /// the fixed final size if there is one, otherwise
     /// `max(exposure_end, reliable_size)`.
     pub fn minimum_final_size(&self, reliable_size: VarInt) -> VarInt {
@@ -191,9 +205,11 @@ pub struct FinalSizeRequest {
 /// writer with a reset.
 ///
 /// - Chooses the smallest legal final size.
-/// - Answers `STOP_SENDING` at once with a reset carrying its error code and
-///   reliable size zero; when a reset is already in effect it keeps the
-///   error code and final size and lowers the reliable size to zero.
+/// - Answers `STOP_SENDING` at once with a [`TerminationAction::Reset`]
+///   carrying its error code; when a reset is already in effect it keeps the
+///   error code and final size. A `reset_at` in effect stays a
+///   `RESET_STREAM_AT` and has its reliable size lowered to zero, so the
+///   stream still reaches `DataRecvd`; a plain reset in effect stays as it is.
 /// - Resets with the configured `abandon_code` when the stream writer is
 ///   abandoned while input is open; an abandoned writer of a closed or reset
 ///   stream changes nothing.
@@ -217,13 +233,12 @@ impl ResetOnAbandonTermination {
         self.abandon_code
     }
 
-    fn reset_without_prefix(
+    fn reset(
         error_code: ApplicationErrorCode,
         context: &SendTerminationContext,
-    ) -> ResetTarget {
-        ResetTarget {
+    ) -> TerminationAction<Infallible> {
+        TerminationAction::Reset {
             error_code,
-            reliable_size: VarInt::ZERO,
             final_size: context.minimum_final_size(VarInt::ZERO),
         }
     }
@@ -241,12 +256,15 @@ impl SendTerminationPolicy for ResetOnAbandonTermination {
             return TerminationAction::Keep;
         }
         match (event, context.end_state) {
+            (SendTerminationEvent::StopSendingReceived { .. }, SendEndState::Reset { .. }) => {
+                TerminationAction::Keep
+            }
             (
                 SendTerminationEvent::StopSendingReceived { .. },
-                SendEndState::Reset { target, .. },
+                SendEndState::ResetAt { target, .. },
             ) => {
                 if target.reliable_size > VarInt::ZERO {
-                    TerminationAction::Reset(ResetTarget {
+                    TerminationAction::ResetAt(ResetTarget {
                         reliable_size: VarInt::ZERO,
                         ..target
                     })
@@ -255,10 +273,10 @@ impl SendTerminationPolicy for ResetOnAbandonTermination {
                 }
             }
             (SendTerminationEvent::StopSendingReceived { error_code }, _) => {
-                TerminationAction::Reset(Self::reset_without_prefix(error_code, context))
+                Self::reset(error_code, context)
             }
             (SendTerminationEvent::WriterAbandoned, SendEndState::Open) => {
-                TerminationAction::Reset(Self::reset_without_prefix(self.abandon_code, context))
+                Self::reset(self.abandon_code, context)
             }
             _ => TerminationAction::Keep,
         }

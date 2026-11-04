@@ -3,10 +3,13 @@
 //! chain of automatic actions must end.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
 
 use bytes::{BufMut, Bytes};
 use sakuya_stream::connection_receive_flow::ConnectionReceiveFlowController;
-use sakuya_stream::connection_send_credit::ConnectionSendFlowController;
+use sakuya_stream::connection_send_credit::{
+    AtomicConnectionCreditReservation, AtomicConnectionSendFlowController,
+};
 use sakuya_stream::receive::flow_control::{
     AdvertisementIntent, ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView,
 };
@@ -27,9 +30,9 @@ use sakuya_stream::send::termination::{
     TerminationAction,
 };
 use sakuya_stream::send::write::WriteOutcome;
-use sakuya_stream::send::{ResetTarget, SendEndState, SendTerminalState, StreamSender};
+use sakuya_stream::send::{EndFrame, SendEndState, SendTerminalState, StreamSender};
+use sakuya_stream::send_buffer::ResetRetention;
 use sakuya_stream::send_buffer::offset_map::OffsetMapStreamSendBuffer;
-use sakuya_stream::send_buffer::{ExposedContent, ResetRetention};
 use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::stream_id::StreamId;
 use sakuya_wire::var_int::VarInt;
@@ -68,10 +71,15 @@ where
     }
 }
 
-type Composition<F> =
-    SendComposition<OffsetMapStreamSendBuffer, FullCeilingAdmission, Answering<F>>;
+type Composition<F> = SendComposition<
+    OffsetMapStreamSendBuffer<AtomicConnectionCreditReservation>,
+    FullCeilingAdmission,
+    Answering<F>,
+>;
 
-fn sender<F>(answer: F) -> StreamSender<Composition<F>>
+type Sender<F> = StreamSender<Composition<F>, AtomicConnectionSendFlowController>;
+
+fn sender<F>(connection: &Arc<AtomicConnectionSendFlowController>, answer: F) -> Sender<F>
 where
     F: FnMut(&SendTerminationEvent, &SendTerminationContext) -> TerminationAction<()>,
 {
@@ -84,38 +92,35 @@ where
             FullCeilingAdmission::new(),
             Answering(answer),
         ),
+        Arc::clone(connection),
     )
 }
 
-fn write<F>(
-    stream: &mut StreamSender<Composition<F>>,
-    connection: &mut ConnectionSendFlowController,
-    len: usize,
-) where
+fn write<F>(stream: &mut Sender<F>, len: usize)
+where
     F: FnMut(&SendTerminationEvent, &SendTerminationContext) -> TerminationAction<()>,
 {
     let mut source = Bytes::from(vec![7; len]);
     assert!(matches!(
-        stream.write(&mut source, connection),
+        stream.write(&mut source),
         Ok(WriteOutcome::Written(_))
     ));
 }
 
 #[test]
 fn an_illegal_automatic_reset_changes_nothing_before_the_panic() {
-    let mut connection = ConnectionSendFlowController::new(v(1000));
-    let mut stream = sender(|event, context| match event {
+    let connection = Arc::new(AtomicConnectionSendFlowController::new(v(1000)));
+    let mut stream = sender(&connection, |event, context| match event {
         SendTerminationEvent::StopSendingReceived { error_code } => {
-            TerminationAction::Reset(ResetTarget {
+            TerminationAction::Reset {
                 error_code: *error_code,
-                reliable_size: VarInt::ZERO,
                 // Beyond the written end.
                 final_size: context.written_end.saturating_add(v(1)),
-            })
+            }
         }
         _ => TerminationAction::Keep,
     });
-    write(&mut stream, &mut connection, 100);
+    write(&mut stream, 100);
     let reserved = connection.reserved();
     let outcome = catch_unwind(AssertUnwindSafe(|| stream.on_stop_sending(code(1))));
     assert!(outcome.is_err(), "the violation panics");
@@ -131,9 +136,9 @@ fn an_illegal_automatic_reset_changes_nothing_before_the_panic() {
 
 #[test]
 fn an_out_of_range_final_size_changes_nothing_before_the_panic() {
-    let mut connection = ConnectionSendFlowController::new(v(1000));
-    let mut stream = sender(|_, _| TerminationAction::Keep);
-    write(&mut stream, &mut connection, 100);
+    let connection = Arc::new(AtomicConnectionSendFlowController::new(v(1000)));
+    let mut stream = sender(&connection, |_, _| TerminationAction::Keep);
+    write(&mut stream, 100);
     let outcome = catch_unwind(AssertUnwindSafe(|| stream.reset(code(1))));
     assert!(outcome.is_err(), "the violation panics");
     assert_eq!(stream.end_state(), SendEndState::Open);
@@ -168,7 +173,7 @@ impl SendFlowControlPolicy for StaleOffset {
 
 #[test]
 fn a_stale_guard_consumes_nothing_before_the_panic() {
-    let mut connection = ConnectionSendFlowController::new(v(1000));
+    let connection = Arc::new(AtomicConnectionSendFlowController::new(v(1000)));
     let mut stream = StreamSender::new(
         StreamId::from_var_int(v(0)),
         v(1000),
@@ -180,11 +185,10 @@ fn a_stale_guard_consumes_nothing_before_the_panic() {
                 TerminationAction::<()>::Keep
             }),
         ),
+        Arc::clone(&connection),
     );
     let mut source = Bytes::from(vec![7; 10]);
-    let outcome = catch_unwind(AssertUnwindSafe(|| {
-        stream.write(&mut source, &mut connection).is_ok()
-    }));
+    let outcome = catch_unwind(AssertUnwindSafe(|| stream.write(&mut source).is_ok()));
     assert!(outcome.is_err(), "the violation panics");
     assert_eq!(source.len(), 10, "input stays with the caller");
     assert_eq!(connection.reserved(), VarInt::ZERO);
@@ -196,16 +200,24 @@ fn a_stale_guard_consumes_nothing_before_the_panic() {
 #[test]
 fn repeated_automatic_decisions_end_the_chain() {
     let mut events = 0_u32;
-    let mut connection = ConnectionSendFlowController::new(v(1000));
-    let mut stream = sender(move |_, context| {
+    let connection = Arc::new(AtomicConnectionSendFlowController::new(v(1000)));
+    let mut stream = sender(&connection, move |_, context| {
         events += 1;
         assert!(events < 64, "the chain of receipts does not end");
         match context.end_state {
             SendEndState::Open | SendEndState::Closed { .. } => TerminationAction::Close,
-            SendEndState::Reset { target, .. } => TerminationAction::Reset(target),
+            SendEndState::Reset {
+                error_code,
+                final_size,
+                ..
+            } => TerminationAction::Reset {
+                error_code,
+                final_size,
+            },
+            SendEndState::ResetAt { target, .. } => TerminationAction::ResetAt(target),
         }
     });
-    write(&mut stream, &mut connection, 10);
+    write(&mut stream, 10);
     assert!(
         matches!(stream.end_state(), SendEndState::Closed { final_size, .. } if final_size == v(10))
     );
@@ -217,13 +229,13 @@ fn repeated_automatic_decisions_end_the_chain() {
 /// that was closed and never reset cannot be in it.
 #[test]
 fn a_terminal_reset_needs_a_reset() {
-    let mut connection = ConnectionSendFlowController::new(v(1000));
-    let mut stream = sender(|_, _| TerminationAction::Keep);
-    write(&mut stream, &mut connection, 10);
+    let connection = Arc::new(AtomicConnectionSendFlowController::new(v(1000)));
+    let mut stream = sender(&connection, |_, _| TerminationAction::Keep);
+    write(&mut stream, 10);
     stream.close().unwrap();
-    stream
-        .expose_usage_through(v(10), ExposedContent::Fin, &mut connection)
-        .unwrap();
+    let fin = stream.prepare_end_frame().unwrap();
+    assert!(matches!(*fin, EndFrame::Fin(_)));
+    fin.expose();
     assert!(
         stream
             .enter_terminal_state(SendTerminalState::ResetRecvd)

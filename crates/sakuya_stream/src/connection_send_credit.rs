@@ -1,6 +1,9 @@
 //! Connection-level send credit: the connection send flow controller
 //! ([`ConnectionSendFlowController`]) and the connection credit reservations
-//! ([`ConnectionCreditReservation`]) it grants.
+//! ([`ConnectionCreditReservation`]) it grants, as traits, and their
+//! implementation over shared atomic counters
+//! ([`AtomicConnectionSendFlowController`],
+//! [`AtomicConnectionCreditReservation`]).
 //!
 //! The peer grants one cumulative limit `L` for the stream data of all
 //! streams on a connection (`initial_max_data`, then `MAX_DATA`, [RFC 9000
@@ -18,14 +21,16 @@
 //! `R` into `C` without touching `available`; releasing moves it from `R` back
 //! into `available`.
 //!
-//! A reservation is a linear handle. It cannot be cloned, splitting it
-//! conserves its amount, and the controller consumes it to commit or release
-//! it. Dropping a reservation cancels the part it still owns, which then
-//! becomes available again; whoever owns a reservation must therefore also
-//! own the right to expose the data it covers. Dropping is the cancellation
-//! path for code that cannot reach the controller, such as a send buffer
-//! discarding the tail after a reset; [`ConnectionSendFlowController::release`]
-//! is the same cancellation performed through the controller.
+//! The controller is shared: its methods take `&self`, and the traits only
+//! state that; how an implementation synchronises, and how a dropped
+//! reservation returns its credit, is the implementation's. A reservation is
+//! a linear handle that only its controller grants and that keeps the shared
+//! state of that controller, so the ledger changes only through the
+//! controller's own reservations. It cannot be cloned, splitting it conserves
+//! its amount, and it consumes itself to commit or release. Dropping a
+//! reservation that was not committed is the same as releasing it; whoever
+//! owns a reservation must therefore also own the right to expose the data it
+//! covers.
 //!
 //! [RFC 9000 §4.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-4.1
 use core::fmt;
@@ -39,57 +44,178 @@ use std::sync::Arc;
 /// data that the peer grants, the uncommitted reservations taken against it,
 /// and the cumulative committed usage.
 ///
-/// One controller exists per connection. Its methods take `&mut self`; the
-/// stream send components that use it receive it from the composing code for
-/// the duration of one operation. Reservations dropped elsewhere return their
-/// credit without access to the controller, through a counter they share with
-/// it.
-pub struct ConnectionSendFlowController {
-    limit: VarInt,
-    committed: VarInt,
-    ledger: Arc<ReservationLedger>,
+/// One controller exists per connection and is shared by the send direction
+/// of every stream, so its methods take `&self`.
+pub trait ConnectionSendFlowController {
+    /// The reservation this controller grants; it commits and releases itself
+    /// against this controller.
+    type Reservation: ConnectionCreditReservation;
+
+    /// The credit new writes can reserve: `L − R − C`.
+    fn available(&self) -> VarInt;
+
+    /// Reserves as much connection credit for `stream_id` as is available, up
+    /// to `amount`.
+    ///
+    /// Returns `None` if no credit is available or `amount` is zero; the
+    /// returned reservation's amount is never zero.
+    fn reserve_up_to(&self, stream_id: StreamId, amount: VarInt) -> Option<Self::Reservation>;
 }
 
-/// The reserved amount `R`, shared with every reservation of one controller
-/// so that dropping a reservation can return its credit.
-struct ReservationLedger {
+/// A connection credit reservation (`connection_credit_reservation`):
+/// uncommitted connection credit owned by the data of one stream.
+///
+/// The handle is linear: it cannot be cloned, [`split_off`](Self::split_off)
+/// and [`absorb`](Self::absorb) conserve the total amount, and
+/// [`commit`](Self::commit) or [`release`](Self::release) consume it.
+/// Dropping a reservation that was not committed has the effect of
+/// [`release`](Self::release): the amount it still owns becomes available to
+/// other writes at once. Moving the handle, for example into a send buffer
+/// together with the data it covers, is not a cancellation.
+pub trait ConnectionCreditReservation: Sized {
+    /// The uncommitted amount the handle owns.
+    fn amount(&self) -> VarInt;
+
+    /// Commits the whole reservation at the first exposure of the usage it
+    /// covers: its amount moves from `R` to `C`. Returns the committed
+    /// amount.
+    ///
+    /// To commit part of a reservation, split that part off first with
+    /// [`split_off`](Self::split_off).
+    fn commit(self) -> VarInt;
+
+    /// Releases the whole reservation: its amount leaves `R` and becomes
+    /// available. Returns the released amount.
+    ///
+    /// Release only usage that has never been exposed and never will be.
+    fn release(self) -> VarInt;
+
+    /// Moves `amount` out of this reservation into a new one for the same
+    /// stream.
+    ///
+    /// # Errors
+    ///
+    /// [`SplitOffError`] if `amount` exceeds [`amount`](Self::amount);
+    /// nothing changes then.
+    fn split_off(&mut self, amount: VarInt) -> Result<Self, SplitOffError>;
+
+    /// Merges `other` into this reservation.
+    ///
+    /// # Errors
+    ///
+    /// [`AbsorbError`] if `other` belongs to another controller or another
+    /// stream; the error hands `other` back and nothing changes.
+    fn absorb(&mut self, other: Self) -> Result<(), AbsorbError<Self>>;
+}
+
+/// The counters `L`, `R` and `C`, shared by a controller and all of its
+/// reservations so that dropping a reservation can return its credit.
+///
+/// Every access is sequentially consistent. A commit raises `C` before it
+/// lowers `R`, and a reservation reads `R` before `C`: a reader that sees the
+/// lowered `R` also sees the raised `C`, so a racing reader may see too
+/// little credit but never too much. The compare-and-swap on `R` that takes
+/// the credit fails if another reservation or release changed `R` since it
+/// was read.
+struct Ledger {
+    limit: AtomicU64,
     reserved: AtomicU64,
+    committed: AtomicU64,
 }
 
-impl ReservationLedger {
+impl Ledger {
+    fn limit(&self) -> VarInt {
+        // invariant: the counter only holds values stored from a `VarInt`.
+        VarInt::new(self.limit.load(Ordering::SeqCst)).unwrap_or(VarInt::MAX)
+    }
+
     fn reserved(&self) -> VarInt {
         // invariant: the amount is the sum of live reservations, each taken
         // within `L − R − C` of a `VarInt` limit, so it never exceeds the
         // limit. The fallback only keeps a stale read conservative.
-        VarInt::new(self.reserved.load(Ordering::Acquire)).unwrap_or(VarInt::MAX)
+        VarInt::new(self.reserved.load(Ordering::SeqCst)).unwrap_or(VarInt::MAX)
     }
 
-    fn add(&self, amount: VarInt) {
-        self.reserved.fetch_add(amount.get(), Ordering::AcqRel);
+    fn committed(&self) -> VarInt {
+        // invariant: committed credit was part of `R`, so `R + C <= L`.
+        VarInt::new(self.committed.load(Ordering::SeqCst)).unwrap_or(VarInt::MAX)
     }
 
-    fn remove(&self, amount: VarInt) {
-        let previous = self.reserved.fetch_sub(amount.get(), Ordering::AcqRel);
+    fn available(&self) -> VarInt {
+        // `R + C <= L` holds because reserving checks it and the limit only
+        // grows; the saturation guards nothing but stale reads of `R`, which
+        // can only be too high.
+        let reserved = self.reserved();
+        let committed = self.committed();
+        self.limit()
+            .saturating_sub(reserved)
+            .saturating_sub(committed)
+    }
+
+    /// Reserves `min(max_amount, available)`, which is zero if nothing can
+    /// be reserved, and returns the reserved amount.
+    fn reserve_up_to(&self, max_amount: VarInt) -> VarInt {
+        loop {
+            let reserved = self.reserved.load(Ordering::SeqCst);
+            let committed = self.committed.load(Ordering::SeqCst);
+            let limit = self.limit.load(Ordering::SeqCst);
+            let available = limit.saturating_sub(reserved).saturating_sub(committed);
+            let amount = max_amount.get().min(available);
+            if amount == 0 {
+                return VarInt::ZERO;
+            }
+            if self
+                .reserved
+                .compare_exchange(
+                    reserved,
+                    reserved + amount,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_ok()
+            {
+                // invariant: `amount <= max_amount`, a `VarInt`.
+                return VarInt::new(amount).unwrap_or(VarInt::MAX);
+            }
+        }
+    }
+
+    fn commit(&self, amount: VarInt) {
+        self.committed.fetch_add(amount.get(), Ordering::SeqCst);
+        self.remove_reserved(amount);
+    }
+
+    fn remove_reserved(&self, amount: VarInt) {
+        let previous = self.reserved.fetch_sub(amount.get(), Ordering::SeqCst);
         debug_assert!(previous >= amount.get(), "reserved credit underflow");
     }
 }
 
-impl ConnectionSendFlowController {
+/// The connection send flow controller over shared atomic counters.
+///
+/// One controller exists per connection; the send direction of each stream
+/// holds it in an [`Arc`]. Reservations keep the counters alive and return
+/// their credit through them when dropped, without access to the controller.
+pub struct AtomicConnectionSendFlowController {
+    ledger: Arc<Ledger>,
+}
+
+impl AtomicConnectionSendFlowController {
     /// Creates a controller whose limit is the peer's `initial_max_data`
     /// transport parameter, with nothing reserved or committed.
     pub fn new(initial_limit: VarInt) -> Self {
         Self {
-            limit: initial_limit,
-            committed: VarInt::ZERO,
-            ledger: Arc::new(ReservationLedger {
+            ledger: Arc::new(Ledger {
+                limit: AtomicU64::new(initial_limit.get()),
                 reserved: AtomicU64::new(0),
+                committed: AtomicU64::new(0),
             }),
         }
     }
 
     /// The cumulative limit `L` the peer has granted.
     pub fn limit(&self) -> VarInt {
-        self.limit
+        self.ledger.limit()
     }
 
     /// The uncommitted reserved amount `R`, summed over all streams.
@@ -102,22 +228,7 @@ impl ConnectionSendFlowController {
     /// The cumulative committed amount `C`, including that of streams that no
     /// longer exist.
     pub fn committed(&self) -> VarInt {
-        self.committed
-    }
-
-    /// The credit new writes can reserve: `L − R − C`.
-    pub fn available(&self) -> VarInt {
-        // `R + C <= L` holds because reserving checks it and the limit only
-        // grows; the saturation guards nothing but stale reads of `R`, which
-        // can only be too high.
-        self.limit
-            .saturating_sub(self.reserved())
-            .saturating_sub(self.committed)
-    }
-
-    /// Whether this controller granted `reservation`.
-    pub fn owns(&self, reservation: &ConnectionCreditReservation) -> bool {
-        Arc::ptr_eq(&self.ledger, &reservation.ledger)
+        self.ledger.committed()
     }
 
     /// Applies a `MAX_DATA` value: the limit becomes the larger of the current
@@ -125,12 +236,10 @@ impl ConnectionSendFlowController {
     ///
     /// Returns the previous limit if the limit grew, and `None` if `limit` did
     /// not exceed it.
-    pub fn on_max_data(&mut self, limit: VarInt) -> Option<VarInt> {
-        if limit > self.limit {
-            Some(core::mem::replace(&mut self.limit, limit))
-        } else {
-            None
-        }
+    pub fn on_max_data(&self, limit: VarInt) -> Option<VarInt> {
+        let previous = self.ledger.limit.fetch_max(limit.get(), Ordering::SeqCst);
+        // invariant: the counter only holds values stored from a `VarInt`.
+        (limit.get() > previous).then(|| VarInt::new(previous).unwrap_or(VarInt::MAX))
     }
 
     /// Reserves exactly `amount` of connection credit for `stream_id`.
@@ -138,154 +247,102 @@ impl ConnectionSendFlowController {
     /// # Errors
     ///
     /// [`InsufficientConnectionCreditError`] if `amount` exceeds
-    /// [`available`](Self::available); nothing is reserved then.
+    /// [`available`](ConnectionSendFlowController::available); nothing is
+    /// reserved then.
     pub fn reserve(
-        &mut self,
+        &self,
         stream_id: StreamId,
         amount: VarInt,
-    ) -> Result<ConnectionCreditReservation, InsufficientConnectionCreditError> {
-        let available = self.available();
-        ensure!(
-            amount <= available,
-            InsufficientConnectionCreditSnafu {
+    ) -> Result<AtomicConnectionCreditReservation, InsufficientConnectionCreditError> {
+        let reserved = self.ledger.reserve_up_to(amount);
+        if reserved < amount {
+            // `reserved` is all that was available. Hand it back: the
+            // request is all or nothing.
+            self.ledger.remove_reserved(reserved);
+            return InsufficientConnectionCreditSnafu {
                 requested: amount,
-                available,
+                available: reserved,
             }
-        );
-        Ok(self.reserve_available(stream_id, amount))
+            .fail();
+        }
+        Ok(self.reservation(stream_id, reserved))
     }
 
-    /// Reserves as much connection credit for `stream_id` as is available, up
-    /// to `max_amount`.
-    ///
-    /// Returns `None` if no credit is available or `max_amount` is zero; the
-    /// returned reservation's amount is never zero.
-    pub fn reserve_up_to(
-        &mut self,
-        stream_id: StreamId,
-        max_amount: VarInt,
-    ) -> Option<ConnectionCreditReservation> {
-        let amount = max_amount.min(self.available());
-        (amount > VarInt::ZERO).then(|| self.reserve_available(stream_id, amount))
-    }
-
-    /// Reserves `amount`, which the caller checked against
-    /// [`available`](Self::available).
-    fn reserve_available(
-        &mut self,
+    fn reservation(
+        &self,
         stream_id: StreamId,
         amount: VarInt,
-    ) -> ConnectionCreditReservation {
-        self.ledger.add(amount);
-        ConnectionCreditReservation {
+    ) -> AtomicConnectionCreditReservation {
+        AtomicConnectionCreditReservation {
             stream_id,
             amount,
             ledger: Arc::clone(&self.ledger),
         }
     }
+}
 
-    /// Commits all of `reservation`: its amount moves from `R` to `C`.
-    ///
-    /// Commit only at the first exposure of the usage the reservation covers;
-    /// to commit part of a reservation, split that part off first with
-    /// [`ConnectionCreditReservation::split_off`]. Returns the committed
-    /// amount.
-    ///
-    /// # Errors
-    ///
-    /// [`ForeignReservationError`] if another controller granted
-    /// `reservation`; the error hands it back and nothing changes.
-    pub fn commit(
-        &mut self,
-        reservation: ConnectionCreditReservation,
-    ) -> Result<VarInt, ForeignReservationError> {
-        ensure!(
-            self.owns(&reservation),
-            ForeignReservationSnafu { reservation }
-        );
-        Ok(self.commit_owned(reservation))
+impl ConnectionSendFlowController for AtomicConnectionSendFlowController {
+    type Reservation = AtomicConnectionCreditReservation;
+
+    fn available(&self) -> VarInt {
+        self.ledger.available()
     }
 
-    /// Commits `reservation`, which this controller granted.
-    pub(crate) fn commit_owned(&mut self, mut reservation: ConnectionCreditReservation) -> VarInt {
-        debug_assert!(self.owns(&reservation));
-        let amount = reservation.take_amount();
-        self.ledger.remove(amount);
-        // invariant: `amount` was part of `R`, and `R + C <= L`, a `VarInt`.
-        self.committed = self.committed.saturating_add(amount);
-        amount
-    }
-
-    /// Releases all of `reservation`: its amount leaves `R` and becomes
-    /// available.
-    ///
-    /// Release only usage that has never been exposed and never will be.
-    /// Dropping the reservation has the same effect. Returns the released
-    /// amount.
-    ///
-    /// # Errors
-    ///
-    /// [`ForeignReservationError`] if another controller granted
-    /// `reservation`; the error hands it back and nothing changes.
-    pub fn release(
-        &mut self,
-        mut reservation: ConnectionCreditReservation,
-    ) -> Result<VarInt, ForeignReservationError> {
-        ensure!(
-            self.owns(&reservation),
-            ForeignReservationSnafu { reservation }
-        );
-        let amount = reservation.take_amount();
-        self.ledger.remove(amount);
-        Ok(amount)
+    fn reserve_up_to(&self, stream_id: StreamId, amount: VarInt) -> Option<Self::Reservation> {
+        let reserved = self.ledger.reserve_up_to(amount);
+        (reserved > VarInt::ZERO).then(|| self.reservation(stream_id, reserved))
     }
 }
 
-impl fmt::Debug for ConnectionSendFlowController {
+impl fmt::Debug for AtomicConnectionSendFlowController {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ConnectionSendFlowController")
-            .field("limit", &self.limit)
+        f.debug_struct("AtomicConnectionSendFlowController")
+            .field("limit", &self.limit())
             .field("reserved", &self.reserved())
-            .field("committed", &self.committed)
+            .field("committed", &self.committed())
             .finish()
     }
 }
 
-/// A connection credit reservation (`connection_credit_reservation`):
-/// uncommitted connection credit owned by the data of one stream.
+/// A connection credit reservation granted by an
+/// [`AtomicConnectionSendFlowController`].
 ///
-/// The handle is linear: it cannot be cloned, [`split_off`](Self::split_off)
-/// and [`absorb`](Self::absorb) conserve the total amount, and
-/// [`ConnectionSendFlowController::commit`] or
-/// [`ConnectionSendFlowController::release`] consume it. Dropping it cancels
-/// the amount it still owns, which becomes available to other writes at once.
-/// Moving the handle, for example into a send buffer together with the data
-/// it covers, is not a cancellation.
-pub struct ConnectionCreditReservation {
+/// Dropping it without committing releases the amount it still owns.
+pub struct AtomicConnectionCreditReservation {
     stream_id: StreamId,
     amount: VarInt,
-    ledger: Arc<ReservationLedger>,
+    ledger: Arc<Ledger>,
 }
 
-impl ConnectionCreditReservation {
+impl AtomicConnectionCreditReservation {
     /// The stream the reservation was taken for.
     pub fn stream_id(&self) -> StreamId {
         self.stream_id
     }
 
-    /// The uncommitted amount the handle owns.
-    pub fn amount(&self) -> VarInt {
+    fn take_amount(&mut self) -> VarInt {
+        core::mem::replace(&mut self.amount, VarInt::ZERO)
+    }
+}
+
+impl ConnectionCreditReservation for AtomicConnectionCreditReservation {
+    fn amount(&self) -> VarInt {
         self.amount
     }
 
-    /// Moves `amount` out of this reservation into a new one for the same
-    /// stream.
-    ///
-    /// # Errors
-    ///
-    /// [`SplitOffError`] if `amount` exceeds [`amount`](Self::amount);
-    /// nothing changes then.
-    pub fn split_off(&mut self, amount: VarInt) -> Result<Self, SplitOffError> {
+    fn commit(mut self) -> VarInt {
+        let amount = self.take_amount();
+        self.ledger.commit(amount);
+        amount
+    }
+
+    fn release(mut self) -> VarInt {
+        let amount = self.take_amount();
+        self.ledger.remove_reserved(amount);
+        amount
+    }
+
+    fn split_off(&mut self, amount: VarInt) -> Result<Self, SplitOffError> {
         ensure!(
             amount <= self.amount,
             SplitOffSnafu {
@@ -293,28 +350,15 @@ impl ConnectionCreditReservation {
                 owned: self.amount,
             }
         );
-        Ok(self.split_owned(amount))
-    }
-
-    /// Moves `amount`, at most [`amount`](Self::amount), into a new
-    /// reservation.
-    pub(crate) fn split_owned(&mut self, amount: VarInt) -> Self {
-        debug_assert!(amount <= self.amount);
         self.amount = self.amount.saturating_sub(amount);
-        Self {
+        Ok(Self {
             stream_id: self.stream_id,
             amount,
             ledger: Arc::clone(&self.ledger),
-        }
+        })
     }
 
-    /// Merges `other` into this reservation.
-    ///
-    /// # Errors
-    ///
-    /// [`AbsorbError`] if `other` belongs to another controller or another
-    /// stream; the error hands `other` back and nothing changes.
-    pub fn absorb(&mut self, mut other: Self) -> Result<(), AbsorbError> {
+    fn absorb(&mut self, mut other: Self) -> Result<(), AbsorbError<Self>> {
         ensure!(
             Arc::ptr_eq(&self.ledger, &other.ledger),
             absorb_error::ForeignControllerSnafu { other }
@@ -323,6 +367,7 @@ impl ConnectionCreditReservation {
             self.stream_id == other.stream_id,
             absorb_error::DifferentStreamSnafu {
                 stream_id: self.stream_id,
+                other_stream_id: other.stream_id,
                 other,
             }
         );
@@ -332,31 +377,27 @@ impl ConnectionCreditReservation {
         self.amount = self.amount.saturating_add(amount);
         Ok(())
     }
-
-    fn take_amount(&mut self) -> VarInt {
-        core::mem::replace(&mut self.amount, VarInt::ZERO)
-    }
 }
 
-impl Drop for ConnectionCreditReservation {
-    /// Cancels the amount the handle still owns.
+impl Drop for AtomicConnectionCreditReservation {
+    /// Releases the amount the handle still owns.
     fn drop(&mut self) {
         if self.amount > VarInt::ZERO {
-            self.ledger.remove(self.amount);
+            self.ledger.remove_reserved(self.amount);
         }
     }
 }
 
-impl fmt::Debug for ConnectionCreditReservation {
+impl fmt::Debug for AtomicConnectionCreditReservation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ConnectionCreditReservation")
+        f.debug_struct("AtomicConnectionCreditReservation")
             .field("stream_id", &self.stream_id)
             .field("amount", &self.amount)
             .finish_non_exhaustive()
     }
 }
 
-/// [`ConnectionSendFlowController::reserve`] asked for more than the
+/// [`AtomicConnectionSendFlowController::reserve`] asked for more than the
 /// available connection credit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display(
@@ -367,24 +408,6 @@ pub struct InsufficientConnectionCreditError {
     pub requested: VarInt,
     /// The credit that was available.
     pub available: VarInt,
-}
-
-/// [`ConnectionSendFlowController::commit`] or
-/// [`ConnectionSendFlowController::release`] received a reservation another
-/// controller granted.
-#[derive(Debug, Snafu)]
-#[snafu(display(
-    "connection credit reservation belongs to another connection send flow controller"
-))]
-pub struct ForeignReservationError {
-    reservation: ConnectionCreditReservation,
-}
-
-impl ForeignReservationError {
-    /// The rejected reservation, unchanged.
-    pub fn into_reservation(self) -> ConnectionCreditReservation {
-        self.reservation
-    }
 }
 
 /// [`ConnectionCreditReservation::split_off`] asked for more than the
@@ -399,32 +422,33 @@ pub struct SplitOffError {
 }
 
 /// Failures of [`ConnectionCreditReservation::absorb`]; each hands the
-/// rejected reservation back.
+/// rejected reservation `R` back.
 #[derive(Debug, Snafu)]
 #[snafu(module(absorb_error), visibility(pub(crate)))]
-pub enum AbsorbError {
+pub enum AbsorbError<R> {
     /// The reservations belong to different controllers.
     #[snafu(display("connection credit reservations of different controllers cannot merge"))]
     ForeignController {
         /// The rejected reservation.
-        other: ConnectionCreditReservation,
+        other: R,
     },
     /// The reservations belong to different streams.
     #[snafu(display(
-        "connection credit reservation of stream {} cannot merge into one of stream {stream_id}",
-        other.stream_id()
+        "connection credit reservation of stream {other_stream_id} cannot merge into one of stream {stream_id}"
     ))]
     DifferentStream {
         /// The stream of the reservation absorbing.
         stream_id: StreamId,
+        /// The stream of the rejected reservation.
+        other_stream_id: StreamId,
         /// The rejected reservation.
-        other: ConnectionCreditReservation,
+        other: R,
     },
 }
 
-impl AbsorbError {
+impl<R> AbsorbError<R> {
     /// The rejected reservation, unchanged.
-    pub fn into_other(self) -> ConnectionCreditReservation {
+    pub fn into_other(self) -> R {
         match self {
             Self::ForeignController { other } | Self::DifferentStream { other, .. } => other,
         }

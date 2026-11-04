@@ -12,16 +12,14 @@
 //! the data and its reservation into the buffer in one step, as one
 //! [`covered_bytes::CoveredBytes`] value whose constructor has already
 //! checked that the reservation covers exactly the data.
-use crate::connection_send_credit::ConnectionSendFlowController;
+use crate::connection_send_credit::ConnectionCreditReservation;
 use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
 use bytes::Bytes;
 use covered_bytes::CoveredBytes;
 use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
 use sakuya_wire::var_int::VarInt;
 use snafu::{Snafu, ensure};
-use visibility::{
-    FinalSizeBelowExposureError, FixFinalSizeError, ForeignCoverageError, UsageBeyondCoverageError,
-};
+use visibility::{FinalSizeBelowExposureError, FixFinalSizeError, UsageBeyondCoverageError};
 
 pub mod covered_bytes;
 pub mod offset_map;
@@ -38,6 +36,10 @@ pub mod visibility;
 /// [`on_lost`](Self::on_lost) have no callable inputs yet. This interface is
 /// provisional.
 pub trait StreamSendBuffer {
+    /// The connection credit reservation type the buffer takes with the data
+    /// it covers; it commits and releases itself.
+    type Reservation: ConnectionCreditReservation;
+
     /// The written end: the cumulative end of all appended data.
     fn written_end(&self) -> VarInt;
 
@@ -59,7 +61,10 @@ pub trait StreamSendBuffer {
     /// [`AppendError`] if the buffer takes no more data or the written end
     /// would pass [`VarInt::MAX`]; the error hands `data` back and nothing
     /// changes.
-    fn append(&mut self, data: CoveredBytes) -> Result<(), AppendError>;
+    fn append(
+        &mut self,
+        data: CoveredBytes<Self::Reservation>,
+    ) -> Result<(), AppendError<Self::Reservation>>;
 
     /// Applies a reset target.
     ///
@@ -86,8 +91,9 @@ pub trait StreamSendBuffer {
     ///
     /// Data uses the end of the range it carries, with `content` set to
     /// [`ExposedContent::Data`]; a FIN, a `RESET_STREAM` or a
-    /// `RESET_STREAM_AT` uses the final size, with `content` naming the
-    /// frame, even when no data is left to send. Returns the
+    /// `RESET_STREAM_AT` uses the final size, with `content` set to
+    /// [`ExposedContent::FinalSize`], even when no data is left to send. Each
+    /// reservation that covers newly exposed usage commits itself. Returns the
     /// newly committed amount, `max(E, usage_end) − E`; usage at or below the
     /// exposure end commits nothing again.
     ///
@@ -100,7 +106,6 @@ pub trait StreamSendBuffer {
         &mut self,
         usage_end: VarInt,
         content: ExposedContent,
-        connection: &mut ConnectionSendFlowController,
     ) -> Result<VarInt, ExposeUsageError>;
 
     /// Selects data to hand to the link layer within `constraints`.
@@ -130,12 +135,12 @@ pub trait StreamSendBuffer {
 /// [`into_data`](Self::into_data).
 #[derive(Debug, Snafu)]
 #[snafu(module(append_error), visibility(pub(crate)))]
-pub enum AppendError {
+pub enum AppendError<R> {
     /// A reset was applied; the buffer takes no more data.
     #[snafu(display("a send buffer takes no data after a reset"))]
     AfterReset {
         /// The rejected data.
-        data: CoveredBytes,
+        data: CoveredBytes<R>,
     },
     /// A FIN or reset exposed the final size; the buffer takes no more data.
     #[snafu(display("a send buffer takes no data after the final size {final_size} was exposed"))]
@@ -143,7 +148,7 @@ pub enum AppendError {
         /// The exposed final size.
         final_size: VarInt,
         /// The rejected data.
-        data: CoveredBytes,
+        data: CoveredBytes<R>,
     },
     /// The written end would pass [`VarInt::MAX`].
     #[snafu(display(
@@ -154,13 +159,13 @@ pub enum AppendError {
         /// The written end.
         written_end: VarInt,
         /// The rejected data.
-        data: CoveredBytes,
+        data: CoveredBytes<R>,
     },
 }
 
-impl AppendError {
+impl<R> AppendError<R> {
     /// The rejected data, unchanged.
-    pub fn into_data(self) -> CoveredBytes {
+    pub fn into_data(self) -> CoveredBytes<R> {
         match self {
             Self::AfterReset { data }
             | Self::AfterFinalSize { data, .. }
@@ -244,29 +249,20 @@ pub struct ResetRetention {
 }
 
 /// What an exposure carries besides usage (`ExposedContent`): stream data,
-/// or which frame ends the stream.
-///
-/// The three end frames each announce a final size equal to the usage end.
+/// or the announcement of the final size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExposedContent {
     /// Stream data whose range ends at the usage end; no final size.
     Data,
-    /// A STREAM frame with the FIN bit.
-    Fin,
-    /// A `RESET_STREAM` frame.
-    ResetStream,
-    /// A `RESET_STREAM_AT` frame.
-    ///
-    /// A stream that has sent `RESET_STREAM_AT` keeps ending with it, also
-    /// when its reliable size later drops to zero, rather than switching to
-    /// `RESET_STREAM`.
-    ResetStreamAt,
+    /// The final size, equal to the usage end. A FIN and both reset frames
+    /// announce it, and the buffer does not tell them apart.
+    FinalSize,
 }
 
 impl ExposedContent {
     /// Whether the exposure announces a final size.
     pub(crate) const fn announces_final_size(self) -> bool {
-        !matches!(self, Self::Data)
+        matches!(self, Self::FinalSize)
     }
 }
 
@@ -303,13 +299,6 @@ pub enum ExposeUsageError {
     BeyondCoverage {
         /// The rejected usage end and the end of the stored coverage.
         source: UsageBeyondCoverageError,
-    },
-    /// Coverage to commit was granted by another connection send flow
-    /// controller than the one passed in.
-    #[snafu(display("cannot commit the coverage of the exposed usage"))]
-    ForeignReservation {
-        /// The failed ownership check.
-        source: ForeignCoverageError,
     },
 }
 

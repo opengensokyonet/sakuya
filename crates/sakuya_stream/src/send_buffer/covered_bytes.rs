@@ -11,13 +11,13 @@ use snafu::{Snafu, ensure};
 /// that the reservation's amount equals the length of the data and that the
 /// length is a [`VarInt`], so a buffer receiving it need not check again.
 #[derive(Debug)]
-pub struct CoveredBytes {
+pub struct CoveredBytes<R> {
     bytes: Bytes,
-    reservation: ConnectionCreditReservation,
+    reservation: R,
     len: VarInt,
 }
 
-impl CoveredBytes {
+impl<R: ConnectionCreditReservation> CoveredBytes<R> {
     /// Joins `bytes` with the `reservation` that covers them.
     ///
     /// # Errors
@@ -25,17 +25,16 @@ impl CoveredBytes {
     /// [`CoveredBytesError`] if the length of `bytes` is not a [`VarInt`] or
     /// differs from the reservation's amount; the error hands both inputs
     /// back.
-    pub fn new(
-        bytes: Bytes,
-        reservation: ConnectionCreditReservation,
-    ) -> Result<Self, CoveredBytesError> {
+    pub fn new(bytes: Bytes, reservation: R) -> Result<Self, CoveredBytesError<R>> {
         let Ok(len) = VarInt::try_from(bytes.len()) else {
             return covered_bytes_error::LengthOverflowSnafu { bytes, reservation }.fail();
         };
+        let amount = reservation.amount();
         ensure!(
-            reservation.amount() == len,
+            amount == len,
             covered_bytes_error::AmountMismatchSnafu {
                 len,
+                amount,
                 bytes,
                 reservation,
             }
@@ -46,7 +45,9 @@ impl CoveredBytes {
             len,
         })
     }
+}
 
+impl<R> CoveredBytes<R> {
     /// The length of the data, equal to the reservation's amount.
     pub fn len(&self) -> VarInt {
         self.len
@@ -63,12 +64,12 @@ impl CoveredBytes {
     }
 
     /// The reservation covering the data.
-    pub fn reservation(&self) -> &ConnectionCreditReservation {
+    pub fn reservation(&self) -> &R {
         &self.reservation
     }
 
     /// Splits the value into the data and its reservation.
-    pub fn into_parts(self) -> (Bytes, ConnectionCreditReservation) {
+    pub fn into_parts(self) -> (Bytes, R) {
         (self.bytes, self.reservation)
     }
 }
@@ -77,33 +78,34 @@ impl CoveredBytes {
 /// [`into_parts`](Self::into_parts).
 #[derive(Debug, Snafu)]
 #[snafu(module(covered_bytes_error), visibility(pub(crate)))]
-pub enum CoveredBytesError {
+pub enum CoveredBytesError<R> {
     /// The length of the data is not a [`VarInt`].
     #[snafu(display("data of {} bytes exceeds the largest stream offset", bytes.len()))]
     LengthOverflow {
         /// The rejected data.
         bytes: Bytes,
         /// The rejected reservation.
-        reservation: ConnectionCreditReservation,
+        reservation: R,
     },
     /// The reservation's amount differs from the length of the data.
     #[snafu(display(
-        "connection credit reservation of {} does not cover data of {len} bytes",
-        reservation.amount()
+        "connection credit reservation of {amount} does not cover data of {len} bytes"
     ))]
     AmountMismatch {
         /// The length of the data.
         len: VarInt,
+        /// The reservation's amount.
+        amount: VarInt,
         /// The rejected data.
         bytes: Bytes,
         /// The rejected reservation.
-        reservation: ConnectionCreditReservation,
+        reservation: R,
     },
 }
 
-impl CoveredBytesError {
+impl<R> CoveredBytesError<R> {
     /// The rejected data and reservation, unchanged.
-    pub fn into_parts(self) -> (Bytes, ConnectionCreditReservation) {
+    pub fn into_parts(self) -> (Bytes, R) {
         match self {
             Self::LengthOverflow { bytes, reservation }
             | Self::AmountMismatch {

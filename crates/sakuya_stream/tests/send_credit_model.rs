@@ -4,6 +4,7 @@
 
 use proptest::prelude::*;
 use sakuya_stream::connection_send_credit::{
+    AtomicConnectionCreditReservation, AtomicConnectionSendFlowController,
     ConnectionCreditReservation, ConnectionSendFlowController,
 };
 use sakuya_wire::stream_id::StreamId;
@@ -68,8 +69,8 @@ proptest! {
 
     #[test]
     fn ledger_conserves_credit(ops in prop::collection::vec(op(), 0..80), initial in 0u64..800) {
-        let mut connection = ConnectionSendFlowController::new(v(initial));
-        let mut live: Vec<ConnectionCreditReservation> = Vec::new();
+        let connection = AtomicConnectionSendFlowController::new(v(initial));
+        let mut live: Vec<AtomicConnectionCreditReservation> = Vec::new();
         let (mut limit, mut committed) = (initial, 0u64);
         for op in ops {
             match op {
@@ -135,7 +136,7 @@ proptest! {
                     if !live.is_empty() {
                         let reservation = live.swap_remove(at.index(live.len()));
                         let amount = reservation.amount().get();
-                        prop_assert_eq!(connection.commit(reservation).unwrap().get(), amount);
+                        prop_assert_eq!(reservation.commit().get(), amount);
                         committed += amount;
                     }
                 }
@@ -143,7 +144,7 @@ proptest! {
                     if !live.is_empty() {
                         let reservation = live.swap_remove(at.index(live.len()));
                         let amount = reservation.amount().get();
-                        prop_assert_eq!(connection.release(reservation).unwrap().get(), amount);
+                        prop_assert_eq!(reservation.release().get(), amount);
                     }
                 }
                 Op::Drop { at } => {
@@ -176,7 +177,7 @@ proptest! {
 fn reservations_dropped_on_other_threads_return_their_credit() {
     const ROUNDS: usize = 200;
     const HANDLES: u64 = 64;
-    let mut connection = ConnectionSendFlowController::new(v(HANDLES * 10));
+    let connection = AtomicConnectionSendFlowController::new(v(HANDLES * 10));
     for _ in 0..ROUNDS {
         let mut handles: Vec<_> = (0..HANDLES)
             .map(|_| connection.reserve(sid(0), v(10)).unwrap())
@@ -198,4 +199,48 @@ fn reservations_dropped_on_other_threads_return_their_credit() {
         });
         assert_eq!(connection.available(), connection.limit());
     }
+}
+
+/// Multi-thread stress: reservations taken, committed and dropped on several
+/// threads at once never exceed the limit, and what is committed adds up.
+#[test]
+fn concurrent_reservations_never_exceed_the_limit() {
+    const THREADS: u64 = 4;
+    const LIMIT: u64 = 1000;
+    let connection = AtomicConnectionSendFlowController::new(v(LIMIT));
+    let committed: u64 = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..THREADS)
+            .map(|worker| {
+                let connection = &connection;
+                scope.spawn(move || {
+                    let mut committed = 0;
+                    for round in 0..2000u64 {
+                        let amount = 1 + (round * 7 + worker * 3) % 13;
+                        let Some(reservation) = connection.reserve_up_to(sid(0), v(amount)) else {
+                            continue;
+                        };
+                        assert!(reservation.amount().get() <= amount);
+                        assert!(
+                            connection.reserved().get() + connection.committed().get() <= LIMIT
+                        );
+                        // Commit every third reservation, release the rest.
+                        if round % 3 == 0 {
+                            committed += reservation.commit().get();
+                        } else {
+                            drop(reservation);
+                        }
+                    }
+                    committed
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .sum()
+    });
+    assert_eq!(connection.reserved(), VarInt::ZERO);
+    assert_eq!(connection.committed().get(), committed);
+    assert!(committed <= LIMIT);
+    assert_eq!(connection.available().get(), LIMIT - committed);
 }
