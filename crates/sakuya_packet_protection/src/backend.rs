@@ -220,17 +220,19 @@ pub trait AeadKey {
     ///
     /// # Errors
     ///
-    /// Fails when authentication fails, including for a ciphertext longer
-    /// than the AEAD can protect. The contents of `in_out` are then
-    /// unspecified: an implementation may leave the ciphertext, partly
-    /// decrypted data or zeros there.
+    /// - [`AeadOpenError::InputTooLong`] without writing `in_out` when
+    ///   `in_out` is longer than the AEAD can protect under one nonce. Every
+    ///   supported AEAD accepts far more than a QUIC packet can hold.
+    /// - [`AeadOpenError::Authentication`] when the tag does not match. The
+    ///   contents of `in_out` are then unspecified: an implementation may
+    ///   leave the ciphertext, partly decrypted data or zeros there.
     fn open_in_place(
         &self,
         nonce: &[u8; AEAD_NONCE_LEN],
         aad: &[u8],
         in_out: &mut [u8],
         tag: &[u8; AEAD_TAG_LEN],
-    ) -> Result<(), AuthenticationFailed>;
+    ) -> Result<(), AeadOpenError>;
 }
 
 /// A header protection cipher (RFC 9001 §5.4.3, §5.4.4).
@@ -263,8 +265,8 @@ pub struct KeyLengthMismatch {
     pub actual: usize,
 }
 
-/// The error returned by [`AeadKey::seal_in_place`]: the input is longer
-/// than the AEAD can protect under one nonce.
+/// The input of [`AeadKey::seal_in_place`] or [`AeadKey::open_in_place`] is
+/// longer than the AEAD can protect under one nonce.
 #[derive(Debug, Snafu)]
 #[snafu(display("input of {input_len} bytes exceeds the AEAD limit"))]
 pub struct AeadInputTooLong {
@@ -301,3 +303,21 @@ pub enum ExpandLabelError {
 #[derive(Debug, Snafu)]
 #[snafu(display("AEAD authentication failed"))]
 pub struct AuthenticationFailed;
+
+/// The error returned by [`AeadKey::open_in_place`].
+#[derive(Debug, Snafu)]
+#[snafu(module(aead_open_error))]
+pub enum AeadOpenError {
+    /// The ciphertext is longer than the AEAD can protect under one nonce.
+    #[snafu(display("cannot open the ciphertext"))]
+    InputTooLong {
+        /// The length check that failed.
+        source: AeadInputTooLong,
+    },
+    /// The tag does not match.
+    #[snafu(display("cannot open the ciphertext"))]
+    Authentication {
+        /// The failed authentication.
+        source: AuthenticationFailed,
+    },
+}

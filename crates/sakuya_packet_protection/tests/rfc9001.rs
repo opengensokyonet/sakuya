@@ -10,7 +10,7 @@ use sakuya_packet_protection::backend::ring::{
     RingAeadKey, RingBackend, RingHeaderProtectionCipher,
 };
 use sakuya_packet_protection::backend::{
-    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadAlgorithm, AeadInputTooLong, AeadKey, AuthenticationFailed,
+    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadAlgorithm, AeadInputTooLong, AeadKey, AeadOpenError,
     CryptoBackend, ExpandLabelError, ExpandOutputTooLong, HeaderProtectionCipher, KdfAlgorithm,
     KeyLengthMismatch, MAX_HASH_LEN,
 };
@@ -133,7 +133,7 @@ impl AeadKey for RecordingAeadKey {
         aad: &[u8],
         in_out: &mut [u8],
         tag: &[u8; AEAD_TAG_LEN],
-    ) -> Result<(), AuthenticationFailed> {
+    ) -> Result<(), AeadOpenError> {
         self.log.borrow_mut().nonces.push(*nonce);
         self.inner.open_in_place(nonce, aad, in_out, tag)
     }

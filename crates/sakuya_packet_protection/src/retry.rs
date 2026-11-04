@@ -1,10 +1,11 @@
 //! The Retry integrity tag (RFC 9001 §5.8).
 
 use sakuya_wire::connection_id::ConnectionId;
-use snafu::{OptionExt, ResultExt, Snafu};
+use snafu::{IntoError, OptionExt, Snafu};
 
 use crate::backend::{
-    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadAlgorithm, AeadKey, AuthenticationFailed, CryptoBackend,
+    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadAlgorithm, AeadKey, AeadOpenError, AuthenticationFailed,
+    CryptoBackend,
 };
 
 /// The QUIC version 1 key of the Retry integrity tag.
@@ -65,14 +66,23 @@ pub fn verify_retry_integrity_tag<B: CryptoBackend>(
             packet_len: retry_packet.len(),
         },
     )?;
-    retry_key(backend)
-        .open_in_place(
-            &RETRY_NONCE,
-            &pseudo_packet(odcid, retry_without_tag),
-            &mut [],
-            tag,
-        )
-        .context(verify_retry_integrity_error::AuthenticationSnafu)
+    match retry_key(backend).open_in_place(
+        &RETRY_NONCE,
+        &pseudo_packet(odcid, retry_without_tag),
+        &mut [],
+        tag,
+    ) {
+        Ok(()) => Ok(()),
+        Err(AeadOpenError::Authentication { source }) => {
+            Err(verify_retry_integrity_error::AuthenticationSnafu.into_error(source))
+        }
+        // invariant: the ciphertext is empty, within the limit of every
+        // AEAD; a backend that refuses it as too long breaks the `AeadKey`
+        // contract.
+        Err(AeadOpenError::InputTooLong { source }) => {
+            unreachable!("an empty ciphertext is within the AEAD limit: {source}")
+        }
+    }
 }
 
 fn retry_key<B: CryptoBackend>(backend: &B) -> B::AeadKey {

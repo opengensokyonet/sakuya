@@ -1,11 +1,11 @@
 //! AEAD packet protection (RFC 9001 §5.1, §5.3).
 
 use sakuya_wire::packet_number::PacketNumber;
-use snafu::{OptionExt, ResultExt, Snafu};
+use snafu::{IntoError, OptionExt, ResultExt, Snafu};
 
 use crate::backend::{
-    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadAlgorithm, AeadInputTooLong, AeadKey, AuthenticationFailed,
-    CryptoBackend, MAX_KEY_LEN,
+    AEAD_NONCE_LEN, AEAD_TAG_LEN, AeadAlgorithm, AeadInputTooLong, AeadKey, AeadOpenError,
+    AuthenticationFailed, CryptoBackend, MAX_KEY_LEN,
 };
 use crate::secret::TrafficSecret;
 use crate::wipe::wipe;
@@ -57,6 +57,9 @@ impl<B: CryptoBackend> PacketKey<B> {
     ///
     /// - [`OpenPacketError::PacketTooShort`] when `packet` cannot hold the
     ///   header and the tag; `packet` is unchanged.
+    /// - [`OpenPacketError::PayloadTooLong`] when the payload exceeds what
+    ///   the AEAD can protect under one nonce, far beyond any QUIC packet;
+    ///   `packet` is unchanged.
     /// - [`OpenPacketError::Authentication`] when the tag does not match. The
     ///   payload region `packet[header_len..]` may have been overwritten: the
     ///   `ring` backend zeroes it. To try another key, the caller rebuilds the
@@ -74,10 +77,18 @@ impl<B: CryptoBackend> PacketKey<B> {
             payload,
             tag,
         } = split_packet(packet, header_len)?;
-        self.key
+        match self
+            .key
             .open_in_place(&self.nonce(packet_number), header, payload, tag)
-            .context(open_packet_error::AuthenticationSnafu)?;
-        Ok(payload)
+        {
+            Ok(()) => Ok(payload),
+            Err(AeadOpenError::InputTooLong { source }) => {
+                Err(open_packet_error::PayloadTooLongSnafu.into_error(source))
+            }
+            Err(AeadOpenError::Authentication { source }) => {
+                Err(open_packet_error::AuthenticationSnafu.into_error(source))
+            }
+        }
     }
 
     /// Encrypts the payload of `packet` in place and writes the tag into its
@@ -189,6 +200,12 @@ pub enum OpenPacketError {
     PacketTooShort {
         /// The length check that failed.
         source: PacketTooShort,
+    },
+    /// The payload is longer than the AEAD can protect under one nonce.
+    #[snafu(display("cannot open packet payload"))]
+    PayloadTooLong {
+        /// The backend's refusal.
+        source: AeadInputTooLong,
     },
     /// The payload did not authenticate under this key; the payload region
     /// may have been overwritten.
