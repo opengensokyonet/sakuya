@@ -362,9 +362,9 @@ fn agreed(server_events: &[ServerEvent], client_events: &[ClientEvent]) -> Agree
     let label = ExporterLabel::new(b"EXPORTER-test").unwrap();
     let len = ExpandLength::new(32).unwrap();
 
-    let Some(ServerHandshakeEvent::HandshakeKeys {
+    let Some(ServerHandshakeEvent::ServerHelloWritten {
         aead: server_aead,
-        keys: server_keys,
+        secrets: server_secrets,
         zero_rtt,
     }) = server.next()
     else {
@@ -372,9 +372,9 @@ fn agreed(server_events: &[ServerEvent], client_events: &[ClientEvent]) -> Agree
     };
     let mut client_event = client.next();
     let zero_rtt_sent = match client_event {
-        Some(ClientHandshakeEvent::ZeroRttKeys { aead, keys, .. }) => {
+        Some(ClientHandshakeEvent::EarlyDataOffered { aead, secret, .. }) => {
             if let Some(received) = zero_rtt {
-                assert_eq!(received.0.as_bytes(), keys.0.as_bytes());
+                assert_eq!(received.0.as_bytes(), secret.0.as_bytes());
                 assert_eq!(aead, server_aead);
             }
             client_event = client.next();
@@ -382,19 +382,28 @@ fn agreed(server_events: &[ServerEvent], client_events: &[ClientEvent]) -> Agree
         }
         _ => false,
     };
-    let Some(ClientHandshakeEvent::HandshakeKeys {
+    let Some(ClientHandshakeEvent::ServerHelloRead {
         aead: client_aead,
-        keys: client_keys,
+        secrets: client_secrets,
     }) = client_event
     else {
         panic!("no Handshake secrets for the client")
     };
     assert_eq!(server_aead, client_aead);
-    assert_eq!(server_keys.send.as_bytes(), client_keys.receive.as_bytes());
-    assert_eq!(server_keys.receive.as_bytes(), client_keys.send.as_bytes());
-    assert_ne!(server_keys.send.as_bytes(), server_keys.receive.as_bytes());
+    assert_eq!(
+        server_secrets.send.as_bytes(),
+        client_secrets.receive.as_bytes()
+    );
+    assert_eq!(
+        server_secrets.receive.as_bytes(),
+        client_secrets.send.as_bytes()
+    );
+    assert_ne!(
+        server_secrets.send.as_bytes(),
+        server_secrets.receive.as_bytes()
+    );
 
-    let Some(ServerHandshakeEvent::OneRttSend(server_send)) = server.next() else {
+    let Some(ServerHandshakeEvent::ServerFinishedWritten(server_send)) = server.next() else {
         panic!("no 1-RTT secret from the server")
     };
     let Some(ServerHandshakeEvent::Completed {
@@ -407,7 +416,7 @@ fn agreed(server_events: &[ServerEvent], client_events: &[ClientEvent]) -> Agree
         panic!("the server did not complete")
     };
     let Some(ClientHandshakeEvent::Completed {
-        keys,
+        secrets,
         exporter: client_exporter,
         identity,
         application_protocol,
@@ -417,9 +426,9 @@ fn agreed(server_events: &[ServerEvent], client_events: &[ClientEvent]) -> Agree
         panic!("the client did not complete")
     };
     assert!(server.next().is_none() && client.next().is_none());
-    assert_eq!(server_send.0.as_bytes(), keys.receive.as_bytes());
-    assert_eq!(one_rtt_receive.as_bytes(), keys.send.as_bytes());
-    assert_ne!(keys.send.as_bytes(), client_keys.send.as_bytes());
+    assert_eq!(server_send.0.as_bytes(), secrets.receive.as_bytes());
+    assert_eq!(one_rtt_receive.as_bytes(), secrets.send.as_bytes());
+    assert_ne!(secrets.send.as_bytes(), client_secrets.send.as_bytes());
     assert_eq!(
         server_exporter.export(&label, b"context", len).as_bytes(),
         client_exporter.export(&label, b"context", len).as_bytes()
@@ -547,7 +556,7 @@ fn a_ticket_resumes_with_0_rtt_accepted() {
     assert!(matches!(second.server_end, Some(Ok(()))));
     assert!(matches!(
         second.client_events.first(),
-        Some(ClientHandshakeEvent::ZeroRttKeys { transport_parameters, application_protocol, .. })
+        Some(ClientHandshakeEvent::EarlyDataOffered { transport_parameters, application_protocol, .. })
             if transport_parameters.as_ref() == b"server parameters"
                 && application_protocol == &Some(h3())
     ));

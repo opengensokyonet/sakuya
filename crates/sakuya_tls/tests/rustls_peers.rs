@@ -381,12 +381,12 @@ mod server_engine {
     fn check(connection: &Connection, logged: &Logged) -> (bool, bool) {
         assert_eq!(connection.end, Some(Ok(())));
         let [
-            Event::HandshakeKeys {
+            Event::ServerHelloWritten {
                 aead,
-                keys,
+                secrets,
                 zero_rtt,
             },
-            Event::OneRttSend(one_rtt_send),
+            Event::ServerFinishedWritten(one_rtt_send),
             Event::Completed {
                 one_rtt_receive,
                 exporter,
@@ -398,8 +398,8 @@ mod server_engine {
             panic!("unexpected events")
         };
         assert_eq!(*aead, AeadAlgorithm::Aes128Gcm);
-        logged.check("SERVER_HANDSHAKE_TRAFFIC_SECRET", &keys.send);
-        logged.check("CLIENT_HANDSHAKE_TRAFFIC_SECRET", &keys.receive);
+        logged.check("SERVER_HANDSHAKE_TRAFFIC_SECRET", &secrets.send);
+        logged.check("CLIENT_HANDSHAKE_TRAFFIC_SECRET", &secrets.receive);
         logged.check("SERVER_TRAFFIC_SECRET_0", &one_rtt_send.0);
         logged.check("CLIENT_TRAFFIC_SECRET_0", one_rtt_receive);
         if let Some(zero_rtt) = zero_rtt {
@@ -588,18 +588,18 @@ mod client_engine {
         // The client keeps reading tickets.
         assert_eq!(connection.end, None);
         let mut events = connection.events.as_slice();
-        if let [Event::ZeroRttKeys { aead, keys, .. }, rest @ ..] = events {
+        if let [Event::EarlyDataOffered { aead, secret, .. }, rest @ ..] = events {
             assert_eq!(*aead, AeadAlgorithm::Aes128Gcm);
-            logged.check("CLIENT_EARLY_TRAFFIC_SECRET", &keys.0);
+            logged.check("CLIENT_EARLY_TRAFFIC_SECRET", &secret.0);
             events = rest;
         }
         let [
-            Event::HandshakeKeys {
+            Event::ServerHelloRead {
                 aead,
-                keys: handshake,
+                secrets: handshake,
             },
             Event::Completed {
-                keys,
+                secrets,
                 exporter,
                 identity,
                 application_protocol,
@@ -612,8 +612,8 @@ mod client_engine {
         assert_eq!(*aead, AeadAlgorithm::Aes128Gcm);
         logged.check("CLIENT_HANDSHAKE_TRAFFIC_SECRET", &handshake.send);
         logged.check("SERVER_HANDSHAKE_TRAFFIC_SECRET", &handshake.receive);
-        logged.check("CLIENT_TRAFFIC_SECRET_0", &keys.send);
-        logged.check("SERVER_TRAFFIC_SECRET_0", &keys.receive);
+        logged.check("CLIENT_TRAFFIC_SECRET_0", &secrets.send);
+        logged.check("SERVER_TRAFFIC_SECRET_0", &secrets.receive);
         let label = ExporterLabel::new(EXPORTER_LABEL).unwrap();
         connection.peer.check_agreed(
             |context| {

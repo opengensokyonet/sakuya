@@ -13,10 +13,10 @@
 //!    [`ClientTicketStore`], and writes the ClientHello at Initial, with the
 //!    binder of the ticket; the hello names psk_dhe_ke with or without a
 //!    ticket, for the server to send tickets; when it offers 0-RTT, it yields
-//!    [`ClientHandshakeEvent::ZeroRttKeys`];
+//!    [`ClientHandshakeEvent::EarlyDataOffered`];
 //! 2. reads the ServerHello, or a HelloRetryRequest, after which it writes
 //!    the second ClientHello and reads the ServerHello; it yields
-//!    [`ClientHandshakeEvent::HandshakeKeys`] and moves both streams to
+//!    [`ClientHandshakeEvent::ServerHelloRead`] and moves both streams to
 //!    Handshake;
 //! 3. reads EncryptedExtensions and hands the server's transport
 //!    parameters to the connection;
@@ -189,11 +189,12 @@ pub enum EarlyDataOutcome {
 pub enum ClientHandshakeEvent<C: TlsCrypto> {
     /// The ClientHello offering 0-RTT is written: the secret to send 0-RTT
     /// with, and what the ticket remembers of the server.
-    ZeroRttKeys {
+    #[doc(alias = "ZeroRttSend")]
+    EarlyDataOffered {
         /// The AEAD of the ticket's cipher suite.
         aead: AeadAlgorithm,
         /// The 0-RTT secret.
-        keys: ZeroRttSend,
+        secret: ZeroRttSend,
         /// The server's transport parameters of the ticket's connection,
         /// which 0-RTT keeps to (RFC 9000 §7.4.1).
         transport_parameters: Bytes,
@@ -202,17 +203,18 @@ pub enum ClientHandshakeEvent<C: TlsCrypto> {
     },
     /// The ServerHello is read: the Handshake traffic secrets. Both streams
     /// move to Handshake after this item.
-    HandshakeKeys {
+    #[doc(alias = "HandshakeTrafficSecrets")]
+    ServerHelloRead {
         /// The AEAD of the cipher suite, for every later secret.
         aead: AeadAlgorithm,
         /// The Handshake traffic secrets.
-        keys: HandshakeTrafficSecrets,
+        secrets: HandshakeTrafficSecrets,
     },
     /// The server's Finished is verified and the client's written: the
     /// handshake is complete. Both streams move to 1-RTT after this item.
     Completed {
         /// The 1-RTT secrets.
-        keys: OneRttTrafficSecrets,
+        secrets: OneRttTrafficSecrets,
         /// The exporter of the connection.
         exporter: Exporter<C>,
         /// Who the server is.
@@ -860,9 +862,9 @@ where
     write_message(output, &first).await?;
     let early_offered = match (zero_rtt_suite, &psk, &ticket) {
         (Some(suite), Some(early), Some(offered)) => {
-            yield ClientHandshakeEvent::ZeroRttKeys {
+            yield ClientHandshakeEvent::EarlyDataOffered {
                 aead: suite.aead(),
-                keys: early.early_send(),
+                secret: early.early_send(),
                 transport_parameters: offered.ticket.transport_parameters.clone(),
                 application_protocol: offered.ticket.application_protocol.clone(),
             };
@@ -989,7 +991,7 @@ where
     drop(exchanges);
     let selected_psk = server_hello.pre_shared_key();
     let psk_error = |source| alert(ClientAlertError::Psk { source });
-    let (handshake, keys) = match sent {
+    let (handshake, secrets) = match sent {
         Sent::First { hello, psk } => match psk {
             Some(early)
                 if ticket.as_ref().map(|offered| offered.hash.algorithm())
@@ -1015,9 +1017,9 @@ where
         },
     }
     .map_err(psk_error)?;
-    yield ClientHandshakeEvent::HandshakeKeys {
+    yield ClientHandshakeEvent::ServerHelloRead {
         aead: suite.aead(),
-        keys,
+        secrets,
     };
     output.move_to(CryptoLevel::Handshake);
     input.move_to(CryptoLevel::Handshake).map_err(connection)?;
@@ -1167,7 +1169,7 @@ where
         ServerIdentity::Verified(key) | ServerIdentity::Resumed(key) => key.clone(),
     };
     yield ClientHandshakeEvent::Completed {
-        keys: one_rtt,
+        secrets: one_rtt,
         exporter,
         identity,
         application_protocol: selected_protocol.clone(),

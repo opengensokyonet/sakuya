@@ -17,11 +17,11 @@
 //! 3. negotiates the transport parameters, and admits 0-RTT only when the
 //!    handshake, the connection and the ticket policy all agree;
 //! 4. writes the ServerHello and yields
-//!    [`ServerHandshakeEvent::HandshakeKeys`], with the 0-RTT secret when it
+//!    [`ServerHandshakeEvent::ServerHelloWritten`], with the 0-RTT secret when it
 //!    admitted 0-RTT, then moves both streams to Handshake;
 //! 5. writes EncryptedExtensions and, unless it resumed, Certificate and
 //!    CertificateVerify, whose signature may wait; writes its Finished and
-//!    yields [`ServerHandshakeEvent::OneRttSend`];
+//!    yields [`ServerHandshakeEvent::ServerFinishedWritten`];
 //! 6. reads the client's Finished: the handshake is complete, and it yields
 //!    [`ServerHandshakeEvent::Completed`] with the exporter and the client's
 //!    1-RTT secret, which it held back until now (RFC 9001 §5.7), then
@@ -186,16 +186,18 @@ pub enum ServerHandshakeEvent<C: TlsCrypto, T> {
     /// The ServerHello is written: the Handshake traffic secrets and, when
     /// the server admitted 0-RTT, the secret to receive 0-RTT with. Both
     /// streams move to Handshake after this item.
-    HandshakeKeys {
+    #[doc(alias = "HandshakeTrafficSecrets")]
+    ServerHelloWritten {
         /// The AEAD of the cipher suite, for every secret of the handshake.
         aead: AeadAlgorithm,
         /// The Handshake traffic secrets.
-        keys: HandshakeTrafficSecrets,
+        secrets: HandshakeTrafficSecrets,
         /// The 0-RTT secret, `None` when 0-RTT is not admitted.
         zero_rtt: Option<ZeroRttReceive>,
     },
     /// The server's Finished is written: the 1-RTT secret to send with.
-    OneRttSend(OneRttSend),
+    #[doc(alias = "OneRttSend")]
+    ServerFinishedWritten(OneRttSend),
     /// The client's Finished is verified, and the handshake is complete.
     /// Both streams move to 1-RTT after this item.
     Completed {
@@ -823,13 +825,13 @@ where
         sink.sync_write_server_hello_unpin(&server_hello)
     });
     write_message(output, &encoded_hello).await?;
-    let (handshake, keys) = match early {
+    let (handshake, secrets) = match early {
         Early::Plain(early) => early.server_hello(shared, &encoded_hello),
         Early::Psk(early, _) => early.server_hello(shared, &encoded_hello),
     };
-    yield ServerHandshakeEvent::HandshakeKeys {
+    yield ServerHandshakeEvent::ServerHelloWritten {
         aead: suite.aead(),
-        keys,
+        secrets,
         zero_rtt,
     };
     output.move_to(CryptoLevel::Handshake);
@@ -906,7 +908,7 @@ where
     // The server's Finished, then the client's.
     let (master, finished, one_rtt_send) = handshake.server_finished();
     write_message(output, finished.encoded()).await?;
-    yield ServerHandshakeEvent::OneRttSend(one_rtt_send);
+    yield ServerHandshakeEvent::ServerFinishedWritten(one_rtt_send);
     let received = read_message(input, limits, Some(suite.hash().algorithm())).await?;
     let (resumption, completed) = master
         .client_finished(&received)
