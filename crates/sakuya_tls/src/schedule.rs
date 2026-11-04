@@ -736,8 +736,9 @@ impl ResumptionPsk {
     }
 }
 
-/// The label of an exported value: at most 249 bytes, so that it fits an
-/// HkdfLabel with the "tls13 " prefix (RFC 8446 §7.1, §7.5).
+/// The label of an exported value: 1 to 249 bytes, so that with the
+/// "tls13 " prefix it fits the 7 to 255 bytes of an HkdfLabel's label
+/// (RFC 9846 §7.1, §7.5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ExporterLabel<L> {
     label: L,
@@ -748,9 +749,9 @@ impl<L: AsRef<[u8]>> ExporterLabel<L> {
     ///
     /// # Errors
     ///
-    /// [`LengthOutOfRange`] for a label above 249 bytes.
+    /// [`LengthOutOfRange`] for an empty label or one above 249 bytes.
     pub fn new(label: L) -> Result<Self, LengthOutOfRange> {
-        LengthOutOfRange::check(label.as_ref().len(), 0..=LABEL_MAX)?;
+        LengthOutOfRange::check(label.as_ref().len(), 1..=LABEL_MAX)?;
         Ok(Self { label })
     }
 }

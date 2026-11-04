@@ -121,6 +121,8 @@ fn nonce() -> TicketNonce<&'static [u8]> {
 
 #[test]
 fn labels_and_nonces_are_bounded() {
+    assert_eq!(ExporterLabel::new(&[][..]).unwrap_err().length(), 0);
+    assert!(ExporterLabel::new(&[0; 1][..]).is_ok());
     assert!(ExporterLabel::new(&[0; 249][..]).is_ok());
     assert_eq!(ExporterLabel::new(&[0; 250][..]).unwrap_err().length(), 250);
     assert!(TicketNonce::new(&[0; 255][..]).is_ok());
