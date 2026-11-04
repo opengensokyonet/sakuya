@@ -33,7 +33,7 @@ fn local(
     remote: Option<RemoteReset>,
 ) -> ChunkRead {
     Err(ReadError::LocalTermination {
-        reason,
+        reason: SharedTerminationReason::new(reason),
         trigger,
         remote,
     })
@@ -205,6 +205,47 @@ fn policy_destroy_ends_reading_with_its_reason() {
     let error = local("first", TerminationEvent::StopSent, None);
     assert_eq!(receiver.read_chunk(), error);
     assert_eq!(receiver.read_chunk(), error);
+}
+
+/// A reason that is neither `Clone` nor `Debug`.
+struct Unshared(u32);
+
+/// Destroys the receive buffer on a remote reset, for an [`Unshared`] reason.
+struct DestroyOnReset;
+
+impl ReceiveTerminationPolicy for DestroyOnReset {
+    type Reason = Unshared;
+
+    fn on_termination_event(
+        &mut self,
+        event: TerminationEvent,
+        _view: &TerminationView,
+    ) -> TerminationDecision<Unshared> {
+        match event {
+            TerminationEvent::RemoteReset => TerminationDecision::new(BoundaryAction::Destroy {
+                reason: Unshared(7),
+            }),
+            _ => TerminationDecision::keep(),
+        }
+    }
+}
+
+#[test]
+fn repeated_reads_share_one_reason_that_needs_no_clone() {
+    let (mut receiver, mut connection) = new_receiver(DestroyOnReset);
+    receiver
+        .on_reset_stream(reset(4, 1000), &mut connection)
+        .unwrap();
+    let reason = |receiver: &mut Receiver<DestroyOnReset>| {
+        let Err(ReadError::LocalTermination { reason, .. }) = receiver.read_chunk() else {
+            panic!("expected a local termination");
+        };
+        reason
+    };
+    let first = reason(&mut receiver);
+    let second = reason(&mut receiver);
+    assert_eq!(first.0, 7);
+    assert!(core::ptr::eq(&*first, &*second));
 }
 
 #[test]

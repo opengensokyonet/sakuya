@@ -396,11 +396,45 @@ enum Phase {
     Failed(ConnectionFailureError),
 }
 
+/// A read error as the model predicts it, with the local reason unshared.
+#[derive(Clone, Debug, PartialEq)]
+enum Expected {
+    ReaderDropped,
+    Connection(ConnectionFailureError),
+    Reset {
+        reset: RemoteReset,
+        complete: bool,
+    },
+    Local {
+        reason: u32,
+        trigger: TerminationEvent,
+        remote: Option<RemoteReset>,
+    },
+}
+
+/// The model's view of a read error of the stream receiver.
+fn observed(error: ReadError<u32>) -> Expected {
+    match error {
+        ReadError::ReaderDropped => Expected::ReaderDropped,
+        ReadError::Connection { source } => Expected::Connection(source),
+        ReadError::Reset { reset, complete } => Expected::Reset { reset, complete },
+        ReadError::LocalTermination {
+            reason,
+            trigger,
+            remote,
+        } => Expected::Local {
+            reason: *reason,
+            trigger,
+            remote,
+        },
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum Reading {
     Open,
     End,
-    Error(ReadError<u32>),
+    Error(Expected),
     Dropped { committed: bool },
 }
 
@@ -766,7 +800,7 @@ impl Model {
         Ok(())
     }
 
-    fn commit_error(&mut self, error: ReadError<u32>) -> ReadError<u32> {
+    fn commit_error(&mut self, error: Expected) -> Expected {
         self.reading = Reading::Error(error.clone());
         self.destroy(None);
         self.event(TerminationEvent::ReadResultCommitted);
@@ -774,12 +808,12 @@ impl Model {
     }
 
     /// The first three read priorities.
-    fn settled(&mut self) -> Option<Result<(), ReadError<u32>>> {
+    fn settled(&mut self) -> Option<Result<(), Expected>> {
         if self.reader_dropped() {
-            return Some(Err(ReadError::ReaderDropped));
+            return Some(Err(Expected::ReaderDropped));
         }
         if let Some(failure) = self.failure() {
-            return Some(Err(ReadError::Connection { source: failure }));
+            return Some(Err(Expected::Connection(failure)));
         }
         match &self.reading {
             Reading::End => return Some(Ok(())),
@@ -787,7 +821,7 @@ impl Model {
             Reading::Open | Reading::Dropped { .. } => {}
         }
         if let Phase::Destroyed(Some((reason, trigger))) = self.phase {
-            let error = ReadError::LocalTermination {
+            let error = Expected::Local {
                 reason,
                 trigger,
                 remote: self.reset.map(Reset::remote),
@@ -804,12 +838,12 @@ impl Model {
             .count() as u64
     }
 
-    fn end_or_wait(&mut self) -> Result<ReadOutcome<()>, ReadError<u32>> {
+    fn end_or_wait(&mut self) -> Result<ReadOutcome<()>, Expected> {
         let remote = self.reset.map(Reset::remote);
         if self.final_size == Some(self.delivered) {
             return match remote {
                 Some(reset) if self.presentation == ResetPresentation::Report => Err(self
-                    .commit_error(ReadError::Reset {
+                    .commit_error(Expected::Reset {
                         reset,
                         complete: true,
                     })),
@@ -820,7 +854,7 @@ impl Model {
                 }
             };
         }
-        let local = |limit: Limit| ReadError::LocalTermination {
+        let local = |limit: Limit| Expected::Local {
             reason: limit.reason,
             trigger: limit.trigger,
             remote,
@@ -829,7 +863,7 @@ impl Model {
             return Err(self.commit_error(local(limit)));
         }
         if let Some(reset) = remote.filter(|reset| self.delivered >= reset.reliable_size.get()) {
-            return Err(self.commit_error(ReadError::Reset {
+            return Err(self.commit_error(Expected::Reset {
                 reset,
                 complete: false,
             }));
@@ -882,7 +916,7 @@ fn read_chunk(
             })
         }
     };
-    assert_eq!(actual, expected);
+    assert_eq!(actual.clone().map_err(observed), expected);
     actual
 }
 
@@ -921,7 +955,7 @@ fn read_into(
             }
         }
     };
-    assert_eq!(actual, expected);
+    assert_eq!(actual.clone().map_err(observed), expected);
     if !matches!(expected, Ok(ReadOutcome::Data(_))) {
         assert!(bytes.is_empty(), "nothing is copied without a data result");
     }

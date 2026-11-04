@@ -218,7 +218,7 @@ fn stop_truncation_survives_a_larger_reliable_size() {
     assert_eq!(
         end,
         Err(ReadError::LocalTermination {
-            reason: "stop",
+            reason: SharedTerminationReason::new("stop"),
             trigger: TerminationEvent::StopSent,
             remote: Some(RemoteReset {
                 code: c(4),

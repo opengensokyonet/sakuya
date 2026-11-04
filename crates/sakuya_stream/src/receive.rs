@@ -56,7 +56,7 @@ use crate::receive_buffer::{ReceiveBuffer, StreamDataInput, offset_add, span};
 use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError};
 use bytes::Bytes;
 use flow_control::{ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView};
-use read::{ReadError, RemoteReset};
+use read::{ReadError, RemoteReset, SharedTerminationReason};
 use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
 use sakuya_wire::transport_error::TransportErrorCode;
@@ -257,10 +257,19 @@ pub enum ConnectionFailureError {
 }
 
 /// A local reason, and the event during which it took effect.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct Applied<R> {
-    reason: R,
+    reason: SharedTerminationReason<R>,
     trigger: TerminationEvent,
+}
+
+impl<R> Clone for Applied<R> {
+    fn clone(&self) -> Self {
+        Self {
+            reason: self.reason.clone(),
+            trigger: self.trigger,
+        }
+    }
 }
 
 /// A local delivery limit with the reason it was fixed for.

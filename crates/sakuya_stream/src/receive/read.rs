@@ -33,10 +33,13 @@ use super::{
 };
 use crate::receive_buffer::ReceiveBuffer;
 use bytes::BufMut;
+use core::fmt;
 use core::num::NonZeroUsize;
+use core::ops::Deref;
 use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::var_int::VarInt;
 use snafu::Snafu;
+use std::sync::Arc;
 
 /// The successful outcome of one read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,11 +67,54 @@ pub struct RemoteReset {
     pub reliable_size: VarInt,
 }
 
+/// A shared handle to a reason of the receive termination policy.
+///
+/// The stream receiver wraps each reason the policy gives once, and every
+/// read error that reports it receives a clone of the same handle, so the
+/// reason itself needs neither `Clone` nor `Send` and `Sync`. Two handles are
+/// equal when their reasons are.
+pub struct SharedTerminationReason<R>(Arc<R>);
+
+impl<R> SharedTerminationReason<R> {
+    pub(crate) fn new(reason: R) -> Self {
+        Self(Arc::new(reason))
+    }
+}
+
+impl<R> Clone for SharedTerminationReason<R> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl<R> Deref for SharedTerminationReason<R> {
+    type Target = R;
+
+    fn deref(&self) -> &R {
+        &self.0
+    }
+}
+
+impl<R: fmt::Debug> fmt::Debug for SharedTerminationReason<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&*self.0, f)
+    }
+}
+
+impl<R: PartialEq> PartialEq for SharedTerminationReason<R> {
+    fn eq(&self, other: &Self) -> bool {
+        *self.0 == *other.0
+    }
+}
+
+impl<R: Eq> Eq for SharedTerminationReason<R> {}
+
 /// A terminal read error.
 ///
 /// `R` is the receive termination policy's reason type. Every variant can be
-/// reported repeatedly: the reason is a shared handle cloned for each report.
-#[derive(Clone, Debug, PartialEq, Eq, Snafu)]
+/// reported repeatedly: a local reason is reported as a
+/// [`SharedTerminationReason`], cloned for each report.
+#[derive(Debug, PartialEq, Eq, Snafu)]
 pub enum ReadError<R> {
     /// The stream reader was dropped; the receive direction takes no more
     /// reads.
@@ -98,12 +144,36 @@ pub enum ReadError<R> {
     #[snafu(display("delivery of the stream ended locally"))]
     LocalTermination {
         /// The receive termination policy's reason.
-        reason: R,
+        reason: SharedTerminationReason<R>,
         /// The event during which the limit or destruction took effect.
         trigger: TerminationEvent,
         /// The reset facts, if the peer reset the stream too.
         remote: Option<RemoteReset>,
     },
+}
+
+impl<R> Clone for ReadError<R> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::ReaderDropped => Self::ReaderDropped,
+            Self::Connection { source } => Self::Connection {
+                source: source.clone(),
+            },
+            Self::Reset { reset, complete } => Self::Reset {
+                reset: *reset,
+                complete: *complete,
+            },
+            Self::LocalTermination {
+                reason,
+                trigger,
+                remote,
+            } => Self::LocalTermination {
+                reason: reason.clone(),
+                trigger: *trigger,
+                remote: *remote,
+            },
+        }
+    }
 }
 
 impl<R> ReadError<R> {

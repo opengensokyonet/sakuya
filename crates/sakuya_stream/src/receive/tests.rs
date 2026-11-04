@@ -4,7 +4,7 @@ use super::{
     flow_control::{
         AdvertisementIntent, ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView,
     },
-    read::{ReadError, ReadOutcome, RemoteReset},
+    read::{ReadError, ReadOutcome, RemoteReset, SharedTerminationReason},
     termination::{
         BoundaryAction, BoundaryUpdate, FollowingTermination, ReceiveTerminationPolicy,
         ResetPresentation, TerminationDecision, TerminationEvent, TerminationView,

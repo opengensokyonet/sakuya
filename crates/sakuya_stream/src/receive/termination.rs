@@ -44,10 +44,10 @@
 use super::{
     Applied, Boundary, BoundaryMode, Destruction, StreamReceiver,
     flow_control::ReceiveFlowControlPolicy, flow_control::ReceiveFlowEvent, read::RemoteReset,
-    stop::StopError,
+    read::SharedTerminationReason, stop::StopError,
 };
 use crate::receive_buffer::ReceiveBuffer;
-use core::{convert::Infallible, fmt};
+use core::convert::Infallible;
 use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::var_int::VarInt;
 use snafu::{Report, ResultExt, Snafu, ensure};
@@ -204,10 +204,11 @@ impl<R> TerminationDecision<R> {
 pub trait ReceiveTerminationPolicy {
     /// The local reason a policy records with its actions.
     ///
-    /// Read errors report it repeatedly, so it is a shared handle: cloning
-    /// shares the reason. It can be an `Rc` or `Arc` of a richer reason, or a
-    /// small `Copy` value.
-    type Reason: Clone + fmt::Debug;
+    /// Read errors report it repeatedly: the stream receiver wraps it once in
+    /// a [`SharedTerminationReason`] and gives each read error a clone of that
+    /// handle, so the reason needs no `Clone`. It needs `Debug` only where the
+    /// read error is to be `Debug`.
+    type Reason;
 
     /// Decides on `event`, given the state after it.
     fn on_termination_event(
@@ -442,7 +443,10 @@ where
                         policy_violation::DestroysReliablePrefixSnafu { trigger }
                     );
                 }
-                Ok(Plan::Destroy(Applied { reason, trigger }))
+                Ok(Plan::Destroy(Applied {
+                    reason: SharedTerminationReason::new(reason),
+                    trigger,
+                }))
             }
             BoundaryAction::Restrict {
                 acceptance,
@@ -457,6 +461,7 @@ where
                 ensure!(!ended, policy_violation::RestrictsAfterEndSnafu { trigger });
                 self.check_basis("restricts", trigger)?;
                 self.check_reliable_prefix(acceptance, delivery, trigger)?;
+                let reason = SharedTerminationReason::new(reason);
                 let fixed = |limit| Boundary::Fixed {
                     limit,
                     applied: Applied {

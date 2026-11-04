@@ -147,7 +147,7 @@ fn request_after_local_termination() {
     assert_eq!(
         receiver.read_chunk(),
         Err(ReadError::LocalTermination {
-            reason: "stopped",
+            reason: SharedTerminationReason::new("stopped"),
             trigger: TerminationEvent::StopSent,
             remote: None,
         })
