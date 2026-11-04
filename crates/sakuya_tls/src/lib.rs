@@ -17,6 +17,8 @@
 //!   versions and alert descriptions.
 //! - [`vector`]: failures shared by the length-prefixed fields.
 //! - [`clock`]: the current time, as a capability.
+//! - [`verify`]: verification of a server's certificate chain, with
+//!   rustls-webpki and Certificate Transparency.
 //! - [`server`], [`client`]: the capabilities each role's handshake
 //!   consults, such as the choice of parameters and what a ClientHello
 //!   offers, with implementations for plain Web connections.
@@ -48,6 +50,7 @@ pub mod server;
 #[cfg(test)]
 mod test_support;
 pub mod vector;
+pub mod verify;
 pub mod version;
 mod width;
 

@@ -43,6 +43,10 @@ impl ServerTarget {
     pub fn host_name(&self) -> &str {
         self.name.as_ref()
     }
+
+    pub(crate) fn dns_name(&self) -> &DnsName<'static> {
+        &self.name
+    }
 }
 
 /// A string is not a valid DNS host name.
