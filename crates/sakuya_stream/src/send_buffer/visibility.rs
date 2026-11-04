@@ -151,13 +151,8 @@ impl VisibilitySettlement {
     /// differs from a final size fixed or exposed before; nothing changes
     /// then.
     pub fn fix_final_size(&mut self, final_size: VarInt) -> Result<(), FixFinalSizeError> {
-        ensure!(
-            final_size >= self.exposure_end,
-            fix_final_size_error::BelowExposureSnafu {
-                final_size,
-                exposure_end: self.exposure_end,
-            }
-        );
+        FinalSizeBelowExposureError::check(final_size, self.exposure_end)
+            .context(fix_final_size_error::BelowExposureSnafu)?;
         if let Some(established) = self.final_size.established() {
             FinalSizeChangeError::check(established, final_size)
                 .context(fix_final_size_error::MismatchSnafu)?;
@@ -221,13 +216,8 @@ impl VisibilitySettlement {
             }
         }
         if end == ExposedEnd::FinalSize {
-            ensure!(
-                usage_end >= self.exposure_end,
-                expose_usage_error::FinalSizeBelowExposureSnafu {
-                    final_size: usage_end,
-                    exposure_end: self.exposure_end,
-                }
-            );
+            FinalSizeBelowExposureError::check(usage_end, self.exposure_end)
+                .context(expose_usage_error::FinalSizeBelowExposureSnafu)?;
         }
 
         let newly_exposed = usage_end.saturating_sub(self.exposure_end);
@@ -342,12 +332,10 @@ impl CoverError {
 #[snafu(module(fix_final_size_error), visibility(pub(crate)))]
 pub enum FixFinalSizeError {
     /// The final size lies below the exposure end.
-    #[snafu(display("final size {final_size} lies below the exposure end {exposure_end}"))]
+    #[snafu(display("a reset cannot take back exposed usage"))]
     BelowExposure {
-        /// The rejected final size.
-        final_size: VarInt,
-        /// The exposure end.
-        exposure_end: VarInt,
+        /// The rejected final size and the exposure end.
+        source: FinalSizeBelowExposureError,
     },
     /// The final size differs from the one fixed or exposed before.
     #[snafu(display("a reset changes the final size"))]
@@ -355,4 +343,46 @@ pub enum FixFinalSizeError {
         /// The final size fixed or exposed before and the rejected one.
         source: FinalSizeChangeError,
     },
+}
+
+/// A final size lies below the exposure end: usage that may already be
+/// visible to the peer cannot be taken back.
+///
+/// The stream sender checks it for a reset it is asked for, and
+/// [`VisibilitySettlement`] when it fixes or exposes a final size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("final size {final_size} lies below the exposure end {exposure_end}"))]
+pub struct FinalSizeBelowExposureError {
+    final_size: VarInt,
+    exposure_end: VarInt,
+}
+
+impl FinalSizeBelowExposureError {
+    /// Checks that `final_size` is at least `exposure_end`.
+    ///
+    /// # Errors
+    ///
+    /// [`FinalSizeBelowExposureError`] if `final_size` lies below
+    /// `exposure_end`.
+    pub fn check(final_size: VarInt, exposure_end: VarInt) -> Result<(), Self> {
+        ensure!(
+            final_size >= exposure_end,
+            FinalSizeBelowExposureSnafu {
+                final_size,
+                exposure_end,
+            }
+        );
+        Ok(())
+    }
+
+    /// The rejected final size, below
+    /// [`exposure_end`](Self::exposure_end).
+    pub const fn final_size(self) -> VarInt {
+        self.final_size
+    }
+
+    /// The exposure end.
+    pub const fn exposure_end(self) -> VarInt {
+        self.exposure_end
+    }
 }

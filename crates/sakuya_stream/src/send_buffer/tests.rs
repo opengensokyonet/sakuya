@@ -1,6 +1,8 @@
 use super::covered_bytes::{CoveredBytes, CoveredBytesError};
 use super::offset_map::OffsetMapSendBuffer;
-use super::visibility::{CoverError, FixFinalSizeError, VisibilitySettlement};
+use super::visibility::{
+    CoverError, FinalSizeBelowExposureError, FixFinalSizeError, VisibilitySettlement,
+};
 use super::*;
 use crate::connection_send_credit::ConnectionCreditReservation;
 use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
@@ -179,8 +181,7 @@ fn reset_retention_is_checked_before_anything_changes() {
     assert_eq!(
         buffer.apply_reset(retention(101, 0)),
         Err(ApplyResetError::FinalSizeBeyondWrittenEnd {
-            final_size: v(101),
-            written_end: v(100),
+            source: FinalSizeBeyondWrittenEndError::check(v(101), v(100)).unwrap_err(),
         })
     );
     buffer
@@ -190,8 +191,7 @@ fn reset_retention_is_checked_before_anything_changes() {
         buffer.apply_reset(retention(30, 0)),
         Err(ApplyResetError::FixFinalSize {
             source: FixFinalSizeError::BelowExposure {
-                final_size: v(30),
-                exposure_end: v(40),
+                source: FinalSizeBelowExposureError::check(v(30), v(40)).unwrap_err(),
             },
         })
     );
@@ -344,8 +344,7 @@ fn exposed_final_size_constrains_later_exposures() {
     assert_eq!(
         error,
         ExposeUsageError::FinalSizeBelowExposure {
-            final_size: v(50),
-            exposure_end: v(60),
+            source: FinalSizeBelowExposureError::check(v(50), v(60)).unwrap_err(),
         }
     );
 

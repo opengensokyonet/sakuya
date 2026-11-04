@@ -18,8 +18,8 @@ use bytes::Bytes;
 use covered_bytes::CoveredBytes;
 use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
 use sakuya_wire::var_int::VarInt;
-use snafu::Snafu;
-use visibility::FixFinalSizeError;
+use snafu::{Snafu, ensure};
+use visibility::{FinalSizeBelowExposureError, FixFinalSizeError};
 
 pub mod covered_bytes;
 pub mod offset_map;
@@ -176,12 +176,10 @@ pub enum ApplyResetError {
         source: ReliableSizeError,
     },
     /// The final size lies beyond the written end.
-    #[snafu(display("final size {final_size} lies beyond the written end {written_end}"))]
+    #[snafu(display("the reset retention keeps a final size beyond the written end"))]
     FinalSizeBeyondWrittenEnd {
-        /// The requested final size.
-        final_size: VarInt,
-        /// The written end.
-        written_end: VarInt,
+        /// The requested final size and the written end.
+        source: FinalSizeBeyondWrittenEndError,
     },
     /// The final size cannot be fixed.
     #[snafu(display("cannot fix the final size"))]
@@ -189,6 +187,47 @@ pub enum ApplyResetError {
         /// Why the final size was rejected.
         source: FixFinalSizeError,
     },
+}
+
+/// A final size lies beyond the written end: a stream cannot end after data
+/// that was never handed over.
+///
+/// The stream sender checks it for a reset it is asked for, and a send
+/// buffer when it applies a reset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("final size {final_size} lies beyond the written end {written_end}"))]
+pub struct FinalSizeBeyondWrittenEndError {
+    final_size: VarInt,
+    written_end: VarInt,
+}
+
+impl FinalSizeBeyondWrittenEndError {
+    /// Checks that `final_size` is at most `written_end`.
+    ///
+    /// # Errors
+    ///
+    /// [`FinalSizeBeyondWrittenEndError`] if `final_size` lies beyond
+    /// `written_end`.
+    pub fn check(final_size: VarInt, written_end: VarInt) -> Result<(), Self> {
+        ensure!(
+            final_size <= written_end,
+            FinalSizeBeyondWrittenEndSnafu {
+                final_size,
+                written_end,
+            }
+        );
+        Ok(())
+    }
+
+    /// The rejected final size, beyond [`written_end`](Self::written_end).
+    pub const fn final_size(self) -> VarInt {
+        self.final_size
+    }
+
+    /// The written end.
+    pub const fn written_end(self) -> VarInt {
+        self.written_end
+    }
 }
 
 /// The retention a reset leaves to a send buffer (`ResetRetention`).
@@ -236,12 +275,10 @@ pub enum ExposeUsageError {
         source: FinalSizeChangeError,
     },
     /// A final size lies below the exposure end.
-    #[snafu(display("final size {final_size} lies below the exposure end {exposure_end}"))]
+    #[snafu(display("cannot expose a final size below the exposed usage"))]
     FinalSizeBelowExposure {
-        /// The rejected final size.
-        final_size: VarInt,
-        /// The exposure end.
-        exposure_end: VarInt,
+        /// The rejected final size and the exposure end.
+        source: FinalSizeBelowExposureError,
     },
     /// A final size is exposed while the stream has no fixed final size.
     #[snafu(display("final size {final_size} exposed before the stream ended"))]

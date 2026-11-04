@@ -2,14 +2,15 @@
 use super::covered_bytes::CoveredBytes;
 use super::visibility::{CoverError, VisibilitySettlement};
 use super::{
-    AppendError, ApplyResetError, ExposeUsageError, ExposedEnd, ResetRetention, Selection,
-    SelectionConstraints, SendBuffer, TransmissionReceipt, append_error, apply_reset_error,
+    AppendError, ApplyResetError, ExposeUsageError, ExposedEnd, FinalSizeBeyondWrittenEndError,
+    ResetRetention, Selection, SelectionConstraints, SendBuffer, TransmissionReceipt, append_error,
+    apply_reset_error,
 };
 use crate::connection_send_credit::ConnectionSendFlowController;
 use bytes::Bytes;
 use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
 use sakuya_wire::var_int::VarInt;
-use snafu::{ResultExt, ensure};
+use snafu::ResultExt;
 use std::collections::BTreeMap;
 
 /// A send buffer that keeps each appended [`Bytes`] as it arrived, keyed by
@@ -116,13 +117,8 @@ impl SendBuffer for OffsetMapSendBuffer {
         } = retention;
         ReliableSizeError::check(final_size, reliable_size)
             .context(apply_reset_error::ReliableSizeBeyondFinalSizeSnafu)?;
-        ensure!(
-            final_size <= self.written_end,
-            apply_reset_error::FinalSizeBeyondWrittenEndSnafu {
-                final_size,
-                written_end: self.written_end,
-            }
-        );
+        FinalSizeBeyondWrittenEndError::check(final_size, self.written_end)
+            .context(apply_reset_error::FinalSizeBeyondWrittenEndSnafu)?;
         self.visibility
             .fix_final_size(final_size)
             .context(apply_reset_error::FixFinalSizeSnafu)?;
