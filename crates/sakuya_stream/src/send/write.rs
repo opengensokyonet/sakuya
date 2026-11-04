@@ -323,9 +323,6 @@ enum GrantViolationError {
         offset: VarInt,
         granted_offset: VarInt,
     },
-    /// The guard grants zero bytes.
-    #[snafu(display("flow-control policy granted zero bytes"))]
-    Zero,
     /// The guard exceeds the attempt's ceiling.
     #[snafu(display("flow-control policy granted admission above the ceiling"))]
     Ceiling { source: GrantAboveCeilingError },
@@ -341,7 +338,7 @@ fn check_grant(guard: &AdmissionGuard, attempt: &WriteAttempt) -> Result<(), Gra
             granted_offset: guard.offset(),
         }
     );
-    ensure!(guard.granted() > VarInt::ZERO, grant_violation::ZeroSnafu);
+    // A guard never grants zero bytes: `AdmissionGuard::new` rejects that.
     GrantAboveCeilingError::check(guard.granted(), attempt.ceiling)
         .context(grant_violation::CeilingSnafu)?;
     Ok(())

@@ -109,12 +109,6 @@ impl AdmissionGuard {
     pub fn granted(&self) -> VarInt {
         self.granted
     }
-
-    /// A guard that skips the checks of [`new`](Self::new).
-    #[cfg(test)]
-    pub(crate) fn new_unchecked(offset: VarInt, granted: VarInt) -> Self {
-        Self { offset, granted }
-    }
 }
 
 /// [`AdmissionGuard::new`] was asked for a grant outside `1..=ceiling`.

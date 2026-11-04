@@ -64,7 +64,6 @@ struct RecordingFlow {
     grant_cap: Option<VarInt>,
     admit_nothing: bool,
     over_grant: bool,
-    zero_grant: bool,
     foreign_offset: bool,
     attempts: Vec<WriteAttempt>,
     settlements: Vec<(VarInt, Option<VarInt>)>,
@@ -88,9 +87,6 @@ impl SendFlowControlPolicy for RecordingFlow {
                 ..*attempt
             };
             return Some(AdmissionGuard::new(&widened, granted).unwrap());
-        }
-        if self.zero_grant {
-            return Some(AdmissionGuard::new_unchecked(attempt.offset, VarInt::ZERO));
         }
         if self.foreign_offset {
             let shifted = WriteAttempt {
@@ -469,16 +465,6 @@ fn admission_guards_are_checked_at_construction() {
         AdmissionGuard::new(&attempt, VarInt::ZERO),
         Err(AdmissionGrantError::Zero)
     );
-}
-
-#[test]
-#[should_panic(expected = "flow-control policy granted zero bytes")]
-fn zero_grant_is_a_policy_violation() {
-    let connection = new_connection(1000);
-    let mut sender = test_sender(&connection, 100, false);
-    sender.composition.flow_control.zero_grant = true;
-    let mut input = source(10);
-    let _ = sender.write(&mut input);
 }
 
 /// A send buffer that claims its written end has reached `VarInt::MAX`.
