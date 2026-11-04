@@ -28,7 +28,9 @@
 //!    moves both streams to 1-RTT;
 //! 7. issues the session tickets of its ticket policy, and ends.
 //!
-//! A failure ends the call with a [`HandshakeError`].
+//! A failure ends the call with a [`HandshakeError`]; a ClientHello with a
+//! non-empty legacy_session_id ends it with
+//! [`HandshakeError::ProtocolViolation`] (RFC 9001 §8.4).
 //!
 //! This version neither opens encrypted layers nor asks for a client
 //! certificate: it takes layers whose confirmation and retry
@@ -51,7 +53,7 @@ use crate::{
     crypto::TlsCrypto,
     engine::{
         CryptoInput, CryptoInputExt as _, CryptoLevel, CryptoOutput, CryptoOutputExt as _,
-        HandshakeError, encode, split_read, split_write,
+        HandshakeError, LegacySessionIdError, encode, split_read, split_write,
     },
     extension::{
         InvalidExtensions, OpaqueData,
@@ -472,6 +474,16 @@ fn read_hello<L, S, G, K>(
         .map_err(|source| ServerAlertError::ClientHello { source })
 }
 
+/// Checks that a ClientHello does not ask for the middlebox compatibility
+/// mode (RFC 9001 §8.4).
+fn check_session_id<F, E>(hello: &ClientHello<Bytes>) -> Result<(), HandshakeError<F, E>> {
+    LegacySessionIdError::check(*hello.legacy_session_id()).map_err(|source| {
+        HandshakeError::ProtocolViolation {
+            source: source.into(),
+        }
+    })
+}
+
 /// The `quic_transport_parameters` of a ClientHello.
 fn transport_parameters(hello: &ClientHello<Bytes>) -> Option<&Bytes> {
     hello
@@ -559,8 +571,10 @@ fn ticket_age_fits<T>(
 ///
 /// # Errors
 ///
-/// [`HandshakeError::Alert`] with a [`ServerAlertError`], and
-/// [`HandshakeError::Transport`] when a receiver fails.
+/// [`HandshakeError::Alert`] with a [`ServerAlertError`],
+/// [`HandshakeError::ProtocolViolation`] for a non-empty
+/// legacy_session_id, and [`HandshakeError::Transport`] when a receiver
+/// fails.
 #[call(yields = ServerHandshakeEvent<B, <S as TargetSelection>::Target>)]
 #[allow(clippy::too_many_arguments)]
 pub async fn server_handshake<I, O, T, B, N, K, L, S, P, Q, Z>(
@@ -601,6 +615,7 @@ where
     // The ClientHello, its layers, the target and the parameters.
     let first = read_message(input, limits, None).await?;
     let hello = read_hello(&first).map_err(alert)?;
+    check_session_id(&hello)?;
     let accepted = layers
         .open(first, hello)
         .await
@@ -649,6 +664,7 @@ where
             .retry(&encoded);
         let second = read_message(input, limits, None).await?;
         let hello = read_hello(&second).map_err(alert)?;
+        check_session_id(&hello)?;
         let accepted = layers
             .open(second, hello)
             .await

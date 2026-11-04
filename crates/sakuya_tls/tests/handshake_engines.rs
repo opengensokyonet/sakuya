@@ -32,7 +32,7 @@ use sakuya_tls::{
         ticket::TakeOnceTicketMap,
     },
     clock::ManualClock,
-    engine::{CryptoInput, CryptoLevel, CryptoOutput, HandshakeError},
+    engine::{CryptoInput, CryptoLevel, CryptoOutput, HandshakeError, ProtocolViolationError},
     extension::{
         OpaqueData,
         alpn::{ProtocolName, ProtocolNameList},
@@ -1199,4 +1199,80 @@ fn a_key_update_after_the_handshake_fails_with_unexpected_message() {
         alert_of(connection.client_end),
         AlertDescription::UNEXPECTED_MESSAGE
     );
+}
+
+#[test]
+fn a_client_hello_with_a_session_id_is_a_protocol_violation() {
+    let endpoints = Endpoints::new();
+    let connection = connect!(&endpoints, Wire::new(), "example.com", |from,
+                                                                       _,
+                                                                       bytes: &mut Vec<
+        u8,
+    >| {
+        if from == Sender::Client
+            && messages(bytes).first().map(|m| m.0) == Some(HandshakeType::CLIENT_HELLO)
+        {
+            // The empty legacy_session_id, after the header, the version
+            // and the random, becomes one byte long; the message grows by
+            // one byte.
+            assert_eq!(bytes[4 + 2 + 32], 0);
+            bytes[4 + 2 + 32] = 1;
+            bytes.insert(4 + 2 + 32 + 1, 0x5a);
+            let len = u32::from_be_bytes([0, bytes[1], bytes[2], bytes[3]]) + 1;
+            bytes[1..4].copy_from_slice(&len.to_be_bytes()[1..]);
+        }
+    });
+    match connection.server_end {
+        Some(Err(error)) => {
+            let Some(ProtocolViolationError::LegacySessionId { source }) =
+                error.protocol_violation()
+            else {
+                panic!("not a protocol violation: {error:?}")
+            };
+            assert_eq!(source.session_id().as_bytes(), [0x5a]);
+            assert!(error.alert().is_none() && error.transport().is_none());
+        }
+        _ => panic!("the server did not fail"),
+    }
+    assert!(connection.server_events.is_empty());
+}
+
+#[test]
+fn a_ticket_with_another_early_data_size_is_a_protocol_violation() {
+    let endpoints = Endpoints::new();
+    let connection = connect!(&endpoints, Wire::new(), "example.com", |from,
+                                                                       level,
+                                                                       bytes: &mut Vec<
+        u8,
+    >| {
+        if from == Sender::Server && level == CryptoLevel::OneRtt {
+            // early_data is the last extension of each NewSessionTicket.
+            for (found, range) in messages(bytes) {
+                if found == HandshakeType::NEW_SESSION_TICKET {
+                    assert_eq!(
+                        &bytes[range.end - 8..range.end],
+                        [0x00, 0x2a, 0x00, 0x04, 0xff, 0xff, 0xff, 0xff]
+                    );
+                    bytes[range.end - 4..range.end].copy_from_slice(&[0x00, 0x00, 0x40, 0x00]);
+                }
+            }
+        }
+    });
+    assert!(matches!(connection.server_end, Some(Ok(()))));
+    match connection.client_end {
+        Some(Err(error)) => {
+            let Some(ProtocolViolationError::MaxEarlyDataSize { source }) =
+                error.protocol_violation()
+            else {
+                panic!("not a protocol violation: {error:?}")
+            };
+            assert_eq!(source.size().get(), 0x4000);
+            assert!(error.alert().is_none());
+        }
+        _ => panic!("the client did not fail"),
+    }
+    // No ticket was kept: the next connection does a full handshake.
+    let again = connect!(&endpoints, Wire::new(), "example.com", unchanged);
+    let agreed = agreed(&again.server_events, &again.client_events);
+    assert!(!agreed.resumed);
 }

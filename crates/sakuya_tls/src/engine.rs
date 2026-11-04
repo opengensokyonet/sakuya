@@ -17,7 +17,9 @@
 //! moves each stream to the next level as a separate step (RFC 9001
 //! §4.1.3). It hands over traffic secrets and the completion of the
 //! handshake as the items it yields, and ends with a [`HandshakeError`]
-//! when the handshake fails.
+//! when the handshake fails: with an alert, with a
+//! [`ProtocolViolationError`] for the connection to close with
+//! PROTOCOL_VIOLATION, or with the connection's own error.
 //!
 //! `#[capability]` generates `{Trait}Ext` and `{Trait}ViewExt` for each
 //! receiver capability, with the methods the trait documents.
@@ -28,7 +30,8 @@
 
 use crate::{
     alert::{AlertDescription, CallsForAlert},
-    message::codec::ReadHandshakeMessageError,
+    extension::early_data::MaxEarlyDataSize,
+    message::{LegacySessionId, codec::ReadHandshakeMessageError},
 };
 use core::{convert::Infallible, pin::Pin};
 use nitori_call::capability;
@@ -88,8 +91,8 @@ pub trait CryptoOutput: Write {
         Self: 'v;
 }
 
-/// How a handshake fails: with an alert, or with a failure of the
-/// connection's receivers.
+/// How a handshake fails: with an alert, with a violation of QUIC's rules
+/// for TLS, or with a failure of the connection's receivers.
 ///
 /// `F` is the role's failure, which names its alert; in QUIC the alert
 /// closes the connection with the error code `0x0100` plus the alert
@@ -104,6 +107,13 @@ pub enum HandshakeError<F, E> {
         /// The failure.
         source: F,
     },
+    /// The peer broke a rule RFC 9001 sets for TLS in QUIC: the connection
+    /// closes with PROTOCOL_VIOLATION.
+    #[snafu(display("peer violated the QUIC rules for TLS"))]
+    ProtocolViolation {
+        /// The rule.
+        source: ProtocolViolationError,
+    },
     /// A receiver of the connection failed.
     #[snafu(display("connection failed during the handshake"))]
     Transport {
@@ -113,11 +123,12 @@ pub enum HandshakeError<F, E> {
 }
 
 impl<F: CallsForAlert, E> HandshakeError<F, E> {
-    /// The alert to close with, or `None` when a receiver failed.
+    /// The alert to close with, or `None` when the connection closes with a
+    /// transport error instead.
     pub fn alert(&self) -> Option<AlertDescription> {
         match self {
             Self::Alert { source } => Some(source.alert()),
-            Self::Transport { .. } => None,
+            Self::ProtocolViolation { .. } | Self::Transport { .. } => None,
         }
     }
 }
@@ -127,16 +138,95 @@ impl<F, E> HandshakeError<F, E> {
     pub fn failure(&self) -> Option<&F> {
         match self {
             Self::Alert { source } => Some(source),
-            Self::Transport { .. } => None,
+            Self::ProtocolViolation { .. } | Self::Transport { .. } => None,
+        }
+    }
+
+    /// The rule the peer broke, if the connection closes with
+    /// PROTOCOL_VIOLATION.
+    pub fn protocol_violation(&self) -> Option<&ProtocolViolationError> {
+        match self {
+            Self::ProtocolViolation { source } => Some(source),
+            Self::Alert { .. } | Self::Transport { .. } => None,
         }
     }
 
     /// The connection's error, if a receiver failed.
     pub fn transport(&self) -> Option<&E> {
         match self {
-            Self::Alert { .. } => None,
             Self::Transport { source } => Some(source),
+            Self::Alert { .. } | Self::ProtocolViolation { .. } => None,
         }
+    }
+}
+
+/// A rule of RFC 9001 for TLS in QUIC that the peer broke, which the
+/// connection closes with PROTOCOL_VIOLATION.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+pub enum ProtocolViolationError {
+    /// A NewSessionTicket allows 0-RTT with another max_early_data_size than
+    /// 0xffffffff (RFC 9001 §4.6.1, MUST).
+    #[snafu(transparent)]
+    MaxEarlyDataSize {
+        /// The size.
+        source: MaxEarlyDataSizeError,
+    },
+    /// A ClientHello has a non-empty legacy_session_id, which asks for the
+    /// middlebox compatibility mode (RFC 9001 §8.4, SHOULD).
+    #[snafu(transparent)]
+    LegacySessionId {
+        /// The session ID.
+        source: LegacySessionIdError,
+    },
+}
+
+/// The max_early_data_size of a NewSessionTicket is not 0xffffffff.
+///
+/// It is constructed only when the check fails, so the size is never
+/// [`MaxEarlyDataSize::QUIC`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("max_early_data_size {} in QUIC", size.get()))]
+pub struct MaxEarlyDataSizeError {
+    size: MaxEarlyDataSize,
+}
+
+impl MaxEarlyDataSizeError {
+    /// Checks that `size` is [`MaxEarlyDataSize::QUIC`].
+    pub(crate) fn check(size: MaxEarlyDataSize) -> Result<(), Self> {
+        if size == MaxEarlyDataSize::QUIC {
+            return Ok(());
+        }
+        Err(Self { size })
+    }
+
+    /// The size the ticket stated.
+    pub const fn size(self) -> MaxEarlyDataSize {
+        self.size
+    }
+}
+
+/// The legacy_session_id of a ClientHello is not empty.
+///
+/// It is constructed only when the check fails, so the session ID is never
+/// empty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("ClientHello legacy_session_id of {} bytes in QUIC", session_id.as_bytes().len()))]
+pub struct LegacySessionIdError {
+    session_id: LegacySessionId,
+}
+
+impl LegacySessionIdError {
+    /// Checks that `session_id` is empty.
+    pub(crate) fn check(session_id: LegacySessionId) -> Result<(), Self> {
+        if session_id == LegacySessionId::EMPTY {
+            return Ok(());
+        }
+        Err(Self { session_id })
+    }
+
+    /// The session ID the ClientHello carried.
+    pub const fn session_id(&self) -> &LegacySessionId {
+        &self.session_id
     }
 }
 

@@ -28,7 +28,9 @@
 //!    complete, and it yields [`ClientHandshakeEvent::Completed`] and moves
 //!    both streams to 1-RTT;
 //! 6. keeps the tickets of the NewSessionTicket messages the server sends,
-//!    for as long as the call runs.
+//!    for as long as the call runs; a ticket that allows 0-RTT with a
+//!    max_early_data_size other than 0xffffffff ends the call with
+//!    [`HandshakeError::ProtocolViolation`] (RFC 9001 §4.6.1).
 //!
 //! A failure ends the call with a [`HandshakeError`].
 //!
@@ -54,13 +56,12 @@ use crate::{
     crypto::TlsCrypto,
     engine::{
         CryptoInput, CryptoInputExt as _, CryptoLevel, CryptoOutput, CryptoOutputExt as _,
-        HandshakeError, encode, split_read, split_write,
+        HandshakeError, MaxEarlyDataSizeError, encode, split_read, split_write,
     },
     extension::{
         OpaqueData,
         alpn::{ProtocolName, ProtocolNameList},
         cookie::Cookie,
-        early_data::MaxEarlyDataSize,
         key_share::{ClientShares, KeyShareEntry},
         pre_shared_key::{InvalidOfferedPsks, OfferedPsks, PskBinder, PskIdentity, PskIndex},
         psk_key_exchange_modes::PskKeyExchangeMode,
@@ -432,13 +433,6 @@ pub enum ClientAlertError<V> {
         /// The failure.
         source: ReadNewSessionTicketError,
     },
-    /// A NewSessionTicket allows 0-RTT with a max_early_data_size other
-    /// than 0xffffffff (RFC 9001 §4.6.1).
-    #[snafu(display("max_early_data_size {} in QUIC", size.get()))]
-    EarlyDataSize {
-        /// The size.
-        size: MaxEarlyDataSize,
-    },
     /// The output stopped accepting bytes.
     #[snafu(display("CRYPTO output stopped"))]
     OutputStopped {
@@ -453,9 +447,7 @@ impl<V: CallsForAlert> CallsForAlert for ClientAlertError<V> {
     /// version before TLS 1.3; missing_extension without transport
     /// parameters; no_application_protocol when none was selected;
     /// unsupported_extension for an unsolicited one; illegal_parameter for
-    /// the other fields that disagree with the ClientHello, including a
-    /// max_early_data_size other than 0xffffffff, which RFC 9001 §4.6.1
-    /// makes a PROTOCOL_VIOLATION of the connection; internal_error for
+    /// the other fields that disagree with the ClientHello; internal_error for
     /// failures of the client itself; and that of the source otherwise.
     fn alert(&self) -> AlertDescription {
         match self {
@@ -474,8 +466,7 @@ impl<V: CallsForAlert> CallsForAlert for ClientAlertError<V> {
             | Self::PskHash
             | Self::UnofferedProtocol
             | Self::EarlyDataWithoutPsk
-            | Self::UnofferedScheme { .. }
-            | Self::EarlyDataSize { .. } => AlertDescription::ILLEGAL_PARAMETER,
+            | Self::UnofferedScheme { .. } => AlertDescription::ILLEGAL_PARAMETER,
             Self::KeyExchange { source } => match source {
                 CompleteError::InvalidPeerShare { .. } => AlertDescription::ILLEGAL_PARAMETER,
                 CompleteError::Decapsulation { .. } => AlertDescription::INTERNAL_ERROR,
@@ -746,8 +737,10 @@ enum Sent<C: TlsCrypto> {
 ///
 /// # Errors
 ///
-/// [`HandshakeError::Alert`] with a [`ClientAlertError`], and
-/// [`HandshakeError::Transport`] when a receiver fails.
+/// [`HandshakeError::Alert`] with a [`ClientAlertError`],
+/// [`HandshakeError::ProtocolViolation`] for a ticket's
+/// max_early_data_size, and [`HandshakeError::Transport`] when a receiver
+/// fails.
 #[call(yields = ClientHandshakeEvent<B>)]
 #[allow(clippy::too_many_arguments)]
 pub async fn client_handshake<I, O, T, B, F, K, V, Z>(
@@ -1194,8 +1187,14 @@ where
                 NewSessionTicketExtension::EarlyData(size) => Some(*size),
                 NewSessionTicketExtension::Unknown(_) => None,
             }) {
-            Some(MaxEarlyDataSize::QUIC) => true,
-            Some(size) => return Err(alert(ClientAlertError::EarlyDataSize { size })),
+            Some(size) => {
+                MaxEarlyDataSizeError::check(size).map_err(|source| {
+                    HandshakeError::ProtocolViolation {
+                        source: source.into(),
+                    }
+                })?;
+                true
+            }
             None => false,
         };
         if received.ticket_lifetime().seconds() == 0 {
