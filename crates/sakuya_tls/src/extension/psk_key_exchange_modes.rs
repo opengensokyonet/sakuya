@@ -1,4 +1,4 @@
-//! The `psk_key_exchange_modes` extension (RFC 8446 §4.2.9).
+//! The `psk_key_exchange_modes` extension (RFC 9846 §4.3.9).
 //!
 //! Its data is a [`ByteCodePointList`](crate::code_point::ByteCodePointList)
 //! of [`PskKeyExchangeMode`]s.

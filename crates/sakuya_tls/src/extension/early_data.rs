@@ -1,4 +1,4 @@
-//! The `early_data` extension (RFC 8446 §4.2.10).
+//! The `early_data` extension (RFC 9846 §4.3.10).
 //!
 //! In ClientHello and EncryptedExtensions its data is empty; in
 //! NewSessionTicket it is a [`MaxEarlyDataSize`].

@@ -1,7 +1,7 @@
 //! Failures shared by the length-prefixed fields of TLS messages.
 //!
 //! TLS writes a variable-length field as a length of one, two or three bytes
-//! followed by that many bytes (RFC 8446 §3.4). [`ReadVectorError`] is the
+//! followed by that many bytes (RFC 9846 §3.4). [`ReadVectorError`] is the
 //! failure of reading such a field, [`ReadBoundedVectorError`] that of a
 //! field whose length has a narrower range than its length field allows,
 //! with [`LengthOutOfRangeError`] for the range. [`ExcessBytesError`] reports bytes

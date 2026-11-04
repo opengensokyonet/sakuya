@@ -1,4 +1,4 @@
-//! CertificateVerify (RFC 8446 §4.4.3).
+//! CertificateVerify (RFC 9846 §4.5.2).
 
 use crate::{vector::LengthOutOfRangeError, width::Width};
 use nitori_crypto::SignatureScheme;

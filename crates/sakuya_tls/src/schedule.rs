@@ -1,4 +1,4 @@
-//! The transcript and the key schedule of TLS 1.3 (RFC 8446 §4.4.1, §7.1),
+//! The transcript and the key schedule of TLS 1.3 (RFC 9846 §4.1, §7.1),
 //! as one chain of values that move.
 //!
 //! Each value holds the backend, the hash of the cipher suite and the
@@ -136,7 +136,7 @@ impl<C: TlsCrypto> Chain<C> {
 
     /// HMAC under the Finished key of `base` over the transcript so far: a
     /// Finished message and a PSK binder are both this
-    /// (RFC 8446 §4.4.4, §4.2.11.2).
+    /// (RFC 9846 §4.5.3, §4.3.11.2).
     fn verify_data(&self, base: &Secret) -> Digest {
         let key = self.expand_label(base, b"finished", &[], self.hash_len());
         Hmac::sign(
@@ -198,7 +198,7 @@ impl<C: TlsCrypto> Chain<C> {
     }
 }
 
-/// HKDF-Expand-Label (RFC 8446 §7.1). The "tls13 " prefix belongs to TLS,
+/// HKDF-Expand-Label (RFC 9846 §7.1). The "tls13 " prefix belongs to TLS,
 /// not to the backend. The caller keeps `label` within [`LABEL_MAX`] bytes
 /// and `context` within 255.
 fn expand_label<C: TlsCrypto>(
@@ -276,7 +276,7 @@ impl<R: HandshakeRole, C: TlsCrypto + Clone> Transcript<R, C> {
 
     /// Replaces the first ClientHello, which the transcript holds alone,
     /// with the message_hash message that stands for it, and adds the
-    /// HelloRetryRequest (RFC 8446 §4.4.1).
+    /// HelloRetryRequest (RFC 9846 §4.1).
     pub fn retry(mut self, hello_retry_request: &[u8]) -> Self {
         let message = MessageHash::new(self.chain.current());
         let mut buffer = [0; 4 + 48];
@@ -296,7 +296,7 @@ impl<R: HandshakeRole, C: TlsCrypto + Clone> Transcript<R, C> {
         self
     }
 
-    /// The Early Secret without a PSK: HKDF-Extract(0, 0) (RFC 8446 §7.1).
+    /// The Early Secret without a PSK: HKDF-Extract(0, 0) (RFC 9846 §7.1).
     pub fn early_secret(self) -> EarlySecret<R, C> {
         let zeros = self.chain.zeros();
         let early = self.chain.extract(zeros.as_bytes(), zeros.as_bytes());
@@ -330,7 +330,7 @@ pub struct EarlySecret<R, C: TlsCrypto> {
 }
 
 /// How the server authenticates in a handshake: with a certificate, or with
-/// the PSK it accepted (RFC 8446 §4.1.1).
+/// the PSK it accepted (RFC 9846 §4.2.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     Certificate,
@@ -445,7 +445,7 @@ impl<R: HandshakeRole, C: TlsCrypto + Clone> PskEarlySecret<R, C> {
 
 impl<C: TlsCrypto + Clone> PskEarlySecret<Client, C> {
     /// The binder of the PSK over the transcript so far, the ClientHello up
-    /// to its binders (RFC 8446 §4.2.11.2).
+    /// to its binders (RFC 9846 §4.3.11.2).
     pub fn binder(&self) -> Digest {
         self.chain.verify_data(&self.binder_key())
     }
@@ -501,7 +501,7 @@ impl<C: TlsCrypto + Clone> PskEarlySecret<Client, C> {
 impl<C: TlsCrypto + Clone> PskEarlySecret<Server, C> {
     /// Checks the binder the client sent for the PSK over the transcript so
     /// far, the ClientHello up to its binders, in constant time
-    /// (RFC 8446 §4.2.11).
+    /// (RFC 9846 §4.3.11).
     ///
     /// # Errors
     ///
@@ -581,7 +581,7 @@ impl<R: HandshakeRole, C: TlsCrypto + Clone> HandshakeSecret<R, C> {
 
 impl<C: TlsCrypto + Clone> HandshakeSecret<Server, C> {
     /// The content the server signs for its CertificateVerify, over the
-    /// transcript up to its Certificate (RFC 8446 §4.4.3).
+    /// transcript up to its Certificate (RFC 9846 §4.5.2).
     pub fn certificate_verify_content(&self) -> CertificateVerifyContent {
         CertificateVerifyContent::server(&self.chain.current())
     }
@@ -710,7 +710,7 @@ pub struct ResumptionSecret<R, C: TlsCrypto> {
 impl<R: HandshakeRole, C: TlsCrypto> ResumptionSecret<R, C> {
     /// The PSK of the ticket with `nonce`:
     /// HKDF-Expand-Label(resumption_secret, "resumption", nonce,
-    /// Hash.length) (RFC 8446 §4.6.1).
+    /// Hash.length) (RFC 9846 §4.7.1).
     pub fn ticket_psk<N: AsRef<[u8]>>(&self, nonce: &TicketNonce<N>) -> ResumptionPsk {
         let len = ExpandLength::hash_len(self.hash.algorithm());
         ResumptionPsk(expand_label(
@@ -766,7 +766,7 @@ impl<L> ExporterLabel<L> {
     }
 }
 
-/// The exporter of a connection (RFC 8446 §7.5): exporter_secret
+/// The exporter of a connection (RFC 9846 §7.5): exporter_secret
 /// with the hash and the backend.
 pub struct Exporter<C: TlsCrypto> {
     backend: C,
@@ -847,7 +847,7 @@ pub struct Completed<C: TlsCrypto> {
 
 /// The content a server's CertificateVerify signs: 64 spaces, the context
 /// string of a server, a zero byte and the transcript hash
-/// (RFC 8446 §4.4.3).
+/// (RFC 9846 §4.5.2).
 #[derive(Clone, Copy)]
 pub struct CertificateVerifyContent {
     bytes: [u8; 64 + 33 + 1 + 48],
@@ -928,7 +928,7 @@ pub enum FinishedError {
 
 impl FinishedError {
     /// The alert the failure calls for: decrypt_error for verify_data that
-    /// does not match (RFC 8446 §4.4.4), and that of the read failure
+    /// does not match (RFC 9846 §4.5.3), and that of the read failure
     /// otherwise.
     pub fn alert(&self) -> crate::alert::AlertDescription {
         match self {
@@ -944,7 +944,7 @@ impl FinishedError {
 pub struct BinderMismatchError;
 
 impl BinderMismatchError {
-    /// The alert the failure calls for: decrypt_error (RFC 8446 §6.2).
+    /// The alert the failure calls for: decrypt_error (RFC 9846 §6.2).
     pub fn alert(&self) -> crate::alert::AlertDescription {
         crate::alert::AlertDescription::DECRYPT_ERROR
     }
@@ -964,7 +964,7 @@ impl UnofferedPskError {
     }
 
     /// The alert the failure calls for: illegal_parameter
-    /// (RFC 8446 §4.2.11).
+    /// (RFC 9846 §4.3.11).
     pub fn alert(&self) -> crate::alert::AlertDescription {
         crate::alert::AlertDescription::ILLEGAL_PARAMETER
     }

@@ -1,4 +1,4 @@
-//! TLS alert descriptions (RFC 8446 §6).
+//! TLS alert descriptions (RFC 9846 §6).
 //!
 //! In QUIC a TLS alert closes the connection with the transport error code
 //! `0x0100` plus the alert description (RFC 9001 §4.8). The errors of this
@@ -8,7 +8,7 @@
 use crate::code_point::code_point;
 
 code_point! {
-    /// An AlertDescription code point (RFC 8446 §6).
+    /// An AlertDescription code point (RFC 9846 §6).
     ///
     /// Any byte is a code point.
     AlertDescription(u8);

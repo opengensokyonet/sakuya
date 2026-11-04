@@ -1,4 +1,4 @@
-//! Finished (RFC 8446 §4.4.4).
+//! Finished (RFC 9846 §4.5.3).
 //!
 //! The body of a Finished message is its verify_data, as long as the hash of
 //! the cipher suite, so the reader takes that hash.

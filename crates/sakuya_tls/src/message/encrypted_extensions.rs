@@ -1,4 +1,4 @@
-//! EncryptedExtensions (RFC 8446 §4.3.1).
+//! EncryptedExtensions (RFC 9846 §4.4.1).
 
 use crate::extension::{OpaqueData, extension_subset};
 use crate::{
@@ -328,7 +328,7 @@ pub mod codec {
         /// The alert the failure calls for.
         ///
         /// illegal_parameter for a type that appears twice, for a recognized
-        /// extension this message may not carry (RFC 8446 §4.3.1) and for a
+        /// extension this message may not carry (RFC 9846 §4.4.1) and for a
         /// protocol list that does not hold exactly one name; decode_error
         /// for every failure to decode.
         pub fn alert(&self) -> AlertDescription {

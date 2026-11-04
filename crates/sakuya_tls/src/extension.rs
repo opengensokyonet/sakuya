@@ -1,4 +1,4 @@
-//! TLS extensions (RFC 8446 §4.2) and what their blocks share.
+//! TLS extensions (RFC 9846 §4.3) and what their blocks share.
 //!
 //! An extension is a two-byte [`ExtensionType`] and its data, of up to
 //! 2<sup>16</sup> − 1 bytes; a message carries its extensions as a block,
@@ -7,13 +7,13 @@
 //! and keeps the extensions in their order on the wire.
 //!
 //! The readers recognize the extensions of [`RestrictedExtension`]. Each of
-//! them may appear only in the messages RFC 8446 §4.2, RFC 9001 §8.2 and
+//! them may appear only in the messages RFC 9846 §4.3, RFC 9001 §8.2 and
 //! RFC 9849 list for it, and a recognized extension in another message is
 //! [`ExtensionNotAllowedError`], which calls for illegal_parameter; each message
 //! names the recognized extensions it may not carry in an enum of its own,
 //! which is the payload of that failure. An extension
 //! of any other type is kept as an [`UnknownExtension`], with its data as it
-//! is, for the handshake to ignore (RFC 8446 §9.3). No type may appear twice
+//! is, for the handshake to ignore (RFC 9846 §9.3). No type may appear twice
 //! in a block ([`DuplicateExtensionError`]).
 //!
 //! The structured data of the recognized extensions lives in the child
@@ -311,7 +311,7 @@ pub enum InvalidUnknownExtensionError {
     },
 }
 
-/// An extension type appears twice in one block (RFC 8446 §4.2).
+/// An extension type appears twice in one block (RFC 9846 §4.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("{extension:?} appears more than once"))]
 pub struct DuplicateExtensionError {
@@ -331,7 +331,7 @@ impl DuplicateExtensionError {
 }
 
 /// A recognized extension appears in a message it may not appear in
-/// (RFC 8446 §4.2).
+/// (RFC 9846 §4.3).
 ///
 /// `X` is the enum of the message's disallowed extensions: the recognized
 /// extensions that message may not carry, and only those.

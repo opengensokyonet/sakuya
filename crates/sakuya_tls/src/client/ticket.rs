@@ -54,7 +54,7 @@ pub struct StoredTicket {
 
 impl StoredTicket {
     /// The obfuscated age to offer at `now`: the age in milliseconds plus
-    /// `ticket_age_add`, modulo 2<sup>32</sup> (RFC 8446 §4.2.11.1).
+    /// `ticket_age_add`, modulo 2<sup>32</sup> (RFC 9846 §4.3.11.1).
     ///
     /// A `now` before the ticket was received counts as an age of zero.
     pub fn obfuscated_age(&self, now: UtcDateTime) -> u32 {

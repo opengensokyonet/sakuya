@@ -7,7 +7,7 @@
 //!
 //! Whether to send a HelloRetryRequest follows from the chosen group: when
 //! the ClientHello has no key share of that group, the server must ask for
-//! one (RFC 8446 §4.1.1). The handshake derives this; a choice only names
+//! one (RFC 9846 §4.2.1). The handshake derives this; a choice only names
 //! the group.
 
 use crate::{
@@ -140,7 +140,7 @@ pub enum NoCommonParametersError {
 
 impl NoCommonParametersError {
     /// The alert the failure calls for: handshake_failure, one of the two
-    /// RFC 8446 §4.1.1 allows.
+    /// RFC 9846 §4.2.1 allows.
     pub fn alert(&self) -> AlertDescription {
         AlertDescription::HANDSHAKE_FAILURE
     }

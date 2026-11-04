@@ -150,24 +150,24 @@ impl<C> core::fmt::Debug for Offer<C> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(module(invalid_offer), visibility(pub(crate)))]
 pub enum InvalidOfferError {
-    /// No cipher suite: `cipher_suites` cannot be empty (RFC 8446 §4.1.2).
+    /// No cipher suite: `cipher_suites` cannot be empty (RFC 9846 §4.2.2).
     #[snafu(display("offer has no cipher suite"))]
     NoSuite,
-    /// No group: `supported_groups` cannot be empty (RFC 8446 §4.2.7).
+    /// No group: `supported_groups` cannot be empty (RFC 9846 §4.3.7).
     #[snafu(display("offer has no key exchange group"))]
     NoGroup,
     /// No signature scheme: `signature_algorithms` cannot be empty
-    /// (RFC 8446 §4.2.3).
+    /// (RFC 9846 §4.3.3).
     #[snafu(display("offer has no signature scheme"))]
     NoSignatureScheme,
     /// A key share is of a group the offer does not list
-    /// (RFC 8446 §4.2.8).
+    /// (RFC 9846 §4.3.8).
     #[snafu(display("key share of {group:?}, which is not offered"))]
     KeyShareNotListed {
         /// The group.
         group: NamedGroup,
     },
-    /// Two key shares are of one group (RFC 8446 §4.2.8).
+    /// Two key shares are of one group (RFC 9846 §4.3.8).
     #[snafu(display("more than one key share of {group:?}"))]
     DuplicateKeyShare {
         /// The group.

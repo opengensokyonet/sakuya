@@ -4,7 +4,7 @@
 //! transcript in CertificateVerify with the key of the leaf. The scheme of
 //! that signature must be one the client offered in
 //! `signature_algorithms` and fit the key; RSA signs with RSASSA-PSS, and
-//! no scheme uses SHA-1 (RFC 8446 §4.4.3). [`Identity::present`] picks the
+//! no scheme uses SHA-1 (RFC 9846 §4.5.2). [`Identity::present`] picks the
 //! chain and the scheme for the selected target; the handshake computes
 //! the content to sign, and the signature may wait.
 //!
@@ -74,7 +74,7 @@ impl NoCommonSchemeError {
 }
 
 /// Schemes CertificateVerify does not use: RSASSA-PKCS1-v1_5 and SHA-1
-/// (RFC 8446 §4.2.3, §4.4.3).
+/// (RFC 9846 §4.3.3, §4.5.2).
 const NOT_FOR_CERTIFICATE_VERIFY: &[u16] = &[0x0201, 0x0203, 0x0401, 0x0501, 0x0601];
 
 /// One certificate chain and the signing key of its leaf, for every

@@ -2,7 +2,7 @@
 //!
 //! A server that authenticates with a certificate may send a
 //! CertificateRequest, and then reads the client's Certificate and
-//! CertificateVerify before its Finished (RFC 8446 §4.3.2, §4.4.2).
+//! CertificateVerify before its Finished (RFC 9846 §4.4.2, §4.5.1).
 //! [`PeerAuthentication::request`] decides for the selected target.
 //!
 //! [`NoClientCertificate`] never asks. Its request is of a type with no

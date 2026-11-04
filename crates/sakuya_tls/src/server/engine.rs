@@ -27,7 +27,7 @@
 //!    1-RTT secret, which it held back until now (RFC 9001 §5.7), then
 //!    moves both streams to 1-RTT;
 //! 7. issues the session tickets of its ticket policy, and ends; it issues
-//!    none when the client did not name psk_dhe_ke (RFC 8446 §4.2.9).
+//!    none when the client did not name psk_dhe_ke (RFC 9846 §4.3.9).
 //!
 //! A failure ends the call with a [`HandshakeError`]; a ClientHello with a
 //! non-empty legacy_session_id ends it with
@@ -166,7 +166,7 @@ pub struct ServerHandshakeSettings {
     /// The limits on the messages the server receives.
     pub limits: MessageLimits,
     /// How far the age a client states for its ticket may be from the age
-    /// the server measures for 0-RTT to be admitted (RFC 8446 §8.3); 10
+    /// the server measures for 0-RTT to be admitted (RFC 9846 §8.3); 10
     /// seconds by default.
     pub ticket_age_tolerance: Duration,
 }
@@ -213,7 +213,7 @@ pub enum ServerHandshakeEvent<C: TlsCrypto, T> {
     },
 }
 
-/// A required extension a ClientHello lacks (RFC 8446 §9.2, RFC 9001
+/// A required extension a ClientHello lacks (RFC 9846 §9.2, RFC 9001
 /// §8.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RequiredExtension {
@@ -281,7 +281,7 @@ pub enum ServerAlertError<L, S, G, K> {
     #[snafu(display("parameter choice outside the client's offer"))]
     ChoiceNotOffered,
     /// The second ClientHello does not carry exactly one key share, of the
-    /// group the HelloRetryRequest named (RFC 8446 §4.1.2).
+    /// group the HelloRetryRequest named (RFC 9846 §4.2.2).
     #[snafu(display("second ClientHello does not share the requested group"))]
     RetryKeyShare,
     /// The second ClientHello no longer offers the suite or the group the
@@ -370,7 +370,7 @@ pub enum ServerAlertError<L, S, G, K> {
 
 impl<L: CallsForAlert, S: CallsForAlert, G, K> CallsForAlert for ServerAlertError<L, S, G, K> {
     /// The alert the failure calls for: protocol_version without TLS 1.3
-    /// (RFC 8446 §4.2.1), missing_extension for a required extension
+    /// (RFC 9846 §4.3.1), missing_extension for a required extension
     /// (§9.2), illegal_parameter for a second ClientHello that does not
     /// follow the HelloRetryRequest (§4.1.2) and an invalid key share,
     /// decrypt_error for a binder (§4.2.11), handshake_failure without
@@ -552,7 +552,7 @@ enum Early<C: TlsCrypto> {
 }
 
 /// Whether the client's age of its ticket is within `tolerance` of the
-/// age the server measures (RFC 8446 §4.2.11.1, §8.3).
+/// age the server measures (RFC 9846 §4.3.11.1, §8.3).
 fn ticket_age_fits<T>(
     state: &TicketState<T>,
     obfuscated_age: u32,
@@ -705,7 +705,7 @@ where
 
     // Whether the client resumes with psk_dhe_ke, the one mode the server
     // takes: it restricts both the offered tickets and the issued ones
-    // (RFC 8446 §4.2.9).
+    // (RFC 9846 §4.3.9).
     let psk_dhe =
         psk_modes(hello).is_some_and(|modes| modes.contains(&PskKeyExchangeMode::PSK_DHE_KE));
 

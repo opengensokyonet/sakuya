@@ -1,4 +1,4 @@
-//! The message_hash message (RFC 8446 §4.4.1).
+//! The message_hash message (RFC 9846 §4.1).
 //!
 //! After a HelloRetryRequest the transcript replaces the first ClientHello
 //! with a message_hash message whose body is the hash of that ClientHello.

@@ -1,7 +1,7 @@
 //! TLS 1.3 handshake messages, extensions, key schedule and handshake
 //! engines for QUIC in sakuya.
 //!
-//! The baseline is TLS 1.3 ([RFC 8446]) as QUIC version 1 uses it
+//! The baseline is TLS 1.3 ([RFC 9846]) as QUIC version 1 uses it
 //! ([RFC 9001]): handshake messages travel in CRYPTO frames, without the
 //! TLS record layer, and the handshake hands traffic secrets to packet
 //! protection.
@@ -33,7 +33,7 @@
 //! lengths without writing. Each read failure answers the TLS alert it calls
 //! for through `alert`.
 //!
-//! [RFC 8446]: https://www.rfc-editor.org/rfc/rfc8446.html
+//! [RFC 9846]: https://www.rfc-editor.org/rfc/rfc9846.html
 //! [RFC 9001]: https://www.rfc-editor.org/rfc/rfc9001.html
 #![feature(impl_trait_in_assoc_type, yield_expr)]
 #![forbid(unsafe_code)]

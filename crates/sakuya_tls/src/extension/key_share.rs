@@ -1,4 +1,4 @@
-//! The `key_share` extension (RFC 8446 §4.2.8).
+//! The `key_share` extension (RFC 9846 §4.3.8).
 //!
 //! In a ClientHello its data is [`ClientShares`], the shares the client
 //! offers; in a ServerHello it is the one [`KeyShareEntry`] of the server; in
@@ -51,7 +51,7 @@ impl<C> KeyShareEntry<C> {
 /// The shares a client offers, at most one for each group.
 ///
 /// The list may be empty, to ask the server to select a group
-/// (RFC 8446 §4.2.8).
+/// (RFC 9846 §4.3.8).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ClientShares<C> {
     entries: Vec<KeyShareEntry<C>>,
@@ -108,7 +108,7 @@ fn check_groups<C>(entries: &[KeyShareEntry<C>]) -> Result<(), DuplicateGroupErr
     Ok(())
 }
 
-/// Two shares of a client are of the same group (RFC 8446 §4.2.8).
+/// Two shares of a client are of the same group (RFC 9846 §4.3.8).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("more than one key share of {group:?}"))]
 pub struct DuplicateGroupError {
@@ -255,7 +255,7 @@ pub mod codec {
             /// The failure of reading the entry.
             source: ReadKeyShareEntryError,
         },
-        /// Two entries share a group; RFC 8446 §4.2.8 lets a server check
+        /// Two entries share a group; RFC 9846 §4.3.8 lets a server check
         /// this.
         #[snafu(transparent)]
         DuplicateGroup {

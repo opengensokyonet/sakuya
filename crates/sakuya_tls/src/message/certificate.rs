@@ -1,4 +1,4 @@
-//! Certificate (RFC 8446 §4.4.2).
+//! Certificate (RFC 9846 §4.5.1).
 //!
 //! The entries of a Certificate message hold X.509 certificates in DER, or
 //! one SubjectPublicKeyInfo when the endpoints negotiated raw public keys
@@ -416,7 +416,7 @@ pub mod codec {
             /// The failure.
             source: ReadCertificateEntryError,
         },
-        /// The list holds more than one raw public key (RFC 8446 §4.4.2).
+        /// The list holds more than one raw public key (RFC 9846 §4.5.1).
         #[snafu(display("certificate_list holds more than one raw public key"))]
         MoreThanOneRawPublicKey,
     }

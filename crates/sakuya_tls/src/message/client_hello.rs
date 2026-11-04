@@ -1,9 +1,9 @@
-//! ClientHello (RFC 8446 §4.1.2).
+//! ClientHello (RFC 9846 §4.2.2).
 //!
 //! A ClientHello is read whole: the transcript hashes its exact bytes, a PSK
 //! binder covers the bytes before the binders, and the extension block is
 //! checked as a whole, so that no type appears twice and `pre_shared_key`
-//! is the last extension (RFC 8446 §4.2, §4.2.11).
+//! is the last extension (RFC 9846 §4.3, §4.3.11).
 
 use crate::extension::{OpaqueData, extension_subset};
 use crate::{
@@ -194,7 +194,7 @@ impl<C: AsRef<[u8]>> ClientHello<C> {
     /// of the encoding, or `None` without that extension.
     ///
     /// A binder covers the encoding without these bytes
-    /// (RFC 8446 §4.2.11.2).
+    /// (RFC 9846 §4.3.11.2).
     pub fn binders_len(&self) -> Option<usize> {
         self.pre_shared_key().map(OfferedPsks::binders_len)
     }
@@ -552,7 +552,7 @@ pub mod codec {
             source: ReadBoundedVectorError,
         },
         /// legacy_compression_methods is not the single null method
-        /// (RFC 8446 §4.1.2).
+        /// (RFC 9846 §4.2.2).
         #[snafu(display("ClientHello legacy_compression_methods is not the null method"))]
         CompressionMethodsNotNull,
         /// The extension block could not be read, or a type appears twice.
@@ -567,7 +567,7 @@ pub mod codec {
             /// The broken range.
             source: LengthOutOfRangeError,
         },
-        /// `pre_shared_key` is not the last extension (RFC 8446 §4.2.11).
+        /// `pre_shared_key` is not the last extension (RFC 9846 §4.3.11).
         #[snafu(display("pre_shared_key is not the last ClientHello extension"))]
         PreSharedKeyNotLast,
         /// The data of a recognized extension is longer than its fields.
@@ -657,7 +657,7 @@ pub mod codec {
         ///
         /// illegal_parameter for compression methods other than the null
         /// method and for `pre_shared_key` before another extension
-        /// (RFC 8446 §4.1.2, §4.2.11), for a type that appears twice and for
+        /// (RFC 9846 §4.2.2, §4.3.11), for a type that appears twice and for
         /// the rules within an extension that name it; decode_error for every
         /// failure to decode.
         pub fn alert(&self) -> AlertDescription {

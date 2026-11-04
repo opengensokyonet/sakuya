@@ -1,4 +1,4 @@
-//! NewSessionTicket (RFC 8446 §4.6.1).
+//! NewSessionTicket (RFC 9846 §4.7.1).
 
 use crate::extension::extension_subset;
 use crate::{
@@ -15,7 +15,7 @@ use snafu::{ResultExt, Snafu};
 const BLOCK: core::ops::RangeInclusive<usize> = 0..=Width::U16.max() - 1;
 
 /// How long a ticket may be used, in seconds: at most 604800, seven days
-/// (RFC 8446 §4.6.1). Zero asks the client to discard the ticket at once.
+/// (RFC 9846 §4.7.1). Zero asks the client to discard the ticket at once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TicketLifetime(u32);
 
@@ -59,7 +59,7 @@ impl TicketLifetimeTooLongError {
 }
 
 /// The nonce of a ticket: 0 to 255 bytes, from which the ticket's PSK is
-/// derived (RFC 8446 §4.6.1).
+/// derived (RFC 9846 §4.7.1).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TicketNonce<C> {
     nonce: C,
@@ -100,7 +100,7 @@ pub enum NewSessionTicketExtension<C> {
     /// `early_data`: the ticket allows 0-RTT.
     EarlyData(MaxEarlyDataSize),
     /// An extension the readers do not recognize; a server may send it
-    /// unsolicited (RFC 8446 §4.2).
+    /// unsolicited (RFC 9846 §4.3).
     Unknown(UnknownExtension<C>),
 }
 

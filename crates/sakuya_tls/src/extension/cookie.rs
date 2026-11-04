@@ -1,4 +1,4 @@
-//! The `cookie` extension (RFC 8446 §4.2.2).
+//! The `cookie` extension (RFC 9846 §4.3.2).
 
 use crate::{vector::LengthOutOfRangeError, width::Width};
 

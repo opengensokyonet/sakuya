@@ -665,7 +665,7 @@ where
     T: core::error::Error + 'static,
 {
     /// The alert the failure calls for: decode_error for an empty
-    /// Certificate (RFC 8446 §4.4.2.4); certificate_expired, unknown_ca or
+    /// Certificate (RFC 9846 §4.5.1.3); certificate_expired, unknown_ca or
     /// certificate_revoked when webpki reports that cause; unsupported
     /// certificate for a key this crate does not use; certificate_revoked
     /// for the revocation check; bad_certificate otherwise.

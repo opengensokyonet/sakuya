@@ -297,18 +297,18 @@ pub enum ClientAlertError<V> {
         /// The failure.
         source: ReadServerHelloError,
     },
-    /// A second HelloRetryRequest arrived (RFC 8446 §4.1.4).
+    /// A second HelloRetryRequest arrived (RFC 9846 §4.2.4).
     #[snafu(display("second HelloRetryRequest"))]
     SecondRetry,
     /// The server did not select TLS 1.3 in `supported_versions`: it
     /// selected another version, or, without the extension, a version
-    /// before TLS 1.3 (RFC 8446 §4.1.3, §4.2.1).
+    /// before TLS 1.3 (RFC 9846 §4.2.3, §4.3.1).
     #[snafu(display("server selected {version:?}, not TLS 1.3"))]
     Version {
         /// The selected version, `None` without the extension.
         version: Option<ProtocolVersion>,
     },
-    /// The server echoed another legacy_session_id (RFC 8446 §4.1.3).
+    /// The server echoed another legacy_session_id (RFC 9846 §4.2.3).
     #[snafu(display("legacy_session_id_echo differs from the ClientHello"))]
     SessionIdEcho,
     /// The server selected a cipher suite the client did not offer.
@@ -318,21 +318,21 @@ pub enum ClientAlertError<V> {
         suite: CipherSuite,
     },
     /// The ServerHello selected another cipher suite than the
-    /// HelloRetryRequest (RFC 8446 §4.1.4).
+    /// HelloRetryRequest (RFC 9846 §4.2.4).
     #[snafu(display("ServerHello suite {suite:?} differs from the HelloRetryRequest's"))]
     RetrySuite {
         /// The suite of the ServerHello.
         suite: CipherSuite,
     },
     /// The HelloRetryRequest asked for a group the client did not list, or
-    /// one it already shared (RFC 8446 §4.2.8).
+    /// one it already shared (RFC 9846 §4.3.8).
     #[snafu(display("HelloRetryRequest asked for {group:?}"))]
     RetryGroup {
         /// The group.
         group: NamedGroup,
     },
     /// The HelloRetryRequest would not change the ClientHello
-    /// (RFC 8446 §4.1.4).
+    /// (RFC 9846 §4.2.4).
     #[snafu(display("HelloRetryRequest changes nothing"))]
     RetryWithoutChange,
     /// The ServerHello has no key share.
@@ -357,7 +357,7 @@ pub enum ClientAlertError<V> {
         source: UnofferedPskError,
     },
     /// The server selected the PSK with a cipher suite of another hash
-    /// (RFC 8446 §4.2.11).
+    /// (RFC 9846 §4.3.11).
     #[snafu(display("PSK selected with a suite of another hash"))]
     PskHash,
     /// EncryptedExtensions could not be read.
@@ -378,14 +378,14 @@ pub enum ClientAlertError<V> {
     #[snafu(display("server selected an unoffered application protocol"))]
     UnofferedProtocol,
     /// EncryptedExtensions answers an extension the client did not send
-    /// (RFC 8446 §4.2).
+    /// (RFC 9846 §4.3).
     #[snafu(display("unsolicited {extension:?}"))]
     Unsolicited {
         /// The extension.
         extension: UnsolicitedExtension,
     },
     /// The server accepted 0-RTT without accepting the first PSK
-    /// (RFC 8446 §4.2.10).
+    /// (RFC 9846 §4.3.10).
     #[snafu(display("0-RTT accepted without the PSK"))]
     EarlyDataWithoutPsk,
     /// The CertificateRequest could not be read.
@@ -647,8 +647,8 @@ impl<C> HelloParts<'_, C> {
             extensions.push(X::Cookie(cookie.clone()));
         }
         // Every hello names psk_dhe_ke: the mode restricts the tickets the
-        // server sends too, and a server may send none without it (RFC 8446
-        // §4.2.9).
+        // server sends too, and a server may send none without it (RFC 9846
+        // §4.3.9).
         extensions.push(X::PskKeyExchangeModes(
             // invariant: one mode fits.
             ByteCodePointList::new(vec![PskKeyExchangeMode::PSK_DHE_KE]).expect("one mode"),

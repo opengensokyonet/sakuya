@@ -1,4 +1,4 @@
-//! CertificateRequest (RFC 8446 §4.3.2).
+//! CertificateRequest (RFC 9846 §4.4.2).
 
 use crate::extension::extension_subset;
 use crate::{

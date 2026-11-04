@@ -1,7 +1,7 @@
 //! The two ways a server authenticates to a client.
 //!
 //! After the ServerHello, a server authenticates with a certificate or with
-//! the PSK it accepted, never both (RFC 8446 §4.1.1). The client's chain
+//! the PSK it accepted, never both (RFC 9846 §4.2.1). The client's chain
 //! splits there: only the certificate branch verifies a CertificateVerify,
 //! and both branches meet at [`Authenticated`], the only value that reads
 //! the server's Finished, so a client cannot skip authentication.
@@ -27,7 +27,7 @@ pub enum Authentication<C: TlsCrypto> {
     /// The server authenticates with a certificate.
     Certificate(AwaitingCertificateAuthentication<C>),
     /// The server accepted the PSK; it sends no Certificate or
-    /// CertificateVerify (RFC 8446 §4.4.2), and the identity is the one the
+    /// CertificateVerify (RFC 9846 §4.5.1), and the identity is the one the
     /// ticket recorded.
     Resumed(Authenticated<C>),
 }
@@ -133,7 +133,7 @@ pub enum CertificateVerifyError {
 
 impl CertificateVerifyError {
     /// The alert the failure calls for: decrypt_error for a signature that
-    /// does not verify (RFC 8446 §4.4.3), illegal_parameter for a scheme the
+    /// does not verify (RFC 9846 §4.5.2), illegal_parameter for a scheme the
     /// client did not offer, and that of the read failure otherwise.
     pub fn alert(&self) -> AlertDescription {
         match self {

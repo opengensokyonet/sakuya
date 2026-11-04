@@ -1,4 +1,4 @@
-//! ServerHello and HelloRetryRequest (RFC 8446 §4.1.3, §4.1.4).
+//! ServerHello and HelloRetryRequest (RFC 9846 §4.2.3, §4.2.4).
 //!
 //! Both are server_hello messages; a HelloRetryRequest is the one whose
 //! random is [`HELLO_RETRY_REQUEST_RANDOM`]. [`codec::read_server_hello`]
@@ -19,7 +19,7 @@ use nitori_crypto::NamedGroup;
 use snafu::{ResultExt, Snafu};
 
 /// The random of every HelloRetryRequest: SHA-256 of "HelloRetryRequest"
-/// (RFC 8446 §4.1.3).
+/// (RFC 9846 §4.2.3).
 pub const HELLO_RETRY_REQUEST_RANDOM: HelloRandom = HelloRandom([
     0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11, 0xbe, 0x1d, 0x8c, 0x02, 0x1e, 0x65, 0xb8, 0x91,
     0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb, 0x8c, 0x5e, 0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c,
@@ -635,7 +635,7 @@ pub mod codec {
             /// The shortfall.
             source: Incomplete,
         },
-        /// legacy_compression_method is not 0 (RFC 8446 §4.1.3).
+        /// legacy_compression_method is not 0 (RFC 9846 §4.2.3).
         #[snafu(display("ServerHello legacy_compression_method is not 0"))]
         CompressionMethodNotNull,
         /// The extension block could not be read, or a type appears twice.
@@ -717,7 +717,7 @@ pub mod codec {
         ///
         /// illegal_parameter for a compression method other than 0, for a
         /// type that appears twice and for a recognized extension this
-        /// message may not carry (RFC 8446 §4.2); decode_error for every
+        /// message may not carry (RFC 9846 §4.3); decode_error for every
         /// failure to decode.
         pub fn alert(&self) -> AlertDescription {
             match self {

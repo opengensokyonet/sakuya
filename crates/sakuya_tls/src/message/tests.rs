@@ -173,7 +173,7 @@ fn limits_default_and_are_bounded() {
 }
 
 /// Each message's enum of disallowed extensions holds exactly the
-/// recognized extensions RFC 8446 §4.2, RFC 9001 §8.2 and RFC 9849 do not
+/// recognized extensions RFC 9846 §4.3, RFC 9001 §8.2 and RFC 9849 do not
 /// list for that message.
 #[test]
 fn extension_subset_follow_the_table() {

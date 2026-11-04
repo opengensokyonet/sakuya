@@ -9,7 +9,7 @@
 use crate::code_point::code_point;
 
 code_point! {
-    /// A certificate type code point (RFC 7250 §3, RFC 8446 §4.4.2).
+    /// A certificate type code point (RFC 7250 §3, RFC 9846 §4.5.1).
     ///
     /// Any byte is a code point.
     CertificateType(u8);

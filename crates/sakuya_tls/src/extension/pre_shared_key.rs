@@ -1,11 +1,11 @@
-//! The `pre_shared_key` extension (RFC 8446 §4.2.11).
+//! The `pre_shared_key` extension (RFC 9846 §4.3.11).
 //!
 //! In a ClientHello its data is [`OfferedPsks`]: the identities the client
 //! offers and a binder for each. In a ServerHello it is the [`PskIndex`] of
 //! the identity the server selected.
 //!
 //! A binder covers the ClientHello up to the binders, with its lengths as
-//! if the binders were there (RFC 8446 §4.2.11.2), so a client writes the
+//! if the binders were there (RFC 9846 §4.3.11.2), so a client writes the
 //! ClientHello with binders of the right lengths, computes the binders over
 //! the bytes before [`OfferedPsks::binders_len`] and writes them in place.
 

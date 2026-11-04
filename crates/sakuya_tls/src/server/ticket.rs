@@ -14,7 +14,7 @@
 //! suite and application protocol match; the connection checks that the
 //! transport parameters are compatible. A policy that admits 0-RTT with
 //! [`Opened::admit_early_data`] gives one necessary condition of several.
-//! RFC 8446 §8 requires each server instance to accept a 0-RTT handshake at
+//! RFC 9846 §8 requires each server instance to accept a 0-RTT handshake at
 //! most once, which the policy ensures there. Dropping an [`Opened`] means
 //! nothing to the handshake: when a ticket counts as used is the policy's
 //! decision.
@@ -43,7 +43,7 @@ use std::{
 use time::UtcDateTime;
 
 /// What a resumed connection must find again, as the handshake knows it
-/// when it issues tickets (RFC 8446 §4.6.1, RFC 9000 §7.4.1,
+/// when it issues tickets (RFC 9846 §4.7.1, RFC 9000 §7.4.1,
 /// RFC 9001 §4.6.3).
 ///
 /// `T` is the type of the server's selected target, which carries the
@@ -212,7 +212,7 @@ pub trait Opened<T> {
 
     /// Whether the policy lets 0-RTT in with this ticket for the
     /// ClientHello `hello`. A `true` from the same server instance comes at
-    /// most once for one 0-RTT handshake (RFC 8446 §8).
+    /// most once for one 0-RTT handshake (RFC 9846 §8).
     fn admit_early_data(self, hello: &ClientHelloKey) -> Self::Admitting;
 }
 

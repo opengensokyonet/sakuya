@@ -74,7 +74,7 @@ impl SubjectPublicKey {
     /// Checks that a CertificateVerify signed with `scheme` can come from
     /// this key: an ECDSA scheme of the key's curve, Ed25519 for an Ed25519
     /// key, and RSASSA-PSS with an rsaEncryption key for RSA, since a
-    /// CertificateVerify does not use RSASSA-PKCS1-v1_5 (RFC 8446 §4.4.3).
+    /// CertificateVerify does not use RSASSA-PKCS1-v1_5 (RFC 9846 §4.5.2).
     ///
     /// # Errors
     ///
@@ -172,7 +172,7 @@ impl SchemeKeyMismatchError {
     }
 
     /// The alert the failure calls for: illegal_parameter, a field that
-    /// does not agree with another (RFC 8446 §6.2).
+    /// does not agree with another (RFC 9846 §6.2).
     pub fn alert(&self) -> AlertDescription {
         AlertDescription::ILLEGAL_PARAMETER
     }

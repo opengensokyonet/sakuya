@@ -1,4 +1,4 @@
-//! TLS 1.3 cipher suites (RFC 8446 §B.4).
+//! TLS 1.3 cipher suites (RFC 9846 §B.4).
 //!
 //! A cipher suite names the AEAD algorithm that protects records, in QUIC
 //! packets, and the hash used for the transcript and HKDF.
@@ -12,7 +12,7 @@ code_point! {
     /// A CipherSuite code point.
     ///
     /// Any two-byte value is a code point; the readers keep suites they do
-    /// not know, which a server ignores (RFC 8446 §9.3).
+    /// not know, which a server ignores (RFC 9846 §9.3).
     CipherSuite(u16);
     /// TLS_AES_128_GCM_SHA256.
     TLS_AES_128_GCM_SHA256 = 0x1301 => "TLS_AES_128_GCM_SHA256",

@@ -70,7 +70,7 @@ mod sealed {
 /// A two-byte code point that appears in a [`CodePointList`].
 ///
 /// The list's length field is two bytes wide, except for the versions of
-/// `supported_versions`, whose length field is one byte (RFC 8446 §4.2.1).
+/// `supported_versions`, whose length field is one byte (RFC 9846 §4.3.1).
 /// Implemented by the code point types of this crate and of
 /// `nitori_crypto` that appear in lists.
 pub trait CodePoint: Copy + sealed::Sealed {

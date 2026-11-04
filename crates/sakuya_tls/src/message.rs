@@ -1,4 +1,4 @@
-//! TLS 1.3 handshake messages (RFC 8446 §4).
+//! TLS 1.3 handshake messages (RFC 9846 §4).
 //!
 //! A handshake message is a one-byte [`HandshakeType`], a three-byte length
 //! and a body of that length. In QUIC the messages of each encryption level
@@ -10,7 +10,7 @@
 //! then has its own module with a reader and a writer that run on the bytes
 //! of one message: a reader takes a [`MessageSource`], `&[u8]` or `Bytes`,
 //! and its variable-length fields are subslices or `Bytes` of that source,
-//! without copying. A reader checks the encoding and the rules of RFC 8446
+//! without copying. A reader checks the encoding and the rules of RFC 9846
 //! that one message states by itself; rules that relate a message to others,
 //! or to what an endpoint offered, are for the handshake to check.
 //!
@@ -56,7 +56,7 @@ pub mod new_session_ticket;
 pub mod server_hello;
 
 code_point! {
-    /// A HandshakeType code point (RFC 8446 §4).
+    /// A HandshakeType code point (RFC 9846 §4).
     ///
     /// Any byte is a code point.
     HandshakeType(u8);
@@ -312,7 +312,7 @@ impl MessageLimitTooLargeError {
 /// [`codec::read_handshake_message`] collects a message into contiguous
 /// memory before it is read, and CRYPTO frames have no flow control
 /// (RFC 9000 §7.5), so each type has a limit. The body of a Finished message
-/// is as long as the hash of the cipher suite (RFC 8446 §4.4.4) and needs no
+/// is as long as the hash of the cipher suite (RFC 9846 §4.5.3) and needs no
 /// limit of its own.
 ///
 /// The defaults follow sizes seen in practice and may change as traffic or
