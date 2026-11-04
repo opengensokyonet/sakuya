@@ -274,7 +274,7 @@ where
 
 /// Prepares the end frame that is due and exposes it, as a packet writer
 /// does after writing the frame; returns the frame.
-fn send_end<C>(sender: &mut StreamSender<C, Connection>) -> EndFrame
+fn send_end<C>(sender: &mut StreamSender<C, Connection>) -> StreamEndFrame
 where
     C: StreamSendBuffer<Reservation = Reservation> + SendFlowControlPolicy + SendTerminationPolicy,
 {
@@ -556,7 +556,7 @@ fn terminal_state_needs_a_committed_end() {
         Err(EnterTerminalStateError::FinOrResetStreamAtNotSent)
     );
     assert_eq!(sender.terminal_state(), None);
-    assert!(matches!(send_end(&mut sender), EndFrame::Fin(_)));
+    assert!(matches!(send_end(&mut sender), StreamEndFrame::Fin(_)));
     sender
         .enter_terminal_state(SendTerminalState::DataRecvd)
         .unwrap();
@@ -582,7 +582,7 @@ fn reset_recvd_needs_a_committed_reset() {
     );
     assert_eq!(sender.terminal_state(), None);
     assert_eq!(sender.composition.termination.events.len(), events);
-    assert!(matches!(send_end(&mut sender), EndFrame::Fin(_)));
+    assert!(matches!(send_end(&mut sender), StreamEndFrame::Fin(_)));
     sender
         .enter_terminal_state(SendTerminalState::DataRecvd)
         .unwrap();
@@ -604,7 +604,10 @@ fn reset_recvd_needs_a_committed_reset() {
         Err(EnterTerminalStateError::ResetStreamNotSent)
     );
     assert_eq!(sender.terminal_state(), None);
-    assert!(matches!(send_end(&mut sender), EndFrame::ResetStream(_)));
+    assert!(matches!(
+        send_end(&mut sender),
+        StreamEndFrame::ResetStream(_)
+    ));
     sender
         .enter_terminal_state(SendTerminalState::ResetRecvd)
         .unwrap();
@@ -621,7 +624,10 @@ fn data_recvd_after_a_plain_reset_needs_the_fin() {
     write_all(&mut sender, 10);
     sender.close().unwrap();
     sender.reset(CODE).unwrap();
-    assert!(matches!(send_end(&mut sender), EndFrame::ResetStream(_)));
+    assert!(matches!(
+        send_end(&mut sender),
+        StreamEndFrame::ResetStream(_)
+    ));
     assert_eq!(
         sender.enter_terminal_state(SendTerminalState::DataRecvd),
         Err(EnterTerminalStateError::FinOrResetStreamAtNotSent)
@@ -632,7 +638,7 @@ fn data_recvd_after_a_plain_reset_needs_the_fin() {
     let mut sender = test_sender(&connection, 1000, false);
     write_all(&mut sender, 10);
     sender.close().unwrap();
-    assert!(matches!(send_end(&mut sender), EndFrame::Fin(_)));
+    assert!(matches!(send_end(&mut sender), StreamEndFrame::Fin(_)));
     sender.reset(CODE).unwrap();
     sender
         .enter_terminal_state(SendTerminalState::DataRecvd)
@@ -655,7 +661,10 @@ fn reset_stream_at_reaches_data_recvd() {
         Err(EnterTerminalStateError::FinOrResetStreamAtNotSent)
     );
     expose(&mut sender, 40);
-    assert!(matches!(send_end(&mut sender), EndFrame::ResetStreamAt(_)));
+    assert!(matches!(
+        send_end(&mut sender),
+        StreamEndFrame::ResetStreamAt(_)
+    ));
     assert_eq!(
         sender.enter_terminal_state(SendTerminalState::ResetRecvd),
         Err(EnterTerminalStateError::ResetStreamNotSent)
@@ -663,7 +672,10 @@ fn reset_stream_at_reaches_data_recvd() {
     // Lowering the reliable size to zero keeps the stream on
     // RESET_STREAM_AT.
     sender.reset_at(CODE, VarInt::ZERO).unwrap();
-    assert!(matches!(send_end(&mut sender), EndFrame::ResetStreamAt(_)));
+    assert!(matches!(
+        send_end(&mut sender),
+        StreamEndFrame::ResetStreamAt(_)
+    ));
     sender
         .enter_terminal_state(SendTerminalState::DataRecvd)
         .unwrap();
@@ -674,7 +686,7 @@ fn reset_stream_at_reaches_data_recvd() {
 // End frames
 
 /// The end frame the guard offers, if any, without exposing it.
-fn due_end_frame<C>(sender: &mut StreamSender<C, Connection>) -> Option<EndFrame>
+fn due_end_frame<C>(sender: &mut StreamSender<C, Connection>) -> Option<StreamEndFrame>
 where
     C: StreamSendBuffer<Reservation = Reservation> + SendFlowControlPolicy + SendTerminationPolicy,
 {
@@ -691,7 +703,7 @@ fn the_guard_gives_the_fin_of_a_close_once() {
     assert!(due_end_frame(&mut sender).is_none(), "input is open");
     sender.close().unwrap();
 
-    let Some(EndFrame::Fin(fin)) = due_end_frame(&mut sender) else {
+    let Some(StreamEndFrame::Fin(fin)) = due_end_frame(&mut sender) else {
         panic!("the FIN is due");
     };
     assert_eq!(fin.stream_id().get(), stream());
@@ -704,7 +716,7 @@ fn the_guard_gives_the_fin_of_a_close_once() {
     // Dropping the guard changes nothing.
     {
         let prepared = sender.prepare_end_frame().unwrap();
-        assert!(matches!(*prepared, EndFrame::Fin(_)));
+        assert!(matches!(*prepared, StreamEndFrame::Fin(_)));
     }
     assert!(due_end_frame(&mut sender).is_some());
     assert_eq!(connection.committed(), VarInt::ZERO);
@@ -720,7 +732,7 @@ fn the_guard_gives_the_fin_of_a_close_once() {
     // A FIN at offset zero states no Offset field.
     let mut empty = test_sender(&connection, 1000, true);
     empty.close().unwrap();
-    let Some(EndFrame::Fin(fin)) = due_end_frame(&mut empty) else {
+    let Some(StreamEndFrame::Fin(fin)) = due_end_frame(&mut empty) else {
         panic!("the FIN is due");
     };
     assert_eq!(fin.offset(), None);
@@ -738,7 +750,7 @@ fn the_guard_gives_each_new_reset_frame() {
         .reset_at_with_final_size(CODE, v(600), v(900))
         .unwrap();
 
-    let Some(EndFrame::ResetStreamAt(frame)) = due_end_frame(&mut sender) else {
+    let Some(StreamEndFrame::ResetStreamAt(frame)) = due_end_frame(&mut sender) else {
         panic!("RESET_STREAM_AT is due");
     };
     assert_eq!(frame.stream_id().get(), stream());
@@ -749,11 +761,11 @@ fn the_guard_gives_each_new_reset_frame() {
 
     // The next reliable size supersedes one that was never exposed.
     sender.reset_at(CODE, v(300)).unwrap();
-    let Some(EndFrame::ResetStreamAt(frame)) = due_end_frame(&mut sender) else {
+    let Some(StreamEndFrame::ResetStreamAt(frame)) = due_end_frame(&mut sender) else {
         panic!("RESET_STREAM_AT is due");
     };
     assert_eq!(frame.reliable_size().get(), v(300));
-    assert_eq!(send_end(&mut sender), EndFrame::ResetStreamAt(frame));
+    assert_eq!(send_end(&mut sender), StreamEndFrame::ResetStreamAt(frame));
     assert!(due_end_frame(&mut sender).is_none());
 
     // The same target again gives nothing; a lower reliable size gives a
@@ -761,7 +773,7 @@ fn the_guard_gives_each_new_reset_frame() {
     sender.reset_at(CODE, v(300)).unwrap();
     assert!(due_end_frame(&mut sender).is_none());
     sender.reset_at(CODE, v(100)).unwrap();
-    let Some(EndFrame::ResetStreamAt(frame)) = due_end_frame(&mut sender) else {
+    let Some(StreamEndFrame::ResetStreamAt(frame)) = due_end_frame(&mut sender) else {
         panic!("RESET_STREAM_AT is due");
     };
     assert_eq!(frame.reliable_size().get(), v(100));
@@ -769,7 +781,7 @@ fn the_guard_gives_each_new_reset_frame() {
 
     // `reset` after `reset_at` is a new kind: RESET_STREAM from then on.
     sender.reset(CODE).unwrap();
-    let Some(EndFrame::ResetStream(frame)) = due_end_frame(&mut sender) else {
+    let Some(StreamEndFrame::ResetStream(frame)) = due_end_frame(&mut sender) else {
         panic!("RESET_STREAM is due");
     };
     assert_eq!(frame.application_error_code().get(), CODE);
@@ -788,10 +800,13 @@ fn a_reset_that_replaces_a_close_gives_the_reset_frame() {
         write_all(&mut sender, 100);
         sender.close().unwrap();
         if fin_exposed {
-            assert!(matches!(send_end(&mut sender), EndFrame::Fin(_)));
+            assert!(matches!(send_end(&mut sender), StreamEndFrame::Fin(_)));
         }
         sender.reset(CODE).unwrap();
-        assert!(matches!(send_end(&mut sender), EndFrame::ResetStream(_)));
+        assert!(matches!(
+            send_end(&mut sender),
+            StreamEndFrame::ResetStream(_)
+        ));
         assert!(due_end_frame(&mut sender).is_none());
     }
 }
@@ -851,9 +866,15 @@ fn data_recvd_needs_no_reset_stream_after_the_reset_stream_at() {
     let mut sender = test_sender(&connection, 1000, true);
     write_all(&mut sender, 100);
     sender.reset_at(CODE, v(40)).unwrap();
-    assert!(matches!(send_end(&mut sender), EndFrame::ResetStreamAt(_)));
+    assert!(matches!(
+        send_end(&mut sender),
+        StreamEndFrame::ResetStreamAt(_)
+    ));
     sender.reset(CODE).unwrap();
-    assert!(matches!(send_end(&mut sender), EndFrame::ResetStream(_)));
+    assert!(matches!(
+        send_end(&mut sender),
+        StreamEndFrame::ResetStream(_)
+    ));
     assert_eq!(
         sender.enter_terminal_state(SendTerminalState::DataRecvd),
         Err(EnterTerminalStateError::FinOrResetStreamAtNotSent)
@@ -867,11 +888,17 @@ fn data_recvd_needs_no_reset_stream_after_the_reset_stream_at() {
     let mut sender = test_sender(&connection, 1000, true);
     write_all(&mut sender, 100);
     sender.close().unwrap();
-    assert!(matches!(send_end(&mut sender), EndFrame::Fin(_)));
+    assert!(matches!(send_end(&mut sender), StreamEndFrame::Fin(_)));
     sender.reset_at(CODE, v(40)).unwrap();
-    assert!(matches!(send_end(&mut sender), EndFrame::ResetStreamAt(_)));
+    assert!(matches!(
+        send_end(&mut sender),
+        StreamEndFrame::ResetStreamAt(_)
+    ));
     sender.reset(CODE).unwrap();
-    assert!(matches!(send_end(&mut sender), EndFrame::ResetStream(_)));
+    assert!(matches!(
+        send_end(&mut sender),
+        StreamEndFrame::ResetStream(_)
+    ));
     sender
         .enter_terminal_state(SendTerminalState::DataRecvd)
         .unwrap();
@@ -927,7 +954,10 @@ fn reset_at_after_a_plain_reset_is_an_error() {
         sender.reset_at_with_final_size(CODE, VarInt::ZERO, v(5)),
         Err(ResetAtWithFinalSizeError::FinalSizeConflictsWithReset { .. })
     ));
-    assert!(matches!(send_end(&mut sender), EndFrame::ResetStream(_)));
+    assert!(matches!(
+        send_end(&mut sender),
+        StreamEndFrame::ResetStream(_)
+    ));
     sender
         .enter_terminal_state(SendTerminalState::ResetRecvd)
         .unwrap();
@@ -1063,7 +1093,7 @@ fn empty_input_and_flush_table() {
     reset_delivered.reset(CODE).unwrap();
     assert!(matches!(
         send_end(&mut reset_delivered),
-        EndFrame::ResetStream(_)
+        StreamEndFrame::ResetStream(_)
     ));
     reset_delivered
         .enter_terminal_state(SendTerminalState::ResetRecvd)
@@ -1231,7 +1261,10 @@ fn reset_errors_follow_the_check_order() {
     let mut sender = test_sender(&connection, 1000, true);
     write_all(&mut sender, 100);
     sender.reset(CODE).unwrap();
-    assert!(matches!(send_end(&mut sender), EndFrame::ResetStream(_)));
+    assert!(matches!(
+        send_end(&mut sender),
+        StreamEndFrame::ResetStream(_)
+    ));
     sender
         .enter_terminal_state(SendTerminalState::ResetRecvd)
         .unwrap();
@@ -1256,7 +1289,7 @@ fn reset_errors_follow_the_check_order() {
     let mut sender = test_sender(&connection, 1000, false);
     write_all(&mut sender, 100);
     sender.close().unwrap();
-    assert!(matches!(send_end(&mut sender), EndFrame::Fin(_)));
+    assert!(matches!(send_end(&mut sender), StreamEndFrame::Fin(_)));
     sender
         .enter_terminal_state(SendTerminalState::DataRecvd)
         .unwrap();
@@ -1327,7 +1360,10 @@ fn state_transition_table() {
     let target = sender.end_state();
     sender.reset_at(CODE, v(60)).unwrap();
     sender.reset_at_with_final_size(CODE, v(60), v(60)).unwrap();
-    assert!(matches!(send_end(&mut sender), EndFrame::ResetStreamAt(_)));
+    assert!(matches!(
+        send_end(&mut sender),
+        StreamEndFrame::ResetStreamAt(_)
+    ));
     sender
         .enter_terminal_state(SendTerminalState::DataRecvd)
         .unwrap();
@@ -1411,7 +1447,7 @@ fn state_transition_table() {
     );
 
     // A terminal state after complete delivery takes no new reset.
-    assert!(matches!(send_end(&mut closed), EndFrame::Fin(_)));
+    assert!(matches!(send_end(&mut closed), StreamEndFrame::Fin(_)));
     closed
         .enter_terminal_state(SendTerminalState::DataRecvd)
         .unwrap();
@@ -1716,7 +1752,10 @@ fn reset_keeps_coverage_up_to_the_final_size() {
     assert_eq!(sender.written_end(), v(1000));
 
     // Exposing the reset's final size commits the retained coverage.
-    assert!(matches!(send_end(&mut sender), EndFrame::ResetStreamAt(_)));
+    assert!(matches!(
+        send_end(&mut sender),
+        StreamEndFrame::ResetStreamAt(_)
+    ));
     assert_eq!(
         (connection.reserved(), connection.committed()),
         (v(0), v(800))
@@ -1764,7 +1803,10 @@ fn reset_at_after_close_before_the_fin_is_exposed() {
         (v(700), v(300))
     );
     // The reset frame replaces the FIN that was never exposed.
-    assert!(matches!(send_end(&mut sender), EndFrame::ResetStreamAt(_)));
+    assert!(matches!(
+        send_end(&mut sender),
+        StreamEndFrame::ResetStreamAt(_)
+    ));
     assert_eq!(
         (connection.reserved(), connection.committed()),
         (v(0), v(1000))
@@ -1781,7 +1823,7 @@ fn reset_at_after_the_fin_is_exposed() {
     write_all(&mut sender, 1000);
     sender.close().unwrap();
     let fin = sender.prepare_end_frame().unwrap();
-    assert!(matches!(*fin, EndFrame::Fin(_)));
+    assert!(matches!(*fin, StreamEndFrame::Fin(_)));
     assert_eq!(fin.expose(), v(1000));
     assert_eq!(connection.available(), v(0));
 
@@ -1792,7 +1834,7 @@ fn reset_at_after_the_fin_is_exposed() {
     );
     // The reset frame adds no usage.
     let reset = sender.prepare_end_frame().unwrap();
-    assert!(matches!(*reset, EndFrame::ResetStreamAt(_)));
+    assert!(matches!(*reset, StreamEndFrame::ResetStreamAt(_)));
     assert_eq!(reset.expose(), VarInt::ZERO);
     assert!(sender.prepare_end_frame().is_none());
 }
@@ -2181,7 +2223,7 @@ fn default_termination_resets_on_stop_sending() {
     let mut sender = default_sender(&connection, 1000, true);
     write_all(&mut sender, 100);
     sender.close().unwrap();
-    assert!(matches!(send_end(&mut sender), EndFrame::Fin(_)));
+    assert!(matches!(send_end(&mut sender), StreamEndFrame::Fin(_)));
     sender
         .enter_terminal_state(SendTerminalState::DataRecvd)
         .unwrap();

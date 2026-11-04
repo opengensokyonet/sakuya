@@ -30,7 +30,7 @@ use sakuya_stream::send::termination::{
     TerminationAction,
 };
 use sakuya_stream::send::write::WriteOutcome;
-use sakuya_stream::send::{EndFrame, SendEndState, SendTerminalState, StreamSender};
+use sakuya_stream::send::{SendEndState, SendTerminalState, StreamEndFrame, StreamSender};
 use sakuya_stream::send_buffer::ResetRetention;
 use sakuya_stream::send_buffer::offset_map::OffsetMapStreamSendBuffer;
 use sakuya_wire::application_error::ApplicationErrorCode;
@@ -234,7 +234,7 @@ fn a_terminal_reset_needs_a_reset() {
     write(&mut stream, 10);
     stream.close().unwrap();
     let fin = stream.prepare_end_frame().unwrap();
-    assert!(matches!(*fin, EndFrame::Fin(_)));
+    assert!(matches!(*fin, StreamEndFrame::Fin(_)));
     fin.expose();
     assert!(
         stream

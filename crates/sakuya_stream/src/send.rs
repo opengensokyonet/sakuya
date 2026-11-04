@@ -643,7 +643,10 @@ where
                 if sent.fin {
                     return None;
                 }
-                (EndFrame::fin(stream_id, final_size), ExposedEndFrame::Fin)
+                (
+                    StreamEndFrame::fin(stream_id, final_size),
+                    ExposedEndFrame::Fin,
+                )
             }
             CommittedEnd::Reset {
                 error_code,
@@ -659,7 +662,7 @@ where
                     VarIntField::shortest(final_size),
                 );
                 (
-                    EndFrame::ResetStream(frame),
+                    StreamEndFrame::ResetStream(frame),
                     ExposedEndFrame::Reset(ExposedReset::ResetStream),
                 )
             }
@@ -682,7 +685,7 @@ where
                     Err(error) => unreachable!("committed reset target {target:?}: {error}"),
                 };
                 (
-                    EndFrame::ResetStreamAt(frame),
+                    StreamEndFrame::ResetStreamAt(frame),
                     ExposedEndFrame::Reset(exposed),
                 )
             }
@@ -828,12 +831,12 @@ pub enum SenderExposeUsageError {
     },
 }
 
-/// The end frame a stream has to send (`EndFrame`): the wire frame that
+/// The end frame a stream has to send (`StreamEndFrame`): the wire frame that
 /// carries the committed end, as [`StreamSender::prepare_end_frame`] gives it.
 ///
 /// The frames hold their fields in the shortest encodings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EndFrame {
+pub enum StreamEndFrame {
     /// A STREAM frame with the FIN bit, no data and an offset equal to the
     /// final size. Its Length field is not decided: the packet writer decides
     /// it by the position of the frame in the packet.
@@ -844,7 +847,7 @@ pub enum EndFrame {
     ResetStreamAt(ResetStreamAtFrame),
 }
 
-impl EndFrame {
+impl StreamEndFrame {
     /// The FIN of the stream `stream_id` that ends at `final_size`.
     fn fin(stream_id: VarIntField<StreamId>, final_size: VarInt) -> Self {
         // An absent Offset field states offset zero in one byte less.
@@ -870,21 +873,21 @@ enum ExposedEndFrame {
 /// (`PreparedEndFrame`): the guard holds the stream sender until the frame is
 /// exposed or the guard is dropped.
 ///
-/// It dereferences to the [`EndFrame`] to write. After the frame was written
+/// It dereferences to the [`StreamEndFrame`] to write. After the frame was written
 /// to a packet, [`expose`](Self::expose) settles its first exposure; it does
 /// not fail. Dropping the guard changes nothing.
 pub struct PreparedEndFrame<'a, C: SendTerminationPolicy, K: ConnectionSendFlowController> {
     sender: &'a mut StreamSender<C, K>,
-    frame: EndFrame,
+    frame: StreamEndFrame,
     exposed: ExposedEndFrame,
 }
 
 impl<C: SendTerminationPolicy, K: ConnectionSendFlowController> Deref
     for PreparedEndFrame<'_, C, K>
 {
-    type Target = EndFrame;
+    type Target = StreamEndFrame;
 
-    fn deref(&self) -> &EndFrame {
+    fn deref(&self) -> &StreamEndFrame {
         &self.frame
     }
 }

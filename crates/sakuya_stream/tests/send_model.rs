@@ -29,8 +29,8 @@ use sakuya_stream::send::termination::{
 };
 use sakuya_stream::send::write::{FlushError, WriteError, WriteOutcome, WriteWait};
 use sakuya_stream::send::{
-    EndFrame, EndSource, EnterTerminalStateError, ResetTarget, SendEndState, SendTerminalState,
-    SenderExposeUsageError, StreamResetError, StreamSender,
+    EndSource, EnterTerminalStateError, ResetTarget, SendEndState, SendTerminalState,
+    SenderExposeUsageError, StreamEndFrame, StreamResetError, StreamSender,
 };
 use sakuya_stream::send_buffer::offset_map::OffsetMapStreamSendBuffer;
 use sakuya_stream::send_buffer::visibility::FinalSizeBelowExposureError;
@@ -459,7 +459,7 @@ trait Sender {
     fn expose(&mut self, usage_end: VarInt) -> Result<VarInt, SenderExposeUsageError>;
     /// Prepares the end frame that is due; exposes it if `expose`, drops the
     /// guard otherwise. Returns the frame and the newly committed credit.
-    fn end_frame(&mut self, expose: bool) -> Option<(EndFrame, Option<VarInt>)>;
+    fn end_frame(&mut self, expose: bool) -> Option<(StreamEndFrame, Option<VarInt>)>;
     fn sender_close(&mut self) -> Result<(), CloseError>;
     fn request(
         &mut self,
@@ -590,7 +590,7 @@ macro_rules! impl_sender {
                 self.expose_usage_through(usage_end)
             }
 
-            fn end_frame(&mut self, expose: bool) -> Option<(EndFrame, Option<VarInt>)> {
+            fn end_frame(&mut self, expose: bool) -> Option<(StreamEndFrame, Option<VarInt>)> {
                 let prepared = self.prepare_end_frame()?;
                 let frame = *prepared;
                 Some((frame, expose.then(|| prepared.expose())))
@@ -917,7 +917,7 @@ fn expose_data<S: Sender, P: PolicyModel>(
 }
 
 /// The end frame the contract says is due, if any.
-fn due_frame(index: usize, s: &ModelStream) -> Option<(EndFrame, ModelEndFrame)> {
+fn due_frame(index: usize, s: &ModelStream) -> Option<(StreamEndFrame, ModelEndFrame)> {
     if s.connection_closed || s.terminal.is_some() {
         return None;
     }
@@ -926,7 +926,7 @@ fn due_frame(index: usize, s: &ModelStream) -> Option<(EndFrame, ModelEndFrame)>
         ModelEnd::Open => None,
         ModelEnd::Closed { final_size, .. } => (!s.sent_fin).then(|| {
             (
-                EndFrame::Fin(fin_frame(sid, final_size)),
+                StreamEndFrame::Fin(fin_frame(sid, final_size)),
                 ModelEndFrame::Fin,
             )
         }),
@@ -935,7 +935,7 @@ fn due_frame(index: usize, s: &ModelStream) -> Option<(EndFrame, ModelEndFrame)>
             final_size,
         } => (!s.sent_reset_stream()).then(|| {
             (
-                EndFrame::ResetStream(ResetStreamFrame::new(
+                StreamEndFrame::ResetStream(ResetStreamFrame::new(
                     VarIntField::shortest(sid),
                     VarIntField::shortest(code(c)),
                     VarIntField::shortest(v(final_size)),
@@ -949,7 +949,7 @@ fn due_frame(index: usize, s: &ModelStream) -> Option<(EndFrame, ModelEndFrame)>
             final_size,
         } => (s.last_reset_frame != Some(ModelResetFrame::ResetStreamAt { reliable })).then(|| {
             (
-                EndFrame::ResetStreamAt(
+                StreamEndFrame::ResetStreamAt(
                     ResetStreamAtFrame::new(
                         VarIntField::shortest(sid),
                         VarIntField::shortest(code(c)),
