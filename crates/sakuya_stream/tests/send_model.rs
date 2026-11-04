@@ -11,7 +11,11 @@ use bytes::{Buf, Bytes};
 use proptest::prelude::*;
 use sakuya_stream::connection_send_credit::ConnectionSendFlowController;
 use sakuya_stream::send::composition::{DefaultSendComposition, SendComposition};
-use sakuya_stream::send::finish::{CloseError, ResetConflictKind, ResetError};
+use sakuya_stream::send::finish::{
+    CloseError, ProtocolTerminalError, ReliablePrefixNotPreparedError, ReliableSizeIncreaseError,
+    ResetAtError, ResetAtWithFinalSizeError, ResetError, ResetStreamAtNotNegotiatedError,
+    ResetWithFinalSizeError,
+};
 use sakuya_stream::send::flow_control::{
     AdmissionGuard, SendFlowContext, SendFlowControlPolicy, StreamCreditEvent, WriteAttempt,
 };
@@ -22,9 +26,11 @@ use sakuya_stream::send::termination::{
 use sakuya_stream::send::write::{FlushError, WriteError, WriteOutcome, WriteWait};
 use sakuya_stream::send::{EndSource, ResetTarget, SendEndState, SendTerminalState, StreamSender};
 use sakuya_stream::send_buffer::offset_map::OffsetMapSendBuffer;
-use sakuya_stream::send_buffer::{ExposeUsageError, ExposedEnd};
-use sakuya_stream::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
+use sakuya_stream::send_buffer::visibility::FinalSizeBelowExposureError;
+use sakuya_stream::send_buffer::{ExposeUsageError, ExposedEnd, FinalSizeBeyondWrittenEndError};
+use sakuya_stream::stream_end::{BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError};
 use sakuya_wire::application_error::ApplicationErrorCode;
+use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
 use sakuya_wire::stream_id::StreamId;
 use sakuya_wire::var_int::VarInt;
 
@@ -417,7 +423,7 @@ trait Sender {
         code: ApplicationErrorCode,
         reliable: VarInt,
         final_size: Option<VarInt>,
-    ) -> Result<(), ResetError>;
+    ) -> Result<(), ResetAtWithFinalSizeError>;
     fn stop(&mut self, code: ApplicationErrorCode);
     fn abandon(&mut self);
     fn blocked_limit(&self) -> Option<VarInt>;
@@ -425,6 +431,58 @@ trait Sender {
     fn terminal(&mut self, state: SendTerminalState) -> bool;
     fn close_connection(&mut self);
     fn snapshot(&self) -> Snapshot;
+}
+
+/// The failure of `reset` as one of `reset_at_with_final_size`.
+fn widen_reset(error: ResetError) -> ResetAtWithFinalSizeError {
+    use ResetAtWithFinalSizeError as General;
+    match error {
+        ResetError::ConnectionClosed => General::ConnectionClosed,
+        ResetError::ErrorCodeConflict { source } => General::ErrorCodeConflict { source },
+        ResetError::ProtocolTerminal { source } => General::ProtocolTerminal { source },
+    }
+}
+
+/// The failure of `reset_at` as one of `reset_at_with_final_size`.
+fn widen_reset_at(error: ResetAtError) -> ResetAtWithFinalSizeError {
+    use ResetAtWithFinalSizeError as General;
+    match error {
+        ResetAtError::ConnectionClosed => General::ConnectionClosed,
+        ResetAtError::ErrorCodeConflict { source } => General::ErrorCodeConflict { source },
+        ResetAtError::ReliableSizeIncrease { source } => General::ReliableSizeIncrease { source },
+        ResetAtError::ProtocolTerminal { source } => General::ProtocolTerminal { source },
+        ResetAtError::UnsupportedExtension { source } => General::UnsupportedExtension { source },
+        ResetAtError::ReliablePrefixNotPrepared { source } => {
+            General::ReliablePrefixNotPrepared { source }
+        }
+    }
+}
+
+/// The failure of `reset_with_final_size` as one of
+/// `reset_at_with_final_size`.
+fn widen_reset_with_final_size(error: ResetWithFinalSizeError) -> ResetAtWithFinalSizeError {
+    use ResetAtWithFinalSizeError as General;
+    match error {
+        ResetWithFinalSizeError::ConnectionClosed => General::ConnectionClosed,
+        ResetWithFinalSizeError::ErrorCodeConflict { source } => {
+            General::ErrorCodeConflict { source }
+        }
+        ResetWithFinalSizeError::FinalSizeConflictsWithReset { source } => {
+            General::FinalSizeConflictsWithReset { source }
+        }
+        ResetWithFinalSizeError::FinalSizeConflictsWithClose { source } => {
+            General::FinalSizeConflictsWithClose { source }
+        }
+        ResetWithFinalSizeError::ProtocolTerminal { source } => {
+            General::ProtocolTerminal { source }
+        }
+        ResetWithFinalSizeError::FinalSizeBelowExposure { source } => {
+            General::FinalSizeBelowExposure { source }
+        }
+        ResetWithFinalSizeError::FinalSizeBeyondWrittenEnd { source } => {
+            General::FinalSizeBeyondWrittenEnd { source }
+        }
+    }
 }
 
 /// The kinds of write failure the contract distinguishes.
@@ -503,11 +561,13 @@ macro_rules! impl_sender {
                 code: ApplicationErrorCode,
                 reliable: VarInt,
                 final_size: Option<VarInt>,
-            ) -> Result<(), ResetError> {
+            ) -> Result<(), ResetAtWithFinalSizeError> {
                 match (reliable == VarInt::ZERO, final_size) {
-                    (true, None) => self.reset(code),
-                    (false, None) => self.reset_at(code, reliable),
-                    (true, Some(size)) => self.reset_with_final_size(code, size),
+                    (true, None) => self.reset(code).map_err(widen_reset),
+                    (false, None) => self.reset_at(code, reliable).map_err(widen_reset_at),
+                    (true, Some(size)) => self
+                        .reset_with_final_size(code, size)
+                        .map_err(widen_reset_with_final_size),
                     (false, Some(size)) => self.reset_at_with_final_size(code, reliable, size),
                 }
             }
@@ -831,9 +891,10 @@ fn reset<S: Sender, P: PolicyModel>(
     let code_value = code(requested);
     // The order in which the sender checks a reset: connection, identical target,
     // conflicts, terminal state, extension, prefix, final size range.
-    let expected: Result<Option<(u64, u64)>, ResetError> = (|| {
+    let expected: Result<Option<(u64, u64)>, ResetAtWithFinalSizeError> = (|| {
+        use ResetAtWithFinalSizeError as E;
         if s.connection_closed {
-            return Err(ResetError::ConnectionClosed);
+            return Err(E::ConnectionClosed);
         }
         match s.end {
             ModelEnd::Reset {
@@ -848,27 +909,19 @@ fn reset<S: Sender, P: PolicyModel>(
                     return Ok(None);
                 }
                 if current != requested {
-                    return Err(ResetError::ResetConflict {
-                        conflict: ResetConflictKind::ErrorCode {
-                            current: code(current),
-                            requested: code_value,
-                        },
+                    return Err(E::ErrorCodeConflict {
+                        source: ResetCodeChangeError::check(code(current), code_value).unwrap_err(),
                     });
                 }
                 if let Some(size) = final_size.filter(|size| *size != fixed) {
-                    return Err(ResetError::ResetConflict {
-                        conflict: ResetConflictKind::FinalSize {
-                            current: v(fixed),
-                            requested: v(size),
-                        },
+                    return Err(E::FinalSizeConflictsWithReset {
+                        source: FinalSizeChangeError::check(v(fixed), v(size)).unwrap_err(),
                     });
                 }
                 if reliable > effective {
-                    return Err(ResetError::ResetConflict {
-                        conflict: ResetConflictKind::ReliableSizeIncrease {
-                            current: v(effective),
-                            requested: v(reliable),
-                        },
+                    return Err(E::ReliableSizeIncrease {
+                        source: ReliableSizeIncreaseError::check(v(effective), v(reliable))
+                            .unwrap_err(),
                     });
                 }
             }
@@ -876,28 +929,27 @@ fn reset<S: Sender, P: PolicyModel>(
                 final_size: fixed, ..
             } => {
                 if let Some(size) = final_size.filter(|size| *size != fixed) {
-                    return Err(ResetError::ResetConflict {
-                        conflict: ResetConflictKind::FinalSize {
-                            current: v(fixed),
-                            requested: v(size),
-                        },
+                    return Err(E::FinalSizeConflictsWithClose {
+                        source: FinalSizeChangeError::check(v(fixed), v(size)).unwrap_err(),
                     });
                 }
             }
             ModelEnd::Open => {}
         }
         if let Some(state) = s.terminal {
-            return Err(ResetError::ProtocolTerminal { state });
+            return Err(E::ProtocolTerminal {
+                source: ProtocolTerminalError::check(Some(state)).unwrap_err(),
+            });
         }
         if reliable > 0 && !supported {
-            return Err(ResetError::UnsupportedExtension {
-                reliable_size: v(reliable),
+            return Err(E::UnsupportedExtension {
+                source: ResetStreamAtNotNegotiatedError::check(v(reliable), false).unwrap_err(),
             });
         }
         if reliable > s.written {
-            return Err(ResetError::ReliablePrefixNotPrepared {
-                reliable_size: v(reliable),
-                written_end: v(s.written),
+            return Err(E::ReliablePrefixNotPrepared {
+                source: ReliablePrefixNotPreparedError::check(v(reliable), v(s.written))
+                    .unwrap_err(),
             });
         }
         let chosen = match s.final_size() {
@@ -905,11 +957,21 @@ fn reset<S: Sender, P: PolicyModel>(
             None => {
                 let minimum = s.exposure.max(reliable);
                 match final_size {
-                    Some(size) if size < minimum || size > s.written => {
-                        return Err(ResetError::InvalidFinalSize {
-                            final_size: v(size),
-                            minimum: v(minimum),
-                            maximum: v(s.written),
+                    Some(size) if size < reliable => {
+                        return Err(E::FinalSizeBelowReliableSize {
+                            source: ReliableSizeError::check(v(size), v(reliable)).unwrap_err(),
+                        });
+                    }
+                    Some(size) if size < s.exposure => {
+                        return Err(E::FinalSizeBelowExposure {
+                            source: FinalSizeBelowExposureError::check(v(size), v(s.exposure))
+                                .unwrap_err(),
+                        });
+                    }
+                    Some(size) if size > s.written => {
+                        return Err(E::FinalSizeBeyondWrittenEnd {
+                            source: FinalSizeBeyondWrittenEndError::check(v(size), v(s.written))
+                                .unwrap_err(),
                         });
                     }
                     Some(size) => size,

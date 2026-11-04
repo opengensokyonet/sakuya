@@ -31,9 +31,11 @@ use crate::send::termination::{
     FinalSizeRequest, SendTerminationEvent, SendTerminationPolicy, TerminationAction,
 };
 use crate::send::write::SharedWriteLimitReason;
-use crate::send_buffer::{ResetRetention, SendBuffer};
-use core::fmt;
+use crate::send_buffer::visibility::FinalSizeBelowExposureError;
+use crate::send_buffer::{FinalSizeBeyondWrittenEndError, ResetRetention, SendBuffer};
+use crate::stream_end::{FinalSizeChangeError, ResetCodeChangeError};
 use sakuya_wire::application_error::ApplicationErrorCode;
+use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
 use sakuya_wire::var_int::VarInt;
 use snafu::{Report, ResultExt, Snafu, ensure};
 
@@ -49,93 +51,403 @@ pub enum CloseError {
     AlreadyReset,
 }
 
-/// Failures of the reset operations; none of them changes any state.
+/// Failures of [`StreamSender::reset`]; none of them changes any state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(module(reset_error), visibility(pub(crate)))]
 pub enum ResetError {
     /// The connection has closed.
     #[snafu(display("the connection is closed"))]
     ConnectionClosed,
-    /// The request conflicts with the effective end.
-    #[snafu(display("reset conflicts with the effective end: {conflict}"))]
-    ResetConflict {
-        /// The conflicting field.
-        conflict: ResetConflictKind,
+    /// The error code differs from the effective reset's.
+    #[snafu(display("the reset conflicts with the effective reset"))]
+    ErrorCodeConflict {
+        /// The effective and the requested error code.
+        source: ResetCodeChangeError,
     },
     /// The send direction is in a terminal state and takes no new reset.
-    #[snafu(display("the send direction is in the terminal state {state:?}"))]
+    #[snafu(display("the send direction takes no new reset"))]
     ProtocolTerminal {
         /// The terminal state.
-        state: SendTerminalState,
+        source: ProtocolTerminalError,
+    },
+}
+
+/// Failures of [`StreamSender::reset_at`]; none of them changes any state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(module(reset_at_error), visibility(pub(crate)))]
+pub enum ResetAtError {
+    /// The connection has closed.
+    #[snafu(display("the connection is closed"))]
+    ConnectionClosed,
+    /// The error code differs from the effective reset's.
+    #[snafu(display("the reset conflicts with the effective reset"))]
+    ErrorCodeConflict {
+        /// The effective and the requested error code.
+        source: ResetCodeChangeError,
+    },
+    /// The reliable size exceeds the effective reset's.
+    #[snafu(display("the reset conflicts with the effective reset"))]
+    ReliableSizeIncrease {
+        /// The effective and the requested reliable size.
+        source: ReliableSizeIncreaseError,
+    },
+    /// The send direction is in a terminal state and takes no new reset.
+    #[snafu(display("the send direction takes no new reset"))]
+    ProtocolTerminal {
+        /// The terminal state.
+        source: ProtocolTerminalError,
     },
     /// A reliable size above zero needs `RESET_STREAM_AT`, which the
     /// handshake did not negotiate.
-    #[snafu(display("reliable size {reliable_size} needs the RESET_STREAM_AT extension"))]
+    #[snafu(display("the reset cannot keep a reliable prefix"))]
     UnsupportedExtension {
         /// The requested reliable size.
-        reliable_size: VarInt,
+        source: ResetStreamAtNotNegotiatedError,
     },
-    /// The requested reliable size lies beyond the written end: the prefix it
-    /// names has not been handed over.
-    #[snafu(display("reliable size {reliable_size} lies beyond the written end {written_end}"))]
+    /// The requested reliable size lies beyond the written end.
+    #[snafu(display("the reset cannot keep a reliable prefix"))]
     ReliablePrefixNotPrepared {
-        /// The requested reliable size.
-        reliable_size: VarInt,
-        /// The written end.
-        written_end: VarInt,
-    },
-    /// The requested final size lies outside the legal range.
-    #[snafu(display("final size {final_size} lies outside {minimum}..={maximum}"))]
-    InvalidFinalSize {
-        /// The requested final size.
-        final_size: VarInt,
-        /// `max(exposure_end, reliable_size)`.
-        minimum: VarInt,
-        /// The written end.
-        maximum: VarInt,
+        /// The requested reliable size and the written end.
+        source: ReliablePrefixNotPreparedError,
     },
 }
 
-/// The field of a reset request that conflicts with the effective end.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ResetConflictKind {
+/// Failures of [`StreamSender::reset_with_final_size`]; none of them
+/// changes any state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(module(reset_with_final_size_error), visibility(pub(crate)))]
+pub enum ResetWithFinalSizeError {
+    /// The connection has closed.
+    #[snafu(display("the connection is closed"))]
+    ConnectionClosed,
     /// The error code differs from the effective reset's.
-    ErrorCode {
-        /// The effective error code.
-        current: ApplicationErrorCode,
-        /// The requested error code.
-        requested: ApplicationErrorCode,
+    #[snafu(display("the reset conflicts with the effective reset"))]
+    ErrorCodeConflict {
+        /// The effective and the requested error code.
+        source: ResetCodeChangeError,
     },
-    /// The final size differs from the fixed one.
-    FinalSize {
-        /// The fixed final size.
-        current: VarInt,
-        /// The requested final size.
-        requested: VarInt,
+    /// The final size differs from the one the effective reset fixed.
+    #[snafu(display("the reset conflicts with the effective reset"))]
+    FinalSizeConflictsWithReset {
+        /// The fixed and the requested final size.
+        source: FinalSizeChangeError,
     },
-    /// The reliable size exceeds the effective reset's: data it allowed to
-    /// abandon cannot be promised again.
-    ReliableSizeIncrease {
-        /// The effective reliable size.
-        current: VarInt,
-        /// The requested reliable size.
-        requested: VarInt,
+    /// The final size differs from the one the effective close fixed.
+    #[snafu(display("the reset conflicts with the effective close"))]
+    FinalSizeConflictsWithClose {
+        /// The fixed and the requested final size.
+        source: FinalSizeChangeError,
+    },
+    /// The send direction is in a terminal state and takes no new reset.
+    #[snafu(display("the send direction takes no new reset"))]
+    ProtocolTerminal {
+        /// The terminal state.
+        source: ProtocolTerminalError,
+    },
+    /// The requested final size lies below the exposure end.
+    #[snafu(display("the reset cannot end at this final size"))]
+    FinalSizeBelowExposure {
+        /// The requested final size and the exposure end.
+        source: FinalSizeBelowExposureError,
+    },
+    /// The requested final size lies beyond the written end.
+    #[snafu(display("the reset cannot end at this final size"))]
+    FinalSizeBeyondWrittenEnd {
+        /// The requested final size and the written end.
+        source: FinalSizeBeyondWrittenEndError,
     },
 }
 
-impl fmt::Display for ResetConflictKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ErrorCode { current, requested } => {
-                write!(f, "error code {requested} differs from {current}")
-            }
-            Self::FinalSize { current, requested } => {
-                write!(f, "final size {requested} differs from {current}")
-            }
-            Self::ReliableSizeIncrease { current, requested } => {
-                write!(f, "reliable size {requested} exceeds {current}")
+/// Failures of [`StreamSender::reset_at_with_final_size`]; none of them
+/// changes any state.
+///
+/// Every failure of a reset request is one of these; the other reset
+/// operations fail with the variants their requests can reach.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(module(reset_at_with_final_size_error), visibility(pub(crate)))]
+pub enum ResetAtWithFinalSizeError {
+    /// The connection has closed.
+    #[snafu(display("the connection is closed"))]
+    ConnectionClosed,
+    /// The error code differs from the effective reset's.
+    #[snafu(display("the reset conflicts with the effective reset"))]
+    ErrorCodeConflict {
+        /// The effective and the requested error code.
+        source: ResetCodeChangeError,
+    },
+    /// The final size differs from the one the effective reset fixed.
+    #[snafu(display("the reset conflicts with the effective reset"))]
+    FinalSizeConflictsWithReset {
+        /// The fixed and the requested final size.
+        source: FinalSizeChangeError,
+    },
+    /// The reliable size exceeds the effective reset's.
+    #[snafu(display("the reset conflicts with the effective reset"))]
+    ReliableSizeIncrease {
+        /// The effective and the requested reliable size.
+        source: ReliableSizeIncreaseError,
+    },
+    /// The final size differs from the one the effective close fixed.
+    #[snafu(display("the reset conflicts with the effective close"))]
+    FinalSizeConflictsWithClose {
+        /// The fixed and the requested final size.
+        source: FinalSizeChangeError,
+    },
+    /// The send direction is in a terminal state and takes no new reset.
+    #[snafu(display("the send direction takes no new reset"))]
+    ProtocolTerminal {
+        /// The terminal state.
+        source: ProtocolTerminalError,
+    },
+    /// A reliable size above zero needs `RESET_STREAM_AT`, which the
+    /// handshake did not negotiate.
+    #[snafu(display("the reset cannot keep a reliable prefix"))]
+    UnsupportedExtension {
+        /// The requested reliable size.
+        source: ResetStreamAtNotNegotiatedError,
+    },
+    /// The requested reliable size lies beyond the written end.
+    #[snafu(display("the reset cannot keep a reliable prefix"))]
+    ReliablePrefixNotPrepared {
+        /// The requested reliable size and the written end.
+        source: ReliablePrefixNotPreparedError,
+    },
+    /// The requested final size lies below the requested reliable size.
+    #[snafu(display("the reset cannot end at this final size"))]
+    FinalSizeBelowReliableSize {
+        /// The requested final size and reliable size.
+        source: ReliableSizeError,
+    },
+    /// The requested final size lies below the exposure end.
+    #[snafu(display("the reset cannot end at this final size"))]
+    FinalSizeBelowExposure {
+        /// The requested final size and the exposure end.
+        source: FinalSizeBelowExposureError,
+    },
+    /// The requested final size lies beyond the written end.
+    #[snafu(display("the reset cannot end at this final size"))]
+    FinalSizeBeyondWrittenEnd {
+        /// The requested final size and the written end.
+        source: FinalSizeBeyondWrittenEndError,
+    },
+}
+
+impl ResetError {
+    /// The failure of a request with reliable size zero and no final size.
+    fn narrow(error: ResetAtWithFinalSizeError) -> Self {
+        use ResetAtWithFinalSizeError as General;
+        match error {
+            General::ConnectionClosed => Self::ConnectionClosed,
+            General::ErrorCodeConflict { source } => Self::ErrorCodeConflict { source },
+            General::ProtocolTerminal { source } => Self::ProtocolTerminal { source },
+            // invariant: a reliable size of zero never exceeds an effective
+            // one, needs no extension, is always written and never exceeds a
+            // final size; a request without a final size is not compared with
+            // a fixed one and leaves the choice to the termination policy.
+            General::FinalSizeConflictsWithReset { .. }
+            | General::ReliableSizeIncrease { .. }
+            | General::FinalSizeConflictsWithClose { .. }
+            | General::UnsupportedExtension { .. }
+            | General::ReliablePrefixNotPrepared { .. }
+            | General::FinalSizeBelowReliableSize { .. }
+            | General::FinalSizeBelowExposure { .. }
+            | General::FinalSizeBeyondWrittenEnd { .. } => {
+                unreachable!("a plain reset cannot fail with {error:?}")
             }
         }
+    }
+}
+
+impl ResetAtError {
+    /// The failure of a request without a final size.
+    fn narrow(error: ResetAtWithFinalSizeError) -> Self {
+        use ResetAtWithFinalSizeError as General;
+        match error {
+            General::ConnectionClosed => Self::ConnectionClosed,
+            General::ErrorCodeConflict { source } => Self::ErrorCodeConflict { source },
+            General::ReliableSizeIncrease { source } => Self::ReliableSizeIncrease { source },
+            General::ProtocolTerminal { source } => Self::ProtocolTerminal { source },
+            General::UnsupportedExtension { source } => Self::UnsupportedExtension { source },
+            General::ReliablePrefixNotPrepared { source } => {
+                Self::ReliablePrefixNotPrepared { source }
+            }
+            // invariant: a request without a final size is not compared with
+            // a fixed one and leaves the choice to the termination policy.
+            General::FinalSizeConflictsWithReset { .. }
+            | General::FinalSizeConflictsWithClose { .. }
+            | General::FinalSizeBelowReliableSize { .. }
+            | General::FinalSizeBelowExposure { .. }
+            | General::FinalSizeBeyondWrittenEnd { .. } => {
+                unreachable!("a reset without a final size cannot fail with {error:?}")
+            }
+        }
+    }
+}
+
+impl ResetWithFinalSizeError {
+    /// The failure of a request with reliable size zero.
+    fn narrow(error: ResetAtWithFinalSizeError) -> Self {
+        use ResetAtWithFinalSizeError as General;
+        match error {
+            General::ConnectionClosed => Self::ConnectionClosed,
+            General::ErrorCodeConflict { source } => Self::ErrorCodeConflict { source },
+            General::FinalSizeConflictsWithReset { source } => {
+                Self::FinalSizeConflictsWithReset { source }
+            }
+            General::FinalSizeConflictsWithClose { source } => {
+                Self::FinalSizeConflictsWithClose { source }
+            }
+            General::ProtocolTerminal { source } => Self::ProtocolTerminal { source },
+            General::FinalSizeBelowExposure { source } => Self::FinalSizeBelowExposure { source },
+            General::FinalSizeBeyondWrittenEnd { source } => {
+                Self::FinalSizeBeyondWrittenEnd { source }
+            }
+            // invariant: a reliable size of zero never exceeds an effective
+            // one, needs no extension, is always written and never exceeds a
+            // final size.
+            General::ReliableSizeIncrease { .. }
+            | General::UnsupportedExtension { .. }
+            | General::ReliablePrefixNotPrepared { .. }
+            | General::FinalSizeBelowReliableSize { .. } => {
+                unreachable!("a reset without a reliable prefix cannot fail with {error:?}")
+            }
+        }
+    }
+}
+
+/// A reset raises the reliable size of the effective reset: data it allowed
+/// to abandon cannot be promised again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("reliable size {requested} exceeds the effective reliable size {effective}"))]
+pub struct ReliableSizeIncreaseError {
+    effective: VarInt,
+    requested: VarInt,
+}
+
+impl ReliableSizeIncreaseError {
+    /// Checks that `requested` does not exceed the `effective` reliable
+    /// size.
+    ///
+    /// # Errors
+    ///
+    /// [`ReliableSizeIncreaseError`] if `requested` exceeds `effective`.
+    pub fn check(effective: VarInt, requested: VarInt) -> Result<(), Self> {
+        ensure!(
+            requested <= effective,
+            ReliableSizeIncreaseSnafu {
+                effective,
+                requested,
+            }
+        );
+        Ok(())
+    }
+
+    /// The reliable size of the effective reset.
+    pub const fn effective(self) -> VarInt {
+        self.effective
+    }
+
+    /// The requested reliable size, which exceeds
+    /// [`effective`](Self::effective).
+    pub const fn requested(self) -> VarInt {
+        self.requested
+    }
+}
+
+/// The send direction is in a terminal state, which no reset changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("the send direction is in the terminal state {state:?}"))]
+pub struct ProtocolTerminalError {
+    state: SendTerminalState,
+}
+
+impl ProtocolTerminalError {
+    /// Checks that the send direction has not reached a terminal state;
+    /// `terminal_state` is the one it reached, if any.
+    ///
+    /// # Errors
+    ///
+    /// [`ProtocolTerminalError`] if `terminal_state` is a state.
+    pub fn check(terminal_state: Option<SendTerminalState>) -> Result<(), Self> {
+        match terminal_state {
+            Some(state) => ProtocolTerminalSnafu { state }.fail(),
+            None => Ok(()),
+        }
+    }
+
+    /// The terminal state.
+    pub const fn state(self) -> SendTerminalState {
+        self.state
+    }
+}
+
+/// A reset keeps a reliable size above zero, which needs the
+/// `RESET_STREAM_AT` extension, and the handshake did not negotiate it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("reliable size {reliable_size} needs the RESET_STREAM_AT extension"))]
+pub struct ResetStreamAtNotNegotiatedError {
+    reliable_size: VarInt,
+}
+
+impl ResetStreamAtNotNegotiatedError {
+    /// Checks that a reset with `reliable_size` can be sent;
+    /// `reset_stream_at_supported` tells whether the handshake negotiated
+    /// `RESET_STREAM_AT`.
+    ///
+    /// # Errors
+    ///
+    /// [`ResetStreamAtNotNegotiatedError`] if `reliable_size` is above zero
+    /// and the extension was not negotiated.
+    pub fn check(reliable_size: VarInt, reset_stream_at_supported: bool) -> Result<(), Self> {
+        ensure!(
+            reliable_size == VarInt::ZERO || reset_stream_at_supported,
+            ResetStreamAtNotNegotiatedSnafu { reliable_size }
+        );
+        Ok(())
+    }
+
+    /// The requested reliable size, above zero.
+    pub const fn reliable_size(self) -> VarInt {
+        self.reliable_size
+    }
+}
+
+/// A reset keeps a reliable size beyond the written end: the prefix it names
+/// has not been handed over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("reliable size {reliable_size} lies beyond the written end {written_end}"))]
+pub struct ReliablePrefixNotPreparedError {
+    reliable_size: VarInt,
+    written_end: VarInt,
+}
+
+impl ReliablePrefixNotPreparedError {
+    /// Checks that `reliable_size` is at most `written_end`.
+    ///
+    /// # Errors
+    ///
+    /// [`ReliablePrefixNotPreparedError`] if `reliable_size` lies beyond
+    /// `written_end`.
+    pub fn check(reliable_size: VarInt, written_end: VarInt) -> Result<(), Self> {
+        ensure!(
+            reliable_size <= written_end,
+            ReliablePrefixNotPreparedSnafu {
+                reliable_size,
+                written_end,
+            }
+        );
+        Ok(())
+    }
+
+    /// The requested reliable size, beyond
+    /// [`written_end`](Self::written_end).
+    pub const fn reliable_size(self) -> VarInt {
+        self.reliable_size
+    }
+
+    /// The written end.
+    pub const fn written_end(self) -> VarInt {
+        self.written_end
     }
 }
 
@@ -145,8 +457,41 @@ enum ResetCheck {
     Unchanged,
     /// The final size is already fixed at this value.
     FinalSizeFixed(VarInt),
-    /// No final size is fixed; a new one must lie in `minimum..=maximum`.
-    FinalSizeOpen { minimum: VarInt, maximum: VarInt },
+    /// No final size is fixed; a new one must satisfy these bounds.
+    FinalSizeOpen(FinalSizeBounds),
+}
+
+/// The values that bound a new final size: it is at least the reliable size
+/// and the exposure end and at most the written end.
+#[derive(Clone, Copy)]
+struct FinalSizeBounds {
+    reliable_size: VarInt,
+    exposure_end: VarInt,
+    written_end: VarInt,
+}
+
+impl FinalSizeBounds {
+    /// The question for the termination policy's completion entry.
+    fn request(self, error_code: ApplicationErrorCode) -> FinalSizeRequest {
+        FinalSizeRequest {
+            error_code,
+            reliable_size: self.reliable_size,
+            minimum: self.exposure_end.max(self.reliable_size),
+            maximum: self.written_end,
+        }
+    }
+
+    /// Checks an explicit final size, reporting a failure below the reliable
+    /// size, then below the exposure end, then beyond the written end.
+    fn check(self, final_size: VarInt) -> Result<(), ResetAtWithFinalSizeError> {
+        use reset_at_with_final_size_error as e;
+        ReliableSizeError::check(final_size, self.reliable_size)
+            .context(e::FinalSizeBelowReliableSizeSnafu)?;
+        FinalSizeBelowExposureError::check(final_size, self.exposure_end)
+            .context(e::FinalSizeBelowExposureSnafu)?;
+        FinalSizeBeyondWrittenEndError::check(final_size, self.written_end)
+            .context(e::FinalSizeBeyondWrittenEndSnafu)
+    }
 }
 
 /// What a valid application reset request leads to.
@@ -156,7 +501,10 @@ enum ResetPlan {
     /// A new target to install.
     Install(ResetTarget),
     /// A new target whose final size the termination policy chooses.
-    CompleteFinalSize(FinalSizeRequest),
+    CompleteFinalSize {
+        error_code: ApplicationErrorCode,
+        bounds: FinalSizeBounds,
+    },
 }
 
 /// A checked termination policy result, ready to commit.
@@ -193,15 +541,15 @@ enum PolicyViolation {
     #[snafu(display("termination policy decided an illegal reset {target:?}"))]
     IllegalReset {
         target: ResetTarget,
-        source: ResetError,
+        source: ResetAtWithFinalSizeError,
     },
-    #[snafu(display(
-        "termination policy chose final size {final_size} outside {minimum}..={maximum}"
-    ))]
-    FinalSizeOutOfRange {
-        final_size: VarInt,
-        minimum: VarInt,
-        maximum: VarInt,
+    #[snafu(display("termination policy chose a final size below the reliable size"))]
+    ChosenFinalSizeBelowReliableSize { source: ReliableSizeError },
+    #[snafu(display("termination policy chose a final size below the exposure end"))]
+    ChosenFinalSizeBelowExposure { source: FinalSizeBelowExposureError },
+    #[snafu(display("termination policy chose a final size beyond the written end"))]
+    ChosenFinalSizeBeyondWrittenEnd {
+        source: FinalSizeBeyondWrittenEndError,
     },
 }
 
@@ -235,27 +583,47 @@ where
     /// Resets the stream with `error_code` and reliable size zero
     /// (`RESET_STREAM`).
     ///
+    /// While no final size is fixed, the termination policy chooses it.
+    ///
     /// # Errors
     ///
-    /// See [`reset_at_with_final_size`](Self::reset_at_with_final_size).
+    /// Checked in this order, after which the request succeeds without effect
+    /// if it equals the effective reset:
+    ///
+    /// 1. [`ResetError::ConnectionClosed`];
+    /// 2. [`ResetError::ErrorCodeConflict`] against an effective reset;
+    /// 3. [`ResetError::ProtocolTerminal`].
     pub fn reset(&mut self, error_code: ApplicationErrorCode) -> Result<(), ResetError> {
         self.request_reset(error_code, VarInt::ZERO, None)
+            .map_err(ResetError::narrow)
     }
 
     /// Resets the stream with `error_code`, keeping the reliable delivery of
     /// the first `reliable_size` bytes (`RESET_STREAM_AT`).
     ///
     /// The prefix must already be written; the operation takes no input.
+    /// While no final size is fixed, the termination policy chooses it.
     ///
     /// # Errors
     ///
-    /// See [`reset_at_with_final_size`](Self::reset_at_with_final_size).
+    /// Checked in this order, after which the request succeeds without effect
+    /// if it equals the effective reset:
+    ///
+    /// 1. [`ResetAtError::ConnectionClosed`];
+    /// 2. against an effective reset, [`ResetAtError::ErrorCodeConflict`],
+    ///    then [`ResetAtError::ReliableSizeIncrease`];
+    /// 3. [`ResetAtError::ProtocolTerminal`];
+    /// 4. [`ResetAtError::UnsupportedExtension`] for a reliable size above
+    ///    zero without `RESET_STREAM_AT`;
+    /// 5. [`ResetAtError::ReliablePrefixNotPrepared`] for a reliable size
+    ///    beyond the written end.
     pub fn reset_at(
         &mut self,
         error_code: ApplicationErrorCode,
         reliable_size: VarInt,
-    ) -> Result<(), ResetError> {
+    ) -> Result<(), ResetAtError> {
         self.request_reset(error_code, reliable_size, None)
+            .map_err(ResetAtError::narrow)
     }
 
     /// Resets the stream with `error_code` and the explicit `final_size`.
@@ -264,13 +632,26 @@ where
     ///
     /// # Errors
     ///
-    /// See [`reset_at_with_final_size`](Self::reset_at_with_final_size).
+    /// Checked in this order, after which the request succeeds without effect
+    /// if it equals the effective reset:
+    ///
+    /// 1. [`ResetWithFinalSizeError::ConnectionClosed`];
+    /// 2. against an effective reset,
+    ///    [`ResetWithFinalSizeError::ErrorCodeConflict`], then
+    ///    [`ResetWithFinalSizeError::FinalSizeConflictsWithReset`]; against an
+    ///    effective close,
+    ///    [`ResetWithFinalSizeError::FinalSizeConflictsWithClose`];
+    /// 3. [`ResetWithFinalSizeError::ProtocolTerminal`];
+    /// 4. while no final size is fixed,
+    ///    [`ResetWithFinalSizeError::FinalSizeBelowExposure`], then
+    ///    [`ResetWithFinalSizeError::FinalSizeBeyondWrittenEnd`].
     pub fn reset_with_final_size(
         &mut self,
         error_code: ApplicationErrorCode,
         final_size: VarInt,
-    ) -> Result<(), ResetError> {
+    ) -> Result<(), ResetWithFinalSizeError> {
         self.request_reset(error_code, VarInt::ZERO, Some(final_size))
+            .map_err(ResetWithFinalSizeError::narrow)
     }
 
     /// Resets the stream with `error_code`, `reliable_size` and the explicit
@@ -283,21 +664,28 @@ where
     /// Checked in this order, after which the request succeeds without effect
     /// if it equals the effective reset:
     ///
-    /// 1. [`ResetError::ConnectionClosed`];
-    /// 2. [`ResetError::ResetConflict`] against the effective end;
-    /// 3. [`ResetError::ProtocolTerminal`];
-    /// 4. [`ResetError::UnsupportedExtension`] for a reliable size above zero
-    ///    without `RESET_STREAM_AT`;
-    /// 5. [`ResetError::ReliablePrefixNotPrepared`] for a reliable size beyond
-    ///    the written end;
-    /// 6. [`ResetError::InvalidFinalSize`] for a final size outside
-    ///    `max(exposure_end, reliable_size) ..= written_end`.
+    /// 1. [`ResetAtWithFinalSizeError::ConnectionClosed`];
+    /// 2. against an effective reset,
+    ///    [`ResetAtWithFinalSizeError::ErrorCodeConflict`],
+    ///    [`ResetAtWithFinalSizeError::FinalSizeConflictsWithReset`], then
+    ///    [`ResetAtWithFinalSizeError::ReliableSizeIncrease`]; against an
+    ///    effective close,
+    ///    [`ResetAtWithFinalSizeError::FinalSizeConflictsWithClose`];
+    /// 3. [`ResetAtWithFinalSizeError::ProtocolTerminal`];
+    /// 4. [`ResetAtWithFinalSizeError::UnsupportedExtension`] for a reliable
+    ///    size above zero without `RESET_STREAM_AT`;
+    /// 5. [`ResetAtWithFinalSizeError::ReliablePrefixNotPrepared`] for a
+    ///    reliable size beyond the written end;
+    /// 6. while no final size is fixed,
+    ///    [`ResetAtWithFinalSizeError::FinalSizeBelowReliableSize`],
+    ///    [`ResetAtWithFinalSizeError::FinalSizeBelowExposure`], then
+    ///    [`ResetAtWithFinalSizeError::FinalSizeBeyondWrittenEnd`].
     pub fn reset_at_with_final_size(
         &mut self,
         error_code: ApplicationErrorCode,
         reliable_size: VarInt,
         final_size: VarInt,
-    ) -> Result<(), ResetError> {
+    ) -> Result<(), ResetAtWithFinalSizeError> {
         self.request_reset(error_code, reliable_size, Some(final_size))
     }
 
@@ -306,14 +694,16 @@ where
         error_code: ApplicationErrorCode,
         reliable_size: VarInt,
         final_size: Option<VarInt>,
-    ) -> Result<(), ResetError> {
+    ) -> Result<(), ResetAtWithFinalSizeError> {
         let target = match self.plan_reset(error_code, reliable_size, final_size)? {
             ResetPlan::Unchanged => return Ok(()),
             ResetPlan::Install(target) => target,
-            ResetPlan::CompleteFinalSize(request) => {
+            ResetPlan::CompleteFinalSize { error_code, bounds } => {
                 let context = self.termination_context();
-                let chosen = self.composition.complete_final_size(request, &context);
-                enforce_policy(check_completed_final_size(request, chosen))
+                let chosen = self
+                    .composition
+                    .complete_final_size(bounds.request(error_code), &context);
+                enforce_policy(check_completed_final_size(error_code, bounds, chosen))
             }
         };
         self.commit_reset(target, EndSource::Application);
@@ -329,7 +719,7 @@ where
         error_code: ApplicationErrorCode,
         reliable_size: VarInt,
         final_size: Option<VarInt>,
-    ) -> Result<ResetPlan, ResetError> {
+    ) -> Result<ResetPlan, ResetAtWithFinalSizeError> {
         let target = |final_size| ResetTarget {
             error_code,
             reliable_size,
@@ -338,24 +728,22 @@ where
         match self.check_reset(error_code, reliable_size, final_size)? {
             ResetCheck::Unchanged => Ok(ResetPlan::Unchanged),
             ResetCheck::FinalSizeFixed(fixed) => Ok(ResetPlan::Install(target(fixed))),
-            ResetCheck::FinalSizeOpen { minimum, maximum } => match final_size {
+            ResetCheck::FinalSizeOpen(bounds) => match final_size {
                 Some(final_size) => {
-                    check_final_size_range(final_size, minimum, maximum)?;
+                    bounds.check(final_size)?;
                     Ok(ResetPlan::Install(target(final_size)))
                 }
-                None => Ok(ResetPlan::CompleteFinalSize(FinalSizeRequest {
-                    error_code,
-                    reliable_size,
-                    minimum,
-                    maximum,
-                })),
+                None => Ok(ResetPlan::CompleteFinalSize { error_code, bounds }),
             },
         }
     }
 
     /// Validates a complete reset target against the effective state;
     /// `None` means it equals the effective target.
-    fn plan_complete_reset(&self, target: ResetTarget) -> Result<Option<ResetTarget>, ResetError> {
+    fn plan_complete_reset(
+        &self,
+        target: ResetTarget,
+    ) -> Result<Option<ResetTarget>, ResetAtWithFinalSizeError> {
         match self.check_reset(
             target.error_code,
             target.reliable_size,
@@ -363,8 +751,8 @@ where
         )? {
             ResetCheck::Unchanged => Ok(None),
             ResetCheck::FinalSizeFixed(_) => Ok(Some(target)),
-            ResetCheck::FinalSizeOpen { minimum, maximum } => {
-                check_final_size_range(target.final_size, minimum, maximum)?;
+            ResetCheck::FinalSizeOpen(bounds) => {
+                bounds.check(target.final_size)?;
                 Ok(Some(target))
             }
         }
@@ -377,9 +765,9 @@ where
         error_code: ApplicationErrorCode,
         reliable_size: VarInt,
         final_size: Option<VarInt>,
-    ) -> Result<ResetCheck, ResetError> {
-        ensure!(!self.connection_closed, reset_error::ConnectionClosedSnafu);
-        let conflict = |conflict| reset_error::ResetConflictSnafu { conflict }.fail();
+    ) -> Result<ResetCheck, ResetAtWithFinalSizeError> {
+        use reset_at_with_final_size_error as e;
+        ensure!(!self.connection_closed, e::ConnectionClosedSnafu);
         let end_state = self.end_state();
         match end_state {
             SendEndState::Reset { target, .. } => {
@@ -389,60 +777,38 @@ where
                 {
                     return Ok(ResetCheck::Unchanged);
                 }
-                if target.error_code != error_code {
-                    return conflict(ResetConflictKind::ErrorCode {
-                        current: target.error_code,
-                        requested: error_code,
-                    });
+                ResetCodeChangeError::check(target.error_code, error_code)
+                    .context(e::ErrorCodeConflictSnafu)?;
+                if let Some(requested) = final_size {
+                    FinalSizeChangeError::check(target.final_size, requested)
+                        .context(e::FinalSizeConflictsWithResetSnafu)?;
                 }
-                if let Some(requested) = final_size
-                    && requested != target.final_size
-                {
-                    return conflict(ResetConflictKind::FinalSize {
-                        current: target.final_size,
-                        requested,
-                    });
-                }
-                if reliable_size > target.reliable_size {
-                    return conflict(ResetConflictKind::ReliableSizeIncrease {
-                        current: target.reliable_size,
-                        requested: reliable_size,
-                    });
-                }
+                ReliableSizeIncreaseError::check(target.reliable_size, reliable_size)
+                    .context(e::ReliableSizeIncreaseSnafu)?;
             }
             SendEndState::Closed {
-                final_size: current,
-                ..
+                final_size: fixed, ..
             } => {
-                if let Some(requested) = final_size
-                    && requested != current
-                {
-                    return conflict(ResetConflictKind::FinalSize { current, requested });
+                if let Some(requested) = final_size {
+                    FinalSizeChangeError::check(fixed, requested)
+                        .context(e::FinalSizeConflictsWithCloseSnafu)?;
                 }
             }
             SendEndState::Open => {}
         }
-        if let Some(state) = self.terminal_state() {
-            return reset_error::ProtocolTerminalSnafu { state }.fail();
-        }
-        ensure!(
-            reliable_size == VarInt::ZERO || self.reset_stream_at_supported,
-            reset_error::UnsupportedExtensionSnafu { reliable_size }
-        );
+        ProtocolTerminalError::check(self.terminal_state()).context(e::ProtocolTerminalSnafu)?;
+        ResetStreamAtNotNegotiatedError::check(reliable_size, self.reset_stream_at_supported)
+            .context(e::UnsupportedExtensionSnafu)?;
         let written_end = self.written_end();
-        ensure!(
-            reliable_size <= written_end,
-            reset_error::ReliablePrefixNotPreparedSnafu {
-                reliable_size,
-                written_end,
-            }
-        );
+        ReliablePrefixNotPreparedError::check(reliable_size, written_end)
+            .context(e::ReliablePrefixNotPreparedSnafu)?;
         Ok(match end_state.final_size() {
             Some(fixed) => ResetCheck::FinalSizeFixed(fixed),
-            None => ResetCheck::FinalSizeOpen {
-                minimum: self.exposure_end().max(reliable_size),
-                maximum: written_end,
-            },
+            None => ResetCheck::FinalSizeOpen(FinalSizeBounds {
+                reliable_size,
+                exposure_end: self.exposure_end(),
+                written_end,
+            }),
         })
     }
 
@@ -577,23 +943,23 @@ where
     }
 }
 
-/// Checks the completion entry's `chosen` final size for `request` against
-/// the [policy contract](crate::send::termination#contract).
+/// Checks the completion entry's `chosen` final size for a reset with
+/// `error_code` and `bounds` against the
+/// [policy contract](crate::send::termination#contract).
 fn check_completed_final_size(
-    request: FinalSizeRequest,
+    error_code: ApplicationErrorCode,
+    bounds: FinalSizeBounds,
     chosen: VarInt,
 ) -> Result<ResetTarget, PolicyViolation> {
-    ensure!(
-        (request.minimum..=request.maximum).contains(&chosen),
-        policy_violation::FinalSizeOutOfRangeSnafu {
-            final_size: chosen,
-            minimum: request.minimum,
-            maximum: request.maximum,
-        }
-    );
+    ReliableSizeError::check(chosen, bounds.reliable_size)
+        .context(policy_violation::ChosenFinalSizeBelowReliableSizeSnafu)?;
+    FinalSizeBelowExposureError::check(chosen, bounds.exposure_end)
+        .context(policy_violation::ChosenFinalSizeBelowExposureSnafu)?;
+    FinalSizeBeyondWrittenEndError::check(chosen, bounds.written_end)
+        .context(policy_violation::ChosenFinalSizeBeyondWrittenEndSnafu)?;
     Ok(ResetTarget {
-        error_code: request.error_code,
-        reliable_size: request.reliable_size,
+        error_code,
+        reliable_size: bounds.reliable_size,
         final_size: chosen,
     })
 }
@@ -606,20 +972,4 @@ fn enforce_policy<T>(checked: Result<T, PolicyViolation>) -> T {
         Ok(plan) => plan,
         Err(violation) => panic!("{}", Report::from_error(violation)),
     }
-}
-
-fn check_final_size_range(
-    final_size: VarInt,
-    minimum: VarInt,
-    maximum: VarInt,
-) -> Result<(), ResetError> {
-    ensure!(
-        minimum <= final_size && final_size <= maximum,
-        reset_error::InvalidFinalSizeSnafu {
-            final_size,
-            minimum,
-            maximum,
-        }
-    );
-    Ok(())
 }

@@ -1,5 +1,9 @@
 use super::composition::{DefaultSendComposition, SendComposition};
-use super::finish::{CloseError, ResetConflictKind, ResetError};
+use super::finish::{
+    CloseError, ProtocolTerminalError, ReliablePrefixNotPreparedError, ReliableSizeIncreaseError,
+    ResetAtError, ResetAtWithFinalSizeError, ResetError, ResetStreamAtNotNegotiatedError,
+    ResetWithFinalSizeError,
+};
 use super::flow_control::{
     AdmissionGrantError, AdmissionGuard, DefaultSendFlowControlPolicy, SendFlowContext,
     SendFlowControlPolicy, StreamCreditEvent, WriteAttempt,
@@ -12,11 +16,14 @@ use super::write::{FlushError, WriteError, WriteOutcome, WriteReport, WriteWait}
 use super::*;
 use crate::send_buffer::covered_bytes::CoveredBytes;
 use crate::send_buffer::offset_map::OffsetMapSendBuffer;
+use crate::send_buffer::visibility::FinalSizeBelowExposureError;
 use crate::send_buffer::{
-    AppendError, ApplyResetError, ExposedEnd, ResetRetention, Selection, SelectionConstraints,
-    TransmissionReceipt,
+    AppendError, ApplyResetError, ExposedEnd, FinalSizeBeyondWrittenEndError, ResetRetention,
+    Selection, SelectionConstraints, TransmissionReceipt,
 };
+use crate::stream_end::{FinalSizeChangeError, ResetCodeChangeError};
 use bytes::{Buf, Bytes};
+use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
 
 fn v(value: u32) -> VarInt {
     VarInt::from_u32(value)
@@ -765,9 +772,7 @@ fn reset_errors_follow_the_check_order() {
         .unwrap();
     assert!(matches!(
         sender.reset(OTHER_CODE),
-        Err(ResetError::ResetConflict {
-            conflict: ResetConflictKind::ErrorCode { .. }
-        })
+        Err(ResetError::ErrorCodeConflict { .. })
     ));
     assert_eq!(
         sender.reset_at(CODE, VarInt::ZERO),
@@ -784,8 +789,8 @@ fn reset_errors_follow_the_check_order() {
         .unwrap();
     assert_eq!(
         sender.reset_at(CODE, v(50)),
-        Err(ResetError::ProtocolTerminal {
-            state: SendTerminalState::DataRecvd
+        Err(ResetAtError::ProtocolTerminal {
+            source: ProtocolTerminalError::check(Some(SendTerminalState::DataRecvd)).unwrap_err(),
         })
     );
 
@@ -794,8 +799,8 @@ fn reset_errors_follow_the_check_order() {
     write_all(&mut sender, &mut connection, 100);
     assert_eq!(
         sender.reset_at(CODE, v(500)),
-        Err(ResetError::UnsupportedExtension {
-            reliable_size: v(500)
+        Err(ResetAtError::UnsupportedExtension {
+            source: ResetStreamAtNotNegotiatedError::check(v(500), false).unwrap_err(),
         })
     );
 
@@ -804,17 +809,14 @@ fn reset_errors_follow_the_check_order() {
     write_all(&mut sender, &mut connection, 100);
     assert_eq!(
         sender.reset_at_with_final_size(CODE, v(500), v(2000)),
-        Err(ResetError::ReliablePrefixNotPrepared {
-            reliable_size: v(500),
-            written_end: v(100),
+        Err(ResetAtWithFinalSizeError::ReliablePrefixNotPrepared {
+            source: ReliablePrefixNotPreparedError::check(v(500), v(100)).unwrap_err(),
         })
     );
     assert_eq!(
         sender.reset_at_with_final_size(CODE, v(50), v(2000)),
-        Err(ResetError::InvalidFinalSize {
-            final_size: v(2000),
-            minimum: v(50),
-            maximum: v(100),
+        Err(ResetAtWithFinalSizeError::FinalSizeBeyondWrittenEnd {
+            source: FinalSizeBeyondWrittenEndError::check(v(2000), v(100)).unwrap_err(),
         })
     );
     // Failed requests change nothing and never reach the policy.
@@ -877,32 +879,30 @@ fn state_transition_table() {
     // A larger reliable size conflicts.
     assert_eq!(
         sender.reset_at(CODE, v(31)),
-        Err(ResetError::ResetConflict {
-            conflict: ResetConflictKind::ReliableSizeIncrease {
-                current: v(30),
-                requested: v(31),
-            }
+        Err(ResetAtError::ReliableSizeIncrease {
+            source: ReliableSizeIncreaseError::check(v(30), v(31)).unwrap_err(),
         })
     );
 
     // A different error code or final size conflicts.
     assert_eq!(
         sender.reset_at(OTHER_CODE, v(30)),
-        Err(ResetError::ResetConflict {
-            conflict: ResetConflictKind::ErrorCode {
-                current: CODE,
-                requested: OTHER_CODE,
-            }
+        Err(ResetAtError::ErrorCodeConflict {
+            source: ResetCodeChangeError::check(CODE, OTHER_CODE).unwrap_err(),
         })
     );
     assert_eq!(
         sender.reset_at_with_final_size(CODE, v(30), v(90)),
-        Err(ResetError::ResetConflict {
-            conflict: ResetConflictKind::FinalSize {
-                current: v(80),
-                requested: v(90),
-            }
+        Err(ResetAtWithFinalSizeError::FinalSizeConflictsWithReset {
+            source: FinalSizeChangeError::check(v(80), v(90)).unwrap_err(),
         })
+    );
+    assert_eq!(
+        sender.reset_with_final_size(CODE, v(90)),
+        Err(ResetWithFinalSizeError::FinalSizeConflictsWithReset {
+            source: FinalSizeChangeError::check(v(80), v(90)).unwrap_err(),
+        }),
+        "a plain reset with a final size meets the effective reset's"
     );
 
     // Close, then reset: legal, keeping the fixed final size.
@@ -923,11 +923,8 @@ fn state_transition_table() {
     closed.close().unwrap();
     assert_eq!(
         closed.reset_with_final_size(CODE, v(90)),
-        Err(ResetError::ResetConflict {
-            conflict: ResetConflictKind::FinalSize {
-                current: v(100),
-                requested: v(90),
-            }
+        Err(ResetWithFinalSizeError::FinalSizeConflictsWithClose {
+            source: FinalSizeChangeError::check(v(100), v(90)).unwrap_err(),
         })
     );
 
@@ -941,7 +938,7 @@ fn state_transition_table() {
     assert_eq!(
         closed.reset(CODE),
         Err(ResetError::ProtocolTerminal {
-            state: SendTerminalState::DataRecvd
+            source: ProtocolTerminalError::check(Some(SendTerminalState::DataRecvd)).unwrap_err(),
         })
     );
     assert_eq!(closed.close(), Ok(()));
@@ -951,7 +948,7 @@ fn state_transition_table() {
     sender.on_connection_closed();
     assert_eq!(
         sender.reset_at(CODE, v(40)),
-        Err(ResetError::ConnectionClosed)
+        Err(ResetAtError::ConnectionClosed)
     );
     assert_eq!(sender.close(), Err(CloseError::ConnectionClosed));
     assert!(matches!(
@@ -974,9 +971,7 @@ fn conflicts_follow_the_effective_target() {
     sender.reset_at(CODE, v(400)).unwrap();
     assert!(matches!(
         sender.reset_at(CODE, v(800)),
-        Err(ResetError::ResetConflict {
-            conflict: ResetConflictKind::ReliableSizeIncrease { .. }
-        })
+        Err(ResetAtError::ReliableSizeIncrease { .. })
     ));
 }
 
@@ -1008,7 +1003,7 @@ fn active_requests_meet_the_automatic_target_in_effect() {
     );
     assert!(matches!(
         sender.reset_at(CODE, v(600)),
-        Err(ResetError::ResetConflict { .. })
+        Err(ResetAtError::ReliableSizeIncrease { .. })
     ));
     sender.reset_at(CODE, v(400)).unwrap();
     assert_eq!(
@@ -1032,9 +1027,8 @@ fn reset_at_needs_the_prefix_written() {
     write_all(&mut sender, &mut connection, 600);
     assert_eq!(
         sender.reset_at(CODE, v(800)),
-        Err(ResetError::ReliablePrefixNotPrepared {
-            reliable_size: v(800),
-            written_end: v(600),
+        Err(ResetAtError::ReliablePrefixNotPrepared {
+            source: ReliablePrefixNotPreparedError::check(v(800), v(600)).unwrap_err(),
         })
     );
     assert_eq!(sender.end_state(), SendEndState::Open);
@@ -1058,7 +1052,7 @@ fn reset_at_beyond_the_write_limit_cannot_be_prepared() {
     );
     assert!(matches!(
         sender.reset_at(CODE, v(800)),
-        Err(ResetError::ReliablePrefixNotPrepared { .. })
+        Err(ResetAtError::ReliablePrefixNotPrepared { .. })
     ));
 }
 
@@ -1102,33 +1096,71 @@ fn reset_final_size_range() {
         }]
     );
 
-    for (final_size, legal) in [(599, false), (600, true), (1000, true), (1001, false)] {
+    for (final_size, expected) in [
+        (
+            399,
+            Err(ResetAtWithFinalSizeError::FinalSizeBelowReliableSize {
+                source: ReliableSizeError::check(v(399), v(600)).unwrap_err(),
+            }),
+        ),
+        (
+            599,
+            Err(ResetAtWithFinalSizeError::FinalSizeBelowReliableSize {
+                source: ReliableSizeError::check(v(599), v(600)).unwrap_err(),
+            }),
+        ),
+        (600, Ok(())),
+        (1000, Ok(())),
+        (
+            1001,
+            Err(ResetAtWithFinalSizeError::FinalSizeBeyondWrittenEnd {
+                source: FinalSizeBeyondWrittenEndError::check(v(1001), v(1000)).unwrap_err(),
+            }),
+        ),
+    ] {
         let mut sender = prepare(&mut connection);
         let result = sender.reset_at_with_final_size(CODE, v(600), v(final_size));
-        if legal {
-            assert_eq!(result, Ok(()), "final size {final_size}");
+        assert_eq!(result, expected, "final size {final_size}");
+        if expected.is_ok() {
             assert_eq!(sender.end_state().final_size(), Some(v(final_size)));
-        } else {
-            assert_eq!(
-                result,
-                Err(ResetError::InvalidFinalSize {
-                    final_size: v(final_size),
-                    minimum: v(600),
-                    maximum: v(1000),
-                }),
-                "final size {final_size}"
-            );
         }
         // An explicit final size never asks the policy.
         assert!(sender.composition.termination.completions.is_empty());
     }
 
-    // Plain reset: the minimum is the exposure end.
+    // Below both the reliable size and the exposure end: the reliable size
+    // is reported first.
     let mut sender = prepare(&mut connection);
     assert!(matches!(
-        sender.reset_with_final_size(CODE, v(399)),
-        Err(ResetError::InvalidFinalSize { minimum, .. }) if minimum == v(400)
+        sender.reset_at_with_final_size(CODE, v(300), v(200)),
+        Err(ResetAtWithFinalSizeError::FinalSizeBelowReliableSize { .. })
     ));
+
+    // A reliable size below the exposure end: the exposure end bounds the
+    // final size.
+    let mut sender = prepare(&mut connection);
+    assert_eq!(
+        sender.reset_at_with_final_size(CODE, v(300), v(399)),
+        Err(ResetAtWithFinalSizeError::FinalSizeBelowExposure {
+            source: FinalSizeBelowExposureError::check(v(399), v(400)).unwrap_err(),
+        })
+    );
+
+    // Plain reset: the minimum is the exposure end.
+    let mut sender = prepare(&mut connection);
+    assert_eq!(
+        sender.reset_with_final_size(CODE, v(399)),
+        Err(ResetWithFinalSizeError::FinalSizeBelowExposure {
+            source: FinalSizeBelowExposureError::check(v(399), v(400)).unwrap_err(),
+        })
+    );
+    let mut sender = prepare(&mut connection);
+    assert_eq!(
+        sender.reset_with_final_size(CODE, v(1001)),
+        Err(ResetWithFinalSizeError::FinalSizeBeyondWrittenEnd {
+            source: FinalSizeBeyondWrittenEndError::check(v(1001), v(1000)).unwrap_err(),
+        })
+    );
 }
 
 /// Final size 800 and reliable size 600 keep the coverage up to 800 and
@@ -1369,14 +1401,36 @@ fn narrowing_without_stop_sending_is_a_policy_violation() {
 // Policy violations
 
 #[test]
-#[should_panic(expected = "outside 600..=1000")]
-fn final_size_outside_the_range_is_a_policy_violation() {
+#[should_panic(expected = "chose a final size beyond the written end")]
+fn final_size_beyond_the_written_end_is_a_policy_violation() {
     let mut connection = ConnectionSendFlowController::new(v(10_000));
     let mut sender = test_sender(1000, true);
     sender.composition.termination.final_size = Some(v(1200));
     write_all(&mut sender, &mut connection, 1000);
     expose(&mut sender, &mut connection, 400);
     let _ = sender.reset_at(CODE, v(600));
+}
+
+#[test]
+#[should_panic(expected = "chose a final size below the reliable size")]
+fn final_size_below_the_reliable_size_is_a_policy_violation() {
+    let mut connection = ConnectionSendFlowController::new(v(10_000));
+    let mut sender = test_sender(1000, true);
+    sender.composition.termination.final_size = Some(v(500));
+    write_all(&mut sender, &mut connection, 1000);
+    expose(&mut sender, &mut connection, 400);
+    let _ = sender.reset_at(CODE, v(600));
+}
+
+#[test]
+#[should_panic(expected = "chose a final size below the exposure end")]
+fn final_size_below_the_exposure_end_is_a_policy_violation() {
+    let mut connection = ConnectionSendFlowController::new(v(10_000));
+    let mut sender = test_sender(1000, true);
+    sender.composition.termination.final_size = Some(v(300));
+    write_all(&mut sender, &mut connection, 1000);
+    expose(&mut sender, &mut connection, 400);
+    let _ = sender.reset(CODE);
 }
 
 #[test]
