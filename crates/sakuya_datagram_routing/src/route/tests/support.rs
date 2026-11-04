@@ -15,10 +15,10 @@ use sakuya_wire::var_int::{VarInt, codec::WriteVarIntHostExt as _};
 use sakuya_wire::version::Version;
 
 use crate::claim::candidate::DatagramClaimAttempt;
-use crate::claim::deliverer::{
-    DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, ExclusiveDatagram,
-};
+use crate::claim::candidate::{DatagramClaimAccess, DatagramClaimOutcome};
+use crate::claim::deliverer::DatagramDeliverer;
 use crate::claim::delivery::DatagramDelivery;
+use crate::claim::delivery::ExclusiveDatagram;
 use crate::claim::erased::SendDatagramDeliverer;
 use crate::claim::queue::{DatagramDeliveryPoster, DatagramDeliveryQueue};
 use crate::claim::route_match::DatagramRouteMatchInfo;

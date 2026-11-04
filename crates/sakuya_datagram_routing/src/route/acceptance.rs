@@ -37,7 +37,7 @@ use std::sync::Arc;
 use super::datagram::ReceivedDatagram;
 use super::index::{OfferedRouteHistory, RouteEntryRegistration};
 use super::interpretation::RecognizedInitial;
-use crate::claim::deliverer::ExclusiveDatagram;
+use crate::claim::delivery::ExclusiveDatagram;
 use crate::claim::finish::UnclaimedHandoff;
 use crate::claim::queue::DatagramDeliveryPoster;
 

@@ -28,8 +28,8 @@
 //! use std::num::NonZeroUsize;
 //! use std::sync::Arc;
 //!
-//! use sakuya_datagram_routing::claim::candidate::DatagramClaimAttempt;
-//! use sakuya_datagram_routing::claim::deliverer::{DatagramClaimOutcome, DatagramDeliverer};
+//! use sakuya_datagram_routing::claim::candidate::{DatagramClaimAttempt, DatagramClaimOutcome};
+//! use sakuya_datagram_routing::claim::deliverer::DatagramDeliverer;
 //! use sakuya_datagram_routing::claim::delivery::DatagramDelivery;
 //! use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
 //! use sakuya_datagram_routing::claim::queue::{DatagramDeliveryPoster, DatagramDeliveryQueue};

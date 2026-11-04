@@ -24,8 +24,7 @@ use std::sync::Arc;
 use smallvec::SmallVec;
 
 use super::candidate::DatagramClaimCandidate;
-use super::deliverer::ExclusiveDatagram;
-use super::delivery::{DatagramDelivery, ExclusiveDatagramDelivery};
+use super::delivery::{DatagramDelivery, ExclusiveDatagram, ExclusiveDatagramDelivery};
 use super::erased::ErasedDatagramDeliverer;
 use super::finish::UnclaimedHandoff;
 use super::route_match::DatagramRouteMatchInfo;

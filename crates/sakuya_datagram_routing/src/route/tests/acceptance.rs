@@ -12,8 +12,10 @@ use super::support::{
     Datagram, Domain, Handoff, Index, Judging, Recorder, Target, binding, cid, datagram, initial,
     lengths, link, long, nonempty, register,
 };
-use crate::claim::deliverer::{DatagramClaimOutcome, DatagramDeliverer, ExclusiveDatagram};
+use crate::claim::candidate::DatagramClaimOutcome;
+use crate::claim::deliverer::DatagramDeliverer;
 use crate::claim::delivery::DatagramDelivery;
+use crate::claim::delivery::ExclusiveDatagram;
 use crate::claim::queue::DatagramDeliveryQueue;
 use crate::route::acceptance::{
     InitialAcceptance, InitialDatagramReceiver, InitialReceiverFactory, PreparedReceiver,

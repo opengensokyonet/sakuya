@@ -26,7 +26,7 @@ use super::index::{FrozenEntries, Lookup, OfferedRouteHistory, Recheck, RouteInd
 use super::interpretation::{FirstPacketInterpretation, RecognizedInitial};
 use super::recognizer::ConnectionIdRecognizer;
 use super::reset::{StatelessResetDetector, StatelessResetTarget};
-use crate::claim::deliverer::ExclusiveDatagram;
+use crate::claim::delivery::ExclusiveDatagram;
 use crate::claim::erased::ErasedDatagramDeliverer;
 use crate::claim::finish::{ReleaseUnclaimed, UnclaimedHandoff};
 use crate::claim::group::prepare_claim;

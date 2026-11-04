@@ -16,8 +16,10 @@ use super::support::{
     nonempty, short,
 };
 use crate::claim::candidate::DatagramClaimAttempt;
-use crate::claim::deliverer::{DatagramClaimOutcome, DatagramDeliverer, ExclusiveDatagram};
+use crate::claim::candidate::DatagramClaimOutcome;
+use crate::claim::deliverer::DatagramDeliverer;
 use crate::claim::delivery::DatagramDelivery;
+use crate::claim::delivery::ExclusiveDatagram;
 use crate::claim::queue::{DatagramDeliveryPoster, DatagramDeliveryQueue};
 use crate::route::acceptance::{
     InitialAcceptance, InitialDatagramReceiver, InitialReceiverFactory, PreparedReceiver,

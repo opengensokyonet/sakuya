@@ -19,7 +19,7 @@ use super::support::{
     Judging, Probe, TestDatagram, UnclaimedSink, WakeCount, poll_with, ready, route,
 };
 use crate::claim::candidate::DatagramClaimAttempt;
-use crate::claim::deliverer::{DatagramClaimAccess, DatagramClaimOutcome};
+use crate::claim::candidate::{DatagramClaimAccess, DatagramClaimOutcome};
 use crate::claim::delivery::ExclusiveDatagramDelivery;
 use crate::claim::route_match::DatagramRouteMatchInfo;
 use crate::claim::shared::DatagramFinishPolicy;

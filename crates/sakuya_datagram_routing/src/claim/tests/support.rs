@@ -10,7 +10,8 @@ use std::task::{Context, Poll, Wake, Waker};
 use sakuya_wire::connection_id::ConnectionIdLength;
 
 use crate::claim::candidate::DatagramClaimCandidate;
-use crate::claim::deliverer::{DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer};
+use crate::claim::candidate::{DatagramClaimAccess, DatagramClaimOutcome};
+use crate::claim::deliverer::DatagramDeliverer;
 use crate::claim::delivery::{DatagramDelivery, ExclusiveDatagramDelivery};
 use crate::claim::erased::SendDatagramDeliverer;
 use crate::claim::finish::UnclaimedHandoff;

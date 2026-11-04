@@ -7,8 +7,7 @@ use super::support::{
     Delivery, Judging, Probe, TestDatagram, UnclaimedSink, WakeCount, drops, poll_with, ready,
     route, route_info,
 };
-use crate::claim::candidate::{DatagramClaimAttempt, DatagramClaimPrecheck};
-use crate::claim::deliverer::DatagramClaimOutcome;
+use crate::claim::candidate::{DatagramClaimAttempt, DatagramClaimOutcome, DatagramClaimPrecheck};
 use crate::claim::delivery::DatagramDelivery;
 use crate::claim::erased::ErasedDatagramDeliverer;
 use crate::claim::group::prepare_claim;

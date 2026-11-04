@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use super::support::{TestDatagram, drops, ready};
 use crate::claim::candidate::DatagramClaimAttempt;
-use crate::claim::deliverer::{DatagramClaimOutcome, DatagramDeliverer};
+use crate::claim::candidate::DatagramClaimOutcome;
+use crate::claim::deliverer::DatagramDeliverer;
 use crate::claim::delivery::DatagramDelivery;
 use crate::claim::erased::SendDatagramDeliverer;
 use crate::claim::finish::ReleaseUnclaimed;

@@ -1,9 +1,8 @@
-//! What a deliverer receives, and how the receiver consumes it
+//! What a deliverer receives, how the receiver consumes it, and the datagram it owns
 
 use std::fmt;
 
 use super::candidate::DatagramClaimCandidate;
-use super::deliverer::ExclusiveDatagram;
 use super::finish::UnclaimedHandoff;
 use super::route_match::DatagramRouteMatchInfo;
 
@@ -55,6 +54,46 @@ impl<Inner> ExclusiveDatagramDelivery<Inner> {
     /// authenticated or accepted.
     pub fn consume(self) -> (ExclusiveDatagram<Inner>, DatagramRouteMatchInfo) {
         (self.datagram, self.route)
+    }
+}
+
+/// Sole ownership of one datagram.
+///
+/// It is obtained only by taking the datagram, either through
+/// [`DatagramClaimAccess::into_exclusive`](super::candidate::DatagramClaimAccess::into_exclusive)
+/// or when the mechanism takes it for a last-takes candidate. Dropping it
+/// releases the datagram; it is never put back for other candidates. It says
+/// nothing about authentication.
+#[derive(Debug)]
+pub struct ExclusiveDatagram<Inner> {
+    datagram: Inner,
+}
+
+impl<Inner> ExclusiveDatagram<Inner> {
+    pub(crate) fn new(datagram: Inner) -> Self {
+        Self { datagram }
+    }
+
+    /// Returns the datagram.
+    pub fn get(&self) -> &Inner {
+        &self.datagram
+    }
+
+    /// Returns the datagram for modification by its sole owner.
+    pub fn get_mut(&mut self) -> &mut Inner {
+        &mut self.datagram
+    }
+
+    /// Returns the owned datagram.
+    pub fn into_inner(self) -> Inner {
+        self.datagram
+    }
+}
+
+impl<Inner: AsRef<[u8]>> ExclusiveDatagram<Inner> {
+    /// Returns the complete datagram bytes.
+    pub fn bytes(&self) -> &[u8] {
+        self.datagram.as_ref()
     }
 }
 

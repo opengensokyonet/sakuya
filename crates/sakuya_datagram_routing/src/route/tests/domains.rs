@@ -11,11 +11,11 @@ use super::support::{
     Datagram, Handoff, Index, Router, Target, Work, binding, cid, initial, lengths, link, nonempty,
     ready,
 };
+use crate::claim::candidate::{DatagramClaimAccess, DatagramClaimOutcome};
 use crate::claim::candidate::{DatagramClaimAttempt, DatagramClaimCandidate, DatagramClaimFuture};
-use crate::claim::deliverer::{
-    DatagramClaimAccess, DatagramClaimOutcome, DatagramDeliverer, ExclusiveDatagram,
-};
+use crate::claim::deliverer::DatagramDeliverer;
 use crate::claim::delivery::DatagramDelivery;
+use crate::claim::delivery::ExclusiveDatagram;
 use crate::claim::erased::ErasedDatagramDeliverer;
 use crate::claim::route_match::DatagramRouteMatchInfo;
 use crate::route::acceptance::{

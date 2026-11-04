@@ -41,7 +41,7 @@
 //!
 //! | Outcome | Attempt |
 //! | --- | --- |
-//! | `Claimed`, with the datagram taken through [`into_exclusive`](deliverer::DatagramClaimAccess::into_exclusive) and a value | [`Claimed`](candidate::DatagramClaimAttempt::Claimed): an exclusive delivery and the value |
+//! | `Claimed`, with the datagram taken through [`into_exclusive`](candidate::DatagramClaimAccess::into_exclusive) and a value | [`Claimed`](candidate::DatagramClaimAttempt::Claimed): an exclusive delivery and the value |
 //! | `Unclaimed`, with the unchanged access | [`Unclaimed`](candidate::DatagramClaimAttempt::Unclaimed): the access is released and the same candidate comes back |
 //! | `Abandoned`, with a value | [`Abandoned`](candidate::DatagramClaimAttempt::Abandoned): the candidate exits and the value comes back |
 //!
@@ -128,9 +128,9 @@
 //! [`DatagramClaimAttempt::Exclusive`]: candidate::DatagramClaimAttempt::Exclusive
 //! [`DatagramClaimAttempt::ClaimedElsewhere`]: candidate::DatagramClaimAttempt::ClaimedElsewhere
 //! [`DatagramClaimAttempt`]: candidate::DatagramClaimAttempt
-//! [`ClaimedDatagram`]: deliverer::ClaimedDatagram
-//! [`DatagramClaimAccess`]: deliverer::DatagramClaimAccess
-//! [`DatagramClaimOutcome`]: deliverer::DatagramClaimOutcome
+//! [`ClaimedDatagram`]: candidate::ClaimedDatagram
+//! [`DatagramClaimAccess`]: candidate::DatagramClaimAccess
+//! [`DatagramClaimOutcome`]: candidate::DatagramClaimOutcome
 //! [`DatagramDeliverer`]: deliverer::DatagramDeliverer
 //! [`DatagramDeliverer::deliver`]: deliverer::DatagramDeliverer::deliver
 //! [`DatagramDelivery::Exclusive`]: delivery::DatagramDelivery::Exclusive
