@@ -120,10 +120,10 @@ mod width;
 /// ```
 ///
 /// ```compile_fail,E0599
-/// use sakuya_tls::{crypto::TlsCrypto, message::HandshakeMessage, schedule::CertificateAuth};
+/// use sakuya_tls::{crypto::TlsCrypto, message::HandshakeMessage, schedule::AwaitingCertificateAuthentication};
 ///
 /// fn skip_certificate_verify<C: TlsCrypto + Clone>(
-///     certificate: CertificateAuth<C>,
+///     certificate: AwaitingCertificateAuthentication<C>,
 ///     finished: &HandshakeMessage,
 /// ) {
 ///     let _ = certificate.server_finished(finished);

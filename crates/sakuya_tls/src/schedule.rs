@@ -13,8 +13,9 @@
 //!
 //! server: HandshakeSecret<Server> ── server_finished ─▶ MainSecret<Server>
 //!             ── client_finished(received)? ─▶ ResumptionSecret<Server> + Completed
-//! client: HandshakeSecret<Client> ── authentication ─▶ CertificateAuth ── verify_certificate_verify? ─┐
-//!                                                  └─▶ Authenticated ◀─────────────────────────────────┘
+//! client: HandshakeSecret<Client> ── authentication ─┬▶ AwaitingCertificateAuthentication ─┐
+//!                                                    │      verify_certificate_verify?     │
+//!                                                    └▶ Authenticated ◀────────────────────┘
 //!             Authenticated ── server_finished(received)? ─▶ MainSecret<Client>
 //!             ── client_finished ─▶ ResumptionSecret<Client>
 //! ```
@@ -62,7 +63,9 @@ use snafu::{ResultExt, Snafu};
 
 mod client;
 
-pub use client::{Authenticated, Authentication, CertificateAuth, CertificateVerifyError};
+pub use client::{
+    Authenticated, Authentication, AwaitingCertificateAuthentication, CertificateVerifyError,
+};
 
 /// The longest label an HkdfLabel holds after its "tls13 " prefix.
 const LABEL_MAX: usize = Width::U8.max() - 6;

@@ -25,7 +25,7 @@ use snafu::Snafu;
 /// The branch of a client's handshake after EncryptedExtensions.
 pub enum Authentication<C: TlsCrypto> {
     /// The server authenticates with a certificate.
-    Certificate(CertificateAuth<C>),
+    Certificate(AwaitingCertificateAuthentication<C>),
     /// The server accepted the PSK; it sends no Certificate or
     /// CertificateVerify (RFC 8446 §4.4.2), and the identity is the one the
     /// ticket recorded.
@@ -33,7 +33,7 @@ pub enum Authentication<C: TlsCrypto> {
 }
 
 /// A client waiting for the server's certificate and its CertificateVerify.
-pub struct CertificateAuth<C: TlsCrypto> {
+pub struct AwaitingCertificateAuthentication<C: TlsCrypto> {
     handshake: HandshakeSecret<Client, C>,
 }
 
@@ -47,13 +47,15 @@ impl<C: TlsCrypto + Clone> HandshakeSecret<Client, C> {
     /// in the transcript.
     pub fn authentication(self) -> Authentication<C> {
         match self.mode {
-            Mode::Certificate => Authentication::Certificate(CertificateAuth { handshake: self }),
+            Mode::Certificate => {
+                Authentication::Certificate(AwaitingCertificateAuthentication { handshake: self })
+            }
             Mode::Psk => Authentication::Resumed(Authenticated { handshake: self }),
         }
     }
 }
 
-impl<C: TlsCrypto + Clone> CertificateAuth<C> {
+impl<C: TlsCrypto + Clone> AwaitingCertificateAuthentication<C> {
     /// Adds the bytes of a message: CertificateRequest and Certificate, as
     /// they were received.
     pub fn add(mut self, message: &[u8]) -> Self {

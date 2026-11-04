@@ -267,7 +267,9 @@ fn s3_client() {
 }
 
 /// The client's certificate branch of §3, after EncryptedExtensions.
-fn s3_certificate_branch(content: Vec<u8>) -> sakuya_tls::schedule::CertificateAuth<TraceBackend> {
+fn s3_certificate_branch(
+    content: Vec<u8>,
+) -> sakuya_tls::schedule::AwaitingCertificateAuthentication<TraceBackend> {
     let backend = s3_client_backend(content);
     let (handshake, _) = Transcript::<Client, _>::new(&backend, backend.sha256())
         .add(&hex(s3::CLIENT_HELLO))
