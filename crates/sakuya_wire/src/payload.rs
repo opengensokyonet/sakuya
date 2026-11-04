@@ -258,8 +258,8 @@ mod tests {
     use crate::frame::{
         Extensions,
         codec::{ReadFrameError, ReadFrameHostExt as _},
-        crypto::codec::ReadCryptoError,
-        datagram::codec::ReadDatagramError,
+        crypto::codec::ReadCryptoFrameError,
+        datagram::codec::ReadDatagramFrameError,
     };
     use bytes::{Buf, BufMut};
     use core::{
@@ -423,11 +423,11 @@ mod tests {
     fn data_error<T: Debug, E: Debug>(result: Result<T, ReadFrameError<E>>) -> ReadPayloadError<E> {
         match result {
             Err(ReadFrameError::Crypto {
-                source: ReadCryptoError::Data { source },
+                source: ReadCryptoFrameError::Data { source },
                 ..
             })
             | Err(ReadFrameError::Datagram {
-                source: ReadDatagramError::Data { source },
+                source: ReadDatagramFrameError::Data { source },
                 ..
             }) => source,
             other => panic!("{other:?}"),

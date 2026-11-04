@@ -7,16 +7,16 @@ use crate::var_int::{VarInt, VarIntField};
 /// A DATA_BLOCKED frame ([RFC 9000 §19.12]).
 ///
 /// Each field keeps the width of its variable-length integer encoding.
-/// No limit ties the fields together, so [`DataBlocked::new`] accepts any
+/// No limit ties the fields together, so [`DataBlockedFrame::new`] accepts any
 /// values; the fields are read through methods of the same names.
 ///
 /// [RFC 9000 §19.12]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.12
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct DataBlocked {
+pub struct DataBlockedFrame {
     maximum_data: VarIntField<VarInt>,
 }
 
-impl DataBlocked {
+impl DataBlockedFrame {
     /// The DATA_BLOCKED frame with this field.
     pub const fn new(maximum_data: VarIntField<VarInt>) -> Self {
         Self { maximum_data }
@@ -32,7 +32,7 @@ impl DataBlocked {
         type_var_int(type_value::DATA_BLOCKED)
     }
 
-    /// The number of bytes [`codec::write_data_blocked`] writes.
+    /// The number of bytes [`codec::write_data_blocked_frame`] writes.
     pub fn encoded_len(&self) -> usize {
         self.head().len()
     }
@@ -47,23 +47,23 @@ pub mod codec {
     //! Writing DATA_BLOCKED as a `nitori_call` operation; reading is part of
     //! [`read_frame`](crate::frame::codec::read_frame).
     //!
-    //! [`write_data_blocked`] is also the operation struct [`WriteDataBlocked`], with
-    //! `WriteDataBlockedExt` on receiver accesses and `WriteDataBlockedHostExt` on call
+    //! [`write_data_blocked_frame`] is also the operation struct [`WriteDataBlockedFrame`], with
+    //! `WriteDataBlockedFrameExt` on receiver accesses and `WriteDataBlockedFrameHostExt` on call
     //! executors.
     // `#[call]` generates constructors, fields and extension traits without
     // documentation comments; the module documentation above describes them.
     #![allow(missing_docs)]
 
-    use super::DataBlocked;
+    use super::DataBlockedFrame;
     use crate::{frame::read_field, var_int::codec::ReadVarIntError};
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{calls::WriteAllError, prelude::*};
 
     /// Reads the fields that follow the Frame Type.
-    pub(crate) async fn read_data_blocked<F: Read, A: ReceiverAccess<Family = F>>(
+    pub(crate) async fn read_data_blocked_frame<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-    ) -> Result<DataBlocked, ReadVarIntError<F::Error>> {
-        Ok(DataBlocked::new(read_field(io).await?))
+    ) -> Result<DataBlockedFrame, ReadVarIntError<F::Error>> {
+        Ok(DataBlockedFrame::new(read_field(io).await?))
     }
 
     /// Writes the frame.
@@ -73,9 +73,9 @@ pub mod codec {
     /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
     /// bytes accepted before stay written.
     #[call(sync)]
-    pub async fn write_data_blocked<F: Write, A: ReceiverAccess<Family = F>>(
+    pub async fn write_data_blocked_frame<F: Write, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-        frame: DataBlocked,
+        frame: DataBlockedFrame,
     ) -> Result<(), WriteAllError<F::Error>> {
         io.write_all(frame.head().as_slice()).await
     }
@@ -83,7 +83,7 @@ pub mod codec {
 
 #[cfg(test)]
 mod tests {
-    use super::DataBlocked;
+    use super::DataBlockedFrame;
     use crate::{
         frame::{
             Frame,
@@ -95,7 +95,7 @@ mod tests {
     #[test]
     fn round_trips() {
         let maximum_data = VarIntField::shortest(VarInt::from(64u8));
-        let encoding = assert_round_trip(Frame::DataBlocked(DataBlocked::new(maximum_data)));
+        let encoding = assert_round_trip(Frame::DataBlocked(DataBlockedFrame::new(maximum_data)));
         assert_eq!(encoding, [0x14, 0x40, 0x40]);
         let Frame::DataBlocked(read) = assert_bytes_round_trip(&encoding) else {
             panic!("{encoding:02x?}")

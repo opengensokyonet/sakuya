@@ -15,21 +15,21 @@ use snafu::Snafu;
 ///
 /// It is a RESET_STREAM that also states how much of the stream must still
 /// be delivered reliably. `reliable_size` is at most `final_size`:
-/// [`ResetStreamAt::new`] checks it, so every value writes an encoding that
+/// [`ResetStreamAtFrame::new`] checks it, so every value writes an encoding that
 /// reads back to the same value; the fields are read through methods of the
 /// same names. Each field keeps the width of its variable-length integer
 /// encoding.
 ///
 /// [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html#section-4
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ResetStreamAt {
+pub struct ResetStreamAtFrame {
     stream_id: VarIntField<StreamId>,
     application_error_code: VarIntField<ApplicationErrorCode>,
     final_size: VarIntField<VarInt>,
     reliable_size: VarIntField<VarInt>,
 }
 
-impl ResetStreamAt {
+impl ResetStreamAtFrame {
     /// The RESET_STREAM_AT frame with these fields.
     ///
     /// # Errors
@@ -76,7 +76,7 @@ impl ResetStreamAt {
         type_var_int(type_value::RESET_STREAM_AT)
     }
 
-    /// The number of bytes [`codec::write_reset_stream_at`] writes.
+    /// The number of bytes [`codec::write_reset_stream_at_frame`] writes.
     pub fn encoded_len(&self) -> usize {
         self.head().len()
     }
@@ -117,7 +117,7 @@ impl ReliableSizeError {
     }
 
     /// Checks that `reliable_size` is at most `final_size`, the rule
-    /// [`ResetStreamAt::new`] applies.
+    /// [`ResetStreamAtFrame::new`] applies.
     ///
     /// # Errors
     ///
@@ -137,23 +137,23 @@ pub mod codec {
     //! Writing RESET_STREAM_AT frames as a `nitori_call` operation; reading
     //! is part of [`read_frame`](crate::frame::codec::read_frame).
     //!
-    //! [`write_reset_stream_at`] is also the operation struct
-    //! [`WriteResetStreamAt`], with `WriteResetStreamAtExt` on receiver
-    //! accesses and `WriteResetStreamAtHostExt` on call executors.
+    //! [`write_reset_stream_at_frame`] is also the operation struct
+    //! [`WriteResetStreamAtFrame`], with `WriteResetStreamAtFrameExt` on receiver
+    //! accesses and `WriteResetStreamAtFrameHostExt` on call executors.
     // `#[call]` generates constructors, fields and extension traits without
     // documentation comments; the module documentation above describes them.
     #![allow(missing_docs)]
 
-    use super::{ReliableSizeError, ResetStreamAt};
+    use super::{ReliableSizeError, ResetStreamAtFrame};
     use crate::{frame::read_field, var_int::codec::ReadVarIntError};
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{calls::WriteAllError, prelude::*};
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type.
-    pub(crate) async fn read_reset_stream_at<F: Read, A: ReceiverAccess<Family = F>>(
+    pub(crate) async fn read_reset_stream_at_frame<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-    ) -> Result<ResetStreamAt, ReadResetStreamAtError<F::Error>> {
+    ) -> Result<ResetStreamAtFrame, ReadResetStreamAtFrameError<F::Error>> {
         use read_reset_stream_at_error::*;
         let stream_id = read_field(io).await.context(StreamIdSnafu)?;
         let application_error_code = read_field(io)
@@ -162,14 +162,14 @@ pub mod codec {
         let final_size = read_field(io).await.context(FinalSizeSnafu)?;
         let reliable_size = read_field(io).await.context(ReliableSizeSnafu)?;
         let frame =
-            ResetStreamAt::new(stream_id, application_error_code, final_size, reliable_size)?;
+            ResetStreamAtFrame::new(stream_id, application_error_code, final_size, reliable_size)?;
         Ok(frame)
     }
 
     /// Failures of reading a RESET_STREAM_AT frame.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_reset_stream_at_error), visibility(pub(crate)))]
-    pub enum ReadResetStreamAtError<E> {
+    pub enum ReadResetStreamAtFrameError<E> {
         /// The Stream ID field could not be read.
         #[snafu(display("RESET_STREAM_AT Stream ID read failed"))]
         StreamId {
@@ -202,16 +202,16 @@ pub mod codec {
         },
     }
 
-    /// Writes `frame`; [`ResetStreamAt::new`] checked its rule.
+    /// Writes `frame`; [`ResetStreamAtFrame::new`] checked its rule.
     ///
     /// # Errors
     ///
     /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
     /// bytes accepted before stay written.
     #[call(sync)]
-    pub async fn write_reset_stream_at<F: Write, A: ReceiverAccess<Family = F>>(
+    pub async fn write_reset_stream_at_frame<F: Write, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-        frame: ResetStreamAt,
+        frame: ResetStreamAtFrame,
     ) -> Result<(), WriteAllError<F::Error>> {
         io.write_all(frame.head().as_slice()).await
     }
@@ -219,7 +219,7 @@ pub mod codec {
 
 #[cfg(test)]
 mod tests {
-    use super::{ReliableSizeError, ResetStreamAt, codec::ReadResetStreamAtError};
+    use super::{ReliableSizeError, ResetStreamAtFrame, codec::ReadResetStreamAtFrameError};
     use crate::{
         application_error::ApplicationErrorCode,
         frame::{
@@ -231,8 +231,8 @@ mod tests {
         var_int::{VarInt, VarIntField},
     };
 
-    fn frame(final_size: u16, reliable_size: u16) -> Result<ResetStreamAt, ReliableSizeError> {
-        ResetStreamAt::new(
+    fn frame(final_size: u16, reliable_size: u16) -> Result<ResetStreamAtFrame, ReliableSizeError> {
+        ResetStreamAtFrame::new(
             VarIntField::shortest(StreamId::from_var_int(VarInt::ZERO)),
             VarIntField::shortest(ApplicationErrorCode::new(VarInt::from(1u8))),
             VarIntField::shortest(VarInt::from(final_size)),
@@ -261,7 +261,7 @@ mod tests {
         assert!(matches!(
             input.sync_read_frame_unpin(Extensions::ALL),
             Err(ReadFrameError::ResetStreamAt {
-                source: ReadResetStreamAtError::ReliableSizeAboveFinalSize { source },
+                source: ReadResetStreamAtFrameError::ReliableSizeAboveFinalSize { source },
                 ..
             }) if source == expected
         ));
@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn each_field_has_its_own_failure() {
-        fn read(encoding: &[u8]) -> ReadResetStreamAtError<core::convert::Infallible> {
+        fn read(encoding: &[u8]) -> ReadResetStreamAtFrameError<core::convert::Infallible> {
             let mut input = encoding;
             match input.sync_read_frame_unpin(Extensions::ALL) {
                 Err(ReadFrameError::ResetStreamAt { source, .. }) => source,
@@ -280,19 +280,19 @@ mod tests {
         // A two-byte encoding cut short in each field.
         assert!(matches!(
             read(&[0x24, 0x40]),
-            ReadResetStreamAtError::StreamId { source } if source.is_incomplete()
+            ReadResetStreamAtFrameError::StreamId { source } if source.is_incomplete()
         ));
         assert!(matches!(
             read(&[0x24, 0x00, 0x40]),
-            ReadResetStreamAtError::ApplicationProtocolErrorCode { source } if source.is_incomplete()
+            ReadResetStreamAtFrameError::ApplicationProtocolErrorCode { source } if source.is_incomplete()
         ));
         assert!(matches!(
             read(&[0x24, 0x00, 0x00, 0x40]),
-            ReadResetStreamAtError::FinalSize { source } if source.is_incomplete()
+            ReadResetStreamAtFrameError::FinalSize { source } if source.is_incomplete()
         ));
         assert!(matches!(
             read(&[0x24, 0x00, 0x00, 0x05, 0x40]),
-            ReadResetStreamAtError::ReliableSize { source } if source.is_incomplete()
+            ReadResetStreamAtFrameError::ReliableSize { source } if source.is_incomplete()
         ));
     }
 }

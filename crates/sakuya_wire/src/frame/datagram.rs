@@ -15,14 +15,14 @@ use either::Either;
 /// without, whose data extends to the end of the packet, and
 /// [`Either<NoLength, VarIntWidth>`](Either) or
 /// [`Either<VarIntWidth, NoLength>`](Either) for either of the two. Reading
-/// gives `Datagram<D>`, the default, `Either<NoLength, VarIntWidth>`. `From`
+/// gives `DatagramFrame<D>`, the default, `Either<NoLength, VarIntWidth>`. `From`
 /// converts the two single kinds into either `Either` kind, a frame of an
 /// `Either` kind into an `Either` of frames of its two kinds in the same
 /// order and back, and one `Either` kind into the other.
 ///
-/// [`with_length`](Datagram::with_length) checks that the Length field can
-/// state the length of the data, and [`new`](Datagram::new) does so when
-/// there is one; [`without_length`](Datagram::without_length) accepts any
+/// [`with_length`](DatagramFrame::with_length) checks that the Length field can
+/// state the length of the data, and [`new`](DatagramFrame::new) does so when
+/// there is one; [`without_length`](DatagramFrame::without_length) accepts any
 /// data. So every value writes an encoding that reads back to the same
 /// value; the fields are read through methods of the same names.
 /// `D` holds the data: the source's chunk type for a frame that was read,
@@ -30,12 +30,12 @@ use either::Either;
 ///
 /// [RFC 9221 §4]: https://www.rfc-editor.org/rfc/rfc9221.html#section-4
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Datagram<D, L = Either<NoLength, VarIntWidth>> {
+pub struct DatagramFrame<D, L = Either<NoLength, VarIntWidth>> {
     length: L,
     data: D,
 }
 
-impl<D, L: LengthKind> Datagram<D, L> {
+impl<D, L: LengthKind> DatagramFrame<D, L> {
     /// The Length field, present in type `0x31`: its width, since the field
     /// holds the length of the data, or [`NoLength`] without it, in type
     /// `0x30`, when the data extends to the end of the packet.
@@ -63,18 +63,18 @@ impl<D, L: LengthKind> Datagram<D, L> {
     }
 }
 
-impl<D, L> Datagram<D, L> {
+impl<D, L> DatagramFrame<D, L> {
     /// The same frame with the Length field stated as `length`, which states
     /// the same field.
-    fn restate_length<M>(self, length: M) -> Datagram<D, M> {
-        Datagram {
+    fn restate_length<M>(self, length: M) -> DatagramFrame<D, M> {
+        DatagramFrame {
             length,
             data: self.data,
         }
     }
 }
 
-impl<D: Buf, L: LengthKind> Datagram<D, L> {
+impl<D: Buf, L: LengthKind> DatagramFrame<D, L> {
     /// The number of bytes the write operations of [`codec`] write.
     pub fn encoded_len(&self) -> usize {
         1 + length_width(self.length).map_or(0, VarIntWidth::encoded_len) + self.data.remaining()
@@ -94,7 +94,7 @@ impl<D: Buf, L: LengthKind> Datagram<D, L> {
     }
 }
 
-impl<D: Buf> Datagram<D, VarIntWidth> {
+impl<D: Buf> DatagramFrame<D, VarIntWidth> {
     /// The DATAGRAM frame with a Length field of width `width` and `data`.
     ///
     /// # Errors
@@ -110,7 +110,7 @@ impl<D: Buf> Datagram<D, VarIntWidth> {
     }
 }
 
-impl<D: Buf> Datagram<D, NoLength> {
+impl<D: Buf> DatagramFrame<D, NoLength> {
     /// The DATAGRAM frame without a Length field and with `data`; any data
     /// is accepted.
     pub fn without_length(data: D) -> Self {
@@ -121,10 +121,10 @@ impl<D: Buf> Datagram<D, NoLength> {
     }
 }
 
-impl<D: Buf> Datagram<D> {
+impl<D: Buf> DatagramFrame<D> {
     /// The DATAGRAM frame with `data`, with or without a Length field as
-    /// `length` states: [`with_length`](Datagram::with_length) or
-    /// [`without_length`](Datagram::without_length), as a frame that was
+    /// `length` states: [`with_length`](DatagramFrame::with_length) or
+    /// [`without_length`](DatagramFrame::without_length), as a frame that was
     /// read.
     ///
     /// # Errors
@@ -133,54 +133,55 @@ impl<D: Buf> Datagram<D> {
     /// the length of the data. Without a Length field, any data is accepted.
     pub fn new(length: Either<NoLength, VarIntWidth>, data: D) -> Result<Self, LengthError> {
         Ok(match length {
-            Either::Left(NoLength) => Datagram::without_length(data).into(),
-            Either::Right(width) => Datagram::with_length(width, data)?.into(),
+            Either::Left(NoLength) => DatagramFrame::without_length(data).into(),
+            Either::Right(width) => DatagramFrame::with_length(width, data)?.into(),
         })
     }
 }
 
-impl<D> From<Datagram<D, VarIntWidth>> for Datagram<D, Either<NoLength, VarIntWidth>> {
+impl<D> From<DatagramFrame<D, VarIntWidth>> for DatagramFrame<D, Either<NoLength, VarIntWidth>> {
     /// The same frame, which has a Length field.
-    fn from(frame: Datagram<D, VarIntWidth>) -> Self {
+    fn from(frame: DatagramFrame<D, VarIntWidth>) -> Self {
         let length = Either::Right(frame.length);
         frame.restate_length(length)
     }
 }
 
-impl<D> From<Datagram<D, NoLength>> for Datagram<D, Either<NoLength, VarIntWidth>> {
+impl<D> From<DatagramFrame<D, NoLength>> for DatagramFrame<D, Either<NoLength, VarIntWidth>> {
     /// The same frame, which has no Length field.
-    fn from(frame: Datagram<D, NoLength>) -> Self {
+    fn from(frame: DatagramFrame<D, NoLength>) -> Self {
         let length = Either::Left(frame.length);
         frame.restate_length(length)
     }
 }
 
-impl<D> From<Datagram<D, VarIntWidth>> for Datagram<D, Either<VarIntWidth, NoLength>> {
+impl<D> From<DatagramFrame<D, VarIntWidth>> for DatagramFrame<D, Either<VarIntWidth, NoLength>> {
     /// The same frame, which has a Length field.
-    fn from(frame: Datagram<D, VarIntWidth>) -> Self {
+    fn from(frame: DatagramFrame<D, VarIntWidth>) -> Self {
         let length = Either::Left(frame.length);
         frame.restate_length(length)
     }
 }
 
-impl<D> From<Datagram<D, NoLength>> for Datagram<D, Either<VarIntWidth, NoLength>> {
+impl<D> From<DatagramFrame<D, NoLength>> for DatagramFrame<D, Either<VarIntWidth, NoLength>> {
     /// The same frame, which has no Length field.
-    fn from(frame: Datagram<D, NoLength>) -> Self {
+    fn from(frame: DatagramFrame<D, NoLength>) -> Self {
         let length = Either::Right(frame.length);
         frame.restate_length(length)
     }
 }
 
-impl<D, A, B> From<Datagram<D, Either<A, B>>> for Either<Datagram<D, A>, Datagram<D, B>>
+impl<D, A, B> From<DatagramFrame<D, Either<A, B>>>
+    for Either<DatagramFrame<D, A>, DatagramFrame<D, B>>
 where
     A: LengthKind,
     B: LengthKind,
     Either<A, B>: LengthKind,
 {
     /// The same frame as the side of `Either` that its Length field is on:
-    /// `Datagram<D, Either<A, B>>` becomes
-    /// `Either<Datagram<D, A>, Datagram<D, B>>`, in the same order.
-    fn from(frame: Datagram<D, Either<A, B>>) -> Self {
+    /// `DatagramFrame<D, Either<A, B>>` becomes
+    /// `Either<DatagramFrame<D, A>, DatagramFrame<D, B>>`, in the same order.
+    fn from(frame: DatagramFrame<D, Either<A, B>>) -> Self {
         match frame.length {
             Either::Left(length) => Either::Left(frame.restate_length(length)),
             Either::Right(length) => Either::Right(frame.restate_length(length)),
@@ -188,16 +189,17 @@ where
     }
 }
 
-impl<D, A, B> From<Either<Datagram<D, A>, Datagram<D, B>>> for Datagram<D, Either<A, B>>
+impl<D, A, B> From<Either<DatagramFrame<D, A>, DatagramFrame<D, B>>>
+    for DatagramFrame<D, Either<A, B>>
 where
     A: LengthKind,
     B: LengthKind,
     Either<A, B>: LengthKind,
 {
     /// The frame on either side, with its Length field on the same side:
-    /// `Either<Datagram<D, A>, Datagram<D, B>>` becomes
-    /// `Datagram<D, Either<A, B>>`, in the same order.
-    fn from(frame: Either<Datagram<D, A>, Datagram<D, B>>) -> Self {
+    /// `Either<DatagramFrame<D, A>, DatagramFrame<D, B>>` becomes
+    /// `DatagramFrame<D, Either<A, B>>`, in the same order.
+    fn from(frame: Either<DatagramFrame<D, A>, DatagramFrame<D, B>>) -> Self {
         match frame {
             Either::Left(frame) => {
                 let length = Either::Left(frame.length);
@@ -211,21 +213,21 @@ where
     }
 }
 
-impl<D> From<Datagram<D, Either<NoLength, VarIntWidth>>>
-    for Datagram<D, Either<VarIntWidth, NoLength>>
+impl<D> From<DatagramFrame<D, Either<NoLength, VarIntWidth>>>
+    for DatagramFrame<D, Either<VarIntWidth, NoLength>>
 {
     /// The same frame, with the sides of `Either` swapped.
-    fn from(frame: Datagram<D, Either<NoLength, VarIntWidth>>) -> Self {
+    fn from(frame: DatagramFrame<D, Either<NoLength, VarIntWidth>>) -> Self {
         let length = frame.length.flip();
         frame.restate_length(length)
     }
 }
 
-impl<D> From<Datagram<D, Either<VarIntWidth, NoLength>>>
-    for Datagram<D, Either<NoLength, VarIntWidth>>
+impl<D> From<DatagramFrame<D, Either<VarIntWidth, NoLength>>>
+    for DatagramFrame<D, Either<NoLength, VarIntWidth>>
 {
     /// The same frame, with the sides of `Either` swapped.
-    fn from(frame: Datagram<D, Either<VarIntWidth, NoLength>>) -> Self {
+    fn from(frame: DatagramFrame<D, Either<VarIntWidth, NoLength>>) -> Self {
         let length = frame.length.flip();
         frame.restate_length(length)
     }
@@ -268,17 +270,17 @@ pub mod codec {
     //! of [`read_frame`](crate::frame::codec::read_frame).
     //!
     //! There is a write operation for each kind of Length field:
-    //! [`write_datagram_with_length`] for `Datagram<D, VarIntWidth>`,
-    //! [`write_datagram_without_length`] for `Datagram<D, NoLength>`, and
-    //! [`write_datagram`] for `Datagram<D>`, which writes as one of the two.
-    //! Each is also an operation struct, such as [`WriteDatagram`], with
+    //! [`write_datagram_frame_with_length`] for `DatagramFrame<D, VarIntWidth>`,
+    //! [`write_datagram_frame_without_length`] for `DatagramFrame<D, NoLength>`, and
+    //! [`write_datagram_frame`] for `DatagramFrame<D>`, which writes as one of the two.
+    //! Each is also an operation struct, such as [`WriteDatagramFrame`], with
     //! `{Name}Ext` on receiver accesses and `{Name}HostExt` on call
     //! executors.
     // `#[call]` generates constructors, fields and extension traits without
     // documentation comments; the module documentation above describes them.
     #![allow(missing_docs)]
 
-    use super::{Datagram, DatagramTypeValue};
+    use super::{DatagramFrame, DatagramTypeValue};
     use crate::{
         frame::{NoLength, read_field},
         payload::{ReadPayloadError, read_payload, read_payload_to_end},
@@ -293,10 +295,10 @@ pub mod codec {
     /// Reads the fields that follow the Frame Type `frame_type`, and the data
     /// as one chunk of the source: of the Length field's length in type
     /// `0x31`, or to the end of the source.
-    pub(crate) async fn read_datagram<F, A>(
+    pub(crate) async fn read_datagram_frame<F, A>(
         io: &mut A,
         frame_type: DatagramTypeValue,
-    ) -> Result<Datagram<F::Chunk>, ReadDatagramError<F::Error>>
+    ) -> Result<DatagramFrame<F::Chunk>, ReadDatagramFrameError<F::Error>>
     where
         F: ReadChunk<Chunk: Default>,
         A: ReceiverAccess<Family = F>,
@@ -312,7 +314,7 @@ pub mod codec {
             (Either::Left(NoLength), read_payload_to_end(io).await)
         };
         let data = data.context(read_datagram_error::DataSnafu)?;
-        let frame = Datagram::new(length, data);
+        let frame = DatagramFrame::new(length, data);
         // invariant: the Length field, if any, was read at this width, and
         // `read_payload` returns data of exactly the length it states: it
         // fails on shorter data and panics on a longer chunk.
@@ -322,7 +324,7 @@ pub mod codec {
     /// Failures of reading a DATAGRAM frame.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_datagram_error), visibility(pub(crate)))]
-    pub enum ReadDatagramError<E> {
+    pub enum ReadDatagramFrameError<E> {
         /// The Length field could not be read.
         #[snafu(display("DATAGRAM Length read failed"))]
         Length {
@@ -337,8 +339,8 @@ pub mod codec {
         },
     }
 
-    /// Writes `frame`, as [`write_datagram_with_length`] or
-    /// [`write_datagram_without_length`] as its Length field states; its
+    /// Writes `frame`, as [`write_datagram_frame_with_length`] or
+    /// [`write_datagram_frame_without_length`] as its Length field states; its
     /// constructor checked its limits.
     ///
     /// A frame without a Length field extends to the end of the packet;
@@ -349,9 +351,9 @@ pub mod codec {
     /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
     /// bytes accepted before stay written.
     #[call(sync)]
-    pub async fn write_datagram<F, A, D>(
+    pub async fn write_datagram_frame<F, A, D>(
         io: &mut A,
-        frame: Datagram<D>,
+        frame: DatagramFrame<D>,
     ) -> Result<(), WriteAllError<F::Error>>
     where
         F: Write,
@@ -360,25 +362,25 @@ pub mod codec {
     {
         match frame.length {
             Either::Left(length) => {
-                write_datagram_without_length(io, frame.restate_length(length)).await
+                write_datagram_frame_without_length(io, frame.restate_length(length)).await
             }
             Either::Right(length) => {
-                write_datagram_with_length(io, frame.restate_length(length)).await
+                write_datagram_frame_with_length(io, frame.restate_length(length)).await
             }
         }
     }
 
     /// Writes `frame`, which has a Length field;
-    /// [`Datagram::with_length`] checked its limits.
+    /// [`DatagramFrame::with_length`] checked its limits.
     ///
     /// # Errors
     ///
     /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
     /// bytes accepted before stay written.
     #[call(sync)]
-    pub async fn write_datagram_with_length<F, A, D>(
+    pub async fn write_datagram_frame_with_length<F, A, D>(
         io: &mut A,
-        frame: Datagram<D, VarIntWidth>,
+        frame: DatagramFrame<D, VarIntWidth>,
     ) -> Result<(), WriteAllError<F::Error>>
     where
         F: Write,
@@ -399,9 +401,9 @@ pub mod codec {
     /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
     /// bytes accepted before stay written.
     #[call(sync)]
-    pub async fn write_datagram_without_length<F, A, D>(
+    pub async fn write_datagram_frame_without_length<F, A, D>(
         io: &mut A,
-        frame: Datagram<D, NoLength>,
+        frame: DatagramFrame<D, NoLength>,
     ) -> Result<(), WriteAllError<F::Error>>
     where
         F: Write,
@@ -416,10 +418,10 @@ pub mod codec {
 #[cfg(test)]
 mod tests {
     use super::{
-        Datagram,
+        DatagramFrame,
         codec::{
-            WriteDatagramHostExt as _, WriteDatagramWithLengthHostExt as _,
-            WriteDatagramWithoutLengthHostExt as _,
+            WriteDatagramFrameHostExt as _, WriteDatagramFrameWithLengthHostExt as _,
+            WriteDatagramFrameWithoutLengthHostExt as _,
         },
     };
     use crate::{
@@ -450,7 +452,7 @@ mod tests {
         let mut input = &[0x30][..];
         assert_eq!(
             input.sync_read_frame_unpin(Extensions::ALL).unwrap(),
-            Frame::Datagram(Datagram::without_length(&b""[..]).into())
+            Frame::Datagram(DatagramFrame::without_length(&b""[..]).into())
         );
         // Reading keeps which of the two types it was.
         for (encoding, length) in [
@@ -469,30 +471,32 @@ mod tests {
 
     #[test]
     fn each_kind_of_length_field_writes_its_type() {
-        let with = Datagram::with_length(VarIntWidth::Two, &b"hi"[..]).unwrap();
-        let without = Datagram::without_length(&b"hi"[..]);
+        let with = DatagramFrame::with_length(VarIntWidth::Two, &b"hi"[..]).unwrap();
+        let without = DatagramFrame::without_length(&b"hi"[..]);
         assert_eq!(with.type_value(), VarInt::from(0x31u8));
         assert_eq!(without.type_value(), VarInt::from(0x30u8));
         let mut written = Vec::new();
-        written.sync_write_datagram_with_length_unpin(with).unwrap();
+        written
+            .sync_write_datagram_frame_with_length_unpin(with)
+            .unwrap();
         assert_eq!(written, [0x31, 0x40, 0x02, b'h', b'i']);
         assert_eq!(with.encoded_len(), written.len());
         let mut written = Vec::new();
         written
-            .sync_write_datagram_without_length_unpin(without)
+            .sync_write_datagram_frame_without_length_unpin(without)
             .unwrap();
         assert_eq!(written, [0x30, b'h', b'i']);
         assert_eq!(without.encoded_len(), written.len());
         // Both convert into the frame that reading gives, which writes the
         // same bytes.
         for (frame, length) in [
-            (Datagram::from(with), Either::Right(VarIntWidth::Two)),
-            (Datagram::from(without), Either::Left(NoLength)),
+            (DatagramFrame::from(with), Either::Right(VarIntWidth::Two)),
+            (DatagramFrame::from(without), Either::Left(NoLength)),
         ] {
             assert_eq!(frame.length(), length);
-            assert_eq!(frame, Datagram::new(length, &b"hi"[..]).unwrap());
+            assert_eq!(frame, DatagramFrame::new(length, &b"hi"[..]).unwrap());
             let mut written = Vec::new();
-            written.sync_write_datagram_unpin(frame).unwrap();
+            written.sync_write_datagram_frame_unpin(frame).unwrap();
             let mut input = written.as_slice();
             assert_eq!(
                 input.sync_read_frame_unpin(Extensions::ALL).unwrap(),
@@ -506,46 +510,47 @@ mod tests {
         let data = [0; 64];
         let expected = LengthError::check(64, VarIntWidth::One).unwrap_err();
         assert_eq!(
-            Datagram::with_length(VarIntWidth::One, &data[..]),
+            DatagramFrame::with_length(VarIntWidth::One, &data[..]),
             Err(expected)
         );
         assert_eq!(
-            Datagram::new(Either::Right(VarIntWidth::One), &data[..]),
+            DatagramFrame::new(Either::Right(VarIntWidth::One), &data[..]),
             Err(expected)
         );
         // Without a Length field, any length can be written.
-        let frame = Datagram::without_length(&data[..]);
+        let frame = DatagramFrame::without_length(&data[..]);
         assert_eq!(*frame.data(), &data[..]);
-        let frame = Datagram::new(Either::Left(NoLength), &data[..]).unwrap();
+        let frame = DatagramFrame::new(Either::Left(NoLength), &data[..]).unwrap();
         assert_eq!(*frame.data(), &data[..]);
     }
 
     #[test]
     fn constructors_state_the_length_field_in_the_type() {
-        let with: Datagram<&[u8], VarIntWidth> =
-            Datagram::with_length(VarIntWidth::Two, &b"hi"[..]).unwrap();
+        let with: DatagramFrame<&[u8], VarIntWidth> =
+            DatagramFrame::with_length(VarIntWidth::Two, &b"hi"[..]).unwrap();
         assert_eq!(with.length(), VarIntWidth::Two);
-        let without: Datagram<&[u8], NoLength> = Datagram::without_length(&b"hi"[..]);
+        let without: DatagramFrame<&[u8], NoLength> = DatagramFrame::without_length(&b"hi"[..]);
         assert_eq!(without.length(), NoLength);
-        let read: Datagram<&[u8]> =
-            Datagram::new(Either::Right(VarIntWidth::Two), &b"hi"[..]).unwrap();
+        let read: DatagramFrame<&[u8]> =
+            DatagramFrame::new(Either::Right(VarIntWidth::Two), &b"hi"[..]).unwrap();
         assert_eq!(read, with.into());
-        let read: Datagram<&[u8]> = Datagram::new(Either::Left(NoLength), &b"hi"[..]).unwrap();
+        let read: DatagramFrame<&[u8]> =
+            DatagramFrame::new(Either::Left(NoLength), &b"hi"[..]).unwrap();
         assert_eq!(read, without.into());
     }
 
     #[test]
     fn every_kind_of_length_field_writes_the_same_frame() {
-        let with = Datagram::with_length(VarIntWidth::Two, &b"hi"[..]).unwrap();
-        let without = Datagram::without_length(&b"hi"[..]);
+        let with = DatagramFrame::with_length(VarIntWidth::Two, &b"hi"[..]).unwrap();
+        let without = DatagramFrame::without_length(&b"hi"[..]);
         for (width, type_value, encoded_len) in
             [(Some(VarIntWidth::Two), 0x31u8, 5), (None, 0x30, 3)]
         {
-            let read: Datagram<&[u8]> = match width {
+            let read: DatagramFrame<&[u8]> = match width {
                 Some(_) => with.into(),
                 None => without.into(),
             };
-            let swapped: Datagram<&[u8], Either<VarIntWidth, NoLength>> = match width {
+            let swapped: DatagramFrame<&[u8], Either<VarIntWidth, NoLength>> = match width {
                 Some(_) => with.into(),
                 None => without.into(),
             };
@@ -557,9 +562,9 @@ mod tests {
             assert_eq!(read.type_value(), VarInt::from(type_value));
             assert_eq!(swapped.encoded_len(), encoded_len);
             assert_eq!(read.encoded_len(), encoded_len);
-            assert_eq!(Datagram::<_>::from(swapped), read);
+            assert_eq!(DatagramFrame::<_>::from(swapped), read);
             assert_eq!(
-                Datagram::<_, Either<VarIntWidth, NoLength>>::from(read),
+                DatagramFrame::<_, Either<VarIntWidth, NoLength>>::from(read),
                 swapped
             );
         }
@@ -567,28 +572,30 @@ mod tests {
 
     #[test]
     fn either_kinds_convert_to_either_of_frames_in_the_same_order() {
-        let with = Datagram::with_length(VarIntWidth::Two, &b"hi"[..]).unwrap();
-        let without = Datagram::without_length(&b"hi"[..]);
+        let with = DatagramFrame::with_length(VarIntWidth::Two, &b"hi"[..]).unwrap();
+        let without = DatagramFrame::without_length(&b"hi"[..]);
 
         // `Either<NoLength, VarIntWidth>`, as read.
-        let read: Datagram<&[u8]> = without.into();
-        let split: Either<Datagram<_, NoLength>, Datagram<_, VarIntWidth>> = read.into();
+        let read: DatagramFrame<&[u8]> = without.into();
+        let split: Either<DatagramFrame<_, NoLength>, DatagramFrame<_, VarIntWidth>> = read.into();
         assert_eq!(split, Either::Left(without));
-        assert_eq!(Datagram::from(split), read);
-        let read: Datagram<&[u8]> = with.into();
-        let split: Either<Datagram<_, NoLength>, Datagram<_, VarIntWidth>> = read.into();
+        assert_eq!(DatagramFrame::from(split), read);
+        let read: DatagramFrame<&[u8]> = with.into();
+        let split: Either<DatagramFrame<_, NoLength>, DatagramFrame<_, VarIntWidth>> = read.into();
         assert_eq!(split, Either::Right(with));
-        assert_eq!(Datagram::from(split), read);
+        assert_eq!(DatagramFrame::from(split), read);
 
         // `Either<VarIntWidth, NoLength>`, the other order.
-        let swapped: Datagram<&[u8], Either<VarIntWidth, NoLength>> = with.into();
-        let split: Either<Datagram<_, VarIntWidth>, Datagram<_, NoLength>> = swapped.into();
+        let swapped: DatagramFrame<&[u8], Either<VarIntWidth, NoLength>> = with.into();
+        let split: Either<DatagramFrame<_, VarIntWidth>, DatagramFrame<_, NoLength>> =
+            swapped.into();
         assert_eq!(split, Either::Left(with));
-        assert_eq!(Datagram::from(split), swapped);
-        let swapped: Datagram<&[u8], Either<VarIntWidth, NoLength>> = without.into();
-        let split: Either<Datagram<_, VarIntWidth>, Datagram<_, NoLength>> = swapped.into();
+        assert_eq!(DatagramFrame::from(split), swapped);
+        let swapped: DatagramFrame<&[u8], Either<VarIntWidth, NoLength>> = without.into();
+        let split: Either<DatagramFrame<_, VarIntWidth>, DatagramFrame<_, NoLength>> =
+            swapped.into();
         assert_eq!(split, Either::Right(without));
-        assert_eq!(Datagram::from(split), swapped);
+        assert_eq!(DatagramFrame::from(split), swapped);
     }
 
     #[test]

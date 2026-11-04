@@ -6,13 +6,13 @@
 //! and each following ACK Range gives a Gap of unacknowledged packet numbers
 //! below the previous range and the length of the next one.
 //!
-//! [`Ack`] holds these fields as they are encoded, each variable-length
+//! [`AckFrame`] holds these fields as they are encoded, each variable-length
 //! integer with its width, so that a frame reads back as it was written and
 //! writes back the bytes it was read from; the ACK Ranges are collected in
-//! [`AckRanges`]. [`Ack::new`] checks that no range extends below packet
+//! [`AckRanges`]. [`AckFrame::new`] checks that no range extends below packet
 //! number 0 and that the ACK Range Count field can state the number of ACK
-//! Ranges. [`Ack::packet_ranges`] computes the packet number ranges from the
-//! fields, as an iterator. [`Ack::from_packet_ranges`] goes the other way
+//! Ranges. [`AckFrame::packet_ranges`] computes the packet number ranges from the
+//! fields, as an iterator. [`AckFrame::from_packet_ranges`] goes the other way
 //! for a sender: it states packet number ranges in the shortest encodings.
 //!
 //! [RFC 9000 §19.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.3
@@ -37,13 +37,13 @@ use snafu::Snafu;
 /// so only its width is stored.
 ///
 /// No range extends below packet number 0, and the ACK Range Count field can
-/// state the number of ACK Ranges. [`Ack::new`] checks both, so every value
+/// state the number of ACK Ranges. [`AckFrame::new`] checks both, so every value
 /// writes an encoding that reads back to the same value; the fields are read
 /// through methods of the same names.
 ///
 /// [RFC 9000 §19.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.3
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Ack {
+pub struct AckFrame {
     largest_acknowledged: VarIntField<PacketNumber>,
     ack_delay: VarIntField<VarInt>,
     ack_range_count_width: VarIntWidth,
@@ -80,7 +80,7 @@ pub struct EcnCounts {
     pub ce: VarIntField<VarInt>,
 }
 
-impl Ack {
+impl AckFrame {
     /// The ACK frame with these fields.
     ///
     /// # Errors
@@ -242,7 +242,7 @@ impl Ack {
         }
     }
 
-    /// The number of bytes [`codec::write_ack`] writes.
+    /// The number of bytes [`codec::write_ack_frame`] writes.
     pub fn encoded_len(&self) -> usize {
         self.fields().map(|(_, width)| width.encoded_len()).sum()
     }
@@ -334,7 +334,7 @@ impl<'a> IntoIterator for &'a AckRanges {
 }
 
 /// The packet number ranges that the fields of an ACK frame acknowledge,
-/// largest first; see [`Ack::packet_ranges`].
+/// largest first; see [`AckFrame::packet_ranges`].
 ///
 /// It yields one range for First ACK Range and one for each ACK Range:
 /// construction of the frame checked that none extends below packet number
@@ -496,7 +496,7 @@ impl RangeCountError {
     }
 }
 
-/// The packet number ranges given to [`Ack::from_packet_ranges`] cannot be
+/// The packet number ranges given to [`AckFrame::from_packet_ranges`] cannot be
 /// acknowledged by one ACK frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 pub enum PacketRangesError {
@@ -523,14 +523,14 @@ pub mod codec {
     //! Writing ACK frames as a `nitori_call` operation; reading is part of
     //! [`read_frame`](crate::frame::codec::read_frame).
     //!
-    //! [`write_ack`] is also the operation struct [`WriteAck`], with
-    //! `WriteAckExt` on receiver accesses and `WriteAckHostExt` on call
+    //! [`write_ack_frame`] is also the operation struct [`WriteAckFrame`], with
+    //! `WriteAckFrameExt` on receiver accesses and `WriteAckFrameHostExt` on call
     //! executors.
     // `#[call]` generates constructors, fields and extension traits without
     // documentation comments; the module documentation above describes them.
     #![allow(missing_docs)]
 
-    use super::{Ack, AckBelowZeroError, AckRange, AckRanges, EcnCounts};
+    use super::{AckBelowZeroError, AckFrame, AckRange, AckRanges, EcnCounts};
     use crate::{
         frame::read_field,
         packet_number::PacketNumber,
@@ -546,19 +546,19 @@ pub mod codec {
     ///
     /// Each range is checked as soon as its fields are read, so a range that
     /// extends below packet number 0 is reported before the rest is read.
-    pub(crate) async fn read_ack<F: Read, A: ReceiverAccess<Family = F>>(
+    pub(crate) async fn read_ack_frame<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-    ) -> Result<Ack, ReadAckError<F::Error>> {
-        Ok(read_ack_fields(io).await?.into_ack(None))
+    ) -> Result<AckFrame, ReadAckFrameError<F::Error>> {
+        Ok(read_ack_frame_fields(io).await?.into_ack(None))
     }
 
     /// Reads the fields that follow the Frame Type of an ACK frame of type
-    /// `0x03`, with ECN counts; ranges are checked as [`read_ack`] does.
-    pub(crate) async fn read_ack_ecn<F: Read, A: ReceiverAccess<Family = F>>(
+    /// `0x03`, with ECN counts; ranges are checked as [`read_ack_frame`] does.
+    pub(crate) async fn read_ack_frame_ecn<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-    ) -> Result<Ack, ReadAckEcnError<F::Error>> {
+    ) -> Result<AckFrame, ReadAckFrameEcnError<F::Error>> {
         use read_ack_ecn_error::*;
-        let fields = read_ack_fields(io).await?;
+        let fields = read_ack_frame_fields(io).await?;
         let ecn_counts = EcnCounts {
             ect0: read_field(io).await.context(Ect0CountSnafu)?,
             ect1: read_field(io).await.context(Ect1CountSnafu)?,
@@ -578,8 +578,8 @@ pub mod codec {
 
     impl AckFields {
         /// The ACK frame with these fields and `ecn_counts`.
-        fn into_ack(self, ecn_counts: Option<EcnCounts>) -> Ack {
-            let frame = Ack::new(
+        fn into_ack(self, ecn_counts: Option<EcnCounts>) -> AckFrame {
+            let frame = AckFrame::new(
                 self.largest_acknowledged,
                 self.ack_delay,
                 self.ack_range_count_width,
@@ -598,9 +598,9 @@ pub mod codec {
 
     /// Reads the fields from Largest Acknowledged to the last ACK Range,
     /// checking each range as soon as its fields are read.
-    async fn read_ack_fields<F: Read, A: ReceiverAccess<Family = F>>(
+    async fn read_ack_frame_fields<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-    ) -> Result<AckFields, ReadAckError<F::Error>> {
+    ) -> Result<AckFields, ReadAckFrameError<F::Error>> {
         use read_ack_error::*;
         let largest_acknowledged: VarIntField<PacketNumber> =
             read_field(io).await.context(LargestAcknowledgedSnafu)?;
@@ -640,7 +640,7 @@ pub mod codec {
     /// fields before the ECN counts of type `0x03`.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_ack_error), visibility(pub(crate)))]
-    pub enum ReadAckError<E> {
+    pub enum ReadAckFrameError<E> {
         /// The Largest Acknowledged field could not be read.
         #[snafu(display("ACK Largest Acknowledged read failed"))]
         LargestAcknowledged {
@@ -689,7 +689,7 @@ pub mod codec {
         },
     }
 
-    impl<E> ReadAckError<E> {
+    impl<E> ReadAckFrameError<E> {
         /// Whether the source ended within the frame.
         pub(crate) fn is_incomplete(&self) -> bool {
             match self {
@@ -707,13 +707,13 @@ pub mod codec {
     /// Failures of reading an ACK frame of type `0x03`, with ECN counts.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_ack_ecn_error), visibility(pub(crate)))]
-    pub enum ReadAckEcnError<E> {
+    pub enum ReadAckFrameEcnError<E> {
         /// A field before the ECN counts could not be read, or a range
         /// extends below packet number 0.
         #[snafu(transparent)]
         Ack {
             /// The failure.
-            source: ReadAckError<E>,
+            source: ReadAckFrameError<E>,
         },
         /// The ECT0 Count field could not be read.
         #[snafu(display("ECT0 Count read failed"))]
@@ -735,7 +735,7 @@ pub mod codec {
         },
     }
 
-    impl<E> ReadAckEcnError<E> {
+    impl<E> ReadAckFrameEcnError<E> {
         /// Whether the source ended within the frame.
         pub(crate) fn is_incomplete(&self) -> bool {
             match self {
@@ -747,16 +747,16 @@ pub mod codec {
         }
     }
 
-    /// Writes `frame`; [`Ack::new`] checked its rules.
+    /// Writes `frame`; [`AckFrame::new`] checked its rules.
     ///
     /// # Errors
     ///
     /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
     /// bytes accepted before stay written.
     #[call(sync)]
-    pub async fn write_ack<F: Write, A: ReceiverAccess<Family = F>>(
+    pub async fn write_ack_frame<F: Write, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-        frame: Ack,
+        frame: AckFrame,
     ) -> Result<(), WriteAllError<F::Error>> {
         io.write_all(VarInts::new(frame.fields())).await
     }

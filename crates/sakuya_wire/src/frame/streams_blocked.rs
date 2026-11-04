@@ -12,17 +12,17 @@ use crate::{
 /// bidirectional streams, `0x17` for unidirectional ones.
 ///
 /// The Maximum Streams field keeps the width of its encoding.
-/// No limit ties the fields together, so [`StreamsBlocked::new`] accepts any
+/// No limit ties the fields together, so [`StreamsBlockedFrame::new`] accepts any
 /// values; the fields are read through methods of the same names.
 ///
 /// [RFC 9000 §19.14]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.14
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct StreamsBlocked {
+pub struct StreamsBlockedFrame {
     directionality: Directionality,
     maximum_streams: VarIntField<StreamCount>,
 }
 
-impl StreamsBlocked {
+impl StreamsBlockedFrame {
     /// The STREAMS_BLOCKED frame with these fields.
     pub const fn new(
         directionality: Directionality,
@@ -49,7 +49,7 @@ impl StreamsBlocked {
         type_value_of(self.directionality)
     }
 
-    /// The number of bytes [`codec::write_streams_blocked`] writes.
+    /// The number of bytes [`codec::write_streams_blocked_frame`] writes.
     pub fn encoded_len(&self) -> usize {
         self.head().len()
     }
@@ -72,14 +72,14 @@ pub mod codec {
     //! Writing STREAMS_BLOCKED as a `nitori_call` operation; reading is part of
     //! [`read_frame`](crate::frame::codec::read_frame).
     //!
-    //! [`write_streams_blocked`] is also the operation struct [`WriteStreamsBlocked`], with
-    //! `WriteStreamsBlockedExt` on receiver accesses and `WriteStreamsBlockedHostExt` on call
+    //! [`write_streams_blocked_frame`] is also the operation struct [`WriteStreamsBlockedFrame`], with
+    //! `WriteStreamsBlockedFrameExt` on receiver accesses and `WriteStreamsBlockedFrameHostExt` on call
     //! executors.
     // `#[call]` generates constructors, fields and extension traits without
     // documentation comments; the module documentation above describes them.
     #![allow(missing_docs)]
 
-    use super::StreamsBlocked;
+    use super::StreamsBlockedFrame;
     use crate::{
         stream_count::{StreamCount, StreamCountError},
         stream_id::Directionality,
@@ -91,10 +91,10 @@ pub mod codec {
 
     /// Reads the count that follows the Frame Type of a frame for streams of
     /// `directionality`.
-    pub(crate) async fn read_streams_blocked<F: Read, A: ReceiverAccess<Family = F>>(
+    pub(crate) async fn read_streams_blocked_frame<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
         directionality: Directionality,
-    ) -> Result<StreamsBlocked, ReadStreamsBlockedError<F::Error>> {
+    ) -> Result<StreamsBlockedFrame, ReadStreamsBlockedFrameError<F::Error>> {
         let maximum_streams =
             read_var_int_field::<StreamCount, _, _>(io)
                 .await
@@ -104,13 +104,13 @@ pub mod codec {
                     }
                     ReadVarIntFieldError::Value { source, .. } => source.into(),
                 })?;
-        Ok(StreamsBlocked::new(directionality, maximum_streams))
+        Ok(StreamsBlockedFrame::new(directionality, maximum_streams))
     }
 
     /// Failures of reading a STREAMS_BLOCKED frame.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_streams_blocked_error), visibility(pub(crate)))]
-    pub enum ReadStreamsBlockedError<E> {
+    pub enum ReadStreamsBlockedFrameError<E> {
         /// The count could not be read.
         #[snafu(display("STREAMS_BLOCKED field read failed"))]
         Field {
@@ -132,9 +132,9 @@ pub mod codec {
     /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
     /// bytes accepted before stay written.
     #[call(sync)]
-    pub async fn write_streams_blocked<F: Write, A: ReceiverAccess<Family = F>>(
+    pub async fn write_streams_blocked_frame<F: Write, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-        frame: StreamsBlocked,
+        frame: StreamsBlockedFrame,
     ) -> Result<(), WriteAllError<F::Error>> {
         io.write_all(frame.head().as_slice()).await
     }
@@ -142,7 +142,7 @@ pub mod codec {
 
 #[cfg(test)]
 mod tests {
-    use super::{StreamsBlocked, codec::ReadStreamsBlockedError};
+    use super::{StreamsBlockedFrame, codec::ReadStreamsBlockedFrameError};
     use crate::{
         frame::{
             Extensions, Frame,
@@ -161,7 +161,7 @@ mod tests {
             (Directionality::Unidirectional, type_value_of(true)),
         ] {
             let maximum_streams = VarIntField::shortest(StreamCount::MAX);
-            let frame = StreamsBlocked::new(directionality, maximum_streams);
+            let frame = StreamsBlockedFrame::new(directionality, maximum_streams);
             let encoding = assert_round_trip(Frame::StreamsBlocked(frame));
             assert_eq!(encoding[0], type_value);
             let Frame::StreamsBlocked(read) = assert_bytes_round_trip(&encoding) else {
@@ -173,7 +173,7 @@ mod tests {
     }
 
     fn type_value_of(unidirectional: bool) -> u8 {
-        let bidi = StreamsBlocked::new(
+        let bidi = StreamsBlockedFrame::new(
             Directionality::Bidirectional,
             VarIntField::shortest(StreamCount::ZERO),
         )
@@ -195,7 +195,7 @@ mod tests {
         assert!(matches!(
             error,
             ReadFrameError::StreamsBlocked {
-                source: ReadStreamsBlockedError::StreamCount {
+                source: ReadStreamsBlockedFrameError::StreamCount {
                     source
                 },
                 ..

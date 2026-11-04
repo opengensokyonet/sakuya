@@ -43,7 +43,7 @@
 //!   The Offset of STREAM is an `Option`, so a STREAM frame with the OFF bit
 //!   set and offset 0 is distinct from one without the bit.
 //! - Whether a STREAM or DATAGRAM frame has a Length field is stated by the
-//!   type parameter `L` of [`stream::Stream`] and [`datagram::Datagram`], a
+//!   type parameter `L` of [`stream::StreamFrame`] and [`datagram::DatagramFrame`], a
 //!   [`LengthKind`] of one of four types: [`VarIntWidth`], for a frame with
 //!   a Length field of that width; [`NoLength`], for a frame without one,
 //!   whose data extends to the end of the packet; and
@@ -57,7 +57,7 @@
 //!   gives it by `new`; each of these kinds has its own write operation, so
 //!   a writer that knows which kind it writes states it in the type.
 //! - An ACK frame holds its fields as encoded, and owns its ACK Ranges in
-//!   [`ack::AckRanges`]; [`ack::Ack::packet_ranges`] computes the
+//!   [`ack::AckRanges`]; [`ack::AckFrame::packet_ranges`] computes the
 //!   acknowledged packet numbers from them.
 //!
 //! The Frame Type is the exception: it must use its shortest encoding
@@ -72,10 +72,10 @@
 //! of RESET_STREAM_AT does not exceed its Final Size, no range of an ACK
 //! frame extends below packet number 0, and the ACK Range Count field of ACK
 //! can state the number of ACK Ranges. The constructors of these frame
-//! types, such as [`stream::Stream::with_length`] and [`ack::Ack::new`],
+//! types, such as [`stream::StreamFrame::with_length`] and [`ack::AckFrame::new`],
 //! return an error for fields that break one; a DATAGRAM frame without a
 //! Length field has no such limit. The other frame types have no such limit,
-//! and their `new`, such as [`max_data::MaxData::new`], accepts any fields. The
+//! and their `new`, such as [`max_data::MaxDataFrame::new`], accepts any fields. The
 //! fields of every frame type are private and are read through methods of
 //! the same names, so every frame value converts to bytes and back without
 //! loss.
@@ -109,11 +109,11 @@
 //! [`codec::ReadFrameError::AckEcn`] for an ACK frame with ECN counts. The
 //! error of a frame type has a variant for
 //! each field that cannot be read, named after the field, such as
-//! [`ack::codec::ReadAckError::LargestAcknowledged`]; the Gap and ACK Range
+//! [`ack::codec::ReadAckFrameError::LargestAcknowledged`]; the Gap and ACK Range
 //! Length of an ACK Range carry the position of their ACK Range. Each
 //! broken limit has a variant of its own as well, named after the rule,
 //! such as
-//! [`new_connection_id::codec::ReadNewConnectionIdError::RetirePriorToAboveSequenceNumber`].
+//! [`new_connection_id::codec::ReadNewConnectionIdFrameError::RetirePriorToAboveSequenceNumber`].
 //!
 //! Every [`codec::ReadFrameError`] corresponds to FRAME_ENCODING_ERROR, with
 //! two exceptions that correspond to PROTOCOL_VIOLATION
@@ -145,7 +145,7 @@
 //! # Writing
 //!
 //! Every frame type has `encoded_len` and a write operation in its module's
-//! `codec`, such as [`stream::codec::write_stream`], and STREAM and DATAGRAM
+//! `codec`, such as [`stream::codec::write_stream_frame`], and STREAM and DATAGRAM
 //! have one for each kind of Length field; [`codec::write_frame`] writes any
 //! [`Frame`]. Writing writes the encoding the value states and
 //! chooses nothing: the width of each field comes from the value. Every
@@ -155,11 +155,11 @@
 //! `WriteAllError` counts them. `encoded_len`
 //! gives the length in advance, so that a packet encoder can choose frames
 //! and payload sizes before writing.
-//! The `max_data_len` of `Stream<D, VarIntWidth>` and of
-//! `Stream<D, NoLength>`, and [`crypto::Crypto::max_data_len`], give the
+//! The `max_data_len` of `StreamFrame<D, VarIntWidth>` and of
+//! `StreamFrame<D, NoLength>`, and [`crypto::CryptoFrame::max_data_len`], give the
 //! largest amount of data that fits a given room, taking into account that
 //! the shortest Length field grows with the data.
-//! [`ack::Ack::from_packet_ranges`] states packet number ranges as an ACK
+//! [`ack::AckFrame::from_packet_ranges`] states packet number ranges as an ACK
 //! frame in the shortest encodings. Payload fields are written from any
 //! [`bytes::Buf`].
 //!
@@ -463,49 +463,49 @@ impl Extensions {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Frame<D> {
     /// PADDING, one or more bytes.
-    Padding(padding::Padding),
+    Padding(padding::PaddingFrame),
     /// A PING frame.
-    Ping(ping::Ping),
+    Ping(ping::PingFrame),
     /// An ACK frame.
-    Ack(ack::Ack),
+    Ack(ack::AckFrame),
     /// A RESET_STREAM frame.
-    ResetStream(reset_stream::ResetStream),
+    ResetStream(reset_stream::ResetStreamFrame),
     /// A STOP_SENDING frame.
-    StopSending(stop_sending::StopSending),
+    StopSending(stop_sending::StopSendingFrame),
     /// A CRYPTO frame.
-    Crypto(crypto::Crypto<D>),
+    Crypto(crypto::CryptoFrame<D>),
     /// A NEW_TOKEN frame.
-    NewToken(new_token::NewToken<D>),
+    NewToken(new_token::NewTokenFrame<D>),
     /// A STREAM frame.
-    Stream(stream::Stream<D>),
+    Stream(stream::StreamFrame<D>),
     /// A MAX_DATA frame.
-    MaxData(max_data::MaxData),
+    MaxData(max_data::MaxDataFrame),
     /// A MAX_STREAM_DATA frame.
-    MaxStreamData(max_stream_data::MaxStreamData),
+    MaxStreamData(max_stream_data::MaxStreamDataFrame),
     /// A MAX_STREAMS frame.
-    MaxStreams(max_streams::MaxStreams),
+    MaxStreams(max_streams::MaxStreamsFrame),
     /// A DATA_BLOCKED frame.
-    DataBlocked(data_blocked::DataBlocked),
+    DataBlocked(data_blocked::DataBlockedFrame),
     /// A STREAM_DATA_BLOCKED frame.
-    StreamDataBlocked(stream_data_blocked::StreamDataBlocked),
+    StreamDataBlocked(stream_data_blocked::StreamDataBlockedFrame),
     /// A STREAMS_BLOCKED frame.
-    StreamsBlocked(streams_blocked::StreamsBlocked),
+    StreamsBlocked(streams_blocked::StreamsBlockedFrame),
     /// A NEW_CONNECTION_ID frame.
-    NewConnectionId(new_connection_id::NewConnectionId),
+    NewConnectionId(new_connection_id::NewConnectionIdFrame),
     /// A RETIRE_CONNECTION_ID frame.
-    RetireConnectionId(retire_connection_id::RetireConnectionId),
+    RetireConnectionId(retire_connection_id::RetireConnectionIdFrame),
     /// A PATH_CHALLENGE frame.
-    PathChallenge(path_challenge::PathChallenge),
+    PathChallenge(path_challenge::PathChallengeFrame),
     /// A PATH_RESPONSE frame.
-    PathResponse(path_response::PathResponse),
+    PathResponse(path_response::PathResponseFrame),
     /// A CONNECTION_CLOSE frame.
-    ConnectionClose(connection_close::ConnectionClose<D>),
+    ConnectionClose(connection_close::ConnectionCloseFrame<D>),
     /// A HANDSHAKE_DONE frame.
-    HandshakeDone(handshake_done::HandshakeDone),
+    HandshakeDone(handshake_done::HandshakeDoneFrame),
     /// A RESET_STREAM_AT frame.
-    ResetStreamAt(reset_stream_at::ResetStreamAt),
+    ResetStreamAt(reset_stream_at::ResetStreamAtFrame),
     /// A DATAGRAM frame.
-    Datagram(datagram::Datagram<D>),
+    Datagram(datagram::DatagramFrame<D>),
 }
 
 /// Applies `$body` to the frame inside each variant of a [`Frame`].
@@ -609,7 +609,7 @@ mod sealed {
 }
 
 /// What a STREAM or DATAGRAM frame states about its Length field, as the
-/// type parameter `L` of [`stream::Stream`] and [`datagram::Datagram`].
+/// type parameter `L` of [`stream::StreamFrame`] and [`datagram::DatagramFrame`].
 ///
 /// It is implemented by exactly four types:
 ///
@@ -617,15 +617,15 @@ mod sealed {
 /// - [`NoLength`]: the frame has no Length field, and its data extends to
 ///   the end of the packet;
 /// - [`Either<NoLength, VarIntWidth>`](Either): either of the two, as a frame
-///   that was read states it. This is the default, so `Stream<D>` and
-///   `Datagram<D>` are frames as they are read;
+///   that was read states it. This is the default, so `StreamFrame<D>` and
+///   `DatagramFrame<D>` are frames as they are read;
 /// - [`Either<VarIntWidth, NoLength>`](Either): either of the two, in the
 ///   other order.
 ///
 /// The two single kinds convert into each `Either` kind with `From`. A frame
 /// of an `Either` kind converts with `From` into an `Either` of frames of
 /// its two kinds, in the same order, such as
-/// `Either<Stream<D, NoLength>, Stream<D, VarIntWidth>>` for `Stream<D>`,
+/// `Either<StreamFrame<D, NoLength>, StreamFrame<D, VarIntWidth>>` for `StreamFrame<D>`,
 /// and back; and into a frame of the other `Either` kind, with the sides
 /// swapped.
 pub trait LengthKind: sealed::Sealed {}
@@ -866,7 +866,7 @@ impl<const N: usize> Head<N> {
 ///
 /// Each item is a frame or the error that ends the iteration; after an error
 /// the iterator yields `None`. Consecutive PADDING frames are reported as one
-/// [`padding::Padding`]. Payload fields are chunks of the source; see the
+/// [`padding::PaddingFrame`]. Payload fields are chunks of the source; see the
 /// [module documentation](self).
 #[derive(Clone, Debug)]
 pub struct Frames<H> {

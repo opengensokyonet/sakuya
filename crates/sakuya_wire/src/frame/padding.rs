@@ -15,11 +15,11 @@ use core::num::NonZeroUsize;
 ///
 /// [RFC 9000 §19.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.1
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Padding {
+pub struct PaddingFrame {
     len: NonZeroUsize,
 }
 
-impl Padding {
+impl PaddingFrame {
     /// The run of `len` PADDING frames.
     pub const fn new(len: NonZeroUsize) -> Self {
         Self { len }
@@ -35,7 +35,7 @@ impl Padding {
         type_var_int(type_value::PADDING)
     }
 
-    /// The number of bytes [`codec::write_padding`] writes.
+    /// The number of bytes [`codec::write_padding_frame`] writes.
     pub const fn encoded_len(&self) -> usize {
         self.len.get()
     }
@@ -51,28 +51,28 @@ impl Padding {
 pub mod codec {
     //! Writing PADDING as a `nitori_call` operation.
     //!
-    //! [`write_padding`] is also the operation struct [`WritePadding`], with
-    //! `WritePaddingExt` on receiver accesses and `WritePaddingHostExt` on
+    //! [`write_padding_frame`] is also the operation struct [`WritePaddingFrame`], with
+    //! `WritePaddingFrameExt` on receiver accesses and `WritePaddingFrameHostExt` on
     //! call executors.
     // `#[call]` generates constructors, fields and extension traits without
     // documentation comments; the module documentation above describes them.
     #![allow(missing_docs)]
 
-    use super::Padding;
+    use super::PaddingFrame;
     use bytes::Buf;
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{calls::WriteAllError, prelude::*};
 
-    /// Writes [`Padding::len`] zero bytes.
+    /// Writes [`PaddingFrame::len`] zero bytes.
     ///
     /// # Errors
     ///
     /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
     /// bytes accepted before stay written.
     #[call(sync)]
-    pub async fn write_padding<F: Write, A: ReceiverAccess<Family = F>>(
+    pub async fn write_padding_frame<F: Write, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-        frame: Padding,
+        frame: PaddingFrame,
     ) -> Result<(), WriteAllError<F::Error>> {
         io.write_all(Zeros(frame.len().get())).await
     }
@@ -99,14 +99,14 @@ pub mod codec {
 
 #[cfg(test)]
 mod tests {
-    use super::{Padding, codec::WritePaddingHostExt as _};
+    use super::{PaddingFrame, codec::WritePaddingFrameHostExt as _};
     use core::num::NonZeroUsize;
 
     #[test]
     fn writes_zero_bytes() {
-        let padding = Padding::new(NonZeroUsize::new(200).unwrap());
+        let padding = PaddingFrame::new(NonZeroUsize::new(200).unwrap());
         let mut written = Vec::new();
-        written.sync_write_padding_unpin(padding).unwrap();
+        written.sync_write_padding_frame_unpin(padding).unwrap();
         assert_eq!(written, [0; 200]);
         assert_eq!(padding.encoded_len(), 200);
         assert_eq!(padding.len().get(), 200);

@@ -13,7 +13,7 @@ use bytes::Buf;
 ///
 /// The Reason Phrase Length field holds the length of the reason phrase, so
 /// only its width is stored; the other variable-length integers keep the
-/// widths of their encodings. [`ConnectionClose::new`] checks that the
+/// widths of their encodings. [`ConnectionCloseFrame::new`] checks that the
 /// Reason Phrase Length field can state the length of the reason phrase, so
 /// every value writes an encoding that reads back to the same value; the
 /// fields are read through methods of the same names. `D` holds the reason
@@ -22,7 +22,7 @@ use bytes::Buf;
 ///
 /// [RFC 9000 §19.19]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.19
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ConnectionClose<D> {
+pub struct ConnectionCloseFrame<D> {
     error_code: CloseErrorCode,
     reason_phrase_length_width: VarIntWidth,
     reason_phrase: D,
@@ -46,7 +46,7 @@ pub enum CloseErrorCode {
     },
 }
 
-impl<D> ConnectionClose<D> {
+impl<D> ConnectionCloseFrame<D> {
     /// The error that closes the connection; it selects the frame type.
     pub const fn error_code(&self) -> CloseErrorCode {
         self.error_code
@@ -78,7 +78,7 @@ impl<D> ConnectionClose<D> {
     }
 }
 
-impl<D: Buf> ConnectionClose<D> {
+impl<D: Buf> ConnectionCloseFrame<D> {
     /// The CONNECTION_CLOSE frame with these fields.
     ///
     /// # Errors
@@ -98,7 +98,7 @@ impl<D: Buf> ConnectionClose<D> {
         })
     }
 
-    /// The number of bytes [`codec::write_connection_close`] writes.
+    /// The number of bytes [`codec::write_connection_close_frame`] writes.
     pub fn encoded_len(&self) -> usize {
         self.fields().len()
             + self.reason_phrase_length_width.encoded_len()
@@ -137,14 +137,14 @@ pub mod codec {
     //! Writing CONNECTION_CLOSE frames as a `nitori_call` operation; reading
     //! is part of [`read_frame`](crate::frame::codec::read_frame).
     //!
-    //! [`write_connection_close`] is also the operation struct
-    //! [`WriteConnectionClose`], with `WriteConnectionCloseExt` on receiver
-    //! accesses and `WriteConnectionCloseHostExt` on call executors.
+    //! [`write_connection_close_frame`] is also the operation struct
+    //! [`WriteConnectionCloseFrame`], with `WriteConnectionCloseFrameExt` on receiver
+    //! accesses and `WriteConnectionCloseFrameHostExt` on call executors.
     // `#[call]` generates constructors, fields and extension traits without
     // documentation comments; the module documentation above describes them.
     #![allow(missing_docs)]
 
-    use super::{CloseErrorCode, ConnectionClose};
+    use super::{CloseErrorCode, ConnectionCloseFrame};
     use crate::{
         frame::read_field,
         payload::{ReadPayloadError, read_payload},
@@ -158,9 +158,9 @@ pub mod codec {
     /// Reads the fields that follow the Frame Type of a transport
     /// CONNECTION_CLOSE frame, type `0x1c`, and the reason phrase as one
     /// chunk of the source.
-    pub(crate) async fn read_connection_close_transport<F, A>(
+    pub(crate) async fn read_connection_close_frame_transport<F, A>(
         io: &mut A,
-    ) -> Result<ConnectionClose<F::Chunk>, ReadConnectionCloseTransportError<F::Error>>
+    ) -> Result<ConnectionCloseFrame<F::Chunk>, ReadConnectionCloseFrameTransportError<F::Error>>
     where
         F: ReadChunk<Chunk: Default>,
         A: ReceiverAccess<Family = F>,
@@ -177,9 +177,9 @@ pub mod codec {
     /// Reads the fields that follow the Frame Type of an application
     /// CONNECTION_CLOSE frame, type `0x1d`, and the reason phrase as one
     /// chunk of the source.
-    pub(crate) async fn read_connection_close_application<F, A>(
+    pub(crate) async fn read_connection_close_frame_application<F, A>(
         io: &mut A,
-    ) -> Result<ConnectionClose<F::Chunk>, ReadConnectionCloseApplicationError<F::Error>>
+    ) -> Result<ConnectionCloseFrame<F::Chunk>, ReadConnectionCloseFrameApplicationError<F::Error>>
     where
         F: ReadChunk<Chunk: Default>,
         A: ReceiverAccess<Family = F>,
@@ -215,8 +215,8 @@ pub mod codec {
         error_code: CloseErrorCode,
         width: VarIntWidth,
         reason_phrase: D,
-    ) -> ConnectionClose<D> {
-        let frame = ConnectionClose::new(error_code, width, reason_phrase);
+    ) -> ConnectionCloseFrame<D> {
+        let frame = ConnectionCloseFrame::new(error_code, width, reason_phrase);
         // invariant: the Reason Phrase Length field was read at this width,
         // and `read_payload` returns a reason phrase of exactly the length it
         // states: it fails on a shorter one and panics on a longer chunk.
@@ -226,7 +226,7 @@ pub mod codec {
     /// Failures of reading a transport CONNECTION_CLOSE frame, type `0x1c`.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_connection_close_transport_error), visibility(pub(crate)))]
-    pub enum ReadConnectionCloseTransportError<E> {
+    pub enum ReadConnectionCloseFrameTransportError<E> {
         /// The Error Code field, a transport error code, could not be read.
         #[snafu(display("CONNECTION_CLOSE Error Code read failed"))]
         ErrorCode {
@@ -248,7 +248,7 @@ pub mod codec {
         },
     }
 
-    impl<E> ReadConnectionCloseTransportError<E> {
+    impl<E> ReadConnectionCloseFrameTransportError<E> {
         /// Whether the source ended within the frame.
         pub(crate) fn is_incomplete(&self) -> bool {
             match self {
@@ -265,7 +265,7 @@ pub mod codec {
         module(read_connection_close_application_error),
         visibility(pub(crate))
     )]
-    pub enum ReadConnectionCloseApplicationError<E> {
+    pub enum ReadConnectionCloseFrameApplicationError<E> {
         /// The Error Code field, an application protocol error code, could
         /// not be read.
         #[snafu(display("CONNECTION_CLOSE Error Code read failed"))]
@@ -282,7 +282,7 @@ pub mod codec {
         },
     }
 
-    impl<E> ReadConnectionCloseApplicationError<E> {
+    impl<E> ReadConnectionCloseFrameApplicationError<E> {
         /// Whether the source ended within the frame.
         pub(crate) fn is_incomplete(&self) -> bool {
             match self {
@@ -321,16 +321,16 @@ pub mod codec {
         }
     }
 
-    /// Writes `frame`; [`ConnectionClose::new`] checked its limits.
+    /// Writes `frame`; [`ConnectionCloseFrame::new`] checked its limits.
     ///
     /// # Errors
     ///
     /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
     /// bytes accepted before stay written.
     #[call(sync)]
-    pub async fn write_connection_close<F, A, D>(
+    pub async fn write_connection_close_frame<F, A, D>(
         io: &mut A,
-        frame: ConnectionClose<D>,
+        frame: ConnectionCloseFrame<D>,
     ) -> Result<(), WriteAllError<F::Error>>
     where
         F: Write,
@@ -345,7 +345,7 @@ pub mod codec {
 
 #[cfg(test)]
 mod tests {
-    use super::{CloseErrorCode, ConnectionClose};
+    use super::{CloseErrorCode, ConnectionCloseFrame};
     use crate::{
         application_error::ApplicationErrorCode,
         frame::{
@@ -387,7 +387,7 @@ mod tests {
         assert_eq!(
             frame,
             Frame::ConnectionClose(
-                ConnectionClose::new(
+                ConnectionCloseFrame::new(
                     CloseErrorCode::Application { code },
                     VarIntWidth::One,
                     &b""[..],
@@ -411,7 +411,7 @@ mod tests {
         assert_eq!(
             frame,
             Frame::ConnectionClose(
-                ConnectionClose::new(error_code, VarIntWidth::Two, &b"!"[..]).unwrap()
+                ConnectionCloseFrame::new(error_code, VarIntWidth::Two, &b"!"[..]).unwrap()
             )
         );
         assert_eq!(assert_round_trip(frame), long);
@@ -424,10 +424,10 @@ mod tests {
             code: short(ApplicationErrorCode::new(VarInt::ZERO)),
         };
         assert_eq!(
-            ConnectionClose::new(error_code, VarIntWidth::One, &reason_phrase[..]),
+            ConnectionCloseFrame::new(error_code, VarIntWidth::One, &reason_phrase[..]),
             Err(LengthError::check(64, VarIntWidth::One).unwrap_err())
         );
-        let frame = ConnectionClose::new(error_code, VarIntWidth::Two, &reason_phrase[..]);
+        let frame = ConnectionCloseFrame::new(error_code, VarIntWidth::Two, &reason_phrase[..]);
         assert_eq!(frame.unwrap().into_reason_phrase(), &reason_phrase[..]);
     }
 }

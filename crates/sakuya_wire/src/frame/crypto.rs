@@ -16,14 +16,14 @@ use bytes::Buf;
 ///
 /// The end of the data, the offset plus its length, is at most
 /// [`VarInt::MAX`], and the Length field can state the length of the data.
-/// [`Crypto::new`] checks both, so every value writes an encoding that reads
+/// [`CryptoFrame::new`] checks both, so every value writes an encoding that reads
 /// back to the same value; the fields are read through methods of the same
 /// names. `D` holds the data: the source's chunk type for a frame that was
 /// read, any [`Buf`] for one to write.
 ///
 /// [RFC 9000 §19.6]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.6
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Crypto<D> {
+pub struct CryptoFrame<D> {
     offset: VarIntField<VarInt>,
     length_width: VarIntWidth,
     data: D,
@@ -32,7 +32,7 @@ pub struct Crypto<D> {
 /// The longest encoding of the fields before the data.
 const HEAD_MAX: usize = 1 + 8 + 8;
 
-impl<D> Crypto<D> {
+impl<D> CryptoFrame<D> {
     /// The Offset field: the byte offset of the data in the crypto stream of
     /// its level.
     pub const fn offset(&self) -> VarIntField<VarInt> {
@@ -75,7 +75,7 @@ impl<D> Crypto<D> {
     }
 }
 
-impl<D: Buf> Crypto<D> {
+impl<D: Buf> CryptoFrame<D> {
     /// The CRYPTO frame with these fields.
     ///
     /// # Errors
@@ -98,7 +98,7 @@ impl<D: Buf> Crypto<D> {
         })
     }
 
-    /// The number of bytes [`codec::write_crypto`] writes.
+    /// The number of bytes [`codec::write_crypto_frame`] writes.
     pub fn encoded_len(&self) -> usize {
         1 + self.offset.encoded_len() + self.length_width.encoded_len() + self.data.remaining()
     }
@@ -117,14 +117,14 @@ pub mod codec {
     //! Writing CRYPTO frames as a `nitori_call` operation; reading is part of
     //! [`read_frame`](crate::frame::codec::read_frame).
     //!
-    //! [`write_crypto`] is also the operation struct [`WriteCrypto`], with
-    //! `WriteCryptoExt` on receiver accesses and `WriteCryptoHostExt` on call
+    //! [`write_crypto_frame`] is also the operation struct [`WriteCryptoFrame`], with
+    //! `WriteCryptoFrameExt` on receiver accesses and `WriteCryptoFrameHostExt` on call
     //! executors.
     // `#[call]` generates constructors, fields and extension traits without
     // documentation comments; the module documentation above describes them.
     #![allow(missing_docs)]
 
-    use super::Crypto;
+    use super::CryptoFrame;
     use crate::{
         frame::{DataEndError, InvalidDataError, read_field},
         payload::{ReadPayloadError, read_payload},
@@ -137,9 +137,9 @@ pub mod codec {
 
     /// Reads the fields that follow the Frame Type, and the data as one
     /// chunk of the source.
-    pub(crate) async fn read_crypto<F, A>(
+    pub(crate) async fn read_crypto_frame<F, A>(
         io: &mut A,
-    ) -> Result<Crypto<F::Chunk>, ReadCryptoError<F::Error>>
+    ) -> Result<CryptoFrame<F::Chunk>, ReadCryptoFrameError<F::Error>>
     where
         F: ReadChunk<Chunk: Default>,
         A: ReceiverAccess<Family = F>,
@@ -159,8 +159,8 @@ pub mod codec {
         let data = read_payload(io, data_len)
             .await
             .context(read_crypto_error::DataSnafu)?;
-        Crypto::new(offset, length.width(), data).map_err(|error| match error {
-            InvalidDataError::DataEnd { source } => ReadCryptoError::DataEnd { source },
+        CryptoFrame::new(offset, length.width(), data).map_err(|error| match error {
+            InvalidDataError::DataEnd { source } => ReadCryptoFrameError::DataEnd { source },
             // invariant: the Length field was read at this width, and
             // `read_payload` returns data of exactly the length it states: it
             // fails on shorter data and panics on a longer chunk.
@@ -171,7 +171,7 @@ pub mod codec {
     /// Failures of reading a CRYPTO frame.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_crypto_error), visibility(pub(crate)))]
-    pub enum ReadCryptoError<E> {
+    pub enum ReadCryptoFrameError<E> {
         /// The Offset field could not be read.
         #[snafu(display("CRYPTO Offset read failed"))]
         Offset {
@@ -198,16 +198,16 @@ pub mod codec {
         },
     }
 
-    /// Writes `frame`; [`Crypto::new`] checked its limits.
+    /// Writes `frame`; [`CryptoFrame::new`] checked its limits.
     ///
     /// # Errors
     ///
     /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
     /// bytes accepted before stay written.
     #[call(sync)]
-    pub async fn write_crypto<F, A, D>(
+    pub async fn write_crypto_frame<F, A, D>(
         io: &mut A,
-        frame: Crypto<D>,
+        frame: CryptoFrame<D>,
     ) -> Result<(), WriteAllError<F::Error>>
     where
         F: Write,

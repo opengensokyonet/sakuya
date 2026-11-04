@@ -3,15 +3,15 @@
 #![allow(clippy::single_range_in_vec_init, clippy::reversed_empty_ranges)]
 
 use super::{
-    Ack, AckBelowZeroError, AckRange, AckRanges, EcnCounts, InvalidAckError, PacketRangesError,
-    RangeCountError,
-    codec::{ReadAckEcnError, ReadAckError, WriteAckHostExt as _},
+    AckBelowZeroError, AckFrame, AckRange, AckRanges, EcnCounts, InvalidAckError,
+    PacketRangesError, RangeCountError,
+    codec::{ReadAckFrameEcnError, ReadAckFrameError, WriteAckFrameHostExt as _},
 };
 use crate::{
     frame::{
         Extensions, Frame,
         codec::{ReadFrameError, ReadFrameHostExt as _},
-        tests::{assert_round_trip, read_ack, short, vi, wide},
+        tests::{assert_round_trip, read_ack_frame, short, vi, wide},
     },
     packet_number::PacketNumber,
     var_int::{VarInt, VarIntField, VarIntWidth},
@@ -38,8 +38,8 @@ fn ack_range(gap: u64, ack_range_length: u64) -> AckRange {
 
 /// The ACK frame with Largest Acknowledged `largest`, no delay, a one-byte
 /// ACK Range Count, First ACK Range `first` and `ranges`.
-fn ack(largest: u64, first: u64, ranges: Vec<AckRange>) -> Result<Ack, InvalidAckError> {
-    Ack::new(
+fn ack(largest: u64, first: u64, ranges: Vec<AckRange>) -> Result<AckFrame, InvalidAckError> {
+    AckFrame::new(
         short(pn(largest)),
         short(VarInt::ZERO),
         VarIntWidth::One,
@@ -49,10 +49,10 @@ fn ack(largest: u64, first: u64, ranges: Vec<AckRange>) -> Result<Ack, InvalidAc
     )
 }
 
-/// Writes `frame` with [`codec::write_ack`](super::codec::write_ack).
-fn write(frame: Ack) -> Vec<u8> {
+/// Writes `frame` with [`codec::write_ack_frame`](super::codec::write_ack_frame).
+fn write(frame: AckFrame) -> Vec<u8> {
     let mut written = Vec::new();
-    written.sync_write_ack_unpin(frame).unwrap();
+    written.sync_write_ack_frame_unpin(frame).unwrap();
     written
 }
 
@@ -67,12 +67,12 @@ fn read_frame_error(encoding: &[u8]) -> (ReadFrameError<Infallible>, &[u8]) {
 
 /// The failure of reading the ACK frame `encoding` before any ECN count,
 /// and what it left unread.
-fn read_error(encoding: &[u8]) -> (ReadAckError<Infallible>, &[u8]) {
+fn read_error(encoding: &[u8]) -> (ReadAckFrameError<Infallible>, &[u8]) {
     let (error, input) = read_frame_error(encoding);
     match error {
         ReadFrameError::Ack { source } if encoding[0] == 0x02 => (source, input),
         ReadFrameError::AckEcn {
-            source: ReadAckEcnError::Ack { source },
+            source: ReadAckFrameEcnError::Ack { source },
         } if encoding[0] == 0x03 => (source, input),
         error => panic!("{encoding:02x?}: {error:?}"),
     }
@@ -86,7 +86,7 @@ fn several_ranges_and_ecn_counts() {
         0x03, 0x40, 100, 0x05, 0x02, 0x03, 0x01, 0x04, 0x00, 0x00, 0x01, 0x02, 0x03,
     ];
     let expected = ranges(&[97..=100, 90..=94, 88..=88]);
-    let frame = read_ack(&encoding);
+    let frame = read_ack_frame(&encoding);
     let Frame::Ack(ack) = &frame else {
         unreachable!()
     };
@@ -103,7 +103,7 @@ fn several_ranges_and_ecn_counts() {
     assert_eq!(ack.ecn_counts(), Some(ecn_counts));
     assert_eq!(
         *ack,
-        Ack::new(
+        AckFrame::new(
             wide(pn(100), VarIntWidth::Two),
             short(vi(5)),
             VarIntWidth::One,
@@ -124,7 +124,8 @@ fn several_ranges_and_ecn_counts() {
 
     // The same frame from its packet number ranges, in the shortest
     // encodings: Largest Acknowledged takes two bytes either way.
-    let built = Ack::from_packet_ranges(expected.clone(), short(vi(5)), Some(ecn_counts)).unwrap();
+    let built =
+        AckFrame::from_packet_ranges(expected.clone(), short(vi(5)), Some(ecn_counts)).unwrap();
     assert_eq!(built, *ack);
     assert_eq!(built.packet_ranges().collect::<Vec<_>>(), expected);
     assert_eq!(built.encoded_len(), encoding.len());
@@ -135,10 +136,10 @@ fn several_ranges_and_ecn_counts() {
 #[test]
 fn single_packet_and_ranges_reaching_the_largest_packet_number() {
     let single = ranges(&[0..=0]);
-    let built = Ack::from_packet_ranges(single.clone(), short(VarInt::ZERO), None).unwrap();
+    let built = AckFrame::from_packet_ranges(single.clone(), short(VarInt::ZERO), None).unwrap();
     let encoding = write(built);
     assert_eq!(encoding, [0x02, 0x00, 0x00, 0x00, 0x00]);
-    let frame = read_ack(&encoding);
+    let frame = read_ack_frame(&encoding);
     let Frame::Ack(ack) = &frame else {
         unreachable!()
     };
@@ -148,9 +149,9 @@ fn single_packet_and_ranges_reaching_the_largest_packet_number() {
 
     let max = PacketNumber::MAX.get();
     let wide_ranges = ranges(&[max - 10..=max, 0..=max - 12]);
-    let built = Ack::from_packet_ranges(wide_ranges.clone(), short(vi(1)), None).unwrap();
+    let built = AckFrame::from_packet_ranges(wide_ranges.clone(), short(vi(1)), None).unwrap();
     let encoding = write(built);
-    let frame = read_ack(&encoding);
+    let frame = read_ack_frame(&encoding);
     let Frame::Ack(ack) = &frame else {
         unreachable!()
     };
@@ -172,7 +173,7 @@ fn widths_of_every_field_are_kept() {
         0x02, 0x40, 0x05, 0x40, 0x00, 0x40, 0x01, 0x40, 0x01, 0xc0, 0, 0, 0, 0, 0, 0, 0, 0x80, 0,
         0, 0,
     ];
-    let frame = read_ack(&encoding);
+    let frame = read_ack_frame(&encoding);
     let Frame::Ack(ack) = &frame else {
         unreachable!()
     };
@@ -229,7 +230,7 @@ fn reading_rejects_ranges_below_zero_where_they_are_read() {
         assert!(
             matches!(
                 error,
-                ReadAckError::BelowZero {
+                ReadAckFrameError::BelowZero {
                     source: AckBelowZeroError { index: rejected },
                 } if rejected == index
             ),
@@ -249,15 +250,15 @@ fn reading_reports_the_field_that_is_cut_short() {
     ];
     // Each field is one byte; a cut before field `n` reports field `n`, in
     // the failure of the frame type that has the field.
-    let fields: [fn(&ReadAckError<Infallible>) -> bool; 8] = [
-        |error| matches!(error, ReadAckError::LargestAcknowledged { .. }),
-        |error| matches!(error, ReadAckError::AckDelay { .. }),
-        |error| matches!(error, ReadAckError::AckRangeCount { .. }),
-        |error| matches!(error, ReadAckError::FirstAckRange { .. }),
-        |error| matches!(error, ReadAckError::Gap { index: 1, .. }),
-        |error| matches!(error, ReadAckError::AckRangeLength { index: 1, .. }),
-        |error| matches!(error, ReadAckError::Gap { index: 2, .. }),
-        |error| matches!(error, ReadAckError::AckRangeLength { index: 2, .. }),
+    let fields: [fn(&ReadAckFrameError<Infallible>) -> bool; 8] = [
+        |error| matches!(error, ReadAckFrameError::LargestAcknowledged { .. }),
+        |error| matches!(error, ReadAckFrameError::AckDelay { .. }),
+        |error| matches!(error, ReadAckFrameError::AckRangeCount { .. }),
+        |error| matches!(error, ReadAckFrameError::FirstAckRange { .. }),
+        |error| matches!(error, ReadAckFrameError::Gap { index: 1, .. }),
+        |error| matches!(error, ReadAckFrameError::AckRangeLength { index: 1, .. }),
+        |error| matches!(error, ReadAckFrameError::Gap { index: 2, .. }),
+        |error| matches!(error, ReadAckFrameError::AckRangeLength { index: 2, .. }),
     ];
     let without_ecn: Vec<u8> = [0x02].iter().chain(&full[1..9]).copied().collect();
     for (cut, expected) in (1..).zip(fields) {
@@ -269,10 +270,10 @@ fn reading_reports_the_field_that_is_cut_short() {
             assert!(error.is_incomplete());
         }
     }
-    let ecn_fields: [fn(&ReadAckEcnError<Infallible>) -> bool; 3] = [
-        |error| matches!(error, ReadAckEcnError::Ect0Count { .. }),
-        |error| matches!(error, ReadAckEcnError::Ect1Count { .. }),
-        |error| matches!(error, ReadAckEcnError::EcnCeCount { .. }),
+    let ecn_fields: [fn(&ReadAckFrameEcnError<Infallible>) -> bool; 3] = [
+        |error| matches!(error, ReadAckFrameEcnError::Ect0Count { .. }),
+        |error| matches!(error, ReadAckFrameEcnError::Ect1Count { .. }),
+        |error| matches!(error, ReadAckFrameEcnError::EcnCeCount { .. }),
     ];
     for (cut, expected) in (9..).zip(ecn_fields) {
         let encoding = &full[..cut];
@@ -285,7 +286,7 @@ fn reading_reports_the_field_that_is_cut_short() {
         assert!(expected(&source), "{encoding:02x?}: {source:?}");
     }
     // Type 0x02 ends before the ECN counts.
-    assert_round_trip(read_ack(&without_ecn));
+    assert_round_trip(read_ack_frame(&without_ecn));
     let (error, _) = read_error(&full[..6]);
     assert_eq!(
         error.to_string(),
@@ -296,7 +297,7 @@ fn reading_reports_the_field_that_is_cut_short() {
     let source = std::error::Error::source(&error).map(ToString::to_string);
     assert_eq!(source.as_deref(), Some("ECT1 Count read failed"));
     // The whole encoding reads.
-    assert_round_trip(read_ack(&full));
+    assert_round_trip(read_ack_frame(&full));
 }
 
 #[test]
@@ -326,7 +327,7 @@ fn construction_rejects_ranges_below_zero_and_narrow_counts() {
     assert_eq!((error.count(), error.width()), (64, VarIntWidth::One));
     assert_eq!(RangeCountError::check(63, VarIntWidth::One), Ok(()));
     // 64 ranges fit a two-byte count.
-    let frame = Ack::new(
+    let frame = AckFrame::new(
         short(PacketNumber::MAX),
         short(VarInt::ZERO),
         VarIntWidth::Two,
@@ -382,14 +383,14 @@ fn building_rejects_unordered_ranges() {
     for (ranges_in, error) in cases {
         let ranges_in = ranges(ranges_in);
         assert_eq!(
-            Ack::from_packet_ranges(ranges_in.clone(), short(VarInt::ZERO), None),
+            AckFrame::from_packet_ranges(ranges_in.clone(), short(VarInt::ZERO), None),
             Err(error),
             "{ranges_in:?}"
         );
     }
     // One packet number between ranges is enough.
     let ranges_in = ranges(&[5..=6, 3..=3]);
-    let ack = Ack::from_packet_ranges(ranges_in.clone(), short(VarInt::ZERO), None).unwrap();
+    let ack = AckFrame::from_packet_ranges(ranges_in.clone(), short(VarInt::ZERO), None).unwrap();
     assert_eq!(ack.packet_ranges().collect::<Vec<_>>(), ranges_in);
 }
 
@@ -402,12 +403,12 @@ fn building_takes_the_ranges_in_one_pass() {
         next = largest.checked_sub(2)?;
         Some(pn(largest - 1)..=pn(largest))
     });
-    let ack = Ack::from_packet_ranges(once, short(VarInt::ZERO), None).unwrap();
+    let ack = AckFrame::from_packet_ranges(once, short(VarInt::ZERO), None).unwrap();
     let expected = ranges(&[16..=17, 11..=12, 6..=7, 1..=2]);
     assert_eq!(ack.packet_ranges().collect::<Vec<_>>(), expected);
     assert_eq!(ack.ranges().as_slice(), [ack_range(2, 1); 3]);
     let encoding = assert_round_trip(Frame::Ack(ack.clone()));
-    let Frame::Ack(read) = read_ack(&encoding) else {
+    let Frame::Ack(read) = read_ack_frame(&encoding) else {
         unreachable!()
     };
     assert_eq!(read, ack);
@@ -426,7 +427,8 @@ fn built_frames_use_the_shortest_widths() {
         ranges(&[max..=max, 0..=(1 << 30)]),
     ];
     for ranges_in in cases {
-        let ack = Ack::from_packet_ranges(ranges_in.clone(), short(vi(1 << 30)), None).unwrap();
+        let ack =
+            AckFrame::from_packet_ranges(ranges_in.clone(), short(vi(1 << 30)), None).unwrap();
         let shortest = |field: VarIntField<VarInt>| VarIntWidth::shortest(field.get());
         assert_eq!(
             ack.largest_acknowledged().width(),
@@ -446,7 +448,7 @@ fn built_frames_use_the_shortest_widths() {
             );
         }
         let encoding = write(ack.clone());
-        let frame = read_ack(&encoding);
+        let frame = read_ack_frame(&encoding);
         let Frame::Ack(read) = &frame else {
             unreachable!()
         };

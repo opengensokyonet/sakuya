@@ -7,16 +7,16 @@ use crate::var_int::{VarInt, VarIntField};
 /// A RETIRE_CONNECTION_ID frame ([RFC 9000 §19.16]).
 ///
 /// Each field keeps the width of its variable-length integer encoding.
-/// No limit ties the fields together, so [`RetireConnectionId::new`] accepts any
+/// No limit ties the fields together, so [`RetireConnectionIdFrame::new`] accepts any
 /// values; the fields are read through methods of the same names.
 ///
 /// [RFC 9000 §19.16]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.16
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct RetireConnectionId {
+pub struct RetireConnectionIdFrame {
     sequence_number: VarIntField<VarInt>,
 }
 
-impl RetireConnectionId {
+impl RetireConnectionIdFrame {
     /// The RETIRE_CONNECTION_ID frame with this field.
     pub const fn new(sequence_number: VarIntField<VarInt>) -> Self {
         Self { sequence_number }
@@ -32,7 +32,7 @@ impl RetireConnectionId {
         type_var_int(type_value::RETIRE_CONNECTION_ID)
     }
 
-    /// The number of bytes [`codec::write_retire_connection_id`] writes.
+    /// The number of bytes [`codec::write_retire_connection_id_frame`] writes.
     pub fn encoded_len(&self) -> usize {
         self.head().len()
     }
@@ -47,23 +47,23 @@ pub mod codec {
     //! Writing RETIRE_CONNECTION_ID as a `nitori_call` operation; reading is part of
     //! [`read_frame`](crate::frame::codec::read_frame).
     //!
-    //! [`write_retire_connection_id`] is also the operation struct [`WriteRetireConnectionId`], with
-    //! `WriteRetireConnectionIdExt` on receiver accesses and `WriteRetireConnectionIdHostExt` on call
+    //! [`write_retire_connection_id_frame`] is also the operation struct [`WriteRetireConnectionIdFrame`], with
+    //! `WriteRetireConnectionIdFrameExt` on receiver accesses and `WriteRetireConnectionIdFrameHostExt` on call
     //! executors.
     // `#[call]` generates constructors, fields and extension traits without
     // documentation comments; the module documentation above describes them.
     #![allow(missing_docs)]
 
-    use super::RetireConnectionId;
+    use super::RetireConnectionIdFrame;
     use crate::{frame::read_field, var_int::codec::ReadVarIntError};
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{calls::WriteAllError, prelude::*};
 
     /// Reads the fields that follow the Frame Type.
-    pub(crate) async fn read_retire_connection_id<F: Read, A: ReceiverAccess<Family = F>>(
+    pub(crate) async fn read_retire_connection_id_frame<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-    ) -> Result<RetireConnectionId, ReadVarIntError<F::Error>> {
-        Ok(RetireConnectionId::new(read_field(io).await?))
+    ) -> Result<RetireConnectionIdFrame, ReadVarIntError<F::Error>> {
+        Ok(RetireConnectionIdFrame::new(read_field(io).await?))
     }
 
     /// Writes the frame.
@@ -73,9 +73,9 @@ pub mod codec {
     /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
     /// bytes accepted before stay written.
     #[call(sync)]
-    pub async fn write_retire_connection_id<F: Write, A: ReceiverAccess<Family = F>>(
+    pub async fn write_retire_connection_id_frame<F: Write, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-        frame: RetireConnectionId,
+        frame: RetireConnectionIdFrame,
     ) -> Result<(), WriteAllError<F::Error>> {
         io.write_all(frame.head().as_slice()).await
     }
@@ -83,7 +83,7 @@ pub mod codec {
 
 #[cfg(test)]
 mod tests {
-    use super::RetireConnectionId;
+    use super::RetireConnectionIdFrame;
     use crate::{
         frame::{
             Frame,
@@ -95,7 +95,7 @@ mod tests {
     #[test]
     fn round_trips() {
         let sequence_number = VarIntField::shortest(VarInt::from(9u8));
-        let encoding = assert_round_trip(Frame::RetireConnectionId(RetireConnectionId::new(
+        let encoding = assert_round_trip(Frame::RetireConnectionId(RetireConnectionIdFrame::new(
             sequence_number,
         )));
         assert_eq!(encoding, [0x19, 0x09]);

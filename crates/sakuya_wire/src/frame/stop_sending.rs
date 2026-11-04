@@ -9,17 +9,17 @@ use crate::var_int::{VarInt, VarIntField};
 /// A STOP_SENDING frame ([RFC 9000 §19.5]): the receiver asks the peer to stop sending on a stream.
 ///
 /// Each field keeps the width of its variable-length integer encoding.
-/// No limit ties the fields together, so [`StopSending::new`] accepts any
+/// No limit ties the fields together, so [`StopSendingFrame::new`] accepts any
 /// values; the fields are read through methods of the same names.
 ///
 /// [RFC 9000 §19.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.5
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct StopSending {
+pub struct StopSendingFrame {
     stream_id: VarIntField<StreamId>,
     application_error_code: VarIntField<ApplicationErrorCode>,
 }
 
-impl StopSending {
+impl StopSendingFrame {
     /// The STOP_SENDING frame with these fields.
     pub const fn new(
         stream_id: VarIntField<StreamId>,
@@ -46,7 +46,7 @@ impl StopSending {
         type_var_int(type_value::STOP_SENDING)
     }
 
-    /// The number of bytes [`codec::write_stop_sending`] writes.
+    /// The number of bytes [`codec::write_stop_sending_frame`] writes.
     pub fn encoded_len(&self) -> usize {
         self.head().len()
     }
@@ -63,35 +63,35 @@ pub mod codec {
     //! Writing STOP_SENDING as a `nitori_call` operation; reading is part of
     //! [`read_frame`](crate::frame::codec::read_frame).
     //!
-    //! [`write_stop_sending`] is also the operation struct [`WriteStopSending`], with
-    //! `WriteStopSendingExt` on receiver accesses and `WriteStopSendingHostExt` on call
+    //! [`write_stop_sending_frame`] is also the operation struct [`WriteStopSendingFrame`], with
+    //! `WriteStopSendingFrameExt` on receiver accesses and `WriteStopSendingFrameHostExt` on call
     //! executors.
     // `#[call]` generates constructors, fields and extension traits without
     // documentation comments; the module documentation above describes them.
     #![allow(missing_docs)]
 
-    use super::StopSending;
+    use super::StopSendingFrame;
     use crate::{frame::read_field, var_int::codec::ReadVarIntError};
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{calls::WriteAllError, prelude::*};
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type.
-    pub(crate) async fn read_stop_sending<F: Read, A: ReceiverAccess<Family = F>>(
+    pub(crate) async fn read_stop_sending_frame<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-    ) -> Result<StopSending, ReadStopSendingError<F::Error>> {
+    ) -> Result<StopSendingFrame, ReadStopSendingFrameError<F::Error>> {
         use read_stop_sending_error::*;
         let stream_id = read_field(io).await.context(StreamIdSnafu)?;
         let application_error_code = read_field(io)
             .await
             .context(ApplicationProtocolErrorCodeSnafu)?;
-        Ok(StopSending::new(stream_id, application_error_code))
+        Ok(StopSendingFrame::new(stream_id, application_error_code))
     }
 
     /// Failures of reading a STOP_SENDING frame.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_stop_sending_error), visibility(pub(crate)))]
-    pub enum ReadStopSendingError<E> {
+    pub enum ReadStopSendingFrameError<E> {
         /// The Stream ID field could not be read.
         #[snafu(display("STOP_SENDING Stream ID read failed"))]
         StreamId {
@@ -113,9 +113,9 @@ pub mod codec {
     /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
     /// bytes accepted before stay written.
     #[call(sync)]
-    pub async fn write_stop_sending<F: Write, A: ReceiverAccess<Family = F>>(
+    pub async fn write_stop_sending_frame<F: Write, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-        frame: StopSending,
+        frame: StopSendingFrame,
     ) -> Result<(), WriteAllError<F::Error>> {
         io.write_all(frame.head().as_slice()).await
     }
@@ -123,7 +123,7 @@ pub mod codec {
 
 #[cfg(test)]
 mod tests {
-    use super::StopSending;
+    use super::StopSendingFrame;
     use crate::application_error::ApplicationErrorCode;
     use crate::stream_id::StreamId;
     use crate::{
@@ -138,7 +138,8 @@ mod tests {
     fn round_trips() {
         let stream_id = VarIntField::shortest(StreamId::from_var_int(VarInt::from(3u8)));
         let code = VarIntField::shortest(ApplicationErrorCode::new(VarInt::from(7u8)));
-        let encoding = assert_round_trip(Frame::StopSending(StopSending::new(stream_id, code)));
+        let encoding =
+            assert_round_trip(Frame::StopSending(StopSendingFrame::new(stream_id, code)));
         assert_eq!(encoding, [0x05, 0x03, 0x07]);
         let Frame::StopSending(read) = assert_bytes_round_trip(&encoding) else {
             panic!("{encoding:02x?}")

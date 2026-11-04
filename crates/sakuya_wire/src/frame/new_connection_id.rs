@@ -10,14 +10,14 @@ use snafu::Snafu;
 
 /// A NEW_CONNECTION_ID frame ([RFC 9000 §19.15]).
 ///
-/// `retire_prior_to` is at most `sequence_number`: [`NewConnectionId::new`]
+/// `retire_prior_to` is at most `sequence_number`: [`NewConnectionIdFrame::new`]
 /// checks it, so every value writes an encoding that reads back to the same
 /// value; the fields are read through methods of the same names. Each
 /// variable-length integer field keeps the width of its encoding.
 ///
 /// [RFC 9000 §19.15]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.15
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct NewConnectionId {
+pub struct NewConnectionIdFrame {
     sequence_number: VarIntField<VarInt>,
     retire_prior_to: VarIntField<VarInt>,
     connection_id: NonEmptyCid,
@@ -27,7 +27,7 @@ pub struct NewConnectionId {
 /// The longest encoding of the frame.
 const ENCODED_MAX: usize = 1 + 8 + 8 + 1 + ConnectionId::MAX_LEN + StatelessResetToken::LEN;
 
-impl NewConnectionId {
+impl NewConnectionIdFrame {
     /// The NEW_CONNECTION_ID frame with these fields.
     ///
     /// # Errors
@@ -74,7 +74,7 @@ impl NewConnectionId {
         type_var_int(type_value::NEW_CONNECTION_ID)
     }
 
-    /// The number of bytes [`codec::write_new_connection_id`] writes.
+    /// The number of bytes [`codec::write_new_connection_id_frame`] writes.
     pub fn encoded_len(&self) -> usize {
         self.head().len()
     }
@@ -94,7 +94,7 @@ impl NewConnectionId {
 
 /// A NEW_CONNECTION_ID frame retires sequence numbers beyond its own.
 ///
-/// Only [`NewConnectionId::new`] constructs it, when the check fails, so its
+/// Only [`NewConnectionIdFrame::new`] constructs it, when the check fails, so its
 /// Retire Prior To always exceeds its Sequence Number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display(
@@ -133,14 +133,14 @@ pub mod codec {
     //! Writing NEW_CONNECTION_ID frames as a `nitori_call` operation; reading
     //! is part of [`read_frame`](crate::frame::codec::read_frame).
     //!
-    //! [`write_new_connection_id`] is also the operation struct
-    //! [`WriteNewConnectionId`], with `WriteNewConnectionIdExt` on receiver
-    //! accesses and `WriteNewConnectionIdHostExt` on call executors.
+    //! [`write_new_connection_id_frame`] is also the operation struct
+    //! [`WriteNewConnectionIdFrame`], with `WriteNewConnectionIdFrameExt` on receiver
+    //! accesses and `WriteNewConnectionIdFrameHostExt` on call executors.
     // `#[call]` generates constructors, fields and extension traits without
     // documentation comments; the module documentation above describes them.
     #![allow(missing_docs)]
 
-    use super::{NewConnectionId, RetirePriorToError};
+    use super::{NewConnectionIdFrame, RetirePriorToError};
     use crate::{
         connection_id::{
             EmptyCidError, NonEmptyCid, StatelessResetToken,
@@ -157,9 +157,9 @@ pub mod codec {
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type.
-    pub(crate) async fn read_new_connection_id<F: Read, A: ReceiverAccess<Family = F>>(
+    pub(crate) async fn read_new_connection_id_frame<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-    ) -> Result<NewConnectionId, ReadNewConnectionIdError<F::Error>> {
+    ) -> Result<NewConnectionIdFrame, ReadNewConnectionIdFrameError<F::Error>> {
         let sequence_number = read_field(io)
             .await
             .context(read_new_connection_id_error::SequenceNumberSnafu)?;
@@ -176,7 +176,7 @@ pub mod codec {
             .read_array::<{ StatelessResetToken::LEN }>()
             .await
             .context(read_new_connection_id_error::StatelessResetTokenSnafu)?;
-        let frame = NewConnectionId::new(
+        let frame = NewConnectionIdFrame::new(
             sequence_number,
             retire_prior_to,
             connection_id,
@@ -188,7 +188,7 @@ pub mod codec {
     /// Failures of reading a NEW_CONNECTION_ID frame.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_new_connection_id_error), visibility(pub(crate)))]
-    pub enum ReadNewConnectionIdError<E> {
+    pub enum ReadNewConnectionIdFrameError<E> {
         /// The Sequence Number field could not be read.
         #[snafu(display("NEW_CONNECTION_ID Sequence Number read failed"))]
         SequenceNumber {
@@ -227,16 +227,16 @@ pub mod codec {
         },
     }
 
-    /// Writes `frame`; [`NewConnectionId::new`] checked its rule.
+    /// Writes `frame`; [`NewConnectionIdFrame::new`] checked its rule.
     ///
     /// # Errors
     ///
     /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
     /// bytes accepted before stay written.
     #[call(sync)]
-    pub async fn write_new_connection_id<F: Write, A: ReceiverAccess<Family = F>>(
+    pub async fn write_new_connection_id_frame<F: Write, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-        frame: NewConnectionId,
+        frame: NewConnectionIdFrame,
     ) -> Result<(), WriteAllError<F::Error>> {
         io.write_all(frame.head().as_slice()).await
     }
@@ -244,7 +244,7 @@ pub mod codec {
 
 #[cfg(test)]
 mod tests {
-    use super::{NewConnectionId, RetirePriorToError, codec::ReadNewConnectionIdError};
+    use super::{NewConnectionIdFrame, RetirePriorToError, codec::ReadNewConnectionIdFrameError};
     use crate::{
         connection_id::{NonEmptyCid, StatelessResetToken, codec::ReadConnectionIdError},
         frame::{
@@ -261,8 +261,8 @@ mod tests {
         sequence_number: u8,
         retire_prior_to: u8,
         cid: &[u8],
-    ) -> Result<NewConnectionId, RetirePriorToError> {
-        NewConnectionId::new(
+    ) -> Result<NewConnectionIdFrame, RetirePriorToError> {
+        NewConnectionIdFrame::new(
             VarIntField::shortest(VarInt::from(sequence_number)),
             VarIntField::shortest(VarInt::from(retire_prior_to)),
             NonEmptyCid::try_from(cid).unwrap(),
@@ -279,7 +279,7 @@ mod tests {
         }
     }
 
-    fn read(encoding: &[u8]) -> ReadNewConnectionIdError<core::convert::Infallible> {
+    fn read(encoding: &[u8]) -> ReadNewConnectionIdFrameError<core::convert::Infallible> {
         let mut input = encoding;
         match input.sync_read_frame_unpin(Extensions::NONE) {
             Err(ReadFrameError::NewConnectionId { source, .. }) => source,
@@ -291,12 +291,12 @@ mod tests {
     fn connection_id_lengths_outside_1_to_20_are_rejected() {
         assert!(matches!(
             read(&[0x18, 0x01, 0x00, 0x00]),
-            ReadNewConnectionIdError::EmptyConnectionId { .. }
+            ReadNewConnectionIdFrameError::EmptyConnectionId { .. }
         ));
         // A length above 20 is rejected before the bytes are read.
         assert!(matches!(
             read(&[0x18, 0x01, 0x00, 21]),
-            ReadNewConnectionIdError::ConnectionId {
+            ReadNewConnectionIdFrameError::ConnectionId {
                 source: ReadConnectionIdError::Length { source }
             } if source.length() == 21
         ));
@@ -317,7 +317,7 @@ mod tests {
         );
         assert!(matches!(
             read(&encoding),
-            ReadNewConnectionIdError::RetirePriorToAboveSequenceNumber { source } if source == expected
+            ReadNewConnectionIdFrameError::RetirePriorToAboveSequenceNumber { source } if source == expected
         ));
         assert_eq!(frame(1, 2, &[1]), Err(expected));
         assert!(frame(2, 2, &[1]).is_ok());
@@ -328,11 +328,11 @@ mod tests {
         // A two-byte encoding cut short in each field.
         assert!(matches!(
             read(&[0x18, 0x40]),
-            ReadNewConnectionIdError::SequenceNumber { source } if source.is_incomplete()
+            ReadNewConnectionIdFrameError::SequenceNumber { source } if source.is_incomplete()
         ));
         assert!(matches!(
             read(&[0x18, 0x01, 0x40]),
-            ReadNewConnectionIdError::RetirePriorTo { source } if source.is_incomplete()
+            ReadNewConnectionIdFrameError::RetirePriorTo { source } if source.is_incomplete()
         ));
     }
 
@@ -342,7 +342,7 @@ mod tests {
         let error = read(&encoding);
         assert!(matches!(
             error,
-            ReadNewConnectionIdError::StatelessResetToken { .. }
+            ReadNewConnectionIdFrameError::StatelessResetToken { .. }
         ));
     }
 }
