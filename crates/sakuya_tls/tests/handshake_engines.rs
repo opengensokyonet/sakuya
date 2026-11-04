@@ -8,17 +8,22 @@
 //! Ed25519 root that the client's verifier alone trusts; both are built
 //! here and signed with nitori_crypto_aws_lc.
 
-use bytes::{Buf, BufMut, Bytes};
+mod common;
+
+use bytes::Bytes;
+use common::{
+    now,
+    pki::{self, leaf_key, verifier},
+    streams::{ClientParameters, Fault, Incoming, LEVELS, Outgoing, ServerParameters, index},
+};
 use core::{
-    future::Future,
     ops::ControlFlow,
     pin::{Pin, pin},
     task::{Context, Poll, Waker},
 };
-use nitori_call::{BorrowedReceiver, LentCall, Receiver, family_receiver};
-use nitori_crypto::{ExpandLength, NamedGroup, SignatureScheme, SigningKey};
-use nitori_crypto_aws_lc::{AwsLcBackend, Ed25519SigningKey};
-use nitori_io::{Read, Write};
+use nitori_call::{LentCall, Receiver};
+use nitori_crypto::{ExpandLength, NamedGroup};
+use nitori_crypto_aws_lc::AwsLcBackend;
 use sakuya_tls::{
     alert::AlertDescription,
     cipher_suite::CipherSuite,
@@ -26,377 +31,30 @@ use sakuya_tls::{
         ServerTarget,
         engine::{
             ClientAlertError, ClientHandshake, ClientHandshakeEvent, ClientHandshakeSettings,
-            ClientTransport, EarlyDataOutcome, ServerIdentity,
+            EarlyDataOutcome, ServerIdentity,
         },
         offering::{Offering, PreferenceOffering},
         ticket::TakeOnceTicketMap,
     },
     clock::ManualClock,
-    engine::{CryptoInput, CryptoLevel, CryptoOutput, HandshakeError, ProtocolViolationError},
-    extension::{
-        OpaqueData,
-        alpn::{ProtocolName, ProtocolNameList},
-    },
+    engine::{CryptoLevel, HandshakeError, ProtocolViolationError},
+    extension::alpn::{ProtocolName, ProtocolNameList},
     message::{HandshakeType, new_session_ticket::TicketLifetime},
     schedule::{CertificateVerifyError, ExporterLabel, FinishedError},
     server::{
         choice::{GroupPreference, PreferenceTable},
         engine::{
-            Negotiated, RequiredExtension, ServerAlertError, ServerHandshake, ServerHandshakeEvent,
-            ServerHandshakeSettings, ServerTransport,
+            RequiredExtension, ServerAlertError, ServerHandshake, ServerHandshakeEvent,
+            ServerHandshakeSettings,
         },
         identity::CertifiedKey,
         layers::PassThroughLayers,
         peer::NoClientCertificate,
-        targets::{Selected, SniTargets},
-        ticket::{SingleUseTicketTable, TicketState},
-    },
-    verify::{
-        AnchorStore, NoRevocationCheck, SpkiDistrustList, SubjectPublicKey, WebPkiVerifier,
-        transparency::{EmbeddedSctPolicy, LogList, StaleLogList},
+        targets::SniTargets,
+        ticket::SingleUseTicketTable,
     },
 };
-use std::{
-    collections::VecDeque,
-    sync::Arc,
-    time::{Duration, SystemTime},
-};
-
-/// 2026-11-04T00:00:00Z.
-fn now() -> SystemTime {
-    SystemTime::UNIX_EPOCH + Duration::from_secs(1_793_750_400)
-}
-
-mod pki {
-    //! An Ed25519 root and a certificate it issues, in DER.
-
-    use super::*;
-
-    fn tlv(tag: u8, content: &[u8]) -> Vec<u8> {
-        let mut out = vec![tag];
-        match content.len() {
-            len @ 0..=127 => out.push(len as u8),
-            len @ 128..=255 => out.extend([0x81, len as u8]),
-            len => out.extend([0x82, (len >> 8) as u8, len as u8]),
-        }
-        out.extend_from_slice(content);
-        out
-    }
-
-    fn seq(parts: &[&[u8]]) -> Vec<u8> {
-        tlv(0x30, &parts.concat())
-    }
-
-    fn name(common_name: &str) -> Vec<u8> {
-        let attribute = seq(&[
-            &tlv(0x06, &[0x55, 0x04, 0x03]),
-            &tlv(0x0c, common_name.as_bytes()),
-        ]);
-        seq(&[&tlv(0x31, &attribute)])
-    }
-
-    /// id-Ed25519 as an AlgorithmIdentifier.
-    fn ed25519() -> Vec<u8> {
-        seq(&[&tlv(0x06, &[0x2b, 0x65, 0x70])])
-    }
-
-    fn bits(bytes: &[u8]) -> Vec<u8> {
-        tlv(0x03, &[&[0], bytes].concat())
-    }
-
-    pub fn spki(public_key: &[u8]) -> Vec<u8> {
-        seq(&[&ed25519(), &bits(public_key)])
-    }
-
-    fn extension(oid: &[u8], critical: bool, value: &[u8]) -> Vec<u8> {
-        let critical = if critical {
-            tlv(0x01, &[0xff])
-        } else {
-            Vec::new()
-        };
-        seq(&[&tlv(0x06, oid), &critical, &tlv(0x04, value)])
-    }
-
-    /// The key of a 32-byte Ed25519 seed, from a PKCS#8 v1 document.
-    pub fn key(seed: u8) -> Ed25519SigningKey {
-        let mut pkcs8 = vec![
-            0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22,
-            0x04, 0x20,
-        ];
-        pkcs8.extend([seed; 32]);
-        Ed25519SigningKey::from_pkcs8(&pkcs8).unwrap()
-    }
-
-    fn certificate(
-        serial: u8,
-        issuer: &str,
-        subject: &str,
-        public_key: &[u8],
-        extensions: &[Vec<u8>],
-        signer: &Ed25519SigningKey,
-    ) -> Vec<u8> {
-        let extensions: Vec<&[u8]> = extensions.iter().map(Vec::as_slice).collect();
-        let validity = seq(&[&tlv(0x17, b"250101000000Z"), &tlv(0x17, b"491231235959Z")]);
-        let tbs = seq(&[
-            &tlv(0xa0, &tlv(0x02, &[2])),
-            &tlv(0x02, &[serial]),
-            &ed25519(),
-            &name(issuer),
-            &validity,
-            &name(subject),
-            &spki(public_key),
-            &tlv(0xa3, &seq(&extensions)),
-        ]);
-        let signature = super::ready(signer.sign(SignatureScheme::ED25519, &tbs)).unwrap();
-        seq(&[&tbs, &ed25519(), &bits(signature.as_bytes())])
-    }
-
-    /// The root, self-signed by `key(1)`.
-    pub fn root() -> Vec<u8> {
-        let root = key(1);
-        let basic_constraints = extension(&[0x55, 0x1d, 0x13], true, &seq(&[&tlv(0x01, &[0xff])]));
-        certificate(
-            1,
-            "Test Root",
-            "Test Root",
-            root.public_key(),
-            &[basic_constraints],
-            &root,
-        )
-    }
-
-    /// The certificate of `key(2)` for example.com, issued by the root.
-    pub fn leaf() -> Vec<u8> {
-        let alternative_names = extension(
-            &[0x55, 0x1d, 0x11],
-            false,
-            &seq(&[&tlv(0x82, b"example.com")]),
-        );
-        let server_auth = extension(
-            &[0x55, 0x1d, 0x25],
-            false,
-            &seq(&[&tlv(
-                0x06,
-                &[0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01],
-            )]),
-        );
-        certificate(
-            2,
-            "Test Root",
-            "example.com",
-            key(2).public_key(),
-            &[alternative_names, server_auth],
-            &key(1),
-        )
-    }
-}
-
-/// The output of a future that is ready at once.
-fn ready<F: Future>(future: F) -> F::Output {
-    match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
-        Poll::Ready(output) => output,
-        Poll::Pending => panic!("future not ready"),
-    }
-}
-
-/// A failure of the receivers in memory.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Fault {
-    /// Bytes of the level left were not read.
-    Unread(CryptoLevel),
-    /// The transport parameters were refused.
-    Parameters,
-}
-
-fn index(level: CryptoLevel) -> usize {
-    match level {
-        CryptoLevel::Initial => 0,
-        CryptoLevel::Handshake => 1,
-        CryptoLevel::OneRtt => 2,
-    }
-}
-
-const LEVELS: [CryptoLevel; 3] = [
-    CryptoLevel::Initial,
-    CryptoLevel::Handshake,
-    CryptoLevel::OneRtt,
-];
-
-/// What one side receives: a buffer per level and the current level.
-struct Incoming {
-    levels: [VecDeque<u8>; 3],
-    current: CryptoLevel,
-}
-
-impl Default for Incoming {
-    fn default() -> Self {
-        Self {
-            levels: Default::default(),
-            current: CryptoLevel::Initial,
-        }
-    }
-}
-
-family_receiver!(impl [] for Incoming);
-
-impl Read for Incoming {
-    type Error = Fault;
-
-    fn poll_read<'v, Output: BufMut + ?Sized>(
-        host: Pin<&mut BorrowedReceiver<'v, Incoming>>,
-        _: &mut Context<'_>,
-        destination: &mut Output,
-    ) -> Poll<Result<usize, Fault>>
-    where
-        Self: 'v,
-    {
-        let incoming = host.get_pin_mut().get_mut();
-        let buffer = &mut incoming.levels[index(incoming.current)];
-        if buffer.is_empty() {
-            return Poll::Pending;
-        }
-        let len = buffer.len().min(destination.remaining_mut());
-        for byte in buffer.drain(..len) {
-            destination.put_u8(byte);
-        }
-        Poll::Ready(Ok(len))
-    }
-}
-
-impl CryptoInput for Incoming {
-    type LevelError = Fault;
-
-    fn move_to<'v>(
-        view: Pin<&mut BorrowedReceiver<'v, Incoming>>,
-        level: CryptoLevel,
-    ) -> Result<(), Fault>
-    where
-        Self: 'v,
-    {
-        let incoming = view.get_pin_mut().get_mut();
-        if !incoming.levels[index(incoming.current)].is_empty() {
-            return Err(Fault::Unread(incoming.current));
-        }
-        incoming.current = level;
-        Ok(())
-    }
-}
-
-/// What one side sends: a buffer per level and the current level.
-struct Outgoing {
-    levels: [Vec<u8>; 3],
-    current: CryptoLevel,
-}
-
-impl Default for Outgoing {
-    fn default() -> Self {
-        Self {
-            levels: Default::default(),
-            current: CryptoLevel::Initial,
-        }
-    }
-}
-
-family_receiver!(impl [] for Outgoing);
-
-impl Write for Outgoing {
-    type Error = Fault;
-
-    fn poll_write<'v, Input: Buf + ?Sized>(
-        host: Pin<&mut BorrowedReceiver<'v, Outgoing>>,
-        _: &mut Context<'_>,
-        input: &mut Input,
-    ) -> Poll<Result<usize, Fault>>
-    where
-        Self: 'v,
-    {
-        let outgoing = host.get_pin_mut().get_mut();
-        let buffer = &mut outgoing.levels[index(outgoing.current)];
-        let len = input.remaining();
-        while input.has_remaining() {
-            let chunk = input.chunk();
-            let chunk_len = chunk.len();
-            buffer.extend_from_slice(chunk);
-            input.advance(chunk_len);
-        }
-        Poll::Ready(Ok(len))
-    }
-}
-
-impl CryptoOutput for Outgoing {
-    fn move_to<'v>(view: Pin<&mut BorrowedReceiver<'v, Outgoing>>, level: CryptoLevel)
-    where
-        Self: 'v,
-    {
-        view.get_pin_mut().get_mut().current = level;
-    }
-}
-
-/// The server's connection side of the transport parameters.
-struct ServerParameters {
-    local: Bytes,
-    peer: Option<Bytes>,
-    early_data: bool,
-    refuse: bool,
-}
-
-family_receiver!(impl [] for ServerParameters);
-
-impl ServerTransport<&'static str> for ServerParameters {
-    type Error = Fault;
-
-    fn negotiate<'v>(
-        view: Pin<&mut BorrowedReceiver<'v, ServerParameters>>,
-        peer: &[u8],
-        _selected: &Selected<&'static str>,
-        resumed: Option<&TicketState<&'static str>>,
-    ) -> Result<Negotiated, Fault>
-    where
-        Self: 'v,
-    {
-        let parameters = view.get_pin_mut().get_mut();
-        if parameters.refuse {
-            return Err(Fault::Parameters);
-        }
-        parameters.peer = Some(Bytes::copy_from_slice(peer));
-        let compatible =
-            resumed.is_some_and(|state| state.resumable.transport_parameters == parameters.local);
-        Ok(Negotiated {
-            local: OpaqueData::new(parameters.local.clone()).unwrap(),
-            early_data: parameters.early_data && compatible,
-        })
-    }
-}
-
-/// The client's connection side of the transport parameters.
-struct ClientParameters {
-    local: Bytes,
-    peer: Option<Bytes>,
-}
-
-family_receiver!(impl [] for ClientParameters);
-
-impl ClientTransport for ClientParameters {
-    type Error = Fault;
-
-    fn local<'v>(view: Pin<&mut BorrowedReceiver<'v, ClientParameters>>) -> OpaqueData<Bytes>
-    where
-        Self: 'v,
-    {
-        OpaqueData::new(view.get_pin_mut().get_mut().local.clone()).unwrap()
-    }
-
-    fn peer<'v>(
-        view: Pin<&mut BorrowedReceiver<'v, ClientParameters>>,
-        peer: &[u8],
-    ) -> Result<(), Fault>
-    where
-        Self: 'v,
-    {
-        view.get_pin_mut().get_mut().peer = Some(Bytes::copy_from_slice(peer));
-        Ok(())
-    }
-}
+use std::{collections::VecDeque, sync::Arc, time::Duration};
 
 /// Who sent bytes on their way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -595,37 +253,6 @@ fn offering(key_shares: &[NamedGroup]) -> PreferenceOffering {
         key_shares.to_vec(),
     )
     .unwrap()
-}
-
-type Verifier = WebPkiVerifier<
-    AwsLcBackend,
-    AnchorStore,
-    SpkiDistrustList,
-    NoRevocationCheck,
-    EmbeddedSctPolicy,
-    Arc<ManualClock>,
->;
-
-fn verifier(clock: &Arc<ManualClock>) -> Verifier {
-    // The certificates carry no SCTs: a log list past its age skips the CT
-    // check.
-    let transparency = EmbeddedSctPolicy::with_list_age(
-        LogList::new(Vec::new(), SystemTime::UNIX_EPOCH),
-        Duration::ZERO,
-        StaleLogList::SkipCheck,
-    );
-    WebPkiVerifier::new(
-        AwsLcBackend,
-        AnchorStore::from_certificates([pki::root().as_slice()]).unwrap(),
-        SpkiDistrustList::default(),
-        NoRevocationCheck,
-        transparency,
-        Arc::clone(clock),
-    )
-}
-
-fn leaf_key() -> SubjectPublicKey {
-    SubjectPublicKey::from_spki(&pki::spki(pki::key(2).public_key())).unwrap()
 }
 
 type ServerEvent = ServerHandshakeEvent<AwsLcBackend, &'static str>;
