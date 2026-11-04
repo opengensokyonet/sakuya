@@ -25,6 +25,7 @@ use std::rc::Rc;
 
 mod accounting;
 mod boundary;
+mod completion;
 mod order;
 mod read;
 mod stop;
