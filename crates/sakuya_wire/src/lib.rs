@@ -34,8 +34,10 @@
 //! - [`role`]: the client and server roles ([`role::Role`]).
 //! - [`payload`]: how variable-length payload fields are read.
 //! - [`protected_packet`]: cutting the packets of a datagram apart
-//!   ([`protected_packet::into_packets`]), each with the header read and the
-//!   protection still on ([`protected_packet::ProtectedPacket`]).
+//!   ([`protected_packet::into_packets`]), each a [`protected_packet::Packet`]
+//!   with the header read: a packet with the protection still on
+//!   ([`protected_packet::ProtectedPacket`]), a Retry packet or a Version
+//!   Negotiation packet.
 //!
 //! Every wire format is read and written through `nitori_call` operations, in
 //! the `codec` module of its type. They run on sources and sinks that may wait

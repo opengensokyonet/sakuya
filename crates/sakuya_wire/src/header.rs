@@ -379,7 +379,7 @@ pub struct VersionNegotiation<D> {
     versions: D,
 }
 
-impl<D: Buf + Clone> VersionNegotiation<D> {
+impl<D> VersionNegotiation<D> {
     /// The version-independent fields.
     pub fn header(&self) -> &LongHeader {
         &self.header
@@ -395,6 +395,23 @@ impl<D: Buf + Clone> VersionNegotiation<D> {
         self.header.scid()
     }
 
+    /// The supported version list, a whole number of versions: the chunk of
+    /// the source that holds it, or its range within the packet when the
+    /// packet was located by [`into_packets`](crate::protected_packet::into_packets).
+    pub fn versions(&self) -> &D {
+        &self.versions
+    }
+
+    /// The packet with `versions` mapped by `map`.
+    pub(crate) fn map_versions<E>(self, map: impl FnOnce(D) -> E) -> VersionNegotiation<E> {
+        VersionNegotiation {
+            header: self.header,
+            versions: map(self.versions),
+        }
+    }
+}
+
+impl<D: Buf + Clone> VersionNegotiation<D> {
     /// The versions the list offers, in order. The list may be empty.
     pub fn supported_versions(&self) -> SupportedVersions<D> {
         SupportedVersions(self.versions.clone())

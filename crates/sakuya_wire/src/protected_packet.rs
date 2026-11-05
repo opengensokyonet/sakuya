@@ -4,8 +4,13 @@
 //! A datagram can coalesce several QUIC packets. [`into_packets`] cuts one
 //! apart without copying: for each packet it reads the header with the
 //! `sakuya_wire` header operations to find where the packet ends, and splits
-//! those bytes off the datagram with [`SplitTo`]. The datagram can be any
-//! buffer that splits from the front and can be read as bytes, such as a
+//! those bytes off the datagram with [`SplitTo`]. Each item is a [`Packet`]:
+//! a [`ProtectedPacket`], or a Retry or Version Negotiation packet, which are
+//! not protected. Neither of those has a Length field, so each extends to the
+//! end of the datagram and is the last item.
+//!
+//! The datagram can be any buffer that splits from the front and can be read
+//! as bytes, such as a
 //! `BytesMut`, whose packets each keep their share of the storage and can be
 //! rewritten in place, `Bytes`, whose packets share its storage read-only, or
 //! a byte slice, whose packets are subslices.
@@ -13,7 +18,7 @@
 //! ```
 //! use sakuya_wire::{
 //!     connection_id::ConnectionIdLength,
-//!     protected_packet::{ProtectedPacket, into_packets},
+//!     protected_packet::{Packet, ProtectedPacket, into_packets},
 //! };
 //!
 //! // A Handshake packet with 3 bytes of packet number and payload, then a
@@ -22,22 +27,25 @@
 //!     0xe0, 0, 0, 0, 1, 2, 7, 7, 0, 3, 0xaa, 0xbb, 0xcc, // Handshake
 //!     0x40, 7, 7, 0x11, 0x22, 0x33, 0x44, 0x55,          // 1-RTT
 //! ];
-//! let packets = into_packets(datagram, ConnectionIdLength::new(2).unwrap()).collect::<Result<Vec<_>, _>>().unwrap();
-//! assert!(matches!(packets[0], ProtectedPacket::Handshake(..)));
+//! let len = ConnectionIdLength::new(2).unwrap();
+//! let packets = into_packets(datagram, len).collect::<Result<Vec<_>, _>>().unwrap();
+//! assert!(matches!(packets[0], Packet::Protected(ProtectedPacket::Handshake(..))));
 //! assert_eq!(packets[0].bytes().len(), 13);
-//! assert!(matches!(packets[1], ProtectedPacket::OneRtt(..)));
+//! assert!(matches!(packets[1], Packet::Protected(ProtectedPacket::OneRtt(..))));
 //! assert_eq!(packets[1].bytes().len(), 8);
 //! ```
 //!
 //! [RFC 9000 §12.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.2
+use crate::version::Version;
 use crate::{
     connection_id::{ConnectionIdLength, RawConnectionId},
     encryption_level::EncryptionLevel,
     header::{
-        HeaderForm, ShortHeader,
+        HeaderForm, ShortHeader, VersionNegotiation,
         codec::{
             ReadLongHeaderError, ReadLongHeaderHostExt as _, ReadShortHeaderError,
-            ReadShortHeaderHostExt as _,
+            ReadShortHeaderHostExt as _, ReadVersionNegotiationError,
+            ReadVersionNegotiationHostExt as _,
         },
         v1::codec::ReadLongPacketHostExt as _,
         v1::{LongPacket, LongPacketType, codec::ReadLongPacketError},
@@ -107,18 +115,65 @@ impl<P> ProtectedPacket<P> {
     }
 }
 
+/// A packet cut from a datagram.
+///
+/// Most packets are protected. A Retry packet and a Version Negotiation
+/// packet are not, and have no Length field, so each extends to the end of
+/// the datagram ([RFC 9000 §12.2]). `P` is the buffer the datagram was cut
+/// from.
+///
+/// The header values hold ranges within the packet, as in
+/// [`ProtectedPacket`]. A Retry packet's token is a `Bytes` that shares the
+/// storage of a `Bytes` datagram and is copied otherwise, as
+/// [`TypeFields::Retry`](crate::header::v1::TypeFields::Retry) says.
+///
+/// [RFC 9000 §12.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.2
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Packet<P> {
+    /// A protected packet.
+    Protected(ProtectedPacket<P>),
+    /// A Retry packet, whose fields are those of
+    /// [`TypeFields::Retry`](crate::header::v1::TypeFields::Retry).
+    Retry(LongPacket<Range<usize>>, P),
+    /// A Version Negotiation packet, whose supported version list is the
+    /// range of the packet it fills.
+    VersionNegotiation(VersionNegotiation<Range<usize>>, P),
+}
+
+impl<P> Packet<P> {
+    /// The bytes of the whole packet.
+    pub fn bytes(&self) -> &P {
+        match self {
+            Self::Protected(packet) => packet.bytes(),
+            Self::Retry(_, bytes) | Self::VersionNegotiation(_, bytes) => bytes,
+        }
+    }
+
+    /// Takes the bytes of the whole packet.
+    pub fn into_bytes(self) -> P {
+        match self {
+            Self::Protected(packet) => packet.into_bytes(),
+            Self::Retry(_, bytes) | Self::VersionNegotiation(_, bytes) => bytes,
+        }
+    }
+}
+
 /// Cuts the packets out of `datagram`, one per item.
 ///
 /// A short header does not state the length of its destination connection
 /// ID, so `short_dcid_len` is the length the endpoint chose; the first packet
 /// that is a short header packet extends to the end of the datagram.
 ///
-/// Each item is a packet or the failure that stopped it:
-/// [`IntoPacketsError::UnreadableBoundary`] and
-/// [`IntoPacketsError::Retry`] end the iteration, since the rest of the
-/// datagram cannot be cut apart; [`IntoPacketsError::DcidDiffersFromFirst`]
-/// reports one packet that is to be ignored and the iteration goes on with the
-/// next. An empty datagram has no items.
+/// Each item is a packet or the failure that stopped it. A long header with
+/// version 0 is read as a Version Negotiation packet and one with version 1
+/// as a version 1 packet, whose Retry packets are [`Packet::Retry`]; a long
+/// header with another version has no readable boundary. A Retry or Version
+/// Negotiation packet extends to the end of the datagram, so it is the last
+/// item. [`IntoPacketsError::UnreadableBoundary`] ends the iteration, since
+/// the rest of the datagram cannot be cut apart;
+/// [`IntoPacketsError::DcidDiffersFromFirst`] reports one packet that is to
+/// be ignored and the iteration goes on with the next, whichever kind of
+/// packet it is. An empty datagram has no items.
 pub fn into_packets<P: SplitTo + AsRef<[u8]>>(
     datagram: P,
     short_dcid_len: ConnectionIdLength,
@@ -156,7 +211,7 @@ impl<P: SplitTo + AsRef<[u8]>> IntoPackets<P> {
 
     /// Reads the header of the packet at the start of the rest and cuts the
     /// packet off, with its destination connection ID.
-    fn cut(&mut self) -> Result<(ProtectedPacket<P>, RawConnectionId), IntoPacketsError> {
+    fn cut(&mut self) -> Result<(Packet<P>, RawConnectionId), IntoPacketsError> {
         let bytes = self.rest.as_ref();
         match HeaderForm::of(bytes[0]) {
             HeaderForm::Short => {
@@ -168,10 +223,8 @@ impl<P: SplitTo + AsRef<[u8]>> IntoPackets<P> {
                 let packet_number_offset = header.packet_number_offset();
                 let end = bytes.len();
                 let header = header.map_protected(|_| packet_number_offset..end);
-                Ok((
-                    ProtectedPacket::OneRtt(header, self.split_packet(end)),
-                    dcid,
-                ))
+                let packet = ProtectedPacket::OneRtt(header, self.split_packet(end));
+                Ok((Packet::Protected(packet), dcid))
             }
             HeaderForm::Long => {
                 let mut input = bytes;
@@ -179,22 +232,38 @@ impl<P: SplitTo + AsRef<[u8]>> IntoPackets<P> {
                     .sync_read_long_header_unpin()
                     .map_err(|source| PacketBoundaryError::LongHeader { source })?;
                 let dcid = *long.dcid();
+                if long.version() == Version::NEGOTIATION {
+                    let versions_start = long.version_specific_offset();
+                    let packet = input
+                        .sync_read_version_negotiation_unpin(long)
+                        .map_err(|source| PacketBoundaryError::VersionNegotiation { source })?;
+                    // The list fills the rest of the datagram.
+                    let end = bytes.len();
+                    let packet = packet.map_versions(|_| versions_start..end);
+                    return Ok((
+                        Packet::VersionNegotiation(packet, self.split_packet(end)),
+                        dcid,
+                    ));
+                }
                 let packet = input
                     .sync_read_long_packet_unpin(long)
                     .map_err(|source| PacketBoundaryError::LongPacket { source })?;
                 let kind = packet.packet_type();
-                if kind == LongPacketType::Retry {
-                    return Err(IntoPacketsError::Retry);
-                }
                 let end = packet.end();
                 let packet = packet.into_ranges(bytes);
                 let bytes = self.split_packet(end);
                 let packet = match kind {
-                    LongPacketType::Initial => ProtectedPacket::Initial(packet, bytes),
-                    LongPacketType::ZeroRtt => ProtectedPacket::ZeroRtt(packet, bytes),
-                    LongPacketType::Handshake => ProtectedPacket::Handshake(packet, bytes),
-                    // invariant: the Retry packet returned above.
-                    LongPacketType::Retry => unreachable!("Retry packets are not cut"),
+                    LongPacketType::Initial => {
+                        Packet::Protected(ProtectedPacket::Initial(packet, bytes))
+                    }
+                    LongPacketType::ZeroRtt => {
+                        Packet::Protected(ProtectedPacket::ZeroRtt(packet, bytes))
+                    }
+                    LongPacketType::Handshake => {
+                        Packet::Protected(ProtectedPacket::Handshake(packet, bytes))
+                    }
+                    // The Retry packet extends to the end of the datagram.
+                    LongPacketType::Retry => Packet::Retry(packet, bytes),
                 };
                 Ok((packet, dcid))
             }
@@ -203,7 +272,7 @@ impl<P: SplitTo + AsRef<[u8]>> IntoPackets<P> {
 }
 
 impl<P: SplitTo + AsRef<[u8]>> Iterator for IntoPackets<P> {
-    type Item = Result<ProtectedPacket<P>, IntoPacketsError>;
+    type Item = Result<Packet<P>, IntoPacketsError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.finished || self.rest.as_ref().is_empty() {
@@ -216,6 +285,8 @@ impl<P: SplitTo + AsRef<[u8]>> Iterator for IntoPackets<P> {
                 return Some(Err(error));
             }
         };
+        // A Retry or Version Negotiation packet took the rest of the datagram,
+        // so the iteration ends after it without further state.
         if dcid != *self.first_dcid.get_or_insert(dcid) {
             return Some(Err(IntoPacketsError::DcidDiffersFromFirst));
         }
@@ -241,10 +312,6 @@ pub enum IntoPacketsError {
     /// with the next one.
     #[snafu(display("destination connection ID differs from the first packet's"))]
     DcidDiffersFromFirst,
-    /// The packet is a Retry packet, which is not protected and extends to
-    /// the end of the datagram; the iteration ends.
-    #[snafu(display("Retry packet is not protected"))]
-    Retry,
 }
 
 impl From<PacketBoundaryError> for IntoPacketsError {
@@ -267,6 +334,13 @@ pub enum PacketBoundaryError {
     LongPacket {
         /// The failure of reading the fields.
         source: ReadLongPacketError<Infallible>,
+    },
+    /// The supported version list of a Version Negotiation packet could not
+    /// be read.
+    #[snafu(display("version negotiation packet read failed"))]
+    VersionNegotiation {
+        /// The failure of reading the list.
+        source: ReadVersionNegotiationError<Infallible>,
     },
     /// A short header could not be read.
     #[snafu(display("short header read failed"))]

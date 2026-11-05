@@ -1,4 +1,4 @@
-use super::{IntoPacketsError, PacketBoundaryError, ProtectedPacket, into_packets};
+use super::{IntoPacketsError, Packet, PacketBoundaryError, ProtectedPacket, into_packets};
 use crate::{
     connection_id::{ConnectionId, ConnectionIdLength},
     encryption_level::EncryptionLevel,
@@ -96,13 +96,24 @@ fn one_rtt(dcid: &[u8], body: &[u8]) -> Vec<u8> {
     packet
 }
 
-fn levels<P>(
-    items: &[Result<ProtectedPacket<P>, IntoPacketsError>],
-) -> Vec<Option<EncryptionLevel>> {
+/// The level of a protected packet; `None` for an error and for a packet
+/// that is not protected.
+fn levels<P>(items: &[Result<Packet<P>, IntoPacketsError>]) -> Vec<Option<EncryptionLevel>> {
     items
         .iter()
-        .map(|item| item.as_ref().ok().map(ProtectedPacket::level))
+        .map(|item| match item {
+            Ok(Packet::Protected(packet)) => Some(packet.level()),
+            _ => None,
+        })
         .collect()
+}
+
+/// The protected packet in an item.
+fn protected<P>(item: Result<Packet<P>, IntoPacketsError>) -> ProtectedPacket<P> {
+    match item.unwrap() {
+        Packet::Protected(packet) => packet,
+        _ => panic!("not a protected packet"),
+    }
 }
 
 #[test]
@@ -131,7 +142,7 @@ fn a_datagram_of_every_packet_kind_is_cut_in_order() {
 
     // The Initial packet's token and protected bytes are ranges of its own
     // bytes.
-    let Ok(ProtectedPacket::Initial(initial, bytes)) = &items[0] else {
+    let Ok(Packet::Protected(ProtectedPacket::Initial(initial, bytes))) = &items[0] else {
         panic!("not an Initial packet")
     };
     let TypeFields::Initial {
@@ -151,7 +162,7 @@ fn a_datagram_of_every_packet_kind_is_cut_in_order() {
     assert_eq!(initial.end(), bytes.len());
 
     // The 1-RTT packet's protected bytes follow its connection ID.
-    let Ok(ProtectedPacket::OneRtt(short, bytes)) = &items[3] else {
+    let Ok(Packet::Protected(ProtectedPacket::OneRtt(short, bytes))) = &items[3] else {
         panic!("not a 1-RTT packet")
     };
     assert_eq!(short.dcid().as_bytes(), DCID);
@@ -206,7 +217,7 @@ fn an_empty_datagram_has_no_packets() {
 fn a_short_header_packet_takes_the_rest_of_the_datagram() {
     let datagram = one_rtt(&DCID, &[0x44; 25]);
     let mut packets = into_packets(datagram.as_slice(), dcid_len(4));
-    let packet = packets.next().unwrap().unwrap();
+    let packet = protected(packets.next().unwrap());
     assert_eq!(packet.level(), EncryptionLevel::OneRtt);
     assert_eq!(packet.into_bytes(), datagram.as_slice());
     assert!(packets.next().is_none());
@@ -297,9 +308,9 @@ fn headers_that_end_early_have_unreadable_boundaries() {
 }
 
 #[test]
-fn a_version_that_is_not_v1_has_an_unreadable_boundary() {
-    // Version Negotiation, and a version that this crate does not know.
-    for version in [0u32, 0x6b33_43cf] {
+fn a_version_that_is_neither_zero_nor_v1_has_an_unreadable_boundary() {
+    // A version that this crate does not know.
+    for version in [0x6b33_43cfu32, 2, 0xff00_001d] {
         let mut datagram = vec![0xc0];
         datagram.extend_from_slice(&version.to_be_bytes());
         datagram.extend_from_slice(&[0, 0, 0, 0, 0, 1, 2, 3]);
@@ -318,23 +329,141 @@ fn a_version_that_is_not_v1_has_an_unreadable_boundary() {
     }
 }
 
-#[test]
-fn a_retry_packet_is_not_a_protected_packet() {
-    // RFC 9001 Appendix A.4.
-    let retry: Vec<u8> = (0..)
+/// RFC 9001 Appendix A.4: a Retry packet with an empty destination
+/// connection ID, an 8-byte source connection ID, the token `token` and the
+/// 16-byte integrity tag.
+fn rfc_retry() -> Vec<u8> {
+    (0..)
         .step_by(2)
         .take(36)
         .map(|index| {
             let text = "ff000000010008f067a5502a4262b5746f6b656e04a265ba2eff4d829058fb3f0f2496ba";
             u8::from_str_radix(&text[index..index + 2], 16).unwrap()
         })
-        .collect();
+        .collect()
+}
+
+/// A Version Negotiation packet offering versions 1 and 0xfaface00, with the
+/// given connection IDs.
+fn version_negotiation(dcid: &[u8], scid: &[u8]) -> Vec<u8> {
+    let mut packet = vec![0x80, 0, 0, 0, 0, dcid.len() as u8];
+    packet.extend_from_slice(dcid);
+    packet.push(scid.len() as u8);
+    packet.extend_from_slice(scid);
+    packet.extend_from_slice(&[0, 0, 0, 1, 0xfa, 0xce, 0xfa, 0xce]);
+    packet
+}
+
+#[test]
+fn a_retry_packet_alone_is_one_unprotected_packet() {
+    let retry = rfc_retry();
     let mut packets = into_packets(retry.as_slice(), dcid_len(0));
+    let Ok(Packet::Retry(packet, bytes)) = packets.next().unwrap() else {
+        panic!("not a Retry packet")
+    };
+    assert_eq!(bytes, retry.as_slice());
+    assert_eq!(packet.packet_type(), LongPacketType::Retry);
+    assert_eq!(packet.end(), retry.len());
+    let TypeFields::Retry {
+        token,
+        integrity_tag,
+        end,
+    } = packet.fields()
+    else {
+        panic!("not Retry fields")
+    };
+    assert_eq!(&token[..], b"token");
+    assert_eq!(integrity_tag[..], retry[retry.len() - 16..]);
+    assert_eq!(*end, retry.len());
+    assert!(packets.next().is_none());
+}
+
+#[test]
+fn a_version_negotiation_packet_alone_is_one_unprotected_packet() {
+    let datagram = version_negotiation(&DCID, &SCID);
+    let mut packets = into_packets(datagram.as_slice(), dcid_len(0));
+    let Ok(Packet::VersionNegotiation(packet, bytes)) = packets.next().unwrap() else {
+        panic!("not a Version Negotiation packet")
+    };
+    assert_eq!(bytes, datagram.as_slice());
+    assert_eq!(packet.dcid().as_bytes(), DCID);
+    assert_eq!(packet.scid().as_bytes(), SCID);
+    // The list fills the rest of the packet, after the first byte, the
+    // version and the two connection IDs with their lengths.
+    let list = packet.versions().clone();
+    assert_eq!(list, 1 + 4 + 1 + 4 + 1 + 2..datagram.len());
+    assert_eq!(datagram[list], [0, 0, 0, 1, 0xfa, 0xce, 0xfa, 0xce]);
+    assert!(packets.next().is_none());
+}
+
+#[test]
+fn a_retry_packet_ends_the_iteration_after_the_packets_before_it() {
+    // The Retry packet of RFC 9001 Appendix A.4 echoes a 0-byte destination
+    // connection ID in the long header, which the packet before it shares.
+    let initial = initial(&[], b"", &[1; 20]);
+    let retry = rfc_retry();
+    let datagram = [initial.clone(), retry.clone()].concat();
+    let items: Vec<_> = into_packets(datagram.as_slice(), dcid_len(0)).collect();
+    assert_eq!(items.len(), 2);
+    assert_eq!(levels(&items), [Some(EncryptionLevel::Initial), None]);
+    assert_eq!(items[0].as_ref().unwrap().bytes(), &initial.as_slice());
+    let Ok(Packet::Retry(_, bytes)) = &items[1] else {
+        panic!("not a Retry packet")
+    };
+    assert_eq!(*bytes, retry.as_slice());
+}
+
+#[test]
+fn a_retry_or_version_negotiation_packet_for_another_connection_is_reported() {
+    let datagram = [
+        initial(&DCID, b"", &[1; 20]),
+        version_negotiation(&[5; 4], &SCID),
+    ]
+    .concat();
+    let items: Vec<_> = into_packets(datagram.as_slice(), dcid_len(4)).collect();
+    assert_eq!(items.len(), 2);
+    assert!(matches!(
+        &items[1],
+        Err(IntoPacketsError::DcidDiffersFromFirst)
+    ));
+
+    // The Retry packet's destination connection ID is empty, unlike the
+    // Initial packet's.
+    let datagram = [initial(&DCID, b"", &[1; 20]), rfc_retry()].concat();
+    let items: Vec<_> = into_packets(datagram.as_slice(), dcid_len(4)).collect();
+    assert_eq!(items.len(), 2);
+    assert!(matches!(
+        &items[1],
+        Err(IntoPacketsError::DcidDiffersFromFirst)
+    ));
+}
+
+#[test]
+fn a_version_negotiation_packet_with_a_broken_list_has_an_unreadable_boundary() {
+    let mut datagram = version_negotiation(&DCID, &SCID);
+    datagram.pop();
+    let mut packets = into_packets(datagram.as_slice(), dcid_len(0));
     assert!(matches!(
         packets.next().unwrap(),
-        Err(IntoPacketsError::Retry)
+        Err(IntoPacketsError::UnreadableBoundary {
+            source: PacketBoundaryError::VersionNegotiation { .. }
+        })
     ));
     assert!(packets.next().is_none());
+}
+
+#[test]
+fn the_unprotected_packets_of_a_bytes_datagram_share_its_storage() {
+    let datagram = Bytes::from([initial(&[], b"", &[1; 20]), rfc_retry()].concat());
+    let start = datagram.as_ptr();
+    let items: Vec<_> = into_packets(datagram, dcid_len(0)).collect();
+    let Ok(Packet::Retry(_, bytes)) = &items[1] else {
+        panic!("not a Retry packet")
+    };
+    assert_eq!(
+        bytes.as_ptr(),
+        start.wrapping_add(items[0].as_ref().unwrap().bytes().len())
+    );
 }
 
 #[test]
@@ -346,7 +475,7 @@ fn the_packet_types_of_the_read_headers_match_the_levels() {
     ]
     .concat();
     for item in into_packets(datagram.as_slice(), dcid_len(4)) {
-        match item.unwrap() {
+        match protected(item) {
             ProtectedPacket::Initial(packet, _) => {
                 assert_eq!(packet.packet_type(), LongPacketType::Initial);
             }
