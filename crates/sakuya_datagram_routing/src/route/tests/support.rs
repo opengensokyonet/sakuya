@@ -146,7 +146,7 @@ pub(super) fn short(dcid: &[u8], rest: usize) -> Vec<u8> {
     packet.extend(std::iter::repeat_n(0x3c, rest));
     let mut input = packet.as_slice();
     let header = input
-        .sync_read_short_header_unpin(u8::try_from(dcid.len()).unwrap())
+        .sync_read_short_header_unpin(ConnectionIdLength::new(dcid.len()).unwrap())
         .unwrap();
     assert_eq!(header.dcid().as_bytes(), dcid);
     packet

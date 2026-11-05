@@ -1,6 +1,6 @@
 use super::{IntoPacketsError, PacketBoundaryError, ProtectedPacket, into_packets};
 use crate::{
-    connection_id::ConnectionId,
+    connection_id::{ConnectionId, ConnectionIdLength},
     encryption_level::EncryptionLevel,
     header::{
         ShortPacketHeader,
@@ -16,6 +16,10 @@ use bytes::{Bytes, BytesMut};
 
 const DCID: [u8; 4] = [1, 2, 3, 4];
 const SCID: [u8; 2] = [9, 8];
+
+fn dcid_len(length: usize) -> ConnectionIdLength {
+    ConnectionIdLength::new(length).unwrap()
+}
 
 fn cid(bytes: &[u8]) -> ConnectionId {
     ConnectionId::new(bytes).unwrap()
@@ -98,7 +102,7 @@ fn a_datagram_of_every_packet_kind_is_cut_in_order() {
     ];
     let datagram = packets.concat();
 
-    let items: Vec<_> = into_packets(datagram.as_slice(), 4).collect();
+    let items: Vec<_> = into_packets(datagram.as_slice(), dcid_len(4)).collect();
     assert_eq!(
         levels(&items),
         [
@@ -149,7 +153,7 @@ fn the_pieces_of_a_bytes_mut_share_its_storage() {
     let datagram = [handshake(&DCID, &[0x33; 20]), one_rtt(&DCID, &[0x44; 25])].concat();
     let mut buffer = BytesMut::from(datagram.as_slice());
     let start = buffer.as_ptr();
-    let items: Vec<_> = into_packets(buffer.split(), 4).collect();
+    let items: Vec<_> = into_packets(buffer.split(), dcid_len(4)).collect();
     assert_eq!(items.len(), 2);
     let mut offset = 0;
     for item in items {
@@ -164,15 +168,31 @@ fn the_pieces_of_a_bytes_mut_share_its_storage() {
 }
 
 #[test]
+fn the_pieces_of_a_bytes_share_its_storage() {
+    let datagram = [handshake(&DCID, &[0x33; 20]), one_rtt(&DCID, &[0x44; 25])].concat();
+    let buffer = Bytes::from(datagram.clone());
+    let start = buffer.as_ptr();
+    let items: Vec<_> = into_packets(buffer, dcid_len(4)).collect();
+    assert_eq!(items.len(), 2);
+    let mut offset = 0;
+    for item in items {
+        let packet = item.unwrap();
+        assert_eq!(packet.bytes().as_ptr(), start.wrapping_add(offset));
+        offset += packet.bytes().len();
+    }
+    assert_eq!(offset, datagram.len());
+}
+
+#[test]
 fn an_empty_datagram_has_no_packets() {
-    assert_eq!(into_packets(&b""[..], 4).count(), 0);
-    assert_eq!(into_packets(BytesMut::new(), 4).count(), 0);
+    assert_eq!(into_packets(&b""[..], dcid_len(4)).count(), 0);
+    assert_eq!(into_packets(BytesMut::new(), dcid_len(4)).count(), 0);
 }
 
 #[test]
 fn a_short_header_packet_takes_the_rest_of_the_datagram() {
     let datagram = one_rtt(&DCID, &[0x44; 25]);
-    let mut packets = into_packets(datagram.as_slice(), 4);
+    let mut packets = into_packets(datagram.as_slice(), dcid_len(4));
     let packet = packets.next().unwrap().unwrap();
     assert_eq!(packet.level(), EncryptionLevel::OneRtt);
     assert_eq!(packet.into_bytes(), datagram.as_slice());
@@ -189,7 +209,7 @@ fn a_packet_for_another_connection_is_reported_and_skipped() {
         one_rtt(&other, &[4; 20]),
     ]
     .concat();
-    let items: Vec<_> = into_packets(datagram.as_slice(), 4).collect();
+    let items: Vec<_> = into_packets(datagram.as_slice(), dcid_len(4)).collect();
     assert_eq!(
         levels(&items),
         [
@@ -219,7 +239,7 @@ fn a_short_header_of_another_length_differs_from_the_first_packet() {
         one_rtt(&DCID, &[4; 20]),
     ]
     .concat();
-    let items: Vec<_> = into_packets(datagram.as_slice(), 2).collect();
+    let items: Vec<_> = into_packets(datagram.as_slice(), dcid_len(2)).collect();
     assert_eq!(items.len(), 2);
     assert!(matches!(
         &items[1],
@@ -236,7 +256,7 @@ fn an_unreadable_boundary_ends_the_iteration() {
     bad[length_offset] = 63;
     let datagram = [good.clone(), bad, handshake(&DCID, &[4; 20])].concat();
 
-    let mut packets = into_packets(datagram.as_slice(), 4);
+    let mut packets = into_packets(datagram.as_slice(), dcid_len(4));
     assert_eq!(packets.next().unwrap().unwrap().bytes(), &good.as_slice());
     let Err(IntoPacketsError::UnreadableBoundary {
         source: PacketBoundaryError::LongPacket { source },
@@ -252,7 +272,7 @@ fn an_unreadable_boundary_ends_the_iteration() {
 #[test]
 fn headers_that_end_early_have_unreadable_boundaries() {
     for truncated in [&[0xe0][..], &[0xe0, 0, 0, 0, 1, 4, 1], &[0x40, 1, 2]] {
-        let mut packets = into_packets(truncated, 4);
+        let mut packets = into_packets(truncated, dcid_len(4));
         let item = packets.next().unwrap();
         let error = item.unwrap_err();
         assert!(
@@ -270,7 +290,7 @@ fn a_version_that_is_not_v1_has_an_unreadable_boundary() {
         let mut datagram = vec![0xc0];
         datagram.extend_from_slice(&version.to_be_bytes());
         datagram.extend_from_slice(&[0, 0, 0, 0, 0, 1, 2, 3]);
-        let mut packets = into_packets(datagram.as_slice(), 0);
+        let mut packets = into_packets(datagram.as_slice(), dcid_len(0));
         let Err(IntoPacketsError::UnreadableBoundary {
             source:
                 PacketBoundaryError::LongPacket {
@@ -296,7 +316,7 @@ fn a_retry_packet_is_not_a_protected_packet() {
             u8::from_str_radix(&text[index..index + 2], 16).unwrap()
         })
         .collect();
-    let mut packets = into_packets(retry.as_slice(), 0);
+    let mut packets = into_packets(retry.as_slice(), dcid_len(0));
     assert!(matches!(
         packets.next().unwrap(),
         Err(IntoPacketsError::Retry)
@@ -312,7 +332,7 @@ fn the_packet_types_of_the_read_headers_match_the_levels() {
         handshake(&DCID, &[3; 20]),
     ]
     .concat();
-    for item in into_packets(datagram.as_slice(), 4) {
+    for item in into_packets(datagram.as_slice(), dcid_len(4)) {
         match item.unwrap() {
             ProtectedPacket::Initial(packet, _) => {
                 assert_eq!(packet.packet_type(), LongPacketType::Initial);
@@ -331,7 +351,7 @@ fn the_packet_types_of_the_read_headers_match_the_levels() {
 #[test]
 fn zero_length_connection_ids_are_the_same_connection() {
     let datagram = [handshake(&[], &[2; 20]), one_rtt(&[], &[4; 20])].concat();
-    let items: Vec<_> = into_packets(datagram.as_slice(), 0).collect();
+    let items: Vec<_> = into_packets(datagram.as_slice(), dcid_len(0)).collect();
     assert_eq!(
         levels(&items),
         [

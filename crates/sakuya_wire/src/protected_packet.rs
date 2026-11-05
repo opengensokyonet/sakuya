@@ -7,10 +7,14 @@
 //! those bytes off the datagram with [`SplitTo`]. The datagram can be any
 //! buffer that splits from the front and can be read as bytes, such as a
 //! `BytesMut`, whose packets each keep their share of the storage and can be
-//! rewritten in place, or a byte slice, whose packets are subslices.
+//! rewritten in place, `Bytes`, whose packets share its storage read-only, or
+//! a byte slice, whose packets are subslices.
 //!
 //! ```
-//! use sakuya_wire::protected_packet::{ProtectedPacket, into_packets};
+//! use sakuya_wire::{
+//!     connection_id::ConnectionIdLength,
+//!     protected_packet::{ProtectedPacket, into_packets},
+//! };
 //!
 //! // A Handshake packet with 3 bytes of packet number and payload, then a
 //! // short header packet with a 2-byte destination connection ID.
@@ -18,7 +22,7 @@
 //!     0xe0, 0, 0, 0, 1, 2, 7, 7, 0, 3, 0xaa, 0xbb, 0xcc, // Handshake
 //!     0x40, 7, 7, 0x11, 0x22, 0x33, 0x44, 0x55,          // 1-RTT
 //! ];
-//! let packets = into_packets(datagram, 2).collect::<Result<Vec<_>, _>>().unwrap();
+//! let packets = into_packets(datagram, ConnectionIdLength::new(2).unwrap()).collect::<Result<Vec<_>, _>>().unwrap();
 //! assert!(matches!(packets[0], ProtectedPacket::Handshake(..)));
 //! assert_eq!(packets[0].bytes().len(), 13);
 //! assert!(matches!(packets[1], ProtectedPacket::OneRtt(..)));
@@ -27,7 +31,7 @@
 //!
 //! [RFC 9000 §12.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.2
 use crate::{
-    connection_id::RawConnectionId,
+    connection_id::{ConnectionIdLength, RawConnectionId},
     encryption_level::EncryptionLevel,
     header::{
         HeaderForm, ShortHeader,
@@ -115,7 +119,10 @@ impl<P> ProtectedPacket<P> {
 /// datagram cannot be cut apart; [`IntoPacketsError::DcidDiffersFromFirst`]
 /// reports one packet that is to be ignored and the iteration goes on with the
 /// next. An empty datagram has no items.
-pub fn into_packets<P: SplitTo + AsRef<[u8]>>(datagram: P, short_dcid_len: u8) -> IntoPackets<P> {
+pub fn into_packets<P: SplitTo + AsRef<[u8]>>(
+    datagram: P,
+    short_dcid_len: ConnectionIdLength,
+) -> IntoPackets<P> {
     IntoPackets {
         rest: datagram,
         short_dcid_len,
@@ -130,12 +137,23 @@ pub fn into_packets<P: SplitTo + AsRef<[u8]>>(datagram: P, short_dcid_len: u8) -
 #[derive(Clone, Debug)]
 pub struct IntoPackets<P> {
     rest: P,
-    short_dcid_len: u8,
+    short_dcid_len: ConnectionIdLength,
     first_dcid: Option<RawConnectionId>,
     finished: bool,
 }
 
 impl<P: SplitTo + AsRef<[u8]>> IntoPackets<P> {
+    /// Cuts the first `end` bytes of the rest off as one packet.
+    fn split_packet(&mut self, end: usize) -> P {
+        match self.rest.split_to(end) {
+            Ok(packet) => packet,
+            // invariant: `end` is where the header read from the rest says the
+            // packet ends, which is the rest's length or a range of the Length
+            // field that reading checked to lie within it.
+            Err(_) => unreachable!("a packet ends within the datagram"),
+        }
+    }
+
     /// Reads the header of the packet at the start of the rest and cuts the
     /// packet off, with its destination connection ID.
     fn cut(&mut self) -> Result<(ProtectedPacket<P>, RawConnectionId), IntoPacketsError> {
@@ -151,7 +169,7 @@ impl<P: SplitTo + AsRef<[u8]>> IntoPackets<P> {
                 let end = bytes.len();
                 let header = header.map_protected(|_| packet_number_offset..end);
                 Ok((
-                    ProtectedPacket::OneRtt(header, self.rest.split_to(end)),
+                    ProtectedPacket::OneRtt(header, self.split_packet(end)),
                     dcid,
                 ))
             }
@@ -170,7 +188,7 @@ impl<P: SplitTo + AsRef<[u8]>> IntoPackets<P> {
                 }
                 let end = packet.end();
                 let packet = packet.into_ranges(bytes);
-                let bytes = self.rest.split_to(end);
+                let bytes = self.split_packet(end);
                 let packet = match kind {
                     LongPacketType::Initial => ProtectedPacket::Initial(packet, bytes),
                     LongPacketType::ZeroRtt => ProtectedPacket::ZeroRtt(packet, bytes),

@@ -46,9 +46,9 @@
 //!     },
 //!     v1::{self, codec::ReadLongPacketHostExt as _},
 //! };
-//! use sakuya_wire::version::Version;
+//! use sakuya_wire::{connection_id::ConnectionIdLength, version::Version};
 //!
-//! fn describe(datagram: &[u8], short_dcid_len: u8) -> String {
+//! fn describe(datagram: &[u8], short_dcid_len: ConnectionIdLength) -> String {
 //!     let Some(&first) = datagram.first() else { return "empty".into() };
 //!     let mut input = datagram;
 //!     match HeaderForm::of(first) {
@@ -76,17 +76,18 @@
 //!     }
 //! }
 //!
-//! assert_eq!(describe(&[0x40, 0xaa, 0xbb, 0x01], 2), "short, packet number at 3");
+//! let len = |length| ConnectionIdLength::new(length).unwrap();
+//! assert_eq!(describe(&[0x40, 0xaa, 0xbb, 0x01], len(2)), "short, packet number at 3");
 //! assert_eq!(
-//!     describe(&[0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], 0),
+//!     describe(&[0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], len(0)),
 //!     "1 versions offered",
 //! );
 //! assert_eq!(
-//!     describe(&[0xe0, 0, 0, 0, 1, 0, 0, 0x01, 0xaa], 0),
+//!     describe(&[0xe0, 0, 0, 0, 1, 0, 0, 0x01, 0xaa], len(0)),
 //!     "Handshake ending at 9",
 //! );
 //! assert_eq!(
-//!     describe(&[0xc0, 0x6b, 0x33, 0x43, 0xcf, 0, 0], 0),
+//!     describe(&[0xc0, 0x6b, 0x33, 0x43, 0xcf, 0, 0], len(0)),
 //!     "unsupported version 0x6b3343cf",
 //! );
 //! ```

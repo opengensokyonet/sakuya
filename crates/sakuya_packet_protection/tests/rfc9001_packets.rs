@@ -12,7 +12,7 @@ use sakuya_packet_protection::initial::{INITIAL_AEAD, InitialSecrets};
 use sakuya_packet_protection::packet_key::PacketKey;
 use sakuya_packet_protection::retry::verify_retry_integrity_tag;
 use sakuya_packet_protection::secret::TrafficSecret;
-use sakuya_wire::connection_id::ConnectionId;
+use sakuya_wire::connection_id::{ConnectionId, ConnectionIdLength};
 use sakuya_wire::frame::{Extensions, Frame, Frames};
 use sakuya_wire::header::codec::{ReadLongHeaderHostExt as _, ReadShortHeaderHostExt as _};
 use sakuya_wire::header::v1::codec::ReadLongPacketHostExt as _;
@@ -180,7 +180,9 @@ fn a5_short_header_end_to_end() {
     let hp = HeaderProtectionKey::derive(&RingBackend, aead, &secret);
 
     let mut input = protected.as_slice();
-    let header = input.sync_read_short_header_unpin(0).unwrap();
+    let header = input
+        .sync_read_short_header_unpin(ConnectionIdLength::ZERO)
+        .unwrap();
     assert_eq!(header.packet_number_offset(), 1);
     assert_eq!(header.sample_offset(), 5);
     assert_eq!(header.end(), protected.len());

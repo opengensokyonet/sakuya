@@ -11,12 +11,16 @@ use super::{
     },
 };
 use crate::{
-    connection_id::ConnectionId,
+    connection_id::{ConnectionId, ConnectionIdLength},
     payload::ReadPayloadError,
     var_int::{VarInt, codec::WriteVarIntHostExt as _},
     version::Version,
 };
 use bytes::Bytes;
+
+fn dcid_len(length: usize) -> ConnectionIdLength {
+    ConnectionIdLength::new(length).unwrap()
+}
 
 /// The protected client Initial packet of RFC 9001 Appendix A.2: 1200 bytes,
 /// an 8-byte destination connection ID, an empty source connection ID, no
@@ -216,7 +220,9 @@ fn empty_input() {
     let error = input.sync_read_long_header_unpin().unwrap_err();
     assert!(matches!(error, ReadLongHeaderError::FirstByte { .. }));
     assert!(error.is_incomplete());
-    let error = input.sync_read_short_header_unpin(0).unwrap_err();
+    let error = input
+        .sync_read_short_header_unpin(ConnectionIdLength::ZERO)
+        .unwrap_err();
     assert!(matches!(error, ReadShortHeaderError::FirstByte { .. }));
     assert!(error.is_incomplete());
 }
@@ -230,7 +236,7 @@ fn wrong_header_form() {
     ));
     let mut input = &[0xc0, 0, 0][..];
     assert!(matches!(
-        input.sync_read_short_header_unpin(0),
+        input.sync_read_short_header_unpin(ConnectionIdLength::ZERO),
         Err(ReadShortHeaderError::LongForm)
     ));
 }
@@ -354,10 +360,12 @@ fn connection_id_lengths() {
 #[test]
 fn short_header_with_caller_supplied_lengths() {
     let datagram = [0x41, 1, 2, 3, 4, 5, 6, 7, 8, 0xee, 0xee, 0xee];
-    for dcid_len in [0, 1, 8, 11] {
+    for length in [0, 1, 8, 11] {
         let mut input = &datagram[..];
-        let header = input.sync_read_short_header_unpin(dcid_len).unwrap();
-        let dcid_len = usize::from(dcid_len);
+        let header = input
+            .sync_read_short_header_unpin(dcid_len(length))
+            .unwrap();
+        let dcid_len = length;
         assert_eq!(header.first_byte(), 0x41);
         assert_eq!(header.dcid().as_bytes(), &datagram[1..1 + dcid_len]);
         assert_eq!(header.packet_number_offset(), 1 + dcid_len);
@@ -366,9 +374,11 @@ fn short_header_with_caller_supplied_lengths() {
         assert_eq!(header.end(), datagram.len());
         assert!(input.is_empty());
     }
-    for (input, dcid_len) in [(&datagram[..], 12), (&datagram[..1], 20)] {
+    for (input, length) in [(&datagram[..], 12), (&datagram[..1], 20)] {
         let mut input = input;
-        let error = input.sync_read_short_header_unpin(dcid_len).unwrap_err();
+        let error = input
+            .sync_read_short_header_unpin(dcid_len(length))
+            .unwrap_err();
         assert!(
             matches!(error, ReadShortHeaderError::Dcid { .. }),
             "{error:?}"
@@ -555,7 +565,7 @@ fn coalesced_packets() {
 
     assert_eq!(HeaderForm::of(input[0]), HeaderForm::Short);
     let third = input
-        .sync_read_short_header_unpin(RFC_DCID.len() as u8)
+        .sync_read_short_header_unpin(dcid_len(RFC_DCID.len()))
         .unwrap();
     assert_eq!(third.dcid().as_bytes(), RFC_DCID);
     assert_eq!(third.packet_number_offset(), 9);
@@ -849,7 +859,7 @@ fn written_short_headers_read_back_as_the_same_fields() {
         assert_eq!(packet.len(), header.packet_number_offset());
         packet.extend_from_slice(&[0x33; 30]);
         let mut input = packet.as_slice();
-        let read = input.sync_read_short_header_unpin(8).unwrap();
+        let read = input.sync_read_short_header_unpin(dcid_len(8)).unwrap();
         assert_eq!(read.first_byte(), header.first_byte());
         assert_eq!(read.dcid().as_bytes(), dcid.as_bytes());
         assert_eq!(read.packet_number_offset(), header.packet_number_offset());

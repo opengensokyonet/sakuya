@@ -18,7 +18,7 @@ use super::{
 };
 use crate::{
     connection_id::{
-        RawConnectionId,
+        ConnectionIdLength, RawConnectionId,
         codec::{ReadRawConnectionIdError, ReadRawConnectionIdExt as _},
     },
     payload::{ReadPayloadError, read_payload_to_end},
@@ -134,7 +134,7 @@ impl<E> ReadLongHeaderError<E> {
 #[call(sync)]
 pub async fn read_short_header<F, A>(
     io: &mut A,
-    dcid_len: u8,
+    dcid_len: ConnectionIdLength,
 ) -> Result<ShortHeader<F::Chunk>, ReadShortHeaderError<F::Error>>
 where
     F: ReadChunk<Chunk: Default>,
@@ -153,7 +153,7 @@ where
     io.read_exact(&mut destination, length)
         .await
         .context(read_short_header_error::DcidSnafu)?;
-    dcid.len = dcid_len;
+    dcid.len = u8::from(dcid_len);
     let protected = read_payload_to_end(io)
         .await
         .context(read_short_header_error::ProtectedSnafu)?;

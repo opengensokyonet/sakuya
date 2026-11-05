@@ -1,6 +1,7 @@
 //! The version-independent properties of QUIC (RFC 8999), through the public
 //! interface.
 use sakuya_wire::{
+    connection_id::ConnectionIdLength,
     header::{
         HeaderForm,
         codec::{
@@ -93,21 +94,25 @@ fn long_header_connection_ids_take_any_length_a_byte_states() {
 fn short_headers_read_with_the_length_the_caller_knows() {
     for first in 0x00..=0x7fu8 {
         let bytes = [first, 1, 2, 3, 4, 5];
-        for length in 0..=5u8 {
+        for length in 0..=5 {
             let mut input = bytes.as_slice();
-            let header = input.sync_read_short_header_unpin(length).unwrap();
+            let header = input
+                .sync_read_short_header_unpin(ConnectionIdLength::new(length).unwrap())
+                .unwrap();
             assert_eq!(header.first_byte(), first);
-            assert_eq!(header.dcid().len(), usize::from(length));
-            assert_eq!(header.packet_number_offset(), 1 + usize::from(length));
+            assert_eq!(header.dcid().len(), length);
+            assert_eq!(header.packet_number_offset(), 1 + length);
             assert_eq!(header.end(), bytes.len());
         }
         let mut input = bytes.as_slice();
-        let error = input.sync_read_short_header_unpin(6).unwrap_err();
+        let error = input
+            .sync_read_short_header_unpin(ConnectionIdLength::new(6).unwrap())
+            .unwrap_err();
         assert!(error.is_incomplete());
     }
     let mut input = &[0x80, 0, 0][..];
     assert!(matches!(
-        input.sync_read_short_header_unpin(0),
+        input.sync_read_short_header_unpin(ConnectionIdLength::ZERO),
         Err(ReadShortHeaderError::LongForm)
     ));
 }
