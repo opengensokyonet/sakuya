@@ -320,7 +320,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "nitori_call"
 version = "0.0.0"
-source = "git+https://github.com/opengensokyonet/nitori?rev=a18e915ba930d60485b332017a43c2c1a2e7a1e1#a18e915ba930d60485b332017a43c2c1a2e7a1e1"
+source = "git+https://github.com/opengensokyonet/nitori?rev=f38c655b7cb86e58cb9b5c762b2b569431af6766#f38c655b7cb86e58cb9b5c762b2b569431af6766"
 dependencies = [
  "bytes",
  "futures-core",
@@ -331,7 +331,7 @@ dependencies = [
 [[package]]
 name = "nitori_call_macros"
 version = "0.0.0"
-source = "git+https://github.com/opengensokyonet/nitori?rev=a18e915ba930d60485b332017a43c2c1a2e7a1e1#a18e915ba930d60485b332017a43c2c1a2e7a1e1"
+source = "git+https://github.com/opengensokyonet/nitori?rev=f38c655b7cb86e58cb9b5c762b2b569431af6766#f38c655b7cb86e58cb9b5c762b2b569431af6766"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -341,7 +341,7 @@ dependencies = [
 [[package]]
 name = "nitori_crypto"
 version = "0.0.0"
-source = "git+https://github.com/opengensokyonet/nitori?rev=a18e915ba930d60485b332017a43c2c1a2e7a1e1#a18e915ba930d60485b332017a43c2c1a2e7a1e1"
+source = "git+https://github.com/opengensokyonet/nitori?rev=f38c655b7cb86e58cb9b5c762b2b569431af6766#f38c655b7cb86e58cb9b5c762b2b569431af6766"
 dependencies = [
  "smallvec",
  "snafu",
@@ -351,7 +351,7 @@ dependencies = [
 [[package]]
 name = "nitori_crypto_aws_lc"
 version = "0.0.0"
-source = "git+https://github.com/opengensokyonet/nitori?rev=a18e915ba930d60485b332017a43c2c1a2e7a1e1#a18e915ba930d60485b332017a43c2c1a2e7a1e1"
+source = "git+https://github.com/opengensokyonet/nitori?rev=f38c655b7cb86e58cb9b5c762b2b569431af6766#f38c655b7cb86e58cb9b5c762b2b569431af6766"
 dependencies = [
  "aws-lc-rs",
  "nitori_crypto",
@@ -361,12 +361,12 @@ dependencies = [
 [[package]]
 name = "nitori_id"
 version = "0.0.0"
-source = "git+https://github.com/opengensokyonet/nitori?rev=a18e915ba930d60485b332017a43c2c1a2e7a1e1#a18e915ba930d60485b332017a43c2c1a2e7a1e1"
+source = "git+https://github.com/opengensokyonet/nitori?rev=f38c655b7cb86e58cb9b5c762b2b569431af6766#f38c655b7cb86e58cb9b5c762b2b569431af6766"
 
 [[package]]
 name = "nitori_io"
 version = "0.0.0"
-source = "git+https://github.com/opengensokyonet/nitori?rev=a18e915ba930d60485b332017a43c2c1a2e7a1e1#a18e915ba930d60485b332017a43c2c1a2e7a1e1"
+source = "git+https://github.com/opengensokyonet/nitori?rev=f38c655b7cb86e58cb9b5c762b2b569431af6766#f38c655b7cb86e58cb9b5c762b2b569431af6766"
 dependencies = [
  "bytes",
  "nitori_call",
