@@ -518,7 +518,7 @@ mod tests {
     use crate::{
         cipher_suite::CipherSuite,
         clock::ManualClock,
-        extension::pre_shared_key::{OfferedPsks, PskBinder, PskIdentity, PskIndex},
+        extension::pre_shared_key::{OfferedPsks, PskBinderEntry, PskIdentity, PskIndex},
         message::new_session_ticket::{TicketLifetime, TicketNonce},
         schedule::ResumptionPsk,
         test_support::ready_now as now,
@@ -569,7 +569,7 @@ mod tests {
                 .collect(),
             identities
                 .iter()
-                .map(|_| PskBinder::new(vec![0; 32]).unwrap())
+                .map(|_| PskBinderEntry::new(vec![0; 32]).unwrap())
                 .collect(),
         )
         .unwrap()

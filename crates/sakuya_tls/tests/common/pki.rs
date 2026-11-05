@@ -9,7 +9,7 @@ use sakuya_tls::{
     clock::ManualClock,
     verify::{
         AnchorStore, NoRevocationCheck, SpkiDistrustList, SubjectPublicKey, WebPkiVerifier,
-        transparency::{EmbeddedSctPolicy, LogList, StaleLogList},
+        transparency::{EmbeddedSctPolicy, LogList, StaleLogListAction},
     },
 };
 use std::{sync::Arc, time::Duration};
@@ -154,7 +154,7 @@ pub fn verifier(clock: &Arc<ManualClock>) -> Verifier {
     let transparency = EmbeddedSctPolicy::with_list_age(
         LogList::new(Vec::new(), UtcDateTime::UNIX_EPOCH),
         Duration::ZERO,
-        StaleLogList::SkipCheck,
+        StaleLogListAction::SkipCheck,
     );
     WebPkiVerifier::new(
         AwsLcBackend,

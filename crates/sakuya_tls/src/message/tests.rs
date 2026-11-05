@@ -1,5 +1,5 @@
 use super::{
-    HandshakeType, MessageLimit, MessageLimits, ReceivedMessage,
+    HandshakeType, MessageLimit, MessageLimits, ReceivedMessageType,
     codec::{ReadHandshakeMessageError, ReadHandshakeMessageHostExt as _},
 };
 use crate::{alert::AlertDescription, test_support::message};
@@ -89,7 +89,7 @@ fn a_length_above_the_limit_fails_before_the_body() {
     };
     assert_eq!(
         (source.message(), source.length(), source.limit()),
-        (ReceivedMessage::CertificateVerify, 5, 4)
+        (ReceivedMessageType::CertificateVerify, 5, 4)
     );
     assert_eq!(error.alert(), AlertDescription::ILLEGAL_PARAMETER);
     assert_eq!(input, [1, 2, 3, 4, 5]);
@@ -150,19 +150,19 @@ fn a_stream_that_ends_within_a_message_is_a_decode_error() {
 fn limits_default_and_are_bounded() {
     let limits = MessageLimits::default();
     assert_eq!(
-        limits.limit(ReceivedMessage::ClientHello, None),
+        limits.limit(ReceivedMessageType::ClientHello, None),
         Some(16 * 1024)
     );
     assert_eq!(
-        limits.limit(ReceivedMessage::Certificate, None),
+        limits.limit(ReceivedMessageType::Certificate, None),
         Some(64 * 1024)
     );
     assert_eq!(
-        limits.limit(ReceivedMessage::CertificateVerify, None),
+        limits.limit(ReceivedMessageType::CertificateVerify, None),
         Some(8 * 1024)
     );
     assert_eq!(
-        limits.limit(ReceivedMessage::Finished, Some(HashAlgorithm::Sha384)),
+        limits.limit(ReceivedMessageType::Finished, Some(HashAlgorithm::Sha384)),
         Some(48)
     );
     assert_eq!(MessageLimit::new(0xff_ffff).unwrap(), MessageLimit::MAX);

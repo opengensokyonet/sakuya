@@ -4,21 +4,23 @@
 //! transcript in CertificateVerify with the key of the leaf. The scheme of
 //! that signature must be one the client offered in
 //! `signature_algorithms` and fit the key; RSA signs with RSASSA-PSS, and
-//! no scheme uses SHA-1 (RFC 9846 §4.5.2). [`Identity::present`] picks the
-//! chain and the scheme for the selected target; the handshake computes
-//! the content to sign, and the signature may wait.
+//! no scheme uses SHA-1 (RFC 9846 §4.5.2).
+//! [`CertificateSelection::present`] picks the chain and the scheme for
+//! the selected target; the handshake computes the content to sign, and
+//! the signature may wait.
 //!
 //! [`CertifiedKey`] presents one chain with one signing key.
 
-use crate::{alert::AlertDescription, server::targets::Selected};
+use crate::{alert::AlertDescription, server::targets::SelectedTarget};
 use bytes::Bytes;
 use nitori_crypto::{SignatureScheme, SigningKey};
 use snafu::Snafu;
 
-/// How a server presents itself for a selected target.
+/// How a server picks the certificate chain it presents for a selected
+/// target, and the scheme it signs CertificateVerify with.
 ///
 /// `T` is the type of the selected target.
-pub trait Identity<T> {
+pub trait CertificateSelection<T> {
     /// The key that signs CertificateVerify.
     type Key: SigningKey;
 
@@ -30,7 +32,7 @@ pub trait Identity<T> {
     /// [`NoCommonSchemeError`] when the key signs with none of `offered`.
     fn present(
         &self,
-        selected: &Selected<T>,
+        selected: &SelectedTarget<T>,
         offered: &[SignatureScheme],
     ) -> Result<Presented<'_, Self::Key>, NoCommonSchemeError>;
 }
@@ -118,12 +120,12 @@ impl<K> CertifiedKey<K> {
 #[snafu(display("certificate chain is empty"))]
 pub struct EmptyChainError;
 
-impl<K: SigningKey, T> Identity<T> for CertifiedKey<K> {
+impl<K: SigningKey, T> CertificateSelection<T> for CertifiedKey<K> {
     type Key = K;
 
     fn present(
         &self,
-        _selected: &Selected<T>,
+        _selected: &SelectedTarget<T>,
         offered: &[SignatureScheme],
     ) -> Result<Presented<'_, K>, NoCommonSchemeError> {
         let scheme = self
@@ -144,8 +146,8 @@ impl<K: SigningKey, T> Identity<T> for CertifiedKey<K> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CertifiedKey, EmptyChainError, Identity, NoCommonSchemeError};
-    use crate::{server::targets::Selected, test_support::ready_now};
+    use super::{CertificateSelection, CertifiedKey, EmptyChainError, NoCommonSchemeError};
+    use crate::{server::targets::SelectedTarget, test_support::ready_now};
     use bytes::Bytes;
     use core::{
         convert::Infallible,
@@ -172,8 +174,8 @@ mod tests {
         }
     }
 
-    fn selected() -> Selected<()> {
-        Selected {
+    fn selected() -> SelectedTarget<()> {
+        SelectedTarget {
             target: (),
             application_protocol: None,
         }
@@ -210,7 +212,7 @@ mod tests {
             SignatureScheme::RSA_PKCS1_SHA256,
             SignatureScheme::ECDSA_SECP256R1_SHA256,
         ]);
-        let error = Identity::<()>::present(
+        let error = CertificateSelection::<()>::present(
             &identity,
             &selected(),
             &[SignatureScheme::RSA_PKCS1_SHA256, SignatureScheme::ED25519],

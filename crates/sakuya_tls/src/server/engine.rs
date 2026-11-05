@@ -96,10 +96,10 @@ use crate::{
     },
     server::{
         choice::{ClientOffer, NoCommonParametersError, ParameterChoice},
-        identity::{Identity, NoCommonSchemeError},
+        identity::{CertificateSelection, NoCommonSchemeError},
         layers::{AcceptedHello, HelloLayers},
         peer::PeerAuthentication,
-        targets::{Selected, TargetSelection},
+        targets::{SelectedTarget, TargetSelection},
         ticket::{
             ClientHelloKey, Issuing, Opened, Resumable, TicketPolicy, TicketSlot, TicketState,
         },
@@ -141,7 +141,7 @@ pub trait ServerTransport<T>: ReceiverFamily {
     fn negotiate<'v>(
         view: Pin<&mut Self::ReceiverView<'v>>,
         peer: &[u8],
-        selected: &Selected<T>,
+        selected: &SelectedTarget<T>,
         resumed: Option<&TicketState<T>>,
     ) -> Result<Negotiated, Self::Error>
     where
@@ -207,7 +207,7 @@ pub enum ServerHandshakeEvent<C: TlsCrypto, T> {
         /// The exporter of the connection.
         exporter: Exporter<C>,
         /// The selected target and application protocol.
-        selected: Selected<T>,
+        selected: SelectedTarget<T>,
         /// Whether the server authenticated with the PSK of a ticket.
         resumed: bool,
     },
@@ -413,7 +413,7 @@ type Failed<E, L, S, P, K> = HandshakeError<
     ServerAlertError<
         <L as HelloLayers>::Error,
         <S as TargetSelection>::Error,
-        <<P as Identity<<S as TargetSelection>::Target>>::Key as SigningKey>::Error,
+        <<P as CertificateSelection<<S as TargetSelection>::Target>>::Key as SigningKey>::Error,
         <<<K as TicketPolicy<<S as TargetSelection>::Target>>::Issuing as Issuing>::Slot as TicketSlot>::Error,
     >,
     E,
@@ -611,7 +611,7 @@ where
     L::Accepted: AcceptedHello<Confirmation = Infallible, RetryConfigs = Infallible>,
     S: TargetSelection,
     S::Target: Clone + PartialEq,
-    P: Identity<<S as TargetSelection>::Target>,
+    P: CertificateSelection<<S as TargetSelection>::Target>,
     Q: PeerAuthentication<<S as TargetSelection>::Target, Request = Infallible>,
     Z: Clock,
 {

@@ -5,11 +5,11 @@
 //! CertificateVerify before its Finished (RFC 9846 §4.4.2, §4.5.1).
 //! [`PeerAuthentication::request`] decides for the selected target.
 //!
-//! [`NoClientCertificate`] never asks. Its request is of a type with no
+//! [`NoCertificateRequest`] never asks. Its request is of a type with no
 //! values, so the handshake's code for client certificates is never
 //! reached.
 
-use crate::server::targets::Selected;
+use crate::server::targets::SelectedTarget;
 use core::convert::Infallible;
 
 /// How a server decides whether to ask for a client certificate.
@@ -20,32 +20,32 @@ pub trait PeerAuthentication<T> {
     type Request;
 
     /// The request for `selected`, or `None` to ask for no certificate.
-    fn request(&self, selected: &Selected<T>) -> Option<Self::Request>;
+    fn request(&self, selected: &SelectedTarget<T>) -> Option<Self::Request>;
 }
 
 /// Asks no client for a certificate.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct NoClientCertificate;
+pub struct NoCertificateRequest;
 
-impl<T> PeerAuthentication<T> for NoClientCertificate {
+impl<T> PeerAuthentication<T> for NoCertificateRequest {
     type Request = Infallible;
 
-    fn request(&self, _selected: &Selected<T>) -> Option<Infallible> {
+    fn request(&self, _selected: &SelectedTarget<T>) -> Option<Infallible> {
         None
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{NoClientCertificate, PeerAuthentication};
-    use crate::server::targets::Selected;
+    use super::{NoCertificateRequest, PeerAuthentication};
+    use crate::server::targets::SelectedTarget;
 
     #[test]
     fn no_certificate_is_asked_for() {
-        let selected = Selected {
+        let selected = SelectedTarget {
             target: (),
             application_protocol: None,
         };
-        assert!(NoClientCertificate.request(&selected).is_none());
+        assert!(NoCertificateRequest.request(&selected).is_none());
     }
 }

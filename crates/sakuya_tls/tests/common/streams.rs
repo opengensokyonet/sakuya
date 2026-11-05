@@ -15,7 +15,7 @@ use sakuya_tls::{
     extension::OpaqueData,
     server::{
         engine::{Negotiated, ServerTransport},
-        targets::Selected,
+        targets::SelectedTarget,
         ticket::TicketState,
     },
 };
@@ -170,7 +170,7 @@ impl ServerTransport<&'static str> for ServerParameters {
     fn negotiate<'v>(
         view: Pin<&mut BorrowedReceiver<'v, ServerParameters>>,
         peer: &[u8],
-        _selected: &Selected<&'static str>,
+        _selected: &SelectedTarget<&'static str>,
         resumed: Option<&TicketState<&'static str>>,
     ) -> Result<Negotiated, Fault>
     where

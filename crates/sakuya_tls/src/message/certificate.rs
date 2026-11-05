@@ -10,7 +10,7 @@ use crate::{
     extension::{
         BlockEntry, ExtensionType, InvalidExtensionsError, UnknownExtension,
         certificate_type::CertificateType, check_block,
-        signed_certificate_timestamp::SignedCertificateTimestamps,
+        signed_certificate_timestamp::SignedCertificateTimestampList,
     },
     vector::LengthOutOfRangeError,
     width::Width,
@@ -48,7 +48,7 @@ pub struct CertificateEntry<C> {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum CertificateEntryExtension<C> {
     /// `signed_certificate_timestamp`: SCTs for the certificate.
-    SignedCertificateTimestamp(SignedCertificateTimestamps<C>),
+    SignedCertificateTimestamp(SignedCertificateTimestampList<C>),
     /// An extension the readers do not recognize, such as `status_request`.
     Unknown(UnknownExtension<C>),
 }
@@ -284,7 +284,8 @@ pub mod codec {
             BlockEntry as _, BlockReader, ExtensionBlockError, ExtensionNotAllowedError,
             RestrictedExtension, UnknownExtension, not_allowed, read_extension_block,
             signed_certificate_timestamp::codec::{
-                ReadSignedCertificateTimestampsError, ReadSignedCertificateTimestampsHostExt as _,
+                ReadSignedCertificateTimestampListError,
+                ReadSignedCertificateTimestampListHostExt as _,
             },
         },
         message::{HandshakeType, MessageSource, ReadHeaderError, read_body},
@@ -367,7 +368,7 @@ pub mod codec {
             };
             extensions.push(match restricted {
                 RestrictedExtension::SignedCertificateTimestamp => X::SignedCertificateTimestamp(
-                    data.sync_read_signed_certificate_timestamps_unpin()
+                    data.sync_read_signed_certificate_timestamp_list_unpin()
                         .context(SignedCertificateTimestampSnafu)?,
                 ),
                 other => {
@@ -469,7 +470,7 @@ pub mod codec {
         #[snafu(display("signed_certificate_timestamp read failed"))]
         SignedCertificateTimestamp {
             /// The failure.
-            source: ReadSignedCertificateTimestampsError,
+            source: ReadSignedCertificateTimestampListError,
         },
     }
 

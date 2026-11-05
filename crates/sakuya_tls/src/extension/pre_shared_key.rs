@@ -54,11 +54,11 @@ impl<C> PskIdentity<C> {
 
 /// One binder: an HMAC of 32 to 255 bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct PskBinder<C> {
+pub struct PskBinderEntry<C> {
     binder: C,
 }
 
-impl<C: AsRef<[u8]>> PskBinder<C> {
+impl<C: AsRef<[u8]>> PskBinderEntry<C> {
     /// The binder `binder`.
     ///
     /// # Errors
@@ -75,7 +75,7 @@ impl<C: AsRef<[u8]>> PskBinder<C> {
     }
 }
 
-impl<C> PskBinder<C> {
+impl<C> PskBinderEntry<C> {
     /// The binder.
     pub fn binder(&self) -> &C {
         &self.binder
@@ -103,7 +103,7 @@ impl PskIndex {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct OfferedPsks<C> {
     identities: Vec<PskIdentity<C>>,
-    binders: Vec<PskBinder<C>>,
+    binders: Vec<PskBinderEntry<C>>,
 }
 
 impl<C: AsRef<[u8]>> OfferedPsks<C> {
@@ -116,7 +116,7 @@ impl<C: AsRef<[u8]>> OfferedPsks<C> {
     /// encoding is longer than the 65535 bytes of the extension.
     pub fn new(
         identities: Vec<PskIdentity<C>>,
-        binders: Vec<PskBinder<C>>,
+        binders: Vec<PskBinderEntry<C>>,
     ) -> Result<Self, InvalidOfferedPsksError> {
         PskCountMismatchError::check(identities.len(), binders.len())?;
         let offered = Self {
@@ -138,7 +138,11 @@ impl<C: AsRef<[u8]>> OfferedPsks<C> {
     /// their length field included: what a binder does not cover of a
     /// ClientHello whose last extension this is.
     pub fn binders_len(&self) -> usize {
-        2 + self.binders.iter().map(PskBinder::entry_len).sum::<usize>()
+        2 + self
+            .binders
+            .iter()
+            .map(PskBinderEntry::entry_len)
+            .sum::<usize>()
     }
 }
 
@@ -149,7 +153,7 @@ impl<C> OfferedPsks<C> {
     }
 
     /// The binders, one for each identity.
-    pub fn binders(&self) -> &[PskBinder<C>] {
+    pub fn binders(&self) -> &[PskBinderEntry<C>] {
         &self.binders
     }
 }
@@ -210,7 +214,7 @@ pub mod codec {
     // documentation comments; the module documentation above describes them.
     #![allow(missing_docs)]
 
-    use super::{OfferedPsks, PskBinder, PskCountMismatchError, PskIdentity};
+    use super::{OfferedPsks, PskBinderEntry, PskCountMismatchError, PskIdentity};
     use crate::{
         alert::AlertDescription,
         message::MessageSource,
@@ -244,7 +248,7 @@ pub mod codec {
             .context(BindersSnafu)?;
         let mut binders = Vec::new();
         while list.has_remaining() {
-            binders.push(list.sync_read_psk_binder_unpin()?);
+            binders.push(list.sync_read_psk_binder_entry_unpin()?);
         }
         PskCountMismatchError::check(identities.len(), binders.len())?;
         Ok(OfferedPsks {
@@ -269,13 +273,13 @@ pub mod codec {
     }
 
     #[call(sync)]
-    async fn read_psk_binder<F: MessageSource, A: ReceiverAccess<Family = F>>(
+    async fn read_psk_binder_entry<F: MessageSource, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-    ) -> Result<PskBinder<F::Bytes>, ReadOfferedPsksError> {
+    ) -> Result<PskBinderEntry<F::Bytes>, ReadOfferedPsksError> {
         let binder = read_bounded_vector(io, Width::U8, 32..=Width::U8.max())
             .await
             .context(read_offered_psks_error::BinderSnafu)?;
-        Ok(PskBinder { binder })
+        Ok(PskBinderEntry { binder })
     }
 
     /// Failures that [`read_offered_psks`] can produce.

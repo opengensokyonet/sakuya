@@ -58,7 +58,7 @@ use sakuya_tls::{
         engine::{ServerHandshake, ServerHandshakeEvent, ServerHandshakeSettings},
         identity::CertifiedKey,
         layers::PassThroughLayers,
-        peer::NoClientCertificate,
+        peer::NoCertificateRequest,
         targets::SniTargets,
         ticket::SingleUseTicketTable,
     },
@@ -333,7 +333,7 @@ mod server_engine {
             PassThroughLayers,
             targets,
             identity,
-            NoClientCertificate,
+            NoCertificateRequest,
             Arc::clone(&server.clock),
             ServerHandshakeSettings::default(),
         );

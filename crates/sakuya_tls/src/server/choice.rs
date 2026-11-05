@@ -14,7 +14,7 @@ use crate::{
     alert::AlertDescription,
     cipher_suite::{CipherSuite, SupportedSuite},
     message::client_hello::ClientHello,
-    server::targets::Selected,
+    server::targets::SelectedTarget,
 };
 use nitori_crypto::{Hash, KeyExchange, NamedGroup, Supported};
 use smallvec::SmallVec;
@@ -162,7 +162,7 @@ pub trait ParameterChoice<C, T> {
         &self,
         backend: &C,
         offer: &ClientOffer<'_>,
-        selected: &Selected<T>,
+        selected: &SelectedTarget<T>,
     ) -> Result<Choice<C>, NoCommonParametersError>;
 }
 
@@ -225,7 +225,7 @@ impl<C: Hash + KeyExchange, T> ParameterChoice<C, T> for PreferenceTable {
         &self,
         backend: &C,
         offer: &ClientOffer<'_>,
-        _selected: &Selected<T>,
+        _selected: &SelectedTarget<T>,
     ) -> Result<Choice<C>, NoCommonParametersError> {
         let suite = self
             .suites
@@ -262,7 +262,7 @@ mod tests {
     use crate::{
         cipher_suite::CipherSuite,
         message::client_hello::codec::ReadClientHelloHostExt as _,
-        server::targets::Selected,
+        server::targets::SelectedTarget,
         test_support::{client_hello, concat, extension, vector},
     };
     use nitori_crypto::NamedGroup;
@@ -290,8 +290,8 @@ mod tests {
         )
     }
 
-    fn selected() -> Selected<()> {
-        Selected {
+    fn selected() -> SelectedTarget<()> {
+        SelectedTarget {
             target: (),
             application_protocol: None,
         }

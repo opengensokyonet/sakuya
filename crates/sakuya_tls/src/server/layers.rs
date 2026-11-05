@@ -64,12 +64,12 @@ pub struct PassThroughLayers;
 
 /// A ClientHello handed over as it came, by [`PassThroughLayers`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PlainHello {
+pub struct PassThroughHello {
     encoded: HandshakeMessage,
     hello: ClientHello<Bytes>,
 }
 
-impl AcceptedHello for PlainHello {
+impl AcceptedHello for PassThroughHello {
     type Confirmation = Infallible;
     type RetryConfigs = Infallible;
 
@@ -91,12 +91,12 @@ impl AcceptedHello for PlainHello {
 }
 
 impl HelloLayers for PassThroughLayers {
-    type Accepted = PlainHello;
+    type Accepted = PassThroughHello;
     type Error = Infallible;
-    type Opening<'a> = Ready<Result<PlainHello, Infallible>>;
+    type Opening<'a> = Ready<Result<PassThroughHello, Infallible>>;
 
     fn open(&self, encoded: HandshakeMessage, hello: ClientHello<Bytes>) -> Self::Opening<'_> {
-        ready(Ok(PlainHello { encoded, hello }))
+        ready(Ok(PassThroughHello { encoded, hello }))
     }
 }
 

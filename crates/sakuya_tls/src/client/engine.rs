@@ -64,7 +64,9 @@ use crate::{
         alpn::{ProtocolName, ProtocolNameList},
         cookie::Cookie,
         key_share::{ClientShares, KeyShareEntry},
-        pre_shared_key::{InvalidOfferedPsksError, OfferedPsks, PskBinder, PskIdentity, PskIndex},
+        pre_shared_key::{
+            InvalidOfferedPsksError, OfferedPsks, PskBinderEntry, PskIdentity, PskIndex,
+        },
         psk_key_exchange_modes::PskKeyExchangeMode,
         server_name::ServerName,
     },
@@ -659,7 +661,7 @@ impl<C> HelloParts<'_, C> {
             }
             let identity = PskIdentity::new(ticket.ticket.clone(), age)
                 .map_err(|source| ClientAlertError::TicketIdentity { source })?;
-            let binder = PskBinder::new(Bytes::from(vec![0; hash.output_len()]))
+            let binder = PskBinderEntry::new(Bytes::from(vec![0; hash.output_len()]))
                 // invariant: a hash is 32 to 255 bytes.
                 .expect("a binder as long as a hash");
             let offered = OfferedPsks::new(vec![identity], vec![binder])

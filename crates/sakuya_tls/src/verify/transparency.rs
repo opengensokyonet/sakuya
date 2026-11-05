@@ -16,7 +16,7 @@ use super::{
 };
 use crate::clock::elapsed;
 use crate::extension::signed_certificate_timestamp::codec::{
-    ReadSignedCertificateTimestampsError, ReadSignedCertificateTimestampsHostExt as _,
+    ReadSignedCertificateTimestampListError, ReadSignedCertificateTimestampListHostExt as _,
 };
 use nitori_crypto::{Hash, HashAlgorithm, RunningHash, SignatureScheme, SignatureVerify};
 use snafu::{ResultExt, Snafu};
@@ -188,7 +188,7 @@ impl LogList {
 /// What [`EmbeddedSctPolicy`] does once its log list is older than its
 /// maximum age.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum StaleLogList {
+pub enum StaleLogListAction {
     /// Every certificate fails: the check fails closed.
     Reject,
     /// Certificates are not checked for SCTs: the check fails open, as
@@ -209,14 +209,14 @@ pub enum StaleLogList {
 /// SCTs sent in the handshake or in an OCSP response are not considered.
 ///
 /// The list can be replaced while the policy is in use. Once it is older
-/// than the maximum age, the policy acts by its [`StaleLogList`]: by
+/// than the maximum age, the policy acts by its [`StaleLogListAction`]: by
 /// default it rejects every certificate, and the maximum age is
 /// [`EmbeddedSctPolicy::CHROME_MAX_LIST_AGE`].
 #[derive(Debug)]
 pub struct EmbeddedSctPolicy {
     list: RwLock<Arc<LogList>>,
     max_list_age: Duration,
-    when_stale: StaleLogList,
+    when_stale: StaleLogListAction,
 }
 
 impl EmbeddedSctPolicy {
@@ -229,12 +229,16 @@ impl EmbeddedSctPolicy {
     /// The policy over `list`, which rejects every certificate once the
     /// list is older than [`EmbeddedSctPolicy::CHROME_MAX_LIST_AGE`].
     pub fn new(list: LogList) -> Self {
-        Self::with_list_age(list, Self::CHROME_MAX_LIST_AGE, StaleLogList::Reject)
+        Self::with_list_age(list, Self::CHROME_MAX_LIST_AGE, StaleLogListAction::Reject)
     }
 
     /// The policy over `list`, which acts by `when_stale` once the list is
     /// older than `max_list_age`.
-    pub fn with_list_age(list: LogList, max_list_age: Duration, when_stale: StaleLogList) -> Self {
+    pub fn with_list_age(
+        list: LogList,
+        max_list_age: Duration,
+        when_stale: StaleLogListAction,
+    ) -> Self {
         Self {
             list: RwLock::new(Arc::new(list)),
             max_list_age,
@@ -268,8 +272,8 @@ impl<C: Hash + SignatureVerify> super::Transparency<C> for EmbeddedSctPolicy {
         let age = elapsed(list.published_at, now).unwrap_or_default();
         if age > self.max_list_age {
             return match self.when_stale {
-                StaleLogList::Reject => StaleLogListSnafu { age }.fail(),
-                StaleLogList::SkipCheck => Ok(()),
+                StaleLogListAction::Reject => StaleLogListSnafu { age }.fail(),
+                StaleLogListAction::SkipCheck => Ok(()),
             };
         }
         let sha256 = backend
@@ -282,7 +286,7 @@ impl<C: Hash + SignatureVerify> super::Transparency<C> for EmbeddedSctPolicy {
         let mut counted: Vec<&CtLog> = Vec::new();
         if let Some(list_bytes) = leaf.timestamps {
             let timestamps = { list_bytes }
-                .sync_read_signed_certificate_timestamps_unpin()
+                .sync_read_signed_certificate_timestamp_list_unpin()
                 .context(MalformedTimestampListSnafu)?;
             for serialized in timestamps.timestamps() {
                 let Some(sct) = Sct::parse(serialized) else {
@@ -367,7 +371,7 @@ pub enum TransparencyError {
     #[snafu(display("embedded SCT list malformed"))]
     MalformedTimestampList {
         /// The failure.
-        source: ReadSignedCertificateTimestampsError,
+        source: ReadSignedCertificateTimestampListError,
     },
     /// Fewer SCTs count than the certificate's validity calls for.
     #[snafu(display("{valid} valid SCTs where {required} are required"))]

@@ -355,18 +355,18 @@ impl MessageLimits {
     /// the suite is known.
     pub const fn limit(
         &self,
-        message: ReceivedMessage,
+        message: ReceivedMessageType,
         hash: Option<HashAlgorithm>,
     ) -> Option<u32> {
         Some(match message {
-            ReceivedMessage::ClientHello => self.client_hello.0,
-            ReceivedMessage::ServerHello => self.server_hello.0,
-            ReceivedMessage::EncryptedExtensions => self.encrypted_extensions.0,
-            ReceivedMessage::CertificateRequest => self.certificate_request.0,
-            ReceivedMessage::Certificate => self.certificate.0,
-            ReceivedMessage::CertificateVerify => self.certificate_verify.0,
-            ReceivedMessage::NewSessionTicket => self.new_session_ticket.0,
-            ReceivedMessage::Finished => match hash {
+            ReceivedMessageType::ClientHello => self.client_hello.0,
+            ReceivedMessageType::ServerHello => self.server_hello.0,
+            ReceivedMessageType::EncryptedExtensions => self.encrypted_extensions.0,
+            ReceivedMessageType::CertificateRequest => self.certificate_request.0,
+            ReceivedMessageType::Certificate => self.certificate.0,
+            ReceivedMessageType::CertificateVerify => self.certificate_verify.0,
+            ReceivedMessageType::NewSessionTicket => self.new_session_ticket.0,
+            ReceivedMessageType::Finished => match hash {
                 Some(hash) => hash.output_len() as u32,
                 None => return None,
             },
@@ -378,7 +378,7 @@ impl MessageLimits {
 /// an endpoint receives it and limits its length.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[allow(missing_docs)]
-pub enum ReceivedMessage {
+pub enum ReceivedMessageType {
     ClientHello,
     ServerHello,
     EncryptedExtensions,
@@ -389,7 +389,7 @@ pub enum ReceivedMessage {
     NewSessionTicket,
 }
 
-impl ReceivedMessage {
+impl ReceivedMessageType {
     /// The message type `message`, or `None` for a type QUIC does not carry.
     pub const fn new(message: HandshakeType) -> Option<Self> {
         Some(match message {
@@ -464,7 +464,7 @@ pub mod codec {
     // documentation comments; the module documentation above describes them.
     #![allow(missing_docs)]
 
-    use super::{HandshakeMessage, HandshakeType, MessageLimits, ReceivedMessage};
+    use super::{HandshakeMessage, HandshakeType, MessageLimits, ReceivedMessageType};
     use crate::alert::AlertDescription;
     use bytes::{BufMut, BytesMut};
     use nitori_call::{ReceiverAccess, call};
@@ -495,7 +495,7 @@ pub mod codec {
         let header = io.read_array::<4>().await.context(HeaderSnafu)?;
         let message_type = HandshakeType(header[0]);
         let len = u32::from_be_bytes([0, header[1], header[2], header[3]]);
-        let Some(message) = ReceivedMessage::new(message_type) else {
+        let Some(message) = ReceivedMessageType::new(message_type) else {
             return Err(UnexpectedMessageError {
                 message: message_type,
             }
@@ -612,14 +612,14 @@ pub mod codec {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
     #[snafu(display("{message:?} message of {len} bytes exceeds the limit of {limit} bytes"))]
     pub struct MessageTooLongError {
-        message: ReceivedMessage,
+        message: ReceivedMessageType,
         len: u32,
         limit: u32,
     }
 
     impl MessageTooLongError {
         /// The type of the message.
-        pub const fn message(self) -> ReceivedMessage {
+        pub const fn message(self) -> ReceivedMessageType {
             self.message
         }
 

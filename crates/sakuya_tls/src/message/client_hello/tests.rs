@@ -9,7 +9,7 @@ use crate::{
     extension::{
         ExtensionBlockError, ExtensionType, InvalidExtensionsError, OpaqueData, UnknownExtension,
         key_share::codec::ReadClientSharesError,
-        pre_shared_key::{OfferedPsks, PskBinder, PskIdentity},
+        pre_shared_key::{OfferedPsks, PskBinderEntry, PskIdentity},
     },
     message::{HelloRandom, LegacySessionId, ReadHeaderError},
     test_support::{VERSIONS, client_hello, client_hello_body, concat, extension, message},
@@ -252,7 +252,7 @@ fn construction_checks_the_block() {
     };
     let psk = OfferedPsks::new(
         vec![PskIdentity::new(&[1][..], 0).unwrap()],
-        vec![PskBinder::new(&[0; 32][..]).unwrap()],
+        vec![PskBinderEntry::new(&[0; 32][..]).unwrap()],
     )
     .unwrap();
     let error = new(vec![

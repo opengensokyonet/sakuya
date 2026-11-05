@@ -49,7 +49,7 @@ use sakuya_tls::{
         },
         identity::CertifiedKey,
         layers::PassThroughLayers,
-        peer::NoClientCertificate,
+        peer::NoCertificateRequest,
         targets::SniTargets,
         ticket::SingleUseTicketTable,
     },
@@ -293,7 +293,7 @@ macro_rules! connect {
             PassThroughLayers,
             targets,
             identity,
-            NoClientCertificate,
+            NoCertificateRequest,
             Arc::clone(&endpoints.clock),
             ServerHandshakeSettings::default(),
         );

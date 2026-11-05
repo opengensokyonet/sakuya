@@ -25,7 +25,7 @@ use super::{
     der::{self, Reader},
     public_key::PublicKeyAlgorithm,
     transparency::{
-        CtLog, EmbeddedSctPolicy, LogId, LogList, LogState, StaleLogList, TransparencyError,
+        CtLog, EmbeddedSctPolicy, LogId, LogList, LogState, StaleLogListAction, TransparencyError,
     },
 };
 use crate::{
@@ -336,7 +336,7 @@ fn a_stale_log_list_fails_closed_by_default() {
     let open = EmbeddedSctPolicy::with_list_age(
         LogList::new(Vec::new(), at(PUBLISHED)),
         EmbeddedSctPolicy::CHROME_MAX_LIST_AGE,
-        StaleLogList::SkipCheck,
+        StaleLogListAction::SkipCheck,
     );
     assert!(verify(&verifier(open, late), "docsrs.com").is_ok());
     // A fresh list replaces the stale one.

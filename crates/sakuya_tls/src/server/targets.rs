@@ -16,7 +16,7 @@ use std::collections::HashMap;
 /// A selected target: what the server serves on this connection, with the
 /// application protocol negotiated for it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Selected<T> {
+pub struct SelectedTarget<T> {
     /// The target.
     pub target: T,
     /// The application protocol, `None` when the connection negotiates
@@ -33,7 +33,7 @@ pub trait TargetSelection {
     type Error;
 
     /// Selection in progress.
-    type Selecting<'a>: Future<Output = Result<Selected<Self::Target>, Self::Error>> + 'a
+    type Selecting<'a>: Future<Output = Result<SelectedTarget<Self::Target>, Self::Error>> + 'a
     where
         Self: 'a;
 
@@ -101,7 +101,7 @@ impl<T: Clone> SniTargets<T> {
     pub fn select_now<C: AsRef<[u8]>>(
         &self,
         hello: &ClientHello<C>,
-    ) -> Result<Selected<T>, SelectTargetError> {
+    ) -> Result<SelectedTarget<T>, SelectTargetError> {
         let entry = match hello.server_name() {
             Some(name) => {
                 let name = name.host_name().as_ref();
@@ -134,7 +134,7 @@ impl<T: Clone> SniTargets<T> {
                 .ok_or(SelectTargetError::NoCommonProtocol)?;
             Some(protocol.clone())
         };
-        Ok(Selected {
+        Ok(SelectedTarget {
             target: entry.target.clone(),
             application_protocol,
         })
@@ -145,7 +145,7 @@ impl<T: Clone> TargetSelection for SniTargets<T> {
     type Target = T;
     type Error = SelectTargetError;
     type Selecting<'a>
-        = Ready<Result<Selected<T>, SelectTargetError>>
+        = Ready<Result<SelectedTarget<T>, SelectTargetError>>
     where
         Self: 'a;
 
@@ -194,7 +194,7 @@ impl crate::alert::CallsForAlert for SelectTargetError {
 
 #[cfg(test)]
 mod tests {
-    use super::{SelectTargetError, Selected, SniTargets, TargetSelection};
+    use super::{SelectTargetError, SelectedTarget, SniTargets, TargetSelection};
     use crate::{
         alert::AlertDescription,
         extension::alpn::ProtocolName,
@@ -238,7 +238,7 @@ mod tests {
     fn select(
         targets: &SniTargets<&'static str>,
         bytes: &[u8],
-    ) -> Result<Selected<&'static str>, SelectTargetError> {
+    ) -> Result<SelectedTarget<&'static str>, SelectTargetError> {
         let (_, hello) = received_client_hello(bytes);
         ready_now(targets.select(&hello))
     }
@@ -253,7 +253,7 @@ mod tests {
         let selected = select(&targets(), &hello(Some(b"raw.example.com"), &[])).unwrap();
         assert_eq!(
             selected,
-            Selected {
+            SelectedTarget {
                 target: "raw",
                 application_protocol: None
             }

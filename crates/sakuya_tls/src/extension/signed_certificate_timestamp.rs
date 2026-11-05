@@ -2,18 +2,18 @@
 //!
 //! In ClientHello and CertificateRequest its data is empty, a request; in
 //! a certificate entry of a Certificate message it is
-//! [`SignedCertificateTimestamps`], the serialized SCTs for the
+//! [`SignedCertificateTimestampList`], the serialized SCTs for the
 //! certificate, which this crate does not interpret.
 
 use crate::{vector::LengthOutOfRangeError, width::Width};
 
 /// A nonempty list of serialized SCTs, each of 1 to 65535 bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct SignedCertificateTimestamps<C> {
+pub struct SignedCertificateTimestampList<C> {
     timestamps: Vec<C>,
 }
 
-impl<C: AsRef<[u8]>> SignedCertificateTimestamps<C> {
+impl<C: AsRef<[u8]>> SignedCertificateTimestampList<C> {
     /// The list of `timestamps`.
     ///
     /// # Errors
@@ -30,7 +30,7 @@ impl<C: AsRef<[u8]>> SignedCertificateTimestamps<C> {
         Ok(Self { timestamps })
     }
 
-    /// The number of bytes [`codec::write_signed_certificate_timestamps`]
+    /// The number of bytes [`codec::write_signed_certificate_timestamp_list`]
     /// writes.
     pub fn encoded_len(&self) -> usize {
         2 + self
@@ -41,7 +41,7 @@ impl<C: AsRef<[u8]>> SignedCertificateTimestamps<C> {
     }
 }
 
-impl<C> SignedCertificateTimestamps<C> {
+impl<C> SignedCertificateTimestampList<C> {
     /// The serialized SCTs.
     pub fn timestamps(&self) -> &[C] {
         &self.timestamps
@@ -54,7 +54,7 @@ pub mod codec {
     // documentation comments; the module documentation above describes them.
     #![allow(missing_docs)]
 
-    use super::SignedCertificateTimestamps;
+    use super::SignedCertificateTimestampList;
     use crate::{
         alert::AlertDescription,
         message::MessageSource,
@@ -70,15 +70,16 @@ pub mod codec {
     ///
     /// # Errors
     ///
-    /// [`ReadSignedCertificateTimestampsError`].
+    /// [`ReadSignedCertificateTimestampListError`].
     #[call(sync)]
-    pub async fn read_signed_certificate_timestamps<
+    pub async fn read_signed_certificate_timestamp_list<
         F: MessageSource,
         A: ReceiverAccess<Family = F>,
     >(
         io: &mut A,
-    ) -> Result<SignedCertificateTimestamps<F::Bytes>, ReadSignedCertificateTimestampsError> {
-        use read_signed_certificate_timestamps_error::*;
+    ) -> Result<SignedCertificateTimestampList<F::Bytes>, ReadSignedCertificateTimestampListError>
+    {
+        use read_signed_certificate_timestamp_list_error::*;
         let range = 1..=Width::U16.max();
         let mut list = read_bounded_vector(io, Width::U16, range.clone())
             .await
@@ -87,25 +88,25 @@ pub mod codec {
         while list.has_remaining() {
             timestamps.push(list.sync_read_serialized_sct_unpin()?);
         }
-        Ok(SignedCertificateTimestamps { timestamps })
+        Ok(SignedCertificateTimestampList { timestamps })
     }
 
     #[call(sync)]
     async fn read_serialized_sct<F: MessageSource, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-    ) -> Result<F::Bytes, ReadSignedCertificateTimestampsError> {
+    ) -> Result<F::Bytes, ReadSignedCertificateTimestampListError> {
         read_bounded_vector(io, Width::U16, 1..=Width::U16.max())
             .await
-            .context(read_signed_certificate_timestamps_error::TimestampSnafu)
+            .context(read_signed_certificate_timestamp_list_error::TimestampSnafu)
     }
 
-    /// Failures that [`read_signed_certificate_timestamps`] can produce.
+    /// Failures that [`read_signed_certificate_timestamp_list`] can produce.
     #[derive(Debug, Snafu)]
     #[snafu(
-        module(read_signed_certificate_timestamps_error),
+        module(read_signed_certificate_timestamp_list_error),
         visibility(pub(crate))
     )]
-    pub enum ReadSignedCertificateTimestampsError {
+    pub enum ReadSignedCertificateTimestampListError {
         /// The list could not be read.
         #[snafu(display("SCT list read failed"))]
         List {
@@ -120,7 +121,7 @@ pub mod codec {
         },
     }
 
-    impl ReadSignedCertificateTimestampsError {
+    impl ReadSignedCertificateTimestampListError {
         /// The alert the failure calls for: always decode_error.
         pub fn alert(&self) -> AlertDescription {
             AlertDescription::DECODE_ERROR
@@ -133,18 +134,18 @@ pub mod codec {
     ///
     /// [`WriteAllError`] if the receiver stops accepting bytes or fails.
     #[call(sync)]
-    pub async fn write_signed_certificate_timestamps<
+    pub async fn write_signed_certificate_timestamp_list<
         F: Write,
         A: ReceiverAccess<Family = F>,
         C: AsRef<[u8]>,
     >(
         io: &mut A,
-        list: &SignedCertificateTimestamps<C>,
+        list: &SignedCertificateTimestampList<C>,
     ) -> Result<(), WriteAllError<F::Error>> {
         list.encode(&mut Out::new(io)).await
     }
 
-    impl<C: AsRef<[u8]>> SignedCertificateTimestamps<C> {
+    impl<C: AsRef<[u8]>> SignedCertificateTimestampList<C> {
         pub(crate) async fn encode<F: Write, A: ReceiverAccess<Family = F>>(
             &self,
             out: &mut Out<'_, A>,
