@@ -99,11 +99,11 @@
 //! [RFC 9001 §5.4.2]: https://www.rfc-editor.org/rfc/rfc9001.html#section-5.4.2
 use crate::{
     connection_id::{ConnectionId, RawConnectionId},
+    packet_number::PacketNumberLength,
     version::Version,
 };
 use bytes::Buf;
 use core::iter::FusedIterator;
-use snafu::Snafu;
 
 pub mod codec;
 pub mod v1;
@@ -262,74 +262,92 @@ impl<D: Buf> ShortHeader<D> {
     }
 }
 
-/// The bits of the first byte of a short header packet below the Fixed Bit:
-/// the Spin Bit, the reserved bits, the Key Phase and the packet number
-/// length.
-const SHORT_LOW_BITS_MASK: u8 = 0x3f;
-
-/// The first byte's low bits of a short header exceed the six bits below the
-/// Fixed Bit.
+/// The Key Phase bit of a short header ([RFC 9000 §17.3.1]): which packet
+/// protection keys protect the packet.
 ///
-/// It is constructed only when the check fails, so the bits it holds always
-/// have a bit above `0x3f` set.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(display("short header low bits {bits:#04x} exceed the six bits below the Fixed Bit"))]
-pub struct ShortLowBitsError {
-    bits: u8,
+/// An endpoint toggles it each time it updates its keys ([RFC 9001 §6]), so
+/// its value says whether a packet uses the same keys as the one before the
+/// last update.
+///
+/// [RFC 9000 §17.3.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.3.1
+/// [RFC 9001 §6]: https://www.rfc-editor.org/rfc/rfc9001.html#section-6
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum KeyPhase {
+    /// The bit is 0.
+    Zero,
+    /// The bit is 1.
+    One,
 }
 
-impl ShortLowBitsError {
-    /// The rejected bits, with a bit above `0x3f` set.
-    pub const fn bits(self) -> u8 {
-        self.bits
-    }
-
-    /// Checks that `bits` fit the six bits below the Fixed Bit.
-    pub(crate) fn check(bits: u8) -> Result<u8, Self> {
-        if bits & !SHORT_LOW_BITS_MASK != 0 {
-            return Err(Self { bits });
-        }
-        Ok(bits)
-    }
+impl KeyPhase {
+    /// The bit's place in the first byte of a short header.
+    const MASK: u8 = 0x04;
 }
+
+/// The Spin Bit of the first byte of a short header ([RFC 9000 §17.3.1]).
+///
+/// [RFC 9000 §17.3.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.3.1
+const SPIN_BIT: u8 = 0x20;
 
 /// The header of a 1-RTT packet as a sender writes it: the first byte and
 /// the destination connection ID ([RFC 9000 §17.3]).
 ///
-/// The constructor sets the form and the Fixed Bit; the caller gives the six
-/// low bits: the Spin Bit, the reserved bits, the Key Phase and the packet
-/// number length, whose meaning belongs to the layer that protects the
-/// packet. The Packet Number field follows the header and is not part of it.
+/// The first byte states the form, the Fixed Bit, the Spin Bit, the reserved
+/// bits, the Key Phase and the packet number length. The reserved bits are
+/// written as 0, as [RFC 9000 §17.3.1] requires before header protection is
+/// applied. The Packet Number field follows the header and is not part of it.
 ///
 /// [RFC 9000 §17.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.3
+/// [RFC 9000 §17.3.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.3.1
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ShortPacketHeader {
-    low_bits: u8,
+    spin: bool,
+    key_phase: KeyPhase,
+    pn_length: PacketNumberLength,
     dcid: ConnectionId,
 }
 
 impl ShortPacketHeader {
-    /// The header with these low bits and destination connection ID.
-    ///
-    /// # Errors
-    ///
-    /// [`ShortLowBitsError`] if `low_bits` exceed six bits.
-    pub fn new(low_bits: u8, dcid: ConnectionId) -> Result<Self, ShortLowBitsError> {
-        Ok(Self {
-            low_bits: ShortLowBitsError::check(low_bits)?,
+    /// The header with this Spin Bit, Key Phase, packet number length and
+    /// destination connection ID.
+    pub const fn new(
+        spin: bool,
+        key_phase: KeyPhase,
+        pn_length: PacketNumberLength,
+        dcid: ConnectionId,
+    ) -> Self {
+        Self {
+            spin,
+            key_phase,
+            pn_length,
             dcid,
-        })
+        }
     }
 
-    /// The first byte of the packet: the form, the Fixed Bit and the low
-    /// bits.
+    /// The first byte of the packet: the form, the Fixed Bit, the Spin Bit,
+    /// zero reserved bits, the Key Phase and the packet number length.
     pub fn first_byte(&self) -> u8 {
-        v1::FIXED_BIT | self.low_bits
+        let spin = if self.spin { SPIN_BIT } else { 0 };
+        let key_phase = match self.key_phase {
+            KeyPhase::Zero => 0,
+            KeyPhase::One => KeyPhase::MASK,
+        };
+        v1::FIXED_BIT | spin | key_phase | self.pn_length.first_byte_bits()
     }
 
-    /// The six low bits of the first byte.
-    pub fn low_bits(&self) -> u8 {
-        self.low_bits
+    /// The Spin Bit.
+    pub const fn spin(&self) -> bool {
+        self.spin
+    }
+
+    /// The Key Phase.
+    pub const fn key_phase(&self) -> KeyPhase {
+        self.key_phase
+    }
+
+    /// The length of the Packet Number field that follows the header.
+    pub const fn pn_length(&self) -> PacketNumberLength {
+        self.pn_length
     }
 
     /// The destination connection ID.

@@ -22,12 +22,12 @@ use super::{FORM_BIT, LongHeader, SAMPLE_DISTANCE, VERSION_LEN};
 use crate::{
     connection_id::ConnectionId,
     frame::LengthError,
+    packet_number::PacketNumberLength,
     var_int::{VarInt, VarIntField, VarIntWidth},
     version::Version,
 };
 use bytes::{Buf, Bytes};
 use core::ops::Range;
-use snafu::Snafu;
 
 pub mod codec;
 
@@ -73,43 +73,13 @@ impl LongPacketType {
     }
 }
 
-/// The bits of the first byte of an Initial, 0-RTT or Handshake packet below
-/// the Long Packet Type: the reserved bits and the packet number length.
-const LOW_BITS_MASK: u8 = 0x0f;
-
-/// The first byte's low bits of a long header exceed the four bits below the
-/// Long Packet Type.
-///
-/// It is constructed only when the check fails, so the bits it holds always
-/// have a bit above `0x0f` set.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(display("long header low bits {bits:#04x} exceed the four bits below the packet type"))]
-pub struct LongLowBitsError {
-    bits: u8,
-}
-
-impl LongLowBitsError {
-    /// The rejected bits, with a bit above `0x0f` set.
-    pub const fn bits(self) -> u8 {
-        self.bits
-    }
-
-    /// Checks that `bits` fit the four bits below the Long Packet Type.
-    pub(crate) fn check(bits: u8) -> Result<u8, Self> {
-        if bits & !LOW_BITS_MASK != 0 {
-            return Err(Self { bits });
-        }
-        Ok(bits)
-    }
-}
-
 /// The header of an Initial, 0-RTT or Handshake packet as a sender writes
 /// it: every field before the Packet Number field ([RFC 9000 §17.2]).
 ///
-/// The first byte states the form, the Fixed Bit and the packet type, which
-/// the constructors set, and the four low bits, which the caller gives: the
-/// reserved bits and the packet number length, whose meaning belongs to the
-/// layer that protects the packet. The version field is [`VERSION`].
+/// The first byte states the form, the Fixed Bit, the packet type, the
+/// reserved bits and the packet number length. The reserved bits are written
+/// as 0, as [RFC 9000 §17.2] requires before header protection is applied.
+/// The version field is [`VERSION`].
 ///
 /// The Length field covers the packet number and the payload, which the
 /// sender does not know when it starts the packet. It states the Length as a
@@ -126,7 +96,7 @@ impl LongLowBitsError {
 /// [RFC 9000 §17.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.2
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LongPacketHeader {
-    low_bits: u8,
+    pn_length: PacketNumberLength,
     dcid: ConnectionId,
     scid: ConnectionId,
     kind: WrittenKind,
@@ -152,26 +122,25 @@ struct InitialToken {
 impl LongPacketHeader {
     /// The header of an Initial packet.
     ///
-    /// `low_bits` are the four low bits of the first byte. The token may be
-    /// empty; the Token Length field is written at `token_length_width`.
+    /// `pn_length` is the length of the Packet Number field that follows the
+    /// header. The token may be empty; the Token Length field is written at
+    /// `token_length_width`.
     ///
     /// # Errors
     ///
-    /// [`InvalidInitialHeaderError::LowBits`] if `low_bits` exceed four bits,
-    /// and [`InvalidInitialHeaderError::TokenLength`] if the Token Length
-    /// field is too narrow for the length of the token.
+    /// [`LengthError`] if the Token Length field is too narrow for the length
+    /// of the token.
     pub fn initial(
-        low_bits: u8,
         dcid: ConnectionId,
         scid: ConnectionId,
         token_length_width: VarIntWidth,
         token: Bytes,
+        pn_length: PacketNumberLength,
         length: VarIntField<VarInt>,
-    ) -> Result<Self, InvalidInitialHeaderError> {
-        let low_bits = LongLowBitsError::check(low_bits)?;
+    ) -> Result<Self, LengthError> {
         LengthError::check(token.len(), token_length_width)?;
         Ok(Self {
-            low_bits,
+            pn_length,
             dcid,
             scid,
             kind: WrittenKind::Initial(InitialToken {
@@ -183,47 +152,39 @@ impl LongPacketHeader {
     }
 
     /// The header of a 0-RTT packet.
-    ///
-    /// # Errors
-    ///
-    /// [`LongLowBitsError`] if `low_bits` exceed four bits.
     pub fn zero_rtt(
-        low_bits: u8,
         dcid: ConnectionId,
         scid: ConnectionId,
+        pn_length: PacketNumberLength,
         length: VarIntField<VarInt>,
-    ) -> Result<Self, LongLowBitsError> {
-        Self::without_token(WrittenKind::ZeroRtt, low_bits, dcid, scid, length)
+    ) -> Self {
+        Self::without_token(WrittenKind::ZeroRtt, dcid, scid, pn_length, length)
     }
 
     /// The header of a Handshake packet.
-    ///
-    /// # Errors
-    ///
-    /// [`LongLowBitsError`] if `low_bits` exceed four bits.
     pub fn handshake(
-        low_bits: u8,
         dcid: ConnectionId,
         scid: ConnectionId,
+        pn_length: PacketNumberLength,
         length: VarIntField<VarInt>,
-    ) -> Result<Self, LongLowBitsError> {
-        Self::without_token(WrittenKind::Handshake, low_bits, dcid, scid, length)
+    ) -> Self {
+        Self::without_token(WrittenKind::Handshake, dcid, scid, pn_length, length)
     }
 
     fn without_token(
         kind: WrittenKind,
-        low_bits: u8,
         dcid: ConnectionId,
         scid: ConnectionId,
+        pn_length: PacketNumberLength,
         length: VarIntField<VarInt>,
-    ) -> Result<Self, LongLowBitsError> {
-        Ok(Self {
-            low_bits: LongLowBitsError::check(low_bits)?,
+    ) -> Self {
+        Self {
+            pn_length,
             dcid,
             scid,
             kind,
             length,
-        })
+        }
     }
 
     /// The Long Packet Type: never [`LongPacketType::Retry`].
@@ -235,20 +196,20 @@ impl LongPacketHeader {
         }
     }
 
-    /// The first byte of the packet: the form, the Fixed Bit, the packet type
-    /// and the low bits.
+    /// The first byte of the packet: the form, the Fixed Bit, the packet type,
+    /// zero reserved bits and the packet number length.
     pub fn first_byte(&self) -> u8 {
         let type_bits = match self.kind {
             WrittenKind::Initial(_) => 0b00,
             WrittenKind::ZeroRtt => 0b01,
             WrittenKind::Handshake => 0b10,
         };
-        FORM_BIT | FIXED_BIT | (type_bits << 4) | self.low_bits
+        FORM_BIT | FIXED_BIT | (type_bits << 4) | self.pn_length.first_byte_bits()
     }
 
-    /// The four low bits of the first byte.
-    pub fn low_bits(&self) -> u8 {
-        self.low_bits
+    /// The length of the Packet Number field that follows the header.
+    pub fn pn_length(&self) -> PacketNumberLength {
+        self.pn_length
     }
 
     /// The destination connection ID.
@@ -300,23 +261,6 @@ impl LongPacketHeader {
     pub fn packet_number_offset(&self) -> usize {
         self.length_offset() + self.length.encoded_len()
     }
-}
-
-/// An Initial packet header would break a rule of the encoding.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-pub enum InvalidInitialHeaderError {
-    /// The low bits of the first byte exceed four bits.
-    #[snafu(transparent)]
-    LowBits {
-        /// The broken rule.
-        source: LongLowBitsError,
-    },
-    /// The token is longer than the Token Length field can state.
-    #[snafu(transparent)]
-    TokenLength {
-        /// The broken limit.
-        source: LengthError,
-    },
 }
 
 /// A QUIC version 1 long header packet, as far as its header states without

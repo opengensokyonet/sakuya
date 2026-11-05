@@ -35,6 +35,7 @@
 //! use sakuya_wire::{
 //!     connection_id::ConnectionId,
 //!     header::v1::{LongPacketHeader, codec::WriteLongPacketHeaderHostExt as _},
+//!     packet_number::PacketNumberLength,
 //!     var_int::{VarInt, VarIntField, VarIntWidth, codec::WriteVarIntFieldHostExt as _},
 //! };
 //!
@@ -42,7 +43,7 @@
 //! // Reserve a two-byte Length field; write the real value once it is known.
 //! let reserved = VarIntField::new(VarInt::from(0u8), VarIntWidth::Two).unwrap();
 //! let header = LongPacketHeader::initial(
-//!     0b01, dcid, ConnectionId::EMPTY, VarIntWidth::One, Bytes::new(), reserved,
+//!     dcid, ConnectionId::EMPTY, VarIntWidth::One, Bytes::new(), PacketNumberLength::Two, reserved,
 //! ).unwrap();
 //!
 //! let mut packet = Vec::new();

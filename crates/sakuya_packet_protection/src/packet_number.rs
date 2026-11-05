@@ -5,90 +5,11 @@
 //! [`PacketNumberLength`].
 
 use sakuya_wire::packet_number::PacketNumber;
+// The length of the Packet Number field belongs to the wire format, where
+// headers state it; it is re-exported here so that this module still names
+// everything that truncating a packet number involves.
+pub use sakuya_wire::packet_number::{PacketNumberLength, PacketNumberLengthError};
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
-
-/// The length of a Packet Number field, 1 to 4 bytes.
-///
-/// The two Packet Number Length bits of the unprotected first header byte
-/// hold the length minus one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum PacketNumberLength {
-    /// A 1-byte field.
-    One,
-    /// A 2-byte field.
-    Two,
-    /// A 3-byte field.
-    Three,
-    /// A 4-byte field.
-    Four,
-}
-
-impl PacketNumberLength {
-    /// The field length of `len` bytes.
-    ///
-    /// # Errors
-    ///
-    /// Fails when `len` is not 1 to 4.
-    pub const fn new(len: usize) -> Result<Self, PacketNumberLengthError> {
-        match len {
-            1 => Ok(Self::One),
-            2 => Ok(Self::Two),
-            3 => Ok(Self::Three),
-            4 => Ok(Self::Four),
-            _ => Err(PacketNumberLengthError { length: len }),
-        }
-    }
-
-    /// The field length that the Packet Number Length bits of an unprotected
-    /// first header byte encode; the other bits are ignored.
-    pub const fn from_first_byte(first_byte: u8) -> Self {
-        match first_byte & 0x03 {
-            0 => Self::One,
-            1 => Self::Two,
-            2 => Self::Three,
-            _ => Self::Four,
-        }
-    }
-
-    /// The length in bytes, 1 to 4.
-    pub const fn get(self) -> usize {
-        match self {
-            Self::One => 1,
-            Self::Two => 2,
-            Self::Three => 3,
-            Self::Four => 4,
-        }
-    }
-
-    /// The value of the Packet Number Length bits for this length, the
-    /// length minus one, which occupies the two least significant bits of
-    /// the first header byte.
-    pub const fn first_byte_bits(self) -> u8 {
-        match self {
-            Self::One => 0,
-            Self::Two => 1,
-            Self::Three => 2,
-            Self::Four => 3,
-        }
-    }
-}
-
-/// The error returned by [`PacketNumberLength::new`]: the length is not 1 to
-/// 4 bytes.
-///
-/// Only [`PacketNumberLength::new`] constructs it, for a length it refuses.
-#[derive(Debug, Snafu)]
-#[snafu(display("packet number field of {length} bytes is not 1 to 4 bytes long"))]
-pub struct PacketNumberLengthError {
-    length: usize,
-}
-
-impl PacketNumberLengthError {
-    /// The length given, which is zero or above four.
-    pub const fn length(&self) -> usize {
-        self.length
-    }
-}
 
 /// The value of a Packet Number field: the 1 to 4 least significant bytes of
 /// a full packet number.
@@ -316,47 +237,6 @@ mod tests {
 
     fn len(bytes: usize) -> PacketNumberLength {
         PacketNumberLength::new(bytes).unwrap()
-    }
-
-    #[test]
-    fn packet_number_length_bounds() {
-        assert_eq!(PacketNumberLength::new(0).unwrap_err().length(), 0);
-        assert_eq!(PacketNumberLength::new(5).unwrap_err().length(), 5);
-        for (bytes, expected) in [
-            (1, PacketNumberLength::One),
-            (2, PacketNumberLength::Two),
-            (3, PacketNumberLength::Three),
-            (4, PacketNumberLength::Four),
-        ] {
-            let length = PacketNumberLength::new(bytes).unwrap();
-            assert_eq!(length, expected);
-            assert_eq!(length.get(), bytes);
-            assert_eq!(usize::from(length.first_byte_bits()), bytes - 1);
-            assert_eq!(
-                PacketNumberLength::from_first_byte(length.first_byte_bits()),
-                length
-            );
-        }
-    }
-
-    #[test]
-    fn packet_number_length_from_first_byte_ignores_other_bits() {
-        assert_eq!(
-            PacketNumberLength::from_first_byte(0xfc),
-            PacketNumberLength::One
-        );
-        assert_eq!(
-            PacketNumberLength::from_first_byte(0xc1),
-            PacketNumberLength::Two
-        );
-        assert_eq!(
-            PacketNumberLength::from_first_byte(0x42),
-            PacketNumberLength::Three
-        );
-        assert_eq!(
-            PacketNumberLength::from_first_byte(0xff),
-            PacketNumberLength::Four
-        );
     }
 
     #[test]

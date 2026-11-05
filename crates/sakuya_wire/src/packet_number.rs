@@ -3,7 +3,8 @@
 //! A [`PacketNumber`] is an integer from 0 to 2<sup>62</sup> − 1 that
 //! identifies a packet within its packet number space. Packet headers carry
 //! it truncated and protected; ACK frames carry it whole as variable-length
-//! integers, so every [`VarInt`] is a packet number.
+//! integers, so every [`VarInt`] is a packet number. The length of the Packet
+//! Number field of a header is a [`PacketNumberLength`].
 //!
 //! [RFC 9000 §12.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.3
 use crate::var_int::VarInt;
@@ -126,9 +127,94 @@ impl OutOfRangeError {
     }
 }
 
+/// The length of a Packet Number field, 1 to 4 bytes ([RFC 9000 §17.1]).
+///
+/// The two Packet Number Length bits of the unprotected first header byte
+/// hold the length minus one.
+///
+/// [RFC 9000 §17.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.1
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PacketNumberLength {
+    /// A 1-byte field.
+    One,
+    /// A 2-byte field.
+    Two,
+    /// A 3-byte field.
+    Three,
+    /// A 4-byte field.
+    Four,
+}
+
+impl PacketNumberLength {
+    /// The field length of `len` bytes.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `len` is not 1 to 4.
+    pub const fn new(len: usize) -> Result<Self, PacketNumberLengthError> {
+        match len {
+            1 => Ok(Self::One),
+            2 => Ok(Self::Two),
+            3 => Ok(Self::Three),
+            4 => Ok(Self::Four),
+            _ => Err(PacketNumberLengthError { length: len }),
+        }
+    }
+
+    /// The field length that the Packet Number Length bits of an unprotected
+    /// first header byte encode; the other bits are ignored.
+    pub const fn from_first_byte(first_byte: u8) -> Self {
+        match first_byte & 0x03 {
+            0 => Self::One,
+            1 => Self::Two,
+            2 => Self::Three,
+            _ => Self::Four,
+        }
+    }
+
+    /// The length in bytes, 1 to 4.
+    pub const fn get(self) -> usize {
+        match self {
+            Self::One => 1,
+            Self::Two => 2,
+            Self::Three => 3,
+            Self::Four => 4,
+        }
+    }
+
+    /// The value of the Packet Number Length bits for this length, the
+    /// length minus one, which occupies the two least significant bits of
+    /// the first header byte.
+    pub const fn first_byte_bits(self) -> u8 {
+        match self {
+            Self::One => 0,
+            Self::Two => 1,
+            Self::Three => 2,
+            Self::Four => 3,
+        }
+    }
+}
+
+/// The error returned by [`PacketNumberLength::new`]: the length is not 1 to
+/// 4 bytes.
+///
+/// Only [`PacketNumberLength::new`] constructs it, for a length it refuses.
+#[derive(Debug, Snafu)]
+#[snafu(display("packet number field of {length} bytes is not 1 to 4 bytes long"))]
+pub struct PacketNumberLengthError {
+    length: usize,
+}
+
+impl PacketNumberLengthError {
+    /// The length given, which is zero or above four.
+    pub const fn length(&self) -> usize {
+        self.length
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::PacketNumber;
+    use super::{PacketNumber, PacketNumberLength};
     use crate::var_int::VarInt;
 
     #[test]
@@ -152,5 +238,46 @@ mod tests {
         assert_eq!(PacketNumber::from(VarInt::MAX), PacketNumber::MAX);
         assert_eq!(VarInt::from(PacketNumber::ZERO), VarInt::ZERO);
         assert_eq!(PacketNumber::new(42).unwrap().to_string(), "42");
+    }
+
+    #[test]
+    fn packet_number_length_bounds() {
+        assert_eq!(PacketNumberLength::new(0).unwrap_err().length(), 0);
+        assert_eq!(PacketNumberLength::new(5).unwrap_err().length(), 5);
+        for (bytes, expected) in [
+            (1, PacketNumberLength::One),
+            (2, PacketNumberLength::Two),
+            (3, PacketNumberLength::Three),
+            (4, PacketNumberLength::Four),
+        ] {
+            let length = PacketNumberLength::new(bytes).unwrap();
+            assert_eq!(length, expected);
+            assert_eq!(length.get(), bytes);
+            assert_eq!(usize::from(length.first_byte_bits()), bytes - 1);
+            assert_eq!(
+                PacketNumberLength::from_first_byte(length.first_byte_bits()),
+                length
+            );
+        }
+    }
+
+    #[test]
+    fn packet_number_length_from_first_byte_ignores_other_bits() {
+        assert_eq!(
+            PacketNumberLength::from_first_byte(0xfc),
+            PacketNumberLength::One
+        );
+        assert_eq!(
+            PacketNumberLength::from_first_byte(0xc1),
+            PacketNumberLength::Two
+        );
+        assert_eq!(
+            PacketNumberLength::from_first_byte(0x42),
+            PacketNumberLength::Three
+        );
+        assert_eq!(
+            PacketNumberLength::from_first_byte(0xff),
+            PacketNumberLength::Four
+        );
     }
 }

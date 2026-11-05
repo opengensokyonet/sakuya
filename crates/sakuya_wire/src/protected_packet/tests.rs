@@ -3,13 +3,14 @@ use crate::{
     connection_id::{ConnectionId, ConnectionIdLength},
     encryption_level::EncryptionLevel,
     header::{
-        ShortPacketHeader,
+        KeyPhase, ShortPacketHeader,
         codec::WriteShortPacketHeaderHostExt as _,
         v1::{
             LongPacketHeader, LongPacketType, TypeFields,
             codec::{ReadLongPacketError, WriteLongPacketHeaderHostExt as _},
         },
     },
+    packet_number::PacketNumberLength,
     var_int::{VarInt, VarIntField, VarIntWidth, codec::WriteVarIntFieldHostExt as _},
 };
 use bytes::{Bytes, BytesMut};
@@ -50,11 +51,11 @@ fn finish_long(header: &LongPacketHeader, body: &[u8]) -> Vec<u8> {
 
 fn initial(dcid: &[u8], token: &'static [u8], body: &[u8]) -> Vec<u8> {
     let header = LongPacketHeader::initial(
-        0b11,
         cid(dcid),
         cid(&SCID),
         VarIntWidth::Two,
         Bytes::from_static(token),
+        PacketNumberLength::Four,
         reserved(VarIntWidth::Two),
     )
     .unwrap();
@@ -62,22 +63,34 @@ fn initial(dcid: &[u8], token: &'static [u8], body: &[u8]) -> Vec<u8> {
 }
 
 fn handshake(dcid: &[u8], body: &[u8]) -> Vec<u8> {
-    let header =
-        LongPacketHeader::handshake(0b01, cid(dcid), cid(&SCID), reserved(VarIntWidth::One))
-            .unwrap();
+    let header = LongPacketHeader::handshake(
+        cid(dcid),
+        cid(&SCID),
+        PacketNumberLength::Two,
+        reserved(VarIntWidth::One),
+    );
     finish_long(&header, body)
 }
 
 fn zero_rtt(dcid: &[u8], body: &[u8]) -> Vec<u8> {
-    let header =
-        LongPacketHeader::zero_rtt(0, cid(dcid), cid(&SCID), reserved(VarIntWidth::Four)).unwrap();
+    let header = LongPacketHeader::zero_rtt(
+        cid(dcid),
+        cid(&SCID),
+        PacketNumberLength::One,
+        reserved(VarIntWidth::Four),
+    );
     finish_long(&header, body)
 }
 
 fn one_rtt(dcid: &[u8], body: &[u8]) -> Vec<u8> {
     let mut packet = Vec::new();
     packet
-        .sync_write_short_packet_header_unpin(ShortPacketHeader::new(0b10_0001, cid(dcid)).unwrap())
+        .sync_write_short_packet_header_unpin(ShortPacketHeader::new(
+            true,
+            KeyPhase::Zero,
+            PacketNumberLength::Two,
+            cid(dcid),
+        ))
         .unwrap();
     packet.extend_from_slice(body);
     packet
