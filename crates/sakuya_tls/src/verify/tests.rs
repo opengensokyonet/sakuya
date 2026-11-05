@@ -21,7 +21,7 @@
 
 use super::{
     AnchorStore, CertificateVerifier, NoRevocationCheck, PathPosition, SpkiDistrustList,
-    VerifyError, WebPkiVerifier,
+    VerifyCertificateChainError, WebPkiVerifier,
     der::{self, Reader},
     public_key::PublicKeyAlgorithm,
     transparency::{
@@ -125,7 +125,7 @@ fn target(name: &str) -> ServerTarget {
     ServerTarget::from_host_name(name).unwrap()
 }
 
-type Error = VerifyError<Infallible, TransparencyError>;
+type Error = VerifyCertificateChainError<Infallible, TransparencyError>;
 
 fn verify(verifier: &Verifier, name: &str) -> Result<super::SubjectPublicKey, Error> {
     verifier.verify_now(&target(name), &chain())
@@ -171,7 +171,10 @@ fn the_verifier_as_a_capability() {
 #[test]
 fn another_name_fails() {
     let error = verify(&verifier(policy(), at(NOW)), "docs.rs").unwrap_err();
-    assert!(matches!(error, VerifyError::Name { .. }), "{error:?}");
+    assert!(
+        matches!(error, VerifyCertificateChainError::Name { .. }),
+        "{error:?}"
+    );
     assert_eq!(error.alert(), AlertDescription::BAD_CERTIFICATE);
 }
 
@@ -181,7 +184,7 @@ fn an_expired_certificate_fails() {
     assert!(
         matches!(
             error,
-            VerifyError::Path {
+            VerifyCertificateChainError::Path {
                 source: webpki::Error::CertExpired { .. }
             }
         ),
@@ -198,7 +201,7 @@ fn a_distrusted_key_fails_wherever_it_is() {
     assert!(
         matches!(
             error,
-            VerifyError::Distrusted {
+            VerifyCertificateChainError::Distrusted {
                 position: PathPosition::Intermediate { depth: 1 }
             }
         ),
@@ -209,7 +212,7 @@ fn a_distrusted_key_fails_wherever_it_is() {
     assert!(
         matches!(
             error,
-            VerifyError::Distrusted {
+            VerifyCertificateChainError::Distrusted {
                 position: PathPosition::Anchor
             }
         ),
@@ -219,7 +222,7 @@ fn a_distrusted_key_fails_wherever_it_is() {
     let error = verify(&verifier, "docsrs.com").unwrap_err();
     assert!(matches!(
         error,
-        VerifyError::Distrusted {
+        VerifyCertificateChainError::Distrusted {
             position: PathPosition::EndEntity
         }
     ));
@@ -236,7 +239,7 @@ fn an_unknown_root_fails() {
     assert!(
         matches!(
             error,
-            VerifyError::Path {
+            VerifyCertificateChainError::Path {
                 source: webpki::Error::UnknownIssuer
             }
         ),
@@ -244,13 +247,13 @@ fn an_unknown_root_fails() {
     );
     assert_eq!(error.alert(), AlertDescription::UNKNOWN_CA);
     let error = verifier.verify_now(&target("docsrs.com"), &[]).unwrap_err();
-    assert!(matches!(error, VerifyError::NoCertificate));
+    assert!(matches!(error, VerifyCertificateChainError::NoCertificate));
     assert_eq!(error.alert(), AlertDescription::DECODE_ERROR);
 }
 
 fn transparency_error(policy: EmbeddedSctPolicy, now: UtcDateTime) -> TransparencyError {
     match verify(&verifier(policy, now), "docsrs.com").unwrap_err() {
-        VerifyError::Transparency { source } => source,
+        VerifyCertificateChainError::Transparency { source } => source,
         error => panic!("{error:?}"),
     }
 }

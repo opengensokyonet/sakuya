@@ -460,16 +460,16 @@ where
     ///
     /// # Errors
     ///
-    /// [`VerifyError`].
+    /// [`VerifyCertificateChainError`].
     pub fn verify_now(
         &self,
         target: &ServerTarget,
         certificates: &[CertificateEntry<Bytes>],
-    ) -> Result<SubjectPublicKey, VerifyError<R::Error, T::Error>> {
-        use verify_error::*;
+    ) -> Result<SubjectPublicKey, VerifyCertificateChainError<R::Error, T::Error>> {
+        use verify_certificate_chain_error::*;
         let (leaf, intermediates) = certificates
             .split_first()
-            .ok_or(VerifyError::NoCertificate)?;
+            .ok_or(VerifyCertificateChainError::NoCertificate)?;
         let leaf_der = CertificateDer::from(leaf.data().as_ref());
         let end_entity = EndEntityCert::try_from(&leaf_der).context(EndEntitySnafu)?;
         let intermediates: Vec<CertificateDer<'_>> = intermediates
@@ -518,10 +518,16 @@ where
         );
         if let Err(error) = verified {
             return Err(match refusal.into_inner() {
-                Some(Refusal::Distrusted(position)) => VerifyError::Distrusted { position },
-                Some(Refusal::Revocation(source)) => VerifyError::Revocation { source },
-                Some(Refusal::Transparency(source)) => VerifyError::Transparency { source },
-                None => VerifyError::Path { source: error },
+                Some(Refusal::Distrusted(position)) => {
+                    VerifyCertificateChainError::Distrusted { position }
+                }
+                Some(Refusal::Revocation(source)) => {
+                    VerifyCertificateChainError::Revocation { source }
+                }
+                Some(Refusal::Transparency(source)) => {
+                    VerifyCertificateChainError::Transparency { source }
+                }
+                None => VerifyCertificateChainError::Path { source: error },
             });
         }
         end_entity
@@ -578,7 +584,7 @@ where
     T: Transparency<C>,
     K: Clock,
 {
-    type Error = VerifyError<R::Error, T::Error>;
+    type Error = VerifyCertificateChainError<R::Error, T::Error>;
     type Verifying<'a>
         = Ready<Result<SubjectPublicKey, Self::Error>>
     where
@@ -606,8 +612,8 @@ where
 ///
 /// `R` and `T` are the failures of the revocation and CT checks.
 #[derive(Debug, Snafu)]
-#[snafu(module(verify_error), visibility(pub(crate)))]
-pub enum VerifyError<R, T>
+#[snafu(module(verify_certificate_chain_error), visibility(pub(crate)))]
+pub enum VerifyCertificateChainError<R, T>
 where
     R: core::error::Error + 'static,
     T: core::error::Error + 'static,
@@ -659,7 +665,7 @@ where
     },
 }
 
-impl<R, T> VerifyError<R, T>
+impl<R, T> VerifyCertificateChainError<R, T>
 where
     R: core::error::Error + 'static,
     T: core::error::Error + 'static,
@@ -690,12 +696,12 @@ where
     }
 }
 
-impl<R, T> crate::alert::CallsForAlert for VerifyError<R, T>
+impl<R, T> crate::alert::CallsForAlert for VerifyCertificateChainError<R, T>
 where
     R: core::error::Error + 'static,
     T: core::error::Error + 'static,
 {
     fn alert(&self) -> AlertDescription {
-        VerifyError::alert(self)
+        VerifyCertificateChainError::alert(self)
     }
 }
