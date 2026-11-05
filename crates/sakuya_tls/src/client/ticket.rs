@@ -57,7 +57,7 @@ impl StoredTicket {
     /// `ticket_age_add`, modulo 2<sup>32</sup> (RFC 9846 §4.3.11.1).
     ///
     /// A `now` before the ticket was received counts as an age of zero.
-    pub fn obfuscated_age(&self, now: UtcDateTime) -> u32 {
+    pub fn obfuscated_ticket_age(&self, now: UtcDateTime) -> u32 {
         let age = elapsed(self.received_at, now).unwrap_or_default();
         // The age is taken modulo 2^32 milliseconds, as the field holds it.
         (age.as_millis() as u32).wrapping_add(self.ticket_age_add)
@@ -258,15 +258,15 @@ mod tests {
     }
 
     #[test]
-    fn the_obfuscated_age_adds_ticket_age_add() {
+    fn the_obfuscated_ticket_age_adds_ticket_age_add() {
         let ticket = ticket(1, start());
-        assert_eq!(ticket.obfuscated_age(start()), 0xffff_ff00);
+        assert_eq!(ticket.obfuscated_ticket_age(start()), 0xffff_ff00);
         assert_eq!(
-            ticket.obfuscated_age(start() + Duration::from_millis(0x101)),
+            ticket.obfuscated_ticket_age(start() + Duration::from_millis(0x101)),
             0x0000_0001
         );
         assert_eq!(
-            ticket.obfuscated_age(start() - Duration::from_secs(1)),
+            ticket.obfuscated_ticket_age(start() - Duration::from_secs(1)),
             0xffff_ff00
         );
     }

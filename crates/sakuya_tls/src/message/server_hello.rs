@@ -1,14 +1,14 @@
 //! ServerHello and HelloRetryRequest (RFC 9846 §4.2.3, §4.2.4).
 //!
 //! Both are server_hello messages; a HelloRetryRequest is the one whose
-//! random is [`HELLO_RETRY_REQUEST_RANDOM`]. [`codec::read_server_hello`]
+//! random is [`HELLO_RETRY_REQUEST_RANDOM`]. [`codec::read_server_hello_message`]
 //! tells them apart and reads the extensions each may carry.
 
 use crate::extension::{OpaqueData, extension_subset};
 use crate::{
     cipher_suite::CipherSuite,
     extension::{
-        BlockEntry, ExtensionType, InvalidExtensionsError, UnknownExtension, check_block,
+        BlockEntry, ExtensionType, InvalidExtensionBlockError, UnknownExtension, check_block,
         cookie::Cookie, key_share::KeyShareEntry, pre_shared_key::PskIndex,
     },
     message::{HelloRandom, LegacySessionId},
@@ -184,7 +184,7 @@ pub enum InvalidServerHelloError {
     #[snafu(display("ServerHello extensions invalid"))]
     Extensions {
         /// Why.
-        source: InvalidExtensionsError,
+        source: InvalidExtensionBlockError,
     },
 }
 
@@ -239,13 +239,13 @@ impl<C: AsRef<[u8]>> HelloRetryRequest<C> {
     ///
     /// # Errors
     ///
-    /// [`InvalidExtensionsError`] for an extension type that appears twice or a block outside 6 to 65535 bytes.
+    /// [`InvalidExtensionBlockError`] for an extension type that appears twice or a block outside 6 to 65535 bytes.
     pub fn new(
         legacy_version: ProtocolVersion,
         legacy_session_id_echo: LegacySessionId,
         cipher_suite: CipherSuite,
         extensions: Vec<HelloRetryRequestExtension<C>>,
-    ) -> Result<Self, InvalidExtensionsError> {
+    ) -> Result<Self, InvalidExtensionBlockError> {
         check_block(&extensions, BLOCK)?;
         Ok(Self {
             legacy_version,
@@ -396,7 +396,7 @@ pub mod codec {
     //! Reading and writing server_hello messages as `nitori_call`
     //! operations.
     //!
-    //! [`read_server_hello`], [`write_server_hello`] and
+    //! [`read_server_hello_message`], [`write_server_hello`] and
     //! [`write_hello_retry_request`] are also operation structs, with
     //! `{Name}Ext` on receiver accesses and `{Name}HostExt` on call
     //! executors, including the `sync_` methods.
@@ -413,7 +413,7 @@ pub mod codec {
         alert::AlertDescription,
         cipher_suite::CipherSuite,
         extension::{
-            BlockEntry as _, BlockReader, ExtensionBlockError, ExtensionNotAllowedError,
+            BlockEntry as _, BlockReader, ExtensionNotAllowedError, ReadExtensionBlockError,
             RestrictedExtension, UnknownExtension,
             cookie::codec::ReadCookieHostExt as _,
             excess,
@@ -443,22 +443,23 @@ pub mod codec {
     ///
     /// # Errors
     ///
-    /// [`ReadServerHelloError`].
+    /// [`ReadServerHelloMessageError`].
     #[call(sync)]
-    pub async fn read_server_hello<F: MessageSource, A: ReceiverAccess<Family = F>>(
+    pub async fn read_server_hello_message<F: MessageSource, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-    ) -> Result<ServerHelloMessage<F::Bytes>, ReadServerHelloError> {
+    ) -> Result<ServerHelloMessage<F::Bytes>, ReadServerHelloMessageError> {
         let mut body = read_body(io, HandshakeType::SERVER_HELLO).await?;
-        let hello = body.sync_read_server_hello_body_unpin()?;
-        ExcessBytesError::check(body.remaining()).context(read_server_hello_error::ExcessSnafu)?;
+        let hello = body.sync_read_server_hello_message_body_unpin()?;
+        ExcessBytesError::check(body.remaining())
+            .context(read_server_hello_message_error::ExcessSnafu)?;
         Ok(hello)
     }
 
     #[call(sync)]
-    async fn read_server_hello_body<F: MessageSource, A: ReceiverAccess<Family = F>>(
+    async fn read_server_hello_message_body<F: MessageSource, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-    ) -> Result<ServerHelloMessage<F::Bytes>, ReadServerHelloError> {
-        use read_server_hello_error::*;
+    ) -> Result<ServerHelloMessage<F::Bytes>, ReadServerHelloMessageError> {
+        use read_server_hello_message_error::*;
         let legacy_version = ProtocolVersion::new(read_u16(io).await.context(LegacyVersionSnafu)?);
         let random = HelloRandom(read_array(io).await.context(RandomSnafu)?);
         let legacy_session_id_echo = read_session_id(io).await.context(SessionIdSnafu)?;
@@ -487,7 +488,10 @@ pub mod codec {
                     let left = data.remaining();
                     let of = super::ServerHelloStructuredExtension::of;
                     if let Some((extension, source)) = excess(restricted, left, of) {
-                        return Err(ReadServerHelloError::ExtensionExcess { extension, source });
+                        return Err(ReadServerHelloMessageError::ExtensionExcess {
+                            extension,
+                            source,
+                        });
                     }
                 }
                 true => {
@@ -495,7 +499,7 @@ pub mod codec {
                     let left = data.remaining();
                     let of = super::HelloRetryRequestStructuredExtension::of;
                     if let Some((extension, source)) = excess(restricted, left, of) {
-                        return Err(ReadServerHelloError::RetryExtensionExcess {
+                        return Err(ReadServerHelloMessageError::RetryExtensionExcess {
                             extension,
                             source,
                         });
@@ -524,12 +528,12 @@ pub mod codec {
     fn read_server_extension<B>(
         extension: RestrictedExtension,
         data: &mut B,
-    ) -> Result<ServerHelloExtension<B>, ReadServerHelloError>
+    ) -> Result<ServerHelloExtension<B>, ReadServerHelloMessageError>
     where
         B: Buf + nitori_call::Receiver<Family: MessageSource<Bytes = B>> + Unpin,
     {
         use RestrictedExtension as R;
-        use read_server_hello_error::*;
+        use read_server_hello_message_error::*;
         Ok(match extension {
             R::KeyShare => ServerHelloExtension::KeyShare(
                 data.sync_read_key_share_entry_unpin()
@@ -551,12 +555,12 @@ pub mod codec {
     fn read_retry_extension<B>(
         extension: RestrictedExtension,
         data: &mut B,
-    ) -> Result<HelloRetryRequestExtension<B>, ReadServerHelloError>
+    ) -> Result<HelloRetryRequestExtension<B>, ReadServerHelloMessageError>
     where
         B: Buf + nitori_call::Receiver<Family: MessageSource<Bytes = B>> + Unpin + Default,
     {
         use RestrictedExtension as R;
-        use read_server_hello_error::*;
+        use read_server_hello_message_error::*;
         Ok(match extension {
             R::KeyShare => HelloRetryRequestExtension::KeyShare(NamedGroup::new(
                 data.sync_read_selected_u16_unpin()
@@ -588,10 +592,10 @@ pub mod codec {
         read_u16(io).await
     }
 
-    /// Failures that [`read_server_hello`] can produce.
+    /// Failures that [`read_server_hello_message`] can produce.
     #[derive(Debug, Snafu)]
-    #[snafu(module(read_server_hello_error), visibility(pub(crate)))]
-    pub enum ReadServerHelloError {
+    #[snafu(module(read_server_hello_message_error), visibility(pub(crate)))]
+    pub enum ReadServerHelloMessageError {
         /// The header could not be read, or the message is of another type.
         #[snafu(transparent)]
         Header {
@@ -642,7 +646,7 @@ pub mod codec {
         #[snafu(display("ServerHello extensions read failed"))]
         Extensions {
             /// The failure.
-            source: ExtensionBlockError,
+            source: ReadExtensionBlockError,
         },
         /// The extension block is shorter than 6 bytes.
         #[snafu(display("ServerHello extension block length out of range"))]
@@ -712,7 +716,7 @@ pub mod codec {
         },
     }
 
-    impl ReadServerHelloError {
+    impl ReadServerHelloMessageError {
         /// The alert the failure calls for.
         ///
         /// illegal_parameter for a compression method other than 0, for a

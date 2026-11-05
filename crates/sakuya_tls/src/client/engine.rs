@@ -97,7 +97,7 @@ use crate::{
         },
         server_hello::{
             HelloRetryRequestExtension, ServerHelloMessage,
-            codec::{ReadServerHelloError, ReadServerHelloHostExt as _},
+            codec::{ReadServerHelloMessageError, ReadServerHelloMessageHostExt as _},
         },
     },
     role::Client,
@@ -297,7 +297,7 @@ pub enum ClientAlertError<V> {
     #[snafu(display("ServerHello read failed"))]
     ServerHello {
         /// The failure.
-        source: ReadServerHelloError,
+        source: ReadServerHelloMessageError,
     },
     /// A second HelloRetryRequest arrived (RFC 9846 §4.2.4).
     #[snafu(display("second HelloRetryRequest"))]
@@ -829,7 +829,7 @@ where
     };
 
     // The first ClientHello.
-    let age = |offered: &OfferedTicket<B>| offered.ticket.obfuscated_age(clock.now());
+    let age = |offered: &OfferedTicket<B>| offered.ticket.obfuscated_ticket_age(clock.now());
     let hello = parts
         .hello(
             &exchanges,
@@ -899,7 +899,7 @@ where
         let reply = message
             .encoded()
             .clone()
-            .sync_read_server_hello_unpin()
+            .sync_read_server_hello_message_unpin()
             .map_err(|source| alert(ClientAlertError::ServerHello { source }))?;
         let retry = match reply {
             ServerHelloMessage::ServerHello(server_hello) => {

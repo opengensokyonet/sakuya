@@ -57,7 +57,7 @@ use crate::{
         HandshakeError, LegacySessionIdError, encode, split_read, split_write,
     },
     extension::{
-        InvalidExtensionsError, OpaqueData,
+        InvalidExtensionBlockError, OpaqueData,
         early_data::MaxEarlyDataSize,
         key_share::KeyShareEntry,
         pre_shared_key::{OfferedPsks, PskIndex},
@@ -316,7 +316,7 @@ pub enum ServerAlertError<L, S, G, K> {
     #[snafu(display("EncryptedExtensions too long"))]
     EncryptedExtensions {
         /// The failure.
-        source: InvalidExtensionsError,
+        source: InvalidExtensionBlockError,
     },
     /// The key signs with none of the client's schemes.
     #[snafu(display("no common signature scheme"))]
@@ -874,7 +874,7 @@ where
                     extension: RequiredExtension::SignatureAlgorithms,
                 }))?;
         let presented = identity
-            .present(&selected, offered.as_slice())
+            .select(&selected, offered.as_slice())
             .map_err(|source| alert(ServerAlertError::NoCommonScheme { source }))?;
         let entries = presented
             .certificates()

@@ -3,7 +3,9 @@
 use crate::extension::extension_subset;
 use crate::{
     code_point::CodePointList,
-    extension::{BlockEntry, ExtensionType, InvalidExtensionsError, UnknownExtension, check_block},
+    extension::{
+        BlockEntry, ExtensionType, InvalidExtensionBlockError, UnknownExtension, check_block,
+    },
     vector::LengthOutOfRangeError,
     width::Width,
 };
@@ -123,7 +125,7 @@ pub enum InvalidCertificateRequestError {
     #[snafu(display("CertificateRequest extensions invalid"))]
     Extensions {
         /// Why.
-        source: InvalidExtensionsError,
+        source: InvalidExtensionBlockError,
     },
 }
 
@@ -176,7 +178,7 @@ pub mod codec {
         alert::AlertDescription,
         code_point::codec::{ReadCodePointListError, ReadCodePointListHostExt as _},
         extension::{
-            BlockEntry as _, BlockReader, ExtensionBlockError, ExtensionNotAllowedError,
+            BlockEntry as _, BlockReader, ExtensionNotAllowedError, ReadExtensionBlockError,
             RestrictedExtension, UnknownExtension, excess, not_allowed, read_extension_block,
         },
         message::{HandshakeType, MessageSource, ReadHeaderError, read_body},
@@ -274,7 +276,7 @@ pub mod codec {
         #[snafu(display("CertificateRequest extensions read failed"))]
         Extensions {
             /// The failure.
-            source: ExtensionBlockError,
+            source: ReadExtensionBlockError,
         },
         /// The extension block is shorter than 2 bytes.
         #[snafu(display("CertificateRequest extension block length out of range"))]

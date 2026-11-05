@@ -3,7 +3,7 @@
 use crate::extension::extension_subset;
 use crate::{
     extension::{
-        BlockEntry, ExtensionType, InvalidExtensionsError, UnknownExtension, check_block,
+        BlockEntry, ExtensionType, InvalidExtensionBlockError, UnknownExtension, check_block,
         early_data::MaxEarlyDataSize,
     },
     vector::LengthOutOfRangeError,
@@ -214,7 +214,7 @@ pub enum InvalidNewSessionTicketError {
     #[snafu(display("NewSessionTicket extensions invalid"))]
     Extensions {
         /// Why.
-        source: InvalidExtensionsError,
+        source: InvalidExtensionBlockError,
     },
 }
 
@@ -257,7 +257,7 @@ pub mod codec {
     use crate::{
         alert::AlertDescription,
         extension::{
-            BlockEntry as _, BlockReader, ExtensionBlockError, ExtensionNotAllowedError,
+            BlockEntry as _, BlockReader, ExtensionNotAllowedError, ReadExtensionBlockError,
             RestrictedExtension, UnknownExtension, early_data::MaxEarlyDataSize, not_allowed,
             read_extension_block,
         },
@@ -394,7 +394,7 @@ pub mod codec {
         #[snafu(display("NewSessionTicket extensions read failed"))]
         Extensions {
             /// The failure.
-            source: ExtensionBlockError,
+            source: ReadExtensionBlockError,
         },
         /// The extension block is 65535 bytes long.
         #[snafu(display("NewSessionTicket extension block length out of range"))]

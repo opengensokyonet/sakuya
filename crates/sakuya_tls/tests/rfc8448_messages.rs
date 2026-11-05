@@ -41,7 +41,7 @@ use sakuya_tls::{
         server_hello::{
             ServerHelloMessage,
             codec::{
-                ReadServerHelloHostExt as _, WriteHelloRetryRequestHostExt as _,
+                ReadServerHelloMessageHostExt as _, WriteHelloRetryRequestHostExt as _,
                 WriteServerHelloHostExt as _,
             },
         },
@@ -176,15 +176,18 @@ fn server_hellos() {
     ] {
         let bytes = hex(message);
         for value in [
-            bytes.as_slice().sync_read_server_hello_unpin().map(|_| ()),
+            bytes
+                .as_slice()
+                .sync_read_server_hello_message_unpin()
+                .map(|_| ()),
             Bytes::from(bytes.clone())
-                .sync_read_server_hello_unpin()
+                .sync_read_server_hello_message_unpin()
                 .map(|_| ()),
         ] {
             value.unwrap();
         }
         let hello = Bytes::from(bytes.clone())
-            .sync_read_server_hello_unpin()
+            .sync_read_server_hello_message_unpin()
             .unwrap();
         let mut output = Vec::new();
         match &hello {
@@ -205,7 +208,7 @@ fn server_hellos() {
 fn server_hello_fields() {
     let hello = hex(s3::SERVER_HELLO)
         .as_slice()
-        .sync_read_server_hello_unpin()
+        .sync_read_server_hello_message_unpin()
         .map(|hello| match hello {
             ServerHelloMessage::ServerHello(hello) => (
                 hello.cipher_suite(),
@@ -226,14 +229,14 @@ fn server_hello_fields() {
         )
     );
     let resumed = Bytes::from(hex(s4::SERVER_HELLO))
-        .sync_read_server_hello_unpin()
+        .sync_read_server_hello_message_unpin()
         .unwrap();
     let ServerHelloMessage::ServerHello(resumed) = resumed else {
         panic!()
     };
     assert_eq!(resumed.pre_shared_key().map(|index| index.get()), Some(0));
     let retry = Bytes::from(hex(s5::HELLO_RETRY_REQUEST))
-        .sync_read_server_hello_unpin()
+        .sync_read_server_hello_message_unpin()
         .unwrap();
     let ServerHelloMessage::HelloRetryRequest(retry) = retry else {
         panic!()

@@ -10,7 +10,7 @@ use crate::{
     cipher_suite::CipherSuite,
     code_point::{ByteCodePointList, CodePointList},
     extension::{
-        BlockEntry, ExtensionType, InvalidExtensionsError, UnknownExtension,
+        BlockEntry, ExtensionType, InvalidExtensionBlockError, UnknownExtension,
         alpn::ProtocolNameList, certificate_type::CertificateType, check_block, cookie::Cookie,
         key_share::ClientShares, pre_shared_key::OfferedPsks,
         psk_key_exchange_modes::PskKeyExchangeMode, server_name::ServerName,
@@ -293,7 +293,7 @@ pub enum InvalidClientHelloError {
     #[snafu(display("ClientHello extensions invalid"))]
     Extensions {
         /// Why.
-        source: InvalidExtensionsError,
+        source: InvalidExtensionBlockError,
     },
     /// `pre_shared_key` is not the last extension.
     #[snafu(display("pre_shared_key is not the last ClientHello extension"))]
@@ -340,7 +340,7 @@ pub mod codec {
             ReadByteCodePointListError, ReadCodePointListError, read_code_point_list,
         },
         extension::{
-            BlockEntry as _, BlockReader, ExtensionBlockError, RestrictedExtension,
+            BlockEntry as _, BlockReader, ReadExtensionBlockError, RestrictedExtension,
             UnknownExtension, alpn::codec::ReadProtocolNameListError, excess,
             key_share::codec::ReadClientSharesError, pre_shared_key::codec::ReadOfferedPsksError,
             read_extension_block, server_name::codec::ReadServerNameError,
@@ -559,7 +559,7 @@ pub mod codec {
         #[snafu(display("ClientHello extensions read failed"))]
         Extensions {
             /// The failure.
-            source: ExtensionBlockError,
+            source: ReadExtensionBlockError,
         },
         /// The extension block is shorter than 8 bytes.
         #[snafu(display("ClientHello extension block length out of range"))]

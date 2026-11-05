@@ -67,7 +67,7 @@ use sakuya_tls::{
         HandshakeMessage, HelloRandom, LegacySessionId, MessageLimits,
         client_hello::{ClientHello, ClientHelloExtension, codec::WriteClientHelloHostExt as _},
         codec::ReadHandshakeMessageHostExt as _,
-        server_hello::{ServerHelloMessage, codec::ReadServerHelloHostExt as _},
+        server_hello::{ServerHelloMessage, codec::ReadServerHelloMessageHostExt as _},
     },
     role::Client,
     schedule::{Authentication, HandshakeSecret, Transcript},
@@ -1069,7 +1069,7 @@ impl ScriptedClient {
                 };
                 let ServerHelloMessage::ServerHello(reply) = server_hello
                     .as_slice()
-                    .sync_read_server_hello_unpin()
+                    .sync_read_server_hello_message_unpin()
                     .unwrap()
                 else {
                     panic!("a HelloRetryRequest for the one group offered");

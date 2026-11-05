@@ -495,21 +495,15 @@ pub mod codec {
         let header = io.read_array::<4>().await.context(HeaderSnafu)?;
         let message_type = HandshakeType(header[0]);
         let len = u32::from_be_bytes([0, header[1], header[2], header[3]]);
-        let Some(message) = ReceivedMessageType::new(message_type) else {
-            return Err(UnexpectedMessageError {
-                message: message_type,
-            }
-            .into());
+        let Some(received) = ReceivedMessageType::new(message_type) else {
+            return Err(UnexpectedMessageError { message_type }.into());
         };
-        let Some(limit) = limits.limit(message, hash) else {
-            return Err(UnexpectedMessageError {
-                message: message_type,
-            }
-            .into());
+        let Some(limit) = limits.limit(received, hash) else {
+            return Err(UnexpectedMessageError { message_type }.into());
         };
         if len > limit {
             return Err(MessageTooLongError {
-                message,
+                message_type: received,
                 len,
                 limit,
             }
@@ -593,15 +587,15 @@ pub mod codec {
     /// A message of a type that QUIC does not carry, or a Finished message
     /// before the cipher suite is known.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-    #[snafu(display("{message:?} message is not received here"))]
+    #[snafu(display("{message_type:?} message is not received here"))]
     pub struct UnexpectedMessageError {
-        message: HandshakeType,
+        message_type: HandshakeType,
     }
 
     impl UnexpectedMessageError {
         /// The type of the message.
-        pub const fn message(self) -> HandshakeType {
-            self.message
+        pub const fn message_type(self) -> HandshakeType {
+            self.message_type
         }
     }
 
@@ -610,17 +604,17 @@ pub mod codec {
     /// It is constructed only when the check fails, so the length is always
     /// above the limit.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-    #[snafu(display("{message:?} message of {len} bytes exceeds the limit of {limit} bytes"))]
+    #[snafu(display("{message_type:?} message of {len} bytes exceeds the limit of {limit} bytes"))]
     pub struct MessageTooLongError {
-        message: ReceivedMessageType,
+        message_type: ReceivedMessageType,
         len: u32,
         limit: u32,
     }
 
     impl MessageTooLongError {
         /// The type of the message.
-        pub const fn message(self) -> ReceivedMessageType {
-            self.message
+        pub const fn message_type(self) -> ReceivedMessageType {
+            self.message_type
         }
 
         /// The length of the body that the header states.

@@ -435,8 +435,8 @@ pub(crate) fn not_allowed<X: Copy + core::fmt::Debug>(
 /// Failures of reading the structure of an extension block, which every
 /// message with extensions shares.
 #[derive(Debug, Snafu)]
-#[snafu(module(extension_block_error), visibility(pub(crate)))]
-pub enum ExtensionBlockError {
+#[snafu(module(read_extension_block_error), visibility(pub(crate)))]
+pub enum ReadExtensionBlockError {
     /// The block could not be read.
     #[snafu(display("extension block read failed"))]
     Block {
@@ -465,7 +465,7 @@ pub enum ExtensionBlockError {
     },
 }
 
-impl ExtensionBlockError {
+impl ReadExtensionBlockError {
     /// The alert the failure calls for: illegal_parameter for a duplicate
     /// type, decode_error otherwise.
     pub fn alert(&self) -> AlertDescription {
@@ -481,7 +481,7 @@ impl ExtensionBlockError {
 /// Failures of building the extension block of a message to write.
 #[derive(Debug, Snafu)]
 #[snafu(module(invalid_extensions), visibility(pub(crate)))]
-pub enum InvalidExtensionsError {
+pub enum InvalidExtensionBlockError {
     /// An extension type appears twice.
     #[snafu(transparent)]
     Duplicate {
@@ -510,7 +510,7 @@ pub(crate) trait BlockEntry {
 pub(crate) fn check_block<X: BlockEntry>(
     extensions: &[X],
     range: core::ops::RangeInclusive<usize>,
-) -> Result<usize, InvalidExtensionsError> {
+) -> Result<usize, InvalidExtensionBlockError> {
     let mut seen = Seen::default();
     let mut len = 0;
     for extension in extensions {
@@ -548,18 +548,18 @@ impl Seen {
 #[call(sync)]
 pub(crate) async fn read_extension_block<F: MessageSource, A: ReceiverAccess<Family = F>>(
     io: &mut A,
-) -> Result<F::Bytes, ExtensionBlockError> {
+) -> Result<F::Bytes, ReadExtensionBlockError> {
     read_vector(io, Width::U16)
         .await
-        .context(extension_block_error::BlockSnafu)
+        .context(read_extension_block_error::BlockSnafu)
 }
 
 /// Reads the type and data of the next extension of a block.
 #[call(sync)]
 pub(crate) async fn read_extension_entry<F: MessageSource, A: ReceiverAccess<Family = F>>(
     io: &mut A,
-) -> Result<(ExtensionType, F::Bytes), ExtensionBlockError> {
-    use extension_block_error::*;
+) -> Result<(ExtensionType, F::Bytes), ReadExtensionBlockError> {
+    use read_extension_block_error::*;
     let extension = ExtensionType(read_u16(io).await.context(TypeSnafu)?);
     let data = read_vector(io, Width::U16)
         .await
@@ -584,7 +584,7 @@ impl<B: Buf + nitori_call::Receiver<Family: MessageSource<Bytes = B>> + Unpin> B
 
     /// The type and data of the next extension, or `None` at the end of the
     /// block.
-    pub(crate) fn next(&mut self) -> Result<Option<(ExtensionType, B)>, ExtensionBlockError> {
+    pub(crate) fn next(&mut self) -> Result<Option<(ExtensionType, B)>, ReadExtensionBlockError> {
         if !self.block.has_remaining() {
             return Ok(None);
         }

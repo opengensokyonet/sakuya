@@ -4,8 +4,8 @@ use crate::extension::{OpaqueData, extension_subset};
 use crate::{
     code_point::CodePointList,
     extension::{
-        BlockEntry, ExtensionType, InvalidExtensionsError, UnknownExtension, alpn::ProtocolName,
-        certificate_type::CertificateType, check_block,
+        BlockEntry, ExtensionType, InvalidExtensionBlockError, UnknownExtension,
+        alpn::ProtocolName, certificate_type::CertificateType, check_block,
     },
     width::Width,
 };
@@ -77,10 +77,10 @@ impl<C: AsRef<[u8]>> EncryptedExtensions<C> {
     ///
     /// # Errors
     ///
-    /// [`InvalidExtensionsError`] for an extension type that appears twice or a block above 65535 bytes.
+    /// [`InvalidExtensionBlockError`] for an extension type that appears twice or a block above 65535 bytes.
     pub fn new(
         extensions: Vec<EncryptedExtensionsExtension<C>>,
-    ) -> Result<Self, InvalidExtensionsError> {
+    ) -> Result<Self, InvalidExtensionBlockError> {
         check_block(&extensions, 0..=Width::U16.max())?;
         Ok(Self { extensions })
     }
@@ -165,7 +165,7 @@ pub mod codec {
         alert::AlertDescription,
         code_point::codec::{ReadCodePointListError, ReadCodePointListHostExt as _},
         extension::{
-            BlockEntry as _, BlockReader, ExtensionBlockError, ExtensionNotAllowedError,
+            BlockEntry as _, BlockReader, ExtensionNotAllowedError, ReadExtensionBlockError,
             ReadExtensionBlockHostExt as _, RestrictedExtension, UnknownExtension,
             alpn::codec::{ReadSelectedProtocolError, ReadSelectedProtocolHostExt as _},
             certificate_type::CertificateType,
@@ -281,7 +281,7 @@ pub mod codec {
         #[snafu(display("EncryptedExtensions extensions read failed"))]
         Extensions {
             /// The failure.
-            source: ExtensionBlockError,
+            source: ReadExtensionBlockError,
         },
         /// A recognized extension that this message may not carry.
         #[snafu(transparent)]

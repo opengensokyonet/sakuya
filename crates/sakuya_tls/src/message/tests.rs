@@ -88,7 +88,7 @@ fn a_length_above_the_limit_fails_before_the_body() {
         panic!("{error:?}")
     };
     assert_eq!(
-        (source.message(), source.length(), source.limit()),
+        (source.message_type(), source.length(), source.limit()),
         (ReceivedMessageType::CertificateVerify, 5, 4)
     );
     assert_eq!(error.alert(), AlertDescription::ILLEGAL_PARAMETER);
@@ -103,7 +103,7 @@ fn finished_is_limited_by_the_hash() {
         .sync_read_handshake_message_unpin(MessageLimits::default(), None)
         .unwrap_err();
     assert!(
-        matches!(error, ReadHandshakeMessageError::Unexpected { source } if source.message() == HandshakeType::FINISHED)
+        matches!(error, ReadHandshakeMessageError::Unexpected { source } if source.message_type() == HandshakeType::FINISHED)
     );
     assert_eq!(error.alert(), AlertDescription::UNEXPECTED_MESSAGE);
     let mut input = finished.as_slice();

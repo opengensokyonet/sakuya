@@ -7,7 +7,8 @@ use crate::{
     cipher_suite::CipherSuite,
     code_point::{CodePointList, codec::ReadCodePointListError},
     extension::{
-        ExtensionBlockError, ExtensionType, InvalidExtensionsError, OpaqueData, UnknownExtension,
+        ExtensionType, InvalidExtensionBlockError, OpaqueData, ReadExtensionBlockError,
+        UnknownExtension,
         key_share::codec::ReadClientSharesError,
         pre_shared_key::{OfferedPsks, PskBinderEntry, PskIdentity},
     },
@@ -130,7 +131,7 @@ fn a_type_may_appear_once() {
     ]));
     let error = read(&bytes).unwrap_err();
     let ReadClientHelloError::Extensions {
-        source: ExtensionBlockError::Duplicate { source },
+        source: ReadExtensionBlockError::Duplicate { source },
     } = &error
     else {
         panic!("{error:?}")
@@ -272,14 +273,14 @@ fn construction_checks_the_block() {
     assert!(matches!(
         error,
         InvalidClientHelloError::Extensions {
-            source: InvalidExtensionsError::Duplicate { .. }
+            source: InvalidExtensionBlockError::Duplicate { .. }
         }
     ));
     let error = new(vec![ClientHelloExtension::EarlyData]).unwrap_err();
     assert!(matches!(
         error,
         InvalidClientHelloError::Extensions {
-            source: InvalidExtensionsError::Length { .. }
+            source: InvalidExtensionBlockError::Length { .. }
         }
     ));
     let long = vec![0; 0x1_0000];

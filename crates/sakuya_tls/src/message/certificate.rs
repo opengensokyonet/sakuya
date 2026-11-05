@@ -8,7 +8,7 @@
 use crate::extension::extension_subset;
 use crate::{
     extension::{
-        BlockEntry, ExtensionType, InvalidExtensionsError, UnknownExtension,
+        BlockEntry, ExtensionType, InvalidExtensionBlockError, UnknownExtension,
         certificate_type::CertificateType, check_block,
         signed_certificate_timestamp::SignedCertificateTimestampList,
     },
@@ -127,7 +127,7 @@ pub enum InvalidCertificateEntryError {
     #[snafu(display("certificate entry extensions invalid"))]
     Extensions {
         /// Why.
-        source: InvalidExtensionsError,
+        source: InvalidExtensionBlockError,
     },
 }
 
@@ -281,7 +281,7 @@ pub mod codec {
     use crate::{
         alert::AlertDescription,
         extension::{
-            BlockEntry as _, BlockReader, ExtensionBlockError, ExtensionNotAllowedError,
+            BlockEntry as _, BlockReader, ExtensionNotAllowedError, ReadExtensionBlockError,
             RestrictedExtension, UnknownExtension, not_allowed, read_extension_block,
             signed_certificate_timestamp::codec::{
                 ReadSignedCertificateTimestampListError,
@@ -451,7 +451,7 @@ pub mod codec {
         #[snafu(display("certificate entry extensions read failed"))]
         Extensions {
             /// The failure.
-            source: ExtensionBlockError,
+            source: ReadExtensionBlockError,
         },
         /// A recognized extension that an entry may not carry.
         #[snafu(transparent)]

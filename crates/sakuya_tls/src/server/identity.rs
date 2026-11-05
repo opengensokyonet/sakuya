@@ -5,7 +5,7 @@
 //! that signature must be one the client offered in
 //! `signature_algorithms` and fit the key; RSA signs with RSASSA-PSS, and
 //! no scheme uses SHA-1 (RFC 9846 §4.5.2).
-//! [`CertificateSelection::present`] picks the chain and the scheme for
+//! [`CertificateSelection::select`] picks the chain and the scheme for
 //! the selected target; the handshake computes the content to sign, and
 //! the signature may wait.
 //!
@@ -30,7 +30,7 @@ pub trait CertificateSelection<T> {
     /// # Errors
     ///
     /// [`NoCommonSchemeError`] when the key signs with none of `offered`.
-    fn present(
+    fn select(
         &self,
         selected: &SelectedTarget<T>,
         offered: &[SignatureScheme],
@@ -123,7 +123,7 @@ pub struct EmptyChainError;
 impl<K: SigningKey, T> CertificateSelection<T> for CertifiedKey<K> {
     type Key = K;
 
-    fn present(
+    fn select(
         &self,
         _selected: &SelectedTarget<T>,
         offered: &[SignatureScheme],
@@ -192,7 +192,7 @@ mod tests {
             SignatureScheme::RSA_PSS_RSAE_SHA256,
         ]);
         let presented = identity
-            .present(
+            .select(
                 &selected(),
                 &[
                     SignatureScheme::RSA_PSS_RSAE_SHA256,
@@ -212,7 +212,7 @@ mod tests {
             SignatureScheme::RSA_PKCS1_SHA256,
             SignatureScheme::ECDSA_SECP256R1_SHA256,
         ]);
-        let error = CertificateSelection::<()>::present(
+        let error = CertificateSelection::<()>::select(
             &identity,
             &selected(),
             &[SignatureScheme::RSA_PKCS1_SHA256, SignatureScheme::ED25519],

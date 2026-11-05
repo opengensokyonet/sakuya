@@ -1,6 +1,6 @@
 use super::{
     HELLO_RETRY_REQUEST_RANDOM, InvalidServerHelloError, ServerHello, ServerHelloMessage,
-    codec::{ReadServerHelloError, ReadServerHelloHostExt as _},
+    codec::{ReadServerHelloMessageError, ReadServerHelloMessageHostExt as _},
 };
 use crate::{
     alert::AlertDescription,
@@ -24,8 +24,8 @@ fn server_hello(random: &[u8; 32], compression: u8, extensions: &[u8]) -> Vec<u8
     )
 }
 
-fn read(bytes: Vec<u8>) -> Result<ServerHelloMessage<bytes::Bytes>, ReadServerHelloError> {
-    bytes::Bytes::from(bytes).sync_read_server_hello_unpin()
+fn read(bytes: Vec<u8>) -> Result<ServerHelloMessage<bytes::Bytes>, ReadServerHelloMessageError> {
+    bytes::Bytes::from(bytes).sync_read_server_hello_message_unpin()
 }
 
 const VERSION: &[u8] = &[0x00, 0x2b, 0x00, 0x02, 0x03, 0x04];
@@ -54,7 +54,7 @@ fn each_message_allows_its_extensions() {
     // A ServerHello may not carry a cookie; a HelloRetryRequest may.
     let cookie = extension(44, &[0x00, 0x01, 0x09]);
     let error = read(server_hello(&[7; 32], 0, &concat(&[VERSION, &cookie]))).unwrap_err();
-    let ReadServerHelloError::ExtensionNotAllowed { source } = &error else {
+    let ReadServerHelloMessageError::ExtensionNotAllowed { source } = &error else {
         panic!("{error:?}")
     };
     assert_eq!(
@@ -78,7 +78,7 @@ fn each_message_allows_its_extensions() {
         &concat(&[VERSION, &psk]),
     ))
     .unwrap_err();
-    let ReadServerHelloError::RetryExtensionNotAllowed { source } = &error else {
+    let ReadServerHelloMessageError::RetryExtensionNotAllowed { source } = &error else {
         panic!("{error:?}")
     };
     assert_eq!(
@@ -96,7 +96,7 @@ fn each_message_allows_its_extensions() {
     .unwrap_err();
     assert!(matches!(
         error,
-        ReadServerHelloError::RetryExtensionExcess {
+        ReadServerHelloMessageError::RetryExtensionExcess {
             extension: super::HelloRetryRequestStructuredExtension::Cookie,
             ..
         }
@@ -108,7 +108,7 @@ fn field_rules() {
     let error = read(server_hello(&[7; 32], 1, VERSION)).unwrap_err();
     assert!(matches!(
         error,
-        ReadServerHelloError::CompressionMethodNotNull
+        ReadServerHelloMessageError::CompressionMethodNotNull
     ));
     assert_eq!(error.alert(), AlertDescription::ILLEGAL_PARAMETER);
     let error = read(server_hello(
@@ -119,7 +119,7 @@ fn field_rules() {
     .unwrap_err();
     assert!(matches!(
         error,
-        ReadServerHelloError::ExtensionExcess {
+        ReadServerHelloMessageError::ExtensionExcess {
             extension: super::ServerHelloStructuredExtension::SupportedVersions,
             ..
         }
@@ -133,7 +133,7 @@ fn field_rules() {
     .unwrap_err();
     assert!(matches!(
         error,
-        ReadServerHelloError::SelectedVersion { .. }
+        ReadServerHelloMessageError::SelectedVersion { .. }
     ));
 }
 
