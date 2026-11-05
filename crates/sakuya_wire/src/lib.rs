@@ -33,6 +33,9 @@
 //!   codes ([`application_error::ApplicationErrorCode`]).
 //! - [`role`]: the client and server roles ([`role::Role`]).
 //! - [`payload`]: how variable-length payload fields are read.
+//! - [`protected_packet`]: cutting the packets of a datagram apart
+//!   ([`protected_packet::into_packets`]), each with the header read and the
+//!   protection still on ([`protected_packet::ProtectedPacket`]).
 //!
 //! Every wire format is read and written through `nitori_call` operations, in
 //! the `codec` module of its type. They run on sources and sinks that may wait
@@ -61,6 +64,7 @@ pub mod frame;
 pub mod header;
 pub mod packet_number;
 pub mod payload;
+pub mod protected_packet;
 pub mod role;
 pub mod stream_count;
 pub mod stream_id;

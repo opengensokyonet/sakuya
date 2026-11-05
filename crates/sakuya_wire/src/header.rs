@@ -193,7 +193,9 @@ impl LongHeader {
 /// ID; the endpoint that chose the connection ID knows it. Different lengths
 /// give different interpretations of the same bytes, and the header itself
 /// cannot tell which is right. A short header packet extends to the end of the
-/// source; `D` is the source's chunk type, which holds the protected rest.
+/// source; `D` is the source's chunk type, which holds the protected rest, or
+/// the range of those bytes within the packet when the header was located by
+/// [`into_packets`](crate::protected_packet::into_packets).
 ///
 /// [RFC 8999 §5.2]: https://www.rfc-editor.org/rfc/rfc8999.html#section-5.2
 /// [RFC 9000 §17.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.3
@@ -204,7 +206,7 @@ pub struct ShortHeader<D> {
     protected: D,
 }
 
-impl<D: Buf> ShortHeader<D> {
+impl<D> ShortHeader<D> {
     /// The first byte of the packet. Its low seven bits are version-specific
     /// and some of them are protected.
     pub fn first_byte(&self) -> u8 {
@@ -232,11 +234,6 @@ impl<D: Buf> ShortHeader<D> {
         self.packet_number_offset() + SAMPLE_DISTANCE
     }
 
-    /// The offset just past the packet, the end of the source.
-    pub fn end(&self) -> usize {
-        self.packet_number_offset() + self.protected.remaining()
-    }
-
     /// The protected packet number and payload.
     pub fn protected(&self) -> &D {
         &self.protected
@@ -245,6 +242,22 @@ impl<D: Buf> ShortHeader<D> {
     /// Takes the protected packet number and payload.
     pub fn into_protected(self) -> D {
         self.protected
+    }
+
+    /// The header with `protected` mapped by `map`.
+    pub(crate) fn map_protected<E>(self, map: impl FnOnce(D) -> E) -> ShortHeader<E> {
+        ShortHeader {
+            first_byte: self.first_byte,
+            dcid: self.dcid,
+            protected: map(self.protected),
+        }
+    }
+}
+
+impl<D: Buf> ShortHeader<D> {
+    /// The offset just past the packet, the end of the source.
+    pub fn end(&self) -> usize {
+        self.packet_number_offset() + self.protected.remaining()
     }
 }
 

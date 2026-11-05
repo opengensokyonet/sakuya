@@ -25,7 +25,8 @@ use crate::{
     var_int::{VarInt, VarIntField, VarIntWidth},
     version::Version,
 };
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
+use core::ops::Range;
 use snafu::Snafu;
 
 pub mod codec;
@@ -388,6 +389,62 @@ impl<D> LongPacket<D> {
             | TypeFields::ZeroRtt { bounds, .. }
             | TypeFields::Handshake { bounds, .. } => bounds.end,
             TypeFields::Retry { end, .. } => *end,
+        }
+    }
+}
+
+impl<D: Buf> LongPacket<D> {
+    /// The packet with the token and the protected bytes replaced by their
+    /// ranges within `bytes`, the packet as it was read.
+    ///
+    /// The ranges let the packet outlive the borrow of `bytes` that reading
+    /// it needed. A Retry packet keeps its token and integrity tag.
+    pub(crate) fn into_ranges(self, bytes: &[u8]) -> LongPacket<Range<usize>> {
+        let fields = match self.fields {
+            TypeFields::Initial {
+                token,
+                bounds,
+                protected,
+            } => {
+                // The Token Length field follows the connection IDs and was
+                // read from `bytes`, so its first byte exists.
+                let offset = self.header.version_specific_offset();
+                let width = bytes
+                    .get(offset)
+                    .map_or(VarIntWidth::One, |&byte| VarIntWidth::of_first_byte(byte));
+                let token_start = offset + width.encoded_len();
+                TypeFields::Initial {
+                    token: token_start..token_start + token.remaining(),
+                    bounds,
+                    protected: bounds.packet_number_offset
+                        ..bounds.packet_number_offset + protected.remaining(),
+                }
+            }
+            TypeFields::ZeroRtt { bounds, protected } => TypeFields::ZeroRtt {
+                bounds,
+                protected: bounds.packet_number_offset
+                    ..bounds.packet_number_offset + protected.remaining(),
+            },
+            TypeFields::Handshake { bounds, protected } => TypeFields::Handshake {
+                bounds,
+                protected: bounds.packet_number_offset
+                    ..bounds.packet_number_offset + protected.remaining(),
+            },
+            TypeFields::Retry {
+                token,
+                integrity_tag,
+                end,
+            } => TypeFields::Retry {
+                token,
+                integrity_tag,
+                end,
+            },
+        };
+        LongPacket {
+            header: self.header,
+            dcid: self.dcid,
+            scid: self.scid,
+            fields,
         }
     }
 }
