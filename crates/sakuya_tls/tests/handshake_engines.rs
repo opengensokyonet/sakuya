@@ -23,6 +23,7 @@ use core::{
 };
 use nitori_call::{LentCall, Receiver};
 use nitori_crypto::{ExpandLength, NamedGroup};
+use nitori_crypto::{Hash as _, HashAlgorithm, KeyExchange, SignatureScheme, StartedExchange as _};
 use nitori_crypto_aws_lc::AwsLcBackend;
 use sakuya_tls::{
     alert::AlertDescription,
@@ -53,6 +54,24 @@ use sakuya_tls::{
         targets::SniTargets,
         ticket::ZeroRttOnceTicketTable,
     },
+};
+use sakuya_tls::{
+    code_point::{ByteCodePointList, CodePointList},
+    extension::{
+        OpaqueData,
+        key_share::{ClientShares, KeyShareEntry},
+        psk_key_exchange_modes::PskKeyExchangeMode,
+        server_name::ServerName,
+    },
+    message::{
+        HandshakeMessage, HelloRandom, LegacySessionId, MessageLimits,
+        client_hello::{ClientHello, ClientHelloExtension, codec::WriteClientHelloHostExt as _},
+        codec::ReadHandshakeMessageHostExt as _,
+        server_hello::{ServerHelloMessage, codec::ReadServerHelloHostExt as _},
+    },
+    role::Client,
+    schedule::{Authentication, HandshakeSecret, Transcript},
+    version::ProtocolVersion,
 };
 use std::{collections::VecDeque, sync::Arc, time::Duration};
 
@@ -267,19 +286,17 @@ struct Connection<SF, CF> {
     client_end: Option<CF>,
 }
 
-/// Runs one connection to `host` with the server's parameters as `wire`
-/// has them, through `change`.
-macro_rules! connect {
-    ($endpoints:expr, $wire:expr, $host:expr, $change:expr) => {{
+/// The server's handshake of `endpoints`, which serves example.com.
+macro_rules! server_handshake {
+    ($endpoints:expr) => {{
         let endpoints: &Endpoints = $endpoints;
-        let mut wire: Wire = $wire;
         let mut targets = SniTargets::new();
         targets.insert("example.com", "web", endpoints.server_protocols.clone());
         if endpoints.fallback {
             targets.set_fallback("web", endpoints.server_protocols.clone());
         }
         let identity = CertifiedKey::new(vec![Bytes::from(pki::leaf())], pki::key(2)).unwrap();
-        let server = ServerHandshake::new(
+        ServerHandshake::new(
             AwsLcBackend,
             PreferenceTable::new(
                 vec![
@@ -296,7 +313,32 @@ macro_rules! connect {
             NoCertificateRequest,
             Arc::clone(&endpoints.clock),
             ServerHandshakeSettings::default(),
-        );
+        )
+    }};
+}
+
+/// Polls `server`, a pinned call of [`server_handshake!`], on the server's
+/// receivers of `wire`.
+macro_rules! poll_server {
+    ($server:expr, $wire:expr) => {{
+        let wire: &mut Wire = $wire;
+        let mut input = pin!(Pin::new(&mut wire.server_in).view());
+        let mut output = pin!(Pin::new(&mut wire.server_out).view());
+        let mut parameters = pin!(Pin::new(&mut wire.server_parameters).view());
+        $server.as_mut().poll_with_views(
+            (input.as_mut(), output.as_mut(), parameters.as_mut()),
+            &mut Context::from_waker(Waker::noop()),
+        )
+    }};
+}
+
+/// Runs one connection to `host` with the server's parameters as `wire`
+/// has them, through `change`.
+macro_rules! connect {
+    ($endpoints:expr, $wire:expr, $host:expr, $change:expr) => {{
+        let endpoints: &Endpoints = $endpoints;
+        let mut wire: Wire = $wire;
+        let server = server_handshake!(endpoints);
         let client = ClientHandshake::new(
             AwsLcBackend,
             endpoints.offering.clone(),
@@ -315,15 +357,7 @@ macro_rules! connect {
         ));
         let run = run(
             &mut wire,
-            |wire| {
-                let mut input = pin!(Pin::new(&mut wire.server_in).view());
-                let mut output = pin!(Pin::new(&mut wire.server_out).view());
-                let mut parameters = pin!(Pin::new(&mut wire.server_parameters).view());
-                server.as_mut().poll_with_views(
-                    (input.as_mut(), output.as_mut(), parameters.as_mut()),
-                    &mut Context::from_waker(Waker::noop()),
-                )
-            },
+            |wire| poll_server!(server, wire),
             |wire| {
                 let mut input = pin!(Pin::new(&mut wire.client_in).view());
                 let mut output = pin!(Pin::new(&mut wire.client_out).view());
@@ -977,4 +1011,222 @@ fn a_ticket_with_another_early_data_size_is_a_protocol_violation() {
     let again = connect!(&endpoints, Wire::new(), "example.com", unchanged);
     let agreed = agreed(&again.server_events, &again.client_events);
     assert!(!agreed.resumed);
+}
+
+/// A client written out with the transcript chain, for a ClientHello the
+/// client engine does not send: one that may leave out
+/// psk_key_exchange_modes. It offers one suite, one group and Ed25519,
+/// verifies the server as the engine does and writes its Finished; what
+/// the server sends after that stays on the wire.
+struct ScriptedClient {
+    psk_modes: bool,
+    step: ScriptedStep,
+}
+
+/// What a [`ScriptedClient`] waits for.
+enum ScriptedStep {
+    /// Nothing: its ClientHello is still to write.
+    Start,
+    /// The ServerHello, with the transcript and the started exchange.
+    ServerHello(
+        Transcript<Client, AwsLcBackend>,
+        <AwsLcBackend as KeyExchange>::Started,
+    ),
+    /// EncryptedExtensions to the server's Finished.
+    ServerFlight(HandshakeSecret<Client, AwsLcBackend>),
+    /// Nothing: it wrote its Finished.
+    Done,
+}
+
+impl ScriptedClient {
+    fn new(psk_modes: bool) -> Self {
+        Self {
+            psk_modes,
+            step: ScriptedStep::Start,
+        }
+    }
+
+    fn poll(&mut self, wire: &mut Wire) -> Poll<ControlFlow<(), ()>> {
+        let backend = AwsLcBackend;
+        match core::mem::replace(&mut self.step, ScriptedStep::Done) {
+            ScriptedStep::Start => {
+                let group = backend.named_group(NamedGroup::X25519).unwrap();
+                let exchange = KeyExchange::start(&backend, group).unwrap();
+                let hello = self.hello(exchange.share().as_bytes());
+                let mut encoded = Vec::new();
+                encoded.sync_write_client_hello_unpin(&hello).unwrap();
+                wire.client_out.levels[index(CryptoLevel::Initial)].extend_from_slice(&encoded);
+                let hash = backend.hash_algorithm(HashAlgorithm::Sha256).unwrap();
+                let transcript = Transcript::new(&backend, hash).add(&encoded);
+                self.step = ScriptedStep::ServerHello(transcript, exchange);
+                Poll::Ready(ControlFlow::Continue(()))
+            }
+            ScriptedStep::ServerHello(transcript, exchange) => {
+                let Some([server_hello]) = take_messages(&mut wire.client_in, CryptoLevel::Initial)
+                else {
+                    self.step = ScriptedStep::ServerHello(transcript, exchange);
+                    return Poll::Pending;
+                };
+                let ServerHelloMessage::ServerHello(reply) = server_hello
+                    .as_slice()
+                    .sync_read_server_hello_unpin()
+                    .unwrap()
+                else {
+                    panic!("a HelloRetryRequest for the one group offered");
+                };
+                let shared = exchange
+                    .complete(reply.key_share().unwrap().key_exchange())
+                    .unwrap();
+                let (handshake, _) = transcript
+                    .early_secret()
+                    .server_hello(shared, &server_hello, None)
+                    .unwrap();
+                self.step = ScriptedStep::ServerFlight(handshake);
+                Poll::Ready(ControlFlow::Continue(()))
+            }
+            ScriptedStep::ServerFlight(handshake) => {
+                let Some(
+                    [
+                        encrypted_extensions,
+                        certificate,
+                        certificate_verify,
+                        finished,
+                    ],
+                ) = take_messages(&mut wire.client_in, CryptoLevel::Handshake)
+                else {
+                    self.step = ScriptedStep::ServerFlight(handshake);
+                    return Poll::Pending;
+                };
+                let Authentication::Certificate(awaiting) =
+                    handshake.add(&encrypted_extensions).authentication()
+                else {
+                    panic!("resumed without offering a ticket");
+                };
+                let (main, _) = awaiting
+                    .add(&certificate)
+                    .verify_certificate_verify(&whole(&certificate_verify), leaf_key().key())
+                    .unwrap()
+                    .server_finished(&whole(&finished))
+                    .unwrap();
+                let (_, finished) = main.client_finished();
+                wire.client_out.levels[index(CryptoLevel::Handshake)]
+                    .extend_from_slice(finished.encoded());
+                Poll::Ready(ControlFlow::Break(()))
+            }
+            ScriptedStep::Done => Poll::Pending,
+        }
+    }
+
+    /// The ClientHello, with psk_key_exchange_modes naming psk_dhe_ke when
+    /// `psk_modes`.
+    fn hello(&self, share: &[u8]) -> ClientHello<Bytes> {
+        let mut extensions = vec![
+            ClientHelloExtension::ServerName(
+                ServerName::new(Bytes::from_static(b"example.com")).unwrap(),
+            ),
+            ClientHelloExtension::SupportedVersions(
+                CodePointList::new(vec![ProtocolVersion::TLS_1_3]).unwrap(),
+            ),
+            ClientHelloExtension::SupportedGroups(
+                CodePointList::new(vec![NamedGroup::X25519]).unwrap(),
+            ),
+            ClientHelloExtension::SignatureAlgorithms(
+                CodePointList::new(vec![SignatureScheme::ED25519]).unwrap(),
+            ),
+            ClientHelloExtension::ApplicationLayerProtocolNegotiation(
+                ProtocolNameList::new(vec![h3()]).unwrap(),
+            ),
+            ClientHelloExtension::KeyShare(
+                ClientShares::new(vec![
+                    KeyShareEntry::new(NamedGroup::X25519, Bytes::copy_from_slice(share)).unwrap(),
+                ])
+                .unwrap(),
+            ),
+            ClientHelloExtension::QuicTransportParameters(
+                OpaqueData::new(Bytes::from_static(b"client parameters")).unwrap(),
+            ),
+        ];
+        if self.psk_modes {
+            extensions.push(ClientHelloExtension::PskKeyExchangeModes(
+                ByteCodePointList::new(vec![PskKeyExchangeMode::PSK_DHE_KE]).unwrap(),
+            ));
+        }
+        ClientHello::new(
+            ProtocolVersion::TLS_1_2,
+            HelloRandom([7; 32]),
+            LegacySessionId::EMPTY,
+            CodePointList::new(vec![CipherSuite::TLS_AES_128_GCM_SHA256]).unwrap(),
+            extensions,
+        )
+        .unwrap()
+    }
+}
+
+/// Takes `N` whole messages from what `incoming` holds at `level`, or
+/// nothing while fewer have arrived.
+fn take_messages<const N: usize>(
+    incoming: &mut Incoming,
+    level: CryptoLevel,
+) -> Option<[Vec<u8>; N]> {
+    let buffer = &mut incoming.levels[index(level)];
+    let bytes: Vec<u8> = buffer.iter().copied().collect();
+    let mut taken = Vec::new();
+    let mut end = 0;
+    for (_, range) in messages(&bytes).into_iter().take(N) {
+        let len = u32::from_be_bytes([
+            0,
+            bytes[range.start + 1],
+            bytes[range.start + 2],
+            bytes[range.start + 3],
+        ]);
+        if range.len() != 4 + len as usize {
+            return None;
+        }
+        end = range.end;
+        taken.push(bytes[range].to_vec());
+    }
+    let taken = taken.try_into().ok()?;
+    buffer.drain(..end);
+    Some(taken)
+}
+
+/// `bytes`, one whole message of the suite's hash, SHA-256.
+fn whole(mut bytes: &[u8]) -> HandshakeMessage {
+    bytes
+        .sync_read_handshake_message_unpin(MessageLimits::default(), Some(HashAlgorithm::Sha256))
+        .unwrap()
+}
+
+#[test]
+fn a_client_that_does_not_name_psk_dhe_ke_gets_no_tickets() {
+    // With psk_dhe_ke the same client gets the table's two tickets, so the
+    // client is not what keeps them away.
+    for (psk_modes, tickets) in [(true, 2), (false, 0)] {
+        let endpoints = Endpoints::new();
+        let mut wire = Wire::new();
+        let mut server = pin!(LentCall::<(Incoming, Outgoing, ServerParameters,), _>::new(
+            server_handshake!(&endpoints)
+        ));
+        let mut client = ScriptedClient::new(psk_modes);
+        let run = run(
+            &mut wire,
+            |wire| poll_server!(server, wire),
+            |wire| client.poll(wire),
+            unchanged,
+        );
+        assert!(
+            matches!(run.server_end, Some(Ok(()))),
+            "psk_modes {psk_modes}"
+        );
+        assert!(run.client_end.is_some());
+        assert!(matches!(
+            run.server_events.last(),
+            Some(ServerHandshakeEvent::Completed { .. })
+        ));
+        assert_eq!(
+            wire.seen(Sender::Server, HandshakeType::NEW_SESSION_TICKET),
+            tickets,
+            "psk_modes {psk_modes}"
+        );
+    }
 }
