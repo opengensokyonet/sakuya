@@ -250,14 +250,12 @@ where
                 .await
                 .context(PathResponseSnafu)?,
         ),
-        FrameType::ConnectionClose if value == CONNECTION_CLOSE_APPLICATION => {
-            Frame::ConnectionClose(
-                read_connection_close_frame_application(io)
-                    .await
-                    .context(ConnectionCloseApplicationSnafu)?,
-            )
-        }
-        FrameType::ConnectionClose => Frame::ConnectionClose(
+        FrameType::ConnectionCloseApplication => Frame::ConnectionClose(
+            read_connection_close_frame_application(io)
+                .await
+                .context(ConnectionCloseApplicationSnafu)?,
+        ),
+        FrameType::ConnectionCloseTransport => Frame::ConnectionClose(
             read_connection_close_frame_transport(io)
                 .await
                 .context(ConnectionCloseTransportSnafu)?,

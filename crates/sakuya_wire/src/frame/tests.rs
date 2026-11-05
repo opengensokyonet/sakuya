@@ -861,8 +861,9 @@ fn a_field_cut_short_is_named_by_its_variant() {
 /// The "Pkts" column of RFC 9000 Table 3, with the Datagram and
 /// ResetStreamAt entries following STREAM and RESET_STREAM; one character
 /// per level: `I`, `H`, `0`, `1`, and `_` for a level the type may not
-/// appear in. CONNECTION_CLOSE is "ih01" in the table; the kind covers both of
-/// its types, so it can appear in every level.
+/// appear in. CONNECTION_CLOSE is "ih01" in the table, where the lower-case
+/// "ih" says that only type `0x1c` can appear in Initial and Handshake
+/// packets, so type `0x1d` is "__01".
 #[test]
 fn packet_types() {
     use FrameType::*;
@@ -885,7 +886,8 @@ fn packet_types() {
         (RetireConnectionId, "__01"),
         (PathChallenge, "__01"),
         (PathResponse, "___1"),
-        (ConnectionClose, "IH01"),
+        (ConnectionCloseTransport, "IH01"),
+        (ConnectionCloseApplication, "__01"),
         (HandshakeDone, "___1"),
         (ResetStreamAt, "__01"),
         (Datagram, "__01"),
@@ -936,7 +938,8 @@ fn recovery_properties() {
         (RetireConnectionId, true, true),
         (PathChallenge, true, true),
         (PathResponse, true, true),
-        (ConnectionClose, false, false),
+        (ConnectionCloseTransport, false, false),
+        (ConnectionCloseApplication, false, false),
         (HandshakeDone, true, true),
         (ResetStreamAt, true, true),
         (Datagram, true, true),
@@ -1306,7 +1309,8 @@ fn frames_round_trip_with_every_width_and_edge_value() {
         FrameType::StreamsBlocked,
         FrameType::NewConnectionId,
         FrameType::RetireConnectionId,
-        FrameType::ConnectionClose,
+        FrameType::ConnectionCloseTransport,
+        FrameType::ConnectionCloseApplication,
         FrameType::ResetStreamAt,
         FrameType::Datagram,
     ] {

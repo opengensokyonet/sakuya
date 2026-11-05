@@ -270,9 +270,10 @@ pub const PATH_DATA_LEN: usize = 8;
 /// The kind of a frame, as its Frame Type field announces it.
 ///
 /// Several Frame Type values announce the same kind: the eight STREAM types
-/// `0x08..=0x0f`, ACK with and without ECN counts, both CONNECTION_CLOSE
-/// types, and the bidirectional and unidirectional forms of MAX_STREAMS and
-/// STREAMS_BLOCKED. The variants are named after the frames.
+/// `0x08..=0x0f`, ACK with and without ECN counts, and the bidirectional and
+/// unidirectional forms of MAX_STREAMS and STREAMS_BLOCKED. The two
+/// CONNECTION_CLOSE types are two kinds, because the packets they can appear
+/// in differ. The variants are named after the frames.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FrameType {
     /// PADDING, `0x00`.
@@ -311,8 +312,10 @@ pub enum FrameType {
     PathChallenge,
     /// PATH_RESPONSE, `0x1b`.
     PathResponse,
-    /// CONNECTION_CLOSE, `0x1c` and `0x1d`.
-    ConnectionClose,
+    /// CONNECTION_CLOSE with an error of the QUIC layer, `0x1c`.
+    ConnectionCloseTransport,
+    /// CONNECTION_CLOSE with an error of the application, `0x1d`.
+    ConnectionCloseApplication,
     /// HANDSHAKE_DONE, `0x1e`.
     HandshakeDone,
     /// RESET_STREAM_AT, `0x24`, of draft-ietf-quic-reliable-stream-reset-11.
@@ -351,7 +354,8 @@ impl FrameType {
             RETIRE_CONNECTION_ID => Self::RetireConnectionId,
             PATH_CHALLENGE => Self::PathChallenge,
             PATH_RESPONSE => Self::PathResponse,
-            CONNECTION_CLOSE | CONNECTION_CLOSE_APPLICATION => Self::ConnectionClose,
+            CONNECTION_CLOSE => Self::ConnectionCloseTransport,
+            CONNECTION_CLOSE_APPLICATION => Self::ConnectionCloseApplication,
             HANDSHAKE_DONE => Self::HandshakeDone,
             RESET_STREAM_AT => Self::ResetStreamAt,
             DATAGRAM | DATAGRAM_WITH_LENGTH => Self::Datagram,
@@ -372,7 +376,13 @@ impl FrameType {
     ///
     /// [RFC 9002 §2]: https://www.rfc-editor.org/rfc/rfc9002.html#section-2
     pub const fn is_ack_eliciting(self) -> bool {
-        !matches!(self, Self::Ack | Self::Padding | Self::ConnectionClose)
+        !matches!(
+            self,
+            Self::Ack
+                | Self::Padding
+                | Self::ConnectionCloseTransport
+                | Self::ConnectionCloseApplication
+        )
     }
 
     /// Whether a packet containing this frame counts as in flight
@@ -384,7 +394,10 @@ impl FrameType {
     ///
     /// [RFC 9002 §2]: https://www.rfc-editor.org/rfc/rfc9002.html#section-2
     pub const fn counts_in_flight(self) -> bool {
-        !matches!(self, Self::Ack | Self::ConnectionClose)
+        !matches!(
+            self,
+            Self::Ack | Self::ConnectionCloseTransport | Self::ConnectionCloseApplication
+        )
     }
 
     /// Whether a frame of this type can appear in a packet protected at
@@ -397,10 +410,11 @@ impl FrameType {
     /// - PADDING, PING: every level.
     /// - ACK, CRYPTO: Initial, Handshake and 1-RTT.
     /// - NEW_TOKEN, PATH_RESPONSE, HANDSHAKE_DONE: 1-RTT only.
-    /// - CONNECTION_CLOSE: every level, but only the transport type `0x1c`
-    ///   can appear in Initial and Handshake packets (the "ih" mark of the
-    ///   table). The kind covers both types, so the application type has to
-    ///   be refused in those two levels by whoever tells the types apart.
+    /// - CONNECTION_CLOSE of type `0x1c` ([`FrameType::ConnectionCloseTransport`]):
+    ///   every level.
+    /// - CONNECTION_CLOSE of type `0x1d` ([`FrameType::ConnectionCloseApplication`]):
+    ///   0-RTT and 1-RTT. The "ih" mark of the table says that only type
+    ///   `0x1c` can appear in Initial and Handshake packets.
     /// - Every other RFC 9000 frame: 0-RTT and 1-RTT.
     /// - DATAGRAM: 0-RTT and 1-RTT, as STREAM ([RFC 9221 §3]).
     /// - RESET_STREAM_AT: 0-RTT and 1-RTT. The draft calls it a RESET_STREAM
@@ -412,7 +426,7 @@ impl FrameType {
     pub const fn can_appear_in(self, level: EncryptionLevel) -> bool {
         use EncryptionLevel::{Handshake, Initial, OneRtt, ZeroRtt};
         match self {
-            Self::Padding | Self::Ping | Self::ConnectionClose => true,
+            Self::Padding | Self::Ping | Self::ConnectionCloseTransport => true,
             Self::Ack | Self::Crypto => matches!(level, Initial | Handshake | OneRtt),
             Self::NewToken | Self::PathResponse | Self::HandshakeDone => {
                 matches!(level, OneRtt)
@@ -430,6 +444,7 @@ impl FrameType {
             | Self::RetireConnectionId
             | Self::PathChallenge
             | Self::ResetStreamAt
+            | Self::ConnectionCloseApplication
             | Self::Datagram => matches!(level, ZeroRtt | OneRtt),
         }
     }
@@ -619,7 +634,14 @@ impl<D> Frame<D> {
             Self::RetireConnectionId(_) => FrameType::RetireConnectionId,
             Self::PathChallenge(_) => FrameType::PathChallenge,
             Self::PathResponse(_) => FrameType::PathResponse,
-            Self::ConnectionClose(_) => FrameType::ConnectionClose,
+            Self::ConnectionClose(frame) => match frame.error_code() {
+                connection_close::CloseErrorCode::Transport { .. } => {
+                    FrameType::ConnectionCloseTransport
+                }
+                connection_close::CloseErrorCode::Application { .. } => {
+                    FrameType::ConnectionCloseApplication
+                }
+            },
             Self::HandshakeDone(_) => FrameType::HandshakeDone,
             Self::ResetStreamAt(_) => FrameType::ResetStreamAt,
             Self::Datagram(_) => FrameType::Datagram,
