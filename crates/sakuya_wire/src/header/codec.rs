@@ -3,7 +3,7 @@
 //!
 //! [`read_long_header`] and [`read_short_header`] start at the first byte of
 //! a packet; [`read_version_negotiation`] continues after a long header with
-//! [`Version::NEGOTIATION`]. [`write_short_header`] writes the header of a
+//! [`Version::NEGOTIATION`]. [`write_short_packet_header`] writes the header of a
 //! 1-RTT packet up to its Packet Number field. Each function is also an operation struct with
 //! `{Name}Ext` on receiver accesses inside other operations and
 //! `{Name}HostExt` on call executors, including the `sync_` methods for
@@ -315,7 +315,7 @@ impl VersionListError {
 /// [`WriteAllError`] if the receiver stops accepting bytes or fails; bytes
 /// accepted before stay written.
 #[call(sync)]
-pub async fn write_short_header<F: Write, A: ReceiverAccess<Family = F>>(
+pub async fn write_short_packet_header<F: Write, A: ReceiverAccess<Family = F>>(
     io: &mut A,
     header: ShortPacketHeader,
 ) -> Result<(), WriteAllError<F::Error>> {

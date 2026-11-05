@@ -836,7 +836,7 @@ fn long_header_construction_checks_its_rules() {
 
 #[test]
 fn written_short_headers_read_back_as_the_same_fields() {
-    use super::codec::WriteShortHeaderHostExt as _;
+    use super::codec::WriteShortPacketHeaderHostExt as _;
     use super::{ShortLowBitsError, ShortPacketHeader};
 
     let dcid = ConnectionId::new(&[7; 8]).unwrap();
@@ -845,7 +845,7 @@ fn written_short_headers_read_back_as_the_same_fields() {
         assert_eq!(header.first_byte(), 0x40 | low_bits);
         assert_eq!(header.packet_number_offset(), 9);
         let mut packet = Vec::new();
-        packet.sync_write_short_header_unpin(header).unwrap();
+        packet.sync_write_short_packet_header_unpin(header).unwrap();
         assert_eq!(packet.len(), header.packet_number_offset());
         packet.extend_from_slice(&[0x33; 30]);
         let mut input = packet.as_slice();
@@ -872,13 +872,15 @@ fn written_short_headers_read_back_as_the_same_fields() {
 #[test]
 fn write_failures_report_the_receiver() {
     use super::ShortPacketHeader;
-    use super::codec::WriteShortHeaderHostExt as _;
+    use super::codec::WriteShortPacketHeaderHostExt as _;
     use nitori_io::calls::WriteAllError;
 
     let header = ShortPacketHeader::new(0, ConnectionId::new(&[1, 2, 3]).unwrap()).unwrap();
     let mut room = [0; 2];
     let mut sink = &mut room[..];
-    let error = sink.sync_write_short_header_unpin(header).unwrap_err();
+    let error = sink
+        .sync_write_short_packet_header_unpin(header)
+        .unwrap_err();
     assert!(matches!(error, WriteAllError::WriteZero { .. }));
     assert_eq!(error.completed(), 2);
 }

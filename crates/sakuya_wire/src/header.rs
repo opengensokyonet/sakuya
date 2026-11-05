@@ -27,7 +27,7 @@
 //!
 //! A sender describes a short header with a [`ShortPacketHeader`] and the
 //! header of an Initial, 0-RTT or Handshake packet with a
-//! [`v1::LongPacketHeader`]; [`codec::write_short_header`] and
+//! [`v1::LongPacketHeader`]; [`codec::write_short_packet_header`] and
 //! [`v1::codec::write_long_packet_header`] write them up to the Packet Number
 //! field, which the layer that protects the packet writes.
 //!
@@ -337,7 +337,7 @@ impl ShortPacketHeader {
     }
 
     /// The offset of the Packet Number field, right after the destination
-    /// connection ID: the number of bytes [`codec::write_short_header`]
+    /// connection ID: the number of bytes [`codec::write_short_packet_header`]
     /// writes.
     pub fn packet_number_offset(&self) -> usize {
         1 + self.dcid.len()

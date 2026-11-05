@@ -4,7 +4,7 @@ use crate::{
     encryption_level::EncryptionLevel,
     header::{
         ShortPacketHeader,
-        codec::WriteShortHeaderHostExt as _,
+        codec::WriteShortPacketHeaderHostExt as _,
         v1::{
             LongPacketHeader, LongPacketType, TypeFields,
             codec::{ReadLongPacketError, WriteLongPacketHeaderHostExt as _},
@@ -73,7 +73,7 @@ fn zero_rtt(dcid: &[u8], body: &[u8]) -> Vec<u8> {
 fn one_rtt(dcid: &[u8], body: &[u8]) -> Vec<u8> {
     let mut packet = Vec::new();
     packet
-        .sync_write_short_header_unpin(ShortPacketHeader::new(0b10_0001, cid(dcid)).unwrap())
+        .sync_write_short_packet_header_unpin(ShortPacketHeader::new(0b10_0001, cid(dcid)).unwrap())
         .unwrap();
     packet.extend_from_slice(body);
     packet
