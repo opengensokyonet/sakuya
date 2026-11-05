@@ -630,3 +630,255 @@ fn errors_describe_the_layer() {
         "version 0x00000001 is not version negotiation"
     );
 }
+
+/// Writes `header` with its reserved Length, appends `body` bytes for the
+/// packet number and payload, and writes the final Length over the reserved
+/// field at the width the header chose.
+fn written_long_packet(header: &v1::LongPacketHeader, body: &[u8]) -> Vec<u8> {
+    use crate::var_int::{VarIntField, codec::WriteVarIntFieldHostExt as _};
+    use v1::codec::WriteLongPacketHeaderHostExt as _;
+
+    let mut packet = Vec::new();
+    packet
+        .sync_write_long_packet_header_unpin(header.clone())
+        .unwrap();
+    assert_eq!(packet.len(), header.packet_number_offset());
+    packet.extend_from_slice(body);
+    let length = VarIntField::new(
+        VarInt::try_from(body.len()).unwrap(),
+        header.length().width(),
+    )
+    .unwrap();
+    (&mut packet[header.length_offset()..])
+        .sync_write_var_int_field_unpin(length)
+        .unwrap();
+    packet
+}
+
+fn reserved(width: crate::var_int::VarIntWidth) -> crate::var_int::VarIntField<VarInt> {
+    crate::var_int::VarIntField::new(VarInt::ZERO, width).unwrap()
+}
+
+#[test]
+fn rfc_client_initial_header_is_written_as_in_the_appendix() {
+    use crate::var_int::{VarIntField, VarIntWidth};
+
+    // RFC 9001 Appendix A.2: the header before header protection, with the
+    // four-byte packet number 2 (low bits 0b0011).
+    let header = v1::LongPacketHeader::initial(
+        0b0011,
+        ConnectionId::new(&RFC_DCID).unwrap(),
+        ConnectionId::EMPTY,
+        VarIntWidth::One,
+        Bytes::new(),
+        VarIntField::new(VarInt::from(1182u32), VarIntWidth::Two).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(header.first_byte(), 0xc3);
+    assert_eq!(header.length_offset(), 16);
+    assert_eq!(header.packet_number_offset(), 18);
+    let mut written = Vec::new();
+    {
+        use v1::codec::WriteLongPacketHeaderHostExt as _;
+        written.sync_write_long_packet_header_unpin(header).unwrap();
+    }
+    assert_eq!(written, hex("c300000001088394c8f03e5157080000449e"));
+    // The protected packet starts with the same bytes but the first.
+    assert_eq!(written[1..], client_initial()[1..written.len()]);
+}
+
+#[test]
+fn written_long_headers_read_back_as_the_same_fields() {
+    use crate::var_int::VarIntWidth;
+
+    let dcid = ConnectionId::new(&[1, 2, 3]).unwrap();
+    let scid = ConnectionId::new(&[9; 20]).unwrap();
+    for width in VarIntWidth::ALL {
+        for low_bits in [0b0000, 0b0101, 0b1111] {
+            let body = [0x5a; 40];
+            let token = Bytes::from_static(b"token");
+            let initial = v1::LongPacketHeader::initial(
+                low_bits,
+                dcid,
+                scid,
+                width,
+                token.clone(),
+                reserved(width),
+            )
+            .unwrap();
+            let packet = written_long_packet(&initial, &body);
+            let read = v1_of(&packet).unwrap();
+            assert_eq!(read.packet_type(), LongPacketType::Initial);
+            assert_eq!(read.header().first_byte(), initial.first_byte());
+            assert_eq!((read.dcid(), read.scid()), (&dcid, &scid));
+            let TypeFields::Initial {
+                token: read_token,
+                bounds,
+                protected,
+            } = read.fields()
+            else {
+                panic!("not an Initial packet")
+            };
+            assert_eq!(*read_token, &token[..]);
+            assert_eq!(
+                bounds.packet_number_offset(),
+                initial.packet_number_offset()
+            );
+            assert_eq!(bounds.end(), packet.len());
+            assert_eq!(bounds.length(), VarInt::from(40u8));
+            assert_eq!(*protected, &body[..]);
+            assert_eq!(initial.token(), Some(&token));
+            assert_eq!(initial.token_length_width(), Some(width));
+
+            let zero_rtt =
+                v1::LongPacketHeader::zero_rtt(low_bits, dcid, scid, reserved(width)).unwrap();
+            let handshake =
+                v1::LongPacketHeader::handshake(low_bits, dcid, scid, reserved(width)).unwrap();
+            for (header, packet_type) in [
+                (zero_rtt, LongPacketType::ZeroRtt),
+                (handshake, LongPacketType::Handshake),
+            ] {
+                let packet = written_long_packet(&header, &body);
+                let read = v1_of(&packet).unwrap();
+                assert_eq!(read.packet_type(), packet_type);
+                assert_eq!(header.packet_type(), packet_type);
+                assert_eq!(read.header().first_byte(), header.first_byte());
+                assert_eq!(read.header().first_byte() & 0x0f, low_bits);
+                let (TypeFields::ZeroRtt { bounds, protected }
+                | TypeFields::Handshake { bounds, protected }) = read.fields()
+                else {
+                    panic!("not a 0-RTT or Handshake packet")
+                };
+                assert_eq!(bounds.packet_number_offset(), header.packet_number_offset());
+                assert_eq!(bounds.end(), packet.len());
+                assert_eq!(*protected, &body[..]);
+                assert_eq!(header.token(), None);
+                assert_eq!(header.token_length_width(), None);
+            }
+        }
+    }
+}
+
+#[test]
+fn written_long_headers_keep_the_width_of_the_token_length() {
+    use crate::var_int::VarIntWidth;
+
+    let header = v1::LongPacketHeader::initial(
+        0,
+        ConnectionId::EMPTY,
+        ConnectionId::EMPTY,
+        VarIntWidth::Four,
+        Bytes::new(),
+        reserved(VarIntWidth::Eight),
+    )
+    .unwrap();
+    // First byte, version, two length bytes, a four-byte Token Length and an
+    // eight-byte Length.
+    assert_eq!(header.length_offset(), 1 + 4 + 1 + 1 + 4);
+    assert_eq!(header.packet_number_offset(), 11 + 8);
+    let packet = written_long_packet(&header, &[1, 2]);
+    assert_eq!(
+        packet,
+        [
+            &[0xc0, 0, 0, 0, 1, 0, 0][..],
+            &[0x80, 0, 0, 0],
+            &[0xc0, 0, 0, 0, 0, 0, 0, 2],
+            &[1, 2],
+        ]
+        .concat()
+    );
+}
+
+#[test]
+fn long_header_construction_checks_its_rules() {
+    use super::v1::{InvalidInitialHeaderError, LongLowBitsError};
+    use crate::{frame::LengthError, var_int::VarIntWidth};
+
+    let cid = ConnectionId::EMPTY;
+    let length = reserved(VarIntWidth::One);
+    let low_bits =
+        |header: Result<v1::LongPacketHeader, LongLowBitsError>| header.unwrap_err().bits();
+    assert_eq!(
+        low_bits(v1::LongPacketHeader::zero_rtt(0x10, cid, cid, length)),
+        0x10
+    );
+    assert_eq!(
+        low_bits(v1::LongPacketHeader::handshake(0xff, cid, cid, length)),
+        0xff
+    );
+    assert!(v1::LongPacketHeader::handshake(0x0f, cid, cid, length).is_ok());
+
+    let initial = |low_bits, width, token: &[u8]| {
+        v1::LongPacketHeader::initial(
+            low_bits,
+            cid,
+            cid,
+            width,
+            Bytes::copy_from_slice(token),
+            length,
+        )
+    };
+    assert_eq!(
+        initial(0x40, VarIntWidth::One, b""),
+        Err(InvalidInitialHeaderError::LowBits {
+            source: LongLowBitsError::check(0x40).unwrap_err()
+        })
+    );
+    let long_token = [0; 64];
+    assert_eq!(
+        initial(0, VarIntWidth::One, &long_token),
+        Err(InvalidInitialHeaderError::TokenLength {
+            source: LengthError::check(64, VarIntWidth::One).unwrap_err()
+        })
+    );
+    assert!(initial(0, VarIntWidth::Two, &long_token).is_ok());
+}
+
+#[test]
+fn written_short_headers_read_back_as_the_same_fields() {
+    use super::codec::WriteShortHeaderHostExt as _;
+    use super::{ShortLowBitsError, ShortPacketHeader};
+
+    let dcid = ConnectionId::new(&[7; 8]).unwrap();
+    for low_bits in [0b00_0000, 0b10_0101, 0b11_1111] {
+        let header = ShortPacketHeader::new(low_bits, dcid).unwrap();
+        assert_eq!(header.first_byte(), 0x40 | low_bits);
+        assert_eq!(header.packet_number_offset(), 9);
+        let mut packet = Vec::new();
+        packet.sync_write_short_header_unpin(header).unwrap();
+        assert_eq!(packet.len(), header.packet_number_offset());
+        packet.extend_from_slice(&[0x33; 30]);
+        let mut input = packet.as_slice();
+        let read = input.sync_read_short_header_unpin(8).unwrap();
+        assert_eq!(read.first_byte(), header.first_byte());
+        assert_eq!(read.dcid().as_bytes(), dcid.as_bytes());
+        assert_eq!(read.packet_number_offset(), header.packet_number_offset());
+        assert_eq!(*read.protected(), &[0x33; 30][..]);
+    }
+    assert_eq!(ShortPacketHeader::new(0x40, dcid).unwrap_err().bits(), 0x40);
+    assert_eq!(
+        ShortPacketHeader::new(0x40, dcid),
+        Err(ShortLowBitsError::check(0x40).unwrap_err())
+    );
+    assert!(ShortPacketHeader::new(0x3f, dcid).is_ok());
+    assert_eq!(
+        ShortPacketHeader::new(0x80, ConnectionId::EMPTY)
+            .unwrap_err()
+            .to_string(),
+        "short header low bits 0x80 exceed the six bits below the Fixed Bit"
+    );
+}
+
+#[test]
+fn write_failures_report_the_receiver() {
+    use super::ShortPacketHeader;
+    use super::codec::WriteShortHeaderHostExt as _;
+    use nitori_io::calls::WriteAllError;
+
+    let header = ShortPacketHeader::new(0, ConnectionId::new(&[1, 2, 3]).unwrap()).unwrap();
+    let mut room = [0; 2];
+    let mut sink = &mut room[..];
+    let error = sink.sync_write_short_header_unpin(header).unwrap_err();
+    assert!(matches!(error, WriteAllError::WriteZero { .. }));
+    assert_eq!(error.completed(), 2);
+}

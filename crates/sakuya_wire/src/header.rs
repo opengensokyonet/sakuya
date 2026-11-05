@@ -25,6 +25,12 @@
 //! packet from what remains in the source. Version Negotiation packets, Retry
 //! packets and short headers extend to the end of the source.
 //!
+//! A sender describes a short header with a [`ShortPacketHeader`] and the
+//! header of an Initial, 0-RTT or Handshake packet with a
+//! [`v1::LongPacketHeader`]; [`codec::write_short_header`] and
+//! [`v1::codec::write_long_packet_header`] write them up to the Packet Number
+//! field, which the layer that protects the packet writes.
+//!
 //! No layer interprets protected bits or fields. The packet number offset
 //! states where the protected packet number begins and the sample offset
 //! where header protection takes its sample ([RFC 9001 §5.4.2]); the packet
@@ -90,9 +96,13 @@
 //! [RFC 8999 §6]: https://www.rfc-editor.org/rfc/rfc8999.html#section-6
 //! [RFC 9000 §17.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.2
 //! [RFC 9001 §5.4.2]: https://www.rfc-editor.org/rfc/rfc9001.html#section-5.4.2
-use crate::{connection_id::RawConnectionId, version::Version};
+use crate::{
+    connection_id::{ConnectionId, RawConnectionId},
+    version::Version,
+};
 use bytes::Buf;
 use core::iter::FusedIterator;
+use snafu::Snafu;
 
 pub mod codec;
 pub mod v1;
@@ -235,6 +245,89 @@ impl<D: Buf> ShortHeader<D> {
     /// Takes the protected packet number and payload.
     pub fn into_protected(self) -> D {
         self.protected
+    }
+}
+
+/// The bits of the first byte of a short header packet below the Fixed Bit:
+/// the Spin Bit, the reserved bits, the Key Phase and the packet number
+/// length.
+const SHORT_LOW_BITS_MASK: u8 = 0x3f;
+
+/// The first byte's low bits of a short header exceed the six bits below the
+/// Fixed Bit.
+///
+/// It is constructed only when the check fails, so the bits it holds always
+/// have a bit above `0x3f` set.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("short header low bits {bits:#04x} exceed the six bits below the Fixed Bit"))]
+pub struct ShortLowBitsError {
+    bits: u8,
+}
+
+impl ShortLowBitsError {
+    /// The rejected bits, with a bit above `0x3f` set.
+    pub const fn bits(self) -> u8 {
+        self.bits
+    }
+
+    /// Checks that `bits` fit the six bits below the Fixed Bit.
+    pub(crate) fn check(bits: u8) -> Result<u8, Self> {
+        if bits & !SHORT_LOW_BITS_MASK != 0 {
+            return Err(Self { bits });
+        }
+        Ok(bits)
+    }
+}
+
+/// The header of a 1-RTT packet as a sender writes it: the first byte and
+/// the destination connection ID ([RFC 9000 §17.3]).
+///
+/// The constructor sets the form and the Fixed Bit; the caller gives the six
+/// low bits: the Spin Bit, the reserved bits, the Key Phase and the packet
+/// number length, whose meaning belongs to the layer that protects the
+/// packet. The Packet Number field follows the header and is not part of it.
+///
+/// [RFC 9000 §17.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.3
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShortPacketHeader {
+    low_bits: u8,
+    dcid: ConnectionId,
+}
+
+impl ShortPacketHeader {
+    /// The header with these low bits and destination connection ID.
+    ///
+    /// # Errors
+    ///
+    /// [`ShortLowBitsError`] if `low_bits` exceed six bits.
+    pub fn new(low_bits: u8, dcid: ConnectionId) -> Result<Self, ShortLowBitsError> {
+        Ok(Self {
+            low_bits: ShortLowBitsError::check(low_bits)?,
+            dcid,
+        })
+    }
+
+    /// The first byte of the packet: the form, the Fixed Bit and the low
+    /// bits.
+    pub fn first_byte(&self) -> u8 {
+        v1::FIXED_BIT | self.low_bits
+    }
+
+    /// The six low bits of the first byte.
+    pub fn low_bits(&self) -> u8 {
+        self.low_bits
+    }
+
+    /// The destination connection ID.
+    pub fn dcid(&self) -> &ConnectionId {
+        &self.dcid
+    }
+
+    /// The offset of the Packet Number field, right after the destination
+    /// connection ID: the number of bytes [`codec::write_short_header`]
+    /// writes.
+    pub fn packet_number_offset(&self) -> usize {
+        1 + self.dcid.len()
     }
 }
 

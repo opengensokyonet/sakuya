@@ -25,13 +25,45 @@
 //! assert_eq!(input, [0x41]); // The next packet starts here.
 //! ```
 //!
+//! [`write_long_packet_header`] writes the header of an Initial, 0-RTT or
+//! Handshake packet from the first byte to the Length field. It is also the
+//! operation struct [`WriteLongPacketHeader`], with
+//! `WriteLongPacketHeaderExt` and `WriteLongPacketHeaderHostExt`.
+//!
+//! ```
+//! use bytes::Bytes;
+//! use sakuya_wire::{
+//!     connection_id::ConnectionId,
+//!     header::v1::{LongPacketHeader, codec::WriteLongPacketHeaderHostExt as _},
+//!     var_int::{VarInt, VarIntField, VarIntWidth, codec::WriteVarIntFieldHostExt as _},
+//! };
+//!
+//! let dcid = ConnectionId::new(&[1, 2]).unwrap();
+//! // Reserve a two-byte Length field; write the real value once it is known.
+//! let reserved = VarIntField::new(VarInt::from(0u8), VarIntWidth::Two).unwrap();
+//! let header = LongPacketHeader::initial(
+//!     0b01, dcid, ConnectionId::EMPTY, VarIntWidth::One, Bytes::new(), reserved,
+//! ).unwrap();
+//!
+//! let mut packet = Vec::new();
+//! packet.sync_write_long_packet_header_unpin(header.clone()).unwrap();
+//! assert_eq!(packet.len(), header.packet_number_offset());
+//! packet.extend_from_slice(&[0xaa; 20]); // Packet Number and payload.
+//!
+//! let length = VarIntField::new(VarInt::from(20u8), VarIntWidth::Two).unwrap();
+//! (&mut packet[header.length_offset()..]).sync_write_var_int_field_unpin(length).unwrap();
+//! assert_eq!(packet[..8], [0xc1, 0, 0, 0, 1, 2, 1, 2]);
+//! assert_eq!(packet[8..13], [0, 0, 0x40, 20, 0xaa]);
+//! ```
+//!
 //! [`read_long_header`]: crate::header::codec::read_long_header
 // `#[call]` generates constructors, fields and extension traits without
 // documentation comments; the module documentation above describes them.
 #![allow(missing_docs)]
 
 use super::{
-    LongPacket, LongPacketType, PacketBounds, RETRY_INTEGRITY_TAG_LEN, TypeFields, VERSION,
+    LongPacket, LongPacketHeader, LongPacketType, PacketBounds, RETRY_INTEGRITY_TAG_LEN,
+    TypeFields, VERSION, WrittenKind,
 };
 use crate::{
     connection_id::{ConnectionId, ConnectionIdLengthError},
@@ -43,9 +75,9 @@ use crate::{
     },
     version::Version,
 };
-use bytes::Buf;
+use bytes::{Buf, Bytes};
 use nitori_call::{ReceiverAccess, call};
-use nitori_io::prelude::*;
+use nitori_io::{calls::WriteAllError, prelude::*};
 use snafu::{ResultExt, Snafu};
 
 /// Reads the version 1 fields that follow the version-independent fields of
@@ -292,4 +324,57 @@ impl<E> ReadLongPacketError<E> {
             Self::Version { .. } | Self::DcidLength { .. } | Self::ScidLength { .. } => false,
         }
     }
+}
+
+/// The longest prefix of the header before the token and the Length field:
+/// the first byte, the version, two connection IDs with their length bytes
+/// and the longest Token Length field.
+const PREFIX_MAX: usize = 1 + 4 + 1 + ConnectionId::MAX_LEN + 1 + ConnectionId::MAX_LEN + 8;
+
+/// Writes `header` from the first byte to the end of the Length field, up to
+/// the Packet Number field.
+///
+/// The Length field is written with the value and the width the header
+/// states.
+///
+/// Acceptance by the receiver does not imply flushing or delivery.
+///
+/// # Errors
+///
+/// [`WriteAllError`] if the receiver stops accepting bytes or fails; bytes
+/// accepted before stay written.
+#[call(sync)]
+pub async fn write_long_packet_header<F: Write, A: ReceiverAccess<Family = F>>(
+    io: &mut A,
+    header: LongPacketHeader,
+) -> Result<(), WriteAllError<F::Error>> {
+    let mut prefix = [0; PREFIX_MAX];
+    let mut len = 0;
+    let mut put = |bytes: &[u8]| {
+        // invariant: `PREFIX_MAX` is the longest the pieces below add up to.
+        prefix[len..len + bytes.len()].copy_from_slice(bytes);
+        len += bytes.len();
+    };
+    put(&[header.first_byte()]);
+    put(&VERSION.to_be_bytes());
+    put(&[u8::from(header.dcid.length())]);
+    put(header.dcid.as_bytes());
+    put(&[u8::from(header.scid.length())]);
+    put(header.scid.as_bytes());
+    let token = match &header.kind {
+        WrittenKind::Initial(initial) => {
+            // Construction checked that the width holds the token length.
+            let token_len = VarInt::try_from(initial.token.len()).unwrap_or(VarInt::ZERO);
+            let (encoding, encoded_len) = token_len.to_encoding_of(initial.length_width);
+            put(&encoding[..encoded_len]);
+            initial.token.clone()
+        }
+        WrittenKind::ZeroRtt | WrittenKind::Handshake => Bytes::new(),
+    };
+    let (length, length_len) = header
+        .length
+        .to_var_int()
+        .to_encoding_of(header.length.width());
+    io.write_all(prefix[..len].chain(token).chain(&length[..length_len]))
+        .await
 }
