@@ -12,6 +12,8 @@
 //!   ([`connection_id::NonEmptyCid`]), the version-independent
 //!   form of long headers ([`connection_id::RawConnectionId`]), and Stateless
 //!   Reset Tokens ([`connection_id::StatelessResetToken`]).
+//! - [`encryption_level`]: the four levels a packet is protected at
+//!   ([`encryption_level::EncryptionLevel`]).
 //! - [`stream_id`]: stream IDs ([`stream_id::StreamId`]).
 //! - [`stream_count`]: cumulative numbers of streams of one type
 //!   ([`stream_count::StreamCount`]), as stream limits state them.
@@ -54,6 +56,7 @@
 
 pub mod application_error;
 pub mod connection_id;
+pub mod encryption_level;
 pub mod frame;
 pub mod header;
 pub mod packet_number;

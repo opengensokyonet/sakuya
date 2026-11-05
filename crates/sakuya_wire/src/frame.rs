@@ -175,14 +175,23 @@
 //! the per-frame facts from which [RFC 9002 §2] derives whether a packet is
 //! ack-eliciting and whether it counts as in flight.
 //!
+//! # Packet types
+//!
+//! [`FrameType::can_appear_in`] states in which packets a frame type may
+//! appear, the "Pkts" column of [RFC 9000 §12.4] Table 3. Reading a frame does
+//! not check it: the receiver of the packet does.
+//!
 //! [RFC 9000 §19]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19
 //! [RFC 9000 §12.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.4
 //! [RFC 9221]: https://www.rfc-editor.org/rfc/rfc9221.html
 //! [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html
 //! [RFC 9002 §2]: https://www.rfc-editor.org/rfc/rfc9002.html#section-2
-use crate::var_int::{
-    VarInt, VarIntField, VarIntWidth,
-    codec::{ReadVarIntError, read_var_int_field},
+use crate::{
+    encryption_level::EncryptionLevel,
+    var_int::{
+        VarInt, VarIntField, VarIntWidth,
+        codec::{ReadVarIntError, read_var_int_field},
+    },
 };
 use bytes::Buf;
 use core::{convert::Infallible, iter::FusedIterator};
@@ -376,6 +385,53 @@ impl FrameType {
     /// [RFC 9002 §2]: https://www.rfc-editor.org/rfc/rfc9002.html#section-2
     pub const fn counts_in_flight(self) -> bool {
         !matches!(self, Self::Ack | Self::ConnectionClose)
+    }
+
+    /// Whether a frame of this type can appear in a packet protected at
+    /// `level`: the "Pkts" column of [RFC 9000 §12.4] Table 3.
+    ///
+    /// A packet with a frame its level does not permit is a connection error
+    /// of type PROTOCOL_VIOLATION; this method states only the rule of the
+    /// frame type, for the receiver to apply.
+    ///
+    /// - PADDING, PING: every level.
+    /// - ACK, CRYPTO: Initial, Handshake and 1-RTT.
+    /// - NEW_TOKEN, PATH_RESPONSE, HANDSHAKE_DONE: 1-RTT only.
+    /// - CONNECTION_CLOSE: every level, but only the transport type `0x1c`
+    ///   can appear in Initial and Handshake packets (the "ih" mark of the
+    ///   table). The kind covers both types, so the application type has to
+    ///   be refused in those two levels by whoever tells the types apart.
+    /// - Every other RFC 9000 frame: 0-RTT and 1-RTT.
+    /// - DATAGRAM: 0-RTT and 1-RTT, as STREAM ([RFC 9221 §3]).
+    /// - RESET_STREAM_AT: 0-RTT and 1-RTT. The draft calls it a RESET_STREAM
+    ///   frame with a Reliable Size field and allows the extension in 0-RTT
+    ///   packets, but gives no table of its own, so this follows RESET_STREAM.
+    ///
+    /// [RFC 9000 §12.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.4
+    /// [RFC 9221 §3]: https://www.rfc-editor.org/rfc/rfc9221.html#section-3
+    pub const fn can_appear_in(self, level: EncryptionLevel) -> bool {
+        use EncryptionLevel::{Handshake, Initial, OneRtt, ZeroRtt};
+        match self {
+            Self::Padding | Self::Ping | Self::ConnectionClose => true,
+            Self::Ack | Self::Crypto => matches!(level, Initial | Handshake | OneRtt),
+            Self::NewToken | Self::PathResponse | Self::HandshakeDone => {
+                matches!(level, OneRtt)
+            }
+            Self::ResetStream
+            | Self::StopSending
+            | Self::Stream
+            | Self::MaxData
+            | Self::MaxStreamData
+            | Self::MaxStreams
+            | Self::DataBlocked
+            | Self::StreamDataBlocked
+            | Self::StreamsBlocked
+            | Self::NewConnectionId
+            | Self::RetireConnectionId
+            | Self::PathChallenge
+            | Self::ResetStreamAt
+            | Self::Datagram => matches!(level, ZeroRtt | OneRtt),
+        }
     }
 }
 

@@ -34,6 +34,7 @@ use super::{
 use crate::{
     application_error::ApplicationErrorCode,
     connection_id::{NonEmptyCid, StatelessResetToken},
+    encryption_level::EncryptionLevel,
     packet_number::PacketNumber,
     stream_count::StreamCount,
     stream_id::{Directionality, StreamId},
@@ -855,6 +856,62 @@ fn a_field_cut_short_is_named_by_its_variant() {
             "read incomplete after 0 of 1 bytes"
         ]
     );
+}
+
+/// The "Pkts" column of RFC 9000 Table 3, with the Datagram and
+/// ResetStreamAt entries following STREAM and RESET_STREAM; one character
+/// per level: `I`, `H`, `0`, `1`, and `_` for a level the type may not
+/// appear in. CONNECTION_CLOSE is "ih01" in the table; the kind covers both of
+/// its types, so it can appear in every level.
+#[test]
+fn packet_types() {
+    use FrameType::*;
+    let table = [
+        (Padding, "IH01"),
+        (Ping, "IH01"),
+        (Ack, "IH_1"),
+        (ResetStream, "__01"),
+        (StopSending, "__01"),
+        (Crypto, "IH_1"),
+        (NewToken, "___1"),
+        (Stream, "__01"),
+        (MaxData, "__01"),
+        (MaxStreamData, "__01"),
+        (MaxStreams, "__01"),
+        (DataBlocked, "__01"),
+        (StreamDataBlocked, "__01"),
+        (StreamsBlocked, "__01"),
+        (NewConnectionId, "__01"),
+        (RetireConnectionId, "__01"),
+        (PathChallenge, "__01"),
+        (PathResponse, "___1"),
+        (ConnectionClose, "IH01"),
+        (HandshakeDone, "___1"),
+        (ResetStreamAt, "__01"),
+        (Datagram, "__01"),
+    ];
+    for (kind, pkts) in table {
+        // The table lists the levels as I, H, 0, 1.
+        let levels = [
+            EncryptionLevel::Initial,
+            EncryptionLevel::Handshake,
+            EncryptionLevel::ZeroRtt,
+            EncryptionLevel::OneRtt,
+        ];
+        for (level, mark) in levels.into_iter().zip(pkts.chars()) {
+            assert_eq!(
+                kind.can_appear_in(level),
+                mark != '_',
+                "{kind:?} in {level:?}"
+            );
+        }
+    }
+    // Every frame type has an entry, and every frame can appear in 1-RTT
+    // packets (RFC 9000 §12.4).
+    for frame in sample_frames() {
+        assert!(frame.frame_type().can_appear_in(EncryptionLevel::OneRtt));
+        assert!(table.iter().any(|&(kind, _)| kind == frame.frame_type()));
+    }
 }
 
 #[test]
