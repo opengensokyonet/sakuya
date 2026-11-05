@@ -60,7 +60,7 @@ use sakuya_tls::{
         layers::PassThroughLayers,
         peer::NoCertificateRequest,
         targets::SniTargets,
-        ticket::SingleUseTicketTable,
+        ticket::ZeroRttOnceTicketTable,
     },
 };
 use std::{
@@ -265,7 +265,7 @@ mod server_engine {
     /// What the server keeps across connections.
     struct Server {
         clock: Arc<ManualClock>,
-        tickets: SingleUseTicketTable<&'static str, AwsLcBackend, Arc<ManualClock>>,
+        tickets: ZeroRttOnceTicketTable<&'static str, AwsLcBackend, Arc<ManualClock>>,
         groups: Vec<NamedGroup>,
         group_preference: GroupPreference,
     }
@@ -274,7 +274,7 @@ mod server_engine {
         fn new() -> Self {
             let clock = Arc::new(ManualClock::new(now()));
             Self {
-                tickets: SingleUseTicketTable::new(
+                tickets: ZeroRttOnceTicketTable::new(
                     AwsLcBackend,
                     Arc::clone(&clock),
                     2,

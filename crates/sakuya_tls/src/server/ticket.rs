@@ -19,7 +19,7 @@
 //! nothing to the handshake: when a ticket counts as used is the policy's
 //! decision.
 //!
-//! [`SingleUseTicketTable`] keeps tickets in memory, where the ticket is
+//! [`ZeroRttOnceTicketTable`] keeps tickets in memory, where the ticket is
 //! the key of its entry, and spends a ticket when it admits 0-RTT with it.
 
 use crate::{
@@ -216,7 +216,7 @@ pub trait Opened<T> {
     fn admit_early_data(self, hello: &ClientHelloKey) -> Self::Admitting;
 }
 
-/// The length of the tickets of a [`SingleUseTicketTable`].
+/// The length of the tickets of a [`ZeroRttOnceTicketTable`].
 const TICKET_LEN: usize = 16;
 
 /// Tickets kept in memory, each a random key of its entry, and spent when
@@ -231,14 +231,14 @@ const TICKET_LEN: usize = 16;
 /// entries: past it, sealing fails once the expired ones are gone.
 ///
 /// `R` generates the tickets and `K` tells the time.
-pub struct SingleUseTicketTable<T, R, K> {
+pub struct ZeroRttOnceTicketTable<T, R, K> {
     entries: Arc<Mutex<HashMap<[u8; TICKET_LEN], Entry<T>>>>,
     random: R,
     clock: K,
     settings: TableSettings,
 }
 
-/// The fixed choices of a [`SingleUseTicketTable`].
+/// The fixed choices of a [`ZeroRttOnceTicketTable`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TableSettings {
     tickets_per_connection: usize,
@@ -277,7 +277,7 @@ impl<T> Entry<T> {
     }
 }
 
-impl<T, R, K> SingleUseTicketTable<T, R, K> {
+impl<T, R, K> ZeroRttOnceTicketTable<T, R, K> {
     /// A table that issues `tickets_per_connection` tickets valid for
     /// `lifetime`, which allow 0-RTT when `early_data`, and holds at most
     /// `capacity` of them.
@@ -317,7 +317,7 @@ impl<T, R, K> SingleUseTicketTable<T, R, K> {
     }
 }
 
-impl<T, R: Clone, K: Clone> Clone for SingleUseTicketTable<T, R, K> {
+impl<T, R: Clone, K: Clone> Clone for ZeroRttOnceTicketTable<T, R, K> {
     fn clone(&self) -> Self {
         Self {
             entries: Arc::clone(&self.entries),
@@ -329,7 +329,7 @@ impl<T, R: Clone, K: Clone> Clone for SingleUseTicketTable<T, R, K> {
 }
 
 impl<T: Clone, R: Random + Clone, K: Clock + Clone> TicketPolicy<T>
-    for SingleUseTicketTable<T, R, K>
+    for ZeroRttOnceTicketTable<T, R, K>
 {
     type Issuing = TableIssuing<T, R, K>;
     type Opened = TableOpened<T>;
@@ -378,9 +378,9 @@ impl<T: Clone, R: Random + Clone, K: Clock + Clone> TicketPolicy<T>
     }
 }
 
-/// The issuing of a [`SingleUseTicketTable`] on one connection.
+/// The issuing of a [`ZeroRttOnceTicketTable`] on one connection.
 pub struct TableIssuing<T, R, K> {
-    table: SingleUseTicketTable<T, R, K>,
+    table: ZeroRttOnceTicketTable<T, R, K>,
     resumable: Resumable<T>,
     remaining: usize,
 }
@@ -404,9 +404,9 @@ impl<T: Clone, R: Random + Clone, K: Clock + Clone> Issuing for TableIssuing<T, 
     }
 }
 
-/// One ticket of a [`SingleUseTicketTable`], stored when it is sealed.
+/// One ticket of a [`ZeroRttOnceTicketTable`], stored when it is sealed.
 pub struct TableSlot<T, R, K> {
-    table: SingleUseTicketTable<T, R, K>,
+    table: ZeroRttOnceTicketTable<T, R, K>,
     resumable: Resumable<T>,
 }
 
@@ -468,7 +468,7 @@ impl<T, R: Random, K: Clock> TableSlot<T, R, K> {
     }
 }
 
-/// A ticket of a [`SingleUseTicketTable`] could not be stored.
+/// A ticket of a [`ZeroRttOnceTicketTable`] could not be stored.
 #[derive(Debug, Snafu)]
 #[snafu(module(seal_ticket_error), visibility(pub(crate)))]
 pub enum SealTicketError {
@@ -483,7 +483,7 @@ pub enum SealTicketError {
     TableFull,
 }
 
-/// A ticket of a [`SingleUseTicketTable`] that a ClientHello offered.
+/// A ticket of a [`ZeroRttOnceTicketTable`] that a ClientHello offered.
 pub struct TableOpened<T> {
     entries: Arc<Mutex<HashMap<[u8; TICKET_LEN], Entry<T>>>>,
     key: [u8; TICKET_LEN],
@@ -512,8 +512,8 @@ impl<T> Opened<T> for TableOpened<T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClientHelloKey, Issuing, Opened, Resumable, SealTicketError, SingleUseTicketTable,
-        TicketPolicy, TicketSlot,
+        ClientHelloKey, Issuing, Opened, Resumable, SealTicketError, TicketPolicy, TicketSlot,
+        ZeroRttOnceTicketTable,
     };
     use crate::{
         cipher_suite::CipherSuite,
@@ -529,10 +529,10 @@ mod tests {
     use std::{sync::Arc, time::Duration};
     use time::UtcDateTime;
 
-    type Table = SingleUseTicketTable<&'static str, AwsLcBackend, Arc<ManualClock>>;
+    type Table = ZeroRttOnceTicketTable<&'static str, AwsLcBackend, Arc<ManualClock>>;
 
     fn table(clock: &Arc<ManualClock>, early_data: bool, capacity: usize) -> Table {
-        SingleUseTicketTable::new(
+        ZeroRttOnceTicketTable::new(
             AwsLcBackend,
             Arc::clone(clock),
             2,

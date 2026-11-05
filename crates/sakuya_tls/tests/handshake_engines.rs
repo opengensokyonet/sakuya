@@ -51,7 +51,7 @@ use sakuya_tls::{
         layers::PassThroughLayers,
         peer::NoCertificateRequest,
         targets::SniTargets,
-        ticket::SingleUseTicketTable,
+        ticket::ZeroRttOnceTicketTable,
     },
 };
 use std::{collections::VecDeque, sync::Arc, time::Duration};
@@ -202,7 +202,7 @@ fn run<SE, SF, CE, CF>(
 /// What both sides keep across connections.
 struct Endpoints {
     clock: Arc<ManualClock>,
-    server_tickets: SingleUseTicketTable<&'static str, AwsLcBackend, Arc<ManualClock>>,
+    server_tickets: ZeroRttOnceTicketTable<&'static str, AwsLcBackend, Arc<ManualClock>>,
     client_tickets: Arc<TakeOnceTicketMap<Arc<ManualClock>>>,
     offering: PreferenceOffering,
     server_protocols: Vec<ProtocolName<Bytes>>,
@@ -216,7 +216,7 @@ impl Endpoints {
     fn new() -> Self {
         let clock = Arc::new(ManualClock::new(now()));
         Self {
-            server_tickets: SingleUseTicketTable::new(
+            server_tickets: ZeroRttOnceTicketTable::new(
                 AwsLcBackend,
                 Arc::clone(&clock),
                 2,
@@ -617,7 +617,7 @@ fn a_retry_rejects_0_rtt_but_resumes() {
 #[test]
 fn a_ticket_without_0_rtt_resumes_without_offering_it() {
     let mut endpoints = Endpoints::new();
-    endpoints.server_tickets = SingleUseTicketTable::new(
+    endpoints.server_tickets = ZeroRttOnceTicketTable::new(
         AwsLcBackend,
         Arc::clone(&endpoints.clock),
         1,
