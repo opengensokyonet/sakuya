@@ -159,7 +159,7 @@ pub mod codec {
     use bytes::Buf;
     use nitori_call::{ReceiverAccess, call};
     use nitori_crypto::NamedGroup;
-    use nitori_io::{Write, calls::WriteAllError, error::Incomplete};
+    use nitori_io::{Write, calls::WriteAllError, error::IncompleteError};
     use snafu::{ResultExt, Snafu};
 
     /// Reads one key share entry.
@@ -190,7 +190,7 @@ pub mod codec {
         #[snafu(display("key share group read failed"))]
         Group {
             /// The shortfall.
-            source: Incomplete,
+            source: IncompleteError,
         },
         /// The public value could not be read.
         #[snafu(display("key share value read failed"))]

@@ -56,7 +56,7 @@ use bytes::Bytes;
 use core::marker::PhantomData;
 use nitori_crypto::{
     Digest, ExpandLength, Hash, HashAlgorithm, Hmac, RunningHash, Secret, SignatureVerify,
-    Supported, TagMismatch,
+    Supported, TagMismatchError,
 };
 use sakuya_packet_protection::{backend::KdfAlgorithm, secret::TrafficSecret};
 use snafu::{ResultExt, Snafu};
@@ -148,7 +148,7 @@ impl<C: TlsCrypto> Chain<C> {
     }
 
     /// Checks `received` against [`Chain::verify_data`] in constant time.
-    fn check_verify_data(&self, base: &Secret, received: &[u8]) -> Result<(), TagMismatch> {
+    fn check_verify_data(&self, base: &Secret, received: &[u8]) -> Result<(), TagMismatchError> {
         let key = self.expand_label(base, b"finished", &[], self.hash_len());
         Hmac::verify(
             &self.backend,
@@ -192,7 +192,7 @@ impl<C: TlsCrypto> Chain<C> {
             .sync_read_finished_unpin(self.algorithm())
             .context(finished_error::ReadSnafu)?;
         self.check_verify_data(base, finished.verify_data().as_bytes())
-            .map_err(|TagMismatch| FinishedError::Mismatch)?;
+            .map_err(|TagMismatchError| FinishedError::Mismatch)?;
         self.add(encoded);
         Ok(())
     }
@@ -509,7 +509,7 @@ impl<C: TlsCrypto + Clone> PskEarlySecret<Server, C> {
     pub fn verify_binder(&self, binder: &[u8]) -> Result<(), BinderMismatchError> {
         self.chain
             .check_verify_data(&self.binder_key(), binder)
-            .map_err(|TagMismatch| BinderMismatchError)
+            .map_err(|TagMismatchError| BinderMismatchError)
     }
 
     /// The 0-RTT secret the server receives with, once the whole ClientHello

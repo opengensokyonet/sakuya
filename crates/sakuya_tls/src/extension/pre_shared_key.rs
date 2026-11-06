@@ -223,7 +223,7 @@ pub mod codec {
     };
     use bytes::Buf;
     use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{Write, calls::WriteAllError, error::Incomplete};
+    use nitori_io::{Write, calls::WriteAllError, error::IncompleteError};
     use snafu::{ResultExt, Snafu};
 
     /// Reads the data of a `pre_shared_key` extension in a ClientHello.
@@ -302,7 +302,7 @@ pub mod codec {
         #[snafu(display("PSK ticket age read failed"))]
         TicketAge {
             /// The shortfall.
-            source: Incomplete,
+            source: IncompleteError,
         },
         /// The list of binders could not be read.
         #[snafu(display("PSK binder list read failed"))]

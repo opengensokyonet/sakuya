@@ -61,7 +61,7 @@ use core::{convert::Infallible, fmt};
 use nitori_call::{ReceiverAccess, call};
 use nitori_io::{
     calls::{ReadArrayError, WriteAllError},
-    error::{Incomplete, WriteZero},
+    error::{IncompleteError, WriteZeroError},
     prelude::*,
 };
 use snafu::{IntoError, ResultExt, Snafu};
@@ -141,7 +141,7 @@ pub enum ReadVarIntError<E> {
     #[snafu(transparent)]
     Incomplete {
         /// The shortfall, counted over the whole encoding.
-        source: Incomplete,
+        source: IncompleteError,
     },
     /// The receiver failed.
     #[snafu(display("variable-length integer read failed after {completed} bytes"))]
@@ -162,7 +162,7 @@ impl<E> ReadVarIntError<E> {
     /// Bytes of the encoding read before the failure.
     pub fn completed(&self) -> usize {
         match self {
-            Self::Incomplete { source } => source.completed,
+            Self::Incomplete { source } => source.completed(),
             Self::Receiver { completed, .. } => completed.get(),
         }
     }
@@ -180,10 +180,12 @@ impl<E> ReadVarIntError<E> {
     fn after(error: ReadArrayError<E>, offset: usize, encoded_len: usize) -> Self {
         match error {
             ReadArrayError::Incomplete { source } => Self::Incomplete {
-                source: Incomplete {
-                    expected: encoded_len,
-                    completed: offset + source.completed,
-                },
+                // invariant: every caller reads the rest of the encoding, so
+                // `source.expected()` is `encoded_len - offset` and the bytes
+                // read before the failure, `source.completed()`, are below it;
+                // hence `offset + source.completed()` is below `encoded_len`.
+                source: IncompleteError::new(encoded_len, offset + source.completed())
+                    .expect("the bytes read are below the encoding length"),
             },
             ReadArrayError::Receiver { source, completed } => read_var_int_error::ReceiverSnafu {
                 completed: VarIntCompleted::of_failure(offset + completed),
@@ -256,7 +258,7 @@ pub enum WriteVarIntError<E> {
     #[snafu(transparent)]
     WriteZero {
         /// The bytes accepted before the receiver stopped accepting.
-        source: WriteZero,
+        source: WriteZeroError,
     },
     /// The receiver failed.
     #[snafu(display("variable-length integer write failed after {completed} bytes"))]

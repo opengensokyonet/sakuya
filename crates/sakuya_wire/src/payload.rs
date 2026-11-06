@@ -20,7 +20,7 @@
 //! panics.
 use core::{fmt, num::NonZeroUsize};
 use nitori_call::ReceiverAccess;
-use nitori_io::{ReadChunk, ReadChunkExt as _, error::Incomplete};
+use nitori_io::{ReadChunk, ReadChunkExt as _, error::IncompleteError};
 use snafu::{IntoError, ResultExt, Snafu};
 
 /// Failures of reading a payload field.
@@ -31,7 +31,7 @@ pub enum ReadPayloadError<E> {
     #[snafu(transparent)]
     Incomplete {
         /// The shortfall, counted over the field.
-        source: Incomplete,
+        source: IncompleteError,
     },
     /// The source delivered the field in more than one chunk.
     #[snafu(transparent)]
@@ -185,11 +185,11 @@ where
             completed: PayloadCompleted::of_field(length, 0),
         })?;
     let Some(first) = first else {
-        return Err(Incomplete {
-            expected: length,
-            completed: 0,
-        }
-        .into());
+        // invariant: `length` is not zero, since `maximum` is built from it,
+        // so zero bytes read is below it.
+        return Err(IncompleteError::new(length, 0)
+            .expect("`length` is not zero")
+            .into());
     };
     let received = bytes::Buf::remaining(&first);
     assert!(
@@ -201,11 +201,10 @@ where
         return Ok(first);
     };
     match io.read_chunk(rest).await {
-        Ok(None) => Err(Incomplete {
-            expected: length,
-            completed: received,
-        }
-        .into()),
+        // invariant: `received` is below `length`, since `rest` is not zero.
+        Ok(None) => Err(IncompleteError::new(length, received)
+            .expect("`received` is below `length`")
+            .into()),
         // invariant: `received` is below `length`, since `rest` is not zero.
         Ok(Some(_)) => Err(SplitError {
             expected: Some(length),

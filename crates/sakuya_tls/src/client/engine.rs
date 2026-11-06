@@ -114,10 +114,10 @@ use bytes::Bytes;
 use core::{convert::Infallible, pin::Pin};
 use nitori_call::{LentAccess, ReceiverAccess, ReceiverFamily, call, capability};
 use nitori_crypto::{
-    CompleteError, HashAlgorithm, KeyExchange, KeyGenerationFailed, NamedGroup, Random,
+    CompleteError, HashAlgorithm, KeyExchange, KeyGenerationFailedError, NamedGroup, Random,
     RandomError, Secret, SignatureScheme, StartedExchange, Supported,
 };
-use nitori_io::{Read, Write, calls::WriteAllExt as _, error::WriteZero};
+use nitori_io::{Read, Write, calls::WriteAllExt as _, error::WriteZeroError};
 use sakuya_packet_protection::backend::AeadAlgorithm;
 use snafu::Snafu;
 
@@ -255,7 +255,7 @@ pub enum ClientAlertError<V> {
     #[snafu(display("key share generation failed"))]
     KeyGeneration {
         /// The failure.
-        source: KeyGenerationFailed,
+        source: KeyGenerationFailedError,
     },
     /// The backend gave no random bytes.
     #[snafu(display("random generation failed"))]
@@ -443,7 +443,7 @@ pub enum ClientAlertError<V> {
     #[snafu(display("CRYPTO output stopped"))]
     OutputStopped {
         /// The failure.
-        source: WriteZero,
+        source: WriteZeroError,
     },
 }
 

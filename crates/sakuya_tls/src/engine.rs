@@ -38,7 +38,7 @@ use nitori_call::capability;
 use nitori_io::{
     Read, Write,
     calls::{ReadArrayError, WriteAllError},
-    error::WriteZero,
+    error::WriteZeroError,
 };
 use snafu::Snafu;
 
@@ -259,7 +259,7 @@ pub(crate) fn split_read<E>(
 
 /// Splits a failure to write into the sink that stopped and the receiver's
 /// own failure.
-pub(crate) fn split_write<E>(error: WriteAllError<E>) -> Result<WriteZero, E> {
+pub(crate) fn split_write<E>(error: WriteAllError<E>) -> Result<WriteZeroError, E> {
     match error {
         WriteAllError::WriteZero { source } => Ok(source),
         WriteAllError::Receiver { source, .. } => Err(source),

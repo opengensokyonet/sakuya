@@ -90,7 +90,7 @@ fn reports_each_truncated_length() {
             panic!("expected Incomplete, got {error:?}");
         };
         assert_eq!(
-            (incomplete.expected, incomplete.completed),
+            (incomplete.expected(), incomplete.completed()),
             (encoded_len, encoding.len()),
             "{encoding:02x?}"
         );
@@ -214,7 +214,7 @@ fn read_operation_reports_an_ended_source() {
     let ReadVarIntError::Incomplete { source: incomplete } = &error else {
         panic!("expected Incomplete, got {error:?}");
     };
-    assert_eq!((incomplete.expected, incomplete.completed), (1, 0));
+    assert_eq!((incomplete.expected(), incomplete.completed()), (1, 0));
     assert_eq!(error.completed(), 0);
 
     let mut source = &[0x9d, 0x7f][..];
@@ -222,7 +222,7 @@ fn read_operation_reports_an_ended_source() {
     let ReadVarIntError::Incomplete { source: incomplete } = &error else {
         panic!("expected Incomplete, got {error:?}");
     };
-    assert_eq!((incomplete.expected, incomplete.completed), (4, 2));
+    assert_eq!((incomplete.expected(), incomplete.completed()), (4, 2));
     assert!(error.host_error().is_none());
     assert!(source.is_empty());
 }

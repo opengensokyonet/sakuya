@@ -46,7 +46,7 @@ pub mod codec {
         vector::Out,
     };
     use nitori_call::{ReceiverAccess, call};
-    use nitori_crypto::{Digest, DigestLengthMismatch, HashAlgorithm};
+    use nitori_crypto::{Digest, DigestLengthMismatchError, HashAlgorithm};
     use nitori_io::{Write, calls::WriteAllError};
     use snafu::{ResultExt, Snafu};
 
@@ -81,7 +81,7 @@ pub mod codec {
         #[snafu(display("Finished verify_data has the wrong length"))]
         VerifyData {
             /// The lengths.
-            source: DigestLengthMismatch,
+            source: DigestLengthMismatchError,
         },
     }
 

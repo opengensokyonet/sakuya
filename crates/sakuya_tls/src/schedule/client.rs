@@ -19,7 +19,7 @@ use crate::{
     message::{HandshakeMessage, certificate_verify::codec::ReadCertificateVerifyError},
     role::Client,
 };
-use nitori_crypto::{BadSignature, SignatureScheme};
+use nitori_crypto::{BadSignatureError, SignatureScheme};
 use snafu::Snafu;
 
 /// The branch of a client's handshake after EncryptedExtensions.
@@ -127,7 +127,7 @@ pub enum CertificateVerifyError {
     #[snafu(display("CertificateVerify signature rejected"))]
     Signature {
         /// The failure.
-        source: BadSignature,
+        source: BadSignatureError,
     },
 }
 

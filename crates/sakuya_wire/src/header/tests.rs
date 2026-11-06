@@ -289,7 +289,7 @@ fn truncated_initial_fields() {
             panic!("input of {end} bytes: {error:?}");
         };
         assert_eq!(*length, VarInt::from(1182u16));
-        assert_eq!((source.expected, source.completed), (1182, end - 18));
+        assert_eq!((source.expected(), source.completed()), (1182, end - 18));
     }
 }
 
@@ -314,7 +314,7 @@ fn initial_with_token() {
     else {
         panic!("{error:?}");
     };
-    assert_eq!((source.expected, source.completed), (3, 2));
+    assert_eq!((source.expected(), source.completed()), (3, 2));
 }
 
 #[test]
@@ -600,7 +600,7 @@ fn coalesced_packet_with_a_corrupt_length() {
         panic!("{error:?}");
     };
     assert_eq!(*length, VarInt::from(41u8));
-    assert_eq!((source.expected, source.completed), (41, 40));
+    assert_eq!((source.expected(), source.completed()), (41, 40));
 }
 
 #[test]

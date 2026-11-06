@@ -35,7 +35,7 @@ use crate::{
 };
 use bytes::Buf;
 use nitori_call::{ReceiverAccess, call};
-use nitori_io::error::Incomplete;
+use nitori_io::error::IncompleteError;
 use smallvec::SmallVec;
 use snafu::{ResultExt, Snafu};
 
@@ -447,7 +447,7 @@ pub enum ReadExtensionBlockError {
     #[snafu(display("extension type read failed"))]
     Type {
         /// The shortfall.
-        source: Incomplete,
+        source: IncompleteError,
     },
     /// The data of an extension could not be read.
     #[snafu(display("{extension:?} data read failed"))]

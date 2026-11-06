@@ -177,7 +177,7 @@ pub mod codec {
     };
     use bytes::Buf;
     use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{Write, calls::WriteAllError, error::Incomplete};
+    use nitori_io::{Write, calls::WriteAllError, error::IncompleteError};
     use snafu::{ResultExt, Snafu};
 
     /// Reads an EncryptedExtensions message, header included.
@@ -257,7 +257,7 @@ pub mod codec {
     #[call(sync)]
     async fn read_certificate_type<F: MessageSource, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-    ) -> Result<u8, Incomplete> {
+    ) -> Result<u8, IncompleteError> {
         read_u8(io).await
     }
 
@@ -314,13 +314,13 @@ pub mod codec {
         #[snafu(display("client_certificate_type read failed"))]
         ClientCertificateType {
             /// The shortfall.
-            source: Incomplete,
+            source: IncompleteError,
         },
         /// `server_certificate_type` could not be read.
         #[snafu(display("server_certificate_type read failed"))]
         ServerCertificateType {
             /// The shortfall.
-            source: Incomplete,
+            source: IncompleteError,
         },
     }
 

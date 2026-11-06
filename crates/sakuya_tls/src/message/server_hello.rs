@@ -435,7 +435,7 @@ pub mod codec {
     use bytes::Buf;
     use nitori_call::{ReceiverAccess, call};
     use nitori_crypto::NamedGroup;
-    use nitori_io::{Write, calls::WriteAllError, error::Incomplete};
+    use nitori_io::{Write, calls::WriteAllError, error::IncompleteError};
     use snafu::{ResultExt, Snafu};
 
     /// Reads a server_hello message, header included: a ServerHello, or a
@@ -588,7 +588,7 @@ pub mod codec {
     #[call(sync)]
     async fn read_selected_u16<F: MessageSource, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-    ) -> Result<u16, Incomplete> {
+    ) -> Result<u16, IncompleteError> {
         read_u16(io).await
     }
 
@@ -612,13 +612,13 @@ pub mod codec {
         #[snafu(display("ServerHello legacy_version read failed"))]
         LegacyVersion {
             /// The shortfall.
-            source: Incomplete,
+            source: IncompleteError,
         },
         /// random could not be read.
         #[snafu(display("ServerHello random read failed"))]
         Random {
             /// The shortfall.
-            source: Incomplete,
+            source: IncompleteError,
         },
         /// legacy_session_id_echo could not be read or is longer than 32
         /// bytes.
@@ -631,13 +631,13 @@ pub mod codec {
         #[snafu(display("ServerHello cipher_suite read failed"))]
         CipherSuite {
             /// The shortfall.
-            source: Incomplete,
+            source: IncompleteError,
         },
         /// legacy_compression_method could not be read.
         #[snafu(display("ServerHello legacy_compression_method read failed"))]
         CompressionMethod {
             /// The shortfall.
-            source: Incomplete,
+            source: IncompleteError,
         },
         /// legacy_compression_method is not 0 (RFC 9846 §4.2.3).
         #[snafu(display("ServerHello legacy_compression_method is not 0"))]
@@ -694,19 +694,19 @@ pub mod codec {
         #[snafu(display("key_share selected_group read failed"))]
         SelectedGroup {
             /// The shortfall.
-            source: Incomplete,
+            source: IncompleteError,
         },
         /// `pre_shared_key` could not be read.
         #[snafu(display("pre_shared_key selected_identity read failed"))]
         SelectedIdentity {
             /// The shortfall.
-            source: Incomplete,
+            source: IncompleteError,
         },
         /// `supported_versions` could not be read.
         #[snafu(display("supported_versions selected_version read failed"))]
         SelectedVersion {
             /// The shortfall.
-            source: Incomplete,
+            source: IncompleteError,
         },
         /// `cookie` could not be read.
         #[snafu(display("cookie read failed"))]

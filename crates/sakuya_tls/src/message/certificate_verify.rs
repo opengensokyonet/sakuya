@@ -68,7 +68,7 @@ pub mod codec {
     use bytes::Buf;
     use nitori_call::{ReceiverAccess, call};
     use nitori_crypto::SignatureScheme;
-    use nitori_io::{Write, calls::WriteAllError, error::Incomplete};
+    use nitori_io::{Write, calls::WriteAllError, error::IncompleteError};
     use snafu::{ResultExt, Snafu};
 
     /// Reads a CertificateVerify message, header included.
@@ -120,7 +120,7 @@ pub mod codec {
         #[snafu(display("CertificateVerify algorithm read failed"))]
         Algorithm {
             /// The shortfall.
-            source: Incomplete,
+            source: IncompleteError,
         },
         /// signature could not be read.
         #[snafu(display("CertificateVerify signature read failed"))]

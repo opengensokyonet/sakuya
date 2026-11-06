@@ -114,7 +114,7 @@ use nitori_crypto::{
     Hash, HashAlgorithm, KeyExchange, Random, RandomError, RunningHash, Secret, ServerShareError,
     SigningKey,
 };
-use nitori_io::{Read, Write, calls::WriteAllExt as _, error::WriteZero};
+use nitori_io::{Read, Write, calls::WriteAllExt as _, error::WriteZeroError};
 use sakuya_packet_protection::backend::AeadAlgorithm;
 use snafu::Snafu;
 use time::UtcDateTime;
@@ -364,7 +364,7 @@ pub enum ServerAlertError<L, S, G, K> {
     #[snafu(display("CRYPTO output stopped"))]
     OutputStopped {
         /// The failure.
-        source: WriteZero,
+        source: WriteZeroError,
     },
 }
 

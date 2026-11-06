@@ -260,7 +260,7 @@ pub mod codec {
     };
     use bytes::Buf;
     use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{Write, calls::WriteAllError, error::Incomplete};
+    use nitori_io::{Write, calls::WriteAllError, error::IncompleteError};
     use snafu::{ResultExt, Snafu};
 
     /// Reads a nonempty list of two-byte code points.
@@ -299,7 +299,7 @@ pub mod codec {
         #[snafu(display("code point list length read failed"))]
         Length {
             /// The shortfall.
-            source: Incomplete,
+            source: IncompleteError,
         },
         /// The list is empty.
         #[snafu(display("code point list is empty"))]
@@ -314,7 +314,7 @@ pub mod codec {
         #[snafu(display("code point list read failed"))]
         Items {
             /// The shortfall.
-            source: Incomplete,
+            source: IncompleteError,
         },
     }
 
@@ -377,7 +377,7 @@ pub mod codec {
         #[snafu(display("code point list length read failed"))]
         Length {
             /// The shortfall.
-            source: Incomplete,
+            source: IncompleteError,
         },
         /// The list is empty.
         #[snafu(display("code point list is empty"))]
@@ -386,7 +386,7 @@ pub mod codec {
         #[snafu(display("code point list read failed"))]
         Items {
             /// The shortfall.
-            source: Incomplete,
+            source: IncompleteError,
         },
     }
 

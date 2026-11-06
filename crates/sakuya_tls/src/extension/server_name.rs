@@ -73,7 +73,7 @@ pub mod codec {
     };
     use bytes::Buf;
     use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{Write, calls::WriteAllError, error::Incomplete};
+    use nitori_io::{Write, calls::WriteAllError, error::IncompleteError};
     use snafu::{ResultExt, Snafu};
 
     /// Reads the data of a `server_name` extension in a ClientHello.
@@ -132,7 +132,7 @@ pub mod codec {
         #[snafu(display("server name type read failed"))]
         NameType {
             /// The shortfall.
-            source: Incomplete,
+            source: IncompleteError,
         },
         /// An entry has a name type other than host_name.
         #[snafu(transparent)]

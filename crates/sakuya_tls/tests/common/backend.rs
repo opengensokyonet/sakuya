@@ -8,9 +8,9 @@
 //! asks to verify with the content the test computes on its own.
 
 use nitori_crypto::{
-    BadSignature, Digest, ExpandLength, Hash, HashAlgorithm, Hkdf, Hmac, Issuer, KeyExchange,
-    KeyGenerationFailed, KeyShare, NamedGroup, Random, RandomError, Secret, ServerShareError,
-    SignatureScheme, SignatureVerify, Supported, TagMismatch,
+    BadSignatureError, Digest, ExpandLength, Hash, HashAlgorithm, Hkdf, Hmac, Issuer, KeyExchange,
+    KeyGenerationFailedError, KeyShare, NamedGroup, Random, RandomError, Secret, ServerShareError,
+    SignatureScheme, SignatureVerify, Supported, TagMismatchError,
 };
 use nitori_crypto_aws_lc::{AwsLcBackend, FixedX25519};
 use std::rc::Rc;
@@ -99,7 +99,7 @@ impl Hmac for TraceBackend {
         key: &[u8],
         message: &[u8],
         tag: &[u8],
-    ) -> Result<(), TagMismatch> {
+    ) -> Result<(), TagMismatchError> {
         Hmac::verify(&self.primitives, self.hash_of(algorithm), key, message, tag)
     }
 }
@@ -157,7 +157,7 @@ impl KeyExchange for TraceBackend {
     fn start(
         &self,
         group: Supported<Self, NamedGroup>,
-    ) -> Result<Self::Started, KeyGenerationFailed> {
+    ) -> Result<Self::Started, KeyGenerationFailedError> {
         let group = self.key_exchange.named_group(group.algorithm()).unwrap();
         KeyExchange::start(&self.key_exchange, group)
     }
@@ -185,7 +185,7 @@ impl SignatureVerify for TraceBackend {
         public_key: &[u8],
         message: &[u8],
         signature: &[u8],
-    ) -> Result<(), BadSignature> {
+    ) -> Result<(), BadSignatureError> {
         match &self.expected {
             Some(expected)
                 if expected.public_key == public_key
@@ -194,7 +194,7 @@ impl SignatureVerify for TraceBackend {
             {
                 Ok(())
             }
-            _ => Err(BadSignature),
+            _ => Err(BadSignatureError),
         }
     }
 }

@@ -42,7 +42,7 @@ use bytes::{Buf, Bytes};
 use core::convert::Infallible;
 use nitori_call::{Direct, Receiver, ReceiverAccess};
 use nitori_crypto::HashAlgorithm;
-use nitori_io::{ReadChunk, error::Incomplete};
+use nitori_io::{ReadChunk, error::IncompleteError};
 use snafu::{ResultExt, Snafu};
 
 pub mod certificate;
@@ -96,7 +96,7 @@ mod sealed {
 /// [`MessageSource::Bytes`], itself a source of the same family. A reader
 /// therefore reads a variable-length field as one chunk and reads the
 /// structure inside it from that chunk, so that it cannot read past the
-/// field; a source that ends early is an [`Incomplete`] failure.
+/// field; a source that ends early is an [`IncompleteError`] failure.
 pub trait MessageSource:
     ReadChunk<Error = Infallible, Chunk = <Self as MessageSource>::Bytes> + sealed::Sealed
 {
@@ -125,7 +125,7 @@ pub enum ReadHeaderError {
     #[snafu(display("handshake message type read failed"))]
     Type {
         /// The shortfall.
-        source: Incomplete,
+        source: IncompleteError,
     },
     /// The message is not of the type the reader reads.
     #[snafu(transparent)]
@@ -137,13 +137,13 @@ pub enum ReadHeaderError {
     #[snafu(display("handshake message length read failed"))]
     Length {
         /// The shortfall.
-        source: Incomplete,
+        source: IncompleteError,
     },
     /// The body is shorter than the length states.
     #[snafu(display("handshake message body read failed"))]
     Body {
         /// The shortfall.
-        source: Incomplete,
+        source: IncompleteError,
     },
 }
 

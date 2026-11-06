@@ -270,7 +270,7 @@ pub mod codec {
     };
     use bytes::Buf;
     use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{Write, calls::WriteAllError, error::Incomplete};
+    use nitori_io::{Write, calls::WriteAllError, error::IncompleteError};
     use snafu::{ResultExt, Snafu};
 
     /// Reads a NewSessionTicket message, header included.
@@ -340,7 +340,7 @@ pub mod codec {
     #[call(sync)]
     async fn read_max_early_data_size<F: MessageSource, A: ReceiverAccess<Family = F>>(
         io: &mut A,
-    ) -> Result<u32, Incomplete> {
+    ) -> Result<u32, IncompleteError> {
         read_u32(io).await
     }
 
@@ -364,7 +364,7 @@ pub mod codec {
         #[snafu(display("ticket_lifetime read failed"))]
         Lifetime {
             /// The shortfall.
-            source: Incomplete,
+            source: IncompleteError,
         },
         /// ticket_lifetime is above seven days.
         #[snafu(transparent)]
@@ -376,7 +376,7 @@ pub mod codec {
         #[snafu(display("ticket_age_add read failed"))]
         AgeAdd {
             /// The shortfall.
-            source: Incomplete,
+            source: IncompleteError,
         },
         /// ticket_nonce could not be read.
         #[snafu(display("ticket_nonce read failed"))]
@@ -419,7 +419,7 @@ pub mod codec {
         #[snafu(display("early_data max_early_data_size read failed"))]
         EarlyData {
             /// The shortfall.
-            source: Incomplete,
+            source: IncompleteError,
         },
     }
 

@@ -40,7 +40,7 @@ use core::{
     task::{Context, Poll},
 };
 use nitori_call::{ReceiverAccess, call};
-use nitori_io::{calls::WriteAllError, error::WriteZero, prelude::*};
+use nitori_io::{calls::WriteAllError, error::WriteZeroError, prelude::*};
 use snafu::{IntoError, ResultExt, Snafu};
 
 /// Reads the transport parameters that an endpoint in role `sender` sent:
@@ -547,7 +547,7 @@ async fn put<F: Write, A: ReceiverAccess<Family = F>, B: Buf>(
             Ok(())
         }
         Err(WriteAllError::WriteZero { source }) => Err(WriteAllError::WriteZero {
-            source: WriteZero {
+            source: WriteZeroError {
                 completed: before + source.completed,
             },
         }),

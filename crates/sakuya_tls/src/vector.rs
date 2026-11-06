@@ -19,7 +19,7 @@ use nitori_call::ReceiverAccess;
 use nitori_io::{
     ReadChunkExt as _, Write,
     calls::{ReadArrayError, ReadArrayExt as _, WriteAllError, WriteAllExt as _},
-    error::{Incomplete, WriteZero},
+    error::{IncompleteError, WriteZeroError},
 };
 use snafu::{ResultExt, Snafu};
 
@@ -97,13 +97,13 @@ pub enum ReadVectorError {
     #[snafu(display("vector length read failed"))]
     Length {
         /// The shortfall.
-        source: Incomplete,
+        source: IncompleteError,
     },
     /// The bytes the length field states are not all there.
     #[snafu(display("vector read failed"))]
     Bytes {
         /// The shortfall.
-        source: Incomplete,
+        source: IncompleteError,
     },
 }
 
@@ -123,7 +123,7 @@ pub enum ReadBoundedVectorError {
     #[snafu(display("vector length read failed"))]
     Length {
         /// The shortfall.
-        source: Incomplete,
+        source: IncompleteError,
     },
     /// The length lies outside the range of the field.
     #[snafu(transparent)]
@@ -135,7 +135,7 @@ pub enum ReadBoundedVectorError {
     #[snafu(display("vector read failed"))]
     Bytes {
         /// The shortfall.
-        source: Incomplete,
+        source: IncompleteError,
     },
 }
 
@@ -147,7 +147,7 @@ impl ReadBoundedVectorError {
 }
 
 /// The shortfall of a fixed-size read from a source that cannot fail.
-fn incomplete(error: ReadArrayError<Infallible>) -> Incomplete {
+fn incomplete(error: ReadArrayError<Infallible>) -> IncompleteError {
     match error {
         ReadArrayError::Incomplete { source } => source,
         ReadArrayError::Receiver { source, .. } => match source {},
@@ -155,7 +155,7 @@ fn incomplete(error: ReadArrayError<Infallible>) -> Incomplete {
 }
 
 /// Reads `N` bytes.
-pub(crate) async fn read_array<const N: usize, F, A>(io: &mut A) -> Result<[u8; N], Incomplete>
+pub(crate) async fn read_array<const N: usize, F, A>(io: &mut A) -> Result<[u8; N], IncompleteError>
 where
     F: MessageSource,
     A: ReceiverAccess<Family = F>,
@@ -166,7 +166,7 @@ where
 /// Reads one byte.
 pub(crate) async fn read_u8<F: MessageSource, A: ReceiverAccess<Family = F>>(
     io: &mut A,
-) -> Result<u8, Incomplete> {
+) -> Result<u8, IncompleteError> {
     let [byte] = read_array(io).await?;
     Ok(byte)
 }
@@ -174,14 +174,14 @@ pub(crate) async fn read_u8<F: MessageSource, A: ReceiverAccess<Family = F>>(
 /// Reads a two-byte integer.
 pub(crate) async fn read_u16<F: MessageSource, A: ReceiverAccess<Family = F>>(
     io: &mut A,
-) -> Result<u16, Incomplete> {
+) -> Result<u16, IncompleteError> {
     Ok(u16::from_be_bytes(read_array(io).await?))
 }
 
 /// Reads a three-byte integer.
 pub(crate) async fn read_u24<F: MessageSource, A: ReceiverAccess<Family = F>>(
     io: &mut A,
-) -> Result<u32, Incomplete> {
+) -> Result<u32, IncompleteError> {
     let [a, b, c] = read_array(io).await?;
     Ok(u32::from_be_bytes([0, a, b, c]))
 }
@@ -189,7 +189,7 @@ pub(crate) async fn read_u24<F: MessageSource, A: ReceiverAccess<Family = F>>(
 /// Reads a four-byte integer.
 pub(crate) async fn read_u32<F: MessageSource, A: ReceiverAccess<Family = F>>(
     io: &mut A,
-) -> Result<u32, Incomplete> {
+) -> Result<u32, IncompleteError> {
     Ok(u32::from_be_bytes(read_array(io).await?))
 }
 
@@ -197,7 +197,7 @@ pub(crate) async fn read_u32<F: MessageSource, A: ReceiverAccess<Family = F>>(
 pub(crate) async fn read_length<F: MessageSource, A: ReceiverAccess<Family = F>>(
     io: &mut A,
     width: Width,
-) -> Result<usize, Incomplete> {
+) -> Result<usize, IncompleteError> {
     Ok(match width {
         Width::U8 => usize::from(read_u8(io).await?),
         Width::U16 => usize::from(read_u16(io).await?),
@@ -209,7 +209,7 @@ pub(crate) async fn read_length<F: MessageSource, A: ReceiverAccess<Family = F>>
 pub(crate) async fn read_bytes<F: MessageSource, A: ReceiverAccess<Family = F>>(
     io: &mut A,
     len: usize,
-) -> Result<F::Bytes, Incomplete> {
+) -> Result<F::Bytes, IncompleteError> {
     let Some(maximum) = NonZeroUsize::new(len) else {
         return Ok(F::Bytes::default());
     };
@@ -222,10 +222,10 @@ pub(crate) async fn read_bytes<F: MessageSource, A: ReceiverAccess<Family = F>>(
     let completed = chunk.as_ref().map_or(0, Buf::remaining);
     match chunk {
         Some(chunk) if completed == len => Ok(chunk),
-        _ => Err(Incomplete {
-            expected: len,
-            completed,
-        }),
+        // invariant: `len` is not zero, and the chunk holds at most `len`
+        // bytes by the `ReadChunk` contract, so `completed` is below `len`:
+        // it is zero without a chunk and differs from `len` otherwise.
+        _ => Err(IncompleteError::new(len, completed).expect("`completed` is below `len`")),
     }
 }
 
@@ -280,7 +280,7 @@ impl<'a, F: Write, A: ReceiverAccess<Family = F>> Out<'a, A> {
                 Ok(())
             }
             Err(WriteAllError::WriteZero { source }) => Err(WriteAllError::WriteZero {
-                source: WriteZero {
+                source: WriteZeroError {
                     completed: before + source.completed,
                 },
             }),

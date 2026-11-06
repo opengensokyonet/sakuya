@@ -49,7 +49,7 @@ pub mod codec {
         vector::Out,
     };
     use nitori_call::{ReceiverAccess, call};
-    use nitori_crypto::{Digest, DigestLengthMismatch, HashAlgorithm};
+    use nitori_crypto::{Digest, DigestLengthMismatchError, HashAlgorithm};
     use nitori_io::{Write, calls::WriteAllError};
     use snafu::{ResultExt, Snafu};
 
@@ -83,7 +83,7 @@ pub mod codec {
         #[snafu(display("message_hash body has the wrong length"))]
         Hash {
             /// The lengths.
-            source: DigestLengthMismatch,
+            source: DigestLengthMismatchError,
         },
     }
 

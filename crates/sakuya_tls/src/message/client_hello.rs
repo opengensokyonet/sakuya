@@ -355,7 +355,7 @@ pub mod codec {
     };
     use bytes::Buf;
     use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{Write, calls::WriteAllError, error::Incomplete};
+    use nitori_io::{Write, calls::WriteAllError, error::IncompleteError};
     use snafu::{ResultExt, Snafu};
 
     /// Reads a ClientHello message, header included.
@@ -525,13 +525,13 @@ pub mod codec {
         #[snafu(display("ClientHello legacy_version read failed"))]
         LegacyVersion {
             /// The shortfall.
-            source: Incomplete,
+            source: IncompleteError,
         },
         /// random could not be read.
         #[snafu(display("ClientHello random read failed"))]
         Random {
             /// The shortfall.
-            source: Incomplete,
+            source: IncompleteError,
         },
         /// legacy_session_id could not be read or is longer than 32 bytes.
         #[snafu(display("ClientHello legacy_session_id read failed"))]
