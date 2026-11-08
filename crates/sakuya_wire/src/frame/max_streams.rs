@@ -3,8 +3,8 @@
 //! [RFC 9000 §19.11]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.11
 use super::{Head, type_value, type_var_int};
 use crate::{
-    stream_count::StreamCount,
-    stream_id::Directionality,
+    v1::stream_count::StreamCount,
+    v1::stream_id::Directionality,
     var_int::{VarInt, VarIntField},
 };
 
@@ -81,8 +81,8 @@ pub mod codec {
 
     use super::MaxStreamsFrame;
     use crate::{
-        stream_count::{StreamCount, StreamCountError},
-        stream_id::Directionality,
+        v1::stream_count::{StreamCount, StreamCountError},
+        v1::stream_id::Directionality,
         var_int::codec::{ReadVarIntError, ReadVarIntFieldError, read_var_int_field},
     };
     use nitori_call::{ReceiverAccess, call};
@@ -149,8 +149,8 @@ mod tests {
             codec::{ReadFrameError, ReadFrameHostExt as _},
             tests::{assert_bytes_round_trip, assert_round_trip},
         },
-        stream_count::StreamCount,
-        stream_id::Directionality,
+        v1::stream_count::StreamCount,
+        v1::stream_id::Directionality,
         var_int::{VarInt, VarIntField},
     };
 
@@ -203,7 +203,7 @@ mod tests {
         ));
         assert_eq!(
             error.transport_error_code(),
-            crate::transport_error::TransportErrorCode::FRAME_ENCODING_ERROR
+            crate::v1::transport_error::TransportErrorCode::FRAME_ENCODING_ERROR
         );
     }
 }

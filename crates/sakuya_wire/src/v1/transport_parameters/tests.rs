@@ -18,9 +18,9 @@ use super::{
 };
 use crate::{
     connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken},
-    role::Role,
-    stream_count::StreamCount,
-    transport_error::TransportErrorCode,
+    v1::role::Role,
+    v1::stream_count::StreamCount,
+    v1::transport_error::TransportErrorCode,
     var_int::{VarInt, codec::WriteVarIntHostExt as _},
 };
 use bytes::Bytes;

@@ -15,7 +15,7 @@
 //! the check fails, so it holds only values for which the rule fails.
 //!
 //! [RFC 9000 §4.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-4.5
-use sakuya_wire::application_error::ApplicationErrorCode;
+use sakuya_wire::v1::application_error::ApplicationErrorCode;
 use sakuya_wire::var_int::VarInt;
 use snafu::{Snafu, ensure};
 

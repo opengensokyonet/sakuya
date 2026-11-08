@@ -18,7 +18,7 @@
 //! ```
 //! use sakuya_wire::{
 //!     connection_id::ConnectionIdLength,
-//!     protected_packet::{Packet, ProtectedPacket, into_packets},
+//!     v1::protected_packet::{Packet, ProtectedPacket, into_packets},
 //! };
 //!
 //! // A Handshake packet with 3 bytes of packet number and payload, then a
@@ -39,7 +39,6 @@
 use crate::version::Version;
 use crate::{
     connection_id::{ConnectionIdLength, RawConnectionId},
-    encryption_level::EncryptionLevel,
     header::{
         HeaderForm, ShortHeader, VersionNegotiation,
         codec::{
@@ -47,8 +46,11 @@ use crate::{
             ReadShortHeaderHostExt as _, ReadVersionNegotiationError,
             ReadVersionNegotiationHostExt as _,
         },
-        v1::codec::ReadLongPacketHostExt as _,
-        v1::{LongPacket, LongPacketType, codec::ReadLongPacketError},
+    },
+    v1::encryption_level::EncryptionLevel,
+    v1::header::{
+        LongPacket, LongPacketType,
+        codec::{ReadLongPacketError, ReadLongPacketHostExt as _},
     },
 };
 use core::{convert::Infallible, iter::FusedIterator, ops::Range};
@@ -125,7 +127,7 @@ impl<P> ProtectedPacket<P> {
 /// The header values hold ranges within the packet, as in
 /// [`ProtectedPacket`]. A Retry packet's token is a `Bytes` that shares the
 /// storage of a `Bytes` datagram and is copied otherwise, as
-/// [`TypeFields::Retry`](crate::header::v1::TypeFields::Retry) says.
+/// [`TypeFields::Retry`](crate::v1::header::TypeFields::Retry) says.
 ///
 /// [RFC 9000 §12.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.2
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -133,7 +135,7 @@ pub enum Packet<P> {
     /// A protected packet.
     Protected(ProtectedPacket<P>),
     /// A Retry packet, whose fields are those of
-    /// [`TypeFields::Retry`](crate::header::v1::TypeFields::Retry).
+    /// [`TypeFields::Retry`](crate::v1::header::TypeFields::Retry).
     Retry(LongPacket<Range<usize>>, P),
     /// A Version Negotiation packet, whose supported version list is the
     /// range of the packet it fills.
@@ -298,7 +300,7 @@ impl<P: SplitTo + AsRef<[u8]>> FusedIterator for IntoPackets<P> {}
 
 /// Failures of [`into_packets`] for one packet.
 #[derive(Debug, Snafu)]
-#[snafu(module(into_packets_error), visibility(pub(crate)))]
+#[snafu(module(into_packets_error), visibility(pub(in crate::v1)))]
 pub enum IntoPacketsError {
     /// The header does not tell where the packet ends. The rest of the
     /// datagram cannot be cut apart either, so the iteration ends.

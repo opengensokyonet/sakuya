@@ -33,8 +33,8 @@ use sakuya_stream::send::write::WriteOutcome;
 use sakuya_stream::send::{SendEndState, SendTerminalState, StreamEndFrame, StreamSender};
 use sakuya_stream::send_buffer::ResetRetention;
 use sakuya_stream::send_buffer::offset_map::OffsetMapStreamSendBuffer;
-use sakuya_wire::application_error::ApplicationErrorCode;
-use sakuya_wire::stream_id::StreamId;
+use sakuya_wire::v1::application_error::ApplicationErrorCode;
+use sakuya_wire::v1::stream_id::StreamId;
 use sakuya_wire::var_int::VarInt;
 
 fn v(value: u32) -> VarInt {

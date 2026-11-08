@@ -15,14 +15,16 @@
 //!
 //! A sender describes the header of an Initial, 0-RTT or Handshake packet with
 //! a [`LongPacketHeader`], which [`codec::write_long_packet_header`] writes up
+//! to the Packet Number field, and the header of a 1-RTT packet with a
+//! [`ShortPacketHeader`], which [`codec::write_short_packet_header`] writes up
 //! to the Packet Number field.
 //!
 //! [RFC 9000 §17.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.2
-use super::{FORM_BIT, LongHeader, SAMPLE_DISTANCE, VERSION_LEN};
+use crate::header::{FORM_BIT, LongHeader, SAMPLE_DISTANCE, VERSION_LEN};
 use crate::{
     connection_id::ConnectionId,
     frame::LengthError,
-    packet_number::PacketNumberLength,
+    v1::packet_number::PacketNumberLength,
     var_int::{VarInt, VarIntField, VarIntWidth},
     version::Version,
 };
@@ -343,7 +345,7 @@ impl<D: Buf> LongPacket<D> {
     ///
     /// The ranges let the packet outlive the borrow of `bytes` that reading
     /// it needed. A Retry packet keeps its token and integrity tag.
-    pub(crate) fn into_ranges(self, bytes: &[u8]) -> LongPacket<Range<usize>> {
+    pub(in crate::v1) fn into_ranges(self, bytes: &[u8]) -> LongPacket<Range<usize>> {
         let fields = match self.fields {
             TypeFields::Initial {
                 token,
@@ -482,5 +484,105 @@ impl PacketBounds {
     /// [`PacketBounds::packet_number_offset`] plus [`PacketBounds::length`].
     pub fn end(&self) -> usize {
         self.end
+    }
+}
+/// The Key Phase bit of a short header ([RFC 9000 §17.3.1]): which packet
+/// protection keys protect the packet.
+///
+/// An endpoint toggles it each time it updates its keys ([RFC 9001 §6]), so
+/// its value says whether a packet uses the same keys as the one before the
+/// last update.
+///
+/// [RFC 9000 §17.3.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.3.1
+/// [RFC 9001 §6]: https://www.rfc-editor.org/rfc/rfc9001.html#section-6
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum KeyPhase {
+    /// The bit is 0.
+    Zero,
+    /// The bit is 1.
+    One,
+}
+
+impl KeyPhase {
+    /// The bit's place in the first byte of a short header.
+    const MASK: u8 = 0x04;
+}
+
+/// The Spin Bit of the first byte of a short header ([RFC 9000 §17.3.1]).
+///
+/// [RFC 9000 §17.3.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.3.1
+const SPIN_BIT: u8 = 0x20;
+
+/// The header of a 1-RTT packet as a sender writes it: the first byte and
+/// the destination connection ID ([RFC 9000 §17.3]).
+///
+/// The first byte states the form, the Fixed Bit, the Spin Bit, the reserved
+/// bits, the Key Phase and the packet number length. The reserved bits are
+/// written as 0, as [RFC 9000 §17.3.1] requires before header protection is
+/// applied. The Packet Number field follows the header and is not part of it.
+///
+/// [RFC 9000 §17.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.3
+/// [RFC 9000 §17.3.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.3.1
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShortPacketHeader {
+    spin: bool,
+    key_phase: KeyPhase,
+    pn_length: PacketNumberLength,
+    dcid: ConnectionId,
+}
+
+impl ShortPacketHeader {
+    /// The header with this Spin Bit, Key Phase, packet number length and
+    /// destination connection ID.
+    pub const fn new(
+        spin: bool,
+        key_phase: KeyPhase,
+        pn_length: PacketNumberLength,
+        dcid: ConnectionId,
+    ) -> Self {
+        Self {
+            spin,
+            key_phase,
+            pn_length,
+            dcid,
+        }
+    }
+
+    /// The first byte of the packet: the form, the Fixed Bit, the Spin Bit,
+    /// zero reserved bits, the Key Phase and the packet number length.
+    pub fn first_byte(&self) -> u8 {
+        let spin = if self.spin { SPIN_BIT } else { 0 };
+        let key_phase = match self.key_phase {
+            KeyPhase::Zero => 0,
+            KeyPhase::One => KeyPhase::MASK,
+        };
+        FIXED_BIT | spin | key_phase | self.pn_length.first_byte_bits()
+    }
+
+    /// The Spin Bit.
+    pub const fn spin(&self) -> bool {
+        self.spin
+    }
+
+    /// The Key Phase.
+    pub const fn key_phase(&self) -> KeyPhase {
+        self.key_phase
+    }
+
+    /// The length of the Packet Number field that follows the header.
+    pub const fn pn_length(&self) -> PacketNumberLength {
+        self.pn_length
+    }
+
+    /// The destination connection ID.
+    pub fn dcid(&self) -> &ConnectionId {
+        &self.dcid
+    }
+
+    /// The offset of the Packet Number field, right after the destination
+    /// connection ID: the number of bytes [`codec::write_short_packet_header`]
+    /// writes.
+    pub fn packet_number_offset(&self) -> usize {
+        1 + self.dcid.len()
     }
 }

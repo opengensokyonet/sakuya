@@ -39,7 +39,7 @@ use bytes::BufMut;
 use core::fmt;
 use core::num::NonZeroUsize;
 use core::ops::Deref;
-use sakuya_wire::application_error::ApplicationErrorCode;
+use sakuya_wire::v1::application_error::ApplicationErrorCode;
 use sakuya_wire::var_int::VarInt;
 use snafu::Snafu;
 use std::sync::Arc;

@@ -5,7 +5,7 @@
 //! [`write_var_int`](crate::var_int::codec::write_var_int) do.
 //!
 //! ```
-//! use sakuya_wire::stream_id::{
+//! use sakuya_wire::v1::stream_id::{
 //!     Directionality, Initiator, StreamId,
 //!     codec::{ReadStreamIdHostExt as _, WriteStreamIdHostExt as _},
 //! };

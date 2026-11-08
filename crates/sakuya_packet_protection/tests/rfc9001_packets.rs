@@ -15,12 +15,12 @@ use sakuya_packet_protection::secret::TrafficSecret;
 use sakuya_wire::connection_id::{ConnectionId, ConnectionIdLength};
 use sakuya_wire::frame::{Extensions, Frame, Frames};
 use sakuya_wire::header::codec::{ReadLongHeaderHostExt as _, ReadShortHeaderHostExt as _};
-use sakuya_wire::header::v1::codec::ReadLongPacketHostExt as _;
-use sakuya_wire::header::v1::{LongPacketType, TypeFields};
-use sakuya_wire::packet_number::PacketNumber;
-use sakuya_wire::role::Role;
-use sakuya_wire::stream_count::StreamCount;
-use sakuya_wire::transport_parameters::codec::ReadTransportParametersHostExt as _;
+use sakuya_wire::v1::header::codec::ReadLongPacketHostExt as _;
+use sakuya_wire::v1::header::{LongPacketType, TypeFields};
+use sakuya_wire::v1::packet_number::PacketNumber;
+use sakuya_wire::v1::role::Role;
+use sakuya_wire::v1::stream_count::StreamCount;
+use sakuya_wire::v1::transport_parameters::codec::ReadTransportParametersHostExt as _;
 use sakuya_wire::var_int::VarInt;
 
 fn hex(text: &str) -> Vec<u8> {

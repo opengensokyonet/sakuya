@@ -1,6 +1,6 @@
 //! AEAD packet protection (RFC 9001 §5.1, §5.3).
 
-use sakuya_wire::packet_number::PacketNumber;
+use sakuya_wire::v1::packet_number::PacketNumber;
 use snafu::{IntoError, OptionExt, ResultExt, Snafu};
 
 use crate::backend::{

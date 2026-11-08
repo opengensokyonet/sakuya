@@ -6,8 +6,9 @@ use super::{
     },
 };
 use crate::{
-    application_error::ApplicationErrorCode, packet_number::PacketNumber,
-    stream_count::StreamCount, stream_id::StreamId, transport_error::TransportErrorCode,
+    v1::application_error::ApplicationErrorCode, v1::packet_number::PacketNumber,
+    v1::stream_count::StreamCount, v1::stream_id::StreamId,
+    v1::transport_error::TransportErrorCode,
 };
 use bytes::Bytes;
 use core::{convert::Infallible, fmt::Debug};

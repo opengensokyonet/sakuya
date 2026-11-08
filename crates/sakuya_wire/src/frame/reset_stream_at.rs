@@ -4,8 +4,8 @@
 //! [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html#section-4
 use super::{Head, type_value, type_var_int};
 use crate::{
-    application_error::ApplicationErrorCode,
-    stream_id::StreamId,
+    v1::application_error::ApplicationErrorCode,
+    v1::stream_id::StreamId,
     var_int::{VarInt, VarIntField},
 };
 use snafu::Snafu;
@@ -221,13 +221,13 @@ pub mod codec {
 mod tests {
     use super::{ReliableSizeError, ResetStreamAtFrame, codec::ReadResetStreamAtFrameError};
     use crate::{
-        application_error::ApplicationErrorCode,
         frame::{
             Extensions, Frame,
             codec::{ReadFrameError, ReadFrameHostExt as _},
             tests::assert_round_trip,
         },
-        stream_id::StreamId,
+        v1::application_error::ApplicationErrorCode,
+        v1::stream_id::StreamId,
         var_int::{VarInt, VarIntField},
     };
 

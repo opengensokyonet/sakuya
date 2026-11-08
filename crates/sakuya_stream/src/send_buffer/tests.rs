@@ -11,7 +11,7 @@ use crate::connection_send_credit::{
 };
 use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
 use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
-use sakuya_wire::stream_id::StreamId;
+use sakuya_wire::v1::stream_id::StreamId;
 
 type Buffer = OffsetMapStreamSendBuffer<AtomicConnectionCreditReservation>;
 type Covered = CoveredBytes<AtomicConnectionCreditReservation>;

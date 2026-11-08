@@ -24,9 +24,9 @@ use crate::{
     },
     frame::Head,
     payload::{ReadPayloadError, read_payload},
-    role::Role,
-    stream_count::StreamCount,
-    transport_error::TransportErrorCode,
+    v1::role::Role,
+    v1::stream_count::StreamCount,
+    v1::transport_error::TransportErrorCode,
     var_int::{
         VarInt,
         codec::{ReadVarIntError, ReadVarIntExt as _, ReadVarIntHostExt as _},
@@ -239,7 +239,7 @@ impl<D: Buf + Unpin> Read for ValueSource<D> {
 /// TRANSPORT_PARAMETER_ERROR
 /// ([`ReadTransportParametersError::transport_error_code`]).
 #[derive(Debug, Snafu)]
-#[snafu(module(read_transport_parameters_error), visibility(pub(crate)))]
+#[snafu(module(read_transport_parameters_error), visibility(pub(in crate::v1)))]
 pub enum ReadTransportParametersError<E> {
     /// The Transport Parameter ID field could not be read.
     #[snafu(display("transport parameter ID read failed"))]
@@ -401,7 +401,7 @@ pub struct IntegerParameterId(VarInt);
 impl IntegerParameterId {
     /// The ID `id` if the value of its parameter is an integer, and `None`
     /// otherwise.
-    pub(crate) const fn new(id: VarInt) -> Option<Self> {
+    pub(in crate::v1) const fn new(id: VarInt) -> Option<Self> {
         match id {
             id::MAX_IDLE_TIMEOUT
             | id::MAX_UDP_PAYLOAD_SIZE
@@ -439,7 +439,7 @@ pub struct ConnectionIdParameterId(VarInt);
 impl ConnectionIdParameterId {
     /// The ID `id` if the value of its parameter is a connection ID, and
     /// `None` otherwise.
-    pub(crate) const fn new(id: VarInt) -> Option<Self> {
+    pub(in crate::v1) const fn new(id: VarInt) -> Option<Self> {
         match id {
             id::ORIGINAL_DESTINATION_CONNECTION_ID
             | id::INITIAL_SOURCE_CONNECTION_ID
@@ -560,7 +560,7 @@ async fn put<F: Write, A: ReceiverAccess<Family = F>, B: Buf>(
 
 /// Failures that [`write_transport_parameters`] can produce.
 #[derive(Debug, Snafu)]
-#[snafu(module(write_transport_parameters_error), visibility(pub(crate)))]
+#[snafu(module(write_transport_parameters_error), visibility(pub(in crate::v1)))]
 pub enum WriteTransportParametersError<E> {
     /// A parameter is forbidden; nothing was written.
     #[snafu(transparent)]

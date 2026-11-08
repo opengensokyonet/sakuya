@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use proptest::prelude::*;
 use sakuya_link::{BindingId, LinkId};
-use sakuya_wire::header::v1::LongPacketType;
+use sakuya_wire::v1::header::LongPacketType;
 use sakuya_wire::version::Version;
 
 use super::support::*;

@@ -23,7 +23,7 @@ use sakuya_packet_protection::retry::{
 };
 use sakuya_packet_protection::secret::TrafficSecret;
 use sakuya_wire::connection_id::ConnectionId;
-use sakuya_wire::packet_number::PacketNumber;
+use sakuya_wire::v1::packet_number::PacketNumber;
 
 fn hex(text: &str) -> Vec<u8> {
     let digits: Vec<u8> = text

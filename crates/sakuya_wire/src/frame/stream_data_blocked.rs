@@ -2,7 +2,7 @@
 //!
 //! [RFC 9000 §19.13]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.13
 use super::{Head, type_value, type_var_int};
-use crate::stream_id::StreamId;
+use crate::v1::stream_id::StreamId;
 use crate::var_int::{VarInt, VarIntField};
 
 /// A STREAM_DATA_BLOCKED frame ([RFC 9000 §19.13]).
@@ -121,7 +121,7 @@ pub mod codec {
 #[cfg(test)]
 mod tests {
     use super::StreamDataBlockedFrame;
-    use crate::stream_id::StreamId;
+    use crate::v1::stream_id::StreamId;
     use crate::{
         frame::{
             Frame,

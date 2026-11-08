@@ -2,8 +2,8 @@
 //!
 //! [RFC 9000 §19.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.5
 use super::{Head, type_value, type_var_int};
-use crate::application_error::ApplicationErrorCode;
-use crate::stream_id::StreamId;
+use crate::v1::application_error::ApplicationErrorCode;
+use crate::v1::stream_id::StreamId;
 use crate::var_int::{VarInt, VarIntField};
 
 /// A STOP_SENDING frame ([RFC 9000 §19.5]): the receiver asks the peer to stop sending on a stream.
@@ -124,8 +124,8 @@ pub mod codec {
 #[cfg(test)]
 mod tests {
     use super::StopSendingFrame;
-    use crate::application_error::ApplicationErrorCode;
-    use crate::stream_id::StreamId;
+    use crate::v1::application_error::ApplicationErrorCode;
+    use crate::v1::stream_id::StreamId;
     use crate::{
         frame::{
             Frame,

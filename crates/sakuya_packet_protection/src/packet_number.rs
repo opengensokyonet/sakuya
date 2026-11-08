@@ -4,11 +4,11 @@
 //! [`PacketNumber`], as a [`TruncatedPacketNumber`] whose length is a
 //! [`PacketNumberLength`].
 
-use sakuya_wire::packet_number::PacketNumber;
+use sakuya_wire::v1::packet_number::PacketNumber;
 // The length of the Packet Number field belongs to the wire format, where
 // headers state it; it is re-exported here so that this module still names
 // everything that truncating a packet number involves.
-pub use sakuya_wire::packet_number::{PacketNumberLength, PacketNumberLengthError};
+pub use sakuya_wire::v1::packet_number::{PacketNumberLength, PacketNumberLengthError};
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 
 /// The value of a Packet Number field: the 1 to 4 least significant bytes of

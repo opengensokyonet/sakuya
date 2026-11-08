@@ -1,5 +1,5 @@
-//! Reading the version 1 fields of a long header packet as a `nitori_call`
-//! operation.
+//! Reading the version 1 fields of a long header packet, and writing version 1
+//! headers, as `nitori_call` operations.
 //!
 //! [`read_long_packet`] continues after [`read_long_header`] has read the
 //! version-independent fields. It is also the operation struct
@@ -8,10 +8,8 @@
 //! the `sync_` methods for receivers that never wait.
 //!
 //! ```
-//! use sakuya_wire::header::{
-//!     codec::ReadLongHeaderHostExt as _,
-//!     v1::{TypeFields, codec::ReadLongPacketHostExt as _},
-//! };
+//! use sakuya_wire::header::codec::ReadLongHeaderHostExt as _;
+//! use sakuya_wire::v1::header::{TypeFields, codec::ReadLongPacketHostExt as _};
 //!
 //! // A Handshake packet with an empty DCID and a 4-byte SCID, followed by
 //! // the first byte of a coalesced short header packet.
@@ -26,16 +24,17 @@
 //! ```
 //!
 //! [`write_long_packet_header`] writes the header of an Initial, 0-RTT or
-//! Handshake packet from the first byte to the Length field. It is also the
-//! operation struct [`WriteLongPacketHeader`], with
-//! `WriteLongPacketHeaderExt` and `WriteLongPacketHeaderHostExt`.
+//! Handshake packet from the first byte to the Length field, and
+//! [`write_short_packet_header`] the header of a 1-RTT packet up to its
+//! Packet Number field. Each is also an operation struct, such as
+//! [`WriteLongPacketHeader`], with `{Name}Ext` and `{Name}HostExt`.
 //!
 //! ```
 //! use bytes::Bytes;
 //! use sakuya_wire::{
 //!     connection_id::ConnectionId,
-//!     header::v1::{LongPacketHeader, codec::WriteLongPacketHeaderHostExt as _},
-//!     packet_number::PacketNumberLength,
+//!     v1::header::{LongPacketHeader, codec::WriteLongPacketHeaderHostExt as _},
+//!     v1::packet_number::PacketNumberLength,
 //!     var_int::{VarInt, VarIntField, VarIntWidth, codec::WriteVarIntFieldHostExt as _},
 //! };
 //!
@@ -64,7 +63,7 @@
 
 use super::{
     LongPacket, LongPacketHeader, LongPacketType, PacketBounds, RETRY_INTEGRITY_TAG_LEN,
-    TypeFields, VERSION, WrittenKind,
+    ShortPacketHeader, TypeFields, VERSION, WrittenKind,
 };
 use crate::{
     connection_id::{ConnectionId, ConnectionIdLengthError},
@@ -199,7 +198,7 @@ fn saturating_usize(value: VarInt) -> usize {
 
 /// Failures that [`read_long_packet`] can produce.
 #[derive(Debug, Snafu)]
-#[snafu(module(read_long_packet_error), visibility(pub(crate)))]
+#[snafu(module(read_long_packet_error), visibility(pub(in crate::v1)))]
 pub enum ReadLongPacketError<E> {
     /// The version is not QUIC version 1.
     #[snafu(transparent)]
@@ -377,5 +376,24 @@ pub async fn write_long_packet_header<F: Write, A: ReceiverAccess<Family = F>>(
         .to_var_int()
         .to_encoding_of(header.length.width());
     io.write_all(prefix[..len].chain(token).chain(&length[..length_len]))
+        .await
+}
+
+/// Writes the first byte and the destination connection ID of `header`, up to
+/// the Packet Number field.
+///
+/// Acceptance by the receiver does not imply flushing or delivery.
+///
+/// # Errors
+///
+/// [`WriteAllError`] if the receiver stops accepting bytes or fails; bytes
+/// accepted before stay written.
+#[call(sync)]
+pub async fn write_short_packet_header<F: Write, A: ReceiverAccess<Family = F>>(
+    io: &mut A,
+    header: ShortPacketHeader,
+) -> Result<(), WriteAllError<F::Error>> {
+    let first_byte = [header.first_byte()];
+    io.write_all(Buf::chain(&first_byte[..], header.dcid().as_bytes()))
         .await
 }

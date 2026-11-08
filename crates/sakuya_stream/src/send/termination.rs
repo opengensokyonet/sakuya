@@ -40,8 +40,8 @@
 use super::{EndSource, ResetTarget, SendEndState, SendTerminalState};
 use core::convert::Infallible;
 use core::ops::Range;
-use sakuya_wire::application_error::ApplicationErrorCode;
-use sakuya_wire::stream_id::StreamId;
+use sakuya_wire::v1::application_error::ApplicationErrorCode;
+use sakuya_wire::v1::stream_id::StreamId;
 use sakuya_wire::var_int::VarInt;
 
 /// The stream send termination policy (`SendTerminationPolicy`).

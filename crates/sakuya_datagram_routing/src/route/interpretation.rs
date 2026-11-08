@@ -3,7 +3,7 @@
 use sakuya_link::BindingId;
 use sakuya_wire::connection_id::ConnectionIdLength;
 use sakuya_wire::connection_id::{ConnectionId, NonEmptyCid};
-use sakuya_wire::header::v1::LongPacketType;
+use sakuya_wire::v1::header::LongPacketType;
 use sakuya_wire::version::Version;
 
 use super::association::{MatchAssociation, PacketForms};

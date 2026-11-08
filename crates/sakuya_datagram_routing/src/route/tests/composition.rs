@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use sakuya_link::LinkId;
 use sakuya_wire::connection_id::StatelessResetToken;
-use sakuya_wire::header::v1::LongPacketType;
+use sakuya_wire::v1::header::LongPacketType;
 use sakuya_wire::version::Version;
 
 use super::support::{

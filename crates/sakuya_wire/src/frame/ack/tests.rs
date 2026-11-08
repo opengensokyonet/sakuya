@@ -13,7 +13,7 @@ use crate::{
         codec::{ReadFrameError, ReadFrameHostExt as _},
         tests::{assert_round_trip, read_ack_frame, short, vi, wide},
     },
-    packet_number::PacketNumber,
+    v1::packet_number::PacketNumber,
     var_int::{VarInt, VarIntField, VarIntWidth},
 };
 use core::{convert::Infallible, num::NonZeroUsize, ops::RangeInclusive};

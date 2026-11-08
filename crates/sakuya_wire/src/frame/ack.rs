@@ -18,7 +18,7 @@
 //! [RFC 9000 §19.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.3
 use super::{type_value, type_var_int};
 use crate::{
-    packet_number::PacketNumber,
+    v1::packet_number::PacketNumber,
     var_int::{VarInt, VarIntField, VarIntWidth},
 };
 use core::{
@@ -533,7 +533,7 @@ pub mod codec {
     use super::{AckBelowZeroError, AckFrame, AckRange, AckRanges, EcnCounts};
     use crate::{
         frame::read_field,
-        packet_number::PacketNumber,
+        v1::packet_number::PacketNumber,
         var_int::{VarInt, VarIntField, VarIntWidth, codec::ReadVarIntError},
     };
     use bytes::Buf;

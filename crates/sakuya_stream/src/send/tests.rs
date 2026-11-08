@@ -1509,7 +1509,7 @@ fn connection_closed_error_carries_the_first_reason() {
         "the connection is closed: closed locally with application error 0x9"
     );
     let peer = ConnectionClosedError::new(CloseReason::Peer(ImmediateClose::Transport {
-        code: sakuya_wire::transport_error::TransportErrorCode::PROTOCOL_VIOLATION,
+        code: sakuya_wire::v1::transport_error::TransportErrorCode::PROTOCOL_VIOLATION,
         frame_type: None,
         reason_phrase: Bytes::new(),
     }));

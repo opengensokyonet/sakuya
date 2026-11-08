@@ -1,8 +1,8 @@
 //! Facts about the connection that both directions of a stream report.
 use bytes::Bytes;
 use core::fmt;
-use sakuya_wire::application_error::ApplicationErrorCode;
-use sakuya_wire::transport_error::TransportErrorCode;
+use sakuya_wire::v1::application_error::ApplicationErrorCode;
+use sakuya_wire::v1::transport_error::TransportErrorCode;
 use sakuya_wire::var_int::VarInt;
 use snafu::Snafu;
 

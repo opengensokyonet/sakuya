@@ -78,7 +78,7 @@ const FIXED_LEN: usize = 4 + 2 + 16 + 2 + 1 + StatelessResetToken::LEN;
 
 impl PreferredAddress {
     /// The longest encoding: with a 20-byte connection ID.
-    pub(crate) const MAX_LEN: usize = FIXED_LEN + ConnectionId::MAX_LEN;
+    pub(in crate::v1) const MAX_LEN: usize = FIXED_LEN + ConnectionId::MAX_LEN;
 
     /// The number of bytes [`codec::write_preferred_address`] writes.
     pub fn encoded_len(&self) -> usize {
@@ -86,7 +86,7 @@ impl PreferredAddress {
     }
 
     /// The encoding, left-aligned in an array, and its length.
-    pub(crate) fn to_encoding(self) -> ([u8; Self::MAX_LEN], usize) {
+    pub(in crate::v1) fn to_encoding(self) -> ([u8; Self::MAX_LEN], usize) {
         let mut bytes = [0; Self::MAX_LEN];
         let connection_id = self.connection_id.as_bytes();
         let (ipv4, ipv6) = self.addresses.to_encoded();
@@ -185,7 +185,7 @@ pub mod codec {
 
     /// Failures that [`read_preferred_address`] can produce.
     #[derive(Debug, Snafu)]
-    #[snafu(module(read_preferred_address_error), visibility(pub(crate)))]
+    #[snafu(module(read_preferred_address_error), visibility(pub(in crate::v1)))]
     pub enum ReadPreferredAddressError<E> {
         /// The IPv4 Address field could not be read.
         #[snafu(display("preferred address IPv4 Address read failed"))]

@@ -8,10 +8,10 @@ use sakuya_wire::{
             ReadLongHeaderError, ReadLongHeaderHostExt as _, ReadShortHeaderError,
             ReadShortHeaderHostExt as _, ReadVersionNegotiationHostExt as _,
         },
-        v1::{
-            self,
-            codec::{ReadLongPacketError, ReadLongPacketHostExt as _},
-        },
+    },
+    v1::header::{
+        self as v1,
+        codec::{ReadLongPacketError, ReadLongPacketHostExt as _},
     },
     version::Version,
 };

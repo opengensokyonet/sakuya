@@ -20,7 +20,7 @@
 //!     stream::StreamFrame,
 //! };
 //! use sakuya_wire::{
-//!     stream_id::StreamId,
+//!     v1::stream_id::StreamId,
 //!     var_int::{VarInt, VarIntField, VarIntWidth},
 //! };
 //!
@@ -101,8 +101,8 @@ use super::{
 };
 use crate::{
     payload::ReadPayloadError,
-    stream_id::Directionality,
-    transport_error::TransportErrorCode,
+    v1::stream_id::Directionality,
+    v1::transport_error::TransportErrorCode,
     var_int::{
         VarInt, VarIntWidth,
         codec::{ReadVarIntError, read_var_int_with_width},

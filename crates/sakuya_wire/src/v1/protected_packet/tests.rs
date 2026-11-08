@@ -1,16 +1,15 @@
 use super::{IntoPacketsError, Packet, PacketBoundaryError, ProtectedPacket, into_packets};
 use crate::{
     connection_id::{ConnectionId, ConnectionIdLength},
-    encryption_level::EncryptionLevel,
-    header::{
-        KeyPhase, ShortPacketHeader,
-        codec::WriteShortPacketHeaderHostExt as _,
-        v1::{
-            LongPacketHeader, LongPacketType, TypeFields,
-            codec::{ReadLongPacketError, WriteLongPacketHeaderHostExt as _},
+    v1::encryption_level::EncryptionLevel,
+    v1::header::{
+        KeyPhase, LongPacketHeader, LongPacketType, ShortPacketHeader, TypeFields,
+        codec::{
+            ReadLongPacketError, WriteLongPacketHeaderHostExt as _,
+            WriteShortPacketHeaderHostExt as _,
         },
     },
-    packet_number::PacketNumberLength,
+    v1::packet_number::PacketNumberLength,
     var_int::{VarInt, VarIntField, VarIntWidth, codec::WriteVarIntFieldHostExt as _},
 };
 use bytes::{Bytes, BytesMut};

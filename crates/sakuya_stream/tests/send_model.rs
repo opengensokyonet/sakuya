@@ -36,12 +36,12 @@ use sakuya_stream::send_buffer::offset_map::OffsetMapStreamSendBuffer;
 use sakuya_stream::send_buffer::visibility::FinalSizeBelowExposureError;
 use sakuya_stream::send_buffer::{FinalSizeBeyondWrittenEndError, UsageBeyondWrittenEndError};
 use sakuya_stream::stream_end::{BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError};
-use sakuya_wire::application_error::ApplicationErrorCode;
 use sakuya_wire::frame::UndecidedLength;
 use sakuya_wire::frame::reset_stream::ResetStreamFrame;
 use sakuya_wire::frame::reset_stream_at::{ReliableSizeError, ResetStreamAtFrame};
 use sakuya_wire::frame::stream::StreamFrame;
-use sakuya_wire::stream_id::StreamId;
+use sakuya_wire::v1::application_error::ApplicationErrorCode;
+use sakuya_wire::v1::stream_id::StreamId;
 use sakuya_wire::var_int::{VarInt, VarIntField};
 use std::sync::Arc;
 

@@ -32,13 +32,13 @@ use super::{
     streams_blocked::StreamsBlockedFrame,
 };
 use crate::{
-    application_error::ApplicationErrorCode,
     connection_id::{NonEmptyCid, StatelessResetToken},
-    encryption_level::EncryptionLevel,
-    packet_number::PacketNumber,
-    stream_count::StreamCount,
-    stream_id::{Directionality, StreamId},
-    transport_error::TransportErrorCode,
+    v1::application_error::ApplicationErrorCode,
+    v1::encryption_level::EncryptionLevel,
+    v1::packet_number::PacketNumber,
+    v1::stream_count::StreamCount,
+    v1::stream_id::{Directionality, StreamId},
+    v1::transport_error::TransportErrorCode,
     var_int::{
         VarInt, VarIntField, VarIntWidth,
         codec::{ReadVarIntHostExt as _, WriteVarIntFieldHostExt as _},

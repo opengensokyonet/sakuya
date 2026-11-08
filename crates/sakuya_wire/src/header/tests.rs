@@ -5,15 +5,15 @@ use super::{
         ReadShortHeaderHostExt as _, ReadVersionNegotiationError,
         ReadVersionNegotiationHostExt as _,
     },
-    v1::{
-        self, LongPacket, LongPacketType, TypeFields,
-        codec::{ReadLongPacketError, ReadLongPacketHostExt as _},
-    },
+};
+use crate::v1::header::{
+    self as v1, LongPacket, LongPacketType, TypeFields,
+    codec::{ReadLongPacketError, ReadLongPacketHostExt as _},
 };
 use crate::{
     connection_id::{ConnectionId, ConnectionIdLength},
-    packet_number::PacketNumberLength,
     payload::ReadPayloadError,
+    v1::packet_number::PacketNumberLength,
     var_int::{VarInt, codec::WriteVarIntHostExt as _},
     version::Version,
 };
@@ -838,8 +838,9 @@ fn an_initial_header_checks_the_width_of_the_token_length() {
 
 #[test]
 fn written_short_headers_read_back_as_the_same_fields() {
-    use super::codec::WriteShortPacketHeaderHostExt as _;
-    use super::{KeyPhase, ShortPacketHeader};
+    use crate::v1::header::{
+        KeyPhase, ShortPacketHeader, codec::WriteShortPacketHeaderHostExt as _,
+    };
 
     let dcid = ConnectionId::new(&[7; 8]).unwrap();
     for spin in [false, true] {
@@ -876,8 +877,9 @@ fn written_short_headers_read_back_as_the_same_fields() {
 
 #[test]
 fn write_failures_report_the_receiver() {
-    use super::codec::WriteShortPacketHeaderHostExt as _;
-    use super::{KeyPhase, ShortPacketHeader};
+    use crate::v1::header::{
+        KeyPhase, ShortPacketHeader, codec::WriteShortPacketHeaderHostExt as _,
+    };
     use nitori_io::calls::WriteAllError;
 
     let header = ShortPacketHeader::new(

@@ -6,7 +6,7 @@ use std::sync::{Arc, Barrier, Mutex, Weak, mpsc};
 use std::time::Duration;
 
 use sakuya_link::LinkId;
-use sakuya_wire::header::v1::LongPacketType;
+use sakuya_wire::v1::header::LongPacketType;
 
 use super::support::{
     Datagram, Domain, Handoff, Index, Judging, Recorder, Target, binding, cid, datagram, initial,

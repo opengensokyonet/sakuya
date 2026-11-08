@@ -6,7 +6,7 @@ use super::{
     length_width, max_len_with_length_field, type_value, type_var_int,
 };
 use crate::{
-    stream_id::StreamId,
+    v1::stream_id::StreamId,
     var_int::{VarInt, VarIntField, VarIntWidth},
 };
 use bytes::Buf;

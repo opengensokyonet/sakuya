@@ -187,7 +187,7 @@
 //! [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html
 //! [RFC 9002 §2]: https://www.rfc-editor.org/rfc/rfc9002.html#section-2
 use crate::{
-    encryption_level::EncryptionLevel,
+    v1::encryption_level::EncryptionLevel,
     var_int::{
         VarInt, VarIntField, VarIntWidth,
         codec::{ReadVarIntError, read_var_int_field},

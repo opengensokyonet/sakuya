@@ -32,7 +32,7 @@ use super::{
 use crate::connection::ConnectionClosedError;
 use crate::receive_buffer::StreamReceiveBuffer;
 use core::fmt;
-use sakuya_wire::application_error::ApplicationErrorCode;
+use sakuya_wire::v1::application_error::ApplicationErrorCode;
 use sakuya_wire::var_int::VarInt;
 use snafu::{Snafu, ensure};
 

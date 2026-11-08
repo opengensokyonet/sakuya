@@ -7,7 +7,7 @@ use sakuya_stream::connection_send_credit::{
     AtomicConnectionCreditReservation, AtomicConnectionSendFlowController,
     ConnectionCreditReservation, ConnectionSendFlowController,
 };
-use sakuya_wire::stream_id::StreamId;
+use sakuya_wire::v1::stream_id::StreamId;
 use sakuya_wire::var_int::VarInt;
 
 fn v(value: u64) -> VarInt {

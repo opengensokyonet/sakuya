@@ -1,7 +1,7 @@
 //! The error code of a DATAGRAM frame that was not negotiated.
 use sakuya_wire::{
     frame::{Extensions, codec::ReadFrameHostExt as _},
-    transport_error::TransportErrorCode,
+    v1::transport_error::TransportErrorCode,
     var_int::VarInt,
 };
 

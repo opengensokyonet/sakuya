@@ -18,8 +18,8 @@ use crate::{
 };
 use bytes::{BufMut, Bytes};
 use core::cell::Cell;
-use sakuya_wire::application_error::ApplicationErrorCode;
-use sakuya_wire::transport_error::TransportErrorCode;
+use sakuya_wire::v1::application_error::ApplicationErrorCode;
+use sakuya_wire::v1::transport_error::TransportErrorCode;
 use sakuya_wire::var_int::VarInt;
 use std::rc::Rc;
 

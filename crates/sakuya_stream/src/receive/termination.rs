@@ -48,7 +48,7 @@ use super::{
 };
 use crate::receive_buffer::StreamReceiveBuffer;
 use core::convert::Infallible;
-use sakuya_wire::application_error::ApplicationErrorCode;
+use sakuya_wire::v1::application_error::ApplicationErrorCode;
 use sakuya_wire::var_int::VarInt;
 use snafu::{Report, ResultExt, Snafu, ensure};
 

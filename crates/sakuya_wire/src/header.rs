@@ -12,9 +12,11 @@
 //! 3. After a long header with [`Version::NEGOTIATION`],
 //!    [`codec::read_version_negotiation`] reads the rest of a
 //!    [`VersionNegotiation`] packet ([RFC 8999 §6]); after one with
-//!    [`v1::VERSION`], [`v1::codec::read_long_packet`] reads the rest of a
-//!    [`v1::LongPacket`] ([RFC 9000 §17.2]). For any other version, only the
-//!    version-independent fields of the [`LongHeader`] are known.
+//!    [`v1::header::VERSION`](crate::v1::header::VERSION),
+//!    [`v1::header::codec::read_long_packet`](crate::v1::header::codec::read_long_packet)
+//!    reads the rest of a [`v1::header::LongPacket`](crate::v1::header::LongPacket)
+//!    ([RFC 9000 §17.2]). For any other version, only the version-independent
+//!    fields of the [`LongHeader`] are known.
 //!
 //! Each layer is a `nitori_call` operation that continues where the previous
 //! one stopped. The source is a datagram, or the part of it starting at the
@@ -25,11 +27,11 @@
 //! packet from what remains in the source. Version Negotiation packets, Retry
 //! packets and short headers extend to the end of the source.
 //!
-//! A sender describes a short header with a [`ShortPacketHeader`] and the
-//! header of an Initial, 0-RTT or Handshake packet with a
-//! [`v1::LongPacketHeader`]; [`codec::write_short_packet_header`] and
-//! [`v1::codec::write_long_packet_header`] write them up to the Packet Number
-//! field, which the layer that protects the packet writes.
+//! A sender describes the header of a version 1 packet with a
+//! [`ShortPacketHeader`](crate::v1::header::ShortPacketHeader) or a
+//! [`LongPacketHeader`](crate::v1::header::LongPacketHeader), which
+//! [`crate::v1::header::codec`] writes up to the Packet Number field, which
+//! the layer that protects the packet writes.
 //!
 //! No layer interprets protected bits or fields. The packet number offset
 //! states where the protected packet number begins and the sample offset
@@ -44,8 +46,8 @@
 //!         ReadLongHeaderHostExt as _, ReadShortHeaderHostExt as _,
 //!         ReadVersionNegotiationHostExt as _,
 //!     },
-//!     v1::{self, codec::ReadLongPacketHostExt as _},
 //! };
+//! use sakuya_wire::v1::header::{self as v1, codec::ReadLongPacketHostExt as _};
 //! use sakuya_wire::{connection_id::ConnectionIdLength, version::Version};
 //!
 //! fn describe(datagram: &[u8], short_dcid_len: ConnectionIdLength) -> String {
@@ -97,22 +99,17 @@
 //! [RFC 8999 §6]: https://www.rfc-editor.org/rfc/rfc8999.html#section-6
 //! [RFC 9000 §17.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.2
 //! [RFC 9001 §5.4.2]: https://www.rfc-editor.org/rfc/rfc9001.html#section-5.4.2
-use crate::{
-    connection_id::{ConnectionId, RawConnectionId},
-    packet_number::PacketNumberLength,
-    version::Version,
-};
+use crate::{connection_id::RawConnectionId, version::Version};
 use bytes::Buf;
 use core::iter::FusedIterator;
 
 pub mod codec;
-pub mod v1;
 
 /// The Header Form bit: set for long headers.
-const FORM_BIT: u8 = 0x80;
+pub(crate) const FORM_BIT: u8 = 0x80;
 
 /// The length of a version field.
-const VERSION_LEN: usize = 4;
+pub(crate) const VERSION_LEN: usize = 4;
 
 /// How many bytes after the start of the packet number field header
 /// protection takes its sample: the packet number is taken to be four bytes
@@ -196,7 +193,7 @@ impl LongHeader {
 /// cannot tell which is right. A short header packet extends to the end of the
 /// source; `D` is the source's chunk type, which holds the protected rest, or
 /// the range of those bytes within the packet when the header was located by
-/// [`into_packets`](crate::protected_packet::into_packets).
+/// [`into_packets`](crate::v1::protected_packet::into_packets).
 ///
 /// [RFC 8999 §5.2]: https://www.rfc-editor.org/rfc/rfc8999.html#section-5.2
 /// [RFC 9000 §17.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.3
@@ -262,107 +259,6 @@ impl<D: Buf> ShortHeader<D> {
     }
 }
 
-/// The Key Phase bit of a short header ([RFC 9000 §17.3.1]): which packet
-/// protection keys protect the packet.
-///
-/// An endpoint toggles it each time it updates its keys ([RFC 9001 §6]), so
-/// its value says whether a packet uses the same keys as the one before the
-/// last update.
-///
-/// [RFC 9000 §17.3.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.3.1
-/// [RFC 9001 §6]: https://www.rfc-editor.org/rfc/rfc9001.html#section-6
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum KeyPhase {
-    /// The bit is 0.
-    Zero,
-    /// The bit is 1.
-    One,
-}
-
-impl KeyPhase {
-    /// The bit's place in the first byte of a short header.
-    const MASK: u8 = 0x04;
-}
-
-/// The Spin Bit of the first byte of a short header ([RFC 9000 §17.3.1]).
-///
-/// [RFC 9000 §17.3.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.3.1
-const SPIN_BIT: u8 = 0x20;
-
-/// The header of a 1-RTT packet as a sender writes it: the first byte and
-/// the destination connection ID ([RFC 9000 §17.3]).
-///
-/// The first byte states the form, the Fixed Bit, the Spin Bit, the reserved
-/// bits, the Key Phase and the packet number length. The reserved bits are
-/// written as 0, as [RFC 9000 §17.3.1] requires before header protection is
-/// applied. The Packet Number field follows the header and is not part of it.
-///
-/// [RFC 9000 §17.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.3
-/// [RFC 9000 §17.3.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.3.1
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ShortPacketHeader {
-    spin: bool,
-    key_phase: KeyPhase,
-    pn_length: PacketNumberLength,
-    dcid: ConnectionId,
-}
-
-impl ShortPacketHeader {
-    /// The header with this Spin Bit, Key Phase, packet number length and
-    /// destination connection ID.
-    pub const fn new(
-        spin: bool,
-        key_phase: KeyPhase,
-        pn_length: PacketNumberLength,
-        dcid: ConnectionId,
-    ) -> Self {
-        Self {
-            spin,
-            key_phase,
-            pn_length,
-            dcid,
-        }
-    }
-
-    /// The first byte of the packet: the form, the Fixed Bit, the Spin Bit,
-    /// zero reserved bits, the Key Phase and the packet number length.
-    pub fn first_byte(&self) -> u8 {
-        let spin = if self.spin { SPIN_BIT } else { 0 };
-        let key_phase = match self.key_phase {
-            KeyPhase::Zero => 0,
-            KeyPhase::One => KeyPhase::MASK,
-        };
-        v1::FIXED_BIT | spin | key_phase | self.pn_length.first_byte_bits()
-    }
-
-    /// The Spin Bit.
-    pub const fn spin(&self) -> bool {
-        self.spin
-    }
-
-    /// The Key Phase.
-    pub const fn key_phase(&self) -> KeyPhase {
-        self.key_phase
-    }
-
-    /// The length of the Packet Number field that follows the header.
-    pub const fn pn_length(&self) -> PacketNumberLength {
-        self.pn_length
-    }
-
-    /// The destination connection ID.
-    pub fn dcid(&self) -> &ConnectionId {
-        &self.dcid
-    }
-
-    /// The offset of the Packet Number field, right after the destination
-    /// connection ID: the number of bytes [`codec::write_short_packet_header`]
-    /// writes.
-    pub fn packet_number_offset(&self) -> usize {
-        1 + self.dcid.len()
-    }
-}
-
 /// A Version Negotiation packet ([RFC 8999 §6]): a long header with
 /// [`Version::NEGOTIATION`].
 ///
@@ -397,7 +293,7 @@ impl<D> VersionNegotiation<D> {
 
     /// The supported version list, a whole number of versions: the chunk of
     /// the source that holds it, or its range within the packet when the
-    /// packet was located by [`into_packets`](crate::protected_packet::into_packets).
+    /// packet was located by [`into_packets`](crate::v1::protected_packet::into_packets).
     pub fn versions(&self) -> &D {
         &self.versions
     }

@@ -3,8 +3,8 @@
 //! [RFC 9000 §19.19]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.19
 use super::{Head, LengthError, type_value, type_var_int};
 use crate::{
-    application_error::ApplicationErrorCode,
-    transport_error::TransportErrorCode,
+    v1::application_error::ApplicationErrorCode,
+    v1::transport_error::TransportErrorCode,
     var_int::{VarInt, VarIntField, VarIntWidth},
 };
 use bytes::Buf;
@@ -347,13 +347,13 @@ pub mod codec {
 mod tests {
     use super::{CloseErrorCode, ConnectionCloseFrame};
     use crate::{
-        application_error::ApplicationErrorCode,
         frame::{
             Extensions, Frame, LengthError,
             codec::ReadFrameHostExt as _,
             tests::{assert_round_trip, short, wide},
         },
-        transport_error::TransportErrorCode,
+        v1::application_error::ApplicationErrorCode,
+        v1::transport_error::TransportErrorCode,
         var_int::{VarInt, VarIntWidth},
     };
 

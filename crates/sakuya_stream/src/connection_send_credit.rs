@@ -35,7 +35,7 @@
 //! [RFC 9000 §4.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-4.1
 use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
-use sakuya_wire::stream_id::StreamId;
+use sakuya_wire::v1::stream_id::StreamId;
 use sakuya_wire::var_int::VarInt;
 use snafu::{Snafu, ensure};
 use std::sync::Arc;

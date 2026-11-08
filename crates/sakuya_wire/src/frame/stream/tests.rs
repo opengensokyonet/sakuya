@@ -14,7 +14,7 @@ use crate::{
             wide,
         },
     },
-    stream_id::StreamId,
+    v1::stream_id::StreamId,
     var_int::{VarInt, VarIntField, VarIntWidth},
 };
 use either::Either;

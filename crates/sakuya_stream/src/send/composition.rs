@@ -18,7 +18,7 @@ use crate::send_buffer::{
     AppendError, ApplyResetError, ExposeUsageError, ExposedContent, ResetRetention, Selection,
     SelectionConstraints, StreamSendBuffer, TransmissionReceipt,
 };
-use sakuya_wire::application_error::ApplicationErrorCode;
+use sakuya_wire::v1::application_error::ApplicationErrorCode;
 use sakuya_wire::var_int::VarInt;
 
 /// A transparent composition of an independent send buffer, flow-control

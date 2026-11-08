@@ -7,9 +7,9 @@ use sakuya_wire::{
         Extensions, Frame, FrameType,
         codec::{ReadFrameError, ReadFrameHostExt as _},
     },
-    packet_number::PacketNumber,
-    stream_id::Directionality,
-    transport_error::TransportErrorCode,
+    v1::packet_number::PacketNumber,
+    v1::stream_id::Directionality,
+    v1::transport_error::TransportErrorCode,
     var_int::{VarInt, VarIntField, VarIntWidth, codec::WriteVarIntHostExt as _},
 };
 

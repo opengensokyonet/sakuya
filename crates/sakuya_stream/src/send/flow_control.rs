@@ -17,7 +17,7 @@
 //! ([`SendFlowControlPolicy::wants_stream_data_blocked`]). The frame's limit
 //! is always the current peer stream limit.
 use super::{EndSource, SendEndState, SendTerminalState};
-use sakuya_wire::stream_id::StreamId;
+use sakuya_wire::v1::stream_id::StreamId;
 use sakuya_wire::var_int::VarInt;
 use snafu::{ResultExt, Snafu, ensure};
 

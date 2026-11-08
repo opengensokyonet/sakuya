@@ -22,9 +22,9 @@
 //!
 //! ```
 //! use sakuya_wire::{
-//!     role::Role,
-//!     stream_count::StreamCount,
-//!     transport_parameters::{
+//!     v1::role::Role,
+//!     v1::stream_count::StreamCount,
+//!     v1::transport_parameters::{
 //!         TransportParameters,
 //!         codec::{ReadTransportParametersHostExt as _, WriteTransportParametersHostExt as _},
 //!     },
@@ -54,8 +54,8 @@
 //! [RFC 9000 §7.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-7.3
 use crate::{
     connection_id::{ConnectionId, StatelessResetToken},
-    role::Role,
-    stream_count::{StreamCount, StreamCountError},
+    v1::role::Role,
+    v1::stream_count::{StreamCount, StreamCountError},
     var_int::VarInt,
 };
 use bytes::Buf;
@@ -219,7 +219,7 @@ pub struct UnknownParameter<D> {
 }
 
 /// The value of a parameter to write.
-pub(crate) enum Value<'v, D> {
+pub(in crate::v1) enum Value<'v, D> {
     Integer(VarInt),
     Bytes(&'v [u8]),
     PreferredAddress(&'v PreferredAddress),
@@ -227,7 +227,7 @@ pub(crate) enum Value<'v, D> {
 }
 
 impl<D: Buf> Value<'_, D> {
-    pub(crate) fn len(&self) -> usize {
+    pub(in crate::v1) fn len(&self) -> usize {
         match self {
             Self::Integer(value) => value.encoded_len(),
             Self::Bytes(bytes) => bytes.len(),
@@ -249,7 +249,7 @@ impl<D> TransportParameters<D> {
 
     /// Calls `visit` with each parameter to write, in order: the known ones
     /// that differ from their defaults by ID, then the unknown ones.
-    pub(crate) fn for_each<'s>(&'s self, mut visit: impl FnMut(VarInt, Value<'s, D>)) {
+    pub(in crate::v1) fn for_each<'s>(&'s self, mut visit: impl FnMut(VarInt, Value<'s, D>)) {
         fn integer<'s, D: 's>(
             visit: &mut impl FnMut(VarInt, Value<'s, D>),
             id: VarInt,
@@ -422,7 +422,7 @@ impl<D: Buf> TransportParameters<D> {
 /// A transport parameter that RFC 9000 §18 forbids, whether decoded or about
 /// to be encoded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(module(invalid_parameter_error), visibility(pub(crate)))]
+#[snafu(module(invalid_parameter_error), visibility(pub(in crate::v1)))]
 pub enum InvalidParameterError {
     /// The parameter appears more than once.
     #[snafu(display("transport parameter {:#x} appears more than once", id.get()))]
@@ -639,7 +639,7 @@ pub struct ServerOnlyParameterId(VarInt);
 impl ServerOnlyParameterId {
     /// The ID `id` if only a server may send its parameter, and `None` if a
     /// client may send it too.
-    pub(crate) const fn new(id: VarInt) -> Option<Self> {
+    pub(in crate::v1) const fn new(id: VarInt) -> Option<Self> {
         match id {
             id::ORIGINAL_DESTINATION_CONNECTION_ID
             | id::STATELESS_RESET_TOKEN
@@ -669,7 +669,7 @@ pub struct UnknownParameterId(VarInt);
 impl UnknownParameterId {
     /// The ID `id` if QUIC version 1 does not define it, and `None` if it is
     /// an ID of [`id`].
-    pub(crate) const fn new(id: VarInt) -> Option<Self> {
+    pub(in crate::v1) const fn new(id: VarInt) -> Option<Self> {
         if id.get() > id::LAST {
             Some(Self(id))
         } else {
