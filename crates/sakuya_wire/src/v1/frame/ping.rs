@@ -1,7 +1,8 @@
 //! PING frames ([RFC 9000 §19.2]).
 //!
 //! [RFC 9000 §19.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.2
-use super::{type_value, type_var_int};
+use super::{FrameType, type_value};
+use crate::frame::type_var_int;
 use crate::var_int::VarInt;
 
 /// A PING frame ([RFC 9000 §19.2]): the Frame Type alone.
@@ -11,6 +12,11 @@ use crate::var_int::VarInt;
 pub struct PingFrame;
 
 impl PingFrame {
+    /// The kind of the frame, [`FrameType::Ping`].
+    pub const fn frame_type(&self) -> FrameType {
+        FrameType::Ping
+    }
+
     /// The Frame Type value.
     pub const fn type_value(&self) -> VarInt {
         type_var_int(type_value::PING)

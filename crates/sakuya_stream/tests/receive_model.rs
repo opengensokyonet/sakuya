@@ -31,7 +31,7 @@ use sakuya_stream::receive::{
 use sakuya_stream::receive_buffer::fragmented::FragmentedStreamReceiveBuffer;
 use sakuya_stream::receive_buffer::{StreamDataInput, StreamReceiveBuffer};
 use sakuya_stream::stream_end::{BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError};
-use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
+use sakuya_wire::reset_stream_at::ReliableSizeError;
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
 use sakuya_wire::v1::transport_error::TransportErrorCode;
 use sakuya_wire::var_int::VarInt;

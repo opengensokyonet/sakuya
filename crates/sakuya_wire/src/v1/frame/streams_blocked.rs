@@ -1,7 +1,8 @@
 //! STREAMS_BLOCKED frames ([RFC 9000 §19.14]).
 //!
 //! [RFC 9000 §19.14]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.14
-use super::{Head, type_value, type_var_int};
+use super::{FrameType, type_value};
+use crate::frame::{Head, type_var_int};
 use crate::{
     v1::stream_count::StreamCount,
     v1::stream_id::Directionality,
@@ -44,6 +45,11 @@ impl StreamsBlockedFrame {
         self.maximum_streams
     }
 
+    /// The kind of the frame, [`FrameType::StreamsBlocked`].
+    pub const fn frame_type(&self) -> FrameType {
+        FrameType::StreamsBlocked
+    }
+
     /// The Frame Type value: one for each directionality.
     pub const fn type_value(&self) -> VarInt {
         type_value_of(self.directionality)
@@ -55,13 +61,13 @@ impl StreamsBlockedFrame {
     }
 
     /// The encoded frame.
-    pub(crate) fn head(&self) -> Head<9> {
+    pub(in crate::v1) fn head(&self) -> Head<9> {
         Head::new(self.type_value()).field(self.maximum_streams)
     }
 }
 
 /// The Frame Type value of a STREAMS_BLOCKED frame for streams of `directionality`.
-pub(crate) const fn type_value_of(directionality: Directionality) -> VarInt {
+pub(in crate::v1) const fn type_value_of(directionality: Directionality) -> VarInt {
     type_var_int(match directionality {
         Directionality::Bidirectional => type_value::STREAMS_BLOCKED_BIDI,
         Directionality::Unidirectional => type_value::STREAMS_BLOCKED_UNI,
@@ -91,7 +97,10 @@ pub mod codec {
 
     /// Reads the count that follows the Frame Type of a frame for streams of
     /// `directionality`.
-    pub(crate) async fn read_streams_blocked_frame<F: Read, A: ReceiverAccess<Family = F>>(
+    pub(in crate::v1) async fn read_streams_blocked_frame<
+        F: Read,
+        A: ReceiverAccess<Family = F>,
+    >(
         io: &mut A,
         directionality: Directionality,
     ) -> Result<StreamsBlockedFrame, ReadStreamsBlockedFrameError<F::Error>> {
@@ -109,7 +118,7 @@ pub mod codec {
 
     /// Failures of reading a STREAMS_BLOCKED frame.
     #[derive(Debug, Snafu)]
-    #[snafu(module(read_streams_blocked_error), visibility(pub(crate)))]
+    #[snafu(module(read_streams_blocked_error), visibility(pub(in crate::v1)))]
     pub enum ReadStreamsBlockedFrameError<E> {
         /// The count could not be read.
         #[snafu(display("STREAMS_BLOCKED field read failed"))]
@@ -143,10 +152,12 @@ pub mod codec {
 #[cfg(test)]
 mod tests {
     use super::{StreamsBlockedFrame, codec::ReadStreamsBlockedFrameError};
+    use crate::v1::frame::codec::ReadFieldsError;
+    use crate::v1::frame::tests::V1;
     use crate::{
-        frame::{
-            Extensions, Frame,
-            codec::{ReadFrameError, ReadFrameHostExt as _},
+        frame::codec::{ReadFrameError, ReadFrameHostExt as _},
+        v1::frame::{
+            Frame,
             tests::{assert_bytes_round_trip, assert_round_trip},
         },
         v1::stream_count::StreamCount,
@@ -187,19 +198,16 @@ mod tests {
         let too_many = StreamCount::MAX.get() + 1;
         let mut encoding = vec![type_value_of(true)];
         encoding.extend_from_slice(&(too_many | 0xc000_0000_0000_0000).to_be_bytes());
-        let error = encoding
-            .as_slice()
-            .sync_read_frame_unpin(Extensions::NONE)
-            .unwrap_err();
+        let error = encoding.as_slice().sync_read_frame_unpin(V1).unwrap_err();
         assert_eq!(error.frame_type(), Some(VarInt::from(type_value_of(true))));
         assert!(matches!(
             error,
-            ReadFrameError::StreamsBlocked {
+            ReadFrameError::Fields { source: ReadFieldsError::StreamsBlocked {
                 source: ReadStreamsBlockedFrameError::StreamCount {
                     source
                 },
                 ..
-            } if source == StreamCount::new(too_many).unwrap_err()
+            } } if source == StreamCount::new(too_many).unwrap_err()
         ));
         assert_eq!(
             error.transport_error_code(),

@@ -1,7 +1,8 @@
 //! RESET_STREAM frames ([RFC 9000 §19.4]).
 //!
 //! [RFC 9000 §19.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.4
-use super::{Head, type_value, type_var_int};
+use super::{FrameType, type_value};
+use crate::frame::{Head, type_var_int};
 use crate::v1::application_error::ApplicationErrorCode;
 use crate::v1::stream_id::StreamId;
 use crate::var_int::{VarInt, VarIntField};
@@ -49,6 +50,11 @@ impl ResetStreamFrame {
         self.final_size
     }
 
+    /// The kind of the frame, [`FrameType::ResetStream`].
+    pub const fn frame_type(&self) -> FrameType {
+        FrameType::ResetStream
+    }
+
     /// The Frame Type value.
     pub const fn type_value(&self) -> VarInt {
         type_var_int(type_value::RESET_STREAM)
@@ -60,7 +66,7 @@ impl ResetStreamFrame {
     }
 
     /// The encoded frame.
-    pub(crate) fn head(&self) -> Head<25> {
+    pub(in crate::v1) fn head(&self) -> Head<25> {
         Head::new(self.type_value())
             .field(self.stream_id)
             .field(self.application_error_code)
@@ -86,7 +92,7 @@ pub mod codec {
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type.
-    pub(crate) async fn read_reset_stream_frame<F: Read, A: ReceiverAccess<Family = F>>(
+    pub(in crate::v1) async fn read_reset_stream_frame<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
     ) -> Result<ResetStreamFrame, ReadResetStreamFrameError<F::Error>> {
         use read_reset_stream_error::*;
@@ -104,7 +110,7 @@ pub mod codec {
 
     /// Failures of reading a RESET_STREAM frame.
     #[derive(Debug, Snafu)]
-    #[snafu(module(read_reset_stream_error), visibility(pub(crate)))]
+    #[snafu(module(read_reset_stream_error), visibility(pub(in crate::v1)))]
     pub enum ReadResetStreamFrameError<E> {
         /// The Stream ID field could not be read.
         #[snafu(display("RESET_STREAM Stream ID read failed"))]
@@ -147,7 +153,7 @@ mod tests {
     use crate::v1::application_error::ApplicationErrorCode;
     use crate::v1::stream_id::StreamId;
     use crate::{
-        frame::{
+        v1::frame::{
             Frame,
             tests::{assert_bytes_round_trip, assert_round_trip},
         },

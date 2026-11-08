@@ -1,7 +1,8 @@
 //! CONNECTION_CLOSE frames ([RFC 9000 §19.19]).
 //!
 //! [RFC 9000 §19.19]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.19
-use super::{Head, LengthError, type_value, type_var_int};
+use super::{FrameType, type_value};
+use crate::frame::{Head, LengthError, type_var_int};
 use crate::{
     v1::application_error::ApplicationErrorCode,
     v1::transport_error::TransportErrorCode,
@@ -68,6 +69,16 @@ impl<D> ConnectionCloseFrame<D> {
         self.reason_phrase
     }
 
+    /// The kind of the frame: [`FrameType::ConnectionCloseTransport`] for
+    /// a transport error, [`FrameType::ConnectionCloseApplication`] for an
+    /// application error.
+    pub const fn frame_type(&self) -> FrameType {
+        match self.error_code {
+            CloseErrorCode::Transport { .. } => FrameType::ConnectionCloseTransport,
+            CloseErrorCode::Application { .. } => FrameType::ConnectionCloseApplication,
+        }
+    }
+
     /// The Frame Type value: `0x1c` for a transport error, `0x1d` for an
     /// application error.
     pub const fn type_value(&self) -> VarInt {
@@ -115,7 +126,7 @@ impl<D: Buf> ConnectionCloseFrame<D> {
     }
 
     /// The fields before the reason phrase.
-    pub(crate) fn head(&self) -> Head<25> {
+    pub(in crate::v1) fn head(&self) -> Head<25> {
         // Construction checked that the width holds the reason phrase length.
         let length = VarInt::try_from(self.reason_phrase.remaining()).unwrap_or(VarInt::ZERO);
         self.fields()
@@ -125,7 +136,7 @@ impl<D: Buf> ConnectionCloseFrame<D> {
 
 /// The Frame Type value of an application CONNECTION_CLOSE frame if
 /// `application` is set: `0x1d`, or `0x1c` for a transport one.
-pub(crate) const fn type_value_of(application: bool) -> VarInt {
+pub(in crate::v1) const fn type_value_of(application: bool) -> VarInt {
     type_var_int(if application {
         type_value::CONNECTION_CLOSE_APPLICATION
     } else {
@@ -158,7 +169,7 @@ pub mod codec {
     /// Reads the fields that follow the Frame Type of a transport
     /// CONNECTION_CLOSE frame, type `0x1c`, and the reason phrase as one
     /// chunk of the source.
-    pub(crate) async fn read_connection_close_frame_transport<F, A>(
+    pub(in crate::v1) async fn read_connection_close_frame_transport<F, A>(
         io: &mut A,
     ) -> Result<ConnectionCloseFrame<F::Chunk>, ReadConnectionCloseFrameTransportError<F::Error>>
     where
@@ -177,7 +188,7 @@ pub mod codec {
     /// Reads the fields that follow the Frame Type of an application
     /// CONNECTION_CLOSE frame, type `0x1d`, and the reason phrase as one
     /// chunk of the source.
-    pub(crate) async fn read_connection_close_frame_application<F, A>(
+    pub(in crate::v1) async fn read_connection_close_frame_application<F, A>(
         io: &mut A,
     ) -> Result<ConnectionCloseFrame<F::Chunk>, ReadConnectionCloseFrameApplicationError<F::Error>>
     where
@@ -225,7 +236,7 @@ pub mod codec {
 
     /// Failures of reading a transport CONNECTION_CLOSE frame, type `0x1c`.
     #[derive(Debug, Snafu)]
-    #[snafu(module(read_connection_close_transport_error), visibility(pub(crate)))]
+    #[snafu(module(read_connection_close_transport_error), visibility(pub(in crate::v1)))]
     pub enum ReadConnectionCloseFrameTransportError<E> {
         /// The Error Code field, a transport error code, could not be read.
         #[snafu(display("CONNECTION_CLOSE Error Code read failed"))]
@@ -250,7 +261,7 @@ pub mod codec {
 
     impl<E> ReadConnectionCloseFrameTransportError<E> {
         /// Whether the source ended within the frame.
-        pub(crate) fn is_incomplete(&self) -> bool {
+        pub(in crate::v1) fn is_incomplete(&self) -> bool {
             match self {
                 Self::ErrorCode { source } | Self::FrameType { source } => source.is_incomplete(),
                 Self::ReasonPhrase { source } => source.is_incomplete(),
@@ -263,7 +274,7 @@ pub mod codec {
     #[derive(Debug, Snafu)]
     #[snafu(
         module(read_connection_close_application_error),
-        visibility(pub(crate))
+        visibility(pub(in crate::v1))
     )]
     pub enum ReadConnectionCloseFrameApplicationError<E> {
         /// The Error Code field, an application protocol error code, could
@@ -284,7 +295,7 @@ pub mod codec {
 
     impl<E> ReadConnectionCloseFrameApplicationError<E> {
         /// Whether the source ended within the frame.
-        pub(crate) fn is_incomplete(&self) -> bool {
+        pub(in crate::v1) fn is_incomplete(&self) -> bool {
             match self {
                 Self::ErrorCode { source } => source.is_incomplete(),
                 Self::ReasonPhrase { source } => source.is_incomplete(),
@@ -295,7 +306,7 @@ pub mod codec {
     /// Failures of reading the fields that both CONNECTION_CLOSE frame types
     /// end with: the Reason Phrase Length field and the reason phrase.
     #[derive(Debug, Snafu)]
-    #[snafu(module(read_reason_phrase_error), visibility(pub(crate)))]
+    #[snafu(module(read_reason_phrase_error), visibility(pub(in crate::v1)))]
     pub enum ReadReasonPhraseError<E> {
         /// The Reason Phrase Length field could not be read.
         #[snafu(display("CONNECTION_CLOSE Reason Phrase Length read failed"))]
@@ -313,7 +324,7 @@ pub mod codec {
 
     impl<E> ReadReasonPhraseError<E> {
         /// Whether the source ended within the frame.
-        pub(crate) fn is_incomplete(&self) -> bool {
+        pub(in crate::v1) fn is_incomplete(&self) -> bool {
             match self {
                 Self::ReasonPhraseLength { source } => source.is_incomplete(),
                 Self::ReasonPhrase { source } => source.is_incomplete(),
@@ -346,13 +357,14 @@ pub mod codec {
 #[cfg(test)]
 mod tests {
     use super::{CloseErrorCode, ConnectionCloseFrame};
+    use crate::v1::frame::tests::V1;
     use crate::{
-        frame::{
-            Extensions, Frame, LengthError,
-            codec::ReadFrameHostExt as _,
+        frame::{LengthError, codec::ReadFrameHostExt as _},
+        v1::application_error::ApplicationErrorCode,
+        v1::frame::{
+            Frame,
             tests::{assert_round_trip, short, wide},
         },
-        v1::application_error::ApplicationErrorCode,
         v1::transport_error::TransportErrorCode,
         var_int::{VarInt, VarIntWidth},
     };
@@ -360,10 +372,7 @@ mod tests {
     #[test]
     fn transport_and_application_types() {
         let transport = [0x1c, 0x07, 0x06, 0x03, b'b', b'a', b'd'];
-        let frame = transport
-            .as_slice()
-            .sync_read_frame_unpin(Extensions::NONE)
-            .unwrap();
+        let frame = transport.as_slice().sync_read_frame_unpin(V1).unwrap();
         let Frame::ConnectionClose(close) = frame else {
             panic!("{frame:?}")
         };
@@ -379,10 +388,7 @@ mod tests {
         assert_eq!(assert_round_trip(frame), transport);
 
         let application = [0x1d, 0x41, 0x00, 0x00];
-        let frame = application
-            .as_slice()
-            .sync_read_frame_unpin(Extensions::NONE)
-            .unwrap();
+        let frame = application.as_slice().sync_read_frame_unpin(V1).unwrap();
         let code = short(ApplicationErrorCode::new(VarInt::from(0x100u16)));
         assert_eq!(
             frame,
@@ -400,10 +406,7 @@ mod tests {
         // The same codes in longer encodings, with a longer Reason Phrase
         // Length field.
         let long = [0x1c, 0x80, 0, 0, 0x07, 0x40, 0x06, 0x40, 0x01, b'!'];
-        let frame = long
-            .as_slice()
-            .sync_read_frame_unpin(Extensions::NONE)
-            .unwrap();
+        let frame = long.as_slice().sync_read_frame_unpin(V1).unwrap();
         let error_code = CloseErrorCode::Transport {
             code: wide(TransportErrorCode::FRAME_ENCODING_ERROR, VarIntWidth::Four),
             frame_type: wide(VarInt::from(0x06u8), VarIntWidth::Two),

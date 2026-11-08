@@ -1,7 +1,8 @@
 //! HANDSHAKE_DONE frames ([RFC 9000 §19.20]).
 //!
 //! [RFC 9000 §19.20]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.20
-use super::{type_value, type_var_int};
+use super::{FrameType, type_value};
+use crate::frame::type_var_int;
 use crate::var_int::VarInt;
 
 /// A HANDSHAKE_DONE frame ([RFC 9000 §19.20]): the Frame Type alone.
@@ -11,6 +12,11 @@ use crate::var_int::VarInt;
 pub struct HandshakeDoneFrame;
 
 impl HandshakeDoneFrame {
+    /// The kind of the frame, [`FrameType::HandshakeDone`].
+    pub const fn frame_type(&self) -> FrameType {
+        FrameType::HandshakeDone
+    }
+
     /// The Frame Type value.
     pub const fn type_value(&self) -> VarInt {
         type_var_int(type_value::HANDSHAKE_DONE)

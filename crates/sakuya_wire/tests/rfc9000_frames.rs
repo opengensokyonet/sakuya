@@ -1,15 +1,16 @@
 //! The frames of RFC 9000 §19 at the edges of their fields, through the public
 //! interface.
-use core::convert::Infallible;
+use core::{convert::Infallible, marker::PhantomData};
 use either::Either;
 use sakuya_wire::{
-    frame::{
-        Extensions, Frame, FrameType,
-        codec::{ReadFrameError, ReadFrameHostExt as _},
-    },
+    frame::codec::{ReadFrameError, ReadFrameHostExt as _},
     v1::packet_number::PacketNumber,
     v1::stream_id::Directionality,
     v1::transport_error::TransportErrorCode,
+    v1::{
+        self,
+        frame::{Frame, FrameType, codec::ReadFieldsError},
+    },
     var_int::{VarInt, VarIntField, VarIntWidth, codec::WriteVarIntHostExt as _},
 };
 
@@ -28,9 +29,11 @@ fn frame(parts: &[&[u8]]) -> Vec<u8> {
     parts.concat()
 }
 
-fn read(bytes: &[u8]) -> Result<(Frame<&[u8]>, usize), ReadFrameError<Infallible>> {
+type ReadError = ReadFrameError<Infallible, ReadFieldsError<Infallible>>;
+
+fn read(bytes: &[u8]) -> Result<(Frame<&[u8]>, usize), ReadError> {
     let mut input = bytes;
-    let frame = input.sync_read_frame_unpin(Extensions::NONE)?;
+    let frame = input.sync_read_frame_unpin(PhantomData::<v1::Part>)?;
     Ok((frame, bytes.len() - input.len()))
 }
 
@@ -82,30 +85,23 @@ fn every_single_byte_type_is_defined_or_unknown() {
     let defined = 0x00..=0x1e;
     for value in 0u8..=0x3f {
         let kind = FrameType::of(VarInt::from(value));
-        let extension = matches!(value, 0x24 | 0x30 | 0x31);
-        assert_eq!(
-            kind.is_ok(),
-            defined.contains(&value) || extension,
-            "{value:#x}"
-        );
+        assert_eq!(kind.is_some(), defined.contains(&value), "{value:#x}");
         if defined.contains(&value) {
             continue;
         }
-        // Without the extensions enabled, the extension types are rejected
-        // as not enabled, and the others as unknown.
+        // Every other value is unknown to version 1, including those of
+        // extensions such as RESET_STREAM_AT (0x24) and DATAGRAM (0x30,
+        // 0x31): RFC 9000 §12.4.
         let error = read(&[value]).unwrap_err();
-        if extension {
-            assert!(
-                matches!(error, ReadFrameError::ExtensionNotEnabled { .. }),
-                "{value:#x}: {error}"
-            );
-        } else {
-            assert!(
-                matches!(error, ReadFrameError::UnknownType { .. }),
-                "{value:#x}: {error}"
-            );
-        }
+        assert!(
+            matches!(error, ReadFrameError::UnknownType { .. }),
+            "{value:#x}: {error}"
+        );
         assert_eq!(error.frame_type(), Some(VarInt::from(value)));
+        assert_eq!(
+            error.transport_error_code(),
+            TransportErrorCode::FRAME_ENCODING_ERROR
+        );
     }
 }
 

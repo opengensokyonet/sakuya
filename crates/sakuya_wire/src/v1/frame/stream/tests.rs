@@ -5,10 +5,15 @@ use super::{
         WriteStreamFrameWithoutLengthHostExt as _,
     },
 };
+use crate::v1::frame::codec::ReadFieldsError;
+use crate::v1::frame::tests::V1;
 use crate::{
     frame::{
-        DataEndError, Extensions, Frame, InvalidDataError, LengthError, NoLength,
+        DataEndError, InvalidDataError, LengthError, NoLength,
         codec::{ReadFrameError, ReadFrameHostExt as _},
+    },
+    v1::frame::{
+        Frame,
         tests::{
             assert_round_trip, check_max, edge_fields, length_field, short, sid, stream_frame, vi,
             wide,
@@ -34,7 +39,7 @@ fn type_bits() {
         }
         encoding.extend_from_slice(b"ab");
         let mut input = encoding.as_slice();
-        let frame = input.sync_read_frame_unpin(Extensions::NONE).unwrap();
+        let frame = input.sync_read_frame_unpin(V1).unwrap();
         assert!(input.is_empty());
         let Frame::Stream(stream) = frame else {
             panic!("{frame:?}")
@@ -89,7 +94,7 @@ fn read_length_fields_are_kept() {
     ));
     assert_eq!(without, [0x08, 0x04, b'h', b'i']);
     let mut input = without.as_slice();
-    let Frame::Stream(stream) = input.sync_read_frame_unpin(Extensions::NONE).unwrap() else {
+    let Frame::Stream(stream) = input.sync_read_frame_unpin(V1).unwrap() else {
         panic!()
     };
     assert_eq!(stream.length(), Either::Left(NoLength));
@@ -98,7 +103,7 @@ fn read_length_fields_are_kept() {
         let encoding = assert_round_trip(Frame::Stream(frame));
         assert_eq!(encoding.len(), 2 + width.encoded_len() + 2);
         let mut input = encoding.as_slice();
-        let Frame::Stream(stream) = input.sync_read_frame_unpin(Extensions::NONE).unwrap() else {
+        let Frame::Stream(stream) = input.sync_read_frame_unpin(V1).unwrap() else {
             panic!()
         };
         assert_eq!(stream.length(), Either::Right(width));
@@ -142,16 +147,16 @@ fn data_ending_beyond_2_62_is_rejected() {
     without_length.push(0xaa);
     for (encoding, frame_type) in [(with_length, 0x0e), (without_length, 0x0c)] {
         let mut input = encoding.as_slice();
-        let error = input.sync_read_frame_unpin(Extensions::NONE).unwrap_err();
+        let error = input.sync_read_frame_unpin(V1).unwrap_err();
         assert!(
             matches!(
                 error,
-                ReadFrameError::Stream {
+                ReadFrameError::Fields { source: ReadFieldsError::Stream {
                     source: ReadStreamFrameError::DataEnd {
                         source
                     },
                     frame_type: rejected,
-                } if source == DataEndError::check(VarInt::MAX, 1).unwrap_err()
+                } } if source == DataEndError::check(VarInt::MAX, 1).unwrap_err()
                     && rejected.get() == vi(frame_type)
             ),
             "{error:?}"
@@ -164,7 +169,7 @@ fn data_ending_beyond_2_62_is_rejected() {
     at_limit.extend_from_slice(&((max - 1) | 0xc000_0000_0000_0000).to_be_bytes());
     at_limit.push(0xaa);
     let mut input = at_limit.as_slice();
-    assert!(input.sync_read_frame_unpin(Extensions::NONE).is_ok());
+    assert!(input.sync_read_frame_unpin(V1).is_ok());
 
     // Construction rejects the same fields, for every kind of Length field.
     let error = DataEndError::check(VarInt::MAX, 1).unwrap_err();

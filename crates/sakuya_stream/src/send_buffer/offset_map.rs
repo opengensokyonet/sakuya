@@ -8,7 +8,7 @@ use super::{
 };
 use crate::connection_send_credit::ConnectionCreditReservation;
 use bytes::Bytes;
-use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
+use sakuya_wire::reset_stream_at::ReliableSizeError;
 use sakuya_wire::var_int::VarInt;
 use snafu::{IntoError, ResultExt};
 use std::collections::BTreeMap;

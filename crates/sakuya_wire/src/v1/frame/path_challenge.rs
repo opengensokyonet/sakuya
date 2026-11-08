@@ -1,7 +1,8 @@
 //! PATH_CHALLENGE frames ([RFC 9000 §19.17]).
 //!
 //! [RFC 9000 §19.17]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.17
-use super::{Head, PATH_DATA_LEN, type_value, type_var_int};
+use super::{FrameType, PATH_DATA_LEN, type_value};
+use crate::frame::{Head, type_var_int};
 use crate::var_int::VarInt;
 
 /// A PATH_CHALLENGE frame ([RFC 9000 §19.17]).
@@ -26,6 +27,11 @@ impl PathChallengeFrame {
         self.data
     }
 
+    /// The kind of the frame, [`FrameType::PathChallenge`].
+    pub const fn frame_type(&self) -> FrameType {
+        FrameType::PathChallenge
+    }
+
     /// The Frame Type value.
     pub const fn type_value(&self) -> VarInt {
         type_var_int(type_value::PATH_CHALLENGE)
@@ -37,7 +43,7 @@ impl PathChallengeFrame {
     }
 
     /// The encoded frame.
-    pub(crate) fn head(&self) -> Head<{ 1 + PATH_DATA_LEN }> {
+    pub(in crate::v1) fn head(&self) -> Head<{ 1 + PATH_DATA_LEN }> {
         Head::new(self.type_value()).bytes(&self.data)
     }
 }
@@ -54,7 +60,7 @@ pub mod codec {
     #![allow(missing_docs)]
 
     use super::PathChallengeFrame;
-    use crate::frame::PATH_DATA_LEN;
+    use crate::v1::frame::PATH_DATA_LEN;
     use nitori_call::{ReceiverAccess, call};
     use nitori_io::{
         calls::{ReadArrayError, WriteAllError},
@@ -62,7 +68,7 @@ pub mod codec {
     };
 
     /// Reads the data that follows the Frame Type.
-    pub(crate) async fn read_path_challenge_frame<F: Read, A: ReceiverAccess<Family = F>>(
+    pub(in crate::v1) async fn read_path_challenge_frame<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
     ) -> Result<PathChallengeFrame, ReadArrayError<F::Error>> {
         Ok(PathChallengeFrame::new(
@@ -88,7 +94,7 @@ pub mod codec {
 #[cfg(test)]
 mod tests {
     use super::PathChallengeFrame;
-    use crate::frame::{
+    use crate::v1::frame::{
         Frame,
         tests::{assert_bytes_round_trip, assert_round_trip},
     };

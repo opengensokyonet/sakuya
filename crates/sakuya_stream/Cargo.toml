@@ -8,7 +8,10 @@ description = "Stream send and receive components for sakuya"
 
 [dependencies]
 bytes.workspace = true
-sakuya_wire.workspace = true
+# Transition: the stream components use RESET_STREAM_AT and its
+# `ReliableSizeError`, so this enables the `reset_stream_at` extension of
+# sakuya_wire until the components are split by extension; remove it then.
+sakuya_wire = { workspace = true, features = ["reset_stream_at"] }
 snafu.workspace = true
 
 [dev-dependencies]

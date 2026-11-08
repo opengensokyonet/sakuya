@@ -3,7 +3,7 @@
 //! A packet that carries frames is protected at one of four levels, which
 //! its packet type announces: Initial, 0-RTT, Handshake and 1-RTT. The level
 //! decides which frames the packet may carry ([RFC 9000 §12.4]); see
-//! [`FrameType::can_appear_in`](crate::frame::FrameType::can_appear_in).
+//! [`FrameKind::can_appear_in`](crate::frame::FrameKind::can_appear_in).
 //!
 //! [RFC 9001 §2.1]: https://www.rfc-editor.org/rfc/rfc9001.html#section-2.1
 //! [RFC 9000 §12.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.4

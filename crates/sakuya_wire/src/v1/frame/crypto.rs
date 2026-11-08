@@ -1,9 +1,9 @@
 //! CRYPTO frames ([RFC 9000 §19.6]).
 //!
 //! [RFC 9000 §19.6]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.6
-use super::{
-    DataEndError, Head, InvalidDataError, LengthError, max_len_with_length_field, type_value,
-    type_var_int,
+use super::{FrameType, type_value};
+use crate::frame::{
+    DataEndError, Head, InvalidDataError, LengthError, max_len_with_length_field, type_var_int,
 };
 use crate::var_int::{VarInt, VarIntField, VarIntWidth};
 use bytes::Buf;
@@ -52,6 +52,11 @@ impl<D> CryptoFrame<D> {
     /// Takes the cryptographic message data.
     pub fn into_data(self) -> D {
         self.data
+    }
+
+    /// The kind of the frame, [`FrameType::Crypto`].
+    pub const fn frame_type(&self) -> FrameType {
+        FrameType::Crypto
     }
 
     /// The Frame Type value, `0x06`.
@@ -104,7 +109,7 @@ impl<D: Buf> CryptoFrame<D> {
     }
 
     /// The fields before the data.
-    pub(crate) fn head(&self) -> Head<HEAD_MAX> {
+    pub(in crate::v1) fn head(&self) -> Head<HEAD_MAX> {
         // Construction checked that the width holds the data length.
         let length = VarInt::try_from(self.data.remaining()).unwrap_or(VarInt::ZERO);
         Head::new(self.type_value())
@@ -137,7 +142,7 @@ pub mod codec {
 
     /// Reads the fields that follow the Frame Type, and the data as one
     /// chunk of the source.
-    pub(crate) async fn read_crypto_frame<F, A>(
+    pub(in crate::v1) async fn read_crypto_frame<F, A>(
         io: &mut A,
     ) -> Result<CryptoFrame<F::Chunk>, ReadCryptoFrameError<F::Error>>
     where
@@ -170,7 +175,7 @@ pub mod codec {
 
     /// Failures of reading a CRYPTO frame.
     #[derive(Debug, Snafu)]
-    #[snafu(module(read_crypto_error), visibility(pub(crate)))]
+    #[snafu(module(read_crypto_error), visibility(pub(in crate::v1)))]
     pub enum ReadCryptoFrameError<E> {
         /// The Offset field could not be read.
         #[snafu(display("CRYPTO Offset read failed"))]

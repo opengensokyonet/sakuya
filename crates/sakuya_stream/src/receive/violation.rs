@@ -24,7 +24,7 @@
 //! [RFC 9000 §11]: https://www.rfc-editor.org/rfc/rfc9000.html#section-11
 use crate::connection_receive_flow::RecordUsageError;
 use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError};
-use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
+use sakuya_wire::reset_stream_at::ReliableSizeError;
 use sakuya_wire::v1::transport_error::TransportErrorCode;
 use sakuya_wire::var_int::VarInt;
 use snafu::{Snafu, ensure};

@@ -10,7 +10,7 @@ use crate::receive::violation::{
 };
 use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError};
 use core::fmt::Debug;
-use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
+use sakuya_wire::reset_stream_at::ReliableSizeError;
 
 /// Everything about a receiver and its connection that an observer can see
 /// without reading.

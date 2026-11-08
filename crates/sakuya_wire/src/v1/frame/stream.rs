@@ -1,9 +1,10 @@
 //! STREAM frames ([RFC 9000 §19.8]).
 //!
 //! [RFC 9000 §19.8]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.8
-use super::{
+use super::{FrameType, type_value};
+use crate::frame::{
     DataEndError, Head, InvalidDataError, LengthError, LengthKind, NoLength, UndecidedLength,
-    length_width, max_len_with_length_field, type_value, type_var_int,
+    length_width, max_len_with_length_field, type_var_int,
 };
 use crate::{
     v1::stream_id::StreamId,
@@ -15,10 +16,10 @@ use either::Either;
 /// The bits of a STREAM frame type ([RFC 9000 §19.8]).
 ///
 /// [RFC 9000 §19.8]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.8
-pub(crate) mod bits {
-    pub(crate) const OFF: u64 = 0x04;
-    pub(crate) const LEN: u64 = 0x02;
-    pub(crate) const FIN: u64 = 0x01;
+pub(in crate::v1) mod bits {
+    pub(in crate::v1) const OFF: u64 = 0x04;
+    pub(in crate::v1) const LEN: u64 = 0x02;
+    pub(in crate::v1) const FIN: u64 = 0x01;
 }
 
 /// A STREAM frame ([RFC 9000 §19.8]), of any of the types `0x08..=0x0f`.
@@ -110,6 +111,11 @@ impl<D, L: LengthKind> StreamFrame<D, L> {
         self.length
     }
 
+    /// The kind of the frame, [`FrameType::Stream`].
+    pub const fn frame_type(&self) -> FrameType {
+        FrameType::Stream
+    }
+
     /// The Frame Type value, which the OFF, LEN and FIN bits complete.
     pub fn type_value(&self) -> VarInt {
         let mut value = type_value::STREAM;
@@ -150,7 +156,7 @@ impl<D: Buf, L: LengthKind> StreamFrame<D, L> {
     }
 
     /// The fields before the data.
-    pub(crate) fn head(&self) -> Head<HEAD_MAX> {
+    pub(in crate::v1) fn head(&self) -> Head<HEAD_MAX> {
         let mut head = Head::new(self.type_value()).field(self.stream_id);
         if let Some(offset) = self.offset {
             head = head.field(offset);
@@ -412,7 +418,7 @@ pub struct StreamTypeValue(VarInt);
 impl StreamTypeValue {
     /// The Frame Type value `value` if it is that of a STREAM frame, and
     /// `None` otherwise.
-    pub(crate) const fn new(value: VarInt) -> Option<Self> {
+    pub(in crate::v1) const fn new(value: VarInt) -> Option<Self> {
         match value.get() {
             0x08..=0x0f => Some(Self(value)),
             _ => None,
@@ -466,7 +472,7 @@ pub mod codec {
     /// Reads the fields that follow a STREAM Frame Type `frame_type`, and the
     /// data as one chunk of the source: of the Length field's length, or to
     /// the end of the source without one.
-    pub(crate) async fn read_stream_frame<F, A>(
+    pub(in crate::v1) async fn read_stream_frame<F, A>(
         io: &mut A,
         frame_type: StreamTypeValue,
     ) -> Result<StreamFrame<F::Chunk>, ReadStreamFrameError<F::Error>>
@@ -511,7 +517,7 @@ pub mod codec {
 
     /// Failures of reading a STREAM frame.
     #[derive(Debug, Snafu)]
-    #[snafu(module(read_stream_error), visibility(pub(crate)))]
+    #[snafu(module(read_stream_error), visibility(pub(in crate::v1)))]
     pub enum ReadStreamFrameError<E> {
         /// The Stream ID field could not be read.
         #[snafu(display("STREAM Stream ID read failed"))]

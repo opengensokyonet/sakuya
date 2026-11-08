@@ -1,7 +1,8 @@
 //! NEW_CONNECTION_ID frames ([RFC 9000 §19.15]).
 //!
 //! [RFC 9000 §19.15]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.15
-use super::{Head, type_value, type_var_int};
+use super::{FrameType, type_value};
+use crate::frame::{Head, type_var_int};
 use crate::{
     connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken},
     var_int::{VarInt, VarIntField},
@@ -69,6 +70,11 @@ impl NewConnectionIdFrame {
         self.stateless_reset_token
     }
 
+    /// The kind of the frame, [`FrameType::NewConnectionId`].
+    pub const fn frame_type(&self) -> FrameType {
+        FrameType::NewConnectionId
+    }
+
     /// The Frame Type value, `0x18`.
     pub const fn type_value(&self) -> VarInt {
         type_var_int(type_value::NEW_CONNECTION_ID)
@@ -80,7 +86,7 @@ impl NewConnectionIdFrame {
     }
 
     /// The encoded frame.
-    pub(crate) fn head(&self) -> Head<ENCODED_MAX> {
+    pub(in crate::v1) fn head(&self) -> Head<ENCODED_MAX> {
         let connection_id = self.connection_id.as_bytes();
         // A connection ID has at most 20 bytes, so its length fits a byte.
         Head::new(self.type_value())
@@ -157,7 +163,10 @@ pub mod codec {
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type.
-    pub(crate) async fn read_new_connection_id_frame<F: Read, A: ReceiverAccess<Family = F>>(
+    pub(in crate::v1) async fn read_new_connection_id_frame<
+        F: Read,
+        A: ReceiverAccess<Family = F>,
+    >(
         io: &mut A,
     ) -> Result<NewConnectionIdFrame, ReadNewConnectionIdFrameError<F::Error>> {
         let sequence_number = read_field(io)
@@ -187,7 +196,7 @@ pub mod codec {
 
     /// Failures of reading a NEW_CONNECTION_ID frame.
     #[derive(Debug, Snafu)]
-    #[snafu(module(read_new_connection_id_error), visibility(pub(crate)))]
+    #[snafu(module(read_new_connection_id_error), visibility(pub(in crate::v1)))]
     pub enum ReadNewConnectionIdFrameError<E> {
         /// The Sequence Number field could not be read.
         #[snafu(display("NEW_CONNECTION_ID Sequence Number read failed"))]
@@ -245,13 +254,12 @@ pub mod codec {
 #[cfg(test)]
 mod tests {
     use super::{NewConnectionIdFrame, RetirePriorToError, codec::ReadNewConnectionIdFrameError};
+    use crate::v1::frame::codec::ReadFieldsError;
+    use crate::v1::frame::tests::V1;
     use crate::{
         connection_id::{NonEmptyCid, StatelessResetToken, codec::ReadConnectionIdError},
-        frame::{
-            Extensions, Frame,
-            codec::{ReadFrameError, ReadFrameHostExt as _},
-            tests::assert_round_trip,
-        },
+        frame::codec::{ReadFrameError, ReadFrameHostExt as _},
+        v1::frame::{Frame, tests::assert_round_trip},
         var_int::{VarInt, VarIntField},
     };
 
@@ -281,8 +289,10 @@ mod tests {
 
     fn read(encoding: &[u8]) -> ReadNewConnectionIdFrameError<core::convert::Infallible> {
         let mut input = encoding;
-        match input.sync_read_frame_unpin(Extensions::NONE) {
-            Err(ReadFrameError::NewConnectionId { source, .. }) => source,
+        match input.sync_read_frame_unpin(V1) {
+            Err(ReadFrameError::Fields {
+                source: ReadFieldsError::NewConnectionId { source, .. },
+            }) => source,
             other => panic!("{other:?}"),
         }
     }

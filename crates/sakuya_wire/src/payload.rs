@@ -254,16 +254,21 @@ where
 #[cfg(test)]
 mod tests {
     use super::{PayloadCompleted, ReadPayloadError};
-    use crate::frame::{
-        Extensions,
-        codec::{ReadFrameError, ReadFrameHostExt as _},
-        crypto::codec::ReadCryptoFrameError,
-        datagram::codec::ReadDatagramFrameError,
+    use crate::{
+        frame::codec::{ReadFrameError, ReadFrameHostExt as _},
+        v1::{
+            self,
+            frame::{
+                codec::ReadFieldsError, crypto::codec::ReadCryptoFrameError,
+                stream::codec::ReadStreamFrameError,
+            },
+        },
     };
     use bytes::{Buf, BufMut};
     use core::{
         convert::Infallible,
         fmt::Debug,
+        marker::PhantomData,
         num::NonZeroUsize,
         pin::Pin,
         task::{Context, Poll},
@@ -409,25 +414,33 @@ mod tests {
 
     /// The payload failure of reading one frame from `source`.
     fn payload_error(source: &'static [u8]) -> ReadPayloadError<Infallible> {
-        data_error(Bytewise(source).sync_read_frame_unpin(Extensions::ALL))
+        data_error(Bytewise(source).sync_read_frame_unpin(PhantomData::<v1::Part>))
     }
 
     /// The payload failure of reading one frame from `source`, which fails
     /// after its bytes.
     fn receiver_error(source: &'static [u8]) -> ReadPayloadError<SourceFailed> {
-        data_error(Failing(source).sync_read_frame_unpin(Extensions::ALL))
+        data_error(Failing(source).sync_read_frame_unpin(PhantomData::<v1::Part>))
     }
 
-    /// The failure of reading the data of a CRYPTO or DATAGRAM frame.
-    fn data_error<T: Debug, E: Debug>(result: Result<T, ReadFrameError<E>>) -> ReadPayloadError<E> {
+    /// The failure of reading the data of a CRYPTO or STREAM frame.
+    fn data_error<T: Debug, E: Debug>(
+        result: Result<T, ReadFrameError<E, ReadFieldsError<E>>>,
+    ) -> ReadPayloadError<E> {
         match result {
-            Err(ReadFrameError::Crypto {
-                source: ReadCryptoFrameError::Data { source },
-                ..
+            Err(ReadFrameError::Fields {
+                source:
+                    ReadFieldsError::Crypto {
+                        source: ReadCryptoFrameError::Data { source },
+                        ..
+                    },
             })
-            | Err(ReadFrameError::Datagram {
-                source: ReadDatagramFrameError::Data { source },
-                ..
+            | Err(ReadFrameError::Fields {
+                source:
+                    ReadFieldsError::Stream {
+                        source: ReadStreamFrameError::Data { source },
+                        ..
+                    },
             }) => source,
             other => panic!("{other:?}"),
         }
@@ -444,8 +457,8 @@ mod tests {
             source.to_string(),
             "payload arrived in more than one chunk, the first of 1 bytes"
         );
-        // A DATAGRAM frame without a Length field extends to the end.
-        let ReadPayloadError::Split { source } = payload_error(&[0x30, 1, 2]) else {
+        // A STREAM frame without a Length field extends to the end.
+        let ReadPayloadError::Split { source } = payload_error(&[0x08, 0x00, 1, 2]) else {
             panic!()
         };
         assert_eq!((source.expected(), source.received()), (None, 1));
@@ -483,8 +496,9 @@ mod tests {
         };
         assert_eq!((completed.expected(), completed.completed()), (Some(3), 0));
         assert_eq!(error.to_string(), "payload read failed after 0 bytes");
-        // A DATAGRAM frame without a Length field extends to the end.
-        let ReadPayloadError::Receiver { completed, .. } = receiver_error(&[0x30, 1, 2]) else {
+        // A STREAM frame without a Length field extends to the end.
+        let ReadPayloadError::Receiver { completed, .. } = receiver_error(&[0x08, 0x00, 1, 2])
+        else {
             panic!()
         };
         assert_eq!((completed.expected(), completed.completed()), (None, 2));
@@ -494,7 +508,7 @@ mod tests {
     fn a_source_that_keeps_the_contract_reads_the_field() {
         // The same CRYPTO frame from a byte slice, which keeps the contract.
         let mut input = &[0x06, 0x00, 0x02, 1, 2, 3, 4][..];
-        assert!(input.sync_read_frame_unpin(Extensions::NONE).is_ok());
+        assert!(input.sync_read_frame_unpin(PhantomData::<v1::Part>).is_ok());
         assert_eq!(input, [3, 4]);
     }
 
@@ -504,6 +518,6 @@ mod tests {
         // A CRYPTO frame with two bytes of data, and two bytes after it that
         // the source returns in the same chunk.
         let mut source = Overlong(&[0x06, 0x00, 0x02, 1, 2, 3, 4]);
-        let _ = source.sync_read_frame_unpin(Extensions::NONE);
+        let _ = source.sync_read_frame_unpin(PhantomData::<v1::Part>);
     }
 }

@@ -1,4 +1,4 @@
-//! QUIC version 1 frames ([RFC 9000 §19]) and two negotiated extensions.
+//! Frame sets composed of parts, and what the frames of every part share.
 //!
 //! The payload of a QUIC packet, once packet protection is removed, is a
 //! sequence of frames, each starting with a Frame Type field. A frame never
@@ -7,670 +7,461 @@
 //! the payload cuts short is a terminal incomplete failure, not a reason to
 //! wait for more bytes.
 //!
-//! Besides the frames of RFC 9000, two extensions are supported:
+//! # Frame sets
 //!
-//! - DATAGRAM ([RFC 9221]), types `0x30` and `0x31`;
-//! - RESET_STREAM_AT, type `0x24`, as specified by the Internet-Draft
-//!   [draft-ietf-quic-reliable-stream-reset-11]. The draft is not an RFC and
-//!   may still change.
+//! QUIC version 1 and each extension define their own frames, and nothing
+//! else: a *part* of a frame set. A part is a marker type that implements
+//! [`FrameSetPart`]: [`v1::Part`](crate::v1::Part) for the frames of
+//! [RFC 9000], and one in the module of each extension that this crate
+//! implements behind a feature of the same name, `reset_stream_at` and
+//! `datagram`. A part states its frames, the kinds of its frames
+//! ([`FrameKind`]), the failures of reading their fields, and the Frame Type
+//! values it claims ([`FrameTypeValues`]).
 //!
-//! Which extensions the peers negotiated is a run-time fact: reading takes an
-//! [`Extensions`] set, and rejects a frame of an extension that is not in the
-//! set. Like an unknown frame type, that is a FRAME_ENCODING_ERROR
-//! ([RFC 9000 §12.4]), except for DATAGRAM, for which [RFC 9221] requires
-//! PROTOCOL_VIOLATION.
+//! The frame set of a connection is the parts it uses, composed by
+//! [`PartSum`], which is itself a part: each part keeps one place in the sum,
+//! for its frames, kinds and failures. A set of version 1 alone is
+//! [`v1::Part`](crate::v1::Part), without a sum. Reading a frame
+//! ([`codec::read_frame`]) reads its Frame Type, checks that it uses its
+//! shortest encoding, asks the set which part claims it, and lets that part
+//! read the other fields. A Frame Type value that no part of the set claims
+//! is unknown, including the values of an extension that is not in the set:
+//! a FRAME_ENCODING_ERROR ([RFC 9000 §12.4]).
 //!
-//! Each frame type has its own module with its struct, the checks its
-//! encoding imposes, and its write operation. [`Frame`] holds any of them.
+//! The parts of a set must claim disjoint Frame Type values, or the frames of
+//! one would be read as those of another. Two checks reject a set that breaks
+//! this at compile time: [`assert_frame_types_disjoint!`](crate::assert_frame_types_disjoint),
+//! which whoever composes a set writes for it and which `cargo check` already
+//! evaluates, and an assertion in the sum's [`FrameSetPart::kind_of`], which
+//! fails when the code that reads with the set is built.
 //!
-//! # Frame values and their encoding
+//! ```compile_fail
+//! use sakuya_wire::{assert_frame_types_disjoint, frame::PartSum, v1};
 //!
-//! A frame value states every detail of its encoding, and converts to bytes
-//! and back without loss: reading a frame and writing it again reproduces
-//! the bytes that were read, and writing a frame and reading it back gives
-//! the same value.
+//! // Version 1 twice claims every value twice.
+//! assert_frame_types_disjoint!(PartSum<v1::Part, v1::Part>);
+//! ```
 //!
-//! - Each variable-length integer field is a [`VarIntField`]: its value and
-//!   the width of its encoding, 1, 2, 4 or 8 bytes. Reading keeps the width
-//!   it finds; writing uses the width the field holds, which need not be the
-//!   shortest. [`VarIntField::shortest`] gives the shortest encoding that a
-//!   sender normally uses.
-//! - A Length field whose value is the length of a payload field (the Length
-//!   of CRYPTO, STREAM and DATAGRAM, the Token Length of NEW_TOKEN, the
-//!   Reason Phrase Length of CONNECTION_CLOSE) stores only its width; the
-//!   ACK Range Count of ACK likewise.
-//! - Optional fields are present or absent as the Frame Type announces them.
-//!   The Offset of STREAM is an `Option`, so a STREAM frame with the OFF bit
-//!   set and offset 0 is distinct from one without the bit.
-//! - Whether a STREAM or DATAGRAM frame has a Length field is stated by the
-//!   type parameter `L` of [`stream::StreamFrame`] and [`datagram::DatagramFrame`], a
-//!   [`LengthKind`] of one of four types: [`VarIntWidth`], for a frame with
-//!   a Length field of that width; [`NoLength`], for a frame without one,
-//!   whose data extends to the end of the packet; and
-//!   [`Either<NoLength, VarIntWidth>`](Either) and
-//!   [`Either<VarIntWidth, NoLength>`](Either), of the `either` crate, for
-//!   either of the two. `Either<NoLength, VarIntWidth>` is the default and
-//!   what reading gives, since only the Frame Type that was read tells which
-//!   it is. The kinds convert into one another with `From` as
-//!   [`LengthKind`] describes. A frame with a Length field is constructed by
-//!   `with_length`, one without by `without_length`, and a STREAM frame
-//!   whose Length field is not decided yet, of the type [`UndecidedLength`]
-//!   that has no write operation, by `new`, followed by `into_with_length`
-//!   or `into_without_length`; each of the decided kinds has its own write
-//!   operation, so a writer that knows which kind it writes states it in the
-//!   type.
-//! - An ACK frame holds its fields as encoded, and owns its ACK Ranges in
-//!   [`ack::AckRanges`]; [`ack::AckFrame::packet_ranges`] computes the
-//!   acknowledged packet numbers from them.
+//! ```compile_fail
+//! use core::marker::PhantomData;
+//! use sakuya_wire::{frame::{PartSum, codec::ReadFrameHostExt as _}, v1};
 //!
-//! The Frame Type is the exception: it must use its shortest encoding
-//! ([RFC 9000 §12.4]), so a frame value does not store its width. Reading
-//! rejects a longer encoding, and writing always uses the shortest.
+//! let mut input = &[0x01][..];
+//! let _ = input.sync_read_frame_unpin(PhantomData::<PartSum<v1::Part, v1::Part>>);
+//! ```
 //!
-//! Every frame is checked when it is constructed. Some limits tie fields of
-//! one frame together: the end of STREAM and CRYPTO data is at most
-//! 2<sup>62</sup> − 1, the width of a Length field can state the length of
-//! its payload, a NEW_TOKEN token is not empty, the Retire Prior To of
-//! NEW_CONNECTION_ID does not exceed its Sequence Number, the Reliable Size
-//! of RESET_STREAM_AT does not exceed its Final Size, no range of an ACK
-//! frame extends below packet number 0, and the ACK Range Count field of ACK
-//! can state the number of ACK Ranges. The constructors of these frame
-//! types, such as [`stream::StreamFrame::with_length`] and [`ack::AckFrame::new`],
-//! return an error for fields that break one; a DATAGRAM frame without a
-//! Length field has no such limit. The other frame types have no such limit,
-//! and their `new`, such as [`max_data::MaxDataFrame::new`], accepts any fields. The
-//! fields of every frame type are private and are read through methods of
-//! the same names, so every frame value converts to bytes and back without
-//! loss.
-//!
-//! # Reading
-//!
-//! [`codec::read_frame`] reads one frame as a `nitori_call` operation.
 //! [`Frames`] walks a packet payload held by a byte slice or `Bytes`, frame
-//! by frame, without collecting the frames first. Payload fields are chunks
-//! of the source, of the type parameter `D`: subslices of a byte slice and
-//! `Bytes` that share the storage of a `Bytes` source, so reading copies no
-//! payload. These are STREAM, CRYPTO and DATAGRAM data, NEW_TOKEN tokens and
-//! CONNECTION_CLOSE reason phrases. The ACK Ranges of an ACK frame are
-//! collected into [`ack::AckRanges`].
-//!
-//! Reading checks what the encoding alone determines: that every field is
-//! present, the limits the frame definitions state for single fields, and
-//! the limits that tie fields of one frame together. Each frame is
-//! constructed through its `new`, so a frame that was read meets the same
-//! limits as one constructed to be written. A broken limit is reported as
-//! soon as the fields it depends on are read: the end of STREAM or CRYPTO
-//! data before the data, and an ACK range below packet number 0 before the
-//! ACK Ranges that follow it. Whether a frame is allowed in the packet type,
-//! whether a stream exists or may be opened, and flow control are for the
-//! receiver of the frame to check.
-//!
-//! Each failure has a variant of its own. Besides the failures of the Frame
-//! Type, [`codec::ReadFrameError`] has a variant for each frame type, which
-//! holds the error of that type; ACK and CONNECTION_CLOSE have one for each
-//! of their two Frame Type values, whose fields differ, such as
-//! [`codec::ReadFrameError::AckEcn`] for an ACK frame with ECN counts. The
-//! error of a frame type has a variant for
-//! each field that cannot be read, named after the field, such as
-//! [`ack::codec::ReadAckFrameError::LargestAcknowledged`]; the Gap and ACK Range
-//! Length of an ACK Range carry the position of their ACK Range. Each
-//! broken limit has a variant of its own as well, named after the rule,
-//! such as
-//! [`new_connection_id::codec::ReadNewConnectionIdFrameError::RetirePriorToAboveSequenceNumber`].
-//!
-//! Every [`codec::ReadFrameError`] corresponds to FRAME_ENCODING_ERROR, with
-//! two exceptions that correspond to PROTOCOL_VIOLATION
-//! ([`codec::ReadFrameError::transport_error_code`]): a Frame Type encoded
-//! longer than necessary ([RFC 9000 §12.4]), and a DATAGRAM frame that is
-//! not enabled ([RFC 9221]).
+//! by frame, without collecting the frames first, and reports a run of
+//! PADDING frames as one frame. Payload fields are chunks of the source, of
+//! the type parameter `D` of the frames: subslices of a byte slice and `Bytes`
+//! that share the storage of a `Bytes` source, so reading copies no payload.
 //!
 //! ```
-//! use either::Either;
+//! use core::marker::PhantomData;
 //! use sakuya_wire::{
-//!     frame::{Extensions, Frame, Frames},
-//!     var_int::VarIntWidth,
+//!     frame::Frames,
+//!     v1::{self, frame::Frame},
 //! };
 //!
-//! // PING, then a STREAM frame with LEN and FIN on stream 4, whose Stream ID
-//! // takes two bytes.
-//! let payload = [0x01, 0x0b, 0x40, 0x04, 0x02, b'h', b'i'];
-//! let mut frames = Frames::new(&payload[..], Extensions::NONE);
+//! // PING, then three PADDING frames.
+//! let payload = [0x01, 0x00, 0x00, 0x00];
+//! let mut frames = Frames::new(&payload[..], PhantomData::<v1::Part>);
 //! assert!(matches!(frames.next(), Some(Ok(Frame::Ping(_)))));
-//! let Some(Ok(Frame::Stream(stream))) = frames.next() else { panic!() };
-//! assert_eq!(stream.stream_id().get().index(), 1);
-//! assert_eq!(stream.stream_id().width(), VarIntWidth::Two);
-//! assert_eq!(stream.offset(), None);
-//! assert_eq!(stream.length(), Either::Right(VarIntWidth::One));
-//! assert_eq!((*stream.data(), stream.fin()), (&b"hi"[..], true));
+//! let Some(Ok(Frame::Padding(padding))) = frames.next() else { panic!() };
+//! assert_eq!(padding.len().get(), 3);
 //! assert!(frames.next().is_none());
+//!
+//! // DATAGRAM is not a frame of version 1.
+//! let mut frames = Frames::new(&[0x30, 0x01][..], PhantomData::<v1::Part>);
+//! assert!(frames.next().unwrap().is_err());
 //! ```
 //!
-//! # Writing
+//! # Length fields
 //!
-//! Every frame type has `encoded_len` and a write operation in its module's
-//! `codec`, such as [`stream::codec::write_stream_frame`], and STREAM and DATAGRAM
-//! have one for each kind of Length field; [`codec::write_frame`] writes any
-//! [`Frame`]. Writing writes the encoding the value states and
-//! chooses nothing: the width of each field comes from the value. Every
-//! frame checked its limits when it was constructed, so writing checks
-//! nothing, and its only failure is that of the receiver: a sink that stops
-//! accepting bytes or fails keeps the bytes it accepted, and the
-//! `WriteAllError` counts them. `encoded_len`
-//! gives the length in advance, so that a packet encoder can choose frames
-//! and payload sizes before writing.
-//! The `max_data_len` of `StreamFrame<D, VarIntWidth>` and of
-//! `StreamFrame<D, NoLength>`, and [`crypto::CryptoFrame::max_data_len`], give the
-//! largest amount of data that fits a given room, taking into account that
-//! the shortest Length field grows with the data.
-//! [`ack::AckFrame::from_packet_ranges`] states packet number ranges as an ACK
-//! frame in the shortest encodings. Payload fields are written from any
-//! [`bytes::Buf`].
+//! Whether a STREAM or DATAGRAM frame has a Length field is stated by the
+//! type parameter `L` of the frame, a [`LengthKind`] of one of four types:
+//! [`VarIntWidth`], for a frame with a Length field of that width;
+//! [`NoLength`], for a frame without one, whose data extends to the end of
+//! the packet; and [`Either<NoLength, VarIntWidth>`](Either) and
+//! [`Either<VarIntWidth, NoLength>`](Either), of the `either` crate, for
+//! either of the two. A STREAM frame whose Length field is not decided yet
+//! is of the type [`UndecidedLength`], which has no write operation.
 //!
-//! A STREAM or DATAGRAM frame without a Length field extends to the end of the
-//! packet; whoever writes one must not append anything after it.
-//!
-//! # Recovery properties
-//!
-//! [`FrameType::is_ack_eliciting`] and [`FrameType::counts_in_flight`] are
-//! the per-frame facts from which [RFC 9002 §2] derives whether a packet is
-//! ack-eliciting and whether it counts as in flight.
-//!
-//! # Packet types
-//!
-//! [`FrameType::can_appear_in`] states in which packets a frame type may
-//! appear, the "Pkts" column of [RFC 9000 §12.4] Table 3. Reading a frame does
-//! not check it: the receiver of the packet does.
-//!
-//! [RFC 9000 §19]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19
+//! [RFC 9000]: https://www.rfc-editor.org/rfc/rfc9000.html
 //! [RFC 9000 §12.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.4
-//! [RFC 9221]: https://www.rfc-editor.org/rfc/rfc9221.html
-//! [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html
-//! [RFC 9002 §2]: https://www.rfc-editor.org/rfc/rfc9002.html#section-2
 use crate::{
-    v1::encryption_level::EncryptionLevel,
+    v1::{encryption_level::EncryptionLevel, role::Role, transport_error::TransportErrorCode},
     var_int::{
         VarInt, VarIntField, VarIntWidth,
         codec::{ReadVarIntError, read_var_int_field},
     },
 };
 use bytes::Buf;
-use core::{convert::Infallible, iter::FusedIterator};
+use core::{
+    convert::Infallible, error::Error, fmt, future::Future, iter::FusedIterator,
+    marker::PhantomData, ops::RangeInclusive,
+};
 use either::Either;
 use nitori_call::{Direct, Receiver, ReceiverAccess};
 use nitori_io::{Read, ReadChunk};
 use snafu::Snafu;
 
-pub mod ack;
 pub mod codec;
-pub mod connection_close;
-pub mod crypto;
-pub mod data_blocked;
-pub mod datagram;
-pub mod handshake_done;
-pub mod max_data;
-pub mod max_stream_data;
-pub mod max_streams;
-pub mod new_connection_id;
-pub mod new_token;
-pub mod padding;
-pub mod path_challenge;
-pub mod path_response;
-pub mod ping;
-pub mod reset_stream;
-pub mod reset_stream_at;
-pub mod retire_connection_id;
-pub mod stop_sending;
-pub mod stream;
-pub mod stream_data_blocked;
-pub mod streams_blocked;
 
 #[cfg(test)]
 mod tests;
 
-/// Frame Type values.
-pub(crate) mod type_value {
-    pub(crate) const PADDING: u64 = 0x00;
-    pub(crate) const PING: u64 = 0x01;
-    pub(crate) const ACK: u64 = 0x02;
-    pub(crate) const ACK_ECN: u64 = 0x03;
-    pub(crate) const RESET_STREAM: u64 = 0x04;
-    pub(crate) const STOP_SENDING: u64 = 0x05;
-    pub(crate) const CRYPTO: u64 = 0x06;
-    pub(crate) const NEW_TOKEN: u64 = 0x07;
-    pub(crate) const STREAM: u64 = 0x08;
-    pub(crate) const MAX_DATA: u64 = 0x10;
-    pub(crate) const MAX_STREAM_DATA: u64 = 0x11;
-    pub(crate) const MAX_STREAMS_BIDI: u64 = 0x12;
-    pub(crate) const MAX_STREAMS_UNI: u64 = 0x13;
-    pub(crate) const DATA_BLOCKED: u64 = 0x14;
-    pub(crate) const STREAM_DATA_BLOCKED: u64 = 0x15;
-    pub(crate) const STREAMS_BLOCKED_BIDI: u64 = 0x16;
-    pub(crate) const STREAMS_BLOCKED_UNI: u64 = 0x17;
-    pub(crate) const NEW_CONNECTION_ID: u64 = 0x18;
-    pub(crate) const RETIRE_CONNECTION_ID: u64 = 0x19;
-    pub(crate) const PATH_CHALLENGE: u64 = 0x1a;
-    pub(crate) const PATH_RESPONSE: u64 = 0x1b;
-    pub(crate) const CONNECTION_CLOSE: u64 = 0x1c;
-    pub(crate) const CONNECTION_CLOSE_APPLICATION: u64 = 0x1d;
-    pub(crate) const HANDSHAKE_DONE: u64 = 0x1e;
-    pub(crate) const RESET_STREAM_AT: u64 = 0x24;
-    pub(crate) const DATAGRAM: u64 = 0x30;
-    pub(crate) const DATAGRAM_WITH_LENGTH: u64 = 0x31;
-}
-
-/// A Frame Type value as a variable-length integer; every value above is
-/// below 2<sup>6</sup>.
-pub(crate) const fn type_var_int(value: u64) -> VarInt {
-    VarInt::from_u32(value as u32)
-}
-
-/// The length of the data of PATH_CHALLENGE and PATH_RESPONSE.
-pub const PATH_DATA_LEN: usize = 8;
-
-/// The kind of a frame, as its Frame Type field announces it.
+/// The kind of a frame, as its Frame Type field announces it, and what the
+/// kind alone determines.
 ///
-/// Several Frame Type values announce the same kind: the eight STREAM types
-/// `0x08..=0x0f`, ACK with and without ECN counts, and the bidirectional and
-/// unidirectional forms of MAX_STREAMS and STREAMS_BLOCKED. The two
-/// CONNECTION_CLOSE types are two kinds, because the packets they can appear
-/// in differ. The variants are named after the frames.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum FrameType {
-    /// PADDING, `0x00`.
-    Padding,
-    /// PING, `0x01`.
-    Ping,
-    /// ACK, `0x02` and `0x03`.
-    Ack,
-    /// RESET_STREAM, `0x04`.
-    ResetStream,
-    /// STOP_SENDING, `0x05`.
-    StopSending,
-    /// CRYPTO, `0x06`.
-    Crypto,
-    /// NEW_TOKEN, `0x07`.
-    NewToken,
-    /// STREAM, `0x08..=0x0f`.
-    Stream,
-    /// MAX_DATA, `0x10`.
-    MaxData,
-    /// MAX_STREAM_DATA, `0x11`.
-    MaxStreamData,
-    /// MAX_STREAMS, `0x12` and `0x13`.
-    MaxStreams,
-    /// DATA_BLOCKED, `0x14`.
-    DataBlocked,
-    /// STREAM_DATA_BLOCKED, `0x15`.
-    StreamDataBlocked,
-    /// STREAMS_BLOCKED, `0x16` and `0x17`.
-    StreamsBlocked,
-    /// NEW_CONNECTION_ID, `0x18`.
-    NewConnectionId,
-    /// RETIRE_CONNECTION_ID, `0x19`.
-    RetireConnectionId,
-    /// PATH_CHALLENGE, `0x1a`.
-    PathChallenge,
-    /// PATH_RESPONSE, `0x1b`.
-    PathResponse,
-    /// CONNECTION_CLOSE with an error of the QUIC layer, `0x1c`.
-    ConnectionCloseTransport,
-    /// CONNECTION_CLOSE with an error of the application, `0x1d`.
-    ConnectionCloseApplication,
-    /// HANDSHAKE_DONE, `0x1e`.
-    HandshakeDone,
-    /// RESET_STREAM_AT, `0x24`, of draft-ietf-quic-reliable-stream-reset-11.
-    ResetStreamAt,
-    /// DATAGRAM, `0x30` and `0x31`, of RFC 9221.
-    Datagram,
-}
-
-impl FrameType {
-    /// The kind a Frame Type value announces.
-    ///
-    /// This is the `const` form of `FrameType::try_from(value)`.
-    ///
-    /// # Errors
-    ///
-    /// [`UnknownFrameTypeError`] for a value neither RFC 9000 nor a
-    /// supported extension defines.
-    pub const fn of(value: VarInt) -> Result<Self, UnknownFrameTypeError> {
-        use type_value::*;
-        Ok(match value.get() {
-            PADDING => Self::Padding,
-            PING => Self::Ping,
-            ACK | ACK_ECN => Self::Ack,
-            RESET_STREAM => Self::ResetStream,
-            STOP_SENDING => Self::StopSending,
-            CRYPTO => Self::Crypto,
-            NEW_TOKEN => Self::NewToken,
-            0x08..=0x0f => Self::Stream,
-            MAX_DATA => Self::MaxData,
-            MAX_STREAM_DATA => Self::MaxStreamData,
-            MAX_STREAMS_BIDI | MAX_STREAMS_UNI => Self::MaxStreams,
-            DATA_BLOCKED => Self::DataBlocked,
-            STREAM_DATA_BLOCKED => Self::StreamDataBlocked,
-            STREAMS_BLOCKED_BIDI | STREAMS_BLOCKED_UNI => Self::StreamsBlocked,
-            NEW_CONNECTION_ID => Self::NewConnectionId,
-            RETIRE_CONNECTION_ID => Self::RetireConnectionId,
-            PATH_CHALLENGE => Self::PathChallenge,
-            PATH_RESPONSE => Self::PathResponse,
-            CONNECTION_CLOSE => Self::ConnectionCloseTransport,
-            CONNECTION_CLOSE_APPLICATION => Self::ConnectionCloseApplication,
-            HANDSHAKE_DONE => Self::HandshakeDone,
-            RESET_STREAM_AT => Self::ResetStreamAt,
-            DATAGRAM | DATAGRAM_WITH_LENGTH => Self::Datagram,
-            // Every value not matched above is unknown.
-            _ => {
-                return Err(UnknownFrameTypeError {
-                    frame_type: UnknownTypeValue(value),
-                });
-            }
-        })
-    }
-
-    /// Whether a packet containing this frame is ack-eliciting
-    /// ([RFC 9002 §2]).
-    ///
-    /// Every frame except ACK, PADDING and CONNECTION_CLOSE is ack-eliciting;
-    /// RFC 9221 §5.2 and the RESET_STREAM_AT draft state it for their frames.
-    ///
-    /// [RFC 9002 §2]: https://www.rfc-editor.org/rfc/rfc9002.html#section-2
-    pub const fn is_ack_eliciting(self) -> bool {
-        !matches!(
-            self,
-            Self::Ack
-                | Self::Padding
-                | Self::ConnectionCloseTransport
-                | Self::ConnectionCloseApplication
-        )
-    }
-
-    /// Whether a packet containing this frame counts as in flight
-    /// ([RFC 9002 §2]).
-    ///
-    /// A packet is in flight when it is ack-eliciting or contains PADDING;
-    /// this is true for every ack-eliciting frame and for PADDING, and false
-    /// for ACK and CONNECTION_CLOSE.
-    ///
-    /// [RFC 9002 §2]: https://www.rfc-editor.org/rfc/rfc9002.html#section-2
-    pub const fn counts_in_flight(self) -> bool {
-        !matches!(
-            self,
-            Self::Ack | Self::ConnectionCloseTransport | Self::ConnectionCloseApplication
-        )
-    }
-
-    /// Whether a frame of this type can appear in a packet protected at
-    /// `level`: the "Pkts" column of [RFC 9000 §12.4] Table 3.
-    ///
-    /// A packet with a frame its level does not permit is a connection error
-    /// of type PROTOCOL_VIOLATION; this method states only the rule of the
-    /// frame type, for the receiver to apply.
-    ///
-    /// - PADDING, PING: every level.
-    /// - ACK, CRYPTO: Initial, Handshake and 1-RTT.
-    /// - NEW_TOKEN, PATH_RESPONSE, HANDSHAKE_DONE: 1-RTT only.
-    /// - CONNECTION_CLOSE of type `0x1c` ([`FrameType::ConnectionCloseTransport`]):
-    ///   every level.
-    /// - CONNECTION_CLOSE of type `0x1d` ([`FrameType::ConnectionCloseApplication`]):
-    ///   0-RTT and 1-RTT. The "ih" mark of the table says that only type
-    ///   `0x1c` can appear in Initial and Handshake packets.
-    /// - Every other RFC 9000 frame: 0-RTT and 1-RTT.
-    /// - DATAGRAM: 0-RTT and 1-RTT, as STREAM ([RFC 9221 §3]).
-    /// - RESET_STREAM_AT: 0-RTT and 1-RTT. The draft calls it a RESET_STREAM
-    ///   frame with a Reliable Size field and allows the extension in 0-RTT
-    ///   packets, but gives no table of its own, so this follows RESET_STREAM.
+/// The kinds of each part implement it, and so do those of a [`PartSum`],
+/// which answer for the part they belong to.
+pub trait FrameKind: Copy + Eq {
+    /// Whether a frame of this kind can appear in a packet protected at
+    /// `level` ([RFC 9000 §12.4], Table 3).
     ///
     /// [RFC 9000 §12.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.4
-    /// [RFC 9221 §3]: https://www.rfc-editor.org/rfc/rfc9221.html#section-3
-    pub const fn can_appear_in(self, level: EncryptionLevel) -> bool {
-        use EncryptionLevel::{Handshake, Initial, OneRtt, ZeroRtt};
-        match self {
-            Self::Padding | Self::Ping | Self::ConnectionCloseTransport => true,
-            Self::Ack | Self::Crypto => matches!(level, Initial | Handshake | OneRtt),
-            Self::NewToken | Self::PathResponse | Self::HandshakeDone => {
-                matches!(level, OneRtt)
-            }
-            Self::ResetStream
-            | Self::StopSending
-            | Self::Stream
-            | Self::MaxData
-            | Self::MaxStreamData
-            | Self::MaxStreams
-            | Self::DataBlocked
-            | Self::StreamDataBlocked
-            | Self::StreamsBlocked
-            | Self::NewConnectionId
-            | Self::RetireConnectionId
-            | Self::PathChallenge
-            | Self::ResetStreamAt
-            | Self::ConnectionCloseApplication
-            | Self::Datagram => matches!(level, ZeroRtt | OneRtt),
-        }
-    }
-}
+    fn can_appear_in(self, level: EncryptionLevel) -> bool;
 
-impl TryFrom<VarInt> for FrameType {
-    type Error = UnknownFrameTypeError;
-
-    /// The kind a Frame Type value announces; see [`FrameType::of`].
-    fn try_from(value: VarInt) -> Result<Self, Self::Error> {
-        Self::of(value)
-    }
-}
-
-/// A Frame Type value is unknown: neither RFC 9000 nor a supported extension
-/// defines it.
-///
-/// [`FrameType::of`] returns it, and reading a frame reports it as
-/// [`codec::ReadFrameError::UnknownType`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(display("unknown frame type {:#x}", frame_type.get().get()))]
-pub struct UnknownFrameTypeError {
-    /// The Frame Type value.
-    pub frame_type: UnknownTypeValue,
-}
-
-/// A Frame Type value that neither RFC 9000 nor a supported extension
-/// defines; [`FrameType::of`] rejects exactly these values.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct UnknownTypeValue(VarInt);
-
-impl UnknownTypeValue {
-    /// The Frame Type value.
-    pub const fn get(self) -> VarInt {
-        self.0
-    }
-}
-
-impl From<UnknownTypeValue> for VarInt {
-    fn from(value: UnknownTypeValue) -> Self {
-        value.0
-    }
-}
-
-/// The extension frames a reader accepts.
-///
-/// Each extension is negotiated through a transport parameter. Reading
-/// rejects a frame of an extension that is not enabled with
-/// [`codec::ReadFrameError::ExtensionNotEnabled`]. Sending and receiving can
-/// be permitted separately; pass the set that applies to the direction being
-/// read.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct Extensions {
-    /// Accept DATAGRAM frames ([RFC 9221]).
+    /// Whether a packet containing a frame of this kind is ack-eliciting
+    /// ([RFC 9002 §2]).
     ///
-    /// [RFC 9221]: https://www.rfc-editor.org/rfc/rfc9221.html
-    pub datagram: bool,
-    /// Accept RESET_STREAM_AT frames (draft-ietf-quic-reliable-stream-reset-11).
-    pub reset_stream_at: bool,
+    /// [RFC 9002 §2]: https://www.rfc-editor.org/rfc/rfc9002.html#section-2
+    fn is_ack_eliciting(self) -> bool;
+
+    /// Whether a packet containing a frame of this kind counts as in flight
+    /// ([RFC 9002 §2]).
+    ///
+    /// [RFC 9002 §2]: https://www.rfc-editor.org/rfc/rfc9002.html#section-2
+    fn counts_in_flight(self) -> bool;
+
+    /// Whether this is a probing frame ([RFC 9000 §9.1]): a packet that
+    /// contains only probing frames is a probing packet.
+    ///
+    /// [RFC 9000 §9.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-9.1
+    fn is_probing(self) -> bool;
+
+    /// Whether an endpoint of `role` can receive a frame of this kind.
+    fn receivable_by(self, role: Role) -> bool;
 }
 
-impl Extensions {
-    /// No extension: only the frames of RFC 9000.
-    pub const NONE: Self = Self {
-        datagram: false,
-        reset_stream_at: false,
-    };
-
-    /// Every supported extension.
-    pub const ALL: Self = Self {
-        datagram: true,
-        reset_stream_at: true,
-    };
-
-    /// Whether frames of `frame_type` are accepted: always for RFC 9000
-    /// frames, and for extension frames when their extension is enabled.
-    pub const fn permits(self, frame_type: FrameType) -> bool {
-        match frame_type {
-            FrameType::Datagram => self.datagram,
-            FrameType::ResetStreamAt => self.reset_stream_at,
-            _ => true,
-        }
-    }
-}
-
-/// A frame of any type.
+/// A part of a frame set: the frames that version 1 or one extension
+/// defines, or a [`PartSum`] of parts.
 ///
-/// `D` is the type of the payload fields: the chunk type of the source a
-/// frame was read from, or any [`Buf`] for a frame to write.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Frame<D> {
-    /// PADDING, one or more bytes.
-    Padding(padding::PaddingFrame),
-    /// A PING frame.
-    Ping(ping::PingFrame),
-    /// An ACK frame.
-    Ack(ack::AckFrame),
-    /// A RESET_STREAM frame.
-    ResetStream(reset_stream::ResetStreamFrame),
-    /// A STOP_SENDING frame.
-    StopSending(stop_sending::StopSendingFrame),
-    /// A CRYPTO frame.
-    Crypto(crypto::CryptoFrame<D>),
-    /// A NEW_TOKEN frame.
-    NewToken(new_token::NewTokenFrame<D>),
-    /// A STREAM frame.
-    Stream(stream::StreamFrame<D>),
-    /// A MAX_DATA frame.
-    MaxData(max_data::MaxDataFrame),
-    /// A MAX_STREAM_DATA frame.
-    MaxStreamData(max_stream_data::MaxStreamDataFrame),
-    /// A MAX_STREAMS frame.
-    MaxStreams(max_streams::MaxStreamsFrame),
-    /// A DATA_BLOCKED frame.
-    DataBlocked(data_blocked::DataBlockedFrame),
-    /// A STREAM_DATA_BLOCKED frame.
-    StreamDataBlocked(stream_data_blocked::StreamDataBlockedFrame),
-    /// A STREAMS_BLOCKED frame.
-    StreamsBlocked(streams_blocked::StreamsBlockedFrame),
-    /// A NEW_CONNECTION_ID frame.
-    NewConnectionId(new_connection_id::NewConnectionIdFrame),
-    /// A RETIRE_CONNECTION_ID frame.
-    RetireConnectionId(retire_connection_id::RetireConnectionIdFrame),
-    /// A PATH_CHALLENGE frame.
-    PathChallenge(path_challenge::PathChallengeFrame),
-    /// A PATH_RESPONSE frame.
-    PathResponse(path_response::PathResponseFrame),
-    /// A CONNECTION_CLOSE frame.
-    ConnectionClose(connection_close::ConnectionCloseFrame<D>),
-    /// A HANDSHAKE_DONE frame.
-    HandshakeDone(handshake_done::HandshakeDoneFrame),
-    /// A RESET_STREAM_AT frame.
-    ResetStreamAt(reset_stream_at::ResetStreamAtFrame),
-    /// A DATAGRAM frame.
-    Datagram(datagram::DatagramFrame<D>),
+/// [`codec::read_frame`] reads a frame of a set: it looks the Frame Type up
+/// with [`kind_of`](Self::kind_of) and reads the other fields with
+/// [`read_fields`](Self::read_fields).
+pub trait FrameSetPart {
+    /// A frame of this part; `D` is the type of its payload fields.
+    type Frame<D>;
+
+    /// The kinds of the frames of this part.
+    type Kind: FrameKind;
+
+    /// The failures of reading the fields after the Frame Type; each states
+    /// the transport error it corresponds to ([`FrameFieldsError`]).
+    type FieldsError<E>;
+
+    /// The Frame Type values this part claims.
+    const FRAME_TYPE_VALUES: &'static FrameTypeValues;
+
+    /// Whether the parts this part is composed of claim disjoint Frame Type
+    /// values: always for a single part, which has no others to compare
+    /// with; a [`PartSum`] compares its two sides.
+    const PARTS_DISJOINT: bool = true;
+
+    /// The kind that the Frame Type value `value` announces, or `None` for a
+    /// value this part does not claim.
+    fn kind_of(value: VarInt) -> Option<Self::Kind>;
+
+    /// Reads the fields that follow the Frame Type `value`, of the kind
+    /// [`kind_of`](Self::kind_of) gave for it.
+    ///
+    /// The source is the rest of a packet payload; payload fields are chunks
+    /// of it.
+    fn read_fields<F, A>(
+        io: &mut A,
+        kind: Self::Kind,
+        value: VarInt,
+    ) -> impl Future<Output = Result<Self::Frame<F::Chunk>, Self::FieldsError<F::Error>>>
+    where
+        F: ReadChunk<Chunk: Default>,
+        A: ReceiverAccess<Family = F>;
 }
 
-/// Applies `$body` to the frame inside each variant of a [`Frame`].
-macro_rules! each_frame {
-    ($frame:expr, $inner:ident => $body:expr) => {
-        match $frame {
-            Frame::Padding($inner) => $body,
-            Frame::Ping($inner) => $body,
-            Frame::Ack($inner) => $body,
-            Frame::ResetStream($inner) => $body,
-            Frame::StopSending($inner) => $body,
-            Frame::Crypto($inner) => $body,
-            Frame::NewToken($inner) => $body,
-            Frame::Stream($inner) => $body,
-            Frame::MaxData($inner) => $body,
-            Frame::MaxStreamData($inner) => $body,
-            Frame::MaxStreams($inner) => $body,
-            Frame::DataBlocked($inner) => $body,
-            Frame::StreamDataBlocked($inner) => $body,
-            Frame::StreamsBlocked($inner) => $body,
-            Frame::NewConnectionId($inner) => $body,
-            Frame::RetireConnectionId($inner) => $body,
-            Frame::PathChallenge($inner) => $body,
-            Frame::PathResponse($inner) => $body,
-            Frame::ConnectionClose($inner) => $body,
-            Frame::HandshakeDone($inner) => $body,
-            Frame::ResetStreamAt($inner) => $body,
-            Frame::Datagram($inner) => $body,
+/// A failure of reading the fields of a frame after its Frame Type, as a
+/// [`FrameSetPart::FieldsError`] reports it.
+pub trait FrameFieldsError {
+    /// The Frame Type of the frame.
+    fn frame_type(&self) -> VarInt;
+
+    /// Whether the source ended within the frame.
+    fn is_incomplete(&self) -> bool;
+
+    /// The transport error the failure corresponds to.
+    fn transport_error_code(&self) -> TransportErrorCode;
+}
+
+/// A frame that [`Frames`] reads, which merges a run of PADDING frames into
+/// one.
+///
+/// PADDING is a frame of version 1; the frames of other parts keep the
+/// default, which does nothing.
+pub trait MergePadding {
+    /// If this is a PADDING frame, consumes the PADDING frames at the start
+    /// of `rest`, the rest of the payload, into it.
+    fn merge_padding(&mut self, rest: &mut impl Buf) {
+        let _ = rest;
+    }
+}
+
+/// The sum of two parts of a frame set, itself a part; and the sum of the
+/// frames, kinds and failures of those two parts.
+///
+/// A set of several parts nests sums, such as
+/// `PartSum<v1::Part, PartSum<reset_stream_at::Part, datagram::Part>>`. A
+/// frame, kind or failure of the set is one of the first part, in
+/// [`First`](Self::First), or one of the rest, in [`Rest`](Self::Rest).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PartSum<H, T> {
+    /// Of the first part.
+    First(H),
+    /// Of the rest of the parts.
+    Rest(T),
+}
+
+impl<H: FrameKind, T: FrameKind> FrameKind for PartSum<H, T> {
+    fn can_appear_in(self, level: EncryptionLevel) -> bool {
+        match self {
+            Self::First(kind) => kind.can_appear_in(level),
+            Self::Rest(kind) => kind.can_appear_in(level),
         }
+    }
+
+    fn is_ack_eliciting(self) -> bool {
+        match self {
+            Self::First(kind) => kind.is_ack_eliciting(),
+            Self::Rest(kind) => kind.is_ack_eliciting(),
+        }
+    }
+
+    fn counts_in_flight(self) -> bool {
+        match self {
+            Self::First(kind) => kind.counts_in_flight(),
+            Self::Rest(kind) => kind.counts_in_flight(),
+        }
+    }
+
+    fn is_probing(self) -> bool {
+        match self {
+            Self::First(kind) => kind.is_probing(),
+            Self::Rest(kind) => kind.is_probing(),
+        }
+    }
+
+    fn receivable_by(self, role: Role) -> bool {
+        match self {
+            Self::First(kind) => kind.receivable_by(role),
+            Self::Rest(kind) => kind.receivable_by(role),
+        }
+    }
+}
+
+impl<H: FrameSetPart, T: FrameSetPart> FrameSetPart for PartSum<H, T> {
+    type Frame<D> = PartSum<H::Frame<D>, T::Frame<D>>;
+    type Kind = PartSum<H::Kind, T::Kind>;
+    type FieldsError<E> = PartSum<H::FieldsError<E>, T::FieldsError<E>>;
+
+    const FRAME_TYPE_VALUES: &'static FrameTypeValues =
+        &FrameTypeValues::join(H::FRAME_TYPE_VALUES, T::FRAME_TYPE_VALUES);
+
+    const PARTS_DISJOINT: bool = H::PARTS_DISJOINT
+        && T::PARTS_DISJOINT
+        && H::FRAME_TYPE_VALUES.is_disjoint(T::FRAME_TYPE_VALUES);
+
+    fn kind_of(value: VarInt) -> Option<Self::Kind> {
+        // Evaluated when the function is generated for a concrete set, so a
+        // set whose parts overlap does not build. Each nested sum checks its
+        // own two sides.
+        const {
+            assert!(
+                H::FRAME_TYPE_VALUES.is_disjoint(T::FRAME_TYPE_VALUES),
+                "two parts of the frame set claim the same Frame Type value"
+            );
+        }
+        H::kind_of(value)
+            .map(PartSum::First)
+            .or_else(|| T::kind_of(value).map(PartSum::Rest))
+    }
+
+    async fn read_fields<F, A>(
+        io: &mut A,
+        kind: Self::Kind,
+        value: VarInt,
+    ) -> Result<Self::Frame<F::Chunk>, Self::FieldsError<F::Error>>
+    where
+        F: ReadChunk<Chunk: Default>,
+        A: ReceiverAccess<Family = F>,
+    {
+        match kind {
+            PartSum::First(kind) => H::read_fields(io, kind, value)
+                .await
+                .map(PartSum::First)
+                .map_err(PartSum::First),
+            PartSum::Rest(kind) => T::read_fields(io, kind, value)
+                .await
+                .map(PartSum::Rest)
+                .map_err(PartSum::Rest),
+        }
+    }
+}
+
+impl<H: MergePadding, T: MergePadding> MergePadding for PartSum<H, T> {
+    fn merge_padding(&mut self, rest: &mut impl Buf) {
+        match self {
+            Self::First(frame) => frame.merge_padding(rest),
+            Self::Rest(frame) => frame.merge_padding(rest),
+        }
+    }
+}
+
+impl<H: FrameFieldsError, T: FrameFieldsError> FrameFieldsError for PartSum<H, T> {
+    fn frame_type(&self) -> VarInt {
+        match self {
+            Self::First(error) => error.frame_type(),
+            Self::Rest(error) => error.frame_type(),
+        }
+    }
+
+    fn is_incomplete(&self) -> bool {
+        match self {
+            Self::First(error) => error.is_incomplete(),
+            Self::Rest(error) => error.is_incomplete(),
+        }
+    }
+
+    fn transport_error_code(&self) -> TransportErrorCode {
+        match self {
+            Self::First(error) => error.transport_error_code(),
+            Self::Rest(error) => error.transport_error_code(),
+        }
+    }
+}
+
+/// A failure of one of the parts displays as that failure.
+impl<H: fmt::Display, T: fmt::Display> fmt::Display for PartSum<H, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::First(error) => error.fmt(f),
+            Self::Rest(error) => error.fmt(f),
+        }
+    }
+}
+
+/// A failure of one of the parts is that failure, with its source.
+impl<H: Error, T: Error> Error for PartSum<H, T> {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::First(error) => error.source(),
+            Self::Rest(error) => error.source(),
+        }
+    }
+}
+
+/// The Frame Type values a part claims: ranges of values, or for a
+/// [`PartSum`] those of its two sides.
+#[derive(Debug)]
+pub struct FrameTypeValues(Values);
+
+#[derive(Debug)]
+enum Values {
+    Ranges(&'static [RangeInclusive<VarInt>]),
+    Join(&'static FrameTypeValues, &'static FrameTypeValues),
+}
+
+impl FrameTypeValues {
+    /// The values in `ranges`; an empty range claims no value.
+    pub const fn new(ranges: &'static [RangeInclusive<VarInt>]) -> Self {
+        Self(Values::Ranges(ranges))
+    }
+
+    /// The values of `first` and those of `rest`.
+    const fn join(first: &'static Self, rest: &'static Self) -> Self {
+        Self(Values::Join(first, rest))
+    }
+
+    /// Whether no value is in both `self` and `other`.
+    pub const fn is_disjoint(&self, other: &Self) -> bool {
+        match self.0 {
+            Values::Ranges(ranges) => {
+                let mut index = 0;
+                while index < ranges.len() {
+                    if !other.excludes(&ranges[index]) {
+                        return false;
+                    }
+                    index += 1;
+                }
+                true
+            }
+            Values::Join(first, rest) => first.is_disjoint(other) && rest.is_disjoint(other),
+        }
+    }
+
+    /// Whether no value of `range` is in `self`.
+    const fn excludes(&self, range: &RangeInclusive<VarInt>) -> bool {
+        match self.0 {
+            Values::Ranges(ranges) => {
+                let (start, end) = (range.start().get(), range.end().get());
+                let mut index = 0;
+                while index < ranges.len() {
+                    let (other_start, other_end) =
+                        (ranges[index].start().get(), ranges[index].end().get());
+                    if start <= end
+                        && other_start <= other_end
+                        && start <= other_end
+                        && other_start <= end
+                    {
+                        return false;
+                    }
+                    index += 1;
+                }
+                true
+            }
+            Values::Join(first, rest) => first.excludes(range) && rest.excludes(range),
+        }
+    }
+
+    /// Whether `value` is in `self`.
+    #[cfg(test)]
+    pub(crate) const fn contains(&self, value: VarInt) -> bool {
+        !self.excludes(&RangeInclusive::new(value, value))
+    }
+}
+
+/// Asserts at compile time that the parts of a frame set claim disjoint
+/// Frame Type values ([`FrameSetPart::PARTS_DISJOINT`]).
+///
+/// Whoever composes a frame set writes it for the set's type; `cargo check`
+/// reports a set whose parts overlap.
+///
+/// ```
+/// use sakuya_wire::{assert_frame_types_disjoint, v1};
+///
+/// assert_frame_types_disjoint!(v1::Part);
+/// ```
+#[macro_export]
+macro_rules! assert_frame_types_disjoint {
+    ($set:ty) => {
+        const _: () = ::core::assert!(
+            <$set as $crate::frame::FrameSetPart>::PARTS_DISJOINT,
+            "two parts of the frame set claim the same Frame Type value"
+        );
     };
 }
 
-impl<D> Frame<D> {
-    /// The kind of the frame.
-    pub fn frame_type(&self) -> FrameType {
-        match self {
-            Self::Padding(_) => FrameType::Padding,
-            Self::Ping(_) => FrameType::Ping,
-            Self::Ack(_) => FrameType::Ack,
-            Self::ResetStream(_) => FrameType::ResetStream,
-            Self::StopSending(_) => FrameType::StopSending,
-            Self::Crypto(_) => FrameType::Crypto,
-            Self::NewToken(_) => FrameType::NewToken,
-            Self::Stream(_) => FrameType::Stream,
-            Self::MaxData(_) => FrameType::MaxData,
-            Self::MaxStreamData(_) => FrameType::MaxStreamData,
-            Self::MaxStreams(_) => FrameType::MaxStreams,
-            Self::DataBlocked(_) => FrameType::DataBlocked,
-            Self::StreamDataBlocked(_) => FrameType::StreamDataBlocked,
-            Self::StreamsBlocked(_) => FrameType::StreamsBlocked,
-            Self::NewConnectionId(_) => FrameType::NewConnectionId,
-            Self::RetireConnectionId(_) => FrameType::RetireConnectionId,
-            Self::PathChallenge(_) => FrameType::PathChallenge,
-            Self::PathResponse(_) => FrameType::PathResponse,
-            Self::ConnectionClose(frame) => match frame.error_code() {
-                connection_close::CloseErrorCode::Transport { .. } => {
-                    FrameType::ConnectionCloseTransport
-                }
-                connection_close::CloseErrorCode::Application { .. } => {
-                    FrameType::ConnectionCloseApplication
-                }
-            },
-            Self::HandshakeDone(_) => FrameType::HandshakeDone,
-            Self::ResetStreamAt(_) => FrameType::ResetStreamAt,
-            Self::Datagram(_) => FrameType::Datagram,
-        }
-    }
-
-    /// Whether a packet containing this frame is ack-eliciting; see
-    /// [`FrameType::is_ack_eliciting`].
-    pub fn is_ack_eliciting(&self) -> bool {
-        self.frame_type().is_ack_eliciting()
-    }
-
-    /// Whether a packet containing this frame counts as in flight; see
-    /// [`FrameType::counts_in_flight`].
-    pub fn counts_in_flight(&self) -> bool {
-        self.frame_type().counts_in_flight()
-    }
-
-    /// The Frame Type value [`codec::write_frame`] writes.
-    pub fn type_value(&self) -> VarInt {
-        each_frame!(self, frame => frame.type_value())
-    }
-}
-
-impl<D: Buf> Frame<D> {
-    /// The number of bytes [`codec::write_frame`] writes.
-    pub fn encoded_len(&self) -> usize {
-        each_frame!(self, frame => frame.encoded_len())
-    }
+/// A Frame Type value below 2<sup>6</sup> as a variable-length integer.
+pub(crate) const fn type_var_int(value: u64) -> VarInt {
+    VarInt::from_u32(value as u32)
 }
 
 /// The absence of a Length field in a STREAM or DATAGRAM frame: the data
@@ -679,12 +470,12 @@ impl<D: Buf> Frame<D> {
 pub struct NoLength;
 
 /// A STREAM frame whose Length field is not decided yet, as the type
-/// parameter `L` of [`stream::StreamFrame`].
+/// parameter `L` of [`StreamFrame`](crate::v1::frame::stream::StreamFrame).
 ///
 /// It is not a [`LengthKind`]: a frame of this kind has no write operation, so
 /// the types stop a frame from being written before its Length field is
-/// decided. [`StreamFrame::into_with_length`](stream::StreamFrame::into_with_length)
-/// and [`StreamFrame::into_without_length`](stream::StreamFrame::into_without_length)
+/// decided. [`StreamFrame::into_with_length`](crate::v1::frame::stream::StreamFrame::into_with_length)
+/// and [`StreamFrame::into_without_length`](crate::v1::frame::stream::StreamFrame::into_without_length)
 /// decide it. Reading never gives this kind.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct UndecidedLength;
@@ -701,7 +492,8 @@ mod sealed {
 }
 
 /// What a STREAM or DATAGRAM frame states about its Length field, as the
-/// type parameter `L` of [`stream::StreamFrame`] and [`datagram::DatagramFrame`].
+/// type parameter `L` of [`StreamFrame`](crate::v1::frame::stream::StreamFrame)
+/// and of `DatagramFrame` in the `datagram` extension.
 ///
 /// It is implemented by exactly four types:
 ///
@@ -953,32 +745,32 @@ impl<const N: usize> Head<N> {
     }
 }
 
-/// Iterates over the frames of a packet payload held by a memory source such
-/// as a byte slice or `Bytes`, reading each when it is reached.
+/// Iterates over the frames of the frame set `P` in a packet payload held by
+/// a memory source such as a byte slice or `Bytes`, reading each when it is
+/// reached.
 ///
 /// Each item is a frame or the error that ends the iteration; after an error
 /// the iterator yields `None`. Consecutive PADDING frames are reported as one
-/// [`padding::PaddingFrame`]. Payload fields are chunks of the source; see the
+/// frame ([`MergePadding`]). Payload fields are chunks of the source; see the
 /// [module documentation](self).
 #[derive(Clone, Debug)]
-pub struct Frames<H> {
+pub struct Frames<H, P> {
     source: H,
     consumed: usize,
     start: usize,
-    extensions: Extensions,
     failed: bool,
+    part: PhantomData<P>,
 }
 
-impl<H: Buf> Frames<H> {
-    /// Iterates over the frames of `payload`, accepting the extension frames
-    /// in `extensions`.
-    pub fn new(payload: H, extensions: Extensions) -> Self {
+impl<H: Buf, P> Frames<H, P> {
+    /// Iterates over the frames of `payload`, of the frame set `P`.
+    pub fn new(payload: H, part: PhantomData<P>) -> Self {
         Self {
             source: payload,
             consumed: 0,
             start: 0,
-            extensions,
             failed: false,
+            part,
         }
     }
 
@@ -1000,14 +792,18 @@ impl<H: Buf> Frames<H> {
     }
 }
 
-impl<H> Iterator for Frames<H>
+impl<H, P> Iterator for Frames<H, P>
 where
     H: Buf + Receiver<Family = Direct<H>> + Unpin,
     Direct<H>: ReadChunk<Chunk: Default>,
+    P: FrameSetPart<Frame<<Direct<H> as ReadChunk>::Chunk>: MergePadding>,
 {
     type Item = Result<
-        Frame<<Direct<H> as ReadChunk>::Chunk>,
-        codec::ReadFrameError<<Direct<H> as Read>::Error>,
+        P::Frame<<Direct<H> as ReadChunk>::Chunk>,
+        codec::ReadFrameError<
+            <Direct<H> as Read>::Error,
+            P::FieldsError<<Direct<H> as Read>::Error>,
+        >,
     >;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -1017,10 +813,10 @@ where
         }
         self.start = self.consumed;
         let before = self.source.remaining();
-        let result = self.source.sync_read_frame_unpin(self.extensions);
-        let result = result.map(|frame| match frame {
-            Frame::Padding(padding) => Frame::Padding(padding.extend(skip_zeros(&mut self.source))),
-            frame => frame,
+        let result = self.source.sync_read_frame_unpin(self.part);
+        let result = result.map(|mut frame| {
+            frame.merge_padding(&mut self.source);
+            frame
         });
         self.consumed += before - self.source.remaining();
         if result.is_err() {
@@ -1032,25 +828,10 @@ where
     }
 }
 
-impl<H> FusedIterator for Frames<H>
+impl<H, P> FusedIterator for Frames<H, P>
 where
     H: Buf + Receiver<Family = Direct<H>> + Unpin,
     Direct<H>: ReadChunk<Chunk: Default>,
+    P: FrameSetPart<Frame<<Direct<H> as ReadChunk>::Chunk>: MergePadding>,
 {
-}
-
-/// Consumes the zero bytes at the start of `source`, each a PADDING frame,
-/// and returns how many there were.
-fn skip_zeros(source: &mut impl Buf) -> usize {
-    let mut count = 0;
-    loop {
-        let chunk = source.chunk();
-        let zeros = chunk.iter().take_while(|&&byte| byte == 0).count();
-        let whole_chunk = zeros == chunk.len();
-        source.advance(zeros);
-        count += zeros;
-        if zeros == 0 || !whole_chunk {
-            return count;
-        }
-    }
 }

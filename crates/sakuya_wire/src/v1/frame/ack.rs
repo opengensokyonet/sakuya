@@ -16,7 +16,8 @@
 //! for a sender: it states packet number ranges in the shortest encodings.
 //!
 //! [RFC 9000 §19.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.3
-use super::{type_value, type_var_int};
+use super::{FrameType, type_value};
+use crate::frame::type_var_int;
 use crate::{
     v1::packet_number::PacketNumber,
     var_int::{VarInt, VarIntField, VarIntWidth},
@@ -223,6 +224,11 @@ impl AckFrame {
         self.ecn_counts
     }
 
+    /// The kind of the frame, [`FrameType::Ack`].
+    pub const fn frame_type(&self) -> FrameType {
+        FrameType::Ack
+    }
+
     /// The Frame Type value: `0x03` with ECN counts, `0x02` without.
     pub const fn type_value(&self) -> VarInt {
         type_value_of(self.ecn_counts.is_some())
@@ -251,7 +257,7 @@ impl AckFrame {
     /// with its width: Frame Type, Largest Acknowledged, ACK Delay, ACK Range
     /// Count, First ACK Range, the Gap and ACK Range Length of each ACK
     /// Range, and the ECN counts.
-    pub(crate) fn fields(&self) -> impl Iterator<Item = (VarInt, VarIntWidth)> + Clone {
+    pub(in crate::v1) fn fields(&self) -> impl Iterator<Item = (VarInt, VarIntWidth)> + Clone {
         fn pair<T: Copy + Into<VarInt> + TryFrom<VarInt>>(
             field: VarIntField<T>,
         ) -> (VarInt, VarIntWidth) {
@@ -402,7 +408,7 @@ fn next_range(previous: PacketNumber, range: AckRange) -> Option<RangeInclusive<
 
 /// The Frame Type value of an ACK frame with ECN counts if `ecn_counts` is
 /// set: `0x03`, or `0x02` without.
-pub(crate) const fn type_value_of(ecn_counts: bool) -> VarInt {
+pub(in crate::v1) const fn type_value_of(ecn_counts: bool) -> VarInt {
     type_var_int(if ecn_counts {
         type_value::ACK_ECN
     } else {
@@ -546,7 +552,7 @@ pub mod codec {
     ///
     /// Each range is checked as soon as its fields are read, so a range that
     /// extends below packet number 0 is reported before the rest is read.
-    pub(crate) async fn read_ack_frame<F: Read, A: ReceiverAccess<Family = F>>(
+    pub(in crate::v1) async fn read_ack_frame<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
     ) -> Result<AckFrame, ReadAckFrameError<F::Error>> {
         Ok(read_ack_frame_fields(io).await?.into_ack(None))
@@ -554,7 +560,7 @@ pub mod codec {
 
     /// Reads the fields that follow the Frame Type of an ACK frame of type
     /// `0x03`, with ECN counts; ranges are checked as [`read_ack_frame`] does.
-    pub(crate) async fn read_ack_frame_ecn<F: Read, A: ReceiverAccess<Family = F>>(
+    pub(in crate::v1) async fn read_ack_frame_ecn<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
     ) -> Result<AckFrame, ReadAckFrameEcnError<F::Error>> {
         use read_ack_ecn_error::*;
@@ -639,7 +645,7 @@ pub mod codec {
     /// Failures of reading an ACK frame of type `0x02`, and of reading the
     /// fields before the ECN counts of type `0x03`.
     #[derive(Debug, Snafu)]
-    #[snafu(module(read_ack_error), visibility(pub(crate)))]
+    #[snafu(module(read_ack_error), visibility(pub(in crate::v1)))]
     pub enum ReadAckFrameError<E> {
         /// The Largest Acknowledged field could not be read.
         #[snafu(display("ACK Largest Acknowledged read failed"))]
@@ -691,7 +697,7 @@ pub mod codec {
 
     impl<E> ReadAckFrameError<E> {
         /// Whether the source ended within the frame.
-        pub(crate) fn is_incomplete(&self) -> bool {
+        pub(in crate::v1) fn is_incomplete(&self) -> bool {
             match self {
                 Self::LargestAcknowledged { source }
                 | Self::AckDelay { source }
@@ -706,7 +712,7 @@ pub mod codec {
 
     /// Failures of reading an ACK frame of type `0x03`, with ECN counts.
     #[derive(Debug, Snafu)]
-    #[snafu(module(read_ack_ecn_error), visibility(pub(crate)))]
+    #[snafu(module(read_ack_ecn_error), visibility(pub(in crate::v1)))]
     pub enum ReadAckFrameEcnError<E> {
         /// A field before the ECN counts could not be read, or a range
         /// extends below packet number 0.
@@ -737,7 +743,7 @@ pub mod codec {
 
     impl<E> ReadAckFrameEcnError<E> {
         /// Whether the source ended within the frame.
-        pub(crate) fn is_incomplete(&self) -> bool {
+        pub(in crate::v1) fn is_incomplete(&self) -> bool {
             match self {
                 Self::Ack { source } => source.is_incomplete(),
                 Self::Ect0Count { source }

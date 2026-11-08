@@ -13,3 +13,9 @@ nitori_call.workspace = true
 nitori_io.workspace = true
 snafu.workspace = true
 subtle.workspace = true
+
+[features]
+# Each extension of QUIC version 1 is a feature of the same name that
+# compiles its module; none is enabled by default.
+datagram = []
+reset_stream_at = []

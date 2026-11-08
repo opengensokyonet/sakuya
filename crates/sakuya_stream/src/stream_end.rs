@@ -9,7 +9,7 @@
 //! - [`ResetCodeChangeError`]: the error code of a reset does not change.
 //!
 //! The rule that a reliable size is at most the final size is
-//! [`ReliableSizeError`](sakuya_wire::frame::reset_stream_at::ReliableSizeError).
+//! [`ReliableSizeError`](sakuya_wire::reset_stream_at::ReliableSizeError).
 //!
 //! Each error has private fields and is constructed only by its `check` when
 //! the check fails, so it holds only values for which the rule fails.

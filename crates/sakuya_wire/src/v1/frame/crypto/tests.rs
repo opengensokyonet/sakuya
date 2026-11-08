@@ -2,10 +2,15 @@ use super::{
     CryptoFrame,
     codec::{ReadCryptoFrameError, WriteCryptoFrameHostExt as _},
 };
+use crate::v1::frame::codec::ReadFieldsError;
+use crate::v1::frame::tests::V1;
 use crate::{
     frame::{
-        DataEndError, Extensions, Frame, InvalidDataError, LengthError,
+        DataEndError, InvalidDataError, LengthError,
         codec::{ReadFrameError, ReadFrameHostExt as _},
+    },
+    v1::frame::{
+        Frame,
         tests::{assert_round_trip, check_max, length_field, short, vi, wide},
     },
     var_int::{VarInt, VarIntWidth},
@@ -42,11 +47,11 @@ fn data_ending_beyond_2_62_is_rejected() {
     let expected = DataEndError::check(vi(max - 1), 2).unwrap_err();
     let mut input = encoding.as_slice();
     assert!(matches!(
-        input.sync_read_frame_unpin(Extensions::NONE),
-        Err(ReadFrameError::Crypto {
+        input.sync_read_frame_unpin(V1),
+        Err(ReadFrameError::Fields { source: ReadFieldsError::Crypto {
             source: ReadCryptoFrameError::DataEnd { source },
             ..
-        }) if source == expected
+        } }) if source == expected
     ));
 
     // Construction rejects the same fields.

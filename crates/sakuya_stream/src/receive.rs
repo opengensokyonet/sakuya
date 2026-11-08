@@ -71,7 +71,7 @@ use bytes::Bytes;
 use flow_control::{ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView};
 use read::{ReadError, RemoteReset, SharedTerminationReason};
 use received_ranges::ReceivedRanges;
-use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
+use sakuya_wire::reset_stream_at::ReliableSizeError;
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
 use sakuya_wire::var_int::VarInt;
 use termination::{ReceiveTerminationPolicy, ResetPresentation, TerminationEvent, TerminationView};

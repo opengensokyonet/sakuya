@@ -4,6 +4,7 @@
 
 #![cfg(feature = "ring")]
 
+use core::marker::PhantomData;
 use sakuya_packet_protection::backend::AeadAlgorithm;
 use sakuya_packet_protection::backend::KdfAlgorithm;
 use sakuya_packet_protection::backend::ring::RingBackend;
@@ -13,7 +14,7 @@ use sakuya_packet_protection::packet_key::PacketKey;
 use sakuya_packet_protection::retry::verify_retry_integrity_tag;
 use sakuya_packet_protection::secret::TrafficSecret;
 use sakuya_wire::connection_id::{ConnectionId, ConnectionIdLength};
-use sakuya_wire::frame::{Extensions, Frame, Frames};
+use sakuya_wire::frame::Frames;
 use sakuya_wire::header::codec::{ReadLongHeaderHostExt as _, ReadShortHeaderHostExt as _};
 use sakuya_wire::v1::header::codec::ReadLongPacketHostExt as _;
 use sakuya_wire::v1::header::{LongPacketType, TypeFields};
@@ -21,6 +22,7 @@ use sakuya_wire::v1::packet_number::PacketNumber;
 use sakuya_wire::v1::role::Role;
 use sakuya_wire::v1::stream_count::StreamCount;
 use sakuya_wire::v1::transport_parameters::codec::ReadTransportParametersHostExt as _;
+use sakuya_wire::v1::{self, frame::Frame};
 use sakuya_wire::var_int::VarInt;
 
 fn hex(text: &str) -> Vec<u8> {
@@ -78,7 +80,7 @@ fn a2_client_initial_end_to_end() {
     let payload = open_initial(&protected, &secrets.client, 2);
     assert_eq!(payload.len(), 1162);
 
-    let mut frames = Frames::new(payload.as_slice(), Extensions::NONE);
+    let mut frames = Frames::new(payload.as_slice(), PhantomData::<v1::Part>);
     let Some(Ok(Frame::Crypto(crypto))) = frames.next() else {
         panic!("the payload starts with a CRYPTO frame")
     };
@@ -126,7 +128,7 @@ fn a3_server_initial_end_to_end() {
     let secrets = InitialSecrets::derive(&RingBackend, &dcid);
     let payload = open_initial(&protected, &secrets.server, 1);
 
-    let mut frames = Frames::new(payload.as_slice(), Extensions::NONE);
+    let mut frames = Frames::new(payload.as_slice(), PhantomData::<v1::Part>);
     let Some(Ok(Frame::Ack(ack))) = frames.next() else {
         panic!("the payload starts with an ACK frame")
     };
@@ -196,7 +198,7 @@ fn a5_short_header_end_to_end() {
     assert_eq!(number.get(), 654_360_564);
     let header_len = header.packet_number_offset() + truncated.encoded_len().get();
     let payload = key.open(number, &mut private, header_len).unwrap();
-    let mut frames = Frames::new(&*payload, Extensions::NONE);
+    let mut frames = Frames::new(&*payload, PhantomData::<v1::Part>);
     assert!(matches!(frames.next(), Some(Ok(Frame::Ping(_)))));
     assert!(frames.next().is_none());
 }

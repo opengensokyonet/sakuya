@@ -38,7 +38,7 @@ use crate::send::write::SharedWriteLimitReason;
 use crate::send_buffer::visibility::FinalSizeBelowExposureError;
 use crate::send_buffer::{FinalSizeBeyondWrittenEndError, ResetRetention, StreamSendBuffer};
 use crate::stream_end::{FinalSizeChangeError, ResetCodeChangeError};
-use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
+use sakuya_wire::reset_stream_at::ReliableSizeError;
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
 use sakuya_wire::var_int::VarInt;
 use snafu::{Report, ResultExt, Snafu, ensure};

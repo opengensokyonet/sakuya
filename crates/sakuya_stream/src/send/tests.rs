@@ -27,7 +27,7 @@ use crate::send_buffer::{
 };
 use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError};
 use bytes::{Buf, Bytes};
-use sakuya_wire::frame::reset_stream_at::ReliableSizeError;
+use sakuya_wire::reset_stream_at::ReliableSizeError;
 use sakuya_wire::var_int::VarIntWidth;
 use std::sync::Arc;
 

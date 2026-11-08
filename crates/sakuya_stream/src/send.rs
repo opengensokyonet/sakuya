@@ -35,11 +35,10 @@ use crate::send_buffer::{
 use crate::stream_end::BeyondFinalSizeError;
 use core::ops::Deref;
 use flow_control::{SendFlowContext, SendFlowControlPolicy, StreamCreditEvent};
-use sakuya_wire::frame::{
-    UndecidedLength, reset_stream::ResetStreamFrame, reset_stream_at::ResetStreamAtFrame,
-    stream::StreamFrame,
-};
+use sakuya_wire::frame::UndecidedLength;
+use sakuya_wire::reset_stream_at::ResetStreamAtFrame;
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
+use sakuya_wire::v1::frame::{reset_stream::ResetStreamFrame, stream::StreamFrame};
 use sakuya_wire::v1::stream_id::StreamId;
 use sakuya_wire::var_int::{VarInt, VarIntField};
 use snafu::{IntoError, ResultExt, Snafu};

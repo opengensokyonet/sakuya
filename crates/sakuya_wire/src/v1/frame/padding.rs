@@ -1,7 +1,8 @@
 //! PADDING frames ([RFC 9000 §19.1]).
 //!
 //! [RFC 9000 §19.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.1
-use super::{type_value, type_var_int};
+use super::{FrameType, type_value};
+use crate::frame::type_var_int;
 use crate::var_int::VarInt;
 use core::num::NonZeroUsize;
 
@@ -9,7 +10,7 @@ use core::num::NonZeroUsize;
 ///
 /// A PADDING frame is its Frame Type alone, the single byte `0x00`: like
 /// every Frame Type, it must use its shortest encoding. Reading with
-/// [`Frames`](super::Frames) reports a run of consecutive PADDING frames as
+/// [`Frames`](crate::frame::Frames) reports a run of consecutive PADDING frames as
 /// one value. Writing writes [`len`](Self::len) zero bytes, that many
 /// PADDING frames.
 ///
@@ -30,6 +31,11 @@ impl PaddingFrame {
         self.len
     }
 
+    /// The kind of the frame, [`FrameType::Padding`].
+    pub const fn frame_type(&self) -> FrameType {
+        FrameType::Padding
+    }
+
     /// The Frame Type value, zero.
     pub const fn type_value(&self) -> VarInt {
         type_var_int(type_value::PADDING)
@@ -41,7 +47,7 @@ impl PaddingFrame {
     }
 
     /// The run extended by `count` more one-byte PADDING frames.
-    pub(crate) fn extend(self, count: usize) -> Self {
+    pub(in crate::v1) fn extend(self, count: usize) -> Self {
         Self {
             len: self.len.saturating_add(count),
         }

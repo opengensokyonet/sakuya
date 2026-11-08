@@ -23,7 +23,14 @@
 //! - [`frame`]: what the frames of every part share: the kinds of Length
 //!   field, and frame sets composed of parts.
 //!
-//! Everything else that RFC 9000 defines is in [`v1`].
+//! Everything else that RFC 9000 defines is in [`v1`]. Each extension of
+//! version 1 that this crate implements has a module of its own, compiled
+//! with the feature of the same name, which no other feature enables:
+//!
+//! - `reset_stream_at`: the RESET_STREAM_AT frame of the Internet-Draft
+//!   [draft-ietf-quic-reliable-stream-reset-11], with the rule that ties its
+//!   Reliable Size to its Final Size.
+//! - `datagram`: the DATAGRAM frame of [RFC 9221].
 //!
 //! Every wire format is read and written through `nitori_call` operations, in
 //! the `codec` module of its type. They run on sources and sinks that may wait
@@ -41,14 +48,21 @@
 //!
 //! [RFC 9000]: https://www.rfc-editor.org/rfc/rfc9000.html
 //! [RFC 8999]: https://www.rfc-editor.org/rfc/rfc8999.html
+//! [RFC 9221]: https://www.rfc-editor.org/rfc/rfc9221.html
+//! [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html
 #![feature(impl_trait_in_assoc_type)]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod connection_id;
+#[cfg(feature = "datagram")]
+pub mod datagram;
 pub mod frame;
 pub mod header;
 pub mod payload;
+#[cfg(feature = "reset_stream_at")]
+pub mod reset_stream_at;
 pub mod v1;
+
 pub mod var_int;
 pub mod version;

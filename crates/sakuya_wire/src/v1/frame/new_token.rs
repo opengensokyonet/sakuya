@@ -1,7 +1,8 @@
 //! NEW_TOKEN frames ([RFC 9000 §19.7]).
 //!
 //! [RFC 9000 §19.7]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.7
-use super::{Head, LengthError, type_value, type_var_int};
+use super::{FrameType, type_value};
+use crate::frame::{Head, LengthError, type_var_int};
 use crate::var_int::{VarInt, VarIntWidth};
 use bytes::Buf;
 use snafu::Snafu;
@@ -40,6 +41,11 @@ impl<D> NewTokenFrame<D> {
         self.token
     }
 
+    /// The kind of the frame, [`FrameType::NewToken`].
+    pub const fn frame_type(&self) -> FrameType {
+        FrameType::NewToken
+    }
+
     /// The Frame Type value, `0x07`.
     pub const fn type_value(&self) -> VarInt {
         type_var_int(type_value::NEW_TOKEN)
@@ -70,7 +76,7 @@ impl<D: Buf> NewTokenFrame<D> {
     }
 
     /// The fields before the token.
-    pub(crate) fn head(&self) -> Head<9> {
+    pub(in crate::v1) fn head(&self) -> Head<9> {
         // Construction checked that the width holds the token length.
         let length = VarInt::try_from(self.token.remaining()).unwrap_or(VarInt::ZERO);
         Head::new(self.type_value()).var_int_of(length, self.token_length_width)
@@ -89,7 +95,7 @@ pub struct EmptyTokenError;
 
 impl EmptyTokenError {
     /// Checks that a token of `length` bytes is not empty.
-    pub(crate) fn check(length: usize) -> Result<(), Self> {
+    pub(in crate::v1) fn check(length: usize) -> Result<(), Self> {
         if length == 0 {
             return Err(Self);
         }
@@ -138,7 +144,7 @@ pub mod codec {
 
     /// Reads the Token Length field that follows the Frame Type, and the
     /// token as one chunk of the source.
-    pub(crate) async fn read_new_token_frame<F, A>(
+    pub(in crate::v1) async fn read_new_token_frame<F, A>(
         io: &mut A,
     ) -> Result<NewTokenFrame<F::Chunk>, ReadNewTokenFrameError<F::Error>>
     where
@@ -163,7 +169,7 @@ pub mod codec {
 
     /// Failures of reading a NEW_TOKEN frame.
     #[derive(Debug, Snafu)]
-    #[snafu(module(read_new_token_error), visibility(pub(crate)))]
+    #[snafu(module(read_new_token_error), visibility(pub(in crate::v1)))]
     pub enum ReadNewTokenFrameError<E> {
         /// The Token Length field could not be read.
         #[snafu(display("NEW_TOKEN Token Length read failed"))]
@@ -211,12 +217,14 @@ mod tests {
     use super::{
         EmptyTokenError, InvalidNewTokenError, NewTokenFrame, codec::ReadNewTokenFrameError,
     };
+    use crate::v1::frame::codec::ReadFieldsError;
+    use crate::v1::frame::tests::V1;
     use crate::{
         frame::{
-            Extensions, Frame, LengthError,
+            LengthError,
             codec::{ReadFrameError, ReadFrameHostExt as _},
-            tests::assert_round_trip,
         },
+        v1::frame::{Frame, tests::assert_round_trip},
         var_int::VarIntWidth,
     };
 
@@ -248,11 +256,13 @@ mod tests {
     fn empty_tokens_are_rejected() {
         let mut input = &[0x07, 0x00][..];
         assert!(matches!(
-            input.sync_read_frame_unpin(Extensions::NONE),
-            Err(ReadFrameError::NewToken {
-                source: ReadNewTokenFrameError::Empty {
-                    source: EmptyTokenError
-                },
+            input.sync_read_frame_unpin(V1),
+            Err(ReadFrameError::Fields {
+                source: ReadFieldsError::NewToken {
+                    source: ReadNewTokenFrameError::Empty {
+                        source: EmptyTokenError
+                    },
+                }
             })
         ));
         // Construction reports the same failure.

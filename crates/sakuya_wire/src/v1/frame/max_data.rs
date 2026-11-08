@@ -1,7 +1,8 @@
 //! MAX_DATA frames ([RFC 9000 §19.9]).
 //!
 //! [RFC 9000 §19.9]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.9
-use super::{Head, type_value, type_var_int};
+use super::{FrameType, type_value};
+use crate::frame::{Head, type_var_int};
 use crate::var_int::{VarInt, VarIntField};
 
 /// A MAX_DATA frame ([RFC 9000 §19.9]).
@@ -27,6 +28,11 @@ impl MaxDataFrame {
         self.maximum_data
     }
 
+    /// The kind of the frame, [`FrameType::MaxData`].
+    pub const fn frame_type(&self) -> FrameType {
+        FrameType::MaxData
+    }
+
     /// The Frame Type value.
     pub const fn type_value(&self) -> VarInt {
         type_var_int(type_value::MAX_DATA)
@@ -38,7 +44,7 @@ impl MaxDataFrame {
     }
 
     /// The encoded frame.
-    pub(crate) fn head(&self) -> Head<9> {
+    pub(in crate::v1) fn head(&self) -> Head<9> {
         Head::new(self.type_value()).field(self.maximum_data)
     }
 }
@@ -60,7 +66,7 @@ pub mod codec {
     use nitori_io::{calls::WriteAllError, prelude::*};
 
     /// Reads the fields that follow the Frame Type.
-    pub(crate) async fn read_max_data_frame<F: Read, A: ReceiverAccess<Family = F>>(
+    pub(in crate::v1) async fn read_max_data_frame<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
     ) -> Result<MaxDataFrame, ReadVarIntError<F::Error>> {
         Ok(MaxDataFrame::new(read_field(io).await?))
@@ -85,7 +91,7 @@ pub mod codec {
 mod tests {
     use super::MaxDataFrame;
     use crate::{
-        frame::{
+        v1::frame::{
             Frame,
             tests::{assert_bytes_round_trip, assert_round_trip},
         },

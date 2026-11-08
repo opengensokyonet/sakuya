@@ -24,6 +24,8 @@
 //!   with the header read: a packet with the protection still on
 //!   ([`protected_packet::ProtectedPacket`]), a Retry packet or a Version
 //!   Negotiation packet.
+//! - [`frame`]: the frames of version 1 ([`frame::Frame`]), the part of a
+//!   frame set that [`Part`] names.
 //! - [`transport_parameters`]: the transport parameters an endpoint sends in
 //!   the TLS handshake.
 //!
@@ -31,6 +33,7 @@
 
 pub mod application_error;
 pub mod encryption_level;
+pub mod frame;
 pub mod header;
 pub mod packet_number;
 pub mod protected_packet;
@@ -39,3 +42,11 @@ pub mod stream_count;
 pub mod stream_id;
 pub mod transport_error;
 pub mod transport_parameters;
+
+/// The frames of version 1 as a part of a frame set
+/// ([`FrameSetPart`](crate::frame::FrameSetPart)): [`frame::Frame`], of the
+/// kinds [`frame::FrameType`].
+///
+/// A frame set of version 1 alone is this part.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Part;
