@@ -21,7 +21,14 @@ use sakuya_wire::v1::header::{LongPacketType, TypeFields};
 use sakuya_wire::v1::packet_number::PacketNumber;
 use sakuya_wire::v1::role::Role;
 use sakuya_wire::v1::stream_count::StreamCount;
-use sakuya_wire::v1::transport_parameters::codec::ReadTransportParametersHostExt as _;
+use sakuya_wire::v1::transport_parameters::{
+    codec::ReadTransportParametersHostExt as _,
+    connection_id::InitialSourceConnectionId,
+    integer::{
+        InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
+        InitialMaxStreamDataUni, InitialMaxStreamsBidi, InitialMaxStreamsUni, MaxIdleTimeout,
+    },
+};
 use sakuya_wire::v1::{
     self,
     frame::{FrameRun, set::Frames},
@@ -110,18 +117,30 @@ fn a2_client_initial_end_to_end() {
     );
     let mut input = extension;
     let parameters = input
-        .sync_read_transport_parameters_unpin(Role::Client)
+        .sync_read_transport_parameters_unpin(Role::Client, PhantomData::<HList![v1::Part]>)
         .unwrap();
-    assert_eq!(parameters.initial_max_data, VarInt::MAX);
+    let initial_max_data = parameters.get::<InitialMaxData, _>().unwrap();
+    assert_eq!(initial_max_data.get(), VarInt::MAX);
     let limit = VarInt::from(65535u16);
-    assert_eq!(parameters.initial_max_stream_data_bidi_local, limit);
-    assert_eq!(parameters.initial_max_stream_data_bidi_remote, limit);
-    assert_eq!(parameters.initial_max_stream_data_uni, limit);
+    let bidi_local = parameters
+        .get::<InitialMaxStreamDataBidiLocal, _>()
+        .unwrap();
+    assert_eq!(bidi_local.get(), limit);
+    let bidi_remote = parameters
+        .get::<InitialMaxStreamDataBidiRemote, _>()
+        .unwrap();
+    assert_eq!(bidi_remote.get(), limit);
+    let uni = parameters.get::<InitialMaxStreamDataUni, _>().unwrap();
+    assert_eq!(uni.get(), limit);
     let streams = StreamCount::new(16).unwrap();
-    assert_eq!(parameters.initial_max_streams_bidi, streams);
-    assert_eq!(parameters.initial_max_streams_uni, streams);
-    assert_eq!(parameters.max_idle_timeout, VarInt::from(30000u16));
-    assert_eq!(parameters.initial_source_connection_id, Some(dcid));
+    let streams_bidi = parameters.get::<InitialMaxStreamsBidi, _>().unwrap();
+    assert_eq!(streams_bidi.get(), streams);
+    let streams_uni = parameters.get::<InitialMaxStreamsUni, _>().unwrap();
+    assert_eq!(streams_uni.get(), streams);
+    let max_idle_timeout = parameters.get::<MaxIdleTimeout, _>().unwrap();
+    assert_eq!(max_idle_timeout.get(), VarInt::from(30000u16));
+    let source_connection_id = parameters.get::<InitialSourceConnectionId, _>().unwrap();
+    assert_eq!(source_connection_id.get(), dcid);
     assert!(parameters.unknown.is_empty());
 }
 

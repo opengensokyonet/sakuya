@@ -22,8 +22,11 @@
 //! - [`payload`]: how variable-length payload fields are read.
 //! - [`frame`]: what the frames of every part share: the kinds of Length
 //!   field, and the errors of the limits that tie a payload to its length.
-//! - [`parts`]: the lists of parts that compose a frame set, and the sums of
-//!   what each part gives, types of `frunk_core`.
+//! - [`parts`]: the lists of parts that compose a frame set or a set of
+//!   parameters, and the sums of what each part gives, types of `frunk_core`.
+//! - [`parameters`]: sets of parameters keyed by ID, composed of the
+//!   parameter types of parts: a slot for each type, read and written by one
+//!   loop under the rules of a parameter space.
 //!
 //! Everything else that RFC 9000 defines is in [`v1`]. Each extension of
 //! version 1 that this crate implements has a module of its own, compiled
@@ -61,6 +64,7 @@ pub mod connection_id;
 pub mod datagram;
 pub mod frame;
 pub mod header;
+pub mod parameters;
 pub mod parts;
 pub mod payload;
 #[cfg(feature = "reset_stream_at")]

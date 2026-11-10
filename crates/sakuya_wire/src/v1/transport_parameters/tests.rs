@@ -1,13 +1,21 @@
 use super::{
-    AckDelayExponentError, ActiveConnectionIdLimitError, InvalidParameterError, MaxAckDelayError,
-    MaxUdpPayloadSizeError, ServerOnlyParameterId, TransportParameters, UnknownParameter,
-    UnknownParameterId, ValueLengthError,
+    InvalidTransportParametersError, ReservedParameterId, SentBy, ServerOnlyError,
+    TransportParameterList, TransportParameterSlots, TransportParameterSpace, TransportParameters,
     codec::{
-        ConnectionIdParameterId, IntegerParameterId, ReadTransportParametersError,
-        ReadTransportParametersHostExt as _, WriteTransportParametersError,
+        ReadTransportParametersError, ReadTransportParametersHostExt as _,
         WriteTransportParametersHostExt as _,
     },
-    id,
+    connection_id::{
+        InitialSourceConnectionId, OriginalDestinationConnectionId, RetrySourceConnectionId,
+        codec::ReadConnectionIdValueError,
+    },
+    disable_active_migration::DisableActiveMigration,
+    integer::{
+        AckDelayExponent, ActiveConnectionIdLimit, InitialMaxData, InitialMaxStreamDataBidiLocal,
+        InitialMaxStreamDataBidiRemote, InitialMaxStreamDataUni, InitialMaxStreamsBidi,
+        InitialMaxStreamsUni, MaxAckDelay, MaxIdleTimeout, MaxUdpPayloadSize,
+        codec::{ReadIntegerValueHostExt as _, WriteIntegerValueHostExt as _},
+    },
     preferred_address::{
         PreferredAddress, PreferredAddressFamilies,
         codec::{
@@ -15,19 +23,34 @@ use super::{
             WritePreferredAddressHostExt as _,
         },
     },
+    stateless_reset_token,
 };
 use crate::{
     connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken},
-    v1::role::Role,
-    v1::stream_count::StreamCount,
-    v1::transport_error::TransportErrorCode,
-    var_int::{VarInt, codec::WriteVarIntHostExt as _},
+    parameters::{
+        InvalidParametersError, KeyedParameter, ParameterList, ParameterSpace, ReadValueError,
+        UnknownParameter,
+        codec::{ReadParametersError, WriteParametersError},
+    },
+    parts::HList,
+    v1::{self, role::Role, stream_count::StreamCount, transport_error::TransportErrorCode},
+    var_int::{
+        VarInt,
+        codec::{ReadVarIntFieldError, WriteVarIntHostExt as _},
+    },
 };
 use bytes::Bytes;
 use core::{
     convert::Infallible,
+    error::Error,
+    marker::PhantomData,
     net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6},
 };
+use nitori_io::calls::ReadArrayError;
+
+type V1 = HList![v1::Part];
+type V1List = TransportParameterList<V1>;
+type ReadError = ReadTransportParametersError<Infallible>;
 
 fn vi(value: u64) -> VarInt {
     VarInt::try_from(value).unwrap()
@@ -74,12 +97,9 @@ fn preferred_address_value() -> Vec<u8> {
     value
 }
 
-fn read(
-    encoding: &[u8],
-    sender: Role,
-) -> Result<TransportParameters<&[u8]>, ReadTransportParametersError<Infallible>> {
+fn read(encoding: &[u8], sender: Role) -> Result<TransportParameters<&[u8]>, ReadError> {
     let mut input = encoding;
-    let result = input.sync_read_transport_parameters_unpin(sender);
+    let result = input.sync_read_transport_parameters_unpin(sender, PhantomData::<V1>);
     if result.is_ok() {
         assert!(input.is_empty());
     }
@@ -94,17 +114,14 @@ fn write(parameters: TransportParameters<&[u8]>, sender: Role) -> Vec<u8> {
     encoding
 }
 
-fn invalid(error: ReadTransportParametersError<Infallible>) -> InvalidParameterError {
-    match error {
-        ReadTransportParametersError::Invalid { source } => source,
-        other => panic!("{other:?}"),
-    }
-}
-
-fn write_invalid(parameters: TransportParameters<&[u8]>, sender: Role) -> InvalidParameterError {
+fn write_invalid(
+    parameters: TransportParameters<&[u8]>,
+    sender: Role,
+) -> InvalidTransportParametersError {
+    assert!(parameters.validate(sender).is_err());
     let mut buffer = Vec::new();
     match buffer.sync_write_transport_parameters_unpin(parameters, sender) {
-        Err(WriteTransportParametersError::Invalid { source }) => {
+        Err(WriteParametersError::Invalid { source }) => {
             assert!(buffer.is_empty());
             source
         }
@@ -112,42 +129,57 @@ fn write_invalid(parameters: TransportParameters<&[u8]>, sender: Role) -> Invali
     }
 }
 
-fn server_parameters() -> TransportParameters<&'static [u8]> {
-    TransportParameters {
-        original_destination_connection_id: Some(
-            ConnectionId::new(&[1, 2, 3, 4, 5, 6, 7, 8]).unwrap(),
-        ),
-        max_idle_timeout: vi(30_000),
-        stateless_reset_token: Some(StatelessResetToken::new([0x22; 16])),
-        max_udp_payload_size: vi(1472),
-        initial_max_data: vi(1 << 24),
-        initial_max_stream_data_bidi_local: vi(1 << 20),
-        initial_max_stream_data_bidi_remote: vi(1 << 19),
-        initial_max_stream_data_uni: vi(1 << 18),
-        initial_max_streams_bidi: StreamCount::MAX,
-        initial_max_streams_uni: StreamCount::new(3).unwrap(),
-        ack_delay_exponent: vi(20),
-        max_ack_delay: vi((1 << 14) - 1),
-        disable_active_migration: true,
-        preferred_address: Some(preferred_address()),
-        active_connection_id_limit: vi(8),
-        initial_source_connection_id: Some(ConnectionId::EMPTY),
-        retry_source_connection_id: Some(ConnectionId::new(&[0x77; 20]).unwrap()),
-        unknown: vec![
-            UnknownParameter {
-                id: vi(31 * 5 + 27),
-                value: b"grease",
-            },
-            UnknownParameter {
-                id: vi(0x20),
-                value: &[0x80, 0x00, 0xff, 0xff],
-            },
-            UnknownParameter {
-                id: vi(0x1d),
-                value: &[],
-            },
-        ],
+/// The failure of reading the value of the parameter type `P`, which
+/// `error` must be.
+fn value_error<P: KeyedParameter>(error: &ReadError) -> &P::ValueError {
+    assert_eq!(error.id(), Some(P::ID), "{error:?}");
+    assert!(!error.is_incomplete());
+    assert_eq!(
+        error.transport_error_code(),
+        TransportErrorCode::TRANSPORT_PARAMETER_ERROR
+    );
+    match error.value_error::<P>() {
+        Some(error) => error,
+        None => panic!("{error:?}"),
     }
+}
+
+fn connection_id(bytes: &[u8]) -> ConnectionId {
+    ConnectionId::new(bytes).unwrap()
+}
+
+fn server_parameters() -> TransportParameters<&'static [u8]> {
+    let mut parameters = TransportParameters::<&'static [u8]>::new();
+    parameters.set(OriginalDestinationConnectionId::new(connection_id(&[
+        1, 2, 3, 4, 5, 6, 7, 8,
+    ])));
+    parameters.set(MaxIdleTimeout::new(vi(30_000)));
+    parameters.set(stateless_reset_token::StatelessResetToken::new(
+        StatelessResetToken::new([0x22; 16]),
+    ));
+    parameters.set(MaxUdpPayloadSize::new(vi(1472)).unwrap());
+    parameters.set(InitialMaxData::new(vi(1 << 24)));
+    parameters.set(InitialMaxStreamDataBidiLocal::new(vi(1 << 20)));
+    parameters.set(InitialMaxStreamDataBidiRemote::new(vi(1 << 19)));
+    parameters.set(InitialMaxStreamDataUni::new(vi(1 << 18)));
+    parameters.set(InitialMaxStreamsBidi::new(StreamCount::MAX));
+    parameters.set(InitialMaxStreamsUni::new(StreamCount::new(3).unwrap()));
+    parameters.set(AckDelayExponent::new(vi(20)).unwrap());
+    parameters.set(MaxAckDelay::new(vi((1 << 14) - 1)).unwrap());
+    parameters.set(DisableActiveMigration);
+    parameters.set(preferred_address());
+    parameters.set(ActiveConnectionIdLimit::new(vi(8)).unwrap());
+    parameters.set(InitialSourceConnectionId::new(ConnectionId::EMPTY));
+    parameters.set(RetrySourceConnectionId::new(connection_id(&[0x77; 20])));
+    parameters.unknown = vec![
+        UnknownParameter::new(
+            ReservedParameterId::new(vi(31 * 5 + 27)).unwrap(),
+            &b"grease"[..],
+        ),
+        UnknownParameter::new(vi(0x20), &[0x80, 0x00, 0xff, 0xff][..]),
+        UnknownParameter::new(vi(0x1d), &[][..]),
+    ];
+    parameters
 }
 
 #[test]
@@ -155,18 +187,98 @@ fn all_parameters_round_trip() {
     let parameters = server_parameters();
     let encoding = write(parameters.clone(), Role::Server);
     assert_eq!(encoding.len(), parameters.encoded_len());
-    assert_eq!(read(&encoding, Role::Server).unwrap(), parameters);
+    let decoded = read(&encoding, Role::Server).unwrap();
+    assert_eq!(decoded, parameters);
+    // Every slot holds its parameter, each taken by its type.
+    assert_eq!(
+        decoded
+            .get::<OriginalDestinationConnectionId, _>()
+            .unwrap()
+            .get(),
+        connection_id(&[1, 2, 3, 4, 5, 6, 7, 8])
+    );
+    assert_eq!(
+        decoded.get::<MaxIdleTimeout, _>().unwrap().get(),
+        vi(30_000)
+    );
+    assert_eq!(
+        decoded
+            .get::<stateless_reset_token::StatelessResetToken, _>()
+            .unwrap()
+            .get(),
+        StatelessResetToken::new([0x22; 16])
+    );
+    assert_eq!(
+        decoded.get::<MaxUdpPayloadSize, _>().unwrap().get(),
+        vi(1472)
+    );
+    assert_eq!(
+        decoded.get::<InitialMaxData, _>().unwrap().get(),
+        vi(1 << 24)
+    );
+    assert_eq!(
+        decoded
+            .get::<InitialMaxStreamDataBidiLocal, _>()
+            .unwrap()
+            .get(),
+        vi(1 << 20)
+    );
+    assert_eq!(
+        decoded
+            .get::<InitialMaxStreamDataBidiRemote, _>()
+            .unwrap()
+            .get(),
+        vi(1 << 19)
+    );
+    assert_eq!(
+        decoded.get::<InitialMaxStreamDataUni, _>().unwrap().get(),
+        vi(1 << 18)
+    );
+    assert_eq!(
+        decoded.get::<InitialMaxStreamsBidi, _>().unwrap().get(),
+        StreamCount::MAX
+    );
+    assert_eq!(
+        decoded.get::<InitialMaxStreamsUni, _>().unwrap().get(),
+        StreamCount::new(3).unwrap()
+    );
+    assert_eq!(decoded.get::<AckDelayExponent, _>().unwrap().get(), vi(20));
+    assert_eq!(
+        decoded.get::<MaxAckDelay, _>().unwrap().get(),
+        vi((1 << 14) - 1)
+    );
+    assert_eq!(
+        decoded.get::<DisableActiveMigration, _>(),
+        Some(&DisableActiveMigration)
+    );
+    assert_eq!(
+        decoded.get::<PreferredAddress, _>(),
+        Some(&preferred_address())
+    );
+    assert_eq!(
+        decoded.get::<ActiveConnectionIdLimit, _>().unwrap().get(),
+        vi(8)
+    );
+    assert_eq!(
+        decoded.get::<InitialSourceConnectionId, _>().unwrap().get(),
+        ConnectionId::EMPTY
+    );
+    assert_eq!(
+        decoded.get::<RetrySourceConnectionId, _>().unwrap().get(),
+        connection_id(&[0x77; 20])
+    );
 
     // A `Bytes` source keeps unknown values in its own storage.
     let shared = Bytes::from(encoding.clone());
     let from_bytes = shared
         .clone()
-        .sync_read_transport_parameters_unpin(Role::Server)
+        .sync_read_transport_parameters_unpin(Role::Server, PhantomData::<V1>)
         .unwrap();
     let grease = &from_bytes.unknown[0].value;
     assert_eq!(grease, &b"grease"[..]);
     let offset = grease.as_ptr() as usize - shared.as_ptr() as usize;
     assert_eq!(shared.slice(offset..offset + 6), *grease);
+    assert_eq!(from_bytes.known, parameters.known);
 
     // An exact slice takes it; a shorter one keeps the accepted prefix.
     let mut exact = vec![0; encoding.len()];
@@ -174,45 +286,204 @@ fn all_parameters_round_trip() {
     sink.sync_write_transport_parameters_unpin(parameters.clone(), Role::Server)
         .unwrap();
     assert_eq!(exact, encoding);
-    let mut short = vec![0xee; encoding.len() - 1];
-    let mut sink = short.as_mut_slice();
-    let error = sink
-        .sync_write_transport_parameters_unpin(parameters, Role::Server)
-        .unwrap_err();
-    let WriteTransportParametersError::Write { source } = &error else {
-        panic!("{error:?}")
-    };
-    assert_eq!(source.completed(), encoding.len() - 1);
-    assert_eq!(short, encoding[..encoding.len() - 1]);
+    // The cut falls in each part of the encoding in turn: within the head or
+    // the value of a parameter with a type, and within an unknown one.
+    for cut in [1, 5, 12, encoding.len() - 20, encoding.len() - 1] {
+        let mut short = vec![0xee; cut];
+        let mut sink = short.as_mut_slice();
+        let error = sink
+            .sync_write_transport_parameters_unpin(parameters.clone(), Role::Server)
+            .unwrap_err();
+        let WriteParametersError::Write { source } = &error else {
+            panic!("{error:?}")
+        };
+        assert_eq!(source.completed(), cut);
+        assert_eq!(short, encoding[..cut]);
+    }
+}
+
+/// Each parameter alone is written as its ID, the length of its value and
+/// its value, and read back.
+#[test]
+fn each_parameter_round_trips_alone() {
+    fn check<P, I>(parameter: P, value: &[u8])
+    where
+        P: KeyedParameter<Space = TransportParameterSpace> + Clone + PartialEq + core::fmt::Debug,
+        TransportParameterSlots: crate::parts::Selector<Option<P>, I>,
+    {
+        let mut parameters = TransportParameters::<&[u8]>::new();
+        assert_eq!(parameters.set(parameter.clone()), None);
+        assert_eq!(parameter.value_len(), value.len());
+        let encoding = write(parameters.clone(), Role::Server);
+        assert_eq!(encoding, tlv(P::ID.get(), value), "{:#x}", P::ID.get());
+        assert_eq!(encoding.len(), parameters.encoded_len());
+        let decoded = read(&encoding, Role::Server).unwrap();
+        assert_eq!(decoded.get::<P, I>(), Some(&parameter));
+        assert_eq!(decoded, parameters);
+    }
+    let token = StatelessResetToken::new([0x22; 16]);
+    check(
+        OriginalDestinationConnectionId::new(connection_id(&[1, 2])),
+        &[1, 2],
+    );
+    check(MaxIdleTimeout::new(vi(30_000)), &integer(30_000));
+    check(
+        stateless_reset_token::StatelessResetToken::new(token),
+        &[0x22; 16],
+    );
+    check(MaxUdpPayloadSize::new(vi(1200)).unwrap(), &integer(1200));
+    check(
+        InitialMaxData::new(VarInt::MAX),
+        &integer(VarInt::MAX.get()),
+    );
+    check(InitialMaxStreamDataBidiLocal::new(vi(1)), &[1]);
+    check(InitialMaxStreamDataBidiRemote::new(vi(2)), &[2]);
+    check(InitialMaxStreamDataUni::new(vi(3)), &[3]);
+    check(
+        InitialMaxStreamsBidi::new(StreamCount::MAX),
+        &integer(1 << 60),
+    );
+    check(InitialMaxStreamsUni::new(StreamCount::ZERO), &[0]);
+    check(AckDelayExponent::new(vi(0)).unwrap(), &[0]);
+    check(MaxAckDelay::new(vi(100)).unwrap(), &integer(100));
+    check(DisableActiveMigration, &[]);
+    check(preferred_address(), &preferred_address_value());
+    check(ActiveConnectionIdLimit::new(vi(2)).unwrap(), &[2]);
+    check(InitialSourceConnectionId::new(ConnectionId::EMPTY), &[]);
+    check(
+        RetrySourceConnectionId::new(connection_id(&[9; 20])),
+        &[9; 20],
+    );
 }
 
 #[test]
-fn defaults_fill_absent_parameters_and_are_omitted() {
+fn absent_parameters_are_none_and_have_defaults() {
     let parameters = read(&[], Role::Client).unwrap();
-    assert_eq!(parameters, TransportParameters::default());
-    assert_eq!(parameters.max_udp_payload_size, vi(65527));
-    assert_eq!(parameters.ack_delay_exponent, vi(3));
-    assert_eq!(parameters.max_ack_delay, vi(25));
-    assert_eq!(parameters.active_connection_id_limit, vi(2));
-    assert_eq!(parameters.max_idle_timeout, VarInt::ZERO);
-    assert!(!parameters.disable_active_migration);
+    assert_eq!(parameters, TransportParameters::<&[u8]>::new());
+    assert_eq!(parameters, TransportParameters::<&[u8]>::default());
     assert_eq!(parameters.encoded_len(), 0);
+    assert!(parameters.get::<MaxUdpPayloadSize, _>().is_none());
+    assert!(parameters.get::<MaxIdleTimeout, _>().is_none());
+    assert!(parameters.get::<DisableActiveMigration, _>().is_none());
+    assert!(parameters.get::<InitialSourceConnectionId, _>().is_none());
+    assert!(parameters.unknown.is_empty());
 
-    // An explicit default value reads the same as an absent one.
-    let explicit = tlv(0x03, &integer(65527));
+    // The defaults of RFC 9000 §18.2.
     assert_eq!(
-        read(&explicit, Role::Client).unwrap(),
-        TransportParameters::default()
+        parameters.get_or_default::<MaxUdpPayloadSize, _>().get(),
+        vi(65527)
+    );
+    assert_eq!(
+        parameters.get_or_default::<AckDelayExponent, _>().get(),
+        vi(3)
+    );
+    assert_eq!(parameters.get_or_default::<MaxAckDelay, _>().get(), vi(25));
+    assert_eq!(
+        parameters
+            .get_or_default::<ActiveConnectionIdLimit, _>()
+            .get(),
+        vi(2)
+    );
+    assert_eq!(MaxIdleTimeout::default().get(), VarInt::ZERO);
+    assert_eq!(InitialMaxData::default().get(), VarInt::ZERO);
+    assert_eq!(InitialMaxStreamDataBidiLocal::default().get(), VarInt::ZERO);
+    assert_eq!(
+        InitialMaxStreamDataBidiRemote::default().get(),
+        VarInt::ZERO
+    );
+    assert_eq!(InitialMaxStreamDataUni::default().get(), VarInt::ZERO);
+    assert_eq!(InitialMaxStreamsBidi::default().get(), StreamCount::ZERO);
+    assert_eq!(InitialMaxStreamsUni::default().get(), StreamCount::ZERO);
+    // The defaults are values their types accept.
+    assert_eq!(
+        MaxUdpPayloadSize::new(vi(65527)),
+        Ok(MaxUdpPayloadSize::default())
+    );
+    assert_eq!(
+        AckDelayExponent::new(vi(3)),
+        Ok(AckDelayExponent::default())
+    );
+    assert_eq!(MaxAckDelay::new(vi(25)), Ok(MaxAckDelay::default()));
+    assert_eq!(
+        ActiveConnectionIdLimit::new(vi(2)),
+        Ok(ActiveConnectionIdLimit::default())
     );
 
-    let client = TransportParameters::<&[u8]> {
-        initial_source_connection_id: Some(ConnectionId::new(&[9; 4]).unwrap()),
-        initial_max_data: vi(100),
-        ..TransportParameters::default()
-    };
+    // Only the slots that hold a parameter are written, in the order of the
+    // list.
+    let mut client = TransportParameters::<&[u8]>::new();
+    client.set(InitialSourceConnectionId::new(connection_id(&[9; 4])));
+    client.set(InitialMaxData::new(vi(100)));
     let mut expected = tlv(0x04, &integer(100));
     expected.extend(tlv(0x0f, &[9; 4]));
     assert_eq!(write(client, Role::Client), expected);
+}
+
+/// A parameter that states the default value of its type is not an absent
+/// one: it is read as `Some`, written, and read back as `Some`.
+#[test]
+fn a_parameter_with_its_default_value_is_present() {
+    let mut encoding = tlv(0x03, &integer(65527));
+    encoding.extend(tlv(0x04, &integer(0)));
+    encoding.extend(tlv(0x0e, &integer(2)));
+    let parameters = read(&encoding, Role::Client).unwrap();
+    assert_ne!(parameters, TransportParameters::<&[u8]>::new());
+    assert_eq!(
+        parameters.get::<MaxUdpPayloadSize, _>(),
+        Some(&MaxUdpPayloadSize::default())
+    );
+    assert_eq!(
+        parameters.get::<InitialMaxData, _>(),
+        Some(&InitialMaxData::default())
+    );
+    assert_eq!(
+        parameters.get::<ActiveConnectionIdLimit, _>(),
+        Some(&ActiveConnectionIdLimit::default())
+    );
+    assert_eq!(write(parameters.clone(), Role::Client), encoding);
+    assert_eq!(read(&encoding, Role::Client).unwrap(), parameters);
+
+    let mut built = TransportParameters::<&[u8]>::new();
+    built.set(MaxAckDelay::default());
+    let written = write(built.clone(), Role::Client);
+    assert_eq!(written, tlv(0x0b, &integer(25)));
+    let decoded = read(&written, Role::Client).unwrap();
+    assert_eq!(
+        decoded.get::<MaxAckDelay, _>(),
+        Some(&MaxAckDelay::default())
+    );
+    assert_eq!(decoded, built);
+}
+
+#[test]
+fn slots_are_set_and_taken_by_type() {
+    let mut parameters = TransportParameters::<&[u8]>::new();
+    assert_eq!(parameters.set(InitialMaxData::new(vi(1))), None);
+    assert_eq!(
+        parameters.set(InitialMaxData::new(vi(2))),
+        Some(InitialMaxData::new(vi(1)))
+    );
+    *parameters.slot_mut::<MaxIdleTimeout, _>() = Some(MaxIdleTimeout::new(vi(7)));
+    assert_eq!(
+        parameters
+            .slot_mut::<InitialMaxData, _>()
+            .take()
+            .unwrap()
+            .get(),
+        vi(2)
+    );
+    assert!(parameters.get::<InitialMaxData, _>().is_none());
+    parameters.set(MaxAckDelay::new(vi(9)).unwrap());
+
+    // Several slots at once, in any order, without their positions.
+    type Taken<'a> = HList![&'a Option<MaxAckDelay>, &'a Option<MaxIdleTimeout>];
+    let (taken, _rest): (Taken<'_>, _) = parameters.known.to_ref().sculpt();
+    assert_eq!(taken.head.unwrap().get(), vi(9));
+    assert_eq!(taken.tail.head.unwrap().get(), vi(7));
+    // All the slots of a part: here the only one.
+    let (all, rest): (TransportParameterSlots<V1>, _) = parameters.known.sculpt();
+    assert_eq!(rest, crate::parts::HNil);
+    assert_eq!(all.get::<Option<MaxIdleTimeout>, _>().unwrap().get(), vi(7));
 }
 
 #[test]
@@ -222,43 +493,50 @@ fn duplicates_are_rejected() {
     let mut unknown = tlv(0x40, b"a");
     unknown.extend(tlv(0x41, b""));
     unknown.extend(tlv(0x40, b"b"));
-    for (encoding, duplicate) in [(known, 0x04), (unknown, 0x40)] {
+    // A reserved ID is an unknown parameter, and may not repeat either.
+    let mut reserved = tlv(31 * 2 + 27, b"a");
+    reserved.extend(tlv(0x04, &integer(1)));
+    reserved.extend(tlv(31 * 2 + 27, b""));
+    for (encoding, duplicate) in [(known, 0x04), (unknown, 0x40), (reserved, 31 * 2 + 27)] {
         let error = read(&encoding, Role::Server).unwrap_err();
         assert_eq!(
             error.transport_error_code(),
             TransportErrorCode::TRANSPORT_PARAMETER_ERROR
         );
-        assert_eq!(
-            invalid(error),
-            InvalidParameterError::Duplicate { id: vi(duplicate) }
-        );
+        assert!(!error.is_incomplete());
+        assert_eq!(error.id(), Some(vi(duplicate)));
+        let ReadParametersError::Duplicate { source } = error else {
+            panic!("{error:?}")
+        };
+        assert_eq!(source.id(), vi(duplicate));
     }
 
-    let mut parameters = TransportParameters::<&[u8]>::default();
-    parameters.unknown.push(UnknownParameter {
-        id: id::MAX_IDLE_TIMEOUT,
-        value: &[0x01],
-    });
+    // An unknown parameter to write may not have the ID of a type.
+    let mut parameters = TransportParameters::<&[u8]>::new();
+    parameters
+        .unknown
+        .push(UnknownParameter::new(MaxIdleTimeout::ID, &[0x01][..]));
     assert_eq!(
         parameters.validate(Role::Client),
-        Err(InvalidParameterError::Duplicate {
-            id: id::MAX_IDLE_TIMEOUT
+        Err(InvalidParametersError::ClaimedId {
+            id: MaxIdleTimeout::ID
         })
     );
-    parameters.unknown = vec![
-        UnknownParameter {
-            id: vi(0x40),
-            value: b"",
-        },
-        UnknownParameter {
-            id: vi(0x40),
-            value: b"",
-        },
-    ];
     assert_eq!(
-        write_invalid(parameters, Role::Client),
-        InvalidParameterError::Duplicate { id: vi(0x40) }
+        write_invalid(parameters.clone(), Role::Client),
+        InvalidParametersError::ClaimedId {
+            id: MaxIdleTimeout::ID
+        }
     );
+    parameters.unknown = vec![
+        UnknownParameter::new(vi(0x40), &b""[..]),
+        UnknownParameter::new(vi(0x40), &b""[..]),
+    ];
+    let InvalidParametersError::Duplicate { source } = write_invalid(parameters, Role::Client)
+    else {
+        panic!()
+    };
+    assert_eq!(source.id(), vi(0x40));
 }
 
 #[test]
@@ -271,133 +549,205 @@ fn server_only_parameters_from_a_client_are_rejected() {
     ];
     for (parameter, value) in cases {
         let encoding = tlv(parameter, &value);
-        let id = ServerOnlyParameterId::new(vi(parameter)).unwrap();
-        let error = invalid(read(&encoding, Role::Client).unwrap_err());
-        assert_eq!(error, InvalidParameterError::ServerOnly { id });
-        assert_eq!(id.get(), vi(parameter));
-        let parameters = read(&encoding, Role::Server).unwrap();
+        let error = read(&encoding, Role::Client).unwrap_err();
+        assert_eq!(error.id(), Some(vi(parameter)));
         assert_eq!(
-            write_invalid(parameters.clone(), Role::Client),
-            InvalidParameterError::ServerOnly { id }
+            error.transport_error_code(),
+            TransportErrorCode::TRANSPORT_PARAMETER_ERROR
         );
+        let ReadParametersError::NotAdmitted { source } = error else {
+            panic!("{error:?}")
+        };
+        assert_eq!(source.id(), vi(parameter));
+        assert_eq!(*source.reason(), ServerOnlyError);
+        let parameters = read(&encoding, Role::Server).unwrap();
+        let InvalidParametersError::NotAdmitted { source: invalid } =
+            write_invalid(parameters.clone(), Role::Client)
+        else {
+            panic!()
+        };
+        assert_eq!(invalid, source);
+        assert_eq!(parameters.validate(Role::Server), Ok(()));
         assert_eq!(write(parameters, Role::Server), encoding);
     }
+    // The space rejects before the value is read: a value that is not a
+    // value of the type is not looked at.
+    let error = read(&tlv(0x02, &[0; 3]), Role::Client).unwrap_err();
+    assert!(matches!(error, ReadParametersError::NotAdmitted { .. }));
+    let error = read(&tlv(0x02, &[0; 3]), Role::Server).unwrap_err();
+    assert!(matches!(error, ReadParametersError::InvalidValue { .. }));
+}
+
+/// The four parameters of RFC 9000 §18.2 that only a server may send state
+/// so, and the IDs of the list are `0x00` to `0x10` in order.
+#[test]
+fn parameter_ids_and_senders() {
+    fn id_and_sender<P: KeyedParameter<Space = TransportParameterSpace>>() -> (u64, SentBy) {
+        (P::ID.get(), P::ATTRIBUTES)
+    }
+    use SentBy::{Either, ServerOnly};
+    let parameters = [
+        (
+            id_and_sender::<OriginalDestinationConnectionId>(),
+            ServerOnly,
+        ),
+        (id_and_sender::<MaxIdleTimeout>(), Either),
+        (
+            id_and_sender::<stateless_reset_token::StatelessResetToken>(),
+            ServerOnly,
+        ),
+        (id_and_sender::<MaxUdpPayloadSize>(), Either),
+        (id_and_sender::<InitialMaxData>(), Either),
+        (id_and_sender::<InitialMaxStreamDataBidiLocal>(), Either),
+        (id_and_sender::<InitialMaxStreamDataBidiRemote>(), Either),
+        (id_and_sender::<InitialMaxStreamDataUni>(), Either),
+        (id_and_sender::<InitialMaxStreamsBidi>(), Either),
+        (id_and_sender::<InitialMaxStreamsUni>(), Either),
+        (id_and_sender::<AckDelayExponent>(), Either),
+        (id_and_sender::<MaxAckDelay>(), Either),
+        (id_and_sender::<DisableActiveMigration>(), Either),
+        (id_and_sender::<PreferredAddress>(), ServerOnly),
+        (id_and_sender::<ActiveConnectionIdLimit>(), Either),
+        (id_and_sender::<InitialSourceConnectionId>(), Either),
+        (id_and_sender::<RetrySourceConnectionId>(), ServerOnly),
+    ];
+    for (index, ((id, sent_by), expected)) in parameters.into_iter().enumerate() {
+        assert_eq!(id, index as u64);
+        assert_eq!(sent_by, expected, "{id:#x}");
+    }
+    let ids = <V1List as ParameterList<TransportParameterSpace>>::IDS;
+    for value in (0..=0x41).chain([31 * 5 + 27, VarInt::MAX.get()]) {
+        assert_eq!(ids.contains(vi(value)), value <= 0x10, "{value:#x}");
+    }
+    const { assert!(<V1List as ParameterList<TransportParameterSpace>>::DISTINCT_AND_UNRESERVED) };
+}
+
+#[test]
+fn reserved_ids_have_the_form_31_n_plus_27() {
+    let reserved = TransportParameterSpace::RESERVED;
+    for value in 0..=1000 {
+        let id = vi(value);
+        let is_reserved = value >= 27 && (value - 27) % 31 == 0;
+        assert_eq!(reserved.contains(id), is_reserved, "{value}");
+        match ReservedParameterId::new(id) {
+            Ok(reserved_id) => {
+                assert!(is_reserved);
+                assert_eq!(reserved_id.get(), id);
+                assert_eq!(VarInt::from(reserved_id), id);
+            }
+            Err(error) => {
+                assert!(!is_reserved);
+                assert_eq!(error.id(), id);
+                assert_eq!(ReservedParameterId::try_from(id), Err(error));
+            }
+        }
+    }
+    assert!(reserved.contains(vi(27)));
+    assert!(!reserved.contains(vi(26)));
+}
+
+/// A reserved ID has no type: it is kept as an unknown parameter and
+/// written back.
+#[test]
+fn reserved_parameters_are_unknown() {
+    let mut encoding = tlv(31 * 1000 + 27, b"reserved");
+    encoding.extend(tlv(27, b""));
+    let parameters = read(&encoding, Role::Client).unwrap();
+    assert_eq!(
+        parameters.unknown,
+        [
+            UnknownParameter::new(vi(31 * 1000 + 27), &b"reserved"[..]),
+            UnknownParameter::new(vi(27), &b""[..]),
+        ]
+    );
+    assert_eq!(parameters.known, TransportParameters::<&[u8]>::new().known);
+    assert_eq!(parameters.validate(Role::Client), Ok(()));
+    assert_eq!(write(parameters, Role::Client), encoding);
 }
 
 #[test]
 fn range_errors_hold_only_values_out_of_range() {
     for value in [0, 1199] {
-        let error = MaxUdpPayloadSizeError::check(vi(value)).unwrap_err();
+        let error = MaxUdpPayloadSize::new(vi(value)).unwrap_err();
         assert_eq!(error.value(), vi(value));
     }
-    assert_eq!(MaxUdpPayloadSizeError::check(vi(1200)), Ok(()));
+    assert_eq!(MaxUdpPayloadSize::new(vi(1200)).unwrap().get(), vi(1200));
     for value in [21, VarInt::MAX.get()] {
-        let error = AckDelayExponentError::check(vi(value)).unwrap_err();
+        let error = AckDelayExponent::new(vi(value)).unwrap_err();
         assert_eq!(error.value(), vi(value));
     }
-    assert_eq!(AckDelayExponentError::check(vi(20)), Ok(()));
+    assert_eq!(AckDelayExponent::new(vi(20)).unwrap().get(), vi(20));
     for value in [1 << 14, VarInt::MAX.get()] {
-        let error = MaxAckDelayError::check(vi(value)).unwrap_err();
+        let error = MaxAckDelay::new(vi(value)).unwrap_err();
         assert_eq!(error.value(), vi(value));
     }
-    assert_eq!(MaxAckDelayError::check(vi((1 << 14) - 1)), Ok(()));
-    for value in [0, 1] {
-        let error = ActiveConnectionIdLimitError::check(vi(value)).unwrap_err();
-        assert_eq!(error.value(), vi(value));
-    }
-    assert_eq!(ActiveConnectionIdLimitError::check(vi(2)), Ok(()));
-    let id = UnknownParameterId::new(vi(0x40)).unwrap();
-    assert_eq!(ValueLengthError::check(id, 1 << 20), Ok(()));
     assert_eq!(
-        MaxUdpPayloadSizeError::check(vi(1199))
-            .unwrap_err()
-            .to_string(),
+        MaxAckDelay::new(vi((1 << 14) - 1)).unwrap().get(),
+        vi((1 << 14) - 1)
+    );
+    for value in [0, 1] {
+        let error = ActiveConnectionIdLimit::new(vi(value)).unwrap_err();
+        assert_eq!(error.value(), vi(value));
+        assert_eq!(ActiveConnectionIdLimit::try_from(vi(value)), Err(error));
+    }
+    assert_eq!(ActiveConnectionIdLimit::new(vi(2)).unwrap().get(), vi(2));
+    assert_eq!(
+        MaxUdpPayloadSize::new(vi(1199)).unwrap_err().to_string(),
         "max_udp_payload_size 1199 is below 1200"
+    );
+    assert!(InitialMaxStreamsBidi::try_from(vi((1 << 60) + 1)).is_err());
+    assert_eq!(
+        InitialMaxStreamsUni::try_from(vi(1 << 60)).unwrap().get(),
+        StreamCount::MAX
     );
 }
 
+/// Reading a constrained parameter checks its range as constructing it
+/// does: the failure is that of the type, with the rejected value.
 #[test]
 fn values_out_of_range_are_rejected_by_parameter() {
-    use InvalidParameterError as E;
-    let count = |value| StreamCount::new(value).unwrap_err();
-    let cases = [
-        (
-            0x03,
-            1199,
-            1200,
-            E::MaxUdpPayloadSize {
-                source: MaxUdpPayloadSizeError::check(vi(1199)).unwrap_err(),
-            },
-        ),
-        (
-            0x08,
-            (1 << 60) + 1,
-            1 << 60,
-            E::InitialMaxStreamsBidi {
-                source: count((1 << 60) + 1),
-            },
-        ),
-        (
-            0x09,
-            (1 << 60) + 1,
-            1 << 60,
-            E::InitialMaxStreamsUni {
-                source: count((1 << 60) + 1),
-            },
-        ),
-        (
-            0x0a,
-            21,
-            20,
-            E::AckDelayExponent {
-                source: AckDelayExponentError::check(vi(21)).unwrap_err(),
-            },
-        ),
-        (
-            0x0b,
-            1 << 14,
-            (1 << 14) - 1,
-            E::MaxAckDelay {
-                source: MaxAckDelayError::check(vi(1 << 14)).unwrap_err(),
-            },
-        ),
-        (
-            0x0e,
-            1,
-            2,
-            E::ActiveConnectionIdLimit {
-                source: ActiveConnectionIdLimitError::check(vi(1)).unwrap_err(),
-            },
-        ),
-    ];
-    for (parameter, invalid_value, valid, error) in cases {
-        let read_error = read(&tlv(parameter, &integer(invalid_value)), Role::Client).unwrap_err();
-        assert_eq!(
-            read_error.transport_error_code(),
-            TransportErrorCode::TRANSPORT_PARAMETER_ERROR
-        );
-        assert_eq!(invalid(read_error), error, "{parameter:#x}");
-        let valid_encoding = tlv(parameter, &integer(valid));
-        let parameters = read(&valid_encoding, Role::Client).unwrap();
-        let mut invalid_parameters = parameters.clone();
-        match parameter {
-            0x03 => invalid_parameters.max_udp_payload_size = vi(invalid_value),
-            // A stream count above 2^60 cannot be constructed.
-            0x08 | 0x09 => {
-                assert!(StreamCount::new(invalid_value).is_err());
-                continue;
-            }
-            0x0a => invalid_parameters.ack_delay_exponent = vi(invalid_value),
-            0x0b => invalid_parameters.max_ack_delay = vi(invalid_value),
-            _ => invalid_parameters.active_connection_id_limit = vi(invalid_value),
-        }
-        assert_eq!(write_invalid(invalid_parameters, Role::Client), error);
+    fn check<P, V>(invalid: u64, valid: u64, expected: V)
+    where
+        P: KeyedParameter<
+                Space = TransportParameterSpace,
+                ValueError = ReadValueError<ReadVarIntFieldError<Infallible, V>>,
+            > + TryFrom<VarInt, Error = V>,
+        V: Error + PartialEq + 'static,
+    {
+        let error = read(&tlv(P::ID.get(), &integer(invalid)), Role::Client).unwrap_err();
+        let ReadValueError::Content {
+            source: ReadVarIntFieldError::Value { value, source },
+        } = value_error::<P>(&error)
+        else {
+            panic!("{error:?}")
+        };
+        assert_eq!(*value, vi(invalid));
+        assert_eq!(*source, expected);
+        assert_eq!(P::try_from(vi(invalid)).err(), Some(expected));
+        // The source chain reaches the broken rule.
+        let chain: &dyn Error = &error;
+        let rule = chain.source().unwrap().source().unwrap().source().unwrap();
+        assert!(rule.downcast_ref::<V>().is_some());
+        assert!(read(&tlv(P::ID.get(), &integer(valid)), Role::Client).is_ok());
+        assert!(P::try_from(vi(valid)).is_ok());
     }
+    check::<MaxUdpPayloadSize, _>(1199, 1200, MaxUdpPayloadSize::new(vi(1199)).unwrap_err());
+    let count = |value| StreamCount::new(value).unwrap_err();
+    check::<InitialMaxStreamsBidi, _>((1 << 60) + 1, 1 << 60, count((1 << 60) + 1));
+    check::<InitialMaxStreamsUni, _>((1 << 60) + 1, 1 << 60, count((1 << 60) + 1));
+    check::<AckDelayExponent, _>(21, 20, AckDelayExponent::new(vi(21)).unwrap_err());
+    check::<MaxAckDelay, _>(
+        1 << 14,
+        (1 << 14) - 1,
+        MaxAckDelay::new(vi(1 << 14)).unwrap_err(),
+    );
+    check::<ActiveConnectionIdLimit, _>(1, 2, ActiveConnectionIdLimit::new(vi(1)).unwrap_err());
 }
 
 /// A value that claims more bytes than a Transport Parameter Length field
 /// can state.
 #[cfg(target_pointer_width = "64")]
+#[derive(Clone)]
 struct Huge;
 
 #[cfg(target_pointer_width = "64")]
@@ -416,167 +766,168 @@ impl bytes::Buf for Huge {
 #[cfg(target_pointer_width = "64")]
 #[test]
 fn unknown_values_longer_than_a_length_field_states_are_rejected() {
-    let parameters = TransportParameters {
-        unknown: vec![UnknownParameter {
-            id: vi(0x40),
-            value: Huge,
-        }],
-        ..TransportParameters::default()
-    };
-    let Err(InvalidParameterError::ValueLength { source }) = parameters.validate(Role::Client)
+    let mut parameters = TransportParameters::<Huge>::new();
+    parameters
+        .unknown
+        .push(UnknownParameter::new(vi(0x40), Huge));
+    let Err(InvalidParametersError::ValueLength { source }) = parameters.validate(Role::Client)
     else {
         panic!()
     };
-    assert_eq!(source.id(), UnknownParameterId::new(vi(0x40)).unwrap());
+    assert_eq!(source.id(), vi(0x40));
     assert_eq!(source.length(), usize::MAX);
-    assert_eq!(
-        ValueLengthError::check(source.id(), usize::MAX),
-        Err(source)
-    );
-}
-
-#[test]
-fn parameter_id_sets() {
-    let integers = [
-        0x01, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0e,
-    ];
-    for value in (0..=0x41).chain([31 * 5 + 27, VarInt::MAX.get()]) {
-        let id = vi(value);
-        let server_only = matches!(value, 0x00 | 0x02 | 0x0d | 0x10);
-        let integer = integers.contains(&value);
-        let connection_id = matches!(value, 0x00 | 0x0f | 0x10);
-        let unknown = value > 0x10;
-        let some = |present: bool| present.then_some(id);
-        assert_eq!(
-            ServerOnlyParameterId::new(id).map(ServerOnlyParameterId::get),
-            some(server_only),
-            "{value:#x}"
-        );
-        assert_eq!(
-            IntegerParameterId::new(id).map(VarInt::from),
-            some(integer),
-            "{value:#x}"
-        );
-        assert_eq!(
-            ConnectionIdParameterId::new(id).map(ConnectionIdParameterId::get),
-            some(connection_id),
-            "{value:#x}"
-        );
-        assert_eq!(
-            UnknownParameterId::new(id).map(VarInt::from),
-            some(unknown),
-            "{value:#x}"
-        );
-        // The other known parameters are `stateless_reset_token`,
-        // `disable_active_migration` and `preferred_address`; the sets
-        // partition every ID.
-        let other = matches!(value, 0x02 | 0x0c | 0x0d);
-        let sets = [unknown, integer, connection_id, other];
-        assert_eq!(
-            sets.iter().filter(|&&member| member).count(),
-            1,
-            "{value:#x}"
-        );
-    }
+    let mut buffer = Vec::new();
+    let error = buffer
+        .sync_write_transport_parameters_unpin(parameters, Role::Client)
+        .unwrap_err();
+    assert!(matches!(error, WriteParametersError::Invalid { .. }));
+    assert!(buffer.is_empty());
 }
 
 /// Each integer parameter with a value that is not one integer, and each
 /// connection ID parameter with a value that is too long, names its ID.
 #[test]
 fn malformed_values_name_their_parameter() {
-    for parameter in [
-        0x01, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0e,
-    ] {
-        let error = read(&tlv(parameter, &[0x05, 0x00]), Role::Server).unwrap_err();
-        assert!(
-            matches!(
-                error,
-                ReadTransportParametersError::Integer { id, length: 2 } if id.get() == vi(parameter)
-            ),
-            "{parameter:#x}: {error:?}"
-        );
-        assert_eq!(
-            error.transport_error_code(),
-            TransportErrorCode::TRANSPORT_PARAMETER_ERROR
-        );
-    }
-    for parameter in [0x00, 0x0f, 0x10] {
-        let error = read(&tlv(parameter, &[0; 21]), Role::Server).unwrap_err();
-        assert!(
-            matches!(
-                error,
-                ReadTransportParametersError::ConnectionId {
-                    id,
-                    source,
-                } if id.get() == vi(parameter) && source.length() == 21
-            ),
-            "{parameter:#x}: {error:?}"
-        );
-        assert!(!error.is_incomplete());
-        // Twenty bytes are a connection ID.
-        let encoding = tlv(parameter, &[7; 20]);
-        let parameters = read(&encoding, Role::Server).unwrap();
-        let expected = Some(ConnectionId::new(&[7; 20]).unwrap());
-        let connection_id = match parameter {
-            0x00 => parameters.original_destination_connection_id,
-            0x0f => parameters.initial_source_connection_id,
-            _ => parameters.retry_source_connection_id,
+    fn integer_parameter<P, V>(valid: u64)
+    where
+        P: KeyedParameter<
+                Space = TransportParameterSpace,
+                ValueError = ReadValueError<ReadVarIntFieldError<Infallible, V>>,
+            >,
+        V: Error + 'static,
+    {
+        // An integer and a byte after it.
+        let mut value = integer(valid);
+        value.push(0x00);
+        let error = read(&tlv(P::ID.get(), &value), Role::Server).unwrap_err();
+        let ReadValueError::Trailing { source } = value_error::<P>(&error) else {
+            panic!("{error:?}")
         };
-        assert_eq!(connection_id, expected, "{parameter:#x}");
+        assert_eq!((source.length(), source.unread().get()), (value.len(), 1));
+        // No integer, and one cut short.
+        for value in [&[][..], &[0x40]] {
+            let error = read(&tlv(P::ID.get(), value), Role::Server).unwrap_err();
+            let ReadValueError::Content {
+                source: ReadVarIntFieldError::VarInt { source },
+            } = value_error::<P>(&error)
+            else {
+                panic!("{error:?}")
+            };
+            assert!(source.is_incomplete());
+            assert_eq!(source.completed(), value.len());
+        }
     }
+    integer_parameter::<MaxIdleTimeout, _>(5);
+    integer_parameter::<MaxUdpPayloadSize, _>(1200);
+    integer_parameter::<InitialMaxData, _>(5);
+    integer_parameter::<InitialMaxStreamDataBidiLocal, _>(5);
+    integer_parameter::<InitialMaxStreamDataBidiRemote, _>(5);
+    integer_parameter::<InitialMaxStreamDataUni, _>(5);
+    integer_parameter::<InitialMaxStreamsBidi, _>(5);
+    integer_parameter::<InitialMaxStreamsUni, _>(5);
+    integer_parameter::<AckDelayExponent, _>(5);
+    integer_parameter::<MaxAckDelay, _>(5);
+    integer_parameter::<ActiveConnectionIdLimit, _>(5);
+
+    fn connection_id_parameter<P>()
+    where
+        P: KeyedParameter<
+                Space = TransportParameterSpace,
+                ValueError = ReadValueError<ReadConnectionIdValueError<Infallible>>,
+            > + Into<ConnectionId>,
+    {
+        let error = read(&tlv(P::ID.get(), &[0; 21]), Role::Server).unwrap_err();
+        let ReadValueError::Content {
+            source: ReadConnectionIdValueError::Length { source },
+        } = value_error::<P>(&error)
+        else {
+            panic!("{error:?}")
+        };
+        assert_eq!(source.length(), 21);
+        // Twenty bytes are a connection ID, and so are none.
+        for bytes in [&[7; 20][..], &[]] {
+            let mut value = ValueSource::new(bytes);
+            let parameter = P::read_value(&mut value).unwrap();
+            assert_eq!(value.finish(), Ok(()));
+            assert_eq!(parameter.into(), connection_id(bytes));
+        }
+    }
+    use crate::parameters::ValueSource;
+    connection_id_parameter::<OriginalDestinationConnectionId>();
+    connection_id_parameter::<InitialSourceConnectionId>();
+    connection_id_parameter::<RetrySourceConnectionId>();
 }
 
 #[test]
 fn malformed_values_are_rejected_by_parameter() {
-    use ReadTransportParametersError as E;
+    type Token = stateless_reset_token::StatelessResetToken;
+    // A token cut short, and one with a byte after it.
+    let error = read(&tlv(0x02, &[0; 15]), Role::Server).unwrap_err();
+    let ReadValueError::Content { source } = value_error::<Token>(&error) else {
+        panic!("{error:?}")
+    };
+    assert!(matches!(source, ReadArrayError::Incomplete { .. }));
+    let error = read(&tlv(0x02, &[0; 17]), Role::Server).unwrap_err();
+    let ReadValueError::Trailing { source } = value_error::<Token>(&error) else {
+        panic!("{error:?}")
+    };
+    assert_eq!((source.length(), source.unread().get()), (17, 1));
+
+    // `disable_active_migration` with a value.
+    let error = read(&tlv(0x0c, &[0]), Role::Server).unwrap_err();
+    let source = value_error::<DisableActiveMigration>(&error);
+    assert_eq!((source.length(), source.unread().get()), (1, 1));
+    assert_eq!(
+        source.to_string(),
+        "parameter value of 1 bytes has 1 bytes after its content"
+    );
+
+    // A preferred address cut short, with an empty connection ID, and with
+    // a byte after it.
     let mut zero_cid_address = preferred_address_value();
     zero_cid_address[24] = 0;
     zero_cid_address.drain(25..33);
     let mut long_address = preferred_address_value();
     long_address.push(0);
-    let check = |parameter: u64, value: &[u8], expected: fn(&E<Infallible>) -> bool| {
-        let error = read(&tlv(parameter, value), Role::Server).unwrap_err();
-        assert!(expected(&error), "{parameter:#x} {value:02x?}: {error:?}");
-        assert!(!error.is_incomplete());
+    let error = read(&tlv(0x0d, &[0; 24]), Role::Server).unwrap_err();
+    assert!(matches!(
+        value_error::<PreferredAddress>(&error),
+        ReadValueError::Content {
+            source: ReadPreferredAddressError::NoAddress
+        }
+    ));
+    let error = read(&tlv(0x0d, &zero_cid_address), Role::Server).unwrap_err();
+    assert!(matches!(
+        value_error::<PreferredAddress>(&error),
+        ReadValueError::Content {
+            source: ReadPreferredAddressError::EmptyConnectionId { .. }
+        }
+    ));
+    let error = read(&tlv(0x0d, &long_address), Role::Server).unwrap_err();
+    let ReadValueError::Trailing { source } = value_error::<PreferredAddress>(&error) else {
+        panic!("{error:?}")
     };
-    check(
-        0x01,
-        &[],
-        |error| matches!(error, E::Integer { id, length: 0 } if id.get() == vi(0x01)),
-    );
-    check(0x01, &[0x05, 0x00], |error| {
-        matches!(error, E::Integer { length: 2, .. })
-    });
-    check(0x01, &[0x40], |error| {
-        matches!(error, E::Integer { length: 1, .. })
-    });
-    check(
-        0x02,
-        &[0; 15],
-        |error| matches!(error, E::StatelessResetToken { source } if source.length() == 15),
-    );
-    check(
-        0x02,
-        &[0; 17],
-        |error| matches!(error, E::StatelessResetToken { source } if source.length() == 17),
-    );
-    check(
-        0x0c,
-        &[0],
-        |error| matches!(error, E::DisableActiveMigration { length } if length.get() == 1),
-    );
+    assert_eq!((source.length(), source.unread().get()), (50, 1));
+    // The failure of another type is not the failure of this one.
+    assert!(error.value_error::<DisableActiveMigration>().is_none());
+}
 
-    check(0x0d, &[0; 24], |error| {
-        matches!(error, E::PreferredAddress { .. })
-    });
-    check(0x0d, &zero_cid_address, |error| {
-        matches!(error, E::PreferredAddress { .. })
-    });
-    check(
-        0x0d,
-        &long_address,
-        |error| matches!(error, E::PreferredAddressLength { source } if source.length() == 50),
-    );
+/// The value operations of the integer parameters read one integer of any
+/// width into the type and write its shortest encoding.
+#[test]
+fn integer_values_are_read_and_written_by_their_operations() {
+    let mut input = &[0x40, 0x19, 0xff][..];
+    let delay: MaxAckDelay = input.sync_read_integer_value_unpin().unwrap();
+    assert_eq!(delay.get(), vi(25));
+    assert_eq!(input, [0xff]);
+    let mut output = Vec::new();
+    output.sync_write_integer_value_unpin(delay).unwrap();
+    assert_eq!(output, [0x19]);
+    let mut input = &[0x01][..];
+    assert!(matches!(
+        input.sync_read_integer_value_unpin::<ActiveConnectionIdLimit>(),
+        Err(ReadVarIntFieldError::Value { .. })
+    ));
 }
 
 /// RFC 9000 §18.2: an all-zero address and port stands for a family without
@@ -589,18 +940,13 @@ fn preferred_address_needs_an_address_of_some_family() {
     let error = read(&tlv(0x0d, &value), Role::Server).unwrap_err();
     assert!(
         matches!(
-            error,
-            ReadTransportParametersError::PreferredAddress {
+            value_error::<PreferredAddress>(&error),
+            ReadValueError::Content {
                 source: ReadPreferredAddressError::NoAddress
             }
         ),
         "{error:?}"
     );
-    assert_eq!(
-        error.transport_error_code(),
-        TransportErrorCode::TRANSPORT_PARAMETER_ERROR
-    );
-    assert!(!error.is_incomplete());
 }
 
 /// Each family alone, and both, are written with the all-zero marker in
@@ -627,11 +973,9 @@ fn preferred_address_families_round_trip() {
         let mut input = value.as_slice();
         assert_eq!(input.sync_read_preferred_address_unpin().unwrap(), address);
         assert!(input.is_empty());
-        let read_back = read(&tlv(0x0d, &value), Role::Server)
-            .unwrap()
-            .preferred_address
-            .unwrap();
-        assert_eq!(read_back, address);
+        let encoding = tlv(0x0d, &value);
+        let parameters = read(&encoding, Role::Server).unwrap();
+        assert_eq!(parameters.get::<PreferredAddress, _>(), Some(&address));
     }
 }
 
@@ -667,25 +1011,32 @@ fn truncated_input_is_rejected() {
     for encoding in cases {
         let error = read(encoding, Role::Client).unwrap_err();
         assert!(error.is_incomplete(), "{encoding:02x?}: {error:?}");
+        assert_eq!(
+            error.transport_error_code(),
+            TransportErrorCode::TRANSPORT_PARAMETER_ERROR
+        );
     }
     // Each field of a parameter has a variant of its own.
-    assert!(matches!(
-        read(&[0x40], Role::Client),
-        Err(ReadTransportParametersError::Id { .. })
-    ));
+    let error = read(&[0x40], Role::Client).unwrap_err();
+    assert!(matches!(error, ReadParametersError::Id { .. }));
+    assert_eq!(error.id(), None);
     assert!(matches!(
         // The second ID is 0 in a two-byte encoding.
         read(&[0x04, 0x01, 0x01, 0x40, 0x00, 0x80], Role::Client),
-        Err(ReadTransportParametersError::Length { id, .. }) if id == VarInt::ZERO
+        Err(ReadParametersError::Length { id, .. }) if id == VarInt::ZERO
     ));
     assert!(matches!(
         read(&[0x04], Role::Client),
-        Err(ReadTransportParametersError::Length { id, .. }) if id == vi(0x04)
+        Err(ReadParametersError::Length { id, .. }) if id == vi(0x04)
     ));
     assert!(matches!(
         read(&[0x04, 0x02, 0x01], Role::Client),
-        Err(ReadTransportParametersError::Value { id, .. }) if id == vi(0x04)
+        Err(ReadParametersError::Value { id, .. }) if id == vi(0x04)
     ));
+    // An unknown parameter cut short is incomplete too.
+    let error = read(&[0x40, 0x40, 0x03, 0x01], Role::Client).unwrap_err();
+    assert!(error.is_incomplete());
+    assert!(matches!(error, ReadParametersError::Value { id, .. } if id == vi(0x40)));
 }
 
 #[test]
@@ -711,37 +1062,57 @@ fn preferred_address_fields_cut_short_are_named() {
         // Inside the parameter, the same failure is reported.
         let error = read(&tlv(0x0d, &value[..cut]), Role::Server).unwrap_err();
         assert!(
-            matches!(&error, ReadTransportParametersError::PreferredAddress { source } if expected(source)),
+            matches!(
+                value_error::<PreferredAddress>(&error),
+                ReadValueError::Content { source } if expected(source)
+            ),
             "{cut}: {error:?}"
         );
     }
 }
 
+/// The parameters of extensions that are not in the list are unknown
+/// parameters, kept in order after the ones with a type.
 #[test]
 fn unknown_parameters_are_kept_in_order() {
     let mut encoding = tlv(0x1d, &[]);
     encoding.extend(tlv(0x04, &integer(7)));
+    encoding.extend(tlv(0x20, &integer(65535)));
     encoding.extend(tlv(31 * 1000 + 27, b"reserved"));
     let parameters = read(&encoding, Role::Client).unwrap();
-    assert_eq!(parameters.initial_max_data, vi(7));
+    assert_eq!(parameters.get::<InitialMaxData, _>().unwrap().get(), vi(7));
     assert_eq!(
         parameters.unknown,
         [
-            UnknownParameter {
-                id: vi(0x1d),
-                value: &[][..]
-            },
-            UnknownParameter {
-                id: vi(31 * 1000 + 27),
-                value: &b"reserved"[..]
-            },
+            UnknownParameter::new(vi(0x1d), &[][..]),
+            UnknownParameter::new(vi(0x20), &[0x80, 0x00, 0xff, 0xff][..]),
+            UnknownParameter::new(vi(31 * 1000 + 27), &b"reserved"[..]),
         ]
     );
-    // Known parameters are written first, then the unknown ones in order.
+    // The slots are written first, then the unknown parameters in order.
     let mut expected = tlv(0x04, &integer(7));
     expected.extend(tlv(0x1d, &[]));
+    expected.extend(tlv(0x20, &integer(65535)));
     expected.extend(tlv(31 * 1000 + 27, b"reserved"));
     assert_eq!(write(parameters, Role::Client), expected);
+}
+
+#[test]
+fn read_failures_show_their_parameter() {
+    let error = read(&tlv(0x03, &integer(1199)), Role::Client).unwrap_err();
+    assert_eq!(error.to_string(), "parameter 0x3 has an invalid value");
+    let source = Error::source(&error).unwrap();
+    assert_eq!(source.to_string(), "parameter value content read failed");
+    let error = read(&tlv(0x02, &[0; 16]), Role::Client).unwrap_err();
+    assert_eq!(error.to_string(), "parameter 0x2 is not admitted");
+    assert_eq!(
+        Error::source(&error).unwrap().to_string(),
+        "only a server may send this transport parameter"
+    );
+    let mut twice = tlv(0x0c, &[]);
+    twice.extend(tlv(0x0c, &[]));
+    let error = read(&twice, Role::Client).unwrap_err();
+    assert_eq!(error.to_string(), "parameter 0xc appears more than once");
 }
 
 #[test]

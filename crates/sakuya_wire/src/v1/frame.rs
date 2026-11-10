@@ -341,6 +341,38 @@ impl FrameType {
     }
 }
 
+/// A Frame Type value of version 1 with the kind it announces: a value that
+/// RFC 9000 defines.
+///
+/// It is constructed only by [`FrameTypeValue::of`], so its kind is always
+/// the kind of its value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FrameTypeValue {
+    kind: FrameType,
+    value: VarInt,
+}
+
+impl FrameTypeValue {
+    /// The Frame Type value `value` with its kind, or `None` for a value that
+    /// RFC 9000 does not define.
+    pub const fn of(value: VarInt) -> Option<Self> {
+        match FrameType::of(value) {
+            Some(kind) => Some(Self { kind, value }),
+            None => None,
+        }
+    }
+
+    /// The kind the value announces.
+    pub const fn kind(self) -> FrameType {
+        self.kind
+    }
+
+    /// The Frame Type value.
+    pub const fn get(self) -> VarInt {
+        self.value
+    }
+}
+
 impl FrameKind for FrameType {
     /// The "Pkts" column of [RFC 9000 §12.4] Table 3.
     ///
@@ -454,7 +486,7 @@ impl FrameSetPart for super::Part {
     }
 
     /// A PADDING frame and the PADDING frames that follow it are one run;
-    /// every other frame is read as `codec::read_fields` reads it.
+    /// every other frame is read as [`codec::read_fields`] reads it.
     fn read_run<H>(
         source: &mut H,
         kind: FrameType,
@@ -472,8 +504,11 @@ impl FrameSetPart for super::Part {
             let len = NonZeroUsize::MIN.saturating_add(skip_zeros(source));
             return Ok(FrameRun::Padding(PaddingRun::new(len)));
         }
+        // invariant: whoever calls this gives `value` with the kind that
+        // `kind_of` gives for it.
+        let frame_type = FrameTypeValue { kind, value };
         source
-            .sync_read_fields_unpin(kind, value)
+            .sync_read_fields_unpin(frame_type)
             .map(FrameRun::from)
     }
 }

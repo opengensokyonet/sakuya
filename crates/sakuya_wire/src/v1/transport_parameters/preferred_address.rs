@@ -1,12 +1,27 @@
 //! The `preferred_address` transport parameter ([RFC 9000 §18.2]).
 //!
 //! [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
-use crate::connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken};
-use core::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+use self::codec::{
+    ReadPreferredAddressError, ReadPreferredAddressHostExt as _, write_preferred_address,
+};
+use super::{SentBy, TransportParameterSpace};
+use crate::{
+    connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken},
+    parameters::{KeyedParameter, ReadValueError, ValueSource, read_value_error::ContentSnafu},
+    var_int::VarInt,
+};
+use bytes::Buf;
+use core::{
+    convert::Infallible,
+    net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6},
+};
+use nitori_call::ReceiverAccess;
+use nitori_io::{Write, calls::WriteAllError};
+use snafu::ResultExt;
 
-/// The `preferred_address` parameter ([RFC 9000 §18.2]): an address the
-/// server would like the client to migrate to, with the connection ID to use
-/// there.
+/// `preferred_address`, `0x0d` ([RFC 9000 §18.2]): an address the server
+/// would like the client to migrate to, with the connection ID to use
+/// there; sent only by a server.
 ///
 /// The connection ID has sequence number 1.
 ///
@@ -78,7 +93,7 @@ const FIXED_LEN: usize = 4 + 2 + 16 + 2 + 1 + StatelessResetToken::LEN;
 
 impl PreferredAddress {
     /// The longest encoding: with a 20-byte connection ID.
-    pub(in crate::v1) const MAX_LEN: usize = FIXED_LEN + ConnectionId::MAX_LEN;
+    const MAX_LEN: usize = FIXED_LEN + ConnectionId::MAX_LEN;
 
     /// The number of bytes [`codec::write_preferred_address`] writes.
     pub fn encoded_len(&self) -> usize {
@@ -86,7 +101,7 @@ impl PreferredAddress {
     }
 
     /// The encoding, left-aligned in an array, and its length.
-    pub(in crate::v1) fn to_encoding(self) -> ([u8; Self::MAX_LEN], usize) {
+    fn to_encoding(self) -> ([u8; Self::MAX_LEN], usize) {
         let mut bytes = [0; Self::MAX_LEN];
         let connection_id = self.connection_id.as_bytes();
         let (ipv4, ipv6) = self.addresses.to_encoded();
@@ -108,6 +123,32 @@ impl PreferredAddress {
             length += part.len();
         }
         (bytes, length)
+    }
+}
+
+impl KeyedParameter for PreferredAddress {
+    type Space = TransportParameterSpace;
+    type ValueError = ReadValueError<ReadPreferredAddressError<Infallible>>;
+
+    const ID: VarInt = VarInt::from_u32(0x0d);
+    const ATTRIBUTES: SentBy = SentBy::ServerOnly;
+
+    fn read_value<D: Buf + Unpin>(value: &mut ValueSource<D>) -> Result<Self, Self::ValueError> {
+        value
+            .sync_read_preferred_address_unpin()
+            .context(ContentSnafu)
+    }
+
+    fn value_len(&self) -> usize {
+        self.encoded_len()
+    }
+
+    async fn write_value<F, A>(&self, io: &mut A) -> Result<(), WriteAllError<F::Error>>
+    where
+        F: Write,
+        A: ReceiverAccess<Family = F>,
+    {
+        write_preferred_address(io, *self).await
     }
 }
 

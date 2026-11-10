@@ -421,10 +421,10 @@ mod tests {
             // A source passed as `&mut` needs no `mut` of its own.
             #[allow(unused_mut)]
             let mut source = $source;
-            let (kind, value) = source
+            let (_, value) = source
                 .sync_read_frame_type_unpin(PhantomData::<HList![v1::Part]>)
                 .unwrap();
-            source.sync_read_fields_unpin(kind.extract(), value)
+            source.sync_read_fields_unpin(v1::frame::FrameTypeValue::of(value).unwrap())
         }};
     }
 

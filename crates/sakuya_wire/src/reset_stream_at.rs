@@ -8,6 +8,11 @@
 //! set without it reads type `0x24` as an unknown Frame Type
 //! ([RFC 9000 §12.4]).
 //!
+//! [`Part`] is also the part that defines the `reset_stream_at` transport
+//! parameter, `0x1d` (§3; [`ResetStreamAt`]), by which an endpoint states
+//! that it supports receiving the frame. Transport parameters composed
+//! without it keep the parameter as an unknown one.
+//!
 //! ```
 //! use core::marker::PhantomData;
 //! use sakuya_wire::{
@@ -28,34 +33,116 @@
 //! assert_eq!(frame.reliable_size().get().get(), 5);
 //! ```
 //!
+//! ```
+//! use core::marker::PhantomData;
+//! use sakuya_wire::{
+//!     assert_parameters_distinct,
+//!     parameters::KeyedParameter as _,
+//!     parts::HList,
+//!     reset_stream_at::{self, ResetStreamAt},
+//!     v1::{
+//!         self,
+//!         role::Role,
+//!         transport_parameters::{
+//!             TransportParameterList, TransportParameterSpace,
+//!             codec::ReadTransportParametersHostExt as _,
+//!         },
+//!     },
+//! };
+//!
+//! type Parts = HList![reset_stream_at::Part, v1::Part];
+//! assert_parameters_distinct!(TransportParameterSpace, TransportParameterList<Parts>);
+//!
+//! // reset_stream_at, with its empty value.
+//! let mut encoding = &[0x1d, 0x00][..];
+//! let parameters = encoding
+//!     .sync_read_transport_parameters_unpin(Role::Client, PhantomData::<Parts>)
+//!     .unwrap();
+//! assert_eq!(parameters.get::<ResetStreamAt, _>(), Some(&ResetStreamAt));
+//!
+//! // A value with bytes is not a value of the parameter.
+//! let mut encoding = &[0x1d, 0x01, 0x00][..];
+//! let error = encoding
+//!     .sync_read_transport_parameters_unpin(Role::Client, PhantomData::<Parts>)
+//!     .unwrap_err();
+//! assert_eq!(error.id(), Some(ResetStreamAt::ID));
+//! ```
+//!
 //! [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html#section-4
 //! [RFC 9000 §12.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.4
 use self::codec::ReadResetStreamAtFrameHostExt as _;
 use crate::{
     frame::{Head, type_var_int},
+    parameters::{KeyedParameter, ParametersPart, TrailingBytesError, ValueSource},
+    parts::HList,
     v1::{
         application_error::ApplicationErrorCode,
         encryption_level::EncryptionLevel,
         frame::set::{FrameKind, FrameSetPart, FrameTypeValues},
         role::Role,
         stream_id::StreamId,
+        transport_parameters::{SentBy, TransportParameterSpace},
     },
     var_int::{VarInt, VarIntField},
 };
 use bytes::Buf;
 use core::ops::RangeInclusive;
-use nitori_call::{Direct, Receiver};
-use nitori_io::{Read, ReadChunk};
+use nitori_call::{Direct, Receiver, ReceiverAccess};
+use nitori_io::{Read, ReadChunk, Write, calls::WriteAllError};
 use snafu::Snafu;
 
 /// The Frame Type value of RESET_STREAM_AT.
 const TYPE_VALUE: u64 = 0x24;
 
-/// The RESET_STREAM_AT frame as a part of a frame set: frames
+/// The reliable stream reset extension as a part.
+///
+/// As a part of a frame set it holds the RESET_STREAM_AT frame: frames
 /// [`ResetStreamAtFrame`], of the kind [`FrameType`], read with the failures
 /// [`codec::ReadResetStreamAtFrameError`]. It claims the Frame Type `0x24`.
+/// Its transport parameter type is [`ResetStreamAt`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Part;
+
+impl ParametersPart<TransportParameterSpace> for Part {
+    type Parameters = HList![ResetStreamAt];
+}
+
+/// `reset_stream_at`, `0x1d`, as specified by the Internet-Draft
+/// [draft-ietf-quic-reliable-stream-reset-11] §3: the endpoint supports
+/// receiving RESET_STREAM_AT frames.
+///
+/// The parameter states this by being present, and its value is empty: a
+/// value with bytes is a [`TrailingBytesError`], which the draft makes a
+/// TRANSPORT_PARAMETER_ERROR. Nothing is read from or written to the value,
+/// so the type has no read or write operation.
+///
+/// [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html#section-3
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct ResetStreamAt;
+
+impl KeyedParameter for ResetStreamAt {
+    type Space = TransportParameterSpace;
+    type ValueError = TrailingBytesError;
+
+    const ID: VarInt = VarInt::from_u32(0x1d);
+    const ATTRIBUTES: SentBy = SentBy::Either;
+
+    fn read_value<D: Buf + Unpin>(_value: &mut ValueSource<D>) -> Result<Self, Self::ValueError> {
+        Ok(Self)
+    }
+
+    fn value_len(&self) -> usize {
+        0
+    }
+
+    async fn write_value<F, A>(&self, _io: &mut A) -> Result<(), WriteAllError<F::Error>>
+    where
+        F: Write,
+        A: ReceiverAccess<Family = F>,
+    {
+        Ok(())
+    }
+}
 
 impl FrameSetPart for Part {
     type Run<D> = ResetStreamAtFrame;
@@ -525,5 +612,109 @@ mod tests {
         ] {
             assert_eq!(kind.can_appear_in(level), allowed, "{level:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod transport_parameter_tests {
+    use super::ResetStreamAt;
+    use crate::{
+        parameters::{KeyedParameter, UnknownParameter, codec::ReadParametersError},
+        parts::HList,
+        v1::{
+            self,
+            role::Role,
+            transport_parameters::{
+                TransportParameterList, TransportParameterSpace, TransportParameters,
+                codec::{
+                    ReadTransportParametersError, ReadTransportParametersHostExt as _,
+                    WriteTransportParametersHostExt as _,
+                },
+                integer::InitialMaxData,
+            },
+        },
+        var_int::VarInt,
+    };
+    use core::marker::PhantomData;
+
+    type V1First = HList![v1::Part, super::Part];
+    type ExtensionFirst = HList![super::Part, v1::Part];
+
+    crate::assert_parameters_distinct!(TransportParameterSpace, TransportParameterList<V1First>);
+    crate::assert_parameters_distinct!(
+        TransportParameterSpace,
+        TransportParameterList<ExtensionFirst>
+    );
+
+    /// The same call takes the slots by type for either order of the parts;
+    /// the slots are written in the order of the list.
+    #[test]
+    fn present_absent_and_either_order_of_the_parts() {
+        macro_rules! check {
+            ($parts:ty, $written:expr) => {{
+                // reset_stream_at, then initial_max_data 7.
+                let mut input = &[0x1d, 0x00, 0x04, 0x01, 0x07][..];
+                let parameters = input
+                    .sync_read_transport_parameters_unpin(Role::Client, PhantomData::<$parts>)
+                    .unwrap();
+                assert_eq!(parameters.get::<ResetStreamAt, _>(), Some(&ResetStreamAt));
+                assert_eq!(
+                    parameters.get::<InitialMaxData, _>().unwrap().get(),
+                    VarInt::from(7u8)
+                );
+                assert!(parameters.unknown.is_empty());
+                assert_eq!(parameters.encoded_len(), 5);
+                let mut written = Vec::new();
+                written
+                    .sync_write_transport_parameters_unpin(parameters, Role::Client)
+                    .unwrap();
+                assert_eq!(written, $written);
+
+                let mut input = &[0x04, 0x01, 0x07][..];
+                let parameters = input
+                    .sync_read_transport_parameters_unpin(Role::Client, PhantomData::<$parts>)
+                    .unwrap();
+                assert!(parameters.get::<ResetStreamAt, _>().is_none());
+            }};
+        }
+        check!(V1First, [0x04, 0x01, 0x07, 0x1d, 0x00]);
+        check!(ExtensionFirst, [0x1d, 0x00, 0x04, 0x01, 0x07]);
+
+        let mut parameters = TransportParameters::<&[u8], ExtensionFirst>::new();
+        parameters.set(ResetStreamAt);
+        assert_eq!(parameters.validate(Role::Server), Ok(()));
+    }
+
+    #[test]
+    fn a_value_with_bytes_and_a_repeated_parameter_are_rejected() {
+        fn read(
+            mut input: &[u8],
+        ) -> Result<
+            TransportParameters<&[u8], V1First>,
+            ReadTransportParametersError<core::convert::Infallible, V1First>,
+        > {
+            input.sync_read_transport_parameters_unpin(Role::Server, PhantomData::<V1First>)
+        }
+        let error = read(&[0x1d, 0x02, 0x00, 0x00]).unwrap_err();
+        let source = error.value_error::<ResetStreamAt>().unwrap();
+        assert_eq!((source.length(), source.unread().get()), (2, 2));
+        assert!(!error.is_incomplete());
+        let error = read(&[0x1d, 0x00, 0x1d, 0x00]).unwrap_err();
+        assert!(matches!(
+            error,
+            ReadParametersError::Duplicate { source } if source.id() == ResetStreamAt::ID
+        ));
+    }
+
+    #[test]
+    fn without_the_part_the_parameter_is_unknown() {
+        let mut input = &[0x1d, 0x00][..];
+        let parameters = input
+            .sync_read_transport_parameters_unpin(Role::Client, PhantomData::<HList![v1::Part]>)
+            .unwrap();
+        assert_eq!(
+            parameters.unknown,
+            [UnknownParameter::new(ResetStreamAt::ID, &[][..])]
+        );
     }
 }

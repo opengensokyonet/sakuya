@@ -6,7 +6,9 @@
 //! [`PaddingRun`] is a number of consecutive ones, the PADDING variant of
 //! [`FrameRun`](super::FrameRun). Reading a packet payload with
 //! [`Frames`](super::set::Frames) gives the consecutive PADDING frames as one
-//! run, while reading a single frame takes one PADDING frame at a time.
+//! run, while reading a single frame, with
+//! [`read_fields`](super::codec::read_fields), takes one PADDING frame at a
+//! time.
 //!
 //! [RFC 9000 §19.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.1
 use super::{FrameType, type_value};

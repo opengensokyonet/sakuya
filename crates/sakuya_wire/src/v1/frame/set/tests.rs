@@ -9,7 +9,7 @@ use crate::{
     v1::{
         self,
         frame::{
-            Frame, FrameRun, FrameType,
+            Frame, FrameRun, FrameType, FrameTypeValue,
             codec::ReadFieldsHostExt as _,
             padding::{PaddingFrame, PaddingRun},
             ping::PingFrame,
@@ -115,7 +115,7 @@ fn read_fields_reads_one_padding_frame() {
         .unwrap();
     assert_eq!(kind.extract(), FrameType::Padding);
     let frame: Frame<&[u8]> = input
-        .sync_read_fields_unpin(FrameType::Padding, value)
+        .sync_read_fields_unpin(FrameTypeValue::of(value).unwrap())
         .unwrap();
     assert_eq!(frame, Frame::Padding(PaddingFrame));
     assert_eq!(input, [0, 0, 0x01]);

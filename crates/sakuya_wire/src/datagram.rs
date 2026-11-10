@@ -8,6 +8,10 @@
 //! than the `max_datagram_frame_size` it announced ([RFC 9221 §3]) are for
 //! the receiver of the frame to check, with [`DatagramFrame::encoded_len`].
 //!
+//! [`Part`] is also the part that defines the `max_datagram_frame_size`
+//! transport parameter, `0x20` ([`MaxDatagramFrameSize`]). Transport
+//! parameters composed without it keep the parameter as an unknown one.
+//!
 //! ```
 //! use core::marker::PhantomData;
 //! use sakuya_wire::{
@@ -31,16 +35,53 @@
 //! assert!(matches!(run.get::<FrameRun<&[u8]>, _>(), Some(FrameRun::Ping(_))));
 //! ```
 //!
+//! ```
+//! use core::marker::PhantomData;
+//! use sakuya_wire::{
+//!     assert_parameters_distinct,
+//!     datagram::{self, MaxDatagramFrameSize},
+//!     parts::HList,
+//!     v1::{
+//!         self,
+//!         role::Role,
+//!         transport_parameters::{
+//!             TransportParameterList, TransportParameterSpace,
+//!             codec::ReadTransportParametersHostExt as _,
+//!             integer::InitialMaxData,
+//!         },
+//!     },
+//!     var_int::VarInt,
+//! };
+//!
+//! type Parts = HList![v1::Part, datagram::Part];
+//! assert_parameters_distinct!(TransportParameterSpace, TransportParameterList<Parts>);
+//!
+//! // initial_max_data 7, then max_datagram_frame_size 65535.
+//! let mut encoding = &[0x04, 0x01, 0x07, 0x20, 0x04, 0x80, 0x00, 0xff, 0xff][..];
+//! let parameters = encoding
+//!     .sync_read_transport_parameters_unpin(Role::Client, PhantomData::<Parts>)
+//!     .unwrap();
+//! let size = parameters.get::<MaxDatagramFrameSize, _>().unwrap();
+//! assert_eq!(size.get(), VarInt::from(65535u16));
+//! assert_eq!(parameters.get::<InitialMaxData, _>().unwrap().get(), VarInt::from(7u8));
+//! assert!(parameters.unknown.is_empty());
+//! ```
+//!
 //! [RFC 9221]: https://www.rfc-editor.org/rfc/rfc9221.html
 //! [RFC 9221 §3]: https://www.rfc-editor.org/rfc/rfc9221.html#section-3
 //! [RFC 9000 §12.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.4
 use self::codec::ReadDatagramFrameHostExt as _;
 use crate::{
     frame::{Head, LengthError, LengthKind, NoLength, length_width, type_var_int},
+    parameters::ParametersPart,
+    parts::HList,
     v1::{
         encryption_level::EncryptionLevel,
         frame::set::{FrameKind, FrameSetPart, FrameTypeValues},
         role::Role,
+        transport_parameters::{
+            SentBy, TransportParameterSpace, integer::integer_transport_parameter,
+        },
     },
     var_int::{VarInt, VarIntWidth},
 };
@@ -56,12 +97,57 @@ mod type_value {
     pub(super) const DATAGRAM_WITH_LENGTH: u64 = 0x31;
 }
 
-/// The DATAGRAM frame as a part of a frame set: frames [`DatagramFrame`],
-/// of the kind [`FrameType`], read with the failures
+/// The DATAGRAM extension as a part.
+///
+/// As a part of a frame set it holds the DATAGRAM frame: frames
+/// [`DatagramFrame`], of the kind [`FrameType`], read with the failures
 /// [`codec::ReadDatagramFrameError`]. It claims the Frame Types `0x30` and
-/// `0x31`.
+/// `0x31`. Its transport parameter type is [`MaxDatagramFrameSize`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Part;
+
+impl ParametersPart<TransportParameterSpace> for Part {
+    type Parameters = HList![MaxDatagramFrameSize];
+}
+
+/// `max_datagram_frame_size`, `0x20` ([RFC 9221 §3]): the largest DATAGRAM
+/// frame the endpoint is willing to receive, in bytes, counting the Frame
+/// Type, the Length and the data.
+///
+/// A value other than 0 states that the endpoint supports receiving
+/// DATAGRAM frames. An absent parameter is 0: no support. Its value is one
+/// variable-length integer, read and written by the operations of
+/// [`integer::codec`](crate::v1::transport_parameters::integer::codec).
+///
+/// [RFC 9221 §3]: https://www.rfc-editor.org/rfc/rfc9221.html#section-3
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MaxDatagramFrameSize(VarInt);
+
+impl MaxDatagramFrameSize {
+    /// The parameter with `size`.
+    pub const fn new(size: VarInt) -> Self {
+        Self(size)
+    }
+
+    /// The size in bytes.
+    pub const fn get(self) -> VarInt {
+        self.0
+    }
+}
+
+impl From<VarInt> for MaxDatagramFrameSize {
+    fn from(size: VarInt) -> Self {
+        Self(size)
+    }
+}
+
+impl From<MaxDatagramFrameSize> for VarInt {
+    fn from(parameter: MaxDatagramFrameSize) -> Self {
+        parameter.0
+    }
+}
+
+integer_transport_parameter!(MaxDatagramFrameSize, 0x20, SentBy::Either);
 
 impl FrameSetPart for Part {
     type Run<D> = DatagramFrame<D>;
@@ -851,5 +937,217 @@ mod tests {
             panic!()
         };
         assert_eq!(source.frame_type(), VarInt::from(0x31u8));
+    }
+}
+
+#[cfg(test)]
+mod transport_parameter_tests {
+    use super::MaxDatagramFrameSize;
+    use crate::{
+        parameters::{
+            KeyedParameter, ParametersOf, ReadValueError, UnknownParameter,
+            codec::ReadParametersError,
+        },
+        parts::{HList, Sculptor, Selector},
+        v1::{
+            self,
+            role::Role,
+            transport_parameters::{
+                TransportParameterList, TransportParameterSlots, TransportParameterSpace,
+                TransportParameters,
+                codec::{
+                    ReadTransportParametersError, ReadTransportParametersHostExt as _,
+                    WriteTransportParametersHostExt as _,
+                },
+                integer::{InitialMaxData, MaxAckDelay},
+            },
+        },
+        var_int::VarInt,
+    };
+    use core::marker::PhantomData;
+
+    type V1First = HList![v1::Part, super::Part];
+    type DatagramFirst = HList![super::Part, v1::Part];
+
+    crate::assert_parameters_distinct!(TransportParameterSpace, TransportParameterList<V1First>);
+    crate::assert_parameters_distinct!(
+        TransportParameterSpace,
+        TransportParameterList<DatagramFirst>
+    );
+
+    /// initial_max_data 7, max_datagram_frame_size 65535, max_ack_delay 9
+    /// and a reserved parameter.
+    const ENCODING: [u8; 17] = [
+        0x04, 0x01, 0x07, 0x20, 0x04, 0x80, 0x00, 0xff, 0xff, 0x0b, 0x01, 0x09, 0x3a, 0x02, 0xaa,
+        0xbb, 0x0c,
+    ];
+
+    /// Reads with the list of parts `Ps` and takes the slots by type. The
+    /// positions `I`, `J` and `K` are inferred where this is called, so the
+    /// body is the same for every order of the parts.
+    fn read_and_take<Ps, I, J, K>() -> Vec<u8>
+    where
+        Ps: ParametersOf<TransportParameterSpace>,
+        TransportParameterSlots<Ps>: Clone
+            + Selector<Option<MaxDatagramFrameSize>, I>
+            + Selector<Option<InitialMaxData>, J>
+            + Sculptor<TransportParameterSlots<HList![v1::Part]>, K>,
+    {
+        // The last byte is `disable_active_migration` without its length.
+        let mut input = &ENCODING[..16];
+        let Ok(parameters) =
+            input.sync_read_transport_parameters_unpin(Role::Client, PhantomData::<Ps>)
+        else {
+            panic!("the parameters are well formed")
+        };
+        let size = parameters.get::<MaxDatagramFrameSize, I>().unwrap();
+        assert_eq!(size.get(), VarInt::from(65535u16));
+        let data = parameters.get::<InitialMaxData, J>().unwrap();
+        assert_eq!(data.get(), VarInt::from(7u8));
+        assert_eq!(
+            parameters.unknown,
+            [UnknownParameter::new(
+                VarInt::from(0x3au8),
+                &[0xaa, 0xbb][..]
+            )]
+        );
+        // Version 1 takes all its slots at once, wherever its part is.
+        let (version_1, _rest) = Sculptor::sculpt(parameters.known.clone());
+        let version_1: TransportParameterSlots<HList![v1::Part]> = version_1;
+        assert_eq!(
+            version_1.get::<Option<MaxAckDelay>, _>().unwrap().get(),
+            VarInt::from(9u8)
+        );
+        assert_eq!(
+            version_1.get::<Option<InitialMaxData>, _>().unwrap().get(),
+            VarInt::from(7u8)
+        );
+        let mut written = Vec::new();
+        written
+            .sync_write_transport_parameters_unpin(parameters, Role::Client)
+            .unwrap();
+        written
+    }
+
+    #[test]
+    fn slots_are_taken_by_type_in_any_order_of_the_parts() {
+        // The slots are written in the order of the list.
+        let v1_first = read_and_take::<V1First, _, _, _>();
+        assert_eq!(
+            v1_first,
+            [
+                0x04, 0x01, 0x07, 0x0b, 0x01, 0x09, 0x20, 0x04, 0x80, 0x00, 0xff, 0xff, 0x3a, 0x02,
+                0xaa, 0xbb
+            ]
+        );
+        let datagram_first = read_and_take::<DatagramFirst, _, _, _>();
+        assert_eq!(
+            datagram_first,
+            [
+                0x20, 0x04, 0x80, 0x00, 0xff, 0xff, 0x04, 0x01, 0x07, 0x0b, 0x01, 0x09, 0x3a, 0x02,
+                0xaa, 0xbb
+            ]
+        );
+    }
+
+    #[test]
+    fn without_the_part_the_parameter_is_unknown() {
+        let mut input = &ENCODING[..9];
+        let parameters = input
+            .sync_read_transport_parameters_unpin(Role::Client, PhantomData::<HList![v1::Part]>)
+            .unwrap();
+        assert_eq!(
+            parameters.unknown,
+            [UnknownParameter::new(
+                MaxDatagramFrameSize::ID,
+                &[0x80, 0x00, 0xff, 0xff][..]
+            )]
+        );
+    }
+
+    /// An absent parameter is `None`, apart from one that states the
+    /// default, 0, which is written and read back as `Some`.
+    #[test]
+    fn absent_and_default_are_distinct() {
+        let mut parameters = TransportParameters::<&[u8], V1First>::new();
+        assert!(parameters.get::<MaxDatagramFrameSize, _>().is_none());
+        assert_eq!(
+            parameters.get_or_default::<MaxDatagramFrameSize, _>().get(),
+            VarInt::ZERO
+        );
+        parameters.set(MaxDatagramFrameSize::default());
+        let mut written = Vec::new();
+        written
+            .sync_write_transport_parameters_unpin(parameters.clone(), Role::Server)
+            .unwrap();
+        assert_eq!(written, [0x20, 0x01, 0x00]);
+        assert_eq!(written.len(), parameters.encoded_len());
+        let read = written
+            .as_slice()
+            .sync_read_transport_parameters_unpin(Role::Server, PhantomData::<V1First>)
+            .unwrap();
+        assert_eq!(
+            read.get::<MaxDatagramFrameSize, _>(),
+            Some(&MaxDatagramFrameSize::new(VarInt::ZERO))
+        );
+        assert_eq!(read, parameters);
+    }
+
+    #[test]
+    fn malformed_and_repeated_values_are_rejected() {
+        fn read(
+            mut input: &[u8],
+        ) -> Result<
+            TransportParameters<&[u8], DatagramFirst>,
+            ReadTransportParametersError<core::convert::Infallible, DatagramFirst>,
+        > {
+            input.sync_read_transport_parameters_unpin(Role::Client, PhantomData::<DatagramFirst>)
+        }
+        // An integer and a byte after it.
+        let error = read(&[0x20, 0x02, 0x01, 0x00]).unwrap_err();
+        assert!(matches!(
+            error.value_error::<MaxDatagramFrameSize>(),
+            Some(ReadValueError::Trailing { source }) if source.unread().get() == 1
+        ));
+        // No integer.
+        let error = read(&[0x20, 0x00]).unwrap_err();
+        assert!(matches!(
+            error.value_error::<MaxDatagramFrameSize>(),
+            Some(ReadValueError::Content { .. })
+        ));
+        assert!(error.value_error::<InitialMaxData>().is_none());
+        let error = read(&[0x20, 0x01, 0x01, 0x20, 0x01, 0x01]).unwrap_err();
+        assert!(matches!(
+            error,
+            ReadParametersError::Duplicate { source } if source.id() == MaxDatagramFrameSize::ID
+        ));
+    }
+
+    /// The parts of both extensions with version 1 between them.
+    #[cfg(feature = "reset_stream_at")]
+    #[test]
+    fn three_parts_compose() {
+        use crate::reset_stream_at::{self, ResetStreamAt};
+        type Parts = HList![reset_stream_at::Part, v1::Part, super::Part];
+        crate::assert_parameters_distinct!(TransportParameterSpace, TransportParameterList<Parts>);
+        let mut input = &[0x20, 0x01, 0x05, 0x1d, 0x00, 0x04, 0x01, 0x07][..];
+        let parameters = input
+            .sync_read_transport_parameters_unpin(Role::Server, PhantomData::<Parts>)
+            .unwrap();
+        assert_eq!(parameters.get::<ResetStreamAt, _>(), Some(&ResetStreamAt));
+        assert_eq!(
+            parameters.get::<MaxDatagramFrameSize, _>().unwrap().get(),
+            VarInt::from(5u8)
+        );
+        assert_eq!(
+            parameters.get::<InitialMaxData, _>().unwrap().get(),
+            VarInt::from(7u8)
+        );
+        assert!(parameters.unknown.is_empty());
+        let mut written = Vec::new();
+        written
+            .sync_write_transport_parameters_unpin(parameters, Role::Server)
+            .unwrap();
+        assert_eq!(written, [0x1d, 0x00, 0x04, 0x01, 0x07, 0x20, 0x01, 0x05]);
     }
 }

@@ -1,7 +1,7 @@
 //! Tests that cover every frame type, and the helpers the tests of the frame
 //! modules share.
 use super::{
-    Frame, FrameRun, FrameType,
+    Frame, FrameRun, FrameType, FrameTypeValue,
     ack::{AckFrame, AckRange, AckRanges, EcnCounts},
     codec::{
         ReadFieldsError, ReadFieldsHostExt as _, WriteFrameHostExt as _, WriteFrameRunHostExt as _,
@@ -87,8 +87,9 @@ where
         Frame<Self::Chunk>,
         ReadFrameError<Self::Error, Coprod![ReadFieldsError<Self::Error>]>,
     > {
-        let (kind, value) = self.sync_read_frame_type_unpin(V1)?;
-        self.sync_read_fields_unpin(kind.extract(), value)
+        let (_, value) = self.sync_read_frame_type_unpin(V1)?;
+        let frame_type = FrameTypeValue::of(value).expect("a value of the part of version 1");
+        self.sync_read_fields_unpin(frame_type)
             .map_err(|error| ReadFrameError::Fields {
                 source: PartsError(Coproduct::Inl(error)),
             })

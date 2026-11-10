@@ -1,19 +1,23 @@
 //! Reading the fields of version 1 frames and writing frames of any version 1
 //! type as `nitori_call` operations.
 //!
-//! [`v1::Part`](crate::v1::Part) reads the fields after the Frame Type of a
-//! version 1 frame when [`Frames`](super::set::Frames) reads a frame set that
-//! has it; [`ReadFieldsError`] holds the failure of each frame type.
+//! [`read_fields`] reads one version 1 frame of any type from its fields on,
+//! once its Frame Type has been read
+//! ([`read_frame_type`](super::set::codec::read_frame_type));
+//! [`ReadFieldsError`] holds the failure of each frame type.
+//! [`v1::Part`](crate::v1::Part) reads with it when
+//! [`Frames`](super::set::Frames) reads a frame set that has the part.
 //! [`write_frame`] writes any version 1 [`Frame`] and [`write_frame_run`]
 //! any [`FrameRun`]; the modules of the frame types also have write
 //! operations of their own, such as
 //! [`write_stream_frame`](super::stream::codec::write_stream_frame).
 //!
-//! [`write_frame`] is also the operation struct [`WriteFrame`], with
-//! `WriteFrameExt` on receiver accesses inside other operations and
-//! `WriteFrameHostExt` on call executors, including the `sync_` methods for
-//! receivers that never wait; [`write_frame_run`] likewise has
-//! [`WriteFrameRun`]. Constructing an operation performs no IO.
+//! [`read_fields`] is also the operation struct [`ReadFields`], with
+//! `ReadFieldsExt` on receiver accesses inside other operations and
+//! `ReadFieldsHostExt` on call executors, including the `sync_` methods for
+//! receivers that never wait; [`write_frame`] and [`write_frame_run`]
+//! likewise have [`WriteFrame`] and [`WriteFrameRun`]. Constructing an
+//! operation performs no IO.
 //!
 //! ```
 //! use core::marker::PhantomData;
@@ -78,7 +82,7 @@
 #![allow(missing_docs)]
 
 use super::{
-    Frame, FrameRun, FrameType,
+    Frame, FrameRun, FrameType, FrameTypeValue,
     ack::codec::{ReadAckFrameEcnError, ReadAckFrameError, read_ack_frame, read_ack_frame_ecn},
     connection_close::codec::{
         ReadConnectionCloseFrameApplicationError, ReadConnectionCloseFrameTransportError,
@@ -123,13 +127,19 @@ use nitori_io::{
 };
 use snafu::{ResultExt, Snafu};
 
-/// Reads the fields that follow the Frame Type `frame_type`, of the kind
-/// `kind` that [`FrameType::of`] gives for it.
+/// Reads one version 1 frame from the fields that follow its Frame Type
+/// `frame_type`.
+///
+/// The Frame Type has been read from the source already, with
+/// [`read_frame_type`](super::set::codec::read_frame_type) for a frame set
+/// that has [`v1::Part`](crate::v1::Part); [`FrameTypeValue::of`] gives
+/// `frame_type` for the value that was read.
 ///
 /// The source is the rest of a packet payload: a STREAM frame without a
 /// Length field takes all of it. Payload fields are chunks of the source. A
 /// PADDING frame has no fields: it is one byte, its Frame Type, and the
-/// PADDING frames that follow it stay unread.
+/// PADDING frames that follow it stay unread, where
+/// [`Frames`](super::set::Frames) gives them as one run.
 ///
 /// # Errors
 ///
@@ -139,13 +149,13 @@ use snafu::{ResultExt, Snafu};
 ///
 /// # Panics
 ///
-/// If the receiver returns a chunk longer than requested, which breaks the
+/// If the
+/// receiver returns a chunk longer than requested, which breaks the
 /// `ReadChunk` contract of `nitori_io`; see [`payload`](crate::payload).
 #[call(sync)]
-pub(crate) async fn read_fields<F, A>(
+pub async fn read_fields<F, A>(
     io: &mut A,
-    kind: FrameType,
-    frame_type: VarInt,
+    frame_type: FrameTypeValue,
 ) -> Result<Frame<F::Chunk>, ReadFieldsError<F::Error>>
 where
     F: ReadChunk<Chunk: Default>,
@@ -153,6 +163,8 @@ where
 {
     use read_fields_error::*;
     use type_value::*;
+    let kind = frame_type.kind();
+    let frame_type = frame_type.get();
     let value = frame_type.get();
     Ok(match kind {
         FrameType::Padding => Frame::Padding(PaddingFrame),
@@ -177,8 +189,9 @@ where
         }
         FrameType::Stream => {
             let frame_type = StreamTypeValue::new(frame_type);
-            // invariant: `FrameType::of` gives `Stream` for exactly the STREAM
-            // Frame Type values.
+            // invariant: a `FrameTypeValue` has the kind `FrameType::of` gives
+            // for its value, which is `Stream` for exactly the STREAM Frame
+            // Type values.
             let frame_type = frame_type.unwrap_or_else(|| unreachable!("STREAM {value:#x}"));
             Frame::Stream(
                 read_stream_frame(io, frame_type)

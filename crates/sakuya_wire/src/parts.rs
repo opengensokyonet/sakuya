@@ -10,6 +10,10 @@
 //! [`Coproduct`], [`CNil`], [`CoprodInjector`] and [`CoprodUninjector`] build
 //! and take apart a sum. A caller picks a part's value out of a sum by its
 //! type, with `get`, `uninject` or `extract`, and does not name its position.
+//! A list of values, such as the slots of a set of parameters
+//! ([`parameters`](crate::parameters)), is taken apart by type in the same
+//! way: `get` and `get_mut` take one element ([`Selector`]) and `sculpt`
+//! takes several at once ([`Sculptor`]).
 //!
 //! [`PartsError`] wraps the sum of the failures of the parts, so that it is
 //! one error that shows and chains as the failure of the part it holds.
@@ -21,7 +25,7 @@ use core::{
 pub use frunk_core::{
     Coprod, HList,
     coproduct::{CNil, CoprodInjector, CoprodUninjector, Coproduct},
-    hlist::{HCons, HNil},
+    hlist::{HCons, HNil, Sculptor, Selector},
 };
 
 /// A sum of the failures of the parts of a composition, wrapped to be one
