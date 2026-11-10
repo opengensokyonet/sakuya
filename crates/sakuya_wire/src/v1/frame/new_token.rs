@@ -121,8 +121,8 @@ pub enum InvalidNewTokenError {
 }
 
 pub mod codec {
-    //! Writing NEW_TOKEN frames as a `nitori_call` operation; reading is part
-    //! of [`read_frame`](crate::frame::codec::read_frame).
+    //! Writing NEW_TOKEN frames as a `nitori_call` operation; reading is done by
+    //! [`Frames`](crate::v1::frame::set::Frames).
     //!
     //! [`write_new_token_frame`] is also the operation struct [`WriteNewTokenFrame`],
     //! with `WriteNewTokenFrameExt` on receiver accesses and `WriteNewTokenFrameHostExt`
@@ -217,13 +217,12 @@ mod tests {
     use super::{
         EmptyTokenError, InvalidNewTokenError, NewTokenFrame, codec::ReadNewTokenFrameError,
     };
+    use crate::parts::{Coproduct, PartsError};
     use crate::v1::frame::codec::ReadFieldsError;
-    use crate::v1::frame::tests::V1;
+    use crate::v1::frame::set::codec::ReadFrameError;
+    use crate::v1::frame::tests::ReadOneFrame as _;
     use crate::{
-        frame::{
-            LengthError,
-            codec::{ReadFrameError, ReadFrameHostExt as _},
-        },
+        frame::LengthError,
         v1::frame::{Frame, tests::assert_round_trip},
         var_int::VarIntWidth,
     };
@@ -256,13 +255,13 @@ mod tests {
     fn empty_tokens_are_rejected() {
         let mut input = &[0x07, 0x00][..];
         assert!(matches!(
-            input.sync_read_frame_unpin(V1),
+            input.read_one_frame(),
             Err(ReadFrameError::Fields {
-                source: ReadFieldsError::NewToken {
+                source: PartsError(Coproduct::Inl(ReadFieldsError::NewToken {
                     source: ReadNewTokenFrameError::Empty {
                         source: EmptyTokenError
                     },
-                }
+                }))
             })
         ));
         // Construction reports the same failure.

@@ -7,10 +7,11 @@ use super::{
     PacketRangesError, RangeCountError,
     codec::{ReadAckFrameEcnError, ReadAckFrameError, WriteAckFrameHostExt as _},
 };
+use crate::parts::{Coprod, Coproduct, PartsError};
 use crate::v1::frame::codec::ReadFieldsError;
-use crate::v1::frame::tests::V1;
+use crate::v1::frame::set::codec::ReadFrameError;
+use crate::v1::frame::tests::ReadOneFrame as _;
 use crate::{
-    frame::codec::{ReadFrameError, ReadFrameHostExt as _},
     v1::frame::{
         Frame,
         tests::{assert_round_trip, read_ack_frame, short, vi, wide},
@@ -58,16 +59,13 @@ fn write(frame: AckFrame) -> Vec<u8> {
     written
 }
 
+type ReadError = ReadFrameError<Infallible, Coprod![ReadFieldsError<Infallible>]>;
+
 /// The failure of reading the ACK frame `encoding`, of either type, and what
 /// it left unread.
-fn read_frame_error(
-    encoding: &[u8],
-) -> (
-    ReadFrameError<Infallible, ReadFieldsError<Infallible>>,
-    &[u8],
-) {
+fn read_frame_error(encoding: &[u8]) -> (ReadError, &[u8]) {
     let mut input = encoding;
-    let error = input.sync_read_frame_unpin(V1).unwrap_err();
+    let error = input.read_one_frame().unwrap_err();
     assert_eq!(error.frame_type(), Some(vi(u64::from(encoding[0]))));
     (error, input)
 }
@@ -78,13 +76,13 @@ fn read_error(encoding: &[u8]) -> (ReadAckFrameError<Infallible>, &[u8]) {
     let (error, input) = read_frame_error(encoding);
     match error {
         ReadFrameError::Fields {
-            source: ReadFieldsError::Ack { source },
+            source: PartsError(Coproduct::Inl(ReadFieldsError::Ack { source })),
         } if encoding[0] == 0x02 => (source, input),
         ReadFrameError::Fields {
             source:
-                ReadFieldsError::AckEcn {
+                PartsError(Coproduct::Inl(ReadFieldsError::AckEcn {
                     source: ReadAckFrameEcnError::Ack { source },
-                },
+                })),
         } if encoding[0] == 0x03 => (source, input),
         error => panic!("{encoding:02x?}: {error:?}"),
     }
@@ -250,7 +248,7 @@ fn reading_rejects_ranges_below_zero_where_they_are_read() {
         );
         assert_eq!(rest, unread, "{encoding:02x?}");
         let mut input = encoding;
-        let error = input.sync_read_frame_unpin(V1).unwrap_err();
+        let error = input.read_one_frame().unwrap_err();
         assert!(!error.is_incomplete());
     }
 }
@@ -293,7 +291,7 @@ fn reading_reports_the_field_that_is_cut_short() {
         assert!(error.is_incomplete());
         assert!(rest.is_empty());
         let ReadFrameError::Fields {
-            source: ReadFieldsError::AckEcn { source },
+            source: PartsError(Coproduct::Inl(ReadFieldsError::AckEcn { source })),
         } = error
         else {
             panic!("{encoding:02x?}: {error:?}")

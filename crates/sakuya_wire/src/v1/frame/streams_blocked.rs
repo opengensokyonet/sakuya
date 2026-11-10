@@ -75,8 +75,8 @@ pub(in crate::v1) const fn type_value_of(directionality: Directionality) -> VarI
 }
 
 pub mod codec {
-    //! Writing STREAMS_BLOCKED as a `nitori_call` operation; reading is part of
-    //! [`read_frame`](crate::frame::codec::read_frame).
+    //! Writing STREAMS_BLOCKED as a `nitori_call` operation; reading is done by
+    //! [`Frames`](crate::v1::frame::set::Frames).
     //!
     //! [`write_streams_blocked_frame`] is also the operation struct [`WriteStreamsBlockedFrame`], with
     //! `WriteStreamsBlockedFrameExt` on receiver accesses and `WriteStreamsBlockedFrameHostExt` on call
@@ -152,10 +152,11 @@ pub mod codec {
 #[cfg(test)]
 mod tests {
     use super::{StreamsBlockedFrame, codec::ReadStreamsBlockedFrameError};
+    use crate::parts::{Coproduct, PartsError};
     use crate::v1::frame::codec::ReadFieldsError;
-    use crate::v1::frame::tests::V1;
+    use crate::v1::frame::set::codec::ReadFrameError;
+    use crate::v1::frame::tests::ReadOneFrame as _;
     use crate::{
-        frame::codec::{ReadFrameError, ReadFrameHostExt as _},
         v1::frame::{
             Frame,
             tests::{assert_bytes_round_trip, assert_round_trip},
@@ -198,16 +199,16 @@ mod tests {
         let too_many = StreamCount::MAX.get() + 1;
         let mut encoding = vec![type_value_of(true)];
         encoding.extend_from_slice(&(too_many | 0xc000_0000_0000_0000).to_be_bytes());
-        let error = encoding.as_slice().sync_read_frame_unpin(V1).unwrap_err();
+        let error = encoding.as_slice().read_one_frame().unwrap_err();
         assert_eq!(error.frame_type(), Some(VarInt::from(type_value_of(true))));
         assert!(matches!(
             error,
-            ReadFrameError::Fields { source: ReadFieldsError::StreamsBlocked {
+            ReadFrameError::Fields { source: PartsError(Coproduct::Inl(ReadFieldsError::StreamsBlocked {
                 source: ReadStreamsBlockedFrameError::StreamCount {
                     source
                 },
                 ..
-            } } if source == StreamCount::new(too_many).unwrap_err()
+            })) } if source == StreamCount::new(too_many).unwrap_err()
         ));
         assert_eq!(
             error.transport_error_code(),

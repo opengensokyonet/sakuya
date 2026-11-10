@@ -8,7 +8,8 @@
 //!
 //! Each frame type has its own module with its struct, the checks its
 //! encoding imposes, and its write operation. [`Frame`] holds any of them,
-//! and [`FrameType`] names their kinds.
+//! [`FrameRun`] holds any of them with PADDING as a run, and [`FrameType`]
+//! names their kinds.
 //!
 //! # Frame values and their encoding
 //!
@@ -73,16 +74,19 @@
 //!
 //! # Reading
 //!
-//! [`read_frame`](crate::frame::codec::read_frame) reads one frame of a
-//! frame set as a `nitori_call` operation, and
-//! [`Frames`](crate::frame::Frames) walks a packet payload held by a byte
-//! slice or `Bytes`, frame by frame; for a set of version 1 alone, the set is
-//! [`v1::Part`](crate::v1::Part). Payload fields are chunks of the source, of
-//! the type parameter `D`: subslices of a byte slice and `Bytes` that share
-//! the storage of a `Bytes` source, so reading copies no payload. These are
-//! STREAM and CRYPTO data, NEW_TOKEN tokens and CONNECTION_CLOSE reason
-//! phrases. The ACK Ranges of an ACK frame are collected into
-//! [`ack::AckRanges`].
+//! [`Frames`](set::Frames) walks a packet payload held by a byte slice or
+//! `Bytes`, item by item; for a set of version 1 alone, the set is
+//! `HList![v1::Part]`, whose item is a `Coproduct` of a [`FrameRun`] and
+//! `CNil`, taken out with `extract`. A [`FrameRun`] is one frame of any type
+//! but PADDING, or consecutive PADDING frames as one [`padding::PaddingRun`],
+//! whose length is the number of PADDING frames. [`Frame`] is one frame as it
+//! is encoded, with a [`padding::PaddingFrame`] for PADDING; a [`Frame`]
+//! converts into a [`FrameRun`] with `From`, and a PADDING frame is a run of
+//! one. Payload fields are chunks of the source, of the type parameter `D`:
+//! subslices of a byte slice and `Bytes` that share the storage of a `Bytes`
+//! source, so reading copies no payload. These are STREAM and CRYPTO data,
+//! NEW_TOKEN tokens and CONNECTION_CLOSE reason phrases. The ACK Ranges of an
+//! ACK frame are collected into [`ack::AckRanges`].
 //!
 //! Reading checks what the encoding alone determines: that every field is
 //! present, the limits the frame definitions state for single fields, and
@@ -97,9 +101,10 @@
 //!
 //! Each failure has a variant of its own. Besides the failures of the Frame
 //! Type, which are the same for every frame set,
-//! [`ReadFrameError::Fields`](crate::frame::codec::ReadFrameError::Fields)
-//! holds a [`codec::ReadFieldsError`], which has a variant for each frame
-//! type, holding the error of that type; ACK and CONNECTION_CLOSE have one
+//! [`ReadFrameError::Fields`](set::codec::ReadFrameError::Fields)
+//! holds a [`PartsError`](crate::parts::PartsError) of a sum of the failures of
+//! the parts. That of version 1 is a [`codec::ReadFieldsError`], which has a
+//! variant for each frame type, holding the error of that type; ACK and CONNECTION_CLOSE have one
 //! for each of their two Frame Type values, whose fields differ, such as
 //! [`codec::ReadFieldsError::AckEcn`] for an ACK frame with ECN counts. The
 //! error of a frame type has a variant for each field that cannot be read,
@@ -115,17 +120,22 @@
 //! use core::marker::PhantomData;
 //! use either::Either;
 //! use sakuya_wire::{
-//!     frame::Frames,
-//!     v1::{self, frame::Frame},
+//!     parts::HList,
+//!     v1::{
+//!         self,
+//!         frame::{FrameRun, set::Frames},
+//!     },
 //!     var_int::VarIntWidth,
 //! };
 //!
 //! // PING, then a STREAM frame with LEN and FIN on stream 4, whose Stream ID
 //! // takes two bytes.
 //! let payload = [0x01, 0x0b, 0x40, 0x04, 0x02, b'h', b'i'];
-//! let mut frames = Frames::new(&payload[..], PhantomData::<v1::Part>);
-//! assert!(matches!(frames.next(), Some(Ok(Frame::Ping(_)))));
-//! let Some(Ok(Frame::Stream(stream))) = frames.next() else { panic!() };
+//! let mut frames = Frames::new(&payload[..], PhantomData::<HList![v1::Part]>);
+//! let Some(Ok(run)) = frames.next() else { panic!() };
+//! assert!(matches!(run.extract(), FrameRun::Ping(_)));
+//! let Some(Ok(run)) = frames.next() else { panic!() };
+//! let FrameRun::Stream(stream) = run.extract() else { panic!() };
 //! assert_eq!(stream.stream_id().get().index(), 1);
 //! assert_eq!(stream.stream_id().width(), VarIntWidth::Two);
 //! assert_eq!(stream.offset(), None);
@@ -139,7 +149,7 @@
 //! Every frame type has `encoded_len` and a write operation in its module's
 //! `codec`, such as [`stream::codec::write_stream_frame`], and STREAM has
 //! one for each kind of Length field; [`codec::write_frame`] writes any
-//! [`Frame`]. Writing writes the encoding the value states and
+//! [`Frame`] and [`codec::write_frame_run`] any [`FrameRun`]. Writing writes the encoding the value states and
 //! chooses nothing: the width of each field comes from the value. Every
 //! frame checked its limits when it was constructed, so writing checks
 //! nothing, and its only failure is that of the receiver: a sink that stops
@@ -175,13 +185,17 @@
 //! [RFC 9000 §12.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.4
 //! [RFC 9000 §9.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-9.1
 //! [RFC 9002 §2]: https://www.rfc-editor.org/rfc/rfc9002.html#section-2
-use super::{encryption_level::EncryptionLevel, role::Role};
-use crate::{
-    frame::{FrameKind, FrameSetPart, FrameTypeValues, MergePadding},
-    var_int::VarInt,
+use self::{
+    codec::ReadFieldsHostExt as _,
+    padding::{PaddingFrame, PaddingRun},
+    set::{FrameKind, FrameSetPart, FrameTypeValues},
 };
+use super::{encryption_level::EncryptionLevel, role::Role};
+use crate::var_int::VarInt;
 use bytes::Buf;
-use core::ops::RangeInclusive;
+use core::{num::NonZeroUsize, ops::RangeInclusive};
+use nitori_call::{Direct, Receiver};
+use nitori_io::{Read, ReadChunk};
 
 pub mod ack;
 pub mod codec;
@@ -200,6 +214,7 @@ pub mod path_response;
 pub mod ping;
 pub mod reset_stream;
 pub mod retire_connection_id;
+pub mod set;
 pub mod stop_sending;
 pub mod stream;
 pub mod stream_data_blocked;
@@ -420,10 +435,11 @@ impl FrameKind for FrameType {
 }
 
 /// The frames of version 1, `0x00` to `0x1e`, form a part of a frame set:
-/// [`Frame`], of the kinds [`FrameType`], read with the failures
-/// [`codec::ReadFieldsError`].
+/// [`FrameRun`], of the kinds [`FrameType`], read with the failures
+/// [`codec::ReadFieldsError`]. Consecutive PADDING frames are one item, a
+/// [`PaddingRun`], and every other frame is an item of its own.
 impl FrameSetPart for super::Part {
-    type Frame<D> = Frame<D>;
+    type Run<D> = FrameRun<D>;
     type Kind = FrameType;
     type FieldsError<E> = codec::ReadFieldsError<E>;
 
@@ -437,27 +453,40 @@ impl FrameSetPart for super::Part {
         FrameType::of(value)
     }
 
-    async fn read_fields<F, A>(
-        io: &mut A,
+    /// A PADDING frame and the PADDING frames that follow it are one run;
+    /// every other frame is read as `codec::read_fields` reads it.
+    fn read_run<H>(
+        source: &mut H,
         kind: FrameType,
         value: VarInt,
-    ) -> Result<Frame<F::Chunk>, codec::ReadFieldsError<F::Error>>
+    ) -> Result<
+        FrameRun<<Direct<H> as ReadChunk>::Chunk>,
+        codec::ReadFieldsError<<Direct<H> as Read>::Error>,
+    >
     where
-        F: nitori_io::ReadChunk<Chunk: Default>,
-        A: nitori_call::ReceiverAccess<Family = F>,
+        H: Buf + Receiver<Family = Direct<H>> + Unpin,
+        Direct<H>: ReadChunk<Chunk: Default>,
     {
-        codec::read_fields(io, kind, value).await
+        if kind == FrameType::Padding {
+            // The Frame Type that was read is the first frame of the run.
+            let len = NonZeroUsize::MIN.saturating_add(skip_zeros(source));
+            return Ok(FrameRun::Padding(PaddingRun::new(len)));
+        }
+        source
+            .sync_read_fields_unpin(kind, value)
+            .map(FrameRun::from)
     }
 }
 
-/// A frame of version 1, of any type.
+/// A frame of version 1, of any type: one frame as it is encoded.
 ///
 /// `D` is the type of the payload fields: the chunk type of the source a
 /// frame was read from, or any [`Buf`] for a frame to write.
+/// [`FrameRun`] holds the same frames, with PADDING as a run of them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Frame<D> {
-    /// PADDING, one or more bytes.
-    Padding(padding::PaddingFrame),
+    /// A PADDING frame.
+    Padding(PaddingFrame),
     /// A PING frame.
     Ping(ping::PingFrame),
     /// An ACK frame.
@@ -498,70 +527,151 @@ pub enum Frame<D> {
     HandshakeDone(handshake_done::HandshakeDoneFrame),
 }
 
-/// Applies `$body` to the frame inside each variant of a [`Frame`].
+/// A run of frames of version 1: consecutive PADDING frames, or one frame of
+/// any other type.
+///
+/// `D` is the type of the payload fields, as for [`Frame`]. The variants are
+/// those of [`Frame`], and hold the same frame structs, except that PADDING
+/// holds a [`PaddingRun`]. This is what [`Frames`](set::Frames) gives for a
+/// set of version 1, and what [`codec::write_frame_run`] writes. A [`Frame`]
+/// converts into a run of one frame with `From`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FrameRun<D> {
+    /// A run of PADDING frames.
+    Padding(PaddingRun),
+    /// A PING frame.
+    Ping(ping::PingFrame),
+    /// An ACK frame.
+    Ack(ack::AckFrame),
+    /// A RESET_STREAM frame.
+    ResetStream(reset_stream::ResetStreamFrame),
+    /// A STOP_SENDING frame.
+    StopSending(stop_sending::StopSendingFrame),
+    /// A CRYPTO frame.
+    Crypto(crypto::CryptoFrame<D>),
+    /// A NEW_TOKEN frame.
+    NewToken(new_token::NewTokenFrame<D>),
+    /// A STREAM frame.
+    Stream(stream::StreamFrame<D>),
+    /// A MAX_DATA frame.
+    MaxData(max_data::MaxDataFrame),
+    /// A MAX_STREAM_DATA frame.
+    MaxStreamData(max_stream_data::MaxStreamDataFrame),
+    /// A MAX_STREAMS frame.
+    MaxStreams(max_streams::MaxStreamsFrame),
+    /// A DATA_BLOCKED frame.
+    DataBlocked(data_blocked::DataBlockedFrame),
+    /// A STREAM_DATA_BLOCKED frame.
+    StreamDataBlocked(stream_data_blocked::StreamDataBlockedFrame),
+    /// A STREAMS_BLOCKED frame.
+    StreamsBlocked(streams_blocked::StreamsBlockedFrame),
+    /// A NEW_CONNECTION_ID frame.
+    NewConnectionId(new_connection_id::NewConnectionIdFrame),
+    /// A RETIRE_CONNECTION_ID frame.
+    RetireConnectionId(retire_connection_id::RetireConnectionIdFrame),
+    /// A PATH_CHALLENGE frame.
+    PathChallenge(path_challenge::PathChallengeFrame),
+    /// A PATH_RESPONSE frame.
+    PathResponse(path_response::PathResponseFrame),
+    /// A CONNECTION_CLOSE frame.
+    ConnectionClose(connection_close::ConnectionCloseFrame<D>),
+    /// A HANDSHAKE_DONE frame.
+    HandshakeDone(handshake_done::HandshakeDoneFrame),
+}
+
+/// Applies `$body` to the frame struct inside each variant of the enum
+/// `$enum`, [`Frame`] or [`FrameRun`], PADDING included.
 macro_rules! each_frame {
-    ($frame:expr, $inner:ident => $body:expr) => {
+    ($enum:ident, $frame:expr, $inner:ident => $body:expr) => {
         match $frame {
-            Frame::Padding($inner) => $body,
-            Frame::Ping($inner) => $body,
-            Frame::Ack($inner) => $body,
-            Frame::ResetStream($inner) => $body,
-            Frame::StopSending($inner) => $body,
-            Frame::Crypto($inner) => $body,
-            Frame::NewToken($inner) => $body,
-            Frame::Stream($inner) => $body,
-            Frame::MaxData($inner) => $body,
-            Frame::MaxStreamData($inner) => $body,
-            Frame::MaxStreams($inner) => $body,
-            Frame::DataBlocked($inner) => $body,
-            Frame::StreamDataBlocked($inner) => $body,
-            Frame::StreamsBlocked($inner) => $body,
-            Frame::NewConnectionId($inner) => $body,
-            Frame::RetireConnectionId($inner) => $body,
-            Frame::PathChallenge($inner) => $body,
-            Frame::PathResponse($inner) => $body,
-            Frame::ConnectionClose($inner) => $body,
-            Frame::HandshakeDone($inner) => $body,
+            $enum::Padding($inner) => $body,
+            $enum::Ping($inner) => $body,
+            $enum::Ack($inner) => $body,
+            $enum::ResetStream($inner) => $body,
+            $enum::StopSending($inner) => $body,
+            $enum::Crypto($inner) => $body,
+            $enum::NewToken($inner) => $body,
+            $enum::Stream($inner) => $body,
+            $enum::MaxData($inner) => $body,
+            $enum::MaxStreamData($inner) => $body,
+            $enum::MaxStreams($inner) => $body,
+            $enum::DataBlocked($inner) => $body,
+            $enum::StreamDataBlocked($inner) => $body,
+            $enum::StreamsBlocked($inner) => $body,
+            $enum::NewConnectionId($inner) => $body,
+            $enum::RetireConnectionId($inner) => $body,
+            $enum::PathChallenge($inner) => $body,
+            $enum::PathResponse($inner) => $body,
+            $enum::ConnectionClose($inner) => $body,
+            $enum::HandshakeDone($inner) => $body,
         }
     };
 }
 
-impl<D> Frame<D> {
-    /// The kind of the frame.
-    pub fn frame_type(&self) -> FrameType {
-        each_frame!(self, frame => frame.frame_type())
-    }
+/// Implements the methods that [`Frame`] and [`FrameRun`] share.
+macro_rules! frame_methods {
+    ($enum:ident) => {
+        impl<D> $enum<D> {
+            /// The kind of the frame, or of the frames of a run.
+            pub fn frame_type(&self) -> FrameType {
+                each_frame!($enum, self, frame => frame.frame_type())
+            }
 
-    /// Whether a packet containing this frame is ack-eliciting; see
-    /// [`FrameKind::is_ack_eliciting`].
-    pub fn is_ack_eliciting(&self) -> bool {
-        self.frame_type().is_ack_eliciting()
-    }
+            /// Whether a packet containing this frame is ack-eliciting; see
+            /// [`FrameKind::is_ack_eliciting`].
+            pub fn is_ack_eliciting(&self) -> bool {
+                self.frame_type().is_ack_eliciting()
+            }
 
-    /// Whether a packet containing this frame counts as in flight; see
-    /// [`FrameKind::counts_in_flight`].
-    pub fn counts_in_flight(&self) -> bool {
-        self.frame_type().counts_in_flight()
-    }
+            /// Whether a packet containing this frame counts as in flight; see
+            /// [`FrameKind::counts_in_flight`].
+            pub fn counts_in_flight(&self) -> bool {
+                self.frame_type().counts_in_flight()
+            }
 
-    /// The Frame Type value [`codec::write_frame`] writes.
-    pub fn type_value(&self) -> VarInt {
-        each_frame!(self, frame => frame.type_value())
-    }
+            /// The Frame Type value the write operation writes, for each frame
+            /// of a run.
+            pub fn type_value(&self) -> VarInt {
+                each_frame!($enum, self, frame => frame.type_value())
+            }
+        }
+
+        impl<D: Buf> $enum<D> {
+            /// The number of bytes the write operation writes.
+            pub fn encoded_len(&self) -> usize {
+                each_frame!($enum, self, frame => frame.encoded_len())
+            }
+        }
+    };
 }
 
-impl<D: Buf> Frame<D> {
-    /// The number of bytes [`codec::write_frame`] writes.
-    pub fn encoded_len(&self) -> usize {
-        each_frame!(self, frame => frame.encoded_len())
-    }
-}
+frame_methods!(Frame);
+frame_methods!(FrameRun);
 
-/// A PADDING frame takes in the PADDING frames that follow it.
-impl<D> MergePadding for Frame<D> {
-    fn merge_padding(&mut self, rest: &mut impl Buf) {
-        if let Self::Padding(padding) = self {
-            *padding = padding.extend(skip_zeros(rest));
+/// A frame is a run of one frame.
+impl<D> From<Frame<D>> for FrameRun<D> {
+    fn from(frame: Frame<D>) -> Self {
+        match frame {
+            Frame::Padding(frame) => Self::Padding(frame.into()),
+            Frame::Ping(frame) => Self::Ping(frame),
+            Frame::Ack(frame) => Self::Ack(frame),
+            Frame::ResetStream(frame) => Self::ResetStream(frame),
+            Frame::StopSending(frame) => Self::StopSending(frame),
+            Frame::Crypto(frame) => Self::Crypto(frame),
+            Frame::NewToken(frame) => Self::NewToken(frame),
+            Frame::Stream(frame) => Self::Stream(frame),
+            Frame::MaxData(frame) => Self::MaxData(frame),
+            Frame::MaxStreamData(frame) => Self::MaxStreamData(frame),
+            Frame::MaxStreams(frame) => Self::MaxStreams(frame),
+            Frame::DataBlocked(frame) => Self::DataBlocked(frame),
+            Frame::StreamDataBlocked(frame) => Self::StreamDataBlocked(frame),
+            Frame::StreamsBlocked(frame) => Self::StreamsBlocked(frame),
+            Frame::NewConnectionId(frame) => Self::NewConnectionId(frame),
+            Frame::RetireConnectionId(frame) => Self::RetireConnectionId(frame),
+            Frame::PathChallenge(frame) => Self::PathChallenge(frame),
+            Frame::PathResponse(frame) => Self::PathResponse(frame),
+            Frame::ConnectionClose(frame) => Self::ConnectionClose(frame),
+            Frame::HandshakeDone(frame) => Self::HandshakeDone(frame),
         }
     }
 }

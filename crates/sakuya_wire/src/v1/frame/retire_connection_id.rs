@@ -50,8 +50,8 @@ impl RetireConnectionIdFrame {
 }
 
 pub mod codec {
-    //! Writing RETIRE_CONNECTION_ID as a `nitori_call` operation; reading is part of
-    //! [`read_frame`](crate::frame::codec::read_frame).
+    //! Writing RETIRE_CONNECTION_ID as a `nitori_call` operation; reading is done by
+    //! [`Frames`](crate::v1::frame::set::Frames).
     //!
     //! [`write_retire_connection_id_frame`] is also the operation struct [`WriteRetireConnectionIdFrame`], with
     //! `WriteRetireConnectionIdFrameExt` on receiver accesses and `WriteRetireConnectionIdFrameHostExt` on call

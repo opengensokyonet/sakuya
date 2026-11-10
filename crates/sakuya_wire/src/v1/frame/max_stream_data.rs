@@ -65,8 +65,8 @@ impl MaxStreamDataFrame {
 }
 
 pub mod codec {
-    //! Writing MAX_STREAM_DATA as a `nitori_call` operation; reading is part of
-    //! [`read_frame`](crate::frame::codec::read_frame).
+    //! Writing MAX_STREAM_DATA as a `nitori_call` operation; reading is done by
+    //! [`Frames`](crate::v1::frame::set::Frames).
     //!
     //! [`write_max_stream_data_frame`] is also the operation struct [`WriteMaxStreamDataFrame`], with
     //! `WriteMaxStreamDataFrameExt` on receiver accesses and `WriteMaxStreamDataFrameHostExt` on call

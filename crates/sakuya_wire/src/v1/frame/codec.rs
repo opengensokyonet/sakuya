@@ -2,33 +2,39 @@
 //! type as `nitori_call` operations.
 //!
 //! [`v1::Part`](crate::v1::Part) reads the fields after the Frame Type of a
-//! version 1 frame, through
-//! [`read_frame`](crate::frame::codec::read_frame) of a frame set that has
-//! it; [`ReadFieldsError`] holds the failure of each frame type.
-//! [`write_frame`] writes any version 1 [`Frame`]; the modules of the frame
-//! types also have write operations of their own, such as
+//! version 1 frame when [`Frames`](super::set::Frames) reads a frame set that
+//! has it; [`ReadFieldsError`] holds the failure of each frame type.
+//! [`write_frame`] writes any version 1 [`Frame`] and [`write_frame_run`]
+//! any [`FrameRun`]; the modules of the frame types also have write
+//! operations of their own, such as
 //! [`write_stream_frame`](super::stream::codec::write_stream_frame).
 //!
 //! [`write_frame`] is also the operation struct [`WriteFrame`], with
 //! `WriteFrameExt` on receiver accesses inside other operations and
 //! `WriteFrameHostExt` on call executors, including the `sync_` methods for
-//! receivers that never wait. Constructing an operation performs no IO.
+//! receivers that never wait; [`write_frame_run`] likewise has
+//! [`WriteFrameRun`]. Constructing an operation performs no IO.
 //!
 //! ```
 //! use core::marker::PhantomData;
 //! use sakuya_wire::{
-//!     frame::codec::ReadFrameHostExt as _,
+//!     parts::HList,
 //!     v1::{
 //!         self,
 //!         frame::{
-//!             Frame, codec::WriteFrameHostExt as _, max_data::MaxDataFrame, stream::StreamFrame,
+//!             Frame, FrameRun,
+//!             codec::{WriteFrameHostExt as _, WriteFrameRunHostExt as _},
+//!             max_data::MaxDataFrame,
+//!             padding::PaddingRun,
+//!             set::Frames,
+//!             stream::StreamFrame,
 //!         },
 //!         stream_id::StreamId,
 //!     },
 //!     var_int::{VarInt, VarIntField, VarIntWidth},
 //! };
 //!
-//! let set = PhantomData::<v1::Part>;
+//! let set = PhantomData::<HList![v1::Part]>;
 //! let mut output = Vec::new();
 //! let maximum_data = VarIntField::shortest(VarInt::from(1_000_000u32));
 //! let max_data = Frame::<&[u8]>::MaxData(MaxDataFrame::new(maximum_data));
@@ -47,26 +53,32 @@
 //! assert!(long.is_err());
 //!
 //! // Reading a byte slice yields subslices of it as payload fields.
-//! let mut input = output.as_slice();
-//! assert_eq!(input.sync_read_frame_unpin(set).unwrap(), max_data);
-//! assert_eq!(input.sync_read_frame_unpin(set).unwrap(), stream);
-//! assert!(input.is_empty());
+//! let mut frames = Frames::new(output.as_slice(), set);
+//! assert_eq!(frames.next().unwrap().unwrap().extract(), FrameRun::from(max_data));
+//! assert_eq!(frames.next().unwrap().unwrap().extract(), FrameRun::from(stream));
+//! assert!(frames.next().is_none());
 //!
 //! // A longer encoding of a field is kept, and written back as it was.
-//! let mut input = &[0x10, 0x80, 0x00, 0x00, 0x05][..];
-//! let frame = input.sync_read_frame_unpin(set).unwrap();
-//! let Frame::MaxData(max_data) = &frame else { panic!() };
+//! let input = [0x10, 0x80, 0x00, 0x00, 0x05];
+//! let run = Frames::new(&input[..], set).next().unwrap().unwrap().extract();
+//! let FrameRun::MaxData(max_data) = &run else { panic!() };
 //! assert_eq!(max_data.maximum_data().width(), VarIntWidth::Four);
 //! let mut output = Vec::new();
-//! output.sync_write_frame_unpin(frame).unwrap();
-//! assert_eq!(output, [0x10, 0x80, 0x00, 0x00, 0x05]);
+//! output.sync_write_frame_run_unpin(run).unwrap();
+//! assert_eq!(output, input);
+//!
+//! // A run of PADDING frames is written as a zero byte for each.
+//! let padding = FrameRun::<&[u8]>::Padding(PaddingRun::new(3.try_into().unwrap()));
+//! let mut output = Vec::new();
+//! output.sync_write_frame_run_unpin(padding).unwrap();
+//! assert_eq!(output, [0, 0, 0]);
 //! ```
 // `#[call]` generates constructors, fields and extension traits without
 // documentation comments; the module documentation above describes them.
 #![allow(missing_docs)]
 
 use super::{
-    Frame, FrameType,
+    Frame, FrameRun, FrameType,
     ack::codec::{ReadAckFrameEcnError, ReadAckFrameError, read_ack_frame, read_ack_frame_ecn},
     connection_close::codec::{
         ReadConnectionCloseFrameApplicationError, ReadConnectionCloseFrameTransportError,
@@ -86,6 +98,7 @@ use super::{
     ping::PingFrame,
     reset_stream::codec::{ReadResetStreamFrameError, read_reset_stream_frame},
     retire_connection_id::codec::read_retire_connection_id_frame,
+    set::FrameFieldsError,
     stop_sending::codec::{ReadStopSendingFrameError, read_stop_sending_frame},
     stream::{
         StreamTypeValue,
@@ -96,14 +109,13 @@ use super::{
     type_value,
 };
 use crate::{
-    frame::{FrameFieldsError, type_var_int},
+    frame::type_var_int,
     payload::ReadPayloadError,
     v1::stream_id::Directionality,
     v1::transport_error::TransportErrorCode,
     var_int::{VarInt, codec::ReadVarIntError},
 };
 use bytes::Buf;
-use core::num::NonZeroUsize;
 use nitori_call::{ReceiverAccess, call};
 use nitori_io::{
     calls::{ReadArrayError, WriteAllError},
@@ -116,7 +128,8 @@ use snafu::{ResultExt, Snafu};
 ///
 /// The source is the rest of a packet payload: a STREAM frame without a
 /// Length field takes all of it. Payload fields are chunks of the source. A
-/// PADDING frame has no fields: it is one byte, its Frame Type.
+/// PADDING frame has no fields: it is one byte, its Frame Type, and the
+/// PADDING frames that follow it stay unread.
 ///
 /// # Errors
 ///
@@ -128,7 +141,8 @@ use snafu::{ResultExt, Snafu};
 ///
 /// If the receiver returns a chunk longer than requested, which breaks the
 /// `ReadChunk` contract of `nitori_io`; see [`payload`](crate::payload).
-pub(in crate::v1) async fn read_fields<F, A>(
+#[call(sync)]
+pub(crate) async fn read_fields<F, A>(
     io: &mut A,
     kind: FrameType,
     frame_type: VarInt,
@@ -141,7 +155,7 @@ where
     use type_value::*;
     let value = frame_type.get();
     Ok(match kind {
-        FrameType::Padding => Frame::Padding(PaddingFrame::new(NonZeroUsize::MIN)),
+        FrameType::Padding => Frame::Padding(PaddingFrame),
         FrameType::Ping => Frame::Ping(PingFrame),
         FrameType::Ack if value == ACK_ECN => {
             Frame::Ack(read_ack_frame_ecn(io).await.context(AckEcnSnafu)?)
@@ -501,6 +515,67 @@ impl<E> FrameFieldsError for ReadFieldsError<E> {
     }
 }
 
+/// Writes the variants of `$frame`, a `$enum` (`Frame` or `FrameRun`), with
+/// `$write_padding` for PADDING.
+macro_rules! write_variants {
+    ($enum:ident, $io:ident, $frame:ident, $write_padding:path) => {{
+        use $crate::v1::frame::{
+            ack, connection_close, crypto, data_blocked, handshake_done, max_data, max_stream_data,
+            max_streams, new_connection_id, new_token, path_challenge, path_response, ping,
+            reset_stream, retire_connection_id, stop_sending, stream, stream_data_blocked,
+            streams_blocked,
+        };
+        match $frame {
+            $enum::Padding(frame) => $write_padding($io, frame).await,
+            $enum::Ping(frame) => ping::codec::write_ping_frame($io, frame).await,
+            $enum::Ack(frame) => ack::codec::write_ack_frame($io, frame).await,
+            $enum::ResetStream(frame) => {
+                reset_stream::codec::write_reset_stream_frame($io, frame).await
+            }
+            $enum::StopSending(frame) => {
+                stop_sending::codec::write_stop_sending_frame($io, frame).await
+            }
+            $enum::Crypto(frame) => crypto::codec::write_crypto_frame($io, frame).await,
+            $enum::NewToken(frame) => new_token::codec::write_new_token_frame($io, frame).await,
+            $enum::Stream(frame) => stream::codec::write_stream_frame($io, frame).await,
+            $enum::MaxData(frame) => max_data::codec::write_max_data_frame($io, frame).await,
+            $enum::MaxStreamData(frame) => {
+                max_stream_data::codec::write_max_stream_data_frame($io, frame).await
+            }
+            $enum::MaxStreams(frame) => {
+                max_streams::codec::write_max_streams_frame($io, frame).await
+            }
+            $enum::DataBlocked(frame) => {
+                data_blocked::codec::write_data_blocked_frame($io, frame).await
+            }
+            $enum::StreamDataBlocked(frame) => {
+                stream_data_blocked::codec::write_stream_data_blocked_frame($io, frame).await
+            }
+            $enum::StreamsBlocked(frame) => {
+                streams_blocked::codec::write_streams_blocked_frame($io, frame).await
+            }
+            $enum::NewConnectionId(frame) => {
+                new_connection_id::codec::write_new_connection_id_frame($io, frame).await
+            }
+            $enum::RetireConnectionId(frame) => {
+                retire_connection_id::codec::write_retire_connection_id_frame($io, frame).await
+            }
+            $enum::PathChallenge(frame) => {
+                path_challenge::codec::write_path_challenge_frame($io, frame).await
+            }
+            $enum::PathResponse(frame) => {
+                path_response::codec::write_path_response_frame($io, frame).await
+            }
+            $enum::ConnectionClose(frame) => {
+                connection_close::codec::write_connection_close_frame($io, frame).await
+            }
+            $enum::HandshakeDone(frame) => {
+                handshake_done::codec::write_handshake_done_frame($io, frame).await
+            }
+        }
+    }};
+}
+
 /// Writes `frame` completely.
 ///
 /// Every frame type checks its limits when it is constructed, so nothing is
@@ -521,50 +596,36 @@ where
     A: ReceiverAccess<Family = F>,
     D: Buf,
 {
-    use super::{
-        ack, connection_close, crypto, data_blocked, handshake_done, max_data, max_stream_data,
-        max_streams, new_connection_id, new_token, padding, path_challenge, path_response, ping,
-        reset_stream, retire_connection_id, stop_sending, stream, stream_data_blocked,
-        streams_blocked,
-    };
-    match frame {
-        Frame::Padding(frame) => padding::codec::write_padding_frame(io, frame).await,
-        Frame::Ping(frame) => ping::codec::write_ping_frame(io, frame).await,
-        Frame::Ack(frame) => ack::codec::write_ack_frame(io, frame).await,
-        Frame::ResetStream(frame) => reset_stream::codec::write_reset_stream_frame(io, frame).await,
-        Frame::StopSending(frame) => stop_sending::codec::write_stop_sending_frame(io, frame).await,
-        Frame::Crypto(frame) => crypto::codec::write_crypto_frame(io, frame).await,
-        Frame::NewToken(frame) => new_token::codec::write_new_token_frame(io, frame).await,
-        Frame::Stream(frame) => stream::codec::write_stream_frame(io, frame).await,
-        Frame::MaxData(frame) => max_data::codec::write_max_data_frame(io, frame).await,
-        Frame::MaxStreamData(frame) => {
-            max_stream_data::codec::write_max_stream_data_frame(io, frame).await
-        }
-        Frame::MaxStreams(frame) => max_streams::codec::write_max_streams_frame(io, frame).await,
-        Frame::DataBlocked(frame) => data_blocked::codec::write_data_blocked_frame(io, frame).await,
-        Frame::StreamDataBlocked(frame) => {
-            stream_data_blocked::codec::write_stream_data_blocked_frame(io, frame).await
-        }
-        Frame::StreamsBlocked(frame) => {
-            streams_blocked::codec::write_streams_blocked_frame(io, frame).await
-        }
-        Frame::NewConnectionId(frame) => {
-            new_connection_id::codec::write_new_connection_id_frame(io, frame).await
-        }
-        Frame::RetireConnectionId(frame) => {
-            retire_connection_id::codec::write_retire_connection_id_frame(io, frame).await
-        }
-        Frame::PathChallenge(frame) => {
-            path_challenge::codec::write_path_challenge_frame(io, frame).await
-        }
-        Frame::PathResponse(frame) => {
-            path_response::codec::write_path_response_frame(io, frame).await
-        }
-        Frame::ConnectionClose(frame) => {
-            connection_close::codec::write_connection_close_frame(io, frame).await
-        }
-        Frame::HandshakeDone(frame) => {
-            handshake_done::codec::write_handshake_done_frame(io, frame).await
-        }
-    }
+    write_variants!(
+        Frame,
+        io,
+        frame,
+        crate::v1::frame::padding::codec::write_padding_frame
+    )
+}
+
+/// Writes `run` completely: the PADDING frames of a
+/// [`PaddingRun`](super::padding::PaddingRun), or the one frame of any other
+/// type, as [`write_frame`] writes it.
+///
+/// # Errors
+///
+/// [`WriteAllError`] if the receiver stops accepting bytes or fails; bytes
+/// accepted before stay written.
+#[call(sync)]
+pub async fn write_frame_run<F, A, D>(
+    io: &mut A,
+    run: FrameRun<D>,
+) -> Result<(), WriteAllError<F::Error>>
+where
+    F: Write,
+    A: ReceiverAccess<Family = F>,
+    D: Buf,
+{
+    write_variants!(
+        FrameRun,
+        io,
+        run,
+        crate::v1::frame::padding::codec::write_padding_run
+    )
 }

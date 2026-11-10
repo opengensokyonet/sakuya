@@ -3,13 +3,20 @@
 use core::{convert::Infallible, marker::PhantomData};
 use either::Either;
 use sakuya_wire::{
-    frame::codec::{ReadFrameError, ReadFrameHostExt as _},
+    parts::{Coprod, HList},
     v1::packet_number::PacketNumber,
     v1::stream_id::Directionality,
     v1::transport_error::TransportErrorCode,
     v1::{
         self,
-        frame::{Frame, FrameType, codec::ReadFieldsError},
+        frame::{
+            FrameRun, FrameType,
+            codec::ReadFieldsError,
+            set::{
+                Frames,
+                codec::{ReadFrameError, ReadFrameTypeHostExt as _},
+            },
+        },
     },
     var_int::{VarInt, VarIntField, VarIntWidth, codec::WriteVarIntHostExt as _},
 };
@@ -29,16 +36,20 @@ fn frame(parts: &[&[u8]]) -> Vec<u8> {
     parts.concat()
 }
 
-type ReadError = ReadFrameError<Infallible, ReadFieldsError<Infallible>>;
+type ReadError = ReadFrameError<Infallible, Coprod![ReadFieldsError<Infallible>]>;
 
-fn read(bytes: &[u8]) -> Result<(Frame<&[u8]>, usize), ReadError> {
-    let mut input = bytes;
-    let frame = input.sync_read_frame_unpin(PhantomData::<v1::Part>)?;
-    Ok((frame, bytes.len() - input.len()))
+fn read(mut bytes: &[u8]) -> Result<(FrameRun<&[u8]>, usize), ReadError> {
+    let set = PhantomData::<HList![v1::Part]>;
+    let mut frames = Frames::new(bytes, set);
+    let Some(run) = frames.next() else {
+        // An empty payload has no item; the Frame Type is what is missing.
+        return Err(bytes.sync_read_frame_type_unpin(set).unwrap_err());
+    };
+    Ok((run?.extract(), bytes.len() - frames.remainder().len()))
 }
 
 /// Reads a whole frame.
-fn accepts(bytes: &[u8]) -> Frame<&[u8]> {
+fn accepts(bytes: &[u8]) -> FrameRun<&[u8]> {
     let (frame, consumed) = read(bytes).unwrap_or_else(|error| panic!("{bytes:02x?}: {error}"));
     assert_eq!(consumed, bytes.len(), "{bytes:02x?}");
     frame
@@ -71,8 +82,8 @@ fn prefixes_are_incomplete(bytes: &[u8]) {
 
 /// The packet number ranges of an ACK frame, smallest and largest, largest
 /// range first.
-fn ranges(frame: &Frame<&[u8]>) -> Vec<(u64, u64)> {
-    let Frame::Ack(ack) = frame else {
+fn ranges(frame: &FrameRun<&[u8]>) -> Vec<(u64, u64)> {
+    let FrameRun::Ack(ack) = frame else {
         panic!("{frame:?}")
     };
     ack.packet_ranges()
@@ -160,7 +171,7 @@ fn ack_ranges_reach_the_edges_of_the_packet_numbers() {
     // The largest values.
     let largest = frame(&[&[0x02], &var(MAX), &var(MAX), &[0], &var(MAX)]);
     assert_eq!(ranges(&accepts(&largest)), [(0, MAX)]);
-    let Frame::Ack(ack) = accepts(&largest) else {
+    let FrameRun::Ack(ack) = accepts(&largest) else {
         panic!()
     };
     assert_eq!(ack.largest_acknowledged().get(), PacketNumber::MAX);
@@ -178,7 +189,7 @@ fn ack_range_count_is_not_trusted() {
 #[test]
 fn ack_ecn_counts_follow_the_ranges() {
     let bytes = frame(&[&[0x03, 1, 0, 0, 0], &var(1), &var(2), &var(MAX)]);
-    let Frame::Ack(ack) = accepts(&bytes) else {
+    let FrameRun::Ack(ack) = accepts(&bytes) else {
         panic!()
     };
     let counts = ack.ecn_counts().unwrap();
@@ -200,14 +211,14 @@ fn ack_ecn_counts_follow_the_ranges() {
 #[test]
 fn reset_stream_and_stop_sending_take_the_largest_values() {
     let bytes = frame(&[&[0x04], &var(MAX), &var(MAX), &var(MAX)]);
-    let Frame::ResetStream(reset) = accepts(&bytes) else {
+    let FrameRun::ResetStream(reset) = accepts(&bytes) else {
         panic!()
     };
     assert_eq!(reset.stream_id().get().get(), VarInt::MAX);
     assert_eq!(reset.final_size().get(), VarInt::MAX);
     prefixes_are_incomplete(&bytes);
     let bytes = frame(&[&[0x05], &var(MAX), &var(MAX)]);
-    assert!(matches!(accepts(&bytes), Frame::StopSending(_)));
+    assert!(matches!(accepts(&bytes), FrameRun::StopSending(_)));
     prefixes_are_incomplete(&bytes);
 }
 
@@ -215,9 +226,9 @@ fn reset_stream_and_stop_sending_take_the_largest_values() {
 #[test]
 fn crypto_data_ends_at_the_largest_offset() {
     let bytes = frame(&[&[0x06], &var(MAX - 1), &[1, 0xaa]]);
-    assert!(matches!(accepts(&bytes), Frame::Crypto(_)));
+    assert!(matches!(accepts(&bytes), FrameRun::Crypto(_)));
     let bytes = frame(&[&[0x06], &var(MAX), &[0]]);
-    let Frame::Crypto(crypto) = accepts(&bytes) else {
+    let FrameRun::Crypto(crypto) = accepts(&bytes) else {
         panic!()
     };
     assert_eq!(
@@ -235,7 +246,7 @@ fn crypto_data_ends_at_the_largest_offset() {
 #[test]
 fn new_token_is_not_empty() {
     rejects(&[0x07, 0]);
-    assert!(matches!(accepts(&[0x07, 1, 0xaa]), Frame::NewToken(_)));
+    assert!(matches!(accepts(&[0x07, 1, 0xaa]), FrameRun::NewToken(_)));
     prefixes_are_incomplete(&[0x07, 2, 1, 2]);
 }
 
@@ -256,7 +267,7 @@ fn stream_type_bits_announce_the_fields() {
             bytes.push(2);
         }
         bytes.extend([0xaa, 0xbb]);
-        let Frame::Stream(stream) = accepts(&bytes) else {
+        let FrameRun::Stream(stream) = accepts(&bytes) else {
             panic!()
         };
         assert_eq!(stream.stream_id().get().get(), VarInt::from(4u8));
@@ -276,17 +287,17 @@ fn stream_type_bits_announce_the_fields() {
 fn stream_data_ends_at_the_largest_offset() {
     // With and without a Length field.
     let at_limit = frame(&[&[0x0e], &var(0), &var(MAX - 1), &[1, 0xaa]]);
-    assert!(matches!(accepts(&at_limit), Frame::Stream(_)));
+    assert!(matches!(accepts(&at_limit), FrameRun::Stream(_)));
     rejects(&frame(&[&[0x0e], &var(0), &var(MAX), &[1]]));
     let at_limit = frame(&[&[0x0c], &var(0), &var(MAX - 1), &[0xaa]]);
-    assert!(matches!(accepts(&at_limit), Frame::Stream(_)));
+    assert!(matches!(accepts(&at_limit), FrameRun::Stream(_)));
     rejects(&frame(&[&[0x0c], &var(0), &var(MAX), &[0xaa]]));
     assert!(matches!(
         accepts(&frame(&[&[0x0c], &var(0), &var(MAX)])),
-        Frame::Stream(_)
+        FrameRun::Stream(_)
     ));
     // An Offset field with the value zero is kept, with its OFF bit.
-    let Frame::Stream(stream) = accepts(&[0x0e, 0, 0, 1, 0xaa]) else {
+    let FrameRun::Stream(stream) = accepts(&[0x0e, 0, 0, 1, 0xaa]) else {
         panic!()
     };
     assert_eq!(stream.offset(), Some(VarIntField::shortest(VarInt::ZERO)));
@@ -320,8 +331,8 @@ fn stream_counts_stop_at_2_60() {
     ] {
         let bytes = frame(&[&[type_value], &var(MAX_STREAMS)]);
         match accepts(&bytes) {
-            Frame::MaxStreams(frame) => assert_eq!(frame.directionality(), directionality),
-            Frame::StreamsBlocked(frame) => assert_eq!(frame.directionality(), directionality),
+            FrameRun::MaxStreams(frame) => assert_eq!(frame.directionality(), directionality),
+            FrameRun::StreamsBlocked(frame) => assert_eq!(frame.directionality(), directionality),
             other => panic!("{other:?}"),
         }
         rejects(&frame(&[&[type_value], &var(MAX_STREAMS + 1)]));
@@ -346,7 +357,7 @@ fn new_connection_id_lengths_and_retire_prior_to() {
     };
     for length in [1, 20] {
         let bytes = with(3, 3, &vec![0xcc; length]);
-        let Frame::NewConnectionId(new_id) = accepts(&bytes) else {
+        let FrameRun::NewConnectionId(new_id) = accepts(&bytes) else {
             panic!()
         };
         assert_eq!(new_id.connection_id().as_bytes().len(), length);
@@ -396,13 +407,13 @@ fn connection_close_fields_follow_the_type() {
 /// read as the same values, and the frame keeps the widths it was read with.
 #[test]
 fn fields_may_use_longer_encodings() {
-    let Frame::ResetStream(shortest) = accepts(&[0x04, 0x01, 0x02, 0x03]) else {
+    let FrameRun::ResetStream(shortest) = accepts(&[0x04, 0x01, 0x02, 0x03]) else {
         panic!()
     };
     let longer = [
         0x04, 0x40, 0x01, 0x80, 0, 0, 0x02, 0xc0, 0, 0, 0, 0, 0, 0, 0x03,
     ];
-    let Frame::ResetStream(reset) = accepts(&longer) else {
+    let FrameRun::ResetStream(reset) = accepts(&longer) else {
         panic!()
     };
     assert_eq!(
@@ -425,7 +436,7 @@ fn fields_may_use_longer_encodings() {
         ),
         (VarIntWidth::Two, VarIntWidth::Four, VarIntWidth::Eight)
     );
-    let (Frame::NewToken(longer), Frame::NewToken(shortest)) = (
+    let (FrameRun::NewToken(longer), FrameRun::NewToken(shortest)) = (
         accepts(&[0x07, 0x40, 0x01, 0xaa]),
         accepts(&[0x07, 1, 0xaa]),
     ) else {

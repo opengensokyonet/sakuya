@@ -14,16 +14,25 @@ use sakuya_packet_protection::packet_key::PacketKey;
 use sakuya_packet_protection::retry::verify_retry_integrity_tag;
 use sakuya_packet_protection::secret::TrafficSecret;
 use sakuya_wire::connection_id::{ConnectionId, ConnectionIdLength};
-use sakuya_wire::frame::Frames;
 use sakuya_wire::header::codec::{ReadLongHeaderHostExt as _, ReadShortHeaderHostExt as _};
+use sakuya_wire::parts::HList;
 use sakuya_wire::v1::header::codec::ReadLongPacketHostExt as _;
 use sakuya_wire::v1::header::{LongPacketType, TypeFields};
 use sakuya_wire::v1::packet_number::PacketNumber;
 use sakuya_wire::v1::role::Role;
 use sakuya_wire::v1::stream_count::StreamCount;
 use sakuya_wire::v1::transport_parameters::codec::ReadTransportParametersHostExt as _;
-use sakuya_wire::v1::{self, frame::Frame};
+use sakuya_wire::v1::{
+    self,
+    frame::{FrameRun, set::Frames},
+};
 use sakuya_wire::var_int::VarInt;
+
+/// The next run of a payload read with the frame set of version 1 alone: a
+/// frame, or a run of PADDING frames.
+fn next_frame<'a>(frames: &mut Frames<&'a [u8], HList![v1::Part]>) -> Option<FrameRun<&'a [u8]>> {
+    frames.next().map(|frame| frame.unwrap().extract())
+}
 
 fn hex(text: &str) -> Vec<u8> {
     let digits: Vec<u8> = text
@@ -80,18 +89,18 @@ fn a2_client_initial_end_to_end() {
     let payload = open_initial(&protected, &secrets.client, 2);
     assert_eq!(payload.len(), 1162);
 
-    let mut frames = Frames::new(payload.as_slice(), PhantomData::<v1::Part>);
-    let Some(Ok(Frame::Crypto(crypto))) = frames.next() else {
+    let mut frames = Frames::new(payload.as_slice(), PhantomData::<HList![v1::Part]>);
+    let Some(FrameRun::Crypto(crypto)) = next_frame(&mut frames) else {
         panic!("the payload starts with a CRYPTO frame")
     };
     assert_eq!(crypto.offset().get(), VarInt::ZERO);
     assert_eq!(crypto.data().len(), 241);
     assert_eq!(crypto.data()[..4], [0x01, 0x00, 0x00, 0xed]);
-    let Some(Ok(Frame::Padding(padding))) = frames.next() else {
+    let Some(FrameRun::Padding(padding)) = next_frame(&mut frames) else {
         panic!("padding follows")
     };
     assert_eq!(padding.len().get(), 1162 - 245);
-    assert!(frames.next().is_none());
+    assert!(next_frame(&mut frames).is_none());
 
     // The ClientHello ends with the quic_transport_parameters extension.
     let extension = &crypto.data()[crypto.data().len() - 0x32..];
@@ -128,19 +137,19 @@ fn a3_server_initial_end_to_end() {
     let secrets = InitialSecrets::derive(&RingBackend, &dcid);
     let payload = open_initial(&protected, &secrets.server, 1);
 
-    let mut frames = Frames::new(payload.as_slice(), PhantomData::<v1::Part>);
-    let Some(Ok(Frame::Ack(ack))) = frames.next() else {
+    let mut frames = Frames::new(payload.as_slice(), PhantomData::<HList![v1::Part]>);
+    let Some(FrameRun::Ack(ack)) = next_frame(&mut frames) else {
         panic!("the payload starts with an ACK frame")
     };
     assert_eq!(ack.largest_acknowledged().get(), PacketNumber::ZERO);
     assert_eq!(ack.packet_ranges().count(), 1);
     assert_eq!(ack.ecn_counts(), None);
-    let Some(Ok(Frame::Crypto(crypto))) = frames.next() else {
+    let Some(FrameRun::Crypto(crypto)) = next_frame(&mut frames) else {
         panic!("a CRYPTO frame follows")
     };
     assert_eq!(crypto.data().len(), 90);
     assert_eq!(crypto.data()[0], 0x02, "a ServerHello");
-    assert!(frames.next().is_none());
+    assert!(next_frame(&mut frames).is_none());
 }
 
 #[test]
@@ -198,7 +207,7 @@ fn a5_short_header_end_to_end() {
     assert_eq!(number.get(), 654_360_564);
     let header_len = header.packet_number_offset() + truncated.encoded_len().get();
     let payload = key.open(number, &mut private, header_len).unwrap();
-    let mut frames = Frames::new(&*payload, PhantomData::<v1::Part>);
-    assert!(matches!(frames.next(), Some(Ok(Frame::Ping(_)))));
-    assert!(frames.next().is_none());
+    let mut frames = Frames::new(&*payload, PhantomData::<HList![v1::Part]>);
+    assert!(matches!(next_frame(&mut frames), Some(FrameRun::Ping(_))));
+    assert!(next_frame(&mut frames).is_none());
 }

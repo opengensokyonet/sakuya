@@ -66,8 +66,8 @@ impl StopSendingFrame {
 }
 
 pub mod codec {
-    //! Writing STOP_SENDING as a `nitori_call` operation; reading is part of
-    //! [`read_frame`](crate::frame::codec::read_frame).
+    //! Writing STOP_SENDING as a `nitori_call` operation; reading is done by
+    //! [`Frames`](crate::v1::frame::set::Frames).
     //!
     //! [`write_stop_sending_frame`] is also the operation struct [`WriteStopSendingFrame`], with
     //! `WriteStopSendingFrameExt` on receiver accesses and `WriteStopSendingFrameHostExt` on call

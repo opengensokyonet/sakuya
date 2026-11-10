@@ -44,9 +44,9 @@ pub mod transport_error;
 pub mod transport_parameters;
 
 /// The frames of version 1 as a part of a frame set
-/// ([`FrameSetPart`](crate::frame::FrameSetPart)): [`frame::Frame`], of the
+/// ([`FrameSetPart`](frame::set::FrameSetPart)): [`frame::FrameRun`], of the
 /// kinds [`frame::FrameType`].
 ///
-/// A frame set of version 1 alone is this part.
+/// A frame set of version 1 alone is the list `HList![v1::Part]`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Part;

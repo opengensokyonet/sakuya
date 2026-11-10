@@ -146,7 +146,7 @@ pub(in crate::v1) const fn type_value_of(application: bool) -> VarInt {
 
 pub mod codec {
     //! Writing CONNECTION_CLOSE frames as a `nitori_call` operation; reading
-    //! is part of [`read_frame`](crate::frame::codec::read_frame).
+    //! is done by [`Frames`](crate::v1::frame::set::Frames).
     //!
     //! [`write_connection_close_frame`] is also the operation struct
     //! [`WriteConnectionCloseFrame`], with `WriteConnectionCloseFrameExt` on receiver
@@ -357,9 +357,9 @@ pub mod codec {
 #[cfg(test)]
 mod tests {
     use super::{CloseErrorCode, ConnectionCloseFrame};
-    use crate::v1::frame::tests::V1;
+    use crate::v1::frame::tests::ReadOneFrame as _;
     use crate::{
-        frame::{LengthError, codec::ReadFrameHostExt as _},
+        frame::LengthError,
         v1::application_error::ApplicationErrorCode,
         v1::frame::{
             Frame,
@@ -372,7 +372,7 @@ mod tests {
     #[test]
     fn transport_and_application_types() {
         let transport = [0x1c, 0x07, 0x06, 0x03, b'b', b'a', b'd'];
-        let frame = transport.as_slice().sync_read_frame_unpin(V1).unwrap();
+        let frame = transport.as_slice().read_one_frame().unwrap();
         let Frame::ConnectionClose(close) = frame else {
             panic!("{frame:?}")
         };
@@ -388,7 +388,7 @@ mod tests {
         assert_eq!(assert_round_trip(frame), transport);
 
         let application = [0x1d, 0x41, 0x00, 0x00];
-        let frame = application.as_slice().sync_read_frame_unpin(V1).unwrap();
+        let frame = application.as_slice().read_one_frame().unwrap();
         let code = short(ApplicationErrorCode::new(VarInt::from(0x100u16)));
         assert_eq!(
             frame,
@@ -406,7 +406,7 @@ mod tests {
         // The same codes in longer encodings, with a longer Reason Phrase
         // Length field.
         let long = [0x1c, 0x80, 0, 0, 0x07, 0x40, 0x06, 0x40, 0x01, b'!'];
-        let frame = long.as_slice().sync_read_frame_unpin(V1).unwrap();
+        let frame = long.as_slice().read_one_frame().unwrap();
         let error_code = CloseErrorCode::Transport {
             code: wide(TransportErrorCode::FRAME_ENCODING_ERROR, VarIntWidth::Four),
             frame_type: wide(VarInt::from(0x06u8), VarIntWidth::Two),

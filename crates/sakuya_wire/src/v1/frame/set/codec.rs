@@ -1,44 +1,58 @@
-//! Reading a frame of a frame set as a `nitori_call` operation.
+//! Reading the Frame Type of an item of a frame set as a `nitori_call`
+//! operation.
 //!
-//! [`read_frame`] reads one frame of the frame set `P`: its Frame Type, the
-//! part of `P` that claims it, and the fields that part reads. Writing is
+//! [`read_frame_type`] reads the Frame Type of the next item of the frame set
+//! `S`, checks that it uses its shortest encoding, and gives the kind the
+//! set has for it. [`Frames`](super::Frames) reads the Frame Type with it,
+//! and then lets the part that claims the Frame Type read the rest
+//! ([`FrameSetPart::read_run`](super::FrameSetPart::read_run)). Writing is
 //! per frame type, in the `codec` module of each frame.
 //!
-//! [`read_frame`] is also the operation struct [`ReadFrame`], with
-//! `ReadFrameExt` on receiver accesses inside other operations and
-//! `ReadFrameHostExt` on call executors, including the `sync_` methods for
-//! receivers that never wait. Constructing an operation performs no IO.
+//! [`read_frame_type`] is also the operation struct [`ReadFrameType`], with
+//! `ReadFrameTypeExt` on receiver accesses inside other operations and
+//! `ReadFrameTypeHostExt` on call executors, including the `sync_` methods
+//! for receivers that never wait. Constructing an operation performs no IO.
 //!
 //! ```
 //! use core::marker::PhantomData;
 //! use sakuya_wire::{
-//!     frame::codec::{ReadFrameError, ReadFrameHostExt as _},
-//!     v1::{self, frame::Frame, transport_error::TransportErrorCode},
+//!     parts::HList,
+//!     v1::{
+//!         self,
+//!         frame::{
+//!             FrameType,
+//!             set::codec::{ReadFrameError, ReadFrameTypeHostExt as _},
+//!         },
+//!         transport_error::TransportErrorCode,
+//!     },
+//!     var_int::VarInt,
 //! };
 //!
-//! let set = PhantomData::<v1::Part>;
-//! // MAX_DATA with a four-byte Maximum Data, then PING.
-//! let mut input = &[0x10, 0x80, 0x00, 0x00, 0x05, 0x01][..];
-//! let Frame::MaxData(max_data) = input.sync_read_frame_unpin(set).unwrap() else { panic!() };
-//! assert_eq!(max_data.maximum_data().get().get(), 5);
-//! assert!(matches!(input.sync_read_frame_unpin(set).unwrap(), Frame::Ping(_)));
-//!
-//! // A frame cut short is an incomplete failure.
-//! let mut input = &[0x10, 0x80][..];
-//! assert!(input.sync_read_frame_unpin(set).unwrap_err().is_incomplete());
+//! let set = PhantomData::<HList![v1::Part]>;
+//! // MAX_DATA, then PING.
+//! let mut input = &[0x10, 0x05, 0x01][..];
+//! let (kind, value) = input.sync_read_frame_type_unpin(set).unwrap();
+//! assert_eq!(kind.extract(), FrameType::MaxData);
+//! assert_eq!(value, VarInt::from(0x10u8));
+//! assert_eq!(input, [0x05, 0x01]);
 //!
 //! // RESET_STREAM_AT is not a frame of version 1.
 //! let mut input = &[0x24, 0, 0, 0, 0][..];
-//! let error = input.sync_read_frame_unpin(set).unwrap_err();
+//! let error = input.sync_read_frame_type_unpin(set).unwrap_err();
 //! assert!(matches!(error, ReadFrameError::UnknownType { .. }));
 //! assert_eq!(error.transport_error_code(), TransportErrorCode::FRAME_ENCODING_ERROR);
+//!
+//! // A Frame Type cut short is an incomplete failure.
+//! let mut input = &[0x40][..];
+//! assert!(input.sync_read_frame_type_unpin(set).unwrap_err().is_incomplete());
 //! ```
 // `#[call]` generates constructors, fields and extension traits without
 // documentation comments; the module documentation above describes them.
 #![allow(missing_docs)]
 
-use super::{FrameFieldsError, FrameSetPart};
+use super::{FrameFieldsError, FrameSet};
 use crate::{
+    parts::PartsError,
     v1::transport_error::TransportErrorCode,
     var_int::{
         VarInt, VarIntWidth,
@@ -50,11 +64,8 @@ use nitori_call::{ReceiverAccess, call};
 use nitori_io::prelude::*;
 use snafu::{ResultExt, Snafu};
 
-/// Reads one frame of the frame set `P`; `set` names the set.
-///
-/// The source is the rest of a packet payload: a STREAM or DATAGRAM frame
-/// without a Length field takes all of it. Payload fields are chunks of the
-/// source. A PADDING frame reads only its one-byte Frame Type.
+/// Reads the Frame Type of an item of the frame set `S`, and gives the kind
+/// it announces with its value; `set` names the set.
 ///
 /// The Frame Type must use its shortest encoding ([RFC 9000 §12.4]); a
 /// longer one is rejected before the type is looked up.
@@ -63,36 +74,29 @@ use snafu::{ResultExt, Snafu};
 ///
 /// [`ReadFrameError::FrameType`] if the Frame Type cannot be read,
 /// [`ReadFrameError::LongerTypeEncoding`] if it uses a longer encoding than
-/// necessary, [`ReadFrameError::UnknownType`] for a value that no part of
-/// `P` claims, and [`ReadFrameError::Fields`] with the failure of the part
-/// that claims it if the other fields cannot be read or break a limit of
-/// the encoding. Bytes read before a failure stay consumed.
-///
-/// # Panics
-///
-/// If the receiver returns a chunk longer than requested, which breaks the
-/// `ReadChunk` contract of `nitori_io`; see [`payload`](crate::payload).
+/// necessary, and [`ReadFrameError::UnknownType`] for a value that no part
+/// of `S` claims; never [`ReadFrameError::Fields`]. Bytes read before a
+/// failure stay consumed.
 ///
 /// [RFC 9000 §12.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.4
 #[call(sync)]
-pub async fn read_frame<P, F, A>(
+pub async fn read_frame_type<S, F, A>(
     io: &mut A,
-    set: PhantomData<P>,
-) -> Result<P::Frame<F::Chunk>, ReadFrameError<F::Error, P::FieldsError<F::Error>>>
+    set: PhantomData<S>,
+) -> Result<(S::Kind, VarInt), ReadFrameError<F::Error, S::FieldsError<F::Error>>>
 where
-    P: FrameSetPart,
-    F: ReadChunk<Chunk: Default>,
+    S: FrameSet,
+    F: Read,
     A: ReceiverAccess<Family = F>,
 {
     use read_frame_error::*;
     let PhantomData = set;
     let (frame_type, width) = read_var_int_with_width(io).await.context(FrameTypeSnafu)?;
     LongerTypeEncodingError::check(frame_type, width).context(LongerTypeEncodingSnafu)?;
-    let Some(kind) = P::kind_of(frame_type) else {
+    let Some(kind) = S::kind_of(frame_type) else {
         return UnknownTypeSnafu { frame_type }.fail();
     };
-    let frame = P::read_fields(io, kind, frame_type).await?;
-    Ok(frame)
+    Ok((kind, frame_type))
 }
 
 /// A Frame Type uses a longer encoding than necessary ([RFC 9000 §12.4]).
@@ -133,15 +137,17 @@ impl LongerTypeEncodingError {
     }
 }
 
-/// Failures that [`read_frame`] can produce for a frame set whose parts
-/// report the failures of reading fields as `F`.
+/// Failures of reading one item of a frame set whose parts report the
+/// failures of reading fields as the sum `C`: the Frame Type
+/// ([`read_frame_type`]) and what the part that claims it reads after it,
+/// which [`Frames`](super::Frames) yields.
 ///
 /// The failures of the Frame Type are the same for every frame set; the
 /// failures of the other fields come from the part that claims the Frame
 /// Type, through [`Fields`](Self::Fields).
 #[derive(Debug, Snafu)]
 #[snafu(module(read_frame_error), visibility(pub(crate)))]
-pub enum ReadFrameError<E, F> {
+pub enum ReadFrameError<E, C> {
     /// The Frame Type could not be read.
     #[snafu(display("frame type read failed"))]
     FrameType {
@@ -168,11 +174,11 @@ pub enum ReadFrameError<E, F> {
     #[snafu(transparent)]
     Fields {
         /// The failure, of the part that claims the Frame Type.
-        source: F,
+        source: PartsError<C>,
     },
 }
 
-impl<E, F: FrameFieldsError> ReadFrameError<E, F> {
+impl<E, C: FrameFieldsError> ReadFrameError<E, C> {
     /// The Frame Type of the frame, if it could be read.
     ///
     /// This is the value for the Frame Type field of the CONNECTION_CLOSE

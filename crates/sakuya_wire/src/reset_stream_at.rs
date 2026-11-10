@@ -12,34 +12,40 @@
 //! use core::marker::PhantomData;
 //! use sakuya_wire::{
 //!     assert_frame_types_disjoint,
-//!     frame::{PartSum, codec::ReadFrameHostExt as _},
-//!     reset_stream_at, v1,
+//!     parts::HList,
+//!     reset_stream_at,
+//!     v1::{self, frame::set::Frames},
 //! };
 //!
-//! type Set = PartSum<v1::Part, reset_stream_at::Part>;
+//! type Set = HList![v1::Part, reset_stream_at::Part];
 //! assert_frame_types_disjoint!(Set);
 //!
 //! // RESET_STREAM_AT on stream 4, error code 1, final size 9, reliable size 5.
-//! let mut input = &[0x24, 0x04, 0x01, 0x09, 0x05][..];
-//! let Ok(PartSum::Rest(frame)) = input.sync_read_frame_unpin(PhantomData::<Set>) else {
-//!     panic!()
-//! };
+//! let payload = [0x24, 0x04, 0x01, 0x09, 0x05];
+//! let mut frames = Frames::new(&payload[..], PhantomData::<Set>);
+//! let Some(Ok(run)) = frames.next() else { panic!() };
+//! let frame: reset_stream_at::ResetStreamAtFrame = run.uninject().ok().unwrap();
 //! assert_eq!(frame.reliable_size().get().get(), 5);
 //! ```
 //!
 //! [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html#section-4
 //! [RFC 9000 §12.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.4
+use self::codec::ReadResetStreamAtFrameHostExt as _;
 use crate::{
-    frame::{FrameKind, FrameSetPart, FrameTypeValues, Head, MergePadding, type_var_int},
+    frame::{Head, type_var_int},
     v1::{
-        application_error::ApplicationErrorCode, encryption_level::EncryptionLevel, role::Role,
+        application_error::ApplicationErrorCode,
+        encryption_level::EncryptionLevel,
+        frame::set::{FrameKind, FrameSetPart, FrameTypeValues},
+        role::Role,
         stream_id::StreamId,
     },
     var_int::{VarInt, VarIntField},
 };
+use bytes::Buf;
 use core::ops::RangeInclusive;
-use nitori_call::ReceiverAccess;
-use nitori_io::ReadChunk;
+use nitori_call::{Direct, Receiver};
+use nitori_io::{Read, ReadChunk};
 use snafu::Snafu;
 
 /// The Frame Type value of RESET_STREAM_AT.
@@ -52,7 +58,7 @@ const TYPE_VALUE: u64 = 0x24;
 pub struct Part;
 
 impl FrameSetPart for Part {
-    type Frame<D> = ResetStreamAtFrame;
+    type Run<D> = ResetStreamAtFrame;
     type Kind = FrameType;
     type FieldsError<E> = codec::ReadResetStreamAtFrameError<E>;
 
@@ -66,16 +72,16 @@ impl FrameSetPart for Part {
         (value.get() == TYPE_VALUE).then_some(FrameType::ResetStreamAt)
     }
 
-    async fn read_fields<F, A>(
-        io: &mut A,
+    fn read_run<H>(
+        source: &mut H,
         _kind: FrameType,
         _value: VarInt,
-    ) -> Result<ResetStreamAtFrame, codec::ReadResetStreamAtFrameError<F::Error>>
+    ) -> Result<ResetStreamAtFrame, codec::ReadResetStreamAtFrameError<<Direct<H> as Read>::Error>>
     where
-        F: ReadChunk<Chunk: Default>,
-        A: ReceiverAccess<Family = F>,
+        H: Buf + Receiver<Family = Direct<H>> + Unpin,
+        Direct<H>: ReadChunk<Chunk: Default>,
     {
-        codec::read_reset_stream_at_frame(io).await
+        source.sync_read_reset_stream_at_frame_unpin()
     }
 }
 
@@ -199,9 +205,6 @@ impl ResetStreamAtFrame {
     }
 }
 
-/// RESET_STREAM_AT is not PADDING.
-impl MergePadding for ResetStreamAtFrame {}
-
 /// A RESET_STREAM_AT reliable size exceeds its final size.
 ///
 /// Only [`check`](Self::check) constructs it, when the check fails, so its
@@ -246,8 +249,8 @@ impl ReliableSizeError {
 
 pub mod codec {
     //! Writing RESET_STREAM_AT frames as a `nitori_call` operation; reading
-    //! is part of [`read_frame`](crate::frame::codec::read_frame) of a frame
-    //! set that has [`Part`](super::Part).
+    //! is part of [`Frames`](crate::v1::frame::set::Frames) over a frame set that
+    //! has [`Part`](super::Part).
     //!
     //! [`write_reset_stream_at_frame`] is also the operation struct
     //! [`WriteResetStreamAtFrame`], with `WriteResetStreamAtFrameExt` on receiver
@@ -258,8 +261,8 @@ pub mod codec {
 
     use super::{ReliableSizeError, ResetStreamAtFrame, TYPE_VALUE};
     use crate::{
-        frame::{FrameFieldsError, read_field, type_var_int},
-        v1::transport_error::TransportErrorCode,
+        frame::{read_field, type_var_int},
+        v1::{frame::set::FrameFieldsError, transport_error::TransportErrorCode},
         var_int::{VarInt, codec::ReadVarIntError},
     };
     use nitori_call::{ReceiverAccess, call};
@@ -267,6 +270,7 @@ pub mod codec {
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type.
+    #[call(sync)]
     pub(super) async fn read_reset_stream_at_frame<F: Read, A: ReceiverAccess<Family = F>>(
         io: &mut A,
     ) -> Result<ResetStreamAtFrame, ReadResetStreamAtFrameError<F::Error>> {
@@ -364,19 +368,23 @@ mod tests {
         codec::{ReadResetStreamAtFrameError, WriteResetStreamAtFrameHostExt as _},
     };
     use crate::{
-        frame::{
-            FrameFieldsError, FrameKind, FrameSetPart,
-            codec::{ReadFrameError, ReadFrameHostExt as _},
-        },
+        parts::{Coprod, Coproduct, HList, PartsError},
         v1::{
-            application_error::ApplicationErrorCode, encryption_level::EncryptionLevel, role::Role,
-            stream_id::StreamId, transport_error::TransportErrorCode,
+            application_error::ApplicationErrorCode,
+            encryption_level::EncryptionLevel,
+            frame::set::{
+                FrameFieldsError, FrameKind, FrameSetPart, Frames, OnlyPart as _,
+                codec::ReadFrameError,
+            },
+            role::Role,
+            stream_id::StreamId,
+            transport_error::TransportErrorCode,
         },
         var_int::{VarInt, VarIntField, VarIntWidth},
     };
     use core::{convert::Infallible, marker::PhantomData};
 
-    type ReadError = ReadFrameError<Infallible, ReadResetStreamAtFrameError<Infallible>>;
+    type ReadError = ReadFrameError<Infallible, Coprod![ReadResetStreamAtFrameError<Infallible>]>;
 
     fn frame(final_size: u16, reliable_size: u16) -> Result<ResetStreamAtFrame, ReliableSizeError> {
         ResetStreamAtFrame::new(
@@ -388,8 +396,10 @@ mod tests {
     }
 
     fn read(encoding: &[u8]) -> Result<ResetStreamAtFrame, ReadError> {
-        let mut input = encoding;
-        input.sync_read_frame_unpin(PhantomData::<Part>)
+        Frames::new(encoding, PhantomData::<HList![Part]>)
+            .next()
+            .only_part()
+            .expect("the encoding is not empty")
     }
 
     fn assert_round_trip(frame: ResetStreamAtFrame) {
@@ -436,7 +446,7 @@ mod tests {
         assert!(matches!(
             error,
             ReadFrameError::Fields {
-                source: ReadResetStreamAtFrameError::ReliableSizeAboveFinalSize { source },
+                source: PartsError(Coproduct::Inl(ReadResetStreamAtFrameError::ReliableSizeAboveFinalSize { source })),
             } if source == expected
         ));
         assert_eq!(error.frame_type(), Some(VarInt::from(0x24u8)));
@@ -452,7 +462,9 @@ mod tests {
     fn each_field_has_its_own_failure() {
         fn fields(encoding: &[u8]) -> ReadResetStreamAtFrameError<Infallible> {
             match read(encoding) {
-                Err(ReadFrameError::Fields { source }) => {
+                Err(ReadFrameError::Fields {
+                    source: PartsError(Coproduct::Inl(source)),
+                }) => {
                     assert!(source.is_incomplete());
                     assert_eq!(source.frame_type(), VarInt::from(0x24u8));
                     source

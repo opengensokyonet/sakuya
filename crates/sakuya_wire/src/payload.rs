@@ -255,11 +255,13 @@ where
 mod tests {
     use super::{PayloadCompleted, ReadPayloadError};
     use crate::{
-        frame::codec::{ReadFrameError, ReadFrameHostExt as _},
+        parts::HList,
         v1::{
             self,
             frame::{
-                codec::ReadFieldsError, crypto::codec::ReadCryptoFrameError,
+                codec::{ReadFieldsError, ReadFieldsHostExt as _},
+                crypto::codec::ReadCryptoFrameError,
+                set::codec::ReadFrameTypeHostExt as _,
                 stream::codec::ReadStreamFrameError,
             },
         },
@@ -412,35 +414,43 @@ mod tests {
         }
     }
 
+    /// Reads one frame from `$source`, a receiver that never waits: its Frame
+    /// Type, then its fields, which are what carry the payload.
+    macro_rules! read_one_frame {
+        ($source:expr) => {{
+            // A source passed as `&mut` needs no `mut` of its own.
+            #[allow(unused_mut)]
+            let mut source = $source;
+            let (kind, value) = source
+                .sync_read_frame_type_unpin(PhantomData::<HList![v1::Part]>)
+                .unwrap();
+            source.sync_read_fields_unpin(kind.extract(), value)
+        }};
+    }
+
     /// The payload failure of reading one frame from `source`.
     fn payload_error(source: &'static [u8]) -> ReadPayloadError<Infallible> {
-        data_error(Bytewise(source).sync_read_frame_unpin(PhantomData::<v1::Part>))
+        data_error(read_one_frame!(Bytewise(source)))
     }
 
     /// The payload failure of reading one frame from `source`, which fails
     /// after its bytes.
     fn receiver_error(source: &'static [u8]) -> ReadPayloadError<SourceFailed> {
-        data_error(Failing(source).sync_read_frame_unpin(PhantomData::<v1::Part>))
+        data_error(read_one_frame!(Failing(source)))
     }
 
     /// The failure of reading the data of a CRYPTO or STREAM frame.
     fn data_error<T: Debug, E: Debug>(
-        result: Result<T, ReadFrameError<E, ReadFieldsError<E>>>,
+        result: Result<T, ReadFieldsError<E>>,
     ) -> ReadPayloadError<E> {
         match result {
-            Err(ReadFrameError::Fields {
-                source:
-                    ReadFieldsError::Crypto {
-                        source: ReadCryptoFrameError::Data { source },
-                        ..
-                    },
+            Err(ReadFieldsError::Crypto {
+                source: ReadCryptoFrameError::Data { source },
+                ..
             })
-            | Err(ReadFrameError::Fields {
-                source:
-                    ReadFieldsError::Stream {
-                        source: ReadStreamFrameError::Data { source },
-                        ..
-                    },
+            | Err(ReadFieldsError::Stream {
+                source: ReadStreamFrameError::Data { source },
+                ..
             }) => source,
             other => panic!("{other:?}"),
         }
@@ -508,7 +518,7 @@ mod tests {
     fn a_source_that_keeps_the_contract_reads_the_field() {
         // The same CRYPTO frame from a byte slice, which keeps the contract.
         let mut input = &[0x06, 0x00, 0x02, 1, 2, 3, 4][..];
-        assert!(input.sync_read_frame_unpin(PhantomData::<v1::Part>).is_ok());
+        assert!(read_one_frame!(&mut input).is_ok());
         assert_eq!(input, [3, 4]);
     }
 
@@ -517,7 +527,6 @@ mod tests {
     fn a_chunk_longer_than_requested_panics() {
         // A CRYPTO frame with two bytes of data, and two bytes after it that
         // the source returns in the same chunk.
-        let mut source = Overlong(&[0x06, 0x00, 0x02, 1, 2, 3, 4]);
-        let _ = source.sync_read_frame_unpin(PhantomData::<v1::Part>);
+        let _ = read_one_frame!(Overlong(&[0x06, 0x00, 0x02, 1, 2, 3, 4]));
     }
 }

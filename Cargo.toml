@@ -19,6 +19,7 @@ license = "Apache-2.0 OR MIT"
 bytes = "1.12.1"
 dashmap = "6.1.0"
 either = { version = "1.17.0", default-features = false }
+frunk_core = { version = "=0.5.0", default-features = false }
 nitori_call = { git = "https://github.com/opengensokyonet/nitori", rev = "bcd0708b98981c389ea6200f094c37cdfb56613a" }
 nitori_crypto = { git = "https://github.com/opengensokyonet/nitori", rev = "bcd0708b98981c389ea6200f094c37cdfb56613a" }
 nitori_crypto_aws_lc = { git = "https://github.com/opengensokyonet/nitori", rev = "bcd0708b98981c389ea6200f094c37cdfb56613a" }

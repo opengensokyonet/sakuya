@@ -9,6 +9,7 @@ description = "QUIC wire-level value types, header interpretation, frames and tr
 [dependencies]
 bytes.workspace = true
 either.workspace = true
+frunk_core.workspace = true
 nitori_call.workspace = true
 nitori_io.workspace = true
 snafu.workspace = true

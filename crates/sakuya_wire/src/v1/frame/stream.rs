@@ -443,8 +443,8 @@ impl From<StreamTypeValue> for VarInt {
 }
 
 pub mod codec {
-    //! Writing STREAM frames as `nitori_call` operations; reading is part of
-    //! [`read_frame`](crate::frame::codec::read_frame).
+    //! Writing STREAM frames as `nitori_call` operations; reading is done by
+    //! [`Frames`](crate::v1::frame::set::Frames).
     //!
     //! There is a write operation for each kind of Length field:
     //! [`write_stream_frame_with_length`] for `StreamFrame<D, VarIntWidth>`,

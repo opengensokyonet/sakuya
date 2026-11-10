@@ -13,39 +13,42 @@
 //! use sakuya_wire::{
 //!     assert_frame_types_disjoint,
 //!     datagram,
-//!     frame::{PartSum, codec::ReadFrameHostExt as _},
-//!     v1,
+//!     parts::HList,
+//!     v1::{self, frame::{FrameRun, set::Frames}},
 //! };
 //!
-//! type Set = PartSum<v1::Part, datagram::Part>;
+//! type Set = HList![v1::Part, datagram::Part];
 //! assert_frame_types_disjoint!(Set);
 //!
 //! // A DATAGRAM frame with a Length field, then PING.
-//! let mut input = &[0x31, 0x02, b'h', b'i', 0x01][..];
-//! let Ok(PartSum::Rest(frame)) = input.sync_read_frame_unpin(PhantomData::<Set>) else {
-//!     panic!()
-//! };
+//! let payload = [0x31, 0x02, b'h', b'i', 0x01];
+//! let mut frames = Frames::new(&payload[..], PhantomData::<Set>);
+//! let Some(Ok(run)) = frames.next() else { panic!() };
+//! let Ok(frame) = run.uninject::<datagram::DatagramFrame<&[u8]>, _>() else { panic!() };
 //! assert_eq!(*frame.data(), b"hi");
 //! assert_eq!(frame.encoded_len(), 4);
-//! assert!(matches!(input.sync_read_frame_unpin(PhantomData::<Set>), Ok(PartSum::First(_))));
+//! let Some(Ok(run)) = frames.next() else { panic!() };
+//! assert!(matches!(run.get::<FrameRun<&[u8]>, _>(), Some(FrameRun::Ping(_))));
 //! ```
 //!
 //! [RFC 9221]: https://www.rfc-editor.org/rfc/rfc9221.html
 //! [RFC 9221 §3]: https://www.rfc-editor.org/rfc/rfc9221.html#section-3
 //! [RFC 9000 §12.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.4
+use self::codec::ReadDatagramFrameHostExt as _;
 use crate::{
-    frame::{
-        FrameKind, FrameSetPart, FrameTypeValues, Head, LengthError, LengthKind, MergePadding,
-        NoLength, length_width, type_var_int,
+    frame::{Head, LengthError, LengthKind, NoLength, length_width, type_var_int},
+    v1::{
+        encryption_level::EncryptionLevel,
+        frame::set::{FrameKind, FrameSetPart, FrameTypeValues},
+        role::Role,
     },
-    v1::{encryption_level::EncryptionLevel, role::Role},
     var_int::{VarInt, VarIntWidth},
 };
 use bytes::Buf;
 use core::ops::RangeInclusive;
 use either::Either;
-use nitori_call::ReceiverAccess;
-use nitori_io::ReadChunk;
+use nitori_call::{Direct, Receiver};
+use nitori_io::{Read, ReadChunk};
 
 /// Frame Type values.
 mod type_value {
@@ -61,7 +64,7 @@ mod type_value {
 pub struct Part;
 
 impl FrameSetPart for Part {
-    type Frame<D> = DatagramFrame<D>;
+    type Run<D> = DatagramFrame<D>;
     type Kind = FrameType;
     type FieldsError<E> = codec::ReadDatagramFrameError<E>;
 
@@ -75,20 +78,23 @@ impl FrameSetPart for Part {
         DatagramTypeValue::new(value).map(|_| FrameType::Datagram)
     }
 
-    async fn read_fields<F, A>(
-        io: &mut A,
+    fn read_run<H>(
+        source: &mut H,
         _kind: FrameType,
         value: VarInt,
-    ) -> Result<DatagramFrame<F::Chunk>, codec::ReadDatagramFrameError<F::Error>>
+    ) -> Result<
+        DatagramFrame<<Direct<H> as ReadChunk>::Chunk>,
+        codec::ReadDatagramFrameError<<Direct<H> as Read>::Error>,
+    >
     where
-        F: ReadChunk<Chunk: Default>,
-        A: ReceiverAccess<Family = F>,
+        H: Buf + Receiver<Family = Direct<H>> + Unpin,
+        Direct<H>: ReadChunk<Chunk: Default>,
     {
         let frame_type = DatagramTypeValue::new(value);
         // invariant: `kind_of` gives a kind for exactly the DATAGRAM Frame
         // Type values.
         let frame_type = frame_type.unwrap_or_else(|| unreachable!("DATAGRAM {value}"));
-        codec::read_datagram_frame(io, frame_type).await
+        source.sync_read_datagram_frame_unpin(frame_type)
     }
 }
 
@@ -187,9 +193,6 @@ impl<D, L: LengthKind> DatagramFrame<D, L> {
         })
     }
 }
-
-/// DATAGRAM is not PADDING.
-impl<D, L> MergePadding for DatagramFrame<D, L> {}
 
 impl<D, L> DatagramFrame<D, L> {
     /// The kind of the frame, [`FrameType::Datagram`].
@@ -400,8 +403,8 @@ impl From<DatagramTypeValue> for VarInt {
 
 pub mod codec {
     //! Writing DATAGRAM frames as `nitori_call` operations; reading is part
-    //! of [`read_frame`](crate::frame::codec::read_frame) of a frame set that
-    //! has [`Part`](super::Part).
+    //! of [`Frames`](crate::v1::frame::set::Frames) over a frame set that has
+    //! [`Part`](super::Part).
     //!
     //! There is a write operation for each kind of Length field:
     //! [`write_datagram_frame_with_length`] for `DatagramFrame<D, VarIntWidth>`,
@@ -416,9 +419,9 @@ pub mod codec {
 
     use super::{DatagramFrame, DatagramTypeValue, type_value};
     use crate::{
-        frame::{FrameFieldsError, NoLength, read_field, type_var_int},
+        frame::{NoLength, read_field, type_var_int},
         payload::{ReadPayloadError, read_payload, read_payload_to_end},
-        v1::transport_error::TransportErrorCode,
+        v1::{frame::set::FrameFieldsError, transport_error::TransportErrorCode},
         var_int::{VarInt, VarIntField, VarIntWidth, codec::ReadVarIntError},
     };
     use bytes::Buf;
@@ -430,6 +433,7 @@ pub mod codec {
     /// Reads the fields that follow the Frame Type `frame_type`, and the data
     /// as one chunk of the source: of the Length field's length in type
     /// `0x31`, or to the end of the source.
+    #[call(sync)]
     pub(super) async fn read_datagram_frame<F, A>(
         io: &mut A,
         frame_type: DatagramTypeValue,
@@ -585,21 +589,30 @@ mod tests {
         },
     };
     use crate::{
-        frame::{
-            FrameFieldsError, FrameKind, FrameSetPart, LengthError, NoLength,
-            codec::{ReadFrameError, ReadFrameHostExt as _},
+        frame::{LengthError, NoLength},
+        parts::{Coprod, Coproduct, HList, PartsError},
+        v1::{
+            encryption_level::EncryptionLevel,
+            frame::set::{
+                FrameFieldsError, FrameKind, FrameSetPart, Frames, OnlyPart as _,
+                codec::ReadFrameError,
+            },
+            role::Role,
         },
-        v1::{encryption_level::EncryptionLevel, role::Role},
         var_int::{VarInt, VarIntWidth},
     };
     use bytes::Buf;
     use core::{convert::Infallible, marker::PhantomData};
     use either::Either;
 
-    type ReadError = ReadFrameError<Infallible, super::codec::ReadDatagramFrameError<Infallible>>;
+    type ReadError =
+        ReadFrameError<Infallible, Coprod![super::codec::ReadDatagramFrameError<Infallible>]>;
 
     fn read<'a>(encoding: &mut &'a [u8]) -> Result<DatagramFrame<&'a [u8]>, ReadError> {
-        encoding.sync_read_frame_unpin(PhantomData::<super::Part>)
+        let mut frames = Frames::new(*encoding, PhantomData::<HList![super::Part]>);
+        let item = frames.next().only_part();
+        *encoding = frames.into_remainder();
+        item.expect("the encoding is not empty")
     }
 
     fn datagram_frame<D: Buf>(
@@ -827,11 +840,14 @@ mod tests {
         assert!(matches!(
             read(&mut input),
             Err(ReadFrameError::Fields {
-                source: super::codec::ReadDatagramFrameError::Data { frame_type, .. },
+                source: PartsError(Coproduct::Inl(super::codec::ReadDatagramFrameError::Data { frame_type, .. })),
             }) if frame_type.get() == VarInt::from(0x31u8)
         ));
         let mut input = &[0x31][..];
-        let Err(ReadFrameError::Fields { source }) = read(&mut input) else {
+        let Err(ReadFrameError::Fields {
+            source: PartsError(Coproduct::Inl(source)),
+        }) = read(&mut input)
+        else {
             panic!()
         };
         assert_eq!(source.frame_type(), VarInt::from(0x31u8));

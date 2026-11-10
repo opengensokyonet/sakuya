@@ -49,8 +49,8 @@ impl PathChallengeFrame {
 }
 
 pub mod codec {
-    //! Writing PATH_CHALLENGE as a `nitori_call` operation; reading is part of
-    //! [`read_frame`](crate::frame::codec::read_frame).
+    //! Writing PATH_CHALLENGE as a `nitori_call` operation; reading is done by
+    //! [`Frames`](crate::v1::frame::set::Frames).
     //!
     //! [`write_path_challenge_frame`] is also the operation struct [`WritePathChallengeFrame`], with
     //! `WritePathChallengeFrameExt` on receiver accesses and `WritePathChallengeFrameHostExt` on call

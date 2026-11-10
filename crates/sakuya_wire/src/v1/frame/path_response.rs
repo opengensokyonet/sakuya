@@ -49,8 +49,8 @@ impl PathResponseFrame {
 }
 
 pub mod codec {
-    //! Writing PATH_RESPONSE as a `nitori_call` operation; reading is part of
-    //! [`read_frame`](crate::frame::codec::read_frame).
+    //! Writing PATH_RESPONSE as a `nitori_call` operation; reading is done by
+    //! [`Frames`](crate::v1::frame::set::Frames).
     //!
     //! [`write_path_response_frame`] is also the operation struct [`WritePathResponseFrame`], with
     //! `WritePathResponseFrameExt` on receiver accesses and `WritePathResponseFrameHostExt` on call

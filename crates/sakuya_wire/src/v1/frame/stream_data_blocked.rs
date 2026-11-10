@@ -65,8 +65,8 @@ impl StreamDataBlockedFrame {
 }
 
 pub mod codec {
-    //! Writing STREAM_DATA_BLOCKED as a `nitori_call` operation; reading is part of
-    //! [`read_frame`](crate::frame::codec::read_frame).
+    //! Writing STREAM_DATA_BLOCKED as a `nitori_call` operation; reading is done by
+    //! [`Frames`](crate::v1::frame::set::Frames).
     //!
     //! [`write_stream_data_blocked_frame`] is also the operation struct [`WriteStreamDataBlockedFrame`], with
     //! `WriteStreamDataBlockedFrameExt` on receiver accesses and `WriteStreamDataBlockedFrameHostExt` on call

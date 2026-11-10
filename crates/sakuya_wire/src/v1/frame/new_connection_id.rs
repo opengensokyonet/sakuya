@@ -137,7 +137,7 @@ impl RetirePriorToError {
 
 pub mod codec {
     //! Writing NEW_CONNECTION_ID frames as a `nitori_call` operation; reading
-    //! is part of [`read_frame`](crate::frame::codec::read_frame).
+    //! is done by [`Frames`](crate::v1::frame::set::Frames).
     //!
     //! [`write_new_connection_id_frame`] is also the operation struct
     //! [`WriteNewConnectionIdFrame`], with `WriteNewConnectionIdFrameExt` on receiver
@@ -254,11 +254,12 @@ pub mod codec {
 #[cfg(test)]
 mod tests {
     use super::{NewConnectionIdFrame, RetirePriorToError, codec::ReadNewConnectionIdFrameError};
+    use crate::parts::{Coproduct, PartsError};
     use crate::v1::frame::codec::ReadFieldsError;
-    use crate::v1::frame::tests::V1;
+    use crate::v1::frame::set::codec::ReadFrameError;
+    use crate::v1::frame::tests::ReadOneFrame as _;
     use crate::{
         connection_id::{NonEmptyCid, StatelessResetToken, codec::ReadConnectionIdError},
-        frame::codec::{ReadFrameError, ReadFrameHostExt as _},
         v1::frame::{Frame, tests::assert_round_trip},
         var_int::{VarInt, VarIntField},
     };
@@ -289,9 +290,9 @@ mod tests {
 
     fn read(encoding: &[u8]) -> ReadNewConnectionIdFrameError<core::convert::Infallible> {
         let mut input = encoding;
-        match input.sync_read_frame_unpin(V1) {
+        match input.read_one_frame() {
             Err(ReadFrameError::Fields {
-                source: ReadFieldsError::NewConnectionId { source, .. },
+                source: PartsError(Coproduct::Inl(ReadFieldsError::NewConnectionId { source, .. })),
             }) => source,
             other => panic!("{other:?}"),
         }

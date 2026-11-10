@@ -119,8 +119,8 @@ impl<D: Buf> CryptoFrame<D> {
 }
 
 pub mod codec {
-    //! Writing CRYPTO frames as a `nitori_call` operation; reading is part of
-    //! [`read_frame`](crate::frame::codec::read_frame).
+    //! Writing CRYPTO frames as a `nitori_call` operation; reading is done by
+    //! [`Frames`](crate::v1::frame::set::Frames).
     //!
     //! [`write_crypto_frame`] is also the operation struct [`WriteCryptoFrame`], with
     //! `WriteCryptoFrameExt` on receiver accesses and `WriteCryptoFrameHostExt` on call

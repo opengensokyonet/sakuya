@@ -1,9 +1,11 @@
 //! Tests that cover every frame type, and the helpers the tests of the frame
 //! modules share.
 use super::{
-    Frame, FrameType,
+    Frame, FrameRun, FrameType,
     ack::{AckFrame, AckRange, AckRanges, EcnCounts},
-    codec::{ReadFieldsError, WriteFrameHostExt as _},
+    codec::{
+        ReadFieldsError, ReadFieldsHostExt as _, WriteFrameHostExt as _, WriteFrameRunHostExt as _,
+    },
     connection_close::{CloseErrorCode, ConnectionCloseFrame},
     crypto::CryptoFrame,
     data_blocked::DataBlockedFrame,
@@ -13,7 +15,7 @@ use super::{
     max_streams::MaxStreamsFrame,
     new_connection_id::NewConnectionIdFrame,
     new_token::{InvalidNewTokenError, NewTokenFrame},
-    padding::PaddingFrame,
+    padding::{PaddingFrame, PaddingRun},
     path_challenge::PathChallengeFrame,
     path_response::PathResponseFrame,
     ping::PingFrame,
@@ -24,10 +26,11 @@ use super::{
     stream_data_blocked::StreamDataBlockedFrame,
     streams_blocked::StreamsBlockedFrame,
 };
-use crate::frame::{
-    FrameKind, FrameSetPart, Frames, InvalidDataError, LengthError,
-    codec::{LongerTypeEncodingError, ReadFrameError, ReadFrameHostExt as _},
-    length_width,
+use crate::frame::{InvalidDataError, LengthError, length_width};
+use crate::parts::{Coprod, Coproduct, HList, PartsError};
+use crate::v1::frame::set::{
+    FrameKind, FrameSetPart, Frames, OnlyPart as _,
+    codec::{LongerTypeEncodingError, ReadFrameError, ReadFrameTypeHostExt as _},
 };
 use crate::{
     connection_id::{NonEmptyCid, StatelessResetToken},
@@ -44,9 +47,53 @@ use crate::{
 };
 use bytes::{Buf, Bytes};
 use core::{marker::PhantomData, num::NonZeroUsize};
+use nitori_call::{Direct, Receiver};
+use nitori_io::{Read, ReadChunk};
 
 /// The frame set of version 1 alone.
-pub(in crate::v1) const V1: PhantomData<crate::v1::Part> = PhantomData;
+pub(in crate::v1) const V1: PhantomData<HList![crate::v1::Part]> = PhantomData;
+
+/// Reading one frame of version 1 from a memory source: its Frame Type, then
+/// its fields with `read_fields`, which takes one PADDING frame at a time.
+pub(in crate::v1) trait ReadOneFrame: Sized {
+    /// The chunks of the payload fields of the frame.
+    type Chunk;
+
+    /// The failure of the source.
+    type Error;
+
+    /// Reads one frame from the start of the source. Bytes read before a
+    /// failure stay consumed.
+    #[allow(clippy::type_complexity)]
+    fn read_one_frame(
+        &mut self,
+    ) -> Result<
+        Frame<Self::Chunk>,
+        ReadFrameError<Self::Error, Coprod![ReadFieldsError<Self::Error>]>,
+    >;
+}
+
+impl<H> ReadOneFrame for H
+where
+    H: Buf + Receiver<Family = Direct<H>> + Unpin,
+    Direct<H>: ReadChunk<Chunk: Default>,
+{
+    type Chunk = <Direct<H> as ReadChunk>::Chunk;
+    type Error = <Direct<H> as Read>::Error;
+
+    fn read_one_frame(
+        &mut self,
+    ) -> Result<
+        Frame<Self::Chunk>,
+        ReadFrameError<Self::Error, Coprod![ReadFieldsError<Self::Error>]>,
+    > {
+        let (kind, value) = self.sync_read_frame_type_unpin(V1)?;
+        self.sync_read_fields_unpin(kind.extract(), value)
+            .map_err(|error| ReadFrameError::Fields {
+                source: PartsError(Coproduct::Inl(error)),
+            })
+    }
+}
 
 /// The STREAM frame as `StreamFrame::new` and a decision of its Length field
 /// construct it, with a Length field of width `length` if there is one, as a
@@ -136,16 +183,12 @@ pub(in crate::v1) fn assert_round_trip(frame: Frame<&[u8]>) -> Vec<u8> {
     );
 
     let mut input = encoding.as_slice();
-    assert_eq!(
-        input.sync_read_frame_unpin(V1).unwrap(),
-        frame,
-        "{encoding:02x?}"
-    );
+    assert_eq!(input.read_one_frame().unwrap(), frame, "{encoding:02x?}");
     assert!(input.is_empty(), "{frame:?}");
 
     // A `Bytes` source reads the same frame, which writes the same bytes.
     let mut input = Bytes::from(encoding.clone());
-    let from_bytes = input.sync_read_frame_unpin(V1).unwrap();
+    let from_bytes = input.read_one_frame().unwrap();
     assert!(input.is_empty());
     let mut rewritten = Vec::new();
     rewritten.sync_write_frame_unpin(from_bytes).unwrap();
@@ -164,7 +207,7 @@ pub(in crate::v1) fn assert_round_trip(frame: Frame<&[u8]>) -> Vec<u8> {
 /// reproduces `encoding` and that the frame round-trips, and returns it.
 pub(in crate::v1) fn assert_bytes_round_trip(encoding: &[u8]) -> Frame<&[u8]> {
     let mut input = encoding;
-    let frame = input.sync_read_frame_unpin(V1).unwrap();
+    let frame = input.read_one_frame().unwrap();
     assert!(input.is_empty(), "{encoding:02x?}: {frame:?}");
     assert_eq!(assert_round_trip(frame.clone()), encoding, "{frame:?}");
     frame
@@ -175,7 +218,7 @@ pub(in crate::v1) const TOKEN: [u8; 16] = *b"0123456789abcdef";
 /// An ACK frame read from `encoding`.
 pub(in crate::v1) fn read_ack_frame(encoding: &[u8]) -> Frame<&[u8]> {
     let mut input = encoding;
-    let frame = input.sync_read_frame_unpin(V1).unwrap();
+    let frame = input.read_one_frame().unwrap();
     assert!(matches!(frame, Frame::Ack(_)), "{frame:?}");
     assert!(input.is_empty());
     frame
@@ -184,7 +227,7 @@ pub(in crate::v1) fn read_ack_frame(encoding: &[u8]) -> Frame<&[u8]> {
 /// One frame of every type and form, in the shortest encodings.
 fn sample_frames() -> Vec<Frame<&'static [u8]>> {
     let mut frames = vec![
-        Frame::Padding(PaddingFrame::new(NonZeroUsize::new(3).unwrap())),
+        Frame::Padding(PaddingFrame),
         Frame::Ping(PingFrame),
         // Largest 100, delay 5, ranges 97..=100, 90..=94 and 88..=88; ECN
         // counts 1, 2, 3.
@@ -286,21 +329,58 @@ fn sample_frames() -> Vec<Frame<&'static [u8]>> {
 #[test]
 fn every_frame_round_trips() {
     for frame in sample_frames() {
-        match frame {
-            // PADDING reads one byte at a time; a run is read by `Frames`.
-            Frame::Padding(padding) => {
-                let mut written = Vec::new();
-                written.sync_write_frame_unpin(frame.clone()).unwrap();
-                assert_eq!(written, vec![0; padding.len().get()]);
-                let mut frames = Frames::new(written.as_slice(), V1);
-                assert_eq!(frames.next().map(Result::unwrap), Some(frame));
-                assert!(frames.next().is_none());
-            }
-            frame => {
-                assert_round_trip(frame);
-            }
-        }
+        assert_round_trip(frame);
     }
+}
+
+/// A run is written as its frames are, and `Frames` reads it back; a frame
+/// is a run of one frame.
+#[test]
+fn every_frame_round_trips_as_a_run() {
+    for frame in sample_frames() {
+        let mut encoding = Vec::new();
+        encoding.sync_write_frame_unpin(frame.clone()).unwrap();
+        let run = FrameRun::from(frame.clone());
+        assert_eq!(run.frame_type(), frame.frame_type());
+        assert_eq!(run.type_value(), frame.type_value());
+        assert_eq!(run.encoded_len(), encoding.len(), "{run:?}");
+        let mut written = Vec::new();
+        written.sync_write_frame_run_unpin(run.clone()).unwrap();
+        assert_eq!(written, encoding, "{run:?}");
+        let mut frames = Frames::new(written.as_slice(), V1);
+        let read = frames.next().only_part().unwrap().unwrap();
+        assert_eq!(read, run);
+        assert!(frames.next().only_part().is_none());
+    }
+
+    // Runs of several PADDING frames.
+    for len in [2, 3, 200] {
+        let run = FrameRun::<&[u8]>::Padding(PaddingRun::new(NonZeroUsize::new(len).unwrap()));
+        assert_eq!(run.frame_type(), FrameType::Padding);
+        assert_eq!(run.type_value(), VarInt::ZERO);
+        assert_eq!(run.encoded_len(), len);
+        let mut written = Vec::new();
+        written.sync_write_frame_run_unpin(run.clone()).unwrap();
+        assert_eq!(written, vec![0; len]);
+        let mut frames = Frames::new(written.as_slice(), V1);
+        assert_eq!(
+            frames.next().only_part().map(Result::unwrap),
+            Some(run.clone())
+        );
+        assert!(frames.next().only_part().is_none());
+    }
+}
+
+/// The PADDING frame of `Frame` is one byte, whatever follows it, and
+/// becomes a run of one.
+#[test]
+fn a_padding_frame_is_a_run_of_one() {
+    let frame = Frame::<&[u8]>::Padding(PaddingFrame);
+    assert_eq!(frame.encoded_len(), 1);
+    assert_eq!(
+        FrameRun::from(frame),
+        FrameRun::Padding(PaddingRun::new(NonZeroUsize::MIN))
+    );
 }
 
 #[test]
@@ -321,12 +401,14 @@ fn writing_into_a_short_slice_keeps_the_accepted_prefix() {
 fn stream_without_length_takes_the_rest_of_the_payload() {
     // PING, then STREAM 0x09 (FIN, no OFF, no LEN) on stream 1.
     let payload = [0x01, 0x09, 0x01, b'a', b'b', 0x01, 0x00];
-    let frames: Vec<_> = Frames::new(&payload[..], V1).map(Result::unwrap).collect();
+    let frames: Vec<_> = Frames::new(&payload[..], V1)
+        .map(|frame| frame.unwrap().extract())
+        .collect();
     assert_eq!(
         frames,
         [
-            Frame::Ping(PingFrame),
-            Frame::Stream(
+            FrameRun::Ping(PingFrame),
+            FrameRun::Stream(
                 stream_frame(
                     short(sid(1)),
                     None,
@@ -344,16 +426,16 @@ fn stream_without_length_takes_the_rest_of_the_payload() {
 fn bytes_sources_share_their_storage() {
     let payload = Bytes::from_static(&[0x0b, 0x04, 0x02, b'h', b'i', 0x01]);
     let mut frames = Frames::new(payload.clone(), V1);
-    let Some(Ok(Frame::Stream(stream))) = frames.next() else {
+    let Some(Ok(FrameRun::Stream(stream))) = frames.next().only_part() else {
         panic!()
     };
     assert_eq!(*stream.data(), &b"hi"[..]);
     assert_eq!(stream.data().as_ptr(), payload[3..].as_ptr());
     assert_eq!(
-        frames.next().map(Result::unwrap),
-        Some(Frame::Ping(PingFrame))
+        frames.next().only_part().map(Result::unwrap),
+        Some(FrameRun::Ping(PingFrame))
     );
-    assert!(frames.next().is_none());
+    assert!(frames.next().only_part().is_none());
 }
 
 #[test]
@@ -361,39 +443,39 @@ fn padding_runs_are_one_value() {
     let payload = [0x00, 0x00, 0x00, 0x01, 0x00];
     let mut frames = Frames::new(&payload[..], V1);
     assert_eq!(
-        frames.next().map(Result::unwrap),
-        Some(Frame::Padding(PaddingFrame::new(
+        frames.next().only_part().map(Result::unwrap),
+        Some(FrameRun::Padding(PaddingRun::new(
             NonZeroUsize::new(3).unwrap()
         )))
     );
     assert_eq!(frames.offset(), 3);
     assert_eq!(
-        frames.next().map(Result::unwrap),
-        Some(Frame::Ping(PingFrame))
+        frames.next().only_part().map(Result::unwrap),
+        Some(FrameRun::Ping(PingFrame))
     );
     assert_eq!(*frames.remainder(), [0x00]);
     assert_eq!(
-        frames.next().map(Result::unwrap),
-        Some(Frame::Padding(PaddingFrame::new(NonZeroUsize::MIN)))
+        frames.next().only_part().map(Result::unwrap),
+        Some(FrameRun::Padding(PaddingRun::new(NonZeroUsize::MIN)))
     );
-    assert!(frames.next().is_none());
+    assert!(frames.next().only_part().is_none());
 
     // A longer encoding of type 0 is not PADDING; it ends the run and is
     // rejected.
     let payload = [0x00, 0x40, 0x00, 0x01];
     let mut frames = Frames::new(&payload[..], V1);
     assert_eq!(
-        frames.next().map(Result::unwrap),
-        Some(Frame::Padding(PaddingFrame::new(NonZeroUsize::MIN)))
+        frames.next().only_part().map(Result::unwrap),
+        Some(FrameRun::Padding(PaddingRun::new(NonZeroUsize::MIN)))
     );
-    let error = frames.next().unwrap().unwrap_err();
+    let error = frames.next().only_part().unwrap().unwrap_err();
     assert!(matches!(
         error,
         ReadFrameError::LongerTypeEncoding { source }
             if source == LongerTypeEncodingError::check(VarInt::ZERO, VarIntWidth::Two).unwrap_err()
     ));
     assert_eq!(frames.offset(), 1);
-    assert!(frames.next().is_none());
+    assert!(frames.next().only_part().is_none());
 }
 
 #[test]
@@ -412,7 +494,7 @@ fn longer_frame_type_encodings_are_protocol_violations() {
             encoding.push(0x01);
             {
                 let mut input = encoding.as_slice();
-                let error = input.sync_read_frame_unpin(V1).unwrap_err();
+                let error = input.read_one_frame().unwrap_err();
                 assert!(
                     matches!(
                         error,
@@ -431,10 +513,7 @@ fn longer_frame_type_encodings_are_protocol_violations() {
             }
         }
     }
-    let error = [0x40, 0x08]
-        .as_slice()
-        .sync_read_frame_unpin(V1)
-        .unwrap_err();
+    let error = [0x40, 0x08].as_slice().read_one_frame().unwrap_err();
     assert_eq!(error.to_string(), "frame type encoding check failed");
     assert_eq!(
         std::error::Error::source(&error).map(ToString::to_string),
@@ -442,10 +521,7 @@ fn longer_frame_type_encodings_are_protocol_violations() {
     );
     // A type whose shortest encoding takes two bytes is read; 0x4040 is
     // unknown.
-    let error = [0x40, 0x40]
-        .as_slice()
-        .sync_read_frame_unpin(V1)
-        .unwrap_err();
+    let error = [0x40, 0x40].as_slice().read_one_frame().unwrap_err();
     assert!(matches!(error, ReadFrameError::UnknownType { .. }));
     assert_eq!(
         error.transport_error_code(),
@@ -471,7 +547,7 @@ fn unknown_types_and_those_of_extensions_are_rejected() {
         let mut input = encoding;
         let frame_type = input.sync_read_var_int_unpin().unwrap();
         let mut input = encoding;
-        let error = input.sync_read_frame_unpin(V1).unwrap_err();
+        let error = input.read_one_frame().unwrap_err();
         assert!(
             matches!(
                 error,
@@ -504,7 +580,7 @@ fn truncated_frames_are_terminal() {
     ];
     for (encoding, frame_type) in cases {
         let mut input = encoding;
-        let error = input.sync_read_frame_unpin(V1).unwrap_err();
+        let error = input.read_one_frame().unwrap_err();
         assert!(error.is_incomplete(), "{encoding:02x?}: {error:?}");
         assert_eq!(error.frame_type(), frame_type.map(vi), "{encoding:02x?}");
     }
@@ -514,31 +590,32 @@ fn truncated_frames_are_terminal() {
     let payload = [0x01, 0x01, 0x11, 0x04];
     let mut frames = Frames::new(&payload[..], V1);
     assert_eq!(
-        frames.next().map(Result::unwrap),
-        Some(Frame::Ping(PingFrame))
+        frames.next().only_part().map(Result::unwrap),
+        Some(FrameRun::Ping(PingFrame))
     );
     assert_eq!(
-        frames.next().map(Result::unwrap),
-        Some(Frame::Ping(PingFrame))
+        frames.next().only_part().map(Result::unwrap),
+        Some(FrameRun::Ping(PingFrame))
     );
-    let error = frames.next().unwrap().unwrap_err();
+    let error = frames.next().only_part().unwrap().unwrap_err();
     assert_eq!(frames.offset(), 2);
     assert!(matches!(
         error,
         ReadFrameError::Fields {
-            source: ReadFieldsError::MaxStreamData { .. }
+            source: PartsError(Coproduct::Inl(ReadFieldsError::MaxStreamData { .. }))
         }
     ));
     assert!(error.is_incomplete());
-    assert!(frames.next().is_none());
+    assert!(frames.next().only_part().is_none());
 }
 
 /// The failure of reading `encoding`, which ends within a field.
 fn cut_short(
     encoding: &[u8],
-) -> ReadFrameError<core::convert::Infallible, ReadFieldsError<core::convert::Infallible>> {
+) -> ReadFrameError<core::convert::Infallible, Coprod![ReadFieldsError<core::convert::Infallible>]>
+{
     let mut input = encoding;
-    let error = input.sync_read_frame_unpin(V1).unwrap_err();
+    let error = input.read_one_frame().unwrap_err();
     assert!(error.is_incomplete(), "{encoding:02x?}: {error:?}");
     assert_eq!(
         error.transport_error_code(),
@@ -780,7 +857,10 @@ fn a_field_cut_short_is_named_by_its_variant() {
     ];
     for (encoding, expected) in cases {
         let error = cut_short(encoding);
-        let ReadFrameError::Fields { source } = &error else {
+        let ReadFrameError::Fields {
+            source: PartsError(Coproduct::Inl(source)),
+        } = &error
+        else {
             panic!("{encoding:02x?}: {error:?}")
         };
         assert!(expected(source), "{encoding:02x?}: {error:?}");
@@ -969,11 +1049,14 @@ fn failures_give_the_frame_type_value() {
     for value in values {
         let encoding = [value as u8];
         let mut input = &encoding[..];
-        let error = input.sync_read_frame_unpin(V1).unwrap_err();
+        let error = input.read_one_frame().unwrap_err();
         assert!(error.is_incomplete(), "{value:#x}: {error:?}");
         assert_eq!(error.frame_type(), Some(vi(value)), "{value:#x}");
         assert_eq!(error.transport_error_code(), Code::FRAME_ENCODING_ERROR);
-        let ReadFrameError::Fields { source: error } = error else {
+        let ReadFrameError::Fields {
+            source: PartsError(Coproduct::Inl(error)),
+        } = error
+        else {
             panic!("{value:#x}: {error:?}")
         };
         let bidi = Directionality::Bidirectional;
@@ -1000,7 +1083,7 @@ fn failures_give_the_frame_type_value() {
         assert!(attribute, "{value:#x}: {error:?}");
     }
 
-    let error = [0x1f].as_slice().sync_read_frame_unpin(V1).unwrap_err();
+    let error = [0x1f].as_slice().read_one_frame().unwrap_err();
     assert_eq!(error.to_string(), "unknown frame type 0x1f");
     assert_eq!(error.transport_error_code(), Code::FRAME_ENCODING_ERROR);
 }
@@ -1008,7 +1091,7 @@ fn failures_give_the_frame_type_value() {
 #[test]
 fn errors_describe_the_frame() {
     let mut input = &[0x06, 0x00, 0x04, 0xaa][..];
-    let error = input.sync_read_frame_unpin(V1).unwrap_err();
+    let error = input.read_one_frame().unwrap_err();
     assert_eq!(error.to_string(), "CRYPTO frame read failed");
     let mut chain = vec![error.to_string()];
     let mut source = std::error::Error::source(&error);
@@ -1640,12 +1723,14 @@ fn stream_offset_fields_may_hold_zero() {
     }
     // In a payload, each frame keeps its form.
     let payload = [0x0e, 0x04, 0x00, 0x01, b'a', 0x0a, 0x04, 0x01, b'b'];
-    let frames: Vec<_> = Frames::new(&payload[..], V1).map(Result::unwrap).collect();
+    let frames: Vec<_> = Frames::new(&payload[..], V1)
+        .map(|frame| frame.unwrap().extract())
+        .collect();
     let one = Some(VarIntWidth::One);
     assert_eq!(
         frames,
         [
-            Frame::Stream(
+            FrameRun::Stream(
                 stream_frame(
                     short(sid(4)),
                     Some(short(VarInt::ZERO)),
@@ -1655,7 +1740,7 @@ fn stream_offset_fields_may_hold_zero() {
                 )
                 .unwrap()
             ),
-            Frame::Stream(stream_frame(short(sid(4)), None, one, &b"b"[..], false).unwrap()),
+            FrameRun::Stream(stream_frame(short(sid(4)), None, one, &b"b"[..], false).unwrap()),
         ]
     );
 }
