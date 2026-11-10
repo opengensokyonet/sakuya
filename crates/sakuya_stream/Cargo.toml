@@ -6,11 +6,18 @@ publish.workspace = true
 license.workspace = true
 description = "Stream send and receive components for sakuya"
 
+[features]
+# The reliable stream reset extension (RESET_STREAM_AT) of the receive
+# direction: the `reset_stream_at` module.
+reset_stream_at = ["sakuya_wire/reset_stream_at"]
+
 [dependencies]
 bytes.workspace = true
-# Transition: the stream components use RESET_STREAM_AT and its
-# `ReliableSizeError`, so this enables the `reset_stream_at` extension of
-# sakuya_wire until the components are split by extension; remove it then.
+# Transition: the send direction still uses RESET_STREAM_AT and its
+# `ReliableSizeError` unconditionally, so this enables the `reset_stream_at`
+# extension of sakuya_wire whatever the features of this crate. The receive
+# direction is split: without the `reset_stream_at` feature it uses nothing of
+# the extension. Remove the feature here once the send direction is split too.
 sakuya_wire = { workspace = true, features = ["reset_stream_at"] }
 snafu.workspace = true
 

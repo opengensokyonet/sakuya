@@ -319,7 +319,7 @@ impl ReceiveTerminationPolicy for BaseReceive {
 #[test]
 fn reception_completes_after_the_reader_is_gone() {
     let mut connection = ConnectionReceiveFlowController::new(v(1000));
-    let mut receiver = StreamReceiver::new(
+    let mut receiver: StreamReceiver<BaseReceive> = StreamReceiver::new(
         BaseReceive {
             buffer: FragmentedStreamReceiveBuffer::new(),
             termination: FollowingTermination::new(code(9)),

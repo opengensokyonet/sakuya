@@ -2,15 +2,22 @@
 //! connection.
 //!
 //! A [`StreamReceiver`] takes the frames that affect the receive direction of
-//! one stream — STREAM, `RESET_STREAM`, `RESET_STREAM_AT` and
-//! `STREAM_DATA_BLOCKED` — already parsed and attributed to the stream, and
-//! the operations of the stream reader: reads, the local STOP request and the
-//! reader being dropped. It composes three contracts that one type `C`
-//! implements: the receive buffer ([`StreamReceiveBuffer`]), the receive flow
-//! control policy ([`ReceiveFlowControlPolicy`]) and the receive termination
-//! policy ([`ReceiveTerminationPolicy`]). The type may hold three independent
+//! one stream — STREAM, the peer's resets and `STREAM_DATA_BLOCKED` — already
+//! parsed and attributed to the stream, and the operations of the stream
+//! reader: reads, the local STOP request and the reader being dropped. It
+//! composes three contracts that one type `C` implements: the receive buffer
+//! ([`StreamReceiveBuffer`]), the receive flow control policy
+//! ([`ReceiveFlowControlPolicy`]) and the receive termination policy
+//! ([`ReceiveTerminationPolicy`]). The type may hold three independent
 //! components or let the buffer double as the flow control policy; it must
 //! make them work on the same stream.
+//!
+//! The receiver is also generic over the type `F` of its reset facts, a
+//! [`RemoteResetFacts`]: what a reset of the peer states and how far the peer
+//! still owes data after it. [`RemoteReset`], the default, is the reset of
+//! RFC 9000, delivered with
+//! [`on_reset_stream`](StreamReceiver::on_reset_stream). Other kinds of reset
+//! come in through [`on_remote_reset`](StreamReceiver::on_remote_reset).
 //!
 //! # Exclusive operations
 //!
@@ -38,10 +45,10 @@
 //!
 //! # Three independent dimensions
 //!
-//! - Remote end facts: the final size (kept by the buffer), the reset error
-//!   code and the effective reliable size. The latter is established by the
-//!   first reset, takes the smallest value any reset stated, and counts as
-//!   zero for `RESET_STREAM`.
+//! - Remote end facts: the final size (kept by the buffer) and the reset
+//!   facts, which the first reset establishes and later ones are merged into
+//!   ([`RemoteResetFacts::merge`]). They say how far the peer still owes data
+//!   ([`RemoteResetFacts::owed_end`]); a `RESET_STREAM` owes nothing.
 //! - Local delivery limits: the data acceptance limit (`acceptance_limit`),
 //!   which bounds the new payload the buffer keeps, and the delivery limit
 //!   (`delivery_limit`), which bounds delivery to the application. Each
@@ -51,8 +58,8 @@
 //! - The committed read result: once a read has returned end of stream or a
 //!   terminal error, later frames do not change it.
 //!
-//! The reliable size is not a local truncation: it says which gaps are still
-//! worth waiting for, never how far delivery may go.
+//! What the peer still owes is not a local truncation: it says which gaps
+//! are still worth waiting for, never how far delivery may go.
 //!
 //! Waiting and waking, the asynchronous reader, sending `STOP_SENDING` and
 //! `MAX_STREAM_DATA`, and propagating connection errors are left to the
@@ -66,23 +73,26 @@ use crate::connection_receive_flow::{
     ConnectionReceiveFlowController, RecordReleaseError, RecordUsageError,
 };
 use crate::receive_buffer::{StreamDataInput, StreamReceiveBuffer, offset_add, span};
-use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError};
+use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
 use bytes::Bytes;
+use core::error::Error;
 use flow_control::{ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView};
-use read::{ReadError, RemoteReset, SharedTerminationReason};
+use read::{ReadError, SharedTerminationReason};
 use received_ranges::ReceivedRanges;
-use sakuya_wire::reset_stream_at::ReliableSizeError;
+use remote_reset::{RemoteReset, RemoteResetFacts};
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
 use sakuya_wire::var_int::VarInt;
+use snafu::ResultExt;
 use termination::{ReceiveTerminationPolicy, ResetPresentation, TerminationEvent, TerminationView};
 use violation::{
-    FinalSizeBelowReceivedError, OffsetOverflowSnafu, OnResetStreamAtError, OnResetStreamError,
-    OnStreamFrameError, StreamLimitExceededError,
+    ConflictSnafu, FinalSizeBelowReceivedError, MalformedSnafu, OffsetOverflowSnafu,
+    OnRemoteResetError, OnResetStreamError, OnStreamFrameError, StreamLimitExceededError,
 };
 
 pub mod flow_control;
 pub mod read;
 mod received_ranges;
+pub mod remote_reset;
 pub mod stop;
 pub mod termination;
 pub mod violation;
@@ -112,23 +122,6 @@ pub struct ResetStreamFrame {
     pub final_size: VarInt,
 }
 
-/// A `RESET_STREAM_AT` frame of the stream
-/// ([draft-ietf-quic-reliable-stream-reset-11 §4]).
-///
-/// The reliable stream reset extension is an Internet-Draft, not a published
-/// RFC.
-///
-/// [draft-ietf-quic-reliable-stream-reset-11 §4]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html#section-4
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ResetStreamAtFrame {
-    /// The application protocol error code.
-    pub code: ApplicationErrorCode,
-    /// The final size of the stream.
-    pub final_size: VarInt,
-    /// The end of the prefix the sender still delivers reliably.
-    pub reliable_size: VarInt,
-}
-
 /// The mode of a local delivery limit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BoundaryMode {
@@ -153,29 +146,35 @@ impl BoundaryMode {
 }
 
 /// A local reason, and the event during which it took effect.
+///
+/// `X` is the change a later reset can make to the reset facts
+/// ([`RemoteResetFacts::Change`]), which the event may carry.
 #[derive(Debug)]
-struct Applied<R> {
+struct Applied<R, X> {
     reason: SharedTerminationReason<R>,
-    trigger: TerminationEvent,
+    trigger: TerminationEvent<X>,
 }
 
-impl<R> Clone for Applied<R> {
+impl<R, X: Clone> Clone for Applied<R, X> {
     fn clone(&self) -> Self {
         Self {
             reason: self.reason.clone(),
-            trigger: self.trigger,
+            trigger: self.trigger.clone(),
         }
     }
 }
 
 /// A local delivery limit with the reason it was fixed for.
 #[derive(Clone, Debug)]
-enum Boundary<R> {
+enum Boundary<R, X> {
     Following,
-    Fixed { limit: VarInt, applied: Applied<R> },
+    Fixed {
+        limit: VarInt,
+        applied: Applied<R, X>,
+    },
 }
 
-impl<R> Boundary<R> {
+impl<R, X> Boundary<R, X> {
     fn mode(&self) -> BoundaryMode {
         match self {
             Self::Following => BoundaryMode::Following,
@@ -213,15 +212,6 @@ impl StopRequest {
     }
 }
 
-/// The reset facts the receive direction keeps: the code and final size of
-/// the first reset, and the smallest reliable size any reset stated.
-#[derive(Clone, Copy, Debug)]
-struct ResetFacts {
-    code: ApplicationErrorCode,
-    final_size: VarInt,
-    reliable_size: VarInt,
-}
-
 /// What happened to the receive buffer and its payload:
 ///
 /// ```text
@@ -233,11 +223,11 @@ struct ResetFacts {
 /// only: the ranges the frames stated stay recorded in the receiver, so
 /// reception can still complete.
 #[derive(Clone, Debug)]
-enum BufferPhase<R> {
+enum BufferPhase<R, X> {
     /// The buffer holds payload for delivery.
     Live,
     /// The buffer was destroyed.
-    Destroyed(Destruction<R>),
+    Destroyed(Destruction<R, X>),
 }
 
 /// How far the connection's end has reached this stream:
@@ -267,9 +257,9 @@ enum ConnectionPhase {
 
 /// Why the receive buffer was destroyed.
 #[derive(Clone, Debug)]
-enum Destruction<R> {
+enum Destruction<R, X> {
     /// The receive termination policy destroyed it for this reason.
-    Policy(Applied<R>),
+    Policy(Applied<R, X>),
     /// The mechanism destroyed it: the reader was dropped or a read
     /// committed a terminal error.
     Forced,
@@ -284,11 +274,11 @@ enum Destruction<R> {
 ///     └──────────────────────── drop ──────────────────────┘ (not committed)
 /// ```
 #[derive(Clone, Debug)]
-enum Reading<R> {
+enum Reading<R, F: RemoteResetFacts> {
     /// The reader may read; no result is committed.
     Open,
     /// A read committed this result; repeated reads return it.
-    Committed(Committed<R>),
+    Committed(Committed<R, F>),
     /// The reader was dropped; no more reads happen.
     ReaderDropped {
         /// Whether a read had committed a result before.
@@ -297,36 +287,71 @@ enum Reading<R> {
 }
 
 #[derive(Clone, Debug)]
-enum Committed<R> {
+enum Committed<R, F: RemoteResetFacts> {
     End,
-    Error(ReadError<R>),
+    Error(ReadError<R, F>),
 }
 
 /// The receive direction of one stream.
 ///
 /// `C` implements the receive buffer, the receive flow control policy and
-/// the receive termination policy for this stream. See the [module
-/// documentation](self) for the processing model.
+/// the receive termination policy for this stream. `F` is the type of the
+/// reset facts the stream keeps; it decides which resets the stream takes.
+/// See the [module documentation](self) for the processing model.
 #[derive(Debug)]
-pub struct StreamReceiver<C: ReceiveTerminationPolicy> {
+pub struct StreamReceiver<C: ReceiveTerminationPolicy<F>, F: RemoteResetFacts = RemoteReset> {
     parts: C,
     opened_limit: VarInt,
-    buffer: BufferPhase<C::Reason>,
+    buffer: BufferPhase<C::Reason, F::Change>,
     connection: ConnectionPhase,
     received: ReceivedRanges,
-    reset: Option<ResetFacts>,
-    acceptance: Boundary<C::Reason>,
-    delivery: Boundary<C::Reason>,
-    reading: Reading<C::Reason>,
+    reset: Option<F>,
+    acceptance: Boundary<C::Reason, F::Change>,
+    delivery: Boundary<C::Reason, F::Change>,
+    reading: Reading<C::Reason, F>,
     stop: StopRequest,
     data_complete_notified: bool,
     reset_presentation: ResetPresentation,
     released_reported: VarInt,
 }
 
-impl<C> StreamReceiver<C>
+impl<C> StreamReceiver<C, RemoteReset>
 where
-    C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy,
+    C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy<RemoteReset>,
+{
+    /// Processes a `RESET_STREAM` frame of the stream.
+    ///
+    /// The first one establishes the reset facts. A later one changes
+    /// nothing, also when it states another error code: the first code is
+    /// kept. What remains deliverable is up to the receive termination
+    /// policy; reading stops at the first gap. As for
+    /// [`on_stream_frame`](Self::on_stream_frame), a violating frame leaves
+    /// no trace, and a frame after a violation or after the connection
+    /// closed is ignored.
+    ///
+    /// # Errors
+    ///
+    /// [`OnResetStreamError`] if this frame violates the protocol; the caller
+    /// must close the connection with its
+    /// [`transport_error_code`](OnResetStreamError::transport_error_code).
+    pub fn on_reset_stream(
+        &mut self,
+        frame: ResetStreamFrame,
+        connection: &mut ConnectionReceiveFlowController,
+    ) -> Result<(), OnResetStreamError> {
+        self.on_remote_reset(frame, connection)
+            .map_err(|error| match error {
+                OnRemoteResetError::Violation { source } => source,
+                OnRemoteResetError::Malformed { source }
+                | OnRemoteResetError::Conflict { source } => match source {},
+            })
+    }
+}
+
+impl<C, F> StreamReceiver<C, F>
+where
+    C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy<F>,
+    F: RemoteResetFacts,
 {
     /// Creates the receive direction of a stream from its components and the
     /// stream limit the peer may already use.
@@ -363,12 +388,8 @@ where
     }
 
     /// The reset facts, once a reset has been received.
-    pub fn remote_reset(&self) -> Option<RemoteReset> {
-        self.reset.map(|facts| RemoteReset {
-            code: facts.code,
-            final_size: facts.final_size,
-            reliable_size: facts.reliable_size,
-        })
+    pub fn remote_reset(&self) -> Option<F> {
+        self.reset
     }
 
     /// The closure of the connection, once
@@ -447,54 +468,37 @@ where
             .inspect_err(|_| self.connection = ConnectionPhase::Violated)
     }
 
-    /// Processes a `RESET_STREAM` frame of the stream.
+    /// Processes a reset of the stream by the peer: a frame that states
+    /// reset facts of type `F`.
     ///
-    /// It establishes the reset facts with a reliable size of zero, or lowers
-    /// an earlier `RESET_STREAM_AT`'s reliable size to zero. What remains
-    /// deliverable is up to the receive termination policy; reading stops at
-    /// the first gap. As for [`on_stream_frame`](Self::on_stream_frame), a
+    /// This is the entry point of every kind of reset; the methods named
+    /// after a frame call it. `frame` is converted to the facts it states;
+    /// the first reset establishes the facts of the stream and a later one is
+    /// merged into them ([`RemoteResetFacts::merge`]). The receive
+    /// termination policy observes [`TerminationEvent::RemoteReset`] or
+    /// [`TerminationEvent::ResetChanged`]. Every check runs before anything
+    /// changes: as for [`on_stream_frame`](Self::on_stream_frame), a
     /// violating frame leaves no trace, and a frame after a violation or
     /// after the connection closed is ignored.
     ///
     /// # Errors
     ///
-    /// [`OnResetStreamError`] if this frame violates the protocol; the caller
-    /// must close the connection with its
-    /// [`transport_error_code`](OnResetStreamError::transport_error_code).
-    pub fn on_reset_stream(
+    /// [`OnRemoteResetError`] if this frame violates the protocol; the caller
+    /// must close the connection. The checks run in the order of the
+    /// variants, except that the limits of flow control come last.
+    pub fn on_remote_reset<T>(
         &mut self,
-        frame: ResetStreamFrame,
+        frame: T,
         connection: &mut ConnectionReceiveFlowController,
-    ) -> Result<(), OnResetStreamError> {
+    ) -> Result<(), OnRemoteResetError<T::Error, F::Conflict>>
+    where
+        T: TryInto<F>,
+        T::Error: Error + 'static,
+    {
         if !self.takes_frames() {
             return Ok(());
         }
-        self.accept_reset(frame.code, frame.final_size, VarInt::ZERO, connection)
-            .inspect_err(|_| self.connection = ConnectionPhase::Violated)
-    }
-
-    /// Processes a `RESET_STREAM_AT` frame of the stream.
-    ///
-    /// The effective reliable size becomes the smallest one received; a
-    /// larger one arriving later does not raise it. As for
-    /// [`on_stream_frame`](Self::on_stream_frame), a violating frame leaves no
-    /// trace, and a frame after a violation or after the connection closed is
-    /// ignored.
-    ///
-    /// # Errors
-    ///
-    /// [`OnResetStreamAtError`] if this frame violates the protocol; the
-    /// caller must close the connection with its
-    /// [`transport_error_code`](OnResetStreamAtError::transport_error_code).
-    pub fn on_reset_stream_at(
-        &mut self,
-        frame: ResetStreamAtFrame,
-        connection: &mut ConnectionReceiveFlowController,
-    ) -> Result<(), OnResetStreamAtError> {
-        if !self.takes_frames() {
-            return Ok(());
-        }
-        self.accept_reset_at(frame, connection)
+        self.accept_reset(frame, connection)
             .inspect_err(|_| self.connection = ConnectionPhase::Violated)
     }
 
@@ -611,30 +615,31 @@ where
         Ok(())
     }
 
-    fn accept_reset_at(
+    fn accept_reset<T>(
         &mut self,
-        frame: ResetStreamAtFrame,
+        frame: T,
         connection: &mut ConnectionReceiveFlowController,
-    ) -> Result<(), OnResetStreamAtError> {
-        ReliableSizeError::check(frame.final_size, frame.reliable_size)?;
-        self.accept_reset(
-            frame.code,
-            frame.final_size,
-            frame.reliable_size,
-            connection,
-        )?;
-        Ok(())
-    }
-
-    fn accept_reset(
-        &mut self,
-        code: ApplicationErrorCode,
-        final_size: VarInt,
-        reliable_size: VarInt,
-        connection: &mut ConnectionReceiveFlowController,
-    ) -> Result<(), OnResetStreamError> {
+    ) -> Result<(), OnRemoteResetError<T::Error, F::Conflict>>
+    where
+        T: TryInto<F>,
+        T::Error: Error + 'static,
+    {
+        let stated: F = frame.try_into().context(MalformedSnafu)?;
+        debug_assert!(stated.owed_end() <= stated.final_size());
+        let final_size = stated.final_size();
         let old_accounted = self.parts.accounted_end();
-        self.check_reset(self.parts.final_size(), old_accounted, code, final_size)?;
+        check_reset_final_size(self.parts.final_size(), old_accounted, final_size)?;
+        let update = match self.reset {
+            None => Some((stated, TerminationEvent::RemoteReset)),
+            Some(known) => known
+                .merge(stated)
+                .context(ConflictSnafu)?
+                .map(|(facts, change)| {
+                    debug_assert!(facts.final_size() == known.final_size());
+                    debug_assert!(facts.owed_end() <= facts.final_size());
+                    (facts, TerminationEvent::ResetChanged(change))
+                }),
+        };
         // The receive buffer contract: the accounted end is the maximum of
         // every final size it has been given.
         let accounted_end = old_accounted.max(final_size);
@@ -642,39 +647,11 @@ where
         // The frame passed every check: nothing below fails.
         self.parts.receive_final_size(final_size);
         debug_assert_eq!(self.parts.accounted_end(), accounted_end);
-        let event = match &mut self.reset {
-            None => {
-                self.reset = Some(ResetFacts {
-                    code,
-                    final_size,
-                    reliable_size,
-                });
-                Some(TerminationEvent::RemoteReset)
-            }
-            Some(facts) if reliable_size < facts.reliable_size => {
-                facts.reliable_size = reliable_size;
-                Some(TerminationEvent::ReliablePrefixLowered)
-            }
-            Some(_) => None,
-        };
+        let event = update.map(|(facts, event)| {
+            self.reset = Some(facts);
+            event
+        });
         self.after_input(event, connection);
-        Ok(())
-    }
-
-    fn check_reset(
-        &self,
-        old_final: Option<VarInt>,
-        old_accounted: VarInt,
-        code: ApplicationErrorCode,
-        final_size: VarInt,
-    ) -> Result<(), OnResetStreamError> {
-        match old_final {
-            Some(known) => FinalSizeChangeError::check(known, final_size)?,
-            None => FinalSizeBelowReceivedError::check(final_size, old_accounted)?,
-        }
-        if let Some(facts) = self.reset {
-            ResetCodeChangeError::check(facts.code, code)?;
-        }
         Ok(())
     }
 
@@ -699,7 +676,7 @@ where
 
     fn after_input(
         &mut self,
-        event: Option<TerminationEvent>,
+        event: Option<TerminationEvent<F::Change>>,
         connection: &mut ConnectionReceiveFlowController,
     ) {
         self.notify_flow(ReceiveFlowEvent::Received);
@@ -734,7 +711,7 @@ where
 
     /// Destroys the receive buffer for `cause`. A buffer already destroyed
     /// keeps its first cause.
-    fn destroy_buffer(&mut self, cause: Destruction<C::Reason>) {
+    fn destroy_buffer(&mut self, cause: Destruction<C::Reason, F::Change>) {
         if self.is_destroyed() {
             return;
         }
@@ -766,7 +743,7 @@ where
         accounted.saturating_sub(retained)
     }
 
-    fn termination_view(&self) -> TerminationView {
+    fn termination_view(&self) -> TerminationView<F> {
         TerminationView {
             accounted_end: self.parts.accounted_end(),
             final_size: self.parts.final_size(),
@@ -787,7 +764,7 @@ where
         }
     }
 
-    fn notify_termination(&mut self, event: TerminationEvent) {
+    fn notify_termination(&mut self, event: TerminationEvent<F::Change>) {
         let view = self.termination_view();
         let decision = self.parts.on_termination_event(event, &view);
         self.apply_decision(event, decision);
@@ -823,6 +800,20 @@ fn check_stream_final_size(
         }
         None if fin => FinalSizeBelowReceivedError::check(end, old_accounted)?,
         None => {}
+    }
+    Ok(())
+}
+
+/// Checks the final size a reset states against the known one, or else
+/// against the data already received.
+fn check_reset_final_size(
+    old_final: Option<VarInt>,
+    old_accounted: VarInt,
+    final_size: VarInt,
+) -> Result<(), OnResetStreamError> {
+    match old_final {
+        Some(known) => FinalSizeChangeError::check(known, final_size)?,
+        None => FinalSizeBelowReceivedError::check(final_size, old_accounted)?,
     }
     Ok(())
 }

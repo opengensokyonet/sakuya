@@ -186,8 +186,7 @@ pub trait StreamReceiveBuffer {
     /// Takes the data of one STREAM frame.
     fn receive_data(&mut self, input: StreamDataInput);
 
-    /// Takes a final size stated without payload, by `RESET_STREAM` or
-    /// `RESET_STREAM_AT`.
+    /// Takes a final size stated without payload, by a reset.
     fn receive_final_size(&mut self, final_size: VarInt);
 
     /// The accounted end: the highest end offset or final size any input has

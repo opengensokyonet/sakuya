@@ -39,7 +39,7 @@ fn accounting_follows_the_highest_end() {
     assert_eq!(connection.used(), v(300));
     let (read, end) = read_all(&mut receiver);
     assert_eq!(read, data(0, 200));
-    assert_eq!(end, reset_error(1, 300, 0, false));
+    assert_eq!(end, reset_error(1, 300, false));
 }
 
 #[test]

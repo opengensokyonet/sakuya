@@ -69,23 +69,6 @@ fn plain_reset_needs_no_request() {
     );
 }
 
-#[test]
-fn received_reliable_prefix_needs_no_request() {
-    let (mut receiver, mut connection) = new_receiver(keep_all());
-    receiver
-        .on_stream_frame(stream(0, 400, false), &mut connection)
-        .unwrap();
-    receiver
-        .on_reset_stream_at(reset_at(4, 1000, 400), &mut connection)
-        .unwrap();
-    assert_eq!(
-        receiver.stop(c(1)),
-        Err(StopError::StopNotNeeded {
-            reason: StopNotNeededReason::PeerReset,
-        })
-    );
-}
-
 /// An allowed request is installed; it neither sends anything nor ends
 /// reading.
 #[test]

@@ -87,7 +87,7 @@ fn empty_target_commits_nothing() {
         .unwrap();
     let (read, end) = read_all(&mut receiver);
     assert_eq!(read, data(100, 100));
-    assert_eq!(end, reset_error(4, 200, 0, true));
+    assert_eq!(end, reset_error(4, 200, true));
 }
 
 #[test]
@@ -147,7 +147,7 @@ fn terminal_error_is_stable() {
     receiver
         .on_reset_stream(reset(4, 100), &mut connection)
         .unwrap();
-    let error = reset_error(4, 100, 0, false);
+    let error = reset_error(4, 100, false);
     assert_eq!(receiver.read_chunk(), error);
     receiver
         .on_stream_frame(stream(0, 100, true), &mut connection)
@@ -191,7 +191,7 @@ fn complete_but_reset_presentation() {
         .unwrap();
     let (read, end) = read_all(&mut receiver);
     assert_eq!(read.len(), 100);
-    assert_eq!(end, reset_error(4, 100, 0, true));
+    assert_eq!(end, reset_error(4, 100, true));
 
     let (mut receiver, mut connection) = new_receiver(scripted(|event, _| match event {
         TerminationEvent::RemoteReset => {

@@ -61,23 +61,6 @@ fn complete_data_after_destruction_needs_no_request() {
     );
 }
 
-#[test]
-fn reliable_prefix_arriving_after_destruction_needs_no_request() {
-    let (mut receiver, mut connection) = new_receiver(FollowingTermination::new(c(9)));
-    receiver
-        .on_reset_stream_at(reset_at(4, 1000, 100), &mut connection)
-        .unwrap();
-    receiver
-        .on_stream_frame(stream(0, 50, false), &mut connection)
-        .unwrap();
-    receiver.reader_dropped();
-    assert_eq!(receiver.pending_stop(), Some(c(9)));
-    receiver
-        .on_stream_frame(stream(50, 50, false), &mut connection)
-        .unwrap();
-    assert_eq!(receiver.pending_stop(), None);
-}
-
 /// The acceptance limit cuts every later payload, yet the frames still state
 /// the ranges that complete the stream.
 #[test]

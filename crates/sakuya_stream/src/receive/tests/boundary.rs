@@ -107,46 +107,51 @@ fn same_limits_are_idempotent() {
     );
 }
 
-/// A tighter limit records the new reason and trigger; the other limit
-/// keeps its own.
+/// The gap at the read position lies beyond the acceptance limit: reading
+/// ends there with the reason the limit was fixed for.
 #[test]
-fn tightening_records_the_new_reason_per_limit() {
-    let tighten_delivery_to = |limit: u32| {
-        stopped_with(
-            restrict(
-                BoundaryUpdate::Fix(v(500)),
-                BoundaryUpdate::Fix(v(800)),
-                "first",
-            ),
-            move |event, _| match event {
-                TerminationEvent::RemoteReset => restrict(
-                    BoundaryUpdate::Keep,
-                    BoundaryUpdate::Fix(v(limit)),
-                    "second",
-                ),
-                _ => TerminationDecision::keep(),
-            },
-        )
-    };
-    // The reset promises the whole stream, so neither its gap rule nor its
-    // prefix rule ends the read before the local limits do.
-    let whole = reset_at(4, 1000, 1000);
-
-    // Reading ends at the acceptance limit, which kept the first reason.
-    let (mut receiver, mut connection) = tighten_delivery_to(700);
-    receiver.on_reset_stream_at(whole, &mut connection).unwrap();
-    assert_eq!(receiver.delivery_limit(), BoundaryMode::Fixed(v(700)));
+fn reading_ends_at_the_acceptance_limit() {
+    let (mut receiver, mut connection) = stopped_with(
+        restrict(
+            BoundaryUpdate::Fix(v(500)),
+            BoundaryUpdate::Fix(v(800)),
+            "first",
+        ),
+        |_, _| TerminationDecision::keep(),
+    );
+    receiver
+        .on_stream_frame(stream(500, 100, false), &mut connection)
+        .unwrap();
+    assert_eq!(receiver.parts().buffer.held_len(), 500);
     let (read, end) = read_all(&mut receiver);
     assert_eq!(read.len(), 500);
-    let remote = receiver.remote_reset();
     assert_eq!(
         end,
-        acceptance_limit("first", TerminationEvent::StopSent, remote)
+        acceptance_limit("first", TerminationEvent::StopSent, None)
     );
+}
 
-    // Reading ends at the tightened delivery limit, with the second reason.
-    let (mut receiver, mut connection) = tighten_delivery_to(400);
-    receiver.on_reset_stream_at(whole, &mut connection).unwrap();
+/// A tighter limit records the new reason and trigger.
+#[test]
+fn tightening_records_the_new_reason() {
+    let (mut receiver, mut connection) = stopped_with(
+        restrict(
+            BoundaryUpdate::Fix(v(500)),
+            BoundaryUpdate::Fix(v(800)),
+            "first",
+        ),
+        |event, _| match event {
+            TerminationEvent::RemoteReset => {
+                restrict(BoundaryUpdate::Keep, BoundaryUpdate::Fix(v(400)), "second")
+            }
+            _ => TerminationDecision::keep(),
+        },
+    );
+    receiver
+        .on_reset_stream(reset(4, 1000), &mut connection)
+        .unwrap();
+    assert_eq!(receiver.acceptance_limit(), BoundaryMode::Fixed(v(500)));
+    assert_eq!(receiver.delivery_limit(), BoundaryMode::Fixed(v(400)));
     let (read, end) = read_all(&mut receiver);
     assert_eq!(read.len(), 400);
     let remote = receiver.remote_reset();
@@ -326,59 +331,6 @@ fn read_after_reader_drop_fails() {
     assert_eq!(receiver.read_chunk(), Err(ReadError::ReaderDropped));
 }
 
-/// A sent STOP request is a local cancellation: the policy may then give up
-/// a reliable prefix, and reading ends with the local reason.
-#[test]
-fn sent_stop_cancels_the_reliable_prefix() {
-    let (mut receiver, mut connection) = new_receiver(scripted(|event, _| match event {
-        TerminationEvent::StopSent => fix_both(100, "stop"),
-        _ => TerminationDecision::keep(),
-    }));
-    receiver
-        .on_stream_frame(stream(0, 200, false), &mut connection)
-        .unwrap();
-    receiver
-        .on_reset_stream_at(reset_at(4, 1000, 800), &mut connection)
-        .unwrap();
-    receiver.stop(c(1)).unwrap();
-    receiver.on_stop_sent().unwrap();
-    assert_eq!(receiver.delivery_limit(), BoundaryMode::Fixed(v(100)));
-    let (read, end) = read_all(&mut receiver);
-    assert_eq!(read, data(0, 100));
-    let remote = receiver.remote_reset();
-    assert_eq!(
-        end,
-        delivery_limit("stop", TerminationEvent::StopSent, remote)
-    );
-}
-
-/// With the whole reliable prefix received and held, the acceptance limit
-/// may drop below it.
-#[test]
-fn acceptance_below_a_received_prefix() {
-    let (mut receiver, mut connection) = new_receiver(scripted(|event, _| match event {
-        TerminationEvent::RemoteReset => restrict(
-            BoundaryUpdate::Fix(VarInt::ZERO),
-            BoundaryUpdate::Keep,
-            "prefix complete",
-        ),
-        _ => TerminationDecision::keep(),
-    }));
-    receiver
-        .on_stream_frame(stream(0, 800, false), &mut connection)
-        .unwrap();
-    receiver
-        .on_reset_stream_at(reset_at(4, 1000, 800), &mut connection)
-        .unwrap();
-    assert_eq!(
-        receiver.acceptance_limit(),
-        BoundaryMode::Fixed(VarInt::ZERO)
-    );
-    let (read, end) = read_all(&mut receiver);
-    assert_eq!(read.len(), 800);
-    assert_eq!(end, reset_error(4, 1000, 800, false));
-}
-
 /// A reset gives a basis: the base-composition style of fixing both limits
 /// at the final size keeps reading to the first gap.
 #[test]
@@ -394,14 +346,14 @@ fn fixing_at_the_final_size_after_a_reset() {
         .on_stream_frame(stream(0, 100, false), &mut connection)
         .unwrap();
     receiver
-        .on_reset_stream_at(reset_at(4, 300, 200), &mut connection)
+        .on_reset_stream(reset(4, 300), &mut connection)
         .unwrap();
     receiver
         .on_stream_frame(stream(100, 200, false), &mut connection)
         .unwrap();
     let (read, end) = read_all(&mut receiver);
     assert_eq!(read, data(0, 300));
-    assert_eq!(end, reset_error(4, 300, 200, true));
+    assert_eq!(end, reset_error(4, 300, true));
 }
 
 mod violations {
@@ -526,49 +478,6 @@ mod violations {
         }));
         receiver
             .on_stream_frame(stream(0, 100, true), &mut connection)
-            .unwrap();
-    }
-
-    #[test]
-    #[should_panic(expected = "inside the undelivered reliable prefix 800")]
-    fn delivery_inside_the_reliable_prefix() {
-        let (mut receiver, mut connection) = new_receiver(scripted(|event, _| match event {
-            TerminationEvent::RemoteReset => {
-                restrict(BoundaryUpdate::Keep, BoundaryUpdate::Fix(v(300)), "reset")
-            }
-            _ => TerminationDecision::keep(),
-        }));
-        receiver
-            .on_reset_stream_at(reset_at(4, 1000, 800), &mut connection)
-            .unwrap();
-    }
-
-    #[test]
-    #[should_panic(expected = "inside the unreceived reliable prefix 800")]
-    fn acceptance_inside_an_unreceived_prefix() {
-        let (mut receiver, mut connection) = new_receiver(scripted(|event, _| match event {
-            TerminationEvent::RemoteReset => {
-                restrict(BoundaryUpdate::Fix(v(300)), BoundaryUpdate::Keep, "reset")
-            }
-            _ => TerminationDecision::keep(),
-        }));
-        receiver
-            .on_stream_frame(stream(0, 500, false), &mut connection)
-            .unwrap();
-        receiver
-            .on_reset_stream_at(reset_at(4, 1000, 800), &mut connection)
-            .unwrap();
-    }
-
-    #[test]
-    #[should_panic(expected = "while the reliable prefix is undelivered")]
-    fn destroying_an_undelivered_prefix() {
-        let (mut receiver, mut connection) = new_receiver(scripted(|event, _| match event {
-            TerminationEvent::RemoteReset => destroy("reset"),
-            _ => TerminationDecision::keep(),
-        }));
-        receiver
-            .on_reset_stream_at(reset_at(4, 1000, 800), &mut connection)
             .unwrap();
     }
 

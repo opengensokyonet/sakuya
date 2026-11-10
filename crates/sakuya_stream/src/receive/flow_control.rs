@@ -15,7 +15,10 @@
 //! withdrawing an intent never lowers it.
 //!
 //! [RFC 9000 §4.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-4.1
-use super::{BoundaryMode, StreamReceiver, termination::ReceiveTerminationPolicy};
+use super::{
+    BoundaryMode, StreamReceiver, remote_reset::RemoteResetFacts,
+    termination::ReceiveTerminationPolicy,
+};
 use crate::receive_buffer::StreamReceiveBuffer;
 use sakuya_wire::var_int::VarInt;
 
@@ -86,9 +89,10 @@ pub trait ReceiveFlowControlPolicy {
     fn advertisement_intent(&self) -> AdvertisementIntent;
 }
 
-impl<C> StreamReceiver<C>
+impl<C, F> StreamReceiver<C, F>
 where
-    C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy,
+    C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy<F>,
+    F: RemoteResetFacts,
 {
     /// The stream limit to advertise now, if any.
     ///

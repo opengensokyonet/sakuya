@@ -3,19 +3,23 @@
 //!
 //! Each frame method of [`StreamReceiver`](super::StreamReceiver) returns the
 //! violations its own frame can commit and no others:
-//! [`OnStreamFrameError`] for STREAM, [`OnResetStreamError`] for
-//! `RESET_STREAM` and [`OnResetStreamAtError`] for `RESET_STREAM_AT`. Every
-//! violation is a connection error ([RFC 9000 §11]): the caller closes the
-//! connection with the transport error code of the error's
-//! `transport_error_code`.
+//! [`OnStreamFrameError`] for STREAM and [`OnResetStreamError`] for
+//! `RESET_STREAM`. Every violation is a connection error ([RFC 9000 §11]):
+//! the caller closes the connection with the transport error code of the
+//! error's `transport_error_code`.
 //!
-//! A failure that more than one of the three can report is defined once and
+//! [`OnRemoteResetError`] is the error of the entry point that every kind of
+//! reset shares,
+//! [`on_remote_reset`](super::StreamReceiver::on_remote_reset): the
+//! violations of [`OnResetStreamError`], which any reset can commit, and
+//! those that depend on the kind of reset.
+//!
+//! A failure that more than one of them can report is defined once and
 //! wrapped by each of them as a source: [`FinalSizeChangeError`],
-//! [`ResetCodeChangeError`], [`FinalSizeBelowReceivedError`],
-//! [`StreamLimitExceededError`] and [`RecordUsageError`]. The variants keep
-//! apart what was violated, so that the stream-level limit and the
-//! connection-level limit stay distinguishable although both are
-//! `FLOW_CONTROL_ERROR`.
+//! [`FinalSizeBelowReceivedError`], [`StreamLimitExceededError`] and
+//! [`RecordUsageError`]. The variants keep apart what was violated, so that
+//! the stream-level limit and the connection-level limit stay distinguishable
+//! although both are `FLOW_CONTROL_ERROR`.
 //!
 //! Each error struct defined here has private fields and is constructed only
 //! by its `check` when the check fails, so it holds only values for which the
@@ -23,8 +27,8 @@
 //!
 //! [RFC 9000 §11]: https://www.rfc-editor.org/rfc/rfc9000.html#section-11
 use crate::connection_receive_flow::RecordUsageError;
-use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError};
-use sakuya_wire::reset_stream_at::ReliableSizeError;
+use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
+use core::error::Error;
 use sakuya_wire::v1::transport_error::TransportErrorCode;
 use sakuya_wire::var_int::VarInt;
 use snafu::{Snafu, ensure};
@@ -187,7 +191,11 @@ impl OnStreamFrameError {
     }
 }
 
-/// Violations of a `RESET_STREAM` frame.
+/// Violations of a `RESET_STREAM` frame, which every kind of reset can
+/// commit too.
+///
+/// A later `RESET_STREAM` that states another error code is no violation
+/// under RFC 9000: the first code is kept.
 ///
 /// The error code to close the connection with is
 /// [`transport_error_code`](Self::transport_error_code).
@@ -212,13 +220,6 @@ pub enum OnResetStreamError {
         /// The final size the frame states and the highest end received
         /// before.
         source: FinalSizeBelowReceivedError,
-    },
-    /// The reset states an error code different from an earlier reset's
-    /// (`STREAM_STATE_ERROR`, draft-ietf-quic-reliable-stream-reset-11 §5).
-    #[snafu(context(false), display("a reset frame changes the error code"))]
-    ResetCodeChanged {
-        /// The error code of the earlier reset and the one the frame states.
-        source: ResetCodeChangeError,
     },
     /// The stream's accounted end exceeds the stream limit opened to the peer
     /// (`FLOW_CONTROL_ERROR`, [RFC 9000 §4.1]).
@@ -245,7 +246,6 @@ impl OnResetStreamError {
             Self::StreamLimitExceeded { .. } | Self::ConnectionLimitExceeded { .. } => {
                 TransportErrorCode::FLOW_CONTROL_ERROR
             }
-            Self::ResetCodeChanged { .. } => TransportErrorCode::STREAM_STATE_ERROR,
             Self::FinalSizeChanged { .. } | Self::FinalSizeBelowReceived { .. } => {
                 TransportErrorCode::FINAL_SIZE_ERROR
             }
@@ -253,101 +253,37 @@ impl OnResetStreamError {
     }
 }
 
-/// Violations of a `RESET_STREAM_AT` frame: those of `RESET_STREAM`, and a
-/// reliable size beyond the final size.
+/// Violations of a reset of the stream by the peer, of whichever kind:
+/// failures of
+/// [`StreamReceiver::on_remote_reset`](super::StreamReceiver::on_remote_reset).
 ///
-/// The error code to close the connection with is
-/// [`transport_error_code`](Self::transport_error_code).
+/// `M` is why a frame states no reset facts of the receiver's type, and `X`
+/// why a later reset contradicts the facts
+/// ([`RemoteResetFacts::Conflict`](super::remote_reset::RemoteResetFacts::Conflict)).
+/// Both are uninhabited for `RESET_STREAM` under RFC 9000. The transport
+/// error code of a [`Malformed`](Self::Malformed) or
+/// [`Conflict`](Self::Conflict) frame belongs to the kind of reset that
+/// defines the source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-pub enum OnResetStreamAtError {
-    /// The frame states a reliable size above its final size
-    /// (`FRAME_ENCODING_ERROR`, draft-ietf-quic-reliable-stream-reset-11 §4).
-    #[snafu(
-        context(false),
-        display("a RESET_STREAM_AT frame states a reliable size beyond its final size")
-    )]
-    ReliableSizeExceedsFinalSize {
-        /// The reliable size and the final size the frame states.
-        source: ReliableSizeError,
+#[snafu(visibility(pub(super)))]
+pub enum OnRemoteResetError<M: Error + 'static, X: Error + 'static> {
+    /// The frame's fields contradict one another, so that it states no reset
+    /// facts.
+    #[snafu(display("a reset frame states no reset facts"))]
+    Malformed {
+        /// Which rule of the frame's own fields is violated.
+        source: M,
     },
-    /// The frame states a final size different from the known one
-    /// (`FINAL_SIZE_ERROR`, [RFC 9000 §4.5]).
-    ///
-    /// [RFC 9000 §4.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-4.5
-    #[snafu(context(false), display("a reset frame changes the final size"))]
-    FinalSizeChanged {
-        /// The known final size and the one the frame states.
-        source: FinalSizeChangeError,
+    /// The frame violates a rule that every reset follows.
+    #[snafu(transparent)]
+    Violation {
+        /// The violation.
+        source: OnResetStreamError,
     },
-    /// The frame states a final size below data already received
-    /// (`FINAL_SIZE_ERROR`).
-    #[snafu(
-        context(false),
-        display("a reset frame ends the stream below received data")
-    )]
-    FinalSizeBelowReceived {
-        /// The final size the frame states and the highest end received
-        /// before.
-        source: FinalSizeBelowReceivedError,
+    /// The frame contradicts an earlier reset of the stream.
+    #[snafu(display("a reset frame contradicts an earlier reset of the stream"))]
+    Conflict {
+        /// What the two resets disagree on.
+        source: X,
     },
-    /// The frame states an error code different from an earlier reset's
-    /// (`STREAM_STATE_ERROR`, draft-ietf-quic-reliable-stream-reset-11 §5).
-    #[snafu(context(false), display("a reset frame changes the error code"))]
-    ResetCodeChanged {
-        /// The error code of the earlier reset and the one the frame states.
-        source: ResetCodeChangeError,
-    },
-    /// The stream's accounted end exceeds the stream limit opened to the peer
-    /// (`FLOW_CONTROL_ERROR`, [RFC 9000 §4.1]).
-    ///
-    /// [RFC 9000 §4.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-4.1
-    #[snafu(context(false), display("a reset frame exceeds the stream limit"))]
-    StreamLimitExceeded {
-        /// The accounted end after the frame and the stream limit.
-        source: StreamLimitExceededError,
-    },
-    /// The connection's usage exceeds the connection limit
-    /// (`FLOW_CONTROL_ERROR`).
-    #[snafu(context(false), display("connection flow control violated"))]
-    ConnectionLimitExceeded {
-        /// The rejected usage increase.
-        source: RecordUsageError,
-    },
-}
-
-impl OnResetStreamAtError {
-    /// The QUIC transport error code to close the connection with.
-    pub fn transport_error_code(&self) -> TransportErrorCode {
-        match self {
-            Self::StreamLimitExceeded { .. } | Self::ConnectionLimitExceeded { .. } => {
-                TransportErrorCode::FLOW_CONTROL_ERROR
-            }
-            Self::ResetCodeChanged { .. } => TransportErrorCode::STREAM_STATE_ERROR,
-            Self::FinalSizeChanged { .. } | Self::FinalSizeBelowReceived { .. } => {
-                TransportErrorCode::FINAL_SIZE_ERROR
-            }
-            Self::ReliableSizeExceedsFinalSize { .. } => TransportErrorCode::FRAME_ENCODING_ERROR,
-        }
-    }
-}
-
-/// Every violation of `RESET_STREAM` is a violation of `RESET_STREAM_AT`
-/// too, since the two frames share the rules for the final size, the error
-/// code and flow control.
-impl From<OnResetStreamError> for OnResetStreamAtError {
-    fn from(error: OnResetStreamError) -> Self {
-        match error {
-            OnResetStreamError::FinalSizeChanged { source } => Self::FinalSizeChanged { source },
-            OnResetStreamError::FinalSizeBelowReceived { source } => {
-                Self::FinalSizeBelowReceived { source }
-            }
-            OnResetStreamError::ResetCodeChanged { source } => Self::ResetCodeChanged { source },
-            OnResetStreamError::StreamLimitExceeded { source } => {
-                Self::StreamLimitExceeded { source }
-            }
-            OnResetStreamError::ConnectionLimitExceeded { source } => {
-                Self::ConnectionLimitExceeded { source }
-            }
-        }
-    }
 }

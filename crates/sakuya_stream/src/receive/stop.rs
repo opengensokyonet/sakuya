@@ -17,8 +17,9 @@
 //! | no request, and all data was received or the peer reset the stream | [`StopError::StopNotNeeded`] |
 //! | no request, and the protocol still allows one | the request is installed |
 //!
-//! A `RESET_STREAM_AT` whose reliable prefix has not been received yet still
-//! allows a request; once the prefix is received, none is needed.
+//! A reset after which the peer still owes a prefix that has not been
+//! received yet still allows a request; once the prefix is received, none is
+//! needed.
 //!
 //! While the stream waits for the connection to close after a frame
 //! violated the protocol, a request is checked and installed as usual: it
@@ -27,7 +28,8 @@
 //! [RFC 9000 §3.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-3.5
 use super::{
     StopRequest, StreamReceiver, flow_control::ReceiveFlowControlPolicy,
-    termination::ReceiveTerminationPolicy, termination::TerminationEvent,
+    remote_reset::RemoteResetFacts, termination::ReceiveTerminationPolicy,
+    termination::TerminationEvent,
 };
 use crate::connection::ConnectionClosedError;
 use crate::receive_buffer::StreamReceiveBuffer;
@@ -70,8 +72,8 @@ pub enum StopError {
 pub enum StopNotNeededReason {
     /// Every byte of the stream has been received.
     DataComplete,
-    /// The peer reset the stream, and the reliable prefix it still owes, if
-    /// any, has been received.
+    /// The peer reset the stream, and the prefix it still owes, if any, has
+    /// been received.
     PeerReset,
 }
 
@@ -90,9 +92,10 @@ impl fmt::Display for StopNotNeededReason {
 #[snafu(display("STOP_SENDING reported sent without an installed request"))]
 pub struct NoStopRequestError;
 
-impl<C> StreamReceiver<C>
+impl<C, F> StreamReceiver<C, F>
 where
-    C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy,
+    C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy<F>,
+    F: RemoteResetFacts,
 {
     /// Installs a request that the peer stop sending, with application error
     /// code `code`.
@@ -182,7 +185,7 @@ where
         }
         let reset = self.reset?;
         self.received
-            .covers(VarInt::ZERO..reset.reliable_size)
+            .covers(VarInt::ZERO..reset.owed_end())
             .then_some(StopNotNeededReason::PeerReset)
     }
 }

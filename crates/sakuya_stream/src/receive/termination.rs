@@ -24,11 +24,12 @@
 //!   final size; a following limit can be fixed at any legal offset.
 //! - Once the buffer is destroyed, a read result is committed or the
 //!   connection closed, only keeping and destroying (as clean-up) remain.
-//! - While a `RESET_STREAM_AT` reliable prefix still needs delivery or gap
-//!   filling, breaking it — fixing the delivery limit below it, fixing the
-//!   acceptance limit below a part of it not yet received, or destroying —
-//!   needs a local cancellation: the STOP request was sent or the reader was
-//!   dropped.
+//! - While the prefix the peer still owes after a reset
+//!   ([`RemoteResetFacts::owed_end`]) still needs delivery or gap filling,
+//!   breaking it — fixing the delivery limit below it, fixing the acceptance
+//!   limit below a part of it not yet received, or destroying — needs a
+//!   local cancellation: the STOP request was sent or the reader was dropped.
+//!   A `RESET_STREAM` owes nothing.
 //!
 //! # Effects
 //!
@@ -43,11 +44,13 @@
 //! delivered does not ask the policy.
 use super::{
     Applied, Boundary, BoundaryMode, Destruction, StreamReceiver,
-    flow_control::ReceiveFlowControlPolicy, flow_control::ReceiveFlowEvent, read::RemoteReset,
-    read::SharedTerminationReason, stop::StopError,
+    flow_control::ReceiveFlowControlPolicy, flow_control::ReceiveFlowEvent,
+    read::SharedTerminationReason, remote_reset::RemoteReset, remote_reset::RemoteResetFacts,
+    stop::StopError,
 };
 use crate::receive_buffer::StreamReceiveBuffer;
 use core::convert::Infallible;
+use core::fmt;
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
 use sakuya_wire::var_int::VarInt;
 use snafu::{Report, ResultExt, Snafu, ensure};
@@ -60,12 +63,16 @@ use snafu::{Report, ResultExt, Snafu, ensure};
 /// [`ReadError::DeliveryLimitReached`](super::read::ReadError::DeliveryLimitReached)
 /// and
 /// [`ReadError::AcceptanceLimitReached`](super::read::ReadError::AcceptanceLimitReached).
+///
+/// `X` is the change a later reset can make to the reset facts
+/// ([`RemoteResetFacts::Change`]). It is uninhabited for the reset of
+/// RFC 9000, whose facts no later reset changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum TerminationEvent {
-    /// The first `RESET_STREAM` or `RESET_STREAM_AT` was received.
+pub enum TerminationEvent<X = Infallible> {
+    /// The first reset of the stream was received.
     RemoteReset,
-    /// A later reset lowered the effective reliable size.
-    ReliablePrefixLowered,
+    /// A later reset changed the reset facts in this way.
+    ResetChanged(X),
     /// Every byte of `[0, final_size)` has been received.
     DataComplete,
     /// A local STOP request was installed.
@@ -82,9 +89,11 @@ pub enum TerminationEvent {
 }
 
 /// The state a receive termination policy decides on.
+///
+/// `F` is the type of the reset facts of the stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct TerminationView {
+pub struct TerminationView<F = RemoteReset> {
     /// The accounted end.
     pub accounted_end: VarInt,
     /// The final size, if known.
@@ -94,7 +103,7 @@ pub struct TerminationView {
     /// Whether every byte of `[0, final_size)` has been received.
     pub fully_received: bool,
     /// The reset facts, if a reset was received.
-    pub reset: Option<RemoteReset>,
+    pub reset: Option<F>,
     /// The data acceptance limit.
     pub acceptance: BoundaryMode,
     /// The delivery limit.
@@ -203,8 +212,12 @@ impl<R> TerminationDecision<R> {
 
 /// Local delivery decisions of one stream's receive direction.
 ///
+/// `F` is the type of the reset facts of the stream the policy decides for.
+/// A policy that reads no more of them than [`RemoteResetFacts`] offers can
+/// implement the trait for every `F`.
+///
 /// Implementations follow the [contract](self#contract).
-pub trait ReceiveTerminationPolicy {
+pub trait ReceiveTerminationPolicy<F: RemoteResetFacts = RemoteReset> {
     /// The local reason a policy records with its actions.
     ///
     /// Read errors report it repeatedly: the stream receiver wraps it once in
@@ -216,8 +229,8 @@ pub trait ReceiveTerminationPolicy {
     /// Decides on `event`, given the state after it.
     fn on_termination_event(
         &mut self,
-        event: TerminationEvent,
-        view: &TerminationView,
+        event: TerminationEvent<F::Change>,
+        view: &TerminationView<F>,
     ) -> TerminationDecision<Self::Reason>;
 }
 
@@ -227,8 +240,8 @@ pub trait ReceiveTerminationPolicy {
 ///   sent.
 /// - After a reset it keeps both limits following, so late data within the
 ///   unabandoned range can still complete the stream; reading stops at the
-///   first gap beyond the reliable prefix. A completely delivered stream that
-///   was reset reports the reset, marked complete.
+///   first gap beyond the prefix the peer still owes. A completely delivered
+///   stream that was reset reports the reset, marked complete.
 /// - When the reader is dropped and the protocol still allows a STOP request
 ///   and none is installed, it requests one with `abandon_code`; an installed
 ///   request keeps its code.
@@ -257,13 +270,13 @@ impl FollowingTermination {
     }
 }
 
-impl ReceiveTerminationPolicy for FollowingTermination {
+impl<F: RemoteResetFacts> ReceiveTerminationPolicy<F> for FollowingTermination {
     type Reason = Infallible;
 
     fn on_termination_event(
         &mut self,
-        event: TerminationEvent,
-        view: &TerminationView,
+        event: TerminationEvent<F::Change>,
+        view: &TerminationView<F>,
     ) -> TerminationDecision<Infallible> {
         match event {
             TerminationEvent::RemoteReset => {
@@ -278,13 +291,13 @@ impl ReceiveTerminationPolicy for FollowingTermination {
 }
 
 /// A checked limit action, ready to apply.
-enum Plan<R> {
+enum Plan<R, X> {
     Nothing,
     Restrict {
-        acceptance: Option<Boundary<R>>,
-        delivery: Option<Boundary<R>>,
+        acceptance: Option<Boundary<R, X>>,
+        delivery: Option<Boundary<R, X>>,
     },
-    Destroy(Applied<R>),
+    Destroy(Applied<R, X>),
 }
 
 /// Which of the two limits an update names.
@@ -295,32 +308,35 @@ enum Limit {
 }
 
 /// A checked decision, ready to apply.
-struct DecisionPlan<R> {
-    action: Plan<R>,
+struct DecisionPlan<R, X> {
+    action: Plan<R, X>,
     install_stop: Option<ApplicationErrorCode>,
     reset_presentation: Option<ResetPresentation>,
 }
 
 /// A decision that violates the [policy contract](self#contract).
+///
+/// `X` is the change the triggering event may carry
+/// ([`RemoteResetFacts::Change`]).
 #[derive(Debug, Snafu)]
 #[snafu(module(policy_violation))]
-enum PolicyViolationError {
+enum PolicyViolationError<X: fmt::Debug> {
     #[snafu(display(
         "receive termination policy violated its contract: destroys the receive buffer on {trigger:?} without a reset, a sent STOP request or a dropped reader"
     ))]
-    DestroysWithoutBasis { trigger: TerminationEvent },
+    DestroysWithoutBasis { trigger: TerminationEvent<X> },
     #[snafu(display(
         "receive termination policy violated its contract: restricts the receive buffer on {trigger:?} without a reset, a sent STOP request or a dropped reader"
     ))]
-    RestrictsWithoutBasis { trigger: TerminationEvent },
+    RestrictsWithoutBasis { trigger: TerminationEvent<X> },
     #[snafu(display(
-        "receive termination policy violated its contract: destroys the receive buffer on {trigger:?} while the reliable prefix is undelivered"
+        "receive termination policy violated its contract: destroys the receive buffer on {trigger:?} while the prefix the peer still owes is undelivered"
     ))]
-    DestroysReliablePrefix { trigger: TerminationEvent },
+    DestroysOwedPrefix { trigger: TerminationEvent<X> },
     #[snafu(display(
         "receive termination policy violated its contract: restricts the receive buffer on {trigger:?} after delivery ended"
     ))]
-    RestrictsAfterEnd { trigger: TerminationEvent },
+    RestrictsAfterEnd { trigger: TerminationEvent<X> },
     #[snafu(display(
         "receive termination policy violated its contract: fixes the acceptance limit at {limit}, beyond the final size {final_size}"
     ))]
@@ -338,34 +354,39 @@ enum PolicyViolationError {
     ))]
     RaisesFixedDelivery { fixed: VarInt, limit: VarInt },
     #[snafu(display(
-        "receive termination policy violated its contract: fixes the delivery limit at {limit} on {trigger:?}, inside the undelivered reliable prefix {reliable_size}"
+        "receive termination policy violated its contract: fixes the delivery limit at {limit} on {trigger:?}, inside the undelivered prefix the peer still owes up to {owed_end}"
     ))]
-    DeliveryInsideReliablePrefix {
+    DeliveryInsideOwedPrefix {
         limit: VarInt,
-        trigger: TerminationEvent,
-        reliable_size: VarInt,
+        trigger: TerminationEvent<X>,
+        owed_end: VarInt,
     },
     #[snafu(display(
-        "receive termination policy violated its contract: fixes the acceptance limit at {limit} on {trigger:?}, inside the unreceived reliable prefix {reliable_size}"
+        "receive termination policy violated its contract: fixes the acceptance limit at {limit} on {trigger:?}, inside the unreceived prefix the peer still owes up to {owed_end}"
     ))]
-    AcceptanceInsideReliablePrefix {
+    AcceptanceInsideOwedPrefix {
         limit: VarInt,
-        trigger: TerminationEvent,
-        reliable_size: VarInt,
+        trigger: TerminationEvent<X>,
+        owed_end: VarInt,
     },
     #[snafu(display(
         "receive termination policy violated its contract: STOP request with code {code} on {trigger:?}"
     ))]
     Stop {
         code: ApplicationErrorCode,
-        trigger: TerminationEvent,
+        trigger: TerminationEvent<X>,
         source: StopError,
     },
 }
 
-impl<C> StreamReceiver<C>
+/// The result of checking a decision against the
+/// [policy contract](self#contract).
+type Checked<T, X> = Result<T, PolicyViolationError<X>>;
+
+impl<C, F> StreamReceiver<C, F>
 where
-    C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy,
+    C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy<F>,
+    F: RemoteResetFacts,
 {
     /// Checks a whole decision, then applies it.
     ///
@@ -373,7 +394,7 @@ where
     /// operation: the check runs before anything changes.
     pub(super) fn apply_decision(
         &mut self,
-        trigger: TerminationEvent,
+        trigger: TerminationEvent<F::Change>,
         decision: TerminationDecision<C::Reason>,
     ) {
         let plan = match self.check_decision(trigger, decision) {
@@ -412,9 +433,9 @@ where
     /// [policy contract](self#contract) and the current state.
     fn check_decision(
         &self,
-        trigger: TerminationEvent,
+        trigger: TerminationEvent<F::Change>,
         decision: TerminationDecision<C::Reason>,
-    ) -> Result<DecisionPlan<C::Reason>, PolicyViolationError> {
+    ) -> Checked<DecisionPlan<C::Reason, F::Change>, F::Change> {
         let TerminationDecision {
             action,
             stop,
@@ -438,8 +459,8 @@ where
     fn check_action(
         &self,
         action: BoundaryAction<C::Reason>,
-        trigger: TerminationEvent,
-    ) -> Result<Plan<C::Reason>, PolicyViolationError> {
+        trigger: TerminationEvent<F::Change>,
+    ) -> Checked<Plan<C::Reason, F::Change>, F::Change> {
         let ended = self.is_destroyed() || self.is_result_committed();
         match action {
             BoundaryAction::Keep => Ok(Plan::Nothing),
@@ -453,8 +474,8 @@ where
                         policy_violation::DestroysWithoutBasisSnafu { trigger }
                     );
                     ensure!(
-                        self.local_cancellation() || !self.reliable_prefix_pending(),
-                        policy_violation::DestroysReliablePrefixSnafu { trigger }
+                        self.local_cancellation() || !self.owed_prefix_pending(),
+                        policy_violation::DestroysOwedPrefixSnafu { trigger }
                     );
                 }
                 Ok(Plan::Destroy(Applied {
@@ -477,7 +498,7 @@ where
                     self.has_basis(),
                     policy_violation::RestrictsWithoutBasisSnafu { trigger }
                 );
-                self.check_reliable_prefix(acceptance, delivery, trigger)?;
+                self.check_owed_prefix(acceptance, delivery, trigger)?;
                 let reason = SharedTerminationReason::new(reason);
                 let fixed = |limit| Boundary::Fixed {
                     limit,
@@ -499,7 +520,7 @@ where
         &self,
         limit_kind: Limit,
         update: BoundaryUpdate,
-    ) -> Result<Option<VarInt>, PolicyViolationError> {
+    ) -> Checked<Option<VarInt>, F::Change> {
         let BoundaryUpdate::Fix(limit) = update else {
             return Ok(None);
         };
@@ -544,49 +565,52 @@ where
         self.reset.is_some() || self.local_cancellation()
     }
 
-    fn check_reliable_prefix(
+    /// Checks that new limits leave alone the prefix the peer still owes,
+    /// unless a local cancellation gave it up.
+    fn check_owed_prefix(
         &self,
         acceptance: Option<VarInt>,
         delivery: Option<VarInt>,
-        trigger: TerminationEvent,
-    ) -> Result<(), PolicyViolationError> {
+        trigger: TerminationEvent<F::Change>,
+    ) -> Checked<(), F::Change> {
         let Some(reset) = self.reset else {
             return Ok(());
         };
-        if self.local_cancellation() || reset.reliable_size == VarInt::ZERO {
+        let owed_end = reset.owed_end();
+        if self.local_cancellation() || owed_end == VarInt::ZERO {
             return Ok(());
         }
-        let reliable_size = reset.reliable_size;
         if let Some(limit) = delivery {
             ensure!(
-                limit >= reliable_size || self.parts.delivered_end() >= reliable_size,
-                policy_violation::DeliveryInsideReliablePrefixSnafu {
+                limit >= owed_end || self.parts.delivered_end() >= owed_end,
+                policy_violation::DeliveryInsideOwedPrefixSnafu {
                     limit,
                     trigger,
-                    reliable_size,
+                    owed_end,
                 }
             );
         }
         if let Some(limit) = acceptance {
             ensure!(
-                limit >= reliable_size || self.received.covers(limit..reliable_size),
-                policy_violation::AcceptanceInsideReliablePrefixSnafu {
+                limit >= owed_end || self.received.covers(limit..owed_end),
+                policy_violation::AcceptanceInsideOwedPrefixSnafu {
                     limit,
                     trigger,
-                    reliable_size,
+                    owed_end,
                 }
             );
         }
         Ok(())
     }
 
-    /// Whether a local cancellation allows giving up a reliable prefix.
+    /// Whether a local cancellation allows giving up the prefix the peer
+    /// still owes.
     fn local_cancellation(&self) -> bool {
         self.stop_sent() || self.is_reader_dropped()
     }
 
-    fn reliable_prefix_pending(&self) -> bool {
+    fn owed_prefix_pending(&self) -> bool {
         self.reset
-            .is_some_and(|reset| self.parts.delivered_end() < reset.reliable_size)
+            .is_some_and(|reset| self.parts.delivered_end() < reset.owed_end())
     }
 }

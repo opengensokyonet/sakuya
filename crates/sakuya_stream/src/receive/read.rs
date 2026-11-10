@@ -17,7 +17,8 @@
 //! 7. the contiguous data that can be delivered now, without waiting to fill
 //!    the target;
 //! 8. end of stream or a terminal error, judged from the final size, the
-//!    local limits and the reset facts;
+//!    local limits and the reset facts: a reset is returned once delivery has
+//!    reached the end of the prefix the peer still owes;
 //! 9. otherwise, [`ReadOutcome::Wait`].
 //!
 //! A call that delivers data never also reports the end; the next call does.
@@ -30,6 +31,7 @@
 use super::{
     Applied, Boundary, BufferPhase, Committed, Destruction, Reading, StreamReceiver,
     flow_control::ReceiveFlowControlPolicy, flow_control::ReceiveFlowEvent,
+    remote_reset::RemoteReset, remote_reset::RemoteResetFacts,
     termination::ReceiveTerminationPolicy, termination::ResetPresentation,
     termination::TerminationEvent,
 };
@@ -39,8 +41,6 @@ use bytes::BufMut;
 use core::fmt;
 use core::num::NonZeroUsize;
 use core::ops::Deref;
-use sakuya_wire::v1::application_error::ApplicationErrorCode;
-use sakuya_wire::var_int::VarInt;
 use snafu::Snafu;
 use std::sync::Arc;
 
@@ -55,19 +55,6 @@ pub enum ReadOutcome<T> {
     End,
     /// Nothing can be delivered yet; data that is still expected may arrive.
     Wait,
-}
-
-/// The reset facts of a stream: what the peer's `RESET_STREAM` or
-/// `RESET_STREAM_AT` frames stated.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct RemoteReset {
-    /// The application protocol error code.
-    pub code: ApplicationErrorCode,
-    /// The final size of the stream.
-    pub final_size: VarInt,
-    /// The effective reliable size: the smallest one received, zero for
-    /// `RESET_STREAM`.
-    pub reliable_size: VarInt,
 }
 
 /// A shared handle to a reason of the receive termination policy.
@@ -114,11 +101,12 @@ impl<R: Eq> Eq for SharedTerminationReason<R> {}
 
 /// A terminal read error.
 ///
-/// `R` is the receive termination policy's reason type. Every variant can be
-/// reported repeatedly: a local reason is reported as a
-/// [`SharedTerminationReason`], cloned for each report.
+/// `R` is the receive termination policy's reason type and `F` the type of
+/// the reset facts of the stream. Every variant can be reported repeatedly: a
+/// local reason is reported as a [`SharedTerminationReason`], cloned for each
+/// report.
 #[derive(Debug, PartialEq, Eq, Snafu)]
-pub enum ReadError<R> {
+pub enum ReadError<R, F: RemoteResetFacts = RemoteReset> {
     /// The stream reader was dropped; the receive direction takes no more
     /// reads.
     #[snafu(display("the stream reader was dropped"))]
@@ -135,10 +123,10 @@ pub enum ReadError<R> {
     /// to the application: the receive termination policy chose to report the
     /// reset although nothing is missing. Complete means the stream's bytes,
     /// not that the application's object or business succeeded.
-    #[snafu(display("stream reset by the peer with error code {}", reset.code))]
+    #[snafu(display("stream reset by the peer with error code {}", reset.code()))]
     Reset {
         /// The reset facts.
-        reset: RemoteReset,
+        reset: F,
         /// Whether all of `[0, final_size)` was delivered.
         complete: bool,
     },
@@ -149,9 +137,9 @@ pub enum ReadError<R> {
         /// The receive termination policy's reason.
         reason: SharedTerminationReason<R>,
         /// The event during which the destruction took effect.
-        trigger: TerminationEvent,
+        trigger: TerminationEvent<F::Change>,
         /// The reset facts, if the peer reset the stream too.
-        remote: Option<RemoteReset>,
+        remote: Option<F>,
     },
     /// Delivery reached the fixed delivery limit before the whole stream was
     /// delivered.
@@ -160,9 +148,9 @@ pub enum ReadError<R> {
         /// The receive termination policy's reason.
         reason: SharedTerminationReason<R>,
         /// The event during which the limit took effect.
-        trigger: TerminationEvent,
+        trigger: TerminationEvent<F::Change>,
         /// The reset facts, if the peer reset the stream too.
-        remote: Option<RemoteReset>,
+        remote: Option<F>,
     },
     /// The gap at the read position lies beyond the fixed acceptance limit
     /// and can no longer be filled.
@@ -171,13 +159,13 @@ pub enum ReadError<R> {
         /// The receive termination policy's reason.
         reason: SharedTerminationReason<R>,
         /// The event during which the limit took effect.
-        trigger: TerminationEvent,
+        trigger: TerminationEvent<F::Change>,
         /// The reset facts, if the peer reset the stream too.
-        remote: Option<RemoteReset>,
+        remote: Option<F>,
     },
 }
 
-impl<R> Clone for ReadError<R> {
+impl<R, F: RemoteResetFacts> Clone for ReadError<R, F> {
     fn clone(&self) -> Self {
         match self {
             Self::ReaderDropped => Self::ReaderDropped,
@@ -219,8 +207,8 @@ impl<R> Clone for ReadError<R> {
     }
 }
 
-impl<R> ReadError<R> {
-    fn buffer_destroyed(applied: Applied<R>, remote: Option<RemoteReset>) -> Self {
+impl<R, F: RemoteResetFacts> ReadError<R, F> {
+    fn buffer_destroyed(applied: Applied<R, F::Change>, remote: Option<F>) -> Self {
         Self::BufferDestroyed {
             reason: applied.reason,
             trigger: applied.trigger,
@@ -228,7 +216,7 @@ impl<R> ReadError<R> {
         }
     }
 
-    fn delivery_limit_reached(applied: Applied<R>, remote: Option<RemoteReset>) -> Self {
+    fn delivery_limit_reached(applied: Applied<R, F::Change>, remote: Option<F>) -> Self {
         Self::DeliveryLimitReached {
             reason: applied.reason,
             trigger: applied.trigger,
@@ -236,7 +224,7 @@ impl<R> ReadError<R> {
         }
     }
 
-    fn acceptance_limit_reached(applied: Applied<R>, remote: Option<RemoteReset>) -> Self {
+    fn acceptance_limit_reached(applied: Applied<R, F::Change>, remote: Option<F>) -> Self {
         Self::AcceptanceLimitReached {
             reason: applied.reason,
             trigger: applied.trigger,
@@ -264,9 +252,10 @@ impl Settled {
     }
 }
 
-impl<C> StreamReceiver<C>
+impl<C, F> StreamReceiver<C, F>
 where
-    C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy,
+    C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy<F>,
+    F: RemoteResetFacts,
 {
     /// Reads the next block of contiguous data.
     ///
@@ -276,7 +265,7 @@ where
     /// [`ReadError::ReaderDropped`] after
     /// [`reader_dropped`](Self::reader_dropped); see the [module
     /// documentation](self) for priorities.
-    pub fn read_chunk(&mut self) -> Result<ReadOutcome<C::Chunk>, ReadError<C::Reason>> {
+    pub fn read_chunk(&mut self) -> Result<ReadOutcome<C::Chunk>, ReadError<C::Reason, F>> {
         if let Some(settled) = self.settled_read() {
             return settled.map(Settled::outcome);
         }
@@ -298,7 +287,7 @@ where
     pub fn read_into<T: BufMut + ?Sized>(
         &mut self,
         target: &mut T,
-    ) -> Result<ReadOutcome<NonZeroUsize>, ReadError<C::Reason>> {
+    ) -> Result<ReadOutcome<NonZeroUsize>, ReadError<C::Reason, F>> {
         if let Some(settled) = self.settled_read() {
             return settled.map(Settled::outcome);
         }
@@ -316,7 +305,7 @@ where
     }
 
     /// The result of the first five priorities.
-    fn settled_read(&mut self) -> Option<Result<Settled, ReadError<C::Reason>>> {
+    fn settled_read(&mut self) -> Option<Result<Settled, ReadError<C::Reason, F>>> {
         if self.is_reader_dropped() {
             return Some(Err(ReadError::ReaderDropped));
         }
@@ -348,7 +337,7 @@ where
     }
 
     /// Judges end of stream and gaps once no data can be delivered.
-    fn end_or_wait<T>(&mut self) -> Result<ReadOutcome<T>, ReadError<C::Reason>> {
+    fn end_or_wait<T>(&mut self) -> Result<ReadOutcome<T>, ReadError<C::Reason, F>> {
         let delivered = self.parts.delivered_end();
         let remote = self.remote_reset();
         if self.parts.final_size() == Some(delivered) {
@@ -374,7 +363,7 @@ where
             return Err(self.commit_error(error));
         }
         if let Some(reset) = remote
-            && delivered >= reset.reliable_size
+            && delivered >= reset.owed_end()
         {
             let error = ReadError::Reset {
                 reset,
@@ -394,7 +383,7 @@ where
 
     /// Commits a terminal error and destroys the receive buffer in the same
     /// operation.
-    fn commit_error(&mut self, error: ReadError<C::Reason>) -> ReadError<C::Reason> {
+    fn commit_error(&mut self, error: ReadError<C::Reason, F>) -> ReadError<C::Reason, F> {
         self.reading = Reading::Committed(Committed::Error(error.clone()));
         self.destroy_buffer(Destruction::Forced);
         self.notify_termination(TerminationEvent::ReadResultCommitted);

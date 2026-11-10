@@ -5,12 +5,11 @@ use crate::connection::ConnectionClosedError;
 use crate::connection_receive_flow::RecordUsageError;
 use crate::receive::stop::StopError;
 use crate::receive::violation::{
-    FinalSizeBelowReceivedError, OnResetStreamAtError, OnResetStreamError, OnStreamFrameError,
+    FinalSizeBelowReceivedError, OnRemoteResetError, OnResetStreamError, OnStreamFrameError,
     StreamLimitExceededError,
 };
-use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError};
+use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
 use core::fmt::Debug;
-use sakuya_wire::reset_stream_at::ReliableSizeError;
 
 /// Everything about a receiver and its connection that an observer can see
 /// without reading.
@@ -89,16 +88,6 @@ fn reset_violation<T: ReceiveTerminationPolicy>(
 ) -> OnResetStreamError {
     violation(receiver, connection, |receiver, connection| {
         receiver.on_reset_stream(frame, connection)
-    })
-}
-
-fn reset_at_violation<T: ReceiveTerminationPolicy>(
-    receiver: &mut Receiver<T>,
-    connection: &mut ConnectionReceiveFlowController,
-    frame: ResetStreamAtFrame,
-) -> OnResetStreamAtError {
-    violation(receiver, connection, |receiver, connection| {
-        receiver.on_reset_stream_at(frame, connection)
     })
 }
 
@@ -301,23 +290,78 @@ mod reset_stream {
         );
     }
 
+    /// A later `RESET_STREAM` with another error code is no violation: the
+    /// first code is kept and nothing else happens.
     #[test]
-    fn reset_code_changed() {
+    fn a_later_error_code_is_ignored() {
         let (mut receiver, mut connection) = new_receiver(keep_all());
         receiver
-            .on_reset_stream_at(reset_at(1, 100, 50), &mut connection)
+            .on_stream_frame(stream(0, 40, false), &mut connection)
             .unwrap();
-        let error = reset_violation(&mut receiver, &mut connection, reset(2, 100));
+        receiver
+            .on_reset_stream(reset(1, 100), &mut connection)
+            .unwrap();
+        let before = snapshot(&receiver, &connection);
+        assert_eq!(
+            receiver.on_reset_stream(reset(2, 100), &mut connection),
+            Ok(())
+        );
+        // Only the flow control policy observes that a frame came in.
+        let mut after = snapshot(&receiver, &connection);
+        assert_eq!(after.flow_events.pop(), Some(ReceiveFlowEvent::Received));
+        assert_eq!(after, before);
+        assert_eq!(
+            receiver.remote_reset(),
+            Some(RemoteReset {
+                code: c(1),
+                final_size: v(100),
+            })
+        );
+        let (read, end) = read_all(&mut receiver);
+        assert_eq!(read, data(0, 40));
+        assert_eq!(end, reset_error(1, 100, false));
+        // The connection is not closing: frames are still taken.
+        receiver
+            .on_stream_frame(stream(40, 60, false), &mut connection)
+            .unwrap();
+        assert_eq!(connection.used(), v(100));
+    }
+
+    /// A later reset with another error code and another final size still
+    /// violates the final size.
+    #[test]
+    fn a_later_error_code_does_not_excuse_the_final_size() {
+        let (mut receiver, mut connection) = new_receiver(keep_all());
+        receiver
+            .on_reset_stream(reset(1, 100), &mut connection)
+            .unwrap();
+        let error = reset_violation(&mut receiver, &mut connection, reset(2, 200));
         assert_eq!(
             error,
-            OnResetStreamError::ResetCodeChanged {
-                source: ResetCodeChangeError::check(c(1), c(2)).unwrap_err(),
+            OnResetStreamError::FinalSizeChanged {
+                source: FinalSizeChangeError::check(v(100), v(200)).unwrap_err(),
             }
         );
+    }
+
+    /// The entry point every kind of reset shares reports the same
+    /// violations, wrapped.
+    #[test]
+    fn the_shared_entry_point_wraps_the_violation() {
+        let (mut receiver, mut connection) = receiver_with(keep_all(), 1000, 1 << 20);
+        let error = violation(&mut receiver, &mut connection, |receiver, connection| {
+            receiver.on_remote_reset(reset(1, 1001), connection)
+        });
         assert_eq!(
-            error.transport_error_code(),
-            TransportErrorCode::STREAM_STATE_ERROR
+            error,
+            OnRemoteResetError::Violation {
+                source: OnResetStreamError::StreamLimitExceeded {
+                    source: StreamLimitExceededError::check(v(1001), v(1000)).unwrap_err(),
+                },
+            }
         );
+        receiver.connection_closed(close_reason());
+        assert_eq!(receiver.read_chunk(), Err(closed()));
     }
 
     #[test]
@@ -370,131 +414,6 @@ mod reset_stream {
         receiver
             .on_reset_stream(reset(1, 100), &mut connection)
             .unwrap();
-    }
-}
-
-mod reset_stream_at {
-    use super::*;
-
-    #[test]
-    fn reliable_size_exceeds_final_size() {
-        let (mut receiver, mut connection) = new_receiver(keep_all());
-        let error = reset_at_violation(&mut receiver, &mut connection, reset_at(1, 100, 101));
-        assert_eq!(
-            error,
-            OnResetStreamAtError::ReliableSizeExceedsFinalSize {
-                source: ReliableSizeError::check(v(100), v(101)).unwrap_err(),
-            }
-        );
-        assert_eq!(
-            error.transport_error_code(),
-            TransportErrorCode::FRAME_ENCODING_ERROR
-        );
-    }
-
-    #[test]
-    fn final_size_changed() {
-        let (mut receiver, mut connection) = new_receiver(keep_all());
-        receiver
-            .on_stream_frame(stream(0, 100, true), &mut connection)
-            .unwrap();
-        let error = reset_at_violation(&mut receiver, &mut connection, reset_at(1, 200, 0));
-        assert_eq!(
-            error,
-            OnResetStreamAtError::FinalSizeChanged {
-                source: FinalSizeChangeError::check(v(100), v(200)).unwrap_err(),
-            }
-        );
-        assert_eq!(
-            error.transport_error_code(),
-            TransportErrorCode::FINAL_SIZE_ERROR
-        );
-    }
-
-    #[test]
-    fn final_size_below_received() {
-        let (mut receiver, mut connection) = new_receiver(keep_all());
-        receiver
-            .on_stream_frame(stream(0, 100, false), &mut connection)
-            .unwrap();
-        let error = reset_at_violation(&mut receiver, &mut connection, reset_at(1, 50, 10));
-        assert_eq!(
-            error,
-            OnResetStreamAtError::FinalSizeBelowReceived {
-                source: FinalSizeBelowReceivedError::check(v(50), v(100)).unwrap_err(),
-            }
-        );
-        assert_eq!(
-            error.transport_error_code(),
-            TransportErrorCode::FINAL_SIZE_ERROR
-        );
-    }
-
-    #[test]
-    fn reset_code_changed() {
-        let (mut receiver, mut connection) = new_receiver(keep_all());
-        receiver
-            .on_reset_stream(reset(1, 100), &mut connection)
-            .unwrap();
-        let error = reset_at_violation(&mut receiver, &mut connection, reset_at(2, 100, 10));
-        assert_eq!(
-            error,
-            OnResetStreamAtError::ResetCodeChanged {
-                source: ResetCodeChangeError::check(c(1), c(2)).unwrap_err(),
-            }
-        );
-        assert_eq!(
-            error.transport_error_code(),
-            TransportErrorCode::STREAM_STATE_ERROR
-        );
-    }
-
-    #[test]
-    fn stream_limit_exceeded() {
-        let (mut receiver, mut connection) = receiver_with(keep_all(), 1000, 1 << 20);
-        let error = reset_at_violation(&mut receiver, &mut connection, reset_at(1, 1001, 10));
-        assert_eq!(
-            error,
-            OnResetStreamAtError::StreamLimitExceeded {
-                source: StreamLimitExceededError::check(v(1001), v(1000)).unwrap_err(),
-            }
-        );
-        assert_eq!(
-            error.transport_error_code(),
-            TransportErrorCode::FLOW_CONTROL_ERROR
-        );
-    }
-
-    #[test]
-    fn connection_limit_exceeded() {
-        let (mut receiver, mut connection) = receiver_with(keep_all(), 1000, 100);
-        let error = reset_at_violation(&mut receiver, &mut connection, reset_at(1, 101, 10));
-        assert_eq!(
-            error,
-            OnResetStreamAtError::ConnectionLimitExceeded {
-                source: RecordUsageError {
-                    used: VarInt::ZERO,
-                    increase: v(101),
-                    limit: v(100),
-                },
-            }
-        );
-        assert_eq!(
-            error.transport_error_code(),
-            TransportErrorCode::FLOW_CONTROL_ERROR
-        );
-    }
-
-    /// The reliable size is checked first: a frame that breaks it and a
-    /// rule of reset frames reports the encoding error.
-    #[test]
-    fn reliable_size_is_checked_first() {
-        let (mut receiver, mut connection) = receiver_with(keep_all(), 1000, 1 << 20);
-        let error = reset_at_violation(&mut receiver, &mut connection, reset_at(1, 2000, 3000));
-        assert!(matches!(
-            error,
-            OnResetStreamAtError::ReliableSizeExceedsFinalSize { .. }
-        ));
     }
 }
 
@@ -588,10 +507,6 @@ mod awaiting_the_close {
             receiver.on_reset_stream(reset(1, 300), &mut connection),
             Ok(())
         );
-        assert_eq!(
-            receiver.on_reset_stream_at(reset_at(1, 50, 60), &mut connection),
-            Ok(())
-        );
         receiver.on_stream_data_blocked(v(77));
         assert_eq!(snapshot(&receiver, &connection), before);
     }
@@ -667,10 +582,6 @@ mod after_the_close {
         );
         assert_eq!(
             receiver.on_reset_stream(reset(1, 300), &mut connection),
-            Ok(())
-        );
-        assert_eq!(
-            receiver.on_reset_stream_at(reset_at(1, 50, 60), &mut connection),
             Ok(())
         );
         receiver.on_stream_data_blocked(v(77));

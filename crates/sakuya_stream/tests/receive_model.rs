@@ -7,6 +7,11 @@
 //! checks, the read priorities, the local limits, the STOP request table and
 //! the released progress. A scripted termination policy takes only legal
 //! decisions, so that any panic is a defect of the receiver.
+//!
+//! The receiver under test is the one of RFC 9000 resets. With the
+//! `reset_stream_at` feature it is the one that also takes `RESET_STREAM_AT`,
+//! and the model follows draft-ietf-quic-reliable-stream-reset-11 for it;
+//! [`dialect`] holds what differs between the two.
 
 use bytes::{BufMut, Bytes, BytesMut};
 use proptest::prelude::*;
@@ -15,28 +20,188 @@ use sakuya_stream::connection_receive_flow::{ConnectionReceiveFlowController, Re
 use sakuya_stream::receive::flow_control::{
     AdvertisementIntent, ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView,
 };
-use sakuya_stream::receive::read::{ReadError, ReadOutcome, RemoteReset};
+use sakuya_stream::receive::read::{ReadError, ReadOutcome};
+use sakuya_stream::receive::remote_reset::RemoteResetFacts;
 use sakuya_stream::receive::stop::{StopError, StopNotNeededReason};
 use sakuya_stream::receive::termination::{
     BoundaryAction, BoundaryUpdate, ReceiveTerminationPolicy, ResetPresentation,
     TerminationDecision, TerminationEvent, TerminationView,
 };
 use sakuya_stream::receive::violation::{
-    FinalSizeBelowReceivedError, OnResetStreamAtError, OnResetStreamError, OnStreamFrameError,
-    StreamLimitExceededError,
+    FinalSizeBelowReceivedError, OnResetStreamError, OnStreamFrameError, StreamLimitExceededError,
 };
-use sakuya_stream::receive::{
-    BoundaryMode, ResetStreamAtFrame, ResetStreamFrame, StreamFrame, StreamReceiver,
-};
+use sakuya_stream::receive::{BoundaryMode, ResetStreamFrame, StreamFrame, StreamReceiver};
 use sakuya_stream::receive_buffer::fragmented::FragmentedStreamReceiveBuffer;
 use sakuya_stream::receive_buffer::{StreamDataInput, StreamReceiveBuffer};
-use sakuya_stream::stream_end::{BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError};
-use sakuya_wire::reset_stream_at::ReliableSizeError;
+use sakuya_stream::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
 use sakuya_wire::v1::transport_error::TransportErrorCode;
 use sakuya_wire::var_int::VarInt;
 
 const STREAMS: usize = 2;
+
+/// The reset facts of the receivers under test.
+type Facts = dialect::Facts;
+
+/// The events their termination policy observes.
+type Event = TerminationEvent<<Facts as RemoteResetFacts>::Change>;
+
+/// The receiver under test.
+type Receiver = StreamReceiver<Parts, Facts>;
+
+/// The receiver of RFC 9000 resets: a reset abandons all data, and a later
+/// reset changes nothing.
+#[cfg(not(feature = "reset_stream_at"))]
+mod dialect {
+    use super::{Event, Receiver, Violation};
+    use sakuya_stream::connection_receive_flow::ConnectionReceiveFlowController;
+    use sakuya_stream::receive::ResetStreamFrame;
+    use sakuya_stream::receive::remote_reset::RemoteReset;
+
+    pub type Facts = RemoteReset;
+
+    /// Whether the peer also sends resets that keep a prefix.
+    pub const PARTIAL_RESETS: bool = false;
+
+    /// No reset violates a rule beyond those of RFC 9000.
+    #[derive(Clone, Copy, Debug)]
+    pub enum Extra {}
+
+    pub fn facts(code: u32, final_size: u64, owed: u64) -> Facts {
+        assert_eq!(owed, 0, "a reset abandons all data");
+        RemoteReset {
+            code: super::code(code),
+            final_size: super::v(final_size),
+        }
+    }
+
+    /// A reset never states an owed prefix, so none exceeds the final size.
+    pub fn check_owed(_final_size: u64, _owed: u64) -> Result<(), Extra> {
+        Ok(())
+    }
+
+    /// A later reset with another error code is ignored.
+    pub fn check_code(_known: u32, _stated: u32) -> Result<(), Extra> {
+        Ok(())
+    }
+
+    /// The event of a later reset that lowers the owed prefix; there is none.
+    pub fn lowered() -> Event {
+        unreachable!("no reset lowers what the peer owes")
+    }
+
+    pub fn on_reset_stream(
+        receiver: &mut Receiver,
+        frame: ResetStreamFrame,
+        connection: &mut ConnectionReceiveFlowController,
+        expected: Result<(), Violation>,
+    ) {
+        let actual = receiver.on_reset_stream(frame, connection);
+        assert_eq!(actual, expected.map_err(Violation::on_reset_stream));
+    }
+
+    pub fn on_partial_reset(
+        _receiver: &mut Receiver,
+        _frame: ResetStreamFrame,
+        _owed: u64,
+        _connection: &mut ConnectionReceiveFlowController,
+        _expected: Result<(), Violation>,
+    ) {
+        unreachable!("no reset keeps a prefix")
+    }
+}
+
+/// The receiver that also takes `RESET_STREAM_AT`: a reset can keep a
+/// reliable prefix, later resets can lower it, and resets must agree on the
+/// error code.
+#[cfg(feature = "reset_stream_at")]
+mod dialect {
+    use super::{Event, Receiver, Violation};
+    use sakuya_stream::connection_receive_flow::ConnectionReceiveFlowController;
+    use sakuya_stream::receive::ResetStreamFrame;
+    use sakuya_stream::receive::termination::TerminationEvent;
+    use sakuya_stream::reset_stream_at::{
+        OnResetStreamAtError, OnResetStreamError as ResetAtOnResetStreamError, RemoteResetAt,
+        RemoteResetAtChange, ResetStreamAtFrame,
+    };
+    use sakuya_stream::stream_end::ResetCodeChangeError;
+    use sakuya_wire::reset_stream_at::ReliableSizeError;
+
+    pub type Facts = RemoteResetAt;
+
+    /// Whether the peer also sends resets that keep a prefix.
+    pub const PARTIAL_RESETS: bool = true;
+
+    /// The violations the extension adds to those of RFC 9000.
+    #[derive(Clone, Copy, Debug)]
+    pub enum Extra {
+        ResetCodeChanged(ResetCodeChangeError),
+        ReliableSizeExceedsFinalSize(ReliableSizeError),
+    }
+
+    pub fn facts(code: u32, final_size: u64, owed: u64) -> Facts {
+        RemoteResetAt::new(super::code(code), super::v(final_size), super::v(owed)).unwrap()
+    }
+
+    pub fn check_owed(final_size: u64, owed: u64) -> Result<(), Extra> {
+        ReliableSizeError::check(super::v(final_size), super::v(owed))
+            .map_err(Extra::ReliableSizeExceedsFinalSize)
+    }
+
+    pub fn check_code(known: u32, stated: u32) -> Result<(), Extra> {
+        ResetCodeChangeError::check(super::code(known), super::code(stated))
+            .map_err(Extra::ResetCodeChanged)
+    }
+
+    /// The event of a later reset that lowers the reliable prefix.
+    pub fn lowered() -> Event {
+        TerminationEvent::ResetChanged(RemoteResetAtChange::ReliablePrefixLowered)
+    }
+
+    fn shared(violation: Violation) -> ResetAtOnResetStreamError {
+        match violation {
+            Violation::Extra(Extra::ResetCodeChanged(source)) => {
+                ResetAtOnResetStreamError::ResetCodeChanged { source }
+            }
+            Violation::Extra(Extra::ReliableSizeExceedsFinalSize(_)) => {
+                panic!("a RESET_STREAM frame cannot commit {violation:?}")
+            }
+            other => other.on_reset_stream().into(),
+        }
+    }
+
+    pub fn on_reset_stream(
+        receiver: &mut Receiver,
+        frame: ResetStreamFrame,
+        connection: &mut ConnectionReceiveFlowController,
+        expected: Result<(), Violation>,
+    ) {
+        let actual = receiver.on_reset_stream(frame, connection);
+        assert_eq!(actual, expected.map_err(shared));
+    }
+
+    pub fn on_partial_reset(
+        receiver: &mut Receiver,
+        frame: ResetStreamFrame,
+        owed: u64,
+        connection: &mut ConnectionReceiveFlowController,
+        expected: Result<(), Violation>,
+    ) {
+        let frame = ResetStreamAtFrame {
+            code: frame.code,
+            final_size: frame.final_size,
+            reliable_size: super::v(owed),
+        };
+        let actual = receiver.on_reset_stream_at(frame, connection);
+        let expected = expected.map_err(|violation| match violation {
+            Violation::Extra(Extra::ReliableSizeExceedsFinalSize(source)) => {
+                OnResetStreamAtError::ReliableSizeExceedsFinalSize { source }
+            }
+            other => shared(other).into(),
+        });
+        assert_eq!(actual, expected);
+    }
+}
 
 fn v(value: u64) -> VarInt {
     VarInt::new(value).unwrap()
@@ -78,10 +243,11 @@ struct Script {
 
 /// The facts [`Script::decide`] reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Facts {
+struct PolicyFacts {
     final_size: Option<u64>,
     delivered: u64,
-    reliable: Option<u64>,
+    /// The end of the prefix the peer still owes, once it reset the stream.
+    owed: Option<u64>,
     acceptance: Option<u64>,
     delivery: Option<u64>,
     destroyed: bool,
@@ -113,7 +279,7 @@ struct Choice {
 }
 
 impl Script {
-    fn decide(&self, event: TerminationEvent, facts: &Facts) -> Choice {
+    fn decide(&self, event: Event, facts: &PolicyFacts) -> Choice {
         let mut choice = Choice {
             action: Action::Keep,
             stop: None,
@@ -131,15 +297,15 @@ impl Script {
                     choice.action = restrict(acceptance, delivery, 1, facts);
                 }
             }
-            TerminationEvent::RemoteReset | TerminationEvent::ReliablePrefixLowered => {
+            TerminationEvent::RemoteReset | TerminationEvent::ResetChanged(_) => {
                 match self.on_reset {
                     OnReset::Nothing => {}
                     OnReset::Destroy => {
                         let cancelled = facts.stop_sent || facts.reader_dropped;
-                        let reliable = facts.reliable.unwrap_or(0);
+                        let owed = facts.owed.unwrap_or(0);
                         if !facts.destroyed
                             && !facts.failed
-                            && (cancelled || facts.delivered >= reliable || facts.committed)
+                            && (cancelled || facts.delivered >= owed || facts.committed)
                         {
                             choice.action = Action::Destroy { reason: 3 };
                         }
@@ -158,13 +324,18 @@ impl Script {
     }
 }
 
-fn restrict(acceptance: Option<u64>, delivery: Option<u64>, reason: u32, facts: &Facts) -> Action {
+fn restrict(
+    acceptance: Option<u64>,
+    delivery: Option<u64>,
+    reason: u32,
+    facts: &PolicyFacts,
+) -> Action {
     if facts.destroyed || facts.committed || facts.failed {
         return Action::Keep;
     }
     let cancelled = facts.stop_sent || facts.reader_dropped;
-    let floor = match facts.reliable {
-        Some(reliable) if !cancelled => reliable,
+    let floor = match facts.owed {
+        Some(owed) if !cancelled => owed,
         _ => 0,
     };
     let legal = |wanted: Option<u64>, current: Option<u64>| {
@@ -243,18 +414,18 @@ fn fixed(mode: BoundaryMode) -> Option<u64> {
     }
 }
 
-impl ReceiveTerminationPolicy for Parts {
+impl ReceiveTerminationPolicy<Facts> for Parts {
     type Reason = u32;
 
     fn on_termination_event(
         &mut self,
-        event: TerminationEvent,
-        view: &TerminationView,
+        event: Event,
+        view: &TerminationView<Facts>,
     ) -> TerminationDecision<u32> {
-        let facts = Facts {
+        let facts = PolicyFacts {
             final_size: view.final_size.map(VarInt::get),
             delivered: view.delivered_end.get(),
-            reliable: view.reset.map(|reset| reset.reliable_size.get()),
+            owed: view.reset.map(|reset| reset.owed_end().get()),
             acceptance: fixed(view.acceptance),
             delivery: fixed(view.delivery),
             destroyed: view.destroyed,
@@ -306,11 +477,12 @@ enum Op {
         code: u32,
         final_size: Option<u64>,
     },
-    ResetAt {
+    /// A reset that keeps the prefix `[0, owed)`.
+    PartialReset {
         stream: usize,
         code: u32,
         final_size: Option<u64>,
-        reliable: u64,
+        owed: u64,
     },
     ReadChunk {
         stream: usize,
@@ -357,7 +529,11 @@ fn op() -> impl Strategy<Value = Op> {
         1 => (stream.clone(), 1u32..3, prop::option::weighted(0.1, 0u64..260))
             .prop_map(|(stream, code, final_size)| Op::Reset { stream, code, final_size }),
         2 => (stream.clone(), 1u32..3, prop::option::weighted(0.1, 0u64..260), 0u64..240).prop_map(
-            |(stream, code, final_size, reliable)| Op::ResetAt { stream, code, final_size, reliable }
+            |(stream, code, final_size, owed)| if dialect::PARTIAL_RESETS {
+                Op::PartialReset { stream, code, final_size, owed }
+            } else {
+                Op::Reset { stream, code, final_size }
+            }
         ),
         6 => stream.clone().prop_map(|stream| Op::ReadChunk { stream }),
         6 => (stream.clone(), 0usize..40).prop_map(|(stream, room)| Op::ReadInto { stream, room }),
@@ -391,7 +567,7 @@ impl Stop {
 #[derive(Clone, Debug, PartialEq)]
 enum Phase {
     Live,
-    Destroyed(Option<(u32, TerminationEvent)>),
+    Destroyed(Option<(u32, Event)>),
 }
 
 /// How far the connection's end has reached the stream.
@@ -412,8 +588,8 @@ enum Violation {
     FinalSizeBelowReceived(FinalSizeBelowReceivedError),
     StreamLimitExceeded(StreamLimitExceededError),
     ConnectionLimitExceeded(RecordUsageError),
-    ResetCodeChanged(ResetCodeChangeError),
-    ReliableSizeExceedsFinalSize(ReliableSizeError),
+    /// A violation of a rule that only some kinds of reset have.
+    Extra(dialect::Extra),
 }
 
 impl Violation {
@@ -428,9 +604,7 @@ impl Violation {
             Self::ConnectionLimitExceeded(source) => {
                 OnStreamFrameError::ConnectionLimitExceeded { source }
             }
-            Self::ResetCodeChanged(_) | Self::ReliableSizeExceedsFinalSize(_) => {
-                panic!("a STREAM frame cannot commit {self:?}")
-            }
+            Self::Extra(_) => panic!("a STREAM frame cannot commit {self:?}"),
         }
     }
 
@@ -440,24 +614,13 @@ impl Violation {
             Self::FinalSizeBelowReceived(source) => {
                 OnResetStreamError::FinalSizeBelowReceived { source }
             }
-            Self::ResetCodeChanged(source) => OnResetStreamError::ResetCodeChanged { source },
             Self::StreamLimitExceeded(source) => OnResetStreamError::StreamLimitExceeded { source },
             Self::ConnectionLimitExceeded(source) => {
                 OnResetStreamError::ConnectionLimitExceeded { source }
             }
-            Self::BeyondFinalSize(_) | Self::ReliableSizeExceedsFinalSize(_) => {
+            Self::BeyondFinalSize(_) | Self::Extra(_) => {
                 panic!("a RESET_STREAM frame cannot commit {self:?}")
             }
-        }
-    }
-
-    fn on_reset_stream_at(self) -> OnResetStreamAtError {
-        match self {
-            Self::ReliableSizeExceedsFinalSize(source) => {
-                OnResetStreamAtError::ReliableSizeExceedsFinalSize { source }
-            }
-            Self::BeyondFinalSize(_) => panic!("a RESET_STREAM_AT frame cannot commit {self:?}"),
-            other => other.on_reset_stream().into(),
         }
     }
 }
@@ -484,14 +647,14 @@ enum Expected {
     ReaderDropped,
     ConnectionClosed(ConnectionClosedError),
     Reset {
-        reset: RemoteReset,
+        reset: Facts,
         complete: bool,
     },
     Local {
         cause: LocalCause,
         reason: u32,
-        trigger: TerminationEvent,
-        remote: Option<RemoteReset>,
+        trigger: Event,
+        remote: Option<Facts>,
     },
 }
 
@@ -504,7 +667,7 @@ enum LocalCause {
 }
 
 /// The model's view of a read error of the stream receiver.
-fn observed(error: ReadError<u32>) -> Expected {
+fn observed(error: ReadError<u32, Facts>) -> Expected {
     match error {
         ReadError::ReaderDropped => Expected::ReaderDropped,
         ReadError::ConnectionClosed { source } => Expected::ConnectionClosed(source),
@@ -554,23 +717,20 @@ enum Reading {
 struct Limit {
     at: u64,
     reason: u32,
-    trigger: TerminationEvent,
+    trigger: Event,
 }
 
 #[derive(Clone, Copy, Debug)]
 struct Reset {
     code: u32,
     final_size: u64,
-    reliable: u64,
+    /// The end of the prefix the peer still owes.
+    owed: u64,
 }
 
 impl Reset {
-    fn remote(self) -> RemoteReset {
-        RemoteReset {
-            code: code(self.code),
-            final_size: v(self.final_size),
-            reliable_size: v(self.reliable),
-        }
+    fn remote(self) -> Facts {
+        dialect::facts(self.code, self.final_size, self.owed)
     }
 }
 
@@ -659,15 +819,15 @@ impl Model {
             return Some(StopNotNeededReason::DataComplete);
         }
         let reset = self.reset?;
-        self.is_received(0, reset.reliable)
+        self.is_received(0, reset.owed)
             .then_some(StopNotNeededReason::PeerReset)
     }
 
-    fn facts(&self) -> Facts {
-        Facts {
+    fn facts(&self) -> PolicyFacts {
+        PolicyFacts {
             final_size: self.final_size,
             delivered: self.delivered,
-            reliable: self.reset.map(|reset| reset.reliable),
+            owed: self.reset.map(|reset| reset.owed),
             acceptance: self.acceptance.map(|limit| limit.at),
             delivery: self.delivery.map(|limit| limit.at),
             destroyed: self.destroyed(),
@@ -685,14 +845,14 @@ impl Model {
         self.held.fill(false);
     }
 
-    fn destroy(&mut self, cause: Option<(u32, TerminationEvent)>) {
+    fn destroy(&mut self, cause: Option<(u32, Event)>) {
         if !self.destroyed() {
             self.clear_held();
             self.phase = Phase::Destroyed(cause);
         }
     }
 
-    fn event(&mut self, event: TerminationEvent) {
+    fn event(&mut self, event: Event) {
         let choice = self.script.decide(event, &self.facts());
         if let Some(presentation) = choice.presentation
             && !self.committed()
@@ -754,7 +914,7 @@ impl Model {
         }
     }
 
-    fn after_input(&mut self, event: Option<TerminationEvent>, connection: &mut ModelConnection) {
+    fn after_input(&mut self, event: Option<Event>, connection: &mut ModelConnection) {
         if let Some(event) = event {
             self.event(event);
         }
@@ -844,16 +1004,14 @@ impl Model {
         &mut self,
         code_value: u32,
         final_size: u64,
-        reliable: u64,
+        owed: u64,
         connection: &mut ModelConnection,
     ) -> Result<(), Violation> {
         if !self.takes_frames() {
             return Ok(());
         }
-        let checked = if reliable > final_size {
-            Err(Violation::ReliableSizeExceedsFinalSize(
-                ReliableSizeError::check(v(final_size), v(reliable)).unwrap_err(),
-            ))
+        let checked = if let Err(extra) = dialect::check_owed(final_size, owed) {
+            Err(Violation::Extra(extra))
         } else {
             match self.final_size {
                 Some(known) if final_size != known => Err(Violation::FinalSizeChanged(
@@ -864,11 +1022,10 @@ impl Model {
                         .unwrap_err(),
                 )),
                 _ => match self.reset {
-                    Some(facts) if facts.code != code_value => Err(Violation::ResetCodeChanged(
-                        ResetCodeChangeError::check(code(facts.code), code(code_value))
-                            .unwrap_err(),
-                    )),
-                    _ => Ok(()),
+                    Some(facts) => {
+                        dialect::check_code(facts.code, code_value).map_err(Violation::Extra)
+                    }
+                    None => Ok(()),
                 },
             }
             .and_then(|()| self.check_account(self.accounted.max(final_size), connection))
@@ -886,13 +1043,13 @@ impl Model {
                 self.reset = Some(Reset {
                     code: code_value,
                     final_size,
-                    reliable,
+                    owed,
                 });
                 Some(TerminationEvent::RemoteReset)
             }
-            Some(facts) if reliable < facts.reliable => {
-                facts.reliable = reliable;
-                Some(TerminationEvent::ReliablePrefixLowered)
+            Some(facts) if owed < facts.owed => {
+                facts.owed = owed;
+                Some(dialect::lowered())
             }
             Some(_) => None,
         };
@@ -969,7 +1126,7 @@ impl Model {
         if let Some(limit) = self.delivery.filter(|limit| self.delivered >= limit.at) {
             return Err(self.commit_error(local(LocalCause::DeliveryLimitReached, limit)));
         }
-        if let Some(reset) = remote.filter(|reset| self.delivered >= reset.reliable_size.get()) {
+        if let Some(reset) = remote.filter(|reset| self.delivered >= reset.owed_end().get()) {
             return Err(self.commit_error(Expected::Reset {
                 reset,
                 complete: false,
@@ -999,8 +1156,8 @@ struct ModelConnection {
 fn read_chunk(
     stream: usize,
     model: &mut Model,
-    receiver: &mut StreamReceiver<Parts>,
-) -> Result<ReadOutcome<Bytes>, ReadError<u32>> {
+    receiver: &mut Receiver,
+) -> Result<ReadOutcome<Bytes>, ReadError<u32, Facts>> {
     let actual = receiver.read_chunk();
     let expected = match model.settled() {
         Some(settled) => settled.map(Settled::outcome),
@@ -1031,8 +1188,8 @@ fn read_into(
     stream: usize,
     room: usize,
     model: &mut Model,
-    receiver: &mut StreamReceiver<Parts>,
-) -> Result<ReadOutcome<usize>, ReadError<u32>> {
+    receiver: &mut Receiver,
+) -> Result<ReadOutcome<usize>, ReadError<u32, Facts>> {
     let mut target = BytesMut::with_capacity(room).limit(room);
     let actual = receiver
         .read_into(&mut target)
@@ -1072,7 +1229,7 @@ fn read_into(
 fn step(
     op: &Op,
     models: &mut [Model; STREAMS],
-    receivers: &mut [StreamReceiver<Parts>; STREAMS],
+    receivers: &mut [Receiver; STREAMS],
     connection: &mut ConnectionReceiveFlowController,
     ledger: &mut ModelConnection,
 ) {
@@ -1116,30 +1273,27 @@ fn step(
                 code: code(value),
                 final_size: v(size),
             };
-            let actual = receivers[stream].on_reset_stream(frame, connection);
             let expected = models[stream].on_reset(value, size, 0, ledger);
-            assert_eq!(actual, expected.map_err(Violation::on_reset_stream));
+            dialect::on_reset_stream(&mut receivers[stream], frame, connection, expected);
         }
-        Op::ResetAt {
+        Op::PartialReset {
             stream,
             code: value,
             final_size,
-            reliable,
+            owed,
         } => {
             let size = final_size.unwrap_or(models[stream].total);
-            let reliable = if final_size.is_none() {
-                reliable.min(size)
+            let owed = if final_size.is_none() {
+                owed.min(size)
             } else {
-                reliable
+                owed
             };
-            let frame = ResetStreamAtFrame {
+            let frame = ResetStreamFrame {
                 code: code(value),
                 final_size: v(size),
-                reliable_size: v(reliable),
             };
-            let actual = receivers[stream].on_reset_stream_at(frame, connection);
-            let expected = models[stream].on_reset(value, size, reliable, ledger);
-            assert_eq!(actual, expected.map_err(Violation::on_reset_stream_at));
+            let expected = models[stream].on_reset(value, size, owed, ledger);
+            dialect::on_partial_reset(&mut receivers[stream], frame, owed, connection, expected);
         }
         Op::ReadChunk { stream } => {
             drop(read_chunk(
@@ -1234,7 +1388,7 @@ fn step(
 
 fn check(
     models: &[Model; STREAMS],
-    receivers: &[StreamReceiver<Parts>; STREAMS],
+    receivers: &[Receiver; STREAMS],
     connection: &ConnectionReceiveFlowController,
     ledger: &ModelConnection,
     target: u64,
@@ -1318,7 +1472,7 @@ fn check(
 fn drain(
     stream: usize,
     model: &mut Model,
-    receiver: &mut StreamReceiver<Parts>,
+    receiver: &mut Receiver,
     connection: &mut ConnectionReceiveFlowController,
     ledger: &mut ModelConnection,
 ) {
@@ -1373,7 +1527,7 @@ fn run(
         limit: connection_limit,
         ..ModelConnection::default()
     };
-    let make = |limit| {
+    let make = |limit| -> Receiver {
         StreamReceiver::new(
             Parts {
                 buffer: FragmentedStreamReceiveBuffer::new(),

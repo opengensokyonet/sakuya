@@ -1,9 +1,10 @@
 use super::{
-    BoundaryMode, ResetStreamAtFrame, ResetStreamFrame, StreamFrame, StreamReceiver,
+    BoundaryMode, ResetStreamFrame, StreamFrame, StreamReceiver,
     flow_control::{
         AdvertisementIntent, ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView,
     },
-    read::{ReadError, ReadOutcome, RemoteReset, SharedTerminationReason},
+    read::{ReadError, ReadOutcome, SharedTerminationReason},
+    remote_reset::RemoteReset,
     termination::{
         BoundaryAction, BoundaryUpdate, FollowingTermination, ReceiveTerminationPolicy,
         ResetPresentation, TerminationDecision, TerminationEvent, TerminationView,
@@ -67,14 +68,6 @@ fn reset(code: u32, final_size: u32) -> ResetStreamFrame {
     ResetStreamFrame {
         code: c(code),
         final_size: v(final_size),
-    }
-}
-
-fn reset_at(code: u32, final_size: u32, reliable_size: u32) -> ResetStreamAtFrame {
-    ResetStreamAtFrame {
-        code: c(code),
-        final_size: v(final_size),
-        reliable_size: v(reliable_size),
     }
 }
 
@@ -271,12 +264,11 @@ fn read_all<T: ReceiveTerminationPolicy>(
     }
 }
 
-fn reset_error<R>(code: u32, final_size: u32, reliable_size: u32, complete: bool) -> ChunkRead<R> {
+fn reset_error<R>(code: u32, final_size: u32, complete: bool) -> ChunkRead<R> {
     Err(ReadError::Reset {
         reset: RemoteReset {
             code: c(code),
             final_size: v(final_size),
-            reliable_size: v(reliable_size),
         },
         complete,
     })
@@ -339,7 +331,7 @@ mod following {
             .unwrap();
         let (read, end) = read_all(&mut receiver);
         assert_eq!(read, data(0, 300));
-        assert_eq!(end, reset_error(4, 300, 0, true));
+        assert_eq!(end, reset_error(4, 300, true));
     }
 
     #[test]
@@ -356,26 +348,6 @@ mod following {
             .unwrap();
         let (read, end) = read_all(&mut receiver);
         assert_eq!(read, data(0, 100));
-        assert_eq!(end, reset_error(4, 300, 0, false));
-    }
-
-    #[test]
-    fn reliable_prefix_gap_waits() {
-        let (mut receiver, mut connection) = new_receiver(FollowingTermination::new(c(9)));
-        receiver
-            .on_reset_stream_at(reset_at(4, 1000, 500), &mut connection)
-            .unwrap();
-        receiver
-            .on_stream_frame(stream(0, 200, false), &mut connection)
-            .unwrap();
-        let (read, outcome) = read_all(&mut receiver);
-        assert_eq!(read, data(0, 200));
-        assert_eq!(outcome, Ok(ReadOutcome::Wait));
-        receiver
-            .on_stream_frame(stream(200, 400, false), &mut connection)
-            .unwrap();
-        let (read, end) = read_all(&mut receiver);
-        assert_eq!(read, data(200, 400));
-        assert_eq!(end, reset_error(4, 1000, 500, false));
+        assert_eq!(end, reset_error(4, 300, false));
     }
 }
