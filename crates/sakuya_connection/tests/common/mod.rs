@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-use sakuya_connection::clock::{Clock, ConnectionChoices};
+use sakuya_connection::clock::{ConnectionChoices, MonotonicClock};
 
 pub mod parts;
 
@@ -41,7 +41,7 @@ impl Future for TestSleep {
     }
 }
 
-impl Clock for TestClock {
+impl MonotonicClock for TestClock {
     type Instant = Duration;
     type Sleep = TestSleep;
     fn now(&self) -> Duration {

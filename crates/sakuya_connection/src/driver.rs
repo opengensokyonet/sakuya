@@ -23,7 +23,7 @@ use sakuya_wire::parts::HNil;
 
 use crate::{
     call::{CallPositions, CallStep, NodeCalls, NodeLoan, PartsCallBundle, TreeCalls},
-    clock::{Clock, ConnectionChoices, InstantOf},
+    clock::{ConnectionChoices, InstantOf, MonotonicClock},
     component::{BuildNode, NodePositions, ReadSet, RequestOf},
     layer::{
         Connection, ConnectionArgs, Established, EstablishedArgs, Layer, LinkEntry, LinkEntryArgs,
@@ -152,7 +152,7 @@ type Bundle<T, L, P> = PartsCallBundle<T, L, P>;
 /// The sleep until the earliest deadline, with that deadline.
 type Sleeping<T> = (
     InstantOf<T>,
-    Pin<Box<<<T as ConnectionChoices>::Clock as Clock>::Sleep>>,
+    Pin<Box<<<T as ConnectionChoices>::Clock as MonotonicClock>::Sleep>>,
 );
 /// A link path node of a composition whose call positions are given by layer.
 type LinkNode<T, L, Pc, Pe, Pl, Pk, Ps, Pr> =

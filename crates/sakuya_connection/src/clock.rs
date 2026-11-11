@@ -5,11 +5,11 @@
 //! deadlines in their state and are handed the instant as an argument.
 use core::{future::Future, ops::Add, time::Duration};
 
-/// A clock and its timer.
+/// A monotonic clock and its timer.
 ///
 /// Chosen when an endpoint is composed; its `Instant` is also the instant
-/// of a link's arrivals and sends.
-pub trait Clock {
+/// of a link's arrivals and sends. It is not calendar time.
+pub trait MonotonicClock {
     /// A point in time.
     type Instant: Ord + Copy + Add<Duration, Output = Self::Instant> + core::fmt::Debug;
     /// A timer that ends at an instant; it need not be resettable.
@@ -26,8 +26,8 @@ pub trait Clock {
 /// part uses.
 pub trait ConnectionChoices: 'static {
     /// The clock.
-    type Clock: Clock;
+    type Clock: MonotonicClock;
 }
 
 /// A point in time of the choices `T`.
-pub type InstantOf<T> = <<T as ConnectionChoices>::Clock as Clock>::Instant;
+pub type InstantOf<T> = <<T as ConnectionChoices>::Clock as MonotonicClock>::Instant;

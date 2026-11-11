@@ -18,7 +18,7 @@
 //! their rereads, round after round until nothing changes. Calls hand over
 //! [`request::StructureRequest`]s to build, end or move nodes; expiries and
 //! rereads return them; the driver applies them at once. Time comes from
-//! one [`clock::Clock`], read once in each poll.
+//! one [`clock::MonotonicClock`], read once in each poll.
 //!
 //! The protocol's parts are not here yet: this crate is the structure they
 //! are composed in.
