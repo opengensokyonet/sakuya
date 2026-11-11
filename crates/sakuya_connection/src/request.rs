@@ -9,22 +9,22 @@ use sakuya_link::LinkId;
 /// into one. The driver applies it at once: nodes are built or ended before
 /// anything else in the poll runs. A request that no longer fits the
 /// structure, such as one for a link path whose logical path is gone, is
-/// dropped. `K` is the key of a logical path.
+/// dropped. `K` is the key of a logical path, `Lk` the type of a link.
 ///
 /// Errors and closing are not requests: whoever finds an error records the
 /// reason for closing in the component that keeps it.
 #[derive(Clone, Debug)]
-pub enum StructureRequest<K> {
+pub enum StructureRequest<K, Lk> {
     /// Build a logical path.
     AddLogicalPath {
         /// What it is built from, its key among them.
         args: LogicalPathArgs<K>,
     },
     /// Build a link path; the entry of its logical link is built with the
-    /// first link path over it.
+    /// first link path over it, and takes the clone of the link from here.
     AddLinkPath {
-        /// What it is built from, its key among them.
-        args: LinkPathArgs<K>,
+        /// Its key, and the connection's clone of its logical link.
+        args: LinkPathArgs<K, Lk>,
     },
     /// End a link path; the entry of its logical link ends with the last
     /// link path over it.
@@ -72,7 +72,7 @@ pub enum StructureRequest<K> {
     },
 }
 
-impl<K> From<Infallible> for StructureRequest<K> {
+impl<K, Lk> From<Infallible> for StructureRequest<K, Lk> {
     fn from(never: Infallible) -> Self {
         match never {}
     }

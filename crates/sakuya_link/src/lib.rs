@@ -4,7 +4,8 @@
 //! binding produces links, channels that send and receive whole messages
 //! between this side and one peer. The three kinds of object have independent
 //! lifetimes, and old and new link bindings or links may coexist for the same
-//! local address. This crate provides their identities.
+//! local address. This crate provides their identities and the [`Link`]
+//! trait; link bindings and link drivers have no traits yet.
 //!
 //! Code that refers to a link binding or a link without holding it, such as a
 //! delayed notification, a map key or the routing of a datagram by where it
@@ -73,6 +74,9 @@ use core::{
     hash::{Hash, Hasher},
 };
 use nitori_id::Identity;
+
+mod link;
+pub use link::{EcnMarking, Link, MIN_DATAGRAM_SIZE, OutgoingDatagram, SendAcceptance};
 
 /// The identity of a link binding.
 ///

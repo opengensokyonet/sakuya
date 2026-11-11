@@ -7,4 +7,5 @@ license.workspace = true
 description = "Link, link binding and link driver abstractions for sakuya"
 
 [dependencies]
+bytes.workspace = true
 nitori_id.workspace = true

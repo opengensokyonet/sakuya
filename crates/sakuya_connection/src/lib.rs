@@ -20,8 +20,9 @@
 //! rereads return them; the driver applies them at once. Time comes from
 //! one [`clock::MonotonicClock`], read once in each poll.
 //!
-//! The protocol's parts are not here yet: this crate is the structure they
-//! are composed in.
+//! QUIC version 1 is the part [`v1::Part`]. So far its shares hold the
+//! keys, the transport parameters, the idle timeout, the entries of the
+//! logical links and the roles of the link paths; it has no calls yet.
 #![feature(associated_type_defaults)]
 #![warn(missing_docs)]
 
@@ -35,3 +36,4 @@ pub mod request;
 pub mod share;
 pub mod take;
 pub mod tree;
+pub mod v1;

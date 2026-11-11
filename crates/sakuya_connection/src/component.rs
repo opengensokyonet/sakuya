@@ -26,9 +26,9 @@ pub type LineageOf<'v, T, L, Lv> = Lineage<'v, <Lv as LayerLineage>::List<'v, T,
 /// The lineage of the nodes above a node of the layer `Lv`.
 pub type ParentsOf<'v, T, L, Lv> = Lineage<'v, <Lv as LayerLineage>::Parents<'v, T, L>>;
 /// The facts a node of the layer `Lv` is built from.
-pub type ArgsOf<L, Lv> = <Lv as Layer>::Args<PathKey<L>>;
-/// A request of the list of parts `L`.
-pub type RequestOf<L> = StructureRequest<PathKey<L>>;
+pub type ArgsOf<T, L, Lv> = <Lv as Layer>::Args<T, L>;
+/// A request of the choices `T` and the list of parts `L`.
+pub type RequestOf<T, L> = StructureRequest<PathKey<L>, <T as ConnectionChoices>::Link>;
 
 /// The component types something reads.
 #[derive(Debug, Default)]
@@ -69,7 +69,7 @@ where
         _lineage: LineageOf<'v, T, L, Lv>,
         _others: &mut OtherNodes<'v, T, L, B>,
         _now: InstantOf<T>,
-    ) -> Option<RequestOf<L>> {
+    ) -> Option<RequestOf<T, L>> {
         None
     }
     /// A component it reads was taken mutably: look at it again.
@@ -81,7 +81,7 @@ where
         _lineage: LineageOf<'v, T, L, Lv>,
         _others: &mut OtherNodes<'v, T, L, B>,
         _now: InstantOf<T>,
-    ) -> Option<RequestOf<L>> {
+    ) -> Option<RequestOf<T, L>> {
         None
     }
 }
@@ -92,12 +92,12 @@ where
 /// `Self` is a component, or a list of components made together. It cannot
 /// fail: what could be missing was taken by whoever asked for the node and
 /// is in `args`.
-pub trait Build<T, L, Lv: LayerLineage, H>: Sized
+pub trait Build<T: ConnectionChoices, L, Lv: LayerLineage, H>: Sized
 where
     for<'v> L: LineageLists<'v, T>,
 {
     /// Make the unit.
-    fn build<'v>(parents: &mut ParentsOf<'v, T, L, Lv>, args: &ArgsOf<L, Lv>) -> Self;
+    fn build<'v>(parents: &mut ParentsOf<'v, T, L, Lv>, args: &mut ArgsOf<T, L, Lv>) -> Self;
     /// The node is ended: the unit is handed over with the data of the nodes
     /// above it. By default it is dropped.
     fn end<'v>(self, _parents: &mut ParentsOf<'v, T, L, Lv>) {}
@@ -106,13 +106,13 @@ where
 /// How a unit of one component is built: by the component's own
 /// [`Build`].
 pub struct SingleUnit<H>(core::marker::PhantomData<H>);
-impl<T, L, Lv: LayerLineage, X: Build<T, L, Lv, H>, H> Build<T, L, Lv, SingleUnit<H>>
-    for HCons<X, HNil>
+impl<T: ConnectionChoices, L, Lv: LayerLineage, X: Build<T, L, Lv, H>, H>
+    Build<T, L, Lv, SingleUnit<H>> for HCons<X, HNil>
 where
     for<'v> L: LineageLists<'v, T>,
 {
     #[inline]
-    fn build<'v>(parents: &mut ParentsOf<'v, T, L, Lv>, args: &ArgsOf<L, Lv>) -> Self {
+    fn build<'v>(parents: &mut ParentsOf<'v, T, L, Lv>, args: &mut ArgsOf<T, L, Lv>) -> Self {
         HCons {
             head: X::build(parents, args),
             tail: HNil,
@@ -125,31 +125,34 @@ where
 }
 
 /// Building a part's units one after the other, joined into its data.
-pub trait BuildUnits<T, L, Lv: LayerLineage, Hu>: Sized
+pub trait BuildUnits<T: ConnectionChoices, L, Lv: LayerLineage, Hu>: Sized
 where
     for<'v> L: LineageLists<'v, T>,
 {
     /// The units joined.
     type Flat;
     /// Build every unit.
-    fn build_units<'v>(parents: &mut ParentsOf<'v, T, L, Lv>, args: &ArgsOf<L, Lv>) -> Self::Flat;
+    fn build_units<'v>(
+        parents: &mut ParentsOf<'v, T, L, Lv>,
+        args: &mut ArgsOf<T, L, Lv>,
+    ) -> Self::Flat;
     /// End every unit.
     fn end_units<'v>(flat: Self::Flat, parents: &mut ParentsOf<'v, T, L, Lv>);
 }
-impl<T, L, Lv: LayerLineage> BuildUnits<T, L, Lv, HNil> for HNil
+impl<T: ConnectionChoices, L, Lv: LayerLineage> BuildUnits<T, L, Lv, HNil> for HNil
 where
     for<'v> L: LineageLists<'v, T>,
 {
     type Flat = HNil;
     #[inline]
-    fn build_units<'v>(_: &mut ParentsOf<'v, T, L, Lv>, _: &ArgsOf<L, Lv>) -> HNil {
+    fn build_units<'v>(_: &mut ParentsOf<'v, T, L, Lv>, _: &mut ArgsOf<T, L, Lv>) -> HNil {
         HNil
     }
     #[inline]
     fn end_units<'v>(_: HNil, _: &mut ParentsOf<'v, T, L, Lv>) {}
 }
-impl<T, L, Lv: LayerLineage, U, Us, Bh, Iu, Hu> BuildUnits<T, L, Lv, HCons<(Bh, Iu), Hu>>
-    for HCons<U, Us>
+impl<T: ConnectionChoices, L, Lv: LayerLineage, U, Us, Bh, Iu, Hu>
+    BuildUnits<T, L, Lv, HCons<(Bh, Iu), Hu>> for HCons<U, Us>
 where
     for<'v> L: LineageLists<'v, T>,
     U: Build<T, L, Lv, Bh> + Add<Us::Flat>,
@@ -158,7 +161,10 @@ where
 {
     type Flat = <U as Add<Us::Flat>>::Output;
     #[inline]
-    fn build_units<'v>(parents: &mut ParentsOf<'v, T, L, Lv>, args: &ArgsOf<L, Lv>) -> Self::Flat {
+    fn build_units<'v>(
+        parents: &mut ParentsOf<'v, T, L, Lv>,
+        args: &mut ArgsOf<T, L, Lv>,
+    ) -> Self::Flat {
         let unit = U::build(parents, args);
         unit + Us::build_units(parents, args)
     }
@@ -172,14 +178,15 @@ where
 
 /// Building and ending a node's data: every part's units, in the order of
 /// the list. `Full` is the whole list.
-pub trait BuildNode<T, Full, Lv: LayerLineage, Hp>: LayerShares<T, Full, Lv>
+pub trait BuildNode<T: ConnectionChoices, Full, Lv: LayerLineage, Hp>:
+    LayerShares<T, Full, Lv>
 where
     for<'v> Full: LineageLists<'v, T>,
 {
     /// Build the data of a node.
     fn build_node<'v>(
         parents: &mut ParentsOf<'v, T, Full, Lv>,
-        args: &ArgsOf<Full, Lv>,
+        args: &mut ArgsOf<T, Full, Lv>,
     ) -> <Self as LayerShares<T, Full, Lv>>::Data;
     /// End the data of a node.
     fn end_node<'v>(
@@ -187,19 +194,19 @@ where
         parents: &mut ParentsOf<'v, T, Full, Lv>,
     );
 }
-impl<T, Full, Lv: LayerLineage> BuildNode<T, Full, Lv, HNil> for HNil
+impl<T: ConnectionChoices, Full, Lv: LayerLineage> BuildNode<T, Full, Lv, HNil> for HNil
 where
     for<'v> Full: LineageLists<'v, T>,
 {
     #[inline]
-    fn build_node<'v>(_: &mut ParentsOf<'v, T, Full, Lv>, _: &ArgsOf<Full, Lv>) -> HNil {
+    fn build_node<'v>(_: &mut ParentsOf<'v, T, Full, Lv>, _: &mut ArgsOf<T, Full, Lv>) -> HNil {
         HNil
     }
     #[inline]
     fn end_node<'v>(_: HNil, _: &mut ParentsOf<'v, T, Full, Lv>) {}
 }
-impl<T, Full, Lv: LayerLineage, P, Ps, Hu, Hp> BuildNode<T, Full, Lv, HCons<Hu, Hp>>
-    for HCons<P, Ps>
+impl<T: ConnectionChoices, Full, Lv: LayerLineage, P, Ps, Hu, Hp>
+    BuildNode<T, Full, Lv, HCons<Hu, Hp>> for HCons<P, Ps>
 where
     for<'v> Full: LineageLists<'v, T>,
     P: LayerShare<T, Full, Lv>,
@@ -209,7 +216,7 @@ where
     #[inline]
     fn build_node<'v>(
         parents: &mut ParentsOf<'v, T, Full, Lv>,
-        args: &ArgsOf<Full, Lv>,
+        args: &mut ArgsOf<T, Full, Lv>,
     ) -> <Self as LayerShares<T, Full, Lv>>::Data {
         let head = P::Units::build_units(parents, args);
         HCons {
@@ -255,7 +262,7 @@ where
         r: usize,
         after: usize,
         now: InstantOf<T>,
-    ) -> Result<Option<RequestOf<L>>, LineageOf<'v, T, L, Lv>>;
+    ) -> Result<Option<RequestOf<T, L>>, LineageOf<'v, T, L, Lv>>;
     /// The reread of the component at `r` from the end, or the lineage back.
     #[allow(clippy::type_complexity)]
     fn try_reread<'v, B: CallBundle>(
@@ -264,7 +271,7 @@ where
         r: usize,
         after: usize,
         now: InstantOf<T>,
-    ) -> Result<Option<RequestOf<L>>, LineageOf<'v, T, L, Lv>>;
+    ) -> Result<Option<RequestOf<T, L>>, LineageOf<'v, T, L, Lv>>;
 }
 impl<T: ConnectionChoices, L, Lv: LayerLineage> PartPositions<T, L, Lv, HNil> for HNil
 where
@@ -288,7 +295,7 @@ where
         _: usize,
         _: usize,
         _: InstantOf<T>,
-    ) -> Result<Option<RequestOf<L>>, LineageOf<'v, T, L, Lv>> {
+    ) -> Result<Option<RequestOf<T, L>>, LineageOf<'v, T, L, Lv>> {
         Err(lineage)
     }
     #[inline(always)]
@@ -298,7 +305,7 @@ where
         _: usize,
         _: usize,
         _: InstantOf<T>,
-    ) -> Result<Option<RequestOf<L>>, LineageOf<'v, T, L, Lv>> {
+    ) -> Result<Option<RequestOf<T, L>>, LineageOf<'v, T, L, Lv>> {
         Err(lineage)
     }
 }
@@ -339,7 +346,7 @@ where
         r: usize,
         after: usize,
         now: InstantOf<T>,
-    ) -> Result<Option<RequestOf<L>>, LineageOf<'v, T, L, Lv>> {
+    ) -> Result<Option<RequestOf<T, L>>, LineageOf<'v, T, L, Lv>> {
         if r == Xs::LEN + after {
             Ok(X::expire(lineage, others, now))
         } else {
@@ -353,7 +360,7 @@ where
         r: usize,
         after: usize,
         now: InstantOf<T>,
-    ) -> Result<Option<RequestOf<L>>, LineageOf<'v, T, L, Lv>> {
+    ) -> Result<Option<RequestOf<T, L>>, LineageOf<'v, T, L, Lv>> {
         if r == Xs::LEN + after {
             Ok(X::reread(lineage, others, now))
         } else {
@@ -382,14 +389,14 @@ where
         others: &mut OtherNodes<'v, T, L, B>,
         r: usize,
         now: InstantOf<T>,
-    ) -> Option<RequestOf<L>>;
+    ) -> Option<RequestOf<T, L>>;
     /// The reread at position `r` from the end.
     fn reread_from_end<'v, B: CallBundle>(
         lineage: LineageOf<'v, T, L, Lv>,
         others: &mut OtherNodes<'v, T, L, B>,
         r: usize,
         now: InstantOf<T>,
-    ) -> Option<RequestOf<L>>;
+    ) -> Option<RequestOf<T, L>>;
 }
 impl<T: ConnectionChoices, L, Lv: LayerLineage> NodePositions<T, L, Lv, HNil> for HNil
 where
@@ -408,7 +415,7 @@ where
         _: &mut OtherNodes<'v, T, L, B>,
         _: usize,
         _: InstantOf<T>,
-    ) -> Option<RequestOf<L>> {
+    ) -> Option<RequestOf<T, L>> {
         unreachable!("a position beyond the node's data")
     }
     #[inline(always)]
@@ -417,7 +424,7 @@ where
         _: &mut OtherNodes<'v, T, L, B>,
         _: usize,
         _: InstantOf<T>,
-    ) -> Option<RequestOf<L>> {
+    ) -> Option<RequestOf<T, L>> {
         unreachable!("a position beyond the node's data")
     }
 }
@@ -450,7 +457,7 @@ where
         others: &mut OtherNodes<'v, T, L, B>,
         r: usize,
         now: InstantOf<T>,
-    ) -> Option<RequestOf<L>> {
+    ) -> Option<RequestOf<T, L>> {
         match S::try_expire(lineage, others, r, Ss::LEN, now) {
             Ok(request) => request,
             Err(lineage) => Ss::expire_from_end(lineage, others, r, now),
@@ -462,7 +469,7 @@ where
         others: &mut OtherNodes<'v, T, L, B>,
         r: usize,
         now: InstantOf<T>,
-    ) -> Option<RequestOf<L>> {
+    ) -> Option<RequestOf<T, L>> {
         match S::try_reread(lineage, others, r, Ss::LEN, now) {
             Ok(request) => request,
             Err(lineage) => Ss::reread_from_end(lineage, others, r, now),

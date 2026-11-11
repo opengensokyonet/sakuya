@@ -5,6 +5,8 @@
 //! deadlines in their state and are handed the instant as an argument.
 use core::{future::Future, ops::Add, time::Duration};
 
+use sakuya_link::Link;
+
 /// A monotonic clock and its timer.
 ///
 /// Chosen when an endpoint is composed; its `Instant` is also the instant
@@ -27,6 +29,9 @@ pub trait MonotonicClock {
 pub trait ConnectionChoices: 'static {
     /// The clock.
     type Clock: MonotonicClock;
+    /// The links the connection sends over: the instants they report are
+    /// those of the clock.
+    type Link: Link<Instant = InstantOf<Self>>;
 }
 
 /// A point in time of the choices `T`.

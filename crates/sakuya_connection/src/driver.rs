@@ -17,8 +17,8 @@ use std::{
     task::{Context, Poll, Wake, Waker},
 };
 
-use atomic_waker::AtomicWaker;
-use sakuya_link::LinkId;
+use futures_util::task::AtomicWaker;
+use sakuya_link::{Link, LinkId};
 use sakuya_wire::parts::HNil;
 
 use crate::{
@@ -26,11 +26,11 @@ use crate::{
     clock::{ConnectionChoices, InstantOf, MonotonicClock},
     component::{BuildNode, NodePositions, ReadSet, RequestOf},
     layer::{
-        Connection, ConnectionArgs, Established, EstablishedArgs, Layer, LinkEntry, LinkEntryArgs,
-        LinkPath, LinkPathArgs, LogicalPath, LogicalPathArgs, NodeKey, Recovery, RecoveryArgs,
+        Connection, Established, EstablishedArgs, Layer, LinkEntry, LinkEntryArgs, LinkPath,
+        LinkPathArgs, LogicalPath, LogicalPathArgs, NodeKey, Recovery, RecoveryArgs,
     },
     request::StructureRequest,
-    share::{LineageLists, NodeData, PathKey},
+    share::{ConnectionArgsOf, LineageLists, NodeData, PathKey},
     take::{Lineage, TakenPositions},
     tree::{ConnectionTree, LogicalPathNode, Node, NodeAddr, Records, WakeMarks},
 };
@@ -255,11 +255,15 @@ where
 {
     /// Make a connection with its first logical path and its first link
     /// path. Every call starts woken; every deadline is read.
+    ///
+    /// `connection` is what the parts declare the connection node needs;
+    /// `link` carries the clone of the first logical link, which goes into
+    /// its entry.
     pub fn new(
         clock: T::Clock,
-        connection: ConnectionArgs,
-        path: LogicalPathArgs<PathKey<L>>,
-        link: LinkPathArgs<PathKey<L>>,
+        mut connection: ConnectionArgsOf<T, L>,
+        mut path: LogicalPathArgs<PathKey<L>>,
+        link: LinkPathArgs<PathKey<L>, T::Link>,
     ) -> Self {
         let mut types: [Vec<TypeId>; 6] = Default::default();
         let mut data_reads: [Vec<ReadSet>; 6] = Default::default();
@@ -300,9 +304,9 @@ where
             positions: PhantomData,
         };
         let mut changes = Changes::new();
-        driver.build_connection(&connection, now, &mut changes);
-        driver.build_logical_path(&path, now, &mut changes);
-        driver.build_link_path(&link, now, &mut changes);
+        driver.build_connection(&mut connection, now, &mut changes);
+        driver.build_logical_path(&mut path, now, &mut changes);
+        driver.build_link_path(link, now, &mut changes);
         let mut todo = Vec::new();
         driver.readers(&changes, None, &mut todo);
         driver.settle(todo, now);
@@ -506,7 +510,7 @@ where
         addr: NodeAddr,
         position: usize,
         now: InstantOf<T>,
-    ) -> Option<RequestOf<L>> {
+    ) -> Option<RequestOf<T, L>> {
         let r = self.tables.data[addr.layer] - 1 - position;
         let Self {
             tree,
@@ -528,7 +532,7 @@ where
         addr: NodeAddr,
         position: usize,
         now: InstantOf<T>,
-    ) -> Option<RequestOf<L>> {
+    ) -> Option<RequestOf<T, L>> {
         let r = self.tables.data[addr.layer] - 1 - position;
         let Self {
             tree,
@@ -550,7 +554,7 @@ where
         addr: NodeAddr,
         position: usize,
         now: InstantOf<T>,
-    ) -> CallStep<RequestOf<L>> {
+    ) -> CallStep<RequestOf<T, L>> {
         let data = self.tables.data[addr.layer];
         let index = position - data;
         let r = self.tables.calls[addr.layer] - 1 - index;
@@ -670,7 +674,7 @@ where
 
     fn build_connection(
         &mut self,
-        args: &ConnectionArgs,
+        args: &mut ConnectionArgsOf<T, L>,
         now: InstantOf<T>,
         changes: &mut Changes,
     ) {
@@ -719,22 +723,23 @@ where
         Some(NodeAddr::link_path(slot, sub))
     }
 
-    fn build_entry(&mut self, link: &LinkId, now: InstantOf<T>, changes: &mut Changes) -> usize {
-        let args = LinkEntryArgs { link: link.clone() };
+    fn build_entry(&mut self, link: T::Link, now: InstantOf<T>, changes: &mut Changes) -> usize {
+        let id = link.id().clone();
+        let mut args = LinkEntryArgs { link: Some(link) };
         let slot = Self::free_slot(&mut self.tree.entries);
         let data = {
             let connection = self.tree.connection.as_mut().expect("the connection node");
             let mut parents =
                 Lineage::new(L::connection(&mut connection.data), &mut self.lineage_taken);
-            <L as BuildNode<T, L, LinkEntry, Be>>::build_node(&mut parents, &args)
+            <L as BuildNode<T, L, LinkEntry, Be>>::build_node(&mut parents, &mut args)
         };
         changes.extend(self.recorded_for(&[NodeAddr::CONNECTION]));
         let calls =
             crate::call::LinkEntryCalls(<L as NodeCalls<T, L, LinkEntry, Pe>>::start_all::<
                 Bundle<T, L, Six<Pc, Pe, Pl, Pk, Ps, Pr>>,
-            >(&args));
+            >(&mut args));
         let addr = NodeAddr::entry(slot);
-        let node = self.node(addr, NodeKey::LinkEntry(link.clone()), 0, data, calls, ());
+        let node = self.node(addr, NodeKey::LinkEntry(id), 0, data, calls, ());
         self.tree.entries[slot] = Some(node);
         self.started(addr, now, changes);
         slot
@@ -742,7 +747,7 @@ where
 
     fn build_logical_path(
         &mut self,
-        args: &LogicalPathArgs<PathKey<L>>,
+        args: &mut LogicalPathArgs<PathKey<L>>,
         now: InstantOf<T>,
         changes: &mut Changes,
     ) {
@@ -777,12 +782,20 @@ where
         self.started(addr, now, changes);
     }
 
+    /// Build a link path. Without an entry for its logical link, the entry
+    /// is built first and takes the clone of the link; otherwise the clone
+    /// is dropped here.
     fn build_link_path(
         &mut self,
-        args: &LinkPathArgs<PathKey<L>>,
+        request: LinkPathArgs<PathKey<L>, T::Link>,
         now: InstantOf<T>,
         changes: &mut Changes,
     ) {
+        let LinkPathArgs { path, link } = request;
+        let mut args = LinkPathArgs {
+            path,
+            link: link.id().clone(),
+        };
         let Some(slot) = self.find_logical_path(&args.path) else {
             return;
         };
@@ -791,7 +804,7 @@ where
         }
         let entry = match self.find_entry(&args.link) {
             Some(entry) => entry,
-            None => self.build_entry(&args.link, now, changes),
+            None => self.build_entry(link, now, changes),
         };
         let sub = Self::free_slot(
             &mut self.tree.logical_paths[slot]
@@ -816,7 +829,7 @@ where
                 ),
                 &mut self.lineage_taken,
             );
-            <L as BuildNode<T, L, LinkPath, Bk>>::build_node(&mut parents, args)
+            <L as BuildNode<T, L, LinkPath, Bk>>::build_node(&mut parents, &mut args)
         };
         changes.extend(self.recorded_for(&[
             NodeAddr::CONNECTION,
@@ -825,7 +838,7 @@ where
         ]));
         let calls = crate::call::LinkPathCalls(<L as NodeCalls<T, L, LinkPath, Pk>>::start_all::<
             Bundle<T, L, Six<Pc, Pe, Pl, Pk, Ps, Pr>>,
-        >(args));
+        >(&mut args));
         let addr = NodeAddr::link_path(slot, sub);
         let node = self.node(
             addr,
@@ -844,7 +857,7 @@ where
 
     fn build_established(
         &mut self,
-        args: &EstablishedArgs,
+        args: &mut EstablishedArgs,
         now: InstantOf<T>,
         changes: &mut Changes,
     ) {
@@ -876,7 +889,7 @@ where
 
     fn build_recovery(
         &mut self,
-        args: &RecoveryArgs<PathKey<L>>,
+        args: &mut RecoveryArgs<PathKey<L>>,
         now: InstantOf<T>,
         changes: &mut Changes,
     ) {
@@ -1155,18 +1168,16 @@ where
     /// dropped. What reads the nodes made or ended goes into `todo`.
     fn apply(
         &mut self,
-        request: RequestOf<L>,
+        request: RequestOf<T, L>,
         now: InstantOf<T>,
         todo: &mut Vec<(NodeAddr, usize)>,
     ) {
         let mut changes = Changes::new();
         match request {
-            StructureRequest::AddLogicalPath { args } => {
-                self.build_logical_path(&args, now, &mut changes)
+            StructureRequest::AddLogicalPath { mut args } => {
+                self.build_logical_path(&mut args, now, &mut changes)
             }
-            StructureRequest::AddLinkPath { args } => {
-                self.build_link_path(&args, now, &mut changes)
-            }
+            StructureRequest::AddLinkPath { args } => self.build_link_path(args, now, &mut changes),
             StructureRequest::EndLinkPath { path, link } => {
                 if let Some(addr) = self.find_link_path(&path, &link) {
                     self.end_link_path(addr, todo);
@@ -1178,11 +1189,13 @@ where
                 }
             }
             StructureRequest::EndConnection => self.end_connection(todo),
-            StructureRequest::AddEstablished { args } => {
-                self.build_established(&args, now, &mut changes)
+            StructureRequest::AddEstablished { mut args } => {
+                self.build_established(&mut args, now, &mut changes)
             }
             StructureRequest::EndEstablished => self.end_established(todo),
-            StructureRequest::AddRecovery { args } => self.build_recovery(&args, now, &mut changes),
+            StructureRequest::AddRecovery { mut args } => {
+                self.build_recovery(&mut args, now, &mut changes)
+            }
             StructureRequest::EndRecovery { path, link } => {
                 if let Some(addr) = self.find_link_path(&path, &link) {
                     self.end_recovery(addr, todo);
@@ -1244,7 +1257,7 @@ where
         &mut self,
         addr: NodeAddr,
         call: Option<usize>,
-        request: Option<RequestOf<L>>,
+        request: Option<RequestOf<T, L>>,
         now: InstantOf<T>,
     ) {
         let changes = self.recorded(addr);

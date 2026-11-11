@@ -97,7 +97,7 @@ where
         self: Pin<&mut Self>,
         loan: NodeLoan<'v, T, L, Lv, B>,
         cx: &mut Context<'_>,
-    ) -> CallStep<RequestOf<L>>;
+    ) -> CallStep<RequestOf<T, L>>;
     /// Whether the call is not needed any more; see
     /// [`CallKind::no_longer_needed`].
     fn no_longer_needed<'v>(lineage: &LineageOf<'v, T, L, Lv>) -> bool;
@@ -114,14 +114,14 @@ where
     B: CallBundle,
     Op: Operation<NodeCallFamily<T, L, Lv, K, H, B>, Output = ()>
         + for<'s> Start<'s, LentSlot<'s, NodeCallFamily<T, L, Lv, K, H, B>>>,
-    <Op as Operation<NodeCallFamily<T, L, Lv, K, H, B>>>::Yield: Into<RequestOf<L>>,
+    <Op as Operation<NodeCallFamily<T, L, Lv, K, H, B>>>::Yield: Into<RequestOf<T, L>>,
 {
     #[inline]
     fn poll_lent<'v>(
         self: Pin<&mut Self>,
         loan: NodeLoan<'v, T, L, Lv, B>,
         cx: &mut Context<'_>,
-    ) -> CallStep<RequestOf<L>> {
+    ) -> CallStep<RequestOf<T, L>> {
         let mut loan = loan;
         match self.poll_with_views(Pin::new(&mut loan), cx) {
             Poll::Ready(ControlFlow::Break(())) => CallStep::Finished,
@@ -146,7 +146,7 @@ where
     /// The call, for the bundle `B`.
     type Call<B: CallBundle>: NodeCall<T, L, Lv, B>;
     /// Start the call of a new node; it starts woken.
-    fn start<B: CallBundle>(args: &ArgsOf<L, Lv>) -> Self::Call<B>;
+    fn start<B: CallBundle>(args: &mut ArgsOf<T, L, Lv>) -> Self::Call<B>;
     /// The component types the call reads: after one was taken mutably by
     /// anything but this call's own lend, the call is woken.
     fn reads(_reads: &mut ReadSet) {}
@@ -180,7 +180,7 @@ where
         after: usize,
         loan: NodeLoan<'v, T, L, Lv, B>,
         cx: &mut Context<'_>,
-    ) -> Result<CallStep<RequestOf<L>>, NodeLoan<'v, T, L, Lv, B>>;
+    ) -> Result<CallStep<RequestOf<T, L>>, NodeLoan<'v, T, L, Lv, B>>;
 }
 impl<T: ConnectionChoices, L, Lv: LayerLineage, B: CallBundle> PollAt<T, L, Lv, B> for HNil
 where
@@ -193,7 +193,7 @@ where
         _: usize,
         loan: NodeLoan<'v, T, L, Lv, B>,
         _: &mut Context<'_>,
-    ) -> Result<CallStep<RequestOf<L>>, NodeLoan<'v, T, L, Lv, B>> {
+    ) -> Result<CallStep<RequestOf<T, L>>, NodeLoan<'v, T, L, Lv, B>> {
         Err(loan)
     }
 }
@@ -213,7 +213,7 @@ where
         after: usize,
         loan: NodeLoan<'v, T, L, Lv, B>,
         cx: &mut Context<'_>,
-    ) -> Result<CallStep<RequestOf<L>>, NodeLoan<'v, T, L, Lv, B>> {
+    ) -> Result<CallStep<RequestOf<T, L>>, NodeLoan<'v, T, L, Lv, B>> {
         if r != Xs::COUNT + after {
             return self.tail.try_poll(r, after, loan, cx);
         }
@@ -254,7 +254,7 @@ where
     /// How many calls.
     const LEN: usize;
     /// Start every call.
-    fn start_all<B: CallBundle>(args: &ArgsOf<L, Lv>) -> Self::Calls<B>;
+    fn start_all<B: CallBundle>(args: &mut ArgsOf<T, L, Lv>) -> Self::Calls<B>;
     /// What each call reads, in order.
     fn reads(out: &mut Vec<ReadSet>);
 }
@@ -264,7 +264,7 @@ where
 {
     type Calls<B: CallBundle> = HNil;
     const LEN: usize = 0;
-    fn start_all<B: CallBundle>(_: &ArgsOf<L, Lv>) -> HNil {
+    fn start_all<B: CallBundle>(_: &mut ArgsOf<T, L, Lv>) -> HNil {
         HNil
     }
     fn reads(_: &mut Vec<ReadSet>) {}
@@ -278,7 +278,7 @@ where
 {
     type Calls<B: CallBundle> = HCons<CallSlot<K::Call<B>>, Ks::Calls<B>>;
     const LEN: usize = 1 + Ks::LEN;
-    fn start_all<B: CallBundle>(args: &ArgsOf<L, Lv>) -> Self::Calls<B> {
+    fn start_all<B: CallBundle>(args: &mut ArgsOf<T, L, Lv>) -> Self::Calls<B> {
         HCons {
             head: CallSlot {
                 call: Some(Box::pin(K::start::<B>(args))),
@@ -305,7 +305,7 @@ where
     /// How many calls a node has.
     const LEN: usize;
     /// Start every call.
-    fn start_all<B: CallBundle>(args: &ArgsOf<L, Lv>) -> Self::Calls<B>;
+    fn start_all<B: CallBundle>(args: &mut ArgsOf<T, L, Lv>) -> Self::Calls<B>;
     /// What each call reads, in order.
     fn reads(out: &mut Vec<ReadSet>);
     /// Poll the call at `r` from the end.
@@ -314,7 +314,7 @@ where
         r: usize,
         loan: NodeLoan<'v, T, L, Lv, B>,
         cx: &mut Context<'_>,
-    ) -> CallStep<RequestOf<L>>;
+    ) -> CallStep<RequestOf<T, L>>;
 }
 impl<T: ConnectionChoices, L, Lv: LayerLineage> NodeCalls<T, L, Lv, HNil> for HNil
 where
@@ -322,7 +322,7 @@ where
 {
     type Calls<B: CallBundle> = HNil;
     const LEN: usize = 0;
-    fn start_all<B: CallBundle>(_: &ArgsOf<L, Lv>) -> HNil {
+    fn start_all<B: CallBundle>(_: &mut ArgsOf<T, L, Lv>) -> HNil {
         HNil
     }
     fn reads(_: &mut Vec<ReadSet>) {}
@@ -332,7 +332,7 @@ where
         _: usize,
         _: NodeLoan<'v, T, L, Lv, B>,
         _: &mut Context<'_>,
-    ) -> CallStep<RequestOf<L>> {
+    ) -> CallStep<RequestOf<T, L>> {
         unreachable!("a position beyond the node's calls")
     }
 }
@@ -347,7 +347,7 @@ where
     type Calls<B: CallBundle> =
         HCons<<P::Calls as PartCalls<T, L, Lv, Hs>>::Calls<B>, Ps::Calls<B>>;
     const LEN: usize = <P::Calls as PartCalls<T, L, Lv, Hs>>::LEN + Ps::LEN;
-    fn start_all<B: CallBundle>(args: &ArgsOf<L, Lv>) -> Self::Calls<B> {
+    fn start_all<B: CallBundle>(args: &mut ArgsOf<T, L, Lv>) -> Self::Calls<B> {
         HCons {
             head: <P::Calls as PartCalls<T, L, Lv, Hs>>::start_all::<B>(args),
             tail: Ps::start_all::<B>(args),
@@ -363,7 +363,7 @@ where
         r: usize,
         loan: NodeLoan<'v, T, L, Lv, B>,
         cx: &mut Context<'_>,
-    ) -> CallStep<RequestOf<L>> {
+    ) -> CallStep<RequestOf<T, L>> {
         match calls.head.try_poll(r, Ps::LEN, loan, cx) {
             Ok(step) => step,
             Err(loan) => Ps::poll_from_end::<B>(&mut calls.tail, r, loan, cx),

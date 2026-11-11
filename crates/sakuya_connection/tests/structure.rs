@@ -7,13 +7,13 @@ mod common;
 use std::{cell::Cell, future::Future};
 
 use common::{
-    Mine, Outer, TestClock, advance_to, ms,
+    Mine, Outer, TestClock, TestLink, advance_to, ms, nothing,
     parts::{self, Command, FACTORY_CALLS, IDLE_AT, a, b, c},
     take_log,
 };
 use sakuya_connection::{
     driver::ConnectionDriver,
-    layer::{ConnectionArgs, EstablishedArgs, LinkPathArgs, LogicalPathArgs, RecoveryArgs},
+    layer::{EstablishedArgs, LinkPathArgs, LogicalPathArgs, RecoveryArgs},
     request::StructureRequest,
     share::SoleLogicalPath,
 };
@@ -31,9 +31,9 @@ macro_rules! connection {
     ($($part:ty),*; $first:expr) => {
         ConnectionDriver::<Mine, HList![$($part),*], _, _, _>::new(
             TestClock,
-            ConnectionArgs::default(),
+            frunk_core::hlist![$(nothing::<$part>()),*],
             LogicalPathArgs { path: PATH },
-            LinkPathArgs { path: PATH, link: $first },
+            LinkPathArgs { path: PATH, link: TestLink($first) },
         )
     };
 }
@@ -150,7 +150,7 @@ fn a_request_is_applied_at_once_and_the_call_goes_on_next_poll() {
     parts::command(Command::Ask(StructureRequest::AddLinkPath {
         args: LinkPathArgs {
             path: PATH,
-            link: second,
+            link: TestLink(second),
         },
     }));
     assert!(outer.poll(&mut connection).is_pending());
@@ -235,7 +235,7 @@ fn child_nodes_are_built_moved_and_ended() {
     parts::command(Command::Ask(StructureRequest::AddLinkPath {
         args: LinkPathArgs {
             path: PATH,
-            link: second.clone(),
+            link: TestLink(second.clone()),
         },
     }));
     assert!(outer.poll(&mut connection).is_pending());

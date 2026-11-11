@@ -28,7 +28,7 @@ use sakuya_connection::{
 };
 use sakuya_wire::parts::{HList, HNil};
 
-use super::{Mine, log, ms};
+use super::{Mine, TestLink, log, ms};
 
 thread_local! {
     pub static COMMANDS: RefCell<VecDeque<Command>> = const { RefCell::new(VecDeque::new()) };
@@ -41,7 +41,7 @@ thread_local! {
 /// What the watch call does at its next turn.
 pub enum Command {
     /// Hand over a request.
-    Ask(StructureRequest<SoleLogicalPath>),
+    Ask(StructureRequest<SoleLogicalPath, TestLink>),
     /// Write the close record.
     Close(&'static str),
     /// Write the close record and wake itself in the same lend.
@@ -67,12 +67,25 @@ macro_rules! plain {
     ($lv:ident: $($t:ty),*) => {$(
         impl<L> DataComponent<Mine, L, layer::$lv, ()> for $t where for<'v> L: LineageLists<'v, Mine> {}
         impl<L> Build<Mine, L, layer::$lv, ()> for $t where for<'v> L: LineageLists<'v, Mine> {
-            fn build<'v>(_: &mut ParentsOf<'v, Mine, L, layer::$lv>, _: &ArgsOf<L, layer::$lv>) -> Self {
+            fn build<'v>(_: &mut ParentsOf<'v, Mine, L, layer::$lv>, _: &mut ArgsOf<Mine, L, layer::$lv>) -> Self {
                 Default::default()
             }
         }
     )*};
 }
+
+/// A stand-in part defines no transport parameters.
+macro_rules! no_parameters {
+    ($($part:ty),*) => {$(
+        impl sakuya_wire::parameters::ParametersPart<
+            sakuya_wire::v1::transport_parameters::TransportParameterSpace,
+        > for $part
+        {
+            type Parameters = HNil;
+        }
+    )*};
+}
+no_parameters!(a::Part, b::Part, c::Part);
 
 macro_rules! no_share {
     ($part:ty: $($lv:ident),*) => {$(
@@ -107,7 +120,7 @@ pub mod a {
     {
         fn build<'v>(
             _: &mut ParentsOf<'v, Mine, L, layer::Connection>,
-            _: &ArgsOf<L, layer::Connection>,
+            _: &mut ArgsOf<Mine, L, layer::Connection>,
         ) -> Self {
             Idle(IDLE_AT.with(Cell::get))
         }
@@ -125,7 +138,7 @@ pub mod a {
             lineage: LineageOf<'v, Mine, L, layer::Connection>,
             _: &mut OtherNodes<'v, Mine, L, B>,
             now: Duration,
-        ) -> Option<RequestOf<L>> {
+        ) -> Option<RequestOf<Mine, L>> {
             let (hlist_pat![idle, record], _) = Take::<HList![Idle, Record], J>::take(lineage);
             idle.0 = None;
             record.0.get_or_insert("idle");
@@ -144,7 +157,7 @@ pub mod a {
     {
         fn build<'v>(
             _: &mut ParentsOf<'v, Mine, L, layer::Connection>,
-            _: &ArgsOf<L, layer::Connection>,
+            _: &mut ArgsOf<Mine, L, layer::Connection>,
         ) -> Self {
             Closer
         }
@@ -161,7 +174,7 @@ pub mod a {
             lineage: LineageOf<'v, Mine, L, layer::Connection>,
             others: &mut OtherNodes<'v, Mine, L, B>,
             _: Duration,
-        ) -> Option<RequestOf<L>> {
+        ) -> Option<RequestOf<Mine, L>> {
             lineage.get::<Record, I>().0?;
             if others.has_established() {
                 Some(StructureRequest::EndEstablished)
@@ -186,7 +199,7 @@ pub mod a {
     {
         fn build<'v>(
             _: &mut ParentsOf<'v, Mine, L, layer::LinkPath>,
-            _: &ArgsOf<L, layer::LinkPath>,
+            _: &mut ArgsOf<Mine, L, layer::LinkPath>,
         ) -> Self {
             Role::Active
         }
@@ -210,7 +223,7 @@ pub mod a {
             _: LineageOf<'v, Mine, L, layer::LinkPath>,
             others: &mut OtherNodes<'v, Mine, L, B>,
             now: Duration,
-        ) -> Option<RequestOf<L>> {
+        ) -> Option<RequestOf<Mine, L>> {
             let NodeKey::LinkPath(path, link) = others.here().clone() else {
                 unreachable!()
             };
@@ -221,7 +234,7 @@ pub mod a {
             lineage: LineageOf<'v, Mine, L, layer::LinkPath>,
             others: &mut OtherNodes<'v, Mine, L, B>,
             now: Duration,
-        ) -> Option<RequestOf<L>> {
+        ) -> Option<RequestOf<Mine, L>> {
             if lineage.get::<Record, J>().0.is_none() || *lineage.get::<Role, I>() != Role::Active {
                 return None;
             }
@@ -251,7 +264,7 @@ pub mod a {
     {
         fn build<'v>(
             _: &mut ParentsOf<'v, Mine, L, layer::Recovery>,
-            _: &ArgsOf<L, layer::Recovery>,
+            _: &mut ArgsOf<Mine, L, layer::Recovery>,
         ) -> Self {
             let n = FACTORY_CALLS.with(|c| {
                 c.set(c.get() + 1);
@@ -279,7 +292,7 @@ pub mod a {
     {
         fn build<'v>(
             _: &mut ParentsOf<'v, Mine, L, layer::Established>,
-            _: &ArgsOf<L, layer::Established>,
+            _: &mut ArgsOf<Mine, L, layer::Established>,
         ) -> Self {
             Streams(3)
         }
@@ -305,7 +318,7 @@ pub mod a {
     {
         fn build<'v>(
             _: &mut ParentsOf<'v, Mine, L, layer::LinkEntry>,
-            _: &ArgsOf<L, layer::LinkEntry>,
+            _: &mut ArgsOf<Mine, L, layer::LinkEntry>,
         ) -> Self {
             log("entry built");
             Credit(0)
@@ -367,7 +380,7 @@ pub mod a {
         }
     }
 
-    #[call(yields = StructureRequest<SoleLogicalPath>)]
+    #[call(yields = StructureRequest<SoleLogicalPath, TestLink>)]
     pub async fn watch<W: WatchCapability>(host: &mut impl LentAccess<Family = W>) {
         loop {
             let next = poll_fn(|cx| {
@@ -406,7 +419,7 @@ pub mod a {
     {
         type Call<B: CallBundle> =
             LentCall<NodeCallFamily<Mine, L, layer::Connection, WatchKind, I, B>, Watch>;
-        fn start<B: CallBundle>(_: &ArgsOf<L, layer::Connection>) -> Self::Call<B> {
+        fn start<B: CallBundle>(_: &mut ArgsOf<Mine, L, layer::Connection>) -> Self::Call<B> {
             LentCall::new(Watch::new())
         }
         fn reads(reads: &mut ReadSet) {
@@ -437,7 +450,7 @@ pub mod a {
     {
         type Call<B: CallBundle> =
             LentCall<NodeCallFamily<Mine, L, layer::LinkPath, SendKind, I, B>, SendLoop>;
-        fn start<B: CallBundle>(_: &ArgsOf<L, layer::LinkPath>) -> Self::Call<B> {
+        fn start<B: CallBundle>(_: &mut ArgsOf<Mine, L, layer::LinkPath>) -> Self::Call<B> {
             LentCall::new(SendLoop::new())
         }
         fn reads(reads: &mut ReadSet) {
@@ -467,7 +480,7 @@ pub mod b {
     {
         fn build<'v>(
             _: &mut ParentsOf<'v, Mine, L, layer::Connection>,
-            _: &ArgsOf<L, layer::Connection>,
+            _: &mut ArgsOf<Mine, L, layer::Connection>,
         ) -> Self {
             Seen(0)
         }
@@ -485,7 +498,7 @@ pub mod b {
             lineage: LineageOf<'v, Mine, L, layer::Connection>,
             _: &mut OtherNodes<'v, Mine, L, B>,
             _: Duration,
-        ) -> Option<RequestOf<L>> {
+        ) -> Option<RequestOf<Mine, L>> {
             let reason = lineage.get::<super::a::Record, I>().0;
             let (hlist_pat![seen], _) = Take::<HList![Seen], J>::take(lineage);
             seen.0 += 1;
@@ -520,7 +533,7 @@ pub mod c {
     {
         fn build<'v>(
             _: &mut ParentsOf<'v, Mine, L, layer::Connection>,
-            _: &ArgsOf<L, layer::Connection>,
+            _: &mut ArgsOf<Mine, L, layer::Connection>,
         ) -> Self {
             Ping(0)
         }
@@ -531,7 +544,7 @@ pub mod c {
     {
         fn build<'v>(
             _: &mut ParentsOf<'v, Mine, L, layer::Connection>,
-            _: &ArgsOf<L, layer::Connection>,
+            _: &mut ArgsOf<Mine, L, layer::Connection>,
         ) -> Self {
             Pong(0)
         }
@@ -548,7 +561,7 @@ pub mod c {
             lineage: LineageOf<'v, Mine, L, layer::Connection>,
             _: &mut OtherNodes<'v, Mine, L, B>,
             _: Duration,
-        ) -> Option<RequestOf<L>> {
+        ) -> Option<RequestOf<Mine, L>> {
             let (hlist_pat![ping], _) = Take::<HList![Ping], J>::take(lineage);
             ping.0 += 1;
             None
@@ -566,7 +579,7 @@ pub mod c {
             lineage: LineageOf<'v, Mine, L, layer::Connection>,
             _: &mut OtherNodes<'v, Mine, L, B>,
             _: Duration,
-        ) -> Option<RequestOf<L>> {
+        ) -> Option<RequestOf<Mine, L>> {
             let (hlist_pat![pong], _) = Take::<HList![Pong], J>::take(lineage);
             pong.0 += 1;
             None

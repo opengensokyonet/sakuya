@@ -11,6 +11,11 @@ use core::fmt::Debug;
 
 use sakuya_link::LinkId;
 
+use crate::{
+    clock::ConnectionChoices,
+    share::{ConnectionArgsOf, PartList, PathKey},
+};
+
 /// The connection: one node.
 #[derive(Debug)]
 pub struct Connection;
@@ -46,50 +51,50 @@ mod sealed {
 
 /// A layer of the tree.
 pub trait Layer: sealed::Sealed + 'static {
-    /// The facts a node of this layer is built from; `K` is the key of a
-    /// logical path.
-    type Args<K>;
+    /// The facts a node of this layer is built from, for the choices `T`
+    /// and the list of parts `L`.
+    ///
+    /// The connection node is built from what each part declares it needs
+    /// ([`LayerShare::Args`](crate::share::LayerShare::Args)); the other
+    /// layers are built from structural facts only, and their components
+    /// read what else they need from the nodes above.
+    type Args<T: ConnectionChoices, L: PartList<T>>;
     /// The index of the layer, for the driver's tables.
     #[doc(hidden)]
     const INDEX: usize;
 }
 impl Layer for Connection {
-    type Args<K> = ConnectionArgs;
+    type Args<T: ConnectionChoices, L: PartList<T>> = ConnectionArgsOf<T, L>;
     const INDEX: usize = 0;
 }
 impl Layer for LinkEntry {
-    type Args<K> = LinkEntryArgs;
+    type Args<T: ConnectionChoices, L: PartList<T>> = LinkEntryArgs<T::Link>;
     const INDEX: usize = 1;
 }
 impl Layer for LogicalPath {
-    type Args<K> = LogicalPathArgs<K>;
+    type Args<T: ConnectionChoices, L: PartList<T>> = LogicalPathArgs<PathKey<L>>;
     const INDEX: usize = 2;
 }
 impl Layer for LinkPath {
-    type Args<K> = LinkPathArgs<K>;
+    type Args<T: ConnectionChoices, L: PartList<T>> = LinkPathArgs<PathKey<L>, LinkId>;
     const INDEX: usize = 3;
 }
 impl Layer for Established {
-    type Args<K> = EstablishedArgs;
+    type Args<T: ConnectionChoices, L: PartList<T>> = EstablishedArgs;
     const INDEX: usize = 4;
 }
 impl Layer for Recovery {
-    type Args<K> = RecoveryArgs<K>;
+    type Args<T: ConnectionChoices, L: PartList<T>> = RecoveryArgs<PathKey<L>>;
     const INDEX: usize = 5;
 }
 
-/// The facts the connection node is built from.
-///
-/// The fields of this structure are provisional: it gains the facts that
-/// the connection node's components are built from.
-#[derive(Debug, Default)]
-pub struct ConnectionArgs {}
-
 /// The facts a logical link entry is built from.
 #[derive(Clone, Debug)]
-pub struct LinkEntryArgs {
-    /// The logical link of the entry.
-    pub link: LinkId,
+pub struct LinkEntryArgs<Lk> {
+    /// The connection's clone of the logical link, moved here from the
+    /// request for the first link path over it. The component that keeps
+    /// the clone takes it out when it is built; it is `None` afterwards.
+    pub link: Option<Lk>,
 }
 
 /// The facts a logical path is built from.
@@ -99,13 +104,20 @@ pub struct LogicalPathArgs<K> {
     pub path: K,
 }
 
-/// The facts a link path is built from.
+/// A link path: the key of its logical path and its logical link.
+///
+/// A request to build a link path carries the connection's clone of the
+/// logical link (`Lk` is the link type): the driver moves it into the
+/// entry of the logical link when it builds that entry with this link
+/// path, and drops it when the entry is there already. The link path node
+/// itself is built from the logical link's identity (`Lk` is
+/// [`LinkId`]); its components read the clone from the entry above.
 #[derive(Clone, Debug)]
-pub struct LinkPathArgs<K> {
+pub struct LinkPathArgs<K, Lk> {
     /// The key of the link path's logical path.
     pub path: K,
     /// The link path's logical link.
-    pub link: LinkId,
+    pub link: Lk,
 }
 
 /// The facts the established layer is built from.

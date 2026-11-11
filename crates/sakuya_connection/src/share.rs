@@ -28,6 +28,16 @@ pub trait LayerShare<T, L, Lv> {
     type Units = <Self::Data as SingleUnits>::Units;
     /// The kinds of calls, in the order of their positions after the data.
     type Calls;
+    /// What the part needs given when the node is built, as a list; by
+    /// default nothing.
+    ///
+    /// Only the connection layer uses it: the connection node is built from
+    /// the parts' lists, in the order of the list of parts
+    /// ([`ConnectionArgsOf`]). The other layers are built from structural
+    /// facts, and what a part's components there need otherwise they read
+    /// from the nodes above. A value only one call or component uses once
+    /// is wrapped in an `Option` and taken out when it is built.
+    type Args = HNil;
 }
 
 /// A list of components, each a unit of its own.
@@ -46,15 +56,25 @@ impl<X, Xs: SingleUnits> SingleUnits for HCons<X, Xs> {
 pub trait LayerShares<T, Full, Lv> {
     /// The data of a node: each part's data, in the order of the list.
     type Data;
+    /// What the parts need given when a node is built: each part's list,
+    /// in the order of the list.
+    type Args;
 }
 impl<T, Full, Lv> LayerShares<T, Full, Lv> for HNil {
     type Data = HNil;
+    type Args = HNil;
 }
 impl<T, Full, Lv, P: LayerShare<T, Full, Lv>, Ps: LayerShares<T, Full, Lv>> LayerShares<T, Full, Lv>
     for HCons<P, Ps>
 {
     type Data = HCons<P::Data, Ps::Data>;
+    type Args = HCons<P::Args, Ps::Args>;
 }
+
+/// What the connection node is built from: the list the parts declare in
+/// the connection layer, one for each part in the order of the list of
+/// parts `L`, as a node's data is.
+pub type ConnectionArgsOf<T, L> = <L as LayerShares<T, L, Connection>>::Args;
 
 /// The data of a node of the layer `Lv`.
 pub type NodeData<T, L, Lv> = <L as LayerShares<T, L, Lv>>::Data;

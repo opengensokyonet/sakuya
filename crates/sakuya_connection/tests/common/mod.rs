@@ -3,6 +3,7 @@
 use std::{
     cell::{Cell, RefCell},
     future::Future,
+    num::NonZeroUsize,
     pin::Pin,
     sync::{
         Arc,
@@ -13,6 +14,7 @@ use std::{
 };
 
 use sakuya_connection::clock::{ConnectionChoices, MonotonicClock};
+use sakuya_link::{Link, LinkId, OutgoingDatagram, SendAcceptance};
 
 pub mod parts;
 
@@ -55,10 +57,51 @@ impl MonotonicClock for TestClock {
     }
 }
 
+/// A link of the tests: an identity and nothing else.
+#[derive(Clone, Debug)]
+pub struct TestLink(pub LinkId);
+
+impl Link for TestLink {
+    type Payload = Vec<u8>;
+    type Instant = Duration;
+    type MaxDatagramSizeError = ();
+    type SendError = ();
+    type Send<'a> = core::future::Ready<Result<SendAcceptance<Duration>, ()>>;
+    type MaxDatagramSizeChanged = core::future::Pending<()>;
+    fn id(&self) -> &LinkId {
+        &self.0
+    }
+    fn may_mark_ecn(&self) -> bool {
+        false
+    }
+    fn max_datagram_size(&self) -> Result<usize, ()> {
+        Ok(sakuya_link::MIN_DATAGRAM_SIZE)
+    }
+    fn send<'a>(&self, batch: &'a [OutgoingDatagram]) -> Self::Send<'a> {
+        let count = NonZeroUsize::new(batch.len()).expect("a batch is not empty");
+        core::future::ready(Ok(SendAcceptance { count, at: now() }))
+    }
+    fn max_datagram_size_changed(&self) -> Self::MaxDatagramSizeChanged {
+        core::future::pending()
+    }
+}
+
 /// The choices of the tests' compositions.
 pub struct Mine;
 impl ConnectionChoices for Mine {
     type Clock = TestClock;
+    type Link = TestLink;
+}
+impl sakuya_connection::v1::Choices for Mine {
+    type Crypto = sakuya_packet_protection::backend::ring::RingBackend;
+    type Side = sakuya_connection::v1::Server;
+}
+
+/// What the part `P`, which declares nothing the connection node needs, is
+/// given: one per part, so a composition's facts are written by its parts.
+#[allow(clippy::extra_unused_type_parameters)] // the part names the slot
+pub fn nothing<P>() -> sakuya_wire::parts::HNil {
+    sakuya_wire::parts::HNil
 }
 
 pub fn ms(n: u64) -> Duration {
