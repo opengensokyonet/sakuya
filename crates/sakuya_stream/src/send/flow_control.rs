@@ -16,6 +16,7 @@
 //! mechanism queries it at a sending opportunity
 //! ([`SendFlowControlPolicy::wants_stream_data_blocked`]). The frame's limit
 //! is always the current peer stream limit.
+use super::local_reset::{LocalReset, LocalResetTarget};
 use super::{EndSource, SendEndState, SendTerminalState};
 use sakuya_wire::v1::stream_id::StreamId;
 use sakuya_wire::var_int::VarInt;
@@ -33,7 +34,7 @@ use snafu::{ResultExt, Snafu, ensure};
 /// attempt's ceiling at that attempt's offset. The stream sender checks this
 /// before it consumes any input and panics on a guard that violates it: that
 /// is a defect of the policy, not an error of the write.
-pub trait SendFlowControlPolicy {
+pub trait SendFlowControlPolicy<T: LocalResetTarget = LocalReset> {
     /// Decides the admission of one write attempt.
     ///
     /// Returns a guard for at most [`WriteAttempt::ceiling`] bytes, or `None`
@@ -46,7 +47,7 @@ pub trait SendFlowControlPolicy {
     fn admit_write(
         &mut self,
         attempt: &WriteAttempt,
-        context: &SendFlowContext,
+        context: &SendFlowContext<T>,
     ) -> Option<AdmissionGuard>;
 
     /// Takes back a guard whose attempt appended `used` bytes, with
@@ -54,21 +55,26 @@ pub trait SendFlowControlPolicy {
     ///
     /// The appended range is `guard.offset()..guard.offset() + used`; no
     /// separate append event follows.
-    fn on_admission_used(&mut self, guard: AdmissionGuard, used: VarInt, context: &SendFlowContext);
+    fn on_admission_used(
+        &mut self,
+        guard: AdmissionGuard,
+        used: VarInt,
+        context: &SendFlowContext<T>,
+    );
 
     /// Takes back a guard whose attempt appended nothing because no
     /// connection credit was available.
-    fn on_admission_abandoned(&mut self, guard: AdmissionGuard, context: &SendFlowContext);
+    fn on_admission_abandoned(&mut self, guard: AdmissionGuard, context: &SendFlowContext<T>);
 
     /// Observes an event; the policy may update its signal intent.
     ///
     /// Events cannot produce admission for a later attempt.
-    fn on_flow_event(&mut self, event: StreamCreditEvent, context: &SendFlowContext);
+    fn on_flow_event(&mut self, event: StreamCreditEvent, context: &SendFlowContext<T>);
 
     /// Whether a `STREAM_DATA_BLOCKED` frame should be sent now.
     ///
     /// Querying neither consumes the intent nor counts as sending.
-    fn wants_stream_data_blocked(&self, context: &SendFlowContext) -> bool;
+    fn wants_stream_data_blocked(&self, context: &SendFlowContext<T>) -> bool;
 }
 
 /// The admission granted to one write attempt.
@@ -195,7 +201,7 @@ impl WriteAttempt {
 /// The stream facts a flow-control policy reads when deciding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct SendFlowContext {
+pub struct SendFlowContext<T: LocalResetTarget = LocalReset> {
     /// The stream's ID.
     pub stream_id: StreamId,
     /// The written end.
@@ -207,7 +213,7 @@ pub struct SendFlowContext {
     /// The write limit end, if set.
     pub write_limit_end: Option<VarInt>,
     /// The end state.
-    pub end_state: SendEndState,
+    pub end_state: SendEndState<T>,
     /// The terminal state, once reached.
     pub terminal_state: Option<SendTerminalState>,
 }
@@ -279,11 +285,11 @@ impl FullCeilingAdmission {
     }
 }
 
-impl SendFlowControlPolicy for FullCeilingAdmission {
+impl<T: LocalResetTarget> SendFlowControlPolicy<T> for FullCeilingAdmission {
     fn admit_write(
         &mut self,
         attempt: &WriteAttempt,
-        context: &SendFlowContext,
+        context: &SendFlowContext<T>,
     ) -> Option<AdmissionGuard> {
         if attempt.is_stream_limited() && self.signalled_limit != Some(context.peer_stream_limit) {
             self.wants_signal = true;
@@ -291,11 +297,11 @@ impl SendFlowControlPolicy for FullCeilingAdmission {
         AdmissionGuard::new(attempt, attempt.ceiling).ok()
     }
 
-    fn on_admission_used(&mut self, _: AdmissionGuard, _: VarInt, _: &SendFlowContext) {}
+    fn on_admission_used(&mut self, _: AdmissionGuard, _: VarInt, _: &SendFlowContext<T>) {}
 
-    fn on_admission_abandoned(&mut self, _: AdmissionGuard, _: &SendFlowContext) {}
+    fn on_admission_abandoned(&mut self, _: AdmissionGuard, _: &SendFlowContext<T>) {}
 
-    fn on_flow_event(&mut self, event: StreamCreditEvent, context: &SendFlowContext) {
+    fn on_flow_event(&mut self, event: StreamCreditEvent, context: &SendFlowContext<T>) {
         match event {
             StreamCreditEvent::PeerStreamLimitIncreased { .. } => self.wants_signal = false,
             StreamCreditEvent::StreamBlockedSignalSent { stream_data_limit } => {
@@ -308,7 +314,7 @@ impl SendFlowControlPolicy for FullCeilingAdmission {
         }
     }
 
-    fn wants_stream_data_blocked(&self, _: &SendFlowContext) -> bool {
+    fn wants_stream_data_blocked(&self, _: &SendFlowContext<T>) -> bool {
         self.wants_signal
     }
 }

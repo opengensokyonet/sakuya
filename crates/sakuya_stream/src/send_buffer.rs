@@ -16,7 +16,6 @@ use crate::connection_send_credit::ConnectionCreditReservation;
 use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
 use bytes::Bytes;
 use covered_bytes::CoveredBytes;
-use sakuya_wire::reset_stream_at::ReliableSizeError;
 use sakuya_wire::var_int::VarInt;
 use snafu::{Snafu, ensure};
 use visibility::{
@@ -93,8 +92,7 @@ pub trait StreamSendBuffer {
     /// monotonically.
     ///
     /// Data uses the end of the range it carries, with `content` set to
-    /// [`ExposedContent::Data`]; a FIN, a `RESET_STREAM` or a
-    /// `RESET_STREAM_AT` uses the final size, with `content` set to
+    /// [`ExposedContent::Data`]; a FIN or a reset frame uses the final size, with `content` set to
     /// [`ExposedContent::FinalSize`], even when no data is left to send. Each
     /// reservation that covers newly exposed usage commits itself. Returns the
     /// newly committed amount, `max(E, usage_end) − E`; usage at or below the
@@ -185,7 +183,7 @@ pub enum ApplyResetError {
     #[snafu(display("the reset retention keeps a reliable size beyond its final size"))]
     ReliableSizeBeyondFinalSize {
         /// The requested reliable size and final size.
-        source: ReliableSizeError,
+        source: ReliableSizeBeyondFinalSizeError,
     },
     /// The final size lies beyond the written end.
     #[snafu(display("the reset retention keeps a final size beyond the written end"))]
@@ -242,12 +240,51 @@ impl FinalSizeBeyondWrittenEndError {
     }
 }
 
+/// A reset retention keeps a reliable size beyond its final size: data
+/// beyond the end of the stream cannot be delivered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("reliable size {reliable_size} lies beyond the final size {final_size}"))]
+pub struct ReliableSizeBeyondFinalSizeError {
+    final_size: VarInt,
+    reliable_size: VarInt,
+}
+
+impl ReliableSizeBeyondFinalSizeError {
+    /// Checks that `reliable_size` is at most `final_size`.
+    ///
+    /// # Errors
+    ///
+    /// [`ReliableSizeBeyondFinalSizeError`] if `reliable_size` lies beyond
+    /// `final_size`.
+    pub fn check(final_size: VarInt, reliable_size: VarInt) -> Result<(), Self> {
+        ensure!(
+            reliable_size <= final_size,
+            ReliableSizeBeyondFinalSizeSnafu {
+                final_size,
+                reliable_size,
+            }
+        );
+        Ok(())
+    }
+
+    /// The final size.
+    pub const fn final_size(self) -> VarInt {
+        self.final_size
+    }
+
+    /// The rejected reliable size, beyond [`final_size`](Self::final_size).
+    pub const fn reliable_size(self) -> VarInt {
+        self.reliable_size
+    }
+}
+
 /// The retention a reset leaves to a send buffer (`ResetRetention`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResetRetention {
     /// The final size of the stream; coverage below it is retained.
     pub final_size: VarInt,
-    /// The reliable size: data below it must still be delivered.
+    /// The reliable size: data below it must still be delivered. It is zero
+    /// for a reset that abandons all data.
     pub reliable_size: VarInt,
 }
 

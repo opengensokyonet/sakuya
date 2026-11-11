@@ -1,12 +1,12 @@
-//! The reliable stream reset extension for the receive direction of a
-//! stream, as specified by the Internet-Draft
+//! The reliable stream reset extension, as specified by the Internet-Draft
 //! [draft-ietf-quic-reliable-stream-reset-11]. The draft is not an RFC and
 //! may still change.
 //!
-//! With the extension the peer can reset a stream and still deliver a prefix
-//! of it reliably: a `RESET_STREAM_AT` frame states a reliable size next to
-//! the error code and the final size. This module adds that to the stream
-//! receiver without changing the receiver of RFC 9000:
+//! With the extension an endpoint can reset a stream and still deliver a
+//! prefix of it reliably: a `RESET_STREAM_AT` frame states a reliable size
+//! next to the error code and the final size. The send direction is in
+//! [`send`]. For the receive direction this module adds the extension to the
+//! stream receiver without changing the receiver of RFC 9000:
 //!
 //! - [`RemoteResetAt`] is the type of reset facts that keeps a reliable
 //!   size. A [`StreamReceiver`] of these facts,
@@ -306,6 +306,8 @@ where
             })
     }
 }
+
+pub mod send;
 
 #[cfg(test)]
 mod tests;

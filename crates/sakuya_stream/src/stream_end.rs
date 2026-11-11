@@ -1,20 +1,19 @@
 //! Rules about the end of a stream that both directions apply.
 //!
 //! The send direction checks them for local calls, the receive direction for
-//! the peer's frames ([RFC 9000 §4.5], draft-ietf-quic-reliable-stream-reset-11
-//! §5); each failure is defined once here and wrapped by the errors of both.
+//! the peer's frames ([RFC 9000 §4.5], [RFC 9000 §13.3]; with the reliable
+//! stream reset extension also draft-ietf-quic-reliable-stream-reset-11 §5);
+//! each failure is defined once here and wrapped by the errors of both.
 //!
 //! - [`FinalSizeChangeError`]: a final size, once known, does not change.
 //! - [`BeyondFinalSizeError`]: stream data does not pass the final size.
 //! - [`ResetCodeChangeError`]: the error code of a reset does not change.
 //!
-//! The rule that a reliable size is at most the final size is
-//! [`ReliableSizeError`](sakuya_wire::reset_stream_at::ReliableSizeError).
-//!
 //! Each error has private fields and is constructed only by its `check` when
 //! the check fails, so it holds only values for which the rule fails.
 //!
 //! [RFC 9000 §4.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-4.5
+//! [RFC 9000 §13.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-13.3
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
 use sakuya_wire::var_int::VarInt;
 use snafu::{Snafu, ensure};

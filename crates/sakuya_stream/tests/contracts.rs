@@ -25,6 +25,7 @@ use sakuya_stream::send::flow_control::{
     AdmissionGuard, FullCeilingAdmission, SendFlowContext, SendFlowControlPolicy,
     StreamCreditEvent, WriteAttempt,
 };
+use sakuya_stream::send::local_reset::LocalReset;
 use sakuya_stream::send::termination::{
     FinalSizeRequest, SendTerminationContext, SendTerminationEvent, SendTerminationPolicy,
     TerminationAction,
@@ -86,7 +87,6 @@ where
     StreamSender::new(
         StreamId::from_var_int(v(0)),
         v(1000),
-        true,
         SendComposition::new(
             OffsetMapStreamSendBuffer::new(),
             FullCeilingAdmission::new(),
@@ -112,11 +112,11 @@ fn an_illegal_automatic_reset_changes_nothing_before_the_panic() {
     let connection = Arc::new(AtomicConnectionSendFlowController::new(v(1000)));
     let mut stream = sender(&connection, |event, context| match event {
         SendTerminationEvent::StopSendingReceived { error_code } => {
-            TerminationAction::Reset {
+            TerminationAction::Reset(LocalReset {
                 error_code: *error_code,
                 // Beyond the written end.
                 final_size: context.written_end.saturating_add(v(1)),
-            }
+            })
         }
         _ => TerminationAction::Keep,
     });
@@ -174,10 +174,9 @@ impl SendFlowControlPolicy for StaleOffset {
 #[test]
 fn a_stale_guard_consumes_nothing_before_the_panic() {
     let connection = Arc::new(AtomicConnectionSendFlowController::new(v(1000)));
-    let mut stream = StreamSender::new(
+    let mut stream = StreamSender::<_, _, LocalReset>::new(
         StreamId::from_var_int(v(0)),
         v(1000),
-        true,
         SendComposition::new(
             OffsetMapStreamSendBuffer::new(),
             StaleOffset,
@@ -206,15 +205,7 @@ fn repeated_automatic_decisions_end_the_chain() {
         assert!(events < 64, "the chain of receipts does not end");
         match context.end_state {
             SendEndState::Open | SendEndState::Closed { .. } => TerminationAction::Close,
-            SendEndState::Reset {
-                error_code,
-                final_size,
-                ..
-            } => TerminationAction::Reset {
-                error_code,
-                final_size,
-            },
-            SendEndState::ResetAt { target, .. } => TerminationAction::ResetAt(target),
+            SendEndState::Reset { target, .. } => TerminationAction::Reset(target),
         }
     });
     write(&mut stream, 10);

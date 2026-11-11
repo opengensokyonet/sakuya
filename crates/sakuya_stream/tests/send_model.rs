@@ -6,6 +6,12 @@
 //! and coverage), and the end state. After every operation the implementation
 //! must agree with it, and the monotonic and conservation invariants of
 //! RFC 9000 §3–§4 must hold.
+//!
+//! The sender under test is the one of RFC 9000 resets. With the
+//! `reset_stream_at` feature it is the one that also ends a stream with
+//! `RESET_STREAM_AT`, and the model follows
+//! draft-ietf-quic-reliable-stream-reset-11 for it; [`dialect`] holds what
+//! differs between the two.
 
 use bytes::{Buf, Bytes};
 use proptest::prelude::*;
@@ -16,34 +22,281 @@ use sakuya_stream::connection_send_credit::{
 };
 use sakuya_stream::send::composition::{DefaultSendComposition, SendComposition};
 use sakuya_stream::send::finish::{
-    CloseError, PlainResetEffectiveError, ProtocolTerminalError, ReliablePrefixNotPreparedError,
-    ReliableSizeIncreaseError, ResetAtError, ResetAtWithFinalSizeError, ResetError,
-    ResetStreamAtNotNegotiatedError, ResetWithFinalSizeError,
+    CloseError, ProtocolTerminalError, ResetError, ResetWithFinalSizeError,
 };
 use sakuya_stream::send::flow_control::{
     AdmissionGuard, SendFlowContext, SendFlowControlPolicy, StreamCreditEvent, WriteAttempt,
 };
+use sakuya_stream::send::local_reset::LocalResetTarget;
 use sakuya_stream::send::termination::{
     FinalSizeRequest, SendTerminationContext, SendTerminationEvent, SendTerminationPolicy,
     TerminationAction,
 };
 use sakuya_stream::send::write::{FlushError, WriteError, WriteOutcome, WriteWait};
 use sakuya_stream::send::{
-    EndSource, EnterTerminalStateError, ResetTarget, SendEndState, SendTerminalState,
-    SenderExposeUsageError, StreamEndFrame, StreamResetError, StreamSender,
+    EndSource, EnterTerminalStateError, SendEndState, SendTerminalState, SenderExposeUsageError,
+    StreamEndFrame, StreamResetError, StreamSender,
 };
 use sakuya_stream::send_buffer::offset_map::OffsetMapStreamSendBuffer;
 use sakuya_stream::send_buffer::visibility::FinalSizeBelowExposureError;
 use sakuya_stream::send_buffer::{FinalSizeBeyondWrittenEndError, UsageBeyondWrittenEndError};
 use sakuya_stream::stream_end::{BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError};
 use sakuya_wire::frame::UndecidedLength;
-use sakuya_wire::reset_stream_at::{ReliableSizeError, ResetStreamAtFrame};
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
 use sakuya_wire::v1::frame::reset_stream::ResetStreamFrame;
 use sakuya_wire::v1::frame::stream::StreamFrame;
 use sakuya_wire::v1::stream_id::StreamId;
 use sakuya_wire::var_int::{VarInt, VarIntField};
 use std::sync::Arc;
+
+/// The reset target of the senders under test.
+type Target = dialect::Target;
+
+/// The end frame they give.
+type EndFrame = StreamEndFrame<<Target as LocalResetTarget>::Frame>;
+
+/// The sender under test over the composition `C`.
+type SenderOf<C> = StreamSender<C, AtomicConnectionSendFlowController, Target>;
+
+/// The failure of a reset request, whichever operation it was made with.
+/// The failures only a reset with a reliable size meets carry plain numbers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ResetFailure {
+    ConnectionClosed(ConnectionClosedError),
+    ErrorCodeConflict(ResetCodeChangeError),
+    FinalSizeConflictsWithReset(FinalSizeChangeError),
+    FinalSizeConflictsWithClose(FinalSizeChangeError),
+    ProtocolTerminal(ProtocolTerminalError),
+    ReliableSizeIncrease { effective: u64, requested: u64 },
+    PlainResetEffective,
+    ReliablePrefixNotPrepared { reliable: u64, written: u64 },
+    FinalSizeBelowReliableSize { final_size: u64, reliable: u64 },
+    FinalSizeBelowExposure(FinalSizeBelowExposureError),
+    FinalSizeBeyondWrittenEnd(FinalSizeBeyondWrittenEndError),
+}
+
+impl From<ResetError> for ResetFailure {
+    fn from(error: ResetError) -> Self {
+        match error {
+            ResetError::ConnectionClosed { source } => Self::ConnectionClosed(source),
+            ResetError::ErrorCodeConflict { source } => Self::ErrorCodeConflict(source),
+            ResetError::ProtocolTerminal { source } => Self::ProtocolTerminal(source),
+        }
+    }
+}
+
+impl From<ResetWithFinalSizeError> for ResetFailure {
+    fn from(error: ResetWithFinalSizeError) -> Self {
+        use ResetWithFinalSizeError as E;
+        match error {
+            E::ConnectionClosed { source } => Self::ConnectionClosed(source),
+            E::ErrorCodeConflict { source } => Self::ErrorCodeConflict(source),
+            E::FinalSizeConflictsWithReset { source } => Self::FinalSizeConflictsWithReset(source),
+            E::FinalSizeConflictsWithClose { source } => Self::FinalSizeConflictsWithClose(source),
+            E::ProtocolTerminal { source } => Self::ProtocolTerminal(source),
+            E::FinalSizeBelowExposure { source } => Self::FinalSizeBelowExposure(source),
+            E::FinalSizeBeyondWrittenEnd { source } => Self::FinalSizeBeyondWrittenEnd(source),
+        }
+    }
+}
+
+/// The reset in effect as the model states it: `reliable` is `None` for one
+/// committed with `reset`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EffectiveReset {
+    code: ApplicationErrorCode,
+    reliable: Option<VarInt>,
+    final_size: VarInt,
+}
+
+/// The sender of RFC 9000 resets: every reset ends with `RESET_STREAM`.
+#[cfg(not(feature = "reset_stream_at"))]
+mod dialect {
+    use super::{EffectiveReset, ResetFailure, SenderOf};
+    use sakuya_stream::connection_send_credit::AtomicConnectionCreditReservation;
+    use sakuya_stream::send::flow_control::SendFlowControlPolicy;
+    use sakuya_stream::send::local_reset::LocalReset;
+    use sakuya_stream::send::termination::SendTerminationPolicy;
+    use sakuya_stream::send_buffer::StreamSendBuffer;
+    use sakuya_wire::v1::application_error::ApplicationErrorCode;
+    use sakuya_wire::v1::frame::reset_stream::ResetStreamFrame;
+    use sakuya_wire::v1::stream_id::StreamId;
+    use sakuya_wire::var_int::VarInt;
+
+    pub type Target = LocalReset;
+
+    /// Whether the application also resets with a reliable size.
+    pub const RESETS_AT: bool = false;
+
+    pub fn request<C>(
+        sender: &mut SenderOf<C>,
+        reliable: Option<VarInt>,
+        code: ApplicationErrorCode,
+        final_size: Option<VarInt>,
+    ) -> Result<(), ResetFailure>
+    where
+        C: StreamSendBuffer<Reservation = AtomicConnectionCreditReservation>
+            + SendFlowControlPolicy
+            + SendTerminationPolicy,
+    {
+        assert_eq!(reliable, None, "this sender has no reset_at");
+        match final_size {
+            None => Ok(sender.reset(code)?),
+            Some(size) => Ok(sender.reset_with_final_size(code, size)?),
+        }
+    }
+
+    pub fn effective(target: Target) -> EffectiveReset {
+        EffectiveReset {
+            code: target.error_code,
+            reliable: None,
+            final_size: target.final_size,
+        }
+    }
+
+    pub fn frame(
+        _stream: StreamId,
+        plain: ResetStreamFrame,
+        reliable: Option<VarInt>,
+    ) -> ResetStreamFrame {
+        assert_eq!(reliable, None, "this sender has no RESET_STREAM_AT");
+        plain
+    }
+}
+
+/// The sender that also ends a stream with `RESET_STREAM_AT`.
+#[cfg(feature = "reset_stream_at")]
+mod dialect {
+    use super::{EffectiveReset, ResetFailure, SenderOf};
+    use sakuya_stream::connection_send_credit::AtomicConnectionCreditReservation;
+    use sakuya_stream::reset_stream_at::send::{
+        LocalResetAt, LocalResetAtFrame, PeerResetStreamAtSupport, ResetAtError,
+        ResetAtWithFinalSizeError,
+    };
+    use sakuya_stream::send::flow_control::SendFlowControlPolicy;
+    use sakuya_stream::send::termination::SendTerminationPolicy;
+    use sakuya_stream::send_buffer::StreamSendBuffer;
+    use sakuya_wire::reset_stream_at::{ResetStreamAt, ResetStreamAtFrame};
+    use sakuya_wire::v1::application_error::ApplicationErrorCode;
+    use sakuya_wire::v1::frame::reset_stream::ResetStreamFrame;
+    use sakuya_wire::v1::stream_id::StreamId;
+    use sakuya_wire::var_int::{VarInt, VarIntField};
+
+    pub type Target = LocalResetAt;
+
+    /// Whether the application also resets with a reliable size.
+    pub const RESETS_AT: bool = true;
+
+    const SUPPORT: PeerResetStreamAtSupport =
+        PeerResetStreamAtSupport::from_peer_parameter(ResetStreamAt);
+
+    impl From<ResetAtWithFinalSizeError> for ResetFailure {
+        fn from(error: ResetAtWithFinalSizeError) -> Self {
+            use ResetAtWithFinalSizeError as E;
+            match error {
+                E::ConnectionClosed { source } => Self::ConnectionClosed(source),
+                E::ErrorCodeConflict { source } => Self::ErrorCodeConflict(source),
+                E::FinalSizeConflictsWithReset { source } => {
+                    Self::FinalSizeConflictsWithReset(source)
+                }
+                E::FinalSizeConflictsWithClose { source } => {
+                    Self::FinalSizeConflictsWithClose(source)
+                }
+                E::ProtocolTerminal { source } => Self::ProtocolTerminal(source),
+                E::ReliableSizeIncrease { source } => Self::ReliableSizeIncrease {
+                    effective: source.effective().get(),
+                    requested: source.requested().get(),
+                },
+                E::PlainResetEffective { .. } => Self::PlainResetEffective,
+                E::ReliablePrefixNotPrepared { source } => Self::ReliablePrefixNotPrepared {
+                    reliable: source.reliable_size().get(),
+                    written: source.written_end().get(),
+                },
+                E::FinalSizeBelowReliableSize { source } => Self::FinalSizeBelowReliableSize {
+                    final_size: source.final_size().get(),
+                    reliable: source.reliable_size().get(),
+                },
+                E::FinalSizeBelowExposure { source } => Self::FinalSizeBelowExposure(source),
+                E::FinalSizeBeyondWrittenEnd { source } => Self::FinalSizeBeyondWrittenEnd(source),
+            }
+        }
+    }
+
+    impl From<ResetAtError> for ResetFailure {
+        fn from(error: ResetAtError) -> Self {
+            use ResetAtError as E;
+            match error {
+                E::ConnectionClosed { source } => Self::ConnectionClosed(source),
+                E::ErrorCodeConflict { source } => Self::ErrorCodeConflict(source),
+                E::ProtocolTerminal { source } => Self::ProtocolTerminal(source),
+                E::ReliableSizeIncrease { source } => Self::ReliableSizeIncrease {
+                    effective: source.effective().get(),
+                    requested: source.requested().get(),
+                },
+                E::PlainResetEffective { .. } => Self::PlainResetEffective,
+                E::ReliablePrefixNotPrepared { source } => Self::ReliablePrefixNotPrepared {
+                    reliable: source.reliable_size().get(),
+                    written: source.written_end().get(),
+                },
+            }
+        }
+    }
+
+    pub fn request<C>(
+        sender: &mut SenderOf<C>,
+        reliable: Option<VarInt>,
+        code: ApplicationErrorCode,
+        final_size: Option<VarInt>,
+    ) -> Result<(), ResetFailure>
+    where
+        C: StreamSendBuffer<Reservation = AtomicConnectionCreditReservation>
+            + SendFlowControlPolicy<Target>
+            + SendTerminationPolicy<Target>,
+    {
+        match (reliable, final_size) {
+            (None, None) => Ok(sender.reset(code)?),
+            (None, Some(size)) => Ok(sender.reset_with_final_size(code, size)?),
+            (Some(reliable), None) => Ok(sender.reset_at(SUPPORT, code, reliable)?),
+            (Some(reliable), Some(size)) => {
+                Ok(sender.reset_at_with_final_size(SUPPORT, code, reliable, size)?)
+            }
+        }
+    }
+
+    pub fn effective(target: Target) -> EffectiveReset {
+        match target {
+            LocalResetAt::Reset(reset) => EffectiveReset {
+                code: reset.error_code,
+                reliable: None,
+                final_size: reset.final_size,
+            },
+            LocalResetAt::ResetAt(target) => EffectiveReset {
+                code: target.error_code(),
+                reliable: Some(target.reliable_size()),
+                final_size: target.final_size(),
+            },
+        }
+    }
+
+    pub fn frame(
+        stream: StreamId,
+        plain: ResetStreamFrame,
+        reliable: Option<VarInt>,
+    ) -> LocalResetAtFrame {
+        match reliable {
+            None => LocalResetAtFrame::ResetStream(plain),
+            Some(reliable) => LocalResetAtFrame::ResetStreamAt(
+                ResetStreamAtFrame::new(
+                    VarIntField::shortest(stream),
+                    plain.application_error_code(),
+                    plain.final_size(),
+                    VarIntField::shortest(reliable),
+                )
+                .unwrap(),
+            ),
+        }
+    }
+}
 
 const STREAMS: usize = 2;
 const ABANDON_CODE: u32 = 77;
@@ -139,7 +392,7 @@ fn op() -> impl Strategy<Value = Op> {
         4 => (stream.clone(), any::<bool>(), 1u32..4, 0u64..300, prop::option::of(0u64..400))
             .prop_map(|(stream, at, code, reliable, final_size)| Op::Reset {
                 stream,
-                at,
+                at: at && dialect::RESETS_AT,
                 code,
                 reliable,
                 final_size,
@@ -250,22 +503,22 @@ struct Chunked {
     chunk: u64,
 }
 
-impl SendFlowControlPolicy for Chunked {
+impl<T: LocalResetTarget> SendFlowControlPolicy<T> for Chunked {
     fn admit_write(
         &mut self,
         attempt: &WriteAttempt,
-        _context: &SendFlowContext,
+        _context: &SendFlowContext<T>,
     ) -> Option<AdmissionGuard> {
         AdmissionGuard::new(attempt, attempt.ceiling.min(v(self.chunk))).ok()
     }
 
-    fn on_admission_used(&mut self, _: AdmissionGuard, _: VarInt, _: &SendFlowContext) {}
+    fn on_admission_used(&mut self, _: AdmissionGuard, _: VarInt, _: &SendFlowContext<T>) {}
 
-    fn on_admission_abandoned(&mut self, _: AdmissionGuard, _: &SendFlowContext) {}
+    fn on_admission_abandoned(&mut self, _: AdmissionGuard, _: &SendFlowContext<T>) {}
 
-    fn on_flow_event(&mut self, _: StreamCreditEvent, _: &SendFlowContext) {}
+    fn on_flow_event(&mut self, _: StreamCreditEvent, _: &SendFlowContext<T>) {}
 
-    fn wants_stream_data_blocked(&self, _: &SendFlowContext) -> bool {
+    fn wants_stream_data_blocked(&self, _: &SendFlowContext<T>) -> bool {
         false
     }
 }
@@ -276,14 +529,14 @@ struct Narrowing {
     stops: u64,
 }
 
-impl SendTerminationPolicy for Narrowing {
+impl<T: LocalResetTarget> SendTerminationPolicy<T> for Narrowing {
     type WriteLimitReason = u64;
 
     fn on_termination_event(
         &mut self,
         event: SendTerminationEvent,
-        context: &SendTerminationContext,
-    ) -> TerminationAction<u64> {
+        context: &SendTerminationContext<T>,
+    ) -> TerminationAction<u64, T> {
         if let SendTerminationEvent::StopSendingReceived { .. } = event {
             self.stops += 1;
             if !context.connection_closed
@@ -305,8 +558,8 @@ impl SendTerminationPolicy for Narrowing {
 
     fn complete_final_size(
         &mut self,
-        request: FinalSizeRequest,
-        _context: &SendTerminationContext,
+        request: FinalSizeRequest<T>,
+        _context: &SendTerminationContext<T>,
     ) -> VarInt {
         request.maximum
     }
@@ -349,7 +602,6 @@ struct ModelStream {
     exposed_final: Option<u64>,
     /// The end frames whose exposure succeeded.
     sent_fin: bool,
-    sent_reset_stream_at: bool,
     last_reset_frame: Option<ModelResetFrame>,
     terminal: Option<SendTerminalState>,
     stop_code: Option<u32>,
@@ -371,7 +623,6 @@ impl ModelStream {
             end_source: EndSource::Application,
             exposed_final: None,
             sent_fin: false,
-            sent_reset_stream_at: false,
             last_reset_frame: None,
             terminal: None,
             stop_code: None,
@@ -431,7 +682,6 @@ struct Model<P> {
     policy: P,
     streams: [ModelStream; STREAMS],
     limit: u64,
-    reset_stream_at: bool,
 }
 
 impl<P: PolicyModel> Model<P> {
@@ -459,15 +709,16 @@ trait Sender {
     fn expose(&mut self, usage_end: VarInt) -> Result<VarInt, SenderExposeUsageError>;
     /// Prepares the end frame that is due; exposes it if `expose`, drops the
     /// guard otherwise. Returns the frame and the newly committed credit.
-    fn end_frame(&mut self, expose: bool) -> Option<(StreamEndFrame, Option<VarInt>)>;
+    fn end_frame(&mut self, expose: bool) -> Option<(EndFrame, Option<VarInt>)>;
     fn sender_close(&mut self) -> Result<(), CloseError>;
+    /// Requests a reset: with `reset_at` and its variant if `reliable` is a
+    /// size, with `reset` and its variant otherwise.
     fn request(
         &mut self,
-        at: bool,
+        reliable: Option<VarInt>,
         code: ApplicationErrorCode,
-        reliable: VarInt,
         final_size: Option<VarInt>,
-    ) -> Result<(), ResetAtWithFinalSizeError>;
+    ) -> Result<(), ResetFailure>;
     fn stop(&mut self, code: ApplicationErrorCode);
     fn abandon(&mut self);
     fn blocked_limit(&self) -> Option<VarInt>;
@@ -475,61 +726,6 @@ trait Sender {
     fn terminal(&mut self, state: SendTerminalState) -> Result<(), EnterTerminalStateError>;
     fn close_connection(&mut self);
     fn snapshot(&self) -> Snapshot;
-}
-
-/// The failure of `reset` as one of `reset_at_with_final_size`.
-fn widen_reset(error: ResetError) -> ResetAtWithFinalSizeError {
-    use ResetAtWithFinalSizeError as General;
-    match error {
-        ResetError::ConnectionClosed { source } => General::ConnectionClosed { source },
-        ResetError::ErrorCodeConflict { source } => General::ErrorCodeConflict { source },
-        ResetError::ProtocolTerminal { source } => General::ProtocolTerminal { source },
-    }
-}
-
-/// The failure of `reset_at` as one of `reset_at_with_final_size`.
-fn widen_reset_at(error: ResetAtError) -> ResetAtWithFinalSizeError {
-    use ResetAtWithFinalSizeError as General;
-    match error {
-        ResetAtError::ConnectionClosed { source } => General::ConnectionClosed { source },
-        ResetAtError::ErrorCodeConflict { source } => General::ErrorCodeConflict { source },
-        ResetAtError::ReliableSizeIncrease { source } => General::ReliableSizeIncrease { source },
-        ResetAtError::ProtocolTerminal { source } => General::ProtocolTerminal { source },
-        ResetAtError::PlainResetEffective { source } => General::PlainResetEffective { source },
-        ResetAtError::UnsupportedExtension { source } => General::UnsupportedExtension { source },
-        ResetAtError::ReliablePrefixNotPrepared { source } => {
-            General::ReliablePrefixNotPrepared { source }
-        }
-    }
-}
-
-/// The failure of `reset_with_final_size` as one of
-/// `reset_at_with_final_size`.
-fn widen_reset_with_final_size(error: ResetWithFinalSizeError) -> ResetAtWithFinalSizeError {
-    use ResetAtWithFinalSizeError as General;
-    match error {
-        ResetWithFinalSizeError::ConnectionClosed { source } => {
-            General::ConnectionClosed { source }
-        }
-        ResetWithFinalSizeError::ErrorCodeConflict { source } => {
-            General::ErrorCodeConflict { source }
-        }
-        ResetWithFinalSizeError::FinalSizeConflictsWithReset { source } => {
-            General::FinalSizeConflictsWithReset { source }
-        }
-        ResetWithFinalSizeError::FinalSizeConflictsWithClose { source } => {
-            General::FinalSizeConflictsWithClose { source }
-        }
-        ResetWithFinalSizeError::ProtocolTerminal { source } => {
-            General::ProtocolTerminal { source }
-        }
-        ResetWithFinalSizeError::FinalSizeBelowExposure { source } => {
-            General::FinalSizeBelowExposure { source }
-        }
-        ResetWithFinalSizeError::FinalSizeBeyondWrittenEnd { source } => {
-            General::FinalSizeBeyondWrittenEnd { source }
-        }
-    }
 }
 
 /// The kinds of write failure the contract distinguishes.
@@ -547,7 +743,7 @@ struct Snapshot {
     written: VarInt,
     limit: VarInt,
     exposure: VarInt,
-    end: SendEndState,
+    end: SendEndState<Target>,
     reliable: VarInt,
     write_limit: Option<VarInt>,
     write_limit_reason: Option<u64>,
@@ -560,7 +756,7 @@ struct Snapshot {
 
 macro_rules! impl_sender {
     ($composition:ty, $reason:expr) => {
-        impl Sender for StreamSender<$composition, AtomicConnectionSendFlowController> {
+        impl Sender for SenderOf<$composition> {
             fn write_len(&mut self, source: &mut Bytes) -> Result<WriteOutcome, WriteFailure> {
                 #[allow(clippy::redundant_closure_call)]
                 self.write(source).map_err(|error| match error {
@@ -590,7 +786,7 @@ macro_rules! impl_sender {
                 self.expose_usage_through(usage_end)
             }
 
-            fn end_frame(&mut self, expose: bool) -> Option<(StreamEndFrame, Option<VarInt>)> {
+            fn end_frame(&mut self, expose: bool) -> Option<(EndFrame, Option<VarInt>)> {
                 let prepared = self.prepare_end_frame()?;
                 let frame = *prepared;
                 Some((frame, expose.then(|| prepared.expose())))
@@ -602,19 +798,11 @@ macro_rules! impl_sender {
 
             fn request(
                 &mut self,
-                at: bool,
+                reliable: Option<VarInt>,
                 code: ApplicationErrorCode,
-                reliable: VarInt,
                 final_size: Option<VarInt>,
-            ) -> Result<(), ResetAtWithFinalSizeError> {
-                match (at, final_size) {
-                    (false, None) => self.reset(code).map_err(widen_reset),
-                    (true, None) => self.reset_at(code, reliable).map_err(widen_reset_at),
-                    (false, Some(size)) => self
-                        .reset_with_final_size(code, size)
-                        .map_err(widen_reset_with_final_size),
-                    (true, Some(size)) => self.reset_at_with_final_size(code, reliable, size),
-                }
+            ) -> Result<(), ResetFailure> {
+                dialect::request(self, reliable, code, final_size)
             }
 
             fn stop(&mut self, code: ApplicationErrorCode) {
@@ -793,17 +981,21 @@ fn step<S: Sender, P: PolicyModel>(
                 SendTerminalState::DataRecvd
             };
             // A terminal state needs a committed end that can reach it, then
-            // the end frame it acknowledges: a FIN, or a RESET_STREAM_AT that
-            // no RESET_STREAM followed, for Data Recvd, a RESET_STREAM for
-            // Reset Recvd.
+            // the end frame it acknowledges: for Data Recvd a FIN, or a
+            // RESET_STREAM_AT as the reset frame sent last; for Reset Recvd a
+            // RESET_STREAM as the reset frame sent last.
             let s = &mut model.streams[stream];
             let expected = match (s.end, reset) {
                 (ModelEnd::Open, _) => Err(EnterTerminalStateError::EndNotCommitted),
                 (ModelEnd::Closed { .. }, true) => Err(EnterTerminalStateError::ResetNotCommitted),
                 (_, false)
-                    if !(s.sent_fin || (s.sent_reset_stream_at && !s.sent_reset_stream())) =>
+                    if !(s.sent_fin
+                        || matches!(
+                            s.last_reset_frame,
+                            Some(ModelResetFrame::ResetStreamAt { .. })
+                        )) =>
                 {
-                    Err(EnterTerminalStateError::FinOrResetStreamAtNotSent)
+                    Err(EnterTerminalStateError::DataRecvdEndNotSent)
                 }
                 (_, true) if !s.sent_reset_stream() => {
                     Err(EnterTerminalStateError::ResetStreamNotSent)
@@ -917,7 +1109,7 @@ fn expose_data<S: Sender, P: PolicyModel>(
 }
 
 /// The end frame the contract says is due, if any.
-fn due_frame(index: usize, s: &ModelStream) -> Option<(StreamEndFrame, ModelEndFrame)> {
+fn due_frame(index: usize, s: &ModelStream) -> Option<(EndFrame, ModelEndFrame)> {
     if s.connection_closed || s.terminal.is_some() {
         return None;
     }
@@ -935,10 +1127,10 @@ fn due_frame(index: usize, s: &ModelStream) -> Option<(StreamEndFrame, ModelEndF
             final_size,
         } => (!s.sent_reset_stream()).then(|| {
             (
-                StreamEndFrame::ResetStream(ResetStreamFrame::new(
-                    VarIntField::shortest(sid),
-                    VarIntField::shortest(code(c)),
-                    VarIntField::shortest(v(final_size)),
+                StreamEndFrame::Reset(dialect::frame(
+                    sid,
+                    reset_stream_frame(sid, c, final_size),
+                    None,
                 )),
                 ModelEndFrame::Reset(ModelResetFrame::ResetStream),
             )
@@ -949,19 +1141,23 @@ fn due_frame(index: usize, s: &ModelStream) -> Option<(StreamEndFrame, ModelEndF
             final_size,
         } => (s.last_reset_frame != Some(ModelResetFrame::ResetStreamAt { reliable })).then(|| {
             (
-                StreamEndFrame::ResetStreamAt(
-                    ResetStreamAtFrame::new(
-                        VarIntField::shortest(sid),
-                        VarIntField::shortest(code(c)),
-                        VarIntField::shortest(v(final_size)),
-                        VarIntField::shortest(v(reliable)),
-                    )
-                    .unwrap(),
-                ),
+                StreamEndFrame::Reset(dialect::frame(
+                    sid,
+                    reset_stream_frame(sid, c, final_size),
+                    Some(v(reliable)),
+                )),
                 ModelEndFrame::Reset(ModelResetFrame::ResetStreamAt { reliable }),
             )
         }),
     }
+}
+
+fn reset_stream_frame(stream: StreamId, code_value: u32, final_size: u64) -> ResetStreamFrame {
+    ResetStreamFrame::new(
+        VarIntField::shortest(stream),
+        VarIntField::shortest(code(code_value)),
+        VarIntField::shortest(v(final_size)),
+    )
 }
 
 /// An end frame as the model records it once exposed.
@@ -1001,12 +1197,7 @@ fn send_end_frame<S: Sender, P: PolicyModel>(
             s.exposed_final = Some(final_size);
             match recorded {
                 ModelEndFrame::Fin => s.sent_fin = true,
-                ModelEndFrame::Reset(reset) => {
-                    if let ModelResetFrame::ResetStreamAt { .. } = reset {
-                        s.sent_reset_stream_at = true;
-                    }
-                    s.last_reset_frame = Some(reset);
-                }
+                ModelEndFrame::Reset(reset) => s.last_reset_frame = Some(reset),
             }
         }
         (expected, actual) => panic!("expected {expected:?}, got {actual:?}"),
@@ -1022,19 +1213,19 @@ fn reset<S: Sender, P: PolicyModel>(
     model: &mut Model<P>,
     senders: &mut [S; STREAMS],
 ) {
-    let supported = model.reset_stream_at;
     // A plain reset has reliable size zero, whatever the generator drew.
     let reliable = if at { reliable } else { 0 };
     let s = &model.streams[stream];
     let code_value = code(requested);
-    // The order in which the sender checks a reset: connection, identical target,
-    // conflicts, terminal state, extension, prefix, final size range.
-    let expected: Result<Option<(u64, u64)>, ResetAtWithFinalSizeError> = (|| {
-        use ResetAtWithFinalSizeError as E;
+    // The order in which the sender checks a reset: connection, identical
+    // target, error code and final size, terminal state, what a reset with a
+    // reliable size adds (reliable size, kind, prefix), final size range.
+    let expected: Result<Option<(u64, u64)>, ResetFailure> = (|| {
+        use ResetFailure as E;
         if s.connection_closed {
-            return Err(E::ConnectionClosed {
-                source: ConnectionClosedError::new(close_reason()),
-            });
+            return Err(E::ConnectionClosed(ConnectionClosedError::new(
+                close_reason(),
+            )));
         }
         // The reset in effect: its kind, error code, reliable size and final
         // size.
@@ -1061,52 +1252,47 @@ fn reset<S: Sender, P: PolicyModel>(
                     return Ok(None);
                 }
                 if current != requested {
-                    return Err(E::ErrorCodeConflict {
-                        source: ResetCodeChangeError::check(code(current), code_value).unwrap_err(),
-                    });
+                    return Err(E::ErrorCodeConflict(
+                        ResetCodeChangeError::check(code(current), code_value).unwrap_err(),
+                    ));
                 }
                 if let Some(size) = final_size.filter(|size| *size != fixed) {
-                    return Err(E::FinalSizeConflictsWithReset {
-                        source: FinalSizeChangeError::check(v(fixed), v(size)).unwrap_err(),
-                    });
-                }
-                if reliable > effective {
-                    return Err(E::ReliableSizeIncrease {
-                        source: ReliableSizeIncreaseError::check(v(effective), v(reliable))
-                            .unwrap_err(),
-                    });
+                    return Err(E::FinalSizeConflictsWithReset(
+                        FinalSizeChangeError::check(v(fixed), v(size)).unwrap_err(),
+                    ));
                 }
             }
             ModelEnd::Closed {
                 final_size: fixed, ..
             } => {
                 if let Some(size) = final_size.filter(|size| *size != fixed) {
-                    return Err(E::FinalSizeConflictsWithClose {
-                        source: FinalSizeChangeError::check(v(fixed), v(size)).unwrap_err(),
-                    });
+                    return Err(E::FinalSizeConflictsWithClose(
+                        FinalSizeChangeError::check(v(fixed), v(size)).unwrap_err(),
+                    ));
                 }
             }
             ModelEnd::Open => {}
         }
         if let Some(state) = s.terminal {
-            return Err(E::ProtocolTerminal {
-                source: ProtocolTerminalError::check(Some(state)).unwrap_err(),
-            });
+            return Err(E::ProtocolTerminal(
+                ProtocolTerminalError::check(Some(state)).unwrap_err(),
+            ));
         }
-        if at && effective.is_some_and(|(effective_at, ..)| !effective_at) {
-            return Err(E::PlainResetEffective {
-                source: PlainResetEffectiveError,
-            });
-        }
-        if at && !supported {
-            return Err(E::UnsupportedExtension {
-                source: ResetStreamAtNotNegotiatedError::check(v(reliable), false).unwrap_err(),
-            });
+        if let Some((effective_at, _, effective, _)) = effective {
+            if reliable > effective {
+                return Err(E::ReliableSizeIncrease {
+                    effective,
+                    requested: reliable,
+                });
+            }
+            if at && !effective_at {
+                return Err(E::PlainResetEffective);
+            }
         }
         if reliable > s.written {
             return Err(E::ReliablePrefixNotPrepared {
-                source: ReliablePrefixNotPreparedError::check(v(reliable), v(s.written))
-                    .unwrap_err(),
+                reliable,
+                written: s.written,
             });
         }
         let chosen = match s.final_size() {
@@ -1116,20 +1302,20 @@ fn reset<S: Sender, P: PolicyModel>(
                 match final_size {
                     Some(size) if size < reliable => {
                         return Err(E::FinalSizeBelowReliableSize {
-                            source: ReliableSizeError::check(v(size), v(reliable)).unwrap_err(),
+                            final_size: size,
+                            reliable,
                         });
                     }
                     Some(size) if size < s.exposure => {
-                        return Err(E::FinalSizeBelowExposure {
-                            source: FinalSizeBelowExposureError::check(v(size), v(s.exposure))
-                                .unwrap_err(),
-                        });
+                        return Err(E::FinalSizeBelowExposure(
+                            FinalSizeBelowExposureError::check(v(size), v(s.exposure)).unwrap_err(),
+                        ));
                     }
                     Some(size) if size > s.written => {
-                        return Err(E::FinalSizeBeyondWrittenEnd {
-                            source: FinalSizeBeyondWrittenEndError::check(v(size), v(s.written))
+                        return Err(E::FinalSizeBeyondWrittenEnd(
+                            FinalSizeBeyondWrittenEndError::check(v(size), v(s.written))
                                 .unwrap_err(),
-                        });
+                        ));
                     }
                     Some(size) => size,
                     None => model.policy.complete(minimum, s.written),
@@ -1138,7 +1324,7 @@ fn reset<S: Sender, P: PolicyModel>(
         };
         Ok(Some((reliable, chosen)))
     })();
-    let actual = senders[stream].request(at, code_value, v(reliable), final_size.map(v));
+    let actual = senders[stream].request(at.then(|| v(reliable)), code_value, final_size.map(v));
     assert_eq!(actual, expected.clone().map(|_| ()));
     if let Ok(Some((reliable, chosen))) = expected {
         let s = &mut model.streams[stream];
@@ -1194,13 +1380,16 @@ fn check<S: Sender, P: PolicyModel>(
                     code: c,
                     final_size,
                 },
-                SendEndState::Reset {
-                    error_code,
-                    final_size: actual,
-                    source,
-                },
+                SendEndState::Reset { target, source },
             ) => {
-                assert_eq!((error_code, actual), (code(c), v(final_size)));
+                assert_eq!(
+                    dialect::effective(target),
+                    EffectiveReset {
+                        code: code(c),
+                        reliable: None,
+                        final_size: v(final_size),
+                    }
+                );
                 assert_eq!(source, s.end_source);
             }
             (
@@ -1209,13 +1398,13 @@ fn check<S: Sender, P: PolicyModel>(
                     reliable,
                     final_size,
                 },
-                SendEndState::ResetAt { target, source },
+                SendEndState::Reset { target, source },
             ) => {
                 assert_eq!(
-                    target,
-                    ResetTarget {
-                        error_code: code(c),
-                        reliable_size: v(reliable),
+                    dialect::effective(target),
+                    EffectiveReset {
+                        code: code(c),
+                        reliable: Some(v(reliable)),
                         final_size: v(final_size),
                     }
                 );
@@ -1267,7 +1456,6 @@ fn run<S: Sender, P: PolicyModel>(
     make: impl Fn(usize, u64, Arc<AtomicConnectionSendFlowController>) -> S,
     limits: [u64; STREAMS],
     connection_limit: u64,
-    reset_stream_at: bool,
 ) {
     let connection = Arc::new(AtomicConnectionSendFlowController::new(v(connection_limit)));
     let mut senders = [
@@ -1278,7 +1466,6 @@ fn run<S: Sender, P: PolicyModel>(
         policy,
         streams: limits.map(ModelStream::new),
         limit: connection_limit,
-        reset_stream_at,
     };
     for op in ops {
         let (old_limit, old_committed, old_streams) =
@@ -1339,7 +1526,6 @@ proptest! {
         ops in prop::collection::vec(op(), 0..60),
         limits in [0u64..300, 0u64..300],
         connection_limit in 0u64..500,
-        reset_stream_at in any::<bool>(),
     ) {
         run(
             &ops,
@@ -1347,13 +1533,11 @@ proptest! {
             |index, limit, connection| StreamSender::new(
                 stream_id(index),
                 v(limit),
-                reset_stream_at,
                 DefaultSendComposition::with_abandon_code(code(ABANDON_CODE)),
                 connection,
             ),
             limits,
             connection_limit,
-            reset_stream_at,
         );
     }
 
@@ -1371,7 +1555,6 @@ proptest! {
             |index, limit, connection| StreamSender::new(
                 stream_id(index),
                 v(limit),
-                true,
                 SendComposition::new(
                     OffsetMapStreamSendBuffer::new(),
                     Chunked { chunk },
@@ -1381,7 +1564,6 @@ proptest! {
             ),
             limits,
             connection_limit,
-            true,
         );
     }
 }

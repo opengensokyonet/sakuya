@@ -14,6 +14,10 @@
 //! - [`SendTerminationPolicy`], for automatic end decisions, the write limit,
 //!   and the final size of resets the application leaves open.
 //!
+//! It is generic over the type of its reset target, a [`LocalResetTarget`]:
+//! by default [`LocalReset`], the reset of RFC 9000, which a `RESET_STREAM`
+//! frame announces.
+//!
 //! [`composition::SendComposition`] joins three independent components
 //! transparently; a single type may also fulfil several contracts.
 //!
@@ -35,8 +39,8 @@ use crate::send_buffer::{
 use crate::stream_end::BeyondFinalSizeError;
 use core::ops::Deref;
 use flow_control::{SendFlowContext, SendFlowControlPolicy, StreamCreditEvent};
+use local_reset::{LocalReset, LocalResetTarget};
 use sakuya_wire::frame::UndecidedLength;
-use sakuya_wire::reset_stream_at::ResetStreamAtFrame;
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
 use sakuya_wire::v1::frame::{reset_stream::ResetStreamFrame, stream::StreamFrame};
 use sakuya_wire::v1::stream_id::StreamId;
@@ -49,6 +53,7 @@ use write::SharedWriteLimitReason;
 pub mod composition;
 pub mod finish;
 pub mod flow_control;
+pub mod local_reset;
 pub mod termination;
 pub mod write;
 
@@ -58,18 +63,23 @@ pub mod write;
 /// `C` is the composition of a [`StreamSendBuffer`], a
 /// [`SendFlowControlPolicy`] and a [`SendTerminationPolicy`] that act on this
 /// stream and on the same data; `K` is the connection send flow controller
-/// that grants the reservations the buffer takes.
+/// that grants the reservations the buffer takes; `T` is the type of the
+/// reset target.
 ///
 /// Operations are grouped by subject: writing and flushing in [`write`](mod@write),
 /// close and reset in [`finish`]; peer and feedback facts are applied by the
 /// `on_*` methods here.
-pub struct StreamSender<C: SendTerminationPolicy, K: ConnectionSendFlowController> {
+pub struct StreamSender<C, K, T = LocalReset>
+where
+    C: SendTerminationPolicy<T>,
+    K: ConnectionSendFlowController,
+    T: LocalResetTarget,
+{
     stream_id: StreamId,
     peer_stream_limit: VarInt,
-    reset_stream_at_supported: bool,
     composition: C,
     connection: Arc<K>,
-    end: EndPhase,
+    end: EndPhase<T>,
     stop_sending: StopSending<C::WriteLimitReason>,
     close_reason: Option<CloseReason>,
 }
@@ -78,120 +88,79 @@ pub struct StreamSender<C: SendTerminationPolicy, K: ConnectionSendFlowControlle
 ///
 /// ```text
 /// Open ──close──▶ Closed
-/// Open, Closed ──reset_at──▶ ResetAt ──reset_at (lower reliable size)──▶ ResetAt
-/// Open, Closed, ResetAt ──reset──▶ Reset
+/// Open, Closed ──reset──▶ Reset ──reset (as the target type allows)──▶ Reset
 /// ```
-///
-/// `reset` ends with `RESET_STREAM` and `reset_at` with `RESET_STREAM_AT`.
-/// A `reset_at` in effect may be replaced by `reset`; a `reset` in effect
-/// cannot be followed by `reset_at`.
 ///
 /// A terminal state can be entered once an end is committed; afterwards the
 /// end no longer changes.
-enum EndPhase {
+enum EndPhase<T> {
     /// Input is open.
     Open,
     /// An end is committed.
     Ended {
         /// The committed end.
-        end: CommittedEnd,
+        end: CommittedEnd<T>,
         /// The end frames sent so far, kept across a reset that replaces a
         /// close.
-        sent: SentEndFrames,
+        sent: SentEndFrames<T>,
         /// The terminal state, once reached.
         terminal: Option<SendTerminalState>,
     },
 }
 
-/// A reset frame as it was exposed: its kind and, for `RESET_STREAM_AT`, the
-/// reliable size it carried.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ExposedReset {
-    ResetStream,
-    ResetStreamAt { reliable_size: VarInt },
-}
-
 /// The end frames exposed so far through [`PreparedEndFrame::expose`]. A FIN
 /// may be followed by a reset, and a reset frame is exposed again when the
-/// reliable size drops or the kind changes.
-#[derive(Clone, Copy, Default)]
-struct SentEndFrames {
+/// reset target changes.
+#[derive(Clone, Copy)]
+struct SentEndFrames<T> {
     fin: bool,
-    /// Whether a `RESET_STREAM_AT` was exposed, also if a `RESET_STREAM`
-    /// replaced it later.
-    reset_stream_at: bool,
-    /// The reset frame exposed last.
-    last_reset: Option<ExposedReset>,
+    /// The reset target whose frame was exposed last.
+    last_reset: Option<T>,
 }
 
-impl SentEndFrames {
-    /// Whether a `RESET_STREAM` was exposed. A `RESET_STREAM_AT` cannot
-    /// follow one, so it is the last reset frame then.
-    fn reset_stream(&self) -> bool {
-        self.last_reset == Some(ExposedReset::ResetStream)
-    }
-
-    fn record_fin(&mut self) {
-        self.fin = true;
-    }
-
-    fn record_reset(&mut self, reset: ExposedReset) {
-        if let ExposedReset::ResetStreamAt { .. } = reset {
-            self.reset_stream_at = true;
+impl<T: LocalResetTarget> SentEndFrames<T> {
+    fn none() -> Self {
+        Self {
+            fin: false,
+            last_reset: None,
         }
-        self.last_reset = Some(reset);
+    }
+
+    /// Whether an end was exposed whose acknowledgement leads to `state`: for
+    /// "Data Recvd" also the FIN, with all data.
+    fn reaches(&self, state: SendTerminalState) -> bool {
+        (self.fin && state == SendTerminalState::DataRecvd)
+            || self
+                .last_reset
+                .is_some_and(|target| target.acknowledged_state() == state)
     }
 }
 
 /// A committed close or reset.
 #[derive(Clone, Copy)]
-enum CommittedEnd {
+enum CommittedEnd<T> {
     Closed {
         final_size: VarInt,
         source: EndSource,
     },
     Reset {
-        error_code: ApplicationErrorCode,
-        final_size: VarInt,
-        source: EndSource,
-    },
-    ResetAt {
-        target: ResetTarget,
+        target: T,
         source: EndSource,
     },
 }
 
-impl EndPhase {
-    fn end_state(&self) -> SendEndState {
-        match self {
+impl<T: LocalResetTarget> EndPhase<T> {
+    fn end_state(&self) -> SendEndState<T> {
+        match *self {
             Self::Open => SendEndState::Open,
             Self::Ended {
                 end: CommittedEnd::Closed { final_size, source },
                 ..
-            } => SendEndState::Closed {
-                final_size: *final_size,
-                source: *source,
-            },
+            } => SendEndState::Closed { final_size, source },
             Self::Ended {
-                end:
-                    CommittedEnd::Reset {
-                        error_code,
-                        final_size,
-                        source,
-                    },
+                end: CommittedEnd::Reset { target, source },
                 ..
-            } => SendEndState::Reset {
-                error_code: *error_code,
-                final_size: *final_size,
-                source: *source,
-            },
-            Self::Ended {
-                end: CommittedEnd::ResetAt { target, source },
-                ..
-            } => SendEndState::ResetAt {
-                target: *target,
-                source: *source,
-            },
+            } => SendEndState::Reset { target, source },
         }
     }
 
@@ -234,7 +203,7 @@ struct WriteLimit<R> {
 /// A committed end fixes the final size at once; committing does not wait for
 /// any frame to be sent or acknowledged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SendEndState {
+pub enum SendEndState<T = LocalReset> {
     /// Input is open.
     Open,
     /// A normal close is committed at the written end of that time.
@@ -244,49 +213,25 @@ pub enum SendEndState {
         /// Who committed the close.
         source: EndSource,
     },
-    /// A reset is committed with `reset` (`RESET_STREAM`); it may have
-    /// replaced a close or a `reset_at`.
+    /// A reset is committed; it may have replaced a close or an earlier
+    /// reset target.
     Reset {
-        /// The application error code.
-        error_code: ApplicationErrorCode,
-        /// The final size.
-        final_size: VarInt,
-        /// Who committed the current target.
-        source: EndSource,
-    },
-    /// A reset is committed with `reset_at` (`RESET_STREAM_AT`); it may have
-    /// replaced a close.
-    ResetAt {
-        /// The effective reset target.
-        target: ResetTarget,
+        /// The reset target in effect.
+        target: T,
         /// Who committed the current target.
         source: EndSource,
     },
 }
 
-impl SendEndState {
+impl<T: LocalResetTarget> SendEndState<T> {
     /// The fixed final size, if an end is committed.
     pub fn final_size(&self) -> Option<VarInt> {
         match self {
             Self::Open => None,
             Self::Closed { final_size, .. } => Some(*final_size),
-            Self::Reset { final_size, .. } => Some(*final_size),
-            Self::ResetAt { target, .. } => Some(target.final_size),
+            Self::Reset { target, .. } => Some(target.final_size()),
         }
     }
-}
-
-/// A complete target of a reset at a reliable size (`reset_at`): error code,
-/// reliable size and final size.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ResetTarget {
-    /// The application error code.
-    pub error_code: ApplicationErrorCode,
-    /// The reliable size (`reliable_size`): the prefix that must still be
-    /// delivered.
-    pub reliable_size: VarInt,
-    /// The final size.
-    pub final_size: VarInt,
 }
 
 /// Who committed an end state.
@@ -310,26 +255,27 @@ pub enum SendTerminalState {
     ResetRecvd,
 }
 
-impl<C: SendTerminationPolicy, K: ConnectionSendFlowController> StreamSender<C, K> {
+impl<C, K, T> StreamSender<C, K, T>
+where
+    C: SendTerminationPolicy<T>,
+    K: ConnectionSendFlowController,
+    T: LocalResetTarget,
+{
     /// Creates the send direction of `stream_id`.
     ///
     /// `peer_stream_limit` is the initial stream data limit that the peer's
     /// transport parameters grant this stream, or a later `MAX_STREAM_DATA`
-    /// value already in effect. `reset_stream_at_supported` tells whether the
-    /// handshake negotiated the `RESET_STREAM_AT` extension. `connection` is
-    /// the connection send flow controller shared by the streams of the
-    /// connection.
+    /// value already in effect. `connection` is the connection send flow
+    /// controller shared by the streams of the connection.
     pub fn new(
         stream_id: StreamId,
         peer_stream_limit: VarInt,
-        reset_stream_at_supported: bool,
         composition: C,
         connection: Arc<K>,
     ) -> Self {
         Self {
             stream_id,
             peer_stream_limit,
-            reset_stream_at_supported,
             composition,
             connection,
             end: EndPhase::Open,
@@ -349,7 +295,7 @@ impl<C: SendTerminationPolicy, K: ConnectionSendFlowController> StreamSender<C, 
     }
 
     /// The end state.
-    pub fn end_state(&self) -> SendEndState {
+    pub fn end_state(&self) -> SendEndState<T> {
         self.end.end_state()
     }
 
@@ -388,23 +334,19 @@ impl<C: SendTerminationPolicy, K: ConnectionSendFlowController> StreamSender<C, 
         self.close_reason.is_some()
     }
 
-    /// Whether the handshake negotiated `RESET_STREAM_AT`.
-    pub fn reset_stream_at_supported(&self) -> bool {
-        self.reset_stream_at_supported
-    }
-
     /// The composition of buffer and policies, for inspection.
     pub fn composition(&self) -> &C {
         &self.composition
     }
 }
 
-impl<C, K> StreamSender<C, K>
+impl<C, K, T> StreamSender<C, K, T>
 where
+    T: LocalResetTarget,
     K: ConnectionSendFlowController,
     C: StreamSendBuffer<Reservation = K::Reservation>
-        + SendFlowControlPolicy
-        + SendTerminationPolicy,
+        + SendFlowControlPolicy<T>
+        + SendTerminationPolicy<T>,
 {
     /// The written end (`written_end`), as the send buffer keeps it.
     pub fn written_end(&self) -> VarInt {
@@ -420,13 +362,13 @@ where
     /// still be delivered reliably.
     ///
     /// It follows the written end while input is open, equals the final size
-    /// after a close, and is the reset's reliable size after a reset.
+    /// after a close, and is the reliable size of the reset target after a
+    /// reset.
     pub fn reliable_size(&self) -> VarInt {
         match self.end_state() {
             SendEndState::Open => self.written_end(),
             SendEndState::Closed { final_size, .. } => final_size,
-            SendEndState::Reset { .. } => VarInt::ZERO,
-            SendEndState::ResetAt { target, .. } => target.reliable_size,
+            SendEndState::Reset { target, .. } => target.reliable_size(),
         }
     }
 
@@ -495,19 +437,16 @@ where
     /// `state` must be one the committed end can reach: "Reset Recvd" follows
     /// "Reset Sent" only ([RFC 9000 §3.1]), so a send direction that was
     /// closed and never reset cannot enter [`SendTerminalState::ResetRecvd`].
-    /// The frame that carries the acknowledged end must also have been sent,
-    /// as recorded by [`PreparedEndFrame::expose`]:
+    /// An end whose acknowledgement leads to `state` must also have been
+    /// sent, as recorded by [`PreparedEndFrame::expose`]:
     ///
-    /// - [`SendTerminalState::DataRecvd`] needs a FIN, or a
-    ///   `RESET_STREAM_AT` with no `RESET_STREAM` sent after it. After a
-    ///   `RESET_STREAM`, the caller enters it only when the FIN was sent and
-    ///   all data with the FIN was acknowledged; otherwise the stream waits
-    ///   for its `RESET_STREAM` to be acknowledged ([RFC 9000 §13.3]). A
-    ///   stream ended by `RESET_STREAM_AT` enters it once the frame with the
-    ///   smallest reliable size and all data up to that size were acknowledged
-    ///   (reliable stream reset draft, §5.3), so it does not imply that all
-    ///   data arrived.
-    /// - [`SendTerminalState::ResetRecvd`] needs a `RESET_STREAM`.
+    /// - the reset frame exposed last, if its target reaches `state` when
+    ///   acknowledged ([`LocalResetTarget::acknowledged_state`]): a
+    ///   `RESET_STREAM` leads to [`SendTerminalState::ResetRecvd`];
+    /// - for [`SendTerminalState::DataRecvd`] also a FIN. After a reset the
+    ///   caller enters it only when the FIN was sent before and all data
+    ///   with the FIN was acknowledged; otherwise the stream waits for its
+    ///   reset to be acknowledged ([RFC 9000 §13.3]).
     ///
     /// Only the first terminal state is kept; a later call with a state the
     /// committed end can reach succeeds without effect. This entry is
@@ -516,7 +455,7 @@ where
     /// # Errors
     ///
     /// [`EnterTerminalStateError`] if no end is committed, if the committed
-    /// end cannot reach `state`, or if the frame `state` needs was not sent,
+    /// end cannot reach `state`, or if no end that leads to `state` was sent,
     /// checked in this order. Nothing changes then.
     ///
     /// [RFC 9000 §3.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-3.1
@@ -537,16 +476,11 @@ where
         if let (SendTerminalState::ResetRecvd, CommittedEnd::Closed { .. }) = (state, &*end) {
             return e::ResetNotCommittedSnafu.fail();
         }
-        match state {
-            SendTerminalState::DataRecvd
-                if !(sent.fin || (sent.reset_stream_at && !sent.reset_stream())) =>
-            {
-                return e::FinOrResetStreamAtNotSentSnafu.fail();
-            }
-            SendTerminalState::ResetRecvd if !sent.reset_stream() => {
-                return e::ResetStreamNotSentSnafu.fail();
-            }
-            SendTerminalState::DataRecvd | SendTerminalState::ResetRecvd => {}
+        if !sent.reaches(state) {
+            return match state {
+                SendTerminalState::DataRecvd => e::DataRecvdEndNotSentSnafu.fail(),
+                SendTerminalState::ResetRecvd => e::ResetStreamNotSentSnafu.fail(),
+            };
         }
         if terminal.is_some() {
             return Ok(());
@@ -622,10 +556,10 @@ where
     /// The frame follows from the committed end and from the end frames
     /// exposed before:
     ///
-    /// - a reset is in effect and the reset frame of its kind and reliable
-    ///   size was not exposed yet: the `RESET_STREAM` for a `reset`, the
-    ///   `RESET_STREAM_AT` for a `reset_at`, also if a close was replaced and
-    ///   its FIN was exposed;
+    /// - a reset is in effect and the frame of its target was not the reset
+    ///   frame exposed last: the frame of the target
+    ///   ([`LocalResetTarget::frame`]), also if a close was replaced and its
+    ///   FIN was exposed;
     /// - a close is in effect and the FIN was not exposed yet: the FIN.
     ///
     /// No frame is due once the connection has closed or a terminal state was
@@ -633,63 +567,30 @@ where
     /// frame to write, and [`PreparedEndFrame::expose`] settles its
     /// exposure after the frame was written to a packet. Dropping the guard
     /// changes nothing. This entry is provisional.
-    pub fn prepare_end_frame(&mut self) -> Option<PreparedEndFrame<'_, C, K>> {
+    pub fn prepare_end_frame(&mut self) -> Option<PreparedEndFrame<'_, C, K, T>> {
         if self.is_connection_closed() || self.terminal_state().is_some() {
             return None;
         }
         let EndPhase::Ended { end, sent, .. } = &self.end else {
             return None;
         };
-        let stream_id = VarIntField::shortest(self.stream_id);
         let (frame, exposed) = match *end {
             CommittedEnd::Closed { final_size, .. } => {
                 if sent.fin {
                     return None;
                 }
                 (
-                    StreamEndFrame::fin(stream_id, final_size),
+                    StreamEndFrame::fin(VarIntField::shortest(self.stream_id), final_size),
                     ExposedEndFrame::Fin,
                 )
             }
-            CommittedEnd::Reset {
-                error_code,
-                final_size,
-                ..
-            } => {
-                if sent.last_reset == Some(ExposedReset::ResetStream) {
+            CommittedEnd::Reset { target, .. } => {
+                if sent.last_reset == Some(target) {
                     return None;
                 }
-                let frame = ResetStreamFrame::new(
-                    stream_id,
-                    VarIntField::shortest(error_code),
-                    VarIntField::shortest(final_size),
-                );
                 (
-                    StreamEndFrame::ResetStream(frame),
-                    ExposedEndFrame::Reset(ExposedReset::ResetStream),
-                )
-            }
-            CommittedEnd::ResetAt { target, .. } => {
-                let exposed = ExposedReset::ResetStreamAt {
-                    reliable_size: target.reliable_size,
-                };
-                if sent.last_reset == Some(exposed) {
-                    return None;
-                }
-                let frame = match ResetStreamAtFrame::new(
-                    stream_id,
-                    VarIntField::shortest(target.error_code),
-                    VarIntField::shortest(target.final_size),
-                    VarIntField::shortest(target.reliable_size),
-                ) {
-                    Ok(frame) => frame,
-                    // invariant: a reset target was checked to keep a
-                    // reliable size within its final size.
-                    Err(error) => unreachable!("committed reset target {target:?}: {error}"),
-                };
-                (
-                    StreamEndFrame::ResetStreamAt(frame),
-                    ExposedEndFrame::Reset(exposed),
+                    StreamEndFrame::Reset(target.frame(self.stream_id)),
+                    ExposedEndFrame::Reset(target),
                 )
             }
         };
@@ -712,10 +613,7 @@ where
     pub fn stream_data_blocked_limit(&self) -> Option<VarInt> {
         let allowed = !self.is_connection_closed()
             && self.terminal_state().is_none()
-            && !matches!(
-                self.end_state(),
-                SendEndState::Reset { .. } | SendEndState::ResetAt { .. }
-            );
+            && !matches!(self.end_state(), SendEndState::Reset { .. });
         (allowed
             && self
                 .composition
@@ -750,7 +648,7 @@ where
         }
     }
 
-    fn flow_context(&self) -> SendFlowContext {
+    fn flow_context(&self) -> SendFlowContext<T> {
         SendFlowContext {
             stream_id: self.stream_id,
             written_end: self.written_end(),
@@ -762,7 +660,7 @@ where
         }
     }
 
-    fn termination_context(&self) -> SendTerminationContext {
+    fn termination_context(&self) -> SendTerminationContext<T> {
         SendTerminationContext {
             stream_id: self.stream_id,
             written_end: self.written_end(),
@@ -771,7 +669,6 @@ where
             end_state: self.end_state(),
             stop_sending: self.stop_sending_code(),
             write_limit_end: self.write_limit_end(),
-            reset_stream_at_supported: self.reset_stream_at_supported,
             terminal_state: self.terminal_state(),
             connection_closed: self.is_connection_closed(),
         }
@@ -837,20 +734,20 @@ pub enum SenderExposeUsageError {
 /// The end frame a stream has to send (`StreamEndFrame`): the wire frame that
 /// carries the committed end, as [`StreamSender::prepare_end_frame`] gives it.
 ///
-/// The frames hold their fields in the shortest encodings.
+/// `F` is the reset frame of the stream's reset target
+/// ([`LocalResetTarget::Frame`]). The frames hold their fields in the
+/// shortest encodings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StreamEndFrame {
+pub enum StreamEndFrame<F = ResetStreamFrame> {
     /// A STREAM frame with the FIN bit, no data and an offset equal to the
     /// final size. Its Length field is not decided: the packet writer decides
     /// it by the position of the frame in the packet.
     Fin(StreamFrame<&'static [u8], UndecidedLength>),
-    /// A `RESET_STREAM` frame.
-    ResetStream(ResetStreamFrame),
-    /// A `RESET_STREAM_AT` frame.
-    ResetStreamAt(ResetStreamAtFrame),
+    /// The frame that announces the reset target in effect.
+    Reset(F),
 }
 
-impl StreamEndFrame {
+impl<F> StreamEndFrame<F> {
     /// The FIN of the stream `stream_id` that ends at `final_size`.
     fn fin(stream_id: VarIntField<StreamId>, final_size: VarInt) -> Self {
         // An absent Offset field states offset zero in one byte less.
@@ -867,9 +764,9 @@ impl StreamEndFrame {
 /// The end frame a [`PreparedEndFrame`] stands for, as the stream sender
 /// records it once exposed.
 #[derive(Clone, Copy)]
-enum ExposedEndFrame {
+enum ExposedEndFrame<T> {
     Fin,
-    Reset(ExposedReset),
+    Reset(T),
 }
 
 /// An end frame prepared by [`StreamSender::prepare_end_frame`]
@@ -879,28 +776,37 @@ enum ExposedEndFrame {
 /// It dereferences to the [`StreamEndFrame`] to write. After the frame was written
 /// to a packet, [`expose`](Self::expose) settles its first exposure; it does
 /// not fail. Dropping the guard changes nothing.
-pub struct PreparedEndFrame<'a, C: SendTerminationPolicy, K: ConnectionSendFlowController> {
-    sender: &'a mut StreamSender<C, K>,
-    frame: StreamEndFrame,
-    exposed: ExposedEndFrame,
+pub struct PreparedEndFrame<'a, C, K, T = LocalReset>
+where
+    C: SendTerminationPolicy<T>,
+    K: ConnectionSendFlowController,
+    T: LocalResetTarget,
+{
+    sender: &'a mut StreamSender<C, K, T>,
+    frame: StreamEndFrame<T::Frame>,
+    exposed: ExposedEndFrame<T>,
 }
 
-impl<C: SendTerminationPolicy, K: ConnectionSendFlowController> Deref
-    for PreparedEndFrame<'_, C, K>
+impl<C, K, T> Deref for PreparedEndFrame<'_, C, K, T>
+where
+    C: SendTerminationPolicy<T>,
+    K: ConnectionSendFlowController,
+    T: LocalResetTarget,
 {
-    type Target = StreamEndFrame;
+    type Target = StreamEndFrame<T::Frame>;
 
-    fn deref(&self) -> &StreamEndFrame {
+    fn deref(&self) -> &StreamEndFrame<T::Frame> {
         &self.frame
     }
 }
 
-impl<C, K> PreparedEndFrame<'_, C, K>
+impl<C, K, T> PreparedEndFrame<'_, C, K, T>
 where
+    T: LocalResetTarget,
     K: ConnectionSendFlowController,
     C: StreamSendBuffer<Reservation = K::Reservation>
-        + SendFlowControlPolicy
-        + SendTerminationPolicy,
+        + SendFlowControlPolicy<T>
+        + SendTerminationPolicy<T>,
 {
     /// Settles the first exposure of the frame, which was written to a
     /// packet: the credit that covers the usage up to the final size is
@@ -931,8 +837,8 @@ where
         };
         if let EndPhase::Ended { sent, .. } = &mut sender.end {
             match exposed {
-                ExposedEndFrame::Fin => sent.record_fin(),
-                ExposedEndFrame::Reset(reset) => sent.record_reset(reset),
+                ExposedEndFrame::Fin => sent.fin = true,
+                ExposedEndFrame::Reset(target) => sent.last_reset = Some(target),
             }
         }
         committed
@@ -951,19 +857,21 @@ pub enum EnterTerminalStateError {
     /// is a close: no reset was committed that could have been acknowledged.
     #[snafu(display("a send direction that was not reset cannot reach Reset Recvd"))]
     ResetNotCommitted,
-    /// [`SendTerminalState::DataRecvd`] was requested, but no FIN was sent
-    /// and no `RESET_STREAM_AT` was sent without a `RESET_STREAM` after it:
-    /// the peer cannot have acknowledged the final size in a way that
-    /// reaches Data Recvd.
+    /// [`SendTerminalState::DataRecvd`] was requested, but no FIN was sent,
+    /// and the reset frame sent last, if any, does not lead to it: the peer
+    /// cannot have acknowledged the final size in a way that reaches Data
+    /// Recvd.
     #[snafu(display(
-        "a send direction reaches Data Recvd only after a FIN or a RESET_STREAM_AT without a later RESET_STREAM was sent"
+        "a send direction reaches Data Recvd only after a FIN, or a reset frame that leads to it, was sent"
     ))]
-    FinOrResetStreamAtNotSent,
+    DataRecvdEndNotSent,
     /// [`SendTerminalState::ResetRecvd`] was requested, but no `RESET_STREAM`
     /// was sent that could have been acknowledged.
     #[snafu(display("a send direction reaches Reset Recvd only after a RESET_STREAM was sent"))]
     ResetStreamNotSent,
 }
 
+#[cfg(test)]
+pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;

@@ -23,6 +23,7 @@
 //!
 //! No asynchronous interface is provided here; [`WriteOutcome::Wait`] tells
 //! the caller to retry once the cause may have changed.
+use super::local_reset::LocalResetTarget;
 use super::{SendEndState, StreamResetError, StreamSender, WriteLimit};
 use crate::connection::ConnectionClosedError;
 use crate::connection_send_credit::{ConnectionCreditReservation, ConnectionSendFlowController};
@@ -161,12 +162,13 @@ pub enum FlushError {
     },
 }
 
-impl<C, K> StreamSender<C, K>
+impl<C, K, T> StreamSender<C, K, T>
 where
+    T: LocalResetTarget,
     K: ConnectionSendFlowController,
     C: StreamSendBuffer<Reservation = K::Reservation>
-        + SendFlowControlPolicy
-        + SendTerminationPolicy,
+        + SendFlowControlPolicy<T>
+        + SendTerminationPolicy<T>,
 {
     /// Makes one write attempt with `source`: hands the prefix that admission
     /// and connection credit allow to the send buffer and advances `source`
@@ -195,9 +197,7 @@ where
     ) -> Result<WriteOutcome, WriteError<C::WriteLimitReason>> {
         self.check_connection_open()?;
         match self.end_state() {
-            SendEndState::Reset { .. } | SendEndState::ResetAt { .. } => {
-                return Err(StreamResetError.into());
-            }
+            SendEndState::Reset { .. } => return Err(StreamResetError.into()),
             SendEndState::Closed { .. } => return write_error::ClosedSnafu.fail(),
             SendEndState::Open => {}
         }
@@ -303,7 +303,7 @@ where
     /// reset is in effect, even if nothing remains to deliver.
     pub fn flush(&self) -> Result<(), FlushError> {
         self.check_connection_open()?;
-        if let SendEndState::Reset { .. } | SendEndState::ResetAt { .. } = self.end_state() {
+        if let SendEndState::Reset { .. } = self.end_state() {
             return Err(StreamResetError.into());
         }
         Ok(())

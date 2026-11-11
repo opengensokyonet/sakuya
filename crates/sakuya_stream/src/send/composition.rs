@@ -5,6 +5,7 @@ use super::flow_control::{
     AdmissionGuard, DefaultSendFlowControlPolicy, SendFlowContext, SendFlowControlPolicy,
     StreamCreditEvent, WriteAttempt,
 };
+use super::local_reset::LocalResetTarget;
 use super::termination::{
     DefaultSendTerminationPolicy, FinalSizeRequest, SendTerminationContext, SendTerminationEvent,
     SendTerminationPolicy, TerminationAction,
@@ -28,13 +29,13 @@ use sakuya_wire::var_int::VarInt;
 /// The components must belong to the same stream: the policies then see the
 /// real buffer, and grants and resets act on the data they describe.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct SendComposition<B, F, T> {
+pub struct SendComposition<B, F, P> {
     /// The send buffer.
     pub buffer: B,
     /// The flow-control policy.
     pub flow_control: F,
     /// The termination policy.
-    pub termination: T,
+    pub termination: P,
 }
 
 /// The default composition: [`OffsetMapStreamSendBuffer`],
@@ -49,9 +50,9 @@ pub type DefaultSendComposition<R = AtomicConnectionCreditReservation> = SendCom
     DefaultSendTerminationPolicy,
 >;
 
-impl<B, F, T> SendComposition<B, F, T> {
+impl<B, F, P> SendComposition<B, F, P> {
     /// Joins the three components.
-    pub fn new(buffer: B, flow_control: F, termination: T) -> Self {
+    pub fn new(buffer: B, flow_control: F, termination: P) -> Self {
         Self {
             buffer,
             flow_control,
@@ -72,7 +73,7 @@ impl<R: ConnectionCreditReservation> DefaultSendComposition<R> {
     }
 }
 
-impl<B: StreamSendBuffer, F, T> StreamSendBuffer for SendComposition<B, F, T> {
+impl<B: StreamSendBuffer, F, P> StreamSendBuffer for SendComposition<B, F, P> {
     type Reservation = B::Reservation;
 
     fn written_end(&self) -> VarInt {
@@ -115,11 +116,15 @@ impl<B: StreamSendBuffer, F, T> StreamSendBuffer for SendComposition<B, F, T> {
     }
 }
 
-impl<B, F: SendFlowControlPolicy, T> SendFlowControlPolicy for SendComposition<B, F, T> {
+impl<B, F, P, T> SendFlowControlPolicy<T> for SendComposition<B, F, P>
+where
+    T: LocalResetTarget,
+    F: SendFlowControlPolicy<T>,
+{
     fn admit_write(
         &mut self,
         attempt: &WriteAttempt,
-        context: &SendFlowContext,
+        context: &SendFlowContext<T>,
     ) -> Option<AdmissionGuard> {
         self.flow_control.admit_write(attempt, context)
     }
@@ -128,39 +133,43 @@ impl<B, F: SendFlowControlPolicy, T> SendFlowControlPolicy for SendComposition<B
         &mut self,
         guard: AdmissionGuard,
         used: VarInt,
-        context: &SendFlowContext,
+        context: &SendFlowContext<T>,
     ) {
         self.flow_control.on_admission_used(guard, used, context);
     }
 
-    fn on_admission_abandoned(&mut self, guard: AdmissionGuard, context: &SendFlowContext) {
+    fn on_admission_abandoned(&mut self, guard: AdmissionGuard, context: &SendFlowContext<T>) {
         self.flow_control.on_admission_abandoned(guard, context);
     }
 
-    fn on_flow_event(&mut self, event: StreamCreditEvent, context: &SendFlowContext) {
+    fn on_flow_event(&mut self, event: StreamCreditEvent, context: &SendFlowContext<T>) {
         self.flow_control.on_flow_event(event, context);
     }
 
-    fn wants_stream_data_blocked(&self, context: &SendFlowContext) -> bool {
+    fn wants_stream_data_blocked(&self, context: &SendFlowContext<T>) -> bool {
         self.flow_control.wants_stream_data_blocked(context)
     }
 }
 
-impl<B, F, T: SendTerminationPolicy> SendTerminationPolicy for SendComposition<B, F, T> {
-    type WriteLimitReason = T::WriteLimitReason;
+impl<B, F, P, T> SendTerminationPolicy<T> for SendComposition<B, F, P>
+where
+    T: LocalResetTarget,
+    P: SendTerminationPolicy<T>,
+{
+    type WriteLimitReason = P::WriteLimitReason;
 
     fn on_termination_event(
         &mut self,
         event: SendTerminationEvent,
-        context: &SendTerminationContext,
-    ) -> TerminationAction<Self::WriteLimitReason> {
+        context: &SendTerminationContext<T>,
+    ) -> TerminationAction<Self::WriteLimitReason, T> {
         self.termination.on_termination_event(event, context)
     }
 
     fn complete_final_size(
         &mut self,
-        request: FinalSizeRequest,
-        context: &SendTerminationContext,
+        request: FinalSizeRequest<T>,
+        context: &SendTerminationContext<T>,
     ) -> VarInt {
         self.termination.complete_final_size(request, context)
     }

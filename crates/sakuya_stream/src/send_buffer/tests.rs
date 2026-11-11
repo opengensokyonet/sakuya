@@ -10,7 +10,6 @@ use crate::connection_send_credit::{
     ConnectionCreditReservation, ConnectionSendFlowController,
 };
 use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
-use sakuya_wire::reset_stream_at::ReliableSizeError;
 use sakuya_wire::v1::stream_id::StreamId;
 
 type Buffer = OffsetMapStreamSendBuffer<AtomicConnectionCreditReservation>;
@@ -180,7 +179,7 @@ fn reset_retention_is_checked_before_anything_changes() {
     assert_eq!(
         buffer.apply_reset(retention(50, 60)),
         Err(ApplyResetError::ReliableSizeBeyondFinalSize {
-            source: ReliableSizeError::check(v(50), v(60)).unwrap_err(),
+            source: ReliableSizeBeyondFinalSizeError::check(v(50), v(60)).unwrap_err(),
         })
     );
     assert_eq!(

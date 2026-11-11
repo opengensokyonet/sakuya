@@ -3,12 +3,11 @@ use super::covered_bytes::CoveredBytes;
 use super::visibility::{CoverError, VisibilitySettlement};
 use super::{
     AppendError, ApplyResetError, ExposeUsageError, ExposedContent, FinalSizeBeyondWrittenEndError,
-    ResetRetention, Selection, SelectionConstraints, StreamSendBuffer, TransmissionReceipt,
-    append_error, apply_reset_error,
+    ReliableSizeBeyondFinalSizeError, ResetRetention, Selection, SelectionConstraints,
+    StreamSendBuffer, TransmissionReceipt, append_error, apply_reset_error,
 };
 use crate::connection_send_credit::ConnectionCreditReservation;
 use bytes::Bytes;
-use sakuya_wire::reset_stream_at::ReliableSizeError;
 use sakuya_wire::var_int::VarInt;
 use snafu::{IntoError, ResultExt};
 use std::collections::BTreeMap;
@@ -128,7 +127,7 @@ impl<R: ConnectionCreditReservation> StreamSendBuffer for OffsetMapStreamSendBuf
             final_size,
             reliable_size,
         } = retention;
-        ReliableSizeError::check(final_size, reliable_size)
+        ReliableSizeBeyondFinalSizeError::check(final_size, reliable_size)
             .context(apply_reset_error::ReliableSizeBeyondFinalSizeSnafu)?;
         FinalSizeBeyondWrittenEndError::check(final_size, self.written_end)
             .context(apply_reset_error::FinalSizeBeyondWrittenEndSnafu)?;
