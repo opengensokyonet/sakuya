@@ -3,7 +3,11 @@
 //! Only the driver reads the clock: once at the start of each poll. That
 //! instant is the "now" of everything the poll does; components keep
 //! deadlines in their state and are handed the instant as an argument.
-use core::{future::Future, ops::Add, time::Duration};
+use core::{
+    future::Future,
+    ops::{Add, Sub},
+    time::Duration,
+};
 
 use sakuya_link::Link;
 
@@ -13,7 +17,16 @@ use sakuya_link::Link;
 /// of a link's arrivals and sends. It is not calendar time.
 pub trait MonotonicClock {
     /// A point in time.
-    type Instant: Ord + Copy + Add<Duration, Output = Self::Instant> + core::fmt::Debug;
+    ///
+    /// Subtracting gives the time between two instants. It is used only
+    /// after comparing them, never where the result would be below zero,
+    /// so what a type does there (`std::time::Instant` saturates,
+    /// `Duration` panics) does not matter.
+    type Instant: Ord
+        + Copy
+        + Add<Duration, Output = Self::Instant>
+        + Sub<Output = Duration>
+        + core::fmt::Debug;
     /// A timer that ends at an instant; it need not be resettable.
     type Sleep: Future<Output = ()>;
     /// The current instant.

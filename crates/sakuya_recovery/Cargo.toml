@@ -1,0 +1,11 @@
+[package]
+name = "sakuya_recovery"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Loss recovery, congestion control and datagram size probing for sakuya"
+
+[dependencies]
+sakuya_link.workspace = true
+snafu.workspace = true
