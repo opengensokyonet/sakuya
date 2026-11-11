@@ -12,9 +12,11 @@ futures-util.workspace = true
 nitori_call.workspace = true
 sakuya_link.workspace = true
 sakuya_packet_protection.workspace = true
+sakuya_recovery.workspace = true
 sakuya_wire.workspace = true
 snafu.workspace = true
 
 [dev-dependencies]
 sakuya_link.workspace = true
+sakuya_recovery.workspace = true
 sakuya_packet_protection = { workspace = true, features = ["ring"] }

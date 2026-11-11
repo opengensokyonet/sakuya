@@ -205,6 +205,97 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
         Some(items)
     }
 
+    /// The node of the link path (`path`, `link`) among the others, with its
+    /// address.
+    fn find_link_path(
+        &mut self,
+        path: &PathKey<L>,
+        link: &LinkId,
+    ) -> Option<(NodeAddr, &mut LinkPathNodeOf<T, L, B>)> {
+        let key = NodeKey::LinkPath(path.clone(), link.clone());
+        let Self {
+            logical_paths,
+            here_link_paths,
+            here_path,
+            ..
+        } = self;
+        if let Some((slot, _)) = *here_path
+            && let Some((sub, node)) = here_link_paths.find(|n| n.key == key)
+        {
+            return Some((NodeAddr::link_path(slot, sub), node));
+        }
+        let (slot, logical) =
+            logical_paths.find(|n| matches!(&n.node.key, NodeKey::LogicalPath(p) if p == path))?;
+        let (sub, node) = logical
+            .link_paths
+            .iter_mut()
+            .enumerate()
+            .find_map(|(sub, n)| n.as_mut().filter(|n| n.key == key).map(|n| (sub, n)))?;
+        Some((NodeAddr::link_path(slot, sub), node))
+    }
+
+    /// Take components `U` of the recovery layer of the link path (`path`,
+    /// `link`) among the others, and hand them to `each` together with the
+    /// others, read only: the recovery layers still reached from them are
+    /// those of every link path but this one ([`each_recovery`](Self::each_recovery)).
+    /// `None` when the link path is not among the others or has no
+    /// recovery layer.
+    ///
+    /// The layer is out of its link path while `each` runs and goes back
+    /// afterwards.
+    pub fn with_recovery_at<U, Is, R>(
+        &mut self,
+        path: &PathKey<L>,
+        link: &LinkId,
+        each: impl for<'x> FnOnce(<U as RefsOf<'x>>::Out, &'x Self) -> R,
+    ) -> Option<R>
+    where
+        for<'x> NodeData<T, L, Recovery>: FlatMut<'x>,
+        for<'x> <NodeData<T, L, Recovery> as FlatMut<'x>>::Out: TakeEach<'x, U, Is>,
+        for<'x> U: RefsOf<'x>,
+    {
+        let (addr, node) = self.find_link_path(path, link)?;
+        let mut layer = node.child.take()?;
+        let addr = NodeAddr::recovery(addr.slot, addr.sub);
+        let (items, _) = layer
+            .data
+            .flat_mut()
+            .take_each(&mut Self::record(self.taken, addr));
+        let result = each(items, &*self);
+        let (_, node) = self
+            .find_link_path(path, link)
+            .expect("the link path is still there");
+        node.child = Some(layer);
+        Some(result)
+    }
+
+    /// Read the recovery layer of every link path among the others that has
+    /// one, with the layer's key; and the lent link path's own, unless it
+    /// was taken. Nothing is taken.
+    pub fn each_recovery<'s>(
+        &'s self,
+        mut each: impl FnMut(&'s NodeKey<PathKey<L>>, &'s NodeData<T, L, Recovery>),
+    ) {
+        if let Some(own) = self.here_recovery.as_deref() {
+            each(&own.key, &own.data);
+        }
+        let mut visit = |node: &'s LinkPathNodeOf<T, L, B>| {
+            if let Some(recovery) = node.child.as_ref() {
+                each(&recovery.key, &recovery.data);
+            }
+        };
+        if self.here_path.is_some() {
+            for (_, node) in self.here_link_paths.indexed_ref() {
+                visit(node);
+            }
+        }
+        for (_, logical) in self.logical_paths.indexed_ref() {
+            for node in logical.link_paths.iter().flatten() {
+                visit(node);
+            }
+        }
+    }
+
     /// Take components `U` of every other link path, of every logical path,
     /// and hand them to `each` with the link path's key.
     pub fn each_link_path<'s, U, Is>(

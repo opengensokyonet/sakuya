@@ -89,6 +89,15 @@ pub trait LendCongestion<I, Others> {
 
     /// The access of the link path whose part is `this`.
     fn lend<'a>(&'a mut self, this: &'a mut Self::Part, others: &'a Others) -> Self::Access<'a>;
+
+    /// The earliest deadline of the access [`lend`](Self::lend) would give
+    /// for `this`: the next release of its pacer, and any instant its probe
+    /// timeout policy sets apart from the probe timeout.
+    ///
+    /// It reads the part and the factory only, not the other link paths:
+    /// a deadline is the state of the link path's own value, which the
+    /// events of each lend leave in the part.
+    fn next_deadline(&self, this: &Self::Part) -> Option<I>;
 }
 
 /// The congestion control a [`NewRenoRecoveryFactory`] makes for each link
@@ -236,6 +245,12 @@ where
         _others: &'a Others,
     ) -> Self::Access<'a> {
         this
+    }
+
+    /// The next release of the pacer: the probe timeout policy of NewReno
+    /// sets no instant of its own.
+    fn next_deadline(&self, this: &PacedNewReno<I>) -> Option<I> {
+        Pacer::next_release(this)
     }
 }
 

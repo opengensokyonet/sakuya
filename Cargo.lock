@@ -632,6 +632,7 @@ dependencies = [
  "nitori_call",
  "sakuya_link",
  "sakuya_packet_protection",
+ "sakuya_recovery",
  "sakuya_wire",
  "snafu",
 ]

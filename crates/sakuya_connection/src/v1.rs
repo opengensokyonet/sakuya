@@ -4,22 +4,24 @@
 //! [`Part`] is version 1 as one part of a composition. Its shares put the
 //! keys of each encryption level, the transport parameters, the idle
 //! timeout and what the connection was made with for its first logical
-//! link in the connection node; the clone of the link, the facts about it
-//! and the anti-amplification limit in the entry of each logical link; and
-//! the role in each link path. The calls and the components of the logical
-//! path and the recovery layer are not here yet.
+//! link in the connection node, with the recovery factory; the clone of the
+//! link, the facts about it and the anti-amplification limit in the entry of
+//! each logical link; the role in each link path; and in each link path's
+//! recovery layer, what the factory makes for it with the state beside them.
+//! The calls and the components of the logical path are not here yet.
 
 pub mod amplification;
 pub mod idle;
 pub mod keys;
 pub mod link;
 pub mod parameters;
+pub mod recovery;
 pub mod role;
 
 #[cfg(test)]
 mod tests;
 
-use core::time::Duration;
+use core::{fmt::Debug, time::Duration};
 
 use sakuya_packet_protection::{
     backend::CryptoBackend,
@@ -42,7 +44,7 @@ use crate::{
     layer::{self, NodeKey},
     others::OtherNodes,
     request::StructureRequest,
-    share::{ConnectionArgsOf, LayerShare, LineageLists, LogicalPathKeyShare},
+    share::{ConnectionArgsOf, LayerShare, LineageLists, LogicalPathKeyShare, LogicalPathKeys},
     take::GetAt,
 };
 
@@ -52,8 +54,13 @@ use self::{
     keys::{DirectionKeys, HandshakeKeys, InitialKeys, LevelKeys, OneRttKeys},
     link::{FirstLinkStart, LinkClone, LinkFacts},
     parameters::{LocalTransportParameters, PeerTransportParameters},
+    recovery::{
+        CongestionPartOf, LinkPathCongestionState, PmtuOf, RecoveryConfigOf, RecoveryFactoryOf,
+        RttOf,
+    },
     role::LinkPathRole,
 };
+use sakuya_recovery::factory::RecoveryFactory;
 
 /// QUIC version 1, one part of a composition.
 #[derive(Debug)]
@@ -78,6 +85,12 @@ pub trait Choices: ConnectionChoices {
     type Crypto: CryptoBackend + 'static;
     /// Which side of the connection this side is.
     type Side: Side;
+    /// What makes the RTT estimate, the stored part of congestion control
+    /// and the datagram size probing policy of each link path, one for each
+    /// connection. `V` identifies a link path, as found from the list of
+    /// parts: the logical link when the connection supports version 1
+    /// alone.
+    type Recovery<V: Clone + Eq + Debug + 'static>: RecoveryFactory<Self::Link, Via = V> + 'static;
 }
 
 /// What differs between the two sides of a connection: one method for each
@@ -128,7 +141,7 @@ impl Side for Client {
 ///
 /// The start state of the handshake engine joins these when the advancing
 /// call is written.
-pub struct ConnectionArgs<T: Choices> {
+pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
     /// The backend the Initial keys are derived with.
     pub crypto: T::Crypto,
     /// The Destination Connection ID of the client's first Initial packet,
@@ -143,10 +156,12 @@ pub struct ConnectionArgs<T: Choices> {
     pub transport_parameters: TransportParameterSlots,
     /// What is known about the connection's first logical link.
     pub first_link: LinkFacts,
+    /// The configuration the connection's recovery factory is made from.
+    pub recovery: RecoveryConfigOf<T, L>,
 }
 
-impl<T: Choices, L: ParametersOf<TransportParameterSpace>> LayerShare<T, L, layer::Connection>
-    for Part
+impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys>
+    LayerShare<T, L, layer::Connection> for Part
 {
     type Data = HList![
         InitialKeys<T::Crypto>,
@@ -157,9 +172,10 @@ impl<T: Choices, L: ParametersOf<TransportParameterSpace>> LayerShare<T, L, laye
         IdleTimeout<InstantOf<T>>,
         LocalTransportParameters<TransportParameterSlots>,
         PeerTransportParameters<TransportParameterSlots<L>>,
+        RecoveryFactoryOf<T, L>,
     ];
     type Calls = HNil;
-    type Args = ConnectionArgs<T>;
+    type Args = ConnectionArgs<T, L>;
 }
 impl<T: Choices, L> LayerShare<T, L, layer::LinkEntry> for Part {
     type Data = HList![LinkClone<T::Link>, LinkFacts, AntiAmplification];
@@ -177,16 +193,28 @@ impl<T: Choices, L> LayerShare<T, L, layer::Established> for Part {
     type Data = HNil;
     type Calls = HNil;
 }
-impl<T: Choices, L> LayerShare<T, L, layer::Recovery> for Part {
-    type Data = HNil;
+impl<T: Choices, L: LogicalPathKeys> LayerShare<T, L, layer::Recovery> for Part {
+    type Data = HList![
+        RttOf<T, L>,
+        CongestionPartOf<T, L>,
+        PmtuOf<T, L>,
+        LinkPathCongestionState<InstantOf<T>>,
+    ];
+    /// The factory makes the first three together.
+    type Units = HList![
+        HList![RttOf<T, L>, CongestionPartOf<T, L>, PmtuOf<T, L>],
+        HList![LinkPathCongestionState<InstantOf<T>>],
+    ];
     type Calls = HNil;
 }
 
 /// Version 1's facts among the facts of the connection node.
-fn own_args<T: Choices, L, I>(args: &mut ArgsOf<T, L, layer::Connection>) -> &mut ConnectionArgs<T>
+fn own_args<T: Choices, L, I>(
+    args: &mut ArgsOf<T, L, layer::Connection>,
+) -> &mut ConnectionArgs<T, L>
 where
     for<'v> L: LineageLists<'v, T>,
-    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T>, I>,
+    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
 {
     args.get_mut()
 }
@@ -202,10 +230,10 @@ fn max_idle_timeout<S: Selector<Option<MaxIdleTimeout>, I>, I>(slots: &S) -> Opt
 
 /// The Initial keys are derived when the connection is made, so the level
 /// is live from the start (RFC 9001 §5.2).
-impl<T: Choices, L, I> Build<T, L, layer::Connection, I> for InitialKeys<T::Crypto>
+impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for InitialKeys<T::Crypto>
 where
     for<'v> L: LineageLists<'v, T>,
-    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T>, I>,
+    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
@@ -247,10 +275,10 @@ macro_rules! not_yet {
 }
 not_yet!(HandshakeKeys, OneRttKeys);
 
-impl<T: Choices, L, I> Build<T, L, layer::Connection, I> for AntiAmplificationFactor
+impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for AntiAmplificationFactor
 where
     for<'v> L: LineageLists<'v, T>,
-    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T>, I>,
+    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
@@ -264,10 +292,10 @@ impl<T: Choices, L> DataComponent<T, L, layer::Connection, ()> for AntiAmplifica
 {
 }
 
-impl<T: Choices, L, I> Build<T, L, layer::Connection, I> for FirstLinkStart
+impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for FirstLinkStart
 where
     for<'v> L: LineageLists<'v, T>,
-    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T>, I>,
+    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
@@ -283,10 +311,10 @@ impl<T: Choices, L> DataComponent<T, L, layer::Connection, ()> for FirstLinkStar
 
 /// The idle timeout starts from this side's maximum idle timeout as
 /// configured.
-impl<T: Choices, L, I> Build<T, L, layer::Connection, I> for IdleTimeout<InstantOf<T>>
+impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for IdleTimeout<InstantOf<T>>
 where
     for<'v> L: LineageLists<'v, T>,
-    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T>, I>,
+    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
@@ -358,11 +386,11 @@ where
 }
 
 /// This side's transport parameters start as configured.
-impl<T: Choices, L, I> Build<T, L, layer::Connection, I>
+impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)>
     for LocalTransportParameters<TransportParameterSlots>
 where
     for<'v> L: LineageLists<'v, T>,
-    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T>, I>,
+    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
@@ -493,10 +521,15 @@ where
 }
 
 /// The role's end time is its deadline: when it comes the link path ends.
-/// It reads itself, which other components change.
+/// It reads itself, which other components change, and asks for the
+/// recovery layer to follow it: built when the link path is `Active`
+/// without one, ended when the role has none. A link path built `Active`,
+/// the connection's first, so gets its layer as soon as it is built.
 ///
 /// Not here yet: entering `Closing` and `Draining`, which read the record
-/// of why the connection closed.
+/// of why the connection closed; and the initial RTT of a later link path
+/// whose new address was validated, which comes with path validation. It
+/// asks for the layer of an `Active` link path without an initial RTT.
 impl<T: Choices, L, I> DataComponent<T, L, layer::LinkPath, I> for LinkPathRole<InstantOf<T>>
 where
     for<'v> L: LineageLists<'v, T>,
@@ -517,5 +550,27 @@ where
             unreachable!("a link path's lend carries its key")
         };
         Some(StructureRequest::EndLinkPath { path, link })
+    }
+    fn reread<'v, B: CallBundle>(
+        lineage: LineageOf<'v, T, L, layer::LinkPath>,
+        others: &mut OtherNodes<'v, T, L, B>,
+        _: InstantOf<T>,
+    ) -> Option<RequestOf<T, L>> {
+        let role = lineage.get::<LinkPathRole<InstantOf<T>>, I>();
+        let wanted = *role == LinkPathRole::Active;
+        let NodeKey::LinkPath(path, link) = others.here().clone() else {
+            unreachable!("a link path's lend carries its key")
+        };
+        match (wanted, role.has_recovery(), others.has_recovery()) {
+            (true, _, false) => Some(StructureRequest::AddRecovery {
+                args: layer::RecoveryArgs {
+                    path,
+                    link,
+                    initial_rtt: None,
+                },
+            }),
+            (_, false, true) => Some(StructureRequest::EndRecovery { path, link }),
+            _ => None,
+        }
     }
 }

@@ -7,7 +7,7 @@
 //! and the recovery layer under a link path. Every node of one layer holds
 //! the same kinds of components and calls: each part of the composition has
 //! a share in every layer ([`LayerShare`](crate::share::LayerShare)).
-use core::fmt::Debug;
+use core::{fmt::Debug, time::Duration};
 
 use sakuya_link::LinkId;
 
@@ -134,6 +134,11 @@ pub struct RecoveryArgs<K> {
     pub path: K,
     /// The link path's logical link.
     pub link: LinkId,
+    /// The RTT measured before the layer is built: for a link path whose
+    /// new address was validated, the interval between sending a
+    /// PATH_CHALLENGE and receiving its PATH_RESPONSE on it (RFC 9002
+    /// §6.2.2); `None` for the connection's first link path.
+    pub initial_rtt: Option<Duration>,
 }
 
 /// The key of a node.

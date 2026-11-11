@@ -229,6 +229,7 @@ fn child_nodes_are_built_moved_and_ended() {
         args: RecoveryArgs {
             path: PATH,
             link: first.clone(),
+            initial_rtt: None,
         },
     }));
     assert!(outer.poll(&mut connection).is_pending());

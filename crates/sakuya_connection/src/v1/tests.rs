@@ -214,3 +214,43 @@ fn local_parameters_are_settled_when_sent() {
     local.send_with(|configured| configured + 1);
     assert_eq!((local.sent(), local.configured()), (Some(&11), None));
 }
+
+mod recovery {
+    use super::super::recovery::{LinkPathCongestionState, max_datagram_size_in_use};
+    use core::time::Duration;
+    use sakuya_recovery::{
+        congestion::{CongestionController, new_reno::NewReno, new_reno::NewRenoConfig},
+        pacing::{PacedCongestionController, TokenBucketPacer, TokenBucketPacerConfig},
+        rtt::RttEstimate,
+    };
+
+    #[test]
+    fn the_size_in_use_is_the_smallest_limit_but_not_below_1200() {
+        // the conclusion, the peer's limit and the link's limit
+        assert_eq!(max_datagram_size_in_use(1500, None, Some(1452)), 1452);
+        assert_eq!(max_datagram_size_in_use(1400, Some(1350), Some(1452)), 1350);
+        assert_eq!(max_datagram_size_in_use(1400, None, Some(9000)), 1400);
+        // a link below 1200 is raised to it; one that cannot tell gives 1200
+        assert_eq!(max_datagram_size_in_use(1400, None, Some(1000)), 1200);
+        assert_eq!(max_datagram_size_in_use(1400, None, None), 1200);
+    }
+
+    #[test]
+    fn the_window_left_is_none_once_probes_went_past_it() {
+        let controller: PacedCongestionController<NewReno<Duration>, TokenBucketPacer<Duration>> =
+            PacedCongestionController::new(
+                NewReno::new(NewRenoConfig::RECOMMENDED, 1200),
+                TokenBucketPacer::new(TokenBucketPacerConfig::recommended(Duration::from_millis(
+                    1,
+                ))),
+            );
+        let state = LinkPathCongestionState::<Duration>::new();
+        assert_eq!(state.window_left(&controller), controller.window());
+        assert_eq!(state.bytes_in_flight(), 0);
+        let mut controller = controller;
+        let rtt = RttEstimate::initial(Duration::from_millis(333));
+        // the first refill fills the bucket
+        let allowance = state.pacing_allowance(&mut controller, Duration::ZERO, &rtt, 1200);
+        assert!(allowance >= 12000, "{allowance}");
+    }
+}

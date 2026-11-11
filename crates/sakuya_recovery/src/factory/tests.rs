@@ -1,5 +1,5 @@
 use super::{
-    LendCongestion, NewRenoRecoveryFactory, NewRenoRecoveryFactoryConfig,
+    LendCongestion, NewRenoRecoveryFactory, NewRenoRecoveryFactoryConfig, PacedNewReno,
     PacerInitialWindowMismatchError, RecoveryFactory,
 };
 use crate::{
@@ -98,6 +98,24 @@ fn a_link_path_part_is_lent_as_it_is() {
         &mut part
     ));
     assert_eq!(Pacer::<Duration>::allowance(&part), 12000);
+}
+
+#[test]
+fn the_deadline_of_a_part_is_its_pacers_next_release() {
+    let mut factory = factory();
+    let (_, mut part, _) = RecoveryFactory::<TestLink>::create(&mut factory, &link(), None);
+    let deadline = |factory: &NewRenoRecoveryFactory<LinkId>, part: &PacedNewReno<Duration>| {
+        LendCongestion::<Duration, ()>::next_deadline(factory, part)
+    };
+    // A full bucket holds nothing back.
+    let _ = window_left(&mut factory, &mut part, &(), 0);
+    assert_eq!(deadline(&factory, &part), None);
+    // Spent, it is released again once a full datagram is earned back.
+    let access = LendCongestion::<Duration, ()>::lend(&mut factory, &mut part, &());
+    access.on_charged(12000);
+    let release = deadline(&factory, &part).expect("a release after spending");
+    assert!(release > ms(0));
+    assert_eq!(Some(release), Pacer::<Duration>::next_release(&part));
 }
 
 #[test]
