@@ -1,0 +1,17 @@
+[package]
+name = "sakuya_connection"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "QUIC connections for sakuya: the tree of a connection's state and the driver of its calls"
+
+[dependencies]
+atomic-waker.workspace = true
+frunk_core.workspace = true
+nitori_call.workspace = true
+sakuya_link.workspace = true
+sakuya_wire.workspace = true
+
+[dev-dependencies]
+sakuya_link.workspace = true
