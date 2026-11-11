@@ -1,43 +1,50 @@
 //! The client's handshake engine.
 //!
-//! [`client_handshake`] runs a TLS 1.3 handshake for a QUIC client
-//! connecting to a [`ServerTarget`]. Like the server's engine, it owns the
-//! backend and the client's capabilities and receives the connection's
-//! receivers on every poll (see [`engine`](crate::engine)): the CRYPTO
-//! streams and a [`ClientTransport`], which gives the client's transport
-//! parameters and checks the server's.
+//! [`ClientHandshake`] is the start state of a TLS 1.3 handshake for a QUIC
+//! client connecting to a [`ServerTarget`], and implements
+//! [`ClientHandshakeSteps`]. Like the server's engine, it owns the backend
+//! and the client's capabilities, and each step receives the connection as
+//! one access, lent on every poll, whose family has the
+//! [`ClientHandshakeCapability`] (see [`engine`](crate::engine)): the
+//! CRYPTO streams and a [`ClientTransport`], which gives the client's
+//! transport parameters and checks the server's.
 //!
-//! The handshake goes:
+//! The steps go:
 //!
-//! 1. takes what to offer from the [`Offering`] and a ticket from the
+//! 1. [`write_client_hello`](ClientHandshakeSteps::write_client_hello)
+//!    takes what to offer from the [`Offering`] and a ticket from the
 //!    [`ClientTicketStore`], and writes the ClientHello at Initial, with the
 //!    binder of the ticket; the hello names psk_dhe_ke with or without a
-//!    ticket, for the server to send tickets; when it offers 0-RTT, it yields
-//!    [`ClientHandshakeEvent::EarlyDataOffered`];
-//! 2. reads the ServerHello, or a HelloRetryRequest, after which it writes
-//!    the second ClientHello and reads the ServerHello; it yields
-//!    [`ClientHandshakeEvent::ServerHelloRead`] and moves both streams to
-//!    Handshake;
-//! 3. reads EncryptedExtensions and hands the server's transport
-//!    parameters to the connection;
-//! 4. authenticates the server: with its certificate, verified by the
+//!    ticket, for the server to send tickets. When it offers 0-RTT, it
+//!    returns [`EarlyDataOffered`].
+//! 2. [`read_server_hello`](ClientHandshakeSteps::read_server_hello) reads
+//!    the ServerHello, or a HelloRetryRequest, after which it writes the
+//!    second ClientHello and reads the ServerHello; it returns
+//!    [`ServerHelloRead`].
+//! 3. [`read_server_finished`](ClientHandshakeSteps::read_server_finished)
+//!    moves both streams to Handshake, reads EncryptedExtensions and hands
+//!    the server's transport parameters to the connection. It authenticates
+//!    the server: with its certificate, verified by the
 //!    [`CertificateVerifier`], and CertificateVerify, whose scheme must fit
 //!    the certificate's key; or with the PSK the server accepted, keeping
-//!    the identity the ticket recorded;
-//! 5. reads the server's Finished, writes an empty Certificate when the
-//!    server asked for one, and writes its own Finished: the handshake is
-//!    complete, and it yields [`ClientHandshakeEvent::Completed`] and moves
-//!    both streams to 1-RTT;
-//! 6. keeps the tickets of the NewSessionTicket messages the server sends,
-//!    for as long as the call runs; a ticket that allows 0-RTT with a
-//!    max_early_data_size other than 0xffffffff ends the call with
-//!    [`HandshakeError::ProtocolViolation`] (RFC 9001 §4.6.1).
+//!    the identity the ticket recorded. It reads the server's Finished,
+//!    writes an empty Certificate when the server asked for one, and writes
+//!    its own Finished: the handshake is complete, and it returns
+//!    [`ClientHandshakeCompleted`].
+//! 4. [`read_tickets`](ClientHandshakeSteps::read_tickets) moves both
+//!    streams to 1-RTT and keeps the tickets of the NewSessionTicket
+//!    messages the server sends, for as long as it runs; a ticket that
+//!    allows 0-RTT with a max_early_data_size other than 0xffffffff ends it
+//!    with [`HandshakeError::ProtocolViolation`] (RFC 9001 §4.6.1).
 //!
-//! A failure ends the call with a [`HandshakeError`].
+//! A failure ends the handshake with a [`HandshakeError`].
 //!
-//! `#[call]` and `#[capability]` generate the operation struct
-//! [`ClientHandshake`], with a `new` constructor taking the arguments after
-//! the receivers, and the extension traits `ClientHandshakeExt`,
+//! Each step is also a `nitori_call` operation for every
+//! [`ClientHandshakeSteps`], through [`write_client_hello_step`],
+//! [`read_server_hello_step`], [`read_server_finished_step`] and
+//! [`read_tickets_step`]: `#[call]` generates their operation structs
+//! ([`WriteClientHelloStep`] and so on), each with a `new` constructor
+//! taking the state, and their extension traits. `#[capability]` generates
 //! `ClientTransportExt` and `ClientTransportViewExt`.
 
 // The generated items have no documentation comments; the module
@@ -102,9 +109,9 @@ use crate::{
     },
     role::Client,
     schedule::{
-        Authentication, CertificateVerifyError, Exporter, FinishedError, HandshakeTrafficSecrets,
-        OneRttTrafficSecrets, PskEarlySecret, ResumptionPsk, Transcript, UnofferedPskError,
-        ZeroRttSendTrafficSecret,
+        Authentication, CertificateVerifyError, Exporter, FinishedError, HandshakeSecret,
+        HandshakeTrafficSecrets, OneRttTrafficSecrets, PskEarlySecret, ResumptionPsk,
+        ResumptionSecret, Transcript, UnofferedPskError, ZeroRttSendTrafficSecret,
     },
     vector::LengthOutOfRangeError,
     verify::{CertificateVerifier, SubjectPublicKey, public_key::SchemeKeyMismatchError},
@@ -186,47 +193,268 @@ pub enum EarlyDataOutcome {
     Rejected,
 }
 
-/// What a client's handshake hands over, in this order.
+/// Everything a client's handshake asks of the connection, on one family:
+/// the CRYPTO bytes it reads and writes, the moves of their levels, and the
+/// transport parameters.
+///
+/// It is implemented for every family with [`CryptoInput`],
+/// [`CryptoOutput`] and [`ClientTransport`] whose failures to read, to move
+/// the input's level and to write convert into the error of
+/// [`ClientTransport`]; the three conversions are its methods.
+pub trait ClientHandshakeCapability: CryptoInput + CryptoOutput + ClientTransport {
+    /// Converts a failure to read CRYPTO bytes.
+    fn convert_read_error(error: <Self as Read>::Error) -> <Self as ClientTransport>::Error;
+
+    /// Converts a failure to move the input to a level.
+    fn convert_level_error(
+        error: <Self as CryptoInput>::LevelError,
+    ) -> <Self as ClientTransport>::Error;
+
+    /// Converts a failure to write CRYPTO bytes.
+    fn convert_write_error(error: <Self as Write>::Error) -> <Self as ClientTransport>::Error;
+}
+
+impl<W> ClientHandshakeCapability for W
+where
+    W: CryptoInput + CryptoOutput + ClientTransport,
+    <W as Read>::Error: Into<<W as ClientTransport>::Error>,
+    <W as CryptoInput>::LevelError: Into<<W as ClientTransport>::Error>,
+    <W as Write>::Error: Into<<W as ClientTransport>::Error>,
+{
+    fn convert_read_error(error: <W as Read>::Error) -> <W as ClientTransport>::Error {
+        error.into()
+    }
+
+    fn convert_level_error(error: <W as CryptoInput>::LevelError) -> <W as ClientTransport>::Error {
+        error.into()
+    }
+
+    fn convert_write_error(error: <W as Write>::Error) -> <W as ClientTransport>::Error {
+        error.into()
+    }
+}
+
+/// The steps of a client's handshake, implemented by the engine's start
+/// state.
+///
+/// As for the server's
+/// [`ServerHandshakeSteps`](crate::server::engine::ServerHandshakeSteps):
+/// each step takes the state the step before returned by value, with the
+/// connection as an access whose family `W` has the
+/// [`ClientHandshakeCapability`], and returns what the connection installs
+/// with the state of the next step. Every step fails with the same
+/// [`HandshakeError`].
+///
+/// The steps are async functions of the trait, so code generic over the
+/// trait cannot name their futures, nor require that they be `Send`.
+#[allow(async_fn_in_trait)]
+pub trait ClientHandshakeSteps: Sized {
+    /// The backend, which the exporter keeps.
+    type Crypto: TlsCrypto;
+
+    /// The client's failure, which names its alert.
+    type AlertError: CallsForAlert;
+
+    /// The state after the first ClientHello is written.
+    type ClientHelloWrittenState;
+
+    /// The state after the ServerHello is read.
+    type ServerHelloReadState;
+
+    /// The state after the client's Finished is written.
+    type ClientHandshakeCompletedState;
+
+    /// Writes the first ClientHello; returns what 0-RTT needs when it
+    /// offers 0-RTT.
+    ///
+    /// # Errors
+    ///
+    /// As [`HandshakeError`] describes.
+    async fn write_client_hello<W: ClientHandshakeCapability>(
+        self,
+        host: &mut impl LentAccess<Family = W>,
+    ) -> Result<(Option<EarlyDataOffered>, Self::ClientHelloWrittenState), StepError<Self, W>>;
+
+    /// Reads the ServerHello, after a HelloRetryRequest and a second
+    /// ClientHello when the server sends one.
+    ///
+    /// # Errors
+    ///
+    /// As [`HandshakeError`] describes.
+    async fn read_server_hello<W: ClientHandshakeCapability>(
+        state: Self::ClientHelloWrittenState,
+        host: &mut impl LentAccess<Family = W>,
+    ) -> Result<(ServerHelloRead, Self::ServerHelloReadState), StepError<Self, W>>;
+
+    /// Moves both streams to Handshake, authenticates the server, verifies
+    /// its Finished and writes the client's.
+    ///
+    /// # Errors
+    ///
+    /// As [`HandshakeError`] describes.
+    #[allow(clippy::type_complexity)]
+    async fn read_server_finished<W: ClientHandshakeCapability>(
+        state: Self::ServerHelloReadState,
+        host: &mut impl LentAccess<Family = W>,
+    ) -> Result<
+        (
+            ClientHandshakeCompleted<Self::Crypto>,
+            Self::ClientHandshakeCompletedState,
+        ),
+        StepError<Self, W>,
+    >;
+
+    /// Moves both streams to 1-RTT and keeps the tickets the server sends;
+    /// it ends only when it fails.
+    ///
+    /// # Errors
+    ///
+    /// As [`HandshakeError`] describes.
+    async fn read_tickets<W: ClientHandshakeCapability>(
+        state: Self::ClientHandshakeCompletedState,
+        host: &mut impl LentAccess<Family = W>,
+    ) -> Result<Infallible, StepError<Self, W>>;
+}
+
+/// How a step of `E` fails on the family `W`.
+type StepError<E, W> =
+    HandshakeError<<E as ClientHandshakeSteps>::AlertError, <W as ClientTransport>::Error>;
+
+/// What [`ClientHandshakeSteps::write_client_hello`] returns when the
+/// ClientHello offers 0-RTT: the secret to send 0-RTT with, and what the
+/// ticket remembers of the server.
+#[doc(alias = "ZeroRttSendTrafficSecret")]
+pub struct EarlyDataOffered {
+    /// The AEAD of the ticket's cipher suite.
+    pub aead: AeadAlgorithm,
+    /// The 0-RTT secret.
+    pub secret: ZeroRttSendTrafficSecret,
+    /// The server's transport parameters of the ticket's connection, which
+    /// 0-RTT keeps to (RFC 9000 §7.4.1).
+    pub transport_parameters: Bytes,
+    /// The application protocol of the ticket's connection.
+    pub application_protocol: Option<ProtocolName<Bytes>>,
+}
+
+/// What [`ClientHandshakeSteps::read_server_hello`] returns: the Handshake
+/// traffic secrets.
+#[doc(alias = "HandshakeTrafficSecrets")]
+pub struct ServerHelloRead {
+    /// The AEAD of the cipher suite, for every later secret.
+    pub aead: AeadAlgorithm,
+    /// The Handshake traffic secrets.
+    pub secrets: HandshakeTrafficSecrets,
+}
+
+/// What [`ClientHandshakeSteps::read_server_finished`] returns: the
+/// server's Finished is verified and the client's written, and the
+/// handshake is complete.
 ///
 /// `C` is the backend.
-pub enum ClientHandshakeEvent<C: TlsCrypto> {
-    /// The ClientHello offering 0-RTT is written: the secret to send 0-RTT
-    /// with, and what the ticket remembers of the server.
-    #[doc(alias = "ZeroRttSendTrafficSecret")]
-    EarlyDataOffered {
-        /// The AEAD of the ticket's cipher suite.
-        aead: AeadAlgorithm,
-        /// The 0-RTT secret.
-        secret: ZeroRttSendTrafficSecret,
-        /// The server's transport parameters of the ticket's connection,
-        /// which 0-RTT keeps to (RFC 9000 §7.4.1).
-        transport_parameters: Bytes,
-        /// The application protocol of the ticket's connection.
-        application_protocol: Option<ProtocolName<Bytes>>,
-    },
-    /// The ServerHello is read: the Handshake traffic secrets. Both streams
-    /// move to Handshake after this item.
-    #[doc(alias = "HandshakeTrafficSecrets")]
-    ServerHelloRead {
-        /// The AEAD of the cipher suite, for every later secret.
-        aead: AeadAlgorithm,
-        /// The Handshake traffic secrets.
-        secrets: HandshakeTrafficSecrets,
-    },
-    /// The server's Finished is verified and the client's written: the
-    /// handshake is complete. Both streams move to 1-RTT after this item.
-    Completed {
-        /// The 1-RTT secrets.
-        secrets: OneRttTrafficSecrets,
-        /// The exporter of the connection.
-        exporter: Exporter<C>,
-        /// Who the server is.
-        identity: ServerIdentity,
-        /// The application protocol the server selected.
-        application_protocol: Option<ProtocolName<Bytes>>,
-        /// What became of 0-RTT.
-        early_data: EarlyDataOutcome,
-    },
+pub struct ClientHandshakeCompleted<C: TlsCrypto> {
+    /// The 1-RTT secrets.
+    pub secrets: OneRttTrafficSecrets,
+    /// The exporter of the connection.
+    pub exporter: Exporter<C>,
+    /// Who the server is.
+    pub identity: ServerIdentity,
+    /// The application protocol the server selected.
+    pub application_protocol: Option<ProtocolName<Bytes>>,
+    /// What became of 0-RTT.
+    pub early_data: EarlyDataOutcome,
+}
+
+/// A step of a client's handshake as an operation: see
+/// [`ClientHandshakeSteps::write_client_hello`].
+///
+/// # Errors
+///
+/// As the step's.
+#[call]
+#[allow(clippy::type_complexity)]
+pub async fn write_client_hello_step<W, E>(
+    host: &mut impl LentAccess<Family = W>,
+    tls: E,
+) -> Result<
+    (
+        Option<EarlyDataOffered>,
+        <E as ClientHandshakeSteps>::ClientHelloWrittenState,
+    ),
+    StepError<E, W>,
+>
+where
+    E: ClientHandshakeSteps,
+    W: ClientHandshakeCapability,
+{
+    tls.write_client_hello(host).await
+}
+
+/// A step of a client's handshake as an operation: see
+/// [`ClientHandshakeSteps::read_server_hello`].
+///
+/// # Errors
+///
+/// As the step's.
+#[call]
+#[allow(clippy::type_complexity)]
+pub async fn read_server_hello_step<W, E>(
+    host: &mut impl LentAccess<Family = W>,
+    state: <E as ClientHandshakeSteps>::ClientHelloWrittenState,
+) -> Result<
+    (
+        ServerHelloRead,
+        <E as ClientHandshakeSteps>::ServerHelloReadState,
+    ),
+    StepError<E, W>,
+>
+where
+    E: ClientHandshakeSteps,
+    W: ClientHandshakeCapability,
+{
+    E::read_server_hello(state, host).await
+}
+
+/// A step of a client's handshake as an operation: see
+/// [`ClientHandshakeSteps::read_server_finished`].
+///
+/// # Errors
+///
+/// As the step's.
+#[call]
+#[allow(clippy::type_complexity)]
+pub async fn read_server_finished_step<W, E>(
+    host: &mut impl LentAccess<Family = W>,
+    state: <E as ClientHandshakeSteps>::ServerHelloReadState,
+) -> Result<
+    (
+        ClientHandshakeCompleted<<E as ClientHandshakeSteps>::Crypto>,
+        <E as ClientHandshakeSteps>::ClientHandshakeCompletedState,
+    ),
+    StepError<E, W>,
+>
+where
+    E: ClientHandshakeSteps,
+    W: ClientHandshakeCapability,
+{
+    E::read_server_finished(state, host).await
+}
+
+/// A step of a client's handshake as an operation: see
+/// [`ClientHandshakeSteps::read_tickets`].
+///
+/// # Errors
+///
+/// As the step's.
+#[call]
+pub async fn read_tickets_step<W, E>(
+    host: &mut impl LentAccess<Family = W>,
+    state: <E as ClientHandshakeSteps>::ClientHandshakeCompletedState,
+) -> Result<Infallible, StepError<E, W>>
+where
+    E: ClientHandshakeSteps,
+    W: ClientHandshakeCapability,
+{
+    E::read_tickets(state, host).await
 }
 
 /// An extension EncryptedExtensions carries that the client did not ask
@@ -505,49 +733,79 @@ fn alert<F, E>(source: F) -> HandshakeError<F, E> {
     HandshakeError::Alert { source }
 }
 
-fn connection<F, E>(source: impl Into<E>) -> HandshakeError<F, E> {
-    HandshakeError::Transport {
-        source: source.into(),
-    }
-}
+/// How a step fails with the verifier's failure `V` on the family `W`.
+type Failed<V, W> = HandshakeError<ClientAlertError<V>, <W as ClientTransport>::Error>;
 
-/// Collects one handshake message from `input`.
-async fn read_message<F, A, V, E>(
-    input: &mut A,
+/// Collects one handshake message from `host`.
+async fn read_message<W: ClientHandshakeCapability, V>(
+    host: &mut impl ReceiverAccess<Family = W>,
     limits: MessageLimits,
     hash: Option<HashAlgorithm>,
-) -> Result<HandshakeMessage, HandshakeError<ClientAlertError<V>, E>>
-where
-    F: Read,
-    A: ReceiverAccess<Family = F>,
-    F::Error: Into<E>,
-{
-    input
-        .read_handshake_message(limits, hash)
+) -> Result<HandshakeMessage, Failed<V, W>> {
+    host.read_handshake_message(limits, hash)
         .await
         .map_err(|error| match split_read(error) {
             Ok(source) => alert(ClientAlertError::Message { source }),
-            Err(error) => connection(error),
+            Err(error) => HandshakeError::Transport {
+                source: W::convert_read_error(error),
+            },
         })
 }
 
-/// Writes the bytes of one message to `output`.
-async fn write_message<F, A, V, E>(
-    output: &mut A,
+/// Writes the bytes of one message to `host`.
+async fn write_message<W: ClientHandshakeCapability, V>(
+    host: &mut impl ReceiverAccess<Family = W>,
     message: &[u8],
-) -> Result<(), HandshakeError<ClientAlertError<V>, E>>
-where
-    F: Write,
-    A: ReceiverAccess<Family = F>,
-    F::Error: Into<E>,
-{
-    output
-        .write_all(message)
+) -> Result<(), Failed<V, W>> {
+    host.write_all(message)
         .await
         .map_err(|error| match split_write(error) {
             Ok(source) => alert(ClientAlertError::OutputStopped { source }),
-            Err(error) => connection(error),
+            Err(error) => HandshakeError::Transport {
+                source: W::convert_write_error(error),
+            },
         })
+}
+
+/// Moves both streams of `host` to `level`.
+fn move_to<W: ClientHandshakeCapability, V>(
+    host: &mut impl LentAccess<Family = W>,
+    level: CryptoLevel,
+) -> Result<(), Failed<V, W>> {
+    host.move_output_to(level);
+    host.move_input_to(level)
+        .map_err(|error| HandshakeError::Transport {
+            source: W::convert_level_error(error),
+        })
+}
+
+/// Checks that the server selected TLS 1.3.
+fn check_version<V, W: ClientHandshakeCapability>(
+    version: Option<ProtocolVersion>,
+) -> Result<(), Failed<V, W>> {
+    if version == Some(ProtocolVersion::TLS_1_3) {
+        Ok(())
+    } else {
+        Err(alert(ClientAlertError::Version { version }))
+    }
+}
+
+/// The suite of `offer` the server selected.
+fn offered_suite<C, V, W: ClientHandshakeCapability>(
+    offer: &Offer<C>,
+    suite: CipherSuite,
+) -> Result<SupportedSuite<C>, Failed<V, W>> {
+    offer
+        .suites()
+        .iter()
+        .find(|offered| offered.suite() == suite)
+        .copied()
+        .ok_or(alert(ClientAlertError::UnofferedSuite { suite }))
+}
+
+/// The age of the ticket of `offered`, as the ClientHello states it now.
+fn ticket_age<C>(offered: &OfferedTicket<C>, clock: &impl Clock) -> u32 {
+    offered.ticket.obfuscated_ticket_age(clock.now())
 }
 
 /// A copy of a PSK, which the chain consumes.
@@ -566,7 +824,7 @@ struct OfferedTicket<C> {
 struct HelloParts<'a, C> {
     target: &'a ServerTarget,
     offer: &'a Offer<C>,
-    transport_parameters: OpaqueData<Bytes>,
+    transport_parameters: &'a OpaqueData<Bytes>,
     application_protocols: Option<&'a ProtocolNameList<Bytes>>,
     random: HelloRandom,
 }
@@ -736,26 +994,9 @@ enum Sent<C: TlsCrypto> {
     },
 }
 
-/// Runs a client's handshake to `target` with `backend`, `offering`,
-/// `tickets`, `verifier`, `clock` and `settings`, offering the
-/// `application_protocols`, over the connection's `input`, `output` and
-/// `transport`.
-///
-/// It yields the [`ClientHandshakeEvent`]s, then keeps the tickets the
-/// server sends until the call is dropped or fails.
-///
-/// # Errors
-///
-/// [`HandshakeError::Alert`] with a [`ClientAlertError`],
-/// [`HandshakeError::ProtocolViolation`] for a ticket's
-/// max_early_data_size, and [`HandshakeError::Transport`] when a receiver
-/// fails.
-#[call(yields = ClientHandshakeEvent<B>)]
-#[allow(clippy::too_many_arguments)]
-pub async fn client_handshake<I, O, T, B, F, K, V, Z>(
-    input: &mut impl LentAccess<Family = I>,
-    output: &mut impl LentAccess<Family = O>,
-    transport: &mut impl LentAccess<Family = T>,
+/// The start state of a client's handshake: the backend, the client's
+/// capabilities and the target, which [`ClientHandshakeSteps`] runs.
+pub struct ClientHandshake<B, F, K, V, Z> {
     backend: B,
     offering: F,
     tickets: K,
@@ -764,465 +1005,670 @@ pub async fn client_handshake<I, O, T, B, F, K, V, Z>(
     target: ServerTarget,
     application_protocols: Option<ProtocolNameList<Bytes>>,
     settings: ClientHandshakeSettings,
-) -> Result<(), HandshakeError<ClientAlertError<V::Error>, <T as ClientTransport>::Error>>
+}
+
+impl<B, F, K, V, Z> ClientHandshake<B, F, K, V, Z> {
+    /// A client's handshake to `target` with `backend`, `offering`,
+    /// `tickets`, `verifier`, `clock` and `settings`, offering the
+    /// `application_protocols`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        backend: B,
+        offering: F,
+        tickets: K,
+        verifier: V,
+        clock: Z,
+        target: ServerTarget,
+        application_protocols: Option<ProtocolNameList<Bytes>>,
+        settings: ClientHandshakeSettings,
+    ) -> Self {
+        Self {
+            backend,
+            offering,
+            tickets,
+            verifier,
+            clock,
+            target,
+            application_protocols,
+            settings,
+        }
+    }
+}
+
+/// The state of a client's handshake after its first ClientHello is
+/// written: what a second ClientHello and reading the ServerHello need.
+///
+/// `A` is the attempt of the offering.
+pub struct ClientHelloWrittenState<B: TlsCrypto, K, V, Z, A> {
+    backend: B,
+    tickets: K,
+    verifier: V,
+    clock: Z,
+    target: ServerTarget,
+    application_protocols: Option<ProtocolNameList<Bytes>>,
+    limits: MessageLimits,
+    offer: Offer<B>,
+    attempt: Option<A>,
+    ticket: Option<OfferedTicket<B>>,
+    exchanges: Vec<<B as KeyExchange>::Started>,
+    transport_parameters: OpaqueData<Bytes>,
+    random: HelloRandom,
+    sent: Sent<B>,
+    early_offered: bool,
+}
+
+/// The state of a client's handshake after the ServerHello is read: what
+/// authenticating the server and the Finished messages need.
+pub struct ServerHelloReadState<B: TlsCrypto, K, V, Z> {
+    tickets: K,
+    verifier: V,
+    clock: Z,
+    target: ServerTarget,
+    application_protocols: Option<ProtocolNameList<Bytes>>,
+    limits: MessageLimits,
+    offer: Offer<B>,
+    ticket: Option<OfferedTicket<B>>,
+    suite: SupportedSuite<B>,
+    selected_psk: Option<PskIndex>,
+    early_offered: bool,
+    handshake: HandshakeSecret<Client, B>,
+}
+
+/// The state of a client's handshake once it is complete: what keeping the
+/// server's tickets needs.
+pub struct ClientHandshakeCompletedState<B: TlsCrypto, K, Z> {
+    tickets: K,
+    clock: Z,
+    target: ServerTarget,
+    limits: MessageLimits,
+    suite: SupportedSuite<B>,
+    selected_protocol: Option<ProtocolName<Bytes>>,
+    peer_parameters: Bytes,
+    ticket_identity: SubjectPublicKey,
+    resumption: ResumptionSecret<Client, B>,
+}
+
+impl<B, F, K, V, Z> ClientHandshakeSteps for ClientHandshake<B, F, K, V, Z>
 where
-    I: CryptoInput,
-    O: CryptoOutput,
-    T: ClientTransport,
-    <I as Read>::Error: Into<<T as ClientTransport>::Error>,
-    <I as CryptoInput>::LevelError: Into<<T as ClientTransport>::Error>,
-    <O as Write>::Error: Into<<T as ClientTransport>::Error>,
     B: TlsCrypto + Clone,
     F: Offering<B>,
     K: ClientTicketStore,
     V: CertificateVerifier,
+    V::Error: CallsForAlert,
     Z: Clock,
 {
-    let limits = settings.limits;
+    type Crypto = B;
+    type AlertError = ClientAlertError<V::Error>;
+    type ClientHelloWrittenState = ClientHelloWrittenState<B, K, V, Z, F::Attempt>;
+    type ServerHelloReadState = ServerHelloReadState<B, K, V, Z>;
+    type ClientHandshakeCompletedState = ClientHandshakeCompletedState<B, K, Z>;
 
-    // What to offer, and the ticket.
-    let (offer, attempt) = offering
-        .offer(&backend, &target, &verifier.support())
-        .map_err(|source| alert(ClientAlertError::Offer { source }))?;
-    let ticket = tickets.take(&target).and_then(|ticket| {
-        let hash = offer
-            .suites()
-            .iter()
-            .find(|suite| Some(suite.hash().algorithm()) == ticket.suite.hash())?
-            .hash();
-        Some(OfferedTicket { ticket, hash })
-    });
-    let zero_rtt_suite = ticket.as_ref().and_then(|offered| {
-        let ticket = &offered.ticket;
-        let protocol_offered = match (&ticket.application_protocol, &application_protocols) {
-            (None, None) => true,
-            (Some(protocol), Some(protocols)) => protocols
-                .names()
+    async fn write_client_hello<W: ClientHandshakeCapability>(
+        self,
+        host: &mut impl LentAccess<Family = W>,
+    ) -> Result<(Option<EarlyDataOffered>, Self::ClientHelloWrittenState), StepError<Self, W>> {
+        let Self {
+            backend,
+            offering,
+            tickets,
+            verifier,
+            clock,
+            target,
+            application_protocols,
+            settings,
+        } = self;
+        let limits = settings.limits;
+
+        // What to offer, and the ticket.
+        let (offer, attempt) = offering
+            .offer(&backend, &target, &verifier.support())
+            .map_err(|source| alert(ClientAlertError::Offer { source }))?;
+        let ticket = tickets.take(&target).and_then(|ticket| {
+            let hash = offer
+                .suites()
                 .iter()
-                .any(|name| name.name().as_ref() == protocol.name().as_ref()),
-            _ => false,
-        };
-        (settings.early_data && ticket.early_data && protocol_offered)
-            .then(|| {
-                offer
-                    .suites()
+                .find(|suite| Some(suite.hash().algorithm()) == ticket.suite.hash())?
+                .hash();
+            Some(OfferedTicket { ticket, hash })
+        });
+        let zero_rtt_suite = ticket.as_ref().and_then(|offered| {
+            let ticket = &offered.ticket;
+            let protocol_offered = match (&ticket.application_protocol, &application_protocols) {
+                (None, None) => true,
+                (Some(protocol), Some(protocols)) => protocols
+                    .names()
                     .iter()
-                    .find(|suite| suite.suite() == ticket.suite)
-                    .copied()
-            })
-            .flatten()
-    });
-    let mut exchanges = offer
-        .key_share_groups()
-        .iter()
-        .map(|&group| KeyExchange::start(&backend, group))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|source| alert(ClientAlertError::KeyGeneration { source }))?;
-    let random: [u8; 32] =
-        Random::random(&backend).map_err(|source| alert(ClientAlertError::Random { source }))?;
-    let parts = HelloParts {
-        target: &target,
-        offer: &offer,
-        transport_parameters: transport.local(),
-        application_protocols: application_protocols.as_ref(),
-        random: HelloRandom(random),
-    };
+                    .any(|name| name.name().as_ref() == protocol.name().as_ref()),
+                _ => false,
+            };
+            (settings.early_data && ticket.early_data && protocol_offered)
+                .then(|| {
+                    offer
+                        .suites()
+                        .iter()
+                        .find(|suite| suite.suite() == ticket.suite)
+                        .copied()
+                })
+                .flatten()
+        });
+        let exchanges = offer
+            .key_share_groups()
+            .iter()
+            .map(|&group| KeyExchange::start(&backend, group))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|source| alert(ClientAlertError::KeyGeneration { source }))?;
+        let random: [u8; 32] = Random::random(&backend)
+            .map_err(|source| alert(ClientAlertError::Random { source }))?;
+        let transport_parameters = host.local();
+        let random = HelloRandom(random);
+        let parts = HelloParts {
+            target: &target,
+            offer: &offer,
+            transport_parameters: &transport_parameters,
+            application_protocols: application_protocols.as_ref(),
+            random,
+        };
 
-    // The first ClientHello.
-    let age = |offered: &OfferedTicket<B>| offered.ticket.obfuscated_ticket_age(clock.now());
-    let hello = parts
-        .hello(
-            &exchanges,
-            None,
-            zero_rtt_suite.is_some(),
-            ticket
-                .as_ref()
-                .map(|offered| (&offered.ticket, offered.hash.algorithm(), age(offered))),
-        )
-        .map_err(alert)?;
-    let (first, psk) = match &ticket {
-        Some(offered) => {
-            let (encoded, chain) = bind(
-                &hello,
-                Transcript::<Client, B>::new(&backend, offered.hash),
-                Some(offered),
-            );
-            (
-                encoded,
-                match chain {
-                    HelloChain::Psk(early) => Some(early),
-                    HelloChain::Plain(_) => None,
-                },
+        // The first ClientHello.
+        let hello = parts
+            .hello(
+                &exchanges,
+                None,
+                zero_rtt_suite.is_some(),
+                ticket.as_ref().map(|offered| {
+                    (
+                        &offered.ticket,
+                        offered.hash.algorithm(),
+                        ticket_age(offered, &clock),
+                    )
+                }),
             )
-        }
-        None => (
-            encode(hello.encoded_len(), |sink| {
-                sink.sync_write_client_hello_unpin(&hello)
-            }),
-            None,
-        ),
-    };
-    write_message(output, &first).await?;
-    let early_offered = match (zero_rtt_suite, &psk, &ticket) {
-        (Some(suite), Some(early), Some(offered)) => {
-            yield ClientHandshakeEvent::EarlyDataOffered {
+            .map_err(alert)?;
+        let (first, psk) = match &ticket {
+            Some(offered) => {
+                let (encoded, chain) = bind(
+                    &hello,
+                    Transcript::<Client, B>::new(&backend, offered.hash),
+                    Some(offered),
+                );
+                (
+                    encoded,
+                    match chain {
+                        HelloChain::Psk(early) => Some(early),
+                        HelloChain::Plain(_) => None,
+                    },
+                )
+            }
+            None => (
+                encode(hello.encoded_len(), |sink| {
+                    sink.sync_write_client_hello_unpin(&hello)
+                }),
+                None,
+            ),
+        };
+        write_message::<W, _>(host, &first).await?;
+        let offered = match (zero_rtt_suite, &psk, &ticket) {
+            (Some(suite), Some(early), Some(offered)) => Some(EarlyDataOffered {
                 aead: suite.aead(),
                 secret: early.early_send(),
                 transport_parameters: offered.ticket.transport_parameters.clone(),
                 application_protocol: offered.ticket.application_protocol.clone(),
-            };
-            true
-        }
-        _ => false,
-    };
-    let mut sent = Sent::First { hello: first, psk };
+            }),
+            _ => None,
+        };
+        let state = ClientHelloWrittenState {
+            backend,
+            tickets,
+            verifier,
+            clock,
+            target,
+            application_protocols,
+            limits,
+            offer,
+            attempt: Some(attempt),
+            ticket,
+            exchanges,
+            transport_parameters,
+            random,
+            sent: Sent::First { hello: first, psk },
+            early_offered: offered.is_some(),
+        };
+        Ok((offered, state))
+    }
 
-    // The ServerHello, after a HelloRetryRequest if there is one.
-    let check_version = |version: Option<ProtocolVersion>| {
-        if version == Some(ProtocolVersion::TLS_1_3) {
-            Ok(())
-        } else {
-            Err(alert(ClientAlertError::Version { version }))
+    async fn read_server_hello<W: ClientHandshakeCapability>(
+        state: Self::ClientHelloWrittenState,
+        host: &mut impl LentAccess<Family = W>,
+    ) -> Result<(ServerHelloRead, Self::ServerHelloReadState), StepError<Self, W>> {
+        let ClientHelloWrittenState {
+            backend,
+            tickets,
+            verifier,
+            clock,
+            target,
+            application_protocols,
+            limits,
+            offer,
+            mut attempt,
+            ticket,
+            mut exchanges,
+            transport_parameters,
+            random,
+            mut sent,
+            early_offered,
+        } = state;
+        let (server_hello, encoded_server_hello) = loop {
+            let message = read_message::<W, _>(host, limits, None).await?;
+            let reply = message
+                .encoded()
+                .clone()
+                .sync_read_server_hello_message_unpin()
+                .map_err(|source| alert(ClientAlertError::ServerHello { source }))?;
+            let retry = match reply {
+                ServerHelloMessage::ServerHello(server_hello) => {
+                    break (server_hello, message.into_encoded());
+                }
+                ServerHelloMessage::HelloRetryRequest(retry) => retry,
+            };
+            let Sent::First { hello: first, .. } = &sent else {
+                return Err(alert(ClientAlertError::SecondRetry));
+            };
+            check_version::<V::Error, W>(retry.extensions().iter().find_map(|extension| {
+                match extension {
+                    HelloRetryRequestExtension::SupportedVersions(version) => Some(*version),
+                    _ => None,
+                }
+            }))?;
+            if retry.legacy_session_id_echo() != &LegacySessionId::EMPTY {
+                return Err(alert(ClientAlertError::SessionIdEcho));
+            }
+            let suite = offered_suite::<_, V::Error, W>(&offer, retry.cipher_suite())?;
+            let cookie = retry.cookie();
+            match retry.key_share() {
+                Some(group) => {
+                    let supported = offer
+                        .groups()
+                        .iter()
+                        .find(|offered| offered.algorithm() == group)
+                        .copied()
+                        .filter(|offered| !offer.key_share_groups().contains(offered))
+                        .ok_or(alert(ClientAlertError::RetryGroup { group }))?;
+                    if let Some(attempt) = attempt.take() {
+                        attempt.retried(supported);
+                    }
+                    exchanges = vec![
+                        KeyExchange::start(&backend, supported)
+                            .map_err(|source| alert(ClientAlertError::KeyGeneration { source }))?,
+                    ];
+                }
+                None if cookie.is_none() => {
+                    return Err(alert(ClientAlertError::RetryWithoutChange));
+                }
+                None => {}
+            }
+            let transcript = Transcript::<Client, B>::new(&backend, suite.hash())
+                .add(first)
+                .retry(message.encoded());
+            let ticket = ticket
+                .as_ref()
+                .filter(|offered| offered.hash.algorithm() == suite.hash().algorithm());
+            let parts = HelloParts {
+                target: &target,
+                offer: &offer,
+                transport_parameters: &transport_parameters,
+                application_protocols: application_protocols.as_ref(),
+                random,
+            };
+            let hello = parts
+                .hello(
+                    &exchanges,
+                    cookie,
+                    false,
+                    ticket.map(|offered| {
+                        (
+                            &offered.ticket,
+                            offered.hash.algorithm(),
+                            ticket_age(offered, &clock),
+                        )
+                    }),
+                )
+                .map_err(alert)?;
+            let (second, chain) = bind(&hello, transcript, ticket);
+            write_message::<W, _>(host, &second).await?;
+            sent = Sent::Second {
+                suite: suite.suite(),
+                chain,
+            };
+        };
+        drop(attempt);
+        check_version::<V::Error, W>(server_hello.supported_versions())?;
+        if server_hello.legacy_session_id_echo() != &LegacySessionId::EMPTY {
+            return Err(alert(ClientAlertError::SessionIdEcho));
         }
-    };
-    let offered_suite = |suite: CipherSuite| {
-        offer
-            .suites()
+        let suite = offered_suite::<_, V::Error, W>(&offer, server_hello.cipher_suite())?;
+        if let Sent::Second { suite: retried, .. } = &sent
+            && *retried != suite.suite()
+        {
+            return Err(alert(ClientAlertError::RetrySuite {
+                suite: suite.suite(),
+            }));
+        }
+        let server_share = server_hello
+            .key_share()
+            .ok_or(alert(ClientAlertError::MissingServerShare))?;
+        let position = exchanges
             .iter()
-            .find(|offered| offered.suite() == suite)
-            .copied()
-            .ok_or(alert(ClientAlertError::UnofferedSuite { suite }))
-    };
-    let mut attempt = Some(attempt);
-    let (server_hello, encoded_server_hello) = loop {
-        let message = read_message(input, limits, None).await?;
-        let reply = message
+            .position(|exchange| exchange.group() == server_share.group())
+            .ok_or(alert(ClientAlertError::UnsharedGroup {
+                group: server_share.group(),
+            }))?;
+        let shared = exchanges
+            .swap_remove(position)
+            .complete(server_share.key_exchange().as_ref())
+            .map_err(|source| alert(ClientAlertError::KeyExchange { source }))?;
+        drop(exchanges);
+        let selected_psk = server_hello.pre_shared_key();
+        let psk_error = |source| alert(ClientAlertError::Psk { source });
+        let (handshake, secrets) = match sent {
+            Sent::First { hello, psk } => match psk {
+                Some(early)
+                    if ticket.as_ref().map(|offered| offered.hash.algorithm())
+                        == Some(suite.hash().algorithm()) =>
+                {
+                    early.server_hello(shared, &encoded_server_hello, selected_psk)
+                }
+                Some(_) if selected_psk.is_some() => return Err(alert(ClientAlertError::PskHash)),
+                _ => Transcript::<Client, B>::new(&backend, suite.hash())
+                    .add(&hello)
+                    .early_secret()
+                    .server_hello(shared, &encoded_server_hello, selected_psk),
+            },
+            Sent::Second { chain, .. } => match chain {
+                HelloChain::Psk(early) => {
+                    early.server_hello(shared, &encoded_server_hello, selected_psk)
+                }
+                HelloChain::Plain(transcript) => transcript.early_secret().server_hello(
+                    shared,
+                    &encoded_server_hello,
+                    selected_psk,
+                ),
+            },
+        }
+        .map_err(psk_error)?;
+        let read = ServerHelloRead {
+            aead: suite.aead(),
+            secrets,
+        };
+        let state = ServerHelloReadState {
+            tickets,
+            verifier,
+            clock,
+            target,
+            application_protocols,
+            limits,
+            offer,
+            ticket,
+            suite,
+            selected_psk,
+            early_offered,
+            handshake,
+        };
+        Ok((read, state))
+    }
+
+    async fn read_server_finished<W: ClientHandshakeCapability>(
+        state: Self::ServerHelloReadState,
+        host: &mut impl LentAccess<Family = W>,
+    ) -> Result<
+        (
+            ClientHandshakeCompleted<B>,
+            Self::ClientHandshakeCompletedState,
+        ),
+        StepError<Self, W>,
+    > {
+        let ServerHelloReadState {
+            tickets,
+            verifier,
+            clock,
+            target,
+            application_protocols,
+            limits,
+            offer,
+            ticket,
+            suite,
+            selected_psk,
+            early_offered,
+            handshake,
+        } = state;
+        move_to::<W, _>(host, CryptoLevel::Handshake)?;
+        let hash = Some(suite.hash().algorithm());
+
+        // EncryptedExtensions.
+        let message = read_message::<W, _>(host, limits, hash).await?;
+        let extensions = message
             .encoded()
             .clone()
-            .sync_read_server_hello_message_unpin()
-            .map_err(|source| alert(ClientAlertError::ServerHello { source }))?;
-        let retry = match reply {
-            ServerHelloMessage::ServerHello(server_hello) => {
-                break (server_hello, message.into_encoded());
-            }
-            ServerHelloMessage::HelloRetryRequest(retry) => retry,
-        };
-        let Sent::First { hello: first, .. } = &sent else {
-            return Err(alert(ClientAlertError::SecondRetry));
-        };
-        check_version(
-            retry
+            .sync_read_encrypted_extensions_unpin()
+            .map_err(|source| alert(ClientAlertError::EncryptedExtensions { source }))?;
+        let peer_parameters = extensions
+            .quic_transport_parameters()
+            .ok_or(alert(ClientAlertError::MissingTransportParameters))?
+            .clone();
+        let selected_protocol =
+            extensions
                 .extensions()
                 .iter()
                 .find_map(|extension| match extension {
-                    HelloRetryRequestExtension::SupportedVersions(version) => Some(*version),
+                    EncryptedExtensionsExtension::ApplicationLayerProtocolNegotiation(protocol) => {
+                        Some(protocol.clone())
+                    }
                     _ => None,
-                }),
-        )?;
-        if retry.legacy_session_id_echo() != &LegacySessionId::EMPTY {
-            return Err(alert(ClientAlertError::SessionIdEcho));
-        }
-        let suite = offered_suite(retry.cipher_suite())?;
-        let cookie = retry.cookie();
-        match retry.key_share() {
-            Some(group) => {
-                let supported = offer
-                    .groups()
+                });
+        match (&application_protocols, &selected_protocol) {
+            (None, None) => {}
+            (None, Some(_)) => {
+                return Err(alert(ClientAlertError::Unsolicited {
+                    extension: UnsolicitedExtension::ApplicationLayerProtocolNegotiation,
+                }));
+            }
+            (Some(_), None) => return Err(alert(ClientAlertError::NoApplicationProtocol)),
+            (Some(protocols), Some(selected)) => {
+                if !protocols
+                    .names()
                     .iter()
-                    .find(|offered| offered.algorithm() == group)
-                    .copied()
-                    .filter(|offered| !offer.key_share_groups().contains(offered))
-                    .ok_or(alert(ClientAlertError::RetryGroup { group }))?;
-                if let Some(attempt) = attempt.take() {
-                    attempt.retried(supported);
+                    .any(|name| name.name().as_ref() == selected.name().as_ref())
+                {
+                    return Err(alert(ClientAlertError::UnofferedProtocol));
                 }
-                exchanges = vec![
-                    KeyExchange::start(&backend, supported)
-                        .map_err(|source| alert(ClientAlertError::KeyGeneration { source }))?,
-                ];
-            }
-            None if cookie.is_none() => return Err(alert(ClientAlertError::RetryWithoutChange)),
-            None => {}
-        }
-        let transcript = Transcript::<Client, B>::new(&backend, suite.hash())
-            .add(first)
-            .retry(message.encoded());
-        let ticket = ticket
-            .as_ref()
-            .filter(|offered| offered.hash.algorithm() == suite.hash().algorithm());
-        let hello = parts
-            .hello(
-                &exchanges,
-                cookie,
-                false,
-                ticket.map(|offered| (&offered.ticket, offered.hash.algorithm(), age(offered))),
-            )
-            .map_err(alert)?;
-        let (second, chain) = bind(&hello, transcript, ticket);
-        write_message(output, &second).await?;
-        sent = Sent::Second {
-            suite: suite.suite(),
-            chain,
-        };
-    };
-    drop(attempt);
-    check_version(server_hello.supported_versions())?;
-    if server_hello.legacy_session_id_echo() != &LegacySessionId::EMPTY {
-        return Err(alert(ClientAlertError::SessionIdEcho));
-    }
-    let suite = offered_suite(server_hello.cipher_suite())?;
-    if let Sent::Second { suite: retried, .. } = &sent
-        && *retried != suite.suite()
-    {
-        return Err(alert(ClientAlertError::RetrySuite {
-            suite: suite.suite(),
-        }));
-    }
-    let server_share = server_hello
-        .key_share()
-        .ok_or(alert(ClientAlertError::MissingServerShare))?;
-    let position = exchanges
-        .iter()
-        .position(|exchange| exchange.group() == server_share.group())
-        .ok_or(alert(ClientAlertError::UnsharedGroup {
-            group: server_share.group(),
-        }))?;
-    let shared = exchanges
-        .swap_remove(position)
-        .complete(server_share.key_exchange().as_ref())
-        .map_err(|source| alert(ClientAlertError::KeyExchange { source }))?;
-    drop(exchanges);
-    let selected_psk = server_hello.pre_shared_key();
-    let psk_error = |source| alert(ClientAlertError::Psk { source });
-    let (handshake, secrets) = match sent {
-        Sent::First { hello, psk } => match psk {
-            Some(early)
-                if ticket.as_ref().map(|offered| offered.hash.algorithm())
-                    == Some(suite.hash().algorithm()) =>
-            {
-                early.server_hello(shared, &encoded_server_hello, selected_psk)
-            }
-            Some(_) if selected_psk.is_some() => return Err(alert(ClientAlertError::PskHash)),
-            _ => Transcript::<Client, B>::new(&backend, suite.hash())
-                .add(&hello)
-                .early_secret()
-                .server_hello(shared, &encoded_server_hello, selected_psk),
-        },
-        Sent::Second { chain, .. } => match chain {
-            HelloChain::Psk(early) => {
-                early.server_hello(shared, &encoded_server_hello, selected_psk)
-            }
-            HelloChain::Plain(transcript) => {
-                transcript
-                    .early_secret()
-                    .server_hello(shared, &encoded_server_hello, selected_psk)
-            }
-        },
-    }
-    .map_err(psk_error)?;
-    yield ClientHandshakeEvent::ServerHelloRead {
-        aead: suite.aead(),
-        secrets,
-    };
-    output.move_to(CryptoLevel::Handshake);
-    input.move_to(CryptoLevel::Handshake).map_err(connection)?;
-    let hash = Some(suite.hash().algorithm());
-
-    // EncryptedExtensions.
-    let message = read_message(input, limits, hash).await?;
-    let extensions = message
-        .encoded()
-        .clone()
-        .sync_read_encrypted_extensions_unpin()
-        .map_err(|source| alert(ClientAlertError::EncryptedExtensions { source }))?;
-    let peer_parameters = extensions
-        .quic_transport_parameters()
-        .ok_or(alert(ClientAlertError::MissingTransportParameters))?
-        .clone();
-    let selected_protocol = extensions
-        .extensions()
-        .iter()
-        .find_map(|extension| match extension {
-            EncryptedExtensionsExtension::ApplicationLayerProtocolNegotiation(protocol) => {
-                Some(protocol.clone())
-            }
-            _ => None,
-        });
-    match (&application_protocols, &selected_protocol) {
-        (None, None) => {}
-        (None, Some(_)) => {
-            return Err(alert(ClientAlertError::Unsolicited {
-                extension: UnsolicitedExtension::ApplicationLayerProtocolNegotiation,
-            }));
-        }
-        (Some(_), None) => return Err(alert(ClientAlertError::NoApplicationProtocol)),
-        (Some(protocols), Some(selected)) => {
-            if !protocols
-                .names()
-                .iter()
-                .any(|name| name.name().as_ref() == selected.name().as_ref())
-            {
-                return Err(alert(ClientAlertError::UnofferedProtocol));
             }
         }
-    }
-    let early_accepted = extensions
-        .extensions()
-        .iter()
-        .any(|extension| matches!(extension, EncryptedExtensionsExtension::EarlyData));
-    let early_data = match (early_offered, early_accepted) {
-        (false, false) => EarlyDataOutcome::NotOffered,
-        (false, true) => {
-            return Err(alert(ClientAlertError::Unsolicited {
-                extension: UnsolicitedExtension::EarlyData,
-            }));
-        }
-        (true, true) if selected_psk != Some(PskIndex::new(0)) => {
-            return Err(alert(ClientAlertError::EarlyDataWithoutPsk));
-        }
-        (true, true) => EarlyDataOutcome::Accepted,
-        (true, false) => EarlyDataOutcome::Rejected,
-    };
-    transport
-        .peer(&peer_parameters)
-        .map_err(|error| HandshakeError::Transport { source: error })?;
-    let handshake = handshake.add(message.encoded());
-
-    // The server authenticates, by certificate or by PSK.
-    let (authenticated, identity, requested) = match handshake.authentication() {
-        Authentication::Certificate(mut authentication) => {
-            let mut message = read_message(input, limits, hash).await?;
-            let mut requested = None;
-            if message.handshake_type() == HandshakeType::CERTIFICATE_REQUEST {
-                let request = message
-                    .encoded()
-                    .clone()
-                    .sync_read_certificate_request_unpin()
-                    .map_err(|source| alert(ClientAlertError::CertificateRequest { source }))?;
-                requested = Some(request.certificate_request_context().clone());
-                authentication = authentication.add(message.encoded());
-                message = read_message(input, limits, hash).await?;
-            }
-            let certificate = message
-                .encoded()
-                .clone()
-                .sync_read_certificate_unpin(CertificateFormat::X509)
-                .map_err(|source| alert(ClientAlertError::Certificate { source }))?;
-            let leaf = verifier
-                .verify(&target, certificate.certificates().entries())
-                .await
-                .map_err(|source| alert(ClientAlertError::Verify { source }))?;
-            let authentication = authentication.add(message.encoded());
-            let message = read_message(input, limits, hash).await?;
-            let verify = message
-                .encoded()
-                .clone()
-                .sync_read_certificate_verify_unpin()
-                .map_err(|source| {
-                    alert(ClientAlertError::CertificateVerify {
-                        source: CertificateVerifyError::Read { source },
-                    })
-                })?;
-            let scheme = verify.algorithm();
-            if !offer
-                .signature_schemes()
-                .iter()
-                .any(|offered| offered.algorithm() == scheme)
-            {
-                return Err(alert(ClientAlertError::UnofferedScheme { scheme }));
-            }
-            leaf.check_certificate_verify_scheme(scheme)
-                .map_err(|source| alert(ClientAlertError::SchemeKey { source }))?;
-            let authenticated = authentication
-                .verify_certificate_verify(&message, leaf.key())
-                .map_err(|source| alert(ClientAlertError::CertificateVerify { source }))?;
-            (authenticated, ServerIdentity::Verified(leaf), requested)
-        }
-        Authentication::Resumed(authenticated) => {
-            // invariant: the server authenticates with a PSK only when it
-            // selected the offered one, which has a ticket.
-            let ticket = ticket.as_ref().expect("the ticket of the selected PSK");
-            (
-                authenticated,
-                ServerIdentity::Resumed(ticket.ticket.identity.clone()),
-                None,
-            )
-        }
-    };
-
-    // The server's Finished, then the client's.
-    let message = read_message(input, limits, hash).await?;
-    let (mut master, one_rtt) = authenticated
-        .server_finished(&message)
-        .map_err(|source| alert(ClientAlertError::Finished { source }))?;
-    if let Some(context) = requested {
-        let certificate = Certificate::new(context, CertificateList::X509(Vec::new()))
-            // invariant: a context read from a CertificateRequest fits.
-            .expect("an empty Certificate");
-        let encoded = encode(certificate.encoded_len(), |sink| {
-            sink.sync_write_certificate_unpin(&certificate)
-        });
-        write_message(output, &encoded).await?;
-        master = master.add(&encoded);
-    }
-    let exporter = master.exporter();
-    let (resumption, finished) = master.client_finished();
-    write_message(output, finished.encoded()).await?;
-    let ticket_identity = match &identity {
-        ServerIdentity::Verified(key) | ServerIdentity::Resumed(key) => key.clone(),
-    };
-    yield ClientHandshakeEvent::Completed {
-        secrets: one_rtt,
-        exporter,
-        identity,
-        application_protocol: selected_protocol.clone(),
-        early_data,
-    };
-    output.move_to(CryptoLevel::OneRtt);
-    input.move_to(CryptoLevel::OneRtt).map_err(connection)?;
-
-    // The tickets the server sends.
-    loop {
-        let message = read_message(input, limits, hash).await?;
-        let received = message
-            .encoded()
-            .clone()
-            .sync_read_new_session_ticket_unpin()
-            .map_err(|source| alert(ClientAlertError::NewSessionTicket { source }))?;
-        let early_data = match received
+        let early_accepted = extensions
             .extensions()
             .iter()
-            .find_map(|extension| match extension {
-                NewSessionTicketExtension::EarlyData(size) => Some(*size),
-                NewSessionTicketExtension::Unknown(_) => None,
-            }) {
-            Some(size) => {
-                MaxEarlyDataSizeError::check(size).map_err(|source| {
-                    HandshakeError::ProtocolViolation {
-                        source: source.into(),
-                    }
-                })?;
-                true
+            .any(|extension| matches!(extension, EncryptedExtensionsExtension::EarlyData));
+        let early_data = match (early_offered, early_accepted) {
+            (false, false) => EarlyDataOutcome::NotOffered,
+            (false, true) => {
+                return Err(alert(ClientAlertError::Unsolicited {
+                    extension: UnsolicitedExtension::EarlyData,
+                }));
             }
-            None => false,
+            (true, true) if selected_psk != Some(PskIndex::new(0)) => {
+                return Err(alert(ClientAlertError::EarlyDataWithoutPsk));
+            }
+            (true, true) => EarlyDataOutcome::Accepted,
+            (true, false) => EarlyDataOutcome::Rejected,
         };
-        if received.ticket_lifetime().seconds() == 0 {
-            continue;
+        host.peer(&peer_parameters)
+            .map_err(|error| HandshakeError::Transport { source: error })?;
+        let handshake = handshake.add(message.encoded());
+
+        // The server authenticates, by certificate or by PSK.
+        let (authenticated, identity, requested) = match handshake.authentication() {
+            Authentication::Certificate(mut authentication) => {
+                let mut message = read_message::<W, _>(host, limits, hash).await?;
+                let mut requested = None;
+                if message.handshake_type() == HandshakeType::CERTIFICATE_REQUEST {
+                    let request = message
+                        .encoded()
+                        .clone()
+                        .sync_read_certificate_request_unpin()
+                        .map_err(|source| alert(ClientAlertError::CertificateRequest { source }))?;
+                    requested = Some(request.certificate_request_context().clone());
+                    authentication = authentication.add(message.encoded());
+                    message = read_message::<W, _>(host, limits, hash).await?;
+                }
+                let certificate = message
+                    .encoded()
+                    .clone()
+                    .sync_read_certificate_unpin(CertificateFormat::X509)
+                    .map_err(|source| alert(ClientAlertError::Certificate { source }))?;
+                let leaf = verifier
+                    .verify(&target, certificate.certificates().entries())
+                    .await
+                    .map_err(|source| alert(ClientAlertError::Verify { source }))?;
+                let authentication = authentication.add(message.encoded());
+                let message = read_message::<W, _>(host, limits, hash).await?;
+                let verify = message
+                    .encoded()
+                    .clone()
+                    .sync_read_certificate_verify_unpin()
+                    .map_err(|source| {
+                        alert(ClientAlertError::CertificateVerify {
+                            source: CertificateVerifyError::Read { source },
+                        })
+                    })?;
+                let scheme = verify.algorithm();
+                if !offer
+                    .signature_schemes()
+                    .iter()
+                    .any(|offered| offered.algorithm() == scheme)
+                {
+                    return Err(alert(ClientAlertError::UnofferedScheme { scheme }));
+                }
+                leaf.check_certificate_verify_scheme(scheme)
+                    .map_err(|source| alert(ClientAlertError::SchemeKey { source }))?;
+                let authenticated = authentication
+                    .verify_certificate_verify(&message, leaf.key())
+                    .map_err(|source| alert(ClientAlertError::CertificateVerify { source }))?;
+                (authenticated, ServerIdentity::Verified(leaf), requested)
+            }
+            Authentication::Resumed(authenticated) => {
+                // invariant: the server authenticates with a PSK only when it
+                // selected the offered one, which has a ticket.
+                let ticket = ticket.as_ref().expect("the ticket of the selected PSK");
+                (
+                    authenticated,
+                    ServerIdentity::Resumed(ticket.ticket.identity.clone()),
+                    None,
+                )
+            }
+        };
+
+        // The server's Finished, then the client's.
+        let message = read_message::<W, _>(host, limits, hash).await?;
+        let (mut master, one_rtt) = authenticated
+            .server_finished(&message)
+            .map_err(|source| alert(ClientAlertError::Finished { source }))?;
+        if let Some(context) = requested {
+            let certificate = Certificate::new(context, CertificateList::X509(Vec::new()))
+                // invariant: a context read from a CertificateRequest fits.
+                .expect("an empty Certificate");
+            let encoded = encode(certificate.encoded_len(), |sink| {
+                sink.sync_write_certificate_unpin(&certificate)
+            });
+            write_message::<W, _>(host, &encoded).await?;
+            master = master.add(&encoded);
         }
-        tickets.store(
-            &target,
-            StoredTicket {
-                ticket: received.ticket().clone(),
-                psk: resumption.ticket_psk(received.ticket_nonce()),
-                suite: suite.suite(),
-                ticket_age_add: received.ticket_age_add(),
-                lifetime: received.ticket_lifetime(),
-                received_at: clock.now(),
-                early_data,
-                application_protocol: selected_protocol.clone(),
-                transport_parameters: peer_parameters.clone(),
-                identity: ticket_identity.clone(),
-            },
-        );
+        let exporter = master.exporter();
+        let (resumption, finished) = master.client_finished();
+        write_message::<W, _>(host, finished.encoded()).await?;
+        let ticket_identity = match &identity {
+            ServerIdentity::Verified(key) | ServerIdentity::Resumed(key) => key.clone(),
+        };
+        let completed = ClientHandshakeCompleted {
+            secrets: one_rtt,
+            exporter,
+            identity,
+            application_protocol: selected_protocol.clone(),
+            early_data,
+        };
+        let state = ClientHandshakeCompletedState {
+            tickets,
+            clock,
+            target,
+            limits,
+            suite,
+            selected_protocol,
+            peer_parameters,
+            ticket_identity,
+            resumption,
+        };
+        Ok((completed, state))
+    }
+
+    async fn read_tickets<W: ClientHandshakeCapability>(
+        state: Self::ClientHandshakeCompletedState,
+        host: &mut impl LentAccess<Family = W>,
+    ) -> Result<Infallible, StepError<Self, W>> {
+        let ClientHandshakeCompletedState {
+            tickets,
+            clock,
+            target,
+            limits,
+            suite,
+            selected_protocol,
+            peer_parameters,
+            ticket_identity,
+            resumption,
+        } = state;
+        move_to::<W, _>(host, CryptoLevel::OneRtt)?;
+        let hash = Some(suite.hash().algorithm());
+
+        // The tickets the server sends.
+        loop {
+            let message = read_message::<W, _>(host, limits, hash).await?;
+            let received = message
+                .encoded()
+                .clone()
+                .sync_read_new_session_ticket_unpin()
+                .map_err(|source| alert(ClientAlertError::NewSessionTicket { source }))?;
+            let early_data =
+                match received
+                    .extensions()
+                    .iter()
+                    .find_map(|extension| match extension {
+                        NewSessionTicketExtension::EarlyData(size) => Some(*size),
+                        NewSessionTicketExtension::Unknown(_) => None,
+                    }) {
+                    Some(size) => {
+                        MaxEarlyDataSizeError::check(size).map_err(|source| {
+                            HandshakeError::ProtocolViolation {
+                                source: source.into(),
+                            }
+                        })?;
+                        true
+                    }
+                    None => false,
+                };
+            if received.ticket_lifetime().seconds() == 0 {
+                continue;
+            }
+            tickets.store(
+                &target,
+                StoredTicket {
+                    ticket: received.ticket().clone(),
+                    psk: resumption.ticket_psk(received.ticket_nonce()),
+                    suite: suite.suite(),
+                    ticket_age_add: received.ticket_age_add(),
+                    lifetime: received.ticket_lifetime(),
+                    received_at: clock.now(),
+                    early_data,
+                    application_protocol: selected_protocol.clone(),
+                    transport_parameters: peer_parameters.clone(),
+                    identity: ticket_identity.clone(),
+                },
+            );
+        }
     }
 }

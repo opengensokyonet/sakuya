@@ -3,6 +3,7 @@
 //! messages, the exporter and resumption master secrets through what they
 //! derive, ticket PSKs, the PSK binder and the message_hash that replaces
 //! the first ClientHello after a HelloRetryRequest.
+#![feature(impl_trait_in_assoc_type, yield_expr)]
 
 mod common;
 

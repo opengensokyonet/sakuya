@@ -1,25 +1,30 @@
 //! What the server's and the client's handshake engines share: the CRYPTO
 //! byte streams they read and write, and how a handshake fails.
 //!
-//! A handshake engine is a `nitori_call` operation, run as a `LentCall`.
-//! What it owns for the whole handshake, such as the backend and the
-//! capabilities of its role, are its arguments; what the connection
-//! provides, it receives as receivers lent on every poll:
+//! A handshake engine runs in steps. Each role has a trait of its steps,
+//! [`ServerHandshakeSteps`](crate::server::engine::ServerHandshakeSteps)
+//! and [`ClientHandshakeSteps`](crate::client::engine::ClientHandshakeSteps),
+//! which the engine's start state implements. A step is an async function
+//! that takes the state before it by value and runs until the connection
+//! has something to do: it returns what the connection installs, such as
+//! traffic secrets or the completion of the handshake, together with the
+//! state of the next step. What the engine owns for the whole handshake,
+//! such as the backend and the capabilities of its role, is in its states;
+//! what the connection provides, a step receives as one access, lent on
+//! every poll, whose family has the role's capability:
 //!
-//! - `input`, a [`CryptoInput`]: the CRYPTO bytes the peer sent, at the
-//!   current [`CryptoLevel`];
-//! - `output`, a [`CryptoOutput`]: the CRYPTO bytes to send, at the current
-//!   level;
-//! - `transport`: the transport parameters, through synchronous methods of
-//!   the role's own capability.
+//! - [`CryptoInput`]: the CRYPTO bytes the peer sent, at the current
+//!   [`CryptoLevel`];
+//! - [`CryptoOutput`]: the CRYPTO bytes to send, at the current level;
+//! - the transport parameters, through synchronous methods of the role's
+//!   own capability.
 //!
 //! The engine reads and writes the bytes of the current level only, and
 //! moves each stream to the next level as a separate step (RFC 9001
-//! §4.1.3). It hands over traffic secrets and the completion of the
-//! handshake as the items it yields, and ends with a [`HandshakeError`]
-//! when the handshake fails: with an alert, with a
-//! [`ProtocolViolationError`] for the connection to close with
-//! PROTOCOL_VIOLATION, or with the connection's own error.
+//! §4.1.3). A step that fails ends the handshake with a
+//! [`HandshakeError`]: with an alert, with a [`ProtocolViolationError`] for
+//! the connection to close with PROTOCOL_VIOLATION, or with the
+//! connection's own error.
 //!
 //! `#[capability]` generates `{Trait}Ext` and `{Trait}ViewExt` for each
 //! receiver capability, with the methods the trait documents.
@@ -58,7 +63,8 @@ pub enum CryptoLevel {
 /// level, read with [`Read`].
 ///
 /// Reading waits for bytes that have not arrived. A level begins as
-/// [`CryptoLevel::Initial`] and moves forward with [`CryptoInput::move_to`].
+/// [`CryptoLevel::Initial`] and moves forward with
+/// [`CryptoInput::move_input_to`].
 #[capability]
 pub trait CryptoInput: Read {
     /// A failure to move to a level.
@@ -70,7 +76,7 @@ pub trait CryptoInput: Read {
     ///
     /// As the implementation documents; RFC 9001 §4.1.3 makes it an error
     /// when bytes of the level being left remain unread.
-    fn move_to<'v>(
+    fn move_input_to<'v>(
         view: Pin<&mut Self::ReceiverView<'v>>,
         level: CryptoLevel,
     ) -> Result<(), Self::LevelError>
@@ -82,11 +88,12 @@ pub trait CryptoInput: Read {
 /// written with [`Write`].
 ///
 /// A level begins as [`CryptoLevel::Initial`] and moves forward with
-/// [`CryptoOutput::move_to`]; what was written before stays at its level.
+/// [`CryptoOutput::move_output_to`]; what was written before stays at its
+/// level.
 #[capability]
 pub trait CryptoOutput: Write {
     /// Moves to `level`: later writes go to it.
-    fn move_to<'v>(view: Pin<&mut Self::ReceiverView<'v>>, level: CryptoLevel)
+    fn move_output_to<'v>(view: Pin<&mut Self::ReceiverView<'v>>, level: CryptoLevel)
     where
         Self: 'v;
 }

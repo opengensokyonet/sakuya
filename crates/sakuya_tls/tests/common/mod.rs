@@ -6,6 +6,8 @@ pub mod backend;
 pub mod pki;
 pub mod rfc8448;
 #[allow(dead_code)]
+pub mod steps;
+#[allow(dead_code)]
 pub mod streams;
 
 use core::{

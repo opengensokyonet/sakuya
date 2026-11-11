@@ -1,6 +1,7 @@
 //! Every handshake message of RFC 8448 §3, §4 and §5, and the
 //! CertificateRequest of §6, reads and writes back byte for byte, from a
 //! byte slice and from `Bytes`.
+#![feature(impl_trait_in_assoc_type, yield_expr)]
 
 mod common;
 

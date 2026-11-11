@@ -1,6 +1,6 @@
-//! CRYPTO streams and transport parameters in memory, as the receivers a
-//! handshake engine is lent: a buffer per level for what a side receives
-//! and for what it sends.
+//! CRYPTO streams and transport parameters in memory, as the receiver a
+//! handshake engine's steps are lent: a buffer per level for what a side
+//! receives and for what it sends.
 
 use bytes::{Buf, BufMut, Bytes};
 use core::{
@@ -59,21 +59,11 @@ impl Default for Incoming {
     }
 }
 
-family_receiver!(impl [] for Incoming);
-
-impl Read for Incoming {
-    type Error = Fault;
-
-    fn poll_read<'v, Output: BufMut + ?Sized>(
-        host: Pin<&mut BorrowedReceiver<'v, Incoming>>,
-        _: &mut Context<'_>,
-        destination: &mut Output,
-    ) -> Poll<Result<usize, Fault>>
-    where
-        Self: 'v,
-    {
-        let incoming = host.get_pin_mut().get_mut();
-        let buffer = &mut incoming.levels[index(incoming.current)];
+impl Incoming {
+    /// Moves what is buffered at the current level into `destination`;
+    /// waits while nothing is.
+    fn poll_read<Output: BufMut + ?Sized>(&mut self, destination: &mut Output) -> Poll<usize> {
+        let buffer = &mut self.levels[index(self.current)];
         if buffer.is_empty() {
             return Poll::Pending;
         }
@@ -81,25 +71,15 @@ impl Read for Incoming {
         for byte in buffer.drain(..len) {
             destination.put_u8(byte);
         }
-        Poll::Ready(Ok(len))
+        Poll::Ready(len)
     }
-}
 
-impl CryptoInput for Incoming {
-    type LevelError = Fault;
-
-    fn move_to<'v>(
-        view: Pin<&mut BorrowedReceiver<'v, Incoming>>,
-        level: CryptoLevel,
-    ) -> Result<(), Fault>
-    where
-        Self: 'v,
-    {
-        let incoming = view.get_pin_mut().get_mut();
-        if !incoming.levels[index(incoming.current)].is_empty() {
-            return Err(Fault::Unread(incoming.current));
+    /// Moves to `level`, unless bytes of the current level are unread.
+    fn move_to(&mut self, level: CryptoLevel) -> Result<(), Fault> {
+        if !self.levels[index(self.current)].is_empty() {
+            return Err(Fault::Unread(self.current));
         }
-        incoming.current = level;
+        self.current = level;
         Ok(())
     }
 }
@@ -119,21 +99,10 @@ impl Default for Outgoing {
     }
 }
 
-family_receiver!(impl [] for Outgoing);
-
-impl Write for Outgoing {
-    type Error = Fault;
-
-    fn poll_write<'v, Input: Buf + ?Sized>(
-        host: Pin<&mut BorrowedReceiver<'v, Outgoing>>,
-        _: &mut Context<'_>,
-        input: &mut Input,
-    ) -> Poll<Result<usize, Fault>>
-    where
-        Self: 'v,
-    {
-        let outgoing = host.get_pin_mut().get_mut();
-        let buffer = &mut outgoing.levels[index(outgoing.current)];
+impl Outgoing {
+    /// Appends `input` to the current level.
+    fn write(&mut self, input: &mut (impl Buf + ?Sized)) -> usize {
+        let buffer = &mut self.levels[index(self.current)];
         let len = input.remaining();
         while input.has_remaining() {
             let chunk = input.chunk();
@@ -141,16 +110,7 @@ impl Write for Outgoing {
             buffer.extend_from_slice(chunk);
             input.advance(chunk_len);
         }
-        Poll::Ready(Ok(len))
-    }
-}
-
-impl CryptoOutput for Outgoing {
-    fn move_to<'v>(view: Pin<&mut BorrowedReceiver<'v, Outgoing>>, level: CryptoLevel)
-    where
-        Self: 'v,
-    {
-        view.get_pin_mut().get_mut().current = level;
+        len
     }
 }
 
@@ -162,30 +122,21 @@ pub struct ServerParameters {
     pub refuse: bool,
 }
 
-family_receiver!(impl [] for ServerParameters);
-
-impl ServerTransport<&'static str> for ServerParameters {
-    type Error = Fault;
-
-    fn negotiate<'v>(
-        view: Pin<&mut BorrowedReceiver<'v, ServerParameters>>,
+impl ServerParameters {
+    fn negotiate(
+        &mut self,
         peer: &[u8],
-        _selected: &SelectedTarget<&'static str>,
         resumed: Option<&TicketState<&'static str>>,
-    ) -> Result<Negotiated, Fault>
-    where
-        Self: 'v,
-    {
-        let parameters = view.get_pin_mut().get_mut();
-        if parameters.refuse {
+    ) -> Result<Negotiated, Fault> {
+        if self.refuse {
             return Err(Fault::Parameters);
         }
-        parameters.peer = Some(Bytes::copy_from_slice(peer));
+        self.peer = Some(Bytes::copy_from_slice(peer));
         let compatible =
-            resumed.is_some_and(|state| state.resumable.transport_parameters == parameters.local);
+            resumed.is_some_and(|state| state.resumable.transport_parameters == self.local);
         Ok(Negotiated {
-            local: OpaqueData::new(parameters.local.clone()).unwrap(),
-            early_data: parameters.early_data && compatible,
+            local: OpaqueData::new(self.local.clone()).unwrap(),
+            early_data: self.early_data && compatible,
         })
     }
 }
@@ -196,26 +147,113 @@ pub struct ClientParameters {
     pub peer: Option<Bytes>,
 }
 
-family_receiver!(impl [] for ClientParameters);
+/// What one side's handshake is lent: its CRYPTO streams and its side of
+/// the transport parameters, as one receiver.
+pub struct Side<P> {
+    pub input: Incoming,
+    pub output: Outgoing,
+    pub parameters: P,
+}
 
-impl ClientTransport for ClientParameters {
+/// The server's receiver.
+pub type ServerSide = Side<ServerParameters>;
+
+/// The client's receiver.
+pub type ClientSide = Side<ClientParameters>;
+
+family_receiver!(impl [P: Unpin + 'static] for Side<P>);
+
+impl<P: Unpin + 'static> Read for Side<P> {
     type Error = Fault;
 
-    fn local<'v>(view: Pin<&mut BorrowedReceiver<'v, ClientParameters>>) -> OpaqueData<Bytes>
+    fn poll_read<'v, Output: BufMut + ?Sized>(
+        host: Pin<&mut BorrowedReceiver<'v, Side<P>>>,
+        _: &mut Context<'_>,
+        destination: &mut Output,
+    ) -> Poll<Result<usize, Fault>>
     where
         Self: 'v,
     {
-        OpaqueData::new(view.get_pin_mut().get_mut().local.clone()).unwrap()
+        host.get_pin_mut()
+            .get_mut()
+            .input
+            .poll_read(destination)
+            .map(Ok)
     }
+}
 
-    fn peer<'v>(
-        view: Pin<&mut BorrowedReceiver<'v, ClientParameters>>,
-        peer: &[u8],
+impl<P: Unpin + 'static> CryptoInput for Side<P> {
+    type LevelError = Fault;
+
+    fn move_input_to<'v>(
+        view: Pin<&mut BorrowedReceiver<'v, Side<P>>>,
+        level: CryptoLevel,
     ) -> Result<(), Fault>
     where
         Self: 'v,
     {
-        view.get_pin_mut().get_mut().peer = Some(Bytes::copy_from_slice(peer));
+        view.get_pin_mut().get_mut().input.move_to(level)
+    }
+}
+
+impl<P: Unpin + 'static> Write for Side<P> {
+    type Error = Fault;
+
+    fn poll_write<'v, Input: Buf + ?Sized>(
+        host: Pin<&mut BorrowedReceiver<'v, Side<P>>>,
+        _: &mut Context<'_>,
+        input: &mut Input,
+    ) -> Poll<Result<usize, Fault>>
+    where
+        Self: 'v,
+    {
+        Poll::Ready(Ok(host.get_pin_mut().get_mut().output.write(input)))
+    }
+}
+
+impl<P: Unpin + 'static> CryptoOutput for Side<P> {
+    fn move_output_to<'v>(view: Pin<&mut BorrowedReceiver<'v, Side<P>>>, level: CryptoLevel)
+    where
+        Self: 'v,
+    {
+        view.get_pin_mut().get_mut().output.current = level;
+    }
+}
+
+impl ServerTransport<&'static str> for ServerSide {
+    type Error = Fault;
+
+    fn negotiate<'v>(
+        view: Pin<&mut BorrowedReceiver<'v, ServerSide>>,
+        peer: &[u8],
+        _selected: &SelectedTarget<&'static str>,
+        resumed: Option<&TicketState<&'static str>>,
+    ) -> Result<Negotiated, Fault>
+    where
+        Self: 'v,
+    {
+        view.get_pin_mut()
+            .get_mut()
+            .parameters
+            .negotiate(peer, resumed)
+    }
+}
+
+impl ClientTransport for ClientSide {
+    type Error = Fault;
+
+    fn local<'v>(view: Pin<&mut BorrowedReceiver<'v, ClientSide>>) -> OpaqueData<Bytes>
+    where
+        Self: 'v,
+    {
+        OpaqueData::new(view.get_pin_mut().get_mut().parameters.local.clone()).unwrap()
+    }
+
+    fn peer<'v>(view: Pin<&mut BorrowedReceiver<'v, ClientSide>>, peer: &[u8]) -> Result<(), Fault>
+    where
+        Self: 'v,
+    {
+        view.get_pin_mut().get_mut().parameters.peer = Some(Bytes::copy_from_slice(peer));
         Ok(())
     }
 }

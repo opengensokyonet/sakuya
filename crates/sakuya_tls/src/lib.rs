@@ -35,7 +35,7 @@
 //!
 //! [RFC 9846]: https://www.rfc-editor.org/rfc/rfc9846.html
 //! [RFC 9001]: https://www.rfc-editor.org/rfc/rfc9001.html
-#![feature(impl_trait_in_assoc_type, yield_expr)]
+#![feature(impl_trait_in_assoc_type)]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 

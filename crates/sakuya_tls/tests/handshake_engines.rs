@@ -7,6 +7,7 @@
 //! server presents an Ed25519 certificate for example.com, issued by an
 //! Ed25519 root that the client's verifier alone trusts; both are built
 //! here and signed with nitori_crypto_aws_lc.
+#![feature(impl_trait_in_assoc_type, yield_expr)]
 
 mod common;
 
@@ -14,7 +15,11 @@ use bytes::Bytes;
 use common::{
     now,
     pki::{self, leaf_key, verifier},
-    streams::{ClientParameters, Fault, Incoming, LEVELS, Outgoing, ServerParameters, index},
+    steps::{self, ClientSteps, ServerSteps},
+    streams::{
+        ClientParameters, ClientSide, Fault, Incoming, LEVELS, Outgoing, ServerParameters,
+        ServerSide, index,
+    },
 };
 use core::{
     ops::ControlFlow,
@@ -31,8 +36,9 @@ use sakuya_tls::{
     client::{
         ServerTarget,
         engine::{
-            ClientAlertError, ClientHandshake, ClientHandshakeEvent, ClientHandshakeSettings,
-            EarlyDataOutcome, ServerIdentity,
+            ClientAlertError, ClientHandshake, ClientHandshakeCompleted, ClientHandshakeSettings,
+            EarlyDataOffered, EarlyDataOutcome, ServerHelloRead, ServerIdentity,
+            WriteClientHelloStep,
         },
         offering::{Offering, PreferenceOffering},
         ticket::TakeOnceTicketMap,
@@ -45,8 +51,8 @@ use sakuya_tls::{
     server::{
         choice::{GroupPreference, PreferenceTable},
         engine::{
-            RequiredExtension, ServerAlertError, ServerHandshake, ServerHandshakeEvent,
-            ServerHandshakeSettings,
+            RequiredExtension, ServerAlertError, ServerHandshake, ServerHandshakeCompleted,
+            ServerHandshakeSettings, ServerHelloWritten, WriteServerHelloStep,
         },
         identity::CertifiedKey,
         layers::PassThroughLayers,
@@ -84,12 +90,8 @@ enum Sender {
 
 /// The receivers of both sides.
 struct Wire {
-    server_in: Incoming,
-    server_out: Outgoing,
-    server_parameters: ServerParameters,
-    client_in: Incoming,
-    client_out: Outgoing,
-    client_parameters: ClientParameters,
+    server: ServerSide,
+    client: ClientSide,
     /// The messages that went past, by sender and level.
     seen: Vec<(Sender, CryptoLevel, HandshakeType)>,
 }
@@ -97,19 +99,23 @@ struct Wire {
 impl Wire {
     fn new() -> Self {
         Self {
-            server_in: Incoming::default(),
-            server_out: Outgoing::default(),
-            server_parameters: ServerParameters {
-                local: Bytes::from_static(b"server parameters"),
-                peer: None,
-                early_data: true,
-                refuse: false,
+            server: ServerSide {
+                input: Incoming::default(),
+                output: Outgoing::default(),
+                parameters: ServerParameters {
+                    local: Bytes::from_static(b"server parameters"),
+                    peer: None,
+                    early_data: true,
+                    refuse: false,
+                },
             },
-            client_in: Incoming::default(),
-            client_out: Outgoing::default(),
-            client_parameters: ClientParameters {
-                local: Bytes::from_static(b"client parameters"),
-                peer: None,
+            client: ClientSide {
+                input: Incoming::default(),
+                output: Outgoing::default(),
+                parameters: ClientParameters {
+                    local: Bytes::from_static(b"client parameters"),
+                    peer: None,
+                },
             },
             seen: Vec::new(),
         }
@@ -120,8 +126,16 @@ impl Wire {
     fn deliver(&mut self, change: &mut impl FnMut(Sender, CryptoLevel, &mut Vec<u8>)) -> bool {
         let mut moved = false;
         for (from, out, into) in [
-            (Sender::Server, &mut self.server_out, &mut self.client_in),
-            (Sender::Client, &mut self.client_out, &mut self.server_in),
+            (
+                Sender::Server,
+                &mut self.server.output,
+                &mut self.client.input,
+            ),
+            (
+                Sender::Client,
+                &mut self.client.output,
+                &mut self.server.input,
+            ),
         ] {
             for level in LEVELS {
                 let mut bytes = core::mem::take(&mut out.levels[index(level)]);
@@ -274,8 +288,8 @@ fn offering(key_shares: &[NamedGroup]) -> PreferenceOffering {
     .unwrap()
 }
 
-type ServerEvent = ServerHandshakeEvent<AwsLcBackend, &'static str>;
-type ClientEvent = ClientHandshakeEvent<AwsLcBackend>;
+type ServerEvent = steps::ServerEvent<AwsLcBackend, &'static str>;
+type ClientEvent = steps::ClientEvent<AwsLcBackend>;
 
 /// The events and final values of one connection between the endpoints.
 struct Connection<SF, CF> {
@@ -317,18 +331,32 @@ macro_rules! server_handshake {
     }};
 }
 
+/// The client's handshake of `endpoints` to `host`.
+macro_rules! client_handshake {
+    ($endpoints:expr, $host:expr) => {{
+        let endpoints: &Endpoints = $endpoints;
+        ClientHandshake::new(
+            AwsLcBackend,
+            endpoints.offering.clone(),
+            Arc::clone(&endpoints.client_tickets),
+            verifier(&endpoints.clock),
+            Arc::clone(&endpoints.clock),
+            ServerTarget::from_host_name($host).unwrap(),
+            Some(ProtocolNameList::new(vec![h3()]).unwrap()),
+            ClientHandshakeSettings::default(),
+        )
+    }};
+}
+
 /// Polls `server`, a pinned call of [`server_handshake!`], on the server's
 /// receivers of `wire`.
 macro_rules! poll_server {
     ($server:expr, $wire:expr) => {{
         let wire: &mut Wire = $wire;
-        let mut input = pin!(Pin::new(&mut wire.server_in).view());
-        let mut output = pin!(Pin::new(&mut wire.server_out).view());
-        let mut parameters = pin!(Pin::new(&mut wire.server_parameters).view());
-        $server.as_mut().poll_with_views(
-            (input.as_mut(), output.as_mut(), parameters.as_mut()),
-            &mut Context::from_waker(Waker::noop()),
-        )
+        let mut side = pin!(Pin::new(&mut wire.server).view());
+        $server
+            .as_mut()
+            .poll_with_views(side.as_mut(), &mut Context::from_waker(Waker::noop()))
     }};
 }
 
@@ -339,33 +367,17 @@ macro_rules! connect {
         let endpoints: &Endpoints = $endpoints;
         let mut wire: Wire = $wire;
         let server = server_handshake!(endpoints);
-        let client = ClientHandshake::new(
-            AwsLcBackend,
-            endpoints.offering.clone(),
-            Arc::clone(&endpoints.client_tickets),
-            verifier(&endpoints.clock),
-            Arc::clone(&endpoints.clock),
-            ServerTarget::from_host_name($host).unwrap(),
-            Some(ProtocolNameList::new(vec![h3()]).unwrap()),
-            ClientHandshakeSettings::default(),
-        );
-        let mut server = pin!(LentCall::<(Incoming, Outgoing, ServerParameters,), _>::new(
-            server
-        ));
-        let mut client = pin!(LentCall::<(Incoming, Outgoing, ClientParameters,), _>::new(
-            client
-        ));
+        let client = client_handshake!(endpoints, $host);
+        let mut server = pin!(LentCall::<ServerSide, _>::new(ServerSteps::new(server)));
+        let mut client = pin!(LentCall::<ClientSide, _>::new(ClientSteps::new(client)));
         let run = run(
             &mut wire,
             |wire| poll_server!(server, wire),
             |wire| {
-                let mut input = pin!(Pin::new(&mut wire.client_in).view());
-                let mut output = pin!(Pin::new(&mut wire.client_out).view());
-                let mut parameters = pin!(Pin::new(&mut wire.client_parameters).view());
-                client.as_mut().poll_with_views(
-                    (input.as_mut(), output.as_mut(), parameters.as_mut()),
-                    &mut Context::from_waker(Waker::noop()),
-                )
+                let mut side = pin!(Pin::new(&mut wire.client).view());
+                client
+                    .as_mut()
+                    .poll_with_views(side.as_mut(), &mut Context::from_waker(Waker::noop()))
             },
             $change,
         );
@@ -396,17 +408,17 @@ fn agreed(server_events: &[ServerEvent], client_events: &[ClientEvent]) -> Agree
     let label = ExporterLabel::new(b"EXPORTER-test").unwrap();
     let len = ExpandLength::new(32).unwrap();
 
-    let Some(ServerHandshakeEvent::ServerHelloWritten {
+    let Some(ServerEvent::ServerHelloWritten(ServerHelloWritten {
         aead: server_aead,
         secrets: server_secrets,
         zero_rtt,
-    }) = server.next()
+    })) = server.next()
     else {
         panic!("no Handshake secrets from the server")
     };
     let mut client_event = client.next();
     let zero_rtt_sent = match client_event {
-        Some(ClientHandshakeEvent::EarlyDataOffered { aead, secret, .. }) => {
+        Some(ClientEvent::EarlyDataOffered(EarlyDataOffered { aead, secret, .. })) => {
             if let Some(received) = zero_rtt {
                 assert_eq!(received.0.as_bytes(), secret.0.as_bytes());
                 assert_eq!(aead, server_aead);
@@ -416,10 +428,10 @@ fn agreed(server_events: &[ServerEvent], client_events: &[ClientEvent]) -> Agree
         }
         _ => false,
     };
-    let Some(ClientHandshakeEvent::ServerHelloRead {
+    let Some(ClientEvent::ServerHelloRead(ServerHelloRead {
         aead: client_aead,
         secrets: client_secrets,
-    }) = client_event
+    })) = client_event
     else {
         panic!("no Handshake secrets for the client")
     };
@@ -437,25 +449,25 @@ fn agreed(server_events: &[ServerEvent], client_events: &[ClientEvent]) -> Agree
         server_secrets.receive.as_bytes()
     );
 
-    let Some(ServerHandshakeEvent::ServerFinishedWritten(server_send)) = server.next() else {
+    let Some(ServerEvent::ServerFinishedWritten(server_send)) = server.next() else {
         panic!("no 1-RTT secret from the server")
     };
-    let Some(ServerHandshakeEvent::Completed {
+    let Some(ServerEvent::Completed(ServerHandshakeCompleted {
         one_rtt_receive,
         exporter: server_exporter,
         selected,
         resumed,
-    }) = server.next()
+    })) = server.next()
     else {
         panic!("the server did not complete")
     };
-    let Some(ClientHandshakeEvent::Completed {
+    let Some(ClientEvent::Completed(ClientHandshakeCompleted {
         secrets,
         exporter: client_exporter,
         identity,
         application_protocol,
         early_data,
-    }) = client.next()
+    })) = client.next()
     else {
         panic!("the client did not complete")
     };
@@ -490,14 +502,75 @@ fn agreed(server_events: &[ServerEvent], client_events: &[ClientEvent]) -> Agree
 }
 
 /// The alert a side ended with.
-fn alert_of<F: sakuya_tls::alert::CallsForAlert, E: core::fmt::Debug>(
-    end: Option<Result<(), HandshakeError<F, E>>>,
+fn alert_of<T, F: sakuya_tls::alert::CallsForAlert, E: core::fmt::Debug>(
+    end: Option<Result<T, HandshakeError<F, E>>>,
 ) -> AlertDescription {
     match end {
         Some(Err(error)) => error.alert().expect("an alert"),
-        Some(Ok(())) => panic!("the side succeeded"),
+        Some(Ok(_)) => panic!("the side succeeded"),
         None => panic!("the side did not end"),
     }
+}
+
+#[test]
+fn the_calls_of_both_engines_are_send() {
+    fn assert_send<T: Send>(_: &T) {}
+    let endpoints = Endpoints::new();
+    let server = LentCall::<ServerSide, _>::new(ServerSteps::new(server_handshake!(&endpoints)));
+    assert_send(&server);
+    let client = LentCall::<ClientSide, _>::new(ClientSteps::new(client_handshake!(
+        &endpoints,
+        "example.com"
+    )));
+    assert_send(&client);
+}
+
+#[test]
+fn a_step_runs_alone_as_an_operation() {
+    let endpoints = Endpoints::new();
+    let mut wire = Wire::new();
+    let mut client = pin!(LentCall::<ClientSide, _>::new(WriteClientHelloStep::new(
+        client_handshake!(&endpoints, "example.com")
+    )));
+    let mut side = pin!(Pin::new(&mut wire.client).view());
+    let Poll::Ready(ControlFlow::Break(Ok((offered, _)))) = client
+        .as_mut()
+        .poll_with_views(side.as_mut(), &mut Context::from_waker(Waker::noop()))
+    else {
+        panic!("the ClientHello is not written")
+    };
+    assert!(offered.is_none());
+    assert!(wire.deliver(&mut unchanged));
+
+    let mut server = pin!(LentCall::<ServerSide, _>::new(WriteServerHelloStep::new(
+        server_handshake!(&endpoints)
+    )));
+    let mut side = pin!(Pin::new(&mut wire.server).view());
+    let Poll::Ready(ControlFlow::Break(Ok((written, _)))) = server
+        .as_mut()
+        .poll_with_views(side.as_mut(), &mut Context::from_waker(Waker::noop()))
+    else {
+        panic!("the ServerHello is not written")
+    };
+    assert!(written.zero_rtt.is_none());
+    // The step ends after the ServerHello, before moving to Handshake.
+    assert_eq!(wire.server.output.current, CryptoLevel::Initial);
+    assert!(wire.deliver(&mut unchanged));
+    assert_eq!(
+        wire.seen,
+        [
+            (
+                Sender::Client,
+                CryptoLevel::Initial,
+                HandshakeType::CLIENT_HELLO
+            ),
+            (
+                Sender::Server,
+                CryptoLevel::Initial,
+                HandshakeType::SERVER_HELLO
+            ),
+        ]
+    );
 }
 
 #[test]
@@ -513,11 +586,11 @@ fn a_full_handshake_agrees_on_every_secret() {
     assert_eq!(agreed.early_data, EarlyDataOutcome::NotOffered);
     let wire = &connection.wire;
     assert_eq!(
-        wire.server_parameters.peer.as_deref(),
+        wire.server.parameters.peer.as_deref(),
         Some(&b"client parameters"[..])
     );
     assert_eq!(
-        wire.client_parameters.peer.as_deref(),
+        wire.client.parameters.peer.as_deref(),
         Some(&b"server parameters"[..])
     );
     assert_eq!(wire.seen(Sender::Server, HandshakeType::SERVER_HELLO), 1);
@@ -541,7 +614,7 @@ fn a_full_handshake_agrees_on_every_secret() {
         HandshakeType::NEW_SESSION_TICKET
     )));
     // Every byte was read at its level.
-    for side in [&wire.server_in, &wire.client_in] {
+    for side in [&wire.server.input, &wire.client.input] {
         assert!(side.levels.iter().all(VecDeque::is_empty));
         assert_eq!(side.current, CryptoLevel::OneRtt);
     }
@@ -590,7 +663,7 @@ fn a_ticket_resumes_with_0_rtt_accepted() {
     assert!(matches!(second.server_end, Some(Ok(()))));
     assert!(matches!(
         second.client_events.first(),
-        Some(ClientHandshakeEvent::EarlyDataOffered { transport_parameters, application_protocol, .. })
+        Some(ClientEvent::EarlyDataOffered(EarlyDataOffered { transport_parameters, application_protocol, .. }))
             if transport_parameters.as_ref() == b"server parameters"
                 && application_protocol == &Some(h3())
     ));
@@ -620,7 +693,7 @@ fn the_connection_can_reject_0_rtt() {
     let endpoints = Endpoints::new();
     connect!(&endpoints, Wire::new(), "example.com", unchanged);
     let mut wire = Wire::new();
-    wire.server_parameters.early_data = false;
+    wire.server.parameters.early_data = false;
     let second = connect!(&endpoints, wire, "example.com", unchanged);
     assert!(matches!(second.server_end, Some(Ok(()))));
     let agreed = agreed(&second.server_events, &second.client_events);
@@ -710,12 +783,10 @@ fn a_changed_client_finished_fails_with_decrypt_error() {
     ));
     assert_eq!(alert_of(end), AlertDescription::DECRYPT_ERROR);
     // The server completes nothing.
-    assert!(
-        !connection
-            .server_events
-            .iter()
-            .any(|event| matches!(event, ServerHandshakeEvent::Completed { .. }))
-    );
+    assert!(!connection.server_events.iter().any(|event| matches!(
+        event,
+        ServerEvent::Completed(ServerHandshakeCompleted { .. })
+    )));
 }
 
 #[test]
@@ -816,7 +887,7 @@ fn a_changed_binder_fails_with_decrypt_error() {
 fn refused_transport_parameters_fail_through_the_connection() {
     let endpoints = Endpoints::new();
     let mut wire = Wire::new();
-    wire.server_parameters.refuse = true;
+    wire.server.parameters.refuse = true;
     let connection = connect!(&endpoints, wire, "example.com", unchanged);
     match connection.server_end {
         Some(Err(error)) => {
@@ -1055,14 +1126,15 @@ impl ScriptedClient {
                 let hello = self.hello(exchange.share().as_bytes());
                 let mut encoded = Vec::new();
                 encoded.sync_write_client_hello_unpin(&hello).unwrap();
-                wire.client_out.levels[index(CryptoLevel::Initial)].extend_from_slice(&encoded);
+                wire.client.output.levels[index(CryptoLevel::Initial)].extend_from_slice(&encoded);
                 let hash = backend.hash_algorithm(HashAlgorithm::Sha256).unwrap();
                 let transcript = Transcript::new(&backend, hash).add(&encoded);
                 self.step = ScriptedStep::ServerHello(transcript, exchange);
                 Poll::Ready(ControlFlow::Continue(()))
             }
             ScriptedStep::ServerHello(transcript, exchange) => {
-                let Some([server_hello]) = take_messages(&mut wire.client_in, CryptoLevel::Initial)
+                let Some([server_hello]) =
+                    take_messages(&mut wire.client.input, CryptoLevel::Initial)
                 else {
                     self.step = ScriptedStep::ServerHello(transcript, exchange);
                     return Poll::Pending;
@@ -1092,7 +1164,7 @@ impl ScriptedClient {
                         certificate_verify,
                         finished,
                     ],
-                ) = take_messages(&mut wire.client_in, CryptoLevel::Handshake)
+                ) = take_messages(&mut wire.client.input, CryptoLevel::Handshake)
                 else {
                     self.step = ScriptedStep::ServerFlight(handshake);
                     return Poll::Pending;
@@ -1109,7 +1181,7 @@ impl ScriptedClient {
                     .server_finished(&whole(&finished))
                     .unwrap();
                 let (_, finished) = main.client_finished();
-                wire.client_out.levels[index(CryptoLevel::Handshake)]
+                wire.client.output.levels[index(CryptoLevel::Handshake)]
                     .extend_from_slice(finished.encoded());
                 Poll::Ready(ControlFlow::Break(()))
             }
@@ -1204,9 +1276,9 @@ fn a_client_that_does_not_name_psk_dhe_ke_gets_no_tickets() {
     for (psk_modes, tickets) in [(true, 2), (false, 0)] {
         let endpoints = Endpoints::new();
         let mut wire = Wire::new();
-        let mut server = pin!(LentCall::<(Incoming, Outgoing, ServerParameters,), _>::new(
+        let mut server = pin!(LentCall::<ServerSide, _>::new(ServerSteps::new(
             server_handshake!(&endpoints)
-        ));
+        )));
         let mut client = ScriptedClient::new(psk_modes);
         let run = run(
             &mut wire,
@@ -1221,7 +1293,7 @@ fn a_client_that_does_not_name_psk_dhe_ke_gets_no_tickets() {
         assert!(run.client_end.is_some());
         assert!(matches!(
             run.server_events.last(),
-            Some(ServerHandshakeEvent::Completed { .. })
+            Some(ServerEvent::Completed(ServerHandshakeCompleted { .. }))
         ));
         assert_eq!(
             wire.seen(Sender::Server, HandshakeType::NEW_SESSION_TICKET),

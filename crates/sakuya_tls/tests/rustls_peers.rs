@@ -9,6 +9,7 @@
 //! protocol and on each other's transport parameters. The server presents
 //! the Ed25519 certificate for example.com of `common::pki`, which both
 //! clients trust through its root.
+#![feature(impl_trait_in_assoc_type, yield_expr)]
 
 mod common;
 
@@ -16,7 +17,11 @@ use bytes::Bytes;
 use common::{
     now,
     pki::{self, leaf_key, verifier},
-    streams::{ClientParameters, Incoming, LEVELS, Outgoing, ServerParameters, index},
+    steps::{self, ClientSteps, ServerSteps},
+    streams::{
+        ClientParameters, ClientSide, Incoming, LEVELS, Outgoing, ServerParameters, ServerSide,
+        Side, index,
+    },
 };
 use core::{
     fmt::Debug,
@@ -42,8 +47,8 @@ use sakuya_tls::{
     client::{
         ServerTarget,
         engine::{
-            ClientHandshake, ClientHandshakeEvent, ClientHandshakeSettings, EarlyDataOutcome,
-            ServerIdentity,
+            ClientHandshake, ClientHandshakeCompleted, ClientHandshakeSettings, EarlyDataOffered,
+            EarlyDataOutcome, ServerHelloRead, ServerIdentity,
         },
         offering::PreferenceOffering,
         ticket::TakeOnceTicketMap,
@@ -55,7 +60,9 @@ use sakuya_tls::{
     schedule::ExporterLabel,
     server::{
         choice::{GroupPreference, PreferenceTable},
-        engine::{ServerHandshake, ServerHandshakeEvent, ServerHandshakeSettings},
+        engine::{
+            ServerHandshake, ServerHandshakeCompleted, ServerHandshakeSettings, ServerHelloWritten,
+        },
         identity::CertifiedKey,
         layers::PassThroughLayers,
         peer::NoCertificateRequest,
@@ -218,25 +225,24 @@ impl Peer {
 
 /// Polls the engine until it waits, then lets `peer` take and give bytes,
 /// until neither moves; the events and how the engine ended, if it did.
-fn run<E, F>(
+fn run<E, F, P>(
     peer: &mut Peer,
-    input: &mut Incoming,
-    output: &mut Outgoing,
-    mut poll: impl FnMut(&mut Incoming, &mut Outgoing) -> Poll<ControlFlow<F, E>>,
+    side: &mut Side<P>,
+    mut poll: impl FnMut(&mut Side<P>) -> Poll<ControlFlow<F, E>>,
 ) -> (Vec<E>, Option<F>) {
     let mut events = Vec::new();
     let mut end = None;
     for _ in 0..64 {
         let mut progress = false;
         while end.is_none() {
-            match poll(input, output) {
+            match poll(side) {
                 Poll::Ready(ControlFlow::Continue(event)) => events.push(event),
                 Poll::Ready(ControlFlow::Break(done)) => end = Some(done),
                 Poll::Pending => break,
             }
             progress = true;
         }
-        progress |= peer.exchange(output, input);
+        progress |= peer.exchange(&mut side.output, &mut side.input);
         if !progress {
             return (events, end);
         }
@@ -260,7 +266,7 @@ mod server_engine {
 
     use super::*;
 
-    type Event = ServerHandshakeEvent<AwsLcBackend, &'static str>;
+    type Event = steps::ServerEvent<AwsLcBackend, &'static str>;
 
     /// What the server keeps across connections.
     struct Server {
@@ -337,9 +343,7 @@ mod server_engine {
             Arc::clone(&server.clock),
             ServerHandshakeSettings::default(),
         );
-        let mut call = pin!(LentCall::<(Incoming, Outgoing, ServerParameters,), _>::new(
-            engine
-        ));
+        let mut call = pin!(LentCall::<ServerSide, _>::new(ServerSteps::new(engine)));
         let mut peer = Peer::new(
             quic::ClientConnection::new(
                 Arc::clone(client),
@@ -349,23 +353,24 @@ mod server_engine {
             )
             .unwrap(),
         );
-        let mut input = Incoming::default();
-        let mut output = Outgoing::default();
-        let mut parameters = ServerParameters {
-            local: Bytes::from_static(SERVER_PARAMETERS),
-            peer: None,
-            early_data: true,
-            refuse: false,
+        let mut side = ServerSide {
+            input: Incoming::default(),
+            output: Outgoing::default(),
+            parameters: ServerParameters {
+                local: Bytes::from_static(SERVER_PARAMETERS),
+                peer: None,
+                early_data: true,
+                refuse: false,
+            },
         };
-        let (events, end) = run(&mut peer, &mut input, &mut output, |input, output| {
-            let mut input = pin!(Pin::new(input).view());
-            let mut output = pin!(Pin::new(output).view());
-            let mut parameters = pin!(Pin::new(&mut parameters).view());
-            call.as_mut().poll_with_views(
-                (input.as_mut(), output.as_mut(), parameters.as_mut()),
-                &mut Context::from_waker(Waker::noop()),
-            )
+        let (events, end) = run(&mut peer, &mut side, |side| {
+            let mut side = pin!(Pin::new(side).view());
+            call.as_mut()
+                .poll_with_views(side.as_mut(), &mut Context::from_waker(Waker::noop()))
         });
+        let Side {
+            input, parameters, ..
+        } = side;
         // Every byte rustls sent was read at its level.
         assert!(input.levels.iter().all(|level| level.is_empty()));
         Connection {
@@ -381,18 +386,18 @@ mod server_engine {
     fn check(connection: &Connection, logged: &Logged) -> (bool, bool) {
         assert_eq!(connection.end, Some(Ok(())));
         let [
-            Event::ServerHelloWritten {
+            Event::ServerHelloWritten(ServerHelloWritten {
                 aead,
                 secrets,
                 zero_rtt,
-            },
+            }),
             Event::ServerFinishedWritten(one_rtt_send),
-            Event::Completed {
+            Event::Completed(ServerHandshakeCompleted {
                 one_rtt_receive,
                 exporter,
                 selected,
                 resumed,
-            },
+            }),
         ] = connection.events.as_slice()
         else {
             panic!("unexpected events")
@@ -474,7 +479,7 @@ mod client_engine {
 
     use super::*;
 
-    type Event = ClientHandshakeEvent<AwsLcBackend>;
+    type Event = steps::ClientEvent<AwsLcBackend>;
 
     /// What the client keeps across connections.
     struct Client {
@@ -539,7 +544,7 @@ mod client_engine {
     /// One connection between the client's engine and a rustls server.
     struct Connection {
         events: Vec<Event>,
-        end: Option<Result<(), String>>,
+        end: Option<Result<core::convert::Infallible, String>>,
         peer: Peer,
         parameters: ClientParameters,
     }
@@ -563,9 +568,7 @@ mod client_engine {
             Some(ProtocolNameList::new(vec![h3()]).unwrap()),
             ClientHandshakeSettings::default(),
         );
-        let mut call = pin!(LentCall::<(Incoming, Outgoing, ClientParameters,), _>::new(
-            engine
-        ));
+        let mut call = pin!(LentCall::<ClientSide, _>::new(ClientSteps::new(engine)));
         let mut peer = Peer::new(
             quic::ServerConnection::new(
                 Arc::clone(server),
@@ -574,21 +577,22 @@ mod client_engine {
             )
             .unwrap(),
         );
-        let mut input = Incoming::default();
-        let mut output = Outgoing::default();
-        let mut parameters = ClientParameters {
-            local: Bytes::from_static(CLIENT_PARAMETERS),
-            peer: None,
+        let mut side = ClientSide {
+            input: Incoming::default(),
+            output: Outgoing::default(),
+            parameters: ClientParameters {
+                local: Bytes::from_static(CLIENT_PARAMETERS),
+                peer: None,
+            },
         };
-        let (events, end) = run(&mut peer, &mut input, &mut output, |input, output| {
-            let mut input = pin!(Pin::new(input).view());
-            let mut output = pin!(Pin::new(output).view());
-            let mut parameters = pin!(Pin::new(&mut parameters).view());
-            call.as_mut().poll_with_views(
-                (input.as_mut(), output.as_mut(), parameters.as_mut()),
-                &mut Context::from_waker(Waker::noop()),
-            )
+        let (events, end) = run(&mut peer, &mut side, |side| {
+            let mut side = pin!(Pin::new(side).view());
+            call.as_mut()
+                .poll_with_views(side.as_mut(), &mut Context::from_waker(Waker::noop()))
         });
+        let Side {
+            input, parameters, ..
+        } = side;
         // Every byte rustls sent was read at its level, the tickets too.
         assert!(input.levels.iter().all(|level| level.is_empty()));
         assert_eq!(input.current, CryptoLevel::OneRtt);
@@ -606,23 +610,27 @@ mod client_engine {
         // The client keeps reading tickets.
         assert_eq!(connection.end, None);
         let mut events = connection.events.as_slice();
-        if let [Event::EarlyDataOffered { aead, secret, .. }, rest @ ..] = events {
+        if let [
+            Event::EarlyDataOffered(EarlyDataOffered { aead, secret, .. }),
+            rest @ ..,
+        ] = events
+        {
             assert_eq!(*aead, AeadAlgorithm::Aes128Gcm);
             logged.check("CLIENT_EARLY_TRAFFIC_SECRET", &secret.0);
             events = rest;
         }
         let [
-            Event::ServerHelloRead {
+            Event::ServerHelloRead(ServerHelloRead {
                 aead,
                 secrets: handshake,
-            },
-            Event::Completed {
+            }),
+            Event::Completed(ClientHandshakeCompleted {
                 secrets,
                 exporter,
                 identity,
                 application_protocol,
                 early_data,
-            },
+            }),
         ] = events
         else {
             panic!("unexpected events")
