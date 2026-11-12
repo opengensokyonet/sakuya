@@ -631,6 +631,11 @@ impl<R: HandshakeRole, C: TlsCrypto + Clone> MainSecret<R, C> {
         self
     }
 
+    /// exporter_secret, for a key log.
+    pub(crate) fn exporter_secret(&self) -> &[u8] {
+        self.parts.exporter.as_bytes()
+    }
+
     /// The exporter of the connection, with a copy of
     /// exporter_secret.
     pub fn exporter(&self) -> Exporter<C> {
@@ -661,6 +666,12 @@ impl<C: TlsCrypto> MainParts<C> {
 }
 
 impl<C: TlsCrypto + Clone> MainSecret<Server, C> {
+    /// The client's 1-RTT secret, which the server receives with only once
+    /// the client's Finished is verified, for a key log.
+    pub(crate) fn client_traffic_secret(&self) -> &TrafficSecret {
+        &self.withheld
+    }
+
     /// Checks the client's Finished and adds it: the handshake is complete,
     /// and the client's 1-RTT secret is handed over with the exporter.
     ///

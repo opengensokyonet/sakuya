@@ -77,6 +77,7 @@ use crate::{
         psk_key_exchange_modes::PskKeyExchangeMode,
         server_name::ServerName,
     },
+    key_log::{KeyLog, KeyLogLabel},
     message::{
         HandshakeMessage, HandshakeType, HelloRandom, LegacySessionId, MessageLimits,
         certificate::{
@@ -996,21 +997,22 @@ enum Sent<C: TlsCrypto> {
 
 /// The start state of a client's handshake: the backend, the client's
 /// capabilities and the target, which [`ClientHandshakeSteps`] runs.
-pub struct ClientHandshake<B, F, K, V, Z> {
+pub struct ClientHandshake<B, F, K, V, Z, G> {
     backend: B,
     offering: F,
     tickets: K,
     verifier: V,
     clock: Z,
+    key_log: G,
     target: ServerTarget,
     application_protocols: Option<ProtocolNameList<Bytes>>,
     settings: ClientHandshakeSettings,
 }
 
-impl<B, F, K, V, Z> ClientHandshake<B, F, K, V, Z> {
+impl<B, F, K, V, Z, G> ClientHandshake<B, F, K, V, Z, G> {
     /// A client's handshake to `target` with `backend`, `offering`,
-    /// `tickets`, `verifier`, `clock` and `settings`, offering the
-    /// `application_protocols`.
+    /// `tickets`, `verifier`, `clock`, `key_log` and `settings`, offering
+    /// the `application_protocols`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         backend: B,
@@ -1018,6 +1020,7 @@ impl<B, F, K, V, Z> ClientHandshake<B, F, K, V, Z> {
         tickets: K,
         verifier: V,
         clock: Z,
+        key_log: G,
         target: ServerTarget,
         application_protocols: Option<ProtocolNameList<Bytes>>,
         settings: ClientHandshakeSettings,
@@ -1028,6 +1031,7 @@ impl<B, F, K, V, Z> ClientHandshake<B, F, K, V, Z> {
             tickets,
             verifier,
             clock,
+            key_log,
             target,
             application_protocols,
             settings,
@@ -1038,12 +1042,13 @@ impl<B, F, K, V, Z> ClientHandshake<B, F, K, V, Z> {
 /// The state of a client's handshake after its first ClientHello is
 /// written: what a second ClientHello and reading the ServerHello need.
 ///
-/// `A` is the attempt of the offering.
-pub struct ClientHelloWrittenState<B: TlsCrypto, K, V, Z, A> {
+/// `A` is the attempt of the offering and `G` the key log.
+pub struct ClientHelloWrittenState<B: TlsCrypto, K, V, Z, A, G> {
     backend: B,
     tickets: K,
     verifier: V,
     clock: Z,
+    key_log: G,
     target: ServerTarget,
     application_protocols: Option<ProtocolNameList<Bytes>>,
     limits: MessageLimits,
@@ -1059,10 +1064,12 @@ pub struct ClientHelloWrittenState<B: TlsCrypto, K, V, Z, A> {
 
 /// The state of a client's handshake after the ServerHello is read: what
 /// authenticating the server and the Finished messages need.
-pub struct ServerHelloReadState<B: TlsCrypto, K, V, Z> {
+pub struct ServerHelloReadState<B: TlsCrypto, K, V, Z, G> {
     tickets: K,
     verifier: V,
     clock: Z,
+    key_log: G,
+    random: HelloRandom,
     target: ServerTarget,
     application_protocols: Option<ProtocolNameList<Bytes>>,
     limits: MessageLimits,
@@ -1088,7 +1095,7 @@ pub struct ClientHandshakeCompletedState<B: TlsCrypto, K, Z> {
     resumption: ResumptionSecret<Client, B>,
 }
 
-impl<B, F, K, V, Z> ClientHandshakeSteps for ClientHandshake<B, F, K, V, Z>
+impl<B, F, K, V, Z, G> ClientHandshakeSteps for ClientHandshake<B, F, K, V, Z, G>
 where
     B: TlsCrypto + Clone,
     F: Offering<B>,
@@ -1096,11 +1103,12 @@ where
     V: CertificateVerifier,
     V::Error: CallsForAlert,
     Z: Clock,
+    G: KeyLog,
 {
     type Crypto = B;
     type AlertError = ClientAlertError<V::Error>;
-    type ClientHelloWrittenState = ClientHelloWrittenState<B, K, V, Z, F::Attempt>;
-    type ServerHelloReadState = ServerHelloReadState<B, K, V, Z>;
+    type ClientHelloWrittenState = ClientHelloWrittenState<B, K, V, Z, F::Attempt, G>;
+    type ServerHelloReadState = ServerHelloReadState<B, K, V, Z, G>;
     type ClientHandshakeCompletedState = ClientHandshakeCompletedState<B, K, Z>;
 
     async fn write_client_hello<W: ClientHandshakeCapability>(
@@ -1113,6 +1121,7 @@ where
             tickets,
             verifier,
             clock,
+            key_log,
             target,
             application_protocols,
             settings,
@@ -1216,11 +1225,19 @@ where
             }),
             _ => None,
         };
+        if let Some(offered) = &offered {
+            key_log.log(
+                KeyLogLabel::ClientEarlyTrafficSecret,
+                &random.0,
+                offered.secret.0.as_bytes(),
+            );
+        }
         let state = ClientHelloWrittenState {
             backend,
             tickets,
             verifier,
             clock,
+            key_log,
             target,
             application_protocols,
             limits,
@@ -1245,6 +1262,7 @@ where
             tickets,
             verifier,
             clock,
+            key_log,
             target,
             application_protocols,
             limits,
@@ -1395,6 +1413,16 @@ where
             },
         }
         .map_err(psk_error)?;
+        key_log.log(
+            KeyLogLabel::ClientHandshakeTrafficSecret,
+            &random.0,
+            secrets.send.as_bytes(),
+        );
+        key_log.log(
+            KeyLogLabel::ServerHandshakeTrafficSecret,
+            &random.0,
+            secrets.receive.as_bytes(),
+        );
         let read = ServerHelloRead {
             aead: suite.aead(),
             secrets,
@@ -1403,6 +1431,8 @@ where
             tickets,
             verifier,
             clock,
+            key_log,
+            random,
             target,
             application_protocols,
             limits,
@@ -1430,6 +1460,8 @@ where
             tickets,
             verifier,
             clock,
+            key_log,
+            random,
             target,
             application_protocols,
             limits,
@@ -1570,6 +1602,21 @@ where
         let (mut master, one_rtt) = authenticated
             .server_finished(&message)
             .map_err(|source| alert(ClientAlertError::Finished { source }))?;
+        key_log.log(
+            KeyLogLabel::ClientTrafficSecret0,
+            &random.0,
+            one_rtt.send.as_bytes(),
+        );
+        key_log.log(
+            KeyLogLabel::ServerTrafficSecret0,
+            &random.0,
+            one_rtt.receive.as_bytes(),
+        );
+        key_log.log(
+            KeyLogLabel::ExporterSecret,
+            &random.0,
+            master.exporter_secret(),
+        );
         if let Some(context) = requested {
             let certificate = Certificate::new(context, CertificateList::X509(Vec::new()))
                 // invariant: a context read from a CertificateRequest fits.

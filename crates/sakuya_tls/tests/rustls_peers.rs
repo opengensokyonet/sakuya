@@ -4,7 +4,8 @@
 //!
 //! What one side writes at a level moves to the other side at the same
 //! level. rustls logs its secrets through a `KeyLog`; the tests check that
-//! the engine hands over the same traffic secrets, that both exporters
+//! the engine hands over the same traffic secrets and logs the same secrets,
+//! with the same client_random, through its own key log, that both exporters
 //! export the same bytes, and that both sides agree on the application
 //! protocol and on each other's transport parameters. The server presents
 //! the Ed25519 certificate for example.com of `common::pki`, which both
@@ -56,6 +57,7 @@ use sakuya_tls::{
     clock::ManualClock,
     engine::CryptoLevel,
     extension::alpn::{ProtocolName, ProtocolNameList},
+    key_log::{KeyLog as EngineKeyLog, KeyLogLabel},
     message::{MessageLimits, new_session_ticket::TicketLifetime},
     schedule::ExporterLabel,
     server::{
@@ -86,14 +88,24 @@ fn h3() -> ProtocolName<Bytes> {
 
 /// The secrets a rustls side logs, taken one connection at a time.
 #[derive(Debug, Default)]
-struct Secrets(Mutex<Vec<(String, Vec<u8>)>>);
+struct Secrets(Mutex<Vec<(String, LoggedSecret)>>);
+
+/// The client_random and the secret of one logged line.
+type LoggedSecret = (Vec<u8>, Vec<u8>);
 
 impl KeyLog for Secrets {
-    fn log(&self, label: &str, _client_random: &[u8], secret: &[u8]) {
+    fn log(&self, label: &str, client_random: &[u8], secret: &[u8]) {
         self.0
             .lock()
             .unwrap()
-            .push((label.to_owned(), secret.to_vec()));
+            .push((label.to_owned(), (client_random.to_vec(), secret.to_vec())));
+    }
+}
+
+/// The engine under test logs into the same kind of record.
+impl EngineKeyLog for Secrets {
+    fn log(&self, label: KeyLogLabel, client_random: &[u8; 32], secret: &[u8]) {
+        KeyLog::log(self, label.as_str(), client_random, secret);
     }
 }
 
@@ -108,14 +120,35 @@ impl Secrets {
     }
 }
 
-/// The secrets rustls logged for one connection, by label.
-struct Logged(HashMap<String, Vec<u8>>);
+/// The secrets logged for one connection, by label.
+struct Logged(HashMap<String, LoggedSecret>);
 
 impl Logged {
     /// Checks that `secret` is the one logged as `label`.
     fn check(&self, label: &str, secret: &TrafficSecret) {
-        let logged = self.0.get(label).unwrap_or_else(|| panic!("no {label}"));
+        let (_, logged) = self.0.get(label).unwrap_or_else(|| panic!("no {label}"));
         assert_eq!(secret.as_bytes(), logged.as_slice(), "{label}");
+    }
+
+    /// Checks that the engine logged the five secrets of every handshake,
+    /// and the early one exactly when `early`, each as rustls logged it,
+    /// with the same client_random.
+    fn check_engine(&self, rustls: &Logged, early: bool) {
+        let mut labels = vec![
+            "CLIENT_HANDSHAKE_TRAFFIC_SECRET",
+            "SERVER_HANDSHAKE_TRAFFIC_SECRET",
+            "CLIENT_TRAFFIC_SECRET_0",
+            "SERVER_TRAFFIC_SECRET_0",
+            "EXPORTER_SECRET",
+        ];
+        if early {
+            labels.push("CLIENT_EARLY_TRAFFIC_SECRET");
+        }
+        assert_eq!(self.0.len(), labels.len(), "{:?}", self.0.keys());
+        for label in labels {
+            let engine = self.0.get(label).unwrap_or_else(|| panic!("no {label}"));
+            assert_eq!(Some(engine), rustls.0.get(label), "{label}");
+        }
     }
 }
 
@@ -319,12 +352,14 @@ mod server_engine {
         end: Option<Result<(), String>>,
         peer: Peer,
         parameters: ServerParameters,
+        logged: Logged,
     }
 
     fn connect(server: &Server, client: &Arc<ClientConfig>) -> Connection {
         let mut targets = SniTargets::new();
         targets.insert("example.com", "web", vec![h3()]);
         let identity = CertifiedKey::new(vec![Bytes::from(pki::leaf())], pki::key(2)).unwrap();
+        let key_log = Arc::new(Secrets::default());
         let engine = ServerHandshake::new(
             AwsLcBackend,
             PreferenceTable::new(
@@ -341,6 +376,7 @@ mod server_engine {
             identity,
             NoCertificateRequest,
             Arc::clone(&server.clock),
+            Arc::clone(&key_log),
             ServerHandshakeSettings::default(),
         );
         let mut call = pin!(LentCall::<ServerSide, _>::new(ServerSteps::new(
@@ -381,6 +417,7 @@ mod server_engine {
             end: end.map(|end| end.map_err(|error| format!("{error:?}"))),
             peer,
             parameters,
+            logged: key_log.take(),
         }
     }
 
@@ -413,6 +450,7 @@ mod server_engine {
         if let Some(zero_rtt) = zero_rtt {
             logged.check("CLIENT_EARLY_TRAFFIC_SECRET", &zero_rtt.0);
         }
+        connection.logged.check_engine(logged, zero_rtt.is_some());
         let label = ExporterLabel::new(EXPORTER_LABEL).unwrap();
         connection.peer.check_agreed(
             |context| {
@@ -550,9 +588,11 @@ mod client_engine {
         end: Option<Result<core::convert::Infallible, String>>,
         peer: Peer,
         parameters: ClientParameters,
+        logged: Logged,
     }
 
     fn connect(client: &Client, server: &Arc<ServerConfig>) -> Connection {
+        let key_log = Arc::new(Secrets::default());
         let engine = ClientHandshake::new(
             AwsLcBackend,
             PreferenceOffering::new(
@@ -567,6 +607,7 @@ mod client_engine {
             Arc::clone(&client.tickets),
             verifier(&client.clock),
             Arc::clone(&client.clock),
+            Arc::clone(&key_log),
             ServerTarget::from_host_name("example.com").unwrap(),
             Some(ProtocolNameList::new(vec![h3()]).unwrap()),
             ClientHandshakeSettings::default(),
@@ -604,6 +645,7 @@ mod client_engine {
             end: end.map(|end| end.map_err(|error| format!("{error:?}"))),
             peer,
             parameters,
+            logged: key_log.take(),
         }
     }
 
@@ -613,6 +655,7 @@ mod client_engine {
         // The client keeps reading tickets.
         assert_eq!(connection.end, None);
         let mut events = connection.events.as_slice();
+        let mut early_offered = false;
         if let [
             Event::EarlyDataOffered(EarlyDataOffered { aead, secret, .. }),
             rest @ ..,
@@ -620,8 +663,10 @@ mod client_engine {
         {
             assert_eq!(*aead, AeadAlgorithm::Aes128Gcm);
             logged.check("CLIENT_EARLY_TRAFFIC_SECRET", &secret.0);
+            early_offered = true;
             events = rest;
         }
+        connection.logged.check_engine(logged, early_offered);
         let [
             Event::ServerHelloRead(ServerHelloRead {
                 aead,

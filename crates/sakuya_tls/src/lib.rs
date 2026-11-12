@@ -17,6 +17,8 @@
 //!   versions and alert descriptions.
 //! - [`vector`]: failures shared by the length-prefixed fields.
 //! - [`clock`]: the current time, as a capability.
+//! - [`key_log`]: the secrets of a handshake, for debugging tools, as a
+//!   capability that logs nothing by default.
 //! - [`verify`]: verification of a server's certificate chain, with
 //!   rustls-webpki and Certificate Transparency.
 //! - [`server`], [`client`]: the capabilities each role's handshake
@@ -47,6 +49,7 @@ pub mod code_point;
 pub mod crypto;
 pub mod engine;
 pub mod extension;
+pub mod key_log;
 pub mod message;
 pub mod role;
 pub mod schedule;

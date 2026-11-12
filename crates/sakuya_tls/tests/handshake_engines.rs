@@ -345,6 +345,7 @@ macro_rules! server_handshake {
             identity,
             NoCertificateRequest,
             Arc::clone(&endpoints.clock),
+            (),
             ServerHandshakeSettings::default(),
         )
     }};
@@ -360,6 +361,7 @@ macro_rules! client_handshake {
             Arc::clone(&endpoints.client_tickets),
             verifier(&endpoints.clock),
             Arc::clone(&endpoints.clock),
+            (),
             ServerTarget::from_host_name($host).unwrap(),
             Some(ProtocolNameList::new(vec![h3()]).unwrap()),
             ClientHandshakeSettings::default(),

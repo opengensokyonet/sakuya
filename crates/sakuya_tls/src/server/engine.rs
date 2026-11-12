@@ -79,6 +79,7 @@ use crate::{
         pre_shared_key::{OfferedPsks, PskIndex},
         psk_key_exchange_modes::PskKeyExchangeMode,
     },
+    key_log::{KeyLog, KeyLogLabel},
     message::{
         HandshakeMessage, HelloRandom, MessageLimits,
         certificate::{
@@ -924,7 +925,7 @@ fn ticket_age_fits<T>(
 
 /// The start state of a server's handshake: the backend and the server's
 /// capabilities, which [`ServerHandshakeSteps`] runs.
-pub struct ServerHandshake<B, N, K, L, S, P, Q, Z> {
+pub struct ServerHandshake<B, N, K, L, S, P, Q, Z, G> {
     backend: B,
     choice: N,
     tickets: K,
@@ -933,12 +934,13 @@ pub struct ServerHandshake<B, N, K, L, S, P, Q, Z> {
     identity: P,
     peer: Q,
     clock: Z,
+    key_log: G,
     settings: ServerHandshakeSettings,
 }
 
-impl<B, N, K, L, S, P, Q, Z> ServerHandshake<B, N, K, L, S, P, Q, Z> {
+impl<B, N, K, L, S, P, Q, Z, G> ServerHandshake<B, N, K, L, S, P, Q, Z, G> {
     /// A server's handshake with `backend`, `choice`, `tickets`, `layers`,
-    /// `targets`, `identity`, `peer`, `clock` and `settings`.
+    /// `targets`, `identity`, `peer`, `clock`, `key_log` and `settings`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         backend: B,
@@ -949,6 +951,7 @@ impl<B, N, K, L, S, P, Q, Z> ServerHandshake<B, N, K, L, S, P, Q, Z> {
         identity: P,
         peer: Q,
         clock: Z,
+        key_log: G,
         settings: ServerHandshakeSettings,
     ) -> Self {
         Self {
@@ -960,6 +963,7 @@ impl<B, N, K, L, S, P, Q, Z> ServerHandshake<B, N, K, L, S, P, Q, Z> {
             identity,
             peer,
             clock,
+            key_log,
             settings,
         }
     }
@@ -968,12 +972,14 @@ impl<B, N, K, L, S, P, Q, Z> ServerHandshake<B, N, K, L, S, P, Q, Z> {
 /// The state of a server's handshake after its ServerHello is written: what
 /// the rest of its flight needs.
 ///
-/// `A` is the accepted ClientHello and `T` the type of the selected target.
-pub struct ServerHelloWrittenState<B: TlsCrypto, K, P, Q, A, T> {
+/// `A` is the accepted ClientHello, `T` the type of the selected target and
+/// `G` the key log.
+pub struct ServerHelloWrittenState<B: TlsCrypto, K, P, Q, A, T, G> {
     backend: B,
     tickets: K,
     identity: P,
     peer: Q,
+    key_log: G,
     limits: MessageLimits,
     accepted: A,
     selected: SelectedTarget<T>,
@@ -1010,7 +1016,7 @@ pub struct ServerHandshakeCompletedState<B: TlsCrypto, K, T> {
     resumption: ResumptionSecret<Server, B>,
 }
 
-impl<B, N, K, L, S, P, Q, Z> ServerHandshakeSteps for ServerHandshake<B, N, K, L, S, P, Q, Z>
+impl<B, N, K, L, S, P, Q, Z, G> ServerHandshakeSteps for ServerHandshake<B, N, K, L, S, P, Q, Z, G>
 where
     B: TlsCrypto + Clone,
     N: ParameterChoice<B, <S as TargetSelection>::Target>,
@@ -1024,11 +1030,12 @@ where
     P: CertificateSelection<<S as TargetSelection>::Target>,
     Q: PeerAuthentication<<S as TargetSelection>::Target, Request = Infallible>,
     Z: Clock,
+    G: KeyLog,
 {
     type Crypto = B;
     type Target = S::Target;
     type AlertError = AlertOf<L, S, P, K>;
-    type ServerHelloWrittenState = ServerHelloWrittenState<B, K, P, Q, L::Accepted, S::Target>;
+    type ServerHelloWrittenState = ServerHelloWrittenState<B, K, P, Q, L::Accepted, S::Target, G>;
     type ServerFinishedWrittenState = ServerFinishedWrittenState<B, K, S::Target>;
     type ServerHandshakeCompletedState = ServerHandshakeCompletedState<B, K, S::Target>;
 
@@ -1046,6 +1053,7 @@ where
             identity,
             peer,
             clock,
+            key_log,
             settings,
         } = self;
         let limits = settings.limits;
@@ -1266,6 +1274,24 @@ where
             Early::Plain(early) => early.server_hello(shared, &encoded_hello),
             Early::Psk(early, _) => early.server_hello(shared, &encoded_hello),
         };
+        let client_random = &accepted.client_hello().random().0;
+        if let Some(early) = &zero_rtt {
+            key_log.log(
+                KeyLogLabel::ClientEarlyTrafficSecret,
+                client_random,
+                early.0.as_bytes(),
+            );
+        }
+        key_log.log(
+            KeyLogLabel::ClientHandshakeTrafficSecret,
+            client_random,
+            secrets.receive.as_bytes(),
+        );
+        key_log.log(
+            KeyLogLabel::ServerHandshakeTrafficSecret,
+            client_random,
+            secrets.send.as_bytes(),
+        );
         let written = ServerHelloWritten {
             aead: suite.aead(),
             secrets,
@@ -1276,6 +1302,7 @@ where
             tickets,
             identity,
             peer,
+            key_log,
             limits,
             accepted,
             selected,
@@ -1299,6 +1326,7 @@ where
             tickets,
             identity,
             peer,
+            key_log,
             limits,
             accepted,
             selected,
@@ -1381,6 +1409,22 @@ where
 
         // The server's Finished, then the client's.
         let (main, finished, one_rtt_send) = handshake.server_finished();
+        let client_random = &hello.random().0;
+        key_log.log(
+            KeyLogLabel::ClientTrafficSecret0,
+            client_random,
+            main.client_traffic_secret().as_bytes(),
+        );
+        key_log.log(
+            KeyLogLabel::ServerTrafficSecret0,
+            client_random,
+            one_rtt_send.0.as_bytes(),
+        );
+        key_log.log(
+            KeyLogLabel::ExporterSecret,
+            client_random,
+            main.exporter_secret(),
+        );
         write_message::<S::Target, W, _, _, _, _>(host, finished.encoded()).await?;
         let state = ServerFinishedWrittenState {
             backend,
