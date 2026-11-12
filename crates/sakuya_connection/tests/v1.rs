@@ -12,20 +12,23 @@ use std::{
     time::Duration,
 };
 
+use bytes::BytesMut;
 use common::{Mine, Outer, TestClock, TestLink, advance_to, log, ms, take_log};
+use frunk_core::coproduct::CoproductSelector;
 use frunk_core::hlist_pat;
 use sakuya_connection::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf},
     component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
+    dispatch::{DispatchFacts, FrameDispatch, FrameSetDispatch},
     driver::ConnectionDriver,
     error::ConnectionErrorsOf,
     layer::{self, EstablishedArgs, LinkPathArgs, LogicalPathArgs, NodeKey},
     others::OtherNodes,
     request::StructureRequest,
     share::{
-        FlatMut, FlatRef, LayerShare, LineageLists, LogicalPathKeyShare, LogicalPathKeys, NodeData,
-        SoleLogicalPath,
+        FlatMut, FlatRef, LayerShare, LineageLists, LineagePartList, LogicalPathKeyShare,
+        LogicalPathKeys, NodeData, SoleLogicalPath,
     },
     take::{GetAt, Take, TakeEach},
     v1::{
@@ -35,20 +38,26 @@ use sakuya_connection::{
         confirmation::HandshakeConfirmation,
         crypto::{CryptoReceiveCapacities, CryptoReceiver, FragmentedCryptoReceiveBuffer},
         idle::IdleTimeout,
-        keys::InitialKeys,
+        keys::{DirectionKeys, HandshakeKeys, InitialKeys, LevelKeys, OneRttKeys},
         link::LinkFacts,
         loss_detection::LossDetectionOf,
         parameters::PeerTransportParameters,
         pto::ProbeTimeout,
+        receive::{DropReason, PacketOutcome, ReceivedPacket, receive_packet},
         recovery::{
             CongestionPartOf, LinkPathCongestionState, RecoveryFactoryOf, RttOf, lend_congestion,
         },
         role::LinkPathRole,
+        spaces::AckObligationsOf,
     },
 };
-use sakuya_link::{BindingId, LinkId};
-use sakuya_packet_protection::backend::ring::RingBackend;
+use sakuya_link::{ArrivalFacts, BindingId, LinkId};
+use sakuya_packet_protection::{
+    backend::ring::RingBackend,
+    initial::{INITIAL_AEAD, InitialSecrets},
+};
 use sakuya_recovery::{
+    ack_obligation::AckObligation,
     congestion::CongestionController,
     factory::{NewRenoRecoveryFactory, NewRenoRecoveryFactoryConfig, RecoveryFactory},
     loss::{LossThresholds, loss_delay},
@@ -56,15 +65,21 @@ use sakuya_recovery::{
     pacing::{Pacer, PacingInput},
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces},
     pto::probe_timeout,
+    receive_journals::{MaxAckRanges, ReceiveJournals},
     rtt::{RttEstimator, RttSample},
 };
 use sakuya_stream::connection::CloseReason;
 use sakuya_tls::{engine::CryptoLevel, message::MessageLimits};
 use sakuya_wire::{
-    connection_id::ConnectionId,
+    connection_id::{ConnectionId, ConnectionIdLength},
     parameters::ParametersPart,
-    parts::{HList, HNil, Selector},
+    parts::{CNil, CoprodInjector, CoprodUninjector, HList, HNil, PartsError, Selector},
+    v1::frame::{
+        FrameType,
+        set::{FrameSet, FrameSetPart, FrameTypeValues},
+    },
     v1::packet_number::PacketNumber,
+    v1::protected_packet::{Packet, into_packets},
     v1::transport_parameters::{
         TransportParameterSlots, TransportParameterSpace, TransportParameters,
         integer::MaxIdleTimeout,
@@ -95,6 +110,11 @@ thread_local! {
     /// When the probe of a server connection hands CRYPTO frames to the
     /// connection's CRYPTO receiver, as the calls will.
     static CRYPTO_AT: Cell<Option<Duration>> = const { Cell::new(None) };
+    /// What the packet feeder of the next server connection's logical path
+    /// does, and when.
+    static PACKETS: RefCell<VecDeque<(Duration, probe::PacketStep)>> = const { RefCell::new(VecDeque::new()) };
+    /// How many ACK ranges the receive journals of the next connection keep.
+    static MAX_ACK_RANGES: Cell<MaxAckRanges> = const { Cell::new(MaxAckRanges::DEFAULT) };
 }
 
 /// The parts of the tests' connections.
@@ -115,6 +135,8 @@ fn reset() {
     FEED.with(|f| f.borrow_mut().clear());
     CLOSER.with(|c| c.borrow_mut().clear());
     CRYPTO_AT.with(|c| c.set(None));
+    PACKETS.with(|p| p.borrow_mut().clear());
+    MAX_ACK_RANGES.with(|m| m.set(MaxAckRanges::DEFAULT));
 }
 
 /// The choices of a client: the tests' clock and link, version 1 as the
@@ -225,6 +247,50 @@ mod probe {
     }
     impl ParametersPart<TransportParameterSpace> for Part {
         type Parameters = HNil;
+    }
+
+    const NO_FRAME_TYPES: FrameTypeValues = FrameTypeValues::new(&[]);
+
+    /// The probe claims no frames.
+    impl FrameSetPart for Part {
+        type Run<D> = CNil;
+        type Kind = CNil;
+        type FieldsError<E> = CNil;
+
+        const FRAME_TYPE_VALUES: &'static FrameTypeValues = &NO_FRAME_TYPES;
+
+        fn kind_of(_: VarInt) -> Option<CNil> {
+            None
+        }
+
+        fn run_kind<D>(run: &CNil) -> CNil {
+            match *run {}
+        }
+
+        fn read_run<H>(_: &mut H, kind: CNil, _: VarInt) -> Result<CNil, CNil>
+        where
+            H: bytes::Buf + nitori_call::Receiver<Family = nitori_call::Direct<H>> + Unpin,
+            nitori_call::Direct<H>: nitori_io::ReadChunk<Chunk: Default>,
+        {
+            match kind {}
+        }
+    }
+    impl<T: ConnectionChoices, L> FrameDispatch<T, L, ()> for Part
+    where
+        for<'v> L: LineageLists<'v, T>,
+    {
+        fn dispatch<'v, B: CallBundle>(
+            _: &mut LineageOf<'v, T, L, layer::LogicalPath>,
+            _: &mut OtherNodes<'v, T, L, B>,
+            run: CNil,
+            _: &DispatchFacts<InstantOf<T>>,
+        ) -> Result<(), core::convert::Infallible> {
+            match run {}
+        }
+
+        fn fields_error(error: CNil) -> core::convert::Infallible {
+            match error {}
+        }
     }
 
     /// In the connection: asks for a second link path at its deadline, and
@@ -388,6 +454,221 @@ mod probe {
                 String::from_utf8_lossy(&read)
             ));
             None
+        }
+    }
+
+    /// What the packet feeder does at one instant.
+    #[derive(Debug)]
+    #[allow(clippy::large_enum_variant)]
+    pub enum PacketStep {
+        /// Receive the packet, as the receiving call will, and log what came
+        /// of it.
+        Receive(ReceivedPacket<BytesMut, TestLink>),
+        /// Install Handshake keys that receive with the client's Initial
+        /// secret, as the handshake will.
+        InstallHandshakeKeys,
+        /// Install 1-RTT keys that only send, as a server does before the
+        /// handshake completes.
+        InstallOneRttSendKeys,
+        /// Log the CRYPTO data ready at the level being read; the largest
+        /// packet number, the ranges and the ACK obligation of the Initial
+        /// space; the idle timeout's deadline; and the reason for closing.
+        Inspect,
+    }
+
+    /// In a logical path: does its steps at their instants.
+    #[derive(Debug)]
+    pub struct PacketFeeder(VecDeque<(Duration, PacketStep)>);
+    macro_rules! packet_feeder {
+        ($t:ty) => {
+            impl Build<$t, Parts, layer::LogicalPath, ()> for PacketFeeder {
+                fn build<'v>(
+                    _: &mut ParentsOf<'v, $t, Parts, layer::LogicalPath>,
+                    _: &mut ArgsOf<$t, Parts, layer::LogicalPath>,
+                ) -> Self {
+                    PacketFeeder(PACKETS.with(|p| core::mem::take(&mut *p.borrow_mut())))
+                }
+            }
+        };
+    }
+    packet_feeder!(Mine);
+    packet_feeder!(ClientMine);
+    impl<T, L, I, Ii, Ih, Io, Ij, Im, Ia, It, Ir, Ie, Ik, Hd, Ic, Icr>
+        DataComponent<
+            T,
+            L,
+            layer::LogicalPath,
+            (
+                I,
+                (Ii, Ih, Io),
+                (Ij, Im, Ia, It),
+                (Ir, Ie, Ik, Hd),
+                (Ic, Icr),
+            ),
+        > for PacketFeeder
+    where
+        T: v1::Choices<
+                Clock = TestClock,
+                Link = TestLink,
+                Crypto = RingBackend,
+                CryptoReceiveBuffer = FragmentedCryptoReceiveBuffer,
+            >,
+        L: LineagePartList<T> + FrameSetDispatch<T, L, Hd>,
+        CloseCauseOf<T, L>: Debug,
+        <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<v1::error::ConnectionError, Ie>
+            + CoprodUninjector<v1::error::ConnectionError, Ie>,
+        <L as FrameSet>::Kind: CoproductSelector<FrameType, Ik>,
+        for<'v> <L as LineageLists<'v, T>>::LogicalPath: GetAt<PacketFeeder, I>
+            + GetAt<InitialKeys<RingBackend>, Ii>
+            + GetAt<HandshakeKeys<RingBackend>, Ih>
+            + GetAt<OneRttKeys<RingBackend>, Io>
+            + GetAt<PacketNumberSpaces<ReceiveJournals<Duration>>, Ij>
+            + GetAt<MaxAckRanges, Im>
+            + GetAt<AckObligationsOf<T>, Ia>
+            + GetAt<IdleTimeout<Duration>, It>
+            + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
+            + GetAt<CryptoReceiver<FragmentedCryptoReceiveBuffer>, Icr>,
+        for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+        for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+            GetAt<LinkPathRole<Duration>, Ir>,
+    {
+        fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::LogicalPath>) -> Option<Duration> {
+            lineage
+                .get::<PacketFeeder, I>()
+                .0
+                .front()
+                .map(|(at, _)| *at)
+        }
+        fn expire<'v, B: CallBundle>(
+            mut lineage: LineageOf<'v, T, L, layer::LogicalPath>,
+            others: &mut OtherNodes<'v, T, L, B>,
+            _: Duration,
+        ) -> Option<RequestOf<T, L>> {
+            let (_, step) = lineage.get_mut::<PacketFeeder, I>().0.pop_front()?;
+            match step {
+                PacketStep::Receive(packet) => {
+                    let outcome = receive_packet::<
+                        T,
+                        L,
+                        B,
+                        BytesMut,
+                        Ii,
+                        Ih,
+                        Io,
+                        Ij,
+                        Im,
+                        Ia,
+                        It,
+                        Ir,
+                        Ie,
+                        Ik,
+                        Hd,
+                    >(&mut lineage, others, packet);
+                    log(describe::<L, Ie>(outcome));
+                }
+                PacketStep::InstallHandshakeKeys => {
+                    let secrets = InitialSecrets::derive(&RingBackend, &client_dcid());
+                    lineage
+                        .get_mut::<HandshakeKeys<RingBackend>, Ih>()
+                        .install(LevelKeys {
+                            send: DirectionKeys::derive(
+                                &RingBackend,
+                                INITIAL_AEAD,
+                                &secrets.server,
+                            ),
+                            receive: DirectionKeys::derive(
+                                &RingBackend,
+                                INITIAL_AEAD,
+                                &secrets.client,
+                            ),
+                        });
+                }
+                PacketStep::InstallOneRttSendKeys => {
+                    let secrets = InitialSecrets::derive(&RingBackend, &client_dcid());
+                    lineage
+                        .get_mut::<OneRttKeys<RingBackend>, Io>()
+                        .install_send(DirectionKeys::derive(
+                            &RingBackend,
+                            INITIAL_AEAD,
+                            &secrets.server,
+                        ));
+                }
+                PacketStep::Inspect => {
+                    let mut read = Vec::new();
+                    lineage
+                        .get_mut::<CryptoReceiver<FragmentedCryptoReceiveBuffer>, Icr>()
+                        .read_into(&mut read);
+                    let journals = lineage
+                        .get::<PacketNumberSpaces<ReceiveJournals<Duration>>, Ij>()
+                        .get(PacketNumberSpaceKind::Initial);
+                    let largest = journals
+                        .and_then(|journals| journals.largest())
+                        .map(|(number, at)| (number.get(), at));
+                    let ranges: Vec<_> = journals
+                        .map(|journals| journals.ranges())
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|range| (range.start().get(), range.end().get()))
+                        .collect();
+                    let due = lineage
+                        .get::<AckObligationsOf<T>, Ia>()
+                        .get(PacketNumberSpaceKind::Initial)
+                        .map(|obligation| obligation.due());
+                    let idle = lineage.get::<IdleTimeout<Duration>, It>().deadline();
+                    let reason = lineage
+                        .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
+                        .reason()
+                        .map(|reason| format!("{reason:?}"));
+                    log(format!(
+                        "read {:?}, largest {largest:?}, ranges {ranges:?}, due {due:?}, \
+                         idle {idle:?}, reason {reason:?}",
+                        String::from_utf8_lossy(&read)
+                    ));
+                }
+            }
+            None
+        }
+    }
+
+    /// What came of a packet, in short.
+    fn describe<L, Ie>(
+        outcome: Result<
+            PacketOutcome<BytesMut, TestLink>,
+            sakuya_connection::error::ConnectionErrorOf<L>,
+        >,
+    ) -> String
+    where
+        L: ConnectionErrorsOf,
+        L::ConnectionErrors: CoprodUninjector<v1::error::ConnectionError, Ie>,
+    {
+        match outcome {
+            Ok(PacketOutcome::Processed {
+                highest_numbered,
+                non_probing,
+            }) => {
+                format!("processed: highest numbered {highest_numbered}, non-probing {non_probing}")
+            }
+            Ok(PacketOutcome::Closing) => "read while closing".into(),
+            Ok(PacketOutcome::Held(packet)) => format!("held at {:?}", packet.packet().level()),
+            Ok(PacketOutcome::Dropped(reason)) => format!(
+                "dropped: {}",
+                match reason {
+                    DropReason::NoLinkPath => "no link path".into(),
+                    DropReason::Draining => "draining".into(),
+                    DropReason::TokenFromServer => "token from the server".into(),
+                    DropReason::NoReceiveKeys { level } => format!("no {level:?} keys"),
+                    DropReason::NotProtected => "not protected".into(),
+                    DropReason::HeaderProtectionNotRemoved { .. } => {
+                        "header protection not removed".into()
+                    }
+                    DropReason::PayloadNotOpened { .. } => "payload not opened".into(),
+                    DropReason::Duplicate { number } => format!("duplicate {}", number.get()),
+                }
+            ),
+            Err(PartsError(errors)) => match errors.uninject() {
+                Ok(error) => format!("error: {error:?}"),
+                Err(_) => "error of another part".into(),
+            },
         }
     }
 
@@ -853,8 +1134,29 @@ mod probe {
         type Data = HList![LayerWatch, Feeder];
         type Calls = HNil;
     }
-    none!(LogicalPath, Established);
+    impl LayerShare<Mine, Parts, layer::LogicalPath> for Part {
+        type Data = HList![PacketFeeder];
+        type Calls = HNil;
+    }
+    impl LayerShare<SpyMine, Parts, layer::LogicalPath> for Part {
+        type Data = HNil;
+        type Calls = HNil;
+    }
+    impl LayerShare<ClientMine, Parts, layer::LogicalPath> for Part {
+        type Data = HList![PacketFeeder];
+        type Calls = HNil;
+    }
+    none!(Established);
 }
+
+/// The Destination Connection ID of the client's first Initial packet that
+/// the tests' connections are made with.
+fn client_dcid() -> ConnectionId {
+    // invariant: eight bytes is a valid connection ID length
+    ConnectionId::new(&CLIENT_DCID).expect("eight bytes")
+}
+
+const CLIENT_DCID: [u8; 8] = [0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
 
 /// Version 1's facts for a connection whose first logical link is
 /// `validation`.
@@ -868,16 +1170,14 @@ where
     parameters.set(MaxIdleTimeout::new(VarInt::from_u32(30_000)));
     v1::ConnectionArgs {
         crypto: RingBackend,
-        // invariant: eight bytes is a valid connection ID length
-        client_dcid: ConnectionId::new(&[0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08])
-            .expect("eight bytes"),
+        client_dcid: client_dcid(),
         anti_amplification: AntiAmplificationFactor::new(2).expect("2 is a factor"),
         transport_parameters: parameters.known,
         first_link: LinkFacts { validation },
         recovery: NewRenoRecoveryFactoryConfig::recommended(ms(1)),
         loss_thresholds: sakuya_recovery::loss::LossThresholds::recommended(ms(1))
             .expect("the test clock's timers fire to the millisecond"),
-        max_ack_ranges: sakuya_recovery::receive_journals::MaxAckRanges::DEFAULT,
+        max_ack_ranges: MAX_ACK_RANGES.with(Cell::get),
         crypto_receive: <T::Side as SideCapacities>::crypto_receive(),
     }
 }
@@ -1504,4 +1804,477 @@ fn version_1_dispatches_the_frames_it_reads() {
     {
     }
     dispatches::<Mine, HList![v1::Part], _>();
+}
+
+/// The Long Packet Type bits of an Initial packet.
+const INITIAL: u8 = 0b00;
+/// The Long Packet Type bits of a Handshake packet.
+const HANDSHAKE: u8 = 0b10;
+
+/// The keys the client protects its Initial packets with (RFC 9001 §5.2).
+fn client_keys() -> DirectionKeys<RingBackend> {
+    let secrets = InitialSecrets::derive(&RingBackend, &client_dcid());
+    DirectionKeys::derive(&RingBackend, INITIAL_AEAD, &secrets.client)
+}
+
+/// The keys the server protects its Initial packets with (RFC 9001 §5.2).
+fn server_keys() -> DirectionKeys<RingBackend> {
+    let secrets = InitialSecrets::derive(&RingBackend, &client_dcid());
+    DirectionKeys::derive(&RingBackend, INITIAL_AEAD, &secrets.server)
+}
+
+/// The unprotected first byte of a long header packet of the type
+/// `type_bits` with a 4-byte Packet Number field and no reserved bits set.
+fn first_byte(type_bits: u8) -> u8 {
+    0xc3 | (type_bits << 4)
+}
+
+/// A long header packet of the client, of the type `type_bits`, with a
+/// 4-byte Packet Number field holding `number`, carrying `payload`,
+/// protected with the keys of the client's Initial secret.
+fn long_packet(type_bits: u8, number: u64, payload: &[u8]) -> BytesMut {
+    long_packet_with(first_byte(type_bits), &[], &client_keys(), number, payload)
+}
+
+/// A long header packet whose unprotected first byte is `first`, which
+/// gives its type and a 4-byte Packet Number field holding `number`;
+/// carrying `token`, if it is an Initial packet, and `payload`; protected
+/// with `keys`.
+fn long_packet_with(
+    first: u8,
+    token: &[u8],
+    keys: &DirectionKeys<RingBackend>,
+    number: u64,
+    payload: &[u8],
+) -> BytesMut {
+    let mut packet = vec![first];
+    packet.extend_from_slice(&1u32.to_be_bytes());
+    packet.push(8);
+    packet.extend_from_slice(&CLIENT_DCID);
+    packet.push(0);
+    if (first >> 4) & 0b11 == INITIAL {
+        packet.push(u8::try_from(token.len()).unwrap());
+        packet.extend_from_slice(token);
+    }
+    let length = u16::try_from(4 + payload.len() + 16).unwrap();
+    packet.extend_from_slice(&(0x4000 | length).to_be_bytes());
+    let pn_offset = packet.len();
+    packet.extend_from_slice(&u32::try_from(number).unwrap().to_be_bytes());
+    packet.extend_from_slice(payload);
+    packet.extend_from_slice(&[0; 16]);
+    let number = PacketNumber::new(number).unwrap();
+    keys.packet
+        .seal(number, &mut packet, pn_offset + 4)
+        .unwrap();
+    keys.header.apply(&mut packet, pn_offset).unwrap();
+    BytesMut::from(&packet[..])
+}
+
+/// A 1-RTT packet to the client's first Destination Connection ID, which no
+/// keys open.
+fn one_rtt_packet() -> BytesMut {
+    let mut packet = BytesMut::from(&[0x43][..]);
+    packet.extend_from_slice(&CLIENT_DCID);
+    packet.extend_from_slice(&[0; 24]);
+    packet
+}
+
+/// The packet `datagram` holds, arrived over `link` at `at`.
+fn received(
+    datagram: BytesMut,
+    link: &LinkId<(), ()>,
+    at: Duration,
+) -> ReceivedPacket<BytesMut, TestLink> {
+    let len = ConnectionIdLength::new(8).unwrap();
+    let Some(Ok(Packet::Protected(packet))) = into_packets(datagram, len).next() else {
+        panic!("the datagram holds a protected packet")
+    };
+    ReceivedPacket::new(packet, ArrivalFacts::new(TestLink(link.clone()), at, None))
+}
+
+/// What the packet feeder of the next connection does at each instant.
+fn feed_packets(steps: impl IntoIterator<Item = (Duration, probe::PacketStep)>) {
+    PACKETS.with(|p| p.borrow_mut().extend(steps));
+}
+
+/// Poll `connection`, which stays pending, at each millisecond of
+/// `millis`, and take the log.
+fn run<F: Future + Unpin>(
+    connection: &mut F,
+    millis: core::ops::RangeInclusive<u64>,
+) -> Vec<String> {
+    let outer = Outer::new();
+    for at in millis {
+        advance_to(ms(at));
+        assert!(outer.poll(connection).is_pending());
+    }
+    take_log()
+}
+
+/// A CRYPTO frame of "hello" at offset 0, then PADDING.
+fn crypto_hello() -> Vec<u8> {
+    [&[0x06, 0x00, 0x05][..], b"hello", &[0; 20]].concat()
+}
+
+/// A PING frame, then PADDING.
+fn ping() -> Vec<u8> {
+    [&[0x01][..], &[0; 20]].concat()
+}
+
+/// PADDING alone.
+fn padding() -> Vec<u8> {
+    vec![0; 30]
+}
+
+#[test]
+fn an_initial_packet_is_processed_once() {
+    use probe::PacketStep::{Inspect, Receive};
+    reset();
+    let first = link();
+    let packet = long_packet(INITIAL, 0, &crypto_hello());
+    let mut changed = long_packet(INITIAL, 1, &crypto_hello());
+    let last = changed.len() - 1;
+    changed[last] ^= 1;
+    feed_packets([
+        (ms(5), Receive(received(packet.clone(), &first, ms(5)))),
+        (ms(6), Inspect),
+        (ms(7), Receive(received(packet, &first, ms(7)))),
+        (ms(8), Inspect),
+        (ms(9), Receive(received(changed, &first, ms(9)))),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first);
+    take_log();
+    assert_eq!(
+        run(&mut connection, 5..=9),
+        [
+            "processed: highest numbered true, non-probing true",
+            "read \"hello\", largest Some((0, 5ms)), ranges [(0, 0)], due Some(Now), \
+             idle Some(30.005s), reason None",
+            "dropped: duplicate 0",
+            // a duplicate restarts nothing
+            "read \"\", largest Some((0, 5ms)), ranges [(0, 0)], due Some(Now), \
+             idle Some(30.005s), reason None",
+            "dropped: payload not opened",
+        ]
+    );
+}
+
+#[test]
+fn a_packet_needs_a_frame_and_padding_is_one() {
+    use probe::PacketStep::{Inspect, Receive};
+    reset();
+    let first = link();
+    feed_packets([
+        (
+            ms(5),
+            Receive(received(long_packet(INITIAL, 0, &padding()), &first, ms(5))),
+        ),
+        (ms(6), Inspect),
+        (
+            ms(7),
+            Receive(received(long_packet(INITIAL, 1, &[]), &first, ms(7))),
+        ),
+        (ms(8), Inspect),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first);
+    take_log();
+    assert_eq!(
+        run(&mut connection, 5..=8),
+        [
+            // PADDING is a probing frame and elicits no ACK frame
+            "processed: highest numbered true, non-probing false",
+            "read \"\", largest Some((0, 5ms)), ranges [(0, 0)], due Some(NotDue), \
+             idle Some(30.005s), reason None",
+            "error: EmptyPacket { level: Initial }",
+            // the packet that failed is not recorded
+            "read \"\", largest Some((0, 5ms)), ranges [(0, 0)], due Some(NotDue), \
+             idle Some(30.005s), reason None",
+        ]
+    );
+}
+
+#[test]
+fn a_frame_the_packet_type_cannot_carry_ends_the_connection() {
+    use probe::PacketStep::{Inspect, Receive};
+    reset();
+    let first = link();
+    let payload = [&[0x1e][..], &[0; 20]].concat();
+    feed_packets([
+        (
+            ms(5),
+            Receive(received(long_packet(INITIAL, 0, &payload), &first, ms(5))),
+        ),
+        (ms(6), Inspect),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first);
+    take_log();
+    assert_eq!(
+        run(&mut connection, 5..=6),
+        [
+            "error: FrameNotPermitted { source: NotAtLevel { level: Initial } }",
+            "read \"\", largest None, ranges [], due Some(NotDue), idle None, reason None",
+        ]
+    );
+}
+
+#[test]
+fn frames_before_one_not_permitted_are_handled_but_the_packet_is_not_recorded() {
+    use probe::PacketStep::{Inspect, Receive};
+    reset();
+    let first = link();
+    // CRYPTO, then HANDSHAKE_DONE
+    let payload = [&[0x06, 0x00, 0x05][..], b"hello", &[0x1e], &[0; 20]].concat();
+    feed_packets([
+        (
+            ms(5),
+            Receive(received(long_packet(INITIAL, 0, &payload), &first, ms(5))),
+        ),
+        (ms(6), Inspect),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first);
+    take_log();
+    assert_eq!(
+        run(&mut connection, 5..=6),
+        [
+            "error: FrameNotPermitted { source: NotAtLevel { level: Initial } }",
+            "read \"hello\", largest None, ranges [], due Some(NotDue), idle None, reason None",
+        ]
+    );
+}
+
+#[test]
+fn reserved_bits_set_end_the_connection() {
+    use probe::PacketStep::{Inspect, Receive};
+    reset();
+    let first = link();
+    let packet = long_packet_with(first_byte(INITIAL) | 0x0c, &[], &client_keys(), 0, &ping());
+    feed_packets([
+        (ms(5), Receive(received(packet, &first, ms(5)))),
+        (ms(6), Inspect),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first);
+    take_log();
+    assert_eq!(
+        run(&mut connection, 5..=6),
+        [
+            "error: ReservedBitsSet { level: Initial }",
+            "read \"\", largest None, ranges [], due Some(NotDue), idle None, reason None",
+        ]
+    );
+}
+
+#[test]
+fn packets_wait_for_their_keys_and_a_handshake_packet_discards_initial_keys() {
+    use probe::PacketStep::{InstallHandshakeKeys, Receive};
+    reset();
+    let first = link();
+    let handshake = long_packet(HANDSHAKE, 0, &ping());
+    feed_packets([
+        (ms(5), Receive(received(handshake.clone(), &first, ms(5)))),
+        (ms(6), Receive(received(one_rtt_packet(), &first, ms(6)))),
+        (ms(7), InstallHandshakeKeys),
+        (ms(8), Receive(received(handshake, &first, ms(8)))),
+        (
+            ms(9),
+            Receive(received(long_packet(INITIAL, 0, &padding()), &first, ms(9))),
+        ),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first);
+    take_log();
+    assert_eq!(
+        run(&mut connection, 5..=9),
+        [
+            "held at Handshake",
+            "held at OneRtt",
+            "processed: highest numbered true, non-probing true",
+            // a server discards them once it processed a Handshake packet
+            "initial keys live: false",
+            "dropped: no Initial keys",
+        ]
+    );
+}
+
+#[test]
+fn a_one_rtt_packet_waits_while_only_the_send_keys_are_installed() {
+    use probe::PacketStep::{InstallOneRttSendKeys, Receive};
+    reset();
+    let first = link();
+    feed_packets([
+        (ms(5), InstallOneRttSendKeys),
+        (ms(6), Receive(received(one_rtt_packet(), &first, ms(6)))),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first);
+    take_log();
+    assert_eq!(run(&mut connection, 5..=6), ["held at OneRtt"]);
+}
+
+#[test]
+fn a_handshake_packet_that_fails_keeps_the_initial_keys() {
+    use probe::PacketStep::{InstallHandshakeKeys, Receive};
+    reset();
+    let first = link();
+    let handshake_done = [&[0x1e][..], &[0; 20]].concat();
+    feed_packets([
+        (ms(5), InstallHandshakeKeys),
+        (
+            ms(6),
+            Receive(received(
+                long_packet(HANDSHAKE, 0, &handshake_done),
+                &first,
+                ms(6),
+            )),
+        ),
+        (
+            ms(7),
+            Receive(received(long_packet(INITIAL, 0, &ping()), &first, ms(7))),
+        ),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first);
+    take_log();
+    assert_eq!(
+        run(&mut connection, 5..=7),
+        [
+            "error: FrameNotPermitted { source: NotAtLevel { level: Handshake } }",
+            "processed: highest numbered true, non-probing true",
+        ]
+    );
+}
+
+#[test]
+fn a_client_drops_an_initial_packet_with_a_token() {
+    use probe::PacketStep::Receive;
+    reset();
+    let first = link();
+    let initial =
+        |token: &[u8]| long_packet_with(first_byte(INITIAL), token, &server_keys(), 0, &ping());
+    feed_packets([
+        (ms(5), Receive(received(initial(b"token"), &first, ms(5)))),
+        (ms(6), Receive(received(initial(&[]), &first, ms(6)))),
+    ]);
+    let mut connection = connection!(ClientMine, AddressValidation::Validated, first);
+    take_log();
+    assert_eq!(
+        run(&mut connection, 5..=6),
+        [
+            "dropped: token from the server",
+            "processed: highest numbered true, non-probing true",
+        ]
+    );
+}
+
+#[test]
+fn past_the_limit_of_ack_ranges_the_oldest_goes_and_what_lies_below_it_is_a_duplicate() {
+    use probe::PacketStep::{Inspect, Receive};
+    reset();
+    MAX_ACK_RANGES.with(|m| m.set(MaxAckRanges::new(core::num::NonZeroUsize::MIN)));
+    let first = link();
+    let packet = |number, at| received(long_packet(INITIAL, number, &ping()), &first, ms(at));
+    feed_packets([
+        (ms(5), Receive(packet(1, 5))),
+        (ms(6), Receive(packet(3, 6))),
+        (ms(7), Inspect),
+        (ms(8), Receive(packet(0, 8))),
+        (ms(9), Receive(packet(2, 9))),
+        (ms(10), Inspect),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    take_log();
+    assert_eq!(
+        run(&mut connection, 5..=10),
+        [
+            "processed: highest numbered true, non-probing true",
+            "processed: highest numbered true, non-probing true",
+            // the range of 1 went, and the floor rose above it
+            "read \"\", largest Some((3, 6ms)), ranges [(3, 3)], due Some(Now), \
+             idle Some(30.006s), reason None",
+            // never processed, but below the floor
+            "dropped: duplicate 0",
+            "processed: highest numbered false, non-probing true",
+            "read \"\", largest Some((3, 6ms)), ranges [(2, 3)], due Some(Now), \
+             idle Some(30.009s), reason None",
+        ]
+    );
+}
+
+#[test]
+fn a_connection_close_from_the_peer_drains_the_link_paths() {
+    use probe::PacketStep::{Inspect, Receive};
+    reset();
+    let first = link();
+    let close = [&[0x1c, 0x00, 0x00, 0x00][..], &[0; 20]].concat();
+    feed_packets([
+        (
+            ms(5),
+            Receive(received(long_packet(INITIAL, 0, &close), &first, ms(5))),
+        ),
+        (ms(6), Inspect),
+        (
+            ms(7),
+            Receive(received(long_packet(INITIAL, 1, &padding()), &first, ms(7))),
+        ),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first);
+    take_log();
+    let log = run(&mut connection, 5..=7);
+    assert_eq!(log[0], "processed: highest numbered true, non-probing true");
+    assert!(
+        log.iter().any(|line| line.starts_with("Draining(")),
+        "the link path drains: {log:?}"
+    );
+    let inspect = log
+        .iter()
+        .find(|line| line.starts_with("read"))
+        .expect("inspected");
+    assert!(
+        inspect.contains("largest Some((0, 5ms))") && inspect.contains("reason Some(\"Peer("),
+        "{inspect}"
+    );
+    assert_eq!(log.last().map(String::as_str), Some("dropped: draining"));
+}
+
+#[test]
+fn a_closing_link_path_reads_only_for_a_close() {
+    use probe::PacketStep::{Inspect, InstallOneRttSendKeys, Receive};
+    reset();
+    CLOSE_AT.with(|c| c.set(Some(ms(4))));
+    let first = link();
+    let close = [&[0x01, 0x1c, 0x00, 0x00, 0x00][..], &[0; 20]].concat();
+    feed_packets([
+        (
+            ms(5),
+            Receive(received(long_packet(INITIAL, 0, &ping()), &first, ms(5))),
+        ),
+        (ms(6), Inspect),
+        (
+            ms(7),
+            Receive(received(long_packet(HANDSHAKE, 0, &ping()), &first, ms(7))),
+        ),
+        (ms(8), Receive(received(one_rtt_packet(), &first, ms(8)))),
+        (ms(9), InstallOneRttSendKeys),
+        (ms(10), Receive(received(one_rtt_packet(), &first, ms(10)))),
+        (
+            ms(11),
+            Receive(received(long_packet(INITIAL, 1, &close), &first, ms(11))),
+        ),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first);
+    run(&mut connection, 4..=4);
+    let log = run(&mut connection, 5..=11);
+    assert_eq!(
+        log[..6],
+        [
+            "read while closing",
+            // nothing is recorded while closing
+            "read \"\", largest None, ranges [], due Some(NotDue), idle None, reason None",
+            // no keys come to a closing link path
+            "dropped: no Handshake keys",
+            "dropped: no OneRtt keys",
+            "dropped: no OneRtt keys",
+            "read while closing",
+        ]
+    );
+    assert!(
+        log.iter().any(|line| line.starts_with("Draining(34ms)")),
+        "a closing link path keeps its end as it drains: {log:?}"
+    );
 }

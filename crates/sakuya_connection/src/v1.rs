@@ -29,6 +29,7 @@ pub mod link;
 pub mod loss_detection;
 pub mod parameters;
 pub mod pto;
+pub mod receive;
 pub mod recovery;
 pub mod role;
 pub mod spaces;
@@ -47,6 +48,7 @@ use sakuya_wire::{
     connection_id::ConnectionId,
     parameters::{ParametersOf, ParametersPart},
     parts::{HList, HNil, Selector},
+    v1::role::Role,
     v1::transport_parameters::{
         TransportParameterSlots, TransportParameterSpace,
         integer::{MaxAckDelay, MaxIdleTimeout},
@@ -163,6 +165,9 @@ pub type CloseCauseOf<T, L> = LocalCloseCause<
 /// What differs between the two sides of a connection: one method for each
 /// difference.
 pub trait Side: 'static {
+    /// The role of this side.
+    const ROLE: Role;
+
     /// The Initial secrets split into this side's sending and receiving
     /// secret, in that order (RFC 9001 §5.2).
     fn split_initial_secrets(secrets: InitialSecrets) -> (TrafficSecret, TrafficSecret);
@@ -192,6 +197,7 @@ pub trait Side: 'static {
 pub struct Server;
 
 impl Side for Server {
+    const ROLE: Role = Role::Server;
     fn split_initial_secrets(secrets: InitialSecrets) -> (TrafficSecret, TrafficSecret) {
         (secrets.server, secrets.client)
     }
@@ -208,6 +214,7 @@ impl Side for Server {
 pub struct Client;
 
 impl Side for Client {
+    const ROLE: Role = Role::Client;
     fn split_initial_secrets(secrets: InitialSecrets) -> (TrafficSecret, TrafficSecret) {
         (secrets.client, secrets.server)
     }

@@ -31,6 +31,13 @@ pub enum ConnectionError {
         /// The level of the packet.
         level: EncryptionLevel,
     },
+    /// A packet has a reserved bit of its first byte set once both layers
+    /// of protection are removed (RFC 9000 §17.2, §17.3.1).
+    #[snafu(display("a packet at the {level:?} level has reserved bits set"))]
+    ReservedBitsSet {
+        /// The level of the packet.
+        level: EncryptionLevel,
+    },
     /// No link path of the connection can send after one stopped sending
     /// (RFC 9000 §14.2).
     #[snafu(display("no link path can send"))]
@@ -82,7 +89,9 @@ pub enum ConnectionError {
 impl TransportClose for ConnectionError {
     fn code(&self) -> TransportErrorCode {
         match self {
-            Self::EmptyPacket { .. } => TransportErrorCode::PROTOCOL_VIOLATION,
+            Self::EmptyPacket { .. } | Self::ReservedBitsSet { .. } => {
+                TransportErrorCode::PROTOCOL_VIOLATION
+            }
             Self::NoViablePath => TransportErrorCode::NO_VIABLE_PATH,
             Self::OneRttSendKeysMissing | Self::UnhandledFrame { .. } => {
                 TransportErrorCode::INTERNAL_ERROR
@@ -108,6 +117,7 @@ impl TransportClose for ConnectionError {
             Self::ReadFrameFields { source } => Some(source.frame_type()),
             Self::Crypto { .. } => Some(VarInt::from_u32(CRYPTO_FRAME_TYPE)),
             Self::EmptyPacket { .. }
+            | Self::ReservedBitsSet { .. }
             | Self::NoViablePath
             | Self::OneRttSendKeysMissing
             | Self::FrameNotPermitted { .. }
