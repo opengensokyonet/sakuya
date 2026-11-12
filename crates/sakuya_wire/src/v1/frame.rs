@@ -485,6 +485,10 @@ impl FrameSetPart for super::Part {
         FrameType::of(value)
     }
 
+    fn run_kind<D>(run: &FrameRun<D>) -> FrameType {
+        run.frame_type()
+    }
+
     /// A PADDING frame and the PADDING frames that follow it are one run;
     /// every other frame is read as [`codec::read_fields`] reads it.
     fn read_run<H>(

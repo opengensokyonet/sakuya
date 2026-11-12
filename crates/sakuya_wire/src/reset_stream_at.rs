@@ -168,6 +168,10 @@ impl FrameSetPart for Part {
         (value.get() == TYPE_VALUE).then_some(FrameType::ResetStreamAt)
     }
 
+    fn run_kind<D>(_run: &ResetStreamAtFrame) -> FrameType {
+        FrameType::ResetStreamAt
+    }
+
     fn read_run<H>(
         source: &mut H,
         _kind: FrameType,

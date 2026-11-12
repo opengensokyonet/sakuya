@@ -175,6 +175,10 @@ impl FrameSetPart for Part {
         DatagramTypeValue::new(value).map(|_| FrameType::Datagram)
     }
 
+    fn run_kind<D>(_run: &DatagramFrame<D>) -> FrameType {
+        FrameType::Datagram
+    }
+
     fn read_run<H>(
         source: &mut H,
         _kind: FrameType,

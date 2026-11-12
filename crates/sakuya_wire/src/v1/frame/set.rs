@@ -174,6 +174,10 @@ pub trait FrameSetPart {
     /// value this part does not claim.
     fn kind_of(value: VarInt) -> Option<Self::Kind>;
 
+    /// The kind of the frames of `run`: the kind
+    /// [`kind_of`](Self::kind_of) gave for the Frame Type it was read from.
+    fn run_kind<D>(run: &Self::Run<D>) -> Self::Kind;
+
     /// Reads a run from `source`, a packet payload in memory from which the
     /// Frame Type `value` has just been read, of the kind
     /// [`kind_of`](Self::kind_of) gave for it.
@@ -228,6 +232,10 @@ pub trait FrameSet {
     /// value no part of this set claims.
     fn kind_of(value: VarInt) -> Option<Self::Kind>;
 
+    /// The kind of the frames of `run`, as the part of the run gives it
+    /// ([`FrameSetPart::run_kind`]).
+    fn run_kind<D>(run: &Self::Run<D>) -> Self::Kind;
+
     /// Reads a run from `source`, a packet payload in memory from which the
     /// Frame Type `value` has just been read, of the kind
     /// [`kind_of`](Self::kind_of) gave for it, as the part of the kind does
@@ -258,6 +266,10 @@ impl FrameSet for HNil {
 
     fn kind_of(_value: VarInt) -> Option<CNil> {
         None
+    }
+
+    fn run_kind<D>(run: &CNil) -> CNil {
+        match *run {}
     }
 
     fn read_run<H>(_source: &mut H, kind: CNil, _value: VarInt) -> Result<CNil, CNil>
@@ -293,6 +305,13 @@ impl<P: FrameSetPart, Ps: FrameSet> FrameSet for HCons<P, Ps> {
         P::kind_of(value)
             .map(Coproduct::Inl)
             .or_else(|| Ps::kind_of(value).map(Coproduct::Inr))
+    }
+
+    fn run_kind<D>(run: &Self::Run<D>) -> Self::Kind {
+        match run {
+            Coproduct::Inl(run) => Coproduct::Inl(P::run_kind(run)),
+            Coproduct::Inr(run) => Coproduct::Inr(Ps::run_kind(run)),
+        }
     }
 
     fn read_run<H>(
