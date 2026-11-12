@@ -1,17 +1,28 @@
 //! The error QUIC version 1 finds in a connection.
+use core::convert::Infallible;
+
 use bytes::Bytes;
 use sakuya_wire::{
-    v1::{encryption_level::EncryptionLevel, transport_error::TransportErrorCode},
+    parts::CNil,
+    v1::{
+        encryption_level::EncryptionLevel,
+        frame::{
+            FrameType,
+            codec::ReadFieldsError,
+            set::{FrameFieldsError, codec::ReadFrameError},
+        },
+        transport_error::TransportErrorCode,
+    },
     var_int::VarInt,
 };
 use snafu::Snafu;
 
-use super::close::TransportClose;
+use super::{close::TransportClose, crypto::CryptoFrameError, dispatch::FrameNotPermittedError};
 
 /// An error of version 1 in a connection: one variant for each type of
 /// error it comes from, which gives the transport error code; a failure
 /// without a type of its own has its fields here.
-#[derive(Debug, PartialEq, Eq, Snafu)]
+#[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum ConnectionError {
     /// A packet carries no frames (RFC 9000 §12.4).
@@ -27,10 +38,45 @@ pub enum ConnectionError {
     /// The handshake completed without the 1-RTT keys for sending.
     #[snafu(display("the handshake completed without 1-RTT send keys"))]
     OneRttSendKeysMissing,
+    /// The Frame Type of a frame could not be read, is not the shortest
+    /// encoding of its value, or is a value no part of the connection
+    /// claims (RFC 9000 §12.4).
+    #[snafu(display("frame read failed"))]
+    ReadFrame {
+        /// The failure.
+        source: ReadFrameError<Infallible, CNil>,
+    },
+    /// The fields of a frame of version 1 could not be read.
+    #[snafu(display("frame fields read failed"))]
+    ReadFrameFields {
+        /// The failure.
+        source: ReadFieldsError<Infallible>,
+    },
+    /// A frame is in a packet type it cannot appear in, or reached an
+    /// endpoint whose role does not receive it.
+    #[snafu(display("frame not permitted"))]
+    FrameNotPermitted {
+        /// The broken rule.
+        source: FrameNotPermittedError,
+    },
+    /// A CRYPTO frame broke a rule of receiving CRYPTO data.
+    #[snafu(display("CRYPTO frame rejected"))]
+    Crypto {
+        /// The broken rule.
+        source: CryptoFrameError,
+    },
+    /// A frame of a kind this version does not handle yet; the connection
+    /// closes with INTERNAL_ERROR. It goes away as the components that
+    /// handle each kind are added.
+    #[snafu(display("{kind:?} frames are not handled"))]
+    UnhandledFrame {
+        /// The kind of the frame.
+        kind: FrameType,
+    },
 }
 
-/// None of these failures is in a frame: the Frame Type field is 0. The
-/// reason phrase is what this layer shows, without its sources: a
+/// The Frame Type field holds the type of the frame that failed when it is
+/// known, and is 0 otherwise. The reason phrase is what this layer shows, without its sources: a
 /// description of the violation, for the peer, with nothing internal to
 /// this endpoint.
 impl TransportClose for ConnectionError {
@@ -38,18 +84,48 @@ impl TransportClose for ConnectionError {
         match self {
             Self::EmptyPacket { .. } => TransportErrorCode::PROTOCOL_VIOLATION,
             Self::NoViablePath => TransportErrorCode::NO_VIABLE_PATH,
-            Self::OneRttSendKeysMissing => TransportErrorCode::INTERNAL_ERROR,
+            Self::OneRttSendKeysMissing | Self::UnhandledFrame { .. } => {
+                TransportErrorCode::INTERNAL_ERROR
+            }
+            Self::ReadFrame { source } => source.transport_error_code(),
+            Self::ReadFrameFields { source } => source.transport_error_code(),
+            Self::FrameNotPermitted { .. } => TransportErrorCode::PROTOCOL_VIOLATION,
+            Self::Crypto { source } => match source {
+                CryptoFrameError::BufferExceeded { .. } => {
+                    TransportErrorCode::CRYPTO_BUFFER_EXCEEDED
+                }
+                CryptoFrameError::BeyondReceivedEnd { .. } => {
+                    TransportErrorCode::PROTOCOL_VIOLATION
+                }
+                CryptoFrameError::Refused => TransportErrorCode::crypto_error(UNEXPECTED_MESSAGE),
+            },
         }
     }
 
     fn frame_type(&self) -> Option<VarInt> {
-        None
+        match self {
+            Self::ReadFrame { source } => source.frame_type(),
+            Self::ReadFrameFields { source } => Some(source.frame_type()),
+            Self::Crypto { .. } => Some(VarInt::from_u32(CRYPTO_FRAME_TYPE)),
+            Self::EmptyPacket { .. }
+            | Self::NoViablePath
+            | Self::OneRttSendKeysMissing
+            | Self::FrameNotPermitted { .. }
+            | Self::UnhandledFrame { .. } => None,
+        }
     }
 
     fn reason_phrase(&self) -> Bytes {
         Bytes::from(self.to_string())
     }
 }
+
+/// The Frame Type of CRYPTO (RFC 9000 §19.6).
+const CRYPTO_FRAME_TYPE: u32 = 0x06;
+
+/// The TLS alert unexpected_message (RFC 9846 §6.2): a server receives no
+/// handshake messages at 1-RTT (RFC 9001 §6).
+const UNEXPECTED_MESSAGE: u8 = 10;
 
 #[cfg(test)]
 mod tests {

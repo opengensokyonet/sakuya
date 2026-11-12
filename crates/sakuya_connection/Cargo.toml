@@ -11,6 +11,7 @@ bytes.workspace = true
 frunk_core.workspace = true
 futures-util.workspace = true
 nitori_call.workspace = true
+nitori_io.workspace = true
 sakuya_link.workspace = true
 sakuya_packet_protection.workspace = true
 sakuya_recovery.workspace = true

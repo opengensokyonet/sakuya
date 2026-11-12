@@ -29,6 +29,7 @@
 pub mod call;
 pub mod clock;
 pub mod component;
+pub mod dispatch;
 pub mod driver;
 pub mod error;
 pub mod layer;

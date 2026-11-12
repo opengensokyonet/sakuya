@@ -1491,3 +1491,17 @@ fn sizes_of_the_layers() {
         size_of::<sakuya_connection::v1::recovery::PmtuOf<Mine, V1>>()
     );
 }
+
+/// Version 1 alone dispatches every frame its set reads: the positions of
+/// what its dispatch takes are found from the composition.
+#[test]
+fn version_1_dispatches_the_frames_it_reads() {
+    use sakuya_connection::dispatch::FrameSetDispatch;
+    fn dispatches<T: ConnectionChoices, L, Hs>()
+    where
+        for<'v> L: LineageLists<'v, T>,
+        L: FrameSetDispatch<T, L, Hs>,
+    {
+    }
+    dispatches::<Mine, HList![v1::Part], _>();
+}

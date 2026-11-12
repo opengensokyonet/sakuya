@@ -625,6 +625,7 @@ dependencies = [
  "frunk_core",
  "futures-util",
  "nitori_call",
+ "nitori_io",
  "sakuya_link",
  "sakuya_packet_protection",
  "sakuya_recovery",
