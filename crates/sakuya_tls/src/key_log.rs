@@ -12,16 +12,18 @@
 //! reads no environment variables: writing a file and any locking are the
 //! implementation's.
 
+use crate::message::HelloRandom;
+
 /// Receives the secrets of a handshake as the engine derives them.
 pub trait KeyLog {
     /// Records `secret` under `label` for the connection whose ClientHello
     /// carried `client_random`.
-    fn log(&self, label: KeyLogLabel, client_random: &[u8; 32], secret: &[u8]);
+    fn log(&self, label: KeyLogLabel, client_random: &HelloRandom, secret: &[u8]);
 }
 
 /// No key log: nothing is recorded.
 impl KeyLog for () {
-    fn log(&self, _label: KeyLogLabel, _client_random: &[u8; 32], _secret: &[u8]) {}
+    fn log(&self, _label: KeyLogLabel, _client_random: &HelloRandom, _secret: &[u8]) {}
 }
 
 /// The secret a [`KeyLog`] receives, named as in the NSS SSLKEYLOGFILE
@@ -57,13 +59,13 @@ impl KeyLogLabel {
 }
 
 impl<Log: KeyLog + ?Sized> KeyLog for &Log {
-    fn log(&self, label: KeyLogLabel, client_random: &[u8; 32], secret: &[u8]) {
+    fn log(&self, label: KeyLogLabel, client_random: &HelloRandom, secret: &[u8]) {
         (**self).log(label, client_random, secret);
     }
 }
 
 impl<Log: KeyLog + ?Sized> KeyLog for std::sync::Arc<Log> {
-    fn log(&self, label: KeyLogLabel, client_random: &[u8; 32], secret: &[u8]) {
+    fn log(&self, label: KeyLogLabel, client_random: &HelloRandom, secret: &[u8]) {
         (**self).log(label, client_random, secret);
     }
 }

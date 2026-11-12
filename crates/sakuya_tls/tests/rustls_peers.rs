@@ -58,7 +58,7 @@ use sakuya_tls::{
     engine::CryptoLevel,
     extension::alpn::{ProtocolName, ProtocolNameList},
     key_log::{KeyLog as EngineKeyLog, KeyLogLabel},
-    message::{MessageLimits, new_session_ticket::TicketLifetime},
+    message::{HelloRandom, MessageLimits, new_session_ticket::TicketLifetime},
     schedule::ExporterLabel,
     server::{
         choice::{GroupPreference, PreferenceTable},
@@ -104,8 +104,8 @@ impl KeyLog for Secrets {
 
 /// The engine under test logs into the same kind of record.
 impl EngineKeyLog for Secrets {
-    fn log(&self, label: KeyLogLabel, client_random: &[u8; 32], secret: &[u8]) {
-        KeyLog::log(self, label.as_str(), client_random, secret);
+    fn log(&self, label: KeyLogLabel, client_random: &HelloRandom, secret: &[u8]) {
+        KeyLog::log(self, label.as_str(), &client_random.0, secret);
     }
 }
 

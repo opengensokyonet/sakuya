@@ -1228,7 +1228,7 @@ where
         if let Some(offered) = &offered {
             key_log.log(
                 KeyLogLabel::ClientEarlyTrafficSecret,
-                &random.0,
+                &random,
                 offered.secret.0.as_bytes(),
             );
         }
@@ -1415,12 +1415,12 @@ where
         .map_err(psk_error)?;
         key_log.log(
             KeyLogLabel::ClientHandshakeTrafficSecret,
-            &random.0,
+            &random,
             secrets.send.as_bytes(),
         );
         key_log.log(
             KeyLogLabel::ServerHandshakeTrafficSecret,
-            &random.0,
+            &random,
             secrets.receive.as_bytes(),
         );
         let read = ServerHelloRead {
@@ -1604,17 +1604,17 @@ where
             .map_err(|source| alert(ClientAlertError::Finished { source }))?;
         key_log.log(
             KeyLogLabel::ClientTrafficSecret0,
-            &random.0,
+            &random,
             one_rtt.send.as_bytes(),
         );
         key_log.log(
             KeyLogLabel::ServerTrafficSecret0,
-            &random.0,
+            &random,
             one_rtt.receive.as_bytes(),
         );
         key_log.log(
             KeyLogLabel::ExporterSecret,
-            &random.0,
+            &random,
             master.exporter_secret(),
         );
         if let Some(context) = requested {

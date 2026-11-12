@@ -1274,7 +1274,7 @@ where
             Early::Plain(early) => early.server_hello(shared, &encoded_hello),
             Early::Psk(early, _) => early.server_hello(shared, &encoded_hello),
         };
-        let client_random = &accepted.client_hello().random().0;
+        let client_random = accepted.client_hello().random();
         if let Some(early) = &zero_rtt {
             key_log.log(
                 KeyLogLabel::ClientEarlyTrafficSecret,
@@ -1409,7 +1409,7 @@ where
 
         // The server's Finished, then the client's.
         let (main, finished, one_rtt_send) = handshake.server_finished();
-        let client_random = &hello.random().0;
+        let client_random = hello.random();
         key_log.log(
             KeyLogLabel::ClientTrafficSecret0,
             client_random,
