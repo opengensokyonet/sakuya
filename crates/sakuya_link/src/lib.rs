@@ -4,66 +4,61 @@
 //! binding produces links, channels that send and receive whole messages
 //! between this side and one peer. The three kinds of object have independent
 //! lifetimes, and old and new link bindings or links may coexist for the same
-//! local address. This crate provides their identities and the [`Link`]
-//! trait; link bindings and link drivers have no traits yet.
+//! local address. This crate provides the [`Link`] trait and the identity of a
+//! link; link bindings and link drivers have no traits yet.
 //!
-//! Code that refers to a link binding or a link without holding it, such as a
-//! delayed notification, a map key or the routing of a datagram by where it
-//! arrived, uses its identity:
-//!
-//! - [`BindingId`] identifies one link binding. Two link bindings always have
-//!   different `BindingId`s, even when they bind the same address.
-//! - [`LinkId`] identifies one link. Two links always have different
-//!   `LinkId`s, even when both connect the same pair of addresses. A `LinkId`
-//!   also records the `BindingId` of the link binding that produced the link,
-//!   available through [`LinkId::binding_id`]. A link whose peer address
-//!   changes while the local binding stays the same gets a new `LinkId` with
-//!   the same source `BindingId`.
+//! Code that refers to a link without holding it, such as a delayed
+//! notification, a map key or the routing of a datagram by where it arrived,
+//! uses its [`LinkId`]. A `LinkId` names the two ends of the link, which are
+//! public fields of types the link chooses ([`Link::Local`] and
+//! [`Link::Peer`]), and holds an identity of its own that tells apart two
+//! links with the same two ends:
 //!
 //! ```
-//! use sakuya_link::{BindingId, LinkId};
+//! use sakuya_link::LinkId;
 //!
-//! struct UdpBinding;
 //! struct UdpLink;
 //!
-//! let binding = BindingId::new::<UdpBinding>();
-//! let first = LinkId::new::<UdpLink>(binding.clone());
-//! let second = LinkId::new::<UdpLink>(binding.clone());
+//! let local = "192.0.2.1:4433";
+//! let peer = "198.51.100.7:50000";
+//! let first = LinkId::new::<UdpLink>(local, peer);
+//! let second = LinkId::new::<UdpLink>(local, peer);
 //!
+//! assert_eq!((first.local, first.peer), (second.local, second.peer));
 //! assert_ne!(first, second);
-//! assert_eq!(first.binding_id(), &binding);
-//! assert_eq!(second.binding_id(), &binding);
-//! assert_ne!(binding, BindingId::new::<UdpBinding>());
+//! assert_eq!(first, first.clone());
 //! ```
 //!
 //! # Identity
 //!
 //! Each `new` call allocates a [`nitori_id::Identity`]: the `TypeId` of its
-//! type parameter, which names the concrete link binding or link type, and a
-//! value unique within the process and never reused. An identity kept after
-//! its object is gone, in a clone, a pending event or a map key, can therefore
-//! never be mistaken for a later object.
+//! type parameter, which names the concrete link type, and a value unique
+//! within the process and never reused. An identity kept after its link is
+//! gone, in a clone, a pending event or a map key, can therefore never be
+//! mistaken for a later link.
 //!
 //! `Eq`, `Hash` and `Ord` compare only that identity, so they agree with one
-//! another; the order is total but its meaning is unspecified. The source
-//! `BindingId` of a `LinkId` takes no part in its identity: two `LinkId`s are
-//! equal exactly when they come from the same allocation. Equal addresses, or
-//! equal descriptions of what is bound, never make identities equal.
+//! another; the order is total but its meaning is unspecified. The two ends
+//! take no part in it: two `LinkId`s are equal exactly when they come from the
+//! same allocation, and equal ends never make them equal. [`LinkId::map`]
+//! changes the types of the ends and keeps the identity, which is how the
+//! identity of a link enters a sum of link types.
 //!
-//! An identity says nothing about its object. It neither keeps the object
-//! alive nor implies that it still is: a `LinkId` can outlive its link, and
-//! its source `BindingId` can outlive the link binding. Neither type can look
-//! its object up.
+//! An identity says nothing about whether its link still exists. It neither
+//! keeps the link alive nor implies that it still is, and it cannot look the
+//! link up.
 //!
 //! # Within one process only
 //!
-//! Identities are meaningful only in the process that allocated them. Neither
-//! type exposes its numbers, implements serialization, or can be rebuilt from
-//! an external value. `Debug` output is for diagnostics only; its format is
-//! not stable.
+//! Identities are meaningful only in the process that allocated them. A
+//! `LinkId` does not expose its identity's numbers, implement serialization,
+//! or rebuild an identity from an external value; its ends are values of the
+//! link's own types. `Debug` output shows only the identity and is for
+//! diagnostics only; its format is not stable.
 //!
-//! Both types are `Send` and `Sync` and cheap to clone. They are not `Copy`,
-//! which leaves their representation free to carry more information.
+//! A `LinkId` is `Send` and `Sync` when its ends are, and as cheap to clone as
+//! they are. It is not `Copy`, which leaves its representation free to carry
+//! more information.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -78,22 +73,30 @@ use nitori_id::Identity;
 mod link;
 pub use link::{EcnMarking, Link, MIN_DATAGRAM_SIZE, OutgoingDatagram, SendAcceptance};
 
-/// The identity of a link binding.
+/// The identity of a link: its two ends, and an identity of its own.
 ///
-/// Each [`BindingId::new`] call returns an identity that differs from every
-/// other `BindingId` in the process. Equality, hashing and ordering compare
-/// only that identity. A `BindingId` does not keep its link binding alive and
-/// cannot be used to find it; it is meaningful only within the process that
-/// allocated it.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct BindingId {
+/// `local` and `peer` say which two ends the link joins, in the types the
+/// link chooses ([`Link::Local`], [`Link::Peer`]). The identity, which is
+/// not public, tells apart two links with the same two ends: each
+/// [`LinkId::new`] call returns a `LinkId` that differs from every other
+/// one allocated in the process. Equality, hashing and ordering compare
+/// only that identity, not the ends. A `LinkId` does not keep its link alive
+/// and cannot be used to find it; it is meaningful only within the process
+/// that allocated it.
+#[derive(Clone)]
+pub struct LinkId<Local, Peer> {
+    /// This side's end of the link.
+    pub local: Local,
+    /// The peer's end of the link.
+    pub peer: Peer,
     identity: Identity,
 }
 
-impl BindingId {
-    /// Allocate the identity of a new link binding of type `B`.
+impl<Local, Peer> LinkId<Local, Peer> {
+    /// Allocate the identity of a new link of type `L` between `local` and
+    /// `peer`.
     ///
-    /// `B` is the concrete link binding type. It labels the identity and is
+    /// `L` is the concrete link type. It labels the identity and is
     /// otherwise unused; no value of it is needed or kept.
     ///
     /// # Panics
@@ -101,118 +104,88 @@ impl BindingId {
     /// Panics if the process has exhausted its identities, which does not
     /// happen in practice; see [`nitori_id::UniqueId::allocate`].
     #[must_use]
-    pub fn new<B: ?Sized + 'static>() -> Self {
+    pub fn new<L: ?Sized + 'static>(local: Local, peer: Peer) -> Self {
         Self {
-            identity: Identity::new::<B>(),
-        }
-    }
-}
-
-impl fmt::Debug for BindingId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("BindingId").field(&self.identity).finish()
-    }
-}
-
-/// The identity of a link, together with the [`BindingId`] of the link
-/// binding that produced it.
-///
-/// Each [`LinkId::new`] call returns an identity that differs from every other
-/// `LinkId` in the process. Equality, hashing and ordering compare only that
-/// identity, not the source `BindingId`. A `LinkId` does not keep its link or
-/// link binding alive and cannot be used to find them; it is meaningful only
-/// within the process that allocated it.
-#[derive(Clone)]
-pub struct LinkId {
-    identity: Identity,
-    binding: BindingId,
-}
-
-impl LinkId {
-    /// Allocate the identity of a new link of type `L` produced by the link
-    /// binding identified by `binding`.
-    ///
-    /// `L` is the concrete link type. It labels the identity and is otherwise
-    /// unused; no value of it is needed or kept.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the process has exhausted its identities, which does not
-    /// happen in practice; see [`nitori_id::UniqueId::allocate`].
-    #[must_use]
-    pub fn new<L: ?Sized + 'static>(binding: BindingId) -> Self {
-        Self {
+            local,
+            peer,
             identity: Identity::new::<L>(),
-            binding,
         }
     }
 
-    /// The identity of the link binding that produced this link.
+    /// The same identity with its ends turned into other types: `local` and
+    /// `peer` are applied to the two ends, and the identity is kept.
     ///
-    /// It remains available after that link binding is gone.
+    /// The identity of a link enters the identity of a sum of link types this
+    /// way, each end injected into the sum of the members' ends; the result
+    /// still differs from the identity of every other link.
     #[must_use]
-    pub fn binding_id(&self) -> &BindingId {
-        &self.binding
+    pub fn map<NewLocal, NewPeer>(
+        self,
+        local: impl FnOnce(Local) -> NewLocal,
+        peer: impl FnOnce(Peer) -> NewPeer,
+    ) -> LinkId<NewLocal, NewPeer> {
+        LinkId {
+            local: local(self.local),
+            peer: peer(self.peer),
+            identity: self.identity,
+        }
     }
 }
 
-impl PartialEq for LinkId {
+impl<Local, Peer> PartialEq for LinkId<Local, Peer> {
     fn eq(&self, other: &Self) -> bool {
         self.identity == other.identity
     }
 }
 
-impl Eq for LinkId {}
+impl<Local, Peer> Eq for LinkId<Local, Peer> {}
 
-impl PartialOrd for LinkId {
+impl<Local, Peer> PartialOrd for LinkId<Local, Peer> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for LinkId {
+impl<Local, Peer> Ord for LinkId<Local, Peer> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.identity.cmp(&other.identity)
     }
 }
 
-impl Hash for LinkId {
+impl<Local, Peer> Hash for LinkId<Local, Peer> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.identity.hash(state);
     }
 }
 
-impl fmt::Debug for LinkId {
+impl<Local, Peer> fmt::Debug for LinkId<Local, Peer> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("LinkId")
-            .field("identity", &self.identity)
-            .field("binding", &self.binding)
-            .finish()
+        f.debug_tuple("LinkId").field(&self.identity).finish()
     }
 }
 
 /// Programs that must not compile.
 ///
-/// The identities are not `Copy`, so that their representation can grow:
+/// The identity is not `Copy`, so that its representation can grow:
 ///
 /// ```compile_fail
 /// fn copy<T: Copy>() {}
-/// copy::<sakuya_link::BindingId>();
+/// copy::<sakuya_link::LinkId<u16, u16>>();
+/// ```
+///
+/// No identity can be built from its ends alone, from a number or by
+/// default:
+///
+/// ```compile_fail
+/// let _ = sakuya_link::LinkId { local: 1u16, peer: 2u16 };
 /// ```
 ///
 /// ```compile_fail
-/// fn copy<T: Copy>() {}
-/// copy::<sakuya_link::LinkId>();
-/// ```
-///
-/// No identity can be built from a number or by default:
-///
-/// ```compile_fail
-/// let _: sakuya_link::BindingId = 0u64.into();
+/// let _: sakuya_link::LinkId<u16, u16> = 0u64.into();
 /// ```
 ///
 /// ```compile_fail
-/// let _: sakuya_link::BindingId = Default::default();
+/// let _: sakuya_link::LinkId<u16, u16> = Default::default();
 /// ```
 #[cfg(doctest)]
 pub struct CompileFail;
@@ -222,20 +195,27 @@ mod tests {
     use super::*;
     use std::hash::{BuildHasher, RandomState};
 
-    struct Binding;
     struct Link;
 
     #[test]
-    fn source_binding_takes_no_part_in_link_identity() {
-        let link = LinkId::new::<Link>(BindingId::new::<Binding>());
-        let rebound = LinkId {
-            identity: link.identity.clone(),
-            binding: BindingId::new::<Binding>(),
-        };
-        assert_ne!(link.binding_id(), rebound.binding_id());
-        assert_eq!(link, rebound);
-        assert_eq!(link.cmp(&rebound), Ordering::Equal);
+    fn ends_take_no_part_in_identity() {
+        let link = LinkId::new::<Link>(1u16, 2u16);
+        let mut moved = link.clone();
+        moved.local = 3;
+        moved.peer = 4;
+        assert_eq!(link, moved);
+        assert_eq!(link.cmp(&moved), Ordering::Equal);
         let hasher = RandomState::new();
-        assert_eq!(hasher.hash_one(&link), hasher.hash_one(&rebound));
+        assert_eq!(hasher.hash_one(&link), hasher.hash_one(&moved));
+    }
+
+    #[test]
+    fn map_keeps_the_identity() {
+        let link = LinkId::new::<Link>(1u16, 2u16);
+        let mapped = link.clone().map(u32::from, Some::<u16>);
+        assert_eq!((mapped.local, mapped.peer), (1u32, Some(2u16)));
+        assert_eq!(mapped.identity, link.identity);
+        let other = LinkId::new::<Link>(1u16, 2u16).map(u32::from, Some::<u16>);
+        assert_ne!(mapped, other);
     }
 }

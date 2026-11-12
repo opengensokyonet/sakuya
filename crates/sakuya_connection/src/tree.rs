@@ -10,9 +10,11 @@ use std::{
 use crate::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf},
-    layer::{Connection, Established, Layer, LinkEntry, LinkPath, LogicalPath, NodeKey, Recovery},
+    layer::{
+        Connection, Established, Layer, LinkEntry, LinkPath, LogicalPath, NodeKeyOf, Recovery,
+    },
     others::OtherNodes,
-    share::{LineageLists, NodeData, PartList, PathKey},
+    share::{LineageLists, NodeData, PartList},
     take::{Lineage, TakenPositions},
 };
 
@@ -91,9 +93,9 @@ impl NodeAddr {
 
 /// A node: its head (key, wake marks; for a link path the slot of its
 /// logical link entry), its data and its calls, and the child node it may
-/// have.
-pub struct Node<K, Data, Calls, Child = ()> {
-    pub(crate) key: NodeKey<K>,
+/// have. `Key` is the type of the key ([`NodeKey`](crate::layer::NodeKey)).
+pub struct Node<Key, Data, Calls, Child = ()> {
+    pub(crate) key: Key,
     pub(crate) marks: Arc<WakeMarks>,
     pub(crate) entry: usize,
     pub(crate) data: Data,
@@ -102,47 +104,47 @@ pub struct Node<K, Data, Calls, Child = ()> {
     pub(crate) wakers: Vec<Waker>,
 }
 
-impl<K, Data, Calls, Child> Node<K, Data, Calls, Child> {
+impl<Key, Data, Calls, Child> Node<Key, Data, Calls, Child> {
     /// The node's key.
-    pub fn key(&self) -> &NodeKey<K> {
+    pub fn key(&self) -> &Key {
         &self.key
     }
 }
 
 /// The node of a logical link entry.
 pub(crate) type EntryNode<T, L, B> =
-    Node<PathKey<L>, NodeData<T, L, LinkEntry>, <B as CallBundle>::LinkEntry>;
+    Node<NodeKeyOf<T, L>, NodeData<T, L, LinkEntry>, <B as CallBundle>::LinkEntry>;
 /// The established layer's node.
 pub(crate) type EstablishedNode<T, L, B> =
-    Node<PathKey<L>, NodeData<T, L, Established>, <B as CallBundle>::Established>;
+    Node<NodeKeyOf<T, L>, NodeData<T, L, Established>, <B as CallBundle>::Established>;
 /// The recovery layer's node.
 pub(crate) type RecoveryNode<T, L, B> =
-    Node<PathKey<L>, NodeData<T, L, Recovery>, <B as CallBundle>::Recovery>;
+    Node<NodeKeyOf<T, L>, NodeData<T, L, Recovery>, <B as CallBundle>::Recovery>;
 /// A link path's node, with its recovery layer when it has one.
 pub(crate) type LinkPathNodeOf<T, L, B> = Node<
-    PathKey<L>,
+    NodeKeyOf<T, L>,
     NodeData<T, L, LinkPath>,
     <B as CallBundle>::LinkPath,
     Option<RecoveryNode<T, L, B>>,
 >;
 /// The connection's node, with its established layer when it has one.
 pub(crate) type ConnectionNode<T, L, B> = Node<
-    PathKey<L>,
+    NodeKeyOf<T, L>,
     NodeData<T, L, Connection>,
     <B as CallBundle>::Connection,
     Option<EstablishedNode<T, L, B>>,
 >;
 
 /// A logical path's node and its link paths.
-pub struct LogicalPathNode<T, L: PartList<T>, B: CallBundle> {
-    pub(crate) node: Node<PathKey<L>, NodeData<T, L, LogicalPath>, B::LogicalPath>,
+pub struct LogicalPathNode<T: ConnectionChoices, L: PartList<T>, B: CallBundle> {
+    pub(crate) node: Node<NodeKeyOf<T, L>, NodeData<T, L, LogicalPath>, B::LogicalPath>,
     pub(crate) link_paths: Vec<Option<LinkPathNodeOf<T, L, B>>>,
 }
 
 /// The tree of a connection: the connection node, the logical link
 /// entries and the logical paths under it, the link paths under their
 /// logical paths.
-pub struct ConnectionTree<T, L: PartList<T>, B: CallBundle> {
+pub struct ConnectionTree<T: ConnectionChoices, L: PartList<T>, B: CallBundle> {
     pub(crate) connection: Option<ConnectionNode<T, L, B>>,
     pub(crate) entries: Vec<Option<EntryNode<T, L, B>>>,
     pub(crate) logical_paths: Vec<Option<LogicalPathNode<T, L, B>>>,

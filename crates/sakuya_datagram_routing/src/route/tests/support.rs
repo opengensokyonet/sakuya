@@ -2,10 +2,10 @@
 //! recording deliverer, a receiver factory and a reflow queue
 
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use sakuya_link::{BindingId, LinkId};
+use sakuya_link::LinkId;
 use sakuya_wire::connection_id::ConnectionIdLength;
 use sakuya_wire::header::codec::{ReadLongHeaderHostExt as _, ReadShortHeaderHostExt as _};
 use sakuya_wire::v1::header::{
@@ -35,15 +35,20 @@ use crate::route::recognizer::ConnectionIdLengths;
 use crate::route::reset::{StatelessResetTarget, StatelessResetTokens};
 use crate::route::router::{DatagramRouter, VersionService};
 
-pub(super) type Datagram = ReceivedDatagram<Vec<u8>, LinkId>;
-pub(super) type Work = UnclaimedWork<Vec<u8>, LinkId>;
+/// This side's end of a test link: a stand-in for a local address.
+pub(super) type Local = u32;
+/// The peer's end of a test link: a stand-in for a remote address.
+pub(super) type Peer = u32;
+pub(super) type TestLinkId = LinkId<Local, Peer>;
+pub(super) type Datagram = ReceivedDatagram<Vec<u8>, TestLinkId>;
+pub(super) type Work = UnclaimedWork<Vec<u8>, TestLinkId>;
 pub(super) type Reflow = DatagramDeliveryPoster<Work>;
-pub(super) type Handoff = ReflowHandoff<Reflow>;
-pub(super) type Target = dyn SendDatagramDeliverer<Datagram, Handoff>;
-pub(super) type Index = RouteIndex<Target>;
+pub(super) type Handoff = ReflowHandoff<Reflow, Local>;
+pub(super) type Target = dyn SendDatagramDeliverer<Datagram, Local, Handoff>;
+pub(super) type Index = RouteIndex<Target, Local>;
 pub(super) type Router = DatagramRouter<
     Vec<u8>,
-    LinkId,
+    TestLinkId,
     Target,
     ConnectionIdLengths,
     Arc<StatelessResetTokens<ResetProbe>>,
@@ -52,18 +57,21 @@ pub(super) type Router = DatagramRouter<
 >;
 
 pub(super) struct TestLink;
-pub(super) struct TestBinding;
 
-/// A new link of `binding`.
-pub(super) fn link(binding: &BindingId) -> LinkId {
-    LinkId::new::<TestLink>(binding.clone())
+static NEXT_END: AtomicU32 = AtomicU32::new(1);
+
+/// A local end that no other call of this function returned.
+pub(super) fn local_end() -> Local {
+    NEXT_END.fetch_add(1, Ordering::Relaxed)
 }
 
-pub(super) fn binding() -> BindingId {
-    BindingId::new::<TestBinding>()
+/// A new link whose local end is `local`, with a peer end no other link of
+/// this function has.
+pub(super) fn link(local: &Local) -> TestLinkId {
+    LinkId::new::<TestLink>(*local, NEXT_END.fetch_add(1, Ordering::Relaxed))
 }
 
-pub(super) fn datagram(bytes: Vec<u8>, link: &LinkId) -> Datagram {
+pub(super) fn datagram(bytes: Vec<u8>, link: &TestLinkId) -> Datagram {
     ReceivedDatagram::new(bytes, link.clone())
 }
 
@@ -189,7 +197,7 @@ pub(super) struct Recorder {
     pub(super) label: u32,
     judging: Mutex<Judging>,
     claims: AtomicUsize,
-    deliveries: Mutex<Vec<DatagramDelivery<Datagram, Handoff>>>,
+    deliveries: Mutex<Vec<DatagramDelivery<Datagram, Local, Handoff>>>,
 }
 
 impl Recorder {
@@ -214,7 +222,7 @@ impl Recorder {
         self.deliveries.lock().unwrap().len()
     }
 
-    pub(super) fn take(&self) -> Vec<DatagramDelivery<Datagram, Handoff>> {
+    pub(super) fn take(&self) -> Vec<DatagramDelivery<Datagram, Local, Handoff>> {
         std::mem::take(&mut self.deliveries.lock().unwrap())
     }
 
@@ -281,18 +289,18 @@ pub(super) fn ready<F: std::future::Future>(future: F) -> F::Output {
 }
 
 pub(super) fn route_match(
-    delivery: &DatagramDelivery<Datagram, Handoff>,
-) -> &DatagramRouteMatchInfo {
+    delivery: &DatagramDelivery<Datagram, Local, Handoff>,
+) -> &DatagramRouteMatchInfo<Local> {
     match delivery {
         DatagramDelivery::Competing(candidate) => candidate.route_match(),
         DatagramDelivery::Exclusive(exclusive) => exclusive.route_match(),
     }
 }
 
-impl DatagramDeliverer<Datagram> for Recorder {
+impl DatagramDeliverer<Datagram, Local> for Recorder {
     type Handoff = Handoff;
 
-    fn deliver(&self, delivery: DatagramDelivery<Datagram, Handoff>) {
+    fn deliver(&self, delivery: DatagramDelivery<Datagram, Local, Handoff>) {
         self.deliveries.lock().unwrap().push(delivery);
     }
 }
@@ -300,18 +308,18 @@ impl DatagramDeliverer<Datagram> for Recorder {
 /// Registers `recorder` under `association` for every form of version 1.
 pub(super) fn register(
     index: &Arc<Index>,
-    association: MatchAssociation,
+    association: MatchAssociation<Local>,
     recorder: &Arc<Recorder>,
-) -> RouteEntryRegistration<Target> {
+) -> RouteEntryRegistration<Target, Local> {
     register_forms(index, association, PacketForms::ALL, recorder)
 }
 
 pub(super) fn register_forms(
     index: &Arc<Index>,
-    association: MatchAssociation,
+    association: MatchAssociation<Local>,
     forms: PacketForms,
     recorder: &Arc<Recorder>,
-) -> RouteEntryRegistration<Target> {
+) -> RouteEntryRegistration<Target, Local> {
     index.register(
         RouteMatcher::new(association, forms, Version::V1),
         Arc::clone(recorder) as Arc<Target>,
@@ -320,9 +328,9 @@ pub(super) fn register_forms(
 
 /// The receiver of a newly published Initial entry.
 pub(super) struct Accepted {
-    pub(super) registration: RouteEntryRegistration<Target>,
+    pub(super) registration: RouteEntryRegistration<Target, Local>,
     pub(super) datagram: ExclusiveDatagram<Datagram>,
-    pub(super) initial: RecognizedInitial,
+    pub(super) initial: RecognizedInitial<Local>,
     pub(super) deliverer: Arc<Recorder>,
 }
 
@@ -334,12 +342,12 @@ pub(super) struct TestReceiver {
     before: Option<Box<dyn FnOnce(&Arc<Recorder>) + Send>>,
 }
 
-impl InitialDatagramReceiver<Vec<u8>, LinkId, Target> for TestReceiver {
+impl InitialDatagramReceiver<Vec<u8>, TestLinkId, Target> for TestReceiver {
     fn receive_first(
         self,
-        registration: RouteEntryRegistration<Target>,
+        registration: RouteEntryRegistration<Target, Local>,
         datagram: ExclusiveDatagram<Datagram>,
-        initial: RecognizedInitial,
+        initial: RecognizedInitial<Local>,
     ) {
         if let Some(before) = self.before {
             before(&self.deliverer);
@@ -399,16 +407,16 @@ impl Factory {
     }
 }
 
-impl InitialReceiverFactory<Vec<u8>, LinkId, Target> for Factory {
+impl InitialReceiverFactory<Vec<u8>, TestLinkId, Target> for Factory {
     type Receiver = TestReceiver;
 
-    fn admits(&self, _initial: &RecognizedInitial, datagram: &Datagram) -> bool {
+    fn admits(&self, _initial: &RecognizedInitial<Local>, datagram: &Datagram) -> bool {
         datagram.payload().len() >= 1200
     }
 
     fn prepare(
         &self,
-        _initial: &RecognizedInitial,
+        _initial: &RecognizedInitial<Local>,
     ) -> Option<PreparedReceiver<Target, TestReceiver>> {
         if let Some(during) = self.shared.during_prepare.lock().unwrap().take() {
             during();
@@ -436,7 +444,7 @@ impl InitialReceiverFactory<Vec<u8>, LinkId, Target> for Factory {
 #[derive(Clone, Default)]
 pub(super) struct VersionProbe(pub(super) Arc<Mutex<Vec<Version>>>);
 
-impl VersionService<Vec<u8>, LinkId> for VersionProbe {
+impl VersionService<Vec<u8>, TestLinkId> for VersionProbe {
     fn unsupported_version(&self, version: Version, _datagram: Datagram) {
         self.0.lock().unwrap().push(version);
     }
@@ -489,7 +497,7 @@ impl Domain {
         self.router.index()
     }
 
-    pub(super) fn route(&self, bytes: Vec<u8>, link: &LinkId) {
+    pub(super) fn route(&self, bytes: Vec<u8>, link: &TestLinkId) {
         self.router.route(datagram(bytes, link));
     }
 

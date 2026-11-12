@@ -1,7 +1,7 @@
 //! Requests to change the structure of a connection's tree.
 use crate::layer::{EstablishedArgs, LinkPathArgs, LogicalPathArgs, RecoveryArgs};
 use core::convert::Infallible;
-use sakuya_link::LinkId;
+use sakuya_link::{Link, LinkId};
 
 /// A change of the tree's structure: a node made, ended or moved.
 ///
@@ -10,11 +10,13 @@ use sakuya_link::LinkId;
 /// anything else in the poll runs. A request that no longer fits the
 /// structure, such as one for a link path whose logical path is gone, is
 /// dropped. `K` is the key of a logical path, `Lk` the type of a link.
+/// Its variants that name a link without holding it carry the link's
+/// identity.
 ///
 /// Errors and closing are not requests: whoever finds an error records the
 /// reason for closing in the component that keeps it.
 #[derive(Clone, Debug)]
-pub enum StructureRequest<K, Lk> {
+pub enum StructureRequest<K, Lk: Link> {
     /// Build a logical path.
     AddLogicalPath {
         /// What it is built from, its key among them.
@@ -32,7 +34,7 @@ pub enum StructureRequest<K, Lk> {
         /// Its logical path.
         path: K,
         /// Its logical link.
-        link: LinkId,
+        link: LinkId<Lk::Local, Lk::Peer>,
     },
     /// End a logical path and its link paths.
     EndLogicalPath {
@@ -51,14 +53,14 @@ pub enum StructureRequest<K, Lk> {
     /// Build the recovery layer of a link path.
     AddRecovery {
         /// What it is built from, the link path's key among them.
-        args: RecoveryArgs<K>,
+        args: RecoveryArgs<K, LinkId<Lk::Local, Lk::Peer>>,
     },
     /// End the recovery layer of a link path.
     EndRecovery {
         /// The link path's logical path.
         path: K,
         /// The link path's logical link.
-        link: LinkId,
+        link: LinkId<Lk::Local, Lk::Peer>,
     },
     /// Move the recovery layer of a link path, by value, to another link
     /// path of the same logical path that has none.
@@ -66,13 +68,13 @@ pub enum StructureRequest<K, Lk> {
         /// The logical path.
         path: K,
         /// The logical link of the link path it is on.
-        from: LinkId,
+        from: LinkId<Lk::Local, Lk::Peer>,
         /// The logical link of the link path it goes to.
-        to: LinkId,
+        to: LinkId<Lk::Local, Lk::Peer>,
     },
 }
 
-impl<K, Lk> From<Infallible> for StructureRequest<K, Lk> {
+impl<K, Lk: Link> From<Infallible> for StructureRequest<K, Lk> {
     fn from(never: Infallible) -> Self {
         match never {}
     }

@@ -46,7 +46,10 @@ impl<Target: StatelessResetTarget + ?Sized> StatelessResetTarget for Arc<Target>
 }
 
 /// Recognizes a received stateless reset and names the target it resets.
-pub trait StatelessResetDetector {
+///
+/// `Local` and `Peer` are the ends of the links the datagrams arrive on
+/// ([`sakuya_link::Link::Local`], [`sakuya_link::Link::Peer`]).
+pub trait StatelessResetDetector<Local, Peer> {
     /// What a hit resets.
     type Target: StatelessResetTarget;
 
@@ -55,14 +58,22 @@ pub trait StatelessResetDetector {
     ///
     /// A hit must carry the target it belongs to, so that the caller never
     /// guesses it again. It must not run the target itself.
-    fn detect(&self, tail: &StatelessResetToken, link: &LinkId) -> Option<Self::Target>;
+    fn detect(
+        &self,
+        tail: &StatelessResetToken,
+        link: &LinkId<Local, Peer>,
+    ) -> Option<Self::Target>;
 }
 
 /// No detection: no datagram is a stateless reset.
-impl StatelessResetDetector for () {
+impl<Local, Peer> StatelessResetDetector<Local, Peer> for () {
     type Target = Infallible;
 
-    fn detect(&self, _tail: &StatelessResetToken, _link: &LinkId) -> Option<Infallible> {
+    fn detect(
+        &self,
+        _tail: &StatelessResetToken,
+        _link: &LinkId<Local, Peer>,
+    ) -> Option<Infallible> {
         None
     }
 }
@@ -120,18 +131,30 @@ impl<Target> StatelessResetTokens<Target> {
     }
 }
 
-impl<Target: StatelessResetTarget> StatelessResetDetector for StatelessResetTokens<Target> {
+impl<Local, Peer, Target: StatelessResetTarget> StatelessResetDetector<Local, Peer>
+    for StatelessResetTokens<Target>
+{
     type Target = Arc<Target>;
 
-    fn detect(&self, tail: &StatelessResetToken, _link: &LinkId) -> Option<Arc<Target>> {
+    fn detect(
+        &self,
+        tail: &StatelessResetToken,
+        _link: &LinkId<Local, Peer>,
+    ) -> Option<Arc<Target>> {
         self.tokens.get(tail)?.first().cloned()
     }
 }
 
-impl<Detector: StatelessResetDetector + ?Sized> StatelessResetDetector for Arc<Detector> {
+impl<Local, Peer, Detector: StatelessResetDetector<Local, Peer> + ?Sized>
+    StatelessResetDetector<Local, Peer> for Arc<Detector>
+{
     type Target = Detector::Target;
 
-    fn detect(&self, tail: &StatelessResetToken, link: &LinkId) -> Option<Self::Target> {
+    fn detect(
+        &self,
+        tail: &StatelessResetToken,
+        link: &LinkId<Local, Peer>,
+    ) -> Option<Self::Target> {
         (**self).detect(tail, link)
     }
 }

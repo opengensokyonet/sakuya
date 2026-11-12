@@ -26,16 +26,16 @@ pub(super) mod sealed {
     use super::super::finish::UnclaimedHandoff;
 
     /// Dispatch into the concrete deliverer behind an erased one.
-    pub trait DispatchDelivery<Inner, Handoff: UnclaimedHandoff<Inner>> {
+    pub trait DispatchDelivery<Inner, Local, Handoff: UnclaimedHandoff<Inner>> {
         /// Delivers through the concrete deliverer's `deliver`.
-        fn dispatch_delivery(&self, delivery: DatagramDelivery<Inner, Handoff>);
+        fn dispatch_delivery(&self, delivery: DatagramDelivery<Inner, Local, Handoff>);
     }
 }
 
-impl<Inner, Deliverer: DatagramDeliverer<Inner>> sealed::DispatchDelivery<Inner, Deliverer::Handoff>
-    for Deliverer
+impl<Inner, Local, Deliverer: DatagramDeliverer<Inner, Local>>
+    sealed::DispatchDelivery<Inner, Local, Deliverer::Handoff> for Deliverer
 {
-    fn dispatch_delivery(&self, delivery: DatagramDelivery<Inner, Deliverer::Handoff>) {
+    fn dispatch_delivery(&self, delivery: DatagramDelivery<Inner, Local, Deliverer::Handoff>) {
         self.deliver(delivery);
     }
 }
@@ -44,7 +44,7 @@ impl<Inner, Deliverer: DatagramDeliverer<Inner>> sealed::DispatchDelivery<Inner,
 ///
 /// Every [`DatagramDeliverer`] implements it for its
 /// [handoff](DatagramDeliverer::Handoff); use it only as a trait object,
-/// `Arc<dyn ErasedDatagramDeliverer<Inner, Handoff> + 'a>`, obtained by
+/// `Arc<dyn ErasedDatagramDeliverer<Inner, Local, Handoff> + 'a>`, obtained by
 /// coercing an `Arc` of the concrete deliverer. It adds no requirement to the
 /// deliverer: local `Rc` state and borrowed deliverers erase as well. The
 /// trait object is neither `Send` nor `Sync`, and nothing can make it so
@@ -60,24 +60,24 @@ impl<Inner, Deliverer: DatagramDeliverer<Inner>> sealed::DispatchDelivery<Inner,
 /// # use sakuya_datagram_routing::claim::erased::ErasedDatagramDeliverer;
 /// # use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
 /// // A deliverer that keeps its deliveries in local storage.
-/// struct Local(Rc<RefCell<Vec<DatagramDelivery<Vec<u8>, ReleaseUnclaimed>>>>);
+/// struct Local(Rc<RefCell<Vec<DatagramDelivery<Vec<u8>, (), ReleaseUnclaimed>>>>);
 ///
-/// impl DatagramDeliverer<Vec<u8>> for Local {
-///     fn deliver(&self, delivery: DatagramDelivery<Vec<u8>, ReleaseUnclaimed>) {
+/// impl DatagramDeliverer<Vec<u8>, ()> for Local {
+///     fn deliver(&self, delivery: DatagramDelivery<Vec<u8>, (), ReleaseUnclaimed>) {
 ///         self.0.borrow_mut().push(delivery);
 ///     }
 /// }
 ///
-/// let local: Arc<dyn ErasedDatagramDeliverer<Vec<u8>>> =
+/// let local: Arc<dyn ErasedDatagramDeliverer<Vec<u8>, ()>> =
 ///     Arc::new(Local(Rc::default()));
 /// ```
-pub trait ErasedDatagramDeliverer<Inner, Handoff: UnclaimedHandoff<Inner> = ReleaseUnclaimed>:
-    sealed::DispatchDelivery<Inner, Handoff>
+pub trait ErasedDatagramDeliverer<Inner, Local, Handoff: UnclaimedHandoff<Inner> = ReleaseUnclaimed>:
+    sealed::DispatchDelivery<Inner, Local, Handoff>
 {
 }
 
-impl<Inner, Deliverer: DatagramDeliverer<Inner>> ErasedDatagramDeliverer<Inner, Deliverer::Handoff>
-    for Deliverer
+impl<Inner, Local, Deliverer: DatagramDeliverer<Inner, Local>>
+    ErasedDatagramDeliverer<Inner, Local, Deliverer::Handoff> for Deliverer
 {
 }
 
@@ -96,15 +96,15 @@ impl<Inner, Deliverer: DatagramDeliverer<Inner>> ErasedDatagramDeliverer<Inner, 
 /// # use sakuya_datagram_routing::claim::delivery::DatagramDelivery;
 /// # use sakuya_datagram_routing::claim::erased::SendDatagramDeliverer;
 /// # use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
-/// struct Local(Rc<RefCell<Vec<DatagramDelivery<Vec<u8>, ReleaseUnclaimed>>>>);
+/// struct Local(Rc<RefCell<Vec<DatagramDelivery<Vec<u8>, (), ReleaseUnclaimed>>>>);
 ///
-/// impl DatagramDeliverer<Vec<u8>> for Local {
-///     fn deliver(&self, delivery: DatagramDelivery<Vec<u8>, ReleaseUnclaimed>) {
+/// impl DatagramDeliverer<Vec<u8>, ()> for Local {
+///     fn deliver(&self, delivery: DatagramDelivery<Vec<u8>, (), ReleaseUnclaimed>) {
 ///         self.0.borrow_mut().push(delivery);
 ///     }
 /// }
 ///
-/// let shared: Arc<dyn SendDatagramDeliverer<Vec<u8>>> = Arc::new(Local(Rc::default()));
+/// let shared: Arc<dyn SendDatagramDeliverer<Vec<u8>, ()>> = Arc::new(Local(Rc::default()));
 /// ```
 ///
 /// Deliveries do not carry the deliverer, so nothing about them is checked
@@ -128,16 +128,16 @@ impl<Inner, Deliverer: DatagramDeliverer<Inner>> ErasedDatagramDeliverer<Inner, 
 /// /// Processes every delivery on the routing thread.
 /// struct Direct;
 ///
-/// impl DatagramDeliverer<Rc<[u8]>> for Direct {
-///     fn deliver(&self, _: DatagramDelivery<Rc<[u8]>, ReleaseUnclaimed>) {}
+/// impl DatagramDeliverer<Rc<[u8]>, ()> for Direct {
+///     fn deliver(&self, _: DatagramDelivery<Rc<[u8]>, (), ReleaseUnclaimed>) {}
 /// }
 ///
 /// fn assert_send<T: Send>() {}
 ///
-/// let shared: Arc<dyn SendDatagramDeliverer<Rc<[u8]>>> = Arc::new(Direct);
-/// assert_send::<Arc<dyn SendDatagramDeliverer<Rc<[u8]>>>>();
-/// assert_send::<DatagramClaimCandidate<Vec<u8>, ReleaseUnclaimed>>();
-/// assert_send::<DatagramDelivery<Vec<u8>, ReleaseUnclaimed>>();
+/// let shared: Arc<dyn SendDatagramDeliverer<Rc<[u8]>, ()>> = Arc::new(Direct);
+/// assert_send::<Arc<dyn SendDatagramDeliverer<Rc<[u8]>, ()>>>();
+/// assert_send::<DatagramClaimCandidate<Vec<u8>, (), ReleaseUnclaimed>>();
+/// assert_send::<DatagramDelivery<Vec<u8>, (), ReleaseUnclaimed>>();
 /// ```
 ///
 /// A deliverer erased into the local trait object has lost the evidence, even
@@ -151,19 +151,19 @@ impl<Inner, Deliverer: DatagramDeliverer<Inner>> ErasedDatagramDeliverer<Inner, 
 /// # use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
 /// struct Plain;
 ///
-/// impl DatagramDeliverer<Vec<u8>> for Plain {
-///     fn deliver(&self, _: DatagramDelivery<Vec<u8>, ReleaseUnclaimed>) {}
+/// impl DatagramDeliverer<Vec<u8>, ()> for Plain {
+///     fn deliver(&self, _: DatagramDelivery<Vec<u8>, (), ReleaseUnclaimed>) {}
 /// }
 ///
-/// let local: Arc<dyn ErasedDatagramDeliverer<Vec<u8>>> = Arc::new(Plain);
+/// let local: Arc<dyn ErasedDatagramDeliverer<Vec<u8>, ()>> = Arc::new(Plain);
 /// std::thread::spawn(move || drop(local));
 /// ```
-pub trait SendDatagramDeliverer<Inner, Handoff: UnclaimedHandoff<Inner> = ReleaseUnclaimed>:
-    ErasedDatagramDeliverer<Inner, Handoff> + Send + Sync
+pub trait SendDatagramDeliverer<Inner, Local, Handoff: UnclaimedHandoff<Inner> = ReleaseUnclaimed>:
+    ErasedDatagramDeliverer<Inner, Local, Handoff> + Send + Sync
 {
 }
 
-impl<Inner, Deliverer> SendDatagramDeliverer<Inner, Deliverer::Handoff> for Deliverer where
-    Deliverer: DatagramDeliverer<Inner> + Send + Sync
+impl<Inner, Local, Deliverer> SendDatagramDeliverer<Inner, Local, Deliverer::Handoff> for Deliverer where
+    Deliverer: DatagramDeliverer<Inner, Local> + Send + Sync
 {
 }

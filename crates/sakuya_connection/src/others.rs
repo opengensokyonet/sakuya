@@ -1,10 +1,8 @@
 //! The nodes a lend reaches besides the lent node and the nodes above it.
-use sakuya_link::LinkId;
-
 use crate::{
     call::CallBundle,
-    clock::{ConnectionChoices, InstantOf},
-    layer::{Established, LinkEntry, LinkPath, LogicalPath, NodeKey, Recovery},
+    clock::{ConnectionChoices, InstantOf, LinkIdOf},
+    layer::{Established, LinkEntry, LinkPath, LogicalPath, NodeKey, NodeKeyOf, Recovery},
     share::{FlatMut, NodeData, PartList, PathKey},
     take::{GetAt, RefsOf, TakeEach},
     tree::{
@@ -26,7 +24,7 @@ pub struct OtherNodes<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> {
     established: Option<&'v mut EstablishedNode<T, L, B>>,
     here_recovery: Option<&'v mut RecoveryNode<T, L, B>>,
     taken: &'v mut Vec<(NodeAddr, usize)>,
-    here: NodeKey<PathKey<L>>,
+    here: NodeKeyOf<T, L>,
     now: InstantOf<T>,
 }
 
@@ -40,7 +38,7 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
         established: Option<&'v mut EstablishedNode<T, L, B>>,
         here_recovery: Option<&'v mut RecoveryNode<T, L, B>>,
         taken: &'v mut Vec<(NodeAddr, usize)>,
-        here: NodeKey<PathKey<L>>,
+        here: NodeKeyOf<T, L>,
         now: InstantOf<T>,
     ) -> Self {
         Self {
@@ -57,7 +55,7 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
     }
 
     /// The lent node's key.
-    pub fn here(&self) -> &NodeKey<PathKey<L>> {
+    pub fn here(&self) -> &NodeKeyOf<T, L> {
         &self.here
     }
 
@@ -119,7 +117,7 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
 
     /// Take components `U` of the entry of the logical link `link`; `None`
     /// when there is no such entry among the others.
-    pub fn link_entry<'s, U, Is>(&'s mut self, link: &LinkId) -> Option<<U as RefsOf<'s>>::Out>
+    pub fn link_entry<'s, U, Is>(&'s mut self, link: &LinkIdOf<T>) -> Option<<U as RefsOf<'s>>::Out>
     where
         NodeData<T, L, LinkEntry>: FlatMut<'s>,
         <NodeData<T, L, LinkEntry> as FlatMut<'s>>::Out: TakeEach<'s, U, Is>,
@@ -167,7 +165,7 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
     pub fn link_path<'s, U, Is>(
         &'s mut self,
         path: &PathKey<L>,
-        link: &LinkId,
+        link: &LinkIdOf<T>,
     ) -> Option<<U as RefsOf<'s>>::Out>
     where
         NodeData<T, L, LinkPath>: FlatMut<'s>,
@@ -210,7 +208,7 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
     fn find_link_path(
         &mut self,
         path: &PathKey<L>,
-        link: &LinkId,
+        link: &LinkIdOf<T>,
     ) -> Option<(NodeAddr, &mut LinkPathNodeOf<T, L, B>)> {
         let key = NodeKey::LinkPath(path.clone(), link.clone());
         let Self {
@@ -246,7 +244,7 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
     pub fn with_recovery_at<U, Is, R>(
         &mut self,
         path: &PathKey<L>,
-        link: &LinkId,
+        link: &LinkIdOf<T>,
         each: impl for<'x> FnOnce(<U as RefsOf<'x>>::Out, &'x Self) -> R,
     ) -> Option<R>
     where
@@ -274,7 +272,7 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
     /// was taken. Nothing is taken.
     pub fn each_recovery<'s>(
         &'s self,
-        mut each: impl FnMut(&'s NodeKey<PathKey<L>>, &'s NodeData<T, L, Recovery>),
+        mut each: impl FnMut(&'s NodeKeyOf<T, L>, &'s NodeData<T, L, Recovery>),
     ) {
         if let Some(own) = self.here_recovery.as_deref() {
             each(&own.key, &own.data);
@@ -300,7 +298,7 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
     /// and hand them to `each` with the link path's key.
     pub fn each_link_path<'s, U, Is>(
         &'s mut self,
-        mut each: impl FnMut(&NodeKey<PathKey<L>>, <U as RefsOf<'s>>::Out),
+        mut each: impl FnMut(&NodeKeyOf<T, L>, <U as RefsOf<'s>>::Out),
     ) where
         NodeData<T, L, LinkPath>: FlatMut<'s>,
         <NodeData<T, L, LinkPath> as FlatMut<'s>>::Out: TakeEach<'s, U, Is>,
@@ -336,10 +334,8 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
 
     /// Read the component `X` of every other link path, of every logical
     /// path; nothing is taken.
-    pub fn each_link_path_read<'s, X, I>(
-        &'s mut self,
-        mut each: impl FnMut(&NodeKey<PathKey<L>>, &X),
-    ) where
+    pub fn each_link_path_read<'s, X, I>(&'s mut self, mut each: impl FnMut(&NodeKeyOf<T, L>, &X))
+    where
         NodeData<T, L, LinkPath>: FlatMut<'s>,
         <NodeData<T, L, LinkPath> as FlatMut<'s>>::Out: GetAt<X, I>,
     {
@@ -368,7 +364,7 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
     /// nothing is taken.
     pub fn each_recovery_read<'s, X, I>(
         &'s mut self,
-        mut each: impl FnMut(&NodeKey<PathKey<L>>, Option<&X>),
+        mut each: impl FnMut(&NodeKeyOf<T, L>, Option<&X>),
     ) where
         NodeData<T, L, Recovery>: FlatMut<'s>,
         <NodeData<T, L, Recovery> as FlatMut<'s>>::Out: GetAt<X, I>,
@@ -399,7 +395,7 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
     }
 
     /// The keys of the other link paths, of every logical path.
-    pub fn link_path_keys(&self) -> impl Iterator<Item = &NodeKey<PathKey<L>>> {
+    pub fn link_path_keys(&self) -> impl Iterator<Item = &NodeKeyOf<T, L>> {
         let here = self
             .here_path
             .is_some()

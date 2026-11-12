@@ -5,7 +5,7 @@ use std::pin::pin;
 use std::task::Waker;
 
 use super::support::{
-    Delivery, Judging, Probe, TestDatagram, UnclaimedSink, drops, poll_with, ready, route,
+    Delivery, Judging, Local, Probe, TestDatagram, UnclaimedSink, drops, poll_with, ready, route,
 };
 use crate::claim::candidate::DatagramClaimAttempt;
 use crate::claim::deliverer::DatagramDeliverer;
@@ -80,7 +80,7 @@ fn panic_after_the_take_leaves_the_slot_empty() {
 /// Panics in `deliver`, as when a deliverer consumes on the spot and fails.
 struct PanickingDeliverer;
 
-impl DatagramDeliverer<TestDatagram> for PanickingDeliverer {
+impl DatagramDeliverer<TestDatagram, Local> for PanickingDeliverer {
     type Handoff = UnclaimedSink;
 
     fn deliver(&self, _delivery: Delivery) {
@@ -98,10 +98,8 @@ fn deliver_panic_releases_the_candidates_not_yet_delivered() {
     let later = Probe::new(Judging::Accept);
     let sink = UnclaimedSink::default();
     let (datagram, datagram_drops) = TestDatagram::new(b"dispatch");
-    let entries: Vec<(
-        Arc<dyn SendDatagramDeliverer<TestDatagram, UnclaimedSink>>,
-        _,
-    )> = vec![
+    type Target = dyn SendDatagramDeliverer<TestDatagram, Local, UnclaimedSink>;
+    let entries: Vec<(Arc<Target>, _)> = vec![
         (Arc::new(PanickingDeliverer), super::support::route_info()),
         (later.clone(), super::support::route_info()),
     ];

@@ -16,7 +16,7 @@ use std::task::{Poll, Waker};
 use tokio::sync::Notify;
 
 use super::support::{
-    Judging, Probe, TestDatagram, UnclaimedSink, WakeCount, poll_with, ready, route,
+    Judging, Local, Probe, TestDatagram, UnclaimedSink, WakeCount, poll_with, ready, route,
 };
 use crate::claim::candidate::DatagramClaimAttempt;
 use crate::claim::candidate::{DatagramClaimAccess, DatagramClaimOutcome};
@@ -81,7 +81,7 @@ impl PathReceiver {
         &mut self,
     ) -> impl for<'access> FnOnce(
         DatagramClaimAccess<'access, TestDatagram>,
-        &DatagramRouteMatchInfo,
+        &DatagramRouteMatchInfo<Local>,
     ) -> DatagramClaimOutcome<
         'access,
         Authenticated,
@@ -121,7 +121,7 @@ impl PathReceiver {
     /// acceptance rules, then commits.
     fn process(
         &mut self,
-        delivery: ExclusiveDatagramDelivery<TestDatagram>,
+        delivery: ExclusiveDatagramDelivery<TestDatagram, Local>,
         packet: Authenticated,
     ) -> bool {
         let (_datagram, _route) = delivery.consume();

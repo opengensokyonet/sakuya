@@ -21,6 +21,9 @@ use crate::claim::shared::DatagramFinishPolicy;
 use crate::route::association::MatchAssociation;
 use crate::route::interpretation::FirstPacketInterpretation;
 
+/// This side's end of the links the tests pretend datagrams arrive on.
+pub(super) type Local = u32;
+
 /// A datagram that counts how often it is dropped.
 #[derive(Debug)]
 pub(super) struct TestDatagram {
@@ -64,10 +67,10 @@ pub(super) enum Judging {
 }
 
 /// What every probe receives.
-pub(super) type Delivery = DatagramDelivery<TestDatagram, UnclaimedSink>;
+pub(super) type Delivery = DatagramDelivery<TestDatagram, Local, UnclaimedSink>;
 
 /// What every probe's candidate is.
-pub(super) type Candidate = DatagramClaimCandidate<TestDatagram, UnclaimedSink>;
+pub(super) type Candidate = DatagramClaimCandidate<TestDatagram, Local, UnclaimedSink>;
 
 /// A deliverer that keeps every delivery, together with the judgment its
 /// receiver passes to attempts.
@@ -105,7 +108,7 @@ impl Probe {
         self: &Arc<Self>,
     ) -> impl for<'access> FnOnce(
         DatagramClaimAccess<'access, TestDatagram>,
-        &DatagramRouteMatchInfo,
+        &DatagramRouteMatchInfo<Local>,
     ) -> DatagramClaimOutcome<'access, usize, usize, TestDatagram>
     + Send
     + 'static {
@@ -145,7 +148,7 @@ impl Probe {
         }
     }
 
-    pub(super) fn take_exclusive(&self) -> ExclusiveDatagramDelivery<TestDatagram> {
+    pub(super) fn take_exclusive(&self) -> ExclusiveDatagramDelivery<TestDatagram, Local> {
         match self.take_delivery() {
             DatagramDelivery::Exclusive(delivery) => delivery,
             DatagramDelivery::Competing(_) => panic!("expected an exclusive delivery"),
@@ -153,7 +156,7 @@ impl Probe {
     }
 }
 
-impl DatagramDeliverer<TestDatagram> for Probe {
+impl DatagramDeliverer<TestDatagram, Local> for Probe {
     type Handoff = UnclaimedSink;
 
     fn deliver(&self, delivery: Delivery) {
@@ -186,9 +189,9 @@ impl UnclaimedSink {
 }
 
 /// Match information for a candidate; the claim mechanism does not read it.
-pub(super) fn route_info() -> DatagramRouteMatchInfo {
+pub(super) fn route_info() -> DatagramRouteMatchInfo<Local> {
     DatagramRouteMatchInfo::new(
-        MatchAssociation::ZeroCid(sakuya_link::BindingId::new::<TestDatagram>()),
+        MatchAssociation::ZeroCid(7),
         FirstPacketInterpretation::Short {
             dcid_len: ConnectionIdLength::ZERO,
         },
@@ -204,7 +207,7 @@ pub(super) fn route(
     let entries = probes
         .iter()
         .map(|probe| {
-            let erased: Arc<dyn SendDatagramDeliverer<TestDatagram, UnclaimedSink>> =
+            let erased: Arc<dyn SendDatagramDeliverer<TestDatagram, Local, UnclaimedSink>> =
                 Arc::clone(probe) as _;
             (erased, route_info())
         })

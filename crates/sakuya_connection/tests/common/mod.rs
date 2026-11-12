@@ -57,18 +57,24 @@ impl MonotonicClock for TestClock {
     }
 }
 
-/// A link of the tests: an identity and nothing else.
+/// A link of the tests: an identity and nothing else; its two ends are
+/// `()`.
 #[derive(Clone, Debug)]
-pub struct TestLink(pub LinkId);
+pub struct TestLink(pub TestLinkId);
+
+/// The identity of a [`TestLink`].
+pub type TestLinkId = LinkId<(), ()>;
 
 impl Link for TestLink {
+    type Local = ();
+    type Peer = ();
     type Payload = Vec<u8>;
     type Instant = Duration;
     type MaxDatagramSizeError = ();
     type SendError = ();
     type Send<'a> = core::future::Ready<Result<SendAcceptance<Duration>, ()>>;
     type MaxDatagramSizeChanged = core::future::Pending<()>;
-    fn id(&self) -> &LinkId {
+    fn id(&self) -> &TestLinkId {
         &self.0
     }
     fn may_mark_ecn(&self) -> bool {

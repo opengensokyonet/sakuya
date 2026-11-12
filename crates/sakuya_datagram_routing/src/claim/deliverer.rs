@@ -22,7 +22,7 @@ use super::finish::{ReleaseUnclaimed, UnclaimedHandoff};
 /// The trait requires neither `Send`, `Sync` nor `'static`; thread constraints
 /// apply where objects actually cross threads (see the [module
 /// documentation](super#thread-constraints)).
-pub trait DatagramDeliverer<Inner> {
+pub trait DatagramDeliverer<Inner, Local> {
     /// What takes over a datagram that every candidate left, in the routing
     /// domain this deliverer serves.
     ///
@@ -42,5 +42,5 @@ pub trait DatagramDeliverer<Inner> {
     /// [consumed](super::delivery::ExclusiveDatagramDelivery::consume).
     /// Attempting or consuming on the spot runs that work on the caller's
     /// stack. A deliverer that can no longer accept deliveries drops them.
-    fn deliver(&self, delivery: DatagramDelivery<Inner, Self::Handoff>);
+    fn deliver(&self, delivery: DatagramDelivery<Inner, Local, Self::Handoff>);
 }

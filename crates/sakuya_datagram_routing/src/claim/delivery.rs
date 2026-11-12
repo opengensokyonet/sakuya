@@ -13,15 +13,15 @@ use super::route_match::DatagramRouteMatchInfo;
 /// [`Competing`](Self::Competing) never run a judgment and never create a
 /// participant. Its type names the datagram and the routing domain's handoff,
 /// never the deliverer.
-pub enum DatagramDelivery<Inner, Handoff: UnclaimedHandoff<Inner>> {
+pub enum DatagramDelivery<Inner, Local, Handoff: UnclaimedHandoff<Inner>> {
     /// The datagram has several possible owners; the receiver attempts it with
     /// [`DatagramClaimCandidate::try_exclusive`] and consumes the delivery a
     /// claimed attempt returns. An unclaimed candidate can be kept as it is or
     /// wrapped here again.
-    Competing(DatagramClaimCandidate<Inner, Handoff>),
+    Competing(DatagramClaimCandidate<Inner, Local, Handoff>),
     /// The datagram already belongs to this delivery; the receiver
     /// [consumes](ExclusiveDatagramDelivery::consume) it.
-    Exclusive(ExclusiveDatagramDelivery<Inner>),
+    Exclusive(ExclusiveDatagramDelivery<Inner, Local>),
 }
 
 /// A datagram owned by one candidate, with the route match information
@@ -32,18 +32,21 @@ pub enum DatagramDelivery<Inner, Handoff: UnclaimedHandoff<Inner>> {
 /// Nothing else can create one, and it cannot be cloned. It does not refer to
 /// any deliverer. Dropping it releases the datagram; it is never put back for
 /// other candidates.
-pub struct ExclusiveDatagramDelivery<Inner> {
+pub struct ExclusiveDatagramDelivery<Inner, Local> {
     datagram: ExclusiveDatagram<Inner>,
-    route: DatagramRouteMatchInfo,
+    route: DatagramRouteMatchInfo<Local>,
 }
 
-impl<Inner> ExclusiveDatagramDelivery<Inner> {
-    pub(super) fn new(datagram: ExclusiveDatagram<Inner>, route: DatagramRouteMatchInfo) -> Self {
+impl<Inner, Local> ExclusiveDatagramDelivery<Inner, Local> {
+    pub(super) fn new(
+        datagram: ExclusiveDatagram<Inner>,
+        route: DatagramRouteMatchInfo<Local>,
+    ) -> Self {
         Self { datagram, route }
     }
 
     /// What routing recorded about this delivery's match.
-    pub fn route_match(&self) -> &DatagramRouteMatchInfo {
+    pub fn route_match(&self) -> &DatagramRouteMatchInfo<Local> {
         &self.route
     }
 
@@ -52,7 +55,7 @@ impl<Inner> ExclusiveDatagramDelivery<Inner> {
     /// It runs no judgment and never waits. It only starts the processing of
     /// the datagram; it does not mean that any packet was processed,
     /// authenticated or accepted.
-    pub fn consume(self) -> (ExclusiveDatagram<Inner>, DatagramRouteMatchInfo) {
+    pub fn consume(self) -> (ExclusiveDatagram<Inner>, DatagramRouteMatchInfo<Local>) {
         (self.datagram, self.route)
     }
 }
@@ -97,7 +100,9 @@ impl<Inner: AsRef<[u8]>> ExclusiveDatagram<Inner> {
     }
 }
 
-impl<Inner, Handoff: UnclaimedHandoff<Inner>> fmt::Debug for DatagramDelivery<Inner, Handoff> {
+impl<Inner, Local: fmt::Debug, Handoff: UnclaimedHandoff<Inner>> fmt::Debug
+    for DatagramDelivery<Inner, Local, Handoff>
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Competing(candidate) => f.debug_tuple("Competing").field(candidate).finish(),
@@ -106,7 +111,7 @@ impl<Inner, Handoff: UnclaimedHandoff<Inner>> fmt::Debug for DatagramDelivery<In
     }
 }
 
-impl<Inner> fmt::Debug for ExclusiveDatagramDelivery<Inner> {
+impl<Inner, Local: fmt::Debug> fmt::Debug for ExclusiveDatagramDelivery<Inner, Local> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ExclusiveDatagramDelivery")
             .field("route", &self.route)

@@ -37,7 +37,7 @@ use sakuya_wire::{
 
 use crate::{
     call::CallBundle,
-    clock::{ConnectionChoices, InstantOf},
+    clock::{ConnectionChoices, InstantOf, LinkIdOf},
     component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
     layer::{self, NodeKey},
     others::OtherNodes,
@@ -50,7 +50,7 @@ use super::{
 };
 
 /// The recovery factory of the choices `T` for the list of parts `L`.
-pub type RecoveryFactoryOf<T, L> = <T as Choices>::Recovery<LinkPathIdentifierOf<L>>;
+pub type RecoveryFactoryOf<T, L> = <T as Choices>::Recovery<LinkPathIdentifierOf<T, L>>;
 /// The configuration the recovery factory is made from.
 pub type RecoveryConfigOf<T, L> =
     <RecoveryFactoryOf<T, L> as RecoveryFactory<<T as ConnectionChoices>::Link>>::Config;
@@ -65,7 +65,8 @@ pub type CongestionPartOf<T, L> =
 pub type PmtuOf<T, L> =
     <RecoveryFactoryOf<T, L> as RecoveryFactory<<T as ConnectionChoices>::Link>>::Pmtu;
 /// The other link paths as the recovery factory sees them when it lends.
-pub type OthersOf<'s, T, L> = OtherCongestionParts<'s, PathKey<L>, CongestionPartOf<T, L>>;
+pub type OthersOf<'s, T, L> =
+    OtherCongestionParts<'s, PathKey<L>, LinkIdOf<T>, CongestionPartOf<T, L>>;
 
 /// Where the recovery factory is among the connection's components.
 #[derive(Debug)]
@@ -90,7 +91,7 @@ pub struct ChosenRecoveryParts;
 /// The factory is made from its configuration when the connection is.
 impl<T, L, X, I> Build<T, L, layer::Connection, (ChosenRecoveryFactory, I)> for X
 where
-    T: Choices<Recovery<LinkPathIdentifierOf<L>> = X>,
+    T: Choices<Recovery<LinkPathIdentifierOf<T, L>> = X>,
     for<'v> L: LineageLists<'v, T>,
     X: RecoveryFactory<T::Link>,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
@@ -104,7 +105,7 @@ where
 }
 impl<T, L, X> DataComponent<T, L, layer::Connection, ChosenRecoveryFactory> for X
 where
-    T: Choices<Recovery<LinkPathIdentifierOf<L>> = X>,
+    T: Choices<Recovery<LinkPathIdentifierOf<T, L>> = X>,
     for<'v> L: LineageLists<'v, T>,
 {
 }
@@ -297,29 +298,35 @@ where
 ///
 /// The link path whose access is lent is not among them, nor is a link path
 /// without a recovery layer.
-pub struct OtherCongestionParts<'s, K, P> {
-    each: &'s dyn EachCongestionPart<K, P>,
+///
+/// `K` is the key of a logical path, `Id` the identity of a link
+/// ([`LinkIdOf`]), `P` the part.
+pub struct OtherCongestionParts<'s, K, Id, P> {
+    each: &'s dyn EachCongestionPart<K, Id, P>,
 }
 
-impl<K, P> OtherCongestionParts<'_, K, P> {
+impl<K, Id, P> OtherCongestionParts<'_, K, Id, P> {
     /// Each of the other link paths with a recovery layer: the key of the
     /// layer, its part, its RTT estimate.
-    pub fn each(&self, mut each: impl FnMut(&NodeKey<K>, &P, RttEstimate)) {
+    pub fn each(&self, mut each: impl FnMut(&NodeKey<K, Id>, &P, RttEstimate)) {
         self.each.each(&mut each);
     }
 }
 
-impl<K, P> fmt::Debug for OtherCongestionParts<'_, K, P> {
+impl<K, Id, P> fmt::Debug for OtherCongestionParts<'_, K, Id, P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OtherCongestionParts")
             .finish_non_exhaustive()
     }
 }
 
+/// What is called for each of the other recovery layers.
+pub(crate) type EachPart<'f, K, Id, P> = dyn FnMut(&NodeKey<K, Id>, &P, RttEstimate) + 'f;
+
 /// Going over the other recovery layers, whatever the calls of the tree
 /// are.
-pub(crate) trait EachCongestionPart<K, P> {
-    fn each(&self, each: &mut dyn FnMut(&NodeKey<K>, &P, RttEstimate));
+pub(crate) trait EachCongestionPart<K, Id, P> {
+    fn each(&self, each: &mut EachPart<'_, K, Id, P>);
 }
 
 /// The recovery layers reached from a lend, read by the positions of the
@@ -337,7 +344,7 @@ struct RecoveryLayers<
     positions: PhantomData<fn() -> (Ix, Ir)>,
 }
 
-impl<T, L, B, Ix, Ir> EachCongestionPart<PathKey<L>, CongestionPartOf<T, L>>
+impl<T, L, B, Ix, Ir> EachCongestionPart<PathKey<L>, LinkIdOf<T>, CongestionPartOf<T, L>>
     for RecoveryLayers<'_, '_, T, L, B, Ix, Ir>
 where
     T: Choices,
@@ -347,10 +354,7 @@ where
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out:
         Selector<&'a CongestionPartOf<T, L>, Ix> + Selector<&'a RttOf<T, L>, Ir>,
 {
-    fn each(
-        &self,
-        each: &mut dyn FnMut(&NodeKey<PathKey<L>>, &CongestionPartOf<T, L>, RttEstimate),
-    ) {
+    fn each(&self, each: &mut EachPart<'_, PathKey<L>, LinkIdOf<T>, CongestionPartOf<T, L>>) {
         self.others.each_recovery(|key, data| {
             let flat = data.flat_ref();
             let part: &&CongestionPartOf<T, L> = Selector::<_, Ix>::get(&flat);

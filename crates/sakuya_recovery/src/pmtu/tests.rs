@@ -6,20 +6,20 @@ use core::{
     num::{NonZeroU8, NonZeroU32, NonZeroUsize},
     time::Duration,
 };
-use sakuya_link::{BindingId, Link, LinkId, OutgoingDatagram, SendAcceptance};
+use sakuya_link::{Link, LinkId, OutgoingDatagram, SendAcceptance};
 use std::{cell::Cell, rc::Rc};
 
 /// A link whose shared conclusion follows the rules of the two records.
 #[derive(Clone, Debug)]
 struct SharingLink {
-    id: LinkId,
+    id: LinkId<(), ()>,
     shared: Rc<Cell<usize>>,
 }
 
 impl SharingLink {
     fn new() -> Self {
         Self {
-            id: LinkId::new::<()>(BindingId::new::<()>()),
+            id: LinkId::new::<()>((), ()),
             shared: Rc::new(Cell::new(1200)),
         }
     }
@@ -32,13 +32,15 @@ impl SharingLink {
 }
 
 impl Link for SharingLink {
+    type Local = ();
+    type Peer = ();
     type Payload = Vec<u8>;
     type Instant = Duration;
     type MaxDatagramSizeError = ();
     type SendError = ();
     type Send<'a> = core::future::Pending<Result<SendAcceptance<Duration>, ()>>;
     type MaxDatagramSizeChanged = core::future::Pending<()>;
-    fn id(&self) -> &LinkId {
+    fn id(&self) -> &LinkId<(), ()> {
         &self.id
     }
     fn may_mark_ecn(&self) -> bool {
@@ -64,7 +66,7 @@ impl Link for SharingLink {
     }
 }
 
-type Policy = BinarySearchPmtuPolicy<Duration>;
+type Policy = BinarySearchPmtuPolicy<Duration, (), ()>;
 
 fn secs(value: u64) -> Duration {
     Duration::from_secs(value)

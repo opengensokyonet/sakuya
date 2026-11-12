@@ -175,13 +175,16 @@ impl InitialSizeBelowMinimumError {
 ///   first link it starts from the larger of the shared conclusion and its
 ///   initial size. When the link path moves to another logical link (only
 ///   the port changed), it hands its conclusion to the new link.
+///
+/// `I` is the link's instant, and `Local` and `Peer` the types of its two
+/// ends, which the identity of the last link seen carries.
 #[derive(Clone, Debug)]
-pub struct BinarySearchPmtuPolicy<I> {
+pub struct BinarySearchPmtuPolicy<I, Local, Peer> {
     config: BinarySearchPmtuPolicyConfig,
     conclusion: usize,
     ceiling: Option<usize>,
     /// The link last seen and its shared conclusion then.
-    link: Option<(LinkId, usize)>,
+    link: Option<(LinkId<Local, Peer>, usize)>,
     /// What to hand to the link at the next datagram.
     record: Option<ConclusionRecord>,
     search: Search<I>,
@@ -219,7 +222,7 @@ impl<I> Search<I> {
     };
 }
 
-impl<I> BinarySearchPmtuPolicy<I> {
+impl<I, Local, Peer> BinarySearchPmtuPolicy<I, Local, Peer> {
     /// A policy that has not seen a link yet.
     pub const fn new(config: BinarySearchPmtuPolicyConfig) -> Self {
         Self {
@@ -264,7 +267,7 @@ impl<I> BinarySearchPmtuPolicy<I> {
     }
 }
 
-impl<I: Copy + Add<Duration, Output = I>> BinarySearchPmtuPolicy<I> {
+impl<I: Copy + Add<Duration, Output = I>, Local, Peer> BinarySearchPmtuPolicy<I, Local, Peer> {
     /// Ends the search if nothing is left to probe.
     fn settle(&mut self, now: I) {
         let raise_at = Some(now + self.config.raise_interval);
@@ -288,7 +291,7 @@ impl<I: Copy + Add<Duration, Output = I>> BinarySearchPmtuPolicy<I> {
     }
 }
 
-impl<L> PmtuPolicy<L> for BinarySearchPmtuPolicy<L::Instant>
+impl<L> PmtuPolicy<L> for BinarySearchPmtuPolicy<L::Instant, L::Local, L::Peer>
 where
     L: Link,
     L::Instant: Copy + Add<Duration, Output = L::Instant>,

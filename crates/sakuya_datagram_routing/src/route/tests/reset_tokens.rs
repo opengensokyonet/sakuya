@@ -3,7 +3,6 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use sakuya_link::LinkId;
 use sakuya_wire::connection_id::StatelessResetToken;
 
 use super::support::*;
@@ -18,8 +17,8 @@ fn reset_datagram() -> Vec<u8> {
     bytes
 }
 
-fn any_link() -> LinkId {
-    link(&binding())
+fn any_link() -> TestLinkId {
+    link(&local_end())
 }
 
 #[test]

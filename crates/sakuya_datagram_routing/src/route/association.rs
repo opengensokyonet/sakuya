@@ -3,7 +3,6 @@
 use std::fmt;
 use std::ops::BitOr;
 
-use sakuya_link::BindingId;
 use sakuya_wire::connection_id::NonEmptyCid;
 use sakuya_wire::v1::header::LongPacketType;
 use sakuya_wire::version::Version;
@@ -13,21 +12,23 @@ use super::interpretation::FirstPacketInterpretation;
 /// The key under which a route entry is found.
 ///
 /// All three kinds hold any number of entries: several connections may use
-/// the same non-empty connection ID, and one link binding may carry several
+/// the same non-empty connection ID, and one local end of a link may carry several
 /// zero-length connection ID receivers. A collision is a case for connection
 /// ID generation to avoid, never a reason to refuse a registration.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub enum MatchAssociation {
+pub enum MatchAssociation<Local> {
     /// A non-empty connection ID this side issued for receiving.
     LocalCid(NonEmptyCid),
     /// A non-empty destination connection ID under which this side receives
     /// Initial packets, and the 0-RTT packets that use the same value. After a
     /// Retry it differs from the client's original destination connection ID.
     InitialDcid(NonEmptyCid),
-    /// Receiving with the zero-length connection ID on the link binding that
-    /// produced the arrival link. Only an explicit zero-length interpretation
-    /// looks it up; it is never a fallback for a failed lookup.
-    ZeroCid(BindingId),
+    /// Receiving with the zero-length connection ID on this side's end of the
+    /// arrival link ([`sakuya_link::Link::Local`]). The peer's end does not
+    /// take part, so a peer that changed address still finds it. Only an
+    /// explicit zero-length interpretation looks it up; it is never a fallback
+    /// for a failed lookup.
+    ZeroCid(Local),
 }
 
 /// A set of packet forms a route entry applies to.
@@ -112,15 +113,15 @@ impl fmt::Debug for PacketForms {
 /// version, the version equals [`version`](Self::version). Version
 /// Negotiation and short headers carry no version to compare.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RouteMatcher {
-    association: MatchAssociation,
+pub struct RouteMatcher<Local> {
+    association: MatchAssociation<Local>,
     forms: PacketForms,
     version: Version,
 }
 
-impl RouteMatcher {
+impl<Local> RouteMatcher<Local> {
     /// Matches `association` for the packets in `forms` of `version`.
-    pub fn new(association: MatchAssociation, forms: PacketForms, version: Version) -> Self {
+    pub fn new(association: MatchAssociation<Local>, forms: PacketForms, version: Version) -> Self {
         Self {
             association,
             forms,
@@ -129,7 +130,7 @@ impl RouteMatcher {
     }
 
     /// The association the entry is registered under.
-    pub fn association(&self) -> &MatchAssociation {
+    pub fn association(&self) -> &MatchAssociation<Local> {
         &self.association
     }
 

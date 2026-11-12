@@ -202,7 +202,7 @@ where
     type Via = Via;
     type Rtt = Rfc9002RttEstimator<Via>;
     type CongestionPart = PacedNewReno<L::Instant>;
-    type Pmtu = BinarySearchPmtuPolicy<L::Instant>;
+    type Pmtu = BinarySearchPmtuPolicy<L::Instant, L::Local, L::Peer>;
 
     fn new(config: &NewRenoRecoveryFactoryConfig) -> Self {
         Self {

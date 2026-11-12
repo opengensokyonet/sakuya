@@ -3,7 +3,7 @@
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use super::support::{TestDatagram, drops, ready};
+use super::support::{Local, TestDatagram, drops, ready};
 use crate::claim::candidate::DatagramClaimAttempt;
 use crate::claim::candidate::DatagramClaimOutcome;
 use crate::claim::deliverer::DatagramDeliverer;
@@ -14,14 +14,14 @@ use crate::claim::group::prepare_claim;
 use crate::claim::queue::{DatagramDeliveryPoster, DatagramDeliveryQueue};
 use crate::claim::shared::DatagramFinishPolicy;
 
-type Delivery = DatagramDelivery<TestDatagram, ReleaseUnclaimed>;
+type Delivery = DatagramDelivery<TestDatagram, Local, ReleaseUnclaimed>;
 
 /// Queues every delivery for its receiver.
 struct Queued {
     poster: DatagramDeliveryPoster<Delivery>,
 }
 
-impl DatagramDeliverer<TestDatagram> for Queued {
+impl DatagramDeliverer<TestDatagram, Local> for Queued {
     fn deliver(&self, delivery: Delivery) {
         self.poster.post(delivery);
     }
@@ -43,7 +43,8 @@ fn route_to(
     let entries = deliverers
         .iter()
         .map(|deliverer| {
-            let erased: Arc<dyn SendDatagramDeliverer<TestDatagram>> = Arc::clone(deliverer) as _;
+            let erased: Arc<dyn SendDatagramDeliverer<TestDatagram, Local>> =
+                Arc::clone(deliverer) as _;
             (erased, super::support::route_info())
         })
         .collect::<Vec<_>>();

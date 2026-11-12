@@ -1,5 +1,6 @@
 //! The routing input: one received datagram and the link it arrived on
 
+use std::hash::Hash;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -8,34 +9,54 @@ use sakuya_link::LinkId;
 /// A link whose identity routing can read.
 ///
 /// Routing needs only the identity of the link a datagram arrived on: zero
-/// length connection IDs are looked up by the link binding that produced it,
-/// which [`LinkId::binding_id`] gives. Remote addresses and other facts come
-/// from the transport adapter and are not part of this trait.
+/// length connection IDs are looked up by the arrival link's end on this side
+/// (its `local` field), as RFC 9000 section 5.2.1 has a client that chose
+/// zero-length connection IDs identify its connections by local address and
+/// port. Remote addresses and other facts come from the transport adapter and
+/// are not part of this trait.
 pub trait LinkIdentity {
+    /// This side's end of the link ([`sakuya_link::Link::Local`]).
+    type Local: Clone + Eq + Hash;
+
+    /// The peer's end of the link ([`sakuya_link::Link::Peer`]).
+    type Peer;
+
     /// The identity of this link.
-    fn link_id(&self) -> &LinkId;
+    fn link_id(&self) -> &LinkId<Self::Local, Self::Peer>;
 }
 
-impl LinkIdentity for LinkId {
-    fn link_id(&self) -> &LinkId {
+impl<Local: Clone + Eq + Hash, Peer> LinkIdentity for LinkId<Local, Peer> {
+    type Local = Local;
+    type Peer = Peer;
+
+    fn link_id(&self) -> &LinkId<Local, Peer> {
         self
     }
 }
 
 impl<Link: LinkIdentity + ?Sized> LinkIdentity for &Link {
-    fn link_id(&self) -> &LinkId {
+    type Local = Link::Local;
+    type Peer = Link::Peer;
+
+    fn link_id(&self) -> &LinkId<Link::Local, Link::Peer> {
         (**self).link_id()
     }
 }
 
 impl<Link: LinkIdentity + ?Sized> LinkIdentity for Arc<Link> {
-    fn link_id(&self) -> &LinkId {
+    type Local = Link::Local;
+    type Peer = Link::Peer;
+
+    fn link_id(&self) -> &LinkId<Link::Local, Link::Peer> {
         (**self).link_id()
     }
 }
 
 impl<Link: LinkIdentity + ?Sized> LinkIdentity for Rc<Link> {
-    fn link_id(&self) -> &LinkId {
+    type Local = Link::Local;
+    type Peer = Link::Peer;
+
+    fn link_id(&self) -> &LinkId<Link::Local, Link::Peer> {
         (**self).link_id()
     }
 }
@@ -43,7 +64,7 @@ impl<Link: LinkIdentity + ?Sized> LinkIdentity for Rc<Link> {
 /// One complete UDP datagram as a link delivered it, with that link.
 ///
 /// It keeps only the complete payload and the link. The link identity, and
-/// through it the link binding identity, are read from the link when needed
+/// through it this side's end of the link, are read from the link when needed
 /// rather than stored again. Every datagram has exactly one original that a
 /// candidate can take.
 ///

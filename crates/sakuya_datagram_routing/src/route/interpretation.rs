@@ -1,6 +1,5 @@
 //! First-packet interpretations and the Initial context routing recognized
 
-use sakuya_link::BindingId;
 use sakuya_wire::connection_id::ConnectionIdLength;
 use sakuya_wire::connection_id::{ConnectionId, NonEmptyCid};
 use sakuya_wire::v1::header::LongPacketType;
@@ -56,25 +55,25 @@ impl FirstPacketInterpretation {
 /// It states the header fields as they arrived; nothing in it is
 /// authenticated.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RecognizedInitial {
+pub struct RecognizedInitial<Local> {
     version: Version,
     dcid: ConnectionId,
     scid: ConnectionId,
-    binding: BindingId,
+    local: Local,
 }
 
-impl RecognizedInitial {
+impl<Local> RecognizedInitial<Local> {
     pub(crate) fn new(
         version: Version,
         dcid: ConnectionId,
         scid: ConnectionId,
-        binding: BindingId,
+        local: Local,
     ) -> Self {
         Self {
             version,
             dcid,
             scid,
-            binding,
+            local,
         }
     }
 
@@ -93,9 +92,9 @@ impl RecognizedInitial {
         &self.scid
     }
 
-    /// The link binding that produced the arrival link.
-    pub fn binding(&self) -> &BindingId {
-        &self.binding
+    /// This side's end of the arrival link.
+    pub fn local(&self) -> &Local {
+        &self.local
     }
 
     /// The interpretation of the Initial packet.
@@ -107,27 +106,34 @@ impl RecognizedInitial {
     }
 
     /// The association under which a receiver for this Initial is published:
-    /// the destination connection ID, or the link binding when it is empty.
-    pub fn association(&self) -> MatchAssociation {
+    /// the destination connection ID, or this side's end of the arrival link when it is empty.
+    pub fn association(&self) -> MatchAssociation<Local>
+    where
+        Local: Clone,
+    {
         match self.key() {
             InitialKey::Dcid(dcid) => MatchAssociation::InitialDcid(dcid),
-            InitialKey::Binding(binding) => MatchAssociation::ZeroCid(binding),
+            InitialKey::Local(local) => MatchAssociation::ZeroCid(local),
         }
     }
 
     /// The index key of [`association`](Self::association).
-    pub(crate) fn key(&self) -> InitialKey {
+    pub(crate) fn key(&self) -> InitialKey<Local>
+    where
+        Local: Clone,
+    {
         match NonEmptyCid::new(self.dcid) {
             Ok(dcid) => InitialKey::Dcid(dcid),
-            Err(_) => InitialKey::Binding(self.binding.clone()),
+            Err(_) => InitialKey::Local(self.local.clone()),
         }
     }
 }
 
 /// The index key under which a receiver for an Initial is published.
-pub(crate) enum InitialKey {
+pub(crate) enum InitialKey<Local> {
     /// A non-empty destination connection ID, under the Initial association.
     Dcid(NonEmptyCid),
-    /// The link binding of a zero-length destination connection ID.
-    Binding(BindingId),
+    /// This side's end of the arrival link, for a zero-length destination
+    /// connection ID.
+    Local(Local),
 }

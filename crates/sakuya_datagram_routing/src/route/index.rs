@@ -5,8 +5,8 @@
 //! synchronization boundary: inserting, revoking and the Initial recheck with
 //! publication of either kind all pass through the same map entry, so a reader
 //! can never combine an empty local list read before a hand-over with an empty
-//! Initial list read after it. Zero-length associations are kept per link
-//! binding.
+//! Initial list read after it. Zero-length associations are kept per local end
+//! of the arrival link.
 //!
 //! Every operation holds at most one map guard at a time and does only
 //! controlled index work under it: no `deliver`, judgment, reflow handoff or
@@ -15,12 +15,12 @@
 //! dropped, so that no deliverer is destroyed inside the index.
 
 use std::fmt;
+use std::hash::Hash;
 use std::sync::{Arc, Weak};
 
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry as MapEntry;
 use nitori_id::UniqueId;
-use sakuya_link::BindingId;
 use sakuya_wire::connection_id::NonEmptyCid;
 use smallvec::SmallVec;
 
@@ -35,14 +35,14 @@ use super::recognizer::ConnectionIdOccupancy;
 /// Every registration is its own instance with its own identity, even when it
 /// shares the deliverer, the association or the receiver with another one; a
 /// new registration under the same key never reuses an old identity.
-pub struct DatagramRouteEntry<Target: ?Sized> {
+pub struct DatagramRouteEntry<Target: ?Sized, Local> {
     id: UniqueId,
-    matcher: RouteMatcher,
+    matcher: RouteMatcher<Local>,
     deliverer: Arc<Target>,
 }
 
-impl<Target: ?Sized> DatagramRouteEntry<Target> {
-    fn new(matcher: RouteMatcher, deliverer: Arc<Target>) -> Arc<Self> {
+impl<Target: ?Sized, Local> DatagramRouteEntry<Target, Local> {
+    fn new(matcher: RouteMatcher<Local>, deliverer: Arc<Target>) -> Arc<Self> {
         Arc::new(Self {
             id: UniqueId::allocate(),
             matcher,
@@ -51,7 +51,7 @@ impl<Target: ?Sized> DatagramRouteEntry<Target> {
     }
 
     /// What the entry matches.
-    pub fn matcher(&self) -> &RouteMatcher {
+    pub fn matcher(&self) -> &RouteMatcher<Local> {
         &self.matcher
     }
 
@@ -61,7 +61,7 @@ impl<Target: ?Sized> DatagramRouteEntry<Target> {
     }
 }
 
-impl<Target: ?Sized> fmt::Debug for DatagramRouteEntry<Target> {
+impl<Target: ?Sized, Local: fmt::Debug> fmt::Debug for DatagramRouteEntry<Target, Local> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DatagramRouteEntry")
             .field("matcher", &self.matcher)
@@ -69,7 +69,7 @@ impl<Target: ?Sized> fmt::Debug for DatagramRouteEntry<Target> {
     }
 }
 
-type EntryList<Target> = SmallVec<[Arc<DatagramRouteEntry<Target>>; 2]>;
+type EntryList<Target, Local> = SmallVec<[Arc<DatagramRouteEntry<Target, Local>>; 2]>;
 
 /// Which list of a non-empty connection ID's bucket an association uses.
 #[derive(Clone, Copy)]
@@ -79,28 +79,28 @@ enum NonzeroKind {
 }
 
 /// Where the entries of one association are kept.
-enum Location<'a> {
+enum Location<'a, Local> {
     Nonzero(&'a NonEmptyCid, NonzeroKind),
-    Zero(&'a BindingId),
+    Zero(&'a Local),
 }
 
-impl<'a> Location<'a> {
-    fn of(association: &'a MatchAssociation) -> Self {
+impl<'a, Local> Location<'a, Local> {
+    fn of(association: &'a MatchAssociation<Local>) -> Self {
         match association {
             MatchAssociation::LocalCid(cid) => Self::Nonzero(cid, NonzeroKind::Local),
             MatchAssociation::InitialDcid(cid) => Self::Nonzero(cid, NonzeroKind::Initial),
-            MatchAssociation::ZeroCid(binding) => Self::Zero(binding),
+            MatchAssociation::ZeroCid(local) => Self::Zero(local),
         }
     }
 }
 
 /// The entries of one non-empty connection ID, both kinds side by side.
-struct NonzeroBucket<Target: ?Sized> {
-    local: EntryList<Target>,
-    initial: EntryList<Target>,
+struct NonzeroBucket<Target: ?Sized, Local> {
+    local: EntryList<Target, Local>,
+    initial: EntryList<Target, Local>,
 }
 
-impl<Target: ?Sized> NonzeroBucket<Target> {
+impl<Target: ?Sized, Local> NonzeroBucket<Target, Local> {
     fn new() -> Self {
         Self {
             local: SmallVec::new(),
@@ -108,7 +108,7 @@ impl<Target: ?Sized> NonzeroBucket<Target> {
         }
     }
 
-    fn list_mut(&mut self, kind: NonzeroKind) -> &mut EntryList<Target> {
+    fn list_mut(&mut self, kind: NonzeroKind) -> &mut EntryList<Target, Local> {
         match kind {
             NonzeroKind::Local => &mut self.local,
             NonzeroKind::Initial => &mut self.initial,
@@ -123,54 +123,54 @@ impl<Target: ?Sized> NonzeroBucket<Target> {
 /// The index of every route entry of one routing domain.
 ///
 /// `Target` is the erased deliverer type of the domain, for example
-/// `dyn ErasedDatagramDeliverer<Inner, Handoff>` for a domain used on one
-/// thread or `dyn SendDatagramDeliverer<Inner, Handoff>` for one shared
+/// `dyn ErasedDatagramDeliverer<Inner, Local, Handoff>` for a domain used on one
+/// thread or `dyn SendDatagramDeliverer<Inner, Local, Handoff>` for one shared
 /// between threads (see [`erased`](crate::claim::erased)); the index is `Send`
 /// and `Sync` exactly when its entries are.
-pub struct RouteIndex<Target: ?Sized> {
-    nonzero: DashMap<NonEmptyCid, NonzeroBucket<Target>>,
-    zero: DashMap<BindingId, EntryList<Target>>,
+pub struct RouteIndex<Target: ?Sized, Local> {
+    nonzero: DashMap<NonEmptyCid, NonzeroBucket<Target, Local>>,
+    zero: DashMap<Local, EntryList<Target, Local>>,
 }
 
 /// The entries one lookup found, each with the association and
 /// interpretation it was found under.
-pub(crate) type FrozenEntries<Target> = SmallVec<
+pub(crate) type FrozenEntries<Target, Local> = SmallVec<
     [(
-        Arc<DatagramRouteEntry<Target>>,
-        MatchAssociation,
+        Arc<DatagramRouteEntry<Target, Local>>,
+        MatchAssociation<Local>,
         FirstPacketInterpretation,
     ); 4],
 >;
 
 /// What one first-packet interpretation looks up.
-pub(crate) enum Lookup {
+pub(crate) enum Lookup<Local> {
     /// The local association of a non-empty connection ID.
     Local(NonEmptyCid),
     /// The local and the Initial association of a non-empty connection ID.
     LocalAndInitial(NonEmptyCid),
-    /// The zero-length association of a link binding.
-    Zero(BindingId),
+    /// The zero-length association of this side's end of the arrival link.
+    Zero(Local),
 }
 
 /// The outcome of the Initial recheck.
-pub(crate) enum Recheck<Target: ?Sized, Receiver> {
+pub(crate) enum Recheck<Target: ?Sized, Local: Clone + Eq + Hash, Receiver> {
     /// Entries that apply and had no chance at this datagram yet; the
     /// prepared receiver, if any, was not used.
     Offer {
-        fresh: FrozenEntries<Target>,
+        fresh: FrozenEntries<Target, Local>,
         unused: Option<PreparedReceiver<Target, Receiver>>,
     },
     /// The prepared deliverer was published; the registration belongs to the
     /// prepared receiver.
     Published {
-        registration: RouteEntryRegistration<Target>,
+        registration: RouteEntryRegistration<Target, Local>,
         receiver: Receiver,
     },
     /// Nothing applies and nothing was prepared.
     Release,
 }
 
-impl<Target: ?Sized> RouteIndex<Target> {
+impl<Target: ?Sized, Local: Clone + Eq + Hash> RouteIndex<Target, Local> {
     /// Creates an empty index.
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -188,9 +188,9 @@ impl<Target: ?Sized> RouteIndex<Target> {
     /// local connection ID must be disclosed only after this returns.
     pub fn register(
         self: &Arc<Self>,
-        matcher: RouteMatcher,
+        matcher: RouteMatcher<Local>,
         deliverer: Arc<Target>,
-    ) -> RouteEntryRegistration<Target> {
+    ) -> RouteEntryRegistration<Target, Local> {
         let entry = DatagramRouteEntry::new(matcher, deliverer);
         self.insert(Arc::clone(&entry));
         RouteEntryRegistration {
@@ -199,10 +199,10 @@ impl<Target: ?Sized> RouteIndex<Target> {
         }
     }
 
-    fn insert(&self, entry: Arc<DatagramRouteEntry<Target>>) {
+    fn insert(&self, entry: Arc<DatagramRouteEntry<Target, Local>>) {
         match Location::of(entry.matcher.association()) {
-            Location::Zero(binding) => {
-                self.zero.entry(binding.clone()).or_default().push(entry);
+            Location::Zero(local) => {
+                self.zero.entry(local.clone()).or_default().push(entry);
             }
             Location::Nonzero(cid, kind) => {
                 self.nonzero
@@ -218,12 +218,12 @@ impl<Target: ?Sized> RouteIndex<Target> {
     /// caller drops it outside the guard.
     fn remove(
         &self,
-        entry: &Arc<DatagramRouteEntry<Target>>,
-    ) -> Option<Arc<DatagramRouteEntry<Target>>> {
-        fn take<Target: ?Sized>(
-            list: &mut EntryList<Target>,
-            entry: &Arc<DatagramRouteEntry<Target>>,
-        ) -> Option<Arc<DatagramRouteEntry<Target>>> {
+        entry: &Arc<DatagramRouteEntry<Target, Local>>,
+    ) -> Option<Arc<DatagramRouteEntry<Target, Local>>> {
+        fn take<Target: ?Sized, Local>(
+            list: &mut EntryList<Target, Local>,
+            entry: &Arc<DatagramRouteEntry<Target, Local>>,
+        ) -> Option<Arc<DatagramRouteEntry<Target, Local>>> {
             let position = list
                 .iter()
                 .position(|current| Arc::ptr_eq(current, entry))?;
@@ -231,7 +231,7 @@ impl<Target: ?Sized> RouteIndex<Target> {
         }
 
         match Location::of(entry.matcher.association()) {
-            Location::Zero(binding) => match self.zero.entry(binding.clone()) {
+            Location::Zero(local) => match self.zero.entry(local.clone()) {
                 MapEntry::Occupied(mut slot) => {
                     let removed = take(slot.get_mut(), entry);
                     if slot.get().is_empty() {
@@ -262,11 +262,11 @@ impl<Target: ?Sized> RouteIndex<Target> {
     /// both associations of a connection ID sees one state of its bucket.
     pub(crate) fn collect(
         &self,
-        lookup: &Lookup,
+        lookup: &Lookup<Local>,
         interpretation: FirstPacketInterpretation,
-        frozen: &mut FrozenEntries<Target>,
+        frozen: &mut FrozenEntries<Target, Local>,
     ) {
-        let mut push = |association: MatchAssociation, list: &EntryList<Target>| {
+        let mut push = |association: MatchAssociation<Local>, list: &EntryList<Target, Local>| {
             for entry in list {
                 let seen = frozen.iter().any(|(existing, _, existing_interpretation)| {
                     existing.id == entry.id && *existing_interpretation == interpretation
@@ -277,9 +277,9 @@ impl<Target: ?Sized> RouteIndex<Target> {
             }
         };
         match lookup {
-            Lookup::Zero(binding) => {
-                if let Some(list) = self.zero.get(binding) {
-                    push(MatchAssociation::ZeroCid(binding.clone()), &list);
+            Lookup::Zero(local) => {
+                if let Some(list) = self.zero.get(local) {
+                    push(MatchAssociation::ZeroCid(local.clone()), &list);
                 }
             }
             Lookup::Local(cid) => {
@@ -305,10 +305,10 @@ impl<Target: ?Sized> RouteIndex<Target> {
     /// returned for the caller to drop outside.
     pub(crate) fn recheck_initial<Receiver>(
         self: &Arc<Self>,
-        initial: &RecognizedInitial,
+        initial: &RecognizedInitial<Local>,
         offered: &mut OfferedRouteHistory,
         prepared: Option<PreparedReceiver<Target, Receiver>>,
-    ) -> Recheck<Target, Receiver> {
+    ) -> Recheck<Target, Local, Receiver> {
         let interpretation = initial.interpretation();
         let matcher = RouteMatcher::new(
             initial.association(),
@@ -316,7 +316,7 @@ impl<Target: ?Sized> RouteIndex<Target> {
             initial.version(),
         );
         let mut fresh = FrozenEntries::new();
-        let mut gather = |association: MatchAssociation, list: &EntryList<Target>| {
+        let mut gather = |association: MatchAssociation<Local>, list: &EntryList<Target, Local>| {
             for entry in list {
                 if entry.matcher.applies(&interpretation)
                     && !offered.contains(entry, interpretation)
@@ -326,7 +326,7 @@ impl<Target: ?Sized> RouteIndex<Target> {
             }
         };
         let mut prepared = prepared;
-        let mut publish = |list: &mut EntryList<Target>| {
+        let mut publish = |list: &mut EntryList<Target, Local>| {
             let (deliverer, receiver) = prepared.take()?.into_parts();
             let entry = DatagramRouteEntry::new(matcher.clone(), deliverer);
             list.push(Arc::clone(&entry));
@@ -352,9 +352,9 @@ impl<Target: ?Sized> RouteIndex<Target> {
                     published
                 }
             },
-            InitialKey::Binding(binding) => match self.zero.entry(binding.clone()) {
+            InitialKey::Local(local) => match self.zero.entry(local.clone()) {
                 MapEntry::Occupied(mut slot) => {
-                    gather(MatchAssociation::ZeroCid(binding), slot.get());
+                    gather(MatchAssociation::ZeroCid(local), slot.get());
                     if fresh.is_empty() {
                         publish(slot.get_mut())
                     } else {
@@ -394,14 +394,14 @@ impl<Target: ?Sized> RouteIndex<Target> {
 }
 
 #[cfg(test)]
-impl<Target: ?Sized> RouteIndex<Target> {
-    /// The number of non-empty connection ID keys and of link binding keys.
+impl<Target: ?Sized, Local: Eq + Hash> RouteIndex<Target, Local> {
+    /// The number of non-empty connection ID keys and of local end keys.
     pub(crate) fn key_counts(&self) -> (usize, usize) {
         (self.nonzero.len(), self.zero.len())
     }
 }
 
-impl<Target: ?Sized> ConnectionIdOccupancy for RouteIndex<Target> {
+impl<Target: ?Sized, Local: Eq + Hash> ConnectionIdOccupancy for RouteIndex<Target, Local> {
     fn occupancy(&self, cid: &NonEmptyCid) -> usize {
         self.nonzero
             .get(cid)
@@ -409,7 +409,7 @@ impl<Target: ?Sized> ConnectionIdOccupancy for RouteIndex<Target> {
     }
 }
 
-impl<Target: ?Sized> fmt::Debug for RouteIndex<Target> {
+impl<Target: ?Sized, Local: Eq + Hash> fmt::Debug for RouteIndex<Target, Local> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RouteIndex")
             .field("nonzero_keys", &self.nonzero.len())
@@ -427,19 +427,19 @@ impl<Target: ?Sized> fmt::Debug for RouteIndex<Target> {
 /// original deliverer, which stays callable. Revoking after the index is gone
 /// does nothing.
 #[must_use = "dropping the registration revokes the route entry"]
-pub struct RouteEntryRegistration<Target: ?Sized> {
-    index: Weak<RouteIndex<Target>>,
-    entry: Arc<DatagramRouteEntry<Target>>,
+pub struct RouteEntryRegistration<Target: ?Sized, Local: Clone + Eq + Hash> {
+    index: Weak<RouteIndex<Target, Local>>,
+    entry: Arc<DatagramRouteEntry<Target, Local>>,
 }
 
-impl<Target: ?Sized> RouteEntryRegistration<Target> {
+impl<Target: ?Sized, Local: Clone + Eq + Hash> RouteEntryRegistration<Target, Local> {
     /// The registered entry.
-    pub fn entry(&self) -> &DatagramRouteEntry<Target> {
+    pub fn entry(&self) -> &DatagramRouteEntry<Target, Local> {
         &self.entry
     }
 }
 
-impl<Target: ?Sized> Drop for RouteEntryRegistration<Target> {
+impl<Target: ?Sized, Local: Clone + Eq + Hash> Drop for RouteEntryRegistration<Target, Local> {
     fn drop(&mut self) {
         if let Some(index) = self.index.upgrade() {
             // The removed reference outlives the guard and drops here.
@@ -448,7 +448,9 @@ impl<Target: ?Sized> Drop for RouteEntryRegistration<Target> {
     }
 }
 
-impl<Target: ?Sized> fmt::Debug for RouteEntryRegistration<Target> {
+impl<Target: ?Sized, Local: Clone + Eq + Hash + fmt::Debug> fmt::Debug
+    for RouteEntryRegistration<Target, Local>
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RouteEntryRegistration")
             .field("entry", &self.entry)
@@ -475,9 +477,9 @@ impl OfferedRouteHistory {
         }
     }
 
-    pub(crate) fn record<Target: ?Sized>(
+    pub(crate) fn record<Target: ?Sized, Local>(
         &mut self,
-        entry: &DatagramRouteEntry<Target>,
+        entry: &DatagramRouteEntry<Target, Local>,
         interpretation: FirstPacketInterpretation,
     ) {
         if !self.contains(entry, interpretation) {
@@ -485,9 +487,9 @@ impl OfferedRouteHistory {
         }
     }
 
-    pub(crate) fn contains<Target: ?Sized>(
+    pub(crate) fn contains<Target: ?Sized, Local>(
         &self,
-        entry: &DatagramRouteEntry<Target>,
+        entry: &DatagramRouteEntry<Target, Local>,
         interpretation: FirstPacketInterpretation,
     ) -> bool {
         self.offered.iter().any(|(seen, seen_interpretation)| {

@@ -14,8 +14,8 @@
 //! # Associations and the index
 //!
 //! A route entry is found under a [`MatchAssociation`]: a local connection ID,
-//! an Initial destination connection ID, or the zero-length connection ID of a
-//! link binding. Every kind holds any number of entries; each registration is
+//! an Initial destination connection ID, or the zero-length connection ID on
+//! this side's end of the arrival link. Every kind holds any number of entries; each registration is
 //! its own [`DatagramRouteEntry`] with its own identity, published together
 //! with its [`RouteMatcher`] and its erased deliverer. The datagram receiver
 //! holds the [`RouteEntryRegistration`] and revokes exactly its entry by

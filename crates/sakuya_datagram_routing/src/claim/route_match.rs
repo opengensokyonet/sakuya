@@ -16,14 +16,14 @@ use crate::route::interpretation::FirstPacketInterpretation;
 ///
 /// Only routing creates it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DatagramRouteMatchInfo {
-    association: MatchAssociation,
+pub struct DatagramRouteMatchInfo<Local> {
+    association: MatchAssociation<Local>,
     interpretation: FirstPacketInterpretation,
 }
 
-impl DatagramRouteMatchInfo {
+impl<Local> DatagramRouteMatchInfo<Local> {
     pub(crate) fn new(
-        association: MatchAssociation,
+        association: MatchAssociation<Local>,
         interpretation: FirstPacketInterpretation,
     ) -> Self {
         Self {
@@ -33,7 +33,7 @@ impl DatagramRouteMatchInfo {
     }
 
     /// The association under which routing found the entry.
-    pub fn association(&self) -> &MatchAssociation {
+    pub fn association(&self) -> &MatchAssociation<Local> {
         &self.association
     }
 

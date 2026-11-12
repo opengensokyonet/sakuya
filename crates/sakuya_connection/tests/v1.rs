@@ -32,7 +32,7 @@ use sakuya_connection::{
         role::LinkPathRole,
     },
 };
-use sakuya_link::{BindingId, LinkId};
+use sakuya_link::LinkId;
 use sakuya_packet_protection::backend::ring::RingBackend;
 use sakuya_recovery::{
     congestion::CongestionController,
@@ -54,7 +54,7 @@ const PATH: SoleLogicalPath = SoleLogicalPath;
 
 thread_local! {
     /// When the probe asks for a link path over a second logical link.
-    static ADD: Cell<Option<(Duration, LinkId)>> = const { Cell::new(None) };
+    static ADD: Cell<Option<(Duration, LinkId<(), ()>)>> = const { Cell::new(None) };
     /// When the probe of each link path built from now on closes its role.
     static CLOSE_AT: Cell<Option<Duration>> = const { Cell::new(None) };
     /// When the probe sets the peer's maximum idle timeout to 10 s and
@@ -68,8 +68,8 @@ thread_local! {
 /// The parts of the tests' connections.
 type Parts = HList![v1::Part, probe::Part];
 
-fn link() -> LinkId {
-    LinkId::new::<()>(BindingId::new::<()>())
+fn link() -> LinkId<(), ()> {
+    LinkId::new::<()>((), ())
 }
 
 fn reset() {
@@ -135,8 +135,10 @@ mod spy {
         }
     }
     impl<'s, V, K: Debug>
-        LendCongestion<Duration, OtherCongestionParts<'s, K, PacedNewReno<Duration>>>
-        for SpyFactory<V>
+        LendCongestion<
+            Duration,
+            OtherCongestionParts<'s, K, LinkId<(), ()>, PacedNewReno<Duration>>,
+        > for SpyFactory<V>
     {
         type Part = PacedNewReno<Duration>;
         type Access<'a>
@@ -147,7 +149,7 @@ mod spy {
         fn lend<'a>(
             &'a mut self,
             this: &'a mut PacedNewReno<Duration>,
-            others: &'a OtherCongestionParts<'s, K, PacedNewReno<Duration>>,
+            others: &'a OtherCongestionParts<'s, K, LinkId<(), ()>, PacedNewReno<Duration>>,
         ) -> &'a mut PacedNewReno<Duration> {
             others.each(|key, _, rtt| {
                 log(format!("lent beside {key:?}, smoothed {:?}", rtt.smoothed))
@@ -176,7 +178,7 @@ mod probe {
     /// In the connection: asks for a second link path at its deadline, and
     /// logs whether the Initial keys are live.
     #[derive(Debug)]
-    pub struct Adder(Option<(Duration, LinkId)>);
+    pub struct Adder(Option<(Duration, LinkId<(), ()>)>);
     impl<T: v1::Choices<Link = TestLink>, L> Build<T, L, layer::Connection, ()> for Adder
     where
         for<'v> L: LineageLists<'v, T>,
@@ -289,7 +291,7 @@ mod probe {
     /// link path active; at the second, lends the other link path's
     /// congestion access from the connection.
     #[derive(Debug)]
-    pub struct Lender(Option<(Duration, Duration)>, Option<LinkId>);
+    pub struct Lender(Option<(Duration, Duration)>, Option<LinkId<(), ()>>);
     impl Build<SpyMine, Parts, layer::Connection, ()> for Lender {
         fn build<'v>(
             _: &mut ParentsOf<'v, SpyMine, Parts, layer::Connection>,
@@ -519,7 +521,7 @@ mod probe {
 fn args<T>(validation: AddressValidation) -> v1::ConnectionArgs<T, Parts>
 where
     T: v1::Choices<Crypto = RingBackend, Link = TestLink>,
-    T::Recovery<LinkId>: RecoveryFactory<TestLink, Config = NewRenoRecoveryFactoryConfig>,
+    T::Recovery<LinkId<(), ()>>: RecoveryFactory<TestLink, Config = NewRenoRecoveryFactoryConfig>,
 {
     let mut parameters = TransportParameters::<Vec<u8>>::new();
     parameters.set(MaxIdleTimeout::new(VarInt::from_u32(30_000)));

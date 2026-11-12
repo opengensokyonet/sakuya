@@ -6,13 +6,13 @@ use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use sakuya_link::LinkId;
+use super::support::{Local, TestLinkId};
 use sakuya_wire::connection_id::StatelessResetToken;
 use sakuya_wire::v1::header::LongPacketType;
 use sakuya_wire::version::Version;
 
 use super::support::{
-    Datagram, Handoff, Target, Work, binding, cid, datagram, initial, lengths, link, long,
+    Datagram, Handoff, Target, Work, cid, datagram, initial, lengths, link, local_end, long,
     nonempty, short,
 };
 use crate::claim::candidate::DatagramClaimAttempt;
@@ -30,7 +30,7 @@ use crate::route::interpretation::RecognizedInitial;
 use crate::route::reset::{StatelessResetRegistration, StatelessResetTarget, StatelessResetTokens};
 use crate::route::router::DatagramRouter;
 
-type Delivery = DatagramDelivery<Datagram, Handoff>;
+type Delivery = DatagramDelivery<Datagram, Local, Handoff>;
 
 /// The deliverer of one connection: it queues what it is given for the
 /// connection, which claims every datagram it attempts.
@@ -38,7 +38,7 @@ struct ConnectionDeliverer {
     poster: DatagramDeliveryPoster<Delivery>,
 }
 
-impl DatagramDeliverer<Datagram> for ConnectionDeliverer {
+impl DatagramDeliverer<Datagram, Local> for ConnectionDeliverer {
     type Handoff = Handoff;
 
     fn deliver(&self, delivery: Delivery) {
@@ -61,7 +61,7 @@ impl StatelessResetTarget for ResetFlag {
 struct Connection {
     queue: DatagramDeliveryQueue<Delivery>,
     deliverer: Arc<ConnectionDeliverer>,
-    registrations: Vec<RouteEntryRegistration<Target>>,
+    registrations: Vec<RouteEntryRegistration<Target, Local>>,
     reset_registration: Option<StatelessResetRegistration<ResetFlag>>,
     reset: ResetFlag,
     processed: Vec<ExclusiveDatagram<Datagram>>,
@@ -107,12 +107,12 @@ struct ConnectionReceiver {
     connections: Arc<Mutex<Vec<Connection>>>,
 }
 
-impl InitialDatagramReceiver<Vec<u8>, LinkId, Target> for ConnectionReceiver {
+impl InitialDatagramReceiver<Vec<u8>, TestLinkId, Target> for ConnectionReceiver {
     fn receive_first(
         self,
-        registration: RouteEntryRegistration<Target>,
+        registration: RouteEntryRegistration<Target, Local>,
         datagram: ExclusiveDatagram<Datagram>,
-        _initial: RecognizedInitial,
+        _initial: RecognizedInitial<Local>,
     ) {
         self.connections.lock().unwrap().push(Connection {
             queue: self.queue,
@@ -129,16 +129,16 @@ struct Server {
     connections: Arc<Mutex<Vec<Connection>>>,
 }
 
-impl InitialReceiverFactory<Vec<u8>, LinkId, Target> for Server {
+impl InitialReceiverFactory<Vec<u8>, TestLinkId, Target> for Server {
     type Receiver = ConnectionReceiver;
 
-    fn admits(&self, _: &RecognizedInitial, datagram: &Datagram) -> bool {
+    fn admits(&self, _: &RecognizedInitial<Local>, datagram: &Datagram) -> bool {
         datagram.payload().len() >= 1200
     }
 
     fn prepare(
         &self,
-        _: &RecognizedInitial,
+        _: &RecognizedInitial<Local>,
     ) -> Option<PreparedReceiver<Target, ConnectionReceiver>> {
         let queue = DatagramDeliveryQueue::new(NonZeroUsize::new(8).unwrap()).unwrap();
         let deliverer = Arc::new(ConnectionDeliverer {
@@ -158,7 +158,7 @@ fn datagrams_flow_from_the_link_to_connections_through_one_router() {
     let connections = Arc::new(Mutex::new(Vec::new()));
     let mut reflow = DatagramDeliveryQueue::<Work>::new(NonZeroUsize::new(8).unwrap()).unwrap();
     let resets = StatelessResetTokens::<ResetFlag>::new();
-    let index = RouteIndex::<Target>::new();
+    let index = RouteIndex::<Target, Local>::new();
     let router = DatagramRouter::new(Arc::clone(&index), lengths(&[8]))
         .with_stateless_reset(Arc::clone(&resets))
         .with_initial_acceptance(InitialAcceptance::new(
@@ -167,8 +167,8 @@ fn datagrams_flow_from_the_link_to_connections_through_one_router() {
             },
             Arc::new(reflow.poster()),
         ));
-    let binding = binding();
-    let link = link(&binding);
+    let end = local_end();
+    let link = link(&end);
 
     // The link's datagram dispatcher: one route call per datagram, then the
     // outer layer resumes queued reflow work on its own stack.

@@ -10,19 +10,21 @@ use crate::{
     rtt::RttEstimator,
 };
 use core::{num::NonZeroUsize, time::Duration};
-use sakuya_link::{BindingId, Link, LinkId, OutgoingDatagram, SendAcceptance};
+use sakuya_link::{Link, LinkId, OutgoingDatagram, SendAcceptance};
 
 #[derive(Clone, Debug)]
-struct TestLink(LinkId);
+struct TestLink(LinkId<(), ()>);
 
 impl Link for TestLink {
+    type Local = ();
+    type Peer = ();
     type Payload = Vec<u8>;
     type Instant = Duration;
     type MaxDatagramSizeError = ();
     type SendError = ();
     type Send<'a> = core::future::Pending<Result<SendAcceptance<Duration>, ()>>;
     type MaxDatagramSizeChanged = core::future::Pending<()>;
-    fn id(&self) -> &LinkId {
+    fn id(&self) -> &LinkId<(), ()> {
         &self.0
     }
     fn may_mark_ecn(&self) -> bool {
@@ -44,10 +46,10 @@ fn ms(value: u64) -> Duration {
 }
 
 fn link() -> TestLink {
-    TestLink(LinkId::new::<()>(BindingId::new::<()>()))
+    TestLink(LinkId::new::<()>((), ()))
 }
 
-fn factory() -> NewRenoRecoveryFactory<LinkId> {
+fn factory() -> NewRenoRecoveryFactory<LinkId<(), ()>> {
     RecoveryFactory::<TestLink>::new(&NewRenoRecoveryFactoryConfig::recommended(ms(1)))
 }
 
@@ -104,7 +106,8 @@ fn a_link_path_part_is_lent_as_it_is() {
 fn the_deadline_of_a_part_is_its_pacers_next_release() {
     let mut factory = factory();
     let (_, mut part, _) = RecoveryFactory::<TestLink>::create(&mut factory, &link(), None);
-    let deadline = |factory: &NewRenoRecoveryFactory<LinkId>, part: &PacedNewReno<Duration>| {
+    let deadline = |factory: &NewRenoRecoveryFactory<LinkId<(), ()>>,
+                    part: &PacedNewReno<Duration>| {
         LendCongestion::<Duration, ()>::next_deadline(factory, part)
     };
     // A full bucket holds nothing back.

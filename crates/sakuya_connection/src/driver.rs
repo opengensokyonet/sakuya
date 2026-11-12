@@ -18,16 +18,16 @@ use std::{
 };
 
 use futures_util::task::AtomicWaker;
-use sakuya_link::{Link, LinkId};
+use sakuya_link::Link;
 use sakuya_wire::parts::HNil;
 
 use crate::{
     call::{CallPositions, CallStep, NodeCalls, NodeLoan, PartsCallBundle, TreeCalls},
-    clock::{ConnectionChoices, InstantOf, MonotonicClock},
+    clock::{ConnectionChoices, InstantOf, LinkIdOf, MonotonicClock},
     component::{BuildNode, NodePositions, ReadSet, RequestOf},
     layer::{
         Connection, Established, EstablishedArgs, Layer, LinkEntry, LinkEntryArgs, LinkPath,
-        LinkPathArgs, LogicalPath, LogicalPathArgs, NodeKey, Recovery, RecoveryArgs,
+        LinkPathArgs, LogicalPath, LogicalPathArgs, NodeKey, NodeKeyOf, Recovery, RecoveryArgs,
     },
     request::StructureRequest,
     share::{ConnectionArgsOf, LineageLists, NodeData, PathKey},
@@ -618,12 +618,12 @@ where
     fn node<Data, Calls, Child>(
         &self,
         addr: NodeAddr,
-        key: NodeKey<PathKey<L>>,
+        key: NodeKeyOf<T, L>,
         entry: usize,
         data: Data,
         calls: Calls,
         child: Child,
-    ) -> Node<PathKey<L>, Data, Calls, Child> {
+    ) -> Node<NodeKeyOf<T, L>, Data, Calls, Child> {
         let marks = Arc::new(WakeMarks::default());
         let wakers = self.wakers(addr, &marks);
         Node {
@@ -699,7 +699,7 @@ where
         self.started(NodeAddr::CONNECTION, now, changes);
     }
 
-    fn find_entry(&self, link: &LinkId) -> Option<usize> {
+    fn find_entry(&self, link: &LinkIdOf<T>) -> Option<usize> {
         self.tree.entries.iter().position(|e| {
             e.as_ref()
                 .is_some_and(|e| matches!(&e.key, NodeKey::LinkEntry(l) if l == link))
@@ -713,7 +713,7 @@ where
         })
     }
 
-    fn find_link_path(&self, path: &PathKey<L>, link: &LinkId) -> Option<NodeAddr> {
+    fn find_link_path(&self, path: &PathKey<L>, link: &LinkIdOf<T>) -> Option<NodeAddr> {
         let slot = self.find_logical_path(path)?;
         let paths = &self.tree.logical_paths[slot].as_ref()?.link_paths;
         let sub = paths.iter().position(|n| {
@@ -889,7 +889,7 @@ where
 
     fn build_recovery(
         &mut self,
-        args: &mut RecoveryArgs<PathKey<L>>,
+        args: &mut RecoveryArgs<PathKey<L>, LinkIdOf<T>>,
         now: InstantOf<T>,
         changes: &mut Changes,
     ) {

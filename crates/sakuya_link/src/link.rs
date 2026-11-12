@@ -1,6 +1,6 @@
 //! The link: a channel that keeps message boundaries.
 
-use core::{future::Future, num::NonZeroUsize, ops::Add, time::Duration};
+use core::{future::Future, hash::Hash, num::NonZeroUsize, ops::Add, time::Duration};
 
 use bytes::Bytes;
 
@@ -29,6 +29,23 @@ pub const MIN_DATAGRAM_SIZE: usize = 1200;
 ///
 /// The method that receives messages is not part of this trait yet.
 pub trait Link: Clone {
+    /// This side's end of a link, chosen by the transport: for UDP, for
+    /// example, the identity of the socket and its local address.
+    ///
+    /// It is not only the link binding: a socket bound to a wildcard address
+    /// has several local addresses, and a connection that moves to the
+    /// server's preferred address keeps its peer and changes its local
+    /// address (RFC 9000 §9.6). Zero-length connection IDs are looked up by
+    /// it, since a client that chooses them identifies its connections by
+    /// local address and port (RFC 9000 §5.2.1).
+    type Local: Clone + Eq + Hash;
+    /// The peer's end of a link, chosen by the transport: for UDP, for
+    /// example, the peer's address.
+    ///
+    /// The value is the peer's identity itself, so code that needs more of
+    /// it, such as the client's IP address for an address validation token,
+    /// states what it needs as bounds where it does so.
+    type Peer: Clone + Eq + Hash;
     /// The type of a received message's payload.
     ///
     /// Code that cuts, reads or rewrites payloads states what it needs as
@@ -57,7 +74,7 @@ pub trait Link: Clone {
     type MaxDatagramSizeChanged: Future<Output = ()>;
 
     /// The identity of this link, the same for all its clones.
-    fn id(&self) -> &LinkId;
+    fn id(&self) -> &LinkId<Self::Local, Self::Peer>;
 
     /// Whether this link can write ECN codepoints into the IP headers of
     /// what it sends.

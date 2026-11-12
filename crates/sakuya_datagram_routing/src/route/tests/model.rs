@@ -7,7 +7,6 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use proptest::prelude::*;
-use sakuya_link::{BindingId, LinkId};
 use sakuya_wire::v1::header::LongPacketType;
 use sakuya_wire::version::Version;
 
@@ -50,7 +49,7 @@ enum Op {
     },
     Route {
         kind: Kind,
-        binding: usize,
+        end: usize,
     },
     Judge {
         at: prop::sample::Index,
@@ -85,7 +84,7 @@ fn op() -> impl Strategy<Value = Op> {
         5 => (assoc, 0u8..4, prop::bool::weighted(0.3))
             .prop_map(|(assoc, forms, accept)| Op::Register { assoc, forms, accept }),
         2 => at().prop_map(|at| Op::Revoke { at }),
-        6 => (kind, 0..2usize).prop_map(|(kind, binding)| Op::Route { kind, binding }),
+        6 => (kind, 0..2usize).prop_map(|(kind, end)| Op::Route { kind, end }),
         2 => (at(), any::<bool>()).prop_map(|(at, accept)| Op::Judge { at, accept }),
         5 => at().prop_map(|at| Op::Settle { at }),
         4 => Just(Op::Resume),
@@ -108,7 +107,7 @@ struct Entry {
     forms: PacketForms,
     recorder: Arc<Recorder>,
     accept: bool,
-    registration: Option<RouteEntryRegistration<Target>>,
+    registration: Option<RouteEntryRegistration<Target, Local>>,
 }
 
 type Chance = (u32, FirstPacketInterpretation);
@@ -129,8 +128,8 @@ struct ModelDatagram {
 
 struct Model {
     domain: Domain,
-    links: [LinkId; 2],
-    bindings: [BindingId; 2],
+    links: [TestLinkId; 2],
+    ends: [Local; 2],
     entries: Vec<Entry>,
     datagrams: BTreeMap<u32, ModelDatagram>,
     /// Pending deliveries per entry label, in delivery order.
@@ -151,11 +150,11 @@ fn tag_of(payload: &[u8]) -> u32 {
 
 impl Model {
     fn new() -> Self {
-        let bindings = [binding(), binding()];
+        let ends = [local_end(), local_end()];
         Self {
             domain: Domain::new(&SHORT_LENGTHS),
-            links: [link(&bindings[0]), link(&bindings[1])],
-            bindings,
+            links: [link(&ends[0]), link(&ends[1])],
+            ends,
             entries: Vec::new(),
             datagrams: BTreeMap::new(),
             pending: BTreeMap::new(),
@@ -165,15 +164,13 @@ impl Model {
         }
     }
 
-    fn association(&self, assoc: Assoc) -> MatchAssociation {
+    fn association(&self, assoc: Assoc) -> MatchAssociation<Local> {
         match assoc {
             Assoc::Local(cid_index) => MatchAssociation::LocalCid(nonempty(&cid(CIDS[cid_index]))),
             Assoc::Initial(cid_index) => {
                 MatchAssociation::InitialDcid(nonempty(&cid(CIDS[cid_index])))
             }
-            Assoc::Zero(binding_index) => {
-                MatchAssociation::ZeroCid(self.bindings[binding_index].clone())
-            }
+            Assoc::Zero(end_index) => MatchAssociation::ZeroCid(self.ends[end_index]),
         }
     }
 
@@ -232,7 +229,7 @@ impl Model {
         }
     }
 
-    fn route(&mut self, kind: Kind, binding_index: usize) {
+    fn route(&mut self, kind: Kind, end_index: usize) {
         if self.datagrams.len() >= 16 {
             return;
         }
@@ -254,7 +251,7 @@ impl Model {
                         lookups.push((Assoc::Initial(i), interpretation));
                     }
                 }
-                None => lookups.push((Assoc::Zero(binding_index), interpretation)),
+                None => lookups.push((Assoc::Zero(end_index), interpretation)),
             }
             lookups
         };
@@ -289,7 +286,7 @@ impl Model {
             Kind::Short { cid: cid_index } => {
                 let lookups = vec![
                     (
-                        Assoc::Zero(binding_index),
+                        Assoc::Zero(end_index),
                         FirstPacketInterpretation::Short {
                             dcid_len: dcid_len(0),
                         },
@@ -335,7 +332,7 @@ impl Model {
             },
         );
         self.offer(tag, &fresh);
-        let link = self.links[binding_index].clone();
+        let link = self.links[end_index].clone();
         self.domain.route(tagged(bytes, tag), &link);
         self.finish_if_exited(tag);
         self.check_kind_of_last_delivery(tag, &fresh);
@@ -487,7 +484,7 @@ impl Model {
                     self.entries[index].registration = None;
                 }
             }
-            Op::Route { kind, binding } => self.route(kind, binding),
+            Op::Route { kind, end } => self.route(kind, end),
             Op::Judge { at, accept } => {
                 if !self.entries.is_empty() {
                     let index = at.index(self.entries.len());

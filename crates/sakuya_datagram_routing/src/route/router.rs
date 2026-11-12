@@ -54,27 +54,31 @@ pub(super) mod sealed {
     use std::sync::Arc;
 
     use super::super::acceptance::UnclaimedWork;
-    use super::super::datagram::ReceivedDatagram;
+    use super::super::datagram::{LinkIdentity, ReceivedDatagram};
     use super::super::index::{FrozenEntries, RouteIndex};
     use super::super::interpretation::RecognizedInitial;
     use crate::claim::finish::UnclaimedHandoff;
     use crate::claim::shared::DatagramFinishPolicy;
 
     /// The routing decisions that depend on Initial acceptance.
-    pub trait AcceptanceMode<Payload, Link, Target: ?Sized> {
+    pub trait AcceptanceMode<Payload, Link: LinkIdentity, Target: ?Sized> {
         /// What takes over an acceptable Initial that every candidate left.
         type Handoff: UnclaimedHandoff<ReceivedDatagram<Payload, Link>>;
 
         /// The finish policy of a first-round supported Initial.
         fn first_round(
             &self,
-            initial: &RecognizedInitial,
+            initial: &RecognizedInitial<Link::Local>,
             datagram: &ReceivedDatagram<Payload, Link>,
-            frozen: &FrozenEntries<Target>,
+            frozen: &FrozenEntries<Target, Link::Local>,
         ) -> DatagramFinishPolicy<Self::Handoff>;
 
         /// Runs one reflow round.
-        fn resume(&self, index: &Arc<RouteIndex<Target>>, work: UnclaimedWork<Payload, Link>);
+        fn resume(
+            &self,
+            index: &Arc<RouteIndex<Target, Link::Local>>,
+            work: UnclaimedWork<Payload, Link>,
+        );
     }
 }
 
@@ -88,35 +92,43 @@ pub(super) mod sealed {
 /// | Mode | Handoff |
 /// | --- | --- |
 /// | `()` | [`ReleaseUnclaimed`] |
-/// | `InitialAcceptance<Factory, Provider>` | [`ReflowHandoff<Provider>`](ReflowHandoff) |
+/// | `InitialAcceptance<Factory, Provider>` | [`ReflowHandoff<Provider, Local>`](ReflowHandoff) |
 ///
 /// Neither mode requires `Send`: a routing domain used on one thread accepts
 /// new Initials with local deliverers, datagrams and providers, and a domain
 /// shared between threads is `Send` because its parts are.
-pub trait InitialAcceptanceMode<Payload, Link, Target: ?Sized>:
+pub trait InitialAcceptanceMode<Payload, Link: LinkIdentity, Target: ?Sized>:
     sealed::AcceptanceMode<Payload, Link, Target>
 {
 }
 
-impl<Payload, Link, Target: ?Sized, Mode> InitialAcceptanceMode<Payload, Link, Target> for Mode where
-    Mode: sealed::AcceptanceMode<Payload, Link, Target>
+impl<Payload, Link: LinkIdentity, Target: ?Sized, Mode> InitialAcceptanceMode<Payload, Link, Target>
+    for Mode
+where
+    Mode: sealed::AcceptanceMode<Payload, Link, Target>,
 {
 }
 
 /// No acceptance: every Initial is offered to the existing entries only.
-impl<Payload, Link, Target: ?Sized> sealed::AcceptanceMode<Payload, Link, Target> for () {
+impl<Payload, Link: LinkIdentity, Target: ?Sized> sealed::AcceptanceMode<Payload, Link, Target>
+    for ()
+{
     type Handoff = ReleaseUnclaimed;
 
     fn first_round(
         &self,
-        _initial: &RecognizedInitial,
+        _initial: &RecognizedInitial<Link::Local>,
         _datagram: &ReceivedDatagram<Payload, Link>,
-        _frozen: &FrozenEntries<Target>,
+        _frozen: &FrozenEntries<Target, Link::Local>,
     ) -> DatagramFinishPolicy<ReleaseUnclaimed> {
         DatagramFinishPolicy::LastTakes
     }
 
-    fn resume(&self, _index: &Arc<RouteIndex<Target>>, work: UnclaimedWork<Payload, Link>) {
+    fn resume(
+        &self,
+        _index: &Arc<RouteIndex<Target, Link::Local>>,
+        work: UnclaimedWork<Payload, Link>,
+    ) {
         drop(work);
     }
 }
@@ -125,19 +137,24 @@ impl<Payload, Link, Target, Factory, Provider> sealed::AcceptanceMode<Payload, L
     for InitialAcceptance<Factory, Provider>
 where
     Payload: AsRef<[u8]>,
-    Target:
-        ?Sized + ErasedDatagramDeliverer<ReceivedDatagram<Payload, Link>, ReflowHandoff<Provider>>,
+    Link: LinkIdentity,
+    Target: ?Sized
+        + ErasedDatagramDeliverer<
+            ReceivedDatagram<Payload, Link>,
+            Link::Local,
+            ReflowHandoff<Provider, Link::Local>,
+        >,
     Factory: InitialReceiverFactory<Payload, Link, Target>,
     Provider: ReflowProvider<Payload, Link>,
 {
-    type Handoff = ReflowHandoff<Provider>;
+    type Handoff = ReflowHandoff<Provider, Link::Local>;
 
     fn first_round(
         &self,
-        initial: &RecognizedInitial,
+        initial: &RecognizedInitial<Link::Local>,
         datagram: &ReceivedDatagram<Payload, Link>,
-        frozen: &FrozenEntries<Target>,
-    ) -> DatagramFinishPolicy<ReflowHandoff<Provider>> {
+        frozen: &FrozenEntries<Target, Link::Local>,
+    ) -> DatagramFinishPolicy<ReflowHandoff<Provider, Link::Local>> {
         if !self.factory().admits(initial, datagram) {
             return DatagramFinishPolicy::LastTakes;
         }
@@ -152,7 +169,11 @@ where
         ))
     }
 
-    fn resume(&self, index: &Arc<RouteIndex<Target>>, work: UnclaimedWork<Payload, Link>) {
+    fn resume(
+        &self,
+        index: &Arc<RouteIndex<Target, Link::Local>>,
+        work: UnclaimedWork<Payload, Link>,
+    ) {
         let (datagram, mut offered, initial) = work.into_parts();
         // Prepared outside the index; the recheck only moves it in.
         let prepared = self.factory().prepare(&initial);
@@ -186,14 +207,14 @@ where
 /// caller's stack and return.
 pub struct DatagramRouter<
     Payload,
-    Link,
+    Link: LinkIdentity,
     Target: ?Sized,
     Recognizer,
     Reset = (),
     Versions = (),
     Acceptance = (),
 > {
-    index: Arc<RouteIndex<Target>>,
+    index: Arc<RouteIndex<Target, Link::Local>>,
     recognizer: Recognizer,
     reset: Reset,
     versions: Versions,
@@ -201,10 +222,12 @@ pub struct DatagramRouter<
     datagram: PhantomData<fn(ReceivedDatagram<Payload, Link>)>,
 }
 
-impl<Payload, Link, Target: ?Sized, Recognizer> DatagramRouter<Payload, Link, Target, Recognizer> {
+impl<Payload, Link: LinkIdentity, Target: ?Sized, Recognizer>
+    DatagramRouter<Payload, Link, Target, Recognizer>
+{
     /// Routes into `index`, reading short headers with `recognizer`, without
     /// stateless reset detection, version service or Initial acceptance.
-    pub fn new(index: Arc<RouteIndex<Target>>, recognizer: Recognizer) -> Self {
+    pub fn new(index: Arc<RouteIndex<Target, Link::Local>>, recognizer: Recognizer) -> Self {
         Self {
             index,
             recognizer,
@@ -216,7 +239,7 @@ impl<Payload, Link, Target: ?Sized, Recognizer> DatagramRouter<Payload, Link, Ta
     }
 }
 
-impl<Payload, Link, Target: ?Sized, Recognizer, Reset, Versions, Acceptance>
+impl<Payload, Link: LinkIdentity, Target: ?Sized, Recognizer, Reset, Versions, Acceptance>
     DatagramRouter<Payload, Link, Target, Recognizer, Reset, Versions, Acceptance>
 {
     /// Checks every datagram with `reset` before ordinary routing.
@@ -273,7 +296,7 @@ impl<Payload, Link, Target: ?Sized, Recognizer, Reset, Versions, Acceptance>
     }
 
     /// The index of the routing domain, for registering route entries.
-    pub fn index(&self) -> &Arc<RouteIndex<Target>> {
+    pub fn index(&self) -> &Arc<RouteIndex<Target, Link::Local>> {
         &self.index
     }
 }
@@ -283,9 +306,10 @@ impl<Payload, Link, Target, Recognizer, Reset, Versions, Acceptance>
 where
     Payload: AsRef<[u8]>,
     Link: LinkIdentity,
-    Target: ?Sized + ErasedDatagramDeliverer<ReceivedDatagram<Payload, Link>, Acceptance::Handoff>,
-    Recognizer: ConnectionIdRecognizer,
-    Reset: StatelessResetDetector,
+    Target: ?Sized
+        + ErasedDatagramDeliverer<ReceivedDatagram<Payload, Link>, Link::Local, Acceptance::Handoff>,
+    Recognizer: ConnectionIdRecognizer<Link::Local, Link::Peer>,
+    Reset: StatelessResetDetector<Link::Local, Link::Peer>,
     Versions: VersionService<Payload, Link>,
     Acceptance: InitialAcceptanceMode<Payload, Link, Target>,
 {
@@ -300,7 +324,7 @@ where
     /// | First packet | Looked up | When no candidate is left |
     /// | --- | --- | --- |
     /// | Fields needed for lookup not readable | nothing | released; later bytes are not searched for another packet |
-    /// | Supported Initial the domain may accept | local and Initial associations, or the zero-length one of the link binding; on-unclaimed | reflow, then a recheck that may publish a new receiver |
+    /// | Supported Initial the domain may accept | local and Initial associations, or the zero-length one of this side's end of the arrival link; on-unclaimed | reflow, then a recheck that may publish a new receiver |
     /// | Supported Initial otherwise | the same entries; last takes | released |
     /// | Supported 0-RTT | local and Initial associations, or the zero-length one; last takes | released |
     /// | Supported Handshake or Retry | the local association, or the zero-length one; last takes | released |
@@ -353,7 +377,7 @@ where
     }
 
     /// Completes every lookup of one round.
-    fn freeze(&self, queries: &Queries) -> FrozenEntries<Target> {
+    fn freeze(&self, queries: &Queries<Link::Local>) -> FrozenEntries<Target, Link::Local> {
         let mut frozen = FrozenEntries::new();
         for (lookup, interpretation) in queries {
             self.index.collect(lookup, *interpretation, &mut frozen);
@@ -362,8 +386,8 @@ where
     }
 }
 
-impl<Payload, Link, Target: ?Sized, Recognizer, Reset, Versions, Acceptance> fmt::Debug
-    for DatagramRouter<Payload, Link, Target, Recognizer, Reset, Versions, Acceptance>
+impl<Payload, Link: LinkIdentity, Target: ?Sized, Recognizer, Reset, Versions, Acceptance>
+    fmt::Debug for DatagramRouter<Payload, Link, Target, Recognizer, Reset, Versions, Acceptance>
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DatagramRouter")
@@ -376,10 +400,11 @@ impl<Payload, Link, Target: ?Sized, Recognizer, Reset, Versions, Acceptance> fmt
 fn dispatch<Payload, Link, Handoff, Target>(
     datagram: ReceivedDatagram<Payload, Link>,
     finish: DatagramFinishPolicy<Handoff>,
-    frozen: FrozenEntries<Target>,
+    frozen: FrozenEntries<Target, Link::Local>,
 ) where
+    Link: LinkIdentity,
     Handoff: UnclaimedHandoff<ReceivedDatagram<Payload, Link>>,
-    Target: ?Sized + ErasedDatagramDeliverer<ReceivedDatagram<Payload, Link>, Handoff>,
+    Target: ?Sized + ErasedDatagramDeliverer<ReceivedDatagram<Payload, Link>, Link::Local, Handoff>,
 {
     let entries = frozen
         .into_iter()
@@ -393,37 +418,37 @@ fn dispatch<Payload, Link, Handoff, Target>(
 }
 
 /// The lookups a first packet calls for.
-type Queries = SmallVec<[(Lookup, FirstPacketInterpretation); 4]>;
+type Queries<Local> = SmallVec<[(Lookup<Local>, FirstPacketInterpretation); 4]>;
 
-enum Classification {
+enum Classification<Local> {
     /// The fields needed for lookup cannot be read safely.
     Release,
     /// A long header of an unsupported, non-zero version.
     Unsupported(Version),
     /// Look these up.
-    Route(Queries),
+    Route(Queries<Local>),
     /// A supported Initial: look these up, and keep what was recognized.
     RouteInitial {
-        queries: Queries,
-        initial: RecognizedInitial,
+        queries: Queries<Local>,
+        initial: RecognizedInitial<Local>,
     },
 }
 
-fn classify(
+fn classify<Local: Clone, Peer>(
     bytes: &[u8],
-    link: &LinkId,
-    recognizer: &impl ConnectionIdRecognizer,
-) -> Classification {
+    link: &LinkId<Local, Peer>,
+    recognizer: &impl ConnectionIdRecognizer<Local, Peer>,
+) -> Classification<Local> {
     let Some(&first) = bytes.first() else {
         return Classification::Release;
     };
-    let binding = link.binding_id();
+    let local = &link.local;
     let by_dcid = |dcid: ConnectionId, interpretation, with_initial: bool| {
         let mut queries = Queries::new();
         let lookup = match NonEmptyCid::new(dcid) {
             Ok(cid) if with_initial => Lookup::LocalAndInitial(cid),
             Ok(cid) => Lookup::Local(cid),
-            Err(_) => Lookup::Zero(binding.clone()),
+            Err(_) => Lookup::Zero(local.clone()),
         };
         queries.push((lookup, interpretation));
         queries
@@ -481,7 +506,7 @@ fn classify(
             match packet_type {
                 LongPacketType::Initial => Classification::RouteInitial {
                     queries: by_dcid(dcid, interpretation, true),
-                    initial: RecognizedInitial::new(version, dcid, *packet.scid(), binding.clone()),
+                    initial: RecognizedInitial::new(version, dcid, *packet.scid(), local.clone()),
                 },
                 LongPacketType::ZeroRtt => {
                     Classification::Route(by_dcid(dcid, interpretation, true))

@@ -5,12 +5,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex, Weak, mpsc};
 use std::time::Duration;
 
-use sakuya_link::LinkId;
+use super::support::{Local, TestLinkId};
 use sakuya_wire::v1::header::LongPacketType;
 
 use super::support::{
-    Datagram, Domain, Handoff, Index, Judging, Recorder, Target, binding, cid, datagram, initial,
-    lengths, link, long, nonempty, register,
+    Datagram, Domain, Handoff, Index, Judging, Recorder, Target, cid, datagram, initial, lengths,
+    link, local_end, long, nonempty, register,
 };
 use crate::claim::candidate::DatagramClaimOutcome;
 use crate::claim::deliverer::DatagramDeliverer;
@@ -29,8 +29,8 @@ use crate::route::router::DatagramRouter;
 #[test]
 fn unclaimed_initial_is_published_only_after_a_separate_resume() {
     let mut domain = Domain::new(&[8]);
-    let binding = binding();
-    domain.route(initial(&cid(1), &cid(9)), &link(&binding));
+    let end = local_end();
+    domain.route(initial(&cid(1), &cid(9)), &link(&end));
     // Nothing ran inline: the work waits in the outer queue.
     assert_eq!(domain.factory.shared().prepared.load(Ordering::SeqCst), 0);
     assert_eq!(domain.factory.accepted_count(), 0);
@@ -63,17 +63,17 @@ fn unclaimed_initial_is_published_only_after_a_separate_resume() {
 }
 
 #[test]
-fn zero_length_initial_is_published_under_its_link_binding() {
+fn zero_length_initial_is_published_under_its_local_end() {
     let mut domain = Domain::new(&[0]);
-    let binding = binding();
-    domain.route(initial(&[], &cid(9)), &link(&binding));
+    let end = local_end();
+    domain.route(initial(&[], &cid(9)), &link(&end));
     assert_eq!(domain.drain(), 1);
     let [accepted] = <[_; 1]>::try_from(domain.factory.take_accepted())
         .ok()
         .unwrap();
     assert_eq!(
         accepted.registration.entry().matcher().association(),
-        &MatchAssociation::ZeroCid(binding.clone())
+        &MatchAssociation::ZeroCid(end)
     );
     assert_eq!(domain.index().key_counts(), (0, 1));
 }
@@ -83,9 +83,9 @@ fn zero_length_initial_is_published_under_its_link_binding() {
 fn two_empty_snapshots(judging: Judging) -> (Domain, Arc<Recorder>) {
     let mut domain = Domain::new(&[8]);
     *domain.factory.shared().judging.lock().unwrap() = judging;
-    let binding = binding();
-    domain.route(initial(&cid(1), &cid(10)), &link(&binding));
-    domain.route(initial(&cid(1), &cid(11)), &link(&binding));
+    let end = local_end();
+    domain.route(initial(&cid(1), &cid(10)), &link(&end));
+    domain.route(initial(&cid(1), &cid(11)), &link(&end));
     let first = domain.next_work().unwrap();
     let second = domain.next_work().unwrap();
     domain.router.resume(first);
@@ -125,16 +125,16 @@ fn second_empty_snapshot_creates_after_the_first_receiver_exits() {
         "the exited receiver is not offered B again"
     );
     // A new datagram is offered to both receivers again.
-    domain.route(initial(&cid(1), &cid(12)), &link(&binding()));
+    domain.route(initial(&cid(1), &cid(12)), &link(&local_end()));
     assert_eq!(published.delivery_count(), 1);
 }
 
 #[test]
 fn concurrent_rechecks_publish_once_and_offer_to_the_other() {
     let mut domain = Domain::new(&[8]);
-    let binding = binding();
-    domain.route(initial(&cid(3), &cid(10)), &link(&binding));
-    domain.route(initial(&cid(3), &cid(11)), &link(&binding));
+    let end = local_end();
+    domain.route(initial(&cid(3), &cid(10)), &link(&end));
+    domain.route(initial(&cid(3), &cid(11)), &link(&end));
     let works = [domain.next_work().unwrap(), domain.next_work().unwrap()];
     // Both prepare before either rechecks.
     *domain.factory.shared().barrier.lock().unwrap() = Some(Arc::new(Barrier::new(2)));
@@ -154,8 +154,8 @@ fn concurrent_rechecks_publish_once_and_offer_to_the_other() {
 #[test]
 fn local_entry_registered_while_preparing_becomes_a_candidate() {
     let mut domain = Domain::new(&[8]);
-    let binding = binding();
-    domain.route(initial(&cid(4), &cid(10)), &link(&binding));
+    let end = local_end();
+    domain.route(initial(&cid(4), &cid(10)), &link(&end));
     let local = Recorder::new(7, Judging::Accept);
     let registrations = Arc::new(Mutex::new(Vec::new()));
     {
@@ -184,7 +184,7 @@ fn local_entry_registered_while_preparing_becomes_a_candidate() {
 fn nothing_prepared_releases_without_leaving_a_bucket() {
     let mut domain = Domain::new(&[8]);
     *domain.factory.shared().can_prepare.lock().unwrap() = false;
-    domain.route(initial(&cid(5), &cid(10)), &link(&binding()));
+    domain.route(initial(&cid(5), &cid(10)), &link(&local_end()));
     assert_eq!(domain.drain(), 1);
     assert_eq!(domain.factory.accepted_count(), 0);
     assert_eq!(domain.index().key_counts(), (0, 0));
@@ -193,14 +193,14 @@ fn nothing_prepared_releases_without_leaving_a_bucket() {
 #[test]
 fn rejected_entry_is_not_offered_again_and_history_keeps_it_unalive() {
     let mut domain = Domain::new(&[8]);
-    let binding = binding();
+    let end = local_end();
     let rejecting = Recorder::new(1, Judging::Reject);
     let registration = register(
         domain.index(),
         MatchAssociation::InitialDcid(nonempty(&cid(6))),
         &rejecting,
     );
-    domain.route(initial(&cid(6), &cid(10)), &link(&binding));
+    domain.route(initial(&cid(6), &cid(10)), &link(&end));
     assert!(rejecting.settle().is_empty());
     let work = domain.next_work().unwrap();
     assert_eq!(work.offered_len(), 1);
@@ -211,14 +211,14 @@ fn rejected_entry_is_not_offered_again_and_history_keeps_it_unalive() {
     assert_eq!(domain.factory.accepted_count(), 1);
 
     // A new datagram is offered to the old entry again.
-    domain.route(initial(&cid(6), &cid(11)), &link(&binding));
+    domain.route(initial(&cid(6), &cid(11)), &link(&end));
     assert_eq!(rejecting.delivery_count(), 1);
     drop(rejecting.take());
 
     // The history holds the entry weakly.
     domain.factory.take_accepted();
     let weak = Arc::downgrade(&rejecting);
-    domain.route(initial(&cid(6), &cid(12)), &link(&binding));
+    domain.route(initial(&cid(6), &cid(12)), &link(&end));
     rejecting.settle();
     let work = domain.next_work().unwrap();
     drop(registration);
@@ -230,8 +230,8 @@ fn rejected_entry_is_not_offered_again_and_history_keeps_it_unalive() {
 #[test]
 fn published_receiver_can_receive_before_it_handles_the_first_datagram() {
     let mut domain = Domain::new(&[8]);
-    let binding = binding();
-    let later = link(&binding);
+    let end = local_end();
+    let later = link(&end);
     {
         let router = Arc::clone(&domain.router);
         *domain.factory.shared().before_receive.lock().unwrap() =
@@ -244,7 +244,7 @@ fn published_receiver_can_receive_before_it_handles_the_first_datagram() {
                 assert_eq!(deliverer.delivery_count(), 1);
             }));
     }
-    domain.route(initial(&cid(7), &cid(9)), &link(&binding));
+    domain.route(initial(&cid(7), &cid(9)), &link(&end));
     assert_eq!(domain.drain(), 1);
     let [accepted] = <[_; 1]>::try_from(domain.factory.take_accepted())
         .ok()
@@ -255,14 +255,14 @@ fn published_receiver_can_receive_before_it_handles_the_first_datagram() {
 #[test]
 fn closing_receiver_revokes_and_a_later_initial_creates_again() {
     let mut domain = Domain::new(&[8]);
-    let binding = binding();
-    domain.route(initial(&cid(8), &cid(9)), &link(&binding));
+    let end = local_end();
+    domain.route(initial(&cid(8), &cid(9)), &link(&end));
     domain.drain();
     let [accepted] = <[_; 1]>::try_from(domain.factory.take_accepted())
         .ok()
         .unwrap();
     // A delivery taken before the close keeps its deliverer.
-    domain.route(initial(&cid(8), &cid(9)), &link(&binding));
+    domain.route(initial(&cid(8), &cid(9)), &link(&end));
     let held = accepted.deliverer.take();
     assert_eq!(held.len(), 1);
 
@@ -275,7 +275,7 @@ fn closing_receiver_revokes_and_a_later_initial_creates_again() {
     }
     assert_eq!(old.settle().len(), 1);
 
-    domain.route(initial(&cid(8), &cid(9)), &link(&binding));
+    domain.route(initial(&cid(8), &cid(9)), &link(&end));
     assert_eq!(domain.drain(), 1);
     assert_eq!(domain.factory.accepted_count(), 1);
 }
@@ -283,12 +283,12 @@ fn closing_receiver_revokes_and_a_later_initial_creates_again() {
 #[test]
 fn closed_or_full_reflow_queue_releases_the_work() {
     let mut domain = Domain::new(&[8]);
-    let binding = binding();
+    let end = local_end();
     drop(std::mem::replace(
         &mut domain.reflow,
         DatagramDeliveryQueue::new(NonZeroUsize::MIN).unwrap(),
     ));
-    domain.route(initial(&cid(9), &cid(9)), &link(&binding));
+    domain.route(initial(&cid(9), &cid(9)), &link(&end));
     assert_eq!(domain.drain(), 0);
     assert_eq!(domain.factory.accepted_count(), 0);
 }
@@ -296,8 +296,8 @@ fn closed_or_full_reflow_queue_releases_the_work() {
 #[test]
 fn next_round_hands_off_again_instead_of_nesting() {
     let mut domain = Domain::new(&[8]);
-    let binding = binding();
-    domain.route(initial(&cid(10), &cid(9)), &link(&binding));
+    let end = local_end();
+    domain.route(initial(&cid(10), &cid(9)), &link(&end));
     let work = domain.next_work().unwrap();
     // An entry appears before the recheck; it will exit.
     let late = Recorder::new(1, Judging::Reject);
@@ -333,20 +333,20 @@ fn prepared_material_is_dropped_outside_the_index() {
         }
     }
 
-    impl DatagramDeliverer<Datagram> for ReadsOnDrop {
+    impl DatagramDeliverer<Datagram, Local> for ReadsOnDrop {
         type Handoff = Handoff;
 
-        fn deliver(&self, _delivery: DatagramDelivery<Datagram, Handoff>) {}
+        fn deliver(&self, _delivery: DatagramDelivery<Datagram, Local, Handoff>) {}
     }
 
     struct Ignored;
 
-    impl InitialDatagramReceiver<Vec<u8>, LinkId, Target> for Ignored {
+    impl InitialDatagramReceiver<Vec<u8>, TestLinkId, Target> for Ignored {
         fn receive_first(
             self,
-            _: RouteEntryRegistration<Target>,
+            _: RouteEntryRegistration<Target, Local>,
             _: ExclusiveDatagram<Datagram>,
-            _: RecognizedInitial,
+            _: RecognizedInitial<Local>,
         ) {
         }
     }
@@ -356,14 +356,17 @@ fn prepared_material_is_dropped_outside_the_index() {
         dropped: Arc<AtomicUsize>,
     }
 
-    impl InitialReceiverFactory<Vec<u8>, LinkId, Target> for Preparing {
+    impl InitialReceiverFactory<Vec<u8>, TestLinkId, Target> for Preparing {
         type Receiver = Ignored;
 
-        fn admits(&self, _: &RecognizedInitial, _: &Datagram) -> bool {
+        fn admits(&self, _: &RecognizedInitial<Local>, _: &Datagram) -> bool {
             true
         }
 
-        fn prepare(&self, _: &RecognizedInitial) -> Option<PreparedReceiver<Target, Ignored>> {
+        fn prepare(
+            &self,
+            _: &RecognizedInitial<Local>,
+        ) -> Option<PreparedReceiver<Target, Ignored>> {
             let deliverer = Arc::new(ReadsOnDrop {
                 index: Weak::clone(&self.index),
                 dropped: Arc::clone(&self.dropped),
@@ -376,7 +379,7 @@ fn prepared_material_is_dropped_outside_the_index() {
     let dropped = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&dropped);
     std::thread::spawn(move || {
-        let index = RouteIndex::<Target>::new();
+        let index = RouteIndex::<Target, Local>::new();
         let mut reflow = DatagramDeliveryQueue::new(NonZeroUsize::new(4).unwrap()).unwrap();
         let router = DatagramRouter::new(Arc::clone(&index), lengths(&[8]))
             .with_initial_acceptance(InitialAcceptance::new(
@@ -387,8 +390,8 @@ fn prepared_material_is_dropped_outside_the_index() {
                 Arc::new(reflow.poster()),
             ));
         let existing = Recorder::new(1, Judging::Reject);
-        let binding = binding();
-        router.route(datagram(initial(&cid(11), &cid(9)), &link(&binding)));
+        let end = local_end();
+        router.route(datagram(initial(&cid(11), &cid(9)), &link(&end)));
         let work = reflow.try_recv().unwrap();
         let _existing = register(
             &index,
@@ -409,7 +412,7 @@ fn prepared_material_is_dropped_outside_the_index() {
 #[test]
 fn cancelled_attempts_reflow_and_a_winner_that_drops_its_datagram_does_not() {
     let mut domain = Domain::new(&[8]);
-    let binding = binding();
+    let end = local_end();
     let first = Recorder::new(1, Judging::Reject);
     let second = Recorder::new(2, Judging::Accept);
     let _first = register(
@@ -424,7 +427,7 @@ fn cancelled_attempts_reflow_and_a_winner_that_drops_its_datagram_does_not() {
     );
 
     // Every attempt is cancelled before it runs: the last exit hands off.
-    domain.route(initial(&cid(12), &cid(9)), &link(&binding));
+    domain.route(initial(&cid(12), &cid(9)), &link(&end));
     for delivery in first.take().into_iter().chain(second.take()) {
         let DatagramDelivery::Competing(candidate) = delivery else {
             panic!("two entries compete");
@@ -438,7 +441,7 @@ fn cancelled_attempts_reflow_and_a_winner_that_drops_its_datagram_does_not() {
     assert!(domain.next_work().is_some());
 
     // The winner takes the datagram and then drops it: no handoff, no refill.
-    domain.route(initial(&cid(12), &cid(9)), &link(&binding));
+    domain.route(initial(&cid(12), &cid(9)), &link(&end));
     let owned = second.settle();
     assert_eq!(owned.len(), 1);
     drop(owned);

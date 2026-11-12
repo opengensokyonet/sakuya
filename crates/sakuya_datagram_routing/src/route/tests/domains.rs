@@ -4,12 +4,12 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use sakuya_link::LinkId;
+use super::support::{Local, TestLinkId};
 use sakuya_wire::version::Version;
 
 use super::support::{
-    Datagram, Handoff, Index, Router, Target, Work, binding, cid, initial, lengths, link, nonempty,
-    ready,
+    Datagram, Handoff, Index, Router, Target, Work, cid, initial, lengths, link, local_end,
+    nonempty, ready,
 };
 use crate::claim::candidate::{DatagramClaimAccess, DatagramClaimOutcome};
 use crate::claim::candidate::{DatagramClaimAttempt, DatagramClaimCandidate, DatagramClaimFuture};
@@ -29,11 +29,11 @@ use crate::route::interpretation::RecognizedInitial;
 use crate::route::router::DatagramRouter;
 
 type LocalPayload = Rc<[u8]>;
-type LocalLink = Rc<LinkId>;
+type LocalLink = Rc<TestLinkId>;
 type LocalDatagram = ReceivedDatagram<LocalPayload, LocalLink>;
 type LocalWork = UnclaimedWork<LocalPayload, LocalLink>;
-type LocalHandoff = ReflowHandoff<LocalReflow>;
-type LocalTarget = dyn ErasedDatagramDeliverer<LocalDatagram, LocalHandoff>;
+type LocalHandoff = ReflowHandoff<LocalReflow, Local>;
+type LocalTarget = dyn ErasedDatagramDeliverer<LocalDatagram, Local, LocalHandoff>;
 
 /// A reflow provider that keeps the work in a queue shared through `Rc`.
 struct LocalReflow {
@@ -48,7 +48,7 @@ impl ReflowProvider<LocalPayload, LocalLink> for LocalReflow {
 
 /// A deliverer whose deliveries stay on this thread.
 struct LocalDeliverer {
-    deliveries: RefCell<Vec<DatagramDelivery<LocalDatagram, LocalHandoff>>>,
+    deliveries: RefCell<Vec<DatagramDelivery<LocalDatagram, Local, LocalHandoff>>>,
 }
 
 impl LocalDeliverer {
@@ -63,17 +63,17 @@ impl LocalDeliverer {
     }
 }
 
-impl DatagramDeliverer<LocalDatagram> for LocalDeliverer {
+impl DatagramDeliverer<LocalDatagram, Local> for LocalDeliverer {
     type Handoff = LocalHandoff;
 
-    fn deliver(&self, delivery: DatagramDelivery<LocalDatagram, LocalHandoff>) {
+    fn deliver(&self, delivery: DatagramDelivery<LocalDatagram, Local, LocalHandoff>) {
         self.deliveries.borrow_mut().push(delivery);
     }
 }
 
 /// What a local receiver received for a newly published Initial entry.
 struct LocalAccepted {
-    registration: RouteEntryRegistration<LocalTarget>,
+    registration: RouteEntryRegistration<LocalTarget, Local>,
     datagram: ExclusiveDatagram<LocalDatagram>,
     deliverer: Arc<LocalDeliverer>,
 }
@@ -86,9 +86,9 @@ struct LocalReceiver {
 impl InitialDatagramReceiver<LocalPayload, LocalLink, LocalTarget> for LocalReceiver {
     fn receive_first(
         self,
-        registration: RouteEntryRegistration<LocalTarget>,
+        registration: RouteEntryRegistration<LocalTarget, Local>,
         datagram: ExclusiveDatagram<LocalDatagram>,
-        _initial: RecognizedInitial,
+        _initial: RecognizedInitial<Local>,
     ) {
         self.accepted.borrow_mut().push(LocalAccepted {
             registration,
@@ -105,13 +105,13 @@ struct LocalFactory {
 impl InitialReceiverFactory<LocalPayload, LocalLink, LocalTarget> for LocalFactory {
     type Receiver = LocalReceiver;
 
-    fn admits(&self, _: &RecognizedInitial, _: &LocalDatagram) -> bool {
+    fn admits(&self, _: &RecognizedInitial<Local>, _: &LocalDatagram) -> bool {
         true
     }
 
     fn prepare(
         &self,
-        _: &RecognizedInitial,
+        _: &RecognizedInitial<Local>,
     ) -> Option<PreparedReceiver<LocalTarget, LocalReceiver>> {
         let deliverer = LocalDeliverer::new();
         let receiver = LocalReceiver {
@@ -133,7 +133,7 @@ impl InitialReceiverFactory<LocalPayload, LocalLink, LocalTarget> for LocalFacto
 fn local_routing_domain_accepts_new_initials_without_send() {
     let queue = Rc::new(RefCell::new(Vec::new()));
     let accepted = Rc::new(RefCell::new(Vec::new()));
-    let index = RouteIndex::<LocalTarget>::new();
+    let index = RouteIndex::<LocalTarget, Local>::new();
     let router = DatagramRouter::new(Arc::clone(&index), lengths(&[8])).with_initial_acceptance(
         InitialAcceptance::new(
             LocalFactory {
@@ -153,7 +153,7 @@ fn local_routing_domain_accepts_new_initials_without_send() {
         ),
         Arc::clone(&existing) as Arc<LocalTarget>,
     );
-    let link = Rc::new(link(&binding()));
+    let link = Rc::new(link(&local_end()));
     let datagram = |bytes: Vec<u8>| ReceivedDatagram::new(Rc::from(bytes), Rc::clone(&link));
 
     // The existing entry judges and exits; its last exit hands the work off.
@@ -201,7 +201,7 @@ fn routing_domain_shared_between_threads_is_send() {
     fn send_sync<T: ?Sized + Send + Sync>() {}
     type Judgment = for<'access, 'route> fn(
         DatagramClaimAccess<'access, Datagram>,
-        &'route DatagramRouteMatchInfo,
+        &'route DatagramRouteMatchInfo<Local>,
     ) -> DatagramClaimOutcome<'access, (), (), Datagram>;
 
     send_sync::<Router>();
@@ -209,8 +209,8 @@ fn routing_domain_shared_between_threads_is_send() {
     send_sync::<Target>();
     send::<Handoff>();
     send::<Work>();
-    send::<RouteEntryRegistration<Target>>();
-    send::<DatagramClaimCandidate<Datagram, Handoff>>();
-    send::<DatagramClaimFuture<Datagram, Handoff, (), (), Judgment>>();
-    send::<DatagramDelivery<Datagram, Handoff>>();
+    send::<RouteEntryRegistration<Target, Local>>();
+    send::<DatagramClaimCandidate<Datagram, Local, Handoff>>();
+    send::<DatagramClaimFuture<Datagram, Local, Handoff, (), (), Judgment>>();
+    send::<DatagramDelivery<Datagram, Local, Handoff>>();
 }

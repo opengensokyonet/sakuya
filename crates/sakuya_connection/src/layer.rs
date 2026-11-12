@@ -9,10 +9,8 @@
 //! a share in every layer ([`LayerShare`](crate::share::LayerShare)).
 use core::{fmt::Debug, time::Duration};
 
-use sakuya_link::LinkId;
-
 use crate::{
-    clock::ConnectionChoices,
+    clock::{ConnectionChoices, LinkIdOf},
     share::{ConnectionArgsOf, PartList, PathKey},
 };
 
@@ -76,7 +74,7 @@ impl Layer for LogicalPath {
     const INDEX: usize = 2;
 }
 impl Layer for LinkPath {
-    type Args<T: ConnectionChoices, L: PartList<T>> = LinkPathArgs<PathKey<L>, LinkId>;
+    type Args<T: ConnectionChoices, L: PartList<T>> = LinkPathArgs<PathKey<L>, LinkIdOf<T>>;
     const INDEX: usize = 3;
 }
 impl Layer for Established {
@@ -84,7 +82,7 @@ impl Layer for Established {
     const INDEX: usize = 4;
 }
 impl Layer for Recovery {
-    type Args<T: ConnectionChoices, L: PartList<T>> = RecoveryArgs<PathKey<L>>;
+    type Args<T: ConnectionChoices, L: PartList<T>> = RecoveryArgs<PathKey<L>, LinkIdOf<T>>;
     const INDEX: usize = 5;
 }
 
@@ -111,7 +109,7 @@ pub struct LogicalPathArgs<K> {
 /// entry of the logical link when it builds that entry with this link
 /// path, and drops it when the entry is there already. The link path node
 /// itself is built from the logical link's identity (`Lk` is
-/// [`LinkId`]); its components read the clone from the entry above.
+/// [`LinkIdOf`]); its components read the clone from the entry above.
 #[derive(Clone, Debug)]
 pub struct LinkPathArgs<K, Lk> {
     /// The key of the link path's logical path.
@@ -128,12 +126,15 @@ pub struct LinkPathArgs<K, Lk> {
 pub struct EstablishedArgs {}
 
 /// The facts the recovery layer of a link path is built from.
+///
+/// `K` is the key of the logical path, `Id` the identity of a link
+/// ([`LinkIdOf`]).
 #[derive(Clone, Debug)]
-pub struct RecoveryArgs<K> {
+pub struct RecoveryArgs<K, Id> {
     /// The key of the link path's logical path.
     pub path: K,
     /// The link path's logical link.
-    pub link: LinkId,
+    pub link: Id,
     /// The RTT measured before the layer is built: for a link path whose
     /// new address was validated, the interval between sending a
     /// PATH_CHALLENGE and receiving its PATH_RESPONSE on it (RFC 9002
@@ -142,21 +143,27 @@ pub struct RecoveryArgs<K> {
 }
 
 /// The key of a node.
+///
+/// `K` is the key of a logical path, `Id` the identity of a link
+/// ([`LinkIdOf`]).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum NodeKey<K> {
+pub enum NodeKey<K, Id> {
     /// The connection node.
     Connection,
     /// The entry of a logical link.
-    LinkEntry(LinkId),
+    LinkEntry(Id),
     /// A logical path.
     LogicalPath(K),
     /// A link path: its logical path and its logical link.
-    LinkPath(K, LinkId),
+    LinkPath(K, Id),
     /// The established layer.
     Established,
     /// The recovery layer of a link path.
-    Recovery(K, LinkId),
+    Recovery(K, Id),
 }
+
+/// The key of a node of the choices `T` and the list of parts `L`.
+pub type NodeKeyOf<T, L> = NodeKey<PathKey<L>, LinkIdOf<T>>;
 
 /// What a key of a logical path must be.
 pub trait LogicalPathKey: Clone + Eq + Ord + Debug + 'static {}

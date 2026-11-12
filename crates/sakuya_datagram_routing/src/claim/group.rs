@@ -32,20 +32,20 @@ use super::shared::{ClaimCore, DatagramFinishPolicy, Participation};
 
 /// The complete candidate set of one datagram, ready to be dispatched.
 #[must_use = "a prepared claim delivers nothing until dispatched"]
-pub(crate) struct PreparedClaim<Inner, Handoff: UnclaimedHandoff<Inner>, Target: ?Sized> {
-    prepared: Prepared<Inner, Handoff, Target>,
+pub(crate) struct PreparedClaim<Inner, Local, Handoff: UnclaimedHandoff<Inner>, Target: ?Sized> {
+    prepared: Prepared<Inner, Local, Handoff, Target>,
 }
 
 /// Each candidate's deliverer, credential and match information.
-type Candidates<Inner, Handoff, Target> = SmallVec<
+type Candidates<Inner, Local, Handoff, Target> = SmallVec<
     [(
         Arc<Target>,
         Participation<Inner, Handoff>,
-        DatagramRouteMatchInfo,
+        DatagramRouteMatchInfo<Local>,
     ); 4],
 >;
 
-enum Prepared<Inner, Handoff: UnclaimedHandoff<Inner>, Target: ?Sized> {
+enum Prepared<Inner, Local, Handoff: UnclaimedHandoff<Inner>, Target: ?Sized> {
     Release(Inner),
     Unclaimed {
         datagram: Inner,
@@ -54,11 +54,11 @@ enum Prepared<Inner, Handoff: UnclaimedHandoff<Inner>, Target: ?Sized> {
     Exclusive {
         target: Arc<Target>,
         datagram: ExclusiveDatagram<Inner>,
-        route: DatagramRouteMatchInfo,
+        route: DatagramRouteMatchInfo<Local>,
     },
     Competing {
         core: Arc<ClaimCore<Inner, Handoff>>,
-        candidates: Candidates<Inner, Handoff, Target>,
+        candidates: Candidates<Inner, Local, Handoff, Target>,
     },
 }
 
@@ -70,15 +70,15 @@ enum Prepared<Inner, Handoff: UnclaimedHandoff<Inner>, Target: ?Sized> {
 /// candidate. No author code runs here, so routing may call this while it still
 /// holds its table locks; it must release them before
 /// [`dispatch`](PreparedClaim::dispatch).
-pub(crate) fn prepare_claim<Inner, Handoff, Target, Entries>(
+pub(crate) fn prepare_claim<Inner, Local, Handoff, Target, Entries>(
     datagram: Inner,
     finish: DatagramFinishPolicy<Handoff>,
     entries: Entries,
-) -> PreparedClaim<Inner, Handoff, Target>
+) -> PreparedClaim<Inner, Local, Handoff, Target>
 where
     Handoff: UnclaimedHandoff<Inner>,
-    Target: ?Sized + ErasedDatagramDeliverer<Inner, Handoff>,
-    Entries: IntoIterator<Item = (Arc<Target>, DatagramRouteMatchInfo)>,
+    Target: ?Sized + ErasedDatagramDeliverer<Inner, Local, Handoff>,
+    Entries: IntoIterator<Item = (Arc<Target>, DatagramRouteMatchInfo<Local>)>,
 {
     let mut entries = entries.into_iter();
     let prepared = match (finish, entries.next()) {
@@ -109,10 +109,10 @@ where
     PreparedClaim { prepared }
 }
 
-impl<Inner, Handoff, Target> PreparedClaim<Inner, Handoff, Target>
+impl<Inner, Local, Handoff, Target> PreparedClaim<Inner, Local, Handoff, Target>
 where
     Handoff: UnclaimedHandoff<Inner>,
-    Target: ?Sized + ErasedDatagramDeliverer<Inner, Handoff>,
+    Target: ?Sized + ErasedDatagramDeliverer<Inner, Local, Handoff>,
 {
     /// Commits the set and delivers every candidate to its deliverer, in
     /// order.

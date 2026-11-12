@@ -21,7 +21,12 @@ use sakuya_wire::connection_id::{ConnectionId, ConnectionIdLength, NonEmptyCid};
 use smallvec::SmallVec;
 
 /// Reads the destination connection IDs a short header may carry.
-pub trait ConnectionIdRecognizer {
+///
+/// `Local` and `Peer` are the ends of the links the datagrams arrive on
+/// ([`sakuya_link::Link::Local`], [`sakuya_link::Link::Peer`]); an
+/// implementation that cares about one kind of end implements the trait for
+/// that type only.
+pub trait ConnectionIdRecognizer<Local, Peer> {
     /// Yields every destination connection ID length under which the short
     /// header at the start of `datagram`, arriving on `link`, can be read.
     ///
@@ -32,7 +37,7 @@ pub trait ConnectionIdRecognizer {
     fn short_dcid_lengths<'a>(
         &'a self,
         datagram: &'a [u8],
-        link: &'a LinkId,
+        link: &'a LinkId<Local, Peer>,
     ) -> impl Iterator<Item = ConnectionIdLength> + 'a;
 }
 
@@ -64,11 +69,11 @@ impl ConnectionIdLengths {
     }
 }
 
-impl ConnectionIdRecognizer for ConnectionIdLengths {
+impl<Local, Peer> ConnectionIdRecognizer<Local, Peer> for ConnectionIdLengths {
     fn short_dcid_lengths<'a>(
         &'a self,
         _datagram: &'a [u8],
-        _link: &'a LinkId,
+        _link: &'a LinkId<Local, Peer>,
     ) -> impl Iterator<Item = ConnectionIdLength> + 'a {
         self.lengths()
     }

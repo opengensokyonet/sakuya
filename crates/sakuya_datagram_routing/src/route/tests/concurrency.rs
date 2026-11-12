@@ -22,10 +22,10 @@ use crate::route::recognizer::ConnectionIdOccupancy;
 /// A deliverer that only counts its deliveries.
 struct Counter(Arc<AtomicUsize>);
 
-impl DatagramDeliverer<Datagram> for Counter {
+impl DatagramDeliverer<Datagram, Local> for Counter {
     type Handoff = Handoff;
 
-    fn deliver(&self, _delivery: DatagramDelivery<Datagram, Handoff>) {
+    fn deliver(&self, _delivery: DatagramDelivery<Datagram, Local, Handoff>) {
         self.0.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -37,7 +37,7 @@ impl DatagramDeliverer<Datagram> for Counter {
 #[test]
 fn a_lookup_does_not_combine_two_states_of_a_bucket() {
     const DEADLINE: Duration = Duration::from_secs(5);
-    let binding = binding();
+    let end = local_end();
     let domain = Domain::new(&[8]);
     let router = Arc::clone(&domain.router);
     let key = nonempty(&cid(0x77));
@@ -65,7 +65,7 @@ fn a_lookup_does_not_combine_two_states_of_a_bucket() {
         })
     };
     let bytes = long(LongPacketType::ZeroRtt, &cid(0x77), &cid(0x10), 20);
-    let arrival = link(&binding);
+    let arrival = link(&end);
     let started = Instant::now();
     let mut routed = 0_u64;
     let mut missed = 0_u64;
@@ -105,10 +105,10 @@ impl Drop for ReadsIndex {
     }
 }
 
-impl DatagramDeliverer<Datagram> for ReadsIndex {
+impl DatagramDeliverer<Datagram, Local> for ReadsIndex {
     type Handoff = Handoff;
 
-    fn deliver(&self, delivery: DatagramDelivery<Datagram, Handoff>) {
+    fn deliver(&self, delivery: DatagramDelivery<Datagram, Local, Handoff>) {
         if let Some(index) = self.index.upgrade() {
             assert!(index.occupancy(&self.cid) >= 1);
         }
@@ -135,7 +135,7 @@ fn revocation_destroys_the_deliverer_outside_the_index() {
     );
     domain.route(
         long(LongPacketType::Handshake, &cid(0x31), &cid(0x10), 20),
-        &link(&binding()),
+        &link(&local_end()),
     );
     drop(registration);
     assert_eq!(dropped.load(Ordering::SeqCst), 1);
@@ -146,13 +146,13 @@ fn revocation_destroys_the_deliverer_outside_the_index() {
 struct RegistersDuringDelivery {
     index: Arc<Index>,
     late: Arc<Recorder>,
-    registrations: Mutex<Vec<RouteEntryRegistration<Target>>>,
+    registrations: Mutex<Vec<RouteEntryRegistration<Target, Local>>>,
 }
 
-impl DatagramDeliverer<Datagram> for RegistersDuringDelivery {
+impl DatagramDeliverer<Datagram, Local> for RegistersDuringDelivery {
     type Handoff = Handoff;
 
-    fn deliver(&self, delivery: DatagramDelivery<Datagram, Handoff>) {
+    fn deliver(&self, delivery: DatagramDelivery<Datagram, Local, Handoff>) {
         let registration = register(
             &self.index,
             MatchAssociation::InitialDcid(nonempty(&cid(0x32))),
@@ -182,7 +182,7 @@ fn an_entry_registered_during_delivery_waits_for_the_next_round() {
         ),
         Arc::clone(&registering) as Arc<Target>,
     );
-    domain.route(initial(&cid(0x32), &cid(0x10)), &link(&binding()));
+    domain.route(initial(&cid(0x32), &cid(0x10)), &link(&local_end()));
     assert_eq!(late.delivery_count(), 0, "the frozen set has no late entry");
     assert_eq!(domain.drain(), 1, "the only candidate exited");
     assert_eq!(
@@ -201,7 +201,7 @@ fn a_reflow_round_does_not_repeat_reset_detection() {
     let probe = ResetProbe::default();
     let bytes = initial(&cid(0x33), &cid(0x10));
     let tail = *bytes.last_chunk().unwrap();
-    domain.route(bytes, &link(&binding()));
+    domain.route(bytes, &link(&local_end()));
     let _token = domain
         .resets
         .register(StatelessResetToken::new(tail), probe.clone());

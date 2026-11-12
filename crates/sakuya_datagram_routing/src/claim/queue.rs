@@ -34,14 +34,14 @@
 //! use sakuya_datagram_routing::claim::finish::ReleaseUnclaimed;
 //! use sakuya_datagram_routing::claim::queue::{DatagramDeliveryPoster, DatagramDeliveryQueue};
 //!
-//! type Delivery = DatagramDelivery<Vec<u8>, ReleaseUnclaimed>;
+//! type Delivery = DatagramDelivery<Vec<u8>, (), ReleaseUnclaimed>;
 //!
 //! /// Queues every delivery for its receiver.
 //! struct Queued {
 //!     poster: DatagramDeliveryPoster<Delivery>,
 //! }
 //!
-//! impl DatagramDeliverer<Vec<u8>> for Queued {
+//! impl DatagramDeliverer<Vec<u8>, ()> for Queued {
 //!     fn deliver(&self, delivery: Delivery) {
 //!         // After the receiver closed, this takes the delivery and drops it.
 //!         self.poster.post(delivery);

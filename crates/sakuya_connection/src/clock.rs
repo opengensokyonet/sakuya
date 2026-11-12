@@ -9,7 +9,7 @@ use core::{
     time::Duration,
 };
 
-use sakuya_link::Link;
+use sakuya_link::{Link, LinkId};
 
 /// A monotonic clock and its timer.
 ///
@@ -49,3 +49,10 @@ pub trait ConnectionChoices: 'static {
 
 /// A point in time of the choices `T`.
 pub type InstantOf<T> = <<T as ConnectionChoices>::Clock as MonotonicClock>::Instant;
+
+/// The identity of a link of the choices `T`, with the types of its two
+/// ends.
+pub type LinkIdOf<T> = LinkId<
+    <<T as ConnectionChoices>::Link as Link>::Local,
+    <<T as ConnectionChoices>::Link as Link>::Peer,
+>;

@@ -8,11 +8,10 @@
 //! nodes above ([`LineageLists`]).
 use core::{fmt::Debug, ops::Add};
 
-use sakuya_link::LinkId;
-
 use frunk_core::traits::{ToMut, ToRef};
 use sakuya_wire::parts::{HCons, HNil};
 
+use crate::clock::LinkIdOf;
 use crate::layer::{
     Connection, Established, Layer, LinkEntry, LinkPath, LogicalPath, LogicalPathKey, Recovery,
 };
@@ -154,15 +153,15 @@ pub trait LogicalPathKeys {
     /// list of fields.
     type Key: LogicalPathKey;
     /// What identifies a link path where one link path is told from another
-    /// beyond the tree, such as where an acknowledgment came back from:
-    /// [`LinkId`] when no part adds a field, otherwise the key and the
-    /// logical link.
-    type LinkPathIdentifier: Clone + Eq + Debug + 'static;
+    /// beyond the tree, such as where an acknowledgment came back from,
+    /// given the identity of a link `Id`: `Id` when no part adds a field,
+    /// otherwise the key and the logical link.
+    type LinkPathIdentifier<Id: Clone + Eq + Debug + 'static>: Clone + Eq + Debug + 'static;
 }
 impl LogicalPathKeys for HNil {
     type Fields = HNil;
     type Key = SoleLogicalPath;
-    type LinkPathIdentifier = LinkId;
+    type LinkPathIdentifier<Id: Clone + Eq + Debug + 'static> = Id;
 }
 impl<P: LogicalPathKeyShare, Ps: LogicalPathKeys> LogicalPathKeys for HCons<P, Ps>
 where
@@ -171,27 +170,27 @@ where
 {
     type Fields = <P::Fields as Add<Ps::Fields>>::Output;
     type Key = <<P::Fields as Add<Ps::Fields>>::Output as KeyOfFields>::Key;
-    type LinkPathIdentifier =
-        <<P::Fields as Add<Ps::Fields>>::Output as KeyOfFields>::LinkPathIdentifier;
+    type LinkPathIdentifier<Id: Clone + Eq + Debug + 'static> =
+        <<P::Fields as Add<Ps::Fields>>::Output as KeyOfFields>::LinkPathIdentifier<Id>;
 }
 
 /// The key of a logical path made of a list of fields.
 pub trait KeyOfFields {
     /// The key.
     type Key: LogicalPathKey;
-    /// The identifier of a link path.
-    type LinkPathIdentifier: Clone + Eq + Debug + 'static;
+    /// The identifier of a link path, given the identity of a link `Id`.
+    type LinkPathIdentifier<Id: Clone + Eq + Debug + 'static>: Clone + Eq + Debug + 'static;
 }
 impl KeyOfFields for HNil {
     type Key = SoleLogicalPath;
-    type LinkPathIdentifier = LinkId;
+    type LinkPathIdentifier<Id: Clone + Eq + Debug + 'static> = Id;
 }
 impl<H, T> KeyOfFields for HCons<H, T>
 where
     HCons<H, T>: LogicalPathKey,
 {
     type Key = HCons<H, T>;
-    type LinkPathIdentifier = (HCons<H, T>, LinkId);
+    type LinkPathIdentifier<Id: Clone + Eq + Debug + 'static> = (HCons<H, T>, Id);
 }
 
 /// The key of the one logical path of a connection whose parts add no field
@@ -201,8 +200,9 @@ pub struct SoleLogicalPath;
 
 /// The key of a logical path of the list of parts `L`.
 pub type PathKey<L> = <L as LogicalPathKeys>::Key;
-/// The identifier of a link path of the list of parts `L`.
-pub type LinkPathIdentifierOf<L> = <L as LogicalPathKeys>::LinkPathIdentifier;
+/// The identifier of a link path of the choices `T` and the list of parts
+/// `L`.
+pub type LinkPathIdentifierOf<T, L> = <L as LogicalPathKeys>::LinkPathIdentifier<LinkIdOf<T>>;
 
 /// A list of parts with a share in every layer.
 pub trait PartList<T>:
