@@ -10,7 +10,7 @@ use super::{
         ResetPresentation, TerminationDecision, TerminationEvent, TerminationView,
     },
 };
-use crate::connection::{CloseReason, ImmediateClose, TransportImmediateClose};
+use crate::connection::CloseReason;
 use crate::send::test_support::TestCloseCause;
 use crate::{
     connection_receive_flow::ConnectionReceiveFlowController,
@@ -25,6 +25,10 @@ use sakuya_wire::v1::transport_error::TransportErrorCode;
 use sakuya_wire::var_int::VarInt;
 use std::rc::Rc;
 
+use crate::receive::test_support::{
+    c, close_reason, data, destroy, fix_both, reset, restrict, stream, v,
+};
+
 mod accounting;
 mod boundary;
 mod completion;
@@ -32,45 +36,6 @@ mod order;
 mod read;
 mod stop;
 mod violation;
-
-/// The reason the tests close connections for.
-fn close_reason() -> CloseReason<TestCloseCause> {
-    CloseReason::Peer(ImmediateClose::Transport(TransportImmediateClose {
-        code: TransportErrorCode::PROTOCOL_VIOLATION,
-        frame_type: Some(VarInt::from(0x08u8)),
-        reason_phrase: Bytes::from_static(b"bad stream"),
-    }))
-}
-
-fn v(value: u32) -> VarInt {
-    VarInt::from_u32(value)
-}
-
-fn c(value: u32) -> ApplicationErrorCode {
-    ApplicationErrorCode::new(v(value))
-}
-
-/// `len` bytes whose values are their stream offsets modulo 251.
-fn data(offset: u32, len: u32) -> Bytes {
-    (offset..offset + len)
-        .map(|at| u8::try_from(at % 251).unwrap())
-        .collect()
-}
-
-fn stream(offset: u32, len: u32, fin: bool) -> StreamFrame {
-    StreamFrame {
-        offset: v(offset),
-        data: data(offset, len),
-        fin,
-    }
-}
-
-fn reset(code: u32, final_size: u32) -> ResetStreamFrame {
-    ResetStreamFrame {
-        code: c(code),
-        final_size: v(final_size),
-    }
-}
 
 /// A termination policy that answers each event with a closure.
 struct Scripted<S>(S);
@@ -104,30 +69,6 @@ fn keep(_: TerminationEvent, _: &TerminationView) -> TerminationDecision<&'stati
 fn keep_all()
 -> Scripted<impl FnMut(TerminationEvent, &TerminationView) -> TerminationDecision<&'static str>> {
     scripted(keep)
-}
-
-fn restrict(
-    acceptance: BoundaryUpdate,
-    delivery: BoundaryUpdate,
-    reason: &'static str,
-) -> TerminationDecision<&'static str> {
-    TerminationDecision::new(BoundaryAction::Restrict {
-        acceptance,
-        delivery,
-        reason,
-    })
-}
-
-fn fix_both(limit: u32, reason: &'static str) -> TerminationDecision<&'static str> {
-    restrict(
-        BoundaryUpdate::Fix(v(limit)),
-        BoundaryUpdate::Fix(v(limit)),
-        reason,
-    )
-}
-
-fn destroy(reason: &'static str) -> TerminationDecision<&'static str> {
-    TerminationDecision::new(BoundaryAction::Destroy { reason })
 }
 
 /// The components of the receivers under test: the fragmented buffer, a

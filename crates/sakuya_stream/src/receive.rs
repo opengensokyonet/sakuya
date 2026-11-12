@@ -820,4 +820,7 @@ fn check_reset_final_size(
 }
 
 #[cfg(test)]
+pub(crate) mod test_support;
+
+#[cfg(test)]
 mod tests;

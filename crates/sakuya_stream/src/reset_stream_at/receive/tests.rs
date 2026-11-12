@@ -5,9 +5,7 @@ use super::{
     OnResetStreamAtError, OnResetStreamError as ResetAtOnResetStreamError, RemoteResetAt,
     RemoteResetAtChange, ResetStreamAtFrame,
 };
-use crate::connection::{
-    CloseReason, ConnectionClosedError, ImmediateClose, TransportImmediateClose,
-};
+use crate::connection::ConnectionClosedError;
 use crate::connection_receive_flow::{ConnectionReceiveFlowController, RecordUsageError};
 use crate::receive::flow_control::{
     AdvertisementIntent, ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView,
@@ -15,13 +13,13 @@ use crate::receive::flow_control::{
 use crate::receive::read::{ReadError, ReadOutcome, SharedTerminationReason};
 use crate::receive::stop::{StopError, StopNotNeededReason};
 use crate::receive::termination::{
-    BoundaryAction, BoundaryUpdate, FollowingTermination, ReceiveTerminationPolicy,
-    TerminationDecision, TerminationEvent, TerminationView,
+    BoundaryUpdate, FollowingTermination, ReceiveTerminationPolicy, TerminationDecision,
+    TerminationEvent, TerminationView,
 };
 use crate::receive::violation::{
     FinalSizeBelowReceivedError, OnRemoteResetError, OnResetStreamError, StreamLimitExceededError,
 };
-use crate::receive::{BoundaryMode, ResetStreamFrame, StreamFrame, StreamReceiver};
+use crate::receive::{BoundaryMode, ResetStreamFrame, StreamReceiver};
 use crate::receive_buffer::{
     StreamDataInput, StreamReceiveBuffer, fragmented::FragmentedStreamReceiveBuffer,
 };
@@ -34,6 +32,10 @@ use sakuya_wire::v1::application_error::ApplicationErrorCode;
 use sakuya_wire::v1::transport_error::TransportErrorCode;
 use sakuya_wire::var_int::VarInt;
 
+use crate::receive::test_support::{
+    c, close_reason, data, destroy, fix_both, reset, restrict, stream, v,
+};
+
 /// The events a policy of these receivers observes.
 type Event = TerminationEvent<RemoteResetAtChange>;
 
@@ -42,45 +44,6 @@ type View = TerminationView<RemoteResetAt>;
 
 /// A later reset lowered the effective reliable size.
 const LOWERED: Event = TerminationEvent::ResetChanged(RemoteResetAtChange::ReliablePrefixLowered);
-
-/// The reason the tests close connections for.
-fn close_reason() -> CloseReason<TestCloseCause> {
-    CloseReason::Peer(ImmediateClose::Transport(TransportImmediateClose {
-        code: TransportErrorCode::PROTOCOL_VIOLATION,
-        frame_type: Some(VarInt::from(0x08u8)),
-        reason_phrase: Bytes::from_static(b"bad stream"),
-    }))
-}
-
-fn v(value: u32) -> VarInt {
-    VarInt::from_u32(value)
-}
-
-fn c(value: u32) -> ApplicationErrorCode {
-    ApplicationErrorCode::new(v(value))
-}
-
-/// `len` bytes whose values are their stream offsets modulo 251.
-fn data(offset: u32, len: u32) -> Bytes {
-    (offset..offset + len)
-        .map(|at| u8::try_from(at % 251).unwrap())
-        .collect()
-}
-
-fn stream(offset: u32, len: u32, fin: bool) -> StreamFrame {
-    StreamFrame {
-        offset: v(offset),
-        data: data(offset, len),
-        fin,
-    }
-}
-
-fn reset(code: u32, final_size: u32) -> ResetStreamFrame {
-    ResetStreamFrame {
-        code: c(code),
-        final_size: v(final_size),
-    }
-}
 
 fn reset_at(code: u32, final_size: u32, reliable_size: u32) -> ResetStreamAtFrame {
     ResetStreamAtFrame {
@@ -125,30 +88,6 @@ fn keep(_: Event, _: &View) -> TerminationDecision<&'static str> {
 
 fn keep_all() -> Scripted<impl FnMut(Event, &View) -> TerminationDecision<&'static str>> {
     scripted(keep)
-}
-
-fn restrict(
-    acceptance: BoundaryUpdate,
-    delivery: BoundaryUpdate,
-    reason: &'static str,
-) -> TerminationDecision<&'static str> {
-    TerminationDecision::new(BoundaryAction::Restrict {
-        acceptance,
-        delivery,
-        reason,
-    })
-}
-
-fn fix_both(limit: u32, reason: &'static str) -> TerminationDecision<&'static str> {
-    restrict(
-        BoundaryUpdate::Fix(v(limit)),
-        BoundaryUpdate::Fix(v(limit)),
-        reason,
-    )
-}
-
-fn destroy(reason: &'static str) -> TerminationDecision<&'static str> {
-    TerminationDecision::new(BoundaryAction::Destroy { reason })
 }
 
 /// The components of the receivers under test: the fragmented buffer, a
