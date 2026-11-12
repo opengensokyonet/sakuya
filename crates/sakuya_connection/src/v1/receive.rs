@@ -19,10 +19,18 @@
 //!    not read yet, is dropped.
 //! 3. Header protection and the AEAD are removed in place, with the packet
 //!    number decoded against the largest one processed in its space; a
-//!    packet that does not open is dropped (RFC 9001 §5.4.2, §5.5).
+//!    packet that does not open is dropped (RFC 9001 §5.4.2, §5.5), and
+//!    one that fails authentication counts toward the integrity limit of
+//!    its AEAD, past which the connection ends (§6.6). A 1-RTT packet is
+//!    opened once, with the one receiving generation its Key Phase and
+//!    packet number select, as [`key_phase`](super::key_phase) says.
 //! 4. Reserved bits set once both layers are removed end the connection
 //!    (RFC 9000 §17.2, §17.3.1); a packet number already processed is
-//!    dropped (§12.3).
+//!    dropped (§12.3). A 1-RTT packet that is not dropped notes its number
+//!    for its generation; one opened with the next generation makes it
+//!    current, and when the peer updated first, the sending generation
+//!    moves with it, before anything acknowledges the packet (RFC 9001
+//!    §6.2).
 //! 5. The frames are read and dispatched one by one, each checked against
 //!    the level and this side's role first; a failure ends the connection,
 //!    and what follows it is not dispatched. A packet without frames ends
@@ -46,7 +54,9 @@ use bytes::Bytes;
 use frunk_core::coproduct::CoproductSelector;
 use sakuya_link::{ArrivalFacts, EcnCodepoint, Link};
 use sakuya_packet_protection::{
-    backend::CryptoBackend, header_protection::HeaderProtectionError, packet_key::OpenPacketError,
+    backend::CryptoBackend,
+    header_protection::{HeaderProtectionError, HeaderProtectionKey},
+    packet_key::{OpenPacketError, PacketKey},
 };
 use sakuya_recovery::{
     ack_obligation::AckObligation,
@@ -61,7 +71,7 @@ use sakuya_wire::{
             FrameType,
             set::{FrameSet, Frames, codec::ReadFrameError},
         },
-        header::TypeFields,
+        header::{KeyPhase, TypeFields},
         packet_number::PacketNumber,
         protected_packet::ProtectedPacket,
         role::Role,
@@ -70,10 +80,12 @@ use sakuya_wire::{
 
 use super::{
     Choices, Side,
+    aead_usage::AeadUsage,
     dispatch::permitted,
     error::ConnectionError,
     idle::IdleTimeout,
-    keys::{DirectionKeys, HandshakeKeys, InitialKeys, OneRttKeys},
+    key_phase::KeyPhaseNumbers,
+    keys::{DirectionKeys, HandshakeKeys, InitialKeys, OneRttKeys, OneRttReceiveKeys},
     role::LinkPathRole,
     spaces::AckObligationsOf,
 };
@@ -231,18 +243,21 @@ pub enum DropReason {
 ///
 /// The positions are found from the composition: `Ii`, `Ih`, `Io` of the
 /// keys of the three levels, `Ij` of the receive journals, `Im` of their
-/// maximum number of ACK ranges, `Ia` of the ACK obligations and `It` of
-/// the idle timeout, among the components of the logical path's lineage; `Ir` of the role among a link path's; `Ie` of
+/// maximum number of ACK ranges, `Ia` of the ACK obligations, `It` of the
+/// idle timeout, `Iu` of the AEAD usage and `Ikp` of the key phase numbers,
+/// among the components of the logical path's lineage; `Ir` of the role
+/// among a link path's; `Ie` of
 /// version 1's error in the connection's error; `Ik` of version 1's frame
 /// kinds among the kinds of the frame set; `Hd` of what each part's
 /// dispatch takes.
 ///
 /// # Errors
 ///
-/// The connection error the packet causes: reserved bits set, a frame that
-/// does not read or is not permitted, a failure of the part that handles a
-/// frame, or no frames at all. The packet is then not recorded.
-pub fn receive_packet<'v, T, L, B, P, Ii, Ih, Io, Ij, Im, Ia, It, Ir, Ie, Ik, Hd>(
+/// The connection error the packet causes: the integrity limit exceeded,
+/// reserved bits set, a frame that does not read
+/// or is not permitted, a failure of the part that handles a frame, or no
+/// frames at all. The packet is then not recorded.
+pub fn receive_packet<'v, T, L, B, P, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd>(
     lineage: &mut LineageOf<'v, T, L, LogicalPath>,
     others: &mut OtherNodes<'v, T, L, B>,
     packet: ReceivedPacket<P, T::Link>,
@@ -256,11 +271,13 @@ where
     <L as FrameSet>::Kind: CoproductSelector<FrameType, Ik>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<InitialKeys<T::Crypto>, Ii>
         + GetAt<HandshakeKeys<T::Crypto>, Ih>
-        + GetAt<OneRttKeys<T::Crypto>, Io>
+        + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
         + GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
         + GetAt<MaxAckRanges, Im>
         + GetAt<AckObligationsOf<T>, Ia>
-        + GetAt<IdleTimeout<InstantOf<T>>, It>,
+        + GetAt<IdleTimeout<InstantOf<T>>, It>
+        + GetAt<AeadUsage, Iu>
+        + GetAt<KeyPhaseNumbers, Ikp>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<LinkPathRole<InstantOf<T>>, Ir>,
@@ -277,7 +294,7 @@ where
     let level = packet.packet().level();
     let space = space_of(level);
     let (packet, arrival) = packet.into_parts();
-    let (opened, bytes) = {
+    let (opened, bytes, one_rtt) = {
         let keys = match receive_keys::<T, L, Ii, Ih, Io>(lineage, level) {
             LevelReceiveKeys::Ready(keys) => keys,
             // a closing link path gets no more keys than it has
@@ -304,9 +321,36 @@ where
             return Ok(PacketOutcome::Dropped(DropReason::NotProtected));
         };
         let mut bytes = packet.into_bytes();
-        match open(keys, bytes.as_mut(), pn_offset, largest) {
-            Ok(opened) => (opened, bytes),
-            Err(reason) => return Ok(PacketOutcome::Dropped(reason)),
+        let (opening, aead) = match keys {
+            ReceiveKeys::Level(keys) => (
+                open(keys, bytes.as_mut(), pn_offset, largest).map(|opened| (opened, None)),
+                keys.aead(),
+            ),
+            ReceiveKeys::OneRtt(keys) => {
+                let current = keys.current().generation();
+                let lowest = lineage
+                    .get::<KeyPhaseNumbers, Ikp>()
+                    .lowest_received(current);
+                (
+                    open_one_rtt(keys, lowest, bytes.as_mut(), pn_offset, largest)
+                        .map(|(opened, generation)| (opened, Some((generation, current, lowest)))),
+                    keys.current().aead(),
+                )
+            }
+        };
+        match opening {
+            Ok((opened, one_rtt)) => (opened, bytes, one_rtt),
+            Err(reason) => {
+                if fails_authentication(&reason) {
+                    lineage
+                        .get_mut::<AeadUsage, Iu>()
+                        .authentication_failed(aead)
+                        .map_err(|source| {
+                            v1_error::<L, Ie>(ConnectionError::AeadLimitReached { source })
+                        })?;
+                }
+                return Ok(PacketOutcome::Dropped(reason));
+            }
         }
     };
     let payload = bytes.into().slice(opened.payload);
@@ -329,6 +373,32 @@ where
     let Some(admission) = admission else {
         return Ok(PacketOutcome::Dropped(DropReason::Duplicate { number }));
     };
+    match one_rtt {
+        // taken only to change it
+        Some((ReceiveGeneration::Current, current, lowest))
+            if lowest.is_none_or(|lowest| number < lowest) =>
+        {
+            lineage
+                .get_mut::<KeyPhaseNumbers, Ikp>()
+                .received(current, number);
+        }
+        Some((ReceiveGeneration::Next, ..)) => {
+            // a level that only receives, as the connection closes, has
+            // nothing to derive with: the packet is processed all the same
+            let promotion = lineage
+                .get_mut::<OneRttKeys<T::Crypto, InstantOf<T>>, Io>()
+                .promote_next();
+            if let Some(promotion) = promotion {
+                if promotion.send_updated {
+                    lineage.get_mut::<AeadUsage, Iu>().send_keys_updated();
+                }
+                lineage
+                    .get_mut::<KeyPhaseNumbers, Ikp>()
+                    .promoted(promotion.generation, number);
+            }
+        }
+        Some((ReceiveGeneration::Current | ReceiveGeneration::Previous, ..)) | None => {}
+    }
 
     let mut packet_facts = PacketFacts::default();
     for run in Frames::new(payload, PhantomData::<L>) {
@@ -429,13 +499,21 @@ fn carries_token<P>(packet: &ProtectedPacket<P>) -> bool {
 }
 
 /// The receive keys of one level, as far as there are any.
-pub(super) enum LevelReceiveKeys<'k, B: CryptoBackend> {
+pub(super) enum LevelReceiveKeys<K> {
     /// The keys to read the level's packets with.
-    Ready(&'k DirectionKeys<B>),
+    Ready(K),
     /// The handshake has not produced them yet; the packet waits.
     NotYet,
     /// None are to come.
     Gone,
+}
+
+/// The keys a level's packets are read with.
+pub(super) enum ReceiveKeys<'k, B: CryptoBackend, I> {
+    /// Those of Initial or Handshake.
+    Level(&'k DirectionKeys<B>),
+    /// The generations of 1-RTT.
+    OneRtt(&'k OneRttReceiveKeys<B, I>),
 }
 
 /// The receive keys of `level`.
@@ -446,34 +524,53 @@ pub(super) enum LevelReceiveKeys<'k, B: CryptoBackend> {
 pub(super) fn receive_keys<'k, T, L, Ii, Ih, Io>(
     lineage: &'k LineageOf<'_, T, L, LogicalPath>,
     level: EncryptionLevel,
-) -> LevelReceiveKeys<'k, T::Crypto>
+) -> LevelReceiveKeys<ReceiveKeys<'k, T::Crypto, InstantOf<T>>>
 where
     T: Choices,
     L: LineagePartList<T>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<InitialKeys<T::Crypto>, Ii>
         + GetAt<HandshakeKeys<T::Crypto>, Ih>
-        + GetAt<OneRttKeys<T::Crypto>, Io>,
+        + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>,
 {
+    let level_keys = |keys: Option<_>| {
+        keys.map_or(LevelReceiveKeys::Gone, |keys| {
+            LevelReceiveKeys::Ready(ReceiveKeys::Level(keys))
+        })
+    };
     match level {
-        EncryptionLevel::Initial => lineage
-            .get::<InitialKeys<T::Crypto>, Ii>()
-            .receive()
-            .map_or(LevelReceiveKeys::Gone, LevelReceiveKeys::Ready),
+        EncryptionLevel::Initial => {
+            level_keys(lineage.get::<InitialKeys<T::Crypto>, Ii>().receive())
+        }
         // the connection reads no 0-RTT yet; a server may drop it (RFC 9001
         // §4.6.1)
         EncryptionLevel::ZeroRtt => LevelReceiveKeys::Gone,
         EncryptionLevel::Handshake => match lineage.get::<HandshakeKeys<T::Crypto>, Ih>() {
             HandshakeKeys::NotYet => LevelReceiveKeys::NotYet,
-            keys => keys
-                .receive()
-                .map_or(LevelReceiveKeys::Gone, LevelReceiveKeys::Ready),
+            keys => level_keys(keys.receive()),
         },
-        EncryptionLevel::OneRtt => match lineage.get::<OneRttKeys<T::Crypto>, Io>() {
-            OneRttKeys::NotYet | OneRttKeys::SendOnly(_) => LevelReceiveKeys::NotYet,
-            keys => keys
-                .receive()
-                .map_or(LevelReceiveKeys::Gone, LevelReceiveKeys::Ready),
+        EncryptionLevel::OneRtt => match one_rtt_receive_keys::<T, L, Io>(lineage) {
+            LevelReceiveKeys::Ready(keys) => LevelReceiveKeys::Ready(ReceiveKeys::OneRtt(keys)),
+            LevelReceiveKeys::NotYet => LevelReceiveKeys::NotYet,
+            LevelReceiveKeys::Gone => LevelReceiveKeys::Gone,
         },
+    }
+}
+
+/// The receive keys of 1-RTT; as [`receive_keys`] says, a server's level
+/// with only its sending half has not come for receiving.
+pub(super) fn one_rtt_receive_keys<'k, T, L, Io>(
+    lineage: &'k LineageOf<'_, T, L, LogicalPath>,
+) -> LevelReceiveKeys<&'k OneRttReceiveKeys<T::Crypto, InstantOf<T>>>
+where
+    T: Choices,
+    L: LineagePartList<T>,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>,
+{
+    match lineage.get::<OneRttKeys<T::Crypto, InstantOf<T>>, Io>() {
+        OneRttKeys::NotYet | OneRttKeys::SendOnly(..) => LevelReceiveKeys::NotYet,
+        keys => keys
+            .receive()
+            .map_or(LevelReceiveKeys::Gone, LevelReceiveKeys::Ready),
     }
 }
 
@@ -515,6 +612,17 @@ pub(super) struct Opened {
     payload: Range<usize>,
 }
 
+/// Which receiving generation of the 1-RTT keys opened a packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReceiveGeneration {
+    /// The one before the current generation: the packet was delayed.
+    Previous,
+    /// The current generation.
+    Current,
+    /// The one after the current generation: the peer updated its keys.
+    Next,
+}
+
 /// Remove header protection and the AEAD from `packet` in place, with the
 /// Packet Number field at `pn_offset`, decoding the packet number against
 /// `largest`, the largest one processed in its space.
@@ -524,22 +632,108 @@ pub(super) fn open<B: CryptoBackend>(
     pn_offset: usize,
     largest: Option<PacketNumber>,
 ) -> Result<Opened, DropReason> {
-    let truncated = keys
-        .header
+    let header = remove_header(&keys.header, packet, pn_offset, largest)?;
+    open_payload(&keys.packet, packet, &header)
+}
+
+/// Remove header protection and the AEAD from the 1-RTT `packet` in place,
+/// as [`open`] does, with the one receiving generation its Key Phase and
+/// packet number select (RFC 9001 §6.5): the current one for the current
+/// Key Phase; for the other, the previous one when it is kept and the
+/// packet number is lower than `lowest`, the lowest one this logical path
+/// received with the current generation, or `lowest` is `None`; the next
+/// one otherwise. The payload is opened once, with that generation only, as
+/// the [`key_phase`](super::key_phase) module says.
+///
+/// # Errors
+///
+/// The packet does not open with the selected generation.
+pub(super) fn open_one_rtt<B: CryptoBackend, I: Copy>(
+    keys: &OneRttReceiveKeys<B, I>,
+    lowest: Option<PacketNumber>,
+    packet: &mut [u8],
+    pn_offset: usize,
+    largest: Option<PacketNumber>,
+) -> Result<(Opened, ReceiveGeneration), DropReason> {
+    let header = remove_header(keys.header(), packet, pn_offset, largest)?;
+    let number = header.number;
+    let key_phase = if packet[0] & KEY_PHASE_BIT == 0 {
+        KeyPhase::Zero
+    } else {
+        KeyPhase::One
+    };
+    let (packet_key, generation) = if key_phase == keys.current().key_phase() {
+        (keys.current().packet(), ReceiveGeneration::Current)
+    } else {
+        match keys.previous() {
+            // "lower than any" holds when there is none
+            Some(previous) if lowest.is_none_or(|lowest| number < lowest) => {
+                (previous, ReceiveGeneration::Previous)
+            }
+            // the peer updated; or the previous generation is discarded,
+            // and the next one fails authentication
+            _ => (keys.next().packet(), ReceiveGeneration::Next),
+        }
+    };
+    open_payload(packet_key, packet, &header).map(|opened| (opened, generation))
+}
+
+/// The Key Phase bit of the unprotected first byte of a short header (RFC
+/// 9000 §17.3.1).
+const KEY_PHASE_BIT: u8 = 0x04;
+
+/// A packet with header protection removed.
+struct Unprotected {
+    /// The packet number.
+    number: PacketNumber,
+    /// The length of the header, up to the end of the Packet Number field.
+    len: usize,
+}
+
+/// Remove header protection from `packet` in place with `header`, as
+/// [`open`] says.
+fn remove_header<B: CryptoBackend>(
+    header: &HeaderProtectionKey<B>,
+    packet: &mut [u8],
+    pn_offset: usize,
+    largest: Option<PacketNumber>,
+) -> Result<Unprotected, DropReason> {
+    let truncated = header
         .remove(packet, pn_offset)
         .map_err(|source| DropReason::HeaderProtectionNotRemoved { source })?;
-    let number = truncated.decode(largest);
-    let header_len = pn_offset + truncated.encoded_len().get();
-    let payload_len = keys
-        .packet
-        .open(number, packet, header_len)
+    Ok(Unprotected {
+        number: truncated.decode(largest),
+        len: pn_offset + truncated.encoded_len().get(),
+    })
+}
+
+/// Remove the AEAD from `packet`, whose header protection is removed, in
+/// place with `key`.
+fn open_payload<B: CryptoBackend>(
+    key: &PacketKey<B>,
+    packet: &mut [u8],
+    header: &Unprotected,
+) -> Result<Opened, DropReason> {
+    let payload_len = key
+        .open(header.number, packet, header.len)
         .map_err(|source| DropReason::PayloadNotOpened { source })?
         .len();
     Ok(Opened {
-        number,
+        number: header.number,
         first_byte: packet[0],
-        payload: header_len..header_len + payload_len,
+        payload: header.len..header.len + payload_len,
     })
+}
+
+/// Whether the packet dropped for `reason` failed authentication, which
+/// counts toward the integrity limit (RFC 9001 §6.6).
+fn fails_authentication(reason: &DropReason) -> bool {
+    matches!(
+        reason,
+        DropReason::PayloadNotOpened {
+            source: OpenPacketError::Authentication { .. }
+        }
+    )
 }
 
 /// Whether a reserved bit of the unprotected first byte of a packet of
@@ -618,10 +812,13 @@ where
 
 #[cfg(test)]
 mod tests {
+    use core::time::Duration;
+
     use sakuya_packet_protection::{
-        backend::ring::RingBackend,
+        backend::{AeadAlgorithm, KdfAlgorithm, ring::RingBackend},
         initial::{INITIAL_AEAD, InitialSecrets},
         packet_number::{PacketNumberLength, TruncatedPacketNumber},
+        secret::TrafficSecret,
     };
     use sakuya_wire::connection_id::ConnectionId;
 
@@ -643,6 +840,17 @@ mod tests {
         number: u64,
         payload: &[u8],
     ) -> Vec<u8> {
+        sealed_with(&keys.packet, &keys.header, first_byte, number, payload)
+    }
+
+    /// The packet [`sealed`] makes, protected with `packet` and `header`.
+    fn sealed_with(
+        packet_key: &PacketKey<RingBackend>,
+        header: &HeaderProtectionKey<RingBackend>,
+        first_byte: u8,
+        number: u64,
+        payload: &[u8],
+    ) -> Vec<u8> {
         let pn_len = PacketNumberLength::new(2).unwrap();
         let truncated = TruncatedPacketNumber::new(u32::try_from(number).unwrap(), pn_len).unwrap();
         let number = PacketNumber::new(number).unwrap();
@@ -650,9 +858,128 @@ mod tests {
         packet.extend_from_slice(truncated.as_bytes());
         packet.extend_from_slice(payload);
         packet.extend_from_slice(&[0; 16]);
-        keys.packet.seal(number, &mut packet, 4).unwrap();
-        keys.header.apply(&mut packet, 2).unwrap();
+        packet_key.seal(number, &mut packet, 4).unwrap();
+        header.apply(&mut packet, 2).unwrap();
         packet
+    }
+
+    /// 1-RTT keys whose receiving generation 1 is current, generation 0
+    /// previous.
+    fn promoted() -> OneRttKeys<RingBackend, Duration> {
+        let secret = |byte| TrafficSecret::new(KdfAlgorithm::HkdfSha256, &[byte; 32]).unwrap();
+        let mut keys = OneRttKeys::NotYet;
+        keys.install(RingBackend, AeadAlgorithm::Aes128Gcm, secret(1), secret(2));
+        keys.promote_next().unwrap();
+        keys
+    }
+
+    fn pn(number: u64) -> PacketNumber {
+        PacketNumber::new(number).unwrap()
+    }
+
+    #[test]
+    fn the_key_phase_and_the_packet_number_select_the_generation() {
+        let keys = promoted();
+        let receive = keys.receive().unwrap();
+        let previous = receive.previous().unwrap();
+        // generation 1 has Key Phase 1, generations 0 and 2 have 0
+        let current = sealed_with(
+            receive.current().packet(),
+            receive.header(),
+            0x44,
+            7,
+            &[1; 20],
+        );
+        let next = sealed_with(receive.next().packet(), receive.header(), 0x40, 9, &[1; 20]);
+        let old = |number| sealed_with(previous, receive.header(), 0x40, number, &[1; 20]);
+        let open = |mut packet: Vec<u8>, lowest| {
+            open_one_rtt(receive, lowest, &mut packet, 2, Some(pn(5)))
+                .map(|(opened, generation)| (opened.number.get(), generation))
+        };
+        assert!(matches!(
+            open(current, Some(pn(6))),
+            Ok((7, ReceiveGeneration::Current))
+        ));
+        assert!(matches!(
+            open(next, Some(pn(6))),
+            Ok((9, ReceiveGeneration::Next))
+        ));
+        assert!(matches!(
+            open(old(4), Some(pn(6))),
+            Ok((4, ReceiveGeneration::Previous))
+        ));
+        // nothing received with the current generation is lower than any
+        assert!(matches!(
+            open(old(8), None),
+            Ok((8, ReceiveGeneration::Previous))
+        ));
+        // old keys after newer ones are tried with the next generation only
+        assert!(matches!(
+            open(old(8), Some(pn(6))),
+            Err(DropReason::PayloadNotOpened {
+                source: OpenPacketError::Authentication { .. }
+            })
+        ));
+        let mut forged = old(4);
+        let last = forged.len() - 1;
+        forged[last] ^= 1;
+        assert!(matches!(
+            open(forged, Some(pn(6))),
+            Err(DropReason::PayloadNotOpened {
+                source: OpenPacketError::Authentication { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn a_discarded_previous_generation_leaves_the_next_one() {
+        let mut keys = promoted();
+        let old = {
+            let receive = keys.receive().unwrap();
+            sealed_with(
+                receive.previous().unwrap(),
+                receive.header(),
+                0x40,
+                4,
+                &[1; 20],
+            )
+        };
+        keys.discard_previous();
+        let receive = keys.receive().unwrap();
+        let mut packet = old;
+        assert!(matches!(
+            open_one_rtt(receive, Some(pn(6)), &mut packet, 2, Some(pn(5))),
+            Err(DropReason::PayloadNotOpened {
+                source: OpenPacketError::Authentication { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn numbers_of_an_older_generation_select_the_previous_one() {
+        let keys = promoted();
+        let receive = keys.receive().unwrap();
+        let current = receive.current().generation();
+        // this logical path received packet 3 with generation 0, then
+        // another one promoted generation 1
+        let mut numbers = KeyPhaseNumbers::new();
+        numbers.received(current - 1, pn(3));
+        let lowest = numbers.lowest_received(current);
+        assert_eq!(lowest, None);
+        let mut packet = sealed_with(
+            receive.previous().unwrap(),
+            receive.header(),
+            0x40,
+            8,
+            &[1; 20],
+        );
+        assert!(matches!(
+            open_one_rtt(receive, lowest, &mut packet, 2, Some(pn(5))),
+            Ok((opened, ReceiveGeneration::Previous)) if opened.number == pn(8)
+        ));
+        // the first packet of generation 1 starts its numbers afresh
+        numbers.received(current, pn(9));
+        assert_eq!(numbers.lowest_received(current), Some(pn(9)));
     }
 
     #[test]

@@ -99,14 +99,16 @@ use sakuya_wire::{
 
 use super::{
     Choices, CloseCauseOf, Side,
+    aead_usage::AeadUsage,
     amplification::AntiAmplification,
     close::{CloseReasonRecord, LocalCloseCause},
     error::ConnectionError,
     idle::IdleTimeout,
-    keys::{DirectionKeys, HandshakeKeys, InitialKeys, OneRttKeys},
+    key_phase::KeyPhaseNumbers,
+    keys::{HandshakeKeys, InitialKeys, OneRttKeys, OneRttReceiveKeys},
     receive::{
-        LevelReceiveKeys, PacketOutcome, ReceivedPacket, open, packet_number_offset, receive_keys,
-        receive_packet,
+        LevelReceiveKeys, PacketOutcome, ReceivedPacket, one_rtt_receive_keys, open_one_rtt,
+        packet_number_offset, receive_keys, receive_packet,
     },
     role::LinkPathRole,
     spaces::AckObligationsOf,
@@ -204,7 +206,7 @@ impl ReceivableLevels {
         L: LineagePartList<T>,
         for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<InitialKeys<T::Crypto>, Ii>
             + GetAt<HandshakeKeys<T::Crypto>, Ih>
-            + GetAt<OneRttKeys<T::Crypto>, Io>,
+            + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>,
     {
         let receivable = |level| {
             !matches!(
@@ -418,21 +420,21 @@ pub trait LogicalPathReceivingCapability: ReceiverFamily {
 /// the record of why the connection closed in the logical path's lineage;
 /// those of [`receive_packet`]; and `Ian` of
 /// the anti-amplification limit in the entry of a logical link.
-type Positions<Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Ir, Ie, Ik, Hd, Ian> = (
+type Positions<Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian> = (
     (Ip, Ic),
-    (Ii, Ih, Io, Ij, Im, Ia, It),
+    (Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp),
     (Ir, Ie, Ik, Hd),
     Ian,
 );
 
-impl<T, L, K, B, Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Ir, Ie, Ik, Hd, Ian>
+impl<T, L, K, B, Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian>
     LogicalPathReceivingCapability
     for NodeCallFamily<
         T,
         L,
         LogicalPath,
         K,
-        Positions<Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Ir, Ie, Ik, Hd, Ian>,
+        Positions<Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian>,
         B,
     >
 where
@@ -446,11 +448,13 @@ where
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
         + GetAt<InitialKeys<T::Crypto>, Ii>
         + GetAt<HandshakeKeys<T::Crypto>, Ih>
-        + GetAt<OneRttKeys<T::Crypto>, Io>
+        + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
         + GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
         + GetAt<MaxAckRanges, Im>
         + GetAt<AckObligationsOf<T>, Ia>
-        + GetAt<IdleTimeout<InstantOf<T>>, It>,
+        + GetAt<IdleTimeout<InstantOf<T>>, It>
+        + GetAt<AeadUsage, Iu>
+        + GetAt<KeyPhaseNumbers, Ikp>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<LinkPathRole<InstantOf<T>>, Ir>,
@@ -498,6 +502,8 @@ where
                             Im,
                             Ia,
                             It,
+                            Iu,
+                            Ikp,
                             Ir,
                             Ie,
                             Ik,
@@ -538,7 +544,7 @@ where
         let FirstPacketInterpretation::Short { dcid_len } = route.interpretation() else {
             return DatagramClaimOutcome::Abandoned(());
         };
-        let keys = match receive_keys::<T, L, Ii, Ih, Io>(lineage, EncryptionLevel::OneRtt) {
+        let keys = match one_rtt_receive_keys::<T, L, Io>(lineage) {
             LevelReceiveKeys::Ready(keys) => keys,
             LevelReceiveKeys::NotYet => return DatagramClaimOutcome::Unclaimed(access),
             LevelReceiveKeys::Gone => return DatagramClaimOutcome::Abandoned(()),
@@ -548,7 +554,10 @@ where
             .get(PacketNumberSpaceKind::ApplicationData)
             .and_then(|journals| journals.largest())
             .map(|(number, _)| number);
-        if first_packet_opens(keys, access.bytes(), dcid_len, largest) {
+        let lowest = lineage
+            .get::<KeyPhaseNumbers, Ikp>()
+            .lowest_received(keys.current().generation());
+        if first_packet_opens(keys, lowest, access.bytes(), dcid_len, largest) {
             DatagramClaimOutcome::Claimed(access.into_exclusive(), ())
         } else {
             DatagramClaimOutcome::Abandoned(())
@@ -602,9 +611,26 @@ where
                 Err(IntoPacketsError::UnreadableBoundary { .. }) => break,
             };
             let packet = ReceivedPacket::new(packet, arrival.clone());
-            let next = receive_one::<T, L, B, Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Ir, Ie, Ik, Hd>(
-                lineage, others, packet,
-            );
+            let next = receive_one::<
+                T,
+                L,
+                B,
+                Ip,
+                Ic,
+                Ii,
+                Ih,
+                Io,
+                Ij,
+                Im,
+                Ia,
+                It,
+                Iu,
+                Ikp,
+                Ir,
+                Ie,
+                Ik,
+                Hd,
+            >(lineage, others, packet);
             if next.is_break() {
                 break;
             }
@@ -617,7 +643,7 @@ where
 /// why the connection closed, use up this poll's inputs and break, so that
 /// what follows waits until the link paths have entered closing.
 #[allow(clippy::type_complexity)] // the positions of what it takes
-fn receive_one<'v, T, L, B, Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Ir, Ie, Ik, Hd>(
+fn receive_one<'v, T, L, B, Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd>(
     lineage: &mut LineageOf<'v, T, L, LogicalPath>,
     others: &mut OtherNodes<'v, T, L, B>,
     packet: ReceivedPacket<<T::Link as Link>::Payload, T::Link>,
@@ -633,11 +659,13 @@ where
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
         + GetAt<InitialKeys<T::Crypto>, Ii>
         + GetAt<HandshakeKeys<T::Crypto>, Ih>
-        + GetAt<OneRttKeys<T::Crypto>, Io>
+        + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
         + GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
         + GetAt<MaxAckRanges, Im>
         + GetAt<AckObligationsOf<T>, Ia>
-        + GetAt<IdleTimeout<InstantOf<T>>, It>,
+        + GetAt<IdleTimeout<InstantOf<T>>, It>
+        + GetAt<AeadUsage, Iu>
+        + GetAt<KeyPhaseNumbers, Ikp>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<LinkPathRole<InstantOf<T>>, Ir>,
@@ -654,6 +682,8 @@ where
         Im,
         Ia,
         It,
+        Iu,
+        Ikp,
         Ir,
         Ie,
         Ik,
@@ -705,10 +735,12 @@ fn short_dcid_len<Local>(route: &DatagramRouteMatchInfo<Local>) -> ConnectionIdL
 
 /// Whether the first packet of `datagram`, a 1-RTT packet whose
 /// Destination Connection ID is `dcid_len` long, opens with `keys`, its
-/// packet number decoded against `largest`. A copy is opened: the datagram
-/// stays as it arrived, and nothing is recorded.
-fn first_packet_opens<B: CryptoBackend>(
-    keys: &DirectionKeys<B>,
+/// packet number decoded against `largest` and its generation selected
+/// against `lowest` as [`open_one_rtt`] does. A copy is opened: the datagram
+/// stays as it arrived, and nothing is recorded or counted.
+fn first_packet_opens<B: CryptoBackend, I: Copy>(
+    keys: &OneRttReceiveKeys<B, I>,
+    lowest: Option<PacketNumber>,
     datagram: &[u8],
     dcid_len: ConnectionIdLength,
     largest: Option<PacketNumber>,
@@ -722,7 +754,7 @@ fn first_packet_opens<B: CryptoBackend>(
         return false;
     };
     let mut copy = packet.into_bytes().to_vec();
-    open(keys, &mut copy, pn_offset, largest).is_ok()
+    open_one_rtt(keys, lowest, &mut copy, pn_offset, largest).is_ok()
 }
 
 /// The receiving call of a logical path; the steps are those of the
@@ -766,9 +798,13 @@ pub async fn logical_path_receiving<W: LogicalPathReceivingCapability>(
 #[derive(Debug)]
 pub struct LogicalPathReceivingKind;
 
-impl<T, L, Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Ir, Ie, Ik, Hd, Ian>
-    CallKind<T, L, LogicalPath, Positions<Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Ir, Ie, Ik, Hd, Ian>>
-    for LogicalPathReceivingKind
+impl<T, L, Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian>
+    CallKind<
+        T,
+        L,
+        LogicalPath,
+        Positions<Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian>,
+    > for LogicalPathReceivingKind
 where
     T: Choices,
     L: LineagePartList<T> + FrameSetDispatch<T, L, Hd>,
@@ -779,18 +815,20 @@ where
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
         + GetAt<InitialKeys<T::Crypto>, Ii>
         + GetAt<HandshakeKeys<T::Crypto>, Ih>
-        + GetAt<OneRttKeys<T::Crypto>, Io>
+        + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
         + GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
         + GetAt<MaxAckRanges, Im>
         + GetAt<AckObligationsOf<T>, Ia>
-        + GetAt<IdleTimeout<InstantOf<T>>, It>,
+        + GetAt<IdleTimeout<InstantOf<T>>, It>
+        + GetAt<AeadUsage, Iu>
+        + GetAt<KeyPhaseNumbers, Ikp>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<LinkPathRole<InstantOf<T>>, Ir>,
     for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![AntiAmplification], Ian>,
-    Positions<Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Ir, Ie, Ik, Hd, Ian>: 'static,
+    Positions<Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian>: 'static,
 {
     type Call<B: CallBundle> = LentCall<
         NodeCallFamily<
@@ -798,7 +836,7 @@ where
             L,
             LogicalPath,
             LogicalPathReceivingKind,
-            Positions<Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Ir, Ie, Ik, Hd, Ian>,
+            Positions<Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian>,
             B,
         >,
         LogicalPathReceiving,
@@ -809,6 +847,6 @@ where
     fn reads(reads: &mut ReadSet) {
         reads
             .add::<HandshakeKeys<T::Crypto>>()
-            .add::<OneRttKeys<T::Crypto>>();
+            .add::<OneRttKeys<T::Crypto, InstantOf<T>>>();
     }
 }

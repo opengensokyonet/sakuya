@@ -8,6 +8,12 @@
 //! such as Initial discarded while Handshake has not come: the conditions of
 //! the transitions do (Initial is discarded when a Handshake packet is
 //! processed or sent, and its keys are there by then).
+//!
+//! The 1-RTT level moves through generations with the key updates (RFC 9001
+//! §6): [`KeyGeneration`] is one generation of one direction. The counts
+//! that change with every packet are not here but in [`AeadUsage`] and
+//! [`KeyPhaseNumbers`](super::key_phase::KeyPhaseNumbers): whoever reads
+//! the keys is looked at again only when they change.
 
 use core::fmt;
 
@@ -17,15 +23,19 @@ use sakuya_packet_protection::{
     packet_key::PacketKey,
     secret::TrafficSecret,
 };
+use sakuya_wire::v1::header::KeyPhase;
+
+use super::aead_usage::AeadUsage;
 
 /// The keys that protect the packets of one direction at one encryption
 /// level: the packet key and the header protection key, derived from one
-/// traffic secret.
+/// traffic secret, and the AEAD they are for.
 pub struct DirectionKeys<B: CryptoBackend> {
     /// Encrypts or decrypts the payload.
     pub packet: PacketKey<B>,
     /// Applies or removes header protection.
     pub header: HeaderProtectionKey<B>,
+    aead: AeadAlgorithm,
 }
 
 impl<B: CryptoBackend> DirectionKeys<B> {
@@ -35,7 +45,14 @@ impl<B: CryptoBackend> DirectionKeys<B> {
         Self {
             packet: PacketKey::derive(backend, aead, secret),
             header: HeaderProtectionKey::derive(backend, aead, secret),
+            aead,
         }
+    }
+
+    /// The AEAD the keys are for, whose limits their use counts toward
+    /// (RFC 9001 §6.6).
+    pub fn aead(&self) -> AeadAlgorithm {
+        self.aead
     }
 }
 
@@ -195,64 +212,398 @@ impl<B: CryptoBackend> HandshakeKeys<B> {
     }
 }
 
+/// One generation of the 1-RTT packet keys of one direction: the traffic
+/// secret of the generation, the AEAD of the cipher suite and the packet key
+/// derived from them.
+///
+/// Generation 0 is derived from the secret the handshake produced; each
+/// key update derives the next one from the secret with the "quic ku" label
+/// (RFC 9001 §6.1). The header protection key is not part of a generation:
+/// a key update does not change it.
+pub struct KeyGeneration<B: CryptoBackend> {
+    generation: u64,
+    aead: AeadAlgorithm,
+    secret: TrafficSecret,
+    packet: PacketKey<B>,
+}
+
+impl<B: CryptoBackend> KeyGeneration<B> {
+    /// Generation 0, from `secret`, which the handshake produced with the
+    /// cipher suite of `aead`.
+    pub fn first(backend: &B, aead: AeadAlgorithm, secret: TrafficSecret) -> Self {
+        Self {
+            generation: 0,
+            aead,
+            packet: PacketKey::derive(backend, aead, &secret),
+            secret,
+        }
+    }
+
+    /// The generation after this one: its secret is derived from this one's
+    /// with the "quic ku" label, and its packet key from that secret.
+    pub fn next(&self, backend: &B) -> Self {
+        let secret = self.secret.next(backend);
+        Self {
+            // invariant: each generation is derived from one a packet was
+            // protected with, give or take one, and packet numbers end at
+            // 2^62
+            generation: self.generation + 1,
+            aead: self.aead,
+            packet: PacketKey::derive(backend, self.aead, &secret),
+            secret,
+        }
+    }
+
+    /// How many key updates lie between generation 0 and this one.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The Key Phase of the packets protected with this generation: 0 for
+    /// an even generation, 1 for an odd one (RFC 9001 §6).
+    pub fn key_phase(&self) -> KeyPhase {
+        if self.generation % 2 == 0 {
+            KeyPhase::Zero
+        } else {
+            KeyPhase::One
+        }
+    }
+
+    /// The AEAD the keys are for.
+    pub fn aead(&self) -> AeadAlgorithm {
+        self.aead
+    }
+
+    /// The packet key of the generation.
+    pub fn packet(&self) -> &PacketKey<B> {
+        &self.packet
+    }
+
+    /// The packet key alone; the secret is dropped, and with it the means
+    /// to derive later generations.
+    fn into_packet(self) -> PacketKey<B> {
+        self.packet
+    }
+}
+
+impl<B: CryptoBackend> fmt::Debug for KeyGeneration<B> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KeyGeneration")
+            .field("generation", &self.generation)
+            .field("aead", &self.aead)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The keys this side protects its 1-RTT packets with: the current
+/// generation of the sending direction and the header protection key.
+pub struct OneRttSendKeys<B: CryptoBackend> {
+    generation: KeyGeneration<B>,
+    header: HeaderProtectionKey<B>,
+}
+
+impl<B: CryptoBackend> OneRttSendKeys<B> {
+    /// Generation 0 and the header protection key, from the sending
+    /// `secret` the handshake produced with the cipher suite of `aead`.
+    fn derive(backend: &B, aead: AeadAlgorithm, secret: TrafficSecret) -> Self {
+        Self {
+            header: HeaderProtectionKey::derive(backend, aead, &secret),
+            generation: KeyGeneration::first(backend, aead, secret),
+        }
+    }
+
+    /// The generation packets are sealed with.
+    pub fn generation(&self) -> &KeyGeneration<B> {
+        &self.generation
+    }
+
+    /// The packet key of the generation packets are sealed with.
+    pub fn packet(&self) -> &PacketKey<B> {
+        self.generation.packet()
+    }
+
+    /// The header protection key.
+    pub fn header(&self) -> &HeaderProtectionKey<B> {
+        &self.header
+    }
+
+    /// The Key Phase the packets carry.
+    pub fn key_phase(&self) -> KeyPhase {
+        self.generation.key_phase()
+    }
+
+    /// Seal with the next generation from now on.
+    fn update(&mut self, backend: &B) {
+        self.generation = self.generation.next(backend);
+    }
+}
+
+impl<B: CryptoBackend> fmt::Debug for OneRttSendKeys<B> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OneRttSendKeys")
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The keys this side removes the protection of 1-RTT packets with: the
+/// current generation of the receiving direction, the next one, the
+/// previous one for a while after a key update, and the header protection
+/// key.
+///
+/// A packet whose Key Phase is that of the current generation is opened
+/// with it. One with the other Key Phase is opened with the previous
+/// generation when its packet number is lower than every one received with
+/// the current generation, and with the next generation otherwise (RFC 9001
+/// §6.5). The next generation is derived as soon as the one before it
+/// becomes current, so that it is ready before the peer uses it (§6.3,
+/// §9.5).
+///
+/// `I` is the instant of the connection's clock.
+pub struct OneRttReceiveKeys<B: CryptoBackend, I> {
+    /// The previous generation's packet key and the instant it is dropped,
+    /// which is set after it became previous (RFC 9001 §6.5).
+    previous: Option<(PacketKey<B>, Option<I>)>,
+    current: KeyGeneration<B>,
+    next: KeyGeneration<B>,
+    header: HeaderProtectionKey<B>,
+}
+
+impl<B: CryptoBackend, I: Copy> OneRttReceiveKeys<B, I> {
+    /// Generation 0, generation 1 and the header protection key, from the
+    /// receiving `secret` the handshake produced with the cipher suite of
+    /// `aead`.
+    fn derive(backend: &B, aead: AeadAlgorithm, secret: TrafficSecret) -> Self {
+        let header = HeaderProtectionKey::derive(backend, aead, &secret);
+        let current = KeyGeneration::first(backend, aead, secret);
+        Self {
+            previous: None,
+            next: current.next(backend),
+            current,
+            header,
+        }
+    }
+
+    /// The generation the peer protects its packets with, as far as this
+    /// side has seen.
+    pub fn current(&self) -> &KeyGeneration<B> {
+        &self.current
+    }
+
+    /// The generation after the current one, which the peer's next key
+    /// update moves to.
+    pub fn next(&self) -> &KeyGeneration<B> {
+        &self.next
+    }
+
+    /// The packet key of the generation before the current one, while it is
+    /// kept.
+    pub fn previous(&self) -> Option<&PacketKey<B>> {
+        self.previous.as_ref().map(|(packet, _)| packet)
+    }
+
+    /// The instant the previous generation is dropped, once it is set.
+    pub fn previous_deadline(&self) -> Option<I> {
+        self.previous.as_ref().and_then(|(_, deadline)| *deadline)
+    }
+
+    /// The header protection key.
+    pub fn header(&self) -> &HeaderProtectionKey<B> {
+        &self.header
+    }
+
+    /// The next generation becomes current, the current one previous, until
+    /// an instant still to be set, and the generation after the new current
+    /// one is derived.
+    fn promote(&mut self, backend: &B) {
+        let following = self.next.next(backend);
+        let next = core::mem::replace(&mut self.next, following);
+        let current = core::mem::replace(&mut self.current, next);
+        self.previous = Some((current.into_packet(), None));
+    }
+
+    /// Whether the previous generation is kept without an instant to drop
+    /// it.
+    fn previous_awaits_deadline(&self) -> bool {
+        matches!(self.previous, Some((_, None)))
+    }
+
+    /// Drop the previous generation at `at`; one that has an instant keeps
+    /// it.
+    fn set_previous_deadline(&mut self, at: I) {
+        if let Some((_, deadline @ None)) = &mut self.previous {
+            *deadline = Some(at);
+        }
+    }
+
+    /// Drop the previous generation.
+    fn discard_previous(&mut self) {
+        self.previous = None;
+    }
+}
+
+impl<B: CryptoBackend, I: fmt::Debug> fmt::Debug for OneRttReceiveKeys<B, I> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OneRttReceiveKeys")
+            .field(
+                "previous_deadline",
+                &self.previous.as_ref().map(|(_, deadline)| deadline),
+            )
+            .field("current", &self.current)
+            .field("next", &self.next)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The 1-RTT keys of both directions, with the backend later generations
+/// are derived with.
+///
+/// The sending generation is the receiving one, or one ahead of it after
+/// this side initiated a key update the peer has not answered yet.
+///
+/// `I` is the instant of the connection's clock.
+pub struct OneRttKeyGenerations<B: CryptoBackend, I> {
+    backend: B,
+    send: OneRttSendKeys<B>,
+    receive: OneRttReceiveKeys<B, I>,
+    send_confirmed_at: Option<I>,
+}
+
+impl<B: CryptoBackend, I: Copy> OneRttKeyGenerations<B, I> {
+    /// The keys packets are sealed with.
+    pub fn send(&self) -> &OneRttSendKeys<B> {
+        &self.send
+    }
+
+    /// The keys packets are opened with.
+    pub fn receive(&self) -> &OneRttReceiveKeys<B, I> {
+        &self.receive
+    }
+
+    /// When the peer acknowledged a packet sealed with the current sending
+    /// generation, once it has.
+    pub fn send_confirmed_at(&self) -> Option<I> {
+        self.send_confirmed_at
+    }
+
+    /// The peer acknowledged a packet sealed with the current sending
+    /// generation at `at`; an instant already set stays.
+    pub fn send_confirmed(&mut self, at: I) {
+        self.send_confirmed_at.get_or_insert(at);
+    }
+
+    /// Seal with the next sending generation from now on.
+    fn update_send(&mut self) {
+        self.send.update(&self.backend);
+        self.send_confirmed_at = None;
+    }
+}
+
+impl<B: CryptoBackend, I: fmt::Debug> fmt::Debug for OneRttKeyGenerations<B, I> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OneRttKeyGenerations")
+            .field("send", &self.send)
+            .field("receive", &self.receive)
+            .field("send_confirmed_at", &self.send_confirmed_at)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What a promotion of the next receiving generation changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Promotion {
+    /// The receiving generation that is now current.
+    pub(crate) generation: u64,
+    /// Whether the sending generation moved with it: the peer updated first
+    /// (RFC 9001 §6.2).
+    pub(crate) send_updated: bool,
+}
+
 /// The keys of the 1-RTT level.
 ///
 /// A server gets the sending half first, when it has written its Finished,
 /// and the receiving half when it has verified the client's; a client gets
-/// both at once.
-pub enum OneRttKeys<B: CryptoBackend> {
+/// both at once. Each direction then moves through generations with the
+/// key updates (RFC 9001 §6).
+///
+/// `I` is the instant of the connection's clock.
+pub enum OneRttKeys<B: CryptoBackend, I> {
     /// The handshake has not produced them yet.
     NotYet,
     /// A server that has written its Finished and not yet verified the
-    /// client's.
-    SendOnly(DirectionKeys<B>),
+    /// client's, with the backend the receiving half will be derived with.
+    SendOnly(OneRttSendKeys<B>, B),
     /// Both directions.
-    Live(LevelKeys<B>),
+    Live(OneRttKeyGenerations<B, I>),
     /// The connection is closing: only packets from the peer are read.
-    ReceiveOnly(DirectionKeys<B>),
+    ReceiveOnly(OneRttReceiveKeys<B, I>),
     /// Gone: the connection is draining, or closed before they came.
     Discarded,
 }
-state_debug!(OneRttKeys<B> { NotYet, SendOnly(_), Live(_), ReceiveOnly(_), Discarded });
 
-impl<B: CryptoBackend> OneRttKeys<B> {
+impl<B: CryptoBackend, I> fmt::Debug for OneRttKeys<B, I> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::NotYet => "NotYet",
+            Self::SendOnly(..) => "SendOnly",
+            Self::Live(_) => "Live",
+            Self::ReceiveOnly(_) => "ReceiveOnly",
+            Self::Discarded => "Discarded",
+        })
+    }
+}
+
+impl<B: CryptoBackend, I: Copy> OneRttKeys<B, I> {
     /// The keys to send with, while there are any.
-    pub fn send(&self) -> Option<&DirectionKeys<B>> {
+    pub fn send(&self) -> Option<&OneRttSendKeys<B>> {
         match self {
-            Self::SendOnly(keys) => Some(keys),
+            Self::SendOnly(keys, _) => Some(keys),
             Self::Live(keys) => Some(&keys.send),
             Self::NotYet | Self::ReceiveOnly(_) | Self::Discarded => None,
         }
     }
 
     /// The keys to receive with, while there are any.
-    pub fn receive(&self) -> Option<&DirectionKeys<B>> {
+    pub fn receive(&self) -> Option<&OneRttReceiveKeys<B, I>> {
         match self {
             Self::Live(keys) => Some(&keys.receive),
             Self::ReceiveOnly(keys) => Some(keys),
-            Self::NotYet | Self::SendOnly(_) | Self::Discarded => None,
+            Self::NotYet | Self::SendOnly(..) | Self::Discarded => None,
         }
     }
 
-    /// Install the sending half, as a server does when it has written its
-    /// Finished.
+    /// Install the sending half, derived with `backend` from `secret`, which
+    /// the handshake produced with the cipher suite of `aead`, as a server
+    /// does when it has written its Finished. The backend is kept to derive
+    /// the receiving half and later generations.
     ///
     /// No key of the level may have come before.
-    pub fn install_send(&mut self, keys: DirectionKeys<B>) {
+    pub fn install_send(&mut self, backend: B, aead: AeadAlgorithm, secret: TrafficSecret) {
         debug_assert!(
             matches!(self, Self::NotYet),
             "installing 1-RTT send keys that are {self:?}"
         );
-        *self = Self::SendOnly(keys);
+        let send = OneRttSendKeys::derive(&backend, aead, secret);
+        *self = Self::SendOnly(send, backend);
     }
 
-    /// Install the receiving half next to the sending half, as a server
-    /// does when it has verified the client's Finished.
+    /// Install the receiving half next to the sending half, derived from
+    /// `secret` with the backend and for the AEAD the sending half was
+    /// installed with, as a server does when it has verified the client's
+    /// Finished.
     ///
     /// The sending half must be there alone.
-    pub fn install_receive(&mut self, receive: DirectionKeys<B>) {
+    pub fn install_receive(&mut self, secret: TrafficSecret) {
         match core::mem::replace(self, Self::Discarded) {
-            Self::SendOnly(send) => *self = Self::Live(LevelKeys { send, receive }),
+            Self::SendOnly(send, backend) => {
+                let receive = OneRttReceiveKeys::derive(&backend, send.generation.aead(), secret);
+                *self = Self::Live(OneRttKeyGenerations {
+                    backend,
+                    send,
+                    receive,
+                    send_confirmed_at: None,
+                });
+            }
             other => {
                 debug_assert!(false, "installing 1-RTT receive keys that are {other:?}");
                 *self = other;
@@ -260,16 +611,29 @@ impl<B: CryptoBackend> OneRttKeys<B> {
         }
     }
 
-    /// Install both directions, as a client does when it has verified the
-    /// server's Finished.
+    /// Install both directions, derived with `backend` from the sending and
+    /// the receiving secret, which the handshake produced with the cipher
+    /// suite of `aead`, as a client does when it has verified the server's
+    /// Finished. The backend is kept to derive later generations.
     ///
     /// No key of the level may have come before.
-    pub fn install(&mut self, keys: LevelKeys<B>) {
+    pub fn install(
+        &mut self,
+        backend: B,
+        aead: AeadAlgorithm,
+        send: TrafficSecret,
+        receive: TrafficSecret,
+    ) {
         debug_assert!(
             matches!(self, Self::NotYet),
             "installing 1-RTT keys that are {self:?}"
         );
-        *self = Self::Live(keys);
+        *self = Self::Live(OneRttKeyGenerations {
+            send: OneRttSendKeys::derive(&backend, aead, send),
+            receive: OneRttReceiveKeys::derive(&backend, aead, receive),
+            backend,
+            send_confirmed_at: None,
+        });
     }
 
     /// Drop the sending half; a level that has no receiving half is
@@ -278,13 +642,88 @@ impl<B: CryptoBackend> OneRttKeys<B> {
         match core::mem::replace(self, Self::Discarded) {
             Self::Live(keys) => *self = Self::ReceiveOnly(keys.receive),
             Self::ReceiveOnly(keys) => *self = Self::ReceiveOnly(keys),
-            Self::NotYet | Self::SendOnly(_) | Self::Discarded => {}
+            Self::NotYet | Self::SendOnly(..) | Self::Discarded => {}
         }
     }
 
     /// Discard the level.
     pub fn discard(&mut self) {
         *self = Self::Discarded;
+    }
+
+    /// The instant the previous receiving generation is dropped, once it is
+    /// set.
+    pub fn previous_deadline(&self) -> Option<I> {
+        self.receive()
+            .and_then(OneRttReceiveKeys::previous_deadline)
+    }
+
+    /// Whether a previous receiving generation is kept without an instant to
+    /// drop it.
+    pub(crate) fn previous_awaits_deadline(&self) -> bool {
+        self.receive()
+            .is_some_and(OneRttReceiveKeys::previous_awaits_deadline)
+    }
+
+    /// Drop the previous receiving generation at `at`; one that has an
+    /// instant keeps it.
+    pub(crate) fn set_previous_deadline(&mut self, at: I) {
+        match self {
+            Self::Live(keys) => keys.receive.set_previous_deadline(at),
+            Self::ReceiveOnly(keys) => keys.set_previous_deadline(at),
+            Self::NotYet | Self::SendOnly(..) | Self::Discarded => {}
+        }
+    }
+
+    /// Drop the previous receiving generation.
+    pub(crate) fn discard_previous(&mut self) {
+        match self {
+            Self::Live(keys) => keys.receive.discard_previous(),
+            Self::ReceiveOnly(keys) => keys.discard_previous(),
+            Self::NotYet | Self::SendOnly(..) | Self::Discarded => {}
+        }
+    }
+
+    /// A packet opened with the next receiving generation: it becomes
+    /// current and the one after it is derived (RFC 9001 §6.3). When the
+    /// sending generation is behind it, the peer updated first, and the
+    /// sending generation moves to it too (§6.2). `None` when the level
+    /// has no backend to derive with: it only receives, or has no receiving
+    /// half.
+    pub(crate) fn promote_next(&mut self) -> Option<Promotion> {
+        let Self::Live(keys) = self else {
+            return None;
+        };
+        keys.receive.promote(&keys.backend);
+        let generation = keys.receive.current.generation;
+        let send_updated = keys.send.generation.generation < generation;
+        if send_updated {
+            keys.update_send();
+        }
+        Some(Promotion {
+            generation,
+            send_updated,
+        })
+    }
+
+    /// Initiate a key update: seal with the next sending generation from
+    /// now on, counting the packets sealed with it from zero (RFC 9001
+    /// §6.1, §6.6).
+    ///
+    /// Whoever calls it checks first that a key update may be initiated
+    /// (§6.1); both directions must be there.
+    // nothing initiates one but the tests until sending does
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub(crate) fn initiate_update(&mut self, usage: &mut AeadUsage) {
+        let Self::Live(keys) = self else {
+            debug_assert!(
+                false,
+                "initiating a key update of 1-RTT keys that are {self:?}"
+            );
+            return;
+        };
+        keys.update_send();
+        usage.send_keys_updated();
     }
 }
 

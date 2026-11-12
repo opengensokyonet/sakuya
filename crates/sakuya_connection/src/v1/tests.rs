@@ -1,17 +1,23 @@
 use core::time::Duration;
 
 use sakuya_packet_protection::{
-    backend::ring::RingBackend,
+    backend::{AeadAlgorithm, KdfAlgorithm, ring::RingBackend},
     initial::{INITIAL_AEAD, InitialSecrets},
+    packet_key::PacketKey,
+    secret::TrafficSecret,
 };
-use sakuya_wire::connection_id::ConnectionId;
+use sakuya_wire::{
+    connection_id::ConnectionId,
+    v1::{header::KeyPhase, packet_number::PacketNumber},
+};
 
 use super::{
+    aead_usage::AeadUsage,
     amplification::{AddressValidation, AntiAmplification, AntiAmplificationFactor},
     idle::IdleTimeout,
     keys::{
-        DirectionKeys, HandshakeKeys, InitialKeys, LevelKeys, OneRttKeys, ZeroRttReceiving,
-        ZeroRttSending,
+        DirectionKeys, HandshakeKeys, InitialKeys, KeyGeneration, LevelKeys, OneRttKeys,
+        ZeroRttReceiving, ZeroRttSending,
     },
     parameters::{LocalTransportParameters, PeerTransportParameters},
     role::LinkPathRole,
@@ -28,6 +34,28 @@ fn level_keys() -> LevelKeys<RingBackend> {
 
 fn direction_keys() -> DirectionKeys<RingBackend> {
     level_keys().send
+}
+
+/// A traffic secret of SHA-256 whose bytes are all `byte`.
+fn secret(byte: u8) -> TrafficSecret {
+    TrafficSecret::new(KdfAlgorithm::HkdfSha256, &[byte; 32]).unwrap()
+}
+
+const AEAD: AeadAlgorithm = AeadAlgorithm::Aes128Gcm;
+
+/// The ciphertext of a fixed packet sealed with `key`: equal for equal keys.
+fn sealed_with(key: &PacketKey<RingBackend>) -> Vec<u8> {
+    let mut packet = [&[0x40, 0x00][..], &[0x01; 20], &[0; 16]].concat();
+    key.seal(PacketNumber::new(0).unwrap(), &mut packet, 2)
+        .unwrap();
+    packet
+}
+
+/// Both directions of 1-RTT keys, as a client installs them.
+fn one_rtt_keys() -> OneRttKeys<RingBackend, Duration> {
+    let mut one_rtt = OneRttKeys::NotYet;
+    one_rtt.install(RingBackend, AEAD, secret(1), secret(2));
+    one_rtt
 }
 
 #[test]
@@ -58,23 +86,99 @@ fn handshake_keys_that_never_came_are_discarded_on_close() {
 
 #[test]
 fn a_server_gets_one_rtt_keys_in_two_halves() {
-    let mut one_rtt = OneRttKeys::NotYet;
-    one_rtt.install_send(direction_keys());
+    let mut one_rtt = OneRttKeys::<_, Duration>::NotYet;
+    one_rtt.install_send(RingBackend, AEAD, secret(1));
     assert!(one_rtt.send().is_some() && one_rtt.receive().is_none());
-    one_rtt.install_receive(direction_keys());
+    one_rtt.install_receive(secret(2));
     assert!(matches!(one_rtt, OneRttKeys::Live(_)));
+    let receive = one_rtt.receive().unwrap();
+    // the receiving half is for the AEAD the sending half was installed with
+    assert_eq!(receive.current().aead(), AEAD);
+    assert_eq!(
+        (receive.current().generation(), receive.next().generation()),
+        (0, 1)
+    );
 }
 
 #[test]
 fn one_rtt_keys_without_a_receiving_half_are_discarded_on_close() {
-    let mut one_rtt = OneRttKeys::NotYet;
-    one_rtt.install_send(direction_keys());
+    let mut one_rtt = OneRttKeys::<_, Duration>::NotYet;
+    one_rtt.install_send(RingBackend, AEAD, secret(1));
     one_rtt.keep_receive_only();
     assert!(matches!(one_rtt, OneRttKeys::Discarded));
-    let mut one_rtt = OneRttKeys::NotYet;
-    one_rtt.install(level_keys());
+    let mut one_rtt = one_rtt_keys();
     one_rtt.keep_receive_only();
     assert!(matches!(one_rtt, OneRttKeys::ReceiveOnly(_)));
+    // a level that only receives has no backend to promote with
+    assert!(one_rtt.promote_next().is_none());
+}
+
+#[test]
+fn a_generation_derives_the_next_as_its_secret_does() {
+    let zero = KeyGeneration::first(&RingBackend, AEAD, secret(1));
+    let two = zero.next(&RingBackend).next(&RingBackend);
+    let from_secret = KeyGeneration::first(
+        &RingBackend,
+        AEAD,
+        secret(1).next(&RingBackend).next(&RingBackend),
+    );
+    assert_eq!(sealed_with(two.packet()), sealed_with(from_secret.packet()));
+    assert_ne!(sealed_with(zero.packet()), sealed_with(two.packet()));
+    assert_eq!(two.generation(), 2);
+    assert_eq!(
+        [
+            zero.key_phase(),
+            zero.next(&RingBackend).key_phase(),
+            two.key_phase()
+        ],
+        [KeyPhase::Zero, KeyPhase::One, KeyPhase::Zero]
+    );
+}
+
+#[test]
+fn a_promotion_after_the_peer_updated_moves_the_send_generation_too() {
+    let mut one_rtt = one_rtt_keys();
+    let next = sealed_with(one_rtt.receive().unwrap().next().packet());
+    let promotion = one_rtt.promote_next().unwrap();
+    assert_eq!((promotion.generation, promotion.send_updated), (1, true));
+    let send = one_rtt.send().unwrap();
+    assert_eq!(
+        (send.generation().generation(), send.key_phase()),
+        (1, KeyPhase::One)
+    );
+    assert_eq!(
+        sealed_with(send.packet()),
+        sealed_with(
+            KeyGeneration::first(&RingBackend, AEAD, secret(1).next(&RingBackend)).packet()
+        )
+    );
+    let receive = one_rtt.receive().unwrap();
+    assert_eq!(sealed_with(receive.current().packet()), next);
+    // the next one is derived at once
+    assert_eq!(receive.next().generation(), 2);
+    assert!(receive.previous().is_some() && receive.previous_deadline().is_none());
+    assert!(one_rtt.previous_awaits_deadline());
+    one_rtt.set_previous_deadline(Duration::from_millis(30));
+    one_rtt.set_previous_deadline(Duration::from_millis(40));
+    assert_eq!(one_rtt.previous_deadline(), Some(Duration::from_millis(30)));
+    assert!(!one_rtt.previous_awaits_deadline());
+    one_rtt.discard_previous();
+    assert!(one_rtt.receive().unwrap().previous().is_none());
+    assert_eq!(one_rtt.previous_deadline(), None);
+}
+
+#[test]
+fn a_promotion_after_this_side_initiated_keeps_the_send_generation() {
+    let mut one_rtt = one_rtt_keys();
+    let mut usage = AeadUsage::new();
+    usage.sealed();
+    one_rtt.initiate_update(&mut usage);
+    assert_eq!(usage.sealed_with_current(), 0);
+    assert_eq!(one_rtt.send().unwrap().generation().generation(), 1);
+    assert_eq!(one_rtt.receive().unwrap().current().generation(), 0);
+    let promotion = one_rtt.promote_next().unwrap();
+    assert_eq!((promotion.generation, promotion.send_updated), (1, false));
+    assert_eq!(one_rtt.send().unwrap().generation().generation(), 1);
 }
 
 #[test]

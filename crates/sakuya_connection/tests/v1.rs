@@ -34,13 +34,15 @@ use sakuya_connection::{
     take::{GetAt, Take, TakeEach},
     v1::{
         self, CloseCauseOf,
+        aead_usage::AeadUsage,
         amplification::{AddressValidation, AntiAmplification, AntiAmplificationFactor},
         close::{CloseReasonRecord, LocalCloseCause},
         confirmation::HandshakeConfirmation,
         crypto::{CryptoReceiveCapacities, CryptoReceiver, FragmentedCryptoReceiveBuffer},
         idle::IdleTimeout,
         input::{InitialPathReceiver, LogicalPathInput},
-        keys::{DirectionKeys, HandshakeKeys, InitialKeys, LevelKeys, OneRttKeys},
+        key_phase::KeyPhaseNumbers,
+        keys::{DirectionKeys, HandshakeKeys, InitialKeys, KeyGeneration, LevelKeys, OneRttKeys},
         link::LinkFacts,
         loss_detection::LossDetectionOf,
         parameters::PeerTransportParameters,
@@ -69,8 +71,10 @@ use sakuya_datagram_routing::{
 };
 use sakuya_link::{ArrivalFacts, BindingId, LinkId, MIN_DATAGRAM_SIZE, ReceivedDatagram};
 use sakuya_packet_protection::{
-    backend::ring::RingBackend,
+    backend::{AeadAlgorithm, KdfAlgorithm, ring::RingBackend},
+    header_protection::HeaderProtectionKey,
     initial::{INITIAL_AEAD, InitialSecrets},
+    secret::TrafficSecret,
 };
 use sakuya_recovery::{
     ack_obligation::AckObligation,
@@ -567,6 +571,13 @@ mod probe {
         /// Install 1-RTT keys that only send, as a server does before the
         /// handshake completes.
         InstallOneRttSendKeys,
+        /// Install 1-RTT keys of both directions: the server's secret to
+        /// send, the client's to receive.
+        InstallOneRttKeys,
+        /// Log the generations of the 1-RTT keys, when the previous one goes,
+        /// the packets that failed authentication and the lowest packet
+        /// number received with the current generation.
+        InspectOneRtt,
         /// Log the CRYPTO data ready at the level being read; the largest
         /// packet number, the ranges and the ACK obligation of the Initial
         /// space; the idle timeout's deadline; and the reason for closing.
@@ -596,7 +607,7 @@ mod probe {
     }
     packet_feeder!(Mine);
     packet_feeder!(ClientMine);
-    impl<T, L, I, Ii, Ih, Io, Ij, Im, Ia, It, Ir, Ie, Ik, Hd, Ic, Icr, Ip, Ian>
+    impl<T, L, I, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ic, Icr, Ip, Ian>
         DataComponent<
             T,
             L,
@@ -604,7 +615,7 @@ mod probe {
             (
                 I,
                 (Ii, Ih, Io),
-                (Ij, Im, Ia, It),
+                (Ij, Im, Ia, It, Iu, Ikp),
                 (Ir, Ie, Ik, Hd),
                 (Ic, Icr),
                 (Ip, Ian),
@@ -625,11 +636,13 @@ mod probe {
         for<'v> <L as LineageLists<'v, T>>::LogicalPath: GetAt<PacketFeeder, I>
             + GetAt<InitialKeys<RingBackend>, Ii>
             + GetAt<HandshakeKeys<RingBackend>, Ih>
-            + GetAt<OneRttKeys<RingBackend>, Io>
+            + GetAt<OneRttKeys<RingBackend, Duration>, Io>
             + GetAt<PacketNumberSpaces<ReceiveJournals<Duration>>, Ij>
             + GetAt<MaxAckRanges, Im>
             + GetAt<AckObligationsOf<T>, Ia>
             + GetAt<IdleTimeout<Duration>, It>
+            + GetAt<AeadUsage, Iu>
+            + GetAt<KeyPhaseNumbers, Ikp>
             + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
             + GetAt<CryptoReceiver<FragmentedCryptoReceiveBuffer>, Icr>
             + GetAt<LogicalPathInput<TestLink, T::Receiver>, Ip>,
@@ -667,6 +680,8 @@ mod probe {
                         Im,
                         Ia,
                         It,
+                        Iu,
+                        Ikp,
                         Ir,
                         Ie,
                         Ik,
@@ -694,12 +709,33 @@ mod probe {
                 PacketStep::InstallOneRttSendKeys => {
                     let secrets = InitialSecrets::derive(&RingBackend, &client_dcid());
                     lineage
-                        .get_mut::<OneRttKeys<RingBackend>, Io>()
-                        .install_send(DirectionKeys::derive(
-                            &RingBackend,
-                            INITIAL_AEAD,
-                            &secrets.server,
-                        ));
+                        .get_mut::<OneRttKeys<RingBackend, Duration>, Io>()
+                        .install_send(RingBackend, INITIAL_AEAD, secrets.server);
+                }
+                PacketStep::InstallOneRttKeys => {
+                    lineage
+                        .get_mut::<OneRttKeys<RingBackend, Duration>, Io>()
+                        .install(RingBackend, ONE_RTT_AEAD, server_secret(), client_secret());
+                }
+                PacketStep::InspectOneRtt => {
+                    let keys = lineage.get::<OneRttKeys<RingBackend, Duration>, Io>();
+                    let (receive, send) = (keys.receive(), keys.send());
+                    let current = receive.map(|keys| keys.current().generation());
+                    let next = receive.map(|keys| keys.next().generation());
+                    let previous = receive.map(|keys| keys.previous().is_some());
+                    let until = keys.previous_deadline();
+                    let send = send.map(|keys| keys.generation().generation());
+                    let failed = lineage.get::<AeadUsage, Iu>().failed_authentication();
+                    let lowest = current.and_then(|current| {
+                        lineage
+                            .get::<KeyPhaseNumbers, Ikp>()
+                            .lowest_received(current)
+                            .map(|number| number.get())
+                    });
+                    log(format!(
+                        "receive {current:?}, next {next:?}, previous {previous:?} until \
+                         {until:?}, send {send:?}, failed {failed}, lowest {lowest:?}"
+                    ));
                 }
                 PacketStep::InspectHeld => {
                     let held = lineage
@@ -1999,6 +2035,53 @@ fn long_packet_with(
     BytesMut::from(&packet[..])
 }
 
+/// The AEAD of the tests' 1-RTT keys.
+const ONE_RTT_AEAD: AeadAlgorithm = AeadAlgorithm::Aes128Gcm;
+
+/// The traffic secret the client sends 1-RTT packets with.
+fn client_secret() -> TrafficSecret {
+    TrafficSecret::new(KdfAlgorithm::HkdfSha256, &[0xc1; 32]).unwrap()
+}
+
+/// The traffic secret the server sends 1-RTT packets with.
+fn server_secret() -> TrafficSecret {
+    TrafficSecret::new(KdfAlgorithm::HkdfSha256, &[0x5e; 32]).unwrap()
+}
+
+/// The client's 1-RTT keys of `generation`.
+fn client_generation(generation: u64) -> KeyGeneration<RingBackend> {
+    let mut keys = KeyGeneration::first(&RingBackend, ONE_RTT_AEAD, client_secret());
+    for _ in 0..generation {
+        keys = keys.next(&RingBackend);
+    }
+    keys
+}
+
+/// A 1-RTT packet of the client to its first Destination Connection ID,
+/// with a 4-byte Packet Number field holding `number`, carrying `payload`,
+/// protected with the client's keys of `generation` and the Key Phase they
+/// give.
+fn one_rtt_packet_of(generation: u64, number: u64, payload: &[u8]) -> BytesMut {
+    let keys = client_generation(generation);
+    let header = HeaderProtectionKey::derive(&RingBackend, ONE_RTT_AEAD, &client_secret());
+    let key_phase = if generation % 2 == 1 { 0x04 } else { 0 };
+    let mut packet = vec![0x43 | key_phase];
+    packet.extend_from_slice(&CLIENT_DCID);
+    let pn_offset = packet.len();
+    packet.extend_from_slice(&u32::try_from(number).unwrap().to_be_bytes());
+    packet.extend_from_slice(payload);
+    packet.extend_from_slice(&[0; 16]);
+    keys.packet()
+        .seal(
+            PacketNumber::new(number).unwrap(),
+            &mut packet,
+            pn_offset + 4,
+        )
+        .unwrap();
+    header.apply(&mut packet, pn_offset).unwrap();
+    BytesMut::from(&packet[..])
+}
+
 /// A 1-RTT packet to the client's first Destination Connection ID, which no
 /// keys open.
 fn one_rtt_packet() -> BytesMut {
@@ -2235,6 +2318,166 @@ fn a_one_rtt_packet_waits_while_only_the_send_keys_are_installed() {
     let mut connection = connection!(Mine, AddressValidation::NotValidated, first);
     take_log();
     assert_eq!(run(&mut connection, 5..=6), ["held at OneRtt"]);
+}
+
+#[test]
+fn a_one_rtt_packet_of_the_current_generation_is_processed() {
+    use probe::PacketStep::{InspectOneRtt, InstallOneRttKeys, Receive};
+    reset();
+    let first = link();
+    feed_packets([
+        (ms(5), InstallOneRttKeys),
+        (ms(6), InspectOneRtt),
+        (
+            ms(7),
+            Receive(received(one_rtt_packet_of(0, 3, &ping()), &first, ms(7))),
+        ),
+        (
+            ms(8),
+            Receive(received(one_rtt_packet_of(0, 2, &ping()), &first, ms(8))),
+        ),
+        (ms(9), InspectOneRtt),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first);
+    take_log();
+    assert_eq!(
+        run(&mut connection, 5..=9),
+        [
+            "receive Some(0), next Some(1), previous Some(false) until None, send Some(0), \
+             failed 0, lowest None",
+            "processed: highest numbered true, non-probing true",
+            "processed: highest numbered false, non-probing true",
+            "receive Some(0), next Some(1), previous Some(false) until None, send Some(0), \
+             failed 0, lowest Some(2)",
+        ]
+    );
+}
+
+#[test]
+fn a_flipped_key_phase_promotes_the_next_generation_and_the_send_keys_follow() {
+    use probe::PacketStep::{InspectOneRtt, InstallOneRttKeys, Receive};
+    reset();
+    let first = link();
+    feed_packets([
+        (ms(5), InstallOneRttKeys),
+        (
+            ms(6),
+            Receive(received(one_rtt_packet_of(0, 0, &ping()), &first, ms(6))),
+        ),
+        (
+            ms(7),
+            Receive(received(one_rtt_packet_of(1, 2, &ping()), &first, ms(7))),
+        ),
+        (ms(8), InspectOneRtt),
+        // delayed, numbered below the first of generation 1
+        (
+            ms(9),
+            Receive(received(one_rtt_packet_of(0, 1, &ping()), &first, ms(9))),
+        ),
+        (ms(10), InspectOneRtt),
+        // old keys after newer ones
+        (
+            ms(11),
+            Receive(received(one_rtt_packet_of(0, 3, &ping()), &first, ms(11))),
+        ),
+        (ms(12), InspectOneRtt),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first);
+    take_log();
+    assert_eq!(
+        run(&mut connection, 5..=12),
+        [
+            "processed: highest numbered true, non-probing true",
+            "processed: highest numbered true, non-probing true",
+            // three probe timeouts of 1.024 s from the promotion
+            "receive Some(1), next Some(2), previous Some(true) until Some(3.079s), \
+             send Some(1), failed 0, lowest Some(2)",
+            "processed: highest numbered false, non-probing true",
+            "receive Some(1), next Some(2), previous Some(true) until Some(3.079s), \
+             send Some(1), failed 0, lowest Some(2)",
+            // tried with the next generation only, which does not open it
+            "dropped: payload not opened",
+            "receive Some(1), next Some(2), previous Some(true) until Some(3.079s), \
+             send Some(1), failed 1, lowest Some(2)",
+        ]
+    );
+}
+
+#[test]
+fn the_previous_generation_goes_three_probe_timeouts_after_the_promotion() {
+    use probe::PacketStep::{InspectOneRtt, InstallOneRttKeys, Receive};
+    reset();
+    let first = link();
+    feed_packets([
+        (ms(5), InstallOneRttKeys),
+        (
+            ms(6),
+            Receive(received(one_rtt_packet_of(1, 5, &ping()), &first, ms(6))),
+        ),
+        (ms(7), InspectOneRtt),
+        (ms(3077), InspectOneRtt),
+        (ms(3079), InspectOneRtt),
+        (
+            ms(3080),
+            Receive(received(one_rtt_packet_of(0, 1, &ping()), &first, ms(3080))),
+        ),
+        (ms(3081), InspectOneRtt),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first);
+    take_log();
+    assert_eq!(
+        run(&mut connection, 5..=3081),
+        [
+            "processed: highest numbered true, non-probing true",
+            // three probe timeouts of 1.024 s from the promotion
+            "receive Some(1), next Some(2), previous Some(true) until Some(3.078s), \
+             send Some(1), failed 0, lowest Some(5)",
+            "receive Some(1), next Some(2), previous Some(true) until Some(3.078s), \
+             send Some(1), failed 0, lowest Some(5)",
+            "receive Some(1), next Some(2), previous Some(false) until None, send Some(1), \
+             failed 0, lowest Some(5)",
+            // tried with the next generation, which has its Key Phase
+            "dropped: payload not opened",
+            "receive Some(1), next Some(2), previous Some(false) until None, send Some(1), \
+             failed 1, lowest Some(5)",
+        ]
+    );
+}
+
+#[test]
+fn initial_and_handshake_packets_that_fail_authentication_count() {
+    use probe::PacketStep::{InspectOneRtt, InstallHandshakeKeys, Receive};
+    reset();
+    let first = link();
+    let changed = |type_bits| {
+        let mut packet = long_packet(type_bits, 0, &ping());
+        let last = packet.len() - 1;
+        packet[last] ^= 1;
+        packet
+    };
+    feed_packets([
+        (ms(5), InstallHandshakeKeys),
+        (ms(6), InspectOneRtt),
+        (ms(7), Receive(received(changed(INITIAL), &first, ms(7)))),
+        (ms(8), InspectOneRtt),
+        (ms(9), Receive(received(changed(HANDSHAKE), &first, ms(9)))),
+        (ms(10), InspectOneRtt),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first);
+    take_log();
+    assert_eq!(
+        run(&mut connection, 5..=10),
+        [
+            "receive None, next None, previous None until None, send None, failed 0, \
+             lowest None",
+            "dropped: payload not opened",
+            "receive None, next None, previous None until None, send None, failed 1, \
+             lowest None",
+            "dropped: payload not opened",
+            "receive None, next None, previous None until None, send None, failed 2, \
+             lowest None",
+        ]
+    );
 }
 
 #[test]

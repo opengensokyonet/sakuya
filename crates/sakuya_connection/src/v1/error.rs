@@ -17,7 +17,10 @@ use sakuya_wire::{
 };
 use snafu::Snafu;
 
-use super::{close::TransportClose, crypto::CryptoFrameError, dispatch::FrameNotPermittedError};
+use super::{
+    aead_usage::AeadLimitReachedError, close::TransportClose, crypto::CryptoFrameError,
+    dispatch::FrameNotPermittedError,
+};
 
 /// An error of version 1 in a connection: one variant for each type of
 /// error it comes from, which gives the transport error code; a failure
@@ -72,6 +75,13 @@ pub enum ConnectionError {
         /// The broken rule.
         source: CryptoFrameError,
     },
+    /// The connection used its AEAD past a limit (RFC 9001 §6.6): it closes
+    /// at once and processes no more packets.
+    #[snafu(display("AEAD limit reached"))]
+    AeadLimitReached {
+        /// The limit crossed.
+        source: AeadLimitReachedError,
+    },
     /// A frame of a kind this version does not handle yet; the connection
     /// closes with INTERNAL_ERROR. It goes away as the components that
     /// handle each kind are added.
@@ -99,6 +109,7 @@ impl TransportClose for ConnectionError {
             Self::ReadFrame { source } => source.transport_error_code(),
             Self::ReadFrameFields { source } => source.transport_error_code(),
             Self::FrameNotPermitted { .. } => TransportErrorCode::PROTOCOL_VIOLATION,
+            Self::AeadLimitReached { .. } => TransportErrorCode::AEAD_LIMIT_REACHED,
             Self::Crypto { source } => match source {
                 CryptoFrameError::BufferExceeded { .. } => {
                     TransportErrorCode::CRYPTO_BUFFER_EXCEEDED
@@ -121,6 +132,7 @@ impl TransportClose for ConnectionError {
             | Self::NoViablePath
             | Self::OneRttSendKeysMissing
             | Self::FrameNotPermitted { .. }
+            | Self::AeadLimitReached { .. }
             | Self::UnhandledFrame { .. } => None,
         }
     }
@@ -139,6 +151,8 @@ const UNEXPECTED_MESSAGE: u8 = 10;
 
 #[cfg(test)]
 mod tests {
+    use sakuya_packet_protection::backend::AeadAlgorithm;
+
     use super::*;
 
     #[test]
@@ -150,5 +164,16 @@ mod tests {
             error.immediate_close().reason_phrase,
             Bytes::from_static(b"a packet at the Handshake level has no frames")
         );
+    }
+
+    #[test]
+    fn the_aead_limit_closes_with_aead_limit_reached() {
+        let error = ConnectionError::AeadLimitReached {
+            source: AeadLimitReachedError::IntegrityLimitExceeded {
+                aead: AeadAlgorithm::Aes128Gcm,
+            },
+        };
+        assert_eq!(error.code(), TransportErrorCode::AEAD_LIMIT_REACHED);
+        assert_eq!(error.frame_type(), None);
     }
 }

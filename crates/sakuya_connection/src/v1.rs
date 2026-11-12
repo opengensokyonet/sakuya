@@ -2,7 +2,8 @@
 //! components.
 //!
 //! [`Part`] is version 1 as one part of a composition. Its shares put the
-//! keys of each encryption level, the CRYPTO data received at each level,
+//! keys of each encryption level, the counts of the AEAD's usage
+//! ([`aead_usage`]), the CRYPTO data received at each level,
 //! the transport parameters, the idle timeout and what the connection was
 //! made with for its first logical link in the connection node, with the
 //! recovery factory and the record of why the connection closed
@@ -12,14 +13,16 @@
 //! recovery layer, what the factory makes for it with the state beside them,
 //! its loss detection state for each packet number space and its probe
 //! timeout. Each logical path keeps, for each packet number space, its
-//! packet number state, its receive journals and its ACK obligation, and
-//! what it receives ([`input`]): its datagram receiver, the first one taken
+//! packet number state, its receive journals and its ACK obligation, the
+//! packet numbers the current 1-RTT key generation has seen
+//! ([`key_phase`]), and what it receives ([`input`]): its datagram receiver, the first one taken
 //! from what the connection was made with, and the inputs it holds until
 //! their keys come; its receiving call takes each datagram in. Once
 //! a reason for closing is written, the link paths close, their recovery
 //! layers and the established layer end, and the connection ends with its
 //! last link path. The other calls and the send journals are not here yet.
 
+pub mod aead_usage;
 pub mod amplification;
 pub mod close;
 pub mod confirmation;
@@ -28,6 +31,7 @@ pub mod dispatch;
 pub mod error;
 pub mod idle;
 pub mod input;
+pub mod key_phase;
 pub mod keys;
 pub mod link;
 pub mod loss_detection;
@@ -78,6 +82,7 @@ use crate::{
 };
 
 use self::{
+    aead_usage::AeadUsage,
     amplification::{AddressValidation, AntiAmplification, AntiAmplificationFactor},
     close::{ApplicationClose, CloseReasonRecord, LocalCloseCause},
     confirmation::HandshakeConfirmation,
@@ -87,6 +92,7 @@ use self::{
         InitialPathReceiver, LogicalPathDatagramReceiver, LogicalPathInput,
         LogicalPathReceivingKind, LogicalPathReceivingLimits,
     },
+    key_phase::KeyPhaseNumbers,
     keys::{DirectionKeys, HandshakeKeys, InitialKeys, LevelKeys, OneRttKeys},
     link::{FirstLinkStart, LinkClone, LinkFacts},
     loss_detection::LossDetectionOf,
@@ -282,7 +288,8 @@ impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + Co
     type Data = HList![
         InitialKeys<T::Crypto>,
         HandshakeKeys<T::Crypto>,
-        OneRttKeys<T::Crypto>,
+        OneRttKeys<T::Crypto, InstantOf<T>>,
+        AeadUsage,
         CryptoReceiver<T::CryptoReceiveBuffer>,
         AntiAmplificationFactor,
         FirstLinkStart,
@@ -310,6 +317,7 @@ impl<T: Choices, L> LayerShare<T, L, layer::LogicalPath> for Part {
         PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>,
         AckObligationsOf<T>,
         LogicalPathInput<T::Link, T::Receiver>,
+        KeyPhaseNumbers,
     ];
     type Calls = HList![LogicalPathReceivingKind];
 }
@@ -437,7 +445,36 @@ macro_rules! not_yet {
         }
     )*};
 }
-not_yet!(HandshakeKeys, OneRttKeys);
+not_yet!(HandshakeKeys);
+
+/// The handshake produces them later.
+impl<T: Choices, L> Build<T, L, layer::Connection, ()> for OneRttKeys<T::Crypto, InstantOf<T>>
+where
+    L: LineagePartList<T>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        _: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        OneRttKeys::NotYet
+    }
+}
+
+/// Nothing is sealed or opened when the connection is made.
+impl<T: Choices, L> Build<T, L, layer::Connection, ()> for AeadUsage
+where
+    L: LineagePartList<T>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        _: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        AeadUsage::new()
+    }
+}
+/// It has no deadline and reads nothing; the calls that seal and open
+/// packets count in it.
+impl PassiveDataComponent for AeadUsage {}
 
 macro_rules! discarded_when_draining {
     ($($ty:ident),*) => {$(
@@ -479,7 +516,101 @@ macro_rules! discarded_when_draining {
         }
     )*};
 }
-discarded_when_draining!(InitialKeys, HandshakeKeys, OneRttKeys);
+discarded_when_draining!(InitialKeys, HandshakeKeys);
+
+/// The 1-RTT keys read the roles of the link paths, as the keys of the
+/// other levels do: once every link path is `Draining`, they are discarded
+/// (RFC 9000 §10.2.2).
+///
+/// They also read themselves. Once the next receiving generation became
+/// current, the previous one is kept for three current probe timeouts (RFC
+/// 9001 §6.5): the largest among the link paths with a recovery layer, as
+/// the idle timeout measures it, or the last one the idle timeout took when
+/// no link path has one, measured when the keys are looked at after the
+/// promotion. That instant is their deadline; when it comes the previous
+/// generation is dropped.
+impl<T: Choices, L, I, J, Iv, Ima, Ir>
+    DataComponent<T, L, layer::Connection, ((I, J, Iv), (Ima, Ir))>
+    for OneRttKeys<T::Crypto, InstantOf<T>>
+where
+    L: LineagePartList<T>,
+    L: ParametersOf<TransportParameterSpace>,
+    TransportParameterSlots<L>: Selector<Option<MaxAckDelay>, Ima>,
+    for<'v> <L as LineageLists<'v, T>>::Connection:
+        GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, I> + ReadEach<OneRttKeysReads<T, L>, Iv>,
+    for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        GetAt<LinkPathRole<InstantOf<T>>, J>,
+    for<'s> NodeData<T, L, layer::Recovery>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::Recovery> as FlatMut<'s>>::Out: GetAt<RttOf<T, L>, Ir>,
+{
+    fn reads(reads: &mut ReadSet) {
+        reads
+            .add::<LinkPathRole<InstantOf<T>>>()
+            .add::<OneRttKeys<T::Crypto, InstantOf<T>>>();
+    }
+    fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::Connection>) -> Option<InstantOf<T>> {
+        lineage
+            .get::<OneRttKeys<T::Crypto, InstantOf<T>>, I>()
+            .previous_deadline()
+    }
+    fn expire<'v, B: CallBundle>(
+        mut lineage: LineageOf<'v, T, L, layer::Connection>,
+        _: &mut OtherNodes<'v, T, L, B>,
+        _: InstantOf<T>,
+    ) -> Option<RequestOf<T, L>> {
+        lineage
+            .get_mut::<OneRttKeys<T::Crypto, InstantOf<T>>, I>()
+            .discard_previous();
+        None
+    }
+    fn reread<'v, B: CallBundle>(
+        mut lineage: LineageOf<'v, T, L, layer::Connection>,
+        others: &mut OtherNodes<'v, T, L, B>,
+        now: InstantOf<T>,
+    ) -> Option<RequestOf<T, L>> {
+        let keys = lineage.get::<OneRttKeys<T::Crypto, InstantOf<T>>, I>();
+        if matches!(keys, OneRttKeys::Discarded) {
+            return None;
+        }
+        let (mut any, mut all_draining) = (false, true);
+        others.each_link_path_read::<LinkPathRole<InstantOf<T>>, J>(|_, role| {
+            any = true;
+            all_draining &= matches!(role, LinkPathRole::Draining(_));
+        });
+        if any && all_draining {
+            lineage
+                .get_mut::<OneRttKeys<T::Crypto, InstantOf<T>>, I>()
+                .discard();
+            return None;
+        }
+        if lineage
+            .get::<OneRttKeys<T::Crypto, InstantOf<T>>, I>()
+            .previous_awaits_deadline()
+        {
+            let frunk_core::hlist_pat![peer, thresholds, idle] =
+                lineage.read_each::<OneRttKeysReads<T, L>, Iv>();
+            let pto = current_probe_timeout::<T, L, B, Ima, Ir>(peer, thresholds, others)
+                // with no recovery layer, the last one the idle timeout took
+                .unwrap_or_else(|| idle.probe_timeout());
+            // an instant beyond what the instant type represents is none:
+            // the previous generation goes at once rather than never
+            let at = now.checked_add(pto.saturating_mul(3)).unwrap_or(now);
+            lineage
+                .get_mut::<OneRttKeys<T::Crypto, InstantOf<T>>, I>()
+                .set_previous_deadline(at);
+        }
+        None
+    }
+}
+
+/// What the 1-RTT keys read to measure the current probe timeout, besides
+/// the RTT estimates; they are not reread when these change.
+type OneRttKeysReads<T, L> = HList![
+    PeerTransportParameters<TransportParameterSlots<L>>,
+    LossThresholds,
+    IdleTimeout<InstantOf<T>>
+];
 
 /// Each level this side receives handshake messages at starts with an
 /// empty buffer of the configured capacity; the input reads Initial.
@@ -804,6 +935,22 @@ impl<Lk: sakuya_link::Link, R: LogicalPathDatagramReceiver<Lk>> PassiveDataCompo
     for LogicalPathInput<Lk, R>
 {
 }
+
+/// No 1-RTT packet has been seen when a logical path is made.
+impl<T: Choices, L> Build<T, L, layer::LogicalPath, ()> for KeyPhaseNumbers
+where
+    L: LineagePartList<T>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::LogicalPath>,
+        _: &mut ArgsOf<T, L, layer::LogicalPath>,
+    ) -> Self {
+        KeyPhaseNumbers::new()
+    }
+}
+/// It has no deadline and reads nothing; the calls that seal and open
+/// 1-RTT packets note in it.
+impl PassiveDataComponent for KeyPhaseNumbers {}
 
 // ---- the entry of a logical link ----
 
