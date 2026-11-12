@@ -15,7 +15,8 @@ use bytes::Bytes;
 use common::{
     now,
     pki::{self, leaf_key, verifier},
-    steps::{self, ClientSteps, ServerSteps},
+    ready,
+    steps::{self, ClientSteps, ServerSteps, ServerStepsFrom},
     streams::{
         ClientParameters, ClientSide, Fault, Incoming, LEVELS, Outgoing, ServerParameters,
         ServerSide, index,
@@ -56,9 +57,11 @@ use sakuya_tls::{
             WriteServerHelloStep,
         },
         identity::CertifiedKey,
-        layers::PassThroughLayers,
+        layers::{
+            AcceptedHello as _, HelloLayers, PassThroughHello, PassThroughLayers, PreopenedLayers,
+        },
         peer::NoCertificateRequest,
-        targets::SniTargets,
+        targets::{PreselectedTarget, SniTargets, TargetSelection as _},
         ticket::ZeroRttOnceTicketTable,
     },
 };
@@ -80,7 +83,11 @@ use sakuya_tls::{
     schedule::{Authentication, HandshakeSecret, Transcript},
     version::ProtocolVersion,
 };
-use std::{collections::VecDeque, sync::Arc, time::Duration};
+use std::{
+    collections::VecDeque,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 /// Who sent bytes on their way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -301,15 +308,26 @@ struct Connection<SF, CF> {
     client_end: Option<CF>,
 }
 
-/// The server's handshake of `endpoints`, which serves example.com.
+/// The targets of `endpoints`: example.com, and every name when
+/// `fallback` is set.
+fn sni_targets(endpoints: &Endpoints) -> SniTargets<&'static str> {
+    let mut targets = SniTargets::new();
+    targets.insert("example.com", "web", endpoints.server_protocols.clone());
+    if endpoints.fallback {
+        targets.set_fallback("web", endpoints.server_protocols.clone());
+    }
+    targets
+}
+
+/// The server's handshake of `endpoints`, which serves example.com, with
+/// `layers` and `targets` when they are given.
 macro_rules! server_handshake {
     ($endpoints:expr) => {{
         let endpoints: &Endpoints = $endpoints;
-        let mut targets = SniTargets::new();
-        targets.insert("example.com", "web", endpoints.server_protocols.clone());
-        if endpoints.fallback {
-            targets.set_fallback("web", endpoints.server_protocols.clone());
-        }
+        server_handshake!(endpoints, PassThroughLayers, sni_targets(endpoints))
+    }};
+    ($endpoints:expr, $layers:expr, $targets:expr) => {{
+        let endpoints: &Endpoints = $endpoints;
         let identity = CertifiedKey::new(vec![Bytes::from(pki::leaf())], pki::key(2)).unwrap();
         ServerHandshake::new(
             AwsLcBackend,
@@ -322,8 +340,8 @@ macro_rules! server_handshake {
                 endpoints.group_preference,
             ),
             endpoints.server_tickets.clone(),
-            PassThroughLayers,
-            targets,
+            $layers,
+            $targets,
             identity,
             NoCertificateRequest,
             Arc::clone(&endpoints.clock),
@@ -675,6 +693,86 @@ fn a_hello_retry_request_moves_the_key_share() {
 }
 
 use sakuya_tls::verify::CertificateVerifier as _;
+
+/// Layers that pass the hello through and record the encoding of each
+/// `first` they are given.
+struct RecordingLayers(Arc<Mutex<Vec<Option<Vec<u8>>>>>);
+
+impl HelloLayers for RecordingLayers {
+    type Accepted = PassThroughHello;
+    type Error = core::convert::Infallible;
+    type Opening<'a> = core::future::Ready<Result<PassThroughHello, core::convert::Infallible>>;
+
+    fn open<'a>(
+        &'a self,
+        encoded: HandshakeMessage,
+        hello: ClientHello<Bytes>,
+        first: Option<&'a PassThroughHello>,
+    ) -> Self::Opening<'a> {
+        self.0
+            .lock()
+            .unwrap()
+            .push(first.map(|first| first.encoded().encoded().to_vec()));
+        PassThroughLayers.open(encoded, hello, None)
+    }
+}
+
+#[test]
+fn a_deciding_server_hands_its_openings_to_the_engine_across_a_retry() {
+    let mut endpoints = Endpoints::new();
+    endpoints.offering = offering(&[NamedGroup::SECP256R1]);
+    endpoints.group_preference = GroupPreference::TableOrder;
+    let mut wire = Wire::new();
+    let mut client = pin!(LentCall::<ClientSide, _>::new(ClientSteps::new(
+        client_handshake!(&endpoints, "example.com")
+    )));
+    let mut poll_client = |wire: &mut Wire| {
+        let mut side = pin!(Pin::new(&mut wire.client).view());
+        client
+            .as_mut()
+            .poll_with_views(side.as_mut(), &mut Context::from_waker(Waker::noop()))
+    };
+    assert!(poll_client(&mut wire).is_pending());
+    assert!(wire.deliver(&mut unchanged));
+
+    // The server reads the first ClientHello, opens it and selects its
+    // target before it builds the engine.
+    let mut read = pin!(LentCall::<ServerSide, _>::new(ReadFirstClientHello::new(
+        MessageLimits::default()
+    )));
+    let Poll::Ready(ControlFlow::Break(Ok(first))) = poll_server!(read, &mut wire) else {
+        panic!("the ClientHello is not read")
+    };
+    let (encoded, hello) = first.clone().into_parts();
+    let Ok(opened) = ready(PassThroughLayers.open(encoded, hello, None));
+    let selected = ready(sni_targets(&endpoints).select(opened.client_hello())).unwrap();
+
+    let firsts = Arc::new(Mutex::new(Vec::new()));
+    let server = server_handshake!(
+        &endpoints,
+        PreopenedLayers::new(opened, RecordingLayers(Arc::clone(&firsts))),
+        PreselectedTarget::new(selected)
+    );
+    fn assert_send<T: Send>(_: &T) {}
+    let server = LentCall::<ServerSide, _>::new(ServerStepsFrom::new(server, first.clone()));
+    // The layers are shared across the engine's waits, and stay `Send`.
+    assert_send(&server);
+    let mut server = pin!(server);
+    let run = run(
+        &mut wire,
+        |wire| poll_server!(server, wire),
+        poll_client,
+        unchanged,
+    );
+    assert!(matches!(run.server_end, Some(Ok(()))));
+    assert_eq!(wire.seen(Sender::Server, HandshakeType::SERVER_HELLO), 2);
+    // The wrapped layers opened the second ClientHello alone, with the
+    // opening of the first.
+    assert_eq!(
+        *firsts.lock().unwrap(),
+        [Some(first.encoded().encoded().to_vec())]
+    );
+}
 
 #[test]
 fn a_ticket_resumes_with_0_rtt_accepted() {

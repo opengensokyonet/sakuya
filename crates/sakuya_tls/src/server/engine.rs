@@ -18,7 +18,8 @@
 //!    takes the [`FirstClientHello`], opens its layers, selects the target
 //!    and chooses the cipher suite and group; when the client sent no key
 //!    share of that group, it writes a HelloRetryRequest and reads the
-//!    second ClientHello. It opens an offered ticket and checks its binder,
+//!    second ClientHello, whose layers it opens with what opening the
+//!    first gave. It opens an offered ticket and checks its binder,
 //!    negotiates the transport parameters, and admits 0-RTT only when the
 //!    handshake, the connection and the ticket policy all agree. It writes
 //!    the ServerHello and returns [`ServerHelloWritten`], with the 0-RTT
@@ -1055,7 +1056,7 @@ where
             client_hello,
         } = first;
         let accepted = layers
-            .open(encoded, client_hello)
+            .open(encoded, client_hello, None)
             .await
             .map_err(|source| alert(ServerAlertError::Layers { source }))?;
         check_hello(accepted.client_hello()).map_err(alert)?;
@@ -1106,7 +1107,7 @@ where
             let hello = read_hello(&second).map_err(alert)?;
             check_session_id(&hello)?;
             let accepted = layers
-                .open(second, hello)
+                .open(second, hello, Some(&accepted))
                 .await
                 .map_err(|source| alert(ServerAlertError::Layers { source }))?;
             let hello = accepted.client_hello();

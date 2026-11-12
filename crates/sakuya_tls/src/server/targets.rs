@@ -3,13 +3,18 @@
 //! A server may serve several targets, each with its own application
 //! protocols. [`TargetSelection::select`] picks the target of a ClientHello
 //! and negotiates its application protocol; [`SniTargets`] picks by the
-//! `server_name` extension.
+//! `server_name` extension. [`PreselectedTarget`] hands over a target
+//! selected before the handshake began, such as by a server that decided
+//! what to do with the connection.
 
 use crate::{
     alert::AlertDescription, extension::alpn::ProtocolName, message::client_hello::ClientHello,
 };
 use bytes::Bytes;
-use core::future::{Future, Ready, ready};
+use core::{
+    convert::Infallible,
+    future::{Future, Ready, ready},
+};
 use snafu::Snafu;
 use std::collections::HashMap;
 
@@ -154,6 +159,33 @@ impl<T: Clone> TargetSelection for SniTargets<T> {
     }
 }
 
+/// A target selected before the handshake began, which every selection
+/// hands over whatever the ClientHello.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreselectedTarget<T> {
+    selected: SelectedTarget<T>,
+}
+
+impl<T> PreselectedTarget<T> {
+    /// A selection that hands over `selected`.
+    pub const fn new(selected: SelectedTarget<T>) -> Self {
+        Self { selected }
+    }
+}
+
+impl<T: Clone> TargetSelection for PreselectedTarget<T> {
+    type Target = T;
+    type Error = Infallible;
+    type Selecting<'a>
+        = Ready<Result<SelectedTarget<T>, Infallible>>
+    where
+        Self: 'a;
+
+    fn select<'a>(&'a self, _hello: &'a ClientHello<Bytes>) -> Self::Selecting<'a> {
+        ready(Ok(self.selected.clone()))
+    }
+}
+
 /// [`SniTargets`] has no target for a ClientHello.
 #[derive(Clone, Debug, PartialEq, Eq, Snafu)]
 pub enum SelectTargetError {
@@ -194,7 +226,9 @@ impl crate::alert::CallsForAlert for SelectTargetError {
 
 #[cfg(test)]
 mod tests {
-    use super::{SelectTargetError, SelectedTarget, SniTargets, TargetSelection};
+    use super::{
+        PreselectedTarget, SelectTargetError, SelectedTarget, SniTargets, TargetSelection,
+    };
     use crate::{
         alert::AlertDescription,
         extension::alpn::ProtocolName,
@@ -295,5 +329,17 @@ mod tests {
             select(&targets, &hello(None, &[])).unwrap().target,
             "default"
         );
+    }
+
+    #[test]
+    fn a_preselected_target_is_handed_over_for_any_client_hello() {
+        let selected = SelectedTarget {
+            target: "web",
+            application_protocol: Some(protocol(b"h3")),
+        };
+        let targets = PreselectedTarget::new(selected.clone());
+        let (_, hello) = received_client_hello(&client_hello(&extension(43, VERSIONS)));
+        let Ok(handed) = ready_now(targets.select(&hello));
+        assert_eq!(handed, selected);
     }
 }
