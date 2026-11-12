@@ -51,8 +51,9 @@ use sakuya_tls::{
     server::{
         choice::{GroupPreference, PreferenceTable},
         engine::{
-            RequiredExtension, ServerAlertError, ServerHandshake, ServerHandshakeCompleted,
-            ServerHandshakeSettings, ServerHelloWritten, WriteServerHelloStep,
+            ReadFirstClientHello, RequiredExtension, ServerAlertError, ServerHandshake,
+            ServerHandshakeCompleted, ServerHandshakeSettings, ServerHelloWritten,
+            WriteServerHelloStep,
         },
         identity::CertifiedKey,
         layers::PassThroughLayers,
@@ -368,7 +369,10 @@ macro_rules! connect {
         let mut wire: Wire = $wire;
         let server = server_handshake!(endpoints);
         let client = client_handshake!(endpoints, $host);
-        let mut server = pin!(LentCall::<ServerSide, _>::new(ServerSteps::new(server)));
+        let mut server = pin!(LentCall::<ServerSide, _>::new(ServerSteps::new(
+            server,
+            MessageLimits::default()
+        )));
         let mut client = pin!(LentCall::<ClientSide, _>::new(ClientSteps::new(client)));
         let run = run(
             &mut wire,
@@ -516,7 +520,10 @@ fn alert_of<T, F: sakuya_tls::alert::CallsForAlert, E: core::fmt::Debug>(
 fn the_calls_of_both_engines_are_send() {
     fn assert_send<T: Send>(_: &T) {}
     let endpoints = Endpoints::new();
-    let server = LentCall::<ServerSide, _>::new(ServerSteps::new(server_handshake!(&endpoints)));
+    let server = LentCall::<ServerSide, _>::new(ServerSteps::new(
+        server_handshake!(&endpoints),
+        MessageLimits::default(),
+    ));
     assert_send(&server);
     let client = LentCall::<ClientSide, _>::new(ClientSteps::new(client_handshake!(
         &endpoints,
@@ -542,8 +549,23 @@ fn a_step_runs_alone_as_an_operation() {
     assert!(offered.is_none());
     assert!(wire.deliver(&mut unchanged));
 
+    // The first ClientHello is read without the engine.
+    let mut read = pin!(LentCall::<ServerSide, _>::new(ReadFirstClientHello::new(
+        MessageLimits::default()
+    )));
+    let mut side = pin!(Pin::new(&mut wire.server).view());
+    let Poll::Ready(ControlFlow::Break(Ok(first))) = read
+        .as_mut()
+        .poll_with_views(side.as_mut(), &mut Context::from_waker(Waker::noop()))
+    else {
+        panic!("the ClientHello is not read")
+    };
+    assert!(first.client_hello().pre_shared_key().is_none());
+    assert_eq!(wire.server.output.current, CryptoLevel::Initial);
+
     let mut server = pin!(LentCall::<ServerSide, _>::new(WriteServerHelloStep::new(
-        server_handshake!(&endpoints)
+        server_handshake!(&endpoints),
+        first
     )));
     let mut side = pin!(Pin::new(&mut wire.server).view());
     let Poll::Ready(ControlFlow::Break(Ok((written, _)))) = server
@@ -1277,7 +1299,8 @@ fn a_client_that_does_not_name_psk_dhe_ke_gets_no_tickets() {
         let endpoints = Endpoints::new();
         let mut wire = Wire::new();
         let mut server = pin!(LentCall::<ServerSide, _>::new(ServerSteps::new(
-            server_handshake!(&endpoints)
+            server_handshake!(&endpoints),
+            MessageLimits::default()
         )));
         let mut client = ScriptedClient::new(psk_modes);
         let run = run(

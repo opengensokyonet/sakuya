@@ -165,6 +165,28 @@ impl<F, E> HandshakeError<F, E> {
             Self::Alert { .. } | Self::ProtocolViolation { .. } => None,
         }
     }
+
+    /// Converts the role's failure with `failure` and the connection's error
+    /// with `transport`; a broken rule stays as it is.
+    ///
+    /// A failure of an operation that runs before the steps, such as reading
+    /// the first ClientHello, converts this way into the failure of the
+    /// steps.
+    pub fn map<G, D>(
+        self,
+        failure: impl FnOnce(F) -> G,
+        transport: impl FnOnce(E) -> D,
+    ) -> HandshakeError<G, D> {
+        match self {
+            Self::Alert { source } => HandshakeError::Alert {
+                source: failure(source),
+            },
+            Self::ProtocolViolation { source } => HandshakeError::ProtocolViolation { source },
+            Self::Transport { source } => HandshakeError::Transport {
+                source: transport(source),
+            },
+        }
+    }
 }
 
 /// A rule of RFC 9001 for TLS in QUIC that the peer broke, which the

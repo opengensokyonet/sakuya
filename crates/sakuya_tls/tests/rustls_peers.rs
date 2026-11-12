@@ -56,7 +56,7 @@ use sakuya_tls::{
     clock::ManualClock,
     engine::CryptoLevel,
     extension::alpn::{ProtocolName, ProtocolNameList},
-    message::new_session_ticket::TicketLifetime,
+    message::{MessageLimits, new_session_ticket::TicketLifetime},
     schedule::ExporterLabel,
     server::{
         choice::{GroupPreference, PreferenceTable},
@@ -343,7 +343,10 @@ mod server_engine {
             Arc::clone(&server.clock),
             ServerHandshakeSettings::default(),
         );
-        let mut call = pin!(LentCall::<ServerSide, _>::new(ServerSteps::new(engine)));
+        let mut call = pin!(LentCall::<ServerSide, _>::new(ServerSteps::new(
+            engine,
+            MessageLimits::default()
+        )));
         let mut peer = Peer::new(
             quic::ClientConnection::new(
                 Arc::clone(client),

@@ -9,10 +9,13 @@
 //! whose [`ServerTransport::negotiate`] checks the client's transport
 //! parameters and gives the server's own.
 //!
-//! The steps go:
+//! The first ClientHello is read before the engine runs, by
+//! [`read_first_client_hello`]: it needs only the limits on messages, not
+//! the engine's state, so a server can read it, and decide what to do with
+//! the connection, before it builds the engine. The steps go:
 //!
 //! 1. [`write_server_hello`](ServerHandshakeSteps::write_server_hello)
-//!    reads the ClientHello at Initial, opens its layers, selects the target
+//!    takes the [`FirstClientHello`], opens its layers, selects the target
 //!    and chooses the cipher suite and group; when the client sent no key
 //!    share of that group, it writes a HelloRetryRequest and reads the
 //!    second ClientHello. It opens an offered ticket and checks its binder,
@@ -36,13 +39,16 @@
 //!
 //! A failure ends the handshake with a [`HandshakeError`]; a ClientHello
 //! with a non-empty legacy_session_id ends it with
-//! [`HandshakeError::ProtocolViolation`] (RFC 9001 §8.4).
+//! [`HandshakeError::ProtocolViolation`] (RFC 9001 §8.4), the first one
+//! already in [`read_first_client_hello`].
 //!
 //! This version neither opens encrypted layers nor asks for a client
 //! certificate: it takes layers whose confirmation and retry
 //! configurations, and a peer authentication whose request, are
 //! [`Infallible`], so those steps have no values to act on.
 //!
+//! [`read_first_client_hello`] is a `nitori_call` operation, and `#[call]`
+//! generates [`ReadFirstClientHello`] and its extension trait.
 //! `#[call]` cannot be written on the methods of a trait. Each step is also
 //! a `nitori_call` operation for every [`ServerHandshakeSteps`], through
 //! [`write_server_hello_step`], [`write_server_finished_step`],
@@ -172,7 +178,9 @@ pub struct Negotiated {
 /// The fixed choices of a server's handshake.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ServerHandshakeSettings {
-    /// The limits on the messages the server receives.
+    /// The limits on the messages the server receives after the first
+    /// ClientHello, which [`read_first_client_hello`] reads with limits of
+    /// its own.
     pub limits: MessageLimits,
     /// How far the age a client states for its ticket may be from the age
     /// the server measures for 0-RTT to be admitted (RFC 9846 §8.3); 10
@@ -233,6 +241,99 @@ where
     }
 }
 
+/// The first ClientHello of a connection, read at Initial by
+/// [`read_first_client_hello`]: the message as it arrived and the
+/// ClientHello decoded from it.
+///
+/// Its legacy_session_id is empty, as QUIC requires (RFC 9001 §8.4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FirstClientHello {
+    encoded: HandshakeMessage,
+    client_hello: ClientHello<Bytes>,
+}
+
+impl FirstClientHello {
+    /// The message as it arrived, which goes into the transcript.
+    pub const fn encoded(&self) -> &HandshakeMessage {
+        &self.encoded
+    }
+
+    /// The ClientHello decoded from [`FirstClientHello::encoded`].
+    pub const fn client_hello(&self) -> &ClientHello<Bytes> {
+        &self.client_hello
+    }
+
+    /// The message and the ClientHello decoded from it.
+    pub fn into_parts(self) -> (HandshakeMessage, ClientHello<Bytes>) {
+        (self.encoded, self.client_hello)
+    }
+}
+
+/// How reading the first ClientHello fails with an alert.
+#[derive(Debug, Snafu)]
+pub enum ReadFirstClientHelloError {
+    /// The handshake message could not be collected.
+    #[snafu(display("handshake message read failed"))]
+    Message {
+        /// The failure.
+        source: ReadHandshakeMessageError<Infallible>,
+    },
+    /// The message is not a ClientHello that could be read.
+    #[snafu(display("ClientHello read failed"))]
+    ClientHello {
+        /// The failure.
+        source: ReadClientHelloError,
+    },
+}
+
+impl CallsForAlert for ReadFirstClientHelloError {
+    /// The alert of the source.
+    fn alert(&self) -> AlertDescription {
+        match self {
+            Self::Message { source } => source.alert(),
+            Self::ClientHello { source } => source.alert(),
+        }
+    }
+}
+
+/// Reads the first ClientHello of a connection from the CRYPTO bytes at
+/// Initial, within `limits`.
+///
+/// It needs nothing of the engine, so a server can read the ClientHello
+/// before it builds the engine, and hand it to
+/// [`ServerHandshakeSteps::write_server_hello`]. A ClientHello sent again
+/// after a HelloRetryRequest is read by that step.
+///
+/// # Errors
+///
+/// [`HandshakeError::Alert`] when the message cannot be collected or is not
+/// a ClientHello, [`HandshakeError::ProtocolViolation`] when its
+/// legacy_session_id is not empty, and [`HandshakeError::Transport`] with
+/// the failure of the input.
+#[call]
+pub async fn read_first_client_hello<W: CryptoInput>(
+    host: &mut impl LentAccess<Family = W>,
+    limits: MessageLimits,
+) -> Result<FirstClientHello, HandshakeError<ReadFirstClientHelloError, <W as Read>::Error>> {
+    let encoded =
+        host.read_handshake_message(limits, None)
+            .await
+            .map_err(|error| match split_read(error) {
+                Ok(source) => alert(ReadFirstClientHelloError::Message { source }),
+                Err(source) => HandshakeError::Transport { source },
+            })?;
+    let client_hello = encoded
+        .encoded()
+        .clone()
+        .sync_read_client_hello_unpin()
+        .map_err(|source| alert(ReadFirstClientHelloError::ClientHello { source }))?;
+    check_session_id(&client_hello)?;
+    Ok(FirstClientHello {
+        encoded,
+        client_hello,
+    })
+}
+
 /// The steps of a server's handshake, implemented by the engine's start
 /// state.
 ///
@@ -253,8 +354,9 @@ pub trait ServerHandshakeSteps: Sized {
     /// The type of the selected target.
     type Target;
 
-    /// The server's failure, which names its alert.
-    type AlertError: CallsForAlert;
+    /// The server's failure, which names its alert; a failure to read the
+    /// first ClientHello converts into it.
+    type AlertError: CallsForAlert + From<ReadFirstClientHelloError>;
 
     /// The state after the ServerHello is written.
     type ServerHelloWrittenState;
@@ -265,15 +367,16 @@ pub trait ServerHandshakeSteps: Sized {
     /// The state after the client's Finished is verified.
     type ServerHandshakeCompletedState;
 
-    /// Reads the ClientHello, after a HelloRetryRequest when the server
-    /// sends one, negotiates the transport parameters and writes the
-    /// ServerHello.
+    /// Continues from `first`, reads the second ClientHello after a
+    /// HelloRetryRequest when the server sends one, negotiates the transport
+    /// parameters and writes the ServerHello.
     ///
     /// # Errors
     ///
     /// As [`HandshakeError`] describes.
     async fn write_server_hello<W: ServerHandshakeCapability<Self::Target>>(
         self,
+        first: FirstClientHello,
         host: &mut impl LentAccess<Family = W>,
     ) -> Result<(ServerHelloWritten, Self::ServerHelloWrittenState), StepError<Self, W>>;
 
@@ -361,6 +464,7 @@ pub struct ServerHandshakeCompleted<C: TlsCrypto, T> {
 pub async fn write_server_hello_step<W, E>(
     host: &mut impl LentAccess<Family = W>,
     tls: E,
+    first: FirstClientHello,
 ) -> Result<
     (
         ServerHelloWritten,
@@ -372,7 +476,7 @@ where
     E: ServerHandshakeSteps,
     W: ServerHandshakeCapability<<E as ServerHandshakeSteps>::Target>,
 {
-    tls.write_server_hello(host).await
+    tls.write_server_hello(first, host).await
 }
 
 /// A step of a server's handshake as an operation: see
@@ -636,6 +740,15 @@ impl<L: CallsForAlert, S: CallsForAlert, G, K> CallsForAlert for ServerAlertErro
             | Self::SignatureLength { .. }
             | Self::Ticket { .. }
             | Self::OutputStopped { .. } => AlertDescription::INTERNAL_ERROR,
+        }
+    }
+}
+
+impl<L, S, G, K> From<ReadFirstClientHelloError> for ServerAlertError<L, S, G, K> {
+    fn from(error: ReadFirstClientHelloError) -> Self {
+        match error {
+            ReadFirstClientHelloError::Message { source } => Self::Message { source },
+            ReadFirstClientHelloError::ClientHello { source } => Self::ClientHello { source },
         }
     }
 }
@@ -920,6 +1033,7 @@ where
 
     async fn write_server_hello<W: ServerHandshakeCapability<S::Target>>(
         self,
+        first: FirstClientHello,
         host: &mut impl LentAccess<Family = W>,
     ) -> Result<(ServerHelloWritten, Self::ServerHelloWrittenState), StepError<Self, W>> {
         let Self {
@@ -935,12 +1049,13 @@ where
         } = self;
         let limits = settings.limits;
 
-        // The ClientHello, its layers, the target and the parameters.
-        let first = read_message::<S::Target, W, _, _, _, _>(host, limits, None).await?;
-        let hello = read_hello(&first).map_err(alert)?;
-        check_session_id(&hello)?;
+        // The layers of the first ClientHello, the target and the parameters.
+        let FirstClientHello {
+            encoded,
+            client_hello,
+        } = first;
         let accepted = layers
-            .open(first, hello)
+            .open(encoded, client_hello)
             .await
             .map_err(|source| alert(ServerAlertError::Layers { source }))?;
         check_hello(accepted.client_hello()).map_err(alert)?;

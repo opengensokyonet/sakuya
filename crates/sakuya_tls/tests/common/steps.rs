@@ -10,10 +10,11 @@ use sakuya_tls::{
     },
     crypto::TlsCrypto,
     engine::HandshakeError,
+    message::MessageLimits,
     schedule::OneRttSendTrafficSecret,
     server::engine::{
         ServerHandshakeCapability, ServerHandshakeCompleted, ServerHandshakeSteps,
-        ServerHelloWritten, ServerTransport,
+        ServerHelloWritten, ServerTransport, read_first_client_hello,
     },
 };
 
@@ -47,17 +48,22 @@ pub type ServerFailed<E, W> = HandshakeError<
 pub type ClientFailed<E, W> =
     HandshakeError<<E as ClientHandshakeSteps>::AlertError, <W as ClientTransport>::Error>;
 
-/// Runs the steps of the server's handshake `tls`.
+/// Reads the first ClientHello within `limits` and runs the steps of the
+/// server's handshake `tls`.
 #[call(yields = ServerEvent<<E as ServerHandshakeSteps>::Crypto, <E as ServerHandshakeSteps>::Target>)]
 pub async fn server_steps<W, E>(
     host: &mut impl LentAccess<Family = W>,
     tls: E,
+    limits: MessageLimits,
 ) -> Result<(), ServerFailed<E, W>>
 where
     E: ServerHandshakeSteps,
     W: ServerHandshakeCapability<<E as ServerHandshakeSteps>::Target>,
 {
-    let (written, state) = tls.write_server_hello(host).await?;
+    let first = read_first_client_hello(host, limits)
+        .await
+        .map_err(|error| error.map(Into::into, W::convert_read_error))?;
+    let (written, state) = tls.write_server_hello(first, host).await?;
     yield ServerEvent::ServerHelloWritten(written);
     let (send, state) = E::write_server_finished(state, host).await?;
     yield ServerEvent::ServerFinishedWritten(send);
