@@ -33,7 +33,7 @@ use crate::route::index::{RouteEntryRegistration, RouteIndex};
 use crate::route::interpretation::{FirstPacketInterpretation, RecognizedInitial};
 use crate::route::recognizer::ConnectionIdLengths;
 use crate::route::reset::{StatelessResetTarget, StatelessResetTokens};
-use crate::route::router::{DatagramRouter, VersionService};
+use crate::route::router::{DatagramRouter, StatelessResetService, VersionService};
 
 /// This side's end of a test link: a stand-in for a local address.
 pub(super) type Local = u32;
@@ -54,6 +54,7 @@ pub(super) type Router = DatagramRouter<
     Arc<StatelessResetTokens<ResetProbe>>,
     VersionProbe,
     InitialAcceptance<Factory, Reflow>,
+    UnclaimedShortProbe,
 >;
 
 pub(super) struct TestLink;
@@ -454,6 +455,16 @@ impl VersionService<Vec<u8>, TestLinkId> for VersionProbe {
     }
 }
 
+/// Records the payloads of unclaimed short header datagrams.
+#[derive(Clone, Default)]
+pub(super) struct UnclaimedShortProbe(pub(super) Arc<Mutex<Vec<Vec<u8>>>>);
+
+impl StatelessResetService<Vec<u8>, TestLinkId> for UnclaimedShortProbe {
+    fn unclaimed_short_header(&self, datagram: Datagram) {
+        self.0.lock().unwrap().push(datagram.payload().clone());
+    }
+}
+
 /// Counts the stateless resets it receives.
 #[derive(Clone, Default)]
 pub(super) struct ResetProbe(pub(super) Arc<AtomicUsize>);
@@ -471,6 +482,7 @@ pub(super) struct Domain {
     pub(super) factory: Factory,
     pub(super) resets: Arc<StatelessResetTokens<ResetProbe>>,
     pub(super) versions: VersionProbe,
+    pub(super) unclaimed: UnclaimedShortProbe,
 }
 
 impl Domain {
@@ -479,6 +491,7 @@ impl Domain {
         let factory = Factory::new();
         let resets = StatelessResetTokens::new();
         let versions = VersionProbe::default();
+        let unclaimed = UnclaimedShortProbe::default();
         let router = Arc::new(
             DatagramRouter::new(RouteIndex::new(), lengths(short_lengths))
                 .with_stateless_reset(Arc::clone(&resets))
@@ -486,7 +499,8 @@ impl Domain {
                 .with_initial_acceptance(InitialAcceptance::new(
                     factory.clone(),
                     Arc::new(reflow.poster()),
-                )),
+                ))
+                .with_stateless_reset_service(unclaimed.clone()),
         );
         Self {
             router,
@@ -494,6 +508,7 @@ impl Domain {
             factory,
             resets,
             versions,
+            unclaimed,
         }
     }
 

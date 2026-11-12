@@ -435,3 +435,50 @@ fn coalesced_datagram_routes_by_its_first_packet_and_delivers_it_whole() {
     assert_eq!(owned[0].payload().len(), total);
     assert!(total > first_len);
 }
+
+#[test]
+fn unclaimed_short_header_with_a_non_empty_dcid_goes_to_the_reset_service() {
+    let mut domain = Domain::new(&[8]);
+    let end = local_end();
+    let datagram = short(&cid(7), 30);
+    domain.route(datagram.clone(), &link(&end));
+    assert_eq!(*domain.unclaimed.0.lock().unwrap(), [datagram]);
+    assert!(domain.next_work().is_none());
+}
+
+#[test]
+fn short_header_whose_candidates_all_exit_is_released() {
+    let domain = Domain::new(&[8]);
+    let end = local_end();
+    let entries = entries(&domain, 1, &end);
+    domain.route(short(&cid(1), 30), &link(&end));
+    assert_eq!(counts(&entries), [1, 0, 0]);
+    assert!(domain.unclaimed.0.lock().unwrap().is_empty());
+}
+
+#[test]
+fn unclaimed_short_header_read_only_as_zero_length_is_released() {
+    let domain = Domain::new(&[0]);
+    let end = local_end();
+    domain.route(short(&[], 30), &link(&end));
+    assert!(domain.unclaimed.0.lock().unwrap().is_empty());
+}
+
+#[test]
+fn unclaimed_short_header_with_any_non_empty_reading_goes_to_the_reset_service() {
+    let domain = Domain::new(&[0, 8]);
+    let end = local_end();
+    domain.route(short(&cid(7), 30), &link(&end));
+    assert_eq!(domain.unclaimed.0.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn short_header_too_short_for_any_reading_is_released() {
+    let domain = Domain::new(&[8]);
+    let end = local_end();
+    // The first byte and four bytes of a destination connection ID.
+    let mut datagram = short(&cid(7), 30);
+    datagram.truncate(5);
+    domain.route(datagram, &link(&end));
+    assert!(domain.unclaimed.0.lock().unwrap().is_empty());
+}

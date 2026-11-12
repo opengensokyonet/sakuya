@@ -9,15 +9,22 @@
 //! and recognition must agree, which is the implementation's responsibility:
 //! routing keeps no format numbers, length registry or pairing credentials.
 //!
+//! A [`ConnectionIdGenerator`] issues the connection IDs of one connection,
+//! with their stateless reset tokens, and may compute a token again later for
+//! a connection whose state is gone.
+//!
 //! [`ConnectionIdLengths`] and [`LeastOccupiedConnectionIds`] are one simple
 //! pair: a fixed set of accepted lengths, and generation of one of them that
 //! prefers values few entries use. Neither is a required framework.
 
 use std::fmt;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 use sakuya_link::LinkId;
-use sakuya_wire::connection_id::{ConnectionId, ConnectionIdLength, NonEmptyCid};
+use sakuya_wire::connection_id::{
+    ConnectionId, ConnectionIdLength, NonEmptyCid, StatelessResetToken,
+};
 use smallvec::SmallVec;
 
 /// Reads the destination connection IDs a short header may carry.
@@ -89,34 +96,91 @@ pub trait ConnectionIdOccupancy {
     fn occupancy(&self, cid: &NonEmptyCid) -> usize;
 }
 
-/// Produces connection IDs for this side to issue.
+impl<Occupancy: ConnectionIdOccupancy + ?Sized> ConnectionIdOccupancy for &Occupancy {
+    fn occupancy(&self, cid: &NonEmptyCid) -> usize {
+        (**self).occupancy(cid)
+    }
+}
+
+impl<Occupancy: ConnectionIdOccupancy + ?Sized> ConnectionIdOccupancy for Arc<Occupancy> {
+    fn occupancy(&self, cid: &NonEmptyCid) -> usize {
+        (**self).occupancy(cid)
+    }
+}
+
+/// Produces the connection IDs one connection issues, with their stateless
+/// reset tokens.
+///
+/// Every connection holds its own generator value, made from the endpoint's
+/// [`Config`](Self::Config) when the connection is created. Whether
+/// connections share state is up to the implementation, for example a shared
+/// counter or key held inside the value.
 pub trait ConnectionIdGenerator {
+    /// What the endpoint keeps to make a generator for each connection.
+    type Config: Clone;
+
+    /// Makes the generator of one connection.
+    fn new(config: &Self::Config) -> Self;
+
     /// Generates a connection ID according to the generator's own policy,
-    /// possibly consulting `occupancy`.
+    /// with the stateless reset token issued with it.
     ///
-    /// The result is not promised to be unique; the connection ID manager
-    /// registers it and discloses it only after the registration took effect.
-    fn generate(&self, occupancy: &impl ConnectionIdOccupancy) -> ConnectionId;
+    /// The connection ID is not promised to be unique; the connection ID
+    /// manager registers it and discloses it only after the registration took
+    /// effect. The token must be hard to guess ([RFC 9000 §10.3]).
+    ///
+    /// [RFC 9000 §10.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-10.3
+    fn generate(&mut self) -> (ConnectionId, StatelessResetToken);
+
+    /// Computes again the stateless reset token that a generator made from
+    /// `config` issued with `cid`, without any state of the connection.
+    ///
+    /// A generator that derives tokens from the connection ID and a static
+    /// key ([RFC 9000 §10.3.2]) returns it; one that draws tokens at random
+    /// returns `None`, and then no stateless reset is sent for `cid`.
+    ///
+    /// [RFC 9000 §10.3.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-10.3.2
+    fn stateless_reset_token(
+        config: &Self::Config,
+        cid: &ConnectionId,
+    ) -> Option<StatelessResetToken>;
 }
 
 /// Generates connection IDs of one length, preferring the least used of a few
-/// random samples.
+/// random samples, with random stateless reset tokens.
 ///
-/// The random bytes come from `fill`, which the owner supplies. A length of
-/// zero always generates the zero-length connection ID.
-pub struct LeastOccupiedConnectionIds<Fill> {
+/// The random bytes of connection IDs and tokens come from `fill`, which the
+/// owner supplies and which must be unpredictable. The route entries in use
+/// are read from `occupancy`. A length of zero always generates the
+/// zero-length connection ID. Tokens are not derived, so
+/// [`stateless_reset_token`](ConnectionIdGenerator::stateless_reset_token)
+/// is always `None`. The value is its own configuration: every connection
+/// gets a clone.
+#[derive(Clone)]
+pub struct LeastOccupiedConnectionIds<Occupancy, Fill> {
     length: ConnectionIdLength,
     samples: NonZeroUsize,
+    occupancy: Occupancy,
     fill: Fill,
 }
 
-impl<Fill: Fn(&mut [u8])> LeastOccupiedConnectionIds<Fill> {
+impl<Occupancy, Fill> LeastOccupiedConnectionIds<Occupancy, Fill>
+where
+    Occupancy: ConnectionIdOccupancy,
+    Fill: Fn(&mut [u8]),
+{
     /// Generates connection IDs of `length` bytes from `samples` candidates
-    /// each, filled by `fill`.
-    pub fn new(length: ConnectionIdLength, samples: NonZeroUsize, fill: Fill) -> Self {
+    /// each, filled by `fill` and compared by `occupancy`.
+    pub fn new(
+        length: ConnectionIdLength,
+        samples: NonZeroUsize,
+        occupancy: Occupancy,
+        fill: Fill,
+    ) -> Self {
         Self {
             length,
             samples,
+            occupancy,
             fill,
         }
     }
@@ -129,15 +193,14 @@ impl<Fill: Fn(&mut [u8])> LeastOccupiedConnectionIds<Fill> {
         // `ConnectionId::MAX_LEN`, so `active` is a valid connection ID.
         ConnectionId::new(active).expect("a connection ID length is at most the maximum")
     }
-}
 
-impl<Fill: Fn(&mut [u8])> ConnectionIdGenerator for LeastOccupiedConnectionIds<Fill> {
-    fn generate(&self, occupancy: &impl ConnectionIdOccupancy) -> ConnectionId {
+    fn least_occupied(&self) -> ConnectionId {
         if self.length.is_zero() {
             return ConnectionId::EMPTY;
         }
-        let occupied =
-            |cid: &ConnectionId| NonEmptyCid::new(*cid).map_or(0, |cid| occupancy.occupancy(&cid));
+        let occupied = |cid: &ConnectionId| {
+            NonEmptyCid::new(*cid).map_or(0, |cid| self.occupancy.occupancy(&cid))
+        };
         let first = self.sample();
         let first_occupied = occupied(&first);
         let (least, _) = (1..self.samples.get()).fold((first, first_occupied), |least, _| {
@@ -153,7 +216,30 @@ impl<Fill: Fn(&mut [u8])> ConnectionIdGenerator for LeastOccupiedConnectionIds<F
     }
 }
 
-impl<Fill> fmt::Debug for LeastOccupiedConnectionIds<Fill> {
+impl<Occupancy, Fill> ConnectionIdGenerator for LeastOccupiedConnectionIds<Occupancy, Fill>
+where
+    Occupancy: ConnectionIdOccupancy + Clone,
+    Fill: Fn(&mut [u8]) + Clone,
+{
+    type Config = Self;
+
+    fn new(config: &Self) -> Self {
+        config.clone()
+    }
+
+    fn generate(&mut self) -> (ConnectionId, StatelessResetToken) {
+        let cid = self.least_occupied();
+        let mut token = [0; StatelessResetToken::LEN];
+        (self.fill)(&mut token);
+        (cid, StatelessResetToken::new(token))
+    }
+
+    fn stateless_reset_token(_config: &Self, _cid: &ConnectionId) -> Option<StatelessResetToken> {
+        None
+    }
+}
+
+impl<Occupancy, Fill> fmt::Debug for LeastOccupiedConnectionIds<Occupancy, Fill> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LeastOccupiedConnectionIds")
             .field("length", &self.length)

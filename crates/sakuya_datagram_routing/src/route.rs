@@ -55,6 +55,11 @@
 //! Before any of this, the last 16 bytes of every datagram are checked by the
 //! configured [`StatelessResetDetector`]; a hit ends ordinary routing.
 //!
+//! Sending a stateless reset is a separate matter: a short header datagram
+//! whose lookups found no entry, read with a non-empty destination connection
+//! ID, goes to the configured [`StatelessResetService`] instead of being
+//! released.
+//!
 //! [`DatagramRouter::route`]: router::DatagramRouter::route
 //! [`DatagramRouter::resume`]: router::DatagramRouter::resume
 //! [`ReceivedDatagram`]: datagram::ReceivedDatagram
@@ -70,6 +75,7 @@
 //! [`ReflowHandoff`]: acceptance::ReflowHandoff
 //! [`InitialAcceptance`]: acceptance::InitialAcceptance
 //! [`StatelessResetDetector`]: reset::StatelessResetDetector
+//! [`StatelessResetService`]: router::StatelessResetService
 
 pub mod acceptance;
 pub mod association;

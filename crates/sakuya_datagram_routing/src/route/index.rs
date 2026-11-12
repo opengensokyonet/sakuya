@@ -13,10 +13,16 @@
 //! receiver construction runs there. Lookups copy the entry references out of
 //! the guard; removed references are carried out of the guard before they are
 //! dropped, so that no deliverer is destroyed inside the index.
+//!
+//! The index also counts its published registrations, so that the drivers of
+//! a closed endpoint can wait until none is left
+//! ([`RouteIndex::poll_empty`]).
 
 use std::fmt;
 use std::hash::Hash;
-use std::sync::{Arc, Weak};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::task::{Context, Poll, Waker};
 
 use dashmap::DashMap;
 use dashmap::mapref::entry::Entry as MapEntry;
@@ -130,6 +136,11 @@ impl<Target: ?Sized, Local> NonzeroBucket<Target, Local> {
 pub struct RouteIndex<Target: ?Sized, Local> {
     nonzero: DashMap<NonEmptyCid, NonzeroBucket<Target, Local>>,
     zero: DashMap<Local, EntryList<Target, Local>>,
+    registrations: AtomicUsize,
+    /// Woken when the last registration is revoked. The count is read and
+    /// the waker stored under this lock, and the last revocation takes the
+    /// wakers under it, so that no wake-up is lost in between.
+    empty_waiters: Mutex<SmallVec<[Waker; 2]>>,
 }
 
 /// The entries one lookup found, each with the association and
@@ -176,7 +187,58 @@ impl<Target: ?Sized, Local: Clone + Eq + Hash> RouteIndex<Target, Local> {
         Arc::new(Self {
             nonzero: DashMap::new(),
             zero: DashMap::new(),
+            registrations: AtomicUsize::new(0),
+            empty_waiters: Mutex::new(SmallVec::new()),
         })
+    }
+
+    /// The number of published registrations that were not revoked yet.
+    ///
+    /// It is an observation: registrations can be published or revoked right
+    /// after it is read.
+    pub fn registration_count(&self) -> usize {
+        self.registrations.load(Ordering::SeqCst)
+    }
+
+    /// Ready when no registration is published; otherwise arranges for the
+    /// task of `cx` to be woken when the last one is revoked.
+    ///
+    /// Becoming empty is not final: a later registration makes the index
+    /// non-empty again. A routing domain that no longer creates connections
+    /// stays empty once it is.
+    pub fn poll_empty(&self, cx: &mut Context<'_>) -> Poll<()> {
+        let mut waiters = self.lock_empty_waiters();
+        if self.registrations.load(Ordering::SeqCst) == 0 {
+            return Poll::Ready(());
+        }
+        if !waiters.iter().any(|waiter| waiter.will_wake(cx.waker())) {
+            waiters.push(cx.waker().clone());
+        }
+        Poll::Pending
+    }
+
+    /// Counts a registration about to be published.
+    fn count_registration(&self) {
+        self.registrations.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Counts a revoked registration; the last one wakes the waiters, outside
+    /// every guard of the maps.
+    fn count_revocation(&self) {
+        if self.registrations.fetch_sub(1, Ordering::SeqCst) == 1 {
+            let waiters = std::mem::take(&mut *self.lock_empty_waiters());
+            for waiter in waiters {
+                waiter.wake();
+            }
+        }
+    }
+
+    /// The lock is taken on the revocation path, which also runs while a
+    /// panic unwinds; a poisoned lock is used as it is.
+    fn lock_empty_waiters(&self) -> std::sync::MutexGuard<'_, SmallVec<[Waker; 2]>> {
+        self.empty_waiters
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Publishes a route entry for `deliverer`.
@@ -192,6 +254,7 @@ impl<Target: ?Sized, Local: Clone + Eq + Hash> RouteIndex<Target, Local> {
         deliverer: Arc<Target>,
     ) -> RouteEntryRegistration<Target, Local> {
         let entry = DatagramRouteEntry::new(matcher, deliverer);
+        self.count_registration();
         self.insert(Arc::clone(&entry));
         RouteEntryRegistration {
             index: Arc::downgrade(self),
@@ -329,6 +392,7 @@ impl<Target: ?Sized, Local: Clone + Eq + Hash> RouteIndex<Target, Local> {
         let mut publish = |list: &mut EntryList<Target, Local>| {
             let (deliverer, receiver) = prepared.take()?.into_parts();
             let entry = DatagramRouteEntry::new(matcher.clone(), deliverer);
+            self.count_registration();
             list.push(Arc::clone(&entry));
             Some((entry, receiver))
         };
@@ -414,6 +478,7 @@ impl<Target: ?Sized, Local: Eq + Hash> fmt::Debug for RouteIndex<Target, Local> 
         f.debug_struct("RouteIndex")
             .field("nonzero_keys", &self.nonzero.len())
             .field("zero_keys", &self.zero.len())
+            .field("registrations", &self.registrations.load(Ordering::SeqCst))
             .finish()
     }
 }
@@ -443,7 +508,10 @@ impl<Target: ?Sized, Local: Clone + Eq + Hash> Drop for RouteEntryRegistration<T
     fn drop(&mut self) {
         if let Some(index) = self.index.upgrade() {
             // The removed reference outlives the guard and drops here.
-            drop(index.remove(&self.entry));
+            if let Some(removed) = index.remove(&self.entry) {
+                drop(removed);
+                index.count_revocation();
+            }
         }
     }
 }

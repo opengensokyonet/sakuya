@@ -50,6 +50,28 @@ impl<Payload, Link> VersionService<Payload, Link> for () {
     fn unsupported_version(&self, _version: Version, _datagram: ReceivedDatagram<Payload, Link>) {}
 }
 
+/// Takes over short header datagrams that no route entry applies to.
+///
+/// It is the entry point for sending a stateless reset ([RFC 9000 §10.3]),
+/// unrelated to detecting one this side receives
+/// ([`StatelessResetDetector`]). Routing calls it on the caller's stack, with
+/// ownership of the datagram, when the first packet has a short header, at
+/// least one interpretation the recognizer yields reads a non-empty
+/// destination connection ID, and the lookups found no entry at all. Short
+/// headers read only with a zero-length destination connection ID, and those
+/// whose candidates all exit, are released instead.
+///
+/// [RFC 9000 §10.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-10.3
+pub trait StatelessResetService<Payload, Link> {
+    /// Takes over a short header datagram no route entry applies to.
+    fn unclaimed_short_header(&self, datagram: ReceivedDatagram<Payload, Link>);
+}
+
+/// No stateless reset service: unclaimed short header datagrams are released.
+impl<Payload, Link> StatelessResetService<Payload, Link> for () {
+    fn unclaimed_short_header(&self, _datagram: ReceivedDatagram<Payload, Link>) {}
+}
+
 pub(super) mod sealed {
     use std::sync::Arc;
 
@@ -198,9 +220,10 @@ where
 ///
 /// A router combines the [`RouteIndex`] of the domain with the components the
 /// domain is configured with: the short header [`ConnectionIdRecognizer`],
-/// a [`StatelessResetDetector`], a [`VersionService`] and the
-/// [acceptance](InitialAcceptanceMode) of new Initial receivers. The last three
-/// default to `()`, which means "not provided". `Target` is the erased
+/// a [`StatelessResetDetector`], a [`VersionService`], the
+/// [acceptance](InitialAcceptanceMode) of new Initial receivers and a
+/// [`StatelessResetService`]. The last four default to `()`, which means "not
+/// provided". `Target` is the erased
 /// deliverer type of the domain, whose handoff the acceptance mode decides.
 /// The router has no runtime, task spawner or polling loop of its own:
 /// [`route`](Self::route) and [`resume`](Self::resume) do their work on the
@@ -213,12 +236,14 @@ pub struct DatagramRouter<
     Reset = (),
     Versions = (),
     Acceptance = (),
+    ResetService = (),
 > {
     index: Arc<RouteIndex<Target, Link::Local>>,
     recognizer: Recognizer,
     reset: Reset,
     versions: Versions,
     acceptance: Acceptance,
+    reset_service: ResetService,
     datagram: PhantomData<fn(ReceivedDatagram<Payload, Link>)>,
 }
 
@@ -234,25 +259,44 @@ impl<Payload, Link: LinkIdentity, Target: ?Sized, Recognizer>
             reset: (),
             versions: (),
             acceptance: (),
+            reset_service: (),
             datagram: PhantomData,
         }
     }
 }
 
-impl<Payload, Link: LinkIdentity, Target: ?Sized, Recognizer, Reset, Versions, Acceptance>
-    DatagramRouter<Payload, Link, Target, Recognizer, Reset, Versions, Acceptance>
+impl<
+    Payload,
+    Link: LinkIdentity,
+    Target: ?Sized,
+    Recognizer,
+    Reset,
+    Versions,
+    Acceptance,
+    ResetService,
+> DatagramRouter<Payload, Link, Target, Recognizer, Reset, Versions, Acceptance, ResetService>
 {
     /// Checks every datagram with `reset` before ordinary routing.
     pub fn with_stateless_reset<Detector>(
         self,
         reset: Detector,
-    ) -> DatagramRouter<Payload, Link, Target, Recognizer, Detector, Versions, Acceptance> {
+    ) -> DatagramRouter<
+        Payload,
+        Link,
+        Target,
+        Recognizer,
+        Detector,
+        Versions,
+        Acceptance,
+        ResetService,
+    > {
         DatagramRouter {
             index: self.index,
             recognizer: self.recognizer,
             reset,
             versions: self.versions,
             acceptance: self.acceptance,
+            reset_service: self.reset_service,
             datagram: PhantomData,
         }
     }
@@ -261,13 +305,15 @@ impl<Payload, Link: LinkIdentity, Target: ?Sized, Recognizer, Reset, Versions, A
     pub fn with_version_service<Service>(
         self,
         versions: Service,
-    ) -> DatagramRouter<Payload, Link, Target, Recognizer, Reset, Service, Acceptance> {
+    ) -> DatagramRouter<Payload, Link, Target, Recognizer, Reset, Service, Acceptance, ResetService>
+    {
         DatagramRouter {
             index: self.index,
             recognizer: self.recognizer,
             reset: self.reset,
             versions,
             acceptance: self.acceptance,
+            reset_service: self.reset_service,
             datagram: PhantomData,
         }
     }
@@ -284,6 +330,7 @@ impl<Payload, Link: LinkIdentity, Target: ?Sized, Recognizer, Reset, Versions, A
         Reset,
         Versions,
         InitialAcceptance<Factory, Provider>,
+        ResetService,
     > {
         DatagramRouter {
             index: self.index,
@@ -291,6 +338,25 @@ impl<Payload, Link: LinkIdentity, Target: ?Sized, Recognizer, Reset, Versions, A
             reset: self.reset,
             versions: self.versions,
             acceptance,
+            reset_service: self.reset_service,
+            datagram: PhantomData,
+        }
+    }
+
+    /// Hands short header datagrams that no route entry applies to to
+    /// `service`.
+    pub fn with_stateless_reset_service<Service>(
+        self,
+        service: Service,
+    ) -> DatagramRouter<Payload, Link, Target, Recognizer, Reset, Versions, Acceptance, Service>
+    {
+        DatagramRouter {
+            index: self.index,
+            recognizer: self.recognizer,
+            reset: self.reset,
+            versions: self.versions,
+            acceptance: self.acceptance,
+            reset_service: service,
             datagram: PhantomData,
         }
     }
@@ -301,8 +367,8 @@ impl<Payload, Link: LinkIdentity, Target: ?Sized, Recognizer, Reset, Versions, A
     }
 }
 
-impl<Payload, Link, Target, Recognizer, Reset, Versions, Acceptance>
-    DatagramRouter<Payload, Link, Target, Recognizer, Reset, Versions, Acceptance>
+impl<Payload, Link, Target, Recognizer, Reset, Versions, Acceptance, ResetService>
+    DatagramRouter<Payload, Link, Target, Recognizer, Reset, Versions, Acceptance, ResetService>
 where
     Payload: AsRef<[u8]>,
     Link: LinkIdentity,
@@ -312,6 +378,7 @@ where
     Reset: StatelessResetDetector<Link::Local, Link::Peer>,
     Versions: VersionService<Payload, Link>,
     Acceptance: InitialAcceptanceMode<Payload, Link, Target>,
+    ResetService: StatelessResetService<Payload, Link>,
 {
     /// Routes one datagram as it arrived from its link.
     ///
@@ -328,7 +395,7 @@ where
     /// | Supported Initial otherwise | the same entries; last takes | released |
     /// | Supported 0-RTT | local and Initial associations, or the zero-length one; last takes | released |
     /// | Supported Handshake or Retry | the local association, or the zero-length one; last takes | released |
-    /// | Short header | every interpretation the recognizer yields; last takes | released |
+    /// | Short header | every interpretation the recognizer yields; last takes | released; handed to the stateless reset service instead when nothing was found and an interpretation reads a non-empty destination connection ID |
     /// | Version Negotiation | the local association of its destination connection ID, or the zero-length one; last takes | released |
     /// | Unsupported non-zero version | nothing | handed to the version service |
     ///
@@ -355,6 +422,17 @@ where
             Classification::Route(queries) => {
                 let frozen = self.freeze(&queries);
                 dispatch(datagram, DatagramFinishPolicy::LastTakes, frozen);
+            }
+            Classification::RouteShort {
+                queries,
+                nonempty_dcid,
+            } => {
+                let frozen = self.freeze(&queries);
+                if frozen.is_empty() && nonempty_dcid {
+                    self.reset_service.unclaimed_short_header(datagram);
+                } else {
+                    dispatch(datagram, DatagramFinishPolicy::LastTakes, frozen);
+                }
             }
             Classification::RouteInitial { queries, initial } => {
                 let frozen = self.freeze(&queries);
@@ -386,8 +464,17 @@ where
     }
 }
 
-impl<Payload, Link: LinkIdentity, Target: ?Sized, Recognizer, Reset, Versions, Acceptance>
-    fmt::Debug for DatagramRouter<Payload, Link, Target, Recognizer, Reset, Versions, Acceptance>
+impl<
+    Payload,
+    Link: LinkIdentity,
+    Target: ?Sized,
+    Recognizer,
+    Reset,
+    Versions,
+    Acceptance,
+    ResetService,
+> fmt::Debug
+    for DatagramRouter<Payload, Link, Target, Recognizer, Reset, Versions, Acceptance, ResetService>
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DatagramRouter")
@@ -427,6 +514,12 @@ enum Classification<Local> {
     Unsupported(Version),
     /// Look these up.
     Route(Queries<Local>),
+    /// A short header: look these up; `nonempty_dcid` when an interpretation
+    /// reads a non-empty destination connection ID.
+    RouteShort {
+        queries: Queries<Local>,
+        nonempty_dcid: bool,
+    },
     /// A supported Initial: look these up, and keep what was recognized.
     RouteInitial {
         queries: Queries<Local>,
@@ -456,6 +549,7 @@ fn classify<Local: Clone, Peer>(
     match HeaderForm::of(first) {
         HeaderForm::Short => {
             let mut queries = Queries::new();
+            let mut nonempty_dcid = false;
             for dcid_len in recognizer.short_dcid_lengths(bytes, link) {
                 let mut input = bytes;
                 let Ok(short) = input.sync_read_short_header_unpin(dcid_len) else {
@@ -468,9 +562,13 @@ fn classify<Local: Clone, Peer>(
                 if queries.iter().any(|(_, seen)| *seen == interpretation) {
                     continue;
                 }
+                nonempty_dcid |= !dcid_len.is_zero();
                 queries.extend(by_dcid(dcid, interpretation, false));
             }
-            Classification::Route(queries)
+            Classification::RouteShort {
+                queries,
+                nonempty_dcid,
+            }
         }
         HeaderForm::Long => {
             let mut input = bytes;
