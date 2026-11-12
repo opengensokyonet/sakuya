@@ -5,7 +5,7 @@ use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use sakuya_link::LinkId;
+use sakuya_link::{BindingId, LinkId};
 use sakuya_wire::connection_id::ConnectionIdLength;
 use sakuya_wire::header::codec::{ReadLongHeaderHostExt as _, ReadShortHeaderHostExt as _};
 use sakuya_wire::v1::header::{
@@ -68,7 +68,11 @@ pub(super) fn local_end() -> Local {
 /// A new link whose local end is `local`, with a peer end no other link of
 /// this function has.
 pub(super) fn link(local: &Local) -> TestLinkId {
-    LinkId::new::<TestLink>(*local, NEXT_END.fetch_add(1, Ordering::Relaxed))
+    LinkId::new::<TestLink>(
+        *local,
+        NEXT_END.fetch_add(1, Ordering::Relaxed),
+        &BindingId::new(),
+    )
 }
 
 pub(super) fn datagram(bytes: Vec<u8>, link: &TestLinkId) -> Datagram {

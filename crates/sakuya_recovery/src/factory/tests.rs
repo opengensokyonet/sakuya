@@ -10,7 +10,7 @@ use crate::{
     rtt::RttEstimator,
 };
 use core::{num::NonZeroUsize, time::Duration};
-use sakuya_link::{Link, LinkId, OutgoingDatagram, SendAcceptance};
+use sakuya_link::{BindingId, Link, LinkId, OutgoingDatagram, SendAcceptance};
 
 #[derive(Clone, Debug)]
 struct TestLink(LinkId<(), ()>);
@@ -46,7 +46,7 @@ fn ms(value: u64) -> Duration {
 }
 
 fn link() -> TestLink {
-    TestLink(LinkId::new::<()>((), ()))
+    TestLink(LinkId::new::<()>((), (), &BindingId::new()))
 }
 
 fn factory() -> NewRenoRecoveryFactory<LinkId<(), ()>> {

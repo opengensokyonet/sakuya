@@ -17,13 +17,13 @@ use sakuya_connection::{
     request::StructureRequest,
     share::SoleLogicalPath,
 };
-use sakuya_link::LinkId;
+use sakuya_link::{BindingId, LinkId};
 use sakuya_wire::parts::HList;
 
 const PATH: SoleLogicalPath = SoleLogicalPath;
 
 fn link() -> LinkId<(), ()> {
-    LinkId::new::<()>((), ())
+    LinkId::new::<()>((), (), &BindingId::new())
 }
 
 /// A connection of the parts `L` with one link path over `first`.

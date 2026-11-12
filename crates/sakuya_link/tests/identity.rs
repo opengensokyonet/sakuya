@@ -1,4 +1,4 @@
-use sakuya_link::LinkId;
+use sakuya_link::{BindingId, LinkId};
 use std::{
     cmp::Ordering,
     collections::{BTreeSet, HashSet},
@@ -20,27 +20,31 @@ const _: () = {
 
 #[test]
 fn allocations_differ() {
-    let link = Id::new::<UdpLink>(1, 2);
-    assert_ne!(link, Id::new::<UdpLink>(1, 2));
+    let link = Id::new::<UdpLink>(1, 2, &BindingId::new());
+    assert_ne!(link, Id::new::<UdpLink>(1, 2, &BindingId::new()));
     assert_eq!(link, link.clone());
 }
 
 #[test]
 fn any_type_parameter_allocates() {
     let links = [
-        Id::new::<UdpLink>(1, 2),
-        Id::new::<UdpLink>(1, 2),
-        Id::new::<TestLink>(1, 2),
-        Id::new::<str>(1, 2),
-        Id::new::<[u8]>(1, 2),
-        Id::new::<dyn Marker>(1, 2),
+        Id::new::<UdpLink>(1, 2, &BindingId::new()),
+        Id::new::<UdpLink>(1, 2, &BindingId::new()),
+        Id::new::<TestLink>(1, 2, &BindingId::new()),
+        Id::new::<str>(1, 2, &BindingId::new()),
+        Id::new::<[u8]>(1, 2, &BindingId::new()),
+        Id::new::<dyn Marker>(1, 2, &BindingId::new()),
     ];
     assert_eq!(links.iter().collect::<HashSet<_>>().len(), links.len());
 }
 
 #[test]
 fn ends_are_kept_and_cloned() {
-    let link = LinkId::new::<UdpLink>(String::from("local"), String::from("peer"));
+    let link = LinkId::new::<UdpLink>(
+        String::from("local"),
+        String::from("peer"),
+        &BindingId::new(),
+    );
     let cloned = link.clone();
     assert_eq!(cloned.local, "local");
     assert_eq!(cloned.peer, "peer");
@@ -49,8 +53,8 @@ fn ends_are_kept_and_cloned() {
 
 #[test]
 fn mapped_ends_keep_the_identity() {
-    let first = Id::new::<UdpLink>(1, 2);
-    let second = Id::new::<UdpLink>(1, 2);
+    let first = Id::new::<UdpLink>(1, 2, &BindingId::new());
+    let second = Id::new::<UdpLink>(1, 2, &BindingId::new());
     let into_sum = |id: Id| id.map(Ok::<u16, ()>, Err::<(), u16>);
     let (first_sum, second_sum) = (into_sum(first.clone()), into_sum(second.clone()));
     assert_eq!(first_sum.local, Ok(1));
@@ -84,8 +88,8 @@ fn assert_consistent<T: Ord + std::hash::Hash>(ids: &[T]) {
 fn eq_hash_and_ord_agree() {
     let mut links = Vec::new();
     for end in 0..8 {
-        links.push(Id::new::<UdpLink>(end, 0));
-        links.push(Id::new::<TestLink>(0, 0));
+        links.push(Id::new::<UdpLink>(end, 0, &BindingId::new()));
+        links.push(Id::new::<TestLink>(0, 0, &BindingId::new()));
     }
     links.extend(links.clone());
     assert_consistent(&links);
@@ -103,7 +107,9 @@ fn concurrent_allocations_differ() {
             .map(|_| {
                 scope.spawn(|| {
                     start.wait();
-                    (0..PER_THREAD).map(|_| Id::new::<UdpLink>(1, 2)).collect()
+                    (0..PER_THREAD)
+                        .map(|_| Id::new::<UdpLink>(1, 2, &BindingId::new()))
+                        .collect()
                 })
             })
             .collect();
@@ -120,7 +126,7 @@ fn concurrent_allocations_differ() {
 
 #[test]
 fn debug_shows_only_the_identity() {
-    let link = LinkId::new::<UdpLink>("secret local", "secret peer");
+    let link = LinkId::new::<UdpLink>("secret local", "secret peer", &BindingId::new());
     let link = format!("{link:?}");
     assert!(link.starts_with("LinkId("), "{link}");
     assert!(link.contains("UniqueId("), "{link}");

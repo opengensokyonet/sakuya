@@ -6,7 +6,7 @@ use core::{
     num::{NonZeroU8, NonZeroU32, NonZeroUsize},
     time::Duration,
 };
-use sakuya_link::{Link, LinkId, OutgoingDatagram, SendAcceptance};
+use sakuya_link::{BindingId, Link, LinkId, OutgoingDatagram, SendAcceptance};
 use std::{cell::Cell, rc::Rc};
 
 /// A link whose shared conclusion follows the rules of the two records.
@@ -19,7 +19,7 @@ struct SharingLink {
 impl SharingLink {
     fn new() -> Self {
         Self {
-            id: LinkId::new::<()>((), ()),
+            id: LinkId::new::<()>((), (), &BindingId::new()),
             shared: Rc::new(Cell::new(1200)),
         }
     }

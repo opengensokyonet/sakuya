@@ -45,7 +45,7 @@ use sakuya_connection::{
         role::LinkPathRole,
     },
 };
-use sakuya_link::LinkId;
+use sakuya_link::{BindingId, LinkId};
 use sakuya_packet_protection::backend::ring::RingBackend;
 use sakuya_recovery::{
     congestion::CongestionController,
@@ -96,7 +96,7 @@ thread_local! {
 type Parts = HList![v1::Part, probe::Part];
 
 fn link() -> LinkId<(), ()> {
-    LinkId::new::<()>((), ())
+    LinkId::new::<()>((), (), &BindingId::new())
 }
 
 fn reset() {
