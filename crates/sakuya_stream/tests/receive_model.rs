@@ -122,7 +122,7 @@ mod dialect {
     use sakuya_stream::connection_receive_flow::ConnectionReceiveFlowController;
     use sakuya_stream::receive::ResetStreamFrame;
     use sakuya_stream::receive::termination::TerminationEvent;
-    use sakuya_stream::reset_stream_at::{
+    use sakuya_stream::reset_stream_at::receive::{
         OnResetStreamAtError, OnResetStreamError as ResetAtOnResetStreamError, RemoteResetAt,
         RemoteResetAtChange, ResetStreamAtFrame,
     };
