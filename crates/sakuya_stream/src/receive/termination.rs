@@ -53,7 +53,7 @@ use core::convert::Infallible;
 use core::fmt;
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
 use sakuya_wire::var_int::VarInt;
-use snafu::{Report, ResultExt, Snafu, ensure};
+use snafu::{Report, Snafu, ensure};
 
 /// The events a receive termination policy observes.
 ///
@@ -375,7 +375,14 @@ enum PolicyViolationError<X: fmt::Debug> {
     Stop {
         code: ApplicationErrorCode,
         trigger: TerminationEvent<X>,
-        source: StopError,
+        source: StopError<Infallible>,
+    },
+    #[snafu(display(
+        "receive termination policy violated its contract: STOP request with code {code} on {trigger:?} after the connection closed"
+    ))]
+    StopAfterConnectionClosed {
+        code: ApplicationErrorCode,
+        trigger: TerminationEvent<X>,
     },
 }
 
@@ -383,7 +390,7 @@ enum PolicyViolationError<X: fmt::Debug> {
 /// [policy contract](self#contract).
 type Checked<T, X> = Result<T, PolicyViolationError<X>>;
 
-impl<C, F> StreamReceiver<C, F>
+impl<C, Lc, F> StreamReceiver<C, Lc, F>
 where
     C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy<F>,
     F: RemoteResetFacts,
@@ -443,10 +450,21 @@ where
         } = decision;
         let action = self.check_action(action, trigger)?;
         let install_stop = match stop {
-            Some(code) => self
-                .check_stop(code)
-                .context(policy_violation::StopSnafu { code, trigger })?
-                .then_some(code),
+            Some(code) => match self.check_stop(code) {
+                Ok(install) => install.then_some(code),
+                Err(error) => {
+                    return Err(match error.without_closed_connection() {
+                        Ok(source) => PolicyViolationError::Stop {
+                            code,
+                            trigger,
+                            source,
+                        },
+                        Err(_closed) => {
+                            PolicyViolationError::StopAfterConnectionClosed { code, trigger }
+                        }
+                    });
+                }
+            },
             None => None,
         };
         Ok(DecisionPlan {

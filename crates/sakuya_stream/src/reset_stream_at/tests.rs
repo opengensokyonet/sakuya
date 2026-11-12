@@ -5,7 +5,9 @@ use super::{
     OnResetStreamAtError, OnResetStreamError as ResetAtOnResetStreamError, RemoteResetAt,
     RemoteResetAtChange, ResetStreamAtFrame,
 };
-use crate::connection::{CloseReason, ConnectionClosedError, ImmediateClose};
+use crate::connection::{
+    CloseReason, ConnectionClosedError, ImmediateClose, TransportImmediateClose,
+};
 use crate::connection_receive_flow::{ConnectionReceiveFlowController, RecordUsageError};
 use crate::receive::flow_control::{
     AdvertisementIntent, ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView,
@@ -23,6 +25,7 @@ use crate::receive::{BoundaryMode, ResetStreamFrame, StreamFrame, StreamReceiver
 use crate::receive_buffer::{
     StreamDataInput, StreamReceiveBuffer, fragmented::FragmentedStreamReceiveBuffer,
 };
+use crate::send::test_support::TestCloseCause;
 use crate::stream_end::{FinalSizeChangeError, ResetCodeChangeError};
 use bytes::{BufMut, Bytes};
 use core::fmt::Debug;
@@ -41,12 +44,12 @@ type View = TerminationView<RemoteResetAt>;
 const LOWERED: Event = TerminationEvent::ResetChanged(RemoteResetAtChange::ReliablePrefixLowered);
 
 /// The reason the tests close connections for.
-fn close_reason() -> CloseReason {
-    CloseReason::Peer(ImmediateClose::Transport {
+fn close_reason() -> CloseReason<TestCloseCause> {
+    CloseReason::Peer(ImmediateClose::Transport(TransportImmediateClose {
         code: TransportErrorCode::PROTOCOL_VIOLATION,
         frame_type: Some(VarInt::from(0x08u8)),
         reason_phrase: Bytes::from_static(b"bad stream"),
-    })
+    }))
 }
 
 fn v(value: u32) -> VarInt {
@@ -229,10 +232,11 @@ impl<T: ReceiveTerminationPolicy<RemoteResetAt>> ReceiveTerminationPolicy<Remote
     }
 }
 
-type Receiver<T> = StreamReceiver<Parts<T>, RemoteResetAt>;
+type Receiver<T> = StreamReceiver<Parts<T>, TestCloseCause, RemoteResetAt>;
 
 /// The result of one chunk read.
-type ChunkRead<R = &'static str> = Result<ReadOutcome<Bytes>, ReadError<R, RemoteResetAt>>;
+type ChunkRead<R = &'static str> =
+    Result<ReadOutcome<Bytes>, ReadError<R, TestCloseCause, RemoteResetAt>>;
 
 /// A receiver with stream limit `stream_limit` on a connection with limit
 /// `connection_limit`.

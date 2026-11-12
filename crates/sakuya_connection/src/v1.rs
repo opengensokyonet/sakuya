@@ -4,17 +4,22 @@
 //! [`Part`] is version 1 as one part of a composition. Its shares put the
 //! keys of each encryption level, the transport parameters, the idle
 //! timeout and what the connection was made with for its first logical
-//! link in the connection node, with the recovery factory; the clone of the
+//! link in the connection node, with the recovery factory and the record of
+//! why the connection closed ([`close`]); the clone of the
 //! link, the facts about it and the anti-amplification limit in the entry of
 //! each logical link; the role in each link path; and in each link path's
 //! recovery layer, what the factory makes for it with the state beside them,
 //! its loss detection state for each packet number space and its probe
 //! timeout. Each logical path keeps, for each packet number space, its
-//! packet number state, its receive journals and its ACK obligation. The
-//! calls and the send journals are not here yet.
+//! packet number state, its receive journals and its ACK obligation. Once
+//! a reason for closing is written, the link paths close, their recovery
+//! layers and the established layer end, and the connection ends with its
+//! last link path. The calls and the send journals are not here yet.
 
 pub mod amplification;
+pub mod close;
 pub mod confirmation;
+pub mod error;
 pub mod idle;
 pub mod keys;
 pub mod link;
@@ -47,8 +52,9 @@ use sakuya_wire::{
 
 use crate::{
     call::CallBundle,
-    clock::{ConnectionChoices, InstantOf},
+    clock::{CheckedAdd, ConnectionChoices, InstantOf},
     component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
+    error::{ConnectionErrorOf, ConnectionErrorPart, ConnectionErrorsOf},
     layer::{self, NodeKey},
     others::OtherNodes,
     request::StructureRequest,
@@ -61,6 +67,7 @@ use crate::{
 
 use self::{
     amplification::{AddressValidation, AntiAmplification, AntiAmplificationFactor},
+    close::{ApplicationClose, CloseReasonRecord, LocalCloseCause},
     confirmation::HandshakeConfirmation,
     idle::IdleTimeout,
     keys::{DirectionKeys, HandshakeKeys, InitialKeys, LevelKeys, OneRttKeys},
@@ -84,6 +91,8 @@ use sakuya_recovery::{
     receive_journals::{MaxAckRanges, ReceiveJournals},
     rtt::RttEstimator,
 };
+use sakuya_stream::connection::CloseReason;
+use sakuya_tls::engine::HandshakeError;
 
 /// QUIC version 1, one part of a composition.
 #[derive(Debug)]
@@ -102,6 +111,11 @@ impl ParametersPart<TransportParameterSpace> for Part {
         <sakuya_wire::v1::Part as ParametersPart<TransportParameterSpace>>::Parameters;
 }
 
+/// Version 1 finds its own [`ConnectionError`](error::ConnectionError).
+impl ConnectionErrorPart for Part {
+    type ConnectionError = error::ConnectionError;
+}
+
 /// What a composition chooses for version 1.
 pub trait Choices: ConnectionChoices {
     /// The cryptographic backend that derives the packet protection keys.
@@ -117,7 +131,24 @@ pub trait Choices: ConnectionChoices {
     /// What decides when an ACK frame is due, one for each packet number
     /// space of a logical path.
     type AckObligation: AckObligation<InstantOf<Self>> + 'static;
+    /// The application's own error type for closing the connection.
+    type ApplicationError: ApplicationClose + 'static;
+    /// How the handshake engine of this side fails with an alert: the
+    /// failure that [`HandshakeError`] holds for it.
+    ///
+    /// This item is provisional: it is to follow from the handshake engine
+    /// of the side.
+    type HandshakeFailure: 'static;
 }
+
+/// This endpoint's reason for closing a connection of the choices `T` and
+/// the list of parts `L`: the connection's error, the handshake's error or
+/// the application's error.
+pub type CloseCauseOf<T, L> = LocalCloseCause<
+    ConnectionErrorOf<L>,
+    HandshakeError<<T as Choices>::HandshakeFailure, ConnectionErrorOf<L>>,
+    <T as Choices>::ApplicationError,
+>;
 
 /// What differs between the two sides of a connection: one method for each
 /// difference.
@@ -207,7 +238,7 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
     pub max_ack_ranges: MaxAckRanges,
 }
 
-impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys>
+impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + ConnectionErrorsOf>
     LayerShare<T, L, layer::Connection> for Part
 {
     type Data = HList![
@@ -223,6 +254,7 @@ impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys>
         LossThresholds,
         MaxAckRanges,
         HandshakeConfirmation,
+        CloseReasonRecord<CloseCauseOf<T, L>>,
     ];
     type Calls = HNil;
     type Args = ConnectionArgs<T, L>;
@@ -289,6 +321,41 @@ fn max_idle_timeout<S: Selector<Option<MaxIdleTimeout>, I>, I>(slots: &S) -> Opt
     Some(Duration::from_millis(millis)).filter(|timeout| !timeout.is_zero())
 }
 
+/// The current probe timeout (RFC 9002 §6.2.1): the largest among the link
+/// paths with a recovery layer, without backoff, as in the Application
+/// Data space, with the peer's maximum ACK delay or the default before its
+/// transport parameters are known; `None` when no link path has a recovery
+/// layer. The idle timeout and the closing and draining periods are
+/// measured in it.
+fn current_probe_timeout<'v, 's, T: Choices, L, B: CallBundle, Ima, Ir>(
+    peer: &PeerTransportParameters<TransportParameterSlots<L>>,
+    thresholds: &LossThresholds,
+    others: &'s mut OtherNodes<'v, T, L, B>,
+) -> Option<Duration>
+where
+    for<'x> L: LineageLists<'x, T>,
+    L: ParametersOf<TransportParameterSpace>,
+    TransportParameterSlots<L>: Selector<Option<MaxAckDelay>, Ima>,
+    NodeData<T, L, layer::Recovery>: FlatMut<'s>,
+    <NodeData<T, L, layer::Recovery> as FlatMut<'s>>::Out: GetAt<RttOf<T, L>, Ir>,
+{
+    let peer_max_ack_delay = peer_max_ack_delay::<L, Ima>(peer).unwrap_or(DEFAULT_MAX_ACK_DELAY);
+    let granularity = thresholds.granularity();
+    let mut pto = None;
+    others.each_recovery_read::<RttOf<T, L>, Ir>(|_, rtt| {
+        let Some(rtt) = rtt else { return };
+        let this = probe_timeout(
+            &rtt.estimate(),
+            granularity,
+            PacketNumberSpaceKind::ApplicationData,
+            peer_max_ack_delay,
+            0,
+        );
+        pto = Some(pto.map_or(this, |pto: Duration| pto.max(this)));
+    });
+    pto
+}
+
 // ---- the connection node ----
 
 /// The Initial keys are derived when the connection is made, so the level
@@ -311,10 +378,6 @@ where
         })
     }
 }
-impl<T: Choices, L> DataComponent<T, L, layer::Connection, ()> for InitialKeys<T::Crypto> where
-    for<'v> L: LineageLists<'v, T>
-{
-}
 
 macro_rules! not_yet {
     ($($ty:ident),*) => {$(
@@ -330,13 +393,51 @@ macro_rules! not_yet {
                 $ty::NotYet
             }
         }
-        impl<T: Choices, L> DataComponent<T, L, layer::Connection, ()> for $ty<T::Crypto> where
-            for<'v> L: LineageLists<'v, T>
-        {
-        }
     )*};
 }
 not_yet!(HandshakeKeys, OneRttKeys);
+
+macro_rules! discarded_when_draining {
+    ($($ty:ident),*) => {$(
+        /// The keys of a level read the roles of the link paths: once every
+        /// link path is `Draining`, nothing is sent or processed any more,
+        /// and the keys are discarded (RFC 9000 §10.2.2).
+        ///
+        /// Not here yet: keeping only the receiving half while closing, once
+        /// every closing link path has sealed its close packet.
+        impl<T: Choices, L, I, J> DataComponent<T, L, layer::Connection, (I, J)> for $ty<T::Crypto>
+        where
+            for<'v> L: LineageLists<'v, T>,
+            for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<$ty<T::Crypto>, I>,
+            for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+            for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+                GetAt<LinkPathRole<InstantOf<T>>, J>,
+        {
+            fn reads(reads: &mut ReadSet) {
+                reads.add::<LinkPathRole<InstantOf<T>>>();
+            }
+            fn reread<'v, B: CallBundle>(
+                mut lineage: LineageOf<'v, T, L, layer::Connection>,
+                others: &mut OtherNodes<'v, T, L, B>,
+                _: InstantOf<T>,
+            ) -> Option<RequestOf<T, L>> {
+                if matches!(lineage.get::<$ty<T::Crypto>, I>(), $ty::Discarded) {
+                    return None;
+                }
+                let (mut any, mut all_draining) = (false, true);
+                others.each_link_path_read::<LinkPathRole<InstantOf<T>>, J>(|_, role| {
+                    any = true;
+                    all_draining &= matches!(role, LinkPathRole::Draining(_));
+                });
+                if any && all_draining {
+                    lineage.get_mut::<$ty<T::Crypto>, I>().discard();
+                }
+                None
+            }
+        }
+    )*};
+}
+discarded_when_draining!(InitialKeys, HandshakeKeys, OneRttKeys);
 
 impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for AntiAmplificationFactor
 where
@@ -396,6 +497,58 @@ impl<T: Choices, L> DataComponent<T, L, layer::Connection, ()> for HandshakeConf
 {
 }
 
+/// No connection starts closing.
+impl<T: Choices, L: ConnectionErrorsOf> Build<T, L, layer::Connection, ()>
+    for CloseReasonRecord<CloseCauseOf<T, L>>
+where
+    for<'v> L: LineageLists<'v, T>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        _: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        CloseReasonRecord::new()
+    }
+}
+
+/// The record reads itself, which whoever finds a reason for closing
+/// writes, and the roles of the link paths. Once it is written, it asks for
+/// the established layer to end; once it is written and no link path is
+/// left, for the connection to end: each link path ends when its closing or
+/// draining period does. An end without such a period, such as the idle
+/// timeout's, asks for the connection to end where it writes the reason.
+impl<T: Choices, L: ConnectionErrorsOf, I> DataComponent<T, L, layer::Connection, (I,)>
+    for CloseReasonRecord<CloseCauseOf<T, L>>
+where
+    for<'v> L: LineageLists<'v, T>,
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, I>,
+{
+    fn reads(reads: &mut ReadSet) {
+        reads
+            .add::<CloseReasonRecord<CloseCauseOf<T, L>>>()
+            .add::<LinkPathRole<InstantOf<T>>>();
+    }
+    fn reread<'v, B: CallBundle>(
+        lineage: LineageOf<'v, T, L, layer::Connection>,
+        others: &mut OtherNodes<'v, T, L, B>,
+        _: InstantOf<T>,
+    ) -> Option<RequestOf<T, L>> {
+        if !lineage
+            .get::<CloseReasonRecord<CloseCauseOf<T, L>>, I>()
+            .is_written()
+        {
+            return None;
+        }
+        if others.link_path_keys().next().is_none() {
+            Some(StructureRequest::EndConnection)
+        } else if others.has_established() {
+            Some(StructureRequest::EndEstablished)
+        } else {
+            None
+        }
+    }
+}
+
 impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for FirstLinkStart
 where
     for<'v> L: LineageLists<'v, T>,
@@ -436,21 +589,21 @@ where
 /// is three probe timeouts: the largest among the link paths with a
 /// recovery layer, without backoff, as in the Application Data space. When
 /// it expires the connection ends at once, without a closing period (RFC
-/// 9000 §10.1).
-///
-/// Not here yet: the record of why the connection closed.
-impl<T: Choices, L, Ii, Il, Ip, Is, Ima, Ith, Ir>
-    DataComponent<T, L, layer::Connection, ((Ii, Il, Ip, Is), (Ima, Ith, Ir))>
+/// 9000 §10.1), and the reason goes into the record of why the connection
+/// closed; a reason already there stays.
+impl<T: Choices, L, Ii, Il, Ip, Is, Ima, Ith, Ir, Ic>
+    DataComponent<T, L, layer::Connection, ((Ii, Il, Ip, Is), (Ima, Ith, Ir, Ic))>
     for IdleTimeout<InstantOf<T>>
 where
     for<'v> L: LineageLists<'v, T>,
-    L: ParametersOf<TransportParameterSpace>,
+    L: ParametersOf<TransportParameterSpace> + ConnectionErrorsOf,
     TransportParameterSlots<L>:
         Selector<Option<MaxIdleTimeout>, Is> + Selector<Option<MaxAckDelay>, Ima>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<IdleTimeout<InstantOf<T>>, Ii>
         + GetAt<LocalTransportParameters<TransportParameterSlots>, Il>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>
-        + GetAt<LossThresholds, Ith>,
+        + GetAt<LossThresholds, Ith>
+        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>,
     for<'s> NodeData<T, L, layer::Recovery>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Recovery> as FlatMut<'s>>::Out: GetAt<RttOf<T, L>, Ir>,
 {
@@ -465,10 +618,13 @@ where
         lineage.get::<IdleTimeout<InstantOf<T>>, Ii>().deadline()
     }
     fn expire<'v, B: CallBundle>(
-        _: LineageOf<'v, T, L, layer::Connection>,
+        mut lineage: LineageOf<'v, T, L, layer::Connection>,
         _: &mut OtherNodes<'v, T, L, B>,
         _: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
+        lineage
+            .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
+            .record(CloseReason::IdleTimeout);
         Some(StructureRequest::EndConnection)
     }
     fn reread<'v, B: CallBundle>(
@@ -476,23 +632,11 @@ where
         others: &mut OtherNodes<'v, T, L, B>,
         _: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
-        let peer_max_ack_delay = peer_max_ack_delay::<L, Ima>(
+        let pto = current_probe_timeout::<T, L, B, Ima, Ir>(
             lineage.get::<PeerTransportParameters<TransportParameterSlots<L>>, Ip>(),
-        )
-        .unwrap_or(DEFAULT_MAX_ACK_DELAY);
-        let granularity = lineage.get::<LossThresholds, Ith>().granularity();
-        let mut pto = None;
-        others.each_recovery_read::<RttOf<T, L>, Ir>(|_, rtt| {
-            let Some(rtt) = rtt else { return };
-            let this = probe_timeout(
-                &rtt.estimate(),
-                granularity,
-                PacketNumberSpaceKind::ApplicationData,
-                peer_max_ack_delay,
-                0,
-            );
-            pto = Some(pto.map_or(this, |pto: Duration| pto.max(this)));
-        });
+            lineage.get::<LossThresholds, Ith>(),
+            others,
+        );
         let local = lineage.get::<LocalTransportParameters<TransportParameterSlots>, Il>();
         let local = local
             .sent()
@@ -653,22 +797,40 @@ where
 }
 
 /// The role's end time is its deadline: when it comes the link path ends.
-/// It reads itself, which other components change, and asks for the
-/// recovery layer to follow it: built when the link path is `Active`
-/// without one, ended when the role has none. A link path built `Active`,
-/// the connection's first, so gets its layer as soon as it is built.
+/// It reads itself, which other components change, and the record of why
+/// the connection closed, and asks for the recovery layer to follow the
+/// role: built when the link path is `Active` without one, ended when the
+/// role has none. A link path built `Active`, the connection's first, so
+/// gets its layer as soon as it is built.
 ///
-/// Not here yet: entering `Closing` and `Draining`, which read the record
-/// of why the connection closed; and the initial RTT of a later link path
-/// whose new address was validated, which comes with path validation. It
-/// asks for the layer of an `Active` link path without an initial RTT.
-impl<T: Choices, L, I> DataComponent<T, L, layer::LinkPath, I> for LinkPathRole<InstantOf<T>>
+/// Once the record is written, a candidate ends, and an `Active` or
+/// `Settling` link path enters `Closing` for three times the current probe
+/// timeout (RFC 9000 §10.2), measured when it enters; a link path already
+/// `Closing` or `Draining` keeps its role. Whoever finds that the peer
+/// closed puts the link paths into `Draining` itself.
+///
+/// Not here yet: the initial RTT of a later link path whose new address
+/// was validated, which comes with path validation. It asks for the layer
+/// of an `Active` link path without an initial RTT.
+impl<T: Choices, L, I, Ic, Ip, Ith, Iid, Ima, Ir>
+    DataComponent<T, L, layer::LinkPath, ((I, Ic, Ip, Ith, Iid), (Ima, Ir))>
+    for LinkPathRole<InstantOf<T>>
 where
     for<'v> L: LineageLists<'v, T>,
-    for<'v> <L as LineageLists<'v, T>>::LinkPath: GetAt<LinkPathRole<InstantOf<T>>, I>,
+    L: ParametersOf<TransportParameterSpace> + ConnectionErrorsOf,
+    TransportParameterSlots<L>: Selector<Option<MaxAckDelay>, Ima>,
+    for<'v> <L as LineageLists<'v, T>>::LinkPath: GetAt<LinkPathRole<InstantOf<T>>, I>
+        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
+        + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>
+        + GetAt<LossThresholds, Ith>
+        + GetAt<IdleTimeout<InstantOf<T>>, Iid>,
+    for<'s> NodeData<T, L, layer::Recovery>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::Recovery> as FlatMut<'s>>::Out: GetAt<RttOf<T, L>, Ir>,
 {
     fn reads(reads: &mut ReadSet) {
-        reads.add::<LinkPathRole<InstantOf<T>>>();
+        reads
+            .add::<LinkPathRole<InstantOf<T>>>()
+            .add::<CloseReasonRecord<CloseCauseOf<T, L>>>();
     }
     fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::LinkPath>) -> Option<InstantOf<T>> {
         lineage.get::<LinkPathRole<InstantOf<T>>, I>().end_time()
@@ -684,10 +846,44 @@ where
         Some(StructureRequest::EndLinkPath { path, link })
     }
     fn reread<'v, B: CallBundle>(
-        lineage: LineageOf<'v, T, L, layer::LinkPath>,
+        mut lineage: LineageOf<'v, T, L, layer::LinkPath>,
         others: &mut OtherNodes<'v, T, L, B>,
-        _: InstantOf<T>,
+        now: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
+        let closing = lineage
+            .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
+            .is_written();
+        if closing {
+            match *lineage.get::<LinkPathRole<InstantOf<T>>, I>() {
+                LinkPathRole::Candidate => {
+                    let NodeKey::LinkPath(path, link) = others.here().clone() else {
+                        unreachable!("a link path's lend carries its key")
+                    };
+                    return Some(StructureRequest::EndLinkPath { path, link });
+                }
+                LinkPathRole::Active | LinkPathRole::Settling(_) => {
+                    let pto = current_probe_timeout::<T, L, B, Ima, Ir>(
+                        lineage.get::<PeerTransportParameters<TransportParameterSlots<L>>, Ip>(),
+                        lineage.get::<LossThresholds, Ith>(),
+                        others,
+                    )
+                    // with no recovery layer, the last one the idle timeout took
+                    .unwrap_or_else(|| {
+                        lineage
+                            .get::<IdleTimeout<InstantOf<T>>, Iid>()
+                            .probe_timeout()
+                    });
+                    // an end beyond what the instant type represents is
+                    // none: the closing period is cut short rather than
+                    // kept forever
+                    let end = now.checked_add(pto.saturating_mul(3)).unwrap_or(now);
+                    lineage
+                        .get_mut::<LinkPathRole<InstantOf<T>>, I>()
+                        .close(end);
+                }
+                LinkPathRole::Closing(_) | LinkPathRole::Draining(_) => {}
+            }
+        }
         let role = lineage.get::<LinkPathRole<InstantOf<T>>, I>();
         let wanted = *role == LinkPathRole::Active;
         let NodeKey::LinkPath(path, link) = others.here().clone() else {

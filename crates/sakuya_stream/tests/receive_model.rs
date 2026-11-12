@@ -15,7 +15,9 @@
 
 use bytes::{BufMut, Bytes, BytesMut};
 use proptest::prelude::*;
-use sakuya_stream::connection::{CloseReason, ConnectionClosedError, ImmediateClose};
+use sakuya_stream::connection::{
+    CloseReason, ConnectionClosedError, ImmediateClose, TransportImmediateClose,
+};
 use sakuya_stream::connection_receive_flow::{ConnectionReceiveFlowController, RecordUsageError};
 use sakuya_stream::receive::flow_control::{
     AdvertisementIntent, ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView,
@@ -47,7 +49,7 @@ type Facts = dialect::Facts;
 type Event = TerminationEvent<<Facts as RemoteResetFacts>::Change>;
 
 /// The receiver under test.
-type Receiver = StreamReceiver<Parts, Facts>;
+type Receiver = StreamReceiver<Parts, TestCloseCause, Facts>;
 
 /// The receiver of RFC 9000 resets: a reset abandons all data, and a later
 /// reset changes nothing.
@@ -645,7 +647,7 @@ impl Settled {
 #[derive(Clone, Debug, PartialEq)]
 enum Expected {
     ReaderDropped,
-    ConnectionClosed(ConnectionClosedError),
+    ConnectionClosed(ConnectionClosedError<TestCloseCause>),
     Reset {
         reset: Facts,
         complete: bool,
@@ -667,7 +669,7 @@ enum LocalCause {
 }
 
 /// The model's view of a read error of the stream receiver.
-fn observed(error: ReadError<u32, Facts>) -> Expected {
+fn observed(error: ReadError<u32, TestCloseCause, Facts>) -> Expected {
     match error {
         ReadError::ReaderDropped => Expected::ReaderDropped,
         ReadError::ConnectionClosed { source } => Expected::ConnectionClosed(source),
@@ -1157,7 +1159,7 @@ fn read_chunk(
     stream: usize,
     model: &mut Model,
     receiver: &mut Receiver,
-) -> Result<ReadOutcome<Bytes>, ReadError<u32, Facts>> {
+) -> Result<ReadOutcome<Bytes>, ReadError<u32, TestCloseCause, Facts>> {
     let actual = receiver.read_chunk();
     let expected = match model.settled() {
         Some(settled) => settled.map(Settled::outcome),
@@ -1189,7 +1191,7 @@ fn read_into(
     room: usize,
     model: &mut Model,
     receiver: &mut Receiver,
-) -> Result<ReadOutcome<usize>, ReadError<u32, Facts>> {
+) -> Result<ReadOutcome<usize>, ReadError<u32, TestCloseCause, Facts>> {
     let mut target = BytesMut::with_capacity(room).limit(room);
     let actual = receiver
         .read_into(&mut target)
@@ -1634,10 +1636,22 @@ proptest! {
 }
 
 /// The reason the tests close connections for.
-fn close_reason() -> CloseReason {
-    CloseReason::Peer(ImmediateClose::Transport {
+fn close_reason() -> CloseReason<TestCloseCause> {
+    CloseReason::Peer(ImmediateClose::Transport(TransportImmediateClose {
         code: TransportErrorCode::PROTOCOL_VIOLATION,
         frame_type: Some(VarInt::from(0x08u8)),
         reason_phrase: Bytes::from_static(b"bad stream"),
-    })
+    }))
 }
+
+/// The type of the local close cause of the test connections.
+#[derive(Debug, PartialEq, Eq)]
+struct TestCloseCause(&'static str);
+
+impl core::fmt::Display for TestCloseCause {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl core::error::Error for TestCloseCause {}

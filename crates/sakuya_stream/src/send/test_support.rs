@@ -13,7 +13,7 @@ use super::termination::{
 };
 use super::write::{WriteOutcome, WriteReport};
 use super::{StreamEndFrame, StreamSender};
-use crate::connection::{CloseReason, ImmediateClose};
+use crate::connection::CloseReason;
 use crate::connection_send_credit::{
     AtomicConnectionCreditReservation, AtomicConnectionSendFlowController,
 };
@@ -41,12 +41,21 @@ pub(crate) const CODE: ApplicationErrorCode = ApplicationErrorCode::new(VarInt::
 pub(crate) const OTHER_CODE: ApplicationErrorCode = ApplicationErrorCode::new(VarInt::from_u32(9));
 
 /// The reason the tests close connections for.
-pub(crate) fn close_reason() -> CloseReason {
-    CloseReason::Local(ImmediateClose::Application {
-        code: ApplicationErrorCode::new(VarInt::from_u32(9)),
-        reason_phrase: Bytes::from_static(b"done"),
-    })
+pub(crate) fn close_reason() -> CloseReason<TestCloseCause> {
+    CloseReason::Local(Arc::new(TestCloseCause("done")))
 }
+
+/// The local close cause of the test connections.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct TestCloseCause(pub &'static str);
+
+impl core::fmt::Display for TestCloseCause {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl core::error::Error for TestCloseCause {}
 
 /// A flow-control policy that records what it is told, caps grants at
 /// `grant_cap` and otherwise behaves like the default policy.
@@ -177,6 +186,7 @@ pub(crate) type TestSender<S, T> = StreamSender<
         ScriptedTermination<S, T>,
     >,
     Connection,
+    TestCloseCause,
     T,
 >;
 
@@ -245,7 +255,7 @@ where
 pub(crate) fn default_sender<T>(
     connection: &Arc<Connection>,
     peer_stream_limit: u32,
-) -> StreamSender<DefaultSendComposition, Connection, T>
+) -> StreamSender<DefaultSendComposition, Connection, TestCloseCause, T>
 where
     T: LocalResetTarget,
     DefaultSendTerminationPolicy: SendTerminationPolicy<T>,
@@ -269,20 +279,21 @@ pub(crate) fn written(new_bytes: u32) -> WriteOutcome {
 }
 
 /// Writes `length` bytes that must all be accepted.
-pub(crate) fn write_all<C, T>(sender: &mut StreamSender<C, Connection, T>, length: u32)
+pub(crate) fn write_all<C, Lc, T>(sender: &mut StreamSender<C, Connection, Lc, T>, length: u32)
 where
     T: LocalResetTarget,
     C: StreamSendBuffer<Reservation = Reservation>
         + SendFlowControlPolicy<T>
         + SendTerminationPolicy<T>,
     C::WriteLimitReason: core::fmt::Debug,
+    Lc: core::fmt::Debug,
 {
     let mut input = source(length as usize);
     assert_eq!(sender.write(&mut input).unwrap(), written(length));
     assert!(!input.has_remaining());
 }
 
-pub(crate) fn expose<C, T>(sender: &mut StreamSender<C, Connection, T>, usage_end: u32)
+pub(crate) fn expose<C, Lc, T>(sender: &mut StreamSender<C, Connection, Lc, T>, usage_end: u32)
 where
     T: LocalResetTarget,
     C: StreamSendBuffer<Reservation = Reservation>
@@ -294,8 +305,8 @@ where
 
 /// Prepares the end frame that is due and exposes it, as a packet writer
 /// does after writing the frame; returns the frame.
-pub(crate) fn send_end<C, T>(
-    sender: &mut StreamSender<C, Connection, T>,
+pub(crate) fn send_end<C, Lc, T>(
+    sender: &mut StreamSender<C, Connection, Lc, T>,
 ) -> StreamEndFrame<T::Frame>
 where
     T: LocalResetTarget,
@@ -310,8 +321,8 @@ where
 }
 
 /// The end frame the guard offers, if any, without exposing it.
-pub(crate) fn due_end_frame<C, T>(
-    sender: &mut StreamSender<C, Connection, T>,
+pub(crate) fn due_end_frame<C, Lc, T>(
+    sender: &mut StreamSender<C, Connection, Lc, T>,
 ) -> Option<StreamEndFrame<T::Frame>>
 where
     T: LocalResetTarget,

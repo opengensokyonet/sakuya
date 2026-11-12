@@ -245,14 +245,14 @@ enum BufferPhase<R, X> {
 /// meanwhile. `Closed` is final: the closure is the highest-priority result
 /// of every later operation, and the buffer is destroyed.
 #[derive(Clone, Debug)]
-enum ConnectionPhase {
+enum ConnectionPhase<Lc> {
     /// Nothing ended the connection as far as this stream knows.
     Open,
     /// A frame violated the protocol; the stream waits for the connection to
     /// close.
     Violated,
     /// The connection closed; the first reason is kept.
-    Closed(ConnectionClosedError),
+    Closed(ConnectionClosedError<Lc>),
 }
 
 /// Why the receive buffer was destroyed.
@@ -274,11 +274,11 @@ enum Destruction<R, X> {
 ///     └──────────────────────── drop ──────────────────────┘ (not committed)
 /// ```
 #[derive(Clone, Debug)]
-enum Reading<R, F: RemoteResetFacts> {
+enum Reading<R, Lc, F: RemoteResetFacts> {
     /// The reader may read; no result is committed.
     Open,
     /// A read committed this result; repeated reads return it.
-    Committed(Committed<R, F>),
+    Committed(Committed<R, Lc, F>),
     /// The reader was dropped; no more reads happen.
     ReaderDropped {
         /// Whether a read had committed a result before.
@@ -287,35 +287,36 @@ enum Reading<R, F: RemoteResetFacts> {
 }
 
 #[derive(Clone, Debug)]
-enum Committed<R, F: RemoteResetFacts> {
+enum Committed<R, Lc, F: RemoteResetFacts> {
     End,
-    Error(ReadError<R, F>),
+    Error(ReadError<R, Lc, F>),
 }
 
 /// The receive direction of one stream.
 ///
 /// `C` implements the receive buffer, the receive flow control policy and
-/// the receive termination policy for this stream. `F` is the type of the
-/// reset facts the stream keeps; it decides which resets the stream takes.
+/// the receive termination policy for this stream. `Lc` is the type of the
+/// connection's local close cause. `F` is the type of the reset facts the
+/// stream keeps; it decides which resets the stream takes.
 /// See the [module documentation](self) for the processing model.
 #[derive(Debug)]
-pub struct StreamReceiver<C: ReceiveTerminationPolicy<F>, F: RemoteResetFacts = RemoteReset> {
+pub struct StreamReceiver<C: ReceiveTerminationPolicy<F>, Lc, F: RemoteResetFacts = RemoteReset> {
     parts: C,
     opened_limit: VarInt,
     buffer: BufferPhase<C::Reason, F::Change>,
-    connection: ConnectionPhase,
+    connection: ConnectionPhase<Lc>,
     received: ReceivedRanges,
     reset: Option<F>,
     acceptance: Boundary<C::Reason, F::Change>,
     delivery: Boundary<C::Reason, F::Change>,
-    reading: Reading<C::Reason, F>,
+    reading: Reading<C::Reason, Lc, F>,
     stop: StopRequest,
     data_complete_notified: bool,
     reset_presentation: ResetPresentation,
     released_reported: VarInt,
 }
 
-impl<C> StreamReceiver<C, RemoteReset>
+impl<C, Lc> StreamReceiver<C, Lc, RemoteReset>
 where
     C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy<RemoteReset>,
 {
@@ -348,7 +349,7 @@ where
     }
 }
 
-impl<C, F> StreamReceiver<C, F>
+impl<C, Lc, F> StreamReceiver<C, Lc, F>
 where
     C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy<F>,
     F: RemoteResetFacts,
@@ -394,7 +395,7 @@ where
 
     /// The closure of the connection, once
     /// [`connection_closed`](Self::connection_closed) recorded it.
-    pub fn closed(&self) -> Option<&ConnectionClosedError> {
+    pub fn closed(&self) -> Option<&ConnectionClosedError<Lc>> {
         match &self.connection {
             ConnectionPhase::Closed(closed) => Some(closed),
             ConnectionPhase::Open | ConnectionPhase::Violated => None,
@@ -521,7 +522,7 @@ where
     /// application fail with [`ConnectionClosedError`], carrying `reason`. The
     /// receive buffer is destroyed. Only the first reason is kept; a later
     /// call has no effect.
-    pub fn connection_closed(&mut self, reason: CloseReason) {
+    pub fn connection_closed(&mut self, reason: CloseReason<Lc>) {
         if self.closed().is_some() {
             return;
         }
@@ -703,7 +704,7 @@ where
     }
 
     /// Records the closure of the connection and destroys the buffer.
-    fn shut_down(&mut self, closed: ConnectionClosedError) {
+    fn shut_down(&mut self, closed: ConnectionClosedError<Lc>) {
         self.connection = ConnectionPhase::Closed(closed);
         self.destroy_buffer(Destruction::Forced);
         self.notify_termination(TerminationEvent::ConnectionClosed);

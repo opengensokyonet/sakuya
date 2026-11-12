@@ -7,12 +7,15 @@ license.workspace = true
 description = "QUIC connections for sakuya: the tree of a connection's state and the driver of its calls"
 
 [dependencies]
+bytes.workspace = true
 frunk_core.workspace = true
 futures-util.workspace = true
 nitori_call.workspace = true
 sakuya_link.workspace = true
 sakuya_packet_protection.workspace = true
 sakuya_recovery.workspace = true
+sakuya_stream.workspace = true
+sakuya_tls.workspace = true
 sakuya_wire.workspace = true
 snafu.workspace = true
 

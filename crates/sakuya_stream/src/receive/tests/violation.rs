@@ -91,7 +91,7 @@ fn reset_violation<T: ReceiveTerminationPolicy>(
     })
 }
 
-fn closed() -> ReadError<&'static str> {
+fn closed() -> ReadError<&'static str, TestCloseCause> {
     ReadError::ConnectionClosed {
         source: ConnectionClosedError::new(close_reason()),
     }

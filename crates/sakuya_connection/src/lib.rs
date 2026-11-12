@@ -30,6 +30,7 @@ pub mod call;
 pub mod clock;
 pub mod component;
 pub mod driver;
+pub mod error;
 pub mod layer;
 pub mod others;
 pub mod request;

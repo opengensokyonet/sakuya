@@ -33,6 +33,7 @@ use super::{
 };
 use crate::connection::ConnectionClosedError;
 use crate::receive_buffer::StreamReceiveBuffer;
+use core::convert::Infallible;
 use core::fmt;
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
 use sakuya_wire::var_int::VarInt;
@@ -42,13 +43,15 @@ use snafu::{Snafu, ensure};
 ///
 /// A failed request does not end reading and does not change the local
 /// limits.
+///
+/// `Lc` is the type of the connection's local close cause.
 #[derive(Clone, Debug, PartialEq, Eq, Snafu)]
-pub enum StopError {
+pub enum StopError<Lc> {
     /// The connection has closed.
     #[snafu(transparent)]
     ConnectionClosed {
         /// The closed connection.
-        source: ConnectionClosedError,
+        source: ConnectionClosedError<Lc>,
     },
     /// A STOP request with another error code is already installed; it is
     /// kept.
@@ -65,6 +68,26 @@ pub enum StopError {
         /// Why no request is needed.
         reason: StopNotNeededReason,
     },
+}
+
+impl<Lc> StopError<Lc> {
+    /// The same failure without the connection closure, which the failure
+    /// of a policy's decision never reports; the closure itself otherwise.
+    pub(super) fn without_closed_connection(
+        self,
+    ) -> Result<StopError<Infallible>, ConnectionClosedError<Lc>> {
+        match self {
+            Self::ConnectionClosed { source } => Err(source),
+            Self::StopConflict {
+                installed,
+                requested,
+            } => Ok(StopError::StopConflict {
+                installed,
+                requested,
+            }),
+            Self::StopNotNeeded { reason } => Ok(StopError::StopNotNeeded { reason }),
+        }
+    }
 }
 
 /// Why [`StopError::StopNotNeeded`] was returned.
@@ -92,7 +115,7 @@ impl fmt::Display for StopNotNeededReason {
 #[snafu(display("STOP_SENDING reported sent without an installed request"))]
 pub struct NoStopRequestError;
 
-impl<C, F> StreamReceiver<C, F>
+impl<C, Lc, F> StreamReceiver<C, Lc, F>
 where
     C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy<F>,
     F: RemoteResetFacts,
@@ -107,7 +130,7 @@ where
     /// # Errors
     ///
     /// See [`StopError`].
-    pub fn stop(&mut self, code: ApplicationErrorCode) -> Result<(), StopError> {
+    pub fn stop(&mut self, code: ApplicationErrorCode) -> Result<(), StopError<Lc>> {
         if self.check_stop(code)? {
             self.install_stop(code);
             self.notify_termination(TerminationEvent::StopRequested);
@@ -152,7 +175,7 @@ where
 
     /// Checks a STOP request; `Ok(true)` means it is to be installed,
     /// `Ok(false)` that the same request is already installed.
-    pub(super) fn check_stop(&self, code: ApplicationErrorCode) -> Result<bool, StopError> {
+    pub(super) fn check_stop(&self, code: ApplicationErrorCode) -> Result<bool, StopError<Lc>> {
         if let Some(closed) = self.closed() {
             return Err(StopError::ConnectionClosed {
                 source: closed.clone(),

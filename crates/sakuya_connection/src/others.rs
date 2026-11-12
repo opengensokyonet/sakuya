@@ -369,7 +369,8 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
 
     /// Read the component `X` of the recovery layer of every other link
     /// path, of every logical path, with `None` for a link path without one;
-    /// nothing is taken.
+    /// and of the lent link path's own, with the key of the layer, unless it
+    /// was taken. Nothing is taken.
     pub fn each_recovery_read<'s, X, I>(
         &'s mut self,
         mut each: impl FnMut(&NodeKeyOf<T, L>, Option<&X>),
@@ -381,8 +382,13 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
             logical_paths,
             here_link_paths,
             here_path,
+            here_recovery,
             ..
         } = self;
+        if let Some(own) = here_recovery.as_deref_mut() {
+            let flat = own.data.flat_mut();
+            each(&own.key, Some(flat.get_at()));
+        }
         let mut visit = |node: &'s mut LinkPathNodeOf<T, L, B>| match node.child.as_mut() {
             Some(recovery) => {
                 let flat = recovery.data.flat_mut();

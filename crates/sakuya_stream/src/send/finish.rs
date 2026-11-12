@@ -45,14 +45,16 @@ use sakuya_wire::var_int::VarInt;
 use snafu::{Report, ResultExt, Snafu, ensure};
 
 /// Failures of [`StreamSender::close`].
+///
+/// `Lc` is the type of the connection's local close cause.
 #[derive(Clone, Debug, PartialEq, Eq, Snafu)]
 #[snafu(module(close_error), visibility(pub(crate)))]
-pub enum CloseError {
+pub enum CloseError<Lc> {
     /// The connection has closed.
     #[snafu(transparent)]
     ConnectionClosed {
         /// The closed connection.
-        source: ConnectionClosedError,
+        source: ConnectionClosedError<Lc>,
     },
     /// A reset is in effect; a close cannot replace it.
     #[snafu(transparent)]
@@ -66,15 +68,16 @@ pub enum CloseError {
 /// state.
 ///
 /// `X` and `U` are the [`Conflict`](LocalResetTarget::Conflict) and the
-/// [`Unfit`](LocalResetTarget::Unfit) of the stream's reset target type.
+/// [`Unfit`](LocalResetTarget::Unfit) of the stream's reset target type; `Lc`
+/// is the type of the connection's local close cause.
 #[derive(Clone, Debug, PartialEq, Eq, Snafu)]
 #[snafu(module(request_reset_error), visibility(pub(crate)))]
-pub enum RequestResetError<X: Error + 'static, U: Error + 'static> {
+pub enum RequestResetError<X: Error + 'static, U: Error + 'static, Lc> {
     /// The connection has closed.
     #[snafu(transparent)]
     ConnectionClosed {
         /// The closed connection.
-        source: ConnectionClosedError,
+        source: ConnectionClosedError<Lc>,
     },
     /// The error code differs from the effective reset's.
     #[snafu(display("the reset conflicts with the effective reset"))]
@@ -127,19 +130,42 @@ pub enum RequestResetError<X: Error + 'static, U: Error + 'static> {
     },
 }
 
+impl<X: Error + 'static, U: Error + 'static, Lc> RequestResetError<X, U, Lc> {
+    /// The same failure without the connection closure, which the failure
+    /// of a policy's decision never reports; the closure itself otherwise.
+    fn without_closed_connection(
+        self,
+    ) -> Result<RequestResetError<X, U, Infallible>, ConnectionClosedError<Lc>> {
+        use RequestResetError as E;
+        Ok(match self {
+            E::ConnectionClosed { source } => return Err(source),
+            E::ErrorCodeConflict { source } => E::ErrorCodeConflict { source },
+            E::FinalSizeConflictsWithReset { source } => E::FinalSizeConflictsWithReset { source },
+            E::FinalSizeConflictsWithClose { source } => E::FinalSizeConflictsWithClose { source },
+            E::ProtocolTerminal { source } => E::ProtocolTerminal { source },
+            E::Conflict { source } => E::Conflict { source },
+            E::Unfit { source } => E::Unfit { source },
+            E::FinalSizeBelowExposure { source } => E::FinalSizeBelowExposure { source },
+            E::FinalSizeBeyondWrittenEnd { source } => E::FinalSizeBeyondWrittenEnd { source },
+        })
+    }
+}
+
 /// The failure of a request for a target of type `T`.
-type RequestResetErrorOf<T> =
-    RequestResetError<<T as LocalResetTarget>::Conflict, <T as LocalResetTarget>::Unfit>;
+type RequestResetErrorOf<T, Lc> =
+    RequestResetError<<T as LocalResetTarget>::Conflict, <T as LocalResetTarget>::Unfit, Lc>;
 
 /// Failures of [`StreamSender::reset`]; none of them changes any state.
+///
+/// `Lc` is the type of the connection's local close cause.
 #[derive(Clone, Debug, PartialEq, Eq, Snafu)]
 #[snafu(module(reset_error), visibility(pub(crate)))]
-pub enum ResetError {
+pub enum ResetError<Lc> {
     /// The connection has closed.
     #[snafu(transparent)]
     ConnectionClosed {
         /// The closed connection.
-        source: ConnectionClosedError,
+        source: ConnectionClosedError<Lc>,
     },
     /// The error code differs from the effective reset's.
     #[snafu(display("the reset conflicts with the effective reset"))]
@@ -157,14 +183,16 @@ pub enum ResetError {
 
 /// Failures of [`StreamSender::reset_with_final_size`]; none of them
 /// changes any state.
+///
+/// `Lc` is the type of the connection's local close cause.
 #[derive(Clone, Debug, PartialEq, Eq, Snafu)]
 #[snafu(module(reset_with_final_size_error), visibility(pub(crate)))]
-pub enum ResetWithFinalSizeError {
+pub enum ResetWithFinalSizeError<Lc> {
     /// The connection has closed.
     #[snafu(transparent)]
     ConnectionClosed {
         /// The closed connection.
-        source: ConnectionClosedError,
+        source: ConnectionClosedError<Lc>,
     },
     /// The error code differs from the effective reset's.
     #[snafu(display("the reset conflicts with the effective reset"))]
@@ -204,7 +232,7 @@ pub enum ResetWithFinalSizeError {
     },
 }
 
-impl ResetError {
+impl<Lc> ResetError<Lc> {
     /// The failure of a request that names no final size and that the target
     /// type never refuses.
     ///
@@ -212,7 +240,7 @@ impl ResetError {
     ///
     /// If `error` is a failure only a request with a final size can meet.
     pub fn from_request_without_final_size(
-        error: RequestResetError<Infallible, Infallible>,
+        error: RequestResetError<Infallible, Infallible, Lc>,
     ) -> Self {
         use RequestResetError as General;
         match error {
@@ -226,14 +254,14 @@ impl ResetError {
             | General::FinalSizeConflictsWithClose { .. }
             | General::FinalSizeBelowExposure { .. }
             | General::FinalSizeBeyondWrittenEnd { .. } => {
-                unreachable!("a reset without a final size cannot fail with {error:?}")
+                unreachable!("a reset without a final size cannot fail with a final size error")
             }
         }
     }
 }
 
-impl From<RequestResetError<Infallible, Infallible>> for ResetWithFinalSizeError {
-    fn from(error: RequestResetError<Infallible, Infallible>) -> Self {
+impl<Lc> From<RequestResetError<Infallible, Infallible, Lc>> for ResetWithFinalSizeError<Lc> {
+    fn from(error: RequestResetError<Infallible, Infallible, Lc>) -> Self {
         use RequestResetError as General;
         match error {
             General::ConnectionClosed { source } => Self::ConnectionClosed { source },
@@ -325,6 +353,12 @@ enum PolicyPlan<R, T> {
     Reset(T),
 }
 
+/// The connection is closed; stands for [`ConnectionClosedError`] in the
+/// failure of a policy's decision, whose cause the failure does not keep.
+#[derive(Debug, Snafu)]
+#[snafu(display("the connection is closed"))]
+struct ConnectionIsClosed;
+
 /// A termination policy result that violates the
 /// [policy contract](crate::send::termination#contract).
 #[derive(Debug, Snafu)]
@@ -333,7 +367,7 @@ enum PolicyViolationError<T: LocalResetTarget> {
     #[snafu(display("termination policy closed a stream that was reset"))]
     CloseAfterReset { source: StreamResetError },
     #[snafu(display("termination policy closed a stream after the connection closed"))]
-    CloseAfterConnectionClosed { source: ConnectionClosedError },
+    CloseAfterConnectionClosed { source: ConnectionIsClosed },
     #[snafu(display("termination policy narrowed the write limit of a finished stream"))]
     NarrowFinished,
     #[snafu(display("termination policy narrowed the write limit after input was closed"))]
@@ -347,7 +381,12 @@ enum PolicyViolationError<T: LocalResetTarget> {
     #[snafu(display("termination policy decided an illegal reset {target:?}"))]
     IllegalReset {
         target: T,
-        source: RequestResetErrorOf<T>,
+        source: RequestResetErrorOf<T, Infallible>,
+    },
+    #[snafu(display("termination policy decided an illegal reset {target:?}"))]
+    ResetAfterConnectionClosed {
+        target: T,
+        source: ConnectionIsClosed,
     },
     #[snafu(display("termination policy chose a final size the reset cannot end at"))]
     ChosenFinalSizeUnfit { source: T::Unfit },
@@ -359,7 +398,7 @@ enum PolicyViolationError<T: LocalResetTarget> {
     },
 }
 
-impl<C, K> StreamSender<C, K, LocalReset>
+impl<C, K, Lc> StreamSender<C, K, Lc, LocalReset>
 where
     K: ConnectionSendFlowController,
     C: StreamSendBuffer<Reservation = K::Reservation>
@@ -378,7 +417,7 @@ where
     /// 1. [`ResetError::ConnectionClosed`];
     /// 2. [`ResetError::ErrorCodeConflict`] against an effective reset;
     /// 3. [`ResetError::ProtocolTerminal`].
-    pub fn reset(&mut self, error_code: ApplicationErrorCode) -> Result<(), ResetError> {
+    pub fn reset(&mut self, error_code: ApplicationErrorCode) -> Result<(), ResetError<Lc>> {
         self.request_reset(error_code, None)
             .map_err(ResetError::from_request_without_final_size)
     }
@@ -407,12 +446,12 @@ where
         &mut self,
         error_code: ApplicationErrorCode,
         final_size: VarInt,
-    ) -> Result<(), ResetWithFinalSizeError> {
+    ) -> Result<(), ResetWithFinalSizeError<Lc>> {
         Ok(self.request_reset(error_code, Some(final_size))?)
     }
 }
 
-impl<C, K, T> StreamSender<C, K, T>
+impl<C, K, Lc, T> StreamSender<C, K, Lc, T>
 where
     T: LocalResetTarget,
     K: ConnectionSendFlowController,
@@ -428,7 +467,7 @@ where
     /// # Errors
     ///
     /// [`CloseError::ConnectionClosed`], then [`CloseError::AlreadyReset`].
-    pub fn close(&mut self) -> Result<(), CloseError> {
+    pub fn close(&mut self) -> Result<(), CloseError<Lc>> {
         self.check_connection_open()?;
         match self.end_state() {
             SendEndState::Reset { .. } => Err(StreamResetError.into()),
@@ -476,7 +515,7 @@ where
         &mut self,
         request: T::Request,
         final_size: Option<VarInt>,
-    ) -> Result<(), RequestResetErrorOf<T>> {
+    ) -> Result<(), RequestResetErrorOf<T, Lc>> {
         let target = match self.plan_reset(request, final_size)? {
             ResetPlan::Unchanged => return Ok(()),
             ResetPlan::Install(target) => target,
@@ -501,7 +540,7 @@ where
         &self,
         request: T::Request,
         final_size: Option<VarInt>,
-    ) -> Result<ResetPlan<T>, RequestResetErrorOf<T>> {
+    ) -> Result<ResetPlan<T>, RequestResetErrorOf<T, Lc>> {
         use request_reset_error as e;
         self.check_connection_open()?;
         match self.end_state() {
@@ -656,8 +695,10 @@ where
                     Err(StreamResetError).context(policy_violation::CloseAfterResetSnafu)
                 }
                 SendEndState::Open => {
-                    self.check_connection_open()
-                        .context(policy_violation::CloseAfterConnectionClosedSnafu)?;
+                    if self.is_connection_closed() {
+                        return Err(ConnectionIsClosed)
+                            .context(policy_violation::CloseAfterConnectionClosedSnafu);
+                    }
                     Ok(PolicyPlan::Close)
                 }
             },
@@ -696,10 +737,22 @@ where
             }
             // A complete target is its request with its final size.
             TerminationAction::Reset(target) => {
-                match self
-                    .plan_reset(target.request(), Some(target.final_size()))
-                    .context(policy_violation::IllegalResetSnafu { target })?
-                {
+                let plan = match self.plan_reset(target.request(), Some(target.final_size())) {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        return Err(match error.without_closed_connection() {
+                            Ok(error) => PolicyViolationError::IllegalReset {
+                                target,
+                                source: error,
+                            },
+                            Err(_closed) => PolicyViolationError::ResetAfterConnectionClosed {
+                                target,
+                                source: ConnectionIsClosed,
+                            },
+                        });
+                    }
+                };
+                match plan {
                     ResetPlan::Unchanged => Ok(PolicyPlan::Keep),
                     ResetPlan::Install(target) => Ok(PolicyPlan::Reset(target)),
                     ResetPlan::CompleteFinalSize(_) => {

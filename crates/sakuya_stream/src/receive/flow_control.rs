@@ -89,7 +89,7 @@ pub trait ReceiveFlowControlPolicy {
     fn advertisement_intent(&self) -> AdvertisementIntent;
 }
 
-impl<C, F> StreamReceiver<C, F>
+impl<C, Lc, F> StreamReceiver<C, Lc, F>
 where
     C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy<F>,
     F: RemoteResetFacts,

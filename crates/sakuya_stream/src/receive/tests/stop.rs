@@ -160,7 +160,7 @@ fn stop_sent_without_a_request_fails() {
 
 #[test]
 fn stop_error_display() {
-    let error = StopError::StopNotNeeded {
+    let error = StopError::<TestCloseCause>::StopNotNeeded {
         reason: StopNotNeededReason::DataComplete,
     };
     assert_eq!(

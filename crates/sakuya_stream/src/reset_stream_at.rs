@@ -10,7 +10,7 @@
 //!
 //! - [`RemoteResetAt`] is the type of reset facts that keeps a reliable
 //!   size. A [`StreamReceiver`] of these facts,
-//!   `StreamReceiver<C, RemoteResetAt>`, takes `RESET_STREAM_AT` with
+//!   `StreamReceiver<C, Lc, RemoteResetAt>`, takes `RESET_STREAM_AT` with
 //!   [`on_reset_stream_at`](StreamReceiver::on_reset_stream_at) and
 //!   `RESET_STREAM` with [`on_reset_stream`](StreamReceiver::on_reset_stream),
 //!   in any order.
@@ -172,7 +172,7 @@ impl TryFrom<ResetStreamAtFrame> for RemoteResetAt {
 /// Violations of a `RESET_STREAM` frame on a stream that also takes
 /// `RESET_STREAM_AT`: failures of
 /// [`on_reset_stream`](StreamReceiver::on_reset_stream) of a
-/// `StreamReceiver<C, RemoteResetAt>`.
+/// `StreamReceiver<C, Lc, RemoteResetAt>`.
 ///
 /// The error code to close the connection with is
 /// [`transport_error_code`](Self::transport_error_code).
@@ -246,7 +246,7 @@ impl OnResetStreamAtError {
     }
 }
 
-impl<C> StreamReceiver<C, RemoteResetAt>
+impl<C, Lc> StreamReceiver<C, Lc, RemoteResetAt>
 where
     C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy<RemoteResetAt>,
 {

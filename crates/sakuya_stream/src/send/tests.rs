@@ -9,12 +9,14 @@ use super::termination::{
 };
 use super::test_support::{
     Action, CODE, Connection, OTHER_CODE, RecordingFlow, Reservation, ScriptedTermination,
-    TestSender, close_reason, code, completing_sender, due_end_frame, end_commits, expose, keep,
-    new_connection, send_end, source, stream, v, write_all, written,
+    TestCloseCause, TestSender, close_reason, code, completing_sender, due_end_frame, end_commits,
+    expose, keep, new_connection, send_end, source, stream, v, write_all, written,
 };
 use super::write::{FlushError, WriteError, WriteOutcome, WriteWait};
 use super::*;
-use crate::connection::{CloseReason, ConnectionClosedError, ImmediateClose};
+use crate::connection::{
+    CloseReason, ConnectionClosedError, ImmediateClose, TransportImmediateClose,
+};
 use crate::send_buffer::covered_bytes::CoveredBytes;
 use crate::send_buffer::visibility::FinalSizeBelowExposureError;
 use crate::send_buffer::{
@@ -53,7 +55,7 @@ fn test_sender(
 fn default_sender(
     connection: &Arc<Connection>,
     peer_stream_limit: u32,
-) -> StreamSender<super::composition::DefaultSendComposition, Connection> {
+) -> StreamSender<super::composition::DefaultSendComposition, Connection, TestCloseCause> {
     super::test_support::default_sender(connection, peer_stream_limit)
 }
 
@@ -543,7 +545,7 @@ type Row<S> = (
     &'static str,
     S,
     Result<(), &'static str>,
-    Result<(), FlushError>,
+    Result<(), FlushError<TestCloseCause>>,
 );
 
 /// Empty input and flush, one row per state.
@@ -959,13 +961,15 @@ fn connection_closed_error_carries_the_first_reason() {
     assert_eq!(source.reason(), &close_reason());
     assert_eq!(
         source.to_string(),
-        "the connection is closed: closed locally with application error 0x9"
+        "the connection is closed: closed locally: done"
     );
-    let peer = ConnectionClosedError::new(CloseReason::Peer(ImmediateClose::Transport {
-        code: sakuya_wire::v1::transport_error::TransportErrorCode::PROTOCOL_VIOLATION,
-        frame_type: None,
-        reason_phrase: Bytes::new(),
-    }));
+    let peer = ConnectionClosedError::new(CloseReason::<TestCloseCause>::Peer(
+        ImmediateClose::Transport(TransportImmediateClose {
+            code: sakuya_wire::v1::transport_error::TransportErrorCode::PROTOCOL_VIOLATION,
+            frame_type: None,
+            reason_phrase: Bytes::new(),
+        }),
+    ));
     assert!(
         peer.to_string()
             .starts_with("the connection is closed: closed by the peer with transport error")

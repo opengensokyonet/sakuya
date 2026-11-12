@@ -101,12 +101,13 @@ impl<R: Eq> Eq for SharedTerminationReason<R> {}
 
 /// A terminal read error.
 ///
-/// `R` is the receive termination policy's reason type and `F` the type of
-/// the reset facts of the stream. Every variant can be reported repeatedly: a
+/// `R` is the receive termination policy's reason type, `Lc` the type of the
+/// connection's local close cause and `F` the type of the reset facts of the
+/// stream. Every variant can be reported repeatedly: a
 /// local reason is reported as a [`SharedTerminationReason`], cloned for each
 /// report.
 #[derive(Debug, PartialEq, Eq, Snafu)]
-pub enum ReadError<R, F: RemoteResetFacts = RemoteReset> {
+pub enum ReadError<R, Lc, F: RemoteResetFacts = RemoteReset> {
     /// The stream reader was dropped; the receive direction takes no more
     /// reads.
     #[snafu(display("the stream reader was dropped"))]
@@ -115,7 +116,7 @@ pub enum ReadError<R, F: RemoteResetFacts = RemoteReset> {
     #[snafu(transparent)]
     ConnectionClosed {
         /// The closed connection.
-        source: ConnectionClosedError,
+        source: ConnectionClosedError<Lc>,
     },
     /// The peer reset the stream.
     ///
@@ -165,7 +166,7 @@ pub enum ReadError<R, F: RemoteResetFacts = RemoteReset> {
     },
 }
 
-impl<R, F: RemoteResetFacts> Clone for ReadError<R, F> {
+impl<R, Lc, F: RemoteResetFacts> Clone for ReadError<R, Lc, F> {
     fn clone(&self) -> Self {
         match self {
             Self::ReaderDropped => Self::ReaderDropped,
@@ -207,7 +208,7 @@ impl<R, F: RemoteResetFacts> Clone for ReadError<R, F> {
     }
 }
 
-impl<R, F: RemoteResetFacts> ReadError<R, F> {
+impl<R, Lc, F: RemoteResetFacts> ReadError<R, Lc, F> {
     fn buffer_destroyed(applied: Applied<R, F::Change>, remote: Option<F>) -> Self {
         Self::BufferDestroyed {
             reason: applied.reason,
@@ -252,7 +253,10 @@ impl Settled {
     }
 }
 
-impl<C, F> StreamReceiver<C, F>
+/// The result a read settles on without consulting the buffer, if any.
+type SettledRead<R, Lc, F> = Option<Result<Settled, ReadError<R, Lc, F>>>;
+
+impl<C, Lc, F> StreamReceiver<C, Lc, F>
 where
     C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy<F>,
     F: RemoteResetFacts,
@@ -265,7 +269,7 @@ where
     /// [`ReadError::ReaderDropped`] after
     /// [`reader_dropped`](Self::reader_dropped); see the [module
     /// documentation](self) for priorities.
-    pub fn read_chunk(&mut self) -> Result<ReadOutcome<C::Chunk>, ReadError<C::Reason, F>> {
+    pub fn read_chunk(&mut self) -> Result<ReadOutcome<C::Chunk>, ReadError<C::Reason, Lc, F>> {
         if let Some(settled) = self.settled_read() {
             return settled.map(Settled::outcome);
         }
@@ -287,7 +291,7 @@ where
     pub fn read_into<T: BufMut + ?Sized>(
         &mut self,
         target: &mut T,
-    ) -> Result<ReadOutcome<NonZeroUsize>, ReadError<C::Reason, F>> {
+    ) -> Result<ReadOutcome<NonZeroUsize>, ReadError<C::Reason, Lc, F>> {
         if let Some(settled) = self.settled_read() {
             return settled.map(Settled::outcome);
         }
@@ -305,7 +309,7 @@ where
     }
 
     /// The result of the first five priorities.
-    fn settled_read(&mut self) -> Option<Result<Settled, ReadError<C::Reason, F>>> {
+    fn settled_read(&mut self) -> SettledRead<C::Reason, Lc, F> {
         if self.is_reader_dropped() {
             return Some(Err(ReadError::ReaderDropped));
         }
@@ -337,7 +341,7 @@ where
     }
 
     /// Judges end of stream and gaps once no data can be delivered.
-    fn end_or_wait<T>(&mut self) -> Result<ReadOutcome<T>, ReadError<C::Reason, F>> {
+    fn end_or_wait<T>(&mut self) -> Result<ReadOutcome<T>, ReadError<C::Reason, Lc, F>> {
         let delivered = self.parts.delivered_end();
         let remote = self.remote_reset();
         if self.parts.final_size() == Some(delivered) {
@@ -383,7 +387,7 @@ where
 
     /// Commits a terminal error and destroys the receive buffer in the same
     /// operation.
-    fn commit_error(&mut self, error: ReadError<C::Reason, F>) -> ReadError<C::Reason, F> {
+    fn commit_error(&mut self, error: ReadError<C::Reason, Lc, F>) -> ReadError<C::Reason, Lc, F> {
         self.reading = Reading::Committed(Committed::Error(error.clone()));
         self.destroy_buffer(Destruction::Forced);
         self.notify_termination(TerminationEvent::ReadResultCommitted);

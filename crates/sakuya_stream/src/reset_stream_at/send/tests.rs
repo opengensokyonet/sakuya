@@ -15,9 +15,9 @@ use crate::send::termination::{
     FinalSizeRequest, SendTerminationContext, SendTerminationEvent, TerminationAction,
 };
 use crate::send::test_support::{
-    Action, CODE, Connection, OTHER_CODE, TestSender, close_reason, completing_sender,
-    due_end_frame, end_commits, expose, keep, new_connection, send_end, source, stream, v,
-    write_all, written,
+    Action, CODE, Connection, OTHER_CODE, TestCloseCause, TestSender, close_reason,
+    completing_sender, due_end_frame, end_commits, expose, keep, new_connection, send_end, source,
+    stream, v, write_all, written,
 };
 use crate::send::write::{FlushError, WriteError};
 use crate::send::{
@@ -64,7 +64,7 @@ fn test_sender(
 fn default_sender(
     connection: &Arc<Connection>,
     peer_stream_limit: u32,
-) -> StreamSender<DefaultSendComposition, Connection, LocalResetAt> {
+) -> StreamSender<DefaultSendComposition, Connection, TestCloseCause, LocalResetAt> {
     crate::send::test_support::default_sender(connection, peer_stream_limit)
 }
 

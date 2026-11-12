@@ -63,13 +63,13 @@ pub mod write;
 /// `C` is the composition of a [`StreamSendBuffer`], a
 /// [`SendFlowControlPolicy`] and a [`SendTerminationPolicy`] that act on this
 /// stream and on the same data; `K` is the connection send flow controller
-/// that grants the reservations the buffer takes; `T` is the type of the
-/// reset target.
+/// that grants the reservations the buffer takes; `Lc` is the type of the
+/// connection's local close cause; `T` is the type of the reset target.
 ///
 /// Operations are grouped by subject: writing and flushing in [`write`](mod@write),
 /// close and reset in [`finish`]; peer and feedback facts are applied by the
 /// `on_*` methods here.
-pub struct StreamSender<C, K, T = LocalReset>
+pub struct StreamSender<C, K, Lc, T = LocalReset>
 where
     C: SendTerminationPolicy<T>,
     K: ConnectionSendFlowController,
@@ -81,7 +81,7 @@ where
     connection: Arc<K>,
     end: EndPhase<T>,
     stop_sending: StopSending<C::WriteLimitReason>,
-    close_reason: Option<CloseReason>,
+    close_reason: Option<CloseReason<Lc>>,
 }
 
 /// The end of the send direction:
@@ -255,7 +255,7 @@ pub enum SendTerminalState {
     ResetRecvd,
 }
 
-impl<C, K, T> StreamSender<C, K, T>
+impl<C, K, Lc, T> StreamSender<C, K, Lc, T>
 where
     C: SendTerminationPolicy<T>,
     K: ConnectionSendFlowController,
@@ -340,7 +340,7 @@ where
     }
 }
 
-impl<C, K, T> StreamSender<C, K, T>
+impl<C, K, Lc, T> StreamSender<C, K, Lc, T>
 where
     T: LocalResetTarget,
     K: ConnectionSendFlowController,
@@ -423,7 +423,7 @@ where
     /// Every later operation fails with a [`ConnectionClosedError`] that
     /// carries `reason`; results returned before are not changed. Only the
     /// first reason is kept; a later call has no effect.
-    pub fn on_connection_closed(&mut self, reason: CloseReason) {
+    pub fn on_connection_closed(&mut self, reason: CloseReason<Lc>) {
         if self.is_connection_closed() {
             return;
         }
@@ -567,7 +567,7 @@ where
     /// frame to write, and [`PreparedEndFrame::expose`] settles its
     /// exposure after the frame was written to a packet. Dropping the guard
     /// changes nothing. This entry is provisional.
-    pub fn prepare_end_frame(&mut self) -> Option<PreparedEndFrame<'_, C, K, T>> {
+    pub fn prepare_end_frame(&mut self) -> Option<PreparedEndFrame<'_, C, K, Lc, T>> {
         if self.is_connection_closed() || self.terminal_state().is_some() {
             return None;
         }
@@ -641,7 +641,7 @@ where
     }
 
     /// Fails once the connection has closed.
-    fn check_connection_open(&self) -> Result<(), ConnectionClosedError> {
+    fn check_connection_open(&self) -> Result<(), ConnectionClosedError<Lc>> {
         match &self.close_reason {
             Some(reason) => Err(ConnectionClosedError::new(reason.clone())),
             None => Ok(()),
@@ -776,18 +776,21 @@ enum ExposedEndFrame<T> {
 /// It dereferences to the [`StreamEndFrame`] to write. After the frame was written
 /// to a packet, [`expose`](Self::expose) settles its first exposure; it does
 /// not fail. Dropping the guard changes nothing.
-pub struct PreparedEndFrame<'a, C, K, T = LocalReset>
+///
+/// `Lc` is the type of the connection's local close cause, as for the
+/// [`StreamSender`] it holds.
+pub struct PreparedEndFrame<'a, C, K, Lc, T = LocalReset>
 where
     C: SendTerminationPolicy<T>,
     K: ConnectionSendFlowController,
     T: LocalResetTarget,
 {
-    sender: &'a mut StreamSender<C, K, T>,
+    sender: &'a mut StreamSender<C, K, Lc, T>,
     frame: StreamEndFrame<T::Frame>,
     exposed: ExposedEndFrame<T>,
 }
 
-impl<C, K, T> Deref for PreparedEndFrame<'_, C, K, T>
+impl<C, K, Lc, T> Deref for PreparedEndFrame<'_, C, K, Lc, T>
 where
     C: SendTerminationPolicy<T>,
     K: ConnectionSendFlowController,
@@ -800,7 +803,7 @@ where
     }
 }
 
-impl<C, K, T> PreparedEndFrame<'_, C, K, T>
+impl<C, K, Lc, T> PreparedEndFrame<'_, C, K, Lc, T>
 where
     T: LocalResetTarget,
     K: ConnectionSendFlowController,

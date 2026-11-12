@@ -78,15 +78,16 @@ pub enum WriteWait {
 
 /// Failures of [`StreamSender::write`]; none of them consumes input.
 ///
-/// `R` is the termination policy's write limit reason.
+/// `R` is the termination policy's write limit reason; `Lc` is the type of
+/// the connection's local close cause.
 #[derive(Debug, Snafu)]
 #[snafu(module(write_error), visibility(pub(crate)))]
-pub enum WriteError<R> {
+pub enum WriteError<R, Lc> {
     /// The connection has closed.
     #[snafu(transparent)]
     ConnectionClosed {
         /// The closed connection.
-        source: ConnectionClosedError,
+        source: ConnectionClosedError<Lc>,
     },
     /// The stream was reset.
     #[snafu(transparent)]
@@ -145,14 +146,16 @@ impl<R: fmt::Debug> fmt::Debug for SharedWriteLimitReason<R> {
 }
 
 /// Failures of [`StreamSender::flush`].
+///
+/// `Lc` is the type of the connection's local close cause.
 #[derive(Clone, Debug, PartialEq, Eq, Snafu)]
 #[snafu(module(flush_error), visibility(pub(crate)))]
-pub enum FlushError {
+pub enum FlushError<Lc> {
     /// The connection has closed.
     #[snafu(transparent)]
     ConnectionClosed {
         /// The closed connection.
-        source: ConnectionClosedError,
+        source: ConnectionClosedError<Lc>,
     },
     /// The stream was reset.
     #[snafu(transparent)]
@@ -162,7 +165,7 @@ pub enum FlushError {
     },
 }
 
-impl<C, K, T> StreamSender<C, K, T>
+impl<C, K, Lc, T> StreamSender<C, K, Lc, T>
 where
     T: LocalResetTarget,
     K: ConnectionSendFlowController,
@@ -194,7 +197,7 @@ where
     pub fn write<S: Buf + ?Sized>(
         &mut self,
         source: &mut S,
-    ) -> Result<WriteOutcome, WriteError<C::WriteLimitReason>> {
+    ) -> Result<WriteOutcome, WriteError<C::WriteLimitReason, Lc>> {
         self.check_connection_open()?;
         match self.end_state() {
             SendEndState::Reset { .. } => return Err(StreamResetError.into()),
@@ -301,7 +304,7 @@ where
     ///
     /// [`FlushError::ConnectionClosed`], then [`FlushError::Reset`] once a
     /// reset is in effect, even if nothing remains to deliver.
-    pub fn flush(&self) -> Result<(), FlushError> {
+    pub fn flush(&self) -> Result<(), FlushError<Lc>> {
         self.check_connection_open()?;
         if let SendEndState::Reset { .. } = self.end_state() {
             return Err(StreamResetError.into());

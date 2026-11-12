@@ -104,6 +104,26 @@ impl sakuya_connection::v1::Choices for Mine {
     type Recovery<V: Clone + Eq + core::fmt::Debug + 'static> =
         sakuya_recovery::factory::NewRenoRecoveryFactory<V>;
     type AckObligation = sakuya_recovery::ack_obligation::Rfc9000AckObligation<Duration>;
+    type ApplicationError = AppClose;
+    type HandshakeFailure = core::convert::Infallible;
+}
+
+/// The application's error type for closing, in the tests: an application
+/// error code.
+#[derive(Debug, PartialEq, Eq)]
+pub struct AppClose(pub u32);
+impl core::fmt::Display for AppClose {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "the application closed with {}", self.0)
+    }
+}
+impl std::error::Error for AppClose {}
+impl sakuya_connection::v1::close::ApplicationClose for AppClose {
+    fn code(&self) -> sakuya_wire::v1::application_error::ApplicationErrorCode {
+        sakuya_wire::v1::application_error::ApplicationErrorCode::new(
+            sakuya_wire::var_int::VarInt::from_u32(self.0),
+        )
+    }
 }
 
 /// What the part `P`, which declares nothing the connection node needs, is

@@ -10,7 +10,8 @@ use super::{
         ResetPresentation, TerminationDecision, TerminationEvent, TerminationView,
     },
 };
-use crate::connection::{CloseReason, ImmediateClose};
+use crate::connection::{CloseReason, ImmediateClose, TransportImmediateClose};
+use crate::send::test_support::TestCloseCause;
 use crate::{
     connection_receive_flow::ConnectionReceiveFlowController,
     receive_buffer::{
@@ -33,12 +34,12 @@ mod stop;
 mod violation;
 
 /// The reason the tests close connections for.
-fn close_reason() -> CloseReason {
-    CloseReason::Peer(ImmediateClose::Transport {
+fn close_reason() -> CloseReason<TestCloseCause> {
+    CloseReason::Peer(ImmediateClose::Transport(TransportImmediateClose {
         code: TransportErrorCode::PROTOCOL_VIOLATION,
         frame_type: Some(VarInt::from(0x08u8)),
         reason_phrase: Bytes::from_static(b"bad stream"),
-    })
+    }))
 }
 
 fn v(value: u32) -> VarInt {
@@ -216,10 +217,10 @@ impl<T: ReceiveTerminationPolicy> ReceiveTerminationPolicy for Parts<T> {
     }
 }
 
-type Receiver<T> = StreamReceiver<Parts<T>>;
+type Receiver<T> = StreamReceiver<Parts<T>, TestCloseCause>;
 
 /// The result of one chunk read.
-type ChunkRead<R = &'static str> = Result<ReadOutcome<Bytes>, ReadError<R>>;
+type ChunkRead<R = &'static str> = Result<ReadOutcome<Bytes>, ReadError<R, TestCloseCause>>;
 
 /// A receiver with stream limit `stream_limit` on a connection with limit
 /// `connection_limit`.

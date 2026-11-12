@@ -8,6 +8,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
     fmt::Debug,
+    sync::Arc,
     time::Duration,
 };
 
@@ -18,7 +19,8 @@ use sakuya_connection::{
     clock::{ConnectionChoices, InstantOf},
     component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
     driver::ConnectionDriver,
-    layer::{self, LinkPathArgs, LogicalPathArgs, NodeKey},
+    error::ConnectionErrorsOf,
+    layer::{self, EstablishedArgs, LinkPathArgs, LogicalPathArgs, NodeKey},
     others::OtherNodes,
     request::StructureRequest,
     share::{
@@ -27,8 +29,9 @@ use sakuya_connection::{
     },
     take::{GetAt, Take, TakeEach},
     v1::{
-        self,
+        self, CloseCauseOf,
         amplification::{AddressValidation, AntiAmplification, AntiAmplificationFactor},
+        close::{CloseReasonRecord, LocalCloseCause},
         confirmation::HandshakeConfirmation,
         idle::IdleTimeout,
         keys::InitialKeys,
@@ -51,8 +54,10 @@ use sakuya_recovery::{
     loss_detection::InFlightCharge,
     pacing::{Pacer, PacingInput},
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces},
+    pto::probe_timeout,
     rtt::{RttEstimator, RttSample},
 };
+use sakuya_stream::connection::CloseReason;
 use sakuya_wire::{
     connection_id::ConnectionId,
     parameters::ParametersPart,
@@ -72,6 +77,8 @@ thread_local! {
     static ADD: Cell<Option<(Duration, LinkId<(), ()>)>> = const { Cell::new(None) };
     /// When the probe of each link path built from now on closes its role.
     static CLOSE_AT: Cell<Option<Duration>> = const { Cell::new(None) };
+    /// Whether that probe puts its role into `Draining` instead.
+    static DRAIN: Cell<bool> = const { Cell::new(false) };
     /// When the probe sets the peer's maximum idle timeout to 10 s and
     /// processes a packet, as the calls will.
     static PEER_AT: Cell<Option<Duration>> = const { Cell::new(None) };
@@ -81,6 +88,8 @@ thread_local! {
     /// What the feeder of the first recovery layer of a server does, and
     /// when.
     static FEED: RefCell<VecDeque<(Duration, probe::Step)>> = const { RefCell::new(VecDeque::new()) };
+    /// What the closer of the next server connection does, and when.
+    static CLOSER: RefCell<VecDeque<(Duration, probe::CloserStep)>> = const { RefCell::new(VecDeque::new()) };
 }
 
 /// The parts of the tests' connections.
@@ -95,9 +104,11 @@ fn reset() {
     advance_to(ms(0));
     ADD.with(|a| a.set(None));
     CLOSE_AT.with(|c| c.set(None));
+    DRAIN.with(|d| d.set(false));
     PEER_AT.with(|p| p.set(None));
     LEND_AT.with(|p| p.set(None));
     FEED.with(|f| f.borrow_mut().clear());
+    CLOSER.with(|c| c.borrow_mut().clear());
 }
 
 /// The choices of a client: the tests' clock and link, version 1 as the
@@ -113,6 +124,8 @@ impl v1::Choices for ClientMine {
     type Recovery<V: Clone + Eq + Debug + 'static> =
         sakuya_recovery::factory::NewRenoRecoveryFactory<V>;
     type AckObligation = sakuya_recovery::ack_obligation::Rfc9000AckObligation<Duration>;
+    type ApplicationError = common::AppClose;
+    type HandshakeFailure = core::convert::Infallible;
 }
 
 /// The choices of a server whose recovery factory logs the other link
@@ -127,6 +140,8 @@ impl v1::Choices for SpyMine {
     type Side = v1::Server;
     type Recovery<V: Clone + Eq + Debug + 'static> = spy::SpyFactory<V>;
     type AckObligation = sakuya_recovery::ack_obligation::Rfc9000AckObligation<Duration>;
+    type ApplicationError = common::AppClose;
+    type HandshakeFailure = core::convert::Infallible;
 }
 
 /// A recovery factory that makes what sakuya's makes and logs, when it
@@ -196,6 +211,9 @@ mod probe {
     pub struct Part;
     impl LogicalPathKeyShare for Part {
         type Fields = HNil;
+    }
+    impl sakuya_connection::error::ConnectionErrorPart for Part {
+        type ConnectionError = core::convert::Infallible;
     }
     impl ParametersPart<TransportParameterSpace> for Part {
         type Parameters = HNil;
@@ -313,6 +331,66 @@ mod probe {
         }
     }
 
+    /// What the closer does at its instants: build the established layer,
+    /// close as the application, or log whether the established layer is
+    /// there.
+    #[derive(Debug, Clone, Copy)]
+    pub enum CloserStep {
+        Establish,
+        Close,
+        LogEstablished,
+    }
+
+    /// In the connection: does its steps at their instants.
+    #[derive(Debug)]
+    pub struct Closer(VecDeque<(Duration, CloserStep)>);
+    impl Build<Mine, Parts, layer::Connection, ()> for Closer {
+        fn build<'v>(
+            _: &mut ParentsOf<'v, Mine, Parts, layer::Connection>,
+            _: &mut ArgsOf<Mine, Parts, layer::Connection>,
+        ) -> Self {
+            Closer(CLOSER.with(|c| c.take()))
+        }
+    }
+    impl<I, K> DataComponent<Mine, Parts, layer::Connection, (I, K)> for Closer
+    where
+        for<'v> <Parts as LineageLists<'v, Mine>>::Connection: GetAt<Closer, I>
+            + TakeEach<'v, HList![Closer, CloseReasonRecord<CloseCauseOf<Mine, Parts>>], K>,
+    {
+        fn deadline<'v>(
+            lineage: &LineageOf<'v, Mine, Parts, layer::Connection>,
+        ) -> Option<Duration> {
+            lineage.get::<Closer, I>().0.front().map(|(at, _)| *at)
+        }
+        fn expire<'v, B: CallBundle>(
+            lineage: LineageOf<'v, Mine, Parts, layer::Connection>,
+            others: &mut OtherNodes<'v, Mine, Parts, B>,
+            _: Duration,
+        ) -> Option<RequestOf<Mine, Parts>> {
+            let (hlist_pat![closer, record], _) = Take::<
+                HList![Closer, CloseReasonRecord<CloseCauseOf<Mine, Parts>>],
+                K,
+            >::take(lineage);
+            let (_, step) = closer.0.pop_front()?;
+            match step {
+                CloserStep::Establish => Some(StructureRequest::AddEstablished {
+                    args: EstablishedArgs::default(),
+                }),
+                CloserStep::Close => {
+                    record.record(CloseReason::Local(Arc::new(LocalCloseCause::Application(
+                        common::AppClose(7),
+                    ))));
+                    log("closed by the application");
+                    None
+                }
+                CloserStep::LogEstablished => {
+                    log(format!("established: {}", others.has_established()));
+                    None
+                }
+            }
+        }
+    }
+
     /// In a spying connection: at the first instant, makes the candidate
     /// link path active; at the second, lends the other link path's
     /// congestion access from the connection.
@@ -425,9 +503,12 @@ mod probe {
     /// whenever the role changes, and closes the role at its deadline.
     #[derive(Debug)]
     pub struct Watcher(Option<Duration>);
-    impl<T: v1::Choices, L> Build<T, L, layer::LinkPath, ()> for Watcher
+    impl<T: v1::Choices, L: ConnectionErrorsOf, I> Build<T, L, layer::LinkPath, (I,)> for Watcher
     where
         for<'v> L: LineageLists<'v, T>,
+        for<'v> <L as LineageLists<'v, T>>::LinkPathParents:
+            GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, I>,
+        CloseCauseOf<T, L>: Debug,
     {
         fn build<'v>(
             _: &mut ParentsOf<'v, T, L, layer::LinkPath>,
@@ -437,14 +518,17 @@ mod probe {
         }
         fn end<'v, B: CallBundle>(
             self,
-            _: &mut ParentsOf<'v, T, L, layer::LinkPath>,
+            parents: &mut ParentsOf<'v, T, L, layer::LinkPath>,
             others: &mut OtherNodes<'v, T, L, B>,
         ) {
             assert!(
                 matches!(others.here(), NodeKey::LinkPath(..)),
                 "an end action is given the ended node's key"
             );
-            log("link path ended");
+            let reason = parents
+                .get::<CloseReasonRecord<CloseCauseOf<T, L>>, I>()
+                .reason();
+            log(format!("link path ended: {reason:?}"));
         }
     }
     impl<T, L, I, J, K, M, N> DataComponent<T, L, layer::LinkPath, (I, J, K, M, N)> for Watcher
@@ -472,7 +556,11 @@ mod probe {
             let (hlist_pat![watcher, role], _) =
                 Take::<HList![Watcher, LinkPathRole<Duration>], N>::take(lineage);
             watcher.0 = None;
-            role.close(now + ms(30));
+            if DRAIN.with(Cell::get) {
+                role.drain(now + ms(30));
+            } else {
+                role.close(now + ms(30));
+            }
             None
         }
         fn reread<'v, B: CallBundle>(
@@ -670,7 +758,7 @@ mod probe {
         type Calls = HNil;
     }
     impl LayerShare<Mine, Parts, layer::Connection> for Part {
-        type Data = HList![Adder, PeerSetter];
+        type Data = HList![Adder, PeerSetter, Closer];
         type Calls = HNil;
     }
     impl LayerShare<ClientMine, Parts, layer::Connection> for Part {
@@ -814,9 +902,11 @@ fn a_link_path_ends_at_the_end_time_of_its_role() {
     assert_eq!(
         take_log(),
         [
-            "link path ended",
+            // the roles closed themselves: no reason is written, and the
+            // connection goes on without link paths
+            "link path ended: None",
             "entry ended",
-            "link path ended",
+            "link path ended: None",
             "entry ended",
         ]
     );
@@ -839,7 +929,94 @@ fn the_idle_timeout_follows_the_peer_and_ends_the_connection() {
     assert!(outer.poll(&mut connection).is_ready(), "ended silently");
     assert_eq!(
         take_log(),
-        ["recovery ended", "link path ended", "entry ended"]
+        [
+            "recovery ended",
+            "link path ended: Some(IdleTimeout)",
+            "entry ended"
+        ]
+    );
+}
+
+#[test]
+fn the_keys_go_once_every_link_path_drains() {
+    reset();
+    CLOSE_AT.with(|c| c.set(Some(ms(20))));
+    DRAIN.with(|d| d.set(true));
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, link());
+    take_log();
+    let outer = Outer::new();
+    advance_to(ms(20));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(
+        take_log(),
+        [
+            "recovery ended",
+            "Draining(50ms), NotValidated, credit Some(0)",
+            "initial keys live: false",
+        ]
+    );
+}
+
+#[test]
+fn a_close_of_this_side_closes_the_link_paths_and_ends_the_connection_after_them() {
+    reset();
+    ADD.with(|a| a.set(Some((ms(10), link()))));
+    CLOSER.with(|c| {
+        c.borrow_mut().extend([
+            (ms(12), probe::CloserStep::Establish),
+            (ms(14), probe::CloserStep::LogEstablished),
+            (ms(20), probe::CloserStep::Close),
+            (ms(21), probe::CloserStep::LogEstablished),
+        ])
+    });
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, link());
+    let outer = Outer::new();
+    for at in [10, 12, 14] {
+        advance_to(ms(at));
+        assert!(outer.poll(&mut connection).is_pending());
+    }
+    assert_eq!(take_log()[4..], ["established: true"]);
+    advance_to(ms(20));
+    assert!(outer.poll(&mut connection).is_pending());
+    let pto = probe_timeout(
+        &sakuya_recovery::rtt::RttEstimate::initial(sakuya_recovery::rtt::INITIAL_RTT),
+        ms(1),
+        PacketNumberSpaceKind::ApplicationData,
+        ms(25),
+        0,
+    );
+    let closing = format!(
+        "Closing({:?}), NotValidated, credit Some(0)",
+        ms(20) + pto * 3
+    );
+    assert_eq!(
+        take_log(),
+        [
+            "closed by the application".to_owned(),
+            // the active link path closes for three probe timeouts and its
+            // recovery layer goes; the candidate ends at once
+            "recovery ended".to_owned(),
+            "link path ended: Some(Local(Application(AppClose(7))))".to_owned(),
+            "entry ended".to_owned(),
+            closing,
+        ]
+    );
+    advance_to(ms(21));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(take_log(), ["established: false"]);
+    advance_to(ms(20) + pto * 3 - ms(1));
+    assert!(outer.poll(&mut connection).is_pending());
+    advance_to(ms(20) + pto * 3);
+    assert!(
+        outer.poll(&mut connection).is_ready(),
+        "the connection ends with its last link path"
+    );
+    assert_eq!(
+        take_log(),
+        [
+            "link path ended: Some(Local(Application(AppClose(7))))",
+            "entry ended"
+        ]
     );
 }
 

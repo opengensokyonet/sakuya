@@ -15,7 +15,7 @@
 
 use bytes::{Buf, Bytes};
 use proptest::prelude::*;
-use sakuya_stream::connection::{CloseReason, ConnectionClosedError, ImmediateClose};
+use sakuya_stream::connection::{CloseReason, ConnectionClosedError};
 use sakuya_stream::connection_send_credit::{
     AtomicConnectionCreditReservation, AtomicConnectionSendFlowController,
     ConnectionSendFlowController,
@@ -56,13 +56,13 @@ type Target = dialect::Target;
 type EndFrame = StreamEndFrame<<Target as LocalResetTarget>::Frame>;
 
 /// The sender under test over the composition `C`.
-type SenderOf<C> = StreamSender<C, AtomicConnectionSendFlowController, Target>;
+type SenderOf<C> = StreamSender<C, AtomicConnectionSendFlowController, TestCloseCause, Target>;
 
 /// The failure of a reset request, whichever operation it was made with.
 /// The failures only a reset with a reliable size meets carry plain numbers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum ResetFailure {
-    ConnectionClosed(ConnectionClosedError),
+    ConnectionClosed(ConnectionClosedError<TestCloseCause>),
     ErrorCodeConflict(ResetCodeChangeError),
     FinalSizeConflictsWithReset(FinalSizeChangeError),
     FinalSizeConflictsWithClose(FinalSizeChangeError),
@@ -75,8 +75,8 @@ enum ResetFailure {
     FinalSizeBeyondWrittenEnd(FinalSizeBeyondWrittenEndError),
 }
 
-impl From<ResetError> for ResetFailure {
-    fn from(error: ResetError) -> Self {
+impl From<ResetError<TestCloseCause>> for ResetFailure {
+    fn from(error: ResetError<TestCloseCause>) -> Self {
         match error {
             ResetError::ConnectionClosed { source } => Self::ConnectionClosed(source),
             ResetError::ErrorCodeConflict { source } => Self::ErrorCodeConflict(source),
@@ -85,8 +85,8 @@ impl From<ResetError> for ResetFailure {
     }
 }
 
-impl From<ResetWithFinalSizeError> for ResetFailure {
-    fn from(error: ResetWithFinalSizeError) -> Self {
+impl From<ResetWithFinalSizeError<TestCloseCause>> for ResetFailure {
+    fn from(error: ResetWithFinalSizeError<TestCloseCause>) -> Self {
         use ResetWithFinalSizeError as E;
         match error {
             E::ConnectionClosed { source } => Self::ConnectionClosed(source),
@@ -167,7 +167,7 @@ mod dialect {
 /// The sender that also ends a stream with `RESET_STREAM_AT`.
 #[cfg(feature = "reset_stream_at")]
 mod dialect {
-    use super::{EffectiveReset, ResetFailure, SenderOf};
+    use super::{EffectiveReset, ResetFailure, SenderOf, TestCloseCause};
     use sakuya_stream::connection_send_credit::AtomicConnectionCreditReservation;
     use sakuya_stream::reset_stream_at::send::{
         LocalResetAt, LocalResetAtFrame, PeerResetStreamAtSupport, ResetAtError,
@@ -190,8 +190,8 @@ mod dialect {
     const SUPPORT: PeerResetStreamAtSupport =
         PeerResetStreamAtSupport::from_peer_parameter(ResetStreamAt);
 
-    impl From<ResetAtWithFinalSizeError> for ResetFailure {
-        fn from(error: ResetAtWithFinalSizeError) -> Self {
+    impl From<ResetAtWithFinalSizeError<TestCloseCause>> for ResetFailure {
+        fn from(error: ResetAtWithFinalSizeError<TestCloseCause>) -> Self {
             use ResetAtWithFinalSizeError as E;
             match error {
                 E::ConnectionClosed { source } => Self::ConnectionClosed(source),
@@ -222,8 +222,8 @@ mod dialect {
         }
     }
 
-    impl From<ResetAtError> for ResetFailure {
-        fn from(error: ResetAtError) -> Self {
+    impl From<ResetAtError<TestCloseCause>> for ResetFailure {
+        fn from(error: ResetAtError<TestCloseCause>) -> Self {
             use ResetAtError as E;
             match error {
                 E::ConnectionClosed { source } => Self::ConnectionClosed(source),
@@ -704,13 +704,13 @@ impl<P: PolicyModel> Model<P> {
 /// A sender as the driver sees it.
 trait Sender {
     fn write_len(&mut self, source: &mut Bytes) -> Result<WriteOutcome, WriteFailure>;
-    fn sender_flush(&self) -> Result<(), FlushError>;
+    fn sender_flush(&self) -> Result<(), FlushError<TestCloseCause>>;
     fn on_max(&mut self, limit: VarInt);
     fn expose(&mut self, usage_end: VarInt) -> Result<VarInt, SenderExposeUsageError>;
     /// Prepares the end frame that is due; exposes it if `expose`, drops the
     /// guard otherwise. Returns the frame and the newly committed credit.
     fn end_frame(&mut self, expose: bool) -> Option<(EndFrame, Option<VarInt>)>;
-    fn sender_close(&mut self) -> Result<(), CloseError>;
+    fn sender_close(&mut self) -> Result<(), CloseError<TestCloseCause>>;
     /// Requests a reset: with `reset_at` and its variant if `reliable` is a
     /// size, with `reset` and its variant otherwise.
     fn request(
@@ -774,7 +774,7 @@ macro_rules! impl_sender {
                 })
             }
 
-            fn sender_flush(&self) -> Result<(), FlushError> {
+            fn sender_flush(&self) -> Result<(), FlushError<TestCloseCause>> {
                 self.flush()
             }
 
@@ -792,7 +792,7 @@ macro_rules! impl_sender {
                 Some((frame, expose.then(|| prepared.expose())))
             }
 
-            fn sender_close(&mut self) -> Result<(), CloseError> {
+            fn sender_close(&mut self) -> Result<(), CloseError<TestCloseCause>> {
                 self.close()
             }
 
@@ -1569,9 +1569,18 @@ proptest! {
 }
 
 /// The reason the tests close connections for.
-fn close_reason() -> CloseReason {
-    CloseReason::Local(ImmediateClose::Application {
-        code: ApplicationErrorCode::new(VarInt::from_u32(9)),
-        reason_phrase: Bytes::from_static(b"done"),
-    })
+fn close_reason() -> CloseReason<TestCloseCause> {
+    CloseReason::Local(Arc::new(TestCloseCause("done")))
 }
+
+/// The type of the local close cause of the test connections.
+#[derive(Debug, PartialEq, Eq)]
+struct TestCloseCause(&'static str);
+
+impl core::fmt::Display for TestCloseCause {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl core::error::Error for TestCloseCause {}

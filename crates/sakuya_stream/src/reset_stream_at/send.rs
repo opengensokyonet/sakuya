@@ -7,7 +7,7 @@
 //! - [`LocalResetAt`] is the type of reset target that is either a reset
 //!   with `RESET_STREAM` or one with `RESET_STREAM_AT` and a reliable size
 //!   ([`ResetTarget`]). A [`StreamSender`] of these targets,
-//!   `StreamSender<C, K, LocalResetAt>`, resets with
+//!   `StreamSender<C, K, Lc, LocalResetAt>`, resets with
 //!   [`reset`](StreamSender::reset) and
 //!   [`reset_at`](StreamSender::reset_at).
 //! - A `reset_at` in effect may lower its reliable size, and `reset` may
@@ -481,14 +481,16 @@ impl ReliablePrefixNotPreparedError {
 }
 
 /// Failures of [`StreamSender::reset_at`]; none of them changes any state.
+///
+/// `Lc` is the type of the connection's local close cause.
 #[derive(Clone, Debug, PartialEq, Eq, Snafu)]
 #[snafu(module(reset_at_error))]
-pub enum ResetAtError {
+pub enum ResetAtError<Lc> {
     /// The connection has closed.
     #[snafu(transparent)]
     ConnectionClosed {
         /// The closed connection.
-        source: ConnectionClosedError,
+        source: ConnectionClosedError<Lc>,
     },
     /// The error code differs from the effective reset's.
     #[snafu(display("the reset conflicts with the effective reset"))]
@@ -524,14 +526,16 @@ pub enum ResetAtError {
 
 /// Failures of [`StreamSender::reset_at_with_final_size`]; none of them
 /// changes any state.
+///
+/// `Lc` is the type of the connection's local close cause.
 #[derive(Clone, Debug, PartialEq, Eq, Snafu)]
 #[snafu(module(reset_at_with_final_size_error))]
-pub enum ResetAtWithFinalSizeError {
+pub enum ResetAtWithFinalSizeError<Lc> {
     /// The connection has closed.
     #[snafu(transparent)]
     ConnectionClosed {
         /// The closed connection.
-        source: ConnectionClosedError,
+        source: ConnectionClosedError<Lc>,
     },
     /// The error code differs from the effective reset's.
     #[snafu(display("the reset conflicts with the effective reset"))]
@@ -596,10 +600,10 @@ pub enum ResetAtWithFinalSizeError {
 }
 
 /// The failure of a request for a [`LocalResetAt`].
-type RequestError = RequestResetError<LocalResetAtConflictError, LocalResetAtUnfitError>;
+type RequestError<Lc> = RequestResetError<LocalResetAtConflictError, LocalResetAtUnfitError, Lc>;
 
-impl From<RequestError> for ResetAtWithFinalSizeError {
-    fn from(error: RequestError) -> Self {
+impl<Lc> From<RequestError<Lc>> for ResetAtWithFinalSizeError<Lc> {
+    fn from(error: RequestError<Lc>) -> Self {
         use LocalResetAtConflictError as Conflict;
         use LocalResetAtUnfitError as Unfit;
         use RequestResetError as General;
@@ -633,9 +637,9 @@ impl From<RequestError> for ResetAtWithFinalSizeError {
     }
 }
 
-impl ResetAtError {
+impl<Lc> ResetAtError<Lc> {
     /// The failure of a `reset_at` request without a final size.
-    fn narrow(error: RequestError) -> Self {
+    fn narrow(error: RequestError<Lc>) -> Self {
         use ResetAtWithFinalSizeError as General;
         match General::from(error) {
             General::ConnectionClosed { source } => Self::ConnectionClosed { source },
@@ -648,12 +652,12 @@ impl ResetAtError {
             }
             // invariant: a request without a final size is not compared with
             // a fixed one and leaves the choice to the termination policy.
-            error @ (General::FinalSizeConflictsWithReset { .. }
+            General::FinalSizeConflictsWithReset { .. }
             | General::FinalSizeConflictsWithClose { .. }
             | General::FinalSizeBelowReliableSize { .. }
             | General::FinalSizeBelowExposure { .. }
-            | General::FinalSizeBeyondWrittenEnd { .. }) => {
-                unreachable!("a reset without a final size cannot fail with {error:?}")
+            | General::FinalSizeBeyondWrittenEnd { .. } => {
+                unreachable!("a reset without a final size cannot fail with a final size error")
             }
         }
     }
@@ -661,7 +665,7 @@ impl ResetAtError {
 
 /// The failure of a `reset` request, whose reliable size is zero, as the
 /// failure of the same request for a [`LocalReset`].
-fn plain_reset_error(error: RequestError) -> RequestResetError<Infallible, Infallible> {
+fn plain_reset_error<Lc>(error: RequestError<Lc>) -> RequestResetError<Infallible, Infallible, Lc> {
     use RequestResetError as General;
     match error {
         General::ConnectionClosed { source } => General::ConnectionClosed { source },
@@ -681,12 +685,14 @@ fn plain_reset_error(error: RequestError) -> RequestResetError<Infallible, Infal
         // size, no written end and no final size, and the request of `reset`
         // may follow either kind of reset.
         General::Conflict { .. } | General::Unfit { .. } => {
-            unreachable!("a reset without a reliable prefix cannot fail with {error:?}")
+            unreachable!(
+                "a reset without a reliable prefix cannot fail with a reliable prefix error"
+            )
         }
     }
 }
 
-impl<C, K> StreamSender<C, K, LocalResetAt>
+impl<C, K, Lc> StreamSender<C, K, Lc, LocalResetAt>
 where
     K: ConnectionSendFlowController,
     C: StreamSendBuffer<Reservation = K::Reservation>
@@ -708,7 +714,7 @@ where
     /// 1. [`ResetError::ConnectionClosed`];
     /// 2. [`ResetError::ErrorCodeConflict`] against an effective reset;
     /// 3. [`ResetError::ProtocolTerminal`].
-    pub fn reset(&mut self, error_code: ApplicationErrorCode) -> Result<(), ResetError> {
+    pub fn reset(&mut self, error_code: ApplicationErrorCode) -> Result<(), ResetError<Lc>> {
         self.request_reset(LocalResetAtRequest::reset(error_code), None)
             .map_err(|error| ResetError::from_request_without_final_size(plain_reset_error(error)))
     }
@@ -737,7 +743,7 @@ where
         &mut self,
         error_code: ApplicationErrorCode,
         final_size: VarInt,
-    ) -> Result<(), ResetWithFinalSizeError> {
+    ) -> Result<(), ResetWithFinalSizeError<Lc>> {
         self.request_reset(LocalResetAtRequest::reset(error_code), Some(final_size))
             .map_err(|error| plain_reset_error(error).into())
     }
@@ -767,7 +773,7 @@ where
         support: PeerResetStreamAtSupport,
         error_code: ApplicationErrorCode,
         reliable_size: VarInt,
-    ) -> Result<(), ResetAtError> {
+    ) -> Result<(), ResetAtError<Lc>> {
         let request = LocalResetAtRequest::reset_at(support, error_code, reliable_size);
         self.request_reset(request, None)
             .map_err(ResetAtError::narrow)
@@ -805,7 +811,7 @@ where
         error_code: ApplicationErrorCode,
         reliable_size: VarInt,
         final_size: VarInt,
-    ) -> Result<(), ResetAtWithFinalSizeError> {
+    ) -> Result<(), ResetAtWithFinalSizeError<Lc>> {
         let request = LocalResetAtRequest::reset_at(support, error_code, reliable_size);
         Ok(self.request_reset(request, Some(final_size))?)
     }

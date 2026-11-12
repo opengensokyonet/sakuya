@@ -229,7 +229,7 @@ fn waits_for_expected_data_only() {
 
 #[test]
 fn read_error_delegates_to_the_closed_connection() {
-    let error: ReadError<&str> = ReadError::ConnectionClosed {
+    let error: ReadError<&str, TestCloseCause> = ReadError::ConnectionClosed {
         source: ConnectionClosedError::new(close_reason()),
     };
     assert_eq!(

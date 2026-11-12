@@ -78,7 +78,7 @@ type Composition<F> = SendComposition<
     Answering<F>,
 >;
 
-type Sender<F> = StreamSender<Composition<F>, AtomicConnectionSendFlowController>;
+type Sender<F> = StreamSender<Composition<F>, AtomicConnectionSendFlowController, TestCloseCause>;
 
 fn sender<F>(connection: &Arc<AtomicConnectionSendFlowController>, answer: F) -> Sender<F>
 where
@@ -174,7 +174,7 @@ impl SendFlowControlPolicy for StaleOffset {
 #[test]
 fn a_stale_guard_consumes_nothing_before_the_panic() {
     let connection = Arc::new(AtomicConnectionSendFlowController::new(v(1000)));
-    let mut stream = StreamSender::<_, _, LocalReset>::new(
+    let mut stream = StreamSender::<_, _, TestCloseCause, LocalReset>::new(
         StreamId::from_var_int(v(0)),
         v(1000),
         SendComposition::new(
@@ -310,7 +310,7 @@ impl ReceiveTerminationPolicy for BaseReceive {
 #[test]
 fn reception_completes_after_the_reader_is_gone() {
     let mut connection = ConnectionReceiveFlowController::new(v(1000));
-    let mut receiver: StreamReceiver<BaseReceive> = StreamReceiver::new(
+    let mut receiver: StreamReceiver<BaseReceive, TestCloseCause> = StreamReceiver::new(
         BaseReceive {
             buffer: FragmentedStreamReceiveBuffer::new(),
             termination: FollowingTermination::new(code(9)),
@@ -343,3 +343,15 @@ fn reception_completes_after_the_reader_is_gone() {
         "STOP_SENDING is unnecessary now"
     );
 }
+
+/// The type of the local close cause of the test connections.
+#[derive(Debug, PartialEq, Eq)]
+struct TestCloseCause(&'static str);
+
+impl core::fmt::Display for TestCloseCause {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl core::error::Error for TestCloseCause {}
