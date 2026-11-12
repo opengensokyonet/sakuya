@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use sakuya_link::{BindingId, LinkId};
+use sakuya_link::{BindingId, Link as _, LinkId};
 use sakuya_wire::connection_id::StatelessResetToken;
 
 use super::support::*;
@@ -18,13 +18,17 @@ fn reset_datagram() -> Vec<u8> {
     bytes
 }
 
-fn any_link() -> TestLinkId {
+fn any_link() -> TestLink {
     link(&local_end())
 }
 
 /// A link from `peer` to a local end no other link has.
-fn link_from(peer: Peer) -> TestLinkId {
-    LinkId::new::<TestLink>(local_end(), peer, &BindingId::new())
+fn link_from(peer: Peer) -> TestLink {
+    TestLink::new(LinkId::new::<TestLink>(
+        local_end(),
+        peer,
+        &BindingId::new(),
+    ))
 }
 
 #[test]
@@ -33,26 +37,26 @@ fn revoking_removes_exactly_its_registration() {
     let token = StatelessResetToken::new(TOKEN);
     let link = any_link();
     let (first, second) = (ResetProbe::default(), ResetProbe::default());
-    let revoked = tokens.register(link.peer, token, first.clone());
-    let kept = tokens.register(link.peer, token, second.clone());
-    assert!(tokens.detect(&token, &link).is_some());
+    let revoked = tokens.register(link.id().peer, token, first.clone());
+    let kept = tokens.register(link.id().peer, token, second.clone());
+    assert!(tokens.detect(&token, link.id()).is_some());
     drop(revoked);
     let target = tokens
-        .detect(&token, &link)
+        .detect(&token, link.id())
         .expect("the second registration remains");
     target.stateless_reset_received();
     assert_eq!(first.0.load(Ordering::SeqCst), 0);
     assert_eq!(second.0.load(Ordering::SeqCst), 1);
     drop(target);
     drop(kept);
-    assert!(tokens.detect(&token, &link).is_none());
+    assert!(tokens.detect(&token, link.id()).is_none());
 }
 
 #[test]
 fn revoking_after_the_detector_is_gone_does_nothing() {
     let tokens = StatelessResetTokens::new();
     let registration = tokens.register(
-        any_link().peer,
+        any_link().id().peer,
         StatelessResetToken::new(TOKEN),
         ResetProbe::default(),
     );
@@ -65,10 +69,11 @@ fn a_revoked_token_routes_as_an_ordinary_datagram() {
     let domain = Domain::new(&[8]);
     let probe = ResetProbe::default();
     let link = any_link();
-    let registration =
-        domain
-            .resets
-            .register(link.peer, StatelessResetToken::new(TOKEN), probe.clone());
+    let registration = domain.resets.register(
+        link.id().peer,
+        StatelessResetToken::new(TOKEN),
+        probe.clone(),
+    );
     domain.route(reset_datagram(), &link);
     assert_eq!(probe.0.load(Ordering::SeqCst), 1);
     drop(registration);
@@ -85,7 +90,7 @@ fn a_token_does_not_apply_on_an_unrelated_link() {
     let probe = ResetProbe::default();
     // The connection that owns the token only ever used another link.
     let _registration = domain.resets.register(
-        any_link().peer,
+        any_link().id().peer,
         StatelessResetToken::new(TOKEN),
         probe.clone(),
     );
@@ -101,12 +106,12 @@ fn a_token_applies_to_its_peer_through_another_local_end() {
     let probe = ResetProbe::default();
     let registered_on = any_link();
     let _registration = domain.resets.register(
-        registered_on.peer,
+        registered_on.id().peer,
         StatelessResetToken::new(TOKEN),
         probe.clone(),
     );
-    let arrived_on = link_from(registered_on.peer);
-    assert_ne!(arrived_on.local, registered_on.local);
+    let arrived_on = link_from(registered_on.id().peer);
+    assert_ne!(arrived_on.id().local, registered_on.id().local);
     domain.route(reset_datagram(), &arrived_on);
     assert_eq!(probe.0.load(Ordering::SeqCst), 1);
 }
@@ -119,10 +124,10 @@ fn the_same_token_on_two_peers_resets_the_target_of_the_arriving_peer() {
     let token = StatelessResetToken::new(TOKEN);
     let (one, other) = (any_link(), any_link());
     let (one_probe, other_probe) = (ResetProbe::default(), ResetProbe::default());
-    let _one = tokens.register(one.peer, token, one_probe.clone());
-    let _other = tokens.register(other.peer, token, other_probe.clone());
+    let _one = tokens.register(one.id().peer, token, one_probe.clone());
+    let _other = tokens.register(other.id().peer, token, other_probe.clone());
     tokens
-        .detect(&token, &other)
+        .detect(&token, other.id())
         .expect("registered for this peer")
         .stateless_reset_received();
     assert_eq!(one_probe.0.load(Ordering::SeqCst), 0);

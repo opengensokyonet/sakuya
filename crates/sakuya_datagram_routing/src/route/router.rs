@@ -4,7 +4,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use sakuya_link::LinkId;
+use sakuya_link::{LinkId, ReceivedDatagram};
 use sakuya_wire::connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken};
 use sakuya_wire::header::{
     HeaderForm,
@@ -21,7 +21,6 @@ use super::acceptance::{
     InitialAcceptance, InitialDatagramReceiver, InitialReceiverFactory, ReflowHandoff,
     ReflowProvider, UnclaimedWork,
 };
-use super::datagram::{LinkIdentity, ReceivedDatagram};
 use super::index::{FrozenEntries, Lookup, OfferedRouteHistory, Recheck, RouteIndex};
 use super::interpretation::{FirstPacketInterpretation, RecognizedInitial};
 use super::recognizer::ConnectionIdRecognizer;
@@ -40,13 +39,13 @@ use crate::claim::shared::DatagramFinishPolicy;
 /// answer with Version Negotiation where the role and the protocol allow it.
 /// Version Negotiation packets themselves (version 0) are not unsupported
 /// versions; they go to the existing client entries.
-pub trait VersionService<Payload, Link> {
+pub trait VersionService<Payload, Link: sakuya_link::Link> {
     /// Takes over a datagram whose first packet has the non-zero `version`.
     fn unsupported_version(&self, version: Version, datagram: ReceivedDatagram<Payload, Link>);
 }
 
 /// No version service: datagrams of unsupported versions are released.
-impl<Payload, Link> VersionService<Payload, Link> for () {
+impl<Payload, Link: sakuya_link::Link> VersionService<Payload, Link> for () {
     fn unsupported_version(&self, _version: Version, _datagram: ReceivedDatagram<Payload, Link>) {}
 }
 
@@ -62,13 +61,13 @@ impl<Payload, Link> VersionService<Payload, Link> for () {
 /// whose candidates all exit, are released instead.
 ///
 /// [RFC 9000 §10.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-10.3
-pub trait StatelessResetService<Payload, Link> {
+pub trait StatelessResetService<Payload, Link: sakuya_link::Link> {
     /// Takes over a short header datagram no route entry applies to.
     fn unclaimed_short_header(&self, datagram: ReceivedDatagram<Payload, Link>);
 }
 
 /// No stateless reset service: unclaimed short header datagrams are released.
-impl<Payload, Link> StatelessResetService<Payload, Link> for () {
+impl<Payload, Link: sakuya_link::Link> StatelessResetService<Payload, Link> for () {
     fn unclaimed_short_header(&self, _datagram: ReceivedDatagram<Payload, Link>) {}
 }
 
@@ -76,14 +75,14 @@ pub(super) mod sealed {
     use std::sync::Arc;
 
     use super::super::acceptance::UnclaimedWork;
-    use super::super::datagram::{LinkIdentity, ReceivedDatagram};
     use super::super::index::{FrozenEntries, RouteIndex};
     use super::super::interpretation::RecognizedInitial;
     use crate::claim::finish::UnclaimedHandoff;
     use crate::claim::shared::DatagramFinishPolicy;
+    use sakuya_link::ReceivedDatagram;
 
     /// The routing decisions that depend on Initial acceptance.
-    pub trait AcceptanceMode<Payload, Link: LinkIdentity, Target: ?Sized> {
+    pub trait AcceptanceMode<Payload, Link: sakuya_link::Link, Target: ?Sized> {
         /// What takes over an acceptable Initial that every candidate left.
         type Handoff: UnclaimedHandoff<ReceivedDatagram<Payload, Link>>;
 
@@ -119,20 +118,20 @@ pub(super) mod sealed {
 /// Neither mode requires `Send`: a routing domain used on one thread accepts
 /// new Initials with local deliverers, datagrams and providers, and a domain
 /// shared between threads is `Send` because its parts are.
-pub trait InitialAcceptanceMode<Payload, Link: LinkIdentity, Target: ?Sized>:
+pub trait InitialAcceptanceMode<Payload, Link: sakuya_link::Link, Target: ?Sized>:
     sealed::AcceptanceMode<Payload, Link, Target>
 {
 }
 
-impl<Payload, Link: LinkIdentity, Target: ?Sized, Mode> InitialAcceptanceMode<Payload, Link, Target>
-    for Mode
+impl<Payload, Link: sakuya_link::Link, Target: ?Sized, Mode>
+    InitialAcceptanceMode<Payload, Link, Target> for Mode
 where
     Mode: sealed::AcceptanceMode<Payload, Link, Target>,
 {
 }
 
 /// No acceptance: every Initial is offered to the existing entries only.
-impl<Payload, Link: LinkIdentity, Target: ?Sized> sealed::AcceptanceMode<Payload, Link, Target>
+impl<Payload, Link: sakuya_link::Link, Target: ?Sized> sealed::AcceptanceMode<Payload, Link, Target>
     for ()
 {
     type Handoff = ReleaseUnclaimed;
@@ -159,7 +158,7 @@ impl<Payload, Link, Target, Factory, Provider> sealed::AcceptanceMode<Payload, L
     for InitialAcceptance<Factory, Provider>
 where
     Payload: AsRef<[u8]>,
-    Link: LinkIdentity,
+    Link: sakuya_link::Link,
     Target: ?Sized
         + ErasedDatagramDeliverer<
             ReceivedDatagram<Payload, Link>,
@@ -230,7 +229,7 @@ where
 /// caller's stack and return.
 pub struct DatagramRouter<
     Payload,
-    Link: LinkIdentity,
+    Link: sakuya_link::Link,
     Target: ?Sized,
     Recognizer,
     Reset = (),
@@ -247,7 +246,7 @@ pub struct DatagramRouter<
     datagram: PhantomData<fn(ReceivedDatagram<Payload, Link>)>,
 }
 
-impl<Payload, Link: LinkIdentity, Target: ?Sized, Recognizer>
+impl<Payload, Link: sakuya_link::Link, Target: ?Sized, Recognizer>
     DatagramRouter<Payload, Link, Target, Recognizer>
 {
     /// Routes into `index`, reading short headers with `recognizer`, without
@@ -267,7 +266,7 @@ impl<Payload, Link: LinkIdentity, Target: ?Sized, Recognizer>
 
 impl<
     Payload,
-    Link: LinkIdentity,
+    Link: sakuya_link::Link,
     Target: ?Sized,
     Recognizer,
     Reset,
@@ -371,7 +370,7 @@ impl<Payload, Link, Target, Recognizer, Reset, Versions, Acceptance, ResetServic
     DatagramRouter<Payload, Link, Target, Recognizer, Reset, Versions, Acceptance, ResetService>
 where
     Payload: AsRef<[u8]>,
-    Link: LinkIdentity,
+    Link: sakuya_link::Link,
     Target: ?Sized
         + ErasedDatagramDeliverer<ReceivedDatagram<Payload, Link>, Link::Local, Acceptance::Handoff>,
     Recognizer: ConnectionIdRecognizer<Link::Local, Link::Peer>,
@@ -405,7 +404,7 @@ where
     /// that work on this call stack.
     pub fn route(&self, datagram: ReceivedDatagram<Payload, Link>) {
         let bytes = datagram.payload().as_ref();
-        let link = datagram.link().link_id();
+        let link = datagram.link().id();
         let reset = bytes
             .last_chunk::<{ StatelessResetToken::LEN }>()
             .and_then(|tail| self.reset.detect(&StatelessResetToken::new(*tail), link));
@@ -466,7 +465,7 @@ where
 
 impl<
     Payload,
-    Link: LinkIdentity,
+    Link: sakuya_link::Link,
     Target: ?Sized,
     Recognizer,
     Reset,
@@ -489,7 +488,7 @@ fn dispatch<Payload, Link, Handoff, Target>(
     finish: DatagramFinishPolicy<Handoff>,
     frozen: FrozenEntries<Target, Link::Local>,
 ) where
-    Link: LinkIdentity,
+    Link: sakuya_link::Link,
     Handoff: UnclaimedHandoff<ReceivedDatagram<Payload, Link>>,
     Target: ?Sized + ErasedDatagramDeliverer<ReceivedDatagram<Payload, Link>, Link::Local, Handoff>,
 {

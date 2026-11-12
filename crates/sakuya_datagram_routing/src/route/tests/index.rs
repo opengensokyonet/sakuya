@@ -5,7 +5,8 @@ use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use super::support::{Local, TestLinkId};
+use super::support::{Local, TestLink, TestLinkId, arrival};
+use sakuya_link::{Link as _, ReceivedDatagram};
 use sakuya_wire::connection_id::{ConnectionId, StatelessResetToken};
 use sakuya_wire::v1::header::LongPacketType;
 use sakuya_wire::version::Version;
@@ -256,7 +257,7 @@ fn local_routing_domain_does_not_require_send() {
         }
     }
 
-    type ReceivedLocal = crate::route::datagram::ReceivedDatagram<Rc<[u8]>, Rc<TestLinkId>>;
+    type ReceivedLocal = ReceivedDatagram<Rc<[u8]>, TestLink<Rc<TestLinkId>>>;
 
     let seen = Cell::new(0);
     let index = RouteIndex::<dyn ErasedDatagramDeliverer<ReceivedLocal, Local> + '_, Local>::new();
@@ -270,10 +271,10 @@ fn local_routing_domain_does_not_require_send() {
     };
     let _local = index.register(matcher(), Arc::new(Counting { seen: &seen }));
     let _other = index.register(matcher(), Arc::new(Other { seen: &seen }));
-    let link = Rc::new(link(&local_end()));
-    router.route(crate::route::datagram::ReceivedDatagram::new(
+    let link = link(&local_end()).into_rc();
+    router.route(ReceivedDatagram::new(
         Rc::from(short(&cid(7), 30)),
-        link,
+        arrival(&link),
     ));
     assert_eq!(seen.get(), 11);
 }
@@ -346,7 +347,7 @@ fn length_sets_drop_repetitions_and_keep_ambiguity() {
     let link = link(&local_end());
     assert_eq!(
         lengths
-            .short_dcid_lengths(&[0x40; 16], &link)
+            .short_dcid_lengths(&[0x40; 16], link.id())
             .collect::<Vec<_>>(),
         expected
     );

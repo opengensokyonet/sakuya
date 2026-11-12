@@ -1,11 +1,19 @@
 //! Shared fixtures: packets built from the version 1 header rules, a
 //! recording deliverer, a receiver factory and a reflow queue
 
+use std::borrow::Borrow;
+use std::convert::Infallible;
+use std::future::Pending;
 use std::num::NonZeroUsize;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use sakuya_link::{BindingId, LinkId};
+use sakuya_link::{
+    ArrivalFacts, BindingId, Link, LinkId, MIN_DATAGRAM_SIZE, OutgoingDatagram, ReceivedDatagram,
+    SendAcceptance,
+};
 use sakuya_wire::connection_id::ConnectionIdLength;
 use sakuya_wire::header::codec::{ReadLongHeaderHostExt as _, ReadShortHeaderHostExt as _};
 use sakuya_wire::v1::header::{
@@ -28,7 +36,6 @@ use crate::route::acceptance::{
     ReflowHandoff, UnclaimedWork,
 };
 use crate::route::association::{MatchAssociation, PacketForms, RouteMatcher};
-use crate::route::datagram::ReceivedDatagram;
 use crate::route::index::{RouteEntryRegistration, RouteIndex};
 use crate::route::interpretation::{FirstPacketInterpretation, RecognizedInitial};
 use crate::route::recognizer::ConnectionIdLengths;
@@ -40,15 +47,15 @@ pub(super) type Local = u32;
 /// The peer's end of a test link: a stand-in for a remote address.
 pub(super) type Peer = u32;
 pub(super) type TestLinkId = LinkId<Local, Peer>;
-pub(super) type Datagram = ReceivedDatagram<Vec<u8>, TestLinkId>;
-pub(super) type Work = UnclaimedWork<Vec<u8>, TestLinkId>;
+pub(super) type Datagram = ReceivedDatagram<Vec<u8>, TestLink>;
+pub(super) type Work = UnclaimedWork<Vec<u8>, TestLink>;
 pub(super) type Reflow = DatagramDeliveryPoster<Work>;
 pub(super) type Handoff = ReflowHandoff<Reflow, Local>;
 pub(super) type Target = dyn SendDatagramDeliverer<Datagram, Local, Handoff>;
 pub(super) type Index = RouteIndex<Target, Local>;
 pub(super) type Router = DatagramRouter<
     Vec<u8>,
-    TestLinkId,
+    TestLink,
     Target,
     ConnectionIdLengths,
     Arc<StatelessResetTokens<Peer, ResetProbe>>,
@@ -57,7 +64,55 @@ pub(super) type Router = DatagramRouter<
     UnclaimedShortProbe,
 >;
 
-pub(super) struct TestLink;
+/// A link of the tests: only its identity takes part in routing.
+///
+/// `Id` holds the identity; `TestLink<Rc<TestLinkId>>` is a link that stays
+/// on one thread. It never reads ECN, and its sends never complete.
+#[derive(Clone, Debug)]
+pub(super) struct TestLink<Id = TestLinkId>(Id);
+
+impl TestLink {
+    /// The link with the identity `id`.
+    pub(super) fn new(id: TestLinkId) -> Self {
+        Self(id)
+    }
+
+    /// The same link, holding its identity through an `Rc`.
+    pub(super) fn into_rc(self) -> TestLink<Rc<TestLinkId>> {
+        TestLink(Rc::new(self.0))
+    }
+}
+
+impl<Id: Borrow<TestLinkId> + Clone> Link for TestLink<Id> {
+    type Local = Local;
+    type Peer = Peer;
+    type Payload = Vec<u8>;
+    type Instant = Duration;
+    type MaxDatagramSizeError = Infallible;
+    type SendError = Infallible;
+    type Send<'a> = Pending<Result<SendAcceptance<Duration>, Infallible>>;
+    type MaxDatagramSizeChanged = Pending<()>;
+
+    fn id(&self) -> &TestLinkId {
+        self.0.borrow()
+    }
+
+    fn may_mark_ecn(&self) -> bool {
+        false
+    }
+
+    fn max_datagram_size(&self) -> Result<usize, Infallible> {
+        Ok(MIN_DATAGRAM_SIZE)
+    }
+
+    fn send<'a>(&self, _batch: &'a [OutgoingDatagram]) -> Self::Send<'a> {
+        std::future::pending()
+    }
+
+    fn max_datagram_size_changed(&self) -> Pending<()> {
+        std::future::pending()
+    }
+}
 
 static NEXT_END: AtomicU32 = AtomicU32::new(1);
 
@@ -68,16 +123,23 @@ pub(super) fn local_end() -> Local {
 
 /// A new link whose local end is `local`, with a peer end no other link of
 /// this function has.
-pub(super) fn link(local: &Local) -> TestLinkId {
-    LinkId::new::<TestLink>(
+pub(super) fn link(local: &Local) -> TestLink {
+    TestLink::new(LinkId::new::<TestLink>(
         *local,
         NEXT_END.fetch_add(1, Ordering::Relaxed),
         &BindingId::new(),
-    )
+    ))
 }
 
-pub(super) fn datagram(bytes: Vec<u8>, link: &TestLinkId) -> Datagram {
-    ReceivedDatagram::new(bytes, link.clone())
+/// An arrival on `link`, at a fixed instant, without an ECN codepoint.
+pub(super) fn arrival<Id: Borrow<TestLinkId> + Clone>(
+    link: &TestLink<Id>,
+) -> ArrivalFacts<TestLink<Id>> {
+    ArrivalFacts::new(link.clone(), Duration::ZERO, None)
+}
+
+pub(super) fn datagram(bytes: Vec<u8>, link: &TestLink) -> Datagram {
+    ReceivedDatagram::new(bytes, arrival(link))
 }
 
 /// A recognizer for the given short header connection ID lengths.
@@ -347,7 +409,7 @@ pub(super) struct TestReceiver {
     before: Option<Box<dyn FnOnce(&Arc<Recorder>) + Send>>,
 }
 
-impl InitialDatagramReceiver<Vec<u8>, TestLinkId, Target> for TestReceiver {
+impl InitialDatagramReceiver<Vec<u8>, TestLink, Target> for TestReceiver {
     fn receive_first(
         self,
         registration: RouteEntryRegistration<Target, Local>,
@@ -412,7 +474,7 @@ impl Factory {
     }
 }
 
-impl InitialReceiverFactory<Vec<u8>, TestLinkId, Target> for Factory {
+impl InitialReceiverFactory<Vec<u8>, TestLink, Target> for Factory {
     type Receiver = TestReceiver;
 
     fn admits(&self, _initial: &RecognizedInitial<Local>, datagram: &Datagram) -> bool {
@@ -449,7 +511,7 @@ impl InitialReceiverFactory<Vec<u8>, TestLinkId, Target> for Factory {
 #[derive(Clone, Default)]
 pub(super) struct VersionProbe(pub(super) Arc<Mutex<Vec<Version>>>);
 
-impl VersionService<Vec<u8>, TestLinkId> for VersionProbe {
+impl VersionService<Vec<u8>, TestLink> for VersionProbe {
     fn unsupported_version(&self, version: Version, _datagram: Datagram) {
         self.0.lock().unwrap().push(version);
     }
@@ -459,7 +521,7 @@ impl VersionService<Vec<u8>, TestLinkId> for VersionProbe {
 #[derive(Clone, Default)]
 pub(super) struct UnclaimedShortProbe(pub(super) Arc<Mutex<Vec<Vec<u8>>>>);
 
-impl StatelessResetService<Vec<u8>, TestLinkId> for UnclaimedShortProbe {
+impl StatelessResetService<Vec<u8>, TestLink> for UnclaimedShortProbe {
     fn unclaimed_short_header(&self, datagram: Datagram) {
         self.0.lock().unwrap().push(datagram.payload().clone());
     }
@@ -516,7 +578,7 @@ impl Domain {
         self.router.index()
     }
 
-    pub(super) fn route(&self, bytes: Vec<u8>, link: &TestLinkId) {
+    pub(super) fn route(&self, bytes: Vec<u8>, link: &TestLink) {
         self.router.route(datagram(bytes, link));
     }
 

@@ -34,12 +34,12 @@
 use std::fmt;
 use std::sync::Arc;
 
-use super::datagram::{LinkIdentity, ReceivedDatagram};
 use super::index::{OfferedRouteHistory, RouteEntryRegistration};
 use super::interpretation::RecognizedInitial;
 use crate::claim::delivery::ExclusiveDatagram;
 use crate::claim::finish::UnclaimedHandoff;
 use crate::claim::queue::DatagramDeliveryPoster;
+use sakuya_link::ReceivedDatagram;
 
 /// A datagram that every candidate left unclaimed, with what routing needs to
 /// continue.
@@ -49,13 +49,13 @@ use crate::claim::queue::DatagramDeliveryPoster;
 /// The capabilities to look up, prepare and publish come from the router the
 /// work is resumed with. Taking it over only moves ownership; dropping it
 /// releases the datagram and its history. It is `Send` when the datagram is.
-pub struct UnclaimedWork<Payload, Link: LinkIdentity> {
+pub struct UnclaimedWork<Payload, Link: sakuya_link::Link> {
     datagram: ReceivedDatagram<Payload, Link>,
     offered: OfferedRouteHistory,
     initial: RecognizedInitial<Link::Local>,
 }
 
-impl<Payload, Link: LinkIdentity> UnclaimedWork<Payload, Link> {
+impl<Payload, Link: sakuya_link::Link> UnclaimedWork<Payload, Link> {
     /// The unclaimed datagram.
     pub fn datagram(&self) -> &ReceivedDatagram<Payload, Link> {
         &self.datagram
@@ -87,7 +87,7 @@ impl<Payload, Link: LinkIdentity> UnclaimedWork<Payload, Link> {
     }
 }
 
-impl<Payload, Link: LinkIdentity> fmt::Debug for UnclaimedWork<Payload, Link>
+impl<Payload, Link: sakuya_link::Link> fmt::Debug for UnclaimedWork<Payload, Link>
 where
     Link::Local: fmt::Debug,
 {
@@ -114,7 +114,7 @@ where
 /// The trait requires neither `Send` nor `Sync`. A provider shared by the
 /// candidates of a routing domain used across threads must be both, so that
 /// the domain's [`ReflowHandoff`] is `Send`.
-pub trait ReflowProvider<Payload, Link: LinkIdentity> {
+pub trait ReflowProvider<Payload, Link: sakuya_link::Link> {
     /// Takes over one round of unclaimed work.
     fn hand_off(&self, work: UnclaimedWork<Payload, Link>);
 }
@@ -149,7 +149,7 @@ impl<Provider, Local> ReflowHandoff<Provider, Local> {
     }
 }
 
-impl<Payload, Link: LinkIdentity, Provider: ReflowProvider<Payload, Link>>
+impl<Payload, Link: sakuya_link::Link, Provider: ReflowProvider<Payload, Link>>
     UnclaimedHandoff<ReceivedDatagram<Payload, Link>> for ReflowHandoff<Provider, Link::Local>
 {
     fn hand_off(self, datagram: ReceivedDatagram<Payload, Link>) {
@@ -173,7 +173,7 @@ impl<Provider, Local: fmt::Debug> fmt::Debug for ReflowHandoff<Provider, Local> 
 /// Builds receivers for Initials that no existing receiver claimed.
 ///
 /// The router calls it outside every index lock.
-pub trait InitialReceiverFactory<Payload, Link: LinkIdentity, Target: ?Sized> {
+pub trait InitialReceiverFactory<Payload, Link: sakuya_link::Link, Target: ?Sized> {
     /// The receiver this factory prepares.
     type Receiver: InitialDatagramReceiver<Payload, Link, Target>;
 
@@ -232,7 +232,7 @@ impl<Target: ?Sized, Receiver> fmt::Debug for PreparedReceiver<Target, Receiver>
 }
 
 /// The datagram receiver of a newly published Initial entry.
-pub trait InitialDatagramReceiver<Payload, Link: LinkIdentity, Target: ?Sized> {
+pub trait InitialDatagramReceiver<Payload, Link: sakuya_link::Link, Target: ?Sized> {
     /// Takes over the registration of the new entry and the first datagram.
     ///
     /// The receiver now owns the registration and is responsible for revoking
@@ -289,7 +289,7 @@ impl<Factory, Provider> fmt::Debug for InitialAcceptance<Factory, Provider> {
 /// [`DatagramRouter::resume`](super::router::DatagramRouter::resume), on its
 /// own stack. A closed or full queue drops the work, which releases the
 /// datagram.
-impl<Payload, Link: LinkIdentity> ReflowProvider<Payload, Link>
+impl<Payload, Link: sakuya_link::Link> ReflowProvider<Payload, Link>
     for DatagramDeliveryPoster<UnclaimedWork<Payload, Link>>
 {
     fn hand_off(&self, work: UnclaimedWork<Payload, Link>) {

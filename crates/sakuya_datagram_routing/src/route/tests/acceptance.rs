@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex, Weak, mpsc};
 use std::time::Duration;
 
-use super::support::{Local, TestLinkId};
+use super::support::{Local, TestLink};
 use sakuya_wire::v1::header::LongPacketType;
 
 use super::support::{
@@ -341,7 +341,7 @@ fn prepared_material_is_dropped_outside_the_index() {
 
     struct Ignored;
 
-    impl InitialDatagramReceiver<Vec<u8>, TestLinkId, Target> for Ignored {
+    impl InitialDatagramReceiver<Vec<u8>, TestLink, Target> for Ignored {
         fn receive_first(
             self,
             _: RouteEntryRegistration<Target, Local>,
@@ -356,7 +356,7 @@ fn prepared_material_is_dropped_outside_the_index() {
         dropped: Arc<AtomicUsize>,
     }
 
-    impl InitialReceiverFactory<Vec<u8>, TestLinkId, Target> for Preparing {
+    impl InitialReceiverFactory<Vec<u8>, TestLink, Target> for Preparing {
         type Receiver = Ignored;
 
         fn admits(&self, _: &RecognizedInitial<Local>, _: &Datagram) -> bool {

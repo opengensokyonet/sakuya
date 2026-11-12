@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use sakuya_link::Link as _;
 use sakuya_wire::connection_id::StatelessResetToken;
 use sakuya_wire::v1::header::LongPacketType;
 use sakuya_wire::version::Version;
@@ -15,7 +16,6 @@ use super::support::*;
 use crate::claim::deliverer::DatagramDeliverer;
 use crate::claim::delivery::DatagramDelivery;
 use crate::route::association::{MatchAssociation, PacketForms, RouteMatcher};
-use crate::route::datagram::ReceivedDatagram;
 use crate::route::index::RouteEntryRegistration;
 use crate::route::recognizer::ConnectionIdOccupancy;
 
@@ -72,7 +72,7 @@ fn a_lookup_does_not_combine_two_states_of_a_bucket() {
     while started.elapsed() < DEADLINE && missed == 0 {
         for _ in 0..4096 {
             let before = delivered.load(Ordering::SeqCst);
-            router.route(ReceivedDatagram::new(bytes.clone(), arrival.clone()));
+            router.route(datagram(bytes.clone(), &arrival));
             routed += 1;
             if delivered.load(Ordering::SeqCst) == before {
                 missed += 1;
@@ -203,10 +203,11 @@ fn a_reflow_round_does_not_repeat_reset_detection() {
     let tail = *bytes.last_chunk().unwrap();
     let arrival = link(&local_end());
     domain.route(bytes, &arrival);
-    let _token =
-        domain
-            .resets
-            .register(arrival.peer, StatelessResetToken::new(tail), probe.clone());
+    let _token = domain.resets.register(
+        arrival.id().peer,
+        StatelessResetToken::new(tail),
+        probe.clone(),
+    );
     assert_eq!(domain.drain(), 1);
     assert_eq!(probe.0.load(Ordering::SeqCst), 0);
     assert_eq!(domain.factory.accepted_count(), 1);

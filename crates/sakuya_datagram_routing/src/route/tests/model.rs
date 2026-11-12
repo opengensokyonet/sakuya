@@ -128,7 +128,7 @@ struct ModelDatagram {
 
 struct Model {
     domain: Domain,
-    links: [TestLinkId; 2],
+    links: [TestLink; 2],
     ends: [Local; 2],
     entries: Vec<Entry>,
     datagrams: BTreeMap<u32, ModelDatagram>,

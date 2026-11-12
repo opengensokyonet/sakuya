@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use sakuya_link::Link as _;
 use sakuya_wire::connection_id::StatelessResetToken;
 use sakuya_wire::v1::header::LongPacketType;
 use sakuya_wire::version::Version;
@@ -77,10 +78,11 @@ fn stateless_reset_hit_ends_ordinary_routing() {
     let token: [u8; 16] = datagram[datagram.len() - 16..].try_into().unwrap();
     let probe = ResetProbe::default();
     let arrival = link(&end);
-    let registration =
-        domain
-            .resets
-            .register(arrival.peer, StatelessResetToken::new(token), probe.clone());
+    let registration = domain.resets.register(
+        arrival.id().peer,
+        StatelessResetToken::new(token),
+        probe.clone(),
+    );
 
     domain.route(datagram.clone(), &arrival);
     assert_eq!(counts(&entries), [0, 0, 0]);
@@ -103,10 +105,11 @@ fn datagram_shorter_than_a_token_is_never_a_reset() {
     token[16 - datagram.len()..].copy_from_slice(&datagram);
     let probe = ResetProbe::default();
     let arrival = link(&end);
-    let _registration =
-        domain
-            .resets
-            .register(arrival.peer, StatelessResetToken::new(token), probe.clone());
+    let _registration = domain.resets.register(
+        arrival.id().peer,
+        StatelessResetToken::new(token),
+        probe.clone(),
+    );
     domain.route(datagram, &arrival);
     assert_eq!(probe.0.load(Ordering::SeqCst), 0);
     assert_eq!(counts(&entries), [1, 0, 0]);
@@ -260,7 +263,7 @@ fn zero_length_entry_follows_the_local_end_not_the_peer() {
     let end = local_end();
     let entries = entries(&domain, 1, &end);
     let (first, second) = (link(&end), link(&end));
-    assert_ne!(first.peer, second.peer);
+    assert_ne!(first.id().peer, second.id().peer);
     let elsewhere = link(&local_end());
     // The peer changed, the local end did not: the registration is found.
     domain.route(short(&[], 30), &first);

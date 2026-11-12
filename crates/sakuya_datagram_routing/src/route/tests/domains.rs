@@ -4,7 +4,8 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use super::support::{Local, TestLinkId};
+use super::support::{Local, TestLink, TestLinkId, arrival};
+use sakuya_link::ReceivedDatagram;
 use sakuya_wire::version::Version;
 
 use super::support::{
@@ -23,13 +24,12 @@ use crate::route::acceptance::{
     ReflowHandoff, ReflowProvider, UnclaimedWork,
 };
 use crate::route::association::{MatchAssociation, PacketForms, RouteMatcher};
-use crate::route::datagram::ReceivedDatagram;
 use crate::route::index::{RouteEntryRegistration, RouteIndex};
 use crate::route::interpretation::RecognizedInitial;
 use crate::route::router::DatagramRouter;
 
 type LocalPayload = Rc<[u8]>;
-type LocalLink = Rc<TestLinkId>;
+type LocalLink = TestLink<Rc<TestLinkId>>;
 type LocalDatagram = ReceivedDatagram<LocalPayload, LocalLink>;
 type LocalWork = UnclaimedWork<LocalPayload, LocalLink>;
 type LocalHandoff = ReflowHandoff<LocalReflow, Local>;
@@ -153,8 +153,8 @@ fn local_routing_domain_accepts_new_initials_without_send() {
         ),
         Arc::clone(&existing) as Arc<LocalTarget>,
     );
-    let link = Rc::new(link(&local_end()));
-    let datagram = |bytes: Vec<u8>| ReceivedDatagram::new(Rc::from(bytes), Rc::clone(&link));
+    let link = link(&local_end()).into_rc();
+    let datagram = |bytes: Vec<u8>| ReceivedDatagram::new(Rc::from(bytes), arrival(&link));
 
     // The existing entry judges and exits; its last exit hands the work off.
     router.route(datagram(initial(&cid(20), &cid(9))));

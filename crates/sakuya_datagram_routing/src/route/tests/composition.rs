@@ -6,7 +6,8 @@ use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::support::{Local, Peer, TestLinkId};
+use super::support::{Local, Peer, TestLink};
+use sakuya_link::Link as _;
 use sakuya_wire::connection_id::StatelessResetToken;
 use sakuya_wire::v1::header::LongPacketType;
 use sakuya_wire::version::Version;
@@ -107,7 +108,7 @@ struct ConnectionReceiver {
     connections: Arc<Mutex<Vec<Connection>>>,
 }
 
-impl InitialDatagramReceiver<Vec<u8>, TestLinkId, Target> for ConnectionReceiver {
+impl InitialDatagramReceiver<Vec<u8>, TestLink, Target> for ConnectionReceiver {
     fn receive_first(
         self,
         registration: RouteEntryRegistration<Target, Local>,
@@ -129,7 +130,7 @@ struct Server {
     connections: Arc<Mutex<Vec<Connection>>>,
 }
 
-impl InitialReceiverFactory<Vec<u8>, TestLinkId, Target> for Server {
+impl InitialReceiverFactory<Vec<u8>, TestLink, Target> for Server {
     type Receiver = ConnectionReceiver;
 
     fn admits(&self, _: &RecognizedInitial<Local>, datagram: &Datagram) -> bool {
@@ -205,7 +206,7 @@ fn datagrams_flow_from_the_link_to_connections_through_one_router() {
     reset_packet.extend([0x77; 16]);
     let token: [u8; 16] = reset_packet[reset_packet.len() - 16..].try_into().unwrap();
     connection.reset_registration = Some(resets.register(
-        link.peer,
+        link.id().peer,
         StatelessResetToken::new(token),
         connection.reset.clone(),
     ));

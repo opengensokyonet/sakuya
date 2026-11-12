@@ -1,7 +1,8 @@
 //! Datagram routing: from a received datagram to its claim candidates
 //!
-//! A link's datagram dispatcher receives each complete UDP datagram and passes
-//! it, with the link, to [`DatagramRouter::route`] as a [`ReceivedDatagram`].
+//! A link's datagram dispatcher receives each complete UDP datagram, with the
+//! facts of its arrival, as a [`ReceivedDatagram`] and passes it to
+//! [`DatagramRouter::route`].
 //! Routing keeps the receive registrations of one routing domain in a
 //! [`RouteIndex`], recognizes the first packet of the datagram, finds every
 //! route entry that applies, and delivers one claim candidate per entry
@@ -62,7 +63,7 @@
 //!
 //! [`DatagramRouter::route`]: router::DatagramRouter::route
 //! [`DatagramRouter::resume`]: router::DatagramRouter::resume
-//! [`ReceivedDatagram`]: datagram::ReceivedDatagram
+//! [`ReceivedDatagram`]: sakuya_link::ReceivedDatagram
 //! [`RouteIndex`]: index::RouteIndex
 //! [`MatchAssociation`]: association::MatchAssociation
 //! [`DatagramRouteEntry`]: index::DatagramRouteEntry
@@ -79,7 +80,6 @@
 
 pub mod acceptance;
 pub mod association;
-pub mod datagram;
 pub mod index;
 pub mod interpretation;
 pub mod recognizer;

@@ -1,6 +1,6 @@
 //! The link: a channel that keeps message boundaries.
 
-use core::{future::Future, hash::Hash, num::NonZeroUsize, ops::Add, time::Duration};
+use core::{fmt, future::Future, hash::Hash, num::NonZeroUsize, ops::Add, time::Duration};
 
 use bytes::Bytes;
 
@@ -216,4 +216,128 @@ pub struct SendAcceptance<I> {
     /// The instant the link accepted them; the connection records it as
     /// their send time.
     pub at: I,
+}
+
+/// The facts of a datagram's arrival: the link it arrived on, when, and the
+/// ECN codepoint of its IP header.
+///
+/// The link reports them as it receives: `link` is a clone of itself, `at`
+/// is read from its clock or taken from a receive timestamp, as the link
+/// chooses, and `ecn` is what it read from the IP header. Each packet cut
+/// out of a datagram keeps a copy of its own.
+pub struct ArrivalFacts<L: Link> {
+    link: L,
+    at: L::Instant,
+    ecn: Option<EcnCodepoint>,
+}
+
+impl<L: Link> ArrivalFacts<L> {
+    /// The arrival of a datagram on `link` at `at` with the ECN codepoint
+    /// `ecn`.
+    ///
+    /// `ecn` is `None` when the link cannot read ECN codepoints, and
+    /// `Some(EcnCodepoint::NotEct)` when it read one and the datagram was not
+    /// marked.
+    pub fn new(link: L, at: L::Instant, ecn: Option<EcnCodepoint>) -> Self {
+        Self { link, at, ecn }
+    }
+
+    /// The link the datagram arrived on.
+    pub fn link(&self) -> &L {
+        &self.link
+    }
+
+    /// When the datagram arrived.
+    pub fn at(&self) -> L::Instant {
+        self.at
+    }
+
+    /// The ECN codepoint of the datagram: `None` when the link cannot read
+    /// ECN codepoints, `Some(EcnCodepoint::NotEct)` when it read one and the
+    /// datagram was not marked.
+    pub fn ecn(&self) -> Option<EcnCodepoint> {
+        self.ecn
+    }
+}
+
+impl<L: Link> Clone for ArrivalFacts<L> {
+    fn clone(&self) -> Self {
+        Self {
+            link: self.link.clone(),
+            at: self.at,
+            ecn: self.ecn,
+        }
+    }
+}
+
+impl<L: Link + fmt::Debug> fmt::Debug for ArrivalFacts<L>
+where
+    L::Instant: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ArrivalFacts")
+            .field("link", &self.link)
+            .field("at", &self.at)
+            .field("ecn", &self.ecn)
+            .finish()
+    }
+}
+
+/// One complete UDP datagram as a link received it, with the facts of its
+/// arrival.
+///
+/// It keeps the complete payload and the [`ArrivalFacts`]. The identity of
+/// the arrival link, and through it this side's end, are read from the link
+/// when needed rather than stored again. It always stands for the whole
+/// datagram: a packet cut out of it is not a `ReceivedDatagram`. It is not
+/// `Clone`, so each datagram has exactly one original payload to take.
+pub struct ReceivedDatagram<Payload, L: Link> {
+    payload: Payload,
+    arrival: ArrivalFacts<L>,
+}
+
+impl<Payload, L: Link> ReceivedDatagram<Payload, L> {
+    /// Pairs a received payload with the facts of its arrival.
+    pub fn new(payload: Payload, arrival: ArrivalFacts<L>) -> Self {
+        Self { payload, arrival }
+    }
+
+    /// The complete payload.
+    pub fn payload(&self) -> &Payload {
+        &self.payload
+    }
+
+    /// The facts of the datagram's arrival.
+    pub fn arrival(&self) -> &ArrivalFacts<L> {
+        &self.arrival
+    }
+
+    /// The link the datagram arrived on.
+    pub fn link(&self) -> &L {
+        self.arrival.link()
+    }
+
+    /// Returns the payload and the facts of its arrival.
+    pub fn into_parts(self) -> (Payload, ArrivalFacts<L>) {
+        (self.payload, self.arrival)
+    }
+}
+
+/// The bytes of a received datagram are its payload's.
+impl<Payload: AsRef<[u8]>, L: Link> AsRef<[u8]> for ReceivedDatagram<Payload, L> {
+    fn as_ref(&self) -> &[u8] {
+        self.payload.as_ref()
+    }
+}
+
+impl<Payload: fmt::Debug, L: Link + fmt::Debug> fmt::Debug for ReceivedDatagram<Payload, L>
+where
+    L::Instant: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReceivedDatagram")
+            .field("payload", &self.payload)
+            .field("arrival", &self.arrival)
+            .finish()
+    }
 }

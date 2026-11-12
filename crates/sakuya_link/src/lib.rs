@@ -4,8 +4,10 @@
 //! binding produces links, channels that send and receive whole messages
 //! between this side and one peer. The three kinds of object have independent
 //! lifetimes, and old and new link bindings or links may coexist for the same
-//! local address. This crate provides the [`Link`] trait and the identity of a
-//! link; link bindings and link drivers have no traits yet.
+//! local address. This crate provides the [`Link`] trait, the identity of a
+//! link, and the datagrams a link sends and receives: a received one is a
+//! [`ReceivedDatagram`], with the [`ArrivalFacts`] of its arrival. Link
+//! bindings and link drivers have no traits yet.
 //!
 //! Code that refers to a link without holding it, such as a delayed
 //! notification, a map key or the routing of a datagram by where it arrived,
@@ -80,7 +82,8 @@ use nitori_id::{Identity, UniqueId};
 
 mod link;
 pub use link::{
-    EcnCodepoint, EcnMarking, Link, MIN_DATAGRAM_SIZE, OutgoingDatagram, SendAcceptance,
+    ArrivalFacts, EcnCodepoint, EcnMarking, Link, MIN_DATAGRAM_SIZE, OutgoingDatagram,
+    ReceivedDatagram, SendAcceptance,
 };
 
 /// The identity of a link binding: unique within the process, opaque.
