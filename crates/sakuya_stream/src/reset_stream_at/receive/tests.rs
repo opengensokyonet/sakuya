@@ -1,10 +1,7 @@
 //! The stream receiver with [`RemoteResetAt`] facts: `RESET_STREAM_AT` and
 //! `RESET_STREAM` in every order, the reliable prefix in reads, STOP requests
 //! and the termination policy contract, and the violations of both frames.
-use super::{
-    OnResetStreamAtError, OnResetStreamError as ResetAtOnResetStreamError, RemoteResetAt,
-    RemoteResetAtChange, ResetStreamAtFrame,
-};
+use super::{OnResetStreamError as ResetAtOnResetStreamError, RemoteResetAt, RemoteResetAtChange};
 use crate::connection::ConnectionClosedError;
 use crate::connection_receive_flow::{ConnectionReceiveFlowController, RecordUsageError};
 use crate::receive::flow_control::{
@@ -19,7 +16,7 @@ use crate::receive::termination::{
 use crate::receive::violation::{
     FinalSizeBelowReceivedError, OnRemoteResetError, OnResetStreamError, StreamLimitExceededError,
 };
-use crate::receive::{BoundaryMode, ResetStreamFrame, StreamReceiver};
+use crate::receive::{BoundaryMode, StreamReceiver};
 use crate::receive_buffer::{
     StreamDataInput, StreamReceiveBuffer, fragmented::FragmentedStreamReceiveBuffer,
 };
@@ -27,13 +24,15 @@ use crate::send::test_support::TestCloseCause;
 use crate::stream_end::{FinalSizeChangeError, ResetCodeChangeError};
 use bytes::{BufMut, Bytes};
 use core::fmt::Debug;
-use sakuya_wire::reset_stream_at::ReliableSizeError;
+use sakuya_wire::reset_stream_at::ResetStreamAtFrame;
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
+use sakuya_wire::v1::frame::reset_stream::ResetStreamFrame;
 use sakuya_wire::v1::transport_error::TransportErrorCode;
 use sakuya_wire::var_int::VarInt;
+use sakuya_wire::var_int::VarIntField;
 
 use crate::receive::test_support::{
-    c, close_reason, data, destroy, fix_both, reset, restrict, stream, v,
+    c, close_reason, data, destroy, fix_both, reset, restrict, stream, stream_id, v,
 };
 
 /// The events a policy of these receivers observes.
@@ -46,11 +45,13 @@ type View = TerminationView<RemoteResetAt>;
 const LOWERED: Event = TerminationEvent::ResetChanged(RemoteResetAtChange::ReliablePrefixLowered);
 
 fn reset_at(code: u32, final_size: u32, reliable_size: u32) -> ResetStreamAtFrame {
-    ResetStreamAtFrame {
-        code: c(code),
-        final_size: v(final_size),
-        reliable_size: v(reliable_size),
-    }
+    ResetStreamAtFrame::new(
+        stream_id(),
+        VarIntField::shortest(c(code)),
+        VarIntField::shortest(v(final_size)),
+        VarIntField::shortest(v(reliable_size)),
+    )
+    .expect("a reliable size within the final size")
 }
 
 fn facts(code: u32, final_size: u32, reliable_size: u32) -> RemoteResetAt {
@@ -348,19 +349,19 @@ fn reset_at_violation<T: ReceiveTerminationPolicy<RemoteResetAt>>(
     receiver: &mut Receiver<T>,
     connection: &mut ConnectionReceiveFlowController,
     frame: ResetStreamAtFrame,
-) -> OnResetStreamAtError {
+) -> ResetAtOnResetStreamError {
     violation(receiver, connection, |receiver, connection| {
         receiver.on_reset_stream_at(frame, connection)
     })
 }
 
 /// The violation of a rule that `RESET_STREAM_AT` shares with
-/// `RESET_STREAM`, as each of the two frame methods reports it.
+/// `RESET_STREAM`, as each of the two frame methods reports it: alike.
 fn shared(
     source: impl Into<ResetAtOnResetStreamError>,
-) -> (ResetAtOnResetStreamError, OnResetStreamAtError) {
+) -> (ResetAtOnResetStreamError, ResetAtOnResetStreamError) {
     let source = source.into();
-    (source, OnResetStreamAtError::Reset { source })
+    (source, source)
 }
 
 /// The violation of a rule of RFC 9000 for resets.
@@ -825,22 +826,6 @@ mod violation {
     use super::*;
 
     #[test]
-    fn reliable_size_exceeds_final_size() {
-        let (mut receiver, mut connection) = new_receiver(keep_all());
-        let error = reset_at_violation(&mut receiver, &mut connection, reset_at(1, 100, 101));
-        assert_eq!(
-            error,
-            OnResetStreamAtError::ReliableSizeExceedsFinalSize {
-                source: ReliableSizeError::check(v(100), v(101)).unwrap_err(),
-            }
-        );
-        assert_eq!(
-            error.transport_error_code(),
-            TransportErrorCode::FRAME_ENCODING_ERROR
-        );
-    }
-
-    #[test]
     fn final_size_changed() {
         let (mut receiver, mut connection) = new_receiver(keep_all());
         receiver
@@ -996,33 +981,10 @@ mod violation {
         );
     }
 
-    /// The reliable size is checked first: a frame that breaks it and a
-    /// rule of reset frames reports the encoding error.
-    #[test]
-    fn reliable_size_is_checked_first() {
-        let (mut receiver, mut connection) = receiver_with(keep_all(), 1000, 1 << 20);
-        let error = reset_at_violation(&mut receiver, &mut connection, reset_at(1, 2000, 3000));
-        assert!(matches!(
-            error,
-            OnResetStreamAtError::ReliableSizeExceedsFinalSize { .. }
-        ));
-    }
-
-    /// The entry point every kind of reset shares tells the three kinds of
+    /// The entry point every kind of reset shares tells the two kinds of
     /// failure apart.
     #[test]
     fn the_shared_entry_point_keeps_the_kinds_apart() {
-        let (mut receiver, mut connection) = new_receiver(keep_all());
-        let error = violation(&mut receiver, &mut connection, |receiver, connection| {
-            receiver.on_remote_reset(reset_at(1, 100, 101), connection)
-        });
-        assert_eq!(
-            error,
-            OnRemoteResetError::Malformed {
-                source: ReliableSizeError::check(v(100), v(101)).unwrap_err(),
-            }
-        );
-
         let (mut receiver, mut connection) = new_receiver(keep_all());
         receiver
             .on_remote_reset(reset_at(1, 100, 50), &mut connection)
@@ -1058,7 +1020,7 @@ mod violation {
             Ok(())
         );
         assert_eq!(
-            receiver.on_reset_stream_at(reset_at(1, 50, 60), &mut connection),
+            receiver.on_reset_stream_at(reset_at(1, 50, 40), &mut connection),
             Ok(())
         );
         assert_eq!(snapshot(&receiver, &connection), before);
@@ -1071,7 +1033,7 @@ mod violation {
             Ok(())
         );
         assert_eq!(
-            receiver.on_reset_stream_at(reset_at(1, 50, 60), &mut connection),
+            receiver.on_reset_stream_at(reset_at(1, 50, 40), &mut connection),
             Ok(())
         );
         assert_eq!(snapshot(&receiver, &connection), before);
@@ -1081,22 +1043,5 @@ mod violation {
                 source: ConnectionClosedError::new(close_reason()),
             })
         );
-    }
-
-    /// A malformed frame leaves the stream waiting for the connection to
-    /// close, like any other violation.
-    #[test]
-    fn a_malformed_frame_is_a_violation_of_the_stream() {
-        let (mut receiver, mut connection) = new_receiver(keep_all());
-        receiver
-            .on_stream_frame(stream(0, 100, false), &mut connection)
-            .unwrap();
-        reset_at_violation(&mut receiver, &mut connection, reset_at(1, 100, 101));
-        assert_eq!(receiver.read_chunk(), Ok(ReadOutcome::Wait));
-        assert_eq!(
-            receiver.on_stream_frame(stream(100, 100, false), &mut connection),
-            Ok(())
-        );
-        assert_eq!(connection.used(), v(100));
     }
 }

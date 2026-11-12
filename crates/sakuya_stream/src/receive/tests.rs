@@ -1,5 +1,5 @@
 use super::{
-    BoundaryMode, ResetStreamFrame, StreamFrame, StreamReceiver,
+    BoundaryMode, StreamReceiver,
     flow_control::{
         AdvertisementIntent, ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView,
     },
@@ -20,7 +20,9 @@ use crate::{
 };
 use bytes::{BufMut, Bytes};
 use core::cell::Cell;
+use sakuya_wire::frame::UndecidedLength;
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
+use sakuya_wire::v1::frame::{reset_stream::ResetStreamFrame, stream::StreamFrame};
 use sakuya_wire::v1::transport_error::TransportErrorCode;
 use sakuya_wire::var_int::VarInt;
 use std::rc::Rc;

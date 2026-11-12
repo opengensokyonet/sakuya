@@ -74,7 +74,7 @@ where
 fn stream_violation<T: ReceiveTerminationPolicy>(
     receiver: &mut Receiver<T>,
     connection: &mut ConnectionReceiveFlowController,
-    frame: StreamFrame,
+    frame: StreamFrame<Bytes, UndecidedLength>,
 ) -> OnStreamFrameError {
     violation(receiver, connection, |receiver, connection| {
         receiver.on_stream_frame(frame, connection)
@@ -211,28 +211,6 @@ mod stream_frame {
             TransportErrorCode::FLOW_CONTROL_ERROR
         );
         assert_eq!(connection.used(), VarInt::ZERO);
-    }
-
-    #[test]
-    fn offset_overflow() {
-        let (mut receiver, mut connection) = new_receiver(keep_all());
-        let frame = StreamFrame {
-            offset: VarInt::MAX,
-            data: Bytes::from_static(b"x"),
-            fin: false,
-        };
-        let error = stream_violation(&mut receiver, &mut connection, frame);
-        assert_eq!(
-            error,
-            OnStreamFrameError::OffsetOverflow {
-                offset: VarInt::MAX,
-                len: 1,
-            }
-        );
-        assert_eq!(
-            error.transport_error_code(),
-            TransportErrorCode::FRAME_ENCODING_ERROR
-        );
     }
 
     /// The violating frame carries payload the buffer would keep, and a FIN

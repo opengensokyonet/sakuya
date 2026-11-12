@@ -75,18 +75,18 @@ use crate::connection_receive_flow::{
 use crate::receive_buffer::{StreamDataInput, StreamReceiveBuffer, offset_add, span};
 use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
 use bytes::Bytes;
-use core::error::Error;
 use flow_control::{ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView};
 use read::{ReadError, SharedTerminationReason};
 use received_ranges::ReceivedRanges;
 use remote_reset::{RemoteReset, RemoteResetFacts};
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
+use sakuya_wire::v1::frame::{reset_stream::ResetStreamFrame, stream::StreamFrame};
 use sakuya_wire::var_int::VarInt;
 use snafu::ResultExt;
 use termination::{ReceiveTerminationPolicy, ResetPresentation, TerminationEvent, TerminationView};
 use violation::{
-    ConflictSnafu, FinalSizeBelowReceivedError, MalformedSnafu, OffsetOverflowSnafu,
-    OnRemoteResetError, OnResetStreamError, OnStreamFrameError, StreamLimitExceededError,
+    ConflictSnafu, FinalSizeBelowReceivedError, OnRemoteResetError, OnResetStreamError,
+    OnStreamFrameError, StreamLimitExceededError,
 };
 
 pub mod flow_control;
@@ -96,31 +96,6 @@ pub mod remote_reset;
 pub mod stop;
 pub mod termination;
 pub mod violation;
-
-/// A STREAM frame of the stream ([RFC 9000 §19.8]).
-///
-/// [RFC 9000 §19.8]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.8
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StreamFrame {
-    /// The offset of the first byte of `data`.
-    pub offset: VarInt,
-    /// The stream data the frame carries.
-    pub data: Bytes,
-    /// Whether the frame carries FIN, stating `offset + data.len()` as the
-    /// final size.
-    pub fin: bool,
-}
-
-/// A `RESET_STREAM` frame of the stream ([RFC 9000 §19.4]).
-///
-/// [RFC 9000 §19.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.4
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ResetStreamFrame {
-    /// The application protocol error code.
-    pub code: ApplicationErrorCode,
-    /// The final size of the stream.
-    pub final_size: VarInt,
-}
 
 /// The mode of a local delivery limit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -343,8 +318,7 @@ where
         self.on_remote_reset(frame, connection)
             .map_err(|error| match error {
                 OnRemoteResetError::Violation { source } => source,
-                OnRemoteResetError::Malformed { source }
-                | OnRemoteResetError::Conflict { source } => match source {},
+                OnRemoteResetError::Conflict { source } => match source {},
             })
     }
 }
@@ -440,6 +414,9 @@ where
 
     /// Processes a STREAM frame of the stream.
     ///
+    /// The Stream ID has already chosen this receiver, and the widths of the
+    /// fields and the Length field play no part.
+    ///
     /// The part of the data below both local limits goes to the receive
     /// buffer; the frame's offset, end and FIN are processed in full. Every
     /// check runs before anything changes, so a frame that violates the
@@ -457,9 +434,9 @@ where
     /// [`transport_error_code`](OnStreamFrameError::transport_error_code).
     /// The stream then exposes no new result to the application until
     /// [`connection_closed`](Self::connection_closed).
-    pub fn on_stream_frame(
+    pub fn on_stream_frame<L>(
         &mut self,
-        frame: StreamFrame,
+        frame: StreamFrame<Bytes, L>,
         connection: &mut ConnectionReceiveFlowController,
     ) -> Result<(), OnStreamFrameError> {
         if !self.takes_frames() {
@@ -487,15 +464,11 @@ where
     /// [`OnRemoteResetError`] if this frame violates the protocol; the caller
     /// must close the connection. The checks run in the order of the
     /// variants, except that the limits of flow control come last.
-    pub fn on_remote_reset<T>(
+    pub fn on_remote_reset<T: Into<F>>(
         &mut self,
         frame: T,
         connection: &mut ConnectionReceiveFlowController,
-    ) -> Result<(), OnRemoteResetError<T::Error, F::Conflict>>
-    where
-        T: TryInto<F>,
-        T::Error: Error + 'static,
-    {
+    ) -> Result<(), OnRemoteResetError<F::Conflict>> {
         if !self.takes_frames() {
             return Ok(());
         }
@@ -582,19 +555,18 @@ where
         Ok(())
     }
 
-    fn accept_stream_frame(
+    fn accept_stream_frame<L>(
         &mut self,
-        frame: StreamFrame,
+        frame: StreamFrame<Bytes, L>,
         connection: &mut ConnectionReceiveFlowController,
     ) -> Result<(), OnStreamFrameError> {
-        let StreamFrame { offset, data, fin } = frame;
-        let Some(end) = offset_add(offset, data.len()) else {
-            return OffsetOverflowSnafu {
-                offset,
-                len: data.len(),
-            }
-            .fail();
-        };
+        let offset = frame.data_offset();
+        let fin = frame.fin();
+        let data = frame.into_data();
+        // invariant: a STREAM frame's data ends at 2^62 - 1 at most, which
+        // its constructors and its read check.
+        let end =
+            offset_add(offset, data.len()).expect("a STREAM frame's data ends within 2^62 - 1");
         let old_accounted = self.parts.accounted_end();
         check_stream_final_size(self.parts.final_size(), old_accounted, end, fin)?;
         // The receive buffer contract: the accounted end is the maximum of
@@ -616,16 +588,12 @@ where
         Ok(())
     }
 
-    fn accept_reset<T>(
+    fn accept_reset<T: Into<F>>(
         &mut self,
         frame: T,
         connection: &mut ConnectionReceiveFlowController,
-    ) -> Result<(), OnRemoteResetError<T::Error, F::Conflict>>
-    where
-        T: TryInto<F>,
-        T::Error: Error + 'static,
-    {
-        let stated: F = frame.try_into().context(MalformedSnafu)?;
+    ) -> Result<(), OnRemoteResetError<F::Conflict>> {
+        let stated: F = frame.into();
         debug_assert!(stated.owed_end() <= stated.final_size());
         let final_size = stated.final_size();
         let old_accounted = self.parts.accounted_end();

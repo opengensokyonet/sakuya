@@ -18,13 +18,16 @@ use sakuya_stream::receive::termination::{
 use sakuya_stream::receive::violation::{
     FinalSizeBelowReceivedError, OnResetStreamError, OnStreamFrameError, StreamLimitExceededError,
 };
-use sakuya_stream::receive::{BoundaryMode, ResetStreamFrame, StreamFrame, StreamReceiver};
+use sakuya_stream::receive::{BoundaryMode, StreamReceiver};
 use sakuya_stream::receive_buffer::fragmented::FragmentedStreamReceiveBuffer;
 use sakuya_stream::receive_buffer::{StreamDataInput, StreamReceiveBuffer};
 use sakuya_stream::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
+use sakuya_wire::frame::UndecidedLength;
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
+use sakuya_wire::v1::frame::{reset_stream::ResetStreamFrame, stream::StreamFrame};
+use sakuya_wire::v1::stream_id::StreamId;
 use sakuya_wire::v1::transport_error::TransportErrorCode;
-use sakuya_wire::var_int::VarInt;
+use sakuya_wire::var_int::{VarInt, VarIntField};
 
 const STREAMS: usize = 2;
 
@@ -47,6 +50,31 @@ pub(super) fn code(value: u32) -> ApplicationErrorCode {
 
 fn byte_at(stream: usize, offset: u64) -> u8 {
     u8::try_from((offset * 3 + stream as u64 * 17 + 5) % 251).unwrap()
+}
+
+/// The Stream ID the frames state; the receivers do not look at it.
+fn stream_id() -> VarIntField<StreamId> {
+    VarIntField::shortest(StreamId::from_var_int(v(0)))
+}
+
+/// A STREAM frame with `data` at `offset`.
+fn stream_frame(offset: u64, data: Bytes, fin: bool) -> StreamFrame<Bytes, UndecidedLength> {
+    StreamFrame::new(
+        stream_id(),
+        Some(VarIntField::shortest(v(offset))),
+        data,
+        fin,
+    )
+    .unwrap()
+}
+
+/// A RESET_STREAM frame.
+pub(super) fn reset_frame(value: u32, final_size: u64) -> ResetStreamFrame {
+    ResetStreamFrame::new(
+        stream_id(),
+        VarIntField::shortest(code(value)),
+        VarIntField::shortest(v(final_size)),
+    )
 }
 
 fn content(stream: usize, offset: u64, len: u64) -> Bytes {
@@ -844,26 +872,21 @@ impl Model {
         if !self.takes_frames() {
             return Ok(());
         }
-        let checked = if let Err(extra) = dialect::check_owed(final_size, owed) {
-            Err(Violation::Extra(extra))
-        } else {
-            match self.final_size {
-                Some(known) if final_size != known => Err(Violation::FinalSizeChanged(
-                    FinalSizeChangeError::check(v(known), v(final_size)).unwrap_err(),
-                )),
-                None if final_size < self.accounted => Err(Violation::FinalSizeBelowReceived(
-                    FinalSizeBelowReceivedError::check(v(final_size), v(self.accounted))
-                        .unwrap_err(),
-                )),
-                _ => match self.reset {
-                    Some(facts) => {
-                        dialect::check_code(facts.code, code_value).map_err(Violation::Extra)
-                    }
-                    None => Ok(()),
-                },
-            }
-            .and_then(|()| self.check_account(self.accounted.max(final_size), connection))
-        };
+        let checked = match self.final_size {
+            Some(known) if final_size != known => Err(Violation::FinalSizeChanged(
+                FinalSizeChangeError::check(v(known), v(final_size)).unwrap_err(),
+            )),
+            None if final_size < self.accounted => Err(Violation::FinalSizeBelowReceived(
+                FinalSizeBelowReceivedError::check(v(final_size), v(self.accounted)).unwrap_err(),
+            )),
+            _ => match self.reset {
+                Some(facts) => {
+                    dialect::check_code(facts.code, code_value).map_err(Violation::Extra)
+                }
+                None => Ok(()),
+            },
+        }
+        .and_then(|()| self.check_account(self.accounted.max(final_size), connection));
         if let Err(violation) = checked {
             // The violating frame leaves nothing behind.
             self.link = Link::Violated;
@@ -1073,11 +1096,7 @@ fn step(
             let offset = at.index(total as usize + 1) as u64;
             let len = len.min(total - offset);
             let fin = offset + len == total;
-            let frame = StreamFrame {
-                offset: v(offset),
-                data: content(stream, offset, len),
-                fin,
-            };
+            let frame = stream_frame(offset, content(stream, offset, len), fin);
             let actual = receivers[stream].on_stream_frame(frame, connection);
             let expected = models[stream].on_frame(offset, len, fin, ledger);
             assert_eq!(actual, expected.map_err(Violation::on_stream_frame));
@@ -1088,11 +1107,7 @@ fn step(
             len,
             fin,
         } => {
-            let frame = StreamFrame {
-                offset: v(offset),
-                data: content(stream, offset, len),
-                fin,
-            };
+            let frame = stream_frame(offset, content(stream, offset, len), fin);
             let actual = receivers[stream].on_stream_frame(frame, connection);
             let expected = models[stream].on_frame(offset, len, fin, ledger);
             assert_eq!(actual, expected.map_err(Violation::on_stream_frame));
@@ -1103,10 +1118,7 @@ fn step(
             final_size,
         } => {
             let size = final_size.unwrap_or(models[stream].total);
-            let frame = ResetStreamFrame {
-                code: code(value),
-                final_size: v(size),
-            };
+            let frame = reset_frame(value, size);
             let expected = models[stream].on_reset(value, size, 0, ledger);
             dialect::on_reset_stream(&mut receivers[stream], frame, connection, expected);
         }
@@ -1117,15 +1129,9 @@ fn step(
             owed,
         } => {
             let size = final_size.unwrap_or(models[stream].total);
-            let owed = if final_size.is_none() {
-                owed.min(size)
-            } else {
-                owed
-            };
-            let frame = ResetStreamFrame {
-                code: code(value),
-                final_size: v(size),
-            };
+            // A frame cannot state a reliable size above its final size.
+            let owed = owed.min(size);
+            let frame = reset_frame(value, size);
             let expected = models[stream].on_reset(value, size, owed, ledger);
             dialect::on_partial_reset(&mut receivers[stream], frame, owed, connection, expected);
         }
@@ -1324,11 +1330,7 @@ fn drain(
     if model.accounted > total {
         return;
     }
-    let frame = StreamFrame {
-        offset: v(0),
-        data: content(stream, 0, total),
-        fin: true,
-    };
+    let frame = stream_frame(0, content(stream, 0, total), true);
     let actual = receiver.on_stream_frame(frame, connection);
     let expected = model.on_frame(0, total, true, ledger);
     assert_eq!(actual, expected.map_err(Violation::on_stream_frame));

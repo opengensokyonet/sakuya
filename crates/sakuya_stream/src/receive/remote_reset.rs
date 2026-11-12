@@ -12,11 +12,11 @@
 //! data, and a later reset changes nothing.
 //!
 //! [RFC 9000 §3.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-3.2
-use super::ResetStreamFrame;
 use core::convert::Infallible;
 use core::error::Error;
 use core::fmt;
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
+use sakuya_wire::v1::frame::reset_stream::ResetStreamFrame;
 use sakuya_wire::var_int::VarInt;
 
 /// The reset facts of one stream, as a stream receiver keeps them.
@@ -108,8 +108,8 @@ impl RemoteResetFacts for RemoteReset {
 impl From<ResetStreamFrame> for RemoteReset {
     fn from(frame: ResetStreamFrame) -> Self {
         Self {
-            code: frame.code,
-            final_size: frame.final_size,
+            code: frame.application_error_code().get(),
+            final_size: frame.final_size().get(),
         }
     }
 }

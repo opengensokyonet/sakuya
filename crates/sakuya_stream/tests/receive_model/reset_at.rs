@@ -4,14 +4,14 @@
 mod dialect {
     use super::model::{Event, Receiver, Violation};
     use sakuya_stream::connection_receive_flow::ConnectionReceiveFlowController;
-    use sakuya_stream::receive::ResetStreamFrame;
     use sakuya_stream::receive::termination::TerminationEvent;
     use sakuya_stream::reset_stream_at::receive::{
-        OnResetStreamAtError, OnResetStreamError as ResetAtOnResetStreamError, RemoteResetAt,
-        RemoteResetAtChange, ResetStreamAtFrame,
+        OnResetStreamError as ResetAtOnResetStreamError, RemoteResetAt, RemoteResetAtChange,
     };
     use sakuya_stream::stream_end::ResetCodeChangeError;
-    use sakuya_wire::reset_stream_at::ReliableSizeError;
+    use sakuya_wire::reset_stream_at::ResetStreamAtFrame;
+    use sakuya_wire::v1::frame::reset_stream::ResetStreamFrame;
+    use sakuya_wire::var_int::VarIntField;
 
     pub type Facts = RemoteResetAt;
 
@@ -22,7 +22,6 @@ mod dialect {
     #[derive(Clone, Copy, Debug)]
     pub enum Extra {
         ResetCodeChanged(ResetCodeChangeError),
-        ReliableSizeExceedsFinalSize(ReliableSizeError),
     }
 
     pub fn facts(code: u32, final_size: u64, owed: u64) -> Facts {
@@ -32,11 +31,6 @@ mod dialect {
             super::model::v(owed),
         )
         .unwrap()
-    }
-
-    pub fn check_owed(final_size: u64, owed: u64) -> Result<(), Extra> {
-        ReliableSizeError::check(super::model::v(final_size), super::model::v(owed))
-            .map_err(Extra::ReliableSizeExceedsFinalSize)
     }
 
     pub fn check_code(known: u32, stated: u32) -> Result<(), Extra> {
@@ -53,9 +47,6 @@ mod dialect {
         match violation {
             Violation::Extra(Extra::ResetCodeChanged(source)) => {
                 ResetAtOnResetStreamError::ResetCodeChanged { source }
-            }
-            Violation::Extra(Extra::ReliableSizeExceedsFinalSize(_)) => {
-                panic!("a RESET_STREAM frame cannot commit {violation:?}")
             }
             other => other.on_reset_stream().into(),
         }
@@ -78,19 +69,15 @@ mod dialect {
         connection: &mut ConnectionReceiveFlowController,
         expected: Result<(), Violation>,
     ) {
-        let frame = ResetStreamAtFrame {
-            code: frame.code,
-            final_size: frame.final_size,
-            reliable_size: super::model::v(owed),
-        };
+        let frame = ResetStreamAtFrame::new(
+            frame.stream_id(),
+            frame.application_error_code(),
+            frame.final_size(),
+            VarIntField::shortest(super::model::v(owed)),
+        )
+        .unwrap();
         let actual = receiver.on_reset_stream_at(frame, connection);
-        let expected = expected.map_err(|violation| match violation {
-            Violation::Extra(Extra::ReliableSizeExceedsFinalSize(source)) => {
-                OnResetStreamAtError::ReliableSizeExceedsFinalSize { source }
-            }
-            other => shared(other).into(),
-        });
-        assert_eq!(actual, expected);
+        assert_eq!(actual, expected.map_err(shared));
     }
 }
 

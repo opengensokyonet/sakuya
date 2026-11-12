@@ -3,8 +3,8 @@
 mod dialect {
     use super::model::{Event, Receiver, Violation};
     use sakuya_stream::connection_receive_flow::ConnectionReceiveFlowController;
-    use sakuya_stream::receive::ResetStreamFrame;
     use sakuya_stream::receive::remote_reset::RemoteReset;
+    use sakuya_wire::v1::frame::reset_stream::ResetStreamFrame;
 
     pub type Facts = RemoteReset;
 
@@ -21,11 +21,6 @@ mod dialect {
             code: super::model::code(code),
             final_size: super::model::v(final_size),
         }
-    }
-
-    /// A reset never states an owed prefix, so none exceeds the final size.
-    pub fn check_owed(_final_size: u64, _owed: u64) -> Result<(), Extra> {
-        Ok(())
     }
 
     /// A later reset with another error code is ignored.

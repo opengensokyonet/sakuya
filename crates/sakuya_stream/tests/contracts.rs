@@ -10,6 +10,7 @@ use sakuya_stream::connection_receive_flow::ConnectionReceiveFlowController;
 use sakuya_stream::connection_send_credit::{
     AtomicConnectionCreditReservation, AtomicConnectionSendFlowController,
 };
+use sakuya_stream::receive::StreamReceiver;
 use sakuya_stream::receive::flow_control::{
     AdvertisementIntent, ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView,
 };
@@ -17,7 +18,6 @@ use sakuya_stream::receive::termination::{
     FollowingTermination, ReceiveTerminationPolicy, TerminationDecision, TerminationEvent,
     TerminationView,
 };
-use sakuya_stream::receive::{StreamFrame, StreamReceiver};
 use sakuya_stream::receive_buffer::fragmented::FragmentedStreamReceiveBuffer;
 use sakuya_stream::receive_buffer::{StreamDataInput, StreamReceiveBuffer};
 use sakuya_stream::send::composition::SendComposition;
@@ -35,8 +35,9 @@ use sakuya_stream::send::{SendEndState, SendTerminalState, StreamEndFrame, Strea
 use sakuya_stream::send_buffer::ResetRetention;
 use sakuya_stream::send_buffer::offset_map::OffsetMapStreamSendBuffer;
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
+use sakuya_wire::v1::frame::stream::StreamFrame;
 use sakuya_wire::v1::stream_id::StreamId;
-use sakuya_wire::var_int::VarInt;
+use sakuya_wire::var_int::{VarInt, VarIntField};
 
 fn v(value: u32) -> VarInt {
     VarInt::from_u32(value)
@@ -318,10 +319,14 @@ fn reception_completes_after_the_reader_is_gone() {
         },
         v(1000),
     );
-    let frame = |offset: u32, len: usize, fin| StreamFrame {
-        offset: v(offset),
-        data: Bytes::from(vec![1; len]),
-        fin,
+    let frame = |offset: u32, len: usize, fin| {
+        StreamFrame::new(
+            VarIntField::shortest(StreamId::from_var_int(v(0))),
+            Some(VarIntField::shortest(v(offset))),
+            Bytes::from(vec![1; len]),
+            fin,
+        )
+        .unwrap()
     };
     receiver
         .on_stream_frame(frame(0, 50, false), &mut connection)

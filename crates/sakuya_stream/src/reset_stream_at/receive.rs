@@ -26,32 +26,19 @@
 //!
 //! [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html
 use crate::connection_receive_flow::ConnectionReceiveFlowController;
+use crate::receive::StreamReceiver;
 use crate::receive::flow_control::ReceiveFlowControlPolicy;
 use crate::receive::remote_reset::RemoteResetFacts;
 use crate::receive::termination::ReceiveTerminationPolicy;
 use crate::receive::violation::{self, OnRemoteResetError};
-use crate::receive::{ResetStreamFrame, StreamReceiver};
 use crate::receive_buffer::StreamReceiveBuffer;
 use crate::stream_end::ResetCodeChangeError;
-use sakuya_wire::reset_stream_at::ReliableSizeError;
+use sakuya_wire::reset_stream_at::{ReliableSizeError, ResetStreamAtFrame};
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
+use sakuya_wire::v1::frame::reset_stream::ResetStreamFrame;
 use sakuya_wire::v1::transport_error::TransportErrorCode;
 use sakuya_wire::var_int::VarInt;
 use snafu::Snafu;
-
-/// A `RESET_STREAM_AT` frame of the stream
-/// ([draft-ietf-quic-reliable-stream-reset-11 §4]).
-///
-/// [draft-ietf-quic-reliable-stream-reset-11 §4]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html#section-4
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ResetStreamAtFrame {
-    /// The application protocol error code.
-    pub code: ApplicationErrorCode,
-    /// The final size of the stream.
-    pub final_size: VarInt,
-    /// The end of the prefix the sender still delivers reliably.
-    pub reliable_size: VarInt,
-}
 
 /// The reset facts of a stream that takes `RESET_STREAM_AT` as well as
 /// `RESET_STREAM`: what the peer's reset frames stated.
@@ -150,25 +137,31 @@ impl RemoteResetFacts for RemoteResetAt {
 impl From<ResetStreamFrame> for RemoteResetAt {
     fn from(frame: ResetStreamFrame) -> Self {
         Self {
-            code: frame.code,
-            final_size: frame.final_size,
+            code: frame.application_error_code().get(),
+            final_size: frame.final_size().get(),
             reliable_size: VarInt::ZERO,
         }
     }
 }
 
-impl TryFrom<ResetStreamAtFrame> for RemoteResetAt {
-    type Error = ReliableSizeError;
-
-    fn try_from(frame: ResetStreamAtFrame) -> Result<Self, ReliableSizeError> {
-        Self::new(frame.code, frame.final_size, frame.reliable_size)
+/// A `RESET_STREAM_AT` frame states its reliable size, which is at most its
+/// final size: the frame checks that when it is constructed or read.
+impl From<ResetStreamAtFrame> for RemoteResetAt {
+    fn from(frame: ResetStreamAtFrame) -> Self {
+        Self {
+            code: frame.application_error_code().get(),
+            final_size: frame.final_size().get(),
+            reliable_size: frame.reliable_size().get(),
+        }
     }
 }
 
-/// Violations of a `RESET_STREAM` frame on a stream that also takes
+/// Violations of a reset frame on a stream that also takes
 /// `RESET_STREAM_AT`: failures of
-/// [`on_reset_stream`](StreamReceiver::on_reset_stream) of a
-/// `StreamReceiver<C, Lc, RemoteResetAt>`.
+/// [`on_reset_stream`](StreamReceiver::on_reset_stream) and
+/// [`on_reset_stream_at`](StreamReceiver::on_reset_stream_at) of a
+/// `StreamReceiver<C, Lc, RemoteResetAt>`. The two frames share the rules
+/// for the final size, the error code and flow control.
 ///
 /// The error code to close the connection with is
 /// [`transport_error_code`](Self::transport_error_code).
@@ -202,46 +195,6 @@ impl OnResetStreamError {
     }
 }
 
-/// Violations of a `RESET_STREAM_AT` frame: a reliable size beyond the final
-/// size, and those of a `RESET_STREAM` frame on the same stream, since the
-/// two frames share the rules for the final size, the error code and flow
-/// control.
-///
-/// The error code to close the connection with is
-/// [`transport_error_code`](Self::transport_error_code).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-pub enum OnResetStreamAtError {
-    /// The frame states a reliable size above its final size
-    /// (`FRAME_ENCODING_ERROR`, [draft-ietf-quic-reliable-stream-reset-11
-    /// §4]).
-    ///
-    /// [draft-ietf-quic-reliable-stream-reset-11 §4]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html#section-4
-    #[snafu(
-        context(false),
-        display("a RESET_STREAM_AT frame states a reliable size beyond its final size")
-    )]
-    ReliableSizeExceedsFinalSize {
-        /// The reliable size and the final size the frame states.
-        source: ReliableSizeError,
-    },
-    /// The frame violates a rule it shares with `RESET_STREAM`.
-    #[snafu(transparent)]
-    Reset {
-        /// The violation.
-        source: OnResetStreamError,
-    },
-}
-
-impl OnResetStreamAtError {
-    /// The QUIC transport error code to close the connection with.
-    pub fn transport_error_code(&self) -> TransportErrorCode {
-        match self {
-            Self::ReliableSizeExceedsFinalSize { .. } => TransportErrorCode::FRAME_ENCODING_ERROR,
-            Self::Reset { source } => source.transport_error_code(),
-        }
-    }
-}
-
 impl<C, Lc> StreamReceiver<C, Lc, RemoteResetAt>
 where
     C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy<RemoteResetAt>,
@@ -268,7 +221,6 @@ where
     ) -> Result<(), OnResetStreamError> {
         self.on_remote_reset(frame, connection)
             .map_err(|error| match error {
-                OnRemoteResetError::Malformed { source } => match source {},
                 OnRemoteResetError::Violation { source } => source.into(),
                 OnRemoteResetError::Conflict { source } => source.into(),
             })
@@ -285,20 +237,18 @@ where
     ///
     /// # Errors
     ///
-    /// [`OnResetStreamAtError`] if this frame violates the protocol; the
+    /// [`OnResetStreamError`] if this frame violates the protocol; the
     /// caller must close the connection with its
-    /// [`transport_error_code`](OnResetStreamAtError::transport_error_code).
-    /// The reliable size is checked first.
+    /// [`transport_error_code`](OnResetStreamError::transport_error_code).
     pub fn on_reset_stream_at(
         &mut self,
         frame: ResetStreamAtFrame,
         connection: &mut ConnectionReceiveFlowController,
-    ) -> Result<(), OnResetStreamAtError> {
+    ) -> Result<(), OnResetStreamError> {
         self.on_remote_reset(frame, connection)
             .map_err(|error| match error {
-                OnRemoteResetError::Malformed { source } => source.into(),
-                OnRemoteResetError::Violation { source } => OnResetStreamError::from(source).into(),
-                OnRemoteResetError::Conflict { source } => OnResetStreamError::from(source).into(),
+                OnRemoteResetError::Violation { source } => source.into(),
+                OnRemoteResetError::Conflict { source } => source.into(),
             })
     }
 }

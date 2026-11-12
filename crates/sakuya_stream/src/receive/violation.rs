@@ -163,17 +163,6 @@ pub enum OnStreamFrameError {
         /// The rejected usage increase.
         source: RecordUsageError,
     },
-    /// The frame's offset plus length exceeds 2<sup>62</sup> − 1
-    /// (`FRAME_ENCODING_ERROR`, [RFC 9000 §19.8]).
-    ///
-    /// [RFC 9000 §19.8]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.8
-    #[snafu(display("stream data at offset {offset} with length {len} ends beyond 2^62 - 1"))]
-    OffsetOverflow {
-        /// The frame's offset.
-        offset: VarInt,
-        /// The frame's data length.
-        len: usize,
-    },
 }
 
 impl OnStreamFrameError {
@@ -186,7 +175,6 @@ impl OnStreamFrameError {
             Self::FinalSizeChanged { .. }
             | Self::BeyondFinalSize { .. }
             | Self::FinalSizeBelowReceived { .. } => TransportErrorCode::FINAL_SIZE_ERROR,
-            Self::OffsetOverflow { .. } => TransportErrorCode::FRAME_ENCODING_ERROR,
         }
     }
 }
@@ -257,23 +245,15 @@ impl OnResetStreamError {
 /// failures of
 /// [`StreamReceiver::on_remote_reset`](super::StreamReceiver::on_remote_reset).
 ///
-/// `M` is why a frame states no reset facts of the receiver's type, and `X`
-/// why a later reset contradicts the facts
-/// ([`RemoteResetFacts::Conflict`](super::remote_reset::RemoteResetFacts::Conflict)).
-/// Both are uninhabited for `RESET_STREAM` under RFC 9000. The transport
-/// error code of a [`Malformed`](Self::Malformed) or
-/// [`Conflict`](Self::Conflict) frame belongs to the kind of reset that
-/// defines the source.
+/// `X` is why a later reset contradicts the facts
+/// ([`RemoteResetFacts::Conflict`](super::remote_reset::RemoteResetFacts::Conflict)),
+/// uninhabited for `RESET_STREAM` under RFC 9000. The transport error code
+/// of a [`Conflict`](Self::Conflict) frame belongs to the kind of reset that
+/// defines the source. A frame's own fields never contradict one another:
+/// the frame types check them when they are constructed or read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(visibility(pub(super)))]
-pub enum OnRemoteResetError<M: Error + 'static, X: Error + 'static> {
-    /// The frame's fields contradict one another, so that it states no reset
-    /// facts.
-    #[snafu(display("a reset frame states no reset facts"))]
-    Malformed {
-        /// Which rule of the frame's own fields is violated.
-        source: M,
-    },
+pub enum OnRemoteResetError<X: Error + 'static> {
     /// The frame violates a rule that every reset follows.
     #[snafu(transparent)]
     Violation {
