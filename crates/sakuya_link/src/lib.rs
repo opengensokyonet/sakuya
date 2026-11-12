@@ -71,7 +71,9 @@ use core::{
 use nitori_id::Identity;
 
 mod link;
-pub use link::{EcnMarking, Link, MIN_DATAGRAM_SIZE, OutgoingDatagram, SendAcceptance};
+pub use link::{
+    EcnCodepoint, EcnMarking, Link, MIN_DATAGRAM_SIZE, OutgoingDatagram, SendAcceptance,
+};
 
 /// The identity of a link: its two ends, and an identity of its own.
 ///

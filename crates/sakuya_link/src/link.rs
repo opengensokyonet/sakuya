@@ -192,6 +192,22 @@ pub enum EcnMarking {
     Ect1,
 }
 
+/// The ECN codepoint read from the IP header of a datagram that arrived:
+/// Not-ECT, ECT(0), ECT(1) or CE (RFC 9000 §13.4, RFC 3168 §5).
+///
+/// Unlike [`EcnMarking`] it has CE: a router on the path sets it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EcnCodepoint {
+    /// Not ECN-Capable Transport.
+    NotEct,
+    /// ECN-Capable Transport, codepoint 0.
+    Ect0,
+    /// ECN-Capable Transport, codepoint 1.
+    Ect1,
+    /// Congestion Experienced.
+    Ce,
+}
+
 /// How much of a batch [`Link::send`] accepted, and when.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SendAcceptance<I> {
