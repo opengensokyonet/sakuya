@@ -1023,7 +1023,6 @@ where
     K: TicketPolicy<<S as TargetSelection>::Target>,
     L: HelloLayers,
     L::Error: CallsForAlert,
-    L::Accepted: AcceptedHello<Confirmation = Infallible, RetryConfigs = Infallible>,
     S: TargetSelection,
     S::Error: CallsForAlert,
     S::Target: Clone + PartialEq,
@@ -1238,9 +1237,6 @@ where
                 .map_err(|source| alert(ServerAlertError::KeyExchange { source }))?;
         let random: [u8; 32] = Random::random(&backend)
             .map_err(|source| alert(ServerAlertError::Random { source }))?;
-        if let Some(never) = accepted.confirmation() {
-            match *never {}
-        }
         let mut extensions = vec![
             ServerHelloExtension::SupportedVersions(ProtocolVersion::TLS_1_3),
             ServerHelloExtension::KeyShare(
@@ -1340,9 +1336,6 @@ where
         move_to::<S::Target, W, _>(host, CryptoLevel::Handshake)?;
         let hello = accepted.client_hello();
         // EncryptedExtensions.
-        if let Some(never) = accepted.retry_configs() {
-            match *never {}
-        }
         let mut extensions = Vec::new();
         if let Some(protocol) = &selected.application_protocol {
             extensions.push(
