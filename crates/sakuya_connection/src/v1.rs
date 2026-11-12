@@ -19,6 +19,7 @@
 pub mod amplification;
 pub mod close;
 pub mod confirmation;
+pub mod crypto;
 pub mod error;
 pub mod idle;
 pub mod keys;
