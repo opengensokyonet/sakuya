@@ -28,12 +28,13 @@
 //! §4.1.3). Frames of the level after the one being read are stored and wait
 //! until the engine moves there.
 //!
-//! The capacity of each open level is checked when the component is made: it
-//! is at least 4096 bytes, which RFC 9000 §7.5 requires an endpoint to
-//! buffer, and at least the largest single handshake message the endpoint
+//! The capacity of each open level is checked when its
+//! [`CryptoReceiveCapacities`] are made, so that making the component cannot
+//! fail: it is at least 4096 bytes, which RFC 9000 §7.5 requires an endpoint
+//! to buffer, and at least the largest single handshake message the endpoint
 //! can receive at the level, so that a message that arrives in order can
-//! always be stored whole. A frame that does not fit is an error, as RFC
-//! 9000 §7.5 requires during the handshake.
+//! always be stored whole. A frame that does not fit is an error, as RFC 9000
+//! §7.5 requires during the handshake.
 //!
 //! The component keeps no packet protection state and does not decide when
 //! the engine moves to a level.
@@ -160,16 +161,6 @@ impl CryptoReceiveBuffer for FragmentedCryptoReceiveBuffer {
     }
 }
 
-/// A buffer for an open level with the number of bytes it may hold past its
-/// read position.
-#[derive(Debug)]
-pub struct BoundedCryptoBuffer<B> {
-    /// The buffer of the level.
-    pub buffer: B,
-    /// How many bytes past the read position the level accepts.
-    pub capacity: usize,
-}
-
 /// A level whose capacity is below what the level needs.
 ///
 /// The capacity must be at least 4096 bytes (RFC 9000 §7.5) and at least the
@@ -186,6 +177,124 @@ pub struct CryptoCapacityError {
     pub capacity: usize,
     /// The least capacity the level needs.
     pub minimum: usize,
+}
+
+/// How much each encryption level of an endpoint accepts past its read
+/// position, checked against the handshake messages the endpoint receives
+/// there; none at a level where its role receives no handshake messages.
+///
+/// A [`CryptoReceiver`] is made from it and cannot fail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CryptoReceiveCapacities {
+    initial: LevelCapacity,
+    handshake: LevelCapacity,
+    one_rtt: LevelCapacity,
+}
+
+impl CryptoReceiveCapacities {
+    /// The capacities of a server: Initial receives the ClientHello and
+    /// Handshake the client's Finished, preceded by its Certificate and
+    /// CertificateVerify if `requires_client_certificate`; 1-RTT receives
+    /// none.
+    ///
+    /// # Errors
+    ///
+    /// [`CryptoCapacityError`] if the capacity of a level is below what the
+    /// level needs for messages within `limits`.
+    pub fn server(
+        limits: MessageLimits,
+        requires_client_certificate: bool,
+        initial: usize,
+        handshake: usize,
+    ) -> Result<Self, CryptoCapacityError> {
+        use ReceivedMessageType::*;
+        let handshake_messages: &[ReceivedMessageType] = if requires_client_certificate {
+            &[Certificate, CertificateVerify, Finished]
+        } else {
+            &[Finished]
+        };
+        Ok(Self {
+            initial: open(CryptoLevel::Initial, initial, &limits, &[ClientHello])?,
+            handshake: open(
+                CryptoLevel::Handshake,
+                handshake,
+                &limits,
+                handshake_messages,
+            )?,
+            one_rtt: LevelCapacity::Refused,
+        })
+    }
+
+    /// The capacities of a client: Initial receives the ServerHello (or
+    /// HelloRetryRequest), Handshake the EncryptedExtensions,
+    /// CertificateRequest, Certificate, CertificateVerify and Finished, and
+    /// 1-RTT the NewSessionTicket.
+    ///
+    /// # Errors
+    ///
+    /// [`CryptoCapacityError`] if the capacity of a level is below what the
+    /// level needs for messages within `limits`.
+    pub fn client(
+        limits: MessageLimits,
+        initial: usize,
+        handshake: usize,
+        one_rtt: usize,
+    ) -> Result<Self, CryptoCapacityError> {
+        use ReceivedMessageType::*;
+        Ok(Self {
+            initial: open(CryptoLevel::Initial, initial, &limits, &[ServerHello])?,
+            handshake: open(
+                CryptoLevel::Handshake,
+                handshake,
+                &limits,
+                &[
+                    EncryptedExtensions,
+                    CertificateRequest,
+                    Certificate,
+                    CertificateVerify,
+                    Finished,
+                ],
+            )?,
+            one_rtt: open(CryptoLevel::OneRtt, one_rtt, &limits, &[NewSessionTicket])?,
+        })
+    }
+
+    /// How many bytes past its read position `level` accepts; `None` if
+    /// the endpoint's role receives no handshake messages there.
+    pub fn capacity(&self, level: CryptoLevel) -> Option<usize> {
+        let capacity = match level {
+            CryptoLevel::Initial => self.initial,
+            CryptoLevel::Handshake => self.handshake,
+            CryptoLevel::OneRtt => self.one_rtt,
+        };
+        match capacity {
+            LevelCapacity::Open(capacity) => Some(capacity),
+            LevelCapacity::Refused => None,
+        }
+    }
+}
+
+/// What one level of [`CryptoReceiveCapacities`] accepts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LevelCapacity {
+    /// The level stores frames up to this many bytes past its read
+    /// position.
+    Open(usize),
+    /// The endpoint's role receives no handshake messages at the level.
+    Refused,
+}
+
+impl LevelCapacity {
+    /// The input of the level as the receiver starts with it.
+    fn input<B: Default>(self) -> LevelInput<B> {
+        match self {
+            LevelCapacity::Open(capacity) => LevelInput::Open {
+                buffer: B::default(),
+                capacity,
+            },
+            LevelCapacity::Refused => LevelInput::Refused,
+        }
+    }
 }
 
 /// A CRYPTO frame that cannot be taken.
@@ -260,74 +369,18 @@ pub struct CryptoReceiver<B> {
 }
 
 impl<B: CryptoReceiveBuffer> CryptoReceiver<B> {
-    /// The input of a server: Initial receives the ClientHello and
-    /// Handshake the client's Finished, preceded by its Certificate and
-    /// CertificateVerify if `requires_client_certificate`; 1-RTT receives
-    /// none.
-    ///
-    /// # Errors
-    ///
-    /// [`CryptoCapacityError`] if the capacity of a level is below what the
-    /// level needs for messages within `limits`.
-    pub fn server(
-        limits: MessageLimits,
-        requires_client_certificate: bool,
-        initial: BoundedCryptoBuffer<B>,
-        handshake: BoundedCryptoBuffer<B>,
-    ) -> Result<Self, CryptoCapacityError> {
-        use ReceivedMessageType::*;
-        let initial = open(CryptoLevel::Initial, initial, &limits, &[ClientHello])?;
-        let handshake = if requires_client_certificate {
-            open(
-                CryptoLevel::Handshake,
-                handshake,
-                &limits,
-                &[Certificate, CertificateVerify, Finished],
-            )?
-        } else {
-            open(CryptoLevel::Handshake, handshake, &limits, &[Finished])?
-        };
-        Ok(Self {
+    /// The input with the levels of `capacities`, each open level with an
+    /// empty buffer, reading Initial.
+    pub fn new(capacities: &CryptoReceiveCapacities) -> Self
+    where
+        B: Default,
+    {
+        Self {
             reading: CryptoLevel::Initial,
-            initial,
-            handshake,
-            one_rtt: LevelInput::Refused,
-        })
-    }
-
-    /// The input of a client: Initial receives the ServerHello (or
-    /// HelloRetryRequest), Handshake the EncryptedExtensions,
-    /// CertificateRequest, Certificate, CertificateVerify and Finished, and
-    /// 1-RTT the NewSessionTicket.
-    ///
-    /// # Errors
-    ///
-    /// [`CryptoCapacityError`] if the capacity of a level is below what the
-    /// level needs for messages within `limits`.
-    pub fn client(
-        limits: MessageLimits,
-        initial: BoundedCryptoBuffer<B>,
-        handshake: BoundedCryptoBuffer<B>,
-        one_rtt: BoundedCryptoBuffer<B>,
-    ) -> Result<Self, CryptoCapacityError> {
-        use ReceivedMessageType::*;
-        Ok(Self {
-            reading: CryptoLevel::Initial,
-            initial: open(CryptoLevel::Initial, initial, &limits, &[ServerHello])?,
-            handshake: open(
-                CryptoLevel::Handshake,
-                handshake,
-                &limits,
-                &[
-                    EncryptedExtensions,
-                    CertificateRequest,
-                    Certificate,
-                    CertificateVerify,
-                    Finished,
-                ],
-            )?,
-            one_rtt: open(CryptoLevel::OneRtt, one_rtt, &limits, &[NewSessionTicket])?,
-        })
+            initial: capacities.initial.input(),
+            handshake: capacities.handshake.input(),
+            one_rtt: capacities.one_rtt.input(),
+        }
     }
 
     /// The level the engine reads.
@@ -440,24 +493,21 @@ fn minimum_capacity(limits: &MessageLimits, messages: &[ReceivedMessageType]) ->
         .fold(MIN_CAPACITY, usize::max)
 }
 
-/// An open level with `bounded`, if its capacity suffices for `messages`.
-fn open<B>(
+/// An open level of `capacity`, if it suffices for `messages`.
+fn open(
     level: CryptoLevel,
-    bounded: BoundedCryptoBuffer<B>,
+    capacity: usize,
     limits: &MessageLimits,
     messages: &[ReceivedMessageType],
-) -> Result<LevelInput<B>, CryptoCapacityError> {
+) -> Result<LevelCapacity, CryptoCapacityError> {
     let minimum = minimum_capacity(limits, messages);
     ensure!(
-        bounded.capacity >= minimum,
+        capacity >= minimum,
         CryptoCapacitySnafu {
             level,
-            capacity: bounded.capacity,
+            capacity,
             minimum
         }
     );
-    Ok(LevelInput::Open {
-        buffer: bounded.buffer,
-        capacity: bounded.capacity,
-    })
+    Ok(LevelCapacity::Open(capacity))
 }

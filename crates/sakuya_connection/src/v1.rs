@@ -2,10 +2,11 @@
 //! components.
 //!
 //! [`Part`] is version 1 as one part of a composition. Its shares put the
-//! keys of each encryption level, the transport parameters, the idle
-//! timeout and what the connection was made with for its first logical
-//! link in the connection node, with the recovery factory and the record of
-//! why the connection closed ([`close`]); the clone of the
+//! keys of each encryption level, the CRYPTO data received at each level,
+//! the transport parameters, the idle timeout and what the connection was
+//! made with for its first logical link in the connection node, with the
+//! recovery factory and the record of why the connection closed
+//! ([`close`]); the clone of the
 //! link, the facts about it and the anti-amplification limit in the entry of
 //! each logical link; the role in each link path; and in each link path's
 //! recovery layer, what the factory makes for it with the state beside them,
@@ -73,6 +74,7 @@ use self::{
     amplification::{AddressValidation, AntiAmplification, AntiAmplificationFactor},
     close::{ApplicationClose, CloseReasonRecord, LocalCloseCause},
     confirmation::HandshakeConfirmation,
+    crypto::{CryptoReceiveBuffer, CryptoReceiveCapacities, CryptoReceiver},
     idle::IdleTimeout,
     keys::{DirectionKeys, HandshakeKeys, InitialKeys, LevelKeys, OneRttKeys},
     link::{FirstLinkStart, LinkClone, LinkFacts},
@@ -126,6 +128,9 @@ pub trait Choices: ConnectionChoices {
     type Crypto: CryptoBackend + 'static;
     /// Which side of the connection this side is.
     type Side: Side;
+    /// What stores the CRYPTO data of one encryption level until the
+    /// handshake engine reads it.
+    type CryptoReceiveBuffer: CryptoReceiveBuffer + Default + 'static;
     /// What makes the RTT estimate, the stored part of congestion control
     /// and the datagram size probing policy of each link path, one for each
     /// connection. `V` identifies a link path, as found from the list of
@@ -240,6 +245,9 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
     pub loss_thresholds: LossThresholds,
     /// How many ranges an ACK frame this side writes reports at most.
     pub max_ack_ranges: MaxAckRanges,
+    /// How much CRYPTO data each encryption level holds past what the
+    /// handshake engine has read, for this side's role.
+    pub crypto_receive: CryptoReceiveCapacities,
 }
 
 impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + ConnectionErrorsOf>
@@ -249,6 +257,7 @@ impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + Co
         InitialKeys<T::Crypto>,
         HandshakeKeys<T::Crypto>,
         OneRttKeys<T::Crypto>,
+        CryptoReceiver<T::CryptoReceiveBuffer>,
         AntiAmplificationFactor,
         FirstLinkStart,
         IdleTimeout<InstantOf<T>>,
@@ -442,6 +451,25 @@ macro_rules! discarded_when_draining {
     )*};
 }
 discarded_when_draining!(InitialKeys, HandshakeKeys, OneRttKeys);
+
+/// Each level this side receives handshake messages at starts with an
+/// empty buffer of the configured capacity; the input reads Initial.
+impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)>
+    for CryptoReceiver<T::CryptoReceiveBuffer>
+where
+    L: LineagePartList<T>,
+    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        args: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        CryptoReceiver::new(&own_args::<T, L, I>(args).crypto_receive)
+    }
+}
+/// It has no deadline and reads nothing; the calls that take frames or feed
+/// the handshake engine change it.
+impl<B> PassiveDataComponent for CryptoReceiver<B> {}
 
 impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for AntiAmplificationFactor
 where

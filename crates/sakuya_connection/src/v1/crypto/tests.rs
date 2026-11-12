@@ -3,7 +3,7 @@ use sakuya_tls::{engine::CryptoLevel, message::MessageLimits};
 use sakuya_wire::var_int::VarInt;
 
 use super::{
-    BoundedCryptoBuffer, CryptoCapacityError, CryptoFrameError, CryptoLevelMoveError,
+    CryptoCapacityError, CryptoFrameError, CryptoLevelMoveError, CryptoReceiveCapacities,
     CryptoReceiver, FragmentedCryptoReceiveBuffer,
 };
 
@@ -11,31 +11,16 @@ fn v(n: u64) -> VarInt {
     VarInt::new(n).unwrap()
 }
 
-fn bounded(capacity: usize) -> BoundedCryptoBuffer<FragmentedCryptoReceiveBuffer> {
-    BoundedCryptoBuffer {
-        buffer: FragmentedCryptoReceiveBuffer::new(),
-        capacity,
-    }
-}
-
 fn server() -> CryptoReceiver<FragmentedCryptoReceiveBuffer> {
-    CryptoReceiver::server(
-        MessageLimits::default(),
-        false,
-        bounded(20_000),
-        bounded(4096),
-    )
-    .unwrap()
+    let capacities =
+        CryptoReceiveCapacities::server(MessageLimits::default(), false, 20_000, 4096).unwrap();
+    CryptoReceiver::new(&capacities)
 }
 
 fn client() -> CryptoReceiver<FragmentedCryptoReceiveBuffer> {
-    CryptoReceiver::client(
-        MessageLimits::default(),
-        bounded(20_000),
-        bounded(70_000),
-        bounded(20_000),
-    )
-    .unwrap()
+    let capacities =
+        CryptoReceiveCapacities::client(MessageLimits::default(), 20_000, 70_000, 20_000).unwrap();
+    CryptoReceiver::new(&capacities)
 }
 
 fn read_all(receiver: &mut CryptoReceiver<FragmentedCryptoReceiveBuffer>) -> Vec<u8> {
@@ -214,9 +199,9 @@ fn capacity_at_the_minimum_passes_and_below_fails() {
     let limits = MessageLimits::default();
     // Server Initial: ClientHello, 16 KiB plus the 4-byte header.
     let minimum = 16 * 1024 + 4;
-    assert!(CryptoReceiver::server(limits, false, bounded(minimum), bounded(4096)).is_ok());
+    assert!(CryptoReceiveCapacities::server(limits, false, minimum, 4096).is_ok());
     assert_eq!(
-        CryptoReceiver::server(limits, false, bounded(minimum - 1), bounded(4096)).unwrap_err(),
+        CryptoReceiveCapacities::server(limits, false, minimum - 1, 4096).unwrap_err(),
         CryptoCapacityError {
             level: CryptoLevel::Initial,
             capacity: minimum - 1,
@@ -229,31 +214,41 @@ fn capacity_at_the_minimum_passes_and_below_fails() {
 fn handshake_minimum_depends_on_client_certificate() {
     let limits = MessageLimits::default();
     // Without a client certificate only Finished counts: the 4096 floor.
-    assert!(CryptoReceiver::server(limits, false, bounded(20_000), bounded(4096)).is_ok());
+    assert!(CryptoReceiveCapacities::server(limits, false, 20_000, 4096).is_ok());
     // With one, Certificate is 64 KiB plus the header.
     let minimum = 64 * 1024 + 4;
     assert_eq!(
-        CryptoReceiver::server(limits, true, bounded(20_000), bounded(4096)).unwrap_err(),
+        CryptoReceiveCapacities::server(limits, true, 20_000, 4096).unwrap_err(),
         CryptoCapacityError {
             level: CryptoLevel::Handshake,
             capacity: 4096,
             minimum
         }
     );
-    assert!(CryptoReceiver::server(limits, true, bounded(20_000), bounded(minimum)).is_ok());
+    assert!(CryptoReceiveCapacities::server(limits, true, 20_000, minimum).is_ok());
 }
 
 #[test]
 fn client_levels_are_checked() {
     let limits = MessageLimits::default();
-    let err = CryptoReceiver::client(limits, bounded(20_000), bounded(20_000), bounded(20_000))
-        .unwrap_err();
+    let err = CryptoReceiveCapacities::client(limits, 20_000, 20_000, 20_000).unwrap_err();
     assert_eq!(err.level, CryptoLevel::Handshake);
     assert_eq!(err.minimum, 64 * 1024 + 4);
-    let err = CryptoReceiver::client(limits, bounded(20_000), bounded(70_000), bounded(4096))
-        .unwrap_err();
+    let err = CryptoReceiveCapacities::client(limits, 20_000, 70_000, 4096).unwrap_err();
     assert_eq!(err.level, CryptoLevel::OneRtt);
-    let err =
-        CryptoReceiver::client(limits, bounded(100), bounded(70_000), bounded(20_000)).unwrap_err();
+    let err = CryptoReceiveCapacities::client(limits, 100, 70_000, 20_000).unwrap_err();
     assert_eq!(err.level, CryptoLevel::Initial);
+}
+
+#[test]
+fn capacities_tell_each_level() {
+    let limits = MessageLimits::default();
+    let server = CryptoReceiveCapacities::server(limits, false, 20_000, 4096).unwrap();
+    assert_eq!(server.capacity(CryptoLevel::Initial), Some(20_000));
+    assert_eq!(server.capacity(CryptoLevel::Handshake), Some(4096));
+    assert_eq!(server.capacity(CryptoLevel::OneRtt), None);
+    let client = CryptoReceiveCapacities::client(limits, 20_000, 70_000, 30_000).unwrap();
+    assert_eq!(client.capacity(CryptoLevel::Initial), Some(20_000));
+    assert_eq!(client.capacity(CryptoLevel::Handshake), Some(70_000));
+    assert_eq!(client.capacity(CryptoLevel::OneRtt), Some(30_000));
 }

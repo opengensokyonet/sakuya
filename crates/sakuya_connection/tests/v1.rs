@@ -33,6 +33,7 @@ use sakuya_connection::{
         amplification::{AddressValidation, AntiAmplification, AntiAmplificationFactor},
         close::{CloseReasonRecord, LocalCloseCause},
         confirmation::HandshakeConfirmation,
+        crypto::{CryptoReceiveCapacities, CryptoReceiver, FragmentedCryptoReceiveBuffer},
         idle::IdleTimeout,
         keys::InitialKeys,
         link::LinkFacts,
@@ -58,6 +59,7 @@ use sakuya_recovery::{
     rtt::{RttEstimator, RttSample},
 };
 use sakuya_stream::connection::CloseReason;
+use sakuya_tls::{engine::CryptoLevel, message::MessageLimits};
 use sakuya_wire::{
     connection_id::ConnectionId,
     parameters::ParametersPart,
@@ -90,6 +92,9 @@ thread_local! {
     static FEED: RefCell<VecDeque<(Duration, probe::Step)>> = const { RefCell::new(VecDeque::new()) };
     /// What the closer of the next server connection does, and when.
     static CLOSER: RefCell<VecDeque<(Duration, probe::CloserStep)>> = const { RefCell::new(VecDeque::new()) };
+    /// When the probe of a server connection hands CRYPTO frames to the
+    /// connection's CRYPTO receiver, as the calls will.
+    static CRYPTO_AT: Cell<Option<Duration>> = const { Cell::new(None) };
 }
 
 /// The parts of the tests' connections.
@@ -109,6 +114,7 @@ fn reset() {
     LEND_AT.with(|p| p.set(None));
     FEED.with(|f| f.borrow_mut().clear());
     CLOSER.with(|c| c.borrow_mut().clear());
+    CRYPTO_AT.with(|c| c.set(None));
 }
 
 /// The choices of a client: the tests' clock and link, version 1 as the
@@ -121,6 +127,7 @@ impl ConnectionChoices for ClientMine {
 impl v1::Choices for ClientMine {
     type Crypto = RingBackend;
     type Side = v1::Client;
+    type CryptoReceiveBuffer = FragmentedCryptoReceiveBuffer;
     type Recovery<V: Clone + Eq + Debug + 'static> =
         sakuya_recovery::factory::NewRenoRecoveryFactory<V>;
     type AckObligation = sakuya_recovery::ack_obligation::Rfc9000AckObligation<Duration>;
@@ -138,6 +145,7 @@ impl ConnectionChoices for SpyMine {
 impl v1::Choices for SpyMine {
     type Crypto = RingBackend;
     type Side = v1::Server;
+    type CryptoReceiveBuffer = FragmentedCryptoReceiveBuffer;
     type Recovery<V: Clone + Eq + Debug + 'static> = spy::SpyFactory<V>;
     type AckObligation = sakuya_recovery::ack_obligation::Rfc9000AckObligation<Duration>;
     type ApplicationError = common::AppClose;
@@ -327,6 +335,58 @@ mod probe {
             peer.set_known(slots);
             idle.packet_processed(now);
             log(format!("packet processed at {now:?}"));
+            None
+        }
+    }
+
+    /// In the connection: at its deadline, hands a CRYPTO frame with data to
+    /// the 1-RTT level and one to the Initial level, then reads the level
+    /// being read.
+    #[derive(Debug)]
+    pub struct CryptoFeeder(Option<Duration>);
+    impl Build<Mine, Parts, layer::Connection, ()> for CryptoFeeder {
+        fn build<'v>(
+            _: &mut ParentsOf<'v, Mine, Parts, layer::Connection>,
+            _: &mut ArgsOf<Mine, Parts, layer::Connection>,
+        ) -> Self {
+            CryptoFeeder(CRYPTO_AT.with(Cell::take))
+        }
+    }
+    impl<I, K> DataComponent<Mine, Parts, layer::Connection, (I, K)> for CryptoFeeder
+    where
+        for<'v> <Parts as LineageLists<'v, Mine>>::Connection: GetAt<CryptoFeeder, I>
+            + TakeEach<'v, HList![CryptoFeeder, CryptoReceiver<FragmentedCryptoReceiveBuffer>], K>,
+    {
+        fn deadline<'v>(
+            lineage: &LineageOf<'v, Mine, Parts, layer::Connection>,
+        ) -> Option<Duration> {
+            lineage.get::<CryptoFeeder, I>().0
+        }
+        fn expire<'v, B: CallBundle>(
+            lineage: LineageOf<'v, Mine, Parts, layer::Connection>,
+            _: &mut OtherNodes<'v, Mine, Parts, B>,
+            _: Duration,
+        ) -> Option<RequestOf<Mine, Parts>> {
+            let (hlist_pat![feeder, receiver], _) = Take::<
+                HList![CryptoFeeder, CryptoReceiver<FragmentedCryptoReceiveBuffer>],
+                K,
+            >::take(lineage);
+            feeder.0 = None;
+            let zero = VarInt::from_u32(0);
+            let one_rtt =
+                receiver.receive_frame(CryptoLevel::OneRtt, zero, bytes::Bytes::from_static(b"x"));
+            log(format!("1-RTT: {one_rtt:?}"));
+            let initial = receiver.receive_frame(
+                CryptoLevel::Initial,
+                zero,
+                bytes::Bytes::from_static(b"hello"),
+            );
+            let mut read = Vec::new();
+            receiver.read_into(&mut read);
+            log(format!(
+                "Initial: {initial:?}, read {:?}",
+                String::from_utf8_lossy(&read)
+            ));
             None
         }
     }
@@ -758,7 +818,7 @@ mod probe {
         type Calls = HNil;
     }
     impl LayerShare<Mine, Parts, layer::Connection> for Part {
-        type Data = HList![Adder, PeerSetter, Closer];
+        type Data = HList![Adder, PeerSetter, Closer, CryptoFeeder];
         type Calls = HNil;
     }
     impl LayerShare<ClientMine, Parts, layer::Connection> for Part {
@@ -801,6 +861,7 @@ mod probe {
 fn args<T>(validation: AddressValidation) -> v1::ConnectionArgs<T, Parts>
 where
     T: v1::Choices<Crypto = RingBackend, Link = TestLink>,
+    T::Side: SideCapacities,
     T::Recovery<LinkId<(), ()>>: RecoveryFactory<TestLink, Config = NewRenoRecoveryFactoryConfig>,
 {
     let mut parameters = TransportParameters::<Vec<u8>>::new();
@@ -817,6 +878,33 @@ where
         loss_thresholds: sakuya_recovery::loss::LossThresholds::recommended(ms(1))
             .expect("the test clock's timers fire to the millisecond"),
         max_ack_ranges: sakuya_recovery::receive_journals::MaxAckRanges::DEFAULT,
+        crypto_receive: <T::Side as SideCapacities>::crypto_receive(),
+    }
+}
+
+/// The CRYPTO capacities of a side: the least the default message limits
+/// allow at each level.
+trait SideCapacities {
+    fn crypto_receive() -> CryptoReceiveCapacities;
+}
+impl SideCapacities for v1::Server {
+    fn crypto_receive() -> CryptoReceiveCapacities {
+        // ClientHello at Initial; only Finished at Handshake
+        CryptoReceiveCapacities::server(MessageLimits::default(), false, 16 * 1024 + 4, 4096)
+            .expect("the least capacities the limits allow")
+    }
+}
+impl SideCapacities for v1::Client {
+    fn crypto_receive() -> CryptoReceiveCapacities {
+        // ServerHello at Initial, Certificate at Handshake, NewSessionTicket
+        // at 1-RTT
+        CryptoReceiveCapacities::client(
+            MessageLimits::default(),
+            16 * 1024 + 4,
+            64 * 1024 + 4,
+            16 * 1024 + 4,
+        )
+        .expect("the least capacities the limits allow")
     }
 }
 
@@ -846,6 +934,22 @@ fn a_server_connection_starts_with_live_initial_keys_and_an_active_link_path() {
             "recovery built, initial RTT None",
             "Active, NotValidated, credit Some(0)",
         ]
+    );
+}
+
+#[test]
+fn the_connection_receives_crypto_data_as_its_side_does() {
+    reset();
+    CRYPTO_AT.with(|c| c.set(Some(ms(5))));
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, link());
+    take_log();
+    let outer = Outer::new();
+    advance_to(ms(5));
+    assert!(outer.poll(&mut connection).is_pending());
+    // a server receives no handshake messages at 1-RTT
+    assert_eq!(
+        take_log(),
+        ["1-RTT: Err(Refused)", "Initial: Ok(()), read \"hello\""]
     );
 }
 
