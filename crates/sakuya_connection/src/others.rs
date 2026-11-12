@@ -54,7 +54,15 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
         }
     }
 
-    /// The lent node's key.
+    /// The same nodes, for the node of the key `here`: a node being ended,
+    /// which is out of the tree.
+    pub(crate) fn ending(mut self, here: NodeKeyOf<T, L>) -> Self {
+        self.here = here;
+        self
+    }
+
+    /// The lent node's key; for an end action, the key of the node being
+    /// ended.
     pub fn here(&self) -> &NodeKeyOf<T, L> {
         &self.here
     }

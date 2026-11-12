@@ -67,6 +67,7 @@ pub struct LossThresholds {
     packet_threshold: PacketThreshold,
     time_threshold: Ratio,
     granularity: Duration,
+    clock_granularity: Duration,
 }
 
 impl LossThresholds {
@@ -100,6 +101,7 @@ impl LossThresholds {
             packet_threshold,
             time_threshold,
             granularity,
+            clock_granularity,
         })
     }
 
@@ -131,6 +133,14 @@ impl LossThresholds {
     /// The timer granularity.
     pub const fn granularity(&self) -> Duration {
         self.granularity
+    }
+
+    /// The precision of the clock's timers these thresholds were checked
+    /// against: what an ACK is sent early by, so that a late timer does not
+    /// take it past the `max_ack_delay` this side announces (RFC 9000
+    /// §18.2).
+    pub const fn clock_granularity(&self) -> Duration {
+        self.clock_granularity
     }
 }
 

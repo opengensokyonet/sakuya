@@ -40,17 +40,21 @@
 
 use core::{ops::Sub, time::Duration};
 
+pub mod ack_obligation;
 pub mod congestion;
 pub mod ecn;
 pub mod factory;
 pub mod loss;
+pub mod loss_detection;
 pub mod pacing;
 pub mod packet_number_space;
 pub mod persistent_congestion;
 pub mod pmtu;
 pub mod pto;
 pub mod ratio;
+pub mod receive_journals;
 pub mod rtt;
+pub mod send_journals;
 
 /// The time from `earlier` to `later`; `None` if `later` is before
 /// `earlier`.

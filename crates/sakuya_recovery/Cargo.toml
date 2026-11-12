@@ -8,4 +8,6 @@ description = "Loss recovery, congestion control and datagram size probing for s
 
 [dependencies]
 sakuya_link.workspace = true
+sakuya_wire.workspace = true
+smallvec.workspace = true
 snafu.workspace = true

@@ -4,7 +4,12 @@
 
 mod common;
 
-use std::{cell::Cell, fmt::Debug, time::Duration};
+use std::{
+    cell::{Cell, RefCell},
+    collections::VecDeque,
+    fmt::Debug,
+    time::Duration,
+};
 
 use common::{Mine, Outer, TestClock, TestLink, advance_to, log, ms, take_log};
 use frunk_core::hlist_pat;
@@ -24,11 +29,16 @@ use sakuya_connection::{
     v1::{
         self,
         amplification::{AddressValidation, AntiAmplification, AntiAmplificationFactor},
+        confirmation::HandshakeConfirmation,
         idle::IdleTimeout,
         keys::InitialKeys,
         link::LinkFacts,
+        loss_detection::LossDetectionOf,
         parameters::PeerTransportParameters,
-        recovery::{CongestionPartOf, RecoveryFactoryOf, RttOf, lend_congestion},
+        pto::ProbeTimeout,
+        recovery::{
+            CongestionPartOf, LinkPathCongestionState, RecoveryFactoryOf, RttOf, lend_congestion,
+        },
         role::LinkPathRole,
     },
 };
@@ -37,12 +47,17 @@ use sakuya_packet_protection::backend::ring::RingBackend;
 use sakuya_recovery::{
     congestion::CongestionController,
     factory::{NewRenoRecoveryFactory, NewRenoRecoveryFactoryConfig, RecoveryFactory},
+    loss::{LossThresholds, loss_delay},
+    loss_detection::InFlightCharge,
     pacing::{Pacer, PacingInput},
+    packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces},
+    rtt::{RttEstimator, RttSample},
 };
 use sakuya_wire::{
     connection_id::ConnectionId,
     parameters::ParametersPart,
     parts::{HList, HNil, Selector},
+    v1::packet_number::PacketNumber,
     v1::transport_parameters::{
         TransportParameterSlots, TransportParameterSpace, TransportParameters,
         integer::MaxIdleTimeout,
@@ -63,6 +78,9 @@ thread_local! {
     /// When the probe of a spying connection makes its second link path
     /// active, and when it then lends the first one's congestion access.
     static LEND_AT: Cell<Option<(Duration, Duration)>> = const { Cell::new(None) };
+    /// What the feeder of the first recovery layer of a server does, and
+    /// when.
+    static FEED: RefCell<VecDeque<(Duration, probe::Step)>> = const { RefCell::new(VecDeque::new()) };
 }
 
 /// The parts of the tests' connections.
@@ -79,6 +97,7 @@ fn reset() {
     CLOSE_AT.with(|c| c.set(None));
     PEER_AT.with(|p| p.set(None));
     LEND_AT.with(|p| p.set(None));
+    FEED.with(|f| f.borrow_mut().clear());
 }
 
 /// The choices of a client: the tests' clock and link, version 1 as the
@@ -93,6 +112,7 @@ impl v1::Choices for ClientMine {
     type Side = v1::Client;
     type Recovery<V: Clone + Eq + Debug + 'static> =
         sakuya_recovery::factory::NewRenoRecoveryFactory<V>;
+    type AckObligation = sakuya_recovery::ack_obligation::Rfc9000AckObligation<Duration>;
 }
 
 /// The choices of a server whose recovery factory logs the other link
@@ -106,6 +126,7 @@ impl v1::Choices for SpyMine {
     type Crypto = RingBackend;
     type Side = v1::Server;
     type Recovery<V: Clone + Eq + Debug + 'static> = spy::SpyFactory<V>;
+    type AckObligation = sakuya_recovery::ack_obligation::Rfc9000AckObligation<Duration>;
 }
 
 /// A recovery factory that makes what sakuya's makes and logs, when it
@@ -113,7 +134,10 @@ impl v1::Choices for SpyMine {
 mod spy {
     use super::*;
     use sakuya_connection::v1::recovery::OtherCongestionParts;
-    use sakuya_recovery::factory::{LendCongestion, PacedNewReno, RecoveryFactory};
+    use sakuya_recovery::{
+        congestion::CongestionController,
+        factory::{LendCongestion, PacedNewReno, RecoveryFactory},
+    };
 
     #[derive(Debug)]
     pub struct SpyFactory<V>(NewRenoRecoveryFactory<V>);
@@ -141,6 +165,8 @@ mod spy {
         > for SpyFactory<V>
     {
         type Part = PacedNewReno<Duration>;
+        type SentState = <PacedNewReno<Duration> as CongestionController<Duration>>::SentState;
+        type LossState = <PacedNewReno<Duration> as CongestionController<Duration>>::LossState;
         type Access<'a>
             = &'a mut PacedNewReno<Duration>
         where
@@ -382,7 +408,11 @@ mod probe {
         ) -> Self {
             EntryEnd
         }
-        fn end<'v>(self, _: &mut ParentsOf<'v, T, L, layer::LinkEntry>) {
+        fn end<'v, B: CallBundle>(
+            self,
+            _: &mut ParentsOf<'v, T, L, layer::LinkEntry>,
+            _: &mut OtherNodes<'v, T, L, B>,
+        ) {
             log("entry ended");
         }
     }
@@ -405,7 +435,15 @@ mod probe {
         ) -> Self {
             Watcher(CLOSE_AT.with(Cell::get))
         }
-        fn end<'v>(self, _: &mut ParentsOf<'v, T, L, layer::LinkPath>) {
+        fn end<'v, B: CallBundle>(
+            self,
+            _: &mut ParentsOf<'v, T, L, layer::LinkPath>,
+            others: &mut OtherNodes<'v, T, L, B>,
+        ) {
+            assert!(
+                matches!(others.here(), NodeKey::LinkPath(..)),
+                "an end action is given the ended node's key"
+            );
             log("link path ended");
         }
     }
@@ -472,7 +510,11 @@ mod probe {
             ));
             LayerWatch
         }
-        fn end<'v>(self, _: &mut ParentsOf<'v, T, L, layer::Recovery>) {
+        fn end<'v, B: CallBundle>(
+            self,
+            _: &mut ParentsOf<'v, T, L, layer::Recovery>,
+            _: &mut OtherNodes<'v, T, L, B>,
+        ) {
             log("recovery ended");
         }
     }
@@ -480,6 +522,148 @@ mod probe {
         for<'v> L: LineageLists<'v, T>
     {
     }
+
+    /// What the feeder does at one instant, as the calls will.
+    #[derive(Debug)]
+    pub enum Step {
+        /// The link accepted 1200-byte ack-eliciting packets of these
+        /// numbers in the space now; then the packet `acked`, if any, was
+        /// acknowledged, and losses were detected as an ACK does. It is one
+        /// take: a reread sees only what it left.
+        Send {
+            space: PacketNumberSpaceKind,
+            numbers: Vec<u64>,
+            acked: Option<u64>,
+        },
+        /// The handshake is confirmed.
+        Confirm,
+        /// An ACK arriving now gives an RTT sample of a packet sent at the
+        /// instant given.
+        Sample(Duration),
+    }
+
+    /// In a server's first recovery layer: does its steps at their
+    /// instants, and, when it was given any, logs the losses, the bytes in
+    /// flight, the probe permits and the backoff whenever they change.
+    #[derive(Debug)]
+    pub struct Feeder(VecDeque<(Duration, Step)>, bool);
+    type Fed<T> = HList![
+        Feeder,
+        LossDetectionOf<T, Parts>,
+        LinkPathCongestionState<Duration>,
+        PacketNumberSpaces<PacketNumberSpaceState>,
+        HandshakeConfirmation,
+        RttOf<T, Parts>
+    ];
+    /// The feeder of the recovery layers of a connection of the choices `$t`.
+    macro_rules! feeder {
+        ($t:ty) => {
+        impl Build<$t, Parts, layer::Recovery, ()> for Feeder {
+            fn build<'v>(
+                _: &mut ParentsOf<'v, $t, Parts, layer::Recovery>,
+                _: &mut ArgsOf<$t, Parts, layer::Recovery>,
+            ) -> Self {
+                let steps = FEED.with(|f| core::mem::take(&mut *f.borrow_mut()));
+                let given = !steps.is_empty();
+                Feeder(steps, given)
+            }
+        }
+        impl<I, Ith, K, Jd, Js, Jp>
+            DataComponent<$t, Parts, layer::Recovery, (I, Ith, K, (Jd, Js, Jp))> for Feeder
+        where
+            for<'v> <Parts as LineageLists<'v, $t>>::Recovery: GetAt<Feeder, I>
+                + GetAt<LossThresholds, Ith>
+                + GetAt<LossDetectionOf<$t, Parts>, Jd>
+                + GetAt<LinkPathCongestionState<Duration>, Js>
+                + GetAt<ProbeTimeout<Duration>, Jp>
+                + TakeEach<'v, Fed<$t>, K>,
+        {
+            fn reads(reads: &mut ReadSet) {
+                reads
+                    .add::<LossDetectionOf<$t, Parts>>()
+                    .add::<LinkPathCongestionState<Duration>>()
+                    .add::<ProbeTimeout<Duration>>();
+            }
+            fn deadline<'v>(lineage: &LineageOf<'v, $t, Parts, layer::Recovery>) -> Option<Duration> {
+                lineage.get::<Feeder, I>().0.front().map(|(at, _)| *at)
+            }
+            fn expire<'v, B: CallBundle>(
+                lineage: LineageOf<'v, $t, Parts, layer::Recovery>,
+                _: &mut OtherNodes<'v, $t, Parts, B>,
+                now: Duration,
+            ) -> Option<RequestOf<$t, Parts>> {
+                let thresholds = *lineage.get::<LossThresholds, Ith>();
+                let (hlist_pat![feeder, spaces, state, numbers, confirmation, rtt], _) =
+                    Take::<Fed<$t>, K>::take(lineage);
+                let (_, step) = feeder.0.pop_front()?;
+                match step {
+                    Step::Send {
+                        space,
+                        numbers: sent,
+                        acked,
+                    } => {
+                        let detection = spaces.get_mut(space)?;
+                        for number in sent {
+                            let charge = InFlightCharge {
+                                bytes: 1200,
+                                app_limited: false,
+                                sent_state: (),
+                            };
+                            let number = PacketNumber::new(number).ok()?;
+                            detection.accept(number, now, true, Some(charge));
+                            state.add_in_flight(1200);
+                        }
+                        let acked = PacketNumber::new(acked?).ok()?;
+                        numbers.get_mut(space)?.on_ack(acked, acked);
+                        for packet in detection.take_acknowledged(&(acked..=acked)) {
+                            if let Some(charge) = packet.in_flight {
+                                state.remove_in_flight(charge.bytes);
+                            }
+                        }
+                        let delay = loss_delay(&RttEstimator::<Duration>::estimate(rtt), &thresholds);
+                        let lost = detection
+                            .detect_lost(now, acked, delay, thresholds.packet_threshold())
+                            .count();
+                        assert_eq!(lost, 0, "nothing is lost when the ACK arrives");
+                    }
+                    Step::Confirm => *confirmation = HandshakeConfirmation::Confirmed,
+                    Step::Sample(sent_at) => {
+                        let sample =
+                            RttSample::new(sent_at, now, Duration::ZERO, Duration::MAX, link())?;
+                        rtt.on_sample(sample);
+                    }
+                }
+                None
+            }
+            fn reread<'v, B: CallBundle>(
+                lineage: LineageOf<'v, $t, Parts, layer::Recovery>,
+                _: &mut OtherNodes<'v, $t, Parts, B>,
+                _: Duration,
+            ) -> Option<RequestOf<$t, Parts>> {
+                if !lineage.get::<Feeder, I>().1 {
+                    return None;
+                }
+                let spaces = lineage.get::<LossDetectionOf<$t, Parts>, Jd>();
+                let state = lineage.get::<LinkPathCongestionState<Duration>, Js>();
+                let outstanding: usize = spaces.iter().map(|(_, d)| d.outstanding().len()).sum();
+                let lost: Vec<_> = spaces
+                    .iter()
+                    .flat_map(|(_, d)| d.declared_lost())
+                    .map(|p| (p.number.get(), p.retain_until))
+                    .collect();
+                log(format!(
+                    "in flight {}, outstanding {outstanding}, lost {lost:?}, permits {}, backoff {}",
+                    state.bytes_in_flight(),
+                    state.probe_permits(),
+                    lineage.get::<ProbeTimeout<Duration>, Jp>().backoff(),
+                ));
+                None
+            }
+        }
+        };
+    }
+    feeder!(Mine);
+    feeder!(ClientMine);
 
     impl LayerShare<SpyMine, Parts, layer::Connection> for Part {
         type Data = HList![Adder, Lender];
@@ -509,8 +693,16 @@ mod probe {
             }
         )*};
     }
-    impl<T: v1::Choices, L> LayerShare<T, L, layer::Recovery> for Part {
+    impl LayerShare<Mine, Parts, layer::Recovery> for Part {
+        type Data = HList![LayerWatch, Feeder];
+        type Calls = HNil;
+    }
+    impl LayerShare<SpyMine, Parts, layer::Recovery> for Part {
         type Data = HList![LayerWatch];
+        type Calls = HNil;
+    }
+    impl LayerShare<ClientMine, Parts, layer::Recovery> for Part {
+        type Data = HList![LayerWatch, Feeder];
         type Calls = HNil;
     }
     none!(LogicalPath, Established);
@@ -534,6 +726,9 @@ where
         transport_parameters: parameters.known,
         first_link: LinkFacts { validation },
         recovery: NewRenoRecoveryFactoryConfig::recommended(ms(1)),
+        loss_thresholds: sakuya_recovery::loss::LossThresholds::recommended(ms(1))
+            .expect("the test clock's timers fire to the millisecond"),
+        max_ack_ranges: sakuya_recovery::receive_journals::MaxAckRanges::DEFAULT,
     }
 }
 
@@ -694,6 +889,291 @@ fn a_link_path_made_active_gets_its_recovery_layer_and_is_seen_beside_another() 
     // refilled: nothing more until the idle timeout
     advance_to(ms(1000));
     assert_eq!(outer.wakes(), wakes + 2);
+}
+
+/// The feeder of the next server's first recovery layer does `steps`.
+fn feed(steps: impl IntoIterator<Item = (Duration, probe::Step)>) {
+    FEED.with(|f| f.borrow_mut().extend(steps));
+}
+
+/// The lines the feeder logged since the last call.
+fn statuses() -> Vec<String> {
+    take_log()
+        .into_iter()
+        .filter(|line| line.starts_with("in flight"))
+        .collect()
+}
+
+/// The last line the feeder logged since the last call; `None` if none.
+fn status() -> Option<String> {
+    statuses().pop()
+}
+
+#[test]
+fn the_time_threshold_declares_lost_what_it_waits_on() {
+    reset();
+    feed([(
+        ms(10),
+        probe::Step::Send {
+            space: PacketNumberSpaceKind::Initial,
+            numbers: vec![0, 1, 2],
+            acked: Some(2),
+        },
+    )]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, link());
+    take_log();
+    let outer = Outer::new();
+    advance_to(ms(10));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(
+        status().as_deref(),
+        Some("in flight 2400, outstanding 2, lost [], permits 0, backoff 0")
+    );
+    // 9/8 of the initial RTT of 333 ms after they were sent; meanwhile the
+    // probe timeout waits on the time threshold
+    advance_to(ms(384));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(status(), None);
+    advance_to(ms(385));
+    assert!(outer.poll(&mut connection).is_pending());
+    // kept for three probe timeouts of 999 ms; NewReno asks to send one
+    // datagram as its window comes down
+    assert_eq!(
+        status().as_deref(),
+        Some(
+            "in flight 0, outstanding 0, lost [(0, 3.382s), (1, 3.382s)], permits 1, \
+             backoff 0"
+        )
+    );
+}
+
+#[test]
+fn the_probe_timeout_backs_off_and_grants_probe_permits() {
+    reset();
+    feed([(
+        ms(10),
+        probe::Step::Send {
+            space: PacketNumberSpaceKind::Initial,
+            numbers: vec![0],
+            acked: None,
+        },
+    )]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, link());
+    let outer = Outer::new();
+    advance_to(ms(10));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(
+        status().as_deref(),
+        Some("in flight 1200, outstanding 1, lost [], permits 0, backoff 0")
+    );
+    // 333 ms + 4 × 166.5 ms, without max_ack_delay in the Initial space
+    advance_to(ms(1008));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(status(), None);
+    advance_to(ms(1009));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(
+        status().as_deref(),
+        Some("in flight 1200, outstanding 1, lost [], permits 2, backoff 1")
+    );
+    // twice as long, from the expiry: no probe was sent since
+    advance_to(ms(3006));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(status(), None);
+    advance_to(ms(3007));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(
+        status().as_deref(),
+        Some("in flight 1200, outstanding 1, lost [], permits 4, backoff 2")
+    );
+}
+
+#[test]
+fn the_probe_timeout_leaves_out_application_data_until_the_handshake_is_confirmed() {
+    reset();
+    feed([
+        (
+            ms(10),
+            probe::Step::Send {
+                space: PacketNumberSpaceKind::ApplicationData,
+                numbers: vec![0],
+                acked: None,
+            },
+        ),
+        (ms(1500), probe::Step::Confirm),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, link());
+    let outer = Outer::new();
+    advance_to(ms(10));
+    assert!(outer.poll(&mut connection).is_pending());
+    take_log();
+    // it would have expired at 1034 ms, with the peer's max_ack_delay of
+    // 25 ms by default
+    advance_to(ms(1100));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(status(), None);
+    // once confirmed it is past and expires at once
+    advance_to(ms(1500));
+    let mut lines = Vec::new();
+    for _ in 0..3 {
+        assert!(outer.poll(&mut connection).is_pending());
+        lines.extend(statuses());
+    }
+    assert_eq!(
+        lines.last().map(String::as_str),
+        Some("in flight 1200, outstanding 1, lost [], permits 2, backoff 1"),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn a_late_poll_expires_the_probe_timeout_once_and_counts_the_next_from_then() {
+    reset();
+    feed([(
+        ms(10),
+        probe::Step::Send {
+            space: PacketNumberSpaceKind::Initial,
+            numbers: vec![0],
+            acked: None,
+        },
+    )]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, link());
+    let outer = Outer::new();
+    advance_to(ms(10));
+    assert!(outer.poll(&mut connection).is_pending());
+    take_log();
+    // due at 1009 ms, polled long after
+    advance_to(ms(5000));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(
+        statuses(),
+        ["in flight 1200, outstanding 1, lost [], permits 2, backoff 1"]
+    );
+    advance_to(ms(6997));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(status(), None);
+    advance_to(ms(6998));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(
+        status().as_deref(),
+        Some("in flight 1200, outstanding 1, lost [], permits 4, backoff 2")
+    );
+}
+
+#[test]
+fn a_client_probes_with_nothing_in_flight_until_a_handshake_packet_is_acknowledged() {
+    reset();
+    feed([
+        (
+            ms(10),
+            probe::Step::Send {
+                space: PacketNumberSpaceKind::Initial,
+                numbers: vec![0],
+                acked: None,
+            },
+        ),
+        (
+            ms(20),
+            probe::Step::Send {
+                space: PacketNumberSpaceKind::Initial,
+                numbers: vec![],
+                acked: Some(0),
+            },
+        ),
+    ]);
+    let mut connection = connection!(ClientMine, AddressValidation::Validated, link());
+    let outer = Outer::new();
+    advance_to(ms(10));
+    assert!(outer.poll(&mut connection).is_pending());
+    advance_to(ms(20));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(
+        status().as_deref(),
+        Some("in flight 0, outstanding 0, lost [], permits 0, backoff 0")
+    );
+    // from when nothing was left in flight, in the Initial space: there are
+    // no Handshake keys yet
+    advance_to(ms(1018));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(status(), None);
+    advance_to(ms(1019));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(
+        status().as_deref(),
+        Some("in flight 0, outstanding 0, lost [], permits 2, backoff 1")
+    );
+    advance_to(ms(3016));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(status(), None);
+    advance_to(ms(3017));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(
+        status().as_deref(),
+        Some("in flight 0, outstanding 0, lost [], permits 4, backoff 2")
+    );
+}
+
+#[test]
+fn a_client_whose_handshake_packet_was_acknowledged_does_not_probe_with_nothing_in_flight() {
+    reset();
+    feed([(
+        ms(10),
+        probe::Step::Send {
+            space: PacketNumberSpaceKind::Handshake,
+            numbers: vec![0],
+            acked: Some(0),
+        },
+    )]);
+    let mut connection = connection!(ClientMine, AddressValidation::Validated, link());
+    let outer = Outer::new();
+    advance_to(ms(10));
+    assert!(outer.poll(&mut connection).is_pending());
+    take_log();
+    advance_to(ms(5000));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(status(), None);
+}
+
+#[test]
+fn a_server_does_not_probe_with_nothing_in_flight() {
+    reset();
+    feed([(
+        ms(10),
+        probe::Step::Send {
+            space: PacketNumberSpaceKind::Initial,
+            numbers: vec![0],
+            acked: Some(0),
+        },
+    )]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, link());
+    let outer = Outer::new();
+    advance_to(ms(10));
+    assert!(outer.poll(&mut connection).is_pending());
+    take_log();
+    advance_to(ms(5000));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(status(), None);
+}
+
+#[test]
+fn the_idle_timeout_is_at_least_three_probe_timeouts_of_the_current_rtt() {
+    reset();
+    PEER_AT.with(|p| p.set(Some(ms(5))));
+    feed([(ms(4010), probe::Step::Sample(ms(10)))]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, link());
+    let outer = Outer::new();
+    advance_to(ms(5));
+    assert!(outer.poll(&mut connection).is_pending());
+    // a sample of 4 s: a probe timeout of 4 s + 4 × 2 s + 25 ms, three of
+    // which are longer than the peer's 10 s
+    advance_to(ms(4010));
+    assert!(outer.poll(&mut connection).is_pending());
+    advance_to(ms(10_005));
+    assert!(outer.poll(&mut connection).is_pending());
+    advance_to(ms(36_079));
+    assert!(outer.poll(&mut connection).is_pending());
+    advance_to(ms(36_080));
+    assert!(outer.poll(&mut connection).is_ready(), "ended silently");
 }
 
 /// The sizes of the data of each layer of a version 1 connection, for the

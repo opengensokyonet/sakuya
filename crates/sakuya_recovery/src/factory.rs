@@ -81,8 +81,18 @@ pub trait RecoveryFactory<L: Link>: Sized {
 pub trait LendCongestion<I, Others> {
     /// The part of the link path's congestion control that it stores.
     type Part;
+    /// What the controller keeps for each packet in flight: the same for
+    /// every lend, since the link path's loss detection state keeps it
+    /// across them.
+    type SentState;
+    /// What the controller keeps for each batch of losses, kept the same
+    /// way.
+    type LossState: Clone;
     /// The access lent for one use.
-    type Access<'a>: CongestionController<I> + Pacer<I> + PtoPolicy<I> + EcnPolicy<I>
+    type Access<'a>: CongestionController<I, SentState = Self::SentState, LossState = Self::LossState>
+        + Pacer<I>
+        + PtoPolicy<I>
+        + EcnPolicy<I>
     where
         Self: 'a,
         Others: 'a;
@@ -233,6 +243,8 @@ where
     I: Ord + Copy + Add<Duration, Output = I> + Sub<Output = Duration> + 'static,
 {
     type Part = PacedNewReno<I>;
+    type SentState = <PacedNewReno<I> as CongestionController<I>>::SentState;
+    type LossState = <PacedNewReno<I> as CongestionController<I>>::LossState;
     type Access<'a>
         = &'a mut PacedNewReno<I>
     where

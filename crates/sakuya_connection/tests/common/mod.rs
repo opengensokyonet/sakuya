@@ -103,6 +103,7 @@ impl sakuya_connection::v1::Choices for Mine {
     type Side = sakuya_connection::v1::Server;
     type Recovery<V: Clone + Eq + core::fmt::Debug + 'static> =
         sakuya_recovery::factory::NewRenoRecoveryFactory<V>;
+    type AckObligation = sakuya_recovery::ack_obligation::Rfc9000AckObligation<Duration>;
 }
 
 /// What the part `P`, which declares nothing the connection node needs, is

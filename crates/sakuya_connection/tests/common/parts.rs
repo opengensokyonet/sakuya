@@ -272,7 +272,11 @@ pub mod a {
             });
             hlist![Rtt(ms(10 * n as u64)), Window(1000 * n as u32)]
         }
-        fn end<'v>(self, _: &mut ParentsOf<'v, Mine, L, layer::Recovery>) {
+        fn end<'v, B: CallBundle>(
+            self,
+            _: &mut ParentsOf<'v, Mine, L, layer::Recovery>,
+            _: &mut OtherNodes<'v, Mine, L, B>,
+        ) {
             log(format!("recovery ended with {:?}", self));
         }
     }
@@ -296,7 +300,11 @@ pub mod a {
         ) -> Self {
             Streams(3)
         }
-        fn end<'v>(self, parents: &mut ParentsOf<'v, Mine, L, layer::Established>) {
+        fn end<'v, B: CallBundle>(
+            self,
+            parents: &mut ParentsOf<'v, Mine, L, layer::Established>,
+            _: &mut OtherNodes<'v, Mine, L, B>,
+        ) {
             log(format!(
                 "streams ended with {} open, the record says {:?}",
                 self.0,
@@ -323,7 +331,11 @@ pub mod a {
             log("entry built");
             Credit(0)
         }
-        fn end<'v>(self, _: &mut ParentsOf<'v, Mine, L, layer::LinkEntry>) {
+        fn end<'v, B: CallBundle>(
+            self,
+            _: &mut ParentsOf<'v, Mine, L, layer::LinkEntry>,
+            _: &mut OtherNodes<'v, Mine, L, B>,
+        ) {
             log("entry ended");
         }
     }

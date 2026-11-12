@@ -7,16 +7,23 @@
 //! link in the connection node, with the recovery factory; the clone of the
 //! link, the facts about it and the anti-amplification limit in the entry of
 //! each logical link; the role in each link path; and in each link path's
-//! recovery layer, what the factory makes for it with the state beside them.
-//! The calls and the components of the logical path are not here yet.
+//! recovery layer, what the factory makes for it with the state beside them,
+//! its loss detection state for each packet number space and its probe
+//! timeout. Each logical path keeps, for each packet number space, its
+//! packet number state, its receive journals and its ACK obligation. The
+//! calls and the send journals are not here yet.
 
 pub mod amplification;
+pub mod confirmation;
 pub mod idle;
 pub mod keys;
 pub mod link;
+pub mod loss_detection;
 pub mod parameters;
+pub mod pto;
 pub mod recovery;
 pub mod role;
+pub mod spaces;
 
 #[cfg(test)]
 mod tests;
@@ -33,7 +40,8 @@ use sakuya_wire::{
     parameters::{ParametersOf, ParametersPart},
     parts::{HList, HNil, Selector},
     v1::transport_parameters::{
-        TransportParameterSlots, TransportParameterSpace, integer::MaxIdleTimeout,
+        TransportParameterSlots, TransportParameterSpace,
+        integer::{MaxAckDelay, MaxIdleTimeout},
     },
 };
 
@@ -44,23 +52,38 @@ use crate::{
     layer::{self, NodeKey},
     others::OtherNodes,
     request::StructureRequest,
-    share::{ConnectionArgsOf, LayerShare, LineageLists, LogicalPathKeyShare, LogicalPathKeys},
+    share::{
+        ConnectionArgsOf, FlatMut, LayerShare, LineageLists, LogicalPathKeyShare, LogicalPathKeys,
+        NodeData,
+    },
     take::GetAt,
 };
 
 use self::{
     amplification::{AddressValidation, AntiAmplification, AntiAmplificationFactor},
+    confirmation::HandshakeConfirmation,
     idle::IdleTimeout,
     keys::{DirectionKeys, HandshakeKeys, InitialKeys, LevelKeys, OneRttKeys},
     link::{FirstLinkStart, LinkClone, LinkFacts},
+    loss_detection::LossDetectionOf,
     parameters::{LocalTransportParameters, PeerTransportParameters},
+    pto::ProbeTimeout,
     recovery::{
-        CongestionPartOf, LinkPathCongestionState, PmtuOf, RecoveryConfigOf, RecoveryFactoryOf,
-        RttOf,
+        CongestionPartOf, LinkPathCongestionState, OthersOf, PmtuOf, RecoveryConfigOf,
+        RecoveryFactoryOf, RttOf,
     },
     role::LinkPathRole,
+    spaces::{AckObligationsOf, DEFAULT_MAX_ACK_DELAY, peer_max_ack_delay},
 };
-use sakuya_recovery::factory::RecoveryFactory;
+use sakuya_recovery::{
+    ack_obligation::AckObligation,
+    factory::{LendCongestion, RecoveryFactory},
+    loss::LossThresholds,
+    packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces},
+    pto::probe_timeout,
+    receive_journals::{MaxAckRanges, ReceiveJournals},
+    rtt::RttEstimator,
+};
 
 /// QUIC version 1, one part of a composition.
 #[derive(Debug)]
@@ -91,6 +114,9 @@ pub trait Choices: ConnectionChoices {
     /// parts: the logical link when the connection supports version 1
     /// alone.
     type Recovery<V: Clone + Eq + Debug + 'static>: RecoveryFactory<Self::Link, Via = V> + 'static;
+    /// What decides when an ACK frame is due, one for each packet number
+    /// space of a logical path.
+    type AckObligation: AckObligation<InstantOf<Self>> + 'static;
 }
 
 /// What differs between the two sides of a connection: one method for each
@@ -108,6 +134,16 @@ pub trait Side: 'static {
     /// from an address not yet validated, not to a client starting a
     /// connection or a migration (§21.1.1.1).
     fn later_link_validation() -> AddressValidation;
+
+    /// Whether this side takes its address as validated by the peer from
+    /// the start (RFC 9002 Appendix A.8).
+    ///
+    /// A server does: a client validates the server's address implicitly. A
+    /// client does not until the server acknowledges one of its Handshake
+    /// packets or the handshake is confirmed; until then it keeps a probe
+    /// timeout even with nothing in flight (§6.2.2.1), so that a lost
+    /// server flight cannot leave both sides waiting.
+    fn peer_validates_address_implicitly() -> bool;
 }
 
 /// The server's side.
@@ -121,6 +157,9 @@ impl Side for Server {
     fn later_link_validation() -> AddressValidation {
         AddressValidation::NotValidated
     }
+    fn peer_validates_address_implicitly() -> bool {
+        true
+    }
 }
 
 /// The client's side.
@@ -133,6 +172,9 @@ impl Side for Client {
     }
     fn later_link_validation() -> AddressValidation {
         AddressValidation::Validated
+    }
+    fn peer_validates_address_implicitly() -> bool {
+        false
     }
 }
 
@@ -158,6 +200,11 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
     pub first_link: LinkFacts,
     /// The configuration the connection's recovery factory is made from.
     pub recovery: RecoveryConfigOf<T, L>,
+    /// The thresholds of loss detection, checked against the precision of
+    /// the clock's timers.
+    pub loss_thresholds: LossThresholds,
+    /// How many ranges an ACK frame this side writes reports at most.
+    pub max_ack_ranges: MaxAckRanges,
 }
 
 impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys>
@@ -173,6 +220,9 @@ impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys>
         LocalTransportParameters<TransportParameterSlots>,
         PeerTransportParameters<TransportParameterSlots<L>>,
         RecoveryFactoryOf<T, L>,
+        LossThresholds,
+        MaxAckRanges,
+        HandshakeConfirmation,
     ];
     type Calls = HNil;
     type Args = ConnectionArgs<T, L>;
@@ -182,7 +232,11 @@ impl<T: Choices, L> LayerShare<T, L, layer::LinkEntry> for Part {
     type Calls = HNil;
 }
 impl<T: Choices, L> LayerShare<T, L, layer::LogicalPath> for Part {
-    type Data = HNil;
+    type Data = HList![
+        PacketNumberSpaces<PacketNumberSpaceState>,
+        PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>,
+        AckObligationsOf<T>,
+    ];
     type Calls = HNil;
 }
 impl<T: Choices, L> LayerShare<T, L, layer::LinkPath> for Part {
@@ -193,17 +247,26 @@ impl<T: Choices, L> LayerShare<T, L, layer::Established> for Part {
     type Data = HNil;
     type Calls = HNil;
 }
-impl<T: Choices, L: LogicalPathKeys> LayerShare<T, L, layer::Recovery> for Part {
+/// The loss detection state comes before the probe timeout: its time
+/// threshold is dispatched first (RFC 9002 §6.2.1, Appendix A.8).
+impl<T: Choices, L: LogicalPathKeys> LayerShare<T, L, layer::Recovery> for Part
+where
+    RecoveryFactoryOf<T, L>: for<'s> LendCongestion<InstantOf<T>, OthersOf<'s, T, L>>,
+{
     type Data = HList![
         RttOf<T, L>,
         CongestionPartOf<T, L>,
         PmtuOf<T, L>,
         LinkPathCongestionState<InstantOf<T>>,
+        LossDetectionOf<T, L>,
+        ProbeTimeout<InstantOf<T>>,
     ];
     /// The factory makes the first three together.
     type Units = HList![
         HList![RttOf<T, L>, CongestionPartOf<T, L>, PmtuOf<T, L>],
         HList![LinkPathCongestionState<InstantOf<T>>],
+        HList![LossDetectionOf<T, L>],
+        HList![ProbeTimeout<InstantOf<T>>],
     ];
     type Calls = HNil;
 }
@@ -292,6 +355,47 @@ impl<T: Choices, L> DataComponent<T, L, layer::Connection, ()> for AntiAmplifica
 {
 }
 
+macro_rules! configured {
+    ($($ty:ident . $field:ident),*) => {$(
+        /// It is the configured value, which stays the same for the life of
+        /// the connection.
+        impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for $ty
+        where
+            for<'v> L: LineageLists<'v, T>,
+            ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+        {
+            fn build<'v>(
+                _: &mut ParentsOf<'v, T, L, layer::Connection>,
+                args: &mut ArgsOf<T, L, layer::Connection>,
+            ) -> Self {
+                own_args::<T, L, I>(args).$field
+            }
+        }
+        impl<T: Choices, L> DataComponent<T, L, layer::Connection, ()> for $ty where
+            for<'v> L: LineageLists<'v, T>
+        {
+        }
+    )*};
+}
+configured!(LossThresholds.loss_thresholds, MaxAckRanges.max_ack_ranges);
+
+/// No connection starts confirmed: the advancing call confirms it.
+impl<T: Choices, L> Build<T, L, layer::Connection, ()> for HandshakeConfirmation
+where
+    for<'v> L: LineageLists<'v, T>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        _: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        HandshakeConfirmation::NotConfirmed
+    }
+}
+impl<T: Choices, L> DataComponent<T, L, layer::Connection, ()> for HandshakeConfirmation where
+    for<'v> L: LineageLists<'v, T>
+{
+}
+
 impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for FirstLinkStart
 where
     for<'v> L: LineageLists<'v, T>,
@@ -326,28 +430,36 @@ where
     }
 }
 
-/// The idle timeout reads itself, which the calls restart, and both sides'
-/// transport parameters: this side's once they are sent, the peer's once
-/// they are known. When it expires the
-/// connection ends at once, without a closing period (RFC 9000 §10.1).
+/// The idle timeout reads itself, which the calls restart, both sides'
+/// transport parameters (this side's once they are sent, the peer's once
+/// they are known) and the RTT estimates of the recovery layers. Its floor
+/// is three probe timeouts: the largest among the link paths with a
+/// recovery layer, without backoff, as in the Application Data space. When
+/// it expires the connection ends at once, without a closing period (RFC
+/// 9000 §10.1).
 ///
-/// Not here yet: the floor of three probe timeouts, which reads the
-/// recovery layers, and the record of why the connection closed.
-impl<T: Choices, L, Ii, Il, Ip, Is> DataComponent<T, L, layer::Connection, (Ii, Il, Ip, Is)>
+/// Not here yet: the record of why the connection closed.
+impl<T: Choices, L, Ii, Il, Ip, Is, Ima, Ith, Ir>
+    DataComponent<T, L, layer::Connection, ((Ii, Il, Ip, Is), (Ima, Ith, Ir))>
     for IdleTimeout<InstantOf<T>>
 where
     for<'v> L: LineageLists<'v, T>,
     L: ParametersOf<TransportParameterSpace>,
-    TransportParameterSlots<L>: Selector<Option<MaxIdleTimeout>, Is>,
+    TransportParameterSlots<L>:
+        Selector<Option<MaxIdleTimeout>, Is> + Selector<Option<MaxAckDelay>, Ima>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<IdleTimeout<InstantOf<T>>, Ii>
         + GetAt<LocalTransportParameters<TransportParameterSlots>, Il>
-        + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>,
+        + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>
+        + GetAt<LossThresholds, Ith>,
+    for<'s> NodeData<T, L, layer::Recovery>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::Recovery> as FlatMut<'s>>::Out: GetAt<RttOf<T, L>, Ir>,
 {
     fn reads(reads: &mut ReadSet) {
         reads
             .add::<IdleTimeout<InstantOf<T>>>()
             .add::<LocalTransportParameters<TransportParameterSlots>>()
-            .add::<PeerTransportParameters<TransportParameterSlots<L>>>();
+            .add::<PeerTransportParameters<TransportParameterSlots<L>>>()
+            .add::<RttOf<T, L>>();
     }
     fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::Connection>) -> Option<InstantOf<T>> {
         lineage.get::<IdleTimeout<InstantOf<T>>, Ii>().deadline()
@@ -361,9 +473,26 @@ where
     }
     fn reread<'v, B: CallBundle>(
         mut lineage: LineageOf<'v, T, L, layer::Connection>,
-        _: &mut OtherNodes<'v, T, L, B>,
+        others: &mut OtherNodes<'v, T, L, B>,
         _: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
+        let peer_max_ack_delay = peer_max_ack_delay::<L, Ima>(
+            lineage.get::<PeerTransportParameters<TransportParameterSlots<L>>, Ip>(),
+        )
+        .unwrap_or(DEFAULT_MAX_ACK_DELAY);
+        let granularity = lineage.get::<LossThresholds, Ith>().granularity();
+        let mut pto = None;
+        others.each_recovery_read::<RttOf<T, L>, Ir>(|_, rtt| {
+            let Some(rtt) = rtt else { return };
+            let this = probe_timeout(
+                &rtt.estimate(),
+                granularity,
+                PacketNumberSpaceKind::ApplicationData,
+                peer_max_ack_delay,
+                0,
+            );
+            pto = Some(pto.map_or(this, |pto: Duration| pto.max(this)));
+        });
         let local = lineage.get::<LocalTransportParameters<TransportParameterSlots>, Il>();
         let local = local
             .sent()
@@ -376,10 +505,13 @@ where
         // takes the timeout only to change it: it reads itself
         let idle = lineage.get::<IdleTimeout<InstantOf<T>>, Ii>();
         let peer = peer.unwrap_or(idle.peer());
-        if (idle.local(), idle.peer()) != (local, peer) {
+        // with no recovery layer the last probe timeout stays
+        let pto = pto.unwrap_or(idle.probe_timeout());
+        if (idle.local(), idle.peer(), idle.probe_timeout()) != (local, peer, pto) {
             let idle = lineage.get_mut::<IdleTimeout<InstantOf<T>>, Ii>();
             idle.set_local(local);
             idle.set_peer(peer);
+            idle.set_probe_timeout(pto);
         }
         None
     }

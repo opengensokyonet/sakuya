@@ -29,10 +29,11 @@ use crate::{
         Connection, Established, EstablishedArgs, Layer, LinkEntry, LinkEntryArgs, LinkPath,
         LinkPathArgs, LogicalPath, LogicalPathArgs, NodeKey, NodeKeyOf, Recovery, RecoveryArgs,
     },
+    others::OtherNodes,
     request::StructureRequest,
     share::{ConnectionArgsOf, LineageLists, NodeData, PathKey},
     take::{Lineage, TakenPositions},
-    tree::{ConnectionTree, LogicalPathNode, Node, NodeAddr, Records, WakeMarks},
+    tree::{Around, ConnectionTree, Lent, LogicalPathNode, Node, NodeAddr, Records, WakeMarks},
 };
 
 /// What every waker of a connection shares.
@@ -190,6 +191,32 @@ impl<T: ConnectionChoices, L: TreeCalls<T, P>, P: CallPositions, W, Bw> Unpin
 where
     for<'v> L: LineageLists<'v, T>,
 {
+}
+
+/// End the data `$data` of a node of the layer `$lv` (data positions
+/// `$b`) whose parent is the connection node, with the key `$key`: its
+/// parents are the connection's lend, with the other nodes.
+macro_rules! end_under_connection {
+    ($self:ident, $lv:ident, $b:ident, $data:expr, $key:expr, $now:expr) => {{
+        let Self {
+            tree,
+            lineage_taken,
+            nodes_taken,
+            ..
+        } = $self;
+        let records = Records {
+            lineage: lineage_taken,
+            nodes: nodes_taken,
+            now: $now,
+        };
+        let Lent {
+            mut lineage,
+            others,
+            ..
+        } = tree.lend_connection(records);
+        let mut others = others.ending($key);
+        <L as BuildNode<T, L, $lv, $b>>::end_node($data, &mut lineage, &mut others);
+    }};
 }
 
 /// Run `$go!` for the layer of `$addr`, with the name of the tree's lend,
@@ -939,33 +966,45 @@ where
         self.started(addr, now, changes);
     }
 
-    fn end_recovery(&mut self, link: NodeAddr, todo: &mut Vec<(NodeAddr, usize)>) {
+    fn end_recovery(
+        &mut self,
+        link: NodeAddr,
+        now: InstantOf<T>,
+        todo: &mut Vec<(NodeAddr, usize)>,
+    ) {
         if !self.link_node(link).is_some_and(|n| n.child.is_some()) {
             return;
         }
         let addr = NodeAddr::recovery(link.slot, link.sub);
         self.ending(addr, todo);
         {
-            let ConnectionTree {
-                connection,
-                entries,
-                logical_paths,
-            } = &mut self.tree;
-            let connection = connection.as_mut().expect("the connection node");
-            let path = logical_paths[link.slot].as_mut().expect("alive");
-            let link_node = path.link_paths[link.sub].as_mut().expect("alive");
-            let node = link_node.child.take().expect("checked");
-            let entry_node = entries[link_node.entry].as_mut().expect("the entry");
-            let mut parents = Lineage::new(
-                L::link_path(
-                    &mut connection.data,
-                    &mut entry_node.data,
-                    &mut path.node.data,
-                    &mut link_node.data,
-                ),
-                &mut self.lineage_taken,
-            );
-            <L as BuildNode<T, L, Recovery, Br>>::end_node(node.data, &mut parents);
+            let node = self.tree.logical_paths[link.slot]
+                .as_mut()
+                .expect("alive")
+                .link_paths[link.sub]
+                .as_mut()
+                .expect("alive")
+                .child
+                .take()
+                .expect("checked");
+            let Self {
+                tree,
+                lineage_taken,
+                nodes_taken,
+                ..
+            } = self;
+            let records = Records {
+                lineage: lineage_taken,
+                nodes: nodes_taken,
+                now,
+            };
+            let Lent {
+                mut lineage,
+                others,
+                ..
+            } = tree.lend_link_path(link.slot, link.sub, records);
+            let mut others = others.ending(node.key);
+            <L as BuildNode<T, L, Recovery, Br>>::end_node(node.data, &mut lineage, &mut others);
         }
         let mut lineage = self.ancestors(link);
         lineage.push(link);
@@ -973,32 +1012,39 @@ where
         self.readers(&changes, None, todo);
     }
 
-    fn end_link_path(&mut self, link: NodeAddr, todo: &mut Vec<(NodeAddr, usize)>) {
+    fn end_link_path(
+        &mut self,
+        link: NodeAddr,
+        now: InstantOf<T>,
+        todo: &mut Vec<(NodeAddr, usize)>,
+    ) {
         if self.link_node(link).is_none() {
             return;
         }
-        self.end_recovery(link, todo);
+        self.end_recovery(link, now, todo);
         self.ending(link, todo);
         let entry = self.link_node(link).expect("alive").entry;
         {
-            let ConnectionTree {
-                connection,
-                entries,
-                logical_paths,
-            } = &mut self.tree;
-            let connection = connection.as_mut().expect("the connection node");
-            let path = logical_paths[link.slot].as_mut().expect("alive");
-            let node = path.link_paths[link.sub].take().expect("alive");
-            let entry_node = entries[entry].as_mut().expect("the entry");
-            let mut parents = Lineage::new(
-                L::link_path_parents(
-                    &mut connection.data,
-                    &mut entry_node.data,
-                    &mut path.node.data,
-                ),
-                &mut self.lineage_taken,
-            );
-            <L as BuildNode<T, L, LinkPath, Bk>>::end_node(node.data, &mut parents);
+            let node = self.tree.logical_paths[link.slot]
+                .as_mut()
+                .expect("alive")
+                .link_paths[link.sub]
+                .take()
+                .expect("alive");
+            let Self {
+                tree,
+                lineage_taken,
+                nodes_taken,
+                ..
+            } = self;
+            let records = Records {
+                lineage: lineage_taken,
+                nodes: nodes_taken,
+                now,
+            };
+            let (mut parents, mut others) =
+                tree.end_link_path_view(link.slot, entry, node.key, records);
+            <L as BuildNode<T, L, LinkPath, Bk>>::end_node(node.data, &mut parents, &mut others);
         }
         let changes = self.recorded_for(&[
             NodeAddr::CONNECTION,
@@ -1013,30 +1059,25 @@ where
             .flatten()
             .any(|p| p.link_paths.iter().flatten().any(|n| n.entry == entry));
         if !still_used {
-            self.end_entry(entry, todo);
+            self.end_entry(entry, now, todo);
         }
     }
 
-    fn end_entry(&mut self, slot: usize, todo: &mut Vec<(NodeAddr, usize)>) {
+    fn end_entry(&mut self, slot: usize, now: InstantOf<T>, todo: &mut Vec<(NodeAddr, usize)>) {
         let addr = NodeAddr::entry(slot);
         self.ending(addr, todo);
-        {
-            let ConnectionTree {
-                connection,
-                entries,
-                ..
-            } = &mut self.tree;
-            let connection = connection.as_mut().expect("the connection node");
-            let node = entries[slot].take().expect("alive");
-            let mut parents =
-                Lineage::new(L::connection(&mut connection.data), &mut self.lineage_taken);
-            <L as BuildNode<T, L, LinkEntry, Be>>::end_node(node.data, &mut parents);
-        }
+        let node = self.tree.entries[slot].take().expect("alive");
+        end_under_connection!(self, LinkEntry, Be, node.data, node.key, now);
         let changes = self.recorded_for(&[NodeAddr::CONNECTION]);
         self.readers(&changes, None, todo);
     }
 
-    fn end_logical_path(&mut self, slot: usize, todo: &mut Vec<(NodeAddr, usize)>) {
+    fn end_logical_path(
+        &mut self,
+        slot: usize,
+        now: InstantOf<T>,
+        todo: &mut Vec<(NodeAddr, usize)>,
+    ) {
         let Some(path) = self.tree.logical_paths.get(slot).and_then(Option::as_ref) else {
             return;
         };
@@ -1047,38 +1088,23 @@ where
             .filter_map(|(sub, n)| n.as_ref().map(|_| sub))
             .collect();
         for sub in subs {
-            self.end_link_path(NodeAddr::link_path(slot, sub), todo);
+            self.end_link_path(NodeAddr::link_path(slot, sub), now, todo);
         }
         let addr = NodeAddr::logical_path(slot);
         self.ending(addr, todo);
-        {
-            let ConnectionTree {
-                connection,
-                logical_paths,
-                ..
-            } = &mut self.tree;
-            let connection = connection.as_mut().expect("the connection node");
-            let path = logical_paths[slot].take().expect("alive");
-            let mut parents =
-                Lineage::new(L::connection(&mut connection.data), &mut self.lineage_taken);
-            <L as BuildNode<T, L, LogicalPath, Bl>>::end_node(path.node.data, &mut parents);
-        }
+        let path = self.tree.logical_paths[slot].take().expect("alive");
+        end_under_connection!(self, LogicalPath, Bl, path.node.data, path.node.key, now);
         let changes = self.recorded_for(&[NodeAddr::CONNECTION]);
         self.readers(&changes, None, todo);
     }
 
-    fn end_established(&mut self, todo: &mut Vec<(NodeAddr, usize)>) {
+    fn end_established(&mut self, now: InstantOf<T>, todo: &mut Vec<(NodeAddr, usize)>) {
         if self.tree.connection().child.is_none() {
             return;
         }
         self.ending(NodeAddr::ESTABLISHED, todo);
-        {
-            let connection = self.tree.connection.as_mut().expect("the connection node");
-            let node = connection.child.take().expect("checked");
-            let mut parents =
-                Lineage::new(L::connection(&mut connection.data), &mut self.lineage_taken);
-            <L as BuildNode<T, L, Established, Bs>>::end_node(node.data, &mut parents);
-        }
+        let node = self.tree.connection().child.take().expect("checked");
+        end_under_connection!(self, Established, Bs, node.data, node.key, now);
         let changes = self.recorded_for(&[NodeAddr::CONNECTION]);
         self.readers(&changes, None, todo);
     }
@@ -1134,23 +1160,35 @@ where
 
     /// End every node from the bottom up, each component with its end
     /// action; what is queued or due is not run any more.
-    fn end_connection(&mut self, todo: &mut Vec<(NodeAddr, usize)>) {
+    fn end_connection(&mut self, now: InstantOf<T>, todo: &mut Vec<(NodeAddr, usize)>) {
         for slot in 0..self.tree.logical_paths.len() {
             if self.tree.logical_paths[slot].is_some() {
-                self.end_logical_path(slot, todo);
+                self.end_logical_path(slot, now, todo);
             }
         }
         for slot in 0..self.tree.entries.len() {
             if self.tree.entries[slot].is_some() {
-                self.end_entry(slot, todo);
+                self.end_entry(slot, now, todo);
             }
         }
-        self.end_established(todo);
+        self.end_established(now, todo);
         self.drop_deadlines(NodeAddr::CONNECTION);
         if let Some(node) = self.tree.connection.take() {
+            let mut others = OtherNodes::<T, L, Bundle<T, L, Six<Pc, Pe, Pl, Pk, Ps, Pr>>>::new(
+                Around::empty(),
+                Around::empty(),
+                Around::empty(),
+                None,
+                None,
+                None,
+                &mut self.nodes_taken,
+                node.key,
+                now,
+            );
             <L as BuildNode<T, L, Connection, Bw>>::end_node(
                 node.data,
                 &mut Lineage::new(HNil, &mut self.lineage_taken),
+                &mut others,
             );
         }
         self.lineage_taken.clear();
@@ -1180,25 +1218,25 @@ where
             StructureRequest::AddLinkPath { args } => self.build_link_path(args, now, &mut changes),
             StructureRequest::EndLinkPath { path, link } => {
                 if let Some(addr) = self.find_link_path(&path, &link) {
-                    self.end_link_path(addr, todo);
+                    self.end_link_path(addr, now, todo);
                 }
             }
             StructureRequest::EndLogicalPath { path } => {
                 if let Some(slot) = self.find_logical_path(&path) {
-                    self.end_logical_path(slot, todo);
+                    self.end_logical_path(slot, now, todo);
                 }
             }
-            StructureRequest::EndConnection => self.end_connection(todo),
+            StructureRequest::EndConnection => self.end_connection(now, todo),
             StructureRequest::AddEstablished { mut args } => {
                 self.build_established(&mut args, now, &mut changes)
             }
-            StructureRequest::EndEstablished => self.end_established(todo),
+            StructureRequest::EndEstablished => self.end_established(now, todo),
             StructureRequest::AddRecovery { mut args } => {
                 self.build_recovery(&mut args, now, &mut changes)
             }
             StructureRequest::EndRecovery { path, link } => {
                 if let Some(addr) = self.find_link_path(&path, &link) {
-                    self.end_recovery(addr, todo);
+                    self.end_recovery(addr, now, todo);
                 }
             }
             StructureRequest::MoveRecovery { path, from, to } => {

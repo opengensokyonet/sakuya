@@ -416,6 +416,53 @@ impl<T: ConnectionChoices, L: PartList<T>, B: CallBundle> ConnectionTree<T, L, B
         }
     }
 
+    /// What a link path of the logical path `slot` over the entry `entry`
+    /// is ended with, once it is out of the tree: its parents' lineage, and
+    /// the other nodes, the logical path's other link paths among them.
+    pub(crate) fn end_link_path_view<'v>(
+        &'v mut self,
+        slot: usize,
+        entry: usize,
+        here: NodeKeyOf<T, L>,
+        records: Records<'v, T>,
+    ) -> (
+        Lineage<'v, <L as LineageLists<'v, T>>::LinkPathParents>,
+        OtherNodes<'v, T, L, B>,
+    )
+    where
+        L: LineageLists<'v, T>,
+    {
+        let Self {
+            connection,
+            entries,
+            logical_paths,
+        } = self;
+        let Node {
+            data: connection_data,
+            child,
+            ..
+        } = connection.as_mut().expect("the connection node");
+        let (path, logical_paths) = Around::split(logical_paths, slot);
+        let LogicalPathNode { node, link_paths } = path;
+        let (entry, entries) = Around::split(entries, entry);
+        let others = OtherNodes::new(
+            entries,
+            logical_paths,
+            Around::whole(link_paths),
+            Some((slot, None)),
+            child.as_mut(),
+            None,
+            records.nodes,
+            here,
+            records.now,
+        );
+        let lineage = Lineage::new(
+            L::link_path_parents(connection_data, &mut entry.data, &mut node.data),
+            records.lineage,
+        );
+        (lineage, others)
+    }
+
     pub(crate) fn lend_established<'v>(
         &'v mut self,
         records: Records<'v, T>,

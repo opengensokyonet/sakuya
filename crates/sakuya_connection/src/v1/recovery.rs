@@ -25,6 +25,7 @@ use sakuya_recovery::{
     factory::{LendCongestion, RecoveryFactory},
     pacing::{Pacer, PacingInput},
     pmtu::PmtuPolicy,
+    pto::ProbeCount,
     rtt::{RttEstimate, RttEstimator},
 };
 use sakuya_wire::{
@@ -67,6 +68,14 @@ pub type PmtuOf<T, L> =
 /// The other link paths as the recovery factory sees them when it lends.
 pub type OthersOf<'s, T, L> =
     OtherCongestionParts<'s, PathKey<L>, LinkIdOf<T>, CongestionPartOf<T, L>>;
+/// What the congestion controller lent for a link path keeps for each
+/// packet in flight; the same for every lend.
+pub type SentStateOf<T, L> =
+    <RecoveryFactoryOf<T, L> as LendCongestion<InstantOf<T>, OthersOf<'static, T, L>>>::SentState;
+/// What the congestion controller lent for a link path keeps for each batch
+/// of losses; the same for every lend.
+pub type LossStateOf<T, L> =
+    <RecoveryFactoryOf<T, L> as LendCongestion<InstantOf<T>, OthersOf<'static, T, L>>>::LossState;
 
 /// Where the recovery factory is among the connection's components.
 #[derive(Debug)]
@@ -367,15 +376,15 @@ where
 // ---- the fixed state ----
 
 /// What the protocol defines for a link path's congestion control, beside
-/// the controller: the bytes in flight, whether sending is limited by the
-/// application, and the arrival of the first RTT sample.
+/// the controller: the bytes in flight, the permits to send datagrams past
+/// the window, whether sending is limited by the application, and the
+/// arrival of the first RTT sample.
 ///
 /// The controller is not in it; the methods take what the factory lends.
-/// Not here yet: the permit to send a probe past the window, which comes
-/// with the probe timeout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinkPathCongestionState<I> {
     bytes_in_flight: usize,
+    probe_permits: u8,
     app_limited: bool,
     first_rtt_sample_at: Option<I>,
 }
@@ -384,6 +393,7 @@ impl<I> Default for LinkPathCongestionState<I> {
     fn default() -> Self {
         Self {
             bytes_in_flight: 0,
+            probe_permits: 0,
             app_limited: false,
             first_rtt_sample_at: None,
         }
@@ -391,7 +401,8 @@ impl<I> Default for LinkPathCongestionState<I> {
 }
 
 impl<I: Copy> LinkPathCongestionState<I> {
-    /// Nothing in flight, not limited by the application, no sample yet.
+    /// Nothing in flight, no permits, not limited by the application, no
+    /// sample yet.
     pub fn new() -> Self {
         Self::default()
     }
@@ -399,6 +410,51 @@ impl<I: Copy> LinkPathCongestionState<I> {
     /// The bytes in flight.
     pub fn bytes_in_flight(&self) -> usize {
         self.bytes_in_flight
+    }
+
+    /// `bytes` more are in flight. Probes count too (RFC 9002 §7.5), so the
+    /// bytes in flight can go past the window.
+    pub fn add_in_flight(&mut self, bytes: usize) {
+        self.bytes_in_flight = self.bytes_in_flight.saturating_add(bytes);
+    }
+
+    /// `bytes` left the bytes in flight: acknowledged, declared lost, or
+    /// removed without a signal.
+    pub fn remove_in_flight(&mut self, bytes: usize) {
+        debug_assert!(
+            bytes <= self.bytes_in_flight,
+            "only bytes that are in flight leave"
+        );
+        self.bytes_in_flight = self.bytes_in_flight.saturating_sub(bytes);
+    }
+
+    /// How many datagrams may still be sent past the window.
+    pub fn probe_permits(&self) -> u8 {
+        self.probe_permits
+    }
+
+    /// `count` more datagrams may be sent past the window: at an expiry of
+    /// the probe timeout, or when the controller asks to send before its
+    /// window comes down (RFC 9002 §7.3.2).
+    pub fn grant_probe_permits(&mut self, count: ProbeCount) {
+        let count = u8::try_from(count.get()).unwrap_or(u8::MAX);
+        self.probe_permits = self.probe_permits.saturating_add(count);
+    }
+
+    /// Use one permit for a datagram sent past the window; `false` when
+    /// there is none.
+    pub fn use_probe_permit(&mut self) -> bool {
+        let Some(left) = self.probe_permits.checked_sub(1) else {
+            return false;
+        };
+        self.probe_permits = left;
+        true
+    }
+
+    /// No more datagrams past the window: an ACK newly acknowledged
+    /// packets.
+    pub fn clear_probe_permits(&mut self) {
+        self.probe_permits = 0;
     }
 
     /// Whether sending is limited by the application (RFC 9002 §7.8).
@@ -465,7 +521,7 @@ pub fn max_datagram_size_in_use(
 /// The peer's `max_udp_payload_size`: its default 65527 when the peer left
 /// it out (RFC 9000 §18.2), nothing while its transport parameters are not
 /// known.
-fn peer_max_udp_payload_size<L, I>(
+pub(super) fn peer_max_udp_payload_size<L, I>(
     peer: &PeerTransportParameters<TransportParameterSlots<L>>,
 ) -> Option<usize>
 where

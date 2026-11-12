@@ -19,7 +19,7 @@ use core::{ops::Add, time::Duration};
 pub struct IdleTimeout<I> {
     local: Option<Duration>,
     peer: Option<Duration>,
-    probe_floor: Duration,
+    probe_timeout: Duration,
     restarted_at: Option<I>,
     sent_since_received: bool,
 }
@@ -31,7 +31,7 @@ impl<I: Copy + Add<Duration, Output = I>> IdleTimeout<I> {
         Self {
             local: local.filter(|timeout| !timeout.is_zero()),
             peer: None,
-            probe_floor: Duration::ZERO,
+            probe_timeout: Duration::ZERO,
             restarted_at: None,
             sent_since_received: false,
         }
@@ -63,7 +63,12 @@ impl<I: Copy + Add<Duration, Output = I>> IdleTimeout<I> {
     /// The current probe timeout is `pto`: the timeout in effect is at
     /// least three times it.
     pub fn set_probe_timeout(&mut self, pto: Duration) {
-        self.probe_floor = pto.saturating_mul(3);
+        self.probe_timeout = pto;
+    }
+
+    /// The current probe timeout, zero before one is set.
+    pub fn probe_timeout(&self) -> Duration {
+        self.probe_timeout
     }
 
     /// The timeout in effect, or `None` when neither side advertises one.
@@ -73,7 +78,7 @@ impl<I: Copy + Add<Duration, Output = I>> IdleTimeout<I> {
             (Some(timeout), None) | (None, Some(timeout)) => timeout,
             (None, None) => return None,
         };
-        Some(advertised.max(self.probe_floor))
+        Some(advertised.max(self.probe_timeout.saturating_mul(3)))
     }
 
     /// The instant the connection ends for having been idle, if it can.

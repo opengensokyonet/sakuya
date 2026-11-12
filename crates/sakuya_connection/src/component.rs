@@ -99,8 +99,15 @@ where
     /// Make the unit.
     fn build<'v>(parents: &mut ParentsOf<'v, T, L, Lv>, args: &mut ArgsOf<T, L, Lv>) -> Self;
     /// The node is ended: the unit is handed over with the data of the nodes
-    /// above it. By default it is dropped.
-    fn end<'v>(self, _parents: &mut ParentsOf<'v, T, L, Lv>) {}
+    /// above it and the other nodes, as an expiry gets them; the ended
+    /// node is out of the tree and the others' key is its key. By default
+    /// it is dropped.
+    fn end<'v, B: CallBundle>(
+        self,
+        _parents: &mut ParentsOf<'v, T, L, Lv>,
+        _others: &mut OtherNodes<'v, T, L, B>,
+    ) {
+    }
 }
 
 /// How a unit of one component is built: by the component's own
@@ -119,8 +126,12 @@ where
         }
     }
     #[inline]
-    fn end<'v>(self, parents: &mut ParentsOf<'v, T, L, Lv>) {
-        self.head.end(parents);
+    fn end<'v, B: CallBundle>(
+        self,
+        parents: &mut ParentsOf<'v, T, L, Lv>,
+        others: &mut OtherNodes<'v, T, L, B>,
+    ) {
+        self.head.end(parents, others);
     }
 }
 
@@ -137,7 +148,11 @@ where
         args: &mut ArgsOf<T, L, Lv>,
     ) -> Self::Flat;
     /// End every unit.
-    fn end_units<'v>(flat: Self::Flat, parents: &mut ParentsOf<'v, T, L, Lv>);
+    fn end_units<'v, B: CallBundle>(
+        flat: Self::Flat,
+        parents: &mut ParentsOf<'v, T, L, Lv>,
+        others: &mut OtherNodes<'v, T, L, B>,
+    );
 }
 impl<T: ConnectionChoices, L, Lv: LayerLineage> BuildUnits<T, L, Lv, HNil> for HNil
 where
@@ -149,7 +164,12 @@ where
         HNil
     }
     #[inline]
-    fn end_units<'v>(_: HNil, _: &mut ParentsOf<'v, T, L, Lv>) {}
+    fn end_units<'v, B: CallBundle>(
+        _: HNil,
+        _: &mut ParentsOf<'v, T, L, Lv>,
+        _: &mut OtherNodes<'v, T, L, B>,
+    ) {
+    }
 }
 impl<T: ConnectionChoices, L, Lv: LayerLineage, U, Us, Bh, Iu, Hu>
     BuildUnits<T, L, Lv, HCons<(Bh, Iu), Hu>> for HCons<U, Us>
@@ -169,10 +189,14 @@ where
         unit + Us::build_units(parents, args)
     }
     #[inline]
-    fn end_units<'v>(flat: Self::Flat, parents: &mut ParentsOf<'v, T, L, Lv>) {
+    fn end_units<'v, B: CallBundle>(
+        flat: Self::Flat,
+        parents: &mut ParentsOf<'v, T, L, Lv>,
+        others: &mut OtherNodes<'v, T, L, B>,
+    ) {
         let (unit, rest) = flat.sculpt();
-        unit.end(parents);
-        Us::end_units(rest, parents);
+        unit.end(parents, others);
+        Us::end_units(rest, parents, others);
     }
 }
 
@@ -189,9 +213,10 @@ where
         args: &mut ArgsOf<T, Full, Lv>,
     ) -> <Self as LayerShares<T, Full, Lv>>::Data;
     /// End the data of a node.
-    fn end_node<'v>(
+    fn end_node<'v, B: CallBundle>(
         data: <Self as LayerShares<T, Full, Lv>>::Data,
         parents: &mut ParentsOf<'v, T, Full, Lv>,
+        others: &mut OtherNodes<'v, T, Full, B>,
     );
 }
 impl<T: ConnectionChoices, Full, Lv: LayerLineage> BuildNode<T, Full, Lv, HNil> for HNil
@@ -203,7 +228,12 @@ where
         HNil
     }
     #[inline]
-    fn end_node<'v>(_: HNil, _: &mut ParentsOf<'v, T, Full, Lv>) {}
+    fn end_node<'v, B: CallBundle>(
+        _: HNil,
+        _: &mut ParentsOf<'v, T, Full, Lv>,
+        _: &mut OtherNodes<'v, T, Full, B>,
+    ) {
+    }
 }
 impl<T: ConnectionChoices, Full, Lv: LayerLineage, P, Ps, Hu, Hp>
     BuildNode<T, Full, Lv, HCons<Hu, Hp>> for HCons<P, Ps>
@@ -225,12 +255,13 @@ where
         }
     }
     #[inline]
-    fn end_node<'v>(
+    fn end_node<'v, B: CallBundle>(
         data: <Self as LayerShares<T, Full, Lv>>::Data,
         parents: &mut ParentsOf<'v, T, Full, Lv>,
+        others: &mut OtherNodes<'v, T, Full, B>,
     ) {
-        P::Units::end_units(data.head, parents);
-        Ps::end_node(data.tail, parents);
+        P::Units::end_units(data.head, parents, others);
+        Ps::end_node(data.tail, parents, others);
     }
 }
 

@@ -254,3 +254,68 @@ mod recovery {
         assert!(allowance >= 12000, "{allowance}");
     }
 }
+
+mod probe_timeout {
+    use core::time::Duration;
+
+    use sakuya_recovery::{
+        loss_detection::{InFlightCharge, LossDetectionState},
+        packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaces},
+        rtt::RttEstimate,
+    };
+    use sakuya_wire::v1::packet_number::PacketNumber;
+
+    use super::super::{confirmation::HandshakeConfirmation, pto::ProbeTimeout};
+
+    type Spaces = PacketNumberSpaces<LossDetectionState<Duration, (), ()>>;
+
+    /// One ack-eliciting packet outstanding in the Initial space, sent at
+    /// 10 ms.
+    fn one_initial_packet() -> Spaces {
+        let mut spaces = Spaces {
+            initial: Some(LossDetectionState::new()),
+            handshake: Some(LossDetectionState::new()),
+            application_data: LossDetectionState::new(),
+        };
+        let charge = InFlightCharge {
+            bytes: 1200,
+            app_limited: false,
+            sent_state: (),
+        };
+        spaces.initial.as_mut().unwrap().accept(
+            PacketNumber::new(0).unwrap(),
+            Duration::from_millis(10),
+            true,
+            Some(charge),
+        );
+        spaces
+    }
+
+    fn earliest(pto: &ProbeTimeout<Duration>) -> Option<(Duration, PacketNumberSpaceKind)> {
+        pto.earliest(
+            &one_initial_packet(),
+            &RttEstimate::initial(Duration::from_millis(333)),
+            Duration::from_millis(1),
+            Duration::from_millis(25),
+            HandshakeConfirmation::NotConfirmed,
+            PacketNumberSpaceKind::Initial,
+        )
+    }
+
+    #[test]
+    fn counts_from_the_last_ack_eliciting_packet() {
+        assert_eq!(
+            earliest(&ProbeTimeout::new()),
+            Some((Duration::from_millis(1009), PacketNumberSpaceKind::Initial))
+        );
+    }
+
+    #[test]
+    fn a_timeout_past_the_last_representable_instant_gives_no_deadline() {
+        let mut pto = ProbeTimeout::new();
+        for _ in 0..64 {
+            pto.expired(Duration::from_millis(10));
+        }
+        assert_eq!(earliest(&pto), None);
+    }
+}

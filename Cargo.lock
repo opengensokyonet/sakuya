@@ -673,6 +673,8 @@ name = "sakuya_recovery"
 version = "0.0.0"
 dependencies = [
  "sakuya_link",
+ "sakuya_wire",
+ "smallvec",
  "snafu",
 ]
 
