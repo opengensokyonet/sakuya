@@ -51,7 +51,7 @@ pub(super) type Router = DatagramRouter<
     TestLinkId,
     Target,
     ConnectionIdLengths,
-    Arc<StatelessResetTokens<ResetProbe>>,
+    Arc<StatelessResetTokens<Peer, ResetProbe>>,
     VersionProbe,
     InitialAcceptance<Factory, Reflow>,
     UnclaimedShortProbe,
@@ -480,7 +480,7 @@ pub(super) struct Domain {
     pub(super) router: Arc<Router>,
     pub(super) reflow: DatagramDeliveryQueue<Work>,
     pub(super) factory: Factory,
-    pub(super) resets: Arc<StatelessResetTokens<ResetProbe>>,
+    pub(super) resets: Arc<StatelessResetTokens<Peer, ResetProbe>>,
     pub(super) versions: VersionProbe,
     pub(super) unclaimed: UnclaimedShortProbe,
 }

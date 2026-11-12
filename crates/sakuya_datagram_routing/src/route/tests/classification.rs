@@ -76,16 +76,18 @@ fn stateless_reset_hit_ends_ordinary_routing() {
     datagram.extend(short(&cid(1), 30));
     let token: [u8; 16] = datagram[datagram.len() - 16..].try_into().unwrap();
     let probe = ResetProbe::default();
-    let registration = domain
-        .resets
-        .register(StatelessResetToken::new(token), probe.clone());
+    let arrival = link(&end);
+    let registration =
+        domain
+            .resets
+            .register(arrival.peer, StatelessResetToken::new(token), probe.clone());
 
-    domain.route(datagram.clone(), &link(&end));
+    domain.route(datagram.clone(), &arrival);
     assert_eq!(counts(&entries), [0, 0, 0]);
     assert_eq!(probe.0.load(Ordering::SeqCst), 1);
 
     drop(registration);
-    domain.route(datagram, &link(&end));
+    domain.route(datagram, &arrival);
     assert_eq!(probe.0.load(Ordering::SeqCst), 1);
     assert_eq!(counts(&entries), [1, 0, 0]);
 }
@@ -100,10 +102,12 @@ fn datagram_shorter_than_a_token_is_never_a_reset() {
     let mut token = [0; 16];
     token[16 - datagram.len()..].copy_from_slice(&datagram);
     let probe = ResetProbe::default();
-    let _registration = domain
-        .resets
-        .register(StatelessResetToken::new(token), probe.clone());
-    domain.route(datagram, &link(&end));
+    let arrival = link(&end);
+    let _registration =
+        domain
+            .resets
+            .register(arrival.peer, StatelessResetToken::new(token), probe.clone());
+    domain.route(datagram, &arrival);
     assert_eq!(probe.0.load(Ordering::SeqCst), 0);
     assert_eq!(counts(&entries), [1, 0, 0]);
 }

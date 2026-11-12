@@ -201,10 +201,12 @@ fn a_reflow_round_does_not_repeat_reset_detection() {
     let probe = ResetProbe::default();
     let bytes = initial(&cid(0x33), &cid(0x10));
     let tail = *bytes.last_chunk().unwrap();
-    domain.route(bytes, &link(&local_end()));
-    let _token = domain
-        .resets
-        .register(StatelessResetToken::new(tail), probe.clone());
+    let arrival = link(&local_end());
+    domain.route(bytes, &arrival);
+    let _token =
+        domain
+            .resets
+            .register(arrival.peer, StatelessResetToken::new(tail), probe.clone());
     assert_eq!(domain.drain(), 1);
     assert_eq!(probe.0.load(Ordering::SeqCst), 0);
     assert_eq!(domain.factory.accepted_count(), 1);

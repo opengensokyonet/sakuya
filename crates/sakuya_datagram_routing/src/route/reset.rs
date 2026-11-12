@@ -15,6 +15,7 @@
 
 use std::convert::Infallible;
 use std::fmt;
+use std::hash::Hash;
 use std::sync::{Arc, Weak};
 
 use dashmap::DashMap;
@@ -78,52 +79,68 @@ impl<Local, Peer> StatelessResetDetector<Local, Peer> for () {
     }
 }
 
-/// A detector over the tokens the connection side registered.
+/// A detector over the tokens the connection side registered, grouped by the
+/// peer they apply to.
 ///
-/// Connection ID and token management registers each token that currently
-/// applies, with the target to reset, and drops the registration when the
-/// token stops applying. A hit returns a reference to the target registered
-/// first under the token; no target code runs while the token table is
-/// locked.
-pub struct StatelessResetTokens<Target> {
-    tokens: DashMap<StatelessResetToken, SmallVec<[Arc<Target>; 1]>>,
+/// RFC 9000 §10.3.1 compares the trailing bytes of a datagram only with the
+/// tokens associated with the remote end it came from. Connection ID
+/// management registers a token for a peer when the connection ID it belongs
+/// to is first sent to that peer, and drops the registration when the
+/// connection ID is retired or the link path to that peer is removed,
+/// whichever comes first.
+///
+/// Detection looks up the group of the arriving link's
+/// [`peer`](LinkId::peer) and compares the tail with each token in the group
+/// in constant time ([`StatelessResetToken`]'s equality), stopping at the
+/// first match. The time a lookup takes depends on the peer and on the number
+/// of tokens in its group, never on a token's value. A hit returns a
+/// reference to the target registered first under that token for that peer;
+/// no target code runs while the token table is locked.
+pub struct StatelessResetTokens<Peer, Target> {
+    by_peer: DashMap<Peer, PeerTokens<Target>>,
 }
 
-impl<Target> StatelessResetTokens<Target> {
+/// The tokens registered for one peer, each with its target, in the order
+/// they were registered.
+type PeerTokens<Target> = SmallVec<[(StatelessResetToken, Arc<Target>); 2]>;
+
+impl<Peer: Clone + Eq + Hash, Target> StatelessResetTokens<Peer, Target> {
     /// Creates a detector without tokens.
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            tokens: DashMap::new(),
+            by_peer: DashMap::new(),
         })
     }
 
-    /// Registers `token` for `target` until the registration is dropped.
+    /// Registers `token` for `target` on datagrams from `peer` until the
+    /// registration is dropped.
     pub fn register(
         self: &Arc<Self>,
+        peer: Peer,
         token: StatelessResetToken,
         target: Target,
-    ) -> StatelessResetRegistration<Target> {
+    ) -> StatelessResetRegistration<Peer, Target> {
         let target = Arc::new(target);
-        self.tokens
-            .entry(token)
+        self.by_peer
+            .entry(peer.clone())
             .or_default()
-            .push(Arc::clone(&target));
+            .push((token, Arc::clone(&target)));
         StatelessResetRegistration {
             detector: Arc::downgrade(self),
-            token,
+            peer,
             target,
         }
     }
 
-    fn remove(&self, token: &StatelessResetToken, target: &Arc<Target>) -> Option<Arc<Target>> {
-        let MapEntry::Occupied(mut slot) = self.tokens.entry(*token) else {
+    fn remove(&self, peer: &Peer, target: &Arc<Target>) -> Option<Arc<Target>> {
+        let MapEntry::Occupied(mut slot) = self.by_peer.entry(peer.clone()) else {
             return None;
         };
         let position = slot
             .get()
             .iter()
-            .position(|current| Arc::ptr_eq(current, target))?;
-        let removed = slot.get_mut().remove(position);
+            .position(|(_, current)| Arc::ptr_eq(current, target))?;
+        let (_, removed) = slot.get_mut().remove(position);
         if slot.get().is_empty() {
             drop(slot.remove());
         }
@@ -131,17 +148,21 @@ impl<Target> StatelessResetTokens<Target> {
     }
 }
 
-impl<Local, Peer, Target: StatelessResetTarget> StatelessResetDetector<Local, Peer>
-    for StatelessResetTokens<Target>
+impl<Local, Peer: Eq + Hash, Target: StatelessResetTarget> StatelessResetDetector<Local, Peer>
+    for StatelessResetTokens<Peer, Target>
 {
     type Target = Arc<Target>;
 
     fn detect(
         &self,
         tail: &StatelessResetToken,
-        _link: &LinkId<Local, Peer>,
+        link: &LinkId<Local, Peer>,
     ) -> Option<Arc<Target>> {
-        self.tokens.get(tail)?.first().cloned()
+        let group = self.by_peer.get(&link.peer)?;
+        group
+            .iter()
+            .find(|(token, _)| token == tail)
+            .map(|(_, target)| Arc::clone(target))
     }
 }
 
@@ -159,32 +180,32 @@ impl<Local, Peer, Detector: StatelessResetDetector<Local, Peer> + ?Sized>
     }
 }
 
-impl<Target> fmt::Debug for StatelessResetTokens<Target> {
+impl<Peer: Eq + Hash, Target> fmt::Debug for StatelessResetTokens<Peer, Target> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StatelessResetTokens")
-            .field("tokens", &self.tokens.len())
+            .field("peers", &self.by_peer.len())
             .finish()
     }
 }
 
-/// Keeps one stateless reset token registered; dropping it revokes exactly
-/// that registration.
+/// Keeps one stateless reset token registered for one peer; dropping it
+/// revokes exactly that registration.
 #[must_use = "dropping the registration revokes the token"]
-pub struct StatelessResetRegistration<Target> {
-    detector: Weak<StatelessResetTokens<Target>>,
-    token: StatelessResetToken,
+pub struct StatelessResetRegistration<Peer: Clone + Eq + Hash, Target> {
+    detector: Weak<StatelessResetTokens<Peer, Target>>,
+    peer: Peer,
     target: Arc<Target>,
 }
 
-impl<Target> Drop for StatelessResetRegistration<Target> {
+impl<Peer: Clone + Eq + Hash, Target> Drop for StatelessResetRegistration<Peer, Target> {
     fn drop(&mut self) {
         if let Some(detector) = self.detector.upgrade() {
-            drop(detector.remove(&self.token, &self.target));
+            drop(detector.remove(&self.peer, &self.target));
         }
     }
 }
 
-impl<Target> fmt::Debug for StatelessResetRegistration<Target> {
+impl<Peer: Clone + Eq + Hash, Target> fmt::Debug for StatelessResetRegistration<Peer, Target> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StatelessResetRegistration")
             .finish_non_exhaustive()

@@ -6,7 +6,7 @@ use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use super::support::{Local, TestLinkId};
+use super::support::{Local, Peer, TestLinkId};
 use sakuya_wire::connection_id::StatelessResetToken;
 use sakuya_wire::v1::header::LongPacketType;
 use sakuya_wire::version::Version;
@@ -62,7 +62,7 @@ struct Connection {
     queue: DatagramDeliveryQueue<Delivery>,
     deliverer: Arc<ConnectionDeliverer>,
     registrations: Vec<RouteEntryRegistration<Target, Local>>,
-    reset_registration: Option<StatelessResetRegistration<ResetFlag>>,
+    reset_registration: Option<StatelessResetRegistration<Peer, ResetFlag>>,
     reset: ResetFlag,
     processed: Vec<ExclusiveDatagram<Datagram>>,
 }
@@ -157,7 +157,7 @@ impl InitialReceiverFactory<Vec<u8>, TestLinkId, Target> for Server {
 fn datagrams_flow_from_the_link_to_connections_through_one_router() {
     let connections = Arc::new(Mutex::new(Vec::new()));
     let mut reflow = DatagramDeliveryQueue::<Work>::new(NonZeroUsize::new(8).unwrap()).unwrap();
-    let resets = StatelessResetTokens::<ResetFlag>::new();
+    let resets = StatelessResetTokens::<Peer, ResetFlag>::new();
     let index = RouteIndex::<Target, Local>::new();
     let router = DatagramRouter::new(Arc::clone(&index), lengths(&[8]))
         .with_stateless_reset(Arc::clone(&resets))
@@ -204,8 +204,11 @@ fn datagrams_flow_from_the_link_to_connections_through_one_router() {
     let mut reset_packet = short(&cid(4), 24);
     reset_packet.extend([0x77; 16]);
     let token: [u8; 16] = reset_packet[reset_packet.len() - 16..].try_into().unwrap();
-    connection.reset_registration =
-        Some(resets.register(StatelessResetToken::new(token), connection.reset.clone()));
+    connection.reset_registration = Some(resets.register(
+        link.peer,
+        StatelessResetToken::new(token),
+        connection.reset.clone(),
+    ));
 
     assert_eq!(
         dispatch(long(LongPacketType::Handshake, &cid(3), &[], 40)),
