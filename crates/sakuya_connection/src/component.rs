@@ -40,8 +40,32 @@ impl ReadSet {
         self.0.push(TypeId::of::<X>());
         self
     }
+    /// Each component type of the list `U` is read.
+    pub fn add_each<U: ComponentTypeList>(&mut self) -> &mut Self {
+        U::add_to(self);
+        self
+    }
     pub(crate) fn contains(&self, ty: TypeId) -> bool {
         self.0.contains(&ty)
+    }
+}
+
+/// A list of component types, read or added to a [`ReadSet`] together.
+pub trait ComponentTypeList {
+    /// One shared borrow for each component, in order.
+    type Refs<'s>;
+    /// Add each type of the list.
+    fn add_to(reads: &mut ReadSet);
+}
+impl ComponentTypeList for HNil {
+    type Refs<'s> = HNil;
+    fn add_to(_: &mut ReadSet) {}
+}
+impl<X: 'static, Xs: ComponentTypeList> ComponentTypeList for HCons<X, Xs> {
+    type Refs<'s> = HCons<&'s X, Xs::Refs<'s>>;
+    fn add_to(reads: &mut ReadSet) {
+        reads.add::<X>();
+        Xs::add_to(reads);
     }
 }
 
@@ -84,6 +108,25 @@ where
     ) -> Option<RequestOf<T, L>> {
         None
     }
+}
+
+/// A data component without a deadline and without reads.
+///
+/// Its [`DataComponent`] implementation is this marker's; it keeps every
+/// default, in every layer.
+pub trait PassiveDataComponent {}
+
+/// The position argument of the [`DataComponent`] implementation of every
+/// [`PassiveDataComponent`]; it keeps that implementation apart from the
+/// others.
+#[derive(Debug)]
+pub struct Passive;
+
+impl<T: ConnectionChoices, L, Lv: LayerLineage, X: PassiveDataComponent>
+    DataComponent<T, L, Lv, Passive> for X
+where
+    for<'v> L: LineageLists<'v, T>,
+{
 }
 
 /// How a unit of components of a new node of the layer `Lv` is made, from

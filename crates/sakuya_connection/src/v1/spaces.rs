@@ -27,10 +27,13 @@ use sakuya_wire::{
 use crate::{
     call::CallBundle,
     clock::InstantOf,
-    component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
+    component::{
+        ArgsOf, Build, DataComponent, LineageOf, ParentsOf, PassiveDataComponent, ReadSet,
+        RequestOf,
+    },
     layer,
     others::OtherNodes,
-    share::LineageLists,
+    share::{LineageLists, LineagePartList},
     take::{GetAt, Lineage},
 };
 
@@ -109,7 +112,7 @@ where
 impl<T: Choices, L, Ii, Ih> Build<T, L, layer::LogicalPath, (Ii, Ih)>
     for PacketNumberSpaces<PacketNumberSpaceState>
 where
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
     for<'v> <L as LineageLists<'v, T>>::Connection:
         GetAt<InitialKeys<T::Crypto>, Ii> + GetAt<HandshakeKeys<T::Crypto>, Ih>,
 {
@@ -120,12 +123,7 @@ where
         live_spaces::<T, _, Ii, Ih, _>(parents, |_| PacketNumberSpaceState::new())
     }
 }
-impl<T: Choices, L> DataComponent<T, L, layer::LogicalPath, ()>
-    for PacketNumberSpaces<PacketNumberSpaceState>
-where
-    for<'v> L: LineageLists<'v, T>,
-{
-}
+impl PassiveDataComponent for PacketNumberSpaces<PacketNumberSpaceState> {}
 
 // ---- the receive journals ----
 
@@ -133,7 +131,7 @@ where
 impl<T: Choices, L, Ii, Ih> Build<T, L, layer::LogicalPath, (Ii, Ih)>
     for PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>
 where
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
     for<'v> <L as LineageLists<'v, T>>::Connection:
         GetAt<InitialKeys<T::Crypto>, Ii> + GetAt<HandshakeKeys<T::Crypto>, Ih>,
 {
@@ -144,12 +142,7 @@ where
         live_spaces::<T, _, Ii, Ih, _>(parents, |_| ReceiveJournals::new())
     }
 }
-impl<T: Choices, L> DataComponent<T, L, layer::LogicalPath, ()>
-    for PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>
-where
-    for<'v> L: LineageLists<'v, T>,
-{
-}
+impl<I> PassiveDataComponent for PacketNumberSpaces<ReceiveJournals<I>> {}
 
 // ---- the ACK obligations ----
 
@@ -164,7 +157,7 @@ impl<T, L, X, Ii, Ih, Il, It, Is>
 where
     T: Choices<AckObligation = X>,
     X: AckObligation<InstantOf<T>>,
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
     TransportParameterSlots: Selector<Option<MaxAckDelay>, Is>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<InitialKeys<T::Crypto>, Ii>
         + GetAt<HandshakeKeys<T::Crypto>, Ih>
@@ -200,7 +193,7 @@ impl<T, L, X, I> DataComponent<T, L, layer::LogicalPath, (ChosenAckObligation, I
 where
     T: Choices<AckObligation = X>,
     X: AckObligation<InstantOf<T>> + 'static,
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
     for<'v> <L as LineageLists<'v, T>>::LogicalPath: GetAt<PacketNumberSpaces<X>, I>,
 {
     fn reads(reads: &mut ReadSet) {

@@ -15,6 +15,8 @@ use core::marker::PhantomData;
 pub use frunk_core::indices::{Here, There};
 use sakuya_wire::parts::{HCons, HNil};
 
+use crate::component::ComponentTypeList;
+
 /// What is left in a view where a component was taken out.
 #[derive(Debug)]
 pub struct TakenOut;
@@ -138,6 +140,36 @@ where
     }
 }
 
+/// A list from which the components `U` (a list of component types) can be
+/// read together, at the positions `Is`.
+///
+/// It is to [`GetAt`] what [`TakeEach`] is to [`TakeAt`]: generic code
+/// names the list once and passes on one type parameter for all of its
+/// positions. The borrows' type depends on `U` alone, so generic code can
+/// take them apart.
+pub trait ReadEach<U: ComponentTypeList, Is> {
+    /// Read the components, in the order of `U`.
+    fn read_each(&self) -> U::Refs<'_>;
+}
+impl<V> ReadEach<HNil, HNil> for V {
+    #[inline]
+    fn read_each(&self) -> HNil {
+        HNil
+    }
+}
+impl<V, X: 'static, Xs: ComponentTypeList, I, Is> ReadEach<HCons<X, Xs>, HCons<I, Is>> for V
+where
+    V: GetAt<X, I> + ReadEach<Xs, Is>,
+{
+    #[inline]
+    fn read_each(&self) -> HCons<&X, Xs::Refs<'_>> {
+        HCons {
+            head: self.get_at(),
+            tail: <V as ReadEach<Xs, Is>>::read_each(self),
+        }
+    }
+}
+
 /// A list that holds a borrow of the component `X`, at position `I`.
 #[diagnostic::on_unimplemented(
     message = "the component `{X}` is not in this view",
@@ -234,6 +266,16 @@ impl<'r, V> Lineage<'r, V> {
         V: GetAt<X, I>,
     {
         self.list.get_at()
+    }
+
+    /// Read the components `U` (a list of component types) together, as
+    /// shared borrows in the order of `U`, without taking them.
+    #[inline]
+    pub fn read_each<U: ComponentTypeList, Is>(&self) -> U::Refs<'_>
+    where
+        V: ReadEach<U, Is>,
+    {
+        self.list.read_each()
     }
 
     /// Change the component `X` in place, without taking it out; the change

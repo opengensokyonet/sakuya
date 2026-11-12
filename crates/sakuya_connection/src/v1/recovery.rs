@@ -39,15 +39,22 @@ use sakuya_wire::{
 use crate::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf, LinkIdOf},
-    component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
+    component::{
+        ArgsOf, Build, DataComponent, LineageOf, ParentsOf, PassiveDataComponent, ReadSet,
+        RequestOf,
+    },
     layer::{self, NodeKey},
     others::OtherNodes,
-    share::{ConnectionArgsOf, FlatRef, LineageLists, LinkPathIdentifierOf, NodeData, PathKey},
-    take::{GetAt, Take, TakeEach},
+    share::{
+        ConnectionArgsOf, FlatRef, LineageLists, LineagePartList, LinkPathIdentifierOf, NodeData,
+        PathKey,
+    },
+    take::{GetAt, ReadEach, Take, TakeEach},
 };
 
 use super::{
-    Choices, ConnectionArgs, link::LinkClone, own_args, parameters::PeerTransportParameters,
+    Choices, ConnectionArgs, link::LinkClone, loss_detection::LossFactsReads, own_args,
+    parameters::PeerTransportParameters,
 };
 
 /// The recovery factory of the choices `T` for the list of parts `L`.
@@ -101,7 +108,7 @@ pub struct ChosenRecoveryParts;
 impl<T, L, X, I> Build<T, L, layer::Connection, (ChosenRecoveryFactory, I)> for X
 where
     T: Choices<Recovery<LinkPathIdentifierOf<T, L>> = X>,
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
     X: RecoveryFactory<T::Link>,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
 {
@@ -115,7 +122,7 @@ where
 impl<T, L, X> DataComponent<T, L, layer::Connection, ChosenRecoveryFactory> for X
 where
     T: Choices<Recovery<LinkPathIdentifierOf<T, L>> = X>,
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
 {
 }
 
@@ -127,7 +134,7 @@ impl<T, L, R, C, P, If, Il> Build<T, L, layer::Recovery, (ChosenRecoveryParts, I
     for HList![R, C, P]
 where
     T: Choices,
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
     RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link, Rtt = R, CongestionPart = C, Pmtu = P>,
     for<'v> <L as LineageLists<'v, T>>::LinkPath:
         GetAt<RecoveryFactoryOf<T, L>, If> + GetAt<LinkClone<T::Link>, Il>,
@@ -150,7 +157,7 @@ where
 impl<T, L, X> DataComponent<T, L, layer::Recovery, ChosenRttEstimator> for X
 where
     T: Choices,
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
     X: RttEstimator<InstantOf<T>>,
 {
 }
@@ -159,7 +166,7 @@ where
 impl<T, L, X, I> DataComponent<T, L, layer::Recovery, (ChosenPmtuPolicy, I)> for X
 where
     T: Choices,
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
     X: PmtuPolicy<T::Link> + 'static,
     for<'v> <L as LineageLists<'v, T>>::Recovery: GetAt<X, I>,
 {
@@ -183,22 +190,12 @@ where
 /// factory reads from the part: the next release of pacing among them.
 /// When it comes, the pacer is refilled; what reads the part then sees the
 /// new allowance. It reads itself.
-impl<T, L, X, If, Ix, Ir, Ip, Ipp, Ipr, Il, It, Jx, Jr>
-    DataComponent<
-        T,
-        L,
-        layer::Recovery,
-        (
-            ChosenCongestionPart,
-            If,
-            Ix,
-            (Ir, Ip, Ipp, Ipr, Il, It),
-            (Jx, Jr),
-        ),
-    > for X
+impl<T, L, X, If, Ix, Iq, Ipp, It, Jx, Jr>
+    DataComponent<T, L, layer::Recovery, (ChosenCongestionPart, If, Ix, (Iq, Ipp, It), (Jx, Jr))>
+    for X
 where
     T: Choices,
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
     L: ParametersOf<TransportParameterSpace>,
     X: 'static,
     RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link, CongestionPart = X>
@@ -206,10 +203,7 @@ where
     TransportParameterSlots<L>: Selector<Option<MaxUdpPayloadSize>, Ipp>,
     for<'v> <L as LineageLists<'v, T>>::Recovery: GetAt<RecoveryFactoryOf<T, L>, If>
         + GetAt<X, Ix>
-        + GetAt<RttOf<T, L>, Ir>
-        + GetAt<PmtuOf<T, L>, Ip>
-        + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ipr>
-        + GetAt<LinkClone<T::Link>, Il>
+        + ReadEach<LossFactsReads<T, L>, Iq>
         + TakeEach<'v, HList![RecoveryFactoryOf<T, L>, X], It>,
     for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out:
@@ -227,17 +221,13 @@ where
         others: &mut OtherNodes<'v, T, L, B>,
         now: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
-        let rtt = lineage.get::<RttOf<T, L>, Ir>().estimate();
+        let frunk_core::hlist_pat![_, rtt, pmtu, peer, link] =
+            lineage.read_each::<LossFactsReads<T, L>, Iq>();
+        let rtt = rtt.estimate();
         let size = max_datagram_size_in_use(
-            lineage.get::<PmtuOf<T, L>, Ip>().conclusion(),
-            peer_max_udp_payload_size::<L, Ipp>(
-                lineage.get::<PeerTransportParameters<TransportParameterSlots<L>>, Ipr>(),
-            ),
-            lineage
-                .get::<LinkClone<T::Link>, Il>()
-                .0
-                .max_datagram_size()
-                .ok(),
+            pmtu.conclusion(),
+            peer_max_udp_payload_size::<L, Ipp>(peer),
+            link.0.max_datagram_size().ok(),
         );
         let (frunk_core::hlist_pat![factory, part], _) =
             Take::<HList![RecoveryFactoryOf<T, L>, X], It>::take(lineage);
@@ -251,7 +241,7 @@ where
 /// The fixed state starts with nothing in flight.
 impl<T: Choices, L> Build<T, L, layer::Recovery, ()> for LinkPathCongestionState<InstantOf<T>>
 where
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Recovery>,
@@ -260,12 +250,7 @@ where
         Self::new()
     }
 }
-impl<T: Choices, L> DataComponent<T, L, layer::Recovery, ()>
-    for LinkPathCongestionState<InstantOf<T>>
-where
-    for<'v> L: LineageLists<'v, T>,
-{
-}
+impl<I> PassiveDataComponent for LinkPathCongestionState<I> {}
 
 // ---- lending ----
 

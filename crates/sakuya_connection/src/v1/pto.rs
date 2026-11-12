@@ -29,11 +29,13 @@ use sakuya_wire::{
 use crate::{
     call::CallBundle,
     clock::{CheckedAdd, InstantOf},
-    component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
+    component::{
+        ArgsOf, Build, ComponentTypeList, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf,
+    },
     layer,
     others::OtherNodes,
-    share::{FlatRef, LineageLists, NodeData},
-    take::{GetAt, Take, TakeEach},
+    share::{FlatRef, LineageLists, LineagePartList, NodeData},
+    take::{GetAt, ReadEach, Take, TakeEach},
 };
 
 use super::{
@@ -41,11 +43,11 @@ use super::{
     amplification::AntiAmplification,
     confirmation::HandshakeConfirmation,
     keys::HandshakeKeys,
-    link::{LinkClone, LinkFacts},
-    loss_detection::{declare_lost, loss_facts},
+    link::LinkFacts,
+    loss_detection::{LossFactsReads, declare_lost, loss_facts},
     parameters::PeerTransportParameters,
     recovery::{
-        CongestionPartOf, LinkPathCongestionState, OthersOf, PmtuOf, RecoveryFactoryOf, RttOf,
+        CongestionPartOf, LinkPathCongestionState, OthersOf, RecoveryFactoryOf, RttOf,
         lend_congestion,
     },
     role::LinkPathRole,
@@ -187,7 +189,7 @@ where
 /// A link path starts with no backoff.
 impl<T: Choices, L> Build<T, L, layer::Recovery, ()> for ProbeTimeout<InstantOf<T>>
 where
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Recovery>,
@@ -217,22 +219,12 @@ where
 /// through the link path's send planner; and declaring the packets in
 /// flight lost without asking the policy while the link path cannot send
 /// 1200 bytes.
-impl<T, L, S, Ls, Ipt, Id, Ir, Ith, Ihc, Ipr, Ima, Irl, Iaa, Ilf, Ihk, Ip, Il, Ipp, In, It, Jx, Jr>
-    DataComponent<
-        T,
-        L,
-        layer::Recovery,
-        (
-            (Ipt, Id, Ir, Ith),
-            (Ihc, Ipr, Ima, Irl),
-            (Iaa, Ilf, Ihk),
-            (Ip, Il, Ipp, In, It),
-            (Jx, Jr),
-        ),
-    > for ProbeTimeout<InstantOf<T>>
+impl<T, L, S, Ls, Ipt, Ir, If, Ipp, Ima, It, Jx, Jr>
+    DataComponent<T, L, layer::Recovery, ((Ipt, Ir, If), (Ipp, Ima), It, (Jx, Jr))>
+    for ProbeTimeout<InstantOf<T>>
 where
     T: Choices,
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
     L: ParametersOf<TransportParameterSpace>,
     S: 'static,
     Ls: Clone + 'static,
@@ -247,18 +239,8 @@ where
     TransportParameterSlots<L>:
         Selector<Option<MaxUdpPayloadSize>, Ipp> + Selector<Option<MaxAckDelay>, Ima>,
     for<'v> <L as LineageLists<'v, T>>::Recovery: GetAt<ProbeTimeout<InstantOf<T>>, Ipt>
-        + GetAt<PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>, Id>
-        + GetAt<RttOf<T, L>, Ir>
-        + GetAt<LossThresholds, Ith>
-        + GetAt<HandshakeConfirmation, Ihc>
-        + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ipr>
-        + GetAt<LinkPathRole<InstantOf<T>>, Irl>
-        + GetAt<AntiAmplification, Iaa>
-        + GetAt<LinkFacts, Ilf>
-        + GetAt<HandshakeKeys<T::Crypto>, Ihk>
-        + GetAt<PmtuOf<T, L>, Ip>
-        + GetAt<LinkClone<T::Link>, Il>
-        + GetAt<PacketNumberSpaces<PacketNumberSpaceState>, In>
+        + ReadEach<ProbeTimeoutReads<T, L, S, Ls>, Ir>
+        + ReadEach<LossFactsReads<T, L>, If>
         + TakeEach<
             'v,
             HList![
@@ -276,21 +258,10 @@ where
         Selector<&'a CongestionPartOf<T, L>, Jx> + Selector<&'a RttOf<T, L>, Jr>,
 {
     fn reads(reads: &mut ReadSet) {
-        reads
-            .add::<ProbeTimeout<InstantOf<T>>>()
-            .add::<RttOf<T, L>>()
-            .add::<PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>>()
-            .add::<LinkPathRole<InstantOf<T>>>()
-            .add::<AntiAmplification>()
-            .add::<LinkFacts>()
-            .add::<HandshakeConfirmation>()
-            .add::<HandshakeKeys<T::Crypto>>()
-            .add::<PacketNumberSpaces<PacketNumberSpaceState>>()
-            .add::<PeerTransportParameters<TransportParameterSlots<L>>>()
-            .add::<LossThresholds>();
+        reads.add_each::<ProbeTimeoutReads<T, L, S, Ls>>();
     }
     fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::Recovery>) -> Option<InstantOf<T>> {
-        earliest::<T, L, S, Ls, _, Ipt, Id, Ir, Ith, Ihc, Ipr, Ima, Irl, Iaa, Ilf, Ihk>(lineage)
+        earliest::<T, L, S, Ls, Ima>(lineage.read_each::<ProbeTimeoutReads<T, L, S, Ls>, Ir>())
             .map(|(at, _)| at)
     }
     fn expire<'v, B: CallBundle>(
@@ -298,14 +269,11 @@ where
         others: &mut OtherNodes<'v, T, L, B>,
         now: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
-        let (_, expired_space) =
-            earliest::<T, L, S, Ls, _, Ipt, Id, Ir, Ith, Ihc, Ipr, Ima, Irl, Iaa, Ilf, Ihk>(
-                &lineage,
-            )?;
-        let facts = loss_facts::<T, L, Ith, Ir, Ip, Ipr, Il, Ipp, Ima, _>(&lineage, now);
-        let numbers = lineage
-            .get::<PacketNumberSpaces<PacketNumberSpaceState>, In>()
-            .clone();
+        let reads = lineage.read_each::<ProbeTimeoutReads<T, L, S, Ls>, Ir>();
+        let (_, expired_space) = earliest::<T, L, S, Ls, Ima>(reads)?;
+        let frunk_core::hlist_pat![_, _, _, _, _, _, _, _, _, _, numbers] = reads;
+        let numbers = numbers.clone();
+        let facts = loss_facts::<T, L, Ipp, Ima, _, If>(&lineage, now);
         let (frunk_core::hlist_pat![pto, factory, part, rtt, spaces, state], _) =
             Take::<
                 HList![
@@ -365,101 +333,114 @@ where
         _: &mut OtherNodes<'v, T, L, B>,
         now: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
-        let probes = probes_with_nothing_outstanding::<T, S, Ls, _, Id, Ihc, In>(&lineage);
-        let since = lineage
-            .get::<ProbeTimeout<InstantOf<T>>, Ipt>()
-            .anti_deadlock_since();
-        match (probes, since) {
-            (true, None) => lineage
-                .get_mut::<ProbeTimeout<InstantOf<T>>, Ipt>()
-                .set_anti_deadlock_since(Some(now)),
-            (false, Some(_)) => lineage
-                .get_mut::<ProbeTimeout<InstantOf<T>>, Ipt>()
-                .set_anti_deadlock_since(None),
-            (true, Some(_)) | (false, None) => {}
-        }
+        let reads = lineage.read_each::<ProbeTimeoutReads<T, L, S, Ls>, Ir>();
+        let probes = probes_with_nothing_outstanding::<T, L, S, Ls>(reads);
+        let pto = reads.head;
+        let since = match (probes, pto.anti_deadlock_since()) {
+            (true, None) => Some(now),
+            (false, Some(_)) => None,
+            (true, Some(_)) | (false, None) => return None,
+        };
+        lineage
+            .get_mut::<ProbeTimeout<InstantOf<T>>, Ipt>()
+            .set_anti_deadlock_since(since);
         None
     }
 }
 
-/// Whether the client whose recovery layer's lineage is `lineage` probes
-/// with nothing ack-eliciting outstanding: its peer has not acknowledged
-/// any of its Handshake packets, the handshake is not confirmed, and
-/// nothing ack-eliciting is outstanding on the link path (RFC 9002
-/// §6.2.2.1, Appendix A.8). A server never does: it assumes the client
-/// validated its address.
-fn probes_with_nothing_outstanding<T, S, Ls, V, Id, Ihc, In>(
-    lineage: &crate::take::Lineage<'_, V>,
-) -> bool
+/// What the probe timeout reads: its deadline and its reread look at these,
+/// and it is reread when one of them changes.
+type ProbeTimeoutReads<T, L, S, Ls> = HList![
+    ProbeTimeout<InstantOf<T>>,
+    PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>,
+    RttOf<T, L>,
+    LossThresholds,
+    HandshakeConfirmation,
+    PeerTransportParameters<TransportParameterSlots<L>>,
+    LinkPathRole<InstantOf<T>>,
+    AntiAmplification,
+    LinkFacts,
+    HandshakeKeys<<T as Choices>::Crypto>,
+    PacketNumberSpaces<PacketNumberSpaceState>
+];
+
+/// The borrows of what the probe timeout reads.
+type ProbeTimeoutRefs<'s, T, L, S, Ls> =
+    <ProbeTimeoutReads<T, L, S, Ls> as ComponentTypeList>::Refs<'s>;
+
+/// Whether the client whose probe timeout reads `reads` probes with nothing
+/// ack-eliciting outstanding: its peer has not acknowledged any of its
+/// Handshake packets, the handshake is not confirmed, and nothing
+/// ack-eliciting is outstanding on the link path (RFC 9002 §6.2.2.1,
+/// Appendix A.8). A server never does: it assumes the client validated its
+/// address.
+fn probes_with_nothing_outstanding<T, L, S, Ls>(reads: ProbeTimeoutRefs<'_, T, L, S, Ls>) -> bool
 where
     T: Choices,
-    V: GetAt<PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>, Id>
-        + GetAt<HandshakeConfirmation, Ihc>
-        + GetAt<PacketNumberSpaces<PacketNumberSpaceState>, In>,
+    L: ParametersOf<TransportParameterSpace> + crate::share::LogicalPathKeys + 'static,
+    S: 'static,
+    Ls: 'static,
 {
+    let frunk_core::hlist_pat![_, detection, _, _, confirmation, _, _, _, _, _, numbers] = reads;
     !T::Side::peer_validates_address_implicitly()
-        && *lineage.get::<HandshakeConfirmation, Ihc>() != HandshakeConfirmation::Confirmed
-        && lineage
-            .get::<PacketNumberSpaces<PacketNumberSpaceState>, In>()
+        && *confirmation != HandshakeConfirmation::Confirmed
+        && numbers
             .get(PacketNumberSpaceKind::Handshake)
             .is_none_or(|handshake| handshake.largest_acked().is_none())
-        && !lineage
-            .get::<PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>, Id>()
+        && !detection
             .iter()
             .any(|(_, detection)| detection.has_ack_eliciting_outstanding())
 }
 
-/// The instant the probe timeout of the link path whose recovery layer's
-/// lineage is `lineage` expires, and the space whose timeout it is.
-fn earliest<T, L, S, Ls, V, Ipt, Id, Ir, Ith, Ihc, Ipr, Ima, Irl, Iaa, Ilf, Ihk>(
-    lineage: &crate::take::Lineage<'_, V>,
+/// The instant the probe timeout that reads `reads` expires, and the space
+/// whose timeout it is.
+fn earliest<T, L, S, Ls, Ima>(
+    reads: ProbeTimeoutRefs<'_, T, L, S, Ls>,
 ) -> Option<(InstantOf<T>, PacketNumberSpaceKind)>
 where
     T: Choices,
-    L: ParametersOf<TransportParameterSpace> + crate::share::LogicalPathKeys,
+    L: ParametersOf<TransportParameterSpace> + crate::share::LogicalPathKeys + 'static,
+    S: 'static,
+    Ls: 'static,
     TransportParameterSlots<L>: Selector<Option<MaxAckDelay>, Ima>,
-    V: GetAt<ProbeTimeout<InstantOf<T>>, Ipt>
-        + GetAt<PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>, Id>
-        + GetAt<RttOf<T, L>, Ir>
-        + GetAt<LossThresholds, Ith>
-        + GetAt<HandshakeConfirmation, Ihc>
-        + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ipr>
-        + GetAt<LinkPathRole<InstantOf<T>>, Irl>
-        + GetAt<AntiAmplification, Iaa>
-        + GetAt<LinkFacts, Ilf>
-        + GetAt<HandshakeKeys<T::Crypto>, Ihk>,
 {
-    if *lineage.get::<LinkPathRole<InstantOf<T>>, Irl>() != LinkPathRole::Active {
+    let frunk_core::hlist_pat![
+        pto,
+        spaces,
+        rtt,
+        thresholds,
+        confirmation,
+        peer,
+        role,
+        amplification,
+        facts,
+        handshake_keys,
+        _
+    ] = reads;
+    if *role != LinkPathRole::Active {
         return None;
     }
-    let spaces = lineage.get::<PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>, Id>();
     // the time threshold comes first (§6.2.1, Appendix A.8)
     if spaces.iter().any(|(_, d)| d.loss_time().is_some()) {
         return None;
     }
     // a server at the limit waits for the client's next datagram
     // (§6.2.2.1)
-    let validation = lineage.get::<LinkFacts, Ilf>().validation;
-    if lineage.get::<AntiAmplification, Iaa>().credit(validation) == Some(0) {
+    if amplification.credit(facts.validation) == Some(0) {
         return None;
     }
-    let peer = lineage.get::<PeerTransportParameters<TransportParameterSlots<L>>, Ipr>();
     let peer_max_ack_delay = peer_max_ack_delay::<L, Ima>(peer).unwrap_or(DEFAULT_MAX_ACK_DELAY);
-    let anti_deadlock_space = if lineage
-        .get::<HandshakeKeys<T::Crypto>, Ihk>()
-        .send()
-        .is_some()
-    {
+    let anti_deadlock_space = if handshake_keys.send().is_some() {
         PacketNumberSpaceKind::Handshake
     } else {
         PacketNumberSpaceKind::Initial
     };
-    lineage.get::<ProbeTimeout<InstantOf<T>>, Ipt>().earliest(
+    pto.earliest(
         spaces,
-        &lineage.get::<RttOf<T, L>, Ir>().estimate(),
-        lineage.get::<LossThresholds, Ith>().granularity(),
+        &rtt.estimate(),
+        thresholds.granularity(),
         peer_max_ack_delay,
-        *lineage.get::<HandshakeConfirmation, Ihc>(),
+        *confirmation,
         anti_deadlock_space,
     )
 }

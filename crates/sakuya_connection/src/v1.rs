@@ -53,16 +53,19 @@ use sakuya_wire::{
 use crate::{
     call::CallBundle,
     clock::{CheckedAdd, ConnectionChoices, InstantOf},
-    component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
+    component::{
+        ArgsOf, Build, DataComponent, LineageOf, ParentsOf, PassiveDataComponent, ReadSet,
+        RequestOf,
+    },
     error::{ConnectionErrorOf, ConnectionErrorPart, ConnectionErrorsOf},
     layer::{self, NodeKey},
     others::OtherNodes,
     request::StructureRequest,
     share::{
-        ConnectionArgsOf, FlatMut, LayerShare, LineageLists, LogicalPathKeyShare, LogicalPathKeys,
-        NodeData,
+        ConnectionArgsOf, FlatMut, LayerShare, LineageLists, LineagePartList, LogicalPathKeyShare,
+        LogicalPathKeys, NodeData,
     },
-    take::GetAt,
+    take::{GetAt, ReadEach},
 };
 
 use self::{
@@ -308,7 +311,7 @@ fn own_args<T: Choices, L, I>(
     args: &mut ArgsOf<T, L, layer::Connection>,
 ) -> &mut ConnectionArgs<T, L>
 where
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
 {
     args.get_mut()
@@ -362,7 +365,7 @@ where
 /// is live from the start (RFC 9001 §5.2).
 impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for InitialKeys<T::Crypto>
 where
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
@@ -384,7 +387,7 @@ macro_rules! not_yet {
         /// The handshake produces them later.
         impl<T: Choices, L> Build<T, L, layer::Connection, ()> for $ty<T::Crypto>
         where
-            for<'v> L: LineageLists<'v, T>,
+            L: LineagePartList<T>,
         {
             fn build<'v>(
                 _: &mut ParentsOf<'v, T, L, layer::Connection>,
@@ -407,7 +410,7 @@ macro_rules! discarded_when_draining {
         /// every closing link path has sealed its close packet.
         impl<T: Choices, L, I, J> DataComponent<T, L, layer::Connection, (I, J)> for $ty<T::Crypto>
         where
-            for<'v> L: LineageLists<'v, T>,
+            L: LineagePartList<T>,
             for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<$ty<T::Crypto>, I>,
             for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
             for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
@@ -441,7 +444,7 @@ discarded_when_draining!(InitialKeys, HandshakeKeys, OneRttKeys);
 
 impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for AntiAmplificationFactor
 where
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
@@ -451,10 +454,7 @@ where
         own_args::<T, L, I>(args).anti_amplification
     }
 }
-impl<T: Choices, L> DataComponent<T, L, layer::Connection, ()> for AntiAmplificationFactor where
-    for<'v> L: LineageLists<'v, T>
-{
-}
+impl PassiveDataComponent for AntiAmplificationFactor {}
 
 macro_rules! configured {
     ($($ty:ident . $field:ident),*) => {$(
@@ -462,7 +462,7 @@ macro_rules! configured {
         /// the connection.
         impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for $ty
         where
-            for<'v> L: LineageLists<'v, T>,
+            L: LineagePartList<T>,
             ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
         {
             fn build<'v>(
@@ -472,10 +472,7 @@ macro_rules! configured {
                 own_args::<T, L, I>(args).$field
             }
         }
-        impl<T: Choices, L> DataComponent<T, L, layer::Connection, ()> for $ty where
-            for<'v> L: LineageLists<'v, T>
-        {
-        }
+        impl PassiveDataComponent for $ty {}
     )*};
 }
 configured!(LossThresholds.loss_thresholds, MaxAckRanges.max_ack_ranges);
@@ -483,7 +480,7 @@ configured!(LossThresholds.loss_thresholds, MaxAckRanges.max_ack_ranges);
 /// No connection starts confirmed: the advancing call confirms it.
 impl<T: Choices, L> Build<T, L, layer::Connection, ()> for HandshakeConfirmation
 where
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
@@ -492,16 +489,13 @@ where
         HandshakeConfirmation::NotConfirmed
     }
 }
-impl<T: Choices, L> DataComponent<T, L, layer::Connection, ()> for HandshakeConfirmation where
-    for<'v> L: LineageLists<'v, T>
-{
-}
+impl PassiveDataComponent for HandshakeConfirmation {}
 
 /// No connection starts closing.
 impl<T: Choices, L: ConnectionErrorsOf> Build<T, L, layer::Connection, ()>
     for CloseReasonRecord<CloseCauseOf<T, L>>
 where
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
@@ -520,7 +514,7 @@ where
 impl<T: Choices, L: ConnectionErrorsOf, I> DataComponent<T, L, layer::Connection, (I,)>
     for CloseReasonRecord<CloseCauseOf<T, L>>
 where
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, I>,
 {
     fn reads(reads: &mut ReadSet) {
@@ -551,7 +545,7 @@ where
 
 impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for FirstLinkStart
 where
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
@@ -561,16 +555,13 @@ where
         FirstLinkStart::new(own_args::<T, L, I>(args).first_link)
     }
 }
-impl<T: Choices, L> DataComponent<T, L, layer::Connection, ()> for FirstLinkStart where
-    for<'v> L: LineageLists<'v, T>
-{
-}
+impl PassiveDataComponent for FirstLinkStart {}
 
 /// The idle timeout starts from this side's maximum idle timeout as
 /// configured.
 impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for IdleTimeout<InstantOf<T>>
 where
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
@@ -591,18 +582,16 @@ where
 /// it expires the connection ends at once, without a closing period (RFC
 /// 9000 §10.1), and the reason goes into the record of why the connection
 /// closed; a reason already there stays.
-impl<T: Choices, L, Ii, Il, Ip, Is, Ima, Ith, Ir, Ic>
-    DataComponent<T, L, layer::Connection, ((Ii, Il, Ip, Is), (Ima, Ith, Ir, Ic))>
+impl<T: Choices, L, Ii, Iv, Ic, Is, Ima, Ir>
+    DataComponent<T, L, layer::Connection, ((Ii, Iv, Ic), (Is, Ima, Ir))>
     for IdleTimeout<InstantOf<T>>
 where
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
     L: ParametersOf<TransportParameterSpace> + ConnectionErrorsOf,
     TransportParameterSlots<L>:
         Selector<Option<MaxIdleTimeout>, Is> + Selector<Option<MaxAckDelay>, Ima>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<IdleTimeout<InstantOf<T>>, Ii>
-        + GetAt<LocalTransportParameters<TransportParameterSlots>, Il>
-        + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>
-        + GetAt<LossThresholds, Ith>
+        + ReadEach<IdleTimeoutReads<L>, Iv>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>,
     for<'s> NodeData<T, L, layer::Recovery>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Recovery> as FlatMut<'s>>::Out: GetAt<RttOf<T, L>, Ir>,
@@ -610,8 +599,7 @@ where
     fn reads(reads: &mut ReadSet) {
         reads
             .add::<IdleTimeout<InstantOf<T>>>()
-            .add::<LocalTransportParameters<TransportParameterSlots>>()
-            .add::<PeerTransportParameters<TransportParameterSlots<L>>>()
+            .add_each::<IdleTimeoutReads<L>>()
             .add::<RttOf<T, L>>();
     }
     fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::Connection>) -> Option<InstantOf<T>> {
@@ -632,20 +620,14 @@ where
         others: &mut OtherNodes<'v, T, L, B>,
         _: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
-        let pto = current_probe_timeout::<T, L, B, Ima, Ir>(
-            lineage.get::<PeerTransportParameters<TransportParameterSlots<L>>, Ip>(),
-            lineage.get::<LossThresholds, Ith>(),
-            others,
-        );
-        let local = lineage.get::<LocalTransportParameters<TransportParameterSlots>, Il>();
+        let frunk_core::hlist_pat![local, peer, thresholds] =
+            lineage.read_each::<IdleTimeoutReads<L>, Iv>();
+        let pto = current_probe_timeout::<T, L, B, Ima, Ir>(peer, thresholds, others);
         let local = local
             .sent()
             .or(local.configured())
             .and_then(max_idle_timeout);
-        let peer = lineage
-            .get::<PeerTransportParameters<TransportParameterSlots<L>>, Ip>()
-            .known()
-            .map(max_idle_timeout);
+        let peer = peer.known().map(max_idle_timeout);
         // takes the timeout only to change it: it reads itself
         let idle = lineage.get::<IdleTimeout<InstantOf<T>>, Ii>();
         let peer = peer.unwrap_or(idle.peer());
@@ -661,11 +643,19 @@ where
     }
 }
 
+/// What the idle timeout reads besides itself, the RTT estimates and the
+/// record of why the connection closed.
+type IdleTimeoutReads<L> = HList![
+    LocalTransportParameters<TransportParameterSlots>,
+    PeerTransportParameters<TransportParameterSlots<L>>,
+    LossThresholds
+];
+
 /// This side's transport parameters start as configured.
 impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)>
     for LocalTransportParameters<TransportParameterSlots>
 where
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
@@ -675,12 +665,7 @@ where
         LocalTransportParameters::Configured(own_args::<T, L, I>(args).transport_parameters)
     }
 }
-impl<T: Choices, L> DataComponent<T, L, layer::Connection, ()>
-    for LocalTransportParameters<TransportParameterSlots>
-where
-    for<'v> L: LineageLists<'v, T>,
-{
-}
+impl<S> PassiveDataComponent for LocalTransportParameters<S> {}
 
 /// The peer's transport parameters are not known when the connection is
 /// made, even to a client that offers 0-RTT: the remembered ones are set
@@ -688,7 +673,7 @@ where
 impl<T: Choices, L: ParametersOf<TransportParameterSpace>> Build<T, L, layer::Connection, ()>
     for PeerTransportParameters<TransportParameterSlots<L>>
 where
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
@@ -697,13 +682,7 @@ where
         PeerTransportParameters::NotYet
     }
 }
-impl<T: Choices, L: ParametersOf<TransportParameterSpace>>
-    DataComponent<T, L, layer::Connection, ()>
-    for PeerTransportParameters<TransportParameterSlots<L>>
-where
-    for<'v> L: LineageLists<'v, T>,
-{
-}
+impl<S> PassiveDataComponent for PeerTransportParameters<S> {}
 
 // ---- the entry of a logical link ----
 
@@ -711,7 +690,7 @@ where
 /// logical link.
 impl<T: Choices, L> Build<T, L, layer::LinkEntry, ()> for LinkClone<T::Link>
 where
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::LinkEntry>,
@@ -726,16 +705,13 @@ where
         )
     }
 }
-impl<T: Choices, L> DataComponent<T, L, layer::LinkEntry, ()> for LinkClone<T::Link> where
-    for<'v> L: LineageLists<'v, T>
-{
-}
+impl<Lk> PassiveDataComponent for LinkClone<Lk> {}
 
 /// The first entry takes the facts the connection was made with; a later
 /// one starts as the side says.
 impl<T: Choices, L, I> Build<T, L, layer::LinkEntry, I> for LinkFacts
 where
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<FirstLinkStart, I>,
 {
     fn build<'v>(
@@ -750,16 +726,13 @@ where
             })
     }
 }
-impl<T: Choices, L> DataComponent<T, L, layer::LinkEntry, ()> for LinkFacts where
-    for<'v> L: LineageLists<'v, T>
-{
-}
+impl PassiveDataComponent for LinkFacts {}
 
 /// The limit starts with nothing received or sent, by the configured
 /// factor.
 impl<T: Choices, L, I> Build<T, L, layer::LinkEntry, I> for AntiAmplification
 where
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<AntiAmplificationFactor, I>,
 {
     fn build<'v>(
@@ -769,10 +742,7 @@ where
         AntiAmplification::new(*parents.get::<AntiAmplificationFactor, I>())
     }
 }
-impl<T: Choices, L> DataComponent<T, L, layer::LinkEntry, ()> for AntiAmplification where
-    for<'v> L: LineageLists<'v, T>
-{
-}
+impl PassiveDataComponent for AntiAmplification {}
 
 // ---- the link path ----
 
@@ -781,7 +751,7 @@ impl<T: Choices, L> DataComponent<T, L, layer::LinkEntry, ()> for AntiAmplificat
 /// validated.
 impl<T: Choices, L, I> Build<T, L, layer::LinkPath, I> for LinkPathRole<InstantOf<T>>
 where
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
     for<'v> <L as LineageLists<'v, T>>::LinkPathParents: GetAt<FirstLinkStart, I>,
 {
     fn build<'v>(
@@ -812,18 +782,15 @@ where
 /// Not here yet: the initial RTT of a later link path whose new address
 /// was validated, which comes with path validation. It asks for the layer
 /// of an `Active` link path without an initial RTT.
-impl<T: Choices, L, I, Ic, Ip, Ith, Iid, Ima, Ir>
-    DataComponent<T, L, layer::LinkPath, ((I, Ic, Ip, Ith, Iid), (Ima, Ir))>
-    for LinkPathRole<InstantOf<T>>
+impl<T: Choices, L, I, Ic, Iv, Ima, Ir>
+    DataComponent<T, L, layer::LinkPath, ((I, Ic, Iv), (Ima, Ir))> for LinkPathRole<InstantOf<T>>
 where
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
     L: ParametersOf<TransportParameterSpace> + ConnectionErrorsOf,
     TransportParameterSlots<L>: Selector<Option<MaxAckDelay>, Ima>,
     for<'v> <L as LineageLists<'v, T>>::LinkPath: GetAt<LinkPathRole<InstantOf<T>>, I>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
-        + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>
-        + GetAt<LossThresholds, Ith>
-        + GetAt<IdleTimeout<InstantOf<T>>, Iid>,
+        + ReadEach<LinkPathRoleReads<T, L>, Iv>,
     for<'s> NodeData<T, L, layer::Recovery>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Recovery> as FlatMut<'s>>::Out: GetAt<RttOf<T, L>, Ir>,
 {
@@ -862,17 +829,11 @@ where
                     return Some(StructureRequest::EndLinkPath { path, link });
                 }
                 LinkPathRole::Active | LinkPathRole::Settling(_) => {
-                    let pto = current_probe_timeout::<T, L, B, Ima, Ir>(
-                        lineage.get::<PeerTransportParameters<TransportParameterSlots<L>>, Ip>(),
-                        lineage.get::<LossThresholds, Ith>(),
-                        others,
-                    )
-                    // with no recovery layer, the last one the idle timeout took
-                    .unwrap_or_else(|| {
-                        lineage
-                            .get::<IdleTimeout<InstantOf<T>>, Iid>()
-                            .probe_timeout()
-                    });
+                    let frunk_core::hlist_pat![peer, thresholds, idle] =
+                        lineage.read_each::<LinkPathRoleReads<T, L>, Iv>();
+                    let pto = current_probe_timeout::<T, L, B, Ima, Ir>(peer, thresholds, others)
+                        // with no recovery layer, the last one the idle timeout took
+                        .unwrap_or_else(|| idle.probe_timeout());
                     // an end beyond what the instant type represents is
                     // none: the closing period is cut short rather than
                     // kept forever
@@ -902,3 +863,12 @@ where
         }
     }
 }
+
+/// What a link path's role reads to enter `Closing`, besides the record of
+/// why the connection closed and the RTT estimates; it is not reread when
+/// these change.
+type LinkPathRoleReads<T, L> = HList![
+    PeerTransportParameters<TransportParameterSlots<L>>,
+    LossThresholds,
+    IdleTimeout<InstantOf<T>>
+];

@@ -289,6 +289,11 @@ pub trait LineageLists<'v, T>: PartList<T> {
     ) -> Self::Recovery;
 }
 
+/// A list of parts whose data can be borrowed flat for any lifetime: one
+/// bound in place of `for<'v> L: LineageLists<'v, T>`, which comes with it.
+pub trait LineagePartList<T>: for<'v> LineageLists<'v, T> {}
+impl<T, L> LineagePartList<T> for L where L: for<'v> LineageLists<'v, T> {}
+
 type Join<A, B> = <A as Add<B>>::Output;
 
 impl<'v, T, L: PartList<T>> LineageLists<'v, T> for L

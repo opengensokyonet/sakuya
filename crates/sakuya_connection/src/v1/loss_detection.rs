@@ -45,12 +45,12 @@ use sakuya_wire::{
 
 use crate::{
     call::CallBundle,
-    clock::InstantOf,
+    clock::{ConnectionChoices, InstantOf},
     component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
     layer,
     others::OtherNodes,
-    share::{FlatRef, LineageLists, NodeData},
-    take::{GetAt, Take, TakeEach},
+    share::{FlatRef, LineageLists, LineagePartList, NodeData},
+    take::{GetAt, ReadEach, Take, TakeEach},
 };
 
 use super::{
@@ -209,7 +209,7 @@ impl<T, L, S, Ls, Ii, Ih> Build<T, L, layer::Recovery, (Ii, Ih)>
     for PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>
 where
     T: Choices,
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
     for<'v> <L as LineageLists<'v, T>>::LinkPath:
         GetAt<InitialKeys<T::Crypto>, Ii> + GetAt<HandshakeKeys<T::Crypto>, Ih>,
 {
@@ -230,12 +230,12 @@ where
 ///
 /// Not here yet: handing the lost packets to the send journals and the
 /// frame sources.
-impl<T, L, S, Ls, Id, In, Ith, Ir, Ip, Ipr, Il, Ipp, Ima, It, Jx, Jr>
-    DataComponent<T, L, layer::Recovery, ((Id, In, Ith, Ir), (Ip, Ipr, Il, Ipp, Ima), It, (Jx, Jr))>
+impl<T, L, S, Ls, Id, In, If, Ipp, Ima, It, Jx, Jr>
+    DataComponent<T, L, layer::Recovery, ((Id, In, If), (Ipp, Ima), It, (Jx, Jr))>
     for PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>
 where
     T: Choices,
-    for<'v> L: LineageLists<'v, T>,
+    L: LineagePartList<T>,
     L: ParametersOf<TransportParameterSpace>,
     S: 'static,
     Ls: Clone + 'static,
@@ -251,11 +251,7 @@ where
         Selector<Option<MaxUdpPayloadSize>, Ipp> + Selector<Option<MaxAckDelay>, Ima>,
     for<'v> <L as LineageLists<'v, T>>::Recovery: GetAt<Self, Id>
         + GetAt<PacketNumberSpaces<PacketNumberSpaceState>, In>
-        + GetAt<LossThresholds, Ith>
-        + GetAt<RttOf<T, L>, Ir>
-        + GetAt<PmtuOf<T, L>, Ip>
-        + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ipr>
-        + GetAt<LinkClone<T::Link>, Il>
+        + ReadEach<LossFactsReads<T, L>, If>
         + TakeEach<
             'v,
             HList![
@@ -286,7 +282,7 @@ where
         others: &mut OtherNodes<'v, T, L, B>,
         now: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
-        let facts = loss_facts::<T, L, Ith, Ir, Ip, Ipr, Il, Ipp, Ima, _>(&lineage, now);
+        let facts = loss_facts::<T, L, Ipp, Ima, _, If>(&lineage, now);
         let numbers = lineage
             .get::<PacketNumberSpaces<PacketNumberSpaceState>, In>()
             .clone();
@@ -329,37 +325,39 @@ where
     }
 }
 
+/// The components of a recovery layer's lineage that [`loss_facts`] reads.
+pub(super) type LossFactsReads<T, L> = HList![
+    LossThresholds,
+    RttOf<T, L>,
+    PmtuOf<T, L>,
+    PeerTransportParameters<TransportParameterSlots<L>>,
+    LinkClone<<T as ConnectionChoices>::Link>
+];
+
 /// The facts of the link path a batch of losses is handled with, read from
 /// its recovery layer's lineage at `now`.
-pub(super) fn loss_facts<T, L, Ith, Ir, Ip, Ipr, Il, Ipp, Ima, V>(
+pub(super) fn loss_facts<T, L, Ipp, Ima, V, If>(
     lineage: &crate::take::Lineage<'_, V>,
     now: InstantOf<T>,
 ) -> LossFacts<InstantOf<T>>
 where
     T: Choices,
-    L: ParametersOf<TransportParameterSpace> + crate::share::LogicalPathKeys,
+    L: ParametersOf<TransportParameterSpace> + crate::share::LogicalPathKeys + 'static,
     TransportParameterSlots<L>:
         Selector<Option<MaxUdpPayloadSize>, Ipp> + Selector<Option<MaxAckDelay>, Ima>,
-    V: GetAt<LossThresholds, Ith>
-        + GetAt<RttOf<T, L>, Ir>
-        + GetAt<PmtuOf<T, L>, Ip>
-        + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ipr>
-        + GetAt<LinkClone<T::Link>, Il>,
+    V: ReadEach<LossFactsReads<T, L>, If>,
 {
-    let peer = lineage.get::<PeerTransportParameters<TransportParameterSlots<L>>, Ipr>();
+    let frunk_core::hlist_pat![thresholds, rtt, pmtu, peer, link] =
+        lineage.read_each::<LossFactsReads<T, L>, If>();
     let max_datagram_size = max_datagram_size_in_use(
-        lineage.get::<PmtuOf<T, L>, Ip>().conclusion(),
+        pmtu.conclusion(),
         peer_max_udp_payload_size::<L, Ipp>(peer),
-        lineage
-            .get::<LinkClone<T::Link>, Il>()
-            .0
-            .max_datagram_size()
-            .ok(),
+        link.0.max_datagram_size().ok(),
     );
     LossFacts {
         now,
-        rtt: lineage.get::<RttOf<T, L>, Ir>().estimate(),
-        thresholds: *lineage.get::<LossThresholds, Ith>(),
+        rtt: rtt.estimate(),
+        thresholds: *thresholds,
         peer_max_ack_delay: peer_max_ack_delay::<L, Ima>(peer),
         max_datagram_size,
     }
