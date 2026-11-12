@@ -24,7 +24,7 @@ pub struct IdleTimeout<I> {
     sent_since_received: bool,
 }
 
-impl<I: Copy + Add<Duration, Output = I>> IdleTimeout<I> {
+impl<I: Ord + Copy + Add<Duration, Output = I>> IdleTimeout<I> {
     /// This side advertises `local` (`None`, or zero, for no idle timeout);
     /// the timer has not started.
     pub fn new(local: Option<Duration>) -> Self {
@@ -86,8 +86,16 @@ impl<I: Copy + Add<Duration, Output = I>> IdleTimeout<I> {
         Some(self.restarted_at? + self.timeout()?)
     }
 
-    /// A packet from the peer was processed at `now`.
+    /// A packet from the peer that arrived at `now` was processed.
+    ///
+    /// A packet can be processed after one that arrived later, for example
+    /// when it waited for its keys; the timer only moves forward, so a
+    /// restart later than `now` stays, and so does whether an ack-eliciting
+    /// packet was sent since it.
     pub fn packet_processed(&mut self, now: I) {
+        if self.restarted_at.is_some_and(|restarted| restarted > now) {
+            return;
+        }
         self.restarted_at = Some(now);
         self.sent_since_received = false;
     }

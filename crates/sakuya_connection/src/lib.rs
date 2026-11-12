@@ -22,8 +22,9 @@
 //!
 //! QUIC version 1 is the part [`v1::Part`]. So far its shares hold the
 //! keys, the transport parameters, the idle timeout, the entries of the
-//! logical links and the roles of the link paths; it has no calls yet.
-#![feature(associated_type_defaults)]
+//! logical links and the roles of the link paths; its one call so far is
+//! the receiving call of each logical path.
+#![feature(associated_type_defaults, impl_trait_in_assoc_type)]
 #![warn(missing_docs)]
 
 pub mod call;

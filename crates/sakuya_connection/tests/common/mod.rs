@@ -58,7 +58,7 @@ impl MonotonicClock for TestClock {
 }
 
 /// A link of the tests: an identity and nothing else; its two ends are
-/// `()`.
+/// `()`, and a datagram's payload is a `BytesMut`.
 #[derive(Clone, Debug)]
 pub struct TestLink(pub TestLinkId);
 
@@ -68,7 +68,7 @@ pub type TestLinkId = LinkId<(), ()>;
 impl Link for TestLink {
     type Local = ();
     type Peer = ();
-    type Payload = Vec<u8>;
+    type Payload = bytes::BytesMut;
     type Instant = Duration;
     type MaxDatagramSizeError = ();
     type SendError = ();
@@ -107,7 +107,18 @@ impl sakuya_connection::v1::Choices for Mine {
     type AckObligation = sakuya_recovery::ack_obligation::Rfc9000AckObligation<Duration>;
     type ApplicationError = AppClose;
     type HandshakeFailure = core::convert::Infallible;
+    type Receiver = TestReceiver;
 }
+
+/// The datagram receiver of the tests' logical paths: a delivery queue that
+/// a routing domain of the test posts to.
+pub type TestReceiver = sakuya_datagram_routing::claim::queue::DatagramDeliveryQueue<
+    sakuya_datagram_routing::claim::delivery::DatagramDelivery<
+        sakuya_link::ReceivedDatagram<bytes::BytesMut, TestLink>,
+        (),
+        sakuya_datagram_routing::claim::finish::ReleaseUnclaimed,
+    >,
+>;
 
 /// The application's error type for closing, in the tests: an application
 /// error code.

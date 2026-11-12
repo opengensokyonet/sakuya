@@ -12,10 +12,13 @@
 //! recovery layer, what the factory makes for it with the state beside them,
 //! its loss detection state for each packet number space and its probe
 //! timeout. Each logical path keeps, for each packet number space, its
-//! packet number state, its receive journals and its ACK obligation. Once
+//! packet number state, its receive journals and its ACK obligation, and
+//! what it receives ([`input`]): its datagram receiver, the first one taken
+//! from what the connection was made with, and the inputs it holds until
+//! their keys come; its receiving call takes each datagram in. Once
 //! a reason for closing is written, the link paths close, their recovery
 //! layers and the established layer end, and the connection ends with its
-//! last link path. The calls and the send journals are not here yet.
+//! last link path. The other calls and the send journals are not here yet.
 
 pub mod amplification;
 pub mod close;
@@ -24,6 +27,7 @@ pub mod crypto;
 pub mod dispatch;
 pub mod error;
 pub mod idle;
+pub mod input;
 pub mod keys;
 pub mod link;
 pub mod loss_detection;
@@ -37,7 +41,7 @@ pub mod spaces;
 #[cfg(test)]
 mod tests;
 
-use core::{fmt::Debug, time::Duration};
+use core::{fmt::Debug, num::NonZeroUsize, time::Duration};
 
 use sakuya_packet_protection::{
     backend::CryptoBackend,
@@ -79,6 +83,10 @@ use self::{
     confirmation::HandshakeConfirmation,
     crypto::{CryptoReceiveBuffer, CryptoReceiveCapacities, CryptoReceiver},
     idle::IdleTimeout,
+    input::{
+        InitialPathReceiver, LogicalPathDatagramReceiver, LogicalPathInput,
+        LogicalPathReceivingKind, LogicalPathReceivingLimits,
+    },
     keys::{DirectionKeys, HandshakeKeys, InitialKeys, LevelKeys, OneRttKeys},
     link::{FirstLinkStart, LinkClone, LinkFacts},
     loss_detection::LossDetectionOf,
@@ -151,6 +159,8 @@ pub trait Choices: ConnectionChoices {
     /// This item is provisional: it is to follow from the handshake engine
     /// of the side.
     type HandshakeFailure: 'static;
+    /// The datagram receiver of a logical path.
+    type Receiver: LogicalPathDatagramReceiver<Self::Link> + 'static;
 }
 
 /// This endpoint's reason for closing a connection of the choices `T` and
@@ -256,6 +266,14 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
     /// How much CRYPTO data each encryption level holds past what the
     /// handshake engine has read, for this side's role.
     pub crypto_receive: CryptoReceiveCapacities,
+    /// The datagram receiver of the connection's initial path.
+    pub initial_receiver: InitialPathReceiver<T::Receiver>,
+    /// How many inputs, datagrams and held inputs released, the receiving
+    /// call of a logical path handles at most in one poll before it yields.
+    pub max_datagrams_per_poll: NonZeroUsize,
+    /// How many inputs a logical path holds at most until the keys to
+    /// process them come.
+    pub max_held_inputs: usize,
 }
 
 impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + ConnectionErrorsOf>
@@ -276,6 +294,8 @@ impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + Co
         MaxAckRanges,
         HandshakeConfirmation,
         CloseReasonRecord<CloseCauseOf<T, L>>,
+        InitialPathReceiver<T::Receiver>,
+        LogicalPathReceivingLimits,
     ];
     type Calls = HNil;
     type Args = ConnectionArgs<T, L>;
@@ -289,8 +309,9 @@ impl<T: Choices, L> LayerShare<T, L, layer::LogicalPath> for Part {
         PacketNumberSpaces<PacketNumberSpaceState>,
         PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>,
         AckObligationsOf<T>,
+        LogicalPathInput<T::Link, T::Receiver>,
     ];
-    type Calls = HNil;
+    type Calls = HList![LogicalPathReceivingKind];
 }
 impl<T: Choices, L> LayerShare<T, L, layer::LinkPath> for Part {
     type Data = HList![LinkPathRole<InstantOf<T>>];
@@ -594,6 +615,42 @@ where
 }
 impl PassiveDataComponent for FirstLinkStart {}
 
+/// The connection keeps the receiver of its initial path until the first
+/// logical path takes it.
+impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for InitialPathReceiver<T::Receiver>
+where
+    L: LineagePartList<T>,
+    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        args: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        own_args::<T, L, I>(args).initial_receiver.moved()
+    }
+}
+impl<R> PassiveDataComponent for InitialPathReceiver<R> {}
+
+/// The limits are configured, and stay the same for the life of the
+/// connection; each logical path takes them when it is built.
+impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for LogicalPathReceivingLimits
+where
+    L: LineagePartList<T>,
+    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        args: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        let args = own_args::<T, L, I>(args);
+        LogicalPathReceivingLimits {
+            max_datagrams_per_poll: args.max_datagrams_per_poll,
+            max_held_inputs: args.max_held_inputs,
+        }
+    }
+}
+impl PassiveDataComponent for LogicalPathReceivingLimits {}
+
 /// The idle timeout starts from this side's maximum idle timeout as
 /// configured.
 impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for IdleTimeout<InstantOf<T>>
@@ -720,6 +777,33 @@ where
     }
 }
 impl<S> PassiveDataComponent for PeerTransportParameters<S> {}
+
+// ---- the logical path ----
+
+/// The first logical path takes the receiver of the initial path; a later
+/// one starts without a receiver. Each takes the connection's limits.
+impl<T: Choices, L, I, J> Build<T, L, layer::LogicalPath, (I, J)>
+    for LogicalPathInput<T::Link, T::Receiver>
+where
+    L: LineagePartList<T>,
+    for<'v> <L as LineageLists<'v, T>>::Connection:
+        GetAt<InitialPathReceiver<T::Receiver>, I> + GetAt<LogicalPathReceivingLimits, J>,
+{
+    fn build<'v>(
+        parents: &mut ParentsOf<'v, T, L, layer::LogicalPath>,
+        _: &mut ArgsOf<T, L, layer::LogicalPath>,
+    ) -> Self {
+        let limits = *parents.get::<LogicalPathReceivingLimits, J>();
+        let receiver = parents
+            .get_mut::<InitialPathReceiver<T::Receiver>, I>()
+            .take();
+        LogicalPathInput::new(receiver, limits)
+    }
+}
+impl<Lk: sakuya_link::Link, R: LogicalPathDatagramReceiver<Lk>> PassiveDataComponent
+    for LogicalPathInput<Lk, R>
+{
+}
 
 // ---- the entry of a logical link ----
 

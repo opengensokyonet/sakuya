@@ -8,12 +8,13 @@ use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
     fmt::Debug,
+    num::NonZeroUsize,
     sync::Arc,
     time::Duration,
 };
 
 use bytes::BytesMut;
-use common::{Mine, Outer, TestClock, TestLink, advance_to, log, ms, take_log};
+use common::{Mine, Outer, TestClock, TestLink, TestReceiver, advance_to, log, ms, take_log};
 use frunk_core::coproduct::CoproductSelector;
 use frunk_core::hlist_pat;
 use sakuya_connection::{
@@ -38,6 +39,7 @@ use sakuya_connection::{
         confirmation::HandshakeConfirmation,
         crypto::{CryptoReceiveCapacities, CryptoReceiver, FragmentedCryptoReceiveBuffer},
         idle::IdleTimeout,
+        input::{InitialPathReceiver, LogicalPathInput},
         keys::{DirectionKeys, HandshakeKeys, InitialKeys, LevelKeys, OneRttKeys},
         link::LinkFacts,
         loss_detection::LossDetectionOf,
@@ -51,7 +53,21 @@ use sakuya_connection::{
         spaces::AckObligationsOf,
     },
 };
-use sakuya_link::{ArrivalFacts, BindingId, LinkId};
+use sakuya_datagram_routing::{
+    claim::{
+        deliverer::DatagramDeliverer,
+        delivery::DatagramDelivery,
+        erased::ErasedDatagramDeliverer,
+        queue::{DatagramDeliveryPoster, DatagramDeliveryQueue},
+    },
+    route::{
+        association::{MatchAssociation, PacketForms, RouteMatcher},
+        index::{RouteEntryRegistration, RouteIndex},
+        recognizer::ConnectionIdLengths,
+        router::DatagramRouter,
+    },
+};
+use sakuya_link::{ArrivalFacts, BindingId, LinkId, MIN_DATAGRAM_SIZE, ReceivedDatagram};
 use sakuya_packet_protection::{
     backend::ring::RingBackend,
     initial::{INITIAL_AEAD, InitialSecrets},
@@ -71,7 +87,7 @@ use sakuya_recovery::{
 use sakuya_stream::connection::CloseReason;
 use sakuya_tls::{engine::CryptoLevel, message::MessageLimits};
 use sakuya_wire::{
-    connection_id::{ConnectionId, ConnectionIdLength},
+    connection_id::{ConnectionId, ConnectionIdLength, NonEmptyCid},
     parameters::ParametersPart,
     parts::{CNil, CoprodInjector, CoprodUninjector, HList, HNil, PartsError, Selector},
     v1::frame::{
@@ -85,6 +101,7 @@ use sakuya_wire::{
         integer::MaxIdleTimeout,
     },
     var_int::VarInt,
+    version::Version,
 };
 
 const PATH: SoleLogicalPath = SoleLogicalPath;
@@ -115,6 +132,13 @@ thread_local! {
     static PACKETS: RefCell<VecDeque<(Duration, probe::PacketStep)>> = const { RefCell::new(VecDeque::new()) };
     /// How many ACK ranges the receive journals of the next connection keep.
     static MAX_ACK_RANGES: Cell<MaxAckRanges> = const { Cell::new(MaxAckRanges::DEFAULT) };
+    /// How many inputs the receiving call of the next connection handles in
+    /// one poll.
+    static MAX_PER_POLL: Cell<usize> = const { Cell::new(16) };
+    /// How many inputs a logical path of the next connection holds.
+    static MAX_HELD: Cell<usize> = const { Cell::new(16) };
+    /// The routing domain of the last connection made.
+    static ROUTING: RefCell<Option<TestRouting>> = const { RefCell::new(None) };
 }
 
 /// The parts of the tests' connections.
@@ -137,6 +161,77 @@ fn reset() {
     CRYPTO_AT.with(|c| c.set(None));
     PACKETS.with(|p| p.borrow_mut().clear());
     MAX_ACK_RANGES.with(|m| m.set(MaxAckRanges::DEFAULT));
+    MAX_PER_POLL.with(|m| m.set(16));
+    MAX_HELD.with(|m| m.set(16));
+    ROUTING.with(|r| r.borrow_mut().take());
+}
+
+/// A datagram of the tests, as it arrived.
+type Datagram = ReceivedDatagram<BytesMut, TestLink>;
+/// What routing gives a deliverer of the tests.
+type Delivery =
+    DatagramDelivery<Datagram, (), sakuya_datagram_routing::claim::finish::ReleaseUnclaimed>;
+/// The deliverers of the tests' routing domain.
+type Target = dyn ErasedDatagramDeliverer<Datagram, ()>;
+
+/// A deliverer that posts to a connection's receiver.
+struct Posting(DatagramDeliveryPoster<Delivery>);
+impl DatagramDeliverer<Datagram, ()> for Posting {
+    fn deliver(&self, delivery: Delivery) {
+        self.0.post(delivery);
+    }
+}
+
+/// A routing domain with one route entry, the client's first Destination
+/// Connection ID, for every packet form; it reads short headers with
+/// 8-byte connection IDs.
+struct TestRouting {
+    router: DatagramRouter<BytesMut, TestLink, Target, ConnectionIdLengths>,
+    _registration: RouteEntryRegistration<Target, ()>,
+}
+
+/// The receiver of the initial path of a connection about to be made,
+/// registered in a new routing domain that [`deliver`] routes into.
+fn initial_receiver() -> InitialPathReceiver<TestReceiver> {
+    // invariant: 64 is within the largest capacity
+    let queue = DatagramDeliveryQueue::new(NonZeroUsize::new(64).expect("not zero"))
+        .expect("a capacity a queue can have");
+    let index = RouteIndex::<Target, ()>::new();
+    let registration = index.register(
+        RouteMatcher::new(
+            MatchAssociation::LocalCid(NonEmptyCid::new(client_dcid()).expect("not empty")),
+            PacketForms::ALL,
+            Version::V1,
+        ),
+        Arc::new(Posting(queue.poster())) as Arc<Target>,
+    );
+    let router = DatagramRouter::new(
+        index,
+        ConnectionIdLengths::new([ConnectionIdLength::new(8).expect("a length")]),
+    );
+    ROUTING.with(|r| {
+        *r.borrow_mut() = Some(TestRouting {
+            router,
+            _registration: registration,
+        });
+    });
+    InitialPathReceiver::new(queue)
+}
+
+/// Route `datagram`, arrived over `link` at `at`, in the routing domain of
+/// the last connection made.
+fn deliver(datagram: BytesMut, link: &LinkId<(), ()>, at: Duration) {
+    let datagram = ReceivedDatagram::new(
+        datagram,
+        ArrivalFacts::new(TestLink(link.clone()), at, None),
+    );
+    ROUTING.with(|r| {
+        r.borrow()
+            .as_ref()
+            .expect("a connection was made")
+            .router
+            .route(datagram);
+    });
 }
 
 /// The choices of a client: the tests' clock and link, version 1 as the
@@ -155,6 +250,7 @@ impl v1::Choices for ClientMine {
     type AckObligation = sakuya_recovery::ack_obligation::Rfc9000AckObligation<Duration>;
     type ApplicationError = common::AppClose;
     type HandshakeFailure = core::convert::Infallible;
+    type Receiver = TestReceiver;
 }
 
 /// The choices of a server whose recovery factory logs the other link
@@ -172,6 +268,7 @@ impl v1::Choices for SpyMine {
     type AckObligation = sakuya_recovery::ack_obligation::Rfc9000AckObligation<Duration>;
     type ApplicationError = common::AppClose;
     type HandshakeFailure = core::convert::Infallible;
+    type Receiver = TestReceiver;
 }
 
 /// A recovery factory that makes what sakuya's makes and logs, when it
@@ -474,6 +571,12 @@ mod probe {
         /// packet number, the ranges and the ACK obligation of the Initial
         /// space; the idle timeout's deadline; and the reason for closing.
         Inspect,
+        /// Log how many inputs the logical path holds, and the largest
+        /// packet number processed in the Handshake space.
+        InspectHeld,
+        /// Log the credit of the anti-amplification limit of the logical
+        /// link, as if its address were not validated.
+        InspectCredit(LinkId<(), ()>),
     }
 
     /// In a logical path: does its steps at their instants.
@@ -493,7 +596,7 @@ mod probe {
     }
     packet_feeder!(Mine);
     packet_feeder!(ClientMine);
-    impl<T, L, I, Ii, Ih, Io, Ij, Im, Ia, It, Ir, Ie, Ik, Hd, Ic, Icr>
+    impl<T, L, I, Ii, Ih, Io, Ij, Im, Ia, It, Ir, Ie, Ik, Hd, Ic, Icr, Ip, Ian>
         DataComponent<
             T,
             L,
@@ -504,6 +607,7 @@ mod probe {
                 (Ij, Im, Ia, It),
                 (Ir, Ie, Ik, Hd),
                 (Ic, Icr),
+                (Ip, Ian),
             ),
         > for PacketFeeder
     where
@@ -527,10 +631,14 @@ mod probe {
             + GetAt<AckObligationsOf<T>, Ia>
             + GetAt<IdleTimeout<Duration>, It>
             + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
-            + GetAt<CryptoReceiver<FragmentedCryptoReceiveBuffer>, Icr>,
+            + GetAt<CryptoReceiver<FragmentedCryptoReceiveBuffer>, Icr>
+            + GetAt<LogicalPathInput<TestLink, T::Receiver>, Ip>,
         for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
         for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
             GetAt<LinkPathRole<Duration>, Ir>,
+        for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
+        for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
+            TakeEach<'s, HList![AntiAmplification], Ian>,
     {
         fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::LogicalPath>) -> Option<Duration> {
             lineage
@@ -592,6 +700,23 @@ mod probe {
                             INITIAL_AEAD,
                             &secrets.server,
                         ));
+                }
+                PacketStep::InspectHeld => {
+                    let held = lineage
+                        .get::<LogicalPathInput<TestLink, T::Receiver>, Ip>()
+                        .held_len();
+                    let largest = lineage
+                        .get::<PacketNumberSpaces<ReceiveJournals<Duration>>, Ij>()
+                        .get(PacketNumberSpaceKind::Handshake)
+                        .and_then(|journals| journals.largest())
+                        .map(|(number, _)| number.get());
+                    log(format!("held {held}, largest Handshake {largest:?}"));
+                }
+                PacketStep::InspectCredit(link) => {
+                    let credit = others
+                        .link_entry::<HList![AntiAmplification], Ian>(&link)
+                        .map(|hlist_pat![limit]| limit.credit(AddressValidation::NotValidated));
+                    log(format!("credit {credit:?}"));
                 }
                 PacketStep::Inspect => {
                     let mut read = Vec::new();
@@ -1162,7 +1287,7 @@ const CLIENT_DCID: [u8; 8] = [0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
 /// `validation`.
 fn args<T>(validation: AddressValidation) -> v1::ConnectionArgs<T, Parts>
 where
-    T: v1::Choices<Crypto = RingBackend, Link = TestLink>,
+    T: v1::Choices<Crypto = RingBackend, Link = TestLink, Receiver = TestReceiver>,
     T::Side: SideCapacities,
     T::Recovery<LinkId<(), ()>>: RecoveryFactory<TestLink, Config = NewRenoRecoveryFactoryConfig>,
 {
@@ -1179,6 +1304,10 @@ where
             .expect("the test clock's timers fire to the millisecond"),
         max_ack_ranges: MAX_ACK_RANGES.with(Cell::get),
         crypto_receive: <T::Side as SideCapacities>::crypto_receive(),
+        initial_receiver: initial_receiver(),
+        max_datagrams_per_poll: NonZeroUsize::new(MAX_PER_POLL.with(Cell::get))
+            .expect("the tests handle at least one input per poll"),
+        max_held_inputs: MAX_HELD.with(Cell::get),
     }
 }
 
@@ -2276,5 +2405,265 @@ fn a_closing_link_path_reads_only_for_a_close() {
     assert!(
         log.iter().any(|line| line.starts_with("Draining(34ms)")),
         "a closing link path keeps its end as it drains: {log:?}"
+    );
+}
+
+/// A CRYPTO frame of `data` at `offset`, then PADDING.
+fn crypto_at(offset: u8, data: &[u8]) -> Vec<u8> {
+    let len = u8::try_from(data.len()).expect("a short segment");
+    [&[0x06, offset, len][..], data, &[0; 20]].concat()
+}
+
+/// One datagram of `packets`, coalesced.
+fn coalesced(packets: impl IntoIterator<Item = BytesMut>) -> BytesMut {
+    let mut datagram = BytesMut::new();
+    for packet in packets {
+        datagram.extend_from_slice(&packet);
+    }
+    datagram
+}
+
+/// One datagram of `before`, then the packet `last` builds from `payload`
+/// filled with PADDING so that the datagram is as long as a datagram that
+/// carries a client's Initial packet must be.
+fn padded(before: &[BytesMut], last: impl Fn(&[u8]) -> BytesMut, payload: &[u8]) -> BytesMut {
+    let build = |payload: &[u8]| coalesced(before.iter().cloned().chain([last(payload)]));
+    let short = MIN_DATAGRAM_SIZE.saturating_sub(build(payload).len());
+    let mut payload = payload.to_vec();
+    payload.resize(payload.len() + short, 0);
+    build(&payload)
+}
+
+#[test]
+fn the_receiving_call_receives_each_packet_of_a_datagram_and_counts_the_whole_datagram() {
+    use probe::PacketStep::{Inspect, InspectCredit};
+    reset();
+    let first = link();
+    feed_packets([(ms(6), Inspect), (ms(7), InspectCredit(first.clone()))]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    take_log();
+    // the last packet is protected with the server's keys, which the server
+    // does not open with
+    let datagram = padded(
+        &[
+            long_packet(INITIAL, 0, &crypto_at(0, b"hel")),
+            long_packet(INITIAL, 1, &crypto_at(3, b"lo")),
+        ],
+        |payload| long_packet_with(first_byte(INITIAL), &[], &server_keys(), 2, payload),
+        &ping(),
+    );
+    let size = datagram.len();
+    deliver(datagram, &first, ms(5));
+    assert_eq!(
+        run(&mut connection, 5..=7),
+        [
+            "read \"hello\", largest Some((1, 5ms)), ranges [(0, 1)], due Some(Now), \
+             idle Some(30.005s), reason None"
+                .to_owned(),
+            // the factor of the tests is 2
+            format!("credit Some(Some({}))", 2 * size),
+        ]
+    );
+}
+
+#[test]
+fn a_server_passes_over_the_initial_packets_of_a_short_datagram() {
+    use probe::PacketStep::{Inspect, InspectCredit, InspectHeld};
+    reset();
+    let first = link();
+    feed_packets([
+        (ms(6), Inspect),
+        (ms(7), InspectHeld),
+        (ms(8), InspectCredit(first.clone())),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    take_log();
+    let datagram = coalesced([
+        long_packet(INITIAL, 0, &crypto_hello()),
+        long_packet(HANDSHAKE, 0, &ping()),
+    ]);
+    let size = datagram.len();
+    assert!(size < MIN_DATAGRAM_SIZE);
+    deliver(datagram, &first, ms(5));
+    let log = run(&mut connection, 5..=8);
+    assert!(
+        log[0].starts_with("read \"\", largest None, ranges []"),
+        "the Initial packet is not processed: {log:?}"
+    );
+    assert_eq!(
+        log[1..],
+        [
+            // the Handshake packet after it is received, and waits for its keys
+            "held 1, largest Handshake None".to_owned(),
+            format!("credit Some(Some({}))", 2 * size),
+        ]
+    );
+}
+
+#[test]
+fn a_datagram_whose_packets_wait_for_their_keys_counts_toward_the_limit() {
+    use probe::PacketStep::{InspectCredit, InspectHeld};
+    reset();
+    let first = link();
+    feed_packets([(ms(6), InspectHeld), (ms(7), InspectCredit(first.clone()))]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    take_log();
+    let datagram = long_packet(HANDSHAKE, 0, &ping());
+    let size = datagram.len();
+    deliver(datagram, &first, ms(5));
+    assert_eq!(
+        run(&mut connection, 5..=7),
+        [
+            "held 1, largest Handshake None".to_owned(),
+            format!("credit Some(Some({}))", 2 * size),
+        ]
+    );
+}
+
+#[test]
+fn a_packet_without_its_keys_is_held_until_they_come() {
+    use probe::PacketStep::{Inspect, InspectHeld, InstallHandshakeKeys};
+    reset();
+    let first = link();
+    feed_packets([
+        (ms(6), Inspect),
+        (ms(7), InspectHeld),
+        (ms(8), InstallHandshakeKeys),
+        (ms(9), InspectHeld),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    take_log();
+    deliver(
+        padded(
+            &[long_packet(INITIAL, 0, &crypto_hello())],
+            |payload| long_packet(HANDSHAKE, 0, payload),
+            &ping(),
+        ),
+        &first,
+        ms(5),
+    );
+    assert_eq!(
+        run(&mut connection, 5..=9),
+        [
+            "read \"hello\", largest Some((0, 5ms)), ranges [(0, 0)], due Some(Now), \
+             idle Some(30.005s), reason None",
+            "held 1, largest Handshake None",
+            // a server discards them once it processed a Handshake packet
+            "initial keys live: false",
+            "held 0, largest Handshake Some(0)",
+        ]
+    );
+}
+
+#[test]
+fn a_poll_receives_at_most_its_limit_and_wakes_itself_for_the_rest() {
+    use probe::PacketStep::Inspect;
+    reset();
+    MAX_PER_POLL.with(|m| m.set(1));
+    let first = link();
+    feed_packets([(ms(5), Inspect), (ms(6), Inspect)]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    take_log();
+    deliver(
+        padded(
+            &[],
+            |payload| long_packet(INITIAL, 0, payload),
+            &crypto_at(0, b"hel"),
+        ),
+        &first,
+        ms(5),
+    );
+    deliver(
+        padded(
+            &[],
+            |payload| long_packet(INITIAL, 1, payload),
+            &crypto_at(3, b"lo"),
+        ),
+        &first,
+        ms(5),
+    );
+    let outer = Outer::new();
+    advance_to(ms(5));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(outer.wakes(), 1, "the receiving call woke itself");
+    assert_eq!(
+        take_log(),
+        [
+            "read \"hel\", largest Some((0, 5ms)), ranges [(0, 0)], due Some(Now), \
+          idle Some(30.005s), reason None"
+        ]
+    );
+    advance_to(ms(6));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(
+        take_log(),
+        [
+            "read \"lo\", largest Some((1, 5ms)), ranges [(0, 1)], due Some(Now), \
+          idle Some(30.005s), reason None"
+        ]
+    );
+}
+
+#[test]
+fn a_connection_error_drops_the_rest_of_its_datagram() {
+    use probe::PacketStep::Inspect;
+    reset();
+    let first = link();
+    let handshake_done = [&[0x1e][..], &[0; 20]].concat();
+    feed_packets([(ms(6), Inspect)]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    take_log();
+    deliver(
+        padded(
+            &[long_packet(INITIAL, 0, &handshake_done)],
+            |payload| long_packet(INITIAL, 1, payload),
+            &crypto_hello(),
+        ),
+        &first,
+        ms(5),
+    );
+    let log = run(&mut connection, 5..=6);
+    let inspect = log
+        .iter()
+        .find(|line| line.starts_with("read"))
+        .expect("inspected");
+    assert!(
+        inspect.starts_with("read \"\", largest None, ranges []")
+            && inspect.contains(
+                "reason Some(\"Local(Connection(PartsError(Inl(FrameNotPermitted { source: \
+                 NotAtLevel { level: Initial } }))))\")"
+            ),
+        "{inspect}"
+    );
+}
+
+#[test]
+fn past_the_limit_of_held_inputs_the_new_one_is_dropped() {
+    use probe::PacketStep::{InspectHeld, InstallHandshakeKeys};
+    reset();
+    MAX_HELD.with(|m| m.set(1));
+    let first = link();
+    feed_packets([
+        (ms(6), InspectHeld),
+        (ms(7), InstallHandshakeKeys),
+        (ms(8), InspectHeld),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    take_log();
+    deliver(
+        coalesced([
+            long_packet(HANDSHAKE, 0, &ping()),
+            long_packet(HANDSHAKE, 1, &ping()),
+        ]),
+        &first,
+        ms(5),
+    );
+    assert_eq!(
+        run(&mut connection, 5..=8),
+        [
+            "held 1, largest Handshake None",
+            "initial keys live: false",
+            "held 0, largest Handshake Some(0)",
+        ]
     );
 }

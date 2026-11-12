@@ -429,7 +429,7 @@ fn carries_token<P>(packet: &ProtectedPacket<P>) -> bool {
 }
 
 /// The receive keys of one level, as far as there are any.
-enum LevelReceiveKeys<'k, B: CryptoBackend> {
+pub(super) enum LevelReceiveKeys<'k, B: CryptoBackend> {
     /// The keys to read the level's packets with.
     Ready(&'k DirectionKeys<B>),
     /// The handshake has not produced them yet; the packet waits.
@@ -443,7 +443,7 @@ enum LevelReceiveKeys<'k, B: CryptoBackend> {
 /// A server's 1-RTT level that has only its sending half has not come for
 /// receiving: a 1-RTT packet is not read before the handshake completes
 /// (RFC 9001 §5.7).
-fn receive_keys<'k, T, L, Ii, Ih, Io>(
+pub(super) fn receive_keys<'k, T, L, Ii, Ih, Io>(
     lineage: &'k LineageOf<'_, T, L, LogicalPath>,
     level: EncryptionLevel,
 ) -> LevelReceiveKeys<'k, T::Crypto>
@@ -490,7 +490,7 @@ fn space_of(level: EncryptionLevel) -> PacketNumberSpaceKind {
 
 /// Where the Packet Number field of `packet` starts: the start of the
 /// protected range; `None` for a header of a Retry packet.
-fn packet_number_offset<P>(packet: &ProtectedPacket<P>) -> Option<usize> {
+pub(super) fn packet_number_offset<P>(packet: &ProtectedPacket<P>) -> Option<usize> {
     match packet {
         ProtectedPacket::Initial(long, _)
         | ProtectedPacket::ZeroRtt(long, _)
@@ -506,7 +506,7 @@ fn packet_number_offset<P>(packet: &ProtectedPacket<P>) -> Option<usize> {
 
 /// A packet with both layers of protection removed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Opened {
+pub(super) struct Opened {
     /// The packet number.
     number: PacketNumber,
     /// The first byte, unprotected.
@@ -518,7 +518,7 @@ struct Opened {
 /// Remove header protection and the AEAD from `packet` in place, with the
 /// Packet Number field at `pn_offset`, decoding the packet number against
 /// `largest`, the largest one processed in its space.
-fn open<B: CryptoBackend>(
+pub(super) fn open<B: CryptoBackend>(
     keys: &DirectionKeys<B>,
     packet: &mut [u8],
     pn_offset: usize,

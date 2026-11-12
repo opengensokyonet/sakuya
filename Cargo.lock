@@ -626,6 +626,7 @@ dependencies = [
  "futures-util",
  "nitori_call",
  "nitori_io",
+ "sakuya_datagram_routing",
  "sakuya_link",
  "sakuya_packet_protection",
  "sakuya_recovery",

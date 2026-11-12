@@ -198,6 +198,25 @@ fn idle_timer_restarts_on_the_first_ack_eliciting_send_only() {
 }
 
 #[test]
+fn idle_timer_does_not_move_back_for_a_packet_that_arrived_earlier() {
+    let mut idle = IdleTimeout::new(Some(ms(1000)));
+    idle.packet_processed(ms(40));
+    idle.ack_eliciting_sent(ms(50));
+    idle.packet_processed(ms(5));
+    assert_eq!(idle.deadline(), Some(ms(1050)));
+    idle.ack_eliciting_sent(ms(60));
+    assert_eq!(
+        idle.deadline(),
+        Some(ms(1050)),
+        "a send since the restart at 50 is still recorded"
+    );
+    let mut idle = IdleTimeout::new(Some(ms(1000)));
+    idle.packet_processed(ms(40));
+    idle.packet_processed(ms(5));
+    assert_eq!(idle.deadline(), Some(ms(1040)));
+}
+
+#[test]
 fn peer_parameters_are_remembered_then_known() {
     let mut peer = PeerTransportParameters::NotYet;
     assert_eq!(peer.slots(), None);
