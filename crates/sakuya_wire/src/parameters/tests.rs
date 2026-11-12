@@ -187,3 +187,26 @@ fn a_value_source_reports_what_is_left() {
     assert_eq!((error.length(), error.unread().get()), (3, 2));
     assert_eq!(ValueSource::new(&[][..]).finish(), Ok(()));
 }
+
+#[test]
+fn retain_asks_once_per_type_and_empties_the_rejected_slots() {
+    let mut input = &[0x06, 0x01, 0x05, 0x08, 0x00][..];
+    let mut parameters = input
+        .sync_read_parameters_unpin((), PhantomData::<(Space, Both)>)
+        .unwrap();
+    let mut asked = 0;
+    <Both as ParameterList<Space>>::retain(&mut parameters.known, &mut |()| {
+        asked += 1;
+        true
+    });
+    assert_eq!(asked, 2);
+    assert_eq!(parameters.get::<Size, _>(), Some(&Size(VarInt::from(5u8))));
+    assert_eq!(parameters.get::<Flag, _>(), Some(&Flag));
+    // The first type of the list, the flag, is kept, and the size emptied.
+    let mut first = true;
+    <Both as ParameterList<Space>>::retain(&mut parameters.known, &mut |()| {
+        core::mem::replace(&mut first, false)
+    });
+    assert_eq!(parameters.get::<Flag, _>(), Some(&Flag));
+    assert!(parameters.get::<Size, _>().is_none());
+}

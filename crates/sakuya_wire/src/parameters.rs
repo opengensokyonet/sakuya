@@ -52,6 +52,11 @@
 //! that hold a parameter in the order of the list, then the unknown
 //! parameters in their order.
 //!
+//! A space can keep part of a set that was read by the attributes of the
+//! types: [`ParameterList::retain`] empties the slots whose attributes a
+//! condition rejects, such as the transport parameters that are not
+//! remembered for 0-RTT.
+//!
 //! Two types of a list must not claim the same ID, and none may claim a
 //! reserved ID of the space. Two checks reject a list that breaks this at
 //! compile time: [`assert_parameters_distinct!`](crate::assert_parameters_distinct),
@@ -94,7 +99,9 @@
 //!     assert_parameters_distinct,
 //!     parameters::{KeyedParameter, TrailingBytesError, ValueSource},
 //!     parts::HList,
-//!     v1::transport_parameters::{SentBy, TransportParameterSpace},
+//!     v1::transport_parameters::{
+//!         RememberedForZeroRtt, SentBy, TransportParameterAttributes, TransportParameterSpace,
+//!     },
 //!     var_int::VarInt,
 //! };
 //!
@@ -105,7 +112,10 @@
 //!     type ValueError = TrailingBytesError;
 //!
 //!     const ID: VarInt = VarInt::from_u32(0x1b);
-//!     const ATTRIBUTES: SentBy = SentBy::Either;
+//!     const ATTRIBUTES: TransportParameterAttributes = TransportParameterAttributes {
+//!         sent_by: SentBy::Either,
+//!         remembered_for_zero_rtt: RememberedForZeroRtt::Prohibited,
+//!     };
 //!
 //!     fn read_value<D: Buf + Unpin>(_: &mut ValueSource<D>) -> Result<Self, TrailingBytesError> {
 //!         Ok(Self)
@@ -492,6 +502,10 @@ pub trait ParameterList<S: ParameterSpace> {
         context: S::Context,
     ) -> Result<(), InvalidParametersError<S::AdmitError>>;
 
+    /// Empties each slot whose type has attributes that `keep` rejects, and
+    /// leaves the others as they are.
+    fn retain<K: FnMut(&S::Attributes) -> bool>(slots: &mut Self::Slots, keep: &mut K);
+
     /// The number of bytes [`write`](Self::write) writes.
     fn encoded_len(slots: &Self::Slots) -> usize;
 
@@ -540,6 +554,8 @@ impl<S: ParameterSpace> ParameterList<S> for HNil {
     ) -> Result<(), InvalidParametersError<S::AdmitError>> {
         Ok(())
     }
+
+    fn retain<K: FnMut(&S::Attributes) -> bool>(_slots: &mut HNil, _keep: &mut K) {}
 
     fn encoded_len(_slots: &HNil) -> usize {
         0
@@ -616,6 +632,13 @@ where
             ValueLengthError::check(H::ID, parameter.value_len())?;
         }
         T::validate(&slots.tail, context)
+    }
+
+    fn retain<K: FnMut(&S::Attributes) -> bool>(slots: &mut Self::Slots, keep: &mut K) {
+        if !keep(&H::ATTRIBUTES) {
+            slots.head = None;
+        }
+        T::retain(&mut slots.tail, keep);
     }
 
     fn encoded_len(slots: &Self::Slots) -> usize {

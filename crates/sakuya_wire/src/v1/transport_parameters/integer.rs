@@ -22,10 +22,11 @@ use snafu::Snafu;
 
 /// Implements `KeyedParameter` in the space of the transport parameters for
 /// a type whose value is one variable-length integer: `$name` has the ID
-/// `$id`, is sent by `$sent_by`, and converts from a `VarInt` with `TryFrom`
-/// and into one with `Into`.
+/// `$id`, is sent by `$sent_by`, is remembered for 0-RTT as `$remembered`
+/// says, and converts from a `VarInt` with `TryFrom` and into one with
+/// `Into`.
 macro_rules! integer_transport_parameter {
-    ($name:ty, $id:literal, $sent_by:expr) => {
+    ($name:ty, $id:literal, $sent_by:expr, $remembered:expr) => {
         impl $crate::parameters::KeyedParameter for $name {
             type Space = $crate::v1::transport_parameters::TransportParameterSpace;
             type ValueError = $crate::parameters::ReadValueError<
@@ -36,7 +37,11 @@ macro_rules! integer_transport_parameter {
             >;
 
             const ID: $crate::var_int::VarInt = $crate::var_int::VarInt::from_u32($id);
-            const ATTRIBUTES: $crate::v1::transport_parameters::SentBy = $sent_by;
+            const ATTRIBUTES: $crate::v1::transport_parameters::TransportParameterAttributes =
+                $crate::v1::transport_parameters::TransportParameterAttributes {
+                    sent_by: $sent_by,
+                    remembered_for_zero_rtt: $remembered,
+                };
 
             fn read_value<D: ::bytes::Buf + ::core::marker::Unpin>(
                 value: &mut $crate::parameters::ValueSource<D>,
@@ -74,7 +79,7 @@ pub(crate) use integer_transport_parameter;
 /// Defines a transport parameter that holds any variable-length integer and
 /// is 0 when absent.
 macro_rules! unconstrained {
-    ($(#[$doc:meta])* $name:ident, $id:literal) => {
+    ($(#[$doc:meta])* $name:ident, $id:literal, $remembered:ident) => {
         $(#[$doc])*
         #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub struct $name(VarInt);
@@ -103,7 +108,12 @@ macro_rules! unconstrained {
             }
         }
 
-        integer_transport_parameter!($name, $id, crate::v1::transport_parameters::SentBy::Either);
+        integer_transport_parameter!(
+            $name,
+            $id,
+            crate::v1::transport_parameters::SentBy::Either,
+            crate::v1::transport_parameters::RememberedForZeroRtt::$remembered
+        );
     };
 }
 
@@ -111,7 +121,7 @@ macro_rules! unconstrained {
 /// holds a `VarInt` that `$error::check` accepts, and is `$default` when
 /// absent.
 macro_rules! constrained {
-    ($(#[$doc:meta])* $name:ident, $id:literal, $error:ident, $default:literal) => {
+    ($(#[$doc:meta])* $name:ident, $id:literal, $error:ident, $default:literal, $remembered:ident) => {
         $(#[$doc])*
         #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub struct $name(VarInt);
@@ -158,14 +168,19 @@ macro_rules! constrained {
             }
         }
 
-        integer_transport_parameter!($name, $id, crate::v1::transport_parameters::SentBy::Either);
+        integer_transport_parameter!(
+            $name,
+            $id,
+            crate::v1::transport_parameters::SentBy::Either,
+            crate::v1::transport_parameters::RememberedForZeroRtt::$remembered
+        );
     };
 }
 
 /// Defines a transport parameter that holds a `StreamCount` and is 0 when
 /// absent.
 macro_rules! stream_count {
-    ($(#[$doc:meta])* $name:ident, $id:literal) => {
+    ($(#[$doc:meta])* $name:ident, $id:literal, $remembered:ident) => {
         $(#[$doc])*
         #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub struct $name(StreamCount);
@@ -208,80 +223,85 @@ macro_rules! stream_count {
             }
         }
 
-        integer_transport_parameter!($name, $id, crate::v1::transport_parameters::SentBy::Either);
+        integer_transport_parameter!(
+            $name,
+            $id,
+            crate::v1::transport_parameters::SentBy::Either,
+            crate::v1::transport_parameters::RememberedForZeroRtt::$remembered
+        );
     };
 }
 
 unconstrained! {
     /// `max_idle_timeout`, `0x01`: the idle timeout in milliseconds; 0, also
     /// the value of an absent parameter, disables it.
-    MaxIdleTimeout, 0x01
+    MaxIdleTimeout, 0x01, Mandatory
 }
 
 constrained! {
     /// `max_udp_payload_size`, `0x03`: the largest UDP payload the endpoint
     /// is willing to receive, at least 1200; 65527 when absent.
-    MaxUdpPayloadSize, 0x03, MaxUdpPayloadSizeError, 65527
+    MaxUdpPayloadSize, 0x03, MaxUdpPayloadSizeError, 65527, Mandatory
 }
 
 unconstrained! {
     /// `initial_max_data`, `0x04`: the initial connection-level flow control
     /// limit, in bytes; 0 when absent.
-    InitialMaxData, 0x04
+    InitialMaxData, 0x04, Mandatory
 }
 
 unconstrained! {
     /// `initial_max_stream_data_bidi_local`, `0x05`: the initial flow
     /// control limit for bidirectional streams the sender of the parameters
     /// opens, in bytes; 0 when absent.
-    InitialMaxStreamDataBidiLocal, 0x05
+    InitialMaxStreamDataBidiLocal, 0x05, Mandatory
 }
 
 unconstrained! {
     /// `initial_max_stream_data_bidi_remote`, `0x06`: the initial flow
     /// control limit for bidirectional streams the peer opens, in bytes; 0
     /// when absent.
-    InitialMaxStreamDataBidiRemote, 0x06
+    InitialMaxStreamDataBidiRemote, 0x06, Mandatory
 }
 
 unconstrained! {
     /// `initial_max_stream_data_uni`, `0x07`: the initial flow control limit
     /// for unidirectional streams the peer opens, in bytes; 0 when absent.
-    InitialMaxStreamDataUni, 0x07
+    InitialMaxStreamDataUni, 0x07, Mandatory
 }
 
 stream_count! {
     /// `initial_max_streams_bidi`, `0x08`: the initial number of
     /// bidirectional streams the peer may open, at most 2<sup>60</sup>; 0
     /// when absent.
-    InitialMaxStreamsBidi, 0x08
+    InitialMaxStreamsBidi, 0x08, Mandatory
 }
 
 stream_count! {
     /// `initial_max_streams_uni`, `0x09`: the initial number of
     /// unidirectional streams the peer may open, at most 2<sup>60</sup>; 0
     /// when absent.
-    InitialMaxStreamsUni, 0x09
+    InitialMaxStreamsUni, 0x09, Mandatory
 }
 
 constrained! {
     /// `ack_delay_exponent`, `0x0a`: the exponent of the ACK Delay field of
     /// ACK frames, at most 20; 3 when absent.
-    AckDelayExponent, 0x0a, AckDelayExponentError, 3
+    AckDelayExponent, 0x0a, AckDelayExponentError, 3, Prohibited
 }
 
 constrained! {
     /// `max_ack_delay`, `0x0b`: the longest time, in milliseconds, the
     /// endpoint delays sending acknowledgments, below 2<sup>14</sup>; 25
     /// when absent.
-    MaxAckDelay, 0x0b, MaxAckDelayError, 25
+    MaxAckDelay, 0x0b, MaxAckDelayError, 25, Prohibited
 }
 
 constrained! {
     /// `active_connection_id_limit`, `0x0e`: the number of connection IDs
     /// from the peer the endpoint is willing to store, at least 2; 2 when
     /// absent.
-    ActiveConnectionIdLimit, 0x0e, ActiveConnectionIdLimitError, 2
+    ActiveConnectionIdLimit, 0x0e, ActiveConnectionIdLimitError, 2, Mandatory
 }
 
 /// The smallest `max_udp_payload_size` RFC 9000 permits.

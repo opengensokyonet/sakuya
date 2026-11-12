@@ -103,7 +103,8 @@ mod tests;
 
 /// The parameter space of the QUIC transport parameters ([RFC 9000 §18]).
 ///
-/// Each parameter type states who may send it ([`SentBy`]), and a set of
+/// Each parameter type states who may send it ([`SentBy`]) and whether it is
+/// remembered for 0-RTT ([`RememberedForZeroRtt`]), and a set of
 /// parameters is read or checked with the [`Role`] of the endpoint that
 /// sends it: a parameter that only a server may send is not admitted from a
 /// client ([`ServerOnlyError`]). The IDs of the form 31 × N + 27 are reserved
@@ -117,7 +118,7 @@ mod tests;
 pub struct TransportParameterSpace;
 
 impl ParameterSpace for TransportParameterSpace {
-    type Attributes = SentBy;
+    type Attributes = TransportParameterAttributes;
     type Context = Role;
     type AdmitError = ServerOnlyError;
     type ErrorCode = TransportErrorCode;
@@ -127,16 +128,29 @@ impl ParameterSpace for TransportParameterSpace {
     const RESERVED: ReservedIds = ReservedIds::new(NonZeroU64::new(31).unwrap(), 27);
 
     /// `sender` is the role of the endpoint that sends the parameters.
-    fn admit(_id: VarInt, sent_by: &SentBy, sender: Role) -> Result<(), ServerOnlyError> {
-        match (sent_by, sender) {
+    fn admit(
+        _id: VarInt,
+        attributes: &TransportParameterAttributes,
+        sender: Role,
+    ) -> Result<(), ServerOnlyError> {
+        match (attributes.sent_by, sender) {
             (SentBy::ServerOnly, Role::Client) => Err(ServerOnlyError),
             (SentBy::ServerOnly, Role::Server) | (SentBy::Either, _) => Ok(()),
         }
     }
 }
 
-/// Who may send a transport parameter ([RFC 9000 §18.2]): what
-/// [`TransportParameterSpace`] attaches to each parameter type.
+/// What [`TransportParameterSpace`] attaches to each parameter type: who
+/// may send it, and whether it is remembered for 0-RTT.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TransportParameterAttributes {
+    /// Who may send the parameter.
+    pub sent_by: SentBy,
+    /// Whether the parameter is remembered for 0-RTT.
+    pub remembered_for_zero_rtt: RememberedForZeroRtt,
+}
+
+/// Who may send a transport parameter ([RFC 9000 §18.2]).
 ///
 /// [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -146,6 +160,33 @@ pub enum SentBy {
     /// A server only: a server that receives the parameter treats it as a
     /// TRANSPORT_PARAMETER_ERROR.
     ServerOnly,
+}
+
+/// Whether storing a transport parameter of the server for 0-RTT is
+/// mandatory, optional or prohibited ([RFC 9000 §7.4.1]); the definition of
+/// each transport parameter states which.
+///
+/// Both endpoints store the server's transport parameters with a session
+/// ticket: the client the ones it received, the server the ones it sent. A
+/// client that sends 0-RTT data applies the remembered parameters to it,
+/// and a server decides with them whether to accept 0-RTT data. Of the
+/// parameters of RFC 9000, storing seven is prohibited, since a client must
+/// not use remembered values for them, and storing every other one is
+/// mandatory for a client that can process it.
+///
+/// [`codec::read_remembered_transport_parameters`] keeps the parameters
+/// whose storing is mandatory or optional.
+///
+/// [RFC 9000 §7.4.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-7.4.1
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RememberedForZeroRtt {
+    /// The parameter is stored.
+    Mandatory,
+    /// The parameter may be stored.
+    Optional,
+    /// The parameter is not stored: a client uses the value the server
+    /// sends in the handshake, or the default value.
+    Prohibited,
 }
 
 /// A client sends a transport parameter that only a server may send

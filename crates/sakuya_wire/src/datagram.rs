@@ -80,7 +80,8 @@ use crate::{
         frame::set::{FrameKind, FrameSetPart, FrameTypeValues},
         role::Role,
         transport_parameters::{
-            SentBy, TransportParameterSpace, integer::integer_transport_parameter,
+            RememberedForZeroRtt, SentBy, TransportParameterSpace,
+            integer::integer_transport_parameter,
         },
     },
     var_int::{VarInt, VarIntWidth},
@@ -119,6 +120,11 @@ impl ParametersPart<TransportParameterSpace> for Part {
 /// variable-length integer, read and written by the operations of
 /// [`integer::codec`](crate::v1::transport_parameters::integer::codec).
 ///
+/// Storing it for 0-RTT is optional. A client that stores it can send
+/// DATAGRAM frames in 0-RTT packets, and checks that the value the server
+/// sends in the handshake is not smaller; a server that accepts 0-RTT data
+/// sends a value not smaller than the one it stored.
+///
 /// [RFC 9221 §3]: https://www.rfc-editor.org/rfc/rfc9221.html#section-3
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MaxDatagramFrameSize(VarInt);
@@ -147,7 +153,12 @@ impl From<MaxDatagramFrameSize> for VarInt {
     }
 }
 
-integer_transport_parameter!(MaxDatagramFrameSize, 0x20, SentBy::Either);
+integer_transport_parameter!(
+    MaxDatagramFrameSize,
+    0x20,
+    SentBy::Either,
+    RememberedForZeroRtt::Optional
+);
 
 impl FrameSetPart for Part {
     type Run<D> = DatagramFrame<D>;

@@ -2,7 +2,7 @@
 //!
 //! [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
 use self::codec::{ReadStatelessResetTokenValueHostExt as _, write_stateless_reset_token_value};
-use super::{SentBy, TransportParameterSpace};
+use super::{RememberedForZeroRtt, SentBy, TransportParameterAttributes, TransportParameterSpace};
 use crate::{
     connection_id,
     parameters::{KeyedParameter, ReadValueError, ValueSource, read_value_error::ContentSnafu},
@@ -56,7 +56,10 @@ impl KeyedParameter for StatelessResetToken {
     type ValueError = ReadValueError<ReadArrayError<Infallible>>;
 
     const ID: VarInt = VarInt::from_u32(0x02);
-    const ATTRIBUTES: SentBy = SentBy::ServerOnly;
+    const ATTRIBUTES: TransportParameterAttributes = TransportParameterAttributes {
+        sent_by: SentBy::ServerOnly,
+        remembered_for_zero_rtt: RememberedForZeroRtt::Prohibited,
+    };
 
     fn read_value<D: Buf + Unpin>(value: &mut ValueSource<D>) -> Result<Self, Self::ValueError> {
         value

@@ -2,7 +2,7 @@
 //! ([RFC 9000 §18.2]).
 //!
 //! [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
-use super::{SentBy, TransportParameterSpace};
+use super::{RememberedForZeroRtt, SentBy, TransportParameterAttributes, TransportParameterSpace};
 use crate::{
     parameters::{KeyedParameter, TrailingBytesError, ValueSource},
     var_int::VarInt,
@@ -25,7 +25,10 @@ impl KeyedParameter for DisableActiveMigration {
     type ValueError = TrailingBytesError;
 
     const ID: VarInt = VarInt::from_u32(0x0c);
-    const ATTRIBUTES: SentBy = SentBy::Either;
+    const ATTRIBUTES: TransportParameterAttributes = TransportParameterAttributes {
+        sent_by: SentBy::Either,
+        remembered_for_zero_rtt: RememberedForZeroRtt::Mandatory,
+    };
 
     fn read_value<D: Buf + Unpin>(_value: &mut ValueSource<D>) -> Result<Self, Self::ValueError> {
         Ok(Self)

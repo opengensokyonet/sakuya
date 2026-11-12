@@ -81,7 +81,9 @@ use crate::{
         frame::set::{FrameKind, FrameSetPart, FrameTypeValues},
         role::Role,
         stream_id::StreamId,
-        transport_parameters::{SentBy, TransportParameterSpace},
+        transport_parameters::{
+            RememberedForZeroRtt, SentBy, TransportParameterAttributes, TransportParameterSpace,
+        },
     },
     var_int::{VarInt, VarIntField},
 };
@@ -116,6 +118,10 @@ impl ParametersPart<TransportParameterSpace> for Part {
 /// TRANSPORT_PARAMETER_ERROR. Nothing is read from or written to the value,
 /// so the type has no read or write operation.
 ///
+/// Storing it for 0-RTT is mandatory: both endpoints remember whether the
+/// server sent it, so that RESET_STREAM_AT can be sent in 0-RTT packets,
+/// and a server that accepts 0-RTT data does not leave it out.
+///
 /// [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html#section-3
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ResetStreamAt;
@@ -125,7 +131,10 @@ impl KeyedParameter for ResetStreamAt {
     type ValueError = TrailingBytesError;
 
     const ID: VarInt = VarInt::from_u32(0x1d);
-    const ATTRIBUTES: SentBy = SentBy::Either;
+    const ATTRIBUTES: TransportParameterAttributes = TransportParameterAttributes {
+        sent_by: SentBy::Either,
+        remembered_for_zero_rtt: RememberedForZeroRtt::Mandatory,
+    };
 
     fn read_value<D: Buf + Unpin>(_value: &mut ValueSource<D>) -> Result<Self, Self::ValueError> {
         Ok(Self)

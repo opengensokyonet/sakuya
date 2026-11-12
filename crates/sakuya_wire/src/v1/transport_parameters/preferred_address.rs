@@ -4,7 +4,7 @@
 use self::codec::{
     ReadPreferredAddressError, ReadPreferredAddressHostExt as _, write_preferred_address,
 };
-use super::{SentBy, TransportParameterSpace};
+use super::{RememberedForZeroRtt, SentBy, TransportParameterAttributes, TransportParameterSpace};
 use crate::{
     connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken},
     parameters::{KeyedParameter, ReadValueError, ValueSource, read_value_error::ContentSnafu},
@@ -131,7 +131,10 @@ impl KeyedParameter for PreferredAddress {
     type ValueError = ReadValueError<ReadPreferredAddressError<Infallible>>;
 
     const ID: VarInt = VarInt::from_u32(0x0d);
-    const ATTRIBUTES: SentBy = SentBy::ServerOnly;
+    const ATTRIBUTES: TransportParameterAttributes = TransportParameterAttributes {
+        sent_by: SentBy::ServerOnly,
+        remembered_for_zero_rtt: RememberedForZeroRtt::Prohibited,
+    };
 
     fn read_value<D: Buf + Unpin>(value: &mut ValueSource<D>) -> Result<Self, Self::ValueError> {
         value

@@ -6,14 +6,16 @@
 //! whole value of the parameter: its length is the length of the value.
 //! Whether a parameter matches the connection ID that the packets used, and
 //! whether the ones that must be present are, is for the handshake to
-//! check.
+//! check. None of them is remembered for 0-RTT ([RFC 9000 §7.4.1]): they
+//! belong to the connection that sends them.
 //!
 //! [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
 //! [RFC 9000 §7.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-7.3
+//! [RFC 9000 §7.4.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-7.4.1
 use self::codec::{
     ReadConnectionIdValueError, ReadConnectionIdValueHostExt as _, write_connection_id_value,
 };
-use super::{SentBy, TransportParameterSpace};
+use super::{RememberedForZeroRtt, SentBy, TransportParameterAttributes, TransportParameterSpace};
 use crate::{
     connection_id::ConnectionId,
     parameters::{KeyedParameter, ReadValueError, ValueSource, read_value_error::ContentSnafu},
@@ -61,7 +63,10 @@ macro_rules! connection_id {
             type ValueError = ReadValueError<ReadConnectionIdValueError<Infallible>>;
 
             const ID: VarInt = VarInt::from_u32($id);
-            const ATTRIBUTES: SentBy = $sent_by;
+            const ATTRIBUTES: TransportParameterAttributes = TransportParameterAttributes {
+                sent_by: $sent_by,
+                remembered_for_zero_rtt: RememberedForZeroRtt::Prohibited,
+            };
 
             fn read_value<D: Buf + Unpin>(
                 value: &mut ValueSource<D>,

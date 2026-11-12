@@ -3,7 +3,9 @@
 //! [`read_transport_parameters`] reads the whole value of the
 //! `quic_transport_parameters` TLS extension, to the end of the source, into
 //! the slots of the transport parameter types of a list of parts;
-//! [`write_transport_parameters`] writes it. They are the operations of
+//! [`write_transport_parameters`] writes it. [`read_remembered_transport_parameters`]
+//! reads the server's transport parameters stored with a session ticket and
+//! keeps the ones remembered for 0-RTT. They are the operations of
 //! [`parameters::codec`](crate::parameters::codec) for the space of the
 //! transport parameters, where the context of a set of parameters is the
 //! role of the endpoint that sends it. Each function is also an operation
@@ -16,8 +18,9 @@
 #![allow(missing_docs)]
 
 use super::{
-    ServerOnlyError, TransportParameterList, TransportParameterSpace,
-    TransportParameterValueErrors, TransportParameters,
+    RememberedForZeroRtt, ServerOnlyError, TransportParameterAttributes, TransportParameterList,
+    TransportParameterSlots, TransportParameterSpace, TransportParameterValueErrors,
+    TransportParameters,
 };
 use crate::{
     parameters::{
@@ -83,6 +86,53 @@ where
         PhantomData::<(TransportParameterSpace, TransportParameterList<Ps>)>,
     )
     .await
+}
+
+/// Reads the server's transport parameters stored with a session ticket,
+/// the whole source, as [`read_transport_parameters`] reads the parameters
+/// a server sent, and keeps the slots of the types remembered for 0-RTT
+/// ([RFC 9000 §7.4.1]): those whose storing is mandatory or optional
+/// ([`RememberedForZeroRtt`](super::RememberedForZeroRtt)).
+///
+/// Both endpoints store the encoding of the server's parameters as a
+/// whole, the client the parameters it received and the server the ones it
+/// sent, and read them back with this when 0-RTT is attempted. The slots of
+/// the other types are empty, and unknown parameters are left out: they
+/// are not remembered, and a client need not store a parameter it cannot
+/// process.
+///
+/// # Errors
+///
+/// The failures of [`read_transport_parameters`] for parameters a server
+/// sent; a parameter that is not remembered is checked like any other.
+///
+/// # Panics
+///
+/// If the receiver returns a chunk longer than requested, which breaks the
+/// `ReadChunk` contract of `nitori_io`; see [`payload`](crate::payload).
+///
+/// [RFC 9000 §7.4.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-7.4.1
+#[call(sync)]
+pub async fn read_remembered_transport_parameters<Ps, F, A>(
+    io: &mut A,
+    parts: PhantomData<Ps>,
+) -> Result<TransportParameterSlots<Ps>, ReadTransportParametersError<F::Error, Ps>>
+where
+    Ps: ParametersOf<TransportParameterSpace>,
+    F: ReadChunk<Chunk: Default + Unpin>,
+    A: ReceiverAccess<Family = F>,
+{
+    let mut parameters = read_transport_parameters(io, Role::Server, parts).await?;
+    TransportParameterList::<Ps>::retain(
+        &mut parameters.known,
+        &mut |attributes: &TransportParameterAttributes| {
+            !matches!(
+                attributes.remembered_for_zero_rtt,
+                RememberedForZeroRtt::Prohibited
+            )
+        },
+    );
+    Ok(parameters.known)
 }
 
 impl<E, C> ReadParametersError<E, ServerOnlyError, C> {

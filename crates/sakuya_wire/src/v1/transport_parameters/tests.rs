@@ -1,9 +1,10 @@
 use super::{
-    InvalidTransportParametersError, ReservedParameterId, SentBy, ServerOnlyError,
-    TransportParameterList, TransportParameterSlots, TransportParameterSpace, TransportParameters,
+    InvalidTransportParametersError, RememberedForZeroRtt, ReservedParameterId, SentBy,
+    ServerOnlyError, TransportParameterList, TransportParameterSlots, TransportParameterSpace,
+    TransportParameters,
     codec::{
-        ReadTransportParametersError, ReadTransportParametersHostExt as _,
-        WriteTransportParametersHostExt as _,
+        ReadRememberedTransportParametersHostExt as _, ReadTransportParametersError,
+        ReadTransportParametersHostExt as _, WriteTransportParametersHostExt as _,
     },
     connection_id::{
         InitialSourceConnectionId, OriginalDestinationConnectionId, RetrySourceConnectionId,
@@ -579,47 +580,117 @@ fn server_only_parameters_from_a_client_are_rejected() {
 }
 
 /// The four parameters of RFC 9000 §18.2 that only a server may send state
-/// so, and the IDs of the list are `0x00` to `0x10` in order.
+/// so, the seven that a client must not use remembered values for are not
+/// remembered for 0-RTT while every other one must be (RFC 9000 §7.4.1),
+/// and the IDs of the list are `0x00` to `0x10` in order.
 #[test]
-fn parameter_ids_and_senders() {
-    fn id_and_sender<P: KeyedParameter<Space = TransportParameterSpace>>() -> (u64, SentBy) {
-        (P::ID.get(), P::ATTRIBUTES)
+fn parameter_ids_senders_and_zero_rtt() {
+    fn attributes<P: KeyedParameter<Space = TransportParameterSpace>>()
+    -> (u64, SentBy, RememberedForZeroRtt) {
+        (
+            P::ID.get(),
+            P::ATTRIBUTES.sent_by,
+            P::ATTRIBUTES.remembered_for_zero_rtt,
+        )
     }
+    use RememberedForZeroRtt::{Mandatory, Prohibited};
     use SentBy::{Either, ServerOnly};
     let parameters = [
         (
-            id_and_sender::<OriginalDestinationConnectionId>(),
-            ServerOnly,
+            attributes::<OriginalDestinationConnectionId>(),
+            (ServerOnly, Prohibited),
         ),
-        (id_and_sender::<MaxIdleTimeout>(), Either),
+        (attributes::<MaxIdleTimeout>(), (Either, Mandatory)),
         (
-            id_and_sender::<stateless_reset_token::StatelessResetToken>(),
-            ServerOnly,
+            attributes::<stateless_reset_token::StatelessResetToken>(),
+            (ServerOnly, Prohibited),
         ),
-        (id_and_sender::<MaxUdpPayloadSize>(), Either),
-        (id_and_sender::<InitialMaxData>(), Either),
-        (id_and_sender::<InitialMaxStreamDataBidiLocal>(), Either),
-        (id_and_sender::<InitialMaxStreamDataBidiRemote>(), Either),
-        (id_and_sender::<InitialMaxStreamDataUni>(), Either),
-        (id_and_sender::<InitialMaxStreamsBidi>(), Either),
-        (id_and_sender::<InitialMaxStreamsUni>(), Either),
-        (id_and_sender::<AckDelayExponent>(), Either),
-        (id_and_sender::<MaxAckDelay>(), Either),
-        (id_and_sender::<DisableActiveMigration>(), Either),
-        (id_and_sender::<PreferredAddress>(), ServerOnly),
-        (id_and_sender::<ActiveConnectionIdLimit>(), Either),
-        (id_and_sender::<InitialSourceConnectionId>(), Either),
-        (id_and_sender::<RetrySourceConnectionId>(), ServerOnly),
+        (attributes::<MaxUdpPayloadSize>(), (Either, Mandatory)),
+        (attributes::<InitialMaxData>(), (Either, Mandatory)),
+        (
+            attributes::<InitialMaxStreamDataBidiLocal>(),
+            (Either, Mandatory),
+        ),
+        (
+            attributes::<InitialMaxStreamDataBidiRemote>(),
+            (Either, Mandatory),
+        ),
+        (attributes::<InitialMaxStreamDataUni>(), (Either, Mandatory)),
+        (attributes::<InitialMaxStreamsBidi>(), (Either, Mandatory)),
+        (attributes::<InitialMaxStreamsUni>(), (Either, Mandatory)),
+        (attributes::<AckDelayExponent>(), (Either, Prohibited)),
+        (attributes::<MaxAckDelay>(), (Either, Prohibited)),
+        (attributes::<DisableActiveMigration>(), (Either, Mandatory)),
+        (attributes::<PreferredAddress>(), (ServerOnly, Prohibited)),
+        (attributes::<ActiveConnectionIdLimit>(), (Either, Mandatory)),
+        (
+            attributes::<InitialSourceConnectionId>(),
+            (Either, Prohibited),
+        ),
+        (
+            attributes::<RetrySourceConnectionId>(),
+            (ServerOnly, Prohibited),
+        ),
     ];
-    for (index, ((id, sent_by), expected)) in parameters.into_iter().enumerate() {
+    for (index, ((id, sent_by, remembered), expected)) in parameters.into_iter().enumerate() {
         assert_eq!(id, index as u64);
-        assert_eq!(sent_by, expected, "{id:#x}");
+        assert_eq!((sent_by, remembered), expected, "{id:#x}");
     }
     let ids = <V1List as ParameterList<TransportParameterSpace>>::IDS;
     for value in (0..=0x41).chain([31 * 5 + 27, VarInt::MAX.get()]) {
         assert_eq!(ids.contains(vi(value)), value <= 0x10, "{value:#x}");
     }
     const { assert!(<V1List as ParameterList<TransportParameterSpace>>::DISTINCT_AND_UNRESERVED) };
+}
+
+/// Reading the stored parameters of a server keeps the slots of the types
+/// remembered for 0-RTT, empties the others and leaves out the unknown
+/// parameters.
+#[test]
+fn remembered_parameters_keep_only_the_remembered_slots() {
+    let parameters = server_parameters();
+    let encoding = write(parameters.clone(), Role::Server);
+    let remembered: TransportParameterSlots = encoding
+        .as_slice()
+        .sync_read_remembered_transport_parameters_unpin(PhantomData::<V1>)
+        .unwrap();
+    let mut expected = parameters.clone();
+    expected.unknown.clear();
+    *expected.slot_mut::<OriginalDestinationConnectionId, _>() = None;
+    *expected.slot_mut::<stateless_reset_token::StatelessResetToken, _>() = None;
+    *expected.slot_mut::<AckDelayExponent, _>() = None;
+    *expected.slot_mut::<MaxAckDelay, _>() = None;
+    *expected.slot_mut::<PreferredAddress, _>() = None;
+    *expected.slot_mut::<InitialSourceConnectionId, _>() = None;
+    *expected.slot_mut::<RetrySourceConnectionId, _>() = None;
+    assert_eq!(remembered, expected.known);
+    // What is kept is what the server sent.
+    assert_eq!(
+        remembered.get::<Option<InitialMaxData>, _>(),
+        &Some(InitialMaxData::new(vi(1 << 24)))
+    );
+    assert_eq!(
+        remembered.get::<Option<DisableActiveMigration>, _>(),
+        &Some(DisableActiveMigration)
+    );
+}
+
+/// The stored parameters are the server's: parameters only a server may
+/// send are admitted, and a malformed one is rejected even if it is not
+/// remembered.
+#[test]
+fn remembered_parameters_are_read_as_a_server_sent_them() {
+    let encoding = tlv(0x02, &[0x22; 16]);
+    let remembered: TransportParameterSlots = encoding
+        .as_slice()
+        .sync_read_remembered_transport_parameters_unpin(PhantomData::<V1>)
+        .unwrap();
+    assert_eq!(remembered, TransportParameters::<&[u8]>::new().known);
+    let error = tlv(0x02, &[0x22; 3])
+        .as_slice()
+        .sync_read_remembered_transport_parameters_unpin(PhantomData::<V1>)
+        .unwrap_err();
+    assert!(matches!(error, ReadParametersError::InvalidValue { .. }));
 }
 
 #[test]
@@ -1131,4 +1202,53 @@ fn preferred_address_layout() {
         preferred_address()
     );
     assert!(input.is_empty());
+}
+
+/// The parameters of extensions are remembered as their definitions say:
+/// `reset_stream_at` must be, `max_datagram_frame_size` may be, and both are
+/// kept; the order of the parts does not matter.
+#[cfg(all(feature = "datagram", feature = "reset_stream_at"))]
+#[test]
+fn remembered_parameters_of_extensions() {
+    use crate::{
+        datagram::{self, MaxDatagramFrameSize},
+        reset_stream_at::{self, ResetStreamAt},
+    };
+    assert_eq!(
+        ResetStreamAt::ATTRIBUTES.remembered_for_zero_rtt,
+        RememberedForZeroRtt::Mandatory
+    );
+    assert_eq!(
+        MaxDatagramFrameSize::ATTRIBUTES.remembered_for_zero_rtt,
+        RememberedForZeroRtt::Optional
+    );
+    let mut encoding = tlv(0x1d, &[]);
+    encoding.extend(tlv(0x04, &integer(7)));
+    encoding.extend(tlv(0x0b, &integer(30)));
+    encoding.extend(tlv(0x20, &integer(1200)));
+    encoding.extend(tlv(31 * 1000 + 27, b"reserved"));
+
+    macro_rules! check {
+        ($parts:ty) => {{
+            let remembered = encoding
+                .as_slice()
+                .sync_read_remembered_transport_parameters_unpin(PhantomData::<$parts>)
+                .unwrap();
+            assert_eq!(
+                remembered.get::<Option<ResetStreamAt>, _>(),
+                &Some(ResetStreamAt)
+            );
+            assert_eq!(
+                remembered.get::<Option<MaxDatagramFrameSize>, _>(),
+                &Some(MaxDatagramFrameSize::new(vi(1200)))
+            );
+            assert_eq!(
+                remembered.get::<Option<InitialMaxData>, _>(),
+                &Some(InitialMaxData::new(vi(7)))
+            );
+            assert_eq!(remembered.get::<Option<MaxAckDelay>, _>(), &None);
+        }};
+    }
+    check!(HList![v1::Part, reset_stream_at::Part, datagram::Part]);
+    check!(HList![datagram::Part, v1::Part, reset_stream_at::Part]);
 }
