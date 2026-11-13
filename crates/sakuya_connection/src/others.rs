@@ -3,7 +3,7 @@ use crate::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf, LinkIdOf},
     layer::{Established, LinkEntry, LinkPath, LogicalPath, NodeKey, NodeKeyOf, Recovery},
-    share::{FlatMut, NodeData, PartList, PathKey},
+    share::{FlatMut, FlatRef, NodeData, PartList, PathKey},
     take::{GetAt, RefsOf, TakeEach},
     tree::{
         Around, EntryNode, EstablishedNode, LinkPathNodeOf, LogicalPathNode, NodeAddr, RecoveryNode,
@@ -121,6 +121,17 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
             .flat_mut()
             .take_each(&mut Self::record(self.taken, addr));
         Some(items)
+    }
+
+    /// Read the lent link path's recovery layer; `None` when it has none or
+    /// it was taken. Nothing is taken.
+    pub fn recovery_ref<'s>(&'s self) -> Option<<NodeData<T, L, Recovery> as FlatRef<'s>>::Out>
+    where
+        NodeData<T, L, Recovery>: FlatRef<'s>,
+    {
+        self.here_recovery
+            .as_deref()
+            .map(|node| node.data.flat_ref())
     }
 
     /// Take components `U` of the entry of the logical link `link`; `None`

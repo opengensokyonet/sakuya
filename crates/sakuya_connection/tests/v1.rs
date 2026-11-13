@@ -4292,3 +4292,27 @@ fn the_next_probe_timeout_drops_the_last_ping_before_it_publishes_its_own() {
         ]
     );
 }
+
+#[test]
+fn the_planner_is_told_what_its_link_path_can_send_when_the_credit_grows() {
+    reset();
+    let first = link();
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    let datagram = long_packet(INITIAL, 0, &ping());
+    let size = datagram.len();
+    deliver(datagram, &first, ms(5));
+    let _ = run(&mut connection, 5..=5);
+    let limits = common::strategy::observed_limits(0).expect("the planner was told");
+    // the factor of the tests is 2; the link takes 1200 bytes, and the
+    // peer's transport parameters are not known yet
+    assert_eq!(limits.anti_amplification_credit, Some(2 * size as u64));
+    assert_eq!(limits.link_ceiling, Some(1200));
+    assert_eq!(limits.peer_max_udp_payload, 65527);
+    assert_eq!(limits.pmtu_conclusion, 1200);
+    assert_eq!(limits.probe_permits, 0);
+    // nothing is in flight in the initial window of ten 1200-byte
+    // datagrams (RFC 9002 §7.2); the pacer has not been refilled, since
+    // nothing was sent
+    assert_eq!(limits.congestion_window_left, 12000);
+    assert_eq!(limits.pacing_allowance, 0);
+}

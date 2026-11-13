@@ -5,25 +5,43 @@
 //! Whoever changes a key, the handshake's confirmation, the record of why
 //! the connection closed or a link path's role only changes its own
 //! component; the core and the planners read those components, and the
-//! driver rereads them after a lend that changed one. Each remembers what
-//! it told the strategy last, so the same fact is told once.
+//! driver rereads them after a lend that changed one. Each remembers the
+//! events it told the strategy last, so the same event is told once; what
+//! a link path can send is told as its current value at every reread of
+//! its planner, which the strategy takes as no change when it is the same.
 
 use core::fmt;
 
-use sakuya_wire::v1::encryption_level::EncryptionLevel;
+use sakuya_link::Link;
+use sakuya_wire::{
+    parameters::ParametersOf,
+    parts::Selector,
+    v1::{
+        encryption_level::EncryptionLevel,
+        transport_parameters::{
+            TransportParameterSlots, TransportParameterSpace, integer::MaxUdpPayloadSize,
+        },
+    },
+};
 
 use sakuya_recovery::{
     ack_obligation::{AckDue, AckObligation},
+    congestion::CongestionController,
+    pacing::Pacer,
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaces},
+    pmtu::PmtuPolicy,
     receive_journals::ReceiveJournals,
 };
 
 use super::{
     AckObligationsOf, Choices, CloseCauseOf,
+    amplification::AntiAmplification,
     close::CloseReasonRecord,
     confirmation::HandshakeConfirmation,
     keys::{HandshakeKeys, InitialKeys, OneRttKeys},
-    link::FirstLinkStart,
+    link::{FirstLinkStart, LinkClone, LinkFacts},
+    parameters::PeerTransportParameters,
+    recovery::{CongestionPartOf, LinkPathCongestionState, PmtuOf, peer_max_udp_payload_size},
     role::LinkPathRole,
     send::{AckIntent, ProbePingIntent, SendTypes, shortest_ack_frame},
 };
@@ -37,11 +55,11 @@ use crate::{
     layer::{self, NodeKey},
     others::OtherNodes,
     send_strategy::{
-        AnyActiveLinkPath, LinkPathRoleKind, LinkPathSendPlanner, PlannerLinkPath, Publish,
-        PublishOutcome, PublishTo, SendStrategy, SendStrategyTypes,
+        AnyActiveLinkPath, DatagramLimits, LinkPathRoleKind, LinkPathSendPlanner, Observe,
+        PlannerLinkPath, Publish, PublishOutcome, PublishTo, SendStrategy, SendStrategyTypes,
     },
-    share::{LineageLists, LineagePartList, LogicalPathKeys},
-    take::{GetAt, Take, TakeEach},
+    share::{FlatRef, LineageLists, LineagePartList, LogicalPathKeys, NodeData},
+    take::{GetAt, ReadEach, Take, TakeEach},
 };
 
 /// The core of the send strategy of the choices `T` and the list of parts
@@ -285,19 +303,37 @@ where
     }
 }
 
-/// A planner is told when its link path's role changes.
-impl<T: Choices, L, Ip, Ir, It> DataComponent<T, L, layer::LinkPath, (Ip, Ir, It)>
+/// A planner is told when its link path's role changes, and what the link
+/// path can send whenever a component that limits it changes: the
+/// anti-amplification credit, the peer's transport parameters, and the
+/// congestion control, its fixed state and the datagram size probing
+/// policy in the link path's recovery layer.
+impl<T: Choices, L, Ip, Ir, It, Il, Ipp, Jc, Js, Jm>
+    DataComponent<T, L, layer::LinkPath, (Ip, Ir, It, Il, Ipp, (Jc, Js, Jm))>
     for LinkPathPlanner<LinkPathSendPlannerOf<T, L>>
 where
-    L: LineagePartList<T>,
+    L: LineagePartList<T> + ParametersOf<TransportParameterSpace>,
     SendTypes<T, L>: SendStrategyTypes,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    LinkPathSendPlannerOf<T, L>: Observe<DatagramLimits>,
+    TransportParameterSlots<L>: Selector<Option<MaxUdpPayloadSize>, Ipp>,
+    CongestionPartOf<T, L>: CongestionController<InstantOf<T>> + Pacer<InstantOf<T>>,
     for<'v> <L as LineageLists<'v, T>>::LinkPath: GetAt<Self, Ip>
         + GetAt<LinkPathRole<InstantOf<T>>, Ir>
+        + ReadEach<DatagramLimitsReads<T, L>, Il>
         + TakeEach<'v, frunk_core::HList![Self, SendStrategyCore<SendStrategyOf<T, L>>], It>,
+    for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
+    for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out: Selector<&'a CongestionPartOf<T, L>, Jc>
+        + Selector<&'a LinkPathCongestionState<InstantOf<T>>, Js>
+        + Selector<&'a PmtuOf<T, L>, Jm>,
 {
     fn reads(reads: &mut ReadSet) {
         reads.add::<LinkPathRole<InstantOf<T>>>();
+        reads.add::<AntiAmplification>();
+        reads.add::<PeerTransportParameters<TransportParameterSlots<L>>>();
+        reads.add::<CongestionPartOf<T, L>>();
+        reads.add::<LinkPathCongestionState<InstantOf<T>>>();
+        reads.add::<PmtuOf<T, L>>();
     }
 
     fn reread<'v, B: CallBundle>(
@@ -307,17 +343,123 @@ where
     ) -> Option<RequestOf<T, L>> {
         debug_assert!(matches!(others.here(), NodeKey::LinkPath(..)));
         let role = lineage.get::<LinkPathRole<InstantOf<T>>, Ir>().kind();
-        if lineage.get::<Self, Ip>().role == role {
-            return None;
-        }
+        let limits = read_datagram_limits::<T, L, B, Il, Ipp, Jc, Js, Jm>(&lineage, others);
         let (frunk_core::hlist_pat![planner, core], _) = Take::<
             frunk_core::HList![Self, SendStrategyCore<SendStrategyOf<T, L>>],
             It,
         >::take(lineage);
-        planner.role = role;
-        planner.planner.role_changed(core.strategy_mut(), role);
+        if planner.role != role {
+            planner.role = role;
+            planner.planner.role_changed(core.strategy_mut(), role);
+        }
+        // the current value; the strategy takes the same value again as no
+        // change
+        planner.planner.observe(limits);
         None
     }
+}
+
+// ---- what a link path can send ----
+
+/// What a link path's recovery layer says about what it can send: what the
+/// congestion window leaves, what pacing releases and how many datagrams
+/// may go past both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct CongestionAllowance {
+    pub(super) window_left: usize,
+    pub(super) pacing_allowance: usize,
+    pub(super) probe_permits: u8,
+}
+
+/// The peer's `max_udp_payload_size` when it left it out (RFC 9000 §18.2),
+/// taken too while its transport parameters are not known.
+const DEFAULT_PEER_MAX_UDP_PAYLOAD: usize = 65527;
+
+/// What a link path can send in its next new datagram, from the raw
+/// quantities of its components: the link's ceiling (`None` when asking
+/// failed), the peer's `max_udp_payload_size` (`None` while its transport
+/// parameters are not known), what path MTU discovery concluded and what
+/// congestion control allows (`None` without a recovery layer), and the
+/// anti-amplification credit.
+///
+/// A link path without a recovery layer has no congestion window: it
+/// sends nothing that counts in flight, and its datagrams are of the
+/// least size every path supports (RFC 9000 §14).
+pub(super) fn datagram_limits(
+    link_ceiling: Option<usize>,
+    peer_max_udp_payload: Option<usize>,
+    anti_amplification_credit: Option<u64>,
+    recovery: Option<(usize, CongestionAllowance)>,
+) -> DatagramLimits {
+    let (pmtu_conclusion, congestion) = recovery.unwrap_or((
+        DatagramLimits::MINIMUM,
+        CongestionAllowance {
+            window_left: 0,
+            pacing_allowance: 0,
+            probe_permits: 0,
+        },
+    ));
+    DatagramLimits {
+        link_ceiling,
+        peer_max_udp_payload: peer_max_udp_payload.unwrap_or(DEFAULT_PEER_MAX_UDP_PAYLOAD),
+        pmtu_conclusion,
+        anti_amplification_credit,
+        congestion_window_left: congestion.window_left,
+        pacing_allowance: congestion.pacing_allowance,
+        probe_permits: congestion.probe_permits,
+    }
+}
+
+/// What a link path's planner reads from the nodes above it to tell its
+/// strategy what the link path can send: the logical link, its facts and
+/// anti-amplification state, and the peer's transport parameters.
+pub(super) type DatagramLimitsReads<T, L> = frunk_core::HList![
+    LinkClone<<T as crate::clock::ConnectionChoices>::Link>,
+    LinkFacts,
+    AntiAmplification,
+    PeerTransportParameters<TransportParameterSlots<L>>,
+];
+
+/// What a link path can send in its next new datagram, read from the link
+/// path's lend without taking anything: the pacer is not refilled, so its
+/// allowance is what its last refill left.
+fn read_datagram_limits<'v, T, L, B, Il, Ipp, Jc, Js, Jm>(
+    lineage: &LineageOf<'v, T, L, layer::LinkPath>,
+    others: &OtherNodes<'v, T, L, B>,
+) -> DatagramLimits
+where
+    T: Choices,
+    L: LineagePartList<T> + ParametersOf<TransportParameterSpace>,
+    B: CallBundle,
+    TransportParameterSlots<L>: Selector<Option<MaxUdpPayloadSize>, Ipp>,
+    CongestionPartOf<T, L>: CongestionController<InstantOf<T>> + Pacer<InstantOf<T>>,
+    for<'x> <L as LineageLists<'x, T>>::LinkPath: ReadEach<DatagramLimitsReads<T, L>, Il>,
+    for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
+    for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out: Selector<&'a CongestionPartOf<T, L>, Jc>
+        + Selector<&'a LinkPathCongestionState<InstantOf<T>>, Js>
+        + Selector<&'a PmtuOf<T, L>, Jm>,
+{
+    let frunk_core::hlist_pat![link, facts, amplification, peer] =
+        lineage.read_each::<DatagramLimitsReads<T, L>, Il>();
+    let recovery = others.recovery_ref().map(|flat| {
+        let controller: &&CongestionPartOf<T, L> = Selector::<_, Jc>::get(&flat);
+        let state: &&LinkPathCongestionState<InstantOf<T>> = Selector::<_, Js>::get(&flat);
+        let pmtu: &&PmtuOf<T, L> = Selector::<_, Jm>::get(&flat);
+        (
+            pmtu.conclusion(),
+            CongestionAllowance {
+                window_left: state.window_left(*controller),
+                pacing_allowance: Pacer::allowance(*controller),
+                probe_permits: state.probe_permits(),
+            },
+        )
+    });
+    datagram_limits(
+        link.0.max_datagram_size().ok(),
+        peer_max_udp_payload_size::<L, Ipp>(peer),
+        amplification.credit(facts.validation),
+        recovery,
+    )
 }
 
 // ---- the ACK intents ----

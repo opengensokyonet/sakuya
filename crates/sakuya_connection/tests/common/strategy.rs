@@ -21,6 +21,7 @@ use sakuya_wire::v1::encryption_level::EncryptionLevel;
 
 thread_local! {
     static EVENTS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    static LIMITS: RefCell<Vec<Option<DatagramLimits>>> = const { RefCell::new(Vec::new()) };
 }
 
 fn record(event: impl Into<String>) {
@@ -39,6 +40,13 @@ fn record(event: impl Into<String>) {
 ///   published on that planner and for its ticket going.
 pub fn take_strategy_events() -> Vec<String> {
     EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()))
+}
+
+/// What the planner of the Nth link path built was last told the link path
+/// can send; `None` when it was told nothing yet. Each strategy made starts
+/// with none told.
+pub fn observed_limits(path: usize) -> Option<DatagramLimits> {
+    LIMITS.with(|limits| limits.borrow().get(path).copied().flatten())
 }
 
 /// A ticket that records when it goes.
@@ -68,6 +76,7 @@ pub struct EventLoggingSendStrategy<I: SendStrategyTypes> {
 
 impl<I: SendStrategyTypes> Default for EventLoggingSendStrategy<I> {
     fn default() -> Self {
+        LIMITS.with(|limits| limits.borrow_mut().clear());
         Self {
             inner: RankedSendStrategy::new(),
             link_paths: 0,
@@ -183,6 +192,13 @@ where
 
 impl<I: SendStrategyTypes> Observe<DatagramLimits> for EventLoggingPlanner<I> {
     fn observe(&mut self, change: DatagramLimits) {
+        LIMITS.with(|limits| {
+            let mut limits = limits.borrow_mut();
+            if limits.len() <= self.index {
+                limits.resize(self.index + 1, None);
+            }
+            limits[self.index] = Some(change);
+        });
         self.inner.observe(change);
     }
 }
