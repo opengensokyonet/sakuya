@@ -24,9 +24,10 @@
 //! ```
 //!
 //! [`write_long_packet_header`] writes the header of an Initial, 0-RTT or
-//! Handshake packet from the first byte to the Length field, and
+//! Handshake packet from the first byte to the Length field,
 //! [`write_short_packet_header`] the header of a 1-RTT packet up to its
-//! Packet Number field. Each is also an operation struct, such as
+//! Packet Number field, and [`write_retry_packet_without_tag`] a Retry packet
+//! up to its integrity tag. Each is also an operation struct, such as
 //! [`WriteLongPacketHeader`], with `{Name}Ext` and `{Name}HostExt`.
 //!
 //! ```
@@ -56,18 +57,40 @@
 //! assert_eq!(packet[8..13], [0, 0, 0x40, 20, 0xaa]);
 //! ```
 //!
+//! A Retry packet ends with an integrity tag computed over the bytes before
+//! it and the original destination connection ID ([RFC 9001 §5.8]); the
+//! sender computes it from what [`write_retry_packet_without_tag`] wrote and
+//! appends it.
+//!
+//! ```
+//! use sakuya_wire::{
+//!     connection_id::ConnectionId,
+//!     v1::header::codec::WriteRetryPacketWithoutTagHostExt as _,
+//! };
+//!
+//! let scid = ConnectionId::new(&[0xf0, 0x67, 0xa5, 0x50, 0x2a, 0x42, 0x62, 0xb5]).unwrap();
+//! let mut packet = Vec::new();
+//! packet
+//!     .sync_write_retry_packet_without_tag_unpin(0x0f, ConnectionId::EMPTY, scid, b"token")
+//!     .unwrap();
+//! assert_eq!(packet[..7], [0xff, 0, 0, 0, 1, 0, 8]);
+//! assert_eq!(packet[15..], *b"token");
+//! // The 16-byte Retry Integrity Tag follows.
+//! ```
+//!
 //! [`read_long_header`]: crate::header::codec::read_long_header
+//! [RFC 9001 §5.8]: https://www.rfc-editor.org/rfc/rfc9001.html#section-5.8
 // `#[call]` generates constructors, fields and extension traits without
 // documentation comments; the module documentation above describes them.
 #![allow(missing_docs)]
 
 use super::{
-    LongPacket, LongPacketHeader, LongPacketType, PacketBounds, RETRY_INTEGRITY_TAG_LEN,
+    FIXED_BIT, LongPacket, LongPacketHeader, LongPacketType, PacketBounds, RETRY_INTEGRITY_TAG_LEN,
     ShortPacketHeader, TypeFields, VERSION, WrittenKind,
 };
 use crate::{
     connection_id::{ConnectionId, ConnectionIdLengthError},
-    header::LongHeader,
+    header::{FORM_BIT, LongHeader},
     payload::{ReadPayloadError, read_payload, read_payload_to_end},
     var_int::{
         VarInt,
@@ -396,4 +419,69 @@ pub async fn write_short_packet_header<F: Write, A: ReceiverAccess<Family = F>>(
     let first_byte = [header.first_byte()];
     io.write_all(Buf::chain(&first_byte[..], header.dcid().as_bytes()))
         .await
+}
+
+/// The Long Packet Type bits of a Retry packet, `0b11`, in place in the
+/// first byte.
+const RETRY_TYPE_BITS: u8 = 0b11 << 4;
+
+/// The bits of the first byte of a Retry packet that form its Unused field.
+const RETRY_UNUSED_MASK: u8 = 0x0f;
+
+/// The longest Retry packet before its token: the first byte, the version and
+/// two connection IDs with their length bytes.
+const RETRY_PREFIX_MAX: usize = 1 + 4 + 1 + ConnectionId::MAX_LEN + 1 + ConnectionId::MAX_LEN;
+
+/// Writes a Retry packet ([RFC 9000 §17.2.5]) from the first byte to the end
+/// of the Retry Token, up to the Retry Integrity Tag.
+///
+/// The first byte has the form, the Fixed Bit and the Retry packet type set,
+/// and its Unused field holds the low four bits of `unused`, the high four
+/// bits of `unused` being ignored. [RFC 9000 §17.2.5] lets the server set the
+/// Unused field to any value and requires the client to ignore it; nothing
+/// in a Retry packet is protected. The version is [`VERSION`]. A server puts
+/// the source connection ID of the client's Initial in `dcid` and a
+/// connection ID of its choice, other than the destination connection ID of
+/// that Initial, in `scid` ([RFC 9000 §17.2.5.1]). A client discards a Retry
+/// packet whose `token` is empty ([RFC 9000 §17.2.5.2]).
+///
+/// The sender appends the 16-byte Retry Integrity Tag ([RFC 9001 §5.8]),
+/// computed over the written bytes; the packet read back with
+/// [`read_long_header`](crate::header::codec::read_long_header) and
+/// [`read_long_packet`] then reads as the same fields.
+///
+/// Acceptance by the receiver does not imply flushing or delivery.
+///
+/// # Errors
+///
+/// [`WriteAllError`] if the receiver stops accepting bytes or fails; bytes
+/// accepted before stay written.
+///
+/// [RFC 9000 §17.2.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.2.5
+/// [RFC 9000 §17.2.5.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.2.5.1
+/// [RFC 9000 §17.2.5.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.2.5.2
+/// [RFC 9001 §5.8]: https://www.rfc-editor.org/rfc/rfc9001.html#section-5.8
+#[call(sync)]
+pub async fn write_retry_packet_without_tag<F: Write, A: ReceiverAccess<Family = F>>(
+    io: &mut A,
+    unused: u8,
+    dcid: ConnectionId,
+    scid: ConnectionId,
+    token: &[u8],
+) -> Result<(), WriteAllError<F::Error>> {
+    let mut prefix = [0; RETRY_PREFIX_MAX];
+    let mut len = 0;
+    let mut put = |bytes: &[u8]| {
+        // invariant: `RETRY_PREFIX_MAX` is the longest the pieces below add
+        // up to.
+        prefix[len..len + bytes.len()].copy_from_slice(bytes);
+        len += bytes.len();
+    };
+    put(&[FORM_BIT | FIXED_BIT | RETRY_TYPE_BITS | (unused & RETRY_UNUSED_MASK)]);
+    put(&VERSION.to_be_bytes());
+    put(&[u8::from(dcid.length())]);
+    put(dcid.as_bytes());
+    put(&[u8::from(scid.length())]);
+    put(scid.as_bytes());
+    io.write_all(prefix[..len].chain(token)).await
 }

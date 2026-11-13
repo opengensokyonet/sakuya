@@ -896,3 +896,141 @@ fn write_failures_report_the_receiver() {
     assert!(matches!(error, WriteAllError::WriteZero { .. }));
     assert_eq!(error.completed(), 2);
 }
+
+#[test]
+fn written_version_negotiation_reads_back_as_the_same_fields() {
+    use super::codec::WriteVersionNegotiationHostExt as _;
+    use crate::connection_id::RawConnectionId;
+
+    let long = RawConnectionId::new(&[3; 255]).unwrap();
+    let short = RawConnectionId::new(&RFC_DCID).unwrap();
+    let versions = [
+        Version::V1,
+        Version::new(0x6b33_43cf),
+        Version::new(0x1a2a_3a4a),
+    ];
+    for (unused, dcid, scid, versions) in [
+        (0x40, long, short, &versions[..]),
+        (0x7f, short, RawConnectionId::EMPTY, &versions[..1]),
+        (0x00, RawConnectionId::EMPTY, long, &[][..]),
+    ] {
+        let mut packet = Vec::new();
+        packet
+            .sync_write_version_negotiation_unpin(unused, &dcid, &scid, versions)
+            .unwrap();
+        assert_eq!(packet[0], 0x80 | unused);
+        assert_eq!(
+            packet.len(),
+            1 + 4 + 1 + dcid.len() + 1 + scid.len() + 4 * versions.len()
+        );
+        let mut input = packet.as_slice();
+        let header = long_header(&mut input);
+        assert_eq!(header.first_byte(), 0x80 | unused);
+        assert_eq!(header.version(), Version::NEGOTIATION);
+        let negotiation = input.sync_read_version_negotiation_unpin(header).unwrap();
+        assert_eq!(negotiation.dcid(), &dcid);
+        assert_eq!(negotiation.scid(), &scid);
+        assert_eq!(
+            negotiation.supported_versions().collect::<Vec<_>>(),
+            versions
+        );
+        assert!(input.is_empty());
+    }
+}
+
+#[test]
+fn written_version_negotiation_keeps_the_header_form() {
+    use super::codec::WriteVersionNegotiationHostExt as _;
+    use crate::connection_id::RawConnectionId;
+
+    let mut packet = Vec::new();
+    packet
+        .sync_write_version_negotiation_unpin(
+            0xff,
+            &RawConnectionId::EMPTY,
+            &RawConnectionId::EMPTY,
+            &[Version::V1],
+        )
+        .unwrap();
+    assert_eq!(packet, [0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+}
+
+#[test]
+fn version_negotiation_write_failures_count_the_bytes_accepted() {
+    use super::codec::WriteVersionNegotiationHostExt as _;
+    use crate::connection_id::RawConnectionId;
+    use nitori_io::calls::WriteAllError;
+
+    let dcid = RawConnectionId::new(&[1, 2]).unwrap();
+    let versions = [Version::V1, Version::new(0x1a2a_3a4a)];
+    // The header takes 9 bytes; the room ends within the second version.
+    let mut room = [0; 15];
+    let mut sink = &mut room[..];
+    let error = sink
+        .sync_write_version_negotiation_unpin(0x40, &dcid, &RawConnectionId::EMPTY, &versions)
+        .unwrap_err();
+    assert!(matches!(error, WriteAllError::WriteZero { .. }));
+    assert_eq!(error.completed(), 15);
+    assert_eq!(room, [0xc0, 0, 0, 0, 0, 2, 1, 2, 0, 0, 0, 0, 1, 0x1a, 0x2a]);
+}
+
+#[test]
+fn rfc_retry_is_written_as_in_the_appendix() {
+    use v1::codec::WriteRetryPacketWithoutTagHostExt as _;
+
+    let retry = hex(RETRY);
+    let (without_tag, tag) = retry.split_at(retry.len() - v1::RETRY_INTEGRITY_TAG_LEN);
+    let mut written = Vec::new();
+    written
+        .sync_write_retry_packet_without_tag_unpin(
+            0x0f,
+            ConnectionId::EMPTY,
+            ConnectionId::new(&hex("f067a5502a4262b5")).unwrap(),
+            b"token",
+        )
+        .unwrap();
+    assert_eq!(written, without_tag);
+    // With the tag of the appendix appended, it reads back as that packet.
+    written.extend_from_slice(tag);
+    let packet = v1_of(&written).unwrap();
+    assert_eq!(packet, v1_of(&retry).unwrap());
+}
+
+#[test]
+fn written_retry_packets_read_back_as_the_same_fields() {
+    use v1::codec::WriteRetryPacketWithoutTagHostExt as _;
+
+    let dcid = ConnectionId::new(&[1, 2, 3]).unwrap();
+    let scid = ConnectionId::new(&[9; 20]).unwrap();
+    let tag = [0x5a; v1::RETRY_INTEGRITY_TAG_LEN];
+    for (unused, token) in [
+        (0x00, &b"a token"[..]),
+        (0x0a, &[7; 300][..]),
+        (0xf5, &[][..]),
+    ] {
+        let mut packet = Vec::new();
+        packet
+            .sync_write_retry_packet_without_tag_unpin(unused, dcid, scid, token)
+            .unwrap();
+        // The high four bits of `unused` are ignored.
+        assert_eq!(packet[0], 0xf0 | (unused & 0x0f));
+        packet.extend_from_slice(&tag);
+        let read = v1_of(&packet).unwrap();
+        assert_eq!(read.packet_type(), LongPacketType::Retry);
+        assert!(read.fixed_bit());
+        assert_eq!(read.header().version(), v1::VERSION);
+        assert_eq!(read.dcid(), &dcid);
+        assert_eq!(read.scid(), &scid);
+        let TypeFields::Retry {
+            token: read_token,
+            integrity_tag,
+            end,
+        } = read.fields()
+        else {
+            panic!("expected Retry fields, got {:?}", read.fields());
+        };
+        assert_eq!(read_token, token);
+        assert_eq!(integrity_tag, &tag);
+        assert_eq!(*end, packet.len());
+    }
+}

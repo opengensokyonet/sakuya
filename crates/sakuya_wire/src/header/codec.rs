@@ -1,18 +1,46 @@
-//! Reading the version-independent header layers as `nitori_call`
-//! operations.
+//! Reading the version-independent header layers, and writing Version
+//! Negotiation packets, as `nitori_call` operations.
 //!
 //! [`read_long_header`] and [`read_short_header`] start at the first byte of
 //! a packet; [`read_version_negotiation`] continues after a long header with
-//! [`Version::NEGOTIATION`]. Each function is also an operation struct with
+//! [`Version::NEGOTIATION`]. [`write_version_negotiation`] writes a whole
+//! Version Negotiation packet. Each function is also an operation struct with
 //! `{Name}Ext` on receiver accesses inside other operations and
 //! `{Name}HostExt` on call executors, including the `sync_` methods for
 //! receivers that never wait. A source that ends early is an incomplete
 //! failure, which the errors' `is_incomplete` methods recognize.
+//!
+//! ```
+//! use sakuya_wire::{
+//!     connection_id::RawConnectionId,
+//!     header::codec::{
+//!         ReadLongHeaderHostExt as _, ReadVersionNegotiationHostExt as _,
+//!         WriteVersionNegotiationHostExt as _,
+//!     },
+//!     version::Version,
+//! };
+//!
+//! // The client's packet had these connection IDs; the response swaps them.
+//! let client_dcid = RawConnectionId::new(&[7; 30]).unwrap();
+//! let client_scid = RawConnectionId::new(&[1, 2]).unwrap();
+//! let mut packet = Vec::new();
+//! packet
+//!     .sync_write_version_negotiation_unpin(0x40, &client_scid, &client_dcid, &[Version::V1])
+//!     .unwrap();
+//! assert_eq!(packet[..6], [0xc0, 0, 0, 0, 0, 2]);
+//!
+//! let mut input = &packet[..];
+//! let header = input.sync_read_long_header_unpin().unwrap();
+//! let negotiation = input.sync_read_version_negotiation_unpin(header).unwrap();
+//! assert_eq!(negotiation.dcid(), &client_scid);
+//! assert_eq!(negotiation.scid(), &client_dcid);
+//! assert_eq!(negotiation.supported_versions().collect::<Vec<_>>(), [Version::V1]);
+//! ```
 // `#[call]` generates constructors, fields and extension traits without
 // documentation comments; the module documentation above describes them.
 #![allow(missing_docs)]
 
-use super::{HeaderForm, LongHeader, ShortHeader, VERSION_LEN, VersionNegotiation};
+use super::{FORM_BIT, HeaderForm, LongHeader, ShortHeader, VERSION_LEN, VersionNegotiation};
 use crate::{
     connection_id::{
         ConnectionIdLength, RawConnectionId,
@@ -24,7 +52,7 @@ use crate::{
 use bytes::Buf;
 use nitori_call::{ReceiverAccess, call};
 use nitori_io::{
-    calls::{ReadArrayError, ReadBeError, ReadExactError},
+    calls::{ReadArrayError, ReadBeError, ReadExactError, WriteAllError},
     prelude::*,
 };
 use snafu::{ResultExt, Snafu};
@@ -299,5 +327,114 @@ impl VersionListError {
             return Err(Self { length });
         }
         Ok(())
+    }
+}
+
+/// The longest version-independent long header: the first byte, the version
+/// and two connection IDs of 255 bytes with their length bytes.
+const LONG_HEADER_MAX: usize =
+    1 + VERSION_LEN + 1 + RawConnectionId::MAX_LEN + 1 + RawConnectionId::MAX_LEN;
+
+/// Writes a Version Negotiation packet ([RFC 8999 §6], [RFC 9000 §17.2.1]):
+/// the first byte, [`Version::NEGOTIATION`], the two connection IDs with their
+/// lengths and the supported version list `versions`, in order.
+///
+/// The low seven bits of `unused` fill the Unused field; the most
+/// significant bit of the first byte is the Header Form and always 1. The
+/// sender chooses the Unused field freely, and [RFC 9000 §17.2.1] asks a
+/// server to set its `0x40` bit so that the packet appears to have the
+/// Fixed Bit. A server responding to a client packet puts that packet's
+/// source connection ID in `dcid` and its destination connection ID in
+/// `scid`; either may be up to 255 bytes long.
+///
+/// A packet written and read back with [`read_long_header`] and
+/// [`read_version_negotiation`] reads as the same fields.
+///
+/// Acceptance by the receiver does not imply flushing or delivery.
+///
+/// # Errors
+///
+/// [`WriteAllError`] if the receiver stops accepting bytes or fails; bytes
+/// accepted before stay written.
+///
+/// [RFC 8999 §6]: https://www.rfc-editor.org/rfc/rfc8999.html#section-6
+/// [RFC 9000 §17.2.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.2.1
+#[call(sync)]
+pub async fn write_version_negotiation<F: Write, A: ReceiverAccess<Family = F>>(
+    io: &mut A,
+    unused: u8,
+    dcid: &RawConnectionId,
+    scid: &RawConnectionId,
+    versions: &[Version],
+) -> Result<(), WriteAllError<F::Error>> {
+    let mut header = [0; LONG_HEADER_MAX];
+    let mut len = 0;
+    let mut put = |bytes: &[u8]| {
+        // invariant: `LONG_HEADER_MAX` is the longest the pieces below add up
+        // to.
+        header[len..len + bytes.len()].copy_from_slice(bytes);
+        len += bytes.len();
+    };
+    put(&[FORM_BIT | unused]);
+    put(&Version::NEGOTIATION.to_be_bytes());
+    put(&[dcid.len]);
+    put(dcid.as_bytes());
+    put(&[scid.len]);
+    put(scid.as_bytes());
+    io.write_all(header[..len].chain(VersionListBytes::new(versions)))
+        .await
+}
+
+/// The bytes of a supported version list, each version in network byte
+/// order.
+struct VersionListBytes<'a> {
+    /// The version being written.
+    current: [u8; VERSION_LEN],
+    /// How many bytes of `current` are written.
+    position: usize,
+    /// The versions after `current`.
+    rest: &'a [Version],
+}
+
+impl<'a> VersionListBytes<'a> {
+    fn new(versions: &'a [Version]) -> Self {
+        let mut bytes = Self {
+            current: [0; VERSION_LEN],
+            position: VERSION_LEN,
+            rest: versions,
+        };
+        bytes.next_version();
+        bytes
+    }
+
+    /// Moves to the next version once `current` is written.
+    fn next_version(&mut self) {
+        if self.position == VERSION_LEN
+            && let Some((next, rest)) = self.rest.split_first()
+        {
+            self.current = next.to_be_bytes();
+            self.position = 0;
+            self.rest = rest;
+        }
+    }
+}
+
+impl Buf for VersionListBytes<'_> {
+    fn remaining(&self) -> usize {
+        VERSION_LEN - self.position + self.rest.len() * VERSION_LEN
+    }
+
+    fn chunk(&self) -> &[u8] {
+        &self.current[self.position..]
+    }
+
+    fn advance(&mut self, mut cnt: usize) {
+        assert!(cnt <= self.remaining(), "advanced past the version list");
+        while cnt > 0 {
+            let step = cnt.min(VERSION_LEN - self.position);
+            self.position += step;
+            cnt -= step;
+            self.next_version();
+        }
     }
 }
