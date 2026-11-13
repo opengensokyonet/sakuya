@@ -24,6 +24,7 @@ use sakuya_connection::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf},
     component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
+    connection_id::DestinationConnectionIdStrategy as _,
     dispatch::{DispatchFacts, FrameDispatch, FrameSetDispatch},
     driver::ConnectionDriver,
     error::ConnectionErrorsOf,
@@ -309,6 +310,8 @@ impl v1::Choices for ClientMine {
     type Receiver = TestReceiver;
     type SendStrategy<I: sakuya_connection::send_strategy::SendStrategyTypes> =
         sakuya_connection::send_strategy::ranked::RankedSendStrategy<I>;
+    type DestinationConnectionIds = common::TestDestinationConnectionIds;
+    type ResetTokenRegistry = common::TestResetTokenRegistry;
 }
 
 /// The choices of a server whose recovery factory logs the other link
@@ -331,6 +334,8 @@ impl v1::Choices for SpyMine {
     type Receiver = TestReceiver;
     type SendStrategy<I: sakuya_connection::send_strategy::SendStrategyTypes> =
         sakuya_connection::send_strategy::ranked::RankedSendStrategy<I>;
+    type DestinationConnectionIds = common::TestDestinationConnectionIds;
+    type ResetTokenRegistry = common::TestResetTokenRegistry;
 }
 
 /// A recovery factory that makes what sakuya's makes and logs, when it
@@ -815,6 +820,9 @@ mod probe {
         /// Log the credit of the anti-amplification limit of the logical
         /// link, as if its address were not validated.
         InspectCredit(LinkId<(), ()>),
+        /// Log the connection IDs the destination connection ID strategy
+        /// offers for the link path over the logical link.
+        InspectOffer(LinkId<(), ()>),
     }
 
     /// In a logical path: does its steps at their instants.
@@ -835,7 +843,7 @@ mod probe {
     packet_feeder!(Mine);
     packet_feeder!(ClientMine);
     packet_feeder!(SpyMine);
-    impl<T, L, I, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ic, Icr, Ip, Ian>
+    impl<T, L, I, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ic, Icr, Ip, Ian, Icid>
         DataComponent<
             T,
             L,
@@ -843,7 +851,7 @@ mod probe {
             (
                 I,
                 (Ii, Ih, Io),
-                (Ij, Im, Ia, It, Iu, Ikp),
+                (Ij, Im, Ia, It, Iu, Ikp, Icid),
                 (Ir, Ie, Ik, Hd),
                 (Ic, Icr),
                 (Ip, Ian),
@@ -871,6 +879,7 @@ mod probe {
             + GetAt<IdleTimeout<Duration>, It>
             + GetAt<AeadUsage, Iu>
             + GetAt<KeyPhaseNumbers, Ikp>
+            + GetAt<v1::connection_ids::ConnectionIdsOf<T>, Icid>
             + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
             + GetAt<CryptoReceiver<FragmentedCryptoReceiveBuffer>, Icr>
             + GetAt<LogicalPathInput<TestLink, T::Receiver>, Ip>,
@@ -914,6 +923,7 @@ mod probe {
                         Ie,
                         Ik,
                         Hd,
+                        Icid,
                     >(&mut lineage, others, packet);
                     log(describe::<L, Ie>(outcome));
                 }
@@ -981,6 +991,15 @@ mod probe {
                         .link_entry::<HList![AntiAmplification], Ian>(&link)
                         .map(|hlist_pat![limit]| limit.credit(AddressValidation::NotValidated));
                     log(format!("credit {credit:?}"));
+                }
+                PacketStep::InspectOffer(link) => {
+                    let offered: Vec<_> = lineage
+                        .get_mut::<v1::connection_ids::ConnectionIdsOf<T>, Icid>()
+                        .destination_mut()
+                        .offer(&link)
+                        .map(|offered| (offered.sequence, offered.id.as_bytes().to_vec()))
+                        .collect();
+                    log(format!("offered {offered:?}"));
                 }
                 PacketStep::Inspect => {
                     let mut read = Vec::new();
@@ -1647,7 +1666,13 @@ const CLIENT_DCID: [u8; 8] = [0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
 /// `validation`.
 fn args<T>(validation: AddressValidation) -> v1::ConnectionArgs<T, Parts>
 where
-    T: v1::Choices<Crypto = RingBackend, Link = TestLink, Receiver = TestReceiver>,
+    T: v1::Choices<
+            Crypto = RingBackend,
+            Link = TestLink,
+            Receiver = TestReceiver,
+            DestinationConnectionIds = common::TestDestinationConnectionIds,
+            ResetTokenRegistry = common::TestResetTokenRegistry,
+        >,
     T::Side: SideCapacities,
     T::Recovery<LinkId<(), ()>>: RecoveryFactory<TestLink, Config = NewRenoRecoveryFactoryConfig>,
 {
@@ -1669,6 +1694,9 @@ where
         max_datagrams_per_poll: NonZeroUsize::new(MAX_PER_POLL.with(Cell::get))
             .expect("the tests handle at least one input per poll"),
         max_held_inputs: MAX_HELD.with(Cell::get),
+        destination_connection_ids:
+            sakuya_connection::connection_id::sequence_map::SequenceMapDestinationConnectionIdStrategyConfig::new(8),
+        reset_token_registry: sakuya_datagram_routing::route::reset::StatelessResetTokens::new(),
     }
 }
 
@@ -2421,11 +2449,37 @@ fn long_packet_with(
     number: u64,
     payload: &[u8],
 ) -> BytesMut {
+    long_packet_from(first, &[], token, keys, number, payload)
+}
+
+/// An Initial packet of the client with the Source Connection ID `scid`,
+/// numbered `number` and carrying `payload`.
+fn initial_from(scid: &[u8], number: u64, payload: &[u8]) -> BytesMut {
+    long_packet_from(
+        first_byte(INITIAL),
+        scid,
+        &[],
+        &client_keys(),
+        number,
+        payload,
+    )
+}
+
+/// As [`long_packet_with`], with the Source Connection ID `scid`.
+fn long_packet_from(
+    first: u8,
+    scid: &[u8],
+    token: &[u8],
+    keys: &DirectionKeys<RingBackend>,
+    number: u64,
+    payload: &[u8],
+) -> BytesMut {
     let mut packet = vec![first];
     packet.extend_from_slice(&1u32.to_be_bytes());
     packet.push(8);
     packet.extend_from_slice(&CLIENT_DCID);
-    packet.push(0);
+    packet.push(u8::try_from(scid.len()).unwrap());
+    packet.extend_from_slice(scid);
     if (first >> 4) & 0b11 == INITIAL {
         packet.push(u8::try_from(token.len()).unwrap());
         packet.extend_from_slice(token);
@@ -4315,4 +4369,165 @@ fn the_planner_is_told_what_its_link_path_can_send_when_the_credit_grows() {
     // nothing was sent
     assert_eq!(limits.congestion_window_left, 12000);
     assert_eq!(limits.pacing_allowance, 0);
+}
+
+/// A NEW_CONNECTION_ID frame (RFC 9000 §19.15) numbered `sequence`, with
+/// Retire Prior To 0, an 8-byte connection ID and a token made from
+/// `sequence`.
+fn new_connection_id(sequence: u8) -> Vec<u8> {
+    let mut frame = vec![0x18, sequence, 0, 8];
+    frame.extend_from_slice(&[sequence + 0x10; 8]);
+    frame.extend_from_slice(&[sequence + 0x80; 16]);
+    frame
+}
+
+#[test]
+fn a_server_sends_with_the_source_connection_id_of_the_first_initial_packet_that_opens() {
+    use probe::PacketStep::{InspectOffer, Receive};
+    reset();
+    let first = link();
+    let mut changed = initial_from(&[0xbb; 8], 1, &ping());
+    // the tag no longer authenticates
+    let len = changed.len();
+    changed[len - 1] ^= 1;
+    feed_packets([
+        (ms(4), InspectOffer(first.clone())),
+        (ms(5), Receive(received(changed, &first, ms(5)))),
+        (ms(6), InspectOffer(first.clone())),
+        (
+            ms(7),
+            Receive(received(
+                initial_from(&[0xaa; 8], 2, &ping()),
+                &first,
+                ms(7),
+            )),
+        ),
+        (
+            ms(8),
+            Receive(received(
+                initial_from(&[0xcc; 8], 3, &ping()),
+                &first,
+                ms(8),
+            )),
+        ),
+        (ms(9), InspectOffer(first.clone())),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first);
+    take_log();
+    assert_eq!(
+        run(&mut connection, 4..=9),
+        [
+            // nothing to send with before the handshake connection ID
+            "offered []".to_owned(),
+            "dropped: payload not opened".to_owned(),
+            "offered []".to_owned(),
+            "processed: highest numbered true, non-probing true".to_owned(),
+            "processed: highest numbered true, non-probing true".to_owned(),
+            format!("offered [(0, {:?})]", [0xaa; 8]),
+        ]
+    );
+}
+
+#[test]
+fn a_new_connection_id_frame_adds_a_connection_id_to_offer() {
+    use probe::PacketStep::{InspectOffer, InstallOneRttKeys, Receive};
+    reset();
+    let first = link();
+    feed_packets([
+        (
+            ms(5),
+            Receive(received(
+                initial_from(&[0xaa; 8], 0, &ping()),
+                &first,
+                ms(5),
+            )),
+        ),
+        (ms(6), InstallOneRttKeys),
+        (
+            ms(7),
+            Receive(received(
+                one_rtt_packet_of(0, 0, &new_connection_id(1)),
+                &first,
+                ms(7),
+            )),
+        ),
+        (ms(8), InspectOffer(first.clone())),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first);
+    take_log();
+    assert_eq!(
+        run(&mut connection, 5..=8),
+        [
+            "processed: highest numbered true, non-probing true".to_owned(),
+            // NEW_CONNECTION_ID is a probing frame (RFC 9000 §9.1)
+            "processed: highest numbered true, non-probing false".to_owned(),
+            format!("offered [(0, {:?}), (1, {:?})]", [0xaa; 8], [0x11; 8]),
+        ]
+    );
+}
+
+#[test]
+fn a_new_connection_id_frame_past_the_limit_is_a_connection_error() {
+    use probe::PacketStep::{InstallOneRttKeys, Receive};
+    reset();
+    let first = link();
+    feed_packets([
+        (
+            ms(5),
+            Receive(received(
+                initial_from(&[0xaa; 8], 0, &ping()),
+                &first,
+                ms(5),
+            )),
+        ),
+        (ms(6), InstallOneRttKeys),
+        // the limit this side sends is 2, the default: the handshake
+        // connection ID and one more
+        (
+            ms(7),
+            Receive(received(
+                one_rtt_packet_of(0, 0, &[new_connection_id(1), new_connection_id(2)].concat()),
+                &first,
+                ms(7),
+            )),
+        ),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first);
+    take_log();
+    let lines = run(&mut connection, 5..=7);
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(
+        lines[1].starts_with("error: NewConnectionId { source: ActiveLimitExceeded"),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn a_new_connection_id_frame_to_a_zero_length_handshake_connection_id_is_a_connection_error() {
+    use probe::PacketStep::{InstallOneRttKeys, Receive};
+    reset();
+    let first = link();
+    feed_packets([
+        (
+            ms(5),
+            Receive(received(long_packet(INITIAL, 0, &ping()), &first, ms(5))),
+        ),
+        (ms(6), InstallOneRttKeys),
+        (
+            ms(7),
+            Receive(received(
+                one_rtt_packet_of(0, 0, &new_connection_id(1)),
+                &first,
+                ms(7),
+            )),
+        ),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first);
+    take_log();
+    let lines = run(&mut connection, 5..=7);
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert!(
+        lines[1].starts_with("error: NewConnectionId { source: ZeroLengthInUse"),
+        "{lines:?}"
+    );
 }

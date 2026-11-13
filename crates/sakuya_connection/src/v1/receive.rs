@@ -23,7 +23,10 @@
 //!    one that fails authentication counts toward the integrity limit of
 //!    its AEAD, past which the connection ends (§6.6). A 1-RTT packet is
 //!    opened once, with the one receiving generation its Key Phase and
-//!    packet number select, as [`key_phase`](super::key_phase) says.
+//!    packet number select, as [`key_phase`](super::key_phase) says. The
+//!    first Initial packet a server opens tells the logical path's
+//!    destination connection ID strategy the client's Source Connection
+//!    ID, which the server sends with (RFC 9000 §7.2).
 //! 4. Reserved bits set once both layers are removed end the connection
 //!    (RFC 9000 §17.2, §17.3.1); a packet number already processed is
 //!    dropped (§12.3). A 1-RTT packet that is not dropped notes its number
@@ -81,6 +84,7 @@ use sakuya_wire::{
 use super::{
     Choices, Side,
     aead_usage::AeadUsage,
+    connection_ids::{ConnectionIdsOf, ResetTokenRegistrarOf},
     dispatch::permitted,
     error::ConnectionError,
     idle::IdleTimeout,
@@ -91,7 +95,7 @@ use super::{
 };
 use crate::{
     call::CallBundle,
-    clock::InstantOf,
+    clock::{InstantOf, LinkIdOf},
     component::LineageOf,
     dispatch::{DispatchFacts, FrameSetDispatch, PacketFacts},
     error::{ConnectionErrorOf, ConnectionErrorsOf},
@@ -257,7 +261,7 @@ pub enum DropReason {
 /// reserved bits set, a frame that does not read
 /// or is not permitted, a failure of the part that handles a frame, or no
 /// frames at all. The packet is then not recorded.
-pub fn receive_packet<'v, T, L, B, P, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd>(
+pub fn receive_packet<'v, T, L, B, P, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Icid>(
     lineage: &mut LineageOf<'v, T, L, LogicalPath>,
     others: &mut OtherNodes<'v, T, L, B>,
     packet: ReceivedPacket<P, T::Link>,
@@ -277,7 +281,8 @@ where
         + GetAt<AckObligationsOf<T>, Ia>
         + GetAt<IdleTimeout<InstantOf<T>>, It>
         + GetAt<AeadUsage, Iu>
-        + GetAt<KeyPhaseNumbers, Ikp>,
+        + GetAt<KeyPhaseNumbers, Ikp>
+        + GetAt<ConnectionIdsOf<T>, Icid>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<LinkPathRole<InstantOf<T>>, Ir>,
@@ -294,7 +299,7 @@ where
     let level = packet.packet().level();
     let space = space_of(level);
     let (packet, arrival) = packet.into_parts();
-    let (opened, bytes, one_rtt) = {
+    let (opened, bytes, one_rtt, initial_scid) = {
         let keys = match receive_keys::<T, L, Ii, Ih, Io>(lineage, level) {
             LevelReceiveKeys::Ready(keys) => keys,
             // a closing link path gets no more keys than it has
@@ -320,6 +325,12 @@ where
         let Some(pn_offset) = packet_number_offset(&packet) else {
             return Ok(PacketOutcome::Dropped(DropReason::NotProtected));
         };
+        let initial_scid = match &packet {
+            ProtectedPacket::Initial(long, _) => Some(*long.scid()),
+            ProtectedPacket::ZeroRtt(..)
+            | ProtectedPacket::Handshake(..)
+            | ProtectedPacket::OneRtt(..) => None,
+        };
         let mut bytes = packet.into_bytes();
         let (opening, aead) = match keys {
             ReceiveKeys::Level(keys) => (
@@ -339,7 +350,7 @@ where
             }
         };
         match opening {
-            Ok((opened, one_rtt)) => (opened, bytes, one_rtt),
+            Ok((opened, one_rtt)) => (opened, bytes, one_rtt, initial_scid),
             Err(reason) => {
                 if fails_authentication(&reason) {
                     lineage
@@ -353,6 +364,15 @@ where
             }
         }
     };
+    // the first Initial packet that opens sets the connection ID a server
+    // sends with (RFC 9000 §7.2)
+    if let Some(scid) = initial_scid
+        && <T::Side as Side>::ROLE == Role::Server
+    {
+        lineage
+            .get_mut::<ConnectionIdsOf<T>, Icid>()
+            .handshake_connection_id::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>(scid);
+    }
     let payload = bytes.into().slice(opened.payload);
     let at = arrival.at();
     let NodeKey::LogicalPath(path) = others.here() else {

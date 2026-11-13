@@ -47,7 +47,7 @@ fn cid(sequence: u8) -> ConnectionId {
 
 /// A strategy with the connection IDs numbered 0 and 1.
 fn strategy() -> Strategy {
-    let mut strategy = Strategy::new(
+    let mut strategy = crate::connection_id::sequence_map::started(
         cid(0),
         Some(StatelessResetToken::new([1; 16])),
         ActiveConnectionIdLimit::new(VarInt::from(4u8)).unwrap(),

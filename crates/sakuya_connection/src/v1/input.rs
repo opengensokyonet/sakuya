@@ -104,6 +104,7 @@ use super::{
     aead_usage::AeadUsage,
     amplification::AntiAmplification,
     close::{CloseReasonRecord, LocalCloseCause},
+    connection_ids::ConnectionIdsOf,
     error::ConnectionError,
     idle::IdleTimeout,
     key_phase::KeyPhaseNumbers,
@@ -447,21 +448,21 @@ pub trait LogicalPathReceivingCapability: ReceiverFamily {
 /// the record of why the connection closed in the logical path's lineage;
 /// those of [`receive_packet`]; and `Ian` of
 /// the anti-amplification limit in the entry of a logical link.
-type Positions<Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian> = (
+type Positions<Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian, Icid> = (
     (Ip, Ic),
-    (Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp),
+    (Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Icid),
     (Ir, Ie, Ik, Hd),
     Ian,
 );
 
-impl<T, L, K, B, Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian>
+impl<T, L, K, B, Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian, Icid>
     LogicalPathReceivingCapability
     for NodeCallFamily<
         T,
         L,
         LogicalPath,
         K,
-        Positions<Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian>,
+        Positions<Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian, Icid>,
         B,
     >
 where
@@ -481,7 +482,8 @@ where
         + GetAt<AckObligationsOf<T>, Ia>
         + GetAt<IdleTimeout<InstantOf<T>>, It>
         + GetAt<AeadUsage, Iu>
-        + GetAt<KeyPhaseNumbers, Ikp>,
+        + GetAt<KeyPhaseNumbers, Ikp>
+        + GetAt<ConnectionIdsOf<T>, Icid>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<LinkPathRole<InstantOf<T>>, Ir>,
@@ -535,6 +537,7 @@ where
                             Ie,
                             Ik,
                             Hd,
+                            Icid,
                         >(lineage, others, packet);
                         continue;
                     }
@@ -563,6 +566,7 @@ where
                     Ik,
                     Hd,
                     Ian,
+                    Icid,
                 >(lineage, others, datagram, dcid_len);
                 continue;
             }
@@ -641,7 +645,28 @@ where
     {
         let NodeLoan { lineage, others } = view.get_mut();
         let (datagram, route) = delivery.consume();
-        receive_owned::<T, L, B, Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian>(
+        receive_owned::<
+            T,
+            L,
+            B,
+            Ip,
+            Ic,
+            Ii,
+            Ih,
+            Io,
+            Ij,
+            Im,
+            Ia,
+            It,
+            Iu,
+            Ikp,
+            Ir,
+            Ie,
+            Ik,
+            Hd,
+            Ian,
+            Icid,
+        >(
             lineage,
             others,
             datagram.into_inner(),
@@ -656,7 +681,29 @@ where
 /// being `dcid_len` long, and receive each, until one causes a connection
 /// error.
 #[allow(clippy::type_complexity)] // the positions of what it takes
-fn receive_owned<'v, T, L, B, Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian>(
+fn receive_owned<
+    'v,
+    T,
+    L,
+    B,
+    Ip,
+    Ic,
+    Ii,
+    Ih,
+    Io,
+    Ij,
+    Im,
+    Ia,
+    It,
+    Iu,
+    Ikp,
+    Ir,
+    Ie,
+    Ik,
+    Hd,
+    Ian,
+    Icid,
+>(
     lineage: &mut LineageOf<'v, T, L, LogicalPath>,
     others: &mut OtherNodes<'v, T, L, B>,
     datagram: DatagramOf<T::Link>,
@@ -678,7 +725,8 @@ fn receive_owned<'v, T, L, B, Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, I
         + GetAt<AckObligationsOf<T>, Ia>
         + GetAt<IdleTimeout<InstantOf<T>>, It>
         + GetAt<AeadUsage, Iu>
-        + GetAt<KeyPhaseNumbers, Ikp>,
+        + GetAt<KeyPhaseNumbers, Ikp>
+        + GetAt<ConnectionIdsOf<T>, Icid>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<LinkPathRole<InstantOf<T>>, Ir>,
@@ -708,10 +756,27 @@ fn receive_owned<'v, T, L, B, Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, I
             Err(IntoPacketsError::UnreadableBoundary { .. }) => break,
         };
         let packet = ReceivedPacket::new(packet, arrival.clone());
-        let next =
-            receive_one::<T, L, B, Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd>(
-                lineage, others, packet,
-            );
+        let next = receive_one::<
+            T,
+            L,
+            B,
+            Ip,
+            Ic,
+            Ii,
+            Ih,
+            Io,
+            Ij,
+            Im,
+            Ia,
+            It,
+            Iu,
+            Ikp,
+            Ir,
+            Ie,
+            Ik,
+            Hd,
+            Icid,
+        >(lineage, others, packet);
         if next.is_break() {
             break;
         }
@@ -723,7 +788,7 @@ fn receive_owned<'v, T, L, B, Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, I
 /// why the connection closed, use up this poll's inputs and break, so that
 /// what follows waits until the link paths have entered closing.
 #[allow(clippy::type_complexity)] // the positions of what it takes
-fn receive_one<'v, T, L, B, Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd>(
+fn receive_one<'v, T, L, B, Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Icid>(
     lineage: &mut LineageOf<'v, T, L, LogicalPath>,
     others: &mut OtherNodes<'v, T, L, B>,
     packet: ReceivedPacket<<T::Link as Link>::Payload, T::Link>,
@@ -745,7 +810,8 @@ where
         + GetAt<AckObligationsOf<T>, Ia>
         + GetAt<IdleTimeout<InstantOf<T>>, It>
         + GetAt<AeadUsage, Iu>
-        + GetAt<KeyPhaseNumbers, Ikp>,
+        + GetAt<KeyPhaseNumbers, Ikp>
+        + GetAt<ConnectionIdsOf<T>, Icid>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<LinkPathRole<InstantOf<T>>, Ir>,
@@ -768,6 +834,7 @@ where
         Ie,
         Ik,
         Hd,
+        Icid,
     >(lineage, others, packet);
     match outcome {
         // what a processed packet tells of migration is acted on with
@@ -878,12 +945,12 @@ pub async fn logical_path_receiving<W: LogicalPathReceivingCapability>(
 #[derive(Debug)]
 pub struct LogicalPathReceivingKind;
 
-impl<T, L, Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian>
+impl<T, L, Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian, Icid>
     CallKind<
         T,
         L,
         LogicalPath,
-        Positions<Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian>,
+        Positions<Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian, Icid>,
     > for LogicalPathReceivingKind
 where
     T: Choices,
@@ -901,14 +968,15 @@ where
         + GetAt<AckObligationsOf<T>, Ia>
         + GetAt<IdleTimeout<InstantOf<T>>, It>
         + GetAt<AeadUsage, Iu>
-        + GetAt<KeyPhaseNumbers, Ikp>,
+        + GetAt<KeyPhaseNumbers, Ikp>
+        + GetAt<ConnectionIdsOf<T>, Icid>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<LinkPathRole<InstantOf<T>>, Ir>,
     for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![AntiAmplification], Ian>,
-    Positions<Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian>: 'static,
+    Positions<Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian, Icid>: 'static,
 {
     type Call<B: CallBundle> = LentCall<
         NodeCallFamily<
@@ -916,7 +984,7 @@ where
             L,
             LogicalPath,
             LogicalPathReceivingKind,
-            Positions<Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian>,
+            Positions<Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian, Icid>,
             B,
         >,
         LogicalPathReceiving,

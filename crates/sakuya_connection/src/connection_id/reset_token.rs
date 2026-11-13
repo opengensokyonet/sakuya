@@ -22,6 +22,30 @@ pub trait ResetTokenRegistrar {
     fn register(&mut self, token: StatelessResetToken) -> Self::Registration;
 }
 
+/// What a connection holds to register reset tokens: it makes the
+/// [`ResetTokenRegistrar`] of each link path, for the link's peer and the
+/// target a detected reset resets.
+pub trait ResetTokenRegistry<Peer, Target> {
+    /// The registrar of one link path.
+    type Registrar: ResetTokenRegistrar;
+
+    /// The registrar of a link path whose link's peer is `peer`, for
+    /// resets of `target`.
+    fn registrar(&self, peer: &Peer, target: &Target) -> Self::Registrar;
+}
+
+/// Routing's table of tokens, shared with the router that detects resets:
+/// each link path's registrar registers in it for its peer.
+impl<Peer: Clone + Eq + Hash, Target: Clone> ResetTokenRegistry<Peer, Target>
+    for Arc<StatelessResetTokens<Peer, Target>>
+{
+    type Registrar = PeerGroupedResetTokenRegistrar<Peer, Target>;
+
+    fn registrar(&self, peer: &Peer, target: &Target) -> Self::Registrar {
+        PeerGroupedResetTokenRegistrar::new(Arc::clone(self), peer.clone(), target.clone())
+    }
+}
+
 /// Registers tokens in routing's [`StatelessResetTokens`], which groups them
 /// by the peer they apply to, for one peer and one target.
 ///

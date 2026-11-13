@@ -33,6 +33,7 @@ pub mod aead_usage;
 pub mod amplification;
 pub mod close;
 pub mod confirmation;
+pub mod connection_ids;
 pub mod crypto;
 pub mod datagram_batch;
 pub mod dispatch;
@@ -55,6 +56,7 @@ pub mod role;
 pub mod send;
 pub mod send_planning;
 pub mod spaces;
+pub mod stateless_reset;
 
 #[cfg(test)]
 mod tests;
@@ -79,7 +81,7 @@ use sakuya_wire::{
 
 use crate::{
     call::CallBundle,
-    clock::{CheckedAdd, ConnectionChoices, InstantOf},
+    clock::{CheckedAdd, ConnectionChoices, InstantOf, LinkIdOf},
     component::{
         ArgsOf, Build, DataComponent, LineageOf, ParentsOf, PassiveDataComponent, ReadSet,
         RequestOf,
@@ -97,11 +99,18 @@ use crate::{
     take::{GetAt, ReadEach},
 };
 
+use std::sync::Arc;
+
 use self::{
     aead_usage::AeadUsage,
     amplification::{AddressValidation, AntiAmplification, AntiAmplificationFactor},
     close::{ApplicationClose, CloseReasonRecord, LocalCloseCause},
     confirmation::HandshakeConfirmation,
+    connection_ids::{
+        ConnectionIdsOf, ConnectionResetTokenRegistry, DestinationConnectionIdConfig,
+        DestinationConnectionIdConfigOf, LinkPathResetTokenRegistrar, PeerOf,
+        ResetTokenRegistrarOf,
+    },
     crypto::{CryptoReceiveBuffer, CryptoReceiveCapacities, CryptoReceiver},
     first_flight::{FirstFlight, FirstFlightStart},
     idle::IdleTimeout,
@@ -126,7 +135,9 @@ use self::{
         ProbePingTicketOf, ProbePingTickets, SendStrategyCore, SendStrategyOf,
     },
     spaces::{AckObligationsOf, DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
+    stateless_reset::StatelessResetSignal,
 };
+use crate::connection_id::{DestinationConnectionIdStrategy, reset_token::ResetTokenRegistry};
 use sakuya_recovery::{
     ack_obligation::AckObligation,
     factory::{LendCongestion, RecoveryFactory},
@@ -200,6 +211,21 @@ pub trait Choices: ConnectionChoices {
     /// The core of the send strategy, for the types `I` the composition
     /// gives it; it starts as its default makes it.
     type SendStrategy<I: SendStrategyTypes>: Default;
+    /// What decides which of the peer's connection IDs this side sends
+    /// with, one for each logical path; it registers reset tokens through
+    /// the registrars of [`ResetTokenRegistry`](Self::ResetTokenRegistry).
+    type DestinationConnectionIds: DestinationConnectionIdStrategy<
+            LinkIdOf<Self>,
+            InstantOf<Self>,
+            ResetTokenRegistrarOf<Self>,
+        > + 'static;
+    /// What the connection holds to register the reset tokens of the
+    /// peer's connection IDs for detection: it makes the registrar of each
+    /// link path, for its link's peer and its logical path's
+    /// [`StatelessResetSignal`].
+    type ResetTokenRegistry: ResetTokenRegistry<PeerOf<Self>, Arc<StatelessResetSignal>, Registrar: 'static>
+        + Clone
+        + 'static;
 }
 
 /// This endpoint's reason for closing a connection of the choices `T` and
@@ -316,6 +342,12 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
     /// How many inputs a logical path holds at most until the keys to
     /// process them come.
     pub max_held_inputs: usize,
+    /// The configuration each logical path's destination connection ID
+    /// strategy is made from.
+    pub destination_connection_ids: DestinationConnectionIdConfigOf<T>,
+    /// What registers the reset tokens of the peer's connection IDs, as the
+    /// endpoint shares it with the router that detects stateless resets.
+    pub reset_token_registry: T::ResetTokenRegistry,
 }
 
 impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + ConnectionErrorsOf>
@@ -343,6 +375,8 @@ where
         LogicalPathReceivingLimits,
         FirstFlightStart<T>,
         SendStrategyCore<SendStrategyOf<T, L>>,
+        DestinationConnectionIdConfig<DestinationConnectionIdConfigOf<T>>,
+        ConnectionResetTokenRegistry<T::ResetTokenRegistry>,
     ];
     type Calls = HNil;
     type Args = ConnectionArgs<T, L>;
@@ -369,11 +403,13 @@ where
         LogicalPathInput<T::Link, T::Receiver>,
         KeyPhaseNumbers,
         AckIntentTickets<AckIntentTicketOf<T, L>>,
+        Arc<StatelessResetSignal>,
+        ConnectionIdsOf<T>,
     ];
     type Calls = HList![LogicalPathReceivingKind];
 }
-/// The planner comes before the role: it is built before the role takes
-/// the mark of the connection's first link path.
+/// The planner and the registrar come before the role: they are built
+/// before the role takes the mark of the connection's first link path.
 impl<T: Choices, L> LayerShare<T, L, layer::LinkPath> for Part
 where
     SendTypes<T, L>: SendStrategyTypes,
@@ -381,6 +417,7 @@ where
 {
     type Data = HList![
         LinkPathPlanner<LinkPathSendPlannerOf<T, L>>,
+        LinkPathResetTokenRegistrar<ResetTokenRegistrarOf<T>>,
         LinkPathRole<InstantOf<T>>
     ];
     type Calls = HNil;

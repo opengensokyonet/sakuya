@@ -15,6 +15,7 @@
 //! | CRYPTO | [`CryptoReceiver`], at the level of the packet |
 //! | HANDSHAKE_DONE | [`HandshakeConfirmation`]: the handshake is confirmed |
 //! | CONNECTION_CLOSE | the [`CloseReasonRecord`], with the peer's close; every link path drains |
+//! | NEW_CONNECTION_ID | the destination connection ID strategy of the logical path ([`ConnectionIds`](super::connection_ids::ConnectionIds)) |
 //! | ACK | the send journals of its space, the recovery layers of the logical path's link paths, and the parts the summaries of the packets settled go back to ([`ack`](super::ack)) |
 //!
 //! The components of the other frames are not in the connection yet; such a
@@ -56,6 +57,7 @@ use super::{
     ack::{AckReads, AckRecoveryTakes, receive_ack},
     close::CloseReasonRecord,
     confirmation::HandshakeConfirmation,
+    connection_ids::ConnectionIdsOf,
     crypto::CryptoReceiver,
     current_probe_timeout,
     error::{self, ConnectionError},
@@ -68,6 +70,7 @@ use crate::{
     call::CallBundle,
     clock::{CheckedAdd, InstantOf},
     component::LineageOf,
+    connection_id::DestinationConnectionIdStrategy,
     dispatch::{DispatchFacts, FrameDispatch},
     error::ConnectionErrorsOf,
     feedback::{FeedbackSummariesOf, PartsSendFeedback},
@@ -170,6 +173,7 @@ impl<
     Ic,
     Ir,
     Ih,
+    Icid,
     Iv,
     Ima,
     Irt,
@@ -192,7 +196,7 @@ impl<
         T,
         L,
         (
-            (Ic, Ir, Ih),
+            (Ic, Ir, Ih, Icid),
             (Iv, Ima, Irt),
             Il,
             ((Ij, In, If, Ird), (Ide, Ipp), (Ile, Ik), (Jx, Jr), Hf),
@@ -228,6 +232,7 @@ where
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out:
         Selector<&'a CongestionPartOf<T, L>, Jx> + Selector<&'a RttOf<T, L>, Jr>,
     for<'v> <L as LineageLists<'v, T>>::LogicalPath: GetAt<CryptoReceiver<T::CryptoReceiveBuffer>, Ic>
+        + GetAt<ConnectionIdsOf<T>, Icid>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
         + GetAt<HandshakeConfirmation, Ih>
         + ReadEach<LinkPathRoleReads<T, L>, Iv>,
@@ -258,6 +263,11 @@ where
                     .receive_frame(level, offset, frame.into_data())
                     .context(error::CryptoSnafu)
             }
+            FrameRun::NewConnectionId(frame) => lineage
+                .get_mut::<ConnectionIdsOf<T>, Icid>()
+                .destination_mut()
+                .on_new_connection_id(&frame)
+                .context(error::NewConnectionIdSnafu),
             FrameRun::HandshakeDone(_) => {
                 *lineage.get_mut::<HandshakeConfirmation, Ih>() = HandshakeConfirmation::Confirmed;
                 Ok(())

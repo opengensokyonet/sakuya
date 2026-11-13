@@ -53,7 +53,11 @@
 //! [RFC 9000 §19.16]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.16
 
 use sakuya_wire::{
-    connection_id::ConnectionId, v1::frame::new_connection_id::NewConnectionIdFrame,
+    connection_id::ConnectionId,
+    v1::{
+        frame::new_connection_id::NewConnectionIdFrame,
+        transport_parameters::integer::ActiveConnectionIdLimit,
+    },
 };
 
 pub mod datagram;
@@ -90,11 +94,33 @@ pub struct OfferedConnectionId {
 ///
 /// The [module documentation](self) lists the contract every implementation
 /// keeps.
-pub trait DestinationConnectionIdStrategy<Id, I, R: ResetTokenRegistrar> {
+pub trait DestinationConnectionIdStrategy<Id, I, R: ResetTokenRegistrar>: Sized {
+    /// The configuration each connection's strategy is made from.
+    type Config: Clone;
+
     /// The connection IDs offered for one datagram.
     type Offer<'a>: Iterator<Item = OfferedConnectionId>
     where
         Self: 'a;
+
+    /// The strategy of a new logical path, made before the connection ID
+    /// the peer chose for the handshake is known: it offers nothing until
+    /// [`on_handshake_connection_id`](Self::on_handshake_connection_id).
+    /// `active_limit` is the `active_connection_id_limit` this side sends.
+    fn new(config: &Self::Config, active_limit: ActiveConnectionIdLimit) -> Self;
+
+    /// The connection ID to send the handshake with is now `id`, numbered
+    /// 0: a server's is the Source Connection ID of the first Initial
+    /// packet it processed from the client ([RFC 9000 §7.2]); a zero-length
+    /// one means the peer issues no other connection ID
+    /// ([RFC 9000 §5.1.1]).
+    ///
+    /// It comes before any NEW_CONNECTION_ID frame. It replaces the
+    /// connection ID numbered 0 and what was bound to it.
+    ///
+    /// [RFC 9000 §5.1.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-5.1.1
+    /// [RFC 9000 §7.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-7.2
+    fn on_handshake_connection_id(&mut self, id: ConnectionId);
 
     /// The connection IDs this side is willing to send with on
     /// `link_path` at this moment, most preferred first.

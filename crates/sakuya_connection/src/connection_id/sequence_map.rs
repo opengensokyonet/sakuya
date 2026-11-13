@@ -63,6 +63,7 @@ pub struct SequenceMapDestinationConnectionIdStrategy<Id, R: ResetTokenRegistrar
     active: BTreeMap<u64, PeerConnectionId<Id, R::Registration>>,
     issuance: Issuance,
     active_limit: ActiveConnectionIdLimit,
+    retirement_limit: usize,
 }
 
 /// How the peer issues connection IDs.
@@ -155,45 +156,35 @@ impl Retirements {
     }
 }
 
-impl<Id, R: ResetTokenRegistrar> SequenceMapDestinationConnectionIdStrategy<Id, R> {
-    /// The strategy of a connection whose peer chose `first` as its
-    /// connection ID during the handshake (sequence number 0), with the
-    /// reset token `first_token` the server gave in its
-    /// `stateless_reset_token` transport parameter, if any.
-    ///
-    /// `active_limit` is the `active_connection_id_limit` this side sent.
+/// The configuration of a [`SequenceMapDestinationConnectionIdStrategy`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SequenceMapDestinationConnectionIdStrategyConfig {
+    retirement_limit: usize,
+}
+
+impl SequenceMapDestinationConnectionIdStrategyConfig {
     /// `retirement_limit` is how many retirements may wait for their
     /// RETIRE_CONNECTION_ID frame to be acknowledged before a
     /// NEW_CONNECTION_ID frame that adds to them is a violation;
-    /// RFC 9000 §5.1.2 recommends at least twice `active_limit`.
-    pub fn new(
-        first: ConnectionId,
-        first_token: Option<StatelessResetToken>,
-        active_limit: ActiveConnectionIdLimit,
-        retirement_limit: usize,
-    ) -> Self {
-        let issuance = if first.is_empty() {
-            Issuance::ZeroLength
-        } else {
-            Issuance::Sequenced(Retirements {
-                retire_prior_to: 0,
-                retired_above: BTreeSet::new(),
-                unacknowledged: BTreeMap::new(),
-                limit: retirement_limit,
-            })
-        };
-        let first = PeerConnectionId {
-            id: first,
-            token: first_token,
-            bindings: Vec::new(),
-        };
+    /// RFC 9000 §5.1.2 recommends at least twice the
+    /// `active_connection_id_limit` this side sends.
+    pub fn new(retirement_limit: usize) -> Self {
+        Self { retirement_limit }
+    }
+}
+
+impl Retirements {
+    fn new(limit: usize) -> Self {
         Self {
-            active: BTreeMap::from([(0, first)]),
-            issuance,
-            active_limit,
+            retire_prior_to: 0,
+            retired_above: BTreeSet::new(),
+            unacknowledged: BTreeMap::new(),
+            limit,
         }
     }
+}
 
+impl<Id, R: ResetTokenRegistrar> SequenceMapDestinationConnectionIdStrategy<Id, R> {
     /// The sequence numbers whose RETIRE_CONNECTION_ID frame waits to be
     /// written, ascending.
     pub fn pending_retirements(&self) -> impl Iterator<Item = u64> + '_ {
@@ -277,10 +268,39 @@ where
     Id: Clone + PartialEq,
     R: ResetTokenRegistrar,
 {
+    type Config = SequenceMapDestinationConnectionIdStrategyConfig;
     type Offer<'a>
         = SequenceMapConnectionIdOffer<'a, Id, R::Registration>
     where
         Self: 'a;
+
+    fn new(config: &Self::Config, active_limit: ActiveConnectionIdLimit) -> Self {
+        Self {
+            active: BTreeMap::new(),
+            issuance: Issuance::Sequenced(Retirements::new(config.retirement_limit)),
+            active_limit,
+            retirement_limit: config.retirement_limit,
+        }
+    }
+
+    fn on_handshake_connection_id(&mut self, id: ConnectionId) {
+        match (&self.issuance, id.is_empty()) {
+            (Issuance::Sequenced(_), true) => self.issuance = Issuance::ZeroLength,
+            (Issuance::ZeroLength, false) => {
+                self.issuance = Issuance::Sequenced(Retirements::new(self.retirement_limit));
+            }
+            _ => {}
+        }
+        // dropping the one replaced drops its bindings and registrations
+        self.active.insert(
+            0,
+            PeerConnectionId {
+                id,
+                token: None,
+                bindings: Vec::new(),
+            },
+        );
+    }
 
     fn offer(&mut self, link_path: &Id) -> Self::Offer<'_> {
         SequenceMapConnectionIdOffer {
@@ -425,6 +445,32 @@ impl<Id, Reg> core::fmt::Debug for SequenceMapConnectionIdOffer<'_, Id, Reg> {
         f.debug_struct("SequenceMapConnectionIdOffer")
             .finish_non_exhaustive()
     }
+}
+
+#[cfg(test)]
+/// A strategy made through the trait, then told the peer's handshake
+/// connection ID `first`; `first_token` is the token a client learns for
+/// it from the server's transport parameters.
+pub(crate) fn started<Id: Clone + PartialEq, R: ResetTokenRegistrar>(
+    first: ConnectionId,
+    first_token: Option<StatelessResetToken>,
+    active_limit: ActiveConnectionIdLimit,
+    retirement_limit: usize,
+) -> SequenceMapDestinationConnectionIdStrategy<Id, R> {
+    let config = SequenceMapDestinationConnectionIdStrategyConfig::new(retirement_limit);
+    let mut strategy =
+        <SequenceMapDestinationConnectionIdStrategy<Id, R> as DestinationConnectionIdStrategy<
+            Id,
+            u64,
+            R,
+        >>::new(&config, active_limit);
+    DestinationConnectionIdStrategy::<Id, u64, R>::on_handshake_connection_id(&mut strategy, first);
+    strategy
+        .active
+        .get_mut(&0)
+        .expect("the handshake connection ID was just given")
+        .token = first_token;
+    strategy
 }
 
 #[cfg(test)]

@@ -5,10 +5,8 @@
 //! Whoever changes a key, the handshake's confirmation, the record of why
 //! the connection closed or a link path's role only changes its own
 //! component; the core and the planners read those components, and the
-//! driver rereads them after a lend that changed one. Each remembers the
-//! events it told the strategy last, so the same event is told once; what
-//! a link path can send is told as its current value at every reread of
-//! its planner, which the strategy takes as no change when it is the same.
+//! driver rereads them after a lend that changed one. Each remembers what
+//! it told the strategy last, so the same fact is told once.
 
 use core::fmt;
 
@@ -225,16 +223,18 @@ where
 // ---- the planners ----
 
 /// The send planner of a link path, in the link path's node, with the
-/// role it was last told.
+/// role and the limits it was last told.
 pub struct LinkPathPlanner<P> {
     planner: P,
     role: LinkPathRoleKind,
+    limits: Option<DatagramLimits>,
 }
 
 impl<P> fmt::Debug for LinkPathPlanner<P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LinkPathPlanner")
             .field("role", &self.role)
+            .field("limits", &self.limits)
             .finish_non_exhaustive()
     }
 }
@@ -287,7 +287,11 @@ where
             .get_mut::<SendStrategyCore<SendStrategyOf<T, L>>, Ic>()
             .strategy_mut()
             .add_link_path(identifier, role);
-        Self { planner, role }
+        Self {
+            planner,
+            role,
+            limits: None,
+        }
     }
 
     fn end<'v, B: CallBundle>(
@@ -344,6 +348,10 @@ where
         debug_assert!(matches!(others.here(), NodeKey::LinkPath(..)));
         let role = lineage.get::<LinkPathRole<InstantOf<T>>, Ir>().kind();
         let limits = read_datagram_limits::<T, L, B, Il, Ipp, Jc, Js, Jm>(&lineage, others);
+        let told = lineage.get::<Self, Ip>();
+        if told.role == role && told.limits == Some(limits) {
+            return None;
+        }
         let (frunk_core::hlist_pat![planner, core], _) = Take::<
             frunk_core::HList![Self, SendStrategyCore<SendStrategyOf<T, L>>],
             It,
@@ -352,9 +360,10 @@ where
             planner.role = role;
             planner.planner.role_changed(core.strategy_mut(), role);
         }
-        // the current value; the strategy takes the same value again as no
-        // change
-        planner.planner.observe(limits);
+        if planner.limits != Some(limits) {
+            planner.limits = Some(limits);
+            planner.planner.observe(limits);
+        }
         None
     }
 }

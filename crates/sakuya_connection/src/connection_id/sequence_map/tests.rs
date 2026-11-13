@@ -63,7 +63,7 @@ fn limit(value: u8) -> ActiveConnectionIdLimit {
 /// `token(0)`, under `active_limit`, tracking `retirement_limit`
 /// retirements.
 fn strategy(active_limit: u8, retirement_limit: usize) -> Strategy {
-    Strategy::new(
+    started(
         cid(0),
         Some(token(0)),
         limit(active_limit),
@@ -182,7 +182,7 @@ fn a_token_is_registered_on_first_use_on_each_link_path() {
 #[test]
 fn a_handshake_connection_id_without_a_token_registers_nothing() {
     let mut registrar = Registrar::default();
-    let mut strategy = Strategy::new(cid(0), None, limit(2), 4);
+    let mut strategy = started(cid(0), None, limit(2), 4);
     used(&mut strategy, &mut registrar, 0, 1);
     assert_eq!(registrar.live(), []);
     assert_eq!(offer(&mut strategy, 1), [0]);
@@ -401,7 +401,7 @@ fn an_ended_link_path_keeps_a_connection_id_another_one_uses() {
 #[test]
 fn a_zero_length_connection_id_serves_every_link_path_and_is_never_retired() {
     let mut registrar = Registrar::default();
-    let mut strategy = Strategy::new(ConnectionId::EMPTY, Some(token(0)), limit(2), 4);
+    let mut strategy = started(ConnectionId::EMPTY, Some(token(0)), limit(2), 4);
     used(&mut strategy, &mut registrar, 0, 1);
     assert_eq!(offer(&mut strategy, 2), [0]);
     assert_eq!(registrar.live(), [token(0)]);
@@ -440,12 +440,7 @@ fn link_ids_identify_link_paths() {
     let first = LinkPath::new::<()>((), (), &binding);
     let second = LinkPath::new::<()>((), (), &binding);
     let mut registrar = Registrar::default();
-    let mut strategy = SequenceMapDestinationConnectionIdStrategy::<LinkPath, Registrar>::new(
-        cid(0),
-        Some(token(0)),
-        limit(2),
-        4,
-    );
+    let mut strategy = started::<LinkPath, Registrar>(cid(0), Some(token(0)), limit(2), 4);
     DestinationConnectionIdStrategy::<LinkPath, Instant, Registrar>::on_used(
         &mut strategy,
         &mut registrar,
@@ -478,7 +473,7 @@ mod contract {
         active_limit: ActiveConnectionIdLimit,
     ) -> Checked {
         let tracked = usize::try_from(active_limit.get().get()).unwrap() * 2;
-        Checked::new(first, first_token, active_limit, tracked)
+        started(first, first_token, active_limit, tracked)
     }
 
     #[test]
@@ -515,4 +510,40 @@ mod contract {
     fn link_path_end_revokes() {
         strategy_checks::check_link_path_end_revokes::<Instant, u8, _, _>(new, [1, 2]);
     }
+}
+
+#[test]
+fn nothing_is_offered_before_the_handshake_connection_id() {
+    let config = SequenceMapDestinationConnectionIdStrategyConfig::new(4);
+    let mut strategy = <Strategy as DestinationConnectionIdStrategy<u8, Instant, Registrar>>::new(
+        &config,
+        limit(2),
+    );
+    assert_eq!(offer(&mut strategy, 1), NONE);
+    DestinationConnectionIdStrategy::<u8, Instant, Registrar>::on_handshake_connection_id(
+        &mut strategy,
+        cid(0),
+    );
+    assert_eq!(offer(&mut strategy, 1), [0]);
+}
+
+#[test]
+fn a_new_handshake_connection_id_replaces_the_one_numbered_0() {
+    let mut registrar = Registrar::default();
+    let mut strategy = strategy(2, 4);
+    used(&mut strategy, &mut registrar, 0, 1);
+    assert_eq!(registrar.live(), [token(0)]);
+
+    DestinationConnectionIdStrategy::<u8, Instant, Registrar>::on_handshake_connection_id(
+        &mut strategy,
+        cid(9),
+    );
+    // what was bound to the one replaced goes with it
+    assert_eq!(registrar.live(), []);
+    let offered: Vec<_> =
+        DestinationConnectionIdStrategy::<u8, Instant, Registrar>::offer(&mut strategy, &1)
+            .map(|offered| (offered.sequence, offered.id))
+            .collect();
+    assert_eq!(offered, [(0, cid(9))]);
+    assert_eq!(pending(&strategy), NONE);
 }

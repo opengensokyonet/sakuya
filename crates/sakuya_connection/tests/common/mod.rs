@@ -113,7 +113,27 @@ impl sakuya_connection::v1::Choices for Mine {
     type Receiver = TestReceiver;
     type SendStrategy<I: sakuya_connection::send_strategy::SendStrategyTypes> =
         strategy::EventLoggingSendStrategy<I>;
+    type DestinationConnectionIds = TestDestinationConnectionIds;
+    type ResetTokenRegistry = TestResetTokenRegistry;
 }
+
+/// The destination connection ID strategy of the tests' compositions.
+pub type TestDestinationConnectionIds =
+    sakuya_connection::connection_id::sequence_map::SequenceMapDestinationConnectionIdStrategy<
+        LinkId<(), ()>,
+        sakuya_connection::connection_id::reset_token::PeerGroupedResetTokenRegistrar<
+            (),
+            std::sync::Arc<sakuya_connection::v1::stateless_reset::StatelessResetSignal>,
+        >,
+    >;
+
+/// What the tests' connections register reset tokens in.
+pub type TestResetTokenRegistry = std::sync::Arc<
+    sakuya_datagram_routing::route::reset::StatelessResetTokens<
+        (),
+        std::sync::Arc<sakuya_connection::v1::stateless_reset::StatelessResetSignal>,
+    >,
+>;
 
 /// The datagram receiver of the tests' logical paths: a delivery queue that
 /// a routing domain of the test posts to.

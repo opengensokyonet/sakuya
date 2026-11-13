@@ -243,6 +243,7 @@ pub struct FirstFlightStart<T: Choices> {
     ack: Option<T::AckObligation>,
     received_bytes: usize,
     first: Option<FirstClientHello>,
+    handshake_connection_id: Option<ConnectionId>,
 }
 
 impl<T: Choices> FirstFlightStart<T> {
@@ -256,7 +257,16 @@ impl<T: Choices> FirstFlightStart<T> {
             ack: None,
             received_bytes: 0,
             first: None,
+            handshake_connection_id: None,
         }
+    }
+
+    /// The Source Connection ID of the first Initial packet read that
+    /// opened, the client's handshake connection ID, the first time it is
+    /// asked for; `None` afterwards, and when the first flight was not read
+    /// or no Initial packet in it opened.
+    pub fn take_handshake_connection_id(&mut self) -> Option<ConnectionId> {
+        self.handshake_connection_id.take()
     }
 
     /// The first datagrams not read yet, in the order they arrived, the
@@ -477,10 +487,17 @@ where
     let Some(pn_offset) = packet_number_offset(&packet) else {
         return Ok(());
     };
+    let ProtectedPacket::Initial(long, _) = &packet else {
+        unreachable!("only Initial packets are received here")
+    };
+    let scid = *long.scid();
     let mut bytes = packet.into_bytes();
     let Ok(opened) = open(&keys.receive, bytes.as_mut(), pn_offset, largest) else {
         return Ok(());
     };
+    // the first Initial packet that opens sets the connection ID the
+    // server sends with (RFC 9000 §7.2)
+    state.start.handshake_connection_id.get_or_insert(scid);
     if reserved_bits_set(level, opened.first_byte) {
         return Err(connection::<L, Ie>(ConnectionError::ReservedBitsSet {
             level,

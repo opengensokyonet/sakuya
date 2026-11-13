@@ -19,6 +19,8 @@ use sakuya_wire::{
 };
 use snafu::Snafu;
 
+use crate::connection_id::violation::NewConnectionIdViolationError;
+
 use super::{
     aead_usage::AeadLimitReachedError, close::TransportClose, crypto::CryptoFrameError,
     dispatch::FrameNotPermittedError,
@@ -101,6 +103,13 @@ pub enum ConnectionError {
         /// than `0x02`.
         ecn_counts: bool,
     },
+    /// A NEW_CONNECTION_ID frame broke a rule the destination connection ID
+    /// strategy checks.
+    #[snafu(display("NEW_CONNECTION_ID frame rejected"))]
+    NewConnectionId {
+        /// The broken rule.
+        source: NewConnectionIdViolationError,
+    },
     /// A frame of a kind this version does not handle yet; the connection
     /// closes with INTERNAL_ERROR. It goes away as the components that
     /// handle each kind are added.
@@ -129,6 +138,7 @@ impl TransportClose for ConnectionError {
             Self::ReadFrameFields { source } => source.transport_error_code(),
             Self::FrameNotPermitted { .. } => TransportErrorCode::PROTOCOL_VIOLATION,
             Self::AeadLimitReached { .. } => TransportErrorCode::AEAD_LIMIT_REACHED,
+            Self::NewConnectionId { source } => source.transport_error_code(),
             Self::Crypto { source } => match source {
                 CryptoFrameError::BufferExceeded { .. } => {
                     TransportErrorCode::CRYPTO_BUFFER_EXCEEDED
@@ -146,6 +156,7 @@ impl TransportClose for ConnectionError {
             Self::ReadFrame { source } => source.frame_type(),
             Self::ReadFrameFields { source } => Some(source.frame_type()),
             Self::Crypto { .. } => Some(VarInt::from_u32(CRYPTO_FRAME_TYPE)),
+            Self::NewConnectionId { .. } => Some(VarInt::from_u32(NEW_CONNECTION_ID_FRAME_TYPE)),
             Self::UnsentPacketAcknowledged { ecn_counts, .. } => {
                 Some(VarInt::from_u32(if *ecn_counts {
                     ACK_ECN_FRAME_TYPE
@@ -170,6 +181,9 @@ impl TransportClose for ConnectionError {
 
 /// The Frame Type of CRYPTO (RFC 9000 §19.6).
 const CRYPTO_FRAME_TYPE: u32 = 0x06;
+
+/// The Frame Type of NEW_CONNECTION_ID (RFC 9000 §19.15).
+const NEW_CONNECTION_ID_FRAME_TYPE: u32 = 0x18;
 
 /// The Frame Type of ACK without ECN counts (RFC 9000 §19.3).
 const ACK_FRAME_TYPE: u32 = 0x02;
