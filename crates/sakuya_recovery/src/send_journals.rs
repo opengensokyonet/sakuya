@@ -59,6 +59,9 @@ pub struct SentPacketRecord<I, S, P> {
     /// Whether it counts in the bytes in flight: it has a frame other than
     /// ACK (RFC 9002 §2).
     pub in_flight: bool,
+    /// Whether it is a PMTU probe: its loss is not a congestion signal
+    /// (RFC 9000 §14.4).
+    pub pmtu_probe: bool,
     /// The summary of each frame, in the order they were written.
     pub summaries: Vec<S>,
 }
@@ -77,11 +80,11 @@ pub trait PacketSendAttempt {
     /// whether it makes the packet count in the bytes in flight.
     fn record_frame(&mut self, summary: Self::Summary, ack_eliciting: bool, in_flight: bool);
 
-    /// The packet was protected; `packet_len` is its size in bytes. With a
-    /// frame written, the packet number is used and the record made, and
-    /// the sealed packet is handed out; without one, `None` and nothing
-    /// happened.
-    fn seal(self, packet_len: usize) -> Option<Self::Sealed>;
+    /// The packet was protected; `packet_len` is its size in bytes, and
+    /// `pmtu_probe` whether it is a PMTU probe. With a frame written, the
+    /// packet number is used and the record made, and the sealed packet is
+    /// handed out; without one, `None` and nothing happened.
+    fn seal(self, packet_len: usize, pmtu_probe: bool) -> Option<Self::Sealed>;
 }
 
 /// The packets one packet number space of a logical path has sent.
@@ -212,7 +215,7 @@ impl<'a, I, S, P> PacketSendAttempt for DequeSendAttempt<'a, I, S, P> {
         self.in_flight |= in_flight;
     }
 
-    fn seal(self, packet_len: usize) -> Option<DequeSealedPacket> {
+    fn seal(self, packet_len: usize, pmtu_probe: bool) -> Option<DequeSealedPacket> {
         if self.summaries.is_empty() {
             return None;
         }
@@ -228,6 +231,7 @@ impl<'a, I, S, P> PacketSendAttempt for DequeSendAttempt<'a, I, S, P> {
             bytes: packet_len,
             ack_eliciting: self.ack_eliciting,
             in_flight: self.in_flight,
+            pmtu_probe,
             summaries: self.summaries,
         });
         Some(DequeSealedPacket { number })

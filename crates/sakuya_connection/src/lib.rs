@@ -40,3 +40,4 @@ pub mod share;
 pub mod take;
 pub mod tree;
 pub mod v1;
+pub mod write;
