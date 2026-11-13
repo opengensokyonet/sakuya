@@ -10,11 +10,11 @@
 //! A batch leaves the bytes in flight. Its packets that count for
 //! congestion go to the lent controller as one congestion event, are
 //! tested for persistent congestion, and are kept to recognize a late
-//! acknowledgment; the others leave without a signal.
-//!
-//! Not here yet: handing the lost packets to the send journals and to the
-//! frame sources, and the ACK obligation's `ack_lost` for a lost packet
-//! with only ACK frames.
+//! acknowledgment; the others leave without a signal. Every packet of the
+//! batch, including one with only ACK frames, then goes back to the send
+//! journals of the logical path, which keep its record as declared lost
+//! for as long, and each summary of its frames goes back to its part as
+//! lost.
 use core::{ops::Add, ops::Sub, time::Duration};
 
 use sakuya_link::Link;
@@ -30,6 +30,7 @@ use sakuya_recovery::{
     pmtu::PmtuPolicy,
     pto::{ProbeCount, probe_timeout},
     rtt::{RttEstimate, RttEstimator},
+    send_journals::SendJournals,
 };
 use sakuya_wire::{
     parameters::ParametersOf,
@@ -47,10 +48,11 @@ use crate::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf},
     component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
+    feedback::{FeedbackSummariesOf, FeedbackSummaryOf, PartsSendFeedback},
     layer,
     others::OtherNodes,
-    share::{FlatRef, LineageLists, LineagePartList, NodeData},
-    take::{GetAt, ReadEach, Take, TakeEach},
+    share::{FlatRef, LineageLists, LineagePartList, LinkPathIdentifierOf, NodeData, PartList},
+    take::{GetAt, Lineage, ReadEach, Take, TakeEach},
 };
 
 use super::{
@@ -63,7 +65,7 @@ use super::{
         RecoveryFactoryOf, RttOf, SentStateOf, lend_congestion, max_datagram_size_in_use,
         peer_max_udp_payload_size,
     },
-    spaces::{DEFAULT_MAX_ACK_DELAY, live_spaces, peer_max_ack_delay},
+    spaces::{DEFAULT_MAX_ACK_DELAY, SendJournalsOf, live_spaces, peer_max_ack_delay},
 };
 
 /// The loss detection states of a link path, one for each packet number
@@ -84,14 +86,32 @@ pub(super) struct LossFacts<I> {
     pub(super) peer_max_ack_delay: Option<Duration>,
     /// The maximum datagram size the link path uses.
     pub(super) max_datagram_size: usize,
+    /// Whether an ACK frame that declares the batch gave the link path a new
+    /// RTT sample; never at an expiry.
+    pub(super) rtt_sampled: bool,
+}
+
+/// What a batch of losses on a link path declared lost in one space.
+#[derive(Debug)]
+pub(super) struct DeclaredBatch<I> {
+    /// The packet numbers, oldest first.
+    pub(super) numbers: Vec<PacketNumber>,
+    /// Until when the packets are kept as declared lost: three probe
+    /// timeouts of the space, without backoff, from the instant they were
+    /// declared lost.
+    pub(super) retain_until: I,
+    /// Whether the batch establishes persistent congestion, which the
+    /// caller tells the RTT estimate of.
+    pub(super) persistent: bool,
 }
 
 /// Handle the batch `lost` of the space `space`, just declared lost on this
 /// link path: its packets leave the bytes in flight; those that count for
 /// congestion are one congestion event of `access`, and are kept as
 /// declared lost for three probe timeouts of the space without backoff.
-/// Returns whether the batch establishes persistent congestion, which the
-/// caller tells the RTT estimate of.
+/// Returns the numbers of the batch's packets, for the send journals, with
+/// until when they are kept, and whether the batch establishes persistent
+/// congestion.
 ///
 /// A loss of the Handshake or Application Data space below every packet
 /// number acknowledged in it, or before any was, does not count for
@@ -104,7 +124,7 @@ pub(super) fn declare_lost<I, S, Ls, A>(
     state: &mut LinkPathCongestionState<I>,
     access: &mut A,
     facts: &LossFacts<I>,
-) -> bool
+) -> DeclaredBatch<I>
 where
     I: Ord + Copy + Add<Duration, Output = I> + Sub<Output = Duration>,
     Ls: Clone,
@@ -114,9 +134,19 @@ where
         space != PacketNumberSpaceKind::Initial
             && numbers.is_none_or(|n| n.loss_may_ignore_congestion(p.number))
     };
-    // look at the batch before handing it out: what leaves the bytes in
-    // flight, and whether the packets that count establish persistent
-    // congestion
+    let granularity = facts.thresholds.granularity();
+    let pto = probe_timeout(
+        &facts.rtt,
+        granularity,
+        space,
+        facts.peer_max_ack_delay.unwrap_or(DEFAULT_MAX_ACK_DELAY),
+        0,
+    );
+    let retain_until = facts.now + pto.saturating_mul(3);
+    // look at the batch before handing it out: its packet numbers, what
+    // leaves the bytes in flight, and whether the packets that count
+    // establish persistent congestion
+    let numbers = lost.packets().map(|p| p.number).collect();
     let (mut any_ignored, mut any_counted) = (false, false);
     for packet in lost.packets() {
         let Some(charge) = &packet.in_flight else {
@@ -129,7 +159,6 @@ where
             any_counted = true;
         }
     }
-    let granularity = facts.thresholds.granularity();
     let persistent = any_counted
         && establishes_persistent_congestion(
             lost.packets()
@@ -146,11 +175,9 @@ where
         now: facts.now,
         bytes_in_flight: state.bytes_in_flight(),
         rtt: facts.rtt,
-        rtt_sampled: false,
+        rtt_sampled: facts.rtt_sampled,
         max_datagram_size: facts.max_datagram_size,
     };
-    // Not here yet: a packet with only ACK frames goes to the ACK
-    // obligation.
     if any_ignored {
         access.on_removed(
             core::iter::from_fn(|| {
@@ -168,7 +195,11 @@ where
         );
     }
     if !any_counted {
-        return false;
+        return DeclaredBatch {
+            numbers,
+            retain_until,
+            persistent: false,
+        };
     }
     let loss = access.on_lost(
         core::iter::from_fn(|| {
@@ -193,15 +224,12 @@ where
     if access.wants_recovery_send() {
         state.grant_probe_permits(ProbeCount::One);
     }
-    let pto = probe_timeout(
-        &facts.rtt,
-        granularity,
-        space,
-        facts.peer_max_ack_delay.unwrap_or(DEFAULT_MAX_ACK_DELAY),
-        0,
-    );
-    lost.finish(loss, facts.now + pto.saturating_mul(3));
-    persistent
+    lost.finish(loss, retain_until);
+    DeclaredBatch {
+        numbers,
+        retain_until,
+        persistent,
+    }
 }
 
 /// Each space whose keys are not discarded starts with nothing sent.
@@ -226,16 +254,15 @@ where
 /// time came declares its packets lost by the time threshold, against the
 /// largest packet number acknowledged in the space, and its losses are one
 /// batch (RFC 9002 §6.1.2, Appendix A.10). The time threshold's batch has
-/// the loss steps only.
-///
-/// Not here yet: handing the lost packets to the send journals and the
-/// frame sources.
-impl<T, L, S, Ls, Id, In, If, Ipp, Ima, It, Jx, Jr>
-    DataComponent<T, L, layer::Recovery, ((Id, In, If), (Ipp, Ima), It, (Jx, Jr))>
+/// the loss steps only; then its packets go back to the send journals of
+/// the logical path, which drop what is past its retention first, and the
+/// summaries of their frames go back to their parts as lost.
+impl<T, L, S, Ls, Id, In, If, Ipp, Ima, It, Jx, Jr, Hf>
+    DataComponent<T, L, layer::Recovery, ((Id, In, If), (Ipp, Ima), It, (Jx, Jr), Hf)>
     for PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>
 where
     T: Choices,
-    L: LineagePartList<T>,
+    L: LineagePartList<T> + FeedbackSummariesOf,
     L: ParametersOf<TransportParameterSpace>,
     S: 'static,
     Ls: Clone + 'static,
@@ -252,16 +279,12 @@ where
     for<'v> <L as LineageLists<'v, T>>::Recovery: GetAt<Self, Id>
         + GetAt<PacketNumberSpaces<PacketNumberSpaceState>, In>
         + ReadEach<LossFactsReads<T, L>, If>
-        + TakeEach<
-            'v,
-            HList![
-                RecoveryFactoryOf<T, L>,
-                CongestionPartOf<T, L>,
-                RttOf<T, L>,
-                Self,
-                LinkPathCongestionState<InstantOf<T>>
-            ],
-            It,
+        + TakeEach<'v, LossTakes<T, L, Self>, It>,
+    for<'v> L: PartsSendFeedback<
+            T,
+            L,
+            <<L as LineageLists<'v, T>>::Recovery as TakeEach<'v, LossTakes<T, L, Self>, It>>::Rest,
+            Hf,
         >,
     for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out:
@@ -286,42 +309,85 @@ where
         let numbers = lineage
             .get::<PacketNumberSpaces<PacketNumberSpaceState>, In>()
             .clone();
-        let (frunk_core::hlist_pat![factory, part, rtt, spaces, state], _) =
-            Take::<
-                HList![
-                    RecoveryFactoryOf<T, L>,
-                    CongestionPartOf<T, L>,
-                    RttOf<T, L>,
-                    Self,
-                    LinkPathCongestionState<InstantOf<T>>
-                ],
-                It,
-            >::take(lineage);
+        let (frunk_core::hlist_pat![factory, part, rtt, spaces, state, journals], mut rest) =
+            Take::<LossTakes<T, L, Self>, It>::take(lineage);
         let delay = loss_delay(&facts.rtt, &facts.thresholds);
         let threshold = facts.thresholds.packet_threshold();
-        let persistent =
-            lend_congestion::<T, L, B, Jx, Jr, _>(factory, part, others, |mut access| {
-                let mut persistent = false;
-                for (space, detection) in spaces.iter_mut() {
-                    if detection.loss_time().is_none_or(|at| at > now) {
-                        continue;
-                    }
-                    let numbers = numbers.get(space);
-                    // with nothing acknowledged nothing is eligible, and the loss
-                    // time goes
-                    let largest = numbers
-                        .and_then(PacketNumberSpaceState::largest_acked)
-                        .unwrap_or(PacketNumber::ZERO);
-                    detection.discard_expired(now);
-                    let lost = detection.detect_lost(now, largest, delay, threshold);
-                    persistent |= declare_lost(space, lost, numbers, state, &mut access, &facts);
+        let batches = lend_congestion::<T, L, B, Jx, Jr, _>(factory, part, others, |mut access| {
+            let mut batches = Vec::new();
+            for (space, detection) in spaces.iter_mut() {
+                if detection.loss_time().is_none_or(|at| at > now) {
+                    continue;
                 }
-                persistent
-            });
-        if persistent {
-            rtt.on_persistent_congestion();
+                let numbers = numbers.get(space);
+                // with nothing acknowledged nothing is eligible, and the loss
+                // time goes
+                let largest = numbers
+                    .and_then(PacketNumberSpaceState::largest_acked)
+                    .unwrap_or(PacketNumber::ZERO);
+                detection.discard_expired(now);
+                let lost = detection.detect_lost(now, largest, delay, threshold);
+                batches.push((
+                    space,
+                    declare_lost(space, lost, numbers, state, &mut access, &facts),
+                ));
+            }
+            batches
+        });
+        for (space, batch) in &batches {
+            if batch.persistent {
+                rtt.on_persistent_congestion();
+            }
+            let Some(journals) = journals.get_mut(*space) else {
+                continue;
+            };
+            journals.discard_expired(now);
+            hand_back_lost::<T, L, _, Hf, B>(journals, &mut rest, others, *space, batch);
         }
         None
+    }
+}
+
+/// What the time threshold's expiry takes out of a recovery layer's lineage,
+/// with the loss detection states `D`: the factory, the stored part of
+/// congestion control, the RTT estimate, `D`, the fixed congestion state
+/// and the logical path's send journals.
+pub(super) type LossTakes<T, L, D> = HList![
+    RecoveryFactoryOf<T, L>,
+    CongestionPartOf<T, L>,
+    RttOf<T, L>,
+    D,
+    LinkPathCongestionState<InstantOf<T>>,
+    SendJournalsOf<T, L>
+];
+
+/// Hand the packets of `batch`, declared lost in `space`, back to the
+/// space's `journals`, which keep their records as declared lost until the
+/// batch's retention ends, and the summaries of their frames back to their
+/// parts as lost, with `lineage` and `others`. A packet the journals do not
+/// have as sent, such as one whose record went with the end of its link
+/// path, gives nothing back.
+pub(super) fn hand_back_lost<T, L, V, Hf, B>(
+    journals: &mut <T as Choices>::SendJournals<
+        FeedbackSummaryOf<T, L>,
+        LinkPathIdentifierOf<T, L>,
+    >,
+    lineage: &mut Lineage<'_, V>,
+    others: &mut OtherNodes<'_, T, L, B>,
+    space: PacketNumberSpaceKind,
+    batch: &DeclaredBatch<InstantOf<T>>,
+) where
+    T: Choices,
+    L: PartList<T> + PartsSendFeedback<T, L, V, Hf>,
+    B: CallBundle,
+{
+    for &number in &batch.numbers {
+        let Some(record) = journals.declare_lost(number, batch.retain_until) else {
+            continue;
+        };
+        for summary in &record.summaries {
+            <L as PartsSendFeedback<T, L, V, Hf>>::lost(lineage, others, space, summary);
+        }
     }
 }
 
@@ -360,5 +426,6 @@ where
         thresholds: *thresholds,
         peer_max_ack_delay: peer_max_ack_delay::<L, Ima>(peer),
         max_datagram_size,
+        rtt_sampled: false,
     }
 }

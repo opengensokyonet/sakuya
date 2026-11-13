@@ -15,6 +15,7 @@
 //! | CRYPTO | [`CryptoReceiver`], at the level of the packet |
 //! | HANDSHAKE_DONE | [`HandshakeConfirmation`]: the handshake is confirmed |
 //! | CONNECTION_CLOSE | the [`CloseReasonRecord`], with the peer's close; every link path drains |
+//! | ACK | the send journals of its space, the recovery layers of the logical path's link paths, and the parts the summaries of the packets settled go back to ([`ack`](super::ack)) |
 //!
 //! The components of the other frames are not in the connection yet; such a
 //! frame ends the connection with INTERNAL_ERROR
@@ -42,7 +43,8 @@ use sakuya_wire::{
         },
         role::Role,
         transport_parameters::{
-            TransportParameterSlots, TransportParameterSpace, integer::MaxAckDelay,
+            TransportParameterSlots, TransportParameterSpace,
+            integer::{AckDelayExponent, MaxAckDelay, MaxUdpPayloadSize},
         },
     },
     var_int::VarInt,
@@ -51,13 +53,16 @@ use snafu::{ResultExt, Snafu, ensure};
 
 use super::{
     Choices, CloseCauseOf, LinkPathRoleReads, Part,
+    ack::{AckReads, AckRecoveryTakes, receive_ack},
     close::CloseReasonRecord,
     confirmation::HandshakeConfirmation,
     crypto::CryptoReceiver,
     current_probe_timeout,
     error::{self, ConnectionError},
-    recovery::RttOf,
+    link::LinkClone,
+    recovery::{CongestionPartOf, OthersOf, RecoveryFactoryOf, RttOf},
     role::LinkPathRole,
+    spaces::SendJournalsOf,
 };
 use crate::{
     call::CallBundle,
@@ -65,10 +70,15 @@ use crate::{
     component::LineageOf,
     dispatch::{DispatchFacts, FrameDispatch},
     error::ConnectionErrorsOf,
+    feedback::{FeedbackSummariesOf, PartsSendFeedback},
     layer::{self, LogicalPath},
     others::OtherNodes,
-    share::{FlatMut, LineageLists, LineagePartList, NodeData},
+    share::{FlatMut, FlatRef, LineageLists, LineagePartList, LinkPathIdentifierOf, NodeData},
     take::{GetAt, ReadEach, TakeEach},
+};
+use sakuya_recovery::{
+    factory::{LendCongestion, RecoveryFactory},
+    packet_number_space::{PacketNumberSpaceState, PacketNumberSpaces},
 };
 
 /// Version 1 reads its frames as the wire format's version 1 part.
@@ -153,12 +163,70 @@ pub enum FrameNotPermittedError {
 /// is already there, and puts every link path into `Draining`, for three
 /// times the current probe timeout (RFC 9000 §10.2.2), measured as a
 /// closing link path measures it; a link path that was closing keeps its end.
-impl<T: Choices, L, Ic, Ir, Ih, Iv, Ima, Irt, Il>
-    FrameDispatch<T, L, ((Ic, Ir, Ih), (Iv, Ima, Irt), Il)> for Part
+/// An ACK frame is received as [`receive_ack`] says.
+impl<
+    T: Choices,
+    L,
+    Ic,
+    Ir,
+    Ih,
+    Iv,
+    Ima,
+    Irt,
+    Il,
+    S,
+    Ls,
+    Ij,
+    In,
+    If,
+    Ird,
+    Ide,
+    Ipp,
+    Ile,
+    Ik,
+    Jx,
+    Jr,
+    Hf,
+>
+    FrameDispatch<
+        T,
+        L,
+        (
+            (Ic, Ir, Ih),
+            (Iv, Ima, Irt),
+            Il,
+            ((Ij, In, If, Ird), (Ide, Ipp), (Ile, Ik), (Jx, Jr), Hf),
+        ),
+    > for Part
 where
     L: LineagePartList<T>,
-    L: ParametersOf<TransportParameterSpace> + ConnectionErrorsOf,
-    TransportParameterSlots<L>: Selector<Option<MaxAckDelay>, Ima>,
+    L: ParametersOf<TransportParameterSpace> + ConnectionErrorsOf + FeedbackSummariesOf,
+    TransportParameterSlots<L>: Selector<Option<MaxAckDelay>, Ima>
+        + Selector<Option<AckDelayExponent>, Ide>
+        + Selector<Option<MaxUdpPayloadSize>, Ipp>,
+    S: 'static,
+    Ls: Clone + 'static,
+    RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link>
+        + for<'s> LendCongestion<
+            InstantOf<T>,
+            OthersOf<'s, T, L>,
+            Part = CongestionPartOf<T, L>,
+            SentState = S,
+            LossState = Ls,
+        >,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<SendJournalsOf<T, L>, Ij>
+        + GetAt<PacketNumberSpaces<PacketNumberSpaceState>, In>
+        + GetAt<RecoveryFactoryOf<T, L>, If>
+        + ReadEach<AckReads<L>, Ird>,
+    for<'x> L: PartsSendFeedback<T, L, <L as LineageLists<'x, T>>::LogicalPath, Hf>,
+    for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![LinkClone<T::Link>], Ile>,
+    for<'x> <NodeData<T, L, layer::Recovery> as FlatMut<'x>>::Out:
+        TakeEach<'x, AckRecoveryTakes<T, L, S, Ls>, Ik>,
+    for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
+    for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out:
+        Selector<&'a CongestionPartOf<T, L>, Jx> + Selector<&'a RttOf<T, L>, Jr>,
     for<'v> <L as LineageLists<'v, T>>::LogicalPath: GetAt<CryptoReceiver<T::CryptoReceiveBuffer>, Ic>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
         + GetAt<HandshakeConfirmation, Ih>
@@ -173,9 +241,14 @@ where
         lineage: &mut LineageOf<'v, T, L, LogicalPath>,
         others: &mut OtherNodes<'v, T, L, B>,
         run: FrameRun<Bytes>,
-        packet: &DispatchFacts<InstantOf<T>>,
+        packet: &DispatchFacts<InstantOf<T>, LinkPathIdentifierOf<T, L>>,
     ) -> Result<(), ConnectionError> {
         match run {
+            FrameRun::Ack(frame) => {
+                receive_ack::<T, L, B, S, Ls, Ij, In, If, Ird, Ide, Ima, Ipp, Ile, Ik, Jx, Jr, Hf>(
+                    lineage, others, &frame, packet,
+                )
+            }
             FrameRun::Padding(_) | FrameRun::Ping(_) => Ok(()),
             FrameRun::Crypto(frame) => {
                 let level = crypto_level(packet.level())?;

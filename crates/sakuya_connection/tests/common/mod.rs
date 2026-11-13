@@ -105,6 +105,8 @@ impl sakuya_connection::v1::Choices for Mine {
     type Recovery<V: Clone + Eq + core::fmt::Debug + 'static> =
         sakuya_recovery::factory::NewRenoRecoveryFactory<V>;
     type AckObligation = sakuya_recovery::ack_obligation::Rfc9000AckObligation<Duration>;
+    type SendJournals<S: 'static, P: Clone + Eq + core::fmt::Debug + 'static> =
+        sakuya_recovery::send_journals::DequeSendJournals<Duration, S, P>;
     type ApplicationError = AppClose;
     type HandshakeFailure = core::convert::Infallible;
     type Receiver = TestReceiver;

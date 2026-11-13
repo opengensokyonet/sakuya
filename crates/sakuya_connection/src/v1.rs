@@ -14,18 +14,21 @@
 //! recovery layer, what the factory makes for it with the state beside them,
 //! its loss detection state for each packet number space and its probe
 //! timeout. Each logical path keeps, for each packet number space, its
-//! packet number state, its receive journals and its ACK obligation, the
-//! packet numbers the current 1-RTT key generation has seen
-//! ([`key_phase`]), and what it receives ([`input`]): its datagram receiver, the first one taken
+//! packet number state, its receive journals, its ACK obligation and its
+//! send journals, which keep the feedback summaries of the frames sent
+//! ([`feedback`]); the packet numbers the current 1-RTT key generation
+//! has seen ([`key_phase`]); and what it receives ([`input`]): its datagram receiver, the first one taken
 //! from what the connection was made with, and the inputs it holds until
-//! their keys come; its receiving call takes each datagram in. A link path
-//! writes its datagrams into a batch ([`datagram_batch`]), one packet after
-//! the other ([`packet_writer`]), with the frames of version 1
-//! ([`frames`]). Once
+//! their keys come; its receiving call takes each datagram in, and the ACK
+//! frames it carries settle what was sent ([`ack`]). A link path writes its
+//! datagrams into a batch ([`datagram_batch`]), one packet after the other
+//! ([`packet_writer`]), with the frames of version 1 ([`frames`]). Once
 //! a reason for closing is written, the link paths close, their recovery
 //! layers and the established layer end, and the connection ends with its
-//! last link path. The other calls and the send journals are not here yet.
+//! last link path; a link path that ends hands back what it had not
+//! settled as lost. The other calls are not here yet.
 
+pub mod ack;
 pub mod aead_usage;
 pub mod amplification;
 pub mod close;
@@ -34,6 +37,7 @@ pub mod crypto;
 pub mod datagram_batch;
 pub mod dispatch;
 pub mod error;
+pub mod feedback;
 pub mod first_flight;
 pub mod frames;
 pub mod idle;
@@ -79,6 +83,7 @@ use crate::{
         RequestOf,
     },
     error::{ConnectionErrorOf, ConnectionErrorPart, ConnectionErrorsOf},
+    feedback::{FeedbackSummariesOf, PartsSendFeedback},
     layer::{self, NodeKey},
     others::OtherNodes,
     request::StructureRequest,
@@ -112,7 +117,7 @@ use self::{
         RecoveryFactoryOf, RttOf,
     },
     role::LinkPathRole,
-    spaces::{AckObligationsOf, DEFAULT_MAX_ACK_DELAY, peer_max_ack_delay},
+    spaces::{AckObligationsOf, DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
 };
 use sakuya_recovery::{
     ack_obligation::AckObligation,
@@ -122,6 +127,7 @@ use sakuya_recovery::{
     pto::probe_timeout,
     receive_journals::{MaxAckRanges, ReceiveJournals},
     rtt::RttEstimator,
+    send_journals::SendJournals,
 };
 use sakuya_stream::connection::{AbortCause, CloseReason};
 use sakuya_tls::engine::HandshakeError;
@@ -166,6 +172,13 @@ pub trait Choices: ConnectionChoices {
     /// What decides when an ACK frame is due, one for each packet number
     /// space of a logical path.
     type AckObligation: AckObligation<InstantOf<Self>> + 'static;
+    /// What records the packets sent in one packet number space of a
+    /// logical path, one for each space; it starts empty. `S` is the
+    /// summary of a frame, as found from the list of parts, and `P`
+    /// identifies a link path, as the recovery factory's `V`.
+    type SendJournals<S: 'static, P: Clone + Eq + Debug + 'static>: SendJournals<S, InstantOf<Self>, P>
+        + Default
+        + 'static;
     /// The application's own error type for closing the connection.
     type ApplicationError: ApplicationClose + 'static;
     /// How the handshake engine of this side fails with an alert: the
@@ -324,11 +337,14 @@ impl<T: Choices, L> LayerShare<T, L, layer::LinkEntry> for Part {
     type Data = HList![LinkClone<T::Link>, LinkFacts, AntiAmplification];
     type Calls = HNil;
 }
-impl<T: Choices, L> LayerShare<T, L, layer::LogicalPath> for Part {
+impl<T: Choices, L: FeedbackSummariesOf + LogicalPathKeys + 'static>
+    LayerShare<T, L, layer::LogicalPath> for Part
+{
     type Data = HList![
         PacketNumberSpaces<PacketNumberSpaceState>,
         PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>,
         AckObligationsOf<T>,
+        SendJournalsOf<T, L>,
         LogicalPathInput<T::Link, T::Receiver>,
         KeyPhaseNumbers,
     ];
@@ -1087,10 +1103,20 @@ impl PassiveDataComponent for AntiAmplification {}
 /// The connection's first link path is active from the start: the
 /// handshake runs over it. A later one is a candidate until it is
 /// validated.
-impl<T: Choices, L, I> Build<T, L, layer::LinkPath, I> for LinkPathRole<InstantOf<T>>
+///
+/// When the link path ends, the packets sent on it that were neither
+/// acknowledged nor declared lost leave the send journals of its logical
+/// path, in every space, and the summaries of their frames go back to
+/// their parts as lost; the kept records of its lost packets go with them,
+/// so a late acknowledgment of them is ignored. Its congestion control
+/// hears of none of it: it ended with the recovery layer.
+impl<T: Choices, L, I, Ij, Hf> Build<T, L, layer::LinkPath, (I, Ij, Hf)>
+    for LinkPathRole<InstantOf<T>>
 where
-    L: LineagePartList<T>,
-    for<'v> <L as LineageLists<'v, T>>::LinkPathParents: GetAt<FirstLinkStart, I>,
+    L: LineagePartList<T> + FeedbackSummariesOf,
+    for<'v> <L as LineageLists<'v, T>>::LinkPathParents:
+        GetAt<FirstLinkStart, I> + GetAt<SendJournalsOf<T, L>, Ij>,
+    for<'v> L: PartsSendFeedback<T, L, <L as LineageLists<'v, T>>::LinkPathParents, Hf>,
 {
     fn build<'v>(
         parents: &mut ParentsOf<'v, T, L, layer::LinkPath>,
@@ -1100,6 +1126,28 @@ where
             LinkPathRole::Active
         } else {
             LinkPathRole::Candidate
+        }
+    }
+    fn end<'v, B: CallBundle>(
+        self,
+        parents: &mut ParentsOf<'v, T, L, layer::LinkPath>,
+        others: &mut OtherNodes<'v, T, L, B>,
+    ) {
+        let NodeKey::LinkPath(path, link) = others.here().clone() else {
+            unreachable!("an ended link path's others carry its key")
+        };
+        let identifier = L::link_path_identifier(&path, &link);
+        for space in PacketNumberSpaceKind::ALL {
+            let Some(journals) = parents.get_mut::<SendJournalsOf<T, L>, Ij>().get_mut(space)
+            else {
+                continue;
+            };
+            let unsettled: Vec<_> = journals.take_link_path(&identifier).collect();
+            for record in &unsettled {
+                for summary in &record.summaries {
+                    <L as PartsSendFeedback<T, L, _, Hf>>::lost(parents, others, space, summary);
+                }
+            }
         }
     }
 }

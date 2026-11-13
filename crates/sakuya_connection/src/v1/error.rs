@@ -2,6 +2,7 @@
 use core::convert::Infallible;
 
 use bytes::Bytes;
+use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
 use sakuya_wire::{
     parts::CNil,
     v1::{
@@ -11,6 +12,7 @@ use sakuya_wire::{
             codec::ReadFieldsError,
             set::{FrameFieldsError, codec::ReadFrameError},
         },
+        packet_number::PacketNumber,
         transport_error::TransportErrorCode,
     },
     var_int::VarInt,
@@ -82,6 +84,23 @@ pub enum ConnectionError {
         /// The limit crossed.
         source: AeadLimitReachedError,
     },
+    /// An ACK frame acknowledges a packet number its packet number space
+    /// has not sent yet (RFC 9000 §13.1).
+    #[snafu(display(
+        "an ACK frame of the {space:?} space acknowledges packet {largest}, \
+         and the next packet sent there is {next}"
+    ))]
+    UnsentPacketAcknowledged {
+        /// The packet number space of the frame.
+        space: PacketNumberSpaceKind,
+        /// The frame's Largest Acknowledged.
+        largest: PacketNumber,
+        /// The packet number the next packet sent in the space gets.
+        next: PacketNumber,
+        /// Whether the frame carries ECN counts: its type is `0x03` rather
+        /// than `0x02`.
+        ecn_counts: bool,
+    },
     /// A frame of a kind this version does not handle yet; the connection
     /// closes with INTERNAL_ERROR. It goes away as the components that
     /// handle each kind are added.
@@ -99,9 +118,9 @@ pub enum ConnectionError {
 impl TransportClose for ConnectionError {
     fn code(&self) -> TransportErrorCode {
         match self {
-            Self::EmptyPacket { .. } | Self::ReservedBitsSet { .. } => {
-                TransportErrorCode::PROTOCOL_VIOLATION
-            }
+            Self::EmptyPacket { .. }
+            | Self::ReservedBitsSet { .. }
+            | Self::UnsentPacketAcknowledged { .. } => TransportErrorCode::PROTOCOL_VIOLATION,
             Self::NoViablePath => TransportErrorCode::NO_VIABLE_PATH,
             Self::OneRttSendKeysMissing | Self::UnhandledFrame { .. } => {
                 TransportErrorCode::INTERNAL_ERROR
@@ -127,6 +146,13 @@ impl TransportClose for ConnectionError {
             Self::ReadFrame { source } => source.frame_type(),
             Self::ReadFrameFields { source } => Some(source.frame_type()),
             Self::Crypto { .. } => Some(VarInt::from_u32(CRYPTO_FRAME_TYPE)),
+            Self::UnsentPacketAcknowledged { ecn_counts, .. } => {
+                Some(VarInt::from_u32(if *ecn_counts {
+                    ACK_ECN_FRAME_TYPE
+                } else {
+                    ACK_FRAME_TYPE
+                }))
+            }
             Self::EmptyPacket { .. }
             | Self::ReservedBitsSet { .. }
             | Self::NoViablePath
@@ -144,6 +170,12 @@ impl TransportClose for ConnectionError {
 
 /// The Frame Type of CRYPTO (RFC 9000 §19.6).
 const CRYPTO_FRAME_TYPE: u32 = 0x06;
+
+/// The Frame Type of ACK without ECN counts (RFC 9000 §19.3).
+const ACK_FRAME_TYPE: u32 = 0x02;
+
+/// The Frame Type of ACK with ECN counts (RFC 9000 §19.3).
+const ACK_ECN_FRAME_TYPE: u32 = 0x03;
 
 /// The TLS alert unexpected_message (RFC 9846 §6.2): a server receives no
 /// handshake messages at 1-RTT (RFC 9001 §6).
@@ -164,6 +196,19 @@ mod tests {
             error.immediate_close().reason_phrase,
             Bytes::from_static(b"a packet at the Handshake level has no frames")
         );
+    }
+
+    #[test]
+    fn an_ack_of_a_packet_not_sent_is_a_protocol_violation_of_its_frame_type() {
+        let error = |ecn_counts| ConnectionError::UnsentPacketAcknowledged {
+            space: PacketNumberSpaceKind::Handshake,
+            largest: PacketNumber::new(7).unwrap(),
+            next: PacketNumber::new(5).unwrap(),
+            ecn_counts,
+        };
+        assert_eq!(error(false).code(), TransportErrorCode::PROTOCOL_VIOLATION);
+        assert_eq!(error(false).frame_type(), Some(VarInt::from_u32(0x02)));
+        assert_eq!(error(true).frame_type(), Some(VarInt::from_u32(0x03)));
     }
 
     #[test]

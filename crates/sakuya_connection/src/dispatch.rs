@@ -33,23 +33,30 @@ use crate::{
     error::{ConnectionErrorPart, ConnectionErrorsOf},
     layer::LogicalPath,
     others::OtherNodes,
-    share::LineageLists,
+    share::{LineageLists, LinkPathIdentifierOf},
 };
 
 /// What dispatching a frame knows about the packet it came in.
 ///
 /// It is read only; each branch of a dispatch hands on just what the
-/// component it calls needs.
+/// component it calls needs. `I` is the type of instants, `P` what
+/// identifies a link path ([`LinkPathIdentifierOf`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DispatchFacts<I> {
+pub struct DispatchFacts<I, P> {
     level: EncryptionLevel,
     at: I,
+    link_path: P,
 }
 
-impl<I: Copy> DispatchFacts<I> {
-    /// A packet protected at `level` that arrived at `at`.
-    pub fn new(level: EncryptionLevel, at: I) -> Self {
-        Self { level, at }
+impl<I: Copy, P> DispatchFacts<I, P> {
+    /// A packet protected at `level` whose datagram arrived at `at` on the
+    /// link path `link_path`.
+    pub fn new(level: EncryptionLevel, at: I, link_path: P) -> Self {
+        Self {
+            level,
+            at,
+            link_path,
+        }
     }
 
     /// The encryption level the packet was protected at.
@@ -60,6 +67,12 @@ impl<I: Copy> DispatchFacts<I> {
     /// When the datagram of the packet arrived.
     pub fn at(&self) -> I {
         self.at
+    }
+
+    /// The link path the datagram of the packet arrived on, such as where
+    /// an acknowledgment came back from.
+    pub fn link_path(&self) -> &P {
+        &self.link_path
     }
 }
 
@@ -83,7 +96,7 @@ where
         lineage: &mut LineageOf<'v, T, L, LogicalPath>,
         others: &mut OtherNodes<'v, T, L, B>,
         run: Self::Run<Bytes>,
-        packet: &DispatchFacts<InstantOf<T>>,
+        packet: &DispatchFacts<InstantOf<T>, LinkPathIdentifierOf<T, L>>,
     ) -> Result<(), Self::ConnectionError>;
 
     /// The connection error that a failure of reading the fields of one of
@@ -109,7 +122,7 @@ where
         lineage: &mut LineageOf<'v, T, L, LogicalPath>,
         others: &mut OtherNodes<'v, T, L, B>,
         run: Self::Run<Bytes>,
-        packet: &DispatchFacts<InstantOf<T>>,
+        packet: &DispatchFacts<InstantOf<T>, LinkPathIdentifierOf<T, L>>,
     ) -> Result<(), Self::ConnectionErrors>;
 
     /// The connection error that a failure of reading the fields of a frame
@@ -125,7 +138,7 @@ where
         _: &mut LineageOf<'v, T, L, LogicalPath>,
         _: &mut OtherNodes<'v, T, L, B>,
         run: CNil,
-        _: &DispatchFacts<InstantOf<T>>,
+        _: &DispatchFacts<InstantOf<T>, LinkPathIdentifierOf<T, L>>,
     ) -> Result<(), CNil> {
         match run {}
     }
@@ -145,7 +158,7 @@ where
         lineage: &mut LineageOf<'v, T, L, LogicalPath>,
         others: &mut OtherNodes<'v, T, L, B>,
         run: Self::Run<Bytes>,
-        packet: &DispatchFacts<InstantOf<T>>,
+        packet: &DispatchFacts<InstantOf<T>, LinkPathIdentifierOf<T, L>>,
     ) -> Result<(), Self::ConnectionErrors> {
         match run {
             Coproduct::Inl(run) => {

@@ -157,11 +157,23 @@ pub trait LogicalPathKeys {
     /// given the identity of a link `Id`: `Id` when no part adds a field,
     /// otherwise the key and the logical link.
     type LinkPathIdentifier<Id: Clone + Eq + Debug + 'static>: Clone + Eq + Debug + 'static;
+    /// The identifier of the link path of the logical path `path` over the
+    /// logical link `link`.
+    fn link_path_identifier<Id: Clone + Eq + Debug + 'static>(
+        path: &Self::Key,
+        link: &Id,
+    ) -> Self::LinkPathIdentifier<Id>;
 }
 impl LogicalPathKeys for HNil {
     type Fields = HNil;
     type Key = SoleLogicalPath;
     type LinkPathIdentifier<Id: Clone + Eq + Debug + 'static> = Id;
+    fn link_path_identifier<Id: Clone + Eq + Debug + 'static>(
+        _: &SoleLogicalPath,
+        link: &Id,
+    ) -> Id {
+        link.clone()
+    }
 }
 impl<P: LogicalPathKeyShare, Ps: LogicalPathKeys> LogicalPathKeys for HCons<P, Ps>
 where
@@ -172,6 +184,12 @@ where
     type Key = <<P::Fields as Add<Ps::Fields>>::Output as KeyOfFields>::Key;
     type LinkPathIdentifier<Id: Clone + Eq + Debug + 'static> =
         <<P::Fields as Add<Ps::Fields>>::Output as KeyOfFields>::LinkPathIdentifier<Id>;
+    fn link_path_identifier<Id: Clone + Eq + Debug + 'static>(
+        path: &Self::Key,
+        link: &Id,
+    ) -> Self::LinkPathIdentifier<Id> {
+        <<P::Fields as Add<Ps::Fields>>::Output as KeyOfFields>::link_path_identifier(path, link)
+    }
 }
 
 /// The key of a logical path made of a list of fields.
@@ -180,10 +198,22 @@ pub trait KeyOfFields {
     type Key: LogicalPathKey;
     /// The identifier of a link path, given the identity of a link `Id`.
     type LinkPathIdentifier<Id: Clone + Eq + Debug + 'static>: Clone + Eq + Debug + 'static;
+    /// The identifier of the link path of the logical path `key` over the
+    /// logical link `link`.
+    fn link_path_identifier<Id: Clone + Eq + Debug + 'static>(
+        key: &Self::Key,
+        link: &Id,
+    ) -> Self::LinkPathIdentifier<Id>;
 }
 impl KeyOfFields for HNil {
     type Key = SoleLogicalPath;
     type LinkPathIdentifier<Id: Clone + Eq + Debug + 'static> = Id;
+    fn link_path_identifier<Id: Clone + Eq + Debug + 'static>(
+        _: &SoleLogicalPath,
+        link: &Id,
+    ) -> Id {
+        link.clone()
+    }
 }
 impl<H, T> KeyOfFields for HCons<H, T>
 where
@@ -191,6 +221,12 @@ where
 {
     type Key = HCons<H, T>;
     type LinkPathIdentifier<Id: Clone + Eq + Debug + 'static> = (HCons<H, T>, Id);
+    fn link_path_identifier<Id: Clone + Eq + Debug + 'static>(
+        key: &HCons<H, T>,
+        link: &Id,
+    ) -> (HCons<H, T>, Id) {
+        (key.clone(), link.clone())
+    }
 }
 
 /// The key of the one logical path of a connection whose parts add no field

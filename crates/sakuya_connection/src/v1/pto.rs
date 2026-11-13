@@ -16,6 +16,7 @@ use sakuya_recovery::{
     },
     pto::{PtoAction, PtoExpiry, PtoPolicy, probe_timeout},
     rtt::{RttEstimate, RttEstimator},
+    send_journals::SendJournals,
 };
 use sakuya_wire::{
     parameters::ParametersOf,
@@ -32,6 +33,7 @@ use crate::{
     component::{
         ArgsOf, Build, ComponentTypeList, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf,
     },
+    feedback::{FeedbackSummariesOf, PartsSendFeedback},
     layer,
     others::OtherNodes,
     share::{FlatRef, LineageLists, LineagePartList, NodeData},
@@ -44,14 +46,14 @@ use super::{
     confirmation::HandshakeConfirmation,
     keys::HandshakeKeys,
     link::LinkFacts,
-    loss_detection::{LossFactsReads, declare_lost, loss_facts},
+    loss_detection::{LossFactsReads, declare_lost, hand_back_lost, loss_facts},
     parameters::PeerTransportParameters,
     recovery::{
         CongestionPartOf, LinkPathCongestionState, OthersOf, RecoveryFactoryOf, RttOf,
         lend_congestion,
     },
     role::LinkPathRole,
-    spaces::{DEFAULT_MAX_ACK_DELAY, peer_max_ack_delay},
+    spaces::{DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
 };
 
 /// The probe timeout of a link path (RFC 9002 §6.2): how many times it
@@ -115,6 +117,15 @@ impl<I: Ord + Copy + Add<Duration, Output = I> + CheckedAdd<Duration>> ProbeTime
     pub fn expired(&mut self, now: I) {
         self.backoff = self.backoff.saturating_add(1);
         self.expired_at = Some(now);
+    }
+
+    /// An ACK frame newly acknowledged packets of the link path: the backoff
+    /// is reset (RFC 9002 §6.2.1, Appendix A.7), and the next timeout counts
+    /// from the last ack-eliciting packet sent in its space, not from the
+    /// last expiry, as Appendix A.8 sets the timer.
+    pub fn reset_backoff(&mut self) {
+        self.backoff = 0;
+        self.expired_at = None;
     }
 
     /// The client probes with nothing ack-eliciting outstanding since
@@ -213,18 +224,19 @@ where
 /// When it expires the backoff grows by one and the lent policy says what
 /// to do. A probe grants as many permits past the window as datagrams; a
 /// choice to declare the packets in flight lost is a batch of losses in
-/// each space, as the time threshold's.
+/// each space, as the time threshold's, handed back to the send journals
+/// and the parts as the time threshold's is.
 ///
 /// Not here yet: the PING wanted in each space to probe, which goes out
 /// through the link path's send planner; and declaring the packets in
 /// flight lost without asking the policy while the link path cannot send
 /// 1200 bytes.
-impl<T, L, S, Ls, Ipt, Ir, If, Ipp, Ima, It, Jx, Jr>
-    DataComponent<T, L, layer::Recovery, ((Ipt, Ir, If), (Ipp, Ima), It, (Jx, Jr))>
+impl<T, L, S, Ls, Ipt, Ir, If, Ipp, Ima, It, Jx, Jr, Hf>
+    DataComponent<T, L, layer::Recovery, ((Ipt, Ir, If), (Ipp, Ima), It, (Jx, Jr), Hf)>
     for ProbeTimeout<InstantOf<T>>
 where
     T: Choices,
-    L: LineagePartList<T>,
+    L: LineagePartList<T> + FeedbackSummariesOf,
     L: ParametersOf<TransportParameterSpace>,
     S: 'static,
     Ls: Clone + 'static,
@@ -241,17 +253,16 @@ where
     for<'v> <L as LineageLists<'v, T>>::Recovery: GetAt<ProbeTimeout<InstantOf<T>>, Ipt>
         + ReadEach<ProbeTimeoutReads<T, L, S, Ls>, Ir>
         + ReadEach<LossFactsReads<T, L>, If>
-        + TakeEach<
-            'v,
-            HList![
-                ProbeTimeout<InstantOf<T>>,
-                RecoveryFactoryOf<T, L>,
-                CongestionPartOf<T, L>,
-                RttOf<T, L>,
-                PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>,
-                LinkPathCongestionState<InstantOf<T>>
-            ],
-            It,
+        + TakeEach<'v, ProbeTimeoutTakes<T, L, S, Ls>, It>,
+    for<'v> L: PartsSendFeedback<
+            T,
+            L,
+            <<L as LineageLists<'v, T>>::Recovery as TakeEach<
+                'v,
+                ProbeTimeoutTakes<T, L, S, Ls>,
+                It,
+            >>::Rest,
+            Hf,
         >,
     for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out:
@@ -274,18 +285,8 @@ where
         let frunk_core::hlist_pat![_, _, _, _, _, _, _, _, _, _, numbers] = reads;
         let numbers = numbers.clone();
         let facts = loss_facts::<T, L, Ipp, Ima, _, If>(&lineage, now);
-        let (frunk_core::hlist_pat![pto, factory, part, rtt, spaces, state], _) =
-            Take::<
-                HList![
-                    ProbeTimeout<InstantOf<T>>,
-                    RecoveryFactoryOf<T, L>,
-                    CongestionPartOf<T, L>,
-                    RttOf<T, L>,
-                    PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>,
-                    LinkPathCongestionState<InstantOf<T>>
-                ],
-                It,
-            >::take(lineage);
+        let (frunk_core::hlist_pat![pto, factory, part, rtt, spaces, state, journals], mut rest) =
+            Take::<ProbeTimeoutTakes<T, L, S, Ls>, It>::take(lineage);
         pto.expired(now);
         let expiry = PtoExpiry {
             at: now,
@@ -294,37 +295,43 @@ where
             backoff: pto.backoff(),
             rtt: facts.rtt,
         };
-        let persistent =
-            lend_congestion::<T, L, B, Jx, Jr, _>(factory, part, others, |mut access| {
-                match access.on_pto_expired(&expiry) {
-                    PtoAction::Probe {
-                        datagrams,
-                        spaces: _,
-                    } => {
-                        // Not here yet: a PING wanted in each of the spaces
-                        // given, and in the expired one even if left out.
-                        state.grant_probe_permits(datagrams);
-                        false
-                    }
-                    PtoAction::MarkInFlightLost => {
-                        let mut persistent = false;
-                        for (space, detection) in spaces.iter_mut() {
-                            detection.discard_expired(now);
-                            persistent |= declare_lost(
-                                space,
-                                detection.take_all(),
-                                numbers.get(space),
-                                state,
-                                &mut access,
-                                &facts,
-                            );
-                        }
-                        persistent
+        let batches = lend_congestion::<T, L, B, Jx, Jr, _>(factory, part, others, |mut access| {
+            let mut batches = Vec::new();
+            match access.on_pto_expired(&expiry) {
+                PtoAction::Probe {
+                    datagrams,
+                    spaces: _,
+                } => {
+                    // Not here yet: a PING wanted in each of the spaces
+                    // given, and in the expired one even if left out.
+                    state.grant_probe_permits(datagrams);
+                }
+                PtoAction::MarkInFlightLost => {
+                    for (space, detection) in spaces.iter_mut() {
+                        detection.discard_expired(now);
+                        let batch = declare_lost(
+                            space,
+                            detection.take_all(),
+                            numbers.get(space),
+                            state,
+                            &mut access,
+                            &facts,
+                        );
+                        batches.push((space, batch));
                     }
                 }
-            });
-        if persistent {
-            rtt.on_persistent_congestion();
+            }
+            batches
+        });
+        for (space, batch) in &batches {
+            if batch.persistent {
+                rtt.on_persistent_congestion();
+            }
+            let Some(journals) = journals.get_mut(*space) else {
+                continue;
+            };
+            journals.discard_expired(now);
+            hand_back_lost::<T, L, _, Hf, B>(journals, &mut rest, others, *space, batch);
         }
         None
     }
@@ -347,6 +354,17 @@ where
         None
     }
 }
+
+/// What the probe timeout's expiry takes out of a recovery layer's lineage.
+type ProbeTimeoutTakes<T, L, S, Ls> = HList![
+    ProbeTimeout<InstantOf<T>>,
+    RecoveryFactoryOf<T, L>,
+    CongestionPartOf<T, L>,
+    RttOf<T, L>,
+    PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>,
+    LinkPathCongestionState<InstantOf<T>>,
+    SendJournalsOf<T, L>
+];
 
 /// What the probe timeout reads: its deadline and its reread look at these,
 /// and it is reread when one of them changes.

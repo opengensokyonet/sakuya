@@ -452,6 +452,12 @@ impl<I: Copy> LinkPathCongestionState<I> {
         self.first_rtt_sample_at
     }
 
+    /// The link path got an RTT sample from a datagram that arrived at
+    /// `at`: the first one's arrival is kept.
+    pub fn rtt_sampled(&mut self, at: I) {
+        self.first_rtt_sample_at.get_or_insert(at);
+    }
+
     /// What is left of the window: more is in flight than the window when
     /// probes went past it, and then nothing is left.
     pub fn window_left<C: CongestionController<I>>(&self, controller: &C) -> usize {
@@ -494,7 +500,7 @@ impl<I: Copy> LinkPathCongestionState<I> {
 }
 
 /// Refill the pacer of a lent access to `at`.
-fn refill<I, C: CongestionController<I> + Pacer<I>>(
+pub(super) fn refill<I, C: CongestionController<I> + Pacer<I>>(
     controller: &mut C,
     at: I,
     rtt: &RttEstimate,

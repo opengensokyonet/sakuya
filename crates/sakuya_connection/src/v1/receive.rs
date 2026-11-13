@@ -97,7 +97,7 @@ use crate::{
     error::{ConnectionErrorOf, ConnectionErrorsOf},
     layer::{self, LogicalPath, NodeKey},
     others::OtherNodes,
-    share::{FlatMut, LineageLists, LineagePartList, NodeData},
+    share::{FlatMut, LineageLists, LineagePartList, LinkPathIdentifierOf, NodeData},
     take::GetAt,
 };
 
@@ -355,7 +355,11 @@ where
     };
     let payload = bytes.into().slice(opened.payload);
     let at = arrival.at();
-    let facts = DispatchFacts::new(level, at);
+    let NodeKey::LogicalPath(path) = others.here() else {
+        unreachable!("a logical path's lend carries its key")
+    };
+    let link_path = L::link_path_identifier(path, arrival.link().id());
+    let facts = DispatchFacts::new(level, at, link_path);
     if closing {
         find_close::<T, L, B, Ik, Hd>(lineage, others, payload, &facts)?;
         return Ok(PacketOutcome::Closing);
@@ -639,7 +643,7 @@ where
 }
 
 /// The packet number space of the packets of `level`.
-fn space_of(level: EncryptionLevel) -> PacketNumberSpaceKind {
+pub(super) fn space_of(level: EncryptionLevel) -> PacketNumberSpaceKind {
     match level {
         EncryptionLevel::Initial => PacketNumberSpaceKind::Initial,
         EncryptionLevel::Handshake => PacketNumberSpaceKind::Handshake,
@@ -818,7 +822,7 @@ fn find_close<'v, T, L, B, Ik, Hd>(
     lineage: &mut LineageOf<'v, T, L, LogicalPath>,
     others: &mut OtherNodes<'v, T, L, B>,
     payload: Bytes,
-    facts: &DispatchFacts<InstantOf<T>>,
+    facts: &DispatchFacts<InstantOf<T>, LinkPathIdentifierOf<T, L>>,
 ) -> Result<(), ConnectionErrorOf<L>>
 where
     T: Choices,

@@ -24,14 +24,15 @@ use sakuya_connection::{
     dispatch::{DispatchFacts, FrameDispatch, FrameSetDispatch},
     driver::ConnectionDriver,
     error::ConnectionErrorsOf,
+    feedback::{FeedbackSummaryPart, SendFeedback},
     layer::{self, EstablishedArgs, LinkPathArgs, LogicalPathArgs, NodeKey},
     others::OtherNodes,
     request::StructureRequest,
     share::{
-        FlatMut, FlatRef, LayerShare, LineageLists, LineagePartList, LogicalPathKeyShare,
-        LogicalPathKeys, NodeData, SoleLogicalPath,
+        FlatMut, FlatRef, LayerShare, LineageLists, LineagePartList, LinkPathIdentifierOf,
+        LogicalPathKeyShare, LogicalPathKeys, NodeData, PartList, SoleLogicalPath,
     },
-    take::{GetAt, Take, TakeEach},
+    take::{GetAt, Lineage, Take, TakeEach},
     v1::{
         self, CloseCauseOf,
         aead_usage::AeadUsage,
@@ -39,6 +40,7 @@ use sakuya_connection::{
         close::{CloseReasonRecord, LocalCloseCause},
         confirmation::HandshakeConfirmation,
         crypto::{CryptoReceiveCapacities, CryptoReceiver, FragmentedCryptoReceiveBuffer},
+        feedback::AckSummary,
         first_flight::{
             FirstFlight, FirstFlightReadState, ReadFirstFlightError, read_first_flight,
         },
@@ -55,7 +57,7 @@ use sakuya_connection::{
             CongestionPartOf, LinkPathCongestionState, RecoveryFactoryOf, RttOf, lend_congestion,
         },
         role::LinkPathRole,
-        spaces::AckObligationsOf,
+        spaces::{AckObligationsOf, SendJournalsOf},
     },
 };
 use sakuya_datagram_routing::{
@@ -90,13 +92,14 @@ use sakuya_recovery::{
     pto::probe_timeout,
     receive_journals::{MaxAckRanges, ReceiveJournals},
     rtt::{RttEstimator, RttSample},
+    send_journals::{PacketSendAttempt, SendJournals},
 };
 use sakuya_stream::connection::CloseReason;
 use sakuya_tls::{engine::CryptoLevel, message::MessageLimits};
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength, NonEmptyCid},
     parameters::ParametersPart,
-    parts::{CNil, CoprodInjector, CoprodUninjector, HList, HNil, PartsError, Selector},
+    parts::{CNil, CoprodInjector, CoprodUninjector, Coproduct, HList, HNil, PartsError, Selector},
     v1::frame::{
         FrameType,
         set::{FrameSet, FrameSetPart, FrameTypeValues},
@@ -295,6 +298,8 @@ impl v1::Choices for ClientMine {
     type Recovery<V: Clone + Eq + Debug + 'static> =
         sakuya_recovery::factory::NewRenoRecoveryFactory<V>;
     type AckObligation = sakuya_recovery::ack_obligation::Rfc9000AckObligation<Duration>;
+    type SendJournals<S: 'static, P: Clone + Eq + Debug + 'static> =
+        sakuya_recovery::send_journals::DequeSendJournals<Duration, S, P>;
     type ApplicationError = common::AppClose;
     type HandshakeFailure = core::convert::Infallible;
     type Receiver = TestReceiver;
@@ -313,6 +318,8 @@ impl v1::Choices for SpyMine {
     type CryptoReceiveBuffer = FragmentedCryptoReceiveBuffer;
     type Recovery<V: Clone + Eq + Debug + 'static> = spy::SpyFactory<V>;
     type AckObligation = sakuya_recovery::ack_obligation::Rfc9000AckObligation<Duration>;
+    type SendJournals<S: 'static, P: Clone + Eq + Debug + 'static> =
+        sakuya_recovery::send_journals::DequeSendJournals<Duration, S, P>;
     type ApplicationError = common::AppClose;
     type HandshakeFailure = core::convert::Infallible;
     type Receiver = TestReceiver;
@@ -323,9 +330,15 @@ impl v1::Choices for SpyMine {
 mod spy {
     use super::*;
     use sakuya_connection::v1::recovery::OtherCongestionParts;
+    use sakuya_link::EcnMarking;
     use sakuya_recovery::{
-        congestion::CongestionController,
+        congestion::{
+            CongestionContext, CongestionController, InFlightPacket, RemovedPacket,
+            SpuriouslyLostPacket,
+        },
+        ecn::{EcnContext, EcnPolicy},
         factory::{LendCongestion, PacedNewReno, RecoveryFactory},
+        pto::{PtoAction, PtoExpiry, PtoPolicy},
     };
 
     #[derive(Debug)]
@@ -357,7 +370,7 @@ mod spy {
         type SentState = <PacedNewReno<Duration> as CongestionController<Duration>>::SentState;
         type LossState = <PacedNewReno<Duration> as CongestionController<Duration>>::LossState;
         type Access<'a>
-            = &'a mut PacedNewReno<Duration>
+            = Logged<'a>
         where
             Self: 'a,
             's: 'a;
@@ -365,14 +378,129 @@ mod spy {
             &'a mut self,
             this: &'a mut PacedNewReno<Duration>,
             others: &'a OtherCongestionParts<'s, K, LinkId<(), ()>, PacedNewReno<Duration>>,
-        ) -> &'a mut PacedNewReno<Duration> {
+        ) -> Logged<'a> {
             others.each(|key, _, rtt| {
                 log(format!("lent beside {key:?}, smoothed {:?}", rtt.smoothed))
             });
-            this
+            Logged(this)
         }
         fn next_deadline(&self, this: &PacedNewReno<Duration>) -> Option<Duration> {
             LendCongestion::<Duration, ()>::next_deadline(&self.0, this)
+        }
+    }
+
+    /// What the spy lends: sakuya's controller, logging the events of
+    /// congestion control as it hears of them.
+    pub struct Logged<'a>(&'a mut PacedNewReno<Duration>);
+    impl CongestionController<Duration> for Logged<'_> {
+        type SentState = ();
+        type LossState = ();
+        fn window(&self) -> usize {
+            self.0.window()
+        }
+        fn on_packet_sealed(&mut self, bytes: usize, app_limited: bool, now: Duration) {
+            self.0.on_packet_sealed(bytes, app_limited, now);
+        }
+        fn on_spurious_loss(
+            &mut self,
+            loss: (),
+            packets: impl Iterator<Item = SpuriouslyLostPacket<Duration>>,
+            context: &CongestionContext<Duration>,
+        ) {
+            let packets: Vec<_> = packets.collect();
+            log(format!(
+                "congestion: spurious {:?}",
+                packets.iter().map(|p| p.sent_at).collect::<Vec<_>>()
+            ));
+            self.0.on_spurious_loss(loss, packets.into_iter(), context);
+        }
+        fn on_ce(
+            &mut self,
+            increase: u64,
+            reference_sent_at: Duration,
+            context: &CongestionContext<Duration>,
+        ) {
+            self.0.on_ce(increase, reference_sent_at, context);
+        }
+        fn on_lost(
+            &mut self,
+            packets: impl Iterator<Item = InFlightPacket<Duration, ()>>,
+            context: &CongestionContext<Duration>,
+        ) {
+            let packets: Vec<_> = packets.collect();
+            log(format!(
+                "congestion: lost {} bytes, {} in flight",
+                packets.iter().map(|p| p.bytes).sum::<usize>(),
+                context.bytes_in_flight
+            ));
+            self.0.on_lost(packets.into_iter(), context);
+        }
+        fn on_persistent_congestion(&mut self, context: &CongestionContext<Duration>) {
+            log("congestion: persistent");
+            self.0.on_persistent_congestion(context);
+        }
+        fn wants_recovery_send(&mut self) -> bool {
+            self.0.wants_recovery_send()
+        }
+        fn on_acked(
+            &mut self,
+            packets: impl Iterator<Item = InFlightPacket<Duration, ()>>,
+            context: &CongestionContext<Duration>,
+        ) {
+            let packets: Vec<_> = packets.collect();
+            log(format!(
+                "congestion: acked {} bytes, {} in flight, sampled {}",
+                packets.iter().map(|p| p.bytes).sum::<usize>(),
+                context.bytes_in_flight,
+                context.rtt_sampled
+            ));
+            self.0.on_acked(packets.into_iter(), context);
+        }
+        fn on_removed(
+            &mut self,
+            packets: impl Iterator<Item = RemovedPacket<()>>,
+            context: &CongestionContext<Duration>,
+        ) {
+            self.0.on_removed(packets, context);
+        }
+        fn on_max_datagram_size_changed(
+            &mut self,
+            new: usize,
+            handshake_confirmed: bool,
+            context: &CongestionContext<Duration>,
+        ) {
+            self.0
+                .on_max_datagram_size_changed(new, handshake_confirmed, context);
+        }
+    }
+    impl Pacer<Duration> for Logged<'_> {
+        fn next_release(&self) -> Option<Duration> {
+            self.0.next_release()
+        }
+        fn allowance(&self) -> usize {
+            self.0.allowance()
+        }
+        fn refill(&mut self, at: Duration, input: PacingInput) {
+            self.0.refill(at, input);
+        }
+        fn on_charged(&mut self, bytes: usize) {
+            self.0.on_charged(bytes);
+        }
+    }
+    impl PtoPolicy<Duration> for Logged<'_> {
+        fn on_pto_expired(&mut self, expiry: &PtoExpiry<Duration>) -> PtoAction {
+            self.0.on_pto_expired(expiry)
+        }
+        fn on_duplicate_initial_crypto(&mut self) -> bool {
+            self.0.on_duplicate_initial_crypto()
+        }
+    }
+    impl EcnPolicy<Duration> for Logged<'_> {
+        fn marking(&mut self, context: &EcnContext<Duration>) -> EcnMarking {
+            self.0.marking(context)
+        }
+        fn wants_revalidation(&mut self, context: &EcnContext<Duration>) -> bool {
+            self.0.wants_revalidation(context)
         }
     }
 }
@@ -391,6 +519,32 @@ mod probe {
     }
     impl ParametersPart<TransportParameterSpace> for Part {
         type Parameters = HNil;
+    }
+
+    /// The summary of a frame the probe writes, as the tests number it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Summary(pub u64);
+    impl FeedbackSummaryPart for Part {
+        type FeedbackSummary<I> = Summary;
+    }
+    /// The probe logs what comes back of its summaries.
+    impl<T: ConnectionChoices, L: PartList<T>, V> SendFeedback<T, L, V, ()> for Part {
+        fn delivered<B: CallBundle>(
+            _: &mut Lineage<'_, V>,
+            _: &mut OtherNodes<'_, T, L, B>,
+            space: PacketNumberSpaceKind,
+            summary: Summary,
+        ) {
+            log(format!("delivered {space:?} {}", summary.0));
+        }
+        fn lost<B: CallBundle>(
+            _: &mut Lineage<'_, V>,
+            _: &mut OtherNodes<'_, T, L, B>,
+            space: PacketNumberSpaceKind,
+            summary: &Summary,
+        ) {
+            log(format!("lost {space:?} {}", summary.0));
+        }
     }
 
     const NO_FRAME_TYPES: FrameTypeValues = FrameTypeValues::new(&[]);
@@ -432,7 +586,7 @@ mod probe {
             _: &mut LineageOf<'v, T, L, layer::LogicalPath>,
             _: &mut OtherNodes<'v, T, L, B>,
             run: CNil,
-            _: &DispatchFacts<InstantOf<T>>,
+            _: &DispatchFacts<InstantOf<T>, LinkPathIdentifierOf<T, L>>,
         ) -> Result<(), core::convert::Infallible> {
             match run {}
         }
@@ -655,6 +809,7 @@ mod probe {
     }
     packet_feeder!(Mine);
     packet_feeder!(ClientMine);
+    packet_feeder!(SpyMine);
     impl<T, L, I, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ic, Icr, Ip, Ian>
         DataComponent<
             T,
@@ -1005,18 +1160,23 @@ mod probe {
                 &PATH,
                 &first,
                 |hlist_pat![part], rest| {
-                    lend_congestion::<SpyMine, Parts, B, Ji, Jr, _>(factory, part, rest, |access| {
-                        // refilled as a datagram would start, then spent,
-                        // so pacing holds the next datagram back
-                        let input = PacingInput {
-                            window: access.window(),
-                            smoothed_rtt: ms(333),
-                            max_datagram_size: 1200,
-                        };
-                        access.refill(now, input);
-                        let all = access.allowance();
-                        access.on_charged(all);
-                    })
+                    lend_congestion::<SpyMine, Parts, B, Ji, Jr, _>(
+                        factory,
+                        part,
+                        rest,
+                        |mut access| {
+                            // refilled as a datagram would start, then spent,
+                            // so pacing holds the next datagram back
+                            let input = PacingInput {
+                                window: access.window(),
+                                smoothed_rtt: ms(333),
+                                max_datagram_size: 1200,
+                            };
+                            access.refill(now, input);
+                            let all = access.allowance();
+                            access.on_charged(all);
+                        },
+                    )
                 },
             );
             None
@@ -1178,6 +1338,21 @@ mod probe {
         /// An ACK arriving now gives an RTT sample of a packet sent at the
         /// instant given.
         Sample(Duration),
+        /// The link accepted, now, as many 1200-byte ack-eliciting packets
+        /// as `count` in the space, as the sending call will: recorded in
+        /// the send journals, each with one frame of the probe, numbered as
+        /// its packet, and appended to the loss detection state.
+        Sent {
+            space: PacketNumberSpaceKind,
+            count: u64,
+        },
+        /// The link accepted, now, a 50-byte packet with only an ACK frame
+        /// of the space, as the ACK frame source and the sending call will:
+        /// the frame acknowledges the largest packet number received.
+        SentAck(PacketNumberSpaceKind),
+        /// Log the RTT estimate, the window, the bytes in flight, the probe
+        /// permits, the backoff and the first sample's arrival.
+        Inspect,
     }
 
     /// In a server's first recovery layer: does its steps at their
@@ -1191,7 +1366,12 @@ mod probe {
         LinkPathCongestionState<Duration>,
         PacketNumberSpaces<PacketNumberSpaceState>,
         HandshakeConfirmation,
-        RttOf<T, Parts>
+        RttOf<T, Parts>,
+        SendJournalsOf<T, Parts>,
+        AckObligationsOf<T>,
+        PacketNumberSpaces<ReceiveJournals<Duration>>,
+        CongestionPartOf<T, Parts>,
+        ProbeTimeout<Duration>
     ];
     /// The feeder of the recovery layers of a connection of the choices `$t`.
     macro_rules! feeder {
@@ -1227,12 +1407,29 @@ mod probe {
             }
             fn expire<'v, B: CallBundle>(
                 lineage: LineageOf<'v, $t, Parts, layer::Recovery>,
-                _: &mut OtherNodes<'v, $t, Parts, B>,
+                others: &mut OtherNodes<'v, $t, Parts, B>,
                 now: Duration,
             ) -> Option<RequestOf<$t, Parts>> {
                 let thresholds = *lineage.get::<LossThresholds, Ith>();
-                let (hlist_pat![feeder, spaces, state, numbers, confirmation, rtt], _) =
-                    Take::<Fed<$t>, K>::take(lineage);
+                let (
+                    hlist_pat![
+                        feeder,
+                        spaces,
+                        state,
+                        numbers,
+                        confirmation,
+                        rtt,
+                        journals,
+                        obligations,
+                        received,
+                        part,
+                        pto
+                    ],
+                    _,
+                ) = Take::<Fed<$t>, K>::take(lineage);
+                let NodeKey::Recovery(_, here) = others.here().clone() else {
+                    unreachable!("a recovery layer's lend carries its key")
+                };
                 let (_, step) = feeder.0.pop_front()?;
                 match step {
                     Step::Send {
@@ -1270,6 +1467,59 @@ mod probe {
                             RttSample::new(sent_at, now, Duration::ZERO, Duration::MAX, link())?;
                         rtt.on_sample(sample);
                     }
+                    Step::Sent { space, count } => {
+                        let journals = journals.get_mut(space)?;
+                        let detection = spaces.get_mut(space)?;
+                        for _ in 0..count {
+                            let mut attempt = journals.start_attempt(here.clone());
+                            let number = attempt.packet_number();
+                            attempt.record_frame(
+                                Coproduct::inject(Summary(number.get())),
+                                true,
+                                true,
+                            );
+                            let sealed = attempt.seal(1200, false)?;
+                            journals.sent(sealed, now);
+                            let charge = InFlightCharge {
+                                bytes: 1200,
+                                app_limited: false,
+                                sent_state: (),
+                            };
+                            detection.accept(number, now, true, Some(charge));
+                            state.add_in_flight(1200);
+                        }
+                    }
+                    Step::SentAck(space) => {
+                        let received = received.get_mut(space)?;
+                        let (largest, _) = received.largest()?;
+                        let before = obligations.get_mut(space)?.ack_written(largest);
+                        received.on_ack_written();
+                        let journals = journals.get_mut(space)?;
+                        let mut attempt = journals.start_attempt(here.clone());
+                        let number = attempt.packet_number();
+                        let summary = v1::feedback::FeedbackSummary::Ack(AckSummary {
+                            largest,
+                            before,
+                        });
+                        attempt.record_frame(Coproduct::inject(summary), false, false);
+                        let sealed = attempt.seal(50, false)?;
+                        journals.sent(sealed, now);
+                        spaces.get_mut(space)?.accept(number, now, false, None);
+                    }
+                    Step::Inspect => {
+                        let estimate = RttEstimator::<Duration>::estimate(rtt);
+                        log(format!(
+                            "rtt latest {:?}, smoothed {:?}, window {}, in flight {}, permits {}, \
+                             backoff {}, first sample {:?}",
+                            estimate.latest,
+                            estimate.smoothed,
+                            CongestionController::<Duration>::window(part),
+                            state.bytes_in_flight(),
+                            state.probe_permits(),
+                            pto.backoff(),
+                            state.first_rtt_sample_at(),
+                        ));
+                    }
                 }
                 None
             }
@@ -1302,6 +1552,7 @@ mod probe {
     }
     feeder!(Mine);
     feeder!(ClientMine);
+    feeder!(SpyMine);
 
     impl LayerShare<SpyMine, Parts, layer::Connection> for Part {
         type Data = HList![Adder, Lender];
@@ -1336,7 +1587,7 @@ mod probe {
         type Calls = HNil;
     }
     impl LayerShare<SpyMine, Parts, layer::Recovery> for Part {
-        type Data = HList![LayerWatch];
+        type Data = HList![LayerWatch, Feeder];
         type Calls = HNil;
     }
     impl LayerShare<ClientMine, Parts, layer::Recovery> for Part {
@@ -1348,7 +1599,7 @@ mod probe {
         type Calls = HNil;
     }
     impl LayerShare<SpyMine, Parts, layer::LogicalPath> for Part {
-        type Data = HNil;
+        type Data = HList![PacketFeeder];
         type Calls = HNil;
     }
     impl LayerShare<ClientMine, Parts, layer::LogicalPath> for Part {
@@ -3328,5 +3579,325 @@ fn past_the_limit_of_held_inputs_the_new_one_is_dropped() {
             "initial keys live: false",
             "held 0, largest Handshake Some(0)",
         ]
+    );
+}
+
+/// An ACK frame of `ranges`, largest first, each `(smallest, largest)` below
+/// 64, with an ACK Delay of 0 and, when `ecn`, ECN counts of 0; then
+/// PADDING.
+fn ack_of(ranges: &[(u8, u8)], ecn: bool) -> Vec<u8> {
+    let (first_smallest, largest) = ranges[0];
+    let count = u8::try_from(ranges.len() - 1).expect("a short list");
+    let mut frame = vec![
+        if ecn { 0x03 } else { 0x02 },
+        largest,
+        0,
+        count,
+        largest - first_smallest,
+    ];
+    let mut previous = first_smallest;
+    for &(smallest, end) in &ranges[1..] {
+        frame.push(previous - end - 2);
+        frame.push(end - smallest);
+        previous = smallest;
+    }
+    if ecn {
+        frame.extend_from_slice(&[0, 0, 0]);
+    }
+    frame.extend_from_slice(&[0; 20]);
+    frame
+}
+
+/// The client's Initial packet `number` with an ACK frame of `ranges`,
+/// received over `link` at `at`.
+fn ack_received(
+    number: u64,
+    ranges: &[(u8, u8)],
+    link: &LinkId<(), ()>,
+    at: Duration,
+) -> probe::PacketStep {
+    probe::PacketStep::Receive(received(
+        long_packet(INITIAL, number, &ack_of(ranges, false)),
+        link,
+        at,
+    ))
+}
+
+/// The lines of `log` that start with one of `prefixes`.
+fn lines_of(log: Vec<String>, prefixes: &[&str]) -> Vec<String> {
+    log.into_iter()
+        .filter(|line| prefixes.iter().any(|prefix| line.starts_with(prefix)))
+        .collect()
+}
+
+#[test]
+fn an_ack_of_a_packet_not_sent_closes_the_connection() {
+    use probe::PacketStep::Inspect;
+    reset();
+    let first = link();
+    feed_packets([(ms(6), Inspect)]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    take_log();
+    deliver(
+        padded(
+            &[],
+            |payload| long_packet(INITIAL, 0, payload),
+            &ack_of(&[(0, 0)], false),
+        ),
+        &first,
+        ms(5),
+    );
+    let log = run(&mut connection, 5..=6);
+    let inspect = log
+        .iter()
+        .find(|line| line.starts_with("read"))
+        .expect("inspected");
+    assert!(
+        inspect.contains(
+            "UnsentPacketAcknowledged { space: Initial, largest: PacketNumber(VarInt(0)), \
+             next: PacketNumber(VarInt(0)), ecn_counts: false }"
+        ),
+        "{inspect}"
+    );
+}
+
+#[test]
+fn an_ack_samples_the_rtt_and_settles_what_it_newly_acknowledges() {
+    use probe::PacketStep::Receive;
+    reset();
+    let first = link();
+    feed([
+        (
+            ms(10),
+            probe::Step::Sent {
+                space: PacketNumberSpaceKind::Initial,
+                count: 3,
+            },
+        ),
+        (ms(51), probe::Step::Inspect),
+    ]);
+    // with ECN counts, which are not looked at yet
+    feed_packets([(
+        ms(50),
+        Receive(received(
+            long_packet(INITIAL, 0, &ack_of(&[(0, 2)], true)),
+            &first,
+            ms(50),
+        )),
+    )]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first);
+    take_log();
+    let log = run(&mut connection, 10..=51);
+    assert_eq!(
+        lines_of(log, &["in flight", "delivered", "lost", "processed", "rtt"]),
+        [
+            "in flight 3600, outstanding 3, lost [], permits 0, backoff 0",
+            "delivered Initial 0",
+            "delivered Initial 1",
+            "delivered Initial 2",
+            "processed: highest numbered true, non-probing true",
+            "in flight 0, outstanding 0, lost [], permits 0, backoff 0",
+            // the sample is the arrival less the send time; slow start
+            // grows the window by what was acknowledged
+            "rtt latest 40ms, smoothed 40ms, window 15600, in flight 0, permits 0, backoff 0, \
+             first sample Some(50ms)",
+            // what the inspection took is read again
+            "in flight 0, outstanding 0, lost [], permits 0, backoff 0",
+        ]
+    );
+}
+
+#[test]
+fn deliveries_go_back_before_losses_and_a_late_ack_tells_of_a_spurious_loss() {
+    reset();
+    let first = link();
+    feed([(
+        ms(10),
+        probe::Step::Sent {
+            space: PacketNumberSpaceKind::Initial,
+            count: 5,
+        },
+    )]);
+    feed_packets([
+        // 0 and 1 are three packets before 4, 2 is not
+        (ms(50), ack_received(0, &[(3, 4)], &first, ms(50))),
+        (ms(52), ack_received(1, &[(3, 4), (0, 1)], &first, ms(52))),
+        (ms(60), ack_received(2, &[(2, 2)], &first, ms(60))),
+    ]);
+    let mut connection = connection!(SpyMine, AddressValidation::Validated, first);
+    take_log();
+    let log = run(&mut connection, 10..=60);
+    assert_eq!(
+        lines_of(log, &["congestion", "delivered", "lost"]),
+        [
+            // the losses come before the acknowledgments, each after what it
+            // settles left the bytes in flight
+            "congestion: lost 2400 bytes, 3600 in flight",
+            "congestion: acked 2400 bytes, 1200 in flight, sampled true",
+            "delivered Initial 3",
+            "delivered Initial 4",
+            "lost Initial 0",
+            "lost Initial 1",
+            // acknowledged late: the records were kept
+            "congestion: spurious [10ms, 10ms]",
+            "delivered Initial 0",
+            "delivered Initial 1",
+            // 2 waited on the time threshold: 9/8 of the 40 ms sample after
+            // it was sent
+            "congestion: lost 1200 bytes, 0 in flight",
+            "lost Initial 2",
+            "congestion: spurious [10ms]",
+            "delivered Initial 2",
+        ]
+    );
+}
+
+#[test]
+fn an_ack_that_acknowledges_nothing_new_keeps_the_backoff() {
+    reset();
+    let first = link();
+    feed([
+        (
+            ms(10),
+            probe::Step::Sent {
+                space: PacketNumberSpaceKind::Initial,
+                count: 1,
+            },
+        ),
+        (
+            ms(60),
+            probe::Step::Sent {
+                space: PacketNumberSpaceKind::Initial,
+                count: 1,
+            },
+        ),
+    ]);
+    feed_packets([
+        (ms(50), ack_received(0, &[(0, 0)], &first, ms(50))),
+        (ms(200), ack_received(1, &[(0, 0)], &first, ms(200))),
+        (ms(210), ack_received(2, &[(0, 1)], &first, ms(210))),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first);
+    take_log();
+    let outer = Outer::new();
+    let mut at = |millis| {
+        advance_to(ms(millis));
+        assert!(outer.poll(&mut connection).is_pending());
+        status()
+    };
+    assert_eq!(
+        at(10).as_deref(),
+        Some("in flight 1200, outstanding 1, lost [], permits 0, backoff 0")
+    );
+    assert_eq!(
+        at(50).as_deref(),
+        Some("in flight 0, outstanding 0, lost [], permits 0, backoff 0")
+    );
+    at(60);
+    // 40 ms + 4 × 20 ms from the sample, after the packet sent at 60 ms
+    assert_eq!(at(179), None);
+    assert_eq!(
+        at(180).as_deref(),
+        Some("in flight 1200, outstanding 1, lost [], permits 2, backoff 1")
+    );
+    assert_eq!(
+        at(200).as_deref(),
+        Some("in flight 1200, outstanding 1, lost [], permits 2, backoff 1")
+    );
+    assert_eq!(
+        at(210).as_deref(),
+        Some("in flight 0, outstanding 0, lost [], permits 0, backoff 0")
+    );
+}
+
+#[test]
+fn a_delivered_ack_frame_stops_what_it_reported_from_being_reported() {
+    use probe::PacketStep::{Inspect, Receive};
+    reset();
+    let first = link();
+    feed([(ms(6), probe::Step::SentAck(PacketNumberSpaceKind::Initial))]);
+    feed_packets([
+        (
+            ms(5),
+            Receive(received(long_packet(INITIAL, 0, &ping()), &first, ms(5))),
+        ),
+        (ms(7), Inspect),
+        (ms(50), ack_received(1, &[(0, 0)], &first, ms(50))),
+        (ms(51), Inspect),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first);
+    take_log();
+    let log = run(&mut connection, 5..=51);
+    assert_eq!(
+        lines_of(log, &["read"]),
+        [
+            "read \"\", largest Some((0, 5ms)), ranges [(0, 0)], due Some(NotDue), \
+             idle Some(30.005s), reason None",
+            // the peer knows of 0: only the ACK frame's own packet is left
+            "read \"\", largest Some((1, 50ms)), ranges [(1, 1)], due Some(NotDue), \
+             idle Some(30.05s), reason None",
+        ]
+    );
+}
+
+#[test]
+fn a_lost_ack_frame_owes_again_what_it_answered() {
+    use probe::PacketStep::{Inspect, Receive};
+    reset();
+    let first = link();
+    feed([
+        (ms(6), probe::Step::SentAck(PacketNumberSpaceKind::Initial)),
+        (
+            ms(8),
+            probe::Step::Sent {
+                space: PacketNumberSpaceKind::Initial,
+                count: 3,
+            },
+        ),
+    ]);
+    feed_packets([
+        (
+            ms(5),
+            Receive(received(long_packet(INITIAL, 0, &ping()), &first, ms(5))),
+        ),
+        (ms(7), Inspect),
+        // the ACK frame went in packet 0, three packets before 3
+        (ms(50), ack_received(1, &[(3, 3)], &first, ms(50))),
+        (ms(51), Inspect),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first);
+    take_log();
+    let log = run(&mut connection, 5..=51);
+    assert_eq!(
+        lines_of(log, &["read", "delivered", "lost"]),
+        [
+            "read \"\", largest Some((0, 5ms)), ranges [(0, 0)], due Some(NotDue), \
+             idle Some(30.005s), reason None",
+            "delivered Initial 3",
+            // an Initial packet is acknowledged at once
+            "read \"\", largest Some((1, 50ms)), ranges [(0, 1)], due Some(Now), \
+             idle Some(30.05s), reason None",
+        ]
+    );
+}
+
+#[test]
+fn a_link_path_that_ends_hands_back_what_it_did_not_settle_as_lost() {
+    reset();
+    CLOSE_AT.with(|c| c.set(Some(ms(20))));
+    let first = link();
+    feed([(
+        ms(10),
+        probe::Step::Sent {
+            space: PacketNumberSpaceKind::Initial,
+            count: 2,
+        },
+    )]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first);
+    take_log();
+    let log = run(&mut connection, 10..=60);
+    assert_eq!(
+        lines_of(log, &["lost", "link path ended"]),
+        ["lost Initial 0", "lost Initial 1", "link path ended: None",]
     );
 }

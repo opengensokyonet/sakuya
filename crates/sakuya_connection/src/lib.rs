@@ -33,6 +33,7 @@ pub mod component;
 pub mod dispatch;
 pub mod driver;
 pub mod error;
+pub mod feedback;
 pub mod layer;
 pub mod others;
 pub mod request;

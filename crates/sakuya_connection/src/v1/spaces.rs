@@ -1,12 +1,15 @@
 //! What a logical path keeps for each packet number space: its packet
-//! number state, its receive journals and its ACK obligation.
+//! number state, its receive journals, its ACK obligation and its send
+//! journals.
 //!
 //! Each is one component of [`PacketNumberSpaces`]: the value for a space
 //! does not know which space it is. A space exists until its keys are
 //! discarded, so a logical path built after the Initial or Handshake keys
 //! are discarded has no such space.
 //!
-//! The send journals join these with the summaries of the frame sources.
+//! The send journals record each packet sent with the feedback summaries
+//! of its frames, until it is acknowledged, or declared lost and its
+//! retention ended.
 
 use core::time::Duration;
 
@@ -31,9 +34,10 @@ use crate::{
         ArgsOf, Build, DataComponent, LineageOf, ParentsOf, PassiveDataComponent, ReadSet,
         RequestOf,
     },
+    feedback::{FeedbackSummariesOf, FeedbackSummaryOf},
     layer,
     others::OtherNodes,
-    share::{LineageLists, LineagePartList},
+    share::{LineageLists, LineagePartList, LinkPathIdentifierOf},
     take::{GetAt, Lineage},
 };
 
@@ -51,6 +55,16 @@ pub type AckObligationsOf<T> = PacketNumberSpaces<<T as Choices>::AckObligation>
 /// Where the ACK obligations are among a logical path's components.
 #[derive(Debug)]
 pub struct ChosenAckObligation;
+
+/// The send journals of a logical path, of the type the choices `T` give,
+/// for the summaries and the link paths of the list of parts `L`.
+pub type SendJournalsOf<T, L> = PacketNumberSpaces<
+    <T as Choices>::SendJournals<FeedbackSummaryOf<T, L>, LinkPathIdentifierOf<T, L>>,
+>;
+
+/// Where the send journals are among a logical path's components.
+#[derive(Debug)]
+pub struct ChosenSendJournals;
 
 /// The `max_ack_delay` a peer assumes when the parameter is absent (RFC
 /// 9000 §18.2): 25 ms.
@@ -235,4 +249,39 @@ where
         }
         None
     }
+}
+
+// ---- the send journals ----
+
+/// Each space starts with nothing sent.
+///
+/// The positions are one tuple: the packet number states and the receive
+/// journals are built with two and three positions, and a tuple of the
+/// same length would overlap theirs.
+impl<T, L, X, Ii, Ih> Build<T, L, layer::LogicalPath, ((ChosenSendJournals, Ii, Ih),)>
+    for PacketNumberSpaces<X>
+where
+    T: Choices<SendJournals<FeedbackSummaryOf<T, L>, LinkPathIdentifierOf<T, L>> = X>,
+    X: Default,
+    L: LineagePartList<T> + FeedbackSummariesOf,
+    for<'v> <L as LineageLists<'v, T>>::Connection:
+        GetAt<InitialKeys<T::Crypto>, Ii> + GetAt<HandshakeKeys<T::Crypto>, Ih>,
+{
+    fn build<'v>(
+        parents: &mut ParentsOf<'v, T, L, layer::LogicalPath>,
+        _: &mut ArgsOf<T, L, layer::LogicalPath>,
+    ) -> Self {
+        live_spaces::<T, _, Ii, Ih, _>(parents, |_| X::default())
+    }
+}
+
+/// They have no deadline and read nothing: what lies past its retention is
+/// dropped when an ACK frame or a loss detection of the space looks at
+/// them anyway (RFC 9002 §6.1 keeps no record of lost packets; these are
+/// kept only to recognize late acknowledgments).
+impl<T, L, X> DataComponent<T, L, layer::LogicalPath, ChosenSendJournals> for PacketNumberSpaces<X>
+where
+    T: Choices<SendJournals<FeedbackSummaryOf<T, L>, LinkPathIdentifierOf<T, L>> = X>,
+    L: LineagePartList<T> + FeedbackSummariesOf,
+{
 }
