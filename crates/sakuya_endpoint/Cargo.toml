@@ -1,0 +1,23 @@
+[package]
+name = "sakuya_endpoint"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "QUIC endpoints for sakuya: address validation tokens, Retry and version negotiation responses"
+
+[dependencies]
+bytes.workspace = true
+futures-util.workspace = true
+nitori_call.workspace = true
+nitori_crypto.workspace = true
+nitori_io.workspace = true
+sakuya_datagram_routing.workspace = true
+sakuya_packet_protection.workspace = true
+sakuya_wire.workspace = true
+snafu.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+nitori_crypto_aws_lc.workspace = true
+sakuya_packet_protection = { workspace = true, features = ["ring"] }

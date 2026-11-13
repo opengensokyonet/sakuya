@@ -8,6 +8,7 @@ members = [
     "crates/sakuya_tls",
     "crates/sakuya_recovery",
     "crates/sakuya_connection",
+    "crates/sakuya_endpoint",
 ]
 resolver = "3"
 
@@ -23,11 +24,11 @@ dashmap = "6.1.0"
 either = { version = "1.17.0", default-features = false }
 frunk_core = { version = "=0.5.0", default-features = false }
 futures-util = { version = "0.3.32", default-features = false, features = ["alloc"] }
-nitori_call = { git = "https://github.com/opengensokyonet/nitori", rev = "bcd0708b98981c389ea6200f094c37cdfb56613a" }
-nitori_crypto = { git = "https://github.com/opengensokyonet/nitori", rev = "bcd0708b98981c389ea6200f094c37cdfb56613a" }
-nitori_crypto_aws_lc = { git = "https://github.com/opengensokyonet/nitori", rev = "bcd0708b98981c389ea6200f094c37cdfb56613a" }
-nitori_id = { git = "https://github.com/opengensokyonet/nitori", rev = "bcd0708b98981c389ea6200f094c37cdfb56613a" }
-nitori_io = { git = "https://github.com/opengensokyonet/nitori", rev = "bcd0708b98981c389ea6200f094c37cdfb56613a" }
+nitori_call = { git = "https://github.com/opengensokyonet/nitori", rev = "8d9a31362c81e575e37406219ff15d710f04dd6f" }
+nitori_crypto = { git = "https://github.com/opengensokyonet/nitori", rev = "8d9a31362c81e575e37406219ff15d710f04dd6f" }
+nitori_crypto_aws_lc = { git = "https://github.com/opengensokyonet/nitori", rev = "8d9a31362c81e575e37406219ff15d710f04dd6f" }
+nitori_id = { git = "https://github.com/opengensokyonet/nitori", rev = "8d9a31362c81e575e37406219ff15d710f04dd6f" }
+nitori_io = { git = "https://github.com/opengensokyonet/nitori", rev = "8d9a31362c81e575e37406219ff15d710f04dd6f" }
 proptest = "1.12.0"
 ring = { version = "0.17.14", default-features = false }
 rustls = { version = "0.23.46", default-features = false, features = ["std", "aws_lc_rs"] }
