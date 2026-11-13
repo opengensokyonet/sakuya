@@ -20,6 +20,11 @@
 //!   for each kind of response it sends without a connection.
 //! - [`quota`]: the bounds an endpoint applies to work that arrives without a
 //!   connection.
+//! - [`dropped_input`]: what an endpoint dropped of that work, counted by
+//!   the bound that was reached.
+//! - [`zero_length`]: the local ends on which a connection uses
+//!   zero-length local connection IDs, and the recognizer that reads short
+//!   headers there accordingly.
 //! - [`client_token`]: where a client keeps the tokens servers gave it for
 //!   later connections.
 //!
@@ -28,8 +33,13 @@
 
 pub mod address_token;
 pub mod client_token;
+pub mod dropped_input;
 pub mod invalid_token;
 pub mod quota;
 pub mod retry;
 pub mod send_set;
 pub mod version_negotiation;
+pub mod zero_length;
+
+#[cfg(test)]
+mod test_link;

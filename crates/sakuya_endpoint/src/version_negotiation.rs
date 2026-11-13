@@ -12,12 +12,16 @@
 //! [RFC 9000 §6.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-6.3
 //! [RFC 9000 §17.2.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.2.1
 
+mod service;
+
 use bytes::Bytes;
 use nitori_crypto::{Random, RandomError};
 use sakuya_wire::{
     connection_id::RawConnectionId, header::codec::WriteVersionNegotiationHostExt as _,
     version::Version,
 };
+
+pub use service::{NegotiatingVersionService, PendingVersionNegotiation, VersionNegotiationQueue};
 
 /// The `0x40` bit of the Unused field, set so that the packet appears to have
 /// the Fixed Bit ([RFC 9000 §17.2.1]).

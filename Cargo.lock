@@ -661,12 +661,14 @@ name = "sakuya_endpoint"
 version = "0.0.0"
 dependencies = [
  "bytes",
+ "dashmap",
  "futures-util",
  "nitori_call",
  "nitori_crypto",
  "nitori_crypto_aws_lc",
  "nitori_io",
  "sakuya_datagram_routing",
+ "sakuya_link",
  "sakuya_packet_protection",
  "sakuya_wire",
  "snafu",

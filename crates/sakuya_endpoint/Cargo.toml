@@ -8,11 +8,13 @@ description = "QUIC endpoints for sakuya: address validation tokens, Retry and v
 
 [dependencies]
 bytes.workspace = true
+dashmap.workspace = true
 futures-util.workspace = true
 nitori_call.workspace = true
 nitori_crypto.workspace = true
 nitori_io.workspace = true
 sakuya_datagram_routing.workspace = true
+sakuya_link.workspace = true
 sakuya_packet_protection.workspace = true
 sakuya_wire.workspace = true
 snafu.workspace = true
