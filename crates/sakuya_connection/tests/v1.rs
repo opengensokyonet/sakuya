@@ -152,6 +152,10 @@ thread_local! {
     /// What reading the first flight left, for the next connection made
     /// with a first flight read; nothing read when there is none.
     static READ_STATE: RefCell<Option<Box<dyn core::any::Any>>> = const { RefCell::new(None) };
+    /// Whether the routing domain of the next connection has a rival entry
+    /// for the same connection ID, so that every datagram is a competing
+    /// candidate.
+    static RIVAL: Cell<bool> = const { Cell::new(false) };
     /// The routing domain of the last connection made.
     static ROUTING: RefCell<Option<TestRouting>> = const { RefCell::new(None) };
 }
@@ -181,6 +185,7 @@ fn reset() {
     FIRST_DATAGRAMS.with(|f| f.borrow_mut().clear());
     FIRST_READ.with(|f| f.set(false));
     READ_STATE.with(|r| r.borrow_mut().take());
+    RIVAL.with(|r| r.set(false));
     ROUTING.with(|r| r.borrow_mut().take());
 }
 
@@ -206,6 +211,10 @@ impl DatagramDeliverer<Datagram, ()> for Posting {
 struct TestRouting {
     router: DatagramRouter<BytesMut, TestLink, Target, ConnectionIdLengths>,
     _registration: RouteEntryRegistration<Target, ()>,
+    /// When there is a rival: its entry for the same connection ID, and
+    /// its receiver, which keeps every candidate it is given and never
+    /// judges one.
+    _rival: Option<(RouteEntryRegistration<Target, ()>, TestReceiver)>,
 }
 
 /// The receiver of the initial path of a connection about to be made,
@@ -229,6 +238,19 @@ fn test_receiver() -> TestReceiver {
         ),
         Arc::new(Posting(queue.poster())) as Arc<Target>,
     );
+    let rival = RIVAL.with(Cell::get).then(|| {
+        let queue = DatagramDeliveryQueue::new(NonZeroUsize::new(64).expect("not zero"))
+            .expect("a capacity a queue can have");
+        let registration = index.register(
+            RouteMatcher::new(
+                MatchAssociation::LocalCid(NonEmptyCid::new(client_dcid()).expect("not empty")),
+                PacketForms::ALL,
+                Version::V1,
+            ),
+            Arc::new(Posting(queue.poster())) as Arc<Target>,
+        );
+        (registration, queue)
+    });
     let router = DatagramRouter::new(
         index,
         ConnectionIdLengths::new([ConnectionIdLength::new(8).expect("a length")]),
@@ -237,6 +259,7 @@ fn test_receiver() -> TestReceiver {
         *r.borrow_mut() = Some(TestRouting {
             router,
             _registration: registration,
+            _rival: rival,
         });
     });
     queue
@@ -2414,6 +2437,65 @@ fn a_one_rtt_packet_of_the_current_generation_is_processed() {
             "processed: highest numbered false, non-probing true",
             "receive Some(0), next Some(1), previous Some(false) until None, send Some(0), \
              failed 0, lowest Some(2)",
+        ]
+    );
+}
+
+#[test]
+fn a_competing_one_rtt_datagram_is_taken_when_it_opens_and_left_otherwise() {
+    use probe::PacketStep::{InspectOneRtt, InstallOneRttKeys};
+    reset();
+    RIVAL.with(|r| r.set(true));
+    let first = link();
+    feed_packets([
+        (ms(5), InstallOneRttKeys),
+        (ms(7), InspectOneRtt),
+        (ms(9), InspectOneRtt),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    take_log();
+    deliver(one_rtt_packet_of(0, 3, &ping()), &first, ms(6));
+    let log = run(&mut connection, 5..=7);
+    // it opened with the current generation: taken, and processed
+    assert_eq!(
+        log,
+        [
+            "receive Some(0), next Some(1), previous Some(false) until None, send Some(0), \
+          failed 0, lowest Some(3)"
+        ]
+    );
+    // no keys open it: left to the rival, and nothing is counted
+    deliver(one_rtt_packet(), &first, ms(8));
+    assert_eq!(
+        run(&mut connection, 8..=9),
+        [
+            "receive Some(0), next Some(1), previous Some(false) until None, send Some(0), \
+          failed 0, lowest Some(3)"
+        ]
+    );
+}
+
+#[test]
+fn a_competing_one_rtt_datagram_waits_for_the_one_rtt_keys() {
+    use probe::PacketStep::{InspectHeld, InspectOneRtt, InstallOneRttKeys};
+    reset();
+    RIVAL.with(|r| r.set(true));
+    let first = link();
+    feed_packets([
+        (ms(6), InspectHeld),
+        (ms(7), InstallOneRttKeys),
+        (ms(8), InspectOneRtt),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    take_log();
+    deliver(one_rtt_packet_of(0, 3, &ping()), &first, ms(5));
+    assert_eq!(
+        run(&mut connection, 5..=8),
+        [
+            "held 1, largest Handshake None",
+            // judged again once the keys came, and taken
+            "receive Some(0), next Some(1), previous Some(false) until None, send Some(0), \
+             failed 0, lowest Some(3)",
         ]
     );
 }
