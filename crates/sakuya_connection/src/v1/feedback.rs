@@ -34,7 +34,15 @@ pub enum FeedbackSummary<I> {
     Padding(PaddingSummary),
     /// An ACK frame.
     Ack(AckSummary<I>),
+    /// The PING of a probe timeout.
+    ProbePing(ProbePingSummary),
 }
+
+/// The summary of the PING of a probe timeout: nothing is done when it is
+/// acknowledged or lost; the probe timeout sends a new probe when it
+/// expires again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct ProbePingSummary;
 
 /// The summary of an ACK frame written into a packet.
 ///
@@ -52,6 +60,14 @@ pub struct AckSummary<I> {
 impl<I> From<PaddingSummary> for FeedbackSummary<I> {
     fn from(summary: PaddingSummary) -> Self {
         Self::Padding(summary)
+    }
+}
+
+/// Version 1's frame sources put their summaries into the sum of the
+/// summaries of a composition, where version 1's comes first.
+impl<I, Rest> From<FeedbackSummary<I>> for Coproduct<FeedbackSummary<I>, Rest> {
+    fn from(summary: FeedbackSummary<I>) -> Self {
+        Coproduct::Inl(summary)
     }
 }
 
@@ -85,7 +101,7 @@ where
         summary: FeedbackSummary<InstantOf<T>>,
     ) {
         match summary {
-            FeedbackSummary::Padding(_) => {}
+            FeedbackSummary::Padding(_) | FeedbackSummary::ProbePing(_) => {}
             FeedbackSummary::Ack(ack) => {
                 if let Some(journals) = lineage
                     .get_mut::<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>()
@@ -104,7 +120,7 @@ where
         summary: &FeedbackSummary<InstantOf<T>>,
     ) {
         match summary {
-            FeedbackSummary::Padding(_) => {}
+            FeedbackSummary::Padding(_) | FeedbackSummary::ProbePing(_) => {}
             FeedbackSummary::Ack(ack) => {
                 if let Some(obligation) =
                     lineage.get_mut::<AckObligationsOf<T>, Ia>().get_mut(space)

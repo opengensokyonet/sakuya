@@ -52,6 +52,7 @@ pub mod pto;
 pub mod receive;
 pub mod recovery;
 pub mod role;
+pub mod send;
 pub mod spaces;
 
 #[cfg(test)]

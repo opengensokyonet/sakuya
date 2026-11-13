@@ -60,6 +60,13 @@ pub enum AckOnlyClass {}
 #[derive(Debug)]
 pub enum InFlightClass {}
 
+/// The class of an open packet on its way to a frame source: the filling
+/// hands a packet to a part with this class, and the part's dispatch gives
+/// it the class of the frame source it reaches
+/// ([`OpenPacket::into_source_class`]). Nothing can be written with it.
+#[derive(Debug)]
+pub enum ClassOfSource {}
+
 impl FlightClassType for AckOnlyClass {
     const FLIGHT_CLASS: FlightClass = FlightClass::AckOnly;
 }
@@ -131,6 +138,10 @@ pub trait PacketWriting: sealed::Writing {
 
     /// The buffer the packet is written into; frames go at its end.
     fn buffer(&mut self) -> &mut BytesMut;
+
+    /// The bytes in the buffer so far: what a frame source wrote is the
+    /// difference before and after it.
+    fn buffer_len(&self) -> usize;
 
     /// A frame was written: its summary and properties.
     fn frame_written(
@@ -314,7 +325,21 @@ impl<W, C, P> OpenPacket<W, C, P> {
     }
 }
 
+impl<W, P> OpenPacket<W, ClassOfSource, P> {
+    /// The same packet for a frame source of class `C`: what a part's
+    /// dispatch does before it gives the packet to the frame source the
+    /// planned item belongs to, with that source's class.
+    pub fn into_source_class<C: FlightClassType>(self) -> OpenPacket<W, C, P> {
+        OpenPacket::new(self.writer)
+    }
+}
+
 impl<W: PacketWriting, C, P> OpenPacket<W, C, P> {
+    /// The bytes in the packet's buffer so far.
+    pub(crate) fn buffer_len(&self) -> usize {
+        self.writer.buffer_len()
+    }
+
     /// Whether more packets follow in the datagram; the packet is sealed
     /// now.
     #[cfg_attr(not(test), expect(dead_code, reason = "the filling loop uses it"))]
@@ -498,6 +523,11 @@ impl<W: fmt::Debug, C> fmt::Debug for ClosedPacket<W, C> {
 }
 
 impl<W: PacketWriting, C> ClosedPacket<W, C> {
+    /// The bytes in the packet's buffer so far.
+    pub(crate) fn buffer_len(&self) -> usize {
+        self.writer.buffer_len()
+    }
+
     /// Whether more packets follow in the datagram; the packet is sealed
     /// now.
     #[cfg_attr(not(test), expect(dead_code, reason = "the filling loop uses it"))]
@@ -517,7 +547,29 @@ pub enum Supplied<W, C, P> {
     Closed(ClosedPacket<W, C>),
 }
 
+impl<W, C, P> Supplied<W, C, P> {
+    /// The same packet back with [`ClassOfSource`]: what a part's dispatch
+    /// does with what the frame source handed back.
+    pub fn into_class_of_source(self) -> Supplied<W, ClassOfSource, P> {
+        match self {
+            Self::Open(packet) => Supplied::Open(OpenPacket::new(packet.writer)),
+            Self::Closed(packet) => Supplied::Closed(ClosedPacket {
+                writer: packet.writer,
+                class: PhantomData,
+            }),
+        }
+    }
+}
+
 impl<W: PacketWriting, C, P> Supplied<W, C, P> {
+    /// The bytes in the packet's buffer so far.
+    pub(crate) fn buffer_len(&self) -> usize {
+        match self {
+            Self::Open(packet) => packet.buffer_len(),
+            Self::Closed(packet) => packet.buffer_len(),
+        }
+    }
+
     /// Whether more packets follow in the datagram; the packet is sealed
     /// now.
     #[cfg_attr(not(test), expect(dead_code, reason = "the filling loop uses it"))]

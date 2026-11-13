@@ -481,6 +481,10 @@ where
         self.buffer
     }
 
+    fn buffer_len(&self) -> usize {
+        self.buffer.len()
+    }
+
     fn frame_written(
         &mut self,
         summary: SummaryOf<Self>,
