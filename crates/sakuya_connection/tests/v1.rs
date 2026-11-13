@@ -14,7 +14,10 @@ use std::{
 };
 
 use bytes::BytesMut;
-use common::{Mine, Outer, TestClock, TestLink, TestReceiver, advance_to, log, ms, take_log};
+use common::{
+    Mine, Outer, TestClock, TestLink, TestReceiver, advance_to, log, ms,
+    strategy::take_strategy_events, take_log,
+};
 use frunk_core::coproduct::CoproductSelector;
 use frunk_core::hlist_pat;
 use sakuya_connection::{
@@ -172,6 +175,7 @@ fn link() -> LinkId<(), ()> {
 
 fn reset() {
     take_log();
+    take_strategy_events();
     advance_to(ms(0));
     ADD.with(|a| a.set(None));
     CLOSE_AT.with(|c| c.set(None));
@@ -2157,6 +2161,7 @@ fn the_probe_timeout_leaves_out_application_data_until_the_handshake_is_confirme
     advance_to(ms(1100));
     assert!(outer.poll(&mut connection).is_pending());
     assert_eq!(status(), None);
+    assert_eq!(strategy_events("path 0: publish"), Vec::<String>::new());
     // once confirmed it is past and expires at once
     advance_to(ms(1500));
     let mut lines = Vec::new();
@@ -2168,6 +2173,11 @@ fn the_probe_timeout_leaves_out_application_data_until_the_handshake_is_confirme
         lines.last().map(String::as_str),
         Some("in flight 1200, outstanding 1, lost [], permits 2, backoff 1"),
         "{lines:?}"
+    );
+    // the space is probed with a PING only once it is probed at all
+    assert_eq!(
+        strategy_events("path 0: publish"),
+        ["path 0: publish ProbePingIntent { space: ApplicationData }"]
     );
 }
 
@@ -3966,5 +3976,319 @@ fn a_link_path_that_ends_hands_back_what_it_did_not_settle_as_lost() {
     assert_eq!(
         lines_of(log, &["lost", "link path ended"]),
         ["lost Initial 0", "lost Initial 1", "link path ended: None",]
+    );
+}
+
+/// The events of the send strategy that start with `prefix`, taken.
+fn strategy_events(prefix: &str) -> Vec<String> {
+    take_strategy_events()
+        .into_iter()
+        .filter(|event| event.starts_with(prefix))
+        .collect()
+}
+
+#[test]
+fn the_strategy_core_is_told_of_each_send_key_and_the_confirmation_once() {
+    use probe::PacketStep::{InstallHandshakeKeys, InstallOneRttSendKeys};
+    reset();
+    feed_packets([
+        (ms(12), InstallHandshakeKeys),
+        (ms(13), InstallOneRttSendKeys),
+    ]);
+    feed([(ms(14), probe::Step::Confirm)]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, link());
+    // the server starts with its Initial keys
+    assert_eq!(
+        take_strategy_events(),
+        ["path 0: added Active", "core: keys Initial"]
+    );
+    let outer = Outer::new();
+    for (at, told) in [
+        (11, &[][..]),
+        (12, &["core: keys Handshake"][..]),
+        (13, &["core: keys OneRtt"][..]),
+        (14, &["core: confirmed"][..]),
+        // nothing is told again as the connection is polled on
+        (15, &[][..]),
+        (500, &[][..]),
+        (1500, &[][..]),
+    ] {
+        advance_to(ms(at));
+        assert!(outer.poll(&mut connection).is_pending());
+        assert_eq!(take_strategy_events(), told, "at {at} ms");
+    }
+}
+
+#[test]
+fn the_strategy_core_is_told_once_the_close_reason_is_recorded_that_no_link_path_is_active() {
+    reset();
+    CLOSER.with(|c| c.borrow_mut().push_back((ms(20), probe::CloserStep::Close)));
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, link());
+    take_strategy_events();
+    let outer = Outer::new();
+    advance_to(ms(19));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(strategy_events("core: closed"), Vec::<String>::new());
+    advance_to(ms(20));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(
+        strategy_events("core: closed"),
+        ["core: closed Local(Application(AppClose(7)))"]
+    );
+    // the link path closes for three probe timeouts; the core is not told
+    // again while it does, nor when the connection ends
+    let pto = probe_timeout(
+        &sakuya_recovery::rtt::RttEstimate::initial(sakuya_recovery::rtt::INITIAL_RTT),
+        ms(1),
+        PacketNumberSpaceKind::ApplicationData,
+        ms(25),
+        0,
+    );
+    advance_to(ms(21));
+    assert!(outer.poll(&mut connection).is_pending());
+    advance_to(ms(20) + pto * 3);
+    assert!(outer.poll(&mut connection).is_ready());
+    assert_eq!(strategy_events("core: closed"), Vec::<String>::new());
+}
+
+#[test]
+fn the_first_link_path_planner_starts_active_and_a_later_one_as_a_candidate() {
+    reset();
+    ADD.with(|a| a.set(Some((ms(10), link()))));
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, link());
+    assert_eq!(strategy_events("path"), ["path 0: added Active"]);
+    let outer = Outer::new();
+    advance_to(ms(10));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(strategy_events("path"), ["path 1: added Candidate"]);
+}
+
+#[test]
+fn the_planner_is_told_when_its_link_path_closes_and_when_it_ends() {
+    reset();
+    CLOSE_AT.with(|c| c.set(Some(ms(20))));
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, link());
+    assert_eq!(strategy_events("path"), ["path 0: added Active"]);
+    let outer = Outer::new();
+    advance_to(ms(19));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(strategy_events("path"), Vec::<String>::new());
+    // the role becomes `Closing` for 30 ms
+    advance_to(ms(20));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(strategy_events("path"), ["path 0: role Closing"]);
+    advance_to(ms(49));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(strategy_events("path"), Vec::<String>::new());
+    advance_to(ms(50));
+    let _ = outer.poll(&mut connection);
+    assert_eq!(strategy_events("path"), ["path 0: ended"]);
+}
+
+#[test]
+fn the_planner_is_told_when_its_link_path_drains() {
+    reset();
+    CLOSE_AT.with(|c| c.set(Some(ms(20))));
+    DRAIN.with(|d| d.set(true));
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, link());
+    take_strategy_events();
+    let outer = Outer::new();
+    advance_to(ms(20));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(strategy_events("path"), ["path 0: role Draining"]);
+}
+
+#[test]
+fn an_acknowledgment_due_now_is_published_asking_room_for_the_shortest_frame() {
+    use probe::PacketStep::Receive;
+    reset();
+    let first = link();
+    feed_packets([(
+        ms(5),
+        Receive(received(long_packet(INITIAL, 0, &ping()), &first, ms(5))),
+    )]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first);
+    take_strategy_events();
+    let _ = run(&mut connection, 4..=4);
+    assert_eq!(take_strategy_events(), Vec::<String>::new());
+    let _ = run(&mut connection, 5..=5);
+    // the frame's type, a Largest Acknowledged, an ACK Delay, an ACK Range
+    // Count and a First ACK Range of one byte each
+    assert_eq!(
+        take_strategy_events(),
+        ["core: publish AckIntent { space: Initial, shortest: 5 }"]
+    );
+    // it stays published while the acknowledgment is due
+    let _ = run(&mut connection, 6..=7);
+    assert_eq!(take_strategy_events(), Vec::<String>::new());
+}
+
+#[test]
+fn an_acknowledgment_that_is_not_due_now_publishes_no_intent() {
+    use probe::PacketStep::{InstallOneRttKeys, Receive};
+    reset();
+    let first = link();
+    feed_packets([
+        (ms(5), InstallOneRttKeys),
+        (
+            ms(6),
+            Receive(received(one_rtt_packet_of(0, 0, &ping()), &first, ms(6))),
+        ),
+        (
+            ms(7),
+            Receive(received(one_rtt_packet_of(0, 1, &ping()), &first, ms(7))),
+        ),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first);
+    take_strategy_events();
+    // one ack-eliciting packet in the Application Data space waits for the
+    // maximum ACK delay
+    let _ = run(&mut connection, 5..=6);
+    assert_eq!(strategy_events("core: publish"), Vec::<String>::new());
+    // a second is acknowledged at once
+    let _ = run(&mut connection, 7..=7);
+    assert_eq!(
+        strategy_events("core: publish"),
+        ["core: publish AckIntent { space: ApplicationData, shortest: 5 }"]
+    );
+}
+
+#[test]
+fn the_acknowledgment_intent_goes_when_the_acknowledgment_is_written() {
+    use probe::PacketStep::Receive;
+    reset();
+    let first = link();
+    feed([(ms(8), probe::Step::SentAck(PacketNumberSpaceKind::Initial))]);
+    feed_packets([
+        (
+            ms(5),
+            Receive(received(long_packet(INITIAL, 0, &ping()), &first, ms(5))),
+        ),
+        (
+            ms(10),
+            Receive(received(long_packet(INITIAL, 1, &ping()), &first, ms(10))),
+        ),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first);
+    take_strategy_events();
+    let _ = run(&mut connection, 5..=7);
+    assert_eq!(
+        take_strategy_events(),
+        ["core: publish AckIntent { space: Initial, shortest: 5 }"]
+    );
+    // the ACK frame went out: nothing is due, and the ticket is dropped
+    let _ = run(&mut connection, 8..=9);
+    assert_eq!(
+        take_strategy_events(),
+        ["core: drop AckIntent { space: Initial, shortest: 5 }"]
+    );
+    // a new packet makes one due again
+    let _ = run(&mut connection, 10..=11);
+    assert_eq!(
+        take_strategy_events(),
+        ["core: publish AckIntent { space: Initial, shortest: 5 }"]
+    );
+}
+
+#[test]
+fn the_acknowledgment_intent_is_published_again_when_the_shortest_frame_grows() {
+    use probe::PacketStep::Receive;
+    reset();
+    let first = link();
+    feed_packets([
+        (
+            ms(5),
+            Receive(received(long_packet(INITIAL, 0, &ping()), &first, ms(5))),
+        ),
+        // the Largest Acknowledged of the first range needs two bytes
+        (
+            ms(6),
+            Receive(received(long_packet(INITIAL, 100, &ping()), &first, ms(6))),
+        ),
+        // the first range grows with no more bytes
+        (
+            ms(7),
+            Receive(received(long_packet(INITIAL, 101, &ping()), &first, ms(7))),
+        ),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first);
+    take_strategy_events();
+    let _ = run(&mut connection, 5..=5);
+    assert_eq!(
+        take_strategy_events(),
+        ["core: publish AckIntent { space: Initial, shortest: 5 }"]
+    );
+    // the new intent is in before the old ticket goes, so the space is never
+    // without one while an acknowledgment is due
+    let _ = run(&mut connection, 6..=6);
+    assert_eq!(
+        take_strategy_events(),
+        [
+            "core: publish AckIntent { space: Initial, shortest: 6 }",
+            "core: drop AckIntent { space: Initial, shortest: 5 }",
+        ]
+    );
+    let _ = run(&mut connection, 7..=8);
+    assert_eq!(take_strategy_events(), Vec::<String>::new());
+}
+
+#[test]
+fn a_probe_timeout_publishes_a_ping_on_the_planner_of_its_link_path() {
+    reset();
+    feed([(
+        ms(10),
+        probe::Step::Send {
+            space: PacketNumberSpaceKind::Initial,
+            numbers: vec![0],
+            acked: None,
+        },
+    )]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, link());
+    let outer = Outer::new();
+    advance_to(ms(10));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(strategy_events("path 0: publish"), Vec::<String>::new());
+    advance_to(ms(1008));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(strategy_events("path 0: publish"), Vec::<String>::new());
+    // the probe timeout expires at 1009 ms
+    advance_to(ms(1009));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(
+        strategy_events("path 0: publish"),
+        ["path 0: publish ProbePingIntent { space: Initial }"]
+    );
+}
+
+#[test]
+fn the_next_probe_timeout_drops_the_last_ping_before_it_publishes_its_own() {
+    reset();
+    feed([(
+        ms(10),
+        probe::Step::Send {
+            space: PacketNumberSpaceKind::Initial,
+            numbers: vec![0],
+            acked: None,
+        },
+    )]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, link());
+    let outer = Outer::new();
+    for at in [10, 1009] {
+        advance_to(ms(at));
+        assert!(outer.poll(&mut connection).is_pending());
+    }
+    take_strategy_events();
+    // the ticket stays until the next probe timeout, at 3007 ms
+    advance_to(ms(3006));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(take_strategy_events(), Vec::<String>::new());
+    advance_to(ms(3007));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(
+        take_strategy_events(),
+        [
+            "path 0: drop ProbePingIntent { space: Initial }",
+            "path 0: publish ProbePingIntent { space: Initial }",
+        ]
     );
 }

@@ -17,6 +17,7 @@ use sakuya_connection::clock::{ConnectionChoices, MonotonicClock};
 use sakuya_link::{Link, LinkId, OutgoingDatagram, SendAcceptance};
 
 pub mod parts;
+pub mod strategy;
 
 thread_local! {
     static NOW: Cell<Duration> = const { Cell::new(Duration::ZERO) };
@@ -111,7 +112,7 @@ impl sakuya_connection::v1::Choices for Mine {
     type HandshakeFailure = core::convert::Infallible;
     type Receiver = TestReceiver;
     type SendStrategy<I: sakuya_connection::send_strategy::SendStrategyTypes> =
-        sakuya_connection::send_strategy::ranked::RankedSendStrategy<I>;
+        strategy::EventLoggingSendStrategy<I>;
 }
 
 /// The datagram receiver of the tests' logical paths: a delivery queue that
