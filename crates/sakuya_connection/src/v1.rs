@@ -117,7 +117,7 @@ use sakuya_recovery::{
     receive_journals::{MaxAckRanges, ReceiveJournals},
     rtt::RttEstimator,
 };
-use sakuya_stream::connection::CloseReason;
+use sakuya_stream::connection::{AbortCause, CloseReason};
 use sakuya_tls::engine::HandshakeError;
 
 /// QUIC version 1, one part of a composition.
@@ -716,6 +716,11 @@ where
 /// left, for the connection to end: each link path ends when its closing or
 /// draining period does. An end without such a period, such as the idle
 /// timeout's, asks for the connection to end where it writes the reason.
+/// When the connection's future is dropped with the record still empty,
+/// the reason becomes [`CloseReason::Aborted`] before any node ends, so the
+/// end actions read it: [`AbortCause::DriverDropped`]. When a panic
+/// unwound through the future it becomes [`AbortCause::Panicked`], and no
+/// end action runs.
 impl<T: Choices, L: ConnectionErrorsOf, I> DataComponent<T, L, layer::Connection, (I,)>
     for CloseReasonRecord<CloseCauseOf<T, L>>
 where
@@ -745,6 +750,11 @@ where
         } else {
             None
         }
+    }
+    fn future_dropped<'v>(lineage: &mut LineageOf<'v, T, L, layer::Connection>, cause: AbortCause) {
+        lineage
+            .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, I>()
+            .record(CloseReason::Aborted(cause));
     }
 }
 

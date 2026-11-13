@@ -19,6 +19,7 @@ use std::{
 
 use futures_util::task::AtomicWaker;
 use sakuya_link::Link;
+use sakuya_stream::connection::AbortCause;
 use sakuya_wire::parts::HNil;
 
 use crate::{
@@ -162,7 +163,8 @@ type LinkNode<T, L, Pc, Pe, Pl, Pk, Ps, Pr> =
 type Six<Pc, Pe, Pl, Pk, Ps, Pr> = (Pc, Pe, Pl, Pk, Ps, Pr);
 
 /// A connection: the tree of its nodes and the driver of their calls, as
-/// one future that ends when the connection ends.
+/// one future that ends when the connection ends. Dropped before that, it
+/// ends its nodes as it is dropped, unless a panic unwound through it.
 ///
 /// `T` is the choices of the composition, `L` the list of parts. `P`, `W`
 /// and `Bw` are what the calls, the data components and their builds infer
@@ -181,7 +183,42 @@ where
     nodes_taken: Vec<(NodeAddr, usize)>,
     tables: Tables,
     ended: bool,
+    /// The driver's own code runs: set where a poll or the making of the
+    /// connection begins, cleared where it returns. Still set when the
+    /// driver is dropped, a panic unwound through it.
+    running: bool,
+    /// What a drop before the end runs. `Drop` cannot be implemented with
+    /// the bounds the components and their builds need, so the function is
+    /// taken where the connection is made, which has them.
+    on_drop: fn(&mut Self),
     positions: PhantomData<fn() -> (W, Bw)>,
+}
+
+/// A connection dropped before it ended ends here, without a closing
+/// period and with nothing sent: every data component is told that the
+/// future is dropped
+/// ([`DataComponent::future_dropped`](crate::component::DataComponent::future_dropped))
+/// with [`AbortCause::DriverDropped`], then every node ends, each component
+/// with its end action.
+///
+/// When a panic unwound through a poll or through the making of the
+/// connection, only the data components of the connection node are told,
+/// with [`AbortCause::Panicked`], so that the reason is written where the
+/// connection keeps it; no end action runs, and what the panic left of the
+/// tree is dropped as it is. The driver tells the two apart by itself: it
+/// notes that its own code runs where that begins and where it returns, so
+/// a driver dropped after its poll panicked has ended by the panic, and one
+/// dropped while a panic from elsewhere unwinds was only dropped.
+impl<T: ConnectionChoices, L: TreeCalls<T, P>, P: CallPositions, W, Bw> Drop
+    for ConnectionDriver<T, L, P, W, Bw>
+where
+    for<'v> L: LineageLists<'v, T>,
+{
+    fn drop(&mut self) {
+        if !self.ended {
+            (self.on_drop)(self);
+        }
+    }
 }
 
 // Nothing in the driver is pinned structurally: the calls and the sleep are
@@ -328,6 +365,8 @@ where
             nodes_taken: Vec::new(),
             tables,
             ended: false,
+            running: true,
+            on_drop: Self::end_dropped,
             positions: PhantomData,
         };
         let mut changes = Changes::new();
@@ -337,6 +376,7 @@ where
         let mut todo = Vec::new();
         driver.readers(&changes, None, &mut todo);
         driver.settle(todo, now);
+        driver.running = false;
         driver
     }
 
@@ -1202,6 +1242,57 @@ where
         self.ended = true;
     }
 
+    /// The future is dropped before the connection ended: tell every data
+    /// component, the nodes above a node first, then end every node. After
+    /// a panic unwound through the driver, tell the connection node's only
+    /// and end nothing.
+    fn end_dropped(&mut self) {
+        let panicked = self.running;
+        let cause = if panicked {
+            AbortCause::Panicked
+        } else {
+            AbortCause::DriverDropped
+        };
+        let now = self.clock.now();
+        // a panic can have left records of a lend it unwound through
+        self.lineage_taken.clear();
+        self.nodes_taken.clear();
+        let told = if !panicked {
+            self.live()
+        } else if self.tree.connection.is_some() {
+            // lending the connection node needs nothing of the nodes below
+            // it, whatever the panic left of them
+            vec![NodeAddr::CONNECTION]
+        } else {
+            Vec::new()
+        };
+        for addr in told {
+            let Self {
+                tree,
+                lineage_taken,
+                nodes_taken,
+                ..
+            } = self;
+            macro_rules! go {
+                ($lend:ident($($a:expr),*), $lv:ident, $h:ident, $c:ident) => {{
+                    let mut lent = tree.$lend($($a,)* Records { lineage: lineage_taken, nodes: nodes_taken, now });
+                    <NodeData<T, L, $lv> as NodePositions<T, L, $lv, $h>>::future_dropped_each(&mut lent.lineage, cause);
+                }};
+            }
+            by_layer!(addr, go);
+        }
+        // nothing is reread
+        self.lineage_taken.clear();
+        self.nodes_taken.clear();
+        if panicked {
+            // the nodes are dropped with the tree; a waker of theirs kept
+            // elsewhere does nothing from here on
+            self.shared.closed.store(true, Ordering::SeqCst);
+        } else {
+            self.end_connection(now, &mut Vec::new());
+        }
+    }
+
     /// Apply a request at once; one that no longer fits the structure is
     /// dropped. What reads the nodes made or ended goes into `todo`.
     fn apply(
@@ -1453,6 +1544,10 @@ where
 {
     type Output = ();
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        self.get_mut().turn(cx)
+        let driver = self.get_mut();
+        driver.running = true;
+        let turned = driver.turn(cx);
+        driver.running = false;
+        turned
     }
 }

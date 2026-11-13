@@ -315,6 +315,114 @@ fn closing_spreads_by_rereads_in_either_order_of_parts() {
 }
 
 #[test]
+fn a_connection_dropped_before_its_end_tells_its_components_then_ends_its_nodes() {
+    reset();
+    let mut connection = connection!(a::Part, b::Part; link());
+    let outer = Outer::new();
+    assert!(outer.poll(&mut connection).is_pending());
+    parts::command(Command::Ask(StructureRequest::AddEstablished {
+        args: EstablishedArgs::default(),
+    }));
+    // the call that handed the request over goes on and waits
+    assert!(outer.poll(&mut connection).is_pending());
+    assert!(outer.poll(&mut connection).is_pending());
+    take_log();
+    let watch = parts::WATCH_WAKER
+        .with(|w| w.borrow_mut().take())
+        .expect("the watch call waits");
+    drop(connection);
+    // the record was empty: its component wrote the reason before any node
+    // ended, and nothing was reread for it
+    assert_eq!(
+        take_log(),
+        [
+            "record told DriverDropped",
+            "entry ended",
+            "streams ended with 3 open, the record says Some(\"dropped\")",
+        ]
+    );
+    let before = outer.wakes();
+    watch.wake();
+    assert_eq!(outer.wakes(), before, "an old waker does nothing");
+}
+
+#[test]
+fn a_connection_dropped_after_its_end_ends_nothing_again() {
+    reset();
+    IDLE_AT.with(|i| i.set(Some(ms(10))));
+    let mut connection = connection!(a::Part; link());
+    let outer = Outer::new();
+    assert!(outer.poll(&mut connection).is_pending());
+    advance_to(ms(10));
+    assert!(outer.poll(&mut connection).is_ready());
+    take_log();
+    drop(connection);
+    assert!(take_log().is_empty());
+}
+
+#[test]
+#[cfg(debug_assertions)]
+fn a_connection_a_panic_unwound_through_while_made_is_only_dropped() {
+    reset();
+    let unwound = std::panic::catch_unwind(|| drop(connection!(c::Part, a::Part; link())));
+    assert!(unwound.is_err(), "the rereads do not settle");
+    let log = take_log();
+    assert!(
+        log.iter().any(|l| l == "record told Panicked"),
+        "the record was told: {log:?}"
+    );
+    assert!(
+        !log.iter().any(|l| l.contains("ended")),
+        "no end action ran: {log:?}"
+    );
+}
+
+#[test]
+fn a_connection_dropped_after_a_panic_in_its_poll_records_the_panic_and_ends_nothing() {
+    reset();
+    let mut connection = connection!(a::Part, b::Part; link());
+    let outer = Outer::new();
+    assert!(outer.poll(&mut connection).is_pending());
+    parts::command(Command::Ask(StructureRequest::AddEstablished {
+        args: EstablishedArgs::default(),
+    }));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert!(outer.poll(&mut connection).is_pending());
+    parts::command(Command::Panic);
+    let unwound =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| outer.poll(&mut connection)));
+    assert!(unwound.is_err(), "the watch call panics in the poll");
+    take_log();
+    // the host caught the panic and drops the driver afterwards: the
+    // driver still tells it from a drop without a panic
+    drop(connection);
+    assert_eq!(take_log(), ["record told Panicked"]);
+}
+
+#[test]
+fn a_connection_dropped_while_another_panic_unwinds_is_only_dropped() {
+    reset();
+    let mut connection = connection!(a::Part; link());
+    let outer = Outer::new();
+    assert!(outer.poll(&mut connection).is_pending());
+    take_log();
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _connection = connection;
+        panic!("a panic from elsewhere");
+    }));
+    assert!(unwound.is_err());
+    let log = take_log();
+    assert_eq!(
+        log.first().map(String::as_str),
+        Some("record told DriverDropped")
+    );
+    assert!(
+        log.iter().any(|l| l == "entry ended"),
+        "the nodes ended: {log:?}"
+    );
+}
+
+#[test]
 #[cfg(debug_assertions)]
 #[should_panic(expected = "rereads did not settle")]
 fn rereads_that_never_settle_panic_in_debug_builds() {

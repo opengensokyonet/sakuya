@@ -9,6 +9,7 @@
 use core::any::TypeId;
 use core::ops::Add;
 
+use sakuya_stream::connection::AbortCause;
 use sakuya_wire::parts::{HCons, HNil, Sculptor};
 
 use crate::{
@@ -108,6 +109,21 @@ where
     ) -> Option<RequestOf<T, L>> {
         None
     }
+    /// The connection's future is dropped before the connection ended.
+    ///
+    /// `cause` tells how: [`AbortCause::DriverDropped`] when the future is
+    /// only dropped, [`AbortCause::Panicked`] when a panic unwound through
+    /// it; it is never another cause.
+    ///
+    /// Dropped only, the driver calls it for every data component of every
+    /// node, the nodes above a node first, and then ends every node: an end
+    /// action sees what the components did here. Nothing is reread
+    /// afterwards.
+    ///
+    /// After a panic the driver calls it for the data components of the
+    /// connection node only, and ends no node: what the panic left of the
+    /// other nodes is dropped as it is. By default nothing.
+    fn future_dropped<'v>(_lineage: &mut LineageOf<'v, T, L, Lv>, _cause: AbortCause) {}
 }
 
 /// A data component without a deadline and without reads.
@@ -346,6 +362,9 @@ where
         after: usize,
         now: InstantOf<T>,
     ) -> Result<Option<RequestOf<T, L>>, LineageOf<'v, T, L, Lv>>;
+    /// Tell each component, in order, that the connection's future is
+    /// dropped, and how.
+    fn future_dropped_each<'v>(lineage: &mut LineageOf<'v, T, L, Lv>, cause: AbortCause);
 }
 impl<T: ConnectionChoices, L, Lv: LayerLineage> PartPositions<T, L, Lv, HNil> for HNil
 where
@@ -382,6 +401,8 @@ where
     ) -> Result<Option<RequestOf<T, L>>, LineageOf<'v, T, L, Lv>> {
         Err(lineage)
     }
+    #[inline(always)]
+    fn future_dropped_each<'v>(_: &mut LineageOf<'v, T, L, Lv>, _: AbortCause) {}
 }
 impl<T: ConnectionChoices, L, Lv: LayerLineage, X, Xs, H, Hs> PartPositions<T, L, Lv, HCons<H, Hs>>
     for HCons<X, Xs>
@@ -441,6 +462,11 @@ where
             Xs::try_reread(lineage, others, r, after, now)
         }
     }
+    #[inline(always)]
+    fn future_dropped_each<'v>(lineage: &mut LineageOf<'v, T, L, Lv>, cause: AbortCause) {
+        X::future_dropped(lineage, cause);
+        Xs::future_dropped_each(lineage, cause);
+    }
 }
 
 /// The positions of a node's data components: every part's, in the order
@@ -471,6 +497,9 @@ where
         r: usize,
         now: InstantOf<T>,
     ) -> Option<RequestOf<T, L>>;
+    /// Tell each component, in order, that the connection's future is
+    /// dropped, and how.
+    fn future_dropped_each<'v>(lineage: &mut LineageOf<'v, T, L, Lv>, cause: AbortCause);
 }
 impl<T: ConnectionChoices, L, Lv: LayerLineage> NodePositions<T, L, Lv, HNil> for HNil
 where
@@ -501,6 +530,8 @@ where
     ) -> Option<RequestOf<T, L>> {
         unreachable!("a position beyond the node's data")
     }
+    #[inline(always)]
+    fn future_dropped_each<'v>(_: &mut LineageOf<'v, T, L, Lv>, _: AbortCause) {}
 }
 impl<T: ConnectionChoices, L, Lv: LayerLineage, S, Ss, Hs, Hss>
     NodePositions<T, L, Lv, HCons<Hs, Hss>> for HCons<S, Ss>
@@ -548,5 +579,10 @@ where
             Ok(request) => request,
             Err(lineage) => Ss::reread_from_end(lineage, others, r, now),
         }
+    }
+    #[inline(always)]
+    fn future_dropped_each<'v>(lineage: &mut LineageOf<'v, T, L, Lv>, cause: AbortCause) {
+        S::future_dropped_each(lineage, cause);
+        Ss::future_dropped_each(lineage, cause);
     }
 }

@@ -26,6 +26,7 @@ use sakuya_connection::{
     share::{LayerShare, LineageLists, LogicalPathKeyShare, LogicalPathKeys, SoleLogicalPath},
     take::{GetAt, Take, TakeEach},
 };
+use sakuya_stream::connection::AbortCause;
 use sakuya_wire::parts::{HList, HNil};
 
 use super::{Mine, TestLink, log, ms};
@@ -46,6 +47,8 @@ pub enum Command {
     Close(&'static str),
     /// Write the close record and wake itself in the same lend.
     CloseAndWakeSelf(&'static str),
+    /// Panic while the connection node is lent.
+    Panic,
 }
 
 /// Give the watch call a command and wake it, as another thread would.
@@ -61,17 +64,6 @@ pub fn wake_sends() {
     for waker in SEND_WAKERS.with(|w| std::mem::take(&mut *w.borrow_mut())) {
         waker.wake();
     }
-}
-
-macro_rules! plain {
-    ($lv:ident: $($t:ty),*) => {$(
-        impl<L> DataComponent<Mine, L, layer::$lv, ()> for $t where for<'v> L: LineageLists<'v, Mine> {}
-        impl<L> Build<Mine, L, layer::$lv, ()> for $t where for<'v> L: LineageLists<'v, Mine> {
-            fn build<'v>(_: &mut ParentsOf<'v, Mine, L, layer::$lv>, _: &mut ArgsOf<Mine, L, layer::$lv>) -> Self {
-                Default::default()
-            }
-        }
-    )*};
 }
 
 /// A stand-in part defines no transport parameters.
@@ -108,7 +100,32 @@ pub mod a {
     /// Why the connection closes; only the first reason stays.
     #[derive(Debug, Default)]
     pub struct Record(pub Option<&'static str>);
-    plain!(Connection: Record);
+    impl<L> Build<Mine, L, layer::Connection, ()> for Record
+    where
+        for<'v> L: LineageLists<'v, Mine>,
+    {
+        fn build<'v>(
+            _: &mut ParentsOf<'v, Mine, L, layer::Connection>,
+            _: &mut ArgsOf<Mine, L, layer::Connection>,
+        ) -> Self {
+            Record(None)
+        }
+    }
+    /// When the connection's future is dropped with the record empty, that
+    /// becomes the reason; how it was dropped goes into the log.
+    impl<L, I> DataComponent<Mine, L, layer::Connection, (I,)> for Record
+    where
+        for<'v> L: LineageLists<'v, Mine>,
+        for<'v> <L as LineageLists<'v, Mine>>::Connection: GetAt<Record, I>,
+    {
+        fn future_dropped<'v>(
+            lineage: &mut LineageOf<'v, Mine, L, layer::Connection>,
+            cause: AbortCause,
+        ) {
+            log(format!("record told {cause:?}"));
+            lineage.get_mut::<Record, I>().0.get_or_insert("dropped");
+        }
+    }
 
     /// The idle timeout: when it expires the reason is written and the
     /// connection ends at once.
@@ -417,6 +434,7 @@ pub mod a {
                     })
                     .await;
                 }
+                Command::Panic => host.with(|_| panic!("the watch call panics")),
             }
         }
     }

@@ -1683,6 +1683,40 @@ fn a_close_of_this_side_closes_the_link_paths_and_ends_the_connection_after_them
 }
 
 #[test]
+fn a_connection_dropped_with_no_reason_recorded_ends_aborted() {
+    reset();
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, link());
+    let outer = Outer::new();
+    assert!(outer.poll(&mut connection).is_pending());
+    take_log();
+    drop(connection);
+    assert_eq!(
+        take_log(),
+        [
+            "recovery ended",
+            "link path ended: Some(Aborted(DriverDropped))",
+            "entry ended"
+        ]
+    );
+}
+
+#[test]
+fn a_connection_dropped_before_its_first_poll_ends_aborted() {
+    reset();
+    let connection = connection!(Mine, AddressValidation::NotValidated, link());
+    take_log();
+    drop(connection);
+    assert_eq!(
+        take_log(),
+        [
+            "recovery ended",
+            "link path ended: Some(Aborted(DriverDropped))",
+            "entry ended"
+        ]
+    );
+}
+
+#[test]
 fn a_link_path_made_active_gets_its_recovery_layer_and_is_seen_beside_another() {
     // what the recovery layers and the factory log, without the probe's roles
     fn recovery_log() -> Vec<String> {

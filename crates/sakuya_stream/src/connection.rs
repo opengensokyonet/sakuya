@@ -82,8 +82,37 @@ pub enum CloseReason<C> {
     /// reason.
     #[doc(alias = "Retry")]
     RetryAbandoned,
-    /// This endpoint ended the connection without sending a close.
-    Aborted,
+    /// This endpoint ended the connection without sending a close, for the
+    /// cause it holds.
+    Aborted(AbortCause),
+}
+
+/// Why this endpoint ended a connection without sending a close.
+///
+/// None of the causes has an error to carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AbortCause {
+    /// A panic unwound through the connection's driver.
+    Panicked,
+    /// The connection's driver was dropped before the connection ended and
+    /// before any reason was recorded. A close the application asked for
+    /// that the driver had not recorded yet is not the reason: the peer
+    /// received nothing.
+    DriverDropped,
+    /// The connection did not form: at the deadline, no valid Initial
+    /// packet was in the first datagrams. Only a server ends a connection
+    /// for this cause.
+    NoValidInitial,
+}
+
+impl fmt::Display for AbortCause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Panicked => "a panic unwound through the connection's driver",
+            Self::DriverDropped => "the connection's driver was dropped",
+            Self::NoValidInitial => "no valid Initial packet arrived",
+        })
+    }
 }
 
 /// Every reporter gets the same reason: this endpoint's is shared, so
@@ -99,7 +128,7 @@ impl<C> Clone for CloseReason<C> {
                 versions: Arc::clone(versions),
             },
             Self::RetryAbandoned => Self::RetryAbandoned,
-            Self::Aborted => Self::Aborted,
+            Self::Aborted(cause) => Self::Aborted(*cause),
         }
     }
 }
@@ -160,7 +189,7 @@ impl<C: fmt::Display> fmt::Display for CloseReason<C> {
             Self::RetryAbandoned => {
                 f.write_str("the connection attempt was given up after a Retry")
             }
-            Self::Aborted => f.write_str("ended without a close"),
+            Self::Aborted(cause) => write!(f, "ended without a close: {cause}"),
         }
     }
 }
