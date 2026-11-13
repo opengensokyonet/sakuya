@@ -11,6 +11,8 @@
 //!   ([RFC 9000 §8.1]).
 //! - [`retry`]: the Retry packet a server sends before it keeps any state, and
 //!   the policy that decides when to send one.
+//! - [`stateless_check`]: what the reflow driver decides about a datagram
+//!   that may start a connection, before any state for it exists.
 //! - [`invalid_token`]: the Initial packet that closes a connection attempt
 //!   with INVALID_TOKEN when a client returns a Retry token that does not
 //!   validate.
@@ -38,6 +40,7 @@ pub mod invalid_token;
 pub mod quota;
 pub mod retry;
 pub mod send_set;
+pub mod stateless_check;
 pub mod version_negotiation;
 pub mod zero_length;
 
