@@ -39,6 +39,7 @@ use sakuya_connection::{
         close::{CloseReasonRecord, LocalCloseCause},
         confirmation::HandshakeConfirmation,
         crypto::{CryptoReceiveCapacities, CryptoReceiver, FragmentedCryptoReceiveBuffer},
+        first_flight::{FirstFlight, FirstFlightReadState},
         idle::IdleTimeout,
         input::{InitialPathReceiver, LogicalPathInput},
         key_phase::KeyPhaseNumbers,
@@ -141,6 +142,11 @@ thread_local! {
     static MAX_PER_POLL: Cell<usize> = const { Cell::new(16) };
     /// How many inputs a logical path of the next connection holds.
     static MAX_HELD: Cell<usize> = const { Cell::new(16) };
+    /// The first datagrams the next connection is made with.
+    static FIRST_DATAGRAMS: RefCell<Vec<Datagram>> = const { RefCell::new(Vec::new()) };
+    /// Whether the next connection is made with a first flight read before
+    /// it was made, as a server that decides before answering makes it.
+    static FIRST_READ: Cell<bool> = const { Cell::new(false) };
     /// The routing domain of the last connection made.
     static ROUTING: RefCell<Option<TestRouting>> = const { RefCell::new(None) };
 }
@@ -167,6 +173,8 @@ fn reset() {
     MAX_ACK_RANGES.with(|m| m.set(MaxAckRanges::DEFAULT));
     MAX_PER_POLL.with(|m| m.set(16));
     MAX_HELD.with(|m| m.set(16));
+    FIRST_DATAGRAMS.with(|f| f.borrow_mut().clear());
+    FIRST_READ.with(|f| f.set(false));
     ROUTING.with(|r| r.borrow_mut().take());
 }
 
@@ -1340,6 +1348,7 @@ where
             .expect("the test clock's timers fire to the millisecond"),
         max_ack_ranges: MAX_ACK_RANGES.with(Cell::get),
         crypto_receive: <T::Side as SideCapacities>::crypto_receive(),
+        first_flight: first_flight::<T>(),
         initial_receiver: initial_receiver(),
         max_datagrams_per_poll: NonZeroUsize::new(MAX_PER_POLL.with(Cell::get))
             .expect("the tests handle at least one input per poll"),
@@ -1347,12 +1356,35 @@ where
     }
 }
 
+/// The first flight the next connection is made with.
+fn first_flight<T>() -> FirstFlight<T>
+where
+    T: v1::Choices<Crypto = RingBackend, Link = TestLink>,
+    T::Side: SideCapacities,
+{
+    if FIRST_READ.with(Cell::get) {
+        FirstFlight::Read(<T::Side as SideCapacities>::read_state())
+    } else {
+        FirstFlight::Datagrams(FIRST_DATAGRAMS.with(|f| core::mem::take(&mut *f.borrow_mut())))
+    }
+}
+
 /// The CRYPTO capacities of a side: the least the default message limits
-/// allow at each level.
-trait SideCapacities {
+/// allow at each level; and for a server, a first flight read before the
+/// connection is made.
+trait SideCapacities: Sized {
     fn crypto_receive() -> CryptoReceiveCapacities;
+    fn read_state<T>() -> FirstFlightReadState<T>
+    where
+        T: v1::Choices<Crypto = RingBackend, Side = Self>;
 }
 impl SideCapacities for v1::Server {
+    fn read_state<T>() -> FirstFlightReadState<T>
+    where
+        T: v1::Choices<Crypto = RingBackend, Side = Self>,
+    {
+        FirstFlightReadState::new(&RingBackend, &client_dcid(), &Self::crypto_receive())
+    }
     fn crypto_receive() -> CryptoReceiveCapacities {
         // ClientHello at Initial; only Finished at Handshake
         CryptoReceiveCapacities::server(MessageLimits::default(), false, 16 * 1024 + 4, 4096)
@@ -1360,6 +1392,12 @@ impl SideCapacities for v1::Server {
     }
 }
 impl SideCapacities for v1::Client {
+    fn read_state<T>() -> FirstFlightReadState<T>
+    where
+        T: v1::Choices<Crypto = RingBackend, Side = Self>,
+    {
+        unreachable!("only a server reads its first flight before deciding")
+    }
     fn crypto_receive() -> CryptoReceiveCapacities {
         // ServerHello at Initial, Certificate at Handshake, NewSessionTicket
         // at 1-RTT
@@ -2704,6 +2742,82 @@ fn the_receiving_call_receives_each_packet_of_a_datagram_and_counts_the_whole_da
              idle Some(30.005s), reason None"
                 .to_owned(),
             // the factor of the tests is 2
+            format!("credit Some(Some({}))", 2 * size),
+        ]
+    );
+}
+
+#[test]
+fn the_first_datagrams_are_received_and_counted_as_later_ones_are() {
+    use probe::PacketStep::{Inspect, InspectCredit};
+    reset();
+    let first = link();
+    feed_packets([(ms(6), Inspect), (ms(7), InspectCredit(first.clone()))]);
+    let datagram = padded(
+        &[],
+        |payload| long_packet(INITIAL, 0, payload),
+        &crypto_at(0, b"hel"),
+    );
+    let size = datagram.len();
+    FIRST_DATAGRAMS.with(|f| {
+        f.borrow_mut().push(ReceivedDatagram::new(
+            datagram,
+            ArrivalFacts::new(TestLink(first.clone()), ms(0), None),
+        ));
+    });
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    take_log();
+    // delivered before the first poll, received after the first datagram
+    let later = padded(
+        &[],
+        |payload| long_packet(INITIAL, 1, payload),
+        &crypto_at(3, b"lo"),
+    );
+    let later_size = later.len();
+    deliver(later, &first, ms(5));
+    assert_eq!(
+        run(&mut connection, 5..=7),
+        [
+            "read \"hello\", largest Some((1, 5ms)), ranges [(0, 1)], due Some(Now), \
+             idle Some(30.005s), reason None"
+                .to_owned(),
+            // the first datagram is counted as it is received
+            format!("credit Some(Some({}))", 2 * (size + later_size)),
+        ]
+    );
+}
+
+#[test]
+fn a_server_made_with_a_read_first_flight_starts_with_what_was_read() {
+    use probe::PacketStep::{Inspect, InspectCredit};
+    reset();
+    FIRST_READ.with(|f| f.set(true));
+    let first = link();
+    feed_packets([(ms(6), Inspect), (ms(7), InspectCredit(first.clone()))]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    // the Initial keys read with are live; nothing was received
+    assert_eq!(
+        take_log(),
+        [
+            "initial keys live: true",
+            "recovery built, initial RTT None",
+            "Active, NotValidated, credit Some(0)",
+        ]
+    );
+    // the keys and the CRYPTO receiver read with take what comes next
+    let datagram = padded(
+        &[],
+        |payload| long_packet(INITIAL, 0, payload),
+        &crypto_at(0, b"hello"),
+    );
+    let size = datagram.len();
+    deliver(datagram, &first, ms(5));
+    assert_eq!(
+        run(&mut connection, 5..=7),
+        [
+            "read \"hello\", largest Some((0, 5ms)), ranges [(0, 0)], due Some(Now), \
+             idle Some(30.005s), reason None"
+                .to_owned(),
             format!("credit Some(Some({}))", 2 * size),
         ]
     );

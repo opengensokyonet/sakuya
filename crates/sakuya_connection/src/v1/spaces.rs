@@ -39,6 +39,7 @@ use crate::{
 
 use super::{
     Choices,
+    first_flight::FirstFlightStart,
     keys::{HandshakeKeys, InitialKeys},
     parameters::{LocalTransportParameters, PeerTransportParameters},
 };
@@ -127,19 +128,30 @@ impl PassiveDataComponent for PacketNumberSpaces<PacketNumberSpaceState> {}
 
 // ---- the receive journals ----
 
-/// Each space starts with nothing received.
-impl<T: Choices, L, Ii, Ih> Build<T, L, layer::LogicalPath, (Ii, Ih)>
+/// Each space starts with nothing received; the Initial space of the
+/// first logical path starts with what reading the first flight before the
+/// connection was made received in it.
+impl<T: Choices, L, Ii, Ih, If> Build<T, L, layer::LogicalPath, (Ii, Ih, If)>
     for PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>
 where
     L: LineagePartList<T>,
-    for<'v> <L as LineageLists<'v, T>>::Connection:
-        GetAt<InitialKeys<T::Crypto>, Ii> + GetAt<HandshakeKeys<T::Crypto>, Ih>,
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<InitialKeys<T::Crypto>, Ii>
+        + GetAt<HandshakeKeys<T::Crypto>, Ih>
+        + GetAt<FirstFlightStart<T>, If>,
 {
     fn build<'v>(
         parents: &mut ParentsOf<'v, T, L, layer::LogicalPath>,
         _: &mut ArgsOf<T, L, layer::LogicalPath>,
     ) -> Self {
-        live_spaces::<T, _, Ii, Ih, _>(parents, |_| ReceiveJournals::new())
+        let mut read = parents
+            .get_mut::<FirstFlightStart<T>, If>()
+            .take_initial_journals();
+        live_spaces::<T, _, Ii, Ih, _>(parents, |space| match space {
+            PacketNumberSpaceKind::Initial => read.take().unwrap_or_default(),
+            PacketNumberSpaceKind::Handshake | PacketNumberSpaceKind::ApplicationData => {
+                ReceiveJournals::new()
+            }
+        })
     }
 }
 impl<I> PassiveDataComponent for PacketNumberSpaces<ReceiveJournals<I>> {}
@@ -150,9 +162,11 @@ impl<I> PassiveDataComponent for PacketNumberSpaces<ReceiveJournals<I>> {}
 /// §13.2.1). The Application Data space may delay by this side's
 /// `max_ack_delay` less the precision of the clock's timers, and not below
 /// zero: a timer that fires late still sends the ACK frame within the
-/// delay announced (§18.2).
-impl<T, L, X, Ii, Ih, Il, It, Is>
-    Build<T, L, layer::LogicalPath, (ChosenAckObligation, (Ii, Ih), Il, It, Is)>
+/// delay announced (§18.2). The Initial space of the first logical path
+/// starts with what reading the first flight before the connection was
+/// made left it owing.
+impl<T, L, X, Ii, Ih, Il, It, Is, If>
+    Build<T, L, layer::LogicalPath, (ChosenAckObligation, (Ii, Ih, If), Il, It, Is)>
     for PacketNumberSpaces<X>
 where
     T: Choices<AckObligation = X>,
@@ -161,6 +175,7 @@ where
     TransportParameterSlots: Selector<Option<MaxAckDelay>, Is>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<InitialKeys<T::Crypto>, Ii>
         + GetAt<HandshakeKeys<T::Crypto>, Ih>
+        + GetAt<FirstFlightStart<T>, If>
         + GetAt<LocalTransportParameters<TransportParameterSlots>, Il>
         + GetAt<LossThresholds, It>,
 {
@@ -168,6 +183,9 @@ where
         parents: &mut ParentsOf<'v, T, L, layer::LogicalPath>,
         _: &mut ArgsOf<T, L, layer::LogicalPath>,
     ) -> Self {
+        let mut read = parents
+            .get_mut::<FirstFlightStart<T>, If>()
+            .take_initial_ack_obligation();
         let local = parents.get::<LocalTransportParameters<TransportParameterSlots>, Il>();
         let announced = local
             .sent()
@@ -176,7 +194,8 @@ where
         let early = parents.get::<LossThresholds, It>().clock_granularity();
         let delay = announced.saturating_sub(early);
         live_spaces::<T, _, Ii, Ih, _>(parents, |space| match space {
-            PacketNumberSpaceKind::Initial | PacketNumberSpaceKind::Handshake => X::new(None),
+            PacketNumberSpaceKind::Initial => read.take().unwrap_or_else(|| X::new(None)),
+            PacketNumberSpaceKind::Handshake => X::new(None),
             PacketNumberSpaceKind::ApplicationData => X::new(Some(delay)),
         })
     }

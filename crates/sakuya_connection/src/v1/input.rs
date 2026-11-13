@@ -6,8 +6,10 @@
 //! through one input at a time:
 //!
 //! 1. The next input is the first held one, in the order of arrival, that
-//!    the keys installed since can process; otherwise the next delivery of
-//!    the logical path's datagram receiver ([`LogicalPathDatagramReceiver`]).
+//!    the keys installed since can process; otherwise the next of the first
+//!    datagrams the connection was made with, which the first logical path
+//!    owns; otherwise the next delivery of the logical path's datagram
+//!    receiver ([`LogicalPathDatagramReceiver`]).
 //!    A logical path without a receiver waits until a held input can go.
 //!    One poll handles at most
 //!    [`max_datagrams_per_poll`](LogicalPathReceivingLimits::max_datagrams_per_poll)
@@ -288,12 +290,17 @@ pub struct LogicalPathReceivingLimits {
     pub max_held_inputs: usize,
 }
 
-/// What a logical path receives: its datagram receiver, if it has one, and
-/// the inputs it holds until their keys come, in the order of arrival.
+/// What a logical path receives: its datagram receiver, if it has one, the
+/// datagrams it receives before what the receiver delivers, and the inputs
+/// it holds until their keys come, in the order of arrival.
 ///
 /// `Lk` is the link datagrams arrive over, `R` the receiver.
 pub struct LogicalPathInput<Lk: Link, R: LogicalPathDatagramReceiver<Lk>> {
     receiver: Option<R>,
+    /// The first datagrams not read yet, and the length of a short
+    /// header's Destination Connection ID they are cut with.
+    first: VecDeque<DatagramOf<Lk>>,
+    first_dcid_len: ConnectionIdLength,
     held: VecDeque<HeldInput<Lk, R::Handoff>>,
     limits: LogicalPathReceivingLimits,
     /// The inputs handled in this poll of the receiving call.
@@ -306,9 +313,28 @@ impl<Lk: Link, R: LogicalPathDatagramReceiver<Lk>> LogicalPathInput<Lk, R> {
     pub fn new(receiver: Option<R>, limits: LogicalPathReceivingLimits) -> Self {
         Self {
             receiver,
+            first: VecDeque::new(),
+            first_dcid_len: ConnectionIdLength::ZERO,
             held: VecDeque::new(),
             limits,
             handled: 0,
+        }
+    }
+
+    /// Receive `datagrams`, which the logical path owns, before anything
+    /// the receiver delivers, cutting them with `dcid_len` as the length of
+    /// a short header's Destination Connection ID; and hold `held`, as far
+    /// as the limit allows.
+    pub(super) fn start_with(
+        &mut self,
+        datagrams: Vec<DatagramOf<Lk>>,
+        dcid_len: ConnectionIdLength,
+        held: Vec<HeldInput<Lk, R::Handoff>>,
+    ) {
+        self.first.extend(datagrams);
+        self.first_dcid_len = dcid_len;
+        for input in held {
+            self.hold(input);
         }
     }
 
@@ -362,6 +388,7 @@ impl<Lk: Link, R: LogicalPathDatagramReceiver<Lk>> fmt::Debug for LogicalPathInp
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LogicalPathInput")
             .field("receiver", &self.receiver.is_some())
+            .field("first", &self.first.len())
             .field("held", &self.held.len())
             .finish_non_exhaustive()
     }
@@ -513,6 +540,32 @@ where
                     }
                 }
             }
+            if let Some(datagram) = input.first.pop_front() {
+                input.handled += 1;
+                let dcid_len = input.first_dcid_len;
+                receive_owned::<
+                    T,
+                    L,
+                    B,
+                    Ip,
+                    Ic,
+                    Ii,
+                    Ih,
+                    Io,
+                    Ij,
+                    Im,
+                    Ia,
+                    It,
+                    Iu,
+                    Ikp,
+                    Ir,
+                    Ie,
+                    Ik,
+                    Hd,
+                    Ian,
+                >(lineage, others, datagram, dcid_len);
+                continue;
+            }
             let Some(receiver) = input.receiver.as_mut() else {
                 input.handled = 0;
                 return Poll::Pending;
@@ -588,52 +641,79 @@ where
     {
         let NodeLoan { lineage, others } = view.get_mut();
         let (datagram, route) = delivery.consume();
-        let datagram = datagram.into_inner();
-        let size = datagram.payload().as_ref().len();
-        // the entry of a logical link no link path is over yet does not
-        // exist; there is nothing to count
-        if let Some(hlist_pat![limit]) =
-            others.link_entry::<HList![AntiAmplification], Ian>(datagram.link().id())
-        {
-            limit.received(size);
-        }
-        // a server takes no Initial packet from a datagram too short to
-        // have carried a client's first flight (RFC 9000 §14.1)
-        let initial_allowed = <T::Side as Side>::ROLE == Role::Client || size >= MIN_DATAGRAM_SIZE;
-        let (payload, arrival) = datagram.into_parts();
-        for packet in into_packets(payload, short_dcid_len(&route)) {
-            let packet = match packet {
-                Ok(Packet::Protected(ProtectedPacket::Initial(..))) if !initial_allowed => continue,
-                Ok(Packet::Protected(packet)) => packet,
-                // a client's handling of these is not here yet
-                Ok(Packet::Retry(..) | Packet::VersionNegotiation(..)) => continue,
-                Err(IntoPacketsError::DcidDiffersFromFirst) => continue,
-                Err(IntoPacketsError::UnreadableBoundary { .. }) => break,
-            };
-            let packet = ReceivedPacket::new(packet, arrival.clone());
-            let next = receive_one::<
-                T,
-                L,
-                B,
-                Ip,
-                Ic,
-                Ii,
-                Ih,
-                Io,
-                Ij,
-                Im,
-                Ia,
-                It,
-                Iu,
-                Ikp,
-                Ir,
-                Ie,
-                Ik,
-                Hd,
-            >(lineage, others, packet);
-            if next.is_break() {
-                break;
-            }
+        receive_owned::<T, L, B, Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian>(
+            lineage,
+            others,
+            datagram.into_inner(),
+            short_dcid_len(&route),
+        );
+    }
+}
+
+/// Receive `datagram`, which the logical path of `lineage` owns: count it
+/// toward the anti-amplification limit of the logical link it arrived
+/// over, cut it into packets, a short header's Destination Connection ID
+/// being `dcid_len` long, and receive each, until one causes a connection
+/// error.
+#[allow(clippy::type_complexity)] // the positions of what it takes
+fn receive_owned<'v, T, L, B, Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian>(
+    lineage: &mut LineageOf<'v, T, L, LogicalPath>,
+    others: &mut OtherNodes<'v, T, L, B>,
+    datagram: DatagramOf<T::Link>,
+    dcid_len: ConnectionIdLength,
+) where
+    T: Choices,
+    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd>,
+    B: CallBundle,
+    <T::Link as Link>::Payload: SplitTo + AsRef<[u8]> + AsMut<[u8]> + Into<Bytes>,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ie>,
+    <L as FrameSet>::Kind: CoproductSelector<FrameType, Ik>,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<LogicalPathInput<T::Link, T::Receiver>, Ip>
+        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
+        + GetAt<InitialKeys<T::Crypto>, Ii>
+        + GetAt<HandshakeKeys<T::Crypto>, Ih>
+        + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
+        + GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
+        + GetAt<MaxAckRanges, Im>
+        + GetAt<AckObligationsOf<T>, Ia>
+        + GetAt<IdleTimeout<InstantOf<T>>, It>
+        + GetAt<AeadUsage, Iu>
+        + GetAt<KeyPhaseNumbers, Ikp>,
+    for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        GetAt<LinkPathRole<InstantOf<T>>, Ir>,
+    for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![AntiAmplification], Ian>,
+{
+    let size = datagram.payload().as_ref().len();
+    // the entry of a logical link no link path is over yet does not
+    // exist; there is nothing to count
+    if let Some(hlist_pat![limit]) =
+        others.link_entry::<HList![AntiAmplification], Ian>(datagram.link().id())
+    {
+        limit.received(size);
+    }
+    // a server takes no Initial packet from a datagram too short to
+    // have carried a client's first flight (RFC 9000 §14.1)
+    let initial_allowed = <T::Side as Side>::ROLE == Role::Client || size >= MIN_DATAGRAM_SIZE;
+    let (payload, arrival) = datagram.into_parts();
+    for packet in into_packets(payload, dcid_len) {
+        let packet = match packet {
+            Ok(Packet::Protected(ProtectedPacket::Initial(..))) if !initial_allowed => continue,
+            Ok(Packet::Protected(packet)) => packet,
+            // a client's handling of these is not here yet
+            Ok(Packet::Retry(..) | Packet::VersionNegotiation(..)) => continue,
+            Err(IntoPacketsError::DcidDiffersFromFirst) => continue,
+            Err(IntoPacketsError::UnreadableBoundary { .. }) => break,
+        };
+        let packet = ReceivedPacket::new(packet, arrival.clone());
+        let next =
+            receive_one::<T, L, B, Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd>(
+                lineage, others, packet,
+            );
+        if next.is_break() {
+            break;
         }
     }
 }

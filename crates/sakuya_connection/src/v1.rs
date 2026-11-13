@@ -5,7 +5,8 @@
 //! keys of each encryption level, the counts of the AEAD's usage
 //! ([`aead_usage`]), the CRYPTO data received at each level,
 //! the transport parameters, the idle timeout and what the connection was
-//! made with for its first logical link in the connection node, with the
+//! made with for its first logical link and from its first flight
+//! ([`first_flight`]) in the connection node, with the
 //! recovery factory and the record of why the connection closed
 //! ([`close`]); the clone of the
 //! link, the facts about it and the anti-amplification limit in the entry of
@@ -29,6 +30,7 @@ pub mod confirmation;
 pub mod crypto;
 pub mod dispatch;
 pub mod error;
+pub mod first_flight;
 pub mod idle;
 pub mod input;
 pub mod key_phase;
@@ -87,6 +89,7 @@ use self::{
     close::{ApplicationClose, CloseReasonRecord, LocalCloseCause},
     confirmation::HandshakeConfirmation,
     crypto::{CryptoReceiveBuffer, CryptoReceiveCapacities, CryptoReceiver},
+    first_flight::{FirstFlight, FirstFlightStart},
     idle::IdleTimeout,
     input::{
         InitialPathReceiver, LogicalPathDatagramReceiver, LogicalPathInput,
@@ -272,6 +275,9 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
     /// How much CRYPTO data each encryption level holds past what the
     /// handshake engine has read, for this side's role.
     pub crypto_receive: CryptoReceiveCapacities,
+    /// The first flight: the first datagrams, or what reading them before
+    /// deciding left.
+    pub first_flight: FirstFlight<T>,
     /// The datagram receiver of the connection's initial path.
     pub initial_receiver: InitialPathReceiver<T::Receiver>,
     /// How many inputs, datagrams and held inputs released, the receiving
@@ -303,6 +309,7 @@ impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + Co
         CloseReasonRecord<CloseCauseOf<T, L>>,
         InitialPathReceiver<T::Receiver>,
         LogicalPathReceivingLimits,
+        FirstFlightStart<T>,
     ];
     type Calls = HNil;
     type Args = ConnectionArgs<T, L>;
@@ -409,7 +416,8 @@ where
 // ---- the connection node ----
 
 /// The Initial keys are derived when the connection is made, so the level
-/// is live from the start (RFC 9001 §5.2).
+/// is live from the start (RFC 9001 §5.2); a first flight read before the
+/// connection was made gives the keys it was read with.
 impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for InitialKeys<T::Crypto>
 where
     L: LineagePartList<T>,
@@ -420,6 +428,9 @@ where
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
         let args = own_args::<T, L, I>(args);
+        if let Some(keys) = args.first_flight.take_initial_keys() {
+            return keys;
+        }
         let secrets = InitialSecrets::derive(&args.crypto, &args.client_dcid);
         let (send, receive) = T::Side::split_initial_secrets(secrets);
         InitialKeys::Live(LevelKeys {
@@ -613,7 +624,9 @@ type OneRttKeysReads<T, L> = HList![
 ];
 
 /// Each level this side receives handshake messages at starts with an
-/// empty buffer of the configured capacity; the input reads Initial.
+/// empty buffer of the configured capacity; the input reads Initial. A
+/// first flight read before the connection was made gives the receiver it
+/// was read into.
 impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)>
     for CryptoReceiver<T::CryptoReceiveBuffer>
 where
@@ -624,7 +637,10 @@ where
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        CryptoReceiver::new(&own_args::<T, L, I>(args).crypto_receive)
+        let args = own_args::<T, L, I>(args);
+        args.first_flight
+            .take_crypto_receiver()
+            .unwrap_or_else(|| CryptoReceiver::new(&args.crypto_receive))
     }
 }
 /// It has no deadline and reads nothing; the calls that take frames or feed
@@ -782,6 +798,28 @@ where
 }
 impl PassiveDataComponent for LogicalPathReceivingLimits {}
 
+/// The connection keeps what its first flight gave the later parts of the
+/// tree until they take it. Datagrams not read yet are cut as routing cuts
+/// those it delivers under the client's first Destination Connection ID:
+/// a short header's is as long as that one.
+impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for FirstFlightStart<T>
+where
+    L: LineagePartList<T>,
+    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        args: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        let args = own_args::<T, L, I>(args);
+        let dcid_len = args.client_dcid.length();
+        args.first_flight.take_start(dcid_len)
+    }
+}
+/// It has no deadline and reads nothing; the parts built after the
+/// connection node take from it.
+impl<T: Choices> PassiveDataComponent for FirstFlightStart<T> {}
+
 /// The idle timeout starts from this side's maximum idle timeout as
 /// configured.
 impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for IdleTimeout<InstantOf<T>>
@@ -911,14 +949,17 @@ impl<S> PassiveDataComponent for PeerTransportParameters<S> {}
 
 // ---- the logical path ----
 
-/// The first logical path takes the receiver of the initial path; a later
-/// one starts without a receiver. Each takes the connection's limits.
-impl<T: Choices, L, I, J> Build<T, L, layer::LogicalPath, (I, J)>
+/// The first logical path takes the receiver of the initial path, the
+/// first datagrams not read yet and the inputs held while the first flight
+/// was read; a later one starts without a receiver and with nothing to
+/// receive first. Each takes the connection's limits.
+impl<T: Choices, L, I, J, Ik> Build<T, L, layer::LogicalPath, (I, J, Ik)>
     for LogicalPathInput<T::Link, T::Receiver>
 where
     L: LineagePartList<T>,
-    for<'v> <L as LineageLists<'v, T>>::Connection:
-        GetAt<InitialPathReceiver<T::Receiver>, I> + GetAt<LogicalPathReceivingLimits, J>,
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<InitialPathReceiver<T::Receiver>, I>
+        + GetAt<LogicalPathReceivingLimits, J>
+        + GetAt<FirstFlightStart<T>, Ik>,
 {
     fn build<'v>(
         parents: &mut ParentsOf<'v, T, L, layer::LogicalPath>,
@@ -928,7 +969,10 @@ where
         let receiver = parents
             .get_mut::<InitialPathReceiver<T::Receiver>, I>()
             .take();
-        LogicalPathInput::new(receiver, limits)
+        let start = parents.get_mut::<FirstFlightStart<T>, Ik>();
+        let mut input = LogicalPathInput::new(receiver, limits);
+        input.start_with(start.take_datagrams(), start.dcid_len(), start.take_held());
+        input
     }
 }
 impl<Lk: sakuya_link::Link, R: LogicalPathDatagramReceiver<Lk>> PassiveDataComponent
@@ -996,18 +1040,28 @@ where
 }
 impl PassiveDataComponent for LinkFacts {}
 
-/// The limit starts with nothing received or sent, by the configured
-/// factor.
-impl<T: Choices, L, I> Build<T, L, layer::LinkEntry, I> for AntiAmplification
+/// The limit starts with nothing sent, by the configured factor. The first
+/// entry starts with the bytes of the first datagrams read before the
+/// connection was made (RFC 9000 §8.1); any other starts with nothing
+/// received.
+impl<T: Choices, L, I, J> Build<T, L, layer::LinkEntry, (I, J)> for AntiAmplification
 where
     L: LineagePartList<T>,
-    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<AntiAmplificationFactor, I>,
+    for<'v> <L as LineageLists<'v, T>>::Connection:
+        GetAt<AntiAmplificationFactor, I> + GetAt<FirstFlightStart<T>, J>,
 {
     fn build<'v>(
         parents: &mut ParentsOf<'v, T, L, layer::LinkEntry>,
         _: &mut ArgsOf<T, L, layer::LinkEntry>,
     ) -> Self {
-        AntiAmplification::new(*parents.get::<AntiAmplificationFactor, I>())
+        let mut limit = AntiAmplification::new(*parents.get::<AntiAmplificationFactor, I>());
+        let received = parents
+            .get_mut::<FirstFlightStart<T>, J>()
+            .take_received_bytes();
+        if received > 0 {
+            limit.received(received);
+        }
+        limit
     }
 }
 impl PassiveDataComponent for AntiAmplification {}
