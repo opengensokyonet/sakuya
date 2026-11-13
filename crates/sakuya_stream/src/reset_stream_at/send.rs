@@ -24,7 +24,7 @@
 //! size is therefore requested and decided only with a
 //! [`PeerResetStreamAtSupport`], which exists only for a peer that did; the
 //! sender has no setting for it.
-use crate::connection::ConnectionClosedError;
+use crate::connection::LayerEndedError;
 use crate::connection_send_credit::ConnectionSendFlowController;
 use crate::send::finish::{
     ProtocolTerminalError, RequestResetError, ResetError, ResetWithFinalSizeError,
@@ -488,9 +488,9 @@ impl ReliablePrefixNotPreparedError {
 pub enum ResetAtError<Lc> {
     /// The connection has closed.
     #[snafu(transparent)]
-    ConnectionClosed {
+    LayerEnded {
         /// The closed connection.
-        source: ConnectionClosedError<Lc>,
+        source: LayerEndedError<Lc>,
     },
     /// The error code differs from the effective reset's.
     #[snafu(display("the reset conflicts with the effective reset"))]
@@ -533,9 +533,9 @@ pub enum ResetAtError<Lc> {
 pub enum ResetAtWithFinalSizeError<Lc> {
     /// The connection has closed.
     #[snafu(transparent)]
-    ConnectionClosed {
+    LayerEnded {
         /// The closed connection.
-        source: ConnectionClosedError<Lc>,
+        source: LayerEndedError<Lc>,
     },
     /// The error code differs from the effective reset's.
     #[snafu(display("the reset conflicts with the effective reset"))]
@@ -608,7 +608,7 @@ impl<Lc> From<RequestError<Lc>> for ResetAtWithFinalSizeError<Lc> {
         use LocalResetAtUnfitError as Unfit;
         use RequestResetError as General;
         match error {
-            General::ConnectionClosed { source } => Self::ConnectionClosed { source },
+            General::LayerEnded { source } => Self::LayerEnded { source },
             General::ErrorCodeConflict { source } => Self::ErrorCodeConflict { source },
             General::FinalSizeConflictsWithReset { source } => {
                 Self::FinalSizeConflictsWithReset { source }
@@ -642,7 +642,7 @@ impl<Lc> ResetAtError<Lc> {
     fn narrow(error: RequestError<Lc>) -> Self {
         use ResetAtWithFinalSizeError as General;
         match General::from(error) {
-            General::ConnectionClosed { source } => Self::ConnectionClosed { source },
+            General::LayerEnded { source } => Self::LayerEnded { source },
             General::ErrorCodeConflict { source } => Self::ErrorCodeConflict { source },
             General::ProtocolTerminal { source } => Self::ProtocolTerminal { source },
             General::ReliableSizeIncrease { source } => Self::ReliableSizeIncrease { source },
@@ -668,7 +668,7 @@ impl<Lc> ResetAtError<Lc> {
 fn plain_reset_error<Lc>(error: RequestError<Lc>) -> RequestResetError<Infallible, Infallible, Lc> {
     use RequestResetError as General;
     match error {
-        General::ConnectionClosed { source } => General::ConnectionClosed { source },
+        General::LayerEnded { source } => General::LayerEnded { source },
         General::ErrorCodeConflict { source } => General::ErrorCodeConflict { source },
         General::FinalSizeConflictsWithReset { source } => {
             General::FinalSizeConflictsWithReset { source }
@@ -711,7 +711,7 @@ where
     /// Checked in this order, after which the request succeeds without effect
     /// if it equals the effective reset:
     ///
-    /// 1. [`ResetError::ConnectionClosed`];
+    /// 1. [`ResetError::LayerEnded`];
     /// 2. [`ResetError::ErrorCodeConflict`] against an effective reset;
     /// 3. [`ResetError::ProtocolTerminal`].
     pub fn reset(&mut self, error_code: ApplicationErrorCode) -> Result<(), ResetError<Lc>> {
@@ -729,7 +729,7 @@ where
     /// Checked in this order, after which the request succeeds without effect
     /// if it equals the effective reset:
     ///
-    /// 1. [`ResetWithFinalSizeError::ConnectionClosed`];
+    /// 1. [`ResetWithFinalSizeError::LayerEnded`];
     /// 2. against an effective reset,
     ///    [`ResetWithFinalSizeError::ErrorCodeConflict`], then
     ///    [`ResetWithFinalSizeError::FinalSizeConflictsWithReset`]; against an
@@ -761,7 +761,7 @@ where
     /// Checked in this order, after which the request succeeds without effect
     /// if it equals the effective reset:
     ///
-    /// 1. [`ResetAtError::ConnectionClosed`];
+    /// 1. [`ResetAtError::LayerEnded`];
     /// 2. [`ResetAtError::ErrorCodeConflict`] against an effective reset;
     /// 3. [`ResetAtError::ProtocolTerminal`];
     /// 4. against an effective reset, [`ResetAtError::ReliableSizeIncrease`],
@@ -789,7 +789,7 @@ where
     /// Checked in this order, after which the request succeeds without effect
     /// if it equals the effective reset:
     ///
-    /// 1. [`ResetAtWithFinalSizeError::ConnectionClosed`];
+    /// 1. [`ResetAtWithFinalSizeError::LayerEnded`];
     /// 2. against an effective reset,
     ///    [`ResetAtWithFinalSizeError::ErrorCodeConflict`], then
     ///    [`ResetAtWithFinalSizeError::FinalSizeConflictsWithReset`]; against

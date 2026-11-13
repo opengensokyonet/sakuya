@@ -25,7 +25,7 @@
 //! the caller to retry once the cause may have changed.
 use super::local_reset::LocalResetTarget;
 use super::{SendEndState, StreamResetError, StreamSender, WriteLimit};
-use crate::connection::ConnectionClosedError;
+use crate::connection::LayerEndedError;
 use crate::connection_send_credit::{ConnectionCreditReservation, ConnectionSendFlowController};
 use crate::send::flow_control::{
     AdmissionGuard, GrantAboveCeilingError, SendFlowControlPolicy, WriteAttempt,
@@ -85,9 +85,9 @@ pub enum WriteWait {
 pub enum WriteError<R, Lc> {
     /// The connection has closed.
     #[snafu(transparent)]
-    ConnectionClosed {
+    LayerEnded {
         /// The closed connection.
-        source: ConnectionClosedError<Lc>,
+        source: LayerEndedError<Lc>,
     },
     /// The stream was reset.
     #[snafu(transparent)]
@@ -153,9 +153,9 @@ impl<R: fmt::Debug> fmt::Debug for SharedWriteLimitReason<R> {
 pub enum FlushError<Lc> {
     /// The connection has closed.
     #[snafu(transparent)]
-    ConnectionClosed {
+    LayerEnded {
         /// The closed connection.
-        source: ConnectionClosedError<Lc>,
+        source: LayerEndedError<Lc>,
     },
     /// The stream was reset.
     #[snafu(transparent)]
@@ -184,7 +184,7 @@ where
     ///
     /// # Errors
     ///
-    /// Checked in this order: [`WriteError::ConnectionClosed`],
+    /// Checked in this order: [`WriteError::LayerEnded`],
     /// [`WriteError::Reset`], [`WriteError::Closed`], and for non-empty input
     /// [`WriteError::WriteLimitReached`] and
     /// [`WriteError::StreamSizeExhausted`].
@@ -302,7 +302,7 @@ where
     ///
     /// # Errors
     ///
-    /// [`FlushError::ConnectionClosed`], then [`FlushError::Reset`] once a
+    /// [`FlushError::LayerEnded`], then [`FlushError::Reset`] once a
     /// reset is in effect, even if nothing remains to deliver.
     pub fn flush(&self) -> Result<(), FlushError<Lc>> {
         self.check_connection_open()?;

@@ -1,7 +1,7 @@
 use super::dialect;
 use bytes::{Buf, Bytes};
 use proptest::prelude::*;
-use sakuya_stream::connection::{CloseReason, ConnectionClosedError};
+use sakuya_stream::connection::{CloseReason, LayerEnd, LayerEndedError};
 use sakuya_stream::connection_send_credit::{
     AtomicConnectionCreditReservation, AtomicConnectionSendFlowController,
     ConnectionSendFlowController,
@@ -49,7 +49,7 @@ pub(super) type SenderOf<C> =
 /// The failures only a reset with a reliable size meets carry plain numbers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum ResetFailure {
-    ConnectionClosed(ConnectionClosedError<TestCloseCause>),
+    ConnectionClosed(LayerEndedError<TestCloseCause>),
     ErrorCodeConflict(ResetCodeChangeError),
     FinalSizeConflictsWithReset(FinalSizeChangeError),
     FinalSizeConflictsWithClose(FinalSizeChangeError),
@@ -65,7 +65,7 @@ pub(super) enum ResetFailure {
 impl From<ResetError<TestCloseCause>> for ResetFailure {
     fn from(error: ResetError<TestCloseCause>) -> Self {
         match error {
-            ResetError::ConnectionClosed { source } => Self::ConnectionClosed(source),
+            ResetError::LayerEnded { source } => Self::ConnectionClosed(source),
             ResetError::ErrorCodeConflict { source } => Self::ErrorCodeConflict(source),
             ResetError::ProtocolTerminal { source } => Self::ProtocolTerminal(source),
         }
@@ -76,7 +76,7 @@ impl From<ResetWithFinalSizeError<TestCloseCause>> for ResetFailure {
     fn from(error: ResetWithFinalSizeError<TestCloseCause>) -> Self {
         use ResetWithFinalSizeError as E;
         match error {
-            E::ConnectionClosed { source } => Self::ConnectionClosed(source),
+            E::LayerEnded { source } => Self::ConnectionClosed(source),
             E::ErrorCodeConflict { source } => Self::ErrorCodeConflict(source),
             E::FinalSizeConflictsWithReset { source } => Self::FinalSizeConflictsWithReset(source),
             E::FinalSizeConflictsWithClose { source } => Self::FinalSizeConflictsWithClose(source),
@@ -558,7 +558,7 @@ macro_rules! impl_sender {
             fn write_len(&mut self, source: &mut Bytes) -> Result<WriteOutcome, WriteFailure> {
                 #[allow(clippy::redundant_closure_call)]
                 self.write(source).map_err(|error| match error {
-                    WriteError::ConnectionClosed { .. } => WriteFailure::ConnectionClosed,
+                    WriteError::LayerEnded { .. } => WriteFailure::ConnectionClosed,
                     WriteError::Reset { .. } => WriteFailure::Reset,
                     WriteError::Closed => WriteFailure::Closed,
                     WriteError::WriteLimitReached {
@@ -627,7 +627,7 @@ macro_rules! impl_sender {
             }
 
             fn close_connection(&mut self) {
-                self.on_connection_closed(close_reason());
+                self.on_layer_ended(LayerEnd::ConnectionClosed(close_reason()));
             }
 
             #[allow(clippy::redundant_closure_call)]
@@ -680,8 +680,8 @@ fn step<S: Sender, P: PolicyModel>(
         Op::Flush { stream } => {
             let s = &model.streams[stream];
             let expected = if s.connection_closed {
-                Err(FlushError::ConnectionClosed {
-                    source: ConnectionClosedError::new(close_reason()),
+                Err(FlushError::LayerEnded {
+                    source: LayerEndedError::new(LayerEnd::ConnectionClosed(close_reason())),
                 })
             } else if s.is_reset() {
                 Err(FlushError::Reset {
@@ -714,8 +714,8 @@ fn step<S: Sender, P: PolicyModel>(
         Op::Close { stream } => {
             let s = &mut model.streams[stream];
             let expected = if s.connection_closed {
-                Err(CloseError::ConnectionClosed {
-                    source: ConnectionClosedError::new(close_reason()),
+                Err(CloseError::LayerEnded {
+                    source: LayerEndedError::new(LayerEnd::ConnectionClosed(close_reason())),
                 })
             } else if s.is_reset() {
                 Err(CloseError::AlreadyReset {
@@ -1021,8 +1021,8 @@ fn reset<S: Sender, P: PolicyModel>(
     let expected: Result<Option<(u64, u64)>, ResetFailure> = (|| {
         use ResetFailure as E;
         if s.connection_closed {
-            return Err(E::ConnectionClosed(ConnectionClosedError::new(
-                close_reason(),
+            return Err(E::ConnectionClosed(LayerEndedError::new(
+                LayerEnd::ConnectionClosed(close_reason()),
             )));
         }
         // The reset in effect: its kind, error code, reliable size and final

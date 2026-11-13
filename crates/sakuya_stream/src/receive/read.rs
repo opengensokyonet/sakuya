@@ -7,7 +7,7 @@
 //! result. A read returns, in this order of priority:
 //!
 //! 1. [`ReadError::ReaderDropped`] once the reader was dropped;
-//! 2. [`ReadError::ConnectionClosed`], once the connection closed;
+//! 2. [`ReadError::LayerEnded`], once the connection closed;
 //! 3. the committed terminal result (end of stream or a terminal error);
 //! 4. [`ReadOutcome::Wait`], while the stream waits for the connection to
 //!    close after a frame violated the protocol: the read does not complete,
@@ -35,7 +35,7 @@ use super::{
     termination::ReceiveTerminationPolicy, termination::ResetPresentation,
     termination::TerminationEvent,
 };
-use crate::connection::ConnectionClosedError;
+use crate::connection::LayerEndedError;
 use crate::receive_buffer::StreamReceiveBuffer;
 use bytes::BufMut;
 use core::fmt;
@@ -114,9 +114,9 @@ pub enum ReadError<R, Lc, F: RemoteResetFacts = RemoteReset> {
     ReaderDropped,
     /// The connection has closed.
     #[snafu(transparent)]
-    ConnectionClosed {
+    LayerEnded {
         /// The closed connection.
-        source: ConnectionClosedError<Lc>,
+        source: LayerEndedError<Lc>,
     },
     /// The peer reset the stream.
     ///
@@ -170,7 +170,7 @@ impl<R, Lc, F: RemoteResetFacts> Clone for ReadError<R, Lc, F> {
     fn clone(&self) -> Self {
         match self {
             Self::ReaderDropped => Self::ReaderDropped,
-            Self::ConnectionClosed { source } => Self::ConnectionClosed {
+            Self::LayerEnded { source } => Self::LayerEnded {
                 source: source.clone(),
             },
             Self::Reset { reset, complete } => Self::Reset {
@@ -314,7 +314,7 @@ where
             return Some(Err(ReadError::ReaderDropped));
         }
         if let Some(closed) = self.closed() {
-            return Some(Err(ReadError::ConnectionClosed {
+            return Some(Err(ReadError::LayerEnded {
                 source: closed.clone(),
             }));
         }

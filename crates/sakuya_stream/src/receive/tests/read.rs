@@ -1,6 +1,6 @@
 //! Read results and their priorities.
 use super::*;
-use crate::connection::ConnectionClosedError;
+use crate::connection::{LayerEnd, LayerEndedError};
 use core::num::NonZeroUsize;
 
 fn nz(value: usize) -> NonZeroUsize {
@@ -10,12 +10,12 @@ fn nz(value: usize) -> NonZeroUsize {
 #[test]
 fn connection_closed_keeps_the_first_reason() {
     let (mut receiver, _connection) = new_receiver(keep_all());
-    receiver.connection_closed(close_reason());
-    receiver.connection_closed(CloseReason::StatelessReset);
-    let Err(ReadError::ConnectionClosed { source }) = receiver.read_chunk() else {
+    receiver.layer_ended(LayerEnd::ConnectionClosed(close_reason()));
+    receiver.layer_ended(LayerEnd::ConnectionClosed(CloseReason::StatelessReset));
+    let Err(ReadError::LayerEnded { source }) = receiver.read_chunk() else {
         panic!("expected a closed connection");
     };
-    assert_eq!(source.reason(), &close_reason());
+    assert_eq!(source.end(), &LayerEnd::ConnectionClosed(close_reason()));
 }
 
 #[test]
@@ -24,17 +24,17 @@ fn connection_failure_is_not_hidden_by_held_data() {
     receiver
         .on_stream_frame(stream(0, 100, false), &mut connection)
         .unwrap();
-    receiver.connection_closed(close_reason());
-    let closed = Err(ReadError::ConnectionClosed {
-        source: ConnectionClosedError::new(close_reason()),
+    receiver.layer_ended(LayerEnd::ConnectionClosed(close_reason()));
+    let closed = Err(ReadError::LayerEnded {
+        source: LayerEndedError::new(LayerEnd::ConnectionClosed(close_reason())),
     });
     assert_eq!(receiver.read_chunk(), closed);
     // Not by an empty target either.
     let mut empty = [0u8; 0];
     assert_eq!(
         receiver.read_into(&mut &mut empty[..]),
-        Err(ReadError::ConnectionClosed {
-            source: ConnectionClosedError::new(close_reason()),
+        Err(ReadError::LayerEnded {
+            source: LayerEndedError::new(LayerEnd::ConnectionClosed(close_reason())),
         })
     );
     assert!(receiver.parts().buffer.is_destroyed());
@@ -48,11 +48,11 @@ fn connection_failure_overrides_a_committed_result() {
         .unwrap();
     let (_, end) = read_all(&mut receiver);
     assert_eq!(end, Ok(ReadOutcome::End));
-    receiver.connection_closed(close_reason());
+    receiver.layer_ended(LayerEnd::ConnectionClosed(close_reason()));
     assert_eq!(
         receiver.read_chunk(),
-        Err(ReadError::ConnectionClosed {
-            source: ConnectionClosedError::new(close_reason()),
+        Err(ReadError::LayerEnded {
+            source: LayerEndedError::new(LayerEnd::ConnectionClosed(close_reason())),
         })
     );
 }
@@ -229,13 +229,23 @@ fn waits_for_expected_data_only() {
 
 #[test]
 fn read_error_delegates_to_the_closed_connection() {
-    let error: ReadError<&str, TestCloseCause> = ReadError::ConnectionClosed {
-        source: ConnectionClosedError::new(close_reason()),
+    let error: ReadError<&str, TestCloseCause> = ReadError::LayerEnded {
+        source: LayerEndedError::new(LayerEnd::ConnectionClosed(close_reason())),
     };
     assert_eq!(
         error.to_string(),
-        ConnectionClosedError::new(close_reason()).to_string()
+        LayerEndedError::new(LayerEnd::ConnectionClosed(close_reason())).to_string()
     );
     let report = snafu::Report::from_error(error).to_string();
     assert!(report.contains("the connection is closed"), "{report}");
+}
+
+#[test]
+fn a_rejected_zero_rtt_attempt_fails_the_read_with_layer_ended() {
+    let (mut receiver, _connection) = new_receiver(keep_all());
+    receiver.layer_ended(LayerEnd::ZeroRttRejected);
+    let Err(ReadError::LayerEnded { source }) = receiver.read_chunk() else {
+        panic!("the read must fail with LayerEnded");
+    };
+    assert_eq!(source.end(), &LayerEnd::ZeroRttRejected);
 }

@@ -2,7 +2,7 @@
 //! `RESET_STREAM` in every order, the reliable prefix in reads, STOP requests
 //! and the termination policy contract, and the violations of both frames.
 use super::{OnResetStreamError as ResetAtOnResetStreamError, RemoteResetAt, RemoteResetAtChange};
-use crate::connection::ConnectionClosedError;
+use crate::connection::{LayerEnd, LayerEndedError};
 use crate::connection_receive_flow::{ConnectionReceiveFlowController, RecordUsageError};
 use crate::receive::flow_control::{
     AdvertisementIntent, ReceiveFlowControlPolicy, ReceiveFlowEvent, ReceiveFlowView,
@@ -1026,7 +1026,7 @@ mod violation {
         assert_eq!(snapshot(&receiver, &connection), before);
         assert_eq!(receiver.read_chunk(), Ok(ReadOutcome::Wait));
 
-        receiver.connection_closed(close_reason());
+        receiver.layer_ended(LayerEnd::ConnectionClosed(close_reason()));
         let before = snapshot(&receiver, &connection);
         assert_eq!(
             receiver.on_reset_stream(reset(1, 300), &mut connection),
@@ -1039,8 +1039,8 @@ mod violation {
         assert_eq!(snapshot(&receiver, &connection), before);
         assert_eq!(
             receiver.read_chunk(),
-            Err(ReadError::ConnectionClosed {
-                source: ConnectionClosedError::new(close_reason()),
+            Err(ReadError::LayerEnded {
+                source: LayerEndedError::new(LayerEnd::ConnectionClosed(close_reason())),
             })
         );
     }

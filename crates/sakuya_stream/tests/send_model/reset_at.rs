@@ -27,7 +27,7 @@ mod dialect {
         fn from(error: ResetAtWithFinalSizeError<TestCloseCause>) -> Self {
             use ResetAtWithFinalSizeError as E;
             match error {
-                E::ConnectionClosed { source } => Self::ConnectionClosed(source),
+                E::LayerEnded { source } => Self::ConnectionClosed(source),
                 E::ErrorCodeConflict { source } => Self::ErrorCodeConflict(source),
                 E::FinalSizeConflictsWithReset { source } => {
                     Self::FinalSizeConflictsWithReset(source)
@@ -59,7 +59,7 @@ mod dialect {
         fn from(error: ResetAtError<TestCloseCause>) -> Self {
             use ResetAtError as E;
             match error {
-                E::ConnectionClosed { source } => Self::ConnectionClosed(source),
+                E::LayerEnded { source } => Self::ConnectionClosed(source),
                 E::ErrorCodeConflict { source } => Self::ErrorCodeConflict(source),
                 E::ProtocolTerminal { source } => Self::ProtocolTerminal(source),
                 E::ReliableSizeIncrease { source } => Self::ReliableSizeIncrease {

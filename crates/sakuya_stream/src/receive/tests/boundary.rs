@@ -1,5 +1,6 @@
 //! Limit actions of the receive termination policy.
 use super::*;
+use crate::connection::LayerEnd;
 
 /// A receiver whose policy answers `StopSent` with `on_stop` and everything
 /// else with keep, with [0, 500) received and the STOP request sent.
@@ -327,7 +328,7 @@ fn read_after_reader_drop_fails() {
         Err(ReadError::ReaderDropped)
     );
     // A later connection close does not reopen reading.
-    receiver.connection_closed(close_reason());
+    receiver.layer_ended(LayerEnd::ConnectionClosed(close_reason()));
     assert_eq!(receiver.read_chunk(), Err(ReadError::ReaderDropped));
 }
 

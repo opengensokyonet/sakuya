@@ -28,7 +28,7 @@ use super::{
     CommittedEnd, EndPhase, EndSource, SendEndState, SendTerminalState, SentEndFrames, StopSending,
     StreamResetError, StreamSender, WriteLimit,
 };
-use crate::connection::ConnectionClosedError;
+use crate::connection::LayerEndedError;
 use crate::connection_send_credit::ConnectionSendFlowController;
 use crate::send::flow_control::{SendFlowControlPolicy, StreamCreditEvent};
 use crate::send::termination::{
@@ -52,9 +52,9 @@ use snafu::{Report, ResultExt, Snafu, ensure};
 pub enum CloseError<Lc> {
     /// The connection has closed.
     #[snafu(transparent)]
-    ConnectionClosed {
+    LayerEnded {
         /// The closed connection.
-        source: ConnectionClosedError<Lc>,
+        source: LayerEndedError<Lc>,
     },
     /// A reset is in effect; a close cannot replace it.
     #[snafu(transparent)]
@@ -75,9 +75,9 @@ pub enum CloseError<Lc> {
 pub enum RequestResetError<X: Error + 'static, U: Error + 'static, Lc> {
     /// The connection has closed.
     #[snafu(transparent)]
-    ConnectionClosed {
+    LayerEnded {
         /// The closed connection.
-        source: ConnectionClosedError<Lc>,
+        source: LayerEndedError<Lc>,
     },
     /// The error code differs from the effective reset's.
     #[snafu(display("the reset conflicts with the effective reset"))]
@@ -135,10 +135,10 @@ impl<X: Error + 'static, U: Error + 'static, Lc> RequestResetError<X, U, Lc> {
     /// of a policy's decision never reports; the closure itself otherwise.
     fn without_closed_connection(
         self,
-    ) -> Result<RequestResetError<X, U, Infallible>, ConnectionClosedError<Lc>> {
+    ) -> Result<RequestResetError<X, U, Infallible>, LayerEndedError<Lc>> {
         use RequestResetError as E;
         Ok(match self {
-            E::ConnectionClosed { source } => return Err(source),
+            E::LayerEnded { source } => return Err(source),
             E::ErrorCodeConflict { source } => E::ErrorCodeConflict { source },
             E::FinalSizeConflictsWithReset { source } => E::FinalSizeConflictsWithReset { source },
             E::FinalSizeConflictsWithClose { source } => E::FinalSizeConflictsWithClose { source },
@@ -163,9 +163,9 @@ type RequestResetErrorOf<T, Lc> =
 pub enum ResetError<Lc> {
     /// The connection has closed.
     #[snafu(transparent)]
-    ConnectionClosed {
+    LayerEnded {
         /// The closed connection.
-        source: ConnectionClosedError<Lc>,
+        source: LayerEndedError<Lc>,
     },
     /// The error code differs from the effective reset's.
     #[snafu(display("the reset conflicts with the effective reset"))]
@@ -190,9 +190,9 @@ pub enum ResetError<Lc> {
 pub enum ResetWithFinalSizeError<Lc> {
     /// The connection has closed.
     #[snafu(transparent)]
-    ConnectionClosed {
+    LayerEnded {
         /// The closed connection.
-        source: ConnectionClosedError<Lc>,
+        source: LayerEndedError<Lc>,
     },
     /// The error code differs from the effective reset's.
     #[snafu(display("the reset conflicts with the effective reset"))]
@@ -244,7 +244,7 @@ impl<Lc> ResetError<Lc> {
     ) -> Self {
         use RequestResetError as General;
         match error {
-            General::ConnectionClosed { source } => Self::ConnectionClosed { source },
+            General::LayerEnded { source } => Self::LayerEnded { source },
             General::ErrorCodeConflict { source } => Self::ErrorCodeConflict { source },
             General::ProtocolTerminal { source } => Self::ProtocolTerminal { source },
             General::Conflict { source } | General::Unfit { source } => match source {},
@@ -264,7 +264,7 @@ impl<Lc> From<RequestResetError<Infallible, Infallible, Lc>> for ResetWithFinalS
     fn from(error: RequestResetError<Infallible, Infallible, Lc>) -> Self {
         use RequestResetError as General;
         match error {
-            General::ConnectionClosed { source } => Self::ConnectionClosed { source },
+            General::LayerEnded { source } => Self::LayerEnded { source },
             General::ErrorCodeConflict { source } => Self::ErrorCodeConflict { source },
             General::FinalSizeConflictsWithReset { source } => {
                 Self::FinalSizeConflictsWithReset { source }
@@ -353,7 +353,7 @@ enum PolicyPlan<R, T> {
     Reset(T),
 }
 
-/// The connection is closed; stands for [`ConnectionClosedError`] in the
+/// The connection is closed; stands for [`LayerEndedError`] in the
 /// failure of a policy's decision, whose cause the failure does not keep.
 #[derive(Debug, Snafu)]
 #[snafu(display("the connection is closed"))]
@@ -414,7 +414,7 @@ where
     /// Checked in this order, after which the request succeeds without effect
     /// if it equals the effective reset:
     ///
-    /// 1. [`ResetError::ConnectionClosed`];
+    /// 1. [`ResetError::LayerEnded`];
     /// 2. [`ResetError::ErrorCodeConflict`] against an effective reset;
     /// 3. [`ResetError::ProtocolTerminal`].
     pub fn reset(&mut self, error_code: ApplicationErrorCode) -> Result<(), ResetError<Lc>> {
@@ -432,7 +432,7 @@ where
     /// Checked in this order, after which the request succeeds without effect
     /// if it equals the effective reset:
     ///
-    /// 1. [`ResetWithFinalSizeError::ConnectionClosed`];
+    /// 1. [`ResetWithFinalSizeError::LayerEnded`];
     /// 2. against an effective reset,
     ///    [`ResetWithFinalSizeError::ErrorCodeConflict`], then
     ///    [`ResetWithFinalSizeError::FinalSizeConflictsWithReset`]; against an
@@ -466,7 +466,7 @@ where
     ///
     /// # Errors
     ///
-    /// [`CloseError::ConnectionClosed`], then [`CloseError::AlreadyReset`].
+    /// [`CloseError::LayerEnded`], then [`CloseError::AlreadyReset`].
     pub fn close(&mut self) -> Result<(), CloseError<Lc>> {
         self.check_connection_open()?;
         match self.end_state() {
@@ -497,7 +497,7 @@ where
     /// Checked in this order; a request that restates the target in effect
     /// succeeds before the second check:
     ///
-    /// 1. [`RequestResetError::ConnectionClosed`];
+    /// 1. [`RequestResetError::LayerEnded`];
     /// 2. against an effective reset,
     ///    [`RequestResetError::ErrorCodeConflict`], then
     ///    [`RequestResetError::FinalSizeConflictsWithReset`]; against an

@@ -1,6 +1,7 @@
 //! Reception completes from the ranges the frames stated, whatever became of
 //! the payload.
 use super::*;
+use crate::connection::LayerEnd;
 use crate::receive::stop::{StopError, StopNotNeededReason};
 
 fn completed<T: ReceiveTerminationPolicy>(receiver: &Receiver<T>) -> usize {
@@ -184,7 +185,7 @@ fn a_violating_frame_records_no_range() {
             .on_stream_frame(stream(50, 50, true), &mut connection)
             .unwrap();
         assert!(receiver.on_stream_frame(frame, &mut connection).is_err());
-        receiver.connection_closed(close_reason());
+        receiver.layer_ended(LayerEnd::ConnectionClosed(close_reason()));
         let (event, view) = receiver.parts().events.last().unwrap();
         assert_eq!(*event, TerminationEvent::ConnectionClosed);
         assert!(!view.fully_received);

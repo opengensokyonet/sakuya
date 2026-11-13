@@ -44,6 +44,76 @@ impl<C> Clone for ConnectionClosedError<C> {
     }
 }
 
+/// How a connection's established layer ended.
+///
+/// A stream lives on one established layer. When the layer is removed,
+/// everything on it sees the same end: the connection closed, or a 0-RTT
+/// attempt the server rejected. `C` is the type of this endpoint's reason
+/// for closing, as in [`CloseReason`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum LayerEnd<C> {
+    /// The connection closed, for the reason it holds.
+    ConnectionClosed(CloseReason<C>),
+    /// The server rejected the 0-RTT attempt, and the layer built for it is
+    /// removed. The connection itself goes on.
+    ZeroRttRejected,
+}
+
+/// Every error reports the same end, shared: cloning does not need `C` to
+/// be [`Clone`].
+impl<C> Clone for LayerEnd<C> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::ConnectionClosed(reason) => Self::ConnectionClosed(reason.clone()),
+            Self::ZeroRttRejected => Self::ZeroRttRejected,
+        }
+    }
+}
+
+impl<C: fmt::Display> fmt::Display for LayerEnd<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ConnectionClosed(reason) => write!(f, "the connection is closed: {reason}"),
+            Self::ZeroRttRejected => f.write_str("the 0-RTT attempt was rejected"),
+        }
+    }
+}
+
+/// The layer the operation ran on has ended: no operation on it proceeds.
+///
+/// The operations of streams on the layer report it through their own
+/// errors, which hold this one as their source. [`end`](Self::end) tells
+/// whether the connection closed, in which case the application gives up,
+/// or the 0-RTT attempt was rejected, in which case it can redo the work on
+/// the layer that replaces this one.
+#[derive(Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("the layer has ended: {end}"))]
+pub struct LayerEndedError<C> {
+    end: LayerEnd<C>,
+}
+
+impl<C> LayerEndedError<C> {
+    /// The error for a layer that ended as `end`.
+    ///
+    /// This constructor is provisional.
+    pub const fn new(end: LayerEnd<C>) -> Self {
+        Self { end }
+    }
+
+    /// How the layer ended.
+    pub const fn end(&self) -> &LayerEnd<C> {
+        &self.end
+    }
+}
+
+impl<C> Clone for LayerEndedError<C> {
+    fn clone(&self) -> Self {
+        Self {
+            end: self.end.clone(),
+        }
+    }
+}
+
 /// Why a connection closed.
 ///
 /// A close of this endpoint and a close of the peer are told apart; the

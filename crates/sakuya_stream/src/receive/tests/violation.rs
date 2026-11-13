@@ -1,7 +1,7 @@
 //! The violations of the frame methods, the absence of any trace they leave,
 //! and the stream between a violation and the connection's closure.
 use super::*;
-use crate::connection::ConnectionClosedError;
+use crate::connection::{LayerEnd, LayerEndedError};
 use crate::connection_receive_flow::RecordUsageError;
 use crate::receive::stop::StopError;
 use crate::receive::violation::{
@@ -92,8 +92,8 @@ fn reset_violation<T: ReceiveTerminationPolicy>(
 }
 
 fn closed() -> ReadError<&'static str, TestCloseCause> {
-    ReadError::ConnectionClosed {
-        source: ConnectionClosedError::new(close_reason()),
+    ReadError::LayerEnded {
+        source: LayerEndedError::new(LayerEnd::ConnectionClosed(close_reason())),
     }
 }
 
@@ -338,7 +338,7 @@ mod reset_stream {
                 },
             }
         );
-        receiver.connection_closed(close_reason());
+        receiver.layer_ended(LayerEnd::ConnectionClosed(close_reason()));
         assert_eq!(receiver.read_chunk(), Err(closed()));
     }
 
@@ -442,7 +442,7 @@ mod awaiting_the_close {
             .unwrap();
         stream_violation(&mut receiver, &mut connection, stream(0, 200, false));
         assert_eq!(receiver.read_chunk(), Ok(ReadOutcome::Wait));
-        receiver.connection_closed(close_reason());
+        receiver.layer_ended(LayerEnd::ConnectionClosed(close_reason()));
         assert_eq!(receiver.read_chunk(), Err(closed()));
     }
 
@@ -456,7 +456,7 @@ mod awaiting_the_close {
         assert_eq!(end, Ok(ReadOutcome::End));
         stream_violation(&mut receiver, &mut connection, stream(0, 5, true));
         assert_eq!(receiver.read_chunk(), Ok(ReadOutcome::End));
-        receiver.connection_closed(close_reason());
+        receiver.layer_ended(LayerEnd::ConnectionClosed(close_reason()));
         assert_eq!(receiver.read_chunk(), Err(closed()));
     }
 
@@ -465,7 +465,7 @@ mod awaiting_the_close {
         let (mut receiver, _connection) = violated();
         receiver.reader_dropped();
         assert_eq!(receiver.read_chunk(), Err(ReadError::ReaderDropped));
-        receiver.connection_closed(close_reason());
+        receiver.layer_ended(LayerEnd::ConnectionClosed(close_reason()));
         assert_eq!(receiver.read_chunk(), Err(ReadError::ReaderDropped));
     }
 
@@ -492,12 +492,12 @@ mod awaiting_the_close {
     #[test]
     fn closing_reports_the_reason() {
         let (mut receiver, mut connection) = violated();
-        receiver.connection_closed(close_reason());
-        receiver.connection_closed(CloseReason::StatelessReset);
+        receiver.layer_ended(LayerEnd::ConnectionClosed(close_reason()));
+        receiver.layer_ended(LayerEnd::ConnectionClosed(CloseReason::StatelessReset));
         assert_eq!(receiver.read_chunk(), Err(closed()));
         assert_eq!(
-            receiver.closed().map(ConnectionClosedError::reason),
-            Some(&close_reason())
+            receiver.closed().map(LayerEndedError::end),
+            Some(&LayerEnd::ConnectionClosed(close_reason()))
         );
         assert!(receiver.parts().buffer.is_destroyed());
         assert_eq!(
@@ -506,8 +506,8 @@ mod awaiting_the_close {
         );
         assert_eq!(
             receiver.stop(c(1)),
-            Err(StopError::ConnectionClosed {
-                source: ConnectionClosedError::new(close_reason()),
+            Err(StopError::LayerEnded {
+                source: LayerEndedError::new(LayerEnd::ConnectionClosed(close_reason())),
             })
         );
         // Frames stay ignored.
@@ -552,7 +552,7 @@ mod after_the_close {
         receiver
             .on_stream_frame(stream(0, 100, false), &mut connection)
             .unwrap();
-        receiver.connection_closed(close_reason());
+        receiver.layer_ended(LayerEnd::ConnectionClosed(close_reason()));
         let before = snapshot(&receiver, &connection);
         assert_eq!(
             receiver.on_stream_frame(stream(100, 100, true), &mut connection),

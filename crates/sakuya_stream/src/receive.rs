@@ -30,18 +30,17 @@
 //! every check is handed to the receive buffer. A frame that fails a check
 //! leaves nothing of itself behind.
 //!
-//! # Violations and connection closure
+//! # Violations and the end of the layer
 //!
 //! The frame methods return the violations of their own frame (see
 //! [`violation`]) and keep no failure the application can see. After a
-//! violation the stream waits for the connection to close
-//! ([`connection_closed`](StreamReceiver::connection_closed)), which the
-//! caller does for the first reason the connection records. In between, the
-//! stream exposes no new result to the application: a read does not complete,
-//! and further frames are ignored. Once the connection has closed, every
-//! operation of the application fails with [`ConnectionClosedError`], which
-//! carries the reason. The connection side pushes the reason into each stream
-//! in the poll that records it; a stream never reads it from anywhere.
+//! violation the stream waits for its layer to end
+//! ([`layer_ended`](StreamReceiver::layer_ended)). In between, the stream exposes no new
+//! result to the application: a read does not complete, and further frames
+//! are ignored. Once the layer has ended, every operation of the application
+//! fails with [`LayerEndedError`], which carries the end. The connection side
+//! hands the end to each stream when it removes the layer; a stream never
+//! reads it from anywhere.
 //!
 //! # Three independent dimensions
 //!
@@ -68,7 +67,7 @@
 //! provisional.
 //!
 //! [`StreamReceiveBuffer`]: crate::receive_buffer::StreamReceiveBuffer
-use crate::connection::{CloseReason, ConnectionClosedError};
+use crate::connection::{LayerEnd, LayerEndedError};
 use crate::connection_receive_flow::{
     ConnectionReceiveFlowController, RecordReleaseError, RecordUsageError,
 };
@@ -205,13 +204,13 @@ enum BufferPhase<R, X> {
     Destroyed(Destruction<R, X>),
 }
 
-/// How far the connection's end has reached this stream:
+/// How far the end of the layer has reached this stream:
 ///
 /// ```text
-///            frame violation               connection_closed
+///            frame violation                 layer_ended
 ///   Open ───────────────────▶ Violated ───────────────────────▶ Closed
 ///     │                                                           ▲
-///     └──────────────────── connection_closed ────────────────────┘
+///     └──────────────────── layer_ended ────────────────────┘
 /// ```
 ///
 /// `Violated` is the stream between a violation returned by a frame method
@@ -226,8 +225,8 @@ enum ConnectionPhase<Lc> {
     /// A frame violated the protocol; the stream waits for the connection to
     /// close.
     Violated,
-    /// The connection closed; the first reason is kept.
-    Closed(ConnectionClosedError<Lc>),
+    /// The layer ended; the first end is kept.
+    Closed(LayerEndedError<Lc>),
 }
 
 /// Why the receive buffer was destroyed.
@@ -367,9 +366,9 @@ where
         self.reset
     }
 
-    /// The closure of the connection, once
-    /// [`connection_closed`](Self::connection_closed) recorded it.
-    pub fn closed(&self) -> Option<&ConnectionClosedError<Lc>> {
+    /// The end of the layer, once
+    /// [`layer_ended`](Self::layer_ended) recorded it.
+    pub fn closed(&self) -> Option<&LayerEndedError<Lc>> {
         match &self.connection {
             ConnectionPhase::Closed(closed) => Some(closed),
             ConnectionPhase::Open | ConnectionPhase::Violated => None,
@@ -433,7 +432,7 @@ where
     /// must close the connection with its
     /// [`transport_error_code`](OnStreamFrameError::transport_error_code).
     /// The stream then exposes no new result to the application until
-    /// [`connection_closed`](Self::connection_closed).
+    /// [`layer_ended`](Self::layer_ended).
     pub fn on_stream_frame<L>(
         &mut self,
         frame: StreamFrame<Bytes, L>,
@@ -487,19 +486,20 @@ where
         }
     }
 
-    /// Records that the connection closed for `reason`.
+    /// Records that the layer the stream lives on has ended as `end`.
     ///
-    /// The connection side calls this on every stream in the poll in which the
-    /// connection records its first close reason, whichever its source, and
-    /// also for a stream that returned a violation. Later operations of the
-    /// application fail with [`ConnectionClosedError`], carrying `reason`. The
-    /// receive buffer is destroyed. Only the first reason is kept; a later
-    /// call has no effect.
-    pub fn connection_closed(&mut self, reason: CloseReason<Lc>) {
+    /// The connection side calls this on every stream in the poll in which
+    /// the layer is removed, whichever the cause, and also for a stream that
+    /// returned a violation. A rejected 0-RTT attempt and a closed connection
+    /// act the same on the stream and differ only in the value the errors
+    /// carry. Later operations of the application fail with
+    /// [`LayerEndedError`], carrying `end`. The receive buffer is destroyed.
+    /// Only the first end is kept; a later call has no effect.
+    pub fn layer_ended(&mut self, end: LayerEnd<Lc>) {
         if self.closed().is_some() {
             return;
         }
-        self.shut_down(ConnectionClosedError::new(reason));
+        self.shut_down(LayerEndedError::new(end));
     }
 
     /// Records that the stream reader was dropped.
@@ -671,8 +671,8 @@ where
         data
     }
 
-    /// Records the closure of the connection and destroys the buffer.
-    fn shut_down(&mut self, closed: ConnectionClosedError<Lc>) {
+    /// Records the end of the layer and destroys the buffer.
+    fn shut_down(&mut self, closed: LayerEndedError<Lc>) {
         self.connection = ConnectionPhase::Closed(closed);
         self.destroy_buffer(Destruction::Forced);
         self.notify_termination(TerminationEvent::ConnectionClosed);

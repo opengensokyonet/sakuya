@@ -15,7 +15,7 @@ use super::test_support::{
 use super::write::{FlushError, WriteError, WriteOutcome, WriteWait};
 use super::*;
 use crate::connection::{
-    CloseReason, ConnectionClosedError, ImmediateClose, TransportImmediateClose,
+    CloseReason, ImmediateClose, LayerEnd, LayerEndedError, TransportImmediateClose,
 };
 use crate::send_buffer::covered_bytes::CoveredBytes;
 use crate::send_buffer::visibility::FinalSizeBelowExposureError;
@@ -491,7 +491,7 @@ fn no_end_frame_is_due_in_a_terminal_state_or_after_the_connection_closed() {
     write_all(&mut sender, 10);
     sender.reset(CODE).unwrap();
     assert!(due_end_frame(&mut sender).is_some());
-    sender.on_connection_closed(close_reason());
+    sender.on_layer_ended(LayerEnd::ConnectionClosed(close_reason()));
     assert!(due_end_frame(&mut sender).is_none());
 }
 
@@ -586,7 +586,7 @@ fn empty_input_and_flush_table() {
         .unwrap();
 
     let mut connection_closed = sender(1000);
-    connection_closed.on_connection_closed(close_reason());
+    connection_closed.on_layer_ended(LayerEnd::ConnectionClosed(close_reason()));
 
     let rows: Vec<Row<_>> = vec![
         ("open", open, Ok(()), Ok(())),
@@ -613,8 +613,8 @@ fn empty_input_and_flush_table() {
             "connection closed",
             connection_closed,
             Err("connection closed"),
-            Err(FlushError::ConnectionClosed {
-                source: ConnectionClosedError::new(close_reason()),
+            Err(FlushError::LayerEnded {
+                source: LayerEndedError::new(LayerEnd::ConnectionClosed(close_reason())),
             }),
         ),
     ];
@@ -634,7 +634,7 @@ fn empty_input_and_flush_table() {
             Err(WriteError::Reset {
                 source: StreamResetError,
             }) => Err("reset"),
-            Err(WriteError::ConnectionClosed { .. }) => Err("connection closed"),
+            Err(WriteError::LayerEnded { .. }) => Err("connection closed"),
             Err(error) => panic!("{state}: unexpected {error:?}"),
         };
         assert_eq!(result, empty_write, "{state}: empty write");
@@ -678,10 +678,10 @@ fn write_errors_follow_the_check_order() {
     // Connection closed before reset.
     let mut sender = test_sender(&connection, 1000);
     sender.reset(CODE).unwrap();
-    sender.on_connection_closed(close_reason());
+    sender.on_layer_ended(LayerEnd::ConnectionClosed(close_reason()));
     assert!(matches!(
         sender.write(&mut source(1)),
-        Err(WriteError::ConnectionClosed { .. })
+        Err(WriteError::LayerEnded { .. })
     ));
 
     // Reset before closed, when a reset replaced a close.
@@ -730,11 +730,11 @@ fn close_errors_follow_the_check_order() {
             source: StreamResetError
         })
     );
-    sender.on_connection_closed(close_reason());
+    sender.on_layer_ended(LayerEnd::ConnectionClosed(close_reason()));
     assert_eq!(
         sender.close(),
-        Err(CloseError::ConnectionClosed {
-            source: ConnectionClosedError::new(close_reason())
+        Err(CloseError::LayerEnded {
+            source: LayerEndedError::new(LayerEnd::ConnectionClosed(close_reason()))
         })
     );
 }
@@ -917,34 +917,34 @@ fn state_transition_table() {
 
     // A closed connection fails every new call, ahead of no-ops and empty
     // input.
-    sender.on_connection_closed(close_reason());
+    sender.on_layer_ended(LayerEnd::ConnectionClosed(close_reason()));
     assert_eq!(
         sender.reset(CODE),
-        Err(ResetError::ConnectionClosed {
-            source: ConnectionClosedError::new(close_reason())
+        Err(ResetError::LayerEnded {
+            source: LayerEndedError::new(LayerEnd::ConnectionClosed(close_reason()))
         })
     );
     assert_eq!(
         sender.close(),
-        Err(CloseError::ConnectionClosed {
-            source: ConnectionClosedError::new(close_reason())
+        Err(CloseError::LayerEnded {
+            source: LayerEndedError::new(LayerEnd::ConnectionClosed(close_reason()))
         })
     );
     assert!(matches!(
         sender.write(&mut Bytes::new()),
-        Err(WriteError::ConnectionClosed { .. })
+        Err(WriteError::LayerEnded { .. })
     ));
     assert_eq!(
         sender.flush(),
-        Err(FlushError::ConnectionClosed {
-            source: ConnectionClosedError::new(close_reason())
+        Err(FlushError::LayerEnded {
+            source: LayerEndedError::new(LayerEnd::ConnectionClosed(close_reason()))
         })
     );
-    closed.on_connection_closed(close_reason());
+    closed.on_layer_ended(LayerEnd::ConnectionClosed(close_reason()));
     assert_eq!(
         closed.close(),
-        Err(CloseError::ConnectionClosed {
-            source: ConnectionClosedError::new(close_reason())
+        Err(CloseError::LayerEnded {
+            source: LayerEndedError::new(LayerEnd::ConnectionClosed(close_reason()))
         })
     );
 }
@@ -953,27 +953,26 @@ fn state_transition_table() {
 fn connection_closed_error_carries_the_first_reason() {
     let connection = new_connection(10_000);
     let mut sender = test_sender(&connection, 1000);
-    sender.on_connection_closed(close_reason());
-    sender.on_connection_closed(CloseReason::IdleTimeout);
-    let Err(CloseError::ConnectionClosed { source }) = sender.close() else {
+    sender.on_layer_ended(LayerEnd::ConnectionClosed(close_reason()));
+    sender.on_layer_ended(LayerEnd::ConnectionClosed(CloseReason::IdleTimeout));
+    let Err(CloseError::LayerEnded { source }) = sender.close() else {
         panic!("expected a closed connection");
     };
-    assert_eq!(source.reason(), &close_reason());
+    assert_eq!(source.end(), &LayerEnd::ConnectionClosed(close_reason()));
     assert_eq!(
         source.to_string(),
-        "the connection is closed: closed locally: done"
+        "the layer has ended: the connection is closed: closed locally: done"
     );
-    let peer = ConnectionClosedError::new(CloseReason::<TestCloseCause>::Peer(
-        ImmediateClose::Transport(TransportImmediateClose {
+    let peer = LayerEndedError::new(LayerEnd::ConnectionClosed(
+        CloseReason::<TestCloseCause>::Peer(ImmediateClose::Transport(TransportImmediateClose {
             code: sakuya_wire::v1::transport_error::TransportErrorCode::PROTOCOL_VIOLATION,
             frame_type: None,
             reason_phrase: Bytes::new(),
-        }),
+        })),
     ));
-    assert!(
-        peer.to_string()
-            .starts_with("the connection is closed: closed by the peer with transport error")
-    );
+    assert!(peer.to_string().starts_with(
+        "the layer has ended: the connection is closed: closed by the peer with transport error"
+    ));
     assert!(!peer.to_string().contains("frame type"));
 }
 
@@ -1332,7 +1331,7 @@ fn closing_after_the_connection_closed_is_a_policy_violation() {
         SendTerminationEvent::ConnectionClosed => TerminationAction::Close,
         _ => TerminationAction::Keep,
     });
-    sender.on_connection_closed(close_reason());
+    sender.on_layer_ended(LayerEnd::ConnectionClosed(close_reason()));
 }
 
 #[test]
@@ -1346,7 +1345,7 @@ fn acting_after_the_connection_closed_is_a_policy_violation() {
         }),
         _ => TerminationAction::Keep,
     });
-    sender.on_connection_closed(close_reason());
+    sender.on_layer_ended(LayerEnd::ConnectionClosed(close_reason()));
 }
 
 /// An automatic action committed after data was appended does not turn the
@@ -1543,4 +1542,18 @@ fn keeping_an_abandoned_stream_retains_its_data() {
         sender.composition.termination.events.last(),
         Some(&SendTerminationEvent::StopSendingReceived { error_code: CODE })
     );
+}
+
+/// A layer ended by a rejected 0-RTT attempt fails later writes with
+/// `LayerEnded`, carrying that end.
+#[test]
+fn a_rejected_zero_rtt_attempt_fails_the_write_with_layer_ended() {
+    let connection = new_connection(1000);
+    let mut sender = test_sender(&connection, 1000);
+    sender.on_layer_ended(LayerEnd::ZeroRttRejected);
+    let mut input = source(4);
+    let Err(WriteError::LayerEnded { source }) = sender.write(&mut input) else {
+        panic!("the write must fail with LayerEnded");
+    };
+    assert_eq!(source.end(), &LayerEnd::ZeroRttRejected);
 }

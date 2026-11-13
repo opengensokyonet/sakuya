@@ -2,7 +2,7 @@ use super::dialect;
 use bytes::{BufMut, Bytes, BytesMut};
 use proptest::prelude::*;
 use sakuya_stream::connection::{
-    CloseReason, ConnectionClosedError, ImmediateClose, TransportImmediateClose,
+    CloseReason, ImmediateClose, LayerEnd, LayerEndedError, TransportImmediateClose,
 };
 use sakuya_stream::connection_receive_flow::{ConnectionReceiveFlowController, RecordUsageError};
 use sakuya_stream::receive::flow_control::{
@@ -507,7 +507,7 @@ impl Settled {
 #[derive(Clone, Debug, PartialEq)]
 enum Expected {
     ReaderDropped,
-    ConnectionClosed(ConnectionClosedError<TestCloseCause>),
+    ConnectionClosed(LayerEndedError<TestCloseCause>),
     Reset {
         reset: Facts,
         complete: bool,
@@ -532,7 +532,7 @@ enum LocalCause {
 fn observed(error: ReadError<u32, TestCloseCause, Facts>) -> Expected {
     match error {
         ReadError::ReaderDropped => Expected::ReaderDropped,
-        ReadError::ConnectionClosed { source } => Expected::ConnectionClosed(source),
+        ReadError::LayerEnded { source } => Expected::ConnectionClosed(source),
         ReadError::Reset { reset, complete } => Expected::Reset { reset, complete },
         ReadError::BufferDestroyed {
             reason,
@@ -927,8 +927,8 @@ impl Model {
             return Some(Err(Expected::ReaderDropped));
         }
         if self.closed() {
-            return Some(Err(Expected::ConnectionClosed(ConnectionClosedError::new(
-                close_reason(),
+            return Some(Err(Expected::ConnectionClosed(LayerEndedError::new(
+                LayerEnd::ConnectionClosed(close_reason()),
             ))));
         }
         match &self.reading {
@@ -1157,8 +1157,8 @@ fn step(
             let actual = receivers[stream].stop(code(value));
             let model = &mut models[stream];
             let expected = if model.closed() {
-                Err(StopError::ConnectionClosed {
-                    source: ConnectionClosedError::new(close_reason()),
+                Err(StopError::LayerEnded {
+                    source: LayerEndedError::new(LayerEnd::ConnectionClosed(close_reason())),
                 })
             } else if let Some(installed) = model.stop.code() {
                 if installed == value {
@@ -1203,7 +1203,7 @@ fn step(
             }
         }
         Op::ConnectionClosed { stream } => {
-            receivers[stream].connection_closed(close_reason());
+            receivers[stream].layer_ended(LayerEnd::ConnectionClosed(close_reason()));
             let model = &mut models[stream];
             if !model.closed() {
                 model.close();
@@ -1260,7 +1260,7 @@ fn check(
             receiver.closed().cloned(),
             model
                 .closed()
-                .then(|| ConnectionClosedError::new(close_reason())),
+                .then(|| LayerEndedError::new(LayerEnd::ConnectionClosed(close_reason()))),
             "closure"
         );
         assert_eq!(

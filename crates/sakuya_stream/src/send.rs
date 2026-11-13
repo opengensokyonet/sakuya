@@ -30,7 +30,7 @@
 //! would have to wait for credit or admission reports that instead
 //! ([`write::WriteOutcome::Wait`]). Polling, wake-ups, the stream writer
 //! handle, send selection and feedback dispatch are not part of this module.
-use crate::connection::{CloseReason, ConnectionClosedError};
+use crate::connection::{LayerEnd, LayerEndedError};
 use crate::connection_send_credit::ConnectionSendFlowController;
 use crate::send_buffer::visibility::UsageBeyondCoverageError;
 use crate::send_buffer::{
@@ -81,7 +81,7 @@ where
     connection: Arc<K>,
     end: EndPhase<T>,
     stop_sending: StopSending<C::WriteLimitReason>,
-    close_reason: Option<CloseReason<Lc>>,
+    layer_end: Option<LayerEnd<Lc>>,
 }
 
 /// The end of the send direction:
@@ -280,7 +280,7 @@ where
             connection,
             end: EndPhase::Open,
             stop_sending: StopSending::NotReceived,
-            close_reason: None,
+            layer_end: None,
         }
     }
 
@@ -329,9 +329,9 @@ where
         }
     }
 
-    /// Whether the connection has closed.
+    /// Whether the layer the stream lives on has ended.
     pub fn is_connection_closed(&self) -> bool {
-        self.close_reason.is_some()
+        self.layer_end.is_some()
     }
 
     /// The composition of buffer and policies, for inspection.
@@ -414,20 +414,22 @@ where
         self.dispatch_termination(SendTerminationEvent::WriterAbandoned);
     }
 
-    /// Records that the connection has closed for `reason`.
+    /// Records that the layer the stream lives on has ended as `end`.
     ///
     /// The connection side calls this on every stream in the poll in which
-    /// the connection records its first close reason, whichever its source;
-    /// the stream never reads the reason from anywhere else.
+    /// the layer is removed, whichever the cause; the stream never reads the
+    /// end from anywhere else. A rejected 0-RTT attempt and a closed
+    /// connection act the same on the stream and differ only in the value
+    /// the errors carry.
     ///
-    /// Every later operation fails with a [`ConnectionClosedError`] that
-    /// carries `reason`; results returned before are not changed. Only the
-    /// first reason is kept; a later call has no effect.
-    pub fn on_connection_closed(&mut self, reason: CloseReason<Lc>) {
+    /// Every later operation fails with a [`LayerEndedError`] that carries
+    /// `end`; results returned before are not changed. Only the first end is
+    /// kept; a later call has no effect.
+    pub fn on_layer_ended(&mut self, end: LayerEnd<Lc>) {
         if self.is_connection_closed() {
             return;
         }
-        self.close_reason = Some(reason);
+        self.layer_end = Some(end);
         self.dispatch_termination(SendTerminationEvent::ConnectionClosed);
     }
 
@@ -640,10 +642,10 @@ where
         });
     }
 
-    /// Fails once the connection has closed.
-    fn check_connection_open(&self) -> Result<(), ConnectionClosedError<Lc>> {
-        match &self.close_reason {
-            Some(reason) => Err(ConnectionClosedError::new(reason.clone())),
+    /// Fails once the layer has ended.
+    fn check_connection_open(&self) -> Result<(), LayerEndedError<Lc>> {
+        match &self.layer_end {
+            Some(end) => Err(LayerEndedError::new(end.clone())),
             None => Ok(()),
         }
     }

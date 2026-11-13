@@ -6,7 +6,7 @@ use super::{
     ReliablePrefixNotPreparedError, ReliableSizeIncreaseError, ResetAtError,
     ResetAtWithFinalSizeError, ResetTarget,
 };
-use crate::connection::ConnectionClosedError;
+use crate::connection::{LayerEnd, LayerEndedError};
 use crate::connection_send_credit::ConnectionSendFlowController;
 use crate::send::composition::DefaultSendComposition;
 use crate::send::finish::{CloseError, ProtocolTerminalError, ResetError, ResetWithFinalSizeError};
@@ -602,21 +602,21 @@ fn state_transition_table() {
 
     // A closed connection fails every new call, ahead of no-ops and empty
     // input.
-    sender.on_connection_closed(close_reason());
+    sender.on_layer_ended(LayerEnd::ConnectionClosed(close_reason()));
     assert_eq!(
         sender.reset_at(SUPPORT, CODE, v(40)),
-        Err(ResetAtError::ConnectionClosed {
-            source: ConnectionClosedError::new(close_reason())
+        Err(ResetAtError::LayerEnded {
+            source: LayerEndedError::new(LayerEnd::ConnectionClosed(close_reason()))
         })
     );
     assert!(matches!(
         sender.write(&mut Bytes::new()),
-        Err(WriteError::ConnectionClosed { .. })
+        Err(WriteError::LayerEnded { .. })
     ));
     assert_eq!(
         sender.flush(),
-        Err(FlushError::ConnectionClosed {
-            source: ConnectionClosedError::new(close_reason())
+        Err(FlushError::LayerEnded {
+            source: LayerEndedError::new(LayerEnd::ConnectionClosed(close_reason()))
         })
     );
 }

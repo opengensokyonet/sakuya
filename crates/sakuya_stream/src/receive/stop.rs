@@ -11,7 +11,7 @@
 //!
 //! | State | Result |
 //! | --- | --- |
-//! | connection closed | [`StopError::ConnectionClosed`] |
+//! | connection closed | [`StopError::LayerEnded`] |
 //! | a request with the same code is installed | success, nothing new happens |
 //! | a request with another code is installed | [`StopError::StopConflict`], the request stays |
 //! | no request, and all data was received or the peer reset the stream | [`StopError::StopNotNeeded`] |
@@ -31,7 +31,7 @@ use super::{
     remote_reset::RemoteResetFacts, termination::ReceiveTerminationPolicy,
     termination::TerminationEvent,
 };
-use crate::connection::ConnectionClosedError;
+use crate::connection::LayerEndedError;
 use crate::receive_buffer::StreamReceiveBuffer;
 use core::convert::Infallible;
 use core::fmt;
@@ -49,9 +49,9 @@ use snafu::{Snafu, ensure};
 pub enum StopError<Lc> {
     /// The connection has closed.
     #[snafu(transparent)]
-    ConnectionClosed {
+    LayerEnded {
         /// The closed connection.
-        source: ConnectionClosedError<Lc>,
+        source: LayerEndedError<Lc>,
     },
     /// A STOP request with another error code is already installed; it is
     /// kept.
@@ -75,9 +75,9 @@ impl<Lc> StopError<Lc> {
     /// of a policy's decision never reports; the closure itself otherwise.
     pub(super) fn without_closed_connection(
         self,
-    ) -> Result<StopError<Infallible>, ConnectionClosedError<Lc>> {
+    ) -> Result<StopError<Infallible>, LayerEndedError<Lc>> {
         match self {
-            Self::ConnectionClosed { source } => Err(source),
+            Self::LayerEnded { source } => Err(source),
             Self::StopConflict {
                 installed,
                 requested,
@@ -177,7 +177,7 @@ where
     /// `Ok(false)` that the same request is already installed.
     pub(super) fn check_stop(&self, code: ApplicationErrorCode) -> Result<bool, StopError<Lc>> {
         if let Some(closed) = self.closed() {
-            return Err(StopError::ConnectionClosed {
+            return Err(StopError::LayerEnded {
                 source: closed.clone(),
             });
         }

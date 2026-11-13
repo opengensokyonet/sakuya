@@ -1,16 +1,16 @@
 //! The local STOP request, row by row of its checks.
 use super::*;
-use crate::connection::ConnectionClosedError;
+use crate::connection::{LayerEnd, LayerEndedError};
 use crate::receive::stop::{NoStopRequestError, StopError, StopNotNeededReason};
 
 #[test]
 fn connection_closed_fails_the_request() {
     let (mut receiver, _connection) = new_receiver(keep_all());
-    receiver.connection_closed(close_reason());
+    receiver.layer_ended(LayerEnd::ConnectionClosed(close_reason()));
     assert_eq!(
         receiver.stop(c(1)),
-        Err(StopError::ConnectionClosed {
-            source: ConnectionClosedError::new(close_reason())
+        Err(StopError::LayerEnded {
+            source: LayerEndedError::new(LayerEnd::ConnectionClosed(close_reason()))
         })
     );
     assert_eq!(receiver.pending_stop(), None);
