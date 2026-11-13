@@ -18,7 +18,10 @@
 //! packet numbers the current 1-RTT key generation has seen
 //! ([`key_phase`]), and what it receives ([`input`]): its datagram receiver, the first one taken
 //! from what the connection was made with, and the inputs it holds until
-//! their keys come; its receiving call takes each datagram in. Once
+//! their keys come; its receiving call takes each datagram in. A link path
+//! writes its datagrams into a batch ([`datagram_batch`]), one packet after
+//! the other ([`packet_writer`]), with the frames of version 1
+//! ([`frames`]). Once
 //! a reason for closing is written, the link paths close, their recovery
 //! layers and the established layer end, and the connection ends with its
 //! last link path. The other calls and the send journals are not here yet.
@@ -28,15 +31,18 @@ pub mod amplification;
 pub mod close;
 pub mod confirmation;
 pub mod crypto;
+pub mod datagram_batch;
 pub mod dispatch;
 pub mod error;
 pub mod first_flight;
+pub mod frames;
 pub mod idle;
 pub mod input;
 pub mod key_phase;
 pub mod keys;
 pub mod link;
 pub mod loss_detection;
+pub mod packet_writer;
 pub mod parameters;
 pub mod pto;
 pub mod receive;

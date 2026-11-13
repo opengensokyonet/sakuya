@@ -470,6 +470,27 @@ impl<I: Copy> LinkPathCongestionState<I> {
         refill(controller, now, rtt, max_datagram_size);
         controller.allowance()
     }
+
+    /// A datagram ended with `in_flight` bytes that count in flight, and
+    /// went past the window on a permit if it is a `probe`: the bytes go in
+    /// flight, the permit is used, and pacing is charged, for probes too
+    /// (RFC 9002 §7.5, §7.7).
+    pub fn on_datagram_sealed<C: Pacer<I>>(
+        &mut self,
+        controller: &mut C,
+        in_flight: usize,
+        probe: bool,
+    ) {
+        self.add_in_flight(in_flight);
+        if probe {
+            let used = self.use_probe_permit();
+            debug_assert!(
+                used,
+                "a probe goes past the window on a permit it was given"
+            );
+        }
+        controller.on_charged(in_flight);
+    }
 }
 
 /// Refill the pacer of a lent access to `at`.
