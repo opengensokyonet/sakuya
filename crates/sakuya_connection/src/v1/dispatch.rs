@@ -35,7 +35,7 @@ use sakuya_wire::{
     v1::{
         encryption_level::EncryptionLevel,
         frame::{
-            FrameRun, FrameType,
+            FrameRun, FrameType, FrameTypeValue,
             codec::ReadFieldsError,
             connection_close::{CloseErrorCode, ConnectionCloseFrame},
             set::{FrameKind, FrameSetPart, FrameTypeValues},
@@ -75,13 +75,18 @@ use crate::{
 impl FrameSetPart for Part {
     type Run<D> = FrameRun<D>;
     type Kind = FrameType;
+    type TypeValue = FrameTypeValue;
     type FieldsError<E> = ReadFieldsError<E>;
 
     const FRAME_TYPE_VALUES: &'static FrameTypeValues =
         <sakuya_wire::v1::Part as FrameSetPart>::FRAME_TYPE_VALUES;
 
-    fn kind_of(value: VarInt) -> Option<FrameType> {
-        <sakuya_wire::v1::Part as FrameSetPart>::kind_of(value)
+    fn type_value_of(value: VarInt) -> Option<FrameTypeValue> {
+        <sakuya_wire::v1::Part as FrameSetPart>::type_value_of(value)
+    }
+
+    fn kind_of(type_value: FrameTypeValue) -> FrameType {
+        <sakuya_wire::v1::Part as FrameSetPart>::kind_of(type_value)
     }
 
     fn run_kind<D>(run: &FrameRun<D>) -> FrameType {
@@ -90,8 +95,7 @@ impl FrameSetPart for Part {
 
     fn read_run<H>(
         source: &mut H,
-        kind: FrameType,
-        value: VarInt,
+        type_value: FrameTypeValue,
     ) -> Result<
         FrameRun<<Direct<H> as ReadChunk>::Chunk>,
         ReadFieldsError<<Direct<H> as Read>::Error>,
@@ -100,7 +104,7 @@ impl FrameSetPart for Part {
         H: Buf + Receiver<Family = Direct<H>> + Unpin,
         Direct<H>: ReadChunk<Chunk: Default>,
     {
-        <sakuya_wire::v1::Part as FrameSetPart>::read_run(source, kind, value)
+        <sakuya_wire::v1::Part as FrameSetPart>::read_run(source, type_value)
     }
 }
 

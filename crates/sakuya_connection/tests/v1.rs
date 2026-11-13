@@ -399,24 +399,29 @@ mod probe {
     impl FrameSetPart for Part {
         type Run<D> = CNil;
         type Kind = CNil;
+        type TypeValue = CNil;
         type FieldsError<E> = CNil;
 
         const FRAME_TYPE_VALUES: &'static FrameTypeValues = &NO_FRAME_TYPES;
 
-        fn kind_of(_: VarInt) -> Option<CNil> {
+        fn type_value_of(_: VarInt) -> Option<CNil> {
             None
+        }
+
+        fn kind_of(type_value: CNil) -> CNil {
+            match type_value {}
         }
 
         fn run_kind<D>(run: &CNil) -> CNil {
             match *run {}
         }
 
-        fn read_run<H>(_: &mut H, kind: CNil, _: VarInt) -> Result<CNil, CNil>
+        fn read_run<H>(_: &mut H, type_value: CNil) -> Result<CNil, CNil>
         where
             H: bytes::Buf + nitori_call::Receiver<Family = nitori_call::Direct<H>> + Unpin,
             nitori_call::Direct<H>: nitori_io::ReadChunk<Chunk: Default>,
         {
-            match kind {}
+            match type_value {}
         }
     }
     impl<T: ConnectionChoices, L> FrameDispatch<T, L, ()> for Part

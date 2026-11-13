@@ -163,6 +163,7 @@ integer_transport_parameter!(
 impl FrameSetPart for Part {
     type Run<D> = DatagramFrame<D>;
     type Kind = FrameType;
+    type TypeValue = DatagramTypeValue;
     type FieldsError<E> = codec::ReadDatagramFrameError<E>;
 
     const FRAME_TYPE_VALUES: &'static FrameTypeValues =
@@ -171,8 +172,12 @@ impl FrameSetPart for Part {
             VarInt::from_u32(type_value::DATAGRAM_WITH_LENGTH as u32),
         )]);
 
-    fn kind_of(value: VarInt) -> Option<FrameType> {
-        DatagramTypeValue::new(value).map(|_| FrameType::Datagram)
+    fn type_value_of(value: VarInt) -> Option<DatagramTypeValue> {
+        DatagramTypeValue::new(value)
+    }
+
+    fn kind_of(_type_value: DatagramTypeValue) -> FrameType {
+        FrameType::Datagram
     }
 
     fn run_kind<D>(_run: &DatagramFrame<D>) -> FrameType {
@@ -181,8 +186,7 @@ impl FrameSetPart for Part {
 
     fn read_run<H>(
         source: &mut H,
-        _kind: FrameType,
-        value: VarInt,
+        type_value: DatagramTypeValue,
     ) -> Result<
         DatagramFrame<<Direct<H> as ReadChunk>::Chunk>,
         codec::ReadDatagramFrameError<<Direct<H> as Read>::Error>,
@@ -191,11 +195,7 @@ impl FrameSetPart for Part {
         H: Buf + Receiver<Family = Direct<H>> + Unpin,
         Direct<H>: ReadChunk<Chunk: Default>,
     {
-        let frame_type = DatagramTypeValue::new(value);
-        // invariant: `kind_of` gives a kind for exactly the DATAGRAM Frame
-        // Type values.
-        let frame_type = frame_type.unwrap_or_else(|| unreachable!("DATAGRAM {value}"));
-        source.sync_read_datagram_frame_unpin(frame_type)
+        source.sync_read_datagram_frame_unpin(type_value)
     }
 }
 
@@ -891,14 +891,14 @@ mod tests {
     fn the_part_claims_only_its_frame_types() {
         for value in [0x30u8, 0x31] {
             assert_eq!(
-                super::Part::kind_of(VarInt::from(value)),
+                super::Part::type_value_of(VarInt::from(value)).map(super::Part::kind_of),
                 Some(super::FrameType::Datagram)
             );
             assert!(super::Part::FRAME_TYPE_VALUES.contains(VarInt::from(value)));
         }
         for value in (0..0x30u8).chain(0x32..=0x3f) {
             assert_eq!(
-                super::Part::kind_of(VarInt::from(value)),
+                super::Part::type_value_of(VarInt::from(value)).map(super::Part::kind_of),
                 None,
                 "{value:#x}"
             );

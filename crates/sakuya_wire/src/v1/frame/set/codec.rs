@@ -2,8 +2,8 @@
 //! operation.
 //!
 //! [`read_frame_type`] reads the Frame Type of the next item of the frame set
-//! `S`, checks that it uses its shortest encoding, and gives the kind the
-//! set has for it. [`Frames`](super::Frames) reads the Frame Type with it,
+//! `S`, checks that it uses its shortest encoding, and gives it in the form
+//! of the part of the set that claims it. [`Frames`](super::Frames) reads the Frame Type with it,
 //! and then lets the part that claims the Frame Type read the rest
 //! ([`FrameSetPart::read_run`](super::FrameSetPart::read_run)). Writing is
 //! per frame type, in the `codec` module of each frame.
@@ -31,9 +31,9 @@
 //! let set = PhantomData::<HList![v1::Part]>;
 //! // MAX_DATA, then PING.
 //! let mut input = &[0x10, 0x05, 0x01][..];
-//! let (kind, value) = input.sync_read_frame_type_unpin(set).unwrap();
-//! assert_eq!(kind.extract(), FrameType::MaxData);
-//! assert_eq!(value, VarInt::from(0x10u8));
+//! let type_value = input.sync_read_frame_type_unpin(set).unwrap().extract();
+//! assert_eq!(type_value.kind(), FrameType::MaxData);
+//! assert_eq!(type_value.get(), VarInt::from(0x10u8));
 //! assert_eq!(input, [0x05, 0x01]);
 //!
 //! // RESET_STREAM_AT is not a frame of version 1.
@@ -64,8 +64,9 @@ use nitori_call::{ReceiverAccess, call};
 use nitori_io::prelude::*;
 use snafu::{ResultExt, Snafu};
 
-/// Reads the Frame Type of an item of the frame set `S`, and gives the kind
-/// it announces with its value; `set` names the set.
+/// Reads the Frame Type of an item of the frame set `S`, and gives it in the
+/// form of the part of `S` that claims it ([`FrameSet::TypeValue`]); `set`
+/// names the set.
 ///
 /// The Frame Type must use its shortest encoding ([RFC 9000 §12.4]); a
 /// longer one is rejected before the type is looked up.
@@ -83,7 +84,7 @@ use snafu::{ResultExt, Snafu};
 pub async fn read_frame_type<S, F, A>(
     io: &mut A,
     set: PhantomData<S>,
-) -> Result<(S::Kind, VarInt), ReadFrameError<F::Error, S::FieldsError<F::Error>>>
+) -> Result<S::TypeValue, ReadFrameError<F::Error, S::FieldsError<F::Error>>>
 where
     S: FrameSet,
     F: Read,
@@ -93,10 +94,10 @@ where
     let PhantomData = set;
     let (frame_type, width) = read_var_int_with_width(io).await.context(FrameTypeSnafu)?;
     LongerTypeEncodingError::check(frame_type, width).context(LongerTypeEncodingSnafu)?;
-    let Some(kind) = S::kind_of(frame_type) else {
+    let Some(type_value) = S::type_value_of(frame_type) else {
         return UnknownTypeSnafu { frame_type }.fail();
     };
-    Ok((kind, frame_type))
+    Ok(type_value)
 }
 
 /// A Frame Type uses a longer encoding than necessary ([RFC 9000 §12.4]).

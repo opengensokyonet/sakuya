@@ -156,6 +156,8 @@ impl KeyedParameter for ResetStreamAt {
 impl FrameSetPart for Part {
     type Run<D> = ResetStreamAtFrame;
     type Kind = FrameType;
+    /// The extension claims one Frame Type value, so its kind is the value.
+    type TypeValue = FrameType;
     type FieldsError<E> = codec::ReadResetStreamAtFrameError<E>;
 
     const FRAME_TYPE_VALUES: &'static FrameTypeValues =
@@ -164,8 +166,12 @@ impl FrameSetPart for Part {
             VarInt::from_u32(TYPE_VALUE as u32),
         )]);
 
-    fn kind_of(value: VarInt) -> Option<FrameType> {
+    fn type_value_of(value: VarInt) -> Option<FrameType> {
         (value.get() == TYPE_VALUE).then_some(FrameType::ResetStreamAt)
+    }
+
+    fn kind_of(type_value: FrameType) -> FrameType {
+        type_value
     }
 
     fn run_kind<D>(_run: &ResetStreamAtFrame) -> FrameType {
@@ -174,8 +180,7 @@ impl FrameSetPart for Part {
 
     fn read_run<H>(
         source: &mut H,
-        _kind: FrameType,
-        _value: VarInt,
+        _type_value: FrameType,
     ) -> Result<ResetStreamAtFrame, codec::ReadResetStreamAtFrameError<<Direct<H> as Read>::Error>>
     where
         H: Buf + Receiver<Family = Direct<H>> + Unpin,
@@ -594,11 +599,11 @@ mod tests {
     #[test]
     fn the_part_claims_only_its_frame_type() {
         assert_eq!(
-            Part::kind_of(VarInt::from(0x24u8)),
+            Part::type_value_of(VarInt::from(0x24u8)),
             Some(FrameType::ResetStreamAt)
         );
         for value in (0..0x24u8).chain(0x25..=0x3f) {
-            assert_eq!(Part::kind_of(VarInt::from(value)), None, "{value:#x}");
+            assert_eq!(Part::type_value_of(VarInt::from(value)), None, "{value:#x}");
             assert!(!Part::FRAME_TYPE_VALUES.contains(VarInt::from(value)));
         }
         assert!(Part::FRAME_TYPE_VALUES.contains(VarInt::from(0x24u8)));

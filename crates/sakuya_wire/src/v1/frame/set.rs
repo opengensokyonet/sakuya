@@ -29,7 +29,8 @@
 //! in the list. Reading an item reads its Frame Type
 //! ([`codec::read_frame_type`]), checks that it uses its shortest encoding,
 //! asks the set which part claims it, and lets that part read the rest
-//! ([`FrameSetPart::read_run`]). A Frame Type value that no part of the set
+//! ([`FrameSetPart::read_run`]) from the Frame Type value as the part
+//! claims it ([`FrameSetPart::TypeValue`]). A Frame Type value that no part of the set
 //! claims is unknown, including the values of an extension that is not in the
 //! set: a FRAME_ENCODING_ERROR ([RFC 9000 §12.4]).
 //!
@@ -37,7 +38,7 @@
 //! one would be read as those of another. Two checks reject a set that breaks
 //! this at compile time: [`assert_frame_types_disjoint!`](crate::assert_frame_types_disjoint),
 //! which whoever composes a set writes for it and which `cargo check` already
-//! evaluates, and an assertion in [`FrameSet::kind_of`], which fails when the
+//! evaluates, and an assertion in [`FrameSet::type_value_of`], which fails when the
 //! code that reads with the set is built.
 //!
 //! ```compile_fail
@@ -163,6 +164,11 @@ pub trait FrameSetPart {
     /// The kinds of the frames of this part.
     type Kind: FrameKind;
 
+    /// A Frame Type value this part claims, with what the part reads from
+    /// it: obtained only from [`type_value_of`](Self::type_value_of), so it
+    /// is always a value of this part.
+    type TypeValue: Copy;
+
     /// The failures of reading the fields after the Frame Type; each states
     /// the transport error it corresponds to ([`FrameFieldsError`]).
     type FieldsError<E>;
@@ -170,17 +176,19 @@ pub trait FrameSetPart {
     /// The Frame Type values this part claims.
     const FRAME_TYPE_VALUES: &'static FrameTypeValues;
 
-    /// The kind that the Frame Type value `value` announces, or `None` for a
-    /// value this part does not claim.
-    fn kind_of(value: VarInt) -> Option<Self::Kind>;
+    /// The Frame Type value `value` in the form of this part, or `None` for
+    /// a value this part does not claim.
+    fn type_value_of(value: VarInt) -> Option<Self::TypeValue>;
 
-    /// The kind of the frames of `run`: the kind
-    /// [`kind_of`](Self::kind_of) gave for the Frame Type it was read from.
+    /// The kind that the Frame Type value `type_value` announces.
+    fn kind_of(type_value: Self::TypeValue) -> Self::Kind;
+
+    /// The kind of the frames of `run`: the kind of the Frame Type it was
+    /// read from ([`kind_of`](Self::kind_of)).
     fn run_kind<D>(run: &Self::Run<D>) -> Self::Kind;
 
     /// Reads a run from `source`, a packet payload in memory from which the
-    /// Frame Type `value` has just been read, of the kind
-    /// [`kind_of`](Self::kind_of) gave for it.
+    /// Frame Type `type_value` has just been read.
     ///
     /// The source is the rest of a packet payload; payload fields are chunks
     /// of it. A part may read several consecutive frames as one run. A part
@@ -190,8 +198,7 @@ pub trait FrameSetPart {
     #[allow(clippy::type_complexity)]
     fn read_run<H>(
         source: &mut H,
-        kind: Self::Kind,
-        value: VarInt,
+        type_value: Self::TypeValue,
     ) -> Result<
         Self::Run<<Direct<H> as ReadChunk>::Chunk>,
         Self::FieldsError<<Direct<H> as Read>::Error>,
@@ -205,8 +212,9 @@ pub trait FrameSetPart {
 /// the set `Ps`, such as `HList![v1::Part, datagram::Part]`.
 ///
 /// [`Frames`] reads a set: it looks the Frame Type up with
-/// [`kind_of`](Self::kind_of) and reads the rest with
-/// [`read_run`](Self::read_run). A run, a kind or a failure of the set is a
+/// [`type_value_of`](Self::type_value_of) and reads the rest with
+/// [`read_run`](Self::read_run). A run, a kind, a claimed Frame Type value
+/// or a failure of the set is a
 /// `Coproduct` of those of the parts, one variant per part in the order of
 /// the list, ending in `CNil`; the empty set has none of them.
 pub trait FrameSet {
@@ -218,6 +226,10 @@ pub trait FrameSet {
     /// The kinds of the frames of this set.
     type Kind: FrameKind;
 
+    /// A Frame Type value a part of this set claims, in the form of that part
+    /// ([`FrameSetPart::TypeValue`]).
+    type TypeValue: Copy;
+
     /// The failures of reading the fields after the Frame Type; each states
     /// the transport error it corresponds to ([`FrameFieldsError`]).
     type FieldsError<E>;
@@ -228,24 +240,26 @@ pub trait FrameSet {
     /// Whether the parts of this set claim disjoint Frame Type values.
     const PARTS_DISJOINT: bool;
 
-    /// The kind that the Frame Type value `value` announces, or `None` for a
-    /// value no part of this set claims.
-    fn kind_of(value: VarInt) -> Option<Self::Kind>;
+    /// The Frame Type value `value` in the form of the part of this set that
+    /// claims it, or `None` for a value no part of this set claims.
+    fn type_value_of(value: VarInt) -> Option<Self::TypeValue>;
+
+    /// The kind that the Frame Type value `type_value` announces, as its
+    /// part gives it ([`FrameSetPart::kind_of`]).
+    fn kind_of(type_value: Self::TypeValue) -> Self::Kind;
 
     /// The kind of the frames of `run`, as the part of the run gives it
     /// ([`FrameSetPart::run_kind`]).
     fn run_kind<D>(run: &Self::Run<D>) -> Self::Kind;
 
     /// Reads a run from `source`, a packet payload in memory from which the
-    /// Frame Type `value` has just been read, of the kind
-    /// [`kind_of`](Self::kind_of) gave for it, as the part of the kind does
-    /// ([`FrameSetPart::read_run`]).
+    /// Frame Type `type_value` has just been read, as the part that claims it
+    /// does ([`FrameSetPart::read_run`]).
     // The type spells out the chunks and the failure of the source `H`.
     #[allow(clippy::type_complexity)]
     fn read_run<H>(
         source: &mut H,
-        kind: Self::Kind,
-        value: VarInt,
+        type_value: Self::TypeValue,
     ) -> Result<
         Self::Run<<Direct<H> as ReadChunk>::Chunk>,
         Self::FieldsError<<Direct<H> as Read>::Error>,
@@ -258,32 +272,38 @@ pub trait FrameSet {
 impl FrameSet for HNil {
     type Run<D> = CNil;
     type Kind = CNil;
+    type TypeValue = CNil;
     type FieldsError<E> = CNil;
 
     const FRAME_TYPE_VALUES: &'static FrameTypeValues = &FrameTypeValues::new(&[]);
 
     const PARTS_DISJOINT: bool = true;
 
-    fn kind_of(_value: VarInt) -> Option<CNil> {
+    fn type_value_of(_value: VarInt) -> Option<CNil> {
         None
+    }
+
+    fn kind_of(type_value: CNil) -> CNil {
+        match type_value {}
     }
 
     fn run_kind<D>(run: &CNil) -> CNil {
         match *run {}
     }
 
-    fn read_run<H>(_source: &mut H, kind: CNil, _value: VarInt) -> Result<CNil, CNil>
+    fn read_run<H>(_source: &mut H, type_value: CNil) -> Result<CNil, CNil>
     where
         H: Buf + Receiver<Family = Direct<H>> + Unpin,
         Direct<H>: ReadChunk<Chunk: Default>,
     {
-        match kind {}
+        match type_value {}
     }
 }
 
 impl<P: FrameSetPart, Ps: FrameSet> FrameSet for HCons<P, Ps> {
     type Run<D> = Coproduct<P::Run<D>, Ps::Run<D>>;
     type Kind = Coproduct<P::Kind, Ps::Kind>;
+    type TypeValue = Coproduct<P::TypeValue, Ps::TypeValue>;
     type FieldsError<E> = Coproduct<P::FieldsError<E>, Ps::FieldsError<E>>;
 
     const FRAME_TYPE_VALUES: &'static FrameTypeValues =
@@ -292,7 +312,7 @@ impl<P: FrameSetPart, Ps: FrameSet> FrameSet for HCons<P, Ps> {
     const PARTS_DISJOINT: bool =
         Ps::PARTS_DISJOINT && P::FRAME_TYPE_VALUES.is_disjoint(Ps::FRAME_TYPE_VALUES);
 
-    fn kind_of(value: VarInt) -> Option<Self::Kind> {
+    fn type_value_of(value: VarInt) -> Option<Self::TypeValue> {
         // Evaluated when the function is generated for a concrete set, so a
         // set whose parts overlap does not build. Each cell of the list
         // checks its part against the rest.
@@ -302,9 +322,16 @@ impl<P: FrameSetPart, Ps: FrameSet> FrameSet for HCons<P, Ps> {
                 "two parts of the frame set claim the same Frame Type value"
             );
         }
-        P::kind_of(value)
+        P::type_value_of(value)
             .map(Coproduct::Inl)
-            .or_else(|| Ps::kind_of(value).map(Coproduct::Inr))
+            .or_else(|| Ps::type_value_of(value).map(Coproduct::Inr))
+    }
+
+    fn kind_of(type_value: Self::TypeValue) -> Self::Kind {
+        match type_value {
+            Coproduct::Inl(type_value) => Coproduct::Inl(P::kind_of(type_value)),
+            Coproduct::Inr(type_value) => Coproduct::Inr(Ps::kind_of(type_value)),
+        }
     }
 
     fn run_kind<D>(run: &Self::Run<D>) -> Self::Kind {
@@ -316,8 +343,7 @@ impl<P: FrameSetPart, Ps: FrameSet> FrameSet for HCons<P, Ps> {
 
     fn read_run<H>(
         source: &mut H,
-        kind: Self::Kind,
-        value: VarInt,
+        type_value: Self::TypeValue,
     ) -> Result<
         Self::Run<<Direct<H> as ReadChunk>::Chunk>,
         Self::FieldsError<<Direct<H> as Read>::Error>,
@@ -326,11 +352,11 @@ impl<P: FrameSetPart, Ps: FrameSet> FrameSet for HCons<P, Ps> {
         H: Buf + Receiver<Family = Direct<H>> + Unpin,
         Direct<H>: ReadChunk<Chunk: Default>,
     {
-        match kind {
-            Coproduct::Inl(kind) => P::read_run(source, kind, value)
+        match type_value {
+            Coproduct::Inl(type_value) => P::read_run(source, type_value)
                 .map(Coproduct::Inl)
                 .map_err(Coproduct::Inl),
-            Coproduct::Inr(kind) => Ps::read_run(source, kind, value)
+            Coproduct::Inr(type_value) => Ps::read_run(source, type_value)
                 .map(Coproduct::Inr)
                 .map_err(Coproduct::Inr),
         }
@@ -657,8 +683,8 @@ where
         self.start = self.consumed;
         let before = self.source.remaining();
         let frame_type = self.source.sync_read_frame_type_unpin(self.part);
-        let result = frame_type.and_then(|(kind, value)| {
-            S::read_run(&mut self.source, kind, value).map_err(|error| ReadFrameError::Fields {
+        let result = frame_type.and_then(|type_value| {
+            S::read_run(&mut self.source, type_value).map_err(|error| ReadFrameError::Fields {
                 source: PartsError(error),
             })
         });

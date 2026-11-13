@@ -87,8 +87,7 @@ where
         Frame<Self::Chunk>,
         ReadFrameError<Self::Error, Coprod![ReadFieldsError<Self::Error>]>,
     > {
-        let (_, value) = self.sync_read_frame_type_unpin(V1)?;
-        let frame_type = FrameTypeValue::of(value).expect("a value of the part of version 1");
+        let frame_type = self.sync_read_frame_type_unpin(V1)?.extract();
         self.sync_read_fields_unpin(frame_type)
             .map_err(|error| ReadFrameError::Fields {
                 source: PartsError(Coproduct::Inl(error)),
@@ -562,7 +561,10 @@ fn unknown_types_and_those_of_extensions_are_rejected() {
         );
         assert_eq!(error.frame_type(), Some(frame_type));
         assert!(!error.is_incomplete());
-        assert_eq!(<crate::v1::Part as FrameSetPart>::kind_of(frame_type), None);
+        assert_eq!(
+            <crate::v1::Part as FrameSetPart>::type_value_of(frame_type),
+            None
+        );
     }
 }
 
@@ -975,7 +977,8 @@ fn recovery_properties() {
         let kind = frame.frame_type();
         assert_eq!(FrameType::of(frame.type_value()), Some(kind));
         assert_eq!(
-            <crate::v1::Part as FrameSetPart>::kind_of(frame.type_value()),
+            <crate::v1::Part as FrameSetPart>::type_value_of(frame.type_value())
+                .map(<crate::v1::Part as FrameSetPart>::kind_of),
             Some(kind)
         );
         assert_eq!(frame.is_ack_eliciting(), kind.is_ack_eliciting());
@@ -1029,8 +1032,8 @@ fn frame_type_value_sets() {
             "{value:#x}"
         );
         assert_eq!(
-            <crate::v1::Part as FrameSetPart>::kind_of(frame_type),
-            FrameType::of(frame_type)
+            <crate::v1::Part as FrameSetPart>::type_value_of(frame_type),
+            FrameTypeValue::of(frame_type)
         );
         assert_eq!(values.contains(frame_type), defined(value), "{value:#x}");
     }

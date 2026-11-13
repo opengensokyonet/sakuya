@@ -9,7 +9,7 @@ use crate::{
     v1::{
         self,
         frame::{
-            Frame, FrameRun, FrameType, FrameTypeValue,
+            Frame, FrameRun, FrameType,
             codec::ReadFieldsHostExt as _,
             padding::{PaddingFrame, PaddingRun},
             ping::PingFrame,
@@ -110,13 +110,12 @@ fn consecutive_padding_is_one_run() {
 #[test]
 fn read_fields_reads_one_padding_frame() {
     let mut input = &[0, 0, 0, 0x01][..];
-    let (kind, value) = input
+    let type_value = input
         .sync_read_frame_type_unpin(PhantomData::<HList![v1::Part]>)
-        .unwrap();
-    assert_eq!(kind.extract(), FrameType::Padding);
-    let frame: Frame<&[u8]> = input
-        .sync_read_fields_unpin(FrameTypeValue::of(value).unwrap())
-        .unwrap();
+        .unwrap()
+        .extract();
+    assert_eq!(type_value.kind(), FrameType::Padding);
+    let frame: Frame<&[u8]> = input.sync_read_fields_unpin(type_value).unwrap();
     assert_eq!(frame, Frame::Padding(PaddingFrame));
     assert_eq!(input, [0, 0, 0x01]);
 }
@@ -271,7 +270,9 @@ mod three_parts {
 
     #[test]
     fn the_kind_of_the_set_answers_for_its_part() {
-        let kind = |value: u32| <Set as FrameSet>::kind_of(vi(value)).unwrap();
+        let kind = |value: u32| {
+            <Set as FrameSet>::kind_of(<Set as FrameSet>::type_value_of(vi(value)).unwrap())
+        };
         assert_eq!(kind(0x07).get::<FrameType, _>(), Some(&FrameType::NewToken));
         assert_eq!(
             kind(0x24).get::<reset_stream_at::FrameType, _>(),
@@ -281,7 +282,7 @@ mod three_parts {
             kind(0x30).get::<datagram::FrameType, _>(),
             Some(&datagram::FrameType::Datagram)
         );
-        assert_eq!(<Set as FrameSet>::kind_of(vi(0x1f)), None);
+        assert_eq!(<Set as FrameSet>::type_value_of(vi(0x1f)), None);
         // NEW_TOKEN: only a client receives it, only in 1-RTT packets.
         assert!(kind(0x07).receivable_by(Role::Client));
         assert!(!kind(0x07).receivable_by(Role::Server));

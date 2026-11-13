@@ -467,12 +467,13 @@ impl FrameKind for FrameType {
 }
 
 /// The frames of version 1, `0x00` to `0x1e`, form a part of a frame set:
-/// [`FrameRun`], of the kinds [`FrameType`], read with the failures
+/// [`FrameRun`], of the kinds [`FrameType`], claimed as [`FrameTypeValue`], read with the failures
 /// [`codec::ReadFieldsError`]. Consecutive PADDING frames are one item, a
 /// [`PaddingRun`], and every other frame is an item of its own.
 impl FrameSetPart for super::Part {
     type Run<D> = FrameRun<D>;
     type Kind = FrameType;
+    type TypeValue = FrameTypeValue;
     type FieldsError<E> = codec::ReadFieldsError<E>;
 
     const FRAME_TYPE_VALUES: &'static FrameTypeValues =
@@ -481,8 +482,12 @@ impl FrameSetPart for super::Part {
             VarInt::from_u32(type_value::HANDSHAKE_DONE as u32),
         )]);
 
-    fn kind_of(value: VarInt) -> Option<FrameType> {
-        FrameType::of(value)
+    fn type_value_of(value: VarInt) -> Option<FrameTypeValue> {
+        FrameTypeValue::of(value)
+    }
+
+    fn kind_of(type_value: FrameTypeValue) -> FrameType {
+        type_value.kind()
     }
 
     fn run_kind<D>(run: &FrameRun<D>) -> FrameType {
@@ -493,8 +498,7 @@ impl FrameSetPart for super::Part {
     /// every other frame is read as [`codec::read_fields`] reads it.
     fn read_run<H>(
         source: &mut H,
-        kind: FrameType,
-        value: VarInt,
+        type_value: FrameTypeValue,
     ) -> Result<
         FrameRun<<Direct<H> as ReadChunk>::Chunk>,
         codec::ReadFieldsError<<Direct<H> as Read>::Error>,
@@ -503,16 +507,13 @@ impl FrameSetPart for super::Part {
         H: Buf + Receiver<Family = Direct<H>> + Unpin,
         Direct<H>: ReadChunk<Chunk: Default>,
     {
-        if kind == FrameType::Padding {
+        if type_value.kind() == FrameType::Padding {
             // The Frame Type that was read is the first frame of the run.
             let len = NonZeroUsize::MIN.saturating_add(skip_zeros(source));
             return Ok(FrameRun::Padding(PaddingRun::new(len)));
         }
-        // invariant: whoever calls this gives `value` with the kind that
-        // `kind_of` gives for it.
-        let frame_type = FrameTypeValue { kind, value };
         source
-            .sync_read_fields_unpin(frame_type)
+            .sync_read_fields_unpin(type_value)
             .map(FrameRun::from)
     }
 }
