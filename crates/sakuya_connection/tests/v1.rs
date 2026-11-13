@@ -39,7 +39,9 @@ use sakuya_connection::{
         close::{CloseReasonRecord, LocalCloseCause},
         confirmation::HandshakeConfirmation,
         crypto::{CryptoReceiveCapacities, CryptoReceiver, FragmentedCryptoReceiveBuffer},
-        first_flight::{FirstFlight, FirstFlightReadState},
+        first_flight::{
+            FirstFlight, FirstFlightReadState, ReadFirstFlightError, read_first_flight,
+        },
         idle::IdleTimeout,
         input::{InitialPathReceiver, LogicalPathInput},
         key_phase::KeyPhaseNumbers,
@@ -147,6 +149,9 @@ thread_local! {
     /// Whether the next connection is made with a first flight read before
     /// it was made, as a server that decides before answering makes it.
     static FIRST_READ: Cell<bool> = const { Cell::new(false) };
+    /// What reading the first flight left, for the next connection made
+    /// with a first flight read; nothing read when there is none.
+    static READ_STATE: RefCell<Option<Box<dyn core::any::Any>>> = const { RefCell::new(None) };
     /// The routing domain of the last connection made.
     static ROUTING: RefCell<Option<TestRouting>> = const { RefCell::new(None) };
 }
@@ -175,6 +180,7 @@ fn reset() {
     MAX_HELD.with(|m| m.set(16));
     FIRST_DATAGRAMS.with(|f| f.borrow_mut().clear());
     FIRST_READ.with(|f| f.set(false));
+    READ_STATE.with(|r| r.borrow_mut().take());
     ROUTING.with(|r| r.borrow_mut().take());
 }
 
@@ -205,6 +211,12 @@ struct TestRouting {
 /// The receiver of the initial path of a connection about to be made,
 /// registered in a new routing domain that [`deliver`] routes into.
 fn initial_receiver() -> InitialPathReceiver<TestReceiver> {
+    InitialPathReceiver::new(test_receiver())
+}
+
+/// A receiver registered in a new routing domain that [`deliver`] routes
+/// into.
+fn test_receiver() -> TestReceiver {
     // invariant: 64 is within the largest capacity
     let queue = DatagramDeliveryQueue::new(NonZeroUsize::new(64).expect("not zero"))
         .expect("a capacity a queue can have");
@@ -227,7 +239,7 @@ fn initial_receiver() -> InitialPathReceiver<TestReceiver> {
             _registration: registration,
         });
     });
-    InitialPathReceiver::new(queue)
+    queue
 }
 
 /// Route `datagram`, arrived over `link` at `at`, in the routing domain of
@@ -1383,7 +1395,22 @@ impl SideCapacities for v1::Server {
     where
         T: v1::Choices<Crypto = RingBackend, Side = Self>,
     {
-        FirstFlightReadState::new(&RingBackend, &client_dcid(), &Self::crypto_receive())
+        READ_STATE
+            .with(|r| r.borrow_mut().take())
+            .map(|state| {
+                *state
+                    .downcast()
+                    .expect("the state of the connection's choices")
+            })
+            .unwrap_or_else(|| {
+                FirstFlightReadState::new(
+                    &RingBackend,
+                    &client_dcid(),
+                    &Self::crypto_receive(),
+                    MaxAckRanges::DEFAULT,
+                    MAX_HELD.with(Cell::get),
+                )
+            })
     }
     fn crypto_receive() -> CryptoReceiveCapacities {
         // ClientHello at Initial; only Finished at Handshake
@@ -2820,6 +2847,164 @@ fn a_server_made_with_a_read_first_flight_starts_with_what_was_read() {
                 .to_owned(),
             format!("credit Some(Some({}))", 2 * size),
         ]
+    );
+}
+
+/// The Long Packet Type bits of a 0-RTT packet.
+const ZERO_RTT: u8 = 0b01;
+
+/// A ClientHello with an empty legacy_session_id, offering TLS_AES_128_GCM_SHA256
+/// and carrying two unknown extensions.
+fn client_hello() -> Vec<u8> {
+    let mut body = vec![0x03, 0x03];
+    body.extend_from_slice(&[0x5a; 32]);
+    body.push(0);
+    body.extend_from_slice(&[0x00, 0x02, 0x13, 0x01, 0x01, 0x00]);
+    body.extend_from_slice(&[0x00, 0x08, 0xfa, 0xfa, 0x00, 0x00, 0x1a, 0x1a, 0x00, 0x00]);
+    let len = u8::try_from(body.len()).unwrap();
+    [&[0x01, 0x00, 0x00, len][..], &body].concat()
+}
+
+/// Read the datagrams delivered to `receiver` as a server's first flight,
+/// into a new state.
+fn read_first(receiver: &mut TestReceiver) -> (FirstFlightReadState<Mine>, Result<(), String>) {
+    let mut state = FirstFlightReadState::<Mine>::new(
+        &RingBackend,
+        &client_dcid(),
+        &<v1::Server as SideCapacities>::crypto_receive(),
+        MaxAckRanges::DEFAULT,
+        MAX_HELD.with(Cell::get),
+    );
+    let result = {
+        let reading = core::pin::pin!(read_first_flight::<Mine, Parts, _, _, _>(
+            &mut state,
+            receiver,
+            MessageLimits::default(),
+        ));
+        match reading.poll(&mut core::task::Context::from_waker(
+            core::task::Waker::noop(),
+        )) {
+            core::task::Poll::Ready(result) => result.map_err(|error| match error {
+                ReadFirstFlightError::Connection { source } => format!("connection: {source}"),
+                ReadFirstFlightError::PeerClosed { close } => format!("closed: {close:?}"),
+                other => other.to_string(),
+            }),
+            core::task::Poll::Pending => Err("pending".to_owned()),
+        }
+    };
+    (state, result)
+}
+
+#[test]
+fn reading_the_first_flight_ends_with_the_first_client_hello() {
+    use probe::PacketStep::{Inspect, InspectCredit};
+    reset();
+    let first = link();
+    let mut receiver = test_receiver();
+    let hello = client_hello();
+    let one = padded(
+        &[],
+        |payload| long_packet(INITIAL, 0, payload),
+        &crypto_at(0, &hello[..20]),
+    );
+    let two = coalesced([
+        padded(
+            &[],
+            |payload| long_packet(INITIAL, 1, payload),
+            &crypto_at(20, &hello[20..]),
+        ),
+        long_packet(ZERO_RTT, 0, &ping()),
+    ]);
+    let size = one.len() + two.len();
+    deliver(one, &first, ms(1));
+    // before the rest of the ClientHello the reading waits
+    let (state, result) = read_first(&mut receiver);
+    assert_eq!(result, Err("pending".to_owned()));
+    assert!(state.first_client_hello().is_none());
+    reset();
+    let mut receiver = test_receiver();
+    deliver(
+        padded(
+            &[],
+            |payload| long_packet(INITIAL, 0, payload),
+            &crypto_at(0, &hello[..20]),
+        ),
+        &first,
+        ms(1),
+    );
+    deliver(two, &first, ms(2));
+    let (state, result) = read_first(&mut receiver);
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        state
+            .first_client_hello()
+            .map(|first| first.encoded().encoded().to_vec()),
+        Some(hello)
+    );
+    // the 0-RTT packet is held for the handshake to decide on
+    assert!(format!("{state:?}").contains("held: 1"), "{state:?}");
+    // the connection made from it starts with what was read
+    READ_STATE.with(|r| *r.borrow_mut() = Some(Box::new(state)));
+    FIRST_READ.with(|f| f.set(true));
+    feed_packets([(ms(6), Inspect), (ms(7), InspectCredit(first.clone()))]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    assert_eq!(
+        take_log(),
+        [
+            "initial keys live: true".to_owned(),
+            "recovery built, initial RTT None".to_owned(),
+            format!("Active, NotValidated, credit Some({})", 2 * size),
+        ]
+    );
+    assert_eq!(
+        run(&mut connection, 5..=7),
+        [
+            // the engine read the ClientHello; the Initial space is owed an
+            // ACK frame at once
+            "read \"\", largest Some((1, 2ms)), ranges [(0, 1)], due Some(Now), \
+             idle None, reason None"
+                .to_owned(),
+            format!("credit Some(Some({}))", 2 * size),
+        ]
+    );
+}
+
+#[test]
+fn reading_the_first_flight_ends_at_a_frame_an_initial_packet_cannot_carry() {
+    reset();
+    let first = link();
+    let mut receiver = test_receiver();
+    // a STREAM frame
+    deliver(
+        padded(
+            &[],
+            |payload| long_packet(INITIAL, 0, payload),
+            &[0x08, 0x00],
+        ),
+        &first,
+        ms(1),
+    );
+    let (_, result) = read_first(&mut receiver);
+    assert_eq!(result, Err("connection: frame not permitted".to_owned()));
+}
+
+#[test]
+fn reading_the_first_flight_ends_when_the_client_closes() {
+    reset();
+    let first = link();
+    let mut receiver = test_receiver();
+    let close = [&[0x1c, 0x0a, 0x00, 0x00][..], &[0; 20]].concat();
+    deliver(
+        padded(&[], |payload| long_packet(INITIAL, 0, payload), &close),
+        &first,
+        ms(1),
+    );
+    let (_, result) = read_first(&mut receiver);
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.starts_with("closed: ")),
+        "{result:?}"
     );
 }
 

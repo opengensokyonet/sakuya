@@ -799,7 +799,7 @@ where
 /// datagram routed as `route` says: the length the interpretation read,
 /// and after a long header that of the connection ID it was found by, which
 /// every packet of the datagram carries (RFC 9000 §12.2).
-fn short_dcid_len<Local>(route: &DatagramRouteMatchInfo<Local>) -> ConnectionIdLength {
+pub(super) fn short_dcid_len<Local>(route: &DatagramRouteMatchInfo<Local>) -> ConnectionIdLength {
     match route.interpretation() {
         FirstPacketInterpretation::Short { dcid_len } => dcid_len,
         FirstPacketInterpretation::Long { .. } | FirstPacketInterpretation::VersionNegotiation => {

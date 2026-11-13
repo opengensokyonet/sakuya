@@ -61,7 +61,7 @@ use sakuya_packet_protection::{
 use sakuya_recovery::{
     ack_obligation::AckObligation,
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaces},
-    receive_journals::{MaxAckRanges, ReceiveJournals},
+    receive_journals::{Admission, MaxAckRanges, ReceiveJournals},
 };
 use sakuya_wire::{
     parts::{CoprodInjector, PartsError},
@@ -400,19 +400,11 @@ where
         Some((ReceiveGeneration::Current | ReceiveGeneration::Previous, ..)) | None => {}
     }
 
-    let mut packet_facts = PacketFacts::default();
-    for run in Frames::new(payload, PhantomData::<L>) {
-        let run = run.map_err(read_frame_error::<T, L, Ie, Hd>)?;
-        let kind = <L as FrameSet>::run_kind(&run);
-        permitted(kind, level, <T::Side as Side>::ROLE)
-            .map_err(|source| v1_error::<L, Ie>(ConnectionError::FrameNotPermitted { source }))?;
-        packet_facts.note(kind);
-        <L as FrameSetDispatch<T, L, Hd>>::dispatch(lineage, others, run, &facts)
-            .map_err(PartsError)?;
-    }
-    if packet_facts.is_empty() {
-        return Err(v1_error::<L, Ie>(ConnectionError::EmptyPacket { level }));
-    }
+    let packet_facts =
+        read_frames::<T, L, Ie, Hd, _>(payload, level, core::convert::identity, |_, run| {
+            <L as FrameSetDispatch<T, L, Hd>>::dispatch(lineage, others, run, &facts)
+                .map_err(PartsError)
+        })?;
 
     let ecn = arrival.ecn();
     let max_ranges = *lineage.get::<MaxAckRanges, Im>();
@@ -421,21 +413,10 @@ where
         .get_mut::<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>()
         .get_mut(space)
     {
-        // compared before the packet is recorded, which makes it the largest
-        let highest_numbered = journals
-            .largest()
-            .is_none_or(|(largest, _)| number > largest);
-        let run_below = journals.received_run_below(number);
-        journals.record(admission, at, ecn);
-        journals.limit(max_ranges);
+        let (highest_numbered, run_below) =
+            record_received(journals, admission, at, ecn, max_ranges);
         if let Some(obligation) = lineage.get_mut::<AckObligationsOf<T>, Ia>().get_mut(space) {
-            obligation.record(
-                number,
-                at,
-                packet_facts.is_ack_eliciting(),
-                ecn == Some(EcnCodepoint::Ce),
-                run_below,
-            );
+            owe_ack(obligation, number, at, ecn, &packet_facts, run_below);
         }
         highest_numbered
     } else {
@@ -457,6 +438,89 @@ where
         highest_numbered,
         non_probing: packet_facts.is_non_probing(),
     })
+}
+
+/// Read the frames of `payload`, the plaintext of a packet protected at
+/// `level` that this side received, and hand each to `handle` with its
+/// kind, after checking that the packet may carry it; return what the
+/// frames make of the packet. A connection error of reading or of the
+/// check becomes the error with `into`.
+///
+/// # Errors
+///
+/// A frame that does not read or is not permitted, no frames at all, or an
+/// error of `handle`; the frames after it are not read.
+pub(super) fn read_frames<T, L, Ie, Hd, E>(
+    payload: Bytes,
+    level: EncryptionLevel,
+    into: impl Fn(ConnectionErrorOf<L>) -> E,
+    mut handle: impl FnMut(<L as FrameSet>::Kind, <L as FrameSet>::Run<Bytes>) -> Result<(), E>,
+) -> Result<PacketFacts, E>
+where
+    T: Choices,
+    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd>,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ie>,
+{
+    let mut packet_facts = PacketFacts::default();
+    for run in Frames::new(payload, PhantomData::<L>) {
+        let run = run.map_err(|error| into(read_frame_error::<T, L, Ie, Hd>(error)))?;
+        let kind = <L as FrameSet>::run_kind(&run);
+        permitted(kind, level, <T::Side as Side>::ROLE).map_err(|source| {
+            into(v1_error::<L, Ie>(ConnectionError::FrameNotPermitted {
+                source,
+            }))
+        })?;
+        packet_facts.note(kind);
+        handle(kind, run)?;
+    }
+    if packet_facts.is_empty() {
+        return Err(into(v1_error::<L, Ie>(ConnectionError::EmptyPacket {
+            level,
+        })));
+    }
+    Ok(packet_facts)
+}
+
+/// Record the packet that `admission` admitted, arrived at `at` with
+/// `ecn`, in `journals`, which keep at most `max_ranges`; return whether
+/// its number is higher than any recorded before, and the lowest number of
+/// the run received just below it, which its ACK obligation takes.
+pub(super) fn record_received<I: Copy>(
+    journals: &mut ReceiveJournals<I>,
+    admission: Admission,
+    at: I,
+    ecn: Option<EcnCodepoint>,
+    max_ranges: MaxAckRanges,
+) -> (bool, Option<PacketNumber>) {
+    let number = admission.number();
+    // compared before the packet is recorded, which makes it the largest
+    let highest_numbered = journals
+        .largest()
+        .is_none_or(|(largest, _)| number > largest);
+    let run_below = journals.received_run_below(number);
+    journals.record(admission, at, ecn);
+    journals.limit(max_ranges);
+    (highest_numbered, run_below)
+}
+
+/// Tell `obligation` of the packet `number`, arrived at `at` with `ecn`,
+/// whose frames made `packet_facts`, recorded after `run_below` as
+/// [`record_received`] returned it.
+pub(super) fn owe_ack<I: Copy, X: AckObligation<I>>(
+    obligation: &mut X,
+    number: PacketNumber,
+    at: I,
+    ecn: Option<EcnCodepoint>,
+    packet_facts: &PacketFacts,
+    run_below: Option<PacketNumber>,
+) {
+    obligation.record(
+        number,
+        at,
+        packet_facts.is_ack_eliciting(),
+        ecn == Some(EcnCodepoint::Ce),
+        run_below,
+    );
 }
 
 /// The role of the link path of this logical path that the packet arrived
@@ -605,11 +669,11 @@ pub(super) fn packet_number_offset<P>(packet: &ProtectedPacket<P>) -> Option<usi
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Opened {
     /// The packet number.
-    number: PacketNumber,
+    pub(super) number: PacketNumber,
     /// The first byte, unprotected.
-    first_byte: u8,
+    pub(super) first_byte: u8,
     /// Where the plaintext payload lies in the packet.
-    payload: Range<usize>,
+    pub(super) payload: Range<usize>,
 }
 
 /// Which receiving generation of the 1-RTT keys opened a packet.
@@ -739,7 +803,7 @@ fn fails_authentication(reason: &DropReason) -> bool {
 /// Whether a reserved bit of the unprotected first byte of a packet of
 /// `level` is set: `0x0c` of a long header, `0x18` of a short header, the
 /// header of 1-RTT packets.
-fn reserved_bits_set(level: EncryptionLevel, first_byte: u8) -> bool {
+pub(super) fn reserved_bits_set(level: EncryptionLevel, first_byte: u8) -> bool {
     let reserved = match level {
         EncryptionLevel::OneRtt => 0x18,
         EncryptionLevel::Initial | EncryptionLevel::ZeroRtt | EncryptionLevel::Handshake => 0x0c,
@@ -778,7 +842,7 @@ where
 }
 
 /// Version 1's `error` as the connection's error.
-fn v1_error<L, Ie>(error: ConnectionError) -> ConnectionErrorOf<L>
+pub(super) fn v1_error<L, Ie>(error: ConnectionError) -> ConnectionErrorOf<L>
 where
     L: ConnectionErrorsOf,
     L::ConnectionErrors: CoprodInjector<ConnectionError, Ie>,

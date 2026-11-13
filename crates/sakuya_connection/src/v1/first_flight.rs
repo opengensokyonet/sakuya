@@ -19,22 +19,70 @@
 //! The pieces the connection node does not take itself wait in
 //! [`FirstFlightStart`] until the first logical path and the first entry
 //! are built.
+//!
+//! [`read_first_flight`] is the reading outside the connection. It takes
+//! the datagrams of the half connection's receiver one by one and receives
+//! what a first flight carries with the same functions as the receiving
+//! call of a logical path: an Initial packet is opened, checked, read frame
+//! by frame and recorded; a 0-RTT packet is held until the handshake
+//! decides on it. Between datagrams the handshake engine reads the first
+//! ClientHello from the CRYPTO receiver, which is all it is lent.
 
-use core::{fmt, mem};
+use core::{
+    convert::Infallible,
+    fmt,
+    future::poll_fn,
+    mem,
+    pin::{Pin, pin},
+    task::Poll,
+};
 
-use sakuya_link::{Link, ReceivedDatagram};
+use bytes::Bytes;
+use frunk_core::coproduct::CoproductTaker;
+use nitori_call::{LentCall, Receiver};
+use nitori_io::SplitTo;
+use sakuya_datagram_routing::claim::delivery::DatagramDelivery;
+use sakuya_link::{Link, MIN_DATAGRAM_SIZE, ReceivedDatagram};
 use sakuya_packet_protection::initial::{INITIAL_AEAD, InitialSecrets};
-use sakuya_recovery::{ack_obligation::AckObligation, receive_journals::ReceiveJournals};
-use sakuya_tls::server::engine::FirstClientHello;
-use sakuya_wire::connection_id::{ConnectionId, ConnectionIdLength};
+use sakuya_recovery::{
+    ack_obligation::AckObligation,
+    receive_journals::{MaxAckRanges, ReceiveJournals},
+};
+use sakuya_stream::connection::ImmediateClose;
+use sakuya_tls::{
+    engine::{CryptoLevel, HandshakeError},
+    message::MessageLimits,
+    server::engine::{FirstClientHello, ReadFirstClientHello, ReadFirstClientHelloError},
+};
+use sakuya_wire::{
+    connection_id::{ConnectionId, ConnectionIdLength},
+    parts::CoprodInjector,
+    v1::{
+        encryption_level::EncryptionLevel,
+        frame::{FrameRun, set::FrameSet},
+        protected_packet::{IntoPacketsError, Packet, ProtectedPacket, into_packets},
+    },
+};
+use snafu::Snafu;
 
 use super::{
     Choices, Server, Side,
     crypto::{CryptoReceiveCapacities, CryptoReceiver},
-    input::{HeldInput, LogicalPathDatagramReceiver},
+    dispatch::immediate_close,
+    error::ConnectionError,
+    input::{HeldInput, LogicalPathDatagramReceiver, short_dcid_len},
     keys::{DirectionKeys, InitialKeys, LevelKeys},
+    receive::{
+        ReceivedPacket, open, owe_ack, packet_number_offset, read_frames, record_received,
+        reserved_bits_set, v1_error,
+    },
 };
-use crate::clock::{ConnectionChoices, InstantOf};
+use crate::{
+    clock::{ConnectionChoices, InstantOf},
+    dispatch::FrameSetDispatch,
+    error::{ConnectionErrorOf, ConnectionErrorsOf},
+    share::LineagePartList,
+};
 
 /// A datagram as it arrived over the link `Lk`.
 type DatagramOf<Lk> = ReceivedDatagram<<Lk as Link>::Payload, Lk>;
@@ -124,6 +172,8 @@ pub struct FirstFlightReadState<T: Choices> {
     crypto: Option<CryptoReceiver<T::CryptoReceiveBuffer>>,
     keys: Option<InitialKeys<T::Crypto>>,
     start: FirstFlightStart<T>,
+    max_ack_ranges: MaxAckRanges,
+    max_held_inputs: usize,
 }
 
 impl<T: Choices<Side = Server>> FirstFlightReadState<T> {
@@ -131,11 +181,15 @@ impl<T: Choices<Side = Server>> FirstFlightReadState<T> {
     /// Destination Connection ID of the client's first Initial packet: the
     /// Initial keys derived from it with `crypto` (RFC 9001 §5.2), each
     /// level of `capacities` with an empty CRYPTO buffer, nothing received
-    /// and nothing held.
+    /// and nothing held. The receive journals keep at most
+    /// `max_ack_ranges`; at most `max_held_inputs` 0-RTT packets are held,
+    /// and later ones are dropped.
     pub fn new(
         crypto: &T::Crypto,
         client_dcid: &ConnectionId,
         capacities: &CryptoReceiveCapacities,
+        max_ack_ranges: MaxAckRanges,
+        max_held_inputs: usize,
     ) -> Self {
         let (send, receive) =
             Server::split_initial_secrets(InitialSecrets::derive(crypto, client_dcid));
@@ -151,7 +205,14 @@ impl<T: Choices<Side = Server>> FirstFlightReadState<T> {
                 ack: Some(T::AckObligation::new(None)),
                 ..FirstFlightStart::empty(client_dcid.length())
             },
+            max_ack_ranges,
+            max_held_inputs,
         }
+    }
+
+    /// The first ClientHello, once it was read.
+    pub fn first_client_hello(&self) -> Option<&FirstClientHello> {
+        self.start.first.as_ref()
     }
 }
 
@@ -258,4 +319,273 @@ impl<T: Choices> fmt::Debug for FirstFlightStart<T> {
             .field("first_client_hello", &self.first.is_some())
             .finish_non_exhaustive()
     }
+}
+
+/// Read the first datagrams that `receiver` delivers into `state` until the
+/// handshake engine has read the first ClientHello within `limits`; it goes
+/// into `state` too. Nothing is sent.
+///
+/// Each datagram counts toward the anti-amplification limit as a whole and
+/// is cut into packets. An Initial packet is received as the receiving
+/// call of a logical path receives it: dropped when it does not open, is a
+/// duplicate or is in a datagram shorter than [`MIN_DATAGRAM_SIZE`] (RFC
+/// 9000 §14.1); otherwise its frames are read and checked against the
+/// packet type, its CRYPTO data goes into the CRYPTO receiver at Initial,
+/// and it is recorded in the receive journals and the ACK obligation of the
+/// Initial space. A 0-RTT packet is held. A Handshake or 1-RTT packet is
+/// dropped: no keys for it can come before the connection is made. A
+/// competing delivery is left to the other candidates: its first packet is
+/// a long header, which takes the client's Source Connection ID to judge,
+/// or a 1-RTT packet. Failures to open do not count toward the integrity
+/// limit here.
+///
+/// The positions are found from the composition `L` as for
+/// [`receive_packet`](super::receive::receive_packet): `Ie` of version 1's
+/// error in the connection's error, `Hd` of what each part's dispatch
+/// takes, and `Iv` of version 1's run among the runs of the frame set.
+///
+/// # Errors
+///
+/// [`ReadFirstFlightError`], as its variants document. The rest of the
+/// datagram is not read; `state` holds what was read before.
+pub async fn read_first_flight<T, L, Ie, Hd, Iv>(
+    state: &mut FirstFlightReadState<T>,
+    receiver: &mut T::Receiver,
+    limits: MessageLimits,
+) -> Result<(), ReadFirstFlightError<ConnectionErrorOf<L>>>
+where
+    T: Choices<Side = Server>,
+    T::CryptoReceiveBuffer: Unpin,
+    <T::Link as Link>::Payload: SplitTo + AsRef<[u8]> + AsMut<[u8]> + Into<Bytes>,
+    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd>,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ie>,
+    <L as FrameSet>::Run<Bytes>: CoproductTaker<FrameRun<Bytes>, Iv>,
+{
+    let mut reading = pin!(LentCall::<CryptoReceiver<T::CryptoReceiveBuffer>, _>::new(
+        ReadFirstClientHello::new(limits)
+    ));
+    poll_fn(|cx| {
+        loop {
+            // invariant: the CRYPTO receiver is taken only when the
+            // connection is made from the state, which ends the reading
+            let crypto = state
+                .crypto
+                .as_mut()
+                .expect("the CRYPTO receiver is there until the connection is made");
+            let mut view = pin!(Pin::new(crypto).view());
+            if let Poll::Ready(read) = reading.as_mut().poll_return_with_views(view.as_mut(), cx) {
+                return Poll::Ready(match read {
+                    Ok(first) => {
+                        state.start.first = Some(first);
+                        Ok(())
+                    }
+                    Err(source) => Err(ReadFirstFlightError::ClientHello { source }),
+                });
+            }
+            let Poll::Ready(delivery) = receiver.poll_next(cx) else {
+                return Poll::Pending;
+            };
+            let (datagram, dcid_len) = match delivery {
+                DatagramDelivery::Exclusive(delivery) => {
+                    let (datagram, route) = delivery.consume();
+                    (datagram.into_inner(), short_dcid_len(&route))
+                }
+                // dropping the candidate leaves the datagram to the others
+                DatagramDelivery::Competing(_) => continue,
+            };
+            if let Err(error) = receive_datagram::<T, L, Ie, Hd, Iv>(state, datagram, dcid_len) {
+                return Poll::Ready(Err(error));
+            }
+        }
+    })
+    .await
+}
+
+/// Receive `datagram` into `state`, as [`read_first_flight`] says, cutting
+/// it with `dcid_len` as the length of a short header's Destination
+/// Connection ID.
+fn receive_datagram<T, L, Ie, Hd, Iv>(
+    state: &mut FirstFlightReadState<T>,
+    datagram: ReceivedDatagram<<T::Link as Link>::Payload, T::Link>,
+    dcid_len: ConnectionIdLength,
+) -> Result<(), ReadFirstFlightError<ConnectionErrorOf<L>>>
+where
+    T: Choices<Side = Server>,
+    <T::Link as Link>::Payload: SplitTo + AsRef<[u8]> + AsMut<[u8]> + Into<Bytes>,
+    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd>,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ie>,
+    <L as FrameSet>::Run<Bytes>: CoproductTaker<FrameRun<Bytes>, Iv>,
+{
+    let size = datagram.payload().as_ref().len();
+    state.start.received_bytes = state.start.received_bytes.saturating_add(size);
+    // a server takes no Initial packet from a datagram too short to have
+    // carried a client's first flight (RFC 9000 §14.1)
+    let initial_allowed = size >= MIN_DATAGRAM_SIZE;
+    let (payload, arrival) = datagram.into_parts();
+    for packet in into_packets(payload, dcid_len) {
+        let packet = match packet {
+            Ok(Packet::Protected(packet)) => packet,
+            Ok(Packet::Retry(..) | Packet::VersionNegotiation(..)) => continue,
+            Err(IntoPacketsError::DcidDiffersFromFirst) => continue,
+            Err(IntoPacketsError::UnreadableBoundary { .. }) => break,
+        };
+        match packet.level() {
+            EncryptionLevel::Initial if initial_allowed => {
+                receive_initial::<T, L, Ie, Hd, Iv, _>(state, packet, arrival.at(), arrival.ecn())?;
+            }
+            EncryptionLevel::ZeroRtt => {
+                if state.start.held.len() < state.max_held_inputs {
+                    state.start.held.push(HeldInput::Packet(ReceivedPacket::new(
+                        packet,
+                        arrival.clone(),
+                    )));
+                }
+            }
+            EncryptionLevel::Initial | EncryptionLevel::Handshake | EncryptionLevel::OneRtt => {}
+        }
+    }
+    Ok(())
+}
+
+/// Receive the Initial packet `packet`, arrived at `at` with `ecn`, into
+/// `state`, as [`read_first_flight`] says.
+fn receive_initial<T, L, Ie, Hd, Iv, P>(
+    state: &mut FirstFlightReadState<T>,
+    packet: ProtectedPacket<P>,
+    at: InstantOf<T>,
+    ecn: Option<sakuya_link::EcnCodepoint>,
+) -> Result<(), ReadFirstFlightError<ConnectionErrorOf<L>>>
+where
+    T: Choices<Side = Server>,
+    P: AsMut<[u8]> + Into<Bytes>,
+    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd>,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ie>,
+    <L as FrameSet>::Run<Bytes>: CoproductTaker<FrameRun<Bytes>, Iv>,
+{
+    let level = EncryptionLevel::Initial;
+    // invariant: the keys and the space's journals and obligation are
+    // taken only when the connection is made from the state
+    let Some(InitialKeys::Live(keys)) = state.keys.as_ref() else {
+        unreachable!("the Initial keys are live until the connection is made")
+    };
+    let journals = state
+        .start
+        .journals
+        .as_mut()
+        .expect("the journals are there until the connection is made");
+    let largest = journals.largest().map(|(number, _)| number);
+    let Some(pn_offset) = packet_number_offset(&packet) else {
+        return Ok(());
+    };
+    let mut bytes = packet.into_bytes();
+    let Ok(opened) = open(&keys.receive, bytes.as_mut(), pn_offset, largest) else {
+        return Ok(());
+    };
+    if reserved_bits_set(level, opened.first_byte) {
+        return Err(connection::<L, Ie>(ConnectionError::ReservedBitsSet {
+            level,
+        }));
+    }
+    let Some(admission) = journals.admit(opened.number) else {
+        return Ok(());
+    };
+    let payload = bytes.into().slice(opened.payload);
+    let crypto = state
+        .crypto
+        .as_mut()
+        .expect("the CRYPTO receiver is there until the connection is made");
+    let mut closed = None;
+    let packet_facts = read_frames::<T, L, Ie, Hd, _>(
+        payload,
+        level,
+        |source| ReadFirstFlightError::Connection { source },
+        |_, run| {
+            let Some(run) = run.take() else {
+                return Err(ReadFirstFlightError::ExtensionFrame);
+            };
+            match run {
+                FrameRun::Padding(_) | FrameRun::Ping(_) => Ok(()),
+                FrameRun::Crypto(frame) => {
+                    let offset = frame.offset().into_inner();
+                    crypto
+                        .receive_frame(CryptoLevel::Initial, offset, frame.into_data())
+                        .map_err(|source| connection::<L, Ie>(ConnectionError::Crypto { source }))
+                }
+                FrameRun::ConnectionClose(frame) => {
+                    closed.get_or_insert(immediate_close(frame));
+                    Ok(())
+                }
+                other => Err(connection::<L, Ie>(ConnectionError::UnhandledFrame {
+                    kind: other.frame_type(),
+                })),
+            }
+        },
+    )?;
+    if let Some(close) = closed {
+        return Err(ReadFirstFlightError::PeerClosed { close });
+    }
+    let number = admission.number();
+    // invariant: as the journals
+    let journals = state
+        .start
+        .journals
+        .as_mut()
+        .expect("the journals are there until the connection is made");
+    let (_, run_below) = record_received(journals, admission, at, ecn, state.max_ack_ranges);
+    let obligation = state
+        .start
+        .ack
+        .as_mut()
+        .expect("the ACK obligation is there until the connection is made");
+    owe_ack(obligation, number, at, ecn, &packet_facts, run_below);
+    Ok(())
+}
+
+/// Version 1's `error` as a failure of reading the first flight of the
+/// composition `L`.
+fn connection<L, Ie>(error: ConnectionError) -> ReadFirstFlightError<ConnectionErrorOf<L>>
+where
+    L: ConnectionErrorsOf,
+    L::ConnectionErrors: CoprodInjector<ConnectionError, Ie>,
+{
+    ReadFirstFlightError::Connection {
+        source: v1_error::<L, Ie>(error),
+    }
+}
+
+/// A failure of reading the first flight before deciding; `E` is the
+/// connection's error.
+///
+/// None of them is sent: the half connection the reading belongs to
+/// answers or stays silent as its owner decides.
+#[derive(Debug, Snafu)]
+pub enum ReadFirstFlightError<E> {
+    /// A packet causes a connection error, as it would in the connection:
+    /// reserved bits set, a frame that does not read or is not permitted in
+    /// an Initial packet (RFC 9000 §12.4), no frames, CRYPTO data beyond the
+    /// buffer (§7.5), or a frame whose handling is not here yet.
+    #[snafu(display("a packet of the first flight causes a connection error"))]
+    Connection {
+        /// The connection error.
+        source: E,
+    },
+    /// The client closed the connection with a CONNECTION_CLOSE frame in an
+    /// Initial packet.
+    #[snafu(display("the client closed the connection"))]
+    PeerClosed {
+        /// The client's close.
+        close: ImmediateClose,
+    },
+    /// An Initial packet carries a frame of an extension, which the first
+    /// flight is read without; it is permitted there only if the extension
+    /// says so, as none of this crate's do.
+    #[snafu(display("an Initial packet carries a frame of an extension"))]
+    ExtensionFrame,
+    /// The first ClientHello could not be read, or its legacy_session_id is
+    /// not empty (RFC 9001 §8.4).
+    #[snafu(display("the first ClientHello could not be read"))]
+    ClientHello {
+        /// The failure.
+        source: HandshakeError<ReadFirstClientHelloError, Infallible>,
+    },
 }

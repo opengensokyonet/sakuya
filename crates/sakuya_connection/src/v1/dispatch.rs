@@ -217,7 +217,7 @@ where
 
 /// The CRYPTO stream of `level`; a 0-RTT packet carries no CRYPTO frames
 /// (RFC 9000 §12.4, Table 3).
-fn crypto_level(level: EncryptionLevel) -> Result<CryptoLevel, ConnectionError> {
+pub(super) fn crypto_level(level: EncryptionLevel) -> Result<CryptoLevel, ConnectionError> {
     match level {
         EncryptionLevel::Initial => Ok(CryptoLevel::Initial),
         EncryptionLevel::Handshake => Ok(CryptoLevel::Handshake),
@@ -230,7 +230,7 @@ fn crypto_level(level: EncryptionLevel) -> Result<CryptoLevel, ConnectionError> 
 
 /// The peer's close as the frame carries it; a Frame Type field of 0 is no
 /// frame type.
-fn immediate_close(frame: ConnectionCloseFrame<Bytes>) -> ImmediateClose {
+pub(super) fn immediate_close(frame: ConnectionCloseFrame<Bytes>) -> ImmediateClose {
     match frame.error_code() {
         CloseErrorCode::Transport { code, frame_type } => TransportImmediateClose {
             code: code.into_inner(),

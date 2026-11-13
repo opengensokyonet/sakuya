@@ -39,16 +39,70 @@
 //! The component keeps no packet protection state and does not decide when
 //! the engine moves to a level.
 
+use core::{
+    convert::Infallible,
+    pin::Pin,
+    task::{Context, Poll, Waker},
+};
+
 use bytes::{BufMut, Bytes};
+use nitori_call::{BorrowedReceiver, family_receiver};
+use nitori_io::Read;
 use sakuya_stream::receive_buffer::{
     StreamDataInput, StreamReceiveBuffer, fragmented::FragmentedStreamReceiveBuffer,
 };
 use sakuya_tls::{
-    engine::CryptoLevel,
+    engine::{CryptoInput, CryptoLevel},
     message::{MessageLimits, ReceivedMessageType},
 };
 use sakuya_wire::var_int::VarInt;
 use snafu::{Snafu, ensure};
+
+family_receiver!(impl [B: CryptoReceiveBuffer + Unpin + 'static] for CryptoReceiver<B>);
+
+/// The handshake engine reads the level being read. Nothing is ready when no
+/// contiguous bytes are: the reader is woken when the next frame at that
+/// level is received.
+impl<B: CryptoReceiveBuffer + Unpin + 'static> Read for CryptoReceiver<B> {
+    type Error = Infallible;
+
+    fn poll_read<'v, Output: BufMut + ?Sized>(
+        host: Pin<&mut BorrowedReceiver<'v, Self>>,
+        cx: &mut Context<'_>,
+        destination: &mut Output,
+    ) -> Poll<Result<usize, Infallible>>
+    where
+        Self: 'v,
+    {
+        let this = host.get_pin_mut().get_mut();
+        if !destination.has_remaining_mut() {
+            return Poll::Ready(Ok(0));
+        }
+        match this.read_into(destination) {
+            0 => {
+                this.reader = Some(cx.waker().clone());
+                Poll::Pending
+            }
+            read => Poll::Ready(Ok(read)),
+        }
+    }
+}
+
+/// The handshake engine moves the level it reads as
+/// [`CryptoReceiver::move_input_to`] does.
+impl<B: CryptoReceiveBuffer + Unpin + 'static> CryptoInput for CryptoReceiver<B> {
+    type LevelError = CryptoLevelMoveError;
+
+    fn move_input_to<'v>(
+        view: Pin<&mut BorrowedReceiver<'v, Self>>,
+        level: CryptoLevel,
+    ) -> Result<(), CryptoLevelMoveError>
+    where
+        Self: 'v,
+    {
+        view.get_pin_mut().get_mut().move_input_to(level)
+    }
+}
 
 #[cfg(test)]
 mod tests;
@@ -366,6 +420,8 @@ pub struct CryptoReceiver<B> {
     initial: LevelInput<B>,
     handshake: LevelInput<B>,
     one_rtt: LevelInput<B>,
+    /// What waits to read, woken when a frame comes at the level read.
+    reader: Option<Waker>,
 }
 
 impl<B: CryptoReceiveBuffer> CryptoReceiver<B> {
@@ -380,6 +436,7 @@ impl<B: CryptoReceiveBuffer> CryptoReceiver<B> {
             initial: capacities.initial.input(),
             handshake: capacities.handshake.input(),
             one_rtt: capacities.one_rtt.input(),
+            reader: None,
         }
     }
 
@@ -416,6 +473,11 @@ impl<B: CryptoReceiveBuffer> CryptoReceiver<B> {
                     BufferExceededSnafu { level }
                 );
                 buffer.receive(offset, data);
+                if level == self.reading
+                    && let Some(reader) = self.reader.take()
+                {
+                    reader.wake();
+                }
                 Ok(())
             }
             LevelInput::Left { received_end } => {
