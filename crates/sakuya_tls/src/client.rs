@@ -4,6 +4,8 @@
 //! - [`offering`]: what the ClientHello offers: cipher suites, groups and
 //!   key shares, signature schemes.
 //! - [`ticket`]: the tickets a client keeps, per target.
+//! - [`identity`]: what the client presents when the server asks for its
+//!   certificate.
 //!
 //! [`engine`] is the client's handshake engine, which takes these
 //! capabilities and a certificate verifier from
@@ -16,6 +18,7 @@ use rustls_pki_types::DnsName;
 use snafu::Snafu;
 
 pub mod engine;
+pub mod identity;
 pub mod offering;
 pub mod ticket;
 

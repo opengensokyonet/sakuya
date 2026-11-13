@@ -28,9 +28,11 @@
 //!    [`CertificateVerifier`], and CertificateVerify, whose scheme must fit
 //!    the certificate's key; or with the PSK the server accepted, keeping
 //!    the identity the ticket recorded. It reads the server's Finished,
-//!    writes an empty Certificate when the server asked for one, and writes
-//!    its own Finished: the handshake is complete, and it returns
-//!    [`ClientHandshakeCompleted`].
+//!    writes a Certificate when the server asked for one, with what the
+//!    [`ClientCertificateSelection`] presents (an empty one for
+//!    [`NoClientCertificate`](crate::client::identity::NoClientCertificate)),
+//!    and writes its own Finished: the handshake is complete, and it
+//!    returns [`ClientHandshakeCompleted`].
 //! 4. [`read_tickets`](ClientHandshakeSteps::read_tickets) moves both
 //!    streams to 1-RTT and keeps the tickets of the NewSessionTicket
 //!    messages the server sends, for as long as it runs; a ticket that
@@ -56,6 +58,7 @@ use crate::{
     cipher_suite::{CipherSuite, SupportedSuite},
     client::{
         ServerTarget,
+        identity::ClientCertificateSelection,
         offering::{InvalidOfferError, Offer, OfferAttempt, Offering},
         ticket::{ClientTicketStore, StoredTicket},
     },
@@ -997,11 +1000,12 @@ enum Sent<C: TlsCrypto> {
 
 /// The start state of a client's handshake: the backend, the client's
 /// capabilities and the target, which [`ClientHandshakeSteps`] runs.
-pub struct ClientHandshake<B, F, K, V, Z, G> {
+pub struct ClientHandshake<B, F, K, V, P, Z, G> {
     backend: B,
     offering: F,
     tickets: K,
     verifier: V,
+    certificates: P,
     clock: Z,
     key_log: G,
     target: ServerTarget,
@@ -1009,9 +1013,10 @@ pub struct ClientHandshake<B, F, K, V, Z, G> {
     settings: ClientHandshakeSettings,
 }
 
-impl<B, F, K, V, Z, G> ClientHandshake<B, F, K, V, Z, G> {
+impl<B, F, K, V, P, Z, G> ClientHandshake<B, F, K, V, P, Z, G> {
     /// A client's handshake to `target` with `backend`, `offering`,
-    /// `tickets`, `verifier`, `clock`, `key_log` and `settings`, offering
+    /// `tickets`, `verifier`, `certificates`, `clock`, `key_log` and
+    /// `settings`, offering
     /// the `application_protocols`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -1019,6 +1024,7 @@ impl<B, F, K, V, Z, G> ClientHandshake<B, F, K, V, Z, G> {
         offering: F,
         tickets: K,
         verifier: V,
+        certificates: P,
         clock: Z,
         key_log: G,
         target: ServerTarget,
@@ -1030,6 +1036,7 @@ impl<B, F, K, V, Z, G> ClientHandshake<B, F, K, V, Z, G> {
             offering,
             tickets,
             verifier,
+            certificates,
             clock,
             key_log,
             target,
@@ -1043,10 +1050,11 @@ impl<B, F, K, V, Z, G> ClientHandshake<B, F, K, V, Z, G> {
 /// written: what a second ClientHello and reading the ServerHello need.
 ///
 /// `A` is the attempt of the offering and `G` the key log.
-pub struct ClientHelloWrittenState<B: TlsCrypto, K, V, Z, A, G> {
+pub struct ClientHelloWrittenState<B: TlsCrypto, K, V, P, Z, A, G> {
     backend: B,
     tickets: K,
     verifier: V,
+    certificates: P,
     clock: Z,
     key_log: G,
     target: ServerTarget,
@@ -1064,9 +1072,10 @@ pub struct ClientHelloWrittenState<B: TlsCrypto, K, V, Z, A, G> {
 
 /// The state of a client's handshake after the ServerHello is read: what
 /// authenticating the server and the Finished messages need.
-pub struct ServerHelloReadState<B: TlsCrypto, K, V, Z, G> {
+pub struct ServerHelloReadState<B: TlsCrypto, K, V, P, Z, G> {
     tickets: K,
     verifier: V,
+    certificates: P,
     clock: Z,
     key_log: G,
     random: HelloRandom,
@@ -1095,20 +1104,21 @@ pub struct ClientHandshakeCompletedState<B: TlsCrypto, K, Z> {
     resumption: ResumptionSecret<Client, B>,
 }
 
-impl<B, F, K, V, Z, G> ClientHandshakeSteps for ClientHandshake<B, F, K, V, Z, G>
+impl<B, F, K, V, P, Z, G> ClientHandshakeSteps for ClientHandshake<B, F, K, V, P, Z, G>
 where
     B: TlsCrypto + Clone,
     F: Offering<B>,
     K: ClientTicketStore,
     V: CertificateVerifier,
     V::Error: CallsForAlert,
+    P: ClientCertificateSelection<Presented = Infallible>,
     Z: Clock,
     G: KeyLog,
 {
     type Crypto = B;
     type AlertError = ClientAlertError<V::Error>;
-    type ClientHelloWrittenState = ClientHelloWrittenState<B, K, V, Z, F::Attempt, G>;
-    type ServerHelloReadState = ServerHelloReadState<B, K, V, Z, G>;
+    type ClientHelloWrittenState = ClientHelloWrittenState<B, K, V, P, Z, F::Attempt, G>;
+    type ServerHelloReadState = ServerHelloReadState<B, K, V, P, Z, G>;
     type ClientHandshakeCompletedState = ClientHandshakeCompletedState<B, K, Z>;
 
     async fn write_client_hello<W: ClientHandshakeCapability>(
@@ -1120,6 +1130,7 @@ where
             offering,
             tickets,
             verifier,
+            certificates,
             clock,
             key_log,
             target,
@@ -1236,6 +1247,7 @@ where
             backend,
             tickets,
             verifier,
+            certificates,
             clock,
             key_log,
             target,
@@ -1261,6 +1273,7 @@ where
             backend,
             tickets,
             verifier,
+            certificates,
             clock,
             key_log,
             target,
@@ -1430,6 +1443,7 @@ where
         let state = ServerHelloReadState {
             tickets,
             verifier,
+            certificates,
             clock,
             key_log,
             random,
@@ -1459,6 +1473,7 @@ where
         let ServerHelloReadState {
             tickets,
             verifier,
+            certificates,
             clock,
             key_log,
             random,
@@ -1546,6 +1561,9 @@ where
                         .clone()
                         .sync_read_certificate_request_unpin()
                         .map_err(|source| alert(ClientAlertError::CertificateRequest { source }))?;
+                    if let Some(never) = certificates.select(&target, &request) {
+                        match never {}
+                    }
                     requested = Some(request.certificate_request_context().clone());
                     authentication = authentication.add(message.encoded());
                     message = read_message::<W, _>(host, limits, hash).await?;
