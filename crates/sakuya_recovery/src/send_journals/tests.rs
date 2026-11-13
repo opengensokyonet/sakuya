@@ -79,9 +79,12 @@ fn a_packet_with_only_ack_frames_is_neither_ack_eliciting_nor_in_flight() {
 #[test]
 fn a_sealed_packet_waits_in_the_sealed_state() {
     let mut journals = Journals::new();
-    let _sealed = seal(&mut journals, 1, "a");
-    let taken: Vec<_> = journals.take_acknowledged(&(pn(0)..=pn(0))).collect();
-    assert_eq!(taken[0].state, SentPacketState::Sealed);
+    let sealed = seal(&mut journals, 1, "a");
+    assert_eq!(journals.take_acknowledged(&(pn(0)..=pn(0))).count(), 0);
+    assert_eq!(
+        journals.sent(sealed, ms(1)).state,
+        SentPacketState::Sent(ms(1))
+    );
 }
 
 #[test]
@@ -141,6 +144,23 @@ fn acknowledging_a_range_takes_sent_and_lost_records() {
         numbers(journals.take_acknowledged(&(pn(0)..=pn(9)))),
         [0, 3]
     );
+}
+
+#[test]
+fn a_sealed_packet_acknowledged_stays_until_it_is_handed_back() {
+    let mut journals = Journals::new();
+    let a = seal(&mut journals, 1, "a");
+    let b = seal(&mut journals, 1, "b");
+    let c = seal(&mut journals, 1, "c");
+    journals.sent(a, ms(1));
+    journals.sent(c, ms(1));
+    assert_eq!(
+        numbers(journals.take_acknowledged(&(pn(0)..=pn(2)))),
+        [0, 2]
+    );
+    // the link accepts it after all, and a later acknowledgment takes it
+    assert_eq!(journals.sent(b, ms(2)).number, pn(1));
+    assert_eq!(numbers(journals.take_acknowledged(&(pn(0)..=pn(2)))), [1]);
 }
 
 #[test]
@@ -258,6 +278,6 @@ fn expired_lost_records_are_discarded_and_the_rest_stay() {
     journals2.discard_expired(ms(50));
     assert_eq!(
         numbers(journals2.take_acknowledged(&(pn(0)..=pn(9)))),
-        [1, 2, 3]
+        [1, 2]
     );
 }

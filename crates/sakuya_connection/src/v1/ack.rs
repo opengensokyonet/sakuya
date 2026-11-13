@@ -25,8 +25,10 @@
 //!    persistent congestion, which the RTT estimate hears of too; and of the
 //!    packets newly acknowledged, each step once what it settles left the
 //!    bytes in flight. A link path whose packets were newly acknowledged has
-//!    its probe timeout's backoff and its permits past the window cleared;
-//!    the pacer of each is refilled to the arrival.
+//!    its permits past the window cleared, and its probe timeout's backoff
+//!    too, except at a client not yet sure the server has validated its
+//!    address (RFC 9002 §6.2.1); the pacer of each is refilled to the
+//!    arrival.
 //! 3. Last, every summary of the acknowledged packets goes back to its part
 //!    as delivered, and then every summary of the packets declared lost as
 //!    lost; those packets go back to the send journals, which keep their
@@ -60,6 +62,7 @@ use sakuya_wire::{
     v1::{
         frame::ack::AckFrame,
         packet_number::PacketNumber,
+        role::Role,
         transport_parameters::{
             TransportParameterSlots, TransportParameterSpace,
             integer::{AckDelayExponent, MaxAckDelay, MaxUdpPayloadSize},
@@ -69,7 +72,7 @@ use sakuya_wire::{
 use snafu::ensure;
 
 use super::{
-    Choices,
+    Choices, Side,
     confirmation::HandshakeConfirmation,
     error::{ConnectionError, UnsentPacketAcknowledgedSnafu},
     link::LinkClone,
@@ -228,6 +231,17 @@ where
     let confirmed = *confirmation == HandshakeConfirmation::Confirmed;
     let peer_max_ack_delay = peer_max_ack_delay::<L, Ima>(peer);
     let peer_udp = peer_max_udp_payload_size::<L, Ipp>(peer);
+    // a client not yet sure the server has validated its address keeps
+    // the backoff: it has neither the handshake confirmed nor an
+    // acknowledgment of a Handshake packet (RFC 9002 §6.2.1, Appendix A.7)
+    let backoff_resets = <T::Side as Side>::ROLE == Role::Server
+        || confirmed
+        || lineage
+            .get::<PacketNumberSpaces<PacketNumberSpaceState>, In>()
+            .handshake
+            .as_ref()
+            .and_then(PacketNumberSpaceState::largest_acked)
+            .is_some();
     let reported = ack_delay(frame, peer_ack_delay_exponent::<L, Ide>(peer));
     let ack_delay = effective_ack_delay(
         space,
@@ -333,7 +347,9 @@ where
                     rtt.on_persistent_congestion();
                 }
                 if newly_acked {
-                    pto.reset_backoff();
+                    if backoff_resets {
+                        pto.reset_backoff();
+                    }
                     state.clear_probe_permits();
                 }
                 batch

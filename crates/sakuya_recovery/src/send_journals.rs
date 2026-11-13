@@ -17,7 +17,7 @@
 //! The journals are replaceable; [`DequeSendJournals`] keeps the records in
 //! a deque in the order of their packet numbers.
 use core::ops::RangeInclusive;
-use std::collections::{VecDeque, vec_deque::Drain};
+use std::{collections::VecDeque, vec};
 
 use sakuya_wire::v1::packet_number::PacketNumber;
 
@@ -127,7 +127,10 @@ pub trait SendJournals<S, I, P> {
     ) -> &SentPacketRecord<I, S, P>;
 
     /// Take out the records of `range`, acknowledged: the ones still sent
-    /// are newly acknowledged, the ones lost are acknowledged late.
+    /// are newly acknowledged, the ones lost are acknowledged late. A
+    /// record still sealed stays: its packet is handed back to the journals
+    /// once the link accepts it or not, and a later acknowledgment, which
+    /// repeats the ranges, covers it then.
     fn take_acknowledged(&mut self, range: &RangeInclusive<PacketNumber>)
     -> Self::Acknowledged<'_>;
 
@@ -258,7 +261,7 @@ impl<I: Ord + Copy, S, P: PartialEq> SendJournals<S, I, P> for DequeSendJournals
         Self: 'a;
     type SealedPacket = DequeSealedPacket;
     type Acknowledged<'a>
-        = Drain<'a, SentPacketRecord<I, S, P>>
+        = vec::IntoIter<SentPacketRecord<I, S, P>>
     where
         Self: 'a;
     type LinkPathPackets<'a>
@@ -310,9 +313,22 @@ impl<I: Ord + Copy, S, P: PartialEq> SendJournals<S, I, P> for DequeSendJournals
     fn take_acknowledged(
         &mut self,
         range: &RangeInclusive<PacketNumber>,
-    ) -> Drain<'_, SentPacketRecord<I, S, P>> {
+    ) -> vec::IntoIter<SentPacketRecord<I, S, P>> {
         let indices = self.range(range);
-        self.records.drain(indices)
+        let start = indices.start;
+        let mut taken = Vec::with_capacity(indices.len());
+        let mut sealed = Vec::new();
+        for record in self.records.drain(indices) {
+            match record.state {
+                SentPacketState::Sealed => sealed.push(record),
+                SentPacketState::Sent(_) | SentPacketState::Lost { .. } => taken.push(record),
+            }
+        }
+        // still in order: they lay together in the range
+        for (offset, record) in sealed.into_iter().enumerate() {
+            self.records.insert(start + offset, record);
+        }
+        taken.into_iter()
     }
 
     fn declare_lost(

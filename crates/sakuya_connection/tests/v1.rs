@@ -3811,6 +3811,52 @@ fn an_ack_that_acknowledges_nothing_new_keeps_the_backoff() {
 }
 
 #[test]
+fn a_client_keeps_the_backoff_until_the_server_has_validated_its_address() {
+    reset();
+    let first = link();
+    let ack = |number, at| {
+        probe::PacketStep::Receive(received(
+            long_packet_with(
+                first_byte(INITIAL),
+                &[],
+                &server_keys(),
+                number,
+                &ack_of(&[(0, 0)], false),
+            ),
+            &first,
+            ms(at),
+        ))
+    };
+    feed([(
+        ms(10),
+        probe::Step::Sent {
+            space: PacketNumberSpaceKind::Initial,
+            count: 1,
+        },
+    )]);
+    feed_packets([(ms(1100), ack(0, 1100))]);
+    let mut connection = connection!(ClientMine, AddressValidation::Validated, first.clone());
+    take_log();
+    let outer = Outer::new();
+    let mut at = |millis| {
+        advance_to(ms(millis));
+        assert!(outer.poll(&mut connection).is_pending());
+        status()
+    };
+    at(10);
+    assert_eq!(
+        at(1009).as_deref(),
+        Some("in flight 1200, outstanding 1, lost [], permits 2, backoff 1")
+    );
+    // newly acknowledged in the Initial space, with neither the handshake
+    // confirmed nor a Handshake packet acknowledged
+    assert_eq!(
+        at(1100).as_deref(),
+        Some("in flight 0, outstanding 0, lost [], permits 0, backoff 1")
+    );
+}
+
+#[test]
 fn a_delivered_ack_frame_stops_what_it_reported_from_being_reported() {
     use probe::PacketStep::{Inspect, Receive};
     reset();
