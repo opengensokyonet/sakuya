@@ -42,6 +42,10 @@ use crate::write::PaddingSummary;
 /// packet of the datagram carries it (RFC 9000 §12.2). It is told how many
 /// bytes it was used for once the datagram is sealed; a datagram that
 /// stays empty never uses it.
+///
+/// The connection's implementation is
+/// [`DatagramConnectionId`](crate::connection_id::datagram::DatagramConnectionId),
+/// which tells the destination connection ID strategy that chose it.
 pub trait ConnectionIdUse {
     /// The connection ID.
     fn connection_id(&self) -> ConnectionId;

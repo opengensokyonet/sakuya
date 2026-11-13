@@ -6,6 +6,11 @@ publish.workspace = true
 license.workspace = true
 description = "QUIC connections for sakuya: the tree of a connection's state and the driver of its calls"
 
+[features]
+# Functions that check a destination connection ID strategy against the
+# protocol's contract: the `connection_id::strategy_checks` module.
+connection_id_strategy_checks = []
+
 [dependencies]
 bytes.workspace = true
 frunk_core.workspace = true

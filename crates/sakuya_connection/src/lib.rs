@@ -30,6 +30,7 @@
 pub mod call;
 pub mod clock;
 pub mod component;
+pub mod connection_id;
 pub mod dispatch;
 pub mod driver;
 pub mod error;
