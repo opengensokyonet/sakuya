@@ -262,6 +262,31 @@ fn a_kept_lost_packet_is_handed_back_by_a_late_acknowledgment() {
 }
 
 #[test]
+fn late_acknowledgments_come_back_once_for_each_batch() {
+    let mut state = State::new();
+    lose(&mut state, &[1, 2, 3], 7, 100);
+    lose(&mut state, &[5, 6], 8, 100);
+    // the ranges of an ACK frame, largest first: one spans two batches
+    let back: Vec<_> = state
+        .take_spuriously_lost_batches(&[pn(6)..=pn(6), pn(2)..=pn(5)])
+        .into_iter()
+        .map(|(loss, packets)| {
+            let sent: Vec<_> = packets.iter().map(|p| p.sent_at).collect();
+            (loss, sent)
+        })
+        .collect();
+    assert_eq!(back, [(7, vec![ms(2), ms(3)]), (8, vec![ms(5), ms(6)])]);
+    // taken once only; 1 is still kept
+    assert!(
+        state
+            .take_spuriously_lost_batches(&[pn(0)..=pn(9)])
+            .iter()
+            .all(|(loss, packets)| *loss == 7 && packets.len() == 1)
+    );
+    assert_eq!(kept(&state), []);
+}
+
+#[test]
 fn a_range_without_kept_packets_hands_back_nothing() {
     let mut state = State::new();
     lose(&mut state, &[1], 7, 100);

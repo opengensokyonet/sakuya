@@ -36,7 +36,7 @@ use core::iter::FusedIterator;
 
 use sakuya_wire::v1::packet_number::PacketNumber;
 
-use crate::loss::PacketThreshold;
+use crate::{congestion::SpuriouslyLostPacket, loss::PacketThreshold};
 
 /// A packet the link accepted, neither acknowledged nor declared lost yet.
 ///
@@ -342,6 +342,46 @@ impl<I: Ord + Copy + Add<Duration, Output = I>, S, Ls> LossDetectionState<I, S, 
                 loss: batch.loss.clone(),
             })
         })
+    }
+
+    /// Take out the kept lost packets that any of `ranges` acknowledges,
+    /// batch by batch: each batch with such packets comes once, with its
+    /// value and those packets, oldest first, as
+    /// [`on_spurious_loss`](crate::congestion::CongestionController::on_spurious_loss)
+    /// takes them.
+    pub fn take_spuriously_lost_batches(
+        &mut self,
+        ranges: &[RangeInclusive<PacketNumber>],
+    ) -> Vec<(Ls, Vec<SpuriouslyLostPacket<I>>)>
+    where
+        Ls: Clone,
+    {
+        let mut taken: Vec<(u64, Ls, Vec<SpuriouslyLostPacket<I>>)> = Vec::new();
+        let batches = &self.batches;
+        // kept packets are in the order of their numbers, and a batch's
+        // packets come after an earlier batch's: the oldest go first
+        self.kept.retain(|packet| {
+            if !ranges.iter().any(|range| range.contains(&packet.number)) {
+                return true;
+            }
+            let lost = SpuriouslyLostPacket {
+                bytes: packet.bytes,
+                sent_at: packet.sent_at,
+            };
+            match taken.last_mut() {
+                Some((batch, _, packets)) if *batch == packet.batch => packets.push(lost),
+                _ => {
+                    if let Ok(index) = batches.binary_search_by_key(&packet.batch, |b| b.id) {
+                        taken.push((packet.batch, batches[index].loss.clone(), vec![lost]));
+                    }
+                }
+            }
+            false
+        });
+        taken
+            .into_iter()
+            .map(|(_, loss, packets)| (loss, packets))
+            .collect()
     }
 
     /// Drop the kept lost packets whose batch's retention ended by `now`.
