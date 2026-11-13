@@ -53,6 +53,7 @@ pub mod receive;
 pub mod recovery;
 pub mod role;
 pub mod send;
+pub mod send_planning;
 pub mod spaces;
 
 #[cfg(test)]
@@ -88,6 +89,7 @@ use crate::{
     layer::{self, NodeKey},
     others::OtherNodes,
     request::StructureRequest,
+    send_strategy::{PlannerLinkPath, PublishOutcome, SendStrategy, SendStrategyTypes},
     share::{
         ConnectionArgsOf, FlatMut, LayerShare, LineageLists, LineagePartList, LogicalPathKeyShare,
         LogicalPathKeys, NodeData,
@@ -118,6 +120,11 @@ use self::{
         RecoveryFactoryOf, RttOf,
     },
     role::LinkPathRole,
+    send::{AckIntent, ProbePingIntent, SendTypes},
+    send_planning::{
+        AckIntentTicketOf, AckIntentTickets, LinkPathPlanner, LinkPathSendPlannerOf,
+        ProbePingTicketOf, ProbePingTickets, SendStrategyCore, SendStrategyOf,
+    },
     spaces::{AckObligationsOf, DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
 };
 use sakuya_recovery::{
@@ -190,6 +197,9 @@ pub trait Choices: ConnectionChoices {
     type HandshakeFailure: 'static;
     /// The datagram receiver of a logical path.
     type Receiver: LogicalPathDatagramReceiver<Self::Link> + 'static;
+    /// The core of the send strategy, for the types `I` the composition
+    /// gives it; it starts as its default makes it.
+    type SendStrategy<I: SendStrategyTypes>: Default;
 }
 
 /// This endpoint's reason for closing a connection of the choices `T` and
@@ -310,6 +320,8 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
 
 impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + ConnectionErrorsOf>
     LayerShare<T, L, layer::Connection> for Part
+where
+    SendTypes<T, L>: SendStrategyTypes,
 {
     type Data = HList![
         InitialKeys<T::Crypto>,
@@ -330,6 +342,7 @@ impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + Co
         InitialPathReceiver<T::Receiver>,
         LogicalPathReceivingLimits,
         FirstFlightStart<T>,
+        SendStrategyCore<SendStrategyOf<T, L>>,
     ];
     type Calls = HNil;
     type Args = ConnectionArgs<T, L>;
@@ -340,6 +353,13 @@ impl<T: Choices, L> LayerShare<T, L, layer::LinkEntry> for Part {
 }
 impl<T: Choices, L: FeedbackSummariesOf + LogicalPathKeys + 'static>
     LayerShare<T, L, layer::LogicalPath> for Part
+where
+    SendTypes<T, L>: SendStrategyTypes,
+    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>
+        + PublishOutcome<
+            AckIntent,
+            <SendStrategyOf<T, L> as SendStrategy<SendTypes<T, L>>>::Destination,
+        >,
 {
     type Data = HList![
         PacketNumberSpaces<PacketNumberSpaceState>,
@@ -348,11 +368,21 @@ impl<T: Choices, L: FeedbackSummariesOf + LogicalPathKeys + 'static>
         SendJournalsOf<T, L>,
         LogicalPathInput<T::Link, T::Receiver>,
         KeyPhaseNumbers,
+        AckIntentTickets<AckIntentTicketOf<T, L>>,
     ];
     type Calls = HList![LogicalPathReceivingKind];
 }
-impl<T: Choices, L> LayerShare<T, L, layer::LinkPath> for Part {
-    type Data = HList![LinkPathRole<InstantOf<T>>];
+/// The planner comes before the role: it is built before the role takes
+/// the mark of the connection's first link path.
+impl<T: Choices, L> LayerShare<T, L, layer::LinkPath> for Part
+where
+    SendTypes<T, L>: SendStrategyTypes,
+    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+{
+    type Data = HList![
+        LinkPathPlanner<LinkPathSendPlannerOf<T, L>>,
+        LinkPathRole<InstantOf<T>>
+    ];
     type Calls = HNil;
 }
 impl<T: Choices, L> LayerShare<T, L, layer::Established> for Part {
@@ -364,6 +394,9 @@ impl<T: Choices, L> LayerShare<T, L, layer::Established> for Part {
 impl<T: Choices, L: LogicalPathKeys> LayerShare<T, L, layer::Recovery> for Part
 where
     RecoveryFactoryOf<T, L>: for<'s> LendCongestion<InstantOf<T>, OthersOf<'s, T, L>>,
+    SendTypes<T, L>: SendStrategyTypes,
+    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    LinkPathSendPlannerOf<T, L>: PublishOutcome<ProbePingIntent, PlannerLinkPath>,
 {
     type Data = HList![
         RttOf<T, L>,
@@ -372,6 +405,7 @@ where
         LinkPathCongestionState<InstantOf<T>>,
         LossDetectionOf<T, L>,
         ProbeTimeout<InstantOf<T>>,
+        ProbePingTickets<ProbePingTicketOf<T, L>>,
     ];
     /// The factory makes the first three together.
     type Units = HList![
@@ -379,6 +413,7 @@ where
         HList![LinkPathCongestionState<InstantOf<T>>],
         HList![LossDetectionOf<T, L>],
         HList![ProbeTimeout<InstantOf<T>>],
+        HList![ProbePingTickets<ProbePingTicketOf<T, L>>],
     ];
     type Calls = HNil;
 }

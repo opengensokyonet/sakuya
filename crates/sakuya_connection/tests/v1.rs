@@ -303,6 +303,8 @@ impl v1::Choices for ClientMine {
     type ApplicationError = common::AppClose;
     type HandshakeFailure = core::convert::Infallible;
     type Receiver = TestReceiver;
+    type SendStrategy<I: sakuya_connection::send_strategy::SendStrategyTypes> =
+        sakuya_connection::send_strategy::ranked::RankedSendStrategy<I>;
 }
 
 /// The choices of a server whose recovery factory logs the other link
@@ -323,6 +325,8 @@ impl v1::Choices for SpyMine {
     type ApplicationError = common::AppClose;
     type HandshakeFailure = core::convert::Infallible;
     type Receiver = TestReceiver;
+    type SendStrategy<I: sakuya_connection::send_strategy::SendStrategyTypes> =
+        sakuya_connection::send_strategy::ranked::RankedSendStrategy<I>;
 }
 
 /// A recovery factory that makes what sakuya's makes and logs, when it
@@ -544,6 +548,23 @@ mod probe {
             summary: &Summary,
         ) {
             log(format!("lost {space:?} {}", summary.0));
+        }
+    }
+
+    /// The probe sends nothing through the send strategy.
+    impl sakuya_connection::send_strategy::SendIntentPart for Part {
+        type FrameSourceId = CNil;
+        type SendIntents = CNil;
+    }
+    impl<K: sakuya_connection::frame_source::PacketKind>
+        sakuya_connection::frame_source::FrameSourcePart<K> for Part
+    {
+        type Item<'a> = CNil;
+        fn item(intent: &CNil) -> Option<CNil> {
+            match *intent {}
+        }
+        fn source(item: &CNil) -> CNil {
+            match *item {}
         }
     }
 

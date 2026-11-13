@@ -34,8 +34,9 @@ use super::{
     AnyActiveLinkPath, DatagramFillPlan, DatagramLimits, FrameSourceCursor, FrameSourceSet,
     InjectSendIntent, IntentRejected, IntentState, LeadingContent, LinkPathPublishError,
     LinkPathRoleKind, LinkPathSendPlanner, MinimumLengths, Observe, PacketOverheads,
-    PlannedDatagram, PlannedItem, PlannedPacket, PlannedPacketKind, Publish, PublishTo,
-    RoleNotAcceptingError, SendIntent, SendStrategy, SendStrategyTypes, SupplyFeedback,
+    PlannedDatagram, PlannedItem, PlannedPacket, PlannedPacketKind, PlannerLinkPath, Publish,
+    PublishOutcome, PublishTo, RoleNotAcceptingError, SendIntent, SendStrategy, SendStrategyTypes,
+    SupplyFeedback,
 };
 use crate::write::FlightClass;
 
@@ -279,15 +280,19 @@ impl<I: SendStrategyTypes> RankedSendStrategy<I> {
     }
 }
 
+impl<I: SendStrategyTypes, J: SendIntent> PublishOutcome<J, AnyActiveLinkPath>
+    for RankedSendStrategy<I>
+{
+    type Outcome = IntentTicket<I::CloseCause>;
+}
+
 impl<I, J, Idx> PublishTo<J, AnyActiveLinkPath, Idx> for RankedSendStrategy<I>
 where
     I: SendStrategyTypes,
     J: SendIntent,
     I::SendIntents: InjectSendIntent<J, Idx>,
 {
-    type Outcome = IntentTicket<I::CloseCause>;
-
-    fn publish_to(&mut self, intent: J, _: AnyActiveLinkPath) -> Self::Outcome {
+    fn publish_to(&mut self, intent: J, _: AnyActiveLinkPath) -> IntentTicket<I::CloseCause> {
         let cell = IntentCell::new();
         if self.closed.get().is_some() {
             cell.leave_waiting(ENDED);
@@ -411,15 +416,19 @@ impl<I: SendStrategyTypes> RankedLinkPathSendPlanner<I> {
     }
 }
 
+impl<I: SendStrategyTypes, J: SendIntent> PublishOutcome<J, PlannerLinkPath>
+    for RankedLinkPathSendPlanner<I>
+{
+    type Outcome = Result<LinkPathIntentTicket, IntentRejected<J>>;
+}
+
 impl<I, J, Idx> Publish<J, Idx> for RankedLinkPathSendPlanner<I>
 where
     I: SendStrategyTypes,
     J: SendIntent,
     I::SendIntents: InjectSendIntent<J, Idx>,
 {
-    type Outcome = Result<LinkPathIntentTicket, IntentRejected<J>>;
-
-    fn publish(&mut self, intent: J) -> Self::Outcome {
+    fn publish(&mut self, intent: J) -> Result<LinkPathIntentTicket, IntentRejected<J>> {
         if self.role != LinkPathRoleKind::Active {
             return Err(IntentRejected::new(
                 intent,

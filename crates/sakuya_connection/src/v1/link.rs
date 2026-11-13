@@ -46,6 +46,12 @@ impl FirstLinkStart {
         self.facts.take()
     }
 
+    /// Whether the next link path built is the connection's first, without
+    /// taking it.
+    pub fn path_pending(&self) -> bool {
+        self.path_pending
+    }
+
     /// Whether the link path being built is the connection's first: `true`
     /// the first time only.
     pub fn take_path(&mut self) -> bool {

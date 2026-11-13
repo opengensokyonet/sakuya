@@ -110,6 +110,8 @@ impl sakuya_connection::v1::Choices for Mine {
     type ApplicationError = AppClose;
     type HandshakeFailure = core::convert::Infallible;
     type Receiver = TestReceiver;
+    type SendStrategy<I: sakuya_connection::send_strategy::SendStrategyTypes> =
+        sakuya_connection::send_strategy::ranked::RankedSendStrategy<I>;
 }
 
 /// The datagram receiver of the tests' logical paths: a delivery queue that

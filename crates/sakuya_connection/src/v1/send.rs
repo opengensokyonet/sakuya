@@ -63,12 +63,14 @@ pub enum FrameSourceId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct AckIntent {
     space: PacketNumberSpaceKind,
+    shortest: usize,
 }
 
 impl AckIntent {
-    /// An ACK frame is due in `space`.
-    pub fn new(space: PacketNumberSpaceKind) -> Self {
-        Self { space }
+    /// An ACK frame is due in `space`, and the shortest one the receive
+    /// journals of the space give is `shortest` bytes.
+    pub fn new(space: PacketNumberSpaceKind, shortest: usize) -> Self {
+        Self { space, shortest }
     }
 
     /// The packet number space.
@@ -76,10 +78,6 @@ impl AckIntent {
         self.space
     }
 }
-
-/// The shortest ACK frame: its type, a Largest Acknowledged, an ACK Delay,
-/// an ACK Range Count and a First ACK Range of one byte each.
-const SHORTEST_ACK_FRAME: usize = 5;
 
 impl SendIntent for AckIntent {
     type FrameSourceId = FrameSourceId;
@@ -91,10 +89,34 @@ impl SendIntent for AckIntent {
 
     fn min_lengths(&self) -> MinimumLengths {
         MinimumLengths {
-            with_length: SHORTEST_ACK_FRAME,
-            as_last: SHORTEST_ACK_FRAME,
+            with_length: self.shortest,
+            as_last: self.shortest,
         }
     }
+}
+
+/// The shortest ACK frame `journals` give: the first range only, with no
+/// ACK Delay, and the ECN counts if any were received; `None` when nothing
+/// was received.
+///
+/// The ACK frame source writes no more than this when the packet has room
+/// for nothing longer, so an intent that needs this much is never planned
+/// for a packet its frame does not fit.
+pub fn shortest_ack_frame<I: Copy>(journals: &ReceiveJournals<I>) -> Option<usize> {
+    shortest_frame(journals).map(|frame| frame.encoded_len())
+}
+
+fn ecn_counts<I: Copy>(journals: &ReceiveJournals<I>) -> Option<EcnCounts> {
+    journals.ecn_counts().map(|counts| EcnCounts {
+        ect0: var_int(counts.ect0),
+        ect1: var_int(counts.ect1),
+        ce: var_int(counts.ce),
+    })
+}
+
+fn shortest_frame<I: Copy>(journals: &ReceiveJournals<I>) -> Option<AckFrame> {
+    let first = journals.ranges().first()?.clone();
+    AckFrame::from_packet_ranges([first], var_int(0), ecn_counts(journals)).ok()
 }
 
 impl RankedIntent for AckIntent {
@@ -273,20 +295,21 @@ where
         } else {
             0
         };
-        let ecn = journals.ecn_counts().map(|counts| EcnCounts {
-            ect0: var_int(counts.ect0),
-            ect1: var_int(counts.ect1),
-            ce: var_int(counts.ce),
-        });
+        let ecn = ecn_counts(journals);
         // An ACK frame that cannot hold every range leaves out the last
-        // ones (the smallest packet numbers).
+        // ones (the smallest packet numbers); one that cannot hold even the
+        // first with its ACK Delay reports no delay, which the peer reads
+        // as a longer round trip, never a shorter one.
         let ranges = journals.ranges();
         let room = packet.remaining();
-        let frame = (1..=ranges.len()).rev().find_map(|count| {
-            AckFrame::from_packet_ranges(ranges[..count].iter().cloned(), var_int(delay), ecn)
-                .ok()
-                .filter(|frame| frame.encoded_len() <= room)
-        });
+        let frame = (1..=ranges.len())
+            .rev()
+            .find_map(|count| {
+                AckFrame::from_packet_ranges(ranges[..count].iter().cloned(), var_int(delay), ecn)
+                    .ok()
+                    .filter(|frame| frame.encoded_len() <= room)
+            })
+            .or_else(|| shortest_frame(journals).filter(|frame| frame.encoded_len() <= room));
         let Some(frame) = frame else {
             return Supplied::Open(packet);
         };

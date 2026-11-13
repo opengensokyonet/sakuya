@@ -79,30 +79,38 @@ pub trait SendIntent {
 /// anti-amplification credit, the packet number length.
 pub trait SendConditionChange {}
 
+/// `R: PublishOutcome<J, D>`: what `R` gives back for an intent `J`
+/// published for the destination `D`, wherever `J` is in the composition's
+/// sum of intents: a ticket for intents someone reads or withdraws, `()`
+/// for intents sent and forgotten, in a `Result` when the destination may
+/// refuse them. A component that keeps what it gets back names its type by
+/// this, without the place of `J`.
+pub trait PublishOutcome<J: SendIntent, D> {
+    /// What publishing gives back.
+    type Outcome;
+}
+
+/// The destination of an intent published on a link path's send planner:
+/// that link path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct PlannerLinkPath;
+
 /// `R: Publish<J, Idx>`: `R` takes intents `J` whose destination is the
 /// link path of `R`.
 ///
 /// `Idx` is the place of `J` in the composition's sum of intents; the
 /// compiler infers it.
-pub trait Publish<J: SendIntent, Idx> {
-    /// What publishing gives back: a ticket for intents someone reads or
-    /// withdraws, `()` for intents sent and forgotten, in a `Result` when
-    /// the link path may refuse them.
-    type Outcome;
-
+pub trait Publish<J: SendIntent, Idx>: PublishOutcome<J, PlannerLinkPath> {
     /// Publish `intent`.
-    fn publish(&mut self, intent: J) -> Self::Outcome;
+    fn publish(&mut self, intent: J) -> <Self as PublishOutcome<J, PlannerLinkPath>>::Outcome;
 }
 
 /// `R: PublishTo<J, D, Idx>`: `R` takes intents `J` for the destination
 /// `D`. The core of a strategy implements it for the intents the driver's
 /// components publish.
-pub trait PublishTo<J: SendIntent, D, Idx> {
-    /// What publishing gives back, as for [`Publish::Outcome`].
-    type Outcome;
-
+pub trait PublishTo<J: SendIntent, D, Idx>: PublishOutcome<J, D> {
     /// Publish `intent` for `destination`.
-    fn publish_to(&mut self, intent: J, destination: D) -> Self::Outcome;
+    fn publish_to(&mut self, intent: J, destination: D) -> <Self as PublishOutcome<J, D>>::Outcome;
 }
 
 /// `R: Observe<J>`: `R` takes the changes `J` of its send conditions.

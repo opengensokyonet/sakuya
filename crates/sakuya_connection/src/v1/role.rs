@@ -1,5 +1,7 @@
 //! What a link path does: the role of a link path.
 
+use crate::send_strategy::LinkPathRoleKind;
+
 /// What a link path does, and when it ends.
 ///
 /// The role holds only its mark and its end time; the recovery state of the
@@ -30,6 +32,17 @@ impl<I: Copy> LinkPathRole<I> {
         match self {
             Self::Candidate | Self::Active => None,
             Self::Settling(at) | Self::Closing(at) | Self::Draining(at) => Some(*at),
+        }
+    }
+
+    /// The role as the send strategy sees it.
+    pub fn kind(&self) -> LinkPathRoleKind {
+        match self {
+            Self::Candidate => LinkPathRoleKind::Candidate,
+            Self::Active => LinkPathRoleKind::Active,
+            Self::Settling(_) => LinkPathRoleKind::Settling,
+            Self::Closing(_) => LinkPathRoleKind::Closing,
+            Self::Draining(_) => LinkPathRoleKind::Draining,
         }
     }
 

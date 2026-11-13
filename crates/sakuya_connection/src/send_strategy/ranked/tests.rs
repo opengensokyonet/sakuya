@@ -107,7 +107,7 @@ fn setup(levels: &[EncryptionLevel], window: usize) -> (Core, Planner) {
 }
 
 fn ack(core: &mut Core, space: PacketNumberSpaceKind) -> IntentTicket<()> {
-    core.publish_to(AckIntent::new(space), AnyActiveLinkPath)
+    core.publish_to(AckIntent::new(space, 5), AnyActiveLinkPath)
 }
 
 const ALL: [EncryptionLevel; 3] = [
