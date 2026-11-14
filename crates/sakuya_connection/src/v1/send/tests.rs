@@ -215,3 +215,41 @@ fn an_ack_frame_without_room_for_its_ack_delay_is_the_shortest() {
     assert_eq!(ranges_of(&frame), [(198, 198)]);
     assert_eq!(frame.ack_delay().get(), VarInt::ZERO);
 }
+
+// ---- which packets carry HANDSHAKE_DONE ----
+
+/// The frame source a packet of kind `K` gives `intent` to, if it carries
+/// it.
+fn carried<K: PacketKind>(intent: SendIntents) -> Option<FrameSourceId> {
+    <Part as FrameSourcePart<K>>::item(&intent)
+        .map(|item| <Part as FrameSourcePart<K>>::source(&item))
+}
+
+/// What packets of each kind carry of `intent`: Initial, Handshake, 0-RTT,
+/// 1-RTT, a candidate's probe and a settling link path's response.
+fn carried_by_each(intent: SendIntents) -> [Option<FrameSourceId>; 6] {
+    [
+        carried::<InitialPacket>(intent),
+        carried::<HandshakePacket>(intent),
+        carried::<ZeroRttPacket>(intent),
+        carried::<OneRttPacket>(intent),
+        carried::<OneRttProbePacket>(intent),
+        carried::<SettlingResponsePacket>(intent),
+    ]
+}
+
+#[test]
+fn handshake_done_goes_in_1_rtt_packets_only() {
+    let intent = SendIntents::inject(HandshakeDoneIntent);
+    assert_eq!(
+        carried_by_each(intent),
+        [
+            None,
+            None,
+            None,
+            Some(FrameSourceId::HandshakeDone),
+            None,
+            None
+        ]
+    );
+}

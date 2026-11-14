@@ -176,7 +176,11 @@ pub struct FirstFlightReadState<T: Choices> {
     max_held_inputs: usize,
 }
 
-impl<T: Choices<Side = Server>> FirstFlightReadState<T> {
+impl<T, Tls> FirstFlightReadState<T>
+where
+    T: Choices<Side = Server<Tls>>,
+    Server<Tls>: Side,
+{
     /// Nothing read yet from a first flight sent to `client_dcid`, the
     /// Destination Connection ID of the client's first Initial packet: the
     /// Initial keys derived from it with `crypto` (RFC 9001 §5.2), each
@@ -192,7 +196,7 @@ impl<T: Choices<Side = Server>> FirstFlightReadState<T> {
         max_held_inputs: usize,
     ) -> Self {
         let (send, receive) =
-            Server::split_initial_secrets(InitialSecrets::derive(crypto, client_dcid));
+            <T::Side as Side>::split_initial_secrets(InitialSecrets::derive(crypto, client_dcid));
         Self {
             crypto: Some(CryptoReceiver::new(capacities)),
             keys: Some(InitialKeys::Live(LevelKeys {
@@ -358,13 +362,13 @@ impl<T: Choices> fmt::Debug for FirstFlightStart<T> {
 ///
 /// [`ReadFirstFlightError`], as its variants document. The rest of the
 /// datagram is not read; `state` holds what was read before.
-pub async fn read_first_flight<T, L, Ie, Hd, Iv>(
+pub async fn read_first_flight<T, L, Ie, Hd, Iv, Tls>(
     state: &mut FirstFlightReadState<T>,
     receiver: &mut T::Receiver,
     limits: MessageLimits,
 ) -> Result<(), ReadFirstFlightError<ConnectionErrorOf<L>>>
 where
-    T: Choices<Side = Server>,
+    T: Choices<Side = Server<Tls>>,
     T::CryptoReceiveBuffer: Unpin,
     <T::Link as Link>::Payload: SplitTo + AsRef<[u8]> + AsMut<[u8]> + Into<Bytes>,
     L: LineagePartList<T> + FrameSetDispatch<T, L, Hd>,
@@ -403,7 +407,8 @@ where
                 // dropping the candidate leaves the datagram to the others
                 DatagramDelivery::Competing(_) => continue,
             };
-            if let Err(error) = receive_datagram::<T, L, Ie, Hd, Iv>(state, datagram, dcid_len) {
+            if let Err(error) = receive_datagram::<T, L, Ie, Hd, Iv, Tls>(state, datagram, dcid_len)
+            {
                 return Poll::Ready(Err(error));
             }
         }
@@ -414,13 +419,13 @@ where
 /// Receive `datagram` into `state`, as [`read_first_flight`] says, cutting
 /// it with `dcid_len` as the length of a short header's Destination
 /// Connection ID.
-fn receive_datagram<T, L, Ie, Hd, Iv>(
+fn receive_datagram<T, L, Ie, Hd, Iv, Tls>(
     state: &mut FirstFlightReadState<T>,
     datagram: ReceivedDatagram<<T::Link as Link>::Payload, T::Link>,
     dcid_len: ConnectionIdLength,
 ) -> Result<(), ReadFirstFlightError<ConnectionErrorOf<L>>>
 where
-    T: Choices<Side = Server>,
+    T: Choices<Side = Server<Tls>>,
     <T::Link as Link>::Payload: SplitTo + AsRef<[u8]> + AsMut<[u8]> + Into<Bytes>,
     L: LineagePartList<T> + FrameSetDispatch<T, L, Hd>,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ie>,
@@ -441,7 +446,12 @@ where
         };
         match packet.level() {
             EncryptionLevel::Initial if initial_allowed => {
-                receive_initial::<T, L, Ie, Hd, Iv, _>(state, packet, arrival.at(), arrival.ecn())?;
+                receive_initial::<T, L, Ie, Hd, Iv, _, Tls>(
+                    state,
+                    packet,
+                    arrival.at(),
+                    arrival.ecn(),
+                )?;
             }
             EncryptionLevel::ZeroRtt => {
                 if state.start.held.len() < state.max_held_inputs {
@@ -459,14 +469,14 @@ where
 
 /// Receive the Initial packet `packet`, arrived at `at` with `ecn`, into
 /// `state`, as [`read_first_flight`] says.
-fn receive_initial<T, L, Ie, Hd, Iv, P>(
+fn receive_initial<T, L, Ie, Hd, Iv, P, Tls>(
     state: &mut FirstFlightReadState<T>,
     packet: ProtectedPacket<P>,
     at: InstantOf<T>,
     ecn: Option<sakuya_link::EcnCodepoint>,
 ) -> Result<(), ReadFirstFlightError<ConnectionErrorOf<L>>>
 where
-    T: Choices<Side = Server>,
+    T: Choices<Side = Server<Tls>>,
     P: AsMut<[u8]> + Into<Bytes>,
     L: LineagePartList<T> + FrameSetDispatch<T, L, Hd>,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ie>,

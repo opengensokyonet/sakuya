@@ -335,7 +335,7 @@ impl ConnectionChoices for ClientMine {
 }
 impl v1::Choices for ClientMine {
     type Crypto = RingBackend;
-    type Side = v1::Client;
+    type Side = v1::Client<common::PendingClientEngine>;
     type CryptoReceiveBuffer = FragmentedCryptoReceiveBuffer;
     type Recovery<V: Clone + Eq + Debug + 'static> =
         sakuya_recovery::factory::NewRenoRecoveryFactory<V>;
@@ -343,7 +343,6 @@ impl v1::Choices for ClientMine {
     type SendJournals<S: 'static, P: Clone + Eq + Debug + 'static> =
         sakuya_recovery::send_journals::DequeSendJournals<Duration, S, P>;
     type ApplicationError = common::AppClose;
-    type HandshakeFailure = core::convert::Infallible;
     type Receiver = TestReceiver;
     type SendStrategy<I: sakuya_connection::send_strategy::SendStrategyTypes> =
         sakuya_connection::send_strategy::ranked::RankedSendStrategy<I>;
@@ -361,14 +360,13 @@ impl ConnectionChoices for SpyMine {
 }
 impl v1::Choices for SpyMine {
     type Crypto = RingBackend;
-    type Side = v1::Server;
+    type Side = v1::Server<common::PendingServerEngine>;
     type CryptoReceiveBuffer = FragmentedCryptoReceiveBuffer;
     type Recovery<V: Clone + Eq + Debug + 'static> = spy::SpyFactory<V>;
     type AckObligation = sakuya_recovery::ack_obligation::Rfc9000AckObligation<Duration>;
     type SendJournals<S: 'static, P: Clone + Eq + Debug + 'static> =
         sakuya_recovery::send_journals::DequeSendJournals<Duration, S, P>;
     type ApplicationError = common::AppClose;
-    type HandshakeFailure = core::convert::Infallible;
     type Receiver = TestReceiver;
     type SendStrategy<I: sakuya_connection::send_strategy::SendStrategyTypes> =
         sakuya_connection::send_strategy::ranked::RankedSendStrategy<I>;
@@ -1999,7 +1997,7 @@ trait SideCapacities: Sized {
     where
         T: v1::Choices<Crypto = RingBackend, Side = Self>;
 }
-impl SideCapacities for v1::Server {
+impl SideCapacities for v1::Server<common::PendingServerEngine> {
     fn read_state<T>() -> FirstFlightReadState<T>
     where
         T: v1::Choices<Crypto = RingBackend, Side = Self>,
@@ -2027,7 +2025,7 @@ impl SideCapacities for v1::Server {
             .expect("the least capacities the limits allow")
     }
 }
-impl SideCapacities for v1::Client {
+impl SideCapacities for v1::Client<common::PendingClientEngine> {
     fn read_state<T>() -> FirstFlightReadState<T>
     where
         T: v1::Choices<Crypto = RingBackend, Side = Self>,
@@ -3823,12 +3821,12 @@ fn read_first(receiver: &mut TestReceiver) -> (FirstFlightReadState<Mine>, Resul
     let mut state = FirstFlightReadState::<Mine>::new(
         &RingBackend,
         &client_dcid(),
-        &<v1::Server as SideCapacities>::crypto_receive(),
+        &<v1::Server<common::PendingServerEngine> as SideCapacities>::crypto_receive(),
         MaxAckRanges::DEFAULT,
         MAX_HELD.with(Cell::get),
     );
     let result = {
-        let reading = core::pin::pin!(read_first_flight::<Mine, Parts, _, _, _>(
+        let reading = core::pin::pin!(read_first_flight::<Mine, Parts, _, _, _, _>(
             &mut state,
             receiver,
             MessageLimits::default(),

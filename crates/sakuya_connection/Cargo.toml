@@ -28,6 +28,7 @@ sakuya_wire.workspace = true
 snafu.workspace = true
 
 [dev-dependencies]
+nitori_crypto_aws_lc.workspace = true
 sakuya_link.workspace = true
 sakuya_recovery.workspace = true
 sakuya_packet_protection = { workspace = true, features = ["ring"] }

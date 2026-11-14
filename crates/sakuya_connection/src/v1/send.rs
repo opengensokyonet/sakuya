@@ -1,7 +1,8 @@
 //! What QUIC version 1 sends through the send strategy: acknowledgments of
-//! each packet number space and the PING of a probe timeout, as send
-//! intents, the items a packet of each kind may carry, and the frame
-//! sources that write them.
+//! each packet number space, the PING of a probe timeout, the retirement of
+//! the peer's connection IDs and a server's HANDSHAKE_DONE, as send
+//! intents, the items a packet of each
+//! kind may carry, and the frame sources that write them.
 
 use core::{marker::PhantomData, time::Duration};
 
@@ -15,6 +16,7 @@ use sakuya_wire::{
     parts::{CNil, Coproduct},
     v1::frame::{
         ack::{AckFrame, EcnCounts},
+        handshake_done::HandshakeDoneFrame,
         ping::PingFrame,
         retire_connection_id::RetireConnectionIdFrame,
     },
@@ -22,9 +24,9 @@ use sakuya_wire::{
 };
 
 use super::{
-    AckObligationsOf, Choices, CloseCauseOf, Part,
+    AckObligationsOf, Choices, CloseCauseOf, Part, Side,
     connection_ids::ConnectionIdsOf,
-    feedback::{AckSummary, ProbePingSummary},
+    feedback::{AckSummary, HandshakeDoneSummary, ProbePingSummary},
     key_phase::KeyPhaseNumbers,
     send_planning::{AckIntentTicketOf, AckIntentTickets, CorePublishOutcome},
 };
@@ -64,6 +66,8 @@ pub enum FrameSourceId {
     /// The RETIRE_CONNECTION_ID frames of the destination connection ID
     /// strategy.
     RetireConnectionId,
+    /// A server's HANDSHAKE_DONE frame.
+    HandshakeDone,
 }
 
 /// An ACK frame is due in a packet number space.
@@ -244,6 +248,45 @@ impl RankedCoreIntent for RetireConnectionIdIntent {
     type Outcome<C> = ();
 }
 
+/// The handshake is complete: a server's HANDSHAKE_DONE frame is to be
+/// sent (RFC 9000 §19.20), and sent again while its packets are lost (RFC
+/// 9000 §13.3). It is sent and forgotten: publishing it gives back nothing
+/// to keep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HandshakeDoneIntent;
+
+impl SendIntent for HandshakeDoneIntent {
+    type FrameSourceId = FrameSourceId;
+    type Class = InFlightClass;
+
+    fn frame_source(&self) -> FrameSourceId {
+        FrameSourceId::HandshakeDone
+    }
+
+    fn min_lengths(&self) -> MinimumLengths {
+        let len = HandshakeDoneFrame.encoded_len();
+        MinimumLengths {
+            with_length: len,
+            as_last: len,
+        }
+    }
+}
+
+/// The rank is provisional.
+impl RankedIntent for HandshakeDoneIntent {
+    fn rank(&self) -> SendRank {
+        SendRank {
+            priority: SendPriority::Handshake,
+            holds_place: true,
+        }
+    }
+}
+
+/// Nothing keeps the intent: only its frame being written takes it away.
+impl RankedCoreIntent for HandshakeDoneIntent {
+    type Outcome<C> = ();
+}
+
 /// The summary of a RETIRE_CONNECTION_ID frame written into a packet: the
 /// sequence number it retires.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -253,18 +296,24 @@ pub struct RetireConnectionIdSummary {
 }
 
 /// Version 1's intents.
-pub type SendIntents =
-    Coproduct<AckIntent, Coproduct<ProbePingIntent, Coproduct<RetireConnectionIdIntent, CNil>>>;
+pub type SendIntents = Coproduct<
+    AckIntent,
+    Coproduct<
+        ProbePingIntent,
+        Coproduct<RetireConnectionIdIntent, Coproduct<HandshakeDoneIntent, CNil>>,
+    >,
+>;
 
 /// The kinds of version 1's frame sources: PADDING, which the packet
 /// writer writes, the ACK frames of each packet number space, the PING of
-/// a probe timeout and the RETIRE_CONNECTION_ID frames of the destination
-/// connection ID strategy.
+/// a probe timeout, the RETIRE_CONNECTION_ID frames of the destination
+/// connection ID strategy and a server's HANDSHAKE_DONE.
 pub type FrameSources = frunk_core::HList![
     PaddingFrames,
     AckFrames,
     ProbePingFrames,
-    RetireConnectionIdFrames
+    RetireConnectionIdFrames,
+    HandshakeDoneFrames
 ];
 
 impl SendIntentPart for Part {
@@ -281,8 +330,8 @@ pub type SendItem = FrameSourceItemsOf<'static, Part>;
 /// Whether a packet of `kind` carries content of `space` from a source of
 /// `ack`: ACK frames are not allowed in 0-RTT packets (RFC 9000 §12.4); a
 /// candidate's and a settling link path's packets carry neither.
-/// RETIRE_CONNECTION_ID frames go in 1-RTT packets only (RFC 9000 §12.4,
-/// §12.5).
+/// RETIRE_CONNECTION_ID and HANDSHAKE_DONE frames go in 1-RTT packets only
+/// (RFC 9000 §12.4, §12.5).
 fn carries(kind: PlannedPacketKind, space: PacketNumberSpaceKind, ack: bool) -> bool {
     match kind {
         PlannedPacketKind::Initial => space == PacketNumberSpaceKind::Initial,
@@ -305,7 +354,14 @@ impl<K: PacketKind> FrameSourcePart<K> for Part {
                     Coproduct::Inr(Coproduct::Inl(retire.sequence)),
                 )))
             }
-            Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(never))) => match *never {},
+            Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inl(HandshakeDoneIntent)))) => {
+                (K::KIND == PlannedPacketKind::OneRtt).then_some(Coproduct::Inr(Coproduct::Inr(
+                    Coproduct::Inr(Coproduct::Inr(Coproduct::Inl(()))),
+                )))
+            }
+            Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(never)))) => {
+                match *never {}
+            }
         }
     }
 
@@ -319,9 +375,12 @@ impl<K: PacketKind> FrameSourcePart<K> for Part {
             Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inl(_)))) => {
                 FrameSourceId::RetireConnectionId
             }
-            Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(never)))) => {
-                match *never {}
+            Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inl(()))))) => {
+                FrameSourceId::HandshakeDone
             }
+            Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(
+                never,
+            ))))) => match *never {},
         }
     }
 }
@@ -598,6 +657,35 @@ where
         lineage
             .get_mut::<ConnectionIdsOf<T>, Ic>()
             .destination_mut()
+    }
+}
+
+/// A server's HANDSHAKE_DONE frame, as a kind of frame source.
+#[derive(Debug)]
+pub enum HandshakeDoneFrames {}
+
+impl FrameSourceKind for HandshakeDoneFrames {
+    type Item<'a> = ();
+    type Summary<I> = HandshakeDoneSummary;
+    type Intent = HandshakeDoneIntent;
+}
+
+/// The HANDSHAKE_DONE frame is written by the [`Own`](Side::Own) data of
+/// the side, in the connection node: a server's sends it, a client's writes
+/// nothing.
+impl<T, L, V, Io> FindFrameSource<T, L, V, Io> for HandshakeDoneFrames
+where
+    T: Choices,
+    V: GetAt<<T::Side as Side>::Own, Io>,
+{
+    type Source<'l, 'r>
+        = &'l mut <T::Side as Side>::Own
+    where
+        V: 'l,
+        'r: 'l;
+
+    fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
+        lineage.get_mut::<<T::Side as Side>::Own, Io>()
     }
 }
 

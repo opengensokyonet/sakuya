@@ -15,8 +15,22 @@ use std::{
 };
 
 use bytes::Bytes;
+use nitori_call::LentAccess;
+use nitori_crypto_aws_lc::AwsLcBackend;
 use sakuya_connection::clock::{ConnectionChoices, MonotonicClock};
 use sakuya_link::{Link, LinkId, MIN_DATAGRAM_SIZE, OutgoingDatagram, SendAcceptance};
+use sakuya_tls::{
+    client::engine::{
+        ClientHandshakeCapability, ClientHandshakeCompleted, ClientHandshakeSteps, ClientTransport,
+        EarlyDataOffered, ServerHelloRead,
+    },
+    engine::HandshakeError,
+    schedule::OneRttSendTrafficSecret,
+    server::engine::{
+        FirstClientHello, ReadFirstClientHelloError, ServerHandshakeCapability,
+        ServerHandshakeCompleted, ServerHandshakeSteps, ServerHelloWritten, ServerTransport,
+    },
+};
 
 pub mod parts;
 pub mod strategy;
@@ -301,6 +315,110 @@ impl Future for LinkCeilingChanged {
     }
 }
 
+/// The start state of a server's handshake engine that never gets past
+/// its first step: every step waits forever.
+pub struct PendingServerEngine;
+
+impl ServerHandshakeSteps for PendingServerEngine {
+    type Crypto = AwsLcBackend;
+    type Target = ();
+    type AlertError = ReadFirstClientHelloError;
+    type ServerHelloWrittenState = ();
+    type ServerFinishedWrittenState = ();
+    type ServerHandshakeCompletedState = ();
+
+    async fn write_server_hello<W: ServerHandshakeCapability<()>>(
+        self,
+        _: FirstClientHello,
+        _: &mut impl LentAccess<Family = W>,
+    ) -> Result<
+        (ServerHelloWritten<()>, ()),
+        HandshakeError<ReadFirstClientHelloError, <W as ServerTransport<()>>::Error>,
+    > {
+        core::future::pending().await
+    }
+
+    async fn write_server_finished<W: ServerHandshakeCapability<()>>(
+        (): (),
+        _: &mut impl LentAccess<Family = W>,
+    ) -> Result<
+        (OneRttSendTrafficSecret, ()),
+        HandshakeError<ReadFirstClientHelloError, <W as ServerTransport<()>>::Error>,
+    > {
+        core::future::pending().await
+    }
+
+    async fn read_client_finished<W: ServerHandshakeCapability<()>>(
+        (): (),
+        _: &mut impl LentAccess<Family = W>,
+    ) -> Result<
+        (ServerHandshakeCompleted<AwsLcBackend, ()>, ()),
+        HandshakeError<ReadFirstClientHelloError, <W as ServerTransport<()>>::Error>,
+    > {
+        core::future::pending().await
+    }
+
+    async fn write_tickets<W: ServerHandshakeCapability<()>>(
+        (): (),
+        _: &mut impl LentAccess<Family = W>,
+    ) -> Result<(), HandshakeError<ReadFirstClientHelloError, <W as ServerTransport<()>>::Error>>
+    {
+        core::future::pending().await
+    }
+}
+
+/// The start state of a client's handshake engine that never gets past
+/// its first step: every step waits forever.
+pub struct PendingClientEngine;
+
+impl ClientHandshakeSteps for PendingClientEngine {
+    type Crypto = AwsLcBackend;
+    type AlertError = core::convert::Infallible;
+    type ClientHelloWrittenState = ();
+    type ServerHelloReadState = ();
+    type ClientHandshakeCompletedState = ();
+
+    async fn write_client_hello<W: ClientHandshakeCapability>(
+        self,
+        _: &mut impl LentAccess<Family = W>,
+    ) -> Result<
+        (Option<EarlyDataOffered>, ()),
+        HandshakeError<core::convert::Infallible, <W as ClientTransport>::Error>,
+    > {
+        core::future::pending().await
+    }
+
+    async fn read_server_hello<W: ClientHandshakeCapability>(
+        (): (),
+        _: &mut impl LentAccess<Family = W>,
+    ) -> Result<
+        (ServerHelloRead, ()),
+        HandshakeError<core::convert::Infallible, <W as ClientTransport>::Error>,
+    > {
+        core::future::pending().await
+    }
+
+    async fn read_server_finished<W: ClientHandshakeCapability>(
+        (): (),
+        _: &mut impl LentAccess<Family = W>,
+    ) -> Result<
+        (ClientHandshakeCompleted<AwsLcBackend>, ()),
+        HandshakeError<core::convert::Infallible, <W as ClientTransport>::Error>,
+    > {
+        core::future::pending().await
+    }
+
+    async fn read_tickets<W: ClientHandshakeCapability>(
+        (): (),
+        _: &mut impl LentAccess<Family = W>,
+    ) -> Result<
+        core::convert::Infallible,
+        HandshakeError<core::convert::Infallible, <W as ClientTransport>::Error>,
+    > {
+        core::future::pending().await
+    }
+}
+
 /// The choices of the tests' compositions.
 pub struct Mine;
 impl ConnectionChoices for Mine {
@@ -309,7 +427,7 @@ impl ConnectionChoices for Mine {
 }
 impl sakuya_connection::v1::Choices for Mine {
     type Crypto = sakuya_packet_protection::backend::ring::RingBackend;
-    type Side = sakuya_connection::v1::Server;
+    type Side = sakuya_connection::v1::Server<PendingServerEngine>;
     type CryptoReceiveBuffer = sakuya_connection::v1::crypto::FragmentedCryptoReceiveBuffer;
     type Recovery<V: Clone + Eq + core::fmt::Debug + 'static> =
         sakuya_recovery::factory::NewRenoRecoveryFactory<V>;
@@ -317,7 +435,6 @@ impl sakuya_connection::v1::Choices for Mine {
     type SendJournals<S: 'static, P: Clone + Eq + core::fmt::Debug + 'static> =
         sakuya_recovery::send_journals::DequeSendJournals<Duration, S, P>;
     type ApplicationError = AppClose;
-    type HandshakeFailure = core::convert::Infallible;
     type Receiver = TestReceiver;
     type SendStrategy<I: sakuya_connection::send_strategy::SendStrategyTypes> =
         strategy::EventLoggingSendStrategy<I>;

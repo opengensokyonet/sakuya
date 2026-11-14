@@ -46,7 +46,6 @@ use sakuya_recovery::{
     send_journals::{PacketSendAttempt, SendJournals},
 };
 use sakuya_stream::connection::{CloseReason, ImmediateClose, TransportImmediateClose};
-use sakuya_tls::engine::HandshakeError;
 use sakuya_wire::{
     connection_id::ConnectionId,
     parameters::ParametersOf,
@@ -518,7 +517,6 @@ where
         + ParametersOf<TransportParameterSpace>
         + ConnectionErrorsOf,
     ConnectionErrorOf<L>: TransportClose,
-    HandshakeError<T::HandshakeFailure, ConnectionErrorOf<L>>: TransportClose,
     T::ImmediateClosePolicy: ImmediateClosePolicy<CloseCauseOf<T, L>>,
     TransportParameterSlots<L>: Selector<Option<MaxUdpPayloadSize>, Ipp>,
     SendTypes<T, L>: SendStrategyTypes,

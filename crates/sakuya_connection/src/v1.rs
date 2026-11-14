@@ -4,7 +4,8 @@
 //! [`Part`] is version 1 as one part of a composition. Its shares put the
 //! keys of each encryption level, the counts of the AEAD's usage
 //! ([`aead_usage`]), the CRYPTO data received at each level,
-//! the transport parameters, the idle timeout and what the connection was
+//! what only the connection's side has ([`handshake_done`]), the transport
+//! parameters, the idle timeout and what the connection was
 //! made with for its first logical link and from its first flight
 //! ([`first_flight`]) in the connection node, with the
 //! recovery factory, the record of why the connection closed
@@ -49,6 +50,7 @@ pub mod error;
 pub mod feedback;
 pub mod first_flight;
 pub mod frames;
+pub mod handshake_done;
 pub mod idle;
 pub mod input;
 pub mod key_phase;
@@ -71,7 +73,7 @@ pub mod stateless_reset;
 #[cfg(test)]
 mod tests;
 
-use core::{fmt::Debug, num::NonZeroUsize, time::Duration};
+use core::{fmt::Debug, marker::PhantomData, num::NonZeroUsize, time::Duration};
 
 use sakuya_packet_protection::{
     backend::CryptoBackend,
@@ -128,7 +130,9 @@ use self::{
         PeerOf, ResetTokenRegistrarOf,
     },
     crypto::{CryptoReceiveBuffer, CryptoReceiveCapacities, CryptoReceiver},
+    feedback::HandshakeDoneSummary,
     first_flight::{FirstFlight, FirstFlightStart},
+    handshake_done::{ClientOnlyState, HandshakeDoneSource},
     idle::IdleTimeout,
     input::{
         InitialPathReceiver, LogicalPathDatagramReceiver, LogicalPathInput,
@@ -145,7 +149,7 @@ use self::{
         CongestionPartOf, LinkPathCongestionState, OthersOf, PmtuOf, RecoveryConfigOf,
         RecoveryFactoryOf, RttOf,
     },
-    send::{AckIntent, ProbePingIntent, SendTypes},
+    send::{AckIntent, HandshakeDoneIntent, ProbePingIntent, SendTypes},
     send_planning::{
         AckIntentTicketOf, AckIntentTickets, CorePublishOutcome, LinkPathPlanner,
         LinkPathSendPlannerOf, ProbePingTicketOf, ProbePingTickets, SendStrategyCore,
@@ -168,7 +172,10 @@ use sakuya_recovery::{
     send_journals::SendJournals,
 };
 use sakuya_stream::connection::{AbortCause, CloseReason};
-use sakuya_tls::engine::HandshakeError;
+use sakuya_tls::{
+    alert::CallsForAlert, client::engine::ClientHandshakeSteps, engine::HandshakeError,
+    server::engine::ServerHandshakeSteps,
+};
 
 /// QUIC version 1, one part of a composition.
 #[derive(Debug)]
@@ -224,12 +231,6 @@ pub trait Choices: ConnectionChoices {
     /// endpoint's reason for closing, [`CloseCauseOf`] for the composition's
     /// list of parts. The connection keeps the one it was made with.
     type ImmediateClosePolicy: Clone + 'static;
-    /// How the handshake engine of this side fails with an alert: the
-    /// failure that [`HandshakeError`] holds for it.
-    ///
-    /// This item is provisional: it is to follow from the handshake engine
-    /// of the side.
-    type HandshakeFailure: 'static;
     /// The datagram receiver of a logical path.
     type Receiver: LogicalPathDatagramReceiver<Self::Link> + 'static;
     /// The core of the send strategy, for the types `I` the composition
@@ -259,19 +260,39 @@ pub trait Choices: ConnectionChoices {
 }
 
 /// This endpoint's reason for closing a connection of the choices `T` and
-/// the list of parts `L`: the connection's error, the handshake's error or
-/// the application's error.
+/// the list of parts `L`: the connection's error, the handshake's error,
+/// which holds the alert failure of the side's handshake engine, or the
+/// application's error.
 pub type CloseCauseOf<T, L> = LocalCloseCause<
     ConnectionErrorOf<L>,
-    HandshakeError<<T as Choices>::HandshakeFailure, ConnectionErrorOf<L>>,
+    HandshakeError<<<T as Choices>::Side as Side>::AlertError, ConnectionErrorOf<L>>,
     <T as Choices>::ApplicationError,
 >;
 
-/// What differs between the two sides of a connection: one method for each
-/// difference.
+/// What differs between the two sides of a connection: the handshake
+/// engine, the data only this side has, and one method for each difference
+/// in behavior.
 pub trait Side: 'static {
     /// The role of this side.
     const ROLE: Role;
+
+    /// The start state of this side's handshake engine.
+    type Tls;
+
+    /// How this side's handshake engine fails with an alert: the failure
+    /// that [`HandshakeError`] holds for it.
+    type AlertError: CallsForAlert + 'static;
+
+    /// The data component in the connection node that only this side has.
+    ///
+    /// The HANDSHAKE_DONE frames of version 1 are found in it: a server's
+    /// sends them; a client's never publishes one and writes nothing (RFC
+    /// 9000 §19.20).
+    type Own: for<'a> FrameSource<
+            Item<'a> = (),
+            Summary = HandshakeDoneSummary,
+            Intent = HandshakeDoneIntent,
+        > + 'static;
 
     /// The Initial secrets split into this side's sending and receiving
     /// secret, in that order (RFC 9001 §5.2).
@@ -297,12 +318,25 @@ pub trait Side: 'static {
     fn peer_validates_address_implicitly() -> bool;
 }
 
-/// The server's side.
-#[derive(Debug)]
-pub struct Server;
+/// The server's side, with the handshake engine whose start state is
+/// `Tls`.
+pub struct Server<Tls>(PhantomData<fn() -> Tls>);
 
-impl Side for Server {
+impl<Tls> Debug for Server<Tls> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Server")
+    }
+}
+
+impl<Tls> Side for Server<Tls>
+where
+    Tls: ServerHandshakeSteps + 'static,
+    Tls::AlertError: 'static,
+{
     const ROLE: Role = Role::Server;
+    type Tls = Tls;
+    type AlertError = Tls::AlertError;
+    type Own = HandshakeDoneSource;
     fn split_initial_secrets(secrets: InitialSecrets) -> (TrafficSecret, TrafficSecret) {
         (secrets.server, secrets.client)
     }
@@ -314,12 +348,25 @@ impl Side for Server {
     }
 }
 
-/// The client's side.
-#[derive(Debug)]
-pub struct Client;
+/// The client's side, with the handshake engine whose start state is
+/// `Tls`.
+pub struct Client<Tls>(PhantomData<fn() -> Tls>);
 
-impl Side for Client {
+impl<Tls> Debug for Client<Tls> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Client")
+    }
+}
+
+impl<Tls> Side for Client<Tls>
+where
+    Tls: ClientHandshakeSteps + 'static,
+    Tls::AlertError: 'static,
+{
     const ROLE: Role = Role::Client;
+    type Tls = Tls;
+    type AlertError = Tls::AlertError;
+    type Own = ClientOnlyState;
     fn split_initial_secrets(secrets: InitialSecrets) -> (TrafficSecret, TrafficSecret) {
         (secrets.client, secrets.server)
     }
@@ -424,6 +471,7 @@ where
         FirstLocalConnectionId,
         LinkPathSendingLimits,
         ConnectionImmediateClosePolicy<T::ImmediateClosePolicy>,
+        <T::Side as Side>::Own,
     ];
     type Calls = HNil;
     type Args = ConnectionArgs<T, L>;

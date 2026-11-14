@@ -677,6 +677,7 @@ dependencies = [
  "frunk_core",
  "futures-util",
  "nitori_call",
+ "nitori_crypto_aws_lc",
  "nitori_io",
  "sakuya_clock",
  "sakuya_datagram_routing",
