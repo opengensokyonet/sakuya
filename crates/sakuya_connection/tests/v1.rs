@@ -5150,8 +5150,8 @@ fn a_server_answers_the_first_initial_packet_with_an_ack_in_an_initial_packet() 
     assert_eq!(packet.dcid, CLIENT_SCID);
     assert_eq!(packet.scid, SERVER_CID);
     assert_eq!(packet.number, 0);
-    // an ACK frame of the packet 0, without a delay in the Initial space
-    // and with no more ranges
+    // an ACK frame of the packet 0, sent at the instant it arrived: no
+    // ACK Delay, and no more ranges
     assert_eq!(packet.payload, [0x02, 0x00, 0x00, 0x00, 0x00]);
     // the datagram's one packet elicits no acknowledgment: it is not padded,
     // and well within three times what arrived; it is its header, its tag
@@ -5160,6 +5160,55 @@ fn a_server_answers_the_first_initial_packet_with_an_ack_in_an_initial_packet() 
     assert_eq!(datagram.len(), 1 + 4 + 1 + 8 + 1 + 8 + 1 + 2 + 1 + 16 + 5);
     assert!(datagram.len() < MIN_DATAGRAM_SIZE);
     assert!(datagram.len() <= 2 * size);
+}
+
+/// The frames of the packet payload `payload`, read as the receiving side
+/// reads them.
+fn frames_of(payload: &[u8]) -> Vec<sakuya_wire::v1::frame::FrameRun<&[u8]>> {
+    sakuya_wire::v1::frame::set::Frames::new(
+        payload,
+        core::marker::PhantomData::<HList![sakuya_wire::v1::Part]>,
+    )
+    .map(|run| run.unwrap().extract())
+    .collect()
+}
+
+/// The ACK frame the packet payload `payload` starts with.
+fn ack_frame_of(payload: &[u8]) -> sakuya_wire::v1::frame::ack::AckFrame {
+    match frames_of(payload).into_iter().next() {
+        Some(sakuya_wire::v1::frame::FrameRun::Ack(frame)) => frame,
+        other => panic!("not an ACK frame: {other:?}"),
+    }
+}
+
+#[test]
+fn the_ack_delay_of_a_handshake_packet_counts_the_wait_for_its_keys() {
+    use probe::PacketStep::InstallHandshakeKeys;
+    reset();
+    let first = link();
+    feed_packets([(ms(8), InstallHandshakeKeys)]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    deliver(client_initial(0), &first, ms(5));
+    let _ = settle(&mut connection, 5..=5);
+    assert_eq!(
+        common::take_sent().len(),
+        1,
+        "the ACK of the Initial packet"
+    );
+    // the Handshake packet arrives at 6 ms and waits for its keys until 8
+    deliver(long_packet(HANDSHAKE, 0, &ping()), &first, ms(6));
+    let _ = settle(&mut connection, 6..=9);
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let (at, datagram) = &sent[0];
+    assert_eq!(*at, ms(8));
+    // the probe's Handshake keys seal with the server's Initial secret
+    let (kind, packet) = open_long_sent(datagram, &server_keys());
+    assert_eq!(kind, HANDSHAKE);
+    let frame = ack_frame_of(&packet.payload);
+    assert_eq!(frame.largest_acknowledged().get().get(), 0);
+    // 2 ms from the arrival, 2000 µs at the default exponent 3
+    assert_eq!(frame.ack_delay().get(), VarInt::from_u32(2000 >> 3));
 }
 
 #[test]
@@ -5233,7 +5282,12 @@ fn a_probe_timeout_sends_a_ping_padded_to_1200_bytes_as_the_credit_allows() {
     let (_, datagram) = &sent[0];
     assert_eq!(datagram.len(), MIN_DATAGRAM_SIZE);
     let packet = open_sent_initial(datagram);
-    assert_eq!(packet.payload[..6], [0x02, 0x01, 0x00, 0x00, 0x01, 0x01]);
+    // sent at 6001 ms, 1 ms after the packet 1 arrived: an ACK Delay of
+    // 1000 µs at the default exponent 3, 125
+    assert_eq!(
+        packet.payload[..7],
+        [0x02, 0x01, 0x40, 0x7d, 0x00, 0x01, 0x01]
+    );
 }
 
 /// A server whose link path has, once polled at 1005 ms, two datagrams to
@@ -5459,7 +5513,9 @@ fn an_ack_frame_the_link_gives_up_at_once_is_planned_again() {
     assert_eq!(sent.len(), 1, "{sent:?}");
     let packet = open_sent_initial(&sent[0].1);
     assert_eq!(packet.number, 1);
-    assert_eq!(packet.payload, [0x02, 0x00, 0x00, 0x00, 0x00]);
+    // sent again at 6 ms, 1 ms after the packet 0 arrived: an ACK Delay of
+    // 1000 µs at the default exponent 3, 125
+    assert_eq!(packet.payload, [0x02, 0x00, 0x40, 0x7d, 0x00, 0x00]);
 }
 
 #[test]

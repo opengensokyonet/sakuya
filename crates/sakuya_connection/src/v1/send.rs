@@ -288,9 +288,12 @@ where
         let Some((largest, arrived)) = journals.largest() else {
             return Supplied::Open(packet);
         };
-        // The ACK Delay counts only in the application data space (RFC
-        // 9000 §13.2.5); `arrived` is not after `now`.
-        let delay = if space == PacketNumberSpaceKind::ApplicationData && self.now > arrived {
+        // The ACK Delay runs from the arrival of the packet with the largest
+        // packet number, in every packet number space: it includes the time
+        // a packet waited for its keys (RFC 9000 §13.2.5, SHOULD), which
+        // Handshake packets in particular do, and the peer may ignore it in
+        // the Initial space (RFC 9002 §5.3). `arrived` is not after `now`.
+        let delay = if self.now > arrived {
             let micros = u64::try_from((self.now - arrived).as_micros()).unwrap_or(u64::MAX);
             micros >> ACK_DELAY_EXPONENT
         } else {
