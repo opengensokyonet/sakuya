@@ -86,8 +86,8 @@ pub type LinkPathSendPlannerOf<T, L> =
 /// [`Outcome`](Self::Outcome). A component that keeps what it gets back
 /// names its type by this, without the place of `J`.
 ///
-/// The choices' strategy is bound only by `Default`, as a strategy is a
-/// [`SendStrategy`] only for the types whose intents it can rank; this
+/// The choices' strategy is bound only by `Default`, as a strategy may be
+/// a [`SendStrategy`] only for the types whose intents it can rank; this
 /// trait and [`CorePublishTo`] state, once, that the core of a composition
 /// is one and takes `J` for `D`.
 pub trait CorePublishOutcome<J: SendIntent, D>: SendStrategyTypes {
