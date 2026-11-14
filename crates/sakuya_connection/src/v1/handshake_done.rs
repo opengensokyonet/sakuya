@@ -38,10 +38,6 @@ impl HandshakeDoneSource {
     /// The handshake is complete: the frame is due, and its intent is
     /// published to `publish`. A frame due already, or delivered, stays as
     /// it is.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the server's advancing call makes it due")
-    )]
     pub(crate) fn due<Pb, Idx>(&mut self, publish: &mut Pb)
     where
         Pb: PublishIntent<HandshakeDoneIntent, Idx>,

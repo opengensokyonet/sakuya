@@ -22,8 +22,12 @@ use snafu::Snafu;
 use crate::connection_id::violation::NewConnectionIdViolationError;
 
 use super::{
-    aead_usage::AeadLimitReachedError, close::TransportClose, crypto::CryptoFrameError,
-    dispatch::FrameNotPermittedError, key_update::KeyUpdateError,
+    aead_usage::AeadLimitReachedError,
+    close::TransportClose,
+    crypto::{CryptoFrameError, CryptoLevelMoveError, send::CryptoDataEndError},
+    dispatch::FrameNotPermittedError,
+    key_update::KeyUpdateError,
+    parameters::PeerTransportParametersError,
 };
 
 /// An error of version 1 in a connection: one variant for each type of
@@ -78,6 +82,26 @@ pub enum ConnectionError {
     Crypto {
         /// The broken rule.
         source: CryptoFrameError,
+    },
+    /// The handshake engine could not move the CRYPTO data it reads to
+    /// another level.
+    #[snafu(display("CRYPTO input level not moved"))]
+    CryptoLevelMove {
+        /// The broken rule.
+        source: CryptoLevelMoveError,
+    },
+    /// The handshake engine wrote CRYPTO data past the largest offset.
+    #[snafu(display("CRYPTO output beyond the largest offset"))]
+    CryptoDataEnd {
+        /// The failure.
+        source: CryptoDataEndError,
+    },
+    /// The peer's transport parameters failed the checks of version 1 (RFC
+    /// 9000 §7.3, §7.4).
+    #[snafu(display("peer transport parameters rejected"))]
+    PeerTransportParameters {
+        /// The failed check.
+        source: PeerTransportParametersError,
     },
     /// The connection reached a limit on the use of its AEAD (RFC 9001
     /// §6.6): it closes at once and processes no more packets.
@@ -146,6 +170,12 @@ impl TransportClose for ConnectionError {
             Self::AeadLimitReached { .. } => TransportErrorCode::AEAD_LIMIT_REACHED,
             Self::KeyUpdate { .. } => TransportErrorCode::KEY_UPDATE_ERROR,
             Self::NewConnectionId { source } => source.transport_error_code(),
+            Self::CryptoLevelMove { source } => match source {
+                CryptoLevelMoveError::UnreadBytes { .. } => TransportErrorCode::PROTOCOL_VIOLATION,
+                CryptoLevelMoveError::NotForward { .. } => TransportErrorCode::INTERNAL_ERROR,
+            },
+            Self::CryptoDataEnd { .. } => TransportErrorCode::INTERNAL_ERROR,
+            Self::PeerTransportParameters { .. } => TransportErrorCode::TRANSPORT_PARAMETER_ERROR,
             Self::Crypto { source } => match source {
                 CryptoFrameError::BufferExceeded { .. } => {
                     TransportErrorCode::CRYPTO_BUFFER_EXCEEDED
@@ -178,6 +208,9 @@ impl TransportClose for ConnectionError {
             | Self::FrameNotPermitted { .. }
             | Self::AeadLimitReached { .. }
             | Self::KeyUpdate { .. }
+            | Self::CryptoLevelMove { .. }
+            | Self::CryptoDataEnd { .. }
+            | Self::PeerTransportParameters { .. }
             | Self::UnhandledFrame { .. } => None,
         }
     }

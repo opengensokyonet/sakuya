@@ -2997,9 +2997,26 @@ fn run<F: Future + Unpin>(
     take_log()
 }
 
-/// A CRYPTO frame of "hello" at offset 0, then PADDING.
+/// A CRYPTO frame of "hello" at offset 0 past the first ClientHello, then
+/// PADDING: the advancing call reads the ClientHello, which its engine
+/// never gets past, and leaves "hello" to whoever reads after it.
 fn crypto_hello() -> Vec<u8> {
-    [&[0x06, 0x00, 0x05][..], b"hello", &[0; 20]].concat()
+    crypto_after_hello(0, b"hello")
+}
+
+/// The length of the first ClientHello the tests' CRYPTO data starts with.
+fn hello_len() -> u8 {
+    u8::try_from(client_hello().len()).expect("a short ClientHello")
+}
+
+/// A CRYPTO frame of `data` at `offset` past the first ClientHello, then
+/// PADDING; at offset 0 the frame starts with the ClientHello itself.
+fn crypto_after_hello(offset: u8, data: &[u8]) -> Vec<u8> {
+    if offset == 0 {
+        crypto_at(0, &[&client_hello()[..], data].concat())
+    } else {
+        crypto_at(hello_len() + offset, data)
+    }
 }
 
 /// A PING frame, then PADDING.
@@ -3109,7 +3126,8 @@ fn frames_before_one_not_permitted_are_handled_but_the_packet_is_not_recorded() 
     reset();
     let first = link();
     // CRYPTO, then HANDSHAKE_DONE
-    let payload = [&[0x06, 0x00, 0x05][..], b"hello", &[0x1e], &[0; 20]].concat();
+    let crypto = crypto_after_hello(0, b"hello");
+    let payload = [&crypto[..crypto.len() - 20], &[0x1e], &[0; 20]].concat();
     feed_packets([
         (
             ms(5),
@@ -3798,8 +3816,8 @@ fn the_receiving_call_receives_each_packet_of_a_datagram_and_counts_the_whole_da
     // does not open with
     let datagram = padded(
         &[
-            long_packet(INITIAL, 0, &crypto_at(0, b"hel")),
-            long_packet(INITIAL, 1, &crypto_at(3, b"lo")),
+            long_packet(INITIAL, 0, &crypto_after_hello(0, b"hel")),
+            long_packet(INITIAL, 1, &crypto_after_hello(3, b"lo")),
         ],
         |payload| long_packet_with(first_byte(INITIAL), &[], &server_keys(), 2, payload),
         &ping(),
@@ -3829,7 +3847,7 @@ fn the_first_datagrams_are_received_and_counted_as_later_ones_are() {
     let datagram = padded(
         &[],
         |payload| long_packet(INITIAL, 0, payload),
-        &crypto_at(0, b"hel"),
+        &crypto_after_hello(0, b"hel"),
     );
     let size = datagram.len();
     FIRST_DATAGRAMS.with(|f| {
@@ -3844,7 +3862,7 @@ fn the_first_datagrams_are_received_and_counted_as_later_ones_are() {
     let later = padded(
         &[],
         |payload| long_packet(INITIAL, 1, payload),
-        &crypto_at(3, b"lo"),
+        &crypto_after_hello(3, b"lo"),
     );
     let later_size = later.len();
     deliver(later, &first, ms(5));
@@ -3883,7 +3901,7 @@ fn a_server_made_with_a_read_first_flight_starts_with_what_was_read() {
     let datagram = padded(
         &[],
         |payload| long_packet(INITIAL, 0, payload),
-        &crypto_at(0, b"hello"),
+        &crypto_after_hello(0, b"hello"),
     );
     let size = datagram.len();
     deliver(datagram, &first, ms(5));
@@ -4160,12 +4178,23 @@ fn a_poll_receives_at_most_its_limit_and_wakes_itself_for_the_rest() {
     let first = link();
     feed_packets([(ms(5), Inspect), (ms(6), Inspect)]);
     let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
-    take_log();
+    // the advancing call reads the first ClientHello first
     deliver(
         padded(
             &[],
             |payload| long_packet(INITIAL, 0, payload),
-            &crypto_at(0, b"hel"),
+            &crypto_after_hello(0, b""),
+        ),
+        &first,
+        ms(4),
+    );
+    let _ = settle(&mut connection, 4..=4);
+    take_log();
+    deliver(
+        padded(
+            &[],
+            |payload| long_packet(INITIAL, 1, payload),
+            &crypto_at(hello_len(), b"hel"),
         ),
         &first,
         ms(5),
@@ -4173,8 +4202,8 @@ fn a_poll_receives_at_most_its_limit_and_wakes_itself_for_the_rest() {
     deliver(
         padded(
             &[],
-            |payload| long_packet(INITIAL, 1, payload),
-            &crypto_at(3, b"lo"),
+            |payload| long_packet(INITIAL, 2, payload),
+            &crypto_at(hello_len() + 3, b"lo"),
         ),
         &first,
         ms(5),
@@ -4182,11 +4211,15 @@ fn a_poll_receives_at_most_its_limit_and_wakes_itself_for_the_rest() {
     let outer = Outer::new();
     advance_to(ms(5));
     assert!(outer.poll(&mut connection).is_pending());
-    assert_eq!(outer.wakes(), 1, "the receiving call woke itself");
+    assert_eq!(
+        outer.wakes(),
+        2,
+        "the receiving call woke itself, and the CRYPTO data the advancing call"
+    );
     assert_eq!(
         take_log(),
         [
-            "read \"hel\", largest Some((0, 5ms)), ranges [(0, 0)], due Some(Now), \
+            "read \"hel\", largest Some((1, 5ms)), ranges [(0, 1)], due Some(Now), \
           idle Some(30.005s), reason None"
         ]
     );
@@ -4195,7 +4228,7 @@ fn a_poll_receives_at_most_its_limit_and_wakes_itself_for_the_rest() {
     assert_eq!(
         take_log(),
         [
-            "read \"lo\", largest Some((1, 5ms)), ranges [(0, 1)], due Some(Now), \
+            "read \"lo\", largest Some((2, 5ms)), ranges [(0, 2)], due Some(Now), \
           idle Some(30.005s), reason None"
         ]
     );
@@ -6688,7 +6721,7 @@ fn a_server_closing_once_confirmed_sends_its_close_in_a_one_rtt_packet_alone() {
     );
     assert!(
         log.iter()
-            .any(|line| line == "keys: Initial receive, Handshake receive, 1-RTT receive"),
+            .any(|line| line == "keys: Initial receive, Handshake none, 1-RTT receive"),
         "{log:?}"
     );
 }
@@ -7159,7 +7192,6 @@ fn discarding_the_handshake_keys_retires_the_space_once_and_the_probe_timeout_re
         // an RTT of 10 ms: a probe timeout of 30 ms, 55 ms in the
         // Application Data space with the peer's default max_ack_delay
         (ms(10), Sample(ms(0))),
-        (ms(11), Confirm),
         (
             ms(12),
             Sent {
@@ -7174,7 +7206,8 @@ fn discarding_the_handshake_keys_retires_the_space_once_and_the_probe_timeout_re
                 count: 2,
             },
         ),
-        (ms(150), Discard(PacketNumberSpaceKind::Handshake)),
+        // the confirmation discards the Handshake keys (RFC 9001 §4.9.2)
+        (ms(150), Confirm),
         (ms(160), Discard(PacketNumberSpaceKind::Handshake)),
         (ms(170), Discard(PacketNumberSpaceKind::Initial)),
     ]);

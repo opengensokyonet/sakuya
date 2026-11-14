@@ -12,7 +12,8 @@
 //! recovery factory, the record of why the connection closed
 //! ([`close`]) and the cell of the application's request to close
 //! ([`close_request`]), which at the start of every poll takes the request
-//! into the record; the clone of the
+//! into the record; the connection's one call, the advancing call, runs the
+//! handshake and keeps its exporter ([`advancing`]); the clone of the
 //! link, the facts about it and the anti-amplification limit in the entry of
 //! each logical link, whose call follows the link's datagram size limit
 //! ([`link_ceiling`]); the role in each link path; and in each link path's
@@ -121,7 +122,7 @@ use crate::{
 use std::sync::Arc;
 
 use self::{
-    advancing::HandshakeStart,
+    advancing::{ClientAdvancingKind, ConnectionExporter, HandshakeStart, ServerAdvancingKind},
     aead_usage::AeadUsage,
     amplification::{AddressValidation, AntiAmplification, AntiAmplificationFactor},
     close::{ApplicationClose, CloseReasonRecord, LocalCloseCause},
@@ -186,6 +187,7 @@ use sakuya_tls::{
     alert::CallsForAlert,
     client::engine::ClientHandshakeSteps,
     engine::{CryptoLevel, HandshakeError},
+    schedule::Exporter,
     server::engine::ServerHandshakeSteps,
 };
 
@@ -286,14 +288,23 @@ pub type CloseCauseOf<T, L> = LocalCloseCause<
 >;
 
 /// What differs between the two sides of a connection: the handshake
-/// engine, the data only this side has, and one method for each difference
-/// in behavior.
+/// engine and the call that advances it, the data only this side has, and
+/// one method for each difference in behavior.
 pub trait Side: 'static {
     /// The role of this side.
     const ROLE: Role;
 
     /// The start state of this side's handshake engine.
     type Tls;
+
+    /// The kind of this side's advancing call, the one call of the
+    /// connection node, which runs the handshake
+    /// ([`advancing`](self::advancing)).
+    type Advancing;
+
+    /// The exporter this side's handshake gives when it completes, which
+    /// the connection node keeps until the connection closes.
+    type Exporter: 'static;
 
     /// How this side's handshake engine fails with an alert: the failure
     /// that [`HandshakeError`] holds for it.
@@ -360,6 +371,8 @@ where
 {
     const ROLE: Role = Role::Server;
     type Tls = Tls;
+    type Advancing = ServerAdvancingKind<Tls>;
+    type Exporter = Exporter<Tls::Crypto>;
     type AlertError = Tls::AlertError;
     type Own = HandshakeDoneSource;
     fn split_initial_secrets(secrets: InitialSecrets) -> (TrafficSecret, TrafficSecret) {
@@ -393,6 +406,8 @@ where
 {
     const ROLE: Role = Role::Client;
     type Tls = Tls;
+    type Advancing = ClientAdvancingKind<Tls>;
+    type Exporter = Exporter<Tls::Crypto>;
     type AlertError = Tls::AlertError;
     type Own = ClientOnlyState;
     fn split_initial_secrets(secrets: InitialSecrets) -> (TrafficSecret, TrafficSecret) {
@@ -515,8 +530,9 @@ where
         LinkPathSendingLimits,
         ConnectionImmediateClosePolicy<T::ImmediateClosePolicy>,
         <T::Side as Side>::Own,
+        ConnectionExporter<<T::Side as Side>::Exporter>,
     ];
-    type Calls = HNil;
+    type Calls = HList![<T::Side as Side>::Advancing];
     type Args = ConnectionArgs<T, L>;
 }
 impl<T: Choices, L> LayerShare<T, L, layer::LinkEntry> for Part {
@@ -860,7 +876,60 @@ macro_rules! kept_while_closing {
         }
     )*};
 }
-kept_while_closing!(InitialKeys, HandshakeKeys);
+kept_while_closing!(InitialKeys);
+
+/// The Handshake keys read the record of why the connection closed, the
+/// roles of the link paths and their close packets, as the Initial keys
+/// do; and whether the handshake is confirmed: once it is, they are
+/// discarded (RFC 9001 §4.9.2).
+impl<T: Choices, L, I, Ic, J, Jc, If> DataComponent<T, L, layer::Connection, (I, Ic, J, Jc, If)>
+    for HandshakeKeys<T::Crypto>
+where
+    L: LineagePartList<T> + ConnectionErrorsOf,
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<HandshakeKeys<T::Crypto>, I>
+        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
+        + GetAt<HandshakeConfirmation, If>,
+    for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        GetAt<LinkPathRole<InstantOf<T>>, J> + GetAt<ClosePacket, Jc>,
+{
+    fn reads(reads: &mut ReadSet) {
+        reads
+            .add::<CloseReasonRecord<CloseCauseOf<T, L>>>()
+            .add::<LinkPathRole<InstantOf<T>>>()
+            .add::<ClosePacket>()
+            .add::<HandshakeConfirmation>();
+    }
+    fn reread<'v, B: CallBundle>(
+        mut lineage: LineageOf<'v, T, L, layer::Connection>,
+        others: &mut OtherNodes<'v, T, L, B>,
+        _: InstantOf<T>,
+    ) -> Option<RequestOf<T, L>> {
+        let keys = lineage.get::<HandshakeKeys<T::Crypto>, I>();
+        if matches!(keys, HandshakeKeys::Discarded) {
+            return None;
+        }
+        if *lineage.get::<HandshakeConfirmation, If>() == HandshakeConfirmation::Confirmed {
+            lineage.get_mut::<HandshakeKeys<T::Crypto>, I>().discard();
+            return None;
+        }
+        let receive_only = matches!(keys, HandshakeKeys::ReceiveOnly(_));
+        let written = lineage
+            .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
+            .is_written();
+        match closing_keys::<T, L, B, J, Jc>(written, others) {
+            ClosingKeys::Kept => {}
+            ClosingKeys::ReceiveOnly if receive_only => {}
+            ClosingKeys::ReceiveOnly => {
+                lineage
+                    .get_mut::<HandshakeKeys<T::Crypto>, I>()
+                    .keep_receive_only();
+            }
+            ClosingKeys::Discarded => lineage.get_mut::<HandshakeKeys<T::Crypto>, I>().discard(),
+        }
+        None
+    }
+}
 
 /// The 1-RTT keys read the record of why the connection closed, the roles
 /// of the link paths and their close packets, as the keys of the other

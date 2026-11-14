@@ -6,11 +6,15 @@
 //! as the connection node keeps it ([`FirstLocalConnectionId`]); and the
 //! destination connection ID strategy, made from the configuration the
 //! connection node keeps ([`DestinationConnectionIdConfig`]) with the
-//! `active_connection_id_limit` this side sends. The strategy learns the
-//! connection ID the peer chose for the handshake once: a server's is the
-//! Source Connection ID of the first Initial packet it opens from the
-//! client (RFC 9000 §7.2), whether the first flight was read before the
-//! connection was made or by the receiving call.
+//! `active_connection_id_limit` this side sends. A client's strategy starts
+//! with the Destination Connection ID the client chose. The strategy learns
+//! the connection ID the peer chose for the handshake once: the Source
+//! Connection ID of the first Initial packet that opens from the peer (RFC
+//! 9000 §7.2), whether a server's first flight was read before the
+//! connection was made or by the receiving call. The connection node keeps
+//! it too ([`PeerHandshakeConnectionId`]), with the client's first
+//! Destination Connection IDs ([`InitialDestinationConnectionIds`]): the
+//! handshake checks the peer's transport parameters against them (§7.3).
 //!
 //! The connection node keeps the [`ConnectionResetTokenRegistry`]. Each
 //! link path makes its [`LinkPathResetTokenRegistrar`] from it when it is

@@ -80,17 +80,10 @@ impl<B: CryptoReceiveBuffer + Unpin + 'static> Read for CryptoReceiver<B> {
     where
         Self: 'v,
     {
-        let this = host.get_pin_mut().get_mut();
-        if !destination.has_remaining_mut() {
-            return Poll::Ready(Ok(0));
-        }
-        match this.read_into(destination) {
-            0 => {
-                this.reader = Some(cx.waker().clone());
-                Poll::Pending
-            }
-            read => Poll::Ready(Ok(read)),
-        }
+        host.get_pin_mut()
+            .get_mut()
+            .poll_read(cx, destination)
+            .map(Ok)
     }
 }
 
@@ -497,6 +490,27 @@ impl<B: CryptoReceiveBuffer> CryptoReceiver<B> {
                 ensure!(data.is_empty(), RefusedSnafu);
                 Ok(())
             }
+        }
+    }
+
+    /// Copies the next contiguous bytes of the level being read into
+    /// `destination`, as much as fits, and returns how many; `Pending`
+    /// while none are ready, the waker of `cx` being woken when the next
+    /// frame at the level is received.
+    pub(crate) fn poll_read<T: BufMut + ?Sized>(
+        &mut self,
+        cx: &mut Context<'_>,
+        destination: &mut T,
+    ) -> Poll<usize> {
+        if !destination.has_remaining_mut() {
+            return Poll::Ready(0);
+        }
+        match self.read_into(destination) {
+            0 => {
+                self.reader = Some(cx.waker().clone());
+                Poll::Pending
+            }
+            read => Poll::Ready(read),
         }
     }
 

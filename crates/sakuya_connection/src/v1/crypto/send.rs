@@ -59,12 +59,7 @@ impl<B: CryptoSendBuffer + Unpin + 'static> Write for CryptoSender<B> {
     where
         Self: 'v,
     {
-        let this = host.get_pin_mut().get_mut();
-        let len = input.remaining();
-        this.check_room(len)?;
-        let data = input.copy_to_bytes(len);
-        this.append_checked(data);
-        Poll::Ready(Ok(len))
+        Poll::Ready(host.get_pin_mut().get_mut().write_from(input))
     }
 }
 
@@ -382,6 +377,24 @@ impl<B: CryptoSendBuffer> CryptoSender<B> {
         self.check_room(data.len())?;
         self.append_checked(data);
         Ok(())
+    }
+
+    /// Takes the whole of `input` at the level the engine writes, as
+    /// [`write`](Self::write) does, and returns how much that was.
+    ///
+    /// # Errors
+    ///
+    /// [`CryptoDataEndError`] as for [`write`](Self::write); nothing is
+    /// taken from `input` then.
+    pub(crate) fn write_from<I: Buf + ?Sized>(
+        &mut self,
+        input: &mut I,
+    ) -> Result<usize, CryptoDataEndError> {
+        let len = input.remaining();
+        self.check_room(len)?;
+        let data = input.copy_to_bytes(len);
+        self.append_checked(data);
+        Ok(len)
     }
 
     /// Moves the engine's writing to `level`. What was written before stays
