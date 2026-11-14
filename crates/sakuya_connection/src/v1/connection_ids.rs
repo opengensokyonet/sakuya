@@ -27,8 +27,14 @@ use sakuya_wire::{
     v1::transport_parameters::{TransportParameterSlots, integer::ActiveConnectionIdLimit},
 };
 
+use frunk_core::{HList, hlist_pat};
+
 use super::{
-    Choices, ConnectionArgs, first_flight::FirstFlightStart, parameters::LocalTransportParameters,
+    Choices, ConnectionArgs,
+    first_flight::FirstFlightStart,
+    parameters::LocalTransportParameters,
+    send::{RetireConnectionIdIntent, SendTypes},
+    send_planning::{SendStrategyCore, SendStrategyOf},
     stateless_reset::StatelessResetSignal,
 };
 use crate::{
@@ -39,13 +45,16 @@ use crate::{
         RequestOf,
     },
     connection_id::{
-        DestinationConnectionIdStrategy,
+        DestinationConnectionIdStrategy, NewConnectionId,
         reset_token::{ResetTokenRegistrar, ResetTokenRegistry},
+        violation::NewConnectionIdViolationError,
     },
+    frame_source::PublishIntent,
     layer,
     others::OtherNodes,
+    send_strategy::SendStrategyTypes,
     share::{ConnectionArgsOf, LineageLists, LineagePartList},
-    take::GetAt,
+    take::{GetAt, Lineage, Reborrow, Take, TakeEach},
 };
 use sakuya_link::Link;
 
@@ -260,11 +269,89 @@ where
     }
 }
 
-/// The strategy's deadline is its own; it reads itself.
-impl<T: Choices, L, I> DataComponent<T, L, layer::LogicalPath, I> for ConnectionIdsOf<T>
+// ---- the strategy's events that retire connection IDs ----
+
+/// The core of the send strategy of the choices `T` and the list of parts
+/// `L`, as the connection node holds it.
+type CoreOf<T, L> = SendStrategyCore<SendStrategyOf<T, L>>;
+
+/// What an event of the destination connection ID strategy that may
+/// retire connection IDs takes out of a lineage: the logical path's
+/// connection IDs, and the core the frames are published to.
+type RetiringTakes<T, L> = HList![ConnectionIdsOf<T>, CoreOf<T, L>];
+
+/// `V: CoreLentConnectionIdEvents<T, L, H>`: the events of the destination
+/// connection ID strategy that may retire connection IDs, in a lineage of
+/// `V`, with the core, which the lineage holds, lent to publish the
+/// frames of what they retire.
+///
+/// `H` holds the positions of the connection IDs and of the core, and the
+/// place of [`RetireConnectionIdIntent`] among the composition's intents.
+pub trait CoreLentConnectionIdEvents<T: Choices, L, H>: Sized {
+    /// The peer issued `issued`.
+    ///
+    /// # Errors
+    ///
+    /// What [`DestinationConnectionIdStrategy::on_new_connection_id`]
+    /// returns.
+    fn new_connection_id(
+        lineage: &mut Lineage<'_, Self>,
+        issued: NewConnectionId,
+    ) -> Result<(), NewConnectionIdViolationError>;
+
+    /// `link_path` ended.
+    fn link_path_ended(lineage: &mut Lineage<'_, Self>, link_path: &LinkIdOf<T>);
+
+    /// The strategy's deadline came at `now`.
+    fn deadline(lineage: &mut Lineage<'_, Self>, now: InstantOf<T>);
+}
+
+impl<T, L, V, Is, Idx> CoreLentConnectionIdEvents<T, L, (Is, Idx)> for V
+where
+    T: Choices,
+    SendTypes<T, L>: SendStrategyTypes,
+    CoreOf<T, L>: PublishIntent<RetireConnectionIdIntent, Idx> + 'static,
+    for<'s> V: Reborrow<'s>,
+    for<'s> <V as Reborrow<'s>>::Out: TakeEach<'s, RetiringTakes<T, L>, Is>,
+{
+    fn new_connection_id(
+        lineage: &mut Lineage<'_, V>,
+        issued: NewConnectionId,
+    ) -> Result<(), NewConnectionIdViolationError> {
+        let (hlist_pat![ids, core], _) = Take::<RetiringTakes<T, L>, Is>::take(lineage.reborrow());
+        DestinationConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>::on_new_connection_id::<_, Idx>(
+            &mut ids.destination,
+            core,
+            issued,
+        )
+    }
+
+    fn link_path_ended(lineage: &mut Lineage<'_, V>, link_path: &LinkIdOf<T>) {
+        let (hlist_pat![ids, core], _) = Take::<RetiringTakes<T, L>, Is>::take(lineage.reborrow());
+        DestinationConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>::on_link_path_ended::<_, Idx>(
+            &mut ids.destination,
+            core,
+            link_path,
+        );
+    }
+
+    fn deadline(lineage: &mut Lineage<'_, V>, now: InstantOf<T>) {
+        let (hlist_pat![ids, core], _) = Take::<RetiringTakes<T, L>, Is>::take(lineage.reborrow());
+        DestinationConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>::on_deadline::<_, Idx>(
+            &mut ids.destination,
+            core,
+            now,
+        );
+    }
+}
+
+/// The strategy's deadline is its own; it reads itself. When it comes,
+/// what it retires is published to the core.
+impl<T: Choices, L, I, H> DataComponent<T, L, layer::LogicalPath, (I, H)> for ConnectionIdsOf<T>
 where
     L: LineagePartList<T>,
-    for<'v> <L as LineageLists<'v, T>>::LogicalPath: GetAt<Self, I>,
+    for<'v> <L as LineageLists<'v, T>>::LogicalPath:
+        GetAt<Self, I> + CoreLentConnectionIdEvents<T, L, H>,
 {
     fn reads(reads: &mut ReadSet) {
         reads.add::<Self>();
@@ -279,10 +366,7 @@ where
         _: &mut OtherNodes<'v, T, L, B>,
         now: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
-        DestinationConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>::on_deadline(
-            &mut lineage.get_mut::<Self, I>().destination,
-            now,
-        );
+        CoreLentConnectionIdEvents::<T, L, H>::deadline(&mut lineage, now);
         None
     }
 }
@@ -310,14 +394,15 @@ impl<R> LinkPathResetTokenRegistrar<R> {
 /// A link path makes its registrar and is added to its logical path's
 /// strategy when it is built, with whether the peer switched to another of
 /// this side's connection IDs on it as its request says, and ends there
-/// when it ends.
-impl<T: Choices, L, Ir, Is, Ii> Build<T, L, layer::LinkPath, (Ir, Is, Ii)>
+/// when it ends; what its end retires is published to the core.
+impl<T: Choices, L, Ir, Is, Ii, H> Build<T, L, layer::LinkPath, (Ir, Is, Ii, H)>
     for LinkPathResetTokenRegistrar<ResetTokenRegistrarOf<T>>
 where
     L: LineagePartList<T>,
     for<'v> <L as LineageLists<'v, T>>::LinkPathParents: GetAt<ConnectionResetTokenRegistry<T::ResetTokenRegistry>, Ir>
         + GetAt<Arc<StatelessResetSignal>, Is>
-        + GetAt<ConnectionIdsOf<T>, Ii>,
+        + GetAt<ConnectionIdsOf<T>, Ii>
+        + CoreLentConnectionIdEvents<T, L, H>,
 {
     fn build<'v>(
         parents: &mut ParentsOf<'v, T, L, layer::LinkPath>,
@@ -345,10 +430,7 @@ where
         let crate::layer::NodeKey::LinkPath(_, link) = others.here() else {
             unreachable!("a link path's end carries its key")
         };
-        DestinationConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>::on_link_path_ended(
-            &mut parents.get_mut::<ConnectionIdsOf<T>, Ii>().destination,
-            link,
-        );
+        CoreLentConnectionIdEvents::<T, L, H>::link_path_ended(parents, link);
     }
 }
 impl<R> PassiveDataComponent for LinkPathResetTokenRegistrar<R> {}

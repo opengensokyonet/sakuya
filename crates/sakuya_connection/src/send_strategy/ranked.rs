@@ -290,19 +290,59 @@ impl<I: SendStrategyTypes> RankedSendStrategy<I> {
     }
 }
 
-impl<I: SendStrategyTypes, J: SendIntent> PublishOutcome<J, AnyActiveLinkPath>
+/// What [`RankedSendStrategy`] gives back for an intent published to its
+/// core, by the type of the intent. The parts implement it for the intents
+/// their components publish to the core.
+pub trait RankedCoreIntent: SendIntent {
+    /// [`IntentTicket`] for an intent someone reads or withdraws; `()` for
+    /// one sent and forgotten, which only being supplied or the end of the
+    /// connection takes away. `C` is what this endpoint's reason to close
+    /// holds.
+    type Outcome<C>: RankedCoreOutcome<C>;
+}
+
+/// What the core of [`RankedSendStrategy`] can give back for an intent:
+/// [`IntentTicket`] or `()`.
+pub trait RankedCoreOutcome<C>: sealed::CoreOutcome<C> {}
+
+mod sealed {
+    use super::IntentTicket;
+
+    /// How the core gives back what it gives back for an intent, given how
+    /// to make the intent's ticket.
+    pub trait CoreOutcome<C> {
+        fn new(ticket: impl FnOnce() -> IntentTicket<C>) -> Self;
+    }
+
+    impl<C> CoreOutcome<C> for IntentTicket<C> {
+        fn new(ticket: impl FnOnce() -> IntentTicket<C>) -> Self {
+            ticket()
+        }
+    }
+
+    /// No ticket is made, so nothing withdraws the intent: its state stays
+    /// with the core only.
+    impl<C> CoreOutcome<C> for () {
+        fn new(_: impl FnOnce() -> IntentTicket<C>) -> Self {}
+    }
+}
+
+impl<C> RankedCoreOutcome<C> for IntentTicket<C> {}
+impl<C> RankedCoreOutcome<C> for () {}
+
+impl<I: SendStrategyTypes, J: RankedCoreIntent> PublishOutcome<J, AnyActiveLinkPath>
     for RankedSendStrategy<I>
 {
-    type Outcome = IntentTicket<I::CloseCause>;
+    type Outcome = J::Outcome<I::CloseCause>;
 }
 
 impl<I, J, Idx> PublishTo<J, AnyActiveLinkPath, Idx> for RankedSendStrategy<I>
 where
     I: SendStrategyTypes,
-    J: SendIntent,
+    J: RankedCoreIntent,
     I::SendIntents: InjectSendIntent<J, Idx>,
 {
-    fn publish_to(&mut self, intent: J, _: AnyActiveLinkPath) -> IntentTicket<I::CloseCause> {
+    fn publish_to(&mut self, intent: J, _: AnyActiveLinkPath) -> J::Outcome<I::CloseCause> {
         let cell = IntentCell::new();
         if self.closed.get().is_some() {
             cell.leave_waiting(ENDED);
@@ -313,10 +353,11 @@ where
             });
             self.wake_all();
         }
-        IntentTicket {
+        let closed = &self.closed;
+        sealed::CoreOutcome::new(|| IntentTicket {
             cell,
-            closed: Arc::clone(&self.closed),
-        }
+            closed: Arc::clone(closed),
+        })
     }
 }
 

@@ -57,7 +57,7 @@ use super::{
     ack::{AckReads, AckRecoveryTakes, receive_ack},
     close::CloseReasonRecord,
     confirmation::HandshakeConfirmation,
-    connection_ids::ConnectionIdsOf,
+    connection_ids::CoreLentConnectionIdEvents,
     crypto::CryptoReceiver,
     current_probe_timeout,
     error::{self, ConnectionError},
@@ -73,7 +73,7 @@ use crate::{
     call::CallBundle,
     clock::{CheckedAdd, InstantOf},
     component::LineageOf,
-    connection_id::{DestinationConnectionIdStrategy, NewConnectionId},
+    connection_id::NewConnectionId,
     dispatch::{DispatchFacts, FrameDispatch},
     error::ConnectionErrorsOf,
     feedback::FeedbackSummariesOf,
@@ -245,7 +245,7 @@ where
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out:
         Selector<&'a CongestionPartOf<T, L>, Jx> + Selector<&'a RttOf<T, L>, Jr>,
     for<'v> <L as LineageLists<'v, T>>::LogicalPath: GetAt<CryptoReceiver<T::CryptoReceiveBuffer>, Ic>
-        + GetAt<ConnectionIdsOf<T>, Icid>
+        + CoreLentConnectionIdEvents<T, L, Icid>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
         + GetAt<HandshakeConfirmation, Ih>
         + ReadEach<LinkPathRoleReads<T, L>, Iv>,
@@ -292,11 +292,13 @@ where
                     .receive_frame(level, offset, frame.into_data())
                     .context(error::CryptoSnafu)
             }
-            FrameRun::NewConnectionId(frame) => lineage
-                .get_mut::<ConnectionIdsOf<T>, Icid>()
-                .destination_mut()
-                .on_new_connection_id(NewConnectionId::from(&frame))
-                .context(error::NewConnectionIdSnafu),
+            FrameRun::NewConnectionId(frame) => {
+                CoreLentConnectionIdEvents::<T, L, Icid>::new_connection_id(
+                    lineage,
+                    NewConnectionId::from(&frame),
+                )
+                .context(error::NewConnectionIdSnafu)
+            }
             FrameRun::HandshakeDone(_) => {
                 *lineage.get_mut::<HandshakeConfirmation, Ih>() = HandshakeConfirmation::Confirmed;
                 Ok(())

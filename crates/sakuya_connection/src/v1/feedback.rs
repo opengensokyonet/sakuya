@@ -6,11 +6,13 @@
 //! | PADDING | [`PaddingSummary`] | nothing | nothing |
 //! | ACK | [`AckSummary`]: the Largest Acknowledged and what was due before | the receive journals of the space stop reporting what lies below it (RFC 9000 §13.2.4) | the ACK obligation of the space owes again what it owed before (RFC 9000 §13.2.1), and the space's ACK intent is published again while an ACK frame is due |
 //! | PING of a probe timeout | [`ProbePingSummary`] | nothing | nothing: the next expiry of the probe timeout sends a new probe |
+//! | RETIRE_CONNECTION_ID | [`RetireConnectionIdSummary`]: the sequence number | the retirement no longer waits for acknowledgment | the same frame is published again while the retirement waits for acknowledgment (RFC 9000 §13.3) |
 //!
 //! Each is the summary of one kind of version 1's frame sources
 //! ([`FrameSources`]), and what comes of it is that source's
 //! ([`AckFrameSource`](super::send::AckFrameSource),
-//! [`ProbePingFrameSource`](super::send::ProbePingFrameSource),
+//! [`ProbePingFrameSource`](super::send::ProbePingFrameSource), the
+//! destination connection ID strategy,
 //! [`PaddingFrameSource`](crate::write::PaddingFrameSource)).
 use frunk_core::{HList, hlist_pat};
 use sakuya_recovery::{ack_obligation::AckDue, packet_number_space::PacketNumberSpaceKind};
@@ -23,7 +25,7 @@ use sakuya_wire::{
 use super::send::FrameSources;
 use super::{
     Choices,
-    send::SendTypes,
+    send::{RetireConnectionIdSummary, SendTypes},
     send_planning::{SendStrategyCore, SendStrategyOf},
 };
 use crate::{
@@ -38,8 +40,13 @@ use crate::{
 /// the sum of the summaries of [`FrameSources`], in their order.
 ///
 /// `I` is the type of instants.
-pub type FeedbackSummary<I> =
-    Coproduct<PaddingSummary, Coproduct<AckSummary<I>, Coproduct<ProbePingSummary, CNil>>>;
+pub type FeedbackSummary<I> = Coproduct<
+    PaddingSummary,
+    Coproduct<
+        AckSummary<I>,
+        Coproduct<ProbePingSummary, Coproduct<RetireConnectionIdSummary, CNil>>,
+    >,
+>;
 
 /// The summary of the PING of a probe timeout: nothing is done when it is
 /// acknowledged or lost; the probe timeout sends a new probe when it
@@ -82,6 +89,17 @@ impl<I, Rest> From<AckSummary<I>> for Coproduct<FeedbackSummary<I>, Rest> {
 impl<I, Rest> From<ProbePingSummary> for Coproduct<FeedbackSummary<I>, Rest> {
     fn from(summary: ProbePingSummary) -> Self {
         Coproduct::Inl(Coproduct::Inr(Coproduct::Inr(Coproduct::Inl(summary))))
+    }
+}
+
+/// The destination connection ID strategy puts the summaries of its
+/// RETIRE_CONNECTION_ID frames into the sum of the summaries of a
+/// composition through version 1's, which comes first.
+impl<I, Rest> From<RetireConnectionIdSummary> for Coproduct<FeedbackSummary<I>, Rest> {
+    fn from(summary: RetireConnectionIdSummary) -> Self {
+        Coproduct::Inl(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(
+            Coproduct::Inl(summary),
+        ))))
     }
 }
 

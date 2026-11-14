@@ -37,6 +37,10 @@
 //!   only once the connection ID was used, and the registration is dropped
 //!   when the connection ID is retired or the link path is removed,
 //!   whichever comes first ([RFC 9000 §10.3.1]).
+//! - A connection ID retired has its frame published to send, and
+//!   published again with the same sequence number when that frame is
+//!   declared lost before the retirement is acknowledged
+//!   ([RFC 9000 §13.3]); once acknowledged, the retirement no longer waits.
 //!
 //! [`ResetTokenRegistrar`] is the capability that registers a token; the
 //! sending call lends it to [`DestinationConnectionIdStrategy::on_used`].
@@ -55,6 +59,7 @@
 //! [RFC 9000 §9.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-9.5
 //! [RFC 9000 §10.3.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-10.3.1
 //! [RFC 9000 §12.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.2
+//! [RFC 9000 §13.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-13.3
 //! [RFC 9000 §19.16]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.16
 
 use sakuya_wire::{
@@ -64,6 +69,8 @@ use sakuya_wire::{
         transport_parameters::integer::ActiveConnectionIdLimit,
     },
 };
+
+use crate::frame_source::{FrameSource, PublishIntent};
 
 pub mod datagram;
 pub mod reset_token;
@@ -146,9 +153,21 @@ impl From<&NewConnectionIdFrame> for NewConnectionId {
 /// tokens of used connection IDs; the composition provides it, filled in
 /// with the peer and target of the link path it is lent for.
 ///
+/// The strategy is also the frame source of the frames that retire the
+/// peer's connection IDs ([`FrameSource`]): which frames they are, and so
+/// its items, summaries and intents, the composition says. An event that
+/// retires connection IDs publishes their frames through the publisher it
+/// is lent ([`PublishIntent`]); a frame declared lost is published again
+/// with the same sequence number while its retirement waits for
+/// acknowledgment ([RFC 9000 §13.3]).
+///
 /// The [module documentation](self) lists the contract every implementation
 /// keeps.
-pub trait DestinationConnectionIdStrategy<Id, I, R: ResetTokenRegistrar>: Sized {
+///
+/// [RFC 9000 §13.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-13.3
+pub trait DestinationConnectionIdStrategy<Id, I, R: ResetTokenRegistrar>:
+    FrameSource + Sized
+{
     /// The configuration each connection's strategy is made from.
     type Config: Clone;
 
@@ -197,17 +216,22 @@ pub trait DestinationConnectionIdStrategy<Id, I, R: ResetTokenRegistrar>: Sized 
     fn on_used(&mut self, registrar: &mut R, sequence: u64, link_path: &Id, datagram_len: usize);
 
     /// The peer issued `issued`, in a NEW_CONNECTION_ID frame or, with
-    /// multipath, a PATH_NEW_CONNECTION_ID frame for this logical path.
+    /// multipath, a PATH_NEW_CONNECTION_ID frame for this logical path. The
+    /// frames of the connection IDs its Retire Prior To retires go to
+    /// `retire`.
     ///
     /// # Errors
     ///
     /// [`NewConnectionIdViolationError`] if the frame violates a rule the
     /// strategy checks; the caller closes the connection with its
     /// [`transport_error_code`](NewConnectionIdViolationError::transport_error_code).
-    fn on_new_connection_id(
+    fn on_new_connection_id<Pb, Idx>(
         &mut self,
+        retire: &mut Pb,
         issued: NewConnectionId,
-    ) -> Result<(), NewConnectionIdViolationError>;
+    ) -> Result<(), NewConnectionIdViolationError>
+    where
+        Pb: PublishIntent<Self::Intent, Idx>;
 
     /// `link_path` was added. `peer_switched_local_id` tells whether the
     /// peer, on it, uses another of this side's connection IDs than on the
@@ -217,8 +241,11 @@ pub trait DestinationConnectionIdStrategy<Id, I, R: ResetTokenRegistrar>: Sized 
     /// [RFC 9000 §9.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-9.5
     fn on_link_path_added(&mut self, link_path: &Id, peer_switched_local_id: bool);
 
-    /// `link_path` ended: its bindings and the registrations kept for it go.
-    fn on_link_path_ended(&mut self, link_path: &Id);
+    /// `link_path` ended: its bindings and the registrations kept for it
+    /// go. The frames of the connection IDs it retires go to `retire`.
+    fn on_link_path_ended<Pb, Idx>(&mut self, retire: &mut Pb, link_path: &Id)
+    where
+        Pb: PublishIntent<Self::Intent, Idx>;
 
     /// The earliest instant the strategy wants [`on_deadline`](Self::on_deadline)
     /// called at; `None` when it has nothing to do in time.
@@ -226,6 +253,11 @@ pub trait DestinationConnectionIdStrategy<Id, I, R: ResetTokenRegistrar>: Sized 
         None
     }
 
-    /// Does everything due at or before `now`.
-    fn on_deadline(&mut self, _now: I) {}
+    /// Does everything due at or before `now`. The frames of the connection
+    /// IDs it retires go to `retire`.
+    fn on_deadline<Pb, Idx>(&mut self, _retire: &mut Pb, _now: I)
+    where
+        Pb: PublishIntent<Self::Intent, Idx>,
+    {
+    }
 }

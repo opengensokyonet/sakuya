@@ -6039,12 +6039,14 @@ fn a_link_path_that_ends_while_the_link_holds_its_batch_hands_back_its_packets()
     );
     // the packet the probe recorded at 6 ms among them
     assert_eq!(lines_of(log, &["lost"]), ["lost Initial 1"]);
-    // the packets of both datagrams left the send journals with the link
-    // path, with those it sent before: the ACK frames of the Initial packet
-    // sent at 5 ms and of the 1-RTT packet in the batch are owed again
+    // the link path's end retires the connection ID only it used; the
+    // packets of both datagrams left the send journals with the link path,
+    // with those it sent before: the ACK frames of the Initial packet sent
+    // at 5 ms and of the 1-RTT packet in the batch are owed again
     assert_eq!(
         strategy_events("core: publish"),
         [
+            "core: publish RetireConnectionIdIntent { sequence: 0 }",
             "core: publish AckIntent { space: Initial, shortest: 5 }",
             "core: publish AckIntent { space: ApplicationData, shortest: 5 }",
         ]
@@ -6744,6 +6746,56 @@ fn every_closing_link_path_seals_its_own_close_packet_before_the_keys_lose_their
             .any(|line| line == "keys: Initial receive, Handshake none, 1-RTT receive"),
         "{log:?}"
     );
+}
+
+#[test]
+fn retire_prior_to_sends_the_retirement_with_a_connection_id_still_offered() {
+    use probe::PacketStep::{InstallOneRttKeys, Receive};
+    reset();
+    let first = link();
+    // NEW_CONNECTION_ID numbered 1, retiring prior to 1
+    let mut retiring = new_connection_id(1);
+    retiring[2] = 1;
+    feed_packets([
+        (
+            ms(4),
+            Receive(received(
+                initial_from(&CLIENT_SCID, 0, &ping()),
+                &first,
+                ms(4),
+            )),
+        ),
+        (ms(6), InstallOneRttKeys),
+        (
+            ms(7),
+            Receive(received(one_rtt_packet_of(0, 0, &retiring), &first, ms(7))),
+        ),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    let _ = settle(&mut connection, 4..=6);
+    common::take_sent();
+    let _ = settle(&mut connection, 7..=8);
+    let mut retired = Vec::new();
+    for (_, datagram) in common::take_sent() {
+        let one_rtt = if short_header(&datagram) {
+            &datagram[..]
+        } else {
+            let (_, initial) = open_long_sent(&datagram, &server_keys());
+            &datagram[initial.len..]
+        };
+        if one_rtt.is_empty() {
+            continue;
+        }
+        let (dcid, _, payload) = open_sent_one_rtt(one_rtt);
+        for run in frames_of(&payload) {
+            if let sakuya_wire::v1::frame::FrameRun::RetireConnectionId(frame) = run {
+                retired.push((dcid.clone(), frame.sequence_number().get().get()));
+            }
+        }
+    }
+    // the connection ID numbered 0 is retired, in a packet sent with the
+    // one numbered 1 (RFC 9000 §19.16)
+    assert_eq!(retired, [(vec![0x11; 8], 0)]);
 }
 
 #[test]

@@ -4,9 +4,16 @@
 
 use std::collections::{BTreeMap, BTreeSet, btree_map};
 
+use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
 use sakuya_wire::{
     connection_id::{ConnectionId, StatelessResetToken},
     v1::transport_parameters::integer::ActiveConnectionIdLimit,
+};
+
+use crate::{
+    frame_source::{FrameSource, PublishIntent},
+    v1::send::{RetireConnectionIdIntent, RetireConnectionIdSummary},
+    write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
 
 use super::{
@@ -37,11 +44,13 @@ use super::{
 ///   ending one link path drops its registrations only.
 /// - **Retirement.** A connection ID leaves the map, and with it its
 ///   registrations, when Retire Prior To passes it or when the last link
-///   path it is bound to ends ([RFC 9000 §5.1.2]). Its sequence number then
-///   waits for a RETIRE_CONNECTION_ID frame
-///   ([`pending_retirements`](Self::pending_retirements)) until the frame is
-///   acknowledged. A NEW_CONNECTION_ID that arrives again for a connection
-///   ID retired this way does not bring it back.
+///   path it is bound to ends ([RFC 9000 §5.1.2]). Its RETIRE_CONNECTION_ID
+///   frame is published then, unless its retirement already waits for
+///   acknowledgment; it is published again when its frame is declared lost
+///   and the retirement still waits ([RFC 9000 §13.3]), and the retirement
+///   stops waiting once one of its frames is acknowledged. A
+///   NEW_CONNECTION_ID that arrives again for a connection ID retired this
+///   way does not bring it back.
 /// - **Checks.** Every violation of [`NewConnectionIdViolationError`] is
 ///   reported, the optional ones included. Duplicate values are compared
 ///   with the active connection IDs only, not with retired ones.
@@ -55,6 +64,7 @@ use super::{
 /// [RFC 9000 §5.1.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-5.1.2
 /// [RFC 9000 §9.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-9.5
 /// [RFC 9000 §10.3.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-10.3.1
+/// [RFC 9000 §13.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-13.3
 /// [RFC 9000 §19.15]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.15
 pub struct SequenceMapDestinationConnectionIdStrategy<Id, R: ResetTokenRegistrar> {
     active: BTreeMap<u64, PeerConnectionId<Id, R::Registration>>,
@@ -74,8 +84,8 @@ enum Issuance {
     Sequenced(Retirements),
 }
 
-/// The connection IDs retired, and the RETIRE_CONNECTION_ID frames that
-/// still have to be sent or acknowledged.
+/// The connection IDs retired, and the retirements whose
+/// RETIRE_CONNECTION_ID frame is not acknowledged yet.
 #[derive(Debug)]
 struct Retirements {
     /// The largest Retire Prior To received: every sequence number below
@@ -85,19 +95,10 @@ struct Retirements {
     /// they were no longer used.
     retired_above: BTreeSet<u64>,
     /// The retirements not yet acknowledged.
-    unacknowledged: BTreeMap<u64, RetirementProgress>,
+    unacknowledged: BTreeSet<u64>,
     /// How many unacknowledged retirements are tracked before a
     /// NEW_CONNECTION_ID frame is a violation.
     limit: usize,
-}
-
-/// Where the RETIRE_CONNECTION_ID frame of one retirement stands.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RetirementProgress {
-    /// The frame waits to be written.
-    Pending,
-    /// The frame was written and is neither acknowledged nor lost.
-    Written,
 }
 
 /// One active connection ID of the peer.
@@ -136,15 +137,18 @@ impl<Id: PartialEq, Reg> PeerConnectionId<Id, Reg> {
 }
 
 impl Retirements {
-    /// Starts retiring `sequence`, unless its retirement is still waiting
-    /// for acknowledgment.
-    fn retire(&mut self, sequence: u64) {
+    /// Starts retiring `sequence`, publishing its frame to `retire`, unless
+    /// its retirement is still waiting for acknowledgment.
+    fn retire<Pb, Idx>(&mut self, retire: &mut Pb, sequence: u64)
+    where
+        Pb: PublishIntent<RetireConnectionIdIntent, Idx>,
+    {
         if sequence >= self.retire_prior_to {
             self.retired_above.insert(sequence);
         }
-        self.unacknowledged
-            .entry(sequence)
-            .or_insert(RetirementProgress::Pending);
+        if self.unacknowledged.insert(sequence) {
+            retire.publish(RetireConnectionIdIntent::new(sequence));
+        }
     }
 
     /// Whether `sequence` was retired.
@@ -175,59 +179,73 @@ impl Retirements {
         Self {
             retire_prior_to: 0,
             retired_above: BTreeSet::new(),
-            unacknowledged: BTreeMap::new(),
+            unacknowledged: BTreeSet::new(),
             limit,
         }
     }
 }
 
 impl<Id, R: ResetTokenRegistrar> SequenceMapDestinationConnectionIdStrategy<Id, R> {
-    /// The sequence numbers whose RETIRE_CONNECTION_ID frame waits to be
-    /// written, ascending.
-    pub fn pending_retirements(&self) -> impl Iterator<Item = u64> + '_ {
-        let unacknowledged = match &self.issuance {
-            Issuance::Sequenced(retirements) => Some(&retirements.unacknowledged),
-            Issuance::ZeroLength => None,
-        };
-        unacknowledged
-            .into_iter()
-            .flatten()
-            .filter_map(|(&sequence, &progress)| {
-                (progress == RetirementProgress::Pending).then_some(sequence)
-            })
-    }
-
-    /// The RETIRE_CONNECTION_ID frame for `sequence` was written into a
-    /// packet: it waits for that packet's fate.
-    pub fn on_retirement_written(&mut self, sequence: u64) {
-        if let Some(progress) = self.retirement_progress(sequence) {
-            *progress = RetirementProgress::Written;
-        }
-    }
-
-    /// A packet with the RETIRE_CONNECTION_ID frame for `sequence` was
-    /// acknowledged: the retirement is complete.
-    pub fn on_retirement_acknowledged(&mut self, sequence: u64) {
-        if let Issuance::Sequenced(retirements) = &mut self.issuance {
-            retirements.unacknowledged.remove(&sequence);
-        }
-    }
-
-    /// The packet with the RETIRE_CONNECTION_ID frame for `sequence` was
-    /// declared lost: the same frame waits to be written again
-    /// ([RFC 9000 §13.3]).
-    ///
-    /// [RFC 9000 §13.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-13.3
-    pub fn on_retirement_lost(&mut self, sequence: u64) {
-        if let Some(progress) = self.retirement_progress(sequence) {
-            *progress = RetirementProgress::Pending;
-        }
-    }
-
-    fn retirement_progress(&mut self, sequence: u64) -> Option<&mut RetirementProgress> {
+    fn retirements(&mut self) -> Option<&mut Retirements> {
         match &mut self.issuance {
-            Issuance::Sequenced(retirements) => retirements.unacknowledged.get_mut(&sequence),
+            Issuance::Sequenced(retirements) => Some(retirements),
             Issuance::ZeroLength => None,
+        }
+    }
+}
+
+/// The strategy writes the RETIRE_CONNECTION_ID frames of version 1.
+impl<Id, R: ResetTokenRegistrar> FrameSource for SequenceMapDestinationConnectionIdStrategy<Id, R> {
+    type Summary = RetireConnectionIdSummary;
+    type Class = InFlightClass;
+    type Item<'a> = u64;
+    type Intent = RetireConnectionIdIntent;
+
+    /// The frame is written even when the retirement no longer waits, as a
+    /// frame of it sent earlier and declared lost was acknowledged late: the
+    /// intent was published, and writing nothing would leave it there.
+    fn supply<W, P>(
+        &mut self,
+        sequence: u64,
+        mut packet: OpenPacket<W, InFlightClass, P>,
+    ) -> Supplied<W, InFlightClass, P>
+    where
+        W: PacketWriting,
+        SummaryOf<W>: From<RetireConnectionIdSummary>,
+        P: PacketPosition,
+    {
+        let frame = RetireConnectionIdIntent::new(sequence).frame();
+        let written = packet.write_frame(frame, RetireConnectionIdSummary { sequence });
+        debug_assert!(written.is_ok(), "the intent asks room for the whole frame");
+        Supplied::Open(packet)
+    }
+
+    fn delivered<Pb, Idx>(
+        &mut self,
+        _: &mut Pb,
+        _: PacketNumberSpaceKind,
+        summary: RetireConnectionIdSummary,
+    ) where
+        Pb: PublishIntent<RetireConnectionIdIntent, Idx>,
+    {
+        if let Some(retirements) = self.retirements() {
+            retirements.unacknowledged.remove(&summary.sequence);
+        }
+    }
+
+    fn lost<Pb, Idx>(
+        &mut self,
+        retire: &mut Pb,
+        _: PacketNumberSpaceKind,
+        summary: &RetireConnectionIdSummary,
+    ) where
+        Pb: PublishIntent<RetireConnectionIdIntent, Idx>,
+    {
+        if self
+            .retirements()
+            .is_some_and(|retirements| retirements.unacknowledged.contains(&summary.sequence))
+        {
+            retire.publish(RetireConnectionIdIntent::new(summary.sequence));
         }
     }
 }
@@ -322,10 +340,14 @@ where
         });
     }
 
-    fn on_new_connection_id(
+    fn on_new_connection_id<Pb, Idx>(
         &mut self,
+        retire: &mut Pb,
         issued: NewConnectionId,
-    ) -> Result<(), NewConnectionIdViolationError> {
+    ) -> Result<(), NewConnectionIdViolationError>
+    where
+        Pb: PublishIntent<RetireConnectionIdIntent, Idx>,
+    {
         let sequence = issued.sequence();
         let retire_prior_to = issued.retire_prior_to();
         let id = issued.id().get();
@@ -342,13 +364,13 @@ where
             retirements.retire_prior_to = retire_prior_to;
             retirements.retired_above = retirements.retired_above.split_off(&retire_prior_to);
             for &sequence in passed.keys() {
-                retirements.retire(sequence);
+                retirements.retire(retire, sequence);
             }
         }
         if sequence < retirements.retire_prior_to {
             // Retire a connection ID that arrives below Retire Prior To
             // (RFC 9000 §19.15).
-            retirements.retire(sequence);
+            retirements.retire(retire, sequence);
         } else if !repeated && !retirements.is_retired(sequence) {
             self.active.insert(
                 sequence,
@@ -367,7 +389,10 @@ where
 
     fn on_link_path_added(&mut self, _link_path: &Id, _peer_switched_local_id: bool) {}
 
-    fn on_link_path_ended(&mut self, link_path: &Id) {
+    fn on_link_path_ended<Pb, Idx>(&mut self, retire: &mut Pb, link_path: &Id)
+    where
+        Pb: PublishIntent<RetireConnectionIdIntent, Idx>,
+    {
         match &mut self.issuance {
             Issuance::ZeroLength => {
                 for entry in self.active.values_mut() {
@@ -380,7 +405,7 @@ where
                 self.active.retain(|&sequence, entry| {
                     let unused = entry.unbind(link_path) && entry.bindings.is_empty();
                     if unused {
-                        retirements.retire(sequence);
+                        retirements.retire(retire, sequence);
                     }
                     !unused
                 });
@@ -468,6 +493,19 @@ pub(crate) fn started<Id: Clone + PartialEq, R: ResetTokenRegistrar>(
         .expect("the handshake connection ID was just given")
         .token = first_token;
     strategy
+}
+
+#[cfg(test)]
+/// What the tests lend a strategy to publish retirements to: the sequence
+/// numbers of the RETIRE_CONNECTION_ID frames published, in order.
+#[derive(Debug, Default)]
+pub(crate) struct RetiredSequences(pub(crate) Vec<u64>);
+
+#[cfg(test)]
+impl PublishIntent<RetireConnectionIdIntent, ()> for RetiredSequences {
+    fn publish(&mut self, intent: RetireConnectionIdIntent) {
+        self.0.push(intent.sequence());
+    }
 }
 
 #[cfg(test)]

@@ -99,6 +99,7 @@ use crate::{
     },
     error::{ConnectionErrorOf, ConnectionErrorPart, ConnectionErrorsOf},
     feedback::FeedbackSummariesOf,
+    frame_source::FrameSource,
     layer::{self, NodeKey},
     others::OtherNodes,
     request::StructureRequest,
@@ -236,11 +237,17 @@ pub trait Choices: ConnectionChoices {
     type SendStrategy<I: SendStrategyTypes>: Default;
     /// What decides which of the peer's connection IDs this side sends
     /// with, one for each logical path; it registers reset tokens through
-    /// the registrars of [`ResetTokenRegistry`](Self::ResetTokenRegistry).
+    /// the registrars of [`ResetTokenRegistry`](Self::ResetTokenRegistry),
+    /// and writes the RETIRE_CONNECTION_ID frames that retire the peer's
+    /// connection IDs.
     type DestinationConnectionIds: DestinationConnectionIdStrategy<
             LinkIdOf<Self>,
             InstantOf<Self>,
             ResetTokenRegistrarOf<Self>,
+        > + for<'a> FrameSource<
+            Item<'a> = u64,
+            Summary = send::RetireConnectionIdSummary,
+            Intent = send::RetireConnectionIdIntent,
         > + 'static;
     /// What the connection holds to register the reset tokens of the
     /// peer's connection IDs for detection: it makes the registrar of each

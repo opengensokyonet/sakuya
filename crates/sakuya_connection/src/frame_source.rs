@@ -92,6 +92,50 @@ pub trait FrameSource {
         Pb: PublishIntent<Self::Intent, Idx>;
 }
 
+/// A frame source borrowed is that frame source: what a kind of frame
+/// source finds inside a component is borrowed from it.
+impl<S: FrameSource + ?Sized> FrameSource for &mut S {
+    type Summary = S::Summary;
+    type Class = S::Class;
+    type Item<'a> = S::Item<'a>;
+    type Intent = S::Intent;
+
+    fn supply<W, P>(
+        &mut self,
+        item: Self::Item<'_>,
+        packet: OpenPacket<W, Self::Class, P>,
+    ) -> Supplied<W, Self::Class, P>
+    where
+        W: PacketWriting,
+        SummaryOf<W>: From<Self::Summary>,
+        P: PacketPosition,
+    {
+        (**self).supply(item, packet)
+    }
+
+    fn delivered<Pb, Idx>(
+        &mut self,
+        publish: &mut Pb,
+        space: PacketNumberSpaceKind,
+        summary: Self::Summary,
+    ) where
+        Pb: PublishIntent<Self::Intent, Idx>,
+    {
+        (**self).delivered::<Pb, Idx>(publish, space, summary);
+    }
+
+    fn lost<Pb, Idx>(
+        &mut self,
+        publish: &mut Pb,
+        space: PacketNumberSpaceKind,
+        summary: &Self::Summary,
+    ) where
+        Pb: PublishIntent<Self::Intent, Idx>,
+    {
+        (**self).lost::<Pb, Idx>(publish, space, summary);
+    }
+}
+
 /// `Pb: PublishIntent<J, Idx>`: what a frame source is lent when its frames
 /// come back takes intents `J`, sent and forgotten.
 ///

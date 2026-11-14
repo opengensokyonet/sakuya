@@ -16,12 +16,14 @@ use sakuya_wire::{
     v1::frame::{
         ack::{AckFrame, EcnCounts},
         ping::PingFrame,
+        retire_connection_id::RetireConnectionIdFrame,
     },
     var_int::{VarInt, VarIntField},
 };
 
 use super::{
     AckObligationsOf, Choices, CloseCauseOf, Part,
+    connection_ids::ConnectionIdsOf,
     feedback::{AckSummary, ProbePingSummary},
     key_phase::KeyPhaseNumbers,
     send_planning::{AckIntentTicketOf, AckIntentTickets, CorePublishOutcome},
@@ -37,7 +39,7 @@ use crate::{
     send_strategy::{
         AnyActiveLinkPath, FrameSourceSet, MinimumLengths, PlannedPacketKind, SendIntent,
         SendIntentPart, SendIntentsOf, SendStrategyTypes,
-        ranked::{RankedIntent, SendPriority, SendRank},
+        ranked::{IntentTicket, RankedCoreIntent, RankedIntent, SendPriority, SendRank},
     },
     share::{LinkPathIdentifierOf, LogicalPathKeys},
     take::{GetAt, Lineage},
@@ -59,6 +61,9 @@ pub enum FrameSourceId {
     Ack(PacketNumberSpaceKind),
     /// The PING that a probe timeout of a packet number space sends.
     ProbePing(PacketNumberSpaceKind),
+    /// The RETIRE_CONNECTION_ID frames of the destination connection ID
+    /// strategy.
+    RetireConnectionId,
 }
 
 /// An ACK frame is due in a packet number space.
@@ -130,6 +135,12 @@ impl RankedIntent for AckIntent {
     }
 }
 
+/// The ACK obligation's component keeps the ticket, to withdraw the intent
+/// once no ACK frame is due.
+impl RankedCoreIntent for AckIntent {
+    type Outcome<C> = IntentTicket<C>;
+}
+
 /// A probe timeout of a packet number space wants an ack-eliciting packet
 /// sent (RFC 9002 §6.2.4), and nothing else is there to send.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -174,13 +185,87 @@ impl RankedIntent for ProbePingIntent {
     }
 }
 
+/// A connection ID the peer issued is retired: a RETIRE_CONNECTION_ID
+/// frame with its sequence number is to be sent (RFC 9000 §19.16), and sent
+/// again with the same sequence number while its packets are lost
+/// (RFC 9000 §13.3). It is sent and forgotten: publishing it gives back
+/// nothing to keep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RetireConnectionIdIntent {
+    sequence: u64,
+}
+
+impl RetireConnectionIdIntent {
+    /// The connection ID numbered `sequence` is retired.
+    pub fn new(sequence: u64) -> Self {
+        Self { sequence }
+    }
+
+    /// The sequence number of the connection ID retired.
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// The frame that retires the connection ID.
+    pub fn frame(&self) -> RetireConnectionIdFrame {
+        RetireConnectionIdFrame::new(var_int(self.sequence))
+    }
+}
+
+impl SendIntent for RetireConnectionIdIntent {
+    type FrameSourceId = FrameSourceId;
+    type Class = InFlightClass;
+
+    fn frame_source(&self) -> FrameSourceId {
+        FrameSourceId::RetireConnectionId
+    }
+
+    fn min_lengths(&self) -> MinimumLengths {
+        let len = self.frame().encoded_len();
+        MinimumLengths {
+            with_length: len,
+            as_last: len,
+        }
+    }
+}
+
+impl RankedIntent for RetireConnectionIdIntent {
+    fn rank(&self) -> SendRank {
+        SendRank {
+            priority: SendPriority::Control,
+            holds_place: true,
+        }
+    }
+}
+
+/// Nothing keeps a retirement's intent: only its frame being written takes
+/// it away.
+impl RankedCoreIntent for RetireConnectionIdIntent {
+    type Outcome<C> = ();
+}
+
+/// The summary of a RETIRE_CONNECTION_ID frame written into a packet: the
+/// sequence number it retires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RetireConnectionIdSummary {
+    /// The sequence number of the connection ID retired.
+    pub sequence: u64,
+}
+
 /// Version 1's intents.
-pub type SendIntents = Coproduct<AckIntent, Coproduct<ProbePingIntent, CNil>>;
+pub type SendIntents =
+    Coproduct<AckIntent, Coproduct<ProbePingIntent, Coproduct<RetireConnectionIdIntent, CNil>>>;
 
 /// The kinds of version 1's frame sources: PADDING, which the packet
-/// writer writes, the ACK frames of each packet number space and the PING
-/// of a probe timeout.
-pub type FrameSources = frunk_core::HList![PaddingFrames, AckFrames, ProbePingFrames];
+/// writer writes, the ACK frames of each packet number space, the PING of
+/// a probe timeout and the RETIRE_CONNECTION_ID frames of the destination
+/// connection ID strategy.
+pub type FrameSources = frunk_core::HList![
+    PaddingFrames,
+    AckFrames,
+    ProbePingFrames,
+    RetireConnectionIdFrames
+];
 
 impl SendIntentPart for Part {
     type FrameSourceId = FrameSourceId;
@@ -196,6 +281,8 @@ pub type SendItem = FrameSourceItemsOf<'static, Part>;
 /// Whether a packet of `kind` carries content of `space` from a source of
 /// `ack`: ACK frames are not allowed in 0-RTT packets (RFC 9000 §12.4); a
 /// candidate's and a settling link path's packets carry neither.
+/// RETIRE_CONNECTION_ID frames go in 1-RTT packets only (RFC 9000 §12.4,
+/// §12.5).
 fn carries(kind: PlannedPacketKind, space: PacketNumberSpaceKind, ack: bool) -> bool {
     match kind {
         PlannedPacketKind::Initial => space == PacketNumberSpaceKind::Initial,
@@ -213,7 +300,12 @@ impl<K: PacketKind> FrameSourcePart<K> for Part {
                 .then_some(Coproduct::Inr(Coproduct::Inl(ack.space))),
             Coproduct::Inr(Coproduct::Inl(ping)) => carries(K::KIND, ping.space, false)
                 .then_some(Coproduct::Inr(Coproduct::Inr(Coproduct::Inl(ping.space)))),
-            Coproduct::Inr(Coproduct::Inr(never)) => match *never {},
+            Coproduct::Inr(Coproduct::Inr(Coproduct::Inl(retire))) => {
+                (K::KIND == PlannedPacketKind::OneRtt).then_some(Coproduct::Inr(Coproduct::Inr(
+                    Coproduct::Inr(Coproduct::Inl(retire.sequence)),
+                )))
+            }
+            Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(never))) => match *never {},
         }
     }
 
@@ -224,7 +316,12 @@ impl<K: PacketKind> FrameSourcePart<K> for Part {
             Coproduct::Inr(Coproduct::Inr(Coproduct::Inl(space))) => {
                 FrameSourceId::ProbePing(*space)
             }
-            Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(never))) => match *never {},
+            Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inl(_)))) => {
+                FrameSourceId::RetireConnectionId
+            }
+            Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(never)))) => {
+                match *never {}
+            }
         }
     }
 }
@@ -470,6 +567,37 @@ impl<T: Choices, L, V> FindFrameSource<T, L, V, ()> for ProbePingFrames {
 
     fn find<'l, 'r>(_: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
         ProbePingFrameSource::new()
+    }
+}
+
+/// The RETIRE_CONNECTION_ID frames of the destination connection ID
+/// strategy, as a kind of frame source: the strategy writes them.
+#[derive(Debug)]
+pub enum RetireConnectionIdFrames {}
+
+impl FrameSourceKind for RetireConnectionIdFrames {
+    type Item<'a> = u64;
+    type Summary<I> = RetireConnectionIdSummary;
+    type Intent = RetireConnectionIdIntent;
+}
+
+/// The RETIRE_CONNECTION_ID frames are written by the destination
+/// connection ID strategy of the logical path in the lineage.
+impl<T, L, V, Ic> FindFrameSource<T, L, V, Ic> for RetireConnectionIdFrames
+where
+    T: Choices,
+    V: GetAt<ConnectionIdsOf<T>, Ic>,
+{
+    type Source<'l, 'r>
+        = &'l mut T::DestinationConnectionIds
+    where
+        V: 'l,
+        'r: 'l;
+
+    fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
+        lineage
+            .get_mut::<ConnectionIdsOf<T>, Ic>()
+            .destination_mut()
     }
 }
 

@@ -10,10 +10,10 @@ use std::thread_local;
 use sakuya_connection::send_strategy::{
     AnyActiveLinkPath, DatagramLimits, InjectSendIntent, IntentRejectedError, LinkPathRoleKind,
     LinkPathSendPlanner, Observe, PacketOverheads, PlannedDatagram, PlannerLinkPath, Publish,
-    PublishOutcome, PublishTo, ResendCloseIntent, SendIntent, SendStrategy, SendStrategyTypes,
+    PublishOutcome, PublishTo, ResendCloseIntent, SendStrategy, SendStrategyTypes,
     ranked::{
-        IntentTicket, LinkPathIntentTicket, RankedIntent, RankedLinkPathSendPlanner,
-        RankedSendStrategy,
+        IntentTicket, LinkPathIntentTicket, RankedCoreIntent, RankedIntent,
+        RankedLinkPathSendPlanner, RankedSendStrategy,
     },
 };
 use sakuya_connection::v1::send::ProbePingIntent;
@@ -118,34 +118,60 @@ impl<I: SendStrategyTypes> Default for EventLoggingSendStrategy<I> {
     }
 }
 
-impl<I: SendStrategyTypes, J: SendIntent> PublishOutcome<J, AnyActiveLinkPath>
+/// What the ranked core gives back, as the recording core gives it back: a
+/// ticket that records when it goes, or nothing for an intent sent and
+/// forgotten.
+pub trait RecordOutcome {
+    /// What the recording core gives back.
+    type Recorded;
+    /// The outcome of publishing `intent`, recorded.
+    fn recorded(self, intent: String) -> Self::Recorded;
+}
+
+impl<C> RecordOutcome for IntentTicket<C> {
+    type Recorded = RecordedTicket<IntentTicket<C>>;
+    fn recorded(self, intent: String) -> Self::Recorded {
+        RecordedTicket {
+            owner: "core".to_owned(),
+            intent,
+            inner: self,
+        }
+    }
+}
+
+impl RecordOutcome for () {
+    type Recorded = ();
+    fn recorded(self, _: String) {}
+}
+
+impl<I: SendStrategyTypes, J: RankedCoreIntent> PublishOutcome<J, AnyActiveLinkPath>
     for EventLoggingSendStrategy<I>
+where
+    J::Outcome<I::CloseCause>: RecordOutcome,
 {
-    type Outcome = RecordedTicket<IntentTicket<I::CloseCause>>;
+    type Outcome = <J::Outcome<I::CloseCause> as RecordOutcome>::Recorded;
 }
 
 impl<I, J, Idx> PublishTo<J, AnyActiveLinkPath, Idx> for EventLoggingSendStrategy<I>
 where
     I: SendStrategyTypes,
-    J: SendIntent + Debug,
+    J: RankedCoreIntent + Debug,
+    J::Outcome<I::CloseCause>: RecordOutcome,
     I::SendIntents: InjectSendIntent<J, Idx>,
 {
     fn publish_to(
         &mut self,
         intent: J,
         destination: AnyActiveLinkPath,
-    ) -> RecordedTicket<IntentTicket<I::CloseCause>> {
+    ) -> <J::Outcome<I::CloseCause> as RecordOutcome>::Recorded {
         let label = format!("{intent:?}");
         record(format!("core: publish {label}"));
-        RecordedTicket {
-            owner: "core".to_owned(),
-            intent: label,
-            inner: <RankedSendStrategy<I> as PublishTo<J, AnyActiveLinkPath, Idx>>::publish_to(
-                &mut self.inner,
-                intent,
-                destination,
-            ),
-        }
+        <RankedSendStrategy<I> as PublishTo<J, AnyActiveLinkPath, Idx>>::publish_to(
+            &mut self.inner,
+            intent,
+            destination,
+        )
+        .recorded(label)
     }
 }
 

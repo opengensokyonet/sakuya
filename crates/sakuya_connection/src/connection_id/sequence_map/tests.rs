@@ -2,6 +2,8 @@
 
 use std::{cell::RefCell, rc::Rc};
 
+use sakuya_recovery::packet_number_space::PacketNumberSpaceKind::ApplicationData;
+
 use sakuya_link::{BindingId, LinkId};
 use sakuya_wire::{
     connection_id::NonEmptyCid,
@@ -90,14 +92,26 @@ fn frame(sequence: u8, retire_prior_to: u8) -> NewConnectionIdFrame {
     frame_with(sequence, retire_prior_to, cid(sequence), token(sequence))
 }
 
+thread_local! {
+    static RETIRED: RefCell<RetiredSequences> = RefCell::default();
+}
+
+/// The sequence numbers whose RETIRE_CONNECTION_ID frame the strategy
+/// published since the last call, in order.
+fn published() -> Vec<u64> {
+    RETIRED.with(|retired| core::mem::take(&mut retired.borrow_mut().0))
+}
+
 fn receive(
     strategy: &mut Strategy,
     frame: NewConnectionIdFrame,
 ) -> Result<(), NewConnectionIdViolationError> {
-    <Strategy as DestinationConnectionIdStrategy<u8, Instant, Registrar>>::on_new_connection_id(
-        strategy,
-        NewConnectionId::from(&frame),
-    )
+    RETIRED.with(|retired| {
+        <Strategy as DestinationConnectionIdStrategy<u8, Instant, Registrar>>::on_new_connection_id::<
+            _,
+            (),
+        >(strategy, &mut *retired.borrow_mut(), NewConnectionId::from(&frame))
+    })
 }
 
 fn offer(strategy: &Strategy, link_path: u8) -> Vec<u64> {
@@ -123,13 +137,46 @@ fn added(strategy: &mut Strategy, link_path: u8, peer_switched_local_id: bool) {
 }
 
 fn ended(strategy: &mut Strategy, link_path: u8) {
-    <Strategy as DestinationConnectionIdStrategy<u8, Instant, Registrar>>::on_link_path_ended(
-        strategy, &link_path,
-    );
+    RETIRED.with(|retired| {
+        <Strategy as DestinationConnectionIdStrategy<u8, Instant, Registrar>>::on_link_path_ended::<
+            _,
+            (),
+        >(strategy, &mut *retired.borrow_mut(), &link_path);
+    });
 }
 
-fn pending(strategy: &Strategy) -> Vec<u64> {
-    strategy.pending_retirements().collect()
+/// The packet with the RETIRE_CONNECTION_ID frame for `sequence` was
+/// acknowledged.
+fn retirement_delivered(strategy: &mut Strategy, sequence: u64) {
+    RETIRED.with(|retired| {
+        FrameSource::delivered::<_, ()>(
+            strategy,
+            &mut *retired.borrow_mut(),
+            ApplicationData,
+            RetireConnectionIdSummary { sequence },
+        );
+    });
+}
+
+/// The packet with the RETIRE_CONNECTION_ID frame for `sequence` was
+/// declared lost.
+fn retirement_lost(strategy: &mut Strategy, sequence: u64) {
+    RETIRED.with(|retired| {
+        FrameSource::lost::<_, ()>(
+            strategy,
+            &mut *retired.borrow_mut(),
+            ApplicationData,
+            &RetireConnectionIdSummary { sequence },
+        );
+    });
+}
+
+/// The sequence numbers whose retirement waits for acknowledgment.
+fn unacknowledged(strategy: &Strategy) -> Vec<u64> {
+    match &strategy.issuance {
+        Issuance::Sequenced(retirements) => retirements.unacknowledged.iter().copied().collect(),
+        Issuance::ZeroLength => Vec::new(),
+    }
 }
 
 const NONE: [u64; 0] = [];
@@ -200,7 +247,7 @@ fn retire_prior_to_retires_before_adding() {
     // Two are active; the third fits because the first is retired before.
     receive(&mut strategy, frame(2, 1)).unwrap();
     assert_eq!(offer(&strategy, 1), [1, 2]);
-    assert_eq!(pending(&strategy), [0]);
+    assert_eq!(published(), [0]);
     assert_eq!(registrar.live(), []);
 }
 
@@ -210,21 +257,22 @@ fn a_smaller_retire_prior_to_has_no_effect() {
     receive(&mut strategy, frame(2, 2)).unwrap();
     receive(&mut strategy, frame(3, 1)).unwrap();
     assert_eq!(offer(&strategy, 1), [2, 3]);
-    assert_eq!(pending(&strategy), [0]);
+    assert_eq!(published(), [0]);
 }
 
 #[test]
 fn a_connection_id_below_retire_prior_to_is_retired_at_once() {
     let mut strategy = strategy(2, 4);
     receive(&mut strategy, frame(3, 3)).unwrap();
-    assert_eq!(pending(&strategy), [0]);
+    assert_eq!(published(), [0]);
 
     receive(&mut strategy, frame(1, 0)).unwrap();
     assert_eq!(offer(&strategy, 1), [3]);
-    assert_eq!(pending(&strategy), [0, 1]);
+    assert_eq!(published(), [1]);
     // Its retirement is started once.
     receive(&mut strategy, frame(1, 0)).unwrap();
-    assert_eq!(pending(&strategy), [0, 1]);
+    assert_eq!(published(), NONE);
+    assert_eq!(unacknowledged(&strategy), [0, 1]);
 }
 
 #[test]
@@ -258,22 +306,24 @@ fn more_unacknowledged_retirements_than_tracked_is_a_violation() {
 }
 
 #[test]
-fn written_retirements_count_until_acknowledged() {
+fn retirements_count_until_acknowledged_and_lost_frames_are_published_again() {
     let mut strategy = strategy(2, 2);
     receive(&mut strategy, frame(1, 0)).unwrap();
     receive(&mut strategy, frame(2, 2)).unwrap();
-    assert_eq!(pending(&strategy), [0, 1]);
+    assert_eq!(published(), [0, 1]);
 
-    strategy.on_retirement_written(0);
-    strategy.on_retirement_written(1);
-    assert_eq!(pending(&strategy), NONE);
-    strategy.on_retirement_lost(1);
-    assert_eq!(pending(&strategy), [1]);
-    strategy.on_retirement_acknowledged(0);
+    retirement_lost(&mut strategy, 1);
+    assert_eq!(published(), [1]);
+    retirement_delivered(&mut strategy, 0);
+    assert_eq!(unacknowledged(&strategy), [1]);
+    // A copy of an acknowledged frame lost late is not sent again.
+    retirement_lost(&mut strategy, 0);
+    assert_eq!(published(), NONE);
 
     // One retirement still waits; one more is within the two tracked.
     receive(&mut strategy, frame(3, 3)).unwrap();
-    assert_eq!(pending(&strategy), [1, 2]);
+    assert_eq!(published(), [2]);
+    assert_eq!(unacknowledged(&strategy), [1, 2]);
     assert!(matches!(
         receive(&mut strategy, frame(4, 4)),
         Err(NewConnectionIdViolationError::RetirementLimitExceeded { .. })
@@ -376,7 +426,7 @@ fn an_ended_link_path_retires_what_only_it_used() {
 
     ended(&mut strategy, 1);
     assert_eq!(registrar.live(), []);
-    assert_eq!(pending(&strategy), [1]);
+    assert_eq!(published(), [1]);
     assert_eq!(offer(&strategy, 2), [0, 2]);
 
     // A late copy of its NEW_CONNECTION_ID does not bring it back.
@@ -395,7 +445,7 @@ fn an_ended_link_path_keeps_a_connection_id_another_one_uses() {
     ended(&mut strategy, 1);
     assert_eq!(first.live(), []);
     assert_eq!(second.live(), [token(0)]);
-    assert_eq!(pending(&strategy), NONE);
+    assert_eq!(published(), NONE);
     assert_eq!(offer(&strategy, 2), [0]);
 }
 
@@ -409,7 +459,7 @@ fn a_zero_length_connection_id_serves_every_link_path_and_is_never_retired() {
 
     ended(&mut strategy, 1);
     assert_eq!(registrar.live(), []);
-    assert_eq!(pending(&strategy), NONE);
+    assert_eq!(published(), NONE);
     assert_eq!(offer(&strategy, 2), [0]);
 
     let error = receive(&mut strategy, frame(1, 0)).unwrap_err();
@@ -509,6 +559,16 @@ mod contract {
     fn link_path_end_revokes() {
         strategy_checks::check_link_path_end_revokes::<Instant, u8, _, _>(new, [1, 2]);
     }
+
+    #[test]
+    fn retire_prior_to_publishes_retirements() {
+        strategy_checks::check_retire_prior_to_publishes_retirements::<Instant, u8, _, _>(new);
+    }
+
+    #[test]
+    fn lost_retirement_published_again() {
+        strategy_checks::check_lost_retirement_published_again::<Instant, u8, _, _>(new);
+    }
 }
 
 #[test]
@@ -544,5 +604,5 @@ fn a_new_handshake_connection_id_replaces_the_one_numbered_0() {
             .map(|offered| (offered.sequence, offered.id))
             .collect();
     assert_eq!(offered, [(0, cid(9))]);
-    assert_eq!(pending(&strategy), NONE);
+    assert_eq!(published(), NONE);
 }
