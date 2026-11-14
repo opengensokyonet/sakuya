@@ -58,7 +58,10 @@
 //! flight without a congestion signal, its record is kept as long as one of
 //! a packet declared lost, and the summaries of its frames go back to their
 //! frame sources as lost. What the datagram was charged with when it was
-//! sealed stays charged.
+//! sealed stays charged. A packet of a packet number space retired after it
+//! was sealed ([`space_retirement`](super::space_retirement)) has no record:
+//! when the link accepts it or gives it up, it leaves the bytes in flight
+//! without a signal, and the summaries of its frames go with it.
 //!
 //! Before each filling, the call initiates a 1-RTT key update when one is
 //! due and may be initiated, as the [`key_update`](super::key_update) module
@@ -112,7 +115,7 @@ use sakuya_recovery::{
     congestion::{CongestionContext, CongestionController, RemovedPacket},
     factory::{LendCongestion, RecoveryFactory},
     loss::LossThresholds,
-    loss_detection::LossDetectionState,
+    loss_detection::{InFlightCharge, LossDetectionState},
     pacing::Pacer,
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces},
     pmtu::PmtuPolicy,
@@ -841,11 +844,14 @@ where
                 if *lineage.get::<DatagramAcceptance, Ida>() == DatagramAcceptance::NoneAccepted {
                     *lineage.get_mut::<DatagramAcceptance, Ida>() = DatagramAcceptance::Accepted;
                 }
-                accept::<T, L, B, S, Ls, Ij, Ie, Iq>(
+                let retired = accept::<T, L, B, S, Ls, Ij, Ie, Iq>(
                     lineage,
                     others,
                     batch.take_accepted(acceptance.count.get()),
                     acceptance.at,
+                );
+                remove_without_signal::<T, L, B, S, Ls, If, Iv, Iq, Ipp, Jx, Jr, Jm>(
+                    lineage, others, retired,
                 );
             }
             Err(_) => {
@@ -1446,6 +1452,10 @@ fn packets_of<P, C>(
 /// The link accepted the datagrams `accepted` at `at`: their packets are
 /// marked sent then and enter the loss detection state of their space,
 /// and an ack-eliciting one restarts the idle timeout.
+///
+/// A packet of a space retired since it was sealed has no record to mark:
+/// it is returned, to leave the bytes in flight without a signal, when it
+/// counts in flight, and the summaries of its frames go with it.
 fn accept<'v, T, L, B, S, Ls, Ij, Ie, Iq>(
     lineage: &mut LineageOf<'v, T, L, LinkPath>,
     others: &mut OtherNodes<'v, T, L, B>,
@@ -1453,7 +1463,8 @@ fn accept<'v, T, L, B, S, Ls, Ij, Ie, Iq>(
         Item = BatchedDatagram<SealedPacketOf<T, L>, SealedPacketOf<T, L>, SealedPacketOf<T, L>, S>,
     >,
     at: InstantOf<T>,
-) where
+) -> Vec<RemovedPacket<S>>
+where
     T: Choices,
     L: LineagePartList<T> + FeedbackSummariesOf,
     B: CallBundle,
@@ -1468,6 +1479,7 @@ fn accept<'v, T, L, B, S, Ls, Ij, Ie, Iq>(
     let accepted: Vec<_> = accepted.collect();
     let journals = lineage.get_mut::<SendJournalsOf<T, L>, Ij>();
     let mut ack_eliciting = false;
+    let mut retired = Vec::new();
     let mut mark = Some(
         |mut detections: Option<
             &mut PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>,
@@ -1475,6 +1487,7 @@ fn accept<'v, T, L, B, S, Ls, Ij, Ie, Iq>(
             for datagram in accepted {
                 for (space, packet) in packets_of(datagram) {
                     let Some(journals) = journals.get_mut(space) else {
+                        retired.extend(packet.in_flight.map(removed_packet));
                         continue;
                     };
                     let record = journals.sent(packet.sealed, at);
@@ -1506,13 +1519,24 @@ fn accept<'v, T, L, B, S, Ls, Ij, Ie, Iq>(
             .get_mut::<IdleTimeout<InstantOf<T>>, Ie>()
             .ack_eliciting_sent(at);
     }
+    retired
+}
+
+/// What leaves the bytes in flight of a packet that counted with `charge`,
+/// as its controller hears of it.
+fn removed_packet<S>(charge: InFlightCharge<S>) -> RemovedPacket<S> {
+    RemovedPacket {
+        bytes: charge.bytes,
+        sent_state: charge.sent_state,
+    }
 }
 
 /// Give up the packets of `datagrams`: their send result is unknown. Each
 /// is kept as declared lost for three probe timeouts of its space, the
 /// summaries of its frames go back to their frame sources as lost, and
 /// those that count in flight leave the bytes in flight without a
-/// congestion signal.
+/// congestion signal. A packet of a space retired since it was sealed
+/// has no record to keep, and the summaries of its frames go with it.
 fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ipp, Ima, Jx, Jr, Jm>(
     lineage: &mut LineageOf<'v, T, L, LinkPath>,
     others: &mut OtherNodes<'v, T, L, B>,
@@ -1548,20 +1572,17 @@ fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ipp, Ima, Jx, Jr, Jm>(
         + Selector<&'a PmtuOf<T, L>, Jm>,
 {
     let now = others.now();
-    let hlist_pat![link, thresholds, peer] = Lineage::read_each::<SettleReads<T, L>, Iv>(&*lineage);
-    let link_ceiling = link.0.max_datagram_size().ok();
+    let hlist_pat![_, thresholds, peer] = Lineage::read_each::<SettleReads<T, L>, Iv>(&*lineage);
     let granularity = thresholds.granularity();
     let peer_max_ack_delay = peer_max_ack_delay::<L, Ima>(peer).unwrap_or(DEFAULT_MAX_ACK_DELAY);
-    let peer_max_udp_payload = peer_max_udp_payload_size::<L, Ipp>(peer);
-    let read = others.recovery_ref().map(|flat| {
+    let estimate = others.recovery_ref().map(|flat| {
         let rtt: &&RttOf<T, L> = Selector::<_, Jr>::get(&flat);
-        let pmtu: &&PmtuOf<T, L> = Selector::<_, Jm>::get(&flat);
-        (rtt.estimate(), pmtu.conclusion())
+        rtt.estimate()
     });
     // as long as a packet declared lost is kept (RFC 9002 §6.1); a link
     // path without a recovery layer keeps it no longer than now
     let retain_until = |space| {
-        read.map_or(now, |(estimate, _)| {
+        estimate.map_or(now, |estimate| {
             let pto = probe_timeout(&estimate, granularity, space, peer_max_ack_delay, 0);
             now + pto.saturating_mul(3)
         })
@@ -1573,26 +1594,66 @@ fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ipp, Ima, Jx, Jr, Jm>(
     let mut removed = Vec::new();
     for datagram in datagrams {
         for (space, packet) in packets_of(datagram) {
+            let BatchedPacket { sealed, in_flight } = packet;
+            removed.extend(in_flight.map(removed_packet));
             let Some(space_journals) = journals.get_mut(space) else {
                 continue;
             };
-            let record = space_journals.send_result_unknown(packet.sealed, retain_until(space));
-            if let Some(charge) = packet.in_flight {
-                removed.push(RemovedPacket {
-                    bytes: charge.bytes,
-                    sent_state: charge.sent_state,
-                });
-            }
+            let record = space_journals.send_result_unknown(sealed, retain_until(space));
             CoreLentFeedback::<T, L, Hf>::lost_each(lineage, now, space, &record.summaries);
         }
     }
     *lineage.get_mut::<SendJournalsOf<T, L>, Ij>() = journals;
-    let Some((estimate, conclusion)) = read else {
-        return;
-    };
+    remove_without_signal::<T, L, B, S, Ls, If, Iv, Iq, Ipp, Jx, Jr, Jm>(lineage, others, removed);
+}
+
+/// The packets `removed` leave the bytes in flight of the link path whose
+/// sending call `lineage` and `others` are the lend of, and its lent
+/// congestion controller hears of them as removed without a signal. A link
+/// path without a recovery layer has nothing in flight.
+fn remove_without_signal<'v, T, L, B, S, Ls, If, Iv, Iq, Ipp, Jx, Jr, Jm>(
+    lineage: &mut LineageOf<'v, T, L, LinkPath>,
+    others: &mut OtherNodes<'v, T, L, B>,
+    removed: Vec<RemovedPacket<S>>,
+) where
+    T: Choices,
+    L: LineagePartList<T> + FeedbackSummariesOf + ParametersOf<TransportParameterSpace>,
+    B: CallBundle,
+    S: 'static,
+    Ls: 'static,
+    RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link>
+        + for<'s> LendCongestion<
+            InstantOf<T>,
+            OthersOf<'s, T, L>,
+            Part = CongestionPartOf<T, L>,
+            SentState = S,
+            LossState = Ls,
+        >,
+    TransportParameterSlots<L>: Selector<Option<MaxUdpPayloadSize>, Ipp>,
+    for<'x> <L as LineageLists<'x, T>>::LinkPath:
+        GetAt<RecoveryFactoryOf<T, L>, If> + ReadEach<SettleReads<T, L>, Iv>,
+    for<'x> NodeData<T, L, layer::Recovery>: FlatMut<'x>,
+    for<'x> <NodeData<T, L, layer::Recovery> as FlatMut<'x>>::Out:
+        TakeEach<'x, SettleRecoveryTakes<T, L, S, Ls>, Iq>,
+    for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
+    for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out: Selector<&'a CongestionPartOf<T, L>, Jx>
+        + Selector<&'a RttOf<T, L>, Jr>
+        + Selector<&'a PmtuOf<T, L>, Jm>,
+{
     if removed.is_empty() {
         return;
     }
+    let now = others.now();
+    let hlist_pat![link, _, peer] = Lineage::read_each::<SettleReads<T, L>, Iv>(&*lineage);
+    let link_ceiling = link.0.max_datagram_size().ok();
+    let peer_max_udp_payload = peer_max_udp_payload_size::<L, Ipp>(peer);
+    let Some((estimate, conclusion)) = others.recovery_ref().map(|flat| {
+        let rtt: &&RttOf<T, L> = Selector::<_, Jr>::get(&flat);
+        let pmtu: &&PmtuOf<T, L> = Selector::<_, Jm>::get(&flat);
+        (rtt.estimate(), pmtu.conclusion())
+    }) else {
+        return;
+    };
     let factory = lineage.get_mut::<RecoveryFactoryOf<T, L>, If>();
     others.with_own_recovery::<SettleRecoveryTakes<T, L, S, Ls>, Iq, _>(
         |hlist_pat![part, state, _], others| {

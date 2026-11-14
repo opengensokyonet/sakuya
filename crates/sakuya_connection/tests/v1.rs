@@ -521,7 +521,13 @@ mod spy {
             packets: impl Iterator<Item = RemovedPacket<()>>,
             context: &CongestionContext<Duration>,
         ) {
-            self.0.on_removed(packets, context);
+            let packets: Vec<_> = packets.collect();
+            log(format!(
+                "congestion: removed {} bytes, {} in flight",
+                packets.iter().map(|p| p.bytes).sum::<usize>(),
+                context.bytes_in_flight
+            ));
+            self.0.on_removed(packets.into_iter(), context);
         }
         fn on_max_datagram_size_changed(
             &mut self,
@@ -1689,6 +1695,9 @@ mod probe {
         /// Log the RTT estimate, the window, the bytes in flight, the probe
         /// permits, the backoff and the first sample's arrival.
         Inspect,
+        /// Discard the keys of the level of the Initial or the Handshake
+        /// space, as the handshake will.
+        Discard(PacketNumberSpaceKind),
     }
 
     /// In a server's first recovery layer: does its steps at their
@@ -1722,10 +1731,12 @@ mod probe {
                 Feeder(steps, given)
             }
         }
-        impl<I, Ith, K, Jd, Js, Jp>
-            DataComponent<$t, Parts, layer::Recovery, (I, Ith, K, (Jd, Js, Jp))> for Feeder
+        impl<I, Ith, K, Jd, Js, Jp, Ji, Jh>
+            DataComponent<$t, Parts, layer::Recovery, (I, Ith, K, (Jd, Js, Jp), (Ji, Jh))> for Feeder
         where
             for<'v> <Parts as LineageLists<'v, $t>>::Recovery: GetAt<Feeder, I>
+                + GetAt<InitialKeys<RingBackend>, Ji>
+                + GetAt<HandshakeKeys<RingBackend>, Jh>
                 + GetAt<LossThresholds, Ith>
                 + GetAt<LossDetectionOf<$t, Parts>, Jd>
                 + GetAt<LinkPathCongestionState<Duration>, Js>
@@ -1742,10 +1753,27 @@ mod probe {
                 lineage.get::<Feeder, I>().0.front().map(|(at, _)| *at)
             }
             fn expire<'v, B: CallBundle>(
-                lineage: LineageOf<'v, $t, Parts, layer::Recovery>,
+                mut lineage: LineageOf<'v, $t, Parts, layer::Recovery>,
                 others: &mut OtherNodes<'v, $t, Parts, B>,
                 now: Duration,
             ) -> Option<RequestOf<$t, Parts>> {
+                // the keys are taken only when discarded
+                if let Some((_, Step::Discard(space))) = lineage.get::<Feeder, I>().0.front() {
+                    let space = *space;
+                    lineage.get_mut::<Feeder, I>().0.pop_front();
+                    match space {
+                        PacketNumberSpaceKind::Initial => {
+                            lineage.get_mut::<InitialKeys<RingBackend>, Ji>().discard();
+                        }
+                        PacketNumberSpaceKind::Handshake => {
+                            lineage.get_mut::<HandshakeKeys<RingBackend>, Jh>().discard();
+                        }
+                        PacketNumberSpaceKind::ApplicationData => {
+                            unreachable!("only the Initial and Handshake keys are discarded")
+                        }
+                    }
+                    return None;
+                }
                 let thresholds = *lineage.get::<LossThresholds, Ith>();
                 let (
                     hlist_pat![
@@ -1852,6 +1880,7 @@ mod probe {
                             state.first_rtt_sample_at(),
                         ));
                     }
+                    Step::Discard(_) => unreachable!("discarded before the takes"),
                 }
                 None
             }
@@ -3655,8 +3684,10 @@ fn a_connection_close_from_the_peer_drains_the_link_paths() {
         .iter()
         .find(|line| line.starts_with("read"))
         .expect("inspected");
+    // the keys go once the link path drains, and the Initial space with
+    // them
     assert!(
-        inspect.contains("largest Some((0, 5ms))") && inspect.contains("reason Some(\"Peer("),
+        inspect.contains("largest None") && inspect.contains("reason Some(\"Peer("),
         "{inspect}"
     );
     assert_eq!(log.last().map(String::as_str), Some("dropped: draining"));
@@ -5735,16 +5766,12 @@ fn a_datagram_of_a_level_whose_keys_went_is_not_handed_over() {
         "{sent:?}"
     );
     assert_eq!(common::take_given_up(), [] as [bytes::Bytes; 0]);
-    // the PING left the bytes in flight, and its record is kept as one
-    // whose send result is unknown, never accepted
-    assert_eq!(sealed - last_in_flight(log), MIN_DATAGRAM_SIZE);
+    // the Initial space retired with the keys: the Initial packet accepted
+    // before left the bytes in flight then, and the PING, which the
+    // space's records no longer have, leaves them when it is left out
+    assert_eq!(sealed - last_in_flight(log), 2 * MIN_DATAGRAM_SIZE);
     let log = run(&mut connection, 1062..=1062);
-    let records = lines_of(log, &["records"]);
-    assert_eq!(records.len(), 1, "{records:?}");
-    assert!(
-        records[0].contains("(2, \"Lost { sent_at: None, "),
-        "{records:?}"
-    );
+    assert_eq!(lines_of(log, &["records"]), [] as [String; 0]);
 }
 
 #[test]
@@ -5896,25 +5923,21 @@ fn a_send_the_link_holds_wakes_the_connection_when_it_is_released() {
 
 #[test]
 fn a_plan_blocked_once_wakes_the_call_once() {
-    use probe::PacketStep::{InstallHandshakeKeys, Receive};
     reset();
     let first = link();
-    feed([(
-        ms(6),
-        probe::Step::Sent {
-            space: PacketNumberSpaceKind::Initial,
-            count: 1,
-        },
-    )]);
-    feed_packets([
-        (ms(999), InstallHandshakeKeys),
+    // the Initial keys go right after the probe timeout of the Initial
+    // space published its PING
+    feed([
         (
-            ms(1000),
-            Receive(received(
-                long_packet(HANDSHAKE, 0, &ping()),
-                &first,
-                ms(1000),
-            )),
+            ms(6),
+            probe::Step::Sent {
+                space: PacketNumberSpaceKind::Initial,
+                count: 1,
+            },
+        ),
+        (
+            ms(1005),
+            probe::Step::Discard(PacketNumberSpaceKind::Initial),
         ),
     ]);
     let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
@@ -5928,51 +5951,46 @@ fn a_plan_blocked_once_wakes_the_call_once() {
         ms(5),
     );
     let _ = run(&mut connection, 5..=1004);
-    // the ACKs of the Initial and of the Handshake packet; the Handshake
-    // packet discarded the Initial keys
-    assert_eq!(common::take_sent().len(), 2);
-    // A planner that has not heard of it plans the probe timeout's PING in
-    // an Initial packet: the call stops, wakes itself once to read again
-    // what changed, and then waits.
-    common::strategy::tell_stale_initial_overhead(50);
+    assert_eq!(common::take_sent().len(), 1, "the ACK");
+    // the probe timeout publishes the PING, and the keys go
     let outer = Outer::new();
     advance_to(ms(1005));
+    assert!(outer.poll(&mut connection).is_pending());
+    // A planner that has not heard of it plans the PING in an Initial
+    // packet: the call stops, wakes itself once to read again what
+    // changed, and then waits.
+    common::strategy::tell_stale_initial_overhead(50);
     let mut wakes = Vec::new();
-    for _ in 0..4 {
+    for _ in 0..3 {
         let before = outer.wakes();
         assert!(outer.poll(&mut connection).is_pending());
         wakes.push(outer.wakes() - before);
     }
-    // the first poll runs the probe timeout, which publishes the PING; the
-    // next plans it and is blocked
-    assert_eq!(wakes[1..], [1, 0, 0]);
+    assert_eq!(wakes, [1, 0, 0]);
     assert_eq!(common::take_sent(), []);
 }
 
 #[test]
 fn a_plan_blocked_again_waits_until_the_planner_is_told_something_new() {
-    use probe::PacketStep::{InstallHandshakeKeys, InstallOneRttSendKeys, Receive};
+    use probe::PacketStep::InstallOneRttSendKeys;
     reset();
     let first = link();
-    feed([(
-        ms(6),
-        probe::Step::Sent {
-            space: PacketNumberSpaceKind::Initial,
-            count: 1,
-        },
-    )]);
-    feed_packets([
-        (ms(999), InstallHandshakeKeys),
+    // the Initial keys go right after the probe timeout of the Initial
+    // space published its PING
+    feed([
         (
-            ms(1000),
-            Receive(received(
-                long_packet(HANDSHAKE, 0, &ping()),
-                &first,
-                ms(1000),
-            )),
+            ms(6),
+            probe::Step::Sent {
+                space: PacketNumberSpaceKind::Initial,
+                count: 1,
+            },
         ),
-        (ms(1006), InstallOneRttSendKeys),
+        (
+            ms(1005),
+            probe::Step::Discard(PacketNumberSpaceKind::Initial),
+        ),
     ]);
+    feed_packets([(ms(1006), InstallOneRttSendKeys)]);
     let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
     deliver(
         padded(
@@ -5984,7 +6002,7 @@ fn a_plan_blocked_again_waits_until_the_planner_is_told_something_new() {
         ms(5),
     );
     let _ = run(&mut connection, 5..=1004);
-    assert_eq!(common::take_sent().len(), 2, "the ACKs");
+    assert_eq!(common::take_sent().len(), 1, "the ACK");
     // A planner that keeps planning the probe timeout's PING in an Initial
     // packet, with the Initial keys gone: the call wakes itself once, and
     // then waits instead of waking itself again and again.
@@ -6000,8 +6018,8 @@ fn a_plan_blocked_again_waits_until_the_planner_is_told_something_new() {
             })
             .collect::<Vec<_>>()
     };
-    // the first poll runs the probe timeout, which publishes the PING; the
-    // next plans it and is blocked
+    // the first poll runs the probe timeout, which publishes the PING, and
+    // discards the keys; the next plans it and is blocked
     assert_eq!(wakes_at(1005)[1..], [1, 0, 0, 0, 0, 0, 0]);
     // the 1-RTT keys to send with change what the planner is told: the
     // waiting call is woken, plans again, is blocked, wakes itself once
@@ -7103,4 +7121,161 @@ fn a_client_whose_link_accepted_a_datagram_closes_and_sends_its_close_packet() {
         packet.payload[4..].iter().all(|&byte| byte == 0),
         "padding after it"
     );
+}
+
+// ---- the retirement of the Initial and Handshake spaces ----
+
+#[test]
+fn discarding_the_handshake_keys_retires_the_space_once_and_the_probe_timeout_restarts() {
+    use probe::PacketStep::TakeRecords;
+    use probe::Step::{Confirm, Discard, Sample, Sent};
+    reset();
+    feed([
+        // an RTT of 10 ms: a probe timeout of 30 ms, 55 ms in the
+        // Application Data space with the peer's default max_ack_delay
+        (ms(10), Sample(ms(0))),
+        (ms(11), Confirm),
+        (
+            ms(12),
+            Sent {
+                space: PacketNumberSpaceKind::Handshake,
+                count: 1,
+            },
+        ),
+        (
+            ms(140),
+            Sent {
+                space: PacketNumberSpaceKind::ApplicationData,
+                count: 2,
+            },
+        ),
+        (ms(150), Discard(PacketNumberSpaceKind::Handshake)),
+        (ms(160), Discard(PacketNumberSpaceKind::Handshake)),
+        (ms(170), Discard(PacketNumberSpaceKind::Initial)),
+    ]);
+    feed_packets([
+        (ms(196), TakeRecords(PacketNumberSpaceKind::Handshake)),
+        (ms(197), TakeRecords(PacketNumberSpaceKind::ApplicationData)),
+    ]);
+    let mut connection = connection!(SpyMine, AddressValidation::Validated, link());
+    take_log();
+    // the Handshake space expires at 42 ms and 102 ms; at 140 ms its
+    // timeout, at 222 ms, comes before the Application Data space's, at
+    // 140 + 4 × 55 ms
+    let log = run(&mut connection, 10..=149);
+    assert_eq!(
+        lines_of(log, &["in flight", "congestion"]),
+        [
+            "in flight 1200, outstanding 1, lost [], permits 0, backoff 0",
+            "in flight 1200, outstanding 1, lost [], permits 2, backoff 1",
+            "in flight 1200, outstanding 1, lost [], permits 4, backoff 2",
+            "in flight 3600, outstanding 3, lost [], permits 4, backoff 2",
+        ]
+    );
+    // the Handshake packet leaves the bytes in flight without a signal, and
+    // the backoff is reset; the Application Data space's timeout, from its
+    // last packet, is now the earliest
+    let log = run(&mut connection, 150..=194);
+    assert_eq!(
+        lines_of(log, &["in flight", "congestion"]),
+        [
+            "congestion: removed 1200 bytes, 2400 in flight",
+            "in flight 2400, outstanding 2, lost [], permits 4, backoff 0",
+        ]
+    );
+    let log = run(&mut connection, 195..=197);
+    assert_eq!(
+        lines_of(
+            log,
+            &["in flight", "congestion", "records", "lost", "delivered"]
+        ),
+        [
+            "in flight 2400, outstanding 2, lost [], permits 6, backoff 1",
+            // the Handshake space's records are gone, and its frame
+            // sources heard nothing; the Application Data space stays
+            "records ApplicationData: [(0, \"Sent(140ms)\"), (1, \"Sent(140ms)\")]",
+        ]
+    );
+}
+
+#[test]
+fn an_initial_ack_after_the_initial_space_retired_settles_nothing() {
+    use probe::PacketStep::{InstallHandshakeKeys, Receive};
+    reset();
+    let first = link();
+    feed([(
+        ms(10),
+        probe::Step::Sent {
+            space: PacketNumberSpaceKind::Initial,
+            count: 2,
+        },
+    )]);
+    feed_packets([
+        (ms(49), InstallHandshakeKeys),
+        (
+            ms(50),
+            Receive(received(long_packet(HANDSHAKE, 0, &ping()), &first, ms(50))),
+        ),
+        (ms(51), ack_received(1, &[(0, 1)], &first, ms(51))),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first);
+    take_log();
+    let log = run(&mut connection, 10..=51);
+    assert_eq!(
+        lines_of(
+            log,
+            &["in flight", "delivered", "lost", "processed", "dropped"]
+        ),
+        [
+            "in flight 2400, outstanding 2, lost [], permits 0, backoff 0",
+            // a server discards the Initial keys once it processed a
+            // Handshake packet, and the space retires with them
+            "processed: highest numbered true, non-probing true",
+            "in flight 0, outstanding 0, lost [], permits 0, backoff 0",
+            "dropped: no Initial keys",
+        ]
+    );
+}
+
+#[test]
+fn an_initial_packet_the_link_accepts_after_the_space_retired_leaves_the_bytes_in_flight() {
+    use probe::PacketStep::{InstallHandshakeKeys, Receive, TakeRecords};
+    reset();
+    let first = link();
+    let mut connection = with_two_datagrams_at_1005_ms(
+        &first,
+        [
+            (ms(1049), InstallHandshakeKeys),
+            (
+                ms(1050),
+                Receive(received(
+                    long_packet(HANDSHAKE, 0, &ping()),
+                    &first,
+                    ms(1050),
+                )),
+            ),
+            (ms(1062), TakeRecords(PacketNumberSpaceKind::Initial)),
+        ],
+    );
+    common::plan_sends([common::SendOutcome::Hold(2)]);
+    let log = run(&mut connection, 1005..=1006);
+    assert_eq!(common::take_batch_sizes(), [2]);
+    let sealed = last_in_flight(log);
+    // the Initial keys go with the first Handshake packet processed, while
+    // the link keeps the batch with the PING's datagram: the Initial packet
+    // accepted before leaves the bytes in flight then
+    let log = run(&mut connection, 1049..=1050);
+    assert_eq!(sealed - last_in_flight(log), MIN_DATAGRAM_SIZE);
+    advance_to(ms(1060));
+    common::release_held_send();
+    let log = run(&mut connection, 1060..=1061);
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 3, "{sent:?}");
+    assert_eq!(sent[1].1[0] & 0xf0, 0xc0, "the PING's Initial packet");
+    assert_eq!(sent[2].1[0] & 0xf0, 0xe0, "the ACK of the Handshake packet");
+    // the link accepts the PING, which the space's records no longer have:
+    // it leaves the bytes in flight at once
+    assert_eq!(sealed - last_in_flight(log), 2 * MIN_DATAGRAM_SIZE);
+    let log = run(&mut connection, 1062..=1062);
+    assert_eq!(lines_of(log, &["records"]), [] as [String; 0]);
 }

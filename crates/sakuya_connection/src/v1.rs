@@ -67,6 +67,7 @@ pub mod recovery;
 pub mod send;
 pub mod send_planning;
 pub mod sending;
+pub mod space_retirement;
 pub mod spaces;
 pub mod stateless_reset;
 
@@ -159,6 +160,7 @@ use self::{
         ProbePingTickets, SendStrategyCore, SendStrategyOf,
     },
     sending::{DatagramAcceptance, LinkPathSendingKind, LinkPathSendingLimits},
+    space_retirement::PacketNumberSpaceRetirement,
     spaces::{AckObligationsOf, DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
     stateless_reset::StatelessResetSignal,
 };
@@ -505,6 +507,7 @@ where
         AckIntentTickets<AckIntentTicketOf<T, L>>,
         Arc<StatelessResetSignal>,
         ConnectionIdsOf<T>,
+        PacketNumberSpaceRetirement,
     ];
     type Calls = HList![LogicalPathReceivingKind];
 }
