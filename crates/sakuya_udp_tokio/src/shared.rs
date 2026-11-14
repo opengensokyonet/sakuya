@@ -6,7 +6,7 @@ use core::{
     future::Future,
     net::{IpAddr, SocketAddr},
     pin::Pin,
-    sync::atomic::{AtomicBool, AtomicUsize},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     task::{Context, Poll},
     time::Duration,
 };
@@ -57,8 +57,23 @@ pub(crate) struct LinkEntry<I> {
     /// Notified once for each datagram queued, and for all waiters when the
     /// socket fails.
     pub(crate) arrived: Notify,
+    /// How many clones of the link exist. Once it is zero under the demux
+    /// lock the link is closed for good: it rises again only from a clone,
+    /// or from the table under that lock.
     pub(crate) clones: AtomicUsize,
     pub(crate) conclusion: AtomicUsize,
+    /// Locked only under the demux lock.
+    charge: Mutex<Charge>,
+}
+
+/// Whether a link's datagrams count against the binding's budget for links
+/// not yet accepted.
+pub(crate) enum Charge {
+    /// The link waits to be accepted, with this many datagrams counted.
+    Unaccepted(usize),
+    /// The link was accepted or connected to: its datagrams are not
+    /// counted.
+    Taken,
 }
 
 impl<I> LinkEntry<I> {
@@ -82,6 +97,29 @@ pub(crate) struct Demux<C: MonotonicClock + 'static> {
     /// Whether new peers get links: off when the binding is told not to
     /// take them, or has been dropped.
     pub(crate) accepting: bool,
+    /// The datagrams counted against the links not yet accepted.
+    unaccepted_datagrams: usize,
+}
+
+impl<C: MonotonicClock + 'static> Demux<C> {
+    /// The live link of `key`: an entry whose clones are all dropped is a
+    /// closed link, even before its last clone has taken it out.
+    pub(crate) fn live(&self, key: &Key) -> Option<Arc<LinkEntry<C::Instant>>> {
+        self.links
+            .get(key)
+            .filter(|entry| entry.clones.load(Ordering::Acquire) > 0)
+            .map(Arc::clone)
+    }
+
+    /// `entry` is accepted or connected to: its datagrams stop counting
+    /// against the budget of links not yet accepted.
+    pub(crate) fn take(&mut self, entry: &LinkEntry<C::Instant>) {
+        let mut charge = lock(&entry.charge);
+        if let Charge::Unaccepted(count) = *charge {
+            self.unaccepted_datagrams -= count;
+        }
+        *charge = Charge::Taken;
+    }
 }
 
 /// The buffers of the reader, used only by the holder of the reader
@@ -132,6 +170,7 @@ impl<C: MonotonicClock + 'static> Shared<C> {
                 links: HashMap::new(),
                 unaccepted: VecDeque::new(),
                 accepting,
+                unaccepted_datagrams: 0,
             }),
             new_link: Notify::new(),
             ended: Arc::new(Notify::new()),
@@ -147,6 +186,15 @@ impl<C: MonotonicClock + 'static> Shared<C> {
 
     pub(crate) fn demux(&self) -> MutexGuard<'_, Demux<C>> {
         lock(&self.demux)
+    }
+
+    /// The next link waiting to be accepted, which stops counting against
+    /// the budget of links not yet accepted.
+    pub(crate) fn take_unaccepted(&self) -> Option<UdpLink<C>> {
+        let mut demux = self.demux();
+        let link = demux.unaccepted.pop_front()?;
+        demux.take(link.entry());
+        Some(link)
     }
 
     /// The socket failed: every link and the binding end with `errno`.
@@ -224,18 +272,26 @@ impl<C: MonotonicClock + 'static> Shared<C> {
             Some(ip) if self.unspecified() => ip,
             _ => self.bound.ip(),
         };
+        if !received.replyable() {
+            return Ok(());
+        }
         let key = (local_ip, received.peer);
+        let config = &self.config;
+        // The datagrams go into their link's queue under the demux lock,
+        // which also closes a link and makes a new one: a datagram never
+        // goes to a link that has closed.
         let mut demux = self.demux();
-        let entry = match demux.links.get(&key) {
-            Some(entry) => Arc::clone(entry),
+        let entry = match demux.live(&key) {
+            Some(entry) => entry,
             None if demux.accepting
-                && demux.unaccepted.len() < self.config.max_unaccepted_links =>
+                && demux.unaccepted.len() < config.max_unaccepted_links
+                && demux.unaccepted_datagrams < config.max_unaccepted_datagrams =>
             {
                 let local = UdpLocal::new(
                     self.id.clone(),
                     SocketAddr::new(local_ip, self.bound.port()),
                 );
-                let entry = new_entry::<C>(local, received.peer, &self.id);
+                let entry = new_entry::<C>(local, received.peer, &self.id, Charge::Unaccepted(0));
                 demux.links.insert(key, Arc::clone(&entry));
                 demux
                     .unaccepted
@@ -245,12 +301,24 @@ impl<C: MonotonicClock + 'static> Shared<C> {
             }
             None => return Ok(()),
         };
-        drop(demux);
         let mut queue = lock(&entry.queue);
+        let mut charge = lock(&entry.charge);
         // A datagram of zero bytes is a message too: it is one segment.
         loop {
             let payload = batch.split_to(received.stride.min(batch.len()));
-            if queue.len() < self.config.max_queued_datagrams {
+            let admitted = queue.len() < config.max_queued_datagrams
+                && match &mut *charge {
+                    Charge::Taken => true,
+                    Charge::Unaccepted(count) => {
+                        let room = demux.unaccepted_datagrams < config.max_unaccepted_datagrams;
+                        if room {
+                            *count += 1;
+                            demux.unaccepted_datagrams += 1;
+                        }
+                        room
+                    }
+                };
+            if admitted {
                 queue.push_back(Arrived {
                     payload,
                     at,
@@ -271,6 +339,7 @@ pub(crate) fn new_entry<C: MonotonicClock + 'static>(
     local: UdpLocal,
     peer: SocketAddr,
     binding: &BindingId,
+    charge: Charge,
 ) -> Arc<LinkEntry<C::Instant>> {
     Arc::new(LinkEntry {
         id: LinkId::new::<UdpLink<C>>(local, peer, binding),
@@ -278,6 +347,7 @@ pub(crate) fn new_entry<C: MonotonicClock + 'static>(
         arrived: Notify::new(),
         clones: AtomicUsize::new(0),
         conclusion: AtomicUsize::new(sakuya_link::MIN_DATAGRAM_SIZE),
+        charge: Mutex::new(charge),
     })
 }
 

@@ -10,6 +10,7 @@ description = "UDP link bindings and links for sakuya over a tokio runtime"
 bytes.workspace = true
 futures-util.workspace = true
 nix.workspace = true
+rustix.workspace = true
 sakuya_clock.workspace = true
 sakuya_link.workspace = true
 snafu.workspace = true

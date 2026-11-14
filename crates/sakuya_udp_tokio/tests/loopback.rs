@@ -16,7 +16,7 @@ use sakuya_link::{
     AcceptingLinkBinding, ConnectingLinkBinding, EcnCodepoint, EcnMarking, Link, LinkBinding,
     OutgoingDatagram,
 };
-use sakuya_udp_tokio::{UdpBinding, UdpBindingConfig, UdpLink};
+use sakuya_udp_tokio::{SendDatagramError, UdpBinding, UdpBindingConfig, UdpLink};
 
 type Binding = UdpBinding<TokioClock>;
 
@@ -250,10 +250,8 @@ fn a_link_whose_clones_are_all_dropped_is_closed() {
 #[test]
 fn a_binding_that_takes_no_new_peers_reaches_only_those_it_connects_to() {
     run(async {
-        let config = UdpBindingConfig {
-            accept_new_peers: false,
-            ..UdpBindingConfig::new(v4())
-        };
+        let mut config = UdpBindingConfig::new(v4());
+        config.accept_new_peers = false;
         let server = bind_with(config);
         let stranger = bind(v4());
         let known = bind(v4());
@@ -315,10 +313,8 @@ fn ipv6_links_carry_datagrams_and_their_ecn() {
 #[test]
 fn the_datagram_size_limit_follows_the_interface_mtu_and_the_ip_version() {
     run(async {
-        let config = UdpBindingConfig {
-            interface_mtu: 9000,
-            ..UdpBindingConfig::new(v4())
-        };
+        let mut config = UdpBindingConfig::new(v4());
+        config.interface_mtu = 9000;
         let server = bind_with(config);
         let link = within(server.connect(SocketAddr::from((Ipv4Addr::LOCALHOST, 9))))
             .await
@@ -368,5 +364,81 @@ fn a_socket_on_the_unspecified_address_connects_from_the_address_that_routes_to_
         // The reply arrives at the same local address, so on the same link.
         send_all(&back, &[datagram(b"reply", EcnMarking::NotEct)]).await;
         assert_eq!(receive(&link).await.0, b"reply");
+    });
+}
+
+#[test]
+fn the_links_not_yet_accepted_hold_no_more_datagrams_than_their_budget() {
+    run(async {
+        let mut config = UdpBindingConfig::new(v4());
+        config.max_unaccepted_datagrams = 2;
+        let server = bind_with(config);
+        let first = bind(v4());
+        let second = bind(v4());
+        let known = bind(v4());
+        let from_first = within(first.connect(reach(&server))).await.unwrap();
+        let from_second = within(second.connect(reach(&server))).await.unwrap();
+        let from_known = within(known.connect(reach(&server))).await.unwrap();
+        let to_known = within(server.connect(known.local_address())).await.unwrap();
+
+        let two = [
+            datagram(b"one", EcnMarking::NotEct),
+            datagram(b"two", EcnMarking::NotEct),
+        ];
+        send_all(&from_first, &two).await;
+        send_all(&from_second, &[datagram(b"dropped", EcnMarking::NotEct)]).await;
+        send_all(&from_known, &[datagram(b"known", EcnMarking::NotEct)]).await;
+        // The connected link reads the socket for the strangers as well.
+        assert_eq!(receive(&to_known).await.0, b"known");
+
+        let to_first = within(server.accept()).await.unwrap();
+        assert_eq!(to_first.id().peer, first.local_address());
+        assert_eq!(receive(&to_first).await.0, b"one");
+        assert_eq!(receive(&to_first).await.0, b"two");
+
+        // Accepting the first link freed the budget.
+        send_all(&from_second, &[datagram(b"later", EcnMarking::NotEct)]).await;
+        let to_second = within(server.accept()).await.unwrap();
+        assert_eq!(to_second.id().peer, second.local_address());
+        assert_eq!(receive(&to_second).await.0, b"later");
+    });
+}
+
+#[test]
+fn a_datagram_the_kernel_refuses_for_its_peer_leaves_gso_and_ecn_on() {
+    run(async {
+        let server = bind(v4());
+        let client = bind(v4());
+        let batch = [
+            datagram(b"same", EcnMarking::Ect0),
+            datagram(b"size", EcnMarking::Ect0),
+        ];
+
+        // The kernel refuses to send to port 0 with EINVAL, as it refuses
+        // GSO or ECN it cannot do.
+        let nowhere = within(client.connect(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))))
+            .await
+            .unwrap();
+        let refused = within(nowhere.send(&batch)).await;
+        assert!(
+            matches!(refused, Err(SendDatagramError::Refused { .. })),
+            "{refused:?}"
+        );
+        assert!(nowhere.may_mark_ecn());
+
+        let to_server = within(client.connect(reach(&server))).await.unwrap();
+        let accepted = within(to_server.send(&batch))
+            .await
+            .expect("the batch is sent");
+        assert_eq!(accepted.count.get(), 2, "one GSO send carries both");
+        let to_client = within(server.accept()).await.unwrap();
+        assert_eq!(
+            receive(&to_client).await,
+            (b"same".to_vec(), Some(EcnCodepoint::Ect0))
+        );
+        assert_eq!(
+            receive(&to_client).await,
+            (b"size".to_vec(), Some(EcnCodepoint::Ect0))
+        );
     });
 }

@@ -67,7 +67,7 @@ pub enum SendDatagramError {
     #[snafu(display("the datagram was not sent"))]
     Refused {
         /// The error of `sendmsg`.
-        source: Errno,
+        source: io::Error,
     },
     /// The socket failed; the link has ended.
     #[snafu(display("the link has ended"), context(false))]
@@ -111,6 +111,10 @@ impl<C: MonotonicClock + 'static> UdpLink<C> {
         }
     }
 
+    pub(crate) fn entry(&self) -> &LinkEntry<C::Instant> {
+        &self.entry
+    }
+
     fn arrived(
         &self,
         arrived: crate::shared::Arrived<C::Instant>,
@@ -147,20 +151,27 @@ impl<C: MonotonicClock + 'static> UdpLink<C> {
     ) -> Result<SendAcceptance<C::Instant>, SendDatagramError> {
         let peer = entry.id.peer;
         let local_ip = shared.unspecified().then(|| entry.id.local.address.ip());
+        // What this send has left out after the kernel refused it: the
+        // binding stops using an option only once a send without it went
+        // through, since the same refusal can come from the datagram or
+        // its peer instead.
+        let mut without = Without::Nothing;
         loop {
             if let Some(end) = shared.end.get() {
                 return Err(end.clone().into());
             }
             let first = &batch[0];
+            let gso = shared.gso.load(Ordering::Relaxed) && without == Without::Nothing;
             // A GSO batch names its datagrams' size; one too large for that
             // goes alone.
             let size = u16::try_from(first.payload.len()).ok();
             let count = match size {
-                Some(_) => gso_prefix(batch, shared.gso.load(Ordering::Relaxed)),
+                Some(_) => gso_prefix(batch, gso),
                 None => 1,
             };
             let segment = size.filter(|_| count > 1);
             let ecn = (shared.may_mark_ecn.load(Ordering::Relaxed)
+                && without != Without::Ecn
                 && first.ecn != EcnMarking::NotEct)
                 .then(|| ecn_bits(first.ecn));
             let slices: Vec<IoSlice<'_>> = batch[..count]
@@ -180,6 +191,11 @@ impl<C: MonotonicClock + 'static> UdpLink<C> {
             });
             let errno = match outcome {
                 Ok(()) => {
+                    match without {
+                        Without::Nothing => {}
+                        Without::Gso => shared.gso.store(false, Ordering::Relaxed),
+                        Without::Ecn => shared.may_mark_ecn.store(false, Ordering::Relaxed),
+                    }
                     let count = NonZeroUsize::new(count).expect("a batch is not empty");
                     return Ok(SendAcceptance {
                         count,
@@ -197,19 +213,31 @@ impl<C: MonotonicClock + 'static> UdpLink<C> {
             match errno {
                 Errno::EINTR => {}
                 // A kernel or driver that cannot segment refuses GSO with
-                // EIO or EINVAL: send one at a time from now on.
-                Errno::EIO | Errno::EINVAL if segment.is_some() => {
-                    shared.gso.store(false, Ordering::Relaxed);
-                }
-                // One that refuses the ECN control message: send unmarked.
-                Errno::EINVAL if ecn.is_some() => {
-                    shared.may_mark_ecn.store(false, Ordering::Relaxed);
-                }
+                // EIO or EINVAL: try once without it.
+                Errno::EIO | Errno::EINVAL if segment.is_some() => without = Without::Gso,
+                // One that refuses the ECN control message refuses it with
+                // EINVAL: try once unmarked, and without GSO, which was
+                // ruled out or not used.
+                Errno::EINVAL if ecn.is_some() => without = Without::Ecn,
                 errno if sys::is_fatal(errno) => shared.fail(errno),
-                errno => return Err(SendDatagramError::Refused { source: errno }),
+                errno => {
+                    return Err(SendDatagramError::Refused {
+                        source: io::Error::from(errno),
+                    });
+                }
             }
         }
     }
+}
+
+/// What one send leaves out after the kernel refused it, to learn whether
+/// the socket cannot do it. Leaving out ECN leaves out GSO too: a refusal
+/// is put down to ECN only after a send without GSO was refused as well.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Without {
+    Nothing,
+    Gso,
+    Ecn,
 }
 
 /// How many datagrams from the start of `batch` one send carries: with GSO,
@@ -261,8 +289,10 @@ impl<C: MonotonicClock + 'static> Drop for UdpLink<C> {
         if self.entry.clones.fetch_sub(1, Ordering::AcqRel) != 1 {
             return;
         }
-        // The last clone: close the link, unless a connect found it in the
-        // table and made a clone in the meantime.
+        // The last clone: close the link, unless a connect found it alive
+        // in the table and made a clone in the meantime. From the moment
+        // the count is zero, no datagram goes to it and no connect gives
+        // it, even before the entry is taken out here.
         let mut demux = self.shared.demux();
         if self.entry.clones.load(Ordering::Acquire) == 0 {
             let key = self.entry.key();

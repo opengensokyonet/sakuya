@@ -2,39 +2,25 @@
 //! receiving and sending a datagram or a GSO batch with control messages.
 
 use std::{
-    io::{IoSlice, IoSliceMut},
+    io::{self, IoSlice, IoSliceMut},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
     os::fd::{AsRawFd, BorrowedFd, OwnedFd},
 };
 
 use nix::{
     errno::Errno,
-    libc, setsockopt_impl, sockopt_impl,
+    libc,
     sys::socket::{
         AddressFamily, ControlMessage, ControlMessageOwned, MsgFlags, SockFlag, SockProtocol,
         SockType, SockaddrStorage, bind, getsockname, recvmsg, sendmsg, setsockopt, socket,
         sockopt,
     },
 };
+use rustix::net::sockopt::{
+    Ipv4PathMtuDiscovery, Ipv6PathMtuDiscovery, set_ip_mtu_discover, set_ipv6_mtu_discover,
+};
 use sakuya_link::EcnCodepoint;
 use snafu::{ResultExt, Snafu};
-
-sockopt_impl!(
-    /// `IP_MTU_DISCOVER`: how the kernel discovers the path MTU of IPv4.
-    IpMtuDiscover,
-    SetOnly,
-    libc::IPPROTO_IP,
-    libc::IP_MTU_DISCOVER,
-    libc::c_int
-);
-sockopt_impl!(
-    /// `IPV6_MTU_DISCOVER`: how the kernel discovers the path MTU of IPv6.
-    Ipv6MtuDiscover,
-    SetOnly,
-    libc::IPPROTO_IPV6,
-    libc::IPV6_MTU_DISCOVER,
-    libc::c_int
-);
 
 /// The most bytes one receive takes: a GRO batch is at most 64 KiB.
 pub(crate) const RECEIVE_SIZE: usize = 1 << 16;
@@ -54,14 +40,14 @@ pub enum BindError {
     #[snafu(display("could not create the socket"))]
     Create {
         /// The error of `socket`.
-        source: Errno,
+        source: io::Error,
     },
     /// An IPv6 socket on the unspecified address could not be made to take
     /// IPv4 too (`IPV6_V6ONLY`).
     #[snafu(display("could not let the IPv6 socket take IPv4"))]
     DualStack {
         /// The error of `setsockopt`.
-        source: Errno,
+        source: io::Error,
     },
     /// The socket could not be made to report the local IPv4 address each
     /// datagram arrived at (`IP_PKTINFO`), which a socket on the unspecified
@@ -69,7 +55,7 @@ pub enum BindError {
     #[snafu(display("could not ask for the local IPv4 address of arrivals"))]
     Ipv4PacketInfo {
         /// The error of `setsockopt`.
-        source: Errno,
+        source: io::Error,
     },
     /// The socket could not be made to report the local IPv6 address each
     /// datagram arrived at (`IPV6_RECVPKTINFO`), which a socket on the
@@ -77,7 +63,7 @@ pub enum BindError {
     #[snafu(display("could not ask for the local IPv6 address of arrivals"))]
     Ipv6PacketInfo {
         /// The error of `setsockopt`.
-        source: Errno,
+        source: io::Error,
     },
     /// The socket could not be bound to the address.
     #[snafu(display("could not bind to {address}"))]
@@ -85,13 +71,13 @@ pub enum BindError {
         /// The address.
         address: SocketAddr,
         /// The error of `bind`.
-        source: Errno,
+        source: io::Error,
     },
     /// The address the socket was bound to could not be read.
     #[snafu(display("could not read the bound address"))]
     LocalAddress {
         /// The error of `getsockname`.
-        source: Errno,
+        source: io::Error,
     },
     /// The socket could not be registered with the tokio runtime.
     #[snafu(display("could not register the socket with the runtime"))]
@@ -128,22 +114,24 @@ pub(crate) fn open(address: SocketAddr) -> Result<Opened, BindError> {
         SockFlag::SOCK_NONBLOCK | SockFlag::SOCK_CLOEXEC,
         SockProtocol::Udp,
     )
+    .map_err(io::Error::from)
     .context(CreateSnafu)?;
     let unspecified = address.ip().is_unspecified();
     let takes_v4 = match address {
         SocketAddr::V4(_) => true,
         SocketAddr::V6(_) if unspecified => {
-            setsockopt(&fd, sockopt::Ipv6V6Only, &false).context(DualStackSnafu)?;
+            setsockopt(&fd, sockopt::Ipv6V6Only, &false)
+                .map_err(io::Error::from)
+                .context(DualStackSnafu)?;
             true
         }
         SocketAddr::V6(_) => false,
     };
     let takes_v6 = address.is_ipv6();
 
-    let no_fragment_v4 =
-        takes_v4 && setsockopt(&fd, IpMtuDiscover, &libc::IP_PMTUDISC_PROBE).is_ok();
+    let no_fragment_v4 = takes_v4 && set_ip_mtu_discover(&fd, Ipv4PathMtuDiscovery::PROBE).is_ok();
     let no_fragment_v6 =
-        takes_v6 && setsockopt(&fd, Ipv6MtuDiscover, &libc::IPV6_PMTUDISC_PROBE).is_ok();
+        takes_v6 && set_ipv6_mtu_discover(&fd, Ipv6PathMtuDiscovery::PROBE).is_ok();
     if takes_v4 {
         let _ = setsockopt(&fd, sockopt::IpRecvTos, &true);
     }
@@ -152,16 +140,23 @@ pub(crate) fn open(address: SocketAddr) -> Result<Opened, BindError> {
     }
     if unspecified {
         if takes_v4 {
-            setsockopt(&fd, sockopt::Ipv4PacketInfo, &true).context(Ipv4PacketInfoSnafu)?;
+            setsockopt(&fd, sockopt::Ipv4PacketInfo, &true)
+                .map_err(io::Error::from)
+                .context(Ipv4PacketInfoSnafu)?;
         }
         if takes_v6 {
-            setsockopt(&fd, sockopt::Ipv6RecvPacketInfo, &true).context(Ipv6PacketInfoSnafu)?;
+            setsockopt(&fd, sockopt::Ipv6RecvPacketInfo, &true)
+                .map_err(io::Error::from)
+                .context(Ipv6PacketInfoSnafu)?;
         }
     }
     let _ = setsockopt(&fd, sockopt::UdpGroSegment, &true);
 
-    bind(fd.as_raw_fd(), &SockaddrStorage::from(address)).context(BindSnafu { address })?;
+    bind(fd.as_raw_fd(), &SockaddrStorage::from(address))
+        .map_err(io::Error::from)
+        .context(BindSnafu { address })?;
     let local = getsockname::<SockaddrStorage>(fd.as_raw_fd())
+        .map_err(io::Error::from)
         .context(LocalAddressSnafu)
         .map(|storage| socket_address(&storage).unwrap_or(address))?;
     Ok(Opened {
@@ -184,6 +179,32 @@ pub(crate) struct Received {
     /// The ECN codepoint of the datagrams' IP header, when the kernel
     /// reported it: GRO joins only datagrams with the same one.
     pub(crate) ecn: Option<EcnCodepoint>,
+    /// The datagrams were sent to a broadcast or multicast address, not to
+    /// the local address alone.
+    pub(crate) to_group: bool,
+}
+
+impl Received {
+    /// Whether a reply can go back: the datagrams came from a unicast
+    /// address and port and were sent to this side alone.
+    ///
+    /// The kernel refuses to send to port 0, or from a broadcast or
+    /// multicast address, with the same `EINVAL` that a socket gives when
+    /// it cannot segment or mark ECN, so such datagrams get no link.
+    pub(crate) fn replyable(&self) -> bool {
+        !self.to_group && unicast(self.peer)
+    }
+}
+
+/// Whether `address` is a unicast address and port a datagram can be sent
+/// to.
+fn unicast(address: SocketAddr) -> bool {
+    let ip = address.ip();
+    let group = match ip {
+        IpAddr::V4(v4) => v4.is_broadcast() || v4.is_multicast(),
+        IpAddr::V6(v6) => v6.is_multicast(),
+    };
+    address.port() != 0 && !ip.is_unspecified() && !group
 }
 
 /// The control message space one receive needs: the local address, the
@@ -227,19 +248,27 @@ pub(crate) fn receive(
         peer: canonical(peer),
         local_ip: None,
         ecn: None,
+        to_group: false,
     };
-    if let Ok(messages) = message.cmsgs() {
+    let messages = message.cmsgs();
+    // The space of `control_space` holds every control message the socket
+    // asks for, so they are never truncated.
+    debug_assert!(messages.is_ok(), "the control messages were truncated");
+    if let Ok(messages) = messages {
         for control in messages {
             match control {
                 ControlMessageOwned::Ipv4PacketInfo(info) => {
-                    received.local_ip = Some(IpAddr::V4(Ipv4Addr::from(
-                        info.ipi_addr.s_addr.to_ne_bytes(),
-                    )));
+                    // The header's destination differs from the local
+                    // address of the arrival for a broadcast or multicast.
+                    let to = Ipv4Addr::from(info.ipi_addr.s_addr.to_ne_bytes());
+                    let local = Ipv4Addr::from(info.ipi_spec_dst.s_addr.to_ne_bytes());
+                    received.to_group |= to != local;
+                    received.local_ip = Some(IpAddr::V4(to));
                 }
                 ControlMessageOwned::Ipv6PacketInfo(info) => {
-                    received.local_ip = Some(canonical_ip(IpAddr::V6(Ipv6Addr::from(
-                        info.ipi6_addr.s6_addr,
-                    ))));
+                    let to = canonical_ip(IpAddr::V6(Ipv6Addr::from(info.ipi6_addr.s6_addr)));
+                    received.to_group |= to.is_multicast();
+                    received.local_ip = Some(to);
                 }
                 ControlMessageOwned::Ipv4Tos(tos) => received.ecn = Some(ecn_codepoint(tos)),
                 ControlMessageOwned::Ipv6TClass(class) => {
@@ -355,9 +384,18 @@ fn socket_address(storage: &SockaddrStorage) -> Option<SocketAddr> {
     }
 }
 
-/// An IPv4 address mapped into IPv6 as the IPv4 address it is.
+/// An IPv4 address mapped into IPv6 as the IPv4 address it is. An IPv6
+/// address keeps its scope, which tells apart link-local addresses on
+/// different interfaces, and drops its flow label, which does not name the
+/// peer.
 pub(crate) fn canonical(address: SocketAddr) -> SocketAddr {
-    SocketAddr::new(canonical_ip(address.ip()), address.port())
+    match address {
+        SocketAddr::V6(v6) => match v6.ip().to_ipv4_mapped() {
+            Some(v4) => SocketAddr::V4(SocketAddrV4::new(v4, v6.port())),
+            None => SocketAddr::V6(SocketAddrV6::new(*v6.ip(), v6.port(), 0, v6.scope_id())),
+        },
+        SocketAddr::V4(_) => address,
+    }
 }
 
 fn canonical_ip(ip: IpAddr) -> IpAddr {
@@ -373,5 +411,54 @@ fn ecn_codepoint(tos: u8) -> EcnCodepoint {
         0b01 => EcnCodepoint::Ect1,
         0b10 => EcnCodepoint::Ect0,
         _ => EcnCodepoint::Ce,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_mapped_address_is_the_ipv4_address_and_ipv6_keeps_its_scope() {
+        let mapped = SocketAddr::V6(SocketAddrV6::new(
+            Ipv4Addr::new(192, 0, 2, 1).to_ipv6_mapped(),
+            443,
+            7,
+            0,
+        ));
+        assert_eq!(canonical(mapped), SocketAddr::from(([192, 0, 2, 1], 443)));
+        let link_local = SocketAddrV6::new("fe80::1".parse().unwrap(), 443, 7, 3);
+        assert_eq!(
+            canonical(SocketAddr::V6(link_local)),
+            SocketAddr::V6(SocketAddrV6::new(*link_local.ip(), 443, 0, 3))
+        );
+    }
+
+    fn received(peer: SocketAddr, to_group: bool) -> Received {
+        Received {
+            len: 0,
+            stride: 0,
+            peer,
+            local_ip: None,
+            ecn: None,
+            to_group,
+        }
+    }
+
+    #[test]
+    fn only_datagrams_from_a_unicast_peer_to_this_side_alone_can_be_replied_to() {
+        let peer = SocketAddr::from(([192, 0, 2, 1], 4433));
+        assert!(received(peer, false).replyable());
+        assert!(!received(peer, true).replyable());
+        for unreplyable in [
+            SocketAddr::from(([192, 0, 2, 1], 0)),
+            SocketAddr::from(([0, 0, 0, 0], 4433)),
+            SocketAddr::from(([255, 255, 255, 255], 4433)),
+            SocketAddr::from(([224, 0, 0, 1], 4433)),
+            "[ff02::1]:4433".parse().unwrap(),
+            "[::]:4433".parse().unwrap(),
+        ] {
+            assert!(!received(unreplyable, false).replyable(), "{unreplyable}");
+        }
     }
 }

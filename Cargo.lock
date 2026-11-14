@@ -784,6 +784,7 @@ dependencies = [
  "bytes",
  "futures-util",
  "nix",
+ "rustix",
  "sakuya_clock",
  "sakuya_clock_tokio",
  "sakuya_link",

@@ -14,12 +14,16 @@ use snafu::{ResultExt, Snafu};
 
 use crate::{
     SocketFailedError, UdpLink, UdpLocal,
-    shared::{Shared, new_entry},
+    shared::{Charge, Shared, new_entry},
     sys::{self, BindError, RegisterSnafu},
 };
 
 /// How a [`UdpBinding`] binds and what it keeps.
+///
+/// It is made with [`new`](Self::new), and its fields are changed from
+/// there.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UdpBindingConfig {
     /// The address to bind. An IPv6 socket on the unspecified address takes
     /// IPv4 too, and each link's local address is the one its datagrams
@@ -29,10 +33,18 @@ pub struct UdpBindingConfig {
     /// [`accept`](AcceptingLinkBinding::accept). Without it, the binding
     /// only reaches the peers it is asked to connect to and drops the
     /// datagrams of any other. Default: `true`.
+    ///
+    /// A binding that is only used to connect, on which nobody accepts,
+    /// should turn it off: its new links would wait to be accepted for as
+    /// long as the binding lives, holding the datagrams in them.
     pub accept_new_peers: bool,
     /// How many new links may wait to be accepted; datagrams from further
     /// new peers are dropped meanwhile. Default: 1024.
     pub max_unaccepted_links: usize,
+    /// How many datagrams may wait, in all the links not yet accepted
+    /// together; more for those links are dropped. A link stops counting
+    /// against it once it is accepted, or connected to. Default: 1024.
+    pub max_unaccepted_datagrams: usize,
     /// How many datagrams may wait in one link to be received; more are
     /// dropped. Default: 256.
     pub max_queued_datagrams: usize,
@@ -50,6 +62,7 @@ impl UdpBindingConfig {
             address,
             accept_new_peers: true,
             max_unaccepted_links: 1024,
+            max_unaccepted_datagrams: 1024,
             max_queued_datagrams: 256,
             interface_mtu: 1500,
         }
@@ -133,7 +146,7 @@ impl<C: MonotonicClock + 'static> UdpBinding<C> {
             if let Some(end) = shared.end.get() {
                 return Err(end.clone());
             }
-            if let Some(link) = shared.demux().unaccepted.pop_front() {
+            if let Some(link) = shared.take_unaccepted() {
                 return Ok(link);
             }
             let turn = pin!(shared.reader.acquire());
@@ -166,12 +179,15 @@ impl<C: MonotonicClock + 'static> UdpBinding<C> {
         };
         let key = (local_ip, peer);
         let mut demux = shared.demux();
-        let entry = match demux.links.get(&key) {
-            Some(entry) => Arc::clone(entry),
+        let entry = match demux.live(&key) {
+            Some(entry) => {
+                demux.take(&entry);
+                entry
+            }
             None => {
                 let local =
                     UdpLocal::new(shared.id.clone(), SocketAddr::new(local_ip, bound.port()));
-                let entry = new_entry::<C>(local, peer, &shared.id);
+                let entry = new_entry::<C>(local, peer, &shared.id, Charge::Taken);
                 demux.links.insert(key, Arc::clone(&entry));
                 entry
             }
@@ -197,8 +213,13 @@ impl<C: MonotonicClock + 'static> Drop for UdpBinding<C> {
         let unaccepted = {
             let mut demux = self.shared.demux();
             demux.accepting = false;
-            mem::take(&mut demux.unaccepted)
+            let unaccepted = mem::take(&mut demux.unaccepted);
+            for link in &unaccepted {
+                demux.take(link.entry());
+            }
+            unaccepted
         };
+        // Outside the lock: dropping the last clone of a link takes it.
         drop(unaccepted);
     }
 }
