@@ -182,6 +182,7 @@ fn link() -> LinkId<(), ()> {
 fn reset() {
     take_log();
     take_strategy_events();
+    common::strategy::forget_stale_overheads();
     advance_to(ms(0));
     ADD.with(|a| a.set(None));
     CLOSE_AT.with(|c| c.set(None));
@@ -849,6 +850,14 @@ mod probe {
         /// Log the connection IDs the destination connection ID strategy
         /// offers for the link path over the logical link.
         InspectOffer(LinkId<(), ()>),
+        /// Tell the destination connection ID strategy the connection ID to
+        /// send the handshake with, as a client's composition does with the
+        /// one it chose.
+        HandshakeConnectionId(ConnectionId),
+        /// Take every record out of the send journals of the space, as an
+        /// acknowledgment of all of them would, and log each one's packet
+        /// number and state; a gone space logs nothing.
+        TakeRecords(PacketNumberSpaceKind),
     }
 
     /// In a logical path: does its steps at their instants.
@@ -869,7 +878,7 @@ mod probe {
     packet_feeder!(Mine);
     packet_feeder!(ClientMine);
     packet_feeder!(SpyMine);
-    impl<T, L, I, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ic, Icr, Ip, Ian, Icid>
+    impl<T, L, I, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ic, Icr, Ip, Ian, Icid, Isj>
         DataComponent<
             T,
             L,
@@ -880,7 +889,7 @@ mod probe {
                 (Ij, Im, Ia, It, Iu, Ikp, Icid),
                 (Ir, Ie, Ik, Hd),
                 (Ic, Icr),
-                (Ip, Ian),
+                (Ip, Ian, Isj),
             ),
         > for PacketFeeder
     where
@@ -890,7 +899,9 @@ mod probe {
                 Crypto = RingBackend,
                 CryptoReceiveBuffer = FragmentedCryptoReceiveBuffer,
             >,
-        L: LineagePartList<T> + FrameSetDispatch<T, L, Hd>,
+        L: LineagePartList<T>
+            + FrameSetDispatch<T, L, Hd>
+            + sakuya_connection::feedback::FeedbackSummariesOf,
         CloseCauseOf<T, L>: Debug,
         <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<v1::error::ConnectionError, Ie>
             + CoprodUninjector<v1::error::ConnectionError, Ie>,
@@ -908,7 +919,8 @@ mod probe {
             + GetAt<v1::connection_ids::ConnectionIdsOf<T>, Icid>
             + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
             + GetAt<CryptoReceiver<FragmentedCryptoReceiveBuffer>, Icr>
-            + GetAt<LogicalPathInput<TestLink, T::Receiver>, Ip>,
+            + GetAt<LogicalPathInput<TestLink, T::Receiver>, Ip>
+            + GetAt<SendJournalsOf<T, L>, Isj>,
         for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
         for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
             GetAt<LinkPathRole<Duration>, Ir>,
@@ -1020,12 +1032,29 @@ mod probe {
                 }
                 PacketStep::InspectOffer(link) => {
                     let offered: Vec<_> = lineage
-                        .get_mut::<v1::connection_ids::ConnectionIdsOf<T>, Icid>()
-                        .destination_mut()
+                        .get::<v1::connection_ids::ConnectionIdsOf<T>, Icid>()
+                        .destination()
                         .offer(&link)
                         .map(|offered| (offered.sequence, offered.id.as_bytes().to_vec()))
                         .collect();
                     log(format!("offered {offered:?}"));
+                }
+                PacketStep::HandshakeConnectionId(id) => {
+                    lineage
+                        .get_mut::<v1::connection_ids::ConnectionIdsOf<T>, Icid>()
+                        .destination_mut()
+                        .on_handshake_connection_id(id);
+                }
+                PacketStep::TakeRecords(space) => {
+                    let journals = lineage
+                        .get_mut::<SendJournalsOf<T, L>, Isj>()
+                        .get_mut(space)?;
+                    let all = PacketNumber::ZERO..=PacketNumber::new(1 << 20).unwrap();
+                    let records: Vec<_> = journals
+                        .take_acknowledged(&all)
+                        .map(|record| (record.number.get(), format!("{:?}", record.state)))
+                        .collect();
+                    log(format!("records {space:?}: {records:?}"));
                 }
                 PacketStep::Inspect => {
                     let mut read = Vec::new();
@@ -4634,6 +4663,12 @@ fn read_var_int(bytes: &[u8]) -> (usize, usize) {
 /// The first packet of `datagram`, an Initial packet of the server without
 /// a token, opened.
 fn open_sent_initial(datagram: &[u8]) -> SentInitial {
+    open_initial(datagram, &server_keys())
+}
+
+/// The first packet of `datagram`, an Initial packet without a token
+/// protected with `keys`, opened.
+fn open_initial(datagram: &[u8], keys: &DirectionKeys<RingBackend>) -> SentInitial {
     assert_eq!(datagram[0] & 0xf0, 0xc0, "an Initial packet: {datagram:?}");
     let mut at = 5;
     let dcid_len = usize::from(datagram[at]);
@@ -4648,7 +4683,6 @@ fn open_sent_initial(datagram: &[u8]) -> SentInitial {
     let pn_offset = at + width;
     let len = pn_offset + length;
     let mut packet = datagram[..len].to_vec();
-    let keys = server_keys();
     let truncated = keys.header.remove(&mut packet, pn_offset).unwrap();
     let header_len = pn_offset + truncated.encoded_len().get();
     let number = truncated.decode(None);
@@ -4701,8 +4735,8 @@ fn a_server_answers_the_first_initial_packet_with_an_ack_in_an_initial_packet() 
     // and with no more ranges
     assert_eq!(packet.payload, [0x02, 0x00, 0x00, 0x00, 0x00]);
     // the datagram's one packet elicits no acknowledgment: it is not padded,
-    // and well within three times what arrived; its header and tag are what
-    // the planner was told an Initial packet takes
+    // and well within three times what arrived; it is its header, its tag
+    // and the ACK frame, long enough for the header protection sample
     assert_eq!(packet.len, datagram.len());
     assert_eq!(datagram.len(), 1 + 4 + 1 + 8 + 1 + 8 + 1 + 2 + 1 + 16 + 5);
     assert!(datagram.len() < MIN_DATAGRAM_SIZE);
@@ -4757,6 +4791,13 @@ fn a_probe_timeout_sends_a_ping_padded_to_1200_bytes_as_the_credit_allows() {
         [],
         "held by the anti-amplification limit"
     );
+    // held, the call does not wake itself: polls at one instant end with
+    // no wake
+    let wakes = outer.wakes();
+    for _ in 0..3 {
+        assert!(outer.poll(&mut connection).is_pending());
+    }
+    assert_eq!(outer.wakes(), wakes);
     // the client's next datagram lets it go, with the ACK of its packet
     deliver(
         padded(
@@ -4902,9 +4943,21 @@ fn a_batch_holds_at_most_its_limit_of_datagrams() {
     assert_eq!(open_sent_initial(&sent[1].1).payload[0], 0x01);
 }
 
+/// The bytes in flight of the last line of the recovery layer's feeder in
+/// `log`.
+fn last_in_flight(log: Vec<String>) -> usize {
+    let lines = lines_of(log, &["in flight"]);
+    let line = lines.last().expect("the feeder logged");
+    line["in flight ".len()..]
+        .split(',')
+        .next()
+        .and_then(|bytes| bytes.parse().ok())
+        .unwrap_or_else(|| panic!("{line}"))
+}
+
 #[test]
 fn a_datagram_of_a_level_whose_keys_went_is_not_handed_over() {
-    use probe::PacketStep::{InstallHandshakeKeys, Receive};
+    use probe::PacketStep::{InstallHandshakeKeys, Receive, TakeRecords};
     reset();
     let first = link();
     let mut connection = with_two_datagrams_at_1005_ms(
@@ -4919,11 +4972,13 @@ fn a_datagram_of_a_level_whose_keys_went_is_not_handed_over() {
                     ms(1050),
                 )),
             ),
+            (ms(1062), TakeRecords(PacketNumberSpaceKind::Initial)),
         ],
     );
     common::plan_sends([common::SendOutcome::Hold(1)]);
-    let _ = run(&mut connection, 1005..=1006);
+    let log = run(&mut connection, 1005..=1006);
     assert_eq!(common::take_batch_sizes(), [2]);
+    let sealed = last_in_flight(log);
     // the Initial keys go with the first Handshake packet processed, while
     // the link keeps the batch
     let _ = run(&mut connection, 1049..=1050);
@@ -4941,13 +4996,396 @@ fn a_datagram_of_a_level_whose_keys_went_is_not_handed_over() {
         "{sent:?}"
     );
     assert_eq!(common::take_given_up(), [] as [bytes::Bytes; 0]);
-    // the PING left the bytes in flight: only the packet sent at 6 ms is
-    // there
+    // the PING left the bytes in flight, and its record is kept as one
+    // whose send result is unknown, never accepted
+    assert_eq!(sealed - last_in_flight(log), MIN_DATAGRAM_SIZE);
+    let log = run(&mut connection, 1062..=1062);
+    let records = lines_of(log, &["records"]);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert!(
+        records[0].contains("(2, \"Lost { sent_at: None, "),
+        "{records:?}"
+    );
+}
+
+#[test]
+fn an_ack_frame_the_link_gives_up_at_once_is_planned_again() {
+    reset();
+    let first = link();
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    deliver(
+        padded(
+            &[],
+            |payload| initial_from(&CLIENT_SCID, 0, payload),
+            &ping(),
+        ),
+        &first,
+        ms(5),
+    );
+    common::plan_sends([common::SendOutcome::GiveUp]);
+    let _ = run(&mut connection, 5..=6);
+    // written and given up in one lend: the ACK frame consumed its intent,
+    // and its loss owes the frame again
+    let given_up = common::take_given_up();
+    assert_eq!(given_up.len(), 1);
+    assert_eq!(open_sent_initial(&given_up[0]).payload[0], 0x02);
+    assert_eq!(
+        strategy_events("core: publish"),
+        [
+            "core: publish AckIntent { space: Initial, shortest: 5 }",
+            "core: publish AckIntent { space: Initial, shortest: 5 }",
+        ]
+    );
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let packet = open_sent_initial(&sent[0].1);
+    assert_eq!(packet.number, 1);
+    assert_eq!(packet.payload, [0x02, 0x00, 0x00, 0x00, 0x00]);
+}
+
+#[test]
+fn a_client_sends_the_initial_packets_it_sealed_before_its_first_handshake_packet() {
+    use probe::PacketStep::{
+        HandshakeConnectionId, InstallHandshakeKeys, InstallOneRttKeys, Receive,
+    };
+    reset();
+    let first = link();
+    feed([(
+        ms(6),
+        probe::Step::Sent {
+            space: PacketNumberSpaceKind::Initial,
+            count: 1,
+        },
+    )]);
+    feed_packets([
+        (ms(3), HandshakeConnectionId(server_cid())),
+        (ms(4), InstallOneRttKeys),
+        (
+            ms(1004),
+            Receive(received(one_rtt_packet_of(0, 0, &ping()), &first, ms(1004))),
+        ),
+        (
+            ms(1005),
+            Receive(received(one_rtt_packet_of(0, 1, &ping()), &first, ms(1005))),
+        ),
+        (ms(1049), InstallHandshakeKeys),
+        (
+            ms(1050),
+            Receive(received(
+                long_packet(HANDSHAKE, 0, &ping()),
+                &first,
+                ms(1050),
+            )),
+        ),
+        (
+            ms(1051),
+            Receive(received(
+                long_packet_with(first_byte(INITIAL), &[], &server_keys(), 0, &ping()),
+                &first,
+                ms(1051),
+            )),
+        ),
+    ]);
+    let mut connection = connection!(ClientMine, AddressValidation::Validated, first.clone());
+    let _ = run(&mut connection, 3..=1004);
+    assert_eq!(common::take_sent(), []);
+    // the ACK of two 1-RTT packets, and the probe timeout's PING in an
+    // Initial packet of a lower level, in a datagram of its own
+    common::plan_sends([common::SendOutcome::Hold(1)]);
+    let _ = run(&mut connection, 1005..=1006);
+    assert_eq!(common::take_batch_sizes(), [2]);
+    // while the link keeps them, an Initial and a Handshake packet arrive;
+    // a client keeps its Initial keys until it sends a Handshake packet
+    let _ = run(&mut connection, 1049..=1051);
+    advance_to(ms(1060));
+    common::release_held_send();
+    let _ = run(&mut connection, 1060..=1061);
+    // the PING's datagram waits with the next one: the ACKs of an Initial
+    // and of a Handshake packet, coalesced; the first Handshake packet
+    // discards the Initial keys, and both go out
+    assert_eq!(common::take_batch_sizes(), [2]);
+    assert_eq!(common::take_given_up(), [] as [bytes::Bytes; 0]);
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 3, "{sent:?}");
+    assert!(short_header(&sent[0].1), "the 1-RTT ACK");
+    let ping_datagram = &sent[1].1;
+    assert_eq!(ping_datagram.len(), MIN_DATAGRAM_SIZE);
+    let packet = open_initial(ping_datagram, &client_keys());
+    assert_eq!(packet.dcid, SERVER_CID);
+    assert_eq!(packet.payload[0], 0x01, "the PING");
+    let coalesced = &sent[2].1;
+    assert_eq!(coalesced.len(), MIN_DATAGRAM_SIZE);
+    let packet = open_initial(coalesced, &client_keys());
+    assert_eq!(packet.payload[0], 0x02, "the Initial ACK");
+    assert_eq!(
+        coalesced[packet.len] & 0xf0,
+        0xe0,
+        "a Handshake packet after it"
+    );
+    // no Initial packet after: the probe timeouts that come find no keys
+    let _ = run(&mut connection, 1062..=8000);
+    let sent = common::take_sent();
+    assert!(
+        sent.iter().all(|(_, datagram)| datagram[0] & 0xf0 != 0xc0),
+        "{sent:?}"
+    );
+}
+
+#[test]
+fn a_send_the_link_holds_wakes_the_connection_when_it_is_released() {
+    reset();
+    let first = link();
+    let mut connection = with_two_datagrams_at_1005_ms(&first, []);
+    common::plan_sends([common::SendOutcome::Hold(usize::MAX)]);
+    let outer = Outer::new();
+    advance_to(ms(1005));
+    for _ in 0..3 {
+        assert!(outer.poll(&mut connection).is_pending());
+    }
+    assert_eq!(common::take_batch_sizes(), [2]);
+    // nothing is left to do but wait for the link
+    let wakes = outer.wakes();
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(outer.wakes(), wakes);
+    common::release_held_send();
+    assert_eq!(outer.wakes(), wakes + 1);
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(common::take_sent().len(), 2);
+}
+
+#[test]
+fn a_plan_blocked_once_wakes_the_call_once() {
+    use probe::PacketStep::{InstallHandshakeKeys, Receive};
+    reset();
+    let first = link();
+    feed([(
+        ms(6),
+        probe::Step::Sent {
+            space: PacketNumberSpaceKind::Initial,
+            count: 1,
+        },
+    )]);
+    feed_packets([
+        (ms(999), InstallHandshakeKeys),
+        (
+            ms(1000),
+            Receive(received(
+                long_packet(HANDSHAKE, 0, &ping()),
+                &first,
+                ms(1000),
+            )),
+        ),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    deliver(
+        padded(
+            &[],
+            |payload| initial_from(&CLIENT_SCID, 0, payload),
+            &ping(),
+        ),
+        &first,
+        ms(5),
+    );
+    let _ = run(&mut connection, 5..=1004);
+    // the ACKs of the Initial and of the Handshake packet; the Handshake
+    // packet discarded the Initial keys
+    assert_eq!(common::take_sent().len(), 2);
+    // A planner that has not heard of it plans the probe timeout's PING in
+    // an Initial packet: the call stops, wakes itself once to read again
+    // what changed, and then waits.
+    common::strategy::tell_stale_initial_overhead(50);
+    let outer = Outer::new();
+    advance_to(ms(1005));
+    let mut wakes = Vec::new();
+    for _ in 0..4 {
+        let before = outer.wakes();
+        assert!(outer.poll(&mut connection).is_pending());
+        wakes.push(outer.wakes() - before);
+    }
+    // the first poll runs the probe timeout, which publishes the PING; the
+    // next plans it and is blocked
+    assert_eq!(wakes[1..], [1, 0, 0]);
+    assert_eq!(common::take_sent(), []);
+}
+
+#[test]
+fn a_datagram_given_up_owes_its_ack_again_and_keeps_its_record() {
+    use probe::PacketStep::TakeRecords;
+    reset();
+    let first = link();
+    let mut connection = with_two_datagrams_at_1005_ms(
+        &first,
+        [(
+            ms(1010),
+            TakeRecords(PacketNumberSpaceKind::ApplicationData),
+        )],
+    );
+    take_strategy_events();
+    common::plan_sends([common::SendOutcome::GiveUp, common::SendOutcome::Accept(1)]);
+    let _ = run(&mut connection, 1005..=1007);
+    // the 1-RTT ACK given up, the PING handed over alone and accepted; the
+    // ACK is owed again and goes in the next datagram
+    let given_up = common::take_given_up();
+    assert_eq!(given_up.len(), 1);
+    assert!(short_header(&given_up[0]));
+    assert_eq!(common::take_batch_sizes(), [2, 1, 1]);
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert_eq!(open_sent_initial(&sent[0].1).payload[0], 0x01, "the PING");
+    assert!(short_header(&sent[1].1), "the 1-RTT ACK again");
+    assert_eq!(
+        strategy_events("core: publish"),
+        [
+            "core: publish AckIntent { space: ApplicationData, shortest: 5 }",
+            "core: publish AckIntent { space: ApplicationData, shortest: 5 }",
+        ]
+    );
+    // the given-up packet 0 is kept as one whose send result is unknown,
+    // never accepted; the packet 1 that carried the ACK again was sent
+    let log = run(&mut connection, 1008..=1010);
+    let records = lines_of(log, &["records"]);
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert!(
+        records[0].starts_with("records ApplicationData: [(0, \"Lost { sent_at: None, "),
+        "{records:?}"
+    );
+    assert!(records[0].contains("(1, \"Sent("), "{records:?}");
+}
+
+#[test]
+fn a_probe_acknowledged_after_it_was_accepted_leaves_nothing_in_flight() {
+    reset();
+    let first = link();
+    feed([(
+        ms(6),
+        probe::Step::Sent {
+            space: PacketNumberSpaceKind::Initial,
+            count: 1,
+        },
+    )]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    deliver(
+        padded(
+            &[],
+            |payload| initial_from(&CLIENT_SCID, 0, payload),
+            &ping(),
+        ),
+        &first,
+        ms(5),
+    );
+    let _ = run(&mut connection, 5..=6);
+    assert_eq!(common::take_sent().len(), 1, "the ACK");
+    let log = run(&mut connection, 1005..=1006);
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(open_sent_initial(&sent[0].1).number, 2, "the PING");
     let lines = lines_of(log, &["in flight"]);
     assert!(
         lines
             .last()
-            .is_some_and(|line| line.starts_with("in flight 1200,")),
+            .is_some_and(|line| line.starts_with("in flight 2400,") && line.ends_with("backoff 1")),
         "{lines:?}"
+    );
+    // the client acknowledges the ACK, the packet sent at 6 ms and the PING
+    deliver(
+        padded(
+            &[],
+            |payload| initial_from(&CLIENT_SCID, 1, payload),
+            &ack_of(&[(0, 2)], false),
+        ),
+        &first,
+        ms(1100),
+    );
+    let log = run(&mut connection, 1100..=1101);
+    let lines = lines_of(log, &["in flight"]);
+    assert!(
+        lines.last().is_some_and(
+            |line| line.starts_with("in flight 0, outstanding 0, lost [],")
+                && line.ends_with("backoff 0")
+        ),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn a_link_path_that_ends_while_the_link_holds_its_batch_hands_back_its_packets() {
+    use probe::PacketStep::TakeRecords;
+    reset();
+    CLOSE_AT.with(|c| c.set(Some(ms(1010))));
+    let first = link();
+    let mut connection = with_two_datagrams_at_1005_ms(
+        &first,
+        [
+            (ms(1500), TakeRecords(PacketNumberSpaceKind::Initial)),
+            (
+                ms(1501),
+                TakeRecords(PacketNumberSpaceKind::ApplicationData),
+            ),
+        ],
+    );
+    common::plan_sends([common::SendOutcome::Hold(usize::MAX)]);
+    let _ = run(&mut connection, 1005..=1006);
+    assert_eq!(common::take_batch_sizes(), [2]);
+    take_strategy_events();
+    let log = run(&mut connection, 1007..=1499);
+    assert!(
+        log.iter().any(|line| line.starts_with("link path ended")),
+        "{log:?}"
+    );
+    // the packet the probe recorded at 6 ms among them
+    assert_eq!(lines_of(log, &["lost"]), ["lost Initial 1"]);
+    // the packets of both datagrams left the send journals with the link
+    // path, with those it sent before: the ACK frames of the Initial packet
+    // sent at 5 ms and of the 1-RTT packet in the batch are owed again
+    assert_eq!(
+        strategy_events("core: publish"),
+        [
+            "core: publish AckIntent { space: Initial, shortest: 5 }",
+            "core: publish AckIntent { space: ApplicationData, shortest: 5 }",
+        ]
+    );
+    common::release_held_send();
+    let log = run(&mut connection, 1500..=1600);
+    assert_eq!(
+        lines_of(log, &["records"]),
+        ["records Initial: []", "records ApplicationData: []"]
+    );
+    assert_eq!(common::take_batch_sizes(), [] as [usize; 0]);
+    assert_eq!(common::take_sent(), []);
+}
+
+#[test]
+fn the_planner_is_told_what_a_packet_takes_when_the_keys_of_its_level_come() {
+    use probe::PacketStep::InstallHandshakeKeys;
+    reset();
+    let first = link();
+    feed_packets([(ms(999), InstallHandshakeKeys)]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    deliver(
+        padded(
+            &[],
+            |payload| initial_from(&CLIENT_SCID, 0, payload),
+            &ping(),
+        ),
+        &first,
+        ms(5),
+    );
+    let _ = run(&mut connection, 5..=998);
+    let told = common::strategy::observed_overheads(0).expect("the planner was told");
+    assert_eq!(told.handshake, None);
+    // in the poll the keys come, before the sending call looks at the plan:
+    // the first byte, the version, both connection IDs of 8 bytes with
+    // their lengths, a Length field of two bytes, a packet number of one
+    // byte and the three bytes the header protection sample needs after
+    // it, and the tag
+    let outer = Outer::new();
+    advance_to(ms(999));
+    assert!(outer.poll(&mut connection).is_pending());
+    let told = common::strategy::observed_overheads(0).expect("the planner was told");
+    assert_eq!(told.handshake, Some(1 + 4 + 1 + 8 + 1 + 8 + 2 + 1 + 3 + 16));
+    assert_eq!(
+        told.initial,
+        told.handshake.map(|handshake| handshake + 1),
+        "an Initial packet's empty token takes a byte more"
     );
 }

@@ -13,6 +13,7 @@ use core::fmt;
 use sakuya_link::Link;
 use sakuya_packet_protection::{backend::AEAD_TAG_LEN, packet_number::TruncatedPacketNumber};
 use sakuya_wire::{
+    header::SAMPLE_DISTANCE,
     parameters::ParametersOf,
     parts::Selector,
     v1::{
@@ -30,30 +31,35 @@ use sakuya_recovery::{
     ack_obligation::{AckDue, AckObligation},
     congestion::CongestionController,
     pacing::Pacer,
-    packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaces},
+    packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces},
     pmtu::PmtuPolicy,
     receive_journals::ReceiveJournals,
+    send_journals::SendJournals,
 };
 
 use super::{
-    AckObligationsOf, Choices, CloseCauseOf,
+    AckObligationsOf, Choices, CloseCauseOf, Side,
     amplification::AntiAmplification,
     close::CloseReasonRecord,
     confirmation::HandshakeConfirmation,
+    connection_ids::{ConnectionIdsOf, ResetTokenRegistrarOf},
     keys::{HandshakeKeys, InitialKeys, OneRttKeys},
     link::{FirstLinkStart, LinkClone, LinkFacts},
     parameters::PeerTransportParameters,
     recovery::{CongestionPartOf, LinkPathCongestionState, PmtuOf, peer_max_udp_payload_size},
     role::LinkPathRole,
     send::{AckIntent, ProbePingIntent, SendTypes, shortest_ack_frame},
+    spaces::SendJournalsOf,
 };
 use crate::{
     call::CallBundle,
-    clock::InstantOf,
+    clock::{InstantOf, LinkIdOf},
     component::{
         ArgsOf, Build, DataComponent, LineageOf, ParentsOf, PassiveDataComponent, ReadSet,
         RequestOf,
     },
+    connection_id::DestinationConnectionIdStrategy,
+    feedback::FeedbackSummariesOf,
     layer::{self, NodeKey},
     others::OtherNodes,
     send_strategy::{
@@ -63,6 +69,7 @@ use crate::{
     },
     share::{FlatRef, LineageLists, LineagePartList, LogicalPathKeys, NodeData},
     take::{GetAt, ReadEach, Take, TakeEach},
+    write::FlightClass,
 };
 
 /// The core of the send strategy of the choices `T` and the list of parts
@@ -228,11 +235,12 @@ where
 // ---- the planners ----
 
 /// The send planner of a link path, in the link path's node, with the
-/// role and the limits it was last told.
+/// role, the limits and the packet overheads it was last told.
 pub struct LinkPathPlanner<P> {
     planner: P,
     role: LinkPathRoleKind,
     limits: Option<DatagramLimits>,
+    overheads: Option<PacketOverheads>,
 }
 
 impl<P> fmt::Debug for LinkPathPlanner<P> {
@@ -240,6 +248,7 @@ impl<P> fmt::Debug for LinkPathPlanner<P> {
         f.debug_struct("LinkPathPlanner")
             .field("role", &self.role)
             .field("limits", &self.limits)
+            .field("overheads", &self.overheads)
             .finish_non_exhaustive()
     }
 }
@@ -258,6 +267,7 @@ impl<P> LinkPathPlanner<P> {
         P: Observe<DatagramLimits> + Observe<PacketOverheads>,
     {
         self.limits = Some(limits);
+        self.overheads = Some(overheads);
         self.planner.observe(limits);
         self.planner.observe(overheads);
     }
@@ -308,6 +318,7 @@ where
             planner,
             role,
             limits: None,
+            overheads: None,
         }
     }
 
@@ -324,24 +335,28 @@ where
     }
 }
 
-/// A planner is told when its link path's role changes, and what the link
+/// A planner is told when its link path's role changes; what the link
 /// path can send whenever a component that limits it changes: the
 /// anti-amplification credit, the peer's transport parameters, and the
 /// congestion control, its fixed state and the datagram size probing
-/// policy in the link path's recovery layer.
-impl<T: Choices, L, Ip, Ir, It, Il, Ipp, Jc, Js, Jm>
-    DataComponent<T, L, layer::LinkPath, (Ip, Ir, It, Il, Ipp, (Jc, Js, Jm))>
+/// policy in the link path's recovery layer; and what each kind of packet
+/// takes beyond its frames whenever a component it follows from changes:
+/// the connection IDs, the packet number states and send journals of the
+/// spaces, and the keys of each level. All of it is only read here.
+impl<T: Choices, L, Ip, Ir, It, Il, Io, Ipp, Jc, Js, Jm>
+    DataComponent<T, L, layer::LinkPath, (Ip, Ir, It, Il, Io, Ipp, (Jc, Js, Jm))>
     for LinkPathPlanner<LinkPathSendPlannerOf<T, L>>
 where
-    L: LineagePartList<T> + ParametersOf<TransportParameterSpace>,
+    L: LineagePartList<T> + FeedbackSummariesOf + ParametersOf<TransportParameterSpace>,
     SendTypes<T, L>: SendStrategyTypes,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
-    LinkPathSendPlannerOf<T, L>: Observe<DatagramLimits>,
+    LinkPathSendPlannerOf<T, L>: Observe<DatagramLimits> + Observe<PacketOverheads>,
     TransportParameterSlots<L>: Selector<Option<MaxUdpPayloadSize>, Ipp>,
     CongestionPartOf<T, L>: CongestionController<InstantOf<T>> + Pacer<InstantOf<T>>,
     for<'v> <L as LineageLists<'v, T>>::LinkPath: GetAt<Self, Ip>
         + GetAt<LinkPathRole<InstantOf<T>>, Ir>
         + ReadEach<DatagramLimitsReads<T, L>, Il>
+        + ReadEach<PacketOverheadsReads<T, L>, Io>
         + TakeEach<'v, frunk_core::HList![Self, SendStrategyCore<SendStrategyOf<T, L>>], It>,
     for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out: Selector<&'a CongestionPartOf<T, L>, Jc>
@@ -355,6 +370,12 @@ where
         reads.add::<CongestionPartOf<T, L>>();
         reads.add::<LinkPathCongestionState<InstantOf<T>>>();
         reads.add::<PmtuOf<T, L>>();
+        reads.add::<ConnectionIdsOf<T>>();
+        reads.add::<PacketNumberSpaces<PacketNumberSpaceState>>();
+        reads.add::<SendJournalsOf<T, L>>();
+        reads.add::<InitialKeys<T::Crypto>>();
+        reads.add::<HandshakeKeys<T::Crypto>>();
+        reads.add::<OneRttKeys<T::Crypto, InstantOf<T>>>();
     }
 
     fn reread<'v, B: CallBundle>(
@@ -362,11 +383,18 @@ where
         others: &mut OtherNodes<'v, T, L, B>,
         _: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
-        debug_assert!(matches!(others.here(), NodeKey::LinkPath(..)));
+        let NodeKey::LinkPath(_, link) = others.here() else {
+            unreachable!("a link path's lend carries its key")
+        };
         let role = lineage.get::<LinkPathRole<InstantOf<T>>, Ir>().kind();
         let limits = read_datagram_limits::<T, L, B, Il, Ipp, Jc, Js, Jm>(&lineage, others);
+        let overheads = read_packet_overheads::<T, L, Io>(
+            &lineage,
+            link,
+            limits.capacity_for(FlightClass::AckOnly),
+        );
         let told = lineage.get::<Self, Ip>();
-        if told.role == role && told.limits == Some(limits) {
+        if told.role == role && told.limits == Some(limits) && told.overheads == Some(overheads) {
             return None;
         }
         let (frunk_core::hlist_pat![planner, core], _) = Take::<
@@ -380,6 +408,10 @@ where
         if planner.limits != Some(limits) {
             planner.limits = Some(limits);
             planner.planner.observe(limits);
+        }
+        if planner.overheads != Some(overheads) {
+            planner.overheads = Some(overheads);
+            planner.planner.observe(overheads);
         }
         None
     }
@@ -490,6 +522,97 @@ where
 
 // ---- what a packet takes beyond its frames ----
 
+/// What a link path's planner reads from the nodes above it to tell its
+/// strategy what each kind of packet takes beyond its frames: the
+/// connection IDs, the packet number states and the send journals of the
+/// spaces, and the keys of each level.
+pub(super) type PacketOverheadsReads<T, L> = frunk_core::HList![
+    ConnectionIdsOf<T>,
+    PacketNumberSpaces<PacketNumberSpaceState>,
+    SendJournalsOf<T, L>,
+    InitialKeys<<T as Choices>::Crypto>,
+    HandshakeKeys<<T as Choices>::Crypto>,
+    OneRttKeys<<T as Choices>::Crypto, InstantOf<T>>,
+];
+
+/// Which levels have keys to send packets with now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SendKeyLevels {
+    pub(super) initial: bool,
+    pub(super) handshake: bool,
+    pub(super) one_rtt: bool,
+}
+
+/// What each kind of packet takes beyond its frames on the link path over
+/// `link` now, and the length of the shortest connection ID offered for
+/// it, `None` when none is: from the destination connection IDs offered
+/// for the link path and this side's connection ID in `ids`, the next
+/// packet numbers of the spaces whose levels have keys in `keys`, as
+/// `journals` and `numbers` give them, and `max_len`, the largest datagram
+/// the link path can send now.
+pub(super) fn link_path_packet_overheads<T, L>(
+    ids: &ConnectionIdsOf<T>,
+    link: &LinkIdOf<T>,
+    numbers: &PacketNumberSpaces<PacketNumberSpaceState>,
+    journals: &SendJournalsOf<T, L>,
+    keys: SendKeyLevels,
+    max_len: usize,
+) -> (Option<usize>, PacketOverheads)
+where
+    T: Choices,
+    L: LineagePartList<T> + FeedbackSummariesOf,
+{
+    let shortest = DestinationConnectionIdStrategy::<
+        LinkIdOf<T>,
+        InstantOf<T>,
+        ResetTokenRegistrarOf<T>,
+    >::offer(ids.destination(), link)
+    .map(|offered| offered.id.len())
+    .min();
+    let next = |space, keys: bool| {
+        let journals = journals.get(space).filter(|_| keys)?;
+        Some(NextPacketNumber {
+            next: journals.next_packet_number(),
+            largest_acked: numbers
+                .get(space)
+                .and_then(PacketNumberSpaceState::largest_acked),
+        })
+    };
+    let overheads = packet_overheads(
+        shortest,
+        ids.local().len(),
+        max_len,
+        next(PacketNumberSpaceKind::Initial, keys.initial),
+        next(PacketNumberSpaceKind::Handshake, keys.handshake),
+        next(PacketNumberSpaceKind::ApplicationData, keys.one_rtt),
+        <T::Side as Side>::ROLE,
+    );
+    (shortest, overheads)
+}
+
+/// What each kind of packet takes beyond its frames on the link path over
+/// `link`, read from the link path's lend without taking anything, for
+/// datagrams of at most `max_len` bytes.
+fn read_packet_overheads<'v, T, L, Io>(
+    lineage: &LineageOf<'v, T, L, layer::LinkPath>,
+    link: &LinkIdOf<T>,
+    max_len: usize,
+) -> PacketOverheads
+where
+    T: Choices,
+    L: LineagePartList<T> + FeedbackSummariesOf,
+    for<'x> <L as LineageLists<'x, T>>::LinkPath: ReadEach<PacketOverheadsReads<T, L>, Io>,
+{
+    let frunk_core::hlist_pat![ids, numbers, journals, initial, handshake, one_rtt] =
+        lineage.read_each::<PacketOverheadsReads<T, L>, Io>();
+    let keys = SendKeyLevels {
+        initial: initial.send().is_some(),
+        handshake: handshake.send().is_some(),
+        one_rtt: one_rtt.send().is_some(),
+    };
+    link_path_packet_overheads::<T, L>(ids, link, numbers, journals, keys, max_len).1
+}
+
 /// The bytes of the Version field of a long header (RFC 9000 §17.2).
 const VERSION_LEN: usize = 4;
 
@@ -513,7 +636,11 @@ impl NextPacketNumber {
 }
 
 /// What a packet of each kind takes beyond its frames on a link path now,
-/// from the fixed parts of its header and its AEAD tag.
+/// from the fixed parts of its header and its AEAD tag, and the PADDING its
+/// header protection sample needs: the Packet Number field and the payload
+/// take at least [`SAMPLE_DISTANCE`] bytes together (RFC 9001 §5.4.2), and
+/// the packet writer gives no room to frames shorter than what the Packet
+/// Number field leaves of them.
 ///
 /// `dcid_len` is the length of the shortest connection ID offered for the
 /// link path, `None` when none is; `scid_len` the length of this side's
@@ -537,6 +664,8 @@ pub(super) fn packet_overheads(
     let length_width =
         VarIntWidth::shortest(VarInt::try_from(max_len).unwrap_or(VarInt::MAX)).encoded_len();
     let empty_token = VarIntWidth::shortest(VarInt::ZERO).encoded_len();
+    // the Packet Number field, and what the sample needs of the payload
+    let numbered = |pn_len: usize| pn_len + SAMPLE_DISTANCE.saturating_sub(pn_len);
     let long = |dcid_len: usize, numbers: Option<NextPacketNumber>, token: usize| {
         let pn_len = numbers?.encoded_len()?;
         Some(
@@ -547,7 +676,7 @@ pub(super) fn packet_overheads(
                 + scid_len
                 + token
                 + length_width
-                + pn_len
+                + numbered(pn_len)
                 + AEAD_TAG_LEN,
         )
     };
@@ -563,7 +692,7 @@ pub(super) fn packet_overheads(
         zero_rtt: None,
         one_rtt: one_rtt
             .and_then(NextPacketNumber::encoded_len)
-            .map(|pn_len| 1 + dcid_len + pn_len + AEAD_TAG_LEN),
+            .map(|pn_len| 1 + dcid_len + numbered(pn_len) + AEAD_TAG_LEN),
         expands_every_initial: role == Role::Client,
     }
 }
@@ -618,6 +747,13 @@ impl<K> AckIntentTickets<K> {
     pub fn is_published(&self, space: PacketNumberSpaceKind) -> bool {
         self.published[space_index(space)].is_some()
     }
+
+    /// Drop the ticket of `space`, whose intent an ACK frame consumed and
+    /// that frame was lost: the intent is published again while an ACK
+    /// frame is due.
+    pub(crate) fn forget(&mut self, space: PacketNumberSpaceKind) {
+        self.published[space_index(space)] = None;
+    }
 }
 
 /// A logical path starts with no ACK frame due.
@@ -644,7 +780,8 @@ where
 /// a space's ACK obligation says an ACK frame is due now, and withdrawn
 /// when it no longer is or the space is gone. It asks room for the shortest
 /// frame the space's receive journals give, and is published again when
-/// that grows, so it is never planned for a packet its frame does not fit.
+/// that grows, so it is never planned for a packet its frame does not fit,
+/// and when an ACK frame of the space is lost, which drops its ticket.
 ///
 /// Not here: an ACK frame carried along when the obligation only wants one
 /// in a packet sent anyway.
@@ -818,16 +955,17 @@ mod tests {
         );
         // the first byte, the version, both connection IDs with their
         // lengths, an empty token's length, a Length field of two bytes for
-        // 1200, a packet number of one byte and the tag
+        // 1200, a packet number of one byte, the three bytes of payload the
+        // header protection sample needs after it, and the tag
         assert_eq!(
             overheads.initial,
-            Some(1 + 4 + 1 + 8 + 1 + 4 + 1 + 2 + 1 + 16)
+            Some(1 + 4 + 1 + 8 + 1 + 4 + 1 + 2 + 1 + 3 + 16)
         );
         assert_eq!(
             overheads.handshake,
-            Some(1 + 4 + 1 + 8 + 1 + 4 + 2 + 1 + 16)
+            Some(1 + 4 + 1 + 8 + 1 + 4 + 2 + 1 + 3 + 16)
         );
-        assert_eq!(overheads.one_rtt, Some(1 + 8 + 1 + 16));
+        assert_eq!(overheads.one_rtt, Some(1 + 8 + 1 + 3 + 16));
         assert_eq!(overheads.zero_rtt, None);
         assert!(!overheads.expands_every_initial);
     }
@@ -835,7 +973,8 @@ mod tests {
     #[test]
     fn the_packet_number_and_the_length_field_take_what_they_need() {
         // 301 packets not acknowledged take two bytes (RFC 9000 Appendix
-        // A.2); one past the largest acknowledged, one byte
+        // A.2), and the sample two more of the payload; one past the
+        // largest acknowledged, one byte and three of the payload
         let overheads = packet_overheads(
             Some(8),
             8,
@@ -847,14 +986,34 @@ mod tests {
         );
         assert_eq!(
             overheads.initial,
-            Some(1 + 4 + 1 + 8 + 1 + 8 + 1 + 4 + 2 + 16)
+            Some(1 + 4 + 1 + 8 + 1 + 8 + 1 + 4 + 2 + 2 + 16)
         );
         assert_eq!(
             overheads.handshake,
-            Some(1 + 4 + 1 + 8 + 1 + 8 + 4 + 1 + 16)
+            Some(1 + 4 + 1 + 8 + 1 + 8 + 4 + 1 + 3 + 16)
         );
         assert_eq!(overheads.one_rtt, None, "no keys to send with");
         assert!(overheads.expands_every_initial);
+    }
+
+    #[test]
+    fn the_header_protection_sample_takes_what_the_packet_number_leaves_of_four_bytes() {
+        // a zero-length connection ID: the first byte, a packet number of
+        // one byte, which leaves three bytes of the four to the payload
+        // (RFC 9001 §5.4.2), and the tag; a packet number of four bytes
+        // leaves none
+        let short = packet_overheads(Some(0), 0, 1200, None, None, next(0, None), Role::Server);
+        assert_eq!(short.one_rtt, Some(1 + 1 + 3 + 16));
+        let long = packet_overheads(
+            Some(0),
+            0,
+            1200,
+            None,
+            None,
+            next(1 << 24, Some(0)),
+            Role::Server,
+        );
+        assert_eq!(long.one_rtt, Some(1 + 4 + 16));
     }
 
     #[test]

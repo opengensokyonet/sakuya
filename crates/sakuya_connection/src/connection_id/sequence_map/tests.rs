@@ -99,7 +99,7 @@ fn receive(
     )
 }
 
-fn offer(strategy: &mut Strategy, link_path: u8) -> Vec<u64> {
+fn offer(strategy: &Strategy, link_path: u8) -> Vec<u64> {
     <Strategy as DestinationConnectionIdStrategy<u8, Instant, Registrar>>::offer(
         strategy, &link_path,
     )
@@ -139,11 +139,11 @@ fn offers_bound_connection_ids_then_unused_ones() {
     let mut strategy = strategy(4, 8);
     receive(&mut strategy, frame(1, 0)).unwrap();
     receive(&mut strategy, frame(2, 0)).unwrap();
-    assert_eq!(offer(&mut strategy, 1), [0, 1, 2]);
+    assert_eq!(offer(&strategy, 1), [0, 1, 2]);
 
     used(&mut strategy, &mut registrar, 1, 1);
-    assert_eq!(offer(&mut strategy, 1), [1, 0, 2]);
-    assert_eq!(offer(&mut strategy, 2), [0, 2]);
+    assert_eq!(offer(&strategy, 1), [1, 0, 2]);
+    assert_eq!(offer(&strategy, 2), [0, 2]);
 }
 
 #[test]
@@ -156,10 +156,10 @@ fn a_connection_id_used_on_another_link_path_is_never_offered() {
     // The exception of RFC 9000 §9.5 is not taken, not even when the peer
     // kept this side's connection ID.
     added(&mut strategy, 2, false);
-    assert_eq!(offer(&mut strategy, 2), [1]);
+    assert_eq!(offer(&strategy, 2), [1]);
     used(&mut strategy, &mut registrar, 1, 2);
     added(&mut strategy, 3, true);
-    assert_eq!(offer(&mut strategy, 3), NONE);
+    assert_eq!(offer(&strategy, 3), NONE);
 }
 
 #[test]
@@ -167,7 +167,7 @@ fn a_token_is_registered_on_first_use_on_each_link_path() {
     let mut registrar = Registrar::default();
     let mut strategy = strategy(4, 8);
     receive(&mut strategy, frame(1, 0)).unwrap();
-    drop(offer(&mut strategy, 1));
+    drop(offer(&strategy, 1));
     assert_eq!(registrar.live(), []);
 
     used(&mut strategy, &mut registrar, 1, 1);
@@ -185,7 +185,7 @@ fn a_handshake_connection_id_without_a_token_registers_nothing() {
     let mut strategy = started(cid(0), None, limit(2), 4);
     used(&mut strategy, &mut registrar, 0, 1);
     assert_eq!(registrar.live(), []);
-    assert_eq!(offer(&mut strategy, 1), [0]);
+    assert_eq!(offer(&strategy, 1), [0]);
 }
 
 #[test]
@@ -198,7 +198,7 @@ fn retire_prior_to_retires_before_adding() {
 
     // Two are active; the third fits because the first is retired before.
     receive(&mut strategy, frame(2, 1)).unwrap();
-    assert_eq!(offer(&mut strategy, 1), [1, 2]);
+    assert_eq!(offer(&strategy, 1), [1, 2]);
     assert_eq!(pending(&strategy), [0]);
     assert_eq!(registrar.live(), []);
 }
@@ -208,7 +208,7 @@ fn a_smaller_retire_prior_to_has_no_effect() {
     let mut strategy = strategy(4, 4);
     receive(&mut strategy, frame(2, 2)).unwrap();
     receive(&mut strategy, frame(3, 1)).unwrap();
-    assert_eq!(offer(&mut strategy, 1), [2, 3]);
+    assert_eq!(offer(&strategy, 1), [2, 3]);
     assert_eq!(pending(&strategy), [0]);
 }
 
@@ -219,7 +219,7 @@ fn a_connection_id_below_retire_prior_to_is_retired_at_once() {
     assert_eq!(pending(&strategy), [0]);
 
     receive(&mut strategy, frame(1, 0)).unwrap();
-    assert_eq!(offer(&mut strategy, 1), [3]);
+    assert_eq!(offer(&strategy, 1), [3]);
     assert_eq!(pending(&strategy), [0, 1]);
     // Its retirement is started once.
     receive(&mut strategy, frame(1, 0)).unwrap();
@@ -284,7 +284,7 @@ fn a_repeated_frame_is_accepted_and_adds_nothing() {
     let mut strategy = strategy(2, 4);
     receive(&mut strategy, frame(1, 0)).unwrap();
     receive(&mut strategy, frame(1, 0)).unwrap();
-    assert_eq!(offer(&mut strategy, 1), [0, 1]);
+    assert_eq!(offer(&strategy, 1), [0, 1]);
 }
 
 #[test]
@@ -376,11 +376,11 @@ fn an_ended_link_path_retires_what_only_it_used() {
     ended(&mut strategy, 1);
     assert_eq!(registrar.live(), []);
     assert_eq!(pending(&strategy), [1]);
-    assert_eq!(offer(&mut strategy, 2), [0, 2]);
+    assert_eq!(offer(&strategy, 2), [0, 2]);
 
     // A late copy of its NEW_CONNECTION_ID does not bring it back.
     receive(&mut strategy, frame(1, 0)).unwrap();
-    assert_eq!(offer(&mut strategy, 2), [0, 2]);
+    assert_eq!(offer(&strategy, 2), [0, 2]);
 }
 
 #[test]
@@ -395,7 +395,7 @@ fn an_ended_link_path_keeps_a_connection_id_another_one_uses() {
     assert_eq!(first.live(), []);
     assert_eq!(second.live(), [token(0)]);
     assert_eq!(pending(&strategy), NONE);
-    assert_eq!(offer(&mut strategy, 2), [0]);
+    assert_eq!(offer(&strategy, 2), [0]);
 }
 
 #[test]
@@ -403,13 +403,13 @@ fn a_zero_length_connection_id_serves_every_link_path_and_is_never_retired() {
     let mut registrar = Registrar::default();
     let mut strategy = started(ConnectionId::EMPTY, Some(token(0)), limit(2), 4);
     used(&mut strategy, &mut registrar, 0, 1);
-    assert_eq!(offer(&mut strategy, 2), [0]);
+    assert_eq!(offer(&strategy, 2), [0]);
     assert_eq!(registrar.live(), [token(0)]);
 
     ended(&mut strategy, 1);
     assert_eq!(registrar.live(), []);
     assert_eq!(pending(&strategy), NONE);
-    assert_eq!(offer(&mut strategy, 2), [0]);
+    assert_eq!(offer(&strategy, 2), [0]);
 
     let error = receive(&mut strategy, frame(1, 0)).unwrap_err();
     let NewConnectionIdViolationError::ZeroLengthInUse { source } = error else {
@@ -448,11 +448,9 @@ fn link_ids_identify_link_paths() {
         &first,
         1200,
     );
-    let offered = DestinationConnectionIdStrategy::<LinkPath, Instant, Registrar>::offer(
-        &mut strategy,
-        &second,
-    )
-    .count();
+    let offered =
+        DestinationConnectionIdStrategy::<LinkPath, Instant, Registrar>::offer(&strategy, &second)
+            .count();
     assert_eq!(offered, 0);
 }
 
@@ -519,12 +517,12 @@ fn nothing_is_offered_before_the_handshake_connection_id() {
         &config,
         limit(2),
     );
-    assert_eq!(offer(&mut strategy, 1), NONE);
+    assert_eq!(offer(&strategy, 1), NONE);
     DestinationConnectionIdStrategy::<u8, Instant, Registrar>::on_handshake_connection_id(
         &mut strategy,
         cid(0),
     );
-    assert_eq!(offer(&mut strategy, 1), [0]);
+    assert_eq!(offer(&strategy, 1), [0]);
 }
 
 #[test]
@@ -541,7 +539,7 @@ fn a_new_handshake_connection_id_replaces_the_one_numbered_0() {
     // what was bound to the one replaced goes with it
     assert_eq!(registrar.live(), []);
     let offered: Vec<_> =
-        DestinationConnectionIdStrategy::<u8, Instant, Registrar>::offer(&mut strategy, &1)
+        DestinationConnectionIdStrategy::<u8, Instant, Registrar>::offer(&strategy, &1)
             .map(|offered| (offered.sequence, offered.id))
             .collect();
     assert_eq!(offered, [(0, cid(9))]);

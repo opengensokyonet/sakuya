@@ -1,7 +1,7 @@
 //! A send strategy that plans as the ranked strategy does and records what
 //! the connection's components tell and publish to it.
 use core::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     fmt::Debug,
     task::{Context, Poll},
 };
@@ -22,6 +22,20 @@ use sakuya_wire::v1::encryption_level::EncryptionLevel;
 thread_local! {
     static EVENTS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static LIMITS: RefCell<Vec<Option<DatagramLimits>>> = const { RefCell::new(Vec::new()) };
+    static OVERHEADS: RefCell<Vec<Option<PacketOverheads>>> = const { RefCell::new(Vec::new()) };
+    static STALE_INITIAL: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+/// Let the next packet overheads a planner observes reach the ranked
+/// planner with an Initial packet taking `overhead` bytes, whatever they
+/// say: as a strategy that plans with what it was told before plans.
+pub fn tell_stale_initial_overhead(overhead: usize) {
+    STALE_INITIAL.with(|stale| stale.set(Some(overhead)));
+}
+
+/// Forget an overhead [`tell_stale_initial_overhead`] left untold.
+pub fn forget_stale_overheads() {
+    STALE_INITIAL.with(Cell::take);
 }
 
 fn record(event: impl Into<String>) {
@@ -47,6 +61,13 @@ pub fn take_strategy_events() -> Vec<String> {
 /// with none told.
 pub fn observed_limits(path: usize) -> Option<DatagramLimits> {
     LIMITS.with(|limits| limits.borrow().get(path).copied().flatten())
+}
+
+/// What the planner of the Nth link path built was last told each kind of
+/// packet takes beyond its frames; `None` when it was told nothing yet.
+/// Each strategy made starts with none told.
+pub fn observed_overheads(path: usize) -> Option<PacketOverheads> {
+    OVERHEADS.with(|overheads| overheads.borrow().get(path).copied().flatten())
 }
 
 /// A ticket that records when it goes.
@@ -77,6 +98,7 @@ pub struct EventLoggingSendStrategy<I: SendStrategyTypes> {
 impl<I: SendStrategyTypes> Default for EventLoggingSendStrategy<I> {
     fn default() -> Self {
         LIMITS.with(|limits| limits.borrow_mut().clear());
+        OVERHEADS.with(|overheads| overheads.borrow_mut().clear());
         Self {
             inner: RankedSendStrategy::new(),
             link_paths: 0,
@@ -204,7 +226,17 @@ impl<I: SendStrategyTypes> Observe<DatagramLimits> for EventLoggingPlanner<I> {
 }
 
 impl<I: SendStrategyTypes> Observe<PacketOverheads> for EventLoggingPlanner<I> {
-    fn observe(&mut self, change: PacketOverheads) {
+    fn observe(&mut self, mut change: PacketOverheads) {
+        OVERHEADS.with(|overheads| {
+            let mut overheads = overheads.borrow_mut();
+            if overheads.len() <= self.index {
+                overheads.resize(self.index + 1, None);
+            }
+            overheads[self.index] = Some(change);
+        });
+        if let Some(initial) = STALE_INITIAL.with(Cell::take) {
+            change.initial = Some(initial);
+        }
         self.inner.observe(change);
     }
 }

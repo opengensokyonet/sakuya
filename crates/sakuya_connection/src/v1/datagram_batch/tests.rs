@@ -333,11 +333,24 @@ fn a_client_initial_and_a_handshake_packet_are_coalesced_and_padded_to_1200() {
     let entry = batch.take_accepted(1).next().unwrap();
     assert_eq!(entry.len(), 1200);
     assert!(batch.is_empty());
-    let initial_record = record(&mut initial, entry.initial.unwrap().sealed);
+    // each packet is charged its own bytes in flight
+    let (initial_packet, handshake_packet) = (entry.initial.unwrap(), entry.handshake.unwrap());
+    assert_eq!(
+        initial_packet.in_flight.as_ref().map(|charge| charge.bytes),
+        Some(first_len)
+    );
+    assert_eq!(
+        handshake_packet
+            .in_flight
+            .as_ref()
+            .map(|charge| charge.bytes),
+        Some(second_len)
+    );
+    let initial_record = record(&mut initial, initial_packet.sealed);
     assert_eq!(initial_record.bytes, first_len);
     assert_eq!(initial_record.summaries, [Summary::Frame("crypto")]);
     assert!(initial_record.ack_eliciting && initial_record.in_flight);
-    let handshake_record = record(&mut handshake, entry.handshake.unwrap().sealed);
+    let handshake_record = record(&mut handshake, handshake_packet.sealed);
     assert_eq!(handshake_record.bytes, second_len);
     assert_eq!(
         handshake_record.summaries,
@@ -533,10 +546,9 @@ fn ack_only_content_is_not_limited_by_what_may_go_in_flight() {
     assert_eq!(accounts.congestion.bytes_in_flight(), 0);
     assert_eq!(accounts.pacer.0, 0);
     assert_eq!(accounts.credit(), 3000 - len as u64);
-    let record = record(
-        &mut handshake,
-        batch.take_first().unwrap().handshake.unwrap().sealed,
-    );
+    let packet = batch.take_first().unwrap().handshake.unwrap();
+    assert!(packet.in_flight.is_none());
+    let record = record(&mut handshake, packet.sealed);
     assert!(!record.ack_eliciting && !record.in_flight);
     assert_eq!(record.summaries, [Summary::Frame("ack")]);
 }
@@ -709,4 +721,75 @@ fn a_panic_neither_seals_nor_batches() {
     assert_eq!(handshake.next_packet_number(), PacketNumber::ZERO);
     assert_eq!(accounts.used.get(), None);
     assert_eq!(accounts.congestion.bytes_in_flight(), 0);
+}
+
+#[test]
+fn a_probe_with_only_an_ack_uses_no_permit() {
+    let hk = handshake_keys();
+    let mut handshake = Journals::new();
+    let mut accounts = Accounts::new();
+    accounts.congestion.grant_probe_permits(ProbeCount::Two);
+    let mut batch = Batch::new(NonZeroUsize::MIN);
+    {
+        let mut datagram = accounts.start(&mut batch, Role::Server, 1500, 1500, true);
+        let packet = datagram
+            .start_handshake_packet(handshake.start_attempt(()), &hk, None, scid())
+            .unwrap();
+        let mut open = packet.open::<AckOnlyClass>();
+        let ack = AckFrame::from_packet_ranges(
+            [PacketNumber::ZERO..=PacketNumber::ZERO],
+            VarIntField::shortest(VarInt::ZERO),
+            None,
+        )
+        .unwrap();
+        open.write_frame(ack, Summary::Frame("ack")).unwrap();
+    }
+    assert_eq!(batch.len(), 1);
+    assert_eq!(accounts.congestion.probe_permits(), 2);
+    assert_eq!(accounts.congestion.bytes_in_flight(), 0);
+}
+
+#[test]
+fn a_datagram_taken_out_takes_its_bytes_with_it() {
+    let ik = initial_keys();
+    let mut initial = Journals::new();
+    let mut accounts = Accounts::new();
+    let mut batch = Batch::new(NonZeroUsize::new(2).unwrap());
+    let ack = || {
+        AckFrame::from_packet_ranges(
+            [PacketNumber::ZERO..=PacketNumber::ZERO],
+            VarIntField::shortest(VarInt::ZERO),
+            None,
+        )
+        .unwrap()
+    };
+    {
+        let mut datagram = accounts.start(&mut batch, Role::Server, 1500, 1500, false);
+        let packet = datagram
+            .start_initial_packet(initial.start_attempt(()), &ik, None, scid(), Bytes::new())
+            .unwrap();
+        let mut open = packet.open::<AckOnlyClass>();
+        open.write_frame(ack(), Summary::Frame("ack")).unwrap();
+    }
+    {
+        let mut datagram = accounts.start(&mut batch, Role::Server, 1500, 1500, false);
+        let packet = datagram
+            .start_initial_packet(initial.start_attempt(()), &ik, None, scid(), Bytes::new())
+            .unwrap();
+        let mut open = packet.open::<InFlightClass>();
+        open.write_frame(crypto(b"hello"), Summary::Frame("crypto"))
+            .unwrap();
+    }
+    let later = batch.datagrams().nth(1).unwrap().to_vec();
+    let discarded: Vec<_> = batch
+        .take_discarded(|datagram| datagram.len() < 1200)
+        .collect();
+    assert_eq!(discarded.len(), 1);
+    // what goes to the link and what settles it stay paired
+    assert_eq!(batch.outgoing().len(), batch.entries().count());
+    for (outgoing, entry) in batch.outgoing().iter().zip(batch.entries()) {
+        assert_eq!(outgoing.payload.len(), entry.len());
+    }
+    assert_eq!(batch.outgoing()[0].payload[..], later[..]);
+    assert_eq!(batch.entries().next().unwrap().len(), 1200);
 }

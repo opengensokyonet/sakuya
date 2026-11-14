@@ -25,8 +25,9 @@
 //!    next packet leads with: the packet is the last of the datagram, and
 //!    padded to its floor, when that does not fit after it. A datagram the
 //!    content left empty is filled again from the start. Filling ends when
-//!    the batch is full, when the planner has nothing to plan, or when the
-//!    plan names content that cannot go now: no connection ID fits it, its
+//!    the batch is full, when the planner has nothing to plan or asks for
+//!    the close packet again, which is not kept here, or when the plan
+//!    names content that cannot go now: no connection ID fits it, its
 //!    level has no keys to send with, or it does not fit its packet. With
 //!    nothing in the batch the call then waits for the planner; in the last
 //!    cases it wakes itself first, so that what the lend changed is reread
@@ -115,8 +116,8 @@ use super::{
     },
     send::SendTypes,
     send_planning::{
-        CongestionAllowance, LinkPathPlanner, LinkPathSendPlannerOf, NextPacketNumber,
-        SendStrategyCore, SendStrategyOf, datagram_limits, packet_overheads,
+        CongestionAllowance, LinkPathPlanner, LinkPathSendPlannerOf, SendKeyLevels,
+        SendStrategyCore, SendStrategyOf, datagram_limits, link_path_packet_overheads,
     },
     spaces::{DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
 };
@@ -124,9 +125,7 @@ use crate::{
     call::{CallBundle, CallKind, NodeCallFamily, NodeLoan},
     clock::{InstantOf, LinkIdOf},
     component::{ArgsOf, LineageOf, ReadSet},
-    connection_id::{
-        DestinationConnectionIdStrategy, OfferedConnectionId, datagram::DatagramConnectionId,
-    },
+    connection_id::{OfferedConnectionId, datagram::DatagramConnectionId},
     feedback::{FeedbackSummariesOf, FeedbackSummaryOf, PartsSendFeedback},
     frame_source::{
         HandshakePacket, InitialPacket, OneRttPacket, OneRttProbePacket, PacketKind,
@@ -342,6 +341,10 @@ enum FillEnd {
     /// The plan names content that cannot go now; the planner keeps no
     /// waker.
     Blocked,
+    /// The planner asks for the close packet to be sent again, which is
+    /// not kept here: nothing is filled, and the call does not wake itself
+    /// for it.
+    ResendClose,
 }
 
 /// What filling one datagram came to.
@@ -604,7 +607,7 @@ where
         }
         match end {
             _ if !batch.is_empty() => Poll::Ready(()),
-            FillEnd::Full | FillEnd::NothingPlanned => Poll::Pending,
+            FillEnd::Full | FillEnd::NothingPlanned | FillEnd::ResendClose => Poll::Pending,
             FillEnd::Blocked => {
                 // what this lend changed is reread before the next plan
                 cx.waker().wake_by_ref();
@@ -786,22 +789,6 @@ where
         }
     }
 
-    /// The next packet number of `space` and the largest acknowledged in
-    /// it, while its send journals are there.
-    fn next_packet_number(
-        &self,
-        numbers: &PacketNumberSpaces<PacketNumberSpaceState>,
-        space: PacketNumberSpaceKind,
-    ) -> Option<NextPacketNumber> {
-        let journals = self.journals.get(space)?;
-        Some(NextPacketNumber {
-            next: journals.next_packet_number(),
-            largest_acked: numbers
-                .get(space)
-                .and_then(PacketNumberSpaceState::largest_acked),
-        })
-    }
-
     /// Fill one datagram into `batch`, from the limits and the plan of this
     /// moment.
     fn fill_datagram(
@@ -840,32 +827,18 @@ where
         let max_len = limits.capacity_for(FlightClass::AckOnly);
         let in_flight_room = limits.capacity_for(FlightClass::InFlight);
         let scid = self.ids.local();
-        let shortest = DestinationConnectionIdStrategy::<
-            LinkIdOf<T>,
-            InstantOf<T>,
-            ResetTokenRegistrarOf<T>,
-        >::offer(self.ids.destination_mut(), self.link)
-        .map(|offered| offered.id.len())
-        .min();
-        let initial = self
-            .initial_send_keys()
-            .and(self.next_packet_number(&numbers, PacketNumberSpaceKind::Initial));
-        let handshake = self
-            .handshake_keys
-            .send()
-            .and(self.next_packet_number(&numbers, PacketNumberSpaceKind::Handshake));
-        let one_rtt = self
-            .one_rtt_keys
-            .send()
-            .and(self.next_packet_number(&numbers, PacketNumberSpaceKind::ApplicationData));
-        let mut overheads = packet_overheads(
-            shortest,
-            scid.len(),
+        let keys = SendKeyLevels {
+            initial: self.initial_send_keys().is_some(),
+            handshake: self.handshake_keys.send().is_some(),
+            one_rtt: self.one_rtt_keys.send().is_some(),
+        };
+        let (shortest, mut overheads) = link_path_packet_overheads::<T, L>(
+            self.ids,
+            self.link,
+            &numbers,
+            self.journals,
+            keys,
             max_len,
-            initial,
-            handshake,
-            one_rtt,
-            role,
         );
         self.planner.observe_conditions(limits, overheads);
 
@@ -880,7 +853,7 @@ where
         let mut plan = match planned {
             PlannedDatagram::Fill(plan) => plan,
             // the close packet is not kept here: nothing to fill
-            PlannedDatagram::ResendClose => return DatagramEnd::End(FillEnd::Blocked),
+            PlannedDatagram::ResendClose => return DatagramEnd::End(FillEnd::ResendClose),
         };
         let Some(leading) = plan.leading_content() else {
             return DatagramEnd::End(FillEnd::Blocked);
@@ -892,7 +865,9 @@ where
         };
 
         // the connection ID: the first offered with which the content
-        // planned first fits
+        // planned first fits; where it goes in its packet is not known yet,
+        // so it takes its least room, as the last frame, as the planner
+        // takes it
         let shortest = shortest.unwrap_or(0);
         let padded = leading.packet == PlannedPacketKind::Initial
             && (overheads.expands_every_initial || leading.class == FlightClass::InFlight);
@@ -900,7 +875,7 @@ where
         let fits = |offered: &OfferedConnectionId| {
             let overhead = leading_overhead + offered.id.len().saturating_sub(shortest);
             (!padded || in_flight_room >= MIN_DATAGRAM_SIZE)
-                && capacity >= overhead + leading.min.with_length
+                && capacity >= overhead + leading.min.as_last
         };
         let Some(cid) = DatagramConnectionId::<_, _, _, InstantOf<T>>::choose_first(
             self.ids.destination_mut(),
@@ -1074,8 +1049,9 @@ where
 }
 
 /// Whether the content `next` leads the next packet with fits after the
-/// packet `current`: its packet's header and AEAD tag and its least room
-/// with a Length field, in what is left of the datagram for its class.
+/// packet `current`: its packet's overhead and its least room as the last
+/// frame of that packet, since its position is not known yet, in what is
+/// left of the datagram for its class.
 fn next_fits<Id, W: PacketWriting, P>(
     next: &LeadingContent<Id>,
     current: &Supplied<W, ClassOfSource, P>,
@@ -1083,7 +1059,7 @@ fn next_fits<Id, W: PacketWriting, P>(
 ) -> bool {
     overheads
         .of(next.packet)
-        .is_some_and(|overhead| current.room(next.class) >= overhead + next.min.with_length)
+        .is_some_and(|overhead| current.room(next.class) >= overhead + next.min.as_last)
 }
 
 /// Fill the packet `open` of the kind `K` with the items of `cursor`, each

@@ -208,9 +208,10 @@ impl DatagramLimits {
 
 /// The bytes a packet of each kind takes beyond its frames on a link path
 /// now: its header with the connection ID it would use and its packet
-/// number length, and the AEAD tag. `None` for a kind the link path cannot
-/// send now. Changes of the connection IDs offered and of packet number
-/// lengths reach the strategy as this.
+/// number length, the AEAD tag, and what the header protection sample
+/// needs of the payload after a short packet number. `None` for a kind the
+/// link path cannot send now. Changes of the connection IDs offered and of
+/// packet number lengths reach the strategy as this.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PacketOverheads {
     /// An Initial packet's.

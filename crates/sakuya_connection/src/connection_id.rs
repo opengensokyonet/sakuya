@@ -4,10 +4,11 @@
 //! A [`DestinationConnectionIdStrategy`] decides, for a link path, which of
 //! the peer's connection IDs this side is willing to send with at this
 //! moment: the order of its offer is its preference, and what it leaves out
-//! it is not willing to use there. The sending call asks once per datagram,
-//! because one datagram carries one destination connection ID
-//! ([RFC 9000 §12.2]), and picks the first offered connection ID that fits
-//! what the datagram leads with ([`DatagramConnectionId::choose_first`](datagram::DatagramConnectionId::choose_first)).
+//! it is not willing to use there. An offer is the list of this moment and
+//! holds for one datagram only, because one datagram carries one
+//! destination connection ID ([RFC 9000 §12.2]); asking does not change the
+//! strategy. The sending call picks the first offered connection ID that
+//! fits what the datagram leads with ([`DatagramConnectionId::choose_first`](datagram::DatagramConnectionId::choose_first)).
 //! Every offered connection ID carries its sequence number, which the
 //! protocol keeps unique ([RFC 9000 §5.1.1]); retirement, Retire Prior To
 //! and reset tokens are all keyed by it.
@@ -98,7 +99,7 @@ pub trait DestinationConnectionIdStrategy<Id, I, R: ResetTokenRegistrar>: Sized 
     /// The configuration each connection's strategy is made from.
     type Config: Clone;
 
-    /// The connection IDs offered for one datagram.
+    /// The connection IDs offered at one moment, for one datagram.
     type Offer<'a>: Iterator<Item = OfferedConnectionId>
     where
         Self: 'a;
@@ -125,9 +126,9 @@ pub trait DestinationConnectionIdStrategy<Id, I, R: ResetTokenRegistrar>: Sized 
     /// The connection IDs this side is willing to send with on
     /// `link_path` at this moment, most preferred first.
     ///
-    /// The offer holds for one datagram only: the sending call asks again
-    /// for the next.
-    fn offer(&mut self, link_path: &Id) -> Self::Offer<'_>;
+    /// The offer is the list of this moment and holds for one datagram
+    /// only; asking does not change the strategy.
+    fn offer(&self, link_path: &Id) -> Self::Offer<'_>;
 
     /// A datagram of `datagram_len` bytes with content was sealed on
     /// `link_path` with the connection ID numbered `sequence`.

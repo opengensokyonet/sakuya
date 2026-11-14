@@ -5,7 +5,10 @@
 //! Content that does not fit holds its place: nothing ranked after it goes
 //! into the datagram, so it is not starved by what comes later, unless it
 //! does not hold its place (a path MTU probe, or content waiting for a
-//! larger datagram size). A datagram's packets go in increasing encryption
+//! larger datagram size). Content whose kind of packet the link path
+//! cannot send at all now, as its keys are gone or no connection ID is
+//! offered, is passed over: it holds no place and leaves no threshold, as
+//! no room would let it go. A datagram's packets go in increasing encryption
 //! level: content of a lower level than what is already planned yields, and
 //! with it everything after it, to the next datagram.
 //!
@@ -570,10 +573,9 @@ where
             }
             let min = I::min_lengths(intent);
             let class = I::flight_class(intent);
+            // a kind of packet the link path cannot send now: no room
+            // lets it go, so it holds no place and leaves no threshold
             let Some(overhead) = self.overheads.of(kind) else {
-                if rank.holds_place {
-                    break;
-                }
                 continue;
             };
             let mut class_of_datagram = class;

@@ -302,7 +302,7 @@ where
         );
     }
 
-    fn offer(&mut self, link_path: &Id) -> Self::Offer<'_> {
+    fn offer(&self, link_path: &Id) -> Self::Offer<'_> {
         SequenceMapConnectionIdOffer {
             link_path: link_path.clone(),
             every_link_path: matches!(self.issuance, Issuance::ZeroLength),

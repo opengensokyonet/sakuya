@@ -4,7 +4,7 @@
 //! | Frame | Summary | Delivered | Lost |
 //! | --- | --- | --- | --- |
 //! | PADDING | [`PaddingSummary`] | nothing | nothing |
-//! | ACK | [`AckSummary`]: the Largest Acknowledged and what was due before | the receive journals of the space stop reporting what lies below it (RFC 9000 §13.2.4) | the ACK obligation of the space owes again what it owed before (RFC 9000 §13.2.1) |
+//! | ACK | [`AckSummary`]: the Largest Acknowledged and what was due before | the receive journals of the space stop reporting what lies below it (RFC 9000 §13.2.4) | the ACK obligation of the space owes again what it owed before (RFC 9000 §13.2.1), and the space's ACK intent is published again while an ACK frame is due |
 //!
 //! The summaries of the other frames come with their frame sources.
 use sakuya_recovery::{
@@ -14,12 +14,18 @@ use sakuya_recovery::{
 };
 use sakuya_wire::{parts::Coproduct, v1::packet_number::PacketNumber};
 
-use super::{Choices, Part, spaces::AckObligationsOf};
+use super::{
+    Choices, Part,
+    send::{AckIntent, SendTypes},
+    send_planning::{AckIntentTicketOf, AckIntentTickets, SendStrategyOf},
+    spaces::AckObligationsOf,
+};
 use crate::{
     call::CallBundle,
     clock::InstantOf,
     feedback::{FeedbackSummaryPart, SendFeedback},
     others::OtherNodes,
+    send_strategy::{PublishOutcome, SendStrategy, SendStrategyTypes},
     share::PartList,
     take::{GetAt, Lineage},
     write::PaddingSummary,
@@ -87,12 +93,24 @@ impl FeedbackSummaryPart for Part {
 /// The summaries of version 1 go to the receive journals and the ACK
 /// obligation of the packet's space, of the logical path in the lineage.
 /// A space that is gone takes nothing.
-impl<T, L, V, Ij, Ia> SendFeedback<T, L, V, (Ij, Ia)> for Part
+///
+/// A lost ACK frame also forgets the ticket of its space's ACK intent: the
+/// frame consumed the intent, and when it was written and lost before the
+/// tickets were read again, the ticket left looks like an intent still
+/// waiting for the frame that is due again.
+impl<T, L, V, Ij, Ia, Ik> SendFeedback<T, L, V, (Ij, Ia, Ik)> for Part
 where
     T: Choices,
     L: PartList<T>,
+    SendTypes<T, L>: SendStrategyTypes,
+    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>
+        + PublishOutcome<
+            AckIntent,
+            <SendStrategyOf<T, L> as SendStrategy<SendTypes<T, L>>>::Destination,
+        >,
     V: GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
-        + GetAt<AckObligationsOf<T>, Ia>,
+        + GetAt<AckObligationsOf<T>, Ia>
+        + GetAt<AckIntentTickets<AckIntentTicketOf<T, L>>, Ik>,
 {
     fn delivered<B: CallBundle>(
         lineage: &mut Lineage<'_, V>,
@@ -127,6 +145,9 @@ where
                 {
                     obligation.ack_lost(ack.before);
                 }
+                lineage
+                    .get_mut::<AckIntentTickets<AckIntentTicketOf<T, L>>, Ik>()
+                    .forget(space);
             }
         }
     }

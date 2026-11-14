@@ -364,3 +364,35 @@ fn closing_ends_waiting_intents_and_later_ones_with_the_reason() {
         assert_eq!(error, ConnectionClosedError::new(CloseReason::IdleTimeout));
     }
 }
+
+#[test]
+fn content_of_a_packet_the_link_path_cannot_send_holds_no_place() {
+    // The Initial keys went: the link path sends no Initial packet, and the
+    // core was never told otherwise.
+    let (mut core, mut planner) = setup(&ALL, 12_000);
+    planner.observe(PacketOverheads {
+        initial: None,
+        ..overheads()
+    });
+    let initial = ack(&mut core, Initial);
+    let _handshake = ack(&mut core, Handshake);
+    let (wakes, waker) = waker();
+    let mut plan = ready(&mut planner, &mut core, &waker);
+    assert_eq!(
+        walk(&mut plan, 10),
+        [(PlannedPacketKind::Handshake, vec![SendItem::Ack(Handshake)])]
+    );
+    drop(plan);
+    assert_eq!(initial.state(), IntentState::Waiting);
+    // With only the Initial ACK left, nothing is planned and no room is
+    // waited for: a larger datagram does not wake the planner.
+    pending(&mut planner, &mut core, &waker);
+    assert_eq!(planner.thresholds.ack_only, None);
+    assert_eq!(planner.thresholds.in_flight, None);
+    planner.observe(DatagramLimits {
+        link_ceiling: Some(65527),
+        pmtu_conclusion: 65527,
+        ..limits(usize::MAX)
+    });
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+}

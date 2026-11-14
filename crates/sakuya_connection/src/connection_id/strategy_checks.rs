@@ -117,7 +117,7 @@ fn limit(value: u8) -> ActiveConnectionIdLimit {
     ActiveConnectionIdLimit::new(VarInt::from(value)).expect("scripts use limits of at least 2")
 }
 
-fn sequences<I, Id, S>(strategy: &mut S, link_path: &Id) -> Vec<u64>
+fn sequences<I, Id, S>(strategy: &S, link_path: &Id) -> Vec<u64>
 where
     S: DestinationConnectionIdStrategy<Id, I, RecordingResetTokenRegistrar>,
 {
@@ -209,7 +209,7 @@ where
     let mut strategy = new(connection_id(0), Some(reset_token(0)), limit(2));
     accept(&mut strategy, new_connection_id(1, 0));
     accept(&mut strategy, new_connection_id(1, 0));
-    let offered = sequences(&mut strategy, &link_path);
+    let offered = sequences(&strategy, &link_path);
     assert_eq!(
         offered.iter().filter(|&&sequence| sequence == 1).count(),
         1,
@@ -258,7 +258,7 @@ where
 
     accept(&mut strategy, new_connection_id(9, used_sequence + 1));
     for link_path in [&first, &second] {
-        let offered = sequences(&mut strategy, link_path);
+        let offered = sequences(&strategy, link_path);
         assert!(
             offered.iter().all(|&sequence| sequence > used.sequence),
             "connection IDs below Retire Prior To {} are still offered: {offered:?}",
@@ -293,14 +293,14 @@ where
 
     let on_first = send(&mut strategy, &mut first_registrar, &first);
     strategy.on_link_path_added(&second, true);
-    let offered = sequences(&mut strategy, &second);
+    let offered = sequences(&strategy, &second);
     assert!(
         !offered.contains(&on_first.sequence),
         "connection ID {} used on one link path is offered for another: {offered:?}",
         on_first.sequence
     );
     let on_second = send(&mut strategy, &mut second_registrar, &second);
-    let offered = sequences(&mut strategy, &first);
+    let offered = sequences(&strategy, &first);
     assert!(
         !offered.contains(&on_second.sequence),
         "connection ID {} used on one link path is offered for another: {offered:?}",
@@ -326,7 +326,7 @@ where
     accept(&mut strategy, new_connection_id(1, 0));
     accept(&mut strategy, new_connection_id(2, 0));
 
-    drop(sequences(&mut strategy, &link_path));
+    drop(sequences(&strategy, &link_path));
     // Chosen for a datagram that stays empty: dropped unused.
     let _ = DatagramConnectionId::<S, RecordingResetTokenRegistrar, Id, I>::choose_first(
         &mut strategy,

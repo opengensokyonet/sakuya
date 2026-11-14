@@ -68,7 +68,7 @@ fn strategy() -> Strategy {
     strategy
 }
 
-fn offered(strategy: &mut Strategy, link_path: u8) -> Vec<u64> {
+fn offered(strategy: &Strategy, link_path: u8) -> Vec<u64> {
     DestinationConnectionIdStrategy::<u8, Instant, Registrar>::offer(strategy, &link_path)
         .map(|offered| offered.sequence)
         .collect()
@@ -107,7 +107,7 @@ fn a_used_connection_id_is_bound_and_registered() {
     let chosen = Chosen::choose_first(&mut strategy, &mut registrar, &1, |_| true).unwrap();
     chosen.used(1200);
     assert_eq!(*registrar.0.borrow(), 1);
-    assert_eq!(offered(&mut strategy, 2), [1]);
+    assert_eq!(offered(&strategy, 2), [1]);
 }
 
 #[test]
@@ -117,5 +117,5 @@ fn a_connection_id_dropped_unused_leaves_no_trace() {
     // Chosen for a datagram that stays empty, then dropped.
     assert!(Chosen::choose_first(&mut strategy, &mut registrar, &1, |_| true).is_some());
     assert_eq!(*registrar.0.borrow(), 0);
-    assert_eq!(offered(&mut strategy, 2), [0, 1]);
+    assert_eq!(offered(&strategy, 2), [0, 1]);
 }
