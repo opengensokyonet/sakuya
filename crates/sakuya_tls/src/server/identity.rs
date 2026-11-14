@@ -277,13 +277,17 @@ mod tests {
     const INTERMEDIATE: &[u8] = include_bytes!("../../testdata/docsrs/amazon-rsa-2048-m04.der");
     /// LEAF and INTERMEDIATE in PEM, in that order.
     const CHAIN_PEM: &[u8] = include_bytes!("../../testdata/docsrs/docsrs-com-chain.pem");
-    /// The curve section that `openssl ecparam -genkey` writes before a key.
+    /// The curve section that `openssl ecparam -genkey` writes before a key;
+    /// the PEM reader skips labels it does not know.
     const EC_PARAMETERS: &[u8] =
         b"-----BEGIN EC PARAMETERS-----\nBggqhkjOPQMBBw==\n-----END EC PARAMETERS-----\n";
+    /// A section the PEM reader knows and that is not a certificate, as when
+    /// a file holds the key too. The contents need not be a key.
+    const PRIVATE_KEY: &[u8] = b"-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n";
 
     #[test]
     fn a_pem_chain_keeps_the_certificates_in_order_and_skips_other_sections() {
-        let pem = [EC_PARAMETERS, CHAIN_PEM, EC_PARAMETERS].concat();
+        let pem = [EC_PARAMETERS, PRIVATE_KEY, CHAIN_PEM, PRIVATE_KEY].concat();
         let identity = CertifiedKey::from_pem_chain(&pem, EchoKey(vec![])).unwrap();
         assert_eq!(
             identity.certificates(),
