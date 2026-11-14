@@ -11,17 +11,20 @@
 //! sent again is an entry without packets: settling it touches nothing.
 //!
 //! A [`DatagramWriter`] writes one datagram into the batch's buffer, one
-//! packet after the other ([`PacketWriter`]). It knows the datagram's
-//! floor, which follows from what it carries (RFC 9000 §14.1, §8.2.1,
-//! §8.2.2), and the last packet is padded to it. Dropped with a packet
-//! sealed, it charges the end of the datagram once: each packet that counts
-//! in flight to the link path's congestion controller, which gives what it
-//! keeps for the packet; the bytes in flight, the probe permit and pacing
-//! to the link path's congestion state; the whole datagram to the
-//! anti-amplification limit; the use of its connection ID. Then its bytes
-//! leave the buffer as the payload of an outgoing datagram, marked Not-ECT,
-//! and the datagram joins the batch. Dropped empty, nothing happened.
-//! Dropped while a panic unwinds, it does nothing at all.
+//! packet after the other ([`PacketWriter`]), every packet with the one
+//! destination connection ID it was started with (RFC 9000 §12.2). It
+//! knows the datagram's floor, which follows from what it carries (RFC 9000
+//! §14.1, §8.2.1, §8.2.2), and the last packet is padded to it. Finished
+//! ([`DatagramWriter::finish`]) or dropped with a packet sealed, it charges
+//! the end of the datagram once: each packet that counts in flight to the
+//! link path's congestion controller, which gives what it keeps for the
+//! packet; the bytes in flight, the probe permit and pacing to the link
+//! path's congestion state; the whole datagram to the anti-amplification
+//! limit. Then its bytes leave the buffer as the payload of an outgoing
+//! datagram, marked Not-ECT, and the datagram joins the batch; finishing
+//! gives the datagram's size, for the use of its connection ID. Finished or
+//! dropped empty, nothing happened. Dropped while a panic unwinds, it does
+//! nothing at all.
 
 use core::{fmt, num::NonZeroUsize};
 
@@ -45,22 +48,6 @@ use super::{
     recovery::LinkPathCongestionState,
 };
 use crate::write::PaddingSummary;
-
-/// The destination connection ID one datagram is written with: every
-/// packet of the datagram carries it (RFC 9000 §12.2). It is told how many
-/// bytes it was used for once the datagram is sealed; a datagram that
-/// stays empty never uses it.
-///
-/// The connection's implementation is
-/// [`DatagramConnectionId`](crate::connection_id::datagram::DatagramConnectionId),
-/// which tells the destination connection ID strategy that chose it.
-pub trait ConnectionIdUse {
-    /// The connection ID.
-    fn connection_id(&self) -> ConnectionId;
-
-    /// A datagram of `datagram_len` bytes was sealed with it.
-    fn used(self, datagram_len: usize);
-}
 
 /// One sealed packet waiting in a [`DatagramBatch`]: the send journals'
 /// sealed packet `S` and, for a packet that counts in flight, what it was
@@ -233,18 +220,18 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
         taken.into_iter()
     }
 
-    /// Start writing a datagram at `now` with `cid`, sent by a side of
-    /// `role` that asks the peer to send with connection IDs of
-    /// `local_id_length`, of at most `max_len` bytes, of which packets that count in
-    /// flight take at most `in_flight_room`; `probe` when it may go past
+    /// Start writing a datagram at `now` with the destination connection ID
+    /// `dcid`, sent by a side of `role` that asks the peer to send with
+    /// connection IDs of `local_id_length`, of at most `max_len` bytes, of
+    /// which packets that count in flight take at most `in_flight_room`; `probe` when it may go past
     /// the congestion window on a permit of `congestion`, which it uses if
     /// it carries anything that counts in flight. When it is sealed it is
     /// charged to `congestion`, `controller` and `anti_amplification`.
     #[allow(clippy::too_many_arguments)]
-    pub fn start_datagram<'b, U, K, I>(
+    pub fn start_datagram<'b, K, I>(
         &'b mut self,
         now: I,
-        cid: U,
+        dcid: ConnectionId,
         role: Role,
         local_id_length: ConnectionIdLength,
         max_len: usize,
@@ -253,9 +240,8 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
         congestion: &'b mut LinkPathCongestionState<I>,
         controller: &'b mut K,
         anti_amplification: &'b mut AntiAmplification,
-    ) -> DatagramWriter<'b, Si, Sh, Sa, U, K, I>
+    ) -> DatagramWriter<'b, Si, Sh, Sa, K, I>
     where
-        U: ConnectionIdUse,
         K: CongestionController<I, SentState = C> + Pacer<I>,
         I: Copy,
     {
@@ -263,7 +249,7 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
         // leaves it, and an empty one took its bytes back
         self.buffer.clear();
         let state = DatagramState {
-            dcid: cid.connection_id(),
+            dcid,
             role,
             local_id_length,
             start: self.buffer.len(),
@@ -283,7 +269,6 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
             handshake: None,
             application_data: None,
             initial_goes_out: false,
-            cid: Some(cid),
             now,
             probe,
             congestion,
@@ -338,11 +323,10 @@ impl DatagramState {
 
 /// One datagram being written into a [`DatagramBatch`].
 ///
-/// `U` is its connection ID, `C` the congestion controller and pacer of
-/// the link path, `I` the type of instants.
-pub struct DatagramWriter<'b, Si, Sh, Sa, U, C, I>
+/// `C` is the congestion controller and pacer of the link path, `I` the
+/// type of instants.
+pub struct DatagramWriter<'b, Si, Sh, Sa, C, I>
 where
-    U: ConnectionIdUse,
     C: CongestionController<I> + Pacer<I>,
     I: Copy,
 {
@@ -354,8 +338,6 @@ where
     handshake: Option<SealedInDatagram<Sh>>,
     application_data: Option<SealedInDatagram<Sa>>,
     initial_goes_out: bool,
-    /// Kept until the datagram is sealed.
-    cid: Option<U>,
     now: I,
     probe: bool,
     congestion: &'b mut LinkPathCongestionState<I>,
@@ -363,9 +345,8 @@ where
     anti_amplification: &'b mut AntiAmplification,
 }
 
-impl<Si, Sh, Sa, U, C, I> fmt::Debug for DatagramWriter<'_, Si, Sh, Sa, U, C, I>
+impl<Si, Sh, Sa, C, I> fmt::Debug for DatagramWriter<'_, Si, Sh, Sa, C, I>
 where
-    U: ConnectionIdUse,
     C: CongestionController<I> + Pacer<I>,
     I: Copy,
 {
@@ -377,9 +358,8 @@ where
     }
 }
 
-impl<Si, Sh, Sa, U, C, I> DatagramWriter<'_, Si, Sh, Sa, U, C, I>
+impl<Si, Sh, Sa, C, I> DatagramWriter<'_, Si, Sh, Sa, C, I>
 where
-    U: ConnectionIdUse,
     C: CongestionController<I> + Pacer<I>,
     I: Copy,
 {
@@ -570,16 +550,25 @@ fn open_slot<S>(state: &DatagramState, slot: &Option<S>) {
     );
 }
 
-impl<Si, Sh, Sa, U, C, I> Drop for DatagramWriter<'_, Si, Sh, Sa, U, C, I>
+impl<Si, Sh, Sa, C, I> DatagramWriter<'_, Si, Sh, Sa, C, I>
 where
-    U: ConnectionIdUse,
     C: CongestionController<I> + Pacer<I>,
     I: Copy,
 {
-    fn drop(&mut self) {
-        // a panic ends the whole connection: nothing is charged or batched
-        if std::thread::panicking() || self.state.packets == 0 {
-            return;
+    /// Seal the datagram into the batch: its size once it carries a
+    /// packet, for the use of its connection ID; `None` when it is empty,
+    /// and nothing happened. Dropping the writer seals it the same way,
+    /// without the size.
+    #[must_use = "a datagram sealed with content reports the use of its connection ID"]
+    pub fn finish(mut self) -> Option<usize> {
+        self.seal()
+    }
+
+    /// Charge the end of the datagram and move it into the batch, once: the
+    /// writer is empty afterwards.
+    fn seal(&mut self) -> Option<usize> {
+        if self.state.packets == 0 {
+            return None;
         }
         let len = self.len();
         let app_limited = self.congestion.app_limited();
@@ -607,9 +596,6 @@ where
         self.congestion
             .on_datagram_sealed(self.controller, self.state.in_flight, probe);
         self.anti_amplification.sent(len);
-        if let Some(cid) = self.cid.take() {
-            cid.used(len);
-        }
         self.outgoing.push(OutgoingDatagram {
             payload: self.buffer.split_to(len).freeze(),
             ecn: EcnMarking::NotEct,
@@ -621,6 +607,22 @@ where
             handshake,
             application_data,
         });
+        self.state.packets = 0;
+        Some(len)
+    }
+}
+
+impl<Si, Sh, Sa, C, I> Drop for DatagramWriter<'_, Si, Sh, Sa, C, I>
+where
+    C: CongestionController<I> + Pacer<I>,
+    I: Copy,
+{
+    fn drop(&mut self) {
+        // a panic ends the whole connection: nothing is charged or batched
+        if std::thread::panicking() {
+            return;
+        }
+        let _ = self.seal();
     }
 }
 

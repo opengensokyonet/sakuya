@@ -41,7 +41,7 @@ impl ResetTokenRegistrar for Registrar {
 }
 
 type Strategy = SequenceMapDestinationConnectionIdStrategy<u8, Registrar>;
-type Chosen<'a> = DatagramConnectionId<'a, Strategy, Registrar, u8, Instant>;
+type Chosen = DatagramConnectionId<Strategy, Registrar, u8, Instant>;
 
 fn cid(sequence: u8) -> ConnectionId {
     ConnectionId::new(&[sequence + 1; 4]).unwrap()
@@ -78,12 +78,8 @@ fn offered(strategy: &Strategy, link_path: u8) -> Vec<u64> {
 
 #[test]
 fn chooses_the_first_offered_that_fits() {
-    let mut strategy = strategy();
-    let mut registrar = Registrar::default();
-    let chosen = Chosen::choose_first(&mut strategy, &mut registrar, &1, |offered| {
-        offered.sequence == 1
-    })
-    .unwrap();
+    let strategy = strategy();
+    let chosen = Chosen::choose_first(&strategy, &1, |offered| offered.sequence == 1).unwrap();
     assert_eq!(
         chosen.offered(),
         OfferedConnectionId {
@@ -94,7 +90,7 @@ fn chooses_the_first_offered_that_fits() {
     assert_eq!(chosen.connection_id(), cid(1));
 
     let mut tried = Vec::new();
-    let none = Chosen::choose_first(&mut strategy, &mut registrar, &1, |offered| {
+    let none = Chosen::choose_first(&strategy, &1, |offered| {
         tried.push(offered.sequence);
         false
     });
@@ -106,18 +102,32 @@ fn chooses_the_first_offered_that_fits() {
 fn a_used_connection_id_is_bound_and_registered() {
     let mut strategy = strategy();
     let mut registrar = Registrar::default();
-    let chosen = Chosen::choose_first(&mut strategy, &mut registrar, &1, |_| true).unwrap();
-    chosen.used(1200);
+    let chosen = Chosen::choose_first(&strategy, &1, |_| true).unwrap();
+    chosen.used(&mut strategy, &mut registrar, &1, 1200);
     assert_eq!(*registrar.0.borrow(), 1);
     assert_eq!(offered(&strategy, 2), [1]);
 }
 
 #[test]
-fn a_connection_id_dropped_unused_leaves_no_trace() {
+fn the_strategy_is_free_between_the_choice_and_the_use() {
     let mut strategy = strategy();
     let mut registrar = Registrar::default();
-    // Chosen for a datagram that stays empty, then dropped.
-    assert!(Chosen::choose_first(&mut strategy, &mut registrar, &1, |_| true).is_some());
-    assert_eq!(*registrar.0.borrow(), 0);
+    let chosen = Chosen::choose_first(&strategy, &1, |_| true).unwrap();
+    // told of another event while the datagram is written
+    DestinationConnectionIdStrategy::<u8, Instant, Registrar>::on_link_path_added(
+        &mut strategy,
+        &2,
+        true,
+    );
+    chosen.used(&mut strategy, &mut registrar, &1, 1200);
+    assert_eq!(*registrar.0.borrow(), 1);
+}
+
+#[test]
+fn a_connection_id_dropped_unused_leaves_no_trace() {
+    let strategy = strategy();
+    // Chosen for a datagram that stays empty, then dropped: the strategy,
+    // only read by the choice, binds nothing to the link path.
+    assert!(Chosen::choose_first(&strategy, &1, |_| true).is_some());
     assert_eq!(offered(&strategy, 2), [0, 1]);
 }

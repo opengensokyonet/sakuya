@@ -11,7 +11,8 @@
 //! distinct identities the caller passes.
 //!
 //! Connection IDs are chosen as the sending call chooses them, through
-//! [`DatagramConnectionId::choose_first`] with the first offered one.
+//! [`DatagramConnectionId::choose_first`] with the first offered one, and
+//! a use is reported through [`DatagramConnectionId::used`].
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -28,7 +29,6 @@ use super::{
     DestinationConnectionIdStrategy, NewConnectionId, OfferedConnectionId, ResetTokenRegistrar,
     datagram::DatagramConnectionId,
 };
-use crate::v1::datagram_batch::ConnectionIdUse as _;
 
 /// A registrar that records which tokens are registered through it and not
 /// yet revoked.
@@ -140,13 +140,12 @@ where
 {
     let chosen = DatagramConnectionId::<S, RecordingResetTokenRegistrar, Id, I>::choose_first(
         strategy,
-        registrar,
         link_path,
         |_| true,
     )
     .expect("the strategy offers a connection ID");
     let offered = chosen.offered();
-    chosen.used(1200);
+    chosen.used(strategy, registrar, link_path, 1200);
     offered
 }
 
@@ -330,8 +329,7 @@ where
     drop(sequences(&strategy, &link_path));
     // Chosen for a datagram that stays empty: dropped unused.
     let _ = DatagramConnectionId::<S, RecordingResetTokenRegistrar, Id, I>::choose_first(
-        &mut strategy,
-        &mut registrar,
+        &strategy,
         &link_path,
         |_| true,
     );

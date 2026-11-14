@@ -1,8 +1,7 @@
 //! Datagrams and packets written, read back with the receiving side's
 //! opening.
 
-use core::{cell::Cell, num::NonZeroUsize};
-use std::rc::Rc;
+use core::num::NonZeroUsize;
 
 use bytes::{Bytes, BytesMut};
 use sakuya_packet_protection::{
@@ -119,21 +118,6 @@ impl Pacer<u64> for Charged {
     }
 }
 
-/// A connection ID that records the size it was used for.
-pub(in crate::v1) struct RecordedCid {
-    id: ConnectionId,
-    used: Rc<Cell<Option<usize>>>,
-}
-
-impl ConnectionIdUse for RecordedCid {
-    fn connection_id(&self) -> ConnectionId {
-        self.id
-    }
-    fn used(self, datagram_len: usize) {
-        self.used.set(Some(datagram_len));
-    }
-}
-
 const DCID: [u8; 8] = [0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
 
 fn dcid() -> ConnectionId {
@@ -149,7 +133,6 @@ pub(in crate::v1) struct Accounts {
     congestion: LinkPathCongestionState<u64>,
     pacer: Charged,
     amplification: AntiAmplification,
-    used: Rc<Cell<Option<usize>>>,
     /// The length of the connection IDs this side asks the peer to send
     /// with: that of [`scid`] unless a test changes it.
     local_id_length: ConnectionIdLength,
@@ -163,7 +146,6 @@ impl Accounts {
             congestion: LinkPathCongestionState::new(),
             pacer: Charged::default(),
             amplification,
-            used: Rc::new(Cell::new(None)),
             local_id_length: scid().length(),
         }
     }
@@ -175,22 +157,11 @@ impl Accounts {
         max_len: usize,
         in_flight_room: usize,
         probe: bool,
-    ) -> DatagramWriter<
-        'b,
-        DequeSealedPacket,
-        DequeSealedPacket,
-        DequeSealedPacket,
-        RecordedCid,
-        Charged,
-        u64,
-    > {
-        let cid = RecordedCid {
-            id: dcid(),
-            used: Rc::clone(&self.used),
-        };
+    ) -> DatagramWriter<'b, DequeSealedPacket, DequeSealedPacket, DequeSealedPacket, Charged, u64>
+    {
         batch.start_datagram(
             0,
-            cid,
+            dcid(),
             role,
             self.local_id_length,
             max_len,
@@ -292,7 +263,7 @@ fn a_client_initial_and_a_handshake_packet_are_coalesced_and_padded_to_1200() {
     let (mut initial, mut handshake) = (Journals::new(), Journals::new());
     let mut accounts = Accounts::new();
     let mut batch = Batch::new(NonZeroUsize::new(4).unwrap());
-    {
+    let finished = {
         let mut datagram = accounts.start(&mut batch, Role::Client, 1500, 1500, false);
         {
             let packet = datagram
@@ -304,13 +275,21 @@ fn a_client_initial_and_a_handshake_packet_are_coalesced_and_padded_to_1200() {
             open.conclude(true);
         }
         assert_eq!(datagram.floor(), 1200, "a client's Initial packet");
-        let packet = datagram
-            .start_handshake_packet(handshake.start_attempt(()), &hk, None, scid())
-            .unwrap();
-        let mut open = packet.open::<InFlightClass>();
-        open.write_frame(PingFrame, Summary::Frame("ping")).unwrap();
-        open.conclude(false);
-    }
+        {
+            let packet = datagram
+                .start_handshake_packet(handshake.start_attempt(()), &hk, None, scid())
+                .unwrap();
+            let mut open = packet.open::<InFlightClass>();
+            open.write_frame(PingFrame, Summary::Frame("ping")).unwrap();
+            open.conclude(false);
+        }
+        datagram.finish()
+    };
+    assert_eq!(
+        finished,
+        Some(1200),
+        "the size, for the connection ID's use"
+    );
     let bytes: Vec<Vec<u8>> = batch.datagrams().map(<[u8]>::to_vec).collect();
     assert_eq!(bytes.len(), 1);
     assert_eq!(bytes[0].len(), 1200);
@@ -335,7 +314,6 @@ fn a_client_initial_and_a_handshake_packet_are_coalesced_and_padded_to_1200() {
     assert_eq!(accounts.congestion.bytes_in_flight(), 1200);
     assert_eq!(accounts.pacer.0, 1200);
     assert_eq!(accounts.credit(), 3000 - 1200);
-    assert_eq!(accounts.used.get(), Some(1200));
 
     let entry = batch.take_accepted(1).next().unwrap();
     assert_eq!(entry.len(), 1200);
@@ -539,10 +517,10 @@ fn a_packet_without_frames_takes_its_header_back() {
         }
         assert_eq!(datagram.len(), 0);
         assert!(datagram.is_empty());
+        assert_eq!(datagram.finish(), None, "an empty datagram uses nothing");
     }
     assert!(batch.is_empty());
     assert_eq!(handshake.next_packet_number(), PacketNumber::ZERO);
-    assert_eq!(accounts.used.get(), None);
     assert_eq!(accounts.congestion.bytes_in_flight(), 0);
     assert_eq!(accounts.pacer.0, 0);
     assert_eq!(accounts.credit(), 3000);
@@ -788,7 +766,6 @@ fn a_panic_neither_seals_nor_batches() {
     assert!(unwound.is_err());
     assert!(batch.is_empty());
     assert_eq!(handshake.next_packet_number(), PacketNumber::ZERO);
-    assert_eq!(accounts.used.get(), None);
     assert_eq!(accounts.congestion.bytes_in_flight(), 0);
 }
 

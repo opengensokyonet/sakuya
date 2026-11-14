@@ -70,7 +70,7 @@ use super::{
     close::{CloseReasonRecord, ImmediateClosePolicy, LocalCloseCause, TransportClose},
     confirmation::HandshakeConfirmation,
     connection_ids::{ConnectionIdsOf, LinkPathResetTokenRegistrar, ResetTokenRegistrarOf},
-    datagram_batch::{ConnectionIdUse as _, DatagramState, SealedInDatagram},
+    datagram_batch::{DatagramState, SealedInDatagram},
     keys::{DirectionKeys, HandshakeKeys, InitialKeys, OneRttKeys, OneRttSendKeys},
     packet_writer::{PacketStart, PacketWriter},
     recovery::peer_max_udp_payload_size,
@@ -671,13 +671,17 @@ where
         let (hlist_pat![packet, ids, registrar, planner], _) =
             Take::<SealedTakes<T, L>, Is>::take(lineage);
         let chosen = DatagramConnectionId::<_, _, _, InstantOf<T>>::choose_first(
-            ids.destination_mut(),
-            registrar.registrar_mut(),
+            ids.destination(),
             &link,
             |each| each.sequence == offered.sequence,
         );
         if let Some(chosen) = chosen {
-            chosen.used(sealed.datagram.len());
+            chosen.used(
+                ids.destination_mut(),
+                registrar.registrar_mut(),
+                &link,
+                sealed.datagram.len(),
+            );
         }
         *packet = ClosePacket::Sealed(sealed);
         Publish::<ResendCloseIntent, Irc>::publish(

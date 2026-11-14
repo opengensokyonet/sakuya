@@ -8,7 +8,11 @@
 //! holds for one datagram only, because one datagram carries one
 //! destination connection ID ([RFC 9000 §12.2]); asking does not change the
 //! strategy. The sending call picks the first offered connection ID that
-//! fits what the datagram leads with ([`DatagramConnectionId::choose_first`](datagram::DatagramConnectionId::choose_first)).
+//! fits what the datagram leads with ([`DatagramConnectionId::choose_first`](datagram::DatagramConnectionId::choose_first)),
+//! which only reads the strategy, and once the datagram is sealed with
+//! content it gives the choice back with the datagram's size
+//! ([`DatagramConnectionId::used`](datagram::DatagramConnectionId::used)),
+//! which tells the strategy of the use ([`DestinationConnectionIdStrategy::on_used`]).
 //! Every offered connection ID carries its sequence number, which the
 //! protocol keeps unique ([RFC 9000 §5.1.1]); retirement, Retire Prior To
 //! and reset tokens are all keyed by it.

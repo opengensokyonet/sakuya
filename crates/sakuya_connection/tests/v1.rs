@@ -2656,6 +2656,36 @@ fn version_1_dispatches_the_frames_it_reads() {
     dispatches::<Mine, HList![v1::Part], _>();
 }
 
+/// What filling leaves of a link path's lineage, where each part finds its
+/// frame sources, still holds the logical path's connection IDs to change:
+/// a frame source can write frames of the destination connection ID
+/// strategy, and filling reports a connection ID's use there.
+#[test]
+fn filling_leaves_the_connection_ids_to_change() {
+    use core::marker::PhantomData;
+    use sakuya_connection::{
+        take::RefsOf,
+        v1::{
+            connection_ids::ConnectionIdsOf,
+            sending::{FillReadTakes, FillTakes},
+        },
+    };
+    /// What is left of `V` once `U` is taken.
+    fn rest<'x, V, U, I>(_: PhantomData<V>, _: PhantomData<U>) -> PhantomData<V::Rest>
+    where
+        V: TakeEach<'x, U, I>,
+        U: RefsOf<'x>,
+    {
+        PhantomData
+    }
+    /// `V` holds `X`, to read or change.
+    fn holds<V: GetAt<X, I>, X, I>(_: PhantomData<V>, _: PhantomData<X>) {}
+    let link_path = PhantomData::<<Parts as LineageLists<'static, Mine>>::LinkPath>;
+    let keys_left = rest(link_path, PhantomData::<FillTakes<Mine, Parts>>);
+    let left = rest(keys_left, PhantomData::<FillReadTakes<Mine>>);
+    holds(left, PhantomData::<ConnectionIdsOf<Mine>>);
+}
+
 /// The Long Packet Type bits of an Initial packet.
 const INITIAL: u8 = 0b00;
 /// The Long Packet Type bits of a Handshake packet.

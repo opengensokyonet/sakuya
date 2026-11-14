@@ -16,11 +16,17 @@
 //!    what each kind of packet takes beyond its frames ([`PacketOverheads`]),
 //!    which the planner is told before it is asked for the plan. The
 //!    connection ID is the first one offered for the link path with which
-//!    the content planned first fits; each planned packet then gets a
-//!    packet of its kind, opened with the keys of its level, and each
-//!    planned item whose least room fits is given to its frame source; one
-//!    datagram carries one connection ID (RFC 9000 §12.2), and a 0-RTT
-//!    packet is never written, as no keys to send one with are kept.
+//!    the content planned first fits, chosen by reading the destination
+//!    connection ID strategy only; each planned packet then gets a packet
+//!    of its kind, opened with the keys of its level, and each planned item
+//!    whose least room fits is given to its frame source, which finds its
+//!    components in what filling left of the lineage, the logical path's
+//!    connection IDs among them; one datagram carries one connection ID
+//!    (RFC 9000 §12.2), and a 0-RTT packet is never written, as no keys to
+//!    send one with are kept. Once the datagram is sealed with content, the
+//!    strategy is told that the connection ID was used, with the
+//!    datagram's size and the link path's reset token registrar; a datagram
+//!    left empty used nothing.
 //!    Before a packet is sealed, the plan says what the
 //!    next packet leads with: the packet is the last of the datagram, and
 //!    padded to its floor, when that does not fit after it. A datagram the
@@ -250,14 +256,17 @@ pub trait LinkPathSendingCapability: ReceiverFamily {
 }
 
 /// What filling takes out of the link path's lineage: the send strategy's
-/// core and planner, the connection IDs and the registrar of the link
-/// path's reset tokens, the send journals, the count of the AEAD's usage,
-/// the recovery factory and the anti-amplification limit of the logical
-/// link.
+/// core and planner, the registrar of the link path's reset tokens, the
+/// send journals, the count of the AEAD's usage, the recovery factory and
+/// the anti-amplification limit of the logical link.
+///
+/// The logical path's [`ConnectionIds`](super::connection_ids::ConnectionIds)
+/// stay in what is left, where frame sources find them too: filling reads
+/// them at the start of each datagram and tells the destination connection
+/// ID strategy of a use once a datagram is sealed with content.
 pub type FillTakes<T, L> = HList![
     SendStrategyCore<SendStrategyOf<T, L>>,
     LinkPathPlanner<LinkPathSendPlannerOf<T, L>>,
-    ConnectionIdsOf<T>,
     LinkPathResetTokenRegistrar<ResetTokenRegistrarOf<T>>,
     SendJournalsOf<T, L>,
     AeadUsage,
@@ -326,7 +335,8 @@ pub type SettleReads<T, L> = HList![
 
 /// The positions the sending call takes by, grouped as the steps use them:
 /// `Is` of its limits; for filling, `It` of [`FillTakes`], `Iw` of
-/// [`FillReadTakes`] and `Ir` of [`FillReads`] in what is left, `Ik` of
+/// [`FillReadTakes`], `Ir` of [`FillReads`] and `Ici` of the connection IDs
+/// in what is left, `Ik` of
 /// [`FillRecoveryTakes`], `Hs` of
 /// each part's frame sources; for handing over, `Ii`, `Ih`, `Io` of the
 /// keys and `Il` of the link's clone; for settling, `Ij` of the send
@@ -346,6 +356,7 @@ type Positions<
     It,
     Iw,
     Ir,
+    Ici,
     Ik,
     Hs,
     Ii,
@@ -374,7 +385,7 @@ type Positions<
     Ilf,
 > = (
     Is,
-    (It, Iw, Ir, Ik, Hs),
+    (It, Iw, Ir, Ici, Ik, Hs),
     (Ii, Ih, Io, Il),
     (Ij, If, Iv, Ie, Iq, Hf),
     (Ipp, Ima, Jx, Jr, Jm),
@@ -430,6 +441,7 @@ impl<
     It,
     Iw,
     Ir,
+    Ici,
     Ik,
     Hs,
     Ii,
@@ -467,6 +479,7 @@ impl<
             It,
             Iw,
             Ir,
+            Ici,
             Ik,
             Hs,
             Ii,
@@ -552,7 +565,8 @@ where
     L: ConnectionErrorsOf,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ier>,
     for<'x> FillKeysRest<'x, T, L, It>: TakeEach<'x, FillReadTakes<T>, Iw>,
-    for<'x> FillRest<'x, T, L, It, Iw>: ReadEach<FillReads<T, L>, Ir>,
+    for<'x> FillRest<'x, T, L, It, Iw>:
+        ReadEach<FillReads<T, L>, Ir> + GetAt<ConnectionIdsOf<T>, Ici>,
     for<'x> L: PartsFrameSourceDispatch<
             T,
             InitialPacket,
@@ -675,7 +689,6 @@ where
             hlist_pat![
                 core,
                 planner,
-                ids,
                 registrar,
                 journals,
                 usage,
@@ -689,13 +702,12 @@ where
         let filled = others.with_own_recovery::<FillRecoveryTakes<T, L>, Ik, _>(
             |hlist_pat![part, state], others| {
                 lend_congestion::<T, L, B, Jx, Jr, _>(factory, part, others, |mut access| {
-                    let mut filling = Filling::<T, L, _, _, Ir, Ipp, Hs> {
+                    let mut filling = Filling::<T, L, _, _, Ir, Ici, Ipp, Hs> {
                         now,
                         link: &link,
                         link_path: &link_path,
                         core,
                         planner,
-                        ids,
                         registrar,
                         journals,
                         initial_keys,
@@ -810,14 +822,14 @@ where
 // ---- filling ----
 
 /// What [`Filling`] reads its components and finds its frame sources by.
-type FillPositions<Ir, Ipp, Hs> = fn() -> (Ir, Ipp, Hs);
+type FillPositions<Ir, Ici, Ipp, Hs> = fn() -> (Ir, Ici, Ipp, Hs);
 
 /// What one poll fills with: the borrows of what it took, the instant of
 /// the poll and the link path it fills for.
 ///
-/// `V` is what is left of the lineage, where the frame sources are found;
-/// `A` the congestion access lent for the poll.
-struct Filling<'f, 'r, T, L, V, A, Ir, Ipp, Hs>
+/// `V` is what is left of the lineage, where the connection IDs and the
+/// frame sources are found; `A` the congestion access lent for the poll.
+struct Filling<'f, 'r, T, L, V, A, Ir, Ici, Ipp, Hs>
 where
     T: Choices,
     L: LineagePartList<T> + FeedbackSummariesOf,
@@ -829,7 +841,6 @@ where
     link_path: &'f LinkPathIdentifierOf<T, L>,
     core: &'f mut SendStrategyCore<SendStrategyOf<T, L>>,
     planner: &'f mut LinkPathPlanner<LinkPathSendPlannerOf<T, L>>,
-    ids: &'f mut ConnectionIdsOf<T>,
     registrar: &'f mut LinkPathResetTokenRegistrar<ResetTokenRegistrarOf<T>>,
     journals: &'f mut SendJournalsOf<T, L>,
     initial_keys: &'f InitialKeys<T::Crypto>,
@@ -845,10 +856,10 @@ where
     estimate: RttEstimate,
     pmtu_conclusion: usize,
     state: &'f mut LinkPathCongestionState<InstantOf<T>>,
-    positions: core::marker::PhantomData<FillPositions<Ir, Ipp, Hs>>,
+    positions: core::marker::PhantomData<FillPositions<Ir, Ici, Ipp, Hs>>,
 }
 
-impl<T, L, V, A, S, Ir, Ipp, Hs> Filling<'_, '_, T, L, V, A, Ir, Ipp, Hs>
+impl<T, L, V, A, S, Ir, Ici, Ipp, Hs> Filling<'_, '_, T, L, V, A, Ir, Ici, Ipp, Hs>
 where
     T: Choices,
     L: LineagePartList<T> + FeedbackSummariesOf + ParametersOf<TransportParameterSpace>,
@@ -872,7 +883,7 @@ where
     LinkPathSendPlannerOf<T, L>: Observe<DatagramLimits> + Observe<PacketOverheads>,
     A: CongestionController<InstantOf<T>, SentState = S> + Pacer<InstantOf<T>>,
     TransportParameterSlots<L>: Selector<Option<MaxUdpPayloadSize>, Ipp>,
-    V: ReadEach<FillReads<T, L>, Ir>,
+    V: ReadEach<FillReads<T, L>, Ir> + GetAt<ConnectionIdsOf<T>, Ici>,
     L: PartsFrameSourceDispatch<T, InitialPacket, V, FeedbackSummaryOf<T, L>, Hs>
         + PartsFrameSourceDispatch<T, HandshakePacket, V, FeedbackSummaryOf<T, L>, Hs>
         + PartsFrameSourceDispatch<T, ZeroRttPacket, V, FeedbackSummaryOf<T, L>, Hs>
@@ -947,14 +958,16 @@ where
         );
         let max_len = limits.capacity_for(FlightClass::AckOnly);
         let in_flight_room = limits.capacity_for(FlightClass::InFlight);
-        let scid = self.ids.local();
+        // only read, so that the frame sources find them in what is left
+        let ids = self.rest.get::<ConnectionIdsOf<T>, Ici>();
+        let scid = ids.local();
         let keys = SendKeyLevels {
             initial: self.initial_send_keys().is_some(),
             handshake: self.handshake_keys.send().is_some(),
             one_rtt: self.one_rtt_keys.send().is_some(),
         };
         let (shortest, mut overheads) = link_path_packet_overheads::<T, L>(
-            self.ids,
+            ids,
             self.link,
             &numbers,
             self.journals,
@@ -998,9 +1011,8 @@ where
             (!padded || in_flight_room >= MIN_DATAGRAM_SIZE)
                 && capacity >= overhead + leading.min.as_last
         };
-        let Some(cid) = DatagramConnectionId::<_, _, _, InstantOf<T>>::choose_first(
-            self.ids.destination_mut(),
-            self.registrar.registrar_mut(),
+        let Some(chosen) = DatagramConnectionId::<_, _, _, InstantOf<T>>::choose_first(
+            ids.destination(),
             self.link,
             fits,
         ) else {
@@ -1010,7 +1022,7 @@ where
             && limits.congestion_window_left.min(limits.pacing_allowance) < max_len;
         let mut datagram = batch.start_datagram(
             self.now,
-            cid,
+            chosen.connection_id(),
             role,
             scid.length(),
             max_len,
@@ -1169,9 +1181,21 @@ where
                 break;
             }
         }
-        let sealed = !datagram.is_empty();
-        drop(datagram);
+        let sealed = datagram.finish();
         drop(plan);
+        // a datagram with content used its connection ID; for one left
+        // empty, the choice is dropped and nothing happened
+        if let Some(len) = sealed {
+            chosen.used(
+                self.rest
+                    .get_mut::<ConnectionIdsOf<T>, Ici>()
+                    .destination_mut(),
+                self.registrar.registrar_mut(),
+                self.link,
+                len,
+            );
+        }
+        let sealed = sealed.is_some();
         if blocked || (skipped && !sealed) {
             DatagramEnd::End(FillEnd::Blocked)
         } else {
@@ -1589,6 +1613,7 @@ impl<
     It,
     Iw,
     Ir,
+    Ici,
     Ik,
     Hs,
     Ii,
@@ -1625,6 +1650,7 @@ impl<
             It,
             Iw,
             Ir,
+            Ici,
             Ik,
             Hs,
             Ii,
@@ -1708,7 +1734,8 @@ where
     L: ConnectionErrorsOf,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ier>,
     for<'x> FillKeysRest<'x, T, L, It>: TakeEach<'x, FillReadTakes<T>, Iw>,
-    for<'x> FillRest<'x, T, L, It, Iw>: ReadEach<FillReads<T, L>, Ir>,
+    for<'x> FillRest<'x, T, L, It, Iw>:
+        ReadEach<FillReads<T, L>, Ir> + GetAt<ConnectionIdsOf<T>, Ici>,
     for<'x> L: PartsFrameSourceDispatch<
             T,
             InitialPacket,
@@ -1759,6 +1786,7 @@ where
         It,
         Iw,
         Ir,
+        Ici,
         Ik,
         Hs,
         Ii,
@@ -1799,6 +1827,7 @@ where
                 It,
                 Iw,
                 Ir,
+                Ici,
                 Ik,
                 Hs,
                 Ii,
