@@ -860,6 +860,9 @@ mod probe {
         /// Note an ACK frame up to the packet number as sent in a 1-RTT
         /// packet, as writing one will.
         NoteAckFrameSent(u64),
+        /// Count this many packets as sealed with the current sending
+        /// generation of the 1-RTT keys, as sending them would.
+        Seal(u64),
         /// Log the CRYPTO data ready at the level being read; the largest
         /// packet number, the ranges and the ACK obligation of the Initial
         /// space; the idle timeout's deadline; and the reason for closing.
@@ -906,7 +909,31 @@ mod probe {
     packet_feeder!(Mine);
     packet_feeder!(ClientMine);
     packet_feeder!(SpyMine);
-    impl<T, L, I, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ic, Icr, Ip, Ian, Icid, Isj, Irg>
+    impl<
+        T,
+        L,
+        I,
+        Ii,
+        Ih,
+        Io,
+        Ij,
+        Im,
+        Ia,
+        It,
+        Iu,
+        Ikp,
+        Ir,
+        Ie,
+        Ik,
+        Hd,
+        Ic,
+        Icr,
+        Ip,
+        Ian,
+        Icid,
+        Isj,
+        Irg,
+    >
         DataComponent<
             T,
             L,
@@ -1073,6 +1100,12 @@ mod probe {
                     lineage
                         .get_mut::<KeyPhaseNumbers, Ikp>()
                         .sent(generation, PacketNumber::new(number).unwrap());
+                }
+                PacketStep::Seal(count) => {
+                    let usage = lineage.get_mut::<AeadUsage, Iu>();
+                    for _ in 0..count {
+                        usage.sealed();
+                    }
                 }
                 PacketStep::NoteAckFrameSent(largest) => {
                     lineage
@@ -3206,20 +3239,19 @@ fn the_peer_updates_again_once_its_update_was_acknowledged() {
 
 #[test]
 fn an_ack_of_a_packet_of_the_sending_generation_confirms_it() {
-    use probe::PacketStep::{InspectKeyUpdate, InstallOneRttKeys, NoteSent, Receive};
+    use probe::PacketStep::{InspectKeyUpdate, InstallOneRttKeys, Receive};
     reset();
     let first = link();
-    feed([(
-        ms(10),
-        probe::Step::Sent {
-            space: PacketNumberSpaceKind::ApplicationData,
-            count: 3,
-        },
-    )]);
+    let sent = |count| probe::Step::Sent {
+        space: PacketNumberSpaceKind::ApplicationData,
+        count,
+    };
+    // packet 0 goes before the 1-RTT keys come; once they are there, the
+    // sending call notes the next number, 1, as the lowest one sent with
+    // generation 0, and packets 1 and 2 follow
+    feed([(ms(4), sent(1)), (ms(10), sent(2))]);
     feed_packets([
         (ms(5), InstallOneRttKeys),
-        // packets 0 to 2 are sealed with generation 0, from 1 on
-        (ms(11), NoteSent(0, 1)),
         (ms(12), InspectKeyUpdate),
         (
             ms(50),
@@ -3250,7 +3282,7 @@ fn an_ack_of_a_packet_of_the_sending_generation_confirms_it() {
     ]);
     let mut connection = connection!(Mine, AddressValidation::Validated, first);
     take_log();
-    let log = run(&mut connection, 5..=71);
+    let log = run(&mut connection, 4..=71);
     assert_eq!(
         lines_of(log, &["send", "processed", "error"]),
         [
@@ -5908,4 +5940,90 @@ fn a_stateless_reset_after_the_link_paths_drained_changes_nothing() {
     let log = run(&mut connection, 12..=12);
     assert_eq!(log.len(), 1, "{log:?}");
     assert!(log[0].contains("reason Some(\"Peer("), "{log:?}");
+}
+
+// ---- 1-RTT key updates in the sending call ----
+
+/// The steps that give the server the client's Source Connection ID, its
+/// 1-RTT keys and `sealed` packets sealed with their first sending
+/// generation, then a 1-RTT packet at 10 ms, whose ACK is due at 35 ms,
+/// after the maximum ACK delay; the key update state is inspected at 8 and
+/// 40 ms.
+fn sealed_with_first_generation(
+    first: &LinkId<(), ()>,
+    sealed: u64,
+) -> [(Duration, probe::PacketStep); 6] {
+    use probe::PacketStep::{InspectKeyUpdate, InstallOneRttKeys, Receive, Seal};
+    [
+        (
+            ms(5),
+            Receive(received(
+                initial_from(&CLIENT_SCID, 0, &ping()),
+                first,
+                ms(5),
+            )),
+        ),
+        (ms(6), InstallOneRttKeys),
+        (ms(7), Seal(sealed)),
+        (ms(8), InspectKeyUpdate),
+        (
+            ms(10),
+            Receive(received(one_rtt_packet_of(0, 0, &ping()), first, ms(10))),
+        ),
+        (ms(40), InspectKeyUpdate),
+    ]
+}
+
+#[test]
+fn the_sending_call_initiates_a_key_update_at_three_quarters_of_the_confidentiality_limit() {
+    reset();
+    let first = link();
+    feed([(ms(4), probe::Step::Confirm)]);
+    feed_packets(sealed_with_first_generation(&first, 3 << 21));
+    let mut connection = connection!(Mine, AddressValidation::Validated, first);
+    take_log();
+    let log = run(&mut connection, 4..=40);
+    assert_eq!(
+        lines_of(log, &["send"]),
+        [
+            "send Some(0), confirmed at None, lowest sent Some(0)",
+            // the filling of the ACK initiated it; the next number of the
+            // space is the lowest one of the new generation
+            "send Some(1), confirmed at None, lowest sent Some(0)",
+        ]
+    );
+    let sent = common::take_sent();
+    assert!(
+        sent.iter()
+            .any(|(at, datagram)| *at == ms(35) && short_header(datagram)),
+        "the ACK of the 1-RTT packet goes out: {sent:?}"
+    );
+}
+
+#[test]
+fn the_sending_call_closes_with_aead_limit_reached_when_only_the_closing_packet_is_left() {
+    use probe::PacketStep::Inspect;
+    reset();
+    let first = link();
+    feed_packets(sealed_with_first_generation(&first, (1 << 23) - 1));
+    feed_packets([(ms(41), Inspect)]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first);
+    take_log();
+    let log = run(&mut connection, 4..=41);
+    // the handshake is not confirmed: no update may be initiated
+    assert!(
+        log.iter()
+            .any(|line| line == "send Some(0), confirmed at None, lowest sent Some(0)"),
+        "{log:?}"
+    );
+    let inspect = log.last().expect("the inspection");
+    assert!(
+        inspect.contains("AeadLimitReached { source: ConfidentialityLimitReached }"),
+        "{log:?}"
+    );
+    let sent = common::take_sent();
+    assert!(
+        sent.iter().all(|(_, datagram)| !short_header(datagram)),
+        "no 1-RTT packet goes out: {sent:?}"
+    );
 }

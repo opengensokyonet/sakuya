@@ -9,13 +9,17 @@
 //! generation is the first, once the peer has acknowledged a packet sealed
 //! with it (§6.1); from that acknowledgment three current probe timeouts
 //! are waited, the largest among the link paths (§6.5). The wait is not
-//! kept at the limit itself, where the keys may seal no more packets
-//! (§6.6); an update §6.1 still forbids there closes the connection with
+//! kept where the keys may seal only one more packet within the limit,
+//! which is kept for the packet that closes the connection (§6.6); an
+//! update §6.1 still forbids there closes the connection with
 //! AEAD_LIMIT_REACHED.
 //!
-//! The check is made before each 1-RTT packet is started
-//! ([`prepare_one_rtt_packet`]), which also notes the packet's number as
-//! sent with the generation it is sealed with, for the logical path. An ACK
+//! The sending call of a link path makes the check before each filling
+//! ([`prepare_one_rtt_packets`]), which also notes the number of the next
+//! packet of the Application Data space as sent with the generation the
+//! 1-RTT packets from it on are sealed with, for the logical path; the
+//! filling stops at a 1-RTT packet that would leave only the closing one,
+//! and the next filling checks again. An ACK
 //! frame of the Application Data space whose Largest Acknowledged is at
 //! least the lowest number the logical path sent with the current sending
 //! generation confirms that generation ([`ack_received`]).
@@ -79,10 +83,12 @@ pub enum KeyUpdateError {
     },
 }
 
-/// Before a 1-RTT packet numbered `number` is started on a logical path at
-/// `now`: initiate a key update when one is due and may be initiated, as
-/// the [module documentation](self) says, and note `number` as sent with
-/// the sending generation the packet is sealed with.
+/// Before 1-RTT packets numbered from `number` on are started on a logical
+/// path at `now`: initiate a key update when one is due and may be
+/// initiated, as the [module documentation](self) says, and note `number`
+/// as sent with the sending generation the packets are sealed with. No
+/// packet of the space numbered from `number` on is sealed with older keys
+/// (RFC 9001 §6.4).
 ///
 /// The lineage holds the connection's 1-RTT keys at `Io`, its AEAD usage
 /// at `Iu` and whether the handshake is confirmed at `Ih`, and the logical
@@ -94,11 +100,9 @@ pub enum KeyUpdateError {
 /// # Errors
 ///
 /// [`AeadLimitReachedError::ConfidentialityLimitReached`]: the current
-/// sending generation sealed as many packets as its AEAD allows, and no key
-/// update may be initiated. Nothing is changed then.
-// nothing seals 1-RTT packets but the tests until sending does
-#[cfg_attr(not(test), expect(dead_code))]
-pub(crate) fn prepare_one_rtt_packet<B, I, V, F, Io, Iu, Ih, Ikp>(
+/// sending generation may seal only the closing packet within its AEAD's
+/// limit, and no key update may be initiated. Nothing is changed then.
+pub(crate) fn prepare_one_rtt_packets<B, I, V, F, Io, Iu, Ih, Ikp>(
     lineage: &mut Lineage<'_, V>,
     number: PacketNumber,
     now: I,
@@ -189,7 +193,7 @@ where
         }
         _ => UpdatePermission::Forbidden,
     };
-    if usage.confidentiality_limit_reached(aead) {
+    if usage.only_closing_packet_left(aead) {
         return match permission {
             UpdatePermission::Forbidden => Err(AeadLimitReachedError::ConfidentialityLimitReached),
             UpdatePermission::Now | UpdatePermission::AfterAcknowledgment(_) => Ok(true),
@@ -199,7 +203,7 @@ where
         UpdatePermission::Forbidden => false,
         UpdatePermission::Now => true,
         // a wait past what the instant type represents never ends: the
-        // limit itself is not waited for
+        // closing packet's reserve is not waited for
         UpdatePermission::AfterAcknowledgment(at) => at
             .checked_add(probe_timeout().saturating_mul(3))
             .is_some_and(|end| now >= end),

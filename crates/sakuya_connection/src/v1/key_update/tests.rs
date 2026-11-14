@@ -85,7 +85,7 @@ impl Sending {
                 ],
                 &mut taken,
             );
-            prepare_one_rtt_packet::<RingBackend, _, _, _, _, _, _, _>(
+            prepare_one_rtt_packets::<RingBackend, _, _, _, _, _, _, _>(
                 &mut lineage,
                 pn(number),
                 now,
@@ -225,8 +225,8 @@ fn no_update_before_the_handshake_is_confirmed() {
     assert!(result.is_ok());
     assert_eq!(taken, [3]);
     assert_eq!(sending.send_generation(), 0);
-    // at the limit the keys may seal no more
-    sending.usage = AeadUsage::having_sealed(LIMIT);
+    // one below the limit the keys may seal only the closing packet
+    sending.usage = AeadUsage::having_sealed(LIMIT - 1);
     let (result, _, taken) = sending.prepare(1, ms(11));
     assert!(matches!(
         result,
@@ -280,10 +280,11 @@ fn a_second_update_waits_for_an_acknowledgment_then_three_probe_timeouts() {
 }
 
 #[test]
-fn at_the_limit_an_unacknowledged_update_closes_and_an_acknowledged_one_does_not_wait() {
+fn with_only_the_closing_packet_left_an_unacknowledged_update_closes_and_an_acknowledged_one_does_not_wait()
+ {
     let mut sending = Sending::new(AEAD, DUE, HandshakeConfirmation::Confirmed);
     sending.prepare(10, ms(10)).0.unwrap();
-    sending.usage = AeadUsage::having_sealed(LIMIT - 1);
+    sending.usage = AeadUsage::having_sealed(LIMIT - 2);
     assert!(sending.prepare(11, ms(20)).0.is_ok());
     sending.usage.sealed();
     let (result, _, taken) = sending.prepare(12, ms(21));
@@ -293,7 +294,7 @@ fn at_the_limit_an_unacknowledged_update_closes_and_an_acknowledged_one_does_not
     ));
     assert!(taken.is_empty());
     assert_eq!(sending.send_generation(), 1);
-    // acknowledged: the limit does not wait the three probe timeouts
+    // acknowledged: the closing packet's reserve does not wait the three probe timeouts
     sending.keys.promote_next().unwrap();
     sending.ack(1, 10, ms(30)).unwrap();
     assert_eq!(sending.confirmed_at(), Some(ms(30)));

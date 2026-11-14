@@ -49,6 +49,16 @@
 //! parts as lost. What the datagram was charged with when it was sealed
 //! stays charged.
 //!
+//! Before each filling, the call initiates a 1-RTT key update when one is
+//! due and may be initiated, as the [`key_update`](super::key_update) module
+//! says, and notes the next packet number of the Application Data space as
+//! sent with the current sending generation. Filling stops at a 1-RTT
+//! packet that would leave the current keys only the closing packet within
+//! their AEAD's confidentiality limit, and the next filling initiates the
+//! update; when none may be initiated, the call writes AEAD_LIMIT_REACHED
+//! into the record of why the connection closed and fills nothing more
+//! (RFC 9001 §6.6).
+//!
 //! A client discards its Initial keys once it seals its first Handshake
 //! packet (RFC 9001 §4.9.1); the Initial packets it sealed before still go
 //! out. A server's Initial packets are always padded when they elicit an
@@ -72,6 +82,8 @@ use core::{
     task::{Context, Poll},
 };
 
+use std::sync::Arc;
+
 use bytes::Bytes;
 use frunk_core::hlist_pat;
 use nitori_call::{LentAccess, LentCall, ReceiverFamily, call};
@@ -88,9 +100,10 @@ use sakuya_recovery::{
     rtt::{RttEstimate, RttEstimator},
     send_journals::{PacketSendAttempt, SendJournals},
 };
+use sakuya_stream::connection::CloseReason;
 use sakuya_wire::{
     parameters::ParametersOf,
-    parts::{HList, Selector},
+    parts::{CoprodInjector, HList, Selector},
     v1::{
         role::Role,
         transport_parameters::{
@@ -101,15 +114,22 @@ use sakuya_wire::{
 };
 
 use super::{
-    Choices, Side,
-    aead_usage::AeadUsage,
+    Choices, CloseCauseOf, Side,
+    aead_usage::{AeadLimitReachedError, AeadUsage},
     amplification::AntiAmplification,
+    close::{CloseReasonRecord, LocalCloseCause},
+    confirmation::HandshakeConfirmation,
     connection_ids::{ConnectionIdsOf, LinkPathResetTokenRegistrar, ResetTokenRegistrarOf},
     datagram_batch::{BatchedDatagram, BatchedPacket, DatagramBatch},
+    error::ConnectionError,
     idle::IdleTimeout,
+    key_phase::KeyPhaseNumbers,
+    key_update::prepare_one_rtt_packets,
     keys::{DirectionKeys, HandshakeKeys, InitialKeys, OneRttKeys},
+    largest_probe_timeout,
     link::{LinkClone, LinkFacts},
     parameters::PeerTransportParameters,
+    receive::v1_error,
     recovery::{
         CongestionPartOf, LinkPathCongestionState, OthersOf, PmtuOf, RecoveryFactoryOf, RttOf,
         lend_congestion, max_datagram_size_in_use, peer_max_udp_payload_size, refill,
@@ -126,6 +146,7 @@ use crate::{
     clock::{InstantOf, LinkIdOf},
     component::{ArgsOf, LineageOf, ReadSet},
     connection_id::{OfferedConnectionId, datagram::DatagramConnectionId},
+    error::ConnectionErrorsOf,
     feedback::{FeedbackSummariesOf, FeedbackSummaryOf, PartsSendFeedback},
     frame_source::{
         HandshakePacket, InitialPacket, OneRttPacket, OneRttProbePacket, PacketKind,
@@ -293,7 +314,11 @@ pub type SettleReads<T, L> = HList![
 /// part's feedback; `Ipp` and `Ima` of the peer's `max_udp_payload_size`
 /// and `max_ack_delay`; `Jx`, `Jr` and `Jm` of the stored part of
 /// congestion control, the RTT estimate and the datagram size probing
-/// policy in a recovery layer.
+/// policy in a recovery layer; for 1-RTT key updates, `Iu` of the AEAD's
+/// usage, `Ihc` of whether the handshake is confirmed, `Ikp` of the key
+/// phase numbers, `Ic` of the record of why the connection closed, `Ier`
+/// of version 1's connection error among the composition's, and `Irt` of
+/// the RTT estimator in a recovery layer.
 type Positions<
     Is,
     It,
@@ -316,12 +341,19 @@ type Positions<
     Jx,
     Jr,
     Jm,
+    Iu,
+    Ihc,
+    Ikp,
+    Ic,
+    Ier,
+    Irt,
 > = (
     Is,
     (It, Iw, Ir, Ik, Hs),
     (Ii, Ih, Io, Il),
     (Ij, If, Iv, Ie, Iq, Hf),
     (Ipp, Ima, Jx, Jr, Jm),
+    (Iu, Ihc, Ikp, Ic, Ier, Irt),
 );
 
 /// The upper bound, in debug builds, of the datagrams one poll fills again
@@ -385,6 +417,12 @@ impl<
     Jx,
     Jr,
     Jm,
+    Iu,
+    Ihc,
+    Ikp,
+    Ic,
+    Ier,
+    Irt,
 > LinkPathSendingCapability
     for NodeCallFamily<
         T,
@@ -413,6 +451,12 @@ impl<
             Jx,
             Jr,
             Jm,
+            Iu,
+            Ihc,
+            Ikp,
+            Ic,
+            Ier,
+            Irt,
         >,
         B,
     >
@@ -461,7 +505,13 @@ where
         + GetAt<SendJournalsOf<T, L>, Ij>
         + GetAt<RecoveryFactoryOf<T, L>, If>
         + ReadEach<SettleReads<T, L>, Iv>
-        + GetAt<IdleTimeout<InstantOf<T>>, Ie>,
+        + GetAt<IdleTimeout<InstantOf<T>>, Ie>
+        + GetAt<AeadUsage, Iu>
+        + GetAt<HandshakeConfirmation, Ihc>
+        + GetAt<KeyPhaseNumbers, Ikp>
+        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>,
+    L: ConnectionErrorsOf,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ier>,
     for<'x> FillKeysRest<'x, T, L, It>: TakeEach<'x, FillReadTakes<T>, Iw>,
     for<'x> FillRest<'x, T, L, It, Iw>: ReadEach<FillReads<T, L>, Ir>,
     for<'x> L: PartsFrameSourceDispatch<
@@ -503,7 +553,8 @@ where
         > + PartsSendFeedback<T, L, <L as LineageLists<'x, T>>::LinkPath, Hf>,
     for<'x> NodeData<T, L, layer::Recovery>: FlatMut<'x>,
     for<'x> <NodeData<T, L, layer::Recovery> as FlatMut<'x>>::Out: TakeEach<'x, FillRecoveryTakes<T, L>, Ik>
-        + TakeEach<'x, SettleRecoveryTakes<T, L, S, Ls>, Iq>,
+        + TakeEach<'x, SettleRecoveryTakes<T, L, S, Ls>, Iq>
+        + GetAt<RttOf<T, L>, Irt>,
     for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out: Selector<&'a CongestionPartOf<T, L>, Jx>
         + Selector<&'a RttOf<T, L>, Jr>
@@ -552,6 +603,28 @@ where
         let Some((estimate, pmtu_conclusion)) = read else {
             return no_layer;
         };
+        if let Err(source) =
+            prepare_key_update::<T, L, B, Ij, Iv, Ima, Io, Iu, Ihc, Ikp, Irt>(lineage, others, now)
+        {
+            if !lineage
+                .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
+                .is_written()
+            {
+                let error = v1_error::<L, Ier>(ConnectionError::AeadLimitReached { source });
+                lineage
+                    .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
+                    .record(CloseReason::Local(Arc::new(LocalCloseCause::Connection(
+                        error,
+                    ))));
+            }
+            // what the batch holds still goes; the close is the closing
+            // packet's to send
+            return if batch.is_empty() {
+                Poll::Pending
+            } else {
+                Poll::Ready(())
+            };
+        }
         let (
             hlist_pat![
                 core,
@@ -915,6 +988,16 @@ where
                     blocked = true;
                     break;
                 };
+                // what is left within the AEAD's limit is the closing
+                // packet's: the next filling initiates a key update, or
+                // closes the connection
+                if self
+                    .usage
+                    .only_closing_packet_left(keys.generation().aead())
+                {
+                    blocked = true;
+                    break;
+                }
                 let attempt = self
                     .journals
                     .application_data
@@ -1046,6 +1129,51 @@ where
             DatagramEnd::Next
         }
     }
+}
+
+/// Before a filling of a link path at `now`: initiate a 1-RTT key update
+/// when one is due and may be initiated, and note the next packet number of
+/// the Application Data space as sent with the current sending generation
+/// ([`prepare_one_rtt_packets`]). The probe timeout waited after an
+/// acknowledgment is the largest among the link paths.
+///
+/// # Errors
+///
+/// [`AeadLimitReachedError::ConfidentialityLimitReached`]: the current
+/// sending generation may seal only the closing packet, and no key update
+/// may be initiated.
+#[allow(clippy::type_complexity)] // the positions of what it takes
+fn prepare_key_update<'v, T, L, B, Ij, Iv, Ima, Io, Iu, Ihc, Ikp, Irt>(
+    lineage: &mut LineageOf<'v, T, L, LinkPath>,
+    others: &mut OtherNodes<'v, T, L, B>,
+    now: InstantOf<T>,
+) -> Result<(), AeadLimitReachedError>
+where
+    T: Choices,
+    L: LineagePartList<T> + FeedbackSummariesOf + ParametersOf<TransportParameterSpace>,
+    B: CallBundle,
+    TransportParameterSlots<L>: Selector<Option<MaxAckDelay>, Ima>,
+    for<'x> <L as LineageLists<'x, T>>::LinkPath: GetAt<SendJournalsOf<T, L>, Ij>
+        + ReadEach<SettleReads<T, L>, Iv>
+        + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
+        + GetAt<AeadUsage, Iu>
+        + GetAt<HandshakeConfirmation, Ihc>
+        + GetAt<KeyPhaseNumbers, Ikp>,
+    for<'x> NodeData<T, L, layer::Recovery>: FlatMut<'x>,
+    for<'x> <NodeData<T, L, layer::Recovery> as FlatMut<'x>>::Out: GetAt<RttOf<T, L>, Irt>,
+{
+    let next = lineage
+        .get::<SendJournalsOf<T, L>, Ij>()
+        .application_data
+        .next_packet_number();
+    let hlist_pat![_, thresholds, peer] = (*lineage).read_each::<SettleReads<T, L>, Iv>();
+    let peer_max_ack_delay = peer_max_ack_delay::<L, Ima>(peer).unwrap_or(DEFAULT_MAX_ACK_DELAY);
+    let granularity = thresholds.granularity();
+    prepare_one_rtt_packets::<T::Crypto, _, _, _, Io, Iu, Ihc, Ikp>(lineage, next, now, || {
+        largest_probe_timeout::<T, L, B, Irt>(peer_max_ack_delay, granularity, others)
+            // invariant: the link path that fills has a recovery layer
+            .unwrap_or_else(|| unreachable!("the filling link path has a recovery layer"))
+    })
 }
 
 /// Whether the content `next` leads the next packet with fits after the
@@ -1373,6 +1501,12 @@ impl<
     Jx,
     Jr,
     Jm,
+    Iu,
+    Ihc,
+    Ikp,
+    Ic,
+    Ier,
+    Irt,
 >
     CallKind<
         T,
@@ -1400,6 +1534,12 @@ impl<
             Jx,
             Jr,
             Jm,
+            Iu,
+            Ihc,
+            Ikp,
+            Ic,
+            Ier,
+            Irt,
         >,
     > for LinkPathSendingKind
 where
@@ -1446,7 +1586,13 @@ where
         + GetAt<SendJournalsOf<T, L>, Ij>
         + GetAt<RecoveryFactoryOf<T, L>, If>
         + ReadEach<SettleReads<T, L>, Iv>
-        + GetAt<IdleTimeout<InstantOf<T>>, Ie>,
+        + GetAt<IdleTimeout<InstantOf<T>>, Ie>
+        + GetAt<AeadUsage, Iu>
+        + GetAt<HandshakeConfirmation, Ihc>
+        + GetAt<KeyPhaseNumbers, Ikp>
+        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>,
+    L: ConnectionErrorsOf,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ier>,
     for<'x> FillKeysRest<'x, T, L, It>: TakeEach<'x, FillReadTakes<T>, Iw>,
     for<'x> FillRest<'x, T, L, It, Iw>: ReadEach<FillReads<T, L>, Ir>,
     for<'x> L: PartsFrameSourceDispatch<
@@ -1488,13 +1634,41 @@ where
         > + PartsSendFeedback<T, L, <L as LineageLists<'x, T>>::LinkPath, Hf>,
     for<'x> NodeData<T, L, layer::Recovery>: FlatMut<'x>,
     for<'x> <NodeData<T, L, layer::Recovery> as FlatMut<'x>>::Out: TakeEach<'x, FillRecoveryTakes<T, L>, Ik>
-        + TakeEach<'x, SettleRecoveryTakes<T, L, S, Ls>, Iq>,
+        + TakeEach<'x, SettleRecoveryTakes<T, L, S, Ls>, Iq>
+        + GetAt<RttOf<T, L>, Irt>,
     for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out: Selector<&'a CongestionPartOf<T, L>, Jx>
         + Selector<&'a RttOf<T, L>, Jr>
         + Selector<&'a PmtuOf<T, L>, Jm>,
-    Positions<Is, It, Iw, Ir, Ik, Hs, Ii, Ih, Io, Il, Ij, If, Iv, Ie, Iq, Hf, Ipp, Ima, Jx, Jr, Jm>:
-        'static,
+    Positions<
+        Is,
+        It,
+        Iw,
+        Ir,
+        Ik,
+        Hs,
+        Ii,
+        Ih,
+        Io,
+        Il,
+        Ij,
+        If,
+        Iv,
+        Ie,
+        Iq,
+        Hf,
+        Ipp,
+        Ima,
+        Jx,
+        Jr,
+        Jm,
+        Iu,
+        Ihc,
+        Ikp,
+        Ic,
+        Ier,
+        Irt,
+    >: 'static,
     S: 'static,
 {
     type Call<B: CallBundle> = LentCall<
@@ -1525,6 +1699,12 @@ where
                 Jx,
                 Jr,
                 Jm,
+                Iu,
+                Ihc,
+                Ikp,
+                Ic,
+                Ier,
+                Irt,
             >,
             B,
         >,

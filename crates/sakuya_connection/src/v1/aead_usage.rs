@@ -79,11 +79,13 @@ impl AeadUsage {
         confidentiality_limit(aead).is_some_and(|limit| self.sealed_with_current >= limit / 4 * 3)
     }
 
-    /// Whether the packets sealed with the current sending generation have
-    /// reached the confidentiality limit of `aead`: no more may be sealed
-    /// with it. Never for ChaCha20-Poly1305.
-    pub fn confidentiality_limit_reached(&self, aead: AeadAlgorithm) -> bool {
-        confidentiality_limit(aead).is_some_and(|limit| self.sealed_with_current >= limit)
+    /// Whether, of the packets the confidentiality limit of `aead` lets the
+    /// current sending generation seal, only one is left: the one kept for
+    /// the packet that closes the connection when no key update may be
+    /// initiated, which is sealed once and sent again as it is (RFC 9001
+    /// §6.6). Never for ChaCha20-Poly1305.
+    pub fn only_closing_packet_left(&self, aead: AeadAlgorithm) -> bool {
+        confidentiality_limit(aead).is_some_and(|limit| self.sealed_with_current >= limit - 1)
     }
 }
 
@@ -117,13 +119,14 @@ pub enum AeadLimitReachedError {
         /// The AEAD of the keys of the packet that crossed the limit.
         aead: AeadAlgorithm,
     },
-    /// As many packets were sealed with the current sending generation of
-    /// the 1-RTT keys as the confidentiality limit of their AEAD allows,
-    /// and no key update may be initiated yet: the handshake is not
-    /// confirmed, or the peer has not acknowledged a packet sealed with the
-    /// current generation (RFC 9001 §6.1).
+    /// Of the packets the confidentiality limit of their AEAD lets the
+    /// current sending generation of the 1-RTT keys seal, only the one that
+    /// closes the connection is left, and no key update may be initiated
+    /// yet: the handshake is not confirmed, or the peer has not
+    /// acknowledged a packet sealed with the current generation (RFC 9001
+    /// §6.1).
     #[snafu(display(
-        "as many packets were sealed with the current keys as their AEAD allows, \
+        "the current keys may seal only the closing packet within their AEAD's limit, \
          and no key update may be initiated"
     ))]
     ConfidentialityLimitReached,
@@ -178,14 +181,15 @@ mod tests {
             ..AeadUsage::new()
         };
         assert!(usage.update_due(AeadAlgorithm::Aes128Gcm));
-        assert!(!usage.confidentiality_limit_reached(AeadAlgorithm::Aes128Gcm));
+        assert!(!usage.only_closing_packet_left(AeadAlgorithm::Aes128Gcm));
         assert!(!usage.update_due(AeadAlgorithm::ChaCha20Poly1305));
         usage.sealed_with_current = (3 << 21) - 1;
         assert!(!usage.update_due(AeadAlgorithm::Aes256Gcm));
-        usage.sealed_with_current = (1 << 23) - 1;
+        usage.sealed_with_current = (1 << 23) - 2;
+        assert!(!usage.only_closing_packet_left(AeadAlgorithm::Aes256Gcm));
         usage.sealed();
-        assert!(usage.confidentiality_limit_reached(AeadAlgorithm::Aes256Gcm));
-        assert!(!usage.confidentiality_limit_reached(AeadAlgorithm::ChaCha20Poly1305));
+        assert!(usage.only_closing_packet_left(AeadAlgorithm::Aes256Gcm));
+        assert!(!usage.only_closing_packet_left(AeadAlgorithm::ChaCha20Poly1305));
         usage.send_keys_updated();
         assert_eq!(usage.sealed_with_current(), 0);
     }

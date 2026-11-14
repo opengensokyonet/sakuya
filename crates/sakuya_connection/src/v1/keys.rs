@@ -711,8 +711,6 @@ impl<B: CryptoBackend, I: Copy> OneRttKeys<B, I> {
     ///
     /// Whoever calls it checks first that a key update may be initiated
     /// (§6.1); both directions must be there.
-    // nothing initiates one but the tests until sending does
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn initiate_update(&mut self) {
         let Self::Live(keys) = self else {
             debug_assert!(

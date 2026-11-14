@@ -508,7 +508,21 @@ where
     <NodeData<T, L, layer::Recovery> as FlatMut<'s>>::Out: GetAt<RttOf<T, L>, Ir>,
 {
     let peer_max_ack_delay = peer_max_ack_delay::<L, Ima>(peer).unwrap_or(DEFAULT_MAX_ACK_DELAY);
-    let granularity = thresholds.granularity();
+    largest_probe_timeout::<T, L, B, Ir>(peer_max_ack_delay, thresholds.granularity(), others)
+}
+
+/// [`current_probe_timeout`], from the peer's maximum ACK delay and the
+/// timer granularity as they are.
+fn largest_probe_timeout<'v, 's, T: Choices, L, B: CallBundle, Ir>(
+    peer_max_ack_delay: Duration,
+    granularity: Duration,
+    others: &'s mut OtherNodes<'v, T, L, B>,
+) -> Option<Duration>
+where
+    for<'x> L: LineageLists<'x, T>,
+    NodeData<T, L, layer::Recovery>: FlatMut<'s>,
+    <NodeData<T, L, layer::Recovery> as FlatMut<'s>>::Out: GetAt<RttOf<T, L>, Ir>,
+{
     let mut pto = None;
     others.each_recovery_read::<RttOf<T, L>, Ir>(|_, rtt| {
         let Some(rtt) = rtt else { return };
