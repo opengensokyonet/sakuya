@@ -8,7 +8,7 @@
 //! driver rereads them after a lend that changed one. Each remembers what
 //! it told the strategy last, so the same fact is told once.
 
-use core::fmt;
+use core::{fmt, task::Waker};
 
 use sakuya_link::Link;
 use sakuya_packet_protection::{backend::AEAD_TAG_LEN, packet_number::TruncatedPacketNumber};
@@ -235,12 +235,35 @@ where
 // ---- the planners ----
 
 /// The send planner of a link path, in the link path's node, with the
-/// role, the limits and the packet overheads it was last told.
+/// role, the limits and the packet overheads it was last told, and how the
+/// sending call waits after a plan it could not fill.
 pub struct LinkPathPlanner<P> {
     planner: P,
     role: LinkPathRoleKind,
     limits: Option<DatagramLimits>,
     overheads: Option<PacketOverheads>,
+    blocked: BlockedFilling,
+}
+
+/// Where the sending call of a link path stands after plans it could not
+/// fill: content of a level without keys to send with, or that no
+/// connection ID offered fits.
+///
+/// A planner that plans such content keeps no waker. The call wakes itself
+/// once, so that the planner, told what the lend changed, plans again;
+/// blocked again while nothing it is told has changed, the call waits
+/// until something does.
+#[derive(Debug, Default)]
+enum BlockedFilling {
+    /// The last filling was not blocked, or the planner was told something
+    /// new since.
+    #[default]
+    No,
+    /// The last filling was blocked and the call woke itself.
+    WokeItself,
+    /// Blocked again: the call waits with this waker for what the planner
+    /// is told to change.
+    Waiting(Waker),
 }
 
 impl<P> fmt::Debug for LinkPathPlanner<P> {
@@ -249,6 +272,7 @@ impl<P> fmt::Debug for LinkPathPlanner<P> {
             .field("role", &self.role)
             .field("limits", &self.limits)
             .field("overheads", &self.overheads)
+            .field("blocked", &self.blocked)
             .finish_non_exhaustive()
     }
 }
@@ -276,6 +300,35 @@ impl<P> LinkPathPlanner<P> {
     /// plan with.
     pub fn planner_mut(&mut self) -> &mut P {
         &mut self.planner
+    }
+
+    /// A filling of the link path ended, `blocked` when by a plan it could
+    /// not fill and with nothing to hand over. Returns whether the sending
+    /// call wakes itself to plan again: the first time it is blocked; after
+    /// that it waits with `waker` until the planner is told something new.
+    pub(super) fn filling_ended(&mut self, blocked: bool, waker: &Waker) -> bool {
+        if !blocked {
+            self.blocked = BlockedFilling::No;
+            return false;
+        }
+        match self.blocked {
+            BlockedFilling::No => {
+                self.blocked = BlockedFilling::WokeItself;
+                true
+            }
+            BlockedFilling::WokeItself | BlockedFilling::Waiting(_) => {
+                self.blocked = BlockedFilling::Waiting(waker.clone());
+                false
+            }
+        }
+    }
+
+    /// The planner was told something new: a sending call waiting after a
+    /// blocked filling plans again.
+    fn told_anew(&mut self) {
+        if let BlockedFilling::Waiting(waker) = core::mem::take(&mut self.blocked) {
+            waker.wake();
+        }
     }
 }
 
@@ -319,6 +372,7 @@ where
             role,
             limits: None,
             overheads: None,
+            blocked: BlockedFilling::No,
         }
     }
 
@@ -417,6 +471,7 @@ where
             planner.overheads = Some(overheads);
             planner.planner.observe(overheads);
         }
+        planner.told_anew();
         None
     }
 }

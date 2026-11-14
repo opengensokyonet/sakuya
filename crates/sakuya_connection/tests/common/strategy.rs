@@ -25,6 +25,7 @@ thread_local! {
     static LIMITS: RefCell<Vec<Option<DatagramLimits>>> = const { RefCell::new(Vec::new()) };
     static OVERHEADS: RefCell<Vec<Option<PacketOverheads>>> = const { RefCell::new(Vec::new()) };
     static STALE_INITIAL: Cell<Option<usize>> = const { Cell::new(None) };
+    static STALE_INITIAL_KEPT: Cell<Option<usize>> = const { Cell::new(None) };
 }
 
 /// Let the next packet overheads a planner observes reach the ranked
@@ -34,9 +35,19 @@ pub fn tell_stale_initial_overhead(overhead: usize) {
     STALE_INITIAL.with(|stale| stale.set(Some(overhead)));
 }
 
-/// Forget an overhead [`tell_stale_initial_overhead`] left untold.
+/// Let every packet overheads a planner observes from now on reach the
+/// ranked planner with an Initial packet taking `overhead` bytes: as a
+/// strategy that keeps planning Initial packets whether or not there are
+/// keys to send them with.
+pub fn keep_telling_stale_initial_overhead(overhead: usize) {
+    STALE_INITIAL_KEPT.with(|stale| stale.set(Some(overhead)));
+}
+
+/// Forget an overhead [`tell_stale_initial_overhead`] left untold, and
+/// stop what [`keep_telling_stale_initial_overhead`] started.
 pub fn forget_stale_overheads() {
     STALE_INITIAL.with(Cell::take);
+    STALE_INITIAL_KEPT.with(Cell::take);
 }
 
 fn record(event: impl Into<String>) {
@@ -253,7 +264,10 @@ impl<I: SendStrategyTypes> Observe<PacketOverheads> for EventLoggingPlanner<I> {
             }
             overheads[self.index] = Some(change);
         });
-        if let Some(initial) = STALE_INITIAL.with(Cell::take) {
+        if let Some(initial) = STALE_INITIAL
+            .with(Cell::take)
+            .or(STALE_INITIAL_KEPT.with(Cell::get))
+        {
             change.initial = Some(initial);
         }
         self.inner.observe(change);

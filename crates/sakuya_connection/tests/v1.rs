@@ -5684,6 +5684,68 @@ fn a_plan_blocked_once_wakes_the_call_once() {
 }
 
 #[test]
+fn a_plan_blocked_again_waits_until_the_planner_is_told_something_new() {
+    use probe::PacketStep::{InstallHandshakeKeys, InstallOneRttSendKeys, Receive};
+    reset();
+    let first = link();
+    feed([(
+        ms(6),
+        probe::Step::Sent {
+            space: PacketNumberSpaceKind::Initial,
+            count: 1,
+        },
+    )]);
+    feed_packets([
+        (ms(999), InstallHandshakeKeys),
+        (
+            ms(1000),
+            Receive(received(
+                long_packet(HANDSHAKE, 0, &ping()),
+                &first,
+                ms(1000),
+            )),
+        ),
+        (ms(1006), InstallOneRttSendKeys),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    deliver(
+        padded(
+            &[],
+            |payload| initial_from(&CLIENT_SCID, 0, payload),
+            &ping(),
+        ),
+        &first,
+        ms(5),
+    );
+    let _ = run(&mut connection, 5..=1004);
+    assert_eq!(common::take_sent().len(), 2, "the ACKs");
+    // A planner that keeps planning the probe timeout's PING in an Initial
+    // packet, with the Initial keys gone: the call wakes itself once, and
+    // then waits instead of waking itself again and again.
+    common::strategy::keep_telling_stale_initial_overhead(50);
+    let outer = Outer::new();
+    let mut wakes_at = |at: u64| {
+        advance_to(ms(at));
+        (0..8)
+            .map(|_| {
+                let before = outer.wakes();
+                assert!(outer.poll(&mut connection).is_pending());
+                outer.wakes() - before
+            })
+            .collect::<Vec<_>>()
+    };
+    // the first poll runs the probe timeout, which publishes the PING; the
+    // next plans it and is blocked
+    assert_eq!(wakes_at(1005)[1..], [1, 0, 0, 0, 0, 0, 0]);
+    // the 1-RTT keys to send with change what the planner is told: the
+    // waiting call is woken, plans again, is blocked, wakes itself once
+    // and waits
+    let wakes = wakes_at(1006);
+    assert_eq!(wakes[1..], [1, 0, 0, 0, 0, 0, 0], "{wakes:?}");
+    assert_eq!(common::take_sent(), []);
+}
+
+#[test]
 fn a_datagram_given_up_owes_its_ack_again_and_keeps_its_record() {
     use probe::PacketStep::TakeRecords;
     reset();

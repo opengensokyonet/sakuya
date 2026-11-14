@@ -24,15 +24,18 @@
 //!    Before a packet is sealed, the plan says what the
 //!    next packet leads with: the packet is the last of the datagram, and
 //!    padded to its floor, when that does not fit after it. A datagram the
-//!    content left empty is filled again from the start. Filling ends when
-//!    the batch is full, when the planner has nothing to plan or asks for
-//!    the close packet again before one is sealed, or when the plan
-//!    names content that cannot go now: no connection ID fits it, its
-//!    level has no keys to send with, or it does not fit its packet. With
-//!    nothing in the batch the call then waits for the planner; in the last
-//!    cases it wakes itself first, so that what the lend changed is reread
-//!    before it plans again. What the batch still holds from the last round
-//!    is handed over with what is filled.
+//!    content left empty is filled again from the start, up to a bound of
+//!    empty datagrams in one poll. Filling ends when the batch is full,
+//!    when the planner has nothing to plan or asks for the close packet
+//!    again before one is sealed, when the bound of empty datagrams is
+//!    reached, or when the plan names content that cannot go now: no
+//!    connection ID fits it, its level has no keys to send with, or it
+//!    does not fit its packet. With nothing in the batch the call then
+//!    waits for the planner. In the last case it wakes itself first, so
+//!    that what the lend changed is reread before it plans again; blocked
+//!    again while nothing the planner is told has changed, it waits until
+//!    something does. What the batch still holds from the last round is
+//!    handed over with what is filled.
 //! 2. Handing over. The datagrams that carry a packet of a level whose
 //!    keys to send with are gone by now are taken out, and their packets
 //!    are given up; then the batch goes to [`Link::send`], whose future
@@ -379,11 +382,11 @@ type Positions<
     (Icp, Irs, Ilf),
 );
 
-/// The upper bound, in debug builds, of the datagrams one poll fills again
-/// because the content planned for them left them empty. A frame source
-/// that writes nothing for an item has updated or withdrawn its intent
-/// already, so each empty datagram takes planned content away and the
-/// filling settles; past the bound a source broke that contract.
+/// The most datagrams one poll fills again because the content planned for
+/// them left them empty. A frame source that writes nothing for an item
+/// has updated or withdrawn its intent already, so each empty datagram
+/// takes planned content away and the filling settles; past the bound a
+/// source broke that contract, and the filling ends.
 const EMPTY_DATAGRAMS_PER_POLL: usize = 1024;
 
 /// Why one poll stopped filling.
@@ -400,6 +403,10 @@ enum FillEnd {
     /// sealed: nothing is filled, and the call does not wake itself for it;
     /// once the close packet is sealed the planner is asked again.
     ResendClose,
+    /// The content planned left [`EMPTY_DATAGRAMS_PER_POLL`] datagrams
+    /// empty in this poll: a frame source wrote nothing for its item and
+    /// left its intent as it was. The call does not wake itself for it.
+    LeftEmpty,
 }
 
 /// What filling one datagram came to.
@@ -705,27 +712,30 @@ where
                         positions: core::marker::PhantomData,
                     };
                     let end = filling.fill(batch, cx);
-                    (end, filling.initial_discarded)
+                    let wake_itself = filling
+                        .planner
+                        .filling_ended(end == FillEnd::Blocked && batch.is_empty(), cx.waker());
+                    (filling.initial_discarded, wake_itself)
                 })
             },
         );
         drop(rest);
-        let Some((end, initial_discarded)) = filled else {
+        let Some((initial_discarded, wake_itself)) = filled else {
             return no_layer;
         };
         if initial_discarded {
             // the first Handshake packet sent (RFC 9001 §4.9.1)
             lineage.get_mut::<InitialKeys<T::Crypto>, Ii>().discard();
         }
-        match end {
-            _ if !batch.is_empty() => Poll::Ready(()),
-            FillEnd::Full | FillEnd::NothingPlanned | FillEnd::ResendClose => Poll::Pending,
-            FillEnd::Blocked => {
-                // what this lend changed is reread before the next plan
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
+        if !batch.is_empty() {
+            return Poll::Ready(());
         }
+        if wake_itself {
+            // blocked: what this lend changed is reread before the next
+            // plan
+            cx.waker().wake_by_ref();
+        }
+        Poll::Pending
     }
 
     fn hand_over<'v, 'b>(
@@ -884,10 +894,9 @@ where
             }
             if batch.len() == before {
                 empty += 1;
-                debug_assert!(
-                    empty <= EMPTY_DATAGRAMS_PER_POLL,
-                    "a frame source wrote nothing and left its intent as it was"
-                );
+                if empty >= EMPTY_DATAGRAMS_PER_POLL {
+                    return FillEnd::LeftEmpty;
+                }
             }
         }
     }
