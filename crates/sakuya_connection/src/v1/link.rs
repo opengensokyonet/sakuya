@@ -20,41 +20,22 @@ pub struct LinkFacts {
 }
 
 /// What the connection was made with for its first logical link, kept in
-/// the connection node until the entry and the link path over that link
-/// are built.
-///
-/// The first entry takes the facts; the first link path takes the mark
-/// that it is the first.
+/// the connection node until the entry of that link is built, which takes
+/// the facts.
 #[derive(Debug)]
 pub struct FirstLinkStart {
     facts: Option<LinkFacts>,
-    path_pending: bool,
 }
 
 impl FirstLinkStart {
     /// The connection is made with `facts` about its first logical link.
     pub fn new(facts: LinkFacts) -> Self {
-        Self {
-            facts: Some(facts),
-            path_pending: true,
-        }
+        Self { facts: Some(facts) }
     }
 
     /// The facts about the first logical link, the first time they are
     /// asked for; `None` afterwards.
     pub fn take_facts(&mut self) -> Option<LinkFacts> {
         self.facts.take()
-    }
-
-    /// Whether the next link path built is the connection's first, without
-    /// taking it.
-    pub fn path_pending(&self) -> bool {
-        self.path_pending
-    }
-
-    /// Whether the link path being built is the connection's first: `true`
-    /// the first time only.
-    pub fn take_path(&mut self) -> bool {
-        core::mem::replace(&mut self.path_pending, false)
     }
 }

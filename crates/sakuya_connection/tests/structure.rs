@@ -15,6 +15,7 @@ use sakuya_connection::{
     driver::ConnectionDriver,
     layer::{EstablishedArgs, LinkPathArgs, LogicalPathArgs, RecoveryArgs},
     request::StructureRequest,
+    role::LinkPathRole,
     share::SoleLogicalPath,
 };
 use sakuya_link::{BindingId, LinkId};
@@ -33,7 +34,12 @@ macro_rules! connection {
             TestClock,
             frunk_core::hlist![$(nothing::<$part>()),*],
             LogicalPathArgs { path: PATH },
-            LinkPathArgs { path: PATH, link: TestLink($first) },
+            LinkPathArgs {
+                path: PATH,
+                link: TestLink($first),
+                role: LinkPathRole::Active,
+                peer_switched_local_id: false,
+            },
         )
     };
 }
@@ -151,6 +157,8 @@ fn a_request_is_applied_at_once_and_the_call_goes_on_next_poll() {
         args: LinkPathArgs {
             path: PATH,
             link: TestLink(second),
+            role: LinkPathRole::Candidate,
+            peer_switched_local_id: true,
         },
     }));
     assert!(outer.poll(&mut connection).is_pending());
@@ -237,6 +245,8 @@ fn child_nodes_are_built_moved_and_ended() {
         args: LinkPathArgs {
             path: PATH,
             link: TestLink(second.clone()),
+            role: LinkPathRole::Candidate,
+            peer_switched_local_id: true,
         },
     }));
     assert!(outer.poll(&mut connection).is_pending());

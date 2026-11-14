@@ -19,8 +19,8 @@ use super::{
         ZeroRttReceiving, ZeroRttSending,
     },
     parameters::{LocalTransportParameters, PeerTransportParameters},
-    role::LinkPathRole,
 };
+use crate::role::LinkPathRole;
 
 fn level_keys() -> LevelKeys<RingBackend> {
     let cid = ConnectionId::new(&[0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08]).unwrap();

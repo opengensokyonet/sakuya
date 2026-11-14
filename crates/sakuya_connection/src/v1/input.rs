@@ -130,12 +130,12 @@ use super::{
         packet_number_offset, receive_keys, receive_packet,
     },
     recovery::RttOf,
-    role::LinkPathRole,
     send::SendTypes,
     send_planning::{LinkPathPlanner, LinkPathSendPlannerOf, SendStrategyOf},
     spaces::AckObligationsOf,
     stateless_reset::StatelessResetSignal,
 };
+use crate::role::LinkPathRole;
 use crate::{
     call::{CallBundle, CallKind, NodeCallFamily, NodeLoan},
     clock::{InstantOf, LinkIdOf},

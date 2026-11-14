@@ -40,6 +40,7 @@ pub mod frame_source;
 pub mod layer;
 pub mod others;
 pub mod request;
+pub mod role;
 pub mod send_strategy;
 pub mod share;
 pub mod take;

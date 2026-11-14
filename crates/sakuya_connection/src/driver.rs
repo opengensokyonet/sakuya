@@ -322,12 +322,12 @@ where
     ///
     /// `connection` is what the parts declare the connection node needs;
     /// `link` carries the clone of the first logical link, which goes into
-    /// its entry.
+    /// its entry, and what the first link path starts with.
     pub fn new(
         clock: T::Clock,
         mut connection: ConnectionArgsOf<T, L>,
         mut path: LogicalPathArgs<PathKey<L>>,
-        link: LinkPathArgs<PathKey<L>, T::Link>,
+        link: LinkPathArgs<PathKey<L>, T::Link, InstantOf<T>>,
     ) -> Self {
         let mut types: [Vec<TypeId>; 6] = Default::default();
         let mut data_reads: [Vec<ReadSet>; 6] = Default::default();
@@ -854,14 +854,21 @@ where
     /// is dropped here.
     fn build_link_path(
         &mut self,
-        request: LinkPathArgs<PathKey<L>, T::Link>,
+        request: LinkPathArgs<PathKey<L>, T::Link, InstantOf<T>>,
         now: InstantOf<T>,
         changes: &mut Changes,
     ) {
-        let LinkPathArgs { path, link } = request;
+        let LinkPathArgs {
+            path,
+            link,
+            role,
+            peer_switched_local_id,
+        } = request;
         let mut args = LinkPathArgs {
             path,
             link: link.id().clone(),
+            role,
+            peer_switched_local_id,
         };
         let Some(slot) = self.find_logical_path(&args.path) else {
             return;

@@ -65,9 +65,9 @@ use super::{
     keys::OneRttKeys,
     link::LinkClone,
     recovery::{CongestionPartOf, OthersOf, RecoveryFactoryOf, RttOf},
-    role::LinkPathRole,
     spaces::SendJournalsOf,
 };
+use crate::role::LinkPathRole;
 use crate::{
     call::CallBundle,
     clock::{CheckedAdd, InstantOf},

@@ -10,7 +10,8 @@
 use core::{fmt::Debug, time::Duration};
 
 use crate::{
-    clock::{ConnectionChoices, LinkIdOf},
+    clock::{ConnectionChoices, InstantOf, LinkIdOf},
+    role::LinkPathRole,
     share::{ConnectionArgsOf, PartList, PathKey},
 };
 
@@ -74,7 +75,8 @@ impl Layer for LogicalPath {
     const INDEX: usize = 2;
 }
 impl Layer for LinkPath {
-    type Args<T: ConnectionChoices, L: PartList<T>> = LinkPathArgs<PathKey<L>, LinkIdOf<T>>;
+    type Args<T: ConnectionChoices, L: PartList<T>> =
+        LinkPathArgs<PathKey<L>, LinkIdOf<T>, InstantOf<T>>;
     const INDEX: usize = 3;
 }
 impl Layer for Established {
@@ -102,20 +104,30 @@ pub struct LogicalPathArgs<K> {
     pub path: K,
 }
 
-/// A link path: the key of its logical path and its logical link.
+/// A link path: the key of its logical path and its logical link, and the
+/// protocol facts it starts with, which whoever asks for it gives.
 ///
 /// A request to build a link path carries the connection's clone of the
 /// logical link (`Lk` is the link type): the driver moves it into the
 /// entry of the logical link when it builds that entry with this link
 /// path, and drops it when the entry is there already. The link path node
 /// itself is built from the logical link's identity (`Lk` is
-/// [`LinkIdOf`]); its components read the clone from the entry above.
+/// [`LinkIdOf`]); its components read the clone from the entry above. `I`
+/// is an instant of the connection's clock.
 #[derive(Clone, Debug)]
-pub struct LinkPathArgs<K, Lk> {
+pub struct LinkPathArgs<K, Lk, I> {
     /// The key of the link path's logical path.
     pub path: K,
     /// The link path's logical link.
     pub link: Lk,
+    /// The role the link path starts in: [`LinkPathRole::Active`] for the
+    /// connection's first link path, which the handshake runs over.
+    pub role: LinkPathRole<I>,
+    /// Whether the peer, on this link path, uses another of this side's
+    /// connection IDs than on the link path it came from; when it does
+    /// not, RFC 9000 §9.5 lets this side keep its connection ID towards the
+    /// new remote address. `false` for the connection's first link path.
+    pub peer_switched_local_id: bool,
 }
 
 /// The facts the established layer is built from.

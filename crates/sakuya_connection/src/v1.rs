@@ -59,7 +59,6 @@ pub mod parameters;
 pub mod pto;
 pub mod receive;
 pub mod recovery;
-pub mod role;
 pub mod send;
 pub mod send_planning;
 pub mod sending;
@@ -138,7 +137,6 @@ use self::{
         CongestionPartOf, LinkPathCongestionState, OthersOf, PmtuOf, RecoveryConfigOf,
         RecoveryFactoryOf, RttOf,
     },
-    role::LinkPathRole,
     send::{AckIntent, ProbePingIntent, SendTypes},
     send_planning::{
         AckIntentTicketOf, AckIntentTickets, LinkPathPlanner, LinkPathSendPlannerOf,
@@ -149,6 +147,7 @@ use self::{
     stateless_reset::StatelessResetSignal,
 };
 use crate::connection_id::{DestinationConnectionIdStrategy, reset_token::ResetTokenRegistry};
+use crate::role::LinkPathRole;
 use sakuya_recovery::{
     ack_obligation::AckObligation,
     factory::{LendCongestion, RecoveryFactory},
@@ -435,8 +434,6 @@ where
     ];
     type Calls = HList![LogicalPathReceivingKind];
 }
-/// The planner and the registrar come before the role: they are built
-/// before the role takes the mark of the connection's first link path.
 impl<T: Choices, L> LayerShare<T, L, layer::LinkPath> for Part
 where
     SendTypes<T, L>: SendStrategyTypes,
@@ -1342,9 +1339,9 @@ impl PassiveDataComponent for AntiAmplification {}
 
 // ---- the link path ----
 
-/// The connection's first link path is active from the start: the
-/// handshake runs over it. A later one is a candidate until it is
-/// validated.
+/// A link path starts in the role its request gives: the connection's
+/// first link path is active from the start, as the handshake runs over
+/// it.
 ///
 /// When the link path ends, the packets sent on it that were neither
 /// acknowledged nor declared lost leave the send journals of its logical
@@ -1352,23 +1349,17 @@ impl PassiveDataComponent for AntiAmplification {}
 /// their parts as lost; the kept records of its lost packets go with them,
 /// so a late acknowledgment of them is ignored. Its congestion control
 /// hears of none of it: it ended with the recovery layer.
-impl<T: Choices, L, I, Ij, Hf> Build<T, L, layer::LinkPath, (I, Ij, Hf)>
-    for LinkPathRole<InstantOf<T>>
+impl<T: Choices, L, Ij, Hf> Build<T, L, layer::LinkPath, (Ij, Hf)> for LinkPathRole<InstantOf<T>>
 where
     L: LineagePartList<T> + FeedbackSummariesOf,
-    for<'v> <L as LineageLists<'v, T>>::LinkPathParents:
-        GetAt<FirstLinkStart, I> + GetAt<SendJournalsOf<T, L>, Ij>,
+    for<'v> <L as LineageLists<'v, T>>::LinkPathParents: GetAt<SendJournalsOf<T, L>, Ij>,
     for<'v> L: PartsSendFeedback<T, L, <L as LineageLists<'v, T>>::LinkPathParents, Hf>,
 {
     fn build<'v>(
-        parents: &mut ParentsOf<'v, T, L, layer::LinkPath>,
-        _: &mut ArgsOf<T, L, layer::LinkPath>,
+        _: &mut ParentsOf<'v, T, L, layer::LinkPath>,
+        args: &mut ArgsOf<T, L, layer::LinkPath>,
     ) -> Self {
-        if parents.get_mut::<FirstLinkStart, I>().take_path() {
-            LinkPathRole::Active
-        } else {
-            LinkPathRole::Candidate
-        }
+        args.role
     }
     fn end<'v, B: CallBundle>(
         self,

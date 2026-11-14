@@ -25,8 +25,9 @@ pub enum StructureRequest<K, Lk: Link> {
     /// Build a link path; the entry of its logical link is built with the
     /// first link path over it, and takes the clone of the link from here.
     AddLinkPath {
-        /// Its key, and the connection's clone of its logical link.
-        args: LinkPathArgs<K, Lk>,
+        /// Its key, the connection's clone of its logical link, and what
+        /// it starts with.
+        args: LinkPathArgs<K, Lk, Lk::Instant>,
     },
     /// End a link path; the entry of its logical link ends with the last
     /// link path over it.

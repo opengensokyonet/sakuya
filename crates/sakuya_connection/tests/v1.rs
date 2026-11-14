@@ -32,6 +32,7 @@ use sakuya_connection::{
     layer::{self, EstablishedArgs, LinkPathArgs, LogicalPathArgs, NodeKey},
     others::OtherNodes,
     request::StructureRequest,
+    role::LinkPathRole,
     share::{
         FlatMut, FlatRef, LayerShare, LineageLists, LineagePartList, LinkPathIdentifierOf,
         LogicalPathKeyShare, LogicalPathKeys, NodeData, PartList, SoleLogicalPath,
@@ -60,7 +61,6 @@ use sakuya_connection::{
         recovery::{
             CongestionPartOf, LinkPathCongestionState, RecoveryFactoryOf, RttOf, lend_congestion,
         },
-        role::LinkPathRole,
         spaces::{AckObligationsOf, SendJournalsOf},
     },
 };
@@ -709,6 +709,8 @@ mod probe {
                 args: LinkPathArgs {
                     path: PATH,
                     link: TestLink(second),
+                    role: LinkPathRole::Candidate,
+                    peer_switched_local_id: true,
                 },
             })
         }
@@ -2018,6 +2020,8 @@ macro_rules! connection {
             LinkPathArgs {
                 path: PATH,
                 link: TestLink($first),
+                role: LinkPathRole::Active,
+                peer_switched_local_id: false,
             },
         )
     };

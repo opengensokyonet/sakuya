@@ -74,7 +74,6 @@ use super::{
     keys::{DirectionKeys, HandshakeKeys, InitialKeys, OneRttKeys, OneRttSendKeys},
     packet_writer::{PacketStart, PacketWriter},
     recovery::peer_max_udp_payload_size,
-    role::LinkPathRole,
     send::SendTypes,
     send_planning::{
         DatagramLimitsReads, LinkPathPlanner, LinkPathSendPlannerOf, NextPacketNumber,
@@ -82,6 +81,7 @@ use super::{
     },
     spaces::SendJournalsOf,
 };
+use crate::role::LinkPathRole;
 use crate::{
     call::CallBundle,
     clock::{InstantOf, LinkIdOf},

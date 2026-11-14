@@ -53,13 +53,13 @@ use super::{
         CongestionPartOf, LinkPathCongestionState, OthersOf, RecoveryFactoryOf, RttOf,
         lend_congestion,
     },
-    role::LinkPathRole,
     send::{ProbePingIntent, SendTypes},
     send_planning::{
         LinkPathPlanner, LinkPathSendPlannerOf, ProbePingTicketOf, ProbePingTickets, SendStrategyOf,
     },
     spaces::{DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
 };
+use crate::role::LinkPathRole;
 
 /// The probe timeout of a link path (RFC 9002 §6.2): how many times it
 /// expired since the last acknowledgment that acknowledged something new,

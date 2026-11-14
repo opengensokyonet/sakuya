@@ -28,8 +28,8 @@ use sakuya_wire::{
 };
 
 use super::{
-    Choices, ConnectionArgs, first_flight::FirstFlightStart, link::FirstLinkStart,
-    parameters::LocalTransportParameters, stateless_reset::StatelessResetSignal,
+    Choices, ConnectionArgs, first_flight::FirstFlightStart, parameters::LocalTransportParameters,
+    stateless_reset::StatelessResetSignal,
 };
 use crate::{
     call::CallBundle,
@@ -308,25 +308,22 @@ impl<R> LinkPathResetTokenRegistrar<R> {
 }
 
 /// A link path makes its registrar and is added to its logical path's
-/// strategy when it is built, and ends there when it ends. The peer of
-/// the connection's first link path uses the connection ID it was reached
-/// with; on a later link path this side does not take the exception of
-/// RFC 9000 §9.5, and tells the strategy the peer switched.
-impl<T: Choices, L, Ir, Is, Ii, If> Build<T, L, layer::LinkPath, (Ir, Is, Ii, If)>
+/// strategy when it is built, with whether the peer switched to another of
+/// this side's connection IDs on it as its request says, and ends there
+/// when it ends.
+impl<T: Choices, L, Ir, Is, Ii> Build<T, L, layer::LinkPath, (Ir, Is, Ii)>
     for LinkPathResetTokenRegistrar<ResetTokenRegistrarOf<T>>
 where
     L: LineagePartList<T>,
     for<'v> <L as LineageLists<'v, T>>::LinkPathParents: GetAt<ConnectionResetTokenRegistry<T::ResetTokenRegistry>, Ir>
         + GetAt<Arc<StatelessResetSignal>, Is>
-        + GetAt<ConnectionIdsOf<T>, Ii>
-        + GetAt<FirstLinkStart, If>,
+        + GetAt<ConnectionIdsOf<T>, Ii>,
 {
     fn build<'v>(
         parents: &mut ParentsOf<'v, T, L, layer::LinkPath>,
         args: &mut ArgsOf<T, L, layer::LinkPath>,
     ) -> Self {
         let link = &args.link;
-        let first = parents.get::<FirstLinkStart, If>().path_pending();
         let signal = Arc::clone(parents.get::<Arc<StatelessResetSignal>, Is>());
         let registrar = parents
             .get::<ConnectionResetTokenRegistry<T::ResetTokenRegistry>, Ir>()
@@ -335,7 +332,7 @@ where
         DestinationConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>::on_link_path_added(
             &mut parents.get_mut::<ConnectionIdsOf<T>, Ii>().destination,
             link,
-            !first,
+            args.peer_switched_local_id,
         );
         Self(registrar)
     }

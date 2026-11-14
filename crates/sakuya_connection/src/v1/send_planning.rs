@@ -44,13 +44,13 @@ use super::{
     confirmation::HandshakeConfirmation,
     connection_ids::{ConnectionIdsOf, ResetTokenRegistrarOf},
     keys::{HandshakeKeys, InitialKeys, OneRttKeys},
-    link::{FirstLinkStart, LinkClone, LinkFacts},
+    link::{LinkClone, LinkFacts},
     parameters::PeerTransportParameters,
     recovery::{CongestionPartOf, LinkPathCongestionState, PmtuOf, peer_max_udp_payload_size},
-    role::LinkPathRole,
     send::{AckIntent, ProbePingIntent, SendTypes, shortest_ack_frame},
     spaces::SendJournalsOf,
 };
+use crate::role::LinkPathRole;
 use crate::{
     call::CallBundle,
     clock::{InstantOf, LinkIdOf},
@@ -332,22 +332,10 @@ impl<P> LinkPathPlanner<P> {
     }
 }
 
-/// The role a link path starts in, as its role component decides it: the
-/// connection's first link path is active from the start, a later one is
-/// a candidate.
-fn starting_role(first: &FirstLinkStart) -> LinkPathRoleKind {
-    if first.path_pending() {
-        LinkPathRoleKind::Active
-    } else {
-        LinkPathRoleKind::Candidate
-    }
-}
-
 /// A link path's planner is made by the core when the link path is built,
-/// in the role the link path starts in, and handed back to the core when
-/// the link path ends. It is built before the link path's role, which
-/// takes the mark of the first link path.
-impl<T: Choices, L, Ic, If> Build<T, L, layer::LinkPath, (Ic, If)>
+/// in the role its request gives it, and handed back to the core when the
+/// link path ends.
+impl<T: Choices, L, Ic> Build<T, L, layer::LinkPath, Ic>
     for LinkPathPlanner<LinkPathSendPlannerOf<T, L>>
 where
     L: LineagePartList<T> + LogicalPathKeys,
@@ -355,13 +343,13 @@ where
         SendStrategyTypes<LinkPathIdentifier = crate::share::LinkPathIdentifierOf<T, L>>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     for<'v> <L as LineageLists<'v, T>>::LinkPathParents:
-        GetAt<SendStrategyCore<SendStrategyOf<T, L>>, Ic> + GetAt<FirstLinkStart, If>,
+        GetAt<SendStrategyCore<SendStrategyOf<T, L>>, Ic>,
 {
     fn build<'v>(
         parents: &mut ParentsOf<'v, T, L, layer::LinkPath>,
         args: &mut ArgsOf<T, L, layer::LinkPath>,
     ) -> Self {
-        let role = starting_role(parents.get::<FirstLinkStart, If>());
+        let role = args.role.kind();
         let identifier = L::link_path_identifier(&args.path, &args.link);
         let planner = parents
             .get_mut::<SendStrategyCore<SendStrategyOf<T, L>>, Ic>()

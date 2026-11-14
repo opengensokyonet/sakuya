@@ -93,9 +93,9 @@ use super::{
     key_phase::KeyPhaseNumbers,
     key_update::check_peer_update,
     keys::{DirectionKeys, HandshakeKeys, InitialKeys, OneRttKeys, OneRttReceiveKeys},
-    role::LinkPathRole,
     spaces::AckObligationsOf,
 };
+use crate::role::LinkPathRole;
 use crate::{
     call::CallBundle,
     clock::{InstantOf, LinkIdOf},
