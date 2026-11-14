@@ -1,0 +1,60 @@
+[package]
+name = "wire-differential-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0 OR MIT"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Not a member of the sakuya workspace, nor of the workspace of the package
+# it fuzzes.
+[workspace]
+
+[dependencies]
+bytes = "1.12.1"
+libfuzzer-sys = "0.4.13"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+sakuya_packet_protection = { path = "../../../crates/sakuya_packet_protection" }
+sakuya_tls = { path = "../../../crates/sakuya_tls" }
+sakuya_wire = { path = "../../../crates/sakuya_wire", features = ["datagram", "reset_stream_at"] }
+wire-differential = { path = ".." }
+
+[patch.crates-io]
+quinn-proto = { path = "../vendor/quinn-proto" }
+
+[[bin]]
+name = "frames"
+path = "fuzz_targets/frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parameters"
+path = "fuzz_targets/parameters.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "headers"
+path = "fuzz_targets/headers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "protection"
+path = "fuzz_targets/protection.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "handshake_messages"
+path = "fuzz_targets/handshake_messages.rs"
+test = false
+doc = false
+bench = false

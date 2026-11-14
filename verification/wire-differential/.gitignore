@@ -1,0 +1,7 @@
+/vendor/quinn-proto/
+/target/
+/fuzz/target/
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz/coverage/
+Cargo.lock

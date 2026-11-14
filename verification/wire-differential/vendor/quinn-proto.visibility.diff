@@ -1,0 +1,821 @@
+diff -ru a/src/frame.rs b/src/frame.rs
+--- a/src/frame.rs
++++ b/src/frame.rs
+@@ -20,7 +20,7 @@
+ 
+ /// A QUIC frame type
+ #[derive(Copy, Clone, Eq, PartialEq)]
+-pub struct FrameType(u64);
++pub struct FrameType(pub u64);
+ 
+ impl FrameType {
+     fn stream(self) -> Option<StreamInfo> {
+@@ -48,7 +48,7 @@
+     }
+ }
+ 
+-pub(crate) trait FrameStruct {
++pub trait FrameStruct {
+     /// Smallest number of bytes this type of frame is guaranteed to fit within.
+     const SIZE_BOUND: usize;
+ }
+@@ -56,7 +56,7 @@
+ macro_rules! frame_types {
+     {$($name:ident = $val:expr,)*} => {
+         impl FrameType {
+-            $(pub(crate) const $name: FrameType = FrameType($val);)*
++            $(pub const $name: FrameType = FrameType($val);)*
+         }
+ 
+         impl fmt::Debug for FrameType {
+@@ -140,7 +140,7 @@
+ const DATAGRAM_TYS: RangeInclusive<u64> = RangeInclusive::new(0x30, 0x31);
+ 
+ #[derive(Debug)]
+-pub(crate) enum Frame {
++pub enum Frame {
+     Padding,
+     Ping,
+     Ack(Ack),
+@@ -167,7 +167,7 @@
+ }
+ 
+ impl Frame {
+-    pub(crate) fn ty(&self) -> FrameType {
++    pub fn ty(&self) -> FrameType {
+         use Frame::*;
+         match *self {
+             Padding => FrameType::PADDING,
+@@ -208,7 +208,7 @@
+         }
+     }
+ 
+-    pub(crate) fn is_ack_eliciting(&self) -> bool {
++    pub fn is_ack_eliciting(&self) -> bool {
+         !matches!(*self, Self::Ack(_) | Self::Padding | Self::Close(_))
+     }
+ }
+@@ -220,14 +220,14 @@
+ }
+ 
+ impl Close {
+-    pub(crate) fn encode<W: BufMut>(&self, out: &mut W, max_len: usize) {
++    pub fn encode<W: BufMut>(&self, out: &mut W, max_len: usize) {
+         match *self {
+             Self::Connection(ref x) => x.encode(out, max_len),
+             Self::Application(ref x) => x.encode(out, max_len),
+         }
+     }
+ 
+-    pub(crate) fn is_transport_layer(&self) -> bool {
++    pub fn is_transport_layer(&self) -> bool {
+         matches!(*self, Self::Connection(_))
+     }
+ }
+@@ -285,7 +285,7 @@
+ }
+ 
+ impl ConnectionClose {
+-    pub(crate) fn encode<W: BufMut>(&self, out: &mut W, max_len: usize) {
++    pub fn encode<W: BufMut>(&self, out: &mut W, max_len: usize) {
+         out.write(FrameType::CONNECTION_CLOSE); // 1 byte
+         out.write(self.error_code); // <= 8 bytes
+         let ty = self.frame_type.map_or(0, |x| x.0);
+@@ -328,7 +328,7 @@
+ }
+ 
+ impl ApplicationClose {
+-    pub(crate) fn encode<W: BufMut>(&self, out: &mut W, max_len: usize) {
++    pub fn encode<W: BufMut>(&self, out: &mut W, max_len: usize) {
+         out.write(FrameType::APPLICATION_CLOSE); // 1 byte
+         out.write(self.error_code); // <= 8 bytes
+         let max_len = max_len - 3 - VarInt::from_u64(self.reason.len() as u64).unwrap().size();
+@@ -452,11 +452,11 @@
+ }
+ 
+ #[derive(Debug, Clone)]
+-pub(crate) struct Stream {
+-    pub(crate) id: StreamId,
+-    pub(crate) offset: u64,
+-    pub(crate) fin: bool,
+-    pub(crate) data: Bytes,
++pub struct Stream {
++    pub id: StreamId,
++    pub offset: u64,
++    pub fin: bool,
++    pub data: Bytes,
+ }
+ 
+ impl FrameStruct for Stream {
+@@ -465,10 +465,10 @@
+ 
+ /// Metadata from a stream frame
+ #[derive(Debug, Clone)]
+-pub(crate) struct StreamMeta {
+-    pub(crate) id: StreamId,
+-    pub(crate) offsets: Range<u64>,
+-    pub(crate) fin: bool,
++pub struct StreamMeta {
++    pub id: StreamId,
++    pub offsets: Range<u64>,
++    pub fin: bool,
+ }
+ 
+ // This manual implementation exists because `Default` is not implemented for `StreamId`
+@@ -483,7 +483,7 @@
+ }
+ 
+ impl StreamMeta {
+-    pub(crate) fn encode<W: BufMut>(&self, length: bool, out: &mut W) {
++    pub fn encode<W: BufMut>(&self, length: bool, out: &mut W) {
+         let mut ty = *STREAM_TYS.start();
+         if self.offsets.start != 0 {
+             ty |= 0x04;
+@@ -506,18 +506,18 @@
+ }
+ 
+ /// A vector of [`StreamMeta`] with optimization for the single element case
+-pub(crate) type StreamMetaVec = TinyVec<[StreamMeta; 1]>;
++pub type StreamMetaVec = TinyVec<[StreamMeta; 1]>;
+ 
+ #[derive(Debug, Clone)]
+-pub(crate) struct Crypto {
+-    pub(crate) offset: u64,
+-    pub(crate) data: Bytes,
++pub struct Crypto {
++    pub offset: u64,
++    pub data: Bytes,
+ }
+ 
+ impl Crypto {
+-    pub(crate) const SIZE_BOUND: usize = 17;
++    pub const SIZE_BOUND: usize = 17;
+ 
+-    pub(crate) fn encode<W: BufMut>(&self, out: &mut W) {
++    pub fn encode<W: BufMut>(&self, out: &mut W) {
+         out.write(FrameType::CRYPTO);
+         out.write_var(self.offset);
+         out.write_var(self.data.len() as u64);
+@@ -526,29 +526,29 @@
+ }
+ 
+ #[derive(Debug, Clone)]
+-pub(crate) struct NewToken {
+-    pub(crate) token: Bytes,
++pub struct NewToken {
++    pub token: Bytes,
+ }
+ 
+ impl NewToken {
+-    pub(crate) fn encode<W: BufMut>(&self, out: &mut W) {
++    pub fn encode<W: BufMut>(&self, out: &mut W) {
+         out.write(FrameType::NEW_TOKEN);
+         out.write_var(self.token.len() as u64);
+         out.put_slice(&self.token);
+     }
+ 
+-    pub(crate) fn size(&self) -> usize {
++    pub fn size(&self) -> usize {
+         1 + VarInt::from_u64(self.token.len() as u64).unwrap().size() + self.token.len()
+     }
+ }
+ 
+-pub(crate) struct Iter {
++pub struct Iter {
+     bytes: Bytes,
+     last_ty: Option<FrameType>,
+ }
+ 
+ impl Iter {
+-    pub(crate) fn new(payload: Bytes) -> Result<Self, TransportError> {
++    pub fn new(payload: Bytes) -> Result<Self, TransportError> {
+         if payload.is_empty() {
+             // "An endpoint MUST treat receipt of a packet containing no frames as a
+             // connection error of type PROTOCOL_VIOLATION."
+@@ -748,9 +748,9 @@
+ }
+ 
+ #[derive(Debug)]
+-pub(crate) struct InvalidFrame {
+-    pub(crate) ty: Option<FrameType>,
+-    pub(crate) reason: &'static str,
++pub struct InvalidFrame {
++    pub ty: Option<FrameType>,
++    pub reason: &'static str,
+ }
+ 
+ impl From<InvalidFrame> for TransportError {
+@@ -829,9 +829,9 @@
+ #[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
+ #[derive(Debug, Copy, Clone)]
+ pub struct ResetStream {
+-    pub(crate) id: StreamId,
+-    pub(crate) error_code: VarInt,
+-    pub(crate) final_offset: VarInt,
++    pub id: StreamId,
++    pub error_code: VarInt,
++    pub final_offset: VarInt,
+ }
+ 
+ impl FrameStruct for ResetStream {
+@@ -839,7 +839,7 @@
+ }
+ 
+ impl ResetStream {
+-    pub(crate) fn encode<W: BufMut>(&self, out: &mut W) {
++    pub fn encode<W: BufMut>(&self, out: &mut W) {
+         out.write(FrameType::RESET_STREAM); // 1 byte
+         out.write(self.id); // <= 8 bytes
+         out.write(self.error_code); // <= 8 bytes
+@@ -848,9 +848,9 @@
+ }
+ 
+ #[derive(Debug, Copy, Clone)]
+-pub(crate) struct StopSending {
+-    pub(crate) id: StreamId,
+-    pub(crate) error_code: VarInt,
++pub struct StopSending {
++    pub id: StreamId,
++    pub error_code: VarInt,
+ }
+ 
+ impl FrameStruct for StopSending {
+@@ -858,7 +858,7 @@
+ }
+ 
+ impl StopSending {
+-    pub(crate) fn encode<W: BufMut>(&self, out: &mut W) {
++    pub fn encode<W: BufMut>(&self, out: &mut W) {
+         out.write(FrameType::STOP_SENDING); // 1 byte
+         out.write(self.id); // <= 8 bytes
+         out.write(self.error_code) // <= 8 bytes
+@@ -866,15 +866,15 @@
+ }
+ 
+ #[derive(Debug, Copy, Clone)]
+-pub(crate) struct NewConnectionId {
+-    pub(crate) sequence: u64,
+-    pub(crate) retire_prior_to: u64,
+-    pub(crate) id: ConnectionId,
+-    pub(crate) reset_token: ResetToken,
++pub struct NewConnectionId {
++    pub sequence: u64,
++    pub retire_prior_to: u64,
++    pub id: ConnectionId,
++    pub reset_token: ResetToken,
+ }
+ 
+ impl NewConnectionId {
+-    pub(crate) fn encode<W: BufMut>(&self, out: &mut W) {
++    pub fn encode<W: BufMut>(&self, out: &mut W) {
+         out.write(FrameType::NEW_CONNECTION_ID);
+         out.write_var(self.sequence);
+         out.write_var(self.retire_prior_to);
+@@ -889,7 +889,7 @@
+ }
+ 
+ /// Smallest number of bytes this type of frame is guaranteed to fit within.
+-pub(crate) const RETIRE_CONNECTION_ID_SIZE_BOUND: usize = 9;
++pub const RETIRE_CONNECTION_ID_SIZE_BOUND: usize = 9;
+ 
+ /// An unreliable datagram
+ #[derive(Debug, Clone)]
+@@ -903,7 +903,7 @@
+ }
+ 
+ impl Datagram {
+-    pub(crate) fn encode(&self, length: bool, out: &mut Vec<u8>) {
++    pub fn encode(&self, length: bool, out: &mut Vec<u8>) {
+         out.write(FrameType(*DATAGRAM_TYS.start() | u64::from(length))); // 1 byte
+         if length {
+             // Safe to unwrap because we check length sanity before queueing datagrams
+@@ -912,7 +912,7 @@
+         out.extend_from_slice(&self.data);
+     }
+ 
+-    pub(crate) fn size(&self, length: bool) -> usize {
++    pub fn size(&self, length: bool) -> usize {
+         1 + if length {
+             VarInt::from_u64(self.data.len() as u64).unwrap().size()
+         } else {
+@@ -922,15 +922,15 @@
+ }
+ 
+ #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+-pub(crate) struct AckFrequency {
+-    pub(crate) sequence: VarInt,
+-    pub(crate) ack_eliciting_threshold: VarInt,
+-    pub(crate) request_max_ack_delay: VarInt,
+-    pub(crate) reordering_threshold: VarInt,
++pub struct AckFrequency {
++    pub sequence: VarInt,
++    pub ack_eliciting_threshold: VarInt,
++    pub request_max_ack_delay: VarInt,
++    pub reordering_threshold: VarInt,
+ }
+ 
+ impl AckFrequency {
+-    pub(crate) fn encode<W: BufMut>(&self, buf: &mut W) {
++    pub fn encode<W: BufMut>(&self, buf: &mut W) {
+         buf.write(FrameType::ACK_FREQUENCY);
+         buf.write(self.sequence);
+         buf.write(self.ack_eliciting_threshold);
+diff -ru a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -29,7 +29,7 @@
+ mod cid_queue;
+ pub mod coding;
+ mod constant_time;
+-mod range_set;
++pub mod range_set;
+ #[cfg(all(test, any(feature = "rustls-aws-lc-rs", feature = "rustls-ring")))]
+ mod tests;
+ pub mod transport_parameters;
+@@ -65,7 +65,7 @@
+ 
+ pub mod crypto;
+ 
+-mod frame;
++pub mod frame;
+ use crate::frame::Frame;
+ pub use crate::frame::{ApplicationClose, ConnectionClose, Datagram, FrameType};
+ 
+@@ -74,7 +74,7 @@
+     AcceptError, ConnectError, ConnectionHandle, DatagramEvent, Endpoint, Incoming, RetryError,
+ };
+ 
+-mod packet;
++pub mod packet;
+ pub use packet::{
+     ConnectionIdParser, FixedLengthConnectionIdParser, LongType, PacketDecodeError, PartialDecode,
+     ProtectedHeader, ProtectedInitialHeader,
+@@ -94,7 +94,7 @@
+ };
+ 
+ mod token;
+-use token::ResetToken;
++pub use token::ResetToken;
+ pub use token::{NoneTokenLog, NoneTokenStore, TokenLog, TokenReuseError, TokenStore};
+ 
+ mod token_memory_cache;
+diff -ru a/src/packet.rs b/src/packet.rs
+--- a/src/packet.rs
++++ b/src/packet.rs
+@@ -24,8 +24,8 @@
+ #[cfg_attr(test, derive(Clone))]
+ #[derive(Debug)]
+ pub struct PartialDecode {
+-    plain_header: ProtectedHeader,
+-    buf: io::Cursor<BytesMut>,
++    pub plain_header: ProtectedHeader,
++    pub buf: io::Cursor<BytesMut>,
+ }
+ 
+ #[allow(clippy::len_without_is_empty)]
+@@ -58,23 +58,23 @@
+     }
+ 
+     /// The underlying partially-decoded packet data
+-    pub(crate) fn data(&self) -> &[u8] {
++    pub fn data(&self) -> &[u8] {
+         self.buf.get_ref()
+     }
+ 
+-    pub(crate) fn initial_header(&self) -> Option<&ProtectedInitialHeader> {
++    pub fn initial_header(&self) -> Option<&ProtectedInitialHeader> {
+         self.plain_header.as_initial()
+     }
+ 
+-    pub(crate) fn has_long_header(&self) -> bool {
++    pub fn has_long_header(&self) -> bool {
+         !matches!(self.plain_header, ProtectedHeader::Short { .. })
+     }
+ 
+-    pub(crate) fn is_initial(&self) -> bool {
++    pub fn is_initial(&self) -> bool {
+         self.space() == Some(SpaceId::Initial)
+     }
+ 
+-    pub(crate) fn space(&self) -> Option<SpaceId> {
++    pub fn space(&self) -> Option<SpaceId> {
+         use ProtectedHeader::*;
+         match self.plain_header {
+             Initial { .. } => Some(SpaceId::Initial),
+@@ -91,7 +91,7 @@
+         }
+     }
+ 
+-    pub(crate) fn is_0rtt(&self) -> bool {
++    pub fn is_0rtt(&self) -> bool {
+         match self.plain_header {
+             ProtectedHeader::Long { ty, .. } => ty == LongType::ZeroRtt,
+             _ => false,
+@@ -109,7 +109,7 @@
+         self.buf.get_ref().len()
+     }
+ 
+-    pub(crate) fn finish(
++    pub fn finish(
+         self,
+         header_crypto: Option<&dyn crypto::HeaderKey>,
+     ) -> Result<Packet, PacketDecodeError> {
+@@ -219,14 +219,14 @@
+     }
+ }
+ 
+-pub(crate) struct Packet {
+-    pub(crate) header: Header,
+-    pub(crate) header_data: Bytes,
+-    pub(crate) payload: BytesMut,
++pub struct Packet {
++    pub header: Header,
++    pub header_data: Bytes,
++    pub payload: BytesMut,
+ }
+ 
+ impl Packet {
+-    pub(crate) fn reserved_bits_valid(&self) -> bool {
++    pub fn reserved_bits_valid(&self) -> bool {
+         let mask = match self.header {
+             Header::Short { .. } => SHORT_RESERVED_BITS,
+             _ => LONG_RESERVED_BITS,
+@@ -235,10 +235,10 @@
+     }
+ }
+ 
+-pub(crate) struct InitialPacket {
+-    pub(crate) header: InitialHeader,
+-    pub(crate) header_data: Bytes,
+-    pub(crate) payload: BytesMut,
++pub struct InitialPacket {
++    pub header: InitialHeader,
++    pub header_data: Bytes,
++    pub payload: BytesMut,
+ }
+ 
+ impl From<InitialPacket> for Packet {
+@@ -253,7 +253,7 @@
+ 
+ #[cfg_attr(test, derive(Clone))]
+ #[derive(Debug)]
+-pub(crate) enum Header {
++pub enum Header {
+     Initial(InitialHeader),
+     Long {
+         ty: LongType,
+@@ -281,7 +281,7 @@
+ }
+ 
+ impl Header {
+-    pub(crate) fn encode(&self, w: &mut Vec<u8>) -> PartialEncode {
++    pub fn encode(&self, w: &mut Vec<u8>) -> PartialEncode {
+         use Header::*;
+         let start = w.len();
+         match *self {
+@@ -379,11 +379,11 @@
+     }
+ 
+     /// Whether the packet is encrypted on the wire
+-    pub(crate) fn is_protected(&self) -> bool {
++    pub fn is_protected(&self) -> bool {
+         !matches!(*self, Self::Retry { .. } | Self::VersionNegotiate { .. })
+     }
+ 
+-    pub(crate) fn number(&self) -> Option<PacketNumber> {
++    pub fn number(&self) -> Option<PacketNumber> {
+         use Header::*;
+         Some(match *self {
+             Initial(InitialHeader { number, .. }) => number,
+@@ -395,7 +395,7 @@
+         })
+     }
+ 
+-    pub(crate) fn space(&self) -> SpaceId {
++    pub fn space(&self) -> SpaceId {
+         use Header::*;
+         match *self {
+             Short { .. } => SpaceId::Data,
+@@ -411,22 +411,22 @@
+         }
+     }
+ 
+-    pub(crate) fn key_phase(&self) -> bool {
++    pub fn key_phase(&self) -> bool {
+         match *self {
+             Self::Short { key_phase, .. } => key_phase,
+             _ => false,
+         }
+     }
+ 
+-    pub(crate) fn is_short(&self) -> bool {
++    pub fn is_short(&self) -> bool {
+         matches!(*self, Self::Short { .. })
+     }
+ 
+-    pub(crate) fn is_1rtt(&self) -> bool {
++    pub fn is_1rtt(&self) -> bool {
+         self.is_short()
+     }
+ 
+-    pub(crate) fn is_0rtt(&self) -> bool {
++    pub fn is_0rtt(&self) -> bool {
+         matches!(
+             *self,
+             Self::Long {
+@@ -436,7 +436,7 @@
+         )
+     }
+ 
+-    pub(crate) fn dst_cid(&self) -> ConnectionId {
++    pub fn dst_cid(&self) -> ConnectionId {
+         use Header::*;
+         match *self {
+             Initial(InitialHeader { dst_cid, .. }) => dst_cid,
+@@ -448,7 +448,7 @@
+     }
+ 
+     /// Whether the payload of this packet contains QUIC frames
+-    pub(crate) fn has_frames(&self) -> bool {
++    pub fn has_frames(&self) -> bool {
+         use Header::*;
+         match *self {
+             Initial(_) => true,
+@@ -460,15 +460,15 @@
+     }
+ }
+ 
+-pub(crate) struct PartialEncode {
+-    pub(crate) start: usize,
+-    pub(crate) header_len: usize,
++pub struct PartialEncode {
++    pub start: usize,
++    pub header_len: usize,
+     // Packet number length, payload length needed
+     pn: Option<(usize, bool)>,
+ }
+ 
+ impl PartialEncode {
+-    pub(crate) fn finish(
++    pub fn finish(
+         self,
+         buf: &mut [u8],
+         header_crypto: &dyn crypto::HeaderKey,
+@@ -669,17 +669,17 @@
+ }
+ 
+ #[derive(Clone, Debug)]
+-pub(crate) struct InitialHeader {
+-    pub(crate) dst_cid: ConnectionId,
+-    pub(crate) src_cid: ConnectionId,
+-    pub(crate) token: Bytes,
+-    pub(crate) number: PacketNumber,
+-    pub(crate) version: u32,
++pub struct InitialHeader {
++    pub dst_cid: ConnectionId,
++    pub src_cid: ConnectionId,
++    pub token: Bytes,
++    pub number: PacketNumber,
++    pub version: u32,
+ }
+ 
+ // An encoded packet number
+ #[derive(Debug, Copy, Clone, Eq, PartialEq)]
+-pub(crate) enum PacketNumber {
++pub enum PacketNumber {
+     U8(u8),
+     U16(u16),
+     U24(u32),
+@@ -687,7 +687,7 @@
+ }
+ 
+ impl PacketNumber {
+-    pub(crate) fn new(n: u64, largest_acked: u64) -> Self {
++    pub fn new(n: u64, largest_acked: u64) -> Self {
+         let range = (n - largest_acked) * 2;
+         if range < 1 << 8 {
+             Self::U8(n as u8)
+@@ -702,7 +702,7 @@
+         }
+     }
+ 
+-    pub(crate) fn len(self) -> usize {
++    pub fn len(self) -> usize {
+         use PacketNumber::*;
+         match self {
+             U8(_) => 1,
+@@ -712,7 +712,7 @@
+         }
+     }
+ 
+-    pub(crate) fn encode<W: BufMut>(self, w: &mut W) {
++    pub fn encode<W: BufMut>(self, w: &mut W) {
+         use PacketNumber::*;
+         match self {
+             U8(x) => w.write(x),
+@@ -722,7 +722,7 @@
+         }
+     }
+ 
+-    pub(crate) fn decode<R: Buf>(len: usize, r: &mut R) -> Result<Self, PacketDecodeError> {
++    pub fn decode<R: Buf>(len: usize, r: &mut R) -> Result<Self, PacketDecodeError> {
+         use PacketNumber::*;
+         let pn = match len {
+             1 => U8(r.get()?),
+@@ -734,7 +734,7 @@
+         Ok(pn)
+     }
+ 
+-    pub(crate) fn decode_len(tag: u8) -> usize {
++    pub fn decode_len(tag: u8) -> usize {
+         1 + (tag & 0x03) as usize
+     }
+ 
+@@ -748,7 +748,7 @@
+         }
+     }
+ 
+-    pub(crate) fn expand(self, expected: u64) -> u64 {
++    pub fn expand(self, expected: u64) -> u64 {
+         // From Appendix A
+         use PacketNumber::*;
+         let truncated = match self {
+@@ -808,7 +808,7 @@
+ 
+ /// Long packet type including non-uniform cases
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+-pub(crate) enum LongHeaderType {
++pub enum LongHeaderType {
+     Initial,
+     Retry,
+     Standard(LongType),
+@@ -873,9 +873,9 @@
+     }
+ }
+ 
+-pub(crate) const LONG_HEADER_FORM: u8 = 0x80;
+-pub(crate) const FIXED_BIT: u8 = 0x40;
+-pub(crate) const SPIN_BIT: u8 = 0x20;
++pub const LONG_HEADER_FORM: u8 = 0x80;
++pub const FIXED_BIT: u8 = 0x40;
++pub const SPIN_BIT: u8 = 0x20;
+ const SHORT_RESERVED_BITS: u8 = 0x18;
+ const LONG_RESERVED_BITS: u8 = 0x0c;
+ const KEY_PHASE_BIT: u8 = 0x04;
+diff -ru a/src/range_set/mod.rs b/src/range_set/mod.rs
+--- a/src/range_set/mod.rs
++++ b/src/range_set/mod.rs
+@@ -3,5 +3,5 @@
+ #[cfg(test)]
+ mod tests;
+ 
+-pub(crate) use array_range_set::ArrayRangeSet;
+-pub(crate) use btree_range_set::RangeSet;
++pub use array_range_set::ArrayRangeSet;
++pub use btree_range_set::RangeSet;
+diff -ru a/src/token.rs b/src/token.rs
+--- a/src/token.rs
++++ b/src/token.rs
+@@ -364,7 +364,7 @@
+ /// Used for an endpoint to securely communicate that it has lost state for a connection.
+ #[allow(clippy::derived_hash_with_manual_eq)] // Custom PartialEq impl matches derived semantics
+ #[derive(Debug, Copy, Clone, Hash)]
+-pub(crate) struct ResetToken([u8; RESET_TOKEN_SIZE]);
++pub struct ResetToken([u8; RESET_TOKEN_SIZE]);
+ 
+ impl ResetToken {
+     pub(crate) fn new(key: &dyn HmacKey, id: ConnectionId) -> Self {
+diff -ru a/src/transport_parameters.rs b/src/transport_parameters.rs
+--- a/src/transport_parameters.rs
++++ b/src/transport_parameters.rs
+@@ -69,47 +69,47 @@
+         /// Transport parameters used to negotiate connection-level preferences between peers
+         #[derive(Debug, Copy, Clone, Eq, PartialEq)]
+         pub struct TransportParameters {
+-            $($(#[$doc])* pub(crate) $name : VarInt,)*
++            $($(#[$doc])* pub $name : VarInt,)*
+ 
+             /// Does the endpoint support active connection migration
+-            pub(crate) disable_active_migration: bool,
++            pub disable_active_migration: bool,
+             /// Maximum size for datagram frames
+-            pub(crate) max_datagram_frame_size: Option<VarInt>,
++            pub max_datagram_frame_size: Option<VarInt>,
+             /// The value that the endpoint included in the Source Connection ID field of the first
+             /// Initial packet it sends for the connection
+-            pub(crate) initial_src_cid: Option<ConnectionId>,
++            pub initial_src_cid: Option<ConnectionId>,
+             /// The endpoint is willing to receive QUIC packets containing any value for the fixed
+             /// bit
+-            pub(crate) grease_quic_bit: bool,
++            pub grease_quic_bit: bool,
+ 
+             /// Minimum amount of time in microseconds by which the endpoint is able to delay
+             /// sending acknowledgments
+             ///
+             /// If a value is provided, it implies that the endpoint supports QUIC Acknowledgement
+             /// Frequency
+-            pub(crate) min_ack_delay: Option<VarInt>,
++            pub min_ack_delay: Option<VarInt>,
+ 
+             // Server-only
+             /// The value of the Destination Connection ID field from the first Initial packet sent
+             /// by the client
+-            pub(crate) original_dst_cid: Option<ConnectionId>,
++            pub original_dst_cid: Option<ConnectionId>,
+             /// The value that the server included in the Source Connection ID field of a Retry
+             /// packet
+-            pub(crate) retry_src_cid: Option<ConnectionId>,
++            pub retry_src_cid: Option<ConnectionId>,
+             /// Token used by the client to verify a stateless reset from the server
+-            pub(crate) stateless_reset_token: Option<ResetToken>,
++            pub stateless_reset_token: Option<ResetToken>,
+             /// The server's preferred address for communication after handshake completion
+-            pub(crate) preferred_address: Option<PreferredAddress>,
++            pub preferred_address: Option<PreferredAddress>,
+             /// The randomly generated reserved transport parameter to sustain future extensibility
+             /// of transport parameter extensions.
+             /// When present, it is included during serialization but ignored during deserialization.
+-            pub(crate) grease_transport_parameter: Option<ReservedTransportParameter>,
++            pub grease_transport_parameter: Option<ReservedTransportParameter>,
+ 
+             /// Defines the order in which transport parameters are serialized.
+             ///
+             /// This field is initialized only for outgoing `TransportParameters` instances and
+             /// is set to `None` for `TransportParameters` received from a peer.
+-            pub(crate) write_order: Option<[u8; TransportParameterId::SUPPORTED.len()]>,
++            pub write_order: Option<[u8; TransportParameterId::SUPPORTED.len()]>,
+         }
+ 
+         // We deliberately don't implement the `Default` trait, since that would be public, and
+@@ -117,7 +117,7 @@
+         // supplied by a peer.
+         impl TransportParameters {
+             /// Standard defaults, used if the peer does not supply a given parameter.
+-            pub(crate) fn default() -> Self {
++            pub fn default() -> Self {
+                 Self {
+                     $($name: VarInt::from_u32($default),)*
+ 
+@@ -142,7 +142,7 @@
+ apply_params!(make_struct);
+ 
+ impl TransportParameters {
+-    pub(crate) fn new(
++    pub fn new(
+         config: &TransportConfig,
+         endpoint_config: &EndpointConfig,
+         cid_gen: &dyn ConnectionIdGenerator,
+@@ -186,7 +186,7 @@
+ 
+     /// Check that these parameters are legal when resuming from
+     /// certain cached parameters
+-    pub(crate) fn validate_resumption_from(&self, cached: &Self) -> Result<(), TransportError> {
++    pub fn validate_resumption_from(&self, cached: &Self) -> Result<(), TransportError> {
+         if cached.active_connection_id_limit > self.active_connection_id_limit
+             || cached.initial_max_data > self.initial_max_data
+             || cached.initial_max_stream_data_bidi_local > self.initial_max_stream_data_bidi_local
+@@ -208,7 +208,7 @@
+     ///
+     /// Consider both a) the active_connection_id_limit from the other end; and
+     /// b) LOC_CID_COUNT used locally
+-    pub(crate) fn issue_cids_limit(&self) -> u64 {
++    pub fn issue_cids_limit(&self) -> u64 {
+         self.active_connection_id_limit.0.min(LOC_CID_COUNT)
+     }
+ }
+@@ -217,11 +217,11 @@
+ ///
+ /// This is communicated as a transport parameter during TLS session establishment.
+ #[derive(Debug, Copy, Clone, Eq, PartialEq)]
+-pub(crate) struct PreferredAddress {
+-    pub(crate) address_v4: Option<SocketAddrV4>,
+-    pub(crate) address_v6: Option<SocketAddrV6>,
+-    pub(crate) connection_id: ConnectionId,
+-    pub(crate) stateless_reset_token: ResetToken,
++pub struct PreferredAddress {
++    pub address_v4: Option<SocketAddrV4>,
++    pub address_v6: Option<SocketAddrV6>,
++    pub connection_id: ConnectionId,
++    pub stateless_reset_token: ResetToken,
+ }
+ 
+ impl PreferredAddress {
+@@ -545,7 +545,7 @@
+ ///
+ /// See spec: <https://www.rfc-editor.org/rfc/rfc9000.html#section-18.1>
+ #[derive(Debug, Copy, Clone, Eq, PartialEq)]
+-pub(crate) struct ReservedTransportParameter {
++pub struct ReservedTransportParameter {
+     /// The reserved identifier of the transport parameter
+     id: VarInt,
+ 
+@@ -613,7 +613,7 @@
+ 
+ #[repr(u64)]
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+-pub(crate) enum TransportParameterId {
++pub enum TransportParameterId {
+     // https://www.rfc-editor.org/rfc/rfc9000.html#iana-tp-table
+     OriginalDestinationConnectionId = 0x00,
+     MaxIdleTimeout = 0x01,

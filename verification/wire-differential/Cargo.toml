@@ -1,0 +1,32 @@
+[package]
+name = "wire-differential"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "Apache-2.0 OR MIT"
+description = "Differential and robustness checks of sakuya_wire and sakuya_packet_protection against quinn-proto, s2n-quic-core and rustls"
+
+# Not a member of the sakuya workspace: its dependency graph stays out of the
+# repository's lockfile, and no package of the workspace depends on it.
+[workspace]
+
+[dependencies]
+bytes = "1.12.1"
+either = { version = "1.17.0", default-features = false }
+nitori_call = { git = "https://github.com/opengensokyonet/nitori", rev = "8d9a31362c81e575e37406219ff15d710f04dd6f" }
+nitori_io = { git = "https://github.com/opengensokyonet/nitori", rev = "8d9a31362c81e575e37406219ff15d710f04dd6f" }
+proptest = "1.12.0"
+quinn-proto = { version = "=0.11.19", default-features = false, features = ["rustls-ring"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+s2n-codec = "=0.91.0"
+s2n-quic-core = { version = "=0.91.0", default-features = false, features = ["alloc", "std"] }
+sakuya_packet_protection = { path = "../../crates/sakuya_packet_protection" }
+sakuya_wire = { path = "../../crates/sakuya_wire", features = ["datagram", "reset_stream_at"] }
+
+[patch.crates-io]
+quinn-proto = { path = "vendor/quinn-proto" }
+
+[profile.release]
+debug = true
+overflow-checks = true
+debug-assertions = true
