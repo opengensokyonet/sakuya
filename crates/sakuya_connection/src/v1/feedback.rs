@@ -8,19 +8,23 @@
 //! | PING of a probe timeout | [`ProbePingSummary`] | nothing | nothing: the next expiry of the probe timeout sends a new probe |
 //! | RETIRE_CONNECTION_ID | [`RetireConnectionIdSummary`]: the sequence number | the retirement no longer waits for acknowledgment | the same frame is published again while the retirement waits for acknowledgment (RFC 9000 §13.3) |
 //! | HANDSHAKE_DONE | [`HandshakeDoneSummary`] | the frame is delivered and not sent again | the frame is published again while no copy of it was acknowledged (RFC 9000 §13.3) |
+//! | CRYPTO | [`CryptoSummary`]: the level, the offset and the length of the data | the bytes are acknowledged, and their data can go | the bytes still in flight are unsent again, and the level's intent is published again (RFC 9000 §13.3) |
 //!
 //! Each is the summary of one kind of version 1's frame sources
 //! ([`FrameSources`]), and what comes of it is that source's
 //! ([`AckFrameSource`](super::send::AckFrameSource),
 //! [`ProbePingFrameSource`](super::send::ProbePingFrameSource), the
 //! destination connection ID strategy,
+//! [`LineageCryptoFrameSource`](super::send::LineageCryptoFrameSource),
 //! the [`Own`](super::Side::Own) data of the side,
 //! [`PaddingFrameSource`](crate::write::PaddingFrameSource)).
 use frunk_core::{HList, hlist_pat};
 use sakuya_recovery::{ack_obligation::AckDue, packet_number_space::PacketNumberSpaceKind};
+use sakuya_tls::engine::CryptoLevel;
 use sakuya_wire::{
     parts::{CNil, Coproduct},
     v1::packet_number::PacketNumber,
+    var_int::VarInt,
 };
 
 #[cfg(doc)]
@@ -48,10 +52,25 @@ pub type FeedbackSummary<I> = Coproduct<
         AckSummary<I>,
         Coproduct<
             ProbePingSummary,
-            Coproduct<RetireConnectionIdSummary, Coproduct<HandshakeDoneSummary, CNil>>,
+            Coproduct<
+                RetireConnectionIdSummary,
+                Coproduct<HandshakeDoneSummary, Coproduct<CryptoSummary, CNil>>,
+            >,
         >,
     >,
 >;
+
+/// The summary of a CRYPTO frame written into a packet: which bytes of
+/// which level it carried.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CryptoSummary {
+    /// The encryption level of the data.
+    pub level: CryptoLevel,
+    /// The offset of the data in the level's stream.
+    pub offset: VarInt,
+    /// The length of the data.
+    pub len: usize,
+}
 
 /// The summary of a HANDSHAKE_DONE frame written into a packet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -108,6 +127,16 @@ impl<I, Rest> From<RetireConnectionIdSummary> for Coproduct<FeedbackSummary<I>, 
     fn from(summary: RetireConnectionIdSummary) -> Self {
         Coproduct::Inl(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(
             Coproduct::Inl(summary),
+        ))))
+    }
+}
+
+/// The CRYPTO frame source puts its summaries into the sum of the
+/// summaries of a composition through version 1's, which comes first.
+impl<I, Rest> From<CryptoSummary> for Coproduct<FeedbackSummary<I>, Rest> {
+    fn from(summary: CryptoSummary) -> Self {
+        Coproduct::Inl(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(
+            Coproduct::Inr(Coproduct::Inr(Coproduct::Inl(summary))),
         ))))
     }
 }

@@ -38,6 +38,10 @@
 //!
 //! The component keeps no packet protection state and does not decide when
 //! the engine moves to a level.
+//!
+//! What this endpoint's engine writes is kept apart, in the
+//! [`CryptoSender`](send::CryptoSender) of [`send`]: the two directions
+//! move between levels on their own.
 
 use core::{
     convert::Infallible,
@@ -57,6 +61,8 @@ use sakuya_tls::{
 };
 use sakuya_wire::var_int::VarInt;
 use snafu::{Snafu, ensure};
+
+pub mod send;
 
 family_receiver!(impl [B: CryptoReceiveBuffer + Unpin + 'static] for CryptoReceiver<B>);
 

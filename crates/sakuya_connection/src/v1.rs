@@ -3,9 +3,9 @@
 //!
 //! [`Part`] is version 1 as one part of a composition. Its shares put the
 //! keys of each encryption level, the counts of the AEAD's usage
-//! ([`aead_usage`]), the CRYPTO data received at each level,
-//! what only the connection's side has ([`handshake_done`]), the transport
-//! parameters, the idle timeout and what the connection was
+//! ([`aead_usage`]), the CRYPTO data received and sent at each level
+//! ([`crypto`]) with the intents of what is to be sent, what only the
+//! connection's side has ([`handshake_done`]), the transport parameters, the idle timeout and what the connection was
 //! made with for its first logical link and from its first flight
 //! ([`first_flight`]) in the connection node, with the
 //! recovery factory, the record of why the connection closed
@@ -129,7 +129,10 @@ use self::{
         DestinationConnectionIdConfigOf, FirstLocalConnectionId, LinkPathResetTokenRegistrar,
         PeerOf, ResetTokenRegistrarOf,
     },
-    crypto::{CryptoReceiveBuffer, CryptoReceiveCapacities, CryptoReceiver},
+    crypto::{
+        CryptoReceiveBuffer, CryptoReceiveCapacities, CryptoReceiver,
+        send::{CryptoSendBuffer, CryptoSender},
+    },
     feedback::HandshakeDoneSummary,
     first_flight::{FirstFlight, FirstFlightStart},
     handshake_done::{ClientOnlyState, HandshakeDoneSource},
@@ -149,11 +152,11 @@ use self::{
         CongestionPartOf, LinkPathCongestionState, OthersOf, PmtuOf, RecoveryConfigOf,
         RecoveryFactoryOf, RttOf,
     },
-    send::{AckIntent, HandshakeDoneIntent, ProbePingIntent, SendTypes},
+    send::{AckIntent, CryptoIntent, HandshakeDoneIntent, ProbePingIntent, SendTypes},
     send_planning::{
-        AckIntentTicketOf, AckIntentTickets, CorePublishOutcome, LinkPathPlanner,
-        LinkPathSendPlannerOf, ProbePingTicketOf, ProbePingTickets, SendStrategyCore,
-        SendStrategyOf,
+        AckIntentTicketOf, AckIntentTickets, CorePublishOutcome, CryptoIntentTicketOf,
+        CryptoIntentTickets, LinkPathPlanner, LinkPathSendPlannerOf, ProbePingTicketOf,
+        ProbePingTickets, SendStrategyCore, SendStrategyOf,
     },
     sending::{DatagramAcceptance, LinkPathSendingKind, LinkPathSendingLimits},
     spaces::{AckObligationsOf, DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
@@ -173,7 +176,9 @@ use sakuya_recovery::{
 };
 use sakuya_stream::connection::{AbortCause, CloseReason};
 use sakuya_tls::{
-    alert::CallsForAlert, client::engine::ClientHandshakeSteps, engine::HandshakeError,
+    alert::CallsForAlert,
+    client::engine::ClientHandshakeSteps,
+    engine::{CryptoLevel, HandshakeError},
     server::engine::ServerHandshakeSteps,
 };
 
@@ -208,6 +213,9 @@ pub trait Choices: ConnectionChoices {
     /// What stores the CRYPTO data of one encryption level until the
     /// handshake engine reads it.
     type CryptoReceiveBuffer: CryptoReceiveBuffer + Default + 'static;
+    /// What keeps the CRYPTO data of one encryption level that this side
+    /// sends, until the peer acknowledges it.
+    type CryptoSendBuffer: CryptoSendBuffer + Default + 'static;
     /// What makes the RTT estimate, the stored part of congestion control
     /// and the datagram size probing policy of each link path, one for each
     /// connection. `V` identifies a link path, as found from the list of
@@ -442,7 +450,7 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
 impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + ConnectionErrorsOf>
     LayerShare<T, L, layer::Connection> for Part
 where
-    SendTypes<T, L>: SendStrategyTypes,
+    SendTypes<T, L>: SendStrategyTypes + CorePublishOutcome<CryptoIntent, AnyActiveLinkPath>,
 {
     type Data = HList![
         InitialKeys<T::Crypto>,
@@ -450,6 +458,8 @@ where
         OneRttKeys<T::Crypto, InstantOf<T>>,
         AeadUsage,
         CryptoReceiver<T::CryptoReceiveBuffer>,
+        CryptoSender<T::CryptoSendBuffer>,
+        CryptoIntentTickets<CryptoIntentTicketOf<T, L>>,
         AntiAmplificationFactor,
         FirstLinkStart,
         IdleTimeout<InstantOf<T>>,
@@ -933,6 +943,81 @@ where
 /// It has no deadline and reads nothing; the calls that take frames or feed
 /// the handshake engine change it.
 impl<B> PassiveDataComponent for CryptoReceiver<B> {}
+
+/// Each level starts with nothing to send; the output writes Initial.
+impl<T: Choices, L> Build<T, L, layer::Connection, ()> for CryptoSender<T::CryptoSendBuffer>
+where
+    L: LineagePartList<T>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        _: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        CryptoSender::new()
+    }
+}
+
+/// The output reads the keys of each level: once a level's keys are
+/// discarded, its CRYPTO data goes with them (RFC 9001 §4.9).
+impl<T: Choices, L, I, Ii, Ih, Io> DataComponent<T, L, layer::Connection, (I, Ii, Ih, Io)>
+    for CryptoSender<T::CryptoSendBuffer>
+where
+    L: LineagePartList<T>,
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<CryptoSender<T::CryptoSendBuffer>, I>
+        + GetAt<InitialKeys<T::Crypto>, Ii>
+        + GetAt<HandshakeKeys<T::Crypto>, Ih>
+        + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>,
+{
+    fn reads(reads: &mut ReadSet) {
+        reads
+            .add::<InitialKeys<T::Crypto>>()
+            .add::<HandshakeKeys<T::Crypto>>()
+            .add::<OneRttKeys<T::Crypto, InstantOf<T>>>();
+    }
+
+    fn reread<'v, B: CallBundle>(
+        mut lineage: LineageOf<'v, T, L, layer::Connection>,
+        _: &mut OtherNodes<'v, T, L, B>,
+        _: InstantOf<T>,
+    ) -> Option<RequestOf<T, L>> {
+        let discarded = [
+            (
+                CryptoLevel::Initial,
+                matches!(
+                    lineage.get::<InitialKeys<T::Crypto>, Ii>(),
+                    InitialKeys::Discarded
+                ),
+            ),
+            (
+                CryptoLevel::Handshake,
+                matches!(
+                    lineage.get::<HandshakeKeys<T::Crypto>, Ih>(),
+                    HandshakeKeys::Discarded
+                ),
+            ),
+            (
+                CryptoLevel::OneRtt,
+                matches!(
+                    lineage.get::<OneRttKeys<T::Crypto, InstantOf<T>>, Io>(),
+                    OneRttKeys::Discarded
+                ),
+            ),
+        ];
+        for (level, discarded) in discarded {
+            // takes the output only to change it: it does not read itself
+            if discarded
+                && !lineage
+                    .get::<CryptoSender<T::CryptoSendBuffer>, I>()
+                    .is_discarded(level)
+            {
+                lineage
+                    .get_mut::<CryptoSender<T::CryptoSendBuffer>, I>()
+                    .discard(level);
+            }
+        }
+        None
+    }
+}
 
 impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for AntiAmplificationFactor
 where

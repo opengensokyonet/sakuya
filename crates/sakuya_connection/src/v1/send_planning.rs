@@ -39,6 +39,7 @@ use sakuya_recovery::{
 };
 
 use sakuya_stream::connection::CloseReason;
+use sakuya_tls::engine::CryptoLevel;
 
 use super::{
     AckObligationsOf, Choices, CloseCauseOf, Side,
@@ -46,13 +47,14 @@ use super::{
     close::{CloseReasonRecord, LocalCloseCause},
     confirmation::HandshakeConfirmation,
     connection_ids::{ConnectionIdsOf, ResetTokenRegistrarOf},
+    crypto::send::{CryptoSendBuffer, CryptoSender},
     error::ConnectionError,
     keys::{HandshakeKeys, InitialKeys, OneRttKeys},
     link::{LinkClone, LinkFacts},
     parameters::PeerTransportParameters,
     receive::v1_error,
     recovery::{CongestionPartOf, LinkPathCongestionState, PmtuOf, peer_max_udp_payload_size},
-    send::{AckIntent, ProbePingIntent, SendTypes, shortest_ack_frame},
+    send::{AckIntent, CryptoIntent, ProbePingIntent, SendTypes, shortest_ack_frame},
     spaces::SendJournalsOf,
 };
 use crate::role::LinkPathRole;
@@ -1034,6 +1036,200 @@ where
     }
 }
 
+// ---- the CRYPTO intents ----
+
+/// What publishing a CRYPTO intent for any active link path gives back in
+/// the core of `T` and `L`.
+pub type CryptoIntentTicketOf<T, L> =
+    <SendTypes<T, L> as CorePublishOutcome<CryptoIntent, AnyActiveLinkPath>>::Outcome;
+
+/// The encryption levels that carry CRYPTO frames, in their order.
+const CRYPTO_LEVELS: [CryptoLevel; 3] = [
+    CryptoLevel::Initial,
+    CryptoLevel::Handshake,
+    CryptoLevel::OneRtt,
+];
+
+fn crypto_level_index(level: CryptoLevel) -> usize {
+    match level {
+        CryptoLevel::Initial => 0,
+        CryptoLevel::Handshake => 1,
+        CryptoLevel::OneRtt => 2,
+    }
+}
+
+/// The CRYPTO intents of the connection: for each encryption level whose
+/// data is waiting to be sent, what publishing its intent gave back, with
+/// the shortest frame the intent asked room for. Dropping an intent's
+/// ticket withdraws it.
+pub struct CryptoIntentTickets<K> {
+    published: [Option<(K, usize)>; 3],
+}
+
+impl<K> fmt::Debug for CryptoIntentTickets<K> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let shortest = self
+            .published
+            .each_ref()
+            .map(|published| published.as_ref().map(|(_, shortest)| *shortest));
+        f.debug_struct("CryptoIntentTickets")
+            .field("shortest", &shortest)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<K> Default for CryptoIntentTickets<K> {
+    fn default() -> Self {
+        Self {
+            published: [None, None, None],
+        }
+    }
+}
+
+impl<K> CryptoIntentTickets<K> {
+    /// Whether a CRYPTO intent of `level` is published.
+    pub fn is_published(&self, level: CryptoLevel) -> bool {
+        self.published[crypto_level_index(level)].is_some()
+    }
+
+    /// Drop the ticket of `level`, whose frames were just supplied: the
+    /// intent is published again while data of the level is unsent.
+    pub(crate) fn forget(&mut self, level: CryptoLevel) {
+        self.published[crypto_level_index(level)] = None;
+    }
+
+    /// The intents each level wants, from `sender` and whether the level's
+    /// keys can send: one for a level that can send and has data unsent,
+    /// none otherwise.
+    fn wanted<B: CryptoSendBuffer>(
+        sender: &CryptoSender<B>,
+        can_send: [bool; 3],
+    ) -> [Option<CryptoIntent>; 3] {
+        CRYPTO_LEVELS.map(|level| {
+            if !can_send[crypto_level_index(level)] {
+                return None;
+            }
+            sender
+                .first_unsent(level)
+                .map(|offset| CryptoIntent::new(level, offset))
+        })
+    }
+
+    /// Whether the published intents differ from `wanted`.
+    fn differ(&self, wanted: &[Option<CryptoIntent>; 3]) -> bool {
+        wanted
+            .iter()
+            .zip(&self.published)
+            .any(|(wanted, published)| {
+                wanted.map(|intent| intent.shortest()) != published.as_ref().map(|(_, s)| *s)
+            })
+    }
+
+    /// Publish what `wanted` has and is not published as it is, through
+    /// `publish`, and drop the tickets of the levels that want nothing.
+    fn follow(
+        &mut self,
+        wanted: [Option<CryptoIntent>; 3],
+        mut publish: impl FnMut(CryptoIntent) -> K,
+    ) {
+        for (slot, wanted) in self.published.iter_mut().zip(wanted) {
+            if slot.as_ref().map(|(_, shortest)| *shortest) == wanted.map(|i| i.shortest()) {
+                continue;
+            }
+            // the old ticket goes after the new intent is in, so the level
+            // is never without one while it has data unsent
+            let old = slot.take();
+            if let Some(intent) = wanted {
+                *slot = Some((publish(intent), intent.shortest()));
+            }
+            drop(old);
+        }
+    }
+}
+
+/// A connection starts with no CRYPTO data to send.
+impl<T: Choices, L> Build<T, L, layer::Connection, ()>
+    for CryptoIntentTickets<CryptoIntentTicketOf<T, L>>
+where
+    L: LineagePartList<T>,
+    SendTypes<T, L>: CorePublishOutcome<CryptoIntent, AnyActiveLinkPath>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        _: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        Self::default()
+    }
+}
+
+/// A CRYPTO intent is published to the core for any active link path
+/// while a level has data unsent and keys to send with, and withdrawn when
+/// it has none or its keys can no longer send. It asks room for the
+/// shortest frame at the level's first unsent offset, and is published
+/// again when that grows, so it is never planned for a packet its frame
+/// does not fit; and when the frames of the level were supplied, which
+/// drops its ticket, while data of the level is still unsent, as after a
+/// frame of it is lost.
+impl<T: Choices, L, Ic, Ii, Ih, Io, Is, It, Idx>
+    DataComponent<T, L, layer::Connection, (Ic, Ii, Ih, Io, Is, It, Idx)>
+    for CryptoIntentTickets<CryptoIntentTicketOf<T, L>>
+where
+    L: LineagePartList<T>,
+    SendTypes<T, L>:
+        CorePublishTo<CryptoIntent, AnyActiveLinkPath, Idx, Core = SendStrategyOf<T, L>>,
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<CryptoSender<T::CryptoSendBuffer>, Ic>
+        + GetAt<InitialKeys<T::Crypto>, Ii>
+        + GetAt<HandshakeKeys<T::Crypto>, Ih>
+        + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
+        + GetAt<Self, Is>
+        + TakeEach<'v, frunk_core::HList![Self, SendStrategyCore<SendStrategyOf<T, L>>], It>,
+{
+    fn reads(reads: &mut ReadSet) {
+        reads
+            .add::<CryptoSender<T::CryptoSendBuffer>>()
+            .add::<InitialKeys<T::Crypto>>()
+            .add::<HandshakeKeys<T::Crypto>>()
+            .add::<OneRttKeys<T::Crypto, InstantOf<T>>>();
+    }
+
+    fn reread<'v, B: CallBundle>(
+        lineage: LineageOf<'v, T, L, layer::Connection>,
+        _: &mut OtherNodes<'v, T, L, B>,
+        _: InstantOf<T>,
+    ) -> Option<RequestOf<T, L>> {
+        let can_send = [
+            lineage.get::<InitialKeys<T::Crypto>, Ii>().send().is_some(),
+            lineage
+                .get::<HandshakeKeys<T::Crypto>, Ih>()
+                .send()
+                .is_some(),
+            lineage
+                .get::<OneRttKeys<T::Crypto, InstantOf<T>>, Io>()
+                .send()
+                .is_some(),
+        ];
+        let wanted = Self::wanted(
+            lineage.get::<CryptoSender<T::CryptoSendBuffer>, Ic>(),
+            can_send,
+        );
+        if !lineage.get::<Self, Is>().differ(&wanted) {
+            return None;
+        }
+        let (frunk_core::hlist_pat![tickets, core], _) = Take::<
+            frunk_core::HList![Self, SendStrategyCore<SendStrategyOf<T, L>>],
+            It,
+        >::take(lineage);
+        tickets.follow(wanted, |intent| {
+            <SendTypes<T, L> as CorePublishTo<_, _, Idx>>::publish_to(
+                core.strategy_mut(),
+                intent,
+                AnyActiveLinkPath,
+            )
+        });
+        None
+    }
+}
+
 // ---- the PING of a probe timeout ----
 
 /// What publishing a probe's PING on a link path's planner gives back for
@@ -1210,5 +1406,260 @@ mod tests {
                 ..PacketOverheads::default()
             }
         );
+    }
+
+    // ---- the CRYPTO intents ----
+
+    use core::{cell::RefCell, num::NonZeroUsize};
+    use std::rc::Rc;
+
+    use bytes::Bytes;
+    use frunk_core::hlist;
+    use sakuya_recovery::send_journals::DequeSendJournals;
+    use sakuya_wire::parts::{CNil, Coproduct};
+
+    use crate::{
+        frame_source::FrameSource,
+        take::{Lineage, TakenPositions},
+        v1::{
+            aead_usage::AeadUsage,
+            crypto::send::OffsetMapCryptoSendBuffer,
+            datagram_batch::tests::{Accounts, Batch, one_rtt_keys},
+            feedback::{CryptoSummary, FeedbackSummary},
+            send::LineageCryptoFrameSource,
+        },
+        write::InFlightClass,
+    };
+
+    /// What became of the tickets: each published intent, and each ticket
+    /// dropped, by its level.
+    type TicketLog = Rc<RefCell<Vec<String>>>;
+
+    /// A ticket that notes when it is dropped.
+    struct NotedTicket(TicketLog, CryptoLevel);
+
+    impl Drop for NotedTicket {
+        fn drop(&mut self) {
+            self.0.borrow_mut().push(format!("dropped {:?}", self.1));
+        }
+    }
+
+    type Sender = CryptoSender<OffsetMapCryptoSendBuffer>;
+
+    /// The tickets follow `sender`, as their reread does with the levels
+    /// that `can_send`, publishing into `log`.
+    fn reread(
+        tickets: &mut CryptoIntentTickets<NotedTicket>,
+        sender: &Sender,
+        can_send: [bool; 3],
+        log: &TicketLog,
+    ) {
+        let wanted = CryptoIntentTickets::<NotedTicket>::wanted(sender, can_send);
+        if !tickets.differ(&wanted) {
+            return;
+        }
+        tickets.follow(wanted, |intent| {
+            log.borrow_mut().push(format!(
+                "publish {:?} {}",
+                intent.level(),
+                intent.shortest()
+            ));
+            NotedTicket(Rc::clone(log), intent.level())
+        });
+    }
+
+    fn take(log: &TicketLog) -> Vec<String> {
+        core::mem::take(&mut *log.borrow_mut())
+    }
+
+    fn v(value: u64) -> VarInt {
+        VarInt::try_from(value).unwrap()
+    }
+
+    const ALL: [bool; 3] = [true, true, true];
+
+    /// The frames of `level` supplied into a 1-RTT packet of a datagram of
+    /// at most `max_len` bytes, through the frame source the sending call
+    /// finds in a lineage of `sender` and `tickets`: their summaries.
+    fn supplied(
+        sender: &mut Sender,
+        tickets: &mut CryptoIntentTickets<NotedTicket>,
+        level: CryptoLevel,
+        max_len: usize,
+    ) -> Vec<CryptoSummary> {
+        let (keys, _) = one_rtt_keys();
+        let mut journals =
+            DequeSendJournals::<u64, Coproduct<FeedbackSummary<u64>, CNil>, ()>::new();
+        let mut usage = AeadUsage::new();
+        let mut accounts = Accounts::new();
+        let mut batch = Batch::new(NonZeroUsize::MIN);
+        let mut taken = TakenPositions::default();
+        let mut lineage = Lineage::new(hlist![sender, tickets], &mut taken);
+        let mut source =
+            LineageCryptoFrameSource::<_, OffsetMapCryptoSendBuffer, NotedTicket, _>::new(
+                &mut lineage,
+            );
+        {
+            let mut datagram = accounts.start(&mut batch, Role::Server, max_len, max_len, false);
+            let packet = datagram
+                .start_one_rtt_packet(
+                    journals.start_attempt(()),
+                    keys.send().unwrap(),
+                    &mut usage,
+                    None,
+                )
+                .unwrap();
+            let _ = source.supply(level, packet.open::<InFlightClass>());
+        }
+        journals
+            .take_link_path(&())
+            .flat_map(|record| record.summaries)
+            .filter_map(|summary| match summary {
+                Coproduct::Inl(summary) => summary.get::<CryptoSummary, _>().copied(),
+                Coproduct::Inr(never) => match never {},
+            })
+            .collect()
+    }
+
+    /// `summary` comes back to the frame source of `sender` and `tickets`,
+    /// delivered or lost.
+    fn settled(
+        sender: &mut Sender,
+        tickets: &mut CryptoIntentTickets<NotedTicket>,
+        summary: CryptoSummary,
+        delivered: bool,
+    ) {
+        let mut taken = TakenPositions::default();
+        let mut lineage = Lineage::new(hlist![sender, tickets], &mut taken);
+        let mut source =
+            LineageCryptoFrameSource::<_, OffsetMapCryptoSendBuffer, NotedTicket, _>::new(
+                &mut lineage,
+            );
+        let space = PacketNumberSpaceKind::ApplicationData;
+        if delivered {
+            source.delivered::<(), _>(&mut (), space, summary);
+        } else {
+            source.lost::<(), _>(&mut (), space, &summary);
+        }
+    }
+
+    #[test]
+    fn crypto_data_written_publishes_the_intent_of_its_level() {
+        let log = TicketLog::default();
+        let mut sender = Sender::new();
+        let mut tickets = CryptoIntentTickets::default();
+        reread(&mut tickets, &sender, ALL, &log);
+        assert!(take(&log).is_empty());
+        sender.write(Bytes::from_static(b"client hello")).unwrap();
+        reread(&mut tickets, &sender, ALL, &log);
+        // the shortest frame: type, offset 0, length, one byte
+        assert_eq!(take(&log), ["publish Initial 4"]);
+        assert!(tickets.is_published(CryptoLevel::Initial));
+        // more data at the same level changes nothing
+        sender.write(Bytes::from_static(b" more")).unwrap();
+        reread(&mut tickets, &sender, ALL, &log);
+        assert!(take(&log).is_empty());
+    }
+
+    #[test]
+    fn a_level_without_keys_to_send_holds_its_intent_back() {
+        let log = TicketLog::default();
+        let mut sender = Sender::new();
+        let mut tickets = CryptoIntentTickets::default();
+        sender.write(Bytes::from_static(b"server hello")).unwrap();
+        sender.move_output_to(CryptoLevel::Handshake);
+        sender.write(Bytes::from_static(b"finished")).unwrap();
+        reread(&mut tickets, &sender, [true, false, false], &log);
+        assert_eq!(take(&log), ["publish Initial 4"]);
+        reread(&mut tickets, &sender, [true, true, false], &log);
+        assert_eq!(take(&log), ["publish Handshake 4"]);
+        // the Initial keys go: the level's intent is withdrawn
+        reread(&mut tickets, &sender, [false, true, false], &log);
+        assert_eq!(take(&log), ["dropped Initial"]);
+    }
+
+    #[test]
+    fn a_discarded_level_drops_its_ticket() {
+        let log = TicketLog::default();
+        let mut sender = Sender::new();
+        let mut tickets = CryptoIntentTickets::default();
+        sender.write(Bytes::from_static(b"client hello")).unwrap();
+        reread(&mut tickets, &sender, ALL, &log);
+        take(&log);
+        sender.discard(CryptoLevel::Initial);
+        reread(&mut tickets, &sender, ALL, &log);
+        assert_eq!(take(&log), ["dropped Initial"]);
+        assert!(!tickets.is_published(CryptoLevel::Initial));
+    }
+
+    #[test]
+    fn supplying_takes_the_ticket_and_what_is_left_is_published_again() {
+        let log = TicketLog::default();
+        let mut sender = Sender::new();
+        let mut tickets = CryptoIntentTickets::default();
+        sender.move_output_to(CryptoLevel::OneRtt);
+        sender.write(Bytes::from(vec![7; 100])).unwrap();
+        reread(&mut tickets, &sender, ALL, &log);
+        assert_eq!(take(&log), ["publish OneRtt 4"]);
+        // a 1-RTT packet takes 26 bytes beyond its frames here
+        let first = supplied(&mut sender, &mut tickets, CryptoLevel::OneRtt, 26 + 60);
+        assert_eq!(
+            first,
+            [CryptoSummary {
+                level: CryptoLevel::OneRtt,
+                offset: v(0),
+                len: 57
+            }]
+        );
+        assert_eq!(take(&log), ["dropped OneRtt"]);
+        // the rest starts at 57, whose offset takes one byte still
+        reread(&mut tickets, &sender, ALL, &log);
+        assert_eq!(take(&log), ["publish OneRtt 4"]);
+        let second = supplied(&mut sender, &mut tickets, CryptoLevel::OneRtt, 1200);
+        assert_eq!(
+            second,
+            [CryptoSummary {
+                level: CryptoLevel::OneRtt,
+                offset: v(57),
+                len: 43
+            }]
+        );
+        assert_eq!(take(&log), ["dropped OneRtt"]);
+        reread(&mut tickets, &sender, ALL, &log);
+        assert!(take(&log).is_empty(), "nothing is left to send");
+
+        // the first frame is lost: its bytes are published and sent again
+        // as they were
+        settled(&mut sender, &mut tickets, first[0], false);
+        reread(&mut tickets, &sender, ALL, &log);
+        assert_eq!(take(&log), ["publish OneRtt 4"]);
+        let again = supplied(&mut sender, &mut tickets, CryptoLevel::OneRtt, 1200);
+        assert_eq!(again, first);
+        take(&log);
+        // once delivered, a late loss of the second frame's first copy
+        // sends nothing again
+        settled(&mut sender, &mut tickets, second[0], true);
+        settled(&mut sender, &mut tickets, second[0], false);
+        reread(&mut tickets, &sender, ALL, &log);
+        assert!(take(&log).is_empty());
+    }
+
+    #[test]
+    fn the_intent_is_published_again_when_its_shortest_frame_grows() {
+        let log = TicketLog::default();
+        let mut sender = Sender::new();
+        let mut tickets = CryptoIntentTickets::default();
+        sender.move_output_to(CryptoLevel::OneRtt);
+        sender.write(Bytes::from(vec![7; 100])).unwrap();
+        // 64 bytes in flight: the first unsent offset takes two bytes
+        let _ = supplied(&mut sender, &mut tickets, CryptoLevel::OneRtt, 26 + 68);
+        assert_eq!(sender.first_unsent(CryptoLevel::OneRtt), Some(v(64)));
+        reread(&mut tickets, &sender, ALL, &log);
+        assert_eq!(take(&log), ["publish OneRtt 5"]);
+        // a loss below it makes it shorter again; the old ticket goes after
+        // the new intent is in
+        sender.lost(CryptoLevel::OneRtt, v(0), 10);
+        reread(&mut tickets, &sender, ALL, &log);
+        assert_eq!(take(&log), ["publish OneRtt 4", "dropped OneRtt"]);
     }
 }

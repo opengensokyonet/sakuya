@@ -216,7 +216,7 @@ fn an_ack_frame_without_room_for_its_ack_delay_is_the_shortest() {
     assert_eq!(frame.ack_delay().get(), VarInt::ZERO);
 }
 
-// ---- which packets carry HANDSHAKE_DONE ----
+// ---- which packets carry CRYPTO and HANDSHAKE_DONE ----
 
 /// The frame source a packet of kind `K` gives `intent` to, if it carries
 /// it.
@@ -239,6 +239,20 @@ fn carried_by_each(intent: SendIntents) -> [Option<FrameSourceId>; 6] {
 }
 
 #[test]
+fn each_level_s_crypto_frames_go_in_packets_of_that_level_only() {
+    for (level, at) in [
+        (CryptoLevel::Initial, 0),
+        (CryptoLevel::Handshake, 1),
+        (CryptoLevel::OneRtt, 3),
+    ] {
+        let intent = SendIntents::inject(CryptoIntent::new(level, VarInt::from_u32(0)));
+        let mut expected = [None; 6];
+        expected[at] = Some(FrameSourceId::Crypto(level));
+        assert_eq!(carried_by_each(intent), expected, "{level:?}");
+    }
+}
+
+#[test]
 fn handshake_done_goes_in_1_rtt_packets_only() {
     let intent = SendIntents::inject(HandshakeDoneIntent);
     assert_eq!(
@@ -251,5 +265,21 @@ fn handshake_done_goes_in_1_rtt_packets_only() {
             None,
             None
         ]
+    );
+}
+
+#[test]
+fn the_shortest_crypto_frame_grows_with_its_offset() {
+    let at = |offset: u32| CryptoIntent::new(CryptoLevel::Initial, VarInt::from_u32(offset));
+    assert_eq!(at(0).shortest(), 4);
+    assert_eq!(at(63).shortest(), 4);
+    assert_eq!(at(64).shortest(), 5);
+    assert_eq!(at(16_384).shortest(), 7);
+    assert_eq!(
+        at(0).min_lengths(),
+        MinimumLengths {
+            with_length: 4,
+            as_last: 4
+        }
     );
 }

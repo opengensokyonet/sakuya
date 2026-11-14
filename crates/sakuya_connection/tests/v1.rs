@@ -45,7 +45,10 @@ use sakuya_connection::{
         close::{CloseReasonRecord, LocalCloseCause},
         close_request::CloseRequestCell,
         confirmation::HandshakeConfirmation,
-        crypto::{CryptoReceiveCapacities, CryptoReceiver, FragmentedCryptoReceiveBuffer},
+        crypto::{
+            CryptoReceiveCapacities, CryptoReceiver, FragmentedCryptoReceiveBuffer,
+            send::{CryptoSender, OffsetMapCryptoSendBuffer},
+        },
         feedback::AckSummary,
         first_flight::{
             FirstFlight, FirstFlightReadState, ReadFirstFlightError, read_first_flight,
@@ -142,6 +145,10 @@ thread_local! {
     /// When the probe of a server connection hands CRYPTO frames to the
     /// connection's CRYPTO receiver, as the calls will.
     static CRYPTO_AT: Cell<Option<Duration>> = const { Cell::new(None) };
+    /// When the probe of a server connection writes its ServerHello's
+    /// stand-in into the connection's CRYPTO output, as the handshake
+    /// engine will.
+    static CRYPTO_WRITE_AT: Cell<Option<Duration>> = const { Cell::new(None) };
     /// What the packet feeder of the next server connection's logical path
     /// does, and when.
     static PACKETS: RefCell<VecDeque<(Duration, probe::PacketStep)>> = const { RefCell::new(VecDeque::new()) };
@@ -197,6 +204,7 @@ fn reset() {
     FEED.with(|f| f.borrow_mut().clear());
     CLOSER.with(|c| c.borrow_mut().clear());
     CRYPTO_AT.with(|c| c.set(None));
+    CRYPTO_WRITE_AT.with(|c| c.set(None));
     PACKETS.with(|p| p.borrow_mut().clear());
     MAX_ACK_RANGES.with(|m| m.set(MaxAckRanges::DEFAULT));
     MAX_PER_POLL.with(|m| m.set(16));
@@ -337,6 +345,7 @@ impl v1::Choices for ClientMine {
     type Crypto = RingBackend;
     type Side = v1::Client<common::PendingClientEngine>;
     type CryptoReceiveBuffer = FragmentedCryptoReceiveBuffer;
+    type CryptoSendBuffer = OffsetMapCryptoSendBuffer;
     type Recovery<V: Clone + Eq + Debug + 'static> =
         sakuya_recovery::factory::NewRenoRecoveryFactory<V>;
     type AckObligation = sakuya_recovery::ack_obligation::Rfc9000AckObligation<Duration>;
@@ -362,6 +371,7 @@ impl v1::Choices for SpyMine {
     type Crypto = RingBackend;
     type Side = v1::Server<common::PendingServerEngine>;
     type CryptoReceiveBuffer = FragmentedCryptoReceiveBuffer;
+    type CryptoSendBuffer = OffsetMapCryptoSendBuffer;
     type Recovery<V: Clone + Eq + Debug + 'static> = spy::SpyFactory<V>;
     type AckObligation = sakuya_recovery::ack_obligation::Rfc9000AckObligation<Duration>;
     type SendJournals<S: 'static, P: Clone + Eq + Debug + 'static> =
@@ -866,6 +876,45 @@ mod probe {
                 "Initial: {initial:?}, read {:?}",
                 String::from_utf8_lossy(&read)
             ));
+            None
+        }
+    }
+
+    /// In the connection: at its deadline, writes `server hello` at the
+    /// level the CRYPTO output writes.
+    #[derive(Debug)]
+    pub struct CryptoWriter(Option<Duration>);
+    impl Build<Mine, Parts, layer::Connection, ()> for CryptoWriter {
+        fn build<'v>(
+            _: &mut ParentsOf<'v, Mine, Parts, layer::Connection>,
+            _: &mut ArgsOf<Mine, Parts, layer::Connection>,
+        ) -> Self {
+            CryptoWriter(CRYPTO_WRITE_AT.with(Cell::take))
+        }
+    }
+    impl<I, K> DataComponent<Mine, Parts, layer::Connection, (I, K)> for CryptoWriter
+    where
+        for<'v> <Parts as LineageLists<'v, Mine>>::Connection: GetAt<CryptoWriter, I>
+            + TakeEach<'v, HList![CryptoWriter, CryptoSender<OffsetMapCryptoSendBuffer>], K>,
+    {
+        fn deadline<'v>(
+            lineage: &LineageOf<'v, Mine, Parts, layer::Connection>,
+        ) -> Option<Duration> {
+            lineage.get::<CryptoWriter, I>().0
+        }
+        fn expire<'v, B: CallBundle>(
+            lineage: LineageOf<'v, Mine, Parts, layer::Connection>,
+            _: &mut OtherNodes<'v, Mine, Parts, B>,
+            _: Duration,
+        ) -> Option<RequestOf<Mine, Parts>> {
+            let (hlist_pat![writer, sender], _) = Take::<
+                HList![CryptoWriter, CryptoSender<OffsetMapCryptoSendBuffer>],
+                K,
+            >::take(lineage);
+            writer.0 = None;
+            sender
+                .write(bytes::Bytes::from_static(b"server hello"))
+                .expect("a few bytes fit");
             None
         }
     }
@@ -1853,7 +1902,7 @@ mod probe {
         type Calls = HNil;
     }
     impl LayerShare<Mine, Parts, layer::Connection> for Part {
-        type Data = HList![Adder, PeerSetter, Closer, CryptoFeeder];
+        type Data = HList![Adder, PeerSetter, Closer, CryptoFeeder, CryptoWriter];
         type Calls = HNil;
     }
     impl LayerShare<ClientMine, Parts, layer::Connection> for Part {
@@ -5247,6 +5296,40 @@ fn a_server_answers_the_first_initial_packet_with_an_ack_in_an_initial_packet() 
     assert_eq!(datagram.len(), 1 + 4 + 1 + 8 + 1 + 8 + 1 + 2 + 1 + 16 + 5);
     assert!(datagram.len() < MIN_DATAGRAM_SIZE);
     assert!(datagram.len() <= 2 * size);
+}
+
+#[test]
+fn crypto_data_written_is_published_and_sent_in_an_initial_packet() {
+    reset();
+    let first = link();
+    CRYPTO_WRITE_AT.with(|c| c.set(Some(ms(4))));
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    let _ = settle(&mut connection, 4..=4);
+    let events = take_strategy_events();
+    assert!(
+        events
+            .iter()
+            .any(|event| event == "core: publish CryptoIntent { level: Initial, shortest: 4 }"),
+        "{events:?}"
+    );
+    // nothing goes before the client's Initial packet gives the server a
+    // connection ID to send to and credit to send with
+    assert_eq!(common::take_sent(), []);
+    deliver(client_initial(0), &first, ms(5));
+    let _ = settle(&mut connection, 5..=6);
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let packet = open_sent_initial(&sent[0].1);
+    let crypto: Vec<_> = frames_of(&packet.payload)
+        .into_iter()
+        .filter_map(|run| match run {
+            sakuya_wire::v1::frame::FrameRun::Crypto(frame) => {
+                Some((frame.offset().get().get(), frame.data().to_vec()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(crypto, [(0, b"server hello".to_vec())]);
 }
 
 /// The frames of the packet payload `payload`, read as the receiving side

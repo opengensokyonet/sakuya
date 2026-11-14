@@ -1,7 +1,7 @@
 //! What QUIC version 1 sends through the send strategy: acknowledgments of
 //! each packet number space, the PING of a probe timeout, the retirement of
-//! the peer's connection IDs and a server's HANDSHAKE_DONE, as send
-//! intents, the items a packet of each
+//! the peer's connection IDs, the CRYPTO data of each encryption level and
+//! a server's HANDSHAKE_DONE, as send intents, the items a packet of each
 //! kind may carry, and the frame sources that write them.
 
 use core::{marker::PhantomData, time::Duration};
@@ -11,6 +11,7 @@ use sakuya_recovery::{
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaces},
     receive_journals::ReceiveJournals,
 };
+use sakuya_tls::engine::CryptoLevel;
 use sakuya_wire::v1::packet_number::PacketNumber;
 use sakuya_wire::{
     parts::{CNil, Coproduct},
@@ -20,15 +21,19 @@ use sakuya_wire::{
         ping::PingFrame,
         retire_connection_id::RetireConnectionIdFrame,
     },
-    var_int::{VarInt, VarIntField},
+    var_int::{VarInt, VarIntField, VarIntWidth},
 };
 
 use super::{
     AckObligationsOf, Choices, CloseCauseOf, Part, Side,
     connection_ids::ConnectionIdsOf,
-    feedback::{AckSummary, HandshakeDoneSummary, ProbePingSummary},
+    crypto::send::{CryptoSendBuffer, CryptoSender},
+    feedback::{AckSummary, CryptoSummary, HandshakeDoneSummary, ProbePingSummary},
     key_phase::KeyPhaseNumbers,
-    send_planning::{AckIntentTicketOf, AckIntentTickets, CorePublishOutcome},
+    send_planning::{
+        AckIntentTicketOf, AckIntentTickets, CorePublishOutcome, CryptoIntentTicketOf,
+        CryptoIntentTickets,
+    },
 };
 use crate::{
     clock::InstantOf,
@@ -66,6 +71,8 @@ pub enum FrameSourceId {
     /// The RETIRE_CONNECTION_ID frames of the destination connection ID
     /// strategy.
     RetireConnectionId,
+    /// The CRYPTO frames of an encryption level.
+    Crypto(CryptoLevel),
     /// A server's HANDSHAKE_DONE frame.
     HandshakeDone,
 }
@@ -248,6 +255,74 @@ impl RankedCoreIntent for RetireConnectionIdIntent {
     type Outcome<C> = ();
 }
 
+/// CRYPTO data of an encryption level is unsent (RFC 9000 §19.6), and the
+/// shortest CRYPTO frame of it, one byte at its first unsent offset, is
+/// `shortest` bytes long.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CryptoIntent {
+    level: CryptoLevel,
+    shortest: usize,
+}
+
+impl CryptoIntent {
+    /// CRYPTO data of `level` is unsent from `first_unsent` on.
+    pub fn new(level: CryptoLevel, first_unsent: VarInt) -> Self {
+        Self {
+            level,
+            shortest: shortest_crypto_frame(first_unsent),
+        }
+    }
+
+    /// The encryption level.
+    pub fn level(&self) -> CryptoLevel {
+        self.level
+    }
+
+    /// How long the shortest CRYPTO frame of the unsent data is.
+    pub fn shortest(&self) -> usize {
+        self.shortest
+    }
+}
+
+/// The length of a CRYPTO frame with one byte at `offset`: the Frame
+/// Type, the Offset and Length fields at their shortest, and the byte. A
+/// packet with at least this much room takes some of the data.
+pub fn shortest_crypto_frame(offset: VarInt) -> usize {
+    1 + VarIntWidth::shortest(offset).encoded_len() + 1 + 1
+}
+
+impl SendIntent for CryptoIntent {
+    type FrameSourceId = FrameSourceId;
+    type Class = InFlightClass;
+
+    fn frame_source(&self) -> FrameSourceId {
+        FrameSourceId::Crypto(self.level)
+    }
+
+    fn min_lengths(&self) -> MinimumLengths {
+        MinimumLengths {
+            with_length: self.shortest,
+            as_last: self.shortest,
+        }
+    }
+}
+
+/// The rank is provisional.
+impl RankedIntent for CryptoIntent {
+    fn rank(&self) -> SendRank {
+        SendRank {
+            priority: SendPriority::Handshake,
+            holds_place: true,
+        }
+    }
+}
+
+/// The CRYPTO intent tickets keep the ticket, to withdraw the intent once
+/// nothing of the level is unsent or its keys are gone.
+impl RankedCoreIntent for CryptoIntent {
+    type Outcome<C> = IntentTicket<C>;
+}
+
 /// The handshake is complete: a server's HANDSHAKE_DONE frame is to be
 /// sent (RFC 9000 §19.20), and sent again while its packets are lost (RFC
 /// 9000 §13.3). It is sent and forgotten: publishing it gives back nothing
@@ -300,20 +375,25 @@ pub type SendIntents = Coproduct<
     AckIntent,
     Coproduct<
         ProbePingIntent,
-        Coproduct<RetireConnectionIdIntent, Coproduct<HandshakeDoneIntent, CNil>>,
+        Coproduct<
+            RetireConnectionIdIntent,
+            Coproduct<HandshakeDoneIntent, Coproduct<CryptoIntent, CNil>>,
+        >,
     >,
 >;
 
 /// The kinds of version 1's frame sources: PADDING, which the packet
 /// writer writes, the ACK frames of each packet number space, the PING of
 /// a probe timeout, the RETIRE_CONNECTION_ID frames of the destination
-/// connection ID strategy and a server's HANDSHAKE_DONE.
+/// connection ID strategy, a server's HANDSHAKE_DONE and the CRYPTO frames
+/// of each encryption level.
 pub type FrameSources = frunk_core::HList![
     PaddingFrames,
     AckFrames,
     ProbePingFrames,
     RetireConnectionIdFrames,
-    HandshakeDoneFrames
+    HandshakeDoneFrames,
+    CryptoFrames
 ];
 
 impl SendIntentPart for Part {
@@ -326,6 +406,20 @@ impl SendIntentPart for Part {
 /// PADDING is never planned; the ACK frames and the PING of a probe are
 /// planned for a packet number space.
 pub type SendItem = FrameSourceItemsOf<'static, Part>;
+
+/// The level of the CRYPTO frames a packet of `kind` carries: those of its
+/// own encryption level; 0-RTT packets carry none (RFC 9000 §12.4), and
+/// neither do a candidate's nor a settling link path's.
+fn crypto_level(kind: PlannedPacketKind) -> Option<CryptoLevel> {
+    match kind {
+        PlannedPacketKind::Initial => Some(CryptoLevel::Initial),
+        PlannedPacketKind::Handshake => Some(CryptoLevel::Handshake),
+        PlannedPacketKind::OneRtt => Some(CryptoLevel::OneRtt),
+        PlannedPacketKind::ZeroRtt
+        | PlannedPacketKind::OneRttProbe
+        | PlannedPacketKind::SettlingResponse => None,
+    }
+}
 
 /// Whether a packet of `kind` carries content of `space` from a source of
 /// `ack`: ACK frames are not allowed in 0-RTT packets (RFC 9000 §12.4); a
@@ -359,9 +453,16 @@ impl<K: PacketKind> FrameSourcePart<K> for Part {
                     Coproduct::Inr(Coproduct::Inr(Coproduct::Inl(()))),
                 )))
             }
-            Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(never)))) => {
-                match *never {}
-            }
+            Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inl(
+                crypto,
+            ))))) => (crypto_level(K::KIND) == Some(crypto.level)).then_some(Coproduct::Inr(
+                Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(
+                    Coproduct::Inl(crypto.level),
+                )))),
+            )),
+            Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(
+                never,
+            ))))) => match *never {},
         }
     }
 
@@ -379,7 +480,10 @@ impl<K: PacketKind> FrameSourcePart<K> for Part {
                 FrameSourceId::HandshakeDone
             }
             Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(
-                never,
+                Coproduct::Inl(level),
+            ))))) => FrameSourceId::Crypto(*level),
+            Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(
+                Coproduct::Inr(never),
             ))))) => match *never {},
         }
     }
@@ -657,6 +761,129 @@ where
         lineage
             .get_mut::<ConnectionIdsOf<T>, Ic>()
             .destination_mut()
+    }
+}
+
+/// The CRYPTO frames of the encryption levels, as a kind of frame source.
+#[derive(Debug)]
+pub enum CryptoFrames {}
+
+impl FrameSourceKind for CryptoFrames {
+    type Item<'a> = CryptoLevel;
+    type Summary<I> = CryptoSummary;
+    type Intent = NoIntent;
+}
+
+/// The CRYPTO frames are written from the connection's CRYPTO output, and
+/// take the tickets of its intents.
+impl<T, L, V, Is, It> FindFrameSource<T, L, V, (Is, It)> for CryptoFrames
+where
+    T: Choices,
+    SendTypes<T, L>: CorePublishOutcome<CryptoIntent, AnyActiveLinkPath>,
+    V: GetAt<CryptoSender<T::CryptoSendBuffer>, Is>
+        + GetAt<CryptoIntentTickets<CryptoIntentTicketOf<T, L>>, It>,
+{
+    type Source<'l, 'r>
+        = LineageCryptoFrameSource<
+        'l,
+        'r,
+        V,
+        T::CryptoSendBuffer,
+        CryptoIntentTicketOf<T, L>,
+        (Is, It),
+    >
+    where
+        V: 'l,
+        'r: 'l;
+
+    fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
+        LineageCryptoFrameSource::new(lineage)
+    }
+}
+
+/// The CRYPTO frames of the connection's output, in a lineage: they are
+/// written from its [`CryptoSender`], and writing them takes the ticket
+/// of their level's intent from its [`CryptoIntentTickets`]. `B` is the
+/// buffer of a level, `K` what publishing a CRYPTO intent gave back, `H`
+/// the positions of the two components.
+///
+/// Supplying a level always drops its ticket: when a frame was written the
+/// plan consumed the intent, and when none was, nothing is unsent. The
+/// tickets publish the intent again while bytes of the level are unsent,
+/// also once a frame of it is lost.
+pub struct LineageCryptoFrameSource<'l, 'r, V, B, K, H> {
+    lineage: &'l mut Lineage<'r, V>,
+    types: PhantomData<SourceTypes<B, K, H>>,
+}
+
+/// What [`LineageCryptoFrameSource`] takes its components by: the buffer
+/// of a level, the tickets of the intents and the positions.
+type SourceTypes<B, K, H> = fn() -> (B, K, H);
+
+impl<V, B, K, H> core::fmt::Debug for LineageCryptoFrameSource<'_, '_, V, B, K, H> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("LineageCryptoFrameSource")
+    }
+}
+
+impl<'l, 'r, V, B, K, H> LineageCryptoFrameSource<'l, 'r, V, B, K, H> {
+    pub(crate) fn new(lineage: &'l mut Lineage<'r, V>) -> Self {
+        Self {
+            lineage,
+            types: PhantomData,
+        }
+    }
+}
+
+impl<V, B, K, Is, It> FrameSource for LineageCryptoFrameSource<'_, '_, V, B, K, (Is, It)>
+where
+    B: CryptoSendBuffer,
+    V: GetAt<CryptoSender<B>, Is> + GetAt<CryptoIntentTickets<K>, It>,
+{
+    type Summary = CryptoSummary;
+    type Class = InFlightClass;
+    type Item<'b> = CryptoLevel;
+    type Intent = NoIntent;
+
+    fn supply<W, P>(
+        &mut self,
+        level: CryptoLevel,
+        mut packet: OpenPacket<W, InFlightClass, P>,
+    ) -> Supplied<W, InFlightClass, P>
+    where
+        W: PacketWriting,
+        SummaryOf<W>: From<CryptoSummary>,
+        P: PacketPosition,
+    {
+        self.lineage
+            .get_mut::<CryptoSender<B>, Is>()
+            .write_frames(level, &mut packet);
+        self.lineage
+            .get_mut::<CryptoIntentTickets<K>, It>()
+            .forget(level);
+        Supplied::Open(packet)
+    }
+
+    fn delivered<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, summary: CryptoSummary)
+    where
+        Pb: PublishIntent<NoIntent, Idx>,
+    {
+        self.lineage.get_mut::<CryptoSender<B>, Is>().acknowledged(
+            summary.level,
+            summary.offset,
+            summary.len,
+        );
+    }
+
+    fn lost<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, summary: &CryptoSummary)
+    where
+        Pb: PublishIntent<NoIntent, Idx>,
+    {
+        self.lineage.get_mut::<CryptoSender<B>, Is>().lost(
+            summary.level,
+            summary.offset,
+            summary.len,
+        );
     }
 }
 
