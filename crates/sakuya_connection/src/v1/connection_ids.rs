@@ -22,7 +22,7 @@ use core::fmt;
 use std::sync::Arc;
 
 use sakuya_wire::{
-    connection_id::ConnectionId,
+    connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken},
     parts::Selector,
     v1::transport_parameters::{TransportParameterSlots, integer::ActiveConnectionIdLimit},
 };
@@ -30,7 +30,7 @@ use sakuya_wire::{
 use frunk_core::{HList, hlist_pat};
 
 use super::{
-    Choices, ConnectionArgs,
+    Choices, ConnectionArgs, Side,
     first_flight::FirstFlightStart,
     parameters::LocalTransportParameters,
     send::{RetireConnectionIdIntent, SendTypes},
@@ -105,9 +105,43 @@ impl<C> PassiveDataComponent for DestinationConnectionIdConfig<C> {}
 
 /// The first of this side's connection IDs, as the connection was made
 /// with it, kept in the connection node: the Source Connection ID of the
-/// long headers this side sends.
+/// long headers this side sends, and the transport parameters' Initial
+/// Source Connection ID (RFC 9000 §7.3).
+///
+/// A connection that chose a zero-length connection ID for this side has
+/// no stateless reset token for it (RFC 9000 §5.1, §10.3); any other has
+/// the one it was issued with, which a server sends as its
+/// `stateless_reset_token` (§18.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FirstLocalConnectionId(pub ConnectionId);
+pub enum FirstLocalConnectionId {
+    /// This side chose a zero-length connection ID.
+    ZeroLength,
+    /// A connection ID issued with its stateless reset token.
+    Issued {
+        /// The connection ID.
+        id: NonEmptyCid,
+        /// Its stateless reset token.
+        reset_token: StatelessResetToken,
+    },
+}
+
+impl FirstLocalConnectionId {
+    /// The connection ID, of zero length when this side chose none.
+    pub fn id(&self) -> ConnectionId {
+        match self {
+            Self::ZeroLength => ConnectionId::EMPTY,
+            Self::Issued { id, .. } => id.get(),
+        }
+    }
+
+    /// Its stateless reset token, if it has one.
+    pub fn reset_token(&self) -> Option<StatelessResetToken> {
+        match self {
+            Self::ZeroLength => None,
+            Self::Issued { reset_token, .. } => Some(*reset_token),
+        }
+    }
+}
 
 impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for FirstLocalConnectionId
 where
@@ -118,10 +152,97 @@ where
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        Self(Selector::<ConnectionArgs<T, L>, I>::get(args).first_local_connection_id)
+        Selector::<ConnectionArgs<T, L>, I>::get(args).first_local_connection_id
     }
 }
 impl PassiveDataComponent for FirstLocalConnectionId {}
+
+/// The Destination Connection IDs of the client's first Initial packets,
+/// kept in the connection node: what the transport parameters state of
+/// them is checked against, or made from (RFC 9000 §7.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InitialDestinationConnectionIds {
+    made_with: ConnectionId,
+    before_retry: Option<ConnectionId>,
+}
+
+impl InitialDestinationConnectionIds {
+    /// The one the connection was made with, which the Initial keys are
+    /// derived from: the one a client chose, or the one a server found in
+    /// the first datagrams.
+    pub fn made_with(&self) -> ConnectionId {
+        self.made_with
+    }
+
+    /// The client's first one: the one before a Retry, when the server
+    /// sent one before the connection was made; the one the connection was
+    /// made with otherwise. It is the `original_destination_connection_id`
+    /// a server sends.
+    pub fn original(&self) -> ConnectionId {
+        self.before_retry.unwrap_or(self.made_with)
+    }
+
+    /// The Source Connection ID of the Retry a server sent before the
+    /// connection was made, which is the one the connection was made with:
+    /// the `retry_source_connection_id` it sends. `None` without a Retry.
+    pub fn retry_source(&self) -> Option<ConnectionId> {
+        self.before_retry.map(|_| self.made_with)
+    }
+}
+
+impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for InitialDestinationConnectionIds
+where
+    L: LineagePartList<T>,
+    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        args: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        let args = Selector::<ConnectionArgs<T, L>, I>::get(args);
+        Self {
+            made_with: args.client_dcid,
+            before_retry: args.original_destination_connection_id,
+        }
+    }
+}
+impl PassiveDataComponent for InitialDestinationConnectionIds {}
+
+/// The Source Connection ID of the first Initial packet opened from the
+/// peer, kept in the connection node once it is: the connection ID the
+/// peer chose for the handshake, which its `initial_source_connection_id`
+/// must state (RFC 9000 §7.2, §7.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PeerHandshakeConnectionId(Option<ConnectionId>);
+
+impl PeerHandshakeConnectionId {
+    /// The connection ID, once an Initial packet from the peer opened.
+    pub fn get(&self) -> Option<ConnectionId> {
+        self.0
+    }
+
+    /// An Initial packet from the peer with the Source Connection ID `id`
+    /// opened; only the first counts.
+    pub(super) fn opened(&mut self, id: ConnectionId) {
+        self.0.get_or_insert(id);
+    }
+}
+
+/// No packet from the peer has opened when the connection is made.
+impl<T: Choices, L> Build<T, L, layer::Connection, ()> for PeerHandshakeConnectionId
+where
+    L: LineagePartList<T>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        _: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        Self(None)
+    }
+}
+/// It has no deadline and reads nothing; the receiving of the first Initial
+/// packet from the peer writes it, and the handshake reads it.
+impl PassiveDataComponent for PeerHandshakeConnectionId {}
 
 /// What the connection holds to register the reset tokens of the peer's
 /// connection IDs, kept in the connection node.
@@ -224,18 +345,23 @@ pub type ConnectionIdsOf<T> = ConnectionIds<<T as Choices>::DestinationConnectio
 
 /// This side's connection ID is the one the connection was made with. The
 /// strategy is made with the `active_connection_id_limit` this side
-/// sends, as sent or else as configured (RFC 9000 §18.2: 2 when absent);
-/// a first flight read before the connection was made gives the handshake
-/// connection ID it opened.
-impl<T: Choices, L, Ic, Il, Ia, If, Ix> Build<T, L, layer::LogicalPath, (Ic, Il, Ia, If, Ix)>
-    for ConnectionIdsOf<T>
+/// sends, as sent or else as configured (RFC 9000 §18.2: 2 when absent),
+/// and starts with what the side sends with before the peer chose its
+/// connection ID: a client, the Destination Connection ID it chose (RFC
+/// 9000 §7.2). A first flight read before the connection was made gives
+/// the handshake connection ID it opened, which the connection node then
+/// keeps too.
+impl<T: Choices, L, Ic, Il, Ia, If, Ix, Id, Ip>
+    Build<T, L, layer::LogicalPath, ((Ic, Il, Ia, If, Ix), (Id, Ip))> for ConnectionIdsOf<T>
 where
     L: LineagePartList<T>,
     TransportParameterSlots: Selector<Option<ActiveConnectionIdLimit>, Ia>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<DestinationConnectionIdConfig<DestinationConnectionIdConfigOf<T>>, Ic>
         + GetAt<LocalTransportParameters<TransportParameterSlots>, Il>
         + GetAt<FirstFlightStart<T>, If>
-        + GetAt<FirstLocalConnectionId, Ix>,
+        + GetAt<FirstLocalConnectionId, Ix>
+        + GetAt<InitialDestinationConnectionIds, Id>
+        + GetAt<PeerHandshakeConnectionId, Ip>,
 {
     fn build<'v>(
         parents: &mut ParentsOf<'v, T, L, layer::LogicalPath>,
@@ -251,7 +377,7 @@ where
             .get::<DestinationConnectionIdConfig<DestinationConnectionIdConfigOf<T>>, Ic>()
             .0;
         let mut ids = ConnectionIds {
-            local: parents.get::<FirstLocalConnectionId, Ix>().0,
+            local: parents.get::<FirstLocalConnectionId, Ix>().id(),
             destination: <T::DestinationConnectionIds as DestinationConnectionIdStrategy<
                 LinkIdOf<T>,
                 InstantOf<T>,
@@ -259,10 +385,22 @@ where
             >>::new(config, active_limit),
             handshake_known: false,
         };
+        let made_with = parents
+            .get::<InitialDestinationConnectionIds, Id>()
+            .made_with();
+        if let Some(id) = <T::Side as Side>::initial_destination_connection_id(made_with) {
+            DestinationConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>::on_handshake_connection_id(
+                &mut ids.destination,
+                id,
+            );
+        }
         if let Some(id) = parents
             .get_mut::<FirstFlightStart<T>, If>()
             .take_handshake_connection_id()
         {
+            parents
+                .get_mut::<PeerHandshakeConnectionId, Ip>()
+                .opened(id);
             ids.handshake_connection_id::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>(id);
         }
         ids

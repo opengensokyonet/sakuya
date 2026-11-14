@@ -26,6 +26,12 @@ use sakuya_packet_protection::{
 };
 use sakuya_wire::v1::header::KeyPhase;
 
+/// The backend the packet protection keys of the levels after Initial are
+/// derived with, kept in the connection node: a clone of the one the
+/// connection was made with.
+#[derive(Debug, Clone)]
+pub struct PacketProtectionBackend<B>(pub B);
+
 /// The keys that protect the packets of one direction at one encryption
 /// level: the packet key and the header protection key, derived from one
 /// traffic secret, and the AEAD they are for.

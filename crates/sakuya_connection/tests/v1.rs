@@ -1031,6 +1031,7 @@ mod probe {
         Ip,
         Ian,
         Icid,
+        Iph,
         Isj,
         Irg,
         Ilr,
@@ -1042,7 +1043,7 @@ mod probe {
             (
                 I,
                 (Ii, Ih, Io),
-                (Ij, Im, Ia, It, Iu, Ikp, Icid),
+                (Ij, Im, Ia, It, Iu, Ikp, Icid, Iph),
                 (Ir, Ie, Ik, Hd),
                 (Ic, Icr),
                 (Ip, Ian, Isj, Irg, Ilr),
@@ -1073,6 +1074,7 @@ mod probe {
             + GetAt<AeadUsage, Iu>
             + GetAt<KeyPhaseNumbers, Ikp>
             + GetAt<v1::connection_ids::ConnectionIdsOf<T>, Icid>
+            + GetAt<v1::connection_ids::PeerHandshakeConnectionId, Iph>
             + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
             + GetAt<CryptoReceiver<FragmentedCryptoReceiveBuffer>, Icr>
             + GetAt<LogicalPathInput<TestLink, T::Receiver>, Ip>
@@ -1127,6 +1129,7 @@ mod probe {
                         Ik,
                         Hd,
                         Icid,
+                        Iph,
                     >(&mut lineage, others, packet);
                     log(describe::<L, Ie>(outcome));
                 }
@@ -1362,6 +1365,9 @@ mod probe {
                     DropReason::NoLinkPath => "no link path".into(),
                     DropReason::Draining => "draining".into(),
                     DropReason::TokenFromServer => "token from the server".into(),
+                    DropReason::OtherSourceConnectionId { .. } => {
+                        "another source connection ID".into()
+                    }
                     DropReason::NoReceiveKeys { level } => format!("no {level:?} keys"),
                     DropReason::NotProtected => "not protected".into(),
                     DropReason::HeaderProtectionNotRemoved { .. } => {
@@ -2020,7 +2026,9 @@ where
     parameters.set(MaxIdleTimeout::new(VarInt::from_u32(30_000)));
     v1::ConnectionArgs {
         crypto: RingBackend,
+        handshake: <T::Side as SideCapacities>::handshake(),
         client_dcid: client_dcid(),
+        original_destination_connection_id: None,
         anti_amplification: AntiAmplificationFactor::new(2).expect("2 is a factor"),
         transport_parameters: parameters.known,
         first_link: LinkFacts { validation },
@@ -2045,7 +2053,10 @@ where
                     .reset_tokens,
             )
         }),
-        first_local_connection_id: server_cid(),
+        first_local_connection_id: v1::connection_ids::FirstLocalConnectionId::Issued {
+            id: NonEmptyCid::new(server_cid()).expect("not empty"),
+            reset_token: sakuya_wire::connection_id::StatelessResetToken::new([0x5e; 16]),
+        },
         max_datagrams_per_send: NonZeroUsize::new(MAX_PER_SEND.with(Cell::get))
             .expect("the tests send at least one datagram at once"),
         immediate_close_policy: common::TestImmediateClosePolicy,
@@ -2069,13 +2080,17 @@ where
 /// The CRYPTO capacities of a side: the least the default message limits
 /// allow at each level; and for a server, a first flight read before the
 /// connection is made.
-trait SideCapacities: Sized {
+trait SideCapacities: v1::Side {
+    fn handshake() -> v1::advancing::HandshakeStart<<Self as v1::Side>::Tls>;
     fn crypto_receive() -> CryptoReceiveCapacities;
     fn read_state<T>() -> FirstFlightReadState<T>
     where
         T: v1::Choices<Crypto = RingBackend, Side = Self>;
 }
 impl SideCapacities for v1::Server<common::PendingServerEngine> {
+    fn handshake() -> v1::advancing::HandshakeStart<common::PendingServerEngine> {
+        v1::advancing::HandshakeStart::new(common::PendingServerEngine, MessageLimits::default())
+    }
     fn read_state<T>() -> FirstFlightReadState<T>
     where
         T: v1::Choices<Crypto = RingBackend, Side = Self>,
@@ -2104,6 +2119,9 @@ impl SideCapacities for v1::Server<common::PendingServerEngine> {
     }
 }
 impl SideCapacities for v1::Client<common::PendingClientEngine> {
+    fn handshake() -> v1::advancing::HandshakeStart<common::PendingClientEngine> {
+        v1::advancing::HandshakeStart::new(common::PendingClientEngine, MessageLimits::default())
+    }
     fn read_state<T>() -> FirstFlightReadState<T>
     where
         T: v1::Choices<Crypto = RingBackend, Side = Self>,
@@ -4484,7 +4502,7 @@ fn a_client_keeps_the_backoff_until_the_server_has_validated_its_address() {
                 &[],
                 &server_keys(),
                 number,
-                &ack_of(&[(0, 0)], false),
+                &ack_of(&[(0, 1)], false),
             ),
             &first,
             ms(at),
@@ -7071,7 +7089,14 @@ fn client_answering_at_5_ms(first: &LinkId<(), ()>) {
         (
             ms(5),
             Receive(received(
-                long_packet_with(first_byte(INITIAL), &[], &server_keys(), 0, &ping()),
+                long_packet_from(
+                    first_byte(INITIAL),
+                    &SERVER_CID,
+                    &[],
+                    &server_keys(),
+                    0,
+                    &ping(),
+                ),
                 first,
                 ms(5),
             )),

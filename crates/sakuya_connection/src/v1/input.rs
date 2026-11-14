@@ -119,7 +119,7 @@ use super::{
     amplification::AntiAmplification,
     close::{CloseReasonRecord, LocalCloseCause},
     close_packet::ClosePacket,
-    connection_ids::ConnectionIdsOf,
+    connection_ids::{ConnectionIdsOf, PeerHandshakeConnectionId},
     dispatch::drain_link_paths,
     error::ConnectionError,
     idle::IdleTimeout,
@@ -492,6 +492,7 @@ type Positions<
     Hd,
     Ian,
     Icid,
+    Iph,
     Icp,
     Ipl,
     Irc,
@@ -502,7 +503,7 @@ type Positions<
     Il,
 > = (
     (Ip, Ic),
-    (Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Icid),
+    (Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Icid, Iph),
     (Ir, Ie, Ik, Hd),
     Ian,
     (Is, Iv, Ima, Irt, Il),
@@ -531,6 +532,7 @@ impl<
     Hd,
     Ian,
     Icid,
+    Iph,
     Icp,
     Ipl,
     Irc,
@@ -563,6 +565,7 @@ impl<
             Hd,
             Ian,
             Icid,
+            Iph,
             Icp,
             Ipl,
             Irc,
@@ -592,7 +595,8 @@ where
         + GetAt<IdleTimeout<InstantOf<T>>, It>
         + GetAt<AeadUsage, Iu>
         + GetAt<KeyPhaseNumbers, Ikp>
-        + GetAt<ConnectionIdsOf<T>, Icid>,
+        + GetAt<ConnectionIdsOf<T>, Icid>
+        + GetAt<PeerHandshakeConnectionId, Iph>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<LinkPathRole<InstantOf<T>>, Ir>,
@@ -661,6 +665,7 @@ where
                             Ik,
                             Hd,
                             Icid,
+                            Iph,
                         >(lineage, others, packet);
                         continue;
                     }
@@ -690,6 +695,7 @@ where
                     Hd,
                     Ian,
                     Icid,
+                    Iph,
                     Icp,
                     Ipl,
                     Irc,
@@ -792,6 +798,7 @@ where
             Hd,
             Ian,
             Icid,
+            Iph,
             Icp,
             Ipl,
             Irc,
@@ -832,6 +839,7 @@ fn receive_owned<
     Hd,
     Ian,
     Icid,
+    Iph,
     Icp,
     Ipl,
     Irc,
@@ -858,7 +866,8 @@ fn receive_owned<
         + GetAt<IdleTimeout<InstantOf<T>>, It>
         + GetAt<AeadUsage, Iu>
         + GetAt<KeyPhaseNumbers, Ikp>
-        + GetAt<ConnectionIdsOf<T>, Icid>,
+        + GetAt<ConnectionIdsOf<T>, Icid>
+        + GetAt<PeerHandshakeConnectionId, Iph>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<LinkPathRole<InstantOf<T>>, Ir>,
@@ -914,6 +923,7 @@ fn receive_owned<
             Ik,
             Hd,
             Icid,
+            Iph,
         >(lineage, others, packet);
         if next.is_break() {
             break;
@@ -972,7 +982,29 @@ fn close_packet_resend<T, L, B, Ir, Icp, Ipl, Irc>(
 /// why the connection closed, use up this poll's inputs and break, so that
 /// what follows waits until the link paths have entered closing.
 #[allow(clippy::type_complexity)] // the positions of what it takes
-fn receive_one<'v, T, L, B, Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Icid>(
+fn receive_one<
+    'v,
+    T,
+    L,
+    B,
+    Ip,
+    Ic,
+    Ii,
+    Ih,
+    Io,
+    Ij,
+    Im,
+    Ia,
+    It,
+    Iu,
+    Ikp,
+    Ir,
+    Ie,
+    Ik,
+    Hd,
+    Icid,
+    Iph,
+>(
     lineage: &mut LineageOf<'v, T, L, LogicalPath>,
     others: &mut OtherNodes<'v, T, L, B>,
     packet: ReceivedPacket<<T::Link as Link>::Payload, T::Link>,
@@ -995,7 +1027,8 @@ where
         + GetAt<IdleTimeout<InstantOf<T>>, It>
         + GetAt<AeadUsage, Iu>
         + GetAt<KeyPhaseNumbers, Ikp>
-        + GetAt<ConnectionIdsOf<T>, Icid>,
+        + GetAt<ConnectionIdsOf<T>, Icid>
+        + GetAt<PeerHandshakeConnectionId, Iph>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<LinkPathRole<InstantOf<T>>, Ir>,
@@ -1019,6 +1052,7 @@ where
         Ik,
         Hd,
         Icid,
+        Iph,
     >(lineage, others, packet);
     match outcome {
         // what a processed packet tells of migration is acted on with
@@ -1197,6 +1231,7 @@ impl<
     Hd,
     Ian,
     Icid,
+    Iph,
     Icp,
     Ipl,
     Irc,
@@ -1228,6 +1263,7 @@ impl<
             Hd,
             Ian,
             Icid,
+            Iph,
             Icp,
             Ipl,
             Irc,
@@ -1255,7 +1291,8 @@ where
         + GetAt<IdleTimeout<InstantOf<T>>, It>
         + GetAt<AeadUsage, Iu>
         + GetAt<KeyPhaseNumbers, Ikp>
-        + GetAt<ConnectionIdsOf<T>, Icid>,
+        + GetAt<ConnectionIdsOf<T>, Icid>
+        + GetAt<PeerHandshakeConnectionId, Iph>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<LinkPathRole<InstantOf<T>>, Ir>,
@@ -1293,6 +1330,7 @@ where
         Hd,
         Ian,
         Icid,
+        Iph,
         Icp,
         Ipl,
         Irc,
@@ -1327,6 +1365,7 @@ where
                 Hd,
                 Ian,
                 Icid,
+                Iph,
                 Icp,
                 Ipl,
                 Irc,

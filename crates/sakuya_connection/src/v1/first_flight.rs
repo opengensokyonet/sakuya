@@ -130,17 +130,31 @@ impl<T: Choices> FirstFlight<T> {
         }
     }
 
-    /// What is left for the first logical path, the first entry and the
-    /// advancing call, the first time it is asked for; nothing afterwards.
-    /// The datagrams not read yet are cut with `dcid_len` as the length of
-    /// a short header's Destination Connection ID.
+    /// What is left for the first logical path and the first entry, the
+    /// first time it is asked for; nothing afterwards. The datagrams not
+    /// read yet are cut with `dcid_len` as the length of a short header's
+    /// Destination Connection ID. The first ClientHello stays, for the
+    /// advancing call.
     pub(super) fn take_start(&mut self, dcid_len: ConnectionIdLength) -> FirstFlightStart<T> {
         match self {
             Self::Datagrams(datagrams) => FirstFlightStart {
                 datagrams: mem::take(datagrams),
                 ..FirstFlightStart::empty(dcid_len)
             },
-            Self::Read(state) => mem::replace(&mut state.start, FirstFlightStart::empty(dcid_len)),
+            Self::Read(state) => {
+                let mut start = mem::replace(&mut state.start, FirstFlightStart::empty(dcid_len));
+                state.start.first = start.first.take();
+                start
+            }
+        }
+    }
+
+    /// The first ClientHello read with the first flight, the first time it
+    /// is asked for; `None` afterwards, and when it was not read.
+    pub(super) fn take_first_client_hello(&mut self) -> Option<FirstClientHello> {
+        match self {
+            Self::Datagrams(_) => None,
+            Self::Read(state) => state.start.first.take(),
         }
     }
 }
@@ -235,10 +249,12 @@ impl<T: Choices> fmt::Debug for FirstFlightReadState<T> {
 /// connection node until they take it.
 ///
 /// The first logical path takes the datagrams not read yet, the inputs
-/// held, and the receive journals and the ACK obligation of its Initial
-/// space; the first entry takes the bytes received; the advancing call
-/// takes the first ClientHello. Each is there once, and only when the
-/// first flight was read where the piece says so.
+/// held, the receive journals and the ACK obligation of its Initial space,
+/// and the handshake connection ID; the first entry takes the bytes
+/// received. Each is there once, and only when the first flight was read
+/// where the piece says so. The first ClientHello is not here: the
+/// advancing call takes it from what the connection was made with when it
+/// starts.
 pub struct FirstFlightStart<T: Choices> {
     datagrams: Vec<DatagramOf<T::Link>>,
     dcid_len: ConnectionIdLength,
@@ -313,12 +329,6 @@ impl<T: Choices> FirstFlightStart<T> {
     /// read: datagrams not read yet are counted as they are received.
     pub fn take_received_bytes(&mut self) -> usize {
         mem::take(&mut self.received_bytes)
-    }
-
-    /// The first ClientHello read with the first flight, the first time it
-    /// is asked for; `None` afterwards, and when it was not read.
-    pub fn take_first_client_hello(&mut self) -> Option<FirstClientHello> {
-        self.first.take()
     }
 }
 

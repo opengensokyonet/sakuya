@@ -69,6 +69,7 @@ use sakuya_recovery::{
     receive_journals::{Admission, MaxAckRanges, ReceiveJournals},
 };
 use sakuya_wire::{
+    connection_id::ConnectionId,
     parts::{CoprodInjector, PartsError},
     v1::{
         encryption_level::EncryptionLevel,
@@ -86,7 +87,7 @@ use sakuya_wire::{
 use super::{
     Choices, Side,
     aead_usage::AeadUsage,
-    connection_ids::{ConnectionIdsOf, ResetTokenRegistrarOf},
+    connection_ids::{ConnectionIdsOf, PeerHandshakeConnectionId, ResetTokenRegistrarOf},
     dispatch::permitted,
     error::ConnectionError,
     idle::IdleTimeout,
@@ -215,6 +216,13 @@ pub enum DropReason {
     /// A client received an Initial packet whose Token Length is not zero,
     /// which a server never sends (RFC 9000 §17.2.2).
     TokenFromServer,
+    /// A client received a long header packet whose Source Connection ID
+    /// is not the one of the first Initial packet that opened from the
+    /// server (RFC 9000 §7.2).
+    OtherSourceConnectionId {
+        /// The packet's Source Connection ID.
+        scid: ConnectionId,
+    },
     /// The packet's level has no keys to read it with, and none are to come:
     /// they were discarded, the link path is closing, or, for 0-RTT, the
     /// connection does not read the level.
@@ -265,7 +273,28 @@ pub enum DropReason {
 /// was acknowledged, a frame that does not read
 /// or is not permitted, a failure of the part that handles a frame, or no
 /// frames at all. The packet is then not recorded.
-pub fn receive_packet<'v, T, L, B, P, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Icid>(
+pub fn receive_packet<
+    'v,
+    T,
+    L,
+    B,
+    P,
+    Ii,
+    Ih,
+    Io,
+    Ij,
+    Im,
+    Ia,
+    It,
+    Iu,
+    Ikp,
+    Ir,
+    Ie,
+    Ik,
+    Hd,
+    Icid,
+    Iph,
+>(
     lineage: &mut LineageOf<'v, T, L, LogicalPath>,
     others: &mut OtherNodes<'v, T, L, B>,
     packet: ReceivedPacket<P, T::Link>,
@@ -286,7 +315,8 @@ where
         + GetAt<IdleTimeout<InstantOf<T>>, It>
         + GetAt<AeadUsage, Iu>
         + GetAt<KeyPhaseNumbers, Ikp>
-        + GetAt<ConnectionIdsOf<T>, Icid>,
+        + GetAt<ConnectionIdsOf<T>, Icid>
+        + GetAt<PeerHandshakeConnectionId, Iph>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<LinkPathRole<InstantOf<T>>, Ir>,
@@ -298,6 +328,15 @@ where
     };
     if <T::Side as Side>::ROLE == Role::Client && carries_token(packet.packet()) {
         return Ok(PacketOutcome::Dropped(DropReason::TokenFromServer));
+    }
+    if <T::Side as Side>::ROLE == Role::Client
+        && let Some(scid) = long_scid(packet.packet())
+        && let Some(chosen) = lineage.get::<PeerHandshakeConnectionId, Iph>().get()
+        && scid != chosen
+    {
+        return Ok(PacketOutcome::Dropped(
+            DropReason::OtherSourceConnectionId { scid },
+        ));
     }
     let closing = matches!(role, LinkPathRole::Closing(_));
     let level = packet.packet().level();
@@ -368,11 +407,17 @@ where
             }
         }
     };
-    // the first Initial packet that opens sets the connection ID a server
-    // sends with (RFC 9000 §7.2)
+    // the first Initial packet that opens sets the connection ID the peer
+    // chose, which this side sends with (RFC 9000 §7.2)
     if let Some(scid) = initial_scid
-        && <T::Side as Side>::ROLE == Role::Server
+        && lineage
+            .get::<PeerHandshakeConnectionId, Iph>()
+            .get()
+            .is_none()
     {
+        lineage
+            .get_mut::<PeerHandshakeConnectionId, Iph>()
+            .opened(scid);
         lineage
             .get_mut::<ConnectionIdsOf<T>, Icid>()
             .handshake_connection_id::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>(scid);
@@ -598,6 +643,17 @@ where
 }
 
 /// Whether `packet` is an Initial packet whose Token Length is not zero.
+/// The Source Connection ID of a long header packet; `None` for a short
+/// header.
+fn long_scid<P>(packet: &ProtectedPacket<P>) -> Option<ConnectionId> {
+    match packet {
+        ProtectedPacket::Initial(long, _)
+        | ProtectedPacket::ZeroRtt(long, _)
+        | ProtectedPacket::Handshake(long, _) => Some(*long.scid()),
+        ProtectedPacket::OneRtt(..) => None,
+    }
+}
+
 fn carries_token<P>(packet: &ProtectedPacket<P>) -> bool {
     match packet {
         ProtectedPacket::Initial(long, _) => {

@@ -37,6 +37,7 @@
 //! A link path that ends hands back what it had not settled as lost.
 
 pub mod ack;
+pub mod advancing;
 pub mod aead_usage;
 pub mod amplification;
 pub mod close;
@@ -120,6 +121,7 @@ use crate::{
 use std::sync::Arc;
 
 use self::{
+    advancing::HandshakeStart,
     aead_usage::AeadUsage,
     amplification::{AddressValidation, AntiAmplification, AntiAmplificationFactor},
     close::{ApplicationClose, CloseReasonRecord, LocalCloseCause},
@@ -128,8 +130,8 @@ use self::{
     confirmation::HandshakeConfirmation,
     connection_ids::{
         ConnectionIdsOf, ConnectionResetTokenRegistry, DestinationConnectionIdConfig,
-        DestinationConnectionIdConfigOf, FirstLocalConnectionId, LinkPathResetTokenRegistrar,
-        PeerOf, ResetTokenRegistrarOf,
+        DestinationConnectionIdConfigOf, FirstLocalConnectionId, InitialDestinationConnectionIds,
+        LinkPathResetTokenRegistrar, PeerHandshakeConnectionId, PeerOf, ResetTokenRegistrarOf,
     },
     crypto::{
         CryptoReceiveBuffer, CryptoReceiveCapacities, CryptoReceiver,
@@ -144,7 +146,9 @@ use self::{
         LogicalPathReceivingKind, LogicalPathReceivingLimits,
     },
     key_phase::KeyPhaseNumbers,
-    keys::{DirectionKeys, HandshakeKeys, InitialKeys, LevelKeys, OneRttKeys},
+    keys::{
+        DirectionKeys, HandshakeKeys, InitialKeys, LevelKeys, OneRttKeys, PacketProtectionBackend,
+    },
     link::{FirstLinkStart, LinkClone, LinkFacts},
     link_ceiling::LinkCeilingWatchingKind,
     loss_detection::LossDetectionOf,
@@ -209,8 +213,9 @@ impl ConnectionErrorPart for Part {
 
 /// What a composition chooses for version 1.
 pub trait Choices: ConnectionChoices {
-    /// The cryptographic backend that derives the packet protection keys.
-    type Crypto: CryptoBackend + 'static;
+    /// The cryptographic backend that derives the packet protection keys;
+    /// the connection keeps a clone for the levels after Initial.
+    type Crypto: CryptoBackend + Clone + 'static;
     /// Which side of the connection this side is.
     type Side: Side;
     /// What stores the CRYPTO data of one encryption level until the
@@ -218,7 +223,7 @@ pub trait Choices: ConnectionChoices {
     type CryptoReceiveBuffer: CryptoReceiveBuffer + Default + 'static;
     /// What keeps the CRYPTO data of one encryption level that this side
     /// sends, until the peer acknowledges it.
-    type CryptoSendBuffer: CryptoSendBuffer + Default + 'static;
+    type CryptoSendBuffer: CryptoSendBuffer + Default + Unpin + 'static;
     /// What makes the RTT estimate, the stored part of congestion control
     /// and the datagram size probing policy of each link path, one for each
     /// connection. `V` identifies a link path, as found from the list of
@@ -327,6 +332,15 @@ pub trait Side: 'static {
     /// timeout even with nothing in flight (§6.2.2.1), so that a lost
     /// server flight cannot leave both sides waiting.
     fn peer_validates_address_implicitly() -> bool;
+
+    /// The connection ID this side sends with before the peer chose its
+    /// own for the handshake, from `client_dcid`, the Destination
+    /// Connection ID the connection was made with.
+    ///
+    /// A client's is that one, which it chose (RFC 9000 §7.2). A server has
+    /// none: it sends nothing before the client's first Initial packet
+    /// opens.
+    fn initial_destination_connection_id(client_dcid: ConnectionId) -> Option<ConnectionId>;
 }
 
 /// The server's side, with the handshake engine whose start state is
@@ -356,6 +370,9 @@ where
     }
     fn peer_validates_address_implicitly() -> bool {
         true
+    }
+    fn initial_destination_connection_id(_: ConnectionId) -> Option<ConnectionId> {
+        None
     }
 }
 
@@ -387,20 +404,30 @@ where
     fn peer_validates_address_implicitly() -> bool {
         false
     }
+    fn initial_destination_connection_id(client_dcid: ConnectionId) -> Option<ConnectionId> {
+        Some(client_dcid)
+    }
 }
 
 /// What version 1 needs to make the connection node, given once by whoever
 /// makes the connection.
-///
-/// The start state of the handshake engine joins these when the advancing
-/// call is written.
 pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
-    /// The backend the Initial keys are derived with.
+    /// The backend the packet protection keys are derived with.
     pub crypto: T::Crypto,
+    /// What the connection's handshake starts from: the start state of the
+    /// side's handshake engine, which the advancing call takes.
+    pub handshake: HandshakeStart<<T::Side as Side>::Tls>,
     /// The Destination Connection ID of the client's first Initial packet,
     /// which the Initial secrets are derived from (RFC 9001 §5.2): the one a
     /// client chose, the one a server found in the first datagrams.
     pub client_dcid: ConnectionId,
+    /// The Destination Connection ID of the client's very first Initial
+    /// packet when a server sent a Retry before making the connection, and
+    /// `client_dcid` is the Source Connection ID of that Retry: the
+    /// `original_destination_connection_id` the server sends, with
+    /// `client_dcid` as its `retry_source_connection_id` (RFC 9000 §7.3).
+    /// `None` without a Retry, and always for a client.
+    pub original_destination_connection_id: Option<ConnectionId>,
     /// How many times the bytes received from an address not yet validated
     /// may be sent to it.
     pub anti_amplification: AntiAmplificationFactor,
@@ -436,9 +463,9 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
     /// What registers the reset tokens of the peer's connection IDs, as the
     /// endpoint shares it with the router that detects stateless resets.
     pub reset_token_registry: T::ResetTokenRegistry,
-    /// The first of this side's connection IDs: the Source Connection ID of
-    /// the long headers this side sends.
-    pub first_local_connection_id: ConnectionId,
+    /// The first of this side's connection IDs, with its stateless reset
+    /// token: the Source Connection ID of the long headers this side sends.
+    pub first_local_connection_id: FirstLocalConnectionId,
     /// How many datagrams the sending call of a link path hands to its link
     /// at once at most.
     pub max_datagrams_per_send: NonZeroUsize,
@@ -482,6 +509,9 @@ where
         DestinationConnectionIdConfig<DestinationConnectionIdConfigOf<T>>,
         ConnectionResetTokenRegistry<T::ResetTokenRegistry>,
         FirstLocalConnectionId,
+        InitialDestinationConnectionIds,
+        PeerHandshakeConnectionId,
+        PacketProtectionBackend<T::Crypto>,
         LinkPathSendingLimits,
         ConnectionImmediateClosePolicy<T::ImmediateClosePolicy>,
         <T::Side as Side>::Own,
@@ -698,6 +728,23 @@ where
 /// It has no deadline and reads nothing; the calls that seal and open
 /// packets count in it.
 impl PassiveDataComponent for AeadUsage {}
+
+/// The connection keeps a clone of the backend it was made with.
+impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for PacketProtectionBackend<T::Crypto>
+where
+    L: LineagePartList<T>,
+    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        args: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        PacketProtectionBackend(own_args::<T, L, I>(args).crypto.clone())
+    }
+}
+/// It has no deadline and reads nothing; the keys of the later levels are
+/// derived with it.
+impl<B> PassiveDataComponent for PacketProtectionBackend<B> {}
 
 /// What the keys of a level do as the connection closes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
