@@ -20,7 +20,10 @@ use core::{
 ///
 /// Chosen when an endpoint is composed; its `Instant` is also the instant
 /// of a link's arrivals and sends. It is not calendar time.
-pub trait MonotonicClock {
+///
+/// A clone is another handle to the same clock: the code that composes an
+/// endpoint gives one to the endpoint and one to each link binding.
+pub trait MonotonicClock: Clone {
     /// A point in time.
     ///
     /// Subtracting gives the time between two instants. It is used only
