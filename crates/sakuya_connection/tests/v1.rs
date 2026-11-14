@@ -5216,6 +5216,102 @@ fn the_ack_delay_of_a_handshake_packet_counts_the_wait_for_its_keys() {
 }
 
 #[test]
+fn a_delayed_one_rtt_ack_reports_its_delay_and_the_ecn_counts() {
+    use probe::PacketStep::{InstallOneRttKeys, Receive};
+    reset();
+    let first = link();
+    let mut packet = received(one_rtt_packet_of(0, 0, &ping()), &first, ms(10));
+    let (protected, arrival) = packet.into_parts();
+    packet = ReceivedPacket::new(
+        protected,
+        ArrivalFacts::new(
+            arrival.link().clone(),
+            arrival.at(),
+            Some(sakuya_link::EcnCodepoint::Ect0),
+        ),
+    );
+    feed_packets([
+        (ms(4), InstallOneRttKeys),
+        (
+            ms(5),
+            Receive(received(
+                initial_from(&CLIENT_SCID, 0, &ping()),
+                &first,
+                ms(5),
+            )),
+        ),
+        (ms(10), Receive(packet)),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    let _ = run(&mut connection, 4..=6);
+    assert_eq!(
+        common::take_sent().len(),
+        1,
+        "the ACK of the Initial packet"
+    );
+    // one ack-eliciting packet waits for the maximum ACK delay, 25 ms less
+    // the timer granularity of 1 ms
+    let _ = settle(&mut connection, 10..=33);
+    assert_eq!(common::take_sent(), []);
+    let _ = settle(&mut connection, 34..=34);
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let (_, datagram) = &sent[0];
+    let (_, number, payload) = open_sent_one_rtt(datagram);
+    assert_eq!(number, 0);
+    let frame = ack_frame_of(&payload);
+    assert_eq!(frame.largest_acknowledged().get().get(), 0);
+    // 24 ms from the arrival, 24000 µs at the default exponent 3
+    assert_eq!(frame.ack_delay().get(), VarInt::from_u32(24_000 >> 3));
+    // the packet arrived marked ECT(0) (RFC 9000 §13.4.1)
+    let counts = frame.ecn_counts().expect("ECN counts");
+    assert_eq!(
+        (counts.ect0.get(), counts.ect1.get(), counts.ce.get()),
+        (VarInt::from_u32(1), VarInt::ZERO, VarInt::ZERO)
+    );
+}
+
+#[test]
+fn a_probe_goes_past_a_full_congestion_window_on_a_permit() {
+    use probe::Step;
+    reset();
+    let first = link();
+    // ten 1200-byte packets fill the initial window of 12000 bytes
+    feed([
+        (
+            ms(6),
+            Step::Sent {
+                space: PacketNumberSpaceKind::Initial,
+                count: 10,
+            },
+        ),
+        (ms(7), Step::Inspect),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    deliver(client_initial(0), &first, ms(5));
+    let _ = run(&mut connection, 5..=6);
+    assert_eq!(common::take_sent().len(), 1, "the ACK");
+    let log = run(&mut connection, 7..=7);
+    assert!(
+        log.iter()
+            .any(|line| line.contains("window 12000") && line.contains("in flight 12000")),
+        "{log:?}"
+    );
+    // the probe timeout from the packets sent at 6 ms grants permits: its
+    // PING goes in an Initial packet padded to 1200 bytes, past the window
+    // (RFC 9002 §7.5)
+    let _ = run(&mut connection, 8..=1004);
+    assert_eq!(common::take_sent(), []);
+    let _ = run(&mut connection, 1005..=1006);
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let (_, datagram) = &sent[0];
+    assert_eq!(datagram.len(), MIN_DATAGRAM_SIZE);
+    let packet = open_sent_initial(datagram);
+    assert_eq!(packet.payload[0], 0x01, "a PING");
+}
+
+#[test]
 fn a_probe_timeout_sends_a_ping_padded_to_1200_bytes_as_the_credit_allows() {
     reset();
     let first = link();

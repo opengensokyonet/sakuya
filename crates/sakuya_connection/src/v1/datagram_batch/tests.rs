@@ -56,12 +56,13 @@ impl From<PaddingSummary> for Summary {
 }
 
 type Journals = DequeSendJournals<u64, Summary, ()>;
-type Batch = DatagramBatch<DequeSealedPacket, DequeSealedPacket, DequeSealedPacket, usize>;
+pub(in crate::v1) type Batch =
+    DatagramBatch<DequeSealedPacket, DequeSealedPacket, DequeSealedPacket, usize>;
 
 /// A pacer that only counts what it is charged, and a congestion
 /// controller that gives each packet sealed its own size.
 #[derive(Debug, Default)]
-struct Charged(usize);
+pub(in crate::v1) struct Charged(usize);
 
 impl CongestionController<u64> for Charged {
     type SentState = usize;
@@ -119,7 +120,7 @@ impl Pacer<u64> for Charged {
 }
 
 /// A connection ID that records the size it was used for.
-struct RecordedCid {
+pub(in crate::v1) struct RecordedCid {
     id: ConnectionId,
     used: Rc<Cell<Option<usize>>>,
 }
@@ -144,7 +145,7 @@ fn scid() -> ConnectionId {
 }
 
 /// What the end of a datagram is charged to.
-struct Accounts {
+pub(in crate::v1) struct Accounts {
     congestion: LinkPathCongestionState<u64>,
     pacer: Charged,
     amplification: AntiAmplification,
@@ -155,7 +156,7 @@ struct Accounts {
 }
 
 impl Accounts {
-    fn new() -> Self {
+    pub(in crate::v1) fn new() -> Self {
         let mut amplification = AntiAmplification::new(AntiAmplificationFactor::MAX);
         amplification.received(1000);
         Self {
@@ -167,7 +168,7 @@ impl Accounts {
         }
     }
 
-    fn start<'b>(
+    pub(in crate::v1) fn start<'b>(
         &'b mut self,
         batch: &'b mut Batch,
         role: Role,
@@ -223,7 +224,8 @@ fn handshake_keys() -> DirectionKeys<RingBackend> {
 }
 
 /// The 1-RTT keys of the sender, and those of the receiver.
-fn one_rtt_keys() -> (OneRttKeys<RingBackend, u64>, OneRttKeys<RingBackend, u64>) {
+pub(in crate::v1) fn one_rtt_keys() -> (OneRttKeys<RingBackend, u64>, OneRttKeys<RingBackend, u64>)
+{
     let mut sender = OneRttKeys::NotYet;
     sender.install(RingBackend, AeadAlgorithm::Aes128Gcm, secret(1), secret(2));
     let mut receiver = OneRttKeys::NotYet;
