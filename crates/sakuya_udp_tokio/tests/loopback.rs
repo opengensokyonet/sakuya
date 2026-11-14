@@ -343,3 +343,30 @@ fn the_clones_of_a_link_share_its_datagram_size_conclusion() {
         assert!(poll_once(pin!(link.ended())).is_pending());
     });
 }
+
+#[test]
+fn a_socket_on_the_unspecified_address_connects_from_the_address_that_routes_to_the_peer() {
+    run(async {
+        let unspecified = bind(SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)));
+        let peer = bind(v4());
+        let link = within(unspecified.connect(peer.local_address()))
+            .await
+            .unwrap();
+        let port = unspecified.local_address().port();
+        assert_eq!(
+            link.id().local.address(),
+            SocketAddr::from((Ipv4Addr::LOCALHOST, port))
+        );
+        send_all(&link, &[datagram(b"from loopback", EcnMarking::NotEct)]).await;
+        let back = within(peer.accept()).await.unwrap();
+        assert_eq!(
+            back.id().peer,
+            SocketAddr::from((Ipv4Addr::LOCALHOST, port))
+        );
+        assert_eq!(receive(&back).await.0, b"from loopback");
+
+        // The reply arrives at the same local address, so on the same link.
+        send_all(&back, &[datagram(b"reply", EcnMarking::NotEct)]).await;
+        assert_eq!(receive(&link).await.0, b"reply");
+    });
+}
