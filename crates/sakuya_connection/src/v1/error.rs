@@ -14,6 +14,7 @@ use sakuya_wire::{
         },
         packet_number::PacketNumber,
         transport_error::TransportErrorCode,
+        transport_parameters::codec::ReadTransportParametersError,
     },
     var_int::VarInt,
 };
@@ -96,8 +97,18 @@ pub enum ConnectionError {
         /// The failure.
         source: CryptoDataEndError,
     },
-    /// The peer's transport parameters failed the checks of version 1 (RFC
-    /// 9000 §7.3, §7.4).
+    /// The peer's transport parameters could not be read (RFC 9000 §7.4,
+    /// §18.2): the encoding ends within a parameter, a parameter appears
+    /// twice, a client sent one only a server may send, or the value of a
+    /// parameter of version 1 breaks a rule of its type. The value of a
+    /// parameter of another part is that part's error.
+    #[snafu(display("transport parameters read failed"))]
+    ReadTransportParameters {
+        /// The failure.
+        source: ReadTransportParametersError<Infallible>,
+    },
+    /// The peer's transport parameters failed the checks of version 1 on
+    /// the connection IDs (RFC 9000 §7.3).
     #[snafu(display("peer transport parameters rejected"))]
     PeerTransportParameters {
         /// The failed check.
@@ -175,6 +186,7 @@ impl TransportClose for ConnectionError {
                 CryptoLevelMoveError::NotForward { .. } => TransportErrorCode::INTERNAL_ERROR,
             },
             Self::CryptoDataEnd { .. } => TransportErrorCode::INTERNAL_ERROR,
+            Self::ReadTransportParameters { source } => source.transport_error_code(),
             Self::PeerTransportParameters { .. } => TransportErrorCode::TRANSPORT_PARAMETER_ERROR,
             Self::Crypto { source } => match source {
                 CryptoFrameError::BufferExceeded { .. } => {
@@ -210,6 +222,7 @@ impl TransportClose for ConnectionError {
             | Self::KeyUpdate { .. }
             | Self::CryptoLevelMove { .. }
             | Self::CryptoDataEnd { .. }
+            | Self::ReadTransportParameters { .. }
             | Self::PeerTransportParameters { .. }
             | Self::UnhandledFrame { .. } => None,
         }

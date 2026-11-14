@@ -1,17 +1,24 @@
 //! Transport parameters in a connection: the peer's, and each part's own,
-//! and the checks of version 1 on the connection IDs the peer's state
-//! (RFC 9000 §7.3).
+//! the error of a failure of reading the peer's, and the checks of version
+//! 1 on the connection IDs the peer's state (RFC 9000 §7.3).
 
-use std::error::Error;
+use core::convert::Infallible;
 
 use sakuya_wire::{
     connection_id::ConnectionId,
-    parts::Selector,
-    v1::transport_parameters::connection_id::{
-        InitialSourceConnectionId, OriginalDestinationConnectionId, RetrySourceConnectionId,
+    parameters::codec::ReadParametersError,
+    parts::{CoprodInjector, PartsError, Selector},
+    v1::transport_parameters::{
+        codec::ReadTransportParametersError,
+        connection_id::{
+            InitialSourceConnectionId, OriginalDestinationConnectionId, RetrySourceConnectionId,
+        },
     },
 };
 use snafu::{Snafu, ensure};
+
+use super::{error::ConnectionError, receive::v1_error};
+use crate::error::{ConnectionErrorOf, TransportParameterValueErrorsOf};
 
 /// The peer's transport parameters: one component of the connection node,
 /// read by whoever uses them.
@@ -114,21 +121,18 @@ impl<P> LocalTransportParameters<P> {
     }
 }
 
-/// How the peer's transport parameters fail the checks of version 1: each
-/// closes the connection with TRANSPORT_PARAMETER_ERROR (RFC 9000 §7.3,
-/// §7.4).
+/// How the peer's transport parameters, once read, fail the checks of
+/// version 1 on the connection IDs: each closes the connection with
+/// TRANSPORT_PARAMETER_ERROR (RFC 9000 §7.3).
+///
+/// Failures of reading them are not here: one of the encoding, or of the
+/// value of a parameter of version 1, is
+/// [`ConnectionError::ReadTransportParameters`], and one of the value of a
+/// parameter of another part is that part's error
+/// ([`TransportParameterValueErrorPart`](crate::error::TransportParameterValueErrorPart)).
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum PeerTransportParametersError {
-    /// They could not be read, or a client sent one only a server may send.
-    ///
-    /// The failure's type depends on every part of the composition, which
-    /// the error of version 1 cannot name, so it is kept as a boxed error.
-    #[snafu(display("transport parameters read failed"))]
-    Read {
-        /// The failure.
-        source: Box<dyn Error + Send + Sync>,
-    },
     /// The peer sent no `initial_source_connection_id`.
     #[snafu(display("initial_source_connection_id absent"))]
     InitialSourceConnectionIdAbsent,
@@ -156,6 +160,31 @@ pub enum PeerTransportParametersError {
         /// The connection ID it states.
         received: ConnectionId,
     },
+}
+
+/// The connection's error for the peer's transport parameters that could
+/// not be read into the slots of the parts `L`: version 1's for a failure
+/// of the encoding as a whole, the error of the part whose type claims the
+/// parameter for a value that breaks a rule of the type.
+pub(super) fn read_transport_parameters_error<L, Iv>(
+    error: ReadTransportParametersError<Infallible, L>,
+) -> ConnectionErrorOf<L>
+where
+    L: TransportParameterValueErrorsOf,
+    L::ConnectionErrors: CoprodInjector<ConnectionError, Iv>,
+{
+    let source = match error {
+        ReadParametersError::Id { source } => ReadParametersError::Id { source },
+        ReadParametersError::Length { id, source } => ReadParametersError::Length { id, source },
+        ReadParametersError::Value { id, source } => ReadParametersError::Value { id, source },
+        ReadParametersError::Duplicate { source } => ReadParametersError::Duplicate { source },
+        ReadParametersError::NotAdmitted { source } => ReadParametersError::NotAdmitted { source },
+        ReadParametersError::InvalidValue {
+            id,
+            source: PartsError(source),
+        } => return PartsError(L::value_error(id, source)),
+    };
+    v1_error::<L, Iv>(ConnectionError::ReadTransportParameters { source })
 }
 
 /// Check that the peer's `initial_source_connection_id` among `slots`
@@ -207,12 +236,172 @@ where
 
 #[cfg(test)]
 mod tests {
-    use sakuya_wire::v1::transport_parameters::TransportParameters;
+    use core::marker::PhantomData;
+
+    use bytes::Buf;
+    use nitori_call::ReceiverAccess;
+    use nitori_io::{Write, calls::WriteAllError};
+    use sakuya_wire::{
+        parameters::{KeyedParameter, ParametersPart, TrailingBytesError, ValueSource},
+        parts::{Coprod, Coproduct, HList},
+        v1::{
+            role::Role,
+            transport_error::TransportErrorCode,
+            transport_parameters::{
+                RememberedForZeroRtt, SentBy, TransportParameterAttributes,
+                TransportParameterSpace, TransportParameters,
+                codec::ReadTransportParametersHostExt as _, integer::AckDelayExponent,
+            },
+        },
+        var_int::VarInt,
+    };
 
     use super::*;
+    use crate::{
+        error::{ConnectionErrorPart, TransportParameterValueErrorPart},
+        v1::{Part, close::TransportClose},
+    };
 
     fn id(byte: u8) -> ConnectionId {
         ConnectionId::new(&[byte; 8]).unwrap()
+    }
+
+    /// The ID of the parameter of the extension of the tests.
+    const EXTENSION_ID: u32 = 0x2a;
+
+    /// The parameter of the extension of the tests: its value is empty.
+    struct Flag;
+
+    impl KeyedParameter for Flag {
+        type Space = TransportParameterSpace;
+        type ValueError = TrailingBytesError;
+
+        const ID: VarInt = VarInt::from_u32(EXTENSION_ID);
+        const ATTRIBUTES: TransportParameterAttributes = TransportParameterAttributes {
+            sent_by: SentBy::Either,
+            remembered_for_zero_rtt: RememberedForZeroRtt::Prohibited,
+        };
+
+        fn read_value<D: Buf + Unpin>(_: &mut ValueSource<D>) -> Result<Self, TrailingBytesError> {
+            Ok(Self)
+        }
+
+        fn value_len(&self) -> usize {
+            0
+        }
+
+        async fn write_value<F, A>(&self, _: &mut A) -> Result<(), WriteAllError<F::Error>>
+        where
+            F: Write,
+            A: ReceiverAccess<Family = F>,
+        {
+            Ok(())
+        }
+    }
+
+    /// An extension with a transport parameter of its own, after version 1.
+    struct Extension;
+
+    /// The extension's error: the value of its parameter broke the rule of
+    /// its type.
+    #[derive(Debug)]
+    struct ExtensionValueError {
+        id: VarInt,
+        #[expect(dead_code, reason = "the tests match the ID only")]
+        source: PartsError<Coprod![TrailingBytesError]>,
+    }
+
+    impl ConnectionErrorPart for Extension {
+        type ConnectionError = ExtensionValueError;
+    }
+
+    impl ParametersPart<TransportParameterSpace> for Extension {
+        type Parameters = HList![Flag];
+    }
+
+    impl TransportParameterValueErrorPart<Coprod![TrailingBytesError]> for Extension {
+        fn value_error(
+            id: VarInt,
+            source: PartsError<Coprod![TrailingBytesError]>,
+        ) -> ExtensionValueError {
+            ExtensionValueError { id, source }
+        }
+    }
+
+    /// The connection's error for `encoding`, sent by a server, read for
+    /// the parts `L`.
+    fn read_error<L, Iv>(encoding: &[u8]) -> ConnectionErrorOf<L>
+    where
+        L: TransportParameterValueErrorsOf,
+        L::ConnectionErrors: CoprodInjector<ConnectionError, Iv>,
+    {
+        let mut source = encoding;
+        match source.sync_read_transport_parameters_unpin(Role::Server, PhantomData::<L>) {
+            Ok(_) => panic!("the transport parameters were read"),
+            Err(error) => read_transport_parameters_error::<L, Iv>(error),
+        }
+    }
+
+    /// The read failure in version 1's error, which closes with
+    /// TRANSPORT_PARAMETER_ERROR.
+    fn v1_read_failure<Rest>(
+        error: PartsError<Coproduct<ConnectionError, Rest>>,
+    ) -> ReadTransportParametersError<Infallible> {
+        let PartsError(Coproduct::Inl(error)) = error else {
+            panic!("not version 1's error");
+        };
+        assert_eq!(error.code(), TransportErrorCode::TRANSPORT_PARAMETER_ERROR);
+        match error {
+            ConnectionError::ReadTransportParameters { source } => source,
+            other => panic!("not a read failure: {other:?}"),
+        }
+    }
+
+    type V1Alone = HList![Part];
+    type WithExtension = HList![Part, Extension];
+
+    #[test]
+    fn a_read_failure_of_version_1_alone_is_its_error() {
+        // max_idle_timeout twice
+        let error = read_error::<V1Alone, _>(&[0x01, 0x01, 0x05, 0x01, 0x01, 0x05]);
+        assert!(matches!(
+            v1_read_failure(error),
+            ReadParametersError::Duplicate { source } if source.id() == VarInt::from_u32(0x01)
+        ));
+        // a Length of 4 with one byte after it
+        let error = read_error::<V1Alone, _>(&[0x01, 0x04, 0x05]);
+        let failure = v1_read_failure(error);
+        assert!(matches!(failure, ReadParametersError::Value { .. }));
+        assert!(failure.is_incomplete());
+        // ack_delay_exponent 21
+        let error = read_error::<V1Alone, _>(&[0x0a, 0x01, 0x15]);
+        let failure = v1_read_failure(error);
+        assert!(failure.value_error::<AckDelayExponent>().is_some());
+    }
+
+    #[test]
+    fn the_value_of_another_parts_parameter_is_that_parts_error() {
+        let error = read_error::<WithExtension, _>(&[EXTENSION_ID as u8, 0x01, 0x00]);
+        assert!(matches!(
+            error,
+            PartsError(Coproduct::Inr(Coproduct::Inl(ExtensionValueError { id, .. })))
+                if id == VarInt::from_u32(EXTENSION_ID)
+        ));
+        // the value of a parameter of version 1 stays version 1's
+        let error = read_error::<WithExtension, _>(&[0x0a, 0x01, 0x15]);
+        assert!(
+            v1_read_failure(error)
+                .value_error::<AckDelayExponent>()
+                .is_some()
+        );
+        // the extension's parameter twice is a failure of the encoding
+        let error =
+            read_error::<WithExtension, _>(&[EXTENSION_ID as u8, 0x00, EXTENSION_ID as u8, 0x00]);
+        assert!(matches!(
+            v1_read_failure(error),
+            ReadParametersError::Duplicate { source }
+                if source.id() == VarInt::from_u32(EXTENSION_ID)
+        ));
     }
 
     #[test]

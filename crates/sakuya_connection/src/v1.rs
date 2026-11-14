@@ -86,13 +86,14 @@ use sakuya_packet_protection::{
 };
 use sakuya_wire::{
     connection_id::ConnectionId,
-    parameters::{ParametersOf, ParametersPart},
-    parts::{HList, HNil, Selector},
+    parameters::{ParametersOf, ParametersPart, codec::ReadParametersError},
+    parts::{Coproduct, HList, HNil, PartsError, Selector},
     v1::role::Role,
     v1::transport_parameters::{
-        TransportParameterSlots, TransportParameterSpace,
+        TransportParameterSlots, TransportParameterSpace, TransportParameterValueErrors,
         integer::{MaxAckDelay, MaxIdleTimeout},
     },
+    var_int::VarInt,
 };
 
 use self::feedback::CoreLentFeedback;
@@ -103,7 +104,10 @@ use crate::{
         ArgsOf, Build, DataComponent, LineageOf, ParentsOf, PassiveDataComponent, ReadSet,
         RequestOf,
     },
-    error::{ConnectionErrorOf, ConnectionErrorPart, ConnectionErrorsOf},
+    error::{
+        ConnectionErrorOf, ConnectionErrorPart, ConnectionErrorsOf,
+        TransportParameterValueErrorPart,
+    },
     feedback::FeedbackSummariesOf,
     frame_source::FrameSource,
     layer::{self, NodeKey},
@@ -211,6 +215,27 @@ impl ParametersPart<TransportParameterSpace> for Part {
 /// Version 1 finds its own [`ConnectionError`](error::ConnectionError).
 impl ConnectionErrorPart for Part {
     type ConnectionError = error::ConnectionError;
+}
+
+/// A value of a transport parameter of version 1 that breaks a rule of its
+/// type is a failure of reading the peer's transport parameters, as any
+/// other failure of their encoding is.
+///
+/// The impl is written for any sum that is not `CNil`, so that it stays
+/// apart from the impl every part has for `CNil`; only the sum of the
+/// failures of version 1's own types meets its bound.
+impl<H, T> TransportParameterValueErrorPart<Coproduct<H, T>> for Part
+where
+    PartsError<Coproduct<H, T>>: Into<PartsError<TransportParameterValueErrors>>,
+{
+    fn value_error(id: VarInt, source: PartsError<Coproduct<H, T>>) -> error::ConnectionError {
+        error::ConnectionError::ReadTransportParameters {
+            source: ReadParametersError::InvalidValue {
+                id,
+                source: source.into(),
+            },
+        }
+    }
 }
 
 /// What a composition chooses for version 1.

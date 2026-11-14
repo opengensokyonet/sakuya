@@ -80,16 +80,12 @@ use sakuya_tls::{
     },
 };
 use sakuya_wire::{
-    parameters::ParametersOf,
     parts::{CoprodInjector, Selector},
     v1::{
         role::Role,
         transport_parameters::{
-            TransportParameterSlots, TransportParameterSpace, TransportParameters,
-            codec::{
-                ReadTransportParametersError, ReadTransportParametersHostExt as _,
-                WriteTransportParametersHostExt as _,
-            },
+            TransportParameterSlots, TransportParameters,
+            codec::{ReadTransportParametersHostExt as _, WriteTransportParametersHostExt as _},
             connection_id::{
                 InitialSourceConnectionId, OriginalDestinationConnectionId, RetrySourceConnectionId,
             },
@@ -111,8 +107,8 @@ use super::{
     handshake_done::HandshakeDoneSource,
     keys::{DirectionKeys, HandshakeKeys, LevelKeys, OneRttKeys, PacketProtectionBackend},
     parameters::{
-        LocalTransportParameters, PeerTransportParameters, PeerTransportParametersError,
-        check_initial_source, check_server_destination,
+        LocalTransportParameters, PeerTransportParameters, check_initial_source,
+        check_server_destination, read_transport_parameters_error,
     },
     receive::v1_error,
     send::{HandshakeDoneIntent, SendTypes},
@@ -122,7 +118,7 @@ use crate::{
     call::{CallBundle, CallKind, NodeCallFamily, NodeLoan},
     clock::InstantOf,
     component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
-    error::{ConnectionErrorOf, ConnectionErrorsOf},
+    error::{ConnectionErrorOf, ConnectionErrorsOf, TransportParameterValueErrorsOf},
     frame_source::PublishIntent,
     layer::{self, Connection, EstablishedArgs},
     others::OtherNodes,
@@ -541,21 +537,24 @@ crypto_capabilities!(ClientAdvancingKind);
 
 /// The peer's transport parameters `peer`, sent by an endpoint in the role
 /// `sender`, read into the slots of the parts `L`.
-fn read_peer<L>(
+///
+/// # Errors
+///
+/// They could not be read: version 1's error, or for the value of a
+/// parameter of another part, that part's.
+fn read_peer<L, Iv>(
     peer: &[u8],
     sender: Role,
-) -> Result<TransportParameterSlots<L>, PeerTransportParametersError>
+) -> Result<TransportParameterSlots<L>, ConnectionErrorOf<L>>
 where
-    L: ParametersOf<TransportParameterSpace>,
-    ReadTransportParametersError<Infallible, L>: std::error::Error + Send + Sync + 'static,
+    L: TransportParameterValueErrorsOf,
+    L::ConnectionErrors: CoprodInjector<ConnectionError, Iv>,
 {
     let mut source = peer;
     source
         .sync_read_transport_parameters_unpin(sender, PhantomData::<L>)
         .map(|parameters| parameters.known)
-        .map_err(|error| PeerTransportParametersError::Read {
-            source: Box::new(error),
-        })
+        .map_err(read_transport_parameters_error::<L, Iv>)
 }
 
 /// The transport parameters of version 1 a server sends, from those
@@ -722,10 +721,9 @@ impl<
     >
 where
     T: Choices,
-    L: LineagePartList<T> + ConnectionErrorsOf + ParametersOf<TransportParameterSpace>,
+    L: LineagePartList<T> + TransportParameterValueErrorsOf,
     B: CallBundle,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Iv>,
-    ReadTransportParametersError<Infallible, L>: std::error::Error + Send + Sync + 'static,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>,
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>
@@ -746,11 +744,10 @@ where
     {
         let NodeLoan { lineage, .. } = view.get_mut();
         let chosen = lineage.get::<PeerHandshakeConnectionId, Iph>().get();
-        let slots = read_peer::<L>(peer, Role::Client)
-            .and_then(|slots| check_initial_source::<_, Ja>(&slots, chosen).map(|()| slots))
-            .map_err(|source| {
-                v1_error::<L, Iv>(ConnectionError::PeerTransportParameters { source })
-            })?;
+        let slots = read_peer::<L, Iv>(peer, Role::Client)?;
+        check_initial_source::<_, Ja>(&slots, chosen).map_err(|source| {
+            v1_error::<L, Iv>(ConnectionError::PeerTransportParameters { source })
+        })?;
         lineage
             .get_mut::<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>()
             .set_known(slots);
@@ -824,10 +821,9 @@ where
     T: Choices<Side = Server<Tls>>,
     Tls: ServerHandshakeSteps + 'static,
     Tls::AlertError: 'static,
-    L: LineagePartList<T> + ConnectionErrorsOf + ParametersOf<TransportParameterSpace>,
+    L: LineagePartList<T> + TransportParameterValueErrorsOf,
     B: CallBundle,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Iv>,
-    ReadTransportParametersError<Infallible, L>: std::error::Error + Send + Sync + 'static,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>,
     SendTypes<T, L>: SendStrategyTypes,
     SendStrategyCore<SendStrategyOf<T, L>>: PublishIntent<HandshakeDoneIntent, Idx>,
@@ -1000,9 +996,8 @@ where
     T: Choices<Side = Server<Tls>>,
     Tls: ServerHandshakeSteps + 'static,
     Tls::AlertError: 'static,
-    L: LineagePartList<T> + ConnectionErrorsOf + ParametersOf<TransportParameterSpace>,
+    L: LineagePartList<T> + TransportParameterValueErrorsOf,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Iv>,
-    ReadTransportParametersError<Infallible, L>: std::error::Error + Send + Sync + 'static,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>,
     SendTypes<T, L>: SendStrategyTypes,
     SendStrategyCore<SendStrategyOf<T, L>>: PublishIntent<HandshakeDoneIntent, Idx>,
@@ -1117,10 +1112,9 @@ impl<T, L, Tls, B, Icr, Ics, Iv, Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, J
     >
 where
     T: Choices,
-    L: LineagePartList<T> + ConnectionErrorsOf + ParametersOf<TransportParameterSpace>,
+    L: LineagePartList<T> + TransportParameterValueErrorsOf,
     B: CallBundle,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Iv>,
-    ReadTransportParametersError<Infallible, L>: std::error::Error + Send + Sync + 'static,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>
         + Selector<Option<OriginalDestinationConnectionId>, Jo>
         + Selector<Option<RetrySourceConnectionId>, Jr>,
@@ -1154,12 +1148,9 @@ where
         let original = lineage
             .get::<InitialDestinationConnectionIds, Iid>()
             .original();
-        let slots = read_peer::<L>(peer, Role::Server)
-            .and_then(|slots| {
-                check_server_destination::<_, Jo, Jr>(&slots, original)?;
-                check_initial_source::<_, Ja>(&slots, chosen)?;
-                Ok(slots)
-            })
+        let slots = read_peer::<L, Iv>(peer, Role::Server)?;
+        check_server_destination::<_, Jo, Jr>(&slots, original)
+            .and_then(|()| check_initial_source::<_, Ja>(&slots, chosen))
             .map_err(|source| {
                 v1_error::<L, Iv>(ConnectionError::PeerTransportParameters { source })
             })?;
@@ -1187,10 +1178,9 @@ where
     T: Choices<Side = Client<Tls>>,
     Tls: ClientHandshakeSteps + 'static,
     Tls::AlertError: 'static,
-    L: LineagePartList<T> + ConnectionErrorsOf + ParametersOf<TransportParameterSpace>,
+    L: LineagePartList<T> + TransportParameterValueErrorsOf,
     B: CallBundle,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Iv>,
-    ReadTransportParametersError<Infallible, L>: std::error::Error + Send + Sync + 'static,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>
         + Selector<Option<OriginalDestinationConnectionId>, Jo>
         + Selector<Option<RetrySourceConnectionId>, Jr>,
@@ -1287,9 +1277,8 @@ where
     T: Choices<Side = Client<Tls>>,
     Tls: ClientHandshakeSteps + 'static,
     Tls::AlertError: 'static,
-    L: LineagePartList<T> + ConnectionErrorsOf + ParametersOf<TransportParameterSpace>,
+    L: LineagePartList<T> + TransportParameterValueErrorsOf,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Iv>,
-    ReadTransportParametersError<Infallible, L>: std::error::Error + Send + Sync + 'static,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>
         + Selector<Option<OriginalDestinationConnectionId>, Jo>
         + Selector<Option<RetrySourceConnectionId>, Jr>,
