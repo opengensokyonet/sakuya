@@ -9,13 +9,14 @@
 //! it told the strategy last, so the same fact is told once.
 
 use core::{fmt, task::Waker};
+use std::sync::Arc;
 
 use sakuya_link::Link;
 use sakuya_packet_protection::{backend::AEAD_TAG_LEN, packet_number::TruncatedPacketNumber};
 use sakuya_wire::{
     header::SAMPLE_DISTANCE,
     parameters::ParametersOf,
-    parts::Selector,
+    parts::{CoprodInjector, Selector},
     v1::{
         encryption_level::EncryptionLevel,
         packet_number::PacketNumber,
@@ -37,15 +38,19 @@ use sakuya_recovery::{
     send_journals::SendJournals,
 };
 
+use sakuya_stream::connection::CloseReason;
+
 use super::{
     AckObligationsOf, Choices, CloseCauseOf, Side,
     amplification::AntiAmplification,
-    close::CloseReasonRecord,
+    close::{CloseReasonRecord, LocalCloseCause},
     confirmation::HandshakeConfirmation,
     connection_ids::{ConnectionIdsOf, ResetTokenRegistrarOf},
+    error::ConnectionError,
     keys::{HandshakeKeys, InitialKeys, OneRttKeys},
     link::{LinkClone, LinkFacts},
     parameters::PeerTransportParameters,
+    receive::v1_error,
     recovery::{CongestionPartOf, LinkPathCongestionState, PmtuOf, peer_max_udp_payload_size},
     send::{AckIntent, ProbePingIntent, SendTypes, shortest_ack_frame},
     spaces::SendJournalsOf,
@@ -59,6 +64,7 @@ use crate::{
         RequestOf,
     },
     connection_id::DestinationConnectionIdStrategy,
+    error::ConnectionErrorsOf,
     feedback::FeedbackSummariesOf,
     frame_source::PublishIntent,
     layer::{self, NodeKey},
@@ -68,7 +74,7 @@ use crate::{
         PacketOverheads, PlannerLinkPath, Publish, PublishOutcome, PublishTo, SendIntent,
         SendStrategy, SendStrategyTypes,
     },
-    share::{FlatRef, LineageLists, LineagePartList, LogicalPathKeys, NodeData},
+    share::{FlatMut, FlatRef, LineageLists, LineagePartList, LogicalPathKeys, NodeData},
     take::{GetAt, ReadEach, Take, TakeEach},
     write::FlightClass,
 };
@@ -459,11 +465,20 @@ where
 /// follows from changes: the connection IDs, the packet number states and
 /// send journals of the spaces, and the keys of each level. All of it is
 /// only read here.
-impl<T: Choices, L, Ip, Ir, It, Il, Io, Ipp, Jc, Js, Jm>
-    DataComponent<T, L, layer::LinkPath, (Ip, Ir, It, Il, Io, Ipp, (Jc, Js, Jm))>
+///
+/// An `Active` link path that does not carry 1200 bytes stops sending
+/// (RFC 9000 §14.2); when no other link path of the connection can send,
+/// that is, none is `Active` and carries 1200 bytes, as its planner was
+/// last told, and none is a candidate still being validated, the
+/// connection closes with NO_VIABLE_PATH: the record of why it closed
+/// takes the error, unless a reason is there already.
+impl<T: Choices, L, Ip, Ir, It, Il, Io, Ipp, Jc, Js, Jm, Ic, Ier, Kr, Kp>
+    DataComponent<T, L, layer::LinkPath, (Ip, Ir, It, Il, Io, Ipp, (Jc, Js, Jm), (Ic, Ier, Kr, Kp))>
     for LinkPathPlanner<LinkPathSendPlannerOf<T, L>>
 where
     L: LineagePartList<T> + FeedbackSummariesOf + ParametersOf<TransportParameterSpace>,
+    L: ConnectionErrorsOf,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ier>,
     SendTypes<T, L>: SendStrategyTypes,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     LinkPathSendPlannerOf<T, L>: Observe<DatagramLimits> + Observe<PacketOverheads>,
@@ -473,11 +488,15 @@ where
         + GetAt<LinkPathRole<InstantOf<T>>, Ir>
         + ReadEach<DatagramLimitsReads<T, L>, Il>
         + ReadEach<PacketOverheadsReads<T, L>, Io>
-        + TakeEach<'v, frunk_core::HList![Self, SendStrategyCore<SendStrategyOf<T, L>>], It>,
+        + TakeEach<'v, frunk_core::HList![Self, SendStrategyCore<SendStrategyOf<T, L>>], It>
+        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>,
     for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out: Selector<&'a CongestionPartOf<T, L>, Jc>
         + Selector<&'a LinkPathCongestionState<InstantOf<T>>, Js>
         + Selector<&'a PmtuOf<T, L>, Jm>,
+    for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        GetAt<LinkPathRole<InstantOf<T>>, Kr> + GetAt<Self, Kp>,
 {
     fn reads(reads: &mut ReadSet) {
         reads.add::<LinkPathRole<InstantOf<T>>>();
@@ -497,15 +516,29 @@ where
     }
 
     fn reread<'v, B: CallBundle>(
-        lineage: LineageOf<'v, T, L, layer::LinkPath>,
+        mut lineage: LineageOf<'v, T, L, layer::LinkPath>,
         others: &mut OtherNodes<'v, T, L, B>,
         _: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
+        let role = lineage.get::<LinkPathRole<InstantOf<T>>, Ir>().kind();
+        let limits = read_datagram_limits::<T, L, B, Il, Ipp, Jc, Js, Jm>(&lineage, others);
+        if role == LinkPathRoleKind::Active
+            && !limits.supports_minimum()
+            && !lineage
+                .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
+                .is_written()
+            && !another_can_send::<T, L, B, Kr, Kp>(others)
+        {
+            let error = v1_error::<L, Ier>(ConnectionError::NoViablePath);
+            lineage
+                .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
+                .record(CloseReason::Local(Arc::new(LocalCloseCause::Connection(
+                    error,
+                ))));
+        }
         let NodeKey::LinkPath(_, link) = others.here() else {
             unreachable!("a link path's lend carries its key")
         };
-        let role = lineage.get::<LinkPathRole<InstantOf<T>>, Ir>().kind();
-        let limits = read_datagram_limits::<T, L, B, Il, Ipp, Jc, Js, Jm>(&lineage, others);
         let overheads = read_packet_overheads::<T, L, Io>(
             &lineage,
             link,
@@ -534,6 +567,42 @@ where
         planner.told_anew();
         None
     }
+}
+
+/// Whether a link path other than the lent one can send: one `Active` that
+/// carries 1200 bytes, as its planner was last told, or a candidate still
+/// being validated.
+fn another_can_send<'v, T, L, B, Kr, Kp>(others: &mut OtherNodes<'v, T, L, B>) -> bool
+where
+    T: Choices,
+    L: LineagePartList<T>,
+    B: CallBundle,
+    SendTypes<T, L>: SendStrategyTypes,
+    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out: GetAt<LinkPathRole<InstantOf<T>>, Kr>
+        + GetAt<LinkPathPlanner<LinkPathSendPlannerOf<T, L>>, Kp>,
+{
+    let mut roles = Vec::new();
+    others.each_link_path_read::<LinkPathRole<InstantOf<T>>, Kr>(|key, role| {
+        roles.push((key.clone(), role.kind()));
+    });
+    let mut can = false;
+    others.each_link_path_read::<LinkPathPlanner<LinkPathSendPlannerOf<T, L>>, Kp>(
+        |key, planner| {
+            let Some((_, role)) = roles.iter().find(|(each, _)| each == key) else {
+                return;
+            };
+            can |= match role {
+                LinkPathRoleKind::Candidate => true,
+                LinkPathRoleKind::Active => planner
+                    .limits
+                    .is_some_and(|limits| limits.supports_minimum()),
+                _ => false,
+            };
+        },
+    );
+    can
 }
 
 // ---- what a link path can send ----

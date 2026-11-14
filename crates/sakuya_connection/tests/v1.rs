@@ -187,6 +187,7 @@ fn reset() {
     take_log();
     take_strategy_events();
     common::strategy::forget_stale_overheads();
+    common::strategy::plan_normally();
     advance_to(ms(0));
     ADD.with(|a| a.set(None));
     CLOSE_AT.with(|c| c.set(None));
@@ -3691,8 +3692,8 @@ fn padded(before: &[BytesMut], last: impl Fn(&[u8]) -> BytesMut, payload: &[u8])
 fn the_receiving_call_receives_each_packet_of_a_datagram_and_counts_the_whole_datagram() {
     use probe::PacketStep::{Inspect, InspectCredit};
     reset();
-    // the link takes less than 1200 bytes: nothing is sent
-    common::set_link_ceilings(MIN_DATAGRAM_SIZE - 1);
+    // the strategy plans nothing: nothing is sent
+    common::strategy::plan_nothing();
     let first = link();
     feed_packets([(ms(6), Inspect), (ms(7), InspectCredit(first.clone()))]);
     let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
@@ -3725,8 +3726,8 @@ fn the_receiving_call_receives_each_packet_of_a_datagram_and_counts_the_whole_da
 fn the_first_datagrams_are_received_and_counted_as_later_ones_are() {
     use probe::PacketStep::{Inspect, InspectCredit};
     reset();
-    // the link takes less than 1200 bytes: nothing is sent
-    common::set_link_ceilings(MIN_DATAGRAM_SIZE - 1);
+    // the strategy plans nothing: nothing is sent
+    common::strategy::plan_nothing();
     let first = link();
     feed_packets([(ms(6), Inspect), (ms(7), InspectCredit(first.clone()))]);
     let datagram = padded(
@@ -3767,8 +3768,8 @@ fn the_first_datagrams_are_received_and_counted_as_later_ones_are() {
 fn a_server_made_with_a_read_first_flight_starts_with_what_was_read() {
     use probe::PacketStep::{Inspect, InspectCredit};
     reset();
-    // the link takes less than 1200 bytes: nothing is sent
-    common::set_link_ceilings(MIN_DATAGRAM_SIZE - 1);
+    // the strategy plans nothing: nothing is sent
+    common::strategy::plan_nothing();
     FIRST_READ.with(|f| f.set(true));
     let first = link();
     feed_packets([(ms(6), Inspect), (ms(7), InspectCredit(first.clone()))]);
@@ -3850,8 +3851,8 @@ fn read_first(receiver: &mut TestReceiver) -> (FirstFlightReadState<Mine>, Resul
 fn reading_the_first_flight_ends_with_the_first_client_hello() {
     use probe::PacketStep::{Inspect, InspectCredit};
     reset();
-    // the link takes less than 1200 bytes: nothing is sent
-    common::set_link_ceilings(MIN_DATAGRAM_SIZE - 1);
+    // the strategy plans nothing: nothing is sent
+    common::strategy::plan_nothing();
     let first = link();
     let mut receiver = test_receiver();
     let hello = client_hello();
@@ -3875,7 +3876,7 @@ fn reading_the_first_flight_ends_with_the_first_client_hello() {
     assert_eq!(result, Err("pending".to_owned()));
     assert!(state.first_client_hello().is_none());
     reset();
-    common::set_link_ceilings(MIN_DATAGRAM_SIZE - 1);
+    common::strategy::plan_nothing();
     let mut receiver = test_receiver();
     deliver(
         padded(
@@ -4020,8 +4021,8 @@ fn a_datagram_whose_packets_wait_for_their_keys_counts_toward_the_limit() {
 fn a_packet_without_its_keys_is_held_until_they_come() {
     use probe::PacketStep::{Inspect, InspectHeld, InstallHandshakeKeys};
     reset();
-    // the link takes less than 1200 bytes: nothing is sent
-    common::set_link_ceilings(MIN_DATAGRAM_SIZE - 1);
+    // the strategy plans nothing: nothing is sent
+    common::strategy::plan_nothing();
     let first = link();
     feed_packets([
         (ms(6), Inspect),
@@ -4057,8 +4058,8 @@ fn a_packet_without_its_keys_is_held_until_they_come() {
 fn a_poll_receives_at_most_its_limit_and_wakes_itself_for_the_rest() {
     use probe::PacketStep::Inspect;
     reset();
-    // the link takes less than 1200 bytes: nothing is sent
-    common::set_link_ceilings(MIN_DATAGRAM_SIZE - 1);
+    // the strategy plans nothing: nothing is sent
+    common::strategy::plan_nothing();
     MAX_PER_POLL.with(|m| m.set(1));
     let first = link();
     feed_packets([(ms(5), Inspect), (ms(6), Inspect)]);
@@ -4339,8 +4340,8 @@ fn deliveries_go_back_before_losses_and_a_late_ack_tells_of_a_spurious_loss() {
 #[test]
 fn an_ack_that_acknowledges_nothing_new_keeps_the_backoff() {
     reset();
-    // the link takes less than 1200 bytes: nothing is sent
-    common::set_link_ceilings(MIN_DATAGRAM_SIZE - 1);
+    // the strategy plans nothing: nothing is sent
+    common::strategy::plan_nothing();
     let first = link();
     feed([
         (
@@ -4474,8 +4475,8 @@ fn a_delivered_ack_frame_stops_what_it_reported_from_being_reported() {
 fn a_lost_ack_frame_owes_again_what_it_answered() {
     use probe::PacketStep::{Inspect, Receive};
     reset();
-    // the link takes less than 1200 bytes: nothing is sent
-    common::set_link_ceilings(MIN_DATAGRAM_SIZE - 1);
+    // the strategy plans nothing: nothing is sent
+    common::strategy::plan_nothing();
     let first = link();
     feed([
         (ms(6), probe::Step::SentAck(PacketNumberSpaceKind::Initial)),
@@ -4657,8 +4658,8 @@ fn the_planner_is_told_when_its_link_path_drains() {
 fn an_acknowledgment_due_now_is_published_asking_room_for_the_shortest_frame() {
     use probe::PacketStep::Receive;
     reset();
-    // the link takes less than 1200 bytes: nothing is sent
-    common::set_link_ceilings(MIN_DATAGRAM_SIZE - 1);
+    // the strategy plans nothing: nothing is sent
+    common::strategy::plan_nothing();
     let first = link();
     feed_packets([(
         ms(5),
@@ -4714,8 +4715,8 @@ fn an_acknowledgment_that_is_not_due_now_publishes_no_intent() {
 fn the_acknowledgment_intent_goes_when_the_acknowledgment_is_written() {
     use probe::PacketStep::Receive;
     reset();
-    // the link takes less than 1200 bytes: nothing is sent
-    common::set_link_ceilings(MIN_DATAGRAM_SIZE - 1);
+    // the strategy plans nothing: nothing is sent
+    common::strategy::plan_nothing();
     let first = link();
     feed([(ms(8), probe::Step::SentAck(PacketNumberSpaceKind::Initial))]);
     feed_packets([
@@ -4753,8 +4754,8 @@ fn the_acknowledgment_intent_goes_when_the_acknowledgment_is_written() {
 fn the_acknowledgment_intent_is_published_again_when_the_shortest_frame_grows() {
     use probe::PacketStep::Receive;
     reset();
-    // the link takes less than 1200 bytes: nothing is sent
-    common::set_link_ceilings(MIN_DATAGRAM_SIZE - 1);
+    // the strategy plans nothing: nothing is sent
+    common::strategy::plan_nothing();
     let first = link();
     feed_packets([
         (
@@ -4930,6 +4931,22 @@ fn a_link_ceiling_below_1200_reaches_the_strategy_as_a_link_path_that_does_not_c
     let limits = common::strategy::observed_limits(0).expect("the planner was told");
     assert_eq!(limits.link_ceiling, Some(1200));
     assert!(limits.supports_minimum());
+}
+
+#[test]
+fn the_only_link_path_that_stops_sending_closes_the_connection_with_no_viable_path() {
+    reset();
+    let first = link();
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    let _ = run(&mut connection, 1..=1);
+    assert_eq!(strategy_events("core: closed"), Vec::<String>::new());
+    // an IPv4 tunnel over an MTU of 1200: no other link path can send
+    common::set_link_ceiling(&first, 1172);
+    common::report_link_ceiling_changed(&first);
+    let _ = run(&mut connection, 2..=2);
+    let closed = strategy_events("core: closed");
+    assert_eq!(closed.len(), 1, "{closed:?}");
+    assert!(closed[0].contains("NoViablePath"), "{closed:?}");
 }
 
 #[test]
@@ -6823,6 +6840,29 @@ fn a_draining_link_path_seals_nothing() {
             .any(|line| line == "keys: Initial none, Handshake none, 1-RTT none"),
         "{log:?}"
     );
+}
+
+#[test]
+fn a_draining_link_path_drops_the_send_its_link_holds() {
+    reset();
+    let first = link();
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    common::plan_sends([common::SendOutcome::Hold(usize::MAX)]);
+    deliver(client_initial(0), &first, ms(5));
+    let _ = settle(&mut connection, 5..=6);
+    assert_eq!(common::take_batch_sizes(), [1], "the ACK, held by the link");
+    let close = padded(
+        &[],
+        |payload| initial_from(&CLIENT_SCID, 1, payload),
+        &[0x1c, 0x00, 0x00, 0x00],
+    );
+    deliver(close, &first, ms(7));
+    let _ = settle(&mut connection, 7..=7);
+    // the sending call went with the draining role, and the send with it
+    common::release_held_send();
+    let _ = settle(&mut connection, 8..=9);
+    assert_eq!(common::take_sent(), []);
+    assert_eq!(common::take_batch_sizes(), [0usize; 0]);
 }
 
 #[test]

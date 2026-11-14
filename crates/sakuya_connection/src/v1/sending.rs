@@ -57,8 +57,8 @@
 //! A packet given up counts as declared lost: it leaves the bytes in
 //! flight without a congestion signal, its record is kept as long as one of
 //! a packet declared lost, and the summaries of its frames go back to their
-//! parts as lost. What the datagram was charged with when it was sealed
-//! stays charged.
+//! frame sources as lost. What the datagram was charged with when it was
+//! sealed stays charged.
 //!
 //! Before each filling, the call initiates a 1-RTT key update when one is
 //! due and may be initiated, as the [`key_update`](super::key_update) module
@@ -86,7 +86,8 @@
 //! anti-amplification limit of the logical link; a copy the credit does
 //! not allow is not sent ([`ClosePacket`]). It enters no send journal and
 //! counts nothing in flight. A send in flight when the link path began
-//! closing is still settled.
+//! closing is still settled; once the link path is `Draining`, the call is
+//! dropped, with what its link still holds (RFC 9000 §10.2.2).
 //!
 //! [`link_path_sending`] is also the operation struct
 //! [`LinkPathSending`], with `LinkPathSendingExt` on receiver accesses.
@@ -175,10 +176,11 @@ use crate::{
     },
     layer::{self, LinkPath, NodeKey},
     others::OtherNodes,
+    role::LinkPathRole,
     send_strategy::{
         DatagramFillPlan, DatagramLimits, FrameSourceCursor, FrameSourceSet, LeadingContent,
-        LinkPathSendPlanner, Observe, PacketOverheads, PlannedDatagram, PlannedPacket,
-        PlannedPacketKind, SendStrategy, SendStrategyTypes,
+        LinkPathRoleKind, LinkPathSendPlanner, Observe, PacketOverheads, PlannedDatagram,
+        PlannedPacket, PlannedPacketKind, SendStrategy, SendStrategyTypes,
     },
     share::{FlatMut, FlatRef, LineageLists, LineagePartList, LinkPathIdentifierOf, NodeData},
     take::{GetAt, Lineage, ReadEach, Reborrow, Take, TakeEach},
@@ -369,7 +371,8 @@ pub type SettleReads<T, L> = HList![
 /// of version 1's connection error among the composition's, `Irt` of the
 /// RTT estimator in a recovery layer; for the close packet, `Icp` of it,
 /// `Irs` of [`ResendTakes`] and `Ilf` of the logical link's facts; `Ida`
-/// of whether a link has accepted a datagram of the connection.
+/// of whether a link has accepted a datagram of the connection; `Idr` of
+/// the link path's role, which the kind reads to drop the call.
 type Positions<
     Is,
     It,
@@ -403,6 +406,7 @@ type Positions<
     Irs,
     Ilf,
     Ida,
+    Idr,
 > = (
     Is,
     (It, Iw, Ir, Ici, Ik, Hs),
@@ -410,7 +414,7 @@ type Positions<
     (Ij, If, Iv, Ie, Iq, Hf),
     (Ipp, Ima, Jx, Jr, Jm),
     (Iu, Ihc, Ikp, Ic, Ier, Irt),
-    (Icp, Irs, Ilf, Ida),
+    (Icp, Irs, Ilf, Ida, Idr),
 );
 
 /// The most datagrams one poll fills again because the content planned for
@@ -489,6 +493,7 @@ impl<
     Irs,
     Ilf,
     Ida,
+    Idr,
 > LinkPathSendingCapability
     for NodeCallFamily<
         T,
@@ -528,6 +533,7 @@ impl<
             Irs,
             Ilf,
             Ida,
+            Idr,
         >,
         B,
     >
@@ -1637,6 +1643,11 @@ pub async fn link_path_sending<W: LinkPathSendingCapability>(
 /// sends at; and the link path's close packet, once it is sealed.
 /// Everything else that lets it send more is the send planner's to wake it
 /// for.
+///
+/// It reads the link path's role too: once the link path is `Draining`, it
+/// sends nothing again (RFC 9000 §10.2.2), and the call is not needed any
+/// more. What it handed to its link is sent; what its batch still holds is
+/// not, and goes with the call.
 #[derive(Debug)]
 pub struct LinkPathSendingKind;
 
@@ -1677,6 +1688,7 @@ impl<
     Irs,
     Ilf,
     Ida,
+    Idr,
 >
     CallKind<
         T,
@@ -1715,6 +1727,7 @@ impl<
             Irs,
             Ilf,
             Ida,
+            Idr,
         >,
     > for LinkPathSendingKind
 where
@@ -1769,7 +1782,8 @@ where
         + GetAt<ClosePacket, Icp>
         + GetAt<LinkFacts, Ilf>
         + GetAt<DatagramAcceptance, Ida>
-        + TakeEach<'x, ResendTakes<T, L>, Irs>,
+        + TakeEach<'x, ResendTakes<T, L>, Irs>
+        + GetAt<LinkPathRole<InstantOf<T>>, Idr>,
     L: ConnectionErrorsOf,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ier>,
     for<'x> FillKeysRest<'x, T, L, It>: TakeEach<'x, FillReadTakes<T>, Iw>,
@@ -1860,6 +1874,7 @@ where
         Irs,
         Ilf,
         Ida,
+        Idr,
     >: 'static,
     S: 'static,
 {
@@ -1902,6 +1917,7 @@ where
                 Irs,
                 Ilf,
                 Ida,
+                Idr,
             >,
             B,
         >,
@@ -1911,6 +1927,12 @@ where
         LentCall::new(LinkPathSending::new())
     }
     fn reads(reads: &mut ReadSet) {
-        reads.add::<PmtuOf<T, L>>().add::<ClosePacket>();
+        reads
+            .add::<PmtuOf<T, L>>()
+            .add::<ClosePacket>()
+            .add::<LinkPathRole<InstantOf<T>>>();
+    }
+    fn no_longer_needed<'v>(lineage: &LineageOf<'v, T, L, LinkPath>) -> bool {
+        lineage.get::<LinkPathRole<InstantOf<T>>, Idr>().kind() == LinkPathRoleKind::Draining
     }
 }

@@ -26,6 +26,19 @@ thread_local! {
     static OVERHEADS: RefCell<Vec<Option<PacketOverheads>>> = const { RefCell::new(Vec::new()) };
     static STALE_INITIAL: Cell<Option<usize>> = const { Cell::new(None) };
     static STALE_INITIAL_KEPT: Cell<Option<usize>> = const { Cell::new(None) };
+    static PLAN_NOTHING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Let every planner plan nothing from now on, whatever is published: as a
+/// strategy that has nothing it wants to send, so that nothing is sent.
+pub fn plan_nothing() {
+    PLAN_NOTHING.with(|nothing| nothing.set(true));
+}
+
+/// Let the planners plan as the ranked strategy does again, undoing
+/// [`plan_nothing`].
+pub fn plan_normally() {
+    PLAN_NOTHING.with(|nothing| nothing.set(false));
 }
 
 /// Let the next packet overheads a planner observes reach the ranked
@@ -318,6 +331,9 @@ where
         core: &'a mut Self::Core,
         cx: &mut Context<'_>,
     ) -> Poll<PlannedDatagram<Self::Plan<'a>>> {
+        if PLAN_NOTHING.with(Cell::get) {
+            return Poll::Pending;
+        }
         self.inner.poll_plan(&mut core.inner, cx)
     }
 
