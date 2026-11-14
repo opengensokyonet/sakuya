@@ -100,7 +100,7 @@ use crate::{
     call::CallBundle,
     clock::{InstantOf, LinkIdOf},
     component::LineageOf,
-    dispatch::{DispatchFacts, FrameSetDispatch, PacketFacts},
+    dispatch::{DispatchFacts, FrameSetDispatch, PacketFacts, ReceivedProtection},
     error::{ConnectionErrorOf, ConnectionErrorsOf},
     layer::{self, LogicalPath, NodeKey},
     others::OtherNodes,
@@ -383,17 +383,24 @@ where
         unreachable!("a logical path's lend carries its key")
     };
     let link_path = L::link_path_identifier(path, arrival.link().id());
-    let facts = DispatchFacts::new(level, at, link_path);
-    let facts = match one_rtt {
-        Some((generation, current, _)) => facts.with_key_generation(match generation {
-            // invariant: a previous generation is kept only after a
-            // promotion, which made the current one at least 1
-            ReceiveGeneration::Previous => current - 1,
-            ReceiveGeneration::Current => current,
-            ReceiveGeneration::Next => current + 1,
-        }),
-        None => facts,
+    let protection = match (one_rtt, level) {
+        (Some((generation, current, _)), _) => ReceivedProtection::OneRtt {
+            key_generation: match generation {
+                // invariant: a previous generation is kept only after a
+                // promotion, which made the current one at least 1
+                ReceiveGeneration::Previous => current - 1,
+                ReceiveGeneration::Current => current,
+                ReceiveGeneration::Next => current + 1,
+            },
+        },
+        (None, EncryptionLevel::Initial) => ReceivedProtection::Initial,
+        (None, EncryptionLevel::ZeroRtt) => ReceivedProtection::ZeroRtt,
+        (None, EncryptionLevel::Handshake) => ReceivedProtection::Handshake,
+        // invariant: the 1-RTT keys open a packet with one of their
+        // generations, which `one_rtt` holds
+        (None, EncryptionLevel::OneRtt) => unreachable!("1-RTT keys open with a generation"),
     };
+    let facts = DispatchFacts::new(protection, at, link_path);
     if closing {
         find_close::<T, L, B, Ik, Hd>(lineage, others, payload, &facts)?;
         return Ok(PacketOutcome::Closing);

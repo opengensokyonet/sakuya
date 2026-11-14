@@ -43,38 +43,64 @@ use crate::{
 /// identifies a link path ([`LinkPathIdentifierOf`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DispatchFacts<I, P> {
-    level: EncryptionLevel,
+    protection: ReceivedProtection,
     at: I,
     link_path: P,
-    key_generation: Option<u64>,
 }
 
-impl<I: Copy, P> DispatchFacts<I, P> {
-    /// A packet protected at `level` whose datagram arrived at `at` on the
-    /// link path `link_path`.
-    pub fn new(level: EncryptionLevel, at: I, link_path: P) -> Self {
-        Self {
-            level,
-            at,
-            link_path,
-            key_generation: None,
+/// How a received packet was protected: the encryption level, and for a
+/// 1-RTT packet the key generation that opened it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReceivedProtection {
+    /// An Initial packet.
+    Initial,
+    /// A 0-RTT packet.
+    ZeroRtt,
+    /// A Handshake packet.
+    Handshake,
+    /// A 1-RTT packet.
+    OneRtt {
+        /// How many key updates of the peer's sending keys lie before the
+        /// keys that opened the packet (RFC 9001 §6).
+        key_generation: u64,
+    },
+}
+
+impl ReceivedProtection {
+    /// The encryption level.
+    pub fn level(self) -> EncryptionLevel {
+        match self {
+            Self::Initial => EncryptionLevel::Initial,
+            Self::ZeroRtt => EncryptionLevel::ZeroRtt,
+            Self::Handshake => EncryptionLevel::Handshake,
+            Self::OneRtt { .. } => EncryptionLevel::OneRtt,
         }
     }
 
-    /// The same facts, of a 1-RTT packet opened with the key generation
-    /// `generation`: how many key updates of the peer's sending keys lie
-    /// before the keys that protected it (RFC 9001 §6).
-    #[must_use]
-    pub fn with_key_generation(self, generation: u64) -> Self {
+    /// The key generation of a 1-RTT packet; `None` for a packet of
+    /// another level, which has none.
+    pub fn key_generation(self) -> Option<u64> {
+        match self {
+            Self::OneRtt { key_generation } => Some(key_generation),
+            Self::Initial | Self::ZeroRtt | Self::Handshake => None,
+        }
+    }
+}
+
+impl<I: Copy, P> DispatchFacts<I, P> {
+    /// A packet protected as `protection` says whose datagram arrived at
+    /// `at` on the link path `link_path`.
+    pub fn new(protection: ReceivedProtection, at: I, link_path: P) -> Self {
         Self {
-            key_generation: Some(generation),
-            ..self
+            protection,
+            at,
+            link_path,
         }
     }
 
     /// The encryption level the packet was protected at.
     pub fn level(&self) -> EncryptionLevel {
-        self.level
+        self.protection.level()
     }
 
     /// When the datagram of the packet arrived.
@@ -88,10 +114,10 @@ impl<I: Copy, P> DispatchFacts<I, P> {
         &self.link_path
     }
 
-    /// The key generation a 1-RTT packet was opened with; `None` for a
-    /// packet of another level.
+    /// The key generation that opened a 1-RTT packet; `None` for a packet
+    /// of another level.
     pub fn key_generation(&self) -> Option<u64> {
-        self.key_generation
+        self.protection.key_generation()
     }
 }
 

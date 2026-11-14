@@ -103,7 +103,7 @@ impl Sending {
     fn ack(&mut self, opened_with: u64, largest: u64, at: Duration) -> Result<(), KeyUpdateError> {
         let mut taken = TakenPositions::default();
         let mut lineage = Lineage::new(hlist![&mut self.keys, &mut self.numbers], &mut taken);
-        ack_received::<RingBackend, _, _, _, _>(&mut lineage, Some(opened_with), pn(largest), at)
+        ack_received::<RingBackend, _, _, _, _>(&mut lineage, opened_with, pn(largest), at)
     }
 
     fn send(&self) -> &OneRttSendKeys<RingBackend> {

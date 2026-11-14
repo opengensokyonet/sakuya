@@ -222,7 +222,7 @@ where
 /// sealed with newer keys than `opened_with`. Nothing is confirmed then.
 pub(crate) fn ack_received<B, I, V, Io, Ikp>(
     lineage: &mut Lineage<'_, V>,
-    opened_with: Option<u64>,
+    opened_with: u64,
     largest: PacketNumber,
     at: I,
 ) -> Result<(), KeyUpdateError>
@@ -232,7 +232,7 @@ where
     V: GetAt<OneRttKeys<B, I>, Io> + GetAt<KeyPhaseNumbers, Ikp>,
 {
     let numbers = *lineage.get::<KeyPhaseNumbers, Ikp>();
-    if let Some(lowest_newer) = opened_with.and_then(|opened| numbers.lowest_sent_after(opened))
+    if let Some(lowest_newer) = numbers.lowest_sent_after(opened_with)
         && largest >= lowest_newer
     {
         return AckWithOldKeysSnafu {

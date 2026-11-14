@@ -54,7 +54,7 @@ use sakuya_recovery::{
     factory::{LendCongestion, RecoveryFactory},
     loss::{LossThresholds, loss_delay},
     loss_detection::{LossDetectionState, Outstanding},
-    packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces},
+    packet_number_space::{PacketNumberSpaceState, PacketNumberSpaces},
     pmtu::PmtuPolicy,
     rtt::{RttEstimator, RttSample, effective_ack_delay},
     send_journals::{SendJournals, SentPacketState},
@@ -209,8 +209,10 @@ where
             ecn_counts: frame.ecn_counts().is_some(),
         }
     );
-    if space == PacketNumberSpaceKind::ApplicationData {
-        ack_received::<T::Crypto, _, _, Io, Ikp>(lineage, packet.key_generation(), largest, at)
+    // the frames of the Application Data space come in 1-RTT packets only:
+    // a 0-RTT packet carries no ACK frame (RFC 9000 §12.4)
+    if let Some(opened_with) = packet.key_generation() {
+        ack_received::<T::Crypto, _, _, Io, Ikp>(lineage, opened_with, largest, at)
             .context(KeyUpdateSnafu)?;
     }
     // Out of the lineage while the frame is handled, so that the summaries
