@@ -42,7 +42,7 @@ use sakuya_wire::{
 
 use super::{
     AnyActiveLinkPath, DatagramFillPlan, DatagramLimits, FrameSourceCursor, FrameSourceSet,
-    InjectSendIntent, IntentRejected, IntentState, LeadingContent, LinkPathPublishError,
+    InjectSendIntent, IntentRejectedError, IntentState, LeadingContent, LinkPathPublishError,
     LinkPathRoleKind, LinkPathSendPlanner, MinimumLengths, Observe, PacketOverheads,
     PlannedDatagram, PlannedItem, PlannedPacket, PlannedPacketKind, PlannerLinkPath, Publish,
     PublishOutcome, PublishTo, ResendCloseIntent, RoleNotAcceptingError, SendIntent, SendStrategy,
@@ -457,7 +457,7 @@ impl<I: SendStrategyTypes> RankedLinkPathSendPlanner<I> {
 impl<I: SendStrategyTypes, J: SendIntent + RankedIntent> PublishOutcome<J, PlannerLinkPath>
     for RankedLinkPathSendPlanner<I>
 {
-    type Outcome = Result<LinkPathIntentTicket, IntentRejected<J>>;
+    type Outcome = Result<LinkPathIntentTicket, IntentRejectedError<J>>;
 }
 
 /// A resend of the close packet gives back nothing.
@@ -474,9 +474,9 @@ where
     J: SendIntent + RankedIntent,
     I::SendIntents: InjectSendIntent<J, Idx>,
 {
-    fn publish(&mut self, intent: J) -> Result<LinkPathIntentTicket, IntentRejected<J>> {
+    fn publish(&mut self, intent: J) -> Result<LinkPathIntentTicket, IntentRejectedError<J>> {
         if self.role != LinkPathRoleKind::Active {
-            return Err(IntentRejected::new(
+            return Err(IntentRejectedError::new(
                 intent,
                 LinkPathPublishError::from(RoleNotAcceptingError::new(self.role)),
             ));

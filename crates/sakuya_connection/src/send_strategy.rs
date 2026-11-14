@@ -834,20 +834,20 @@ pub enum LinkPathPublishError {
 /// An intent a link path's planner refused, handed back.
 #[derive(Snafu)]
 #[snafu(display("the link path refused the intent"))]
-pub struct IntentRejected<J> {
+pub struct IntentRejectedError<J> {
     intent: J,
     source: LinkPathPublishError,
 }
 
-impl<J> fmt::Debug for IntentRejected<J> {
+impl<J> fmt::Debug for IntentRejectedError<J> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("IntentRejected")
+        f.debug_struct("IntentRejectedError")
             .field("source", &self.source)
             .finish_non_exhaustive()
     }
 }
 
-impl<J> IntentRejected<J> {
+impl<J> IntentRejectedError<J> {
     /// `intent`, refused for `source`.
     pub fn new(intent: J, source: LinkPathPublishError) -> Self {
         Self { intent, source }

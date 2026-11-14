@@ -8,7 +8,7 @@ use core::{
 use std::thread_local;
 
 use sakuya_connection::send_strategy::{
-    AnyActiveLinkPath, DatagramLimits, InjectSendIntent, IntentRejected, LinkPathRoleKind,
+    AnyActiveLinkPath, DatagramLimits, InjectSendIntent, IntentRejectedError, LinkPathRoleKind,
     LinkPathSendPlanner, Observe, PacketOverheads, PlannedDatagram, PlannerLinkPath, Publish,
     PublishOutcome, PublishTo, ResendCloseIntent, SendIntent, SendStrategy, SendStrategyTypes,
     ranked::{
@@ -187,7 +187,8 @@ pub struct EventLoggingPlanner<I: SendStrategyTypes> {
 impl<I: SendStrategyTypes> PublishOutcome<ProbePingIntent, PlannerLinkPath>
     for EventLoggingPlanner<I>
 {
-    type Outcome = Result<RecordedTicket<LinkPathIntentTicket>, IntentRejected<ProbePingIntent>>;
+    type Outcome =
+        Result<RecordedTicket<LinkPathIntentTicket>, IntentRejectedError<ProbePingIntent>>;
 }
 
 impl<I, Idx> Publish<ProbePingIntent, Idx> for EventLoggingPlanner<I>
@@ -198,7 +199,7 @@ where
     fn publish(
         &mut self,
         intent: ProbePingIntent,
-    ) -> Result<RecordedTicket<LinkPathIntentTicket>, IntentRejected<ProbePingIntent>> {
+    ) -> Result<RecordedTicket<LinkPathIntentTicket>, IntentRejectedError<ProbePingIntent>> {
         let owner = format!("path {}", self.index);
         let label = format!("{intent:?}");
         let ticket = <RankedLinkPathSendPlanner<I> as Publish<ProbePingIntent, Idx>>::publish(
