@@ -14,20 +14,29 @@ pub const MIN_DATAGRAM_SIZE: usize = 1200;
 /// peer, one UDP datagram per message.
 ///
 /// A clone is another handle to the same link, with the same [`LinkId`];
-/// cloning is cheap, and dropping a clone does not close the link. Each
-/// clone has a wait state of its own.
+/// cloning is cheap, and dropping a clone does not close the link. Dropping
+/// every clone closes it, and there is no other way to close it: a
+/// transport implementation keeps no clone of a link it has handed out.
+/// Each clone has a wait state of its own.
 ///
 /// Besides carrying messages, a link states a few facts about itself, each
 /// through its own method because each changes by its own rule: whether it
 /// may mark ECN, its datagram size limit and when that limit may have
 /// changed, and the datagram size its clones have concluded works.
 ///
-/// The futures its methods return borrow nothing of the link: a caller may
-/// keep one while it holds no borrow of the clone it came from. Several
-/// futures from one clone wait each on its own, without affecting one
-/// another.
+/// A link ends when it can carry no more messages, for example when its
+/// socket fails or the session it runs over is closed. From then on
+/// [`recv`](Self::recv) and [`send`](Self::send) return errors on every
+/// clone, and [`ended`](Self::ended) is ready with the reason. Transient
+/// failures, such as an ICMP Port Unreachable or a full buffer, do not end a
+/// link: the link handles them itself and they never reach its callers.
 ///
-/// The method that receives messages is not part of this trait yet.
+/// The futures of [`send`](Self::send), [`ended`](Self::ended) and
+/// [`max_datagram_size_changed`](Self::max_datagram_size_changed) borrow
+/// nothing of the link: a caller may keep one while it holds no borrow of
+/// the clone it came from. Several futures from one clone wait each on its
+/// own, without affecting one another. The future of [`recv`](Self::recv)
+/// borrows the clone it came from.
 pub trait Link: Clone {
     /// This side's end of a link, chosen by the transport: for UDP, for
     /// example, the identity of the socket and its local address.
@@ -57,6 +66,20 @@ pub trait Link: Clone {
     /// A connection requires it to be the instant of its clock; that both
     /// read the same clock is for whoever composes them to ensure.
     type Instant: Ord + Copy + Add<Duration, Output = Self::Instant>;
+    /// Why the link ended: the error of [`recv`](Self::recv) once the link
+    /// has ended, and the output of [`ended`](Self::ended).
+    ///
+    /// It is not classified: a link reports nothing but its end through
+    /// it. It is `Clone` so that every clone can be given the same reason.
+    type RecvError: Clone;
+    /// The future of one [`recv`](Self::recv): it borrows the clone it came
+    /// from.
+    type Recv<'a>: Future<Output = Result<ReceivedDatagram<Self::Payload, Self>, Self::RecvError>>
+        + 'a
+    where
+        Self: 'a;
+    /// The future of [`ended`](Self::ended); it borrows nothing.
+    type Ended: Future<Output = Self::RecvError>;
     /// Why [`max_datagram_size`](Self::max_datagram_size) cannot be told.
     type MaxDatagramSizeError;
     /// Why the first datagram not yet accepted by [`send`](Self::send) was
@@ -100,6 +123,43 @@ pub trait Link: Clone {
     /// The limit cannot be told for now, or the link has failed.
     fn max_datagram_size(&self) -> Result<usize, Self::MaxDatagramSizeError>;
 
+    /// Receive the next message that arrived on this link.
+    ///
+    /// - `Ok` delivers one whole UDP datagram, which certainly arrived on
+    ///   this link, with the facts of its arrival: the link in them is a
+    ///   clone of this one. A datagram of zero bytes is a message too. The
+    ///   contents are not checked: they need not be QUIC packets.
+    /// - `Err` means the link has ended. Every later `recv`, on this clone or
+    ///   any other, returns `Err` as well. Transient failures are not
+    ///   reported: the link retries, backing off if it needs to.
+    ///
+    /// A link that reads several datagrams at once, as with GRO, still
+    /// delivers them one per call. When a link binding produces this link
+    /// because a datagram arrived from a new peer, that datagram is
+    /// delivered by a `recv` of this link, exactly once.
+    ///
+    /// The datagram delivered is owned by the caller: receiving again does
+    /// not change it.
+    ///
+    /// A link has one receiver, its datagram dispatcher, which hands what it
+    /// receives on to routing; this trait does not say whether several
+    /// receives on one link may be pending at once.
+    ///
+    /// # Cancellation
+    ///
+    /// Dropping the future before it returns `Ok` loses no datagram the link
+    /// had taken or set aside for it, and does not keep a later `recv` from
+    /// making progress. Not polling it is not dropping it.
+    fn recv(&self) -> Self::Recv<'_>;
+
+    /// A future that is ready when the link has ended, with the reason: the
+    /// same value as the error [`recv`](Self::recv) returns from then on.
+    ///
+    /// It lets whoever uses the link without receiving on it, such as a
+    /// connection that sends over it, learn of the end and its reason
+    /// without waiting for sends to fail. It borrows nothing.
+    fn ended(&self) -> Self::Ended;
+
     /// Hand `batch` to the link to send, in order.
     ///
     /// The future ends when the link has accepted some of the batch, or has
@@ -111,7 +171,8 @@ pub trait Link: Clone {
     ///   that they reached the network.
     /// - `Err` means the first of them is given up and the rest are not
     ///   touched: the caller handles the packets in that datagram as lost
-    ///   and sends the rest again.
+    ///   and sends the rest again. Once the link has ended, every `send`
+    ///   returns `Err`.
     ///
     /// Dropping the future before it ends leaves the batch neither sent nor
     /// unsent: some of it may have gone out. The caller handles the packets
@@ -341,3 +402,6 @@ where
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests;

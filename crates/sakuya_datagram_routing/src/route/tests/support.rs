@@ -90,6 +90,12 @@ impl<Id: Borrow<TestLinkId> + Clone> Link for TestLink<Id> {
     type Instant = Duration;
     type MaxDatagramSizeError = Infallible;
     type SendError = Infallible;
+    type RecvError = Infallible;
+    type Recv<'a>
+        = Pending<Result<ReceivedDatagram<Self::Payload, Self>, Infallible>>
+    where
+        Self: 'a;
+    type Ended = Pending<Infallible>;
     type Send<'a> = Pending<Result<SendAcceptance<Duration>, Infallible>>;
     type MaxDatagramSizeChanged = Pending<()>;
 
@@ -103,6 +109,14 @@ impl<Id: Borrow<TestLinkId> + Clone> Link for TestLink<Id> {
 
     fn max_datagram_size(&self) -> Result<usize, Infallible> {
         Ok(MIN_DATAGRAM_SIZE)
+    }
+
+    fn recv(&self) -> Self::Recv<'_> {
+        std::future::pending()
+    }
+
+    fn ended(&self) -> Self::Ended {
+        std::future::pending()
     }
 
     fn send<'a>(&self, _batch: &'a [OutgoingDatagram]) -> Self::Send<'a> {

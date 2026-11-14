@@ -6,8 +6,10 @@
 //! lifetimes, and old and new link bindings or links may coexist for the same
 //! local address. This crate provides the [`Link`] trait, the identity of a
 //! link, and the datagrams a link sends and receives: a received one is a
-//! [`ReceivedDatagram`], with the [`ArrivalFacts`] of its arrival. Link
-//! bindings and link drivers have no traits yet.
+//! [`ReceivedDatagram`], with the [`ArrivalFacts`] of its arrival. A link
+//! binding is a [`LinkBinding`], which takes new links as an
+//! [`AcceptingLinkBinding`], sets them up as a [`ConnectingLinkBinding`], or
+//! both. Binding is each transport's own method: link drivers have no trait.
 //!
 //! Code that refers to a link without holding it, such as a delayed
 //! notification, a map key or the routing of a datagram by where it arrived,
@@ -80,7 +82,9 @@ use core::{
 };
 use nitori_id::{Identity, UniqueId};
 
+mod binding;
 mod link;
+pub use binding::{AcceptingLinkBinding, ConnectingLinkBinding, LinkBinding};
 pub use link::{
     ArrivalFacts, EcnCodepoint, EcnMarking, Link, MIN_DATAGRAM_SIZE, OutgoingDatagram,
     ReceivedDatagram, SendAcceptance,

@@ -22,6 +22,10 @@ impl Link for TestLink {
     type Instant = Duration;
     type MaxDatagramSizeError = ();
     type SendError = ();
+    type RecvError = ();
+    type Recv<'a> =
+        core::future::Pending<Result<sakuya_link::ReceivedDatagram<Self::Payload, Self>, ()>>;
+    type Ended = core::future::Pending<()>;
     type Send<'a> = core::future::Pending<Result<SendAcceptance<Duration>, ()>>;
     type MaxDatagramSizeChanged = core::future::Pending<()>;
 
@@ -35,6 +39,14 @@ impl Link for TestLink {
 
     fn max_datagram_size(&self) -> Result<usize, ()> {
         Ok(1452)
+    }
+
+    fn recv(&self) -> Self::Recv<'_> {
+        core::future::pending()
+    }
+
+    fn ended(&self) -> Self::Ended {
+        core::future::pending()
     }
 
     fn send<'a>(&self, _batch: &'a [OutgoingDatagram]) -> Self::Send<'a> {
