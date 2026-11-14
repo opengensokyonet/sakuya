@@ -10,12 +10,13 @@ use std::thread_local;
 use sakuya_connection::send_strategy::{
     AnyActiveLinkPath, DatagramLimits, InjectSendIntent, IntentRejected, LinkPathRoleKind,
     LinkPathSendPlanner, Observe, PacketOverheads, PlannedDatagram, PlannerLinkPath, Publish,
-    PublishOutcome, PublishTo, SendIntent, SendStrategy, SendStrategyTypes,
+    PublishOutcome, PublishTo, ResendCloseIntent, SendIntent, SendStrategy, SendStrategyTypes,
     ranked::{
         IntentTicket, LinkPathIntentTicket, RankedIntent, RankedLinkPathSendPlanner,
         RankedSendStrategy,
     },
 };
+use sakuya_connection::v1::send::ProbePingIntent;
 use sakuya_stream::connection::CloseReason;
 use sakuya_wire::v1::encryption_level::EncryptionLevel;
 
@@ -183,32 +184,49 @@ pub struct EventLoggingPlanner<I: SendStrategyTypes> {
     index: usize,
 }
 
-impl<I: SendStrategyTypes, J: SendIntent> PublishOutcome<J, PlannerLinkPath>
+impl<I: SendStrategyTypes> PublishOutcome<ProbePingIntent, PlannerLinkPath>
     for EventLoggingPlanner<I>
 {
-    type Outcome = Result<RecordedTicket<LinkPathIntentTicket>, IntentRejected<J>>;
+    type Outcome = Result<RecordedTicket<LinkPathIntentTicket>, IntentRejected<ProbePingIntent>>;
 }
 
-impl<I, J, Idx> Publish<J, Idx> for EventLoggingPlanner<I>
+impl<I, Idx> Publish<ProbePingIntent, Idx> for EventLoggingPlanner<I>
 where
     I: SendStrategyTypes,
-    J: SendIntent + Debug,
-    I::SendIntents: InjectSendIntent<J, Idx>,
+    I::SendIntents: InjectSendIntent<ProbePingIntent, Idx>,
 {
     fn publish(
         &mut self,
-        intent: J,
-    ) -> Result<RecordedTicket<LinkPathIntentTicket>, IntentRejected<J>> {
+        intent: ProbePingIntent,
+    ) -> Result<RecordedTicket<LinkPathIntentTicket>, IntentRejected<ProbePingIntent>> {
         let owner = format!("path {}", self.index);
         let label = format!("{intent:?}");
-        let ticket =
-            <RankedLinkPathSendPlanner<I> as Publish<J, Idx>>::publish(&mut self.inner, intent)?;
+        let ticket = <RankedLinkPathSendPlanner<I> as Publish<ProbePingIntent, Idx>>::publish(
+            &mut self.inner,
+            intent,
+        )?;
         record(format!("{owner}: publish {label}"));
         Ok(RecordedTicket {
             owner,
             intent: label,
             inner: ticket,
         })
+    }
+}
+
+impl<I: SendStrategyTypes> PublishOutcome<ResendCloseIntent, PlannerLinkPath>
+    for EventLoggingPlanner<I>
+{
+    type Outcome = ();
+}
+
+impl<I: SendStrategyTypes> Publish<ResendCloseIntent, ()> for EventLoggingPlanner<I> {
+    fn publish(&mut self, intent: ResendCloseIntent) {
+        record(format!("path {}: publish {intent:?}", self.index));
+        <RankedLinkPathSendPlanner<I> as Publish<ResendCloseIntent, ()>>::publish(
+            &mut self.inner,
+            intent,
+        );
     }
 }
 

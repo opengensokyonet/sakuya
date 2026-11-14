@@ -1,22 +1,24 @@
 //! The frames of version 1 that frame sources write: which kind each is,
 //! [`DelimitedFrame`] or [`ToPacketEndFrame`], and its properties.
 //!
-//! ACK is [`AckOnlyClass`]: it does not count in the bytes in flight; every
-//! other frame here is [`InFlightClass`] (RFC 9002 §2). Every frame but ACK
-//! elicits an acknowledgment. PATH_CHALLENGE and PATH_RESPONSE expand their
-//! datagram (RFC 9000 §8.2.1, §8.2.2). STREAM is delimited with a Length
-//! field and extends to the end of the packet without one.
+//! ACK and CONNECTION_CLOSE are [`AckOnlyClass`]: they do not count in the
+//! bytes in flight, and do not elicit an acknowledgment; every other frame
+//! here is [`InFlightClass`] and elicits one (RFC 9002 §2). PATH_CHALLENGE
+//! and PATH_RESPONSE expand their datagram (RFC 9000 §8.2.1, §8.2.2).
+//! STREAM is delimited with a Length field and extends to the end of the
+//! packet without one. No frame source writes CONNECTION_CLOSE: only the
+//! close packet of a link path carries it.
 //!
-//! PADDING is not here: only the packet writer writes it. Neither is
-//! CONNECTION_CLOSE: the packets that close a connection are written apart
-//! from frame sources. The frames of extensions, behind features of
-//! `sakuya_wire` this crate does not enable, are not here either.
+//! PADDING is not here: only the packet writer writes it. The frames of
+//! extensions, behind features of `sakuya_wire` this crate does not enable,
+//! are not here either.
 
 use bytes::{Buf, BytesMut};
 use sakuya_wire::{
     frame::NoLength,
     v1::frame::{
         ack::{AckFrame, codec::WriteAckFrameHostExt as _},
+        connection_close::{ConnectionCloseFrame, codec::WriteConnectionCloseFrameHostExt as _},
         crypto::{CryptoFrame, codec::WriteCryptoFrameHostExt as _},
         data_blocked::{DataBlockedFrame, codec::WriteDataBlockedFrameHostExt as _},
         handshake_done::{HandshakeDoneFrame, codec::WriteHandshakeDoneFrameHostExt as _},
@@ -105,6 +107,21 @@ impl<D: Buf> DelimitedFrame for CryptoFrame<D> {
     }
 }
 
+impl<D: Buf> DelimitedFrame for ConnectionCloseFrame<D> {
+    type Class = AckOnlyClass;
+    const ACK_ELICITING: bool = false;
+
+    fn encoded_len(&self) -> usize {
+        ConnectionCloseFrame::encoded_len(self)
+    }
+
+    fn write_to(self, buffer: &mut BytesMut) {
+        buffer
+            .sync_write_connection_close_frame_unpin(self)
+            .expect(TAKES_EVERY_BYTE);
+    }
+}
+
 impl<D: Buf> DelimitedFrame for NewTokenFrame<D> {
     type Class = InFlightClass;
     const ACK_ELICITING: bool = true;
@@ -186,6 +203,8 @@ mod tests {
         agree::<PathChallengeFrame>(FrameType::PathChallenge);
         agree::<PathResponseFrame>(FrameType::PathResponse);
         agree::<NewConnectionIdFrame>(FrameType::NewConnectionId);
+        agree::<ConnectionCloseFrame<Bytes>>(FrameType::ConnectionCloseTransport);
+        agree::<ConnectionCloseFrame<Bytes>>(FrameType::ConnectionCloseApplication);
         const {
             assert!(PathChallengeFrame::EXPANDS_DATAGRAM && PathResponseFrame::EXPANDS_DATAGRAM);
             assert!(!PingFrame::EXPANDS_DATAGRAM && !AckFrame::EXPANDS_DATAGRAM);

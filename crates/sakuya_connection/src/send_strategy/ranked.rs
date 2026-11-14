@@ -18,6 +18,13 @@
 //! least room blocked content needs, and is woken when its observed
 //! conditions reach it, when content is published, or when the keys or its
 //! role change.
+//!
+//! A closing link path sends its close packet again ([`ResendCloseIntent`])
+//! when it is sealed, and then for the first, second, fourth, eighth and
+//! every further power of two among the datagrams it receives while it
+//! closes: the rate falls as the peer keeps sending (RFC 9000 §10.2.1).
+//! What was published before its planner was told of the closing role
+//! waits for it; a draining link path sends nothing.
 
 use core::{
     fmt,
@@ -38,8 +45,8 @@ use super::{
     InjectSendIntent, IntentRejected, IntentState, LeadingContent, LinkPathPublishError,
     LinkPathRoleKind, LinkPathSendPlanner, MinimumLengths, Observe, PacketOverheads,
     PlannedDatagram, PlannedItem, PlannedPacket, PlannedPacketKind, PlannerLinkPath, Publish,
-    PublishOutcome, PublishTo, RoleNotAcceptingError, SendIntent, SendStrategy, SendStrategyTypes,
-    SupplyFeedback,
+    PublishOutcome, PublishTo, ResendCloseIntent, RoleNotAcceptingError, SendIntent, SendStrategy,
+    SendStrategyTypes, SupplyFeedback,
 };
 use crate::write::FlightClass;
 
@@ -339,6 +346,7 @@ where
             intents: Vec::new(),
             waker: None,
             thresholds: Thresholds::default(),
+            close_resends: CloseResends::default(),
             types: PhantomData,
         }
     }
@@ -388,6 +396,29 @@ impl Thresholds {
     }
 }
 
+/// When a closing link path sends its close packet again: how many
+/// datagrams it received while closing, and whether a resend is due.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CloseResends {
+    received: u64,
+    due: bool,
+}
+
+impl CloseResends {
+    /// What happened, as `intent` tells: a sealed close packet goes out;
+    /// of the datagrams received, those whose count is a power of two make
+    /// it go again.
+    fn note(&mut self, intent: ResendCloseIntent) {
+        match intent {
+            ResendCloseIntent::Sealed => self.due = true,
+            ResendCloseIntent::DatagramReceived => {
+                self.received = self.received.saturating_add(1);
+                self.due |= self.received.is_power_of_two();
+            }
+        }
+    }
+}
+
 /// The planner of one link path in the ranked strategy.
 pub struct RankedLinkPathSendPlanner<I: SendStrategyTypes> {
     id: I::LinkPathIdentifier,
@@ -397,6 +428,7 @@ pub struct RankedLinkPathSendPlanner<I: SendStrategyTypes> {
     intents: Vec<Entry<I::SendIntents>>,
     waker: Option<Waker>,
     thresholds: Thresholds,
+    close_resends: CloseResends,
     types: PhantomData<fn() -> I>,
 }
 
@@ -407,6 +439,7 @@ impl<I: SendStrategyTypes> fmt::Debug for RankedLinkPathSendPlanner<I> {
             .field("limits", &self.limits)
             .field("overheads", &self.overheads)
             .field("intents", &self.intents.len())
+            .field("close_resends", &self.close_resends)
             .finish_non_exhaustive()
     }
 }
@@ -419,16 +452,26 @@ impl<I: SendStrategyTypes> RankedLinkPathSendPlanner<I> {
     }
 }
 
-impl<I: SendStrategyTypes, J: SendIntent> PublishOutcome<J, PlannerLinkPath>
+/// A part's intent, which ranks, gives back its ticket, or itself when the
+/// role does not take it.
+impl<I: SendStrategyTypes, J: SendIntent + RankedIntent> PublishOutcome<J, PlannerLinkPath>
     for RankedLinkPathSendPlanner<I>
 {
     type Outcome = Result<LinkPathIntentTicket, IntentRejected<J>>;
 }
 
+/// A resend of the close packet gives back nothing.
+impl<I: SendStrategyTypes> PublishOutcome<ResendCloseIntent, PlannerLinkPath>
+    for RankedLinkPathSendPlanner<I>
+{
+    type Outcome = ();
+}
+
+/// Only an active link path takes a part's intents.
 impl<I, J, Idx> Publish<J, Idx> for RankedLinkPathSendPlanner<I>
 where
     I: SendStrategyTypes,
-    J: SendIntent,
+    J: SendIntent + RankedIntent,
     I::SendIntents: InjectSendIntent<J, Idx>,
 {
     fn publish(&mut self, intent: J) -> Result<LinkPathIntentTicket, IntentRejected<J>> {
@@ -445,6 +488,22 @@ where
         });
         self.wake();
         Ok(LinkPathIntentTicket { cell })
+    }
+}
+
+/// The close packet of a link path that is not draining is sent again as
+/// the module documentation says; one published before the planner was
+/// told the link path closes waits until it is.
+impl<I: SendStrategyTypes> Publish<ResendCloseIntent, ()> for RankedLinkPathSendPlanner<I> {
+    fn publish(&mut self, intent: ResendCloseIntent) {
+        if self.role == LinkPathRoleKind::Draining {
+            return;
+        }
+        let due = self.close_resends.due;
+        self.close_resends.note(intent);
+        if self.close_resends.due && !due && self.role == LinkPathRoleKind::Closing {
+            self.wake();
+        }
     }
 }
 
@@ -632,6 +691,13 @@ where
         core: &'a mut Self::Core,
         cx: &mut Context<'_>,
     ) -> Poll<PlannedDatagram<Self::Plan<'a>>> {
+        if self.role == LinkPathRoleKind::Closing {
+            if core::mem::take(&mut self.close_resends.due) {
+                return Poll::Ready(PlannedDatagram::ResendClose);
+            }
+            self.waker = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
         self.intents.retain(|entry| entry.cell.is_waiting());
         core.intents.retain(|entry| entry.cell.is_waiting());
         let (packets, thresholds) = self.plan_packets(core);
@@ -662,6 +728,9 @@ where
             for entry in self.intents.drain(..) {
                 entry.cell.leave_waiting(ENDED);
             }
+        }
+        if role == LinkPathRoleKind::Draining {
+            self.close_resends = CloseResends::default();
         }
         self.wake();
     }

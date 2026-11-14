@@ -46,6 +46,10 @@
 //!    a connection error writes it into the record of why the connection
 //!    closed; the rest of the datagram is dropped, and the call yields, so
 //!    that the link paths enter closing before the next input.
+//! 5. When the link path the datagram arrived on is still closing once
+//!    its packets were received, and its close packet is sealed, the
+//!    datagram is one more the close packet may answer: a resend of it is
+//!    published on the link path's planner, which decides whether it goes.
 //!
 //! The inputs held, packets and candidates alike, are at most
 //! [`max_held_inputs`](LogicalPathReceivingLimits::max_held_inputs) for the
@@ -114,6 +118,7 @@ use super::{
     aead_usage::AeadUsage,
     amplification::AntiAmplification,
     close::{CloseReasonRecord, LocalCloseCause},
+    close_packet::ClosePacket,
     connection_ids::ConnectionIdsOf,
     dispatch::drain_link_paths,
     error::ConnectionError,
@@ -126,17 +131,20 @@ use super::{
     },
     recovery::RttOf,
     role::LinkPathRole,
+    send::SendTypes,
+    send_planning::{LinkPathPlanner, LinkPathSendPlannerOf, SendStrategyOf},
     spaces::AckObligationsOf,
     stateless_reset::StatelessResetSignal,
 };
 use crate::{
     call::{CallBundle, CallKind, NodeCallFamily, NodeLoan},
-    clock::InstantOf,
+    clock::{InstantOf, LinkIdOf},
     component::{ArgsOf, LineageOf, ReadSet},
     dispatch::FrameSetDispatch,
     error::ConnectionErrorsOf,
-    layer::{self, LogicalPath},
+    layer::{self, LogicalPath, NodeKey},
     others::OtherNodes,
+    send_strategy::{Publish, ResendCloseIntent, SendStrategy, SendStrategyTypes},
     share::{FlatMut, LineageLists, LineagePartList, NodeData},
     take::{GetAt, ReadEach, TakeEach},
 };
@@ -461,10 +469,11 @@ pub trait LogicalPathReceivingCapability: ReceiverFamily {
 /// The positions the receiving call takes by: `Ip` of its input and `Ic` of
 /// the record of why the connection closed in the logical path's lineage;
 /// those of [`receive_packet`]; `Ian` of
-/// the anti-amplification limit in the entry of a logical link; and those
-/// it drains the link paths by when a stateless reset was received: `Is` of
+/// the anti-amplification limit in the entry of a logical link; those it
+/// drains the link paths by when a stateless reset was received: `Is` of
 /// the logical path's [`StatelessResetSignal`], and those of
-/// [`drain_link_paths`].
+/// [`drain_link_paths`]; and `Icp` of a link path's close packet, `Ipl` of
+/// its planner and `Irc` of the resend among the planner's intents.
 type Positions<
     Ip,
     Ic,
@@ -483,6 +492,9 @@ type Positions<
     Hd,
     Ian,
     Icid,
+    Icp,
+    Ipl,
+    Irc,
     Is,
     Iv,
     Ima,
@@ -494,6 +506,7 @@ type Positions<
     (Ir, Ie, Ik, Hd),
     Ian,
     (Is, Iv, Ima, Irt, Il),
+    (Icp, Ipl, Irc),
 );
 
 impl<
@@ -518,6 +531,9 @@ impl<
     Hd,
     Ian,
     Icid,
+    Icp,
+    Ipl,
+    Irc,
     Is,
     Iv,
     Ima,
@@ -547,6 +563,9 @@ impl<
             Hd,
             Ian,
             Icid,
+            Icp,
+            Ipl,
+            Irc,
             Is,
             Iv,
             Ima,
@@ -580,6 +599,11 @@ where
     for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![AntiAmplification], Ian>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out: GetAt<ClosePacket, Icp>
+        + TakeEach<'s, HList![LinkPathPlanner<LinkPathSendPlannerOf<T, L>>], Ipl>,
+    SendTypes<T, L>: SendStrategyTypes,
+    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    LinkPathSendPlannerOf<T, L>: Publish<ResendCloseIntent, Irc>,
     L: ParametersOf<TransportParameterSpace>,
     TransportParameterSlots<L>: Selector<Option<MaxAckDelay>, Ima>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath:
@@ -666,6 +690,9 @@ where
                     Hd,
                     Ian,
                     Icid,
+                    Icp,
+                    Ipl,
+                    Irc,
                 >(lineage, others, datagram, dcid_len);
                 continue;
             }
@@ -765,6 +792,9 @@ where
             Hd,
             Ian,
             Icid,
+            Icp,
+            Ipl,
+            Irc,
         >(
             lineage,
             others,
@@ -802,6 +832,9 @@ fn receive_owned<
     Hd,
     Ian,
     Icid,
+    Icp,
+    Ipl,
+    Irc,
 >(
     lineage: &mut LineageOf<'v, T, L, LogicalPath>,
     others: &mut OtherNodes<'v, T, L, B>,
@@ -832,8 +865,14 @@ fn receive_owned<
     for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![AntiAmplification], Ian>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out: GetAt<ClosePacket, Icp>
+        + TakeEach<'s, HList![LinkPathPlanner<LinkPathSendPlannerOf<T, L>>], Ipl>,
+    SendTypes<T, L>: SendStrategyTypes,
+    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    LinkPathSendPlannerOf<T, L>: Publish<ResendCloseIntent, Irc>,
 {
     let size = datagram.payload().as_ref().len();
+    let link = datagram.link().id().clone();
     // the entry of a logical link no link path is over yet does not
     // exist; there is nothing to count
     if let Some(hlist_pat![limit]) =
@@ -879,6 +918,52 @@ fn receive_owned<
         if next.is_break() {
             break;
         }
+    }
+    close_packet_resend::<T, L, B, Ir, Icp, Ipl, Irc>(others, &link);
+}
+
+/// A datagram arrived over `link` for the logical path of this lend: when
+/// its link path is still closing once the datagram was received, and its
+/// close packet is sealed, the close packet may go again
+/// ([`ResendCloseIntent::DatagramReceived`]), as the link path's planner
+/// decides. Each datagram counts once, whatever its packets were.
+fn close_packet_resend<T, L, B, Ir, Icp, Ipl, Irc>(
+    others: &mut OtherNodes<'_, T, L, B>,
+    link: &LinkIdOf<T>,
+) where
+    T: Choices,
+    L: LineagePartList<T>,
+    B: CallBundle,
+    SendTypes<T, L>: SendStrategyTypes,
+    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    LinkPathSendPlannerOf<T, L>: Publish<ResendCloseIntent, Irc>,
+    for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out: GetAt<LinkPathRole<InstantOf<T>>, Ir>
+        + GetAt<ClosePacket, Icp>
+        + TakeEach<'s, HList![LinkPathPlanner<LinkPathSendPlannerOf<T, L>>], Ipl>,
+{
+    let NodeKey::LogicalPath(path) = others.here().clone() else {
+        unreachable!("a logical path's lend carries its key")
+    };
+    let key = NodeKey::LinkPath(path.clone(), link.clone());
+    let mut closing = false;
+    others.each_link_path_read::<LinkPathRole<InstantOf<T>>, Ir>(|each, role| {
+        closing |= *each == key && matches!(role, LinkPathRole::Closing(_));
+    });
+    let mut sealed = false;
+    others.each_link_path_read::<ClosePacket, Icp>(|each, packet| {
+        sealed |= *each == key && packet.is_sealed();
+    });
+    if !(closing && sealed) {
+        return;
+    }
+    if let Some(hlist_pat![planner]) =
+        others.link_path::<HList![LinkPathPlanner<LinkPathSendPlannerOf<T, L>>], Ipl>(&path, link)
+    {
+        Publish::<ResendCloseIntent, Irc>::publish(
+            planner.planner_mut(),
+            ResendCloseIntent::DatagramReceived,
+        );
     }
 }
 
@@ -1112,6 +1197,9 @@ impl<
     Hd,
     Ian,
     Icid,
+    Icp,
+    Ipl,
+    Irc,
     Is,
     Iv,
     Ima,
@@ -1140,6 +1228,9 @@ impl<
             Hd,
             Ian,
             Icid,
+            Icp,
+            Ipl,
+            Irc,
             Is,
             Iv,
             Ima,
@@ -1171,6 +1262,11 @@ where
     for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![AntiAmplification], Ian>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out: GetAt<ClosePacket, Icp>
+        + TakeEach<'s, HList![LinkPathPlanner<LinkPathSendPlannerOf<T, L>>], Ipl>,
+    SendTypes<T, L>: SendStrategyTypes,
+    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    LinkPathSendPlannerOf<T, L>: Publish<ResendCloseIntent, Irc>,
     L: ParametersOf<TransportParameterSpace>,
     TransportParameterSlots<L>: Selector<Option<MaxAckDelay>, Ima>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath:
@@ -1197,6 +1293,9 @@ where
         Hd,
         Ian,
         Icid,
+        Icp,
+        Ipl,
+        Irc,
         Is,
         Iv,
         Ima,
@@ -1228,6 +1327,9 @@ where
                 Hd,
                 Ian,
                 Icid,
+                Icp,
+                Ipl,
+                Irc,
                 Is,
                 Iv,
                 Ima,

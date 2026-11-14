@@ -15,6 +15,7 @@ use core::{error::Error, fmt};
 use sakuya_stream::connection::{
     ApplicationImmediateClose, CloseReason, ImmediateClose, TransportImmediateClose,
 };
+use sakuya_tls::{alert::CallsForAlert, engine::HandshakeError};
 use sakuya_wire::{
     parts::{CNil, Coproduct, PartsError},
     v1::{
@@ -151,6 +152,38 @@ impl TransportClose for CNil {
     }
     fn frame_type(&self) -> Option<VarInt> {
         match *self {}
+    }
+}
+
+/// The error of a part that has none never closes anything.
+impl TransportClose for core::convert::Infallible {
+    fn code(&self) -> TransportErrorCode {
+        match *self {}
+    }
+    fn frame_type(&self) -> Option<VarInt> {
+        match *self {}
+    }
+}
+
+/// A failed handshake closes with `0x0100` plus the alert it calls for
+/// (RFC 9001 §4.8), with PROTOCOL_VIOLATION when the peer broke a rule of
+/// TLS in QUIC, and with the code and frame type of the connection's error
+/// when a receiver failed. Its reason phrase is empty, whichever the
+/// failure: the responses to the failures after the protection is removed
+/// do not tell them apart.
+impl<F: CallsForAlert, E: TransportClose> TransportClose for HandshakeError<F, E> {
+    fn code(&self) -> TransportErrorCode {
+        match self {
+            Self::Alert { source } => TransportErrorCode::crypto_error(source.alert().get()),
+            Self::ProtocolViolation { .. } => TransportErrorCode::PROTOCOL_VIOLATION,
+            Self::Transport { source } => source.code(),
+        }
+    }
+    fn frame_type(&self) -> Option<VarInt> {
+        match self {
+            Self::Alert { .. } | Self::ProtocolViolation { .. } => None,
+            Self::Transport { source } => source.frame_type(),
+        }
     }
 }
 

@@ -204,6 +204,7 @@ fn reset() {
     ROUTING.with(|r| r.borrow_mut().take());
     LAST_STATUS.with(|l| l.borrow_mut().take());
     common::reset_links();
+    common::reset_close_policy();
 }
 
 /// A datagram of the tests, as it arrived.
@@ -334,6 +335,7 @@ impl v1::Choices for ClientMine {
         sakuya_connection::send_strategy::ranked::RankedSendStrategy<I>;
     type DestinationConnectionIds = common::TestDestinationConnectionIds;
     type ResetTokenRegistry = common::TestResetTokenRegistry;
+    type ImmediateClosePolicy = common::TestImmediateClosePolicy;
 }
 
 /// The choices of a server whose recovery factory logs the other link
@@ -358,6 +360,7 @@ impl v1::Choices for SpyMine {
         sakuya_connection::send_strategy::ranked::RankedSendStrategy<I>;
     type DestinationConnectionIds = common::TestDestinationConnectionIds;
     type ResetTokenRegistry = common::TestResetTokenRegistry;
+    type ImmediateClosePolicy = common::TestImmediateClosePolicy;
 }
 
 /// A recovery factory that makes what sakuya's makes and logs, when it
@@ -889,6 +892,11 @@ mod probe {
         /// logical link, as the sending call will, lending it each link
         /// path's registrar of reset tokens.
         UseConnectionId(LinkId<(), ()>, u64),
+        /// Log which halves of the keys of each level are there.
+        InspectKeys,
+        /// Make the link path over the logical link active, as path
+        /// validation will.
+        Activate(LinkId<(), ()>),
     }
 
     /// In a logical path: does its steps at their instants.
@@ -933,6 +941,7 @@ mod probe {
         Icid,
         Isj,
         Irg,
+        Ilr,
     >
         DataComponent<
             T,
@@ -944,7 +953,7 @@ mod probe {
                 (Ij, Im, Ia, It, Iu, Ikp, Icid),
                 (Ir, Ie, Ik, Hd),
                 (Ic, Icr),
-                (Ip, Ian, Isj, Irg),
+                (Ip, Ian, Isj, Irg, Ilr),
             ),
         > for PacketFeeder
     where
@@ -990,7 +999,7 @@ mod probe {
                     >
                 ],
                 Irg,
-            >,
+            > + TakeEach<'s, HList![LinkPathRole<Duration>], Ilr>,
     {
         fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::LogicalPath>) -> Option<Duration> {
             lineage
@@ -1172,6 +1181,31 @@ mod probe {
                         );
                     });
                     log(format!("used {sequence}"));
+                }
+                PacketStep::InspectKeys => {
+                    let halves = |send: bool, receive: bool| match (send, receive) {
+                        (true, true) => "both",
+                        (true, false) => "send",
+                        (false, true) => "receive",
+                        (false, false) => "none",
+                    };
+                    let initial = lineage.get::<InitialKeys<RingBackend>, Ii>();
+                    let handshake = lineage.get::<HandshakeKeys<RingBackend>, Ih>();
+                    let one_rtt = lineage.get::<OneRttKeys<RingBackend, Duration>, Io>();
+                    log(format!(
+                        "keys: Initial {}, Handshake {}, 1-RTT {}",
+                        halves(initial.send().is_some(), initial.receive().is_some()),
+                        halves(handshake.send().is_some(), handshake.receive().is_some()),
+                        halves(one_rtt.send().is_some(), one_rtt.receive().is_some()),
+                    ));
+                }
+                PacketStep::Activate(link) => {
+                    let NodeKey::LogicalPath(path) = others.here().clone() else {
+                        unreachable!("a logical path's lend carries its key")
+                    };
+                    let hlist_pat![role] =
+                        others.link_path::<HList![LinkPathRole<Duration>], Ilr>(&path, &link)?;
+                    *role = LinkPathRole::Active;
                 }
                 PacketStep::Inspect => {
                     let mut read = Vec::new();
@@ -1863,6 +1897,7 @@ where
             Receiver = TestReceiver,
             DestinationConnectionIds = common::TestDestinationConnectionIds,
             ResetTokenRegistry = common::TestResetTokenRegistry,
+            ImmediateClosePolicy = common::TestImmediateClosePolicy,
         >,
     T::Side: SideCapacities,
     T::Recovery<LinkId<(), ()>>: RecoveryFactory<TestLink, Config = NewRenoRecoveryFactoryConfig>,
@@ -1899,6 +1934,7 @@ where
         first_local_connection_id: server_cid(),
         max_datagrams_per_send: NonZeroUsize::new(MAX_PER_SEND.with(Cell::get))
             .expect("the tests send at least one datagram at once"),
+        immediate_close_policy: common::TestImmediateClosePolicy,
     }
 }
 
@@ -6025,5 +6061,428 @@ fn the_sending_call_closes_with_aead_limit_reached_when_only_the_closing_packet_
     assert!(
         sent.iter().all(|(_, datagram)| !short_header(datagram)),
         "no 1-RTT packet goes out: {sent:?}"
+    );
+}
+
+// ---- closing ----
+
+/// A long header packet of the server at the start of `datagram`, opened
+/// with `keys`: its type bits and the packet; an Initial packet has an
+/// empty token.
+fn open_long_sent(datagram: &[u8], keys: &DirectionKeys<RingBackend>) -> (u8, SentInitial) {
+    let type_bits = (datagram[0] >> 4) & 0b11;
+    let mut at = 5;
+    let dcid_len = usize::from(datagram[at]);
+    let dcid = datagram[at + 1..at + 1 + dcid_len].to_vec();
+    at += 1 + dcid_len;
+    let scid_len = usize::from(datagram[at]);
+    let scid = datagram[at + 1..at + 1 + scid_len].to_vec();
+    at += 1 + scid_len;
+    if type_bits == INITIAL {
+        assert_eq!(datagram[at], 0, "an empty token");
+        at += 1;
+    }
+    let (length, width) = read_var_int(&datagram[at..]);
+    let pn_offset = at + width;
+    let len = pn_offset + length;
+    let mut packet = datagram[..len].to_vec();
+    let truncated = keys.header.remove(&mut packet, pn_offset).unwrap();
+    let header_len = pn_offset + truncated.encoded_len().get();
+    let number = truncated.decode(None);
+    let payload = keys
+        .packet
+        .open(number, &mut packet, header_len)
+        .unwrap()
+        .to_vec();
+    (
+        type_bits,
+        SentInitial {
+            dcid,
+            scid,
+            number: number.get(),
+            payload,
+            len,
+        },
+    )
+}
+
+/// The 1-RTT packet `packet` of the server, to an 8-byte connection ID and
+/// sealed with the first generation of its keys, opened: its connection ID,
+/// its packet number and its payload.
+fn open_sent_one_rtt(packet: &[u8]) -> (Vec<u8>, u64, Vec<u8>) {
+    assert!(short_header(packet), "a 1-RTT packet: {packet:?}");
+    let header = HeaderProtectionKey::derive(&RingBackend, ONE_RTT_AEAD, &server_secret());
+    let keys = KeyGeneration::first(&RingBackend, ONE_RTT_AEAD, server_secret());
+    let mut packet = packet.to_vec();
+    let pn_offset = 1 + 8;
+    let truncated = header.remove(&mut packet, pn_offset).unwrap();
+    let header_len = pn_offset + truncated.encoded_len().get();
+    let number = truncated.decode(None);
+    let payload = keys
+        .packet()
+        .open(number, &mut packet, header_len)
+        .unwrap()
+        .to_vec();
+    (packet[1..pn_offset].to_vec(), number.get(), payload)
+}
+
+/// The client's first Initial packet, numbered `number`, with a PING, in a
+/// datagram of 1200 bytes.
+fn client_initial(number: u64) -> BytesMut {
+    padded(
+        &[],
+        |payload| initial_from(&CLIENT_SCID, number, payload),
+        &ping(),
+    )
+}
+
+/// Poll `connection`, which stays pending, at each millisecond of
+/// `millis` until it is no longer woken at that instant, so that what a
+/// deadline changed reaches the calls, and take the log.
+fn settle<F: Future + Unpin>(
+    connection: &mut F,
+    millis: core::ops::RangeInclusive<u64>,
+) -> Vec<String> {
+    let outer = Outer::new();
+    for at in millis {
+        advance_to(ms(at));
+        for _ in 0..16 {
+            let wakes = outer.wakes();
+            assert!(outer.poll(connection).is_pending());
+            if outer.wakes() == wakes {
+                break;
+            }
+        }
+    }
+    take_log()
+}
+
+/// The events the strategy recorded since the last call that publish a
+/// resend of the close packet.
+fn resend_events() -> Vec<String> {
+    strategy_events("path ")
+        .into_iter()
+        .filter(|event| event.contains("publish Sealed") || event.contains("DatagramReceived"))
+        .collect()
+}
+
+#[test]
+fn a_server_closing_in_the_handshake_sends_its_close_in_initial_and_handshake_packets() {
+    use probe::PacketStep::{InspectKeys, InstallHandshakeKeys};
+    reset();
+    let first = link();
+    feed_packets([(ms(6), InstallHandshakeKeys), (ms(11), InspectKeys)]);
+    CLOSER.with(|c| c.borrow_mut().push_back((ms(10), probe::CloserStep::Close)));
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    deliver(client_initial(0), &first, ms(5));
+    let _ = settle(&mut connection, 5..=9);
+    assert_eq!(common::take_sent().len(), 1, "the ACK");
+    assert_eq!(common::take_adjusted_levels(), []);
+    let log = settle(&mut connection, 10..=11);
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let (at, datagram) = &sent[0];
+    assert_eq!(*at, ms(10));
+    // the probe's Handshake keys seal with the server's Initial secret
+    let (kind, initial) = open_long_sent(datagram, &server_keys());
+    assert_eq!(kind, INITIAL);
+    assert_eq!(
+        (initial.dcid.as_slice(), initial.scid.as_slice()),
+        (&CLIENT_SCID[..], &SERVER_CID[..])
+    );
+    assert_eq!(initial.number, 1, "the next after the ACK");
+    // an application close goes as APPLICATION_ERROR without its reason
+    // phrase, and the frame type 0
+    assert_eq!(initial.payload, [0x1c, 0x0c, 0x00, 0x00]);
+    let (kind, handshake) = open_long_sent(&datagram[initial.len..], &server_keys());
+    assert_eq!(kind, HANDSHAKE);
+    assert_eq!(handshake.number, 0);
+    assert_eq!(handshake.payload, [0x1c, 0x0c, 0x00, 0x00]);
+    assert_eq!(
+        initial.len + handshake.len,
+        datagram.len(),
+        "one datagram of both"
+    );
+    assert_eq!(
+        common::take_adjusted_levels(),
+        [
+            sakuya_wire::v1::encryption_level::EncryptionLevel::Initial,
+            sakuya_wire::v1::encryption_level::EncryptionLevel::Handshake
+        ]
+    );
+    // once sealed, the keys keep only what reads the peer's packets
+    assert!(
+        log.iter()
+            .any(|line| line == "keys: Initial receive, Handshake receive, 1-RTT none"),
+        "{log:?}"
+    );
+    assert!(
+        log.iter().any(|line| line == "initial keys live: false"),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn a_server_closing_once_confirmed_sends_its_close_in_a_one_rtt_packet_alone() {
+    use probe::PacketStep::{InspectKeys, InstallHandshakeKeys, InstallOneRttKeys};
+    reset();
+    let first = link();
+    feed([(ms(8), probe::Step::Confirm)]);
+    feed_packets([
+        (ms(6), InstallHandshakeKeys),
+        (ms(7), InstallOneRttKeys),
+        (ms(11), InspectKeys),
+    ]);
+    CLOSER.with(|c| c.borrow_mut().push_back((ms(10), probe::CloserStep::Close)));
+    // longer than a datagram holds, of characters two bytes long
+    common::set_close_phrase(Some(bytes::Bytes::from("é".repeat(1000))));
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    deliver(client_initial(0), &first, ms(5));
+    let _ = settle(&mut connection, 5..=9);
+    common::take_sent();
+    let log = settle(&mut connection, 10..=11);
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let (_, datagram) = &sent[0];
+    let (dcid, number, payload) = open_sent_one_rtt(datagram);
+    assert_eq!(dcid, CLIENT_SCID);
+    assert_eq!(number, 0);
+    // the application's close with its code 7, as the policy gave it
+    assert_eq!(payload[..2], [0x1d, 0x07]);
+    let (len, width) = read_var_int(&payload[2..]);
+    let phrase = &payload[2 + width..];
+    assert_eq!(phrase.len(), len, "nothing after the frame");
+    // cut to what the datagram holds, at a character boundary
+    let phrase = core::str::from_utf8(phrase).expect("cut at a character boundary");
+    assert!(phrase.chars().all(|c| c == 'é'));
+    assert!(
+        (MIN_DATAGRAM_SIZE - 1..=MIN_DATAGRAM_SIZE).contains(&datagram.len()),
+        "{}",
+        datagram.len()
+    );
+    assert_eq!(
+        common::take_adjusted_levels(),
+        [sakuya_wire::v1::encryption_level::EncryptionLevel::OneRtt]
+    );
+    assert!(
+        log.iter()
+            .any(|line| line == "keys: Initial receive, Handshake receive, 1-RTT receive"),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn a_server_closing_before_it_knows_the_client_s_connection_id_seals_once_it_does() {
+    use probe::PacketStep::InspectKeys;
+    reset();
+    let first = link();
+    feed_packets([(ms(6), InspectKeys), (ms(21), InspectKeys)]);
+    CLOSER.with(|c| c.borrow_mut().push_back((ms(5), probe::CloserStep::Close)));
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    take_log();
+    take_strategy_events();
+    let log = settle(&mut connection, 5..=19);
+    assert_eq!(common::take_sent(), []);
+    assert_eq!(resend_events(), [] as [&str; 0]);
+    // nothing sealed: the keys keep their sending half
+    assert!(
+        log.iter()
+            .any(|line| line == "keys: Initial both, Handshake none, 1-RTT none"),
+        "{log:?}"
+    );
+    // the client's first Initial packet gives its connection ID while the
+    // link path closes
+    deliver(client_initial(0), &first, ms(20));
+    let log = settle(&mut connection, 20..=21);
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let (_, initial) = open_long_sent(&sent[0].1, &server_keys());
+    assert_eq!(initial.dcid, CLIENT_SCID);
+    assert_eq!(initial.number, 0, "nothing was sent before");
+    assert_eq!(initial.payload, [0x1c, 0x0c, 0x00, 0x00]);
+    // the datagram that gave the connection ID came before the close packet
+    // was sealed: it is not one the close packet answers
+    assert_eq!(resend_events(), ["path 0: publish Sealed"]);
+    assert!(
+        log.iter()
+            .any(|line| line == "keys: Initial receive, Handshake none, 1-RTT none"),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn a_closing_link_path_answers_the_first_second_fourth_and_eighth_datagram() {
+    reset();
+    let first = link();
+    CLOSER.with(|c| c.borrow_mut().push_back((ms(10), probe::CloserStep::Close)));
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    deliver(client_initial(0), &first, ms(5));
+    let _ = settle(&mut connection, 5..=10);
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 2, "the ACK and the close packet: {sent:?}");
+    let close = sent[1].1.clone();
+    let mut answered = Vec::new();
+    for datagram in 1..=9 {
+        let at = 10 + datagram;
+        deliver(client_initial(datagram), &first, ms(at));
+        let _ = settle(&mut connection, at..=at);
+        let sent = common::take_sent();
+        if !sent.is_empty() {
+            // the close packet as it was sealed
+            assert_eq!(sent, [(ms(at), close.clone())]);
+            answered.push(datagram);
+        }
+    }
+    assert_eq!(answered, [1, 2, 4, 8]);
+}
+
+#[test]
+fn the_anti_amplification_limit_holds_back_a_resend_of_the_close_packet() {
+    reset();
+    let first = link();
+    common::set_close_phrase(Some(bytes::Bytes::from(vec![b'a'; 2000])));
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    // HANDSHAKE_DONE in an Initial packet is a connection error: a close of
+    // type 0x1c, which keeps the reason phrase the policy gives
+    let violation = padded(
+        &[],
+        |payload| initial_from(&CLIENT_SCID, 0, payload),
+        &[0x1e],
+    );
+    deliver(violation, &first, ms(5));
+    let _ = settle(&mut connection, 5..=5);
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let close = sent[0].1.clone();
+    // as long as a datagram is: 2400 bytes of credit for the 1200 received
+    assert!(close.len() > MIN_DATAGRAM_SIZE - 8, "{}", close.len());
+    assert!(close.len() <= MIN_DATAGRAM_SIZE);
+    let mut answered = Vec::new();
+    for datagram in 1..=8 {
+        let at = 5 + datagram;
+        // short datagrams add little credit; the fifth is a long one
+        let bytes = if datagram == 5 {
+            client_initial(datagram)
+        } else {
+            one_rtt_packet()
+        };
+        deliver(bytes, &first, ms(at));
+        let _ = settle(&mut connection, at..=at);
+        if !common::take_sent().is_empty() {
+            answered.push(datagram);
+        }
+    }
+    // the first goes on what the close packet left; the second and the
+    // fourth find too little credit, and do not wait for it; the eighth
+    // goes on what the fifth brought
+    assert_eq!(answered, [1, 8]);
+}
+
+#[test]
+fn every_closing_link_path_seals_its_own_close_packet_before_the_keys_lose_their_sending_half() {
+    use probe::PacketStep::{Activate, InspectKeys, InstallOneRttKeys, Receive};
+    reset();
+    let first = link();
+    let second = link();
+    ADD.with(|a| a.set(Some((ms(5), second.clone()))));
+    feed_packets([
+        (
+            ms(4),
+            Receive(received(
+                initial_from(&CLIENT_SCID, 0, &ping()),
+                &first,
+                ms(4),
+            )),
+        ),
+        (ms(6), InstallOneRttKeys),
+        (
+            ms(7),
+            Receive(received(
+                one_rtt_packet_of(0, 0, &new_connection_id(1)),
+                &first,
+                ms(7),
+            )),
+        ),
+        (ms(8), Activate(second.clone())),
+        (ms(12), InspectKeys),
+    ]);
+    CLOSER.with(|c| c.borrow_mut().push_back((ms(10), probe::CloserStep::Close)));
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    let _ = settle(&mut connection, 4..=8);
+    // the second logical link's address is not validated: what arrives
+    // over it gives the credit its close packet goes on
+    deliver(
+        padded(&[], |payload| one_rtt_packet_of(0, 1, payload), &ping()),
+        &second,
+        ms(9),
+    );
+    let _ = settle(&mut connection, 9..=9);
+    common::take_sent();
+    let log = settle(&mut connection, 10..=12);
+    let sent = common::take_sent();
+    assert_eq!(
+        sent.len(),
+        2,
+        "one close packet over each link path: {sent:?}"
+    );
+    let mut initial_numbers = Vec::new();
+    let mut one_rtt_numbers = Vec::new();
+    let mut dcids = Vec::new();
+    for (_, datagram) in &sent {
+        // the second link path sealed with the Initial keys too
+        let (kind, initial) = open_long_sent(datagram, &server_keys());
+        assert_eq!(kind, INITIAL);
+        let (dcid, number, payload) = open_sent_one_rtt(&datagram[initial.len..]);
+        assert_eq!(payload, [0x1d, 0x07, 0x00]);
+        assert_eq!(initial.dcid, dcid);
+        initial_numbers.push(initial.number);
+        one_rtt_numbers.push(number);
+        dcids.push(dcid);
+    }
+    initial_numbers.sort_unstable();
+    one_rtt_numbers.sort_unstable();
+    dcids.sort_unstable();
+    // no packet number protects two packets
+    assert_eq!(initial_numbers, [1, 2]);
+    assert_eq!(one_rtt_numbers[1], one_rtt_numbers[0] + 1);
+    assert_eq!(dcids, [vec![0x11; 8], CLIENT_SCID.to_vec()]);
+    assert_eq!(
+        log.iter()
+            .filter(|line| *line == "initial keys live: false")
+            .count(),
+        1,
+        "{log:?}"
+    );
+    assert!(
+        log.iter()
+            .any(|line| line == "keys: Initial receive, Handshake none, 1-RTT receive"),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn a_draining_link_path_seals_nothing() {
+    use probe::PacketStep::InspectKeys;
+    reset();
+    let first = link();
+    feed_packets([(ms(8), InspectKeys)]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    deliver(client_initial(0), &first, ms(5));
+    let _ = settle(&mut connection, 5..=6);
+    assert_eq!(common::take_sent().len(), 1, "the ACK");
+    take_strategy_events();
+    let close = padded(
+        &[],
+        |payload| initial_from(&CLIENT_SCID, 1, payload),
+        &[0x1c, 0x00, 0x00, 0x00],
+    );
+    deliver(close, &first, ms(7));
+    let log = settle(&mut connection, 7..=8);
+    assert_eq!(common::take_sent(), []);
+    assert_eq!(resend_events(), [] as [&str; 0]);
+    assert!(
+        log.iter()
+            .any(|line| line == "keys: Initial none, Handshake none, 1-RTT none"),
+        "{log:?}"
     );
 }

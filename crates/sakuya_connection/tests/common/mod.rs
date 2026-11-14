@@ -33,6 +33,8 @@ thread_local! {
     static RELEASED: Cell<bool> = const { Cell::new(false) };
     static BATCHES: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static CEILINGS: RefCell<Vec<(TestLinkId, LinkCeiling)>> = const { RefCell::new(Vec::new()) };
+    static CLOSE_PHRASE: RefCell<Option<Bytes>> = const { RefCell::new(None) };
+    static ADJUSTED: RefCell<Vec<sakuya_wire::v1::encryption_level::EncryptionLevel>> = const { RefCell::new(Vec::new()) };
 }
 
 /// The test's clock: time moves only when the test says so.
@@ -321,6 +323,50 @@ impl sakuya_connection::v1::Choices for Mine {
         strategy::EventLoggingSendStrategy<I>;
     type DestinationConnectionIds = TestDestinationConnectionIds;
     type ResetTokenRegistry = TestResetTokenRegistry;
+    type ImmediateClosePolicy = TestImmediateClosePolicy;
+}
+
+/// The close policy of the tests' compositions: it notes the level of each
+/// close it adjusts, and gives the close the reason phrase
+/// [`set_close_phrase`] set, if any.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TestImmediateClosePolicy;
+
+impl<C> sakuya_connection::v1::close::ImmediateClosePolicy<C> for TestImmediateClosePolicy {
+    fn adjust(
+        &mut self,
+        _: &C,
+        level: sakuya_wire::v1::encryption_level::EncryptionLevel,
+        mut close: sakuya_stream::connection::ImmediateClose,
+    ) -> sakuya_stream::connection::ImmediateClose {
+        use sakuya_stream::connection::ImmediateClose;
+        ADJUSTED.with(|adjusted| adjusted.borrow_mut().push(level));
+        if let Some(phrase) = CLOSE_PHRASE.with(|phrase| phrase.borrow().clone()) {
+            match &mut close {
+                ImmediateClose::Transport(close) => close.reason_phrase = phrase,
+                ImmediateClose::Application(close) => close.reason_phrase = phrase,
+            }
+        }
+        close
+    }
+}
+
+/// The reason phrase the tests' close policy gives every close from now
+/// on; `None` leaves the one the error gives.
+pub fn set_close_phrase(phrase: Option<Bytes>) {
+    CLOSE_PHRASE.with(|p| *p.borrow_mut() = phrase);
+}
+
+/// The levels the tests' close policy adjusted a close for since the last
+/// call, in order.
+pub fn take_adjusted_levels() -> Vec<sakuya_wire::v1::encryption_level::EncryptionLevel> {
+    ADJUSTED.with(|adjusted| std::mem::take(&mut *adjusted.borrow_mut()))
+}
+
+/// Forget what the tests' close policy was told and noted.
+pub fn reset_close_policy() {
+    set_close_phrase(None);
+    take_adjusted_levels();
 }
 
 /// The destination connection ID strategy of the tests' compositions.

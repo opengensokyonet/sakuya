@@ -396,3 +396,61 @@ fn content_of_a_packet_the_link_path_cannot_send_holds_no_place() {
     });
     assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
 }
+
+/// Whether the planner gives the close packet to send again now.
+fn resends(planner: &mut Planner, core: &mut Core, waker: &Waker) -> bool {
+    match planner.poll_plan(core, &mut Context::from_waker(waker)) {
+        Poll::Ready(PlannedDatagram::ResendClose) => true,
+        Poll::Ready(PlannedDatagram::Fill(_)) => panic!("a closing link path fills nothing"),
+        Poll::Pending => false,
+    }
+}
+
+#[test]
+fn a_closing_link_path_resends_once_sealed_and_for_powers_of_two_of_datagrams() {
+    let (mut core, mut planner) = setup(&ALL, 12_000);
+    planner.role_changed(&mut core, LinkPathRoleKind::Closing);
+    let (count, waker) = waker();
+    assert!(!resends(&mut planner, &mut core, &waker), "nothing sealed");
+    planner.publish(ResendCloseIntent::Sealed);
+    assert_eq!(count.0.load(Ordering::SeqCst), 1, "woken");
+    assert!(resends(&mut planner, &mut core, &waker));
+    assert!(!resends(&mut planner, &mut core, &waker), "once");
+    let mut answered = Vec::new();
+    for datagram in 1..=17 {
+        planner.publish(ResendCloseIntent::DatagramReceived);
+        if resends(&mut planner, &mut core, &waker) {
+            answered.push(datagram);
+        }
+    }
+    assert_eq!(answered, [1, 2, 4, 8, 16]);
+    // two datagrams before the call asks again are one resend
+    let (_, mut planner) = setup(&ALL, 12_000);
+    planner.role_changed(&mut core, LinkPathRoleKind::Closing);
+    planner.publish(ResendCloseIntent::DatagramReceived);
+    planner.publish(ResendCloseIntent::DatagramReceived);
+    assert!(resends(&mut planner, &mut core, &waker));
+    assert!(!resends(&mut planner, &mut core, &waker));
+}
+
+#[test]
+fn a_resend_published_before_the_closing_role_waits_for_it() {
+    let (mut core, mut planner) = setup(&ALL, 12_000);
+    planner.publish(ResendCloseIntent::Sealed);
+    let (count, waker) = waker();
+    pending(&mut planner, &mut core, &waker);
+    planner.role_changed(&mut core, LinkPathRoleKind::Closing);
+    assert_eq!(count.0.load(Ordering::SeqCst), 1, "woken by the role");
+    assert!(resends(&mut planner, &mut core, &waker));
+}
+
+#[test]
+fn a_draining_link_path_resends_nothing() {
+    let (mut core, mut planner) = setup(&ALL, 12_000);
+    planner.role_changed(&mut core, LinkPathRoleKind::Closing);
+    planner.publish(ResendCloseIntent::Sealed);
+    planner.role_changed(&mut core, LinkPathRoleKind::Draining);
+    planner.publish(ResendCloseIntent::DatagramReceived);
+    let (_, waker) = waker();
+    assert!(!resends(&mut planner, &mut core, &waker));
+}

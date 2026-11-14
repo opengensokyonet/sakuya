@@ -7,7 +7,8 @@
 //! with its size and the sealed packet of each packet number space it
 //! carries ([`BatchedPacket`]). Each entry is settled once: taken out when
 //! the link accepts it, when it is given up, or when it carries a level
-//! whose keys were discarded before it was handed over.
+//! whose keys were discarded before it was handed over. A close packet
+//! sent again is an entry without packets: settling it touches nothing.
 //!
 //! A [`DatagramWriter`] writes one datagram into the batch's buffer, one
 //! packet after the other ([`PacketWriter`]). It knows the datagram's
@@ -170,6 +171,26 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
     /// The entries of the waiting datagrams, in order.
     pub fn entries(&self) -> impl Iterator<Item = &BatchedDatagram<Si, Sh, Sa, C>> {
         self.datagrams.iter()
+    }
+
+    /// Add `payload`, the datagram of a sealed close packet sent again, at
+    /// the end: it carries no packet of the send journals and counts
+    /// nothing in flight, and what it was charged with is the caller's.
+    ///
+    /// The batch must not be full.
+    pub fn push_close_packet(&mut self, payload: Bytes) {
+        debug_assert!(!self.is_full(), "a full batch takes no more datagrams");
+        self.datagrams.push(BatchedDatagram {
+            len: payload.len(),
+            initial_goes_out: false,
+            initial: None,
+            handshake: None,
+            application_data: None,
+        });
+        self.outgoing.push(OutgoingDatagram {
+            payload,
+            ecn: EcnMarking::NotEct,
+        });
     }
 
     /// Take out the first `count` datagrams, or all if fewer wait: the

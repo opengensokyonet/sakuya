@@ -26,15 +26,17 @@
 //! one packet after the other ([`packet_writer`]), with the frames of
 //! version 1 ([`frames`]), as its send planner plans them, and hands the
 //! batch to the link. Once
-//! a reason for closing is written, the link paths close, their recovery
-//! layers and the established layer end, and the connection ends with its
-//! last link path; a link path that ends hands back what it had not
-//! settled as lost.
+//! a reason for closing is written, the link paths close, each sealing its
+//! close packet ([`close_packet`]) with the connection's close policy, and
+//! their recovery layers and the established layer end; the keys keep only
+//! their receiving half, and the connection ends with its last link path.
+//! A link path that ends hands back what it had not settled as lost.
 
 pub mod ack;
 pub mod aead_usage;
 pub mod amplification;
 pub mod close;
+pub mod close_packet;
 pub mod confirmation;
 pub mod connection_ids;
 pub mod crypto;
@@ -111,6 +113,7 @@ use self::{
     aead_usage::AeadUsage,
     amplification::{AddressValidation, AntiAmplification, AntiAmplificationFactor},
     close::{ApplicationClose, CloseReasonRecord, LocalCloseCause},
+    close_packet::{ClosePacket, ConnectionImmediateClosePolicy},
     confirmation::HandshakeConfirmation,
     connection_ids::{
         ConnectionIdsOf, ConnectionResetTokenRegistry, DestinationConnectionIdConfig,
@@ -208,6 +211,11 @@ pub trait Choices: ConnectionChoices {
         + 'static;
     /// The application's own error type for closing the connection.
     type ApplicationError: ApplicationClose + 'static;
+    /// What adjusts the close this endpoint sends at each encryption level:
+    /// an [`ImmediateClosePolicy`](close::ImmediateClosePolicy) of this
+    /// endpoint's reason for closing, [`CloseCauseOf`] for the composition's
+    /// list of parts. The connection keeps the one it was made with.
+    type ImmediateClosePolicy: Clone + 'static;
     /// How the handshake engine of this side fails with an alert: the
     /// failure that [`HandshakeError`] holds for it.
     ///
@@ -362,6 +370,8 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
     /// How many datagrams the sending call of a link path hands to its link
     /// at once at most.
     pub max_datagrams_per_send: NonZeroUsize,
+    /// What adjusts the close this endpoint sends at each encryption level.
+    pub immediate_close_policy: T::ImmediateClosePolicy,
 }
 
 impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + ConnectionErrorsOf>
@@ -393,6 +403,7 @@ where
         ConnectionResetTokenRegistry<T::ResetTokenRegistry>,
         FirstLocalConnectionId,
         LinkPathSendingLimits,
+        ConnectionImmediateClosePolicy<T::ImmediateClosePolicy>,
     ];
     type Calls = HNil;
     type Args = ConnectionArgs<T, L>;
@@ -434,7 +445,8 @@ where
     type Data = HList![
         LinkPathPlanner<LinkPathSendPlannerOf<T, L>>,
         LinkPathResetTokenRegistrar<ResetTokenRegistrarOf<T>>,
-        LinkPathRole<InstantOf<T>>
+        LinkPathRole<InstantOf<T>>,
+        ClosePacket,
     ];
     type Calls = HList![LinkPathSendingKind];
 }
@@ -612,51 +624,127 @@ where
 /// packets count in it.
 impl PassiveDataComponent for AeadUsage {}
 
-macro_rules! discarded_when_draining {
+/// What the keys of a level do as the connection closes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClosingKeys {
+    /// They stay as they are: the connection is not closing, a link path
+    /// has not entered `Closing` or `Draining` yet, or a closing one has
+    /// not sealed its close packet.
+    Kept,
+    /// Only their receiving half stays, to see whether the peer closes too
+    /// (RFC 9000 §10.2.1); a level without one is discarded.
+    ReceiveOnly,
+    /// They are discarded: every link path is draining (§10.2.2).
+    Discarded,
+}
+
+/// What the keys of a level do, by whether the reason for closing is
+/// `written` and by the roles and close packets of the link paths: with
+/// every link path draining they are discarded; with the reason written and
+/// every link path closing or draining, the closing ones with their close
+/// packets sealed, only the receiving half stays. Requiring a role of every
+/// link path keeps a key that is reread before the roles from losing its
+/// sending half while no link path has sealed yet.
+fn closing_keys<T, L, B, J, Jc>(written: bool, others: &mut OtherNodes<'_, T, L, B>) -> ClosingKeys
+where
+    T: Choices,
+    L: LineagePartList<T>,
+    B: CallBundle,
+    for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        GetAt<LinkPathRole<InstantOf<T>>, J> + GetAt<ClosePacket, Jc>,
+{
+    let (mut any, mut all_draining, mut all_ending) = (false, true, true);
+    let mut closing = Vec::new();
+    others.each_link_path_read::<LinkPathRole<InstantOf<T>>, J>(|key, role| {
+        any = true;
+        all_draining &= matches!(role, LinkPathRole::Draining(_));
+        match role {
+            LinkPathRole::Closing(_) => closing.push(key.clone()),
+            LinkPathRole::Draining(_) => {}
+            LinkPathRole::Candidate | LinkPathRole::Active | LinkPathRole::Settling(_) => {
+                all_ending = false;
+            }
+        }
+    });
+    if !any {
+        return ClosingKeys::Kept;
+    }
+    if all_draining {
+        return ClosingKeys::Discarded;
+    }
+    if !written || !all_ending {
+        return ClosingKeys::Kept;
+    }
+    let mut sealed = true;
+    others.each_link_path_read::<ClosePacket, Jc>(|key, packet| {
+        sealed &= packet.is_sealed() || !closing.contains(key);
+    });
+    if sealed {
+        ClosingKeys::ReceiveOnly
+    } else {
+        ClosingKeys::Kept
+    }
+}
+
+macro_rules! kept_while_closing {
     ($($ty:ident),*) => {$(
-        /// The keys of a level read the roles of the link paths: once every
-        /// link path is `Draining`, nothing is sent or processed any more,
-        /// and the keys are discarded (RFC 9000 §10.2.2).
-        ///
-        /// Not here yet: keeping only the receiving half while closing, once
-        /// every closing link path has sealed its close packet.
-        impl<T: Choices, L, I, J> DataComponent<T, L, layer::Connection, (I, J)> for $ty<T::Crypto>
+        /// The keys of a level read the record of why the connection closed,
+        /// the roles of the link paths and their close packets: they keep
+        /// only their receiving half once the reason is written, every link
+        /// path is `Closing` or `Draining` and the closing ones have sealed
+        /// their close packets, and are discarded once every link path is
+        /// `Draining` (RFC 9000 §10.2.1, §10.2.2). A level without a
+        /// receiving half then is discarded.
+        impl<T: Choices, L, I, Ic, J, Jc> DataComponent<T, L, layer::Connection, (I, Ic, J, Jc)>
+            for $ty<T::Crypto>
         where
-            L: LineagePartList<T>,
-            for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<$ty<T::Crypto>, I>,
+            L: LineagePartList<T> + ConnectionErrorsOf,
+            for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<$ty<T::Crypto>, I>
+                + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>,
             for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
             for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
-                GetAt<LinkPathRole<InstantOf<T>>, J>,
+                GetAt<LinkPathRole<InstantOf<T>>, J> + GetAt<ClosePacket, Jc>,
         {
             fn reads(reads: &mut ReadSet) {
-                reads.add::<LinkPathRole<InstantOf<T>>>();
+                reads
+                    .add::<CloseReasonRecord<CloseCauseOf<T, L>>>()
+                    .add::<LinkPathRole<InstantOf<T>>>()
+                    .add::<ClosePacket>();
             }
             fn reread<'v, B: CallBundle>(
                 mut lineage: LineageOf<'v, T, L, layer::Connection>,
                 others: &mut OtherNodes<'v, T, L, B>,
                 _: InstantOf<T>,
             ) -> Option<RequestOf<T, L>> {
-                if matches!(lineage.get::<$ty<T::Crypto>, I>(), $ty::Discarded) {
+                let keys = lineage.get::<$ty<T::Crypto>, I>();
+                if matches!(keys, $ty::Discarded) {
                     return None;
                 }
-                let (mut any, mut all_draining) = (false, true);
-                others.each_link_path_read::<LinkPathRole<InstantOf<T>>, J>(|_, role| {
-                    any = true;
-                    all_draining &= matches!(role, LinkPathRole::Draining(_));
-                });
-                if any && all_draining {
-                    lineage.get_mut::<$ty<T::Crypto>, I>().discard();
+                let receive_only = matches!(keys, $ty::ReceiveOnly(_));
+                let written = lineage
+                    .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
+                    .is_written();
+                match closing_keys::<T, L, B, J, Jc>(written, others) {
+                    ClosingKeys::Kept => {}
+                    ClosingKeys::ReceiveOnly if receive_only => {}
+                    ClosingKeys::ReceiveOnly => {
+                        lineage.get_mut::<$ty<T::Crypto>, I>().keep_receive_only();
+                    }
+                    ClosingKeys::Discarded => lineage.get_mut::<$ty<T::Crypto>, I>().discard(),
                 }
                 None
             }
         }
     )*};
 }
-discarded_when_draining!(InitialKeys, HandshakeKeys);
+kept_while_closing!(InitialKeys, HandshakeKeys);
 
-/// The 1-RTT keys read the roles of the link paths, as the keys of the
-/// other levels do: once every link path is `Draining`, they are discarded
-/// (RFC 9000 §10.2.2).
+/// The 1-RTT keys read the record of why the connection closed, the roles
+/// of the link paths and their close packets, as the keys of the other
+/// levels do: once the closing link paths have sealed their close packets
+/// they keep only their receiving half, and once every link path is
+/// `Draining` they are discarded (RFC 9000 §10.2.1, §10.2.2).
 ///
 /// They also read themselves. Once the next receiving generation became
 /// current, the previous one is kept for three current probe timeouts (RFC
@@ -665,24 +753,27 @@ discarded_when_draining!(InitialKeys, HandshakeKeys);
 /// no link path has one, measured when the keys are looked at after the
 /// promotion. That instant is their deadline; when it comes the previous
 /// generation is dropped.
-impl<T: Choices, L, I, J, Iv, Ima, Ir>
-    DataComponent<T, L, layer::Connection, ((I, J, Iv), (Ima, Ir))>
+impl<T: Choices, L, I, Ic, J, Jc, Iv, Ima, Ir>
+    DataComponent<T, L, layer::Connection, ((I, Ic, J, Jc, Iv), (Ima, Ir))>
     for OneRttKeys<T::Crypto, InstantOf<T>>
 where
-    L: LineagePartList<T>,
+    L: LineagePartList<T> + ConnectionErrorsOf,
     L: ParametersOf<TransportParameterSpace>,
     TransportParameterSlots<L>: Selector<Option<MaxAckDelay>, Ima>,
-    for<'v> <L as LineageLists<'v, T>>::Connection:
-        GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, I> + ReadEach<OneRttKeysReads<T, L>, Iv>,
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, I>
+        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
+        + ReadEach<OneRttKeysReads<T, L>, Iv>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
-        GetAt<LinkPathRole<InstantOf<T>>, J>,
+        GetAt<LinkPathRole<InstantOf<T>>, J> + GetAt<ClosePacket, Jc>,
     for<'s> NodeData<T, L, layer::Recovery>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Recovery> as FlatMut<'s>>::Out: GetAt<RttOf<T, L>, Ir>,
 {
     fn reads(reads: &mut ReadSet) {
         reads
+            .add::<CloseReasonRecord<CloseCauseOf<T, L>>>()
             .add::<LinkPathRole<InstantOf<T>>>()
+            .add::<ClosePacket>()
             .add::<OneRttKeys<T::Crypto, InstantOf<T>>>();
     }
     fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::Connection>) -> Option<InstantOf<T>> {
@@ -709,16 +800,26 @@ where
         if matches!(keys, OneRttKeys::Discarded) {
             return None;
         }
-        let (mut any, mut all_draining) = (false, true);
-        others.each_link_path_read::<LinkPathRole<InstantOf<T>>, J>(|_, role| {
-            any = true;
-            all_draining &= matches!(role, LinkPathRole::Draining(_));
-        });
-        if any && all_draining {
-            lineage
-                .get_mut::<OneRttKeys<T::Crypto, InstantOf<T>>, I>()
-                .discard();
-            return None;
+        let receive_only = matches!(keys, OneRttKeys::ReceiveOnly(_));
+        let written = lineage
+            .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
+            .is_written();
+        match closing_keys::<T, L, B, J, Jc>(written, others) {
+            ClosingKeys::Kept => {}
+            ClosingKeys::ReceiveOnly if receive_only => {}
+            ClosingKeys::ReceiveOnly => {
+                let keys = lineage.get_mut::<OneRttKeys<T::Crypto, InstantOf<T>>, I>();
+                keys.keep_receive_only();
+                if matches!(keys, OneRttKeys::Discarded) {
+                    return None;
+                }
+            }
+            ClosingKeys::Discarded => {
+                lineage
+                    .get_mut::<OneRttKeys<T::Crypto, InstantOf<T>>, I>()
+                    .discard();
+                return None;
+            }
         }
         if lineage
             .get::<OneRttKeys<T::Crypto, InstantOf<T>>, I>()
@@ -951,6 +1052,25 @@ where
     }
 }
 impl PassiveDataComponent for LinkPathSendingLimits {}
+
+/// The connection keeps the close policy it was made with.
+impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)>
+    for ConnectionImmediateClosePolicy<T::ImmediateClosePolicy>
+where
+    L: LineagePartList<T>,
+    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        args: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        ConnectionImmediateClosePolicy::new(
+            own_args::<T, L, I>(args).immediate_close_policy.clone(),
+        )
+    }
+}
+/// It has no deadline and reads nothing; the close packets adjust with it.
+impl<P> PassiveDataComponent for ConnectionImmediateClosePolicy<P> {}
 
 /// The connection keeps what its first flight gave the later parts of the
 /// tree until they take it. Datagrams not read yet are cut as routing cuts

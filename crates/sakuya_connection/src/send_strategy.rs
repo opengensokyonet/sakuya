@@ -38,7 +38,7 @@ use snafu::Snafu;
 pub mod ranked;
 
 use crate::write::{
-    ClassOfSource, FlightClass, FlightClassType, OpenPacket, PacketWriting, Supplied,
+    AckOnlyClass, ClassOfSource, FlightClass, FlightClassType, OpenPacket, PacketWriting, Supplied,
 };
 
 // ---- intents and changes of send conditions ----
@@ -546,6 +546,39 @@ pub enum PlannedDatagram<F> {
     Fill(F),
     /// Send the close packet again.
     ResendClose,
+}
+
+/// The sealed close packet of a link path may go out again: an intent
+/// published on the planner of a closing link path, which a plan answers
+/// with [`PlannedDatagram::ResendClose`] when the strategy sends it.
+///
+/// The intent holds only what happened; the close packet stays with the
+/// link path, and is sent as it was sealed. Whether and when it goes is
+/// the strategy's: an endpoint in the closing period should limit the rate
+/// at which it sends it (RFC 9000 §10.2.1). Publishing it gives back
+/// nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ResendCloseIntent {
+    /// The close packet was just sealed: it has not gone out yet.
+    Sealed,
+    /// A datagram arrived on the closing link path.
+    DatagramReceived,
+}
+
+/// No frame source supplies the close packet: it goes out as it was sealed,
+/// and counts nothing in flight.
+impl SendIntent for ResendCloseIntent {
+    type FrameSourceId = ();
+    type Class = AckOnlyClass;
+
+    fn frame_source(&self) {}
+
+    fn min_lengths(&self) -> MinimumLengths {
+        MinimumLengths {
+            with_length: 0,
+            as_last: 0,
+        }
+    }
 }
 
 /// The content planned first in a packet: the packet's kind, its frame

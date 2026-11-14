@@ -26,7 +26,7 @@
 //!    padded to its floor, when that does not fit after it. A datagram the
 //!    content left empty is filled again from the start. Filling ends when
 //!    the batch is full, when the planner has nothing to plan or asks for
-//!    the close packet again, which is not kept here, or when the plan
+//!    the close packet again before one is sealed, or when the plan
 //!    names content that cannot go now: no connection ID fits it, its
 //!    level has no keys to send with, or it does not fit its packet. With
 //!    nothing in the batch the call then waits for the planner; in the last
@@ -68,6 +68,14 @@
 //!
 //! A link path without a recovery layer sends nothing new: the call is
 //! woken when its layer is built.
+//!
+//! Once the link path's close packet is sealed, the call fills nothing:
+//! each time the planner asks for the close packet to go again, the sealed
+//! datagram joins the batch as it is, charged first to the
+//! anti-amplification limit of the logical link; a copy the credit does
+//! not allow is not sent ([`ClosePacket`]). It enters no send journal and
+//! counts nothing in flight. A send in flight when the link path began
+//! closing is still settled.
 //!
 //! [`link_path_sending`] is also the operation struct
 //! [`LinkPathSending`], with `LinkPathSendingExt` on receiver accesses.
@@ -118,6 +126,7 @@ use super::{
     aead_usage::{AeadLimitReachedError, AeadUsage},
     amplification::AntiAmplification,
     close::{CloseReasonRecord, LocalCloseCause},
+    close_packet::ClosePacket,
     confirmation::HandshakeConfirmation,
     connection_ids::{ConnectionIdsOf, LinkPathResetTokenRegistrar, ResetTokenRegistrarOf},
     datagram_batch::{BatchedDatagram, BatchedPacket, DatagramBatch},
@@ -253,6 +262,15 @@ pub type FillTakes<T, L> = HList![
     AntiAmplification,
 ];
 
+/// What sending the close packet again takes out of the link path's
+/// lineage: the send strategy's core and planner, and the
+/// anti-amplification limit of the logical link.
+pub type ResendTakes<T, L> = HList![
+    SendStrategyCore<SendStrategyOf<T, L>>,
+    LinkPathPlanner<LinkPathSendPlannerOf<T, L>>,
+    AntiAmplification,
+];
+
 /// What filling takes out of what is left to read only: the keys of each
 /// level, which packets are sealed with while the frame sources write.
 pub type FillReadTakes<T> = HList![
@@ -317,8 +335,9 @@ pub type SettleReads<T, L> = HList![
 /// policy in a recovery layer; for 1-RTT key updates, `Iu` of the AEAD's
 /// usage, `Ihc` of whether the handshake is confirmed, `Ikp` of the key
 /// phase numbers, `Ic` of the record of why the connection closed, `Ier`
-/// of version 1's connection error among the composition's, and `Irt` of
-/// the RTT estimator in a recovery layer.
+/// of version 1's connection error among the composition's, `Irt` of the
+/// RTT estimator in a recovery layer; for the close packet, `Icp` of it,
+/// `Irs` of [`ResendTakes`] and `Ilf` of the logical link's facts.
 type Positions<
     Is,
     It,
@@ -347,6 +366,9 @@ type Positions<
     Ic,
     Ier,
     Irt,
+    Icp,
+    Irs,
+    Ilf,
 > = (
     Is,
     (It, Iw, Ir, Ik, Hs),
@@ -354,6 +376,7 @@ type Positions<
     (Ij, If, Iv, Ie, Iq, Hf),
     (Ipp, Ima, Jx, Jr, Jm),
     (Iu, Ihc, Ikp, Ic, Ier, Irt),
+    (Icp, Irs, Ilf),
 );
 
 /// The upper bound, in debug builds, of the datagrams one poll fills again
@@ -373,9 +396,9 @@ enum FillEnd {
     /// The plan names content that cannot go now; the planner keeps no
     /// waker.
     Blocked,
-    /// The planner asks for the close packet to be sent again, which is
-    /// not kept here: nothing is filled, and the call does not wake itself
-    /// for it.
+    /// The planner asks for the close packet to be sent again before it is
+    /// sealed: nothing is filled, and the call does not wake itself for it;
+    /// once the close packet is sealed the planner is asked again.
     ResendClose,
 }
 
@@ -423,6 +446,9 @@ impl<
     Ic,
     Ier,
     Irt,
+    Icp,
+    Irs,
+    Ilf,
 > LinkPathSendingCapability
     for NodeCallFamily<
         T,
@@ -457,6 +483,9 @@ impl<
             Ic,
             Ier,
             Irt,
+            Icp,
+            Irs,
+            Ilf,
         >,
         B,
     >
@@ -509,7 +538,10 @@ where
         + GetAt<AeadUsage, Iu>
         + GetAt<HandshakeConfirmation, Ihc>
         + GetAt<KeyPhaseNumbers, Ikp>
-        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>,
+        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
+        + GetAt<ClosePacket, Icp>
+        + GetAt<LinkFacts, Ilf>
+        + TakeEach<'x, ResendTakes<T, L>, Irs>,
     L: ConnectionErrorsOf,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ier>,
     for<'x> FillKeysRest<'x, T, L, It>: TakeEach<'x, FillReadTakes<T>, Iw>,
@@ -583,6 +615,13 @@ where
             return Poll::Ready(());
         }
         let NodeLoan { lineage, others } = view.get_mut();
+        if let Some(datagram) = lineage
+            .get::<ClosePacket, Icp>()
+            .sealed()
+            .map(|sealed| sealed.datagram().clone())
+        {
+            return resend_close::<T, L, S, Ilf, Irs>(lineage, datagram, batch, cx);
+        }
         let NodeKey::LinkPath(path, link) = others.here().clone() else {
             unreachable!("a link path's lend carries its key")
         };
@@ -925,7 +964,7 @@ where
         };
         let mut plan = match planned {
             PlannedDatagram::Fill(plan) => plan,
-            // the close packet is not kept here: nothing to fill
+            // no close packet is sealed yet: nothing to fill
             PlannedDatagram::ResendClose => return DatagramEnd::End(FillEnd::ResendClose),
         };
         let Some(leading) = plan.leading_content() else {
@@ -1128,6 +1167,61 @@ where
         } else {
             DatagramEnd::Next
         }
+    }
+}
+
+/// Fill `batch` with the sealed close packet `datagram` as often as the
+/// planner of the link path of `lineage` asks for it to go again, until
+/// the batch is full or the planner has nothing to plan. Each copy is
+/// charged to the anti-amplification limit of the logical link before it
+/// joins the batch; a copy the credit does not allow is not sent. A copy
+/// enters no send journal and counts nothing in flight. Ready once the
+/// batch holds a datagram.
+///
+/// A plan to fill a datagram is dropped as it comes: a closing link path
+/// sends nothing else.
+fn resend_close<'v, T, L, S, Ilf, Irs>(
+    lineage: &mut LineageOf<'v, T, L, LinkPath>,
+    datagram: Bytes,
+    batch: &mut DatagramBatchOf<T, L, S>,
+    cx: &mut Context<'_>,
+) -> Poll<()>
+where
+    T: Choices,
+    L: LineagePartList<T> + FeedbackSummariesOf,
+    SendTypes<T, L>: SendStrategyTypes,
+    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    for<'w, 's> <L as LineageLists<'w, T>>::LinkPath:
+        Reborrow<'s, Out = <L as LineageLists<'s, T>>::LinkPath>,
+    for<'x> <L as LineageLists<'x, T>>::LinkPath:
+        GetAt<LinkFacts, Ilf> + TakeEach<'x, ResendTakes<T, L>, Irs>,
+{
+    let validation = lineage.get::<LinkFacts, Ilf>().validation;
+    let (hlist_pat![core, planner, amplification], _) =
+        Take::<ResendTakes<T, L>, Irs>::take(lineage.reborrow());
+    while !batch.is_full() {
+        match planner.planner_mut().poll_plan(core.strategy_mut(), cx) {
+            Poll::Pending => break,
+            Poll::Ready(PlannedDatagram::Fill(plan)) => {
+                drop(plan);
+                break;
+            }
+            Poll::Ready(PlannedDatagram::ResendClose) => {
+                let len = u64::try_from(datagram.len()).unwrap_or(u64::MAX);
+                let allowed = amplification
+                    .credit(validation)
+                    .is_none_or(|credit| credit >= len);
+                if allowed {
+                    amplification.sent(datagram.len());
+                    batch.push_close_packet(datagram.clone());
+                }
+            }
+        }
+    }
+    if batch.is_empty() {
+        Poll::Pending
+    } else {
+        Poll::Ready(())
     }
 }
 
@@ -1470,8 +1564,9 @@ pub async fn link_path_sending<W: LinkPathSendingCapability>(
 /// The kind of the sending call of a link path. It reads the datagram size
 /// probing policy of the link path's recovery layer: the call is woken when
 /// the layer is built, and when the policy changes what the link path
-/// sends at. Everything else that lets it send more is the send planner's
-/// to wake it for.
+/// sends at; and the link path's close packet, once it is sealed.
+/// Everything else that lets it send more is the send planner's to wake it
+/// for.
 #[derive(Debug)]
 pub struct LinkPathSendingKind;
 
@@ -1507,6 +1602,9 @@ impl<
     Ic,
     Ier,
     Irt,
+    Icp,
+    Irs,
+    Ilf,
 >
     CallKind<
         T,
@@ -1540,6 +1638,9 @@ impl<
             Ic,
             Ier,
             Irt,
+            Icp,
+            Irs,
+            Ilf,
         >,
     > for LinkPathSendingKind
 where
@@ -1590,7 +1691,10 @@ where
         + GetAt<AeadUsage, Iu>
         + GetAt<HandshakeConfirmation, Ihc>
         + GetAt<KeyPhaseNumbers, Ikp>
-        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>,
+        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
+        + GetAt<ClosePacket, Icp>
+        + GetAt<LinkFacts, Ilf>
+        + TakeEach<'x, ResendTakes<T, L>, Irs>,
     L: ConnectionErrorsOf,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ier>,
     for<'x> FillKeysRest<'x, T, L, It>: TakeEach<'x, FillReadTakes<T>, Iw>,
@@ -1668,6 +1772,9 @@ where
         Ic,
         Ier,
         Irt,
+        Icp,
+        Irs,
+        Ilf,
     >: 'static,
     S: 'static,
 {
@@ -1705,6 +1812,9 @@ where
                 Ic,
                 Ier,
                 Irt,
+                Icp,
+                Irs,
+                Ilf,
             >,
             B,
         >,
@@ -1714,6 +1824,6 @@ where
         LentCall::new(LinkPathSending::new())
     }
     fn reads(reads: &mut ReadSet) {
-        reads.add::<PmtuOf<T, L>>();
+        reads.add::<PmtuOf<T, L>>().add::<ClosePacket>();
     }
 }
