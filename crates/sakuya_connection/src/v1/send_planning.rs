@@ -64,8 +64,8 @@ use crate::{
     others::OtherNodes,
     send_strategy::{
         AnyActiveLinkPath, DatagramLimits, LinkPathRoleKind, LinkPathSendPlanner, Observe,
-        PacketOverheads, PlannerLinkPath, Publish, PublishOutcome, PublishTo, SendStrategy,
-        SendStrategyTypes,
+        PacketOverheads, PlannerLinkPath, Publish, PublishOutcome, PublishTo, SendIntent,
+        SendStrategy, SendStrategyTypes,
     },
     share::{FlatRef, LineageLists, LineagePartList, LogicalPathKeys, NodeData},
     take::{GetAt, ReadEach, Take, TakeEach},
@@ -79,6 +79,64 @@ pub type SendStrategyOf<T, L> = <T as Choices>::SendStrategy<SendTypes<T, L>>;
 /// The send planner of one link path, as the core of `T` and `L` makes it.
 pub type LinkPathSendPlannerOf<T, L> =
     <SendStrategyOf<T, L> as SendStrategy<SendTypes<T, L>>>::LinkPathSendPlanner;
+
+/// `SendTypes<T, L>: CorePublishOutcome<J, D>`: the core of the choices `T`
+/// and the list of parts `L` takes intents `J` for the destination `D`, as
+/// its own destination converted from `D`, and gives back
+/// [`Outcome`](Self::Outcome). A component that keeps what it gets back
+/// names its type by this, without the place of `J`.
+///
+/// The choices' strategy is bound only by `Default`, as a strategy is a
+/// [`SendStrategy`] only for the types whose intents it can rank; this
+/// trait and [`CorePublishTo`] state, once, that the core of a composition
+/// is one and takes `J` for `D`.
+pub trait CorePublishOutcome<J: SendIntent, D>: SendStrategyTypes {
+    /// What publishing gives back.
+    type Outcome;
+}
+
+/// `SendTypes<T, L>: CorePublishTo<J, D, Idx, Core = SendStrategyOf<T, L>>`:
+/// a component of `T` and `L` publishes intents `J` for the destination
+/// `D` to the core through [`publish_to`](Self::publish_to).
+///
+/// `Idx` is the place of `J` in the composition's sum of intents; the
+/// compiler infers it.
+pub trait CorePublishTo<J: SendIntent, D, Idx>: CorePublishOutcome<J, D> {
+    /// The core.
+    type Core;
+
+    /// Publish `intent` for `destination` to `core`.
+    fn publish_to(core: &mut Self::Core, intent: J, destination: D) -> Self::Outcome;
+}
+
+/// The core's destination of the choices `T` and the list of parts `L`.
+type CoreDestinationOf<T, L> = <SendStrategyOf<T, L> as SendStrategy<SendTypes<T, L>>>::Destination;
+
+impl<T, L, J, D> CorePublishOutcome<J, D> for SendTypes<T, L>
+where
+    T: Choices,
+    J: SendIntent,
+    Self: SendStrategyTypes,
+    SendStrategyOf<T, L>: SendStrategy<Self> + PublishOutcome<J, CoreDestinationOf<T, L>>,
+    CoreDestinationOf<T, L>: From<D>,
+{
+    type Outcome = <SendStrategyOf<T, L> as PublishOutcome<J, CoreDestinationOf<T, L>>>::Outcome;
+}
+
+impl<T, L, J, D, Idx> CorePublishTo<J, D, Idx> for SendTypes<T, L>
+where
+    T: Choices,
+    J: SendIntent,
+    Self: SendStrategyTypes,
+    SendStrategyOf<T, L>: SendStrategy<Self> + PublishTo<J, CoreDestinationOf<T, L>, Idx>,
+    CoreDestinationOf<T, L>: From<D>,
+{
+    type Core = SendStrategyOf<T, L>;
+
+    fn publish_to(core: &mut Self::Core, intent: J, destination: D) -> Self::Outcome {
+        core.publish_to(intent, destination.into())
+    }
+}
 
 // ---- the core ----
 
@@ -748,10 +806,8 @@ pub(super) fn packet_overheads(
 
 /// What publishing an ACK intent for any active link path gives back in
 /// the core of `T` and `L`.
-pub type AckIntentTicketOf<T, L> = <SendStrategyOf<T, L> as PublishOutcome<
-    AckIntent,
-    <SendStrategyOf<T, L> as SendStrategy<SendTypes<T, L>>>::Destination,
->>::Outcome;
+pub type AckIntentTicketOf<T, L> =
+    <SendTypes<T, L> as CorePublishOutcome<AckIntent, AnyActiveLinkPath>>::Outcome;
 
 /// The ACK intents of a logical path: for each packet number space where
 /// an ACK frame is due now, what publishing its intent gave back, with the
@@ -808,12 +864,7 @@ impl<T: Choices, L> Build<T, L, layer::LogicalPath, ()>
     for AckIntentTickets<AckIntentTicketOf<T, L>>
 where
     L: LineagePartList<T>,
-    SendTypes<T, L>: SendStrategyTypes,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>
-        + PublishOutcome<
-            AckIntent,
-            <SendStrategyOf<T, L> as SendStrategy<SendTypes<T, L>>>::Destination,
-        >,
+    SendTypes<T, L>: CorePublishOutcome<AckIntent, AnyActiveLinkPath>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::LogicalPath>,
@@ -837,14 +888,7 @@ impl<T: Choices, L, Ia, Ij, Is, It, Idx>
     for AckIntentTickets<AckIntentTicketOf<T, L>>
 where
     L: LineagePartList<T>,
-    SendTypes<T, L>: SendStrategyTypes,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>
-        + PublishTo<
-            AckIntent,
-            <SendStrategyOf<T, L> as SendStrategy<SendTypes<T, L>>>::Destination,
-            Idx,
-        >,
-    <SendStrategyOf<T, L> as SendStrategy<SendTypes<T, L>>>::Destination: From<AnyActiveLinkPath>,
+    SendTypes<T, L>: CorePublishTo<AckIntent, AnyActiveLinkPath, Idx, Core = SendStrategyOf<T, L>>,
     for<'v> <L as LineageLists<'v, T>>::LogicalPath: GetAt<AckObligationsOf<T>, Ia>
         + GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
         + GetAt<Self, Is>
@@ -894,9 +938,11 @@ where
             // is never without one while an ACK frame is due
             let old = slot.take();
             if let Some(shortest) = wanted {
-                let ticket = core
-                    .strategy_mut()
-                    .publish_to(AckIntent::new(space, shortest), AnyActiveLinkPath.into());
+                let ticket = <SendTypes<T, L> as CorePublishTo<_, _, Idx>>::publish_to(
+                    core.strategy_mut(),
+                    AckIntent::new(space, shortest),
+                    AnyActiveLinkPath,
+                );
                 *slot = Some((ticket, shortest));
             }
             drop(old);

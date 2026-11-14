@@ -98,7 +98,9 @@ use crate::{
     layer::{self, NodeKey},
     others::OtherNodes,
     request::StructureRequest,
-    send_strategy::{PlannerLinkPath, PublishOutcome, SendStrategy, SendStrategyTypes},
+    send_strategy::{
+        AnyActiveLinkPath, PlannerLinkPath, PublishOutcome, SendStrategy, SendStrategyTypes,
+    },
     share::{
         ConnectionArgsOf, FlatMut, LayerShare, LineageLists, LineagePartList, LogicalPathKeyShare,
         LogicalPathKeys, NodeData,
@@ -139,8 +141,9 @@ use self::{
     },
     send::{AckIntent, ProbePingIntent, SendTypes},
     send_planning::{
-        AckIntentTicketOf, AckIntentTickets, LinkPathPlanner, LinkPathSendPlannerOf,
-        ProbePingTicketOf, ProbePingTickets, SendStrategyCore, SendStrategyOf,
+        AckIntentTicketOf, AckIntentTickets, CorePublishOutcome, LinkPathPlanner,
+        LinkPathSendPlannerOf, ProbePingTicketOf, ProbePingTickets, SendStrategyCore,
+        SendStrategyOf,
     },
     sending::{LinkPathSendingKind, LinkPathSendingLimits},
     spaces::{AckObligationsOf, DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
@@ -414,12 +417,7 @@ impl<T: Choices, L> LayerShare<T, L, layer::LinkEntry> for Part {
 impl<T: Choices, L: FeedbackSummariesOf + LogicalPathKeys + 'static>
     LayerShare<T, L, layer::LogicalPath> for Part
 where
-    SendTypes<T, L>: SendStrategyTypes,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>
-        + PublishOutcome<
-            AckIntent,
-            <SendStrategyOf<T, L> as SendStrategy<SendTypes<T, L>>>::Destination,
-        >,
+    SendTypes<T, L>: CorePublishOutcome<AckIntent, AnyActiveLinkPath>,
 {
     type Data = HList![
         PacketNumberSpaces<PacketNumberSpaceState>,

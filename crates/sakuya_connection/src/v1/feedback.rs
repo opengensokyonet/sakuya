@@ -17,7 +17,7 @@ use sakuya_wire::{parts::Coproduct, v1::packet_number::PacketNumber};
 use super::{
     Choices, Part,
     send::{AckIntent, SendTypes},
-    send_planning::{AckIntentTicketOf, AckIntentTickets, SendStrategyOf},
+    send_planning::{AckIntentTicketOf, AckIntentTickets, CorePublishOutcome},
     spaces::AckObligationsOf,
 };
 use crate::{
@@ -25,7 +25,7 @@ use crate::{
     clock::InstantOf,
     feedback::{FeedbackSummaryPart, SendFeedback},
     others::OtherNodes,
-    send_strategy::{PublishOutcome, SendStrategy, SendStrategyTypes},
+    send_strategy::AnyActiveLinkPath,
     share::PartList,
     take::{GetAt, Lineage},
     write::PaddingSummary,
@@ -102,12 +102,7 @@ impl<T, L, V, Ij, Ia, Ik> SendFeedback<T, L, V, (Ij, Ia, Ik)> for Part
 where
     T: Choices,
     L: PartList<T>,
-    SendTypes<T, L>: SendStrategyTypes,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>
-        + PublishOutcome<
-            AckIntent,
-            <SendStrategyOf<T, L> as SendStrategy<SendTypes<T, L>>>::Destination,
-        >,
+    SendTypes<T, L>: CorePublishOutcome<AckIntent, AnyActiveLinkPath>,
     V: GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
         + GetAt<AckObligationsOf<T>, Ia>
         + GetAt<AckIntentTickets<AckIntentTicketOf<T, L>>, Ik>,
