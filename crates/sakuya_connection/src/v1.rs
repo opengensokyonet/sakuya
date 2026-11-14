@@ -10,7 +10,8 @@
 //! recovery factory and the record of why the connection closed
 //! ([`close`]); the clone of the
 //! link, the facts about it and the anti-amplification limit in the entry of
-//! each logical link; the role in each link path; and in each link path's
+//! each logical link, whose call follows the link's datagram size limit
+//! ([`link_ceiling`]); the role in each link path; and in each link path's
 //! recovery layer, what the factory makes for it with the state beside them,
 //! its loss detection state for each packet number space and its probe
 //! timeout. Each logical path keeps, for each packet number space, its
@@ -48,6 +49,7 @@ pub mod input;
 pub mod key_phase;
 pub mod keys;
 pub mod link;
+pub mod link_ceiling;
 pub mod loss_detection;
 pub mod packet_writer;
 pub mod parameters;
@@ -124,6 +126,7 @@ use self::{
     key_phase::KeyPhaseNumbers,
     keys::{DirectionKeys, HandshakeKeys, InitialKeys, LevelKeys, OneRttKeys},
     link::{FirstLinkStart, LinkClone, LinkFacts},
+    link_ceiling::LinkCeilingWatchingKind,
     loss_detection::LossDetectionOf,
     parameters::{LocalTransportParameters, PeerTransportParameters},
     pto::ProbeTimeout,
@@ -395,7 +398,7 @@ where
 }
 impl<T: Choices, L> LayerShare<T, L, layer::LinkEntry> for Part {
     type Data = HList![LinkClone<T::Link>, LinkFacts, AntiAmplification];
-    type Calls = HNil;
+    type Calls = HList![LinkCeilingWatchingKind];
 }
 impl<T: Choices, L: FeedbackSummariesOf + LogicalPathKeys + 'static>
     LayerShare<T, L, layer::LogicalPath> for Part

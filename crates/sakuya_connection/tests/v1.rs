@@ -3340,7 +3340,7 @@ fn the_receiving_call_receives_each_packet_of_a_datagram_and_counts_the_whole_da
     use probe::PacketStep::{Inspect, InspectCredit};
     reset();
     // the link takes less than 1200 bytes: nothing is sent
-    common::set_link_ceiling(MIN_DATAGRAM_SIZE - 1);
+    common::set_link_ceilings(MIN_DATAGRAM_SIZE - 1);
     let first = link();
     feed_packets([(ms(6), Inspect), (ms(7), InspectCredit(first.clone()))]);
     let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
@@ -3374,7 +3374,7 @@ fn the_first_datagrams_are_received_and_counted_as_later_ones_are() {
     use probe::PacketStep::{Inspect, InspectCredit};
     reset();
     // the link takes less than 1200 bytes: nothing is sent
-    common::set_link_ceiling(MIN_DATAGRAM_SIZE - 1);
+    common::set_link_ceilings(MIN_DATAGRAM_SIZE - 1);
     let first = link();
     feed_packets([(ms(6), Inspect), (ms(7), InspectCredit(first.clone()))]);
     let datagram = padded(
@@ -3416,7 +3416,7 @@ fn a_server_made_with_a_read_first_flight_starts_with_what_was_read() {
     use probe::PacketStep::{Inspect, InspectCredit};
     reset();
     // the link takes less than 1200 bytes: nothing is sent
-    common::set_link_ceiling(MIN_DATAGRAM_SIZE - 1);
+    common::set_link_ceilings(MIN_DATAGRAM_SIZE - 1);
     FIRST_READ.with(|f| f.set(true));
     let first = link();
     feed_packets([(ms(6), Inspect), (ms(7), InspectCredit(first.clone()))]);
@@ -3499,7 +3499,7 @@ fn reading_the_first_flight_ends_with_the_first_client_hello() {
     use probe::PacketStep::{Inspect, InspectCredit};
     reset();
     // the link takes less than 1200 bytes: nothing is sent
-    common::set_link_ceiling(MIN_DATAGRAM_SIZE - 1);
+    common::set_link_ceilings(MIN_DATAGRAM_SIZE - 1);
     let first = link();
     let mut receiver = test_receiver();
     let hello = client_hello();
@@ -3523,7 +3523,7 @@ fn reading_the_first_flight_ends_with_the_first_client_hello() {
     assert_eq!(result, Err("pending".to_owned()));
     assert!(state.first_client_hello().is_none());
     reset();
-    common::set_link_ceiling(MIN_DATAGRAM_SIZE - 1);
+    common::set_link_ceilings(MIN_DATAGRAM_SIZE - 1);
     let mut receiver = test_receiver();
     deliver(
         padded(
@@ -3669,7 +3669,7 @@ fn a_packet_without_its_keys_is_held_until_they_come() {
     use probe::PacketStep::{Inspect, InspectHeld, InstallHandshakeKeys};
     reset();
     // the link takes less than 1200 bytes: nothing is sent
-    common::set_link_ceiling(MIN_DATAGRAM_SIZE - 1);
+    common::set_link_ceilings(MIN_DATAGRAM_SIZE - 1);
     let first = link();
     feed_packets([
         (ms(6), Inspect),
@@ -3706,7 +3706,7 @@ fn a_poll_receives_at_most_its_limit_and_wakes_itself_for_the_rest() {
     use probe::PacketStep::Inspect;
     reset();
     // the link takes less than 1200 bytes: nothing is sent
-    common::set_link_ceiling(MIN_DATAGRAM_SIZE - 1);
+    common::set_link_ceilings(MIN_DATAGRAM_SIZE - 1);
     MAX_PER_POLL.with(|m| m.set(1));
     let first = link();
     feed_packets([(ms(5), Inspect), (ms(6), Inspect)]);
@@ -3988,7 +3988,7 @@ fn deliveries_go_back_before_losses_and_a_late_ack_tells_of_a_spurious_loss() {
 fn an_ack_that_acknowledges_nothing_new_keeps_the_backoff() {
     reset();
     // the link takes less than 1200 bytes: nothing is sent
-    common::set_link_ceiling(MIN_DATAGRAM_SIZE - 1);
+    common::set_link_ceilings(MIN_DATAGRAM_SIZE - 1);
     let first = link();
     feed([
         (
@@ -4123,7 +4123,7 @@ fn a_lost_ack_frame_owes_again_what_it_answered() {
     use probe::PacketStep::{Inspect, Receive};
     reset();
     // the link takes less than 1200 bytes: nothing is sent
-    common::set_link_ceiling(MIN_DATAGRAM_SIZE - 1);
+    common::set_link_ceilings(MIN_DATAGRAM_SIZE - 1);
     let first = link();
     feed([
         (ms(6), probe::Step::SentAck(PacketNumberSpaceKind::Initial)),
@@ -4306,7 +4306,7 @@ fn an_acknowledgment_due_now_is_published_asking_room_for_the_shortest_frame() {
     use probe::PacketStep::Receive;
     reset();
     // the link takes less than 1200 bytes: nothing is sent
-    common::set_link_ceiling(MIN_DATAGRAM_SIZE - 1);
+    common::set_link_ceilings(MIN_DATAGRAM_SIZE - 1);
     let first = link();
     feed_packets([(
         ms(5),
@@ -4363,7 +4363,7 @@ fn the_acknowledgment_intent_goes_when_the_acknowledgment_is_written() {
     use probe::PacketStep::Receive;
     reset();
     // the link takes less than 1200 bytes: nothing is sent
-    common::set_link_ceiling(MIN_DATAGRAM_SIZE - 1);
+    common::set_link_ceilings(MIN_DATAGRAM_SIZE - 1);
     let first = link();
     feed([(ms(8), probe::Step::SentAck(PacketNumberSpaceKind::Initial))]);
     feed_packets([
@@ -4402,7 +4402,7 @@ fn the_acknowledgment_intent_is_published_again_when_the_shortest_frame_grows() 
     use probe::PacketStep::Receive;
     reset();
     // the link takes less than 1200 bytes: nothing is sent
-    common::set_link_ceiling(MIN_DATAGRAM_SIZE - 1);
+    common::set_link_ceilings(MIN_DATAGRAM_SIZE - 1);
     let first = link();
     feed_packets([
         (
@@ -4524,6 +4524,92 @@ fn the_planner_is_told_what_its_link_path_can_send_when_the_credit_grows() {
     // it first looked for something to send, which releases the window
     assert_eq!(limits.congestion_window_left, 12000);
     assert_eq!(limits.pacing_allowance, 12000);
+}
+
+/// What the planner of the Nth link path built was last told the link's
+/// datagram size limit is.
+fn told_link_ceiling(path: usize) -> Option<usize> {
+    common::strategy::observed_limits(path)
+        .expect("the planner was told")
+        .link_ceiling
+}
+
+#[test]
+fn the_planner_is_told_the_link_ceiling_when_the_link_reports_a_change() {
+    reset();
+    let first = link();
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    let _ = run(&mut connection, 1..=1);
+    assert_eq!(told_link_ceiling(0), Some(1200));
+    common::set_link_ceiling(&first, 1500);
+    common::report_link_ceiling_changed(&first);
+    let _ = run(&mut connection, 2..=2);
+    let limits = common::strategy::observed_limits(0).expect("the planner was told");
+    assert_eq!(limits.link_ceiling, Some(1500));
+    assert!(limits.supports_minimum());
+    // a later change is reported by the next future
+    common::set_link_ceiling(&first, 1400);
+    common::report_link_ceiling_changed(&first);
+    let _ = run(&mut connection, 3..=3);
+    assert_eq!(told_link_ceiling(0), Some(1400));
+}
+
+#[test]
+fn a_link_ceiling_below_1200_reaches_the_strategy_as_a_link_path_that_does_not_carry_it() {
+    reset();
+    let first = link();
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    let _ = run(&mut connection, 1..=1);
+    // an IPv4 tunnel over an MTU of 1200
+    common::set_link_ceiling(&first, 1172);
+    common::report_link_ceiling_changed(&first);
+    let _ = run(&mut connection, 2..=2);
+    let limits = common::strategy::observed_limits(0).expect("the planner was told");
+    assert_eq!(limits.link_ceiling, Some(1172));
+    assert!(!limits.supports_minimum());
+    assert_eq!(
+        limits.capacity_for(sakuya_connection::write::FlightClass::AckOnly),
+        0
+    );
+    // back at 1200, the link path carries it again
+    common::set_link_ceiling(&first, 1200);
+    common::report_link_ceiling_changed(&first);
+    let _ = run(&mut connection, 3..=3);
+    let limits = common::strategy::observed_limits(0).expect("the planner was told");
+    assert_eq!(limits.link_ceiling, Some(1200));
+    assert!(limits.supports_minimum());
+}
+
+#[test]
+fn the_link_ceiling_is_not_read_again_until_the_link_reports_a_change() {
+    reset();
+    let first = link();
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    let _ = run(&mut connection, 1..=1);
+    common::set_link_ceiling(&first, 1500);
+    let _ = run(&mut connection, 2..=2);
+    assert_eq!(told_link_ceiling(0), Some(1200));
+    common::report_link_ceiling_changed(&first);
+    let _ = run(&mut connection, 3..=3);
+    assert_eq!(told_link_ceiling(0), Some(1500));
+}
+
+#[test]
+fn a_link_ceiling_change_is_told_to_the_link_paths_over_that_link_only() {
+    reset();
+    let first = link();
+    let second = link();
+    ADD.with(|a| a.set(Some((ms(10), second.clone()))));
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    let _ = run(&mut connection, 1..=10);
+    assert_eq!(told_link_ceiling(0), Some(1200));
+    assert_eq!(told_link_ceiling(1), Some(1200));
+    common::set_link_ceiling(&first, 1500);
+    common::set_link_ceiling(&second, 1500);
+    common::report_link_ceiling_changed(&second);
+    let _ = run(&mut connection, 11..=11);
+    assert_eq!(told_link_ceiling(0), Some(1200));
+    assert_eq!(told_link_ceiling(1), Some(1500));
 }
 
 /// A NEW_CONNECTION_ID frame (RFC 9000 §19.15) numbered `sequence`, with

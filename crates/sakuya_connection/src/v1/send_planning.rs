@@ -336,13 +336,15 @@ where
 }
 
 /// A planner is told when its link path's role changes; what the link
-/// path can send whenever a component that limits it changes: the
-/// anti-amplification credit, the peer's transport parameters, and the
-/// congestion control, its fixed state and the datagram size probing
-/// policy in the link path's recovery layer; and what each kind of packet
-/// takes beyond its frames whenever a component it follows from changes:
-/// the connection IDs, the packet number states and send journals of the
-/// spaces, and the keys of each level. All of it is only read here.
+/// path can send whenever a component that limits it changes: the logical
+/// link's clone, taken when the link's datagram size limit may have
+/// changed, and its facts, the anti-amplification credit, the peer's
+/// transport parameters, and the congestion control, its fixed state and
+/// the datagram size probing policy in the link path's recovery layer; and
+/// what each kind of packet takes beyond its frames whenever a component it
+/// follows from changes: the connection IDs, the packet number states and
+/// send journals of the spaces, and the keys of each level. All of it is
+/// only read here.
 impl<T: Choices, L, Ip, Ir, It, Il, Io, Ipp, Jc, Js, Jm>
     DataComponent<T, L, layer::LinkPath, (Ip, Ir, It, Il, Io, Ipp, (Jc, Js, Jm))>
     for LinkPathPlanner<LinkPathSendPlannerOf<T, L>>
@@ -365,6 +367,8 @@ where
 {
     fn reads(reads: &mut ReadSet) {
         reads.add::<LinkPathRole<InstantOf<T>>>();
+        reads.add::<LinkClone<T::Link>>();
+        reads.add::<LinkFacts>();
         reads.add::<AntiAmplification>();
         reads.add::<PeerTransportParameters<TransportParameterSlots<L>>>();
         reads.add::<CongestionPartOf<T, L>>();

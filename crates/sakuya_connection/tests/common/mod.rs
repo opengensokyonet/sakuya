@@ -32,6 +32,7 @@ thread_local! {
     static HELD: RefCell<Option<Waker>> = const { RefCell::new(None) };
     static RELEASED: Cell<bool> = const { Cell::new(false) };
     static BATCHES: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    static CEILINGS: RefCell<Vec<(TestLinkId, LinkCeiling)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// The test's clock: time moves only when the test says so.
@@ -72,9 +73,10 @@ impl MonotonicClock for TestClock {
 ///
 /// What it does with a batch is what the test planned with
 /// [`plan_sends`], and accepting all of it otherwise; what it accepted and
-/// gave up is kept for [`take_sent`] and [`take_given_up`]. The largest
-/// datagram it takes is 1200 bytes unless [`set_link_ceiling`] says
-/// otherwise.
+/// gave up is kept for [`take_sent`] and [`take_given_up`]. Its datagram size
+/// limit is 1200 bytes unless [`set_link_ceilings`] or, for that link,
+/// [`set_link_ceiling`] says otherwise, and it reports a change only when
+/// [`report_link_ceiling_changed`] says so.
 #[derive(Clone, Debug)]
 pub struct TestLink(pub TestLinkId);
 
@@ -121,15 +123,16 @@ pub fn release_held_send() {
     }
 }
 
-/// The largest datagram the test links take from now on: below 1200
-/// bytes, a link path over them sends nothing.
-pub fn set_link_ceiling(size: usize) {
+/// The largest datagram the test links take from now on, unless one is set
+/// for the link: below 1200 bytes, a link path over them sends nothing.
+pub fn set_link_ceilings(size: usize) {
     LINK_CEILING.with(|c| c.set(size));
 }
 
 /// Forget what the test links were told to do and what they did.
 pub fn reset_links() {
     LINK_CEILING.with(|c| c.set(MIN_DATAGRAM_SIZE));
+    CEILINGS.with(|ceilings| ceilings.borrow_mut().clear());
     SEND_OUTCOMES.with(|o| o.borrow_mut().clear());
     SENT.with(|s| s.borrow_mut().clear());
     GIVEN_UP.with(|g| g.borrow_mut().clear());
@@ -191,7 +194,7 @@ impl Link for TestLink {
     type MaxDatagramSizeError = ();
     type SendError = ();
     type Send<'a> = TestSend<'a>;
-    type MaxDatagramSizeChanged = core::future::Pending<()>;
+    type MaxDatagramSizeChanged = LinkCeilingChanged;
     fn id(&self) -> &TestLinkId {
         &self.0
     }
@@ -199,7 +202,8 @@ impl Link for TestLink {
         false
     }
     fn max_datagram_size(&self) -> Result<usize, ()> {
-        Ok(LINK_CEILING.with(Cell::get))
+        let set = with_ceiling(&self.0, |ceiling| ceiling.size);
+        Ok(set.unwrap_or_else(|| LINK_CEILING.with(Cell::get)))
     }
     fn send<'a>(&self, batch: &'a [OutgoingDatagram]) -> Self::Send<'a> {
         assert!(!batch.is_empty(), "a batch is not empty");
@@ -210,7 +214,78 @@ impl Link for TestLink {
         }
     }
     fn max_datagram_size_changed(&self) -> Self::MaxDatagramSizeChanged {
-        core::future::pending()
+        LinkCeilingChanged {
+            link: self.0.clone(),
+            since: with_ceiling(&self.0, |ceiling| ceiling.reports),
+        }
+    }
+}
+
+/// The datagram size limit of one of the tests' links, if set for it, how
+/// many changes it has reported and who waits for the next.
+struct LinkCeiling {
+    size: Option<usize>,
+    reports: u64,
+    waiting: Vec<Waker>,
+}
+
+fn with_ceiling<R>(link: &TestLinkId, f: impl FnOnce(&mut LinkCeiling) -> R) -> R {
+    CEILINGS.with(|ceilings| {
+        let mut ceilings = ceilings.borrow_mut();
+        let at = match ceilings.iter().position(|(id, _)| id == link) {
+            Some(at) => at,
+            None => {
+                ceilings.push((
+                    link.clone(),
+                    LinkCeiling {
+                        size: None,
+                        reports: 0,
+                        waiting: Vec::new(),
+                    },
+                ));
+                ceilings.len() - 1
+            }
+        };
+        f(&mut ceilings[at].1)
+    })
+}
+
+/// Make the datagram size limit of the test link `link` `size`, without
+/// reporting the change.
+pub fn set_link_ceiling(link: &TestLinkId, size: usize) {
+    with_ceiling(link, |ceiling| ceiling.size = Some(size));
+}
+
+/// Report a change of the datagram size limit of the test link `link`: the
+/// futures made before are ready.
+pub fn report_link_ceiling_changed(link: &TestLinkId) {
+    let waiting = with_ceiling(link, |ceiling| {
+        ceiling.reports += 1;
+        std::mem::take(&mut ceiling.waiting)
+    });
+    for waker in waiting {
+        waker.wake();
+    }
+}
+
+/// Ready once the test link has reported a change of its limit since the
+/// future was made.
+pub struct LinkCeilingChanged {
+    link: TestLinkId,
+    since: u64,
+}
+
+impl Future for LinkCeilingChanged {
+    type Output = ();
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        with_ceiling(&self.link, |ceiling| {
+            if ceiling.reports > self.since {
+                Poll::Ready(())
+            } else {
+                ceiling.waiting.push(cx.waker().clone());
+                Poll::Pending
+            }
+        })
     }
 }
 
