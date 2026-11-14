@@ -11,15 +11,19 @@
 use core::fmt;
 
 use sakuya_link::Link;
+use sakuya_packet_protection::{backend::AEAD_TAG_LEN, packet_number::TruncatedPacketNumber};
 use sakuya_wire::{
     parameters::ParametersOf,
     parts::Selector,
     v1::{
         encryption_level::EncryptionLevel,
+        packet_number::PacketNumber,
+        role::Role,
         transport_parameters::{
             TransportParameterSlots, TransportParameterSpace, integer::MaxUdpPayloadSize,
         },
     },
+    var_int::{VarInt, VarIntWidth},
 };
 
 use sakuya_recovery::{
@@ -54,7 +58,8 @@ use crate::{
     others::OtherNodes,
     send_strategy::{
         AnyActiveLinkPath, DatagramLimits, LinkPathRoleKind, LinkPathSendPlanner, Observe,
-        PlannerLinkPath, Publish, PublishOutcome, PublishTo, SendStrategy, SendStrategyTypes,
+        PacketOverheads, PlannerLinkPath, Publish, PublishOutcome, PublishTo, SendStrategy,
+        SendStrategyTypes,
     },
     share::{FlatRef, LineageLists, LineagePartList, LogicalPathKeys, NodeData},
     take::{GetAt, ReadEach, Take, TakeEach},
@@ -243,6 +248,18 @@ impl<P> LinkPathPlanner<P> {
     /// The planner.
     pub fn planner(&self) -> &P {
         &self.planner
+    }
+
+    /// Tell the planner what the link path can send in its next new
+    /// datagram and what each kind of packet takes beyond its frames, as
+    /// they are now.
+    pub(super) fn observe_conditions(&mut self, limits: DatagramLimits, overheads: PacketOverheads)
+    where
+        P: Observe<DatagramLimits> + Observe<PacketOverheads>,
+    {
+        self.limits = Some(limits);
+        self.planner.observe(limits);
+        self.planner.observe(overheads);
     }
 
     /// The planner, to publish to, to tell of its send conditions or to
@@ -471,6 +488,86 @@ where
     )
 }
 
+// ---- what a packet takes beyond its frames ----
+
+/// The bytes of the Version field of a long header (RFC 9000 §17.2).
+const VERSION_LEN: usize = 4;
+
+/// The packet number the next packet of a packet number space gets, and the
+/// largest one acknowledged in that space: the length of its Packet Number
+/// field follows from them (RFC 9000 §17.1, Appendix A.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct NextPacketNumber {
+    pub(super) next: PacketNumber,
+    pub(super) largest_acked: Option<PacketNumber>,
+}
+
+impl NextPacketNumber {
+    /// The length of the Packet Number field of the next packet, as the
+    /// packet writer encodes it; `None` when four bytes cannot cover the
+    /// packets not acknowledged.
+    fn encoded_len(self) -> Option<usize> {
+        let truncated = TruncatedPacketNumber::encode(self.next, self.largest_acked).ok()?;
+        Some(truncated.encoded_len().get())
+    }
+}
+
+/// What a packet of each kind takes beyond its frames on a link path now,
+/// from the fixed parts of its header and its AEAD tag.
+///
+/// `dcid_len` is the length of the shortest connection ID offered for the
+/// link path, `None` when none is; `scid_len` the length of this side's
+/// connection ID a long header carries. `max_len` is the largest datagram
+/// the link path can send now: the packet writer reserves a long header's
+/// Length field wide enough for it. `initial`, `handshake` and `one_rtt`
+/// are the next packet numbers of the spaces whose levels have keys to
+/// send with, `None` for one that has none; a 0-RTT packet is never
+/// planned, as no 0-RTT keys to send with are kept. An Initial packet's
+/// token is empty: a server's always is (RFC 9000 §17.2.2), and a client
+/// keeps none to send.
+pub(super) fn packet_overheads(
+    dcid_len: Option<usize>,
+    scid_len: usize,
+    max_len: usize,
+    initial: Option<NextPacketNumber>,
+    handshake: Option<NextPacketNumber>,
+    one_rtt: Option<NextPacketNumber>,
+    role: Role,
+) -> PacketOverheads {
+    let length_width =
+        VarIntWidth::shortest(VarInt::try_from(max_len).unwrap_or(VarInt::MAX)).encoded_len();
+    let empty_token = VarIntWidth::shortest(VarInt::ZERO).encoded_len();
+    let long = |dcid_len: usize, numbers: Option<NextPacketNumber>, token: usize| {
+        let pn_len = numbers?.encoded_len()?;
+        Some(
+            1 + VERSION_LEN
+                + 1
+                + dcid_len
+                + 1
+                + scid_len
+                + token
+                + length_width
+                + pn_len
+                + AEAD_TAG_LEN,
+        )
+    };
+    let Some(dcid_len) = dcid_len else {
+        return PacketOverheads {
+            expands_every_initial: role == Role::Client,
+            ..PacketOverheads::default()
+        };
+    };
+    PacketOverheads {
+        initial: long(dcid_len, initial, empty_token),
+        handshake: long(dcid_len, handshake, 0),
+        zero_rtt: None,
+        one_rtt: one_rtt
+            .and_then(NextPacketNumber::encoded_len)
+            .map(|pn_len| 1 + dcid_len + pn_len + AEAD_TAG_LEN),
+        expands_every_initial: role == Role::Client,
+    }
+}
+
 // ---- the ACK intents ----
 
 /// What publishing an ACK intent for any active link path gives back in
@@ -696,3 +793,87 @@ where
 }
 
 impl<K> PassiveDataComponent for ProbePingTickets<K> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn next(next: u64, largest_acked: Option<u64>) -> Option<NextPacketNumber> {
+        Some(NextPacketNumber {
+            next: PacketNumber::new(next).unwrap(),
+            largest_acked: largest_acked.map(|largest| PacketNumber::new(largest).unwrap()),
+        })
+    }
+
+    #[test]
+    fn a_packet_takes_its_header_with_the_shortest_connection_id_and_its_tag() {
+        let overheads = packet_overheads(
+            Some(8),
+            4,
+            1200,
+            next(0, None),
+            next(0, None),
+            next(0, None),
+            Role::Server,
+        );
+        // the first byte, the version, both connection IDs with their
+        // lengths, an empty token's length, a Length field of two bytes for
+        // 1200, a packet number of one byte and the tag
+        assert_eq!(
+            overheads.initial,
+            Some(1 + 4 + 1 + 8 + 1 + 4 + 1 + 2 + 1 + 16)
+        );
+        assert_eq!(
+            overheads.handshake,
+            Some(1 + 4 + 1 + 8 + 1 + 4 + 2 + 1 + 16)
+        );
+        assert_eq!(overheads.one_rtt, Some(1 + 8 + 1 + 16));
+        assert_eq!(overheads.zero_rtt, None);
+        assert!(!overheads.expands_every_initial);
+    }
+
+    #[test]
+    fn the_packet_number_and_the_length_field_take_what_they_need() {
+        // 301 packets not acknowledged take two bytes (RFC 9000 Appendix
+        // A.2); one past the largest acknowledged, one byte
+        let overheads = packet_overheads(
+            Some(8),
+            8,
+            16384,
+            next(300, None),
+            next(300, Some(299)),
+            None,
+            Role::Client,
+        );
+        assert_eq!(
+            overheads.initial,
+            Some(1 + 4 + 1 + 8 + 1 + 8 + 1 + 4 + 2 + 16)
+        );
+        assert_eq!(
+            overheads.handshake,
+            Some(1 + 4 + 1 + 8 + 1 + 8 + 4 + 1 + 16)
+        );
+        assert_eq!(overheads.one_rtt, None, "no keys to send with");
+        assert!(overheads.expands_every_initial);
+    }
+
+    #[test]
+    fn nothing_is_sent_without_a_connection_id_to_send_with() {
+        let overheads = packet_overheads(
+            None,
+            8,
+            1200,
+            next(0, None),
+            next(0, None),
+            next(0, None),
+            Role::Client,
+        );
+        assert_eq!(
+            overheads,
+            PacketOverheads {
+                expands_every_initial: true,
+                ..PacketOverheads::default()
+            }
+        );
+    }
+}

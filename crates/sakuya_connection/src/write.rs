@@ -312,7 +312,6 @@ impl<W, C, P> OpenPacket<W, C, P> {
     /// The same packet in the last position: what the filling gives the
     /// last content of the packet, and content that fits only as the last
     /// frame.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the filling loop uses it"))]
     pub(crate) fn make_last(self) -> OpenPacket<W, C, Last> {
         OpenPacket::new(self.writer)
     }
@@ -340,9 +339,14 @@ impl<W: PacketWriting, C, P> OpenPacket<W, C, P> {
         self.writer.buffer_len()
     }
 
+    /// The bytes a frame of `class` may take now: what the filling compares
+    /// an item's least room with before it hands the packet on.
+    pub(crate) fn room(&self, class: FlightClass) -> usize {
+        self.writer.room(class)
+    }
+
     /// Whether more packets follow in the datagram; the packet is sealed
     /// now.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the filling loop uses it"))]
     pub(crate) fn conclude(mut self, more: bool) {
         self.writer.conclude(more);
     }
@@ -528,9 +532,14 @@ impl<W: PacketWriting, C> ClosedPacket<W, C> {
         self.writer.buffer_len()
     }
 
+    /// The bytes a frame of `class` would have after this packet: what a
+    /// packet after it in the datagram is measured against.
+    pub(crate) fn room(&self, class: FlightClass) -> usize {
+        self.writer.room(class)
+    }
+
     /// Whether more packets follow in the datagram; the packet is sealed
     /// now.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the filling loop uses it"))]
     pub(crate) fn conclude(mut self, more: bool) {
         self.writer.conclude(more);
     }
@@ -570,9 +579,17 @@ impl<W: PacketWriting, C, P> Supplied<W, C, P> {
         }
     }
 
+    /// The bytes a frame of `class` may take now in the packet, or, once
+    /// it is closed, would have after it.
+    pub(crate) fn room(&self, class: FlightClass) -> usize {
+        match self {
+            Self::Open(packet) => packet.room(class),
+            Self::Closed(packet) => packet.room(class),
+        }
+    }
+
     /// Whether more packets follow in the datagram; the packet is sealed
     /// now.
-    #[cfg_attr(not(test), expect(dead_code, reason = "the filling loop uses it"))]
     pub(crate) fn conclude(self, more: bool) {
         match self {
             Self::Open(packet) => packet.conclude(more),

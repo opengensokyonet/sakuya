@@ -51,7 +51,7 @@ use sakuya_wire::{
 
 use super::{
     aead_usage::AeadUsage,
-    datagram_batch::DatagramState,
+    datagram_batch::{DatagramState, SealedInDatagram},
     keys::{DirectionKeys, OneRttSendKeys},
 };
 use crate::write::{
@@ -153,7 +153,7 @@ where
 {
     buffer: &'d mut BytesMut,
     datagram: &'d mut DatagramState,
-    slot: &'d mut Option<A::Sealed>,
+    slot: &'d mut Option<SealedInDatagram<A::Sealed>>,
     /// Kept until the packet is sealed or taken back.
     attempt: Option<A>,
     keys: SealingKeys<'d, B>,
@@ -202,7 +202,7 @@ where
     pub(super) fn start(
         buffer: &'d mut BytesMut,
         datagram: &'d mut DatagramState,
-        slot: &'d mut Option<A::Sealed>,
+        slot: &'d mut Option<SealedInDatagram<A::Sealed>>,
         attempt: A,
         start: PacketStart<'d, B>,
         largest_acked: Option<PacketNumber>,
@@ -424,7 +424,10 @@ where
         let sealed = attempt
             .seal(packet_len, self.pmtu_probe)
             .expect("a packet with a frame is sealed");
-        *self.slot = Some(sealed);
+        *self.slot = Some(SealedInDatagram {
+            sealed,
+            in_flight: self.written.in_flight.then_some(packet_len),
+        });
         self.datagram.packets += 1;
         if self.written.in_flight {
             self.datagram.in_flight += packet_len;

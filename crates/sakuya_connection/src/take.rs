@@ -207,6 +207,12 @@ impl<X, H, T: GetAt<X, I>, I> GetAt<X, There<I>> for HCons<H, T> {
 }
 
 /// A list of borrows borrowed again for a shorter time, positions kept.
+///
+/// It is implemented for every `'s`, not only one the borrows outlive:
+/// [`reborrow`](Self::reborrow) takes the list for `'s`, so it can only be
+/// called for one they do, and a bound that holds for every pair of
+/// lifetimes, such as `for<'v, 's> <L as LineageLists<'v, T>>::LinkPath:
+/// Reborrow<'s>`, can be met.
 pub trait Reborrow<'s> {
     /// The list with every borrow shortened to `'s`.
     type Out;
@@ -220,7 +226,7 @@ impl<'s> Reborrow<'s> for HNil {
         HNil
     }
 }
-impl<'s, 'v: 's, X: 's, T: Reborrow<'s>> Reborrow<'s> for HCons<&'v mut X, T> {
+impl<'s, X: 's, T: Reborrow<'s>> Reborrow<'s> for HCons<&mut X, T> {
     type Out = HCons<&'s mut X, T::Out>;
     #[inline]
     fn reborrow(&'s mut self) -> Self::Out {
@@ -300,6 +306,51 @@ impl<'r, V> Lineage<'r, V> {
             list: self.list.reborrow(),
             taken: &mut *self.taken,
         }
+    }
+}
+
+/// A list of mutable borrows made shared: what a take to read only gives.
+pub(crate) trait ShareEach {
+    /// One shared borrow for each, in order.
+    type Out;
+    /// Make every borrow shared.
+    fn share_each(self) -> Self::Out;
+}
+impl ShareEach for HNil {
+    type Out = HNil;
+    #[inline]
+    fn share_each(self) -> HNil {
+        HNil
+    }
+}
+impl<'a, X, T: ShareEach> ShareEach for HCons<&'a mut X, T> {
+    type Out = HCons<&'a X, T::Out>;
+    #[inline]
+    fn share_each(self) -> Self::Out {
+        HCons {
+            head: &*self.head,
+            tail: self.tail.share_each(),
+        }
+    }
+}
+
+impl<'r, V> Lineage<'r, V> {
+    /// Take the components `U` out to read them only, as shared borrows in
+    /// the order of `U`, with the rest of the view, which can then be taken
+    /// from or lent mutably while they are read.
+    ///
+    /// Nothing can change them through the borrows given, so the take is
+    /// not recorded: what reads them is not reread for it.
+    #[inline]
+    pub(crate) fn take_read<'a, U, Is>(self) -> (<U::Out as ShareEach>::Out, Lineage<'r, V::Rest>)
+    where
+        V: TakeEach<'a, U, Is>,
+        U: RefsOf<'a>,
+        U::Out: ShareEach,
+    {
+        let Lineage { list, taken } = self;
+        let (items, rest) = list.take_each(&mut |_| {});
+        (items.share_each(), Lineage { list: rest, taken })
     }
 }
 

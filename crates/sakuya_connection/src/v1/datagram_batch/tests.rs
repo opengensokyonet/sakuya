@@ -11,6 +11,10 @@ use sakuya_packet_protection::{
     secret::TrafficSecret,
 };
 use sakuya_recovery::{
+    congestion::{
+        CongestionContext, CongestionController, InFlightPacket, RemovedPacket,
+        SpuriouslyLostPacket,
+    },
     pacing::{Pacer, PacingInput},
     pto::ProbeCount,
     send_journals::{DequeSealedPacket, DequeSendJournals, SendJournals},
@@ -52,11 +56,54 @@ impl From<PaddingSummary> for Summary {
 }
 
 type Journals = DequeSendJournals<u64, Summary, ()>;
-type Batch = DatagramBatch<DequeSealedPacket, DequeSealedPacket, DequeSealedPacket>;
+type Batch = DatagramBatch<DequeSealedPacket, DequeSealedPacket, DequeSealedPacket, usize>;
 
-/// A pacer that only counts what it is charged.
+/// A pacer that only counts what it is charged, and a congestion
+/// controller that gives each packet sealed its own size.
 #[derive(Debug, Default)]
 struct Charged(usize);
+
+impl CongestionController<u64> for Charged {
+    type SentState = usize;
+    type LossState = ();
+    fn window(&self) -> usize {
+        usize::MAX
+    }
+    fn on_packet_sealed(&mut self, bytes: usize, _: bool, _: u64) -> usize {
+        bytes
+    }
+    fn on_spurious_loss(
+        &mut self,
+        _: (),
+        _: impl Iterator<Item = SpuriouslyLostPacket<u64>>,
+        _: &CongestionContext<u64>,
+    ) {
+    }
+    fn on_ce(&mut self, _: u64, _: u64, _: &CongestionContext<u64>) {}
+    fn on_lost(
+        &mut self,
+        _: impl Iterator<Item = InFlightPacket<u64, usize>>,
+        _: &CongestionContext<u64>,
+    ) {
+    }
+    fn on_persistent_congestion(&mut self, _: &CongestionContext<u64>) {}
+    fn wants_recovery_send(&mut self) -> bool {
+        false
+    }
+    fn on_acked(
+        &mut self,
+        _: impl Iterator<Item = InFlightPacket<u64, usize>>,
+        _: &CongestionContext<u64>,
+    ) {
+    }
+    fn on_removed(
+        &mut self,
+        _: impl Iterator<Item = RemovedPacket<usize>>,
+        _: &CongestionContext<u64>,
+    ) {
+    }
+    fn on_max_datagram_size_changed(&mut self, _: usize, _: bool, _: &CongestionContext<u64>) {}
+}
 
 impl Pacer<u64> for Charged {
     fn next_release(&self) -> Option<u64> {
@@ -137,6 +184,7 @@ impl Accounts {
             used: Rc::clone(&self.used),
         };
         batch.start_datagram(
+            0,
             cid,
             role,
             max_len,
@@ -285,11 +333,11 @@ fn a_client_initial_and_a_handshake_packet_are_coalesced_and_padded_to_1200() {
     let entry = batch.take_accepted(1).next().unwrap();
     assert_eq!(entry.len(), 1200);
     assert!(batch.is_empty());
-    let initial_record = record(&mut initial, entry.initial.unwrap());
+    let initial_record = record(&mut initial, entry.initial.unwrap().sealed);
     assert_eq!(initial_record.bytes, first_len);
     assert_eq!(initial_record.summaries, [Summary::Frame("crypto")]);
     assert!(initial_record.ack_eliciting && initial_record.in_flight);
-    let handshake_record = record(&mut handshake, entry.handshake.unwrap());
+    let handshake_record = record(&mut handshake, entry.handshake.unwrap().sealed);
     assert_eq!(handshake_record.bytes, second_len);
     assert_eq!(
         handshake_record.summaries,
@@ -331,7 +379,7 @@ fn a_short_packet_is_padded_for_the_header_protection_sample() {
     assert_eq!(usage.sealed_with_current(), 1);
 
     let entry = batch.take_first().unwrap();
-    let record = record(&mut application, entry.application_data.unwrap());
+    let record = record(&mut application, entry.application_data.unwrap().sealed);
     assert!(record.pmtu_probe);
     assert_eq!(record.summaries, [Summary::Frame("ping"), Summary::Padding]);
 }
@@ -380,7 +428,7 @@ fn padding_goes_before_the_frames_of_a_closed_packet() {
 
     let record = record(
         &mut application,
-        batch.take_first().unwrap().application_data.unwrap(),
+        batch.take_first().unwrap().application_data.unwrap().sealed,
     );
     assert_eq!(
         record.summaries,
@@ -487,7 +535,7 @@ fn ack_only_content_is_not_limited_by_what_may_go_in_flight() {
     assert_eq!(accounts.credit(), 3000 - len as u64);
     let record = record(
         &mut handshake,
-        batch.take_first().unwrap().handshake.unwrap(),
+        batch.take_first().unwrap().handshake.unwrap().sealed,
     );
     assert!(!record.ack_eliciting && !record.in_flight);
     assert_eq!(record.summaries, [Summary::Frame("ack")]);
@@ -544,7 +592,7 @@ fn a_packet_of_padding_alone_brings_the_datagram_to_its_floor() {
     assert!(payload.iter().all(|&b| b == 0));
     let record = record(
         &mut handshake,
-        batch.take_first().unwrap().handshake.unwrap(),
+        batch.take_first().unwrap().handshake.unwrap().sealed,
     );
     assert_eq!(record.summaries, [Summary::Padding]);
     assert!(!record.ack_eliciting && record.in_flight);

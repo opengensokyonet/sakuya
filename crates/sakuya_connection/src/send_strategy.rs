@@ -548,7 +548,8 @@ pub enum PlannedDatagram<F> {
 }
 
 /// The content planned first in a packet: the packet's kind, its frame
-/// source and the least room it needs.
+/// source, the least room it needs and whether it counts in the bytes in
+/// flight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LeadingContent<Id> {
     /// The kind of packet it goes in.
@@ -557,6 +558,9 @@ pub struct LeadingContent<Id> {
     pub source: Id,
     /// The least room it needs.
     pub min: MinimumLengths,
+    /// Whether it counts in the bytes in flight: the room it takes is
+    /// limited as that class's is.
+    pub class: FlightClass,
 }
 
 /// The plan of one datagram; dropping it ends the datagram.
@@ -664,6 +668,7 @@ pub trait FrameSourceCursor<S: FrameSourceSet> {
 pub struct PlannedItem<'c, T, F: ?Sized> {
     item: T,
     min: MinimumLengths,
+    class: FlightClass,
     last_in_packet: bool,
     feedback: &'c mut F,
 }
@@ -673,19 +678,27 @@ impl<T: fmt::Debug, F: ?Sized> fmt::Debug for PlannedItem<'_, T, F> {
         f.debug_struct("PlannedItem")
             .field("item", &self.item)
             .field("min", &self.min)
+            .field("class", &self.class)
             .field("last_in_packet", &self.last_in_packet)
             .finish_non_exhaustive()
     }
 }
 
 impl<'c, T, F: SupplyFeedback + ?Sized> PlannedItem<'c, T, F> {
-    /// The planned item `item`, needing at least `min`, the last item of
-    /// its packet if `last_in_packet`; what is written for it goes back to
-    /// `feedback`.
-    pub fn new(item: T, min: MinimumLengths, last_in_packet: bool, feedback: &'c mut F) -> Self {
+    /// The planned item `item`, needing at least `min` of the room of
+    /// `class`, the last item of its packet if `last_in_packet`; what is
+    /// written for it goes back to `feedback`.
+    pub fn new(
+        item: T,
+        min: MinimumLengths,
+        class: FlightClass,
+        last_in_packet: bool,
+        feedback: &'c mut F,
+    ) -> Self {
         Self {
             item,
             min,
+            class,
             last_in_packet,
             feedback,
         }
@@ -694,6 +707,12 @@ impl<'c, T, F: SupplyFeedback + ?Sized> PlannedItem<'c, T, F> {
     /// The least room the item needs.
     pub fn min(&self) -> MinimumLengths {
         self.min
+    }
+
+    /// Whether the item counts in the bytes in flight: the room it may take
+    /// is that class's.
+    pub fn class(&self) -> FlightClass {
+        self.class
     }
 
     /// Whether the item is the last one planned for its packet.

@@ -151,6 +151,9 @@ thread_local! {
     static MAX_PER_POLL: Cell<usize> = const { Cell::new(16) };
     /// How many inputs a logical path of the next connection holds.
     static MAX_HELD: Cell<usize> = const { Cell::new(16) };
+    /// How many datagrams the sending call of a link path of the next
+    /// connection hands to its link at once.
+    static MAX_PER_SEND: Cell<usize> = const { Cell::new(16) };
     /// The first datagrams the next connection is made with.
     static FIRST_DATAGRAMS: RefCell<Vec<Datagram>> = const { RefCell::new(Vec::new()) };
     /// Whether the next connection is made with a first flight read before
@@ -165,6 +168,8 @@ thread_local! {
     static RIVAL: Cell<bool> = const { Cell::new(false) };
     /// The routing domain of the last connection made.
     static ROUTING: RefCell<Option<TestRouting>> = const { RefCell::new(None) };
+    /// The last line the feeder of a recovery layer logged.
+    static LAST_STATUS: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// The parts of the tests' connections.
@@ -190,11 +195,14 @@ fn reset() {
     MAX_ACK_RANGES.with(|m| m.set(MaxAckRanges::DEFAULT));
     MAX_PER_POLL.with(|m| m.set(16));
     MAX_HELD.with(|m| m.set(16));
+    MAX_PER_SEND.with(|m| m.set(16));
     FIRST_DATAGRAMS.with(|f| f.borrow_mut().clear());
     FIRST_READ.with(|f| f.set(false));
     READ_STATE.with(|r| r.borrow_mut().take());
     RIVAL.with(|r| r.set(false));
     ROUTING.with(|r| r.borrow_mut().take());
+    LAST_STATUS.with(|l| l.borrow_mut().take());
+    common::reset_links();
 }
 
 /// A datagram of the tests, as it arrived.
@@ -574,6 +582,24 @@ mod probe {
         }
         fn source(item: &CNil) -> CNil {
             match *item {}
+        }
+    }
+    /// The probe has no frame sources to hand an item to.
+    impl<T: ConnectionChoices, K: sakuya_connection::frame_source::PacketKind, V, S>
+        sakuya_connection::frame_source::FrameSourceDispatch<T, K, V, S, ()> for Part
+    {
+        fn supply<W, P>(
+            _: &mut Lineage<'_, V>,
+            _: InstantOf<T>,
+            item: CNil,
+            _: sakuya_connection::write::OpenPacket<W, sakuya_connection::write::ClassOfSource, P>,
+        ) -> sakuya_connection::write::Supplied<W, sakuya_connection::write::ClassOfSource, P>
+        where
+            W: sakuya_connection::write::PacketWriting,
+            W::Attempt: PacketSendAttempt<Summary = S>,
+            P: sakuya_connection::write::PacketPosition,
+        {
+            match item {}
         }
     }
 
@@ -1583,12 +1609,23 @@ mod probe {
                     .flat_map(|(_, d)| d.declared_lost())
                     .map(|p| (p.number.get(), p.retain_until))
                     .collect();
-                log(format!(
+                let line = format!(
                     "in flight {}, outstanding {outstanding}, lost {lost:?}, permits {}, backoff {}",
                     state.bytes_in_flight(),
                     state.probe_permits(),
                     lineage.get::<ProbeTimeout<Duration>, Jp>().backoff(),
-                ));
+                );
+                // the sending call takes the state it reads on each of its
+                // polls: only a change is logged
+                let changed = LAST_STATUS.with(|last| {
+                    let mut last = last.borrow_mut();
+                    let changed = last.as_deref() != Some(line.as_str());
+                    *last = Some(line.clone());
+                    changed
+                });
+                if changed {
+                    log(line);
+                }
                 None
             }
         }
@@ -1662,6 +1699,14 @@ fn client_dcid() -> ConnectionId {
 
 const CLIENT_DCID: [u8; 8] = [0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
 
+/// The connection ID the tests' connections are made with as their own.
+fn server_cid() -> ConnectionId {
+    // invariant: eight bytes is a valid connection ID length
+    ConnectionId::new(&SERVER_CID).expect("eight bytes")
+}
+
+const SERVER_CID: [u8; 8] = [0x5e, 0x5e, 0x5e, 0x5e, 0x01, 0x02, 0x03, 0x04];
+
 /// Version 1's facts for a connection whose first logical link is
 /// `validation`.
 fn args<T>(validation: AddressValidation) -> v1::ConnectionArgs<T, Parts>
@@ -1697,6 +1742,9 @@ where
         destination_connection_ids:
             sakuya_connection::connection_id::sequence_map::SequenceMapDestinationConnectionIdStrategyConfig::new(8),
         reset_token_registry: sakuya_datagram_routing::route::reset::StatelessResetTokens::new(),
+        first_local_connection_id: server_cid(),
+        max_datagrams_per_send: NonZeroUsize::new(MAX_PER_SEND.with(Cell::get))
+            .expect("the tests send at least one datagram at once"),
     }
 }
 
@@ -2045,13 +2093,18 @@ fn a_link_path_made_active_gets_its_recovery_layer_and_is_seen_beside_another() 
     advance_to(ms(20));
     assert!(outer.poll(&mut connection).is_pending());
     let log = recovery_log();
-    // the factory sees the other layer only, read only, with its estimate
-    assert_eq!(log.len(), 1, "{log:?}");
-    assert!(
-        log[0].starts_with("lent beside Recovery(SoleLogicalPath, ")
-            && log[0].ends_with("smoothed 333ms"),
-        "{log:?}"
-    );
+    // the factory sees the other layer only, read only, with its estimate:
+    // as the first link path's access is lent, and as the second's sending
+    // call, woken when its layer was built, lends its own
+    assert_eq!(log.len(), 2, "{log:?}");
+    for line in &log {
+        assert!(
+            line.starts_with("lent beside Recovery(SoleLogicalPath, ")
+                && line.ends_with("smoothed 333ms"),
+            "{log:?}"
+        );
+    }
+    assert_ne!(log[0], log[1], "each beside the other");
     // the pacer's next release is the part's deadline; when it comes the
     // pacer is refilled, and the debug checks of each poll find the
     // deadline gone or later
@@ -2073,7 +2126,8 @@ fn feed(steps: impl IntoIterator<Item = (Duration, probe::Step)>) {
     FEED.with(|f| f.borrow_mut().extend(steps));
 }
 
-/// The lines the feeder logged since the last call.
+/// The lines the feeder logged since the last call: each a change of what
+/// it logs.
 fn statuses() -> Vec<String> {
     take_log()
         .into_iter()
@@ -3203,6 +3257,8 @@ fn padded(before: &[BytesMut], last: impl Fn(&[u8]) -> BytesMut, payload: &[u8])
 fn the_receiving_call_receives_each_packet_of_a_datagram_and_counts_the_whole_datagram() {
     use probe::PacketStep::{Inspect, InspectCredit};
     reset();
+    // the link takes less than 1200 bytes: nothing is sent
+    common::set_link_ceiling(MIN_DATAGRAM_SIZE - 1);
     let first = link();
     feed_packets([(ms(6), Inspect), (ms(7), InspectCredit(first.clone()))]);
     let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
@@ -3235,6 +3291,8 @@ fn the_receiving_call_receives_each_packet_of_a_datagram_and_counts_the_whole_da
 fn the_first_datagrams_are_received_and_counted_as_later_ones_are() {
     use probe::PacketStep::{Inspect, InspectCredit};
     reset();
+    // the link takes less than 1200 bytes: nothing is sent
+    common::set_link_ceiling(MIN_DATAGRAM_SIZE - 1);
     let first = link();
     feed_packets([(ms(6), Inspect), (ms(7), InspectCredit(first.clone()))]);
     let datagram = padded(
@@ -3275,6 +3333,8 @@ fn the_first_datagrams_are_received_and_counted_as_later_ones_are() {
 fn a_server_made_with_a_read_first_flight_starts_with_what_was_read() {
     use probe::PacketStep::{Inspect, InspectCredit};
     reset();
+    // the link takes less than 1200 bytes: nothing is sent
+    common::set_link_ceiling(MIN_DATAGRAM_SIZE - 1);
     FIRST_READ.with(|f| f.set(true));
     let first = link();
     feed_packets([(ms(6), Inspect), (ms(7), InspectCredit(first.clone()))]);
@@ -3356,6 +3416,8 @@ fn read_first(receiver: &mut TestReceiver) -> (FirstFlightReadState<Mine>, Resul
 fn reading_the_first_flight_ends_with_the_first_client_hello() {
     use probe::PacketStep::{Inspect, InspectCredit};
     reset();
+    // the link takes less than 1200 bytes: nothing is sent
+    common::set_link_ceiling(MIN_DATAGRAM_SIZE - 1);
     let first = link();
     let mut receiver = test_receiver();
     let hello = client_hello();
@@ -3379,6 +3441,7 @@ fn reading_the_first_flight_ends_with_the_first_client_hello() {
     assert_eq!(result, Err("pending".to_owned()));
     assert!(state.first_client_hello().is_none());
     reset();
+    common::set_link_ceiling(MIN_DATAGRAM_SIZE - 1);
     let mut receiver = test_receiver();
     deliver(
         padded(
@@ -3523,6 +3586,8 @@ fn a_datagram_whose_packets_wait_for_their_keys_counts_toward_the_limit() {
 fn a_packet_without_its_keys_is_held_until_they_come() {
     use probe::PacketStep::{Inspect, InspectHeld, InstallHandshakeKeys};
     reset();
+    // the link takes less than 1200 bytes: nothing is sent
+    common::set_link_ceiling(MIN_DATAGRAM_SIZE - 1);
     let first = link();
     feed_packets([
         (ms(6), Inspect),
@@ -3558,6 +3623,8 @@ fn a_packet_without_its_keys_is_held_until_they_come() {
 fn a_poll_receives_at_most_its_limit_and_wakes_itself_for_the_rest() {
     use probe::PacketStep::Inspect;
     reset();
+    // the link takes less than 1200 bytes: nothing is sent
+    common::set_link_ceiling(MIN_DATAGRAM_SIZE - 1);
     MAX_PER_POLL.with(|m| m.set(1));
     let first = link();
     feed_packets([(ms(5), Inspect), (ms(6), Inspect)]);
@@ -3786,8 +3853,6 @@ fn an_ack_samples_the_rtt_and_settles_what_it_newly_acknowledges() {
             // grows the window by what was acknowledged
             "rtt latest 40ms, smoothed 40ms, window 15600, in flight 0, permits 0, backoff 0, \
              first sample Some(50ms)",
-            // what the inspection took is read again
-            "in flight 0, outstanding 0, lost [], permits 0, backoff 0",
         ]
     );
 }
@@ -3840,6 +3905,8 @@ fn deliveries_go_back_before_losses_and_a_late_ack_tells_of_a_spurious_loss() {
 #[test]
 fn an_ack_that_acknowledges_nothing_new_keeps_the_backoff() {
     reset();
+    // the link takes less than 1200 bytes: nothing is sent
+    common::set_link_ceiling(MIN_DATAGRAM_SIZE - 1);
     let first = link();
     feed([
         (
@@ -3885,10 +3952,8 @@ fn an_ack_that_acknowledges_nothing_new_keeps_the_backoff() {
         at(180).as_deref(),
         Some("in flight 1200, outstanding 1, lost [], permits 2, backoff 1")
     );
-    assert_eq!(
-        at(200).as_deref(),
-        Some("in flight 1200, outstanding 1, lost [], permits 2, backoff 1")
-    );
+    // nothing newly acknowledged: nothing changes
+    assert_eq!(at(200), None);
     assert_eq!(
         at(210).as_deref(),
         Some("in flight 0, outstanding 0, lost [], permits 0, backoff 0")
@@ -3975,6 +4040,8 @@ fn a_delivered_ack_frame_stops_what_it_reported_from_being_reported() {
 fn a_lost_ack_frame_owes_again_what_it_answered() {
     use probe::PacketStep::{Inspect, Receive};
     reset();
+    // the link takes less than 1200 bytes: nothing is sent
+    common::set_link_ceiling(MIN_DATAGRAM_SIZE - 1);
     let first = link();
     feed([
         (ms(6), probe::Step::SentAck(PacketNumberSpaceKind::Initial)),
@@ -4156,6 +4223,8 @@ fn the_planner_is_told_when_its_link_path_drains() {
 fn an_acknowledgment_due_now_is_published_asking_room_for_the_shortest_frame() {
     use probe::PacketStep::Receive;
     reset();
+    // the link takes less than 1200 bytes: nothing is sent
+    common::set_link_ceiling(MIN_DATAGRAM_SIZE - 1);
     let first = link();
     feed_packets([(
         ms(5),
@@ -4211,6 +4280,8 @@ fn an_acknowledgment_that_is_not_due_now_publishes_no_intent() {
 fn the_acknowledgment_intent_goes_when_the_acknowledgment_is_written() {
     use probe::PacketStep::Receive;
     reset();
+    // the link takes less than 1200 bytes: nothing is sent
+    common::set_link_ceiling(MIN_DATAGRAM_SIZE - 1);
     let first = link();
     feed([(ms(8), probe::Step::SentAck(PacketNumberSpaceKind::Initial))]);
     feed_packets([
@@ -4248,6 +4319,8 @@ fn the_acknowledgment_intent_goes_when_the_acknowledgment_is_written() {
 fn the_acknowledgment_intent_is_published_again_when_the_shortest_frame_grows() {
     use probe::PacketStep::Receive;
     reset();
+    // the link takes less than 1200 bytes: nothing is sent
+    common::set_link_ceiling(MIN_DATAGRAM_SIZE - 1);
     let first = link();
     feed_packets([
         (
@@ -4365,10 +4438,10 @@ fn the_planner_is_told_what_its_link_path_can_send_when_the_credit_grows() {
     assert_eq!(limits.pmtu_conclusion, 1200);
     assert_eq!(limits.probe_permits, 0);
     // nothing is in flight in the initial window of ten 1200-byte
-    // datagrams (RFC 9002 §7.2); the pacer has not been refilled, since
-    // nothing was sent
+    // datagrams (RFC 9002 §7.2); the sending call refilled the pacer when
+    // it first looked for something to send, which releases the window
     assert_eq!(limits.congestion_window_left, 12000);
-    assert_eq!(limits.pacing_allowance, 0);
+    assert_eq!(limits.pacing_allowance, 12000);
 }
 
 /// A NEW_CONNECTION_ID frame (RFC 9000 §19.15) numbered `sequence`, with
@@ -4528,6 +4601,353 @@ fn a_new_connection_id_frame_to_a_zero_length_handshake_connection_id_is_a_conne
     assert_eq!(lines.len(), 2, "{lines:?}");
     assert!(
         lines[1].starts_with("error: NewConnectionId { source: ZeroLengthInUse"),
+        "{lines:?}"
+    );
+}
+
+// ---- sending ----
+
+/// An Initial packet a server sent, opened with the keys the client opens
+/// it with.
+#[derive(Debug)]
+struct SentInitial {
+    dcid: Vec<u8>,
+    scid: Vec<u8>,
+    number: u64,
+    payload: Vec<u8>,
+    /// The length of the packet in its datagram.
+    len: usize,
+}
+
+/// A variable-length integer at the start of `bytes` (RFC 9000 §16), and
+/// its width.
+fn read_var_int(bytes: &[u8]) -> (usize, usize) {
+    let width = 1 << (bytes[0] >> 6);
+    let value = bytes[1..width]
+        .iter()
+        .fold(u64::from(bytes[0] & 0x3f), |value, byte| {
+            (value << 8) | u64::from(*byte)
+        });
+    (usize::try_from(value).unwrap(), width)
+}
+
+/// The first packet of `datagram`, an Initial packet of the server without
+/// a token, opened.
+fn open_sent_initial(datagram: &[u8]) -> SentInitial {
+    assert_eq!(datagram[0] & 0xf0, 0xc0, "an Initial packet: {datagram:?}");
+    let mut at = 5;
+    let dcid_len = usize::from(datagram[at]);
+    let dcid = datagram[at + 1..at + 1 + dcid_len].to_vec();
+    at += 1 + dcid_len;
+    let scid_len = usize::from(datagram[at]);
+    let scid = datagram[at + 1..at + 1 + scid_len].to_vec();
+    at += 1 + scid_len;
+    assert_eq!(datagram[at], 0, "an empty token");
+    at += 1;
+    let (length, width) = read_var_int(&datagram[at..]);
+    let pn_offset = at + width;
+    let len = pn_offset + length;
+    let mut packet = datagram[..len].to_vec();
+    let keys = server_keys();
+    let truncated = keys.header.remove(&mut packet, pn_offset).unwrap();
+    let header_len = pn_offset + truncated.encoded_len().get();
+    let number = truncated.decode(None);
+    let payload = keys
+        .packet
+        .open(number, &mut packet, header_len)
+        .unwrap()
+        .to_vec();
+    SentInitial {
+        dcid,
+        scid,
+        number: number.get(),
+        payload,
+        len,
+    }
+}
+
+/// Whether `datagram` starts with a packet with a short header: a 1-RTT
+/// packet.
+fn short_header(datagram: &[u8]) -> bool {
+    datagram[0] & 0x80 == 0
+}
+
+/// The Source Connection ID of the client's Initial packets in the tests
+/// of sending.
+const CLIENT_SCID: [u8; 8] = [0xc5; 8];
+
+#[test]
+fn a_server_answers_the_first_initial_packet_with_an_ack_in_an_initial_packet() {
+    reset();
+    let first = link();
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    let datagram = padded(
+        &[],
+        |payload| initial_from(&CLIENT_SCID, 0, payload),
+        &ping(),
+    );
+    let size = datagram.len();
+    deliver(datagram, &first, ms(5));
+    let _ = run(&mut connection, 5..=6);
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let (_, datagram) = &sent[0];
+    let packet = open_sent_initial(datagram);
+    // to the client's Source Connection ID, from this side's first one
+    assert_eq!(packet.dcid, CLIENT_SCID);
+    assert_eq!(packet.scid, SERVER_CID);
+    assert_eq!(packet.number, 0);
+    // an ACK frame of the packet 0, without a delay in the Initial space
+    // and with no more ranges
+    assert_eq!(packet.payload, [0x02, 0x00, 0x00, 0x00, 0x00]);
+    // the datagram's one packet elicits no acknowledgment: it is not padded,
+    // and well within three times what arrived; its header and tag are what
+    // the planner was told an Initial packet takes
+    assert_eq!(packet.len, datagram.len());
+    assert_eq!(datagram.len(), 1 + 4 + 1 + 8 + 1 + 8 + 1 + 2 + 1 + 16 + 5);
+    assert!(datagram.len() < MIN_DATAGRAM_SIZE);
+    assert!(datagram.len() <= 2 * size);
+}
+
+#[test]
+fn a_probe_timeout_sends_a_ping_padded_to_1200_bytes_as_the_credit_allows() {
+    reset();
+    let first = link();
+    feed([(
+        ms(6),
+        probe::Step::Sent {
+            space: PacketNumberSpaceKind::Initial,
+            count: 1,
+        },
+    )]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    deliver(
+        padded(
+            &[],
+            |payload| initial_from(&CLIENT_SCID, 0, payload),
+            &ping(),
+        ),
+        &first,
+        ms(5),
+    );
+    let _ = run(&mut connection, 5..=6);
+    assert_eq!(common::take_sent().len(), 1, "the ACK");
+    // 333 ms + 4 × 166.5 ms from the packet sent at 6 ms
+    let _ = run(&mut connection, 1004..=1004);
+    assert_eq!(common::take_sent(), []);
+    let _ = run(&mut connection, 1005..=1006);
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let (_, datagram) = &sent[0];
+    assert_eq!(datagram.len(), MIN_DATAGRAM_SIZE);
+    let packet = open_sent_initial(datagram);
+    // after the ACK and the packet sent at 6 ms
+    assert_eq!(packet.number, 2);
+    assert_eq!(packet.payload[0], 0x01, "a PING");
+    assert!(packet.payload[1..].iter().all(|byte| *byte == 0), "PADDING");
+    // 2400 bytes may go back for the 1200 that arrived; less the ACK and
+    // the probe, the next probe does not fit
+    let outer = Outer::new();
+    for at in (1010..6000).step_by(10) {
+        advance_to(ms(at));
+        assert!(outer.poll(&mut connection).is_pending());
+    }
+    assert_eq!(
+        common::take_sent(),
+        [],
+        "held by the anti-amplification limit"
+    );
+    // the client's next datagram lets it go, with the ACK of its packet
+    deliver(
+        padded(
+            &[],
+            |payload| initial_from(&CLIENT_SCID, 1, payload),
+            &ping(),
+        ),
+        &first,
+        ms(6000),
+    );
+    let _ = run(&mut connection, 6000..=6001);
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let (_, datagram) = &sent[0];
+    assert_eq!(datagram.len(), MIN_DATAGRAM_SIZE);
+    let packet = open_sent_initial(datagram);
+    assert_eq!(packet.payload[..6], [0x02, 0x01, 0x00, 0x00, 0x01, 0x01]);
+}
+
+/// A server whose link path has, once polled at 1005 ms, two datagrams to
+/// send in one batch: the ACK of two 1-RTT packets in a 1-RTT packet, and
+/// the probe timeout's PING, padded, in an Initial packet, which is of a
+/// lower level and goes after it. Before, it sent the ACK of the client's
+/// Initial packet, which is taken.
+fn with_two_datagrams_at_1005_ms(
+    first: &LinkId<(), ()>,
+    later: impl IntoIterator<Item = (Duration, probe::PacketStep)>,
+) -> impl Future<Output = ()> + Unpin {
+    use probe::PacketStep::{InstallOneRttKeys, Receive};
+    feed([(
+        ms(6),
+        probe::Step::Sent {
+            space: PacketNumberSpaceKind::Initial,
+            count: 1,
+        },
+    )]);
+    feed_packets([
+        (ms(4), InstallOneRttKeys),
+        (
+            ms(5),
+            Receive(received(
+                initial_from(&CLIENT_SCID, 0, &ping()),
+                first,
+                ms(5),
+            )),
+        ),
+        // one ack-eliciting packet waits for the maximum ACK delay, a second
+        // is acknowledged at once
+        (
+            ms(1004),
+            Receive(received(one_rtt_packet_of(0, 0, &ping()), first, ms(1004))),
+        ),
+        (
+            ms(1005),
+            Receive(received(one_rtt_packet_of(0, 1, &ping()), first, ms(1005))),
+        ),
+    ]);
+    feed_packets(later);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    let _ = run(&mut connection, 4..=6);
+    assert_eq!(
+        common::take_sent().len(),
+        1,
+        "the ACK of the Initial packet"
+    );
+    assert_eq!(common::take_batch_sizes(), [1]);
+    let _ = run(&mut connection, 1004..=1004);
+    assert_eq!(common::take_sent(), []);
+    connection
+}
+
+#[test]
+fn the_link_accepts_a_prefix_and_the_rest_is_handed_over_again_with_its_send_time() {
+    reset();
+    let first = link();
+    let mut connection = with_two_datagrams_at_1005_ms(&first, []);
+    common::plan_sends([
+        common::SendOutcome::Accept(1),
+        common::SendOutcome::Hold(usize::MAX),
+    ]);
+    let _ = run(&mut connection, 1005..=1006);
+    // the ACK accepted; the PING handed over again, alone
+    assert_eq!(common::take_batch_sizes(), [2, 1]);
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(short_header(&sent[0].1));
+    // accepted later, at 1100 ms
+    advance_to(ms(1100));
+    common::release_held_send();
+    let _ = run(&mut connection, 1100..=1100);
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].0, ms(1100));
+    assert_eq!(open_sent_initial(&sent[0].1).payload[0], 0x01);
+    // the next probe timeout counts from when the PING was accepted, with
+    // the backoff doubled: 1100 ms + 2 × 999 ms
+    let log = run(&mut connection, 1101..=3097);
+    assert_eq!(lines_of(log, &["in flight"]), Vec::<String>::new());
+    let log = run(&mut connection, 3098..=3098);
+    let lines = lines_of(log, &["in flight"]);
+    assert!(
+        lines.last().is_some_and(|line| line.ends_with("backoff 2")),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn a_datagram_the_link_gives_up_is_handed_back_as_lost_and_the_rest_is_sent() {
+    reset();
+    let first = link();
+    let mut connection = with_two_datagrams_at_1005_ms(&first, []);
+    common::plan_sends([common::SendOutcome::GiveUp, common::SendOutcome::GiveUp]);
+    let log = run(&mut connection, 1005..=1006);
+    // the first given up, the second handed over again and given up too
+    assert_eq!(common::take_batch_sizes(), [2, 1]);
+    let given_up = common::take_given_up();
+    assert_eq!(given_up.len(), 2);
+    assert!(short_header(&given_up[0]), "the 1-RTT ACK");
+    assert_eq!(open_sent_initial(&given_up[1]).payload[0], 0x01, "the PING");
+    assert_eq!(common::take_sent(), []);
+    // the PING left the bytes in flight, and was never accepted: only the
+    // packet sent at 6 ms is there
+    let lines = lines_of(log, &["in flight"]);
+    assert!(
+        lines
+            .last()
+            .is_some_and(|line| line.starts_with("in flight 1200, outstanding 2,")),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn a_batch_holds_at_most_its_limit_of_datagrams() {
+    reset();
+    MAX_PER_SEND.with(|m| m.set(1));
+    let first = link();
+    let mut connection = with_two_datagrams_at_1005_ms(&first, []);
+    let _ = run(&mut connection, 1005..=1006);
+    assert_eq!(common::take_batch_sizes(), [1, 1]);
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert!(short_header(&sent[0].1));
+    assert_eq!(open_sent_initial(&sent[1].1).payload[0], 0x01);
+}
+
+#[test]
+fn a_datagram_of_a_level_whose_keys_went_is_not_handed_over() {
+    use probe::PacketStep::{InstallHandshakeKeys, Receive};
+    reset();
+    let first = link();
+    let mut connection = with_two_datagrams_at_1005_ms(
+        &first,
+        [
+            (ms(1049), InstallHandshakeKeys),
+            (
+                ms(1050),
+                Receive(received(
+                    long_packet(HANDSHAKE, 0, &ping()),
+                    &first,
+                    ms(1050),
+                )),
+            ),
+        ],
+    );
+    common::plan_sends([common::SendOutcome::Hold(1)]);
+    let _ = run(&mut connection, 1005..=1006);
+    assert_eq!(common::take_batch_sizes(), [2]);
+    // the Initial keys go with the first Handshake packet processed, while
+    // the link keeps the batch
+    let _ = run(&mut connection, 1049..=1050);
+    advance_to(ms(1060));
+    common::release_held_send();
+    let log = run(&mut connection, 1060..=1061);
+    let sent = common::take_sent();
+    assert!(short_header(&sent[0].1), "the 1-RTT ACK accepted");
+    // the PING's datagram is left out of the next batch; what follows has
+    // no Initial packet
+    assert!(
+        sent[1..]
+            .iter()
+            .all(|(_, datagram)| datagram[0] & 0xf0 != 0xc0),
+        "{sent:?}"
+    );
+    assert_eq!(common::take_given_up(), [] as [bytes::Bytes; 0]);
+    // the PING left the bytes in flight: only the packet sent at 6 ms is
+    // there
+    let lines = lines_of(log, &["in flight"]);
+    assert!(
+        lines
+            .last()
+            .is_some_and(|line| line.starts_with("in flight 1200,")),
         "{lines:?}"
     );
 }

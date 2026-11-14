@@ -1,9 +1,11 @@
 //! The connection IDs of a logical path, and what registers the reset
 //! tokens of the peer's.
 //!
-//! Each logical path keeps its [`ConnectionIds`]: the destination
-//! connection ID strategy, made from the configuration the connection node
-//! keeps ([`DestinationConnectionIdConfig`]) with the
+//! Each logical path keeps its [`ConnectionIds`]: this side's connection
+//! ID, which the long headers it sends carry as their Source Connection ID,
+//! as the connection node keeps it ([`FirstLocalConnectionId`]); and the
+//! destination connection ID strategy, made from the configuration the
+//! connection node keeps ([`DestinationConnectionIdConfig`]) with the
 //! `active_connection_id_limit` this side sends. The strategy learns the
 //! connection ID the peer chose for the handshake once: a server's is the
 //! Source Connection ID of the first Initial packet it opens from the
@@ -92,6 +94,26 @@ where
 }
 impl<C> PassiveDataComponent for DestinationConnectionIdConfig<C> {}
 
+/// The first of this side's connection IDs, as the connection was made
+/// with it, kept in the connection node: the Source Connection ID of the
+/// long headers this side sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FirstLocalConnectionId(pub ConnectionId);
+
+impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for FirstLocalConnectionId
+where
+    L: LineagePartList<T>,
+    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        args: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        Self(Selector::<ConnectionArgs<T, L>, I>::get(args).first_local_connection_id)
+    }
+}
+impl PassiveDataComponent for FirstLocalConnectionId {}
+
 /// What the connection holds to register the reset tokens of the peer's
 /// connection IDs, kept in the connection node.
 pub struct ConnectionResetTokenRegistry<R>(R);
@@ -138,9 +160,11 @@ where
 }
 impl PassiveDataComponent for Arc<StatelessResetSignal> {}
 
-/// The connection IDs of a logical path: the destination connection ID
-/// strategy, with whether it was told the peer's handshake connection ID.
+/// The connection IDs of a logical path: this side's, and the destination
+/// connection ID strategy, with whether it was told the peer's handshake
+/// connection ID.
 pub struct ConnectionIds<D> {
+    local: ConnectionId,
     destination: D,
     handshake_known: bool,
 }
@@ -148,12 +172,19 @@ pub struct ConnectionIds<D> {
 impl<D> fmt::Debug for ConnectionIds<D> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ConnectionIds")
+            .field("local", &self.local)
             .field("handshake_known", &self.handshake_known)
             .finish_non_exhaustive()
     }
 }
 
 impl<D> ConnectionIds<D> {
+    /// This side's connection ID: the Source Connection ID of the long
+    /// headers it sends.
+    pub fn local(&self) -> ConnectionId {
+        self.local
+    }
+
     /// The destination connection ID strategy.
     pub fn destination(&self) -> &D {
         &self.destination
@@ -182,18 +213,20 @@ impl<D> ConnectionIds<D> {
 /// The connection IDs of a logical path of the choices `T`.
 pub type ConnectionIdsOf<T> = ConnectionIds<<T as Choices>::DestinationConnectionIds>;
 
-/// The strategy is made with the `active_connection_id_limit` this side
+/// This side's connection ID is the one the connection was made with. The
+/// strategy is made with the `active_connection_id_limit` this side
 /// sends, as sent or else as configured (RFC 9000 §18.2: 2 when absent);
 /// a first flight read before the connection was made gives the handshake
 /// connection ID it opened.
-impl<T: Choices, L, Ic, Il, Ia, If> Build<T, L, layer::LogicalPath, (Ic, Il, Ia, If)>
+impl<T: Choices, L, Ic, Il, Ia, If, Ix> Build<T, L, layer::LogicalPath, (Ic, Il, Ia, If, Ix)>
     for ConnectionIdsOf<T>
 where
     L: LineagePartList<T>,
     TransportParameterSlots: Selector<Option<ActiveConnectionIdLimit>, Ia>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<DestinationConnectionIdConfig<DestinationConnectionIdConfigOf<T>>, Ic>
         + GetAt<LocalTransportParameters<TransportParameterSlots>, Il>
-        + GetAt<FirstFlightStart<T>, If>,
+        + GetAt<FirstFlightStart<T>, If>
+        + GetAt<FirstLocalConnectionId, Ix>,
 {
     fn build<'v>(
         parents: &mut ParentsOf<'v, T, L, layer::LogicalPath>,
@@ -209,6 +242,7 @@ where
             .get::<DestinationConnectionIdConfig<DestinationConnectionIdConfigOf<T>>, Ic>()
             .0;
         let mut ids = ConnectionIds {
+            local: parents.get::<FirstLocalConnectionId, Ix>().0,
             destination: <T::DestinationConnectionIds as DestinationConnectionIdStrategy<
                 LinkIdOf<T>,
                 InstantOf<T>,

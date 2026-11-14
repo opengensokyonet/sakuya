@@ -478,6 +478,7 @@ enum Held {
 struct PlannedEntry {
     held: Held,
     min: MinimumLengths,
+    class: FlightClass,
 }
 
 #[derive(Debug)]
@@ -593,11 +594,11 @@ where
             highest = Some(level);
             match packets.last_mut() {
                 Some(packet) if packet.kind == kind => {
-                    packet.items.push(PlannedEntry { held, min })
+                    packet.items.push(PlannedEntry { held, min, class })
                 }
                 _ => packets.push(PacketPlan {
                     kind,
-                    items: vec![PlannedEntry { held, min }],
+                    items: vec![PlannedEntry { held, min, class }],
                 }),
             }
         }
@@ -728,6 +729,7 @@ impl<I: SendStrategyTypes> RankedPlan<'_, I> {
             packet: packet.kind,
             source: I::frame_source(self.intent(first.held)),
             min: first.min,
+            class: first.class,
         })
     }
 }
@@ -863,6 +865,7 @@ where
         Some(PlannedItem::new(
             item,
             entry.min,
+            entry.class,
             last_in_packet,
             &mut plan.feedback,
         ))

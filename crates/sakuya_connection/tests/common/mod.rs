@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 use std::{
     cell::{Cell, RefCell},
+    collections::VecDeque,
     future::Future,
     num::NonZeroUsize,
     pin::Pin,
@@ -13,8 +14,9 @@ use std::{
     time::Duration,
 };
 
+use bytes::Bytes;
 use sakuya_connection::clock::{ConnectionChoices, MonotonicClock};
-use sakuya_link::{Link, LinkId, OutgoingDatagram, SendAcceptance};
+use sakuya_link::{Link, LinkId, MIN_DATAGRAM_SIZE, OutgoingDatagram, SendAcceptance};
 
 pub mod parts;
 pub mod strategy;
@@ -23,6 +25,13 @@ thread_local! {
     static NOW: Cell<Duration> = const { Cell::new(Duration::ZERO) };
     static SLEEPERS: RefCell<Vec<(Duration, Waker)>> = const { RefCell::new(Vec::new()) };
     static LOG: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    static LINK_CEILING: Cell<usize> = const { Cell::new(MIN_DATAGRAM_SIZE) };
+    static SEND_OUTCOMES: RefCell<VecDeque<SendOutcome>> = const { RefCell::new(VecDeque::new()) };
+    static SENT: RefCell<Vec<(Duration, Bytes)>> = const { RefCell::new(Vec::new()) };
+    static GIVEN_UP: RefCell<Vec<Bytes>> = const { RefCell::new(Vec::new()) };
+    static HELD: RefCell<Option<Waker>> = const { RefCell::new(None) };
+    static RELEASED: Cell<bool> = const { Cell::new(false) };
+    static BATCHES: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
 
 /// The test's clock: time moves only when the test says so.
@@ -60,8 +69,116 @@ impl MonotonicClock for TestClock {
 
 /// A link of the tests: an identity and nothing else; its two ends are
 /// `()`, and a datagram's payload is a `BytesMut`.
+///
+/// What it does with a batch is what the test planned with
+/// [`plan_sends`], and accepting all of it otherwise; what it accepted and
+/// gave up is kept for [`take_sent`] and [`take_given_up`]. The largest
+/// datagram it takes is 1200 bytes unless [`set_link_ceiling`] says
+/// otherwise.
 #[derive(Clone, Debug)]
 pub struct TestLink(pub TestLinkId);
+
+/// What a test link does with the next batch handed to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendOutcome {
+    /// Accept the first datagrams, at most this many, and leave the rest.
+    Accept(usize),
+    /// Give the first datagram up.
+    GiveUp,
+    /// Keep the sender waiting until [`release_held_send`], then accept
+    /// the first datagrams, at most this many.
+    Hold(usize),
+}
+
+/// What the test links do with the next batches, in order; past these
+/// they accept every datagram.
+pub fn plan_sends(outcomes: impl IntoIterator<Item = SendOutcome>) {
+    SEND_OUTCOMES.with(|o| o.borrow_mut().extend(outcomes));
+}
+
+/// The datagrams the test links accepted since the last call, with the
+/// instant they accepted them, in order.
+pub fn take_sent() -> Vec<(Duration, Bytes)> {
+    SENT.with(|s| std::mem::take(&mut *s.borrow_mut()))
+}
+
+/// How many datagrams each batch handed to the test links since the last
+/// call held, in order.
+pub fn take_batch_sizes() -> Vec<usize> {
+    BATCHES.with(|b| std::mem::take(&mut *b.borrow_mut()))
+}
+
+/// The datagrams the test links gave up since the last call, in order.
+pub fn take_given_up() -> Vec<Bytes> {
+    GIVEN_UP.with(|g| std::mem::take(&mut *g.borrow_mut()))
+}
+
+/// Let the batch a test link keeps the sender waiting on be accepted.
+pub fn release_held_send() {
+    RELEASED.with(|r| r.set(true));
+    if let Some(waker) = HELD.with(|h| h.borrow_mut().take()) {
+        waker.wake();
+    }
+}
+
+/// The largest datagram the test links take from now on: below 1200
+/// bytes, a link path over them sends nothing.
+pub fn set_link_ceiling(size: usize) {
+    LINK_CEILING.with(|c| c.set(size));
+}
+
+/// Forget what the test links were told to do and what they did.
+pub fn reset_links() {
+    LINK_CEILING.with(|c| c.set(MIN_DATAGRAM_SIZE));
+    SEND_OUTCOMES.with(|o| o.borrow_mut().clear());
+    SENT.with(|s| s.borrow_mut().clear());
+    GIVEN_UP.with(|g| g.borrow_mut().clear());
+    HELD.with(|h| h.borrow_mut().take());
+    RELEASED.with(|r| r.set(false));
+    BATCHES.with(|b| b.borrow_mut().clear());
+}
+
+/// One send of a test link: what it does is decided when it is first
+/// polled.
+pub struct TestSend<'a> {
+    batch: &'a [OutgoingDatagram],
+    outcome: Option<SendOutcome>,
+}
+
+impl Future for TestSend<'_> {
+    type Output = Result<SendAcceptance<Duration>, ()>;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let outcome = *self.outcome.get_or_insert_with(|| {
+            SEND_OUTCOMES
+                .with(|o| o.borrow_mut().pop_front())
+                .unwrap_or(SendOutcome::Accept(usize::MAX))
+        });
+        let count = match outcome {
+            SendOutcome::Accept(count) => count.min(self.batch.len()),
+            SendOutcome::GiveUp => {
+                GIVEN_UP.with(|g| g.borrow_mut().push(self.batch[0].payload.clone()));
+                return Poll::Ready(Err(()));
+            }
+            SendOutcome::Hold(count) => {
+                if !RELEASED.with(|r| r.replace(false)) {
+                    HELD.with(|h| *h.borrow_mut() = Some(cx.waker().clone()));
+                    return Poll::Pending;
+                }
+                count.min(self.batch.len())
+            }
+        };
+        let at = now();
+        SENT.with(|s| {
+            s.borrow_mut().extend(
+                self.batch[..count]
+                    .iter()
+                    .map(|datagram| (at, datagram.payload.clone())),
+            )
+        });
+        let count = NonZeroUsize::new(count).expect("a test accepts at least one datagram");
+        Poll::Ready(Ok(SendAcceptance { count, at }))
+    }
+}
 
 /// The identity of a [`TestLink`].
 pub type TestLinkId = LinkId<(), ()>;
@@ -73,7 +190,7 @@ impl Link for TestLink {
     type Instant = Duration;
     type MaxDatagramSizeError = ();
     type SendError = ();
-    type Send<'a> = core::future::Ready<Result<SendAcceptance<Duration>, ()>>;
+    type Send<'a> = TestSend<'a>;
     type MaxDatagramSizeChanged = core::future::Pending<()>;
     fn id(&self) -> &TestLinkId {
         &self.0
@@ -82,11 +199,15 @@ impl Link for TestLink {
         false
     }
     fn max_datagram_size(&self) -> Result<usize, ()> {
-        Ok(sakuya_link::MIN_DATAGRAM_SIZE)
+        Ok(LINK_CEILING.with(Cell::get))
     }
     fn send<'a>(&self, batch: &'a [OutgoingDatagram]) -> Self::Send<'a> {
-        let count = NonZeroUsize::new(batch.len()).expect("a batch is not empty");
-        core::future::ready(Ok(SendAcceptance { count, at: now() }))
+        assert!(!batch.is_empty(), "a batch is not empty");
+        BATCHES.with(|b| b.borrow_mut().push(batch.len()));
+        TestSend {
+            batch,
+            outcome: None,
+        }
     }
     fn max_datagram_size_changed(&self) -> Self::MaxDatagramSizeChanged {
         core::future::pending()

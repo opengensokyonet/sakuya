@@ -123,6 +123,37 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
         Some(items)
     }
 
+    /// Take components `U` of the lent link path's recovery layer and hand
+    /// them to `each` together with the others, read only: the recovery
+    /// layers still reached from them are those of every other link path
+    /// ([`each_recovery`](Self::each_recovery)). `None` when it has none or
+    /// it was taken.
+    ///
+    /// The layer is out of the others while `each` runs and goes back
+    /// afterwards, so it can be taken again later in the same lend.
+    pub(crate) fn with_own_recovery<U, Is, R>(
+        &mut self,
+        each: impl for<'x> FnOnce(<U as RefsOf<'x>>::Out, &'x Self) -> R,
+    ) -> Option<R>
+    where
+        for<'x> NodeData<T, L, Recovery>: FlatMut<'x>,
+        for<'x> <NodeData<T, L, Recovery> as FlatMut<'x>>::Out: TakeEach<'x, U, Is>,
+        for<'x> U: RefsOf<'x>,
+    {
+        let node = self.here_recovery.take()?;
+        let (slot, sub) = self
+            .here_path
+            .expect("a recovery layer belongs to a lent link path");
+        let addr = NodeAddr::recovery(slot, sub.expect("a lent link path"));
+        let (items, _) = node
+            .data
+            .flat_mut()
+            .take_each(&mut Self::record(self.taken, addr));
+        let result = each(items, &*self);
+        self.here_recovery = Some(node);
+        Some(result)
+    }
+
     /// Read the lent link path's recovery layer; `None` when it has none or
     /// it was taken. Nothing is taken.
     pub fn recovery_ref<'s>(&'s self) -> Option<<NodeData<T, L, Recovery> as FlatRef<'s>>::Out>

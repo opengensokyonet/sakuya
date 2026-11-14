@@ -20,13 +20,15 @@
 //! has seen ([`key_phase`]); and what it receives ([`input`]): its datagram receiver, the first one taken
 //! from what the connection was made with, and the inputs it holds until
 //! their keys come; its receiving call takes each datagram in, and the ACK
-//! frames it carries settle what was sent ([`ack`]). A link path writes its
-//! datagrams into a batch ([`datagram_batch`]), one packet after the other
-//! ([`packet_writer`]), with the frames of version 1 ([`frames`]). Once
+//! frames it carries settle what was sent ([`ack`]). A link path's sending
+//! call ([`sending`]) writes its datagrams into a batch ([`datagram_batch`]),
+//! one packet after the other ([`packet_writer`]), with the frames of
+//! version 1 ([`frames`]), as its send planner plans them, and hands the
+//! batch to the link. Once
 //! a reason for closing is written, the link paths close, their recovery
 //! layers and the established layer end, and the connection ends with its
 //! last link path; a link path that ends hands back what it had not
-//! settled as lost. The other calls are not here yet.
+//! settled as lost.
 
 pub mod ack;
 pub mod aead_usage;
@@ -55,6 +57,7 @@ pub mod recovery;
 pub mod role;
 pub mod send;
 pub mod send_planning;
+pub mod sending;
 pub mod spaces;
 pub mod stateless_reset;
 
@@ -108,8 +111,8 @@ use self::{
     confirmation::HandshakeConfirmation,
     connection_ids::{
         ConnectionIdsOf, ConnectionResetTokenRegistry, DestinationConnectionIdConfig,
-        DestinationConnectionIdConfigOf, LinkPathResetTokenRegistrar, PeerOf,
-        ResetTokenRegistrarOf,
+        DestinationConnectionIdConfigOf, FirstLocalConnectionId, LinkPathResetTokenRegistrar,
+        PeerOf, ResetTokenRegistrarOf,
     },
     crypto::{CryptoReceiveBuffer, CryptoReceiveCapacities, CryptoReceiver},
     first_flight::{FirstFlight, FirstFlightStart},
@@ -134,6 +137,7 @@ use self::{
         AckIntentTicketOf, AckIntentTickets, LinkPathPlanner, LinkPathSendPlannerOf,
         ProbePingTicketOf, ProbePingTickets, SendStrategyCore, SendStrategyOf,
     },
+    sending::{LinkPathSendingKind, LinkPathSendingLimits},
     spaces::{AckObligationsOf, DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
     stateless_reset::StatelessResetSignal,
 };
@@ -348,6 +352,12 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
     /// What registers the reset tokens of the peer's connection IDs, as the
     /// endpoint shares it with the router that detects stateless resets.
     pub reset_token_registry: T::ResetTokenRegistry,
+    /// The first of this side's connection IDs: the Source Connection ID of
+    /// the long headers this side sends.
+    pub first_local_connection_id: ConnectionId,
+    /// How many datagrams the sending call of a link path hands to its link
+    /// at once at most.
+    pub max_datagrams_per_send: NonZeroUsize,
 }
 
 impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + ConnectionErrorsOf>
@@ -377,6 +387,8 @@ where
         SendStrategyCore<SendStrategyOf<T, L>>,
         DestinationConnectionIdConfig<DestinationConnectionIdConfigOf<T>>,
         ConnectionResetTokenRegistry<T::ResetTokenRegistry>,
+        FirstLocalConnectionId,
+        LinkPathSendingLimits,
     ];
     type Calls = HNil;
     type Args = ConnectionArgs<T, L>;
@@ -420,7 +432,7 @@ where
         LinkPathResetTokenRegistrar<ResetTokenRegistrarOf<T>>,
         LinkPathRole<InstantOf<T>>
     ];
-    type Calls = HNil;
+    type Calls = HList![LinkPathSendingKind];
 }
 impl<T: Choices, L> LayerShare<T, L, layer::Established> for Part {
     type Data = HNil;
@@ -902,6 +914,25 @@ where
     }
 }
 impl PassiveDataComponent for LogicalPathReceivingLimits {}
+
+/// The limits are configured, and stay the same for the life of the
+/// connection; the sending call of each link path takes them when it
+/// starts.
+impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for LinkPathSendingLimits
+where
+    L: LineagePartList<T>,
+    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        args: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        LinkPathSendingLimits {
+            max_datagrams_per_send: own_args::<T, L, I>(args).max_datagrams_per_send,
+        }
+    }
+}
+impl PassiveDataComponent for LinkPathSendingLimits {}
 
 /// The connection keeps what its first flight gave the later parts of the
 /// tree until they take it. Datagrams not read yet are cut as routing cuts
