@@ -12,7 +12,9 @@ use sakuya_wire::{
 };
 
 use super::*;
-use crate::connection_id::sequence_map::SequenceMapDestinationConnectionIdStrategy;
+use crate::connection_id::{
+    NewConnectionId, sequence_map::SequenceMapDestinationConnectionIdStrategy,
+};
 
 type Instant = u64;
 
@@ -62,7 +64,7 @@ fn strategy() -> Strategy {
     .unwrap();
     DestinationConnectionIdStrategy::<u8, Instant, Registrar>::on_new_connection_id(
         &mut strategy,
-        &frame,
+        NewConnectionId::from(&frame),
     )
     .unwrap();
     strategy

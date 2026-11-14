@@ -5,7 +5,7 @@ use std::{cell::RefCell, rc::Rc};
 use sakuya_link::{BindingId, LinkId};
 use sakuya_wire::{
     connection_id::NonEmptyCid,
-    v1::transport_error::TransportErrorCode,
+    v1::{frame::new_connection_id::NewConnectionIdFrame, transport_error::TransportErrorCode},
     var_int::{VarInt, VarIntField},
 };
 
@@ -95,7 +95,8 @@ fn receive(
     frame: NewConnectionIdFrame,
 ) -> Result<(), NewConnectionIdViolationError> {
     <Strategy as DestinationConnectionIdStrategy<u8, Instant, Registrar>>::on_new_connection_id(
-        strategy, &frame,
+        strategy,
+        NewConnectionId::from(&frame),
     )
 }
 

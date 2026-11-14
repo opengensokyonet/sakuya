@@ -54,7 +54,7 @@
 //! [RFC 9000 §19.16]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.16
 
 use sakuya_wire::{
-    connection_id::ConnectionId,
+    connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken},
     v1::{
         frame::new_connection_id::NewConnectionIdFrame,
         transport_parameters::integer::ActiveConnectionIdLimit,
@@ -82,6 +82,55 @@ pub struct OfferedConnectionId {
     pub sequence: u64,
     /// The connection ID.
     pub id: ConnectionId,
+}
+
+/// A connection ID the peer issued: what a NEW_CONNECTION_ID frame
+/// ([RFC 9000 §19.15]) and a PATH_NEW_CONNECTION_ID frame have in common.
+///
+/// Its Retire Prior To is at most its sequence number: the frames check
+/// it, and a value is only made from a frame.
+///
+/// [RFC 9000 §19.15]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.15
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct NewConnectionId {
+    sequence: u64,
+    retire_prior_to: u64,
+    id: NonEmptyCid,
+    reset_token: StatelessResetToken,
+}
+
+impl NewConnectionId {
+    /// The sequence number the peer assigned to the connection ID.
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// The sequence number below which the peer's connection IDs are to be
+    /// retired; at most [`sequence`](Self::sequence).
+    pub const fn retire_prior_to(&self) -> u64 {
+        self.retire_prior_to
+    }
+
+    /// The connection ID.
+    pub const fn id(&self) -> NonEmptyCid {
+        self.id
+    }
+
+    /// The stateless reset token for the connection ID.
+    pub const fn reset_token(&self) -> StatelessResetToken {
+        self.reset_token
+    }
+}
+
+impl From<&NewConnectionIdFrame> for NewConnectionId {
+    fn from(frame: &NewConnectionIdFrame) -> Self {
+        Self {
+            sequence: frame.sequence_number().get().get(),
+            retire_prior_to: frame.retire_prior_to().get().get(),
+            id: frame.connection_id(),
+            reset_token: frame.stateless_reset_token(),
+        }
+    }
 }
 
 /// Decides which of the peer's connection IDs this side sends with on each
@@ -143,7 +192,8 @@ pub trait DestinationConnectionIdStrategy<Id, I, R: ResetTokenRegistrar>: Sized 
     /// [RFC 9000 §10.3.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-10.3.1
     fn on_used(&mut self, registrar: &mut R, sequence: u64, link_path: &Id, datagram_len: usize);
 
-    /// The peer sent `frame`.
+    /// The peer issued `issued`, in a NEW_CONNECTION_ID frame or, with
+    /// multipath, a PATH_NEW_CONNECTION_ID frame for this logical path.
     ///
     /// # Errors
     ///
@@ -152,7 +202,7 @@ pub trait DestinationConnectionIdStrategy<Id, I, R: ResetTokenRegistrar>: Sized 
     /// [`transport_error_code`](NewConnectionIdViolationError::transport_error_code).
     fn on_new_connection_id(
         &mut self,
-        frame: &NewConnectionIdFrame,
+        issued: NewConnectionId,
     ) -> Result<(), NewConnectionIdViolationError>;
 
     /// `link_path` was added. `peer_switched_local_id` tells whether the

@@ -6,14 +6,11 @@ use std::collections::{BTreeMap, BTreeSet, btree_map};
 
 use sakuya_wire::{
     connection_id::{ConnectionId, StatelessResetToken},
-    v1::{
-        frame::new_connection_id::NewConnectionIdFrame,
-        transport_parameters::integer::ActiveConnectionIdLimit,
-    },
+    v1::transport_parameters::integer::ActiveConnectionIdLimit,
 };
 
 use super::{
-    DestinationConnectionIdStrategy, OfferedConnectionId, ResetTokenRegistrar,
+    DestinationConnectionIdStrategy, NewConnectionId, OfferedConnectionId, ResetTokenRegistrar,
     violation::{
         ActiveConnectionIdLimitExceededError, ConnectionIdResequencedError,
         NewConnectionIdViolationError, ResetTokenChangedError, ResetTokenReusedError,
@@ -327,12 +324,12 @@ where
 
     fn on_new_connection_id(
         &mut self,
-        frame: &NewConnectionIdFrame,
+        issued: NewConnectionId,
     ) -> Result<(), NewConnectionIdViolationError> {
-        let sequence = frame.sequence_number().get().get();
-        let retire_prior_to = frame.retire_prior_to().get().get();
-        let id = frame.connection_id().get();
-        let token = frame.stateless_reset_token();
+        let sequence = issued.sequence();
+        let retire_prior_to = issued.retire_prior_to();
+        let id = issued.id().get();
+        let token = issued.reset_token();
         let Issuance::Sequenced(retirements) = &mut self.issuance else {
             return Err(ZeroLengthConnectionIdInUseError::new(sequence).into());
         };

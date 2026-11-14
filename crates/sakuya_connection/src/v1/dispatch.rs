@@ -72,7 +72,7 @@ use crate::{
     call::CallBundle,
     clock::{CheckedAdd, InstantOf},
     component::LineageOf,
-    connection_id::DestinationConnectionIdStrategy,
+    connection_id::{DestinationConnectionIdStrategy, NewConnectionId},
     dispatch::{DispatchFacts, FrameDispatch},
     error::ConnectionErrorsOf,
     feedback::{FeedbackSummariesOf, PartsSendFeedback},
@@ -294,7 +294,7 @@ where
             FrameRun::NewConnectionId(frame) => lineage
                 .get_mut::<ConnectionIdsOf<T>, Icid>()
                 .destination_mut()
-                .on_new_connection_id(&frame)
+                .on_new_connection_id(NewConnectionId::from(&frame))
                 .context(error::NewConnectionIdSnafu),
             FrameRun::HandshakeDone(_) => {
                 *lineage.get_mut::<HandshakeConfirmation, Ih>() = HandshakeConfirmation::Confirmed;

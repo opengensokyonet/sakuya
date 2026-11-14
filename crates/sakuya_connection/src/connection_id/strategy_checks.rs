@@ -25,7 +25,7 @@ use sakuya_wire::{
 };
 
 use super::{
-    DestinationConnectionIdStrategy, OfferedConnectionId, ResetTokenRegistrar,
+    DestinationConnectionIdStrategy, NewConnectionId, OfferedConnectionId, ResetTokenRegistrar,
     datagram::DatagramConnectionId,
 };
 use crate::v1::datagram_batch::ConnectionIdUse as _;
@@ -95,22 +95,23 @@ pub fn reset_token(sequence: u8) -> StatelessResetToken {
     StatelessResetToken::new([sequence.wrapping_add(0x80); StatelessResetToken::LEN])
 }
 
-/// A NEW_CONNECTION_ID frame for the scripts' connection ID with
-/// `sequence`, retiring prior to `retire_prior_to`.
+/// The scripts' connection ID with `sequence`, issued in a
+/// NEW_CONNECTION_ID frame retiring prior to `retire_prior_to`.
 ///
 /// # Panics
 ///
 /// Panics if `retire_prior_to` exceeds `sequence`.
-pub fn new_connection_id(sequence: u8, retire_prior_to: u8) -> NewConnectionIdFrame {
+pub fn new_connection_id(sequence: u8, retire_prior_to: u8) -> NewConnectionId {
     let id =
         NonEmptyCid::new(connection_id(sequence)).expect("script connection IDs are not empty");
-    NewConnectionIdFrame::new(
+    let frame = NewConnectionIdFrame::new(
         VarIntField::shortest(VarInt::from(sequence)),
         VarIntField::shortest(VarInt::from(retire_prior_to)),
         id,
         reset_token(sequence),
     )
-    .expect("scripts retire prior to at most the sequence number")
+    .expect("scripts retire prior to at most the sequence number");
+    NewConnectionId::from(&frame)
 }
 
 fn limit(value: u8) -> ActiveConnectionIdLimit {
@@ -149,21 +150,21 @@ where
     offered
 }
 
-fn accept<I, Id, S>(strategy: &mut S, frame: NewConnectionIdFrame)
+fn accept<I, Id, S>(strategy: &mut S, issued: NewConnectionId)
 where
     S: DestinationConnectionIdStrategy<Id, I, RecordingResetTokenRegistrar>,
 {
-    if let Err(error) = strategy.on_new_connection_id(&frame) {
+    if let Err(error) = strategy.on_new_connection_id(issued) {
         panic!("a valid NEW_CONNECTION_ID was rejected: {error}");
     }
 }
 
-fn reject<I, Id, S>(strategy: &mut S, frame: NewConnectionIdFrame) -> TransportErrorCode
+fn reject<I, Id, S>(strategy: &mut S, issued: NewConnectionId) -> TransportErrorCode
 where
     S: DestinationConnectionIdStrategy<Id, I, RecordingResetTokenRegistrar>,
 {
-    match strategy.on_new_connection_id(&frame) {
-        Ok(()) => panic!("a violating NEW_CONNECTION_ID was accepted: {frame:?}"),
+    match strategy.on_new_connection_id(issued) {
+        Ok(()) => panic!("a violating NEW_CONNECTION_ID was accepted: {issued:?}"),
         Err(error) => error.transport_error_code(),
     }
 }
