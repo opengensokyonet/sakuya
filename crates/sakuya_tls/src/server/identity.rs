@@ -9,12 +9,14 @@
 //! the selected target; the handshake computes the content to sign, and
 //! the signature may wait.
 //!
-//! [`CertifiedKey`] presents one chain with one signing key.
+//! [`CertifiedKey`] presents one chain with one signing key;
+//! [`CertifiedKey::from_pem_chain`] reads the chain from PEM.
 
 use crate::{alert::AlertDescription, server::targets::SelectedTarget};
 use bytes::Bytes;
 use nitori_crypto::{SignatureScheme, SigningKey};
-use snafu::Snafu;
+use rustls_pki_types::pem::{self, PemObject, SectionKind};
+use snafu::{ResultExt, Snafu};
 
 /// How a server picks the certificate chain it presents for a selected
 /// target, and the scheme it signs CertificateVerify with.
@@ -104,6 +106,29 @@ impl<K> CertifiedKey<K> {
         Ok(Self { certificates, key })
     }
 
+    /// The chain in `chain_pem`, PEM text such as the contents of a
+    /// `cert.pem` file, and `key`, the leaf's key.
+    ///
+    /// The chain is the CERTIFICATE sections in the order of the text, so the
+    /// text gives the leaf first; other sections, such as a private key in
+    /// the same file, are skipped. Whether `key` belongs to the leaf is not
+    /// checked.
+    ///
+    /// # Errors
+    ///
+    /// [`PemChainError::Malformed`] when the text is not valid PEM, and
+    /// [`PemChainError::Empty`] when it has no CERTIFICATE section.
+    pub fn from_pem_chain(chain_pem: &[u8], key: K) -> Result<Self, PemChainError> {
+        let mut certificates = Vec::new();
+        for section in <(SectionKind, Vec<u8>)>::pem_slice_iter(chain_pem) {
+            let (kind, der) = section.context(MalformedSnafu)?;
+            if kind == SectionKind::Certificate {
+                certificates.push(Bytes::from(der));
+            }
+        }
+        Self::new(certificates, key).context(EmptySnafu)
+    }
+
     /// The certificates, the leaf first.
     pub fn certificates(&self) -> &[Bytes] {
         &self.certificates
@@ -119,6 +144,23 @@ impl<K> CertifiedKey<K> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(display("certificate chain is empty"))]
 pub struct EmptyChainError;
+
+/// A certificate chain in PEM cannot make a [`CertifiedKey`].
+#[derive(Debug, Snafu)]
+pub enum PemChainError {
+    /// The text is not valid PEM.
+    #[snafu(display("malformed PEM"))]
+    Malformed {
+        /// The PEM reader's failure.
+        source: pem::Error,
+    },
+    /// The text has no CERTIFICATE section.
+    #[snafu(display("no certificate in PEM"))]
+    Empty {
+        /// The chain is empty.
+        source: EmptyChainError,
+    },
+}
 
 impl<K: SigningKey, T> CertificateSelection<T> for CertifiedKey<K> {
     type Key = K;
@@ -146,7 +188,9 @@ impl<K: SigningKey, T> CertificateSelection<T> for CertifiedKey<K> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CertificateSelection, CertifiedKey, EmptyChainError, NoCommonSchemeError};
+    use super::{
+        CertificateSelection, CertifiedKey, EmptyChainError, NoCommonSchemeError, PemChainError,
+    };
     use crate::{server::targets::SelectedTarget, test_support::ready_now};
     use bytes::Bytes;
     use core::{
@@ -227,5 +271,43 @@ mod tests {
             CertifiedKey::new(vec![], EchoKey(vec![])).unwrap_err(),
             EmptyChainError
         );
+    }
+
+    const LEAF: &[u8] = include_bytes!("../../testdata/docsrs/docsrs-com.der");
+    const INTERMEDIATE: &[u8] = include_bytes!("../../testdata/docsrs/amazon-rsa-2048-m04.der");
+    /// LEAF and INTERMEDIATE in PEM, in that order.
+    const CHAIN_PEM: &[u8] = include_bytes!("../../testdata/docsrs/docsrs-com-chain.pem");
+    /// The curve section that `openssl ecparam -genkey` writes before a key.
+    const EC_PARAMETERS: &[u8] =
+        b"-----BEGIN EC PARAMETERS-----\nBggqhkjOPQMBBw==\n-----END EC PARAMETERS-----\n";
+
+    #[test]
+    fn a_pem_chain_keeps_the_certificates_in_order_and_skips_other_sections() {
+        let pem = [EC_PARAMETERS, CHAIN_PEM, EC_PARAMETERS].concat();
+        let identity = CertifiedKey::from_pem_chain(&pem, EchoKey(vec![])).unwrap();
+        assert_eq!(
+            identity.certificates(),
+            &[Bytes::from_static(LEAF), Bytes::from_static(INTERMEDIATE)]
+        );
+    }
+
+    #[test]
+    fn a_pem_chain_without_certificates_or_with_bad_base64_fails() {
+        assert!(matches!(
+            CertifiedKey::from_pem_chain(EC_PARAMETERS, EchoKey(vec![])),
+            Err(PemChainError::Empty {
+                source: EmptyChainError
+            })
+        ));
+        let broken = b"-----BEGIN CERTIFICATE-----\n!!!!\n-----END CERTIFICATE-----\n";
+        assert!(matches!(
+            CertifiedKey::from_pem_chain(broken, EchoKey(vec![])),
+            Err(PemChainError::Malformed { .. })
+        ));
+        let unterminated = b"-----BEGIN CERTIFICATE-----\nMIIF\n";
+        assert!(matches!(
+            CertifiedKey::from_pem_chain(unterminated, EchoKey(vec![])),
+            Err(PemChainError::Malformed { .. })
+        ));
     }
 }
