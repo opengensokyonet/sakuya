@@ -49,8 +49,10 @@
 //! 3. Settling. The datagrams the link accepted have their packets marked
 //!    sent at the instant the link gives; they enter the loss detection
 //!    state of their space, and an ack-eliciting one restarts the idle
-//!    timeout (RFC 9000 §10.1). When the link gives the first datagram up,
-//!    its packets are given up; the rest wait for the next round.
+//!    timeout (RFC 9000 §10.1). The first datagram a link accepts is noted
+//!    in the connection's [`DatagramAcceptance`]. When the link gives the
+//!    first datagram up, its packets are given up; the rest wait for the
+//!    next round.
 //!
 //! A packet given up counts as declared lost: it leaves the bytes in
 //! flight without a congestion signal, its record is kept as long as one of
@@ -192,6 +194,21 @@ pub struct LinkPathSendingLimits {
     /// at once: as many as one call of [`Link::send`] takes well, such as
     /// the segments of one generic segmentation offload, or one.
     pub max_datagrams_per_send: NonZeroUsize,
+}
+
+/// Whether a link has accepted a datagram of the connection: whether the
+/// peer can know of the connection.
+///
+/// The sending calls note the first datagram a link accepts; it is the last
+/// boundary this side sees, not that the datagram went out. A client that
+/// closes before any was accepted ends with nothing sent
+/// ([`close_request`](super::close_request)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatagramAcceptance {
+    /// No link has accepted a datagram of the connection yet.
+    NoneAccepted,
+    /// A link has accepted a datagram of the connection.
+    Accepted,
 }
 
 /// The sealed packet of the send journals of the choices `T` and the list
@@ -350,7 +367,8 @@ pub type SettleReads<T, L> = HList![
 /// phase numbers, `Ic` of the record of why the connection closed, `Ier`
 /// of version 1's connection error among the composition's, `Irt` of the
 /// RTT estimator in a recovery layer; for the close packet, `Icp` of it,
-/// `Irs` of [`ResendTakes`] and `Ilf` of the logical link's facts.
+/// `Irs` of [`ResendTakes`] and `Ilf` of the logical link's facts; `Ida`
+/// of whether a link has accepted a datagram of the connection.
 type Positions<
     Is,
     It,
@@ -383,6 +401,7 @@ type Positions<
     Icp,
     Irs,
     Ilf,
+    Ida,
 > = (
     Is,
     (It, Iw, Ir, Ici, Ik, Hs),
@@ -390,7 +409,7 @@ type Positions<
     (Ij, If, Iv, Ie, Iq, Hf),
     (Ipp, Ima, Jx, Jr, Jm),
     (Iu, Ihc, Ikp, Ic, Ier, Irt),
-    (Icp, Irs, Ilf),
+    (Icp, Irs, Ilf, Ida),
 );
 
 /// The most datagrams one poll fills again because the content planned for
@@ -468,6 +487,7 @@ impl<
     Icp,
     Irs,
     Ilf,
+    Ida,
 > LinkPathSendingCapability
     for NodeCallFamily<
         T,
@@ -506,6 +526,7 @@ impl<
             Icp,
             Irs,
             Ilf,
+            Ida,
         >,
         B,
     >
@@ -561,6 +582,7 @@ where
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
         + GetAt<ClosePacket, Icp>
         + GetAt<LinkFacts, Ilf>
+        + GetAt<DatagramAcceptance, Ida>
         + TakeEach<'x, ResendTakes<T, L>, Irs>,
     L: ConnectionErrorsOf,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ier>,
@@ -800,12 +822,18 @@ where
     {
         let NodeLoan { lineage, others } = view.get_mut();
         match sent {
-            Ok(acceptance) => accept::<T, L, B, S, Ls, Ij, Ie, Iq>(
-                lineage,
-                others,
-                batch.take_accepted(acceptance.count.get()),
-                acceptance.at,
-            ),
+            Ok(acceptance) => {
+                // taken only to note the first
+                if *lineage.get::<DatagramAcceptance, Ida>() == DatagramAcceptance::NoneAccepted {
+                    *lineage.get_mut::<DatagramAcceptance, Ida>() = DatagramAcceptance::Accepted;
+                }
+                accept::<T, L, B, S, Ls, Ij, Ie, Iq>(
+                    lineage,
+                    others,
+                    batch.take_accepted(acceptance.count.get()),
+                    acceptance.at,
+                );
+            }
             Err(_) => {
                 if let Some(datagram) = batch.take_first() {
                     give_up::<T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ipp, Ima, Jx, Jr, Jm>(
@@ -1640,6 +1668,7 @@ impl<
     Icp,
     Irs,
     Ilf,
+    Ida,
 >
     CallKind<
         T,
@@ -1677,6 +1706,7 @@ impl<
             Icp,
             Irs,
             Ilf,
+            Ida,
         >,
     > for LinkPathSendingKind
 where
@@ -1730,6 +1760,7 @@ where
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
         + GetAt<ClosePacket, Icp>
         + GetAt<LinkFacts, Ilf>
+        + GetAt<DatagramAcceptance, Ida>
         + TakeEach<'x, ResendTakes<T, L>, Irs>,
     L: ConnectionErrorsOf,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ier>,
@@ -1813,6 +1844,7 @@ where
         Icp,
         Irs,
         Ilf,
+        Ida,
     >: 'static,
     S: 'static,
 {
@@ -1854,6 +1886,7 @@ where
                 Icp,
                 Irs,
                 Ilf,
+                Ida,
             >,
             B,
         >,

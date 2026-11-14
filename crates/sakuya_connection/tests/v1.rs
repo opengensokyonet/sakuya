@@ -43,6 +43,7 @@ use sakuya_connection::{
         aead_usage::AeadUsage,
         amplification::{AddressValidation, AntiAmplification, AntiAmplificationFactor},
         close::{CloseReasonRecord, LocalCloseCause},
+        close_request::CloseRequestCell,
         confirmation::HandshakeConfirmation,
         crypto::{CryptoReceiveCapacities, CryptoReceiver, FragmentedCryptoReceiveBuffer},
         feedback::AckSummary,
@@ -170,6 +171,9 @@ thread_local! {
     static ROUTING: RefCell<Option<TestRouting>> = const { RefCell::new(None) };
     /// The last line the feeder of a recovery layer logged.
     static LAST_STATUS: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// The cell the application of the last connection made asks to close
+    /// it through.
+    static CLOSE_REQUEST: RefCell<Option<CloseRequestCell<common::AppClose>>> = const { RefCell::new(None) };
 }
 
 /// The parts of the tests' connections.
@@ -203,8 +207,17 @@ fn reset() {
     RIVAL.with(|r| r.set(false));
     ROUTING.with(|r| r.borrow_mut().take());
     LAST_STATUS.with(|l| l.borrow_mut().take());
+    CLOSE_REQUEST.with(|c| c.borrow_mut().take());
     common::reset_links();
     common::reset_close_policy();
+}
+
+/// The cell the application of the last connection made asks to close it
+/// through.
+fn close_request() -> CloseRequestCell<common::AppClose> {
+    CLOSE_REQUEST
+        .with(|c| c.borrow().clone())
+        .expect("a connection was made")
 }
 
 /// A datagram of the tests, as it arrived.
@@ -1900,10 +1913,13 @@ where
             DestinationConnectionIds = common::TestDestinationConnectionIds,
             ResetTokenRegistry = common::TestResetTokenRegistry,
             ImmediateClosePolicy = common::TestImmediateClosePolicy,
+            ApplicationError = common::AppClose,
         >,
     T::Side: SideCapacities,
     T::Recovery<LinkId<(), ()>>: RecoveryFactory<TestLink, Config = NewRenoRecoveryFactoryConfig>,
 {
+    let close_request = CloseRequestCell::new();
+    CLOSE_REQUEST.with(|c| *c.borrow_mut() = Some(close_request.clone()));
     let mut parameters = TransportParameters::<Vec<u8>>::new();
     parameters.set(MaxIdleTimeout::new(VarInt::from_u32(30_000)));
     v1::ConnectionArgs {
@@ -1937,6 +1953,7 @@ where
         max_datagrams_per_send: NonZeroUsize::new(MAX_PER_SEND.with(Cell::get))
             .expect("the tests send at least one datagram at once"),
         immediate_close_policy: common::TestImmediateClosePolicy,
+        close_request,
     }
 }
 
@@ -2235,6 +2252,8 @@ fn a_connection_dropped_with_no_reason_recorded_ends_aborted() {
     let outer = Outer::new();
     assert!(outer.poll(&mut connection).is_pending());
     take_log();
+    // a request no poll took in yet is not the reason
+    close_request().request(common::AppClose(9));
     drop(connection);
     assert_eq!(
         take_log(),
@@ -6732,5 +6751,164 @@ fn a_draining_link_path_seals_nothing() {
         log.iter()
             .any(|line| line == "keys: Initial none, Handshake none, 1-RTT none"),
         "{log:?}"
+    );
+}
+
+#[test]
+fn a_close_the_application_asks_for_wakes_the_connection_and_closes_it() {
+    reset();
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, link());
+    let outer = Outer::new();
+    assert!(outer.poll(&mut connection).is_pending());
+    take_log();
+    advance_to(ms(20));
+    let before = outer.wakes();
+    let asking = close_request();
+    std::thread::spawn(move || {
+        asking.request(common::AppClose(9));
+        asking.request(common::AppClose(10));
+    })
+    .join()
+    .expect("the asking thread");
+    assert_eq!(outer.wakes(), before + 1, "the first request woke it");
+    assert!(outer.poll(&mut connection).is_pending());
+    let pto = probe_timeout(
+        &sakuya_recovery::rtt::RttEstimate::initial(sakuya_recovery::rtt::INITIAL_RTT),
+        ms(1),
+        PacketNumberSpaceKind::ApplicationData,
+        ms(25),
+        0,
+    );
+    let end = ms(20) + pto * 3;
+    assert_eq!(
+        take_log(),
+        [
+            "recovery ended".to_owned(),
+            format!("Closing({end:?}), NotValidated, credit Some(0)"),
+        ]
+    );
+    advance_to(end);
+    assert!(
+        outer.poll(&mut connection).is_ready(),
+        "the connection ends with its last link path"
+    );
+    assert_eq!(
+        take_log(),
+        [
+            "link path ended: Some(Local(Application(AppClose(9))))",
+            "entry ended"
+        ]
+    );
+}
+
+#[test]
+fn a_close_asked_for_once_another_reason_is_written_is_dropped() {
+    reset();
+    CLOSER.with(|c| c.borrow_mut().push_back((ms(20), probe::CloserStep::Close)));
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, link());
+    let outer = Outer::new();
+    assert!(outer.poll(&mut connection).is_pending());
+    advance_to(ms(20));
+    assert!(outer.poll(&mut connection).is_pending());
+    take_log();
+    close_request().request(common::AppClose(9));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert!(take_log().is_empty(), "nothing follows from the request");
+    drop(connection);
+    assert_eq!(
+        take_log(),
+        [
+            "link path ended: Some(Local(Application(AppClose(7))))",
+            "entry ended"
+        ]
+    );
+}
+
+#[test]
+fn a_close_asked_for_before_the_first_flight_is_received_is_taken_in_first() {
+    reset();
+    let first = link();
+    FIRST_DATAGRAMS.with(|f| {
+        f.borrow_mut().push(ReceivedDatagram::new(
+            client_initial(0),
+            ArrivalFacts::new(TestLink(first.clone()), ms(0), None),
+        ));
+    });
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    take_strategy_events();
+    close_request().request(common::AppClose(9));
+    let _ = settle(&mut connection, 0..=0);
+    // the receiving call of the first poll receives the first flight in
+    // `Closing`: it acknowledges nothing, and its first Initial packet gives
+    // the client's connection ID the close packet is sealed with
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 1, "the close packet alone: {sent:?}");
+    let (kind, initial) = open_long_sent(&sent[0].1, &server_keys());
+    assert_eq!(kind, INITIAL);
+    assert_eq!(initial.dcid, CLIENT_SCID);
+    assert_eq!(initial.number, 0, "nothing was sent before");
+    assert_eq!(initial.payload, [0x1c, 0x0c, 0x00, 0x00]);
+    assert_eq!(resend_events(), ["path 0: publish Sealed"]);
+}
+
+/// The steps of a client's packet feeder: the server's connection ID
+/// becomes known at 3 ms, and the server's first Initial packet, which
+/// elicits an acknowledgment, arrives at 5 ms.
+fn client_answering_at_5_ms(first: &LinkId<(), ()>) {
+    use probe::PacketStep::{HandshakeConnectionId, Receive};
+    feed_packets([
+        (ms(3), HandshakeConnectionId(server_cid())),
+        (
+            ms(5),
+            Receive(received(
+                long_packet_with(first_byte(INITIAL), &[], &server_keys(), 0, &ping()),
+                first,
+                ms(5),
+            )),
+        ),
+    ]);
+}
+
+#[test]
+fn a_client_whose_link_accepted_no_datagram_ends_at_once_with_nothing_sent() {
+    reset();
+    let first = link();
+    client_answering_at_5_ms(&first);
+    let mut connection = connection!(ClientMine, AddressValidation::Validated, first.clone());
+    // the ACK is sealed and handed over, but the link holds it
+    common::plan_sends([common::SendOutcome::Hold(usize::MAX)]);
+    let _ = settle(&mut connection, 3..=5);
+    assert_eq!(common::take_batch_sizes(), [1]);
+    take_log();
+    close_request().request(common::AppClose(9));
+    let outer = Outer::new();
+    assert!(outer.poll(&mut connection).is_ready(), "it ends at once");
+    common::release_held_send();
+    assert_eq!(common::take_sent(), [], "nothing goes out");
+    assert_eq!(
+        lines_of(take_log(), &["link path ended"]),
+        ["link path ended: Some(Local(Application(AppClose(9))))"]
+    );
+}
+
+#[test]
+fn a_client_whose_link_accepted_a_datagram_closes_and_sends_its_close_packet() {
+    reset();
+    let first = link();
+    client_answering_at_5_ms(&first);
+    let mut connection = connection!(ClientMine, AddressValidation::Validated, first.clone());
+    let _ = settle(&mut connection, 3..=5);
+    assert_eq!(common::take_sent().len(), 1, "the ACK");
+    close_request().request(common::AppClose(9));
+    let _ = settle(&mut connection, 6..=6);
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let packet = open_initial(&sent[0].1, &client_keys());
+    assert_eq!(packet.dcid, SERVER_CID);
+    // an application close goes as APPLICATION_ERROR in an Initial packet
+    assert_eq!(packet.payload[..4], [0x1c, 0x0c, 0x00, 0x00]);
+    assert!(
+        packet.payload[4..].iter().all(|&byte| byte == 0),
+        "padding after it"
     );
 }

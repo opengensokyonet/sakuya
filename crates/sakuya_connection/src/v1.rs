@@ -7,8 +7,10 @@
 //! the transport parameters, the idle timeout and what the connection was
 //! made with for its first logical link and from its first flight
 //! ([`first_flight`]) in the connection node, with the
-//! recovery factory and the record of why the connection closed
-//! ([`close`]); the clone of the
+//! recovery factory, the record of why the connection closed
+//! ([`close`]) and the cell of the application's request to close
+//! ([`close_request`]), which at the start of every poll takes the request
+//! into the record; the clone of the
 //! link, the facts about it and the anti-amplification limit in the entry of
 //! each logical link, whose call follows the link's datagram size limit
 //! ([`link_ceiling`]); the role in each link path; and in each link path's
@@ -37,6 +39,7 @@ pub mod aead_usage;
 pub mod amplification;
 pub mod close;
 pub mod close_packet;
+pub mod close_request;
 pub mod confirmation;
 pub mod connection_ids;
 pub mod crypto;
@@ -115,6 +118,7 @@ use self::{
     amplification::{AddressValidation, AntiAmplification, AntiAmplificationFactor},
     close::{ApplicationClose, CloseReasonRecord, LocalCloseCause},
     close_packet::{ClosePacket, ConnectionImmediateClosePolicy},
+    close_request::CloseRequestCell,
     confirmation::HandshakeConfirmation,
     connection_ids::{
         ConnectionIdsOf, ConnectionResetTokenRegistry, DestinationConnectionIdConfig,
@@ -145,7 +149,7 @@ use self::{
         LinkPathSendPlannerOf, ProbePingTicketOf, ProbePingTickets, SendStrategyCore,
         SendStrategyOf,
     },
-    sending::{LinkPathSendingKind, LinkPathSendingLimits},
+    sending::{DatagramAcceptance, LinkPathSendingKind, LinkPathSendingLimits},
     spaces::{AckObligationsOf, DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
     stateless_reset::StatelessResetSignal,
 };
@@ -374,6 +378,10 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
     pub max_datagrams_per_send: NonZeroUsize,
     /// What adjusts the close this endpoint sends at each encryption level.
     pub immediate_close_policy: T::ImmediateClosePolicy,
+    /// The cell the application's request to close the connection is put
+    /// in; the connection node keeps a clone of it, and whoever lets the
+    /// application ask keeps another.
+    pub close_request: CloseRequestCell<T::ApplicationError>,
 }
 
 impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + ConnectionErrorsOf>
@@ -397,6 +405,8 @@ where
         MaxAckRanges,
         HandshakeConfirmation,
         CloseReasonRecord<CloseCauseOf<T, L>>,
+        CloseRequestCell<T::ApplicationError>,
+        DatagramAcceptance,
         InitialPathReceiver<T::Receiver>,
         LogicalPathReceivingLimits,
         FirstFlightStart<T>,
@@ -1047,6 +1057,21 @@ where
     }
 }
 impl PassiveDataComponent for LinkPathSendingLimits {}
+
+/// No datagram is sent when the connection is made.
+impl<T: Choices, L> Build<T, L, layer::Connection, ()> for DatagramAcceptance
+where
+    L: LineagePartList<T>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        _: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        DatagramAcceptance::NoneAccepted
+    }
+}
+/// It has no deadline and reads nothing; the sending calls note in it.
+impl PassiveDataComponent for DatagramAcceptance {}
 
 /// The connection keeps the close policy it was made with.
 impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)>
