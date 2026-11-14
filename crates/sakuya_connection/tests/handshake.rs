@@ -44,7 +44,7 @@ use sakuya_connection::{
     take::GetAt,
     v1::{
         self, CloseCauseOf, Side,
-        advancing::HandshakeStart,
+        advancing::{ConnectionExporter, HandshakeStart},
         amplification::{AddressValidation, AntiAmplificationFactor},
         close::{CloseReasonRecord, LocalCloseCause},
         close_request::CloseRequestCell,
@@ -451,6 +451,8 @@ struct Noted {
     peer_close: Option<ImmediateClose>,
     /// What only this side has, as it shows.
     own: String,
+    /// The exporter the connection keeps, as it shows.
+    exporter: String,
     /// The packet number spaces the logical path keeps.
     spaces: Vec<PacketNumberSpaceKind>,
 }
@@ -564,8 +566,8 @@ mod watch {
             Watch
         }
     }
-    impl<T, L, Ic, Ii, Ih, Ir, Io> DataComponent<T, L, layer::Connection, (Ic, Ii, Ih, Ir, Io)>
-        for Watch
+    impl<T, L, Ic, Ii, Ih, Ir, Io, Ie>
+        DataComponent<T, L, layer::Connection, (Ic, Ii, Ih, Ir, Io, Ie)> for Watch
     where
         T: v1::Choices<Crypto = RingBackend, Clock = TestClock>,
         L: LineagePartList<T> + ConnectionErrorsOf,
@@ -575,7 +577,8 @@ mod watch {
             + GetAt<InitialKeys<RingBackend>, Ii>
             + GetAt<HandshakeKeys<RingBackend>, Ih>
             + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
-            + GetAt<<T::Side as Side>::Own, Io>,
+            + GetAt<<T::Side as Side>::Own, Io>
+            + GetAt<ConnectionExporter<<T::Side as Side>::Exporter>, Ie>,
     {
         fn reads(reads: &mut ReadSet) {
             reads
@@ -583,7 +586,8 @@ mod watch {
                 .add::<InitialKeys<RingBackend>>()
                 .add::<HandshakeKeys<RingBackend>>()
                 .add::<CloseReasonRecord<CloseCauseOf<T, L>>>()
-                .add::<<T::Side as Side>::Own>();
+                .add::<<T::Side as Side>::Own>()
+                .add::<ConnectionExporter<<T::Side as Side>::Exporter>>();
         }
         fn reread<'v, B: CallBundle>(
             lineage: LineageOf<'v, T, L, layer::Connection>,
@@ -613,6 +617,10 @@ mod watch {
                 alert,
                 peer_close,
                 own: format!("{:?}", lineage.get::<<T::Side as Side>::Own, Io>()),
+                exporter: format!(
+                    "{:?}",
+                    lineage.get::<ConnectionExporter<<T::Side as Side>::Exporter>, Ie>()
+                ),
                 spaces: Vec::new(),
             };
             note(<T::Side as Side>::ROLE, |noted| {
@@ -992,6 +1000,7 @@ fn a_client_and_a_server_complete_and_confirm_the_handshake() {
             "the {side} retired its Initial and Handshake spaces"
         );
         assert_eq!(noted.record, None, "the {side}'s connection is not closing");
+        assert_eq!(noted.exporter, "Held(..)", "the {side} keeps its exporter");
     }
     // the server sent HANDSHAKE_DONE, and the client acknowledged it
     assert_eq!(server.own, "Delivered");
@@ -1044,5 +1053,9 @@ fn a_client_that_fails_to_verify_the_server_closes_with_the_alert() {
     );
     // a Frame Type of 0
     assert_eq!(close.frame_type, None);
+    assert_eq!(
+        client.exporter, "Released",
+        "a closed connection keeps no exporter"
+    );
     assert!(!run.server_ended, "the server closes in its own time");
 }

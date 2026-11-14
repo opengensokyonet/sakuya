@@ -299,7 +299,7 @@ pub trait Side: 'static {
 
     /// The kind of this side's advancing call, the one call of the
     /// connection node, which runs the handshake
-    /// ([`advancing`](self::advancing)).
+    /// ([`advancing`]).
     type Advancing;
 
     /// The exporter this side's handshake gives when it completes, which

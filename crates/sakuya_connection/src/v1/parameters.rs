@@ -204,3 +204,56 @@ where
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use sakuya_wire::v1::transport_parameters::TransportParameters;
+
+    use super::*;
+
+    fn id(byte: u8) -> ConnectionId {
+        ConnectionId::new(&[byte; 8]).unwrap()
+    }
+
+    #[test]
+    fn the_initial_source_connection_id_states_the_peers() {
+        let mut parameters = TransportParameters::<&[u8]>::new();
+        assert!(matches!(
+            check_initial_source::<_, _>(&parameters.known, Some(id(1))),
+            Err(PeerTransportParametersError::InitialSourceConnectionIdAbsent)
+        ));
+        parameters.set(InitialSourceConnectionId::new(id(2)));
+        assert!(matches!(
+            check_initial_source::<_, _>(&parameters.known, Some(id(1))),
+            Err(PeerTransportParametersError::InitialSourceConnectionIdMismatch { received })
+                if received == id(2)
+        ));
+        assert!(matches!(
+            check_initial_source::<_, _>(&parameters.known, None),
+            Err(PeerTransportParametersError::InitialSourceConnectionIdMismatch { .. })
+        ));
+        assert!(check_initial_source::<_, _>(&parameters.known, Some(id(2))).is_ok());
+    }
+
+    #[test]
+    fn a_server_states_the_clients_first_destination_and_no_retry() {
+        let mut parameters = TransportParameters::<&[u8]>::new();
+        assert!(matches!(
+            check_server_destination::<_, _, _>(&parameters.known, id(1)),
+            Err(PeerTransportParametersError::OriginalDestinationConnectionIdAbsent)
+        ));
+        parameters.set(OriginalDestinationConnectionId::new(id(2)));
+        assert!(matches!(
+            check_server_destination::<_, _, _>(&parameters.known, id(1)),
+            Err(PeerTransportParametersError::OriginalDestinationConnectionIdMismatch { received })
+                if received == id(2)
+        ));
+        assert!(check_server_destination::<_, _, _>(&parameters.known, id(2)).is_ok());
+        parameters.set(RetrySourceConnectionId::new(id(3)));
+        assert!(matches!(
+            check_server_destination::<_, _, _>(&parameters.known, id(2)),
+            Err(PeerTransportParametersError::RetrySourceConnectionIdWithoutRetry { received })
+                if received == id(3)
+        ));
+    }
+}
