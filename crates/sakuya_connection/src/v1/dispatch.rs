@@ -276,18 +276,7 @@ where
                 lineage
                     .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>()
                     .record(CloseReason::Peer(immediate_close(frame)));
-                let hlist_pat![peer, thresholds, idle] =
-                    (*lineage).read_each::<LinkPathRoleReads<T, L>, Iv>();
-                let pto = current_probe_timeout::<T, L, B, Ima, Irt>(peer, thresholds, others)
-                    // with no recovery layer, the last one the idle timeout took
-                    .unwrap_or_else(|| idle.probe_timeout());
-                let now = others.now();
-                // an end beyond what the instant type represents is none:
-                // the draining period is cut short rather than kept forever
-                let end = now.checked_add(pto.saturating_mul(3)).unwrap_or(now);
-                others.each_link_path::<HList![LinkPathRole<InstantOf<T>>], Il>(
-                    |_, hlist_pat![role]| role.drain(end),
-                );
+                drain_link_paths::<T, L, B, Iv, Ima, Irt, Il>(lineage, others);
                 Ok(())
             }
             other => error::UnhandledFrameSnafu {
@@ -300,6 +289,41 @@ where
     fn fields_error(error: ReadFieldsError<Infallible>) -> ConnectionError {
         ConnectionError::ReadFrameFields { source: error }
     }
+}
+
+/// Put every link path of the connection into `Draining`, for three times
+/// the current probe timeout (RFC 9000 §10.2.2), measured as a closing link
+/// path measures it; a link path that was closing keeps its end.
+///
+/// Whoever finds that the connection drains calls it after writing the
+/// reason into the record: the receiving of a CONNECTION_CLOSE frame and of
+/// a stateless reset.
+pub(super) fn drain_link_paths<'v, T, L, B, Iv, Ima, Irt, Il>(
+    lineage: &mut LineageOf<'v, T, L, LogicalPath>,
+    others: &mut OtherNodes<'v, T, L, B>,
+) where
+    T: Choices,
+    L: LineagePartList<T> + ParametersOf<TransportParameterSpace>,
+    B: CallBundle,
+    TransportParameterSlots<L>: Selector<Option<MaxAckDelay>, Ima>,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath: ReadEach<LinkPathRoleReads<T, L>, Iv>,
+    for<'s> NodeData<T, L, layer::Recovery>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::Recovery> as FlatMut<'s>>::Out: GetAt<RttOf<T, L>, Irt>,
+    for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![LinkPathRole<InstantOf<T>>], Il>,
+{
+    let hlist_pat![peer, thresholds, idle] = (*lineage).read_each::<LinkPathRoleReads<T, L>, Iv>();
+    let pto = current_probe_timeout::<T, L, B, Ima, Irt>(peer, thresholds, others)
+        // with no recovery layer, the last one the idle timeout took
+        .unwrap_or_else(|| idle.probe_timeout());
+    let now = others.now();
+    // an end beyond what the instant type represents is none: the draining
+    // period is cut short rather than kept forever
+    let end = now.checked_add(pto.saturating_mul(3)).unwrap_or(now);
+    others.each_link_path::<HList![LinkPathRole<InstantOf<T>>], Il>(|_, hlist_pat![role]| {
+        role.drain(end)
+    });
 }
 
 /// The CRYPTO stream of `level`; a 0-RTT packet carries no CRYPTO frames

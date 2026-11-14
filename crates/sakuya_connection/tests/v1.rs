@@ -224,9 +224,19 @@ impl DatagramDeliverer<Datagram, ()> for Posting {
 
 /// A routing domain with one route entry, the client's first Destination
 /// Connection ID, for every packet form; it reads short headers with
-/// 8-byte connection IDs.
+/// 8-byte connection IDs, and detects stateless resets by the tokens the
+/// connection registers.
 struct TestRouting {
-    router: DatagramRouter<BytesMut, TestLink, Target, ConnectionIdLengths>,
+    router: DatagramRouter<
+        BytesMut,
+        TestLink,
+        Target,
+        ConnectionIdLengths,
+        common::TestResetTokenRegistry,
+    >,
+    /// Where the connection registers the reset tokens of the peer's
+    /// connection IDs, which the router detects resets by.
+    reset_tokens: common::TestResetTokenRegistry,
     _registration: RouteEntryRegistration<Target, ()>,
     /// When there is a rival: its entry for the same connection ID, and
     /// its receiver, which keeps every candidate it is given and never
@@ -268,13 +278,16 @@ fn test_receiver() -> TestReceiver {
         );
         (registration, queue)
     });
+    let reset_tokens = sakuya_datagram_routing::route::reset::StatelessResetTokens::new();
     let router = DatagramRouter::new(
         index,
         ConnectionIdLengths::new([ConnectionIdLength::new(8).expect("a length")]),
-    );
+    )
+    .with_stateless_reset(Arc::clone(&reset_tokens));
     ROUTING.with(|r| {
         *r.borrow_mut() = Some(TestRouting {
             router,
+            reset_tokens,
             _registration: registration,
             _rival: rival,
         });
@@ -858,6 +871,11 @@ mod probe {
         /// acknowledgment of all of them would, and log each one's packet
         /// number and state; a gone space logs nothing.
         TakeRecords(PacketNumberSpaceKind),
+        /// Tell the destination connection ID strategy that a datagram was
+        /// sent with the connection ID of the sequence number over the
+        /// logical link, as the sending call will, lending it each link
+        /// path's registrar of reset tokens.
+        UseConnectionId(LinkId<(), ()>, u64),
     }
 
     /// In a logical path: does its steps at their instants.
@@ -878,7 +896,7 @@ mod probe {
     packet_feeder!(Mine);
     packet_feeder!(ClientMine);
     packet_feeder!(SpyMine);
-    impl<T, L, I, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ic, Icr, Ip, Ian, Icid, Isj>
+    impl<T, L, I, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ic, Icr, Ip, Ian, Icid, Isj, Irg>
         DataComponent<
             T,
             L,
@@ -889,7 +907,7 @@ mod probe {
                 (Ij, Im, Ia, It, Iu, Ikp, Icid),
                 (Ir, Ie, Ik, Hd),
                 (Ic, Icr),
-                (Ip, Ian, Isj),
+                (Ip, Ian, Isj, Irg),
             ),
         > for PacketFeeder
     where
@@ -927,6 +945,15 @@ mod probe {
         for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
         for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
             TakeEach<'s, HList![AntiAmplification], Ian>,
+        for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out: TakeEach<
+                's,
+                HList![
+                    v1::connection_ids::LinkPathResetTokenRegistrar<
+                        v1::connection_ids::ResetTokenRegistrarOf<T>,
+                    >
+                ],
+                Irg,
+            >,
     {
         fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::LogicalPath>) -> Option<Duration> {
             lineage
@@ -1055,6 +1082,24 @@ mod probe {
                         .map(|record| (record.number.get(), format!("{:?}", record.state)))
                         .collect();
                     log(format!("records {space:?}: {records:?}"));
+                }
+                PacketStep::UseConnectionId(link, sequence) => {
+                    let ids = lineage
+                        .get_mut::<v1::connection_ids::ConnectionIdsOf<T>, Icid>()
+                        .destination_mut();
+                    others.each_link_path::<HList![
+                        v1::connection_ids::LinkPathResetTokenRegistrar<
+                            v1::connection_ids::ResetTokenRegistrarOf<T>,
+                        >
+                    ], Irg>(|_, hlist_pat![registrar]| {
+                        ids.on_used(
+                            registrar.registrar_mut(),
+                            sequence,
+                            &link,
+                            MIN_DATAGRAM_SIZE,
+                        );
+                    });
+                    log(format!("used {sequence}"));
                 }
                 PacketStep::Inspect => {
                     let mut read = Vec::new();
@@ -1770,7 +1815,15 @@ where
         max_held_inputs: MAX_HELD.with(Cell::get),
         destination_connection_ids:
             sakuya_connection::connection_id::sequence_map::SequenceMapDestinationConnectionIdStrategyConfig::new(8),
-        reset_token_registry: sakuya_datagram_routing::route::reset::StatelessResetTokens::new(),
+        // after the initial receiver, which made the routing domain
+        reset_token_registry: ROUTING.with(|r| {
+            Arc::clone(
+                &r.borrow()
+                    .as_ref()
+                    .expect("the initial receiver made a routing domain")
+                    .reset_tokens,
+            )
+        }),
         first_local_connection_id: server_cid(),
         max_datagrams_per_send: NonZeroUsize::new(MAX_PER_SEND.with(Cell::get))
             .expect("the tests send at least one datagram at once"),
@@ -5388,4 +5441,173 @@ fn the_planner_is_told_what_a_packet_takes_when_the_keys_of_its_level_come() {
         told.handshake.map(|handshake| handshake + 1),
         "an Initial packet's empty token takes a byte more"
     );
+}
+
+/// The steps, by 8 ms, that give the logical path a connection ID of the
+/// peer's with a reset token and use it on the link path over `first`: the
+/// handshake connection ID, then the one of sequence 1, whose token is
+/// [`RESET_TOKEN`].
+fn reset_token_registered(first: &LinkId<(), ()>) -> [(Duration, probe::PacketStep); 4] {
+    use probe::PacketStep::{InstallOneRttKeys, Receive, UseConnectionId};
+    [
+        (
+            ms(5),
+            Receive(received(initial_from(&[0xaa; 8], 0, &ping()), first, ms(5))),
+        ),
+        (ms(6), InstallOneRttKeys),
+        (
+            ms(7),
+            Receive(received(
+                one_rtt_packet_of(0, 0, &new_connection_id(1)),
+                first,
+                ms(7),
+            )),
+        ),
+        (ms(8), UseConnectionId(first.clone(), 1)),
+    ]
+}
+
+/// The reset token of the connection ID of sequence 1 that
+/// [`new_connection_id`] gives.
+const RESET_TOKEN: [u8; 16] = [0x81; 16];
+
+/// A datagram that ends in `token`, as a stateless reset does (RFC 9000
+/// §10.3): the first bits of a short header, then bits that look random,
+/// then the token.
+fn stateless_reset(token: [u8; 16]) -> BytesMut {
+    let mut datagram = BytesMut::from(&[0x5c; 25][..]);
+    datagram.extend_from_slice(&token);
+    datagram
+}
+
+/// The current probe timeout of the tests' connections before any RTT
+/// sample, with the default maximum ACK delay.
+fn initial_probe_timeout() -> Duration {
+    probe_timeout(
+        &sakuya_recovery::rtt::RttEstimate::initial(sakuya_recovery::rtt::INITIAL_RTT),
+        ms(1),
+        PacketNumberSpaceKind::ApplicationData,
+        ms(25),
+        0,
+    )
+}
+
+#[test]
+fn a_stateless_reset_wakes_the_receiving_call_which_drains_the_link_paths() {
+    use probe::PacketStep::Inspect;
+    reset();
+    let first = link();
+    feed_packets(reset_token_registered(&first));
+    feed_packets([(ms(12), Inspect)]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    take_log();
+    assert_eq!(
+        run(&mut connection, 5..=8),
+        [
+            "processed: highest numbered true, non-probing true",
+            "processed: highest numbered true, non-probing false",
+            "used 1",
+        ]
+    );
+    take_strategy_events();
+    let outer = Outer::new();
+    advance_to(ms(10));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(take_log(), Vec::<String>::new());
+    let wakes = outer.wakes();
+    // routing detects the reset by its token before it routes the datagram
+    deliver(stateless_reset(RESET_TOKEN), &first, ms(10));
+    assert_eq!(
+        outer.wakes(),
+        wakes + 1,
+        "the reset wakes the receiving call while it waits"
+    );
+    advance_to(ms(11));
+    assert!(outer.poll(&mut connection).is_pending());
+    let log = take_log();
+    let draining = format!("Draining({:?}), ", ms(11) + initial_probe_timeout() * 3);
+    assert!(
+        log.iter().any(|line| line.starts_with(&draining)),
+        "the link path drains for three probe timeouts: {log:?}"
+    );
+    assert!(log.contains(&"recovery ended".to_owned()), "{log:?}");
+    assert_eq!(
+        strategy_events("core: closed"),
+        ["core: closed StatelessReset"]
+    );
+    let log = run(&mut connection, 12..=12);
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert!(
+        log[0].ends_with("reason Some(\"StatelessReset\")"),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn a_closing_connection_drains_on_a_stateless_reset_keeping_its_reason_and_end() {
+    use probe::PacketStep::Inspect;
+    reset();
+    let first = link();
+    feed_packets(reset_token_registered(&first));
+    feed_packets([(ms(12), Inspect)]);
+    CLOSER.with(|c| c.borrow_mut().push_back((ms(9), probe::CloserStep::Close)));
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    let end = ms(9) + initial_probe_timeout() * 3;
+    take_log();
+    let log = run(&mut connection, 5..=9);
+    let closing = format!("Closing({end:?}), ");
+    assert!(
+        log.iter().any(|line| line.starts_with(&closing)),
+        "the link path closes: {log:?}"
+    );
+    take_strategy_events();
+    deliver(stateless_reset(RESET_TOKEN), &first, ms(10));
+    let log = run(&mut connection, 11..=11);
+    let draining = format!("Draining({end:?}), ");
+    assert!(
+        log.iter().any(|line| line.starts_with(&draining)),
+        "the closing link path drains and keeps its end: {log:?}"
+    );
+    assert_eq!(strategy_events("core: closed"), Vec::<String>::new());
+    let log = run(&mut connection, 12..=12);
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert!(
+        log[0].ends_with("reason Some(\"Local(Application(AppClose(7)))\")"),
+        "the record keeps the reason written first: {log:?}"
+    );
+}
+
+#[test]
+fn a_stateless_reset_after_the_link_paths_drained_changes_nothing() {
+    use probe::PacketStep::{Inspect, Receive};
+    reset();
+    let first = link();
+    let close = [&[0x1c, 0x00, 0x00, 0x00][..], &[0; 20]].concat();
+    feed_packets(reset_token_registered(&first));
+    feed_packets([
+        (
+            ms(9),
+            Receive(received(one_rtt_packet_of(0, 1, &close), &first, ms(9))),
+        ),
+        (ms(12), Inspect),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    take_log();
+    let log = run(&mut connection, 5..=9);
+    assert!(
+        log.iter().any(|line| line.starts_with("Draining(")),
+        "the link path drains: {log:?}"
+    );
+    let outer = Outer::new();
+    advance_to(ms(10));
+    assert!(outer.poll(&mut connection).is_pending());
+    let wakes = outer.wakes();
+    deliver(stateless_reset(RESET_TOKEN), &first, ms(10));
+    assert_eq!(outer.wakes(), wakes + 1);
+    advance_to(ms(11));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(take_log(), Vec::<String>::new());
+    let log = run(&mut connection, 12..=12);
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert!(log[0].contains("reason Some(\"Peer("), "{log:?}");
 }

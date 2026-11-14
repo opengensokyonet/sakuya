@@ -2,8 +2,14 @@
 //! from, the inputs it holds until their keys come, and the call that takes
 //! each of them in.
 //!
-//! [`logical_path_receiving`] is the call of each logical path. It goes
-//! through one input at a time:
+//! [`logical_path_receiving`] is the call of each logical path. Whenever
+//! it looks for its next input, it first registers to be woken by the
+//! logical path's [`StatelessResetSignal`], then looks at it: once routing
+//! has marked it, the call writes [`CloseReason::StatelessReset`] into the
+//! record of why the connection closed, unless a reason is already there,
+//! and puts every link path into `Draining` (RFC 9000 §10.3.1), as a
+//! CONNECTION_CLOSE frame from the peer does. It then goes on taking inputs
+//! in, which draining link paths drop. It goes through one input at a time:
 //!
 //! 1. The next input is the first held one, in the order of arrival, that
 //!    the keys installed since can process; otherwise the next of the first
@@ -89,22 +95,27 @@ use sakuya_recovery::{
 use sakuya_stream::connection::CloseReason;
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength},
-    parts::{CoprodInjector, HList},
+    parameters::ParametersOf,
+    parts::{CoprodInjector, HList, Selector},
     v1::{
         encryption_level::EncryptionLevel,
         frame::{FrameType, set::FrameSet},
         packet_number::PacketNumber,
         protected_packet::{IntoPacketsError, Packet, ProtectedPacket, into_packets},
         role::Role,
+        transport_parameters::{
+            TransportParameterSlots, TransportParameterSpace, integer::MaxAckDelay,
+        },
     },
 };
 
 use super::{
-    Choices, CloseCauseOf, Side,
+    Choices, CloseCauseOf, LinkPathRoleReads, Side,
     aead_usage::AeadUsage,
     amplification::AntiAmplification,
     close::{CloseReasonRecord, LocalCloseCause},
     connection_ids::ConnectionIdsOf,
+    dispatch::drain_link_paths,
     error::ConnectionError,
     idle::IdleTimeout,
     key_phase::KeyPhaseNumbers,
@@ -113,8 +124,10 @@ use super::{
         LevelReceiveKeys, PacketOutcome, ReceivedPacket, one_rtt_receive_keys, open_one_rtt,
         packet_number_offset, receive_keys, receive_packet,
     },
+    recovery::RttOf,
     role::LinkPathRole,
     spaces::AckObligationsOf,
+    stateless_reset::StatelessResetSignal,
 };
 use crate::{
     call::{CallBundle, CallKind, NodeCallFamily, NodeLoan},
@@ -125,7 +138,7 @@ use crate::{
     layer::{self, LogicalPath},
     others::OtherNodes,
     share::{FlatMut, LineageLists, LineagePartList, NodeData},
-    take::{GetAt, TakeEach},
+    take::{GetAt, ReadEach, TakeEach},
 };
 
 /// A datagram as it arrived over the link `Lk`.
@@ -403,9 +416,10 @@ pub trait LogicalPathReceivingCapability: ReceiverFamily {
     /// The handoff of the routing domain.
     type Handoff: UnclaimedHandoff<DatagramOf<Self::Link>>;
 
-    /// The next input to judge or take, after receiving the held packets
-    /// that were released; `Pending` at the limit of a poll, having woken
-    /// the call, or until a delivery comes.
+    /// The next input to judge or take, after draining the link paths if a
+    /// stateless reset was received and receiving the held packets that
+    /// were released; `Pending` at the limit of a poll, having woken the
+    /// call, or until a delivery or a stateless reset comes.
     #[allow(clippy::type_complexity)] // the delivery of the routing crate
     fn poll_next_input<'v>(
         view: Pin<&mut Self::ReceiverView<'v>>,
@@ -446,23 +460,99 @@ pub trait LogicalPathReceivingCapability: ReceiverFamily {
 
 /// The positions the receiving call takes by: `Ip` of its input and `Ic` of
 /// the record of why the connection closed in the logical path's lineage;
-/// those of [`receive_packet`]; and `Ian` of
-/// the anti-amplification limit in the entry of a logical link.
-type Positions<Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian, Icid> = (
+/// those of [`receive_packet`]; `Ian` of
+/// the anti-amplification limit in the entry of a logical link; and those
+/// it drains the link paths by when a stateless reset was received: `Is` of
+/// the logical path's [`StatelessResetSignal`], and those of
+/// [`drain_link_paths`].
+type Positions<
+    Ip,
+    Ic,
+    Ii,
+    Ih,
+    Io,
+    Ij,
+    Im,
+    Ia,
+    It,
+    Iu,
+    Ikp,
+    Ir,
+    Ie,
+    Ik,
+    Hd,
+    Ian,
+    Icid,
+    Is,
+    Iv,
+    Ima,
+    Irt,
+    Il,
+> = (
     (Ip, Ic),
     (Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Icid),
     (Ir, Ie, Ik, Hd),
     Ian,
+    (Is, Iv, Ima, Irt, Il),
 );
 
-impl<T, L, K, B, Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian, Icid>
-    LogicalPathReceivingCapability
+impl<
+    T,
+    L,
+    K,
+    B,
+    Ip,
+    Ic,
+    Ii,
+    Ih,
+    Io,
+    Ij,
+    Im,
+    Ia,
+    It,
+    Iu,
+    Ikp,
+    Ir,
+    Ie,
+    Ik,
+    Hd,
+    Ian,
+    Icid,
+    Is,
+    Iv,
+    Ima,
+    Irt,
+    Il,
+> LogicalPathReceivingCapability
     for NodeCallFamily<
         T,
         L,
         LogicalPath,
         K,
-        Positions<Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian, Icid>,
+        Positions<
+            Ip,
+            Ic,
+            Ii,
+            Ih,
+            Io,
+            Ij,
+            Im,
+            Ia,
+            It,
+            Iu,
+            Ikp,
+            Ir,
+            Ie,
+            Ik,
+            Hd,
+            Ian,
+            Icid,
+            Is,
+            Iv,
+            Ima,
+            Irt,
+            Il,
+        >,
         B,
     >
 where
@@ -490,6 +580,14 @@ where
     for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![AntiAmplification], Ian>,
+    L: ParametersOf<TransportParameterSpace>,
+    TransportParameterSlots<L>: Selector<Option<MaxAckDelay>, Ima>,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath:
+        GetAt<Arc<StatelessResetSignal>, Is> + ReadEach<LinkPathRoleReads<T, L>, Iv>,
+    for<'s> NodeData<T, L, layer::Recovery>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::Recovery> as FlatMut<'s>>::Out: GetAt<RttOf<T, L>, Irt>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![LinkPathRole<InstantOf<T>>], Il>,
 {
     type Link = T::Link;
     type Handoff = <T::Receiver as LogicalPathDatagramReceiver<T::Link>>::Handoff;
@@ -502,6 +600,7 @@ where
         Self: 'v,
     {
         let NodeLoan { lineage, others } = view.get_mut();
+        drain_on_stateless_reset::<T, L, B, Ic, Ir, Is, Iv, Ima, Irt, Il>(lineage, others, cx);
         loop {
             let levels = ReceivableLevels::of::<T, L, Ii, Ih, Io>(lineage);
             let input = lineage.get_mut::<LogicalPathInput<T::Link, T::Receiver>, Ip>();
@@ -862,6 +961,54 @@ where
     }
 }
 
+/// Wake the receiving call when a stateless reset is received for its
+/// logical path; once one was, write [`CloseReason::StatelessReset`] into
+/// the record of why the connection closed and drain every link path (RFC
+/// 9000 §10.3.1), as a CONNECTION_CLOSE frame from the peer does.
+///
+/// The record keeps the reason written first: a connection already closing
+/// keeps its own reason and only drains, each link path keeping its end
+/// (§10.2.2). Once every link path drains there is nothing left to do, and
+/// the mark is no longer acted on.
+#[allow(clippy::type_complexity)] // the positions of what it takes
+fn drain_on_stateless_reset<'v, T, L, B, Ic, Ir, Is, Iv, Ima, Irt, Il>(
+    lineage: &mut LineageOf<'v, T, L, LogicalPath>,
+    others: &mut OtherNodes<'v, T, L, B>,
+    cx: &Context<'_>,
+) where
+    T: Choices,
+    L: LineagePartList<T> + ParametersOf<TransportParameterSpace> + ConnectionErrorsOf,
+    B: CallBundle,
+    TransportParameterSlots<L>: Selector<Option<MaxAckDelay>, Ima>,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
+        + GetAt<Arc<StatelessResetSignal>, Is>
+        + ReadEach<LinkPathRoleReads<T, L>, Iv>,
+    for<'s> NodeData<T, L, layer::Recovery>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::Recovery> as FlatMut<'s>>::Out: GetAt<RttOf<T, L>, Irt>,
+    for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out: GetAt<LinkPathRole<InstantOf<T>>, Ir>
+        + TakeEach<'s, HList![LinkPathRole<InstantOf<T>>], Il>,
+{
+    // registered before the mark is looked at, so that a reset received in
+    // between still wakes the call
+    let signal = lineage.get::<Arc<StatelessResetSignal>, Is>();
+    signal.register(cx.waker());
+    if !signal.received() {
+        return;
+    }
+    let mut all_draining = true;
+    others.each_link_path_read::<LinkPathRole<InstantOf<T>>, Ir>(|_, role| {
+        all_draining &= matches!(role, LinkPathRole::Draining(_));
+    });
+    if all_draining {
+        return;
+    }
+    lineage
+        .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
+        .record(CloseReason::StatelessReset);
+    drain_link_paths::<T, L, B, Iv, Ima, Irt, Il>(lineage, others);
+}
+
 /// The length of the Destination Connection ID of a short header in a
 /// datagram routed as `route` says: the length the interpretation read,
 /// and after a long header that of the connection ID it was found by, which
@@ -945,12 +1092,60 @@ pub async fn logical_path_receiving<W: LogicalPathReceivingCapability>(
 #[derive(Debug)]
 pub struct LogicalPathReceivingKind;
 
-impl<T, L, Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian, Icid>
+impl<
+    T,
+    L,
+    Ip,
+    Ic,
+    Ii,
+    Ih,
+    Io,
+    Ij,
+    Im,
+    Ia,
+    It,
+    Iu,
+    Ikp,
+    Ir,
+    Ie,
+    Ik,
+    Hd,
+    Ian,
+    Icid,
+    Is,
+    Iv,
+    Ima,
+    Irt,
+    Il,
+>
     CallKind<
         T,
         L,
         LogicalPath,
-        Positions<Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian, Icid>,
+        Positions<
+            Ip,
+            Ic,
+            Ii,
+            Ih,
+            Io,
+            Ij,
+            Im,
+            Ia,
+            It,
+            Iu,
+            Ikp,
+            Ir,
+            Ie,
+            Ik,
+            Hd,
+            Ian,
+            Icid,
+            Is,
+            Iv,
+            Ima,
+            Irt,
+            Il,
+        >,
     > for LogicalPathReceivingKind
 where
     T: Choices,
@@ -976,7 +1171,38 @@ where
     for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![AntiAmplification], Ian>,
-    Positions<Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian, Icid>: 'static,
+    L: ParametersOf<TransportParameterSpace>,
+    TransportParameterSlots<L>: Selector<Option<MaxAckDelay>, Ima>,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath:
+        GetAt<Arc<StatelessResetSignal>, Is> + ReadEach<LinkPathRoleReads<T, L>, Iv>,
+    for<'s> NodeData<T, L, layer::Recovery>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::Recovery> as FlatMut<'s>>::Out: GetAt<RttOf<T, L>, Irt>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![LinkPathRole<InstantOf<T>>], Il>,
+    Positions<
+        Ip,
+        Ic,
+        Ii,
+        Ih,
+        Io,
+        Ij,
+        Im,
+        Ia,
+        It,
+        Iu,
+        Ikp,
+        Ir,
+        Ie,
+        Ik,
+        Hd,
+        Ian,
+        Icid,
+        Is,
+        Iv,
+        Ima,
+        Irt,
+        Il,
+    >: 'static,
 {
     type Call<B: CallBundle> = LentCall<
         NodeCallFamily<
@@ -984,7 +1210,30 @@ where
             L,
             LogicalPath,
             LogicalPathReceivingKind,
-            Positions<Ip, Ic, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Ian, Icid>,
+            Positions<
+                Ip,
+                Ic,
+                Ii,
+                Ih,
+                Io,
+                Ij,
+                Im,
+                Ia,
+                It,
+                Iu,
+                Ikp,
+                Ir,
+                Ie,
+                Ik,
+                Hd,
+                Ian,
+                Icid,
+                Is,
+                Iv,
+                Ima,
+                Irt,
+                Il,
+            >,
             B,
         >,
         LogicalPathReceiving,

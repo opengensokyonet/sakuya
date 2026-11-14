@@ -5,6 +5,8 @@
 //! token was registered for is the [`StatelessResetSignal`] of the logical
 //! path the connection ID belongs to. Routing only marks the signal and
 //! wakes whoever waits on it; it does not touch the connection's state.
+//! The logical path's receiving call waits on it, and once it is marked
+//! drains the connection ([`input`](super::input)).
 //!
 //! [RFC 9000 §10.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-10.3
 
