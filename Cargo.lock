@@ -625,6 +625,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sakuya_clock"
+version = "0.0.0"
+
+[[package]]
+name = "sakuya_clock_tokio"
+version = "0.0.0"
+dependencies = [
+ "sakuya_clock",
+ "tokio",
+]
+
+[[package]]
 name = "sakuya_connection"
 version = "0.0.0"
 dependencies = [
@@ -633,6 +645,7 @@ dependencies = [
  "futures-util",
  "nitori_call",
  "nitori_io",
+ "sakuya_clock",
  "sakuya_datagram_routing",
  "sakuya_link",
  "sakuya_packet_protection",

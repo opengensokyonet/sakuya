@@ -2,6 +2,8 @@
 members = [
     "crates/sakuya_wire",
     "crates/sakuya_packet_protection",
+    "crates/sakuya_clock",
+    "crates/sakuya_clock_tokio",
     "crates/sakuya_link",
     "crates/sakuya_datagram_routing",
     "crates/sakuya_stream",
@@ -36,6 +38,7 @@ rustls-pki-types = { version = "1.15.1", default-features = false, features = ["
 rustls-webpki = { version = "0.103.16", default-features = false, features = ["std"] }
 sakuya_wire = { path = "crates/sakuya_wire" }
 sakuya_packet_protection = { path = "crates/sakuya_packet_protection", default-features = false }
+sakuya_clock = { path = "crates/sakuya_clock" }
 sakuya_link = { path = "crates/sakuya_link" }
 sakuya_datagram_routing = { path = "crates/sakuya_datagram_routing" }
 sakuya_stream = { path = "crates/sakuya_stream" }
