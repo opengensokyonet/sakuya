@@ -5,8 +5,9 @@
 //! keys of each encryption level, the counts of the AEAD's usage
 //! ([`aead_usage`]), the CRYPTO data received and sent at each level
 //! ([`crypto`]) with the intents of what is to be sent, what only the
-//! connection's side has ([`handshake_done`]), the transport parameters, the idle timeout and what the connection was
-//! made with for its first logical link and from its first flight
+//! connection's side has ([`handshake_done`]), the transport parameters,
+//! the idle timeout and what the connection was made with for its first
+//! logical link and from its first flight
 //! ([`first_flight`]) in the connection node, with the
 //! recovery factory, the record of why the connection closed
 //! ([`close`]) and the cell of the application's request to close
