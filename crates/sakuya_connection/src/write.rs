@@ -21,16 +21,85 @@
 //! ([`PacketWriting`]); an open packet holds it by value, and dropping what
 //! the source hands back drops it.
 
-use core::{fmt, marker::PhantomData};
+use core::{convert::Infallible, fmt, marker::PhantomData};
 
 use bytes::BytesMut;
-use sakuya_recovery::send_journals::PacketSendAttempt;
+use sakuya_recovery::{
+    packet_number_space::PacketNumberSpaceKind, send_journals::PacketSendAttempt,
+};
 use snafu::{Snafu, ensure};
+
+use crate::{
+    clock::{ConnectionChoices, InstantOf},
+    frame_source::{FindFrameSource, FrameSource, FrameSourceKind, NoIntent, PublishIntent},
+    take::Lineage,
+};
 
 /// The summary of the PADDING a packet writer writes: it has nothing to
 /// hand back when the packet is acknowledged or declared lost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct PaddingSummary;
+
+/// PADDING, as a kind of frame source a part lists: the packet writer
+/// writes it, so it is never planned, and nothing comes of it when it is
+/// delivered or lost.
+#[derive(Debug)]
+pub enum PaddingFrames {}
+
+impl FrameSourceKind for PaddingFrames {
+    type Item<'a> = Infallible;
+    type Summary<I> = PaddingSummary;
+    type Intent = NoIntent;
+}
+
+/// What the summaries of PADDING go back to: it does nothing with them.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PaddingFrameSource;
+
+impl FrameSource for PaddingFrameSource {
+    type Summary = PaddingSummary;
+    type Class = InFlightClass;
+    type Item<'a> = Infallible;
+    type Intent = NoIntent;
+
+    fn supply<W, P>(
+        &mut self,
+        item: Infallible,
+        _: OpenPacket<W, InFlightClass, P>,
+    ) -> Supplied<W, InFlightClass, P>
+    where
+        W: PacketWriting,
+        SummaryOf<W>: From<PaddingSummary>,
+        P: PacketPosition,
+    {
+        match item {}
+    }
+
+    fn delivered<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, _: PaddingSummary)
+    where
+        Pb: PublishIntent<NoIntent, Idx>,
+    {
+    }
+
+    fn lost<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, _: &PaddingSummary)
+    where
+        Pb: PublishIntent<NoIntent, Idx>,
+    {
+    }
+}
+
+/// PADDING's source is in no lineage: it holds nothing.
+impl<T: ConnectionChoices, L, V> FindFrameSource<T, L, V, ()> for PaddingFrames {
+    type Source<'l, 'r>
+        = PaddingFrameSource
+    where
+        V: 'l,
+        'r: 'l;
+
+    fn find<'l, 'r>(_: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> PaddingFrameSource {
+        PaddingFrameSource
+    }
+}
 
 // ---- flight classes ----
 

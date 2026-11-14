@@ -33,7 +33,7 @@ use crate::{
     component::{
         ArgsOf, Build, ComponentTypeList, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf,
     },
-    feedback::{FeedbackSummariesOf, PartsSendFeedback},
+    feedback::FeedbackSummariesOf,
     layer,
     others::OtherNodes,
     send_strategy::{Publish, SendStrategy, SendStrategyTypes},
@@ -45,6 +45,7 @@ use super::{
     Choices, Side,
     amplification::AntiAmplification,
     confirmation::HandshakeConfirmation,
+    feedback::CoreLentFeedback,
     keys::HandshakeKeys,
     link::LinkFacts,
     loss_detection::{LossFactsReads, declare_lost, hand_back_lost, loss_facts},
@@ -259,16 +260,11 @@ where
         + ReadEach<ProbeTimeoutReads<T, L, S, Ls>, Ir>
         + ReadEach<LossFactsReads<T, L>, If>
         + TakeEach<'v, ProbeTimeoutTakes<T, L, S, Ls>, It>,
-    for<'v> L: PartsSendFeedback<
-            T,
-            L,
-            <<L as LineageLists<'v, T>>::Recovery as TakeEach<
-                'v,
-                ProbeTimeoutTakes<T, L, S, Ls>,
-                It,
-            >>::Rest,
-            Hf,
-        >,
+    for<'v> <<L as LineageLists<'v, T>>::Recovery as TakeEach<
+        'v,
+        ProbeTimeoutTakes<T, L, S, Ls>,
+        It,
+    >>::Rest: CoreLentFeedback<T, L, Hf>,
     for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out:
         Selector<&'a CongestionPartOf<T, L>, Jx> + Selector<&'a RttOf<T, L>, Jr>,
@@ -343,7 +339,7 @@ where
                 continue;
             };
             journals.discard_expired(now);
-            hand_back_lost::<T, L, _, Hf, B>(journals, &mut rest, others, *space, batch);
+            hand_back_lost::<T, L, _, Hf>(journals, &mut rest, now, *space, batch);
         }
         None
     }

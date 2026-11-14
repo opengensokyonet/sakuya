@@ -5,7 +5,7 @@ use frunk_core::hlist;
 use sakuya_recovery::ack_obligation::Rfc9000AckObligation;
 
 use super::*;
-use crate::take::TakenPositions;
+use crate::{take::TakenPositions, v1::feedback::FeedbackSummary};
 
 type Instant = core::time::Duration;
 
@@ -18,6 +18,7 @@ fn pn(number: u64) -> PacketNumber {
 struct Components {
     journals: PacketNumberSpaces<ReceiveJournals<Instant>>,
     obligations: PacketNumberSpaces<Rfc9000AckObligation<Instant>>,
+    tickets: AckIntentTickets<()>,
     numbers: KeyPhaseNumbers,
 }
 
@@ -36,6 +37,7 @@ impl Components {
                 handshake: Some(Rfc9000AckObligation::new(None)),
                 application_data: Rfc9000AckObligation::new(Some(Instant::from_millis(25))),
             },
+            tickets: AckIntentTickets::default(),
             numbers,
         }
     }
@@ -45,11 +47,16 @@ impl Components {
     fn ack_written(&mut self, space: PacketNumberSpaceKind, largest: u64) {
         let mut taken = TakenPositions::default();
         let mut lineage = Lineage::new(
-            hlist![&mut self.journals, &mut self.obligations, &mut self.numbers],
+            hlist![
+                &mut self.journals,
+                &mut self.obligations,
+                &mut self.tickets,
+                &mut self.numbers
+            ],
             &mut taken,
         );
         let mut state =
-            LineageAckFrameState::<_, Instant, Rfc9000AckObligation<Instant>, _, _, _>::new(
+            LineageAckFrameState::<_, Instant, Rfc9000AckObligation<Instant>, (), _>::new(
                 &mut lineage,
             );
         state.ack_written(space, pn(largest));
@@ -89,6 +96,10 @@ impl AckFrameState<Instant> for Received {
     fn ack_written(&mut self, _: PacketNumberSpaceKind, _: PacketNumber) -> AckDue<Instant> {
         AckDue::NotDue
     }
+
+    fn ack_delivered(&mut self, _: PacketNumberSpaceKind, _: PacketNumber) {}
+
+    fn ack_lost(&mut self, _: PacketNumberSpaceKind, _: AckDue<Instant>) {}
 }
 
 /// The receive journals of the packets `numbers`, each arrived at 10 ms.
@@ -127,7 +138,8 @@ fn ack_frame_written(received: Received, max_len: usize) -> (AckFrame, usize) {
     };
 
     let (sender, receiver) = one_rtt_keys();
-    let mut journals = DequeSendJournals::<u64, FeedbackSummary<Instant>, ()>::new();
+    let mut journals =
+        DequeSendJournals::<u64, Coproduct<FeedbackSummary<Instant>, CNil>, ()>::new();
     let mut usage = AeadUsage::new();
     let mut accounts = Accounts::new();
     let mut batch = Batch::new(NonZeroUsize::MIN);

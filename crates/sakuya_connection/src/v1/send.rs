@@ -22,27 +22,28 @@ use sakuya_wire::{
 
 use super::{
     AckObligationsOf, Choices, CloseCauseOf, Part,
-    feedback::{AckSummary, FeedbackSummary, ProbePingSummary},
+    feedback::{AckSummary, ProbePingSummary},
     key_phase::KeyPhaseNumbers,
+    send_planning::{AckIntentTicketOf, AckIntentTickets, CorePublishOutcome},
 };
 use crate::{
     clock::InstantOf,
     error::ConnectionErrorsOf,
     frame_source::{
-        FrameSource, FrameSourceDispatch, FrameSourcePart, HandshakePacket, InitialPacket,
-        OneRttPacket, OneRttProbePacket, PacketKind, PartsFrameSources, SettlingResponsePacket,
-        ZeroRttPacket,
+        FindFrameSource, FrameSource, FrameSourceItemsOf, FrameSourceKind, FrameSourcePart,
+        HandshakePacket, InitialPacket, NoIntent, OneRttPacket, OneRttProbePacket, PacketKind,
+        PartsFrameSources, PublishIntent, SettlingResponsePacket, ZeroRttPacket,
     },
     send_strategy::{
-        FrameSourceSet, MinimumLengths, PlannedPacketKind, SendIntent, SendIntentPart,
-        SendIntentsOf, SendStrategyTypes,
+        AnyActiveLinkPath, FrameSourceSet, MinimumLengths, PlannedPacketKind, SendIntent,
+        SendIntentPart, SendIntentsOf, SendStrategyTypes,
         ranked::{RankedIntent, SendPriority, SendRank},
     },
     share::{LinkPathIdentifierOf, LogicalPathKeys},
     take::{GetAt, Lineage},
     write::{
-        AckOnlyClass, ClassOfSource, FlightClass, InFlightClass, OpenPacket, PacketPosition,
-        PacketWriting, SummaryOf, Supplied,
+        AckOnlyClass, FlightClass, InFlightClass, OpenPacket, PacketPosition, PacketWriting,
+        PaddingFrames, SummaryOf, Supplied,
     },
 };
 
@@ -176,20 +177,21 @@ impl RankedIntent for ProbePingIntent {
 /// Version 1's intents.
 pub type SendIntents = Coproduct<AckIntent, Coproduct<ProbePingIntent, CNil>>;
 
+/// The kinds of version 1's frame sources: PADDING, which the packet
+/// writer writes, the ACK frames of each packet number space and the PING
+/// of a probe timeout.
+pub type FrameSources = frunk_core::HList![PaddingFrames, AckFrames, ProbePingFrames];
+
 impl SendIntentPart for Part {
     type FrameSourceId = FrameSourceId;
     type SendIntents = SendIntents;
+    type FrameSources = FrameSources;
 }
 
-/// One planned item of version 1: which frame source, for which packet
-/// number space.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SendItem {
-    /// An ACK frame of the space.
-    Ack(PacketNumberSpaceKind),
-    /// The PING of a probe of the space.
-    ProbePing(PacketNumberSpaceKind),
-}
+/// One planned item of version 1: an item of one of [`FrameSources`].
+/// PADDING is never planned; the ACK frames and the PING of a probe are
+/// planned for a packet number space.
+pub type SendItem = FrameSourceItemsOf<'static, Part>;
 
 /// Whether a packet of `kind` carries content of `space` from a source of
 /// `ack`: ACK frames are not allowed in 0-RTT packets (RFC 9000 §12.4); a
@@ -205,25 +207,24 @@ fn carries(kind: PlannedPacketKind, space: PacketNumberSpaceKind, ack: bool) -> 
 }
 
 impl<K: PacketKind> FrameSourcePart<K> for Part {
-    type Item<'a> = SendItem;
-
     fn item(intent: &SendIntents) -> Option<SendItem> {
-        let item = match intent {
-            Coproduct::Inl(ack) => SendItem::Ack(ack.space),
-            Coproduct::Inr(Coproduct::Inl(ping)) => SendItem::ProbePing(ping.space),
+        match intent {
+            Coproduct::Inl(ack) => carries(K::KIND, ack.space, true)
+                .then_some(Coproduct::Inr(Coproduct::Inl(ack.space))),
+            Coproduct::Inr(Coproduct::Inl(ping)) => carries(K::KIND, ping.space, false)
+                .then_some(Coproduct::Inr(Coproduct::Inr(Coproduct::Inl(ping.space)))),
             Coproduct::Inr(Coproduct::Inr(never)) => match *never {},
-        };
-        let (space, ack) = match item {
-            SendItem::Ack(space) => (space, true),
-            SendItem::ProbePing(space) => (space, false),
-        };
-        carries(K::KIND, space, ack).then_some(item)
+        }
     }
 
     fn source(item: &SendItem) -> FrameSourceId {
-        match *item {
-            SendItem::Ack(space) => FrameSourceId::Ack(space),
-            SendItem::ProbePing(space) => FrameSourceId::ProbePing(space),
+        match item {
+            Coproduct::Inl(never) => match *never {},
+            Coproduct::Inr(Coproduct::Inl(space)) => FrameSourceId::Ack(*space),
+            Coproduct::Inr(Coproduct::Inr(Coproduct::Inl(space))) => {
+                FrameSourceId::ProbePing(*space)
+            }
+            Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(never))) => match *never {},
         }
     }
 }
@@ -231,8 +232,9 @@ impl<K: PacketKind> FrameSourcePart<K> for Part {
 // ---- the frame sources ----
 
 /// What the ACK frames of a logical path are made from: the receive
-/// journals of its packet number spaces, and what writing one does to them
-/// and to the space's ACK obligation.
+/// journals of its packet number spaces, and what writing one, and its
+/// being delivered or lost, does to them and to the space's ACK
+/// obligation.
 pub trait AckFrameState<I> {
     /// The receive journals of `space`, if the space is still there.
     fn journals(&self, space: PacketNumberSpaceKind) -> Option<&ReceiveJournals<I>>;
@@ -241,6 +243,17 @@ pub trait AckFrameState<I> {
     /// `space`: the journals and the obligation learn it. Returns what the
     /// obligation owed before.
     fn ack_written(&mut self, space: PacketNumberSpaceKind, largest: PacketNumber) -> AckDue<I>;
+
+    /// An ACK frame of `space` whose Largest Acknowledged is `largest` was
+    /// delivered: the journals stop reporting what lies below it (RFC 9000
+    /// §13.2.4). A space that is gone takes nothing.
+    fn ack_delivered(&mut self, space: PacketNumberSpaceKind, largest: PacketNumber);
+
+    /// An ACK frame of `space`, written when the obligation owed `before`,
+    /// was lost: the obligation owes it again (RFC 9000 §13.2.1), and the
+    /// space's ACK intent is published again while an ACK frame is due. A
+    /// space that is gone takes nothing.
+    fn ack_lost(&mut self, space: PacketNumberSpaceKind, before: AckDue<I>);
 }
 
 /// The ACK frames of a logical path's packet number spaces: what was
@@ -268,9 +281,13 @@ where
     A: AckFrameState<I>,
     I: Copy + Ord + core::ops::Sub<Output = Duration>,
 {
-    type Summary = FeedbackSummary<I>;
+    type Summary = AckSummary<I>;
     type Class = AckOnlyClass;
     type Item<'b> = PacketNumberSpaceKind;
+    /// A lost ACK frame is not sent again as it was: the space's ACK
+    /// intent is published again from the obligation, as any other time an
+    /// ACK frame is due.
+    type Intent = NoIntent;
 
     fn supply<W, P>(
         &mut self,
@@ -279,7 +296,7 @@ where
     ) -> Supplied<W, AckOnlyClass, P>
     where
         W: PacketWriting,
-        SummaryOf<W>: From<FeedbackSummary<I>>,
+        SummaryOf<W>: From<AckSummary<I>>,
         P: PacketPosition,
     {
         let Some(journals) = self.state.journals(space) else {
@@ -318,10 +335,23 @@ where
             return Supplied::Open(packet);
         };
         let before = self.state.ack_written(space, largest);
-        let written =
-            packet.write_frame(frame, FeedbackSummary::Ack(AckSummary { largest, before }));
+        let written = packet.write_frame(frame, AckSummary { largest, before });
         debug_assert!(written.is_ok(), "the frame was measured against the room");
         Supplied::Open(packet)
+    }
+
+    fn delivered<Pb, Idx>(&mut self, _: &mut Pb, space: PacketNumberSpaceKind, ack: AckSummary<I>)
+    where
+        Pb: PublishIntent<NoIntent, Idx>,
+    {
+        self.state.ack_delivered(space, ack.largest);
+    }
+
+    fn lost<Pb, Idx>(&mut self, _: &mut Pb, space: PacketNumberSpaceKind, ack: &AckSummary<I>)
+    where
+        Pb: PublishIntent<NoIntent, Idx>,
+    {
+        self.state.ack_lost(space, ack.before);
     }
 }
 
@@ -341,9 +371,10 @@ impl<I> ProbePingFrameSource<I> {
 }
 
 impl<I> FrameSource for ProbePingFrameSource<I> {
-    type Summary = FeedbackSummary<I>;
+    type Summary = ProbePingSummary;
     type Class = InFlightClass;
     type Item<'b> = PacketNumberSpaceKind;
+    type Intent = NoIntent;
 
     fn supply<W, P>(
         &mut self,
@@ -352,82 +383,133 @@ impl<I> FrameSource for ProbePingFrameSource<I> {
     ) -> Supplied<W, InFlightClass, P>
     where
         W: PacketWriting,
-        SummaryOf<W>: From<FeedbackSummary<I>>,
+        SummaryOf<W>: From<ProbePingSummary>,
         P: PacketPosition,
     {
         // A PING that does not fit leaves the packet as it is.
-        let _ = packet.write_frame(PingFrame, FeedbackSummary::ProbePing(ProbePingSummary));
+        let _ = packet.write_frame(PingFrame, ProbePingSummary);
         Supplied::Open(packet)
     }
+
+    fn delivered<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, _: ProbePingSummary)
+    where
+        Pb: PublishIntent<NoIntent, Idx>,
+    {
+    }
+
+    fn lost<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, _: &ProbePingSummary)
+    where
+        Pb: PublishIntent<NoIntent, Idx>,
+    {
+    }
 }
 
-/// Version 1 finds its frame sources in the lineage of the sending call:
-/// the receive journals, ACK obligations and key phase numbers of the
-/// logical path.
-impl<T, K, V, S, Ij, Ia, Ikp> FrameSourceDispatch<T, K, V, S, (Ij, Ia, Ikp)> for Part
+// ---- where the frame sources are ----
+
+/// The ACK frames of a logical path's packet number spaces, as a kind of
+/// frame source.
+#[derive(Debug)]
+pub enum AckFrames {}
+
+impl FrameSourceKind for AckFrames {
+    type Item<'a> = PacketNumberSpaceKind;
+    type Summary<I> = AckSummary<I>;
+    type Intent = NoIntent;
+}
+
+/// The ACK frames are made from the receive journals, ACK obligations, ACK
+/// intents and key phase numbers of the logical path in the lineage.
+impl<T, L, V, Ij, Ia, Ik, Ikp> FindFrameSource<T, L, V, (Ij, Ia, Ik, Ikp)> for AckFrames
 where
     T: Choices,
-    K: PacketKind,
+    SendTypes<T, L>: CorePublishOutcome<AckIntent, AnyActiveLinkPath>,
     V: GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
         + GetAt<AckObligationsOf<T>, Ia>
+        + GetAt<AckIntentTickets<AckIntentTicketOf<T, L>>, Ik>
         + GetAt<KeyPhaseNumbers, Ikp>,
-    S: From<FeedbackSummary<InstantOf<T>>>,
 {
-    fn supply<W, P>(
-        lineage: &mut Lineage<'_, V>,
-        now: InstantOf<T>,
-        item: SendItem,
-        packet: OpenPacket<W, ClassOfSource, P>,
-    ) -> Supplied<W, ClassOfSource, P>
+    type Source<'l, 'r>
+        = AckFrameSource<
+        LineageAckFrameState<
+            'l,
+            'r,
+            V,
+            InstantOf<T>,
+            T::AckObligation,
+            AckIntentTicketOf<T, L>,
+            (Ij, Ia, Ik, Ikp),
+        >,
+        InstantOf<T>,
+    >
     where
-        W: PacketWriting,
-        W::Attempt: sakuya_recovery::send_journals::PacketSendAttempt<Summary = S>,
-        P: PacketPosition,
-    {
-        match item {
-            SendItem::Ack(space) => AckFrameSource::new(
-                LineageAckFrameState::<_, InstantOf<T>, T::AckObligation, Ij, Ia, Ikp>::new(
-                    lineage,
-                ),
-                now,
-            )
-            .supply(space, packet.into_source_class())
-            .into_class_of_source(),
-            SendItem::ProbePing(space) => ProbePingFrameSource::<InstantOf<T>>::new()
-                .supply(space, packet.into_source_class())
-                .into_class_of_source(),
-        }
+        V: 'l,
+        'r: 'l;
+
+    fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, now: InstantOf<T>) -> Self::Source<'l, 'r> {
+        AckFrameSource::new(LineageAckFrameState::new(lineage), now)
     }
 }
 
-/// What [`LineageAckFrameState`] takes its components by: the instants
-/// and ACK obligations of their types, and their positions.
-type Positions<I, O, Ij, Ia, Ikp> = fn() -> (I, O, Ij, Ia, Ikp);
+/// The PING of a probe timeout, as a kind of frame source.
+#[derive(Debug)]
+pub enum ProbePingFrames {}
 
-/// The ACK frame state of a logical path, in the lineage of a call. An ACK
-/// frame of the Application Data space is written in a 1-RTT packet, and
-/// the key phase numbers learn of it (RFC 9001 §6.2). `I` is the type of
-/// instants, `O` the ACK obligation of a space.
-struct LineageAckFrameState<'l, 'v, V, I, O, Ij, Ia, Ikp> {
-    lineage: &'l mut Lineage<'v, V>,
-    positions: PhantomData<Positions<I, O, Ij, Ia, Ikp>>,
+impl FrameSourceKind for ProbePingFrames {
+    type Item<'a> = PacketNumberSpaceKind;
+    type Summary<I> = ProbePingSummary;
+    type Intent = NoIntent;
 }
 
-impl<'l, 'v, V, I, O, Ij, Ia, Ikp> LineageAckFrameState<'l, 'v, V, I, O, Ij, Ia, Ikp> {
-    fn new(lineage: &'l mut Lineage<'v, V>) -> Self {
+/// The PING of a probe timeout is in no lineage: it holds nothing.
+impl<T: Choices, L, V> FindFrameSource<T, L, V, ()> for ProbePingFrames {
+    type Source<'l, 'r>
+        = ProbePingFrameSource<InstantOf<T>>
+    where
+        V: 'l,
+        'r: 'l;
+
+    fn find<'l, 'r>(_: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
+        ProbePingFrameSource::new()
+    }
+}
+
+/// The ACK frame state of a logical path, in a lineage. An ACK frame of
+/// the Application Data space is written in a 1-RTT packet, and the key
+/// phase numbers learn of it (RFC 9001 §6.2). `I` is the type of instants,
+/// `O` the ACK obligation of a space, `K` what publishing an ACK intent
+/// gave back, `H` the positions of the components.
+pub struct LineageAckFrameState<'l, 'r, V, I, O, K, H> {
+    lineage: &'l mut Lineage<'r, V>,
+    types: PhantomData<StateTypes<I, O, K, H>>,
+}
+
+/// What [`LineageAckFrameState`] takes its components by: the instants,
+/// the ACK obligations, the tickets of the ACK intents and the positions.
+type StateTypes<I, O, K, H> = fn() -> (I, O, K, H);
+
+impl<V, I, O, K, H> core::fmt::Debug for LineageAckFrameState<'_, '_, V, I, O, K, H> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("LineageAckFrameState")
+    }
+}
+
+impl<'l, 'r, V, I, O, K, H> LineageAckFrameState<'l, 'r, V, I, O, K, H> {
+    fn new(lineage: &'l mut Lineage<'r, V>) -> Self {
         Self {
             lineage,
-            positions: PhantomData,
+            types: PhantomData,
         }
     }
 }
 
-impl<V, I, O, Ij, Ia, Ikp> AckFrameState<I> for LineageAckFrameState<'_, '_, V, I, O, Ij, Ia, Ikp>
+impl<V, I, O, K, Ij, Ia, Ik, Ikp> AckFrameState<I>
+    for LineageAckFrameState<'_, '_, V, I, O, K, (Ij, Ia, Ik, Ikp)>
 where
     I: Copy,
     O: AckObligation<I>,
     V: GetAt<PacketNumberSpaces<ReceiveJournals<I>>, Ij>
         + GetAt<PacketNumberSpaces<O>, Ia>
+        + GetAt<AckIntentTickets<K>, Ik>
         + GetAt<KeyPhaseNumbers, Ikp>,
 {
     fn journals(&self, space: PacketNumberSpaceKind) -> Option<&ReceiveJournals<I>> {
@@ -453,6 +535,33 @@ where
             .get_mut::<PacketNumberSpaces<O>, Ia>()
             .get_mut(space)
             .map_or(AckDue::NotDue, |obligation| obligation.ack_written(largest))
+    }
+
+    fn ack_delivered(&mut self, space: PacketNumberSpaceKind, largest: PacketNumber) {
+        if let Some(journals) = self
+            .lineage
+            .get_mut::<PacketNumberSpaces<ReceiveJournals<I>>, Ij>()
+            .get_mut(space)
+        {
+            journals.acknowledged_up_to(largest);
+        }
+    }
+
+    /// The lost frame also forgets the ticket of its space's ACK intent:
+    /// the frame consumed the intent, and when it was written and lost
+    /// before the tickets were read again, the ticket left looks like an
+    /// intent still waiting for the frame that is due again.
+    fn ack_lost(&mut self, space: PacketNumberSpaceKind, before: AckDue<I>) {
+        if let Some(obligation) = self
+            .lineage
+            .get_mut::<PacketNumberSpaces<O>, Ia>()
+            .get_mut(space)
+        {
+            obligation.ack_lost(before);
+        }
+        self.lineage
+            .get_mut::<AckIntentTickets<K>, Ik>()
+            .forget(space);
     }
 }
 

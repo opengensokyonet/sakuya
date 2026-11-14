@@ -17,8 +17,8 @@ use sakuya_wire::{
 use super::*;
 use crate::{
     frame_source::{
-        HandshakePacket, InitialPacket, OneRttPacket, OneRttProbePacket, PartsFrameSources,
-        SettlingResponsePacket, ZeroRttPacket,
+        FrameSourcePart, HandshakePacket, InitialPacket, OneRttPacket, OneRttProbePacket,
+        PartsFrameSources, SettlingResponsePacket, ZeroRttPacket,
     },
     send_strategy::SendIntentsOf,
     v1::{
@@ -116,16 +116,16 @@ const ALL: [EncryptionLevel; 3] = [
     EncryptionLevel::OneRtt,
 ];
 
-/// The kinds of the packets of the plan and, in each, the items, as the
-/// cursors give them, each item reported as `written`.
+/// The kinds of the packets of the plan and, in each, the frame sources of
+/// the items, as the cursors give them, each item reported as `written`.
 fn walk(
     plan: &mut RankedPlan<'_, TestTypes>,
     written: usize,
-) -> Vec<(PlannedPacketKind, Vec<SendItem>)> {
+) -> Vec<(PlannedPacketKind, Vec<FrameSourceId>)> {
     fn items<S: FrameSourceSet>(
         cursor: &mut impl FrameSourceCursor<S, Feedback = RankedFeedback>,
         written: usize,
-        into: &mut Vec<SendItem>,
+        into: &mut Vec<FrameSourceId>,
     ) where
         for<'a> S::Item<'a>: Head,
     {
@@ -154,13 +154,15 @@ fn walk(
 }
 
 trait Head {
-    fn head(self) -> SendItem;
+    fn head(self) -> FrameSourceId;
 }
 
 impl Head for frunk_core::coproduct::Coproduct<SendItem, sakuya_wire::parts::CNil> {
-    fn head(self) -> SendItem {
+    fn head(self) -> FrameSourceId {
         match self {
-            frunk_core::coproduct::Coproduct::Inl(item) => item,
+            frunk_core::coproduct::Coproduct::Inl(item) => {
+                <Part as FrameSourcePart<InitialPacket>>::source(&item)
+            }
             frunk_core::coproduct::Coproduct::Inr(never) => match never {},
         }
     }
@@ -207,11 +209,17 @@ fn acknowledgments_go_in_increasing_levels_and_lower_levels_yield() {
     assert_eq!(
         walk(&mut plan, 10),
         [
-            (PlannedPacketKind::Initial, vec![SendItem::Ack(Initial)]),
-            (PlannedPacketKind::Handshake, vec![SendItem::Ack(Handshake)]),
+            (
+                PlannedPacketKind::Initial,
+                vec![FrameSourceId::Ack(Initial)]
+            ),
+            (
+                PlannedPacketKind::Handshake,
+                vec![FrameSourceId::Ack(Handshake)]
+            ),
             (
                 PlannedPacketKind::OneRtt,
-                vec![SendItem::Ack(ApplicationData)]
+                vec![FrameSourceId::Ack(ApplicationData)]
             ),
         ]
     );
@@ -222,7 +230,7 @@ fn acknowledgments_go_in_increasing_levels_and_lower_levels_yield() {
         walk(&mut plan, 1),
         [(
             PlannedPacketKind::Handshake,
-            vec![SendItem::ProbePing(Handshake)]
+            vec![FrameSourceId::ProbePing(Handshake)]
         )]
     );
 }
@@ -237,7 +245,10 @@ fn consumed_and_withdrawn_intents_leave_the_plan() {
     let mut plan = ready(&mut planner, &mut core, &waker);
     assert_eq!(
         walk(&mut plan, 10),
-        [(PlannedPacketKind::Initial, vec![SendItem::Ack(Initial)])]
+        [(
+            PlannedPacketKind::Initial,
+            vec![FrameSourceId::Ack(Initial)]
+        )]
     );
     drop(plan);
     assert_eq!(consumed.state(), IntentState::Consumed);
@@ -282,7 +293,7 @@ fn content_that_does_not_fit_holds_its_place_until_the_window_opens() {
         walk(&mut plan, 1),
         [(
             PlannedPacketKind::OneRtt,
-            vec![SendItem::ProbePing(ApplicationData)]
+            vec![FrameSourceId::ProbePing(ApplicationData)]
         )]
     );
 }
@@ -302,7 +313,10 @@ fn a_client_initial_needs_room_for_the_whole_expanded_datagram() {
     let mut plan = ready(&mut planner, &mut core, &waker);
     assert_eq!(
         walk(&mut plan, 10),
-        [(PlannedPacketKind::Initial, vec![SendItem::Ack(Initial)])]
+        [(
+            PlannedPacketKind::Initial,
+            vec![FrameSourceId::Ack(Initial)]
+        )]
     );
 }
 
@@ -320,7 +334,10 @@ fn publishing_and_keys_wake_a_waiting_planner() {
     let mut plan = ready(&mut planner, &mut core, &waker);
     assert_eq!(
         walk(&mut plan, 10),
-        [(PlannedPacketKind::Handshake, vec![SendItem::Ack(Handshake)])]
+        [(
+            PlannedPacketKind::Handshake,
+            vec![FrameSourceId::Ack(Handshake)]
+        )]
     );
 }
 
@@ -380,7 +397,10 @@ fn content_of_a_packet_the_link_path_cannot_send_holds_no_place() {
     let mut plan = ready(&mut planner, &mut core, &waker);
     assert_eq!(
         walk(&mut plan, 10),
-        [(PlannedPacketKind::Handshake, vec![SendItem::Ack(Handshake)])]
+        [(
+            PlannedPacketKind::Handshake,
+            vec![FrameSourceId::Ack(Handshake)]
+        )]
     );
     drop(plan);
     assert_eq!(initial.state(), IntentState::Waiting);

@@ -10,7 +10,6 @@
 //! The positions a take goes by (`I`, `Is`, `Hs`) are inferred where the
 //! list of parts is concrete; generic code passes them on as type
 //! parameters.
-use core::marker::PhantomData;
 
 pub use frunk_core::indices::{Here, There};
 use sakuya_wire::parts::{HCons, HNil};
@@ -252,8 +251,8 @@ impl<'s, T: Reborrow<'s>> Reborrow<'s> for HCons<TakenOut, T> {
 ///
 /// For a link path it is the data of the connection, of the link path's
 /// logical link entry, of its logical path and of the link path itself.
-/// Components are taken out by type with [`Take`] and [`TakeCapability`];
-/// what is left is a lineage again. Every mutable take is recorded, and the
+/// Components are taken out by type with [`Take`]; what is left is a
+/// lineage again. Every mutable take is recorded, and the
 /// driver rereads what reads the components taken.
 pub struct Lineage<'r, V> {
     list: V,
@@ -375,198 +374,12 @@ impl<'r, 'a, V: TakeEach<'a, U, Is>, U: RefsOf<'a>, Is> Take<'a, U, Is> for Line
     }
 }
 
-/// A part's components in the capability `Cap`.
-///
-/// `Uses` lists the component types the part works with when the
-/// capability is used: its own or another part's. A part that takes no part
-/// in it uses `HNil`. `T` is the choices of the composition and `L` the full
-/// list of parts.
-pub trait Participant<T, L, Cap> {
-    /// The component types the part uses.
-    type Uses;
-}
-
-/// How one component of a capability is gathered: moved from the rest of
-/// the view, at position `I` there.
-pub struct Moved<I>(PhantomData<I>);
-/// How one component of a capability is gathered: another participant uses
-/// it too and it is already taken, at position `I` among the taken.
-pub struct Already<I>(PhantomData<I>);
-
-/// Gathering the component `X` into what is taken so far, as `How` says.
-///
-/// Implemented for (taken so far, rest of the view); the one way that holds
-/// is inferred.
-pub trait Gather<'a, X, How> {
-    /// What is taken afterwards.
-    type Taken;
-    /// What is left afterwards.
-    type Rest;
-    /// Gather `X`; `at` is told its position when it is moved.
-    fn gather(self, at: &mut impl FnMut(usize)) -> (Self::Taken, Self::Rest);
-}
-impl<'a, X: 'a, Tk, R: TakeAt<'a, X, I>, I> Gather<'a, X, Moved<I>> for (Tk, R) {
-    type Taken = HCons<&'a mut X, Tk>;
-    type Rest = R::Rest;
-    #[inline]
-    fn gather(self, at: &mut impl FnMut(usize)) -> (Self::Taken, R::Rest) {
-        let (taken, rest) = self;
-        let (head, rest) = rest.take_at();
-        at(R::AT);
-        (HCons { head, tail: taken }, rest)
-    }
-}
-impl<'a, X, Tk: GetAt<X, I>, R, I> Gather<'a, X, Already<I>> for (Tk, R) {
-    type Taken = Tk;
-    type Rest = R;
-    #[inline]
-    fn gather(self, _: &mut impl FnMut(usize)) -> (Tk, R) {
-        self
-    }
-}
-
-/// Gathering every component of a list `U`, each as `Hs` says.
-pub trait GatherEach<'a, U, Hs> {
-    /// What is taken afterwards.
-    type Taken;
-    /// What is left afterwards.
-    type Rest;
-    /// Gather the components.
-    fn gather_each(self, at: &mut impl FnMut(usize)) -> (Self::Taken, Self::Rest);
-}
-impl<'a, Tk, R> GatherEach<'a, HNil, HNil> for (Tk, R) {
-    type Taken = Tk;
-    type Rest = R;
-    #[inline]
-    fn gather_each(self, _: &mut impl FnMut(usize)) -> (Tk, R) {
-        self
-    }
-}
-impl<'a, X, Us, H, Hs, Tk, R> GatherEach<'a, HCons<X, Us>, HCons<H, Hs>> for (Tk, R)
-where
-    (Tk, R): Gather<'a, X, H>,
-    (
-        <(Tk, R) as Gather<'a, X, H>>::Taken,
-        <(Tk, R) as Gather<'a, X, H>>::Rest,
-    ): GatherEach<'a, Us, Hs>,
-{
-    type Taken = <(
-        <(Tk, R) as Gather<'a, X, H>>::Taken,
-        <(Tk, R) as Gather<'a, X, H>>::Rest,
-    ) as GatherEach<'a, Us, Hs>>::Taken;
-    type Rest = <(
-        <(Tk, R) as Gather<'a, X, H>>::Taken,
-        <(Tk, R) as Gather<'a, X, H>>::Rest,
-    ) as GatherEach<'a, Us, Hs>>::Rest;
-    #[inline]
-    fn gather_each(self, at: &mut impl FnMut(usize)) -> (Self::Taken, Self::Rest) {
-        self.gather(at).gather_each(at)
-    }
-}
-
-/// Gathering the uses of every participant of the list of parts `Ps` in the
-/// capability `Cap`, each as `Hs` says.
-pub trait GatherParticipants<'a, T, L, Cap, Ps, Hs> {
-    /// What is taken afterwards.
-    type Taken;
-    /// What is left afterwards.
-    type Rest;
-    /// Gather the uses.
-    fn gather_participants(self, at: &mut impl FnMut(usize)) -> (Self::Taken, Self::Rest);
-}
-impl<'a, T, L, Cap, Tk, R> GatherParticipants<'a, T, L, Cap, HNil, HNil> for (Tk, R) {
-    type Taken = Tk;
-    type Rest = R;
-    #[inline]
-    fn gather_participants(self, _: &mut impl FnMut(usize)) -> (Tk, R) {
-        self
-    }
-}
-impl<'a, T, L, Cap, P, Ps, H, Hs, Tk, R>
-    GatherParticipants<'a, T, L, Cap, HCons<P, Ps>, HCons<H, Hs>> for (Tk, R)
-where
-    P: Participant<T, L, Cap>,
-    (Tk, R): GatherEach<'a, P::Uses, H>,
-    (
-        <(Tk, R) as GatherEach<'a, P::Uses, H>>::Taken,
-        <(Tk, R) as GatherEach<'a, P::Uses, H>>::Rest,
-    ): GatherParticipants<'a, T, L, Cap, Ps, Hs>,
-{
-    type Taken = <(
-        <(Tk, R) as GatherEach<'a, P::Uses, H>>::Taken,
-        <(Tk, R) as GatherEach<'a, P::Uses, H>>::Rest,
-    ) as GatherParticipants<'a, T, L, Cap, Ps, Hs>>::Taken;
-    type Rest = <(
-        <(Tk, R) as GatherEach<'a, P::Uses, H>>::Taken,
-        <(Tk, R) as GatherEach<'a, P::Uses, H>>::Rest,
-    ) as GatherParticipants<'a, T, L, Cap, Ps, Hs>>::Rest;
-    #[inline]
-    fn gather_participants(self, at: &mut impl FnMut(usize)) -> (Self::Taken, Self::Rest) {
-        self.gather_each(at).gather_participants(at)
-    }
-}
-
-/// Take a capability out of a view: the union of what its participants use,
-/// each component once.
-///
-/// `Cap` is the capability, `T` the choices and `L` the list of parts, as in
-/// `TakeCapability::<WriterCapability, T, L, _>::take_capability(lineage)`.
-/// The participants then find their own components among the taken by type
-/// ([`GetAt`]). A component that no participant may take, because it is
-/// already taken or not in the view, does not compile.
-pub trait TakeCapability<'a, Cap, T, L, Hs>: Sized {
-    /// The borrows of the components used.
-    type Taken;
-    /// What is left of the view.
-    type Rest;
-    /// Take the capability.
-    fn take_capability(self) -> (Self::Taken, Self::Rest);
-}
-impl<'r, 'a, V, Cap, T, L, Hs> TakeCapability<'a, Cap, T, L, Hs> for Lineage<'r, V>
-where
-    (HNil, V): GatherParticipants<'a, T, L, Cap, L, Hs>,
-{
-    type Taken = <(HNil, V) as GatherParticipants<'a, T, L, Cap, L, Hs>>::Taken;
-    type Rest = Lineage<'r, <(HNil, V) as GatherParticipants<'a, T, L, Cap, L, Hs>>::Rest>;
-    #[inline]
-    fn take_capability(self) -> (Self::Taken, Self::Rest) {
-        let Lineage { list, taken } = self;
-        let (items, rest) = (HNil, list).gather_participants(&mut |at| taken.push(at));
-        (items, Lineage { list: rest, taken })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use frunk_core::{hlist, hlist_pat};
     use sakuya_wire::parts::HList;
 
     use super::*;
-
-    struct Cap;
-    struct First;
-    struct Second;
-    impl Participant<(), HList![First, Second], Cap> for First {
-        type Uses = HList![u8, u16];
-    }
-    impl Participant<(), HList![First, Second], Cap> for Second {
-        type Uses = HList![u16, u32];
-    }
-
-    #[test]
-    fn a_capability_takes_each_component_once_and_records_positions() {
-        let (mut a, mut b, mut c, mut d) = (1u8, 2u16, 3u32, 4u64);
-        let mut taken = TakenPositions::default();
-        let lineage = Lineage::new(hlist![&mut a, &mut b, &mut c, &mut d], &mut taken);
-        let (mut uses, rest) =
-            TakeCapability::<Cap, (), HList![First, Second], _>::take_capability(lineage);
-        *GetAt::<u16, _>::get_at_mut(&mut uses) += 10;
-        *GetAt::<u32, _>::get_at_mut(&mut uses) += 10;
-        let (hlist_pat![last], _) = Take::<HList![u64], _>::take(rest);
-        *last += 10;
-        assert_eq!(taken.drain().collect::<Vec<_>>(), [0, 1, 2, 3]);
-        assert_eq!((a, b, c, d), (1, 12, 13, 14));
-    }
 
     #[test]
     fn a_reborrowed_lineage_is_there_again_after_a_take() {

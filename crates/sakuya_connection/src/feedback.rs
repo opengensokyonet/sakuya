@@ -1,51 +1,43 @@
 //! What the frames of a sent packet leave in its record, and how the record
-//! hands it back to the parts once the packet is delivered or lost.
+//! hands it back to the frame sources once the packet is delivered or lost.
 //!
 //! Each frame written into a packet leaves one feedback summary in the
-//! packet's record. Each part of a composition gives the summary of its own
-//! frames ([`FeedbackSummaryPart`]); the composition's summary is the sum of
-//! those summaries in the order of the list of parts
+//! packet's record. A part's summary is the sum of the summaries of the
+//! kinds of frame sources it lists
+//! ([`FrameSourceKinds::Summaries`]); the composition's summary is the sum
+//! of the parts' summaries in the order of the list of parts
 //! ([`FeedbackSummaryOf`]), and the send journals of every packet number
 //! space keep it. The summaries carry the instant type of the choices, so
 //! that a summary can hold a deadline; they do not depend on the list of
 //! parts.
 //!
 //! When a packet is acknowledged, each of its summaries goes back by value
-//! to the part that wrote it: the packet is delivered. When it is declared
-//! lost, each is lent to the part, and stays in the record kept for a late
-//! acknowledgment, which then delivers it. A part handles only its own
-//! summaries ([`SendFeedback`]); the list of parts hands each to the part it
-//! belongs to ([`PartsSendFeedback`]).
+//! to the frame source that wrote it: the packet is delivered. When it is
+//! declared lost, each is lent to the source, and stays in the record kept
+//! for a late acknowledgment, which then delivers it. The list of parts
+//! hands each summary to the part it belongs to, and the part's list of
+//! kinds to the source of its kind ([`PartsSendFeedback`]), with the
+//! publisher the sources publish through.
 //!
 //! Feedback is given where the packet is settled: in the dispatch of an
 //! ACK frame on a logical path, in an expiry of a link path's recovery
-//! layer that declares packets lost, and in the end of a link path, which
-//! hands back what it had not settled as lost. Each sees other components
-//! of the tree: the lineage of its node, with what it took out of it, and
-//! the other nodes. The feedback traits are generic over that lineage
-//! (`V`), so that the same implementation of a part serves the three.
+//! layer that declares packets lost, in a sending call whose datagrams'
+//! send result is unknown, and in the end of a link path, which hands back
+//! what it had not settled as lost. Each sees the lineage of its node, with
+//! what it took out of it; the feedback traits are generic over that
+//! lineage (`V`), so that the same frame sources serve them all.
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
 use sakuya_wire::parts::{CNil, Coproduct, HCons, HNil};
 
 use crate::{
-    call::CallBundle,
     clock::{ConnectionChoices, InstantOf},
-    others::OtherNodes,
-    share::PartList,
+    frame_source::{FeedFrameSources, FrameSourceKinds},
+    send_strategy::SendIntentPart,
     take::Lineage,
 };
 
-/// The summary a part's frames leave in the record of a sent packet.
-///
-/// It is implemented by the marker type of each part. `I` is the type of
-/// instants of the composition's choices.
-pub trait FeedbackSummaryPart {
-    /// The summary of one frame of the part.
-    type FeedbackSummary<I>;
-}
-
-/// The summaries of a list of parts: the sum of the summaries of the parts
-/// ([`FeedbackSummaryPart::FeedbackSummary`]) in the order of the parts.
+/// The summaries of a list of parts: the sum of the summaries of the
+/// frame sources each part lists, in the order of the parts.
 ///
 /// It is implemented for `HNil` and for `HCons<P, Ps>` of a part `P` and a
 /// list of parts `Ps`.
@@ -58,80 +50,61 @@ impl FeedbackSummariesOf for HNil {
     type FeedbackSummaries<I> = CNil;
 }
 
-impl<P: FeedbackSummaryPart, Ps: FeedbackSummariesOf> FeedbackSummariesOf for HCons<P, Ps> {
-    type FeedbackSummaries<I> = Coproduct<P::FeedbackSummary<I>, Ps::FeedbackSummaries<I>>;
+impl<P: SendIntentPart, Ps: FeedbackSummariesOf> FeedbackSummariesOf for HCons<P, Ps> {
+    type FeedbackSummaries<I> =
+        Coproduct<<P::FrameSources as FrameSourceKinds>::Summaries<I>, Ps::FeedbackSummaries<I>>;
 }
 
 /// The summary of one frame of a connection of the choices `T` and the
 /// list of parts `L`.
 pub type FeedbackSummaryOf<T, L> = <L as FeedbackSummariesOf>::FeedbackSummaries<InstantOf<T>>;
 
-/// How a part takes back the summaries of its frames: implemented by the
-/// marker type of the part.
+/// Handing a summary back to the frame source of a list of parts that
+/// wrote it.
 ///
-/// `L` is the composition's list of parts, `V` the lineage where the
-/// feedback is given and `H` what the impl infers the positions of the
-/// components it takes by. Each summary comes with the packet number space
-/// of the packet it was written into.
-pub trait SendFeedback<T: ConnectionChoices, L: PartList<T>, V, H>: FeedbackSummaryPart {
+/// It is implemented for every list whose parts' lists of frame sources
+/// implement [`FeedFrameSources`]; `L` is the whole composition, `V` the
+/// lineage where the feedback is given, `Pb` the publisher lent to the
+/// sources and `Hs` the positions of each part's impl. Each summary comes
+/// with the packet number space of the packet it was written into.
+pub trait PartsSendFeedback<T: ConnectionChoices, L, V, Pb, Hs>: FeedbackSummariesOf {
     /// The packet the frame of `summary` was written into was acknowledged.
-    fn delivered<B: CallBundle>(
+    fn delivered(
         lineage: &mut Lineage<'_, V>,
-        others: &mut OtherNodes<'_, T, L, B>,
+        publish: &mut Pb,
+        now: InstantOf<T>,
         space: PacketNumberSpaceKind,
-        summary: Self::FeedbackSummary<InstantOf<T>>,
+        summary: Self::FeedbackSummaries<InstantOf<T>>,
     );
 
     /// The packet the frame of `summary` was written into was declared
     /// lost, or its send result is unknown, or its link path ended before
     /// it was settled. `summary` stays in the packet's record while it is
     /// kept, for a late acknowledgment.
-    fn lost<B: CallBundle>(
+    fn lost(
         lineage: &mut Lineage<'_, V>,
-        others: &mut OtherNodes<'_, T, L, B>,
-        space: PacketNumberSpaceKind,
-        summary: &Self::FeedbackSummary<InstantOf<T>>,
-    );
-}
-
-/// Handing a summary back to the part of a list that wrote it.
-///
-/// It is implemented for every list whose parts implement [`SendFeedback`];
-/// `L` is the whole composition and `Hs` the positions of each part's impl.
-pub trait PartsSendFeedback<T: ConnectionChoices, L: PartList<T>, V, Hs>:
-    FeedbackSummariesOf
-{
-    /// The packet the frame of `summary` was written into was acknowledged.
-    fn delivered<B: CallBundle>(
-        lineage: &mut Lineage<'_, V>,
-        others: &mut OtherNodes<'_, T, L, B>,
-        space: PacketNumberSpaceKind,
-        summary: Self::FeedbackSummaries<InstantOf<T>>,
-    );
-
-    /// The packet the frame of `summary` was written into was declared
-    /// lost; see [`SendFeedback::lost`].
-    fn lost<B: CallBundle>(
-        lineage: &mut Lineage<'_, V>,
-        others: &mut OtherNodes<'_, T, L, B>,
+        publish: &mut Pb,
+        now: InstantOf<T>,
         space: PacketNumberSpaceKind,
         summary: &Self::FeedbackSummaries<InstantOf<T>>,
     );
 }
 
-impl<T: ConnectionChoices, L: PartList<T>, V> PartsSendFeedback<T, L, V, HNil> for HNil {
-    fn delivered<B: CallBundle>(
+impl<T: ConnectionChoices, L, V, Pb> PartsSendFeedback<T, L, V, Pb, HNil> for HNil {
+    fn delivered(
         _: &mut Lineage<'_, V>,
-        _: &mut OtherNodes<'_, T, L, B>,
+        _: &mut Pb,
+        _: InstantOf<T>,
         _: PacketNumberSpaceKind,
         summary: CNil,
     ) {
         match summary {}
     }
 
-    fn lost<B: CallBundle>(
+    fn lost(
         _: &mut Lineage<'_, V>,
-        _: &mut OtherNodes<'_, T, L, B>,
+        _: &mut Pb,
+        _: InstantOf<T>,
         _: PacketNumberSpaceKind,
         summary: &CNil,
     ) {
@@ -139,34 +112,44 @@ impl<T: ConnectionChoices, L: PartList<T>, V> PartsSendFeedback<T, L, V, HNil> f
     }
 }
 
-impl<T, L, V, P, Ps, H, Hs> PartsSendFeedback<T, L, V, HCons<H, Hs>> for HCons<P, Ps>
+impl<T, L, V, Pb, P, Ps, H, Hs> PartsSendFeedback<T, L, V, Pb, HCons<H, Hs>> for HCons<P, Ps>
 where
     T: ConnectionChoices,
-    L: PartList<T>,
-    P: SendFeedback<T, L, V, H>,
-    Ps: PartsSendFeedback<T, L, V, Hs>,
+    P: SendIntentPart,
+    P::FrameSources: FeedFrameSources<T, L, V, Pb, H>,
+    Ps: PartsSendFeedback<T, L, V, Pb, Hs>,
 {
-    fn delivered<B: CallBundle>(
+    fn delivered(
         lineage: &mut Lineage<'_, V>,
-        others: &mut OtherNodes<'_, T, L, B>,
+        publish: &mut Pb,
+        now: InstantOf<T>,
         space: PacketNumberSpaceKind,
         summary: Self::FeedbackSummaries<InstantOf<T>>,
     ) {
         match summary {
-            Coproduct::Inl(summary) => P::delivered(lineage, others, space, summary),
-            Coproduct::Inr(summary) => Ps::delivered(lineage, others, space, summary),
+            Coproduct::Inl(summary) => {
+                <P::FrameSources as FeedFrameSources<T, L, V, Pb, H>>::delivered(
+                    lineage, publish, now, space, summary,
+                );
+            }
+            Coproduct::Inr(summary) => Ps::delivered(lineage, publish, now, space, summary),
         }
     }
 
-    fn lost<B: CallBundle>(
+    fn lost(
         lineage: &mut Lineage<'_, V>,
-        others: &mut OtherNodes<'_, T, L, B>,
+        publish: &mut Pb,
+        now: InstantOf<T>,
         space: PacketNumberSpaceKind,
         summary: &Self::FeedbackSummaries<InstantOf<T>>,
     ) {
         match summary {
-            Coproduct::Inl(summary) => P::lost(lineage, others, space, summary),
-            Coproduct::Inr(summary) => Ps::lost(lineage, others, space, summary),
+            Coproduct::Inl(summary) => {
+                <P::FrameSources as FeedFrameSources<T, L, V, Pb, H>>::lost(
+                    lineage, publish, now, space, summary,
+                );
+            }
+            Coproduct::Inr(summary) => Ps::lost(lineage, publish, now, space, summary),
         }
     }
 }

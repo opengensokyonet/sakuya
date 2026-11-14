@@ -60,6 +60,7 @@ use crate::{
     },
     connection_id::DestinationConnectionIdStrategy,
     feedback::FeedbackSummariesOf,
+    frame_source::PublishIntent,
     layer::{self, NodeKey},
     others::OtherNodes,
     send_strategy::{
@@ -182,6 +183,19 @@ impl<S> SendStrategyCore<S> {
     /// The core, to publish to or to plan with.
     pub fn strategy_mut(&mut self) -> &mut S {
         &mut self.strategy
+    }
+}
+
+/// A frame source publishes what it sends again on feedback to the core,
+/// for any active link path: intents sent and forgotten, whose publishing
+/// gives back nothing to keep.
+impl<S, J, Idx> PublishIntent<J, Idx> for SendStrategyCore<S>
+where
+    J: SendIntent,
+    S: PublishTo<J, AnyActiveLinkPath, Idx> + PublishOutcome<J, AnyActiveLinkPath, Outcome = ()>,
+{
+    fn publish(&mut self, intent: J) {
+        self.strategy.publish_to(intent, AnyActiveLinkPath);
     }
 }
 

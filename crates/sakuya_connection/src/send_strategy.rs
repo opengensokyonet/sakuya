@@ -306,6 +306,11 @@ pub trait SendIntentPart {
     /// The part's intents: a sum of its intent types; `CNil` when it sends
     /// nothing.
     type SendIntents: PartSendIntents<Self::FrameSourceId> + 'static;
+    /// The kinds of the part's frame sources: a list of
+    /// [`FrameSourceKind`](crate::frame_source::FrameSourceKind)s, `HNil`
+    /// when it writes no frames. The part's items and summaries follow from
+    /// it, and so does handing each to its source.
+    type FrameSources: crate::frame_source::FrameSourceKinds;
 }
 
 /// The intents and frame sources of a list of parts: at each part's

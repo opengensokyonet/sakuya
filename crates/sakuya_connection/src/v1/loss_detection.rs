@@ -13,8 +13,8 @@
 //! acknowledgment; the others leave without a signal. Every packet of the
 //! batch, including one with only ACK frames, then goes back to the send
 //! journals of the logical path, which keep its record as declared lost
-//! for as long, and each summary of its frames goes back to its part as
-//! lost.
+//! for as long, and each summary of its frames goes back to its frame
+//! source as lost.
 use core::{ops::Add, ops::Sub, time::Duration};
 
 use sakuya_link::Link;
@@ -48,7 +48,7 @@ use crate::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf},
     component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
-    feedback::{FeedbackSummariesOf, FeedbackSummaryOf, PartsSendFeedback},
+    feedback::{FeedbackSummariesOf, FeedbackSummaryOf},
     layer,
     others::OtherNodes,
     share::{FlatRef, LineageLists, LineagePartList, LinkPathIdentifierOf, NodeData, PartList},
@@ -57,6 +57,7 @@ use crate::{
 
 use super::{
     Choices,
+    feedback::CoreLentFeedback,
     keys::{HandshakeKeys, InitialKeys},
     link::LinkClone,
     parameters::PeerTransportParameters,
@@ -256,7 +257,7 @@ where
 /// batch (RFC 9002 §6.1.2, Appendix A.10). The time threshold's batch has
 /// the loss steps only; then its packets go back to the send journals of
 /// the logical path, which drop what is past its retention first, and the
-/// summaries of their frames go back to their parts as lost.
+/// summaries of their frames go back to their frame sources as lost.
 impl<T, L, S, Ls, Id, In, If, Ipp, Ima, It, Jx, Jr, Hf>
     DataComponent<T, L, layer::Recovery, ((Id, In, If), (Ipp, Ima), It, (Jx, Jr), Hf)>
     for PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>
@@ -280,12 +281,8 @@ where
         + GetAt<PacketNumberSpaces<PacketNumberSpaceState>, In>
         + ReadEach<LossFactsReads<T, L>, If>
         + TakeEach<'v, LossTakes<T, L, Self>, It>,
-    for<'v> L: PartsSendFeedback<
-            T,
-            L,
-            <<L as LineageLists<'v, T>>::Recovery as TakeEach<'v, LossTakes<T, L, Self>, It>>::Rest,
-            Hf,
-        >,
+    for<'v> <<L as LineageLists<'v, T>>::Recovery as TakeEach<'v, LossTakes<T, L, Self>, It>>::Rest:
+        CoreLentFeedback<T, L, Hf>,
     for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out:
         Selector<&'a CongestionPartOf<T, L>, Jx> + Selector<&'a RttOf<T, L>, Jr>,
@@ -342,7 +339,7 @@ where
                 continue;
             };
             journals.discard_expired(now);
-            hand_back_lost::<T, L, _, Hf, B>(journals, &mut rest, others, *space, batch);
+            hand_back_lost::<T, L, _, Hf>(journals, &mut rest, now, *space, batch);
         }
         None
     }
@@ -364,30 +361,28 @@ pub(super) type LossTakes<T, L, D> = HList![
 /// Hand the packets of `batch`, declared lost in `space`, back to the
 /// space's `journals`, which keep their records as declared lost until the
 /// batch's retention ends, and the summaries of their frames back to their
-/// parts as lost, with `lineage` and `others`. A packet the journals do not
-/// have as sent, such as one whose record went with the end of its link
+/// frame sources as lost, in `lineage` at `now`. A packet the journals do
+/// not have as sent, such as one whose record went with the end of its link
 /// path, gives nothing back.
-pub(super) fn hand_back_lost<T, L, V, Hf, B>(
+pub(super) fn hand_back_lost<T, L, V, Hf>(
     journals: &mut <T as Choices>::SendJournals<
         FeedbackSummaryOf<T, L>,
         LinkPathIdentifierOf<T, L>,
     >,
     lineage: &mut Lineage<'_, V>,
-    others: &mut OtherNodes<'_, T, L, B>,
+    now: InstantOf<T>,
     space: PacketNumberSpaceKind,
     batch: &DeclaredBatch<InstantOf<T>>,
 ) where
     T: Choices,
-    L: PartList<T> + PartsSendFeedback<T, L, V, Hf>,
-    B: CallBundle,
+    L: PartList<T> + FeedbackSummariesOf,
+    V: CoreLentFeedback<T, L, Hf>,
 {
     for &number in &batch.numbers {
         let Some(record) = journals.declare_lost(number, batch.retain_until) else {
             continue;
         };
-        for summary in &record.summaries {
-            <L as PartsSendFeedback<T, L, V, Hf>>::lost(lineage, others, space, summary);
-        }
+        V::lost_each(lineage, now, space, &record.summaries);
     }
 }
 

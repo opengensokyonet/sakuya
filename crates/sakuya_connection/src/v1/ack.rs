@@ -32,11 +32,11 @@
 //!    too, except at a client not yet sure the server has validated its
 //!    address (RFC 9002 §6.2.1); the pacer of each is refilled to the
 //!    arrival.
-//! 3. Last, every summary of the acknowledged packets goes back to its part
-//!    as delivered, and then every summary of the packets declared lost as
-//!    lost; those packets go back to the send journals, which keep their
-//!    records for three probe timeouts of the space for a late
-//!    acknowledgment.
+//! 3. Last, every summary of the acknowledged packets goes back to its
+//!    frame source as delivered, and then every summary of the packets
+//!    declared lost as lost; those packets go back to the send journals,
+//!    which keep their records for three probe timeouts of the space for a
+//!    late acknowledgment.
 //!
 //! A frame that newly acknowledges nothing only acknowledges late: no RTT
 //! sample, no loss detection, no backoff cleared (Appendix A.7). The ECN
@@ -78,6 +78,7 @@ use super::{
     Choices, Side,
     confirmation::HandshakeConfirmation,
     error::{ConnectionError, KeyUpdateSnafu, UnsentPacketAcknowledgedSnafu},
+    feedback::CoreLentFeedback,
     key_phase::KeyPhaseNumbers,
     key_update::ack_received,
     keys::OneRttKeys,
@@ -97,7 +98,7 @@ use crate::{
     clock::{InstantOf, LinkIdOf},
     component::LineageOf,
     dispatch::DispatchFacts,
-    feedback::{FeedbackSummariesOf, PartsSendFeedback},
+    feedback::FeedbackSummariesOf,
     layer::{self, LogicalPath, NodeKey},
     others::OtherNodes,
     share::{FlatMut, FlatRef, LineageLists, LineagePartList, LinkPathIdentifierOf, NodeData},
@@ -137,7 +138,8 @@ pub type AckRecoveryTakes<T, L, S, Ls> = HList![
 /// the transport parameters; `Il` of the link's clone in an entry; `Ik` of
 /// what [`AckRecoveryTakes`] lists in a recovery layer, and `Jx` and `Jr`
 /// of the stored part of congestion control and the RTT estimate there;
-/// `Hf` of each part's feedback.
+/// `Hf` of the core and of each part's frame sources in the rest, for
+/// feedback.
 ///
 /// # Errors
 ///
@@ -174,7 +176,7 @@ where
         + ReadEach<AckReads<L>, Ir>
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
         + GetAt<KeyPhaseNumbers, Ikp>,
-    for<'x> L: PartsSendFeedback<T, L, <L as LineageLists<'x, T>>::LogicalPath, Hf>,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath: CoreLentFeedback<T, L, Hf>,
     for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![LinkClone<T::Link>], Il>,
@@ -216,8 +218,8 @@ where
             .context(KeyUpdateSnafu)?;
     }
     // Out of the lineage while the frame is handled, so that the summaries
-    // of the packets declared lost can be lent to the parts beside it; the
-    // empty journals left in their place take nothing meanwhile.
+    // of the packets declared lost can be lent to the frame sources beside
+    // it; the empty journals left in their place take nothing meanwhile.
     let Some(journals) = lineage.get_mut::<SendJournalsOf<T, L>, Ij>().get_mut(space) else {
         // invariant: the space was there above, and nothing since takes a
         // space away
@@ -386,12 +388,10 @@ where
     // the feedback, once the whole frame is handled: delivered first, then
     // lost
     for record in acknowledged {
-        for summary in record.summaries {
-            <L as PartsSendFeedback<T, L, _, Hf>>::delivered(lineage, others, space, summary);
-        }
+        CoreLentFeedback::<T, L, Hf>::delivered_each(lineage, at, space, record.summaries);
     }
     for batch in &declared {
-        hand_back_lost::<T, L, _, Hf, B>(&mut journals, lineage, others, space, batch);
+        hand_back_lost::<T, L, _, Hf>(&mut journals, lineage, at, space, batch);
     }
     if let Some(slot) = lineage.get_mut::<SendJournalsOf<T, L>, Ij>().get_mut(space) {
         *slot = journals;

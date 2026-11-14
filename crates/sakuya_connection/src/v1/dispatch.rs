@@ -61,6 +61,7 @@ use super::{
     crypto::CryptoReceiver,
     current_probe_timeout,
     error::{self, ConnectionError},
+    feedback::CoreLentFeedback,
     key_phase::KeyPhaseNumbers,
     keys::OneRttKeys,
     link::LinkClone,
@@ -75,7 +76,7 @@ use crate::{
     connection_id::{DestinationConnectionIdStrategy, NewConnectionId},
     dispatch::{DispatchFacts, FrameDispatch},
     error::ConnectionErrorsOf,
-    feedback::{FeedbackSummariesOf, PartsSendFeedback},
+    feedback::FeedbackSummariesOf,
     layer::{self, LogicalPath},
     others::OtherNodes,
     share::{FlatMut, FlatRef, LineageLists, LineagePartList, LinkPathIdentifierOf, NodeData},
@@ -234,7 +235,7 @@ where
         + ReadEach<AckReads<L>, Ird>
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
         + GetAt<KeyPhaseNumbers, Ikp>,
-    for<'x> L: PartsSendFeedback<T, L, <L as LineageLists<'x, T>>::LogicalPath, Hf>,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath: CoreLentFeedback<T, L, Hf>,
     for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![LinkClone<T::Link>], Ile>,

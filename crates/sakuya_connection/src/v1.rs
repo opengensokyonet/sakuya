@@ -89,6 +89,7 @@ use sakuya_wire::{
     },
 };
 
+use self::feedback::CoreLentFeedback;
 use crate::{
     call::CallBundle,
     clock::{CheckedAdd, ConnectionChoices, InstantOf, LinkIdOf},
@@ -97,7 +98,7 @@ use crate::{
         RequestOf,
     },
     error::{ConnectionErrorOf, ConnectionErrorPart, ConnectionErrorsOf},
-    feedback::{FeedbackSummariesOf, PartsSendFeedback},
+    feedback::FeedbackSummariesOf,
     layer::{self, NodeKey},
     others::OtherNodes,
     request::StructureRequest,
@@ -1369,14 +1370,14 @@ impl PassiveDataComponent for AntiAmplification {}
 /// When the link path ends, the packets sent on it that were neither
 /// acknowledged nor declared lost leave the send journals of its logical
 /// path, in every space, and the summaries of their frames go back to
-/// their parts as lost; the kept records of its lost packets go with them,
-/// so a late acknowledgment of them is ignored. Its congestion control
+/// their frame sources as lost; the kept records of its lost packets go
+/// with them, so a late acknowledgment of them is ignored. Its congestion control
 /// hears of none of it: it ended with the recovery layer.
 impl<T: Choices, L, Ij, Hf> Build<T, L, layer::LinkPath, (Ij, Hf)> for LinkPathRole<InstantOf<T>>
 where
     L: LineagePartList<T> + FeedbackSummariesOf,
     for<'v> <L as LineageLists<'v, T>>::LinkPathParents: GetAt<SendJournalsOf<T, L>, Ij>,
-    for<'v> L: PartsSendFeedback<T, L, <L as LineageLists<'v, T>>::LinkPathParents, Hf>,
+    for<'v> <L as LineageLists<'v, T>>::LinkPathParents: CoreLentFeedback<T, L, Hf>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::LinkPath>,
@@ -1393,17 +1394,19 @@ where
             unreachable!("an ended link path's others carry its key")
         };
         let identifier = L::link_path_identifier(&path, &link);
+        let now = others.now();
         for space in PacketNumberSpaceKind::ALL {
             let Some(journals) = parents.get_mut::<SendJournalsOf<T, L>, Ij>().get_mut(space)
             else {
                 continue;
             };
             let unsettled: Vec<_> = journals.take_link_path(&identifier).collect();
-            for record in &unsettled {
-                for summary in &record.summaries {
-                    <L as PartsSendFeedback<T, L, _, Hf>>::lost(parents, others, space, summary);
-                }
-            }
+            CoreLentFeedback::<T, L, Hf>::lost_each(
+                parents,
+                now,
+                space,
+                unsettled.iter().flat_map(|record| &record.summaries),
+            );
         }
     }
 }

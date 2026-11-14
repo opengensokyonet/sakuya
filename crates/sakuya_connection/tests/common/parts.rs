@@ -79,34 +79,14 @@ macro_rules! no_parameters {
 }
 no_parameters!(a::Part, b::Part, c::Part);
 
-/// A stand-in part writes no frames, so it leaves no summaries and takes
-/// no feedback.
+/// A stand-in part sends nothing and writes no frames, so it leaves no
+/// summaries and takes no feedback.
 macro_rules! no_summaries {
     ($($part:ty),*) => {$(
-        impl sakuya_connection::feedback::FeedbackSummaryPart for $part {
-            type FeedbackSummary<I> = core::convert::Infallible;
-        }
-        impl<T, L, V> sakuya_connection::feedback::SendFeedback<T, L, V, ()> for $part
-        where
-            T: sakuya_connection::clock::ConnectionChoices,
-            L: sakuya_connection::share::PartList<T>,
-        {
-            fn delivered<B: sakuya_connection::call::CallBundle>(
-                _: &mut sakuya_connection::take::Lineage<'_, V>,
-                _: &mut sakuya_connection::others::OtherNodes<'_, T, L, B>,
-                _: sakuya_recovery::packet_number_space::PacketNumberSpaceKind,
-                summary: core::convert::Infallible,
-            ) {
-                match summary {}
-            }
-            fn lost<B: sakuya_connection::call::CallBundle>(
-                _: &mut sakuya_connection::take::Lineage<'_, V>,
-                _: &mut sakuya_connection::others::OtherNodes<'_, T, L, B>,
-                _: sakuya_recovery::packet_number_space::PacketNumberSpaceKind,
-                summary: &core::convert::Infallible,
-            ) {
-                match *summary {}
-            }
+        impl sakuya_connection::send_strategy::SendIntentPart for $part {
+            type FrameSourceId = sakuya_wire::parts::CNil;
+            type SendIntents = sakuya_wire::parts::CNil;
+            type FrameSources = HNil;
         }
     )*};
 }

@@ -142,6 +142,7 @@ use super::{
     connection_ids::{ConnectionIdsOf, LinkPathResetTokenRegistrar, ResetTokenRegistrarOf},
     datagram_batch::{BatchedDatagram, BatchedPacket, DatagramBatch},
     error::ConnectionError,
+    feedback::CoreLentFeedback,
     idle::IdleTimeout,
     key_phase::KeyPhaseNumbers,
     key_update::prepare_one_rtt_packets,
@@ -167,7 +168,7 @@ use crate::{
     component::{ArgsOf, LineageOf, ReadSet},
     connection_id::{OfferedConnectionId, datagram::DatagramConnectionId},
     error::ConnectionErrorsOf,
-    feedback::{FeedbackSummariesOf, FeedbackSummaryOf, PartsSendFeedback},
+    feedback::{FeedbackSummariesOf, FeedbackSummaryOf},
     frame_source::{
         HandshakePacket, InitialPacket, OneRttPacket, OneRttProbePacket, PacketKind,
         PartsFrameSourceDispatch, PartsFrameSources, SettlingResponsePacket, ZeroRttPacket,
@@ -358,9 +359,9 @@ pub type SettleReads<T, L> = HList![
 /// each part's frame sources; for handing over, `Ii`, `Ih`, `Io` of the
 /// keys and `Il` of the link's clone; for settling, `Ij` of the send
 /// journals, `If` of the recovery factory, `Iv` of [`SettleReads`], `Ie`
-/// of the idle timeout, `Iq` of [`SettleRecoveryTakes`], `Hf` of each
-/// part's feedback; `Ipp` and `Ima` of the peer's `max_udp_payload_size`
-/// and `max_ack_delay`; `Jx`, `Jr` and `Jm` of the stored part of
+/// of the idle timeout, `Iq` of [`SettleRecoveryTakes`], `Hf` of the
+/// core and each part's frame sources, for feedback; `Ipp` and `Ima` of
+/// the peer's `max_udp_payload_size` and `max_ack_delay`; `Jx`, `Jr` and `Jm` of the stored part of
 /// congestion control, the RTT estimate and the datagram size probing
 /// policy in a recovery layer; for 1-RTT key updates, `Iu` of the AEAD's
 /// usage, `Ihc` of whether the handshake is confirmed, `Ikp` of the key
@@ -591,41 +592,48 @@ where
         ReadEach<FillReads<T, L>, Ir> + GetAt<ConnectionIdsOf<T>, Ici>,
     for<'x> L: PartsFrameSourceDispatch<
             T,
+            L,
             InitialPacket,
             FillRest<'x, T, L, It, Iw>,
             FeedbackSummaryOf<T, L>,
             Hs,
         > + PartsFrameSourceDispatch<
             T,
+            L,
             HandshakePacket,
             FillRest<'x, T, L, It, Iw>,
             FeedbackSummaryOf<T, L>,
             Hs,
         > + PartsFrameSourceDispatch<
             T,
+            L,
             ZeroRttPacket,
             FillRest<'x, T, L, It, Iw>,
             FeedbackSummaryOf<T, L>,
             Hs,
         > + PartsFrameSourceDispatch<
             T,
+            L,
             OneRttPacket,
             FillRest<'x, T, L, It, Iw>,
             FeedbackSummaryOf<T, L>,
             Hs,
         > + PartsFrameSourceDispatch<
             T,
+            L,
             OneRttProbePacket,
             FillRest<'x, T, L, It, Iw>,
             FeedbackSummaryOf<T, L>,
             Hs,
         > + PartsFrameSourceDispatch<
             T,
+            L,
             SettlingResponsePacket,
             FillRest<'x, T, L, It, Iw>,
             FeedbackSummaryOf<T, L>,
             Hs,
-        > + PartsSendFeedback<T, L, <L as LineageLists<'x, T>>::LinkPath, Hf>,
+        >,
+    for<'x> <L as LineageLists<'x, T>>::LinkPath: CoreLentFeedback<T, L, Hf>,
     for<'x> NodeData<T, L, layer::Recovery>: FlatMut<'x>,
     for<'x> <NodeData<T, L, layer::Recovery> as FlatMut<'x>>::Out: TakeEach<'x, FillRecoveryTakes<T, L>, Ik>
         + TakeEach<'x, SettleRecoveryTakes<T, L, S, Ls>, Iq>
@@ -912,12 +920,12 @@ where
     A: CongestionController<InstantOf<T>, SentState = S> + Pacer<InstantOf<T>>,
     TransportParameterSlots<L>: Selector<Option<MaxUdpPayloadSize>, Ipp>,
     V: ReadEach<FillReads<T, L>, Ir> + GetAt<ConnectionIdsOf<T>, Ici>,
-    L: PartsFrameSourceDispatch<T, InitialPacket, V, FeedbackSummaryOf<T, L>, Hs>
-        + PartsFrameSourceDispatch<T, HandshakePacket, V, FeedbackSummaryOf<T, L>, Hs>
-        + PartsFrameSourceDispatch<T, ZeroRttPacket, V, FeedbackSummaryOf<T, L>, Hs>
-        + PartsFrameSourceDispatch<T, OneRttPacket, V, FeedbackSummaryOf<T, L>, Hs>
-        + PartsFrameSourceDispatch<T, OneRttProbePacket, V, FeedbackSummaryOf<T, L>, Hs>
-        + PartsFrameSourceDispatch<T, SettlingResponsePacket, V, FeedbackSummaryOf<T, L>, Hs>,
+    L: PartsFrameSourceDispatch<T, L, InitialPacket, V, FeedbackSummaryOf<T, L>, Hs>
+        + PartsFrameSourceDispatch<T, L, HandshakePacket, V, FeedbackSummaryOf<T, L>, Hs>
+        + PartsFrameSourceDispatch<T, L, ZeroRttPacket, V, FeedbackSummaryOf<T, L>, Hs>
+        + PartsFrameSourceDispatch<T, L, OneRttPacket, V, FeedbackSummaryOf<T, L>, Hs>
+        + PartsFrameSourceDispatch<T, L, OneRttProbePacket, V, FeedbackSummaryOf<T, L>, Hs>
+        + PartsFrameSourceDispatch<T, L, SettlingResponsePacket, V, FeedbackSummaryOf<T, L>, Hs>,
 {
     /// Fill datagrams into `batch` until the batch is full or the plans
     /// stop.
@@ -1366,7 +1374,7 @@ where
     T: Choices,
     L: LineagePartList<T>
         + FeedbackSummariesOf
-        + PartsFrameSourceDispatch<T, K, V, FeedbackSummaryOf<T, L>, Hs>,
+        + PartsFrameSourceDispatch<T, L, K, V, FeedbackSummaryOf<T, L>, Hs>,
     K: PacketKind,
     PartsFrameSources<K, L>: FrameSourceSet,
     C: FrameSourceCursor<PartsFrameSources<K, L>>,
@@ -1387,14 +1395,14 @@ where
         }
         if last {
             let supplied = item.supply(open.make_last(), |item, packet| {
-                <L as PartsFrameSourceDispatch<T, K, V, FeedbackSummaryOf<T, L>, Hs>>::supply(
+                <L as PartsFrameSourceDispatch<T, L, K, V, FeedbackSummaryOf<T, L>, Hs>>::supply(
                     rest, now, item, packet,
                 )
             });
             return (supplied, false);
         }
         let supplied = item.supply(open, |item, packet| {
-            <L as PartsFrameSourceDispatch<T, K, V, FeedbackSummaryOf<T, L>, Hs>>::supply(
+            <L as PartsFrameSourceDispatch<T, L, K, V, FeedbackSummaryOf<T, L>, Hs>>::supply(
                 rest, now, item, packet,
             )
         });
@@ -1496,8 +1504,9 @@ fn accept<'v, T, L, B, S, Ls, Ij, Ie, Iq>(
 
 /// Give up the packets of `datagrams`: their send result is unknown. Each
 /// is kept as declared lost for three probe timeouts of its space, the
-/// summaries of its frames go back to their parts as lost, and those that
-/// count in flight leave the bytes in flight without a congestion signal.
+/// summaries of its frames go back to their frame sources as lost, and
+/// those that count in flight leave the bytes in flight without a
+/// congestion signal.
 fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ipp, Ima, Jx, Jr, Jm>(
     lineage: &mut LineageOf<'v, T, L, LinkPath>,
     others: &mut OtherNodes<'v, T, L, B>,
@@ -1523,7 +1532,7 @@ fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ipp, Ima, Jx, Jr, Jm>(
     for<'x> <L as LineageLists<'x, T>>::LinkPath: GetAt<SendJournalsOf<T, L>, Ij>
         + GetAt<RecoveryFactoryOf<T, L>, If>
         + ReadEach<SettleReads<T, L>, Iv>,
-    for<'x> L: PartsSendFeedback<T, L, <L as LineageLists<'x, T>>::LinkPath, Hf>,
+    for<'x> <L as LineageLists<'x, T>>::LinkPath: CoreLentFeedback<T, L, Hf>,
     for<'x> NodeData<T, L, layer::Recovery>: FlatMut<'x>,
     for<'x> <NodeData<T, L, layer::Recovery> as FlatMut<'x>>::Out:
         TakeEach<'x, SettleRecoveryTakes<T, L, S, Ls>, Iq>,
@@ -1551,8 +1560,9 @@ fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ipp, Ima, Jx, Jr, Jm>(
             now + pto.saturating_mul(3)
         })
     };
-    // out of the lineage while the summaries go back to the parts beside
-    // it; the empty journals left in their place take nothing meanwhile
+    // out of the lineage while the summaries go back to the frame sources
+    // beside it; the empty journals left in their place take nothing
+    // meanwhile
     let mut journals = core::mem::take(lineage.get_mut::<SendJournalsOf<T, L>, Ij>());
     let mut removed = Vec::new();
     for datagram in datagrams {
@@ -1567,9 +1577,7 @@ fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ipp, Ima, Jx, Jr, Jm>(
                     sent_state: charge.sent_state,
                 });
             }
-            for summary in &record.summaries {
-                <L as PartsSendFeedback<T, L, _, Hf>>::lost(lineage, others, space, summary);
-            }
+            CoreLentFeedback::<T, L, Hf>::lost_each(lineage, now, space, &record.summaries);
         }
     }
     *lineage.get_mut::<SendJournalsOf<T, L>, Ij>() = journals;
@@ -1769,41 +1777,48 @@ where
         ReadEach<FillReads<T, L>, Ir> + GetAt<ConnectionIdsOf<T>, Ici>,
     for<'x> L: PartsFrameSourceDispatch<
             T,
+            L,
             InitialPacket,
             FillRest<'x, T, L, It, Iw>,
             FeedbackSummaryOf<T, L>,
             Hs,
         > + PartsFrameSourceDispatch<
             T,
+            L,
             HandshakePacket,
             FillRest<'x, T, L, It, Iw>,
             FeedbackSummaryOf<T, L>,
             Hs,
         > + PartsFrameSourceDispatch<
             T,
+            L,
             ZeroRttPacket,
             FillRest<'x, T, L, It, Iw>,
             FeedbackSummaryOf<T, L>,
             Hs,
         > + PartsFrameSourceDispatch<
             T,
+            L,
             OneRttPacket,
             FillRest<'x, T, L, It, Iw>,
             FeedbackSummaryOf<T, L>,
             Hs,
         > + PartsFrameSourceDispatch<
             T,
+            L,
             OneRttProbePacket,
             FillRest<'x, T, L, It, Iw>,
             FeedbackSummaryOf<T, L>,
             Hs,
         > + PartsFrameSourceDispatch<
             T,
+            L,
             SettlingResponsePacket,
             FillRest<'x, T, L, It, Iw>,
             FeedbackSummaryOf<T, L>,
             Hs,
-        > + PartsSendFeedback<T, L, <L as LineageLists<'x, T>>::LinkPath, Hf>,
+        >,
+    for<'x> <L as LineageLists<'x, T>>::LinkPath: CoreLentFeedback<T, L, Hf>,
     for<'x> NodeData<T, L, layer::Recovery>: FlatMut<'x>,
     for<'x> <NodeData<T, L, layer::Recovery> as FlatMut<'x>>::Out: TakeEach<'x, FillRecoveryTakes<T, L>, Ik>
         + TakeEach<'x, SettleRecoveryTakes<T, L, S, Ls>, Iq>

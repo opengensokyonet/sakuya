@@ -28,14 +28,14 @@ use sakuya_connection::{
     dispatch::{DispatchFacts, FrameDispatch, FrameSetDispatch},
     driver::ConnectionDriver,
     error::ConnectionErrorsOf,
-    feedback::{FeedbackSummaryPart, SendFeedback},
+    frame_source::{FindFrameSource, FrameSource, FrameSourceKind, NoIntent, PublishIntent},
     layer::{self, EstablishedArgs, LinkPathArgs, LogicalPathArgs, NodeKey},
     others::OtherNodes,
     request::StructureRequest,
     role::LinkPathRole,
     share::{
         FlatMut, FlatRef, LayerShare, LineageLists, LineagePartList, LinkPathIdentifierOf,
-        LogicalPathKeyShare, LogicalPathKeys, NodeData, PartList, SoleLogicalPath,
+        LogicalPathKeyShare, LogicalPathKeys, NodeData, SoleLogicalPath,
     },
     take::{GetAt, Lineage, Take, TakeEach},
     v1::{
@@ -575,26 +575,64 @@ mod probe {
     /// The summary of a frame the probe writes, as the tests number it.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Summary(pub u64);
-    impl FeedbackSummaryPart for Part {
-        type FeedbackSummary<I> = Summary;
+
+    /// The probe's frames go into the sum of the summaries of the
+    /// composition of the tests, where the probe is second and last.
+    impl<A> From<Summary> for Coproduct<A, Coproduct<Coproduct<Summary, CNil>, CNil>> {
+        fn from(summary: Summary) -> Self {
+            Coproduct::Inr(Coproduct::Inl(Coproduct::Inl(summary)))
+        }
     }
-    /// The probe logs what comes back of its summaries.
-    impl<T: ConnectionChoices, L: PartList<T>, V> SendFeedback<T, L, V, ()> for Part {
-        fn delivered<B: CallBundle>(
-            _: &mut Lineage<'_, V>,
-            _: &mut OtherNodes<'_, T, L, B>,
-            space: PacketNumberSpaceKind,
-            summary: Summary,
-        ) {
+
+    /// The probe's frames, as a kind of frame source: none are planned,
+    /// and what comes back of their summaries is logged.
+    pub enum Frames {}
+    impl FrameSourceKind for Frames {
+        type Item<'a> = core::convert::Infallible;
+        type Summary<I> = Summary;
+        type Intent = NoIntent;
+    }
+    /// The source of the probe's frames logs what comes back of their
+    /// summaries.
+    pub struct LoggingSource;
+    impl FrameSource for LoggingSource {
+        type Summary = Summary;
+        type Class = sakuya_connection::write::InFlightClass;
+        type Item<'a> = core::convert::Infallible;
+        type Intent = NoIntent;
+        fn supply<W, P>(
+            &mut self,
+            item: core::convert::Infallible,
+            _: sakuya_connection::write::OpenPacket<W, sakuya_connection::write::InFlightClass, P>,
+        ) -> sakuya_connection::write::Supplied<W, sakuya_connection::write::InFlightClass, P>
+        where
+            W: sakuya_connection::write::PacketWriting,
+            sakuya_connection::write::SummaryOf<W>: From<Summary>,
+            P: sakuya_connection::write::PacketPosition,
+        {
+            match item {}
+        }
+        fn delivered<Pb, Idx>(&mut self, _: &mut Pb, space: PacketNumberSpaceKind, summary: Summary)
+        where
+            Pb: PublishIntent<NoIntent, Idx>,
+        {
             log(format!("delivered {space:?} {}", summary.0));
         }
-        fn lost<B: CallBundle>(
-            _: &mut Lineage<'_, V>,
-            _: &mut OtherNodes<'_, T, L, B>,
-            space: PacketNumberSpaceKind,
-            summary: &Summary,
-        ) {
+        fn lost<Pb, Idx>(&mut self, _: &mut Pb, space: PacketNumberSpaceKind, summary: &Summary)
+        where
+            Pb: PublishIntent<NoIntent, Idx>,
+        {
             log(format!("lost {space:?} {}", summary.0));
+        }
+    }
+    impl<T: ConnectionChoices, L, V> FindFrameSource<T, L, V, ()> for Frames {
+        type Source<'l, 'r>
+            = LoggingSource
+        where
+            V: 'l,
+            'r: 'l;
+        fn find<'l, 'r>(_: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> LoggingSource {
+            LoggingSource
         }
     }
 
@@ -602,34 +640,19 @@ mod probe {
     impl sakuya_connection::send_strategy::SendIntentPart for Part {
         type FrameSourceId = CNil;
         type SendIntents = CNil;
+        type FrameSources = frunk_core::HList![Frames];
     }
     impl<K: sakuya_connection::frame_source::PacketKind>
         sakuya_connection::frame_source::FrameSourcePart<K> for Part
     {
-        type Item<'a> = CNil;
-        fn item(intent: &CNil) -> Option<CNil> {
+        fn item(intent: &CNil) -> Option<Coproduct<core::convert::Infallible, CNil>> {
             match *intent {}
         }
-        fn source(item: &CNil) -> CNil {
-            match *item {}
-        }
-    }
-    /// The probe has no frame sources to hand an item to.
-    impl<T: ConnectionChoices, K: sakuya_connection::frame_source::PacketKind, V, S>
-        sakuya_connection::frame_source::FrameSourceDispatch<T, K, V, S, ()> for Part
-    {
-        fn supply<W, P>(
-            _: &mut Lineage<'_, V>,
-            _: InstantOf<T>,
-            item: CNil,
-            _: sakuya_connection::write::OpenPacket<W, sakuya_connection::write::ClassOfSource, P>,
-        ) -> sakuya_connection::write::Supplied<W, sakuya_connection::write::ClassOfSource, P>
-        where
-            W: sakuya_connection::write::PacketWriting,
-            W::Attempt: PacketSendAttempt<Summary = S>,
-            P: sakuya_connection::write::PacketPosition,
-        {
-            match item {}
+        fn source(item: &Coproduct<core::convert::Infallible, CNil>) -> CNil {
+            match item {
+                Coproduct::Inl(never) => match *never {},
+                Coproduct::Inr(never) => match *never {},
+            }
         }
     }
 
@@ -1739,7 +1762,7 @@ mod probe {
                             let mut attempt = journals.start_attempt(here.clone());
                             let number = attempt.packet_number();
                             attempt.record_frame(
-                                Coproduct::inject(Summary(number.get())),
+                                Summary(number.get()).into(),
                                 true,
                                 true,
                             );
@@ -1762,11 +1785,7 @@ mod probe {
                         let journals = journals.get_mut(space)?;
                         let mut attempt = journals.start_attempt(here.clone());
                         let number = attempt.packet_number();
-                        let summary = v1::feedback::FeedbackSummary::Ack(AckSummary {
-                            largest,
-                            before,
-                        });
-                        attempt.record_frame(Coproduct::inject(summary), false, false);
+                        attempt.record_frame(AckSummary { largest, before }.into(), false, false);
                         let sealed = attempt.seal(50, false)?;
                         journals.sent(sealed, now);
                         spaces.get_mut(space)?.accept(number, now, false, None);
