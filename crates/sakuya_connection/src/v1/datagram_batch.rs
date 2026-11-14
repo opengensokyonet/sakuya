@@ -33,7 +33,7 @@ use sakuya_recovery::{
     packet_number_space::PacketNumberSpaceKind, send_journals::PacketSendAttempt,
 };
 use sakuya_wire::{
-    connection_id::ConnectionId,
+    connection_id::{ConnectionId, ConnectionIdLength},
     v1::{packet_number::PacketNumber, role::Role},
 };
 
@@ -234,7 +234,8 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
     }
 
     /// Start writing a datagram at `now` with `cid`, sent by a side of
-    /// `role`, of at most `max_len` bytes, of which packets that count in
+    /// `role` that asks the peer to send with connection IDs of
+    /// `local_id_length`, of at most `max_len` bytes, of which packets that count in
     /// flight take at most `in_flight_room`; `probe` when it may go past
     /// the congestion window on a permit of `congestion`, which it uses if
     /// it carries anything that counts in flight. When it is sealed it is
@@ -245,6 +246,7 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
         now: I,
         cid: U,
         role: Role,
+        local_id_length: ConnectionIdLength,
         max_len: usize,
         in_flight_room: usize,
         probe: bool,
@@ -263,6 +265,7 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
         let state = DatagramState {
             dcid: cid.connection_id(),
             role,
+            local_id_length,
             start: self.buffer.len(),
             max_len,
             in_flight_room,
@@ -306,6 +309,9 @@ pub(super) struct DatagramState {
     pub(super) dcid: ConnectionId,
     /// The side that sends it.
     pub(super) role: Role,
+    /// The length of the connection IDs the side asks the peer to send
+    /// with.
+    pub(super) local_id_length: ConnectionIdLength,
     /// Where it starts in the buffer.
     pub(super) start: usize,
     /// Its largest size.

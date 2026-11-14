@@ -1003,6 +1003,7 @@ where
             self.now,
             cid,
             role,
+            scid.length(),
             max_len,
             in_flight_room,
             probe,

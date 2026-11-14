@@ -63,6 +63,12 @@ use crate::write::{
 /// §17.4).
 const SPIN: bool = false;
 
+/// How many bytes longer than the connection IDs this side asks the peer
+/// to send with every datagram with content is, so that no stateless reset
+/// the peer sends in reply is shorter than a packet it could be taken for
+/// (RFC 9000 §10.3).
+const BEYOND_LOCAL_ID: usize = 22;
+
 /// The invariant of every write at the end of the buffer: a `BytesMut`
 /// takes every byte.
 const TAKES_EVERY_BYTE: &str = "a BytesMut takes every byte";
@@ -364,6 +370,10 @@ where
                 // within the anti-amplification limit
                 self.datagram.raise_floor(MIN_DATAGRAM_SIZE);
             }
+            // a stateless reset the peer answers with is shorter than any
+            // datagram this side sends (RFC 9000 §10.3, SHOULD)
+            self.datagram
+                .raise_floor(self.datagram.local_id_length.get() + BEYOND_LOCAL_ID);
         }
         let sample = self.sample_shortfall();
         let unpadded = self.buffer.len() - self.datagram.start + sample + AEAD_TAG_LEN;

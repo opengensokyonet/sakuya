@@ -149,6 +149,9 @@ struct Accounts {
     pacer: Charged,
     amplification: AntiAmplification,
     used: Rc<Cell<Option<usize>>>,
+    /// The length of the connection IDs this side asks the peer to send
+    /// with: that of [`scid`] unless a test changes it.
+    local_id_length: ConnectionIdLength,
 }
 
 impl Accounts {
@@ -160,6 +163,7 @@ impl Accounts {
             pacer: Charged::default(),
             amplification,
             used: Rc::new(Cell::new(None)),
+            local_id_length: scid().length(),
         }
     }
 
@@ -187,6 +191,7 @@ impl Accounts {
             0,
             cid,
             role,
+            self.local_id_length,
             max_len,
             in_flight_room,
             probe,
@@ -395,6 +400,38 @@ fn a_short_packet_is_padded_for_the_header_protection_sample() {
     let record = record(&mut application, entry.application_data.unwrap().sealed);
     assert!(record.pmtu_probe);
     assert_eq!(record.summaries, [Summary::Frame("ping"), Summary::Padding]);
+}
+
+#[test]
+fn a_datagram_is_22_bytes_longer_than_the_local_connection_ids() {
+    let (sender, receiver) = one_rtt_keys();
+    let mut application = Journals::new();
+    let mut usage = AeadUsage::new();
+    let mut accounts = Accounts::new();
+    accounts.local_id_length = ConnectionIdLength::new(8).unwrap();
+    let mut batch = Batch::new(NonZeroUsize::MIN);
+    {
+        let mut datagram = accounts.start(&mut batch, Role::Server, 1500, 1500, false);
+        let packet = datagram
+            .start_one_rtt_packet(
+                application.start_attempt(()),
+                sender.send().unwrap(),
+                &mut usage,
+                None,
+            )
+            .unwrap();
+        let mut open = packet.open::<InFlightClass>();
+        open.write_frame(PingFrame, Summary::Frame("ping")).unwrap();
+    }
+    let bytes = batch.datagrams().next().unwrap().to_vec();
+    // first byte, DCID, a one-byte packet number, PING and two PADDING for
+    // the sample, tag: 29 bytes, one short of the 8-byte connection IDs
+    // this side asks for and 22 (RFC 9000 §10.3)
+    assert_eq!(bytes.len(), 8 + 22);
+    let mut packet = BytesMut::from(&bytes[..]);
+    let (opened, _) =
+        open_one_rtt(receiver.receive().unwrap(), None, &mut packet, 9, None).unwrap();
+    assert_eq!(packet[opened.payload.clone()], [0x01, 0x00, 0x00, 0x00]);
 }
 
 #[test]

@@ -384,6 +384,7 @@ fn write_close_datagram<B: CryptoBackend>(
     let mut state = DatagramState {
         dcid: shape.dcid,
         role: shape.role,
+        local_id_length: shape.scid.length(),
         start: 0,
         max_len: shape.max_len,
         in_flight_room: shape.max_len,
