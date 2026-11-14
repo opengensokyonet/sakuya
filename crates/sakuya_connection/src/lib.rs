@@ -17,8 +17,10 @@
 //! driver then rereads what reads those components: their deadlines and
 //! their rereads, round after round until nothing changes. Calls hand over
 //! [`request::StructureRequest`]s to build, end or move nodes; expiries and
-//! rereads return them; the driver applies them at once. Time comes from
-//! one [`clock::MonotonicClock`], read once in each poll.
+//! rereads return them; the driver applies them at once. What reaches the
+//! connection from outside its tree is taken in at the start of each poll,
+//! before any call, by the components that act before the calls. Time
+//! comes from one [`clock::MonotonicClock`], read once in each poll.
 //!
 //! QUIC version 1 is the part [`v1::Part`]. So far its shares hold the
 //! keys, the transport parameters, the idle timeout, the entries of the

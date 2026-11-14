@@ -5,9 +5,13 @@
 //! and the driver reads it after every lend that may have changed it; when
 //! the deadline comes, the driver runs the component's expiry. A component
 //! states which component types it reads; after a lend took one of them
-//! mutably, the driver reads its deadline again and runs its reread.
+//! mutably, the driver reads its deadline again and runs its reread. A
+//! component that takes in what reaches the connection from outside its
+//! tree states that it acts before the calls: the driver runs that action
+//! at the start of every poll, before any call.
 use core::any::TypeId;
 use core::ops::Add;
+use core::task::Waker;
 
 use sakuya_stream::connection::AbortCause;
 use sakuya_wire::parts::{HCons, HNil, Sculptor};
@@ -81,6 +85,10 @@ where
 {
     /// The component types its deadline and its reread read.
     fn reads(_reads: &mut ReadSet) {}
+    /// Whether the driver runs its [`before_calls`](Self::before_calls) at
+    /// the start of every poll. By default not, and a component that does
+    /// not costs a poll nothing.
+    const ACTS_BEFORE_CALLS: bool = false;
     /// Its earliest deadline, read from the lent node and the nodes above.
     fn deadline<'v>(_lineage: &LineageOf<'v, T, L, Lv>) -> Option<InstantOf<T>> {
         None
@@ -106,6 +114,25 @@ where
         _lineage: LineageOf<'v, T, L, Lv>,
         _others: &mut OtherNodes<'v, T, L, B>,
         _now: InstantOf<T>,
+    ) -> Option<RequestOf<T, L>> {
+        None
+    }
+    /// A poll of the connection begins: take in what reached the
+    /// connection from outside its tree.
+    ///
+    /// The driver calls it at the start of every poll, before any call and
+    /// any expiry, for every node of the layer, the nodes above a node
+    /// first, when [`ACTS_BEFORE_CALLS`](Self::ACTS_BEFORE_CALLS) is set.
+    /// What it takes mutably is reread and the request it returns applied
+    /// as after a lend, before the calls are polled. `waker` wakes the
+    /// connection's future: the component leaves it with whatever outside
+    /// the tree it waits on, so that the next poll begins once something
+    /// came. By default nothing.
+    fn before_calls<'v, B: CallBundle>(
+        _lineage: LineageOf<'v, T, L, Lv>,
+        _others: &mut OtherNodes<'v, T, L, B>,
+        _now: InstantOf<T>,
+        _waker: &Waker,
     ) -> Option<RequestOf<T, L>> {
         None
     }
@@ -337,6 +364,8 @@ where
     fn types(out: &mut Vec<TypeId>);
     /// What each component reads, in order.
     fn reads(out: &mut Vec<ReadSet>);
+    /// Whether each component acts before the calls, in order.
+    fn acts_before_calls(out: &mut Vec<bool>);
     /// The deadline of the component at `r` from the end, when it is this
     /// part's; `after` is how many positions follow this part.
     fn try_deadline<'v>(
@@ -362,6 +391,17 @@ where
         after: usize,
         now: InstantOf<T>,
     ) -> Result<Option<RequestOf<T, L>>, LineageOf<'v, T, L, Lv>>;
+    /// The action before the calls of the component at `r` from the end,
+    /// or the lineage back.
+    #[allow(clippy::type_complexity)]
+    fn try_before_calls<'v, B: CallBundle>(
+        lineage: LineageOf<'v, T, L, Lv>,
+        others: &mut OtherNodes<'v, T, L, B>,
+        r: usize,
+        after: usize,
+        now: InstantOf<T>,
+        waker: &Waker,
+    ) -> Result<Option<RequestOf<T, L>>, LineageOf<'v, T, L, Lv>>;
     /// Tell each component, in order, that the connection's future is
     /// dropped, and how.
     fn future_dropped_each<'v>(lineage: &mut LineageOf<'v, T, L, Lv>, cause: AbortCause);
@@ -373,6 +413,7 @@ where
     const LEN: usize = 0;
     fn types(_: &mut Vec<TypeId>) {}
     fn reads(_: &mut Vec<ReadSet>) {}
+    fn acts_before_calls(_: &mut Vec<bool>) {}
     #[inline(always)]
     fn try_deadline<'v>(
         _: &LineageOf<'v, T, L, Lv>,
@@ -402,6 +443,17 @@ where
         Err(lineage)
     }
     #[inline(always)]
+    fn try_before_calls<'v, B: CallBundle>(
+        lineage: LineageOf<'v, T, L, Lv>,
+        _: &mut OtherNodes<'v, T, L, B>,
+        _: usize,
+        _: usize,
+        _: InstantOf<T>,
+        _: &Waker,
+    ) -> Result<Option<RequestOf<T, L>>, LineageOf<'v, T, L, Lv>> {
+        Err(lineage)
+    }
+    #[inline(always)]
     fn future_dropped_each<'v>(_: &mut LineageOf<'v, T, L, Lv>, _: AbortCause) {}
 }
 impl<T: ConnectionChoices, L, Lv: LayerLineage, X, Xs, H, Hs> PartPositions<T, L, Lv, HCons<H, Hs>>
@@ -421,6 +473,10 @@ where
         X::reads(&mut reads);
         out.push(reads);
         Xs::reads(out);
+    }
+    fn acts_before_calls(out: &mut Vec<bool>) {
+        out.push(X::ACTS_BEFORE_CALLS);
+        Xs::acts_before_calls(out);
     }
     #[inline(always)]
     fn try_deadline<'v>(
@@ -463,6 +519,21 @@ where
         }
     }
     #[inline(always)]
+    fn try_before_calls<'v, B: CallBundle>(
+        lineage: LineageOf<'v, T, L, Lv>,
+        others: &mut OtherNodes<'v, T, L, B>,
+        r: usize,
+        after: usize,
+        now: InstantOf<T>,
+        waker: &Waker,
+    ) -> Result<Option<RequestOf<T, L>>, LineageOf<'v, T, L, Lv>> {
+        if r == Xs::LEN + after {
+            Ok(X::before_calls(lineage, others, now, waker))
+        } else {
+            Xs::try_before_calls(lineage, others, r, after, now, waker)
+        }
+    }
+    #[inline(always)]
     fn future_dropped_each<'v>(lineage: &mut LineageOf<'v, T, L, Lv>, cause: AbortCause) {
         X::future_dropped(lineage, cause);
         Xs::future_dropped_each(lineage, cause);
@@ -481,6 +552,8 @@ where
     fn types(out: &mut Vec<TypeId>);
     /// What each component reads, in order.
     fn reads(out: &mut Vec<ReadSet>);
+    /// Whether each component acts before the calls, in order.
+    fn acts_before_calls(out: &mut Vec<bool>);
     /// The deadline at position `r` from the end.
     fn deadline_from_end<'v>(lineage: &LineageOf<'v, T, L, Lv>, r: usize) -> Option<InstantOf<T>>;
     /// The expiry at position `r` from the end.
@@ -497,6 +570,14 @@ where
         r: usize,
         now: InstantOf<T>,
     ) -> Option<RequestOf<T, L>>;
+    /// The action before the calls at position `r` from the end.
+    fn before_calls_from_end<'v, B: CallBundle>(
+        lineage: LineageOf<'v, T, L, Lv>,
+        others: &mut OtherNodes<'v, T, L, B>,
+        r: usize,
+        now: InstantOf<T>,
+        waker: &Waker,
+    ) -> Option<RequestOf<T, L>>;
     /// Tell each component, in order, that the connection's future is
     /// dropped, and how.
     fn future_dropped_each<'v>(lineage: &mut LineageOf<'v, T, L, Lv>, cause: AbortCause);
@@ -508,6 +589,7 @@ where
     const LEN: usize = 0;
     fn types(_: &mut Vec<TypeId>) {}
     fn reads(_: &mut Vec<ReadSet>) {}
+    fn acts_before_calls(_: &mut Vec<bool>) {}
     #[inline(always)]
     fn deadline_from_end<'v>(_: &LineageOf<'v, T, L, Lv>, _: usize) -> Option<InstantOf<T>> {
         unreachable!("a position beyond the node's data")
@@ -531,6 +613,16 @@ where
         unreachable!("a position beyond the node's data")
     }
     #[inline(always)]
+    fn before_calls_from_end<'v, B: CallBundle>(
+        _: LineageOf<'v, T, L, Lv>,
+        _: &mut OtherNodes<'v, T, L, B>,
+        _: usize,
+        _: InstantOf<T>,
+        _: &Waker,
+    ) -> Option<RequestOf<T, L>> {
+        unreachable!("a position beyond the node's data")
+    }
+    #[inline(always)]
     fn future_dropped_each<'v>(_: &mut LineageOf<'v, T, L, Lv>, _: AbortCause) {}
 }
 impl<T: ConnectionChoices, L, Lv: LayerLineage, S, Ss, Hs, Hss>
@@ -548,6 +640,10 @@ where
     fn reads(out: &mut Vec<ReadSet>) {
         S::reads(out);
         Ss::reads(out);
+    }
+    fn acts_before_calls(out: &mut Vec<bool>) {
+        S::acts_before_calls(out);
+        Ss::acts_before_calls(out);
     }
     #[inline(always)]
     fn deadline_from_end<'v>(lineage: &LineageOf<'v, T, L, Lv>, r: usize) -> Option<InstantOf<T>> {
@@ -578,6 +674,19 @@ where
         match S::try_reread(lineage, others, r, Ss::LEN, now) {
             Ok(request) => request,
             Err(lineage) => Ss::reread_from_end(lineage, others, r, now),
+        }
+    }
+    #[inline(always)]
+    fn before_calls_from_end<'v, B: CallBundle>(
+        lineage: LineageOf<'v, T, L, Lv>,
+        others: &mut OtherNodes<'v, T, L, B>,
+        r: usize,
+        now: InstantOf<T>,
+        waker: &Waker,
+    ) -> Option<RequestOf<T, L>> {
+        match S::try_before_calls(lineage, others, r, Ss::LEN, now, waker) {
+            Ok(request) => request,
+            Err(lineage) => Ss::before_calls_from_end(lineage, others, r, now, waker),
         }
     }
     #[inline(always)]
