@@ -12,7 +12,6 @@ use sakuya_wire::{
 };
 
 use super::{
-    aead_usage::AeadUsage,
     amplification::{AddressValidation, AntiAmplification, AntiAmplificationFactor},
     idle::IdleTimeout,
     keys::{
@@ -170,10 +169,7 @@ fn a_promotion_after_the_peer_updated_moves_the_send_generation_too() {
 #[test]
 fn a_promotion_after_this_side_initiated_keeps_the_send_generation() {
     let mut one_rtt = one_rtt_keys();
-    let mut usage = AeadUsage::new();
-    usage.sealed();
-    one_rtt.initiate_update(&mut usage);
-    assert_eq!(usage.sealed_with_current(), 0);
+    one_rtt.initiate_update();
     assert_eq!(one_rtt.send().unwrap().generation().generation(), 1);
     assert_eq!(one_rtt.receive().unwrap().current().generation(), 0);
     let promotion = one_rtt.promote_next().unwrap();

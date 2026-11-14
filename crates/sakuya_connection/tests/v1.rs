@@ -850,6 +850,16 @@ mod probe {
         /// the packets that failed authentication and the lowest packet
         /// number received with the current generation.
         InspectOneRtt,
+        /// Log the sending generation of the 1-RTT keys, when the peer
+        /// acknowledged a packet of it, and the lowest packet number sent
+        /// with it.
+        InspectKeyUpdate,
+        /// Note the packet number as sent with the sending generation, as
+        /// starting a 1-RTT packet will: `(generation, number)`.
+        NoteSent(u64, u64),
+        /// Note an ACK frame up to the packet number as sent in a 1-RTT
+        /// packet, as writing one will.
+        NoteAckFrameSent(u64),
         /// Log the CRYPTO data ready at the level being read; the largest
         /// packet number, the ranges and the ACK obligation of the Initial
         /// space; the idle timeout's deadline; and the reason for closing.
@@ -1039,6 +1049,35 @@ mod probe {
                         "receive {current:?}, next {next:?}, previous {previous:?} until \
                          {until:?}, send {send:?}, failed {failed}, lowest {lowest:?}"
                     ));
+                }
+                PacketStep::InspectKeyUpdate => {
+                    let (send, confirmed) =
+                        match lineage.get::<OneRttKeys<RingBackend, Duration>, Io>() {
+                            OneRttKeys::Live(keys) => (
+                                Some(keys.send().generation().generation()),
+                                keys.send_confirmed_at(),
+                            ),
+                            _ => (None, None),
+                        };
+                    let lowest = send.and_then(|send| {
+                        lineage
+                            .get::<KeyPhaseNumbers, Ikp>()
+                            .lowest_sent(send)
+                            .map(|number| number.get())
+                    });
+                    log(format!(
+                        "send {send:?}, confirmed at {confirmed:?}, lowest sent {lowest:?}"
+                    ));
+                }
+                PacketStep::NoteSent(generation, number) => {
+                    lineage
+                        .get_mut::<KeyPhaseNumbers, Ikp>()
+                        .sent(generation, PacketNumber::new(number).unwrap());
+                }
+                PacketStep::NoteAckFrameSent(largest) => {
+                    lineage
+                        .get_mut::<KeyPhaseNumbers, Ikp>()
+                        .ack_frame_sent(PacketNumber::new(largest).unwrap());
                 }
                 PacketStep::InspectHeld => {
                     let held = lineage
@@ -3098,6 +3137,179 @@ fn the_previous_generation_goes_three_probe_timeouts_after_the_promotion() {
             "dropped: payload not opened",
             "receive Some(1), next Some(2), previous Some(false) until None, send Some(1), \
              failed 1, lowest Some(5)",
+        ]
+    );
+}
+
+#[test]
+fn a_second_update_of_the_peer_before_its_first_was_acknowledged_closes_the_connection() {
+    use probe::PacketStep::{InstallOneRttKeys, Receive};
+    reset();
+    let first = link();
+    feed_packets([
+        (ms(5), InstallOneRttKeys),
+        // the peer updates to generation 1, then at once to generation 2
+        (
+            ms(6),
+            Receive(received(one_rtt_packet_of(1, 0, &ping()), &first, ms(6))),
+        ),
+        (
+            ms(7),
+            Receive(received(one_rtt_packet_of(2, 1, &ping()), &first, ms(7))),
+        ),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first);
+    take_log();
+    assert_eq!(
+        run(&mut connection, 5..=7),
+        [
+            "processed: highest numbered true, non-probing true",
+            "error: KeyUpdate { source: ConsecutiveUpdates { trigger: PacketNumber(VarInt(0)), \
+             number: PacketNumber(VarInt(1)) } }",
+        ]
+    );
+}
+
+#[test]
+fn the_peer_updates_again_once_its_update_was_acknowledged() {
+    use probe::PacketStep::{InspectOneRtt, InstallOneRttKeys, NoteAckFrameSent, Receive};
+    reset();
+    let first = link();
+    feed_packets([
+        (ms(5), InstallOneRttKeys),
+        (
+            ms(6),
+            Receive(received(one_rtt_packet_of(1, 0, &ping()), &first, ms(6))),
+        ),
+        // an ACK frame up to packet 0 went out with generation 1
+        (ms(7), NoteAckFrameSent(0)),
+        (
+            ms(8),
+            Receive(received(one_rtt_packet_of(2, 1, &ping()), &first, ms(8))),
+        ),
+        (ms(9), InspectOneRtt),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first);
+    take_log();
+    assert_eq!(
+        run(&mut connection, 5..=9),
+        [
+            "processed: highest numbered true, non-probing true",
+            "processed: highest numbered true, non-probing true",
+            // the previous generation, 1, goes three probe timeouts after
+            // the second promotion
+            "receive Some(2), next Some(3), previous Some(true) until Some(3.08s), \
+             send Some(2), failed 0, lowest Some(1)",
+        ]
+    );
+}
+
+#[test]
+fn an_ack_of_a_packet_of_the_sending_generation_confirms_it() {
+    use probe::PacketStep::{InspectKeyUpdate, InstallOneRttKeys, NoteSent, Receive};
+    reset();
+    let first = link();
+    feed([(
+        ms(10),
+        probe::Step::Sent {
+            space: PacketNumberSpaceKind::ApplicationData,
+            count: 3,
+        },
+    )]);
+    feed_packets([
+        (ms(5), InstallOneRttKeys),
+        // packets 0 to 2 are sealed with generation 0, from 1 on
+        (ms(11), NoteSent(0, 1)),
+        (ms(12), InspectKeyUpdate),
+        (
+            ms(50),
+            Receive(received(
+                one_rtt_packet_of(0, 0, &ack_of(&[(0, 0)], false)),
+                &first,
+                ms(50),
+            )),
+        ),
+        (ms(51), InspectKeyUpdate),
+        (
+            ms(60),
+            Receive(received(
+                one_rtt_packet_of(0, 1, &ack_of(&[(0, 1)], false)),
+                &first,
+                ms(60),
+            )),
+        ),
+        (
+            ms(70),
+            Receive(received(
+                one_rtt_packet_of(0, 2, &ack_of(&[(0, 2)], false)),
+                &first,
+                ms(70),
+            )),
+        ),
+        (ms(71), InspectKeyUpdate),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first);
+    take_log();
+    let log = run(&mut connection, 5..=71);
+    assert_eq!(
+        lines_of(log, &["send", "processed", "error"]),
+        [
+            "send Some(0), confirmed at None, lowest sent Some(1)",
+            "processed: highest numbered true, non-probing true",
+            // packet 0 is below the lowest one noted for the generation
+            "send Some(0), confirmed at None, lowest sent Some(1)",
+            "processed: highest numbered true, non-probing true",
+            "processed: highest numbered true, non-probing true",
+            // the first acknowledgment of the generation keeps its instant
+            "send Some(0), confirmed at Some(60ms), lowest sent Some(1)",
+        ]
+    );
+}
+
+#[test]
+fn an_ack_under_older_keys_of_a_packet_with_newer_ones_closes_the_connection() {
+    use probe::PacketStep::{InstallOneRttKeys, NoteSent, Receive};
+    reset();
+    let first = link();
+    feed([(
+        ms(10),
+        probe::Step::Sent {
+            space: PacketNumberSpaceKind::ApplicationData,
+            count: 3,
+        },
+    )]);
+    feed_packets([
+        (ms(5), InstallOneRttKeys),
+        // as if packet 0 had been sealed with generation 0, and packets 1
+        // and 2 with generation 1
+        (ms(11), NoteSent(0, 0)),
+        (ms(12), NoteSent(1, 1)),
+        (
+            ms(50),
+            Receive(received(
+                one_rtt_packet_of(0, 0, &ack_of(&[(0, 0)], false)),
+                &first,
+                ms(50),
+            )),
+        ),
+        (
+            ms(60),
+            Receive(received(
+                one_rtt_packet_of(0, 1, &ack_of(&[(0, 1)], false)),
+                &first,
+                ms(60),
+            )),
+        ),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first);
+    take_log();
+    let log = run(&mut connection, 5..=60);
+    assert_eq!(
+        lines_of(log, &["processed", "error"]),
+        [
+            "processed: highest numbered true, non-probing true",
+            "error: KeyUpdate { source: AckWithOldKeys { largest: PacketNumber(VarInt(1)), \
+             lowest_newer: PacketNumber(VarInt(1)) } }",
         ]
     );
 }

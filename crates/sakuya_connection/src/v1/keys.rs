@@ -11,7 +11,8 @@
 //!
 //! The 1-RTT level moves through generations with the key updates (RFC 9001
 //! §6): [`KeyGeneration`] is one generation of one direction. The counts
-//! that change with every packet are not here but in [`AeadUsage`] and
+//! that change with every packet are not here but in
+//! [`AeadUsage`](super::aead_usage::AeadUsage) and
 //! [`KeyPhaseNumbers`](super::key_phase::KeyPhaseNumbers): whoever reads
 //! the keys is looked at again only when they change.
 
@@ -24,8 +25,6 @@ use sakuya_packet_protection::{
     secret::TrafficSecret,
 };
 use sakuya_wire::v1::header::KeyPhase;
-
-use super::aead_usage::AeadUsage;
 
 /// The keys that protect the packets of one direction at one encryption
 /// level: the packet key and the header protection key, derived from one
@@ -707,14 +706,14 @@ impl<B: CryptoBackend, I: Copy> OneRttKeys<B, I> {
     }
 
     /// Initiate a key update: seal with the next sending generation from
-    /// now on, counting the packets sealed with it from zero (RFC 9001
-    /// §6.1, §6.6).
+    /// now on (RFC 9001 §6.1). The caller counts the packets sealed with it
+    /// from zero in [`AeadUsage`](super::aead_usage::AeadUsage) (§6.6).
     ///
     /// Whoever calls it checks first that a key update may be initiated
     /// (§6.1); both directions must be there.
     // nothing initiates one but the tests until sending does
     #[cfg_attr(not(test), expect(dead_code))]
-    pub(crate) fn initiate_update(&mut self, usage: &mut AeadUsage) {
+    pub(crate) fn initiate_update(&mut self) {
         let Self::Live(keys) = self else {
             debug_assert!(
                 false,
@@ -723,7 +722,6 @@ impl<B: CryptoBackend, I: Copy> OneRttKeys<B, I> {
             return;
         };
         keys.update_send();
-        usage.send_keys_updated();
     }
 }
 

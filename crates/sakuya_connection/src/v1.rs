@@ -47,6 +47,7 @@ pub mod frames;
 pub mod idle;
 pub mod input;
 pub mod key_phase;
+pub mod key_update;
 pub mod keys;
 pub mod link;
 pub mod link_ceiling;

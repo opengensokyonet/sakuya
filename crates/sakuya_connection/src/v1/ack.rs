@@ -11,7 +11,10 @@
 //!    acknowledged ranges out of the space's send journals, dropping first
 //!    what is past its retention: a record still sent is newly
 //!    acknowledged, one declared lost is acknowledged late. It moves the
-//!    space's largest and smallest acknowledged packet numbers outward.
+//!    space's largest and smallest acknowledged packet numbers outward. In
+//!    the Application Data space the frame is checked against the 1-RTT
+//!    key generations first, and may confirm the current sending one, as
+//!    the [`key_update`](super::key_update) module says.
 //! 2. Each link path of the logical path with a recovery layer then takes
 //!    its own packets out of its loss detection state for the space. The
 //!    link path of the largest acknowledged packet gets an RTT sample when
@@ -51,7 +54,7 @@ use sakuya_recovery::{
     factory::{LendCongestion, RecoveryFactory},
     loss::{LossThresholds, loss_delay},
     loss_detection::{LossDetectionState, Outstanding},
-    packet_number_space::{PacketNumberSpaceState, PacketNumberSpaces},
+    packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces},
     pmtu::PmtuPolicy,
     rtt::{RttEstimator, RttSample, effective_ack_delay},
     send_journals::{SendJournals, SentPacketState},
@@ -69,12 +72,15 @@ use sakuya_wire::{
         },
     },
 };
-use snafu::ensure;
+use snafu::{ResultExt as _, ensure};
 
 use super::{
     Choices, Side,
     confirmation::HandshakeConfirmation,
-    error::{ConnectionError, UnsentPacketAcknowledgedSnafu},
+    error::{ConnectionError, KeyUpdateSnafu, UnsentPacketAcknowledgedSnafu},
+    key_phase::KeyPhaseNumbers,
+    key_update::ack_received,
+    keys::OneRttKeys,
     link::LinkClone,
     loss_detection::{LossFacts, declare_lost, hand_back_lost},
     parameters::PeerTransportParameters,
@@ -124,8 +130,9 @@ pub type AckRecoveryTakes<T, L, S, Ls> = HList![
 ///
 /// The positions are found from the composition: `Ij` of the send
 /// journals, `In` of the packet number states, `If` of the recovery
-/// factory and `Ir` of what [`AckReads`] lists, among the components of
-/// the logical path's lineage; `Ide`, `Ima` and `Ipp` of the peer's
+/// factory, `Ir` of what [`AckReads`] lists, `Io` of the 1-RTT keys and
+/// `Ikp` of the key phase numbers, among the components of the logical
+/// path's lineage; `Ide`, `Ima` and `Ipp` of the peer's
 /// `ack_delay_exponent`, `max_ack_delay` and `max_udp_payload_size` among
 /// the transport parameters; `Il` of the link's clone in an entry; `Ik` of
 /// what [`AckRecoveryTakes`] lists in a recovery layer, and `Jx` and `Jr`
@@ -135,8 +142,10 @@ pub type AckRecoveryTakes<T, L, S, Ls> = HList![
 /// # Errors
 ///
 /// [`ConnectionError::UnsentPacketAcknowledged`]: the frame acknowledges a
-/// packet not sent yet. Nothing is settled then.
-pub fn receive_ack<'v, T, L, B, S, Ls, Ij, In, If, Ir, Ide, Ima, Ipp, Il, Ik, Jx, Jr, Hf>(
+/// packet not sent yet. [`ConnectionError::KeyUpdate`]: a frame in a packet
+/// protected with older 1-RTT keys acknowledges a packet sealed with newer
+/// ones. Nothing is settled then.
+pub fn receive_ack<'v, T, L, B, S, Ls, Ij, In, If, Ir, Io, Ikp, Ide, Ima, Ipp, Il, Ik, Jx, Jr, Hf>(
     lineage: &mut LineageOf<'v, T, L, LogicalPath>,
     others: &mut OtherNodes<'v, T, L, B>,
     frame: &AckFrame,
@@ -162,7 +171,9 @@ where
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<SendJournalsOf<T, L>, Ij>
         + GetAt<PacketNumberSpaces<PacketNumberSpaceState>, In>
         + GetAt<RecoveryFactoryOf<T, L>, If>
-        + ReadEach<AckReads<L>, Ir>,
+        + ReadEach<AckReads<L>, Ir>
+        + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
+        + GetAt<KeyPhaseNumbers, Ikp>,
     for<'x> L: PartsSendFeedback<T, L, <L as LineageLists<'x, T>>::LogicalPath, Hf>,
     for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
@@ -180,12 +191,15 @@ where
     let ranges: Vec<RangeInclusive<PacketNumber>> = frame.packet_ranges().collect();
 
     // the logical path: what the frame acknowledges of what was sent
-    let Some(journals) = lineage.get_mut::<SendJournalsOf<T, L>, Ij>().get_mut(space) else {
+    let Some(next) = lineage
+        .get::<SendJournalsOf<T, L>, Ij>()
+        .get(space)
+        .map(SendJournals::next_packet_number)
+    else {
         // a space is gone only where its keys were discarded before the
         // logical path was built, and no packet of it is processed
         return Ok(());
     };
-    let next = journals.next_packet_number();
     ensure!(
         largest < next,
         UnsentPacketAcknowledgedSnafu {
@@ -195,9 +209,18 @@ where
             ecn_counts: frame.ecn_counts().is_some(),
         }
     );
+    if space == PacketNumberSpaceKind::ApplicationData {
+        ack_received::<T::Crypto, _, _, Io, Ikp>(lineage, packet.key_generation(), largest, at)
+            .context(KeyUpdateSnafu)?;
+    }
     // Out of the lineage while the frame is handled, so that the summaries
     // of the packets declared lost can be lent to the parts beside it; the
     // empty journals left in their place take nothing meanwhile.
+    let Some(journals) = lineage.get_mut::<SendJournalsOf<T, L>, Ij>().get_mut(space) else {
+        // invariant: the space was there above, and nothing since takes a
+        // space away
+        unreachable!("the space was there above")
+    };
     let mut journals = core::mem::take(journals);
     journals.discard_expired(at);
     let mut acknowledged = Vec::new();

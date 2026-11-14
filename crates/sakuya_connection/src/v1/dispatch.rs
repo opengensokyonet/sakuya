@@ -61,6 +61,8 @@ use super::{
     crypto::CryptoReceiver,
     current_probe_timeout,
     error::{self, ConnectionError},
+    key_phase::KeyPhaseNumbers,
+    keys::OneRttKeys,
     link::LinkClone,
     recovery::{CongestionPartOf, OthersOf, RecoveryFactoryOf, RttOf},
     role::LinkPathRole,
@@ -184,6 +186,8 @@ impl<
     In,
     If,
     Ird,
+    Io,
+    Ikp,
     Ide,
     Ipp,
     Ile,
@@ -199,7 +203,13 @@ impl<
             (Ic, Ir, Ih, Icid),
             (Iv, Ima, Irt),
             Il,
-            ((Ij, In, If, Ird), (Ide, Ipp), (Ile, Ik), (Jx, Jr), Hf),
+            (
+                (Ij, In, If, Ird, Io, Ikp),
+                (Ide, Ipp),
+                (Ile, Ik),
+                (Jx, Jr),
+                Hf,
+            ),
         ),
     > for Part
 where
@@ -221,7 +231,9 @@ where
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<SendJournalsOf<T, L>, Ij>
         + GetAt<PacketNumberSpaces<PacketNumberSpaceState>, In>
         + GetAt<RecoveryFactoryOf<T, L>, If>
-        + ReadEach<AckReads<L>, Ird>,
+        + ReadEach<AckReads<L>, Ird>
+        + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
+        + GetAt<KeyPhaseNumbers, Ikp>,
     for<'x> L: PartsSendFeedback<T, L, <L as LineageLists<'x, T>>::LogicalPath, Hf>,
     for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
@@ -249,11 +261,27 @@ where
         packet: &DispatchFacts<InstantOf<T>, LinkPathIdentifierOf<T, L>>,
     ) -> Result<(), ConnectionError> {
         match run {
-            FrameRun::Ack(frame) => {
-                receive_ack::<T, L, B, S, Ls, Ij, In, If, Ird, Ide, Ima, Ipp, Ile, Ik, Jx, Jr, Hf>(
-                    lineage, others, &frame, packet,
-                )
-            }
+            FrameRun::Ack(frame) => receive_ack::<
+                T,
+                L,
+                B,
+                S,
+                Ls,
+                Ij,
+                In,
+                If,
+                Ird,
+                Io,
+                Ikp,
+                Ide,
+                Ima,
+                Ipp,
+                Ile,
+                Ik,
+                Jx,
+                Jr,
+                Hf,
+            >(lineage, others, &frame, packet),
             FrameRun::Padding(_) | FrameRun::Ping(_) => Ok(()),
             FrameRun::Crypto(frame) => {
                 let level = crypto_level(packet.level())?;

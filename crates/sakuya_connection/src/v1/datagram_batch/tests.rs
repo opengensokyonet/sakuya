@@ -38,7 +38,7 @@ use crate::{
     v1::{
         amplification::{AddressValidation, AntiAmplificationFactor},
         keys::OneRttKeys,
-        receive::{Opened, open, open_one_rtt, packet_number_offset},
+        receive::{Opened, ReceiveGeneration, open, open_one_rtt, packet_number_offset},
     },
     write::{AckOnlyClass, InFlightClass, Last, NotLast, Supplied, ToPacketEndFrame},
 };
@@ -395,6 +395,36 @@ fn a_short_packet_is_padded_for_the_header_protection_sample() {
     let record = record(&mut application, entry.application_data.unwrap().sealed);
     assert!(record.pmtu_probe);
     assert_eq!(record.summaries, [Summary::Frame("ping"), Summary::Padding]);
+}
+
+#[test]
+fn a_packet_after_a_key_update_has_the_next_key_phase() {
+    let (mut sender, receiver) = one_rtt_keys();
+    sender.initiate_update();
+    let mut application = Journals::new();
+    let mut usage = AeadUsage::new();
+    let mut accounts = Accounts::new();
+    let mut batch = Batch::new(NonZeroUsize::MIN);
+    {
+        let mut datagram = accounts.start(&mut batch, Role::Server, 1500, 1500, false);
+        let packet = datagram
+            .start_one_rtt_packet(
+                application.start_attempt(()),
+                sender.send().unwrap(),
+                &mut usage,
+                None,
+            )
+            .unwrap();
+        let mut open = packet.open::<InFlightClass>();
+        open.write_frame(PingFrame, Summary::Frame("ping")).unwrap();
+    }
+    let mut packet = BytesMut::from(batch.datagrams().next().unwrap());
+    // the receiver, still at generation 0, opens it with the next one
+    let (opened, generation) =
+        open_one_rtt(receiver.receive().unwrap(), None, &mut packet, 9, None).unwrap();
+    assert_eq!(generation, ReceiveGeneration::Next);
+    assert_eq!(opened.first_byte & 0x04, 0x04, "Key Phase 1");
+    assert_eq!(usage.sealed_with_current(), 1);
 }
 
 #[test]

@@ -23,6 +23,7 @@ use sakuya_wire::{
 use super::{
     AckObligationsOf, Choices, CloseCauseOf, Part,
     feedback::{AckSummary, FeedbackSummary, ProbePingSummary},
+    key_phase::KeyPhaseNumbers,
 };
 use crate::{
     clock::InstantOf,
@@ -358,13 +359,15 @@ impl<I> FrameSource for ProbePingFrameSource<I> {
 }
 
 /// Version 1 finds its frame sources in the lineage of the sending call:
-/// the receive journals and ACK obligations of the logical path.
-impl<T, K, V, S, Ij, Ia> FrameSourceDispatch<T, K, V, S, (Ij, Ia)> for Part
+/// the receive journals, ACK obligations and key phase numbers of the
+/// logical path.
+impl<T, K, V, S, Ij, Ia, Ikp> FrameSourceDispatch<T, K, V, S, (Ij, Ia, Ikp)> for Part
 where
     T: Choices,
     K: PacketKind,
     V: GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
-        + GetAt<AckObligationsOf<T>, Ia>,
+        + GetAt<AckObligationsOf<T>, Ia>
+        + GetAt<KeyPhaseNumbers, Ikp>,
     S: From<FeedbackSummary<InstantOf<T>>>,
 {
     fn supply<W, P>(
@@ -380,7 +383,7 @@ where
     {
         match item {
             SendItem::Ack(space) => {
-                AckFrameSource::new(LineageAckFrameState::<_, T, Ij, Ia>::new(lineage), now)
+                AckFrameSource::new(LineageAckFrameState::<_, T, Ij, Ia, Ikp>::new(lineage), now)
                     .supply(space, packet.into_source_class())
                     .into_class_of_source()
             }
@@ -392,15 +395,17 @@ where
 }
 
 /// What [`LineageAckFrameState`] takes its components by.
-type Positions<T, Ij, Ia> = fn() -> (T, Ij, Ia);
+type Positions<T, Ij, Ia, Ikp> = fn() -> (T, Ij, Ia, Ikp);
 
-/// The ACK frame state of a logical path, in the lineage of a call.
-struct LineageAckFrameState<'l, 'v, V, T, Ij, Ia> {
+/// The ACK frame state of a logical path, in the lineage of a call. An ACK
+/// frame of the Application Data space is written in a 1-RTT packet, and
+/// the key phase numbers learn of it (RFC 9001 §6.2).
+struct LineageAckFrameState<'l, 'v, V, T, Ij, Ia, Ikp> {
     lineage: &'l mut Lineage<'v, V>,
-    positions: PhantomData<Positions<T, Ij, Ia>>,
+    positions: PhantomData<Positions<T, Ij, Ia, Ikp>>,
 }
 
-impl<'l, 'v, V, T, Ij, Ia> LineageAckFrameState<'l, 'v, V, T, Ij, Ia> {
+impl<'l, 'v, V, T, Ij, Ia, Ikp> LineageAckFrameState<'l, 'v, V, T, Ij, Ia, Ikp> {
     fn new(lineage: &'l mut Lineage<'v, V>) -> Self {
         Self {
             lineage,
@@ -409,11 +414,13 @@ impl<'l, 'v, V, T, Ij, Ia> LineageAckFrameState<'l, 'v, V, T, Ij, Ia> {
     }
 }
 
-impl<V, T, Ij, Ia> AckFrameState<InstantOf<T>> for LineageAckFrameState<'_, '_, V, T, Ij, Ia>
+impl<V, T, Ij, Ia, Ikp> AckFrameState<InstantOf<T>>
+    for LineageAckFrameState<'_, '_, V, T, Ij, Ia, Ikp>
 where
     T: Choices,
     V: GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
-        + GetAt<AckObligationsOf<T>, Ia>,
+        + GetAt<AckObligationsOf<T>, Ia>
+        + GetAt<KeyPhaseNumbers, Ikp>,
 {
     fn journals(&self, space: PacketNumberSpaceKind) -> Option<&ReceiveJournals<InstantOf<T>>> {
         self.lineage
@@ -432,6 +439,11 @@ where
             .get_mut(space)
         {
             journals.on_ack_written();
+        }
+        if space == PacketNumberSpaceKind::ApplicationData {
+            self.lineage
+                .get_mut::<KeyPhaseNumbers, Ikp>()
+                .ack_frame_sent(largest);
         }
         self.lineage
             .get_mut::<AckObligationsOf<T>, Ia>()

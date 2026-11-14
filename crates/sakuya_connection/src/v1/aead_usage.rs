@@ -61,6 +61,16 @@ impl AeadUsage {
         }
     }
 
+    /// The counts after `sealed` packets were sealed with the current
+    /// sending generation, as the tests start from.
+    #[cfg(test)]
+    pub(crate) fn having_sealed(sealed: u64) -> Self {
+        Self {
+            sealed_with_current: sealed,
+            failed_authentication: 0,
+        }
+    }
+
     /// Whether the packets sealed with the current sending generation have
     /// reached three quarters of the confidentiality limit of `aead`, where
     /// this side initiates a key update. Never for ChaCha20-Poly1305, whose
@@ -96,7 +106,7 @@ fn integrity_limit(aead: AeadAlgorithm) -> u64 {
     }
 }
 
-/// The connection used its AEAD past a limit of RFC 9001 §6.6.
+/// The connection reached a limit of RFC 9001 §6.6 on the use of its AEAD.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum AeadLimitReachedError {
@@ -107,6 +117,16 @@ pub enum AeadLimitReachedError {
         /// The AEAD of the keys of the packet that crossed the limit.
         aead: AeadAlgorithm,
     },
+    /// As many packets were sealed with the current sending generation of
+    /// the 1-RTT keys as the confidentiality limit of their AEAD allows,
+    /// and no key update may be initiated yet: the handshake is not
+    /// confirmed, or the peer has not acknowledged a packet sealed with the
+    /// current generation (RFC 9001 §6.1).
+    #[snafu(display(
+        "as many packets were sealed with the current keys as their AEAD allows, \
+         and no key update may be initiated"
+    ))]
+    ConfidentialityLimitReached,
 }
 
 #[cfg(test)]

@@ -33,7 +33,9 @@
 //!    for its generation; one opened with the next generation makes it
 //!    current, and when the peer updated first, the sending generation
 //!    moves with it, before anything acknowledges the packet (RFC 9001
-//!    §6.2).
+//!    §6.2). A second update of the peer's before this side acknowledged
+//!    the first with its keys ends the connection, as the
+//!    [`key_update`](super::key_update) module says.
 //! 5. The frames are read and dispatched one by one, each checked against
 //!    the level and this side's role first; a failure ends the connection,
 //!    and what follows it is not dispatched. A packet without frames ends
@@ -89,6 +91,7 @@ use super::{
     error::ConnectionError,
     idle::IdleTimeout,
     key_phase::KeyPhaseNumbers,
+    key_update::check_peer_update,
     keys::{DirectionKeys, HandshakeKeys, InitialKeys, OneRttKeys, OneRttReceiveKeys},
     role::LinkPathRole,
     spaces::AckObligationsOf,
@@ -258,7 +261,8 @@ pub enum DropReason {
 /// # Errors
 ///
 /// The connection error the packet causes: the integrity limit exceeded,
-/// reserved bits set, a frame that does not read
+/// reserved bits set, a second key update of the peer's before the first
+/// was acknowledged, a frame that does not read
 /// or is not permitted, a failure of the part that handles a frame, or no
 /// frames at all. The packet is then not recorded.
 pub fn receive_packet<'v, T, L, B, P, Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Ir, Ie, Ik, Hd, Icid>(
@@ -380,6 +384,16 @@ where
     };
     let link_path = L::link_path_identifier(path, arrival.link().id());
     let facts = DispatchFacts::new(level, at, link_path);
+    let facts = match one_rtt {
+        Some((generation, current, _)) => facts.with_key_generation(match generation {
+            // invariant: a previous generation is kept only after a
+            // promotion, which made the current one at least 1
+            ReceiveGeneration::Previous => current - 1,
+            ReceiveGeneration::Current => current,
+            ReceiveGeneration::Next => current + 1,
+        }),
+        None => facts,
+    };
     if closing {
         find_close::<T, L, B, Ik, Hd>(lineage, others, payload, &facts)?;
         return Ok(PacketOutcome::Closing);
@@ -413,6 +427,8 @@ where
                 .get_mut::<OneRttKeys<T::Crypto, InstantOf<T>>, Io>()
                 .promote_next();
             if let Some(promotion) = promotion {
+                check_peer_update(lineage.get::<KeyPhaseNumbers, Ikp>(), promotion, number)
+                    .map_err(|source| v1_error::<L, Ie>(ConnectionError::KeyUpdate { source }))?;
                 if promotion.send_updated {
                     lineage.get_mut::<AeadUsage, Iu>().send_keys_updated();
                 }

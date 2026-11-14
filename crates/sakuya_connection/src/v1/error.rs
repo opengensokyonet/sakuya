@@ -23,7 +23,7 @@ use crate::connection_id::violation::NewConnectionIdViolationError;
 
 use super::{
     aead_usage::AeadLimitReachedError, close::TransportClose, crypto::CryptoFrameError,
-    dispatch::FrameNotPermittedError,
+    dispatch::FrameNotPermittedError, key_update::KeyUpdateError,
 };
 
 /// An error of version 1 in a connection: one variant for each type of
@@ -79,12 +79,18 @@ pub enum ConnectionError {
         /// The broken rule.
         source: CryptoFrameError,
     },
-    /// The connection used its AEAD past a limit (RFC 9001 §6.6): it closes
-    /// at once and processes no more packets.
+    /// The connection reached a limit on the use of its AEAD (RFC 9001
+    /// §6.6): it closes at once and processes no more packets.
     #[snafu(display("AEAD limit reached"))]
     AeadLimitReached {
-        /// The limit crossed.
+        /// The limit reached.
         source: AeadLimitReachedError,
+    },
+    /// The peer broke a rule of 1-RTT key updates (RFC 9001 §6.2).
+    #[snafu(display("key update rule broken"))]
+    KeyUpdate {
+        /// The broken rule.
+        source: KeyUpdateError,
     },
     /// An ACK frame acknowledges a packet number its packet number space
     /// has not sent yet (RFC 9000 §13.1).
@@ -138,6 +144,7 @@ impl TransportClose for ConnectionError {
             Self::ReadFrameFields { source } => source.transport_error_code(),
             Self::FrameNotPermitted { .. } => TransportErrorCode::PROTOCOL_VIOLATION,
             Self::AeadLimitReached { .. } => TransportErrorCode::AEAD_LIMIT_REACHED,
+            Self::KeyUpdate { .. } => TransportErrorCode::KEY_UPDATE_ERROR,
             Self::NewConnectionId { source } => source.transport_error_code(),
             Self::Crypto { source } => match source {
                 CryptoFrameError::BufferExceeded { .. } => {
@@ -170,6 +177,7 @@ impl TransportClose for ConnectionError {
             | Self::OneRttSendKeysMissing
             | Self::FrameNotPermitted { .. }
             | Self::AeadLimitReached { .. }
+            | Self::KeyUpdate { .. }
             | Self::UnhandledFrame { .. } => None,
         }
     }
@@ -234,5 +242,25 @@ mod tests {
         };
         assert_eq!(error.code(), TransportErrorCode::AEAD_LIMIT_REACHED);
         assert_eq!(error.frame_type(), None);
+        let error = ConnectionError::AeadLimitReached {
+            source: AeadLimitReachedError::ConfidentialityLimitReached,
+        };
+        assert_eq!(error.code(), TransportErrorCode::AEAD_LIMIT_REACHED);
+    }
+
+    #[test]
+    fn a_broken_key_update_rule_closes_with_key_update_error() {
+        let error = ConnectionError::KeyUpdate {
+            source: KeyUpdateError::ConsecutiveUpdates {
+                trigger: PacketNumber::new(4).unwrap(),
+                number: PacketNumber::new(9).unwrap(),
+            },
+        };
+        assert_eq!(error.code(), TransportErrorCode::KEY_UPDATE_ERROR);
+        assert_eq!(error.frame_type(), None);
+        assert_eq!(
+            error.immediate_close().reason_phrase,
+            Bytes::from_static(b"key update rule broken")
+        );
     }
 }

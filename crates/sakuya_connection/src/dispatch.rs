@@ -46,6 +46,7 @@ pub struct DispatchFacts<I, P> {
     level: EncryptionLevel,
     at: I,
     link_path: P,
+    key_generation: Option<u64>,
 }
 
 impl<I: Copy, P> DispatchFacts<I, P> {
@@ -56,6 +57,18 @@ impl<I: Copy, P> DispatchFacts<I, P> {
             level,
             at,
             link_path,
+            key_generation: None,
+        }
+    }
+
+    /// The same facts, of a 1-RTT packet opened with the key generation
+    /// `generation`: how many key updates of the peer's sending keys lie
+    /// before the keys that protected it (RFC 9001 §6).
+    #[must_use]
+    pub fn with_key_generation(self, generation: u64) -> Self {
+        Self {
+            key_generation: Some(generation),
+            ..self
         }
     }
 
@@ -73,6 +86,12 @@ impl<I: Copy, P> DispatchFacts<I, P> {
     /// an acknowledgment came back from.
     pub fn link_path(&self) -> &P {
         &self.link_path
+    }
+
+    /// The key generation a 1-RTT packet was opened with; `None` for a
+    /// packet of another level.
+    pub fn key_generation(&self) -> Option<u64> {
+        self.key_generation
     }
 }
 
