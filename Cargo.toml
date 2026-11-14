@@ -11,6 +11,7 @@ members = [
     "crates/sakuya_recovery",
     "crates/sakuya_connection",
     "crates/sakuya_endpoint",
+    "crates/sakuya_udp_tokio",
 ]
 resolver = "3"
 
@@ -31,6 +32,7 @@ nitori_crypto = { git = "https://github.com/opengensokyonet/nitori", rev = "e62a
 nitori_crypto_aws_lc = { git = "https://github.com/opengensokyonet/nitori", rev = "e62a04bbc253d3d9cb6b67ec57ca3e230266664b" }
 nitori_id = { git = "https://github.com/opengensokyonet/nitori", rev = "e62a04bbc253d3d9cb6b67ec57ca3e230266664b" }
 nitori_io = { git = "https://github.com/opengensokyonet/nitori", rev = "e62a04bbc253d3d9cb6b67ec57ca3e230266664b" }
+nix = { version = "0.31.3", default-features = false, features = ["net", "socket", "uio"] }
 proptest = "1.12.0"
 ring = { version = "0.17.14", default-features = false }
 rustls = { version = "0.23.46", default-features = false, features = ["std", "aws_lc_rs"] }
@@ -39,6 +41,7 @@ rustls-webpki = { version = "0.103.16", default-features = false, features = ["s
 sakuya_wire = { path = "crates/sakuya_wire" }
 sakuya_packet_protection = { path = "crates/sakuya_packet_protection", default-features = false }
 sakuya_clock = { path = "crates/sakuya_clock" }
+sakuya_clock_tokio = { path = "crates/sakuya_clock_tokio" }
 sakuya_link = { path = "crates/sakuya_link" }
 sakuya_datagram_routing = { path = "crates/sakuya_datagram_routing" }
 sakuya_stream = { path = "crates/sakuya_stream" }
