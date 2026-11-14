@@ -22,8 +22,9 @@
 //!    first gave. It opens an offered ticket and checks its binder,
 //!    negotiates the transport parameters, and admits 0-RTT only when the
 //!    handshake, the connection and the ticket policy all agree. It writes
-//!    the ServerHello and returns [`ServerHelloWritten`], with the 0-RTT
-//!    secret when it admitted 0-RTT.
+//!    the ServerHello and returns [`ServerHelloWritten`], with the selected
+//!    target and application protocol and the 0-RTT secret when it
+//!    admitted 0-RTT.
 //! 2. [`write_server_finished`](ServerHandshakeSteps::write_server_finished)
 //!    moves both streams to Handshake, writes EncryptedExtensions and,
 //!    unless it resumed, Certificate and CertificateVerify, whose signature
@@ -380,7 +381,13 @@ pub trait ServerHandshakeSteps: Sized {
         self,
         first: FirstClientHello,
         host: &mut impl LentAccess<Family = W>,
-    ) -> Result<(ServerHelloWritten, Self::ServerHelloWrittenState), StepError<Self, W>>;
+    ) -> Result<
+        (
+            ServerHelloWritten<Self::Target>,
+            Self::ServerHelloWrittenState,
+        ),
+        StepError<Self, W>,
+    >;
 
     /// Moves both streams to Handshake and writes the server's flight up to
     /// its Finished.
@@ -428,14 +435,19 @@ type StepError<E, W> = HandshakeError<
 >;
 
 /// What [`ServerHandshakeSteps::write_server_hello`] returns: the Handshake
-/// traffic secrets and, when the server admitted 0-RTT, the secret to
-/// receive 0-RTT with.
+/// traffic secrets, the selected target with its application protocol and,
+/// when the server admitted 0-RTT, the secret to receive 0-RTT with.
+///
+/// `T` is the type of the selected target.
 #[doc(alias = "HandshakeTrafficSecrets")]
-pub struct ServerHelloWritten {
+pub struct ServerHelloWritten<T> {
     /// The AEAD of the cipher suite, for every secret of the handshake.
     pub aead: AeadAlgorithm,
     /// The Handshake traffic secrets.
     pub secrets: HandshakeTrafficSecrets,
+    /// The selected target and application protocol, which hold for the
+    /// rest of the handshake.
+    pub selected: SelectedTarget<T>,
     /// The 0-RTT secret, `None` when 0-RTT is not admitted.
     pub zero_rtt: Option<ZeroRttReceiveTrafficSecret>,
 }
@@ -469,7 +481,7 @@ pub async fn write_server_hello_step<W, E>(
     first: FirstClientHello,
 ) -> Result<
     (
-        ServerHelloWritten,
+        ServerHelloWritten<<E as ServerHandshakeSteps>::Target>,
         <E as ServerHandshakeSteps>::ServerHelloWrittenState,
     ),
     StepError<E, W>,
@@ -1042,7 +1054,8 @@ where
         self,
         first: FirstClientHello,
         host: &mut impl LentAccess<Family = W>,
-    ) -> Result<(ServerHelloWritten, Self::ServerHelloWrittenState), StepError<Self, W>> {
+    ) -> Result<(ServerHelloWritten<S::Target>, Self::ServerHelloWrittenState), StepError<Self, W>>
+    {
         let Self {
             backend,
             choice,
@@ -1291,6 +1304,7 @@ where
         let written = ServerHelloWritten {
             aead: suite.aead(),
             secrets,
+            selected: selected.clone(),
             zero_rtt,
         };
         let state = ServerHelloWrittenState {

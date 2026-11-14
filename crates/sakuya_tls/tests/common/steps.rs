@@ -21,7 +21,7 @@ use sakuya_tls::{
 /// What a server's steps return, in this order.
 pub enum ServerEvent<C: TlsCrypto, T> {
     /// [`ServerHandshakeSteps::write_server_hello`].
-    ServerHelloWritten(ServerHelloWritten),
+    ServerHelloWritten(ServerHelloWritten<T>),
     /// [`ServerHandshakeSteps::write_server_finished`].
     ServerFinishedWritten(OneRttSendTrafficSecret),
     /// [`ServerHandshakeSteps::read_client_finished`].

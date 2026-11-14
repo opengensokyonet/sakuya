@@ -437,6 +437,7 @@ fn agreed(server_events: &[ServerEvent], client_events: &[ClientEvent]) -> Agree
     let Some(ServerEvent::ServerHelloWritten(ServerHelloWritten {
         aead: server_aead,
         secrets: server_secrets,
+        selected: selected_at_hello,
         zero_rtt,
     })) = server.next()
     else {
@@ -511,6 +512,7 @@ fn agreed(server_events: &[ServerEvent], client_events: &[ClientEvent]) -> Agree
     );
     assert_eq!(selected.target, "web");
     assert_eq!(selected.application_protocol, Some(h3()));
+    assert_eq!(selected_at_hello, selected);
     assert_eq!(application_protocol, &Some(h3()));
     assert_eq!(
         zero_rtt.is_some(),

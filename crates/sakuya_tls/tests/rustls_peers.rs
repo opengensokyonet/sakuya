@@ -430,6 +430,7 @@ mod server_engine {
             Event::ServerHelloWritten(ServerHelloWritten {
                 aead,
                 secrets,
+                selected: selected_at_hello,
                 zero_rtt,
             }),
             Event::ServerFinishedWritten(one_rtt_send),
@@ -464,6 +465,7 @@ mod server_engine {
             connection.parameters.peer.as_deref().unwrap(),
         );
         assert_eq!(selected.target, "web");
+        assert_eq!(selected_at_hello, selected);
         let client = connection.peer.client();
         assert_eq!(client.tls13_tickets_received(), 2);
         assert_eq!(client.is_early_data_accepted(), zero_rtt.is_some());
