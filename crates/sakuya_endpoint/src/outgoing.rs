@@ -166,7 +166,7 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
             Ok(thresholds) => thresholds,
             Err(source) => return Err(StartOutgoingError::TimerGranularity { half: self, source }),
         };
-        let client_dcid = match self.initial_dcid.clone() {
+        let client_dcid = match self.initial_dcid {
             Some(dcid) => dcid,
             None => match random_initial_dcid(&self.domain) {
                 Ok(dcid) => dcid,

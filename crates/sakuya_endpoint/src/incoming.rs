@@ -201,6 +201,10 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
     /// is finer than the endpoint's clock, as it may be after its
     /// configuration was replaced.
     #[expect(clippy::type_complexity, reason = "the driver's inferred positions")]
+    #[expect(
+        clippy::result_large_err,
+        reason = "the error gives the incoming connection back by value"
+    )]
     pub fn accept<P, W, Bw>(
         mut self,
     ) -> Result<
