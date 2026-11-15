@@ -8,7 +8,7 @@ use sakuya_wire::{
     v1::{
         encryption_level::EncryptionLevel,
         frame::{
-            FrameType,
+            FrameType, FrameTypeValue,
             codec::ReadFieldsError,
             set::{FrameFieldsError, codec::ReadFrameError},
         },
@@ -29,6 +29,7 @@ use super::{
     dispatch::FrameNotPermittedError,
     key_update::KeyUpdateError,
     parameters::PeerTransportParametersError,
+    streams::StreamSetFrameError,
 };
 
 /// An error of version 1 in a connection: one variant for each type of
@@ -151,6 +152,25 @@ pub enum ConnectionError {
         /// The broken rule.
         source: NewConnectionIdViolationError,
     },
+    /// A frame of streams or flow control broke a rule the stream set
+    /// checks.
+    #[snafu(display("{:?} frame rejected by the streams", frame_type.kind()))]
+    StreamSet {
+        /// The broken rule.
+        source: StreamSetFrameError,
+        /// The type of the frame.
+        frame_type: FrameTypeValue,
+    },
+    /// A frame of streams or flow control arrived while the connection has
+    /// no established layer and is not closing; the connection closes with
+    /// INTERNAL_ERROR. It does not happen: a server builds the layer once it
+    /// has written its ServerHello, a client before it can open 1-RTT
+    /// packets, and no 0-RTT packet is taken.
+    #[snafu(display("{:?} frame without an established layer", frame_type.kind()))]
+    NoEstablishedLayer {
+        /// The type of the frame.
+        frame_type: FrameTypeValue,
+    },
     /// A frame of a kind this version does not handle yet; the connection
     /// closes with INTERNAL_ERROR. It goes away as the components that
     /// handle each kind are added.
@@ -172,9 +192,10 @@ impl TransportClose for ConnectionError {
             | Self::ReservedBitsSet { .. }
             | Self::UnsentPacketAcknowledged { .. } => TransportErrorCode::PROTOCOL_VIOLATION,
             Self::NoViablePath => TransportErrorCode::NO_VIABLE_PATH,
-            Self::OneRttSendKeysMissing | Self::UnhandledFrame { .. } => {
-                TransportErrorCode::INTERNAL_ERROR
-            }
+            Self::OneRttSendKeysMissing
+            | Self::UnhandledFrame { .. }
+            | Self::NoEstablishedLayer { .. } => TransportErrorCode::INTERNAL_ERROR,
+            Self::StreamSet { source, .. } => source.transport_error_code(),
             Self::ReadFrame { source } => source.transport_error_code(),
             Self::ReadFrameFields { source } => source.transport_error_code(),
             Self::FrameNotPermitted { .. } => TransportErrorCode::PROTOCOL_VIOLATION,
@@ -205,6 +226,9 @@ impl TransportClose for ConnectionError {
             Self::ReadFrame { source } => source.frame_type(),
             Self::ReadFrameFields { source } => Some(source.frame_type()),
             Self::Crypto { .. } => Some(VarInt::from_u32(CRYPTO_FRAME_TYPE)),
+            Self::StreamSet { frame_type, .. } | Self::NoEstablishedLayer { frame_type } => {
+                Some(frame_type.get())
+            }
             Self::NewConnectionId { .. } => Some(VarInt::from_u32(NEW_CONNECTION_ID_FRAME_TYPE)),
             Self::UnsentPacketAcknowledged { ecn_counts, .. } => {
                 Some(VarInt::from_u32(if *ecn_counts {
@@ -252,6 +276,9 @@ const UNEXPECTED_MESSAGE: u8 = 10;
 #[cfg(test)]
 mod tests {
     use sakuya_packet_protection::backend::AeadAlgorithm;
+    use sakuya_stream::{
+        connection_receive_flow::RecordUsageError, receive::violation::OnStreamFrameError,
+    };
 
     use super::*;
 
@@ -277,6 +304,29 @@ mod tests {
         assert_eq!(error(false).code(), TransportErrorCode::PROTOCOL_VIOLATION);
         assert_eq!(error(false).frame_type(), Some(VarInt::from_u32(0x02)));
         assert_eq!(error(true).frame_type(), Some(VarInt::from_u32(0x03)));
+    }
+
+    #[test]
+    fn a_rejected_frame_of_streams_closes_with_its_code_and_its_type() {
+        let error = ConnectionError::StreamSet {
+            source: StreamSetFrameError::Stream {
+                source: OnStreamFrameError::ConnectionLimitExceeded {
+                    source: RecordUsageError {
+                        used: VarInt::from_u32(10),
+                        increase: VarInt::from_u32(6),
+                        limit: VarInt::from_u32(12),
+                    },
+                },
+            },
+            frame_type: FrameTypeValue::of(VarInt::from_u32(0x0e)).unwrap(),
+        };
+        assert_eq!(error.code(), TransportErrorCode::FLOW_CONTROL_ERROR);
+        assert_eq!(error.frame_type(), Some(VarInt::from_u32(0x0e)));
+        let error = ConnectionError::NoEstablishedLayer {
+            frame_type: FrameTypeValue::of(VarInt::from_u32(0x10)).unwrap(),
+        };
+        assert_eq!(error.code(), TransportErrorCode::INTERNAL_ERROR);
+        assert_eq!(error.frame_type(), Some(VarInt::from_u32(0x10)));
     }
 
     #[test]

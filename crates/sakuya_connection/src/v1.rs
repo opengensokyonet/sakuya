@@ -19,7 +19,8 @@
 //! ([`link_ceiling`]); the role in each link path; and in each link path's
 //! recovery layer, what the factory makes for it with the state beside them,
 //! its loss detection state for each packet number space and its probe
-//! timeout. Each logical path keeps, for each packet number space, its
+//! timeout; the established layer holds the streams ([`streams`]). Each
+//! logical path keeps, for each packet number space, its
 //! packet number state, its receive journals, its ACK obligation and its
 //! send journals, which keep the feedback summaries of the frames sent
 //! ([`feedback`]); the packet numbers the current 1-RTT key generation
@@ -73,6 +74,7 @@ pub mod sending;
 pub mod space_retirement;
 pub mod spaces;
 pub mod stateless_reset;
+pub mod streams;
 
 #[cfg(test)]
 mod tests;
@@ -173,6 +175,7 @@ use self::{
     space_retirement::PacketNumberSpaceRetirement,
     spaces::{AckObligationsOf, DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
     stateless_reset::StatelessResetSignal,
+    streams::{StreamSet, StreamSetConfig, StreamsOf},
 };
 use crate::connection_id::{DestinationConnectionIdStrategy, reset_token::ResetTokenRegistry};
 use crate::role::LinkPathRole;
@@ -300,6 +303,17 @@ pub trait Choices: ConnectionChoices {
     type ResetTokenRegistry: ResetTokenRegistry<PeerOf<Self>, Arc<StatelessResetSignal>, Registrar: 'static>
         + Clone
         + 'static;
+    /// The parameters application data is sent with; the send strategy
+    /// constrains them with a trait of its own.
+    type SendParameters: Clone + PartialEq + Default + 'static;
+    /// The set of the connection's streams in the established layer, for
+    /// `Lc`, this endpoint's reason for closing: [`CloseCauseOf`] for the
+    /// composition's list of parts ([`streams`]).
+    type Streams<Lc>: StreamSet<Lc, Config = Self::StreamSetConfig>;
+    /// What the composition configures the stream set with; the connection
+    /// node keeps it from the connection's making until the established
+    /// layer is built.
+    type StreamSetConfig: Clone + Default + 'static;
 }
 
 /// This endpoint's reason for closing a connection of the choices `T` and
@@ -515,6 +529,9 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
     /// in; the connection node keeps a clone of it, and whoever lets the
     /// application ask keeps another.
     pub close_request: CloseRequestCell<T::ApplicationError>,
+    /// What the stream set of the established layer is configured with;
+    /// the connection node keeps it until the layer is built.
+    pub stream_set: T::StreamSetConfig,
 }
 
 impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + ConnectionErrorsOf>
@@ -556,6 +573,7 @@ where
         ConnectionImmediateClosePolicy<T::ImmediateClosePolicy>,
         <T::Side as Side>::Own,
         ConnectionExporter<<T::Side as Side>::Exporter>,
+        StreamSetConfig<T::StreamSetConfig>,
     ];
     type Calls = HList![<T::Side as Side>::Advancing];
     type Args = ConnectionArgs<T, L>;
@@ -596,8 +614,9 @@ where
     ];
     type Calls = HList![LinkPathSendingKind];
 }
-impl<T: Choices, L> LayerShare<T, L, layer::Established> for Part {
-    type Data = HNil;
+/// The established layer holds the stream set.
+impl<T: Choices, L: ConnectionErrorsOf> LayerShare<T, L, layer::Established> for Part {
+    type Data = HList![StreamsOf<T, L>];
     type Calls = HNil;
 }
 /// The loss detection state comes before the probe timeout: its time

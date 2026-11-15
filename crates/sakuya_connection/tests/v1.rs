@@ -357,6 +357,9 @@ impl v1::Choices for ClientMine {
         sakuya_connection::send_strategy::ranked::RankedSendStrategy<I>;
     type DestinationConnectionIds = common::TestDestinationConnectionIds;
     type ResetTokenRegistry = common::TestResetTokenRegistry;
+    type SendParameters = sakuya_stream::send_options::urgency::Urgency;
+    type Streams<Lc> = sakuya_connection::v1::streams::locked::LockedStreamSet<Lc>;
+    type StreamSetConfig = sakuya_connection::v1::streams::locked::LockedStreamSetConfig;
     type ImmediateClosePolicy = common::TestImmediateClosePolicy;
 }
 
@@ -382,6 +385,9 @@ impl v1::Choices for SpyMine {
         sakuya_connection::send_strategy::ranked::RankedSendStrategy<I>;
     type DestinationConnectionIds = common::TestDestinationConnectionIds;
     type ResetTokenRegistry = common::TestResetTokenRegistry;
+    type SendParameters = sakuya_stream::send_options::urgency::Urgency;
+    type Streams<Lc> = sakuya_connection::v1::streams::locked::LockedStreamSet<Lc>;
+    type StreamSetConfig = sakuya_connection::v1::streams::locked::LockedStreamSetConfig;
     type ImmediateClosePolicy = common::TestImmediateClosePolicy;
 }
 
@@ -2061,6 +2067,7 @@ where
             .expect("the tests send at least one datagram at once"),
         immediate_close_policy: common::TestImmediateClosePolicy,
         close_request,
+        stream_set: Default::default(),
     }
 }
 

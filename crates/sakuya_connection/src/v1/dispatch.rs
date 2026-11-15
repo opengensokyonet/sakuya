@@ -17,6 +17,11 @@
 //! | CONNECTION_CLOSE | the [`CloseReasonRecord`], with the peer's close; every link path drains |
 //! | NEW_CONNECTION_ID | the destination connection ID strategy of the logical path ([`ConnectionIds`](super::connection_ids::ConnectionIds)) |
 //! | ACK | the send journals of its space, the recovery layers of the logical path's link paths, and the parts the summaries of the packets settled go back to ([`ack`](super::ack)) |
+//! | STREAM, RESET_STREAM, STOP_SENDING, MAX_DATA, MAX_STREAM_DATA, MAX_STREAMS, DATA_BLOCKED, STREAM_DATA_BLOCKED, STREAMS_BLOCKED | the [`StreamSet`] of the established layer; a STREAM frame with the level of its packet |
+//!
+//! A frame of streams or flow control that arrives without an established
+//! layer is ignored while the connection closes, and does not arrive
+//! otherwise ([`ConnectionError::NoEstablishedLayer`]).
 //!
 //! The components of the other frames are not in the connection yet; such a
 //! frame ends the connection with INTERNAL_ERROR
@@ -67,6 +72,7 @@ use super::{
     link::LinkClone,
     recovery::{CongestionPartOf, OthersOf, RecoveryFactoryOf, RttOf},
     spaces::SendJournalsOf,
+    streams::{StreamSet, StreamSetFrameError, StreamsOf},
 };
 use crate::role::LinkPathRole;
 use crate::{
@@ -196,6 +202,7 @@ impl<
     Jx,
     Jr,
     Hf,
+    Is,
 >
     FrameDispatch<
         T,
@@ -203,7 +210,7 @@ impl<
         (
             (Ic, Ir, Ih, Icid),
             (Iv, Ima, Irt),
-            Il,
+            (Il, Is),
             (
                 (Ij, In, If, Ird, Io, Ikp),
                 (Ide, Ipp),
@@ -254,6 +261,10 @@ where
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![LinkPathRole<InstantOf<T>>], Il>,
+    StreamsOf<T, L>: StreamSet<CloseCauseOf<T, L>> + 'static,
+    for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![StreamsOf<T, L>], Is>,
 {
     fn dispatch<'v, B: CallBundle>(
         lineage: &mut LineageOf<'v, T, L, LogicalPath>,
@@ -310,6 +321,52 @@ where
                 drain_link_paths::<T, L, B, Iv, Ima, Irt, Il>(lineage, others);
                 Ok(())
             }
+            FrameRun::Stream(frame) => {
+                let level = packet.level();
+                to_streams::<T, L, B, Ir, Is>(lineage, others, frame.type_value(), |streams| {
+                    streams.on_stream_frame(level, frame)
+                })
+            }
+            FrameRun::ResetStream(frame) => {
+                to_streams::<T, L, B, Ir, Is>(lineage, others, frame.type_value(), |streams| {
+                    streams.on_reset_stream(frame)
+                })
+            }
+            FrameRun::StopSending(frame) => {
+                to_streams::<T, L, B, Ir, Is>(lineage, others, frame.type_value(), |streams| {
+                    streams.on_stop_sending(frame)
+                })
+            }
+            FrameRun::MaxData(frame) => {
+                to_streams::<T, L, B, Ir, Is>(lineage, others, frame.type_value(), |streams| {
+                    streams.on_max_data(frame)
+                })
+            }
+            FrameRun::MaxStreamData(frame) => {
+                to_streams::<T, L, B, Ir, Is>(lineage, others, frame.type_value(), |streams| {
+                    streams.on_max_stream_data(frame)
+                })
+            }
+            FrameRun::MaxStreams(frame) => {
+                to_streams::<T, L, B, Ir, Is>(lineage, others, frame.type_value(), |streams| {
+                    streams.on_max_streams(frame)
+                })
+            }
+            FrameRun::DataBlocked(frame) => {
+                to_streams::<T, L, B, Ir, Is>(lineage, others, frame.type_value(), |streams| {
+                    streams.on_data_blocked(frame)
+                })
+            }
+            FrameRun::StreamDataBlocked(frame) => {
+                to_streams::<T, L, B, Ir, Is>(lineage, others, frame.type_value(), |streams| {
+                    streams.on_stream_data_blocked(frame)
+                })
+            }
+            FrameRun::StreamsBlocked(frame) => {
+                to_streams::<T, L, B, Ir, Is>(lineage, others, frame.type_value(), |streams| {
+                    streams.on_streams_blocked(frame)
+                })
+            }
             other => error::UnhandledFrameSnafu {
                 kind: other.frame_type(),
             }
@@ -320,6 +377,61 @@ where
     fn fields_error(error: ReadFieldsError<Infallible>) -> ConnectionError {
         ConnectionError::ReadFrameFields { source: error }
     }
+}
+
+/// Hand a frame of streams or flow control, whose Frame Type is
+/// `type_value`, to the stream set of the established layer with `handle`.
+///
+/// Without an established layer the frame is ignored once the record of why
+/// the connection closed is written: the layer ended as the connection
+/// closes. Otherwise there is always one (a server builds it once its
+/// ServerHello is written, a client before it can open 1-RTT packets, and no
+/// 0-RTT packet is taken); a release build closes with INTERNAL_ERROR if
+/// there is not.
+fn to_streams<'v, T, L, B, Ir, Is>(
+    lineage: &mut LineageOf<'v, T, L, LogicalPath>,
+    others: &mut OtherNodes<'v, T, L, B>,
+    type_value: VarInt,
+    handle: impl FnOnce(&mut StreamsOf<T, L>) -> Result<(), StreamSetFrameError>,
+) -> Result<(), ConnectionError>
+where
+    T: Choices,
+    L: LineagePartList<T> + ConnectionErrorsOf,
+    B: CallBundle,
+    StreamsOf<T, L>: StreamSet<CloseCauseOf<T, L>> + 'static,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath:
+        GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>,
+    for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![StreamsOf<T, L>], Is>,
+{
+    let Some(hlist_pat![streams]) = others.borrow_established::<HList![StreamsOf<T, L>], Is>()
+    else {
+        if lineage
+            .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>()
+            .is_written()
+        {
+            return Ok(());
+        }
+        debug_assert!(
+            false,
+            "a frame of streams arrived without an established layer"
+        );
+        return error::NoEstablishedLayerSnafu {
+            frame_type: frame_type_value(type_value),
+        }
+        .fail();
+    };
+    handle(streams).with_context(|_| error::StreamSetSnafu {
+        frame_type: frame_type_value(type_value),
+    })
+}
+
+/// The Frame Type value of a frame of version 1, with its kind.
+fn frame_type_value(type_value: VarInt) -> FrameTypeValue {
+    // invariant: a frame of version 1 has a Frame Type value RFC 9000
+    // defines
+    FrameTypeValue::of(type_value).expect("a frame of version 1 has a type of version 1")
 }
 
 /// Put every link path of the connection into `Draining`, for three times

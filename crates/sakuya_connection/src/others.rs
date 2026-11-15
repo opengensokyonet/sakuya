@@ -98,6 +98,30 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
         Some(items)
     }
 
+    /// Take components `U` of the established layer for as long as the
+    /// others are borrowed; `None` when there is none, or when it is the
+    /// lent node or was taken with [`established`](Self::established).
+    ///
+    /// Unlike [`established`](Self::established), the layer stays among the
+    /// others: whoever handles one frame after another in a lend, such as
+    /// the dispatch of a packet's frames, takes it again for each.
+    pub fn borrow_established<'s, U, Is>(&'s mut self) -> Option<<U as RefsOf<'s>>::Out>
+    where
+        NodeData<T, L, Established>: FlatMut<'s>,
+        <NodeData<T, L, Established> as FlatMut<'s>>::Out: TakeEach<'s, U, Is>,
+        U: RefsOf<'s>,
+    {
+        let Self {
+            established, taken, ..
+        } = self;
+        let node = established.as_deref_mut()?;
+        let (items, _) = node
+            .data
+            .flat_mut()
+            .take_each(&mut Self::record(taken, NodeAddr::ESTABLISHED));
+        Some(items)
+    }
+
     /// Whether the lent link path has its recovery layer.
     pub fn has_recovery(&self) -> bool {
         self.here_recovery.is_some()

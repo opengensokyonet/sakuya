@@ -57,6 +57,7 @@ use sakuya_connection::{
         input::InitialPathReceiver,
         keys::{HandshakeKeys, InitialKeys},
         link::LinkFacts,
+        streams::StreamsOf,
     },
 };
 use sakuya_datagram_routing::{
@@ -419,6 +420,9 @@ macro_rules! choices {
                 sakuya_connection::send_strategy::ranked::RankedSendStrategy<I>;
             type DestinationConnectionIds = common::TestDestinationConnectionIds;
             type ResetTokenRegistry = common::TestResetTokenRegistry;
+            type SendParameters = sakuya_stream::send_options::urgency::Urgency;
+            type Streams<Lc> = sakuya_connection::v1::streams::locked::LockedStreamSet<Lc>;
+            type StreamSetConfig = sakuya_connection::v1::streams::locked::LockedStreamSetConfig;
             type ImmediateClosePolicy = common::TestImmediateClosePolicy;
         }
     };
@@ -455,6 +459,8 @@ struct Noted {
     exporter: String,
     /// The packet number spaces the logical path keeps.
     spaces: Vec<PacketNumberSpaceKind>,
+    /// Whether the established layer was built with its stream set.
+    streams: bool,
 }
 
 fn index(role: Role) -> usize {
@@ -622,10 +628,12 @@ mod watch {
                     lineage.get::<ConnectionExporter<<T::Side as Side>::Exporter>, Ie>()
                 ),
                 spaces: Vec::new(),
+                streams: false,
             };
             note(<T::Side as Side>::ROLE, |noted| {
                 *noted = Noted {
                     spaces: core::mem::take(&mut noted.spaces),
+                    streams: noted.streams,
                     ..snapshot
                 };
             });
@@ -673,6 +681,42 @@ mod watch {
         }
     }
 
+    /// In the established layer: notes that the layer holds the stream set
+    /// once it is built, when every component of the new node counts as
+    /// changed.
+    #[derive(Debug)]
+    pub struct StreamsWatch;
+    impl<T: v1::Choices, L> Build<T, L, layer::Established, ()> for StreamsWatch
+    where
+        for<'v> L: LineageLists<'v, T>,
+    {
+        fn build<'v>(
+            _: &mut ParentsOf<'v, T, L, layer::Established>,
+            _: &mut ArgsOf<T, L, layer::Established>,
+        ) -> Self {
+            StreamsWatch
+        }
+    }
+    impl<T, L, Is> DataComponent<T, L, layer::Established, (Is,)> for StreamsWatch
+    where
+        T: v1::Choices<Clock = TestClock>,
+        L: LineagePartList<T> + ConnectionErrorsOf,
+        for<'v> <L as LineageLists<'v, T>>::Established: GetAt<StreamsOf<T, L>, Is>,
+    {
+        fn reads(reads: &mut ReadSet) {
+            reads.add::<StreamsOf<T, L>>();
+        }
+        fn reread<'v, B: CallBundle>(
+            lineage: LineageOf<'v, T, L, layer::Established>,
+            _: &mut OtherNodes<'v, T, L, B>,
+            _: Duration,
+        ) -> Option<RequestOf<T, L>> {
+            let _ = lineage.get::<StreamsOf<T, L>, Is>();
+            note(<T::Side as Side>::ROLE, |noted| noted.streams = true);
+            None
+        }
+    }
+
     macro_rules! none {
         ($($lv:ident),*) => {$(
             impl<T: v1::Choices, L> LayerShare<T, L, layer::$lv> for Part {
@@ -681,7 +725,11 @@ mod watch {
             }
         )*};
     }
-    none!(LinkEntry, LinkPath, Established, Recovery);
+    none!(LinkEntry, LinkPath, Recovery);
+    impl<T: v1::Choices, L> LayerShare<T, L, layer::Established> for Part {
+        type Data = HList![StreamsWatch];
+        type Calls = HNil;
+    }
     impl<T: v1::Choices, L> LayerShare<T, L, layer::Connection> for Part {
         type Data = HList![Watch];
         type Calls = HNil;
@@ -844,6 +892,7 @@ where
         max_datagrams_per_send: NonZeroUsize::new(16).expect("not zero"),
         immediate_close_policy: common::TestImmediateClosePolicy,
         close_request: CloseRequestCell::new(),
+        stream_set: Default::default(),
     }
 }
 
@@ -1001,6 +1050,10 @@ fn a_client_and_a_server_complete_and_confirm_the_handshake() {
         );
         assert_eq!(noted.record, None, "the {side}'s connection is not closing");
         assert_eq!(noted.exporter, "Held(..)", "the {side} keeps its exporter");
+        assert!(
+            noted.streams,
+            "the {side}'s established layer holds the stream set"
+        );
     }
     // the server sent HANDSHAKE_DONE, and the client acknowledged it
     assert_eq!(server.own, "Delivered");

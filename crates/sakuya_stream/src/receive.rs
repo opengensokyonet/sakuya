@@ -291,6 +291,7 @@ pub struct StreamReceiver<C: ReceiveTerminationPolicy<F>, Lc, F: RemoteResetFact
     data_complete_notified: bool,
     reset_presentation: ResetPresentation,
     released_reported: VarInt,
+    received_zero_rtt: bool,
 }
 
 impl<C, Lc> StreamReceiver<C, Lc, RemoteReset>
@@ -351,6 +352,7 @@ where
             data_complete_notified: false,
             reset_presentation: ResetPresentation::default(),
             released_reported: VarInt::ZERO,
+            received_zero_rtt: false,
         }
     }
 
@@ -376,6 +378,23 @@ where
             ConnectionPhase::Closed(closed) => Some(closed),
             ConnectionPhase::Open | ConnectionPhase::Violated => None,
         }
+    }
+
+    /// Whether a STREAM frame of the stream arrived in a 0-RTT packet: data
+    /// that the peer sent before the handshake completed and that can be
+    /// replayed (RFC 9001 §9.2). Once set, it stays set.
+    ///
+    /// The receiver does not see the packet a frame came in; the
+    /// connection side marks it with
+    /// [`mark_received_zero_rtt`](Self::mark_received_zero_rtt).
+    pub fn received_zero_rtt(&self) -> bool {
+        self.received_zero_rtt
+    }
+
+    /// Records that a STREAM frame of the stream arrived in a 0-RTT packet;
+    /// see [`received_zero_rtt`](Self::received_zero_rtt).
+    pub fn mark_received_zero_rtt(&mut self) {
+        self.received_zero_rtt = true;
     }
 
     /// The data acceptance limit (`acceptance_limit`).

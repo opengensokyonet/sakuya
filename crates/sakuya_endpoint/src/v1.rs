@@ -123,6 +123,7 @@ where
             max_datagrams_per_send: config.max_datagrams_per_send,
             immediate_close_policy: config.immediate_close_policy,
             close_request: core.close_request,
+            stream_set: Default::default(),
         }
     }
 }

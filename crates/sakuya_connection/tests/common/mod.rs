@@ -441,6 +441,9 @@ impl sakuya_connection::v1::Choices for Mine {
         strategy::EventLoggingSendStrategy<I>;
     type DestinationConnectionIds = TestDestinationConnectionIds;
     type ResetTokenRegistry = TestResetTokenRegistry;
+    type SendParameters = sakuya_stream::send_options::urgency::Urgency;
+    type Streams<Lc> = sakuya_connection::v1::streams::locked::LockedStreamSet<Lc>;
+    type StreamSetConfig = sakuya_connection::v1::streams::locked::LockedStreamSetConfig;
     type ImmediateClosePolicy = TestImmediateClosePolicy;
 }
 

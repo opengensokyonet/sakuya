@@ -195,6 +195,9 @@ macro_rules! choices {
                 PeerGroupedResetTokenRegistrar<PeerOf<Udp>, Arc<StatelessResetSignal>>,
             >;
             type ResetTokenRegistry = ResetTokensOf<Udp>;
+            type SendParameters = sakuya_stream::send_options::urgency::Urgency;
+            type Streams<Lc> = sakuya_connection::v1::streams::locked::LockedStreamSet<Lc>;
+            type StreamSetConfig = sakuya_connection::v1::streams::locked::LockedStreamSetConfig;
             type ImmediateClosePolicy = PassThroughImmediateClosePolicy;
         }
     };
