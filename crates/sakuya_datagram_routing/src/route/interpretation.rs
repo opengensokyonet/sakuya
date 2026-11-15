@@ -48,46 +48,60 @@ impl FirstPacketInterpretation {
     }
 }
 
-/// What routing recognized about a supported Initial packet.
+/// What routing recognized about a supported first packet that may start a
+/// connection: an Initial packet, or a 0-RTT packet, whose destination
+/// connection ID is the one of the client's first Initial
+/// ([RFC 9000 §7.2]).
 ///
 /// It is kept across reflow rounds, so that a later round looks up the same
 /// key and offers the same entries without guessing the first packet again.
 /// It states the header fields as they arrived; nothing in it is
 /// authenticated.
+///
+/// [RFC 9000 §7.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-7.2
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecognizedInitial<Local> {
     version: Version,
+    packet_type: LongPacketType,
     dcid: ConnectionId,
     scid: ConnectionId,
     local: Local,
 }
 
 impl<Local> RecognizedInitial<Local> {
+    /// `packet_type` is [`LongPacketType::Initial`] or
+    /// [`LongPacketType::ZeroRtt`].
     pub(crate) fn new(
         version: Version,
+        packet_type: LongPacketType,
         dcid: ConnectionId,
         scid: ConnectionId,
         local: Local,
     ) -> Self {
+        debug_assert!(matches!(
+            packet_type,
+            LongPacketType::Initial | LongPacketType::ZeroRtt
+        ));
         Self {
             version,
+            packet_type,
             dcid,
             scid,
             local,
         }
     }
 
-    /// The version of the Initial packet.
+    /// The version of the first packet.
     pub fn version(&self) -> Version {
         self.version
     }
 
-    /// The destination connection ID of the Initial packet.
+    /// The destination connection ID of the first packet.
     pub fn dcid(&self) -> &ConnectionId {
         &self.dcid
     }
 
-    /// The source connection ID of the Initial packet.
+    /// The source connection ID of the first packet.
     pub fn scid(&self) -> &ConnectionId {
         &self.scid
     }
@@ -97,11 +111,16 @@ impl<Local> RecognizedInitial<Local> {
         &self.local
     }
 
-    /// The interpretation of the Initial packet.
+    /// Whether the first packet is 0-RTT rather than Initial.
+    pub fn is_zero_rtt(&self) -> bool {
+        self.packet_type == LongPacketType::ZeroRtt
+    }
+
+    /// The interpretation of the first packet.
     pub fn interpretation(&self) -> FirstPacketInterpretation {
         FirstPacketInterpretation::Long {
             version: self.version,
-            packet_type: LongPacketType::Initial,
+            packet_type: self.packet_type,
         }
     }
 

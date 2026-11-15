@@ -196,7 +196,7 @@ fn initial_the_domain_does_not_accept_goes_to_existing_entries_only() {
 }
 
 #[test]
-fn zero_rtt_uses_existing_local_and_initial_entries_and_never_creates() {
+fn zero_rtt_uses_existing_local_and_initial_entries_and_may_create() {
     let mut domain = Domain::new(&[8]);
     let end = local_end();
     let entries = entries(&domain, 1, &end);
@@ -211,8 +211,11 @@ fn zero_rtt_uses_existing_local_and_initial_entries_and_never_creates() {
         long(LongPacketType::ZeroRtt, &cid(2), &cid(9), 1200),
         &link(&end),
     );
-    assert!(domain.next_work().is_none());
-    assert_eq!(domain.factory.shared().prepared.load(Ordering::SeqCst), 0);
+    // A 0-RTT first packet nobody claims may start a connection, as an
+    // Initial does: it is reflowed.
+    let work = domain.next_work().expect("an unclaimed 0-RTT is reflowed");
+    assert!(work.initial().is_zero_rtt());
+    assert_eq!(work.initial().dcid().as_bytes(), &cid(2)[..]);
 }
 
 #[test]

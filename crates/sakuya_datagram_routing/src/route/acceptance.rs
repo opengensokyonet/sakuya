@@ -1,7 +1,9 @@
 //! Accepting new Initial receivers through non-inline reflow
 //!
-//! A supported Initial that the routing domain may accept is routed with the
-//! on-unclaimed finish policy. If every candidate exits while the datagram is
+//! A supported Initial that the routing domain may accept, or a supported
+//! 0-RTT packet heading a datagram, which carries the destination connection
+//! ID of the client's first Initial, is routed with the on-unclaimed finish
+//! policy. If every candidate exits while the datagram is
 //! still present, the last exit hands an [`UnclaimedWork`] to the
 //! [`ReflowProvider`], synchronously and exactly once, through the routing
 //! domain's [`ReflowHandoff`]. The provider only takes the work over: the next

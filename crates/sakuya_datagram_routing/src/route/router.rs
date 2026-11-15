@@ -390,9 +390,8 @@ where
     /// | First packet | Looked up | When no candidate is left |
     /// | --- | --- | --- |
     /// | Fields needed for lookup not readable | nothing | released; later bytes are not searched for another packet |
-    /// | Supported Initial the domain may accept | local and Initial associations, or the zero-length one of this side's end of the arrival link; on-unclaimed | reflow, then a recheck that may publish a new receiver |
-    /// | Supported Initial otherwise | the same entries; last takes | released |
-    /// | Supported 0-RTT | local and Initial associations, or the zero-length one; last takes | released |
+    /// | Supported Initial or 0-RTT the domain may accept | local and Initial associations, or the zero-length one of this side's end of the arrival link; on-unclaimed | reflow, then a recheck that may publish a new receiver |
+    /// | Supported Initial or 0-RTT otherwise | the same entries; last takes | released |
     /// | Supported Handshake or Retry | the local association, or the zero-length one; last takes | released |
     /// | Short header | every interpretation the recognizer yields; last takes | released; handed to the stateless reset service instead when nothing was found and an interpretation reads a non-empty destination connection ID |
     /// | Version Negotiation | the local association of its destination connection ID, or the zero-length one; last takes | released |
@@ -519,7 +518,8 @@ enum Classification<Local> {
         queries: Queries<Local>,
         nonempty_dcid: bool,
     },
-    /// A supported Initial: look these up, and keep what was recognized.
+    /// A supported Initial or 0-RTT first packet: look these up, and keep
+    /// what was recognized.
     RouteInitial {
         queries: Queries<Local>,
         initial: RecognizedInitial<Local>,
@@ -601,13 +601,16 @@ fn classify<Local: Clone, Peer>(
             };
             let dcid = *packet.dcid();
             match packet_type {
-                LongPacketType::Initial => Classification::RouteInitial {
+                LongPacketType::Initial | LongPacketType::ZeroRtt => Classification::RouteInitial {
                     queries: by_dcid(dcid, interpretation, true),
-                    initial: RecognizedInitial::new(version, dcid, *packet.scid(), local.clone()),
+                    initial: RecognizedInitial::new(
+                        version,
+                        packet_type,
+                        dcid,
+                        *packet.scid(),
+                        local.clone(),
+                    ),
                 },
-                LongPacketType::ZeroRtt => {
-                    Classification::Route(by_dcid(dcid, interpretation, true))
-                }
                 LongPacketType::Handshake | LongPacketType::Retry => {
                     Classification::Route(by_dcid(dcid, interpretation, false))
                 }
