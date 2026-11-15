@@ -465,13 +465,21 @@ pub(crate) fn check_loss_thresholds(
     clock_granularity: core::time::Duration,
     role: EndpointRole,
 ) -> Result<LossThresholds, InvalidEndpointConfigError> {
+    thresholds_against_clock(thresholds, clock_granularity).context(TimerGranularitySnafu { role })
+}
+
+/// `thresholds` checked against the precision `clock_granularity` of the
+/// endpoint's clock: they may have been made against another.
+pub(crate) fn thresholds_against_clock(
+    thresholds: &LossThresholds,
+    clock_granularity: core::time::Duration,
+) -> Result<LossThresholds, GranularityBelowClockError> {
     LossThresholds::new(
         thresholds.packet_threshold(),
         thresholds.time_threshold(),
         thresholds.granularity(),
         clock_granularity,
     )
-    .context(TimerGranularitySnafu { role })
 }
 
 /// Checks the versions a server offers in Version Negotiation packets:

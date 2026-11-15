@@ -52,6 +52,7 @@ use sakuya_endpoint::{
     endpoint::{AddBindingError, BindingHandleConnectError, Endpoint},
     handshake::{ClientHandshakeConfig, ServerHandshakeConfig},
     incoming::Incoming,
+    outgoing::StartOutgoingError,
     retry::{CapacityFraction, LoadStatelessRetryPolicy},
     role::{AcceptingServer, ConnectingClient, NoClient, NoServer},
 };
@@ -60,7 +61,7 @@ use sakuya_packet_protection::backend::ring::RingBackend;
 use sakuya_recovery::{
     ack_obligation::Rfc9000AckObligation,
     factory::{NewRenoRecoveryFactory, NewRenoRecoveryFactoryConfig},
-    loss::LossThresholds,
+    loss::{LossThresholds, PacketThreshold, RECOMMENDED_TIME_THRESHOLD},
     receive_journals::MaxAckRanges,
     send_journals::DequeSendJournals,
 };
@@ -419,6 +420,13 @@ fn server_config() -> ServerConfig<
 }
 
 fn client_config(labels: &Arc<RecordedLabels>) -> ClientConfig<ClientChoices, Parts, ClientStarts> {
+    client_config_with(labels, thresholds())
+}
+
+fn client_config_with(
+    labels: &Arc<RecordedLabels>,
+    thresholds: LossThresholds,
+) -> ClientConfig<ClientChoices, Parts, ClientStarts> {
     ClientConfig::new(
         ClientStarts {
             labels: Arc::clone(labels),
@@ -433,7 +441,7 @@ fn client_config(labels: &Arc<RecordedLabels>) -> ClientConfig<ClientChoices, Pa
             handshake: 64 * 1024 + 4,
             one_rtt: 16 * 1024 + 4,
         },
-        thresholds(),
+        thresholds,
         hlist![v1_config!(ClientChoices)],
     )
     .unwrap()
@@ -671,7 +679,13 @@ fn a_closed_endpoint_makes_no_connection() {
         .await
         .unwrap();
         client.close();
-        assert!(outgoing.start().is_err());
+        let Err(StartOutgoingError::EndpointClosed { half, .. }) = outgoing.start() else {
+            panic!("a closed endpoint starts no connection");
+        };
+        assert!(matches!(
+            half.start(),
+            Err(StartOutgoingError::EndpointClosed { .. })
+        ));
         assert!(matches!(
             handle
                 .connect(
@@ -688,6 +702,48 @@ fn a_closed_endpoint_makes_no_connection() {
         within("the server's binding driver ends", server_driver)
             .await
             .unwrap();
+    });
+}
+
+#[test]
+fn thresholds_finer_than_the_clock_give_the_outgoing_connection_back() {
+    run(async {
+        let server = server();
+        let labels = Arc::new(RecordedLabels::default());
+        let (client, _client_reflow) =
+            Endpoint::<Udp, NoServer, Client>::new(endpoint_config((), client_config(&labels)))
+                .unwrap();
+        let (handle, _client_driver) = client
+            .add_connect_only_binding(bind(), BindingDeclarations::default())
+            .unwrap();
+        let mut outgoing = within(
+            "the client takes a link",
+            handle.connect(
+                server.address,
+                ServerTarget::from_host_name("example.com").unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+
+        // Made against a clock finer than the endpoint's, of 1 ms.
+        let fine = Duration::from_micros(100);
+        let fine = LossThresholds::new(
+            PacketThreshold::RECOMMENDED,
+            RECOMMENDED_TIME_THRESHOLD,
+            fine,
+            fine,
+        )
+        .unwrap();
+        *outgoing.config_mut() = client_config_with(&labels, fine);
+        let Err(StartOutgoingError::TimerGranularity { mut half, source }) = outgoing.start()
+        else {
+            panic!("thresholds finer than the clock start no connection");
+        };
+        assert_eq!(source.clock_granularity(), Duration::from_millis(1));
+
+        *half.config_mut() = client_config(&labels);
+        assert!(half.start().is_ok());
     });
 }
 

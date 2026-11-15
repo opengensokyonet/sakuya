@@ -33,18 +33,18 @@ use crate::{
 /// # Errors
 ///
 /// [`EndpointClosedError`] once the endpoint has been closed; nothing is
-/// registered then.
+/// registered then, and `zero_length` is left as it was.
 pub(crate) fn register_first_local<E: EndpointChoices>(
     domain: &Domain<E>,
     receiver: &mut ConnectionDatagramReceiver<E>,
     link: &LinkOf<E>,
-    zero_length: Option<ZeroLengthLocalOccupancy<LocalOf<E>>>,
+    zero_length: &mut Option<ZeroLengthLocalOccupancy<LocalOf<E>>>,
 ) -> Result<FirstLocalConnectionId, EndpointClosedError> {
     if domain.is_closed() {
         return Err(EndpointClosedError);
     }
     let local = || MatchAssociation::ZeroCid(link.id().local.clone());
-    if let Some(occupancy) = zero_length {
+    if let Some(occupancy) = zero_length.take() {
         let registration = domain.register(local(), receiver);
         receiver.keep_first_local(FirstLocalRegistration::ZeroLength(
             ZeroLengthRegistration::new(registration, occupancy),

@@ -26,6 +26,7 @@ use std::{
 
 use core::future::poll_fn;
 use futures_util::Stream;
+use sakuya_clock::MonotonicClock as _;
 use sakuya_connection::v1::input::LogicalPathDatagramReceiver as _;
 use sakuya_connection::{
     call::{CallPositions, TreeCalls},
@@ -43,6 +44,7 @@ use sakuya_datagram_routing::claim::{
 };
 use sakuya_link::MIN_DATAGRAM_SIZE;
 use sakuya_link::{EcnMarking, Link, OutgoingDatagram};
+use sakuya_recovery::loss::GranularityBelowClockError;
 use sakuya_stream::connection::TransportImmediateClose;
 use sakuya_wire::header::codec::ReadLongHeaderHostExt as _;
 use sakuya_wire::{connection_id::ConnectionId, version::Version};
@@ -50,6 +52,7 @@ use sakuya_wire::{connection_id::ConnectionId, version::Version};
 use crate::{
     address_token::NewTokenAddress,
     choices::{ConnectionDatagramReceiver, DatagramOf, EndpointChoices, LinkOf, PeerOf},
+    config::thresholds_against_clock,
     connection::{make_connection, register_first_local},
     domain::{Born, Domain},
     dropped_input::DroppedInputCounts,
@@ -192,17 +195,20 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
     ///
     /// # Errors
     ///
-    /// [`EndpointClosedError`] once the endpoint has been closed; the
-    /// incoming connection is dropped and its registration revoked.
+    /// [`AcceptIncomingError`], which gives the incoming connection back as
+    /// it was: once the endpoint has been closed, when it may still be
+    /// refused; when the timer granularity of its loss detection thresholds
+    /// is finer than the endpoint's clock, as it may be after its
+    /// configuration was replaced.
     #[expect(clippy::type_complexity, reason = "the driver's inferred positions")]
     pub fn accept<P, W, Bw>(
-        self,
+        mut self,
     ) -> Result<
         (
             ConnectionDriver<S::Choices, S::Parts, P, W, Bw>,
             ConnectionHandle<<S::Choices as connection::Choices>::ApplicationError>,
         ),
-        EndpointClosedError,
+        AcceptIncomingError<Self>,
     >
     where
         S::Parts: TreeCalls<S::Choices, P>,
@@ -210,23 +216,45 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
         P: CallPositions,
         ConnectionDriver<S::Choices, S::Parts, P, W, Bw>: MakeConnection<S::Choices, S::Parts>,
     {
+        if self.domain.is_closed() {
+            return Err(AcceptIncomingError::EndpointClosed {
+                half: self,
+                source: EndpointClosedError,
+            });
+        }
+        let loss_thresholds = match thresholds_against_clock(
+            self.config.loss_thresholds(),
+            self.domain.clock.timer_granularity(),
+        ) {
+            Ok(thresholds) => thresholds,
+            Err(source) => {
+                return Err(AcceptIncomingError::TimerGranularity { half: self, source });
+            }
+        };
+        let link = self.first.link().clone();
+        let first_local_connection_id = match register_first_local(
+            &self.domain,
+            &mut self.receiver,
+            &link,
+            &mut self.zero_length,
+        ) {
+            Ok(id) => id,
+            Err(source) => return Err(AcceptIncomingError::EndpointClosed { half: self, source }),
+        };
         let Self {
             domain,
             config,
-            mut receiver,
+            receiver,
             first,
             facts,
             client_dcid,
             client_scid: _,
             transport_validated,
-            zero_length,
+            zero_length: _,
             later,
             has_initial: _,
             late: _,
         } = self;
-        let link = first.link().clone();
-        let first_local_connection_id =
-            register_first_local(&domain, &mut receiver, &link, zero_length)?;
         let (validation, original_destination_connection_id) = match facts.token {
             ReturnedToken::Retry { original_dcid, .. } => {
                 (AddressValidation::Validated, Some(original_dcid))
@@ -246,7 +274,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             original_destination_connection_id,
             first_link: LinkFacts { validation },
             crypto_receive: config.checked_crypto_receive(),
-            loss_thresholds: *config.loss_thresholds(),
+            loss_thresholds,
             first_flight: FirstFlight::Datagrams(core::iter::once(first).chain(later).collect()),
             initial_receiver: InitialPathReceiver::new(receiver),
             reset_token_registry: domain.reset_tokens.clone(),
@@ -376,6 +404,57 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> fmt::Debug for TerminableInc
             .field("token", &self.facts.token)
             .field("born_from_zero_rtt", &self.facts.born_from_zero_rtt)
             .finish_non_exhaustive()
+    }
+}
+
+/// The incoming connection `H` could not be accepted. It is given back as it
+/// was, its registration kept, for the application to refuse, change or
+/// drop.
+pub enum AcceptIncomingError<H> {
+    /// The endpoint has been closed. The connection can still be refused.
+    EndpointClosed {
+        /// The incoming connection, as it was.
+        half: H,
+        /// The endpoint's closing.
+        source: EndpointClosedError,
+    },
+    /// The timer granularity of the loss detection thresholds in the
+    /// configuration is finer than the endpoint's clock (RFC 9002 §6.1.2).
+    TimerGranularity {
+        /// The incoming connection, as it was.
+        half: H,
+        /// The granularity and the clock's.
+        source: GranularityBelowClockError,
+    },
+}
+
+impl<H> fmt::Debug for AcceptIncomingError<H> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EndpointClosed { source, .. } => f
+                .debug_struct("EndpointClosed")
+                .field("source", source)
+                .finish_non_exhaustive(),
+            Self::TimerGranularity { source, .. } => f
+                .debug_struct("TimerGranularity")
+                .field("source", source)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+impl<H> fmt::Display for AcceptIncomingError<H> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the incoming connection was not accepted")
+    }
+}
+
+impl<H> core::error::Error for AcceptIncomingError<H> {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::EndpointClosed { source, .. } => Some(source),
+            Self::TimerGranularity { source, .. } => Some(source),
+        }
     }
 }
 

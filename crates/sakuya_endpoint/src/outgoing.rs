@@ -8,7 +8,8 @@
 use core::fmt;
 use std::sync::Arc;
 
-use nitori_crypto::Random as _;
+use nitori_crypto::{Random as _, RandomError};
+use sakuya_clock::MonotonicClock as _;
 use sakuya_connection::{
     call::{CallPositions, TreeCalls},
     driver::ConnectionDriver,
@@ -21,12 +22,14 @@ use sakuya_connection::{
 };
 use sakuya_datagram_routing::claim::queue::DatagramDeliveryQueue;
 use sakuya_link::Link as _;
+use sakuya_recovery::loss::GranularityBelowClockError;
 use sakuya_wire::connection_id::ConnectionId;
 #[cfg(any(test, feature = "test-util"))]
 use snafu::Snafu;
 
 use crate::{
     choices::{ConnectionDatagramReceiver, EndpointChoices, LinkOf, LocalOf},
+    config::thresholds_against_clock,
     connection::{make_connection, register_first_local},
     domain::Domain,
     endpoint::EndpointClosedError,
@@ -128,22 +131,21 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
     ///
     /// # Errors
     ///
-    /// [`EndpointClosedError`] once the endpoint has been closed; the
-    /// outgoing connection is dropped.
-    ///
-    /// # Panics
-    ///
-    /// When the endpoint's random source fails to give the destination
-    /// connection ID: the client must not choose a predictable one.
+    /// [`StartOutgoingError`], which gives the outgoing connection back as
+    /// it was, nothing registered: once the endpoint has been closed; when
+    /// the timer granularity of its loss detection thresholds is finer than
+    /// the endpoint's clock, as it may be after its configuration was
+    /// replaced; when the endpoint's random source gives no destination
+    /// connection ID, as the client must not choose a predictable one.
     #[expect(clippy::type_complexity, reason = "the driver's inferred positions")]
     pub fn start<P, W, Bw>(
-        self,
+        mut self,
     ) -> Result<
         (
             ConnectionDriver<C::Choices, C::Parts, P, W, Bw>,
             ConnectionHandle<<C::Choices as connection::Choices>::ApplicationError>,
         ),
-        EndpointClosedError,
+        StartOutgoingError<Self>,
     >
     where
         C::Parts: TreeCalls<C::Choices, P>,
@@ -151,19 +153,28 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
         P: CallPositions,
         ConnectionDriver<C::Choices, C::Parts, P, W, Bw>: MakeConnection<C::Choices, C::Parts>,
     {
-        let Self {
-            domain,
-            config,
-            link,
-            server_name,
-            zero_length,
-            initial_dcid,
-        } = self;
-        if domain.is_closed() {
-            return Err(EndpointClosedError);
+        if self.domain.is_closed() {
+            return Err(StartOutgoingError::EndpointClosed {
+                half: self,
+                source: EndpointClosedError,
+            });
         }
+        let loss_thresholds = match thresholds_against_clock(
+            self.config.loss_thresholds(),
+            self.domain.clock.timer_granularity(),
+        ) {
+            Ok(thresholds) => thresholds,
+            Err(source) => return Err(StartOutgoingError::TimerGranularity { half: self, source }),
+        };
+        let client_dcid = match self.initial_dcid.clone() {
+            Some(dcid) => dcid,
+            None => match random_initial_dcid(&self.domain) {
+                Ok(dcid) => dcid,
+                Err(source) => return Err(StartOutgoingError::Random { half: self, source }),
+            },
+        };
         let queue = DatagramDeliveryQueue::new(
-            config.receive_queue_capacity.min(
+            self.config.receive_queue_capacity.min(
                 core::num::NonZeroUsize::new(DatagramDeliveryQueue::<()>::MAX_CAPACITY)
                     .unwrap_or(core::num::NonZeroUsize::MIN),
             ),
@@ -171,12 +182,23 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
         // invariant: the capacity is within the bound a queue can have.
         let queue = queue.expect("the capacity is within the bound");
         let mut receiver = ConnectionDatagramReceiver::new(queue, None);
-        let client_dcid = match initial_dcid {
-            Some(dcid) => dcid,
-            None => random_initial_dcid(&domain),
+        let first_local_connection_id = match register_first_local(
+            &self.domain,
+            &mut receiver,
+            &self.link,
+            &mut self.zero_length,
+        ) {
+            Ok(id) => id,
+            Err(source) => return Err(StartOutgoingError::EndpointClosed { half: self, source }),
         };
-        let first_local_connection_id =
-            register_first_local(&domain, &mut receiver, &link, zero_length)?;
+        let Self {
+            domain,
+            config,
+            link,
+            server_name,
+            zero_length: _,
+            initial_dcid: _,
+        } = self;
         let handshake = config.handshake();
         let close_request = CloseRequestCell::new();
         let core = CoreFacts {
@@ -188,7 +210,7 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
                 validation: AddressValidation::Validated,
             },
             crypto_receive: config.checked_crypto_receive(),
-            loss_thresholds: *config.loss_thresholds(),
+            loss_thresholds,
             first_flight: FirstFlight::Datagrams(Vec::new()),
             initial_receiver: InitialPathReceiver::new(receiver),
             reset_token_registry: domain.reset_tokens.clone(),
@@ -207,15 +229,70 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
 
 /// A destination connection ID for a client's first Initial, from the
 /// endpoint's random source.
-fn random_initial_dcid<E: EndpointChoices>(domain: &Domain<E>) -> ConnectionId {
-    let bytes = domain.random.random::<INITIAL_DCID_LEN>();
-    #[expect(
-        clippy::expect_used,
-        reason = "a client must not start with a predictable connection ID"
-    )]
-    let bytes = bytes.expect("the endpoint's random source gives bytes");
+fn random_initial_dcid<E: EndpointChoices>(
+    domain: &Domain<E>,
+) -> Result<ConnectionId, RandomError> {
+    let bytes = domain.random.random::<INITIAL_DCID_LEN>()?;
     // invariant: eight bytes are within the length of a connection ID.
-    ConnectionId::try_from(&bytes[..]).expect("eight bytes make a connection ID")
+    Ok(ConnectionId::try_from(&bytes[..]).expect("eight bytes make a connection ID"))
+}
+
+/// The outgoing connection `H` could not be started. It is given back as it
+/// was, nothing registered, for the application to change, start again or
+/// drop.
+pub enum StartOutgoingError<H> {
+    /// The endpoint has been closed.
+    EndpointClosed {
+        /// The outgoing connection, as it was.
+        half: H,
+        /// The endpoint's closing.
+        source: EndpointClosedError,
+    },
+    /// The timer granularity of the loss detection thresholds in the
+    /// configuration is finer than the endpoint's clock (RFC 9002 §6.1.2).
+    TimerGranularity {
+        /// The outgoing connection, as it was.
+        half: H,
+        /// The granularity and the clock's.
+        source: GranularityBelowClockError,
+    },
+    /// The endpoint's random source gave no destination connection ID for
+    /// the first Initial.
+    Random {
+        /// The outgoing connection, as it was.
+        half: H,
+        /// The random source's failure.
+        source: RandomError,
+    },
+}
+
+impl<H> fmt::Debug for StartOutgoingError<H> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (name, source): (_, &dyn fmt::Debug) = match self {
+            Self::EndpointClosed { source, .. } => ("EndpointClosed", source),
+            Self::TimerGranularity { source, .. } => ("TimerGranularity", source),
+            Self::Random { source, .. } => ("Random", source),
+        };
+        f.debug_struct(name)
+            .field("source", source)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<H> fmt::Display for StartOutgoingError<H> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the outgoing connection was not started")
+    }
+}
+
+impl<H> core::error::Error for StartOutgoingError<H> {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::EndpointClosed { source, .. } => Some(source),
+            Self::TimerGranularity { source, .. } => Some(source),
+            Self::Random { source, .. } => Some(source),
+        }
+    }
 }
 
 impl<E: EndpointChoices, C: ConnectingClientRole<E>> fmt::Debug for Outgoing<E, C> {
