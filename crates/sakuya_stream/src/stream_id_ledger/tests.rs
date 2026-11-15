@@ -100,6 +100,22 @@ fn streams_blocked_once_for_each_limit() {
     assert_eq!(ledger.streams_blocked(BIDI), None);
 }
 
+/// A lost `STREAMS_BLOCKED` at 2 is wanted again while 2 is the limit.
+#[test]
+fn a_lost_streams_blocked_is_wanted_again() {
+    let mut ledger = client();
+    ledger.open_local(BIDI).unwrap();
+    ledger.open_local(BIDI).unwrap();
+    assert!(ledger.open_local(BIDI).is_err());
+    ledger.on_streams_blocked_sent(BIDI, n(2));
+    ledger.on_streams_blocked_lost(BIDI, n(2));
+    assert_eq!(ledger.streams_blocked(BIDI), Some(n(2)));
+    ledger.on_streams_blocked_sent(BIDI, n(2));
+    ledger.on_max_streams(BIDI, n(3));
+    ledger.on_streams_blocked_lost(BIDI, n(2));
+    assert_eq!(ledger.streams_blocked(BIDI), None);
+}
+
 /// The design's example: the peer has opened its bidirectional stream with
 /// index 0, then a frame names index 2. Indices 1 and 2 open together; only
 /// 2 is created now, 1 when its first frame arrives.

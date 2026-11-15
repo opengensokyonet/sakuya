@@ -6,6 +6,7 @@ use sakuya_recovery::ack_obligation::Rfc9000AckObligation;
 
 use super::*;
 use crate::{take::TakenPositions, v1::feedback::FeedbackSummary};
+use sakuya_wire::parts::CNil;
 
 type Instant = core::time::Duration;
 

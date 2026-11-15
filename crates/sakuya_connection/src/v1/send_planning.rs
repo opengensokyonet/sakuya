@@ -147,6 +147,76 @@ where
     }
 }
 
+/// The intake of the send strategy of the choices `T` and the list of
+/// parts `L`.
+pub type IntakeOf<T, L> = <SendStrategyOf<T, L> as SendStrategy<SendTypes<T, L>>>::Intake;
+
+/// `SendTypes<T, L>: IntakePublishOutcome<J, D>`: the intake of the core of
+/// the choices `T` and the list of parts `L` takes intents `J` for the
+/// destination `D` and gives back [`Outcome`](Self::Outcome). A component
+/// that keeps what it gets back names its type by this, without the place
+/// of `J`, as [`CorePublishOutcome`] does for the core.
+pub trait IntakePublishOutcome<J: SendIntent, D>: SendStrategyTypes {
+    /// What publishing gives back.
+    type Outcome;
+}
+
+impl<T, L, J, D> IntakePublishOutcome<J, D> for SendTypes<T, L>
+where
+    T: Choices,
+    J: SendIntent,
+    Self: SendStrategyTypes,
+    SendStrategyOf<T, L>: SendStrategy<Self>,
+    IntakeOf<T, L>: PublishOutcome<J, D>,
+{
+    type Outcome = <IntakeOf<T, L> as PublishOutcome<J, D>>::Outcome;
+}
+
+/// The intake of the send strategy (`SendStrategyIntake`), in the
+/// connection node: a clone of what the core gives out, made with the core,
+/// so that what publishes while the core is lent elsewhere, such as the
+/// frame sources of the streams when the core is lent for feedback, finds
+/// it in its lineage and takes its handle there.
+pub struct SendStrategyIntake<X>(X);
+
+impl<X> fmt::Debug for SendStrategyIntake<X> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SendStrategyIntake").finish_non_exhaustive()
+    }
+}
+
+impl<X> SendStrategyIntake<X> {
+    /// The intake.
+    pub fn intake(&self) -> &X {
+        &self.0
+    }
+}
+
+/// The core and its intake are made together: the core as the choices'
+/// strategy makes it by default, the intake the one it gives out.
+impl<T: Choices, L> Build<T, L, layer::Connection, ()>
+    for frunk_core::HList![
+        SendStrategyCore<SendStrategyOf<T, L>>,
+        SendStrategyIntake<IntakeOf<T, L>>
+    ]
+where
+    L: LineagePartList<T>,
+    SendTypes<T, L>: SendStrategyTypes,
+    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        _: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        let core = SendStrategyCore::new(SendStrategyOf::<T, L>::default());
+        let intake = SendStrategyIntake(core.strategy().intake());
+        frunk_core::hlist![core, intake]
+    }
+}
+
+/// It has no deadline and reads nothing: it only hands out handles.
+impl<X> PassiveDataComponent for SendStrategyIntake<X> {}
+
 // ---- the core ----
 
 /// The connection's events the core has been told.
@@ -204,20 +274,6 @@ where
 {
     fn publish(&mut self, intent: J) {
         self.strategy.publish_to(intent, AnyActiveLinkPath);
-    }
-}
-
-/// The core starts as the choices' strategy makes it by default.
-impl<T: Choices, L> Build<T, L, layer::Connection, ()> for SendStrategyCore<SendStrategyOf<T, L>>
-where
-    L: LineagePartList<T>,
-    SendTypes<T, L>: SendStrategyTypes,
-{
-    fn build<'v>(
-        _: &mut ParentsOf<'v, T, L, layer::Connection>,
-        _: &mut ArgsOf<T, L, layer::Connection>,
-    ) -> Self {
-        Self::new(SendStrategyOf::<T, L>::default())
     }
 }
 

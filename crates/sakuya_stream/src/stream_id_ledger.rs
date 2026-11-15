@@ -305,6 +305,13 @@ impl StreamIdLedger {
         self.local.get_mut(directionality).blocked.on_sent(limit);
     }
 
+    /// Records that a `STREAMS_BLOCKED` frame for streams of
+    /// `directionality` carrying `limit` was lost: one is wanted again while
+    /// `limit` is still the limit on those streams.
+    pub fn on_streams_blocked_lost(&mut self, directionality: Directionality, limit: StreamCount) {
+        self.local.get_mut(directionality).blocked.on_lost(limit);
+    }
+
     /// Checks the stream that a frame addressed to the receiving part names,
     /// and opens it if it is a new stream of the peer.
     ///

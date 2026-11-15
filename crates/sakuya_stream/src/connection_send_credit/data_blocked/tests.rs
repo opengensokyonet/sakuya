@@ -50,3 +50,18 @@ fn a_higher_limit_clears_an_unsent_intent() {
     signal.on_write_blocked(v(150));
     assert_eq!(signal.wanted(), Some(v(150)));
 }
+
+/// A lost frame at 100 is wanted again while 100 is the limit, and not
+/// once `MAX_DATA` raised it.
+#[test]
+fn a_lost_frame_is_wanted_again_while_its_limit_holds() {
+    let mut signal = DataBlockedSignal::new();
+    signal.on_write_blocked(v(100));
+    signal.on_sent(v(100));
+    signal.on_lost(v(100));
+    assert_eq!(signal.wanted(), Some(v(100)));
+    signal.on_sent(v(100));
+    signal.on_limit_raised(v(200));
+    signal.on_lost(v(100));
+    assert_eq!(signal.wanted(), None);
+}

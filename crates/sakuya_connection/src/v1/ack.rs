@@ -91,16 +91,21 @@ use super::{
         CongestionPartOf, LinkPathCongestionState, OthersOf, PmtuOf, RecoveryFactoryOf, RttOf,
         lend_congestion, max_datagram_size_in_use, peer_max_udp_payload_size, refill,
     },
+    send::SendTypes,
+    send_planning::IntakePublishOutcome,
     spaces::{DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
+    streams::{StreamsOf, send::StreamIntent},
 };
 use crate::{
     call::CallBundle,
     clock::{InstantOf, LinkIdOf},
     component::LineageOf,
     dispatch::DispatchFacts,
+    error::ConnectionErrorsOf,
     feedback::FeedbackSummariesOf,
     layer::{self, LogicalPath, NodeKey},
     others::OtherNodes,
+    send_strategy::AnyActiveLinkPath,
     share::{FlatMut, FlatRef, LineageLists, LineagePartList, LinkPathIdentifierOf, NodeData},
     take::{GetAt, ReadEach, TakeEach},
 };
@@ -139,7 +144,8 @@ pub type AckRecoveryTakes<T, L, S, Ls> = HList![
 /// what [`AckRecoveryTakes`] lists in a recovery layer, and `Jx` and `Jr`
 /// of the stored part of congestion control and the RTT estimate there;
 /// `Hf` of the core and of each part's frame sources in the rest, for
-/// feedback.
+/// feedback, and `Is` of the stream set in the established layer, which
+/// the feedback borrows.
 ///
 /// # Errors
 ///
@@ -147,7 +153,29 @@ pub type AckRecoveryTakes<T, L, S, Ls> = HList![
 /// packet not sent yet. [`ConnectionError::KeyUpdate`]: a frame in a packet
 /// protected with older 1-RTT keys acknowledges a packet sealed with newer
 /// ones. Nothing is settled then.
-pub fn receive_ack<'v, T, L, B, S, Ls, Ij, In, If, Ir, Io, Ikp, Ide, Ima, Ipp, Il, Ik, Jx, Jr, Hf>(
+pub fn receive_ack<
+    'v,
+    T,
+    L,
+    B,
+    S,
+    Ls,
+    Ij,
+    In,
+    If,
+    Ir,
+    Io,
+    Ikp,
+    Ide,
+    Ima,
+    Ipp,
+    Il,
+    Ik,
+    Jx,
+    Jr,
+    Hf,
+    Is,
+>(
     lineage: &mut LineageOf<'v, T, L, LogicalPath>,
     others: &mut OtherNodes<'v, T, L, B>,
     frame: &AckFrame,
@@ -176,7 +204,12 @@ where
         + ReadEach<AckReads<L>, Ir>
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
         + GetAt<KeyPhaseNumbers, Ikp>,
-    for<'x> <L as LineageLists<'x, T>>::LogicalPath: CoreLentFeedback<T, L, Hf>,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath: CoreLentFeedback<T, L, StreamsOf<T, L>, Hf>,
+    L: ConnectionErrorsOf,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![StreamsOf<T, L>], Is>,
     for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![LinkClone<T::Link>], Il>,
@@ -386,12 +419,29 @@ where
     }
 
     // the feedback, once the whole frame is handled: delivered first, then
-    // lost
+    // lost; the stream set is borrowed for it, the established layer
+    // recorded as taken
+    let mut streams = others
+        .borrow_established::<HList![StreamsOf<T, L>], Is>()
+        .map(|hlist_pat![streams]| streams);
     for record in acknowledged {
-        CoreLentFeedback::<T, L, Hf>::delivered_each(lineage, at, space, record.summaries);
+        CoreLentFeedback::<T, L, StreamsOf<T, L>, Hf>::delivered_each(
+            lineage,
+            streams.as_deref_mut(),
+            at,
+            space,
+            record.summaries,
+        );
     }
     for batch in &declared {
-        hand_back_lost::<T, L, _, Hf>(&mut journals, lineage, at, space, batch);
+        hand_back_lost::<T, L, _, _, Hf>(
+            &mut journals,
+            lineage,
+            streams.as_deref_mut(),
+            at,
+            space,
+            batch,
+        );
     }
     if let Some(slot) = lineage.get_mut::<SendJournalsOf<T, L>, Ij>().get_mut(space) {
         *slot = journals;

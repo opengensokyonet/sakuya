@@ -173,6 +173,21 @@ where
         }
     }
 
+    /// Records that the frame carrying the STOP request was declared lost:
+    /// the request waits to be sent again while the protocol still needs it
+    /// and the connection has not closed ([RFC 9000 §13.3]); otherwise
+    /// nothing changes.
+    ///
+    /// [RFC 9000 §13.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-13.3
+    pub fn on_stop_lost(&mut self) {
+        if let StopRequest::Sent(code) = self.stop
+            && self.closed().is_none()
+            && self.stop_not_needed().is_none()
+        {
+            self.stop = StopRequest::Pending(code);
+        }
+    }
+
     /// Checks a STOP request; `Ok(true)` means it is to be installed,
     /// `Ok(false)` that the same request is already installed.
     pub(super) fn check_stop(&self, code: ApplicationErrorCode) -> Result<bool, StopError<Lc>> {

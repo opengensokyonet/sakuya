@@ -9,6 +9,11 @@
 //! | RETIRE_CONNECTION_ID | [`RetireConnectionIdSummary`]: the sequence number | the retirement no longer waits for acknowledgment | the same frame is published again while the retirement waits for acknowledgment (RFC 9000 §13.3) |
 //! | HANDSHAKE_DONE | [`HandshakeDoneSummary`] | the frame is delivered and not sent again | the frame is published again while no copy of it was acknowledged (RFC 9000 §13.3) |
 //! | CRYPTO | [`CryptoSummary`]: the level, the offset and the length of the data | the bytes are acknowledged, and their data can go | the bytes still in flight are unsent again, and the level's intent is published again (RFC 9000 §13.3) |
+//! | STREAM | [`StreamSummary`]: the stream, the offset and length of the data, the FIN | the data is acknowledged; with the FIN and all data acknowledged the sending part is done | the data waits to be sent again, and the FIN if the stream was not reset (RFC 9000 §13.3) |
+//! | RESET_STREAM | [`ResetStreamSummary`]: the stream and the final size | the sending part is done | the frame is sent again while the sending part is not done |
+//! | STOP_SENDING | [`StopSendingSummary`]: the stream and the error code | nothing | the frame is sent again while the receiving part still needs it |
+//! | MAX_DATA, MAX_STREAM_DATA, MAX_STREAMS | [`MaxDataSummary`], [`MaxStreamDataSummary`], [`MaxStreamsSummary`]: the limit | nothing | the limit in effect, never lower than the one lost, is sent again while it is still advertised |
+//! | DATA_BLOCKED, STREAM_DATA_BLOCKED, STREAMS_BLOCKED | [`DataBlockedSummary`], [`StreamDataBlockedSummary`], [`StreamsBlockedSummary`]: the limit | nothing | the frame is sent again while the sender is still blocked at that limit |
 //!
 //! Each is the summary of one kind of version 1's frame sources
 //! ([`FrameSources`]), and what comes of it is that source's
@@ -17,15 +22,13 @@
 //! destination connection ID strategy,
 //! [`LineageCryptoFrameSource`](super::send::LineageCryptoFrameSource),
 //! the [`Own`](super::Side::Own) data of the side,
-//! [`PaddingFrameSource`](crate::write::PaddingFrameSource)).
+//! [`PaddingFrameSource`](crate::write::PaddingFrameSource), and for the
+//! streams' frames the stream set, through
+//! [`LineageStreamFrameSource`](super::streams::send::LineageStreamFrameSource)).
 use frunk_core::{HList, hlist_pat};
 use sakuya_recovery::{ack_obligation::AckDue, packet_number_space::PacketNumberSpaceKind};
 use sakuya_tls::engine::CryptoLevel;
-use sakuya_wire::{
-    parts::{CNil, Coproduct},
-    v1::packet_number::PacketNumber,
-    var_int::VarInt,
-};
+use sakuya_wire::{parts::Coproduct, v1::packet_number::PacketNumber, var_int::VarInt};
 
 #[cfg(doc)]
 use super::send::FrameSources;
@@ -33,12 +36,17 @@ use super::{
     Choices,
     send::{RetireConnectionIdSummary, SendTypes},
     send_planning::{SendStrategyCore, SendStrategyOf},
+    streams::send::{
+        DataBlockedSummary, MaxDataSummary, MaxStreamDataSummary, MaxStreamsSummary,
+        ResetStreamSummary, StopSendingSummary, StreamDataBlockedSummary, StreamSummary,
+        StreamsBlockedSummary,
+    },
 };
 use crate::{
     clock::InstantOf,
     feedback::{FeedbackSummariesOf, FeedbackSummaryOf, PartsSendFeedback},
     send_strategy::SendStrategyTypes,
-    take::{Lineage, Reborrow, Take, TakeEach},
+    take::{AppendLast, Lineage, Reborrow, Take, TakeEach, WithOptional},
     write::PaddingSummary,
 };
 
@@ -46,19 +54,23 @@ use crate::{
 /// the sum of the summaries of [`FrameSources`], in their order.
 ///
 /// `I` is the type of instants.
-pub type FeedbackSummary<I> = Coproduct<
+pub type FeedbackSummary<I> = frunk_core::Coprod!(
     PaddingSummary,
-    Coproduct<
-        AckSummary<I>,
-        Coproduct<
-            ProbePingSummary,
-            Coproduct<
-                RetireConnectionIdSummary,
-                Coproduct<HandshakeDoneSummary, Coproduct<CryptoSummary, CNil>>,
-            >,
-        >,
-    >,
->;
+    AckSummary<I>,
+    ProbePingSummary,
+    RetireConnectionIdSummary,
+    HandshakeDoneSummary,
+    CryptoSummary,
+    StreamSummary,
+    ResetStreamSummary,
+    StopSendingSummary,
+    MaxDataSummary,
+    MaxStreamDataSummary,
+    MaxStreamsSummary,
+    DataBlockedSummary,
+    StreamDataBlockedSummary,
+    StreamsBlockedSummary,
+);
 
 /// The summary of a CRYPTO frame written into a packet: which bytes of
 /// which level it carried.
@@ -151,6 +163,30 @@ impl<I, Rest> From<HandshakeDoneSummary> for Coproduct<FeedbackSummary<I>, Rest>
     }
 }
 
+/// The frame sources of the streams put their summaries into the sum of
+/// the summaries of a composition through version 1's, which comes first.
+macro_rules! stream_summaries_into_sum {
+    ($($summary:ident),* $(,)?) => {$(
+        impl<I, Rest> From<$summary> for Coproduct<FeedbackSummary<I>, Rest> {
+            fn from(summary: $summary) -> Self {
+                Coproduct::Inl(Coproduct::inject(summary))
+            }
+        }
+    )*};
+}
+
+stream_summaries_into_sum!(
+    StreamSummary,
+    ResetStreamSummary,
+    StopSendingSummary,
+    MaxDataSummary,
+    MaxStreamDataSummary,
+    MaxStreamsSummary,
+    DataBlockedSummary,
+    StreamDataBlockedSummary,
+    StreamsBlockedSummary,
+);
+
 // ---- feedback with the core lent ----
 
 /// The core of the send strategy, as the connection node holds it.
@@ -163,17 +199,21 @@ type CoreTakes<T, L> = HList![CoreOf<T, L>];
 type WithoutCore<'s, T, L, V, Ic> =
     <<V as Reborrow<'s>>::Out as TakeEach<'s, CoreTakes<T, L>, Ic>>::Rest;
 
-/// `V: CoreLentFeedback<T, L, H>`: the summaries of the composition of `T`
-/// and `L` go back to their frame sources in a lineage of `V`, with the
-/// core, which the lineage holds, lent to them to publish through.
+/// `V: CoreLentFeedback<T, L, X, H>`: the summaries of the composition of
+/// `T` and `L` go back to their frame sources in a lineage of `V`, with the
+/// core, which the lineage holds, lent to them to publish through, and the
+/// stream set `X` of the established layer, which is not in the lineage,
+/// appended to it for the frame sources of the streams; `None` when there
+/// is no established layer, and then those sources take nothing back.
 ///
 /// `H` holds the place of the core and the positions of each part's
 /// frame sources in the rest of the lineage.
-pub trait CoreLentFeedback<T: Choices, L: FeedbackSummariesOf, H>: Sized {
+pub trait CoreLentFeedback<T: Choices, L: FeedbackSummariesOf, X, H>: Sized {
     /// The packets of `space` that the frames of `summaries` were written
     /// into were acknowledged.
     fn delivered_each(
         lineage: &mut Lineage<'_, Self>,
+        streams: Option<&mut X>,
         now: InstantOf<T>,
         space: PacketNumberSpaceKind,
         summaries: impl IntoIterator<Item = FeedbackSummaryOf<T, L>>,
@@ -184,6 +224,7 @@ pub trait CoreLentFeedback<T: Choices, L: FeedbackSummariesOf, H>: Sized {
     /// link path ended before they were settled.
     fn lost_each<'a>(
         lineage: &mut Lineage<'_, Self>,
+        streams: Option<&mut X>,
         now: InstantOf<T>,
         space: PacketNumberSpaceKind,
         summaries: impl IntoIterator<Item = &'a FeedbackSummaryOf<T, L>>,
@@ -191,23 +232,31 @@ pub trait CoreLentFeedback<T: Choices, L: FeedbackSummariesOf, H>: Sized {
         FeedbackSummaryOf<T, L>: 'a;
 }
 
-impl<T, L, V, Ic, Hf> CoreLentFeedback<T, L, (Ic, Hf)> for V
+/// The positions the driver records for the frame sources of the streams,
+/// past the components of the lineage's nodes, are ignored: whoever borrows
+/// the established layer to append its stream set records that layer as
+/// taken itself.
+impl<T, L, V, X, Ic, Hf> CoreLentFeedback<T, L, X, (Ic, Hf)> for V
 where
     T: Choices,
     L: FeedbackSummariesOf,
     SendTypes<T, L>: SendStrategyTypes,
     CoreOf<T, L>: 'static,
+    X: 'static,
     for<'s> V: Reborrow<'s>,
     for<'s> <V as Reborrow<'s>>::Out: TakeEach<'s, CoreTakes<T, L>, Ic>,
-    for<'s> L: PartsSendFeedback<T, L, WithoutCore<'s, T, L, V, Ic>, CoreOf<T, L>, Hf>,
+    for<'s> WithoutCore<'s, T, L, V, Ic>: AppendLast<Option<&'s mut X>>,
+    for<'s> L: PartsSendFeedback<T, L, WithOptional<'s, WithoutCore<'s, T, L, V, Ic>, X>, CoreOf<T, L>, Hf>,
 {
     fn delivered_each(
         lineage: &mut Lineage<'_, V>,
+        streams: Option<&mut X>,
         now: InstantOf<T>,
         space: PacketNumberSpaceKind,
         summaries: impl IntoIterator<Item = FeedbackSummaryOf<T, L>>,
     ) {
-        let (hlist_pat![core], mut rest) = Take::<CoreTakes<T, L>, Ic>::take(lineage.reborrow());
+        let (hlist_pat![core], rest) = Take::<CoreTakes<T, L>, Ic>::take(lineage.reborrow());
+        let mut rest = rest.append_optional(streams);
         for summary in summaries {
             <L as PartsSendFeedback<T, L, _, _, Hf>>::delivered(
                 &mut rest, core, now, space, summary,
@@ -217,13 +266,15 @@ where
 
     fn lost_each<'a>(
         lineage: &mut Lineage<'_, V>,
+        streams: Option<&mut X>,
         now: InstantOf<T>,
         space: PacketNumberSpaceKind,
         summaries: impl IntoIterator<Item = &'a FeedbackSummaryOf<T, L>>,
     ) where
         FeedbackSummaryOf<T, L>: 'a,
     {
-        let (hlist_pat![core], mut rest) = Take::<CoreTakes<T, L>, Ic>::take(lineage.reborrow());
+        let (hlist_pat![core], rest) = Take::<CoreTakes<T, L>, Ic>::take(lineage.reborrow());
+        let mut rest = rest.append_optional(streams);
         for summary in summaries {
             <L as PartsSendFeedback<T, L, _, _, Hf>>::lost(&mut rest, core, now, space, summary);
         }

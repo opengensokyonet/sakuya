@@ -16,13 +16,19 @@
 //! initiator, the directionality, a stream of this side not opened yet and
 //! the limit on the peer's streams. The default stream set is
 //! [`LockedStreamSet`](locked::LockedStreamSet).
+//!
+//! The set also writes the nine frames, through one kind of frame source
+//! for each, and keeps the tickets of their intents, which it publishes
+//! through the send strategy's intake ([`send`]).
 
 pub mod locked;
+pub mod send;
 
 use bytes::Bytes;
 use sakuya_stream::{
     connection::LayerEnd,
     receive::violation::{OnResetStreamError, OnStreamFrameError},
+    send_options::destination::Unfulfilled,
     stream_id_ledger::{ReceivingPartFrameError, SendingPartFrameError},
 };
 use sakuya_wire::{
@@ -37,6 +43,7 @@ use sakuya_wire::{
             stream_data_blocked::StreamDataBlockedFrame, streams_blocked::StreamsBlockedFrame,
         },
         role::Role,
+        stream_id::{Directionality, StreamId},
         transport_error::TransportErrorCode,
         transport_parameters::{
             TransportParameterSlots, TransportParameterSpace,
@@ -49,11 +56,19 @@ use sakuya_wire::{
 };
 use snafu::Snafu;
 
+use self::send::{
+    DataBlockedSummary, MaxDataSummary, MaxStreamDataSummary, MaxStreamsSummary,
+    ResetStreamSummary, StopSendingSummary, StreamDataBlockedSummary, StreamIntent,
+    StreamIntentHandle, StreamIntentKey, StreamIntentTicketOf, StreamSetFrameSummary,
+    StreamSummary, StreamsBlockedSummary,
+};
 use super::{
     Choices, CloseCauseOf, ConnectionArgs, Side,
     close::CloseReasonRecord,
     own_args,
     parameters::{LocalTransportParameters, PeerTransportParameters},
+    send::SendTypes,
+    send_planning::IntakePublishOutcome,
 };
 use crate::{
     call::CallBundle,
@@ -61,24 +76,34 @@ use crate::{
     error::ConnectionErrorsOf,
     layer,
     others::OtherNodes,
+    send_strategy::{AnyActiveLinkPath, IntentTicketResize, IntentTicketWithdraw},
     share::{ConnectionArgsOf, LineageLists, LineagePartList},
     take::GetAt,
+    write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
 
 /// The set of a connection's streams in its established layer.
 ///
 /// `Lc` is the type of this endpoint's reason for closing the connection,
-/// which the errors of the streams carry. The driver hands it the frames of
-/// streams and flow control, one method for each of the nine frames, and the
-/// end of the layer; the application opens and accepts streams through its
-/// [`Handle`](Self::Handle).
+/// which the errors of the streams carry, and `K` the ticket the send
+/// strategy's intake gives back for a stream intent, which the set keeps.
+/// The driver hands it the frames of streams and flow control, one method
+/// for each of the nine frames, and the end of the layer; the application
+/// opens and accepts streams through its [`Handle`](Self::Handle).
 ///
 /// A frame that names a stream passes the checks of the streams' identity
 /// before it reaches the part of the stream it concerns. A frame that fails
 /// returns a [`StreamSetFrameError`], and the connection closes: the frames
 /// after it in the packet are not handed over, and what the failed frame
 /// changed is not undone.
-pub trait StreamSet<Lc>: Sized {
+///
+/// The set also writes the nine frames: each of its frame sources
+/// ([`send`]) gives it the item planned, with the handle the set publishes
+/// its intents through, and takes back the summaries of the frames written
+/// once their packets are delivered or lost. Every method that may change
+/// what is to be sent is given the handle, `publish`, and leaves the
+/// intents matching what is due afterwards.
+pub trait StreamSet<Lc, K>: Sized {
     /// What the application opens and accepts streams through; the
     /// established layer's handle keeps one.
     type Handle: Clone;
@@ -88,6 +113,10 @@ pub trait StreamSet<Lc>: Sized {
     /// layer is built. Its default is what a composition that sets nothing
     /// gets.
     type Config: Clone + Default;
+
+    /// The parameters application data is sent with: what the stream
+    /// intents of the data carry.
+    type SendParameters;
 
     /// The stream set of an established layer, from the facts of the
     /// connection and the configuration.
@@ -102,75 +131,308 @@ pub trait StreamSet<Lc>: Sized {
     ///
     /// [`StreamSetFrameError`] if the frame breaks a rule of streams or flow
     /// control; the connection closes.
-    fn on_stream_frame(
+    fn on_stream_frame<P>(
         &mut self,
+        publish: &P,
         level: EncryptionLevel,
         frame: StreamFrame<Bytes>,
-    ) -> Result<(), StreamSetFrameError>;
+    ) -> Result<(), StreamSetFrameError>
+    where
+        P: StreamIntentHandle<Self::SendParameters, K>,
+        K: IntentTicketResize + IntentTicketWithdraw;
 
     /// Takes a RESET_STREAM frame.
     ///
     /// # Errors
     ///
     /// As [`on_stream_frame`](Self::on_stream_frame).
-    fn on_reset_stream(&mut self, frame: ResetStreamFrame) -> Result<(), StreamSetFrameError>;
+    fn on_reset_stream<P>(
+        &mut self,
+        publish: &P,
+        frame: ResetStreamFrame,
+    ) -> Result<(), StreamSetFrameError>
+    where
+        P: StreamIntentHandle<Self::SendParameters, K>,
+        K: IntentTicketResize + IntentTicketWithdraw;
 
     /// Takes a STOP_SENDING frame.
     ///
     /// # Errors
     ///
     /// As [`on_stream_frame`](Self::on_stream_frame).
-    fn on_stop_sending(&mut self, frame: StopSendingFrame) -> Result<(), StreamSetFrameError>;
+    fn on_stop_sending<P>(
+        &mut self,
+        publish: &P,
+        frame: StopSendingFrame,
+    ) -> Result<(), StreamSetFrameError>
+    where
+        P: StreamIntentHandle<Self::SendParameters, K>,
+        K: IntentTicketResize + IntentTicketWithdraw;
 
     /// Takes a MAX_DATA frame.
     ///
     /// # Errors
     ///
     /// As [`on_stream_frame`](Self::on_stream_frame).
-    fn on_max_data(&mut self, frame: MaxDataFrame) -> Result<(), StreamSetFrameError>;
+    fn on_max_data<P>(
+        &mut self,
+        publish: &P,
+        frame: MaxDataFrame,
+    ) -> Result<(), StreamSetFrameError>
+    where
+        P: StreamIntentHandle<Self::SendParameters, K>,
+        K: IntentTicketResize + IntentTicketWithdraw;
 
     /// Takes a MAX_STREAM_DATA frame.
     ///
     /// # Errors
     ///
     /// As [`on_stream_frame`](Self::on_stream_frame).
-    fn on_max_stream_data(&mut self, frame: MaxStreamDataFrame) -> Result<(), StreamSetFrameError>;
+    fn on_max_stream_data<P>(
+        &mut self,
+        publish: &P,
+        frame: MaxStreamDataFrame,
+    ) -> Result<(), StreamSetFrameError>
+    where
+        P: StreamIntentHandle<Self::SendParameters, K>,
+        K: IntentTicketResize + IntentTicketWithdraw;
 
     /// Takes a MAX_STREAMS frame.
     ///
     /// # Errors
     ///
     /// As [`on_stream_frame`](Self::on_stream_frame).
-    fn on_max_streams(&mut self, frame: MaxStreamsFrame) -> Result<(), StreamSetFrameError>;
+    fn on_max_streams<P>(
+        &mut self,
+        publish: &P,
+        frame: MaxStreamsFrame,
+    ) -> Result<(), StreamSetFrameError>
+    where
+        P: StreamIntentHandle<Self::SendParameters, K>,
+        K: IntentTicketResize + IntentTicketWithdraw;
 
     /// Takes a DATA_BLOCKED frame.
     ///
     /// # Errors
     ///
     /// As [`on_stream_frame`](Self::on_stream_frame).
-    fn on_data_blocked(&mut self, frame: DataBlockedFrame) -> Result<(), StreamSetFrameError>;
+    fn on_data_blocked<P>(
+        &mut self,
+        publish: &P,
+        frame: DataBlockedFrame,
+    ) -> Result<(), StreamSetFrameError>
+    where
+        P: StreamIntentHandle<Self::SendParameters, K>,
+        K: IntentTicketResize + IntentTicketWithdraw;
 
     /// Takes a STREAM_DATA_BLOCKED frame.
     ///
     /// # Errors
     ///
     /// As [`on_stream_frame`](Self::on_stream_frame).
-    fn on_stream_data_blocked(
+    fn on_stream_data_blocked<P>(
         &mut self,
+        publish: &P,
         frame: StreamDataBlockedFrame,
-    ) -> Result<(), StreamSetFrameError>;
+    ) -> Result<(), StreamSetFrameError>
+    where
+        P: StreamIntentHandle<Self::SendParameters, K>,
+        K: IntentTicketResize + IntentTicketWithdraw;
 
     /// Takes a STREAMS_BLOCKED frame.
     ///
     /// # Errors
     ///
     /// As [`on_stream_frame`](Self::on_stream_frame).
-    fn on_streams_blocked(&mut self, frame: StreamsBlockedFrame)
-    -> Result<(), StreamSetFrameError>;
+    fn on_streams_blocked<P>(
+        &mut self,
+        publish: &P,
+        frame: StreamsBlockedFrame,
+    ) -> Result<(), StreamSetFrameError>
+    where
+        P: StreamIntentHandle<Self::SendParameters, K>,
+        K: IntentTicketResize + IntentTicketWithdraw;
 
     /// The established layer ended as `end`: every stream hears of it, and
     /// every later operation on the set reports it.
     fn layer_ended(&mut self, end: LayerEnd<Lc>);
+
+    /// Writes STREAM frames of the stream `stream_id`: its data, its FIN,
+    /// and first exposes what they use before it returns.
+    ///
+    /// It writes nothing, having resized or withdrawn the intent, when
+    /// nothing is due or the frame does not fit.
+    fn supply_stream<P, W, Q>(
+        &mut self,
+        publish: &P,
+        stream_id: StreamId,
+        packet: OpenPacket<W, InFlightClass, Q>,
+    ) -> Supplied<W, InFlightClass, Q>
+    where
+        P: StreamIntentHandle<Self::SendParameters, K>,
+        K: IntentTicketResize + IntentTicketWithdraw,
+        W: PacketWriting,
+        SummaryOf<W>: From<StreamSummary>,
+        Q: PacketPosition;
+
+    /// Writes the RESET_STREAM frame of the stream `stream_id`, as its
+    /// end is now, and first exposes its final size before it returns.
+    ///
+    /// It writes nothing, having resized or withdrawn the intent, when
+    /// nothing is due or the frame does not fit.
+    fn supply_reset_stream<P, W, Q>(
+        &mut self,
+        publish: &P,
+        stream_id: StreamId,
+        packet: OpenPacket<W, InFlightClass, Q>,
+    ) -> Supplied<W, InFlightClass, Q>
+    where
+        P: StreamIntentHandle<Self::SendParameters, K>,
+        K: IntentTicketResize + IntentTicketWithdraw,
+        W: PacketWriting,
+        SummaryOf<W>: From<ResetStreamSummary>,
+        Q: PacketPosition;
+
+    /// Writes the STOP_SENDING frame of the stream `stream_id`.
+    ///
+    /// It writes nothing, having resized or withdrawn the intent, when
+    /// nothing is due or the frame does not fit.
+    fn supply_stop_sending<P, W, Q>(
+        &mut self,
+        publish: &P,
+        stream_id: StreamId,
+        packet: OpenPacket<W, InFlightClass, Q>,
+    ) -> Supplied<W, InFlightClass, Q>
+    where
+        P: StreamIntentHandle<Self::SendParameters, K>,
+        K: IntentTicketResize + IntentTicketWithdraw,
+        W: PacketWriting,
+        SummaryOf<W>: From<StopSendingSummary>,
+        Q: PacketPosition;
+
+    /// Writes the MAX_DATA frame of the connection's limit now.
+    ///
+    /// It writes nothing, having resized or withdrawn the intent, when
+    /// nothing is due or the frame does not fit.
+    fn supply_max_data<P, W, Q>(
+        &mut self,
+        publish: &P,
+        packet: OpenPacket<W, InFlightClass, Q>,
+    ) -> Supplied<W, InFlightClass, Q>
+    where
+        P: StreamIntentHandle<Self::SendParameters, K>,
+        K: IntentTicketResize + IntentTicketWithdraw,
+        W: PacketWriting,
+        SummaryOf<W>: From<MaxDataSummary>,
+        Q: PacketPosition;
+
+    /// Writes the MAX_STREAM_DATA frame of the stream `stream_id`'s limit
+    /// now.
+    ///
+    /// It writes nothing, having resized or withdrawn the intent, when
+    /// nothing is due or the frame does not fit.
+    fn supply_max_stream_data<P, W, Q>(
+        &mut self,
+        publish: &P,
+        stream_id: StreamId,
+        packet: OpenPacket<W, InFlightClass, Q>,
+    ) -> Supplied<W, InFlightClass, Q>
+    where
+        P: StreamIntentHandle<Self::SendParameters, K>,
+        K: IntentTicketResize + IntentTicketWithdraw,
+        W: PacketWriting,
+        SummaryOf<W>: From<MaxStreamDataSummary>,
+        Q: PacketPosition;
+
+    /// Writes the MAX_STREAMS frame of the peer's streams of
+    /// `directionality`, with their limit now.
+    ///
+    /// It writes nothing, having resized or withdrawn the intent, when
+    /// nothing is due or the frame does not fit.
+    fn supply_max_streams<P, W, Q>(
+        &mut self,
+        publish: &P,
+        directionality: Directionality,
+        packet: OpenPacket<W, InFlightClass, Q>,
+    ) -> Supplied<W, InFlightClass, Q>
+    where
+        P: StreamIntentHandle<Self::SendParameters, K>,
+        K: IntentTicketResize + IntentTicketWithdraw,
+        W: PacketWriting,
+        SummaryOf<W>: From<MaxStreamsSummary>,
+        Q: PacketPosition;
+
+    /// Writes the DATA_BLOCKED frame of the connection's limit now.
+    ///
+    /// It writes nothing, having resized or withdrawn the intent, when
+    /// nothing is due or the frame does not fit.
+    fn supply_data_blocked<P, W, Q>(
+        &mut self,
+        publish: &P,
+        packet: OpenPacket<W, InFlightClass, Q>,
+    ) -> Supplied<W, InFlightClass, Q>
+    where
+        P: StreamIntentHandle<Self::SendParameters, K>,
+        K: IntentTicketResize + IntentTicketWithdraw,
+        W: PacketWriting,
+        SummaryOf<W>: From<DataBlockedSummary>,
+        Q: PacketPosition;
+
+    /// Writes the STREAM_DATA_BLOCKED frame of the stream `stream_id`'s
+    /// limit now.
+    ///
+    /// It writes nothing, having resized or withdrawn the intent, when
+    /// nothing is due or the frame does not fit.
+    fn supply_stream_data_blocked<P, W, Q>(
+        &mut self,
+        publish: &P,
+        stream_id: StreamId,
+        packet: OpenPacket<W, InFlightClass, Q>,
+    ) -> Supplied<W, InFlightClass, Q>
+    where
+        P: StreamIntentHandle<Self::SendParameters, K>,
+        K: IntentTicketResize + IntentTicketWithdraw,
+        W: PacketWriting,
+        SummaryOf<W>: From<StreamDataBlockedSummary>,
+        Q: PacketPosition;
+
+    /// Writes the STREAMS_BLOCKED frame of this side's streams of
+    /// `directionality`, with their limit now.
+    ///
+    /// It writes nothing, having resized or withdrawn the intent, when
+    /// nothing is due or the frame does not fit.
+    fn supply_streams_blocked<P, W, Q>(
+        &mut self,
+        publish: &P,
+        directionality: Directionality,
+        packet: OpenPacket<W, InFlightClass, Q>,
+    ) -> Supplied<W, InFlightClass, Q>
+    where
+        P: StreamIntentHandle<Self::SendParameters, K>,
+        K: IntentTicketResize + IntentTicketWithdraw,
+        W: PacketWriting,
+        SummaryOf<W>: From<StreamsBlockedSummary>,
+        Q: PacketPosition;
+
+    /// The packet a frame of `summary` was written into was acknowledged.
+    fn on_frame_delivered<P>(&mut self, publish: &P, summary: StreamSetFrameSummary)
+    where
+        P: StreamIntentHandle<Self::SendParameters, K>,
+        K: IntentTicketResize + IntentTicketWithdraw;
+
+    /// The packet a frame of `summary` was written into was declared lost,
+    /// or its send result is unknown, or its link path ended before it was
+    /// settled. A later acknowledgment of it may still come.
+    fn on_frame_lost<P>(&mut self, publish: &P, summary: StreamSetFrameSummary)
+    where
+        P: StreamIntentHandle<Self::SendParameters, K>,
+        K: IntentTicketResize + IntentTicketWithdraw;
+
+    /// The intent of `key` was not fulfilled for `cause`.
+    fn on_intent_unfulfilled<P>(&mut self, publish: &P, key: StreamIntentKey, cause: Unfulfilled)
+    where
+        P: StreamIntentHandle<Self::SendParameters, K>,
+        K: IntentTicketResize + IntentTicketWithdraw;
 }
 
 /// What a stream set is made from that the connection knows: this side's
@@ -301,8 +563,9 @@ impl StreamSetFrameError {
     }
 }
 
-/// The stream set of the choices `T` and the list of parts `L`.
-pub type StreamsOf<T, L> = <T as Choices>::Streams<CloseCauseOf<T, L>>;
+/// The stream set of the choices `T` and the list of parts `L`, which keeps
+/// the tickets the strategy's intake gives back for the stream intents.
+pub type StreamsOf<T, L> = <T as Choices>::Streams<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>>;
 
 /// The configuration of the stream set, `C`, kept in the connection node
 /// until the established layer is built.
@@ -343,9 +606,10 @@ pub struct ChosenStreamSet;
 impl<T, L, X, Il, Ip, Ic, Ir, Jl, Jp>
     Build<T, L, layer::Established, (ChosenStreamSet, (Il, Ip, Ic, Ir), (Jl, Jp))> for X
 where
-    T: Choices<Streams<CloseCauseOf<T, L>> = X>,
+    T: Choices<Streams<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>> = X>,
     L: LineagePartList<T> + ConnectionErrorsOf + ParametersOf<TransportParameterSpace>,
-    X: StreamSet<CloseCauseOf<T, L>, Config = T::StreamSetConfig>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    X: StreamSet<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>, Config = T::StreamSetConfig>,
     TransportParameterSlots: FlowControlParameterSlots<Jl>,
     TransportParameterSlots<L>: FlowControlParameterSlots<Jp>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<LocalTransportParameters<TransportParameterSlots>, Il>
@@ -406,7 +670,8 @@ where
 /// and the application change it.
 impl<T, L, X> DataComponent<T, L, layer::Established, ChosenStreamSet> for X
 where
-    T: Choices<Streams<CloseCauseOf<T, L>> = X>,
+    T: Choices<Streams<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>> = X>,
     L: LineagePartList<T> + ConnectionErrorsOf,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
 {
 }

@@ -11,6 +11,7 @@
 //! the frame (RFC 9000 §19.20).
 
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
+use sakuya_stream::send_options::destination::Unfulfilled;
 use sakuya_wire::v1::frame::handshake_done::HandshakeDoneFrame;
 
 use super::{Choices, feedback::HandshakeDoneSummary, send::HandshakeDoneIntent};
@@ -92,6 +93,11 @@ impl FrameSource for HandshakeDoneSource {
             publish.publish(HandshakeDoneIntent);
         }
     }
+
+    /// The frame is sent and forgotten for any active link path: the
+    /// strategy ends it only once no link path will be active again, which
+    /// is the end of the connection, not an unfulfilled intent.
+    fn unfulfilled(&mut self, (): (), _: Unfulfilled) {}
 }
 
 /// No connection starts with its handshake complete.
@@ -146,6 +152,9 @@ impl FrameSource for ClientOnlyState {
         Pb: PublishIntent<HandshakeDoneIntent, Idx>,
     {
     }
+
+    /// A client publishes no intent, so none goes unfulfilled.
+    fn unfulfilled(&mut self, (): (), _: Unfulfilled) {}
 }
 
 /// A client's connection starts with nothing of its own.

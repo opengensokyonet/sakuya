@@ -168,8 +168,8 @@ use self::{
     send::{AckIntent, CryptoIntent, HandshakeDoneIntent, ProbePingIntent, SendTypes},
     send_planning::{
         AckIntentTicketOf, AckIntentTickets, CorePublishOutcome, CryptoIntentTicketOf,
-        CryptoIntentTickets, LinkPathPlanner, LinkPathSendPlannerOf, ProbePingTicketOf,
-        ProbePingTickets, SendStrategyCore, SendStrategyOf,
+        CryptoIntentTickets, IntakeOf, LinkPathPlanner, LinkPathSendPlannerOf, ProbePingTicketOf,
+        ProbePingTickets, SendStrategyCore, SendStrategyIntake, SendStrategyOf,
     },
     sending::{DatagramAcceptance, LinkPathSendingKind, LinkPathSendingLimits},
     space_retirement::PacketNumberSpaceRetirement,
@@ -307,9 +307,10 @@ pub trait Choices: ConnectionChoices {
     /// constrains them with a trait of its own.
     type SendParameters: Clone + PartialEq + Default + 'static;
     /// The set of the connection's streams in the established layer, for
-    /// `Lc`, this endpoint's reason for closing: [`CloseCauseOf`] for the
-    /// composition's list of parts ([`streams`]).
-    type Streams<Lc>: StreamSet<Lc, Config = Self::StreamSetConfig>;
+    /// `Lc`, this endpoint's reason for closing, [`CloseCauseOf`] for the
+    /// composition's list of parts, and `K`, the ticket the send strategy's
+    /// intake gives back for a stream intent ([`streams`]).
+    type Streams<Lc, K>: StreamSet<Lc, K, Config = Self::StreamSetConfig, SendParameters = Self::SendParameters>;
     /// What the composition configures the stream set with; the connection
     /// node keeps it from the connection's making until the established
     /// layer is built.
@@ -538,6 +539,7 @@ impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + Co
     LayerShare<T, L, layer::Connection> for Part
 where
     SendTypes<T, L>: SendStrategyTypes + CorePublishOutcome<CryptoIntent, AnyActiveLinkPath>,
+    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
 {
     type Data = HList![
         InitialKeys<T::Crypto>,
@@ -563,6 +565,7 @@ where
         LogicalPathReceivingLimits,
         FirstFlightStart<T>,
         SendStrategyCore<SendStrategyOf<T, L>>,
+        SendStrategyIntake<IntakeOf<T, L>>,
         DestinationConnectionIdConfig<DestinationConnectionIdConfigOf<T>>,
         ConnectionResetTokenRegistry<T::ResetTokenRegistry>,
         FirstLocalConnectionId,
@@ -574,6 +577,46 @@ where
         <T::Side as Side>::Own,
         ConnectionExporter<<T::Side as Side>::Exporter>,
         StreamSetConfig<T::StreamSetConfig>,
+    ];
+    /// The core of the send strategy and its intake are made together.
+    type Units = HList![
+        HList![InitialKeys<T::Crypto>],
+        HList![HandshakeKeys<T::Crypto>],
+        HList![OneRttKeys<T::Crypto, InstantOf<T>>],
+        HList![AeadUsage],
+        HList![CryptoReceiver<T::CryptoReceiveBuffer>],
+        HList![CryptoSender<T::CryptoSendBuffer>],
+        HList![CryptoIntentTickets<CryptoIntentTicketOf<T, L>>],
+        HList![AntiAmplificationFactor],
+        HList![FirstLinkStart],
+        HList![IdleTimeout<InstantOf<T>>],
+        HList![LocalTransportParameters<TransportParameterSlots>],
+        HList![PeerTransportParameters<TransportParameterSlots<L>>],
+        HList![RecoveryFactoryOf<T, L>],
+        HList![LossThresholds],
+        HList![MaxAckRanges],
+        HList![HandshakeConfirmation],
+        HList![CloseReasonRecord<CloseCauseOf<T, L>>],
+        HList![CloseRequestCell<T::ApplicationError>],
+        HList![DatagramAcceptance],
+        HList![InitialPathReceiver<T::Receiver>],
+        HList![LogicalPathReceivingLimits],
+        HList![FirstFlightStart<T>],
+        HList![
+            SendStrategyCore<SendStrategyOf<T, L>>,
+            SendStrategyIntake<IntakeOf<T, L>>
+        ],
+        HList![DestinationConnectionIdConfig<DestinationConnectionIdConfigOf<T>>],
+        HList![ConnectionResetTokenRegistry<T::ResetTokenRegistry>],
+        HList![FirstLocalConnectionId],
+        HList![InitialDestinationConnectionIds],
+        HList![PeerHandshakeConnectionId],
+        HList![PacketProtectionBackend<T::Crypto>],
+        HList![LinkPathSendingLimits],
+        HList![ConnectionImmediateClosePolicy<T::ImmediateClosePolicy>],
+        HList![<T::Side as Side>::Own],
+        HList![ConnectionExporter<<T::Side as Side>::Exporter>],
+        HList![StreamSetConfig<T::StreamSetConfig>],
     ];
     type Calls = HList![<T::Side as Side>::Advancing];
     type Args = ConnectionArgs<T, L>;
@@ -615,7 +658,13 @@ where
     type Calls = HList![LinkPathSendingKind];
 }
 /// The established layer holds the stream set.
-impl<T: Choices, L: ConnectionErrorsOf> LayerShare<T, L, layer::Established> for Part {
+impl<T: Choices, L: ConnectionErrorsOf> LayerShare<T, L, layer::Established> for Part
+where
+    SendTypes<T, L>: send_planning::IntakePublishOutcome<
+            streams::send::StreamIntent<T::SendParameters>,
+            AnyActiveLinkPath,
+        >,
+{
     type Data = HList![StreamsOf<T, L>];
     type Calls = HNil;
 }
@@ -1677,11 +1726,20 @@ impl PassiveDataComponent for AntiAmplification {}
 /// their frame sources as lost; the kept records of its lost packets go
 /// with them, so a late acknowledgment of them is ignored. Its congestion control
 /// hears of none of it: it ended with the recovery layer.
-impl<T: Choices, L, Ij, Hf> Build<T, L, layer::LinkPath, (Ij, Hf)> for LinkPathRole<InstantOf<T>>
+impl<T: Choices, L, Ij, Hf, Is> Build<T, L, layer::LinkPath, (Ij, Hf, Is)>
+    for LinkPathRole<InstantOf<T>>
 where
-    L: LineagePartList<T> + FeedbackSummariesOf,
+    L: LineagePartList<T> + FeedbackSummariesOf + ConnectionErrorsOf,
+    SendTypes<T, L>: send_planning::IntakePublishOutcome<
+            streams::send::StreamIntent<T::SendParameters>,
+            AnyActiveLinkPath,
+        >,
+    for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
+        crate::take::TakeEach<'s, HList![StreamsOf<T, L>], Is>,
     for<'v> <L as LineageLists<'v, T>>::LinkPathParents: GetAt<SendJournalsOf<T, L>, Ij>,
-    for<'v> <L as LineageLists<'v, T>>::LinkPathParents: CoreLentFeedback<T, L, Hf>,
+    for<'v> <L as LineageLists<'v, T>>::LinkPathParents:
+        CoreLentFeedback<T, L, StreamsOf<T, L>, Hf>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::LinkPath>,
@@ -1699,14 +1757,18 @@ where
         };
         let identifier = L::link_path_identifier(&path, &link);
         let now = others.now();
+        let mut streams = others
+            .borrow_established::<HList![StreamsOf<T, L>], Is>()
+            .map(|frunk_core::hlist_pat![streams]| streams);
         for space in PacketNumberSpaceKind::ALL {
             let Some(journals) = parents.get_mut::<SendJournalsOf<T, L>, Ij>().get_mut(space)
             else {
                 continue;
             };
             let unsettled: Vec<_> = journals.take_link_path(&identifier).collect();
-            CoreLentFeedback::<T, L, Hf>::lost_each(
+            CoreLentFeedback::<T, L, StreamsOf<T, L>, Hf>::lost_each(
                 parents,
+                streams.as_deref_mut(),
                 now,
                 space,
                 unsettled.iter().flat_map(|record| &record.summaries),

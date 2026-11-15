@@ -11,10 +11,11 @@ use sakuya_recovery::{
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaces},
     receive_journals::ReceiveJournals,
 };
+use sakuya_stream::send_options::{destination::Unfulfilled, urgency::Urgency};
 use sakuya_tls::engine::CryptoLevel;
 use sakuya_wire::v1::packet_number::PacketNumber;
 use sakuya_wire::{
-    parts::{CNil, Coproduct},
+    parts::Coproduct,
     v1::frame::{
         ack::{AckFrame, EcnCounts},
         handshake_done::HandshakeDoneFrame,
@@ -33,6 +34,11 @@ use super::{
     send_planning::{
         AckIntentTicketOf, AckIntentTickets, CorePublishOutcome, CryptoIntentTicketOf,
         CryptoIntentTickets,
+    },
+    streams::send::{
+        DataBlockedFrames, MaxDataFrames, MaxStreamDataFrames, MaxStreamsFrames, ResetStreamFrames,
+        StopSendingFrames, StreamDataBlockedFrames, StreamFrames, StreamIntent, StreamIntentKey,
+        StreamsBlockedFrames,
     },
 };
 use crate::{
@@ -75,6 +81,24 @@ pub enum FrameSourceId {
     Crypto(CryptoLevel),
     /// A server's HANDSHAKE_DONE frame.
     HandshakeDone,
+    /// The STREAM frames of the streams.
+    Stream,
+    /// The RESET_STREAM frames of the streams.
+    ResetStream,
+    /// The STOP_SENDING frames of the streams.
+    StopSending,
+    /// The MAX_DATA frames of the connection.
+    MaxData,
+    /// The MAX_STREAM_DATA frames of the streams.
+    MaxStreamData,
+    /// The MAX_STREAMS frames of the peer's streams.
+    MaxStreams,
+    /// The DATA_BLOCKED frames of the connection.
+    DataBlocked,
+    /// The STREAM_DATA_BLOCKED frames of the streams.
+    StreamDataBlocked,
+    /// The STREAMS_BLOCKED frames of this side's streams.
+    StreamsBlocked,
 }
 
 /// An ACK frame is due in a packet number space.
@@ -371,29 +395,42 @@ pub struct RetireConnectionIdSummary {
 }
 
 /// Version 1's intents.
-pub type SendIntents = Coproduct<
+///
+/// The intents of the streams are those of the default send parameters,
+/// [`Urgency`]: the list of parts does not depend on the choices, so a
+/// composition whose [`SendParameters`](super::Choices::SendParameters) are
+/// others has no place for its stream intents yet.
+pub type SendIntents = frunk_core::Coprod!(
     AckIntent,
-    Coproduct<
-        ProbePingIntent,
-        Coproduct<
-            RetireConnectionIdIntent,
-            Coproduct<HandshakeDoneIntent, Coproduct<CryptoIntent, CNil>>,
-        >,
-    >,
->;
+    ProbePingIntent,
+    RetireConnectionIdIntent,
+    HandshakeDoneIntent,
+    CryptoIntent,
+    StreamIntent<Urgency>,
+);
 
 /// The kinds of version 1's frame sources: PADDING, which the packet
 /// writer writes, the ACK frames of each packet number space, the PING of
 /// a probe timeout, the RETIRE_CONNECTION_ID frames of the destination
-/// connection ID strategy, a server's HANDSHAKE_DONE and the CRYPTO frames
-/// of each encryption level.
+/// connection ID strategy, a server's HANDSHAKE_DONE, the CRYPTO frames
+/// of each encryption level and the nine frames of the streams
+/// ([`streams::send`](super::streams::send)).
 pub type FrameSources = frunk_core::HList![
     PaddingFrames,
     AckFrames,
     ProbePingFrames,
     RetireConnectionIdFrames,
     HandshakeDoneFrames,
-    CryptoFrames
+    CryptoFrames,
+    StreamFrames,
+    ResetStreamFrames,
+    StopSendingFrames,
+    MaxDataFrames,
+    MaxStreamDataFrames,
+    MaxStreamsFrames,
+    DataBlockedFrames,
+    StreamDataBlockedFrames,
+    StreamsBlockedFrames
 ];
 
 impl SendIntentPart for Part {
@@ -436,55 +473,104 @@ fn carries(kind: PlannedPacketKind, space: PacketNumberSpaceKind, ack: bool) -> 
     }
 }
 
+/// Whether a packet of `kind` carries the frames of the streams: 0-RTT and
+/// 1-RTT packets of an active link path only (RFC 9000 §12.4, Table 3).
+fn carries_streams(kind: PlannedPacketKind) -> bool {
+    matches!(kind, PlannedPacketKind::ZeroRtt | PlannedPacketKind::OneRtt)
+}
+
+/// A value at the place a list of `_` counts in a sum: as many `Inr` as
+/// there are `_`, then `Inl`.
+macro_rules! at_place {
+    ([] $value:expr) => {
+        Coproduct::Inl($value)
+    };
+    ([_ $($rest:tt)*] $value:expr) => {
+        Coproduct::Inr(at_place!([$($rest)*] $value))
+    };
+}
+
+/// A pattern of the value at the place a list of `_` counts in a sum.
+macro_rules! place_pattern {
+    ([] $pattern:pat) => {
+        Coproduct::Inl($pattern)
+    };
+    ([_ $($rest:tt)*] $pattern:pat) => {
+        Coproduct::Inr(place_pattern!([$($rest)*] $pattern))
+    };
+}
+
+/// A pattern of the rest of a sum after as many places as there are `_`.
+macro_rules! rest_pattern {
+    ([] $pattern:pat) => {
+        $pattern
+    };
+    ([_ $($rest:tt)*] $pattern:pat) => {
+        Coproduct::Inr(rest_pattern!([$($rest)*] $pattern))
+    };
+}
+
+/// The item of [`FrameSources`] for the intent of the streams `key`.
+fn stream_item(key: StreamIntentKey) -> SendItem {
+    match key {
+        StreamIntentKey::Stream(id) => at_place!([_ _ _ _ _ _] id),
+        StreamIntentKey::ResetStream(id) => at_place!([_ _ _ _ _ _ _] id),
+        StreamIntentKey::StopSending(id) => at_place!([_ _ _ _ _ _ _ _] id),
+        StreamIntentKey::MaxData => at_place!([_ _ _ _ _ _ _ _ _] ()),
+        StreamIntentKey::MaxStreamData(id) => at_place!([_ _ _ _ _ _ _ _ _ _] id),
+        StreamIntentKey::MaxStreams(directionality) => {
+            at_place!([_ _ _ _ _ _ _ _ _ _ _] directionality)
+        }
+        StreamIntentKey::DataBlocked => at_place!([_ _ _ _ _ _ _ _ _ _ _ _] ()),
+        StreamIntentKey::StreamDataBlocked(id) => at_place!([_ _ _ _ _ _ _ _ _ _ _ _ _] id),
+        StreamIntentKey::StreamsBlocked(directionality) => {
+            at_place!([_ _ _ _ _ _ _ _ _ _ _ _ _ _] directionality)
+        }
+    }
+}
+
 impl<K: PacketKind> FrameSourcePart<K> for Part {
     fn item(intent: &SendIntents) -> Option<SendItem> {
         match intent {
-            Coproduct::Inl(ack) => carries(K::KIND, ack.space, true)
-                .then_some(Coproduct::Inr(Coproduct::Inl(ack.space))),
-            Coproduct::Inr(Coproduct::Inl(ping)) => carries(K::KIND, ping.space, false)
-                .then_some(Coproduct::Inr(Coproduct::Inr(Coproduct::Inl(ping.space)))),
-            Coproduct::Inr(Coproduct::Inr(Coproduct::Inl(retire))) => {
-                (K::KIND == PlannedPacketKind::OneRtt).then_some(Coproduct::Inr(Coproduct::Inr(
-                    Coproduct::Inr(Coproduct::Inl(retire.sequence)),
-                )))
+            place_pattern!([] ack) => {
+                carries(K::KIND, ack.space, true).then_some(at_place!([_] ack.space))
             }
-            Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inl(HandshakeDoneIntent)))) => {
-                (K::KIND == PlannedPacketKind::OneRtt).then_some(Coproduct::Inr(Coproduct::Inr(
-                    Coproduct::Inr(Coproduct::Inr(Coproduct::Inl(()))),
-                )))
+            place_pattern!([_] ping) => {
+                carries(K::KIND, ping.space, false).then_some(at_place!([_ _] ping.space))
             }
-            Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inl(
-                crypto,
-            ))))) => (crypto_level(K::KIND) == Some(crypto.level)).then_some(Coproduct::Inr(
-                Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(
-                    Coproduct::Inl(crypto.level),
-                )))),
-            )),
-            Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(
-                never,
-            ))))) => match *never {},
+            place_pattern!([_ _] retire) => {
+                (K::KIND == PlannedPacketKind::OneRtt).then_some(at_place!([_ _ _] retire.sequence))
+            }
+            place_pattern!([_ _ _] HandshakeDoneIntent) => {
+                (K::KIND == PlannedPacketKind::OneRtt).then_some(at_place!([_ _ _ _] ()))
+            }
+            place_pattern!([_ _ _ _] crypto) => (crypto_level(K::KIND) == Some(crypto.level))
+                .then_some(at_place!([_ _ _ _ _] crypto.level)),
+            place_pattern!([_ _ _ _ _] stream) => {
+                carries_streams(K::KIND).then(|| stream_item(stream.key()))
+            }
+            rest_pattern!([_ _ _ _ _ _] never) => match *never {},
         }
     }
 
     fn source(item: &SendItem) -> FrameSourceId {
         match item {
-            Coproduct::Inl(never) => match *never {},
-            Coproduct::Inr(Coproduct::Inl(space)) => FrameSourceId::Ack(*space),
-            Coproduct::Inr(Coproduct::Inr(Coproduct::Inl(space))) => {
-                FrameSourceId::ProbePing(*space)
-            }
-            Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inl(_)))) => {
-                FrameSourceId::RetireConnectionId
-            }
-            Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inl(()))))) => {
-                FrameSourceId::HandshakeDone
-            }
-            Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(
-                Coproduct::Inl(level),
-            ))))) => FrameSourceId::Crypto(*level),
-            Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(Coproduct::Inr(
-                Coproduct::Inr(never),
-            ))))) => match *never {},
+            place_pattern!([] never) => match *never {},
+            place_pattern!([_] space) => FrameSourceId::Ack(*space),
+            place_pattern!([_ _] space) => FrameSourceId::ProbePing(*space),
+            place_pattern!([_ _ _] _) => FrameSourceId::RetireConnectionId,
+            place_pattern!([_ _ _ _] ()) => FrameSourceId::HandshakeDone,
+            place_pattern!([_ _ _ _ _] level) => FrameSourceId::Crypto(*level),
+            place_pattern!([_ _ _ _ _ _] _) => FrameSourceId::Stream,
+            place_pattern!([_ _ _ _ _ _ _] _) => FrameSourceId::ResetStream,
+            place_pattern!([_ _ _ _ _ _ _ _] _) => FrameSourceId::StopSending,
+            place_pattern!([_ _ _ _ _ _ _ _ _] ()) => FrameSourceId::MaxData,
+            place_pattern!([_ _ _ _ _ _ _ _ _ _] _) => FrameSourceId::MaxStreamData,
+            place_pattern!([_ _ _ _ _ _ _ _ _ _ _] _) => FrameSourceId::MaxStreams,
+            place_pattern!([_ _ _ _ _ _ _ _ _ _ _ _] ()) => FrameSourceId::DataBlocked,
+            place_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _] _) => FrameSourceId::StreamDataBlocked,
+            place_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _] _) => FrameSourceId::StreamsBlocked,
+            rest_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _] never) => match *never {},
         }
     }
 }
@@ -613,6 +699,11 @@ where
     {
         self.state.ack_lost(space, ack.before);
     }
+
+    /// An ACK intent goes for any active link path: the strategy ends it
+    /// only once no link path will be active again, which is the end of the
+    /// connection, not an unfulfilled intent.
+    fn unfulfilled(&mut self, _: PacketNumberSpaceKind, _: Unfulfilled) {}
 }
 
 /// The PING of a probe timeout: it makes the probe packet ack-eliciting.
@@ -662,6 +753,11 @@ impl<I> FrameSource for ProbePingFrameSource<I> {
         Pb: PublishIntent<NoIntent, Idx>,
     {
     }
+
+    /// A probe's PING goes on its link path's planner, which ends it when
+    /// the link path stops being active; the next expiry of the probe
+    /// timeout decides afresh, so nothing is kept for it.
+    fn unfulfilled(&mut self, _: PacketNumberSpaceKind, _: Unfulfilled) {}
 }
 
 // ---- where the frame sources are ----
@@ -885,6 +981,11 @@ where
             summary.len,
         );
     }
+
+    /// A CRYPTO intent goes for any active link path: the strategy ends it
+    /// only once no link path will be active again, which is the end of the
+    /// connection, not an unfulfilled intent.
+    fn unfulfilled(&mut self, _: CryptoLevel, _: Unfulfilled) {}
 }
 
 /// A server's HANDSHAKE_DONE frame, as a kind of frame source.

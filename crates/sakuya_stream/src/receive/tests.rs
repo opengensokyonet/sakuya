@@ -252,6 +252,26 @@ mod following {
     }
 
     #[test]
+    fn a_lost_stop_waits_again_while_it_is_needed() {
+        let (mut receiver, mut connection) = new_receiver(FollowingTermination::new(c(9)));
+        receiver
+            .on_stream_frame(stream(0, 100, false), &mut connection)
+            .unwrap();
+        receiver.stop(c(3)).unwrap();
+        receiver.on_stop_sent().unwrap();
+        assert_eq!(receiver.pending_stop(), None);
+        receiver.on_stop_lost();
+        assert_eq!(receiver.pending_stop(), Some(c(3)));
+        receiver.on_stop_sent().unwrap();
+        // once the data is complete, a lost STOP_SENDING is not sent again
+        receiver
+            .on_stream_frame(stream(100, 100, true), &mut connection)
+            .unwrap();
+        receiver.on_stop_lost();
+        assert_eq!(receiver.pending_stop(), None);
+    }
+
+    #[test]
     fn reader_drop_after_complete_reception_only_cleans_up() {
         let (mut receiver, mut connection) = new_receiver(FollowingTermination::new(c(9)));
         receiver

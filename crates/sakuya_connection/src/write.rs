@@ -27,6 +27,7 @@ use bytes::BytesMut;
 use sakuya_recovery::{
     packet_number_space::PacketNumberSpaceKind, send_journals::PacketSendAttempt,
 };
+use sakuya_stream::send_options::destination::Unfulfilled;
 use snafu::{Snafu, ensure};
 
 use crate::{
@@ -85,6 +86,11 @@ impl FrameSource for PaddingFrameSource {
     where
         Pb: PublishIntent<NoIntent, Idx>,
     {
+    }
+
+    /// PADDING is never planned: it has no intents.
+    fn unfulfilled(&mut self, item: Infallible, _: Unfulfilled) {
+        match item {}
     }
 }
 

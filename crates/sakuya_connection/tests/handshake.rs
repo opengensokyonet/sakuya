@@ -421,7 +421,7 @@ macro_rules! choices {
             type DestinationConnectionIds = common::TestDestinationConnectionIds;
             type ResetTokenRegistry = common::TestResetTokenRegistry;
             type SendParameters = sakuya_stream::send_options::urgency::Urgency;
-            type Streams<Lc> = sakuya_connection::v1::streams::locked::LockedStreamSet<Lc>;
+            type Streams<Lc, K> = sakuya_connection::v1::streams::locked::LockedStreamSet<Lc, K>;
             type StreamSetConfig = sakuya_connection::v1::streams::locked::LockedStreamSetConfig;
             type ImmediateClosePolicy = common::TestImmediateClosePolicy;
         }
@@ -701,6 +701,10 @@ mod watch {
     where
         T: v1::Choices<Clock = TestClock>,
         L: LineagePartList<T> + ConnectionErrorsOf,
+        v1::send::SendTypes<T, L>: v1::send_planning::IntakePublishOutcome<
+                v1::streams::send::StreamIntent<T::SendParameters>,
+                sakuya_connection::send_strategy::AnyActiveLinkPath,
+            >,
         for<'v> <L as LineageLists<'v, T>>::Established: GetAt<StreamsOf<T, L>, Is>,
     {
         fn reads(reads: &mut ReadSet) {

@@ -24,6 +24,7 @@ use crate::{
     v1::{
         Part,
         send::{AckIntent, FrameSourceId, ProbePingIntent, SendItem},
+        streams::send::{StreamIntent, shortest_stream_frame},
     },
 };
 
@@ -252,6 +253,55 @@ fn consumed_and_withdrawn_intents_leave_the_plan() {
     );
     drop(plan);
     assert_eq!(consumed.state(), IntentState::Consumed);
+    pending(&mut planner, &mut core, &waker);
+}
+
+/// An intent that stays after writing is not consumed by a supply that
+/// wrote part of it: its source resized it, and it is planned again by the
+/// room it needs then; the other intents are consumed as before.
+#[test]
+fn an_intent_that_stays_after_writing_is_planned_again() {
+    let (mut core, mut planner) = setup(&ALL, 12_000);
+    let stream_id =
+        sakuya_wire::v1::stream_id::StreamId::from(sakuya_wire::var_int::VarInt::from_u32(1));
+    let mut stream = core.publish_to(
+        StreamIntent::Stream {
+            stream_id,
+            parameters: sakuya_stream::send_options::urgency::Urgency::default(),
+            min: shortest_stream_frame(stream_id, sakuya_wire::var_int::VarInt::ZERO, true),
+        },
+        AnyActiveLinkPath,
+    );
+    let max_data = core.publish_to(
+        StreamIntent::<sakuya_stream::send_options::urgency::Urgency>::MaxData { len: 2 },
+        AnyActiveLinkPath,
+    );
+    let (_, waker) = waker();
+    let mut plan = ready(&mut planner, &mut core, &waker);
+    assert_eq!(
+        walk(&mut plan, 10),
+        [(
+            PlannedPacketKind::OneRtt,
+            vec![FrameSourceId::MaxData, FrameSourceId::Stream]
+        )]
+    );
+    drop(plan);
+    assert_eq!(max_data.state(), IntentState::Consumed);
+    assert_eq!(stream.state(), IntentState::Waiting);
+    // what is left needs more room: the next byte has an Offset field
+    stream.resize(MinimumLengths {
+        with_length: 5,
+        as_last: 4,
+    });
+    let mut plan = ready(&mut planner, &mut core, &waker);
+    assert_eq!(
+        walk(&mut plan, 10),
+        [(PlannedPacketKind::OneRtt, vec![FrameSourceId::Stream])]
+    );
+    drop(plan);
+    assert_eq!(stream.state(), IntentState::Waiting);
+    // withdrawn once nothing is left: nothing more is planned
+    let _ = stream.withdraw();
     pending(&mut planner, &mut core, &waker);
 }
 

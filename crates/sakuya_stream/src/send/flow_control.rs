@@ -244,6 +244,11 @@ pub enum StreamCreditEvent {
         /// The limit the frame carried.
         stream_data_limit: VarInt,
     },
+    /// A `STREAM_DATA_BLOCKED` frame was declared lost.
+    StreamBlockedSignalLost {
+        /// The limit the lost frame carried.
+        stream_data_limit: VarInt,
+    },
     /// A `STREAM_DATA_BLOCKED` frame was acknowledged.
     StreamBlockedSignalAcknowledged {
         /// The limit the acknowledged frame carried.
@@ -267,8 +272,11 @@ pub enum StreamCreditEvent {
 ///   balance streams against each other.
 /// - Wants `STREAM_DATA_BLOCKED` only when an attempt is actually limited by
 ///   the peer's stream limit. Once a frame carrying the current limit is sent
-///   it does not want another for that limit; a growth of the limit clears
-///   the intent.
+///   it does not want another for that limit, unless that frame is lost while
+///   the limit holds ([RFC 9000 §13.3]); a growth of the limit clears the
+///   intent.
+///
+/// [RFC 9000 §13.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-13.3
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FullCeilingAdmission {
     wants_signal: bool,
@@ -309,6 +317,12 @@ impl<T: LocalResetTarget> SendFlowControlPolicy<T> for FullCeilingAdmission {
                 if stream_data_limit == context.peer_stream_limit {
                     self.wants_signal = false;
                 }
+            }
+            StreamCreditEvent::StreamBlockedSignalLost { stream_data_limit }
+                if self.signalled_limit == Some(stream_data_limit)
+                    && stream_data_limit == context.peer_stream_limit =>
+            {
+                self.wants_signal = true;
             }
             _ => {}
         }

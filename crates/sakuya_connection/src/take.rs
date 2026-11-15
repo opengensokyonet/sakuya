@@ -205,6 +205,67 @@ impl<X, H, T: GetAt<X, I>, I> GetAt<X, There<I>> for HCons<H, T> {
     }
 }
 
+/// A list that holds, at position `I`, a borrow of the component `X` that
+/// may be absent (`GetOptionalAt`): an element a lend appends to a lineage
+/// from a node outside it, such as the established layer's stream set,
+/// which is `None` while there is no such node.
+#[diagnostic::on_unimplemented(
+    message = "the component `{X}` is not appended to this view",
+    label = "`{X}` is not appended to this view"
+)]
+pub trait GetOptionalAt<X, I> {
+    /// Where `X` is in the list.
+    const AT: usize;
+    /// Change `X`, if it is there.
+    fn get_optional_at_mut(&mut self) -> Option<&mut X>;
+}
+impl<X, T> GetOptionalAt<X, Here> for HCons<Option<&mut X>, T> {
+    const AT: usize = 0;
+    #[inline]
+    fn get_optional_at_mut(&mut self) -> Option<&mut X> {
+        self.head.as_deref_mut()
+    }
+}
+impl<X, H, T: GetOptionalAt<X, I>, I> GetOptionalAt<X, There<I>> for HCons<H, T> {
+    const AT: usize = 1 + T::AT;
+    #[inline]
+    fn get_optional_at_mut(&mut self) -> Option<&mut X> {
+        self.tail.get_optional_at_mut()
+    }
+}
+
+/// A list with one more element at its end (`AppendLast`).
+pub trait AppendLast<Y> {
+    /// The list with `Y` last.
+    type Out;
+    /// Put `last` at the end.
+    fn append_last(self, last: Y) -> Self::Out;
+}
+impl<Y> AppendLast<Y> for HNil {
+    type Out = HCons<Y, HNil>;
+    #[inline]
+    fn append_last(self, last: Y) -> Self::Out {
+        HCons {
+            head: last,
+            tail: HNil,
+        }
+    }
+}
+impl<Y, H, T: AppendLast<Y>> AppendLast<Y> for HCons<H, T> {
+    type Out = HCons<H, T::Out>;
+    #[inline]
+    fn append_last(self, last: Y) -> Self::Out {
+        HCons {
+            head: self.head,
+            tail: self.tail.append_last(last),
+        }
+    }
+}
+
+/// The lineage list `V` with the borrow `X`, which may be absent, appended
+/// last for `'s`.
+pub type WithOptional<'s, V, X> = <V as AppendLast<Option<&'s mut X>>>::Out;
+
 /// A list of borrows borrowed again for a shorter time, positions kept.
 ///
 /// It is implemented for every `'s`, not only one the borrows outlive:
@@ -231,6 +292,16 @@ impl<'s, X: 's, T: Reborrow<'s>> Reborrow<'s> for HCons<&mut X, T> {
     fn reborrow(&'s mut self) -> Self::Out {
         HCons {
             head: &mut *self.head,
+            tail: self.tail.reborrow(),
+        }
+    }
+}
+impl<'s, X: 's, T: Reborrow<'s>> Reborrow<'s> for HCons<Option<&mut X>, T> {
+    type Out = HCons<Option<&'s mut X>, T::Out>;
+    #[inline]
+    fn reborrow(&'s mut self) -> Self::Out {
+        HCons {
+            head: self.head.as_deref_mut(),
             tail: self.tail.reborrow(),
         }
     }
@@ -292,6 +363,40 @@ impl<'r, V> Lineage<'r, V> {
     {
         self.taken.push(V::AT);
         self.list.get_at_mut()
+    }
+
+    /// Change the component `X` appended to the lineage, if it is there; the
+    /// change is recorded like a take.
+    ///
+    /// The position recorded lies past the components of the lineage's
+    /// nodes, which the driver ignores when it rereads after the lend:
+    /// whoever appends a component from another node records the take of
+    /// that node itself.
+    #[inline]
+    pub fn get_optional_mut<X, I>(&mut self) -> Option<&mut X>
+    where
+        V: GetOptionalAt<X, I>,
+    {
+        self.taken.push(V::AT);
+        self.list.get_optional_at_mut()
+    }
+
+    /// This lineage with `last`, a borrow of a component of a node outside
+    /// it that may be absent, appended at its end: frame sources that are
+    /// found in another node take it from there
+    /// ([`get_optional_mut`](Self::get_optional_mut)).
+    #[inline]
+    pub(crate) fn append_optional<'s, X>(
+        self,
+        last: Option<&'s mut X>,
+    ) -> Lineage<'r, WithOptional<'s, V, X>>
+    where
+        V: AppendLast<Option<&'s mut X>>,
+    {
+        Lineage {
+            list: self.list.append_last(last),
+            taken: self.taken,
+        }
     }
 
     /// This lineage again for a shorter time, with nothing taken, so that it

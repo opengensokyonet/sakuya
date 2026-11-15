@@ -31,6 +31,11 @@
 //! each datagram starting after the intent that was given its turn last on
 //! the link path. Application data that does not fit is passed over.
 //!
+//! A supply that writes something consumes its intent, except an intent
+//! that stays after writing ([`RankedIntent::stays_after_writing`]), such as
+//! a stream's data: its source wrote as much as it could and resized or
+//! withdrew it, and the next plan takes it by the room it needs then.
+//!
 //! Intents published through the intake ([`RankedSendIntake`]), from the
 //! application's threads or from the driver while it holds the core, wait
 //! in a zone the core shares with the intake and the tickets, under a lock
@@ -115,6 +120,16 @@ pub trait RankedIntent {
     fn urgency(&self) -> Urgency {
         Urgency::default()
     }
+
+    /// Whether the intent stays after a supply that wrote something: the
+    /// strategy does not consume it, and its frame source, which may have
+    /// written part of what it wants, resizes or withdraws it under its own
+    /// lock before the supply returns. An intent that stays is planned again
+    /// by the least room its ticket gives then. By default an intent is
+    /// consumed by the first supply that writes anything.
+    fn stays_after_writing(&self) -> bool {
+        false
+    }
 }
 
 impl RankedIntent for CNil {
@@ -123,6 +138,10 @@ impl RankedIntent for CNil {
     }
 
     fn urgency(&self) -> Urgency {
+        match *self {}
+    }
+
+    fn stays_after_writing(&self) -> bool {
         match *self {}
     }
 }
@@ -139,6 +158,13 @@ impl<H: RankedIntent, T: RankedIntent> RankedIntent for Coproduct<H, T> {
         match self {
             Coproduct::Inl(intent) => intent.urgency(),
             Coproduct::Inr(rest) => rest.urgency(),
+        }
+    }
+
+    fn stays_after_writing(&self) -> bool {
+        match self {
+            Coproduct::Inl(intent) => intent.stays_after_writing(),
+            Coproduct::Inr(rest) => rest.stays_after_writing(),
         }
     }
 }
@@ -1027,6 +1053,9 @@ struct PlannedEntry {
     /// For application data: its urgency and where it stands, to give the
     /// next turn after it once it is supplied.
     turn: Option<(usize, IntentOrder)>,
+    /// Whether the intent stays after a supply that wrote something
+    /// ([`RankedIntent::stays_after_writing`]).
+    stays: bool,
 }
 
 #[derive(Debug)]
@@ -1191,6 +1220,7 @@ where
                 min,
                 class,
                 turn: application_data.then_some((urgency, order)),
+                stays: entry.intent.stays_after_writing(),
             };
             match packets.last_mut() {
                 Some(packet) if packet.kind == kind => packet.items.push(planned),
@@ -1343,14 +1373,15 @@ impl<I: SendStrategyTypes> RankedPlan<'_, I> {
 }
 
 /// The items supplied had their turn; those that wrote anything are
-/// consumed.
+/// consumed, unless they stay after writing: their sources already resized
+/// or withdrew them.
 impl<I: SendStrategyTypes> Drop for RankedPlan<'_, I> {
     fn drop(&mut self) {
         for (entry, wrote) in self.feedback.supplied.drain(..) {
             if let Some((urgency, order)) = entry.turn {
                 self.planner.turns[urgency] = Some(order);
             }
-            if wrote {
+            if wrote && !entry.stays {
                 let cell = match entry.held {
                     Held::Core(index) => &self.core.intents[index].cell,
                     Held::LinkPath(index) => &self.planner.intents[index].cell,

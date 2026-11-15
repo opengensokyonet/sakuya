@@ -730,6 +730,13 @@ where
     }
 
     /// Records that a `STREAM_DATA_BLOCKED` frame carrying
+    /// `stream_data_limit` was declared lost; the flow-control policy decides
+    /// whether another is wanted.
+    pub fn on_stream_data_blocked_lost(&mut self, stream_data_limit: VarInt) {
+        self.notify_flow_control(StreamCreditEvent::StreamBlockedSignalLost { stream_data_limit });
+    }
+
+    /// Records that a `STREAM_DATA_BLOCKED` frame carrying
     /// `stream_data_limit` was acknowledged.
     ///
     /// The value is the one the acknowledged frame carried, not the current

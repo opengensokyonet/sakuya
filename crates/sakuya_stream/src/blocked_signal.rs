@@ -11,8 +11,8 @@
 ///
 /// ```text
 ///          blocked at L               sent L
-///   Quiet ─────────────▶ Wanted(L) ─────────▶ Signalled(L)
-///     ▲                     │                     │
+///   Quiet ─────────────▶ Wanted(L) ◀────────▶ Signalled(L)
+///     ▲                     │        lost L       │
 ///     └───── limit raised above L ────────────────┘
 /// ```
 ///
@@ -45,6 +45,17 @@ impl<L: Copy + Ord> BlockedSignal<L> {
     pub(crate) fn on_sent(&mut self, limit: L) {
         if *self == Self::Wanted(limit) {
             *self = Self::Signalled(limit);
+        }
+    }
+
+    /// Records that a frame carrying `limit` was lost: while it is still
+    /// the limit recorded as signalled, a frame carrying it is wanted again
+    /// ([RFC 9000 §13.3]). A frame for another limit changes nothing.
+    ///
+    /// [RFC 9000 §13.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-13.3
+    pub(crate) fn on_lost(&mut self, limit: L) {
+        if *self == Self::Signalled(limit) {
+            *self = Self::Wanted(limit);
         }
     }
 

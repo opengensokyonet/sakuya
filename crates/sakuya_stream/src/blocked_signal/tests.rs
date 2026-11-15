@@ -45,3 +45,19 @@ fn stale_limits_change_nothing() {
     signal.on_blocked(30);
     assert_eq!(signal.wanted(), Some(30));
 }
+
+#[test]
+fn a_lost_frame_is_wanted_again_while_its_limit_holds() {
+    let mut signal = BlockedSignal::default();
+    signal.on_blocked(10u32);
+    signal.on_sent(10);
+    signal.on_lost(10);
+    assert_eq!(signal.wanted(), Some(10));
+    signal.on_sent(10);
+    // a stale loss, and one after the limit grew, change nothing
+    signal.on_lost(5);
+    assert_eq!(signal.wanted(), None);
+    signal.on_limit_raised(20);
+    signal.on_lost(10);
+    assert_eq!(signal, BlockedSignal::Quiet);
+}

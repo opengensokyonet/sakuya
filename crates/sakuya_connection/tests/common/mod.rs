@@ -442,7 +442,7 @@ impl sakuya_connection::v1::Choices for Mine {
     type DestinationConnectionIds = TestDestinationConnectionIds;
     type ResetTokenRegistry = TestResetTokenRegistry;
     type SendParameters = sakuya_stream::send_options::urgency::Urgency;
-    type Streams<Lc> = sakuya_connection::v1::streams::locked::LockedStreamSet<Lc>;
+    type Streams<Lc, K> = sakuya_connection::v1::streams::locked::LockedStreamSet<Lc, K>;
     type StreamSetConfig = sakuya_connection::v1::streams::locked::LockedStreamSetConfig;
     type ImmediateClosePolicy = TestImmediateClosePolicy;
 }

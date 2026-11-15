@@ -17,7 +17,7 @@
 //! | CONNECTION_CLOSE | the [`CloseReasonRecord`], with the peer's close; every link path drains |
 //! | NEW_CONNECTION_ID | the destination connection ID strategy of the logical path ([`ConnectionIds`](super::connection_ids::ConnectionIds)) |
 //! | ACK | the send journals of its space, the recovery layers of the logical path's link paths, and the parts the summaries of the packets settled go back to ([`ack`](super::ack)) |
-//! | STREAM, RESET_STREAM, STOP_SENDING, MAX_DATA, MAX_STREAM_DATA, MAX_STREAMS, DATA_BLOCKED, STREAM_DATA_BLOCKED, STREAMS_BLOCKED | the [`StreamSet`] of the established layer; a STREAM frame with the level of its packet |
+//! | STREAM, RESET_STREAM, STOP_SENDING, MAX_DATA, MAX_STREAM_DATA, MAX_STREAMS, DATA_BLOCKED, STREAM_DATA_BLOCKED, STREAMS_BLOCKED | the [`StreamSet`] of the established layer, with the handle of the send strategy's intake the connection node keeps; a STREAM frame with the level of its packet |
 //!
 //! A frame of streams or flow control that arrives without an established
 //! layer is ignored while the connection closes, and does not arrive
@@ -71,8 +71,13 @@ use super::{
     keys::OneRttKeys,
     link::LinkClone,
     recovery::{CongestionPartOf, OthersOf, RecoveryFactoryOf, RttOf},
+    send::SendTypes,
+    send_planning::{IntakeOf, IntakePublishOutcome, SendStrategyIntake, SendStrategyOf},
     spaces::SendJournalsOf,
-    streams::{StreamSet, StreamSetFrameError, StreamsOf},
+    streams::{
+        StreamSet, StreamSetFrameError, StreamsOf,
+        send::{StreamIntent, StreamIntentHandle, StreamIntentHandleOf, StreamIntentTicketOf},
+    },
 };
 use crate::role::LinkPathRole;
 use crate::{
@@ -85,6 +90,10 @@ use crate::{
     feedback::FeedbackSummariesOf,
     layer::{self, LogicalPath},
     others::OtherNodes,
+    send_strategy::{
+        AnyActiveLinkPath, IntentTicketResize, IntentTicketWithdraw, SendIntentIntake,
+        SendStrategy, SendStrategyTypes, SharedPublishTo,
+    },
     share::{FlatMut, FlatRef, LineageLists, LineagePartList, LinkPathIdentifierOf, NodeData},
     take::{GetAt, ReadEach, TakeEach},
 };
@@ -203,6 +212,8 @@ impl<
     Jr,
     Hf,
     Is,
+    Ii,
+    Idx,
 >
     FrameDispatch<
         T,
@@ -210,7 +221,7 @@ impl<
         (
             (Ic, Ir, Ih, Icid),
             (Iv, Ima, Irt),
-            (Il, Is),
+            (Il, Is, Ii, Idx),
             (
                 (Ij, In, If, Ird, Io, Ikp),
                 (Ide, Ipp),
@@ -242,7 +253,7 @@ where
         + ReadEach<AckReads<L>, Ird>
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
         + GetAt<KeyPhaseNumbers, Ikp>,
-    for<'x> <L as LineageLists<'x, T>>::LogicalPath: CoreLentFeedback<T, L, Hf>,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath: CoreLentFeedback<T, L, StreamsOf<T, L>, Hf>,
     for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![LinkClone<T::Link>], Ile>,
@@ -261,7 +272,20 @@ where
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![LinkPathRole<InstantOf<T>>], Il>,
-    StreamsOf<T, L>: StreamSet<CloseCauseOf<T, L>> + 'static,
+    SendTypes<T, L>: SendStrategyTypes
+        + IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    StreamsOf<T, L>: StreamSet<
+            CloseCauseOf<T, L>,
+            StreamIntentTicketOf<T, L>,
+            SendParameters = T::SendParameters,
+        > + 'static,
+    StreamIntentTicketOf<T, L>: IntentTicketResize + IntentTicketWithdraw,
+    IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
+        + SharedPublishTo<StreamIntent<T::SendParameters>, AnyActiveLinkPath, Idx>,
+    StreamIntentHandleOf<T, L, Idx>:
+        StreamIntentHandle<T::SendParameters, StreamIntentTicketOf<T, L>>,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<SendStrategyIntake<IntakeOf<T, L>>, Ii>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![StreamsOf<T, L>], Is>,
@@ -293,6 +317,7 @@ where
                 Jx,
                 Jr,
                 Hf,
+                Is,
             >(lineage, others, &frame, packet),
             FrameRun::Padding(_) | FrameRun::Ping(_) => Ok(()),
             FrameRun::Crypto(frame) => {
@@ -323,50 +348,61 @@ where
             }
             FrameRun::Stream(frame) => {
                 let level = packet.level();
-                to_streams::<T, L, B, Ir, Is>(lineage, others, frame.type_value(), |streams| {
-                    streams.on_stream_frame(level, frame)
-                })
+                to_streams::<T, L, B, Ir, Is, Ii, Idx>(
+                    lineage,
+                    others,
+                    frame.type_value(),
+                    |streams, publish| streams.on_stream_frame(publish, level, frame),
+                )
             }
-            FrameRun::ResetStream(frame) => {
-                to_streams::<T, L, B, Ir, Is>(lineage, others, frame.type_value(), |streams| {
-                    streams.on_reset_stream(frame)
-                })
-            }
-            FrameRun::StopSending(frame) => {
-                to_streams::<T, L, B, Ir, Is>(lineage, others, frame.type_value(), |streams| {
-                    streams.on_stop_sending(frame)
-                })
-            }
-            FrameRun::MaxData(frame) => {
-                to_streams::<T, L, B, Ir, Is>(lineage, others, frame.type_value(), |streams| {
-                    streams.on_max_data(frame)
-                })
-            }
-            FrameRun::MaxStreamData(frame) => {
-                to_streams::<T, L, B, Ir, Is>(lineage, others, frame.type_value(), |streams| {
-                    streams.on_max_stream_data(frame)
-                })
-            }
-            FrameRun::MaxStreams(frame) => {
-                to_streams::<T, L, B, Ir, Is>(lineage, others, frame.type_value(), |streams| {
-                    streams.on_max_streams(frame)
-                })
-            }
-            FrameRun::DataBlocked(frame) => {
-                to_streams::<T, L, B, Ir, Is>(lineage, others, frame.type_value(), |streams| {
-                    streams.on_data_blocked(frame)
-                })
-            }
-            FrameRun::StreamDataBlocked(frame) => {
-                to_streams::<T, L, B, Ir, Is>(lineage, others, frame.type_value(), |streams| {
-                    streams.on_stream_data_blocked(frame)
-                })
-            }
-            FrameRun::StreamsBlocked(frame) => {
-                to_streams::<T, L, B, Ir, Is>(lineage, others, frame.type_value(), |streams| {
-                    streams.on_streams_blocked(frame)
-                })
-            }
+            FrameRun::ResetStream(frame) => to_streams::<T, L, B, Ir, Is, Ii, Idx>(
+                lineage,
+                others,
+                frame.type_value(),
+                |streams, publish| streams.on_reset_stream(publish, frame),
+            ),
+            FrameRun::StopSending(frame) => to_streams::<T, L, B, Ir, Is, Ii, Idx>(
+                lineage,
+                others,
+                frame.type_value(),
+                |streams, publish| streams.on_stop_sending(publish, frame),
+            ),
+            FrameRun::MaxData(frame) => to_streams::<T, L, B, Ir, Is, Ii, Idx>(
+                lineage,
+                others,
+                frame.type_value(),
+                |streams, publish| streams.on_max_data(publish, frame),
+            ),
+            FrameRun::MaxStreamData(frame) => to_streams::<T, L, B, Ir, Is, Ii, Idx>(
+                lineage,
+                others,
+                frame.type_value(),
+                |streams, publish| streams.on_max_stream_data(publish, frame),
+            ),
+            FrameRun::MaxStreams(frame) => to_streams::<T, L, B, Ir, Is, Ii, Idx>(
+                lineage,
+                others,
+                frame.type_value(),
+                |streams, publish| streams.on_max_streams(publish, frame),
+            ),
+            FrameRun::DataBlocked(frame) => to_streams::<T, L, B, Ir, Is, Ii, Idx>(
+                lineage,
+                others,
+                frame.type_value(),
+                |streams, publish| streams.on_data_blocked(publish, frame),
+            ),
+            FrameRun::StreamDataBlocked(frame) => to_streams::<T, L, B, Ir, Is, Ii, Idx>(
+                lineage,
+                others,
+                frame.type_value(),
+                |streams, publish| streams.on_stream_data_blocked(publish, frame),
+            ),
+            FrameRun::StreamsBlocked(frame) => to_streams::<T, L, B, Ir, Is, Ii, Idx>(
+                lineage,
+                others,
+                frame.type_value(),
+                |streams, publish| streams.on_streams_blocked(publish, frame),
+            ),
             other => error::UnhandledFrameSnafu {
                 kind: other.frame_type(),
             }
@@ -380,7 +416,9 @@ where
 }
 
 /// Hand a frame of streams or flow control, whose Frame Type is
-/// `type_value`, to the stream set of the established layer with `handle`.
+/// `type_value`, to the stream set of the established layer with `handle`,
+/// which publishes through the handle of the strategy's intake that the
+/// connection node keeps.
 ///
 /// Without an established layer the frame is ignored once the record of why
 /// the connection closed is written: the layer ended as the connection
@@ -388,19 +426,27 @@ where
 /// ServerHello is written, a client before it can open 1-RTT packets, and no
 /// 0-RTT packet is taken); a release build closes with INTERNAL_ERROR if
 /// there is not.
-fn to_streams<'v, T, L, B, Ir, Is>(
+fn to_streams<'v, T, L, B, Ir, Is, Ii, Idx>(
     lineage: &mut LineageOf<'v, T, L, LogicalPath>,
     others: &mut OtherNodes<'v, T, L, B>,
     type_value: VarInt,
-    handle: impl FnOnce(&mut StreamsOf<T, L>) -> Result<(), StreamSetFrameError>,
+    handle: impl FnOnce(
+        &mut StreamsOf<T, L>,
+        &StreamIntentHandleOf<T, L, Idx>,
+    ) -> Result<(), StreamSetFrameError>,
 ) -> Result<(), ConnectionError>
 where
     T: Choices,
     L: LineagePartList<T> + ConnectionErrorsOf,
     B: CallBundle,
-    StreamsOf<T, L>: StreamSet<CloseCauseOf<T, L>> + 'static,
-    for<'x> <L as LineageLists<'x, T>>::LogicalPath:
-        GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>,
+    SendTypes<T, L>: SendStrategyTypes
+        + IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    StreamsOf<T, L>: 'static,
+    IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
+        + SharedPublishTo<StreamIntent<T::SendParameters>, AnyActiveLinkPath, Idx>,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
+        + GetAt<SendStrategyIntake<IntakeOf<T, L>>, Ii>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![StreamsOf<T, L>], Is>,
@@ -422,7 +468,11 @@ where
         }
         .fail();
     };
-    handle(streams).with_context(|_| error::StreamSetSnafu {
+    let publish = lineage
+        .get::<SendStrategyIntake<IntakeOf<T, L>>, Ii>()
+        .intake()
+        .handle::<StreamIntent<T::SendParameters>, Idx>();
+    handle(streams, &publish).with_context(|_| error::StreamSetSnafu {
         frame_type: frame_type_value(type_value),
     })
 }

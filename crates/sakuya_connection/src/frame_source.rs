@@ -7,7 +7,8 @@
 //! each frame it writes leaves a summary in the packet's record, which
 //! comes back to it when the packet is delivered or lost. Then it may
 //! publish intents again through the publisher it is lent
-//! ([`PublishIntent`]).
+//! ([`PublishIntent`]). An intent of it that was refused, or that the
+//! strategy ended, comes back to it as unfulfilled.
 //!
 //! A part lists the kinds of its frame sources ([`FrameSourceKind`], in
 //! [`SendIntentPart::FrameSources`]); each kind says how its source is
@@ -25,6 +26,7 @@
 use core::marker::PhantomData;
 
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
+use sakuya_stream::send_options::destination::Unfulfilled;
 use sakuya_wire::parts::{CNil, Coproduct, HCons, HNil};
 
 use crate::{
@@ -90,6 +92,12 @@ pub trait FrameSource {
         summary: &Self::Summary,
     ) where
         Pb: PublishIntent<Self::Intent, Idx>;
+
+    /// An intent of this source, the one `item` stands for, was not
+    /// fulfilled for `cause`: its publishing was refused, or the strategy
+    /// ended it after taking it. The end of the layer the source lives on is
+    /// not one; the source learns of it otherwise.
+    fn unfulfilled(&mut self, item: Self::Item<'_>, cause: Unfulfilled);
 }
 
 /// A frame source borrowed is that frame source: what a kind of frame
@@ -133,6 +141,10 @@ impl<S: FrameSource + ?Sized> FrameSource for &mut S {
         Pb: PublishIntent<Self::Intent, Idx>,
     {
         (**self).lost::<Pb, Idx>(publish, space, summary);
+    }
+
+    fn unfulfilled(&mut self, item: Self::Item<'_>, cause: Unfulfilled) {
+        (**self).unfulfilled(item, cause);
     }
 }
 

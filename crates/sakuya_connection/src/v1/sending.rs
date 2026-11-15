@@ -161,10 +161,12 @@ use super::{
     },
     send::SendTypes,
     send_planning::{
-        CongestionAllowance, LinkPathPlanner, LinkPathSendPlannerOf, SendKeyLevels,
-        SendStrategyCore, SendStrategyOf, datagram_limits, link_path_packet_overheads,
+        CongestionAllowance, IntakePublishOutcome, LinkPathPlanner, LinkPathSendPlannerOf,
+        SendKeyLevels, SendStrategyCore, SendStrategyOf, datagram_limits,
+        link_path_packet_overheads,
     },
     spaces::{DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
+    streams::{StreamsOf, send::StreamIntent},
 };
 use crate::{
     call::{CallBundle, CallKind, NodeCallFamily, NodeLoan},
@@ -181,12 +183,12 @@ use crate::{
     others::OtherNodes,
     role::LinkPathRole,
     send_strategy::{
-        DatagramFillPlan, DatagramLimits, FrameSourceCursor, FrameSourceSet, LeadingContent,
-        LinkPathRoleKind, LinkPathSendPlanner, Observe, PacketOverheads, PlannedDatagram,
-        PlannedPacket, PlannedPacketKind, SendStrategy, SendStrategyTypes,
+        AnyActiveLinkPath, DatagramFillPlan, DatagramLimits, FrameSourceCursor, FrameSourceSet,
+        LeadingContent, LinkPathRoleKind, LinkPathSendPlanner, Observe, PacketOverheads,
+        PlannedDatagram, PlannedPacket, PlannedPacketKind, SendStrategy, SendStrategyTypes,
     },
     share::{FlatMut, FlatRef, LineageLists, LineagePartList, LinkPathIdentifierOf, NodeData},
-    take::{GetAt, Lineage, ReadEach, Reborrow, Take, TakeEach},
+    take::{AppendLast, GetAt, Lineage, ReadEach, Reborrow, Take, TakeEach, WithOptional},
     write::{
         ClassOfSource, FlightClass, Last, NotLast, OpenPacket, PacketWriting, PaddingSummary,
         Supplied,
@@ -320,9 +322,16 @@ pub type FillKeysRest<'x, T, L, It> =
     <<L as LineageLists<'x, T>>::LinkPath as TakeEach<'x, FillTakes<T, L>, It>>::Rest;
 
 /// What is left of the link path's lineage once filling took
-/// [`FillTakes`] and [`FillReadTakes`]: where the frame sources are found.
+/// [`FillTakes`] and [`FillReadTakes`].
 pub type FillRest<'x, T, L, It, Iw> =
     <FillKeysRest<'x, T, L, It> as TakeEach<'x, FillReadTakes<T>, Iw>>::Rest;
+
+/// What is left of the link path's lineage once filling took
+/// [`FillTakes`] and [`FillReadTakes`], with the stream set of the
+/// established layer appended, if there is one: where the frame sources are
+/// found.
+pub type FillStreamsRest<'x, T, L, It, Iw> =
+    WithOptional<'x, FillRest<'x, T, L, It, Iw>, StreamsOf<T, L>>;
 
 /// What filling reads from what is left of the lineage at the start of
 /// each datagram: the link's clone and facts, the peer's transport
@@ -365,7 +374,8 @@ pub type SettleReads<T, L> = HList![
 /// keys and `Il` of the link's clone; for settling, `Ij` of the send
 /// journals, `If` of the recovery factory, `Iv` of [`SettleReads`], `Ie`
 /// of the idle timeout, `Iq` of [`SettleRecoveryTakes`], `Hf` of the
-/// core and each part's frame sources, for feedback; `Ipp` and `Ima` of
+/// core and each part's frame sources, for feedback, and `Ist` of the
+/// stream set in the established layer, which filling and feedback borrow; `Ipp` and `Ima` of
 /// the peer's `max_udp_payload_size` and `max_ack_delay`; `Jx`, `Jr` and `Jm` of the stored part of
 /// congestion control, the RTT estimate and the datagram size probing
 /// policy in a recovery layer; for 1-RTT key updates, `Iu` of the AEAD's
@@ -394,6 +404,7 @@ type Positions<
     Ie,
     Iq,
     Hf,
+    Ist,
     Ipp,
     Ima,
     Jx,
@@ -414,7 +425,7 @@ type Positions<
     Is,
     (It, Iw, Ir, Ici, Ik, Hs),
     (Ii, Ih, Io, Il),
-    (Ij, If, Iv, Ie, Iq, Hf),
+    (Ij, If, Iv, Ie, Iq, Hf, Ist),
     (Ipp, Ima, Jx, Jr, Jm),
     (Iu, Ihc, Ikp, Ic, Ier, Irt),
     (Icp, Irs, Ilf, Ida, Idr),
@@ -481,6 +492,7 @@ impl<
     Ie,
     Iq,
     Hf,
+    Ist,
     Ipp,
     Ima,
     Jx,
@@ -521,6 +533,7 @@ impl<
             Ie,
             Iq,
             Hf,
+            Ist,
             Ipp,
             Ima,
             Jx,
@@ -597,52 +610,57 @@ where
     L: ConnectionErrorsOf,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ier>,
     for<'x> FillKeysRest<'x, T, L, It>: TakeEach<'x, FillReadTakes<T>, Iw>,
-    for<'x> FillRest<'x, T, L, It, Iw>:
+    for<'x> FillRest<'x, T, L, It, Iw>: AppendLast<Option<&'x mut StreamsOf<T, L>>>,
+    for<'x> FillStreamsRest<'x, T, L, It, Iw>:
         ReadEach<FillReads<T, L>, Ir> + GetAt<ConnectionIdsOf<T>, Ici>,
     for<'x> L: PartsFrameSourceDispatch<
             T,
             L,
             InitialPacket,
-            FillRest<'x, T, L, It, Iw>,
+            FillStreamsRest<'x, T, L, It, Iw>,
             FeedbackSummaryOf<T, L>,
             Hs,
         > + PartsFrameSourceDispatch<
             T,
             L,
             HandshakePacket,
-            FillRest<'x, T, L, It, Iw>,
+            FillStreamsRest<'x, T, L, It, Iw>,
             FeedbackSummaryOf<T, L>,
             Hs,
         > + PartsFrameSourceDispatch<
             T,
             L,
             ZeroRttPacket,
-            FillRest<'x, T, L, It, Iw>,
+            FillStreamsRest<'x, T, L, It, Iw>,
             FeedbackSummaryOf<T, L>,
             Hs,
         > + PartsFrameSourceDispatch<
             T,
             L,
             OneRttPacket,
-            FillRest<'x, T, L, It, Iw>,
+            FillStreamsRest<'x, T, L, It, Iw>,
             FeedbackSummaryOf<T, L>,
             Hs,
         > + PartsFrameSourceDispatch<
             T,
             L,
             OneRttProbePacket,
-            FillRest<'x, T, L, It, Iw>,
+            FillStreamsRest<'x, T, L, It, Iw>,
             FeedbackSummaryOf<T, L>,
             Hs,
         > + PartsFrameSourceDispatch<
             T,
             L,
             SettlingResponsePacket,
-            FillRest<'x, T, L, It, Iw>,
+            FillStreamsRest<'x, T, L, It, Iw>,
             FeedbackSummaryOf<T, L>,
             Hs,
         >,
-    for<'x> <L as LineageLists<'x, T>>::LinkPath: CoreLentFeedback<T, L, Hf>,
+    for<'x> <L as LineageLists<'x, T>>::LinkPath: CoreLentFeedback<T, L, StreamsOf<T, L>, Hf>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![StreamsOf<T, L>], Ist>,
     for<'x> NodeData<T, L, layer::Recovery>: FlatMut<'x>,
     for<'x> <NodeData<T, L, layer::Recovery> as FlatMut<'x>>::Out: TakeEach<'x, FillRecoveryTakes<T, L>, Ik>
         + TakeEach<'x, SettleRecoveryTakes<T, L, S, Ls>, Iq>
@@ -724,53 +742,67 @@ where
                 Poll::Ready(())
             };
         }
-        let (
-            hlist_pat![
-                core,
-                planner,
-                registrar,
-                journals,
-                usage,
-                factory,
-                amplification
-            ],
-            rest,
-        ) = Take::<FillTakes<T, L>, It>::take(lineage.reborrow());
-        let (hlist_pat![initial_keys, handshake_keys, one_rtt_keys], mut rest) =
-            rest.take_read::<FillReadTakes<T>, Iw>();
-        let filled = others.with_own_recovery::<FillRecoveryTakes<T, L>, Ik, _>(
-            |hlist_pat![part, state], others| {
-                lend_congestion::<T, L, B, Jx, Jr, _>(factory, part, others, |mut access| {
-                    let mut filling = Filling::<T, L, _, _, Ir, Ici, Ipp, Hs> {
-                        now,
-                        link: &link,
-                        link_path: &link_path,
+        // the frame sources of the streams find the stream set appended to
+        // what is left of the lineage; the established layer is recorded as
+        // taken, and the positions recorded past the lineage's components
+        // are ignored
+        let filled =
+            others.with_established::<HList![StreamsOf<T, L>], Ist, _>(|streams, others| {
+                let streams = streams.map(|hlist_pat![streams]| streams);
+                let (
+                    hlist_pat![
                         core,
                         planner,
                         registrar,
                         journals,
-                        initial_keys,
-                        handshake_keys,
-                        one_rtt_keys,
-                        initial_discarded: false,
                         usage,
-                        amplification,
-                        rest: &mut rest,
-                        access: &mut access,
-                        estimate,
-                        pmtu_conclusion,
-                        state,
-                        positions: core::marker::PhantomData,
-                    };
-                    let end = filling.fill(batch, cx);
-                    let wake_itself = filling
-                        .planner
-                        .filling_ended(end == FillEnd::Blocked && batch.is_empty(), cx.waker());
-                    (filling.initial_discarded, wake_itself)
-                })
-            },
-        );
-        drop(rest);
+                        factory,
+                        amplification
+                    ],
+                    rest,
+                ) = Take::<FillTakes<T, L>, It>::take(lineage.reborrow());
+                let (hlist_pat![initial_keys, handshake_keys, one_rtt_keys], rest) =
+                    rest.take_read::<FillReadTakes<T>, Iw>();
+                let mut rest = rest.append_optional(streams);
+                others.with_own_recovery::<FillRecoveryTakes<T, L>, Ik, _>(
+                    |hlist_pat![part, state], others| {
+                        lend_congestion::<T, L, B, Jx, Jr, _>(
+                            factory,
+                            part,
+                            others,
+                            |mut access| {
+                                let mut filling = Filling::<T, L, _, _, Ir, Ici, Ipp, Hs> {
+                                    now,
+                                    link: &link,
+                                    link_path: &link_path,
+                                    core,
+                                    planner,
+                                    registrar,
+                                    journals,
+                                    initial_keys,
+                                    handshake_keys,
+                                    one_rtt_keys,
+                                    initial_discarded: false,
+                                    usage,
+                                    amplification,
+                                    rest: &mut rest,
+                                    access: &mut access,
+                                    estimate,
+                                    pmtu_conclusion,
+                                    state,
+                                    positions: core::marker::PhantomData,
+                                };
+                                let end = filling.fill(batch, cx);
+                                let wake_itself = filling.planner.filling_ended(
+                                    end == FillEnd::Blocked && batch.is_empty(),
+                                    cx.waker(),
+                                );
+                                (filling.initial_discarded, wake_itself)
+                            },
+                        )
+                    },
+                )
+            });
         let Some((initial_discarded, wake_itself)) = filled else {
             return no_layer;
         };
@@ -814,7 +846,7 @@ where
             })
         };
         if !discarded.as_slice().is_empty() {
-            give_up::<T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ipp, Ima, Jx, Jr, Jm>(
+            give_up::<T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ist, Ipp, Ima, Jx, Jr, Jm>(
                 lineage, others, discarded,
             );
         }
@@ -856,7 +888,7 @@ where
             }
             Err(_) => {
                 if let Some(datagram) = batch.take_first() {
-                    give_up::<T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ipp, Ima, Jx, Jr, Jm>(
+                    give_up::<T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ist, Ipp, Ima, Jx, Jr, Jm>(
                         lineage,
                         others,
                         core::iter::once(datagram),
@@ -1537,7 +1569,7 @@ fn removed_packet<S>(charge: InFlightCharge<S>) -> RemovedPacket<S> {
 /// those that count in flight leave the bytes in flight without a
 /// congestion signal. A packet of a space retired since it was sealed
 /// has no record to keep, and the summaries of its frames go with it.
-fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ipp, Ima, Jx, Jr, Jm>(
+fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ist, Ipp, Ima, Jx, Jr, Jm>(
     lineage: &mut LineageOf<'v, T, L, LinkPath>,
     others: &mut OtherNodes<'v, T, L, B>,
     datagrams: impl IntoIterator<
@@ -1545,7 +1577,10 @@ fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ipp, Ima, Jx, Jr, Jm>(
     >,
 ) where
     T: Choices,
-    L: LineagePartList<T> + FeedbackSummariesOf + ParametersOf<TransportParameterSpace>,
+    L: LineagePartList<T>
+        + FeedbackSummariesOf
+        + ParametersOf<TransportParameterSpace>
+        + ConnectionErrorsOf,
     B: CallBundle,
     S: 'static,
     Ls: Clone + 'static,
@@ -1562,7 +1597,11 @@ fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ipp, Ima, Jx, Jr, Jm>(
     for<'x> <L as LineageLists<'x, T>>::LinkPath: GetAt<SendJournalsOf<T, L>, Ij>
         + GetAt<RecoveryFactoryOf<T, L>, If>
         + ReadEach<SettleReads<T, L>, Iv>,
-    for<'x> <L as LineageLists<'x, T>>::LinkPath: CoreLentFeedback<T, L, Hf>,
+    for<'x> <L as LineageLists<'x, T>>::LinkPath: CoreLentFeedback<T, L, StreamsOf<T, L>, Hf>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![StreamsOf<T, L>], Ist>,
     for<'x> NodeData<T, L, layer::Recovery>: FlatMut<'x>,
     for<'x> <NodeData<T, L, layer::Recovery> as FlatMut<'x>>::Out:
         TakeEach<'x, SettleRecoveryTakes<T, L, S, Ls>, Iq>,
@@ -1592,6 +1631,9 @@ fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ipp, Ima, Jx, Jr, Jm>(
     // meanwhile
     let mut journals = core::mem::take(lineage.get_mut::<SendJournalsOf<T, L>, Ij>());
     let mut removed = Vec::new();
+    let mut streams = others
+        .borrow_established::<HList![StreamsOf<T, L>], Ist>()
+        .map(|hlist_pat![streams]| streams);
     for datagram in datagrams {
         for (space, packet) in packets_of(datagram) {
             let BatchedPacket { sealed, in_flight } = packet;
@@ -1600,7 +1642,13 @@ fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ipp, Ima, Jx, Jr, Jm>(
                 continue;
             };
             let record = space_journals.send_result_unknown(sealed, retain_until(space));
-            CoreLentFeedback::<T, L, Hf>::lost_each(lineage, now, space, &record.summaries);
+            CoreLentFeedback::<T, L, StreamsOf<T, L>, Hf>::lost_each(
+                lineage,
+                streams.as_deref_mut(),
+                now,
+                space,
+                &record.summaries,
+            );
         }
     }
     *lineage.get_mut::<SendJournalsOf<T, L>, Ij>() = journals;
@@ -1734,6 +1782,7 @@ impl<
     Ie,
     Iq,
     Hf,
+    Ist,
     Ipp,
     Ima,
     Jx,
@@ -1773,6 +1822,7 @@ impl<
             Ie,
             Iq,
             Hf,
+            Ist,
             Ipp,
             Ima,
             Jx,
@@ -1848,52 +1898,57 @@ where
     L: ConnectionErrorsOf,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ier>,
     for<'x> FillKeysRest<'x, T, L, It>: TakeEach<'x, FillReadTakes<T>, Iw>,
-    for<'x> FillRest<'x, T, L, It, Iw>:
+    for<'x> FillRest<'x, T, L, It, Iw>: AppendLast<Option<&'x mut StreamsOf<T, L>>>,
+    for<'x> FillStreamsRest<'x, T, L, It, Iw>:
         ReadEach<FillReads<T, L>, Ir> + GetAt<ConnectionIdsOf<T>, Ici>,
     for<'x> L: PartsFrameSourceDispatch<
             T,
             L,
             InitialPacket,
-            FillRest<'x, T, L, It, Iw>,
+            FillStreamsRest<'x, T, L, It, Iw>,
             FeedbackSummaryOf<T, L>,
             Hs,
         > + PartsFrameSourceDispatch<
             T,
             L,
             HandshakePacket,
-            FillRest<'x, T, L, It, Iw>,
+            FillStreamsRest<'x, T, L, It, Iw>,
             FeedbackSummaryOf<T, L>,
             Hs,
         > + PartsFrameSourceDispatch<
             T,
             L,
             ZeroRttPacket,
-            FillRest<'x, T, L, It, Iw>,
+            FillStreamsRest<'x, T, L, It, Iw>,
             FeedbackSummaryOf<T, L>,
             Hs,
         > + PartsFrameSourceDispatch<
             T,
             L,
             OneRttPacket,
-            FillRest<'x, T, L, It, Iw>,
+            FillStreamsRest<'x, T, L, It, Iw>,
             FeedbackSummaryOf<T, L>,
             Hs,
         > + PartsFrameSourceDispatch<
             T,
             L,
             OneRttProbePacket,
-            FillRest<'x, T, L, It, Iw>,
+            FillStreamsRest<'x, T, L, It, Iw>,
             FeedbackSummaryOf<T, L>,
             Hs,
         > + PartsFrameSourceDispatch<
             T,
             L,
             SettlingResponsePacket,
-            FillRest<'x, T, L, It, Iw>,
+            FillStreamsRest<'x, T, L, It, Iw>,
             FeedbackSummaryOf<T, L>,
             Hs,
         >,
-    for<'x> <L as LineageLists<'x, T>>::LinkPath: CoreLentFeedback<T, L, Hf>,
+    for<'x> <L as LineageLists<'x, T>>::LinkPath: CoreLentFeedback<T, L, StreamsOf<T, L>, Hf>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![StreamsOf<T, L>], Ist>,
     for<'x> NodeData<T, L, layer::Recovery>: FlatMut<'x>,
     for<'x> <NodeData<T, L, layer::Recovery> as FlatMut<'x>>::Out: TakeEach<'x, FillRecoveryTakes<T, L>, Ik>
         + TakeEach<'x, SettleRecoveryTakes<T, L, S, Ls>, Iq>
@@ -1920,6 +1975,7 @@ where
         Ie,
         Iq,
         Hf,
+        Ist,
         Ipp,
         Ima,
         Jx,
@@ -1963,6 +2019,7 @@ where
                 Ie,
                 Iq,
                 Hf,
+                Ist,
                 Ipp,
                 Ima,
                 Jx,

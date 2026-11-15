@@ -48,10 +48,14 @@ use crate::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf},
     component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
+    error::ConnectionErrorsOf,
     feedback::{FeedbackSummariesOf, FeedbackSummaryOf},
     layer,
     others::OtherNodes,
-    share::{FlatRef, LineageLists, LineagePartList, LinkPathIdentifierOf, NodeData, PartList},
+    send_strategy::AnyActiveLinkPath,
+    share::{
+        FlatMut, FlatRef, LineageLists, LineagePartList, LinkPathIdentifierOf, NodeData, PartList,
+    },
     take::{GetAt, Lineage, ReadEach, Take, TakeEach},
 };
 
@@ -66,7 +70,10 @@ use super::{
         RecoveryFactoryOf, RttOf, SentStateOf, lend_congestion, max_datagram_size_in_use,
         peer_max_udp_payload_size,
     },
+    send::SendTypes,
+    send_planning::IntakePublishOutcome,
     spaces::{DEFAULT_MAX_ACK_DELAY, SendJournalsOf, live_spaces, peer_max_ack_delay},
+    streams::{StreamsOf, send::StreamIntent},
 };
 
 /// The loss detection states of a link path, one for each packet number
@@ -258,12 +265,16 @@ where
 /// the loss steps only; then its packets go back to the send journals of
 /// the logical path, which drop what is past its retention first, and the
 /// summaries of their frames go back to their frame sources as lost.
-impl<T, L, S, Ls, Id, In, If, Ipp, Ima, It, Jx, Jr, Hf>
-    DataComponent<T, L, layer::Recovery, ((Id, In, If), (Ipp, Ima), It, (Jx, Jr), Hf)>
+impl<T, L, S, Ls, Id, In, If, Ipp, Ima, It, Jx, Jr, Hf, Is>
+    DataComponent<T, L, layer::Recovery, ((Id, In, If), (Ipp, Ima), It, (Jx, Jr), Hf, Is)>
     for PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>
 where
     T: Choices,
-    L: LineagePartList<T> + FeedbackSummariesOf,
+    L: LineagePartList<T> + FeedbackSummariesOf + ConnectionErrorsOf,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![StreamsOf<T, L>], Is>,
     L: ParametersOf<TransportParameterSpace>,
     S: 'static,
     Ls: Clone + 'static,
@@ -282,7 +293,7 @@ where
         + ReadEach<LossFactsReads<T, L>, If>
         + TakeEach<'v, LossTakes<T, L, Self>, It>,
     for<'v> <<L as LineageLists<'v, T>>::Recovery as TakeEach<'v, LossTakes<T, L, Self>, It>>::Rest:
-        CoreLentFeedback<T, L, Hf>,
+        CoreLentFeedback<T, L, StreamsOf<T, L>, Hf>,
     for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out:
         Selector<&'a CongestionPartOf<T, L>, Jx> + Selector<&'a RttOf<T, L>, Jr>,
@@ -331,6 +342,9 @@ where
             }
             batches
         });
+        let mut streams = others
+            .borrow_established::<HList![StreamsOf<T, L>], Is>()
+            .map(|frunk_core::hlist_pat![streams]| streams);
         for (space, batch) in &batches {
             if batch.persistent {
                 rtt.on_persistent_congestion();
@@ -339,7 +353,14 @@ where
                 continue;
             };
             journals.discard_expired(now);
-            hand_back_lost::<T, L, _, Hf>(journals, &mut rest, now, *space, batch);
+            hand_back_lost::<T, L, _, _, Hf>(
+                journals,
+                &mut rest,
+                streams.as_deref_mut(),
+                now,
+                *space,
+                batch,
+            );
         }
         None
     }
@@ -361,28 +382,36 @@ pub(super) type LossTakes<T, L, D> = HList![
 /// Hand the packets of `batch`, declared lost in `space`, back to the
 /// space's `journals`, which keep their records as declared lost until the
 /// batch's retention ends, and the summaries of their frames back to their
-/// frame sources as lost, in `lineage` at `now`. A packet the journals do
+/// frame sources as lost, in `lineage` with the stream set `streams` at
+/// `now`. A packet the journals do
 /// not have as sent, such as one whose record went with the end of its link
 /// path, gives nothing back.
-pub(super) fn hand_back_lost<T, L, V, Hf>(
+pub(super) fn hand_back_lost<T, L, V, X, Hf>(
     journals: &mut <T as Choices>::SendJournals<
         FeedbackSummaryOf<T, L>,
         LinkPathIdentifierOf<T, L>,
     >,
     lineage: &mut Lineage<'_, V>,
+    mut streams: Option<&mut X>,
     now: InstantOf<T>,
     space: PacketNumberSpaceKind,
     batch: &DeclaredBatch<InstantOf<T>>,
 ) where
     T: Choices,
     L: PartList<T> + FeedbackSummariesOf,
-    V: CoreLentFeedback<T, L, Hf>,
+    V: CoreLentFeedback<T, L, X, Hf>,
 {
     for &number in &batch.numbers {
         let Some(record) = journals.declare_lost(number, batch.retain_until) else {
             continue;
         };
-        V::lost_each(lineage, now, space, &record.summaries);
+        V::lost_each(
+            lineage,
+            streams.as_deref_mut(),
+            now,
+            space,
+            &record.summaries,
+        );
     }
 }
 

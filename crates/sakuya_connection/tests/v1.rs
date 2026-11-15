@@ -358,7 +358,7 @@ impl v1::Choices for ClientMine {
     type DestinationConnectionIds = common::TestDestinationConnectionIds;
     type ResetTokenRegistry = common::TestResetTokenRegistry;
     type SendParameters = sakuya_stream::send_options::urgency::Urgency;
-    type Streams<Lc> = sakuya_connection::v1::streams::locked::LockedStreamSet<Lc>;
+    type Streams<Lc, K> = sakuya_connection::v1::streams::locked::LockedStreamSet<Lc, K>;
     type StreamSetConfig = sakuya_connection::v1::streams::locked::LockedStreamSetConfig;
     type ImmediateClosePolicy = common::TestImmediateClosePolicy;
 }
@@ -386,7 +386,7 @@ impl v1::Choices for SpyMine {
     type DestinationConnectionIds = common::TestDestinationConnectionIds;
     type ResetTokenRegistry = common::TestResetTokenRegistry;
     type SendParameters = sakuya_stream::send_options::urgency::Urgency;
-    type Streams<Lc> = sakuya_connection::v1::streams::locked::LockedStreamSet<Lc>;
+    type Streams<Lc, K> = sakuya_connection::v1::streams::locked::LockedStreamSet<Lc, K>;
     type StreamSetConfig = sakuya_connection::v1::streams::locked::LockedStreamSetConfig;
     type ImmediateClosePolicy = common::TestImmediateClosePolicy;
 }
@@ -644,6 +644,13 @@ mod probe {
             Pb: PublishIntent<NoIntent, Idx>,
         {
             log(format!("lost {space:?} {}", summary.0));
+        }
+        fn unfulfilled(
+            &mut self,
+            item: core::convert::Infallible,
+            _: sakuya_stream::send_options::destination::Unfulfilled,
+        ) {
+            match item {}
         }
     }
     impl<T: ConnectionChoices, L, V> FindFrameSource<T, L, V, ()> for Frames {

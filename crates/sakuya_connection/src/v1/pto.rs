@@ -33,11 +33,12 @@ use crate::{
     component::{
         ArgsOf, Build, ComponentTypeList, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf,
     },
+    error::ConnectionErrorsOf,
     feedback::FeedbackSummariesOf,
     layer,
     others::OtherNodes,
-    send_strategy::{Publish, SendStrategy, SendStrategyTypes},
-    share::{FlatRef, LineageLists, LineagePartList, NodeData},
+    send_strategy::{AnyActiveLinkPath, Publish, SendStrategy, SendStrategyTypes},
+    share::{FlatMut, FlatRef, LineageLists, LineagePartList, NodeData},
     take::{GetAt, ReadEach, Take, TakeEach},
 };
 
@@ -56,9 +57,11 @@ use super::{
     },
     send::{ProbePingIntent, SendTypes},
     send_planning::{
-        LinkPathPlanner, LinkPathSendPlannerOf, ProbePingTicketOf, ProbePingTickets, SendStrategyOf,
+        IntakePublishOutcome, LinkPathPlanner, LinkPathSendPlannerOf, ProbePingTicketOf,
+        ProbePingTickets, SendStrategyOf,
     },
     spaces::{DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
+    streams::{StreamsOf, send::StreamIntent},
 };
 use crate::role::LinkPathRole;
 
@@ -237,12 +240,16 @@ where
 ///
 /// Not here yet: declaring the packets in flight lost without asking the
 /// policy while the link path cannot send 1200 bytes.
-impl<T, L, S, Ls, Ipt, Ir, If, Ipp, Ima, It, Jx, Jr, Hf, Ip>
-    DataComponent<T, L, layer::Recovery, ((Ipt, Ir, If), (Ipp, Ima), It, (Jx, Jr), Hf, Ip)>
+impl<T, L, S, Ls, Ipt, Ir, If, Ipp, Ima, It, Jx, Jr, Hf, Ip, Is>
+    DataComponent<T, L, layer::Recovery, ((Ipt, Ir, If), (Ipp, Ima), It, (Jx, Jr), Hf, Ip, Is)>
     for ProbeTimeout<InstantOf<T>>
 where
     T: Choices,
-    L: LineagePartList<T> + FeedbackSummariesOf,
+    L: LineagePartList<T> + FeedbackSummariesOf + ConnectionErrorsOf,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![StreamsOf<T, L>], Is>,
     L: ParametersOf<TransportParameterSpace>,
     S: 'static,
     Ls: Clone + 'static,
@@ -264,7 +271,7 @@ where
         'v,
         ProbeTimeoutTakes<T, L, S, Ls>,
         It,
-    >>::Rest: CoreLentFeedback<T, L, Hf>,
+    >>::Rest: CoreLentFeedback<T, L, StreamsOf<T, L>, Hf>,
     for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out:
         Selector<&'a CongestionPartOf<T, L>, Jx> + Selector<&'a RttOf<T, L>, Jr>,
@@ -331,6 +338,9 @@ where
         if let Some(spaces) = probed {
             pings.probe::<_, Ip>(planner.planner_mut(), spaces.iter());
         }
+        let mut streams = others
+            .borrow_established::<HList![StreamsOf<T, L>], Is>()
+            .map(|frunk_core::hlist_pat![streams]| streams);
         for (space, batch) in &batches {
             if batch.persistent {
                 rtt.on_persistent_congestion();
@@ -339,7 +349,14 @@ where
                 continue;
             };
             journals.discard_expired(now);
-            hand_back_lost::<T, L, _, Hf>(journals, &mut rest, now, *space, batch);
+            hand_back_lost::<T, L, _, _, Hf>(
+                journals,
+                &mut rest,
+                streams.as_deref_mut(),
+                now,
+                *space,
+                batch,
+            );
         }
         None
     }

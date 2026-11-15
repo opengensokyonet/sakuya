@@ -14,8 +14,9 @@ use sakuya_wire::var_int::VarInt;
 ///   limit.
 /// - A higher limit (`MAX_DATA`) clears the intent left from a lower one.
 ///
-/// Sending the frame again when it is lost or after some time is not part of
-/// this type. It keeps no counters of its own: the limit comes from the
+/// A lost frame is wanted again while its limit holds
+/// ([`on_lost`](Self::on_lost)); sending it again after some time is not
+/// part of this type. It keeps no counters of its own: the limit comes from the
 /// connection send flow controller at each call.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DataBlockedSignal {
@@ -38,6 +39,13 @@ impl DataBlockedSignal {
     /// Records that a `DATA_BLOCKED` frame carrying `limit` was sent.
     pub fn on_sent(&mut self, limit: VarInt) {
         self.signal.on_sent(limit);
+    }
+
+    /// Records that a `DATA_BLOCKED` frame carrying `limit` was lost: one is
+    /// wanted again while `limit` is still the connection limit it was sent
+    /// for.
+    pub fn on_lost(&mut self, limit: VarInt) {
+        self.signal.on_lost(limit);
     }
 
     /// Records that the connection limit grew to `limit`, for example by a

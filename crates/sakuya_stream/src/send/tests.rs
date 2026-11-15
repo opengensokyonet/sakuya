@@ -1459,6 +1459,26 @@ fn default_flow_control_signals_only_when_stream_limited() {
 }
 
 #[test]
+fn default_flow_control_signals_again_when_the_frame_is_lost() {
+    let connection = new_connection(10_000);
+    let mut sender = default_sender(&connection, 700);
+    let mut input = source(1000);
+    assert_eq!(sender.write(&mut input, &options()).unwrap(), written(700));
+    sender.on_stream_data_blocked_sent(v(700));
+    assert_eq!(sender.stream_data_blocked_limit(), None);
+
+    // Lost while the limit holds: wanted again.
+    sender.on_stream_data_blocked_lost(v(700));
+    assert_eq!(sender.stream_data_blocked_limit(), Some(v(700)));
+    sender.on_stream_data_blocked_sent(v(700));
+
+    // Lost after the limit grew: the old value is not wanted.
+    sender.on_max_stream_data(v(800));
+    sender.on_stream_data_blocked_lost(v(700));
+    assert_eq!(sender.stream_data_blocked_limit(), None);
+}
+
+#[test]
 fn default_termination_chooses_the_smallest_final_size() {
     let connection = new_connection(10_000);
     let mut sender = default_sender(&connection, 1000);

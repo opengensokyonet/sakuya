@@ -122,6 +122,38 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
         Some(items)
     }
 
+    /// Run `each` with components `U` of the established layer, `None` when
+    /// there is none, or when it is the lent node or was taken with
+    /// [`established`](Self::established), and with the others, which have
+    /// no established layer meanwhile; the layer is back among them
+    /// afterwards. The layer is recorded as taken.
+    ///
+    /// It is to [`borrow_established`](Self::borrow_established) what
+    /// [`with_own_recovery`](Self::with_own_recovery) is to
+    /// [`recovery`](Self::recovery): whoever lends the others on while it
+    /// holds the components, such as filling, which lends them to
+    /// congestion control, takes them so.
+    pub(crate) fn with_established<U, Is, R>(
+        &mut self,
+        each: impl for<'x> FnOnce(Option<<U as RefsOf<'x>>::Out>, &'x mut Self) -> R,
+    ) -> R
+    where
+        for<'x> NodeData<T, L, Established>: FlatMut<'x>,
+        for<'x> <NodeData<T, L, Established> as FlatMut<'x>>::Out: TakeEach<'x, U, Is>,
+        for<'x> U: RefsOf<'x>,
+    {
+        let mut node = self.established.take();
+        let items = node.as_deref_mut().map(|node| {
+            node.data
+                .flat_mut()
+                .take_each(&mut Self::record(self.taken, NodeAddr::ESTABLISHED))
+                .0
+        });
+        let result = each(items, self);
+        self.established = node;
+        result
+    }
+
     /// Whether the lent link path has its recovery layer.
     pub fn has_recovery(&self) -> bool {
         self.here_recovery.is_some()

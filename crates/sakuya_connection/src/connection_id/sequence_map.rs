@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet, btree_map};
 
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
+use sakuya_stream::send_options::destination::Unfulfilled;
 use sakuya_wire::{
     connection_id::{ConnectionId, StatelessResetToken},
     v1::transport_parameters::integer::ActiveConnectionIdLimit,
@@ -248,6 +249,11 @@ impl<Id, R: ResetTokenRegistrar> FrameSource for SequenceMapDestinationConnectio
             retire.publish(RetireConnectionIdIntent::new(summary.sequence));
         }
     }
+
+    /// A retirement is sent and forgotten for any active link path: the
+    /// strategy ends it only once no link path will be active again, which
+    /// is the end of the connection, not an unfulfilled intent.
+    fn unfulfilled(&mut self, _: u64, _: Unfulfilled) {}
 }
 
 /// Checks a NEW_CONNECTION_ID frame with `sequence`, `id` and `token`
