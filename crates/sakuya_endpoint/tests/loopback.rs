@@ -122,10 +122,6 @@ impl EndpointChoices for Udp {
     type WallClock = SystemClock;
     type ConnectionIds = CountingConnectionIds;
     type Recognizer = ConnectionIdLengths;
-
-    fn peer_socket_addr(peer: &PeerOf<Self>) -> Option<&SocketAddr> {
-        peer.get::<SocketAddr, _>()
-    }
 }
 
 /// Connection IDs of eight bytes from a counter shared by the endpoint,

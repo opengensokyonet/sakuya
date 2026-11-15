@@ -1,3 +1,4 @@
+use core::marker::PhantomData;
 use std::{
     fmt,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -6,6 +7,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use frunk_core::{coproduct::CoproductSelector, indices::Here};
 use nitori_crypto::{
     Aead, AeadAlgorithm, AeadKey, ExpandLength, HashAlgorithm, Hkdf, Random, RandomError, Secret,
     Supported,
@@ -17,7 +19,7 @@ use time::UtcDateTime;
 use super::{
     AddressTokens, DEFAULT_NEW_TOKEN_LIFETIME, DEFAULT_RETRY_TOKEN_LIFETIME,
     ExactTokenAddressPolicy, NewTokenAddress, NewTokenId, NewTokenIssuer, TokenAddressPolicy,
-    TokenKind, TokenOutcome, ValidNewToken,
+    TokenKind, TokenOutcome, TokenPeerAddress, ValidNewToken,
 };
 
 /// The secret key that seals an endpoint's address validation tokens.
@@ -96,21 +98,25 @@ impl Default for AddressTokenLifetimes {
 ///
 /// [RFC 9000 §8.1.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-8.1.3
 /// [RFC 9000 §8.1.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-8.1.4
-pub struct AeadAddressTokens<C: Aead + Hkdf, P = ExactTokenAddressPolicy> {
+pub struct AeadAddressTokens<C: Aead + Hkdf, P = ExactTokenAddressPolicy, I = Here> {
     sealer: Arc<Sealer<C>>,
     policy: P,
+    /// Which member of the sum of the endpoint's peers is the socket
+    /// address.
+    index: PhantomData<fn() -> I>,
 }
 
-impl<C: Aead + Hkdf, P: Clone> Clone for AeadAddressTokens<C, P> {
+impl<C: Aead + Hkdf, P: Clone, I> Clone for AeadAddressTokens<C, P, I> {
     fn clone(&self) -> Self {
         Self {
             sealer: Arc::clone(&self.sealer),
             policy: self.policy.clone(),
+            index: PhantomData,
         }
     }
 }
 
-impl<C: Aead + Hkdf, P: fmt::Debug> fmt::Debug for AeadAddressTokens<C, P> {
+impl<C: Aead + Hkdf, P: fmt::Debug, I> fmt::Debug for AeadAddressTokens<C, P, I> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AeadAddressTokens")
             .field("lifetimes", &self.sealer.lifetimes)
@@ -119,7 +125,7 @@ impl<C: Aead + Hkdf, P: fmt::Debug> fmt::Debug for AeadAddressTokens<C, P> {
     }
 }
 
-impl<C: Aead + Hkdf + Random, P: TokenAddressPolicy> AeadAddressTokens<C, P> {
+impl<C: Aead + Hkdf + Random, P: TokenAddressPolicy, I> AeadAddressTokens<C, P, I> {
     /// Tokens sealed by `backend` under `key`, accepted for `lifetimes`, with
     /// addresses compared by `policy`.
     ///
@@ -147,6 +153,7 @@ impl<C: Aead + Hkdf + Random, P: TokenAddressPolicy> AeadAddressTokens<C, P> {
                 lifetimes,
             }),
             policy,
+            index: PhantomData,
         })
     }
 }
@@ -162,7 +169,19 @@ pub enum AeadAddressTokensError {
     HashUnsupported,
 }
 
-impl<C, P> AddressTokens for AeadAddressTokens<C, P>
+/// The socket address is the member `I` of the sum of the endpoint's peers;
+/// the first member when `I` is left to its default.
+impl<C, P, I, Peer> TokenPeerAddress<Peer> for AeadAddressTokens<C, P, I>
+where
+    C: Aead + Hkdf,
+    Peer: CoproductSelector<SocketAddr, I>,
+{
+    fn peer_socket_addr<'p>(&self, peer: &'p Peer) -> Option<&'p SocketAddr> {
+        peer.get()
+    }
+}
+
+impl<C, P, I> AddressTokens for AeadAddressTokens<C, P, I>
 where
     C: Aead + Hkdf + Random,
     P: TokenAddressPolicy,

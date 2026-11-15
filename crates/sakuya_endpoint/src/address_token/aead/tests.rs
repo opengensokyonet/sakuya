@@ -93,7 +93,7 @@ fn a_changed_retry_token_is_invalid() {
 #[test]
 fn another_key_does_not_open_a_token() {
     let token = tokens().issue_retry(&peer(), &odcid(), start()).unwrap();
-    let other = AeadAddressTokens::new(
+    let other: AeadAddressTokens<_> = AeadAddressTokens::new(
         AwsLcBackend,
         AddressTokenKey::from_bytes(&[8; AddressTokenKey::LEN]),
         AddressTokenLifetimes::default(),

@@ -21,8 +21,8 @@ use sakuya_recovery::loss::LossThresholds;
 use sakuya_wire::version::Version;
 
 use crate::{
-    address_token::AddressTokens,
-    choices::{ConnectionDatagramReceiver, EndpointChoices, LinkOf, ResetTokensOf},
+    address_token::{AddressTokens, TokenPeerAddress},
+    choices::{ConnectionDatagramReceiver, EndpointChoices, LinkOf, PeerOf, ResetTokensOf},
     config::{ClientConfig, InvalidEndpointConfigError, ServerConfig},
     domain::Domain,
     dropped_input::DroppedInputCounts,
@@ -144,7 +144,7 @@ pub trait AcceptingServerRole<E: EndpointChoices>:
     /// What starts the handshake of each connection.
     type Handshake: ServerHandshakeConfig;
     /// The address validation tokens.
-    type Tokens: AddressTokens + Clone;
+    type Tokens: AddressTokens + TokenPeerAddress<PeerOf<E>> + Clone;
     /// When to answer a new Initial with a stateless Retry.
     type RetryPolicy: StatelessRetryPolicy + Clone;
 }
@@ -257,7 +257,7 @@ where
         + LogicalPathKeys<Key = SoleLogicalPath>
         + 'static,
     H: ServerHandshakeConfig + 'static,
-    Tk: AddressTokens + Clone + 'static,
+    Tk: AddressTokens + TokenPeerAddress<PeerOf<E>> + Clone + 'static,
     Rp: StatelessRetryPolicy + Clone + 'static,
 {
     type Config = ServerConfig<T, L, H, Tk, Rp>;
@@ -314,7 +314,7 @@ where
         + LogicalPathKeys<Key = SoleLogicalPath>
         + 'static,
     H: ServerHandshakeConfig + 'static,
-    Tk: AddressTokens + Clone + 'static,
+    Tk: AddressTokens + TokenPeerAddress<PeerOf<E>> + Clone + 'static,
     Rp: StatelessRetryPolicy + Clone + 'static,
 {
     type Choices = T;

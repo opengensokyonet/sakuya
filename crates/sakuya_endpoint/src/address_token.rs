@@ -88,6 +88,18 @@ pub trait NewTokenIssuer {
     fn issue(&self, peer: &SocketAddr, now: UtcDateTime) -> Result<Bytes, RandomError>;
 }
 
+/// Where a token component finds the socket address of a link's peer `Peer`,
+/// which its tokens are bound to.
+///
+/// The requirement on `Peer` follows the component: one that issues tokens
+/// requires a peer that can be a [`SocketAddr`].
+pub trait TokenPeerAddress<Peer> {
+    /// The socket address of `peer`, when it is one; `None` for a peer of
+    /// another kind, on whose links the endpoint issues no tokens and sends
+    /// no Retry.
+    fn peer_socket_addr<'p>(&self, peer: &'p Peer) -> Option<&'p SocketAddr>;
+}
+
 /// What the token in an Initial packet is.
 ///
 /// Which kind of token a client returned is visible on the wire; what the

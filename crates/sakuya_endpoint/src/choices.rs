@@ -3,7 +3,6 @@
 
 use core::{
     fmt,
-    net::SocketAddr,
     task::{Context, Poll},
 };
 use std::sync::Arc;
@@ -62,11 +61,6 @@ pub trait EndpointChoices: 'static {
     /// What tells the lengths of the destination connection IDs of short
     /// headers, by the encoding the connection ID generator uses.
     type Recognizer: ConnectionIdRecognizer<LocalOf<Self>, PeerOf<Self>>;
-
-    /// The socket address of `peer`, when the peer of a link is one: what
-    /// address validation tokens are bound to. `None` for a peer of another
-    /// kind, on whose links the endpoint issues no tokens and sends no Retry.
-    fn peer_socket_addr(peer: &PeerOf<Self>) -> Option<&SocketAddr>;
 }
 
 /// The link of an endpoint of the choices `E`.
