@@ -13,7 +13,7 @@ use sakuya_connection::send_strategy::{
     PublishOutcome, PublishTo, ResendCloseIntent, SendStrategy, SendStrategyTypes,
     ranked::{
         IntentTicket, LinkPathIntentTicket, RankedCoreIntent, RankedIntent,
-        RankedLinkPathSendPlanner, RankedSendStrategy,
+        RankedLinkPathSendPlanner, RankedSendIntake, RankedSendStrategy,
     },
 };
 use sakuya_connection::v1::send::ProbePingIntent;
@@ -197,6 +197,12 @@ where
 {
     type Destination = AnyActiveLinkPath;
     type LinkPathSendPlanner = EventLoggingPlanner<I>;
+    /// What is published through the intake is not recorded.
+    type Intake = RankedSendIntake<I>;
+
+    fn intake(&self) -> RankedSendIntake<I> {
+        self.inner.intake()
+    }
 
     fn add_link_path(
         &mut self,

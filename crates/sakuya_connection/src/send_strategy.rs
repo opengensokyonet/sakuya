@@ -16,6 +16,13 @@
 //! item reaches its frame source only through [`PlannedItem::supply`], which
 //! hands back to the plan how much was written.
 //!
+//! Intents that the application's threads publish, and the driver's
+//! intents of the same kinds, go through the strategy's intake
+//! ([`SendIntentIntake`]) instead: each holder keeps a handle
+//! ([`SendIntentHandle`]) for its one kind of intent, and publishing through
+//! it ([`SharedPublishTo`]) touches only what the strategy shares for this,
+//! never the core, so it is safe while the driver holds the core.
+//!
 //! What a strategy may plan is held by structure where it can be: a packet
 //! of a kind gets a cursor over that kind's set of frame sources
 //! ([`FrameSourceSet`]), so a frame the packet cannot carry has no item to
@@ -111,6 +118,95 @@ pub trait Publish<J: SendIntent, Idx>: PublishOutcome<J, PlannerLinkPath> {
 pub trait PublishTo<J: SendIntent, D, Idx>: PublishOutcome<J, D> {
     /// Publish `intent` for `destination`.
     fn publish_to(&mut self, intent: J, destination: D) -> <Self as PublishOutcome<J, D>>::Outcome;
+}
+
+/// `R: SharedPublishTo<J, D, Idx>`: `R` takes intents `J` for the
+/// destination `D` through a shared reference. The intake of a strategy
+/// ([`SendStrategy::intake`]) implements it for the intents published from
+/// the application's threads, and for those the driver's components publish
+/// through it as well.
+///
+/// `Idx` is the place of `J` in the composition's sum of intents; the
+/// compiler infers it. What a strategy does differently for each kind of
+/// intent belongs to its implementations of this trait: its handles are one
+/// type for every kind ([`SendIntentIntake::Handle`]).
+pub trait SharedPublishTo<J: SendIntent, D, Idx>: PublishOutcome<J, D> {
+    /// Publish `intent` for `destination`.
+    fn publish_to(&self, intent: J, destination: D) -> <Self as PublishOutcome<J, D>>::Outcome;
+}
+
+/// The intake of a send strategy (`SendIntentIntake`): what publishes
+/// intents for the destinations `D` from outside the driver's borrows,
+/// cloned to every holder.
+///
+/// A holder gets a handle for the one kind of intent it publishes; the
+/// place `Idx` of that kind stays in the handle's type, inferred where the
+/// handle is taken.
+pub trait SendIntentIntake<D>: Clone {
+    /// The handle that publishes intents `J` at the place `Idx`.
+    type Handle<J: SendIntent, Idx>: SendIntentHandle<J, D, Outcome = <Self as PublishOutcome<J, D>>::Outcome>
+    where
+        Self: SharedPublishTo<J, D, Idx>;
+
+    /// The handle for intents `J`.
+    fn handle<J: SendIntent, Idx>(&self) -> Self::Handle<J, Idx>
+    where
+        Self: SharedPublishTo<J, D, Idx>;
+}
+
+/// A handle that publishes intents `J` for the destinations `D`
+/// (`SendIntentHandle`), taken from a strategy's intake.
+pub trait SendIntentHandle<J: SendIntent, D>: Clone {
+    /// What publishing gives back.
+    type Outcome;
+
+    /// Publish `intent` for `destination`.
+    fn publish_to(&self, intent: J, destination: D) -> Self::Outcome;
+}
+
+/// A handle that publishes through a clone of the intake `K`, with the kind
+/// of intent `J` and its place `Idx` fixed (`IntakeSendIntentHandle`): the
+/// one implementation of [`SendIntentHandle`] an intake needs, whatever it
+/// does for each kind.
+pub struct IntakeSendIntentHandle<K, J, Idx> {
+    intake: K,
+    intent: PhantomData<fn(J) -> Idx>,
+}
+
+impl<K, J, Idx> IntakeSendIntentHandle<K, J, Idx> {
+    /// The handle publishing through `intake`.
+    pub fn new(intake: K) -> Self {
+        Self {
+            intake,
+            intent: PhantomData,
+        }
+    }
+}
+
+impl<K: Clone, J, Idx> Clone for IntakeSendIntentHandle<K, J, Idx> {
+    fn clone(&self) -> Self {
+        Self::new(self.intake.clone())
+    }
+}
+
+impl<K: fmt::Debug, J, Idx> fmt::Debug for IntakeSendIntentHandle<K, J, Idx> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IntakeSendIntentHandle")
+            .field("intake", &self.intake)
+            .finish()
+    }
+}
+
+impl<K, J, D, Idx> SendIntentHandle<J, D> for IntakeSendIntentHandle<K, J, Idx>
+where
+    K: SharedPublishTo<J, D, Idx> + Clone,
+    J: SendIntent,
+{
+    type Outcome = <K as PublishOutcome<J, D>>::Outcome;
+
+    fn publish_to(&self, intent: J, destination: D) -> Self::Outcome {
+        self.intake.publish_to(intent, destination)
+    }
 }
 
 /// `R: Observe<J>`: `R` takes the changes `J` of its send conditions.
@@ -484,7 +580,8 @@ pub enum LinkPathRoleKind {
 
 /// The core of a send strategy: held in the connection node; it takes the
 /// intents the driver's components publish whose destination is not fixed
-/// ([`PublishTo`]) and the connection's events.
+/// ([`PublishTo`]) and the connection's events, and gives out its intake
+/// ([`intake`](Self::intake)) for intents published without borrowing it.
 ///
 /// Dropping the core is the end of all sending.
 pub trait SendStrategy<I: SendStrategyTypes>: Sized {
@@ -494,6 +591,13 @@ pub trait SendStrategy<I: SendStrategyTypes>: Sized {
     type Destination;
     /// The send planner of one link path.
     type LinkPathSendPlanner: LinkPathSendPlanner<I, Core = Self>;
+    /// The intake: intents published through it reach the core without
+    /// the core being borrowed, from the application's threads or from the
+    /// driver while it holds the core.
+    type Intake: SendIntentIntake<Self::Destination>;
+
+    /// The intake of this core.
+    fn intake(&self) -> Self::Intake;
 
     /// A link path `id` begins, in `role`: its send planner.
     fn add_link_path(
@@ -881,4 +985,22 @@ pub enum IntentState<End> {
     Withdrawn,
     /// Ended.
     Ended(End),
+}
+
+/// A ticket that changes the room its intent needs (`IntentTicketResize`).
+///
+/// What the intent is for, such as its frame source or stream, stays: only
+/// the least room changes.
+pub trait IntentTicketResize {
+    /// The intent needs at least `min` from now on.
+    fn resize(&mut self, min: MinimumLengths);
+}
+
+/// A ticket that withdraws its intent (`IntentTicketWithdraw`).
+pub trait IntentTicketWithdraw {
+    /// What withdrawing tells.
+    type Report;
+
+    /// Withdraw the intent: it is not written into a packet after this.
+    fn withdraw(self) -> Self::Report;
 }

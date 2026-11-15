@@ -474,3 +474,5 @@ fn a_draining_link_path_resends_nothing() {
     let (_, waker) = waker();
     assert!(!resends(&mut planner, &mut core, &waker));
 }
+
+mod intake;

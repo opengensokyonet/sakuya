@@ -25,6 +25,24 @@
 //! closes: the rate falls as the peer keeps sending (RFC 9000 §10.2.1).
 //! What was published before its planner was told of the closing role
 //! waits for it; a draining link path sends nothing.
+//!
+//! Application data goes by urgency ([`RankedIntent::urgency`]): a smaller
+//! urgency always before a larger one, and within one urgency in turns,
+//! each datagram starting after the intent that was given its turn last on
+//! the link path. Application data that does not fit is passed over.
+//!
+//! Intents published through the intake ([`RankedSendIntake`]), from the
+//! application's threads or from the driver while it holds the core, wait
+//! in a zone the core shares with the intake and the tickets, under a lock
+//! nothing else is taken under: the core takes them in when a planner
+//! plans. A planner that waits for content leaves there, for its link
+//! path, the room its next datagram has and its waker; an intent published
+//! or resized that fits that room wakes it, one that does not is kept as a
+//! threshold the link path's conditions are compared with. A planner waits
+//! only if nothing was published, resized or withdrawn there since it began
+//! to plan; otherwise it plans again, so no wake-up is lost. Withdrawing a
+//! waiting intent wakes the planners that something blocks, as the intent
+//! may have been what blocked them.
 
 use core::{
     fmt,
@@ -32,9 +50,12 @@ use core::{
     sync::atomic::{AtomicU8, Ordering},
     task::{Context, Poll, Waker},
 };
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
-use sakuya_stream::connection::{CloseReason, ConnectionClosedError};
+use sakuya_stream::{
+    connection::{CloseReason, ConnectionClosedError},
+    send_options::urgency::Urgency,
+};
 use sakuya_wire::{
     parts::{CNil, Coproduct},
     v1::encryption_level::EncryptionLevel,
@@ -42,11 +63,12 @@ use sakuya_wire::{
 
 use super::{
     AnyActiveLinkPath, DatagramFillPlan, DatagramLimits, FrameSourceCursor, FrameSourceSet,
-    InjectSendIntent, IntentRejectedError, IntentState, LeadingContent, LinkPathPublishError,
-    LinkPathRoleKind, LinkPathSendPlanner, MinimumLengths, Observe, PacketOverheads,
-    PlannedDatagram, PlannedItem, PlannedPacket, PlannedPacketKind, PlannerLinkPath, Publish,
-    PublishOutcome, PublishTo, ResendCloseIntent, RoleNotAcceptingError, SendIntent, SendStrategy,
-    SendStrategyTypes, SupplyFeedback,
+    InjectSendIntent, IntakeSendIntentHandle, IntentRejectedError, IntentState, IntentTicketResize,
+    IntentTicketWithdraw, LeadingContent, LinkPathPublishError, LinkPathRoleKind,
+    LinkPathSendPlanner, MinimumLengths, Observe, PacketOverheads, PlannedDatagram, PlannedItem,
+    PlannedPacket, PlannedPacketKind, PlannerLinkPath, Publish, PublishOutcome, PublishTo,
+    ResendCloseIntent, RoleNotAcceptingError, SendIntent, SendIntentIntake, SendStrategy,
+    SendStrategyTypes, SharedPublishTo, SupplyFeedback,
 };
 use crate::write::FlightClass;
 
@@ -85,10 +107,22 @@ pub struct SendRank {
 pub trait RankedIntent {
     /// Where the intent ranks.
     fn rank(&self) -> SendRank;
+
+    /// How urgent the intent is among application data
+    /// ([`SendPriority::ApplicationData`]): a smaller urgency goes first.
+    /// Other ranks do not read it. The default urgency of RFC 9218 unless
+    /// the intent gives its own.
+    fn urgency(&self) -> Urgency {
+        Urgency::default()
+    }
 }
 
 impl RankedIntent for CNil {
     fn rank(&self) -> SendRank {
+        match *self {}
+    }
+
+    fn urgency(&self) -> Urgency {
         match *self {}
     }
 }
@@ -100,6 +134,13 @@ impl<H: RankedIntent, T: RankedIntent> RankedIntent for Coproduct<H, T> {
             Coproduct::Inr(rest) => rest.rank(),
         }
     }
+
+    fn urgency(&self) -> Urgency {
+        match self {
+            Coproduct::Inl(intent) => intent.urgency(),
+            Coproduct::Inr(rest) => rest.urgency(),
+        }
+    }
 }
 
 // ---- tickets ----
@@ -109,18 +150,30 @@ const CONSUMED: u8 = 1;
 const WITHDRAWN: u8 = 2;
 const ENDED: u8 = 3;
 
+/// What `mutex` holds, whether or not a holder panicked: every holder
+/// writes whole values, so nothing is left half-written.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// The state of one intent, shared by the strategy and the intent's
 /// ticket: consuming and withdrawing are ordered by it, so only one of them
-/// happens.
+/// happens. It also holds the least room the intent needs now, which
+/// resizing the ticket changes; its lock is taken under no other lock and
+/// takes none.
 #[derive(Debug)]
 struct IntentCell {
     state: AtomicU8,
+    min: Mutex<MinimumLengths>,
+    class: FlightClass,
 }
 
 impl IntentCell {
-    fn new() -> Arc<Self> {
+    fn new(min: MinimumLengths, class: FlightClass) -> Arc<Self> {
         Arc::new(Self {
             state: AtomicU8::new(WAITING),
+            min: Mutex::new(min),
+            class,
         })
     }
 
@@ -137,6 +190,14 @@ impl IntentCell {
             .compare_exchange(WAITING, to, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
+
+    fn min(&self) -> MinimumLengths {
+        *lock(&self.min)
+    }
+
+    fn resize(&self, min: MinimumLengths) {
+        *lock(&self.min) = min;
+    }
 }
 
 /// The ticket of an intent published for any active link path: dropping
@@ -144,7 +205,7 @@ impl IntentCell {
 /// holds.
 pub struct IntentTicket<C> {
     cell: Arc<IntentCell>,
-    closed: Arc<OnceLock<CloseReason<C>>>,
+    zone: Arc<SyncZone<C>>,
 }
 
 impl<C> fmt::Debug for IntentTicket<C> {
@@ -164,7 +225,8 @@ impl<C> IntentTicket<C> {
             WITHDRAWN => IntentState::Withdrawn,
             // An intent of the core ends only once the close reason is set.
             _ => IntentState::Ended(ConnectionClosedError::new(
-                self.closed
+                self.zone
+                    .closed
                     .get()
                     .cloned()
                     .expect("an ended intent has its close reason"),
@@ -173,9 +235,40 @@ impl<C> IntentTicket<C> {
     }
 }
 
+/// Resizing a waiting intent tells the planners waiting for content: one
+/// whose room it now fits is woken.
+impl<C> IntentTicketResize for IntentTicket<C> {
+    fn resize(&mut self, min: MinimumLengths) {
+        self.cell.resize(min);
+        if self.cell.is_waiting() {
+            self.zone.content_changed(ContentChange::Needs {
+                class: self.cell.class,
+                need: min.as_last,
+            });
+        }
+    }
+}
+
+/// Withdrawing tells where the intent stood once it was withdrawn: never
+/// [`IntentState::Waiting`].
+impl<C> IntentTicketWithdraw for IntentTicket<C> {
+    type Report = IntentState<ConnectionClosedError<C>>;
+
+    fn withdraw(self) -> Self::Report {
+        if self.cell.leave_waiting(WITHDRAWN) {
+            self.zone.content_changed(ContentChange::Withdrawn);
+            IntentState::Withdrawn
+        } else {
+            self.state()
+        }
+    }
+}
+
 impl<C> Drop for IntentTicket<C> {
     fn drop(&mut self) {
-        self.cell.leave_waiting(WITHDRAWN);
+        if self.cell.leave_waiting(WITHDRAWN) {
+            self.zone.content_changed(ContentChange::Withdrawn);
+        }
     }
 }
 
@@ -199,10 +292,140 @@ impl Drop for LinkPathIntentTicket {
     }
 }
 
+// ---- the zone shared with the intake and the tickets ----
+
+/// The room a link path's next datagram has, for each flight class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Room {
+    ack_only: usize,
+    in_flight: usize,
+}
+
+impl Room {
+    fn of(limits: &DatagramLimits) -> Self {
+        Self {
+            ack_only: limits.capacity_for(FlightClass::AckOnly),
+            in_flight: limits.capacity_for(FlightClass::InFlight),
+        }
+    }
+
+    fn fits(&self, class: FlightClass, need: usize) -> bool {
+        match class {
+            FlightClass::AckOnly => need <= self.ack_only,
+            FlightClass::InFlight => need <= self.in_flight,
+        }
+    }
+}
+
+/// What a link path's planner left in the zone when it last began to wait.
+#[derive(Debug)]
+struct LinkPathWait {
+    serial: u64,
+    /// Taken when it is woken, and when the planner plans again.
+    waker: Option<Waker>,
+    /// Whether the link path takes intents for any active link path.
+    accepts: bool,
+    /// The room of its next datagram; `None` while it was told none.
+    room: Option<Room>,
+    /// The least room needed by content published or resized while it
+    /// waits that did not fit its room.
+    unplanned: Thresholds,
+    /// Whether it left content that did not fit.
+    blocked: bool,
+}
+
+impl LinkPathWait {
+    fn new(serial: u64) -> Self {
+        Self {
+            serial,
+            waker: None,
+            accepts: false,
+            room: None,
+            unplanned: Thresholds::default(),
+            blocked: false,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct Waits {
+    /// Counts the changes of content made in the zone; a planner that
+    /// began to plan at another count plans again instead of waiting.
+    changes: u64,
+    link_paths: Vec<LinkPathWait>,
+}
+
+/// How content changed outside the driver's borrows.
+#[derive(Debug, Clone, Copy)]
+enum ContentChange {
+    /// Content of `class` needing at least `need` bytes was published or
+    /// resized.
+    Needs { class: FlightClass, need: usize },
+    /// A waiting intent was withdrawn.
+    Withdrawn,
+}
+
+/// What the core shares with its intake and its tickets: the reason the
+/// connection closed, and what each link path's planner needs to be woken.
+#[derive(Debug)]
+struct SyncZone<C> {
+    closed: OnceLock<CloseReason<C>>,
+    waits: Mutex<Waits>,
+}
+
+impl<C> SyncZone<C> {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            closed: OnceLock::new(),
+            waits: Mutex::new(Waits::default()),
+        })
+    }
+
+    /// Count `change`, and wake the waiting planners it may let send: the
+    /// zone is let go before they are woken.
+    fn content_changed(&self, change: ContentChange) {
+        let mut woken = Vec::new();
+        {
+            let mut waits = lock(&self.waits);
+            waits.changes = waits.changes.wrapping_add(1);
+            for wait in &mut waits.link_paths {
+                if !wait.accepts || wait.waker.is_none() {
+                    continue;
+                }
+                let wake = match change {
+                    ContentChange::Needs { class, need } => {
+                        let fits = wait.room.is_some_and(|room| room.fits(class, need));
+                        if !fits {
+                            wait.unplanned.add(class, need);
+                        }
+                        fits
+                    }
+                    ContentChange::Withdrawn => wait.blocked,
+                };
+                if wake {
+                    woken.extend(wait.waker.take());
+                }
+            }
+        }
+        for waker in woken {
+            waker.wake();
+        }
+    }
+}
+
 // ---- the core ----
 
 #[derive(Debug)]
 struct Entry<J> {
+    intent: J,
+    cell: Arc<IntentCell>,
+    /// When it was taken in, among the intents of its holder.
+    order: u64,
+}
+
+/// An intent published through the intake, not yet taken in by the core.
+#[derive(Debug)]
+struct Published<J> {
     intent: J,
     cell: Arc<IntentCell>,
 }
@@ -219,7 +442,10 @@ pub struct RankedSendStrategy<I: SendStrategyTypes> {
     link_paths: Vec<LinkPathEntry<I::LinkPathIdentifier>>,
     keys: [bool; 4],
     handshake_confirmed: bool,
-    closed: Arc<OnceLock<CloseReason<I::CloseCause>>>,
+    next_order: u64,
+    next_serial: u64,
+    published: Arc<Mutex<Vec<Published<I::SendIntents>>>>,
+    zone: Arc<SyncZone<I::CloseCause>>,
 }
 
 impl<I: SendStrategyTypes> fmt::Debug for RankedSendStrategy<I> {
@@ -267,7 +493,10 @@ impl<I: SendStrategyTypes> RankedSendStrategy<I> {
             link_paths: Vec::new(),
             keys: [false; 4],
             handshake_confirmed: false,
-            closed: Arc::new(OnceLock::new()),
+            next_order: 0,
+            next_serial: 0,
+            published: Arc::new(Mutex::new(Vec::new())),
+            zone: SyncZone::new(),
         }
     }
 
@@ -288,11 +517,33 @@ impl<I: SendStrategyTypes> RankedSendStrategy<I> {
         }
         self.keys[level_index(level)]
     }
+
+    /// Take in what was published through the intake.
+    fn take_in_published(&mut self) {
+        let next_order = &mut self.next_order;
+        self.intents
+            .extend(lock(&self.published).drain(..).map(|published| {
+                let order = *next_order;
+                *next_order += 1;
+                Entry {
+                    intent: published.intent,
+                    cell: published.cell,
+                    order,
+                }
+            }));
+    }
+
+    fn ticket(&self, cell: Arc<IntentCell>) -> IntentTicket<I::CloseCause> {
+        IntentTicket {
+            cell,
+            zone: Arc::clone(&self.zone),
+        }
+    }
 }
 
 /// What [`RankedSendStrategy`] gives back for an intent published to its
-/// core, by the type of the intent. The parts implement it for the intents
-/// their components publish to the core.
+/// core or its intake, by the type of the intent. The parts implement it
+/// for the intents their components publish there.
 pub trait RankedCoreIntent: SendIntent {
     /// [`IntentTicket`] for an intent someone reads or withdraws; `()` for
     /// one sent and forgotten, which only being supplied or the end of the
@@ -343,21 +594,103 @@ where
     I::SendIntents: InjectSendIntent<J, Idx>,
 {
     fn publish_to(&mut self, intent: J, _: AnyActiveLinkPath) -> J::Outcome<I::CloseCause> {
-        let cell = IntentCell::new();
-        if self.closed.get().is_some() {
+        let intent = <I::SendIntents as InjectSendIntent<J, Idx>>::inject(intent);
+        let cell = IntentCell::new(I::min_lengths(&intent), I::flight_class(&intent));
+        if self.zone.closed.get().is_some() {
             cell.leave_waiting(ENDED);
         } else {
+            let order = self.next_order;
+            self.next_order += 1;
             self.intents.push(Entry {
-                intent: <I::SendIntents as InjectSendIntent<J, Idx>>::inject(intent),
+                intent,
                 cell: Arc::clone(&cell),
+                order,
             });
             self.wake_all();
         }
-        let closed = &self.closed;
+        sealed::CoreOutcome::new(|| self.ticket(cell))
+    }
+}
+
+/// The intake of the ranked strategy: intents published through it wait in
+/// the zone it shares with the core until a planner of the core plans, and
+/// end with the connection's close reason once the connection closed.
+pub struct RankedSendIntake<I: SendStrategyTypes> {
+    published: Arc<Mutex<Vec<Published<I::SendIntents>>>>,
+    zone: Arc<SyncZone<I::CloseCause>>,
+}
+
+impl<I: SendStrategyTypes> Clone for RankedSendIntake<I> {
+    fn clone(&self) -> Self {
+        Self {
+            published: Arc::clone(&self.published),
+            zone: Arc::clone(&self.zone),
+        }
+    }
+}
+
+impl<I: SendStrategyTypes> fmt::Debug for RankedSendIntake<I> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RankedSendIntake").finish_non_exhaustive()
+    }
+}
+
+impl<I: SendStrategyTypes, J: RankedCoreIntent> PublishOutcome<J, AnyActiveLinkPath>
+    for RankedSendIntake<I>
+{
+    type Outcome = J::Outcome<I::CloseCause>;
+}
+
+impl<I, J, Idx> SharedPublishTo<J, AnyActiveLinkPath, Idx> for RankedSendIntake<I>
+where
+    I: SendStrategyTypes,
+    J: RankedCoreIntent,
+    I::SendIntents: InjectSendIntent<J, Idx>,
+{
+    fn publish_to(&self, intent: J, _: AnyActiveLinkPath) -> J::Outcome<I::CloseCause> {
+        let intent = <I::SendIntents as InjectSendIntent<J, Idx>>::inject(intent);
+        let min = I::min_lengths(&intent);
+        let class = I::flight_class(&intent);
+        let cell = IntentCell::new(min, class);
+        // Whether the connection closed is read under the lock the close
+        // takes the published intents under: none is left waiting.
+        let taken = {
+            let mut published = lock(&self.published);
+            if self.zone.closed.get().is_some() {
+                cell.leave_waiting(ENDED);
+                false
+            } else {
+                published.push(Published {
+                    intent,
+                    cell: Arc::clone(&cell),
+                });
+                true
+            }
+        };
+        if taken {
+            self.zone.content_changed(ContentChange::Needs {
+                class,
+                need: min.as_last,
+            });
+        }
         sealed::CoreOutcome::new(|| IntentTicket {
             cell,
-            closed: Arc::clone(closed),
+            zone: Arc::clone(&self.zone),
         })
+    }
+}
+
+impl<I: SendStrategyTypes> SendIntentIntake<AnyActiveLinkPath> for RankedSendIntake<I> {
+    type Handle<J: SendIntent, Idx>
+        = IntakeSendIntentHandle<Self, J, Idx>
+    where
+        Self: SharedPublishTo<J, AnyActiveLinkPath, Idx>;
+
+    fn handle<J: SendIntent, Idx>(&self) -> Self::Handle<J, Idx>
+    where
+        Self: SharedPublishTo<J, AnyActiveLinkPath, Idx>,
+    {
+        IntakeSendIntentHandle::new(self.clone())
     }
 }
 
@@ -369,6 +702,14 @@ where
 {
     type Destination = AnyActiveLinkPath;
     type LinkPathSendPlanner = RankedLinkPathSendPlanner<I>;
+    type Intake = RankedSendIntake<I>;
+
+    fn intake(&self) -> RankedSendIntake<I> {
+        RankedSendIntake {
+            published: Arc::clone(&self.published),
+            zone: Arc::clone(&self.zone),
+        }
+    }
 
     fn add_link_path(
         &mut self,
@@ -379,14 +720,23 @@ where
             id: id.clone(),
             waker: None,
         });
+        let serial = self.next_serial;
+        self.next_serial += 1;
+        lock(&self.zone.waits)
+            .link_paths
+            .push(LinkPathWait::new(serial));
         RankedLinkPathSendPlanner {
             id,
+            serial,
+            zone: Arc::clone(&self.zone),
             role,
             limits: None,
             overheads: PacketOverheads::default(),
             intents: Vec::new(),
+            next_order: 0,
             waker: None,
             thresholds: Thresholds::default(),
+            turns: [None; URGENCIES],
             close_resends: CloseResends::default(),
             types: PhantomData,
         }
@@ -403,9 +753,12 @@ where
     }
 
     fn no_more_active_link_paths(&mut self, reason: CloseReason<I::CloseCause>) {
-        let _ = self.closed.set(reason);
+        let _ = self.zone.closed.set(reason);
         for entry in self.intents.drain(..) {
             entry.cell.leave_waiting(ENDED);
+        }
+        for published in lock(&self.published).drain(..) {
+            published.cell.leave_waiting(ENDED);
         }
     }
 }
@@ -426,6 +779,10 @@ impl Thresholds {
             FlightClass::InFlight => &mut self.in_flight,
         };
         *slot = Some(slot.map_or(need, |least| least.min(need)));
+    }
+
+    fn is_empty(&self) -> bool {
+        self.ack_only.is_none() && self.in_flight.is_none()
     }
 
     fn reached_by(&self, limits: &DatagramLimits) -> bool {
@@ -460,15 +817,36 @@ impl CloseResends {
     }
 }
 
+/// How many urgencies there are: `0` to `7`.
+const URGENCIES: usize = 8;
+
+/// Where an intent stands among the intents of one rank, level and urgency
+/// when turns do not change it: the planner's own first, each holder's in
+/// the order they were taken in.
+type IntentOrder = (u8, u64);
+
+fn intent_order(held: Held, order: u64) -> IntentOrder {
+    match held {
+        Held::LinkPath(_) => (0, order),
+        Held::Core(_) => (1, order),
+    }
+}
+
 /// The planner of one link path in the ranked strategy.
 pub struct RankedLinkPathSendPlanner<I: SendStrategyTypes> {
     id: I::LinkPathIdentifier,
+    serial: u64,
+    zone: Arc<SyncZone<I::CloseCause>>,
     role: LinkPathRoleKind,
     limits: Option<DatagramLimits>,
     overheads: PacketOverheads,
     intents: Vec<Entry<I::SendIntents>>,
+    next_order: u64,
     waker: Option<Waker>,
     thresholds: Thresholds,
+    /// For each urgency of application data, the intent given its turn
+    /// last: the next datagram starts after it.
+    turns: [Option<IntentOrder>; URGENCIES],
     close_resends: CloseResends,
     types: PhantomData<fn() -> I>,
 }
@@ -490,6 +868,64 @@ impl<I: SendStrategyTypes> RankedLinkPathSendPlanner<I> {
         if let Some(waker) = self.waker.take() {
             waker.wake();
         }
+    }
+
+    /// Begin to plan: what was published through the intake is taken in;
+    /// the count of changes in the zone before it was taken in.
+    fn begin(&self, core: &mut RankedSendStrategy<I>) -> u64 {
+        let changes = {
+            let mut waits = lock(&self.zone.waits);
+            if let Some(wait) = waits
+                .link_paths
+                .iter_mut()
+                .find(|wait| wait.serial == self.serial)
+            {
+                wait.waker = None;
+            }
+            waits.changes
+        };
+        core.take_in_published();
+        changes
+    }
+
+    /// Wait with `waker`, leaving in the zone what wakes this link path,
+    /// unless the zone changed since the count `seen`: then plan again.
+    fn wait(&self, seen: u64, waker: &Waker) -> bool {
+        let waker = waker.clone();
+        let mut waits = lock(&self.zone.waits);
+        if waits.changes != seen {
+            return false;
+        }
+        if let Some(wait) = waits
+            .link_paths
+            .iter_mut()
+            .find(|wait| wait.serial == self.serial)
+        {
+            wait.waker = Some(waker);
+            wait.accepts = self.role == LinkPathRoleKind::Active;
+            wait.room = self.limits.as_ref().map(Room::of);
+            wait.unplanned = Thresholds::default();
+            wait.blocked = !self.thresholds.is_empty();
+        }
+        true
+    }
+
+    /// The link path is told `limits` while it may wait: its room in the
+    /// zone follows, and whether content published meanwhile now fits.
+    fn waiting_content_fits(&self, limits: &DatagramLimits) -> bool {
+        let mut waits = lock(&self.zone.waits);
+        let Some(wait) = waits
+            .link_paths
+            .iter_mut()
+            .find(|wait| wait.serial == self.serial)
+        else {
+            return false;
+        };
+        if wait.waker.is_none() {
+            return false;
+        }
+        wait.room = Some(Room::of(limits));
+        wait.unplanned.reached_by(limits)
     }
 }
 
@@ -522,10 +958,14 @@ where
                 LinkPathPublishError::from(RoleNotAcceptingError::new(self.role)),
             ));
         }
-        let cell = IntentCell::new();
+        let intent = <I::SendIntents as InjectSendIntent<J, Idx>>::inject(intent);
+        let cell = IntentCell::new(I::min_lengths(&intent), I::flight_class(&intent));
+        let order = self.next_order;
+        self.next_order += 1;
         self.intents.push(Entry {
-            intent: <I::SendIntents as InjectSendIntent<J, Idx>>::inject(intent),
+            intent,
             cell: Arc::clone(&cell),
+            order,
         });
         self.wake();
         Ok(LinkPathIntentTicket { cell })
@@ -554,7 +994,9 @@ impl<I: SendStrategyTypes> Observe<DatagramLimits> for RankedLinkPathSendPlanner
             return;
         }
         self.limits = Some(limits);
-        if self.thresholds.reached_by(&limits) {
+        // Both are asked: the room in the zone follows the limits.
+        let waiting_fits = self.waiting_content_fits(&limits);
+        if self.thresholds.reached_by(&limits) || waiting_fits {
             self.wake();
         }
     }
@@ -582,6 +1024,9 @@ struct PlannedEntry {
     held: Held,
     min: MinimumLengths,
     class: FlightClass,
+    /// For application data: its urgency and where it stands, to give the
+    /// next turn after it once it is supplied.
+    turn: Option<(usize, IntentOrder)>,
 }
 
 #[derive(Debug)]
@@ -615,6 +1060,21 @@ fn carries<I: SendStrategyTypes>(kind: PlannedPacketKind, intent: &I::SendIntent
         PlannedPacketKind::OneRttProbe => I::ProbeFrameSources::item(intent).is_some(),
         PlannedPacketKind::SettlingResponse => I::SettlingFrameSources::item(intent).is_some(),
     }
+}
+
+/// An intent that may go into the next datagram, with what orders it.
+struct Candidate<'e, J> {
+    rank: SendRank,
+    level: EncryptionLevel,
+    /// The urgency of application data; `0` for other ranks.
+    urgency: usize,
+    /// Whether it had its turn in this urgency: those that had theirs go
+    /// after those that did not.
+    had_turn: bool,
+    order: IntentOrder,
+    held: Held,
+    kind: PlannedPacketKind,
+    entry: &'e Entry<J>,
 }
 
 impl<I> RankedLinkPathSendPlanner<I>
@@ -655,24 +1115,54 @@ where
             else {
                 continue;
             };
-            candidates.push((
-                entry.intent.rank(),
-                level_of(kind),
+            let rank = entry.intent.rank();
+            let order = intent_order(held, entry.order);
+            let (urgency, had_turn) = if rank.priority == SendPriority::ApplicationData {
+                let urgency = usize::from(entry.intent.urgency().get());
+                let had_turn = self.turns[urgency].is_some_and(|last| order <= last);
+                (urgency, had_turn)
+            } else {
+                (0, false)
+            };
+            candidates.push(Candidate {
+                rank,
+                level: level_of(kind),
+                urgency,
+                had_turn,
+                order,
                 held,
                 kind,
-                &entry.intent,
-            ));
+                entry,
+            });
         }
-        candidates.sort_by_key(|&(rank, level, held, ..)| (rank.priority, level, held_order(held)));
+        candidates.sort_by_key(|candidate| {
+            (
+                candidate.rank.priority,
+                candidate.level,
+                candidate.urgency,
+                candidate.had_turn,
+                candidate.order,
+            )
+        });
 
         let mut packets: Vec<PacketPlan> = Vec::new();
         let mut highest: Option<EncryptionLevel> = None;
-        for (rank, level, held, kind, intent) in candidates {
+        for candidate in candidates {
+            let Candidate {
+                rank,
+                level,
+                urgency,
+                order,
+                held,
+                kind,
+                entry,
+                ..
+            } = candidate;
             if highest.is_some_and(|highest| level < highest) {
                 break;
             }
-            let min = I::min_lengths(intent);
-            let class = I::flight_class(intent);
+            let min = entry.cell.min();
+            let class = entry.cell.class;
             // a kind of packet the link path cannot send now: no room
             // lets it go, so it holds no place and leaves no threshold
             let Some(overhead) = self.overheads.of(kind) else {
@@ -686,32 +1176,31 @@ where
                 need = need.max(DatagramLimits::MINIMUM);
                 class_of_datagram = FlightClass::InFlight;
             }
+            let application_data = rank.priority == SendPriority::ApplicationData;
             if need > limits.capacity_for(class_of_datagram) {
                 thresholds.add(class_of_datagram, need);
-                if rank.holds_place {
+                // application data that does not fit is passed over
+                if rank.holds_place && !application_data {
                     break;
                 }
                 continue;
             }
             highest = Some(level);
+            let planned = PlannedEntry {
+                held,
+                min,
+                class,
+                turn: application_data.then_some((urgency, order)),
+            };
             match packets.last_mut() {
-                Some(packet) if packet.kind == kind => {
-                    packet.items.push(PlannedEntry { held, min, class })
-                }
+                Some(packet) if packet.kind == kind => packet.items.push(planned),
                 _ => packets.push(PacketPlan {
                     kind,
-                    items: vec![PlannedEntry { held, min, class }],
+                    items: vec![planned],
                 }),
             }
         }
         (packets, thresholds)
-    }
-}
-
-fn held_order(held: Held) -> (u8, usize) {
-    match held {
-        Held::LinkPath(index) => (0, index),
-        Held::Core(index) => (1, index),
     }
 }
 
@@ -739,25 +1228,30 @@ where
             self.waker = Some(cx.waker().clone());
             return Poll::Pending;
         }
-        self.intents.retain(|entry| entry.cell.is_waiting());
-        core.intents.retain(|entry| entry.cell.is_waiting());
-        let (packets, thresholds) = self.plan_packets(core);
-        if packets.is_empty() {
+        loop {
+            let seen = self.begin(core);
+            self.intents.retain(|entry| entry.cell.is_waiting());
+            core.intents.retain(|entry| entry.cell.is_waiting());
+            let (packets, thresholds) = self.plan_packets(core);
+            if !packets.is_empty() {
+                self.thresholds = Thresholds::default();
+                return Poll::Ready(PlannedDatagram::Fill(RankedPlan {
+                    core,
+                    planner: self,
+                    packets,
+                    next_packet: 0,
+                    feedback: RankedFeedback::default(),
+                }));
+            }
             self.thresholds = thresholds;
             self.waker = Some(cx.waker().clone());
             if let Some(entry) = core.link_paths.iter_mut().find(|entry| entry.id == self.id) {
                 entry.waker = Some(cx.waker().clone());
             }
-            return Poll::Pending;
+            if self.wait(seen, cx.waker()) {
+                return Poll::Pending;
+            }
         }
-        self.thresholds = Thresholds::default();
-        Poll::Ready(PlannedDatagram::Fill(RankedPlan {
-            core,
-            planner: self,
-            packets,
-            next_packet: 0,
-            feedback: RankedFeedback::default(),
-        }))
     }
 
     fn role_changed(&mut self, _: &mut Self::Core, role: LinkPathRoleKind) {
@@ -778,6 +1272,9 @@ where
 
     fn ended(self, core: &mut Self::Core) {
         core.link_paths.retain(|entry| entry.id != self.id);
+        lock(&self.zone.waits)
+            .link_paths
+            .retain(|wait| wait.serial != self.serial);
         for entry in &self.intents {
             entry.cell.leave_waiting(ENDED);
         }
@@ -789,17 +1286,16 @@ where
 /// What the ranked plan learns from each supply.
 #[derive(Debug, Default)]
 pub struct RankedFeedback {
-    current: Option<Held>,
-    consumed: Vec<Held>,
+    current: Option<PlannedEntry>,
+    /// The items supplied, in order, and whether each wrote anything.
+    supplied: Vec<(PlannedEntry, bool)>,
     stopped: bool,
 }
 
 impl SupplyFeedback for RankedFeedback {
     fn supplied(&mut self, written: usize) {
-        if let Some(held) = self.current.take()
-            && written > 0
-        {
-            self.consumed.push(held);
+        if let Some(entry) = self.current.take() {
+            self.supplied.push((entry, written > 0));
         }
     }
 }
@@ -846,14 +1342,21 @@ impl<I: SendStrategyTypes> RankedPlan<'_, I> {
     }
 }
 
+/// The items supplied had their turn; those that wrote anything are
+/// consumed.
 impl<I: SendStrategyTypes> Drop for RankedPlan<'_, I> {
     fn drop(&mut self) {
-        for held in self.feedback.consumed.drain(..) {
-            let cell = match held {
-                Held::Core(index) => &self.core.intents[index].cell,
-                Held::LinkPath(index) => &self.planner.intents[index].cell,
-            };
-            cell.leave_waiting(CONSUMED);
+        for (entry, wrote) in self.feedback.supplied.drain(..) {
+            if let Some((urgency, order)) = entry.turn {
+                self.planner.turns[urgency] = Some(order);
+            }
+            if wrote {
+                let cell = match entry.held {
+                    Held::Core(index) => &self.core.intents[index].cell,
+                    Held::LinkPath(index) => &self.planner.intents[index].cell,
+                };
+                cell.leave_waiting(CONSUMED);
+            }
         }
     }
 }
@@ -973,7 +1476,7 @@ where
         };
         // The packet's kind was chosen because its set carries the intent.
         let item = S::item(intent)?;
-        plan.feedback.current = Some(entry.held);
+        plan.feedback.current = Some(entry);
         Some(PlannedItem::new(
             item,
             entry.min,
