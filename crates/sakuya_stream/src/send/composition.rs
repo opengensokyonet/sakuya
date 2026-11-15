@@ -16,9 +16,14 @@ use crate::connection_send_credit::{
 use crate::send_buffer::covered_bytes::CoveredBytes;
 use crate::send_buffer::offset_map::OffsetMapStreamSendBuffer;
 use crate::send_buffer::{
-    AppendError, ApplyResetError, ExposeUsageError, ExposedContent, ResetRetention, Selection,
-    SelectionConstraints, StreamSendBuffer, TransmissionReceipt,
+    AppendError, ApplyResetError, CurrentDestinationOf, DestinationChanges, ExposeUsageError,
+    ExposedContent, NextSegment, ResetRetention, SelectedData, SendMarker, StreamSendBuffer,
 };
+use crate::send_options::SendOptions;
+use crate::send_options::destination::{AnyActiveLinkPath, Unfulfilled};
+use crate::send_options::urgency::Urgency;
+use bytes::Bytes;
+use core::ops::Range;
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
 use sakuya_wire::var_int::VarInt;
 
@@ -40,12 +45,18 @@ pub struct SendComposition<B, F, P> {
 
 /// The default composition: [`OffsetMapStreamSendBuffer`],
 /// [`DefaultSendFlowControlPolicy`] and [`DefaultSendTerminationPolicy`],
-/// over the connection credit reservation `R`
-/// ([`AtomicConnectionCreditReservation`] by default).
+/// over the data `B` ([`Bytes`] by default), the connection credit
+/// reservation `R` ([`AtomicConnectionCreditReservation`] by default) and
+/// the marker `M` (by default the send options of an [`Urgency`] to
+/// [`AnyActiveLinkPath`]).
 ///
 /// It is a replaceable base, not behaviour every policy must share.
-pub type DefaultSendComposition<R = AtomicConnectionCreditReservation> = SendComposition<
-    OffsetMapStreamSendBuffer<R>,
+pub type DefaultSendComposition<
+    B = Bytes,
+    R = AtomicConnectionCreditReservation,
+    M = SendOptions<Urgency, AnyActiveLinkPath>,
+> = SendComposition<
+    OffsetMapStreamSendBuffer<B, R, M>,
     DefaultSendFlowControlPolicy,
     DefaultSendTerminationPolicy,
 >;
@@ -61,21 +72,28 @@ impl<B, F, P> SendComposition<B, F, P> {
     }
 }
 
-impl<R: ConnectionCreditReservation> DefaultSendComposition<R> {
+impl<B, R: ConnectionCreditReservation, M: SendMarker> DefaultSendComposition<B, R, M> {
     /// The default composition with an empty buffer; an abandoned stream
-    /// writer leads to a reset with `abandon_code`.
-    pub fn with_abandon_code(abandon_code: ApplicationErrorCode) -> Self {
+    /// writer leads to a reset with `abandon_code`, and data whose
+    /// destination has nothing left to fall back to to a reset with
+    /// `destination_exhausted_code`.
+    pub fn with_reset_codes(
+        abandon_code: ApplicationErrorCode,
+        destination_exhausted_code: ApplicationErrorCode,
+    ) -> Self {
         Self::new(
             OffsetMapStreamSendBuffer::new(),
             DefaultSendFlowControlPolicy::new(),
-            DefaultSendTerminationPolicy::new(abandon_code),
+            DefaultSendTerminationPolicy::new(abandon_code, destination_exhausted_code),
         )
     }
 }
 
-impl<B: StreamSendBuffer, F, P> StreamSendBuffer for SendComposition<B, F, P> {
-    type Reservation = B::Reservation;
-
+impl<S, F, P, B, R, M> StreamSendBuffer<B, R, M> for SendComposition<S, F, P>
+where
+    S: StreamSendBuffer<B, R, M>,
+    M: SendMarker,
+{
     fn written_end(&self) -> VarInt {
         self.buffer.written_end()
     }
@@ -84,10 +102,7 @@ impl<B: StreamSendBuffer, F, P> StreamSendBuffer for SendComposition<B, F, P> {
         self.buffer.exposure_end()
     }
 
-    fn append(
-        &mut self,
-        data: CoveredBytes<B::Reservation>,
-    ) -> Result<(), AppendError<B::Reservation>> {
+    fn append(&mut self, data: CoveredBytes<B, R, M>) -> Result<(), AppendError<B, R, M>> {
         self.buffer.append(data)
     }
 
@@ -103,16 +118,36 @@ impl<B: StreamSendBuffer, F, P> StreamSendBuffer for SendComposition<B, F, P> {
         self.buffer.expose_usage_through(usage_end, content)
     }
 
-    fn select(&mut self, constraints: SelectionConstraints) -> Selection {
-        self.buffer.select(constraints)
+    fn destinations(&self) -> Vec<CurrentDestinationOf<M>> {
+        self.buffer.destinations()
     }
 
-    fn on_acknowledged(&mut self, receipt: TransmissionReceipt) {
-        self.buffer.on_acknowledged(receipt);
+    fn next(&self, destination: &CurrentDestinationOf<M>) -> Option<NextSegment<'_, M>> {
+        self.buffer.next(destination)
     }
 
-    fn on_lost(&mut self, receipt: TransmissionReceipt) {
-        self.buffer.on_lost(receipt);
+    fn select(
+        &mut self,
+        destination: &CurrentDestinationOf<M>,
+        max_len: usize,
+    ) -> Option<SelectedData<B>> {
+        self.buffer.select(destination, max_len)
+    }
+
+    fn on_acknowledged(&mut self, range: Range<VarInt>) -> Vec<CurrentDestinationOf<M>> {
+        self.buffer.on_acknowledged(range)
+    }
+
+    fn on_lost(&mut self, range: Range<VarInt>) -> DestinationChanges<CurrentDestinationOf<M>> {
+        self.buffer.on_lost(range)
+    }
+
+    fn on_unfulfilled(
+        &mut self,
+        destination: &CurrentDestinationOf<M>,
+        cause: Unfulfilled,
+    ) -> DestinationChanges<CurrentDestinationOf<M>> {
+        self.buffer.on_unfulfilled(destination, cause)
     }
 }
 

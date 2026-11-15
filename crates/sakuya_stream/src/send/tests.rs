@@ -5,12 +5,14 @@ use super::finish::{CloseError, ProtocolTerminalError, ResetError, ResetWithFina
 use super::flow_control::{AdmissionGrantError, AdmissionGuard, StreamCreditEvent, WriteAttempt};
 use super::local_reset::LocalReset;
 use super::termination::{
-    FinalSizeRequest, SendTerminationContext, SendTerminationEvent, TerminationAction,
+    DefaultSendTerminationPolicy, FinalSizeRequest, SendTerminationContext, SendTerminationEvent,
+    SendTerminationPolicy, TerminationAction,
 };
 use super::test_support::{
-    Action, CODE, Connection, OTHER_CODE, RecordingFlow, Reservation, ScriptedTermination,
-    TestCloseCause, TestSender, close_reason, code, completing_sender, due_end_frame, end_commits,
-    expose, keep, new_connection, send_end, source, stream, v, write_all, written,
+    Action, CODE, Connection, DirectOnly, EXHAUSTED_CODE, OTHER_CODE, Options, RecordingFlow,
+    Reservation, ScriptedTermination, TestCloseCause, TestSender, close_reason, code,
+    completing_sender, direct, direct_sender, due_end_frame, end_commits, expose, keep,
+    new_connection, options, send_end, source, stream, v, write_all, written,
 };
 use super::write::{FlushError, WriteError, WriteOutcome, WriteWait};
 use super::*;
@@ -20,11 +22,13 @@ use crate::connection::{
 use crate::send_buffer::covered_bytes::CoveredBytes;
 use crate::send_buffer::visibility::FinalSizeBelowExposureError;
 use crate::send_buffer::{
-    AppendError, ApplyResetError, ExposedContent, FinalSizeBeyondWrittenEndError, ResetRetention,
-    Selection, SelectionConstraints, TransmissionReceipt,
+    AppendError, ApplyResetError, DestinationChanges, ExposedContent,
+    FinalSizeBeyondWrittenEndError, ResetRetention,
 };
+use crate::send_options::destination::{AnyActiveLinkPath, Unfulfilled};
 use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError};
 use bytes::{Buf, Bytes};
+use core::ops::Range;
 use sakuya_wire::var_int::VarIntWidth;
 use std::sync::Arc;
 
@@ -79,7 +83,7 @@ fn write_takes_the_reserved_part_of_the_grant() {
     sender.composition.flow_control.grant_cap = Some(v(600));
 
     let mut input = source(1000);
-    assert_eq!(sender.write(&mut input).unwrap(), written(400));
+    assert_eq!(sender.write(&mut input, &options()).unwrap(), written(400));
     assert_eq!(input.remaining(), 600);
     assert_eq!(sender.written_end(), v(400));
     assert_eq!(
@@ -113,7 +117,7 @@ fn write_without_connection_credit_waits_and_consumes_nothing() {
     let mut sender = test_sender(&connection, 1000);
     let mut input = source(100);
     assert_eq!(
-        sender.write(&mut input).unwrap(),
+        sender.write(&mut input, &options()).unwrap(),
         WriteOutcome::Wait(WriteWait::ConnectionCredit)
     );
     assert_eq!(input.remaining(), 100);
@@ -125,7 +129,7 @@ fn write_without_connection_credit_waits_and_consumes_nothing() {
     assert!(sender.composition.termination.events.is_empty());
 
     connection.on_max_data(v(60));
-    assert_eq!(sender.write(&mut input).unwrap(), written(60));
+    assert_eq!(sender.write(&mut input, &options()).unwrap(), written(60));
     assert_eq!(input.remaining(), 40);
 }
 
@@ -136,7 +140,7 @@ fn write_at_the_stream_limit_waits_after_consulting_the_policy() {
     write_all(&mut sender, 100);
     let mut input = source(10);
     assert_eq!(
-        sender.write(&mut input).unwrap(),
+        sender.write(&mut input, &options()).unwrap(),
         WriteOutcome::Wait(WriteWait::StreamCredit)
     );
     assert_eq!(input.remaining(), 10);
@@ -152,7 +156,7 @@ fn write_waits_when_the_policy_admits_nothing() {
     sender.composition.flow_control.admit_nothing = true;
     let mut input = source(10);
     assert_eq!(
-        sender.write(&mut input).unwrap(),
+        sender.write(&mut input, &options()).unwrap(),
         WriteOutcome::Wait(WriteWait::Admission)
     );
     assert_eq!(input.remaining(), 10);
@@ -164,7 +168,7 @@ fn write_accepts_a_prefix_of_a_chained_source() {
     let connection = new_connection(1000);
     let mut sender = test_sender(&connection, 5);
     let mut input = Bytes::from_static(b"abc").chain(Bytes::from_static(b"defg"));
-    assert_eq!(sender.write(&mut input).unwrap(), written(5));
+    assert_eq!(sender.write(&mut input, &options()).unwrap(), written(5));
     assert_eq!(input.chunk(), b"fg");
 }
 
@@ -175,7 +179,7 @@ fn grant_beyond_the_ceiling_is_a_policy_violation() {
     let mut sender = test_sender(&connection, 100);
     sender.composition.flow_control.over_grant = true;
     let mut input = source(10);
-    let _ = sender.write(&mut input);
+    let _ = sender.write(&mut input, &options());
 }
 
 #[test]
@@ -185,7 +189,7 @@ fn guard_for_another_offset_is_a_policy_violation() {
     let mut sender = test_sender(&connection, 100);
     sender.composition.flow_control.foreign_offset = true;
     let mut input = source(10);
-    let _ = sender.write(&mut input);
+    let _ = sender.write(&mut input, &options());
 }
 
 #[test]
@@ -214,9 +218,7 @@ fn admission_guards_are_checked_at_construction() {
 /// A send buffer that claims its written end has reached `VarInt::MAX`.
 struct ExhaustedBuffer;
 
-impl StreamSendBuffer for ExhaustedBuffer {
-    type Reservation = Reservation;
-
+impl StreamSendBuffer<Bytes, Reservation, Options> for ExhaustedBuffer {
     fn written_end(&self) -> VarInt {
         VarInt::MAX
     }
@@ -225,7 +227,10 @@ impl StreamSendBuffer for ExhaustedBuffer {
         VarInt::ZERO
     }
 
-    fn append(&mut self, data: CoveredBytes<Reservation>) -> Result<(), AppendError<Reservation>> {
+    fn append(
+        &mut self,
+        data: CoveredBytes<Bytes, Reservation, Options>,
+    ) -> Result<(), AppendError<Bytes, Reservation, Options>> {
         Err(AppendError::WrittenEndOverflow {
             written_end: VarInt::MAX,
             data,
@@ -244,16 +249,32 @@ impl StreamSendBuffer for ExhaustedBuffer {
         Ok(VarInt::ZERO)
     }
 
-    fn select(&mut self, constraints: SelectionConstraints) -> Selection {
-        match constraints {}
+    fn destinations(&self) -> Vec<AnyActiveLinkPath> {
+        Vec::new()
     }
 
-    fn on_acknowledged(&mut self, receipt: TransmissionReceipt) {
-        match receipt {}
+    fn next(&self, _: &AnyActiveLinkPath) -> Option<NextSegment<'_, Options>> {
+        None
     }
 
-    fn on_lost(&mut self, receipt: TransmissionReceipt) {
-        match receipt {}
+    fn select(&mut self, _: &AnyActiveLinkPath, _: usize) -> Option<SelectedData<Bytes>> {
+        None
+    }
+
+    fn on_acknowledged(&mut self, _: Range<VarInt>) -> Vec<AnyActiveLinkPath> {
+        Vec::new()
+    }
+
+    fn on_lost(&mut self, _: Range<VarInt>) -> DestinationChanges<AnyActiveLinkPath> {
+        DestinationChanges::default()
+    }
+
+    fn on_unfulfilled(
+        &mut self,
+        _: &AnyActiveLinkPath,
+        _: Unfulfilled,
+    ) -> DestinationChanges<AnyActiveLinkPath> {
+        DestinationChanges::default()
     }
 }
 
@@ -274,14 +295,17 @@ fn write_at_the_largest_offset_is_a_permanent_error() {
     );
     let mut input = source(10);
     assert!(matches!(
-        sender.write(&mut input),
+        sender.write(&mut input, &options()),
         Err(WriteError::StreamSizeExhausted)
     ));
     assert_eq!(input.remaining(), 10);
     assert!(sender.composition.flow_control.attempts.is_empty());
     assert_eq!(connection.reserved(), VarInt::ZERO);
     // Empty input still succeeds with zero bytes.
-    assert_eq!(sender.write(&mut Bytes::new()).unwrap(), written(0));
+    assert_eq!(
+        sender.write(&mut Bytes::new(), &options()).unwrap(),
+        written(0)
+    );
 }
 
 #[test]
@@ -624,7 +648,7 @@ fn empty_input_and_flush_table() {
         let attempts = sender.composition.flow_control.attempts.len();
         let events = sender.composition.termination.events.len();
 
-        let result = sender.write(&mut Bytes::new());
+        let result = sender.write(&mut Bytes::new(), &options());
         let result = match result {
             Ok(outcome) => {
                 assert_eq!(outcome, written(0), "{state}");
@@ -680,7 +704,7 @@ fn write_errors_follow_the_check_order() {
     sender.reset(CODE).unwrap();
     sender.on_layer_ended(LayerEnd::ConnectionClosed(close_reason()));
     assert!(matches!(
-        sender.write(&mut source(1)),
+        sender.write(&mut source(1), &options()),
         Err(WriteError::LayerEnded { .. })
     ));
 
@@ -689,7 +713,7 @@ fn write_errors_follow_the_check_order() {
     sender.close().unwrap();
     sender.reset(CODE).unwrap();
     assert!(matches!(
-        sender.write(&mut source(1)),
+        sender.write(&mut source(1), &options()),
         Err(WriteError::Reset {
             source: StreamResetError
         })
@@ -700,14 +724,14 @@ fn write_errors_follow_the_check_order() {
     sender.on_stop_sending(CODE);
     sender.close().unwrap();
     assert!(matches!(
-        sender.write(&mut source(1)),
+        sender.write(&mut source(1), &options()),
         Err(WriteError::Closed)
     ));
 
     // The write limit before temporary admission: no attempt is made.
     let mut sender = scripted_sender(&connection, 0, narrow_on_stop_sending(0));
     sender.on_stop_sending(CODE);
-    let error = sender.write(&mut source(1)).unwrap_err();
+    let error = sender.write(&mut source(1), &options()).unwrap_err();
     let WriteError::WriteLimitReached {
         write_limit_end,
         reason,
@@ -931,7 +955,7 @@ fn state_transition_table() {
         })
     );
     assert!(matches!(
-        sender.write(&mut Bytes::new()),
+        sender.write(&mut Bytes::new(), &options()),
         Err(WriteError::LayerEnded { .. })
     ));
     assert_eq!(
@@ -1190,10 +1214,10 @@ fn write_limit_narrows_and_stops_new_input() {
     assert_eq!(sender.write_limit_end(), Some(v(700)));
 
     let mut input = source(300);
-    assert_eq!(sender.write(&mut input).unwrap(), written(100));
+    assert_eq!(sender.write(&mut input, &options()).unwrap(), written(100));
     assert_eq!(input.remaining(), 200);
     sender.on_max_stream_data(v(5000));
-    let error = sender.write(&mut input).unwrap_err();
+    let error = sender.write(&mut input, &options()).unwrap_err();
     assert!(matches!(
         error,
         WriteError::WriteLimitReached { write_limit_end, ref reason }
@@ -1387,7 +1411,7 @@ fn default_flow_control_admits_all_room() {
     let connection = new_connection(10_000);
     let mut sender = default_sender(&connection, 700);
     let mut input = source(1000);
-    assert_eq!(sender.write(&mut input).unwrap(), written(700));
+    assert_eq!(sender.write(&mut input, &options()).unwrap(), written(700));
     assert_eq!(input.remaining(), 300);
 }
 
@@ -1402,19 +1426,19 @@ fn default_flow_control_signals_only_when_stream_limited() {
     let small = new_connection(10);
     let mut tight = default_sender(&small, 700);
     let mut input = source(100);
-    assert_eq!(tight.write(&mut input).unwrap(), written(10));
+    assert_eq!(tight.write(&mut input, &options()).unwrap(), written(10));
     assert_eq!(tight.stream_data_blocked_limit(), None);
 
     // Limited by the stream: signal the current limit, until sent.
     let mut input = source(500);
-    assert_eq!(sender.write(&mut input).unwrap(), written(200));
+    assert_eq!(sender.write(&mut input, &options()).unwrap(), written(200));
     assert_eq!(sender.stream_data_blocked_limit(), Some(v(700)));
     sender.on_stream_data_blocked_sent(v(700));
     assert_eq!(sender.stream_data_blocked_limit(), None);
 
     // Blocked again at the same limit: not repeated at once.
     assert_eq!(
-        sender.write(&mut input).unwrap(),
+        sender.write(&mut input, &options()).unwrap(),
         WriteOutcome::Wait(WriteWait::StreamCredit)
     );
     assert_eq!(sender.stream_data_blocked_limit(), None);
@@ -1422,7 +1446,7 @@ fn default_flow_control_signals_only_when_stream_limited() {
     // A larger limit clears the intent; blocking at it signals the new limit.
     sender.on_max_stream_data(v(800));
     assert_eq!(sender.stream_data_blocked_limit(), None);
-    assert_eq!(sender.write(&mut input).unwrap(), written(100));
+    assert_eq!(sender.write(&mut input, &options()).unwrap(), written(100));
     assert_eq!(sender.stream_data_blocked_limit(), Some(v(800)));
 
     // An acknowledgement of the old value clears nothing.
@@ -1552,8 +1576,118 @@ fn a_rejected_zero_rtt_attempt_fails_the_write_with_layer_ended() {
     let mut sender = test_sender(&connection, 1000);
     sender.on_layer_ended(LayerEnd::ZeroRttRejected);
     let mut input = source(4);
-    let Err(WriteError::LayerEnded { source }) = sender.write(&mut input) else {
+    let Err(WriteError::LayerEnded { source }) = sender.write(&mut input, &options()) else {
         panic!("the write must fail with LayerEnded");
     };
     assert_eq!(source.end(), &LayerEnd::ZeroRttRejected);
+}
+
+// ---------------------------------------------------------------------------
+// Selection, feedback and destinations without a fallback
+
+/// A write copies its marker onto the data; the sender selects it by its
+/// destination and takes feedback by range.
+#[test]
+fn written_data_is_selected_by_its_destination() {
+    let connection = new_connection(1000);
+    let mut sender = default_sender(&connection, 1000);
+    write_all(&mut sender, 100);
+    assert_eq!(sender.send_destinations(), [AnyActiveLinkPath]);
+    let next = sender.next_segment(&AnyActiveLinkPath).unwrap();
+    assert_eq!(
+        (next.offset, next.len, *next.marker),
+        (v(0), 100, options())
+    );
+    let selected = sender.select(&AnyActiveLinkPath, 40).unwrap();
+    assert_eq!((selected.offset, selected.bytes.len()), (v(0), 40));
+    sender.expose_usage_through(v(40)).unwrap();
+    // Any active link path stays where it is: the lost data waits again.
+    assert_eq!(sender.on_data_lost(v(0)..v(40)), [AnyActiveLinkPath]);
+    assert_eq!(
+        sender.next_segment(&AnyActiveLinkPath).unwrap().offset,
+        v(0)
+    );
+    assert_eq!(
+        sender.on_unfulfilled(&AnyActiveLinkPath, Unfulfilled::Rejected),
+        [AnyActiveLinkPath]
+    );
+    assert_eq!(
+        sender.on_data_acknowledged(v(0)..v(100)),
+        [AnyActiveLinkPath]
+    );
+    assert!(sender.send_destinations().is_empty());
+    assert_eq!(sender.end_state(), SendEndState::Open);
+    assert_eq!(sender.written_end(), v(100));
+}
+
+/// Nothing is selected once the layer has ended.
+#[test]
+fn nothing_is_selected_after_the_layer_ended() {
+    let connection = new_connection(1000);
+    let mut sender = default_sender(&connection, 1000);
+    write_all(&mut sender, 100);
+    sender.on_layer_ended(LayerEnd::ConnectionClosed(close_reason()));
+    assert!(sender.send_destinations().is_empty());
+    assert!(sender.next_segment(&AnyActiveLinkPath).is_none());
+    assert!(sender.select(&AnyActiveLinkPath, 100).is_none());
+}
+
+/// Lost data whose destination has nothing to fall back to is reported to
+/// the termination policy, and the default policy resets the stream with
+/// the code it was built with.
+#[test]
+fn an_exhausted_destination_resets_the_stream_by_default() {
+    let connection = new_connection(1000);
+    let mut sender = direct_sender::<LocalReset>(&connection);
+    let mut input = source(100);
+    assert_eq!(sender.write(&mut input, &direct()).unwrap(), written(100));
+    sender.select(&DirectOnly, 100).unwrap();
+    sender.expose_usage_through(v(100)).unwrap();
+    assert!(sender.on_data_lost(v(20)..v(50)).is_empty());
+    assert_eq!(
+        sender.end_state(),
+        SendEndState::Reset {
+            target: LocalReset {
+                error_code: EXHAUSTED_CODE,
+                final_size: v(100),
+            },
+            source: EndSource::Policy,
+        }
+    );
+    assert!(sender.composition().buffer.retained().next().is_none());
+}
+
+/// An unfulfilled intent without a fallback resets the stream too; a reset
+/// in effect stays as it is.
+#[test]
+fn an_exhausted_unfulfilled_intent_resets_once() {
+    let connection = new_connection(1000);
+    let mut sender = direct_sender::<LocalReset>(&connection);
+    let mut input = source(100);
+    sender.write(&mut input, &direct()).unwrap();
+    sender.close().unwrap();
+    assert!(
+        sender
+            .on_unfulfilled(&DirectOnly, Unfulfilled::Ended)
+            .contains(&DirectOnly)
+    );
+    let reset = SendEndState::Reset {
+        target: LocalReset {
+            error_code: EXHAUSTED_CODE,
+            final_size: v(100),
+        },
+        source: EndSource::Policy,
+    };
+    assert_eq!(sender.end_state(), reset);
+    // A later exhaustion keeps the reset in effect.
+    let mut policy = DefaultSendTerminationPolicy::new(code(0x10c), EXHAUSTED_CODE);
+    let context = sender.termination_context();
+    assert_eq!(
+        SendTerminationPolicy::<LocalReset>::on_termination_event(
+            &mut policy,
+            SendTerminationEvent::DestinationExhausted { range: v(0)..v(10) },
+            &context,
+        ),
+        TerminationAction::Keep
+    );
 }

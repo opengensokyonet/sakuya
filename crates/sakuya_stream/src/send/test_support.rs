@@ -19,6 +19,11 @@ use crate::connection_send_credit::{
 };
 use crate::send_buffer::StreamSendBuffer;
 use crate::send_buffer::offset_map::OffsetMapStreamSendBuffer;
+use crate::send_options::SendOptions;
+use crate::send_options::destination::{
+    AnyActiveLinkPath, DestinationFallback, SendDestination, StreamSendDestination, Unfulfilled,
+};
+use crate::send_options::urgency::Urgency;
 use bytes::{Buf, Bytes};
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
 use sakuya_wire::v1::stream_id::StreamId;
@@ -177,11 +182,19 @@ where
 
 pub(crate) type Connection = AtomicConnectionSendFlowController;
 pub(crate) type Reservation = AtomicConnectionCreditReservation;
+/// The marker the tests write with: the default send options.
+pub(crate) type Options = SendOptions<Urgency, AnyActiveLinkPath>;
+
+/// The options of the tests' writes: the default urgency, to any active link
+/// path.
+pub(crate) fn options() -> Options {
+    SendOptions::new(Urgency::default(), AnyActiveLinkPath)
+}
 
 /// A sender over the recording policies, with the reset target `T`.
 pub(crate) type TestSender<S, T> = StreamSender<
     SendComposition<
-        OffsetMapStreamSendBuffer<Reservation>,
+        OffsetMapStreamSendBuffer<Bytes, Reservation, Options>,
         RecordingFlow,
         ScriptedTermination<S, T>,
     >,
@@ -251,6 +264,64 @@ where
     )
 }
 
+/// A destination with nothing to fall back to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DirectOnly;
+
+impl SendDestination for DirectOnly {
+    type Current = Self;
+
+    fn current(&self) -> Self {
+        Self
+    }
+
+    fn on_unfulfilled(&mut self, _: Unfulfilled) -> DestinationFallback {
+        DestinationFallback::Exhausted
+    }
+}
+
+impl StreamSendDestination for DirectOnly {
+    fn on_lost(&mut self) -> DestinationFallback {
+        DestinationFallback::Exhausted
+    }
+}
+
+/// The marker of writes that go only direct.
+pub(crate) type DirectOptions = SendOptions<Urgency, DirectOnly>;
+
+/// The default urgency, only direct.
+pub(crate) fn direct() -> DirectOptions {
+    SendOptions::new(Urgency::default(), DirectOnly)
+}
+
+/// The error code the default termination policy of these tests resets with
+/// when data has no destination left.
+pub(crate) const EXHAUSTED_CODE: ApplicationErrorCode =
+    ApplicationErrorCode::new(VarInt::from_u32(0x10d));
+
+/// A sender over the default composition whose writes go only direct.
+pub(crate) fn direct_sender<T>(
+    connection: &Arc<Connection>,
+) -> StreamSender<
+    DefaultSendComposition<Bytes, Reservation, DirectOptions>,
+    Connection,
+    TestCloseCause,
+    T,
+    Bytes,
+    DirectOptions,
+>
+where
+    T: LocalResetTarget,
+    DefaultSendTerminationPolicy: SendTerminationPolicy<T>,
+{
+    StreamSender::new(
+        stream(),
+        v(1000),
+        DefaultSendComposition::with_reset_codes(code(0x10c), EXHAUSTED_CODE),
+        Arc::clone(connection),
+    )
+}
+
 /// A sender over the default composition.
 pub(crate) fn default_sender<T>(
     connection: &Arc<Connection>,
@@ -263,7 +334,7 @@ where
     StreamSender::new(
         stream(),
         v(peer_stream_limit),
-        DefaultSendComposition::with_abandon_code(code(0x10c)),
+        DefaultSendComposition::with_reset_codes(code(0x10c), EXHAUSTED_CODE),
         Arc::clone(connection),
     )
 }
@@ -282,21 +353,24 @@ pub(crate) fn written(new_bytes: u32) -> WriteOutcome {
 pub(crate) fn write_all<C, Lc, T>(sender: &mut StreamSender<C, Connection, Lc, T>, length: u32)
 where
     T: LocalResetTarget,
-    C: StreamSendBuffer<Reservation = Reservation>
+    C: StreamSendBuffer<Bytes, Reservation, Options>
         + SendFlowControlPolicy<T>
         + SendTerminationPolicy<T>,
     C::WriteLimitReason: core::fmt::Debug,
     Lc: core::fmt::Debug,
 {
     let mut input = source(length as usize);
-    assert_eq!(sender.write(&mut input).unwrap(), written(length));
+    assert_eq!(
+        sender.write(&mut input, &options()).unwrap(),
+        written(length)
+    );
     assert!(!input.has_remaining());
 }
 
 pub(crate) fn expose<C, Lc, T>(sender: &mut StreamSender<C, Connection, Lc, T>, usage_end: u32)
 where
     T: LocalResetTarget,
-    C: StreamSendBuffer<Reservation = Reservation>
+    C: StreamSendBuffer<Bytes, Reservation, Options>
         + SendFlowControlPolicy<T>
         + SendTerminationPolicy<T>,
 {
@@ -310,7 +384,7 @@ pub(crate) fn send_end<C, Lc, T>(
 ) -> StreamEndFrame<T::Frame>
 where
     T: LocalResetTarget,
-    C: StreamSendBuffer<Reservation = Reservation>
+    C: StreamSendBuffer<Bytes, Reservation, Options>
         + SendFlowControlPolicy<T>
         + SendTerminationPolicy<T>,
 {
@@ -326,7 +400,7 @@ pub(crate) fn due_end_frame<C, Lc, T>(
 ) -> Option<StreamEndFrame<T::Frame>>
 where
     T: LocalResetTarget,
-    C: StreamSendBuffer<Reservation = Reservation>
+    C: StreamSendBuffer<Bytes, Reservation, Options>
         + SendFlowControlPolicy<T>
         + SendTerminationPolicy<T>,
 {

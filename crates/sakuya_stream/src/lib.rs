@@ -1,7 +1,7 @@
 //! Stream send and receive components for sakuya.
 //!
 //! The send direction: [`connection_send_credit`], [`send_buffer`] and
-//! [`send`]. The receive direction: [`connection_receive_flow`],
+//! [`send`], with the options each write carries in [`send_options`]. The receive direction: [`connection_receive_flow`],
 //! [`receive_buffer`] and [`receive`]. Both directions carry application
 //! protocol error codes as
 //! [`ApplicationErrorCode`](sakuya_wire::v1::application_error::ApplicationErrorCode)
@@ -22,4 +22,5 @@ pub mod receive_buffer;
 pub mod reset_stream_at;
 pub mod send;
 pub mod send_buffer;
+pub mod send_options;
 pub mod stream_end;

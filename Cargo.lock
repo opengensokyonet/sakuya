@@ -364,7 +364,7 @@ dependencies = [
 [[package]]
 name = "nitori_call"
 version = "0.0.0"
-source = "git+https://github.com/opengensokyonet/nitori?rev=e62a04bbc253d3d9cb6b67ec57ca3e230266664b#e62a04bbc253d3d9cb6b67ec57ca3e230266664b"
+source = "git+https://github.com/opengensokyonet/nitori?rev=bf05c4ca2b470a1493840cd6fa960ddb35746b72#bf05c4ca2b470a1493840cd6fa960ddb35746b72"
 dependencies = [
  "bytes",
  "futures-core",
@@ -375,7 +375,7 @@ dependencies = [
 [[package]]
 name = "nitori_call_macros"
 version = "0.0.0"
-source = "git+https://github.com/opengensokyonet/nitori?rev=e62a04bbc253d3d9cb6b67ec57ca3e230266664b#e62a04bbc253d3d9cb6b67ec57ca3e230266664b"
+source = "git+https://github.com/opengensokyonet/nitori?rev=bf05c4ca2b470a1493840cd6fa960ddb35746b72#bf05c4ca2b470a1493840cd6fa960ddb35746b72"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -385,7 +385,7 @@ dependencies = [
 [[package]]
 name = "nitori_crypto"
 version = "0.0.0"
-source = "git+https://github.com/opengensokyonet/nitori?rev=e62a04bbc253d3d9cb6b67ec57ca3e230266664b#e62a04bbc253d3d9cb6b67ec57ca3e230266664b"
+source = "git+https://github.com/opengensokyonet/nitori?rev=bf05c4ca2b470a1493840cd6fa960ddb35746b72#bf05c4ca2b470a1493840cd6fa960ddb35746b72"
 dependencies = [
  "smallvec",
  "snafu",
@@ -395,7 +395,7 @@ dependencies = [
 [[package]]
 name = "nitori_crypto_aws_lc"
 version = "0.0.0"
-source = "git+https://github.com/opengensokyonet/nitori?rev=e62a04bbc253d3d9cb6b67ec57ca3e230266664b#e62a04bbc253d3d9cb6b67ec57ca3e230266664b"
+source = "git+https://github.com/opengensokyonet/nitori?rev=bf05c4ca2b470a1493840cd6fa960ddb35746b72#bf05c4ca2b470a1493840cd6fa960ddb35746b72"
 dependencies = [
  "aws-lc-rs",
  "nitori_crypto",
@@ -406,12 +406,12 @@ dependencies = [
 [[package]]
 name = "nitori_id"
 version = "0.0.0"
-source = "git+https://github.com/opengensokyonet/nitori?rev=e62a04bbc253d3d9cb6b67ec57ca3e230266664b#e62a04bbc253d3d9cb6b67ec57ca3e230266664b"
+source = "git+https://github.com/opengensokyonet/nitori?rev=bf05c4ca2b470a1493840cd6fa960ddb35746b72#bf05c4ca2b470a1493840cd6fa960ddb35746b72"
 
 [[package]]
 name = "nitori_io"
 version = "0.0.0"
-source = "git+https://github.com/opengensokyonet/nitori?rev=e62a04bbc253d3d9cb6b67ec57ca3e230266664b#e62a04bbc253d3d9cb6b67ec57ca3e230266664b"
+source = "git+https://github.com/opengensokyonet/nitori?rev=bf05c4ca2b470a1493840cd6fa960ddb35746b72#bf05c4ca2b470a1493840cd6fa960ddb35746b72"
 dependencies = [
  "bytes",
  "nitori_call",
@@ -766,6 +766,7 @@ name = "sakuya_stream"
 version = "0.0.0"
 dependencies = [
  "bytes",
+ "nitori_io",
  "proptest",
  "sakuya_wire",
  "snafu",

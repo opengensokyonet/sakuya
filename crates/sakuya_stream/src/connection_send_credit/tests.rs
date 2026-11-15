@@ -1,4 +1,5 @@
 use super::*;
+use nitori_io::{SplitTo, SplitToError};
 
 fn v(value: u32) -> VarInt {
     VarInt::from_u32(value)
@@ -23,7 +24,7 @@ fn reserve_commit_and_discard_example() {
     assert_ledger(&controller, 80, 0);
     assert_eq!(controller.available(), v(20));
 
-    let exposed = reservation.split_off(v(30)).unwrap();
+    let exposed = reservation.split_to(30).unwrap();
     assert_eq!(exposed.commit(), v(30));
     assert_ledger(&controller, 50, 30);
     assert_eq!(controller.available(), v(20));
@@ -46,15 +47,16 @@ fn explicit_release_matches_drop() {
 fn splitting_and_merging_conserve_the_amount() {
     let controller = AtomicConnectionSendFlowController::new(v(100));
     let mut first = controller.reserve(stream(0), v(60)).unwrap();
-    let second = first.split_off(v(25)).unwrap();
+    let second = first.split_to(25).unwrap();
     assert_eq!((first.amount(), second.amount()), (v(35), v(25)));
+    assert_eq!(second.stream_id(), first.stream_id());
     assert_ledger(&controller, 60, 0);
 
     first.absorb(second).unwrap();
     assert_eq!(first.amount(), v(60));
     assert_ledger(&controller, 60, 0);
 
-    let empty = first.split_off(VarInt::ZERO).unwrap();
+    let empty = first.split_to(0).unwrap();
     drop(empty);
     assert_ledger(&controller, 60, 0);
 }
@@ -89,10 +91,12 @@ fn reserve_up_to_takes_what_is_available() {
 #[test]
 fn max_data_only_raises_the_limit() {
     let controller = AtomicConnectionSendFlowController::new(v(100));
-    assert!(!controller.on_max_data(v(80)));
-    assert!(!controller.on_max_data(v(100)));
+    controller.on_max_data(v(80));
+    controller.on_max_data(v(100));
     assert_eq!(controller.limit(), v(100));
-    assert!(controller.on_max_data(v(150)));
+    controller.on_max_data(v(150));
+    assert_eq!(controller.limit(), v(150));
+    controller.on_max_data(v(120));
     assert_eq!(controller.limit(), v(150));
 }
 
@@ -165,13 +169,8 @@ fn merging_reservations_of_different_controllers_fails() {
 fn splitting_more_than_owned_fails_without_effect() {
     let controller = AtomicConnectionSendFlowController::new(v(100));
     let mut reservation = controller.reserve(stream(0), v(10)).unwrap();
-    assert_eq!(
-        reservation.split_off(v(11)).unwrap_err(),
-        SplitOffError {
-            requested: v(11),
-            owned: v(10),
-        }
-    );
+    let error: SplitToError = reservation.split_to(11).unwrap_err();
+    assert_eq!((error.at(), error.length()), (11, 10));
     assert_eq!(reservation.amount(), v(10));
     assert_ledger(&controller, 10, 0);
 }

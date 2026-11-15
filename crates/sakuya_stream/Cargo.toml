@@ -13,6 +13,7 @@ reset_stream_at = ["sakuya_wire/reset_stream_at"]
 
 [dependencies]
 bytes.workspace = true
+nitori_io.workspace = true
 sakuya_wire.workspace = true
 snafu.workspace = true
 

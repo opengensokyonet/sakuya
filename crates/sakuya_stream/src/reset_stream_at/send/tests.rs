@@ -15,9 +15,9 @@ use crate::send::termination::{
     FinalSizeRequest, SendTerminationContext, SendTerminationEvent, TerminationAction,
 };
 use crate::send::test_support::{
-    Action, CODE, Connection, OTHER_CODE, TestCloseCause, TestSender, close_reason,
-    completing_sender, due_end_frame, end_commits, expose, keep, new_connection, send_end, source,
-    stream, v, write_all, written,
+    Action, CODE, Connection, DirectOnly, EXHAUSTED_CODE, OTHER_CODE, TestCloseCause, TestSender,
+    close_reason, completing_sender, direct, direct_sender, due_end_frame, end_commits, expose,
+    keep, new_connection, options, send_end, source, stream, v, write_all, written,
 };
 use crate::send::write::{FlushError, WriteError};
 use crate::send::{
@@ -610,7 +610,7 @@ fn state_transition_table() {
         })
     );
     assert!(matches!(
-        sender.write(&mut Bytes::new()),
+        sender.write(&mut Bytes::new(), &options()),
         Err(WriteError::LayerEnded { .. })
     ));
     assert_eq!(
@@ -709,7 +709,7 @@ fn reset_at_beyond_the_write_limit_cannot_be_prepared() {
     write_all(&mut sender, 600);
     sender.on_stop_sending(CODE);
     let mut input = source(200);
-    assert_eq!(sender.write(&mut input).unwrap(), written(100));
+    assert_eq!(sender.write(&mut input, &options()).unwrap(), written(100));
     assert!(matches!(
         sender.reset_at(SUPPORT, CODE, v(800)),
         Err(ResetAtError::ReliablePrefixNotPrepared { .. })
@@ -954,6 +954,35 @@ fn default_termination_chooses_the_smallest_final_size() {
     expose(&mut sender, 400);
     sender.reset(CODE).unwrap();
     assert_eq!(sender.end_state().final_size(), Some(v(400)));
+}
+
+/// Data without a destination: a plain reset with the configured code while
+/// open, and a `reset_at` in effect gives up its reliable prefix and stays a
+/// `RESET_STREAM_AT`.
+#[test]
+fn default_termination_resets_on_an_exhausted_destination() {
+    let connection = new_connection(10_000);
+
+    let mut sender = direct_sender::<LocalResetAt>(&connection);
+    sender.write(&mut source(100), &direct()).unwrap();
+    sender.select(&DirectOnly, 100).unwrap();
+    sender.expose_usage_through(v(100)).unwrap();
+    sender.on_data_lost(v(0)..v(100));
+    assert_eq!(
+        sender.end_state(),
+        reset_state(EXHAUSTED_CODE, 100, EndSource::Policy)
+    );
+
+    let mut sender = direct_sender::<LocalResetAt>(&connection);
+    sender.write(&mut source(1000), &direct()).unwrap();
+    sender.select(&DirectOnly, 100).unwrap();
+    sender.expose_usage_through(v(100)).unwrap();
+    sender.reset_at(SUPPORT, CODE, v(600)).unwrap();
+    sender.on_data_lost(v(0)..v(100));
+    assert_eq!(
+        sender.end_state(),
+        reset_at_state(CODE, 0, 600, EndSource::Policy)
+    );
 }
 
 #[test]

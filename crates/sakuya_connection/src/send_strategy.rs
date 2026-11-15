@@ -122,11 +122,11 @@ pub trait Observe<J: SendConditionChange> {
     fn observe(&mut self, change: J);
 }
 
-/// The destination of content any active link path may send, including
-/// one that becomes active later. A component whose intents go there asks
-/// for `S::Destination: From<AnyActiveLinkPath>`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct AnyActiveLinkPath;
+/// The destination of content any active link path may send, defined with
+/// the send destinations of `sakuya_stream` because a stream's data is
+/// grouped by it; kept here at the path the send strategy has always named
+/// it by.
+pub use sakuya_stream::send_options::destination::AnyActiveLinkPath;
 
 // ---- the room of a datagram ----
 

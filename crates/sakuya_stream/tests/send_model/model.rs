@@ -26,6 +26,9 @@ use sakuya_stream::send::{
 use sakuya_stream::send_buffer::offset_map::OffsetMapStreamSendBuffer;
 use sakuya_stream::send_buffer::visibility::FinalSizeBelowExposureError;
 use sakuya_stream::send_buffer::{FinalSizeBeyondWrittenEndError, UsageBeyondWrittenEndError};
+use sakuya_stream::send_options::SendOptions;
+use sakuya_stream::send_options::destination::AnyActiveLinkPath;
+use sakuya_stream::send_options::urgency::Urgency;
 use sakuya_stream::stream_end::{BeyondFinalSizeError, FinalSizeChangeError, ResetCodeChangeError};
 use sakuya_wire::frame::UndecidedLength;
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
@@ -40,6 +43,14 @@ type Target = dialect::Target;
 
 /// The end frame they give.
 type EndFrame = StreamEndFrame<<Target as LocalResetTarget>::Frame>;
+
+/// The marker the senders under test write with: the default send options.
+pub(super) type Options = SendOptions<Urgency, AnyActiveLinkPath>;
+
+/// The options of every write here.
+fn options() -> Options {
+    SendOptions::new(Urgency::default(), AnyActiveLinkPath)
+}
 
 /// The sender under test over the composition `C`.
 pub(super) type SenderOf<C> =
@@ -98,6 +109,8 @@ pub(super) struct EffectiveReset {
 
 const STREAMS: usize = 2;
 const ABANDON_CODE: u32 = 77;
+/// The model never loses data, so no destination is ever exhausted.
+const EXHAUSTED_CODE: u32 = 78;
 
 pub(super) fn v(value: u64) -> VarInt {
     VarInt::new(value).unwrap()
@@ -557,7 +570,7 @@ macro_rules! impl_sender {
         impl Sender for SenderOf<$composition> {
             fn write_len(&mut self, source: &mut Bytes) -> Result<WriteOutcome, WriteFailure> {
                 #[allow(clippy::redundant_closure_call)]
-                self.write(source).map_err(|error| match error {
+                self.write(source, &options()).map_err(|error| match error {
                     WriteError::LayerEnded { .. } => WriteFailure::ConnectionClosed,
                     WriteError::Reset { .. } => WriteFailure::Reset,
                     WriteError::Closed => WriteFailure::Closed,
@@ -658,7 +671,7 @@ macro_rules! impl_sender {
 }
 
 type Patient = SendComposition<
-    OffsetMapStreamSendBuffer<AtomicConnectionCreditReservation>,
+    OffsetMapStreamSendBuffer<Bytes, AtomicConnectionCreditReservation, Options>,
     Chunked,
     Narrowing,
 >;
@@ -701,8 +714,7 @@ fn step<S: Sender, P: PolicyModel>(
             }
         }
         Op::MaxData { limit } => {
-            let grew = connection.on_max_data(v(limit));
-            assert_eq!(grew, limit > model.limit);
+            connection.on_max_data(v(limit));
             model.limit = model.limit.max(limit);
         }
         Op::ExposeData { stream, usage_end } => {
@@ -1331,7 +1343,7 @@ proptest! {
             |index, limit, connection| StreamSender::new(
                 stream_id(index),
                 v(limit),
-                DefaultSendComposition::with_abandon_code(code(ABANDON_CODE)),
+                DefaultSendComposition::with_reset_codes(code(ABANDON_CODE), code(EXHAUSTED_CODE)),
                 connection,
             ),
             limits,

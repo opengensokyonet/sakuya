@@ -37,7 +37,7 @@ use crate::send::termination::{
 };
 use crate::send::{SendEndState, SendTerminalState, StreamSender};
 use crate::send_buffer::visibility::FinalSizeBelowExposureError;
-use crate::send_buffer::{FinalSizeBeyondWrittenEndError, StreamSendBuffer};
+use crate::send_buffer::{FinalSizeBeyondWrittenEndError, SendMarker, StreamSendBuffer};
 use crate::stream_end::{FinalSizeChangeError, ResetCodeChangeError};
 use core::convert::Infallible;
 use sakuya_wire::reset_stream_at::{ReliableSizeError, ResetStreamAt, ResetStreamAtFrame};
@@ -692,10 +692,11 @@ fn plain_reset_error<Lc>(error: RequestError<Lc>) -> RequestResetError<Infallibl
     }
 }
 
-impl<C, K, Lc> StreamSender<C, K, Lc, LocalResetAt>
+impl<C, K, Lc, B, M> StreamSender<C, K, Lc, LocalResetAt, B, M>
 where
     K: ConnectionSendFlowController,
-    C: StreamSendBuffer<Reservation = K::Reservation>
+    M: SendMarker,
+    C: StreamSendBuffer<B, K::Reservation, M>
         + SendFlowControlPolicy<LocalResetAt>
         + SendTerminationPolicy<LocalResetAt>,
 {
@@ -820,8 +821,9 @@ where
 /// For a stream that can end with `RESET_STREAM_AT` the policy behaves as for
 /// one of RFC 9000, except that a `reset_at` in effect stays a
 /// `RESET_STREAM_AT` when `STOP_SENDING` arrives and has its reliable size
-/// lowered to zero (§5.4), so the stream still reaches `DataRecvd`. The
-/// policy never starts a `RESET_STREAM_AT` itself.
+/// lowered to zero (§5.4), so the stream still reaches `DataRecvd`; data
+/// without a destination lowers it to zero the same way. The policy never
+/// starts a `RESET_STREAM_AT` itself.
 impl SendTerminationPolicy<LocalResetAt> for ResetOnAbandonTermination {
     type WriteLimitReason = Infallible;
 
@@ -865,6 +867,34 @@ impl SendTerminationPolicy<LocalResetAt> for ResetOnAbandonTermination {
             (SendTerminationEvent::StopSendingReceived { error_code }, _) => reset(error_code),
             (SendTerminationEvent::WriterAbandoned, SendEndState::Open) => {
                 reset(self.abandon_code())
+            }
+            (
+                SendTerminationEvent::DestinationExhausted { .. },
+                SendEndState::Reset {
+                    target: LocalResetAt::Reset(_),
+                    ..
+                },
+            ) => TerminationAction::Keep,
+            // Data below the reliable size cannot be delivered any more: the
+            // reliable prefix is given up, the reset stays a
+            // `RESET_STREAM_AT`.
+            (
+                SendTerminationEvent::DestinationExhausted { .. },
+                SendEndState::Reset {
+                    target: LocalResetAt::ResetAt(target),
+                    ..
+                },
+            ) => {
+                if target.reliable_size() > VarInt::ZERO {
+                    TerminationAction::Reset(LocalResetAt::ResetAt(
+                        target.without_reliable_prefix(),
+                    ))
+                } else {
+                    TerminationAction::Keep
+                }
+            }
+            (SendTerminationEvent::DestinationExhausted { .. }, _) => {
+                reset(self.destination_exhausted_code())
             }
             _ => TerminationAction::Keep,
         }

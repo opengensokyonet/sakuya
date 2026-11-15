@@ -34,6 +34,9 @@ use sakuya_stream::send::write::WriteOutcome;
 use sakuya_stream::send::{SendEndState, SendTerminalState, StreamEndFrame, StreamSender};
 use sakuya_stream::send_buffer::ResetRetention;
 use sakuya_stream::send_buffer::offset_map::OffsetMapStreamSendBuffer;
+use sakuya_stream::send_options::SendOptions;
+use sakuya_stream::send_options::destination::AnyActiveLinkPath;
+use sakuya_stream::send_options::urgency::Urgency;
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
 use sakuya_wire::v1::frame::stream::StreamFrame;
 use sakuya_wire::v1::stream_id::StreamId;
@@ -74,12 +77,19 @@ where
 }
 
 type Composition<F> = SendComposition<
-    OffsetMapStreamSendBuffer<AtomicConnectionCreditReservation>,
+    OffsetMapStreamSendBuffer<Bytes, AtomicConnectionCreditReservation, Options>,
     FullCeilingAdmission,
     Answering<F>,
 >;
 
 type Sender<F> = StreamSender<Composition<F>, AtomicConnectionSendFlowController, TestCloseCause>;
+
+/// The marker of the tests' writes: the default send options.
+type Options = SendOptions<Urgency, AnyActiveLinkPath>;
+
+fn options() -> Options {
+    SendOptions::new(Urgency::default(), AnyActiveLinkPath)
+}
 
 fn sender<F>(connection: &Arc<AtomicConnectionSendFlowController>, answer: F) -> Sender<F>
 where
@@ -103,7 +113,7 @@ where
 {
     let mut source = Bytes::from(vec![7; len]);
     assert!(matches!(
-        stream.write(&mut source),
+        stream.write(&mut source, &options()),
         Ok(WriteOutcome::Written(_))
     ));
 }
@@ -188,7 +198,9 @@ fn a_stale_guard_consumes_nothing_before_the_panic() {
         Arc::clone(&connection),
     );
     let mut source = Bytes::from(vec![7; 10]);
-    let outcome = catch_unwind(AssertUnwindSafe(|| stream.write(&mut source).is_ok()));
+    let outcome = catch_unwind(AssertUnwindSafe(|| {
+        stream.write(&mut source, &options()).is_ok()
+    }));
     assert!(outcome.is_err(), "the violation panics");
     assert_eq!(source.len(), 10, "input stays with the caller");
     assert_eq!(connection.reserved(), VarInt::ZERO);

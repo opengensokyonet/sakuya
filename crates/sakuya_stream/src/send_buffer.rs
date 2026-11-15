@@ -9,12 +9,16 @@
 //! acknowledged data is released.
 //!
 //! The buffer is append-only: callers do not choose offsets. Appending moves
-//! the data and its reservation into the buffer in one step, as one
-//! [`covered_bytes::CoveredBytes`] value whose constructor has already
-//! checked that the reservation covers exactly the data.
-use crate::connection_send_credit::ConnectionCreditReservation;
+//! the data, its reservation and the marker it was written with into the
+//! buffer in one step, as one [`covered_bytes::CoveredBytes`] value whose
+//! constructor has already checked that the reservation covers exactly the
+//! data. The buffer groups the data waiting to be sent by the destination of
+//! its marker ([`SendMarker`]) and decides the order within a stream; the
+//! order between streams belongs to the send strategy.
+use crate::send_options::SendOptions;
+use crate::send_options::destination::{SendDestination, Unfulfilled};
 use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
-use bytes::Bytes;
+use core::ops::Range;
 use covered_bytes::CoveredBytes;
 use sakuya_wire::var_int::VarInt;
 use snafu::{Snafu, ensure};
@@ -28,20 +32,38 @@ pub mod offset_map;
 pub mod visibility;
 
 /// Storage of the data a stream sender has accepted, together with the
-/// connection credit reservations that cover it.
+/// connection credit reservations that cover it, and the choice of what to
+/// send next.
+///
+/// `B` is the type of the stored data, `R` that of the connection credit
+/// reservations, which commit and release themselves, and `M` that of the
+/// marker each piece of data was written with ([`SendMarker`]). One buffer
+/// type may serve several data, reservation and marker types.
 ///
 /// Implementations may organise and split their storage freely, provided
 /// offsets keep their contents and splitting never duplicates the ownership
 /// of a reservation.
 ///
-/// [`select`](Self::select), [`on_acknowledged`](Self::on_acknowledged) and
-/// [`on_lost`](Self::on_lost) have no callable inputs yet. This interface is
-/// provisional.
-pub trait StreamSendBuffer {
-    /// The connection credit reservation type the buffer takes with the data
-    /// it covers; it commits and releases itself.
-    type Reservation: ConnectionCreditReservation;
-
+/// # Selection and feedback
+///
+/// Data waiting to be sent is grouped by the current destination of its
+/// marker ([`destinations`](Self::destinations)); within one destination the
+/// buffer decides the order ([`next`](Self::next)). Selecting
+/// ([`select`](Self::select)) hands out data and keeps it until it is
+/// acknowledged: selection never deletes data that reliable delivery still
+/// needs. Feedback is given by stream range:
+///
+/// - acknowledged data ([`on_acknowledged`](Self::on_acknowledged)) no longer
+///   has to be kept and may be released; the written end does not move;
+/// - lost data that is not acknowledged
+///   ([`on_lost`](Self::on_lost)) waits to be sent again once its
+///   destination fell back; committed credit is not returned and is not
+///   committed again;
+/// - data a reset abandoned never becomes eligible again, also when it is
+///   reported lost later;
+/// - an acknowledgement is never undone by a later loss of another
+///   transmission of the same data.
+pub trait StreamSendBuffer<B, R, M: SendMarker> {
     /// The written end: the cumulative end of all appended data.
     fn written_end(&self) -> VarInt;
 
@@ -53,20 +75,18 @@ pub trait StreamSendBuffer {
     fn exposure_end(&self) -> VarInt;
 
     /// Appends `data` at the written end together with the reservation that
-    /// covers it, and advances the written end by its length.
+    /// covers it and its marker, and advances the written end by its length.
     ///
     /// The whole input is taken; there is no partial acceptance and no
-    /// second admission. No credit is committed here.
+    /// second admission. No credit is committed here. The data waits to be
+    /// sent to the current destination of its marker.
     ///
     /// # Errors
     ///
     /// [`AppendError`] if the buffer takes no more data or the written end
     /// would pass [`VarInt::MAX`]; the error hands `data` back and nothing
     /// changes.
-    fn append(
-        &mut self,
-        data: CoveredBytes<Self::Reservation>,
-    ) -> Result<(), AppendError<Self::Reservation>>;
+    fn append(&mut self, data: CoveredBytes<B, R, M>) -> Result<(), AppendError<B, R, M>>;
 
     /// Applies a reset target.
     ///
@@ -109,39 +129,137 @@ pub trait StreamSendBuffer {
         content: ExposedContent,
     ) -> Result<VarInt, ExposeUsageError>;
 
-    /// Selects data to hand to the link layer within `constraints`.
-    ///
-    /// Selection must not delete data that reliable delivery still needs.
-    /// [`SelectionConstraints`] has no values yet, so this method cannot be
-    /// called. This interface is provisional.
-    fn select(&mut self, constraints: SelectionConstraints) -> Selection;
+    /// The destinations that have data waiting to be sent, each once, by the
+    /// current destination of the data's markers.
+    fn destinations(&self) -> Vec<CurrentDestinationOf<M>>;
 
-    /// Applies an acknowledgement of the data a transmission carried.
-    ///
-    /// Acknowledged data no longer has to be retained; the written end does
-    /// not move. [`TransmissionReceipt`] has no values yet, so this method
-    /// cannot be called. This interface is provisional.
-    fn on_acknowledged(&mut self, receipt: TransmissionReceipt);
+    /// The data that [`select`](Self::select) takes next for `destination`,
+    /// if any waits for it; its marker gives the parameters of the send
+    /// intent for that destination.
+    fn next(&self, destination: &CurrentDestinationOf<M>) -> Option<NextSegment<'_, M>>;
 
-    /// Applies the loss of the data a transmission carried.
+    /// Takes at most `max_len` bytes from the start of
+    /// [`next`](Self::next)`(destination)` for sending, and keeps them until
+    /// they are acknowledged.
     ///
-    /// Lost, unacknowledged data becomes eligible for sending again;
-    /// committed credit is not returned and is not committed again.
-    /// [`TransmissionReceipt`] has no values yet, so this method cannot be
-    /// called. This interface is provisional.
-    fn on_lost(&mut self, receipt: TransmissionReceipt);
+    /// Returns `None` if no data waits for `destination` or `max_len` is
+    /// zero.
+    fn select(
+        &mut self,
+        destination: &CurrentDestinationOf<M>,
+        max_len: usize,
+    ) -> Option<SelectedData<B>>;
+
+    /// Applies an acknowledgement of the data in `range`: it no longer has to
+    /// be kept, whether it was selected or waits to be sent again. Offsets
+    /// not kept are ignored.
+    ///
+    /// Returns the destinations whose waiting data changed.
+    fn on_acknowledged(&mut self, range: Range<VarInt>) -> Vec<CurrentDestinationOf<M>>;
+
+    /// Applies the loss of the data in `range` that was selected and is not
+    /// acknowledged: the destination of each such piece is told
+    /// ([`StreamSendDestination::on_lost`]), and the piece waits for the
+    /// destination it fell back to, or is reported as exhausted. Offsets not
+    /// selected or not kept are ignored.
+    ///
+    /// [`StreamSendDestination::on_lost`]: crate::send_options::destination::StreamSendDestination::on_lost
+    fn on_lost(&mut self, range: Range<VarInt>) -> DestinationChanges<CurrentDestinationOf<M>>;
+
+    /// Applies that the send intent for `destination` was not fulfilled for
+    /// `cause`: the destination of each piece waiting for it is told
+    /// ([`SendDestination::on_unfulfilled`]), and the piece waits for the
+    /// destination it fell back to, or is reported as exhausted.
+    fn on_unfulfilled(
+        &mut self,
+        destination: &CurrentDestinationOf<M>,
+        cause: Unfulfilled,
+    ) -> DestinationChanges<CurrentDestinationOf<M>>;
+}
+
+/// What a send buffer reads from the marker of its data (`SendMarker`): the
+/// destination the data goes to, which the buffer asks to fall back when
+/// sending there fails.
+pub trait SendMarker {
+    /// The destination.
+    type Destination: SendDestination;
+
+    /// The destination of the data.
+    fn destination(&self) -> &Self::Destination;
+
+    /// The destination of the data, to let it fall back.
+    fn destination_mut(&mut self) -> &mut Self::Destination;
+}
+
+/// The marker of a write is its send options.
+impl<P, D: SendDestination> SendMarker for SendOptions<P, D> {
+    type Destination = D;
+
+    fn destination(&self) -> &D {
+        SendOptions::destination(self)
+    }
+
+    fn destination_mut(&mut self) -> &mut D {
+        SendOptions::destination_mut(self)
+    }
+}
+
+/// The current destination of the data a marker `M` was written with.
+pub type CurrentDestinationOf<M> = <<M as SendMarker>::Destination as SendDestination>::Current;
+
+/// The data a send buffer sends next to one destination (`NextSegment`), as
+/// [`StreamSendBuffer::next`] gives it.
+#[derive(Debug)]
+pub struct NextSegment<'a, M> {
+    /// The stream offset of the first byte.
+    pub offset: VarInt,
+    /// The number of bytes a selection of any size could take at once.
+    pub len: usize,
+    /// The marker the data was written with.
+    pub marker: &'a M,
+}
+
+/// Data selected for transmission and its position in the stream.
+#[derive(Debug)]
+pub struct SelectedData<B> {
+    /// The stream offset of the first byte.
+    pub offset: VarInt,
+    /// The selected bytes.
+    pub bytes: B,
+}
+
+/// What a loss or an unfulfilled intent changed (`DestinationChanges`):
+/// the destinations whose waiting data changed, and the ranges left without
+/// a destination.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DestinationChanges<C> {
+    /// The destinations whose waiting data changed, each once; the next
+    /// segment of each may have changed, or none may be left.
+    pub pending_changed: Vec<C>,
+    /// The ranges whose destination has nothing left to fall back to, in
+    /// stream order, adjacent ranges joined.
+    pub exhausted: Vec<Range<VarInt>>,
+}
+
+impl<C> Default for DestinationChanges<C> {
+    fn default() -> Self {
+        Self {
+            pending_changed: Vec::new(),
+            exhausted: Vec::new(),
+        }
+    }
 }
 
 /// Failures of [`StreamSendBuffer::append`]; each hands the data back through
 /// [`into_data`](Self::into_data).
 #[derive(Debug, Snafu)]
 #[snafu(module(append_error), visibility(pub(crate)))]
-pub enum AppendError<R> {
+pub enum AppendError<B, R, M> {
     /// A reset was applied; the buffer takes no more data.
     #[snafu(display("a send buffer takes no data after a reset"))]
     AfterReset {
         /// The rejected data.
-        data: CoveredBytes<R>,
+        data: CoveredBytes<B, R, M>,
     },
     /// A FIN or reset exposed the final size; the buffer takes no more data.
     #[snafu(display("a send buffer takes no data after the final size was exposed"))]
@@ -149,7 +267,7 @@ pub enum AppendError<R> {
         /// The exposed final size.
         source: FinalSizeEstablishedError,
         /// The rejected data.
-        data: CoveredBytes<R>,
+        data: CoveredBytes<B, R, M>,
     },
     /// The written end would pass [`VarInt::MAX`].
     #[snafu(display(
@@ -160,13 +278,13 @@ pub enum AppendError<R> {
         /// The written end.
         written_end: VarInt,
         /// The rejected data.
-        data: CoveredBytes<R>,
+        data: CoveredBytes<B, R, M>,
     },
 }
 
-impl<R> AppendError<R> {
+impl<B, R, M> AppendError<B, R, M> {
     /// The rejected data, unchanged.
-    pub fn into_data(self) -> CoveredBytes<R> {
+    pub fn into_data(self) -> CoveredBytes<B, R, M> {
         match self {
             Self::AfterReset { data }
             | Self::AfterFinalSize { data, .. }
@@ -379,42 +497,6 @@ impl UsageBeyondWrittenEndError {
         self.written_end
     }
 }
-
-/// The constraints a send scheduler passes to [`StreamSendBuffer::select`].
-///
-/// The type has no values yet, so no selection can be requested. This
-/// interface is provisional.
-#[derive(Debug)]
-pub enum SelectionConstraints {}
-
-/// The result of [`StreamSendBuffer::select`].
-///
-/// This interface is provisional.
-#[derive(Debug)]
-pub enum Selection {
-    /// Data was selected.
-    Selected(SelectedData),
-    /// No data is eligible within the constraints.
-    NoCandidate,
-}
-
-/// Data selected for transmission and its position in the stream.
-///
-/// This interface is provisional.
-#[derive(Debug)]
-pub struct SelectedData {
-    /// The stream offset of the first byte.
-    pub offset: VarInt,
-    /// The selected bytes.
-    pub bytes: Bytes,
-}
-
-/// The record of which data one transmission carried, passed back with
-/// acknowledgement and loss feedback.
-///
-/// The type has no values yet. This interface is provisional.
-#[derive(Debug)]
-pub enum TransmissionReceipt {}
 
 #[cfg(test)]
 mod tests;

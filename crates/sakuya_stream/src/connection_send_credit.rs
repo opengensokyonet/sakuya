@@ -35,6 +35,7 @@
 //! [RFC 9000 §4.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-4.1
 use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
+use nitori_io::{SplitTo, SplitToError};
 use sakuya_wire::v1::stream_id::StreamId;
 use sakuya_wire::var_int::VarInt;
 use snafu::{Snafu, ensure};
@@ -64,23 +65,31 @@ pub trait ConnectionSendFlowController {
     /// Applies a `MAX_DATA` value: the limit becomes the larger of the
     /// current limit and `maximum`.
     ///
-    /// Returns `true` if the limit grew. A value that is equal to or below
-    /// the current limit is ignored and returns `false`
+    /// A value that is equal to or below the current limit is ignored
     /// ([RFC 9000 §4.1](https://www.rfc-editor.org/rfc/rfc9000.html#section-4.1)).
-    fn on_max_data(&self, maximum: VarInt) -> bool;
+    /// Writes waiting for connection credit are the implementation's to wake.
+    fn on_max_data(&self, maximum: VarInt);
 }
 
 /// A connection credit reservation (`connection_credit_reservation`):
 /// uncommitted connection credit owned by the data of one stream.
 ///
-/// The handle is linear: it cannot be cloned, [`split_off`](Self::split_off)
-/// and [`absorb`](Self::absorb) conserve the total amount, and
+/// The handle is linear: it cannot be cloned, splitting
+/// ([`SplitTo::split_to`]) and [`absorb`](Self::absorb) conserve the total
+/// amount, and
 /// [`commit`](Self::commit) or [`release`](Self::release) consume it.
 /// Dropping a reservation that was not committed has the effect of
 /// [`release`](Self::release): the amount it still owns becomes available to
 /// other writes at once. Moving the handle, for example into a send buffer
 /// together with the data it covers, is not a cancellation.
-pub trait ConnectionCreditReservation: Sized {
+///
+/// Splitting follows nitori_io's [`SplitTo`], counting the amount in bytes of
+/// stream data: [`split_to(at)`](SplitTo::split_to) moves `at` of the amount
+/// into a new reservation for the same stream and fails with
+/// [`SplitToError`], changing nothing, if `at`
+/// exceeds the amount. The data a reservation covers is split the same way,
+/// so both halves stay covered.
+pub trait ConnectionCreditReservation: SplitTo {
     /// The uncommitted amount the handle owns.
     fn amount(&self) -> VarInt;
 
@@ -89,7 +98,7 @@ pub trait ConnectionCreditReservation: Sized {
     /// amount.
     ///
     /// To commit part of a reservation, split that part off first with
-    /// [`split_off`](Self::split_off).
+    /// [`split_to`](SplitTo::split_to).
     fn commit(self) -> VarInt;
 
     /// Releases the whole reservation: its amount leaves `R` and becomes
@@ -97,15 +106,6 @@ pub trait ConnectionCreditReservation: Sized {
     ///
     /// Release only usage that has never been exposed and never will be.
     fn release(self) -> VarInt;
-
-    /// Moves `amount` out of this reservation into a new one for the same
-    /// stream.
-    ///
-    /// # Errors
-    ///
-    /// [`SplitOffError`] if `amount` exceeds [`amount`](Self::amount);
-    /// nothing changes then.
-    fn split_off(&mut self, amount: VarInt) -> Result<Self, SplitOffError>;
 
     /// Merges `other` into this reservation.
     ///
@@ -311,9 +311,8 @@ impl ConnectionSendFlowController for AtomicConnectionSendFlowController {
         (reserved > VarInt::ZERO).then(|| self.reservation(stream_id, reserved))
     }
 
-    fn on_max_data(&self, maximum: VarInt) -> bool {
-        let previous = self.ledger.limit.fetch_max(maximum.get(), Ordering::SeqCst);
-        maximum.get() > previous
+    fn on_max_data(&self, maximum: VarInt) {
+        self.ledger.limit.fetch_max(maximum.get(), Ordering::SeqCst);
     }
 }
 
@@ -365,22 +364,6 @@ impl ConnectionCreditReservation for AtomicConnectionCreditReservation {
         amount
     }
 
-    fn split_off(&mut self, amount: VarInt) -> Result<Self, SplitOffError> {
-        ensure!(
-            amount <= self.amount,
-            SplitOffSnafu {
-                requested: amount,
-                owned: self.amount,
-            }
-        );
-        self.amount = self.amount.saturating_sub(amount);
-        Ok(Self {
-            stream_id: self.stream_id,
-            amount,
-            ledger: Arc::clone(&self.ledger),
-        })
-    }
-
     fn absorb(&mut self, mut other: Self) -> Result<(), AbsorbError<Self>> {
         ensure!(
             Arc::ptr_eq(&self.ledger, &other.ledger),
@@ -399,6 +382,27 @@ impl ConnectionCreditReservation for AtomicConnectionCreditReservation {
         // which never exceeds its `VarInt` limit.
         self.amount = self.amount.saturating_add(amount);
         Ok(())
+    }
+}
+
+/// The amount is converted at this boundary: `at` counts bytes of stream
+/// data as a `usize`, the amount is a [`VarInt`].
+impl SplitTo for AtomicConnectionCreditReservation {
+    fn split_to(&mut self, at: usize) -> Result<Self, SplitToError> {
+        // An amount that a `usize` cannot hold, possible only where `usize`
+        // is narrower than 62 bits, is larger than every `at`. Comparing
+        // with `usize::MAX` instead accepts exactly the same `at`, and the
+        // substitute never appears in an error: no `at` exceeds it.
+        let owned = usize::try_from(self.amount.get()).unwrap_or(usize::MAX);
+        SplitToError::check(at, owned)?;
+        // invariant: `at <= owned <= amount`, a `VarInt`.
+        let at = VarInt::try_from(at).unwrap_or(self.amount);
+        self.amount = self.amount.saturating_sub(at);
+        Ok(Self {
+            stream_id: self.stream_id,
+            amount: at,
+            ledger: Arc::clone(&self.ledger),
+        })
     }
 }
 
@@ -431,17 +435,6 @@ pub struct InsufficientConnectionCreditError {
     pub requested: VarInt,
     /// The credit that was available.
     pub available: VarInt,
-}
-
-/// [`ConnectionCreditReservation::split_off`] asked for more than the
-/// reservation owns.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
-#[snafu(display("split of {requested} exceeds the reserved amount {owned}"))]
-pub struct SplitOffError {
-    /// The amount asked for.
-    pub requested: VarInt,
-    /// The amount the reservation owns.
-    pub owned: VarInt,
 }
 
 /// Failures of [`ConnectionCreditReservation::absorb`]; each hands the

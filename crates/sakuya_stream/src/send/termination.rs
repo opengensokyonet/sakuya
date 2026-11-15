@@ -7,8 +7,9 @@
 //! - the automatic entry
 //!   ([`on_termination_event`](SendTerminationPolicy::on_termination_event))
 //!   observes facts such as a received `STOP_SENDING`, appended data, a grown
-//!   exposure end, a committed end, an abandoned stream writer or the closed
-//!   connection, and may answer with a complete, legal action;
+//!   exposure end, data whose destination has nothing left to fall back to,
+//!   a committed end, an abandoned stream writer or the closed connection,
+//!   and may answer with a complete, legal action;
 //! - the completion entry
 //!   ([`complete_final_size`](SendTerminationPolicy::complete_final_size)) is
 //!   asked only for the final size of an application reset that names none
@@ -116,6 +117,18 @@ pub enum SendTerminationEvent {
         /// The new exposure end.
         exposure_end: VarInt,
     },
+    /// Data was lost or could not be sent, and its destination has nothing
+    /// left to fall back to.
+    ///
+    /// The range can neither be sent with other content, because data at an
+    /// offset must not change ([RFC 9000 §2.2]), nor be left out, because the
+    /// peer would wait for it.
+    ///
+    /// [RFC 9000 §2.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-2.2
+    DestinationExhausted {
+        /// The stream range without a destination.
+        range: Range<VarInt>,
+    },
     /// A close or reset was committed.
     EndCommitted {
         /// Who committed it.
@@ -190,8 +203,8 @@ pub struct FinalSizeRequest<T: LocalResetTarget = LocalReset> {
     pub maximum: VarInt,
 }
 
-/// A termination policy that answers `STOP_SENDING` and an abandoned stream
-/// writer with a reset.
+/// A termination policy that answers `STOP_SENDING`, an abandoned stream
+/// writer and data without a destination with a reset.
 ///
 /// - Chooses the smallest legal final size.
 /// - Answers `STOP_SENDING` at once with a [`TerminationAction::Reset`]
@@ -199,9 +212,14 @@ pub struct FinalSizeRequest<T: LocalResetTarget = LocalReset> {
 /// - Resets with the configured `abandon_code` when the stream writer is
 ///   abandoned while input is open; an abandoned writer of a closed or reset
 ///   stream changes nothing.
+/// - Resets with the configured `destination_exhausted_code` when data has
+///   no destination left
+///   ([`SendTerminationEvent::DestinationExhausted`]) while input is open or
+///   after a close; a reset already in effect stays as it is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResetOnAbandonTermination {
     abandon_code: ApplicationErrorCode,
+    destination_exhausted_code: ApplicationErrorCode,
 }
 
 /// The termination policy of the default composition.
@@ -209,14 +227,27 @@ pub type DefaultSendTerminationPolicy = ResetOnAbandonTermination;
 
 impl ResetOnAbandonTermination {
     /// Creates the policy; `abandon_code` is the application error code of
-    /// the reset that follows an abandoned stream writer.
-    pub fn new(abandon_code: ApplicationErrorCode) -> Self {
-        Self { abandon_code }
+    /// the reset that follows an abandoned stream writer, and
+    /// `destination_exhausted_code` that of the reset that follows data
+    /// whose destination has nothing left to fall back to.
+    pub fn new(
+        abandon_code: ApplicationErrorCode,
+        destination_exhausted_code: ApplicationErrorCode,
+    ) -> Self {
+        Self {
+            abandon_code,
+            destination_exhausted_code,
+        }
     }
 
     /// The error code used when the stream writer is abandoned.
     pub fn abandon_code(&self) -> ApplicationErrorCode {
         self.abandon_code
+    }
+
+    /// The error code used when data has no destination left.
+    pub fn destination_exhausted_code(&self) -> ApplicationErrorCode {
+        self.destination_exhausted_code
     }
 
     fn reset(
@@ -250,6 +281,12 @@ impl SendTerminationPolicy for ResetOnAbandonTermination {
             }
             (SendTerminationEvent::WriterAbandoned, SendEndState::Open) => {
                 Self::reset(self.abandon_code, context)
+            }
+            (SendTerminationEvent::DestinationExhausted { .. }, SendEndState::Reset { .. }) => {
+                TerminationAction::Keep
+            }
+            (SendTerminationEvent::DestinationExhausted { .. }, _) => {
+                Self::reset(self.destination_exhausted_code, context)
             }
             _ => TerminationAction::Keep,
         }

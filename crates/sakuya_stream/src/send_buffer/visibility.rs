@@ -3,7 +3,6 @@ use super::covered_bytes::CoveredBytes;
 use super::{ExposeUsageError, ExposedContent, UsageBeyondWrittenEndError, expose_usage_error};
 use crate::connection_send_credit::ConnectionCreditReservation;
 use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
-use bytes::Bytes;
 use sakuya_wire::var_int::VarInt;
 use snafu::{IntoError, ResultExt, Snafu, ensure};
 use std::collections::VecDeque;
@@ -114,8 +113,8 @@ impl<R: ConnectionCreditReservation> VisibilitySettlement<R> {
     }
 
     /// Extends the coverage by the reservation of `data`, which covers the
-    /// usage starting at `offset`, and returns the data without its
-    /// reservation.
+    /// usage starting at `offset`, and returns the data and its marker
+    /// without the reservation.
     ///
     /// # Errors
     ///
@@ -123,7 +122,11 @@ impl<R: ConnectionCreditReservation> VisibilitySettlement<R> {
     /// [`coverage_end`](Self::coverage_end), or if the coverage would end
     /// beyond [`VarInt::MAX`]; the error hands `data` back and nothing
     /// changes.
-    pub fn cover(&mut self, offset: VarInt, data: CoveredBytes<R>) -> Result<Bytes, CoverError<R>> {
+    pub fn cover<B, M>(
+        &mut self,
+        offset: VarInt,
+        data: CoveredBytes<B, R, M>,
+    ) -> Result<(B, M), CoverError<B, R, M>> {
         if let Some(final_size) = self.final_size.established() {
             let source = FinalSizeEstablishedSnafu { final_size }.build();
             return Err(cover_error::FinalSizeEstablishedSnafu { data }.into_error(source));
@@ -143,12 +146,12 @@ impl<R: ConnectionCreditReservation> VisibilitySettlement<R> {
         if self.exposure_end.checked_add(covered).is_none() {
             return cover_error::EndOverflowSnafu { offset, data }.fail();
         }
-        let (bytes, reservation) = data.into_parts();
+        let (bytes, reservation, marker) = data.into_parts();
         self.covered = covered;
         if reservation.amount() > VarInt::ZERO {
             self.coverage.push_back(reservation);
         }
-        Ok(bytes)
+        Ok((bytes, marker))
     }
 
     /// Fixes the final size of a reset: keeps the coverage below
@@ -183,7 +186,7 @@ impl<R: ConnectionCreditReservation> VisibilitySettlement<R> {
                 self.coverage.pop_back();
                 amount
             } else {
-                match last.split_off(beyond) {
+                match last.split_to(amount_len(beyond)) {
                     Ok(part) => drop(part),
                     // invariant: `beyond` is below the amount `last` owns.
                     Err(error) => {
@@ -255,7 +258,7 @@ impl<R: ConnectionCreditReservation> VisibilitySettlement<R> {
             let part = if front.amount() <= remaining {
                 self.coverage.pop_front()
             } else {
-                match front.split_off(remaining) {
+                match front.split_to(amount_len(remaining)) {
                     Ok(part) => Some(part),
                     // invariant: `remaining` is below the amount `front` owns.
                     Err(error) => unreachable!("cannot split coverage to commit: {error}"),
@@ -270,18 +273,26 @@ impl<R: ConnectionCreditReservation> VisibilitySettlement<R> {
     }
 }
 
+/// An amount of coverage below that of one reservation, as the `usize` that
+/// splitting the reservation takes.
+fn amount_len(amount: VarInt) -> usize {
+    // invariant: every reservation in the coverage came with data of the
+    // same length, a `usize`, so a smaller amount is one too.
+    usize::try_from(amount.get()).unwrap_or(usize::MAX)
+}
+
 /// Failures of [`VisibilitySettlement::cover`]; each hands the data back
 /// through [`into_data`](Self::into_data).
 #[derive(Debug, Snafu)]
 #[snafu(module(cover_error), visibility(pub(crate)))]
-pub enum CoverError<R> {
+pub enum CoverError<B, R, M> {
     /// A final size is fixed or exposed; coverage no longer grows.
     #[snafu(display("coverage cannot grow after the final size is established"))]
     FinalSizeEstablished {
         /// The established final size.
         source: FinalSizeEstablishedError,
         /// The rejected data.
-        data: CoveredBytes<R>,
+        data: CoveredBytes<B, R, M>,
     },
     /// The data does not start at the coverage end.
     #[snafu(display(
@@ -293,7 +304,7 @@ pub enum CoverError<R> {
         /// The coverage end.
         coverage_end: VarInt,
         /// The rejected data.
-        data: CoveredBytes<R>,
+        data: CoveredBytes<B, R, M>,
     },
     /// The coverage would end beyond [`VarInt::MAX`].
     #[snafu(display("data at offset {offset} would end beyond the largest stream offset"))]
@@ -301,7 +312,7 @@ pub enum CoverError<R> {
         /// The offset given for the data.
         offset: VarInt,
         /// The rejected data.
-        data: CoveredBytes<R>,
+        data: CoveredBytes<B, R, M>,
     },
 }
 
@@ -325,9 +336,9 @@ impl FinalSizeEstablishedError {
     }
 }
 
-impl<R> CoverError<R> {
+impl<B, R, M> CoverError<B, R, M> {
     /// The rejected data, unchanged.
-    pub fn into_data(self) -> CoveredBytes<R> {
+    pub fn into_data(self) -> CoveredBytes<B, R, M> {
         match self {
             Self::FinalSizeEstablished { data, .. }
             | Self::NotContiguous { data, .. }

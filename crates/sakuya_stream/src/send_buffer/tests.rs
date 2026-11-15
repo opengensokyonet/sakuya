@@ -9,11 +9,95 @@ use crate::connection_send_credit::{
     AtomicConnectionCreditReservation, AtomicConnectionSendFlowController,
     ConnectionCreditReservation, ConnectionSendFlowController,
 };
+use crate::send_options::SendOptions;
+use crate::send_options::destination::{
+    DestinationFallback, SendDestination, StreamSendDestination, Unfulfilled,
+};
+use crate::send_options::urgency::Urgency;
 use crate::stream_end::{BeyondFinalSizeError, FinalSizeChangeError};
+use bytes::Bytes;
+use nitori_io::SplitTo;
 use sakuya_wire::v1::stream_id::StreamId;
 
-type Buffer = OffsetMapStreamSendBuffer<AtomicConnectionCreditReservation>;
-type Covered = CoveredBytes<AtomicConnectionCreditReservation>;
+mod selection;
+
+/// The marker of these tests: an urgency and a [`Route`].
+type Options = SendOptions<Urgency, Route>;
+type Buffer = OffsetMapStreamSendBuffer<Bytes, AtomicConnectionCreditReservation, Options>;
+type Covered = CoveredBytes<Bytes, AtomicConnectionCreditReservation, Options>;
+
+/// Where a route sends at one time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Path {
+    /// Only the direct link path.
+    Direct,
+    /// Any active link path.
+    Any,
+}
+
+/// A destination that starts at `current` and, on a failure, moves to
+/// `fallback` once; any active link path stays where it is, and a direct
+/// path without a fallback is exhausted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Route {
+    current: Path,
+    fallback: Option<Path>,
+}
+
+impl Route {
+    const ANY: Self = Self {
+        current: Path::Any,
+        fallback: None,
+    };
+    const DIRECT_THEN_ANY: Self = Self {
+        current: Path::Direct,
+        fallback: Some(Path::Any),
+    };
+    const DIRECT_ONLY: Self = Self {
+        current: Path::Direct,
+        fallback: None,
+    };
+
+    fn fall_back(&mut self) -> DestinationFallback {
+        if self.current == Path::Any {
+            return DestinationFallback::Degraded;
+        }
+        match self.fallback.take() {
+            Some(next) => {
+                self.current = next;
+                DestinationFallback::Degraded
+            }
+            None => DestinationFallback::Exhausted,
+        }
+    }
+}
+
+impl SendDestination for Route {
+    type Current = Path;
+
+    fn current(&self) -> Path {
+        self.current
+    }
+
+    fn on_unfulfilled(&mut self, _: Unfulfilled) -> DestinationFallback {
+        self.fall_back()
+    }
+}
+
+impl StreamSendDestination for Route {
+    fn on_lost(&mut self) -> DestinationFallback {
+        self.fall_back()
+    }
+}
+
+fn urgency(value: u8) -> Urgency {
+    Urgency::new(value).unwrap()
+}
+
+/// The default urgency to any active link path.
+fn any() -> Options {
+    SendOptions::new(Urgency::default(), Route::ANY)
+}
 
 fn v(value: u32) -> VarInt {
     VarInt::from_u32(value)
@@ -23,11 +107,23 @@ fn stream() -> StreamId {
     StreamId::from(VarInt::ZERO)
 }
 
-/// Appends `length` bytes, each holding the low byte of its offset.
+/// Appends `length` bytes with the default options, each holding the low
+/// byte of its offset.
 fn append(
     buffer: &mut Buffer,
     connection: &AtomicConnectionSendFlowController,
     length: u32,
+) -> Bytes {
+    append_with(buffer, connection, length, any())
+}
+
+/// Appends `length` bytes written with `options`, each holding the low byte
+/// of its offset.
+fn append_with(
+    buffer: &mut Buffer,
+    connection: &AtomicConnectionSendFlowController,
+    length: u32,
+    options: Options,
 ) -> Bytes {
     let start = buffer.written_end().get();
     let bytes: Bytes = (start..start + u64::from(length))
@@ -35,7 +131,7 @@ fn append(
         .collect();
     let reservation = connection.reserve(stream(), v(length)).unwrap();
     buffer
-        .append(CoveredBytes::new(bytes.clone(), reservation).unwrap())
+        .append(CoveredBytes::new(bytes.clone(), reservation, options).unwrap())
         .unwrap();
     bytes
 }
@@ -43,7 +139,7 @@ fn append(
 fn covered(connection: &AtomicConnectionSendFlowController, bytes: &'static [u8]) -> Covered {
     let length = VarInt::try_from(bytes.len()).unwrap();
     let reservation = connection.reserve(stream(), length).unwrap();
-    CoveredBytes::new(Bytes::from_static(bytes), reservation).unwrap()
+    CoveredBytes::new(Bytes::from_static(bytes), reservation, any()).unwrap()
 }
 
 fn retention(final_size: u32, reliable_size: u32) -> ResetRetention {
@@ -63,7 +159,7 @@ fn retained_ranges(buffer: &Buffer) -> Vec<(u64, usize)> {
 #[test]
 fn append_moves_bytes_without_copying() {
     let connection = AtomicConnectionSendFlowController::new(v(1000));
-    let mut buffer = OffsetMapStreamSendBuffer::new();
+    let mut buffer = Buffer::new();
     let first = append(&mut buffer, &connection, 100);
     let second = append(&mut buffer, &connection, 50);
     assert_eq!(buffer.written_end(), v(150));
@@ -81,10 +177,10 @@ fn covered_bytes_reject_a_mismatched_reservation_and_return_both() {
     let connection = AtomicConnectionSendFlowController::new(v(1000));
     let reservation = connection.reserve(stream(), v(9)).unwrap();
     let data = Bytes::from_static(b"ten bytes!");
-    let error = CoveredBytes::new(data.clone(), reservation).unwrap_err();
+    let error = CoveredBytes::new(data.clone(), reservation, any()).unwrap_err();
     assert!(matches!(error, CoveredBytesError::AmountMismatch { len, .. } if len == v(10)));
-    let (bytes, reservation) = error.into_parts();
-    assert_eq!(bytes, data);
+    let (bytes, reservation, marker) = error.into_parts();
+    assert_eq!((bytes, marker), (data, any()));
     assert_eq!(reservation.amount(), v(9));
     assert_eq!(connection.reserved(), v(9));
 }
@@ -97,8 +193,41 @@ fn covered_bytes_report_their_parts() {
     assert!(!data.is_empty());
     assert_eq!(data.bytes()[..], b"abc"[..]);
     assert_eq!(data.reservation().amount(), v(3));
-    let (bytes, reservation): (Bytes, AtomicConnectionCreditReservation) = data.into_parts();
+    assert_eq!(data.marker(), &any());
+    let (bytes, reservation, _): (Bytes, AtomicConnectionCreditReservation, Options) =
+        data.into_parts();
     assert_eq!((bytes.len(), reservation.amount()), (3, v(3)));
+}
+
+/// Splitting cuts the data and the reservation at the same length and
+/// copies the marker; a split beyond the length changes nothing.
+#[test]
+fn covered_bytes_split_conserves_data_and_credit() {
+    let connection = AtomicConnectionSendFlowController::new(v(1000));
+    let options = SendOptions::new(urgency(1), Route::DIRECT_THEN_ANY);
+    let reservation = connection.reserve(stream(), v(10)).unwrap();
+    let data = Bytes::from_static(b"0123456789");
+    let mut rest = CoveredBytes::new(data.clone(), reservation, options).unwrap();
+
+    let piece = rest.split_to(4).unwrap();
+    assert_eq!((piece.len(), piece.reservation().amount()), (v(4), v(4)));
+    assert_eq!(piece.bytes()[..], b"0123"[..]);
+    assert_eq!(piece.bytes().as_ptr(), data.as_ptr());
+    assert_eq!(piece.marker(), &options);
+    assert_eq!((rest.len(), rest.reservation().amount()), (v(6), v(6)));
+    assert_eq!(rest.bytes()[..], b"456789"[..]);
+    assert_eq!(rest.marker(), &options);
+    assert_eq!(connection.reserved(), v(10));
+
+    let error = rest.split_to(7).unwrap_err();
+    assert_eq!((error.at(), error.length()), (7, 6));
+    assert_eq!((rest.len(), rest.reservation().amount()), (v(6), v(6)));
+
+    let empty = rest.split_to(0).unwrap();
+    assert!(empty.is_empty());
+    assert_eq!(empty.reservation().amount(), VarInt::ZERO);
+    drop((piece, empty));
+    assert_eq!(connection.reserved(), v(6));
 }
 
 /// With 1000 unexposed bytes, `apply_reset(final_size = 800, reliable_size
@@ -108,7 +237,7 @@ fn covered_bytes_report_their_parts() {
 #[test]
 fn reset_retention_keeps_coverage_up_to_the_final_size() {
     let connection = AtomicConnectionSendFlowController::new(v(2000));
-    let mut buffer = OffsetMapStreamSendBuffer::new();
+    let mut buffer = Buffer::new();
     for _ in 0..4 {
         append(&mut buffer, &connection, 250);
     }
@@ -133,7 +262,7 @@ fn reset_retention_keeps_coverage_up_to_the_final_size() {
 #[test]
 fn reset_slices_the_straddling_entry_without_copying() {
     let connection = AtomicConnectionSendFlowController::new(v(1000));
-    let mut buffer = OffsetMapStreamSendBuffer::new();
+    let mut buffer = Buffer::new();
     let bytes = append(&mut buffer, &connection, 100);
     buffer.apply_reset(retention(100, 30)).unwrap();
     let (offset, kept) = buffer.retained().next().unwrap();
@@ -145,7 +274,7 @@ fn reset_slices_the_straddling_entry_without_copying() {
 #[test]
 fn append_after_reset_fails_and_returns_the_data() {
     let connection = AtomicConnectionSendFlowController::new(v(1000));
-    let mut buffer = OffsetMapStreamSendBuffer::new();
+    let mut buffer = Buffer::new();
     append(&mut buffer, &connection, 10);
     buffer.apply_reset(retention(10, 0)).unwrap();
     let error = buffer.append(covered(&connection, b"more")).unwrap_err();
@@ -157,7 +286,7 @@ fn append_after_reset_fails_and_returns_the_data() {
 #[test]
 fn append_after_an_exposed_fin_fails() {
     let connection = AtomicConnectionSendFlowController::new(v(1000));
-    let mut buffer = OffsetMapStreamSendBuffer::new();
+    let mut buffer = Buffer::new();
     append(&mut buffer, &connection, 10);
     buffer
         .expose_usage_through(v(10), ExposedContent::FinalSize)
@@ -174,7 +303,7 @@ fn append_after_an_exposed_fin_fails() {
 #[test]
 fn reset_retention_is_checked_before_anything_changes() {
     let connection = AtomicConnectionSendFlowController::new(v(1000));
-    let mut buffer = OffsetMapStreamSendBuffer::new();
+    let mut buffer = Buffer::new();
     append(&mut buffer, &connection, 100);
     assert_eq!(
         buffer.apply_reset(retention(50, 60)),
@@ -263,7 +392,7 @@ fn settlement_exposure_needs_coverage() {
 #[test]
 fn exposure_commits_new_usage_once() {
     let connection = AtomicConnectionSendFlowController::new(v(1000));
-    let mut buffer = OffsetMapStreamSendBuffer::new();
+    let mut buffer = Buffer::new();
     append(&mut buffer, &connection, 500);
 
     let exposed = buffer
@@ -297,7 +426,7 @@ fn exposure_commits_new_usage_once() {
 #[test]
 fn exposure_rejects_usage_beyond_the_written_end() {
     let connection = AtomicConnectionSendFlowController::new(v(1000));
-    let mut buffer = OffsetMapStreamSendBuffer::new();
+    let mut buffer = Buffer::new();
     append(&mut buffer, &connection, 100);
     let error = buffer
         .expose_usage_through(v(101), ExposedContent::Data)
@@ -314,7 +443,7 @@ fn exposure_rejects_usage_beyond_the_written_end() {
 #[test]
 fn exposed_final_size_constrains_later_exposures() {
     let connection = AtomicConnectionSendFlowController::new(v(1000));
-    let mut buffer = OffsetMapStreamSendBuffer::new();
+    let mut buffer = Buffer::new();
     append(&mut buffer, &connection, 100);
     buffer
         .expose_usage_through(v(60), ExposedContent::Data)
@@ -368,7 +497,7 @@ fn exposed_final_size_constrains_later_exposures() {
 #[test]
 fn reset_final_size_is_exposed_without_data() {
     let connection = AtomicConnectionSendFlowController::new(v(1000));
-    let mut buffer = OffsetMapStreamSendBuffer::new();
+    let mut buffer = Buffer::new();
     append(&mut buffer, &connection, 100);
     buffer.apply_reset(retention(70, 0)).unwrap();
     assert_eq!(retained_ranges(&buffer), []);
@@ -393,7 +522,7 @@ fn reset_final_size_is_exposed_without_data() {
 #[test]
 fn fixing_an_exposed_final_size_keeps_it() {
     let connection = AtomicConnectionSendFlowController::new(v(1000));
-    let mut buffer = OffsetMapStreamSendBuffer::new();
+    let mut buffer = Buffer::new();
     append(&mut buffer, &connection, 100);
     buffer
         .expose_usage_through(v(80), ExposedContent::FinalSize)

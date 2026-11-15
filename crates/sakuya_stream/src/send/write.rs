@@ -2,7 +2,9 @@
 //!
 //! [`StreamSender::write`] is the synchronous core of a write attempt. It
 //! takes the prefix of the caller's [`Buf`] that it can accept and leaves the
-//! rest with the caller. In order, an attempt
+//! rest with the caller, and copies the marker it is given, the send
+//! parameters and destination of the write, onto that prefix. In order, an
+//! attempt
 //!
 //! 1. checks the connection, the end state, empty input, the write limit and
 //!    the room left below the largest stream offset, and caps the attempt by
@@ -12,9 +14,9 @@
 //! 3. reserves at most the granted amount of connection credit;
 //! 4. without any credit, abandons the guard, consumes nothing and reports
 //!    that it has to wait;
-//! 5. otherwise consumes exactly the reserved amount from the input, appends
-//!    it with its reservation to the send buffer and settles the guard with
-//!    that amount;
+//! 5. otherwise takes exactly the reserved amount from the input
+//!    ([`TakePrefix`]), appends it with its reservation and a copy of the
+//!    marker to the send buffer and settles the guard with that amount;
 //! 6. reports the appended amount.
 //!
 //! Once input is consumed, nothing turns the attempt into an error. A
@@ -31,8 +33,8 @@ use crate::send::flow_control::{
     AdmissionGuard, GrantAboveCeilingError, SendFlowControlPolicy, WriteAttempt,
 };
 use crate::send::termination::{SendTerminationEvent, SendTerminationPolicy};
-use crate::send_buffer::StreamSendBuffer;
-use crate::send_buffer::covered_bytes::CoveredBytes;
+use crate::send_buffer::covered_bytes::{CoveredBytes, TakePrefix};
+use crate::send_buffer::{SendMarker, StreamSendBuffer};
 use bytes::Buf;
 use core::fmt;
 use core::ops::Deref;
@@ -165,17 +167,19 @@ pub enum FlushError<Lc> {
     },
 }
 
-impl<C, K, Lc, T> StreamSender<C, K, Lc, T>
+impl<C, K, Lc, T, B, M> StreamSender<C, K, Lc, T, B, M>
 where
     T: LocalResetTarget,
     K: ConnectionSendFlowController,
-    C: StreamSendBuffer<Reservation = K::Reservation>
-        + SendFlowControlPolicy<T>
-        + SendTerminationPolicy<T>,
+    M: SendMarker,
+    C: StreamSendBuffer<B, K::Reservation, M> + SendFlowControlPolicy<T> + SendTerminationPolicy<T>,
 {
     /// Makes one write attempt with `source`: hands the prefix that admission
-    /// and connection credit allow to the send buffer and advances `source`
-    /// past it.
+    /// and connection credit allow to the send buffer, with a copy of
+    /// `marker`, and advances `source` past it.
+    ///
+    /// The marker stays with the data: changing the options of later writes
+    /// leaves it as it was written.
     ///
     /// Empty input succeeds with zero bytes while the stream accepts writes;
     /// it asks for no admission and produces no event. An attempt that would
@@ -196,8 +200,13 @@ where
     /// [policy contract](SendFlowControlPolicy#contract).
     pub fn write<S: Buf + ?Sized>(
         &mut self,
-        source: &mut S,
-    ) -> Result<WriteOutcome, WriteError<C::WriteLimitReason, Lc>> {
+        mut source: &mut S,
+        marker: &M,
+    ) -> Result<WriteOutcome, WriteError<C::WriteLimitReason, Lc>>
+    where
+        B: Buf + TakePrefix,
+        M: Clone,
+    {
         self.check_connection_open()?;
         match self.end_state() {
             SendEndState::Reset { .. } => return Err(StreamResetError.into()),
@@ -270,8 +279,8 @@ where
         // bytes of input exist and their count is a `usize`.
         let length = usize::try_from(used.get())
             .map_or(source.remaining(), |length| length.min(source.remaining()));
-        let bytes = source.copy_to_bytes(length);
-        let data = match CoveredBytes::new(bytes, reservation) {
+        let bytes = B::take_prefix(&mut source, length);
+        let data = match CoveredBytes::new(bytes, reservation, marker.clone()) {
             Ok(data) => data,
             // invariant: `length` equals the reservation's amount `used`, a
             // `VarInt`, by the bound above.

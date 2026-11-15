@@ -36,7 +36,9 @@ use crate::send::termination::{
 };
 use crate::send::write::SharedWriteLimitReason;
 use crate::send_buffer::visibility::FinalSizeBelowExposureError;
-use crate::send_buffer::{FinalSizeBeyondWrittenEndError, ResetRetention, StreamSendBuffer};
+use crate::send_buffer::{
+    FinalSizeBeyondWrittenEndError, ResetRetention, SendMarker, StreamSendBuffer,
+};
 use crate::stream_end::{FinalSizeChangeError, ResetCodeChangeError};
 use core::convert::Infallible;
 use core::error::Error;
@@ -398,12 +400,11 @@ enum PolicyViolationError<T: LocalResetTarget> {
     },
 }
 
-impl<C, K, Lc> StreamSender<C, K, Lc, LocalReset>
+impl<C, K, Lc, B, M> StreamSender<C, K, Lc, LocalReset, B, M>
 where
     K: ConnectionSendFlowController,
-    C: StreamSendBuffer<Reservation = K::Reservation>
-        + SendFlowControlPolicy
-        + SendTerminationPolicy,
+    M: SendMarker,
+    C: StreamSendBuffer<B, K::Reservation, M> + SendFlowControlPolicy + SendTerminationPolicy,
 {
     /// Resets the stream with `error_code` and ends it with `RESET_STREAM`.
     ///
@@ -451,13 +452,12 @@ where
     }
 }
 
-impl<C, K, Lc, T> StreamSender<C, K, Lc, T>
+impl<C, K, Lc, T, B, M> StreamSender<C, K, Lc, T, B, M>
 where
     T: LocalResetTarget,
     K: ConnectionSendFlowController,
-    C: StreamSendBuffer<Reservation = K::Reservation>
-        + SendFlowControlPolicy<T>
-        + SendTerminationPolicy<T>,
+    M: SendMarker,
+    C: StreamSendBuffer<B, K::Reservation, M> + SendFlowControlPolicy<T> + SendTerminationPolicy<T>,
 {
     /// Closes the stream normally at the written end.
     ///

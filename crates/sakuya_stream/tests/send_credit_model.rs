@@ -2,6 +2,7 @@
 //! commit, release and drop sequences, and reservations dropped on other
 //! threads.
 
+use nitori_io::SplitTo;
 use proptest::prelude::*;
 use sakuya_stream::connection_send_credit::{
     AtomicConnectionCreditReservation, AtomicConnectionSendFlowController,
@@ -100,7 +101,7 @@ proptest! {
                     if !live.is_empty() {
                         let index = at.index(live.len());
                         let owned = live[index].amount().get();
-                        match live[index].split_off(v(amount)) {
+                        match live[index].split_to(usize::try_from(amount).unwrap()) {
                             Ok(part) => {
                                 prop_assert!(amount <= owned);
                                 prop_assert_eq!(live[index].amount().get(), owned - amount);
@@ -153,8 +154,7 @@ proptest! {
                     }
                 }
                 Op::MaxData { limit: value } => {
-                    let grew = connection.on_max_data(v(value));
-                    prop_assert_eq!(grew, value > limit);
+                    connection.on_max_data(v(value));
                     limit = limit.max(value);
                 }
             }
@@ -184,7 +184,7 @@ fn reservations_dropped_on_other_threads_return_their_credit() {
             .collect();
         let splits: Vec<_> = handles
             .iter_mut()
-            .map(|handle| handle.split_off(v(3)).unwrap())
+            .map(|handle| handle.split_to(3).unwrap())
             .collect();
         assert_eq!(connection.available(), VarInt::ZERO);
         std::thread::scope(|scope| {

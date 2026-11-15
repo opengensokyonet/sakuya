@@ -28,16 +28,24 @@
 //! it is created, for the operations that reserve connection credit. Nothing
 //! here waits: an operation that
 //! would have to wait for credit or admission reports that instead
-//! ([`write::WriteOutcome::Wait`]). Polling, wake-ups, the stream writer
-//! handle, send selection and feedback dispatch are not part of this module.
+//! ([`write::WriteOutcome::Wait`]). The sender selects its data by
+//! destination and takes acknowledgement, loss and unfulfilled intents by
+//! range; which stream sends when, polling, wake-ups and the stream writer
+//! handle are not part of this module.
 use crate::connection::{LayerEnd, LayerEndedError};
 use crate::connection_send_credit::ConnectionSendFlowController;
 use crate::send_buffer::visibility::UsageBeyondCoverageError;
 use crate::send_buffer::{
-    ExposeUsageError, ExposedContent, StreamSendBuffer, UsageBeyondWrittenEndError,
+    CurrentDestinationOf, ExposeUsageError, ExposedContent, NextSegment, SelectedData, SendMarker,
+    StreamSendBuffer, UsageBeyondWrittenEndError,
 };
+use crate::send_options::SendOptions;
+use crate::send_options::destination::{AnyActiveLinkPath, Unfulfilled};
+use crate::send_options::urgency::Urgency;
 use crate::stream_end::BeyondFinalSizeError;
-use core::ops::Deref;
+use bytes::Bytes;
+use core::marker::PhantomData;
+use core::ops::{Deref, Range};
 use flow_control::{SendFlowContext, SendFlowControlPolicy, StreamCreditEvent};
 use local_reset::{LocalReset, LocalResetTarget};
 use sakuya_wire::frame::UndecidedLength;
@@ -64,13 +72,23 @@ pub mod write;
 /// [`SendFlowControlPolicy`] and a [`SendTerminationPolicy`] that act on this
 /// stream and on the same data; `K` is the connection send flow controller
 /// that grants the reservations the buffer takes; `Lc` is the type of the
-/// connection's local close cause; `T` is the type of the reset target.
+/// connection's local close cause; `T` is the type of the reset target; `B`
+/// is the type of the data the buffer stores and `M` that of the marker each
+/// write copies onto its data, by default the send options of an
+/// [`Urgency`] to [`AnyActiveLinkPath`]. `B` and `M` only name the buffer's
+/// types: the sender keeps no value of them.
 ///
 /// Operations are grouped by subject: writing and flushing in [`write`](mod@write),
 /// close and reset in [`finish`]; peer and feedback facts are applied by the
 /// `on_*` methods here.
-pub struct StreamSender<C, K, Lc, T = LocalReset>
-where
+pub struct StreamSender<
+    C,
+    K,
+    Lc,
+    T = LocalReset,
+    B = Bytes,
+    M = SendOptions<Urgency, AnyActiveLinkPath>,
+> where
     C: SendTerminationPolicy<T>,
     K: ConnectionSendFlowController,
     T: LocalResetTarget,
@@ -82,6 +100,7 @@ where
     end: EndPhase<T>,
     stop_sending: StopSending<C::WriteLimitReason>,
     layer_end: Option<LayerEnd<Lc>>,
+    buffered: PhantomData<fn() -> (B, M)>,
 }
 
 /// The end of the send direction:
@@ -255,7 +274,7 @@ pub enum SendTerminalState {
     ResetRecvd,
 }
 
-impl<C, K, Lc, T> StreamSender<C, K, Lc, T>
+impl<C, K, Lc, T, B, M> StreamSender<C, K, Lc, T, B, M>
 where
     C: SendTerminationPolicy<T>,
     K: ConnectionSendFlowController,
@@ -281,6 +300,7 @@ where
             end: EndPhase::Open,
             stop_sending: StopSending::NotReceived,
             layer_end: None,
+            buffered: PhantomData,
         }
     }
 
@@ -340,13 +360,12 @@ where
     }
 }
 
-impl<C, K, Lc, T> StreamSender<C, K, Lc, T>
+impl<C, K, Lc, T, B, M> StreamSender<C, K, Lc, T, B, M>
 where
     T: LocalResetTarget,
     K: ConnectionSendFlowController,
-    C: StreamSendBuffer<Reservation = K::Reservation>
-        + SendFlowControlPolicy<T>
-        + SendTerminationPolicy<T>,
+    M: SendMarker,
+    C: StreamSendBuffer<B, K::Reservation, M> + SendFlowControlPolicy<T> + SendTerminationPolicy<T>,
 {
     /// The written end (`written_end`), as the send buffer keeps it.
     pub fn written_end(&self) -> VarInt {
@@ -569,7 +588,7 @@ where
     /// frame to write, and [`PreparedEndFrame::expose`] settles its
     /// exposure after the frame was written to a packet. Dropping the guard
     /// changes nothing. This entry is provisional.
-    pub fn prepare_end_frame(&mut self) -> Option<PreparedEndFrame<'_, C, K, Lc, T>> {
+    pub fn prepare_end_frame(&mut self) -> Option<PreparedEndFrame<'_, C, K, Lc, T, B, M>> {
         if self.is_connection_closed() || self.terminal_state().is_some() {
             return None;
         }
@@ -601,6 +620,85 @@ where
             frame,
             exposed,
         })
+    }
+
+    /// The destinations that have data waiting to be sent, as the send
+    /// buffer groups them; none once the layer has ended.
+    pub fn send_destinations(&self) -> Vec<CurrentDestinationOf<M>> {
+        if self.is_connection_closed() {
+            return Vec::new();
+        }
+        self.composition.destinations()
+    }
+
+    /// The data the send buffer takes next for `destination`, if any; none
+    /// once the layer has ended.
+    pub fn next_segment(
+        &self,
+        destination: &CurrentDestinationOf<M>,
+    ) -> Option<NextSegment<'_, M>> {
+        if self.is_connection_closed() {
+            return None;
+        }
+        self.composition.next(destination)
+    }
+
+    /// Takes at most `max_len` bytes of the data waiting for `destination`
+    /// from the send buffer, which keeps them until they are acknowledged.
+    ///
+    /// Nothing is selected once the layer has ended. Selecting exposes
+    /// nothing: the frame source exposes the data through
+    /// [`expose_usage_through`](Self::expose_usage_through) once its frame
+    /// is written.
+    pub fn select(
+        &mut self,
+        destination: &CurrentDestinationOf<M>,
+        max_len: usize,
+    ) -> Option<SelectedData<B>> {
+        if self.is_connection_closed() {
+            return None;
+        }
+        self.composition.select(destination, max_len)
+    }
+
+    /// Applies an acknowledgement of the stream data in `range`, and returns
+    /// the destinations whose waiting data changed.
+    pub fn on_data_acknowledged(&mut self, range: Range<VarInt>) -> Vec<CurrentDestinationOf<M>> {
+        self.composition.on_acknowledged(range)
+    }
+
+    /// Applies the loss of the stream data in `range`, and returns the
+    /// destinations whose waiting data changed.
+    ///
+    /// Each range whose destination has nothing left to fall back to is
+    /// given to the termination policy as
+    /// [`SendTerminationEvent::DestinationExhausted`], which may reset the
+    /// stream; the destinations returned are those before that decision.
+    pub fn on_data_lost(&mut self, range: Range<VarInt>) -> Vec<CurrentDestinationOf<M>> {
+        let changes = self.composition.on_lost(range);
+        self.dispatch_exhausted(changes.exhausted);
+        changes.pending_changed
+    }
+
+    /// Applies that the send intent for `destination` was not fulfilled for
+    /// `cause`, and returns the destinations whose waiting data changed.
+    ///
+    /// Ranges left without a destination go to the termination policy as
+    /// for [`on_data_lost`](Self::on_data_lost).
+    pub fn on_unfulfilled(
+        &mut self,
+        destination: &CurrentDestinationOf<M>,
+        cause: Unfulfilled,
+    ) -> Vec<CurrentDestinationOf<M>> {
+        let changes = self.composition.on_unfulfilled(destination, cause);
+        self.dispatch_exhausted(changes.exhausted);
+        changes.pending_changed
+    }
+
+    fn dispatch_exhausted(&mut self, exhausted: Vec<Range<VarInt>>) {
+        for range in exhausted {
+            self.dispatch_termination(SendTerminationEvent::DestinationExhausted { range });
+        }
     }
 
     /// The limit to carry in a `STREAM_DATA_BLOCKED` frame, if the
@@ -779,20 +877,27 @@ enum ExposedEndFrame<T> {
 /// to a packet, [`expose`](Self::expose) settles its first exposure; it does
 /// not fail. Dropping the guard changes nothing.
 ///
-/// `Lc` is the type of the connection's local close cause, as for the
-/// [`StreamSender`] it holds.
-pub struct PreparedEndFrame<'a, C, K, Lc, T = LocalReset>
-where
+/// `Lc`, `B` and `M` are the types of the connection's local close cause,
+/// the stored data and the marker, as for the [`StreamSender`] it holds.
+pub struct PreparedEndFrame<
+    'a,
+    C,
+    K,
+    Lc,
+    T = LocalReset,
+    B = Bytes,
+    M = SendOptions<Urgency, AnyActiveLinkPath>,
+> where
     C: SendTerminationPolicy<T>,
     K: ConnectionSendFlowController,
     T: LocalResetTarget,
 {
-    sender: &'a mut StreamSender<C, K, Lc, T>,
+    sender: &'a mut StreamSender<C, K, Lc, T, B, M>,
     frame: StreamEndFrame<T::Frame>,
     exposed: ExposedEndFrame<T>,
 }
 
-impl<C, K, Lc, T> Deref for PreparedEndFrame<'_, C, K, Lc, T>
+impl<C, K, Lc, T, B, M> Deref for PreparedEndFrame<'_, C, K, Lc, T, B, M>
 where
     C: SendTerminationPolicy<T>,
     K: ConnectionSendFlowController,
@@ -805,13 +910,12 @@ where
     }
 }
 
-impl<C, K, Lc, T> PreparedEndFrame<'_, C, K, Lc, T>
+impl<C, K, Lc, T, B, M> PreparedEndFrame<'_, C, K, Lc, T, B, M>
 where
     T: LocalResetTarget,
     K: ConnectionSendFlowController,
-    C: StreamSendBuffer<Reservation = K::Reservation>
-        + SendFlowControlPolicy<T>
-        + SendTerminationPolicy<T>,
+    M: SendMarker,
+    C: StreamSendBuffer<B, K::Reservation, M> + SendFlowControlPolicy<T> + SendTerminationPolicy<T>,
 {
     /// Settles the first exposure of the frame, which was written to a
     /// packet: the credit that covers the usage up to the final size is

@@ -1,6 +1,8 @@
 /// The sender that also ends a stream with `RESET_STREAM_AT`.
 mod dialect {
+    use super::model::Options;
     use super::model::{EffectiveReset, ResetFailure, SenderOf, TestCloseCause};
+    use bytes::Bytes;
     use sakuya_stream::connection_send_credit::AtomicConnectionCreditReservation;
     use sakuya_stream::reset_stream_at::send::{
         LocalResetAt, LocalResetAtFrame, PeerResetStreamAtSupport, ResetAtError,
@@ -82,7 +84,7 @@ mod dialect {
         final_size: Option<VarInt>,
     ) -> Result<(), ResetFailure>
     where
-        C: StreamSendBuffer<Reservation = AtomicConnectionCreditReservation>
+        C: StreamSendBuffer<Bytes, AtomicConnectionCreditReservation, Options>
             + SendFlowControlPolicy<Target>
             + SendTerminationPolicy<Target>,
     {

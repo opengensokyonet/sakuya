@@ -1,6 +1,8 @@
 /// The sender of RFC 9000 resets: every reset ends with `RESET_STREAM`.
 mod dialect {
+    use super::model::Options;
     use super::model::{EffectiveReset, ResetFailure, SenderOf};
+    use bytes::Bytes;
     use sakuya_stream::connection_send_credit::AtomicConnectionCreditReservation;
     use sakuya_stream::send::flow_control::SendFlowControlPolicy;
     use sakuya_stream::send::local_reset::LocalReset;
@@ -23,7 +25,7 @@ mod dialect {
         final_size: Option<VarInt>,
     ) -> Result<(), ResetFailure>
     where
-        C: StreamSendBuffer<Reservation = AtomicConnectionCreditReservation>
+        C: StreamSendBuffer<Bytes, AtomicConnectionCreditReservation, Options>
             + SendFlowControlPolicy
             + SendTerminationPolicy,
     {
