@@ -3,7 +3,7 @@
 //!
 //! Both ways of reading — copying into a [`BufMut`] with
 //! [`StreamReceiver::read_into`] and taking whole blocks with
-//! [`StreamReceiver::read_chunk`] — share one read position and one terminal
+//! [`StreamReceiver::read_chunk`], at most a given number of bytes each — share one read position and one terminal
 //! result. A read returns, in this order of priority:
 //!
 //! 1. [`ReadError::ReaderDropped`] once the reader was dropped;
@@ -36,11 +36,12 @@ use super::{
     termination::TerminationEvent,
 };
 use crate::connection::LayerEndedError;
-use crate::receive_buffer::StreamReceiveBuffer;
+use crate::receive_buffer::{StreamReceiveBuffer, offset_add};
 use bytes::BufMut;
 use core::fmt;
 use core::num::NonZeroUsize;
 use core::ops::Deref;
+use sakuya_wire::var_int::VarInt;
 use snafu::Snafu;
 use std::sync::Arc;
 
@@ -261,7 +262,10 @@ where
     C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy<F>,
     F: RemoteResetFacts,
 {
-    /// Reads the next block of contiguous data.
+    /// Reads the next block of contiguous data, at most `maximum` bytes.
+    ///
+    /// A block longer than `maximum` is cut: the first `maximum` bytes are
+    /// delivered and the rest stays in the receive buffer, still undelivered.
     ///
     /// # Errors
     ///
@@ -269,11 +273,21 @@ where
     /// [`ReadError::ReaderDropped`] after
     /// [`reader_dropped`](Self::reader_dropped); see the [module
     /// documentation](self) for priorities.
-    pub fn read_chunk(&mut self) -> Result<ReadOutcome<C::Chunk>, ReadError<C::Reason, Lc, F>> {
+    pub fn read_chunk(
+        &mut self,
+        maximum: NonZeroUsize,
+    ) -> Result<ReadOutcome<C::Chunk>, ReadError<C::Reason, Lc, F>> {
         if let Some(settled) = self.settled_read() {
             return settled.map(Settled::outcome);
         }
-        match self.parts.read_chunk(self.delivery.limit()) {
+        // An end past the largest offset bounds nothing the delivery limit
+        // does not already bound.
+        let maximum_end =
+            offset_add(self.parts.delivered_end(), maximum.get()).unwrap_or(VarInt::MAX);
+        match self
+            .parts
+            .read_chunk(self.delivery.limit().min(maximum_end))
+        {
             Some(chunk) => {
                 self.notify_flow(ReceiveFlowEvent::Delivered);
                 Ok(ReadOutcome::Data(chunk))

@@ -1,7 +1,9 @@
 //! The receive flow control policy: when to advertise a higher stream limit.
 //!
-//! This crate provides no implementation of the policy. The events and the
-//! view it observes are provisional.
+//! [`SlidingWindowAdvertisement`] implements it with a fixed window that
+//! slides with delivery; it is the policy of the default receive composition
+//! ([`DefaultReceiveFlowControlPolicy`]). The events and the view a policy
+//! observes are provisional.
 //!
 //! The policy keeps an intent: advertise nothing, or advertise up to an
 //! absolute target limit. Events update it; a query returns the current
@@ -89,6 +91,71 @@ pub trait ReceiveFlowControlPolicy {
     fn advertisement_intent(&self) -> AdvertisementIntent;
 }
 
+/// A receive flow control policy with a fixed window `W` that slides with
+/// delivery.
+///
+/// The target is the delivered end plus `W`, an absolute stream limit. The
+/// policy advertises it once it lies at least `W / 2` (rounded down) above
+/// the stream limit opened to the peer, and withholds otherwise: with
+/// `W` = 64 KiB and 64 KiB opened, delivering 20 KiB makes a target of
+/// 84 KiB, which is withheld, and delivering 32 KiB makes one of 96 KiB,
+/// which is advertised.
+///
+/// The intent is worked out afresh from the view at every event, so it never
+/// grows from repeated events and an opened limit that reached the target
+/// withdraws it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SlidingWindowAdvertisement {
+    window: VarInt,
+    intent: AdvertisementIntent,
+}
+
+/// The receive flow control policy of the default receive composition.
+pub type DefaultReceiveFlowControlPolicy = SlidingWindowAdvertisement;
+
+impl SlidingWindowAdvertisement {
+    /// Creates the policy with the window `window`, for example the initial
+    /// stream limit this endpoint advertised for streams of this type.
+    pub fn new(window: VarInt) -> Self {
+        Self {
+            window,
+            intent: AdvertisementIntent::Withhold,
+        }
+    }
+
+    /// The window `W`.
+    pub fn window(&self) -> VarInt {
+        self.window
+    }
+}
+
+impl ReceiveFlowControlPolicy for SlidingWindowAdvertisement {
+    fn on_receive_flow_event(&mut self, _: ReceiveFlowEvent, view: &ReceiveFlowView) {
+        self.intent =
+            match sliding_window_target(view.delivered_end, view.opened_limit, self.window) {
+                Some(target_limit) => AdvertisementIntent::Advertise { target_limit },
+                None => AdvertisementIntent::Withhold,
+            };
+    }
+
+    fn advertisement_intent(&self) -> AdvertisementIntent {
+        self.intent
+    }
+}
+
+/// The limit a fixed window `window` sliding with `progress` advertises over
+/// the limit `advertised`: `progress + window`, saturating at the largest
+/// offset, once it lies above `advertised` by at least `window / 2`.
+pub(crate) fn sliding_window_target(
+    progress: VarInt,
+    advertised: VarInt,
+    window: VarInt,
+) -> Option<VarInt> {
+    let target = progress.saturating_add(window);
+    let threshold = window.get() / 2;
+    (target > advertised && target.get() - advertised.get() >= threshold).then_some(target)
+}
+
 impl<C, Lc, F> StreamReceiver<C, Lc, F>
 where
     C: StreamReceiveBuffer + ReceiveFlowControlPolicy + ReceiveTerminationPolicy<F>,
@@ -125,3 +192,6 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

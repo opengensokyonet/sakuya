@@ -235,7 +235,7 @@ fn limit_below_the_read_position() {
     receiver.on_stop_sent().unwrap();
     assert_eq!(receiver.parts().delivered_end(), v(300));
     assert_eq!(
-        receiver.read_chunk(),
+        receiver.read_chunk(NonZeroUsize::MAX),
         delivery_limit("stop", TerminationEvent::StopSent, None)
     );
 }
@@ -248,8 +248,8 @@ fn policy_destroy_ends_reading_with_its_reason() {
     });
     assert!(receiver.parts().buffer.is_destroyed());
     let error = destroyed("first", TerminationEvent::StopSent, None);
-    assert_eq!(receiver.read_chunk(), error);
-    assert_eq!(receiver.read_chunk(), error);
+    assert_eq!(receiver.read_chunk(NonZeroUsize::MAX), error);
+    assert_eq!(receiver.read_chunk(NonZeroUsize::MAX), error);
 }
 
 /// A reason that is neither `Clone` nor `Debug`.
@@ -282,7 +282,8 @@ fn repeated_reads_share_one_reason_that_needs_no_clone() {
         .on_reset_stream(reset(4, 1000), &mut connection)
         .unwrap();
     let reason = |receiver: &mut Receiver<DestroyOnReset>| {
-        let Err(ReadError::BufferDestroyed { reason, .. }) = receiver.read_chunk() else {
+        let Err(ReadError::BufferDestroyed { reason, .. }) = receiver.read_chunk(NonZeroUsize::MAX)
+        else {
             panic!("expected a destroyed buffer");
         };
         reason
@@ -322,14 +323,20 @@ fn read_after_reader_drop_fails() {
         .on_stream_frame(stream(0, 100, true), &mut connection)
         .unwrap();
     receiver.reader_dropped();
-    assert_eq!(receiver.read_chunk(), Err(ReadError::ReaderDropped));
+    assert_eq!(
+        receiver.read_chunk(NonZeroUsize::MAX),
+        Err(ReadError::ReaderDropped)
+    );
     assert_eq!(
         receiver.read_into(&mut Vec::new()),
         Err(ReadError::ReaderDropped)
     );
     // A later connection close does not reopen reading.
     receiver.layer_ended(LayerEnd::ConnectionClosed(close_reason()));
-    assert_eq!(receiver.read_chunk(), Err(ReadError::ReaderDropped));
+    assert_eq!(
+        receiver.read_chunk(NonZeroUsize::MAX),
+        Err(ReadError::ReaderDropped)
+    );
 }
 
 /// A reset gives a basis: the base-composition style of fixing both limits
@@ -439,7 +446,7 @@ mod violations {
         receiver
             .on_reset_stream(reset(4, 100), &mut connection)
             .unwrap();
-        let _ = receiver.read_chunk();
+        let _ = receiver.read_chunk(NonZeroUsize::MAX);
     }
 
     #[test]

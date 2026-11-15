@@ -1,5 +1,6 @@
 use super::dialect;
 use bytes::{BufMut, Bytes, BytesMut};
+use core::num::NonZeroUsize;
 use proptest::prelude::*;
 use sakuya_stream::connection::{
     CloseReason, ImmediateClose, LayerEnd, LayerEndedError, TransportImmediateClose,
@@ -348,6 +349,7 @@ enum Op {
     },
     ReadChunk {
         stream: usize,
+        maximum: NonZeroUsize,
     },
     ReadInto {
         stream: usize,
@@ -397,7 +399,10 @@ fn op() -> impl Strategy<Value = Op> {
                 Op::Reset { stream, code, final_size }
             }
         ),
-        6 => stream.clone().prop_map(|stream| Op::ReadChunk { stream }),
+        6 => (stream.clone(), 1usize..40).prop_map(|(stream, maximum)| Op::ReadChunk {
+            stream,
+            maximum: NonZeroUsize::new(maximum).unwrap(),
+        }),
         6 => (stream.clone(), 0usize..40).prop_map(|(stream, room)| Op::ReadInto { stream, room }),
         2 => (stream.clone(), 1u32..3).prop_map(|(stream, code)| Op::Stop { stream, code }),
         2 => stream.clone().prop_map(|stream| Op::StopSent { stream }),
@@ -1012,10 +1017,11 @@ struct ModelConnection {
 
 fn read_chunk(
     stream: usize,
+    maximum: NonZeroUsize,
     model: &mut Model,
     receiver: &mut Receiver,
 ) -> Result<ReadOutcome<Bytes>, ReadError<u32, TestCloseCause, Facts>> {
-    let actual = receiver.read_chunk();
+    let actual = receiver.read_chunk(maximum);
     let expected = match model.settled() {
         Some(settled) => settled.map(Settled::outcome),
         None => {
@@ -1026,6 +1032,10 @@ fn read_chunk(
                 };
                 assert!(!chunk.is_empty(), "a data item is never empty");
                 assert!(chunk.len() as u64 <= run);
+                assert!(
+                    chunk.len() <= maximum.get(),
+                    "a data item is at most the maximum"
+                );
                 assert_eq!(*chunk, content(stream, model.delivered, chunk.len() as u64));
                 model.take_delivered(chunk.len() as u64);
                 return actual;
@@ -1135,9 +1145,10 @@ fn step(
             let expected = models[stream].on_reset(value, size, owed, ledger);
             dialect::on_partial_reset(&mut receivers[stream], frame, owed, connection, expected);
         }
-        Op::ReadChunk { stream } => {
+        Op::ReadChunk { stream, maximum } => {
             drop(read_chunk(
                 stream,
+                maximum,
                 &mut models[stream],
                 &mut receivers[stream],
             ));
@@ -1338,14 +1349,14 @@ fn drain(
         return;
     }
     loop {
-        match read_chunk(stream, model, receiver) {
+        match read_chunk(stream, NonZeroUsize::MAX, model, receiver) {
             Ok(ReadOutcome::Data(_)) => {}
             Ok(ReadOutcome::Wait) => panic!("a reader waits although nothing can arrive"),
             Ok(ReadOutcome::End | ReadOutcome::NoProgress) | Err(_) => break,
         }
     }
-    let first = read_chunk(stream, model, receiver);
-    let second = read_chunk(stream, model, receiver);
+    let first = read_chunk(stream, NonZeroUsize::MAX, model, receiver);
+    let second = read_chunk(stream, NonZeroUsize::MAX, model, receiver);
     assert_eq!(first, second, "repeated reads return one result");
 }
 

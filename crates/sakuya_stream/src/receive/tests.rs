@@ -20,6 +20,7 @@ use crate::{
 };
 use bytes::{BufMut, Bytes};
 use core::cell::Cell;
+use core::num::NonZeroUsize;
 use sakuya_wire::frame::UndecidedLength;
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
 use sakuya_wire::v1::frame::{reset_stream::ResetStreamFrame, stream::StreamFrame};
@@ -198,7 +199,7 @@ fn read_all<T: ReceiveTerminationPolicy>(
 ) -> (Vec<u8>, ChunkRead<T::Reason>) {
     let mut out = Vec::new();
     loop {
-        match receiver.read_chunk() {
+        match receiver.read_chunk(NonZeroUsize::MAX) {
             Ok(ReadOutcome::Data(chunk)) => {
                 assert!(!chunk.is_empty());
                 out.extend_from_slice(&chunk);

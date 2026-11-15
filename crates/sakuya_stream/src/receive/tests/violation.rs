@@ -339,7 +339,7 @@ mod reset_stream {
             }
         );
         receiver.layer_ended(LayerEnd::ConnectionClosed(close_reason()));
-        assert_eq!(receiver.read_chunk(), Err(closed()));
+        assert_eq!(receiver.read_chunk(NonZeroUsize::MAX), Err(closed()));
     }
 
     #[test]
@@ -418,7 +418,10 @@ mod awaiting_the_close {
         let (mut receiver, _connection) = violated();
         // Held data is not delivered, and an empty target does not report
         // that it makes no progress.
-        assert_eq!(receiver.read_chunk(), Ok(ReadOutcome::Wait));
+        assert_eq!(
+            receiver.read_chunk(NonZeroUsize::MAX),
+            Ok(ReadOutcome::Wait)
+        );
         assert_eq!(receiver.read_into(&mut Vec::new()), Ok(ReadOutcome::Wait));
         let mut empty = [0u8; 0];
         assert_eq!(
@@ -441,9 +444,12 @@ mod awaiting_the_close {
             .on_reset_stream(reset(1, 100), &mut connection)
             .unwrap();
         stream_violation(&mut receiver, &mut connection, stream(0, 200, false));
-        assert_eq!(receiver.read_chunk(), Ok(ReadOutcome::Wait));
+        assert_eq!(
+            receiver.read_chunk(NonZeroUsize::MAX),
+            Ok(ReadOutcome::Wait)
+        );
         receiver.layer_ended(LayerEnd::ConnectionClosed(close_reason()));
-        assert_eq!(receiver.read_chunk(), Err(closed()));
+        assert_eq!(receiver.read_chunk(NonZeroUsize::MAX), Err(closed()));
     }
 
     #[test]
@@ -455,18 +461,24 @@ mod awaiting_the_close {
         let (_, end) = read_all(&mut receiver);
         assert_eq!(end, Ok(ReadOutcome::End));
         stream_violation(&mut receiver, &mut connection, stream(0, 5, true));
-        assert_eq!(receiver.read_chunk(), Ok(ReadOutcome::End));
+        assert_eq!(receiver.read_chunk(NonZeroUsize::MAX), Ok(ReadOutcome::End));
         receiver.layer_ended(LayerEnd::ConnectionClosed(close_reason()));
-        assert_eq!(receiver.read_chunk(), Err(closed()));
+        assert_eq!(receiver.read_chunk(NonZeroUsize::MAX), Err(closed()));
     }
 
     #[test]
     fn a_dropped_reader_stays_dropped() {
         let (mut receiver, _connection) = violated();
         receiver.reader_dropped();
-        assert_eq!(receiver.read_chunk(), Err(ReadError::ReaderDropped));
+        assert_eq!(
+            receiver.read_chunk(NonZeroUsize::MAX),
+            Err(ReadError::ReaderDropped)
+        );
         receiver.layer_ended(LayerEnd::ConnectionClosed(close_reason()));
-        assert_eq!(receiver.read_chunk(), Err(ReadError::ReaderDropped));
+        assert_eq!(
+            receiver.read_chunk(NonZeroUsize::MAX),
+            Err(ReadError::ReaderDropped)
+        );
     }
 
     #[test]
@@ -494,7 +506,7 @@ mod awaiting_the_close {
         let (mut receiver, mut connection) = violated();
         receiver.layer_ended(LayerEnd::ConnectionClosed(close_reason()));
         receiver.layer_ended(LayerEnd::ConnectionClosed(CloseReason::StatelessReset));
-        assert_eq!(receiver.read_chunk(), Err(closed()));
+        assert_eq!(receiver.read_chunk(NonZeroUsize::MAX), Err(closed()));
         assert_eq!(
             receiver.closed().map(LayerEndedError::end),
             Some(&LayerEnd::ConnectionClosed(close_reason()))
@@ -564,6 +576,6 @@ mod after_the_close {
         );
         receiver.on_stream_data_blocked(v(77));
         assert_eq!(snapshot(&receiver, &connection), before);
-        assert_eq!(receiver.read_chunk(), Err(closed()));
+        assert_eq!(receiver.read_chunk(NonZeroUsize::MAX), Err(closed()));
     }
 }

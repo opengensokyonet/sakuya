@@ -5,7 +5,8 @@
 //! [`receive_buffer`] and [`receive`]. Both directions carry application
 //! protocol error codes as
 //! [`ApplicationErrorCode`](sakuya_wire::v1::application_error::ApplicationErrorCode)
-//! and apply the rules of [`stream_end`].
+//! and apply the rules of [`stream_end`]. Which streams of a connection are
+//! open, and the limits on opening more, are [`stream_id_ledger`]'s.
 //!
 //! Both directions take the resets of RFC 9000. With the `reset_stream_at`
 //! feature, off by default, the `reset_stream_at` module adds the reliable
@@ -13,6 +14,7 @@
 //! with `RESET_STREAM_AT`, and a stream receiver that also takes it.
 #![warn(missing_docs)]
 
+mod blocked_signal;
 pub mod connection;
 pub mod connection_receive_flow;
 pub mod connection_send_credit;
@@ -24,3 +26,4 @@ pub mod send;
 pub mod send_buffer;
 pub mod send_options;
 pub mod stream_end;
+pub mod stream_id_ledger;

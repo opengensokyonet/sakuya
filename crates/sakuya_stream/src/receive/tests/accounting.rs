@@ -9,14 +9,17 @@ fn out_of_order_fin_then_fill() {
     receiver
         .on_stream_frame(stream(100, 100, true), &mut connection)
         .unwrap();
-    assert_eq!(receiver.read_chunk(), Ok(ReadOutcome::Wait));
+    assert_eq!(
+        receiver.read_chunk(NonZeroUsize::MAX),
+        Ok(ReadOutcome::Wait)
+    );
     receiver
         .on_stream_frame(stream(0, 100, false), &mut connection)
         .unwrap();
     let (read, end) = read_all(&mut receiver);
     assert_eq!(read, data(0, 200));
     assert_eq!(end, Ok(ReadOutcome::End));
-    assert_eq!(receiver.read_chunk(), Ok(ReadOutcome::End));
+    assert_eq!(receiver.read_chunk(NonZeroUsize::MAX), Ok(ReadOutcome::End));
 }
 
 /// The examples of the before-and-after accounting: [100, 200) accounts up

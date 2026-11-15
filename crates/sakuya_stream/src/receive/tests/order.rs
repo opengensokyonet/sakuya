@@ -39,7 +39,10 @@ fn reset_then_stream_after_the_error_is_read() {
         .on_stream_frame(stream(100, 200, false), &mut connection)
         .unwrap();
     assert_eq!(receiver.parts().buffer.held_len(), 0);
-    assert_eq!(receiver.read_chunk().map(|_| ()), end.map(|_| ()));
+    assert_eq!(
+        receiver.read_chunk(NonZeroUsize::MAX).map(|_| ()),
+        end.map(|_| ())
+    );
     // Late data is still checked against the final size.
     assert!(
         receiver
@@ -100,5 +103,5 @@ fn late_stop_feedback_after_a_reset() {
     assert_eq!(end, reset_error(4, 200, false));
     receiver.on_stop_sent().unwrap();
     assert_eq!(receiver.parts().count(TerminationEvent::StopSent), 1);
-    assert_eq!(receiver.read_chunk(), end);
+    assert_eq!(receiver.read_chunk(NonZeroUsize::MAX), end);
 }

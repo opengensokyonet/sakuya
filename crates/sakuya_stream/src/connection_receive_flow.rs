@@ -9,15 +9,25 @@
 //! connection's usage. Receiving beyond the advertised limit is a protocol
 //! error of the peer, not back-pressure to wait out.
 //!
+//! The controller also works out when to advertise a higher limit with
+//! `MAX_DATA`: a fixed window `W`, the limit sent as `initial_max_data`,
+//! slides with the released progress, the same way
+//! [`SlidingWindowAdvertisement`] slides a stream's window with delivery.
+//!
+//! [`SlidingWindowAdvertisement`]: crate::receive::flow_control::SlidingWindowAdvertisement
+//!
 //! [RFC 9000 §4.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-4.1
+use crate::receive::flow_control::sliding_window_target;
 use sakuya_wire::var_int::VarInt;
 use snafu::{Snafu, ensure};
 
 /// Connection-wide receive accounting: the advertised limit, the cumulative
 /// usage of all streams and the cumulative released progress.
 ///
-/// Connection-level window growth (when and how far to raise the limit,
-/// sending `MAX_DATA`) is not part of this type.
+/// When to raise the limit follows a fixed window `W`, the initial limit:
+/// [`advertisement`](Self::advertisement) gives the limit to send in
+/// `MAX_DATA`, and [`raise_limit`](Self::raise_limit) records it once it may
+/// be visible. Sending the frame is not part of this type.
 ///
 /// - `limit` is the highest connection limit that may have become visible to
 ///   the peer. It only grows.
@@ -32,16 +42,19 @@ pub struct ConnectionReceiveFlowController {
     limit: VarInt,
     used: VarInt,
     released: VarInt,
+    window: VarInt,
 }
 
 impl ConnectionReceiveFlowController {
     /// Creates the controller with the connection limit this endpoint sent as
-    /// `initial_max_data`.
+    /// `initial_max_data`, which is also the window `W` of
+    /// [`advertisement`](Self::advertisement).
     pub fn new(initial_limit: VarInt) -> Self {
         Self {
             limit: initial_limit,
             used: VarInt::ZERO,
             released: VarInt::ZERO,
+            window: initial_limit,
         }
     }
 
@@ -58,6 +71,22 @@ impl ConnectionReceiveFlowController {
     /// The cumulative released progress.
     pub fn released(&self) -> VarInt {
         self.released
+    }
+
+    /// The window `W` that [`advertisement`](Self::advertisement) slides.
+    pub fn window(&self) -> VarInt {
+        self.window
+    }
+
+    /// The connection limit to advertise in `MAX_DATA` now, if any.
+    ///
+    /// The target is the released progress plus `W`, an absolute limit; it is
+    /// returned once it lies at least `W / 2` (rounded down) above the
+    /// limit that may be visible to the peer. Querying changes nothing:
+    /// once a `MAX_DATA` carrying it may be visible, record it with
+    /// [`raise_limit`](Self::raise_limit), which withdraws it.
+    pub fn advertisement(&self) -> Option<VarInt> {
+        sliding_window_target(self.released, self.limit, self.window)
     }
 
     /// Records that `limit` may have become visible to the peer.

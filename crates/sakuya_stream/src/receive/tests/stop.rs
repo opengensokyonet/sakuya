@@ -79,7 +79,10 @@ fn allowed_request_is_installed_without_ending_reads() {
         .unwrap();
     assert_eq!(receiver.stop(c(1)), Ok(()));
     assert_eq!(receiver.pending_stop(), Some(c(1)));
-    assert_eq!(receiver.read_chunk(), Ok(ReadOutcome::Data(data(0, 100))));
+    assert_eq!(
+        receiver.read_chunk(NonZeroUsize::MAX),
+        Ok(ReadOutcome::Data(data(0, 100)))
+    );
     receiver
         .on_stream_frame(stream(100, 100, true), &mut connection)
         .unwrap();
@@ -114,7 +117,7 @@ fn request_after_local_termination() {
     receiver.stop(c(1)).unwrap();
     receiver.on_stop_sent().unwrap();
     assert_eq!(
-        receiver.read_chunk(),
+        receiver.read_chunk(NonZeroUsize::MAX),
         Err(ReadError::BufferDestroyed {
             reason: SharedTerminationReason::new("stopped"),
             trigger: TerminationEvent::StopSent,

@@ -32,6 +32,8 @@
 //! owns a reservation must therefore also own the right to expose the data it
 //! covers.
 //!
+//! When to send `DATA_BLOCKED` is [`data_blocked`]'s.
+//!
 //! [RFC 9000 §4.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-4.1
 use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -40,6 +42,8 @@ use sakuya_wire::v1::stream_id::StreamId;
 use sakuya_wire::var_int::VarInt;
 use snafu::{Snafu, ensure};
 use std::sync::Arc;
+
+pub mod data_blocked;
 
 /// The connection send flow controller: the connection-wide limit on stream
 /// data that the peer grants, the uncommitted reservations taken against it,

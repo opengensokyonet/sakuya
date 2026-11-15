@@ -1,7 +1,6 @@
 //! Read results and their priorities.
 use super::*;
 use crate::connection::{LayerEnd, LayerEndedError};
-use core::num::NonZeroUsize;
 
 fn nz(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).unwrap()
@@ -12,7 +11,7 @@ fn connection_closed_keeps_the_first_reason() {
     let (mut receiver, _connection) = new_receiver(keep_all());
     receiver.layer_ended(LayerEnd::ConnectionClosed(close_reason()));
     receiver.layer_ended(LayerEnd::ConnectionClosed(CloseReason::StatelessReset));
-    let Err(ReadError::LayerEnded { source }) = receiver.read_chunk() else {
+    let Err(ReadError::LayerEnded { source }) = receiver.read_chunk(NonZeroUsize::MAX) else {
         panic!("expected a closed connection");
     };
     assert_eq!(source.end(), &LayerEnd::ConnectionClosed(close_reason()));
@@ -28,7 +27,7 @@ fn connection_failure_is_not_hidden_by_held_data() {
     let closed = Err(ReadError::LayerEnded {
         source: LayerEndedError::new(LayerEnd::ConnectionClosed(close_reason())),
     });
-    assert_eq!(receiver.read_chunk(), closed);
+    assert_eq!(receiver.read_chunk(NonZeroUsize::MAX), closed);
     // Not by an empty target either.
     let mut empty = [0u8; 0];
     assert_eq!(
@@ -50,7 +49,7 @@ fn connection_failure_overrides_a_committed_result() {
     assert_eq!(end, Ok(ReadOutcome::End));
     receiver.layer_ended(LayerEnd::ConnectionClosed(close_reason()));
     assert_eq!(
-        receiver.read_chunk(),
+        receiver.read_chunk(NonZeroUsize::MAX),
         Err(ReadError::LayerEnded {
             source: LayerEndedError::new(LayerEnd::ConnectionClosed(close_reason())),
         })
@@ -101,7 +100,7 @@ fn empty_target_does_not_report_the_end() {
         receiver.read_into(&mut &mut empty[..]),
         Ok(ReadOutcome::NoProgress)
     );
-    assert_eq!(receiver.read_chunk(), Ok(ReadOutcome::End));
+    assert_eq!(receiver.read_chunk(NonZeroUsize::MAX), Ok(ReadOutcome::End));
     // A committed end is returned before the empty-target shortcut.
     assert_eq!(
         receiver.read_into(&mut &mut empty[..]),
@@ -121,7 +120,7 @@ fn data_then_end_in_separate_calls() {
     assert_eq!(out, data(0, 10));
     assert_eq!(receiver.read_into(&mut out), Ok(ReadOutcome::End));
     assert_eq!(receiver.read_into(&mut out), Ok(ReadOutcome::End));
-    assert_eq!(receiver.read_chunk(), Ok(ReadOutcome::End));
+    assert_eq!(receiver.read_chunk(NonZeroUsize::MAX), Ok(ReadOutcome::End));
 }
 
 #[test]
@@ -135,8 +134,63 @@ fn both_ways_of_reading_share_one_position() {
         receiver.read_into(&mut &mut first[..]),
         Ok(ReadOutcome::Data(nz(30)))
     );
-    assert_eq!(receiver.read_chunk(), Ok(ReadOutcome::Data(data(30, 70))));
-    assert_eq!(receiver.read_chunk(), Ok(ReadOutcome::End));
+    assert_eq!(
+        receiver.read_chunk(NonZeroUsize::MAX),
+        Ok(ReadOutcome::Data(data(30, 70)))
+    );
+    assert_eq!(receiver.read_chunk(NonZeroUsize::MAX), Ok(ReadOutcome::End));
+}
+
+/// A block longer than the maximum is cut: the rest stays undelivered and
+/// the next read continues from it; the end comes only after the last byte.
+#[test]
+fn chunk_reads_are_cut_at_the_maximum() {
+    let (mut receiver, mut connection) = new_receiver(keep_all());
+    receiver
+        .on_stream_frame(stream(0, 100, true), &mut connection)
+        .unwrap();
+    assert_eq!(
+        receiver.read_chunk(nz(30)),
+        Ok(ReadOutcome::Data(data(0, 30)))
+    );
+    assert_eq!(receiver.parts().buffer.delivered_end(), v(30));
+    assert_eq!(
+        receiver.read_chunk(nz(1)),
+        Ok(ReadOutcome::Data(data(30, 1)))
+    );
+    assert_eq!(
+        receiver.read_chunk(nz(200)),
+        Ok(ReadOutcome::Data(data(31, 69)))
+    );
+    assert_eq!(receiver.read_chunk(nz(1)), Ok(ReadOutcome::End));
+}
+
+/// The maximum and a fixed delivery limit bound a chunk together: the nearer
+/// one cuts it.
+#[test]
+fn chunk_reads_are_cut_at_the_nearer_of_maximum_and_delivery_limit() {
+    let (mut receiver, mut connection) = new_receiver(scripted(|event, _| match event {
+        TerminationEvent::RemoteReset => fix_both(50, "truncate"),
+        _ => TerminationDecision::keep(),
+    }));
+    receiver
+        .on_stream_frame(stream(0, 100, false), &mut connection)
+        .unwrap();
+    receiver
+        .on_reset_stream(reset(3, 100), &mut connection)
+        .unwrap();
+    assert_eq!(
+        receiver.read_chunk(nz(40)),
+        Ok(ReadOutcome::Data(data(0, 40)))
+    );
+    assert_eq!(
+        receiver.read_chunk(nz(40)),
+        Ok(ReadOutcome::Data(data(40, 10)))
+    );
+    assert!(matches!(
+        receiver.read_chunk(nz(40)),
+        Err(ReadError::DeliveryLimitReached { .. })
+    ));
 }
 
 /// After a terminal error, reads keep returning it, and late frames do not
@@ -148,11 +202,11 @@ fn terminal_error_is_stable() {
         .on_reset_stream(reset(4, 100), &mut connection)
         .unwrap();
     let error = reset_error(4, 100, false);
-    assert_eq!(receiver.read_chunk(), error);
+    assert_eq!(receiver.read_chunk(NonZeroUsize::MAX), error);
     receiver
         .on_stream_frame(stream(0, 100, true), &mut connection)
         .unwrap();
-    assert_eq!(receiver.read_chunk(), error);
+    assert_eq!(receiver.read_chunk(NonZeroUsize::MAX), error);
     let mut out = Vec::new();
     assert_eq!(receiver.read_into(&mut out).map(|_| ()), error.map(|_| ()));
     assert_eq!(
@@ -175,7 +229,7 @@ fn committed_end_is_not_rewritten_by_a_reset() {
     receiver
         .on_reset_stream(reset(4, 10), &mut connection)
         .unwrap();
-    assert_eq!(receiver.read_chunk(), Ok(ReadOutcome::End));
+    assert_eq!(receiver.read_chunk(NonZeroUsize::MAX), Ok(ReadOutcome::End));
 }
 
 /// A completely delivered stream that was reset reports the reset with
@@ -214,11 +268,17 @@ fn complete_but_reset_presentation() {
 #[test]
 fn waits_for_expected_data_only() {
     let (mut receiver, mut connection) = new_receiver(keep_all());
-    assert_eq!(receiver.read_chunk(), Ok(ReadOutcome::Wait));
+    assert_eq!(
+        receiver.read_chunk(NonZeroUsize::MAX),
+        Ok(ReadOutcome::Wait)
+    );
     receiver
         .on_stream_frame(stream(10, 10, false), &mut connection)
         .unwrap();
-    assert_eq!(receiver.read_chunk(), Ok(ReadOutcome::Wait));
+    assert_eq!(
+        receiver.read_chunk(NonZeroUsize::MAX),
+        Ok(ReadOutcome::Wait)
+    );
     receiver
         .on_stream_frame(stream(0, 10, false), &mut connection)
         .unwrap();
@@ -244,7 +304,7 @@ fn read_error_delegates_to_the_closed_connection() {
 fn a_rejected_zero_rtt_attempt_fails_the_read_with_layer_ended() {
     let (mut receiver, _connection) = new_receiver(keep_all());
     receiver.layer_ended(LayerEnd::ZeroRttRejected);
-    let Err(ReadError::LayerEnded { source }) = receiver.read_chunk() else {
+    let Err(ReadError::LayerEnded { source }) = receiver.read_chunk(NonZeroUsize::MAX) else {
         panic!("the read must fail with LayerEnded");
     };
     assert_eq!(source.end(), &LayerEnd::ZeroRttRejected);

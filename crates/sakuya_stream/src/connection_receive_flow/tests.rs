@@ -64,3 +64,46 @@ fn release_beyond_usage_is_an_error_and_changes_nothing() {
     assert_eq!(controller.released(), v(4));
     assert!(controller.record_release(VarInt::MAX).is_err());
 }
+
+const KIB: u32 = 1024;
+
+/// W = 64 KiB, the initial limit: releasing 20 KiB makes a target of 84 KiB,
+/// which is withheld; releasing 32 KiB makes one of 96 KiB, which is
+/// advertised until it is recorded as visible.
+#[test]
+fn max_data_slides_with_released_progress() {
+    let mut controller = ConnectionReceiveFlowController::new(v(64 * KIB));
+    assert_eq!(controller.window(), v(64 * KIB));
+    assert_eq!(controller.advertisement(), None);
+    controller.record_usage(v(64 * KIB)).unwrap();
+    controller.record_release(v(20 * KIB)).unwrap();
+    assert_eq!(controller.advertisement(), None);
+    controller.record_release(v(12 * KIB)).unwrap();
+    assert_eq!(controller.advertisement(), Some(v(96 * KIB)));
+    // Querying again changes nothing.
+    assert_eq!(controller.advertisement(), Some(v(96 * KIB)));
+    assert!(controller.raise_limit(v(96 * KIB)));
+    assert_eq!(controller.advertisement(), None);
+    controller.record_usage(v(32 * KIB)).unwrap();
+    controller.record_release(v(32 * KIB)).unwrap();
+    assert_eq!(controller.advertisement(), Some(v(128 * KIB)));
+}
+
+/// Usage does not move the target; only released progress does.
+#[test]
+fn usage_alone_advertises_nothing() {
+    let mut controller = ConnectionReceiveFlowController::new(v(100));
+    controller.record_usage(v(100)).unwrap();
+    assert_eq!(controller.advertisement(), None);
+    controller.record_release(v(49)).unwrap();
+    assert_eq!(controller.advertisement(), None);
+    controller.record_release(v(1)).unwrap();
+    assert_eq!(controller.advertisement(), Some(v(150)));
+}
+
+/// A zero initial limit is a zero window: nothing is ever advertised.
+#[test]
+fn zero_window_advertises_nothing() {
+    let controller = ConnectionReceiveFlowController::new(VarInt::ZERO);
+    assert_eq!(controller.advertisement(), None);
+}

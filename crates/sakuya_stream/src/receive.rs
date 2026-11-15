@@ -10,7 +10,9 @@
 //! ([`ReceiveFlowControlPolicy`]) and the receive termination policy
 //! ([`ReceiveTerminationPolicy`]). The type may hold three independent
 //! components or let the buffer double as the flow control policy; it must
-//! make them work on the same stream.
+//! make them work on the same stream. [`composition::ReceiveComposition`]
+//! joins three independent components, and
+//! [`composition::DefaultReceiveComposition`] names the default choice.
 //!
 //! The receiver is also generic over the type `F` of its reset facts, a
 //! [`RemoteResetFacts`]: what a reset of the peer states and how far the peer
@@ -88,6 +90,7 @@ use violation::{
     OnStreamFrameError, StreamLimitExceededError,
 };
 
+pub mod composition;
 pub mod flow_control;
 pub mod read;
 mod received_ranges;

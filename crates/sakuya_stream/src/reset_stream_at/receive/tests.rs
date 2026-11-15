@@ -24,6 +24,7 @@ use crate::send::test_support::TestCloseCause;
 use crate::stream_end::{FinalSizeChangeError, ResetCodeChangeError};
 use bytes::{BufMut, Bytes};
 use core::fmt::Debug;
+use core::num::NonZeroUsize;
 use sakuya_wire::reset_stream_at::ResetStreamAtFrame;
 use sakuya_wire::v1::application_error::ApplicationErrorCode;
 use sakuya_wire::v1::frame::reset_stream::ResetStreamFrame;
@@ -210,7 +211,7 @@ fn read_all<T: ReceiveTerminationPolicy<RemoteResetAt>>(
 ) -> (Vec<u8>, ChunkRead<T::Reason>) {
     let mut out = Vec::new();
     loop {
-        match receiver.read_chunk() {
+        match receiver.read_chunk(NonZeroUsize::MAX) {
             Ok(ReadOutcome::Data(chunk)) => {
                 assert!(!chunk.is_empty());
                 out.extend_from_slice(&chunk);
@@ -419,7 +420,10 @@ mod order {
             .unwrap();
         assert_eq!(receiver.remote_reset().unwrap().reliable_size(), v(400));
         assert_eq!(receiver.parts().count(LOWERED), 1);
-        assert_eq!(receiver.read_chunk(), reset_error(4, 1000, 400, false));
+        assert_eq!(
+            receiver.read_chunk(NonZeroUsize::MAX),
+            reset_error(4, 1000, 400, false)
+        );
     }
 
     /// RESET_STREAM_AT(400), then RESET_STREAM_AT(800): out of order; the
@@ -475,7 +479,10 @@ mod order {
             receiver.remote_reset().unwrap().reliable_size(),
             VarInt::ZERO
         );
-        assert_eq!(receiver.read_chunk(), reset_error(4, 1000, 0, false));
+        assert_eq!(
+            receiver.read_chunk(NonZeroUsize::MAX),
+            reset_error(4, 1000, 0, false)
+        );
     }
 
     /// FIN and RESET_STREAM_AT in both orders agree on the final size, and FIN
@@ -513,7 +520,10 @@ mod order {
         receiver
             .on_reset_stream_at(reset_at(4, 1000, 800), &mut connection)
             .unwrap();
-        assert_eq!(receiver.read_chunk(), Ok(ReadOutcome::Wait));
+        assert_eq!(
+            receiver.read_chunk(NonZeroUsize::MAX),
+            Ok(ReadOutcome::Wait)
+        );
         assert_eq!(receiver.acceptance_limit(), BoundaryMode::Following);
         receiver
             .on_stream_frame(stream(0, 800, false), &mut connection)
@@ -926,7 +936,10 @@ mod violation {
             TransportErrorCode::STREAM_STATE_ERROR
         );
         // The stream waits for the connection to close.
-        assert_eq!(receiver.read_chunk(), Ok(ReadOutcome::Wait));
+        assert_eq!(
+            receiver.read_chunk(NonZeroUsize::MAX),
+            Ok(ReadOutcome::Wait)
+        );
     }
 
     /// The final size is checked before the error code.
@@ -1024,7 +1037,10 @@ mod violation {
             Ok(())
         );
         assert_eq!(snapshot(&receiver, &connection), before);
-        assert_eq!(receiver.read_chunk(), Ok(ReadOutcome::Wait));
+        assert_eq!(
+            receiver.read_chunk(NonZeroUsize::MAX),
+            Ok(ReadOutcome::Wait)
+        );
 
         receiver.layer_ended(LayerEnd::ConnectionClosed(close_reason()));
         let before = snapshot(&receiver, &connection);
@@ -1038,7 +1054,7 @@ mod violation {
         );
         assert_eq!(snapshot(&receiver, &connection), before);
         assert_eq!(
-            receiver.read_chunk(),
+            receiver.read_chunk(NonZeroUsize::MAX),
             Err(ReadError::LayerEnded {
                 source: LayerEndedError::new(LayerEnd::ConnectionClosed(close_reason())),
             })
