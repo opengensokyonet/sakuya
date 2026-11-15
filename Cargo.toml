@@ -61,3 +61,6 @@ tokio = { version = "1", default-features = false }
 # offsets reach; line tables keep backtraces.
 [profile.dev.package.sakuya_connection]
 debug = "line-tables-only"
+
+[profile.dev.package.sakuya_endpoint]
+debug = "line-tables-only"

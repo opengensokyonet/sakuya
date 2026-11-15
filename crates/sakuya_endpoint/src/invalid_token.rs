@@ -18,6 +18,7 @@ use sakuya_packet_protection::{
     packet_key::PacketKey,
     packet_number::TruncatedPacketNumber,
 };
+use sakuya_stream::connection::TransportImmediateClose;
 use sakuya_wire::{
     connection_id::ConnectionId,
     header::SAMPLE_DISTANCE,
@@ -66,21 +67,86 @@ pub fn encode_invalid_token_close<B: CryptoBackend>(
     client_scid: &ConnectionId,
     scid: &ConnectionId,
 ) -> Bytes {
+    let close = TransportImmediateClose {
+        code: TransportErrorCode::INVALID_TOKEN,
+        frame_type: None,
+        reason_phrase: Bytes::new(),
+    };
+    encode_initial_close(backend, client_dcid, client_scid, scid, &close, usize::MAX)
+}
+
+/// Encodes the Initial packet that closes, with `close`, the connection
+/// attempt of a client Initial whose destination connection ID was
+/// `client_dcid` and whose source connection ID was `client_scid`, as
+/// [`encode_invalid_token_close`] does for INVALID_TOKEN.
+///
+/// The packet is at most `max_len` bytes when it can be: the reason phrase
+/// is cut to fit, down to none. A Frame Type of `None` is written as 0.
+pub fn encode_initial_close<B: CryptoBackend>(
+    backend: &B,
+    client_dcid: &ConnectionId,
+    client_scid: &ConnectionId,
+    scid: &ConnectionId,
+    close: &TransportImmediateClose,
+    max_len: usize,
+) -> Bytes {
+    let full = encode_with_phrase(
+        backend,
+        client_dcid,
+        client_scid,
+        scid,
+        close,
+        &close.reason_phrase,
+    );
+    if full.len() <= max_len || close.reason_phrase.is_empty() {
+        return full;
+    }
+    let excess = full.len() - max_len;
+    let kept = close.reason_phrase.len().saturating_sub(excess);
+    // A shorter phrase can shorten its length field and the packet's Length
+    // field too, so the cut is at least the excess; a phrase that still does
+    // not fit is dropped.
+    let shorter = encode_with_phrase(
+        backend,
+        client_dcid,
+        client_scid,
+        scid,
+        close,
+        &close.reason_phrase[..kept],
+    );
+    if shorter.len() <= max_len {
+        shorter
+    } else {
+        encode_with_phrase(backend, client_dcid, client_scid, scid, close, &[])
+    }
+}
+
+fn encode_with_phrase<B: CryptoBackend>(
+    backend: &B,
+    client_dcid: &ConnectionId,
+    client_scid: &ConnectionId,
+    scid: &ConnectionId,
+    close: &TransportImmediateClose,
+    reason_phrase: &[u8],
+) -> Bytes {
     let secrets = InitialSecrets::derive(backend, client_dcid);
     let packet_key = PacketKey::derive(backend, INITIAL_AEAD, &secrets.server);
     let header_key = HeaderProtectionKey::derive(backend, INITIAL_AEAD, &secrets.server);
 
+    let phrase_len = VarInt::try_from(reason_phrase.len());
+    // invariant: a reason phrase in a packet is far below the
+    // variable-length integer limit.
+    let phrase_len = phrase_len.expect("a reason phrase length is a variable-length integer");
     let close = ConnectionCloseFrame::new(
         CloseErrorCode::Transport {
-            code: VarIntField::shortest(TransportErrorCode::INVALID_TOKEN),
-            frame_type: VarIntField::shortest(VarInt::ZERO),
+            code: VarIntField::shortest(close.code),
+            frame_type: VarIntField::shortest(close.frame_type.unwrap_or(VarInt::ZERO)),
         },
-        VarIntWidth::One,
-        &[][..],
+        VarIntWidth::shortest(phrase_len),
+        reason_phrase,
     );
-    // invariant: a one-byte Reason Phrase Length field states the length of
-    // an empty reason phrase.
-    let close = close.expect("an empty reason phrase fits any width");
+    // invariant: the width is the shortest one for the phrase's length.
+    let close = close.expect("the shortest width states the phrase's length");
     let packet_number = PacketNumber::ZERO;
     let truncated = TruncatedPacketNumber::encode(packet_number, None);
     // invariant: packet number 0 with nothing acknowledged takes one byte.

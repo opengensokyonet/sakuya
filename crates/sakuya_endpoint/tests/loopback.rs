@@ -1,0 +1,694 @@
+//! A server endpoint and a client endpoint on UDP sockets of the loopback
+//! interface: the client connects, the server accepts, the handshake
+//! completes, the client closes, and both endpoints shut down.
+//!
+//! The server presents an Ed25519 certificate for example.com, issued by an
+//! Ed25519 root that the client's verifier trusts; both are built here.
+
+#![cfg(target_os = "linux")]
+
+use core::{fmt, future::Future, net::SocketAddr, num::NonZeroU32, time::Duration};
+use std::{
+    pin::pin,
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
+    task::{Context, Poll, Waker},
+};
+
+use bytes::Bytes;
+use frunk_core::{Coprod, hlist};
+use futures_util::StreamExt as _;
+use nitori_crypto::{NamedGroup, SignatureScheme, SigningKey as _};
+use nitori_crypto_aws_lc::{AwsLcBackend, Ed25519SigningKey};
+use sakuya_clock_tokio::TokioClock;
+use sakuya_connection::{
+    clock::{ConnectionChoices, LinkIdOf},
+    connection_id::{
+        reset_token::PeerGroupedResetTokenRegistrar,
+        sequence_map::{
+            SequenceMapDestinationConnectionIdStrategy,
+            SequenceMapDestinationConnectionIdStrategyConfig,
+        },
+    },
+    send_strategy::{SendStrategyTypes, ranked::RankedSendStrategy},
+    v1::{
+        self,
+        amplification::AntiAmplificationFactor,
+        close::PassThroughImmediateClosePolicy,
+        crypto::{FragmentedCryptoReceiveBuffer, send::OffsetMapCryptoSendBuffer},
+        stateless_reset::StatelessResetSignal,
+    },
+};
+use sakuya_datagram_routing::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
+use sakuya_endpoint::{
+    address_token::{AddressTokenKey, AddressTokenLifetimes, AeadAddressTokens},
+    choices::{ConnectionReceiver, EndpointChoices, PeerOf, ResetTokensOf},
+    config::{
+        BindingDeclarations, ClientConfig, ClientCryptoReceiveCapacities, EndpointConfig,
+        ServerConfig, ServerCryptoReceiveCapacities,
+    },
+    endpoint::Endpoint,
+    handshake::{ClientHandshakeConfig, ServerHandshakeConfig},
+    incoming::Incoming,
+    retry::{CapacityFraction, LoadStatelessRetryPolicy},
+    role::{AcceptingServer, ConnectingClient, NoClient, NoServer},
+};
+use sakuya_packet_protection::backend::ring::RingBackend;
+use sakuya_recovery::{
+    ack_obligation::Rfc9000AckObligation,
+    factory::{NewRenoRecoveryFactory, NewRenoRecoveryFactoryConfig},
+    loss::LossThresholds,
+    receive_journals::MaxAckRanges,
+    send_journals::DequeSendJournals,
+};
+use sakuya_tls::{
+    cipher_suite::CipherSuite,
+    client::{
+        ServerTarget,
+        engine::{ClientHandshake, ClientHandshakeSettings},
+        identity::NoClientCertificate,
+        offering::PreferenceOffering,
+        ticket::TakeOnceTicketMap,
+    },
+    clock::SystemClock,
+    extension::alpn::{ProtocolName, ProtocolNameList},
+    key_log::{KeyLog, KeyLogLabel},
+    message::HelloRandom,
+    message::{MessageLimits, new_session_ticket::TicketLifetime},
+    server::{
+        choice::{GroupPreference, PreferenceTable},
+        engine::{ServerHandshake, ServerHandshakeSettings},
+        identity::CertifiedKey,
+        layers::PassThroughLayers,
+        peer::NoCertificateRequest,
+        targets::SniTargets,
+        ticket::ZeroRttOnceTicketTable,
+    },
+    verify::{
+        AnchorStore, NoRevocationCheck, SpkiDistrustList, WebPkiVerifier,
+        transparency::{EmbeddedSctPolicy, LogList, StaleLogListAction},
+    },
+};
+use sakuya_udp_tokio::{UdpBinding, UdpBindingConfig, UdpLink};
+use sakuya_wire::{
+    connection_id::{ConnectionId, ConnectionIdLength, StatelessResetToken},
+    v1::transport_parameters::{TransportParameters, integer::MaxIdleTimeout},
+    var_int::VarInt,
+};
+use time::UtcDateTime;
+
+/// How long any step may take.
+const DEADLINE: Duration = Duration::from_secs(5);
+
+// ---- the endpoint's choices ----
+
+/// The endpoints of the tests: UDP on tokio.
+struct Udp;
+
+type Links = Coprod![UdpLink<TokioClock>];
+
+impl EndpointChoices for Udp {
+    type Links = Links;
+    type Clock = TokioClock;
+    type Crypto = RingBackend;
+    type Random = AwsLcBackend;
+    type WallClock = SystemClock;
+    type ConnectionIds = CountingConnectionIds;
+    type Recognizer = ConnectionIdLengths;
+
+    fn peer_socket_addr(peer: &PeerOf<Self>) -> Option<&SocketAddr> {
+        peer.get::<SocketAddr, _>()
+    }
+}
+
+/// Connection IDs of eight bytes from a counter shared by the endpoint,
+/// with tokens from the same count.
+#[derive(Clone)]
+struct CountingConnectionIds(Arc<AtomicU64>);
+
+impl ConnectionIdGenerator for CountingConnectionIds {
+    type Config = Self;
+
+    fn new(config: &Self) -> Self {
+        config.clone()
+    }
+
+    fn generate(&mut self) -> (ConnectionId, StatelessResetToken) {
+        let n = self.0.fetch_add(1, Ordering::Relaxed);
+        let cid = ConnectionId::new(&n.to_be_bytes()).expect("eight bytes");
+        let mut token = [0; 16];
+        token[..8].copy_from_slice(&n.to_be_bytes());
+        (cid, StatelessResetToken::new(token))
+    }
+
+    fn stateless_reset_token(_: &Self, _: &ConnectionId) -> Option<StatelessResetToken> {
+        None
+    }
+}
+
+// ---- the connections' choices ----
+
+/// The application's error type for closing.
+#[derive(Debug, PartialEq, Eq)]
+struct AppClose(u32);
+impl fmt::Display for AppClose {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the application closed with {}", self.0)
+    }
+}
+impl std::error::Error for AppClose {}
+impl v1::close::ApplicationClose for AppClose {
+    fn code(&self) -> sakuya_wire::v1::application_error::ApplicationErrorCode {
+        sakuya_wire::v1::application_error::ApplicationErrorCode::new(VarInt::from_u32(self.0))
+    }
+}
+
+macro_rules! choices {
+    ($name:ident, $side:ty) => {
+        struct $name;
+        impl ConnectionChoices for $name {
+            type Clock = TokioClock;
+            type Link = sakuya_endpoint::choices::LinkOf<Udp>;
+        }
+        impl v1::Choices for $name {
+            type Crypto = RingBackend;
+            type Side = $side;
+            type CryptoReceiveBuffer = FragmentedCryptoReceiveBuffer;
+            type CryptoSendBuffer = OffsetMapCryptoSendBuffer;
+            type Recovery<V: Clone + Eq + fmt::Debug + 'static> = NewRenoRecoveryFactory<V>;
+            type AckObligation = Rfc9000AckObligation<std::time::Instant>;
+            type SendJournals<S: 'static, P: Clone + Eq + fmt::Debug + 'static> =
+                DequeSendJournals<std::time::Instant, S, P>;
+            type ApplicationError = AppClose;
+            type Receiver = ConnectionReceiver<Udp>;
+            type SendStrategy<I: SendStrategyTypes> = RankedSendStrategy<I>;
+            type DestinationConnectionIds = SequenceMapDestinationConnectionIdStrategy<
+                LinkIdOf<Self>,
+                PeerGroupedResetTokenRegistrar<PeerOf<Udp>, Arc<StatelessResetSignal>>,
+            >;
+            type ResetTokenRegistry = ResetTokensOf<Udp>;
+            type ImmediateClosePolicy = PassThroughImmediateClosePolicy;
+        }
+    };
+}
+choices!(ServerChoices, v1::Server<ServerEngine>);
+choices!(ClientChoices, v1::Client<ClientEngine>);
+
+type Parts = frunk_core::HList![v1::Part];
+
+type Server = AcceptingServer<
+    ServerChoices,
+    Parts,
+    ServerStarts,
+    AeadAddressTokens<AwsLcBackend>,
+    LoadStatelessRetryPolicy,
+>;
+type Client = ConnectingClient<ClientChoices, Parts, ClientStarts>;
+
+// ---- the handshakes ----
+
+type Verifier = WebPkiVerifier<
+    AwsLcBackend,
+    AnchorStore,
+    SpkiDistrustList,
+    NoRevocationCheck,
+    EmbeddedSctPolicy,
+    SystemClock,
+>;
+
+type ServerEngine = ServerHandshake<
+    AwsLcBackend,
+    PreferenceTable,
+    ZeroRttOnceTicketTable<&'static str, AwsLcBackend, SystemClock>,
+    PassThroughLayers,
+    SniTargets<&'static str>,
+    CertifiedKey<Ed25519SigningKey>,
+    NoCertificateRequest,
+    SystemClock,
+    (),
+>;
+
+type ClientEngine = ClientHandshake<
+    AwsLcBackend,
+    PreferenceOffering,
+    Arc<TakeOnceTicketMap<SystemClock>>,
+    Verifier,
+    NoClientCertificate,
+    SystemClock,
+    Arc<RecordedLabels>,
+>;
+
+fn h3() -> ProtocolName<Bytes> {
+    ProtocolName::new(Bytes::from_static(b"h3")).unwrap()
+}
+
+/// Makes each server connection's engine afresh.
+#[derive(Clone)]
+struct ServerStarts;
+
+impl ServerHandshakeConfig for ServerStarts {
+    type Start = ServerEngine;
+
+    fn start(&self) -> ServerEngine {
+        let mut targets = SniTargets::new();
+        targets.insert("example.com", "web", vec![h3()]);
+        ServerHandshake::new(
+            AwsLcBackend,
+            PreferenceTable::new(
+                vec![CipherSuite::TLS_AES_128_GCM_SHA256],
+                vec![NamedGroup::X25519],
+                GroupPreference::KeyShareFirst,
+            ),
+            ZeroRttOnceTicketTable::new(
+                AwsLcBackend,
+                SystemClock,
+                2,
+                TicketLifetime::new(3600).unwrap(),
+                false,
+                16,
+            ),
+            PassThroughLayers,
+            targets,
+            CertifiedKey::new(vec![Bytes::from(pki::leaf())], pki::key(2)).unwrap(),
+            NoCertificateRequest,
+            SystemClock,
+            (),
+            ServerHandshakeSettings::default(),
+        )
+    }
+
+    fn limits(&self) -> MessageLimits {
+        ServerHandshakeSettings::default().limits
+    }
+
+    fn requests_client_certificate(&self) -> bool {
+        false
+    }
+}
+
+/// The labels the client's engines logged a secret under.
+#[derive(Default)]
+struct RecordedLabels(Mutex<Vec<KeyLogLabel>>);
+
+impl KeyLog for RecordedLabels {
+    fn log(&self, label: KeyLogLabel, _: &HelloRandom, _: &[u8]) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(label);
+    }
+}
+
+impl RecordedLabels {
+    fn has(&self, label: KeyLogLabel) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&label)
+    }
+}
+
+/// Makes each client connection's engine, which logs to `labels`.
+#[derive(Clone)]
+struct ClientStarts {
+    labels: Arc<RecordedLabels>,
+    tickets: Arc<TakeOnceTicketMap<SystemClock>>,
+}
+
+impl ClientHandshakeConfig for ClientStarts {
+    type ServerName = ServerTarget;
+    type Start = ClientEngine;
+
+    fn start(&self, server_name: &ServerTarget) -> ClientEngine {
+        ClientHandshake::new(
+            AwsLcBackend,
+            PreferenceOffering::new(
+                vec![CipherSuite::TLS_AES_128_GCM_SHA256],
+                vec![NamedGroup::X25519],
+                vec![NamedGroup::X25519],
+            )
+            .unwrap(),
+            Arc::clone(&self.tickets),
+            pki::verifier(1),
+            NoClientCertificate,
+            SystemClock,
+            Arc::clone(&self.labels),
+            server_name.clone(),
+            Some(ProtocolNameList::new(vec![h3()]).unwrap()),
+            ClientHandshakeSettings::default(),
+        )
+    }
+
+    fn limits(&self) -> MessageLimits {
+        ClientHandshakeSettings::default().limits
+    }
+}
+
+// ---- the configurations ----
+
+macro_rules! v1_config {
+    ($t:ty) => {{
+        let mut parameters = TransportParameters::<Vec<u8>>::new();
+        parameters.set(MaxIdleTimeout::new(VarInt::from_u32(30_000)));
+        sakuya_endpoint::v1::ConnectionConfig::<$t, Parts> {
+            anti_amplification: AntiAmplificationFactor::new(3).unwrap(),
+            transport_parameters: parameters.known,
+            recovery: NewRenoRecoveryFactoryConfig::recommended(Duration::from_millis(1)),
+            max_ack_ranges: MaxAckRanges::DEFAULT,
+            max_datagrams_per_poll: 16.try_into().unwrap(),
+            max_held_inputs: 16,
+            destination_connection_ids: SequenceMapDestinationConnectionIdStrategyConfig::new(8),
+            max_datagrams_per_send: 16.try_into().unwrap(),
+            immediate_close_policy: PassThroughImmediateClosePolicy,
+        }
+    }};
+}
+
+fn thresholds() -> LossThresholds {
+    LossThresholds::recommended(Duration::from_millis(1)).unwrap()
+}
+
+fn endpoint_config<S, C>(server: S::Config, client: C::Config) -> EndpointConfig<Udp, S, C>
+where
+    S: sakuya_endpoint::role::ServerRole<Udp>,
+    C: sakuya_endpoint::role::ClientRole<Udp>,
+{
+    EndpointConfig {
+        server,
+        client,
+        clock: TokioClock,
+        crypto: RingBackend,
+        random: AwsLcBackend,
+        wall_clock: SystemClock,
+        connection_ids: CountingConnectionIds(Arc::new(AtomicU64::new(0x5e5e_0000_0000_0000))),
+        recognizer: ConnectionIdLengths::new([ConnectionIdLength::new(8).unwrap()]),
+    }
+}
+
+fn server_config() -> ServerConfig<
+    ServerChoices,
+    Parts,
+    ServerStarts,
+    AeadAddressTokens<AwsLcBackend>,
+    LoadStatelessRetryPolicy,
+> {
+    let tokens = AeadAddressTokens::new(
+        AwsLcBackend,
+        AddressTokenKey::generate(&AwsLcBackend).unwrap(),
+        AddressTokenLifetimes::default(),
+        Default::default(),
+    )
+    .unwrap();
+    ServerConfig::new(
+        ServerStarts,
+        ServerCryptoReceiveCapacities {
+            initial: 16 * 1024 + 4,
+            handshake: 4096,
+        },
+        thresholds(),
+        hlist![v1_config!(ServerChoices)],
+        tokens,
+        LoadStatelessRetryPolicy::new(
+            CapacityFraction::new(1, NonZeroU32::new(2).unwrap()).unwrap(),
+        ),
+    )
+    .unwrap()
+}
+
+fn client_config(labels: &Arc<RecordedLabels>) -> ClientConfig<ClientChoices, Parts, ClientStarts> {
+    ClientConfig::new(
+        ClientStarts {
+            labels: Arc::clone(labels),
+            tickets: Arc::new(TakeOnceTicketMap::new(
+                SystemClock,
+                Duration::from_secs(86_400),
+                4,
+            )),
+        },
+        ClientCryptoReceiveCapacities {
+            initial: 16 * 1024 + 4,
+            handshake: 64 * 1024 + 4,
+            one_rtt: 16 * 1024 + 4,
+        },
+        thresholds(),
+        hlist![v1_config!(ClientChoices)],
+    )
+    .unwrap()
+}
+
+// ---- running ----
+
+fn run(test: impl Future<Output = ()>) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime builds");
+    tokio::task::LocalSet::new().block_on(&runtime, test);
+}
+
+async fn within<T>(what: &str, future: impl Future<Output = T>) -> T {
+    tokio::time::timeout(DEADLINE, future)
+        .await
+        .unwrap_or_else(|_| panic!("{what} within {DEADLINE:?}"))
+}
+
+fn bind() -> UdpBinding<TokioClock> {
+    UdpBinding::bind(
+        UdpBindingConfig::new(SocketAddr::from(([127, 0, 0, 1], 0))),
+        TokioClock,
+    )
+    .expect("a loopback socket binds")
+}
+
+#[test]
+fn a_client_and_a_server_endpoint_handshake_on_the_loopback_interface() {
+    run(async {
+        let (server, server_reflow) =
+            Endpoint::<Udp, Server, NoClient>::new(endpoint_config(server_config(), ())).unwrap();
+        let server_reflow = tokio::task::spawn_local(server_reflow);
+        let server_socket = bind();
+        let server_address = server_socket.local_address();
+        let (_server_handle, server_driver) = server
+            .add_accepting_binding(server_socket, BindingDeclarations::default())
+            .unwrap();
+        let server_driver = tokio::task::spawn_local(server_driver);
+        let mut incoming = server.incoming();
+
+        let labels = Arc::new(RecordedLabels::default());
+        let (client, client_reflow) =
+            Endpoint::<Udp, NoServer, Client>::new(endpoint_config((), client_config(&labels)))
+                .unwrap();
+        let client_reflow = tokio::task::spawn_local(client_reflow);
+        let (client_handle, client_driver) = client
+            .add_connect_only_binding(bind(), BindingDeclarations::default())
+            .unwrap();
+        let client_driver = tokio::task::spawn_local(client_driver);
+
+        let outgoing = within(
+            "the client takes a link",
+            client_handle.connect(
+                server_address,
+                ServerTarget::from_host_name("example.com").unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+        let (client_connection, client_conn) = outgoing.start().unwrap();
+        let client_connection = tokio::task::spawn_local(client_connection);
+
+        let Some(Incoming::Terminable(half)) =
+            within("an incoming connection", incoming.next()).await
+        else {
+            panic!("the server endpoint ends before a connection comes");
+        };
+        assert!(!half.facts().born_from_zero_rtt);
+        let (server_connection, _server_conn) = half.accept().unwrap();
+        let server_connection = tokio::task::spawn_local(server_connection);
+
+        // The handshake completes for the client once it has the 1-RTT
+        // secrets: that is the completion under test, observed until a
+        // deadline.
+        let start = tokio::time::Instant::now();
+        while !labels.has(KeyLogLabel::ClientTrafficSecret0) {
+            assert!(
+                start.elapsed() < DEADLINE,
+                "the client's handshake completes"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        client_conn.close(AppClose(7));
+        within("the client's connection ends", client_connection)
+            .await
+            .unwrap();
+        within("the server's connection ends", server_connection)
+            .await
+            .unwrap();
+
+        drop(incoming);
+        server.close();
+        client.close();
+        within("the server's binding driver ends", server_driver)
+            .await
+            .unwrap();
+        within("the server's reflow driver ends", server_reflow)
+            .await
+            .unwrap();
+        within("the client's binding driver ends", client_driver)
+            .await
+            .unwrap();
+        within("the client's reflow driver ends", client_reflow)
+            .await
+            .unwrap();
+    });
+}
+
+// ---- the certificates ----
+
+/// The output of a future that is ready at once.
+fn ready<F: Future>(future: F) -> F::Output {
+    match pin!(future).poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(output) => output,
+        Poll::Pending => panic!("future not ready"),
+    }
+}
+
+/// The certificates and keys of the tests: Ed25519, signed with
+/// nitori_crypto_aws_lc.
+mod pki {
+    use super::*;
+
+    fn tlv(tag: u8, content: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag];
+        match content.len() {
+            len @ 0..=127 => out.push(len as u8),
+            len @ 128..=255 => out.extend([0x81, len as u8]),
+            len => out.extend([0x82, (len >> 8) as u8, len as u8]),
+        }
+        out.extend_from_slice(content);
+        out
+    }
+
+    fn seq(parts: &[&[u8]]) -> Vec<u8> {
+        tlv(0x30, &parts.concat())
+    }
+
+    fn name(common_name: &str) -> Vec<u8> {
+        let attribute = seq(&[
+            &tlv(0x06, &[0x55, 0x04, 0x03]),
+            &tlv(0x0c, common_name.as_bytes()),
+        ]);
+        seq(&[&tlv(0x31, &attribute)])
+    }
+
+    fn ed25519() -> Vec<u8> {
+        seq(&[&tlv(0x06, &[0x2b, 0x65, 0x70])])
+    }
+
+    fn bits(bytes: &[u8]) -> Vec<u8> {
+        tlv(0x03, &[&[0], bytes].concat())
+    }
+
+    fn extension(oid: &[u8], critical: bool, value: &[u8]) -> Vec<u8> {
+        let critical = if critical {
+            tlv(0x01, &[0xff])
+        } else {
+            Vec::new()
+        };
+        seq(&[&tlv(0x06, oid), &critical, &tlv(0x04, value)])
+    }
+
+    /// The Ed25519 key with the 32-byte seed `[seed; 32]`.
+    pub fn key(seed: u8) -> Ed25519SigningKey {
+        let mut pkcs8 = vec![
+            0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22,
+            0x04, 0x20,
+        ];
+        pkcs8.extend([seed; 32]);
+        Ed25519SigningKey::from_pkcs8(&pkcs8).unwrap()
+    }
+
+    fn certificate(
+        serial: u8,
+        issuer: &str,
+        subject: &str,
+        public_key: &[u8],
+        extensions: &[Vec<u8>],
+        signer: &Ed25519SigningKey,
+    ) -> Vec<u8> {
+        let extensions: Vec<&[u8]> = extensions.iter().map(Vec::as_slice).collect();
+        let validity = seq(&[&tlv(0x17, b"250101000000Z"), &tlv(0x17, b"491231235959Z")]);
+        let tbs = seq(&[
+            &tlv(0xa0, &tlv(0x02, &[2])),
+            &tlv(0x02, &[serial]),
+            &ed25519(),
+            &name(issuer),
+            &validity,
+            &name(subject),
+            &seq(&[&ed25519(), &bits(public_key)]),
+            &tlv(0xa3, &seq(&extensions)),
+        ]);
+        let signature = ready(signer.sign(SignatureScheme::ED25519, &tbs)).unwrap();
+        seq(&[&tbs, &ed25519(), &bits(signature.as_bytes())])
+    }
+
+    /// A root, self-signed by `key(seed)`.
+    pub fn root(seed: u8) -> Vec<u8> {
+        let root = key(seed);
+        let basic_constraints = extension(&[0x55, 0x1d, 0x13], true, &seq(&[&tlv(0x01, &[0xff])]));
+        certificate(
+            seed,
+            "Test Root",
+            "Test Root",
+            root.public_key(),
+            &[basic_constraints],
+            &root,
+        )
+    }
+
+    /// The certificate of `key(2)` for example.com, issued by `root(1)`.
+    pub fn leaf() -> Vec<u8> {
+        let alternative_names = extension(
+            &[0x55, 0x1d, 0x11],
+            false,
+            &seq(&[&tlv(0x82, b"example.com")]),
+        );
+        let server_auth = extension(
+            &[0x55, 0x1d, 0x25],
+            false,
+            &seq(&[&tlv(
+                0x06,
+                &[0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01],
+            )]),
+        );
+        certificate(
+            2,
+            "Test Root",
+            "example.com",
+            key(2).public_key(),
+            &[alternative_names, server_auth],
+            &key(1),
+        )
+    }
+
+    /// The client's verifier: it trusts `root(seed)` alone, and skips the
+    /// check of certificate transparency, as the certificates carry no
+    /// SCTs.
+    pub fn verifier(seed: u8) -> Verifier {
+        let transparency = EmbeddedSctPolicy::with_list_age(
+            LogList::new(Vec::new(), UtcDateTime::UNIX_EPOCH),
+            Duration::ZERO,
+            StaleLogListAction::SkipCheck,
+        );
+        WebPkiVerifier::new(
+            AwsLcBackend,
+            AnchorStore::from_certificates([root(seed).as_slice()]).unwrap(),
+            SpkiDistrustList::default(),
+            NoRevocationCheck,
+            transparency,
+            SystemClock,
+        )
+    }
+}

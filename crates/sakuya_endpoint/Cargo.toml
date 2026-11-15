@@ -6,6 +6,11 @@ publish.workspace = true
 license.workspace = true
 description = "QUIC endpoints for sakuya: address validation tokens, Retry and version negotiation responses"
 
+[features]
+# What only tests use: replacing the destination connection ID of a
+# client's first Initial.
+test-util = []
+
 [dependencies]
 bytes.workspace = true
 dashmap.workspace = true
@@ -14,9 +19,14 @@ futures-util.workspace = true
 nitori_call.workspace = true
 nitori_crypto.workspace = true
 nitori_io.workspace = true
+sakuya_clock.workspace = true
+sakuya_connection.workspace = true
 sakuya_datagram_routing.workspace = true
 sakuya_link.workspace = true
 sakuya_packet_protection.workspace = true
+sakuya_recovery.workspace = true
+sakuya_stream.workspace = true
+sakuya_tls.workspace = true
 sakuya_wire.workspace = true
 snafu.workspace = true
 time.workspace = true

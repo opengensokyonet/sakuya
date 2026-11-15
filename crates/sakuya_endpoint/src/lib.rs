@@ -38,22 +38,29 @@
 //! [RFC 9000 §8.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-8.1
 
 pub mod address_token;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the endpoint makes binding drivers once it takes bindings"
-    )
-)]
 pub mod binding;
+pub mod choices;
 pub mod client_token;
+pub mod config;
+mod connection;
+pub mod domain;
 pub mod dropped_input;
+pub mod endpoint;
+pub mod handle;
+pub mod handshake;
+pub mod incoming;
 pub mod invalid_token;
 pub mod link;
+mod make;
+pub mod outgoing;
+pub mod part;
 pub mod quota;
+pub mod reflow;
 pub mod retry;
+pub mod role;
 pub mod send_set;
 pub mod stateless_check;
+pub mod v1;
 pub mod version_negotiation;
 pub mod zero_length;
 
