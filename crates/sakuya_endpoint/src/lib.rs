@@ -4,9 +4,29 @@
 //!
 //! An endpoint owns one datagram routing domain: its link bindings, the
 //! reception on the logical links of those bindings, and the birth of new
-//! connections. This crate holds the parts of an endpoint that do not depend
-//! on how a connection is built:
+//! connections. [`endpoint::Endpoint`] is made with its
+//! [`reflow::ReflowDriver`] from an [`config::EndpointConfig`]; each binding
+//! added gives an [`endpoint::BindingHandle`] and a
+//! [`binding::BindingDriver`]. A server takes [`incoming::Incoming`]
+//! connections and accepts or refuses them; a client connects through a
+//! binding handle and starts the [`outgoing::Outgoing`] connection. Both give
+//! the connection's future, which the host spawns, and a
+//! [`handle::ConnectionHandle`].
 //!
+//! - [`choices`]: what an endpoint is composed with, and the types of its
+//!   routing domain, among them the datagram receiver of its connections.
+//! - [`role`]: the server and client roles.
+//! - [`config`]: the configuration of the endpoint and its roles, and the
+//!   checks it passes.
+//! - [`handshake`]: what makes the start state of each connection's
+//!   handshake engine.
+//! - [`part`]: the configuration of each part of a connection, and how the
+//!   connection's start values are made from it; [`v1`] is QUIC version 1's.
+//! - [`endpoint`], [`reflow`], [`incoming`], [`outgoing`], [`handle`]: the
+//!   endpoint, its reflow driver, the incoming and outgoing connections and
+//!   the connection handle.
+//! - [`domain`]: what the bindings, the reflow driver and the connections of
+//!   one endpoint share.
 //! - [`address_token`]: address validation tokens, issued in Retry packets and
 //!   NEW_TOKEN frames and validated when a client returns them
 //!   ([RFC 9000 §8.1]).

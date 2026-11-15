@@ -12,11 +12,7 @@ use sakuya_link::{AcceptingLinkBinding, ConnectingLinkBinding, LinkBinding};
 use snafu::{ResultExt as _, Snafu};
 
 use crate::{
-    binding::{
-        BindingDriver,
-        driving::{Accepting, ConnectOnly},
-        shared::BindingShared,
-    },
+    binding::{Accepting, BindingDriver, ConnectOnly, shared::BindingShared},
     choices::{EndpointChoices, LinkOf, ResetTokensOf},
     config::{
         BindingDeclarations, EndpointConfig, InvalidEndpointConfigError, OfferedVersionsError,

@@ -41,6 +41,8 @@ use crate::link::{EndpointLink, sum::LinkSum};
 
 pub(crate) mod shared;
 
+pub use self::driving::{Accepting, ConnectOnly};
+
 /// The identity of a link of an endpoint whose links are the sum `M`.
 type EndpointLinkId<M> = LinkId<<M as LinkSum>::Local, <M as LinkSum>::Peer>;
 
