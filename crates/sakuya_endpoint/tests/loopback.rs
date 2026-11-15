@@ -49,12 +49,13 @@ use sakuya_endpoint::{
         BindingDeclarations, ClientConfig, ClientCryptoReceiveCapacities, EndpointConfig,
         ServerConfig, ServerCryptoReceiveCapacities,
     },
-    endpoint::Endpoint,
+    endpoint::{AddBindingError, BindingHandleConnectError, Endpoint},
     handshake::{ClientHandshakeConfig, ServerHandshakeConfig},
     incoming::Incoming,
     retry::{CapacityFraction, LoadStatelessRetryPolicy},
     role::{AcceptingServer, ConnectingClient, NoClient, NoServer},
 };
+use sakuya_link::{ConnectingLinkBinding as _, EcnMarking, Link as _, OutgoingDatagram};
 use sakuya_packet_protection::backend::ring::RingBackend;
 use sakuya_recovery::{
     ack_obligation::Rfc9000AckObligation,
@@ -63,6 +64,7 @@ use sakuya_recovery::{
     receive_journals::MaxAckRanges,
     send_journals::DequeSendJournals,
 };
+use sakuya_stream::connection::TransportImmediateClose;
 use sakuya_tls::{
     cipher_suite::CipherSuite,
     client::{
@@ -94,7 +96,10 @@ use sakuya_tls::{
 use sakuya_udp_tokio::{UdpBinding, UdpBindingConfig, UdpLink};
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength, StatelessResetToken},
-    v1::transport_parameters::{TransportParameters, integer::MaxIdleTimeout},
+    v1::{
+        transport_error::TransportErrorCode,
+        transport_parameters::{TransportParameters, integer::MaxIdleTimeout},
+    },
     var_int::VarInt,
 };
 use time::UtcDateTime;
@@ -542,6 +547,201 @@ fn a_client_and_a_server_endpoint_handshake_on_the_loopback_interface() {
         within("the client's reflow driver ends", client_reflow)
             .await
             .unwrap();
+    });
+}
+
+/// A server endpoint, its incoming stream, and the address of its socket,
+/// with its drivers spawned.
+struct Running<D> {
+    endpoint: Endpoint<Udp, Server, NoClient>,
+    address: SocketAddr,
+    drivers: D,
+}
+
+fn server() -> Running<(tokio::task::JoinHandle<()>, tokio::task::JoinHandle<()>)> {
+    let (endpoint, reflow) =
+        Endpoint::<Udp, Server, NoClient>::new(endpoint_config(server_config(), ())).unwrap();
+    let reflow = tokio::task::spawn_local(reflow);
+    let socket = bind();
+    let address = socket.local_address();
+    let (_handle, driver) = endpoint
+        .add_accepting_binding(socket, BindingDeclarations::default())
+        .unwrap();
+    let driver = tokio::task::spawn_local(driver);
+    Running {
+        endpoint,
+        address,
+        drivers: (reflow, driver),
+    }
+}
+
+#[test]
+fn a_refused_connection_ends_on_the_client_without_a_handshake() {
+    run(async {
+        let server = server();
+        let mut incoming = server.endpoint.incoming();
+        let labels = Arc::new(RecordedLabels::default());
+        let (client, client_reflow) =
+            Endpoint::<Udp, NoServer, Client>::new(endpoint_config((), client_config(&labels)))
+                .unwrap();
+        let client_reflow = tokio::task::spawn_local(client_reflow);
+        let (handle, client_driver) = client
+            .add_connect_only_binding(bind(), BindingDeclarations::default())
+            .unwrap();
+        let client_driver = tokio::task::spawn_local(client_driver);
+        let outgoing = within(
+            "the client takes a link",
+            handle.connect(
+                server.address,
+                ServerTarget::from_host_name("example.com").unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+        let (connection, _conn) = outgoing.start().unwrap();
+        let connection = tokio::task::spawn_local(connection);
+
+        let Some(Incoming::Terminable(half)) =
+            within("an incoming connection", incoming.next()).await
+        else {
+            panic!("the server endpoint ends before a connection comes");
+        };
+        let refused = half.refuse(TransportImmediateClose {
+            code: TransportErrorCode::CONNECTION_REFUSED,
+            frame_type: None,
+            reason_phrase: Bytes::from_static(b"not now"),
+        });
+        assert!(within("the refusal is sent", refused).await.is_ok());
+
+        // The client ends on the close, long before its idle timeout.
+        within("the client's connection ends", connection)
+            .await
+            .unwrap();
+        assert!(!labels.has(KeyLogLabel::ClientTrafficSecret0));
+
+        client.close();
+        server.endpoint.close();
+        assert!(
+            within("the incoming stream ends", incoming.next())
+                .await
+                .is_none()
+        );
+        let (server_reflow, server_driver) = server.drivers;
+        within("the server's reflow driver ends", server_reflow)
+            .await
+            .unwrap();
+        within("the server's binding driver ends", server_driver)
+            .await
+            .unwrap();
+        within("the client's reflow driver ends", client_reflow)
+            .await
+            .unwrap();
+        within("the client's binding driver ends", client_driver)
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
+fn a_closed_endpoint_makes_no_connection() {
+    run(async {
+        let server = server();
+        let labels = Arc::new(RecordedLabels::default());
+        let (client, _client_reflow) =
+            Endpoint::<Udp, NoServer, Client>::new(endpoint_config((), client_config(&labels)))
+                .unwrap();
+        let (handle, _client_driver) = client
+            .add_connect_only_binding(bind(), BindingDeclarations::default())
+            .unwrap();
+
+        server.endpoint.close();
+        server.endpoint.close();
+        let mut incoming = server.endpoint.incoming();
+        assert!(incoming.next().await.is_none());
+        assert!(matches!(
+            server
+                .endpoint
+                .add_accepting_binding(bind(), BindingDeclarations::default()),
+            Err(AddBindingError::EndpointClosed { .. })
+        ));
+
+        let outgoing = within(
+            "the client takes a link",
+            handle.connect(
+                server.address,
+                ServerTarget::from_host_name("example.com").unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+        client.close();
+        assert!(outgoing.start().is_err());
+        assert!(matches!(
+            handle
+                .connect(
+                    server.address,
+                    ServerTarget::from_host_name("example.com").unwrap()
+                )
+                .await,
+            Err(BindingHandleConnectError::EndpointClosed(_))
+        ));
+        let (server_reflow, server_driver) = server.drivers;
+        within("the server's reflow driver ends", server_reflow)
+            .await
+            .unwrap();
+        within("the server's binding driver ends", server_driver)
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
+fn a_datagram_of_an_unknown_version_gets_a_version_negotiation_packet() {
+    run(async {
+        let server = server();
+        let _incoming = server.endpoint.incoming();
+        let peer = bind();
+        let link = within("a link to the server", peer.connect(server.address))
+            .await
+            .unwrap();
+        // A long header of version 0x1a2a3a4a, with an eight-byte destination
+        // and a four-byte source connection ID, padded to 1200 bytes.
+        let mut datagram = vec![0xc0, 0x1a, 0x2a, 0x3a, 0x4a, 8];
+        datagram.extend([0xd1; 8]);
+        datagram.push(4);
+        datagram.extend([0x5c; 4]);
+        datagram.resize(1200, 0);
+        let batch = [OutgoingDatagram {
+            payload: Bytes::from(datagram),
+            ecn: EcnMarking::NotEct,
+        }];
+        within("the datagram is sent", link.send(&batch))
+            .await
+            .unwrap();
+
+        let answer = within("an answer arrives", link.recv()).await.unwrap();
+        let answer = answer.payload();
+        assert_eq!(answer[0] & 0xc0, 0xc0, "a long header with the 0x40 bit");
+        assert_eq!(
+            &answer[1..5],
+            &[0, 0, 0, 0],
+            "version 0: Version Negotiation"
+        );
+        assert_eq!(answer[5], 4);
+        assert_eq!(
+            &answer[6..10],
+            &[0x5c; 4],
+            "the client's source connection ID"
+        );
+        assert_eq!(answer[10], 8);
+        assert_eq!(&answer[11..19], &[0xd1; 8]);
+        let versions: Vec<u32> = answer[19..]
+            .chunks(4)
+            .map(|v| u32::from_be_bytes(v.try_into().unwrap()))
+            .collect();
+        assert_eq!(versions[0], 1, "version 1 is offered");
+        assert_eq!(versions.len(), 2, "with one reserved version");
+        assert_eq!(versions[1] & 0x0f0f_0f0f, 0x0a0a_0a0a);
     });
 }
 
