@@ -137,7 +137,7 @@ impl<E: EndpointChoices> fmt::Debug for EndpointDeliverer<E> {
 /// that issues connection IDs and keeps their entries, the entry of the
 /// first local connection ID. They are revoked when the receiver is
 /// dropped, with the connection's first logical path.
-pub struct ConnectionReceiver<E: EndpointChoices> {
+pub struct ConnectionDatagramReceiver<E: EndpointChoices> {
     queue: DatagramDeliveryQueue<DeliveryOf<E>>,
     initial: Option<RegistrationOf<E>>,
     first_local: Option<FirstLocalRegistration<E>>,
@@ -154,7 +154,7 @@ pub(crate) enum FirstLocalRegistration<E: EndpointChoices> {
     ZeroLength(ZeroLengthRegistration<RegistrationOf<E>, LocalOf<E>>),
 }
 
-impl<E: EndpointChoices> ConnectionReceiver<E> {
+impl<E: EndpointChoices> ConnectionDatagramReceiver<E> {
     pub(crate) fn new(
         queue: DatagramDeliveryQueue<DeliveryOf<E>>,
         initial: Option<RegistrationOf<E>>,
@@ -177,7 +177,7 @@ impl<E: EndpointChoices> ConnectionReceiver<E> {
     }
 }
 
-impl<E: EndpointChoices> LogicalPathDatagramReceiver<LinkOf<E>> for ConnectionReceiver<E> {
+impl<E: EndpointChoices> LogicalPathDatagramReceiver<LinkOf<E>> for ConnectionDatagramReceiver<E> {
     type Handoff = HandoffOf<E>;
 
     fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<DeliveryOf<E>> {
@@ -185,9 +185,9 @@ impl<E: EndpointChoices> LogicalPathDatagramReceiver<LinkOf<E>> for ConnectionRe
     }
 }
 
-impl<E: EndpointChoices> fmt::Debug for ConnectionReceiver<E> {
+impl<E: EndpointChoices> fmt::Debug for ConnectionDatagramReceiver<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ConnectionReceiver")
+        f.debug_struct("ConnectionDatagramReceiver")
             .field("queue", &self.queue)
             .field("initial", &self.initial.is_some())
             .field("first_local", &self.first_local.is_some())

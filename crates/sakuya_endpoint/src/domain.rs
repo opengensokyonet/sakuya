@@ -32,8 +32,8 @@ use sakuya_wire::version::Version;
 use crate::{
     binding::driving::{RouteDatagram, StopSignal},
     choices::{
-        ConnectionReceiver, DatagramOf, DeliveryOf, EndpointChoices, EndpointDeliverer, LinkOf,
-        LocalOf, PayloadOf, ReflowPosterOf, RegistrationOf, ResetTokensOf,
+        ConnectionDatagramReceiver, DatagramOf, DeliveryOf, EndpointChoices, EndpointDeliverer,
+        LinkOf, LocalOf, PayloadOf, ReflowPosterOf, RegistrationOf, ResetTokensOf,
     },
     config::BindingDeclarations,
     version_negotiation::NegotiatingVersionService,
@@ -165,7 +165,7 @@ impl<E: EndpointChoices> Domain<E> {
     pub(crate) fn register(
         &self,
         association: MatchAssociation<LocalOf<E>>,
-        receiver: &ConnectionReceiver<E>,
+        receiver: &ConnectionDatagramReceiver<E>,
     ) -> RegistrationOf<E> {
         self.router.index().register(
             RouteMatcher::new(association, PacketForms::ALL, Version::V1),
@@ -216,7 +216,7 @@ pub struct Births<E: EndpointChoices> {
 /// A receiver routing published for a new connection, with the datagram
 /// that made it.
 pub(crate) struct Born<E: EndpointChoices> {
-    pub(crate) receiver: ConnectionReceiver<E>,
+    pub(crate) receiver: ConnectionDatagramReceiver<E>,
     pub(crate) datagram: DatagramOf<E>,
     pub(crate) initial: RecognizedInitial<LocalOf<E>>,
 }
@@ -318,7 +318,7 @@ impl<E: EndpointChoices> InitialDatagramReceiver<PayloadOf<E>, LinkOf<E>, Endpoi
         initial: RecognizedInitial<LocalOf<E>>,
     ) {
         let born = Born {
-            receiver: ConnectionReceiver::new(self.queue, Some(registration)),
+            receiver: ConnectionDatagramReceiver::new(self.queue, Some(registration)),
             datagram: datagram.into_inner(),
             initial,
         };

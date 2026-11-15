@@ -49,7 +49,7 @@ use sakuya_wire::{connection_id::ConnectionId, version::Version};
 
 use crate::{
     address_token::NewTokenAddress,
-    choices::{ConnectionReceiver, DatagramOf, EndpointChoices, LinkOf, PeerOf},
+    choices::{ConnectionDatagramReceiver, DatagramOf, EndpointChoices, LinkOf, PeerOf},
     connection::{make_connection, register_first_local},
     domain::{Born, Domain},
     dropped_input::DroppedInputCounts,
@@ -105,7 +105,7 @@ pub struct IncomingFacts<Peer> {
 pub struct TerminableIncoming<E: EndpointChoices, S: AcceptingServerRole<E>> {
     domain: Arc<Domain<E>>,
     config: S::Config,
-    receiver: ConnectionReceiver<E>,
+    receiver: ConnectionDatagramReceiver<E>,
     first: DatagramOf<E>,
     facts: IncomingFacts<PeerOf<E>>,
     client_dcid: ConnectionId,

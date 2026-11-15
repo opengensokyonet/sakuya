@@ -44,7 +44,7 @@ use sakuya_connection::{
 use sakuya_datagram_routing::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
 use sakuya_endpoint::{
     address_token::{AddressTokenKey, AddressTokenLifetimes, AeadAddressTokens},
-    choices::{ConnectionReceiver, EndpointChoices, PeerOf, ResetTokensOf},
+    choices::{ConnectionDatagramReceiver, EndpointChoices, PeerOf, ResetTokensOf},
     config::{
         BindingDeclarations, ClientConfig, ClientCryptoReceiveCapacities, EndpointConfig,
         ServerConfig, ServerCryptoReceiveCapacities,
@@ -187,7 +187,7 @@ macro_rules! choices {
             type SendJournals<S: 'static, P: Clone + Eq + fmt::Debug + 'static> =
                 DequeSendJournals<std::time::Instant, S, P>;
             type ApplicationError = AppClose;
-            type Receiver = ConnectionReceiver<Udp>;
+            type Receiver = ConnectionDatagramReceiver<Udp>;
             type SendStrategy<I: SendStrategyTypes> = RankedSendStrategy<I>;
             type DestinationConnectionIds = SequenceMapDestinationConnectionIdStrategy<
                 LinkIdOf<Self>,

@@ -26,7 +26,7 @@ use sakuya_wire::connection_id::ConnectionId;
 use snafu::Snafu;
 
 use crate::{
-    choices::{ConnectionReceiver, EndpointChoices, LinkOf, LocalOf},
+    choices::{ConnectionDatagramReceiver, EndpointChoices, LinkOf, LocalOf},
     connection::{make_connection, register_first_local},
     domain::Domain,
     endpoint::EndpointClosedError,
@@ -170,7 +170,7 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
         );
         // invariant: the capacity is within the bound a queue can have.
         let queue = queue.expect("the capacity is within the bound");
-        let mut receiver = ConnectionReceiver::new(queue, None);
+        let mut receiver = ConnectionDatagramReceiver::new(queue, None);
         let client_dcid = match initial_dcid {
             Some(dcid) => dcid,
             None => random_initial_dcid(&domain),

@@ -14,7 +14,9 @@ use sakuya_link::Link as _;
 use sakuya_wire::connection_id::NonEmptyCid;
 
 use crate::{
-    choices::{ConnectionReceiver, EndpointChoices, FirstLocalRegistration, LinkOf, LocalOf},
+    choices::{
+        ConnectionDatagramReceiver, EndpointChoices, FirstLocalRegistration, LinkOf, LocalOf,
+    },
     domain::Domain,
     endpoint::EndpointClosedError,
     make::MakeConnection,
@@ -34,7 +36,7 @@ use crate::{
 /// registered then.
 pub(crate) fn register_first_local<E: EndpointChoices>(
     domain: &Domain<E>,
-    receiver: &mut ConnectionReceiver<E>,
+    receiver: &mut ConnectionDatagramReceiver<E>,
     link: &LinkOf<E>,
     zero_length: Option<ZeroLengthLocalOccupancy<LocalOf<E>>>,
 ) -> Result<FirstLocalConnectionId, EndpointClosedError> {
