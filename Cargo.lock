@@ -712,17 +712,21 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "dashmap",
+ "frunk_core",
  "futures-util",
  "nitori_call",
  "nitori_crypto",
  "nitori_crypto_aws_lc",
  "nitori_io",
+ "sakuya_clock_tokio",
  "sakuya_datagram_routing",
  "sakuya_link",
  "sakuya_packet_protection",
+ "sakuya_udp_tokio",
  "sakuya_wire",
  "snafu",
  "time",
+ "tokio",
 ]
 
 [[package]]

@@ -1,3 +1,4 @@
+#![feature(impl_trait_in_assoc_type)]
 #![forbid(unsafe_code)]
 //! QUIC endpoints for sakuya.
 //!
@@ -29,14 +30,26 @@
 //!   headers there accordingly.
 //! - [`client_token`]: where a client keeps the tokens servers gave it for
 //!   later connections.
+//! - [`link`]: the endpoint's link, the sum of the links of its bindings.
+//! - [`binding`]: the driver of each link binding, which takes the binding's
+//!   new links and receives on each of them.
 //!
 //! [RFC 9000 §6]: https://www.rfc-editor.org/rfc/rfc9000.html#section-6
 //! [RFC 9000 §8.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-8.1
 
 pub mod address_token;
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the endpoint makes binding drivers once it takes bindings"
+    )
+)]
+pub mod binding;
 pub mod client_token;
 pub mod dropped_input;
 pub mod invalid_token;
+pub mod link;
 pub mod quota;
 pub mod retry;
 pub mod send_set;
@@ -44,5 +57,7 @@ pub mod stateless_check;
 pub mod version_negotiation;
 pub mod zero_length;
 
+#[cfg(test)]
+mod memory_link;
 #[cfg(test)]
 mod test_link;
