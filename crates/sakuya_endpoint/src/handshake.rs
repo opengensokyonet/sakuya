@@ -31,8 +31,18 @@ pub trait ServerHandshakeConfig: Clone {
     /// ClientHello; they must be the limits the engine reads with.
     fn limits(&self) -> MessageLimits;
 
-    /// Whether the engines it makes ask the client for a certificate, which
-    /// then arrives with the client's Finished at the Handshake level.
+    /// Whether the engines it makes may ask the client for a certificate,
+    /// for any target: the client then sends its Certificate, empty or
+    /// not, and with a certificate its CertificateVerify, before its
+    /// Finished at the Handshake level (RFC 8446 §4.4.2, §4.4.3).
+    ///
+    /// It is the same whether the certificate is optional or required:
+    /// what the server does with an empty Certificate is its engine's
+    /// peer authentication's, not this. It must agree with the peer
+    /// authentication its engines are made with, as [`limits`](Self::limits)
+    /// with their limits: an engine that asks when this says it does not
+    /// leaves the Handshake level too little room for the client's
+    /// Certificate, and the connection closes with CRYPTO_BUFFER_EXCEEDED.
     fn requests_client_certificate(&self) -> bool;
 }
 
