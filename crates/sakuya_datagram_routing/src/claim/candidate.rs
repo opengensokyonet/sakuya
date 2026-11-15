@@ -180,7 +180,9 @@ impl<'access, Inner> DatagramClaimAccess<'access, Inner> {
         }
     }
 
-    fn datagram(&self) -> &Inner {
+    /// The datagram, for reading: what a judgment looks at besides its
+    /// bytes, such as the link it arrived on.
+    pub fn datagram(&self) -> &Inner {
         match &*self.slot {
             DatagramSlot::Present(datagram) => datagram,
             // invariant: see the field.

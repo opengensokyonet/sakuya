@@ -24,7 +24,9 @@ use std::{
     },
 };
 
+use core::future::poll_fn;
 use futures_util::Stream;
+use sakuya_connection::v1::input::LogicalPathDatagramReceiver as _;
 use sakuya_connection::{
     call::{CallPositions, TreeCalls},
     driver::ConnectionDriver,
@@ -35,8 +37,14 @@ use sakuya_connection::{
         link::LinkFacts,
     },
 };
+use sakuya_datagram_routing::claim::{
+    candidate::{DatagramClaimAttempt, DatagramClaimOutcome},
+    delivery::DatagramDelivery,
+};
+use sakuya_link::MIN_DATAGRAM_SIZE;
 use sakuya_link::{EcnMarking, Link, OutgoingDatagram};
 use sakuya_stream::connection::TransportImmediateClose;
+use sakuya_wire::header::codec::ReadLongHeaderHostExt as _;
 use sakuya_wire::{connection_id::ConnectionId, version::Version};
 
 use crate::{
@@ -49,6 +57,7 @@ use crate::{
     handle::ConnectionHandle,
     handshake::ServerHandshakeConfig as _,
     invalid_token::encode_initial_close,
+    late_initial::LateInitials,
     make::MakeConnection,
     part::CoreFacts,
     reflow,
@@ -103,6 +112,13 @@ pub struct TerminableIncoming<E: EndpointChoices, S: AcceptingServerRole<E>> {
     client_scid: ConnectionId,
     transport_validated: bool,
     zero_length: Option<ZeroLengthLocalOccupancy<crate::choices::LocalOf<E>>>,
+    /// The datagrams taken from the receiver after the first, before the
+    /// connection is made: they follow it in the first flight.
+    later: Vec<DatagramOf<E>>,
+    /// Whether a datagram whose first packet is an Initial is in the first
+    /// flight.
+    has_initial: bool,
+    late: Arc<LateInitials<E>>,
 }
 
 impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
@@ -111,6 +127,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
     pub(crate) fn born(
         domain: &Arc<Domain<E>>,
         config: &S::Config,
+        late: &Arc<LateInitials<E>>,
         born: Born<E>,
         admitted: AdmittedDatagram,
     ) -> Self {
@@ -129,8 +146,11 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             client_dcid: *born.initial.dcid(),
             client_scid: *born.initial.scid(),
             first: born.datagram,
+            has_initial: !admitted.born_from_zero_rtt,
             facts,
             zero_length: None,
+            later: Vec::new(),
+            late: Arc::clone(late),
         }
     }
 
@@ -200,6 +220,9 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             client_scid: _,
             transport_validated,
             zero_length,
+            later,
+            has_initial: _,
+            late: _,
         } = self;
         let link = first.link().clone();
         let first_local_connection_id =
@@ -224,7 +247,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             first_link: LinkFacts { validation },
             crypto_receive: config.checked_crypto_receive(),
             loss_thresholds: *config.loss_thresholds(),
-            first_flight: FirstFlight::Datagrams(vec![first]),
+            first_flight: FirstFlight::Datagrams(core::iter::once(first).chain(later).collect()),
             initial_receiver: InitialPathReceiver::new(receiver),
             reset_token_registry: domain.reset_tokens.clone(),
             first_local_connection_id,
@@ -237,6 +260,65 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             link,
         );
         Ok((driver, ConnectionHandle::new(close_request)))
+    }
+
+    /// Waits until a datagram whose first packet is an Initial arrives for
+    /// an incoming connection born from 0-RTT, and gives the incoming
+    /// connection back; at once for any other incoming connection.
+    ///
+    /// The datagram must be at least 1200 bytes (RFC 9000 §14.1), come from
+    /// the client's address and carry the client's source connection ID of
+    /// the first 0-RTT packet. The endpoint checks its token as it checks
+    /// the first datagram of every other incoming connection; one that
+    /// fails is dropped, and the wait goes on. Only the packet type is read:
+    /// whether the Initial is valid is the connection's to find. How long
+    /// to wait is the application's: dropping the future drops the
+    /// incoming connection.
+    pub async fn initial_arrived(mut self) -> Self {
+        while !self.has_initial {
+            let delivery = poll_fn(|cx| self.receiver.poll_next(cx)).await;
+            let link = self.first.link().id().clone();
+            let scid = self.client_scid;
+            let ours = move |datagram: &DatagramOf<E>| {
+                datagram.link().id() == &link
+                    && initial_scid(datagram.payload().as_ref()) == Some(scid)
+            };
+            let datagram = match delivery {
+                DatagramDelivery::Exclusive(delivery) => delivery.consume().0.into_inner(),
+                DatagramDelivery::Competing(candidate) => {
+                    let attempt = candidate
+                        .try_exclusive(|access, _| {
+                            if ours(access.datagram()) {
+                                DatagramClaimOutcome::Claimed(access.into_exclusive(), ())
+                            } else {
+                                DatagramClaimOutcome::Abandoned(())
+                            }
+                        })
+                        .await;
+                    match attempt {
+                        DatagramClaimAttempt::Claimed(delivery, ())
+                        | DatagramClaimAttempt::Exclusive(delivery) => {
+                            delivery.consume().0.into_inner()
+                        }
+                        _ => continue,
+                    }
+                }
+            };
+            if initial_scid(datagram.payload().as_ref()).is_none() {
+                // More of the client's 0-RTT, before its Initial.
+                self.later.push(datagram);
+                continue;
+            }
+            if datagram.payload().as_ref().len() < MIN_DATAGRAM_SIZE {
+                continue;
+            }
+            if let Some((token, datagram)) = self.late.check(datagram).await {
+                self.facts.token = token;
+                self.later.push(datagram);
+                self.has_initial = true;
+            }
+        }
+        self
     }
 
     /// Refuses the connection: sends an Initial packet that closes the
@@ -335,6 +417,7 @@ pub struct IncomingShared<E: EndpointChoices, S: AcceptingServerRole<E>> {
     capacity: NonZeroUsize,
     state: Mutex<IncomingState<E, S>>,
     counts: DropCounts,
+    late: Arc<LateInitials<E>>,
 }
 
 struct IncomingState<E: EndpointChoices, S: AcceptingServerRole<E>> {
@@ -352,7 +435,6 @@ struct IncomingState<E: EndpointChoices, S: AcceptingServerRole<E>> {
 struct DropCounts {
     incoming_queue_full: AtomicU64,
     zero_rtt_incoming_limit_reached: AtomicU64,
-    late_initial_queue_full: AtomicU64,
     version_negotiation_queue_full: AtomicU64,
     version_negotiation_send_set_full: AtomicU64,
     retry_send_set_full: AtomicU64,
@@ -360,6 +442,7 @@ struct DropCounts {
 
 impl<E: EndpointChoices, S: AcceptingServerRole<E>> IncomingShared<E, S> {
     pub(crate) fn new(config: S::Config, domain: &Arc<Domain<E>>) -> Self {
+        let config_late_capacity = config.quotas.late_initial_queue_capacity;
         Self {
             capacity: config.quotas.incoming_queue_capacity,
             config,
@@ -373,7 +456,12 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> IncomingShared<E, S> {
                 ended: false,
             }),
             counts: DropCounts::default(),
+            late: Arc::new(LateInitials::new(config_late_capacity)),
         }
+    }
+
+    pub(crate) fn late(&self) -> &Arc<LateInitials<E>> {
+        &self.late
     }
 
     pub(crate) fn config(&self) -> &S::Config {
@@ -506,7 +594,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> IncomingShared<E, S> {
         DroppedInputCounts {
             incoming_queue_full: read(&self.counts.incoming_queue_full),
             zero_rtt_incoming_limit_reached: read(&self.counts.zero_rtt_incoming_limit_reached),
-            late_initial_queue_full: read(&self.counts.late_initial_queue_full),
+            late_initial_queue_full: self.late.dropped(),
             version_negotiation_queue_full: read(&self.counts.version_negotiation_queue_full),
             version_negotiation_send_set_full: read(&self.counts.version_negotiation_send_set_full),
             retry_send_set_full: read(&self.counts.retry_send_set_full),
@@ -572,4 +660,20 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> fmt::Debug for IncomingStrea
             .field("shared", &self.shared)
             .finish()
     }
+}
+
+/// The source connection ID of the first packet of the datagram `bytes`
+/// when it is a QUIC version 1 Initial.
+fn initial_scid(mut bytes: &[u8]) -> Option<ConnectionId> {
+    let first = *bytes.first()?;
+    // A long header with the packet type of a version 1 Initial (RFC 9000
+    // §17.2.2).
+    if first & 0x80 == 0 || (first >> 4) & 0b11 != 0 {
+        return None;
+    }
+    let header = bytes.sync_read_long_header_unpin().ok()?;
+    if header.version() != Version::V1 {
+        return None;
+    }
+    ConnectionId::try_from(*header.scid()).ok()
 }

@@ -19,9 +19,12 @@ use crate::{
     choices::{EndpointChoices, LinkOf, WorkOf},
     domain::Domain,
     incoming::{IncomingShared, TerminableIncoming},
+    late_initial::LateInitial,
     role::{AcceptingServerRole, ServerRole},
     send_set::BoundedSendSet,
-    stateless_check::{FirstDatagramOutcome, IncomingLoad, ReleaseReason, StatelessCheck},
+    stateless_check::{
+        FirstDatagramOutcome, IncomingLoad, LateInitialOutcome, ReleaseReason, StatelessCheck,
+    },
     version_negotiation::{
         PendingVersionNegotiation, VersionNegotiationQueue, encode_version_negotiation,
     },
@@ -235,8 +238,13 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> ServerReflow<E, S> {
                 }
                 domain.router.resume(work);
                 if let Some(born) = domain.births.take_born() {
-                    let half =
-                        TerminableIncoming::born(domain, self.shared.config(), born, admitted);
+                    let half = TerminableIncoming::born(
+                        domain,
+                        self.shared.config(),
+                        self.shared.late(),
+                        born,
+                        admitted,
+                    );
                     self.shared.push(half);
                 }
             }
@@ -258,6 +266,32 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> ServerReflow<E, S> {
                 }
                 drop(work);
             }
+        }
+    }
+
+    /// Checks an Initial that arrived late for an incoming connection born
+    /// from 0-RTT.
+    fn late_initial(&mut self, domain: &Arc<Domain<E>>, late: LateInitial<E>) {
+        let LateInitial { datagram, reply } = late;
+        let peer = E::peer_socket_addr(&datagram.link().id().peer);
+        match self
+            .check
+            .late_initial(datagram.payload().as_ref(), peer, domain.wall_clock.now())
+        {
+            LateInitialOutcome::Admit(token) => reply.answer(Some((token, datagram))),
+            LateInitialOutcome::SendInvalidTokenClose(packet) => {
+                let link = datagram.link().clone();
+                drop(datagram);
+                reply.answer(None);
+                if self
+                    .retry_sends
+                    .try_push(Responses::respond(link, packet))
+                    .is_err()
+                {
+                    self.shared.count_retry_send_set_full();
+                }
+            }
+            LateInitialOutcome::Release(_) => reply.answer(None),
         }
     }
 
@@ -309,6 +343,16 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> ReflowSteps<E> for ServerRef
             }
             match self.queues.version_negotiation.poll_pop(cx) {
                 Poll::Ready(pending) => self.version_negotiation(domain, pending),
+                Poll::Pending => break,
+            }
+        }
+        for handled in 0.. {
+            if handled == INPUTS_PER_POLL {
+                busy = true;
+                break;
+            }
+            match self.shared.late().poll_pop(cx) {
+                Poll::Ready(late) => self.late_initial(domain, late),
                 Poll::Pending => break,
             }
         }

@@ -745,6 +745,87 @@ fn a_datagram_of_an_unknown_version_gets_a_version_negotiation_packet() {
     });
 }
 
+/// A long header packet of version 1 that fills a datagram of `len` bytes:
+/// an Initial with an empty token when `initial`, otherwise 0-RTT; its
+/// protected fields are made up.
+fn long_packet(initial: bool, dcid: &[u8], scid: &[u8], len: usize) -> Bytes {
+    let mut packet = vec![if initial { 0xc0 } else { 0xd0 }, 0, 0, 0, 1];
+    packet.push(dcid.len() as u8);
+    packet.extend_from_slice(dcid);
+    packet.push(scid.len() as u8);
+    packet.extend_from_slice(scid);
+    if initial {
+        packet.push(0);
+    }
+    let rest = len - packet.len() - 2;
+    packet.extend([0x40 | (rest >> 8) as u8, rest as u8]);
+    packet.resize(len, 0x2c);
+    Bytes::from(packet)
+}
+
+async fn send_on(link: &UdpLink<TokioClock>, payload: Bytes) {
+    let batch = [OutgoingDatagram {
+        payload,
+        ecn: EcnMarking::NotEct,
+    }];
+    within("the datagram is sent", link.send(&batch))
+        .await
+        .unwrap();
+}
+
+#[test]
+fn an_incoming_connection_born_from_zero_rtt_waits_for_its_initial() {
+    run(async {
+        let server = server();
+        let mut incoming = server.endpoint.incoming();
+        let peer = bind();
+        let link = within("a link to the server", peer.connect(server.address))
+            .await
+            .unwrap();
+        let dcid = [0x0d; 8];
+        send_on(&link, long_packet(false, &dcid, &[0x5c; 4], 100)).await;
+        let Some(Incoming::Terminable(half)) =
+            within("an incoming connection", incoming.next()).await
+        else {
+            panic!("the server endpoint ends before a connection comes");
+        };
+        assert!(half.facts().born_from_zero_rtt);
+        let mut arrived = pin!(half.initial_arrived());
+
+        // An Initial with another source connection ID belongs to another
+        // attempt: it makes an incoming connection of its own.
+        send_on(&link, long_packet(true, &dcid, &[0x77; 4], 1200)).await;
+        let other = within(
+            "another incoming connection",
+            futures_util::future::select(arrived.as_mut(), incoming.next()),
+        )
+        .await;
+        let futures_util::future::Either::Right((Some(Incoming::Terminable(other)), _)) = other
+        else {
+            panic!("the Initial of another attempt completed the wait");
+        };
+        assert!(!other.facts().born_from_zero_rtt);
+
+        // The client's Initial, too small, is dropped; at 1200 bytes it
+        // arrives.
+        send_on(&link, long_packet(true, &dcid, &[0x5c; 4], 600)).await;
+        send_on(&link, long_packet(true, &dcid, &[0x5c; 4], 1200)).await;
+        let half = within("the Initial arrives", arrived).await;
+        assert_eq!(
+            half.facts().token,
+            sakuya_endpoint::stateless_check::ReturnedToken::Absent
+        );
+        assert_eq!(
+            server
+                .endpoint
+                .dropped_input_counts()
+                .late_initial_queue_full,
+            0
+        );
+        drop((half, other));
+    });
+}
+
 // ---- the certificates ----
 
 /// The output of a future that is ready at once.
