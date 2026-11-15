@@ -101,6 +101,7 @@ pub type ResetTokensOf<E> = Arc<StatelessResetTokens<PeerOf<E>, Arc<StatelessRes
 ///
 /// It holds only a weak poster: once the connection's receiver is gone,
 /// deliveries are dropped where they are posted.
+#[doc(hidden)]
 pub struct EndpointDeliverer<E: EndpointChoices> {
     poster: DatagramDeliveryPoster<DeliveryOf<E>>,
 }

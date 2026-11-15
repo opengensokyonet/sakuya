@@ -33,8 +33,18 @@ use crate::{
     retry::StatelessRetryPolicy,
 };
 
+/// What keeps the role traits to the role types of this crate: their hidden
+/// items are the endpoint's own workings, which another implementation
+/// could not give, and new ones may be added.
+mod sealed {
+    pub trait Sealed {}
+}
+
 /// The server role of an endpoint of the choices `E`.
-pub trait ServerRole<E: EndpointChoices>: Sized {
+///
+/// Only the role types of this crate implement it: [`NoServer`] and
+/// [`AcceptingServer`].
+pub trait ServerRole<E: EndpointChoices>: Sized + sealed::Sealed {
     /// The role's configuration.
     type Config;
     /// What the endpoint keeps for the role.
@@ -67,7 +77,10 @@ pub trait ServerRole<E: EndpointChoices>: Sized {
 }
 
 /// The client role of an endpoint of the choices `E`.
-pub trait ClientRole<E: EndpointChoices>: Sized {
+///
+/// Only the role types of this crate implement it: [`NoClient`] and
+/// [`ConnectingClient`].
+pub trait ClientRole<E: EndpointChoices>: Sized + sealed::Sealed {
     /// The role's configuration.
     type Config;
     /// What the endpoint keeps for the role.
@@ -166,6 +179,8 @@ pub trait ConnectingClientRole<E: EndpointChoices>:
 #[derive(Debug)]
 pub enum NoServer {}
 
+impl sealed::Sealed for NoServer {}
+
 impl<E: EndpointChoices> ServerRole<E> for NoServer {
     type Config = ();
     type Kept = ();
@@ -199,6 +214,8 @@ impl<E: EndpointChoices> ServerRole<E> for NoServer {
 #[derive(Debug)]
 pub enum NoClient {}
 
+impl sealed::Sealed for NoClient {}
+
 impl<E: EndpointChoices> ClientRole<E> for NoClient {
     type Config = ();
     type Kept = ();
@@ -221,6 +238,8 @@ impl<T, L, H, Tk, Rp> fmt::Debug for AcceptingServer<T, L, H, Tk, Rp> {
         f.write_str("AcceptingServer")
     }
 }
+
+impl<T, L, H, Tk, Rp> sealed::Sealed for AcceptingServer<T, L, H, Tk, Rp> {}
 
 impl<E, T, L, H, Tk, Rp> ServerRole<E> for AcceptingServer<T, L, H, Tk, Rp>
 where
@@ -314,6 +333,8 @@ impl<T, L, H> fmt::Debug for ConnectingClient<T, L, H> {
         f.write_str("ConnectingClient")
     }
 }
+
+impl<T, L, H> sealed::Sealed for ConnectingClient<T, L, H> {}
 
 impl<E, T, L, H> ClientRole<E> for ConnectingClient<T, L, H>
 where

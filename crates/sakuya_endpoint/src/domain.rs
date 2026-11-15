@@ -53,6 +53,7 @@ pub(crate) type RouterOf<E> = DatagramRouter<
 
 /// What the bindings, the reflow driver and the incoming and outgoing
 /// connections of one endpoint share.
+#[doc(hidden)]
 pub struct Domain<E: EndpointChoices> {
     pub(crate) router: RouterOf<E>,
     pub(crate) reset_tokens: ResetTokensOf<E>,
@@ -203,6 +204,7 @@ impl<E: EndpointChoices> StopSignal for Arc<Domain<E>> {
 
 /// The receivers routing publishes for new connections, as the reflow
 /// driver resumes unclaimed work.
+#[doc(hidden)]
 pub struct Births<E: EndpointChoices> {
     /// Whether the domain offers to create connections.
     offering: AtomicBool,
@@ -258,6 +260,7 @@ impl<E: EndpointChoices> fmt::Debug for Births<E> {
 }
 
 /// Prepares the receivers of new connections for routing.
+#[doc(hidden)]
 pub struct BirthFactory<E: EndpointChoices> {
     births: Arc<Births<E>>,
 }
@@ -303,6 +306,7 @@ impl<E: EndpointChoices> InitialReceiverFactory<PayloadOf<E>, LinkOf<E>, Endpoin
 }
 
 /// The receiver of a new connection before routing published its entry.
+#[doc(hidden)]
 pub struct PreparedBirth<E: EndpointChoices> {
     queue: DatagramDeliveryQueue<DeliveryOf<E>>,
     births: Arc<Births<E>>,
