@@ -58,11 +58,12 @@ subtle = { version = "2.6.1", default-features = false }
 time = { version = "0.3.55", default-features = false }
 tokio = { version = "1", default-features = false }
 
-# The type names of a composition's calls are long enough that full debug
+# The type names of a composition's calls are long enough that the debug
 # information of the connection's tests passes the 4 GiB that 32-bit DWARF
-# offsets reach; line tables keep backtraces.
+# offsets reach, even line tables alone with every feature on: the
+# connection's tests have none, and their backtraces no lines.
 [profile.dev.package.sakuya_connection]
-debug = "line-tables-only"
+debug = false
 
 [profile.dev.package.sakuya_endpoint]
 debug = "line-tables-only"
