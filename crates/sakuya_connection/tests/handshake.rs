@@ -1316,6 +1316,64 @@ fn a_client_and_a_server_exchange_a_request_and_its_answer_on_a_stream() {
     assert_eq!(answer, b"pong");
 }
 
+/// Over the tests' in-memory link, the server answers with as much as the
+/// client lets it send on the stream at once. Once the server has processed
+/// a Handshake packet the client's address is validated (RFC 9000 §8.1), so
+/// the anti-amplification limit no longer holds the answer to three times
+/// what the client sends: it arrives well within the harness's 3 s.
+#[test]
+fn a_server_sends_past_the_anti_amplification_limit_once_the_handshake_validates_the_client() {
+    const ANSWER: usize = 16_384;
+    let clock = tls_clock();
+    let mut client_stream = None;
+    let mut server_layer = None;
+    let mut server_stream = None;
+    let (mut request, mut answer) = (Vec::new(), Vec::new());
+    let mut answered = false;
+    let mut done = false;
+    handshake(client_engine(&clock, 1), &clock, |run| {
+        if client_stream.is_none()
+            && let Poll::Ready(layer) = poll_now(run.client_handle.established())
+        {
+            let layer = layer.expect("the client's handshake completed");
+            let (mut writer, reader) = layer.try_open_bi().expect("the server grants streams");
+            ready(writer.write_all_unpin(Bytes::from_static(b"get")))
+                .expect("the request is written");
+            writer.close().expect("the request ends");
+            client_stream = Some((writer, reader));
+        }
+        if server_layer.is_none()
+            && let Poll::Ready(layer) = poll_now(run.server_handle.established())
+        {
+            server_layer = Some(layer.expect("the server's handshake completed"));
+        }
+        if server_stream.is_none()
+            && let Some(layer) = &server_layer
+            && let Poll::Ready(stream) = poll_now(layer.accept_bi())
+        {
+            server_stream = Some(stream.expect("the client's stream is accepted"));
+        }
+        if let Some((writer, reader)) = &mut server_stream
+            && !answered
+            && read_now!(reader, request)
+        {
+            ready(writer.write_all_unpin(Bytes::from(vec![7; ANSWER])))
+                .expect("the answer is written");
+            writer.close().expect("the answer ends");
+            answered = true;
+        }
+        if let Some((_, reader)) = &mut client_stream
+            && !done
+        {
+            done = read_now!(reader, answer);
+        }
+        done
+    });
+    assert!(done, "the client read the answer's end within 3 s");
+    assert_eq!(request, b"get");
+    assert_eq!(answer.len(), ANSWER);
+}
+
 /// Over the tests' in-memory link, a client completes the handshake and
 /// opens a stream; then its link ends. The connection ends at once, with
 /// the link's end as its reason, which the layer and the stream report

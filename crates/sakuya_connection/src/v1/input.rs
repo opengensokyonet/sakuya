@@ -116,7 +116,7 @@ use sakuya_wire::{
 use super::{
     Choices, CloseCauseOf, LinkPathRoleReads, Side,
     aead_usage::AeadUsage,
-    amplification::AntiAmplification,
+    amplification::{AddressValidation, AntiAmplification},
     close::{CloseReasonRecord, LocalCloseCause},
     close_packet::ClosePacket,
     connection_ids::{ConnectionIdsOf, PeerHandshakeConnectionId},
@@ -125,6 +125,7 @@ use super::{
     idle::IdleTimeout,
     key_phase::KeyPhaseNumbers,
     keys::{HandshakeKeys, InitialKeys, OneRttKeys, OneRttReceiveKeys},
+    link::LinkFacts,
     receive::{
         LevelReceiveKeys, PacketOutcome, ReceivedPacket, one_rtt_receive_keys, open_one_rtt,
         packet_number_offset, receive_keys, receive_packet,
@@ -603,7 +604,7 @@ where
         GetAt<LinkPathRole<InstantOf<T>>, Ir>,
     for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
-        TakeEach<'s, HList![AntiAmplification], Ian>,
+        TakeEach<'s, HList![AntiAmplification, LinkFacts], Ian>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out: GetAt<ClosePacket, Icp>
         + TakeEach<'s, HList![LinkPathPlanner<LinkPathSendPlannerOf<T, L>>], Ipl>,
     SendTypes<T, L>: SendStrategyTypes,
@@ -874,7 +875,7 @@ fn receive_owned<
         GetAt<LinkPathRole<InstantOf<T>>, Ir>,
     for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
-        TakeEach<'s, HList![AntiAmplification], Ian>,
+        TakeEach<'s, HList![AntiAmplification, LinkFacts], Ian>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out: GetAt<ClosePacket, Icp>
         + TakeEach<'s, HList![LinkPathPlanner<LinkPathSendPlannerOf<T, L>>], Ipl>,
     SendTypes<T, L>: SendStrategyTypes,
@@ -885,8 +886,8 @@ fn receive_owned<
     let link = datagram.link().id().clone();
     // the entry of a logical link no link path is over yet does not
     // exist; there is nothing to count
-    if let Some(hlist_pat![limit]) =
-        others.link_entry::<HList![AntiAmplification], Ian>(datagram.link().id())
+    if let Some(hlist_pat![limit, _]) =
+        others.link_entry::<HList![AntiAmplification, LinkFacts], Ian>(datagram.link().id())
     {
         limit.received(size);
     }
@@ -930,7 +931,42 @@ fn receive_owned<
             break;
         }
     }
+    validate_by_handshake::<T, L, B, Ii, Ian>(lineage, others, &link);
     close_packet_resend::<T, L, B, Ir, Icp, Ipl, Irc>(others, &link);
+}
+
+/// A server that processed a Handshake packet from the peer, which it
+/// discards its Initial keys on, has the peer's address validated (RFC 9000
+/// §8.1): the logical link the datagram arrived over is no longer held by
+/// the anti-amplification limit, and what waits on the limit is woken.
+fn validate_by_handshake<T, L, B, Ii, Ian>(
+    lineage: &LineageOf<'_, T, L, layer::LogicalPath>,
+    others: &mut OtherNodes<'_, T, L, B>,
+    link: &LinkIdOf<T>,
+) where
+    T: Choices,
+    L: LineagePartList<T>,
+    B: CallBundle,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<InitialKeys<T::Crypto>, Ii>,
+    for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![AntiAmplification, LinkFacts], Ian>,
+{
+    if <T::Side as Side>::ROLE != Role::Server
+        || !matches!(
+            lineage.get::<InitialKeys<T::Crypto>, Ii>(),
+            InitialKeys::Discarded
+        )
+    {
+        return;
+    }
+    if let Some(hlist_pat![limit, facts]) =
+        others.link_entry::<HList![AntiAmplification, LinkFacts], Ian>(link)
+        && facts.validation == AddressValidation::NotValidated
+    {
+        facts.validation = AddressValidation::Validated;
+        limit.validated();
+    }
 }
 
 /// A datagram arrived over `link` for the logical path of this lend: when
@@ -1299,7 +1335,7 @@ where
         GetAt<LinkPathRole<InstantOf<T>>, Ir>,
     for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
-        TakeEach<'s, HList![AntiAmplification], Ian>,
+        TakeEach<'s, HList![AntiAmplification, LinkFacts], Ian>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out: GetAt<ClosePacket, Icp>
         + TakeEach<'s, HList![LinkPathPlanner<LinkPathSendPlannerOf<T, L>>], Ipl>,
     SendTypes<T, L>: SendStrategyTypes,

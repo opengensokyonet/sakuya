@@ -115,6 +115,14 @@ impl AntiAmplification {
         }
     }
 
+    /// The address was validated: nothing limits what is sent any more, and
+    /// what waits on the limit is woken.
+    pub fn validated(&mut self) {
+        for waker in self.waiters.drain(..) {
+            waker.wake();
+        }
+    }
+
     /// Datagrams of `bytes` bytes in all were sent over the logical link.
     pub fn sent(&mut self, bytes: usize) {
         self.sent = self.sent.saturating_add(bytes as u64);
