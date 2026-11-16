@@ -12,6 +12,7 @@
 //! | Frame | Component |
 //! | --- | --- |
 //! | PADDING, PING | none: they only make a packet ack-eliciting or not |
+//! | PATH_RESPONSE | none: this side sends no PATH_CHALLENGE yet, and a response that matches none is ignored |
 //! | CRYPTO | [`CryptoReceiver`], at the level of the packet |
 //! | NEW_TOKEN | the data only this side has ([`Side::on_new_token`]): a client hands the token over |
 //! | HANDSHAKE_DONE | [`HandshakeConfirmation`]: the handshake is confirmed |
@@ -333,6 +334,10 @@ where
                 Ies,
             >(lineage, others, &frame, packet),
             FrameRun::Padding(_) | FrameRun::Ping(_) => Ok(()),
+            // this side sends no PATH_CHALLENGE yet, so no response matches
+            // one; a response that matches none may be ignored (RFC 9000
+            // §19.18, MAY close)
+            FrameRun::PathResponse(_) => Ok(()),
             FrameRun::Crypto(frame) => {
                 let level = crypto_level(packet.level())?;
                 let offset = frame.offset().into_inner();

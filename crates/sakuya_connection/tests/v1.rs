@@ -5504,6 +5504,37 @@ fn a_new_connection_id_frame_to_a_zero_length_handshake_connection_id_is_a_conne
 }
 
 #[test]
+fn a_path_response_that_answers_no_challenge_is_ignored() {
+    use probe::PacketStep::{InstallOneRttKeys, Receive};
+    reset();
+    let first = link();
+    let mut response = vec![0x1b];
+    response.extend_from_slice(&[9; 8]);
+    feed_packets([
+        (
+            ms(5),
+            Receive(received(
+                initial_from(&[0xaa; 8], 0, &ping()),
+                &first,
+                ms(5),
+            )),
+        ),
+        (ms(6), InstallOneRttKeys),
+        (
+            ms(7),
+            Receive(received(one_rtt_packet_of(0, 0, &response), &first, ms(7))),
+        ),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first);
+    take_log();
+    let lines = run(&mut connection, 5..=7);
+    assert!(
+        lines.iter().all(|line| !line.starts_with("error")),
+        "{lines:?}"
+    );
+}
+
+#[test]
 fn retiring_a_connection_id_never_issued_is_a_connection_error() {
     use probe::PacketStep::{InstallOneRttKeys, Receive};
     reset();
