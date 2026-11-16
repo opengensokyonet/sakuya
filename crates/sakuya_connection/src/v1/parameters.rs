@@ -2,13 +2,14 @@
 //! the error of a failure of reading the peer's, and the checks of version
 //! 1 on the connection IDs the peer's state (RFC 9000 §7.3).
 
-use core::convert::Infallible;
+use core::{convert::Infallible, marker::PhantomData, ops::Add};
 
 use sakuya_wire::{
     connection_id::ConnectionId,
-    parameters::codec::ReadParametersError,
-    parts::{CoprodInjector, PartsError, Selector},
+    parameters::{ParameterList, ParametersOf, ParametersPart, codec::ReadParametersError},
+    parts::{CoprodInjector, HCons, HNil, PartsError, Selector},
     v1::transport_parameters::{
+        TransportParameterSlots, TransportParameterSpace,
         codec::ReadTransportParametersError,
         connection_id::{
             InitialSourceConnectionId, OriginalDestinationConnectionId, RetrySourceConnectionId,
@@ -18,7 +19,10 @@ use sakuya_wire::{
 use snafu::{Snafu, ensure};
 
 use super::{error::ConnectionError, receive::v1_error};
-use crate::error::{ConnectionErrorOf, TransportParameterValueErrorsOf};
+use crate::{
+    error::{ConnectionErrorOf, TransportParameterValueErrorsOf},
+    take::{GetAt, Lineage},
+};
 
 /// The peer's transport parameters: one component of the connection node,
 /// read by whoever uses them.
@@ -118,6 +122,99 @@ impl<P> LocalTransportParameters<P> {
             }
             Self::Sent(_) => debug_assert!(false, "transport parameters are sent twice"),
         }
+    }
+}
+
+/// The place of a part's transport parameters among the components of the
+/// connection node: [`InNode`] for a part that defines parameters, at the
+/// position `I`, which the compiler infers.
+#[derive(Debug)]
+pub enum InNode<I> {
+    #[doc(hidden)]
+    _Never(PhantomData<I>, Infallible),
+}
+
+/// The place of the transport parameters of a part that defines none: there
+/// is no component.
+#[derive(Debug)]
+pub enum NoParameters {}
+
+/// A part's share of the transport parameters this side sends: its slots,
+/// sent from its own [`LocalTransportParameters`] in the connection node,
+/// whose components are `V`. `I` is where they are, [`InNode`] or
+/// [`NoParameters`]; the compiler infers it.
+///
+/// It is implemented for every part: one that defines parameters keeps
+/// them in the connection node, one that defines none has none to send.
+pub trait SendLocalTransportParametersPart<V, I>: ParametersPart<TransportParameterSpace> {
+    /// The part's slots as sent: those configured the first time, as they
+    /// were sent afterwards.
+    fn send_local(lineage: &mut Lineage<'_, V>) -> PartSlots<Self>;
+}
+
+/// The slots of the transport parameter types of the part `P` alone.
+pub type PartSlots<P> =
+    <<P as ParametersPart<TransportParameterSpace>>::Parameters as ParameterList<
+        TransportParameterSpace,
+    >>::Slots;
+
+/// A part that defines parameters sends those it keeps, as configured the
+/// first time.
+impl<P, V, I> SendLocalTransportParametersPart<V, InNode<I>> for P
+where
+    P: ParametersPart<TransportParameterSpace>,
+    PartSlots<P>: Clone,
+    V: GetAt<LocalTransportParameters<PartSlots<P>>, I>,
+{
+    fn send_local(lineage: &mut Lineage<'_, V>) -> PartSlots<P> {
+        let local = lineage.get_mut::<LocalTransportParameters<PartSlots<P>>, I>();
+        if local.sent().is_none() {
+            local.send_with(Clone::clone);
+        }
+        // invariant: sent just above when it was not
+        local.sent().expect("the parameters are sent").clone()
+    }
+}
+
+/// A part that defines no parameters has none to send.
+impl<P, V> SendLocalTransportParametersPart<V, NoParameters> for P
+where
+    P: ParametersPart<TransportParameterSpace, Parameters = HNil>,
+{
+    fn send_local(_: &mut Lineage<'_, V>) -> PartSlots<P> {
+        HNil
+    }
+}
+
+/// The transport parameters this side sends, of a list of parts: each
+/// part's slots ([`SendLocalTransportParametersPart`]), joined in the order
+/// of the parts. `Is` holds the place of each part's; the compiler infers
+/// it.
+///
+/// A part settles its own before they are joined: version 1 settles its
+/// connection IDs as its advancing call sends them; the others send theirs
+/// as configured.
+pub trait SendLocalTransportParameters<V, Is>: ParametersOf<TransportParameterSpace> {
+    /// The slots of every part, as sent.
+    fn send_local(lineage: &mut Lineage<'_, V>) -> TransportParameterSlots<Self>;
+}
+
+impl<V> SendLocalTransportParameters<V, HNil> for HNil {
+    fn send_local(_: &mut Lineage<'_, V>) -> HNil {
+        HNil
+    }
+}
+
+impl<P, Ps, V, I, Is> SendLocalTransportParameters<V, HCons<I, Is>> for HCons<P, Ps>
+where
+    P: SendLocalTransportParametersPart<V, I>,
+    Ps: SendLocalTransportParameters<V, Is>,
+    HCons<P, Ps>: ParametersOf<TransportParameterSpace>,
+    PartSlots<P>: Add<TransportParameterSlots<Ps>, Output = TransportParameterSlots<HCons<P, Ps>>>,
+{
+    fn send_local(lineage: &mut Lineage<'_, V>) -> TransportParameterSlots<Self> {
+        let own = P::send_local(lineage);
+        own + Ps::send_local(lineage)
     }
 }
 

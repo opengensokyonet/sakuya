@@ -80,11 +80,12 @@ use sakuya_tls::{
     },
 };
 use sakuya_wire::{
+    parameters::ParametersOf,
     parts::{CoprodInjector, Selector},
     v1::{
         role::Role,
         transport_parameters::{
-            TransportParameterSlots, TransportParameters,
+            TransportParameterSlots, TransportParameterSpace, TransportParameters,
             codec::{ReadTransportParametersHostExt as _, WriteTransportParametersHostExt as _},
             connection_id::{
                 InitialSourceConnectionId, OriginalDestinationConnectionId, RetrySourceConnectionId,
@@ -110,8 +111,8 @@ use super::{
     handshake_done::HandshakeDoneSource,
     keys::{DirectionKeys, HandshakeKeys, LevelKeys, OneRttKeys, PacketProtectionBackend},
     parameters::{
-        LocalTransportParameters, PeerTransportParameters, check_initial_source,
-        check_server_destination, read_transport_parameters_error,
+        LocalTransportParameters, PeerTransportParameters, SendLocalTransportParameters,
+        check_initial_source, check_server_destination, read_transport_parameters_error,
     },
     receive::v1_error,
     send::{HandshakeDoneIntent, SendTypes},
@@ -637,10 +638,14 @@ fn client_parameters(
     parameters.known
 }
 
-/// `slots` as an endpoint in the role `sender` sends them.
-fn encode(slots: &TransportParameterSlots, sender: Role) -> OpaqueData<Bytes> {
-    let mut parameters = TransportParameters::<Bytes>::new();
-    parameters.known = *slots;
+/// `slots`, of every part of `L`, as an endpoint in the role `sender`
+/// sends them.
+fn encode<L>(slots: TransportParameterSlots<L>, sender: Role) -> OpaqueData<Bytes>
+where
+    L: ParametersOf<TransportParameterSpace>,
+{
+    let mut parameters = TransportParameters::<Bytes, L>::new();
+    parameters.known = slots;
     let mut encoded = Vec::new();
     // invariant: the slots hold only parameters the sender may send, as
     // `server_parameters` and `client_parameters` make them, and no unknown
@@ -648,29 +653,30 @@ fn encode(slots: &TransportParameterSlots, sender: Role) -> OpaqueData<Bytes> {
     encoded
         .sync_write_transport_parameters_unpin(parameters, sender)
         .expect("the parameters a side settles are valid");
-    // invariant: the parameters of version 1 alone are far below 2^16 bytes
+    // invariant: the parameters of version 1 and of the extensions are far
+    // below 2^16 bytes
     OpaqueData::new(Bytes::from(encoded)).expect("transport parameters fit their extension")
 }
 
-/// The parameters this side sends, settled from those configured with
-/// `settle` the first time; as sent afterwards, as a ClientHello written
-/// again after a HelloRetryRequest sends them (RFC 9846 §4.1.2).
+/// Settle the parameters of version 1 this side sends from those
+/// configured with `settle`, the first time; afterwards they stay as sent,
+/// as a ClientHello written again after a HelloRetryRequest sends them (RFC
+/// 9846 §4.1.2). Every part's, these among them, are then joined
+/// ([`SendLocalTransportParameters`]).
 fn send_local(
     local: &mut LocalTransportParameters<TransportParameterSlots>,
     settle: impl FnOnce(&TransportParameterSlots) -> TransportParameterSlots,
-) -> &TransportParameterSlots {
+) {
     if local.sent().is_none() {
         local.send_with(settle);
     }
-    // invariant: sent just above when it was not
-    local.sent().expect("the parameters are sent")
 }
 
 // ---- the server ----
 
 /// The positions a server's advancing call takes by, besides those of the
 /// CRYPTO data: in the connection node, `Ilt` of this side's transport
-/// parameters, `Ipt` of the peer's, `Ifl` of the first local connection ID,
+/// parameters of version 1, `Ils` of every part's, `Ipt` of the peer's, `Ifl` of the first local connection ID,
 /// `Iid` of the client's first Destination Connection IDs, `Iph` of the
 /// peer's handshake connection ID, `Ik` of the Handshake keys, `Io` of the
 /// 1-RTT keys, `Ib` of the backend, `Ic` of the confirmation, `Ihd` of the
@@ -680,8 +686,27 @@ fn send_local(
 /// `initial_source_connection_id` among the slots of the peer's transport
 /// parameters, and `Ia` of what the call is started from in the facts of
 /// the connection node.
-type ServerPositions<Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ic, Ihd, Isc, Ie, Irc, Ih, Idx, Ja, Ia> = (
-    (Ilt, Ipt, Ifl, Iid, Iph),
+type ServerPositions<
+    Ilt,
+    Ils,
+    Ipt,
+    Ifl,
+    Iid,
+    Iph,
+    Ik,
+    Io,
+    Ib,
+    Ic,
+    Ihd,
+    Isc,
+    Ie,
+    Irc,
+    Ih,
+    Idx,
+    Ja,
+    Ia,
+> = (
+    (Ilt, Ils, Ipt, Ifl, Iid, Iph),
     (Ik, Io, Ib, Ic),
     (Ihd, Isc, Ie, Irc, Ih),
     (Idx, Ja, Ia),
@@ -704,6 +729,7 @@ impl<
     Ics,
     Iv,
     Ilt,
+    Ils,
     Ipt,
     Ifl,
     Iid,
@@ -730,6 +756,7 @@ impl<
             CryptoPositions<Icr, Ics, Iv>,
             ServerPositions<
                 Ilt,
+                Ils,
                 Ipt,
                 Ifl,
                 Iid,
@@ -756,6 +783,7 @@ where
     B: CallBundle,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Iv>,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>,
+    for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>,
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>
         + GetAt<FirstLocalConnectionId, Ifl>
@@ -785,11 +813,11 @@ where
         let first = *lineage.get::<FirstLocalConnectionId, Ifl>();
         let destination = *lineage.get::<InitialDestinationConnectionIds, Iid>();
         let local = lineage.get_mut::<LocalTransportParameters<TransportParameterSlots>, Ilt>();
-        let sent = send_local(local, |configured| {
+        send_local(local, |configured| {
             server_parameters(configured, first, destination)
         });
         Ok(Negotiated {
-            local: encode(sent, Role::Server),
+            local: encode::<L>(L::send_local(lineage), Role::Server),
             early_data: false,
         })
     }
@@ -804,6 +832,7 @@ impl<
     Ics,
     Iv,
     Ilt,
+    Ils,
     Ipt,
     Ifl,
     Iid,
@@ -830,6 +859,7 @@ impl<
             CryptoPositions<Icr, Ics, Iv>,
             ServerPositions<
                 Ilt,
+                Ils,
                 Ipt,
                 Ifl,
                 Iid,
@@ -862,6 +892,7 @@ where
     SendStrategyCore<SendStrategyOf<T, L>>: PublishIntent<HandshakeDoneIntent, Idx>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>,
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<T::CryptoReceiveBuffer>, Icr>
         + GetAt<CryptoSender<T::CryptoSendBuffer>, Ics>
         + GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
@@ -1006,6 +1037,7 @@ impl<
     Ics,
     Iv,
     Ilt,
+    Ils,
     Ipt,
     Ifl,
     Iid,
@@ -1031,6 +1063,7 @@ impl<
             CryptoPositions<Icr, Ics, Iv>,
             ServerPositions<
                 Ilt,
+                Ils,
                 Ipt,
                 Ifl,
                 Iid,
@@ -1062,6 +1095,7 @@ where
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, Ia>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>,
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<T::CryptoReceiveBuffer>, Icr>
         + GetAt<CryptoSender<T::CryptoSendBuffer>, Ics>
         + GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
@@ -1082,6 +1116,7 @@ where
         CryptoPositions<Icr, Ics, Iv>,
         ServerPositions<
             Ilt,
+            Ils,
             Ipt,
             Ifl,
             Iid,
@@ -1111,6 +1146,7 @@ where
                 CryptoPositions<Icr, Ics, Iv>,
                 ServerPositions<
                     Ilt,
+                    Ils,
                     Ipt,
                     Ifl,
                     Iid,
@@ -1161,8 +1197,8 @@ where
 /// of `original_destination_connection_id` and `Jr` of
 /// `retry_source_connection_id` among the slots of the peer's transport
 /// parameters.
-type ClientPositions<Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia> = (
-    (Ilt, Ipt, Ifl, Iid, Iph),
+type ClientPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia> = (
+    (Ilt, Ils, Ipt, Ifl, Iid, Iph),
     (Ik, Io, Ib),
     (Ie, Irc, Ih),
     (Ja, Jo, Jr, Ia),
@@ -1177,8 +1213,31 @@ type ClientPositions<Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, J
 /// Initial packet that opened, and without a Retry it must send no
 /// `retry_source_connection_id` (RFC 9000 §7.3). Once they pass, the
 /// server's parameters are known.
-impl<T, L, Tls, B, Icr, Ics, Iv, Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia>
-    ClientTransport
+impl<
+    T,
+    L,
+    Tls,
+    B,
+    Icr,
+    Ics,
+    Iv,
+    Ilt,
+    Ils,
+    Ipt,
+    Ifl,
+    Iid,
+    Iph,
+    Ik,
+    Io,
+    Ib,
+    Ie,
+    Irc,
+    Ih,
+    Ja,
+    Jo,
+    Jr,
+    Ia,
+> ClientTransport
     for NodeCallFamily<
         T,
         L,
@@ -1186,7 +1245,7 @@ impl<T, L, Tls, B, Icr, Ics, Iv, Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, I
         ClientAdvancingKind<Tls>,
         (
             CryptoPositions<Icr, Ics, Iv>,
-            ClientPositions<Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia>,
+            ClientPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia>,
         ),
         B,
     >
@@ -1198,6 +1257,7 @@ where
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>
         + Selector<Option<OriginalDestinationConnectionId>, Jo>
         + Selector<Option<RetrySourceConnectionId>, Jr>,
+    for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>,
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>
         + GetAt<FirstLocalConnectionId, Ifl>
@@ -1213,10 +1273,8 @@ where
         let lineage = &mut view.get_mut().lineage;
         let first = *lineage.get::<FirstLocalConnectionId, Ifl>();
         let local = lineage.get_mut::<LocalTransportParameters<TransportParameterSlots>, Ilt>();
-        encode(
-            send_local(local, |configured| client_parameters(configured, first)),
-            Role::Client,
-        )
+        send_local(local, |configured| client_parameters(configured, first));
+        encode::<L>(L::send_local(lineage), Role::Client)
     }
 
     fn peer<'v>(view: Pin<&mut Self::ReceiverView<'v>>, peer: &[u8]) -> Result<(), Self::Error>
@@ -1241,8 +1299,31 @@ where
     }
 }
 
-impl<T, L, Tls, B, Icr, Ics, Iv, Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia>
-    ClientAdvancingCapability<Tls>
+impl<
+    T,
+    L,
+    Tls,
+    B,
+    Icr,
+    Ics,
+    Iv,
+    Ilt,
+    Ils,
+    Ipt,
+    Ifl,
+    Iid,
+    Iph,
+    Ik,
+    Io,
+    Ib,
+    Ie,
+    Irc,
+    Ih,
+    Ja,
+    Jo,
+    Jr,
+    Ia,
+> ClientAdvancingCapability<Tls>
     for NodeCallFamily<
         T,
         L,
@@ -1250,7 +1331,7 @@ impl<T, L, Tls, B, Icr, Ics, Iv, Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, I
         ClientAdvancingKind<Tls>,
         (
             CryptoPositions<Icr, Ics, Iv>,
-            ClientPositions<Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia>,
+            ClientPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia>,
         ),
         B,
     >
@@ -1266,6 +1347,7 @@ where
         + Selector<Option<RetrySourceConnectionId>, Jr>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>,
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<T::CryptoReceiveBuffer>, Icr>
         + GetAt<CryptoSender<T::CryptoSendBuffer>, Ics>
         + GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
@@ -1376,14 +1458,14 @@ impl<Tls> fmt::Debug for ClientAdvancingKind<Tls> {
     }
 }
 
-impl<T, L, Tls, Icr, Ics, Iv, Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia>
+impl<T, L, Tls, Icr, Ics, Iv, Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia>
     CallKind<
         T,
         L,
         Connection,
         (
             CryptoPositions<Icr, Ics, Iv>,
-            ClientPositions<Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia>,
+            ClientPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia>,
         ),
     > for ClientAdvancingKind<Tls>
 where
@@ -1398,6 +1480,7 @@ where
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, Ia>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>,
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<T::CryptoReceiveBuffer>, Icr>
         + GetAt<CryptoSender<T::CryptoSendBuffer>, Ics>
         + GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
@@ -1413,7 +1496,7 @@ where
         + GetAt<ConnectionHandleCellOf<T, L>, Ih>,
     (
         CryptoPositions<Icr, Ics, Iv>,
-        ClientPositions<Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia>,
+        ClientPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia>,
     ): 'static,
 {
     type Call<B: CallBundle> = LentCall<
@@ -1424,7 +1507,24 @@ where
             ClientAdvancingKind<Tls>,
             (
                 CryptoPositions<Icr, Ics, Iv>,
-                ClientPositions<Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia>,
+                ClientPositions<
+                    Ilt,
+                    Ils,
+                    Ipt,
+                    Ifl,
+                    Iid,
+                    Iph,
+                    Ik,
+                    Io,
+                    Ib,
+                    Ie,
+                    Irc,
+                    Ih,
+                    Ja,
+                    Jo,
+                    Jr,
+                    Ia,
+                >,
             ),
             B,
         >,
