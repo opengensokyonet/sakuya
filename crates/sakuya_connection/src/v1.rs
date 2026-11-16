@@ -382,7 +382,7 @@ pub trait Side: 'static {
     /// What an established layer of this side runs with of the handshake's
     /// selection, which the layer's handle gives: the application protocol,
     /// on a server together with the selected target.
-    type LayerSelection: 'static;
+    type LayerSelection: application_handles::established_layer::LayerSelection + 'static;
 
     /// How this side's handshake engine fails with an alert: the failure
     /// that [`HandshakeError`] holds for it.
@@ -586,6 +586,7 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
 impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + ConnectionErrorsOf>
     LayerShare<T, L, layer::Connection> for Part
 where
+    L: application_handles::HandleShares<T, L, application_handles::handle::EstablishedLayer>,
     SendTypes<T, L>: SendStrategyTypes
         + CorePublishOutcome<CryptoIntent, AnyActiveLinkPath>
         + send_planning::IntakePublishOutcome<
@@ -723,6 +724,18 @@ where
 {
     type Data = HList![StreamsOf<T, L>];
     type Calls = HNil;
+}
+/// The handle of an established layer holds the stream set's handle, to
+/// open and accept streams with.
+impl<T: Choices, L: ConnectionErrorsOf>
+    application_handles::HandleShare<T, L, application_handles::handle::EstablishedLayer> for Part
+where
+    SendTypes<T, L>: send_planning::IntakePublishOutcome<
+            streams::send::StreamIntent<T::SendParameters>,
+            AnyActiveLinkPath,
+        >,
+{
+    type Share = application_handles::connection::StreamSetHandleOf<T, L>;
 }
 /// The loss detection state comes before the probe timeout: its time
 /// threshold is dispatched first (RFC 9002 §6.2.1, Appendix A.8).

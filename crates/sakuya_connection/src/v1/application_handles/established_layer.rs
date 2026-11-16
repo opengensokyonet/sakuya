@@ -5,13 +5,15 @@
 //! A handle is tied to one established layer: it ends with that layer, and
 //! so do the streams opened or accepted through it. It keeps what it reads
 //! of the layer, its application protocol and on a server the selected
-//! target, also after the layer ended. Opening and accepting are
+//! target, also after the layer ended. It holds each part's share of it
+//! ([`HandleShare`](super::HandleShare)). Opening and accepting are
 //! capabilities version 1 gives the handle, a trait each, implemented by
-//! the stream set the composition chooses; the place of the stream intent
-//! in the composition's sum of intents is the trait's parameter `I`,
-//! inferred where it is called. Their futures borrow the handle; the
-//! futures of [`OpenStreamsOwned`] and [`AcceptStreamsOwned`] hold a clone
-//! of it instead.
+//! the stream set the composition chooses, on the handle whose shares hold
+//! the set's handle; the trait's parameter is the place of that share among
+//! the shares and the place of the stream intent in the composition's sum
+//! of intents, inferred where it is called. Their futures borrow the
+//! handle; the futures of [`OpenStreamsOwned`] and [`AcceptStreamsOwned`]
+//! hold a clone of it instead.
 
 use core::{
     fmt,
@@ -24,7 +26,7 @@ use bytes::Bytes;
 use sakuya_stream::{
     connection::LayerEnd, connection::LayerEndedError, send_options::NoSendOptions,
 };
-use sakuya_tls::{extension::alpn::ProtocolName, server::targets::SelectedTarget};
+use sakuya_tls::{extension::alpn::ProtocolName, role, server::targets::SelectedTarget};
 use snafu::Snafu;
 
 use super::{
@@ -35,13 +37,17 @@ use super::{
 /// The handle of an established layer in the application's hands
 /// (`EstablishedLayerHandle`).
 ///
-/// `S` is the stream set's handle, `N` the send strategy's intake the
-/// streams publish their intents through, `A` what the layer runs with of
-/// the handshake's selection: the application protocol, on a server
-/// together with the selected target. `C` is this endpoint's reason for
-/// closing, which the layer's end carries. A clone is the same handle.
-pub struct EstablishedLayerHandle<S, N, A, C> {
-    pub(crate) streams: S,
+/// `Sh` is each part's share of the handle, in the order of the list of
+/// parts ([`HandleSharesOf`](super::HandleSharesOf) for the level
+/// [`handle::EstablishedLayer`](super::handle::EstablishedLayer)): version
+/// 1's is the stream set's handle. `N` is the send strategy's intake the
+/// streams and the other parts publish their intents through, `A` what the
+/// layer runs with of the handshake's selection: the application protocol,
+/// on a server together with the selected target. `C` is this endpoint's
+/// reason for closing, which the layer's end carries. A clone is the same
+/// handle.
+pub struct EstablishedLayerHandle<Sh, N, A, C> {
+    pub(crate) shares: Sh,
     pub(crate) intake: N,
     pub(crate) layer: Arc<LayerShare<A, C>>,
 }
@@ -80,11 +86,11 @@ impl<A, C> LayerShare<A, C> {
     }
 }
 
-impl<S, N, A, C> EstablishedLayerHandle<S, N, A, C> {
-    /// The handle of a layer just built.
-    pub(crate) fn new(streams: S, intake: N, selection: A) -> Self {
+impl<Sh, N, A, C> EstablishedLayerHandle<Sh, N, A, C> {
+    /// The handle of a layer just built, with each part's share `shares`.
+    pub(crate) fn new(shares: Sh, intake: N, selection: A) -> Self {
         Self {
-            streams,
+            shares,
             intake,
             layer: Arc::new(LayerShare {
                 selection,
@@ -105,7 +111,7 @@ impl<S, N, A, C> EstablishedLayerHandle<S, N, A, C> {
 
 /// A client's layer runs with the application protocol its handshake
 /// selected.
-impl<S, N, C> EstablishedLayerHandle<S, N, Option<ProtocolName<Bytes>>, C> {
+impl<Sh, N, C> EstablishedLayerHandle<Sh, N, Option<ProtocolName<Bytes>>, C> {
     /// The application protocol the layer uses, also after it ended.
     pub fn application_protocol(&self) -> Option<&ProtocolName<Bytes>> {
         self.layer.selection.as_ref()
@@ -114,7 +120,7 @@ impl<S, N, C> EstablishedLayerHandle<S, N, Option<ProtocolName<Bytes>>, C> {
 
 /// A server's layer runs with the target and application protocol its
 /// handshake selected, from its ServerHello on.
-impl<S, N, T, C> EstablishedLayerHandle<S, N, SelectedTarget<T>, C> {
+impl<Sh, N, T, C> EstablishedLayerHandle<Sh, N, SelectedTarget<T>, C> {
     /// The application protocol the layer uses, also after it ended.
     pub fn application_protocol(&self) -> Option<&ProtocolName<Bytes>> {
         self.layer.selection.application_protocol.as_ref()
@@ -128,21 +134,41 @@ impl<S, N, T, C> EstablishedLayerHandle<S, N, SelectedTarget<T>, C> {
 }
 
 /// A clone is the same handle.
-impl<S: Clone, N: Clone, A, C> Clone for EstablishedLayerHandle<S, N, A, C> {
+impl<Sh: Clone, N: Clone, A, C> Clone for EstablishedLayerHandle<Sh, N, A, C> {
     fn clone(&self) -> Self {
         Self {
-            streams: self.streams.clone(),
+            shares: self.shares.clone(),
             intake: self.intake.clone(),
             layer: Arc::clone(&self.layer),
         }
     }
 }
 
-impl<S, N, A, C> fmt::Debug for EstablishedLayerHandle<S, N, A, C> {
+impl<Sh, N, A, C> fmt::Debug for EstablishedLayerHandle<Sh, N, A, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EstablishedLayerHandle")
             .finish_non_exhaustive()
     }
+}
+
+/// What a layer runs with of the handshake's selection (`LayerSelection`),
+/// and so which side the layer is of: `Role` is
+/// [`role::Client`] or [`role::Server`]. The handle's capabilities give
+/// what they make the side, as a stream reader that tells a server
+/// whether the stream had data in 0-RTT packets.
+pub trait LayerSelection {
+    /// The side's role.
+    type Role: role::HandshakeRole;
+}
+
+/// A client's layer runs with the application protocol alone.
+impl LayerSelection for Option<ProtocolName<Bytes>> {
+    type Role = role::Client;
+}
+
+/// A server's layer runs with the selected target.
+impl<T> LayerSelection for SelectedTarget<T> {
+    type Role = role::Server;
 }
 
 // ---- the capabilities of streams ----
@@ -150,8 +176,9 @@ impl<S, N, A, C> fmt::Debug for EstablishedLayerHandle<S, N, A, C> {
 /// Opening this side's streams on a layer (`OpenStreams`): what version 1
 /// gives the handle of an established layer.
 ///
-/// `I` is where the stream intents are in the composition's sum of intents;
-/// the compiler infers it. The futures borrow the handle: several tasks may
+/// `I` is where the stream set's handle is among the handle's shares and
+/// where the stream intents are in the composition's sum of intents, as a
+/// pair; the compiler infers it. The futures borrow the handle: several tasks may
 /// open streams on the same handle at once. A stream comes with
 /// [`NoSendOptions`]: its parameters and destination are set before it is
 /// written to, unless they have defaults.

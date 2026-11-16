@@ -478,6 +478,18 @@ macro_rules! no_share {
 }
 no_share!(LinkEntry, LogicalPath, LinkPath, Established, Recovery);
 
+/// The extension gives the handle of an established layer nothing: what it
+/// gives is the stream writer's reset at a reliable size.
+impl<T: Choices, L>
+    crate::v1::application_handles::HandleShare<
+        T,
+        L,
+        crate::v1::application_handles::handle::EstablishedLayer,
+    > for Part
+{
+    type Share = HNil;
+}
+
 /// The extension's transport parameters start as configured; the part
 /// marks where they are among the components, apart from version 1's.
 impl<T: Choices, L, I> Build<T, L, layer::Connection, (Part, I)>

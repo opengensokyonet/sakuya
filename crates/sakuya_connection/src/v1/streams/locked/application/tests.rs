@@ -100,12 +100,18 @@ impl SendIntentIntake<AnyActiveLinkPath> for Intake {
 }
 
 type Set = LockedStreamSet<(), Ticket, Rfc9000StreamResets>;
-type Layer = EstablishedLayerHandle<
-    LockedStreamSetHandle<(), Ticket, Rfc9000StreamResets, Urgency>,
+/// The handle of a layer whose one share is the set's handle, running with
+/// the selection `A`.
+type LayerOf<A> = EstablishedLayerHandle<
+    frunk_core::HList![LockedStreamSetHandle<(), Ticket, Rfc9000StreamResets, Urgency>],
     Intake,
-    (),
+    A,
     (),
 >;
+/// The handle of a client's layer.
+type Layer = LayerOf<Option<sakuya_tls::extension::alpn::ProtocolName<Bytes>>>;
+/// The handle of a server's layer.
+type ServerLayer = LayerOf<sakuya_tls::server::targets::SelectedTarget<()>>;
 type Publish = IntakeSendIntentHandle<Intake, StreamIntent<Urgency>, ()>;
 
 /// A client's set and the handle of its layer: the server, the peer, grants
@@ -120,6 +126,28 @@ fn client(stream: u32, connection: u32) -> (Set, Layer, Intake, Publish) {
 /// As [`client`], with `receive` bytes the client grants of each stream and
 /// of the connection.
 fn client_receiving(stream: u32, connection: u32, receive: u32) -> (Set, Layer, Intake, Publish) {
+    made(Role::Client, None, stream, connection, receive)
+}
+
+/// A server's set and the handle of its layer, as [`client`] with the
+/// sides swapped.
+fn server(stream: u32, connection: u32) -> (Set, ServerLayer, Intake, Publish) {
+    let selected = sakuya_tls::server::targets::SelectedTarget {
+        target: (),
+        application_protocol: None,
+    };
+    made(Role::Server, selected, stream, connection, 1000)
+}
+
+/// The set of `role` and the handle of its layer, running with `selection`,
+/// as [`client_receiving`] describes them.
+fn made<A>(
+    role: Role,
+    selection: A,
+    stream: u32,
+    connection: u32,
+    receive: u32,
+) -> (Set, LayerOf<A>, Intake, Publish) {
     let granted_to_peer = FlowControlParameters {
         initial_max_data: InitialMaxData::new(v(receive)),
         initial_max_stream_data_bidi_local: InitialMaxStreamDataBidiLocal::new(v(receive)),
@@ -138,7 +166,7 @@ fn client_receiving(stream: u32, connection: u32, receive: u32) -> (Set, Layer, 
     };
     let set = Set::new(
         StreamSetFacts {
-            role: Role::Client,
+            role,
             granted_to_peer,
             granted_by_peer,
             peer_reset_support: (),
@@ -146,7 +174,8 @@ fn client_receiving(stream: u32, connection: u32, receive: u32) -> (Set, Layer, 
         LockedStreamSetConfig::default(),
     );
     let intake = Intake::default();
-    let layer = EstablishedLayerHandle::new(set.handle(), intake.clone(), ());
+    let layer =
+        EstablishedLayerHandle::new(frunk_core::hlist![set.handle()], intake.clone(), selection);
     let publish = intake.handle::<StreamIntent<Urgency>, ()>();
     (set, layer, intake, publish)
 }
@@ -573,4 +602,35 @@ fn an_owned_accept_goes_to_another_thread() {
         .expect("taken");
     let accepted = accepting.join().expect("the accepting thread");
     assert_eq!(accepted.expect("accepted"), id(3));
+}
+
+/// A server's reader tells whether its stream had data in 0-RTT packets,
+/// by the encryption level of the packets its STREAM frames came in
+/// (application-handles «0-RTT 里到的数据怎样标出»): stream 0 had its first
+/// bytes in 1-RTT and later ones in 0-RTT, which arrived late, and is
+/// marked; stream 4 had all of its data in 1-RTT, and is not. The mark
+/// stays.
+#[test]
+fn a_servers_reader_tells_whether_its_stream_had_data_in_zero_rtt_packets() {
+    let (mut set, layer, _intake, publish) = server(100, 1000);
+    set.on_stream_frame(&publish, EncryptionLevel::OneRtt, stream_frame(0, 5, 5))
+        .expect("taken");
+    set.on_stream_frame(&publish, EncryptionLevel::OneRtt, stream_frame(4, 0, 5))
+        .expect("taken");
+    let (_writer, mut zero_rtt) = now(layer.accept_bi()).expect("stream 0");
+    let (_writer, one_rtt) = now(layer.accept_bi()).expect("stream 4");
+    assert_eq!(zero_rtt.share.stream_id, id(0));
+    assert!(
+        !zero_rtt.received_zero_rtt(),
+        "nothing came in 0-RTT packets yet"
+    );
+    set.on_stream_frame(&publish, EncryptionLevel::ZeroRtt, stream_frame(0, 0, 5))
+        .expect("taken");
+    assert!(zero_rtt.received_zero_rtt());
+    assert!(!one_rtt.received_zero_rtt());
+    let chunk = now(zero_rtt.read_chunk_unpin(NonZeroUsize::new(16).expect("not zero")))
+        .expect("read")
+        .expect("data");
+    assert_eq!(chunk, Bytes::from(vec![7; 5]), "the first frame's data");
+    assert!(zero_rtt.received_zero_rtt(), "the mark stays");
 }

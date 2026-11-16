@@ -6,10 +6,42 @@ use std::{
 use sakuya_stream::connection::ImmediateClose;
 
 use super::*;
+use crate::v1::application_handles::{FindHandleShare, KeyedHandleShare};
 
-/// A cell with facts `u32`, an exporter `&'static str`, and no stream set:
-/// what the tests look at is the cell's own.
-type TestCell = ConnectionHandleCell<(), u32, &'static str, (), (), ()>;
+/// A part that gives a layer's handle a share.
+struct First;
+/// Another part that gives a layer's handle a share.
+struct Second;
+
+/// The share of [`First`], which tells one layer from another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FirstShare(u8);
+impl KeyedHandleShare for FirstShare {
+    type Part = First;
+}
+
+/// The share of [`Second`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SecondShare;
+impl KeyedHandleShare for SecondShare {
+    type Part = Second;
+}
+
+/// The shares of a layer's handle: of [`First`], of a part that gives
+/// none, and of [`Second`].
+type Shares = frunk_core::HList![FirstShare, sakuya_wire::parts::HNil, SecondShare];
+
+/// A cell with facts `u32`, an exporter `&'static str`, and the shares
+/// [`Shares`]: what the tests look at is the cell's own.
+type TestCell = ConnectionHandleCell<(), u32, &'static str, Shares, (), ()>;
+
+/// The components of a layer just built hand over the intake and every
+/// share, [`First`]'s with `layer`.
+fn build_layer(cell: &TestCell, layer: u8) {
+    cell.keep_intake(());
+    cell.share_built::<First, _>(FirstShare(layer));
+    cell.share_built::<Second, _>(SecondShare);
+}
 
 #[derive(Default)]
 struct Wakes(AtomicUsize);
@@ -106,7 +138,7 @@ fn a_handshake_that_completed_stays_completed_once_the_connection_closed() {
         cell.poll_established(&mut cx).is_pending(),
         "the established layer is given once it is built"
     );
-    cell.layer_built((), ());
+    build_layer(&cell, 1);
     let layer = match cell.poll_established(&mut cx) {
         Poll::Ready(Ok(layer)) => layer,
         other => panic!("the layer is given: {:?}", other.map(|r| r.is_ok())),
@@ -136,7 +168,7 @@ fn a_server_gives_its_layer_before_the_handshake_completes() {
     let cell = TestCell::new();
     let mut cx = Context::from_waker(Waker::noop());
     cell.keep_selection(());
-    cell.layer_built((), ());
+    build_layer(&cell, 1);
     let early = match cell.poll_early(&mut cx) {
         Poll::Ready(Ok(Some(layer))) => layer,
         _ => panic!("the early layer is given"),
@@ -161,7 +193,7 @@ fn a_layer_built_before_its_selection_is_given_once_the_selection_comes() {
     let cell = TestCell::new();
     let mut cx = Context::from_waker(Waker::noop());
     cell.no_early_layer();
-    cell.layer_built((), ());
+    build_layer(&cell, 1);
     cell.handshake_completed(1, None);
     assert!(
         cell.poll_established(&mut cx).is_pending(),
@@ -170,4 +202,50 @@ fn a_layer_built_before_its_selection_is_given_once_the_selection_comes() {
     cell.keep_selection(());
     assert!(matches!(cell.poll_established(&mut cx), Poll::Ready(Ok(_))));
     assert!(matches!(cell.poll_early(&mut cx), Poll::Ready(Ok(None))));
+}
+
+#[test]
+fn a_layer_is_given_once_every_share_came_and_a_layer_built_again_collects_again() {
+    let cell = TestCell::new();
+    let mut cx = Context::from_waker(Waker::noop());
+    cell.keep_selection(());
+    cell.handshake_completed(1, None);
+    cell.keep_intake(());
+    cell.share_built::<Second, _>(SecondShare);
+    assert!(
+        cell.poll_established(&mut cx).is_pending(),
+        "a share is missing"
+    );
+    cell.share_built::<First, _>(FirstShare(1));
+    let first = match cell.poll_established(&mut cx) {
+        Poll::Ready(Ok(layer)) => layer,
+        _ => panic!("the layer is given"),
+    };
+    assert_eq!(
+        FindHandleShare::<First, _>::find(&first.shares),
+        &FirstShare(1)
+    );
+    // the layer is built again, as after 0-RTT was rejected: its shares and
+    // its selection come again
+    cell.share_built::<First, _>(FirstShare(2));
+    cell.keep_selection(());
+    let still = match cell.poll_established(&mut cx) {
+        Poll::Ready(Ok(layer)) => layer,
+        _ => panic!("the first layer is still given"),
+    };
+    assert_eq!(
+        FindHandleShare::<First, _>::find(&still.shares),
+        &FirstShare(1),
+        "a share is missing"
+    );
+    cell.share_built::<Second, _>(SecondShare);
+    let second = match cell.poll_established(&mut cx) {
+        Poll::Ready(Ok(layer)) => layer,
+        _ => panic!("the second layer is given"),
+    };
+    assert_eq!(
+        FindHandleShare::<First, _>::find(&second.shares),
+        &FirstShare(2)
+    );
+    assert!(!Arc::ptr_eq(&first.layer, &second.layer), "another layer");
 }

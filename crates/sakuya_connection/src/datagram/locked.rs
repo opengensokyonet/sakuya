@@ -7,7 +7,7 @@
 //!   payload ([`DatagramQueueBounds`]). When one more comes, the queue
 //!   drops the oldest ones or the new one, as it is configured
 //!   ([`DatagramOverflow`]), and counts what it dropped
-//!   ([`LockedDatagramQueuesHandle::dropped_datagrams`]). Receiving never
+//!   ([`EstablishedLayerHandle::dropped_datagrams`]). Receiving never
 //!   waits for the application (RFC 9221 §5). The bytes are counted by
 //!   payload: a datagram may keep the buffer of its whole packet.
 //! - **Sending.** A datagram waits in the send queue from when it is sent
@@ -62,7 +62,11 @@ use crate::{
     send_strategy::{
         IntentTicketWithdraw, PublishOutcome, SendIntentHandle, SendIntentIntake, SharedPublishTo,
     },
-    v1::application_handles::connection::{keep_waker, lock, wake_all},
+    v1::application_handles::{
+        FindHandleShare, KeyedHandleShare,
+        connection::{keep_waker, lock, wake_all},
+        established_layer::EstablishedLayerHandle,
+    },
 };
 
 /// The bounds of one queue of datagrams (`DatagramQueueBounds`): how many
@@ -296,7 +300,7 @@ where
     S: DatagramSide,
 {
     type Config = LockedDatagramQueuesConfig;
-    type Handle<N: Clone> = LockedDatagramQueuesHandle<Lc, K, S, N>;
+    type Handle = LockedDatagramQueuesHandle<Lc, K, S>;
 
     fn new(facts: DatagramQueuesFacts, config: LockedDatagramQueuesConfig) -> Self {
         let peer_frame_limit = usize::try_from(facts.peer.get().get()).unwrap_or(usize::MAX);
@@ -319,10 +323,9 @@ where
         }
     }
 
-    fn handle<N: Clone>(&self, intake: N) -> LockedDatagramQueuesHandle<Lc, K, S, N> {
+    fn handle(&self) -> LockedDatagramQueuesHandle<Lc, K, S> {
         LockedDatagramQueuesHandle {
             shared: Arc::clone(&self.shared),
-            intake,
         }
     }
 
@@ -336,30 +339,34 @@ where
 }
 
 /// The handle of a [`LockedDatagramQueues`] (`LockedDatagramQueuesHandle`):
-/// it shares the queues' state, and publishes through the send strategy's
-/// intake `N`. A clone is the same handle.
-pub struct LockedDatagramQueuesHandle<Lc, K, S: DatagramSide, N> {
+/// it shares the queues' state. It is the extension's share of an
+/// established layer's handle, which publishes the datagrams through its
+/// intake. A clone is the same handle.
+pub struct LockedDatagramQueuesHandle<Lc, K, S: DatagramSide> {
     shared: Arc<QueuesShare<Lc, K, S>>,
-    intake: N,
 }
 
-impl<Lc, K, S: DatagramSide, N: Clone> Clone for LockedDatagramQueuesHandle<Lc, K, S, N> {
+impl<Lc, K, S: DatagramSide> Clone for LockedDatagramQueuesHandle<Lc, K, S> {
     fn clone(&self) -> Self {
         Self {
             shared: Arc::clone(&self.shared),
-            intake: self.intake.clone(),
         }
     }
 }
 
-impl<Lc, K, S: DatagramSide, N> fmt::Debug for LockedDatagramQueuesHandle<Lc, K, S, N> {
+/// The extension's share of an established layer's handle.
+impl<Lc, K, S: DatagramSide> KeyedHandleShare for LockedDatagramQueuesHandle<Lc, K, S> {
+    type Part = super::Part;
+}
+
+impl<Lc, K, S: DatagramSide> fmt::Debug for LockedDatagramQueuesHandle<Lc, K, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LockedDatagramQueuesHandle")
             .finish_non_exhaustive()
     }
 }
 
-impl<Lc, K, S: DatagramSide, N> LockedDatagramQueuesHandle<Lc, K, S, N> {
+impl<Lc, K, S: DatagramSide> LockedDatagramQueuesHandle<Lc, K, S> {
     /// How many datagrams received were dropped because the receive queue
     /// was full; it only grows.
     pub fn dropped_datagrams(&self) -> u64 {
@@ -367,10 +374,30 @@ impl<Lc, K, S: DatagramSide, N> LockedDatagramQueuesHandle<Lc, K, S, N> {
     }
 }
 
-/// The capability of the queues: the writer publishes through the intake's
-/// handle for the datagram intents at the place `I`.
-impl<Lc, K, S, N, I> Datagrams<I> for LockedDatagramQueuesHandle<Lc, K, S, N>
+/// What the default queues give the handle of an established layer besides
+/// the capability.
+impl<Sh, N, A, Lc> EstablishedLayerHandle<Sh, N, A, Lc> {
+    /// How many datagrams the layer received were dropped because the
+    /// receive queue was full
+    /// ([`LockedDatagramQueuesHandle::dropped_datagrams`]); `Iq` is where
+    /// the queues' handle is among the shares `Sh`, which the compiler
+    /// infers.
+    pub fn dropped_datagrams<Iq, K, S>(&self) -> u64
+    where
+        Sh: FindHandleShare<super::Part, Iq, Found = LockedDatagramQueuesHandle<Lc, K, S>>,
+        S: DatagramSide,
+    {
+        self.shares.find().dropped_datagrams()
+    }
+}
+
+/// The capability of the queues, on the handle of an established layer
+/// whose shares `Sh` hold the queues' handle at the place `Iq`: the writer
+/// publishes through the intake's handle for the datagram intents at the
+/// place `I`.
+impl<Sh, Lc, K, S, N, A, Iq, I> Datagrams<(Iq, I)> for EstablishedLayerHandle<Sh, N, A, Lc>
 where
+    Sh: FindHandleShare<super::Part, Iq, Found = LockedDatagramQueuesHandle<Lc, K, S>>,
     K: IntentTicketWithdraw,
     S: DatagramSide,
     N: SendIntentIntake<AnyActiveLinkPath>
@@ -385,13 +412,13 @@ where
         &self,
     ) -> DatagramWriter<Self::SendShare, sakuya_stream::send_options::NoSendOptions> {
         DatagramWriter::new(LockedDatagramSendShare {
-            shared: Arc::clone(&self.shared),
+            shared: Arc::clone(&self.shares.find().shared),
             publish: self.intake.handle::<DatagramIntent<Urgency>, I>(),
         })
     }
 
     fn recv_datagram(&self) -> impl Future<Output = Result<S::Received, LayerEndedError<Lc>>> {
-        let shared = &self.shared;
+        let shared = Arc::clone(&self.shares.find().shared);
         poll_fn(move |cx| shared.poll_receive(cx))
     }
 }

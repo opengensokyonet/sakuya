@@ -212,6 +212,13 @@ impl<Lc, K, Rs: StreamResets, P> Clone for LockedStreamSetHandle<Lc, K, Rs, P> {
     }
 }
 
+/// Version 1's share of an established layer's handle.
+impl<Lc, K, Rs: StreamResets, P> crate::v1::application_handles::KeyedHandleShare
+    for LockedStreamSetHandle<Lc, K, Rs, P>
+{
+    type Part = crate::v1::Part;
+}
+
 impl<Lc, K, Rs: StreamResets, P> fmt::Debug for LockedStreamSetHandle<Lc, K, Rs, P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LockedStreamSetHandle")

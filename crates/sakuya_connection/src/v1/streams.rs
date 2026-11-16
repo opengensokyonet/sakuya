@@ -68,7 +68,11 @@ use self::send::{
 };
 use super::{
     Choices, CloseCauseOf, ConnectionArgs, Side,
-    application_handles::connection::ConnectionHandleCellOf,
+    application_handles::{
+        FindHandleShare, HandleShares, KeyedHandleShare,
+        connection::{ConnectionHandleCellOf, EstablishedLayerSharesOf},
+        handle,
+    },
     close::CloseReasonRecord,
     own_args,
     parameters::{LocalTransportParameters, PeerTransportParameters},
@@ -114,7 +118,7 @@ use crate::{
 pub trait StreamSet<Lc, K, X: StreamResets>: Sized {
     /// What the application opens and accepts streams through; the
     /// established layer's handle keeps one.
-    type Handle: Clone;
+    type Handle: Clone + KeyedHandleShare<Part = super::Part>;
 
     /// What the composition configures the stream set with; the connection
     /// node keeps it from the connection's making until the established
@@ -633,19 +637,23 @@ pub struct ChosenStreamSet;
 /// When the layer ends, every stream hears that the connection closed, for
 /// the reason in the record of why the connection closed.
 ///
-/// The cell of the connection handle in the connection node is handed what
-/// the layer's handle holds when the layer is built, the set's handle and
-/// the send strategy's intake, and the layer's end when it ends.
-impl<T, L, X, Il, Ip, Ic, Ir, Ih, In, Jl, Jp, Jr>
-    Build<T, L, layer::Established, (ChosenStreamSet, (Il, Ip, Ic, Ir, Ih, In), (Jl, Jp, Jr))> for X
+/// The cell of the connection handle in the connection node is handed
+/// version 1's share of the layer's handle when the layer is built, the
+/// set's handle, together with the send strategy's intake, which every
+/// layer's handle publishes through; and the layer's end when it ends.
+impl<T, L, X, Il, Ip, Ic, Ir, Ih, In, Jl, Jp, Jr, Js>
+    Build<T, L, layer::Established, (ChosenStreamSet, (Il, Ip, Ic, Ir, Ih, In), (Jl, Jp, Jr, Js))>
+    for X
 where
     T: Choices<Streams<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>, StreamResetsOfParts<L>> = X>,
     L: LineagePartList<T>
         + ConnectionErrorsOf
         + StreamResetsOf
-        + ParametersOf<TransportParameterSpace>,
+        + ParametersOf<TransportParameterSpace>
+        + HandleShares<T, L, handle::EstablishedLayer>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    EstablishedLayerSharesOf<T, L>: FindHandleShare<super::Part, Js, Found = X::Handle>,
     X: StreamSet<
             CloseCauseOf<T, L>,
             StreamIntentTicketOf<T, L>,
@@ -698,9 +706,9 @@ where
             .get::<SendStrategyIntake<IntakeOf<T, L>>, In>()
             .intake()
             .clone();
-        parents
-            .get::<ConnectionHandleCellOf<T, L>, Ih>()
-            .layer_built(set.handle(), intake);
+        let cell = parents.get::<ConnectionHandleCellOf<T, L>, Ih>();
+        cell.keep_intake(intake);
+        cell.share_built::<super::Part, Js>(set.handle());
         set
     }
 

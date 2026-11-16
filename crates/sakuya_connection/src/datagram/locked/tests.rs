@@ -108,10 +108,15 @@ impl SendStrategyTypes for TestTypes {
 type Core = RankedSendStrategy<TestTypes>;
 type Planner = RankedLinkPathSendPlanner<TestTypes>;
 type Queues = LockedDatagramQueues<(), IntentTicket<()>, TestSide>;
-type Handle =
-    LockedDatagramQueuesHandle<(), IntentTicket<()>, TestSide, RankedSendIntake<TestTypes>>;
+/// The handle of a layer whose one share is the queues' handle.
+type Handle = EstablishedLayerHandle<
+    frunk_core::HList![LockedDatagramQueuesHandle<(), IntentTicket<()>, TestSide>],
+    RankedSendIntake<TestTypes>,
+    (),
+    (),
+>;
 type Writer = DatagramWriter<
-    <Handle as Datagrams<InHead<Here>>>::SendShare,
+    <Handle as Datagrams<(Here, InHead<Here>)>>::SendShare,
     sakuya_stream::send_options::NoSendOptions,
 >;
 
@@ -132,7 +137,8 @@ fn queues(peer: u32, config: LockedDatagramQueuesConfig) -> (Queues, Core, Handl
     );
     let mut core = Core::new();
     core.send_keys_available(sakuya_wire::v1::encryption_level::EncryptionLevel::OneRtt);
-    let handle = queues.handle(core.intake());
+    let handle =
+        EstablishedLayerHandle::new(frunk_core::hlist![queues.handle()], core.intake(), ());
     (queues, core, handle)
 }
 
@@ -154,7 +160,7 @@ fn sending(peer: u32, send: DatagramQueueBounds) -> (Queues, Core, Handle, Write
             ..LockedDatagramQueuesConfig::default()
         },
     );
-    let writer = Datagrams::<InHead<Here>>::datagram_writer(&handle);
+    let writer = Datagrams::<(Here, InHead<Here>)>::datagram_writer(&handle);
     (queues, core, handle, writer)
 }
 
@@ -167,7 +173,7 @@ fn poll_now<F: core::future::Future>(future: F) -> Poll<F::Output> {
 }
 
 fn recv(handle: &Handle) -> Poll<Result<Bytes, LayerEndedError<()>>> {
-    poll_now(Datagrams::<InHead<Here>>::recv_datagram(handle))
+    poll_now(Datagrams::<(Here, InHead<Here>)>::recv_datagram(handle))
 }
 
 fn received(handle: &Handle) -> Vec<Bytes> {

@@ -761,6 +761,16 @@ mod watch {
         type Data = HList![SpaceWatch];
         type Calls = HNil;
     }
+    /// The watch gives the handle of an established layer nothing.
+    impl<T: v1::Choices, L>
+        v1::application_handles::HandleShare<
+            T,
+            L,
+            v1::application_handles::handle::EstablishedLayer,
+        > for Part
+    {
+        type Share = HNil;
+    }
 }
 
 // ---- the network ----
@@ -872,7 +882,7 @@ macro_rules! connection {
     ($t:ty, $args:expr, $link:expr $(, $rest:expr)*) => {
         ConnectionDriver::<$t, Parts, _, _, _>::new(
             TestClock,
-            frunk_core::hlist![$args, HNil $(, $rest)*],
+            frunk_core::hlist![$args $(, $rest)*],
             LogicalPathArgs { path: PATH },
             LinkPathArgs {
                 path: PATH,
@@ -894,7 +904,7 @@ fn starts_with_initial(datagram: &[u8]) -> bool {
 /// The harness of the runs for the parts `Parts` in scope: version 1's
 /// facts ([`args`]), what a run left ([`Run`]) and the run of a handshake
 /// ([`handshake`]); `$server` and `$client` are what each side's parts
-/// after the watch are given.
+/// after version 1 are given, in the order of `Parts`.
 macro_rules! harness {
     (server: [$($server:expr),*], client: [$($client:expr),*]) => {
 /// Version 1's facts for a connection of the choices `T`.
@@ -1081,7 +1091,7 @@ fn handshake(
     };
 }
 
-harness!(server: [], client: []);
+harness!(server: [HNil], client: [HNil]);
 
 fn tls_clock() -> Arc<ManualClock> {
     Arc::new(ManualClock::new(tls_now()))
@@ -1467,7 +1477,7 @@ mod reliable {
         frunk_core::hlist![announces.then_some(ResetStreamAt)]
     }
 
-    harness!(server: [slots(Role::Server)], client: [slots(Role::Client)]);
+    harness!(server: [HNil, slots(Role::Server)], client: [HNil, slots(Role::Client)]);
 
     /// Run a handshake with the server announcing `reset_stream_at` if
     /// `server` and the client if `client`, as [`handshake`] does.
@@ -1583,25 +1593,21 @@ mod reliable {
 }
 
 /// A client and a server whose compositions have the DATAGRAM extension,
-/// each announcing a `max_datagram_frame_size` or not; a stand-in part
-/// takes each side's handle of its datagram queues once the layer is
-/// built.
+/// each announcing a `max_datagram_frame_size` or not; the tests send and
+/// receive through the handles of the established layers the connection
+/// handles give.
 #[cfg(feature = "datagram")]
 mod datagram {
-    use std::{any::Any, cell::Cell};
+    use std::cell::Cell;
 
     use sakuya_connection::{
         datagram::{
-            self, DatagramChoices, DatagramConnectionArgs, DatagramQueues, DatagramQueuesOf,
-            DatagramSide, ServerReceivedDatagram,
+            self, DatagramChoices, DatagramConnectionArgs, DatagramSide, ServerReceivedDatagram,
             application::SendDatagramError,
-            locked::{
-                LockedDatagramQueues, LockedDatagramQueuesConfig, LockedDatagramQueuesHandle,
-            },
+            locked::{LockedDatagramQueues, LockedDatagramQueuesConfig},
             send::{DatagramSettlement, DatagramState},
         },
         send_strategy::IntentTicketWithdraw,
-        v1::send_planning::{IntakeOf, SendStrategyIntake},
     };
     use sakuya_wire::datagram::MaxDatagramFrameSize;
 
@@ -1619,25 +1625,25 @@ mod datagram {
         type DatagramQueuesConfig = LockedDatagramQueuesConfig;
     }
 
-    /// The parts of these connections: version 1, the watch, the extension
-    /// and the part that takes the handles.
-    type Parts = HList![v1::Part, watch::Part, datagram::Part, grab::Part];
-
-    /// The handle of the datagram queues of the side of the choices `T`.
-    type QueuesHandle<T> = LockedDatagramQueuesHandle<
-        CloseCauseOf<T, Parts>,
-        datagram::DatagramTicketOf<T, Parts>,
-        <T as v1::Choices>::Side,
-        IntakeOf<T, Parts>,
-    >;
+    /// The parts of these connections: version 1, the extension, and the
+    /// watch; with the reliable stream reset extension too, the DATAGRAM
+    /// extension comes last, after it. Both orders run the same tests; one
+    /// binary with both harnesses would not link with its debug
+    /// information.
+    #[cfg(not(feature = "reset_stream_at"))]
+    type Parts = HList![v1::Part, datagram::Part, watch::Part];
+    #[cfg(feature = "reset_stream_at")]
+    type Parts = HList![
+        v1::Part,
+        watch::Part,
+        sakuya_connection::reset_stream_at::Part,
+        datagram::Part
+    ];
 
     thread_local! {
         /// The `max_datagram_frame_size` each side announces: the
         /// server's first; 0 leaves it out.
         static ANNOUNCES: Cell<[u32; 2]> = const { Cell::new([65535, 65535]) };
-        /// Each side's handle of its datagram queues, once its layer is
-        /// built: the server's first.
-        static HANDLES: RefCell<[Option<Box<dyn Any>>; 2]> = const { RefCell::new([None, None]) };
     }
 
     /// The extension's facts of the side of `role`, as the test set them.
@@ -1651,23 +1657,21 @@ mod datagram {
         }
     }
 
+    #[cfg(not(feature = "reset_stream_at"))]
     harness!(server: [datagram_args(Role::Server), HNil], client: [datagram_args(Role::Client), HNil]);
-
-    /// The handle the side of the choices `$t` took, once it did.
-    macro_rules! taken_handle {
-        ($name:ident, $t:ty, $role:expr) => {
-            fn $name() -> Option<QueuesHandle<$t>> {
-                HANDLES.with(|handles| {
-                    handles.borrow()[index($role)]
-                        .as_ref()
-                        .and_then(|handle| handle.downcast_ref::<QueuesHandle<$t>>())
-                        .cloned()
-                })
-            }
-        };
-    }
-    taken_handle!(client_handle, ClientChoices, Role::Client);
-    taken_handle!(server_handle, ServerChoices, Role::Server);
+    #[cfg(feature = "reset_stream_at")]
+    harness!(
+        server: [
+            HNil,
+            frunk_core::hlist![Some(sakuya_wire::reset_stream_at::ResetStreamAt)],
+            datagram_args(Role::Server)
+        ],
+        client: [
+            HNil,
+            frunk_core::hlist![Some(sakuya_wire::reset_stream_at::ResetStreamAt)],
+            datagram_args(Role::Client)
+        ]
+    );
 
     /// Run a handshake with the server announcing `server` and the client
     /// `client` as their `max_datagram_frame_size`, as [`handshake`] does.
@@ -1678,164 +1682,70 @@ mod datagram {
         done: impl FnMut(&Run) -> bool,
     ) -> Run {
         ANNOUNCES.with(|announces| announces.set([server, client]));
-        HANDLES.with(|handles| *handles.borrow_mut() = [None, None]);
         handshake(client_engine(clock, 1), clock, done)
     }
 
-    /// The part that takes the handles.
-    mod grab {
-        use super::*;
-
-        pub struct Part;
-        impl LogicalPathKeyShare for Part {
-            type Fields = HNil;
-        }
-        impl<L> sakuya_connection::error::ConnectionErrorPart<L> for Part {
-            type ConnectionError = core::convert::Infallible;
-        }
-        impl sakuya_connection::v1::streams::resets::StreamResetsPart for Part {
-            type Fold<Prev: sakuya_connection::v1::streams::resets::StreamResets> = Prev;
-        }
-        impl ParametersPart<TransportParameterSpace> for Part {
-            type Parameters = HNil;
-        }
-        impl sakuya_connection::send_strategy::SendIntentPart for Part {
-            type FrameSourceId = CNil;
-            type SendIntents = CNil;
-            type FrameSources = HNil;
-        }
-        impl<K: sakuya_connection::frame_source::PacketKind>
-            sakuya_connection::frame_source::FrameSourcePart<K> for Part
-        {
-            fn item(intent: &CNil) -> Option<CNil> {
-                match *intent {}
+    /// The client opens a stream and sends a datagram through the same
+    /// handle of its established layer, and the server accepts the stream
+    /// and receives the datagram through the same handle of its own: the
+    /// capabilities find their shares wherever the parts are.
+    #[test]
+    fn one_layer_handle_opens_streams_and_exchanges_datagrams() {
+        let clock = tls_clock();
+        let mut client_stream = None;
+        let mut server_stream = None;
+        let mut read = Vec::new();
+        let mut received = None;
+        run_announcing(65535, 65535, &clock, |run| {
+            let Poll::Ready(Ok(client)) = poll_now(run.client_handle.established()) else {
+                return false;
+            };
+            if client_stream.is_none() {
+                let (mut writer, reader) = client.try_open_bi().expect("the server grants streams");
+                ready(writer.write_all_unpin(Bytes::from_static(b"hello")))
+                    .expect("the data is written");
+                writer.close().expect("the stream ends");
+                client
+                    .datagram_writer()
+                    .send(Bytes::from_static(b"ping"))
+                    .expect("the server announced support")
+                    .release();
+                client_stream = Some((writer, reader));
             }
-            fn source(item: &CNil) -> CNil {
-                match *item {}
-            }
-        }
-
-        const NO_FRAME_TYPES: FrameTypeValues = FrameTypeValues::new(&[]);
-
-        impl FrameSetPart for Part {
-            type Run<D> = CNil;
-            type Kind = CNil;
-            type TypeValue = CNil;
-            type FieldsError<E> = CNil;
-
-            const FRAME_TYPE_VALUES: &'static FrameTypeValues = &NO_FRAME_TYPES;
-
-            fn type_value_of(_: VarInt) -> Option<CNil> {
-                None
-            }
-
-            fn kind_of(type_value: CNil) -> CNil {
-                match type_value {}
-            }
-
-            fn run_kind<D>(run: &CNil) -> CNil {
-                match *run {}
-            }
-
-            fn read_run<H>(_: &mut H, type_value: CNil) -> Result<CNil, CNil>
-            where
-                H: bytes::Buf + nitori_call::Receiver<Family = nitori_call::Direct<H>> + Unpin,
-                nitori_call::Direct<H>: nitori_io::ReadChunk<Chunk: Default>,
+            let Poll::Ready(Ok(server)) = poll_now(run.server_handle.established()) else {
+                return false;
+            };
+            if server_stream.is_none()
+                && let Poll::Ready(stream) = poll_now(server.accept_bi())
             {
-                match type_value {}
+                server_stream = Some(stream.expect("the client's stream is accepted"));
             }
-        }
-        impl<T: ConnectionChoices, L> FrameDispatch<T, L, ()> for Part
-        where
-            for<'v> L: LineageLists<'v, T>,
-        {
-            fn dispatch<'v, B: CallBundle>(
-                _: &mut LineageOf<'v, T, L, layer::LogicalPath>,
-                _: &mut OtherNodes<'v, T, L, B>,
-                run: CNil,
-                _: &DispatchFacts<InstantOf<T>, LinkPathIdentifierOf<T, L>>,
-            ) -> Result<(), core::convert::Infallible> {
-                match run {}
-            }
-
-            fn fields_error(error: CNil) -> core::convert::Infallible {
-                match error {}
-            }
-        }
-
-        /// In the established layer: takes the handle of the datagram
-        /// queues once the layer is built, when every component of the
-        /// new node counts as changed.
-        #[derive(Debug)]
-        pub struct Grab;
-        impl<T: v1::Choices, L> Build<T, L, layer::Established, ()> for Grab
-        where
-            for<'v> L: LineageLists<'v, T>,
-        {
-            fn build<'v>(
-                _: &mut ParentsOf<'v, T, L, layer::Established>,
-                _: &mut ArgsOf<T, L, layer::Established>,
-            ) -> Self {
-                Grab
-            }
-        }
-        impl<T, L, Iq, Ii> DataComponent<T, L, layer::Established, (Iq, Ii)> for Grab
-        where
-            T: DatagramChoices<Clock = TestClock>,
-            L: LineagePartList<T> + ConnectionErrorsOf,
-            v1::send::SendTypes<T, L>: v1::send_planning::IntakePublishOutcome<
-                    sakuya_connection::datagram::send::DatagramIntent<
-                        sakuya_stream::send_options::urgency::Urgency,
-                    >,
-                    sakuya_connection::send_strategy::AnyActiveLinkPath,
-                >,
-            datagram::DatagramTicketOf<T, L>: IntentTicketWithdraw,
-            v1::send_planning::SendStrategyOf<T, L>:
-                sakuya_connection::send_strategy::SendStrategy<v1::send::SendTypes<T, L>>,
-            DatagramQueuesOf<T, L>: 'static,
-            IntakeOf<T, L>: Clone + 'static,
-            <DatagramQueuesOf<T, L> as DatagramQueues<CloseCauseOf<T, L>>>::Handle<IntakeOf<T, L>>:
-                'static,
-            for<'v> <L as LineageLists<'v, T>>::Established:
-                GetAt<DatagramQueuesOf<T, L>, Iq> + GetAt<SendStrategyIntake<IntakeOf<T, L>>, Ii>,
-        {
-            fn reads(reads: &mut ReadSet) {
-                reads.add::<DatagramQueuesOf<T, L>>();
-            }
-            fn reread<'v, B: CallBundle>(
-                lineage: LineageOf<'v, T, L, layer::Established>,
-                _: &mut OtherNodes<'v, T, L, B>,
-                _: Duration,
-            ) -> Option<RequestOf<T, L>> {
-                let role = <T::Side as Side>::ROLE;
-                HANDLES.with(|handles| {
-                    let slot = &mut handles.borrow_mut()[index(role)];
-                    if slot.is_none() {
-                        let intake = lineage
-                            .get::<SendStrategyIntake<IntakeOf<T, L>>, Ii>()
-                            .intake()
-                            .clone();
-                        let handle = lineage.get::<DatagramQueuesOf<T, L>, Iq>().handle(intake);
-                        *slot = Some(Box::new(handle));
-                    }
-                });
-                None
-            }
-        }
-
-        macro_rules! none {
-            ($($lv:ident),*) => {$(
-                impl<T: v1::Choices, L> LayerShare<T, L, layer::$lv> for Part {
-                    type Data = HNil;
-                    type Calls = HNil;
+            if let Some((_, reader)) = &mut server_stream {
+                let maximum = NonZeroUsize::new(64).expect("not zero");
+                while let Poll::Ready(Ok(Some(chunk))) = poll_now(reader.read_chunk_unpin(maximum))
+                {
+                    read.extend_from_slice(&chunk);
                 }
-            )*};
-        }
-        none!(Connection, LinkEntry, LogicalPath, LinkPath, Recovery);
-        impl<T: v1::Choices, L> LayerShare<T, L, layer::Established> for Part {
-            type Data = HList![Grab];
-            type Calls = HNil;
-        }
+            }
+            if received.is_none()
+                && let Poll::Ready(datagram) = poll_now(server.recv_datagram())
+            {
+                let datagram: ServerReceivedDatagram = datagram.expect("the layer goes on");
+                received = Some(datagram.into_bytes());
+            }
+            read == b"hello" && received.is_some()
+        });
+        assert_eq!(read, b"hello");
+        assert_eq!(received, Some(Bytes::from_static(b"ping")));
+        let (server, client) = (noted(Role::Server), noted(Role::Client));
+        assert_eq!(
+            server.record, None,
+            "the server's connection is not closing"
+        );
+        assert_eq!(
+            client.record, None,
+            "the client's connection is not closing"
+        );
     }
 
     /// Over the tests' in-memory link, the client sends a datagram and the
@@ -1849,8 +1759,11 @@ mod datagram {
         let mut answered = false;
         let mut answer = None;
         let mut settled = None;
-        let run = run_announcing(65535, 65535, &clock, |_| {
-            let (Some(client), Some(server)) = (client_handle(), server_handle()) else {
+        run_announcing(65535, 65535, &clock, |run| {
+            let (Poll::Ready(Ok(client)), Poll::Ready(Ok(server))) = (
+                poll_now(run.client_handle.established()),
+                poll_now(run.server_handle.established()),
+            ) else {
                 return false;
             };
             if ticket.is_none() {
@@ -1890,10 +1803,6 @@ mod datagram {
         let ticket = ticket.expect("sent");
         assert_eq!(ticket.state(), DatagramState::Acknowledged);
         ticket.release();
-        // the handles were taken from the layers the connection handles
-        // give
-        assert!(ready(run.server_handle.established()).is_ok());
-        assert!(ready(run.client_handle.established()).is_ok());
         let (server, client) = (noted(Role::Server), noted(Role::Client));
         assert_eq!(
             server.record, None,
@@ -1911,8 +1820,8 @@ mod datagram {
     fn nothing_is_sent_to_a_server_that_did_not_announce_support() {
         let clock = tls_clock();
         let mut refused = None;
-        run_announcing(0, 65535, &clock, |_| {
-            let Some(client) = client_handle() else {
+        run_announcing(0, 65535, &clock, |run| {
+            let Poll::Ready(Ok(client)) = poll_now(run.client_handle.established()) else {
                 return false;
             };
             let writer = Datagrams::datagram_writer(&client);
@@ -1935,8 +1844,8 @@ mod datagram {
     fn a_datagram_over_the_servers_limit_is_too_large() {
         let clock = tls_clock();
         let mut results = None;
-        run_announcing(100, 65535, &clock, |_| {
-            let Some(client) = client_handle() else {
+        run_announcing(100, 65535, &clock, |run| {
+            let Poll::Ready(Ok(client)) = poll_now(run.client_handle.established()) else {
                 return false;
             };
             let writer = Datagrams::datagram_writer(&client);

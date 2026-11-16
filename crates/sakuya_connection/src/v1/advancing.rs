@@ -98,8 +98,10 @@ use sakuya_wire::{
 
 use super::{
     Choices, Client, CloseCauseOf, ConnectionArgs, Server,
-    application_handles::connection::{
-        ClientHandshakeFacts, ConnectionHandleCellOf, ServerHandshakeFacts,
+    application_handles::{
+        HandleShares,
+        connection::{ClientHandshakeFacts, ConnectionHandleCellOf, ServerHandshakeFacts},
+        handle,
     },
     close::{CloseReasonRecord, LocalCloseCause},
     confirmation::HandshakeConfirmation,
@@ -881,6 +883,7 @@ impl<
         B,
     >
 where
+    L: HandleShares<T, L, handle::EstablishedLayer>,
     T: Choices<Side = Server<Tls>>,
     Tls: ServerHandshakeSteps + 'static,
     Tls::AlertError: 'static,
@@ -1084,6 +1087,7 @@ impl<
         ),
     > for ServerAdvancingKind<Tls>
 where
+    L: HandleShares<T, L, handle::EstablishedLayer>,
     T: Choices<Side = Server<Tls>>,
     Tls: ServerHandshakeSteps + 'static,
     Tls::AlertError: 'static,
@@ -1336,6 +1340,7 @@ impl<
         B,
     >
 where
+    L: HandleShares<T, L, handle::EstablishedLayer>,
     T: Choices<Side = Client<Tls>>,
     Tls: ClientHandshakeSteps + 'static,
     Tls::AlertError: 'static,
@@ -1469,6 +1474,7 @@ impl<T, L, Tls, Icr, Ics, Iv, Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc,
         ),
     > for ClientAdvancingKind<Tls>
 where
+    L: HandleShares<T, L, handle::EstablishedLayer>,
     T: Choices<Side = Client<Tls>>,
     Tls: ClientHandshakeSteps + 'static,
     Tls::AlertError: 'static,

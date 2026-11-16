@@ -28,6 +28,7 @@
 
 use core::{
     future::{Future, poll_fn, ready},
+    marker::PhantomData,
     num::NonZeroUsize,
     pin::Pin,
     task::{Context, Poll, Waker},
@@ -51,6 +52,7 @@ use sakuya_stream::{
         NoSendOptions, SendOptions, destination::AnyActiveLinkPath, urgency::SendUrgency,
     },
 };
+use sakuya_tls::role;
 use sakuya_wire::{
     v1::{
         application_error::ApplicationErrorCode,
@@ -67,9 +69,11 @@ use crate::{
     send_strategy::{IntentTicketResize, IntentTicketWithdraw, SendIntentIntake, SharedPublishTo},
     v1::{
         application_handles::{
+            FindHandleShare,
             connection::keep_waker,
             established_layer::{
-                AcceptStreams, EstablishedLayerHandle, OpenStreams, TryOpenStreamError,
+                AcceptStreams, EstablishedLayerHandle, LayerSelection, OpenStreams,
+                TryOpenStreamError,
             },
             stream::{AllAcknowledgedError, StreamRead, StreamReader, StreamWrite, StreamWriter},
         },
@@ -127,8 +131,12 @@ where
 /// (`LockedStreamReceiveShare`), which a [`StreamReader`] holds, as
 /// [`LockedStreamSendShare`] is of a sending part.
 ///
+/// `Ro` is the role of this side, [`role::Client`] or [`role::Server`]: a
+/// server's reader also tells whether the stream had data in 0-RTT
+/// packets ([`StreamReader::received_zero_rtt`]).
+///
 /// [`LockedStreamSet`]: super::LockedStreamSet
-pub struct LockedStreamReceiveShare<Lc, K, Rs: StreamResets, P, H>
+pub struct LockedStreamReceiveShare<Lc, K, Rs: StreamResets, P, H, Ro>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
@@ -138,6 +146,7 @@ where
     stream_id: StreamId,
     shared: Arc<StreamSetShare<Lc, K, Rs, P>>,
     publish: H,
+    role: PhantomData<fn() -> Ro>,
 }
 
 /// Nothing of a share is pinned.
@@ -150,7 +159,7 @@ where
 }
 
 /// Nothing of a share is pinned.
-impl<Lc, K, Rs: StreamResets, P, H> Unpin for LockedStreamReceiveShare<Lc, K, Rs, P, H>
+impl<Lc, K, Rs: StreamResets, P, H, Ro> Unpin for LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
@@ -170,7 +179,8 @@ where
     }
 }
 
-impl<Lc, K, Rs: StreamResets, P, H> core::fmt::Debug for LockedStreamReceiveShare<Lc, K, Rs, P, H>
+impl<Lc, K, Rs: StreamResets, P, H, Ro> core::fmt::Debug
+    for LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
@@ -308,7 +318,7 @@ where
     }
 }
 
-impl<Lc, K, Rs: StreamResets, P, H> LockedStreamReceiveShare<Lc, K, Rs, P, H>
+impl<Lc, K, Rs: StreamResets, P, H, Ro> LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
@@ -388,7 +398,7 @@ where
 }
 
 /// The reader gives the reading up when it is dropped.
-impl<Lc, K, Rs: StreamResets, P, H> Drop for LockedStreamReceiveShare<Lc, K, Rs, P, H>
+impl<Lc, K, Rs: StreamResets, P, H, Ro> Drop for LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
@@ -403,7 +413,7 @@ where
 }
 
 /// The receiving part's STOP, under its lock.
-impl<Lc, K, Rs: StreamResets, P, H> StreamRead for LockedStreamReceiveShare<Lc, K, Rs, P, H>
+impl<Lc, K, Rs: StreamResets, P, H, Ro> StreamRead for LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
@@ -417,7 +427,8 @@ where
 }
 
 /// A reader of the default set reads its receiving part.
-impl<Lc, K, Rs: StreamResets, P, H> Read for StreamReader<LockedStreamReceiveShare<Lc, K, Rs, P, H>>
+impl<Lc, K, Rs: StreamResets, P, H, Ro> Read
+    for StreamReader<LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro>>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
@@ -442,8 +453,8 @@ where
 
 /// A reader of the default set reads blocks of its receiving part, cut at
 /// the maximum.
-impl<Lc, K, Rs: StreamResets, P, H> ReadChunk
-    for StreamReader<LockedStreamReceiveShare<Lc, K, Rs, P, H>>
+impl<Lc, K, Rs: StreamResets, P, H, Ro> ReadChunk
+    for StreamReader<LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro>>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
@@ -463,6 +474,48 @@ where
             .get_mut()
             .share
             .poll_read_chunk(cx, maximum)
+    }
+}
+
+/// A server's reader tells whether the stream had data in 0-RTT packets,
+/// which may be replayed (RFC 9001 §9.2); a client receives none
+/// (RFC 9001 §5.6), and its reader has no such method:
+///
+/// ```compile_fail,E0599
+/// # use sakuya_connection::v1::{
+/// #     application_handles::stream::StreamReader,
+/// #     streams::locked::application::LockedStreamReceiveShare,
+/// # };
+/// # use sakuya_tls::role::Client;
+/// fn ask<Lc, K, Rs, P, H>(
+///     reader: &StreamReader<LockedStreamReceiveShare<Lc, K, Rs, P, H, Client>>,
+/// ) -> bool
+/// where
+///     K: sakuya_connection::send_strategy::IntentTicketResize
+///         + sakuya_connection::send_strategy::IntentTicketWithdraw,
+///     Rs: sakuya_connection::v1::streams::resets::StreamResets,
+///     P: Clone + PartialEq + Default + sakuya_stream::send_options::urgency::SendUrgency,
+///     H: sakuya_connection::v1::streams::send::StreamIntentHandle<P, K>,
+/// {
+///     reader.received_zero_rtt()
+/// }
+/// ```
+impl<Lc, K, Rs: StreamResets, P, H>
+    StreamReader<LockedStreamReceiveShare<Lc, K, Rs, P, H, role::Server>>
+where
+    K: IntentTicketResize + IntentTicketWithdraw,
+    P: Clone + PartialEq + Default + SendUrgency,
+    H: StreamIntentHandle<P, K>,
+{
+    /// Whether a STREAM frame of the stream arrived in a 0-RTT packet and
+    /// was taken: data the client sent in 0-RTT, which an attacker may
+    /// replay (RFC 9001 §9.2). It is marked by the packet's encryption
+    /// level, whenever the frame arrives, and stays once marked; data the
+    /// client sent again in 1-RTT packets is not marked. A server that
+    /// takes no 0-RTT data receives none there, so it is `false` for every
+    /// stream.
+    pub fn received_zero_rtt(&self) -> bool {
+        self.share.part.lock().receiver.received_zero_rtt()
     }
 }
 
@@ -591,14 +644,14 @@ where
 /// The writer and reader of the parts `parts` of `id`, sharing `shared`
 /// and publishing through `publish`.
 #[allow(clippy::type_complexity)]
-fn handles<Lc, K, Rs: StreamResets, P, H>(
+fn handles<Lc, K, Rs: StreamResets, P, H, Ro>(
     shared: &Arc<StreamSetShare<Lc, K, Rs, P>>,
     publish: &H,
     id: StreamId,
     parts: FoundParts<Lc, K, Rs, P>,
 ) -> (
     Option<StreamWriter<LockedStreamSendShare<Lc, K, Rs, P, H>, NoSendOptions>>,
-    Option<StreamReader<LockedStreamReceiveShare<Lc, K, Rs, P, H>>>,
+    Option<StreamReader<LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro>>>,
 )
 where
     K: IntentTicketResize + IntentTicketWithdraw,
@@ -619,6 +672,7 @@ where
             stream_id: id,
             shared: Arc::clone(shared),
             publish: publish.clone(),
+            role: PhantomData,
         })
     });
     (writer, reader)
@@ -634,13 +688,15 @@ type SendShareOf<Lc, K, Rs, P, N, I> = LockedStreamSendShare<
     <N as SendIntentIntake<AnyActiveLinkPath>>::Handle<StreamIntent<P>, I>,
 >;
 
-/// The share of a stream's receiving part, as [`SendShareOf`].
-type ReceiveShareOf<Lc, K, Rs, P, N, I> = LockedStreamReceiveShare<
+/// The share of a stream's receiving part, as [`SendShareOf`], on the side
+/// of the layer's selection `A`.
+type ReceiveShareOf<Lc, K, Rs, P, N, I, A> = LockedStreamReceiveShare<
     Lc,
     K,
     Rs,
     P,
     <N as SendIntentIntake<AnyActiveLinkPath>>::Handle<StreamIntent<P>, I>,
+    <A as LayerSelection>::Role,
 >;
 
 /// Opening needs both parts of a bidirectional stream and the sending part
@@ -653,18 +709,21 @@ fn expect_part<X>(part: Option<X>) -> X {
 }
 
 /// The handle of an established layer of the default set opens this
-/// side's streams through the set's handle, and publishes their intents at
-/// the place `I` through the intake `N`.
-impl<Lc, K, Rs: StreamResets, P, N, A, I> OpenStreams<I>
-    for EstablishedLayerHandle<LockedStreamSetHandle<Lc, K, Rs, P>, N, A, Lc>
+/// side's streams through the set's handle, version 1's share at the place
+/// `Is` among the shares `Sh`, and publishes their intents at the place `I`
+/// through the intake `N`.
+impl<Sh, Lc, K, Rs: StreamResets, P, N, A, Is, I> OpenStreams<(Is, I)>
+    for EstablishedLayerHandle<Sh, N, A, Lc>
 where
+    Sh: FindHandleShare<crate::v1::Part, Is, Found = LockedStreamSetHandle<Lc, K, Rs, P>>,
+    A: LayerSelection,
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
     N: SendIntentIntake<AnyActiveLinkPath> + SharedPublishTo<StreamIntent<P>, AnyActiveLinkPath, I>,
     N::Handle<StreamIntent<P>, I>: StreamIntentHandle<P, K>,
 {
     type SendShare = SendShareOf<Lc, K, Rs, P, N, I>;
-    type ReceiveShare = ReceiveShareOf<Lc, K, Rs, P, N, I>;
+    type ReceiveShare = ReceiveShareOf<Lc, K, Rs, P, N, I, A>;
     type CloseCause = Lc;
 
     fn open_bi(
@@ -679,8 +738,9 @@ where
         >,
     > {
         let publish = self.intake.handle::<StreamIntent<P>, I>();
-        let shared = &self.streams.shared;
+        let shared = Arc::clone(&self.shares.find().shared);
         poll_fn(move |cx| {
+            let shared = &shared;
             match shared.open_local(Directionality::Bidirectional, &publish, Some(cx.waker())) {
                 Ok((id, parts)) => {
                     let (writer, reader) = handles(shared, &publish, id, parts);
@@ -697,11 +757,13 @@ where
     ) -> impl Future<Output = Result<StreamWriter<Self::SendShare, NoSendOptions>, LayerEndedError<Lc>>>
     {
         let publish = self.intake.handle::<StreamIntent<P>, I>();
-        let shared = &self.streams.shared;
+        let shared = Arc::clone(&self.shares.find().shared);
         poll_fn(move |cx| {
+            let shared = &shared;
             match shared.open_local(Directionality::Unidirectional, &publish, Some(cx.waker())) {
                 Ok((id, parts)) => {
-                    let (writer, _) = handles(shared, &publish, id, parts);
+                    let (writer, _) =
+                        handles::<_, _, _, _, _, A::Role>(shared, &publish, id, parts);
                     Poll::Ready(Ok(expect_part(writer)))
                 }
                 Err(OpenRefused::AtLimit) => Poll::Pending,
@@ -720,7 +782,7 @@ where
         TryOpenStreamError<Lc>,
     > {
         let publish = self.intake.handle::<StreamIntent<P>, I>();
-        let shared = &self.streams.shared;
+        let shared = &self.shares.find().shared;
         match shared.open_local(Directionality::Bidirectional, &publish, None) {
             Ok((id, parts)) => {
                 let (writer, reader) = handles(shared, &publish, id, parts);
@@ -735,10 +797,10 @@ where
         &self,
     ) -> Result<StreamWriter<Self::SendShare, NoSendOptions>, TryOpenStreamError<Lc>> {
         let publish = self.intake.handle::<StreamIntent<P>, I>();
-        let shared = &self.streams.shared;
+        let shared = &self.shares.find().shared;
         match shared.open_local(Directionality::Unidirectional, &publish, None) {
             Ok((id, parts)) => {
-                let (writer, _) = handles(shared, &publish, id, parts);
+                let (writer, _) = handles::<_, _, _, _, _, A::Role>(shared, &publish, id, parts);
                 Ok(expect_part(writer))
             }
             Err(OpenRefused::AtLimit) => Err(TryOpenStreamError::AtLimit),
@@ -749,17 +811,19 @@ where
 
 /// The handle of an established layer of the default set accepts the
 /// peer's streams from the set's queues, in the order their first frames
-/// arrived.
-impl<Lc, K, Rs: StreamResets, P, N, A, I> AcceptStreams<I>
-    for EstablishedLayerHandle<LockedStreamSetHandle<Lc, K, Rs, P>, N, A, Lc>
+/// arrived; the places are as for opening.
+impl<Sh, Lc, K, Rs: StreamResets, P, N, A, Is, I> AcceptStreams<(Is, I)>
+    for EstablishedLayerHandle<Sh, N, A, Lc>
 where
+    Sh: FindHandleShare<crate::v1::Part, Is, Found = LockedStreamSetHandle<Lc, K, Rs, P>>,
+    A: LayerSelection,
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
     N: SendIntentIntake<AnyActiveLinkPath> + SharedPublishTo<StreamIntent<P>, AnyActiveLinkPath, I>,
     N::Handle<StreamIntent<P>, I>: StreamIntentHandle<P, K>,
 {
     type SendShare = SendShareOf<Lc, K, Rs, P, N, I>;
-    type ReceiveShare = ReceiveShareOf<Lc, K, Rs, P, N, I>;
+    type ReceiveShare = ReceiveShareOf<Lc, K, Rs, P, N, I, A>;
     type CloseCause = Lc;
 
     fn accept_bi(
@@ -774,8 +838,9 @@ where
         >,
     > {
         let publish = self.intake.handle::<StreamIntent<P>, I>();
-        let shared = &self.streams.shared;
+        let shared = Arc::clone(&self.shares.find().shared);
         poll_fn(move |cx| {
+            let shared = &shared;
             shared
                 .poll_accept(cx, Directionality::Bidirectional)
                 .map(|accepted| match accepted {
@@ -792,8 +857,9 @@ where
         &self,
     ) -> impl Future<Output = Result<StreamReader<Self::ReceiveShare>, LayerEndedError<Lc>>> {
         let publish = self.intake.handle::<StreamIntent<P>, I>();
-        let shared = &self.streams.shared;
+        let shared = Arc::clone(&self.shares.find().shared);
         poll_fn(move |cx| {
+            let shared = &shared;
             shared
                 .poll_accept(cx, Directionality::Unidirectional)
                 .map(|accepted| match accepted {

@@ -68,7 +68,9 @@ use crate::{
     frame_source::{FrameSourceItemsOf, FrameSourcePart, PacketKind},
     layer::{self, LogicalPath},
     others::OtherNodes,
-    send_strategy::{AnyActiveLinkPath, IntentTicketWithdraw, PlannedPacketKind, SendIntentPart},
+    send_strategy::{
+        AnyActiveLinkPath, IntentTicketWithdraw, PlannedPacketKind, SendIntentPart, SendStrategy,
+    },
     share::{
         ConnectionArgsOf, FlatMut, LayerShare, LineageLists, LineagePartList, LinkPathIdentifierOf,
         LogicalPathKeyShare, NodeData,
@@ -76,10 +78,15 @@ use crate::{
     take::{GetAt, TakeEach},
     v1::{
         Choices, Client, CloseCauseOf, Server, Side,
+        application_handles::{
+            FindHandleShare, HandleShare, HandleShares, KeyedHandleShare,
+            connection::{ConnectionHandleCellOf, EstablishedLayerSharesOf},
+            handle,
+        },
         close::{CloseReasonRecord, TransportClose},
         parameters::{LocalTransportParameters, PartSlots, PeerTransportParameters},
         send::SendTypes,
-        send_planning::IntakePublishOutcome,
+        send_planning::{IntakePublishOutcome, SendStrategyOf},
         streams::resets::{StreamResets, StreamResetsOf, StreamResetsPart},
     },
 };
@@ -220,16 +227,17 @@ impl Buf for ServerReceivedDatagram {
 pub trait DatagramQueues<Lc>: Sized {
     /// What the composition configures them with.
     type Config;
-    /// The share of the queues the application's handles hold, with the
-    /// send strategy's intake `N` the datagrams are published through.
-    type Handle<N: Clone>: Clone;
+    /// The share of the queues the application's handles hold: the
+    /// extension's share of an established layer's handle, which publishes
+    /// the datagrams through the handle's intake.
+    type Handle: Clone + KeyedHandleShare<Part = Part>;
 
     /// The queues of a layer just built, of the facts `facts` and
     /// configured by `config`.
     fn new(facts: DatagramQueuesFacts, config: Self::Config) -> Self;
 
-    /// The share of the queues, publishing through `intake`.
-    fn handle<N: Clone>(&self, intake: N) -> Self::Handle<N>;
+    /// The share of the queues.
+    fn handle(&self) -> Self::Handle;
 
     /// A DATAGRAM frame arrived in a packet of `level`, no larger than this
     /// side announced. It cannot be refused: what the queues cannot keep
@@ -505,6 +513,16 @@ where
     type Calls = HNil;
 }
 
+/// The handle of an established layer holds the queues' handle, to send
+/// and receive datagrams with.
+impl<T: DatagramChoices, L: ConnectionErrorsOf> HandleShare<T, L, handle::EstablishedLayer> for Part
+where
+    SendTypes<T, L>: IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>,
+    DatagramTicketOf<T, L>: IntentTicketWithdraw,
+{
+    type Share = <DatagramQueuesOf<T, L> as DatagramQueues<CloseCauseOf<T, L>>>::Handle;
+}
+
 macro_rules! no_share {
     ($($lv:ident),*) => {$(
         /// The extension keeps nothing in this layer.
@@ -558,22 +576,32 @@ pub struct ChosenDatagramQueues;
 /// connection node keeps; a layer built before the peer's parameters are
 /// known takes the peer's as absent: nothing is sent.
 ///
+/// The cell of the connection handle in the connection node is handed the
+/// queues' handle, the extension's share of the layer's handle, when the
+/// layer is built.
+///
 /// When the layer ends, the queues hear that the connection closed, for the
 /// reason in the record of why the connection closed.
-impl<T, L, X, Ip, Ic, Ir, Jm>
-    Build<T, L, layer::Established, (ChosenDatagramQueues, (Ip, Ic, Ir), Jm)> for X
+impl<T, L, X, Ip, Ic, Ir, Ih, Jm, Js>
+    Build<T, L, layer::Established, (ChosenDatagramQueues, (Ip, Ic, Ir, Ih), (Jm, Js))> for X
 where
     T: DatagramChoices<
         DatagramQueues<CloseCauseOf<T, L>, DatagramTicketOf<T, L>, <T as Choices>::Side> = X,
     >,
-    L: LineagePartList<T> + ConnectionErrorsOf + ParametersOf<TransportParameterSpace>,
+    L: LineagePartList<T>
+        + ConnectionErrorsOf
+        + ParametersOf<TransportParameterSpace>
+        + HandleShares<T, L, handle::EstablishedLayer>,
     SendTypes<T, L>: IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>,
+    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     DatagramTicketOf<T, L>: IntentTicketWithdraw,
     X: DatagramQueues<CloseCauseOf<T, L>, Config = T::DatagramQueuesConfig>,
     TransportParameterSlots<L>: Selector<Option<MaxDatagramFrameSize>, Jm>,
+    EstablishedLayerSharesOf<T, L>: FindHandleShare<Part, Js, Found = X::Handle>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>
         + GetAt<DatagramQueuesConfig<T::DatagramQueuesConfig>, Ic>
-        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>,
+        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
+        + GetAt<ConnectionHandleCellOf<T, L>, Ih>,
 {
     fn build<'v>(
         parents: &mut ParentsOf<'v, T, L, layer::Established>,
@@ -588,7 +616,11 @@ where
             .get::<DatagramQueuesConfig<T::DatagramQueuesConfig>, Ic>()
             .0
             .clone();
-        X::new(DatagramQueuesFacts { peer }, config)
+        let queues = X::new(DatagramQueuesFacts { peer }, config);
+        parents
+            .get::<ConnectionHandleCellOf<T, L>, Ih>()
+            .share_built::<Part, Js>(queues.handle());
+        queues
     }
 
     fn end<'v, B: CallBundle>(

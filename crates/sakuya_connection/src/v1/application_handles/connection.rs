@@ -15,8 +15,13 @@
 //!   has no layer before the handshake completes (this version sends no
 //!   0-RTT); a server's ServerHello written keeps the selected target for
 //!   the layer; the handshake completed keeps the facts and the exporter;
-//! - the stream set of the established layer: built, it hands the cell what
-//!   the layer's handle needs; ended, the layer's end.
+//! - the components of the established layer: each part's component that
+//!   makes the part's share of the layer's handle hands it to the cell when
+//!   it is built, version 1's stream set together with the send strategy's
+//!   intake; the stream set, ended, the layer's end. The cell gives the
+//!   layer's handle once every share and the handshake's selection came;
+//!   a part that gives no share (`HNil`) hands nothing over. Shares come
+//!   again for a layer built again.
 //!
 //! What a wait gives depends on what happened, not on when it is called
 //! (application-handles «连接先结束时各个等待的结果»): a handshake that
@@ -50,7 +55,11 @@ use sakuya_tls::{
 };
 use sakuya_wire::parts::Selector;
 
-use super::established_layer::{EstablishedLayerHandle, LayerShare};
+use super::{
+    FindHandleShare, HandleShareSlots, HandleShares, HandleSharesOf,
+    established_layer::{EstablishedLayerHandle, LayerShare},
+    handle,
+};
 use crate::{
     call::CallBundle,
     clock::InstantOf,
@@ -125,36 +134,49 @@ pub(crate) fn wake_all(wakers: &mut Vec<Waker>) {
 /// read; see the [module documentation](self).
 ///
 /// `C` is this endpoint's reason for closing, `F` the facts of the side's
-/// handshake, `X` its exporter; `S`, `N` and `A` are what an established
-/// layer's handle holds: the stream set's handle, the send strategy's
+/// handshake, `X` its exporter; `Sh`, `N` and `A` are what an established
+/// layer's handle holds: each part's share of it, the send strategy's
 /// intake, and what the layer runs with of the handshake's selection. A
 /// clone is the same cell. Every wait registers its waker under the cell's
 /// lock, which takes no other lock.
 #[allow(clippy::type_complexity)]
-pub struct ConnectionHandleCell<C, F, X, S, N, A> {
-    shared: Arc<Mutex<CellState<C, F, X, S, N, A>>>,
+pub struct ConnectionHandleCell<C, F, X, Sh: HandleShareSlots, N, A> {
+    shared: Arc<Mutex<CellState<C, F, X, Sh, N, A>>>,
 }
 
 /// What the cell holds.
-struct CellState<C, F, X, S, N, A> {
+struct CellState<C, F, X, Sh: HandleShareSlots, N, A> {
     handshake: HandshakeProgress<F, X>,
-    next: NextLayer<S, N, A>,
-    early: EarlyLayer<EstablishedLayerHandle<S, N, A, C>>,
+    next: NextLayer<Sh, A>,
+    /// The send strategy's intake, once the first layer was built: the
+    /// same for every layer.
+    intake: Option<N>,
+    early: EarlyLayer<EstablishedLayerHandle<Sh, N, A, C>>,
     /// The handle of the latest established layer, kept after it ended.
-    layer: Option<EstablishedLayerHandle<S, N, A, C>>,
+    layer: Option<EstablishedLayerHandle<Sh, N, A, C>>,
     /// The reason the connection closed for, once the record has one.
     closed: Option<CloseReason<C>>,
     wakers: Vec<Waker>,
 }
 
-impl<C, F, X, S, N, A> CellState<C, F, X, S, N, A> {
+impl<C, F, X, Sh: HandleShareSlots, N: Clone, A> CellState<C, F, X, Sh, N, A> {
+    /// Give the next layer's handle once its selection, every share and
+    /// the intake came; the next layer after it starts with nothing.
+    fn give_when_complete(&mut self) {
+        let (Some(intake), Some(shares)) = (&self.intake, Sh::collected(&self.next.shares)) else {
+            return;
+        };
+        let Some(selection) = self.next.selection.take() else {
+            return;
+        };
+        let layer = EstablishedLayerHandle::new(shares, intake.clone(), selection);
+        self.next.shares = Sh::empty_slots();
+        self.give_layer(layer);
+    }
+
     /// Give `layer` from now on: as the layer before the handshake completed
     /// when it has not, and as the latest layer.
-    fn give_layer(&mut self, layer: EstablishedLayerHandle<S, N, A, C>)
-    where
-        S: Clone,
-        N: Clone,
-    {
+    fn give_layer(&mut self, layer: EstablishedLayerHandle<Sh, N, A, C>) {
         if matches!(self.early, EarlyLayer::Undecided) {
             self.early = match self.handshake {
                 HandshakeProgress::Pending => EarlyLayer::Present(layer.clone()),
@@ -174,16 +196,14 @@ enum HandshakeProgress<F, X> {
     Completed { facts: F, exporter: Option<Arc<X>> },
 }
 
-/// What the cell has of the next established layer until it has both the
-/// layer's selection and the layer: its handle is made once both came, in
-/// whichever order.
-enum NextLayer<S, N, A> {
-    /// Neither came.
-    Waiting,
-    /// The handshake selected what the layer runs with.
-    Selected(A),
-    /// The layer was built, with its stream set's handle and the intake.
-    Built { streams: S, intake: N },
+/// What the cell has of the next established layer until it has the
+/// layer's selection and every part's share: each comes on its own, in
+/// whichever order, and the handle is made once all came.
+struct NextLayer<Sh: HandleShareSlots, A> {
+    /// What the handshake selected the layer to run with, once it did.
+    selection: Option<A>,
+    /// Each part's share, once its component handed it over.
+    shares: Sh::Slots,
 }
 
 /// Whether the connection had an established layer before its handshake
@@ -197,13 +217,17 @@ enum EarlyLayer<Y> {
     Present(Y),
 }
 
-impl<C, F, X, S, N, A> ConnectionHandleCell<C, F, X, S, N, A> {
+impl<C, F, X, Sh: HandleShareSlots, N, A> ConnectionHandleCell<C, F, X, Sh, N, A> {
     /// A cell of a connection where nothing has happened yet.
     pub fn new() -> Self {
         Self {
             shared: Arc::new(Mutex::new(CellState {
                 handshake: HandshakeProgress::Pending,
-                next: NextLayer::Waiting,
+                next: NextLayer {
+                    selection: None,
+                    shares: Sh::empty_slots(),
+                },
+                intake: None,
                 early: EarlyLayer::Undecided,
                 layer: None,
                 closed: None,
@@ -212,12 +236,12 @@ impl<C, F, X, S, N, A> ConnectionHandleCell<C, F, X, S, N, A> {
         }
     }
 
-    fn state(&self) -> MutexGuard<'_, CellState<C, F, X, S, N, A>> {
+    fn state(&self) -> MutexGuard<'_, CellState<C, F, X, Sh, N, A>> {
         lock(&self.shared)
     }
 
     /// Change the state with `change`, and wake every waiter.
-    fn change(&self, change: impl FnOnce(&mut CellState<C, F, X, S, N, A>)) {
+    fn change(&self, change: impl FnOnce(&mut CellState<C, F, X, Sh, N, A>)) {
         let mut state = self.state();
         change(&mut state);
         wake_all(&mut state.wakers);
@@ -228,7 +252,7 @@ impl<C, F, X, S, N, A> ConnectionHandleCell<C, F, X, S, N, A> {
     fn poll_with<R>(
         &self,
         cx: &mut Context<'_>,
-        look: impl FnOnce(&CellState<C, F, X, S, N, A>) -> Option<R>,
+        look: impl FnOnce(&CellState<C, F, X, Sh, N, A>) -> Option<R>,
     ) -> Poll<R> {
         let mut state = self.state();
         match look(&state) {
@@ -276,19 +300,12 @@ impl<C, F, X, S, N, A> ConnectionHandleCell<C, F, X, S, N, A> {
     /// selection.
     pub(crate) fn keep_selection(&self, selection: A)
     where
-        S: Clone,
         N: Clone,
     {
-        self.change(
-            |state| match core::mem::replace(&mut state.next, NextLayer::Waiting) {
-                NextLayer::Waiting | NextLayer::Selected(_) => {
-                    state.next = NextLayer::Selected(selection);
-                }
-                NextLayer::Built { streams, intake } => {
-                    state.give_layer(EstablishedLayerHandle::new(streams, intake, selection));
-                }
-            },
-        );
+        self.change(|state| {
+            state.next.selection = Some(selection);
+            state.give_when_complete();
+        });
     }
 
     /// The handshake completed with `facts` and the connection's exporter,
@@ -304,25 +321,32 @@ impl<C, F, X, S, N, A> ConnectionHandleCell<C, F, X, S, N, A> {
         });
     }
 
-    /// An established layer was built, with the stream set's handle
-    /// `streams` and the intake `intake`: its handle is given from now on,
-    /// once the handshake selected what it runs with, as the handle of the
-    /// layer before the handshake completed when it has not.
-    pub(crate) fn layer_built(&self, streams: S, intake: N)
+    /// The send strategy's intake is `intake`, which the established
+    /// layers' handles publish through.
+    pub(crate) fn keep_intake(&self, intake: N)
     where
-        S: Clone,
         N: Clone,
     {
-        self.change(
-            |state| match core::mem::replace(&mut state.next, NextLayer::Waiting) {
-                NextLayer::Selected(selection) => {
-                    state.give_layer(EstablishedLayerHandle::new(streams, intake, selection));
-                }
-                NextLayer::Waiting | NextLayer::Built { .. } => {
-                    state.next = NextLayer::Built { streams, intake };
-                }
-            },
-        );
+        self.change(|state| {
+            state.intake = Some(intake);
+            state.give_when_complete();
+        });
+    }
+
+    /// The component of the part `Key` in an established layer just built
+    /// made the part's share `share` of the layer's handle; `I` is where it
+    /// is among the shares. The handle is given once the handshake selected
+    /// what the layer runs with and every other share came, as the handle
+    /// of the layer before the handshake completed when it has not.
+    pub(crate) fn share_built<Key, I>(&self, share: <Sh as FindHandleShare<Key, I>>::Found)
+    where
+        Sh: FindHandleShare<Key, I>,
+        N: Clone,
+    {
+        self.change(|state| {
+            *Sh::slot(&mut state.next.shares) = Some(share);
+            state.give_when_complete();
+        });
     }
 
     /// The latest established layer ended as `end`; only its first end is
@@ -373,9 +397,8 @@ impl<C, F, X, S, N, A> ConnectionHandleCell<C, F, X, S, N, A> {
     fn poll_early(
         &self,
         cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<EstablishedLayerHandle<S, N, A, C>>, ConnectionClosedError<C>>>
+    ) -> Poll<Result<Option<EstablishedLayerHandle<Sh, N, A, C>>, ConnectionClosedError<C>>>
     where
-        S: Clone,
         N: Clone,
     {
         self.poll_with(cx, |state| match (&state.early, &state.closed) {
@@ -392,9 +415,8 @@ impl<C, F, X, S, N, A> ConnectionHandleCell<C, F, X, S, N, A> {
     fn poll_established(
         &self,
         cx: &mut Context<'_>,
-    ) -> Poll<Result<EstablishedLayerHandle<S, N, A, C>, ConnectionClosedError<C>>>
+    ) -> Poll<Result<EstablishedLayerHandle<Sh, N, A, C>, ConnectionClosedError<C>>>
     where
-        S: Clone,
         N: Clone,
     {
         self.poll_with(cx, |state| {
@@ -410,7 +432,7 @@ impl<C, F, X, S, N, A> ConnectionHandleCell<C, F, X, S, N, A> {
 }
 
 /// A clone is the same cell.
-impl<C, F, X, S, N, A> Clone for ConnectionHandleCell<C, F, X, S, N, A> {
+impl<C, F, X, Sh: HandleShareSlots, N, A> Clone for ConnectionHandleCell<C, F, X, Sh, N, A> {
     fn clone(&self) -> Self {
         Self {
             shared: Arc::clone(&self.shared),
@@ -418,14 +440,14 @@ impl<C, F, X, S, N, A> Clone for ConnectionHandleCell<C, F, X, S, N, A> {
     }
 }
 
-impl<C, F, X, S, N, A> Default for ConnectionHandleCell<C, F, X, S, N, A> {
+impl<C, F, X, Sh: HandleShareSlots, N, A> Default for ConnectionHandleCell<C, F, X, Sh, N, A> {
     fn default() -> Self {
         Self::new()
     }
 }
 
 /// It shows how far the connection got, not what the cell holds.
-impl<C, F, X, S, N, A> fmt::Debug for ConnectionHandleCell<C, F, X, S, N, A> {
+impl<C, F, X, Sh: HandleShareSlots, N, A> fmt::Debug for ConnectionHandleCell<C, F, X, Sh, N, A> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = self.state();
         f.debug_struct("ConnectionHandleCell")
@@ -449,12 +471,17 @@ pub type HandshakeFactsOf<T> = <<T as Choices>::Side as Side>::HandshakeFacts;
 pub type LayerSelectionOf<T> = <<T as Choices>::Side as Side>::LayerSelection;
 
 /// The handle the stream set of the choices `T` and the list of parts `L`
-/// gives the application.
+/// gives the application: version 1's share of an established layer's
+/// handle.
 pub type StreamSetHandleOf<T, L> = <StreamsOf<T, L> as StreamSet<
     CloseCauseOf<T, L>,
     StreamIntentTicketOf<T, L>,
     StreamResetsOfParts<L>,
 >>::Handle;
+
+/// The shares of an established layer's handle of the choices `T` and the
+/// list of parts `L`.
+pub type EstablishedLayerSharesOf<T, L> = HandleSharesOf<T, L, handle::EstablishedLayer>;
 
 /// The cell of the connection handle of the choices `T` and the list of
 /// parts `L`.
@@ -462,7 +489,7 @@ pub type ConnectionHandleCellOf<T, L> = ConnectionHandleCell<
     CloseCauseOf<T, L>,
     HandshakeFactsOf<T>,
     <<T as Choices>::Side as Side>::Exporter,
-    StreamSetHandleOf<T, L>,
+    EstablishedLayerSharesOf<T, L>,
     IntakeOf<T, L>,
     LayerSelectionOf<T>,
 >;
@@ -470,7 +497,7 @@ pub type ConnectionHandleCellOf<T, L> = ConnectionHandleCell<
 /// The handle of an established layer of the choices `T` and the list of
 /// parts `L`.
 pub type EstablishedLayerHandleOf<T, L> = EstablishedLayerHandle<
-    StreamSetHandleOf<T, L>,
+    EstablishedLayerSharesOf<T, L>,
     IntakeOf<T, L>,
     LayerSelectionOf<T>,
     CloseCauseOf<T, L>,
@@ -509,6 +536,7 @@ where
     L: ConnectionErrorsOf,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    L: HandleShares<T, L, handle::EstablishedLayer>,
     ConnectionHandleCellOf<T, L>: Send + Sync + 'static,
 {
     /// A clone of the cell, made now if it was not.
@@ -570,6 +598,7 @@ where
     L: LineagePartList<T> + ConnectionErrorsOf,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    L: HandleShares<T, L, handle::EstablishedLayer>,
     ConnectionHandleCellOf<T, L>: Send + Sync + 'static,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
 {
@@ -610,6 +639,7 @@ where
     L: LineagePartList<T> + ConnectionErrorsOf,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    L: HandleShares<T, L, handle::EstablishedLayer>,
     for<'v> <L as LineageLists<'v, T>>::Connection:
         GetAt<Self, I> + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>,
 {
@@ -663,6 +693,7 @@ where
     L: ConnectionErrorsOf,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    L: HandleShares<T, L, handle::EstablishedLayer>,
 {
     cell: ConnectionHandleCellOf<T, L>,
     close_request: CloseRequestCell<T::ApplicationError>,
@@ -674,6 +705,7 @@ where
     L: LogicalPathKeys + ConnectionErrorsOf,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    L: HandleShares<T, L, handle::EstablishedLayer>,
     ConnectionHandleCellOf<T, L>: Send + Sync + 'static,
 {
     /// The handle of the connection made with `args`, sharing the cells it
@@ -693,6 +725,7 @@ where
     L: ConnectionErrorsOf,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    L: HandleShares<T, L, handle::EstablishedLayer>,
 {
     /// Ask to close the connection with `error`; the connection takes the
     /// request at its next poll. It does not wait for data to be sent, and
@@ -744,10 +777,7 @@ where
             Option<EstablishedLayerHandleOf<T, L>>,
             ConnectionClosedError<CloseCauseOf<T, L>>,
         >,
-    > + '_
-    where
-        StreamSetHandleOf<T, L>: Clone,
-    {
+    > + '_ {
         poll_fn(|cx| self.cell.poll_early(cx))
     }
 
@@ -764,10 +794,7 @@ where
         &self,
     ) -> impl Future<
         Output = Result<EstablishedLayerHandleOf<T, L>, ConnectionClosedError<CloseCauseOf<T, L>>>,
-    > + '_
-    where
-        StreamSetHandleOf<T, L>: Clone,
-    {
+    > + '_ {
         poll_fn(|cx| self.cell.poll_established(cx))
     }
 
@@ -799,6 +826,7 @@ where
     L: ConnectionErrorsOf,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    L: HandleShares<T, L, handle::EstablishedLayer>,
 {
     fn clone(&self) -> Self {
         Self {
@@ -814,6 +842,7 @@ where
     L: ConnectionErrorsOf,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    L: HandleShares<T, L, handle::EstablishedLayer>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ConnectionHandle").finish_non_exhaustive()
@@ -821,7 +850,7 @@ where
 }
 
 /// The share of a layer the cell gives the handle of.
-impl<S, N, A, C> EstablishedLayerHandle<S, N, A, C> {
+impl<Sh, N, A, C> EstablishedLayerHandle<Sh, N, A, C> {
     fn share(&self) -> Arc<LayerShare<A, C>> {
         Arc::clone(&self.layer)
     }

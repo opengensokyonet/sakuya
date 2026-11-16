@@ -1998,6 +1998,16 @@ mod probe {
         type Calls = HNil;
     }
     none!(Established);
+    /// The probe gives the handle of an established layer nothing.
+    impl<T: v1::Choices, L>
+        v1::application_handles::HandleShare<
+            T,
+            L,
+            v1::application_handles::handle::EstablishedLayer,
+        > for Part
+    {
+        type Share = HNil;
+    }
 }
 
 /// The Destination Connection ID of the client's first Initial packet that
