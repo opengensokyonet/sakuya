@@ -13,3 +13,6 @@ pub use crate::v1::application_handles::{
 
 #[cfg(feature = "reset_stream_at")]
 pub use crate::reset_stream_at::StreamResetAt;
+
+#[cfg(feature = "datagram")]
+pub use crate::datagram::application::{DatagramSend, Datagrams, DatagramsOwned};

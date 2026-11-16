@@ -1523,3 +1523,381 @@ mod reliable {
         );
     }
 }
+
+/// A client and a server whose compositions have the DATAGRAM extension,
+/// each announcing a `max_datagram_frame_size` or not; a stand-in part
+/// takes each side's handle of its datagram queues once the layer is
+/// built.
+#[cfg(feature = "datagram")]
+mod datagram {
+    use std::{any::Any, cell::Cell};
+
+    use sakuya_connection::{
+        datagram::{
+            self, DatagramChoices, DatagramConnectionArgs, DatagramQueues, DatagramQueuesOf,
+            DatagramSide, ServerReceivedDatagram,
+            application::SendDatagramError,
+            locked::{
+                LockedDatagramQueues, LockedDatagramQueuesConfig, LockedDatagramQueuesHandle,
+            },
+            send::{DatagramSettlement, DatagramState},
+        },
+        send_strategy::IntentTicketWithdraw,
+        v1::send_planning::{IntakeOf, SendStrategyIntake},
+    };
+    use sakuya_wire::datagram::MaxDatagramFrameSize;
+
+    use super::*;
+
+    impl DatagramChoices for ServerChoices {
+        type DatagramQueues<Lc, K: IntentTicketWithdraw, S: DatagramSide> =
+            LockedDatagramQueues<Lc, K, S>;
+        type DatagramQueuesConfig = LockedDatagramQueuesConfig;
+    }
+
+    impl DatagramChoices for ClientChoices {
+        type DatagramQueues<Lc, K: IntentTicketWithdraw, S: DatagramSide> =
+            LockedDatagramQueues<Lc, K, S>;
+        type DatagramQueuesConfig = LockedDatagramQueuesConfig;
+    }
+
+    /// The parts of these connections: version 1, the watch, the extension
+    /// and the part that takes the handles.
+    type Parts = HList![v1::Part, watch::Part, datagram::Part, grab::Part];
+
+    /// The handle of the datagram queues of the side of the choices `T`.
+    type QueuesHandle<T> = LockedDatagramQueuesHandle<
+        CloseCauseOf<T, Parts>,
+        datagram::DatagramTicketOf<T, Parts>,
+        <T as v1::Choices>::Side,
+        IntakeOf<T, Parts>,
+    >;
+
+    thread_local! {
+        /// The `max_datagram_frame_size` each side announces: the
+        /// server's first; 0 leaves it out.
+        static ANNOUNCES: Cell<[u32; 2]> = const { Cell::new([65535, 65535]) };
+        /// Each side's handle of its datagram queues, once its layer is
+        /// built: the server's first.
+        static HANDLES: RefCell<[Option<Box<dyn Any>>; 2]> = const { RefCell::new([None, None]) };
+    }
+
+    /// The extension's facts of the side of `role`, as the test set them.
+    fn datagram_args(role: Role) -> DatagramConnectionArgs<LockedDatagramQueuesConfig> {
+        let size = ANNOUNCES.with(|announces| announces.get()[index(role)]);
+        DatagramConnectionArgs {
+            transport_parameters: frunk_core::hlist![
+                (size > 0).then(|| MaxDatagramFrameSize::new(VarInt::from_u32(size)))
+            ],
+            queues: LockedDatagramQueuesConfig::default(),
+        }
+    }
+
+    harness!(server: [datagram_args(Role::Server), HNil], client: [datagram_args(Role::Client), HNil]);
+
+    /// The handle the side of the choices `$t` took, once it did.
+    macro_rules! taken_handle {
+        ($name:ident, $t:ty, $role:expr) => {
+            fn $name() -> Option<QueuesHandle<$t>> {
+                HANDLES.with(|handles| {
+                    handles.borrow()[index($role)]
+                        .as_ref()
+                        .and_then(|handle| handle.downcast_ref::<QueuesHandle<$t>>())
+                        .cloned()
+                })
+            }
+        };
+    }
+    taken_handle!(client_handle, ClientChoices, Role::Client);
+    taken_handle!(server_handle, ServerChoices, Role::Server);
+
+    /// Run a handshake with the server announcing `server` and the client
+    /// `client` as their `max_datagram_frame_size`, as [`handshake`] does.
+    fn run_announcing(
+        server: u32,
+        client: u32,
+        clock: &Arc<ManualClock>,
+        done: impl FnMut(&Run) -> bool,
+    ) -> Run {
+        ANNOUNCES.with(|announces| announces.set([server, client]));
+        HANDLES.with(|handles| *handles.borrow_mut() = [None, None]);
+        handshake(client_engine(clock, 1), clock, done)
+    }
+
+    /// The part that takes the handles.
+    mod grab {
+        use super::*;
+
+        pub struct Part;
+        impl LogicalPathKeyShare for Part {
+            type Fields = HNil;
+        }
+        impl<L> sakuya_connection::error::ConnectionErrorPart<L> for Part {
+            type ConnectionError = core::convert::Infallible;
+        }
+        impl sakuya_connection::v1::streams::resets::StreamResetsPart for Part {
+            type Fold<Prev: sakuya_connection::v1::streams::resets::StreamResets> = Prev;
+        }
+        impl ParametersPart<TransportParameterSpace> for Part {
+            type Parameters = HNil;
+        }
+        impl sakuya_connection::send_strategy::SendIntentPart for Part {
+            type FrameSourceId = CNil;
+            type SendIntents = CNil;
+            type FrameSources = HNil;
+        }
+        impl<K: sakuya_connection::frame_source::PacketKind>
+            sakuya_connection::frame_source::FrameSourcePart<K> for Part
+        {
+            fn item(intent: &CNil) -> Option<CNil> {
+                match *intent {}
+            }
+            fn source(item: &CNil) -> CNil {
+                match *item {}
+            }
+        }
+
+        const NO_FRAME_TYPES: FrameTypeValues = FrameTypeValues::new(&[]);
+
+        impl FrameSetPart for Part {
+            type Run<D> = CNil;
+            type Kind = CNil;
+            type TypeValue = CNil;
+            type FieldsError<E> = CNil;
+
+            const FRAME_TYPE_VALUES: &'static FrameTypeValues = &NO_FRAME_TYPES;
+
+            fn type_value_of(_: VarInt) -> Option<CNil> {
+                None
+            }
+
+            fn kind_of(type_value: CNil) -> CNil {
+                match type_value {}
+            }
+
+            fn run_kind<D>(run: &CNil) -> CNil {
+                match *run {}
+            }
+
+            fn read_run<H>(_: &mut H, type_value: CNil) -> Result<CNil, CNil>
+            where
+                H: bytes::Buf + nitori_call::Receiver<Family = nitori_call::Direct<H>> + Unpin,
+                nitori_call::Direct<H>: nitori_io::ReadChunk<Chunk: Default>,
+            {
+                match type_value {}
+            }
+        }
+        impl<T: ConnectionChoices, L> FrameDispatch<T, L, ()> for Part
+        where
+            for<'v> L: LineageLists<'v, T>,
+        {
+            fn dispatch<'v, B: CallBundle>(
+                _: &mut LineageOf<'v, T, L, layer::LogicalPath>,
+                _: &mut OtherNodes<'v, T, L, B>,
+                run: CNil,
+                _: &DispatchFacts<InstantOf<T>, LinkPathIdentifierOf<T, L>>,
+            ) -> Result<(), core::convert::Infallible> {
+                match run {}
+            }
+
+            fn fields_error(error: CNil) -> core::convert::Infallible {
+                match error {}
+            }
+        }
+
+        /// In the established layer: takes the handle of the datagram
+        /// queues once the layer is built, when every component of the
+        /// new node counts as changed.
+        #[derive(Debug)]
+        pub struct Grab;
+        impl<T: v1::Choices, L> Build<T, L, layer::Established, ()> for Grab
+        where
+            for<'v> L: LineageLists<'v, T>,
+        {
+            fn build<'v>(
+                _: &mut ParentsOf<'v, T, L, layer::Established>,
+                _: &mut ArgsOf<T, L, layer::Established>,
+            ) -> Self {
+                Grab
+            }
+        }
+        impl<T, L, Iq, Ii> DataComponent<T, L, layer::Established, (Iq, Ii)> for Grab
+        where
+            T: DatagramChoices<Clock = TestClock>,
+            L: LineagePartList<T> + ConnectionErrorsOf,
+            v1::send::SendTypes<T, L>: v1::send_planning::IntakePublishOutcome<
+                    sakuya_connection::datagram::send::DatagramIntent<
+                        sakuya_stream::send_options::urgency::Urgency,
+                    >,
+                    sakuya_connection::send_strategy::AnyActiveLinkPath,
+                >,
+            datagram::DatagramTicketOf<T, L>: IntentTicketWithdraw,
+            v1::send_planning::SendStrategyOf<T, L>:
+                sakuya_connection::send_strategy::SendStrategy<v1::send::SendTypes<T, L>>,
+            DatagramQueuesOf<T, L>: 'static,
+            IntakeOf<T, L>: Clone + 'static,
+            <DatagramQueuesOf<T, L> as DatagramQueues<CloseCauseOf<T, L>>>::Handle<IntakeOf<T, L>>:
+                'static,
+            for<'v> <L as LineageLists<'v, T>>::Established:
+                GetAt<DatagramQueuesOf<T, L>, Iq> + GetAt<SendStrategyIntake<IntakeOf<T, L>>, Ii>,
+        {
+            fn reads(reads: &mut ReadSet) {
+                reads.add::<DatagramQueuesOf<T, L>>();
+            }
+            fn reread<'v, B: CallBundle>(
+                lineage: LineageOf<'v, T, L, layer::Established>,
+                _: &mut OtherNodes<'v, T, L, B>,
+                _: Duration,
+            ) -> Option<RequestOf<T, L>> {
+                let role = <T::Side as Side>::ROLE;
+                HANDLES.with(|handles| {
+                    let slot = &mut handles.borrow_mut()[index(role)];
+                    if slot.is_none() {
+                        let intake = lineage
+                            .get::<SendStrategyIntake<IntakeOf<T, L>>, Ii>()
+                            .intake()
+                            .clone();
+                        let handle = lineage.get::<DatagramQueuesOf<T, L>, Iq>().handle(intake);
+                        *slot = Some(Box::new(handle));
+                    }
+                });
+                None
+            }
+        }
+
+        macro_rules! none {
+            ($($lv:ident),*) => {$(
+                impl<T: v1::Choices, L> LayerShare<T, L, layer::$lv> for Part {
+                    type Data = HNil;
+                    type Calls = HNil;
+                }
+            )*};
+        }
+        none!(Connection, LinkEntry, LogicalPath, LinkPath, Recovery);
+        impl<T: v1::Choices, L> LayerShare<T, L, layer::Established> for Part {
+            type Data = HList![Grab];
+            type Calls = HNil;
+        }
+    }
+
+    /// Over the tests' in-memory link, the client sends a datagram and the
+    /// server, which reads it as not received in 0-RTT, answers with one;
+    /// the client's ticket hears that its datagram was acknowledged
+    /// (RFC 9221 §5.2).
+    #[test]
+    fn a_client_and_a_server_exchange_datagrams() {
+        let clock = tls_clock();
+        let mut ticket = None;
+        let mut answered = false;
+        let mut answer = None;
+        let mut settled = None;
+        let run = run_announcing(65535, 65535, &clock, |_| {
+            let (Some(client), Some(server)) = (client_handle(), server_handle()) else {
+                return false;
+            };
+            if ticket.is_none() {
+                let writer = Datagrams::datagram_writer(&client);
+                ticket = Some(
+                    writer
+                        .send(Bytes::from_static(b"ping"))
+                        .expect("the server announced support"),
+                );
+            }
+            if !answered && let Poll::Ready(received) = poll_now(Datagrams::recv_datagram(&server))
+            {
+                let received: ServerReceivedDatagram = received.expect("the layer goes on");
+                assert!(!received.received_zero_rtt());
+                assert_eq!(received.into_bytes(), Bytes::from_static(b"ping"));
+                Datagrams::datagram_writer(&server)
+                    .send(Bytes::from_static(b"pong"))
+                    .expect("the client announced support")
+                    .release();
+                answered = true;
+            }
+            if answer.is_none()
+                && let Poll::Ready(received) = poll_now(Datagrams::recv_datagram(&client))
+            {
+                answer = Some(received.expect("the layer goes on"));
+            }
+            if let Some(ticket) = &mut ticket
+                && settled.is_none()
+                && let Poll::Ready(settlement) = poll_now(ticket.settled())
+            {
+                settled = Some(settlement);
+            }
+            answer.is_some() && settled.is_some()
+        });
+        assert_eq!(answer, Some(Bytes::from_static(b"pong")));
+        assert_eq!(settled, Some(DatagramSettlement::Acknowledged));
+        let ticket = ticket.expect("sent");
+        assert_eq!(ticket.state(), DatagramState::Acknowledged);
+        ticket.release();
+        // the handles were taken from the layers the connection handles
+        // give
+        assert!(ready(run.server_handle.established()).is_ok());
+        assert!(ready(run.client_handle.established()).is_ok());
+        let (server, client) = (noted(Role::Server), noted(Role::Client));
+        assert_eq!(
+            server.record, None,
+            "the server's connection is not closing"
+        );
+        assert_eq!(
+            client.record, None,
+            "the client's connection is not closing"
+        );
+    }
+
+    /// A server that announces no `max_datagram_frame_size` takes no
+    /// DATAGRAM frame: the client's writer refuses to send (RFC 9221 §3).
+    #[test]
+    fn nothing_is_sent_to_a_server_that_did_not_announce_support() {
+        let clock = tls_clock();
+        let mut refused = None;
+        run_announcing(0, 65535, &clock, |_| {
+            let Some(client) = client_handle() else {
+                return false;
+            };
+            let writer = Datagrams::datagram_writer(&client);
+            refused = Some(
+                writer
+                    .send(Bytes::from_static(b"ping"))
+                    .map(|ticket| ticket.release()),
+            );
+            true
+        });
+        assert!(
+            matches!(refused, Some(Err(SendDatagramError::NotSupportedByPeer))),
+            "{refused:?}"
+        );
+    }
+
+    /// A datagram over the server's limit, counted with a Length field, is
+    /// refused with the limit (RFC 9221 §3); one at the limit is taken.
+    #[test]
+    fn a_datagram_over_the_servers_limit_is_too_large() {
+        let clock = tls_clock();
+        let mut results = None;
+        run_announcing(100, 65535, &clock, |_| {
+            let Some(client) = client_handle() else {
+                return false;
+            };
+            let writer = Datagrams::datagram_writer(&client);
+            let limits = writer.datagram_limits();
+            let at_limit = writer
+                .send(Bytes::from(vec![0; 97]))
+                .map(|ticket| ticket.release());
+            let over = writer
+                .send(Bytes::from(vec![0; 98]))
+                .map(|ticket| ticket.release());
+            results = Some((limits.everywhere, at_limit, over));
+            true
+        });
+        let (limit, at_limit, over) = results.expect("the client's layer was built");
+        assert_eq!(limit, 97);
+        assert!(at_limit.is_ok(), "{at_limit:?}");
+        assert!(
+            matches!(over, Err(SendDatagramError::TooLarge { limit: 97 })),
+            "{over:?}"
+        );
+    }
+}
