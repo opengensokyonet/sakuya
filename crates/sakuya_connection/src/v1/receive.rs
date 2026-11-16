@@ -10,7 +10,10 @@
 //!    read. A packet with no link path in this logical path, or on a
 //!    draining one, is dropped; on a closing one it is only searched for a
 //!    CONNECTION_CLOSE frame. A client drops an Initial packet that carries
-//!    a token, which a server never sends (RFC 9000 §17.2.2).
+//!    a token, which a server never sends (RFC 9000 §17.2.2). Once a packet
+//!    from the peer opened, either side drops a long header packet from
+//!    another Source Connection ID: a client must (RFC 9000 §7.2), and a
+//!    server's comes from another connection attempt.
 //! 2. The receive keys of the packet's level. A Handshake packet before the
 //!    Handshake keys, or a 1-RTT packet before the 1-RTT receive keys, is
 //!    handed back to wait, unless the link path is closing: a closing link
@@ -217,9 +220,11 @@ pub enum DropReason {
     /// A client received an Initial packet whose Token Length is not zero,
     /// which a server never sends (RFC 9000 §17.2.2).
     TokenFromServer,
-    /// A client received a long header packet whose Source Connection ID
-    /// is not the one of the first Initial packet that opened from the
-    /// server (RFC 9000 §7.2).
+    /// A long header packet whose Source Connection ID is not the one of
+    /// the first Initial packet that opened from the peer: a client must
+    /// discard it (RFC 9000 §7.2), and a server's is from another
+    /// connection attempt, which routing gives the connection when it was
+    /// sent to one of this side's connection IDs.
     OtherSourceConnectionId {
         /// The packet's Source Connection ID.
         scid: ConnectionId,
@@ -330,8 +335,7 @@ where
     if <T::Side as Side>::ROLE == Role::Client && carries_token(packet.packet()) {
         return Ok(PacketOutcome::Dropped(DropReason::TokenFromServer));
     }
-    if <T::Side as Side>::ROLE == Role::Client
-        && let Some(scid) = long_scid(packet.packet())
+    if let Some(scid) = long_scid(packet.packet())
         && let Some(chosen) = lineage.get::<PeerHandshakeConnectionId, Iph>().get()
         && scid != chosen
     {

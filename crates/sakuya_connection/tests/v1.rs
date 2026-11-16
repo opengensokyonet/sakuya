@@ -3073,6 +3073,19 @@ fn long_packet(type_bits: u8, number: u64, payload: &[u8]) -> BytesMut {
     long_packet_with(first_byte(type_bits), &[], &client_keys(), number, payload)
 }
 
+/// A long header packet of the client, from [`CLIENT_SCID`], as
+/// [`long_packet`] makes it.
+fn client_long_packet(type_bits: u8, number: u64, payload: &[u8]) -> BytesMut {
+    long_packet_from(
+        first_byte(type_bits),
+        &CLIENT_SCID,
+        &[],
+        &client_keys(),
+        number,
+        payload,
+    )
+}
+
 /// A long header packet whose unprotected first byte is `first`, which
 /// gives its type and a 4-byte Packet Number field holding `number`;
 /// carrying `token`, if it is an Initial packet, and `payload`; protected
@@ -3877,6 +3890,40 @@ fn a_client_drops_an_initial_packet_with_a_token() {
         [
             "dropped: token from the server",
             "processed: highest numbered true, non-probing true",
+        ]
+    );
+}
+
+#[test]
+fn a_server_drops_a_long_header_from_another_attempts_source_connection_id() {
+    use probe::PacketStep::Receive;
+    reset();
+    let first = link();
+    feed_packets([
+        (
+            ms(5),
+            Receive(received(
+                initial_from(&[0xaa; 8], 0, &ping()),
+                &first,
+                ms(5),
+            )),
+        ),
+        (
+            ms(6),
+            Receive(received(
+                initial_from(&[0xbb; 8], 1, &ping()),
+                &first,
+                ms(6),
+            )),
+        ),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first);
+    take_log();
+    assert_eq!(
+        run(&mut connection, 5..=6),
+        [
+            "processed: highest numbered true, non-probing true",
+            "dropped: another source connection ID",
         ]
     );
 }
@@ -5393,7 +5440,8 @@ fn a_server_sends_with_the_source_connection_id_of_the_first_initial_packet_that
             "dropped: payload not opened".to_owned(),
             "offered []".to_owned(),
             "processed: highest numbered true, non-probing true".to_owned(),
-            "processed: highest numbered true, non-probing true".to_owned(),
+            // from another connection attempt
+            "dropped: another source connection ID".to_owned(),
             format!("offered [(0, {:?})]", [0xaa; 8]),
         ]
     );
@@ -5776,7 +5824,7 @@ fn the_ack_delay_of_a_handshake_packet_counts_the_wait_for_its_keys() {
         "the ACK of the Initial packet"
     );
     // the Handshake packet arrives at 6 ms and waits for its keys until 8
-    deliver(long_packet(HANDSHAKE, 0, &ping()), &first, ms(6));
+    deliver(client_long_packet(HANDSHAKE, 0, &ping()), &first, ms(6));
     let _ = settle(&mut connection, 6..=9);
     let sent = common::take_sent();
     assert_eq!(sent.len(), 1, "{sent:?}");
@@ -6116,7 +6164,7 @@ fn a_datagram_of_a_level_whose_keys_went_is_not_handed_over() {
             (
                 ms(1050),
                 Receive(received(
-                    long_packet(HANDSHAKE, 0, &ping()),
+                    client_long_packet(HANDSHAKE, 0, &ping()),
                     &first,
                     ms(1050),
                 )),
@@ -7665,7 +7713,7 @@ fn an_initial_packet_the_link_accepts_after_the_space_retired_leaves_the_bytes_i
             (
                 ms(1050),
                 Receive(received(
-                    long_packet(HANDSHAKE, 0, &ping()),
+                    client_long_packet(HANDSHAKE, 0, &ping()),
                     &first,
                     ms(1050),
                 )),

@@ -1,16 +1,19 @@
 //! Whether a datagram whose first packet has a long header, offered to a
 //! connection as one of the candidates for it, belongs to the connection.
 //!
-//! Routing finds the connections a datagram may belong to by its
-//! Destination Connection ID; for a long header that is not enough, since
-//! another connection attempt can send to the same connection ID: a client
-//! that starts again with the same first Destination Connection ID, or a
-//! client whose ClientHello takes two Initial packets and sends the second
-//! to the Source Connection ID of the server's first Initial packet. What
-//! tells the attempts apart is the Source Connection ID the peer chose for
-//! the handshake (RFC 9000 §7.2): every long header packet from the peer
-//! carries it, and once a packet from the peer opened the connection keeps
-//! it ([`PeerHandshakeConnectionId`](super::connection_ids::PeerHandshakeConnectionId)).
+//! Routing gives a long header datagram sent to one of this side's
+//! connection IDs to the connections it was issued for, with no other
+//! candidate (sakuya_datagram_routing's `InitialAcceptance`); the receiving
+//! of each packet drops one from another Source Connection ID. A long
+//! header becomes a candidate to judge only when it was found otherwise: by
+//! the first Destination Connection ID a client chose, under which another
+//! connection attempt can send too, a client that starts again with the
+//! same one; or among the connections a colliding connection ID was issued
+//! for. What tells the attempts apart is the Source Connection ID the peer
+//! chose for the handshake (RFC 9000 §7.2): every long header packet from
+//! the peer carries it, and once a packet from the peer opened the
+//! connection keeps it
+//! ([`PeerHandshakeConnectionId`](super::connection_ids::PeerHandshakeConnectionId)).
 //!
 //! [`long_header_belongs`] judges by it: a version 1 long header from the
 //! peer's handshake connection ID belongs to the connection. Before one is
