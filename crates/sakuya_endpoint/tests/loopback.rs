@@ -54,9 +54,9 @@ use sakuya_endpoint::{
     },
     endpoint::{AddBindingError, BindingHandleConnectError, Endpoint},
     handshake::{ClientHandshakeConfig, ServerHandshakeConfig},
-    incoming::{Incoming, RetryError},
+    incoming::{Incoming, RetryError, TerminableIncoming},
     outgoing::StartOutgoingError,
-    retry::{CapacityFraction, LoadStatelessRetryPolicy},
+    retry::{CapacityFraction, EncodeStatelessRetryError, LoadStatelessRetryPolicy},
     role::{AcceptingServer, ConnectingClient, NoClient, NoServer},
     stateless_check::ReturnedToken,
 };
@@ -1072,43 +1072,154 @@ impl<Peer> TokenPeerAddress<Peer> for NoSocketAddrTokens {
     }
 }
 
-type ServerWithoutAddresses = AcceptingServer<
-    ServerChoices,
-    Parts,
-    ServerStarts,
-    NoSocketAddrTokens,
-    LoadStatelessRetryPolicy,
->;
+type ServerWithTokens<Tk> =
+    AcceptingServer<ServerChoices, Parts, ServerStarts, Tk, LoadStatelessRetryPolicy>;
+
+/// A server endpoint on `tokens`, and the incoming connection that a client's
+/// Initial makes on it; the endpoint and the client's link are kept alive
+/// with it.
+async fn incoming_on<Tk>(
+    tokens: Tk,
+) -> (
+    Endpoint<Udp, ServerWithTokens<Tk>, NoClient>,
+    UdpLink<TokioClock>,
+    TerminableIncoming<Udp, ServerWithTokens<Tk>>,
+)
+where
+    Tk: AddressTokens + TokenPeerAddress<PeerOf<Udp>> + Clone + 'static,
+{
+    let (endpoint, reflow) = Endpoint::<Udp, ServerWithTokens<Tk>, NoClient>::new(endpoint_config(
+        server_config_with(tokens),
+        (),
+    ))
+    .unwrap();
+    let _reflow = tokio::task::spawn_local(reflow);
+    let socket = bind();
+    let address = socket.local_address();
+    let (_handle, driver) = endpoint
+        .add_accepting_binding(socket, BindingDeclarations::default())
+        .unwrap();
+    let _driver = tokio::task::spawn_local(driver);
+    let mut incoming = endpoint.incoming();
+    let peer = bind();
+    let link = within("a link to the server", peer.connect(address))
+        .await
+        .unwrap();
+    send_on(&link, long_packet(true, &[0x0d; 8], &[0x5c; 4], 1200)).await;
+    let Some(Incoming::Terminable(half)) = within("an incoming connection", incoming.next()).await
+    else {
+        panic!("the server endpoint ends before a connection comes");
+    };
+    (endpoint, link, half)
+}
+
+/// Refuses `half`, which shows that its registration is still there.
+async fn assert_refusable<Tk>(half: TerminableIncoming<Udp, ServerWithTokens<Tk>>)
+where
+    Tk: AddressTokens + TokenPeerAddress<PeerOf<Udp>> + Clone + 'static,
+{
+    let refused = half.refuse(TransportImmediateClose {
+        code: TransportErrorCode::CONNECTION_REFUSED,
+        frame_type: None,
+        reason_phrase: Bytes::from_static(b"not now"),
+    });
+    assert!(within("the refusal is sent", refused).await.is_ok());
+}
 
 #[test]
 fn a_peer_that_is_not_a_socket_address_gets_no_retry() {
     run(async {
-        let (endpoint, reflow) = Endpoint::<Udp, ServerWithoutAddresses, NoClient>::new(
-            endpoint_config(server_config_with(NoSocketAddrTokens(aead_tokens())), ()),
-        )
-        .unwrap();
-        let _reflow = tokio::task::spawn_local(reflow);
-        let socket = bind();
-        let address = socket.local_address();
-        let (_handle, driver) = endpoint
-            .add_accepting_binding(socket, BindingDeclarations::default())
-            .unwrap();
-        let _driver = tokio::task::spawn_local(driver);
-        let mut incoming = endpoint.incoming();
-        let peer = bind();
-        let link = within("a link to the server", peer.connect(address))
-            .await
-            .unwrap();
-        send_on(&link, long_packet(true, &[0x0d; 8], &[0x5c; 4], 1200)).await;
-        let Some(Incoming::Terminable(half)) =
-            within("an incoming connection", incoming.next()).await
-        else {
-            panic!("the server endpoint ends before a connection comes");
-        };
+        let (_endpoint, _link, half) = incoming_on(NoSocketAddrTokens(aead_tokens())).await;
         assert!(matches!(
             within("the Retry is refused", half.retry()).await,
             Err(RetryError::PeerNotSocketAddr(_))
         ));
+    });
+}
+
+/// What [`FaultyTokens`] does instead of issuing a Retry token.
+#[derive(Clone, Copy)]
+enum Fault {
+    /// The random source fails.
+    Random,
+    /// The token is empty.
+    Empty,
+}
+
+/// The tokens of [`aead_tokens`], except that issuing a Retry token goes
+/// wrong as `fault` says.
+#[derive(Clone)]
+struct FaultyTokens {
+    inner: AeadAddressTokens<AwsLcBackend>,
+    fault: Fault,
+}
+
+impl AddressTokens for FaultyTokens {
+    type NewTokenIssuer = <AeadAddressTokens<AwsLcBackend> as AddressTokens>::NewTokenIssuer;
+
+    fn new_token_issuer(&self) -> Self::NewTokenIssuer {
+        self.inner.new_token_issuer()
+    }
+
+    fn issue_retry(
+        &self,
+        _: &SocketAddr,
+        _: &ConnectionId,
+        _: UtcDateTime,
+    ) -> Result<Bytes, nitori_crypto::RandomError> {
+        match self.fault {
+            Fault::Random => Err(nitori_crypto::RandomError),
+            Fault::Empty => Ok(Bytes::new()),
+        }
+    }
+
+    fn validate(&self, token: &[u8], peer: &SocketAddr, now: UtcDateTime) -> TokenOutcome {
+        self.inner.validate(token, peer, now)
+    }
+}
+
+impl TokenPeerAddress<PeerOf<Udp>> for FaultyTokens {
+    fn peer_socket_addr<'p>(&self, peer: &'p PeerOf<Udp>) -> Option<&'p SocketAddr> {
+        self.inner.peer_socket_addr(peer)
+    }
+}
+
+/// A token source that fails to issue gets no Retry sent, and gives the
+/// incoming connection back, which can still be refused.
+#[test]
+fn a_failing_random_source_gets_no_retry() {
+    run(async {
+        let tokens = FaultyTokens {
+            inner: aead_tokens(),
+            fault: Fault::Random,
+        };
+        let (_endpoint, _link, half) = incoming_on(tokens).await;
+        let Err(RetryError::Random { half, .. }) =
+            within("the Retry is refused", half.retry()).await
+        else {
+            panic!("a failing random source sends a Retry");
+        };
+        assert_refusable(half).await;
+    });
+}
+
+/// An empty Retry token cannot be encoded: no Retry is sent, and the
+/// incoming connection is given back, which can still be refused.
+#[test]
+fn an_empty_retry_token_gets_no_retry() {
+    run(async {
+        let tokens = FaultyTokens {
+            inner: aead_tokens(),
+            fault: Fault::Empty,
+        };
+        let (_endpoint, _link, half) = incoming_on(tokens).await;
+        let Err(RetryError::Encode { half, source }) =
+            within("the Retry is refused", half.retry()).await
+        else {
+            panic!("an empty token is encoded into a Retry");
+        };
+        assert!(matches!(source, EncodeStatelessRetryError::EmptyToken));
+        assert_refusable(half).await;
     });
 }
 
