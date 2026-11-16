@@ -10,9 +10,12 @@
 //! The endpoint keeps one [`LinkCore`] for each `LinkId`, in its set of
 //! dispatched links and in the link's receive loop; those do not count as
 //! uses. Every `EndpointLink` made from it is a use: the ones connections,
-//! incoming and outgoing connections hold, and the one each received
-//! datagram carries until it is taken or dropped. When no use is left, the
-//! endpoint lets the link go.
+//! incoming and outgoing connections hold, the one each received datagram
+//! carries until it is taken or dropped, and the one each response of the
+//! reflow driver holds while it is queued or being sent. When no use is
+//! left, the endpoint lets the link go: it stops receiving on it as the
+//! last clone of the member goes, so the transport closes the link at the
+//! same moment.
 
 use core::{
     fmt,

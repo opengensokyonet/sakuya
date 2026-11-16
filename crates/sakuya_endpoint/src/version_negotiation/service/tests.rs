@@ -74,3 +74,29 @@ fn a_full_queue_counts_the_dropped_response() {
     assert_eq!(queue.len(), 2);
     assert_eq!(queue.dropped(), 1);
 }
+
+#[test]
+fn a_dropped_queue_releases_its_links_and_takes_no_more() {
+    use frunk_core::coproduct::{CNil, Coproduct};
+
+    use crate::link::LinkCore;
+
+    let core = LinkCore::<Coproduct<TestLink, CNil>>::from_member(Coproduct::Inl(link()));
+    let arrived = |len: usize| {
+        let mut bytes = vec![0xc0, 0x1a, 0x2a, 0x3a, 0x4a, 3, 1, 2, 3, 2, 9, 8];
+        bytes.resize(len, 0);
+        ReceivedDatagram::new(
+            bytes,
+            ArrivalFacts::new(core.endpoint_link(), Duration::ZERO, None),
+        )
+    };
+    let (service, queue) = NegotiatingVersionService::new(NonZeroUsize::new(4).unwrap());
+    service.unsupported_version(VERSION, arrived(1200));
+    service.unsupported_version(VERSION, arrived(1200));
+    assert_eq!(core.uses(), 2);
+
+    drop(queue);
+    assert_eq!(core.uses(), 0);
+    service.unsupported_version(VERSION, arrived(1200));
+    assert_eq!(core.uses(), 0);
+}

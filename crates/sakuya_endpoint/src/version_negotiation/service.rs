@@ -53,6 +53,10 @@ pub struct NegotiatingVersionService<L> {
 
 /// The responses a [`NegotiatingVersionService`] queued for the reflow
 /// driver to send.
+///
+/// Each queued response holds the link it is to be sent on. Dropped, the
+/// queue releases them and the service queues nothing more, so a link is
+/// not kept by responses no one will send.
 pub struct VersionNegotiationQueue<L> {
     shared: Arc<Shared<L>>,
 }
@@ -63,7 +67,10 @@ impl<L> NegotiatingVersionService<L> {
     #[must_use]
     pub fn new(capacity: NonZeroUsize) -> (Self, VersionNegotiationQueue<L>) {
         let shared = Arc::new(Shared {
-            pending: Mutex::new(VecDeque::new()),
+            pending: Mutex::new(Pending {
+                queue: VecDeque::new(),
+                ended: false,
+            }),
             capacity,
             waker: AtomicWaker::new(),
             dropped: AtomicU64::new(0),
@@ -103,13 +110,13 @@ impl<P: AsRef<[u8]>, L: Link> VersionService<P, L> for NegotiatingVersionService
 impl<L> VersionNegotiationQueue<L> {
     /// The oldest queued response, or `Pending` until one is queued.
     pub fn poll_pop(&self, cx: &mut Context<'_>) -> Poll<PendingVersionNegotiation<L>> {
-        if let Some(pending) = self.shared.lock().pop_front() {
+        if let Some(pending) = self.shared.lock().queue.pop_front() {
             return Poll::Ready(pending);
         }
         self.shared.waker.register(cx.waker());
         // A response queued between the first look and the registration
         // woke no one; look again.
-        match self.shared.lock().pop_front() {
+        match self.shared.lock().queue.pop_front() {
             Some(pending) => Poll::Ready(pending),
             None => Poll::Pending,
         }
@@ -118,13 +125,13 @@ impl<L> VersionNegotiationQueue<L> {
     /// How many responses are queued.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.shared.lock().len()
+        self.shared.lock().queue.len()
     }
 
     /// Whether no response is queued.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.shared.lock().is_empty()
+        self.shared.lock().queue.is_empty()
     }
 
     /// How many responses were not queued because the queue was full; it only
@@ -132,6 +139,19 @@ impl<L> VersionNegotiationQueue<L> {
     #[must_use]
     pub fn dropped(&self) -> u64 {
         self.shared.dropped.load(Ordering::Relaxed)
+    }
+}
+
+impl<L> Drop for VersionNegotiationQueue<L> {
+    fn drop(&mut self) {
+        let released = {
+            let mut pending = self.shared.lock();
+            pending.ended = true;
+            core::mem::take(&mut pending.queue)
+        };
+        // Outside the lock: releasing a link's last use wakes its receive
+        // loop.
+        drop(released);
     }
 }
 
@@ -154,29 +174,40 @@ impl<L> fmt::Debug for VersionNegotiationQueue<L> {
 
 /// What the service and the queue share.
 struct Shared<L> {
-    pending: Mutex<VecDeque<PendingVersionNegotiation<L>>>,
+    pending: Mutex<Pending<L>>,
     capacity: NonZeroUsize,
     waker: AtomicWaker,
     dropped: AtomicU64,
 }
 
+/// The queued responses, and whether the queue was dropped.
+struct Pending<L> {
+    queue: VecDeque<PendingVersionNegotiation<L>>,
+    ended: bool,
+}
+
 impl<L> Shared<L> {
     fn push(&self, pending: PendingVersionNegotiation<L>) {
         {
-            let mut queue = self.lock();
-            if queue.len() >= self.capacity.get() {
-                drop(queue);
+            let mut queued = self.lock();
+            if queued.ended {
+                drop(queued);
+                drop(pending);
+                return;
+            }
+            if queued.queue.len() >= self.capacity.get() {
+                drop(queued);
                 self.dropped.fetch_add(1, Ordering::Relaxed);
                 return;
             }
-            queue.push_back(pending);
+            queued.queue.push_back(pending);
         }
         self.waker.wake();
     }
 
     /// The lock is also taken while a link's receive loop unwinds; a
     /// poisoned lock is used as it is, since a second panic would abort.
-    fn lock(&self) -> MutexGuard<'_, VecDeque<PendingVersionNegotiation<L>>> {
+    fn lock(&self) -> MutexGuard<'_, Pending<L>> {
         self.pending.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
