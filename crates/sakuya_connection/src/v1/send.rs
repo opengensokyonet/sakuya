@@ -44,6 +44,7 @@ use super::{
 use crate::{
     clock::InstantOf,
     error::ConnectionErrorsOf,
+    feedback::InjectSummary,
     frame_source::{
         FindFrameSource, FrameSource, FrameSourceItemsOf, FrameSourceKind, FrameSourcePart,
         HandshakePacket, InitialPacket, NoIntent, OneRttPacket, OneRttProbePacket, PacketKind,
@@ -635,14 +636,14 @@ where
     /// ACK frame is due.
     type Intent = NoIntent;
 
-    fn supply<W, P>(
+    fn supply<W, P, Idx>(
         &mut self,
         space: PacketNumberSpaceKind,
         mut packet: OpenPacket<W, AckOnlyClass, P>,
     ) -> Supplied<W, AckOnlyClass, P>
     where
         W: PacketWriting,
-        SummaryOf<W>: From<AckSummary<I>>,
+        SummaryOf<W>: InjectSummary<AckSummary<I>, Idx>,
         P: PacketPosition,
     {
         let Some(journals) = self.state.journals(space) else {
@@ -681,7 +682,10 @@ where
             return Supplied::Open(packet);
         };
         let before = self.state.ack_written(space, largest);
-        let written = packet.write_frame(frame, AckSummary { largest, before });
+        let written = packet.write_frame(
+            frame,
+            <SummaryOf<W>>::inject_summary(AckSummary { largest, before }),
+        );
         debug_assert!(written.is_ok(), "the frame was measured against the room");
         Supplied::Open(packet)
     }
@@ -727,18 +731,18 @@ impl<I> FrameSource for ProbePingFrameSource<I> {
     type Item<'b> = PacketNumberSpaceKind;
     type Intent = NoIntent;
 
-    fn supply<W, P>(
+    fn supply<W, P, Idx>(
         &mut self,
         _: PacketNumberSpaceKind,
         mut packet: OpenPacket<W, InFlightClass, P>,
     ) -> Supplied<W, InFlightClass, P>
     where
         W: PacketWriting,
-        SummaryOf<W>: From<ProbePingSummary>,
+        SummaryOf<W>: InjectSummary<ProbePingSummary, Idx>,
         P: PacketPosition,
     {
         // A PING that does not fit leaves the packet as it is.
-        let _ = packet.write_frame(PingFrame, ProbePingSummary);
+        let _ = packet.write_frame(PingFrame, <SummaryOf<W>>::inject_summary(ProbePingSummary));
         Supplied::Open(packet)
     }
 
@@ -941,14 +945,14 @@ where
     type Item<'b> = CryptoLevel;
     type Intent = NoIntent;
 
-    fn supply<W, P>(
+    fn supply<W, P, Idx>(
         &mut self,
         level: CryptoLevel,
         mut packet: OpenPacket<W, InFlightClass, P>,
     ) -> Supplied<W, InFlightClass, P>
     where
         W: PacketWriting,
-        SummaryOf<W>: From<CryptoSummary>,
+        SummaryOf<W>: InjectSummary<CryptoSummary, Idx>,
         P: PacketPosition,
     {
         self.lineage

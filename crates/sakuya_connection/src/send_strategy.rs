@@ -476,15 +476,17 @@ pub trait InjectSendIntent<J, Idx> {
     fn inject(intent: J) -> Self;
 }
 
-/// The place of an intent in the part at the head of a sum, with `Inner`
-/// its place in that part's own sum.
+/// The place of a value, such as an intent or a summary, in the part at
+/// the head of a sum of the parts' sums, with `Inner` its place in that
+/// part's own sum.
 #[derive(Debug)]
 pub enum InHead<Inner> {
     #[doc(hidden)]
     _Never(PhantomData<Inner>, core::convert::Infallible),
 }
 
-/// The place of an intent in a later part of a sum.
+/// The place of a value, such as an intent or a summary, in a later part
+/// of a sum of the parts' sums.
 #[derive(Debug)]
 pub enum InTail<Idx> {
     #[doc(hidden)]

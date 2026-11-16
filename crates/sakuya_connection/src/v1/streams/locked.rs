@@ -113,6 +113,7 @@ use super::{
     },
 };
 use crate::{
+    feedback::InjectSummary,
     send_strategy::{IntentTicketResize, IntentTicketWithdraw, SendIntent},
     v1::application_handles::connection::wake_all,
     write::{
@@ -317,7 +318,7 @@ fn forget_ticket<K: IntentTicketWithdraw, P>(slot: &mut Option<Ticketed<K, P>>) 
 }
 
 /// Write `frame` into `packet` with `summary`; whether it fitted.
-fn write_frame<W, F, S, Q>(
+fn write_frame<W, F, S, Q, Idx>(
     packet: &mut OpenPacket<W, InFlightClass, Q>,
     frame: F,
     summary: S,
@@ -325,10 +326,10 @@ fn write_frame<W, F, S, Q>(
 where
     W: PacketWriting,
     F: DelimitedFrame<Class = InFlightClass>,
-    SummaryOf<W>: From<S>,
+    SummaryOf<W>: InjectSummary<S, Idx>,
 {
     packet
-        .write_frame(frame, <SummaryOf<W>>::from(summary))
+        .write_frame(frame, <SummaryOf<W>>::inject_summary(summary))
         .is_ok()
 }
 
@@ -485,13 +486,13 @@ where
     /// Write STREAM frames into `packet`: as much of the next data as fits,
     /// with the FIN when it ends at the final size, or the FIN alone; the
     /// data and the FIN are first exposed before it returns.
-    fn write_stream<W, Q>(
+    fn write_stream<W, Q, Idx>(
         &mut self,
         packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
         W: PacketWriting,
-        SummaryOf<W>: From<StreamSummary>,
+        SummaryOf<W>: InjectSummary<StreamSummary, Idx>,
         Q: PacketPosition,
     {
         if !self.sends() {
@@ -584,13 +585,13 @@ where
 
     /// Write the RESET_STREAM frame of the reset in effect into `packet`,
     /// its final size first exposed if it was not yet.
-    fn write_reset_stream<W, Q>(
+    fn write_reset_stream<W, Q, Idx>(
         &mut self,
         mut packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
         W: PacketWriting,
-        SummaryOf<W>: From<ResetStreamSummary>,
+        SummaryOf<W>: InjectSummary<ResetStreamSummary, Idx>,
     {
         let Some(target) = self.reset_due() else {
             return Supplied::Open(packet);
@@ -613,13 +614,13 @@ where
     }
 
     /// Write the STREAM_DATA_BLOCKED frame of the limit in effect.
-    fn write_stream_data_blocked<W, Q>(
+    fn write_stream_data_blocked<W, Q, Idx>(
         &mut self,
         mut packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
         W: PacketWriting,
-        SummaryOf<W>: From<StreamDataBlockedSummary>,
+        SummaryOf<W>: InjectSummary<StreamDataBlockedSummary, Idx>,
     {
         let Some(limit) = self.sender.stream_data_blocked_limit() else {
             return Supplied::Open(packet);
@@ -694,7 +695,7 @@ fn data_range(offset: VarInt, len: usize) -> Option<core::ops::Range<VarInt>> {
 /// Write a STREAM frame of `data` at `offset` into `packet`: without a
 /// Length field, closing the packet, when it is the last, otherwise with
 /// one. Hands back the packet and whether the frame fitted.
-fn write_stream_frame<W, Q>(
+fn write_stream_frame<W, Q, Idx>(
     packet: OpenPacket<W, InFlightClass, Q>,
     stream_id: VarIntField<StreamId>,
     offset: VarInt,
@@ -704,7 +705,7 @@ fn write_stream_frame<W, Q>(
 ) -> (Supplied<W, InFlightClass, Q>, bool)
 where
     W: PacketWriting,
-    SummaryOf<W>: From<StreamSummary>,
+    SummaryOf<W>: InjectSummary<StreamSummary, Idx>,
     Q: PacketPosition,
 {
     let offset = offset_field(offset);
@@ -715,7 +716,7 @@ where
                 // invariant: the data lies below the written end, a `VarInt`
                 Err(_) => return (Supplied::Open(last.into_position()), false),
             };
-            match last.write_last(frame, <SummaryOf<W>>::from(summary)) {
+            match last.write_last(frame, <SummaryOf<W>>::inject_summary(summary)) {
                 Ok(closed) => (Supplied::Closed(closed), true),
                 Err(rejected) => (
                     Supplied::Open(rejected.into_parts().0.into_position()),
@@ -795,14 +796,14 @@ where
     }
 
     /// Write the STOP_SENDING frame of the request waiting.
-    fn write_stop_sending<W, Q>(
+    fn write_stop_sending<W, Q, Idx>(
         &mut self,
         stream_id: StreamId,
         mut packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
         W: PacketWriting,
-        SummaryOf<W>: From<StopSendingSummary>,
+        SummaryOf<W>: InjectSummary<StopSendingSummary, Idx>,
     {
         let Some(code) = self.receiver.pending_stop() else {
             return Supplied::Open(packet);
@@ -820,14 +821,14 @@ where
 
     /// Write the MAX_STREAM_DATA frame of the limit due; once written, the
     /// limit may be visible to the peer.
-    fn write_max_stream_data<W, Q>(
+    fn write_max_stream_data<W, Q, Idx>(
         &mut self,
         stream_id: StreamId,
         mut packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
         W: PacketWriting,
-        SummaryOf<W>: From<MaxStreamDataSummary>,
+        SummaryOf<W>: InjectSummary<MaxStreamDataSummary, Idx>,
     {
         let Some(limit) = self.max_stream_data_due() else {
             return Supplied::Open(packet);
@@ -1603,7 +1604,7 @@ where
         }
     }
 
-    fn supply_stream<H, W, Q>(
+    fn supply_stream<H, W, Q, Idx>(
         &mut self,
         publish: &H,
         stream_id: StreamId,
@@ -1613,7 +1614,7 @@ where
         H: StreamIntentHandle<P, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
-        SummaryOf<W>: From<StreamSummary>,
+        SummaryOf<W>: InjectSummary<StreamSummary, Idx>,
         Q: PacketPosition,
     {
         let Some(part) = self.shared.sender_of(stream_id) else {
@@ -1625,7 +1626,7 @@ where
         supplied
     }
 
-    fn supply_reset_stream<H, W, Q>(
+    fn supply_reset_stream<H, W, Q, Idx>(
         &mut self,
         publish: &H,
         stream_id: StreamId,
@@ -1635,7 +1636,7 @@ where
         H: StreamIntentHandle<P, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
-        SummaryOf<W>: From<ResetStreamSummary>,
+        SummaryOf<W>: InjectSummary<ResetStreamSummary, Idx>,
         Q: PacketPosition,
     {
         let Some(part) = self.shared.sender_of(stream_id) else {
@@ -1647,7 +1648,7 @@ where
         supplied
     }
 
-    fn supply_stop_sending<H, W, Q>(
+    fn supply_stop_sending<H, W, Q, Idx>(
         &mut self,
         publish: &H,
         stream_id: StreamId,
@@ -1657,7 +1658,7 @@ where
         H: StreamIntentHandle<P, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
-        SummaryOf<W>: From<StopSendingSummary>,
+        SummaryOf<W>: InjectSummary<StopSendingSummary, Idx>,
         Q: PacketPosition,
     {
         let Some(part) = self.shared.receiver_of(stream_id) else {
@@ -1669,7 +1670,7 @@ where
         supplied
     }
 
-    fn supply_max_data<H, W, Q>(
+    fn supply_max_data<H, W, Q, Idx>(
         &mut self,
         publish: &H,
         mut packet: OpenPacket<W, InFlightClass, Q>,
@@ -1678,7 +1679,7 @@ where
         H: StreamIntentHandle<P, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
-        SummaryOf<W>: From<MaxDataSummary>,
+        SummaryOf<W>: InjectSummary<MaxDataSummary, Idx>,
         Q: PacketPosition,
     {
         self.shared.with_connection_receive(publish, |connection| {
@@ -1697,7 +1698,7 @@ where
         Supplied::Open(packet)
     }
 
-    fn supply_max_stream_data<H, W, Q>(
+    fn supply_max_stream_data<H, W, Q, Idx>(
         &mut self,
         publish: &H,
         stream_id: StreamId,
@@ -1707,7 +1708,7 @@ where
         H: StreamIntentHandle<P, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
-        SummaryOf<W>: From<MaxStreamDataSummary>,
+        SummaryOf<W>: InjectSummary<MaxStreamDataSummary, Idx>,
         Q: PacketPosition,
     {
         let Some(part) = self.shared.receiver_of(stream_id) else {
@@ -1719,7 +1720,7 @@ where
         supplied
     }
 
-    fn supply_max_streams<H, W, Q>(
+    fn supply_max_streams<H, W, Q, Idx>(
         &mut self,
         publish: &H,
         directionality: Directionality,
@@ -1729,7 +1730,7 @@ where
         H: StreamIntentHandle<P, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
-        SummaryOf<W>: From<MaxStreamsSummary>,
+        SummaryOf<W>: InjectSummary<MaxStreamsSummary, Idx>,
         Q: PacketPosition,
     {
         self.shared.with_set(publish, |set| {
@@ -1753,7 +1754,7 @@ where
         Supplied::Open(packet)
     }
 
-    fn supply_data_blocked<H, W, Q>(
+    fn supply_data_blocked<H, W, Q, Idx>(
         &mut self,
         publish: &H,
         mut packet: OpenPacket<W, InFlightClass, Q>,
@@ -1762,7 +1763,7 @@ where
         H: StreamIntentHandle<P, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
-        SummaryOf<W>: From<DataBlockedSummary>,
+        SummaryOf<W>: InjectSummary<DataBlockedSummary, Idx>,
         Q: PacketPosition,
     {
         self.shared.with_set(publish, |set| {
@@ -1780,7 +1781,7 @@ where
         Supplied::Open(packet)
     }
 
-    fn supply_stream_data_blocked<H, W, Q>(
+    fn supply_stream_data_blocked<H, W, Q, Idx>(
         &mut self,
         publish: &H,
         stream_id: StreamId,
@@ -1790,7 +1791,7 @@ where
         H: StreamIntentHandle<P, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
-        SummaryOf<W>: From<StreamDataBlockedSummary>,
+        SummaryOf<W>: InjectSummary<StreamDataBlockedSummary, Idx>,
         Q: PacketPosition,
     {
         let Some(part) = self.shared.sender_of(stream_id) else {
@@ -1802,7 +1803,7 @@ where
         supplied
     }
 
-    fn supply_streams_blocked<H, W, Q>(
+    fn supply_streams_blocked<H, W, Q, Idx>(
         &mut self,
         publish: &H,
         directionality: Directionality,
@@ -1812,7 +1813,7 @@ where
         H: StreamIntentHandle<P, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
-        SummaryOf<W>: From<StreamsBlockedSummary>,
+        SummaryOf<W>: InjectSummary<StreamsBlockedSummary, Idx>,
         Q: PacketPosition,
     {
         self.shared.with_set(publish, |set| {

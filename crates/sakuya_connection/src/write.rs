@@ -32,6 +32,7 @@ use snafu::{Snafu, ensure};
 
 use crate::{
     clock::{ConnectionChoices, InstantOf},
+    feedback::InjectSummary,
     frame_source::{FindFrameSource, FrameSource, FrameSourceKind, NoIntent, PublishIntent},
     take::Lineage,
 };
@@ -63,14 +64,14 @@ impl FrameSource for PaddingFrameSource {
     type Item<'a> = Infallible;
     type Intent = NoIntent;
 
-    fn supply<W, P>(
+    fn supply<W, P, Idx>(
         &mut self,
         item: Infallible,
         _: OpenPacket<W, InFlightClass, P>,
     ) -> Supplied<W, InFlightClass, P>
     where
         W: PacketWriting,
-        SummaryOf<W>: From<PaddingSummary>,
+        SummaryOf<W>: InjectSummary<PaddingSummary, Idx>,
         P: PacketPosition,
     {
         match item {}

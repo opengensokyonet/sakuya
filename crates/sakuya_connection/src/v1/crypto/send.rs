@@ -39,6 +39,7 @@ use sakuya_wire::{
 use snafu::{Snafu, ensure};
 
 use crate::{
+    feedback::InjectSummary,
     v1::feedback::CryptoSummary,
     write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf},
 };
@@ -447,14 +448,14 @@ impl<B: CryptoSendBuffer> CryptoSender<B> {
     /// Writes CRYPTO frames of the unsent bytes of `level` into `packet`,
     /// the earliest first, as many as its room takes, each with its
     /// summary; returns whether it wrote any.
-    pub(crate) fn write_frames<W, P>(
+    pub(crate) fn write_frames<W, P, Idx>(
         &mut self,
         level: CryptoLevel,
         packet: &mut OpenPacket<W, InFlightClass, P>,
     ) -> bool
     where
         W: PacketWriting,
-        SummaryOf<W>: From<CryptoSummary>,
+        SummaryOf<W>: InjectSummary<CryptoSummary, Idx>,
         P: PacketPosition,
     {
         let LevelOutput::Kept(buffer) = self.output_mut(level) else {
@@ -478,7 +479,10 @@ impl<B: CryptoSendBuffer> CryptoSender<B> {
             let width = VarIntWidth::shortest(VarInt::try_from(len).unwrap_or(VarInt::MAX));
             let frame = CryptoFrame::new(VarIntField::shortest(offset), width, data)
                 .expect("the data was measured to fit the frame");
-            let written = packet.write_frame(frame, CryptoSummary { level, offset, len });
+            let written = packet.write_frame(
+                frame,
+                <SummaryOf<W>>::inject_summary(CryptoSummary { level, offset, len }),
+            );
             debug_assert!(written.is_ok(), "the frame was measured against the room");
             wrote = true;
         }

@@ -17,6 +17,7 @@ use sakuya_wire::v1::frame::handshake_done::HandshakeDoneFrame;
 use super::{Choices, feedback::HandshakeDoneSummary, send::HandshakeDoneIntent};
 use crate::{
     component::{ArgsOf, Build, ParentsOf, PassiveDataComponent},
+    feedback::InjectSummary,
     frame_source::{FrameSource, PublishIntent},
     layer,
     share::LineagePartList,
@@ -59,17 +60,20 @@ impl FrameSource for HandshakeDoneSource {
     type Item<'a> = ();
     type Intent = HandshakeDoneIntent;
 
-    fn supply<W, P>(
+    fn supply<W, P, Idx>(
         &mut self,
         (): (),
         mut packet: OpenPacket<W, InFlightClass, P>,
     ) -> Supplied<W, InFlightClass, P>
     where
         W: PacketWriting,
-        SummaryOf<W>: From<HandshakeDoneSummary>,
+        SummaryOf<W>: InjectSummary<HandshakeDoneSummary, Idx>,
         P: PacketPosition,
     {
-        let written = packet.write_frame(HandshakeDoneFrame, HandshakeDoneSummary);
+        let written = packet.write_frame(
+            HandshakeDoneFrame,
+            <SummaryOf<W>>::inject_summary(HandshakeDoneSummary),
+        );
         debug_assert!(written.is_ok(), "the intent asks room for the whole frame");
         Supplied::Open(packet)
     }
@@ -128,14 +132,14 @@ impl FrameSource for ClientOnlyState {
     type Item<'a> = ();
     type Intent = HandshakeDoneIntent;
 
-    fn supply<W, P>(
+    fn supply<W, P, Idx>(
         &mut self,
         (): (),
         packet: OpenPacket<W, InFlightClass, P>,
     ) -> Supplied<W, InFlightClass, P>
     where
         W: PacketWriting,
-        SummaryOf<W>: From<HandshakeDoneSummary>,
+        SummaryOf<W>: InjectSummary<HandshakeDoneSummary, Idx>,
         P: PacketPosition,
     {
         Supplied::Open(packet)

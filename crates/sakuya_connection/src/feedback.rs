@@ -26,13 +26,17 @@
 //! what it had not settled as lost. Each sees the lineage of its node, with
 //! what it took out of it; the feedback traits are generic over that
 //! lineage (`V`), so that the same frame sources serve them all.
+//!
+//! A frame source puts the summary of a frame it writes into the
+//! composition's summary at its part's place, then at its own place in
+//! that part's sum ([`InjectSummary`]); the compiler infers both.
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
-use sakuya_wire::parts::{CNil, Coproduct, HCons, HNil};
+use sakuya_wire::parts::{CNil, CoprodInjector, Coproduct, HCons, HNil};
 
 use crate::{
     clock::{ConnectionChoices, InstantOf},
     frame_source::{FeedFrameSources, FrameSourceKinds},
-    send_strategy::SendIntentPart,
+    send_strategy::{InHead, InTail, SendIntentPart},
     take::Lineage,
 };
 
@@ -58,6 +62,32 @@ impl<P: SendIntentPart, Ps: FeedbackSummariesOf> FeedbackSummariesOf for HCons<P
 /// The summary of one frame of a connection of the choices `T` and the
 /// list of parts `L`.
 pub type FeedbackSummaryOf<T, L> = <L as FeedbackSummariesOf>::FeedbackSummaries<InstantOf<T>>;
+
+/// Putting a summary `S` into a sum of the parts' summaries `Self`: into
+/// its part's sum, then at its place in that sum. `Idx` is the pair of
+/// places, [`InHead`] or [`InTail`]; the compiler infers it.
+pub trait InjectSummary<S, Idx> {
+    /// The sum holding `summary`.
+    fn inject_summary(summary: S) -> Self;
+}
+
+impl<S, Head, Tail, KIdx> InjectSummary<S, InHead<KIdx>> for Coproduct<Head, Tail>
+where
+    Head: CoprodInjector<S, KIdx>,
+{
+    fn inject_summary(summary: S) -> Self {
+        Coproduct::Inl(Head::inject(summary))
+    }
+}
+
+impl<S, Head, Tail, Idx> InjectSummary<S, InTail<Idx>> for Coproduct<Head, Tail>
+where
+    Tail: InjectSummary<S, Idx>,
+{
+    fn inject_summary(summary: S) -> Self {
+        Coproduct::Inr(Tail::inject_summary(summary))
+    }
+}
 
 /// Handing a summary back to the frame source of a list of parts that
 /// wrote it.
@@ -151,5 +181,44 @@ where
             }
             Coproduct::Inr(summary) => Ps::lost(lineage, publish, now, space, summary),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use sakuya_wire::parts::{CNil, Coproduct};
+
+    use super::InjectSummary;
+
+    #[derive(Debug, PartialEq)]
+    struct First;
+    #[derive(Debug, PartialEq)]
+    struct Second;
+    #[derive(Debug, PartialEq)]
+    struct Third;
+
+    /// Three parts: the first has two summaries, the second none, the third
+    /// one.
+    type Sum = Coproduct<
+        Coproduct<First, Coproduct<Second, CNil>>,
+        Coproduct<CNil, Coproduct<Coproduct<Third, CNil>, CNil>>,
+    >;
+
+    #[test]
+    fn a_summary_goes_into_its_part_past_an_empty_part() {
+        let sum = Sum::inject_summary(Third);
+        assert!(matches!(
+            sum,
+            Coproduct::Inr(Coproduct::Inr(Coproduct::Inl(Coproduct::Inl(Third))))
+        ));
+    }
+
+    #[test]
+    fn a_summary_goes_into_its_place_in_the_first_part() {
+        let sum = Sum::inject_summary(Second);
+        assert!(matches!(
+            sum,
+            Coproduct::Inl(Coproduct::Inr(Coproduct::Inl(Second)))
+        ));
     }
 }

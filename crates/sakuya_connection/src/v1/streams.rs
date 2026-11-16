@@ -75,6 +75,7 @@ use crate::{
     call::CallBundle,
     component::{ArgsOf, Build, DataComponent, ParentsOf, PassiveDataComponent},
     error::ConnectionErrorsOf,
+    feedback::InjectSummary,
     layer,
     others::OtherNodes,
     send_strategy::{AnyActiveLinkPath, IntentTicketResize, IntentTicketWithdraw, SendStrategy},
@@ -263,7 +264,7 @@ pub trait StreamSet<Lc, K>: Sized {
     ///
     /// It writes nothing, having resized or withdrawn the intent, when
     /// nothing is due or the frame does not fit.
-    fn supply_stream<P, W, Q>(
+    fn supply_stream<P, W, Q, Idx>(
         &mut self,
         publish: &P,
         stream_id: StreamId,
@@ -273,7 +274,7 @@ pub trait StreamSet<Lc, K>: Sized {
         P: StreamIntentHandle<Self::SendParameters, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
-        SummaryOf<W>: From<StreamSummary>,
+        SummaryOf<W>: InjectSummary<StreamSummary, Idx>,
         Q: PacketPosition;
 
     /// Writes the RESET_STREAM frame of the stream `stream_id`, as its
@@ -281,7 +282,7 @@ pub trait StreamSet<Lc, K>: Sized {
     ///
     /// It writes nothing, having resized or withdrawn the intent, when
     /// nothing is due or the frame does not fit.
-    fn supply_reset_stream<P, W, Q>(
+    fn supply_reset_stream<P, W, Q, Idx>(
         &mut self,
         publish: &P,
         stream_id: StreamId,
@@ -291,14 +292,14 @@ pub trait StreamSet<Lc, K>: Sized {
         P: StreamIntentHandle<Self::SendParameters, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
-        SummaryOf<W>: From<ResetStreamSummary>,
+        SummaryOf<W>: InjectSummary<ResetStreamSummary, Idx>,
         Q: PacketPosition;
 
     /// Writes the STOP_SENDING frame of the stream `stream_id`.
     ///
     /// It writes nothing, having resized or withdrawn the intent, when
     /// nothing is due or the frame does not fit.
-    fn supply_stop_sending<P, W, Q>(
+    fn supply_stop_sending<P, W, Q, Idx>(
         &mut self,
         publish: &P,
         stream_id: StreamId,
@@ -308,14 +309,14 @@ pub trait StreamSet<Lc, K>: Sized {
         P: StreamIntentHandle<Self::SendParameters, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
-        SummaryOf<W>: From<StopSendingSummary>,
+        SummaryOf<W>: InjectSummary<StopSendingSummary, Idx>,
         Q: PacketPosition;
 
     /// Writes the MAX_DATA frame of the connection's limit now.
     ///
     /// It writes nothing, having resized or withdrawn the intent, when
     /// nothing is due or the frame does not fit.
-    fn supply_max_data<P, W, Q>(
+    fn supply_max_data<P, W, Q, Idx>(
         &mut self,
         publish: &P,
         packet: OpenPacket<W, InFlightClass, Q>,
@@ -324,7 +325,7 @@ pub trait StreamSet<Lc, K>: Sized {
         P: StreamIntentHandle<Self::SendParameters, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
-        SummaryOf<W>: From<MaxDataSummary>,
+        SummaryOf<W>: InjectSummary<MaxDataSummary, Idx>,
         Q: PacketPosition;
 
     /// Writes the MAX_STREAM_DATA frame of the stream `stream_id`'s limit
@@ -332,7 +333,7 @@ pub trait StreamSet<Lc, K>: Sized {
     ///
     /// It writes nothing, having resized or withdrawn the intent, when
     /// nothing is due or the frame does not fit.
-    fn supply_max_stream_data<P, W, Q>(
+    fn supply_max_stream_data<P, W, Q, Idx>(
         &mut self,
         publish: &P,
         stream_id: StreamId,
@@ -342,7 +343,7 @@ pub trait StreamSet<Lc, K>: Sized {
         P: StreamIntentHandle<Self::SendParameters, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
-        SummaryOf<W>: From<MaxStreamDataSummary>,
+        SummaryOf<W>: InjectSummary<MaxStreamDataSummary, Idx>,
         Q: PacketPosition;
 
     /// Writes the MAX_STREAMS frame of the peer's streams of
@@ -350,7 +351,7 @@ pub trait StreamSet<Lc, K>: Sized {
     ///
     /// It writes nothing, having resized or withdrawn the intent, when
     /// nothing is due or the frame does not fit.
-    fn supply_max_streams<P, W, Q>(
+    fn supply_max_streams<P, W, Q, Idx>(
         &mut self,
         publish: &P,
         directionality: Directionality,
@@ -360,14 +361,14 @@ pub trait StreamSet<Lc, K>: Sized {
         P: StreamIntentHandle<Self::SendParameters, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
-        SummaryOf<W>: From<MaxStreamsSummary>,
+        SummaryOf<W>: InjectSummary<MaxStreamsSummary, Idx>,
         Q: PacketPosition;
 
     /// Writes the DATA_BLOCKED frame of the connection's limit now.
     ///
     /// It writes nothing, having resized or withdrawn the intent, when
     /// nothing is due or the frame does not fit.
-    fn supply_data_blocked<P, W, Q>(
+    fn supply_data_blocked<P, W, Q, Idx>(
         &mut self,
         publish: &P,
         packet: OpenPacket<W, InFlightClass, Q>,
@@ -376,7 +377,7 @@ pub trait StreamSet<Lc, K>: Sized {
         P: StreamIntentHandle<Self::SendParameters, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
-        SummaryOf<W>: From<DataBlockedSummary>,
+        SummaryOf<W>: InjectSummary<DataBlockedSummary, Idx>,
         Q: PacketPosition;
 
     /// Writes the STREAM_DATA_BLOCKED frame of the stream `stream_id`'s
@@ -384,7 +385,7 @@ pub trait StreamSet<Lc, K>: Sized {
     ///
     /// It writes nothing, having resized or withdrawn the intent, when
     /// nothing is due or the frame does not fit.
-    fn supply_stream_data_blocked<P, W, Q>(
+    fn supply_stream_data_blocked<P, W, Q, Idx>(
         &mut self,
         publish: &P,
         stream_id: StreamId,
@@ -394,7 +395,7 @@ pub trait StreamSet<Lc, K>: Sized {
         P: StreamIntentHandle<Self::SendParameters, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
-        SummaryOf<W>: From<StreamDataBlockedSummary>,
+        SummaryOf<W>: InjectSummary<StreamDataBlockedSummary, Idx>,
         Q: PacketPosition;
 
     /// Writes the STREAMS_BLOCKED frame of this side's streams of
@@ -402,7 +403,7 @@ pub trait StreamSet<Lc, K>: Sized {
     ///
     /// It writes nothing, having resized or withdrawn the intent, when
     /// nothing is due or the frame does not fit.
-    fn supply_streams_blocked<P, W, Q>(
+    fn supply_streams_blocked<P, W, Q, Idx>(
         &mut self,
         publish: &P,
         directionality: Directionality,
@@ -412,7 +413,7 @@ pub trait StreamSet<Lc, K>: Sized {
         P: StreamIntentHandle<Self::SendParameters, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
-        SummaryOf<W>: From<StreamsBlockedSummary>,
+        SummaryOf<W>: InjectSummary<StreamsBlockedSummary, Idx>,
         Q: PacketPosition;
 
     /// The packet a frame of `summary` was written into was acknowledged.

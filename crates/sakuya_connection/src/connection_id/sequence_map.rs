@@ -12,6 +12,7 @@ use sakuya_wire::{
 };
 
 use crate::{
+    feedback::InjectSummary,
     frame_source::{FrameSource, PublishIntent},
     v1::send::{RetireConnectionIdIntent, RetireConnectionIdSummary},
     write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
@@ -205,18 +206,21 @@ impl<Id, R: ResetTokenRegistrar> FrameSource for SequenceMapDestinationConnectio
     /// The frame is written even when the retirement no longer waits, as a
     /// frame of it sent earlier and declared lost was acknowledged late: the
     /// intent was published, and writing nothing would leave it there.
-    fn supply<W, P>(
+    fn supply<W, P, Idx>(
         &mut self,
         sequence: u64,
         mut packet: OpenPacket<W, InFlightClass, P>,
     ) -> Supplied<W, InFlightClass, P>
     where
         W: PacketWriting,
-        SummaryOf<W>: From<RetireConnectionIdSummary>,
+        SummaryOf<W>: InjectSummary<RetireConnectionIdSummary, Idx>,
         P: PacketPosition,
     {
         let frame = RetireConnectionIdIntent::new(sequence).frame();
-        let written = packet.write_frame(frame, RetireConnectionIdSummary { sequence });
+        let written = packet.write_frame(
+            frame,
+            <SummaryOf<W>>::inject_summary(RetireConnectionIdSummary { sequence }),
+        );
         debug_assert!(written.is_ok(), "the intent asks room for the whole frame");
         Supplied::Open(packet)
     }

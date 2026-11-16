@@ -31,6 +31,7 @@ use sakuya_wire::parts::{CNil, Coproduct, HCons, HNil};
 
 use crate::{
     clock::{ConnectionChoices, InstantOf},
+    feedback::InjectSummary,
     send_strategy::{FrameSourceSet, PlannedPacketKind, SendIntentPart},
     take::Lineage,
     write::{
@@ -60,14 +61,17 @@ pub trait FrameSource {
     /// It is called only when the item's least room fits. Having written
     /// nothing, it has already updated or withdrawn the intent, so that the
     /// plan does not give it the same item again.
-    fn supply<W, P>(
+    ///
+    /// `Idx` is the place of [`Self::Summary`](FrameSource::Summary) in the
+    /// composition's sum of summaries; the compiler infers it.
+    fn supply<W, P, Idx>(
         &mut self,
         item: Self::Item<'_>,
         packet: OpenPacket<W, Self::Class, P>,
     ) -> Supplied<W, Self::Class, P>
     where
         W: PacketWriting,
-        SummaryOf<W>: From<Self::Summary>,
+        SummaryOf<W>: InjectSummary<Self::Summary, Idx>,
         P: PacketPosition;
 
     /// The packet of `space` that a frame of `summary` was written into was
@@ -108,17 +112,17 @@ impl<S: FrameSource + ?Sized> FrameSource for &mut S {
     type Item<'a> = S::Item<'a>;
     type Intent = S::Intent;
 
-    fn supply<W, P>(
+    fn supply<W, P, Idx>(
         &mut self,
         item: Self::Item<'_>,
         packet: OpenPacket<W, Self::Class, P>,
     ) -> Supplied<W, Self::Class, P>
     where
         W: PacketWriting,
-        SummaryOf<W>: From<Self::Summary>,
+        SummaryOf<W>: InjectSummary<Self::Summary, Idx>,
         P: PacketPosition,
     {
-        (**self).supply(item, packet)
+        (**self).supply::<W, P, Idx>(item, packet)
     }
 
     fn delivered<Pb, Idx>(
@@ -241,7 +245,8 @@ pub type FrameSourceItemsOf<'a, P> =
 /// list of kinds that implement [`FindFrameSource`].
 ///
 /// `S` is the summary of the composition's send attempts, which takes the
-/// summary of every kind; `Hs` holds the positions of each kind's impl.
+/// summary of every kind; `Hs` holds, for each kind, the positions of its
+/// impl and the place of its summary in `S`.
 pub trait SupplyFrameSources<T: ConnectionChoices, L, V, S, Hs>: FrameSourceKinds {
     /// Give `item` to its frame source in `lineage` at `now`, setting the
     /// packet's class to that source's, and hand back what the source
@@ -274,12 +279,13 @@ impl<T: ConnectionChoices, L, V, S> SupplyFrameSources<T, L, V, S, HNil> for HNi
     }
 }
 
-impl<T, L, V, S, K, Ks, H, Hs> SupplyFrameSources<T, L, V, S, HCons<H, Hs>> for HCons<K, Ks>
+impl<T, L, V, S, K, Ks, H, Ix, Hs> SupplyFrameSources<T, L, V, S, HCons<(H, Ix), Hs>>
+    for HCons<K, Ks>
 where
     T: ConnectionChoices,
     K: FindFrameSource<T, L, V, H>,
     Ks: SupplyFrameSources<T, L, V, S, Hs>,
-    S: From<K::Summary<InstantOf<T>>>,
+    S: InjectSummary<K::Summary<InstantOf<T>>, Ix>,
 {
     fn supply<W, P>(
         lineage: &mut Lineage<'_, V>,
@@ -294,7 +300,7 @@ where
     {
         match item {
             Coproduct::Inl(item) => K::find(lineage, now)
-                .supply(item, packet.into_source_class())
+                .supply::<_, _, Ix>(item, packet.into_source_class())
                 .into_class_of_source(),
             Coproduct::Inr(rest) => Ks::supply(lineage, now, rest, packet),
         }

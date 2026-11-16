@@ -527,7 +527,10 @@ enum Read {
 }
 
 /// Give the item `key` to `set` with `packet`.
-fn supply_key<W, Q>(
+///
+/// `I1` to `I9` are the places of the summaries of the nine kinds of frames
+/// in the packet's summary; the compiler infers them.
+fn supply_key<W, Q, I1, I2, I3, I4, I5, I6, I7, I8, I9>(
     set: &mut TestSet,
     key: StreamIntentKey,
     packet: OpenPacket<W, InFlightClass, Q>,
@@ -535,15 +538,15 @@ fn supply_key<W, Q>(
 where
     W: PacketWriting,
     Q: PacketPosition,
-    SummaryOf<W>: From<StreamSummary>
-        + From<ResetStreamSummary>
-        + From<StopSendingSummary>
-        + From<MaxDataSummary>
-        + From<MaxStreamDataSummary>
-        + From<MaxStreamsSummary>
-        + From<DataBlockedSummary>
-        + From<StreamDataBlockedSummary>
-        + From<StreamsBlockedSummary>,
+    SummaryOf<W>: InjectSummary<StreamSummary, I1>
+        + InjectSummary<ResetStreamSummary, I2>
+        + InjectSummary<StopSendingSummary, I3>
+        + InjectSummary<MaxDataSummary, I4>
+        + InjectSummary<MaxStreamDataSummary, I5>
+        + InjectSummary<MaxStreamsSummary, I6>
+        + InjectSummary<DataBlockedSummary, I7>
+        + InjectSummary<StreamDataBlockedSummary, I8>
+        + InjectSummary<StreamsBlockedSummary, I9>,
 {
     let publish = publish();
     match key {

@@ -43,6 +43,7 @@ use sakuya_wire::{
 use super::{StreamSet, StreamsOf};
 use crate::{
     clock::InstantOf,
+    feedback::InjectSummary,
     frame_source::{FindFrameSource, FrameSource, FrameSourceKind, NoIntent, PublishIntent},
     send_strategy::{
         AnyActiveLinkPath, IntentTicketResize, IntentTicketWithdraw, MinimumLengths, SendIntent,
@@ -423,7 +424,7 @@ pub trait StreamFrameKind: FrameSourceKind<Intent = NoIntent> {
     type FrameSummary: Copy;
 
     /// Give `item` to `set`, which writes the kind's frame into `packet`.
-    fn supply<X, Lc, K, P, W, Q>(
+    fn supply<X, Lc, K, P, W, Q, Idx>(
         set: &mut X,
         publish: &P,
         item: Self::Item<'_>,
@@ -434,7 +435,7 @@ pub trait StreamFrameKind: FrameSourceKind<Intent = NoIntent> {
         P: StreamIntentHandle<X::SendParameters, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
-        SummaryOf<W>: From<Self::FrameSummary>,
+        SummaryOf<W>: InjectSummary<Self::FrameSummary, Idx>,
         Q: PacketPosition;
 
     /// The summary as the set takes it back.
@@ -491,14 +492,14 @@ where
     type Item<'b> = F::Item<'b>;
     type Intent = NoIntent;
 
-    fn supply<W, Q>(
+    fn supply<W, Q, Idx>(
         &mut self,
         item: F::Item<'_>,
         packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
         W: PacketWriting,
-        SummaryOf<W>: From<F::FrameSummary>,
+        SummaryOf<W>: InjectSummary<F::FrameSummary, Idx>,
         Q: PacketPosition,
     {
         match self.lineage.get_optional_mut::<X, Is>() {
@@ -558,7 +559,7 @@ macro_rules! stream_frame_kinds {
         impl StreamFrameKind for $kind {
             type FrameSummary = $summary;
 
-            fn supply<X, Lc, K, P, W, Q>(
+            fn supply<X, Lc, K, P, W, Q, Idx>(
                 $set: &mut X,
                 $publish: &P,
                 $it: $item,
@@ -569,7 +570,7 @@ macro_rules! stream_frame_kinds {
                 P: StreamIntentHandle<X::SendParameters, K>,
                 K: IntentTicketResize + IntentTicketWithdraw,
                 W: PacketWriting,
-                SummaryOf<W>: From<$summary>,
+                SummaryOf<W>: InjectSummary<$summary, Idx>,
                 Q: PacketPosition,
             {
                 $supply

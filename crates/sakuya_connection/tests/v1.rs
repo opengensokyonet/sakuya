@@ -28,6 +28,7 @@ use sakuya_connection::{
     dispatch::{DispatchFacts, FrameDispatch, FrameSetDispatch},
     driver::ConnectionDriver,
     error::ConnectionErrorsOf,
+    feedback::InjectSummary,
     frame_source::{FindFrameSource, FrameSource, FrameSourceKind, NoIntent, PublishIntent},
     layer::{self, EstablishedArgs, LinkPathArgs, LogicalPathArgs, NodeKey},
     others::OtherNodes,
@@ -598,14 +599,6 @@ mod probe {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Summary(pub u64);
 
-    /// The probe's frames go into the sum of the summaries of the
-    /// composition of the tests, where the probe is second and last.
-    impl<A> From<Summary> for Coproduct<A, Coproduct<Coproduct<Summary, CNil>, CNil>> {
-        fn from(summary: Summary) -> Self {
-            Coproduct::Inr(Coproduct::Inl(Coproduct::Inl(summary)))
-        }
-    }
-
     /// The probe's frames, as a kind of frame source: none are planned,
     /// and what comes back of their summaries is logged.
     pub enum Frames {}
@@ -622,14 +615,14 @@ mod probe {
         type Class = sakuya_connection::write::InFlightClass;
         type Item<'a> = core::convert::Infallible;
         type Intent = NoIntent;
-        fn supply<W, P>(
+        fn supply<W, P, Idx>(
             &mut self,
             item: core::convert::Infallible,
             _: sakuya_connection::write::OpenPacket<W, sakuya_connection::write::InFlightClass, P>,
         ) -> sakuya_connection::write::Supplied<W, sakuya_connection::write::InFlightClass, P>
         where
             W: sakuya_connection::write::PacketWriting,
-            sakuya_connection::write::SummaryOf<W>: From<Summary>,
+            sakuya_connection::write::SummaryOf<W>: InjectSummary<Summary, Idx>,
             P: sakuya_connection::write::PacketPosition,
         {
             match item {}
@@ -1858,7 +1851,7 @@ mod probe {
                             let mut attempt = journals.start_attempt(here.clone());
                             let number = attempt.packet_number();
                             attempt.record_frame(
-                                Summary(number.get()).into(),
+                                InjectSummary::inject_summary(Summary(number.get())),
                                 true,
                                 true,
                             );
@@ -1881,7 +1874,7 @@ mod probe {
                         let journals = journals.get_mut(space)?;
                         let mut attempt = journals.start_attempt(here.clone());
                         let number = attempt.packet_number();
-                        attempt.record_frame(AckSummary { largest, before }.into(), false, false);
+                        attempt.record_frame(InjectSummary::inject_summary(AckSummary { largest, before }), false, false);
                         let sealed = attempt.seal(50, false)?;
                         journals.sent(sealed, now);
                         spaces.get_mut(space)?.accept(number, now, false, None);
