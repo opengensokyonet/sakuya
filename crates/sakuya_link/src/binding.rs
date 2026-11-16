@@ -55,7 +55,11 @@ pub trait AcceptingLinkBinding: LinkBinding {
     ///   datagram arrived from a peer with no live link; it may be a link
     ///   that [`ConnectingLinkBinding::connect`] gave too. The datagram that
     ///   made the binding produce it is delivered by a [`recv`](Link::recv)
-    ///   of the link, not by `accept`.
+    ///   of the link, not by `accept`. A link given before any datagram
+    ///   arrived, as a session can be, does not keep its first `recv`
+    ///   pending forever: a datagram arrives or the link ends, so that its
+    ///   user can wait for the first datagram before deciding whether to
+    ///   keep the link.
     /// - `Err` means the binding gives no more new links. The links it gave
     ///   keep working.
     ///

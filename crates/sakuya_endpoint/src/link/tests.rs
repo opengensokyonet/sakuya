@@ -18,7 +18,7 @@ use frunk_core::{
 };
 use sakuya_link::{BindingId, Link, LinkId};
 
-use super::EndpointLink;
+use super::{EndpointLink, LinkCore};
 use crate::memory_link::MemoryLink;
 
 struct First;
@@ -37,7 +37,7 @@ fn endpoint_link<L, I>(member: L) -> EndpointLink<Two>
 where
     Two: CoprodInjector<L, I>,
 {
-    EndpointLink::from_member(Two::inject(member))
+    LinkCore::from_member(Two::inject(member)).endpoint_link()
 }
 
 #[derive(Default)]
@@ -98,9 +98,9 @@ fn a_datagram_arrives_on_a_clone_of_the_endpoint_link() {
     };
     assert_eq!(datagram.payload(), b"hello");
     assert_eq!(datagram.link().id(), link.id());
-    assert_eq!(link.users(), 2);
+    assert_eq!(link.uses(), 2, "the link and the datagram's");
     drop(datagram);
-    assert_eq!(link.users(), 1);
+    assert_eq!(link.uses(), 1);
 }
 
 #[test]
@@ -128,28 +128,29 @@ fn the_facts_of_the_member_are_its_own() {
 }
 
 #[test]
-fn clones_count_their_users_and_two_left_is_unused() {
+fn endpoint_links_are_the_uses_and_none_left_is_unused() {
     let (member, far) = MemoryLink::<First>::new(4433, peer(), &BindingId::new());
-    let link = endpoint_link(member);
-    let kept = link.clone();
+    let core = LinkCore::from_member(Two::inject(member));
+    assert_eq!(core.uses(), 0, "the core is not a use");
+    let link = core.endpoint_link();
     let user = link.clone();
-    assert_eq!(link.users(), 3);
+    assert_eq!(core.uses(), 2);
     assert_eq!(far.link_clones(), 3);
 
     let flag = Arc::new(Flag::default());
     let waker = Waker::from(Arc::clone(&flag));
     let mut cx = Context::from_waker(&waker);
     {
-        let mut unused = pin!(link.unused());
+        let mut unused = pin!(core.unused());
         assert_eq!(unused.as_mut().poll(&mut cx), Poll::Pending);
 
+        drop(link);
+        assert!(!flag.take(), "a use is left");
         drop(user);
-        assert!(flag.take(), "the last user woke the receive loop");
+        assert!(flag.take(), "the last use woke the receive loop");
         assert_eq!(unused.as_mut().poll(&mut cx), Poll::Ready(()));
     }
-    assert_eq!(kept.users(), 2);
 
-    drop(kept);
-    drop(link);
+    drop(core);
     assert_eq!(far.link_clones(), 0, "every clone of the member is gone");
 }

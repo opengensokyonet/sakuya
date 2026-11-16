@@ -304,7 +304,7 @@ where
             .connect(remote)
             .await
             .map_err(BindingHandleConnectError::Binding)?;
-        let link = self.shared.admit(member);
+        let link = self.shared.admit_connected(member);
         Ok(Outgoing::new(
             Arc::clone(&self.domain),
             (*self.client).clone(),

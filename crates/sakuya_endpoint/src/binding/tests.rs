@@ -154,9 +154,9 @@ fn an_accepted_link_is_received_on_and_its_datagram_arrives_on_the_endpoint_link
     assert_eq!(id.peer, Coproduct::Inl(peer()));
     assert_eq!(&id.binding, binding.id());
     assert_eq!(
-        datagram.link().users(),
-        3,
-        "the datagram's, the receive loop's and the dispatched one"
+        datagram.link().uses(),
+        1,
+        "the datagram's: the receive loop's core and the dispatched one are not uses"
     );
     drop(far);
 }
@@ -171,20 +171,20 @@ fn accept_and_connect_giving_one_link_share_its_loop_and_count() {
     let routed = harness.routed.take();
 
     // A connect on the handle gives the same link.
-    let connected = harness.shared.admit(link);
+    let connected = harness.shared.admit_connected(link);
     assert_eq!(connected.id(), routed[0].link().id());
-    assert_eq!(connected.users(), 4);
+    assert_eq!(connected.uses(), 2, "the datagram's and the connect's");
     assert_eq!(harness.poll(), Poll::Pending);
     assert_eq!(harness.loops(), 2, "no second receive loop");
     assert_eq!(harness.shared.dispatched_count(), 1);
 
     drop(routed);
-    assert_eq!(connected.users(), 3);
+    assert_eq!(connected.uses(), 1);
     let found = harness
         .shared
         .dispatched_link(connected.id())
         .expect("the link is dispatched");
-    assert_eq!(found.users(), 4);
+    assert_eq!(found.uses(), 2);
 }
 
 #[test]
@@ -213,11 +213,11 @@ fn a_link_used_meanwhile_keeps_its_loop() {
     let mut harness = Harness::<_, ConnectOnly>::new(binding);
 
     // A connect admits the link; the receive loop has seen it unused, and
-    // before the driver takes it out, another connect takes a clone.
-    let connected = harness.shared.admit(link);
+    // before the driver takes it out, another connect takes a use.
+    let connected = harness.shared.admit_connected(link);
     let mut inbox = harness.shared.take_inbox();
-    let looped = inbox.pop().expect("the link waits in the inbox");
-    assert_eq!(looped.users(), 3);
+    let looped = inbox.pop().expect("the link waits in the inbox").core;
+    assert_eq!(looped.uses(), 1);
     harness.driver.loop_ended(LoopEnd::Unused(looped));
     assert_eq!(harness.loops(), 1, "the receive loop starts again");
     assert_eq!(harness.shared.dispatched_count(), 1);
@@ -226,7 +226,7 @@ fn a_link_used_meanwhile_keeps_its_loop() {
     assert_eq!(harness.routed.len(), 1);
     drop(harness.routed.take());
     assert_eq!(harness.poll(), Poll::Pending);
-    assert_eq!(harness.loops(), 1, "the connected clone keeps the loop");
+    assert_eq!(harness.loops(), 1, "the connected use keeps the loop");
 
     drop(connected);
     assert!(harness.woken());
@@ -242,9 +242,14 @@ fn a_link_seen_unused_and_still_unused_is_taken_out() {
     let (link, far) = link_of(&binding);
     let mut harness = Harness::<_, ConnectOnly>::new(binding);
 
-    drop(harness.shared.admit(link));
-    let looped = harness.shared.take_inbox().pop().expect("the link waits");
-    assert_eq!(looped.users(), 2);
+    drop(harness.shared.admit_connected(link));
+    let looped = harness
+        .shared
+        .take_inbox()
+        .pop()
+        .expect("the link waits")
+        .core;
+    assert_eq!(looped.uses(), 0);
     harness.driver.loop_ended(LoopEnd::Unused(looped));
     assert_eq!(harness.loops(), 0);
     assert_eq!(harness.shared.dispatched_count(), 0);
@@ -265,7 +270,72 @@ fn an_ended_link_leaves_the_dispatched_set_though_it_is_used() {
     assert_eq!(harness.poll(), Poll::Pending);
     assert_eq!(harness.loops(), 1, "only the accept loop is left");
     assert_eq!(harness.shared.dispatched_count(), 0);
-    assert_eq!(routed[0].link().users(), 1, "only the datagram's is left");
+    assert_eq!(routed[0].link().uses(), 1, "only the datagram's is left");
+}
+
+#[test]
+fn an_accepted_link_is_kept_until_its_first_datagram() {
+    let binding = MemoryBinding::new();
+    let (link, far) = MemoryLink::new(4433, peer(), binding.id());
+    binding.offer(link);
+    let mut harness = Harness::<_, Accepting>::new(binding);
+
+    // Nobody uses the link, and nothing has arrived on it yet.
+    assert_eq!(harness.poll(), Poll::Pending);
+    assert_eq!(harness.loops(), 2, "the accept loop and the receive loop");
+    assert_eq!(harness.shared.dispatched_count(), 1);
+    assert_eq!(harness.routed.len(), 0);
+
+    far.send(b"late");
+    assert!(harness.woken());
+    assert_eq!(harness.poll(), Poll::Pending);
+    let routed = harness.routed.take();
+    assert_eq!(routed.len(), 1);
+    assert_eq!(harness.shared.dispatched_count(), 1);
+
+    // Once the datagram is let go, the link is unused like any other.
+    drop(routed);
+    assert!(harness.woken());
+    assert_eq!(harness.poll(), Poll::Pending);
+    assert_eq!(harness.loops(), 1, "only the accept loop is left");
+    assert_eq!(harness.shared.dispatched_count(), 0);
+    assert_eq!(far.link_clones(), 0, "the link is closed");
+}
+
+#[test]
+fn an_accepted_link_that_ends_before_its_first_datagram_leaves() {
+    let binding = MemoryBinding::new();
+    let (link, far) = MemoryLink::new(4433, peer(), binding.id());
+    binding.offer(link);
+    let mut harness = Harness::<_, Accepting>::new(binding);
+    assert_eq!(harness.poll(), Poll::Pending);
+    assert_eq!(harness.shared.dispatched_count(), 1);
+
+    far.end();
+    assert!(harness.woken());
+    assert_eq!(harness.poll(), Poll::Pending);
+    assert_eq!(harness.loops(), 1, "only the accept loop is left");
+    assert_eq!(harness.shared.dispatched_count(), 0);
+    assert_eq!(far.link_clones(), 0);
+}
+
+#[test]
+fn a_connected_link_nobody_uses_leaves_without_a_datagram() {
+    let binding = DialingBinding::new();
+    let (link, far) = MemoryLink::new(4433, peer(), binding.id());
+    let mut harness = Harness::<_, ConnectOnly>::new(binding);
+    let connected = harness.shared.admit_connected(link);
+    assert_eq!(harness.poll(), Poll::Pending);
+    assert_eq!(harness.loops(), 1);
+
+    // The outgoing connection that held it is dropped before anything
+    // arrived.
+    drop(connected);
+    assert!(harness.woken());
+    assert_eq!(harness.poll(), Poll::Pending);
+    assert_eq!(harness.loops(), 0);
+    assert_eq!(harness.shared.dispatched_count(), 0);
+    assert_eq!(far.link_clones(), 0);
 }
 
 #[test]
@@ -297,7 +367,7 @@ fn a_connect_only_driver_receives_on_admitted_links() {
     assert_eq!(harness.poll(), Poll::Pending);
     assert_eq!(harness.loops(), 0, "no accept loop");
 
-    let connected = harness.shared.admit(link);
+    let connected = harness.shared.admit_connected(link);
     assert!(harness.woken(), "admitting wakes the driver");
     assert_eq!(harness.poll(), Poll::Pending);
     assert_eq!(harness.loops(), 1);
@@ -318,14 +388,14 @@ fn the_driver_ends_when_stopped_and_lets_its_links_go() {
         .dispatched_link(harness.routed.take()[0].link().id())
         .expect("the link is dispatched");
     assert_eq!(harness.poll(), Poll::Pending);
-    assert_eq!(harness.loops(), 2, "the connected clone keeps the loop");
+    assert_eq!(harness.loops(), 2, "the connected use keeps the loop");
 
     harness.stop.raise();
     assert!(harness.woken());
     assert_eq!(harness.poll(), Poll::Ready(()));
     assert_eq!(harness.loops(), 0);
     assert_eq!(harness.shared.dispatched_count(), 0);
-    assert_eq!(connected.users(), 1);
+    assert_eq!(connected.uses(), 1);
     drop(connected);
     assert_eq!(far.link_clones(), 0);
 }

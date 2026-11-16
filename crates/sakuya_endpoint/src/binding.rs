@@ -10,15 +10,20 @@
 //! loop in the driver, and connects made through the binding's handle on the
 //! application's tasks. Both admit a link the same way: under the lock of the
 //! set of dispatched links, the link is looked up by its [`LinkId`]; a link
-//! already dispatched is shared, and a new one is made into an
-//! [`EndpointLink`], put in the set and in an inbox, and the driver is woken
-//! to start its receive loop. So each link has one receive loop, and one
-//! count of its users, however many times the binding gives it.
+//! already dispatched is shared, and a new one is made into a link core, put
+//! in the set and in an inbox, and the driver is woken to start its receive
+//! loop. So each link has one receive loop, and one count of its uses,
+//! however many times the binding gives it.
 //!
-//! A receive loop ends when its link ends, or when nobody but the endpoint
-//! itself holds the link any more. The driver then takes the link out of the
-//! dispatched set, checking the count again under the lock: if somebody took
-//! a clone of the link in the meantime, its receive loop starts again.
+//! The uses of a link are its [`EndpointLink`]s: the ones connections and
+//! incoming and outgoing connections hold, and the one each received
+//! datagram carries. The set and the receive loop hold the core, which is
+//! not a use. A receive loop ends when its link ends, or when no use of the
+//! link is left; a link the binding gave by accepting is kept until it
+//! received its first datagram or ended, one of which its transport makes
+//! happen in a finite time. The driver then takes the link out of the dispatched set, checking
+//! the count again under the lock: if somebody took a use of the link in the
+//! meantime, its receive loop starts again.
 
 use core::{
     fmt,
@@ -33,11 +38,11 @@ use futures_util::{
     future::{Either, select},
     stream::FuturesUnordered,
 };
-use sakuya_link::{AcceptingLinkBinding, Link, LinkBinding, LinkId, ReceivedDatagram};
+use sakuya_link::{AcceptingLinkBinding, LinkBinding, LinkId, ReceivedDatagram};
 
-use self::driving::{AcceptMode, LoopEnd, RouteDatagram, StopSignal};
-use self::shared::BindingShared;
-use crate::link::{EndpointLink, sum::LinkSum};
+use self::driving::{AcceptMode, FirstDatagram, LoopEnd, RouteDatagram, StopSignal};
+use self::shared::{Admitted, BindingShared, NewLink};
+use crate::link::{EndpointLink, LinkCore, sum::LinkSum};
 
 pub(crate) mod shared;
 
@@ -56,9 +61,10 @@ type EndpointDatagram<M> = ReceivedDatagram<<M as LinkSum>::Payload, EndpointLin
 /// It is a future the host spawns. Each receive loop is the datagram
 /// dispatcher of its link: it receives on the link and hands each datagram,
 /// which arrives on the endpoint's link, to routing. A receive loop ends when
-/// its link ends, or when nobody but the endpoint holds the link any more;
-/// the endpoint then drops its clones, and the transport closes the link once
-/// every clone is gone.
+/// its link ends, or when no use of the link is left, though not before a
+/// link the binding gave by accepting received its first datagram; the
+/// endpoint then drops its core, and the transport closes the link once every
+/// clone of it is gone.
 ///
 /// The driver of a binding that takes new links runs its accept loop until
 /// the binding gives no more: its links keep receiving after that. The driver
@@ -114,7 +120,11 @@ where
             LoopEnd::LinkEnded(link) => self.shared.release_ended(link.id()),
             LoopEnd::Unused(link) => {
                 if let Some(link) = self.shared.release_unused(link) {
-                    self.loops.push(A::receive_loop(link, self.route.clone()));
+                    self.loops.push(A::receive_loop(
+                        link,
+                        self.route.clone(),
+                        FirstDatagram::Received,
+                    ));
                 }
             }
         }
@@ -140,8 +150,13 @@ where
         }
         this.shared.register_driver(cx.waker());
         loop {
-            for link in this.shared.take_inbox() {
-                this.loops.push(A::receive_loop(link, this.route.clone()));
+            for NewLink { core, admitted } in this.shared.take_inbox() {
+                let first = match admitted {
+                    Admitted::Accepted => FirstDatagram::Awaited,
+                    Admitted::Connected => FirstDatagram::Received,
+                };
+                this.loops
+                    .push(A::receive_loop(core, this.route.clone(), first));
             }
             match this.loops.poll_next_unpin(cx) {
                 Poll::Ready(Some(end)) => this.loop_ended(end),
@@ -190,15 +205,15 @@ where
     M: LinkSum,
 {
     while let Ok(member) = shared.binding().accept().await {
-        drop(shared.admit(member));
+        shared.admit_accepted(member);
     }
     LoopEnd::AcceptEnded
 }
 
 /// The receive loop of `link`, its datagram dispatcher: receives on it and
-/// hands each datagram to `route`, until the link ends or nobody but the
-/// endpoint holds it.
-async fn receive_loop<M, R>(link: EndpointLink<M>, route: R) -> LoopEnd<M>
+/// hands each datagram to `route`, until the link ends or no use of it is
+/// left, but not while its first datagram is `Awaited`.
+async fn receive_loop<M, R>(link: LinkCore<M>, route: R, mut first: FirstDatagram) -> LoopEnd<M>
 where
     M: LinkSum,
     R: RouteDatagram<EndpointDatagram<M>>,
@@ -209,15 +224,24 @@ where
             routed = 0;
             yield_once().await;
         }
-        // A receive comes first: the datagram that made a binding give a new
-        // link is received before the link is found unused.
-        let woken = match select(pin!(link.recv()), pin!(link.unused())).await {
-            Either::Left((Ok(datagram), _)) => Woken::Received(datagram),
-            Either::Left((Err(_), _)) => Woken::Ended,
-            Either::Right(((), _)) => Woken::Unused,
+        let woken = match first {
+            // Nobody uses a link the binding gave by accepting until its
+            // first datagram, which arrives unless the link ends first.
+            FirstDatagram::Awaited => match link.recv().await {
+                Ok(datagram) => Woken::Received(datagram),
+                Err(_) => Woken::Ended,
+            },
+            // A receive comes first: a datagram ready is received before
+            // the link is found unused.
+            FirstDatagram::Received => match select(pin!(link.recv()), pin!(link.unused())).await {
+                Either::Left((Ok(datagram), _)) => Woken::Received(datagram),
+                Either::Left((Err(_), _)) => Woken::Ended,
+                Either::Right(((), _)) => Woken::Unused,
+            },
         };
         match woken {
             Woken::Received(datagram) => {
+                first = FirstDatagram::Received;
                 route.route(datagram);
                 routed += 1;
             }
@@ -253,7 +277,7 @@ enum Woken<D> {
     Received(D),
     /// The link has ended.
     Ended,
-    /// Nobody but the endpoint holds the link.
+    /// No use of the link is left.
     Unused,
 }
 
@@ -268,16 +292,26 @@ pub(crate) mod driving {
     use sakuya_link::{AcceptingLinkBinding, LinkBinding};
 
     use super::{BindingShared, EndpointDatagram, accept_loop, receive_loop};
-    use crate::link::{EndpointLink, sum::LinkSum};
+    use crate::link::{LinkCore, sum::LinkSum};
+
+    /// Whether a receive loop waits for its link's first datagram before it
+    /// looks at the link's uses.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum FirstDatagram {
+        /// The link came from accepting and has received nothing yet.
+        Awaited,
+        /// The link received a datagram, or came from connecting.
+        Received,
+    }
 
     /// How one loop of a binding driver ended.
     pub enum LoopEnd<M: LinkSum> {
         /// The binding gives no more new links.
         AcceptEnded,
         /// The link has ended.
-        LinkEnded(EndpointLink<M>),
-        /// Nobody but the endpoint held the link.
-        Unused(EndpointLink<M>),
+        LinkEnded(LinkCore<M>),
+        /// No use of the link was left.
+        Unused(LinkCore<M>),
     }
 
     /// Where a binding driver hands the datagrams it receives.
@@ -303,8 +337,9 @@ pub(crate) mod driving {
         /// one.
         fn accept_loop(shared: Arc<BindingShared<B, M>>) -> Option<Self::Loop>;
 
-        /// The receive loop of `link`.
-        fn receive_loop(link: EndpointLink<M>, route: R) -> Self::Loop;
+        /// The receive loop of `link`, which waits for the link's first
+        /// datagram when `first` is [`FirstDatagram::Awaited`].
+        fn receive_loop(link: LinkCore<M>, route: R, first: FirstDatagram) -> Self::Loop;
     }
 
     /// The driver runs the binding's accept loop.
@@ -318,7 +353,7 @@ pub(crate) mod driving {
     /// One loop of an accepting driver.
     enum AcceptingLoop<B: LinkBinding, M: LinkSum, R> {
         Accept(Arc<BindingShared<B, M>>),
-        Receive(EndpointLink<M>, R),
+        Receive(LinkCore<M>, R, FirstDatagram),
     }
 
     impl<B, M, R> AcceptMode<B, M, R> for Accepting
@@ -333,8 +368,8 @@ pub(crate) mod driving {
             Some(run::<B, M, R>(AcceptingLoop::Accept(shared)))
         }
 
-        fn receive_loop(link: EndpointLink<M>, route: R) -> Self::Loop {
-            run::<B, M, R>(AcceptingLoop::Receive(link, route))
+        fn receive_loop(link: LinkCore<M>, route: R, first: FirstDatagram) -> Self::Loop {
+            run::<B, M, R>(AcceptingLoop::Receive(link, route, first))
         }
     }
 
@@ -347,7 +382,7 @@ pub(crate) mod driving {
     {
         match task {
             AcceptingLoop::Accept(shared) => accept_loop(shared).await,
-            AcceptingLoop::Receive(link, route) => receive_loop(link, route).await,
+            AcceptingLoop::Receive(link, route, first) => receive_loop(link, route, first).await,
         }
     }
 
@@ -362,11 +397,12 @@ pub(crate) mod driving {
         fn accept_loop(_shared: Arc<BindingShared<B, M>>) -> Option<Self::Loop> {
             // None, of the type of the receive loop, which is this mode's
             // only loop.
-            None::<(EndpointLink<M>, R)>.map(|(link, route)| receive_loop(link, route))
+            None::<(LinkCore<M>, R, FirstDatagram)>
+                .map(|(link, route, first)| receive_loop(link, route, first))
         }
 
-        fn receive_loop(link: EndpointLink<M>, route: R) -> Self::Loop {
-            receive_loop(link, route)
+        fn receive_loop(link: LinkCore<M>, route: R, first: FirstDatagram) -> Self::Loop {
+            receive_loop(link, route, first)
         }
     }
 }

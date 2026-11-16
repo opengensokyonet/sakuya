@@ -127,7 +127,11 @@ fn a_driver_accepts_routes_and_lets_unused_links_go() {
         let first = datagram.link().id().clone();
         assert_eq!(first.peer.get::<SocketAddr, _>(), Some(&client_address));
         assert_eq!(first.binding, server_id);
-        assert_eq!(datagram.link().users(), 3);
+        assert_eq!(
+            datagram.link().uses(),
+            1,
+            "the datagram is the link's only use"
+        );
 
         // Routing lets the datagram go; the driver lets the link go. That
         // is the completion under test, so it is observed until a deadline.

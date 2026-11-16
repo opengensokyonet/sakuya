@@ -7,11 +7,12 @@
 //! members' ends. The binding and the identity of the member's `LinkId` are
 //! kept, so an `EndpointLink` has the identity of the link it holds.
 //!
-//! The endpoint makes one `EndpointLink` for each `LinkId`, and every clone
-//! of it shares one count of its users. When only the two clones the
-//! endpoint itself keeps are left, the one its receiving holds and the one
-//! in its set of dispatched links, nobody else can use the link any more,
-//! and the endpoint lets it go.
+//! The endpoint keeps one [`LinkCore`] for each `LinkId`, in its set of
+//! dispatched links and in the link's receive loop; those do not count as
+//! uses. Every `EndpointLink` made from it is a use: the ones connections,
+//! incoming and outgoing connections hold, and the one each received
+//! datagram carries until it is taken or dropped. When no use is left, the
+//! endpoint lets the link go.
 
 use core::{
     fmt,
@@ -28,9 +29,111 @@ use sakuya_link::{ArrivalFacts, Link, LinkId, OutgoingDatagram, ReceivedDatagram
 
 use self::sum::{Arrived, LinkSum};
 
-/// The clones of an endpoint link that the endpoint keeps while it
-/// receives on the link: the receive loop's and the dispatched set's.
-pub(crate) const KEPT_BY_THE_ENDPOINT: usize = 2;
+/// What the endpoint itself keeps of one link: the member and the count of
+/// its uses, which this does not add to.
+///
+/// The dispatched set and the receive loop of the link hold it; whatever
+/// leaves the endpoint's own bookkeeping, to routing or to a connection, is
+/// an [`EndpointLink`] made from it.
+#[doc(hidden)]
+pub struct LinkCore<M: LinkSum> {
+    member: M,
+    shared: Arc<Shared<M::Local, M::Peer>>,
+}
+
+/// What a link's core and its uses share: its identity and the count of
+/// its uses.
+struct Shared<Local, Peer> {
+    id: LinkId<Local, Peer>,
+    /// How many uses of the link exist: how many [`EndpointLink`]s.
+    uses: AtomicUsize,
+    /// Woken when the last use is gone.
+    unused: AtomicWaker,
+}
+
+impl<M: LinkSum> LinkCore<M> {
+    /// The core of `member`, a link of one of the bindings injected into
+    /// the sum, with no use yet.
+    pub(crate) fn from_member(member: M) -> Self {
+        let id = member.injected_id();
+        Self {
+            member,
+            shared: Arc::new(Shared {
+                id,
+                uses: AtomicUsize::new(0),
+                unused: AtomicWaker::new(),
+            }),
+        }
+    }
+
+    /// The link's identity.
+    pub(crate) fn id(&self) -> &LinkId<M::Local, M::Peer> {
+        &self.shared.id
+    }
+
+    /// A new use of the link.
+    pub(crate) fn endpoint_link(&self) -> EndpointLink<M> {
+        self.shared.uses.fetch_add(1, Ordering::AcqRel);
+        EndpointLink { core: self.clone() }
+    }
+
+    /// How many uses of the link exist.
+    ///
+    /// It is an observation: uses can be made or dropped right after it is
+    /// read.
+    pub(crate) fn uses(&self) -> usize {
+        self.shared.uses.load(Ordering::Acquire)
+    }
+
+    /// Ready when no use of the link is left.
+    ///
+    /// Being unused is not final: the dispatched set can give out a use
+    /// again, which whoever acts on this future checks under its lock.
+    pub(crate) fn unused(&self) -> impl Future<Output = ()> + '_ {
+        poll_fn(|cx| {
+            if self.uses() == 0 {
+                return Poll::Ready(());
+            }
+            self.shared.unused.register(cx.waker());
+            if self.uses() == 0 {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+    }
+
+    /// Receives the next datagram on the member, which arrives on a new use
+    /// of the link.
+    pub(crate) async fn recv(
+        &self,
+    ) -> Result<ReceivedDatagram<M::Payload, EndpointLink<M>>, M::RecvError> {
+        let Arrived { payload, at, ecn } = self.member.recv().await?;
+        Ok(ReceivedDatagram::new(
+            payload,
+            ArrivalFacts::new(self.endpoint_link(), at, ecn),
+        ))
+    }
+}
+
+/// Clones share the count without adding to it.
+impl<M: LinkSum> Clone for LinkCore<M> {
+    fn clone(&self) -> Self {
+        Self {
+            member: self.member.clone(),
+            shared: Arc::clone(&self.shared),
+        }
+    }
+}
+
+impl<M: LinkSum> fmt::Debug for LinkCore<M> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LinkCore")
+            .field("id", &self.shared.id)
+            .field("uses", &self.uses())
+            .finish_non_exhaustive()
+    }
+}
 
 /// The link of an endpoint: one link of one of its bindings, as a value of
 /// the sum of their link types.
@@ -45,87 +148,38 @@ pub(crate) const KEPT_BY_THE_ENDPOINT: usize = 2;
 ///
 /// Its [`LinkId`] is the member's, with the two ends injected into the
 /// sums: it keeps the member's binding and identity, so it equals the
-/// identity of no other link. A datagram it receives arrives on a clone of
-/// it, not on the member link.
+/// identity of no other link. A datagram it receives arrives on a new
+/// `EndpointLink` of the same link.
 ///
-/// The endpoint makes one `EndpointLink` per link, however many times a
-/// binding gives that link, and all its clones share a count of their
-/// users. Cloning one and dropping one add to and take from that count,
-/// one atomic operation each. When no clone is left but the endpoint's
-/// own, the endpoint stops receiving on the link and drops those too, and
-/// the transport closes the link once every clone of the member is gone.
+/// Each `EndpointLink` is a use of the link, and so is each clone: making
+/// one and dropping one add to and take from the link's count of uses, one
+/// atomic operation each. The endpoint's own bookkeeping holds none. When
+/// the last use is gone, the endpoint stops receiving on the link, unless
+/// the link came from accepting and has not received its first datagram
+/// yet; the transport closes the link once every clone of the member is
+/// gone.
 pub struct EndpointLink<M: LinkSum> {
-    member: M,
-    shared: Arc<Shared<M::Local, M::Peer>>,
-}
-
-/// What every clone of an endpoint link shares: its identity and the count
-/// of its users.
-struct Shared<Local, Peer> {
-    id: LinkId<Local, Peer>,
-    /// How many clones of the endpoint link exist.
-    users: AtomicUsize,
-    /// Woken when only the endpoint's own clones are left.
-    unused: AtomicWaker,
+    core: LinkCore<M>,
 }
 
 impl<M: LinkSum> EndpointLink<M> {
-    /// A new endpoint link, with a count of its own, of `member`: a link of
-    /// one of the bindings, injected into the sum.
-    pub(crate) fn from_member(member: M) -> Self {
-        let id = member.injected_id();
-        Self {
-            member,
-            shared: Arc::new(Shared {
-                id,
-                users: AtomicUsize::new(1),
-                unused: AtomicWaker::new(),
-            }),
-        }
-    }
-
-    /// How many clones of this link exist, this one included.
-    ///
-    /// It is an observation: clones can be made or dropped right after it
-    /// is read.
-    pub(crate) fn users(&self) -> usize {
-        self.shared.users.load(Ordering::Acquire)
-    }
-
-    /// Ready when at most the endpoint's own two clones of this link are
-    /// left: the one this future borrows and the one in the dispatched set.
-    ///
-    /// Being unused is not final: the dispatched set can give out a clone
-    /// again, which whoever acts on this future checks under its lock.
-    pub(crate) fn unused(&self) -> impl Future<Output = ()> + '_ {
-        poll_fn(|cx| {
-            if self.users() <= KEPT_BY_THE_ENDPOINT {
-                return Poll::Ready(());
-            }
-            self.shared.unused.register(cx.waker());
-            if self.users() <= KEPT_BY_THE_ENDPOINT {
-                Poll::Ready(())
-            } else {
-                Poll::Pending
-            }
-        })
+    /// How many uses of this link exist, this one included.
+    #[cfg(test)]
+    pub(crate) fn uses(&self) -> usize {
+        self.core.uses()
     }
 }
 
 impl<M: LinkSum> Clone for EndpointLink<M> {
     fn clone(&self) -> Self {
-        self.shared.users.fetch_add(1, Ordering::AcqRel);
-        Self {
-            member: self.member.clone(),
-            shared: Arc::clone(&self.shared),
-        }
+        self.core.endpoint_link()
     }
 }
 
 impl<M: LinkSum> Drop for EndpointLink<M> {
     fn drop(&mut self) {
-        if self.shared.users.fetch_sub(1, Ordering::AcqRel) == KEPT_BY_THE_ENDPOINT + 1 {
-            self.shared.unused.wake();
+        if self.core.shared.uses.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.core.shared.unused.wake();
         }
     }
 }
@@ -133,7 +187,7 @@ impl<M: LinkSum> Drop for EndpointLink<M> {
 impl<M: LinkSum> fmt::Debug for EndpointLink<M> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("EndpointLink")
-            .field("id", &self.shared.id)
+            .field("id", &self.core.shared.id)
             .finish_non_exhaustive()
     }
 }
@@ -155,49 +209,43 @@ impl<M: LinkSum> Link for EndpointLink<M> {
     type MaxDatagramSizeChanged = M::MaxDatagramSizeChanged;
 
     fn id(&self) -> &LinkId<M::Local, M::Peer> {
-        &self.shared.id
+        self.core.id()
     }
 
     fn may_mark_ecn(&self) -> bool {
-        self.member.may_mark_ecn()
+        self.core.member.may_mark_ecn()
     }
 
     fn max_datagram_size(&self) -> Result<usize, M::MaxDatagramSizeError> {
-        self.member.max_datagram_size()
+        self.core.member.max_datagram_size()
     }
 
     fn recv(&self) -> Self::Recv<'_> {
-        async move {
-            let Arrived { payload, at, ecn } = self.member.recv().await?;
-            Ok(ReceivedDatagram::new(
-                payload,
-                ArrivalFacts::new(self.clone(), at, ecn),
-            ))
-        }
+        self.core.recv()
     }
 
     fn ended(&self) -> M::Ended {
-        self.member.ended()
+        self.core.member.ended()
     }
 
     fn send<'a>(&self, batch: &'a [OutgoingDatagram]) -> M::Send<'a> {
-        self.member.send(batch)
+        self.core.member.send(batch)
     }
 
     fn max_datagram_size_changed(&self) -> M::MaxDatagramSizeChanged {
-        self.member.max_datagram_size_changed()
+        self.core.member.max_datagram_size_changed()
     }
 
     fn datagram_size_conclusion(&self) -> usize {
-        self.member.datagram_size_conclusion()
+        self.core.member.datagram_size_conclusion()
     }
 
     fn record_datagram_size_confirmed(&self, size: usize) {
-        self.member.record_datagram_size_confirmed(size);
+        self.core.member.record_datagram_size_confirmed(size);
     }
 
     fn record_datagram_size_lowered(&self, size: usize) {
-        self.member.record_datagram_size_lowered(size);
+        self.core.member.record_datagram_size_lowered(size);
     }
 }
 
@@ -209,7 +257,7 @@ pub(crate) mod sum {
     use sakuya_link::{EcnCodepoint, Link, LinkId, OutgoingDatagram, SendAcceptance};
 
     /// A received datagram without the link it arrived on, which the
-    /// endpoint link puts back as a clone of itself.
+    /// link's core puts back as a new use of the link.
     pub struct Arrived<Payload, Instant> {
         pub payload: Payload,
         pub at: Instant,
