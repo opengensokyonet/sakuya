@@ -36,6 +36,7 @@ use crate::{
     v1::streams::{
         FlowControlParameters, StreamSet, StreamSetFacts,
         locked::{LockedStreamSet, LockedStreamSetConfig},
+        resets::Rfc9000StreamResets,
         send::StreamIntentKey,
     },
 };
@@ -98,8 +99,13 @@ impl SendIntentIntake<AnyActiveLinkPath> for Intake {
     }
 }
 
-type Set = LockedStreamSet<(), Ticket>;
-type Layer = EstablishedLayerHandle<LockedStreamSetHandle<(), Ticket, Urgency>, Intake, (), ()>;
+type Set = LockedStreamSet<(), Ticket, Rfc9000StreamResets>;
+type Layer = EstablishedLayerHandle<
+    LockedStreamSetHandle<(), Ticket, Rfc9000StreamResets, Urgency>,
+    Intake,
+    (),
+    (),
+>;
 type Publish = IntakeSendIntentHandle<Intake, StreamIntent<Urgency>, ()>;
 
 /// A client's set and the handle of its layer: the server, the peer, grants
@@ -240,7 +246,7 @@ fn block_on<F: Future>(future: F) -> F::Output {
 }
 
 type Writer = StreamWriter<
-    LockedStreamSendShare<(), Ticket, Urgency, Publish>,
+    LockedStreamSendShare<(), Ticket, Rfc9000StreamResets, Urgency, Publish>,
     SendOptions<Urgency, AnyActiveLinkPath>,
 >;
 

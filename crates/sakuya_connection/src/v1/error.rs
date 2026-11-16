@@ -3,6 +3,7 @@ use core::convert::Infallible;
 
 use bytes::Bytes;
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
+use sakuya_stream::receive::violation::OnResetStreamError;
 use sakuya_wire::{
     parts::CNil,
     v1::{
@@ -29,15 +30,26 @@ use super::{
     dispatch::FrameNotPermittedError,
     key_update::KeyUpdateError,
     parameters::PeerTransportParametersError,
-    streams::StreamSetFrameError,
+    streams::{
+        StreamSetFrameError,
+        resets::{OnResetStreamErrorOf, ResetStreamViolation},
+    },
 };
+
+/// The error of version 1 in a connection of the list of parts `L`, whose
+/// failures of RESET_STREAM frames are those of how `L` resets streams.
+pub type V1ConnectionErrorOf<L> = ConnectionError<OnResetStreamErrorOf<L>>;
 
 /// An error of version 1 in a connection: one variant for each type of
 /// error it comes from, which gives the transport error code; a failure
 /// without a type of its own has its fields here.
+///
+/// `R` is the failure of a RESET_STREAM frame, which the reset kind of the
+/// composition gives ([`V1ConnectionErrorOf`]); by default that of
+/// RFC 9000.
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
-pub enum ConnectionError {
+pub enum ConnectionError<R = OnResetStreamError> {
     /// A packet carries no frames (RFC 9000 §12.4).
     #[snafu(display("a packet at the {level:?} level has no frames"))]
     EmptyPacket {
@@ -157,7 +169,7 @@ pub enum ConnectionError {
     #[snafu(display("{:?} frame rejected by the streams", frame_type.kind()))]
     StreamSet {
         /// The broken rule.
-        source: StreamSetFrameError,
+        source: StreamSetFrameError<R>,
         /// The type of the frame.
         frame_type: FrameTypeValue,
     },
@@ -185,7 +197,7 @@ pub enum ConnectionError {
 /// known, and is 0 otherwise. The reason phrase is what this layer shows, without its sources: a
 /// description of the violation, for the peer, with nothing internal to
 /// this endpoint.
-impl TransportClose for ConnectionError {
+impl<R: ResetStreamViolation> TransportClose for ConnectionError<R> {
     fn code(&self) -> TransportErrorCode {
         match self {
             Self::EmptyPacket { .. }
@@ -284,7 +296,7 @@ mod tests {
 
     #[test]
     fn the_reason_phrase_describes_the_violation() {
-        let error = ConnectionError::EmptyPacket {
+        let error: ConnectionError = ConnectionError::EmptyPacket {
             level: EncryptionLevel::Handshake,
         };
         assert_eq!(
@@ -295,11 +307,13 @@ mod tests {
 
     #[test]
     fn an_ack_of_a_packet_not_sent_is_a_protocol_violation_of_its_frame_type() {
-        let error = |ecn_counts| ConnectionError::UnsentPacketAcknowledged {
-            space: PacketNumberSpaceKind::Handshake,
-            largest: PacketNumber::new(7).unwrap(),
-            next: PacketNumber::new(5).unwrap(),
-            ecn_counts,
+        let error = |ecn_counts| -> ConnectionError {
+            ConnectionError::UnsentPacketAcknowledged {
+                space: PacketNumberSpaceKind::Handshake,
+                largest: PacketNumber::new(7).unwrap(),
+                next: PacketNumber::new(5).unwrap(),
+                ecn_counts,
+            }
         };
         assert_eq!(error(false).code(), TransportErrorCode::PROTOCOL_VIOLATION);
         assert_eq!(error(false).frame_type(), Some(VarInt::from_u32(0x02)));
@@ -308,7 +322,7 @@ mod tests {
 
     #[test]
     fn a_rejected_frame_of_streams_closes_with_its_code_and_its_type() {
-        let error = ConnectionError::StreamSet {
+        let error: ConnectionError = ConnectionError::StreamSet {
             source: StreamSetFrameError::Stream {
                 source: OnStreamFrameError::ConnectionLimitExceeded {
                     source: RecordUsageError {
@@ -322,7 +336,7 @@ mod tests {
         };
         assert_eq!(error.code(), TransportErrorCode::FLOW_CONTROL_ERROR);
         assert_eq!(error.frame_type(), Some(VarInt::from_u32(0x0e)));
-        let error = ConnectionError::NoEstablishedLayer {
+        let error: ConnectionError = ConnectionError::NoEstablishedLayer {
             frame_type: FrameTypeValue::of(VarInt::from_u32(0x10)).unwrap(),
         };
         assert_eq!(error.code(), TransportErrorCode::INTERNAL_ERROR);
@@ -331,14 +345,14 @@ mod tests {
 
     #[test]
     fn the_aead_limit_closes_with_aead_limit_reached() {
-        let error = ConnectionError::AeadLimitReached {
+        let error: ConnectionError = ConnectionError::AeadLimitReached {
             source: AeadLimitReachedError::IntegrityLimitExceeded {
                 aead: AeadAlgorithm::Aes128Gcm,
             },
         };
         assert_eq!(error.code(), TransportErrorCode::AEAD_LIMIT_REACHED);
         assert_eq!(error.frame_type(), None);
-        let error = ConnectionError::AeadLimitReached {
+        let error: ConnectionError = ConnectionError::AeadLimitReached {
             source: AeadLimitReachedError::ConfidentialityLimitReached,
         };
         assert_eq!(error.code(), TransportErrorCode::AEAD_LIMIT_REACHED);
@@ -346,7 +360,7 @@ mod tests {
 
     #[test]
     fn a_broken_key_update_rule_closes_with_key_update_error() {
-        let error = ConnectionError::KeyUpdate {
+        let error: ConnectionError = ConnectionError::KeyUpdate {
             source: KeyUpdateError::ConsecutiveUpdates {
                 trigger: PacketNumber::new(4).unwrap(),
                 number: PacketNumber::new(9).unwrap(),

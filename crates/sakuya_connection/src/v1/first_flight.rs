@@ -69,13 +69,14 @@ use super::{
     Choices, Server, Side,
     crypto::{CryptoReceiveCapacities, CryptoReceiver},
     dispatch::immediate_close,
-    error::ConnectionError,
+    error::{ConnectionError, V1ConnectionErrorOf},
     input::{HeldInput, LogicalPathDatagramReceiver, short_dcid_len},
     keys::{DirectionKeys, InitialKeys, LevelKeys},
     receive::{
         ReceivedPacket, open, owe_ack, packet_number_offset, read_frames, record_received,
         reserved_bits_set, v1_error,
     },
+    streams::resets::StreamResetsOf,
 };
 use crate::{
     clock::{ConnectionChoices, InstantOf},
@@ -381,8 +382,8 @@ where
     T: Choices<Side = Server<Tls>>,
     T::CryptoReceiveBuffer: Unpin,
     <T::Link as Link>::Payload: SplitTo + AsRef<[u8]> + AsMut<[u8]> + Into<Bytes>,
-    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd>,
-    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ie>,
+    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
     <L as FrameSet>::Run<Bytes>: CoproductTaker<FrameRun<Bytes>, Iv>,
 {
     let mut reading = pin!(LentCall::<CryptoReceiver<T::CryptoReceiveBuffer>, _>::new(
@@ -437,8 +438,8 @@ fn receive_datagram<T, L, Ie, Hd, Iv, Tls>(
 where
     T: Choices<Side = Server<Tls>>,
     <T::Link as Link>::Payload: SplitTo + AsRef<[u8]> + AsMut<[u8]> + Into<Bytes>,
-    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd>,
-    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ie>,
+    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
     <L as FrameSet>::Run<Bytes>: CoproductTaker<FrameRun<Bytes>, Iv>,
 {
     let size = datagram.payload().as_ref().len();
@@ -488,8 +489,8 @@ fn receive_initial<T, L, Ie, Hd, Iv, P, Tls>(
 where
     T: Choices<Side = Server<Tls>>,
     P: AsMut<[u8]> + Into<Bytes>,
-    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd>,
-    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ie>,
+    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
     <L as FrameSet>::Run<Bytes>: CoproductTaker<FrameRun<Bytes>, Iv>,
 {
     let level = EncryptionLevel::Initial;
@@ -580,10 +581,10 @@ where
 
 /// Version 1's `error` as a failure of reading the first flight of the
 /// composition `L`.
-fn connection<L, Ie>(error: ConnectionError) -> ReadFirstFlightError<ConnectionErrorOf<L>>
+fn connection<L, Ie>(error: V1ConnectionErrorOf<L>) -> ReadFirstFlightError<ConnectionErrorOf<L>>
 where
     L: ConnectionErrorsOf,
-    L::ConnectionErrors: CoprodInjector<ConnectionError, Ie>,
+    L::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
 {
     ReadFirstFlightError::Connection {
         source: v1_error::<L, Ie>(error),

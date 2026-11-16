@@ -22,6 +22,7 @@
 //! through the send strategy's intake ([`send`]).
 
 pub mod locked;
+pub mod resets;
 pub mod send;
 
 use bytes::Bytes;
@@ -56,6 +57,7 @@ use sakuya_wire::{
 };
 use snafu::Snafu;
 
+use self::resets::{ResetStreamViolation, StreamResets, StreamResetsOf, StreamResetsOfParts};
 use self::send::{
     DataBlockedSummary, MaxDataSummary, MaxStreamDataSummary, MaxStreamsSummary,
     ResetStreamSummary, StopSendingSummary, StreamDataBlockedSummary, StreamIntent,
@@ -88,14 +90,16 @@ use crate::{
 ///
 /// `Lc` is the type of this endpoint's reason for closing the connection,
 /// which the errors of the streams carry, and `K` the ticket the send
-/// strategy's intake gives back for a stream intent, which the set keeps.
-/// The driver hands it the frames of streams and flow control, one method
-/// for each of the nine frames, and the end of the layer; the application
-/// opens and accepts streams through its [`Handle`](Self::Handle).
+/// strategy's intake gives back for a stream intent, which the set keeps;
+/// `X` is how its streams are reset ([`resets`]), which also gives the
+/// failure of a RESET_STREAM frame. The driver hands it the frames of
+/// streams and flow control, one method for each of the nine frames, and
+/// the end of the layer; the application opens and accepts streams through
+/// its [`Handle`](Self::Handle).
 ///
 /// A frame that names a stream passes the checks of the streams' identity
 /// before it reaches the part of the stream it concerns. A frame that fails
-/// returns a [`StreamSetFrameError`], and the connection closes: the frames
+/// returns a [`StreamSetFrameErrorOf`], and the connection closes: the frames
 /// after it in the packet are not handed over, and what the failed frame
 /// changed is not undone.
 ///
@@ -105,7 +109,7 @@ use crate::{
 /// once their packets are delivered or lost. Every method that may change
 /// what is to be sent is given the handle, `publish`, and leaves the
 /// intents matching what is due afterwards.
-pub trait StreamSet<Lc, K>: Sized {
+pub trait StreamSet<Lc, K, X: StreamResets>: Sized {
     /// What the application opens and accepts streams through; the
     /// established layer's handle keeps one.
     type Handle: Clone;
@@ -131,14 +135,14 @@ pub trait StreamSet<Lc, K>: Sized {
     ///
     /// # Errors
     ///
-    /// [`StreamSetFrameError`] if the frame breaks a rule of streams or flow
+    /// [`StreamSetFrameErrorOf`] if the frame breaks a rule of streams or flow
     /// control; the connection closes.
     fn on_stream_frame<P>(
         &mut self,
         publish: &P,
         level: EncryptionLevel,
         frame: StreamFrame<Bytes>,
-    ) -> Result<(), StreamSetFrameError>
+    ) -> Result<(), StreamSetFrameErrorOf<X>>
     where
         P: StreamIntentHandle<Self::SendParameters, K>,
         K: IntentTicketResize + IntentTicketWithdraw;
@@ -152,7 +156,7 @@ pub trait StreamSet<Lc, K>: Sized {
         &mut self,
         publish: &P,
         frame: ResetStreamFrame,
-    ) -> Result<(), StreamSetFrameError>
+    ) -> Result<(), StreamSetFrameErrorOf<X>>
     where
         P: StreamIntentHandle<Self::SendParameters, K>,
         K: IntentTicketResize + IntentTicketWithdraw;
@@ -166,7 +170,7 @@ pub trait StreamSet<Lc, K>: Sized {
         &mut self,
         publish: &P,
         frame: StopSendingFrame,
-    ) -> Result<(), StreamSetFrameError>
+    ) -> Result<(), StreamSetFrameErrorOf<X>>
     where
         P: StreamIntentHandle<Self::SendParameters, K>,
         K: IntentTicketResize + IntentTicketWithdraw;
@@ -180,7 +184,7 @@ pub trait StreamSet<Lc, K>: Sized {
         &mut self,
         publish: &P,
         frame: MaxDataFrame,
-    ) -> Result<(), StreamSetFrameError>
+    ) -> Result<(), StreamSetFrameErrorOf<X>>
     where
         P: StreamIntentHandle<Self::SendParameters, K>,
         K: IntentTicketResize + IntentTicketWithdraw;
@@ -194,7 +198,7 @@ pub trait StreamSet<Lc, K>: Sized {
         &mut self,
         publish: &P,
         frame: MaxStreamDataFrame,
-    ) -> Result<(), StreamSetFrameError>
+    ) -> Result<(), StreamSetFrameErrorOf<X>>
     where
         P: StreamIntentHandle<Self::SendParameters, K>,
         K: IntentTicketResize + IntentTicketWithdraw;
@@ -208,7 +212,7 @@ pub trait StreamSet<Lc, K>: Sized {
         &mut self,
         publish: &P,
         frame: MaxStreamsFrame,
-    ) -> Result<(), StreamSetFrameError>
+    ) -> Result<(), StreamSetFrameErrorOf<X>>
     where
         P: StreamIntentHandle<Self::SendParameters, K>,
         K: IntentTicketResize + IntentTicketWithdraw;
@@ -222,7 +226,7 @@ pub trait StreamSet<Lc, K>: Sized {
         &mut self,
         publish: &P,
         frame: DataBlockedFrame,
-    ) -> Result<(), StreamSetFrameError>
+    ) -> Result<(), StreamSetFrameErrorOf<X>>
     where
         P: StreamIntentHandle<Self::SendParameters, K>,
         K: IntentTicketResize + IntentTicketWithdraw;
@@ -236,7 +240,7 @@ pub trait StreamSet<Lc, K>: Sized {
         &mut self,
         publish: &P,
         frame: StreamDataBlockedFrame,
-    ) -> Result<(), StreamSetFrameError>
+    ) -> Result<(), StreamSetFrameErrorOf<X>>
     where
         P: StreamIntentHandle<Self::SendParameters, K>,
         K: IntentTicketResize + IntentTicketWithdraw;
@@ -250,7 +254,7 @@ pub trait StreamSet<Lc, K>: Sized {
         &mut self,
         publish: &P,
         frame: StreamsBlockedFrame,
-    ) -> Result<(), StreamSetFrameError>
+    ) -> Result<(), StreamSetFrameErrorOf<X>>
     where
         P: StreamIntentHandle<Self::SendParameters, K>,
         K: IntentTicketResize + IntentTicketWithdraw;
@@ -516,9 +520,13 @@ where
 /// A frame the stream set took broke a rule of streams or flow control; the
 /// connection closes with the transport error code
 /// [`transport_error_code`](Self::transport_error_code) gives.
+///
+/// `R` is the failure of a RESET_STREAM frame, which the reset kind of the
+/// composition gives ([`StreamResets::OnResetStreamError`]); by default
+/// that of RFC 9000.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(visibility(pub(crate)))]
-pub enum StreamSetFrameError {
+pub enum StreamSetFrameError<R = OnResetStreamError> {
     /// A STREAM, RESET_STREAM or STREAM_DATA_BLOCKED frame names a stream
     /// that has no receiving part for it, or one beyond the limit on the
     /// peer's streams (RFC 9000 §19.4, §19.8, §19.13, §4.6).
@@ -549,11 +557,14 @@ pub enum StreamSetFrameError {
     #[snafu(display("RESET_STREAM frame rejected"))]
     ResetStream {
         /// The broken rule.
-        source: OnResetStreamError,
+        source: R,
     },
 }
 
-impl StreamSetFrameError {
+/// The failure of a frame a stream set of the reset kind `X` took.
+pub type StreamSetFrameErrorOf<X> = StreamSetFrameError<<X as StreamResets>::OnResetStreamError>;
+
+impl<R: ResetStreamViolation> StreamSetFrameError<R> {
     /// The QUIC transport error code to close the connection with.
     pub fn transport_error_code(&self) -> TransportErrorCode {
         match self {
@@ -567,7 +578,8 @@ impl StreamSetFrameError {
 
 /// The stream set of the choices `T` and the list of parts `L`, which keeps
 /// the tickets the strategy's intake gives back for the stream intents.
-pub type StreamsOf<T, L> = <T as Choices>::Streams<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>>;
+pub type StreamsOf<T, L> =
+    <T as Choices>::Streams<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>, StreamResetsOfParts<L>>;
 
 /// The configuration of the stream set, `C`, kept in the connection node
 /// until the established layer is built.
@@ -612,11 +624,19 @@ pub struct ChosenStreamSet;
 impl<T, L, X, Il, Ip, Ic, Ir, Ih, In, Jl, Jp>
     Build<T, L, layer::Established, (ChosenStreamSet, (Il, Ip, Ic, Ir, Ih, In), (Jl, Jp))> for X
 where
-    T: Choices<Streams<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>> = X>,
-    L: LineagePartList<T> + ConnectionErrorsOf + ParametersOf<TransportParameterSpace>,
+    T: Choices<Streams<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>, StreamResetsOfParts<L>> = X>,
+    L: LineagePartList<T>
+        + ConnectionErrorsOf
+        + StreamResetsOf
+        + ParametersOf<TransportParameterSpace>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
-    X: StreamSet<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>, Config = T::StreamSetConfig>,
+    X: StreamSet<
+            CloseCauseOf<T, L>,
+            StreamIntentTicketOf<T, L>,
+            StreamResetsOfParts<L>,
+            Config = T::StreamSetConfig,
+        >,
     TransportParameterSlots: FlowControlParameterSlots<Jl>,
     TransportParameterSlots<L>: FlowControlParameterSlots<Jp>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<LocalTransportParameters<TransportParameterSlots>, Il>
@@ -693,8 +713,8 @@ where
 /// and the application change it.
 impl<T, L, X> DataComponent<T, L, layer::Established, ChosenStreamSet> for X
 where
-    T: Choices<Streams<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>> = X>,
-    L: LineagePartList<T> + ConnectionErrorsOf,
+    T: Choices<Streams<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>, StreamResetsOfParts<L>> = X>,
+    L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
 {
 }

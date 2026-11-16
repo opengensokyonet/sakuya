@@ -77,7 +77,7 @@ use snafu::{ResultExt as _, ensure};
 use super::{
     Choices, Side,
     confirmation::HandshakeConfirmation,
-    error::{ConnectionError, KeyUpdateSnafu, UnsentPacketAcknowledgedSnafu},
+    error::{KeyUpdateSnafu, UnsentPacketAcknowledgedSnafu, V1ConnectionErrorOf},
     feedback::CoreLentFeedback,
     key_phase::KeyPhaseNumbers,
     key_update::ack_received,
@@ -180,7 +180,7 @@ pub fn receive_ack<
     others: &mut OtherNodes<'v, T, L, B>,
     frame: &AckFrame,
     packet: &DispatchFacts<InstantOf<T>, LinkPathIdentifierOf<T, L>>,
-) -> Result<(), ConnectionError>
+) -> Result<(), V1ConnectionErrorOf<L>>
 where
     T: Choices,
     L: LineagePartList<T> + FeedbackSummariesOf + ParametersOf<TransportParameterSpace>,

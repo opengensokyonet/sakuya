@@ -360,7 +360,8 @@ impl v1::Choices for ClientMine {
     type DestinationConnectionIds = common::TestDestinationConnectionIds;
     type ResetTokenRegistry = common::TestResetTokenRegistry;
     type SendParameters = sakuya_stream::send_options::urgency::Urgency;
-    type Streams<Lc, K> = sakuya_connection::v1::streams::locked::LockedStreamSet<Lc, K>;
+    type Streams<Lc, K, X: sakuya_connection::v1::streams::resets::StreamResets> =
+        sakuya_connection::v1::streams::locked::LockedStreamSet<Lc, K, X>;
     type StreamSetConfig = sakuya_connection::v1::streams::locked::LockedStreamSetConfig;
     type ImmediateClosePolicy = common::TestImmediateClosePolicy;
 }
@@ -388,7 +389,8 @@ impl v1::Choices for SpyMine {
     type DestinationConnectionIds = common::TestDestinationConnectionIds;
     type ResetTokenRegistry = common::TestResetTokenRegistry;
     type SendParameters = sakuya_stream::send_options::urgency::Urgency;
-    type Streams<Lc, K> = sakuya_connection::v1::streams::locked::LockedStreamSet<Lc, K>;
+    type Streams<Lc, K, X: sakuya_connection::v1::streams::resets::StreamResets> =
+        sakuya_connection::v1::streams::locked::LockedStreamSet<Lc, K, X>;
     type StreamSetConfig = sakuya_connection::v1::streams::locked::LockedStreamSetConfig;
     type ImmediateClosePolicy = common::TestImmediateClosePolicy;
 }
@@ -588,8 +590,11 @@ mod probe {
     impl LogicalPathKeyShare for Part {
         type Fields = HNil;
     }
-    impl sakuya_connection::error::ConnectionErrorPart for Part {
+    impl<L> sakuya_connection::error::ConnectionErrorPart<L> for Part {
         type ConnectionError = core::convert::Infallible;
+    }
+    impl sakuya_connection::v1::streams::resets::StreamResetsPart for Part {
+        type Fold<Prev: sakuya_connection::v1::streams::resets::StreamResets> = Prev;
     }
     impl ParametersPart<TransportParameterSpace> for Part {
         type Parameters = HNil;
@@ -1065,10 +1070,11 @@ mod probe {
             >,
         L: LineagePartList<T>
             + FrameSetDispatch<T, L, Hd>
-            + sakuya_connection::feedback::FeedbackSummariesOf,
+            + sakuya_connection::feedback::FeedbackSummariesOf
+            + sakuya_connection::v1::streams::resets::StreamResetsOf,
         CloseCauseOf<T, L>: Debug,
-        <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<v1::error::ConnectionError, Ie>
-            + CoprodUninjector<v1::error::ConnectionError, Ie>,
+        <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<v1::error::V1ConnectionErrorOf<L>, Ie>
+            + CoprodUninjector<v1::error::V1ConnectionErrorOf<L>, Ie>,
         <L as FrameSet>::Kind: CoproductSelector<FrameType, Ik>,
         for<'v> <L as LineageLists<'v, T>>::LogicalPath: GetAt<PacketFeeder, I>
             + GetAt<InitialKeys<RingBackend>, Ii>
@@ -1355,7 +1361,7 @@ mod probe {
     ) -> String
     where
         L: ConnectionErrorsOf,
-        L::ConnectionErrors: CoprodUninjector<v1::error::ConnectionError, Ie>,
+        L::ConnectionErrors: CoprodUninjector<v1::error::V1ConnectionErrorOf<L>, Ie>,
     {
         match outcome {
             Ok(PacketOutcome::Processed {

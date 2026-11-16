@@ -65,7 +65,7 @@ use super::{
     connection_ids::CoreLentConnectionIdEvents,
     crypto::CryptoReceiver,
     current_probe_timeout,
-    error::{self, ConnectionError},
+    error::{self, ConnectionError, V1ConnectionErrorOf},
     feedback::CoreLentFeedback,
     key_phase::KeyPhaseNumbers,
     keys::OneRttKeys,
@@ -75,7 +75,8 @@ use super::{
     send_planning::{IntakeOf, IntakePublishOutcome, SendStrategyIntake, SendStrategyOf},
     spaces::SendJournalsOf,
     streams::{
-        StreamSet, StreamSetFrameError, StreamsOf,
+        StreamSet, StreamSetFrameErrorOf, StreamsOf,
+        resets::StreamResetsOfParts,
         send::{StreamIntent, StreamIntentHandle, StreamIntentHandleOf, StreamIntentTicketOf},
     },
 };
@@ -278,6 +279,7 @@ where
     StreamsOf<T, L>: StreamSet<
             CloseCauseOf<T, L>,
             StreamIntentTicketOf<T, L>,
+            StreamResetsOfParts<L>,
             SendParameters = T::SendParameters,
         > + 'static,
     StreamIntentTicketOf<T, L>: IntentTicketResize + IntentTicketWithdraw,
@@ -295,7 +297,7 @@ where
         others: &mut OtherNodes<'v, T, L, B>,
         run: FrameRun<Bytes>,
         packet: &DispatchFacts<InstantOf<T>, LinkPathIdentifierOf<T, L>>,
-    ) -> Result<(), ConnectionError> {
+    ) -> Result<(), V1ConnectionErrorOf<L>> {
         match run {
             FrameRun::Ack(frame) => receive_ack::<
                 T,
@@ -410,7 +412,7 @@ where
         }
     }
 
-    fn fields_error(error: ReadFieldsError<Infallible>) -> ConnectionError {
+    fn fields_error(error: ReadFieldsError<Infallible>) -> V1ConnectionErrorOf<L> {
         ConnectionError::ReadFrameFields { source: error }
     }
 }
@@ -433,8 +435,8 @@ fn to_streams<'v, T, L, B, Ir, Is, Ii, Idx>(
     handle: impl FnOnce(
         &mut StreamsOf<T, L>,
         &StreamIntentHandleOf<T, L, Idx>,
-    ) -> Result<(), StreamSetFrameError>,
-) -> Result<(), ConnectionError>
+    ) -> Result<(), StreamSetFrameErrorOf<StreamResetsOfParts<L>>>,
+) -> Result<(), V1ConnectionErrorOf<L>>
 where
     T: Choices,
     L: LineagePartList<T> + ConnectionErrorsOf,
@@ -521,7 +523,7 @@ pub(super) fn drain_link_paths<'v, T, L, B, Iv, Ima, Irt, Il>(
 
 /// The CRYPTO stream of `level`; a 0-RTT packet carries no CRYPTO frames
 /// (RFC 9000 §12.4, Table 3).
-pub(super) fn crypto_level(level: EncryptionLevel) -> Result<CryptoLevel, ConnectionError> {
+pub(super) fn crypto_level<R>(level: EncryptionLevel) -> Result<CryptoLevel, ConnectionError<R>> {
     match level {
         EncryptionLevel::Initial => Ok(CryptoLevel::Initial),
         EncryptionLevel::Handshake => Ok(CryptoLevel::Handshake),

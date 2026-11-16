@@ -89,12 +89,13 @@ use super::{
     aead_usage::AeadUsage,
     connection_ids::{ConnectionIdsOf, PeerHandshakeConnectionId, ResetTokenRegistrarOf},
     dispatch::permitted,
-    error::ConnectionError,
+    error::{ConnectionError, V1ConnectionErrorOf},
     idle::IdleTimeout,
     key_phase::KeyPhaseNumbers,
     key_update::check_peer_update,
     keys::{DirectionKeys, HandshakeKeys, InitialKeys, OneRttKeys, OneRttReceiveKeys},
     spaces::AckObligationsOf,
+    streams::resets::StreamResetsOf,
 };
 use crate::role::LinkPathRole;
 use crate::{
@@ -301,10 +302,10 @@ pub fn receive_packet<
 ) -> Result<PacketOutcome<P, T::Link>, ConnectionErrorOf<L>>
 where
     T: Choices,
-    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd>,
+    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
     B: CallBundle,
     P: AsMut<[u8]> + Into<Bytes>,
-    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ie>,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
     <L as FrameSet>::Kind: CoproductSelector<FrameType, Ik>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<InitialKeys<T::Crypto>, Ii>
         + GetAt<HandshakeKeys<T::Crypto>, Ih>
@@ -550,8 +551,8 @@ pub(super) fn read_frames<T, L, Ie, Hd, E>(
 ) -> Result<PacketFacts, E>
 where
     T: Choices,
-    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd>,
-    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ie>,
+    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
 {
     let mut packet_facts = PacketFacts::default();
     for run in Frames::new(payload, PhantomData::<L>) {
@@ -925,7 +926,7 @@ fn find_close<'v, T, L, B, Ik, Hd>(
 ) -> Result<(), ConnectionErrorOf<L>>
 where
     T: Choices,
-    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd>,
+    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
     B: CallBundle,
     <L as FrameSet>::Kind: CoproductSelector<FrameType, Ik>,
 {
@@ -945,10 +946,10 @@ where
 }
 
 /// Version 1's `error` as the connection's error.
-pub(super) fn v1_error<L, Ie>(error: ConnectionError) -> ConnectionErrorOf<L>
+pub(super) fn v1_error<L, Ie>(error: V1ConnectionErrorOf<L>) -> ConnectionErrorOf<L>
 where
     L: ConnectionErrorsOf,
-    L::ConnectionErrors: CoprodInjector<ConnectionError, Ie>,
+    L::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
 {
     PartsError(CoprodInjector::inject(error))
 }
@@ -961,8 +962,8 @@ fn read_frame_error<T, L, Ie, Hd>(
 ) -> ConnectionErrorOf<L>
 where
     T: Choices,
-    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd>,
-    L::ConnectionErrors: CoprodInjector<ConnectionError, Ie>,
+    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
+    L::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
 {
     let source = match error {
         ReadFrameError::FrameType { source } => ReadFrameError::FrameType { source },

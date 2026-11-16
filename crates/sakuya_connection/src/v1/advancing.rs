@@ -107,7 +107,7 @@ use super::{
         FirstLocalConnectionId, InitialDestinationConnectionIds, PeerHandshakeConnectionId,
     },
     crypto::{CryptoReceiver, send::CryptoSender},
-    error::ConnectionError,
+    error::{ConnectionError, V1ConnectionErrorOf},
     handshake_done::HandshakeDoneSource,
     keys::{DirectionKeys, HandshakeKeys, LevelKeys, OneRttKeys, PacketProtectionBackend},
     parameters::{
@@ -479,7 +479,7 @@ macro_rules! crypto_capabilities {
             T: Choices,
             L: LineagePartList<T> + ConnectionErrorsOf,
             B: CallBundle,
-            <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Iv>,
+            <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
             for<'x> <L as LineageLists<'x, T>>::Connection:
                 GetAt<CryptoReceiver<T::CryptoReceiveBuffer>, Icr>,
         {
@@ -511,7 +511,7 @@ macro_rules! crypto_capabilities {
             T: Choices,
             L: LineagePartList<T> + ConnectionErrorsOf,
             B: CallBundle,
-            <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Iv>,
+            <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
             for<'x> <L as LineageLists<'x, T>>::Connection:
                 GetAt<CryptoSender<T::CryptoSendBuffer>, Ics>,
         {
@@ -544,7 +544,7 @@ macro_rules! crypto_capabilities {
             T: Choices,
             L: LineagePartList<T> + ConnectionErrorsOf,
             B: CallBundle,
-            <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Iv>,
+            <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
             for<'x> <L as LineageLists<'x, T>>::Connection:
                 GetAt<CryptoSender<T::CryptoSendBuffer>, Ics>,
         {
@@ -578,7 +578,7 @@ fn read_peer<L, Iv>(
 ) -> Result<TransportParameterSlots<L>, ConnectionErrorOf<L>>
 where
     L: TransportParameterValueErrorsOf,
-    L::ConnectionErrors: CoprodInjector<ConnectionError, Iv>,
+    L::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
 {
     let mut source = peer;
     source
@@ -781,7 +781,7 @@ where
     T: Choices,
     L: LineagePartList<T> + TransportParameterValueErrorsOf,
     B: CallBundle,
-    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Iv>,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>,
     for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>,
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
@@ -886,7 +886,7 @@ where
     Tls::AlertError: 'static,
     L: LineagePartList<T> + TransportParameterValueErrorsOf,
     B: CallBundle,
-    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Iv>,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>,
     SendTypes<T, L>: SendStrategyTypes,
     SendStrategyCore<SendStrategyOf<T, L>>: PublishIntent<HandshakeDoneIntent, Idx>,
@@ -1088,7 +1088,7 @@ where
     Tls: ServerHandshakeSteps + 'static,
     Tls::AlertError: 'static,
     L: LineagePartList<T> + TransportParameterValueErrorsOf,
-    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Iv>,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>,
     SendTypes<T, L>: SendStrategyTypes,
     SendStrategyCore<SendStrategyOf<T, L>>: PublishIntent<HandshakeDoneIntent, Idx>,
@@ -1253,7 +1253,7 @@ where
     T: Choices,
     L: LineagePartList<T> + TransportParameterValueErrorsOf,
     B: CallBundle,
-    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Iv>,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>
         + Selector<Option<OriginalDestinationConnectionId>, Jo>
         + Selector<Option<RetrySourceConnectionId>, Jr>,
@@ -1341,7 +1341,7 @@ where
     Tls::AlertError: 'static,
     L: LineagePartList<T> + TransportParameterValueErrorsOf,
     B: CallBundle,
-    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Iv>,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>
         + Selector<Option<OriginalDestinationConnectionId>, Jo>
         + Selector<Option<RetrySourceConnectionId>, Jr>,
@@ -1473,7 +1473,7 @@ where
     Tls: ClientHandshakeSteps + 'static,
     Tls::AlertError: 'static,
     L: LineagePartList<T> + TransportParameterValueErrorsOf,
-    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Iv>,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>
         + Selector<Option<OriginalDestinationConnectionId>, Jo>
         + Selector<Option<RetrySourceConnectionId>, Jr>,

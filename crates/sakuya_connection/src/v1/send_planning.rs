@@ -48,7 +48,7 @@ use super::{
     confirmation::HandshakeConfirmation,
     connection_ids::{ConnectionIdsOf, ResetTokenRegistrarOf},
     crypto::send::{CryptoSendBuffer, CryptoSender},
-    error::ConnectionError,
+    error::{ConnectionError, V1ConnectionErrorOf},
     keys::{HandshakeKeys, InitialKeys, OneRttKeys},
     link::{LinkClone, LinkFacts},
     parameters::PeerTransportParameters,
@@ -536,7 +536,7 @@ impl<T: Choices, L, Ip, Ir, It, Il, Io, Ipp, Jc, Js, Jm, Ic, Ier, Kr, Kp>
 where
     L: LineagePartList<T> + FeedbackSummariesOf + ParametersOf<TransportParameterSpace>,
     L: ConnectionErrorsOf,
-    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ier>,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ier>,
     SendTypes<T, L>: SendStrategyTypes,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     LinkPathSendPlannerOf<T, L>: Observe<DatagramLimits> + Observe<PacketOverheads>,

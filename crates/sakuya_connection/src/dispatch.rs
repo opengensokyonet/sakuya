@@ -30,7 +30,7 @@ use crate::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf},
     component::LineageOf,
-    error::{ConnectionErrorPart, ConnectionErrorsOf},
+    error::{ConnectionErrorPart, ConnectionErrorsIn},
     layer::LogicalPath,
     others::OtherNodes,
     share::{LineageLists, LinkPathIdentifierOf},
@@ -126,7 +126,7 @@ impl<I: Copy, P> DispatchFacts<I, P> {
 ///
 /// `L` is the composition's list of parts and `H` what the impl infers the
 /// positions of the components it takes by.
-pub trait FrameDispatch<T: ConnectionChoices, L, H>: FrameSetPart + ConnectionErrorPart
+pub trait FrameDispatch<T: ConnectionChoices, L, H>: FrameSetPart + ConnectionErrorPart<L>
 where
     for<'v> L: LineageLists<'v, T>,
 {
@@ -154,7 +154,7 @@ where
 /// It is implemented for every list whose parts implement
 /// [`FrameDispatch`]; `L` is the whole composition and `Hs` the positions of
 /// each part's impl.
-pub trait FrameSetDispatch<T: ConnectionChoices, L, Hs>: FrameSet + ConnectionErrorsOf
+pub trait FrameSetDispatch<T: ConnectionChoices, L, Hs>: FrameSet + ConnectionErrorsIn<L>
 where
     for<'v> L: LineageLists<'v, T>,
 {
@@ -168,11 +168,13 @@ where
         others: &mut OtherNodes<'v, T, L, B>,
         run: Self::Run<Bytes>,
         packet: &DispatchFacts<InstantOf<T>, LinkPathIdentifierOf<T, L>>,
-    ) -> Result<(), Self::ConnectionErrors>;
+    ) -> Result<(), <Self as ConnectionErrorsIn<L>>::ConnectionErrors>;
 
     /// The connection error that a failure of reading the fields of a frame
     /// is, as the part that claims the frame gives it.
-    fn fields_error(error: Self::FieldsError<Infallible>) -> Self::ConnectionErrors;
+    fn fields_error(
+        error: Self::FieldsError<Infallible>,
+    ) -> <Self as ConnectionErrorsIn<L>>::ConnectionErrors;
 }
 
 impl<T: ConnectionChoices, L> FrameSetDispatch<T, L, HNil> for HNil
@@ -204,7 +206,7 @@ where
         others: &mut OtherNodes<'v, T, L, B>,
         run: Self::Run<Bytes>,
         packet: &DispatchFacts<InstantOf<T>, LinkPathIdentifierOf<T, L>>,
-    ) -> Result<(), Self::ConnectionErrors> {
+    ) -> Result<(), <Self as ConnectionErrorsIn<L>>::ConnectionErrors> {
         match run {
             Coproduct::Inl(run) => {
                 P::dispatch(lineage, others, run, packet).map_err(Coproduct::Inl)
@@ -215,7 +217,9 @@ where
         }
     }
 
-    fn fields_error(error: Self::FieldsError<Infallible>) -> Self::ConnectionErrors {
+    fn fields_error(
+        error: Self::FieldsError<Infallible>,
+    ) -> <Self as ConnectionErrorsIn<L>>::ConnectionErrors {
         match error {
             Coproduct::Inl(error) => Coproduct::Inl(P::fields_error(error)),
             Coproduct::Inr(error) => Coproduct::Inr(Ps::fields_error(error)),

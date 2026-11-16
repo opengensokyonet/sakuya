@@ -16,11 +16,20 @@ use sakuya_wire::{
     var_int::VarInt,
 };
 
-use crate::share::LogicalPathKeyShare;
+use crate::{
+    share::LogicalPathKeyShare,
+    v1::streams::resets::{StreamResets, StreamResetsPart},
+};
 
 /// The reliable stream reset extension, one part of a composition.
 #[derive(Debug)]
 pub struct Part;
+
+/// The extension leaves how streams are reset as it is, for now.
+impl StreamResetsPart for Part {
+    // 下一步换成可靠重置
+    type Fold<Prev: StreamResets> = Prev;
+}
 
 /// The extension adds nothing to the key of a logical path.
 impl LogicalPathKeyShare for Part {

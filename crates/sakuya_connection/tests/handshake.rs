@@ -434,7 +434,8 @@ macro_rules! choices {
             type DestinationConnectionIds = common::TestDestinationConnectionIds;
             type ResetTokenRegistry = common::TestResetTokenRegistry;
             type SendParameters = sakuya_stream::send_options::urgency::Urgency;
-            type Streams<Lc, K> = sakuya_connection::v1::streams::locked::LockedStreamSet<Lc, K>;
+            type Streams<Lc, K, X: sakuya_connection::v1::streams::resets::StreamResets> =
+                sakuya_connection::v1::streams::locked::LockedStreamSet<Lc, K, X>;
             type StreamSetConfig = sakuya_connection::v1::streams::locked::LockedStreamSetConfig;
             type ImmediateClosePolicy = common::TestImmediateClosePolicy;
         }
@@ -499,8 +500,11 @@ mod watch {
     impl LogicalPathKeyShare for Part {
         type Fields = HNil;
     }
-    impl sakuya_connection::error::ConnectionErrorPart for Part {
+    impl<L> sakuya_connection::error::ConnectionErrorPart<L> for Part {
         type ConnectionError = core::convert::Infallible;
+    }
+    impl sakuya_connection::v1::streams::resets::StreamResetsPart for Part {
+        type Fold<Prev: sakuya_connection::v1::streams::resets::StreamResets> = Prev;
     }
     impl ParametersPart<TransportParameterSpace> for Part {
         type Parameters = HNil;

@@ -145,7 +145,7 @@ use super::{
     confirmation::HandshakeConfirmation,
     connection_ids::{ConnectionIdsOf, LinkPathResetTokenRegistrar, ResetTokenRegistrarOf},
     datagram_batch::{BatchedDatagram, BatchedPacket, DatagramBatch},
-    error::ConnectionError,
+    error::{ConnectionError, V1ConnectionErrorOf},
     feedback::CoreLentFeedback,
     idle::IdleTimeout,
     key_phase::KeyPhaseNumbers,
@@ -608,7 +608,7 @@ where
         + GetAt<DatagramAcceptance, Ida>
         + TakeEach<'x, ResendTakes<T, L>, Irs>,
     L: ConnectionErrorsOf,
-    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ier>,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ier>,
     for<'x> FillKeysRest<'x, T, L, It>: TakeEach<'x, FillReadTakes<T>, Iw>,
     for<'x> FillRest<'x, T, L, It, Iw>: AppendLast<Option<&'x mut StreamsOf<T, L>>>,
     for<'x> FillStreamsRest<'x, T, L, It, Iw>:
@@ -1896,7 +1896,7 @@ where
         + TakeEach<'x, ResendTakes<T, L>, Irs>
         + GetAt<LinkPathRole<InstantOf<T>>, Idr>,
     L: ConnectionErrorsOf,
-    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ier>,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ier>,
     for<'x> FillKeysRest<'x, T, L, It>: TakeEach<'x, FillReadTakes<T>, Iw>,
     for<'x> FillRest<'x, T, L, It, Iw>: AppendLast<Option<&'x mut StreamsOf<T, L>>>,
     for<'x> FillStreamsRest<'x, T, L, It, Iw>:

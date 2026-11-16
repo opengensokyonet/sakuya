@@ -18,7 +18,10 @@ use sakuya_wire::{
 };
 use snafu::{Snafu, ensure};
 
-use super::{error::ConnectionError, receive::v1_error};
+use super::{
+    error::{ConnectionError, V1ConnectionErrorOf},
+    receive::v1_error,
+};
 use crate::{
     error::{ConnectionErrorOf, TransportParameterValueErrorsOf},
     take::{GetAt, Lineage},
@@ -268,7 +271,7 @@ pub(super) fn read_transport_parameters_error<L, Iv>(
 ) -> ConnectionErrorOf<L>
 where
     L: TransportParameterValueErrorsOf,
-    L::ConnectionErrors: CoprodInjector<ConnectionError, Iv>,
+    L::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
 {
     let source = match error {
         ReadParametersError::Id { source } => ReadParametersError::Id { source },
@@ -356,7 +359,11 @@ mod tests {
     use super::*;
     use crate::{
         error::{ConnectionErrorPart, TransportParameterValueErrorPart},
-        v1::{Part, close::TransportClose},
+        v1::{
+            Part,
+            close::TransportClose,
+            streams::resets::{StreamResets, StreamResetsPart},
+        },
     };
 
     fn id(byte: u8) -> ConnectionId {
@@ -408,15 +415,19 @@ mod tests {
         source: PartsError<Coprod![TrailingBytesError]>,
     }
 
-    impl ConnectionErrorPart for Extension {
+    impl<L> ConnectionErrorPart<L> for Extension {
         type ConnectionError = ExtensionValueError;
+    }
+
+    impl StreamResetsPart for Extension {
+        type Fold<Prev: StreamResets> = Prev;
     }
 
     impl ParametersPart<TransportParameterSpace> for Extension {
         type Parameters = HList![Flag];
     }
 
-    impl TransportParameterValueErrorPart<Coprod![TrailingBytesError]> for Extension {
+    impl<L> TransportParameterValueErrorPart<Coprod![TrailingBytesError], L> for Extension {
         fn value_error(
             id: VarInt,
             source: PartsError<Coprod![TrailingBytesError]>,
@@ -430,7 +441,7 @@ mod tests {
     fn read_error<L, Iv>(encoding: &[u8]) -> ConnectionErrorOf<L>
     where
         L: TransportParameterValueErrorsOf,
-        L::ConnectionErrors: CoprodInjector<ConnectionError, Iv>,
+        L::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
     {
         let mut source = encoding;
         match source.sync_read_transport_parameters_unpin(Role::Server, PhantomData::<L>) {

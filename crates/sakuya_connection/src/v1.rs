@@ -184,7 +184,10 @@ use self::{
     space_retirement::PacketNumberSpaceRetirement,
     spaces::{AckObligationsOf, DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
     stateless_reset::StatelessResetSignal,
-    streams::{StreamSet, StreamSetConfig, StreamsOf},
+    streams::{
+        StreamSet, StreamSetConfig, StreamsOf,
+        resets::{StreamResets, StreamResetsOf, StreamResetsPart},
+    },
 };
 use crate::connection_id::{DestinationConnectionIdStrategy, reset_token::ResetTokenRegistry};
 use crate::role::LinkPathRole;
@@ -227,9 +230,16 @@ impl ParametersPart<TransportParameterSpace> for Part {
         <sakuya_wire::v1::Part as ParametersPart<TransportParameterSpace>>::Parameters;
 }
 
-/// Version 1 finds its own [`ConnectionError`](error::ConnectionError).
-impl ConnectionErrorPart for Part {
-    type ConnectionError = error::ConnectionError;
+/// Version 1 finds its own [`ConnectionError`](error::ConnectionError),
+/// whose failures of RESET_STREAM frames are those of how the composition
+/// resets streams.
+impl<L: StreamResetsOf> ConnectionErrorPart<L> for Part {
+    type ConnectionError = error::V1ConnectionErrorOf<L>;
+}
+
+/// Version 1 passes the reset kind on: it starts as RFC 9000's.
+impl StreamResetsPart for Part {
+    type Fold<Prev: StreamResets> = Prev;
 }
 
 /// A value of a transport parameter of version 1 that breaks a rule of its
@@ -239,11 +249,14 @@ impl ConnectionErrorPart for Part {
 /// The impl is written for any sum that is not `CNil`, so that it stays
 /// apart from the impl every part has for `CNil`; only the sum of the
 /// failures of version 1's own types meets its bound.
-impl<H, T> TransportParameterValueErrorPart<Coproduct<H, T>> for Part
+impl<H, T, L: StreamResetsOf> TransportParameterValueErrorPart<Coproduct<H, T>, L> for Part
 where
     PartsError<Coproduct<H, T>>: Into<PartsError<TransportParameterValueErrors>>,
 {
-    fn value_error(id: VarInt, source: PartsError<Coproduct<H, T>>) -> error::ConnectionError {
+    fn value_error(
+        id: VarInt,
+        source: PartsError<Coproduct<H, T>>,
+    ) -> error::V1ConnectionErrorOf<L> {
         error::ConnectionError::ReadTransportParameters {
             source: ReadParametersError::InvalidValue {
                 id,
@@ -320,9 +333,11 @@ pub trait Choices: ConnectionChoices {
     type SendParameters: Clone + PartialEq + Default + 'static;
     /// The set of the connection's streams in the established layer, for
     /// `Lc`, this endpoint's reason for closing, [`CloseCauseOf`] for the
-    /// composition's list of parts, and `K`, the ticket the send strategy's
-    /// intake gives back for a stream intent ([`streams`]).
-    type Streams<Lc, K>: StreamSet<Lc, K, Config = Self::StreamSetConfig, SendParameters = Self::SendParameters>;
+    /// composition's list of parts, `K`, the ticket the send strategy's
+    /// intake gives back for a stream intent, and `X`, how the streams are
+    /// reset, [`StreamResetsOfParts`](streams::resets::StreamResetsOfParts)
+    /// of the list of parts ([`streams`]).
+    type Streams<Lc, K, X: StreamResets>: StreamSet<Lc, K, X, Config = Self::StreamSetConfig, SendParameters = Self::SendParameters>;
     /// What the composition configures the stream set with; the connection
     /// node keeps it from the connection's making until the established
     /// layer is built.

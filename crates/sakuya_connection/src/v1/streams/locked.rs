@@ -69,8 +69,8 @@ use sakuya_stream::{
     receive_buffer::StreamReceiveBuffer,
     send::{
         SendEndState, SendTerminalState, StreamEndFrame, StreamSender,
-        composition::DefaultSendComposition,
-        local_reset::{LocalReset, LocalResetTarget},
+        composition::SendComposition, flow_control::DefaultSendFlowControlPolicy,
+        local_reset::LocalResetTarget,
     },
     send_buffer::{StreamSendBuffer, offset_map::OffsetMapStreamSendBuffer},
     send_options::{
@@ -104,7 +104,8 @@ use snafu::ResultExt;
 
 use super::{
     FlowControlParameters, ReceivingPartFrameSnafu, ResetStreamSnafu, SendingPartFrameSnafu,
-    StreamSet, StreamSetFacts, StreamSetFrameError, StreamSnafu,
+    StreamSet, StreamSetFacts, StreamSetFrameErrorOf, StreamSnafu,
+    resets::StreamResets,
     send::{
         DataBlockedSummary, MaxDataSummary, MaxStreamDataSummary, MaxStreamsSummary,
         ResetStreamSummary, StopSendingSummary, StreamDataBlockedSummary, StreamIntent,
@@ -130,29 +131,50 @@ mod tests;
 /// any active link path, the one destination of this set.
 type MarkerOf<P> = SendOptions<P, AnyActiveLinkPath>;
 
-/// The sending part of a stream of the default set: the default
-/// composition over [`Bytes`], with the marker of the parameters `P`,
-/// sharing the connection's atomic send flow controller, with the resets of
-/// RFC 9000.
-type SenderOf<Lc, P> = StreamSender<
-    DefaultSendComposition<Bytes, AtomicConnectionCreditReservation, MarkerOf<P>>,
+/// The composition of a sending part of the default set: the default send
+/// buffer over [`Bytes`] with the marker of the parameters `P`, the default
+/// flow control policy, and the termination policy of the reset kind `Rs`.
+type SendCompositionOf<Rs, P> = SendComposition<
+    OffsetMapStreamSendBuffer<Bytes, AtomicConnectionCreditReservation, MarkerOf<P>>,
+    DefaultSendFlowControlPolicy,
+    <Rs as StreamResets>::SendTermination,
+>;
+
+/// The sending part of a stream of the default set: its composition
+/// ([`SendCompositionOf`]), sharing the connection's atomic send flow
+/// controller, with the resets of the reset kind `Rs`.
+type SenderOf<Lc, Rs, P> = StreamSender<
+    SendCompositionOf<Rs, P>,
     AtomicConnectionSendFlowController,
     Lc,
-    LocalReset,
+    <Rs as StreamResets>::Local,
     Bytes,
     MarkerOf<P>,
 >;
 
 /// The receiving part of a stream of the default set: the default
-/// composition, with the resets of RFC 9000.
-type ReceiverOf<Lc> = StreamReceiver<DefaultReceiveComposition, Lc>;
+/// composition, with the resets of the reset kind `Rs`.
+type ReceiverOf<Lc, Rs> =
+    StreamReceiver<DefaultReceiveComposition, Lc, <Rs as StreamResets>::Remote>;
+
+/// The composition of a new sending part of the default set: an empty
+/// buffer, and the reset codes of `config`.
+fn send_composition<Rs: StreamResets, P>(
+    config: &LockedStreamSetConfig,
+) -> SendCompositionOf<Rs, P> {
+    SendComposition::new(
+        OffsetMapStreamSendBuffer::new(),
+        DefaultSendFlowControlPolicy::new(),
+        Rs::send_termination(config.send_abandon_code, config.destination_exhausted_code),
+    )
+}
 
 /// The sending part of a stream as the set's table and its users share it.
-type SendingPart<Lc, K, P> = Arc<LockedStreamEnd<SendingEnd<Lc, K, P>>>;
+type SendingPart<Lc, K, Rs, P> = Arc<LockedStreamEnd<SendingEnd<Lc, K, Rs, P>>>;
 
 /// The receiving part of a stream as the set's table and its users share
 /// it.
-type ReceivingPart<Lc, K, P> = Arc<LockedStreamEnd<ReceivingEnd<Lc, K, P>>>;
+type ReceivingPart<Lc, K, Rs, P> = Arc<LockedStreamEnd<ReceivingEnd<Lc, K, Rs, P>>>;
 
 /// What `mutex` holds, whether or not a holder panicked: a holder panics
 /// only on a broken invariant of its own, and the state is taken as it was
@@ -165,20 +187,20 @@ fn lock<X>(mutex: &Mutex<X>) -> MutexGuard<'_, X> {
 /// stream under a lock of its own; see the [module documentation](self).
 ///
 /// `Lc` is the type of this endpoint's reason for closing, `K` the ticket
-/// of a stream intent, and `P` the parameters application data is sent
+/// of a stream intent, `Rs` how its streams are reset
+/// ([`StreamResets`]), and `P` the parameters application data is sent
 /// with, by default an [`Urgency`]; all data goes to [`AnyActiveLinkPath`].
-/// It resets streams as RFC 9000 does, also with the `reset_stream_at`
-/// feature.
-pub struct LockedStreamSet<Lc, K, P = Urgency> {
-    shared: Arc<StreamSetShare<Lc, K, P>>,
+/// Of the peer's resets it takes RESET_STREAM only.
+pub struct LockedStreamSet<Lc, K, Rs: StreamResets, P = Urgency> {
+    shared: Arc<StreamSetShare<Lc, K, Rs, P>>,
 }
 
 /// The handle of a [`LockedStreamSet`]: it shares the set's state.
-pub struct LockedStreamSetHandle<Lc, K, P = Urgency> {
-    shared: Arc<StreamSetShare<Lc, K, P>>,
+pub struct LockedStreamSetHandle<Lc, K, Rs: StreamResets, P = Urgency> {
+    shared: Arc<StreamSetShare<Lc, K, Rs, P>>,
 }
 
-impl<Lc, K, P> Clone for LockedStreamSetHandle<Lc, K, P> {
+impl<Lc, K, Rs: StreamResets, P> Clone for LockedStreamSetHandle<Lc, K, Rs, P> {
     fn clone(&self) -> Self {
         Self {
             shared: Arc::clone(&self.shared),
@@ -186,14 +208,14 @@ impl<Lc, K, P> Clone for LockedStreamSetHandle<Lc, K, P> {
     }
 }
 
-impl<Lc, K, P> fmt::Debug for LockedStreamSetHandle<Lc, K, P> {
+impl<Lc, K, Rs: StreamResets, P> fmt::Debug for LockedStreamSetHandle<Lc, K, Rs, P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LockedStreamSetHandle")
             .finish_non_exhaustive()
     }
 }
 
-impl<Lc, K, P> fmt::Debug for LockedStreamSet<Lc, K, P> {
+impl<Lc, K, Rs: StreamResets, P> fmt::Debug for LockedStreamSet<Lc, K, Rs, P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LockedStreamSet").finish_non_exhaustive()
     }
@@ -335,7 +357,7 @@ where
 
 // ---- the sending part ----
 
-impl<Lc, K, P> SendingEnd<Lc, K, P> {
+impl<Lc, K, Rs: StreamResets, P> SendingEnd<Lc, K, Rs, P> {
     /// Wake the writer, if it waits: what it waits for may have come.
     fn wake_writer(&mut self) {
         if let Some(waker) = self.writer.take() {
@@ -344,7 +366,7 @@ impl<Lc, K, P> SendingEnd<Lc, K, P> {
     }
 }
 
-impl<Lc, K, P> ReceivingEnd<Lc, K, P> {
+impl<Lc, K, Rs: StreamResets, P> ReceivingEnd<Lc, K, Rs, P> {
     /// Wake the reader, if it waits: data or an end may have come.
     fn wake_reader(&mut self) {
         if let Some(waker) = self.reader.take() {
@@ -387,8 +409,8 @@ impl EndFrameDelivery {
 ///
 /// The waker of the writer is woken when what it waits for may have come:
 /// room for its writes, or the end of the stream's sending.
-struct SendingEnd<Lc, K, P> {
-    sender: SenderOf<Lc, P>,
+struct SendingEnd<Lc, K, Rs: StreamResets, P> {
+    sender: SenderOf<Lc, Rs, P>,
     data: Option<Ticketed<K, P>>,
     reset: Option<Ticketed<K, P>>,
     blocked: Option<Ticketed<K, P>>,
@@ -397,12 +419,12 @@ struct SendingEnd<Lc, K, P> {
     writer: Option<Waker>,
 }
 
-impl<Lc, K, P> SendingEnd<Lc, K, P>
+impl<Lc, K, Rs: StreamResets, P> SendingEnd<Lc, K, Rs, P>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
 {
-    fn new(sender: SenderOf<Lc, P>) -> Self {
+    fn new(sender: SenderOf<Lc, Rs, P>) -> Self {
         Self {
             sender,
             data: None,
@@ -431,7 +453,7 @@ where
     }
 
     /// The reset whose RESET_STREAM waits to be sent.
-    fn reset_due(&self) -> Option<LocalReset> {
+    fn reset_due(&self) -> Option<Rs::Local> {
         match self.sender.end_state() {
             SendEndState::Reset { target, .. } if self.sends() && self.reset_frame.waits() => {
                 Some(target)
@@ -741,20 +763,20 @@ where
 /// frames, STOP_SENDING and MAX_STREAM_DATA, whether a lost
 /// MAX_STREAM_DATA waits to be sent again, and the waker of the reader,
 /// woken when data or an end may have come.
-struct ReceivingEnd<Lc, K, P> {
-    receiver: ReceiverOf<Lc>,
+struct ReceivingEnd<Lc, K, Rs: StreamResets, P> {
+    receiver: ReceiverOf<Lc, Rs>,
     stop: Option<Ticketed<K, P>>,
     max_stream_data: Option<Ticketed<K, P>>,
     max_stream_data_lost: bool,
     reader: Option<Waker>,
 }
 
-impl<Lc, K, P> ReceivingEnd<Lc, K, P>
+impl<Lc, K, Rs: StreamResets, P> ReceivingEnd<Lc, K, Rs, P>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq,
 {
-    fn new(receiver: ReceiverOf<Lc>) -> Self {
+    fn new(receiver: ReceiverOf<Lc, Rs>) -> Self {
         Self {
             receiver,
             stop: None,
@@ -981,8 +1003,8 @@ impl<K, P> Default for ConnectionIntents<K, P> {
 // ---- the set ----
 
 /// What the set and its handles share.
-struct StreamSetShare<Lc, K, P> {
-    set: Mutex<SetState<Lc, K, P>>,
+struct StreamSetShare<Lc, K, Rs: StreamResets, P> {
+    set: Mutex<SetState<Lc, K, Rs, P>>,
     connection_receive: Mutex<ConnectionReceive<K, P>>,
     connection_send: Arc<AtomicConnectionSendFlowController>,
     facts: StreamSetFacts,
@@ -990,10 +1012,10 @@ struct StreamSetShare<Lc, K, P> {
 }
 
 /// What the set's lock holds.
-struct SetState<Lc, K, P> {
+struct SetState<Lc, K, Rs: StreamResets, P> {
     ledger: StreamIdLedger,
-    senders: HashMap<StreamId, SendingPart<Lc, K, P>>,
-    receivers: HashMap<StreamId, ReceivingPart<Lc, K, P>>,
+    senders: HashMap<StreamId, SendingPart<Lc, K, Rs, P>>,
+    receivers: HashMap<StreamId, ReceivingPart<Lc, K, Rs, P>>,
     /// The bidirectional streams the peer opened, in the order their first
     /// frames arrived, not accepted yet.
     accept_bidirectional: VecDeque<StreamId>,
@@ -1012,7 +1034,7 @@ struct SetState<Lc, K, P> {
     accept_wakers: ByDirectionality<Vec<Waker>>,
 }
 
-impl<Lc, K, P> SetState<Lc, K, P>
+impl<Lc, K, Rs: StreamResets, P> SetState<Lc, K, Rs, P>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq,
@@ -1145,7 +1167,7 @@ impl StreamSetFacts {
     }
 }
 
-impl<Lc, K, P> StreamSetShare<Lc, K, P>
+impl<Lc, K, Rs: StreamResets, P> StreamSetShare<Lc, K, Rs, P>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
@@ -1153,7 +1175,7 @@ where
     /// Make the parts of `id`, a stream the peer opened that a frame just
     /// created, and queue it to be accepted. A bidirectional stream gets
     /// both parts, a unidirectional one its receiving part.
-    fn create_peer_stream(&self, set: &mut SetState<Lc, K, P>, id: StreamId) {
+    fn create_peer_stream(&self, set: &mut SetState<Lc, K, Rs, P>, id: StreamId) {
         let window = self.facts.receive_window(id);
         let receiver = StreamReceiver::new(
             DefaultReceiveComposition::with_window_and_abandon_code(
@@ -1171,10 +1193,7 @@ where
                 let sender = StreamSender::new(
                     id,
                     self.facts.send_limit(id),
-                    DefaultSendComposition::with_reset_codes(
-                        self.config.send_abandon_code,
-                        self.config.destination_exhausted_code,
-                    ),
+                    send_composition::<Rs, P>(&self.config),
                     Arc::clone(&self.connection_send),
                 );
                 set.senders
@@ -1190,11 +1209,12 @@ where
     /// frame passed the checks of the streams' identity: made if the frame
     /// creates the stream; `None` when the frame is to be ignored, as the
     /// stream was reclaimed or the layer ended.
+    #[allow(clippy::type_complexity)] // a part of four type parameters
     fn receiving_part(
         &self,
         id: StreamId,
         frame_type: ReceivingPartFrameType,
-    ) -> Result<Option<ReceivingPart<Lc, K, P>>, StreamSetFrameError> {
+    ) -> Result<Option<ReceivingPart<Lc, K, Rs, P>>, StreamSetFrameErrorOf<Rs>> {
         let mut set = lock(&self.set);
         if set.end.is_some() {
             return Ok(None);
@@ -1217,11 +1237,12 @@ where
 
     /// The sending part of `id` for a frame of `frame_type`, as
     /// [`receiving_part`](Self::receiving_part) finds the receiving part.
+    #[allow(clippy::type_complexity)] // a part of four type parameters
     fn sending_part(
         &self,
         id: StreamId,
         frame_type: SendingPartFrameType,
-    ) -> Result<Option<SendingPart<Lc, K, P>>, StreamSetFrameError> {
+    ) -> Result<Option<SendingPart<Lc, K, Rs, P>>, StreamSetFrameErrorOf<Rs>> {
         let mut set = lock(&self.set);
         if set.end.is_some() {
             return Ok(None);
@@ -1245,12 +1266,12 @@ where
 
     /// The sending part of `id` that a frame source writes or takes back
     /// the frames of: `None` once it left the table.
-    fn sender_of(&self, id: StreamId) -> Option<SendingPart<Lc, K, P>> {
+    fn sender_of(&self, id: StreamId) -> Option<SendingPart<Lc, K, Rs, P>> {
         lock(&self.set).senders.get(&id).cloned()
     }
 
     /// The receiving part of `id`, as [`sender_of`](Self::sender_of).
-    fn receiver_of(&self, id: StreamId) -> Option<ReceivingPart<Lc, K, P>> {
+    fn receiver_of(&self, id: StreamId) -> Option<ReceivingPart<Lc, K, Rs, P>> {
         lock(&self.set).receivers.get(&id).cloned()
     }
 
@@ -1260,7 +1281,7 @@ where
         &self,
         id: StreamId,
         publish: &H,
-        change: impl FnOnce(&mut SendingEnd<Lc, K, P>),
+        change: impl FnOnce(&mut SendingEnd<Lc, K, Rs, P>),
     ) {
         if let Some(part) = self.sender_of(id) {
             let mut end = part.lock();
@@ -1275,7 +1296,7 @@ where
         &self,
         id: StreamId,
         publish: &H,
-        change: impl FnOnce(&mut ReceivingEnd<Lc, K, P>),
+        change: impl FnOnce(&mut ReceivingEnd<Lc, K, Rs, P>),
     ) {
         if let Some(part) = self.receiver_of(id) {
             let mut end = part.lock();
@@ -1289,7 +1310,7 @@ where
     fn with_set<H: StreamIntentHandle<P, K>, R>(
         &self,
         publish: &H,
-        change: impl FnOnce(&mut SetState<Lc, K, P>) -> R,
+        change: impl FnOnce(&mut SetState<Lc, K, Rs, P>) -> R,
     ) -> R {
         let mut set = lock(&self.set);
         let result = change(&mut set);
@@ -1312,13 +1333,13 @@ where
 }
 
 /// `P` is a send parameter the default send buffer orders data by.
-impl<Lc, K, P> StreamSet<Lc, K> for LockedStreamSet<Lc, K, P>
+impl<Lc, K, Rs: StreamResets, P> StreamSet<Lc, K, Rs> for LockedStreamSet<Lc, K, Rs, P>
 where
     P: Clone + PartialEq + Default + SendUrgency,
     OffsetMapStreamSendBuffer<Bytes, AtomicConnectionCreditReservation, MarkerOf<P>>:
         StreamSendBuffer<Bytes, AtomicConnectionCreditReservation, MarkerOf<P>>,
 {
-    type Handle = LockedStreamSetHandle<Lc, K, P>;
+    type Handle = LockedStreamSetHandle<Lc, K, Rs, P>;
     type Config = LockedStreamSetConfig;
     type SendParameters = P;
 
@@ -1359,7 +1380,7 @@ where
         }
     }
 
-    fn handle(&self) -> LockedStreamSetHandle<Lc, K, P> {
+    fn handle(&self) -> LockedStreamSetHandle<Lc, K, Rs, P> {
         LockedStreamSetHandle {
             shared: Arc::clone(&self.shared),
         }
@@ -1372,7 +1393,7 @@ where
         publish: &H,
         level: EncryptionLevel,
         frame: StreamFrame<Bytes>,
-    ) -> Result<(), StreamSetFrameError>
+    ) -> Result<(), StreamSetFrameErrorOf<Rs>>
     where
         H: StreamIntentHandle<P, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
@@ -1403,7 +1424,7 @@ where
         &mut self,
         publish: &H,
         frame: ResetStreamFrame,
-    ) -> Result<(), StreamSetFrameError>
+    ) -> Result<(), StreamSetFrameErrorOf<Rs>>
     where
         H: StreamIntentHandle<P, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
@@ -1418,8 +1439,7 @@ where
         let mut end = part.lock();
         {
             let mut connection = lock(&self.shared.connection_receive);
-            end.receiver
-                .on_reset_stream(frame, &mut connection.flow)
+            Rs::on_reset_stream(&mut end.receiver, frame, &mut connection.flow)
                 .context(ResetStreamSnafu)?;
         }
         end.sync_intents(id, publish);
@@ -1431,7 +1451,7 @@ where
         &mut self,
         publish: &H,
         frame: StopSendingFrame,
-    ) -> Result<(), StreamSetFrameError>
+    ) -> Result<(), StreamSetFrameErrorOf<Rs>>
     where
         H: StreamIntentHandle<P, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
@@ -1455,7 +1475,7 @@ where
         &mut self,
         publish: &H,
         frame: MaxDataFrame,
-    ) -> Result<(), StreamSetFrameError>
+    ) -> Result<(), StreamSetFrameErrorOf<Rs>>
     where
         H: StreamIntentHandle<P, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
@@ -1474,7 +1494,7 @@ where
         &mut self,
         publish: &H,
         frame: MaxStreamDataFrame,
-    ) -> Result<(), StreamSetFrameError>
+    ) -> Result<(), StreamSetFrameErrorOf<Rs>>
     where
         H: StreamIntentHandle<P, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
@@ -1498,7 +1518,7 @@ where
         &mut self,
         publish: &H,
         frame: MaxStreamsFrame,
-    ) -> Result<(), StreamSetFrameError>
+    ) -> Result<(), StreamSetFrameErrorOf<Rs>>
     where
         H: StreamIntentHandle<P, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
@@ -1516,7 +1536,11 @@ where
     }
 
     /// The default policies send nothing for it; it changes nothing.
-    fn on_data_blocked<H>(&mut self, _: &H, _: DataBlockedFrame) -> Result<(), StreamSetFrameError>
+    fn on_data_blocked<H>(
+        &mut self,
+        _: &H,
+        _: DataBlockedFrame,
+    ) -> Result<(), StreamSetFrameErrorOf<Rs>>
     where
         H: StreamIntentHandle<P, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
@@ -1528,7 +1552,7 @@ where
         &mut self,
         publish: &H,
         frame: StreamDataBlockedFrame,
-    ) -> Result<(), StreamSetFrameError>
+    ) -> Result<(), StreamSetFrameErrorOf<Rs>>
     where
         H: StreamIntentHandle<P, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
@@ -1553,7 +1577,7 @@ where
         &mut self,
         _: &H,
         _: StreamsBlockedFrame,
-    ) -> Result<(), StreamSetFrameError>
+    ) -> Result<(), StreamSetFrameErrorOf<Rs>>
     where
         H: StreamIntentHandle<P, K>,
         K: IntentTicketResize + IntentTicketWithdraw,

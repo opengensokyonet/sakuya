@@ -4,7 +4,10 @@ use sakuya_stream::{
     send::write::FlushError,
 };
 
-use crate::send_strategy::{MinimumLengths, SendIntentHandle};
+use crate::{
+    send_strategy::{MinimumLengths, SendIntentHandle},
+    v1::streams::{StreamSetFrameError, resets::Rfc9000StreamResets},
+};
 use sakuya_wire::{
     v1::{
         application_error::ApplicationErrorCode,
@@ -28,7 +31,7 @@ use sakuya_wire::{
 use super::*;
 
 /// The set the tests use: no close cause, the test ticket.
-type TestSet = LockedStreamSet<(), TestTicket>;
+type TestSet = LockedStreamSet<(), TestTicket, Rfc9000StreamResets>;
 
 /// What happened to the intents the set published.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,11 +182,17 @@ fn to_accept(set: &TestSet, directionality: Directionality) -> Vec<StreamId> {
     queue.iter().copied().collect()
 }
 
-fn receiver(set: &TestSet, stream: u32) -> Option<ReceivingPart<(), TestTicket, Urgency>> {
+fn receiver(
+    set: &TestSet,
+    stream: u32,
+) -> Option<ReceivingPart<(), TestTicket, Rfc9000StreamResets, Urgency>> {
     lock(&set.shared.set).receivers.get(&id(stream)).cloned()
 }
 
-fn sender(set: &TestSet, stream: u32) -> Option<SendingPart<(), TestTicket, Urgency>> {
+fn sender(
+    set: &TestSet,
+    stream: u32,
+) -> Option<SendingPart<(), TestTicket, Rfc9000StreamResets, Urgency>> {
     lock(&set.shared.set).senders.get(&id(stream)).cloned()
 }
 

@@ -40,7 +40,10 @@ use sakuya_wire::{
     var_int::{VarInt, VarIntField},
 };
 
-use super::{StreamSet, StreamsOf};
+use super::{
+    StreamSet, StreamsOf,
+    resets::{StreamResets, StreamResetsOf, StreamResetsOfParts},
+};
 use crate::{
     clock::InstantOf,
     feedback::InjectSummary,
@@ -424,14 +427,15 @@ pub trait StreamFrameKind: FrameSourceKind<Intent = NoIntent> {
     type FrameSummary: Copy;
 
     /// Give `item` to `set`, which writes the kind's frame into `packet`.
-    fn supply<X, Lc, K, P, W, Q, Idx>(
+    fn supply<X, Lc, K, Rs, P, W, Q, Idx>(
         set: &mut X,
         publish: &P,
         item: Self::Item<'_>,
         packet: OpenPacket<W, InFlightClass, Q>,
     ) -> Supplied<W, InFlightClass, Q>
     where
-        X: StreamSet<Lc, K>,
+        X: StreamSet<Lc, K, Rs>,
+        Rs: StreamResets,
         P: StreamIntentHandle<X::SendParameters, K>,
         K: IntentTicketResize + IntentTicketWithdraw,
         W: PacketWriting,
@@ -447,27 +451,29 @@ pub trait StreamFrameKind: FrameSourceKind<Intent = NoIntent> {
 
 /// A frame source of the streams in a lineage `V` (`LineageStreamFrameSource`):
 /// it writes the frames of the kind `F` through the stream set `X`, which the
-/// lend appended to the lineage, and publishes through the handle `P`. `Lc`
-/// and `K` are the set's close cause and ticket, `Is` the position of the
-/// set in the lineage.
-pub struct LineageStreamFrameSource<'l, 'r, V, X, Lc, K, P, F, Is> {
+/// lend appended to the lineage, and publishes through the handle `P`. `Lc`,
+/// `K` and `Rs` are the set's close cause, ticket and reset kind, `Is` the
+/// position of the set in the lineage.
+pub struct LineageStreamFrameSource<'l, 'r, V, X, Lc, K, Rs, P, F, Is> {
     lineage: &'l mut Lineage<'r, V>,
     publish: P,
-    types: PhantomData<StreamSourceTypes<X, Lc, K, F, Is>>,
+    types: PhantomData<StreamSourceTypes<X, Lc, K, Rs, F, Is>>,
 }
 
 /// What [`LineageStreamFrameSource`] takes its components by.
-type StreamSourceTypes<X, Lc, K, F, Is> = fn() -> (X, Lc, K, F, Is);
+type StreamSourceTypes<X, Lc, K, Rs, F, Is> = fn() -> (X, Lc, K, Rs, F, Is);
 
-impl<V, X, Lc, K, P, F, Is> core::fmt::Debug
-    for LineageStreamFrameSource<'_, '_, V, X, Lc, K, P, F, Is>
+impl<V, X, Lc, K, Rs, P, F, Is> core::fmt::Debug
+    for LineageStreamFrameSource<'_, '_, V, X, Lc, K, Rs, P, F, Is>
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("LineageStreamFrameSource")
     }
 }
 
-impl<'l, 'r, V, X, Lc, K, P, F, Is> LineageStreamFrameSource<'l, 'r, V, X, Lc, K, P, F, Is> {
+impl<'l, 'r, V, X, Lc, K, Rs, P, F, Is>
+    LineageStreamFrameSource<'l, 'r, V, X, Lc, K, Rs, P, F, Is>
+{
     fn new(lineage: &'l mut Lineage<'r, V>, publish: P) -> Self {
         Self {
             lineage,
@@ -479,10 +485,12 @@ impl<'l, 'r, V, X, Lc, K, P, F, Is> LineageStreamFrameSource<'l, 'r, V, X, Lc, K
 
 /// Without the established layer, nothing is written and nothing taken
 /// back: the streams ended with it.
-impl<V, X, Lc, K, P, F, Is> FrameSource for LineageStreamFrameSource<'_, '_, V, X, Lc, K, P, F, Is>
+impl<V, X, Lc, K, Rs, P, F, Is> FrameSource
+    for LineageStreamFrameSource<'_, '_, V, X, Lc, K, Rs, P, F, Is>
 where
     V: GetOptionalAt<X, Is>,
-    X: StreamSet<Lc, K>,
+    X: StreamSet<Lc, K, Rs>,
+    Rs: StreamResets,
     P: StreamIntentHandle<X::SendParameters, K>,
     K: IntentTicketResize + IntentTicketWithdraw,
     F: StreamFrameKind,
@@ -559,14 +567,15 @@ macro_rules! stream_frame_kinds {
         impl StreamFrameKind for $kind {
             type FrameSummary = $summary;
 
-            fn supply<X, Lc, K, P, W, Q, Idx>(
+            fn supply<X, Lc, K, Rs, P, W, Q, Idx>(
                 $set: &mut X,
                 $publish: &P,
                 $it: $item,
                 $packet: OpenPacket<W, InFlightClass, Q>,
             ) -> Supplied<W, InFlightClass, Q>
             where
-                X: StreamSet<Lc, K>,
+                X: StreamSet<Lc, K, Rs>,
+        Rs: StreamResets,
                 P: StreamIntentHandle<X::SendParameters, K>,
                 K: IntentTicketResize + IntentTicketWithdraw,
                 W: PacketWriting,
@@ -591,11 +600,11 @@ macro_rules! stream_frame_kinds {
         impl<T, L, V, Ii, Is, Idx> FindFrameSource<T, L, V, (Ii, Is, Idx)> for $kind
         where
             T: Choices,
-            L: crate::error::ConnectionErrorsOf,
+            L: crate::error::ConnectionErrorsOf + StreamResetsOf,
             SendTypes<T, L>: SendStrategyTypes
                 + IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
             SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
-            StreamsOf<T, L>: StreamSet<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>, SendParameters = T::SendParameters>,
+            StreamsOf<T, L>: StreamSet<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>, StreamResetsOfParts<L>, SendParameters = T::SendParameters>,
             StreamIntentTicketOf<T, L>: IntentTicketResize + IntentTicketWithdraw,
             IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
                 + SharedPublishTo<StreamIntent<T::SendParameters>, AnyActiveLinkPath, Idx>,
@@ -610,6 +619,7 @@ macro_rules! stream_frame_kinds {
                 StreamsOf<T, L>,
                 CloseCauseOf<T, L>,
                 StreamIntentTicketOf<T, L>,
+                StreamResetsOfParts<L>,
                 StreamIntentHandleOf<T, L, Idx>,
                 $kind,
                 Is,

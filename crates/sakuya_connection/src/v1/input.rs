@@ -121,7 +121,7 @@ use super::{
     close_packet::ClosePacket,
     connection_ids::{ConnectionIdsOf, PeerHandshakeConnectionId},
     dispatch::drain_link_paths,
-    error::ConnectionError,
+    error::V1ConnectionErrorOf,
     idle::IdleTimeout,
     key_phase::KeyPhaseNumbers,
     keys::{HandshakeKeys, InitialKeys, OneRttKeys, OneRttReceiveKeys},
@@ -134,6 +134,7 @@ use super::{
     send_planning::{LinkPathPlanner, LinkPathSendPlannerOf, SendStrategyOf},
     spaces::AckObligationsOf,
     stateless_reset::StatelessResetSignal,
+    streams::resets::StreamResetsOf,
 };
 use crate::role::LinkPathRole;
 use crate::{
@@ -579,10 +580,10 @@ impl<
     >
 where
     T: Choices,
-    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd>,
+    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
     B: CallBundle,
     <T::Link as Link>::Payload: SplitTo + AsRef<[u8]> + AsMut<[u8]> + Into<Bytes>,
-    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ie>,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
     <L as FrameSet>::Kind: CoproductSelector<FrameType, Ik>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<LogicalPathInput<T::Link, T::Receiver>, Ip>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
@@ -850,10 +851,10 @@ fn receive_owned<
     dcid_len: ConnectionIdLength,
 ) where
     T: Choices,
-    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd>,
+    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
     B: CallBundle,
     <T::Link as Link>::Payload: SplitTo + AsRef<[u8]> + AsMut<[u8]> + Into<Bytes>,
-    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ie>,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
     <L as FrameSet>::Kind: CoproductSelector<FrameType, Ik>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<LogicalPathInput<T::Link, T::Receiver>, Ip>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
@@ -1011,10 +1012,10 @@ fn receive_one<
 ) -> ControlFlow<()>
 where
     T: Choices,
-    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd>,
+    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
     B: CallBundle,
     <T::Link as Link>::Payload: AsMut<[u8]> + Into<Bytes>,
-    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ie>,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
     <L as FrameSet>::Kind: CoproductSelector<FrameType, Ik>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<LogicalPathInput<T::Link, T::Receiver>, Ip>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
@@ -1276,9 +1277,9 @@ impl<
     > for LogicalPathReceivingKind
 where
     T: Choices,
-    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd>,
+    L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
     <T::Link as Link>::Payload: SplitTo + AsRef<[u8]> + AsMut<[u8]> + Into<Bytes>,
-    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<ConnectionError, Ie>,
+    <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
     <L as FrameSet>::Kind: CoproductSelector<FrameType, Ik>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<LogicalPathInput<T::Link, T::Receiver>, Ip>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>

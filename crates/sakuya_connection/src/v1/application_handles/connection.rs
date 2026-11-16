@@ -69,6 +69,7 @@ use crate::{
         send_planning::{IntakeOf, IntakePublishOutcome, SendStrategyOf},
         streams::{
             StreamSet, StreamsOf,
+            resets::StreamResetsOfParts,
             send::{StreamIntent, StreamIntentTicketOf},
         },
     },
@@ -449,8 +450,11 @@ pub type LayerSelectionOf<T> = <<T as Choices>::Side as Side>::LayerSelection;
 
 /// The handle the stream set of the choices `T` and the list of parts `L`
 /// gives the application.
-pub type StreamSetHandleOf<T, L> =
-    <StreamsOf<T, L> as StreamSet<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>>>::Handle;
+pub type StreamSetHandleOf<T, L> = <StreamsOf<T, L> as StreamSet<
+    CloseCauseOf<T, L>,
+    StreamIntentTicketOf<T, L>,
+    StreamResetsOfParts<L>,
+>>::Handle;
 
 /// The cell of the connection handle of the choices `T` and the list of
 /// parts `L`.
