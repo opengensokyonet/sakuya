@@ -23,6 +23,17 @@
 //! send strategy's locks for it, which take none of these. So a frame of
 //! one stream waits neither for a write on another stream nor for a read.
 //!
+//! The application's side keeps the same order ([`application`]): a write
+//! or a read takes the part's lock, and a read the receive flow
+//! controller's under it; a write held back by the connection's credit lets
+//! the part's lock go before it takes the set's lock, to have DATA_BLOCKED
+//! sent, and registers its waker with the send flow controller, whose lock
+//! takes none. Opening a stream makes its parts under the set's lock
+//! without taking theirs, as a frame that creates a stream does; accepting
+//! takes the set's lock only. Whoever waits keeps its waker under the lock
+//! of what it waits on: to open or accept, the set's; to write or read, the
+//! part's.
+//!
 //! Whoever changes a part, or the state under the set's lock or the
 //! receive flow controller's, brings the intents of what it holds to what
 //! is due now before it lets the lock go (`sync_intents`): an intent is
@@ -39,6 +50,7 @@
 //! and then enters the queue of streams to accept. A late frame of a stream
 //! whose state was reclaimed is ignored.
 
+use core::task::Waker;
 use std::{
     collections::{HashMap, VecDeque},
     fmt,
@@ -102,12 +114,14 @@ use super::{
 };
 use crate::{
     send_strategy::{IntentTicketResize, IntentTicketWithdraw, SendIntent},
+    v1::application_handles::connection::wake_all,
     write::{
         DelimitedFrame, InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf,
         Supplied,
     },
 };
 
+pub mod application;
 #[cfg(test)]
 mod tests;
 
@@ -320,6 +334,24 @@ where
 
 // ---- the sending part ----
 
+impl<Lc, K, P> SendingEnd<Lc, K, P> {
+    /// Wake the writer, if it waits: what it waits for may have come.
+    fn wake_writer(&mut self) {
+        if let Some(waker) = self.writer.take() {
+            waker.wake();
+        }
+    }
+}
+
+impl<Lc, K, P> ReceivingEnd<Lc, K, P> {
+    /// Wake the reader, if it waits: data or an end may have come.
+    fn wake_reader(&mut self) {
+        if let Some(waker) = self.reader.take() {
+            waker.wake();
+        }
+    }
+}
+
 /// Where a stream's FIN stands: not sent, in flight, lost, or acknowledged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EndFrameDelivery {
@@ -351,6 +383,9 @@ impl EndFrameDelivery {
 /// The sending part of a stream with the tickets of the intents of its
 /// frames: its data and FIN for its one destination, its RESET_STREAM and
 /// its STREAM_DATA_BLOCKED; and where its FIN and its RESET_STREAM stand.
+///
+/// The waker of the writer is woken when what it waits for may have come:
+/// room for its writes, or the end of the stream's sending.
 struct SendingEnd<Lc, K, P> {
     sender: SenderOf<Lc, P>,
     data: Option<Ticketed<K, P>>,
@@ -358,6 +393,7 @@ struct SendingEnd<Lc, K, P> {
     blocked: Option<Ticketed<K, P>>,
     fin: EndFrameDelivery,
     reset_frame: EndFrameDelivery,
+    writer: Option<Waker>,
 }
 
 impl<Lc, K, P> SendingEnd<Lc, K, P>
@@ -373,6 +409,7 @@ where
             blocked: None,
             fin: EndFrameDelivery::NotSent,
             reset_frame: EndFrameDelivery::NotSent,
+            writer: None,
         }
     }
 
@@ -700,13 +737,15 @@ where
 // ---- the receiving part ----
 
 /// The receiving part of a stream with the tickets of the intents of its
-/// frames, STOP_SENDING and MAX_STREAM_DATA, and whether a lost
-/// MAX_STREAM_DATA waits to be sent again.
+/// frames, STOP_SENDING and MAX_STREAM_DATA, whether a lost
+/// MAX_STREAM_DATA waits to be sent again, and the waker of the reader,
+/// woken when data or an end may have come.
 struct ReceivingEnd<Lc, K, P> {
     receiver: ReceiverOf<Lc>,
     stop: Option<Ticketed<K, P>>,
     max_stream_data: Option<Ticketed<K, P>>,
     max_stream_data_lost: bool,
+    reader: Option<Waker>,
 }
 
 impl<Lc, K, P> ReceivingEnd<Lc, K, P>
@@ -720,6 +759,7 @@ where
             stop: None,
             max_stream_data: None,
             max_stream_data_lost: false,
+            reader: None,
         }
     }
 
@@ -963,6 +1003,12 @@ struct SetState<Lc, K, P> {
     /// The connection's frames about the streams' identity and its send
     /// credit.
     connection: ConnectionIntents<K, P>,
+    /// The wakers of those who wait to open a stream of each
+    /// directionality: woken when the peer's limit may have grown.
+    open_wakers: ByDirectionality<Vec<Waker>>,
+    /// The wakers of those who wait to accept a stream of each
+    /// directionality: woken when one may have come.
+    accept_wakers: ByDirectionality<Vec<Waker>>,
 }
 
 impl<Lc, K, P> SetState<Lc, K, P>
@@ -1136,6 +1182,7 @@ where
             }
             Directionality::Unidirectional => set.accept_unidirectional.push_back(id),
         }
+        wake_all(set.accept_wakers.get_mut(id.directionality()));
     }
 
     /// The receiving part of `id` for a frame of `frame_type`, once the
@@ -1288,6 +1335,8 @@ where
             accept_unidirectional: VecDeque::new(),
             end: None,
             connection: ConnectionIntents::default(),
+            open_wakers: ByDirectionality::default(),
+            accept_wakers: ByDirectionality::default(),
         };
         Self {
             shared: Arc::new(StreamSetShare {
@@ -1345,6 +1394,7 @@ where
             end.receiver.mark_received_zero_rtt();
         }
         end.sync_intents(id, publish);
+        end.wake_reader();
         Ok(())
     }
 
@@ -1372,6 +1422,7 @@ where
                 .context(ResetStreamSnafu)?;
         }
         end.sync_intents(id, publish);
+        end.wake_reader();
         Ok(())
     }
 
@@ -1393,6 +1444,7 @@ where
             end.sender
                 .on_stop_sending(frame.application_error_code().get());
             end.sync_intents(publish);
+            end.wake_writer();
         }
         Ok(())
     }
@@ -1435,6 +1487,7 @@ where
             end.sender
                 .on_max_stream_data(frame.maximum_stream_data().get());
             end.sync_intents(publish);
+            end.wake_writer();
         }
         Ok(())
     }
@@ -1450,9 +1503,12 @@ where
         K: IntentTicketResize + IntentTicketWithdraw,
     {
         self.shared.with_set(publish, |set| {
-            if set.end.is_none() {
-                set.ledger
-                    .on_max_streams(frame.directionality(), frame.maximum_streams().get());
+            if set.end.is_none()
+                && set
+                    .ledger
+                    .on_max_streams(frame.directionality(), frame.maximum_streams().get())
+            {
+                wake_all(set.open_wakers.get_mut(frame.directionality()));
             }
         });
         Ok(())
@@ -1516,6 +1572,10 @@ where
             }
             set.end = Some(end.clone());
             withdraw_connection_intents(&mut set.connection);
+            for directionality in DIRECTIONALITIES {
+                wake_all(set.open_wakers.get_mut(directionality));
+                wake_all(set.accept_wakers.get_mut(directionality));
+            }
             (
                 set.senders.values().cloned().collect::<Vec<_>>(),
                 set.receivers.values().cloned().collect::<Vec<_>>(),
@@ -1532,12 +1592,14 @@ where
             part.data = None;
             part.reset = None;
             part.blocked = None;
+            part.wake_writer();
         }
         for receiver in receivers {
             let mut part = receiver.lock();
             part.receiver.layer_ended(end.clone());
             part.stop = None;
             part.max_stream_data = None;
+            part.wake_reader();
         }
     }
 
@@ -1784,7 +1846,8 @@ where
         match summary {
             StreamSetFrameSummary::Stream(summary) => {
                 self.shared.with_sender(summary.stream_id, publish, |end| {
-                    end.stream_delivered(summary)
+                    end.stream_delivered(summary);
+                    end.wake_writer();
                 })
             }
             StreamSetFrameSummary::ResetStream(summary) => {
@@ -1793,6 +1856,7 @@ where
                     let _ = end
                         .sender
                         .enter_terminal_state(SendTerminalState::ResetRecvd);
+                    end.wake_writer();
                 });
             }
             StreamSetFrameSummary::StreamDataBlocked(summary) => {
@@ -1894,6 +1958,8 @@ where
             StreamIntentKey::Stream(id) => self.shared.with_sender(id, publish, |end| {
                 forget_ticket(&mut end.data);
                 let _ = end.sender.on_unfulfilled(&AnyActiveLinkPath, cause);
+                // a destination left without fallback may end the stream
+                end.wake_writer();
             }),
             StreamIntentKey::ResetStream(id) => self
                 .shared

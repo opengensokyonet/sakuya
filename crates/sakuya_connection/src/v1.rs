@@ -12,7 +12,9 @@
 //! recovery factory, the record of why the connection closed
 //! ([`close`]) and the cell of the application's request to close
 //! ([`close_request`]), which at the start of every poll takes the request
-//! into the record; the connection's one call, the advancing call, runs the
+//! into the record, and the cell the application's connection handle
+//! shares, which follows the record, the handshake and the established
+//! layer ([`application_handles`]); the connection's one call, the advancing call, runs the
 //! handshake and keeps its exporter ([`advancing`]); the clone of the
 //! link, the facts about it and the anti-amplification limit in the entry of
 //! each logical link, whose call follows the link's datagram size limit
@@ -42,6 +44,7 @@ pub mod ack;
 pub mod advancing;
 pub mod aead_usage;
 pub mod amplification;
+pub mod application_handles;
 pub mod close;
 pub mod close_packet;
 pub mod close_request;
@@ -131,6 +134,10 @@ use self::{
     advancing::{ClientAdvancingKind, ConnectionExporter, HandshakeStart, ServerAdvancingKind},
     aead_usage::AeadUsage,
     amplification::{AddressValidation, AntiAmplification, AntiAmplificationFactor},
+    application_handles::connection::{
+        ClientHandshakeFacts, ConnectionHandleCellOf, ConnectionHandleCellSlot,
+        ServerHandshakeFacts,
+    },
     close::{ApplicationClose, CloseReasonRecord, LocalCloseCause},
     close_packet::{ClosePacket, ConnectionImmediateClosePolicy},
     close_request::CloseRequestCell,
@@ -179,6 +186,7 @@ use self::{
 };
 use crate::connection_id::{DestinationConnectionIdStrategy, reset_token::ResetTokenRegistry};
 use crate::role::LinkPathRole;
+use bytes::Bytes;
 use sakuya_recovery::{
     ack_obligation::AckObligation,
     factory::{LendCongestion, RecoveryFactory},
@@ -194,8 +202,9 @@ use sakuya_tls::{
     alert::CallsForAlert,
     client::engine::ClientHandshakeSteps,
     engine::{CryptoLevel, HandshakeError},
+    extension::alpn::ProtocolName,
     schedule::Exporter,
-    server::engine::ServerHandshakeSteps,
+    server::{engine::ServerHandshakeSteps, targets::SelectedTarget},
 };
 
 /// QUIC version 1, one part of a composition.
@@ -346,6 +355,16 @@ pub trait Side: 'static {
     /// the connection node keeps until the connection closes.
     type Exporter: 'static;
 
+    /// What this side knows of its handshake once it completed, which the
+    /// connection handle gives
+    /// ([`ClientHandshakeFacts`], [`ServerHandshakeFacts`]).
+    type HandshakeFacts: 'static;
+
+    /// What an established layer of this side runs with of the handshake's
+    /// selection, which the layer's handle gives: the application protocol,
+    /// on a server together with the selected target.
+    type LayerSelection: 'static;
+
     /// How this side's handshake engine fails with an alert: the failure
     /// that [`HandshakeError`] holds for it.
     type AlertError: CallsForAlert + 'static;
@@ -408,11 +427,14 @@ impl<Tls> Side for Server<Tls>
 where
     Tls: ServerHandshakeSteps + 'static,
     Tls::AlertError: 'static,
+    Tls::Target: 'static,
 {
     const ROLE: Role = Role::Server;
     type Tls = Tls;
     type Advancing = ServerAdvancingKind<Tls>;
     type Exporter = Exporter<Tls::Crypto>;
+    type HandshakeFacts = ServerHandshakeFacts<Tls::Target>;
+    type LayerSelection = SelectedTarget<Tls::Target>;
     type AlertError = Tls::AlertError;
     type Own = HandshakeDoneSource;
     fn split_initial_secrets(secrets: InitialSecrets) -> (TrafficSecret, TrafficSecret) {
@@ -448,6 +470,8 @@ where
     type Tls = Tls;
     type Advancing = ClientAdvancingKind<Tls>;
     type Exporter = Exporter<Tls::Crypto>;
+    type HandshakeFacts = ClientHandshakeFacts;
+    type LayerSelection = Option<ProtocolName<Bytes>>;
     type AlertError = Tls::AlertError;
     type Own = ClientOnlyState;
     fn split_initial_secrets(secrets: InitialSecrets) -> (TrafficSecret, TrafficSecret) {
@@ -533,12 +557,22 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
     /// What the stream set of the established layer is configured with;
     /// the connection node keeps it until the layer is built.
     pub stream_set: T::StreamSetConfig,
+    /// Where the cell the connection handle shares with the connection node
+    /// is: the node takes a clone of the cell from it, and whoever gives the
+    /// application its connection handle another
+    /// ([`ConnectionHandle::new`](application_handles::connection::ConnectionHandle::new)).
+    pub connection_handle: ConnectionHandleCellSlot<T, L>,
 }
 
 impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + ConnectionErrorsOf>
     LayerShare<T, L, layer::Connection> for Part
 where
-    SendTypes<T, L>: SendStrategyTypes + CorePublishOutcome<CryptoIntent, AnyActiveLinkPath>,
+    SendTypes<T, L>: SendStrategyTypes
+        + CorePublishOutcome<CryptoIntent, AnyActiveLinkPath>
+        + send_planning::IntakePublishOutcome<
+            streams::send::StreamIntent<T::SendParameters>,
+            AnyActiveLinkPath,
+        >,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
 {
     type Data = HList![
@@ -577,6 +611,7 @@ where
         <T::Side as Side>::Own,
         ConnectionExporter<<T::Side as Side>::Exporter>,
         StreamSetConfig<T::StreamSetConfig>,
+        ConnectionHandleCellOf<T, L>,
     ];
     /// The core of the send strategy and its intake are made together.
     type Units = HList![
@@ -617,6 +652,7 @@ where
         HList![<T::Side as Side>::Own],
         HList![ConnectionExporter<<T::Side as Side>::Exporter>],
         HList![StreamSetConfig<T::StreamSetConfig>],
+        HList![ConnectionHandleCellOf<T, L>],
     ];
     type Calls = HList![<T::Side as Side>::Advancing];
     type Args = ConnectionArgs<T, L>;

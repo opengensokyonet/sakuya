@@ -97,6 +97,9 @@ use sakuya_wire::{
 
 use super::{
     Choices, Client, CloseCauseOf, ConnectionArgs, Server,
+    application_handles::connection::{
+        ClientHandshakeFacts, ConnectionHandleCellOf, ServerHandshakeFacts,
+    },
     close::{CloseReasonRecord, LocalCloseCause},
     confirmation::HandshakeConfirmation,
     connection_ids::{
@@ -112,7 +115,8 @@ use super::{
     },
     receive::v1_error,
     send::{HandshakeDoneIntent, SendTypes},
-    send_planning::{SendStrategyCore, SendStrategyOf},
+    send_planning::{IntakePublishOutcome, SendStrategyCore, SendStrategyOf},
+    streams::send::StreamIntent,
 };
 use crate::{
     call::{CallBundle, CallKind, NodeCallFamily, NodeLoan},
@@ -123,7 +127,7 @@ use crate::{
     layer::{self, Connection, EstablishedArgs},
     others::OtherNodes,
     request::StructureRequest,
-    send_strategy::SendStrategyTypes,
+    send_strategy::{AnyActiveLinkPath, SendStrategy, SendStrategyTypes},
     share::{ConnectionArgsOf, LineageLists, LineagePartList},
     take::GetAt,
 };
@@ -268,6 +272,15 @@ where
 pub trait ServerAdvancingCapability<E: ServerHandshakeSteps>:
     ServerHandshakeCapability<E::Target>
 {
+    /// The ServerHello is written, with `selected` the target and
+    /// application protocol the rest of the handshake and the established
+    /// layer hold to: keep it for the layer.
+    fn hello_written<'v>(
+        view: Pin<&mut Self::ReceiverView<'v>>,
+        selected: SelectedTarget<E::Target>,
+    ) where
+        Self: 'v;
+
     /// Install the Handshake keys, derived from `secrets` for `aead`.
     fn install_handshake<'v>(
         view: Pin<&mut Self::ReceiverView<'v>>,
@@ -287,7 +300,7 @@ pub trait ServerAdvancingCapability<E: ServerHandshakeSteps>:
 
     /// The handshake completed: install the 1-RTT keys to receive with,
     /// confirm the handshake, make HANDSHAKE_DONE due and keep the
-    /// exporter.
+    /// exporter and what the application learns of the handshake.
     fn complete<'v>(
         view: Pin<&mut Self::ReceiverView<'v>>,
         completed: ServerHandshakeCompleted<E::Crypto, E::Target>,
@@ -306,6 +319,12 @@ pub trait ServerAdvancingCapability<E: ServerHandshakeSteps>:
 /// What a client's advancing call does with its view besides what the
 /// engine `E` does: install what each step returns, and close.
 pub trait ClientAdvancingCapability<E: ClientHandshakeSteps>: ClientHandshakeCapability {
+    /// The ClientHello is written without 0-RTT: no established layer comes
+    /// before the handshake completes.
+    fn hello_written<'v>(view: Pin<&mut Self::ReceiverView<'v>>)
+    where
+        Self: 'v;
+
     /// Install the Handshake keys, derived from `secrets` for `aead`.
     fn install_handshake<'v>(
         view: Pin<&mut Self::ReceiverView<'v>>,
@@ -315,7 +334,8 @@ pub trait ClientAdvancingCapability<E: ClientHandshakeSteps>: ClientHandshakeCap
         Self: 'v;
 
     /// The handshake completed: install the 1-RTT keys, derived from the
-    /// secrets of `completed` for `aead`, and keep the exporter.
+    /// secrets of `completed` for `aead`, and keep the exporter and what
+    /// the application learns of the handshake.
     fn complete<'v>(
         view: Pin<&mut Self::ReceiverView<'v>>,
         aead: AeadAlgorithm,
@@ -374,8 +394,16 @@ pub async fn server_advancing<W, E>(
     };
     let (written, state) = step!(host, W::close, tls.write_server_hello(first, host).await);
     // this version does not receive 0-RTT: a secret for it is dropped
-    let ServerHelloWritten { aead, secrets, .. } = written;
-    host.with(|mut view| W::install_handshake(view.as_pin(), aead, secrets));
+    let ServerHelloWritten {
+        aead,
+        secrets,
+        selected,
+        ..
+    } = written;
+    host.with(|mut view| {
+        W::hello_written(view.as_pin(), selected);
+        W::install_handshake(view.as_pin(), aead, secrets);
+    });
     yield EstablishedLayerReady;
     let (send, state) = step!(host, W::close, E::write_server_finished(state, host).await);
     host.with(|mut view| W::install_one_rtt_send(view.as_pin(), aead, send));
@@ -394,6 +422,7 @@ where
 {
     // this version does not send 0-RTT: what an offer gives is dropped
     let (_, state) = step!(host, W::close, tls.write_client_hello(host).await);
+    host.with(|mut view| W::hello_written(view.as_pin()));
     let (read, state) = step!(host, W::close, E::read_server_hello(state, host).await);
     let aead = read.aead;
     host.with(|mut view| W::install_handshake(view.as_pin(), aead, read.secrets));
@@ -651,10 +680,10 @@ fn send_local(
 /// `initial_source_connection_id` among the slots of the peer's transport
 /// parameters, and `Ia` of what the call is started from in the facts of
 /// the connection node.
-type ServerPositions<Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ic, Ihd, Isc, Ie, Irc, Idx, Ja, Ia> = (
+type ServerPositions<Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ic, Ihd, Isc, Ie, Irc, Ih, Idx, Ja, Ia> = (
     (Ilt, Ipt, Ifl, Iid, Iph),
     (Ik, Io, Ib, Ic),
-    (Ihd, Isc, Ie, Irc),
+    (Ihd, Isc, Ie, Irc, Ih),
     (Idx, Ja, Ia),
 );
 
@@ -687,6 +716,7 @@ impl<
     Isc,
     Ie,
     Irc,
+    Ih,
     Idx,
     Ja,
     Ia,
@@ -712,6 +742,7 @@ impl<
                 Isc,
                 Ie,
                 Irc,
+                Ih,
                 Idx,
                 Ja,
                 Ia,
@@ -785,6 +816,7 @@ impl<
     Isc,
     Ie,
     Irc,
+    Ih,
     Idx,
     Ja,
     Ia,
@@ -810,6 +842,7 @@ impl<
                 Isc,
                 Ie,
                 Irc,
+                Ih,
                 Idx,
                 Ja,
                 Ia,
@@ -827,6 +860,8 @@ where
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>,
     SendTypes<T, L>: SendStrategyTypes,
     SendStrategyCore<SendStrategyOf<T, L>>: PublishIntent<HandshakeDoneIntent, Idx>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<T::CryptoReceiveBuffer>, Icr>
         + GetAt<CryptoSender<T::CryptoSendBuffer>, Ics>
         + GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
@@ -841,8 +876,21 @@ where
         + GetAt<HandshakeDoneSource, Ihd>
         + GetAt<SendStrategyCore<SendStrategyOf<T, L>>, Isc>
         + GetAt<ConnectionExporter<Exporter<Tls::Crypto>>, Ie>
-        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Irc>,
+        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Irc>
+        + GetAt<ConnectionHandleCellOf<T, L>, Ih>,
 {
+    fn hello_written<'v>(
+        view: Pin<&mut Self::ReceiverView<'v>>,
+        selected: SelectedTarget<Tls::Target>,
+    ) where
+        Self: 'v,
+    {
+        view.get_mut()
+            .lineage
+            .get::<ConnectionHandleCellOf<T, L>, Ih>()
+            .keep_selection(selected);
+    }
+
     fn install_handshake<'v>(
         view: Pin<&mut Self::ReceiverView<'v>>,
         aead: AeadAlgorithm,
@@ -887,7 +935,8 @@ where
         let ServerHandshakeCompleted {
             one_rtt_receive,
             exporter,
-            ..
+            selected,
+            resumed,
         } = completed;
         lineage
             .get_mut::<OneRttKeys<T::Crypto, InstantOf<T>>, Io>()
@@ -901,6 +950,13 @@ where
         lineage
             .get_mut::<ConnectionExporter<Exporter<Tls::Crypto>>, Ie>()
             .hold(exporter);
+        let exporter = lineage
+            .get::<ConnectionExporter<Exporter<Tls::Crypto>>, Ie>()
+            .exporter()
+            .cloned();
+        lineage
+            .get::<ConnectionHandleCellOf<T, L>, Ih>()
+            .handshake_completed(ServerHandshakeFacts { selected, resumed }, exporter);
     }
 
     fn close<'v>(
@@ -962,6 +1018,7 @@ impl<
     Isc,
     Ie,
     Irc,
+    Ih,
     Idx,
     Ja,
     Ia,
@@ -986,6 +1043,7 @@ impl<
                 Isc,
                 Ie,
                 Irc,
+                Ih,
                 Idx,
                 Ja,
                 Ia,
@@ -1002,6 +1060,8 @@ where
     SendTypes<T, L>: SendStrategyTypes,
     SendStrategyCore<SendStrategyOf<T, L>>: PublishIntent<HandshakeDoneIntent, Idx>,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, Ia>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<T::CryptoReceiveBuffer>, Icr>
         + GetAt<CryptoSender<T::CryptoSendBuffer>, Ics>
         + GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
@@ -1016,10 +1076,29 @@ where
         + GetAt<HandshakeDoneSource, Ihd>
         + GetAt<SendStrategyCore<SendStrategyOf<T, L>>, Isc>
         + GetAt<ConnectionExporter<Exporter<Tls::Crypto>>, Ie>
-        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Irc>,
+        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Irc>
+        + GetAt<ConnectionHandleCellOf<T, L>, Ih>,
     (
         CryptoPositions<Icr, Ics, Iv>,
-        ServerPositions<Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ic, Ihd, Isc, Ie, Irc, Idx, Ja, Ia>,
+        ServerPositions<
+            Ilt,
+            Ipt,
+            Ifl,
+            Iid,
+            Iph,
+            Ik,
+            Io,
+            Ib,
+            Ic,
+            Ihd,
+            Isc,
+            Ie,
+            Irc,
+            Ih,
+            Idx,
+            Ja,
+            Ia,
+        >,
     ): 'static,
 {
     type Call<B: CallBundle> = LentCall<
@@ -1044,6 +1123,7 @@ where
                     Isc,
                     Ie,
                     Irc,
+                    Ih,
                     Idx,
                     Ja,
                     Ia,
@@ -1081,10 +1161,10 @@ where
 /// of `original_destination_connection_id` and `Jr` of
 /// `retry_source_connection_id` among the slots of the peer's transport
 /// parameters.
-type ClientPositions<Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ja, Jo, Jr, Ia> = (
+type ClientPositions<Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia> = (
     (Ilt, Ipt, Ifl, Iid, Iph),
     (Ik, Io, Ib),
-    (Ie, Irc),
+    (Ie, Irc, Ih),
     (Ja, Jo, Jr, Ia),
 );
 
@@ -1097,7 +1177,7 @@ type ClientPositions<Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ja, Jo, Jr, I
 /// Initial packet that opened, and without a Retry it must send no
 /// `retry_source_connection_id` (RFC 9000 §7.3). Once they pass, the
 /// server's parameters are known.
-impl<T, L, Tls, B, Icr, Ics, Iv, Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ja, Jo, Jr, Ia>
+impl<T, L, Tls, B, Icr, Ics, Iv, Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia>
     ClientTransport
     for NodeCallFamily<
         T,
@@ -1106,7 +1186,7 @@ impl<T, L, Tls, B, Icr, Ics, Iv, Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, J
         ClientAdvancingKind<Tls>,
         (
             CryptoPositions<Icr, Ics, Iv>,
-            ClientPositions<Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ja, Jo, Jr, Ia>,
+            ClientPositions<Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia>,
         ),
         B,
     >
@@ -1161,7 +1241,7 @@ where
     }
 }
 
-impl<T, L, Tls, B, Icr, Ics, Iv, Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ja, Jo, Jr, Ia>
+impl<T, L, Tls, B, Icr, Ics, Iv, Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia>
     ClientAdvancingCapability<Tls>
     for NodeCallFamily<
         T,
@@ -1170,7 +1250,7 @@ impl<T, L, Tls, B, Icr, Ics, Iv, Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, J
         ClientAdvancingKind<Tls>,
         (
             CryptoPositions<Icr, Ics, Iv>,
-            ClientPositions<Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ja, Jo, Jr, Ia>,
+            ClientPositions<Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia>,
         ),
         B,
     >
@@ -1184,6 +1264,8 @@ where
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>
         + Selector<Option<OriginalDestinationConnectionId>, Jo>
         + Selector<Option<RetrySourceConnectionId>, Jr>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<T::CryptoReceiveBuffer>, Icr>
         + GetAt<CryptoSender<T::CryptoSendBuffer>, Ics>
         + GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
@@ -1195,8 +1277,19 @@ where
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
         + GetAt<PacketProtectionBackend<T::Crypto>, Ib>
         + GetAt<ConnectionExporter<Exporter<Tls::Crypto>>, Ie>
-        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Irc>,
+        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Irc>
+        + GetAt<ConnectionHandleCellOf<T, L>, Ih>,
 {
+    fn hello_written<'v>(view: Pin<&mut Self::ReceiverView<'v>>)
+    where
+        Self: 'v,
+    {
+        view.get_mut()
+            .lineage
+            .get::<ConnectionHandleCellOf<T, L>, Ih>()
+            .no_early_layer();
+    }
+
     fn install_handshake<'v>(
         view: Pin<&mut Self::ReceiverView<'v>>,
         aead: AeadAlgorithm,
@@ -1223,7 +1316,11 @@ where
     {
         let lineage = &mut view.get_mut().lineage;
         let ClientHandshakeCompleted {
-            secrets, exporter, ..
+            secrets,
+            exporter,
+            identity,
+            application_protocol,
+            early_data,
         } = completed;
         let backend = lineage
             .get::<PacketProtectionBackend<T::Crypto>, Ib>()
@@ -1235,6 +1332,22 @@ where
         lineage
             .get_mut::<ConnectionExporter<Exporter<Tls::Crypto>>, Ie>()
             .hold(exporter);
+        let exporter = lineage
+            .get::<ConnectionExporter<Exporter<Tls::Crypto>>, Ie>()
+            .exporter()
+            .cloned();
+        let cell = lineage.get::<ConnectionHandleCellOf<T, L>, Ih>();
+        // the established layer, built next, runs with the protocol the
+        // handshake selected
+        cell.keep_selection(application_protocol.clone());
+        cell.handshake_completed(
+            ClientHandshakeFacts {
+                identity,
+                application_protocol,
+                early_data,
+            },
+            exporter,
+        );
     }
 
     fn close<'v>(
@@ -1263,14 +1376,14 @@ impl<Tls> fmt::Debug for ClientAdvancingKind<Tls> {
     }
 }
 
-impl<T, L, Tls, Icr, Ics, Iv, Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ja, Jo, Jr, Ia>
+impl<T, L, Tls, Icr, Ics, Iv, Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia>
     CallKind<
         T,
         L,
         Connection,
         (
             CryptoPositions<Icr, Ics, Iv>,
-            ClientPositions<Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ja, Jo, Jr, Ia>,
+            ClientPositions<Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia>,
         ),
     > for ClientAdvancingKind<Tls>
 where
@@ -1283,6 +1396,8 @@ where
         + Selector<Option<OriginalDestinationConnectionId>, Jo>
         + Selector<Option<RetrySourceConnectionId>, Jr>,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, Ia>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<T::CryptoReceiveBuffer>, Icr>
         + GetAt<CryptoSender<T::CryptoSendBuffer>, Ics>
         + GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
@@ -1294,10 +1409,11 @@ where
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
         + GetAt<PacketProtectionBackend<T::Crypto>, Ib>
         + GetAt<ConnectionExporter<Exporter<Tls::Crypto>>, Ie>
-        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Irc>,
+        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Irc>
+        + GetAt<ConnectionHandleCellOf<T, L>, Ih>,
     (
         CryptoPositions<Icr, Ics, Iv>,
-        ClientPositions<Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ja, Jo, Jr, Ia>,
+        ClientPositions<Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia>,
     ): 'static,
 {
     type Call<B: CallBundle> = LentCall<
@@ -1308,7 +1424,7 @@ where
             ClientAdvancingKind<Tls>,
             (
                 CryptoPositions<Icr, Ics, Iv>,
-                ClientPositions<Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ja, Jo, Jr, Ia>,
+                ClientPositions<Ilt, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia>,
             ),
             B,
         >,

@@ -124,6 +124,7 @@ where
             immediate_close_policy: config.immediate_close_policy,
             close_request: core.close_request,
             stream_set: Default::default(),
+            connection_handle: Default::default(),
         }
     }
 }

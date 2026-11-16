@@ -37,11 +37,12 @@
 //! [RFC 9000 §4.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-4.1
 use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
+use core::task::Waker;
 use nitori_io::{SplitTo, SplitToError};
 use sakuya_wire::v1::stream_id::StreamId;
 use sakuya_wire::var_int::VarInt;
 use snafu::{Snafu, ensure};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 pub mod data_blocked;
 
@@ -56,8 +57,19 @@ pub trait ConnectionSendFlowController {
     /// against this controller.
     type Reservation: ConnectionCreditReservation;
 
+    /// The cumulative limit `L` the peer has granted.
+    fn limit(&self) -> VarInt;
+
     /// The credit new writes can reserve: `L − R − C`.
     fn available(&self) -> VarInt;
+
+    /// Wakes `waker` once credit may have become available: the limit grew,
+    /// or a reservation gave credit back.
+    ///
+    /// A write that found no credit registers before it looks at
+    /// [`available`](Self::available) again, so that credit given back in
+    /// between is not missed. Each registration wakes once.
+    fn register_credit_waker(&self, waker: &Waker);
 
     /// Reserves as much connection credit for `stream_id` as is available, up
     /// to `amount`.
@@ -71,7 +83,8 @@ pub trait ConnectionSendFlowController {
     ///
     /// A value that is equal to or below the current limit is ignored
     /// ([RFC 9000 §4.1](https://www.rfc-editor.org/rfc/rfc9000.html#section-4.1)).
-    /// Writes waiting for connection credit are the implementation's to wake.
+    /// A larger one wakes the writes waiting for connection credit
+    /// ([`register_credit_waker`](Self::register_credit_waker)).
     fn on_max_data(&self, maximum: VarInt);
 }
 
@@ -129,10 +142,14 @@ pub trait ConnectionCreditReservation: SplitTo {
 /// little credit but never too much. The compare-and-swap on `R` that takes
 /// the credit fails if another reservation or release changed `R` since it
 /// was read.
+///
+/// The wakers of the writes waiting for credit are under a lock of their
+/// own, which takes no other lock; they are woken after it is let go.
 struct Ledger {
     limit: AtomicU64,
     reserved: AtomicU64,
     committed: AtomicU64,
+    credit_wakers: Mutex<Vec<Waker>>,
 }
 
 impl Ledger {
@@ -226,6 +243,40 @@ impl Ledger {
         let previous = self.reserved.fetch_sub(amount.get(), Ordering::SeqCst);
         debug_assert!(previous >= amount.get(), "reserved credit underflow");
     }
+
+    /// Gives `amount` of reserved credit back, and wakes the writes waiting
+    /// for credit.
+    fn give_back(&self, amount: VarInt) {
+        self.remove_reserved(amount);
+        if amount > VarInt::ZERO {
+            self.wake_credit_waiters();
+        }
+    }
+
+    /// Keeps `waker` until credit may have become available; a waker that
+    /// wakes the same task as one kept already is not kept twice.
+    fn register_credit_waker(&self, waker: &Waker) {
+        let mut wakers = self
+            .credit_wakers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !wakers.iter().any(|kept| kept.will_wake(waker)) {
+            wakers.push(waker.clone());
+        }
+    }
+
+    /// Wakes every write waiting for credit; they look again.
+    fn wake_credit_waiters(&self) {
+        let wakers = core::mem::take(
+            &mut *self
+                .credit_wakers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        for waker in wakers {
+            waker.wake();
+        }
+    }
 }
 
 /// The connection send flow controller over shared atomic counters.
@@ -246,6 +297,7 @@ impl AtomicConnectionSendFlowController {
                 limit: AtomicU64::new(initial_limit.get()),
                 reserved: AtomicU64::new(0),
                 committed: AtomicU64::new(0),
+                credit_wakers: Mutex::new(Vec::new()),
             }),
         }
     }
@@ -306,8 +358,16 @@ impl AtomicConnectionSendFlowController {
 impl ConnectionSendFlowController for AtomicConnectionSendFlowController {
     type Reservation = AtomicConnectionCreditReservation;
 
+    fn limit(&self) -> VarInt {
+        self.ledger.limit()
+    }
+
     fn available(&self) -> VarInt {
         self.ledger.available()
+    }
+
+    fn register_credit_waker(&self, waker: &Waker) {
+        self.ledger.register_credit_waker(waker);
     }
 
     fn reserve_up_to(&self, stream_id: StreamId, amount: VarInt) -> Option<Self::Reservation> {
@@ -316,7 +376,10 @@ impl ConnectionSendFlowController for AtomicConnectionSendFlowController {
     }
 
     fn on_max_data(&self, maximum: VarInt) {
-        self.ledger.limit.fetch_max(maximum.get(), Ordering::SeqCst);
+        let previous = self.ledger.limit.fetch_max(maximum.get(), Ordering::SeqCst);
+        if maximum.get() > previous {
+            self.ledger.wake_credit_waiters();
+        }
     }
 }
 
@@ -364,7 +427,7 @@ impl ConnectionCreditReservation for AtomicConnectionCreditReservation {
 
     fn release(mut self) -> VarInt {
         let amount = self.take_amount();
-        self.ledger.remove_reserved(amount);
+        self.ledger.give_back(amount);
         amount
     }
 
@@ -414,7 +477,7 @@ impl Drop for AtomicConnectionCreditReservation {
     /// Releases the amount the handle still owns.
     fn drop(&mut self) {
         if self.amount > VarInt::ZERO {
-            self.ledger.remove_reserved(self.amount);
+            self.ledger.give_back(self.amount);
         }
     }
 }

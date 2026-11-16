@@ -174,3 +174,39 @@ fn splitting_more_than_owned_fails_without_effect() {
     assert_eq!(reservation.amount(), v(10));
     assert_ledger(&controller, 10, 0);
 }
+
+#[derive(Default)]
+struct Wakes(std::sync::atomic::AtomicUsize);
+
+impl std::task::Wake for Wakes {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// A write waiting for credit is woken once by a larger limit and once by
+/// credit given back; an equal limit and a commit wake nobody.
+#[test]
+fn credit_wakers_are_woken_when_credit_may_be_available() {
+    let controller = AtomicConnectionSendFlowController::new(v(10));
+    let wakes = Arc::new(Wakes::default());
+    let waker = Waker::from(Arc::clone(&wakes));
+    let count = || wakes.0.load(Ordering::SeqCst);
+    let reservation = controller.reserve_up_to(stream(0), v(10)).unwrap();
+    controller.register_credit_waker(&waker);
+    controller.register_credit_waker(&waker);
+    controller.on_max_data(v(10));
+    assert_eq!(count(), 0, "a limit that does not grow wakes nobody");
+    controller.on_max_data(v(20));
+    assert_eq!(count(), 1, "woken once, kept once");
+    controller.on_max_data(v(30));
+    assert_eq!(count(), 1, "each registration wakes once");
+    controller.register_credit_waker(&waker);
+    let mut reservation = reservation;
+    let committed = reservation.split_to(4).unwrap();
+    committed.commit();
+    assert_eq!(count(), 1, "a commit gives nothing back");
+    drop(reservation);
+    assert_eq!(count(), 2, "a dropped reservation gives its credit back");
+    assert_eq!(controller.limit(), v(30));
+}

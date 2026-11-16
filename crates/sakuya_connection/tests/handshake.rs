@@ -27,6 +27,7 @@ use bytes::{Bytes, BytesMut};
 use common::{Outer, TestClock, TestLink, TestReceiver, advance_to, ms, now};
 use nitori_crypto::{NamedGroup, SignatureScheme, SigningKey as _};
 use nitori_crypto_aws_lc::{AwsLcBackend, Ed25519SigningKey};
+use sakuya_connection::prelude::*;
 use sakuya_connection::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf},
@@ -46,6 +47,9 @@ use sakuya_connection::{
         self, CloseCauseOf, Side,
         advancing::{ConnectionExporter, HandshakeStart},
         amplification::{AddressValidation, AntiAmplificationFactor},
+        application_handles::{
+            connection::ConnectionHandle, established_layer::TryOpenStreamError,
+        },
         close::{CloseReasonRecord, LocalCloseCause},
         close_request::CloseRequestCell,
         confirmation::HandshakeConfirmation,
@@ -83,7 +87,7 @@ use sakuya_recovery::{
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces},
     receive_journals::MaxAckRanges,
 };
-use sakuya_stream::connection::{CloseReason, ImmediateClose};
+use sakuya_stream::connection::{AbortCause, CloseReason, ImmediateClose, LayerEnd};
 use sakuya_tls::{
     cipher_suite::CipherSuite,
     client::{
@@ -897,6 +901,7 @@ where
         immediate_close_policy: common::TestImmediateClosePolicy,
         close_request: CloseRequestCell::new(),
         stream_set: Default::default(),
+        connection_handle: Default::default(),
     }
 }
 
@@ -933,6 +938,10 @@ struct Run {
     server_ended: bool,
     /// Whether the client's connection ended.
     client_ended: bool,
+    /// The client's connection handle.
+    client_handle: ConnectionHandle<ClientChoices, Parts>,
+    /// The server's connection handle.
+    server_handle: ConnectionHandle<ServerChoices, Parts>,
 }
 
 /// Run a client of the engine `client` against a server until `done` says
@@ -943,52 +952,50 @@ fn handshake(client: ClientEngine, clock: &Arc<ManualClock>, done: impl Fn() -> 
     advance_to(ms(0));
     let (client_link, server_link) = (link(), link());
     let (client_routing, client_receiver) = Routing::new(&[cid(&CLIENT_CID)]);
-    let mut client = connection!(
-        ClientChoices,
-        args::<ClientChoices>(
-            HandshakeStart::new(client, MessageLimits::default()),
-            AddressValidation::Validated,
-            client_capacities(),
-            FirstFlight::Datagrams(Vec::new()),
-            client_receiver,
-            &client_routing,
-            first_local(&CLIENT_CID, 0xc1),
-        ),
-        client_link.clone()
+    let client_args = args::<ClientChoices>(
+        HandshakeStart::new(client, MessageLimits::default()),
+        AddressValidation::Validated,
+        client_capacities(),
+        FirstFlight::Datagrams(Vec::new()),
+        client_receiver,
+        &client_routing,
+        first_local(&CLIENT_CID, 0xc1),
     );
+    let client_handle = ConnectionHandle::new(&client_args);
+    let mut client = connection!(ClientChoices, client_args, client_link.clone());
     let outer = Outer::new();
-    let mut run = Run {
-        client_sent: Vec::new(),
-        server_ended: false,
-        client_ended: false,
-    };
     assert!(outer.poll(&mut client).is_pending());
     let first: Vec<Bytes> = common::take_sent()
         .into_iter()
         .map(|(_, datagram)| datagram)
         .collect();
     assert!(!first.is_empty(), "the client sends its first flight");
-    run.client_sent.extend(first.iter().cloned());
+    let first_sent = first.clone();
     // the server's connection is made once the first datagram arrives
     let (server_routing, server_receiver) = Routing::new(&[cid(&CLIENT_DCID), cid(&SERVER_CID)]);
-    let mut server = connection!(
-        ServerChoices,
-        args::<ServerChoices>(
-            HandshakeStart::new(server_engine(clock), MessageLimits::default()),
-            AddressValidation::NotValidated,
-            server_capacities(),
-            FirstFlight::Datagrams(
-                first
-                    .iter()
-                    .map(|datagram| arrived(datagram.clone(), &server_link))
-                    .collect()
-            ),
-            server_receiver,
-            &server_routing,
-            first_local(&SERVER_CID, 0x5e),
+    let server_args = args::<ServerChoices>(
+        HandshakeStart::new(server_engine(clock), MessageLimits::default()),
+        AddressValidation::NotValidated,
+        server_capacities(),
+        FirstFlight::Datagrams(
+            first
+                .iter()
+                .map(|datagram| arrived(datagram.clone(), &server_link))
+                .collect(),
         ),
-        server_link.clone()
+        server_receiver,
+        &server_routing,
+        first_local(&SERVER_CID, 0x5e),
     );
+    let server_handle = ConnectionHandle::new(&server_args);
+    let mut server = connection!(ServerChoices, server_args, server_link.clone());
+    let mut run = Run {
+        client_sent: first_sent,
+        server_ended: false,
+        client_ended: false,
+        client_handle,
+        server_handle,
+    };
     for millis in 0..3000 {
         advance_to(ms(millis));
         loop {
@@ -1059,6 +1066,63 @@ fn a_client_and_a_server_complete_and_confirm_the_handshake() {
             "the {side}'s established layer holds the stream set"
         );
     }
+    // the connection handles give the handshake's results and the layers
+    let client_facts =
+        ready(run.client_handle.handshake_completed()).expect("the client's handshake completed");
+    let server_facts =
+        ready(run.server_handle.handshake_completed()).expect("the server's handshake completed");
+    assert_eq!(
+        client_facts.application_protocol, server_facts.selected.application_protocol,
+        "both sides name the protocol selected"
+    );
+    assert!(!server_facts.resumed);
+    assert!(
+        ready(run.client_handle.early()).expect("settled").is_none(),
+        "a client without 0-RTT has no early layer"
+    );
+    let server_early = ready(run.server_handle.early())
+        .expect("settled")
+        .expect("a server's layer comes before its handshake completes");
+    let server_layer = ready(run.server_handle.established()).expect("established");
+    assert_eq!(server_layer.selected(), &server_facts.selected);
+    assert_eq!(
+        server_early.application_protocol(),
+        server_layer.application_protocol()
+    );
+    let client_layer = ready(run.client_handle.established()).expect("established");
+    assert_eq!(
+        client_layer.application_protocol(),
+        client_facts.application_protocol.as_ref()
+    );
+    // the drivers were dropped when the run returned: the connections
+    // ended without a close, the exporter is let go, and the layers ended
+    // with the same reason; the handshakes still completed
+    assert!(matches!(
+        ready(run.client_handle.closed()),
+        CloseReason::Aborted(AbortCause::DriverDropped)
+    ));
+    assert!(matches!(
+        ready(run.server_handle.closed()),
+        CloseReason::Aborted(AbortCause::DriverDropped)
+    ));
+    assert!(
+        ready(run.client_handle.exporter())
+            .expect("completed")
+            .is_none(),
+        "the exporter is let go once the connection closed"
+    );
+    assert!(matches!(
+        ready(server_layer.ended()),
+        LayerEnd::ConnectionClosed(CloseReason::Aborted(AbortCause::DriverDropped))
+    ));
+    assert!(matches!(
+        client_layer.try_open_bi(),
+        Err(TryOpenStreamError::LayerEnded { .. })
+    ));
+    assert!(matches!(
+        ready(server_early.accept_uni()),
+        Err(error) if matches!(error.end(), LayerEnd::ConnectionClosed(_))
+    ));
     // the server sent HANDSHAKE_DONE, and the client acknowledged it
     assert_eq!(server.own, "Delivered");
     assert!(!run.server_ended && !run.client_ended);

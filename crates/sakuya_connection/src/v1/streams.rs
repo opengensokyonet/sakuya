@@ -64,11 +64,12 @@ use self::send::{
 };
 use super::{
     Choices, CloseCauseOf, ConnectionArgs, Side,
+    application_handles::connection::ConnectionHandleCellOf,
     close::CloseReasonRecord,
     own_args,
     parameters::{LocalTransportParameters, PeerTransportParameters},
     send::SendTypes,
-    send_planning::IntakePublishOutcome,
+    send_planning::{IntakeOf, IntakePublishOutcome, SendStrategyIntake, SendStrategyOf},
 };
 use crate::{
     call::CallBundle,
@@ -76,7 +77,7 @@ use crate::{
     error::ConnectionErrorsOf,
     layer,
     others::OtherNodes,
-    send_strategy::{AnyActiveLinkPath, IntentTicketResize, IntentTicketWithdraw},
+    send_strategy::{AnyActiveLinkPath, IntentTicketResize, IntentTicketWithdraw, SendStrategy},
     share::{ConnectionArgsOf, LineageLists, LineagePartList},
     take::GetAt,
     write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
@@ -603,19 +604,26 @@ pub struct ChosenStreamSet;
 ///
 /// When the layer ends, every stream hears that the connection closed, for
 /// the reason in the record of why the connection closed.
-impl<T, L, X, Il, Ip, Ic, Ir, Jl, Jp>
-    Build<T, L, layer::Established, (ChosenStreamSet, (Il, Ip, Ic, Ir), (Jl, Jp))> for X
+///
+/// The cell of the connection handle in the connection node is handed what
+/// the layer's handle holds when the layer is built, the set's handle and
+/// the send strategy's intake, and the layer's end when it ends.
+impl<T, L, X, Il, Ip, Ic, Ir, Ih, In, Jl, Jp>
+    Build<T, L, layer::Established, (ChosenStreamSet, (Il, Ip, Ic, Ir, Ih, In), (Jl, Jp))> for X
 where
     T: Choices<Streams<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>> = X>,
     L: LineagePartList<T> + ConnectionErrorsOf + ParametersOf<TransportParameterSpace>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     X: StreamSet<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>, Config = T::StreamSetConfig>,
     TransportParameterSlots: FlowControlParameterSlots<Jl>,
     TransportParameterSlots<L>: FlowControlParameterSlots<Jp>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<LocalTransportParameters<TransportParameterSlots>, Il>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>
         + GetAt<StreamSetConfig<T::StreamSetConfig>, Ic>
-        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>,
+        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
+        + GetAt<ConnectionHandleCellOf<T, L>, Ih>
+        + GetAt<SendStrategyIntake<IntakeOf<T, L>>, In>,
 {
     fn build<'v>(
         parents: &mut ParentsOf<'v, T, L, layer::Established>,
@@ -636,14 +644,22 @@ where
             .get::<StreamSetConfig<T::StreamSetConfig>, Ic>()
             .0
             .clone();
-        X::new(
+        let set = X::new(
             StreamSetFacts {
                 role: <T::Side as Side>::ROLE,
                 granted_to_peer,
                 granted_by_peer,
             },
             config,
-        )
+        );
+        let intake = parents
+            .get::<SendStrategyIntake<IntakeOf<T, L>>, In>()
+            .intake()
+            .clone();
+        parents
+            .get::<ConnectionHandleCellOf<T, L>, Ih>()
+            .layer_built(set.handle(), intake);
+        set
     }
 
     fn end<'v, B: CallBundle>(
@@ -656,7 +672,13 @@ where
             .reason()
             .cloned();
         match reason {
-            Some(reason) => self.layer_ended(LayerEnd::ConnectionClosed(reason)),
+            Some(reason) => {
+                let end = LayerEnd::ConnectionClosed(reason);
+                self.layer_ended(end.clone());
+                parents
+                    .get::<ConnectionHandleCellOf<T, L>, Ih>()
+                    .layer_ended(end);
+            }
             // invariant: only a written record ends the established layer,
             // asking for it or for the connection's end, and a dropped
             // future writes it before any node ends; without 0-RTT no
