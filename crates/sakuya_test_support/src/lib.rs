@@ -1,0 +1,16 @@
+//! What sakuya's own tests and test programs share; nothing here is for a
+//! production composition.
+//!
+//! - [`verify`]: a certificate verifier for test roots, which checks the
+//!   path, names and signatures as usual but skips Certificate
+//!   Transparency, since test certificates carry no SCTs.
+//! - [`pki`]: Ed25519 test roots and leaf certificates, built in memory.
+//! - [`measure`]: counters of heap allocations and of a task's polls and
+//!   wakes, for measuring a run.
+
+#![deny(unsafe_code)]
+#![warn(missing_docs)]
+
+pub mod measure;
+pub mod pki;
+pub mod verify;

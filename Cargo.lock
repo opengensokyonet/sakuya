@@ -773,6 +773,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "sakuya_test_support"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "frunk_core",
+ "futures-util",
+ "nitori_crypto",
+ "nitori_crypto_aws_lc",
+ "rustls-pki-types",
+ "sakuya_clock_tokio",
+ "sakuya_connection",
+ "sakuya_datagram_routing",
+ "sakuya_endpoint",
+ "sakuya_packet_protection",
+ "sakuya_recovery",
+ "sakuya_stream",
+ "sakuya_tls",
+ "sakuya_udp_tokio",
+ "sakuya_wire",
+ "snafu",
+ "time",
+ "tokio",
+]
+
+[[package]]
 name = "sakuya_tls"
 version = "0.0.0"
 dependencies = [

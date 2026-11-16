@@ -12,6 +12,7 @@ members = [
     "crates/sakuya_connection",
     "crates/sakuya_endpoint",
     "crates/sakuya_udp_tokio",
+    "crates/sakuya_test_support",
 ]
 resolver = "3"
 
@@ -63,4 +64,7 @@ tokio = { version = "1", default-features = false }
 debug = "line-tables-only"
 
 [profile.dev.package.sakuya_endpoint]
+debug = "line-tables-only"
+
+[profile.dev.package.sakuya_test_support]
 debug = "line-tables-only"
