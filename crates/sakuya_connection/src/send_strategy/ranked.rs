@@ -34,7 +34,11 @@
 //! A supply that writes something consumes its intent, except an intent
 //! that stays after writing ([`RankedIntent::stays_after_writing`]), such as
 //! a stream's data: its source wrote as much as it could and resized or
-//! withdrew it, and the next plan takes it by the room it needs then.
+//! withdrew it, and the next plan takes it by the room it needs then. An
+//! intent claimed before writing ([`RankedIntent::claimed_before_writing`]),
+//! such as a DATAGRAM, is consumed before its source is given it, so that
+//! withdrawing it on another thread either takes place first, and the
+//! source is not given it, or reports it consumed.
 //!
 //! Intents published through the intake ([`RankedSendIntake`]), from the
 //! application's threads or from the driver while it holds the core, wait
@@ -69,11 +73,11 @@ use sakuya_wire::{
 use super::{
     AnyActiveLinkPath, DatagramFillPlan, DatagramLimits, FrameSourceCursor, FrameSourceSet,
     InjectSendIntent, IntakeSendIntentHandle, IntentRejectedError, IntentState, IntentTicketResize,
-    IntentTicketWithdraw, LeadingContent, LinkPathPublishError, LinkPathRoleKind,
-    LinkPathSendPlanner, MinimumLengths, Observe, PacketOverheads, PlannedDatagram, PlannedItem,
-    PlannedPacket, PlannedPacketKind, PlannerLinkPath, Publish, PublishOutcome, PublishTo,
-    ResendCloseIntent, RoleNotAcceptingError, SendIntent, SendIntentIntake, SendStrategy,
-    SendStrategyTypes, SharedPublishTo, SupplyFeedback,
+    IntentTicketState, IntentTicketWithdraw, IntentWithdrawReport, LeadingContent,
+    LinkPathPublishError, LinkPathRoleKind, LinkPathSendPlanner, MinimumLengths, Observe,
+    PacketOverheads, PlannedDatagram, PlannedItem, PlannedPacket, PlannedPacketKind,
+    PlannerLinkPath, Publish, PublishOutcome, PublishTo, ResendCloseIntent, RoleNotAcceptingError,
+    SendIntent, SendIntentIntake, SendStrategy, SendStrategyTypes, SharedPublishTo, SupplyFeedback,
 };
 use crate::write::FlightClass;
 
@@ -130,6 +134,17 @@ pub trait RankedIntent {
     fn stays_after_writing(&self) -> bool {
         false
     }
+
+    /// Whether the intent is consumed before its source is given it, rather
+    /// than after its source wrote something: for an intent whose content
+    /// is fixed in it and whose withdrawing no component's lock orders
+    /// against its supply, such as a DATAGRAM. Withdrawing it on another
+    /// thread then either takes place before the supply, and its source is
+    /// not given it, or reports it consumed. Read only for an intent that
+    /// does not stay after writing. By default an intent is not.
+    fn claimed_before_writing(&self) -> bool {
+        false
+    }
 }
 
 impl RankedIntent for CNil {
@@ -142,6 +157,10 @@ impl RankedIntent for CNil {
     }
 
     fn stays_after_writing(&self) -> bool {
+        match *self {}
+    }
+
+    fn claimed_before_writing(&self) -> bool {
         match *self {}
     }
 }
@@ -165,6 +184,13 @@ impl<H: RankedIntent, T: RankedIntent> RankedIntent for Coproduct<H, T> {
         match self {
             Coproduct::Inl(intent) => intent.stays_after_writing(),
             Coproduct::Inr(rest) => rest.stays_after_writing(),
+        }
+    }
+
+    fn claimed_before_writing(&self) -> bool {
+        match self {
+            Coproduct::Inl(intent) => intent.claimed_before_writing(),
+            Coproduct::Inr(rest) => rest.claimed_before_writing(),
         }
     }
 }
@@ -243,20 +269,28 @@ impl<C> fmt::Debug for IntentTicket<C> {
 }
 
 impl<C> IntentTicket<C> {
-    /// Where the intent stands.
-    pub fn state(&self) -> IntentState<ConnectionClosedError<C>> {
+    /// Why an ended intent ended.
+    fn ended(&self) -> ConnectionClosedError<C> {
+        // An intent of the core ends only once the close reason is set.
+        ConnectionClosedError::new(
+            self.zone
+                .closed
+                .get()
+                .cloned()
+                .expect("an ended intent has its close reason"),
+        )
+    }
+}
+
+impl<C> IntentTicketState for IntentTicket<C> {
+    type End = ConnectionClosedError<C>;
+
+    fn state(&self) -> IntentState<ConnectionClosedError<C>> {
         match self.cell.state() {
             WAITING => IntentState::Waiting,
             CONSUMED => IntentState::Consumed,
             WITHDRAWN => IntentState::Withdrawn,
-            // An intent of the core ends only once the close reason is set.
-            _ => IntentState::Ended(ConnectionClosedError::new(
-                self.zone
-                    .closed
-                    .get()
-                    .cloned()
-                    .expect("an ended intent has its close reason"),
-            )),
+            _ => IntentState::Ended(self.ended()),
         }
     }
 }
@@ -275,17 +309,23 @@ impl<C> IntentTicketResize for IntentTicket<C> {
     }
 }
 
-/// Withdrawing tells where the intent stood once it was withdrawn: never
-/// [`IntentState::Waiting`].
+/// Withdrawing and the supply's claim are ordered by the intent's state:
+/// only one of them takes place, so a withdrawal reported as having taken
+/// place leaves the intent out of every packet, and one that comes after
+/// the claim reports it consumed.
 impl<C> IntentTicketWithdraw for IntentTicket<C> {
-    type Report = IntentState<ConnectionClosedError<C>>;
+    type Report = IntentWithdrawReport<ConnectionClosedError<C>>;
 
     fn withdraw(self) -> Self::Report {
         if self.cell.leave_waiting(WITHDRAWN) {
             self.zone.content_changed(ContentChange::Withdrawn);
-            IntentState::Withdrawn
-        } else {
-            self.state()
+            return IntentWithdrawReport::Withdrawn;
+        }
+        // The intent left waiting, and only this ticket withdraws it: it
+        // was consumed or it ended.
+        match self.cell.state() {
+            CONSUMED => IntentWithdrawReport::Consumed,
+            _ => IntentWithdrawReport::Ended(self.ended()),
         }
     }
 }
@@ -1056,6 +1096,10 @@ struct PlannedEntry {
     /// Whether the intent stays after a supply that wrote something
     /// ([`RankedIntent::stays_after_writing`]).
     stays: bool,
+    /// Whether the supply claims the intent before its source is given it
+    /// ([`RankedIntent::claimed_before_writing`]); never for one that
+    /// stays.
+    claimed: bool,
 }
 
 #[derive(Debug)]
@@ -1221,6 +1265,8 @@ where
                 class,
                 turn: application_data.then_some((urgency, order)),
                 stays: entry.intent.stays_after_writing(),
+                claimed: !entry.intent.stays_after_writing()
+                    && entry.intent.claimed_before_writing(),
             };
             match packets.last_mut() {
                 Some(packet) if packet.kind == kind => packet.items.push(planned),
@@ -1313,19 +1359,40 @@ where
 
 // ---- the plan ----
 
+/// The item a cursor gave out and that is not yet supplied.
+#[derive(Debug)]
+struct CurrentItem {
+    entry: PlannedEntry,
+    /// Its intent's state, which claiming it changes.
+    cell: Arc<IntentCell>,
+}
+
 /// What the ranked plan learns from each supply.
 #[derive(Debug, Default)]
 pub struct RankedFeedback {
-    current: Option<PlannedEntry>,
+    current: Option<CurrentItem>,
     /// The items supplied, in order, and whether each wrote anything.
     supplied: Vec<(PlannedEntry, bool)>,
     stopped: bool,
 }
 
+/// An item claimed before writing is consumed when it is claimed, before
+/// its source is given it: the plan found that it fits (its least room as
+/// the last frame), and what it is to write is fixed in the intent, so its
+/// source writes it; should the source write nothing, the intent is
+/// consumed all the same. Other items are not claimed: they are consumed
+/// once the plan ends, if they wrote anything and do not stay.
 impl SupplyFeedback for RankedFeedback {
+    fn claim(&mut self) -> bool {
+        match &self.current {
+            Some(current) if current.entry.claimed => current.cell.leave_waiting(CONSUMED),
+            _ => true,
+        }
+    }
+
     fn supplied(&mut self, written: usize) {
-        if let Some(entry) = self.current.take() {
-            self.supplied.push((entry, written > 0));
+        if let Some(current) = self.current.take() {
+            self.supplied.push((current.entry, written > 0));
         }
     }
 }
@@ -1373,15 +1440,15 @@ impl<I: SendStrategyTypes> RankedPlan<'_, I> {
 }
 
 /// The items supplied had their turn; those that wrote anything are
-/// consumed, unless they stay after writing: their sources already resized
-/// or withdrew them.
+/// consumed, unless they stay after writing, as their sources already
+/// resized or withdrew them, or they were consumed when they were claimed.
 impl<I: SendStrategyTypes> Drop for RankedPlan<'_, I> {
     fn drop(&mut self) {
         for (entry, wrote) in self.feedback.supplied.drain(..) {
             if let Some((urgency, order)) = entry.turn {
                 self.planner.turns[urgency] = Some(order);
             }
-            if wrote && !entry.stays {
+            if wrote && !entry.stays && !entry.claimed {
                 let cell = match entry.held {
                     Held::Core(index) => &self.core.intents[index].cell,
                     Held::LinkPath(index) => &self.planner.intents[index].cell,
@@ -1501,13 +1568,16 @@ where
         let entry = *items.get(self.next_item)?;
         self.next_item += 1;
         let last_in_packet = self.next_item == items.len();
-        let intent = match entry.held {
-            Held::Core(index) => &plan.core.intents[index].intent,
-            Held::LinkPath(index) => &plan.planner.intents[index].intent,
+        let held = match entry.held {
+            Held::Core(index) => &plan.core.intents[index],
+            Held::LinkPath(index) => &plan.planner.intents[index],
         };
         // The packet's kind was chosen because its set carries the intent.
-        let item = S::item(intent)?;
-        plan.feedback.current = Some(entry);
+        let item = S::item(&held.intent)?;
+        plan.feedback.current = Some(CurrentItem {
+            entry,
+            cell: Arc::clone(&held.cell),
+        });
         Some(PlannedItem::new(
             item,
             entry.min,

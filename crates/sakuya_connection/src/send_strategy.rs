@@ -785,9 +785,20 @@ impl<'p, I: SendStrategyTypes, P: DatagramFillPlan<I> + ?Sized + 'p> fmt::Debug
     }
 }
 
-/// What a plan is told after an item was supplied: how many bytes its
-/// frame source wrote, frames and frame headers included.
+/// What a plan is told about an item it planned: whether the item may
+/// still be given to its frame source, and then how many bytes the source
+/// wrote, frames and frame headers included.
 pub trait SupplyFeedback {
+    /// Claim the item, before it is given to its frame source: whether it
+    /// is still waiting to be sent. On `false` the item has stopped
+    /// waiting, as its holder withdrew it: it is not given to its source,
+    /// and it counts as having written 0 bytes. A plan whose items cannot
+    /// be withdrawn while it lasts claims nothing: every item is still
+    /// waiting.
+    fn claim(&mut self) -> bool {
+        true
+    }
+
     /// The item just supplied wrote `written` bytes.
     fn supplied(&mut self, written: usize);
 }
@@ -866,11 +877,19 @@ impl<'c, T, F: SupplyFeedback + ?Sized> PlannedItem<'c, T, F> {
     /// Give the item to its frame source: `source` writes it into `packet`
     /// and hands back what it holds afterwards. The bytes written, measured
     /// before and after, go back to the plan.
+    ///
+    /// The plan claims the item first ([`SupplyFeedback::claim`]): an item
+    /// that stopped waiting is not given to `source`, `packet` comes back
+    /// as it was, and the plan is told 0 bytes were written.
     pub fn supply<W: PacketWriting, P>(
         self,
         packet: OpenPacket<W, ClassOfSource, P>,
         source: impl FnOnce(T, OpenPacket<W, ClassOfSource, P>) -> Supplied<W, ClassOfSource, P>,
     ) -> Supplied<W, ClassOfSource, P> {
+        if !self.feedback.claim() {
+            self.feedback.supplied(0);
+            return Supplied::Open(packet);
+        }
         let before = packet.buffer_len();
         let supplied = source(self.item, packet);
         self.feedback
@@ -987,6 +1006,22 @@ pub enum IntentState<End> {
     Ended(End),
 }
 
+/// What withdrawing an intent tells, when consuming and withdrawing it may
+/// happen at once on two threads: which of them took place, as only one
+/// does. `End` is how the intent can end other than by being consumed or
+/// withdrawn, for the kind of ticket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IntentWithdrawReport<End> {
+    /// The withdrawal took place: the intent was not written into a packet,
+    /// and it will not be.
+    Withdrawn,
+    /// The intent was written into a packet before it could be withdrawn.
+    Consumed,
+    /// The intent had ended before it could be withdrawn, as the connection
+    /// closed or its destination ended.
+    Ended(End),
+}
+
 /// A ticket that changes the room its intent needs (`IntentTicketResize`).
 ///
 /// What the intent is for, such as its frame source or stream, stays: only
@@ -1003,4 +1038,13 @@ pub trait IntentTicketWithdraw {
 
     /// Withdraw the intent: it is not written into a packet after this.
     fn withdraw(self) -> Self::Report;
+}
+
+/// A ticket that tells where its intent stands now (`IntentTicketState`).
+pub trait IntentTicketState {
+    /// How the intent can end other than by being consumed or withdrawn.
+    type End;
+
+    /// Where the intent stands now.
+    fn state(&self) -> IntentState<Self::End>;
 }

@@ -1,7 +1,16 @@
 //! The intake, its tickets, and the order of application data, with intents
 //! of a test part whose rank and urgency each intent gives.
-use core::task::{Context, Poll, Waker};
-use std::sync::atomic::Ordering;
+use core::{
+    cell::RefCell,
+    task::{Context, Poll, Waker},
+};
+use std::{
+    rc::Rc,
+    sync::{Barrier, atomic::Ordering},
+};
+
+use bytes::BytesMut;
+use sakuya_recovery::send_journals::PacketSendAttempt;
 
 use sakuya_stream::{
     connection::{CloseReason, ConnectionClosedError},
@@ -9,7 +18,7 @@ use sakuya_stream::{
 };
 use sakuya_wire::{
     parts::{CNil, Coproduct},
-    v1::encryption_level::EncryptionLevel,
+    v1::{encryption_level::EncryptionLevel, packet_number::PacketNumber},
 };
 
 use super::{super::*, waker};
@@ -17,7 +26,10 @@ use crate::{
     send_strategy::{
         InHead, IntentTicketResize, IntentTicketWithdraw, SendIntentHandle, SendIntentIntake,
     },
-    write::InFlightClass,
+    write::{
+        ClassOfSource, DelimitedFrame, InFlightClass, NotLast, OpenPacket, PacketWriting, Supplied,
+        sealed,
+    },
 };
 
 /// An intent of the test part: `id` names it, and it needs `min` bytes.
@@ -28,6 +40,7 @@ struct TestIntent {
     holds_place: bool,
     urgency: Urgency,
     min: usize,
+    stays: bool,
 }
 
 fn data(id: u32, urgency: u8) -> TestIntent {
@@ -37,6 +50,7 @@ fn data(id: u32, urgency: u8) -> TestIntent {
         holds_place: false,
         urgency: Urgency::new(urgency).unwrap(),
         min: 10,
+        stays: false,
     }
 }
 
@@ -47,6 +61,7 @@ fn control(id: u32) -> TestIntent {
         holds_place: true,
         urgency: Urgency::default(),
         min: 10,
+        stays: false,
     }
 }
 
@@ -84,6 +99,16 @@ impl RankedIntent for TestIntent {
 
     fn urgency(&self) -> Urgency {
         self.urgency
+    }
+
+    fn stays_after_writing(&self) -> bool {
+        self.stays
+    }
+
+    /// The intents of these tests are claimed before writing, as a
+    /// DATAGRAM is, unless they stay.
+    fn claimed_before_writing(&self) -> bool {
+        true
     }
 }
 
@@ -209,6 +234,12 @@ fn next_datagram(
                 FrameSourceCursor::<TestSources>::next(&mut cursor)
         {
             ids.push(item.id);
+            // A supply that writes claims its item first, as
+            // `PlannedItem::supply` does; an item reported as writing
+            // nothing is not claimed, so it is left waiting.
+            if written > 0 {
+                assert!(feedback.claim());
+            }
             feedback.supplied(written);
         }
         if ids.len() == take {
@@ -351,7 +382,7 @@ fn withdrawn_and_dropped_tickets_leave_the_plan() {
     let withdrawn = publish(&handle, data(1, 3));
     let dropped = publish(&handle, data(2, 3));
     let _kept = publish(&handle, data(3, 3));
-    assert_eq!(withdrawn.withdraw(), IntentState::Withdrawn);
+    assert_eq!(withdrawn.withdraw(), IntentWithdrawReport::Withdrawn);
     drop(dropped);
     let (_, waker) = waker();
     assert_eq!(
@@ -363,12 +394,12 @@ fn withdrawn_and_dropped_tickets_leave_the_plan() {
     let consumed = publish(&handle, data(5, 3));
     planner.begin(&mut core);
     assert!(lock(&core.published).is_empty());
-    assert_eq!(later.withdraw(), IntentState::Withdrawn);
+    assert_eq!(later.withdraw(), IntentWithdrawReport::Withdrawn);
     assert_eq!(
         next_datagram(&mut planner, &mut core, &waker, usize::MAX, 10),
         Some(vec![5])
     );
-    assert_eq!(consumed.withdraw(), IntentState::Consumed);
+    assert_eq!(consumed.withdraw(), IntentWithdrawReport::Consumed);
 }
 
 #[test]
@@ -394,7 +425,7 @@ fn what_the_intake_publishes_after_the_close_ends_with_its_reason() {
     for ticket in [unplanned, later, after_the_core] {
         assert_eq!(
             ticket.withdraw(),
-            IntentState::Ended(ConnectionClosedError::new(CloseReason::IdleTimeout))
+            IntentWithdrawReport::Ended(ConnectionClosedError::new(CloseReason::IdleTimeout))
         );
     }
 }
@@ -462,4 +493,287 @@ fn application_data_that_does_not_fit_is_passed_over() {
         publish(&handle, data(2, 7)),
     ];
     assert_eq!(all(&mut planner, &mut core, &waker), None);
+}
+
+// ---- supplying through the claim ----
+
+/// A packet writer that keeps the bytes written, and hands them to `out`
+/// when the packet is concluded.
+#[derive(Debug, Default)]
+struct BufferWriter {
+    buffer: BytesMut,
+    out: Rc<RefCell<Vec<u8>>>,
+}
+
+impl sealed::Writing for BufferWriter {}
+
+impl PacketWriting for BufferWriter {
+    type Attempt = NoAttempt;
+
+    fn room(&self, _: FlightClass) -> usize {
+        usize::MAX
+    }
+
+    fn buffer(&mut self) -> &mut BytesMut {
+        &mut self.buffer
+    }
+
+    fn buffer_len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    fn frame_written(&mut self, (): (), _: bool, _: bool, _: bool) {}
+
+    fn close(&mut self) {}
+
+    fn conclude(&mut self, _: bool) {
+        self.out.borrow_mut().extend_from_slice(&self.buffer);
+    }
+}
+
+/// The send attempt of [`BufferWriter`]: nothing reads it.
+#[derive(Debug)]
+enum NoAttempt {}
+
+impl PacketSendAttempt for NoAttempt {
+    type Summary = ();
+    type Sealed = ();
+
+    fn packet_number(&self) -> PacketNumber {
+        match *self {}
+    }
+
+    fn record_frame(&mut self, (): (), _: bool, _: bool) {
+        match *self {}
+    }
+
+    fn seal(self, _: usize, _: bool) -> Option<()> {
+        match self {}
+    }
+}
+
+/// A frame of one byte: the id of the intent it is written for.
+#[derive(Debug)]
+struct IdFrame(u8);
+
+impl DelimitedFrame for IdFrame {
+    type Class = InFlightClass;
+    const ACK_ELICITING: bool = true;
+
+    fn encoded_len(&self) -> usize {
+        1
+    }
+
+    fn write_to(self, buffer: &mut BytesMut) {
+        buffer.extend_from_slice(&[self.0]);
+    }
+}
+
+/// What filling a datagram through [`PlannedItem::supply`] did.
+#[derive(Debug, PartialEq, Eq)]
+struct Filled {
+    /// The ids of the intents the frame source was given.
+    given: Vec<u32>,
+    /// The bytes written into the packet: one per intent written.
+    packet: Vec<u8>,
+}
+
+/// Fill the next datagram's items into one packet through
+/// [`PlannedItem::supply`], the frame source writing one [`IdFrame`] per
+/// intent; `before` and `after` are called with each item's id before it
+/// is supplied and after, while the plan lasts. `None` when nothing is
+/// planned.
+fn supply_next(
+    planner: &mut Planner,
+    core: &mut Core,
+    waker: &Waker,
+    mut before: impl FnMut(u32),
+    mut after: impl FnMut(u32),
+) -> Option<Filled> {
+    let Poll::Ready(PlannedDatagram::Fill(mut plan)) =
+        planner.poll_plan(core, &mut Context::from_waker(waker))
+    else {
+        return None;
+    };
+    let out = Rc::default();
+    let mut packet = OpenPacket::<_, ClassOfSource, NotLast>::new(BufferWriter {
+        buffer: BytesMut::new(),
+        out: Rc::clone(&out),
+    });
+    let mut given = Vec::new();
+    while let Some(planned) = plan.next_packet() {
+        let PlannedPacket::OneRtt(mut cursor) = planned else {
+            panic!("only 1-RTT packets are planned")
+        };
+        while let Some(item) = FrameSourceCursor::<TestSources>::next(&mut cursor) {
+            let id = item.item.id;
+            before(id);
+            let supplied = item.supply(packet, |intent, open| {
+                given.push(intent.id);
+                let mut open = open.into_source_class::<InFlightClass>();
+                open.write_frame(IdFrame(u8::try_from(intent.id).unwrap()), ())
+                    .unwrap();
+                Supplied::Open(open).into_class_of_source()
+            });
+            let Supplied::Open(open) = supplied else {
+                panic!("a packet in a position other than the last stays open")
+            };
+            packet = open;
+            after(id);
+        }
+    }
+    drop(plan);
+    packet.conclude(false);
+    let packet = out.take();
+    Some(Filled { given, packet })
+}
+
+/// Withdrawn after it was planned and before it is supplied, an intent is
+/// not given to its source: it counts as having written nothing, and what
+/// follows it goes into the same packet.
+#[test]
+fn an_intent_withdrawn_before_its_supply_stays_out_of_the_packet() {
+    let (mut core, mut planner, handle) = setup(12_000);
+    let first = publish(&handle, data(1, 3));
+    let mut second = Some(publish(&handle, data(2, 3)));
+    let third = publish(&handle, data(3, 3));
+    let mut report = None;
+    let (_, waker) = waker();
+    let filled = supply_next(
+        &mut planner,
+        &mut core,
+        &waker,
+        |id| {
+            if id == 2 {
+                report = second.take().map(IntentTicketWithdraw::withdraw);
+            }
+        },
+        |_| {},
+    );
+    assert_eq!(
+        filled,
+        Some(Filled {
+            given: vec![1, 3],
+            packet: vec![1, 3],
+        })
+    );
+    assert_eq!(report, Some(IntentWithdrawReport::Withdrawn));
+    assert_eq!(first.state(), IntentState::Consumed);
+    assert_eq!(third.state(), IntentState::Consumed);
+    assert_eq!(all(&mut planner, &mut core, &waker), None);
+}
+
+/// Written into the packet, an intent is consumed even while the plan
+/// lasts: withdrawing it then reports it consumed.
+#[test]
+fn an_intent_withdrawn_after_its_supply_reports_it_consumed() {
+    let (mut core, mut planner, handle) = setup(12_000);
+    let mut ticket = Some(publish(&handle, data(1, 3)));
+    let mut report = None;
+    let (_, waker) = waker();
+    let filled = supply_next(
+        &mut planner,
+        &mut core,
+        &waker,
+        |_| {},
+        |_| report = ticket.take().map(IntentTicketWithdraw::withdraw),
+    );
+    assert_eq!(
+        filled,
+        Some(Filled {
+            given: vec![1],
+            packet: vec![1],
+        })
+    );
+    assert_eq!(report, Some(IntentWithdrawReport::Consumed));
+}
+
+/// An intent that stays after writing is not claimed: it keeps waiting
+/// through the supply and after the plan, for its source to resize or
+/// withdraw it.
+#[test]
+fn an_intent_that_stays_after_writing_is_not_claimed() {
+    let (mut core, mut planner, handle) = setup(12_000);
+    let ticket = publish(
+        &handle,
+        TestIntent {
+            stays: true,
+            ..data(1, 3)
+        },
+    );
+    let (_, waker) = waker();
+    let mut during = None;
+    let filled = supply_next(
+        &mut planner,
+        &mut core,
+        &waker,
+        |_| {},
+        |_| during = Some(ticket.state()),
+    );
+    assert_eq!(
+        filled,
+        Some(Filled {
+            given: vec![1],
+            packet: vec![1],
+        })
+    );
+    assert_eq!(during, Some(IntentState::Waiting));
+    assert_eq!(ticket.state(), IntentState::Waiting);
+    // planned again, as its source neither resized nor withdrew it here
+    assert_eq!(
+        supply_next(&mut planner, &mut core, &waker, |_| {}, |_| {}).map(|filled| filled.given),
+        Some(vec![1])
+    );
+    assert_eq!(ticket.withdraw(), IntentWithdrawReport::Withdrawn);
+    assert_eq!(all(&mut planner, &mut core, &waker), None);
+}
+
+/// Withdrawn on another thread just as the driver supplies it, each intent
+/// is either withdrawn and never given to its source, or written into the
+/// packet and reported consumed. The two threads meet once the intent is
+/// planned; the withdrawal is delayed by a different number of spins each
+/// time, so it falls on either side of the claim.
+#[test]
+fn a_withdrawal_racing_the_supply_takes_place_or_reports_the_intent_consumed() {
+    let (mut core, mut planner, handle) = setup(12_000);
+    let (_, waker) = waker();
+    for round in 0..400 {
+        let ticket = publish(&handle, data(1, 3));
+        let barrier = Barrier::new(2);
+        let (filled, report) = std::thread::scope(|scope| {
+            let barrier = &barrier;
+            let withdrawing = scope.spawn(move || {
+                barrier.wait();
+                for _ in 0..round % 40 {
+                    core::hint::spin_loop();
+                }
+                ticket.withdraw()
+            });
+            let filled = supply_next(
+                &mut planner,
+                &mut core,
+                &waker,
+                |_| {
+                    barrier.wait();
+                },
+                |_| {},
+            );
+            (filled, withdrawing.join().unwrap())
+        });
+        let filled = filled.expect("the intent is planned before it is withdrawn");
+        assert_eq!(
+            filled.packet,
+            filled
+                .given
+                .iter()
+                .map(|&id| u8::try_from(id).unwrap())
+                .collect::<Vec<_>>()
+        );
+        match report {
+            IntentWithdrawReport::Withdrawn => assert_eq!(filled.given, []),
+            IntentWithdrawReport::Consumed => assert_eq!(filled.given, [1]),
+            IntentWithdrawReport::Ended(error) => panic!("the connection did not close: {error:?}"),
+        }
+        assert_eq!(all(&mut planner, &mut core, &waker), None);
+    }
 }
