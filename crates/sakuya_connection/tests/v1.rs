@@ -359,6 +359,8 @@ impl v1::Choices for ClientMine {
         sakuya_connection::send_strategy::ranked::RankedSendStrategy<I>;
     type DestinationConnectionIds = common::TestDestinationConnectionIds;
     type ResetTokenRegistry = common::TestResetTokenRegistry;
+    type ConnectionIdIssuer = common::TestConnectionIdIssuer;
+    type LocalConnectionIds = common::TestLocalConnectionIds;
     type SendParameters = sakuya_stream::send_options::urgency::Urgency;
     type Streams<Lc, K, X: sakuya_connection::v1::streams::resets::StreamResets> =
         sakuya_connection::v1::streams::locked::LockedStreamSet<Lc, K, X>;
@@ -388,6 +390,8 @@ impl v1::Choices for SpyMine {
         sakuya_connection::send_strategy::ranked::RankedSendStrategy<I>;
     type DestinationConnectionIds = common::TestDestinationConnectionIds;
     type ResetTokenRegistry = common::TestResetTokenRegistry;
+    type ConnectionIdIssuer = common::TestConnectionIdIssuer;
+    type LocalConnectionIds = common::TestLocalConnectionIds;
     type SendParameters = sakuya_stream::send_options::urgency::Urgency;
     type Streams<Lc, K, X: sakuya_connection::v1::streams::resets::StreamResets> =
         sakuya_connection::v1::streams::locked::LockedStreamSet<Lc, K, X>;
@@ -2045,6 +2049,7 @@ where
             Receiver = TestReceiver,
             DestinationConnectionIds = common::TestDestinationConnectionIds,
             ResetTokenRegistry = common::TestResetTokenRegistry,
+            ConnectionIdIssuer = common::TestConnectionIdIssuer,
             ImmediateClosePolicy = common::TestImmediateClosePolicy,
             ApplicationError = common::AppClose,
         >,
@@ -2089,6 +2094,10 @@ where
             id: NonEmptyCid::new(server_cid()).expect("not empty"),
             reset_token: sakuya_wire::connection_id::StatelessResetToken::new([0x5e; 16]),
         },
+        local_connection_id_issuer: v1::connection_ids::LocalConnectionIdIssuer::new(
+            common::TestConnectionIdIssuer::default(),
+            Some(()),
+        ),
         max_datagrams_per_send: NonZeroUsize::new(MAX_PER_SEND.with(Cell::get))
             .expect("the tests send at least one datagram at once"),
         immediate_close_policy: common::TestImmediateClosePolicy,
@@ -4907,7 +4916,15 @@ fn the_strategy_core_is_told_of_each_send_key_and_the_confirmation_once() {
         (11, &[][..]),
         (12, &["core: keys Handshake"][..]),
         (13, &["core: keys OneRtt"][..]),
-        (14, &["core: confirmed"][..]),
+        // the local connection ID strategy issues once the handshake is
+        // confirmed, up to the protocol's minimum limit of 2
+        (
+            14,
+            &[
+                "core: confirmed",
+                "core: publish NewConnectionIdIntent { sequence: 1 }",
+            ][..],
+        ),
         // nothing is told again as the connection is polled on
         (15, &[][..]),
         (500, &[][..]),
@@ -5482,6 +5499,38 @@ fn a_new_connection_id_frame_to_a_zero_length_handshake_connection_id_is_a_conne
     assert_eq!(lines.len(), 2, "{lines:?}");
     assert!(
         lines[1].starts_with("error: NewConnectionId { source: ZeroLengthInUse"),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn retiring_a_connection_id_never_issued_is_a_connection_error() {
+    use probe::PacketStep::{InstallOneRttKeys, Receive};
+    reset();
+    let first = link();
+    feed_packets([
+        (
+            ms(5),
+            Receive(received(
+                initial_from(&[0xaa; 8], 0, &ping()),
+                &first,
+                ms(5),
+            )),
+        ),
+        (ms(6), InstallOneRttKeys),
+        // a RETIRE_CONNECTION_ID frame (RFC 9000 §19.16) of sequence
+        // number 5: the server issued none but its first, numbered 0
+        (
+            ms(7),
+            Receive(received(one_rtt_packet_of(0, 0, &[0x19, 5]), &first, ms(7))),
+        ),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first);
+    take_log();
+    let lines = run(&mut connection, 5..=7);
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(
+        lines[1], "error: RetireConnectionId { source: NotIssued { sequence: 5 } }",
         "{lines:?}"
     );
 }
@@ -6694,8 +6743,10 @@ fn the_sending_call_initiates_a_key_update_at_three_quarters_of_the_confidential
         [
             "send Some(0), confirmed at None, lowest sent Some(0)",
             // the filling of the ACK initiated it; the next number of the
-            // space is the lowest one of the new generation
-            "send Some(1), confirmed at None, lowest sent Some(0)",
+            // space is the lowest one of the new generation: packet 0 carried
+            // the NEW_CONNECTION_ID frame issued once the handshake was
+            // confirmed
+            "send Some(1), confirmed at None, lowest sent Some(1)",
         ]
     );
     let sent = common::take_sent();
@@ -6916,7 +6967,9 @@ fn a_server_closing_once_confirmed_sends_its_close_in_a_one_rtt_packet_alone() {
     let (_, datagram) = &sent[0];
     let (dcid, number, payload) = open_sent_one_rtt(datagram);
     assert_eq!(dcid, CLIENT_SCID);
-    assert_eq!(number, 0);
+    // packet 0 carried the NEW_CONNECTION_ID frame issued once the
+    // handshake was confirmed
+    assert_eq!(number, 1);
     // the application's close with its code 7, as the policy gave it
     assert_eq!(payload[..2], [0x1d, 0x07]);
     let (len, width) = read_var_int(&payload[2..]);

@@ -33,6 +33,7 @@ use sakuya_connection::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf},
     component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
+    connection_id::DestinationConnectionIdStrategy,
     dispatch::{DispatchFacts, FrameDispatch},
     driver::ConnectionDriver,
     error::ConnectionErrorsOf,
@@ -54,7 +55,7 @@ use sakuya_connection::{
         close::{CloseReasonRecord, LocalCloseCause},
         close_request::CloseRequestCell,
         confirmation::HandshakeConfirmation,
-        connection_ids::FirstLocalConnectionId,
+        connection_ids::{ConnectionIdsOf, FirstLocalConnectionId},
         crypto::{
             CryptoReceiveCapacities, FragmentedCryptoReceiveBuffer, send::OffsetMapCryptoSendBuffer,
         },
@@ -133,8 +134,8 @@ use sakuya_wire::{
         transport_parameters::{
             TransportParameterSpace, TransportParameters,
             integer::{
-                InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
-                InitialMaxStreamsBidi, MaxIdleTimeout,
+                ActiveConnectionIdLimit, InitialMaxData, InitialMaxStreamDataBidiLocal,
+                InitialMaxStreamDataBidiRemote, InitialMaxStreamsBidi, MaxIdleTimeout,
             },
         },
     },
@@ -442,6 +443,8 @@ macro_rules! choices {
             type SendStrategy<I: sakuya_connection::send_strategy::SendStrategyTypes> = $strategy;
             type DestinationConnectionIds = common::TestDestinationConnectionIds;
             type ResetTokenRegistry = common::TestResetTokenRegistry;
+            type ConnectionIdIssuer = common::TestConnectionIdIssuer;
+            type LocalConnectionIds = common::TestLocalConnectionIds;
             type SendParameters = sakuya_stream::send_options::urgency::Urgency;
             type Streams<Lc, K, X: sakuya_connection::v1::streams::resets::StreamResets> =
                 sakuya_connection::v1::streams::locked::LockedStreamSet<Lc, K, X>;
@@ -492,6 +495,12 @@ struct Noted {
     spaces: Vec<PacketNumberSpaceKind>,
     /// Whether the established layer was built with its stream set.
     streams: bool,
+    /// How many of this side's connection IDs the logical path's local
+    /// connection ID strategy keeps active.
+    local_connection_ids: usize,
+    /// How many of the peer's connection IDs the logical path's destination
+    /// connection ID strategy offers for its first link path.
+    offered_connection_ids: usize,
 }
 
 fn index(role: Role) -> usize {
@@ -672,11 +681,15 @@ mod watch {
                 ),
                 spaces: Vec::new(),
                 streams: false,
+                local_connection_ids: 0,
+                offered_connection_ids: 0,
             };
             note(<T::Side as Side>::ROLE, |noted| {
                 *noted = Noted {
                     spaces: core::mem::take(&mut noted.spaces),
                     streams: noted.streams,
+                    local_connection_ids: noted.local_connection_ids,
+                    offered_connection_ids: noted.offered_connection_ids,
                     ..snapshot
                 };
             });
@@ -720,6 +733,66 @@ mod watch {
                 .filter(|kind| spaces.get(*kind).is_some())
                 .collect();
             note(<T::Side as Side>::ROLE, |noted| noted.spaces = kept);
+            None
+        }
+    }
+
+    /// In the logical path: notes how many connection IDs of this side the
+    /// local connection ID strategy keeps active, and how many of the
+    /// peer's the destination strategy offers for the first link path,
+    /// whenever the connection IDs change.
+    #[derive(Debug)]
+    pub struct ConnectionIdsWatch;
+    impl<T: v1::Choices, L> Build<T, L, layer::LogicalPath, ()> for ConnectionIdsWatch
+    where
+        for<'v> L: LineageLists<'v, T>,
+    {
+        fn build<'v>(
+            _: &mut ParentsOf<'v, T, L, layer::LogicalPath>,
+            _: &mut ArgsOf<T, L, layer::LogicalPath>,
+        ) -> Self {
+            ConnectionIdsWatch
+        }
+    }
+    impl<T, L, Ii> DataComponent<T, L, layer::LogicalPath, Ii> for ConnectionIdsWatch
+    where
+        T: v1::Choices<
+                Clock = TestClock,
+                Link = TestLink,
+                DestinationConnectionIds = common::TestDestinationConnectionIds,
+                LocalConnectionIds = common::TestLocalConnectionIds,
+            >,
+        for<'v> L: LineageLists<'v, T>,
+        for<'v> <L as LineageLists<'v, T>>::LogicalPath: GetAt<ConnectionIdsOf<T>, Ii>,
+    {
+        fn reads(reads: &mut ReadSet) {
+            reads.add::<ConnectionIdsOf<T>>();
+        }
+        fn reread<'v, B: CallBundle>(
+            lineage: LineageOf<'v, T, L, layer::LogicalPath>,
+            others: &mut OtherNodes<'v, T, L, B>,
+            _: Duration,
+        ) -> Option<RequestOf<T, L>> {
+            let ids = lineage.get::<ConnectionIdsOf<T>, Ii>();
+            let local = ids.local_strategy().active().count();
+            let offered = others
+                .link_path_keys()
+                .find_map(|key| match key {
+                    layer::NodeKey::LinkPath(_, link) => Some(link.clone()),
+                    _ => None,
+                })
+                .map_or(0, |link| {
+                    <common::TestDestinationConnectionIds as DestinationConnectionIdStrategy<
+                        LinkId<(), ()>,
+                        Duration,
+                        common::TestResetTokenRegistrar,
+                    >>::offer(ids.destination(), &link)
+                    .count()
+                });
+            note(<T::Side as Side>::ROLE, |noted| {
+                noted.local_connection_ids = local;
+                noted.offered_connection_ids = offered;
+            });
             None
         }
     }
@@ -858,7 +931,7 @@ mod watch {
         type Calls = HNil;
     }
     impl<T: v1::Choices, L> LayerShare<T, L, layer::LogicalPath> for Part {
-        type Data = HList![SpaceWatch];
+        type Data = HList![SpaceWatch, ConnectionIdsWatch];
         type Calls = HNil;
     }
     /// The watch gives the handle of an established layer nothing.
@@ -1026,6 +1099,7 @@ where
             Receiver = TestReceiver,
             DestinationConnectionIds = common::TestDestinationConnectionIds,
             ResetTokenRegistry = common::TestResetTokenRegistry,
+            ConnectionIdIssuer = common::TestConnectionIdIssuer,
             ImmediateClosePolicy = common::TestImmediateClosePolicy,
             ApplicationError = common::AppClose,
         >,
@@ -1044,6 +1118,11 @@ where
     parameters.set(InitialMaxStreamsBidi::new(
         StreamCount::new(4).expect("a stream count"),
     ));
+    // each side takes as many of the other's connection IDs as sakuya's
+    // local connection ID strategy keeps issued
+    parameters.set(
+        ActiveConnectionIdLimit::new(VarInt::from_u32(4)).expect("at least 2"),
+    );
     v1::ConnectionArgs {
         crypto: RingBackend,
         handshake,
@@ -1065,6 +1144,7 @@ where
         destination_connection_ids:
             sakuya_connection::connection_id::sequence_map::SequenceMapDestinationConnectionIdStrategyConfig::new(8),
         reset_token_registry: Arc::clone(&routing.reset_tokens),
+        local_connection_id_issuer: common::local_connection_id_issuer(&first_local_connection_id),
         first_local_connection_id,
         max_datagrams_per_send: NonZeroUsize::new(16).expect("not zero"),
         immediate_close_policy: common::TestImmediateClosePolicy,
@@ -1429,6 +1509,29 @@ fn every_initial_packet_of_a_client_carries_the_token_it_started_with() {
     for datagram in initials {
         assert_eq!(initial_token(datagram), &token[..]);
         assert!(datagram.len() >= MIN_DATAGRAM_SIZE);
+    }
+}
+
+#[test]
+fn once_confirmed_each_side_issues_connection_ids_up_to_the_peer_s_limit_and_the_peer_takes_them() {
+    let clock = tls_clock();
+    let issued = |noted: &Noted| {
+        noted.confirmed && noted.local_connection_ids == 4 && noted.offered_connection_ids == 4
+    };
+    handshake(client_engine(&clock, 1), &clock, |_| {
+        issued(&noted(Role::Server)) && issued(&noted(Role::Client))
+    });
+    for (side, role) in [("server", Role::Server), ("client", Role::Client)] {
+        let noted = noted(role);
+        assert!(noted.confirmed, "the {side}'s handshake is confirmed");
+        assert_eq!(
+            noted.local_connection_ids, 4,
+            "the {side} keeps its handshake connection ID and three more issued"
+        );
+        assert_eq!(
+            noted.offered_connection_ids, 4,
+            "the {side} took the peer's NEW_CONNECTION_ID frames"
+        );
     }
 }
 

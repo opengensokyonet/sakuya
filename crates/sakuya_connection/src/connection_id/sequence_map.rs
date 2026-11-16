@@ -41,9 +41,12 @@ use super::{
 /// - **Use.** The first datagram on a link path with a connection ID binds
 ///   them and registers the connection ID's reset token through the
 ///   registrar lent for that link path ([RFC 9000 §10.3.1]); a handshake
-///   connection ID the peer gave no token for is not registered. Every
-///   link path registers on its own, even towards the same peer, because
-///   ending one link path drops its registrations only.
+///   connection ID the peer gave no token for is not registered. A
+///   client learns the token of the handshake connection ID from the
+///   server's transport parameters, often after it was used: the next
+///   datagram with it on each link path it is bound to registers it then.
+///   Every link path registers on its own, even towards the same peer,
+///   because ending one link path drops its registrations only.
 /// - **Retirement.** A connection ID leaves the map, and with it its
 ///   registrations, when Retire Prior To passes it or when the last link
 ///   path it is bound to ends ([RFC 9000 §5.1.2]). Its RETIRE_CONNECTION_ID
@@ -111,13 +114,10 @@ struct PeerConnectionId<Id, Reg> {
 }
 
 /// A link path a connection ID was used on, with the registration of the
-/// connection ID's token made for it.
+/// connection ID's token made for it; dropping the binding revokes the
+/// registration.
 struct LinkPathBinding<Id, Reg> {
     link_path: Id,
-    #[expect(
-        dead_code,
-        reason = "held only so that dropping the binding revokes the registration"
-    )]
     registration: Option<Reg>,
 }
 
@@ -327,6 +327,17 @@ where
         );
     }
 
+    /// A zero-length handshake connection ID has no token: it is ignored
+    /// then, as it is once the token is known.
+    fn on_handshake_reset_token(&mut self, token: StatelessResetToken) {
+        if let Some(entry) = self.active.get_mut(&0)
+            && !entry.id.is_empty()
+            && entry.token.is_none()
+        {
+            entry.token = Some(token);
+        }
+    }
+
     fn offer(&self, link_path: &Id) -> Self::Offer<'_> {
         SequenceMapConnectionIdOffer {
             link_path: link_path.clone(),
@@ -340,10 +351,20 @@ where
         let Some(entry) = self.active.get_mut(&sequence) else {
             return;
         };
-        if entry.is_bound_to(link_path) {
+        let token = entry.token;
+        if let Some(binding) = entry
+            .bindings
+            .iter_mut()
+            .find(|binding| binding.link_path == *link_path)
+        {
+            // bound before its token was known: the handshake connection ID
+            // of a client
+            if binding.registration.is_none() {
+                binding.registration = token.map(|token| registrar.register(token));
+            }
             return;
         }
-        let registration = entry.token.map(|token| registrar.register(token));
+        let registration = token.map(|token| registrar.register(token));
         entry.bindings.push(LinkPathBinding {
             link_path: link_path.clone(),
             registration,

@@ -19,6 +19,7 @@ use core::convert::Infallible;
 
 use bytes::Bytes;
 use sakuya_wire::{
+    connection_id::ConnectionId,
     parts::{CNil, Coproduct, HCons, HNil},
     v1::{
         encryption_level::EncryptionLevel,
@@ -44,6 +45,7 @@ use crate::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DispatchFacts<I, P> {
     protection: ReceivedProtection,
+    destination: ConnectionId,
     at: I,
     link_path: P,
 }
@@ -88,11 +90,18 @@ impl ReceivedProtection {
 }
 
 impl<I: Copy, P> DispatchFacts<I, P> {
-    /// A packet protected as `protection` says whose datagram arrived at
-    /// `at` on the link path `link_path`.
-    pub fn new(protection: ReceivedProtection, at: I, link_path: P) -> Self {
+    /// A packet protected as `protection` says, sent to the Destination
+    /// Connection ID `destination`, whose datagram arrived at `at` on the
+    /// link path `link_path`.
+    pub fn new(
+        protection: ReceivedProtection,
+        destination: ConnectionId,
+        at: I,
+        link_path: P,
+    ) -> Self {
         Self {
             protection,
+            destination,
             at,
             link_path,
         }
@@ -101,6 +110,13 @@ impl<I: Copy, P> DispatchFacts<I, P> {
     /// The encryption level the packet was protected at.
     pub fn level(&self) -> EncryptionLevel {
         self.protection.level()
+    }
+
+    /// The Destination Connection ID of the packet: one of this side's
+    /// connection IDs, or the one a client chose for its first Initial
+    /// packets.
+    pub fn destination(&self) -> &ConnectionId {
+        &self.destination
     }
 
     /// When the datagram of the packet arrived.

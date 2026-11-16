@@ -196,6 +196,20 @@ pub trait DestinationConnectionIdStrategy<Id, I, R: ResetTokenRegistrar>:
     /// [RFC 9000 §7.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-7.2
     fn on_handshake_connection_id(&mut self, id: ConnectionId);
 
+    /// The stateless reset token of the connection ID numbered 0 is
+    /// `token`: the `stateless_reset_token` of the server's transport
+    /// parameters, which only a client receives ([RFC 9000 §18.2]). It
+    /// comes after [`on_handshake_connection_id`](Self::on_handshake_connection_id).
+    ///
+    /// Like the tokens of the other connection IDs, it is registered for
+    /// detection only once the connection ID is used on a link path
+    /// ([`on_used`](Self::on_used), [RFC 9000 §10.3.1]). By default the
+    /// token is ignored.
+    ///
+    /// [RFC 9000 §10.3.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-10.3.1
+    /// [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
+    fn on_handshake_reset_token(&mut self, _token: StatelessResetToken) {}
+
     /// The connection IDs this side is willing to send with on
     /// `link_path` at this moment, most preferred first.
     ///

@@ -14,6 +14,7 @@
 //! | STOP_SENDING | [`StopSendingSummary`]: the stream and the error code | nothing | the frame is sent again while the receiving part still needs it |
 //! | MAX_DATA, MAX_STREAM_DATA, MAX_STREAMS | [`MaxDataSummary`], [`MaxStreamDataSummary`], [`MaxStreamsSummary`]: the limit | nothing | the limit in effect, never lower than the one lost, is sent again while it is still advertised |
 //! | DATA_BLOCKED, STREAM_DATA_BLOCKED, STREAMS_BLOCKED | [`DataBlockedSummary`], [`StreamDataBlockedSummary`], [`StreamsBlockedSummary`]: the limit | nothing | the frame is sent again while the sender is still blocked at that limit |
+//! | NEW_CONNECTION_ID | [`NewConnectionIdSummary`]: the sequence number | the connection ID is disclosed and not sent again | the same frame is published again while the connection ID is neither acknowledged nor retired by the peer (RFC 9000 §13.3) |
 //!
 //! Each is the summary of one kind of version 1's frame sources
 //! ([`FrameSources`]), and what comes of it is that source's
@@ -22,9 +23,10 @@
 //! destination connection ID strategy,
 //! [`LineageCryptoFrameSource`](super::send::LineageCryptoFrameSource),
 //! the [`Own`](super::Side::Own) data of the side,
-//! [`PaddingFrameSource`](crate::write::PaddingFrameSource), and for the
+//! [`PaddingFrameSource`](crate::write::PaddingFrameSource), for the
 //! streams' frames the stream set, through
-//! [`LineageStreamFrameSource`](super::streams::send::LineageStreamFrameSource)).
+//! [`LineageStreamFrameSource`](super::streams::send::LineageStreamFrameSource),
+//! and the local connection ID strategy).
 use frunk_core::{HList, hlist_pat};
 use sakuya_recovery::{ack_obligation::AckDue, packet_number_space::PacketNumberSpaceKind};
 use sakuya_stream::send_options::destination::Unfulfilled;
@@ -45,6 +47,7 @@ use super::{
 };
 use crate::{
     clock::InstantOf,
+    connection_id::local::NewConnectionIdSummary,
     feedback::{FeedbackSummariesOf, FeedbackSummaryOf, PartsSendFeedback},
     send_strategy::{SendIntentsOf, SendStrategyTypes},
     take::{AppendEach, Lineage, OptionalRefs, Reborrow, Take, TakeEach, WithOptionals},
@@ -71,6 +74,7 @@ pub type FeedbackSummary<I> = frunk_core::Coprod!(
     DataBlockedSummary,
     StreamDataBlockedSummary,
     StreamsBlockedSummary,
+    NewConnectionIdSummary,
 );
 
 /// The summary of a CRYPTO frame written into a packet: which bytes of

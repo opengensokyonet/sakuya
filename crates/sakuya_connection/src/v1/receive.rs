@@ -343,7 +343,7 @@ where
     let level = packet.packet().level();
     let space = space_of(level);
     let (packet, arrival) = packet.into_parts();
-    let (opened, bytes, one_rtt, initial_scid) = {
+    let (opened, bytes, one_rtt, initial_scid, destination) = {
         let keys = match receive_keys::<T, L, Ii, Ih, Io>(lineage, level) {
             LevelReceiveKeys::Ready(keys) => keys,
             // a closing link path gets no more keys than it has
@@ -375,6 +375,16 @@ where
             | ProtectedPacket::Handshake(..)
             | ProtectedPacket::OneRtt(..) => None,
         };
+        let destination = match &packet {
+            ProtectedPacket::Initial(long, _)
+            | ProtectedPacket::ZeroRtt(long, _)
+            | ProtectedPacket::Handshake(long, _) => *long.dcid(),
+            // one longer than version 1 allows is none of this side's
+            // connection IDs, and stands for none of them
+            ProtectedPacket::OneRtt(short, _) => {
+                ConnectionId::try_from(*short.dcid()).unwrap_or(ConnectionId::EMPTY)
+            }
+        };
         let mut bytes = packet.into_bytes();
         let (opening, aead) = match keys {
             ReceiveKeys::Level(keys) => (
@@ -394,7 +404,7 @@ where
             }
         };
         match opening {
-            Ok((opened, one_rtt)) => (opened, bytes, one_rtt, initial_scid),
+            Ok((opened, one_rtt)) => (opened, bytes, one_rtt, initial_scid, destination),
             Err(reason) => {
                 if fails_authentication(&reason) {
                     lineage
@@ -446,7 +456,7 @@ where
         // generations, which `one_rtt` holds
         (None, EncryptionLevel::OneRtt) => unreachable!("1-RTT keys open with a generation"),
     };
-    let facts = DispatchFacts::new(protection, at, link_path);
+    let facts = DispatchFacts::new(protection, destination, at, link_path);
     if closing {
         find_close::<T, L, B, Ik, Hd>(lineage, others, payload, &facts)?;
         return Ok(PacketOutcome::Closing);

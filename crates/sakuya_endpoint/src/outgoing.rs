@@ -217,13 +217,13 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
         // invariant: the capacity is within the bound a queue can have.
         let queue = queue.expect("the capacity is within the bound");
         let mut receiver = ConnectionDatagramReceiver::new(queue, None);
-        let first_local_connection_id = match register_first_local(
+        let first_local = match register_first_local(
             &self.domain,
             &mut receiver,
             &self.link,
             &mut self.zero_length,
         ) {
-            Ok(id) => id,
+            Ok(first_local) => first_local,
             Err(source) => return Err(StartOutgoingError::EndpointClosed { half: self, source }),
         };
         let Self {
@@ -240,11 +240,7 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
             .address_tokens
             .take(&server_name)
             .filter(|token| {
-                fits_initial_packet(
-                    token.len(),
-                    client_dcid.len(),
-                    first_local_connection_id.id().len(),
-                )
+                fits_initial_packet(token.len(), client_dcid.len(), first_local.id.id().len())
             })
             .unwrap_or_default();
         let sink = KeyedAddressTokenSink::new(config.address_tokens.clone(), server_name);
@@ -262,7 +258,8 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
             first_flight: FirstFlight::Datagrams(Vec::new()),
             initial_receiver: InitialPathReceiver::new(receiver),
             reset_token_registry: domain.reset_tokens.clone(),
-            first_local_connection_id,
+            first_local_connection_id: first_local.id,
+            local_connection_id_issuer: first_local.issuer,
             close_request: CloseRequestCell::new(),
         };
         let (driver, handle) = make_connection::<C::Choices, C::Parts, _, I>(

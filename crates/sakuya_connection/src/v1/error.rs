@@ -21,7 +21,9 @@ use sakuya_wire::{
 };
 use snafu::Snafu;
 
-use crate::connection_id::violation::NewConnectionIdViolationError;
+use crate::connection_id::{
+    local::RetiredByPeerViolationError, violation::NewConnectionIdViolationError,
+};
 
 use super::{
     aead_usage::AeadLimitReachedError,
@@ -164,6 +166,13 @@ pub enum ConnectionError<R = OnResetStreamError> {
         /// The broken rule.
         source: NewConnectionIdViolationError,
     },
+    /// A RETIRE_CONNECTION_ID frame broke a rule the local connection ID
+    /// strategy checks.
+    #[snafu(display("RETIRE_CONNECTION_ID frame rejected"))]
+    RetireConnectionId {
+        /// The broken rule.
+        source: RetiredByPeerViolationError,
+    },
     /// A frame of streams or flow control broke a rule the stream set
     /// checks.
     #[snafu(display("{:?} frame rejected by the streams", frame_type.kind()))]
@@ -214,6 +223,7 @@ impl<R: ResetStreamViolation> TransportClose for ConnectionError<R> {
             Self::AeadLimitReached { .. } => TransportErrorCode::AEAD_LIMIT_REACHED,
             Self::KeyUpdate { .. } => TransportErrorCode::KEY_UPDATE_ERROR,
             Self::NewConnectionId { source } => source.transport_error_code(),
+            Self::RetireConnectionId { source } => source.transport_error_code(),
             Self::CryptoLevelMove { source } => match source {
                 CryptoLevelMoveError::UnreadBytes { .. } => TransportErrorCode::PROTOCOL_VIOLATION,
                 CryptoLevelMoveError::NotForward { .. } => TransportErrorCode::INTERNAL_ERROR,
@@ -242,6 +252,9 @@ impl<R: ResetStreamViolation> TransportClose for ConnectionError<R> {
                 Some(frame_type.get())
             }
             Self::NewConnectionId { .. } => Some(VarInt::from_u32(NEW_CONNECTION_ID_FRAME_TYPE)),
+            Self::RetireConnectionId { .. } => {
+                Some(VarInt::from_u32(RETIRE_CONNECTION_ID_FRAME_TYPE))
+            }
             Self::UnsentPacketAcknowledged { ecn_counts, .. } => {
                 Some(VarInt::from_u32(if *ecn_counts {
                     ACK_ECN_FRAME_TYPE
@@ -274,6 +287,9 @@ const CRYPTO_FRAME_TYPE: u32 = 0x06;
 
 /// The Frame Type of NEW_CONNECTION_ID (RFC 9000 §19.15).
 const NEW_CONNECTION_ID_FRAME_TYPE: u32 = 0x18;
+
+/// The Frame Type of RETIRE_CONNECTION_ID (RFC 9000 §19.16).
+const RETIRE_CONNECTION_ID_FRAME_TYPE: u32 = 0x19;
 
 /// The Frame Type of ACK without ECN counts (RFC 9000 §19.3).
 const ACK_FRAME_TYPE: u32 = 0x02;
@@ -341,6 +357,15 @@ mod tests {
         };
         assert_eq!(error.code(), TransportErrorCode::INTERNAL_ERROR);
         assert_eq!(error.frame_type(), Some(VarInt::from_u32(0x10)));
+    }
+
+    #[test]
+    fn a_rejected_retirement_is_a_protocol_violation_of_its_frame_type() {
+        let error: ConnectionError = ConnectionError::RetireConnectionId {
+            source: RetiredByPeerViolationError::NotIssued { sequence: 5 },
+        };
+        assert_eq!(error.code(), TransportErrorCode::PROTOCOL_VIOLATION);
+        assert_eq!(error.frame_type(), Some(VarInt::from_u32(0x19)));
     }
 
     #[test]

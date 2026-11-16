@@ -1,12 +1,19 @@
-//! The connection IDs of a logical path, and what registers the reset
-//! tokens of the peer's.
+//! The connection IDs of a logical path, what issues this side's and what
+//! registers the reset tokens of the peer's.
 //!
 //! Each logical path keeps its [`ConnectionIds`]: this side's connection
 //! ID, which the long headers it sends carry as their Source Connection ID,
-//! as the connection node keeps it ([`FirstLocalConnectionId`]); and the
+//! as the connection node keeps it ([`FirstLocalConnectionId`]); the
 //! destination connection ID strategy, made from the configuration the
 //! connection node keeps ([`DestinationConnectionIdConfig`]) with the
-//! `active_connection_id_limit` this side sends. A client's strategy starts
+//! `active_connection_id_limit` this side sends; and the local connection
+//! ID strategy, made with the first local connection ID and its
+//! registration, which it takes from the connection node's
+//! [`LocalConnectionIdIssuer`]. The issuer there is lent to the local
+//! strategy's events: once the peer's transport parameters are known, with
+//! the peer's `active_connection_id_limit`; once the handshake is
+//! confirmed; when a RETIRE_CONNECTION_ID frame arrives; and when its
+//! deadline comes. A client's strategy starts
 //! with the Destination Connection ID the client chose. The strategy learns
 //! the connection ID the peer chose for the handshake once: the Source
 //! Connection ID of the first Initial packet that opens from the peer (RFC
@@ -22,21 +29,26 @@
 //! [`StatelessResetSignal`], and tells the strategy when it is added and
 //! when it ends.
 
-use core::fmt;
+use core::{fmt, time::Duration};
 use std::sync::Arc;
 
 use sakuya_wire::{
     connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken},
+    parameters::ParametersOf,
     parts::Selector,
-    v1::transport_parameters::{TransportParameterSlots, integer::ActiveConnectionIdLimit},
+    v1::transport_parameters::{
+        TransportParameterSlots, TransportParameterSpace, integer::ActiveConnectionIdLimit,
+        stateless_reset_token::StatelessResetToken as StatelessResetTokenParameter,
+    },
 };
 
 use frunk_core::{HList, hlist_pat};
 
 use super::{
     Choices, ConnectionArgs, Side,
+    confirmation::HandshakeConfirmation,
     first_flight::FirstFlightStart,
-    parameters::LocalTransportParameters,
+    parameters::{LocalTransportParameters, PeerTransportParameters},
     send::{RetireConnectionIdIntent, SendTypes},
     send_planning::{SendStrategyCore, SendStrategyOf},
     stateless_reset::StatelessResetSignal,
@@ -50,6 +62,10 @@ use crate::{
     },
     connection_id::{
         DestinationConnectionIdStrategy, NewConnectionId,
+        local::{
+            ConnectionIdIssuer, IssuedConnectionId, LocalConnectionIdStrategy,
+            NewConnectionIdIntent, RetiredByPeerViolationError,
+        },
         reset_token::{ResetTokenRegistrar, ResetTokenRegistry},
         violation::NewConnectionIdViolationError,
     },
@@ -71,6 +87,11 @@ pub type ResetTokenRegistrarOf<T> = <<T as Choices>::ResetTokenRegistry as Reset
     PeerOf<T>,
     Arc<StatelessResetSignal>,
 >>::Registrar;
+
+/// What keeps a connection ID the issuer of the choices `T` issued
+/// registered with routing, until it is dropped.
+pub type LocalConnectionIdRegistrationOf<T> =
+    <<T as Choices>::ConnectionIdIssuer as ConnectionIdIssuer>::Registration;
 
 /// The configuration the destination connection ID strategy of the
 /// choices `T` is made from.
@@ -160,6 +181,91 @@ where
     }
 }
 impl PassiveDataComponent for FirstLocalConnectionId {}
+
+/// What issues this side's connection IDs after the first, `C`, kept in the
+/// connection node and lent to the events of the local connection ID
+/// strategy, with the registration of the first local connection ID with
+/// routing until the first logical path's strategy takes it.
+///
+/// The connection is made with one ([`ConnectionArgs::local_connection_id_issuer`]),
+/// which the connection node moves out of what it was made with.
+pub struct LocalConnectionIdIssuer<C: ConnectionIdIssuer> {
+    /// `None` only in what the connection was made with, once the
+    /// connection node moved it out.
+    issuer: Option<C>,
+    first_registration: Option<C::Registration>,
+}
+
+impl<C: ConnectionIdIssuer> LocalConnectionIdIssuer<C> {
+    /// `issuer`, with `first_registration`, the registration of the first
+    /// local connection ID: `Some` when that connection ID is
+    /// [`Issued`](FirstLocalConnectionId::Issued), and then the local
+    /// connection ID strategy keeps it; `None` for a zero-length one, whose
+    /// registration by its local end whoever made the connection keeps. A
+    /// connection whose first local connection ID was issued and is made
+    /// without its registration issues no other, as one with a zero-length
+    /// connection ID; a registration given with a zero-length one is
+    /// dropped.
+    pub fn new(issuer: C, first_registration: Option<C::Registration>) -> Self {
+        Self {
+            issuer: Some(issuer),
+            first_registration,
+        }
+    }
+
+    /// Move the issuer and the registration out into a new value, leaving
+    /// this one empty.
+    fn moved(&mut self) -> Self {
+        Self {
+            issuer: self.issuer.take(),
+            first_registration: self.first_registration.take(),
+        }
+    }
+
+    /// The issuer, to lend to an event of the local connection ID strategy.
+    pub fn issuer_mut(&mut self) -> &mut C {
+        // invariant: only what the connection was made with is left
+        // without its issuer, once the connection node moved it out; the
+        // connection node's keeps it
+        self.issuer
+            .as_mut()
+            .expect("the connection node keeps its connection ID issuer")
+    }
+
+    /// The registration of the first local connection ID, the first time
+    /// it is asked for; `None` afterwards.
+    fn take_first_registration(&mut self) -> Option<C::Registration> {
+        self.first_registration.take()
+    }
+}
+
+impl<C: ConnectionIdIssuer> fmt::Debug for LocalConnectionIdIssuer<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LocalConnectionIdIssuer")
+            .field("first_registration", &self.first_registration.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)>
+    for LocalConnectionIdIssuer<T::ConnectionIdIssuer>
+where
+    L: LineagePartList<T>,
+    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        args: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        Selector::<ConnectionArgs<T, L>, I>::get_mut(args)
+            .local_connection_id_issuer
+            .moved()
+    }
+}
+/// It has no deadline and reads nothing; the first logical path takes the
+/// registration from it, and the events of the local connection ID
+/// strategy are lent the issuer.
+impl<C: ConnectionIdIssuer> PassiveDataComponent for LocalConnectionIdIssuer<C> {}
 
 /// The Destination Connection IDs of the client's first Initial packets,
 /// kept in the connection node: what the transport parameters state of
@@ -305,25 +411,32 @@ where
 }
 impl PassiveDataComponent for Arc<StatelessResetSignal> {}
 
-/// The connection IDs of a logical path: this side's, and the destination
-/// connection ID strategy, with whether it was told the peer's handshake
-/// connection ID.
-pub struct ConnectionIds<D> {
+/// The connection IDs of a logical path: this side's, the destination
+/// connection ID strategy `D` and the local connection ID strategy `Lo`,
+/// with whether the destination strategy was told the peer's handshake
+/// connection ID and the local strategy the peer's limit and the
+/// confirmation.
+pub struct ConnectionIds<D, Lo> {
     local: ConnectionId,
     destination: D,
+    local_strategy: Lo,
     handshake_known: bool,
+    peer_limit_told: bool,
+    confirmation_told: bool,
 }
 
-impl<D> fmt::Debug for ConnectionIds<D> {
+impl<D, Lo> fmt::Debug for ConnectionIds<D, Lo> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ConnectionIds")
             .field("local", &self.local)
             .field("handshake_known", &self.handshake_known)
+            .field("peer_limit_told", &self.peer_limit_told)
+            .field("confirmation_told", &self.confirmation_told)
             .finish_non_exhaustive()
     }
 }
 
-impl<D> ConnectionIds<D> {
+impl<D, Lo> ConnectionIds<D, Lo> {
     /// This side's connection ID: the Source Connection ID of the long
     /// headers it sends.
     pub fn local(&self) -> ConnectionId {
@@ -341,6 +454,17 @@ impl<D> ConnectionIds<D> {
         &mut self.destination
     }
 
+    /// The local connection ID strategy.
+    pub fn local_strategy(&self) -> &Lo {
+        &self.local_strategy
+    }
+
+    /// The local connection ID strategy, to tell it of an event or to
+    /// write its NEW_CONNECTION_ID frames with.
+    pub fn local_strategy_mut(&mut self) -> &mut Lo {
+        &mut self.local_strategy
+    }
+
     /// The peer chose `id` for the handshake; only the first time counts
     /// (RFC 9000 §7.2).
     pub(super) fn handshake_connection_id<Id, I, R>(&mut self, id: ConnectionId)
@@ -356,18 +480,24 @@ impl<D> ConnectionIds<D> {
 }
 
 /// The connection IDs of a logical path of the choices `T`.
-pub type ConnectionIdsOf<T> = ConnectionIds<<T as Choices>::DestinationConnectionIds>;
+pub type ConnectionIdsOf<T> =
+    ConnectionIds<<T as Choices>::DestinationConnectionIds, <T as Choices>::LocalConnectionIds>;
 
 /// This side's connection ID is the one the connection was made with. The
-/// strategy is made with the `active_connection_id_limit` this side
-/// sends, as sent or else as configured (RFC 9000 §18.2: 2 when absent),
-/// and starts with what the side sends with before the peer chose its
-/// connection ID: a client, the Destination Connection ID it chose (RFC
-/// 9000 §7.2). A first flight read before the connection was made gives
-/// the handshake connection ID it opened, which the connection node then
-/// keeps too.
-impl<T: Choices, L, Ic, Il, Ia, If, Ix, Id, Ip>
-    Build<T, L, layer::LogicalPath, ((Ic, Il, Ia, If, Ix), (Id, Ip))> for ConnectionIdsOf<T>
+/// destination strategy is made with the `active_connection_id_limit` this
+/// side sends, as sent or else as configured (RFC 9000 §18.2: 2 when
+/// absent), and starts with what the side sends with before the peer
+/// chose its connection ID: a client, the Destination Connection ID it
+/// chose (RFC 9000 §7.2). A first flight read before the connection was
+/// made gives the handshake connection ID it opened, which the connection
+/// node then keeps too.
+///
+/// The local strategy is made with the first local connection ID, numbered
+/// 0, and the registration the connection node keeps for it, which the
+/// first logical path takes; a zero-length one has none to take, and the
+/// strategy is made with nothing then.
+impl<T: Choices, L, Ic, Il, Ia, If, Ix, Id, Ip, Iu>
+    Build<T, L, layer::LogicalPath, ((Ic, Il, Ia, If, Ix), (Id, Ip, Iu))> for ConnectionIdsOf<T>
 where
     L: LineagePartList<T>,
     TransportParameterSlots: Selector<Option<ActiveConnectionIdLimit>, Ia>,
@@ -376,7 +506,8 @@ where
         + GetAt<FirstFlightStart<T>, If>
         + GetAt<FirstLocalConnectionId, Ix>
         + GetAt<InitialDestinationConnectionIds, Id>
-        + GetAt<PeerHandshakeConnectionId, Ip>,
+        + GetAt<PeerHandshakeConnectionId, Ip>
+        + GetAt<LocalConnectionIdIssuer<T::ConnectionIdIssuer>, Iu>,
 {
     fn build<'v>(
         parents: &mut ParentsOf<'v, T, L, layer::LogicalPath>,
@@ -391,14 +522,38 @@ where
         let config = &parents
             .get::<DestinationConnectionIdConfig<DestinationConnectionIdConfigOf<T>>, Ic>()
             .0;
+        let destination = <T::DestinationConnectionIds as DestinationConnectionIdStrategy<
+            LinkIdOf<T>,
+            InstantOf<T>,
+            ResetTokenRegistrarOf<T>,
+        >>::new(config, active_limit);
+        let first_local = *parents.get::<FirstLocalConnectionId, Ix>();
+        let registration = parents
+            .get_mut::<LocalConnectionIdIssuer<T::ConnectionIdIssuer>, Iu>()
+            .take_first_registration();
+        let first_issued = match (first_local, registration) {
+            (FirstLocalConnectionId::Issued { id, reset_token }, Some(registration)) => {
+                Some(IssuedConnectionId {
+                    id,
+                    token: reset_token,
+                    registration,
+                })
+            }
+            (FirstLocalConnectionId::Issued { .. }, None)
+            | (FirstLocalConnectionId::ZeroLength, _) => None,
+        };
+        let local_strategy = <T::LocalConnectionIds as LocalConnectionIdStrategy<
+            LinkIdOf<T>,
+            InstantOf<T>,
+            LocalConnectionIdRegistrationOf<T>,
+        >>::new(first_issued);
         let mut ids = ConnectionIds {
-            local: parents.get::<FirstLocalConnectionId, Ix>().id(),
-            destination: <T::DestinationConnectionIds as DestinationConnectionIdStrategy<
-                LinkIdOf<T>,
-                InstantOf<T>,
-                ResetTokenRegistrarOf<T>,
-            >>::new(config, active_limit),
+            local: first_local.id(),
+            destination,
+            local_strategy,
             handshake_known: false,
+            peer_limit_told: false,
+            confirmation_told: false,
         };
         let made_with = parents
             .get::<InitialDestinationConnectionIds, Id>()
@@ -422,7 +577,7 @@ where
     }
 }
 
-// ---- the strategy's events that retire connection IDs ----
+// ---- the strategies' events that retire and issue connection IDs ----
 
 /// The core of the send strategy of the choices `T` and the list of parts
 /// `L`, as the connection node holds it.
@@ -433,13 +588,26 @@ type CoreOf<T, L> = SendStrategyCore<SendStrategyOf<T, L>>;
 /// connection IDs, and the core the frames are published to.
 type RetiringTakes<T, L> = HList![ConnectionIdsOf<T>, CoreOf<T, L>];
 
+/// What an event of the local connection ID strategy takes out of a
+/// lineage: the logical path's connection IDs, the core the
+/// NEW_CONNECTION_ID frames are published to, and the connection's issuer.
+type IssuingTakes<T, L> = HList![
+    ConnectionIdsOf<T>,
+    CoreOf<T, L>,
+    LocalConnectionIdIssuer<<T as Choices>::ConnectionIdIssuer>
+];
+
 /// `V: CoreLentConnectionIdEvents<T, L, H>`: the events of the destination
-/// connection ID strategy that may retire connection IDs, in a lineage of
-/// `V`, with the core, which the lineage holds, lent to publish the
-/// frames of what they retire.
+/// connection ID strategy that may retire connection IDs and those of the
+/// local connection ID strategy, in a lineage of `V`, with the core, which
+/// the lineage holds, lent to publish the frames of what they retire or
+/// issue, and the local strategy's events with the connection's issuer,
+/// which the lineage holds too.
 ///
-/// `H` holds the positions of the connection IDs and of the core, and the
-/// place of [`RetireConnectionIdIntent`] among the composition's intents.
+/// `H` holds the positions of what the destination strategy's events take
+/// and the place of [`RetireConnectionIdIntent`] among the composition's
+/// intents, then the positions of what the local strategy's events take
+/// and the place of [`NewConnectionIdIntent`].
 pub trait CoreLentConnectionIdEvents<T: Choices, L, H>: Sized {
     /// The peer issued `issued`.
     ///
@@ -455,17 +623,45 @@ pub trait CoreLentConnectionIdEvents<T: Choices, L, H>: Sized {
     /// `link_path` ended.
     fn link_path_ended(lineage: &mut Lineage<'_, Self>, link_path: &LinkIdOf<T>);
 
-    /// The strategy's deadline came at `now`.
+    /// This side may issue up to `peer_limit` connection IDs.
+    fn issuable(lineage: &mut Lineage<'_, Self>, peer_limit: u64);
+
+    /// The handshake is confirmed.
+    fn handshake_confirmed(lineage: &mut Lineage<'_, Self>);
+
+    /// The peer retired `sequence` in a packet sent to
+    /// `packet_destination` that arrived at `now`, with the probe timeout
+    /// `pto` then.
+    ///
+    /// # Errors
+    ///
+    /// What [`LocalConnectionIdStrategy::on_retired_by_peer`] returns.
+    fn retired_by_peer(
+        lineage: &mut Lineage<'_, Self>,
+        sequence: u64,
+        packet_destination: &ConnectionId,
+        now: InstantOf<T>,
+        pto: Duration,
+    ) -> Result<(), RetiredByPeerViolationError>;
+
+    /// The deadline of the logical path's connection IDs came at `now`:
+    /// each strategy does what is due by then.
     fn deadline(lineage: &mut Lineage<'_, Self>, now: InstantOf<T>);
 }
 
-impl<T, L, V, Is, Idx> CoreLentConnectionIdEvents<T, L, (Is, Idx)> for V
+// TODO: the local strategy's `on_used_by_peer` is not told yet: version 1
+// has one logical path, and its receiving call does not yet tell which of
+// this side's connection IDs the peer switched to on a link path.
+impl<T, L, V, Is, Idx, Iu, Idn> CoreLentConnectionIdEvents<T, L, (Is, Idx, Iu, Idn)> for V
 where
     T: Choices,
     SendTypes<T, L>: SendStrategyTypes,
-    CoreOf<T, L>: PublishIntent<RetireConnectionIdIntent, Idx> + 'static,
+    CoreOf<T, L>: PublishIntent<RetireConnectionIdIntent, Idx>
+        + PublishIntent<NewConnectionIdIntent, Idn>
+        + 'static,
     for<'s> V: Reborrow<'s>,
-    for<'s> <V as Reborrow<'s>>::Out: TakeEach<'s, RetiringTakes<T, L>, Is>,
+    for<'s> <V as Reborrow<'s>>::Out:
+        TakeEach<'s, RetiringTakes<T, L>, Is> + TakeEach<'s, IssuingTakes<T, L>, Iu>,
 {
     fn new_connection_id(
         lineage: &mut Lineage<'_, V>,
@@ -488,6 +684,47 @@ where
         );
     }
 
+    fn issuable(lineage: &mut Lineage<'_, V>, peer_limit: u64) {
+        let (hlist_pat![ids, core, issuer], _) =
+            Take::<IssuingTakes<T, L>, Iu>::take(lineage.reborrow());
+        LocalConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, LocalConnectionIdRegistrationOf<T>>::on_issuable::<_, _, Idn>(
+            &mut ids.local_strategy,
+            issuer.issuer_mut(),
+            core,
+            peer_limit,
+        );
+    }
+
+    fn handshake_confirmed(lineage: &mut Lineage<'_, V>) {
+        let (hlist_pat![ids, core, issuer], _) =
+            Take::<IssuingTakes<T, L>, Iu>::take(lineage.reborrow());
+        LocalConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, LocalConnectionIdRegistrationOf<T>>::on_handshake_confirmed::<_, _, Idn>(
+            &mut ids.local_strategy,
+            issuer.issuer_mut(),
+            core,
+        );
+    }
+
+    fn retired_by_peer(
+        lineage: &mut Lineage<'_, V>,
+        sequence: u64,
+        packet_destination: &ConnectionId,
+        now: InstantOf<T>,
+        pto: Duration,
+    ) -> Result<(), RetiredByPeerViolationError> {
+        let (hlist_pat![ids, core, issuer], _) =
+            Take::<IssuingTakes<T, L>, Iu>::take(lineage.reborrow());
+        LocalConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, LocalConnectionIdRegistrationOf<T>>::on_retired_by_peer::<_, _, Idn>(
+            &mut ids.local_strategy,
+            issuer.issuer_mut(),
+            core,
+            sequence,
+            packet_destination,
+            now,
+            pto,
+        )
+    }
+
     fn deadline(lineage: &mut Lineage<'_, V>, now: InstantOf<T>) {
         let (hlist_pat![ids, core], _) = Take::<RetiringTakes<T, L>, Is>::take(lineage.reborrow());
         DestinationConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>::on_deadline::<_, Idx>(
@@ -495,24 +732,65 @@ where
             core,
             now,
         );
+        let (hlist_pat![ids, core, issuer], _) =
+            Take::<IssuingTakes<T, L>, Iu>::take(lineage.reborrow());
+        LocalConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, LocalConnectionIdRegistrationOf<T>>::on_deadline::<_, _, Idn>(
+            &mut ids.local_strategy,
+            issuer.issuer_mut(),
+            core,
+            now,
+        );
     }
 }
 
-/// The strategy's deadline is its own; it reads itself. When it comes,
-/// what it retires is published to the core.
-impl<T: Choices, L, I, H> DataComponent<T, L, layer::LogicalPath, (I, H)> for ConnectionIdsOf<T>
+/// The connection IDs' deadline is the earlier of the two strategies'; they
+/// read themselves. When it comes, each strategy does what is due, and what
+/// they retire or issue is published to the core.
+///
+/// They also read whether the handshake is confirmed and the peer's
+/// transport parameters, to tell the local strategy once each: once the
+/// peer's parameters are known, 1-RTT packets can be sent (a server's after
+/// it processed the ClientHello, a client's as its handshake completes),
+/// and this side may issue up to the peer's `active_connection_id_limit`
+/// (2 when absent, RFC 9000 §18.2); once the handshake is confirmed, the
+/// strategy is told so. The first call this side may issue at the
+/// protocol's minimum of 2 is not made: the strategy starts there. A
+/// server's `stateless_reset_token` among the peer's parameters, which only
+/// a client receives, is the token of the handshake connection ID the
+/// destination strategy is told then.
+impl<T: Choices, L, I, H, If, Ip, Ia, It>
+    DataComponent<T, L, layer::LogicalPath, (I, H, (If, Ip, Ia, It))> for ConnectionIdsOf<T>
 where
-    L: LineagePartList<T>,
-    for<'v> <L as LineageLists<'v, T>>::LogicalPath:
-        GetAt<Self, I> + CoreLentConnectionIdEvents<T, L, H>,
+    L: LineagePartList<T> + ParametersOf<TransportParameterSpace>,
+    TransportParameterSlots<L>: Selector<Option<ActiveConnectionIdLimit>, Ia>
+        + Selector<Option<StatelessResetTokenParameter>, It>,
+    for<'v> <L as LineageLists<'v, T>>::LogicalPath: GetAt<Self, I>
+        + GetAt<HandshakeConfirmation, If>
+        + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>
+        + CoreLentConnectionIdEvents<T, L, H>,
 {
     fn reads(reads: &mut ReadSet) {
-        reads.add::<Self>();
+        reads
+            .add::<Self>()
+            .add::<HandshakeConfirmation>()
+            .add::<PeerTransportParameters<TransportParameterSlots<L>>>();
     }
     fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::LogicalPath>) -> Option<InstantOf<T>> {
-        DestinationConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>::next_deadline(
-            &lineage.get::<Self, I>().destination,
-        )
+        let ids = lineage.get::<Self, I>();
+        let destination = DestinationConnectionIdStrategy::<
+            LinkIdOf<T>,
+            InstantOf<T>,
+            ResetTokenRegistrarOf<T>,
+        >::next_deadline(&ids.destination);
+        let local = LocalConnectionIdStrategy::<
+            LinkIdOf<T>,
+            InstantOf<T>,
+            LocalConnectionIdRegistrationOf<T>,
+        >::next_deadline(&ids.local_strategy);
+        match (destination, local) {
+            (Some(destination), Some(local)) => Some(destination.min(local)),
+            (destination, local) => destination.or(local),
+        }
     }
     fn expire<'v, B: CallBundle>(
         mut lineage: LineageOf<'v, T, L, layer::LogicalPath>,
@@ -520,6 +798,47 @@ where
         now: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
         CoreLentConnectionIdEvents::<T, L, H>::deadline(&mut lineage, now);
+        None
+    }
+    fn reread<'v, B: CallBundle>(
+        mut lineage: LineageOf<'v, T, L, layer::LogicalPath>,
+        _: &mut OtherNodes<'v, T, L, B>,
+        _: InstantOf<T>,
+    ) -> Option<RequestOf<T, L>> {
+        let ids = lineage.get::<Self, I>();
+        let (limit_told, confirmation_told) = (ids.peer_limit_told, ids.confirmation_told);
+        let known = if limit_told {
+            None
+        } else {
+            lineage
+                .get::<PeerTransportParameters<TransportParameterSlots<L>>, Ip>()
+                .known()
+                .map(|slots| {
+                    let limit = (*Selector::<Option<ActiveConnectionIdLimit>, Ia>::get(slots))
+                        .unwrap_or_default();
+                    let token = (*Selector::<Option<StatelessResetTokenParameter>, It>::get(slots))
+                        .map(StatelessResetTokenParameter::get);
+                    (u64::from(limit.get()), token)
+                })
+        };
+        let confirmed = !confirmation_told
+            && *lineage.get::<HandshakeConfirmation, If>() == HandshakeConfirmation::Confirmed;
+        if let Some((limit, token)) = known {
+            let ids = lineage.get_mut::<Self, I>();
+            ids.peer_limit_told = true;
+            if let Some(token) = token {
+                DestinationConnectionIdStrategy::<
+                    LinkIdOf<T>,
+                    InstantOf<T>,
+                    ResetTokenRegistrarOf<T>,
+                >::on_handshake_reset_token(&mut ids.destination, token);
+            }
+            CoreLentConnectionIdEvents::<T, L, H>::issuable(&mut lineage, limit);
+        }
+        if confirmed {
+            lineage.get_mut::<Self, I>().confirmation_told = true;
+            CoreLentConnectionIdEvents::<T, L, H>::handshake_confirmed(&mut lineage);
+        }
         None
     }
 }

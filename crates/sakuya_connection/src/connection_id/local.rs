@@ -143,10 +143,19 @@ impl RetiredByPeerViolationError {
 /// (`Self: FrameSource<Intent = NewConnectionIdIntent>`); the events that
 /// issue publish them to `publish`.
 pub trait LocalConnectionIdStrategy<Id, I, R> {
+    /// The strategy of a new logical path whose handshake connection ID,
+    /// sequence number 0, is `first`, with its registration, which the
+    /// strategy keeps; `None` for a zero-length local connection ID, which
+    /// issues none (RFC 9000 §5.1.1).
+    fn new(first: Option<IssuedConnectionId<R>>) -> Self
+    where
+        Self: Sized;
+
     /// This side may issue up to `peer_limit` connection IDs, the one of
-    /// the handshake included: first with the protocol's minimum of 2, then
-    /// with the peer's `active_connection_id_limit` once 1-RTT packets can
-    /// be sent (RFC 9000 §5.1.1, §18.2). It only grows.
+    /// the handshake included: the protocol's minimum of 2 holds from the
+    /// start, when the strategy is made, and this is called with the
+    /// peer's `active_connection_id_limit` once 1-RTT packets can be sent
+    /// (RFC 9000 §5.1.1, §18.2). It only grows.
     fn on_issuable<C, Pb, Idx>(&mut self, issuer: &mut C, publish: &mut Pb, peer_limit: u64)
     where
         C: ConnectionIdIssuer<Registration = R>,
@@ -212,8 +221,8 @@ pub trait LocalConnectionIdStrategy<Id, I, R> {
 struct Issued<R, I> {
     id: NonEmptyCid,
     token: StatelessResetToken,
-    /// `None` for the handshake's while it is held elsewhere.
-    registration: Option<R>,
+    #[expect(dead_code, reason = "held for the entry to stay registered")]
+    registration: R,
     /// When the peer retired it: the registration is dropped at this
     /// instant.
     deregister_at: Option<I>,
@@ -242,30 +251,6 @@ impl<R, I: Ord + Copy + Add<Duration, Output = I>> SequenceMapLocalConnectionIdS
     /// The most connection IDs it keeps issued: 4.
     pub const DEFAULT_ACTIVE_LIMIT: u64 = 4;
 
-    /// The strategy of a connection whose handshake connection ID is
-    /// `first`, sequence number 0, registered with `registration` when it
-    /// holds it; `None` for a zero-length local connection ID.
-    pub fn new(first: Option<(NonEmptyCid, StatelessResetToken)>, registration: Option<R>) -> Self {
-        let issued = first.map(|(id, token)| {
-            BTreeMap::from([(
-                0,
-                Issued {
-                    id,
-                    token,
-                    registration,
-                    deregister_at: None,
-                    acknowledged: true,
-                },
-            )])
-        });
-        Self {
-            issued,
-            next_sequence: 1,
-            peer_limit: 2,
-            confirmed: false,
-        }
-    }
-
     /// The connection IDs issued and not retired by the peer, in order.
     pub fn active(&self) -> impl Iterator<Item = (u64, NonEmptyCid)> + '_ {
         self.issued
@@ -278,9 +263,8 @@ impl<R, I: Ord + Copy + Add<Duration, Output = I>> SequenceMapLocalConnectionIdS
     /// Whether the connection ID numbered `sequence` is still registered.
     pub fn is_registered(&self, sequence: u64) -> bool {
         self.issued
-            .iter()
-            .flatten()
-            .any(|(each, issued)| *each == sequence && issued.registration.is_some())
+            .as_ref()
+            .is_some_and(|issued| issued.contains_key(&sequence))
     }
 
     fn top_up<C, Pb, Idx>(&mut self, issuer: &mut C, publish: &mut Pb)
@@ -308,7 +292,7 @@ impl<R, I: Ord + Copy + Add<Duration, Output = I>> SequenceMapLocalConnectionIdS
                 Issued {
                     id: new.id,
                     token: new.token,
-                    registration: Some(new.registration),
+                    registration: new.registration,
                     deregister_at: None,
                     acknowledged: false,
                 },
@@ -323,6 +307,29 @@ impl<Id, R, I> LocalConnectionIdStrategy<Id, I, R> for SequenceMapLocalConnectio
 where
     I: Ord + Copy + Add<Duration, Output = I>,
 {
+    /// The handshake connection ID counts as acknowledged: the handshake
+    /// disclosed it, not a NEW_CONNECTION_ID frame.
+    fn new(first: Option<IssuedConnectionId<R>>) -> Self {
+        let issued = first.map(|first| {
+            BTreeMap::from([(
+                0,
+                Issued {
+                    id: first.id,
+                    token: first.token,
+                    registration: first.registration,
+                    deregister_at: None,
+                    acknowledged: true,
+                },
+            )])
+        });
+        Self {
+            issued,
+            next_sequence: 1,
+            peer_limit: 2,
+            confirmed: false,
+        }
+    }
+
     fn on_issuable<C, Pb, Idx>(&mut self, issuer: &mut C, publish: &mut Pb, peer_limit: u64)
     where
         C: ConnectionIdIssuer<Registration = R>,

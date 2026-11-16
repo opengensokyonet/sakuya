@@ -29,6 +29,7 @@ use crate::{
     dropped_input::DroppedInputCounts,
     handshake::{ClientHandshakeConfig, ServerHandshakeConfig},
     incoming::IncomingShared,
+    issuer::EndpointConnectionIdIssuer,
     part::PartConfigs,
     reflow::{NoServerReflow, ReflowQueues, ReflowSteps, ServerReflow},
     retry::StatelessRetryPolicy,
@@ -132,6 +133,7 @@ pub trait AcceptingServerRole<E: EndpointChoices>:
             Crypto = E::Crypto,
             Receiver = ConnectionDatagramReceiver<E>,
             ResetTokenRegistry = ResetTokensOf<E>,
+            ConnectionIdIssuer = EndpointConnectionIdIssuer<E>,
             Side = v1::Server<<Self::Handshake as ServerHandshakeConfig>::Start>,
         >;
     /// The list of parts of the role's connections.
@@ -180,6 +182,7 @@ pub trait ConnectingClientRole<E: EndpointChoices>:
             Crypto = E::Crypto,
             Receiver = ConnectionDatagramReceiver<E>,
             ResetTokenRegistry = ResetTokensOf<E>,
+            ConnectionIdIssuer = EndpointConnectionIdIssuer<E>,
             Side = ConnectingClientSide<Self::Handshake, Self::AddressTokens, Self::RetryPolicy>,
         >;
     /// The list of parts of the role's connections.
@@ -276,6 +279,7 @@ where
             Crypto = E::Crypto,
             Receiver = ConnectionDatagramReceiver<E>,
             ResetTokenRegistry = ResetTokensOf<E>,
+            ConnectionIdIssuer = EndpointConnectionIdIssuer<E>,
             Side = v1::Server<H::Start>,
         >,
     L: PartConfigs<T, L>
@@ -333,6 +337,7 @@ where
             Crypto = E::Crypto,
             Receiver = ConnectionDatagramReceiver<E>,
             ResetTokenRegistry = ResetTokensOf<E>,
+            ConnectionIdIssuer = EndpointConnectionIdIssuer<E>,
             Side = v1::Server<H::Start>,
         >,
     L: PartConfigs<T, L>
@@ -372,6 +377,7 @@ where
             Crypto = E::Crypto,
             Receiver = ConnectionDatagramReceiver<E>,
             ResetTokenRegistry = ResetTokensOf<E>,
+            ConnectionIdIssuer = EndpointConnectionIdIssuer<E>,
             Side = ConnectingClientSide<H, St, Rp>,
         >,
     L: PartConfigs<T, L>
@@ -408,6 +414,7 @@ where
             Crypto = E::Crypto,
             Receiver = ConnectionDatagramReceiver<E>,
             ResetTokenRegistry = ResetTokensOf<E>,
+            ConnectionIdIssuer = EndpointConnectionIdIssuer<E>,
             Side = ConnectingClientSide<H, St, Rp>,
         >,
     L: PartConfigs<T, L>

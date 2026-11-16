@@ -17,6 +17,7 @@
 //! | HANDSHAKE_DONE | [`HandshakeConfirmation`]: the handshake is confirmed |
 //! | CONNECTION_CLOSE | the [`CloseReasonRecord`], with the peer's close; every link path drains |
 //! | NEW_CONNECTION_ID | the destination connection ID strategy of the logical path ([`ConnectionIds`](super::connection_ids::ConnectionIds)) |
+//! | RETIRE_CONNECTION_ID | the local connection ID strategy of the logical path, with the Destination Connection ID of the packet, its arrival and the current probe timeout |
 //! | ACK | the send journals of its space, the recovery layers of the logical path's link paths, and the parts the summaries of the packets settled go back to ([`ack`](super::ack)) |
 //! | STREAM, RESET_STREAM, STOP_SENDING, MAX_DATA, MAX_STREAM_DATA, MAX_STREAMS, DATA_BLOCKED, STREAM_DATA_BLOCKED, STREAMS_BLOCKED | the [`StreamSet`] of the established layer, with the handle of the send strategy's intake the connection node keeps; a STREAM frame with the level of its packet |
 //!
@@ -187,7 +188,9 @@ pub enum FrameNotPermittedError {
 /// is already there, and puts every link path into `Draining`, for three
 /// times the current probe timeout (RFC 9000 §10.2.2), measured as a
 /// closing link path measures it; a link path that was closing keeps its end.
-/// An ACK frame is received as [`receive_ack`] says.
+/// An ACK frame is received as [`receive_ack`] says. RETIRE_CONNECTION_ID
+/// gives the local connection ID strategy the current probe timeout,
+/// measured as a closing link path measures it.
 impl<
     T: Choices,
     L,
@@ -344,6 +347,21 @@ where
                     NewConnectionId::from(&frame),
                 )
                 .context(error::NewConnectionIdSnafu)
+            }
+            FrameRun::RetireConnectionId(frame) => {
+                let hlist_pat![peer, thresholds, idle] =
+                    (*lineage).read_each::<LinkPathRoleReads<T, L>, Iv>();
+                let pto = current_probe_timeout::<T, L, B, Ima, Irt>(peer, thresholds, others)
+                    // with no recovery layer, the last one the idle timeout took
+                    .unwrap_or_else(|| idle.probe_timeout());
+                CoreLentConnectionIdEvents::<T, L, Icid>::retired_by_peer(
+                    lineage,
+                    frame.sequence_number().get().get(),
+                    packet.destination(),
+                    packet.at(),
+                    pto,
+                )
+                .context(error::RetireConnectionIdSnafu)
             }
             FrameRun::NewToken(frame) => {
                 <T::Side as Side>::on_new_token(

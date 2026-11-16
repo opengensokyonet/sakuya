@@ -16,9 +16,14 @@ use sakuya_connection::{
     layer,
     share::LayerShare,
     v1::{
-        self, Side, advancing::HandshakeStart, close_request::CloseRequestCell,
-        connection_ids::FirstLocalConnectionId, crypto::CryptoReceiveCapacities,
-        first_flight::FirstFlight, input::InitialPathReceiver, link::LinkFacts,
+        self, Side,
+        advancing::HandshakeStart,
+        close_request::CloseRequestCell,
+        connection_ids::{FirstLocalConnectionId, LocalConnectionIdIssuer},
+        crypto::CryptoReceiveCapacities,
+        first_flight::FirstFlight,
+        input::InitialPathReceiver,
+        link::LinkFacts,
     },
 };
 use sakuya_recovery::loss::LossThresholds;
@@ -129,6 +134,7 @@ pub(crate) struct CoreFacts<T: v1::Choices> {
     pub(crate) initial_receiver: InitialPathReceiver<T::Receiver>,
     pub(crate) reset_token_registry: T::ResetTokenRegistry,
     pub(crate) first_local_connection_id: FirstLocalConnectionId,
+    pub(crate) local_connection_id_issuer: LocalConnectionIdIssuer<T::ConnectionIdIssuer>,
     pub(crate) close_request: CloseRequestCell<T::ApplicationError>,
 }
 

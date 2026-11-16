@@ -237,6 +237,29 @@ fn a_handshake_connection_id_without_a_token_registers_nothing() {
 }
 
 #[test]
+fn the_handshake_token_learned_later_is_registered_on_the_next_use() {
+    let mut registrar = Registrar::default();
+    let mut strategy = started(cid(0), None, limit(2), 4);
+    used(&mut strategy, &mut registrar, 0, 1);
+    <Strategy as DestinationConnectionIdStrategy<u8, Instant, Registrar>>::on_handshake_reset_token(
+        &mut strategy,
+        token(0),
+    );
+    assert_eq!(registrar.live(), [], "not before it is used again");
+    used(&mut strategy, &mut registrar, 0, 1);
+    used(&mut strategy, &mut registrar, 0, 1);
+    assert_eq!(registrar.live(), [token(0)]);
+    // a token already known stays
+    <Strategy as DestinationConnectionIdStrategy<u8, Instant, Registrar>>::on_handshake_reset_token(
+        &mut strategy,
+        token(1),
+    );
+    let mut other = Registrar::default();
+    used(&mut strategy, &mut other, 0, 2);
+    assert_eq!(other.live(), [token(0)]);
+}
+
+#[test]
 fn retire_prior_to_retires_before_adding() {
     let mut registrar = Registrar::default();
     let mut strategy = strategy(2, 4);

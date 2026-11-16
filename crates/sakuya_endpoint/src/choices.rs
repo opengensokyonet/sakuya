@@ -126,22 +126,23 @@ impl<E: EndpointChoices> fmt::Debug for EndpointDeliverer<E> {
 /// the [`Receiver`](sakuya_connection::v1::Choices::Receiver) of its
 /// connections' choices.
 ///
-/// It is the delivery queue its route entries post to, and it holds those
-/// entries: the one under the client's first destination connection ID, for
-/// a server, and, until the connection has a local connection ID strategy
-/// that issues connection IDs and keeps their entries, the entry of the
-/// first local connection ID. They are revoked when the receiver is
-/// dropped, with the connection's first logical path.
+/// It is the delivery queue its route entries post to, and it holds some
+/// of those entries: the one under the client's first destination
+/// connection ID, for a server, and the entry of a zero-length first local
+/// connection ID, registered by its local end. They are revoked when the
+/// receiver is dropped, with the connection's first logical path. The
+/// entries of the connection IDs that are not empty are kept by the
+/// connection's local connection ID strategy.
 pub struct ConnectionDatagramReceiver<E: EndpointChoices> {
     queue: DatagramDeliveryQueue<DeliveryOf<E>>,
     initial: Option<RegistrationOf<E>>,
     first_local: Option<FirstLocalRegistration<E>>,
 }
 
-/// The route entry of a connection's first local connection ID.
+/// The route entry of a connection's zero-length first local connection
+/// ID, which its local end is registered for.
 pub(crate) enum FirstLocalRegistration<E: EndpointChoices> {
-    /// A non-empty connection ID, or the zero-length one of a generator of
-    /// zero-length connection IDs.
+    /// The zero-length one of a generator of zero-length connection IDs.
     Issued(
         #[expect(dead_code, reason = "held for the entry to stay registered")] RegistrationOf<E>,
     ),

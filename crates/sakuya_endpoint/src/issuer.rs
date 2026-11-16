@@ -28,7 +28,6 @@ pub struct EndpointConnectionIdIssuer<E: EndpointChoices> {
 impl<E: EndpointChoices> EndpointConnectionIdIssuer<E> {
     /// The issuer of a connection whose generator is `generator` and whose
     /// datagram receiver `poster` posts to.
-    #[allow(dead_code)] // accept and start make it once it goes into the connection
     pub(crate) fn new(
         domain: Arc<Domain<E>>,
         generator: E::ConnectionIds,

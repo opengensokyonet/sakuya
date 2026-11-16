@@ -1,5 +1,6 @@
 //! What `accept` and `start` share: registering the first local
-//! connection ID and making the connection.
+//! connection ID, making the issuer of the later ones and making the
+//! connection.
 
 use sakuya_connection::{
     error::ConnectionErrorsOf,
@@ -14,7 +15,7 @@ use sakuya_connection::{
             connection::{ConnectionHandle, ConnectionHandleCellOf},
             handle,
         },
-        connection_ids::FirstLocalConnectionId,
+        connection_ids::{FirstLocalConnectionId, LocalConnectionIdIssuer},
         send::SendTypes,
         send_planning::{IntakePublishOutcome, SendStrategyOf},
         streams::send::StreamIntent,
@@ -26,60 +27,91 @@ use sakuya_datagram_routing::route::{
 use sakuya_link::Link as _;
 use sakuya_wire::{connection_id::NonEmptyCid, parts::Selector};
 
+use std::sync::Arc;
+
 use crate::{
     choices::{
         ConnectionDatagramReceiver, EndpointChoices, FirstLocalRegistration, LinkOf, LocalOf,
+        RegistrationOf,
     },
     domain::Domain,
     endpoint::EndpointClosedError,
+    issuer::EndpointConnectionIdIssuer,
     make::MakeConnection,
     part::{ConnectionFacts, CoreFacts, PartConfigs},
     zero_length::{ZeroLengthLocalOccupancy, ZeroLengthRegistration},
 };
 
+/// The first local connection ID of a connection, as
+/// [`register_first_local`] registered it, with what issues the later
+/// ones.
+pub(crate) struct RegisteredFirstLocal<E: EndpointChoices> {
+    /// The connection ID.
+    pub(crate) id: FirstLocalConnectionId,
+    /// The issuer, with the registration of a connection ID that is not
+    /// empty, which the connection's local connection ID strategy keeps.
+    pub(crate) issuer: LocalConnectionIdIssuer<EndpointConnectionIdIssuer<E>>,
+}
+
 /// Generates and registers the first local connection ID of a connection
-/// over `link`, whose entry `receiver` keeps; with `zero_length`, the
-/// connection uses zero-length local connection IDs on that local end.
+/// over `link`, whose datagram receiver is `receiver`; with `zero_length`,
+/// the connection uses zero-length local connection IDs on that local end.
+/// The connection's generator, which generated it, goes into the issuer of
+/// the later ones, which registers them for the same receiver.
 ///
-/// The entry is registered before the connection ID is disclosed.
+/// The entry is registered before the connection ID is disclosed. The entry
+/// of a connection ID that is not empty goes with the issuer, for the
+/// connection's local connection ID strategy to keep; `receiver` keeps the
+/// entry of a zero-length one, which is registered by the local end.
 ///
 /// # Errors
 ///
 /// [`EndpointClosedError`] once the endpoint has been closed; nothing is
 /// registered then, and `zero_length` is left as it was.
 pub(crate) fn register_first_local<E: EndpointChoices>(
-    domain: &Domain<E>,
+    domain: &Arc<Domain<E>>,
     receiver: &mut ConnectionDatagramReceiver<E>,
     link: &LinkOf<E>,
     zero_length: &mut Option<ZeroLengthLocalOccupancy<LocalOf<E>>>,
-) -> Result<FirstLocalConnectionId, EndpointClosedError> {
+) -> Result<RegisteredFirstLocal<E>, EndpointClosedError> {
     if domain.is_closed() {
         return Err(EndpointClosedError);
     }
-    let local = || MatchAssociation::ZeroCid(link.id().local.clone());
-    if let Some(occupancy) = zero_length.take() {
-        let registration = domain.register(local(), receiver);
-        receiver.keep_first_local(FirstLocalRegistration::ZeroLength(
-            ZeroLengthRegistration::new(registration, occupancy),
-        ));
-        return Ok(FirstLocalConnectionId::ZeroLength);
-    }
     let mut generator = E::ConnectionIds::new(&domain.connection_ids);
-    let (cid, reset_token) = generator.generate();
-    match NonEmptyCid::new(cid) {
-        Ok(id) => {
-            let registration = domain.register(MatchAssociation::LocalCid(id), receiver);
-            receiver.keep_first_local(FirstLocalRegistration::Issued(registration));
-            Ok(FirstLocalConnectionId::Issued { id, reset_token })
-        }
-        // A generator of zero-length connection IDs: the connection is
-        // told apart by its local end.
-        Err(_) => {
+    let local = || MatchAssociation::ZeroCid(link.id().local.clone());
+    let (id, registration): (_, Option<RegistrationOf<E>>) = match zero_length.take() {
+        Some(occupancy) => {
             let registration = domain.register(local(), receiver);
-            receiver.keep_first_local(FirstLocalRegistration::Issued(registration));
-            Ok(FirstLocalConnectionId::ZeroLength)
+            receiver.keep_first_local(FirstLocalRegistration::ZeroLength(
+                ZeroLengthRegistration::new(registration, occupancy),
+            ));
+            (FirstLocalConnectionId::ZeroLength, None)
         }
-    }
+        None => {
+            let (cid, reset_token) = generator.generate();
+            match NonEmptyCid::new(cid) {
+                Ok(id) => {
+                    let registration = domain.register(MatchAssociation::LocalCid(id), receiver);
+                    (
+                        FirstLocalConnectionId::Issued { id, reset_token },
+                        Some(registration),
+                    )
+                }
+                // A generator of zero-length connection IDs: the connection
+                // is told apart by its local end.
+                Err(_) => {
+                    let registration = domain.register(local(), receiver);
+                    receiver.keep_first_local(FirstLocalRegistration::Issued(registration));
+                    (FirstLocalConnectionId::ZeroLength, None)
+                }
+            }
+        }
+    };
+    let issuer = EndpointConnectionIdIssuer::new(Arc::clone(domain), generator, receiver.poster());
+    Ok(RegisteredFirstLocal {
+        id,
+        issuer: LocalConnectionIdIssuer::new(issuer, registration),
+    })
 }
 
 /// The connection of the choices `T` and the list of parts `L`, made from

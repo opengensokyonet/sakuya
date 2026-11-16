@@ -1,7 +1,8 @@
 //! What QUIC version 1 sends through the send strategy: acknowledgments of
 //! each packet number space, the PING of a probe timeout, the retirement of
-//! the peer's connection IDs, the CRYPTO data of each encryption level and
-//! a server's HANDSHAKE_DONE, as send intents, the items a packet of each
+//! the peer's connection IDs, the CRYPTO data of each encryption level, a
+//! server's HANDSHAKE_DONE, the frames of the streams and the disclosure of
+//! this side's connection IDs, as send intents, the items a packet of each
 //! kind may carry, and the frame sources that write them.
 
 use core::{marker::PhantomData, time::Duration};
@@ -15,6 +16,7 @@ use sakuya_stream::send_options::{destination::Unfulfilled, urgency::Urgency};
 use sakuya_tls::engine::CryptoLevel;
 use sakuya_wire::v1::packet_number::PacketNumber;
 use sakuya_wire::{
+    connection_id::{ConnectionId, StatelessResetToken},
     parts::Coproduct,
     v1::frame::{
         ack::{AckFrame, EcnCounts},
@@ -43,6 +45,7 @@ use super::{
 };
 use crate::{
     clock::InstantOf,
+    connection_id::local::{NewConnectionIdIntent, NewConnectionIdSummary},
     error::ConnectionErrorsOf,
     feedback::InjectSummary,
     frame_source::{
@@ -100,6 +103,8 @@ pub enum FrameSourceId {
     StreamDataBlocked,
     /// The STREAMS_BLOCKED frames of this side's streams.
     StreamsBlocked,
+    /// The NEW_CONNECTION_ID frames of the local connection ID strategy.
+    NewConnectionId,
 }
 
 /// An ACK frame is due in a packet number space.
@@ -280,6 +285,51 @@ impl RankedCoreIntent for RetireConnectionIdIntent {
     type Outcome<C> = ();
 }
 
+impl SendIntent for NewConnectionIdIntent {
+    type FrameSourceId = FrameSourceId;
+    type Class = InFlightClass;
+
+    fn frame_source(&self) -> FrameSourceId {
+        FrameSourceId::NewConnectionId
+    }
+
+    /// The frame with the longest connection ID there is: the intent does
+    /// not say how long the connection ID is.
+    fn min_lengths(&self) -> MinimumLengths {
+        let len = longest_new_connection_id_frame(self.sequence());
+        MinimumLengths {
+            with_length: len,
+            as_last: len,
+        }
+    }
+}
+
+/// The length of the NEW_CONNECTION_ID frame numbered `sequence` with
+/// Retire Prior To 0 and a connection ID of the largest length version 1
+/// allows (RFC 9000 §19.15): no frame of it is longer.
+fn longest_new_connection_id_frame(sequence: u64) -> usize {
+    1 + VarIntWidth::shortest(var_int(sequence).get()).encoded_len()
+        + 1
+        + 1
+        + ConnectionId::MAX_LEN
+        + StatelessResetToken::LEN
+}
+
+/// The rank is provisional.
+impl RankedIntent for NewConnectionIdIntent {
+    fn rank(&self) -> SendRank {
+        SendRank {
+            priority: SendPriority::Control,
+            holds_place: true,
+        }
+    }
+}
+
+/// Nothing keeps the intent: only its frame being written takes it away.
+impl RankedCoreIntent for NewConnectionIdIntent {
+    type Outcome<C> = ();
+}
+
 /// CRYPTO data of an encryption level is unsent (RFC 9000 §19.6), and the
 /// shortest CRYPTO frame of it, one byte at its first unsent offset, is
 /// `shortest` bytes long.
@@ -408,14 +458,16 @@ pub type SendIntents = frunk_core::Coprod!(
     HandshakeDoneIntent,
     CryptoIntent,
     StreamIntent<Urgency>,
+    NewConnectionIdIntent,
 );
 
 /// The kinds of version 1's frame sources: PADDING, which the packet
 /// writer writes, the ACK frames of each packet number space, the PING of
 /// a probe timeout, the RETIRE_CONNECTION_ID frames of the destination
 /// connection ID strategy, a server's HANDSHAKE_DONE, the CRYPTO frames
-/// of each encryption level and the nine frames of the streams
-/// ([`streams::send`](super::streams::send)).
+/// of each encryption level, the nine frames of the streams
+/// ([`streams::send`](super::streams::send)) and the NEW_CONNECTION_ID
+/// frames of the local connection ID strategy.
 pub type FrameSources = frunk_core::HList![
     PaddingFrames,
     AckFrames,
@@ -431,7 +483,8 @@ pub type FrameSources = frunk_core::HList![
     MaxStreamsFrames,
     DataBlockedFrames,
     StreamDataBlockedFrames,
-    StreamsBlockedFrames
+    StreamsBlockedFrames,
+    NewConnectionIdFrames
 ];
 
 /// One planned item of version 1: an item of one of [`FrameSources`].
@@ -457,7 +510,8 @@ fn crypto_level(kind: PlannedPacketKind) -> Option<CryptoLevel> {
 /// `ack`: ACK frames are not allowed in 0-RTT packets (RFC 9000 §12.4); a
 /// candidate's and a settling link path's packets carry neither.
 /// RETIRE_CONNECTION_ID and HANDSHAKE_DONE frames go in 1-RTT packets only
-/// (RFC 9000 §12.4, §12.5).
+/// (RFC 9000 §12.4, §12.5); NEW_CONNECTION_ID frames, as the frames of the
+/// streams, in 0-RTT and 1-RTT packets ([`carries_streams`]).
 fn carries(kind: PlannedPacketKind, space: PacketNumberSpaceKind, ack: bool) -> bool {
     match kind {
         PlannedPacketKind::Initial => space == PacketNumberSpaceKind::Initial,
@@ -468,8 +522,9 @@ fn carries(kind: PlannedPacketKind, space: PacketNumberSpaceKind, ack: bool) -> 
     }
 }
 
-/// Whether a packet of `kind` carries the frames of the streams: 0-RTT and
-/// 1-RTT packets of an active link path only (RFC 9000 §12.4, Table 3).
+/// Whether a packet of `kind` carries the frames of the streams, or
+/// NEW_CONNECTION_ID: 0-RTT and 1-RTT packets of an active link path only
+/// (RFC 9000 §12.4, Table 3).
 fn carries_streams(kind: PlannedPacketKind) -> bool {
     matches!(kind, PlannedPacketKind::ZeroRtt | PlannedPacketKind::OneRtt)
 }
@@ -537,7 +592,10 @@ impl SendIntentPart for Part {
             place_pattern!([_ _ _] HandshakeDoneIntent) => at_place!([_ _ _ _] ()),
             place_pattern!([_ _ _ _] crypto) => at_place!([_ _ _ _ _] crypto.level),
             place_pattern!([_ _ _ _ _] stream) => stream_item(stream.key()),
-            rest_pattern!([_ _ _ _ _ _] never) => match *never {},
+            place_pattern!([_ _ _ _ _ _] new) => {
+                at_place!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _] new.sequence())
+            }
+            rest_pattern!([_ _ _ _ _ _ _] never) => match *never {},
         }
     }
 }
@@ -551,8 +609,10 @@ impl<K: PacketKind> FrameSourcePart<K> for Part {
                 K::KIND == PlannedPacketKind::OneRtt
             }
             place_pattern!([_ _ _ _] crypto) => crypto_level(K::KIND) == Some(crypto.level),
-            place_pattern!([_ _ _ _ _] _) => carries_streams(K::KIND),
-            rest_pattern!([_ _ _ _ _ _] never) => match *never {},
+            place_pattern!([_ _ _ _ _] _) | place_pattern!([_ _ _ _ _ _] _) => {
+                carries_streams(K::KIND)
+            }
+            rest_pattern!([_ _ _ _ _ _ _] never) => match *never {},
         };
         carried.then(|| <Self as SendIntentPart>::intent_item(intent))
     }
@@ -574,7 +634,8 @@ impl<K: PacketKind> FrameSourcePart<K> for Part {
             place_pattern!([_ _ _ _ _ _ _ _ _ _ _ _] ()) => FrameSourceId::DataBlocked,
             place_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _] _) => FrameSourceId::StreamDataBlocked,
             place_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _] _) => FrameSourceId::StreamsBlocked,
-            rest_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _] never) => match *never {},
+            place_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _] _) => FrameSourceId::NewConnectionId,
+            rest_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _] never) => match *never {},
         }
     }
 }
@@ -864,6 +925,37 @@ where
         lineage
             .get_mut::<ConnectionIdsOf<T>, Ic>()
             .destination_mut()
+    }
+}
+
+/// The NEW_CONNECTION_ID frames of the local connection ID strategy, as a
+/// kind of frame source: the strategy writes them.
+#[derive(Debug)]
+pub enum NewConnectionIdFrames {}
+
+impl FrameSourceKind for NewConnectionIdFrames {
+    type Item<'a> = u64;
+    type Summary<I> = NewConnectionIdSummary;
+    type Intent = NewConnectionIdIntent;
+}
+
+/// The NEW_CONNECTION_ID frames are written by the local connection ID
+/// strategy of the logical path in the lineage.
+impl<T, L, V, Ic> FindFrameSource<T, L, V, Ic> for NewConnectionIdFrames
+where
+    T: Choices,
+    V: GetAt<ConnectionIdsOf<T>, Ic>,
+{
+    type Source<'l, 'r>
+        = &'l mut T::LocalConnectionIds
+    where
+        V: 'l,
+        'r: 'l;
+
+    fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
+        lineage
+            .get_mut::<ConnectionIdsOf<T>, Ic>()
+            .local_strategy_mut()
     }
 }
 

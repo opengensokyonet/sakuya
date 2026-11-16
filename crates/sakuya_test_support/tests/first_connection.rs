@@ -216,6 +216,12 @@ macro_rules! choices {
                 PeerGroupedResetTokenRegistrar<PeerOf<Udp>, Arc<StatelessResetSignal>>,
             >;
             type ResetTokenRegistry = ResetTokensOf<Udp>;
+            type ConnectionIdIssuer = sakuya_endpoint::issuer::EndpointConnectionIdIssuer<Udp>;
+            type LocalConnectionIds =
+                sakuya_connection::connection_id::local::SequenceMapLocalConnectionIdStrategy<
+                    sakuya_connection::v1::connection_ids::LocalConnectionIdRegistrationOf<Self>,
+                    sakuya_connection::clock::InstantOf<Self>,
+                >;
             type SendParameters = sakuya_stream::send_options::urgency::Urgency;
             type Streams<Lc, K, X: sakuya_connection::v1::streams::resets::StreamResets> =
                 sakuya_connection::v1::streams::locked::LockedStreamSet<Lc, K, X>;

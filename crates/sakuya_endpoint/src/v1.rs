@@ -121,6 +121,7 @@ where
             destination_connection_ids: config.destination_connection_ids,
             reset_token_registry: core.reset_token_registry,
             first_local_connection_id: core.first_local_connection_id,
+            local_connection_id_issuer: core.local_connection_id_issuer,
             max_datagrams_per_send: config.max_datagrams_per_send,
             immediate_close_policy: config.immediate_close_policy,
             close_request: core.close_request,

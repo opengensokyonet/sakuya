@@ -267,13 +267,13 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             }
         };
         let link = self.first.link().clone();
-        let first_local_connection_id = match register_first_local(
+        let first_local = match register_first_local(
             &self.domain,
             &mut self.receiver,
             &link,
             &mut self.zero_length,
         ) {
-            Ok(id) => id,
+            Ok(first_local) => first_local,
             Err(source) => return Err(AcceptIncomingError::EndpointClosed { half: self, source }),
         };
         let Self {
@@ -314,7 +314,8 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             first_flight: FirstFlight::Datagrams(core::iter::once(first).chain(later).collect()),
             initial_receiver: InitialPathReceiver::new(receiver),
             reset_token_registry: domain.reset_tokens.clone(),
-            first_local_connection_id,
+            first_local_connection_id: first_local.id,
+            local_connection_id_issuer: first_local.issuer,
             close_request: CloseRequestCell::new(),
         };
         let (driver, handle) = make_connection::<S::Choices, S::Parts, _, I>(

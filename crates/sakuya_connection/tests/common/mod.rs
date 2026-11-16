@@ -495,6 +495,8 @@ impl sakuya_connection::v1::Choices for Mine {
         strategy::EventLoggingSendStrategy<I>;
     type DestinationConnectionIds = TestDestinationConnectionIds;
     type ResetTokenRegistry = TestResetTokenRegistry;
+    type ConnectionIdIssuer = TestConnectionIdIssuer;
+    type LocalConnectionIds = TestLocalConnectionIds;
     type SendParameters = sakuya_stream::send_options::urgency::Urgency;
     type Streams<Lc, K, X: sakuya_connection::v1::streams::resets::StreamResets> =
         sakuya_connection::v1::streams::locked::LockedStreamSet<Lc, K, X>;
@@ -549,11 +551,57 @@ pub fn reset_close_policy() {
 pub type TestDestinationConnectionIds =
     sakuya_connection::connection_id::sequence_map::SequenceMapDestinationConnectionIdStrategy<
         LinkId<(), ()>,
-        sakuya_connection::connection_id::reset_token::PeerGroupedResetTokenRegistrar<
-            (),
-            std::sync::Arc<sakuya_connection::v1::stateless_reset::StatelessResetSignal>,
-        >,
+        TestResetTokenRegistrar,
     >;
+
+/// What registers the reset tokens of the peer's connection IDs for each
+/// link path of the tests' compositions.
+pub type TestResetTokenRegistrar =
+    sakuya_connection::connection_id::reset_token::PeerGroupedResetTokenRegistrar<
+        (),
+        std::sync::Arc<sakuya_connection::v1::stateless_reset::StatelessResetSignal>,
+    >;
+
+/// What issues the tests' connections' connection IDs after the first:
+/// `[0xc0 + n; 8]` for the n-th, with the token `[0xd0 + n; 16]`. Nothing
+/// routes them: a registration is nothing.
+#[derive(Debug, Default)]
+pub struct TestConnectionIdIssuer(u8);
+
+impl sakuya_connection::connection_id::local::ConnectionIdIssuer for TestConnectionIdIssuer {
+    type Registration = ();
+
+    fn issue(&mut self) -> sakuya_connection::connection_id::local::IssuedConnectionId<()> {
+        self.0 += 1;
+        let id = sakuya_wire::connection_id::ConnectionId::new(&[0xc0 + self.0; 8])
+            .expect("eight bytes");
+        sakuya_connection::connection_id::local::IssuedConnectionId {
+            id: sakuya_wire::connection_id::NonEmptyCid::new(id).expect("not empty"),
+            token: sakuya_wire::connection_id::StatelessResetToken::new([0xd0 + self.0; 16]),
+            registration: (),
+        }
+    }
+}
+
+/// The local connection ID strategy of the tests' compositions.
+pub type TestLocalConnectionIds =
+    sakuya_connection::connection_id::local::SequenceMapLocalConnectionIdStrategy<(), Duration>;
+
+/// The issuer of a test connection whose first local connection ID is
+/// `first`, with the registration of an issued one.
+pub fn local_connection_id_issuer(
+    first: &sakuya_connection::v1::connection_ids::FirstLocalConnectionId,
+) -> sakuya_connection::v1::connection_ids::LocalConnectionIdIssuer<TestConnectionIdIssuer> {
+    use sakuya_connection::v1::connection_ids::FirstLocalConnectionId;
+    let registration = match first {
+        FirstLocalConnectionId::Issued { .. } => Some(()),
+        FirstLocalConnectionId::ZeroLength => None,
+    };
+    sakuya_connection::v1::connection_ids::LocalConnectionIdIssuer::new(
+        TestConnectionIdIssuer::default(),
+        registration,
+    )
+}
 
 /// What the tests' connections register reset tokens in.
 pub type TestResetTokenRegistry = std::sync::Arc<

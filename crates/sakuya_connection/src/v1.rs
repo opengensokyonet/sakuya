@@ -154,7 +154,8 @@ use self::{
     connection_ids::{
         ConnectionIdsOf, ConnectionResetTokenRegistry, DestinationConnectionIdConfig,
         DestinationConnectionIdConfigOf, FirstLocalConnectionId, InitialDestinationConnectionIds,
-        LinkPathResetTokenRegistrar, PeerHandshakeConnectionId, PeerOf, ResetTokenRegistrarOf,
+        LinkPathResetTokenRegistrar, LocalConnectionIdIssuer, LocalConnectionIdRegistrationOf,
+        PeerHandshakeConnectionId, PeerOf, ResetTokenRegistrarOf,
     },
     crypto::{
         CryptoReceiveBuffer, CryptoReceiveCapacities, CryptoReceiver,
@@ -198,7 +199,11 @@ use self::{
         resets::{StreamResets, StreamResetsOf, StreamResetsPart},
     },
 };
-use crate::connection_id::{DestinationConnectionIdStrategy, reset_token::ResetTokenRegistry};
+use crate::connection_id::{
+    DestinationConnectionIdStrategy,
+    local::{LocalConnectionIdStrategy, NewConnectionIdIntent, NewConnectionIdSummary},
+    reset_token::ResetTokenRegistry,
+};
 use crate::role::LinkPathRole;
 use bytes::Bytes;
 use sakuya_link::Link;
@@ -337,6 +342,25 @@ pub trait Choices: ConnectionChoices {
     type ResetTokenRegistry: ResetTokenRegistry<PeerOf<Self>, Arc<StatelessResetSignal>, Registrar: 'static>
         + Clone
         + 'static;
+    /// What issues this side's connection IDs after the first, one for each
+    /// connection: it generates each with its stateless reset token and
+    /// registers it with routing before it is disclosed.
+    type ConnectionIdIssuer: crate::connection_id::local::ConnectionIdIssuer<Registration: 'static>
+        + 'static;
+    /// What decides how many of this side's connection IDs the peer holds
+    /// and when they are issued and dropped, one for each logical path; it
+    /// issues them with the [`ConnectionIdIssuer`](Self::ConnectionIdIssuer),
+    /// keeps their registrations, and writes the NEW_CONNECTION_ID frames
+    /// that disclose them.
+    type LocalConnectionIds: LocalConnectionIdStrategy<
+            LinkIdOf<Self>,
+            InstantOf<Self>,
+            LocalConnectionIdRegistrationOf<Self>,
+        > + for<'a> FrameSource<
+            Item<'a> = u64,
+            Summary = NewConnectionIdSummary,
+            Intent = NewConnectionIdIntent,
+        > + 'static;
     /// The parameters application data is sent with; the send strategy
     /// constrains them with a trait of its own.
     type SendParameters: Clone + PartialEq + Default + 'static;
@@ -637,6 +661,10 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
     /// The first of this side's connection IDs, with its stateless reset
     /// token: the Source Connection ID of the long headers this side sends.
     pub first_local_connection_id: FirstLocalConnectionId,
+    /// What issues this side's connection IDs after the first, with the
+    /// registration of the first with routing, which the first logical
+    /// path's local connection ID strategy keeps.
+    pub local_connection_id_issuer: LocalConnectionIdIssuer<T::ConnectionIdIssuer>,
     /// How many datagrams the sending call of a link path hands to its link
     /// at once at most.
     pub max_datagrams_per_send: NonZeroUsize,
@@ -697,6 +725,7 @@ where
         DestinationConnectionIdConfig<DestinationConnectionIdConfigOf<T>>,
         ConnectionResetTokenRegistry<T::ResetTokenRegistry>,
         FirstLocalConnectionId,
+        LocalConnectionIdIssuer<T::ConnectionIdIssuer>,
         InitialDestinationConnectionIds,
         PeerHandshakeConnectionId,
         PacketProtectionBackend<T::Crypto>,
@@ -739,6 +768,7 @@ where
         HList![DestinationConnectionIdConfig<DestinationConnectionIdConfigOf<T>>],
         HList![ConnectionResetTokenRegistry<T::ResetTokenRegistry>],
         HList![FirstLocalConnectionId],
+        HList![LocalConnectionIdIssuer<T::ConnectionIdIssuer>],
         HList![InitialDestinationConnectionIds],
         HList![PeerHandshakeConnectionId],
         HList![PacketProtectionBackend<T::Crypto>],

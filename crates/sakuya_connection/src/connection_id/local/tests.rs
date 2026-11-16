@@ -32,19 +32,24 @@ impl PublishIntent<NewConnectionIdIntent, ()> for Published {
 
 type Strategy = SequenceMapLocalConnectionIdStrategy<u8, Duration>;
 
-fn first() -> Option<(NonEmptyCid, StatelessResetToken)> {
-    Some((
-        NonEmptyCid::new(ConnectionId::new(&[0xaa; 8]).unwrap()).unwrap(),
-        StatelessResetToken::new([0xaa; 16]),
-    ))
+fn first() -> Option<IssuedConnectionId<u8>> {
+    Some(IssuedConnectionId {
+        id: NonEmptyCid::new(ConnectionId::new(&[0xaa; 8]).unwrap()).unwrap(),
+        token: StatelessResetToken::new([0xaa; 16]),
+        registration: 0,
+    })
 }
 
 fn local(strategy: &mut Strategy) -> &mut impl LocalConnectionIdStrategy<(), Duration, u8> {
     strategy
 }
 
+fn made(first: Option<IssuedConnectionId<u8>>) -> Strategy {
+    <Strategy as LocalConnectionIdStrategy<(), Duration, u8>>::new(first)
+}
+
 fn confirmed(limit: u64) -> (Strategy, CountingIssuer, Published) {
-    let mut strategy = Strategy::new(first(), Some(0));
+    let mut strategy = made(first());
     let mut issuer = CountingIssuer::default();
     let mut published = Published::default();
     local(&mut strategy).on_issuable(&mut issuer, &mut published, 2);
@@ -109,7 +114,7 @@ fn retiring_what_was_never_issued_or_its_own_destination_is_a_violation() {
 
 #[test]
 fn a_zero_length_connection_issues_nothing_and_takes_no_retirement() {
-    let mut strategy = Strategy::new(None, None);
+    let mut strategy = made(None);
     let mut issuer = CountingIssuer::default();
     let mut published = Published::default();
     local(&mut strategy).on_issuable(&mut issuer, &mut published, 8);
