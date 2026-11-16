@@ -52,7 +52,6 @@ use super::{
     send::SendTypes,
     send_planning::IntakePublishOutcome,
     spaces::SendJournalsOf,
-    streams::StreamsOf,
     streams::send::StreamIntent,
 };
 use crate::{
@@ -61,6 +60,7 @@ use crate::{
     component::LineageOf,
     error::ConnectionErrorsOf,
     feedback::FeedbackSummariesOf,
+    frame_source::{EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts},
     layer::{self, LogicalPath, NodeKey},
     others::OtherNodes,
     send_strategy::AnyActiveLinkPath,
@@ -275,7 +275,7 @@ type RestartRecoveryTakes<T, L, S, Ls> = HList![
 /// The positions: `Ij` of the send journals, `If` of the recovery factory,
 /// `Il` of the link's clone in an entry, `Ik` of what this takes from a
 /// recovery layer, `Hf` of the frame sources fed back and `Is` of the
-/// stream set in an established layer.
+/// frame sources in an established layer.
 #[allow(dead_code)] // the receiving of a Retry calls it once wired
 pub(super) fn restart_recovery<'v, T, L, B, S, Ls, Ij, If, Il, Ik, Hf, Is>(
     lineage: &mut LineageOf<'v, T, L, LogicalPath>,
@@ -285,7 +285,10 @@ pub(super) fn restart_recovery<'v, T, L, B, S, Ls, Ij, If, Il, Ik, Hf, Is>(
 ) -> Option<Duration>
 where
     T: Choices,
-    L: LineagePartList<T> + FeedbackSummariesOf + ConnectionErrorsOf,
+    L: LineagePartList<T>
+        + FeedbackSummariesOf
+        + ConnectionErrorsOf
+        + EstablishedSourceComponentsOf<T, L>,
     B: CallBundle,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
     S: 'static,
@@ -293,7 +296,7 @@ where
     RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<SendJournalsOf<T, L>, Ij>
         + GetAt<RecoveryFactoryOf<T, L>, If>
-        + CoreLentFeedback<T, L, StreamsOf<T, L>, Hf>,
+        + CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![LinkClone<T::Link>], Il>,
@@ -302,13 +305,15 @@ where
         TakeEach<'x, RestartRecoveryTakes<T, L, S, Ls>, Ik>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
-        TakeEach<'s, HList![StreamsOf<T, L>], Is>,
+        TakeEach<'s, EstablishedSourceComponentsOfParts<T, L>, Is>,
 {
     let NodeKey::LogicalPath(path) = others.here().clone() else {
         unreachable!("a logical path's lend carries its key")
     };
     let identifier = L::link_path_identifier(&path, link);
     let mut earliest: Option<InstantOf<T>> = None;
+    let mut established =
+        others.borrow_established_optional::<EstablishedSourceComponentsOfParts<T, L>, Is>();
     for space in PacketNumberSpaceKind::ALL {
         let Some(journals) = lineage.get_mut::<SendJournalsOf<T, L>, Ij>().get_mut(space) else {
             continue;
@@ -319,17 +324,15 @@ where
                 earliest = Some(earliest.map_or(at, |e| e.min(at)));
             }
         }
-        let streams = others
-            .borrow_established::<HList![StreamsOf<T, L>], Is>()
-            .map(|hlist_pat![streams]| streams);
-        CoreLentFeedback::<T, L, StreamsOf<T, L>, Hf>::lost_each(
+        CoreLentFeedback::<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>::lost_each(
             lineage,
-            streams,
+            &mut established,
             now,
             space,
             unsettled.iter().flat_map(|record| &record.summaries),
         );
     }
+    drop(established);
     let initial_rtt = earliest.map(|at| now - at).filter(|rtt| !rtt.is_zero());
     let Some(hlist_pat![clone]) = others.link_entry::<HList![LinkClone<T::Link>], Il>(link) else {
         return initial_rtt;

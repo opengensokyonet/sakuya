@@ -48,6 +48,7 @@ use snafu::Snafu;
 use sakuya_stream::send_options::destination::Unfulfilled;
 
 use crate::{
+    feedback::InjectSummary,
     frame_source::{FrameSource, PublishIntent},
     write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
@@ -403,14 +404,14 @@ impl<R, I> FrameSource for SequenceMapLocalConnectionIdStrategy<R, I> {
 
     /// A connection ID the peer retired in the meantime is not disclosed
     /// again.
-    fn supply<W, P>(
+    fn supply<W, P, Idx>(
         &mut self,
         sequence: u64,
         mut packet: OpenPacket<W, InFlightClass, P>,
     ) -> Supplied<W, InFlightClass, P>
     where
         W: PacketWriting,
-        SummaryOf<W>: From<NewConnectionIdSummary>,
+        SummaryOf<W>: InjectSummary<NewConnectionIdSummary, Idx>,
         P: PacketPosition,
     {
         let Some(issued) = self
@@ -422,7 +423,10 @@ impl<R, I> FrameSource for SequenceMapLocalConnectionIdStrategy<R, I> {
             return Supplied::Open(packet);
         };
         let frame = new_connection_id_frame(sequence, issued.id, issued.token);
-        let written = packet.write_frame(frame, NewConnectionIdSummary { sequence });
+        let written = packet.write_frame(
+            frame,
+            <SummaryOf<W>>::inject_summary(NewConnectionIdSummary { sequence }),
+        );
         debug_assert!(written.is_ok(), "the intent asks room for the whole frame");
         Supplied::Open(packet)
     }
