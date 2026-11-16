@@ -98,6 +98,7 @@ use sakuya_wire::{
 
 use super::{
     Choices, Client, CloseCauseOf, ConnectionArgs, Server,
+    address_token::AddressTokenSink,
     application_handles::{
         HandleShares,
         connection::{ClientHandshakeFacts, ConnectionHandleCellOf, ServerHandshakeFacts},
@@ -117,6 +118,7 @@ use super::{
         check_initial_source, check_server_destination, read_transport_parameters_error,
     },
     receive::v1_error,
+    retry::ClientRetryPolicy,
     send::{HandshakeDoneIntent, SendTypes},
     send_planning::{IntakePublishOutcome, SendStrategyCore, SendStrategyOf},
     streams::send::StreamIntent,
@@ -1307,6 +1309,8 @@ impl<
     T,
     L,
     Tls,
+    Tk,
+    Rp,
     B,
     Icr,
     Ics,
@@ -1341,9 +1345,11 @@ impl<
     >
 where
     L: HandleShares<T, L, handle::EstablishedLayer>,
-    T: Choices<Side = Client<Tls>>,
+    T: Choices<Side = Client<Tls, Tk, Rp>>,
     Tls: ClientHandshakeSteps + 'static,
     Tls::AlertError: 'static,
+    Tk: AddressTokenSink + 'static,
+    Rp: ClientRetryPolicy + 'static,
     L: LineagePartList<T> + TransportParameterValueErrorsOf,
     B: CallBundle,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
@@ -1463,7 +1469,32 @@ impl<Tls> fmt::Debug for ClientAdvancingKind<Tls> {
     }
 }
 
-impl<T, L, Tls, Icr, Ics, Iv, Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia>
+impl<
+    T,
+    L,
+    Tls,
+    Tk,
+    Rp,
+    Icr,
+    Ics,
+    Iv,
+    Ilt,
+    Ils,
+    Ipt,
+    Ifl,
+    Iid,
+    Iph,
+    Ik,
+    Io,
+    Ib,
+    Ie,
+    Irc,
+    Ih,
+    Ja,
+    Jo,
+    Jr,
+    Ia,
+>
     CallKind<
         T,
         L,
@@ -1475,9 +1506,11 @@ impl<T, L, Tls, Icr, Ics, Iv, Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc,
     > for ClientAdvancingKind<Tls>
 where
     L: HandleShares<T, L, handle::EstablishedLayer>,
-    T: Choices<Side = Client<Tls>>,
+    T: Choices<Side = Client<Tls, Tk, Rp>>,
     Tls: ClientHandshakeSteps + 'static,
     Tls::AlertError: 'static,
+    Tk: AddressTokenSink + 'static,
+    Rp: ClientRetryPolicy + 'static,
     L: LineagePartList<T> + TransportParameterValueErrorsOf,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>

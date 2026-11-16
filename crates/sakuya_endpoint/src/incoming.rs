@@ -303,6 +303,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
         };
         let handshake = config.handshake();
         let core = CoreFacts {
+            side: (),
             crypto: domain.crypto.clone(),
             handshake: HandshakeStart::new(handshake.start(), handshake.limits()),
             client_dcid,

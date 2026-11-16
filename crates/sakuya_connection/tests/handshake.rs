@@ -59,9 +59,11 @@ use sakuya_connection::{
             CryptoReceiveCapacities, FragmentedCryptoReceiveBuffer, send::OffsetMapCryptoSendBuffer,
         },
         first_flight::FirstFlight,
+        handshake_done::ClientOnlyStart,
         input::InitialPathReceiver,
         keys::{HandshakeKeys, InitialKeys},
         link::LinkFacts,
+        retry::ContinueOnRetry,
         streams::StreamsOf,
     },
 };
@@ -453,7 +455,7 @@ choices!(ServerChoices, v1::Server<ServerEngine>);
 // a test marks when its link path's role next changes
 choices!(
     ClientChoices,
-    v1::Client<ClientEngine>,
+    v1::Client<ClientEngine, (), ContinueOnRetry>,
     common::ending::IntentEndingSendStrategy<I>
 );
 
@@ -466,6 +468,8 @@ type Parts = HList![v1::Part, watch::Part];
 thread_local! {
     /// What each side's watch noted last: the server's first.
     static NOTED: RefCell<[Noted; 2]> = RefCell::new([Noted::default(), Noted::default()]);
+    /// The token the client of the next run starts with; empty for none.
+    static CLIENT_TOKEN: RefCell<Bytes> = const { RefCell::new(Bytes::new()) };
 }
 
 /// What the watch of one side noted.
@@ -1007,6 +1011,7 @@ macro_rules! harness {
 #[allow(clippy::too_many_arguments)]
 fn args<T>(
     handshake: HandshakeStart<<T::Side as Side>::Tls>,
+    side: <T::Side as Side>::Start,
     validation: AddressValidation,
     crypto_receive: CryptoReceiveCapacities,
     first_flight: FirstFlight<T>,
@@ -1042,6 +1047,7 @@ where
     v1::ConnectionArgs {
         crypto: RingBackend,
         handshake,
+        side,
         client_dcid: cid(&CLIENT_DCID),
         original_destination_connection_id: None,
         anti_amplification: AntiAmplificationFactor::new(3).expect("3 is a factor"),
@@ -1105,6 +1111,7 @@ fn handshake(
     let (client_routing, client_receiver) = Routing::new(&[cid(&CLIENT_CID)]);
     let client_args = args::<ClientChoices>(
         HandshakeStart::new(client, MessageLimits::default()),
+        ClientOnlyStart::new(CLIENT_TOKEN.with(|token| token.take()), (), ContinueOnRetry),
         AddressValidation::Validated,
         client_capacities(),
         FirstFlight::Datagrams(Vec::new()),
@@ -1131,6 +1138,7 @@ fn handshake(
     let (server_routing, server_receiver) = Routing::new(&[cid(&CLIENT_DCID), cid(&SERVER_CID)]);
     let server_args = args::<ServerChoices>(
         HandshakeStart::new(server_engine(clock), MessageLimits::default()),
+        (),
         AddressValidation::NotValidated,
         server_capacities(),
         FirstFlight::Datagrams(
@@ -1384,6 +1392,46 @@ macro_rules! read_now {
 /// the handshake, the client opens a bidirectional stream and sends a
 /// request with its end, and the server reads it and answers on the same
 /// stream.
+/// The Token field of the Initial packet `datagram` starts with.
+fn initial_token(datagram: &[u8]) -> &[u8] {
+    let mut at = 5;
+    at += 1 + usize::from(datagram[at]);
+    at += 1 + usize::from(datagram[at]);
+    let (len, width) = match datagram[at] >> 6 {
+        0 => (usize::from(datagram[at]), 1),
+        1 => (
+            usize::from(u16::from_be_bytes([datagram[at] & 0x3f, datagram[at + 1]])),
+            2,
+        ),
+        _ => unreachable!("the tests' tokens are shorter than 16384 bytes"),
+    };
+    &datagram[at + width..at + width + len]
+}
+
+#[test]
+fn every_initial_packet_of_a_client_carries_the_token_it_started_with() {
+    let clock = tls_clock();
+    let token = Bytes::from(vec![0x70; 100]);
+    CLIENT_TOKEN.with(|cell| *cell.borrow_mut() = token.clone());
+    let run = handshake(client_engine(&clock, 1), &clock, |_| {
+        noted(Role::Client).confirmed
+    });
+    ready(run.client_handle.handshake_completed()).expect("the client's handshake completed");
+    let initials: Vec<_> = run
+        .client_sent
+        .iter()
+        .filter(|datagram| starts_with_initial(datagram))
+        .collect();
+    assert!(
+        initials.len() >= 2,
+        "the client sent its ClientHello and an acknowledgment"
+    );
+    for datagram in initials {
+        assert_eq!(initial_token(datagram), &token[..]);
+        assert!(datagram.len() >= MIN_DATAGRAM_SIZE);
+    }
+}
+
 #[test]
 fn a_client_and_a_server_exchange_a_request_and_its_answer_on_a_stream() {
     let clock = tls_clock();

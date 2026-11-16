@@ -104,6 +104,7 @@ where
         ConnectionArgs {
             crypto: core.crypto,
             handshake: core.handshake,
+            side: core.side,
             client_dcid: core.client_dcid,
             original_destination_connection_id: core.original_destination_connection_id,
             anti_amplification: config.anti_amplification,

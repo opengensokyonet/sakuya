@@ -339,12 +339,14 @@ pub type FillStreamsRest<'x, T, L, It, Iw> =
 
 /// What filling reads from what is left of the lineage at the start of
 /// each datagram: the link's clone and facts, the peer's transport
-/// parameters and the packet number states of the spaces.
+/// parameters, the packet number states of the spaces, and the data only
+/// this side has, which gives the token of its Initial packets.
 pub type FillReads<T, L> = HList![
     LinkClone<<T as crate::clock::ConnectionChoices>::Link>,
     LinkFacts,
     PeerTransportParameters<TransportParameterSlots<L>>,
     PacketNumberSpaces<PacketNumberSpaceState>,
+    <<T as Choices>::Side as Side>::Own,
 ];
 
 /// What filling takes from the link path's recovery layer.
@@ -1023,8 +1025,9 @@ where
         let role = <T::Side as Side>::ROLE;
         // what the link path can send now, the pacer refilled first: it
         // releases nothing before its first refill
-        let hlist_pat![link, facts, peer, numbers] =
+        let hlist_pat![link, facts, peer, numbers, own] =
             Lineage::read_each::<FillReads<T, L>, Ir>(&*self.rest);
+        let initial_token = <T::Side as Side>::initial_token(own);
         let link_ceiling = link.0.max_datagram_size().ok();
         let peer_max_udp_payload = peer_max_udp_payload_size::<L, Ipp>(peer);
         let validation = facts.validation;
@@ -1064,6 +1067,7 @@ where
             &numbers,
             self.journals,
             keys,
+            initial_token.len(),
             max_len,
         );
         self.planner.observe_conditions(limits, overheads);
@@ -1197,7 +1201,7 @@ where
                             keys,
                             largest(PacketNumberSpaceKind::Initial),
                             scid,
-                            Bytes::new(),
+                            initial_token.clone(),
                         ) else {
                             blocked = true;
                             break;

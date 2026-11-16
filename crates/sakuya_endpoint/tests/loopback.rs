@@ -23,6 +23,7 @@ use futures_util::StreamExt as _;
 use nitori_crypto::{NamedGroup, SignatureScheme, SigningKey as _};
 use nitori_crypto_aws_lc::{AwsLcBackend, Ed25519SigningKey};
 use sakuya_clock_tokio::TokioClock;
+use sakuya_connection::v1::retry::ContinueOnRetry;
 use sakuya_connection::{
     clock::{ConnectionChoices, LinkIdOf},
     connection_id::{
@@ -48,6 +49,7 @@ use sakuya_endpoint::{
         TokenPeerAddress,
     },
     choices::{ConnectionDatagramReceiver, EndpointChoices, PeerOf, ResetTokensOf},
+    client_token::BoundedAddressTokenStore,
     config::{
         BindingDeclarations, ClientConfig, ClientCryptoReceiveCapacities, EndpointConfig,
         ServerConfig, ServerCryptoReceiveCapacities,
@@ -57,7 +59,7 @@ use sakuya_endpoint::{
     incoming::{Incoming, RetryError, TerminableIncoming},
     outgoing::StartOutgoingError,
     retry::{CapacityFraction, EncodeStatelessRetryError, LoadStatelessRetryPolicy},
-    role::{AcceptingServer, ConnectingClient, NoClient, NoServer},
+    role::{AcceptingServer, ConnectingClient, ConnectingClientSide, NoClient, NoServer},
     stateless_check::ReturnedToken,
 };
 use sakuya_link::{ConnectingLinkBinding as _, EcnMarking, Link as _, OutgoingDatagram};
@@ -204,7 +206,10 @@ macro_rules! choices {
     };
 }
 choices!(ServerChoices, v1::Server<ServerEngine>);
-choices!(ClientChoices, v1::Client<ClientEngine>);
+choices!(
+    ClientChoices,
+    ConnectingClientSide<ClientStarts, ClientTokens, ContinueOnRetry>
+);
 
 type Parts = frunk_core::HList![v1::Part];
 
@@ -215,7 +220,9 @@ type Server = AcceptingServer<
     AeadAddressTokens<AwsLcBackend>,
     LoadStatelessRetryPolicy,
 >;
-type Client = ConnectingClient<ClientChoices, Parts, ClientStarts>;
+/// Where the client keeps the address validation tokens servers give it.
+type ClientTokens = BoundedAddressTokenStore<ServerTarget>;
+type Client = ConnectingClient<ClientChoices, Parts, ClientStarts, ClientTokens, ContinueOnRetry>;
 
 // ---- the handshakes ----
 
@@ -436,14 +443,16 @@ fn server_config_with<Tk>(
     .unwrap()
 }
 
-fn client_config(labels: &Arc<RecordedLabels>) -> ClientConfig<ClientChoices, Parts, ClientStarts> {
+fn client_config(
+    labels: &Arc<RecordedLabels>,
+) -> ClientConfig<ClientChoices, Parts, ClientStarts, ClientTokens, ContinueOnRetry> {
     client_config_with(labels, thresholds())
 }
 
 fn client_config_with(
     labels: &Arc<RecordedLabels>,
     thresholds: LossThresholds,
-) -> ClientConfig<ClientChoices, Parts, ClientStarts> {
+) -> ClientConfig<ClientChoices, Parts, ClientStarts, ClientTokens, ContinueOnRetry> {
     ClientConfig::new(
         ClientStarts {
             labels: Arc::clone(labels),
@@ -460,6 +469,8 @@ fn client_config_with(
         },
         thresholds,
         hlist![v1_config!(ClientChoices)],
+        ClientTokens::new(),
+        ContinueOnRetry,
     )
     .unwrap()
 }

@@ -271,11 +271,12 @@ where
 }
 
 /// The configuration of the client role, for connections of the choices
-/// `T` and the list of parts `L`, whose handshakes `H` starts.
+/// `T` and the list of parts `L`, whose handshakes `H` starts, with the
+/// store `St` of address validation tokens and the Retry policy `Rp`.
 ///
 /// Each outgoing connection gets a clone, which the application may change
 /// before it starts.
-pub struct ClientConfig<T, L, H>
+pub struct ClientConfig<T, L, H, St, Rp>
 where
     T: connection::Choices,
     L: PartConfigs<T, L>,
@@ -286,20 +287,29 @@ where
     loss_thresholds: LossThresholds,
     /// The configuration of each part, in the order of the list of parts.
     pub parts: L::Configs,
+    /// Where the address validation tokens servers give are kept, per
+    /// server name. A connection takes the token it starts with from the
+    /// store in its configuration when it starts, and puts the tokens its
+    /// server gives into a clone of it; replacing it with `()` breaks
+    /// continuity with servers (RFC 9000 §8.1.3).
+    pub address_tokens: St,
+    /// What decides whether a connection goes on after a valid Retry.
+    pub retry_policy: Rp,
     /// How many deliveries the datagram receiver of a connection holds until
     /// the connection takes them.
     pub receive_queue_capacity: NonZeroUsize,
 }
 
-impl<T, L, H> ClientConfig<T, L, H>
+impl<T, L, H, St, Rp> ClientConfig<T, L, H, St, Rp>
 where
     T: connection::Choices,
     L: PartConfigs<T, L>,
     H: ClientHandshakeConfig,
 {
     /// The configuration with the given handshake, CRYPTO capacities, loss
-    /// detection thresholds and configurations of the parts, and a receive
-    /// queue of 64 deliveries.
+    /// detection thresholds, configurations of the parts, store of address
+    /// validation tokens and Retry policy, and a receive queue of 64
+    /// deliveries.
     ///
     /// # Errors
     ///
@@ -310,6 +320,8 @@ where
         crypto_receive: ClientCryptoReceiveCapacities,
         loss_thresholds: LossThresholds,
         parts: L::Configs,
+        address_tokens: St,
+        retry_policy: Rp,
     ) -> Result<Self, InvalidEndpointConfigError> {
         let checked_crypto_receive = check_client_capacities(&handshake, crypto_receive)?;
         Ok(Self {
@@ -318,6 +330,8 @@ where
             checked_crypto_receive,
             loss_thresholds,
             parts,
+            address_tokens,
+            retry_policy,
             receive_queue_capacity: DEFAULT_RECEIVE_QUEUE_CAPACITY,
         })
     }
@@ -362,7 +376,7 @@ where
     }
 }
 
-impl<T, L, H> ClientConfig<T, L, H>
+impl<T, L, H, St, Rp> ClientConfig<T, L, H, St, Rp>
 where
     T: connection::Choices,
     L: PartConfigs<T, L>,
@@ -397,7 +411,7 @@ where
     }
 }
 
-impl<T, L, H: Clone> Clone for ClientConfig<T, L, H>
+impl<T, L, H: Clone, St: Clone, Rp: Clone> Clone for ClientConfig<T, L, H, St, Rp>
 where
     T: connection::Choices,
     L: PartConfigs<T, L>,
@@ -409,12 +423,14 @@ where
             checked_crypto_receive: self.checked_crypto_receive,
             loss_thresholds: self.loss_thresholds,
             parts: self.parts.clone(),
+            address_tokens: self.address_tokens.clone(),
+            retry_policy: self.retry_policy.clone(),
             receive_queue_capacity: self.receive_queue_capacity,
         }
     }
 }
 
-impl<T, L, H> fmt::Debug for ClientConfig<T, L, H>
+impl<T, L, H, St, Rp> fmt::Debug for ClientConfig<T, L, H, St, Rp>
 where
     T: connection::Choices,
     L: PartConfigs<T, L>,

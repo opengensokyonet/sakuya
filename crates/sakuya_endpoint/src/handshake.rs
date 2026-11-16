@@ -50,8 +50,9 @@ pub trait ServerHandshakeConfig: Clone {
 pub trait ClientHandshakeConfig: Clone {
     /// The name of the server a connection is made to, which the
     /// application gives each time it connects; it is also the key the
-    /// client keeps the server's address validation tokens under.
-    type ServerName;
+    /// client keeps the server's address validation tokens under, which
+    /// each token is put into the store with.
+    type ServerName: Clone + 'static;
     /// The start state it makes.
     type Start: ClientHandshakeSteps<AlertError: 'static> + 'static;
 

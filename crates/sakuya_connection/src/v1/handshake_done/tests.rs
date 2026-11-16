@@ -14,6 +14,7 @@ use sakuya_wire::{
 };
 
 use super::*;
+use crate::v1::retry::ContinueOnRetry;
 use crate::v1::{
     aead_usage::AeadUsage,
     datagram_batch::tests::{Accounts, Batch, one_rtt_keys},
@@ -114,8 +115,48 @@ fn a_server_writes_the_frame_it_is_given() {
     );
 }
 
+fn client_own(sink: &RecordedTokens) -> ClientOnlyState<&RecordedTokens, ContinueOnRetry> {
+    ClientOnlyState {
+        initial_token: Bytes::from_static(b"token"),
+        sink,
+        retry_policy: ContinueOnRetry,
+        received: VecDeque::new(),
+    }
+}
+
+/// The tokens handed to the sink, in order.
+#[derive(Debug, Default)]
+struct RecordedTokens(core::cell::RefCell<Vec<Bytes>>);
+
+impl AddressTokenSink for RecordedTokens {
+    fn keep(&self, token: Bytes) {
+        self.0.borrow_mut().push(token);
+    }
+}
+
 #[test]
 fn a_client_writes_nothing() {
-    let mut own = ClientOnlyState;
+    let sink = RecordedTokens::default();
+    let mut own = client_own(&sink);
     assert_eq!(frames_written(&mut own), (Vec::new(), 0));
+}
+
+#[test]
+fn a_client_hands_each_token_over_once() {
+    let sink = RecordedTokens::default();
+    let mut own = client_own(&sink);
+    let token = |byte: u8| Bytes::from(vec![byte; 4]);
+    own.new_token(token(1));
+    own.new_token(token(2));
+    // sent again after it was declared lost
+    own.new_token(token(1));
+    assert_eq!(*sink.0.borrow(), [token(1), token(2)]);
+    // the token received last are remembered, not every one
+    for byte in 3..=6 {
+        own.new_token(token(byte));
+    }
+    own.new_token(token(1));
+    assert_eq!(sink.0.borrow().len(), 7);
+    // the Initial packets go on with the token they started with
+    assert_eq!(own.initial_token(), &Bytes::from_static(b"token"));
 }

@@ -15,6 +15,7 @@ use nitori_crypto::{NamedGroup, Random as _, SignatureScheme, SigningKey};
 use nitori_crypto_aws_lc::{AwsLcBackend, EcdsaSigningKey};
 use rustls_pki_types::{PrivateKeyDer, pem::PemObject as _};
 use sakuya_clock_tokio::TokioClock;
+use sakuya_connection::v1::retry::ContinueOnRetry;
 use sakuya_connection::{
     clock::{ConnectionChoices, LinkIdOf},
     connection_id::{
@@ -37,6 +38,7 @@ use sakuya_datagram_routing::route::recognizer::{ConnectionIdGenerator, Connecti
 use sakuya_endpoint::{
     address_token::{AddressTokenKey, AddressTokenLifetimes, AeadAddressTokens},
     choices::{ConnectionDatagramReceiver, EndpointChoices, PeerOf, ResetTokensOf},
+    client_token::BoundedAddressTokenStore,
     config::{
         ClientConfig, ClientCryptoReceiveCapacities, EndpointConfig, ServerConfig,
         ServerCryptoReceiveCapacities,
@@ -45,7 +47,7 @@ use sakuya_endpoint::{
     retry::{
         LoadStatelessRetryPolicy, StatelessRetryDecision, StatelessRetryInput, StatelessRetryPolicy,
     },
-    role::{AcceptingServer, ClientRole, ConnectingClient, ServerRole},
+    role::{AcceptingServer, ClientRole, ConnectingClient, ConnectingClientSide, ServerRole},
 };
 use sakuya_packet_protection::backend::ring::RingBackend;
 use sakuya_recovery::{
@@ -199,7 +201,10 @@ macro_rules! choices {
     };
 }
 choices!(ServerChoices, v1::Server<ServerEngine>);
-choices!(ClientChoices, v1::Client<ClientEngine>);
+choices!(
+    ClientChoices,
+    ConnectingClientSide<ClientStarts, ClientTokens, ContinueOnRetry>
+);
 
 pub(crate) type Parts = frunk_core::HList![v1::Part];
 
@@ -210,7 +215,10 @@ pub(crate) type Server = AcceptingServer<
     AeadAddressTokens<AwsLcBackend>,
     RetryPolicy,
 >;
-pub(crate) type Client = ConnectingClient<ClientChoices, Parts, ClientStarts>;
+/// Where the client keeps the address validation tokens servers give it.
+pub(crate) type ClientTokens = BoundedAddressTokenStore<ServerTarget>;
+pub(crate) type Client =
+    ConnectingClient<ClientChoices, Parts, ClientStarts, ClientTokens, ContinueOnRetry>;
 
 /// The stateless Retry policy of the server: always for the `retry` test
 /// case, otherwise under load.
@@ -608,7 +616,7 @@ pub(crate) fn server_config(
 /// The client role's configuration.
 pub(crate) fn client_config(
     starts: ClientStarts,
-) -> ClientConfig<ClientChoices, Parts, ClientStarts> {
+) -> ClientConfig<ClientChoices, Parts, ClientStarts, ClientTokens, ContinueOnRetry> {
     ClientConfig::new(
         starts,
         ClientCryptoReceiveCapacities {
@@ -619,6 +627,8 @@ pub(crate) fn client_config(
         },
         thresholds(),
         hlist![v1_config!(ClientChoices)],
+        ClientTokens::new(),
+        ContinueOnRetry,
     )
     .expect("a consistent client configuration")
 }

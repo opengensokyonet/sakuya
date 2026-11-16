@@ -842,7 +842,8 @@ where
 /// What a link path's planner reads from the nodes above it to tell its
 /// strategy what each kind of packet takes beyond its frames: the
 /// connection IDs, the packet number states and the send journals of the
-/// spaces, and the keys of each level.
+/// spaces, the keys of each level, and the data only this side has, which
+/// gives the token of its Initial packets.
 pub(super) type PacketOverheadsReads<T, L> = frunk_core::HList![
     ConnectionIdsOf<T>,
     PacketNumberSpaces<PacketNumberSpaceState>,
@@ -850,6 +851,7 @@ pub(super) type PacketOverheadsReads<T, L> = frunk_core::HList![
     InitialKeys<<T as Choices>::Crypto>,
     HandshakeKeys<<T as Choices>::Crypto>,
     OneRttKeys<<T as Choices>::Crypto, InstantOf<T>>,
+    <<T as Choices>::Side as Side>::Own,
 ];
 
 /// Which levels have keys to send packets with now.
@@ -865,14 +867,17 @@ pub(super) struct SendKeyLevels {
 /// it, `None` when none is: from the destination connection IDs offered
 /// for the link path and this side's connection ID in `ids`, the next
 /// packet numbers of the spaces whose levels have keys in `keys`, as
-/// `journals` and `numbers` give them, and `max_len`, the largest datagram
-/// the link path can send now.
+/// `journals` and `numbers` give them, the length `initial_token_len` of
+/// the token of this side's Initial packets, and `max_len`, the largest
+/// datagram the link path can send now.
+#[allow(clippy::too_many_arguments)] // each is a separate fact read elsewhere
 pub(super) fn link_path_packet_overheads<T, L>(
     ids: &ConnectionIdsOf<T>,
     link: &LinkIdOf<T>,
     numbers: &PacketNumberSpaces<PacketNumberSpaceState>,
     journals: &SendJournalsOf<T, L>,
     keys: SendKeyLevels,
+    initial_token_len: usize,
     max_len: usize,
 ) -> (Option<usize>, PacketOverheads)
 where
@@ -898,6 +903,7 @@ where
     let overheads = packet_overheads(
         shortest,
         ids.local().len(),
+        initial_token_len,
         max_len,
         next(PacketNumberSpaceKind::Initial, keys.initial),
         next(PacketNumberSpaceKind::Handshake, keys.handshake),
@@ -920,14 +926,24 @@ where
     L: LineagePartList<T> + FeedbackSummariesOf,
     for<'x> <L as LineageLists<'x, T>>::LinkPath: ReadEach<PacketOverheadsReads<T, L>, Io>,
 {
-    let frunk_core::hlist_pat![ids, numbers, journals, initial, handshake, one_rtt] =
+    let frunk_core::hlist_pat![ids, numbers, journals, initial, handshake, one_rtt, own] =
         lineage.read_each::<PacketOverheadsReads<T, L>, Io>();
     let keys = SendKeyLevels {
         initial: initial.send().is_some(),
         handshake: handshake.send().is_some(),
         one_rtt: one_rtt.send().is_some(),
     };
-    link_path_packet_overheads::<T, L>(ids, link, numbers, journals, keys, max_len).1
+    let initial_token_len = <T::Side as Side>::initial_token(own).len();
+    link_path_packet_overheads::<T, L>(
+        ids,
+        link,
+        numbers,
+        journals,
+        keys,
+        initial_token_len,
+        max_len,
+    )
+    .1
 }
 
 /// The bytes of the Version field of a long header (RFC 9000 §17.2).
@@ -961,17 +977,19 @@ impl NextPacketNumber {
 ///
 /// `dcid_len` is the length of the shortest connection ID offered for the
 /// link path, `None` when none is; `scid_len` the length of this side's
-/// connection ID a long header carries. `max_len` is the largest datagram
+/// connection ID a long header carries; `initial_token_len` the length of
+/// the token an Initial packet of this side carries, always 0 for a server
+/// (RFC 9000 §17.2.2). `max_len` is the largest datagram
 /// the link path can send now: the packet writer reserves a long header's
 /// Length field wide enough for it. `initial`, `handshake` and `one_rtt`
 /// are the next packet numbers of the spaces whose levels have keys to
 /// send with, `None` for one that has none; a 0-RTT packet is never
-/// planned, as no 0-RTT keys to send with are kept. An Initial packet's
-/// token is empty: a server's always is (RFC 9000 §17.2.2), and a client
-/// keeps none to send.
+/// planned, as no 0-RTT keys to send with are kept.
+#[allow(clippy::too_many_arguments)] // each is a separate fact of the packets
 pub(super) fn packet_overheads(
     dcid_len: Option<usize>,
     scid_len: usize,
+    initial_token_len: usize,
     max_len: usize,
     initial: Option<NextPacketNumber>,
     handshake: Option<NextPacketNumber>,
@@ -980,7 +998,10 @@ pub(super) fn packet_overheads(
 ) -> PacketOverheads {
     let length_width =
         VarIntWidth::shortest(VarInt::try_from(max_len).unwrap_or(VarInt::MAX)).encoded_len();
-    let empty_token = VarIntWidth::shortest(VarInt::ZERO).encoded_len();
+    let initial_token =
+        VarIntWidth::shortest(VarInt::try_from(initial_token_len).unwrap_or(VarInt::MAX))
+            .encoded_len()
+            + initial_token_len;
     // the Packet Number field, and what the sample needs of the payload
     let numbered = |pn_len: usize| pn_len + SAMPLE_DISTANCE.saturating_sub(pn_len);
     let long = |dcid_len: usize, numbers: Option<NextPacketNumber>, token: usize| {
@@ -1004,7 +1025,7 @@ pub(super) fn packet_overheads(
         };
     };
     PacketOverheads {
-        initial: long(dcid_len, initial, empty_token),
+        initial: long(dcid_len, initial, initial_token),
         handshake: long(dcid_len, handshake, 0),
         zero_rtt: None,
         one_rtt: one_rtt
@@ -1446,6 +1467,7 @@ mod tests {
         let overheads = packet_overheads(
             Some(8),
             4,
+            0,
             1200,
             next(0, None),
             next(0, None),
@@ -1477,6 +1499,7 @@ mod tests {
         let overheads = packet_overheads(
             Some(8),
             8,
+            0,
             16384,
             next(300, None),
             next(300, Some(299)),
@@ -1496,15 +1519,36 @@ mod tests {
     }
 
     #[test]
+    fn a_clients_initial_takes_its_token_with_the_tokens_length() {
+        let overheads = packet_overheads(
+            Some(8),
+            8,
+            100,
+            1200,
+            next(0, None),
+            None,
+            None,
+            Role::Client,
+        );
+        // a token of 100 bytes and its length of two bytes, where an empty
+        // one takes one byte of length
+        assert_eq!(
+            overheads.initial,
+            Some(1 + 4 + 1 + 8 + 1 + 8 + 2 + 100 + 2 + 1 + 3 + 16)
+        );
+    }
+
+    #[test]
     fn the_header_protection_sample_takes_what_the_packet_number_leaves_of_four_bytes() {
         // a zero-length connection ID: the first byte, a packet number of
         // one byte, which leaves three bytes of the four to the payload
         // (RFC 9001 §5.4.2), and the tag; a packet number of four bytes
         // leaves none
-        let short = packet_overheads(Some(0), 0, 1200, None, None, next(0, None), Role::Server);
+        let short = packet_overheads(Some(0), 0, 0, 1200, None, None, next(0, None), Role::Server);
         assert_eq!(short.one_rtt, Some(1 + 1 + 3 + 16));
         let long = packet_overheads(
             Some(0),
+            0,
             0,
             1200,
             None,
@@ -1520,6 +1564,7 @@ mod tests {
         let overheads = packet_overheads(
             None,
             8,
+            0,
             1200,
             next(0, None),
             next(0, None),

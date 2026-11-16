@@ -23,6 +23,7 @@ use sakuya_wire::version::Version;
 use crate::{
     address_token::{AddressTokens, TokenPeerAddress},
     choices::{ConnectionDatagramReceiver, EndpointChoices, LinkOf, PeerOf, ResetTokensOf},
+    client_token::{AddressTokenStore, KeyedAddressTokenSink},
     config::{ClientConfig, InvalidEndpointConfigError, ServerConfig},
     domain::Domain,
     dropped_input::DroppedInputCounts,
@@ -149,9 +150,28 @@ pub trait AcceptingServerRole<E: EndpointChoices>:
     type RetryPolicy: StatelessRetryPolicy + Clone;
 }
 
+/// The side of the connections of a client role whose handshakes `H`
+/// starts, with the store `St` of address validation tokens and the Retry
+/// policy `Rp`: each connection puts the tokens its server gives into the
+/// store, under the server name it was made for.
+pub type ConnectingClientSide<H, St, Rp> = v1::Client<
+    <H as ClientHandshakeConfig>::Start,
+    KeyedAddressTokenSink<St, <H as ClientHandshakeConfig>::ServerName>,
+    Rp,
+>;
+
 /// The role of an endpoint that is a client: it starts connections.
 pub trait ConnectingClientRole<E: EndpointChoices>:
-    ClientRole<E, Config = ClientConfig<Self::Choices, Self::Parts, Self::Handshake>>
+    ClientRole<
+        E,
+        Config = ClientConfig<
+            Self::Choices,
+            Self::Parts,
+            Self::Handshake,
+            Self::AddressTokens,
+            Self::RetryPolicy,
+        >,
+    >
 {
     /// The choices of the role's connections.
     type Choices: v1::Choices<
@@ -160,7 +180,7 @@ pub trait ConnectingClientRole<E: EndpointChoices>:
             Crypto = E::Crypto,
             Receiver = ConnectionDatagramReceiver<E>,
             ResetTokenRegistry = ResetTokensOf<E>,
-            Side = v1::Client<<Self::Handshake as ClientHandshakeConfig>::Start>,
+            Side = ConnectingClientSide<Self::Handshake, Self::AddressTokens, Self::RetryPolicy>,
         >;
     /// The list of parts of the role's connections.
     type Parts: PartConfigs<Self::Choices, Self::Parts>
@@ -172,6 +192,12 @@ pub trait ConnectingClientRole<E: EndpointChoices>:
         > + LogicalPathKeys<Key = SoleLogicalPath>;
     /// What starts the handshake of each connection.
     type Handshake: ClientHandshakeConfig;
+    /// Where the address validation tokens servers give are kept.
+    type AddressTokens: AddressTokenStore<<Self::Handshake as ClientHandshakeConfig>::ServerName>
+        + Clone
+        + 'static;
+    /// What decides whether a connection goes on after a valid Retry.
+    type RetryPolicy: v1::retry::ClientRetryPolicy + Clone + 'static;
 }
 
 /// No server role: the endpoint takes no new connections and answers no
@@ -325,18 +351,19 @@ where
 }
 
 /// The client role for connections of the choices `T` and the list of parts
-/// `L`, whose handshakes `H` starts.
-pub struct ConnectingClient<T, L, H>(Marker<(T, L, H)>);
+/// `L`, whose handshakes `H` starts, with the store `St` of address
+/// validation tokens and the Retry policy `Rp`.
+pub struct ConnectingClient<T, L, H, St, Rp>(Marker<(T, L, H, St, Rp)>);
 
-impl<T, L, H> fmt::Debug for ConnectingClient<T, L, H> {
+impl<T, L, H, St, Rp> fmt::Debug for ConnectingClient<T, L, H, St, Rp> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("ConnectingClient")
     }
 }
 
-impl<T, L, H> sealed::Sealed for ConnectingClient<T, L, H> {}
+impl<T, L, H, St, Rp> sealed::Sealed for ConnectingClient<T, L, H, St, Rp> {}
 
-impl<E, T, L, H> ClientRole<E> for ConnectingClient<T, L, H>
+impl<E, T, L, H, St, Rp> ClientRole<E> for ConnectingClient<T, L, H, St, Rp>
 where
     E: EndpointChoices,
     T: v1::Choices<
@@ -345,16 +372,18 @@ where
             Crypto = E::Crypto,
             Receiver = ConnectionDatagramReceiver<E>,
             ResetTokenRegistry = ResetTokensOf<E>,
-            Side = v1::Client<H::Start>,
+            Side = ConnectingClientSide<H, St, Rp>,
         >,
     L: PartConfigs<T, L>
         + LayerShares<T, L, Connection, Args = <L as PartConfigs<T, L>>::Args>
         + LogicalPathKeys<Key = SoleLogicalPath>
         + 'static,
     H: ClientHandshakeConfig + 'static,
+    St: AddressTokenStore<H::ServerName> + Clone + 'static,
+    Rp: v1::retry::ClientRetryPolicy + Clone + 'static,
 {
-    type Config = ClientConfig<T, L, H>;
-    type Kept = Arc<ClientConfig<T, L, H>>;
+    type Config = ClientConfig<T, L, H, St, Rp>;
+    type Kept = Arc<ClientConfig<T, L, H, St, Rp>>;
 
     fn start(
         mut config: Self::Config,
@@ -370,7 +399,7 @@ where
     }
 }
 
-impl<E, T, L, H> ConnectingClientRole<E> for ConnectingClient<T, L, H>
+impl<E, T, L, H, St, Rp> ConnectingClientRole<E> for ConnectingClient<T, L, H, St, Rp>
 where
     E: EndpointChoices,
     T: v1::Choices<
@@ -379,17 +408,21 @@ where
             Crypto = E::Crypto,
             Receiver = ConnectionDatagramReceiver<E>,
             ResetTokenRegistry = ResetTokensOf<E>,
-            Side = v1::Client<H::Start>,
+            Side = ConnectingClientSide<H, St, Rp>,
         >,
     L: PartConfigs<T, L>
         + LayerShares<T, L, Connection, Args = <L as PartConfigs<T, L>>::Args>
         + LogicalPathKeys<Key = SoleLogicalPath>
         + 'static,
     H: ClientHandshakeConfig + 'static,
+    St: AddressTokenStore<H::ServerName> + Clone + 'static,
+    Rp: v1::retry::ClientRetryPolicy + Clone + 'static,
 {
     type Choices = T;
     type Parts = L;
     type Handshake = H;
+    type AddressTokens = St;
+    type RetryPolicy = Rp;
 }
 
 /// `thresholds` checked against the endpoint's clock.

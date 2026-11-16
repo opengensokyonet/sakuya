@@ -345,7 +345,7 @@ impl ConnectionChoices for ClientMine {
 }
 impl v1::Choices for ClientMine {
     type Crypto = RingBackend;
-    type Side = v1::Client<common::PendingClientEngine>;
+    type Side = v1::Client<common::PendingClientEngine, (), v1::retry::ContinueOnRetry>;
     type CryptoReceiveBuffer = FragmentedCryptoReceiveBuffer;
     type CryptoSendBuffer = OffsetMapCryptoSendBuffer;
     type Recovery<V: Clone + Eq + Debug + 'static> =
@@ -2058,6 +2058,7 @@ where
     v1::ConnectionArgs {
         crypto: RingBackend,
         handshake: <T::Side as SideCapacities>::handshake(),
+        side: <T::Side as SideCapacities>::side(),
         client_dcid: client_dcid(),
         original_destination_connection_id: None,
         anti_amplification: AntiAmplificationFactor::new(2).expect("2 is a factor"),
@@ -2115,6 +2116,7 @@ where
 /// connection is made.
 trait SideCapacities: v1::Side {
     fn handshake() -> v1::advancing::HandshakeStart<<Self as v1::Side>::Tls>;
+    fn side() -> <Self as v1::Side>::Start;
     fn crypto_receive() -> CryptoReceiveCapacities;
     fn read_state<T>() -> FirstFlightReadState<T>
     where
@@ -2124,6 +2126,7 @@ impl SideCapacities for v1::Server<common::PendingServerEngine> {
     fn handshake() -> v1::advancing::HandshakeStart<common::PendingServerEngine> {
         v1::advancing::HandshakeStart::new(common::PendingServerEngine, MessageLimits::default())
     }
+    fn side() {}
     fn read_state<T>() -> FirstFlightReadState<T>
     where
         T: v1::Choices<Crypto = RingBackend, Side = Self>,
@@ -2151,9 +2154,16 @@ impl SideCapacities for v1::Server<common::PendingServerEngine> {
             .expect("the least capacities the limits allow")
     }
 }
-impl SideCapacities for v1::Client<common::PendingClientEngine> {
+impl SideCapacities for v1::Client<common::PendingClientEngine, (), v1::retry::ContinueOnRetry> {
     fn handshake() -> v1::advancing::HandshakeStart<common::PendingClientEngine> {
         v1::advancing::HandshakeStart::new(common::PendingClientEngine, MessageLimits::default())
+    }
+    fn side() -> <Self as v1::Side>::Start {
+        v1::handshake_done::ClientOnlyStart::new(
+            bytes::Bytes::new(),
+            (),
+            v1::retry::ContinueOnRetry,
+        )
     }
     fn read_state<T>() -> FirstFlightReadState<T>
     where

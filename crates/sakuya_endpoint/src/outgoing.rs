@@ -3,7 +3,9 @@
 //! A binding handle's `connect` takes a link and gives an [`Outgoing`]: the
 //! link, the name of the server, and a clone of the client configuration,
 //! which the application may change. [`Outgoing::start`] then registers the
-//! connection's first local connection ID and makes the connection.
+//! connection's first local connection ID, takes the address validation
+//! token the connection starts with from the store in the configuration,
+//! and makes the connection.
 
 use core::fmt;
 use std::sync::Arc;
@@ -18,6 +20,7 @@ use sakuya_connection::{
     share::{ConnectionArgsOf, LineageLists},
     v1::{
         self as connection, ConnectionArgs,
+        address_token::fits_initial_packet,
         advancing::HandshakeStart,
         amplification::AddressValidation,
         application_handles::{
@@ -27,6 +30,7 @@ use sakuya_connection::{
         },
         close_request::CloseRequestCell,
         first_flight::FirstFlight,
+        handshake_done::ClientOnlyStart,
         input::InitialPathReceiver,
         link::LinkFacts,
         send::SendTypes,
@@ -43,6 +47,7 @@ use snafu::Snafu;
 
 use crate::{
     choices::{ConnectionDatagramReceiver, EndpointChoices, LinkOf, LocalOf},
+    client_token::{AddressTokenStore as _, KeyedAddressTokenSink},
     config::thresholds_against_clock,
     connection::{make_connection, register_first_local},
     domain::Domain,
@@ -139,8 +144,16 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
 
     /// Starts the connection: chooses the destination connection ID of its
     /// first Initial, generates and registers its first local connection
-    /// ID, then makes the connection, whose future the host spawns, and its
-    /// handle. The connection sends its first Initial when first polled.
+    /// ID, takes a token for the server name from the configuration's store
+    /// of address validation tokens, then makes the connection, whose
+    /// future the host spawns, and its handle. The connection sends its
+    /// first Initial when first polled.
+    ///
+    /// The token, which every Initial packet of the connection carries, is
+    /// not put back into the store whatever becomes of the connection
+    /// (RFC 9000 §8.1.3); one too long to leave room in an Initial packet is
+    /// dropped. The tokens the server gives go into a clone of the store,
+    /// under the same server name.
     ///
     /// # Errors
     ///
@@ -222,9 +235,23 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
             initial_dcid: _,
         } = self;
         let handshake = config.handshake();
+        let handshake = HandshakeStart::new(handshake.start(&server_name), handshake.limits());
+        let token = config
+            .address_tokens
+            .take(&server_name)
+            .filter(|token| {
+                fits_initial_packet(
+                    token.len(),
+                    client_dcid.len(),
+                    first_local_connection_id.id().len(),
+                )
+            })
+            .unwrap_or_default();
+        let sink = KeyedAddressTokenSink::new(config.address_tokens.clone(), server_name);
         let core = CoreFacts {
             crypto: domain.crypto.clone(),
-            handshake: HandshakeStart::new(handshake.start(&server_name), handshake.limits()),
+            handshake,
+            side: ClientOnlyStart::new(token, sink, config.retry_policy.clone()),
             client_dcid,
             original_destination_connection_id: None,
             first_link: LinkFacts {

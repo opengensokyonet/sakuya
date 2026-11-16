@@ -331,12 +331,13 @@ struct ClosePacketLevel<'k, B: CryptoBackend> {
 }
 
 /// What the datagram of a close packet is written to: its connection IDs,
-/// the side that sends it, the largest it may be, and the bytes within
-/// which its reason phrases keep.
-#[derive(Debug, Clone, Copy)]
+/// the token of an Initial packet in it, the side that sends it, the
+/// largest it may be, and the bytes within which its reason phrases keep.
+#[derive(Debug, Clone)]
 struct ClosePacketShape {
     dcid: ConnectionId,
     scid: ConnectionId,
+    initial_token: Bytes,
     role: Role,
     max_len: usize,
     budget: usize,
@@ -361,6 +362,7 @@ fn write_close_datagram<B: CryptoBackend>(
     let overheads = packet_overheads(
         Some(shape.dcid.len()),
         shape.scid.len(),
+        shape.initial_token.len(),
         shape.max_len,
         next(PlannedPacketKind::Initial),
         next(PlannedPacketKind::Handshake),
@@ -402,7 +404,7 @@ fn write_close_datagram<B: CryptoBackend>(
             ClosePacketKeys::Initial(keys) => PacketStart::Initial {
                 keys,
                 scid: shape.scid,
-                token: Bytes::new(),
+                token: shape.initial_token.clone(),
             },
             ClosePacketKeys::Handshake(keys) => PacketStart::Handshake {
                 keys,
@@ -470,8 +472,9 @@ type SealTakes<T> = HList![
 ];
 
 /// What sealing reads from what is left: the keys of each level, the send
-/// journals and the packet number states of the spaces, and whether the
-/// handshake is confirmed.
+/// journals and the packet number states of the spaces, whether the
+/// handshake is confirmed, and the data only this side has, which gives the
+/// token of its Initial packets.
 type SealReads<T, L> = HList![
     InitialKeys<<T as Choices>::Crypto>,
     HandshakeKeys<<T as Choices>::Crypto>,
@@ -479,6 +482,7 @@ type SealReads<T, L> = HList![
     SendJournalsOf<T, L>,
     PacketNumberSpaces<PacketNumberSpaceState>,
     HandshakeConfirmation,
+    <<T as Choices>::Side as Side>::Own,
 ];
 
 /// What a sealed close packet takes then: itself, the connection IDs and
@@ -614,9 +618,10 @@ where
             .map_or(max_len, |credit| {
                 usize::try_from(credit).unwrap_or(usize::MAX).min(max_len)
             });
-        let shape = ClosePacketShape {
+        let mut shape = ClosePacketShape {
             dcid: offered.id,
             scid,
+            initial_token: Bytes::new(),
             role: <T::Side as Side>::ROLE,
             max_len,
             budget,
@@ -625,8 +630,19 @@ where
         let sealed = {
             let (hlist_pat![policy, usage], rest) =
                 Take::<SealTakes<T>, It>::take(lineage.reborrow());
-            let (hlist_pat![initial, handshake, one_rtt, journals, numbers, confirmation], _) =
-                rest.take_read::<SealReads<T, L>, Iw>();
+            let (
+                hlist_pat![
+                    initial,
+                    handshake,
+                    one_rtt,
+                    journals,
+                    numbers,
+                    confirmation,
+                    own
+                ],
+                _,
+            ) = rest.take_read::<SealReads<T, L>, Iw>();
+            shape.initial_token = <T::Side as Side>::initial_token(own);
             let mut level_close = |level| {
                 close_at_level(
                     policy.policy_mut().adjust(&cause, level, close.clone()),

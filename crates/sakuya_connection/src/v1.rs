@@ -139,6 +139,7 @@ use crate::{
 use std::sync::Arc;
 
 use self::{
+    address_token::AddressTokenSink,
     advancing::{ClientAdvancingKind, ConnectionExporter, HandshakeStart, ServerAdvancingKind},
     aead_usage::AeadUsage,
     amplification::{AddressValidation, AntiAmplification, AntiAmplificationFactor},
@@ -161,7 +162,7 @@ use self::{
     },
     feedback::HandshakeDoneSummary,
     first_flight::{FirstFlight, FirstFlightStart},
-    handshake_done::{ClientOnlyState, HandshakeDoneSource},
+    handshake_done::{ClientOnlyStart, ClientOnlyState, HandshakeDoneSource},
     idle::IdleTimeout,
     input::{
         InitialPathReceiver, LogicalPathDatagramReceiver, LogicalPathInput,
@@ -181,6 +182,7 @@ use self::{
         CongestionPartOf, LinkPathCongestionState, OthersOf, PmtuOf, RecoveryConfigOf,
         RecoveryFactoryOf, RttOf,
     },
+    retry::ClientRetryPolicy,
     send::{AckIntent, CryptoIntent, HandshakeDoneIntent, ProbePingIntent, SendTypes},
     send_planning::{
         AckIntentTicketOf, AckIntentTickets, CorePublishOutcome, CryptoIntentTicketOf,
@@ -395,6 +397,12 @@ pub trait Side: 'static {
     /// that [`HandshakeError`] holds for it.
     type AlertError: CallsForAlert + 'static;
 
+    /// What only this side's connection starts with, besides its handshake
+    /// engine, which [`ConnectionArgs::side`] gives: nothing for a server;
+    /// for a client, what its [`Own`](Side::Own) data is made from
+    /// ([`ClientOnlyStart`]).
+    type Start;
+
     /// The data component in the connection node that only this side has.
     ///
     /// The HANDSHAKE_DONE frames of version 1 are found in it: a server's
@@ -405,6 +413,24 @@ pub trait Side: 'static {
             Summary = HandshakeDoneSummary,
             Intent = HandshakeDoneIntent,
         > + 'static;
+
+    /// The Token field of the Initial packets this side sends now, which
+    /// `own` keeps.
+    ///
+    /// A server's is always empty (RFC 9000 §17.2.2). A client's is the
+    /// token the connection attempt started with, or the one of the Retry
+    /// it went on after: every Initial packet of the attempt carries it,
+    /// those sent again too (§8.1.3, §17.2.5.3).
+    fn initial_token(own: &Self::Own) -> Bytes;
+
+    /// The peer gave a NEW_TOKEN frame with `token`, which `own` takes.
+    ///
+    /// A client hands each token to where its tokens go, once: a token
+    /// that comes again, as when a frame was declared lost and sent again,
+    /// is dropped (RFC 9000 §19.7). A server never gets here: a NEW_TOKEN
+    /// frame it receives is not permitted
+    /// ([`FrameNotPermittedError::NotForRole`](dispatch::FrameNotPermittedError::NotForRole)).
+    fn on_new_token(own: &mut Self::Own, token: Bytes);
 
     /// The Initial secrets split into this side's sending and receiving
     /// secret, in that order (RFC 9001 §5.2).
@@ -462,7 +488,12 @@ where
     type HandshakeFacts = ServerHandshakeFacts<Tls::Target>;
     type LayerSelection = SelectedTarget<Tls::Target>;
     type AlertError = Tls::AlertError;
+    type Start = ();
     type Own = HandshakeDoneSource;
+    fn initial_token(_: &HandshakeDoneSource) -> Bytes {
+        Bytes::new()
+    }
+    fn on_new_token(_: &mut HandshakeDoneSource, _: Bytes) {}
     fn split_initial_secrets(secrets: InitialSecrets) -> (TrafficSecret, TrafficSecret) {
         (secrets.server, secrets.client)
     }
@@ -478,19 +509,25 @@ where
 }
 
 /// The client's side, with the handshake engine whose start state is
-/// `Tls`.
-pub struct Client<Tls>(PhantomData<fn() -> Tls>);
+/// `Tls`, the sink `Tk` of the address validation tokens its server gives
+/// it and the Retry policy `Rp`.
+pub struct Client<Tls, Tk, Rp>(Marker<(Tls, Tk, Rp)>);
 
-impl<Tls> Debug for Client<Tls> {
+/// What a side type holds of its parameters: nothing.
+type Marker<T> = PhantomData<fn() -> T>;
+
+impl<Tls, Tk, Rp> Debug for Client<Tls, Tk, Rp> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("Client")
     }
 }
 
-impl<Tls> Side for Client<Tls>
+impl<Tls, Tk, Rp> Side for Client<Tls, Tk, Rp>
 where
     Tls: ClientHandshakeSteps + 'static,
     Tls::AlertError: 'static,
+    Tk: AddressTokenSink + 'static,
+    Rp: ClientRetryPolicy + 'static,
 {
     const ROLE: Role = Role::Client;
     type Tls = Tls;
@@ -499,7 +536,14 @@ where
     type HandshakeFacts = ClientHandshakeFacts;
     type LayerSelection = Option<ProtocolName<Bytes>>;
     type AlertError = Tls::AlertError;
-    type Own = ClientOnlyState;
+    type Start = ClientOnlyStart<Tk, Rp>;
+    type Own = ClientOnlyState<Tk, Rp>;
+    fn initial_token(own: &ClientOnlyState<Tk, Rp>) -> Bytes {
+        own.initial_token().clone()
+    }
+    fn on_new_token(own: &mut ClientOnlyState<Tk, Rp>, token: Bytes) {
+        own.new_token(token);
+    }
     fn split_initial_secrets(secrets: InitialSecrets) -> (TrafficSecret, TrafficSecret) {
         (secrets.client, secrets.server)
     }
@@ -522,6 +566,9 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
     /// What the connection's handshake starts from: the start state of the
     /// side's handshake engine, which the advancing call takes.
     pub handshake: HandshakeStart<<T::Side as Side>::Tls>,
+    /// What only this side's connection starts with besides: `()` for a
+    /// server, a [`ClientOnlyStart`] for a client.
+    pub side: <T::Side as Side>::Start,
     /// The Destination Connection ID of the client's first Initial packet,
     /// which the Initial secrets are derived from (RFC 9001 §5.2): the one a
     /// client chose, the one a server found in the first datagrams.

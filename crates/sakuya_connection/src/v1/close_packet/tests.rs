@@ -55,6 +55,7 @@ fn shape(role: Role, max_len: usize, budget: usize) -> ClosePacketShape {
     ClosePacketShape {
         dcid: cid(0xc5),
         scid: cid(0x5e),
+        initial_token: Bytes::new(),
         role,
         max_len,
         budget,

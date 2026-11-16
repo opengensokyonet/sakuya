@@ -119,6 +119,7 @@ pub struct ConnectionFacts<T: v1::Choices> {
 pub(crate) struct CoreFacts<T: v1::Choices> {
     pub(crate) crypto: T::Crypto,
     pub(crate) handshake: HandshakeStart<<T::Side as Side>::Tls>,
+    pub(crate) side: <T::Side as Side>::Start,
     pub(crate) client_dcid: ConnectionId,
     pub(crate) original_destination_connection_id: Option<ConnectionId>,
     pub(crate) first_link: LinkFacts,

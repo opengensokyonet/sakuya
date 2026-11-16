@@ -13,6 +13,7 @@
 //! | --- | --- |
 //! | PADDING, PING | none: they only make a packet ack-eliciting or not |
 //! | CRYPTO | [`CryptoReceiver`], at the level of the packet |
+//! | NEW_TOKEN | the data only this side has ([`Side::on_new_token`]): a client hands the token over |
 //! | HANDSHAKE_DONE | [`HandshakeConfirmation`]: the handshake is confirmed |
 //! | CONNECTION_CLOSE | the [`CloseReasonRecord`], with the peer's close; every link path drains |
 //! | NEW_CONNECTION_ID | the destination connection ID strategy of the logical path ([`ConnectionIds`](super::connection_ids::ConnectionIds)) |
@@ -58,7 +59,7 @@ use sakuya_wire::{
 use snafu::{ResultExt, Snafu, ensure};
 
 use super::{
-    Choices, CloseCauseOf, LinkPathRoleReads, Part,
+    Choices, CloseCauseOf, LinkPathRoleReads, Part, Side,
     ack::{AckReads, AckRecoveryTakes, receive_ack},
     close::CloseReasonRecord,
     confirmation::HandshakeConfirmation,
@@ -194,6 +195,7 @@ impl<
     Ir,
     Ih,
     Icid,
+    Iw,
     Iv,
     Ima,
     Irt,
@@ -222,7 +224,7 @@ impl<
         T,
         L,
         (
-            (Ic, Ir, Ih, Icid),
+            (Ic, Ir, Ih, Icid, Iw),
             (Iv, Ima, Irt),
             (Il, Is, Ii, Idx),
             (
@@ -271,6 +273,7 @@ where
         + CoreLentConnectionIdEvents<T, L, Icid>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
         + GetAt<HandshakeConfirmation, Ih>
+        + GetAt<<T::Side as Side>::Own, Iw>
         + ReadEach<LinkPathRoleReads<T, L>, Iv>,
     for<'s> NodeData<T, L, layer::Recovery>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Recovery> as FlatMut<'s>>::Out: GetAt<RttOf<T, L>, Irt>,
@@ -341,6 +344,13 @@ where
                     NewConnectionId::from(&frame),
                 )
                 .context(error::NewConnectionIdSnafu)
+            }
+            FrameRun::NewToken(frame) => {
+                <T::Side as Side>::on_new_token(
+                    lineage.get_mut::<<T::Side as Side>::Own, Iw>(),
+                    frame.into_token(),
+                );
+                Ok(())
             }
             FrameRun::HandshakeDone(_) => {
                 *lineage.get_mut::<HandshakeConfirmation, Ih>() = HandshakeConfirmation::Confirmed;
