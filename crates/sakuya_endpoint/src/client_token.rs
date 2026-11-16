@@ -23,6 +23,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use sakuya_connection::v1::address_token::AddressTokenSink;
 
 /// Where a client keeps tokens, per server name.
 pub trait AddressTokenStore<K> {
@@ -188,10 +189,41 @@ impl<K: Clone + Eq + Hash> AddressTokenStore<K> for BoundedAddressTokenStore<K> 
     }
 }
 
+/// The store `S` bound to the server name `K` of one connection: where the
+/// connection puts the tokens its server gives it.
+///
+/// It is made when a client connection starts, with a clone of the store
+/// in the configuration then and the server name the connection was made
+/// for, which is also the name the token it starts with was taken for.
+#[derive(Clone, Debug)]
+pub struct KeyedAddressTokenSink<S, K> {
+    store: S,
+    server_name: K,
+}
+
+impl<S, K> KeyedAddressTokenSink<S, K> {
+    /// `store`, keeping tokens for `server_name`.
+    pub fn new(store: S, server_name: K) -> Self {
+        Self { store, server_name }
+    }
+
+    /// The server name tokens are kept for.
+    pub fn server_name(&self) -> &K {
+        &self.server_name
+    }
+}
+
+impl<S: AddressTokenStore<K>, K: Clone> AddressTokenSink for KeyedAddressTokenSink<S, K> {
+    fn keep(&self, token: Bytes) {
+        self.store.insert(self.server_name.clone(), token);
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{AddressTokenStore, BoundedAddressTokenStore};
+    use super::{AddressTokenStore, BoundedAddressTokenStore, KeyedAddressTokenSink};
     use bytes::Bytes;
+    use sakuya_connection::v1::address_token::AddressTokenSink as _;
     use std::{num::NonZeroUsize, sync::Arc};
 
     fn token(byte: u8) -> Bytes {
@@ -283,5 +315,14 @@ mod tests {
         let store = BoundedAddressTokenStore::new();
         assert_eq!(round_trip(&store), Some(token(1)));
         assert_eq!(round_trip(Arc::new(store)), Some(token(1)));
+    }
+
+    #[test]
+    fn a_keyed_sink_keeps_tokens_for_its_server_name() {
+        let store = BoundedAddressTokenStore::new();
+        let sink = KeyedAddressTokenSink::new(store.clone(), "example.com");
+        sink.keep(token(1));
+        assert_eq!(store.take(&"example.com"), Some(token(1)));
+        assert_eq!(store.take(&"example.org"), None);
     }
 }

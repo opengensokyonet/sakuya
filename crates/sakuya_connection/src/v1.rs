@@ -41,6 +41,7 @@
 //! A link path that ends hands back what it had not settled as lost.
 
 pub mod ack;
+pub mod address_token;
 pub mod advancing;
 pub mod aead_usage;
 pub mod amplification;
@@ -66,12 +67,14 @@ pub mod keys;
 pub mod link;
 pub mod link_ceiling;
 pub mod link_end;
+pub mod long_header_claim;
 pub mod loss_detection;
 pub mod packet_writer;
 pub mod parameters;
 pub mod pto;
 pub mod receive;
 pub mod recovery;
+pub mod retry;
 pub mod send;
 pub mod send_planning;
 pub mod sending;
@@ -79,6 +82,7 @@ pub mod space_retirement;
 pub mod spaces;
 pub mod stateless_reset;
 pub mod streams;
+pub mod version_negotiation;
 
 #[cfg(test)]
 mod tests;
