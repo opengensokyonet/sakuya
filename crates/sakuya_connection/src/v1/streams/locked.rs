@@ -124,6 +124,8 @@ use crate::{
 };
 
 pub mod application;
+#[cfg(feature = "reset_stream_at")]
+mod reset_stream_at;
 #[cfg(test)]
 mod tests;
 
@@ -190,7 +192,9 @@ fn lock<X>(mutex: &Mutex<X>) -> MutexGuard<'_, X> {
 /// of a stream intent, `Rs` how its streams are reset
 /// ([`StreamResets`]), and `P` the parameters application data is sent
 /// with, by default an [`Urgency`]; all data goes to [`AnyActiveLinkPath`].
-/// Of the peer's resets it takes RESET_STREAM only.
+/// Of the peer's resets it takes RESET_STREAM, and RESET_STREAM_AT where
+/// its streams reset reliably (`reset_stream_at::ResetStreamAtSet`, with
+/// the feature `reset_stream_at`).
 pub struct LockedStreamSet<Lc, K, Rs: StreamResets, P = Urgency> {
     shared: Arc<StreamSetShare<Lc, K, Rs, P>>,
 }
@@ -404,8 +408,15 @@ impl EndFrameDelivery {
 }
 
 /// The sending part of a stream with the tickets of the intents of its
-/// frames: its data and FIN for its one destination, its RESET_STREAM and
-/// its STREAM_DATA_BLOCKED; and where its FIN and its RESET_STREAM stand.
+/// frames: its data and FIN for its one destination, its reset frame and
+/// its STREAM_DATA_BLOCKED; and where its FIN and its reset frame stand.
+///
+/// The reset frame is the one of the target in effect
+/// ([`LocalResetTarget::frame`]): RESET_STREAM, or another kind's, such as
+/// RESET_STREAM_AT. `reset_written` is the target whose frame was written
+/// last, and `reset_frame` where that frame stands; a target that changed
+/// since, as a reset at a reliable size may lower its size, has its frame
+/// due again.
 ///
 /// The waker of the writer is woken when what it waits for may have come:
 /// room for its writes, or the end of the stream's sending.
@@ -415,6 +426,7 @@ struct SendingEnd<Lc, K, Rs: StreamResets, P> {
     reset: Option<Ticketed<K, P>>,
     blocked: Option<Ticketed<K, P>>,
     fin: EndFrameDelivery,
+    reset_written: Option<Rs::Local>,
     reset_frame: EndFrameDelivery,
     writer: Option<Waker>,
 }
@@ -431,6 +443,7 @@ where
             reset: None,
             blocked: None,
             fin: EndFrameDelivery::NotSent,
+            reset_written: None,
             reset_frame: EndFrameDelivery::NotSent,
             writer: None,
         }
@@ -452,10 +465,14 @@ where
         }
     }
 
-    /// The reset whose RESET_STREAM waits to be sent.
+    /// The reset whose frame waits to be sent: its frame was not written,
+    /// or was lost, or the target changed since it was.
     fn reset_due(&self) -> Option<Rs::Local> {
         match self.sender.end_state() {
-            SendEndState::Reset { target, .. } if self.sends() && self.reset_frame.waits() => {
+            SendEndState::Reset { target, .. }
+                if self.sends()
+                    && (self.reset_written != Some(target) || self.reset_frame.waits()) =>
+            {
                 Some(target)
             }
             SendEndState::Open | SendEndState::Closed { .. } | SendEndState::Reset { .. } => None,
@@ -605,8 +622,8 @@ where
         self.fin = EndFrameDelivery::Sent;
     }
 
-    /// Write the RESET_STREAM frame of the reset in effect into `packet`,
-    /// its final size first exposed if it was not yet.
+    /// Write the reset frame of the reset in effect into `packet`, its final
+    /// size first exposed if it was not yet.
     fn write_reset_stream<W, Q, Idx>(
         &mut self,
         mut packet: OpenPacket<W, InFlightClass, Q>,
@@ -622,6 +639,7 @@ where
         let summary = ResetStreamSummary {
             stream_id,
             final_size: target.final_size(),
+            reliable_size: target.reliable_size(),
         };
         if write_frame(&mut packet, target.frame(stream_id), summary) {
             if let Some(prepared) = self.sender.prepare_end_frame()
@@ -629,6 +647,7 @@ where
             {
                 prepared.expose();
             }
+            self.reset_written = Some(target);
             self.reset_frame = EndFrameDelivery::Sent;
             forget_ticket(&mut self.reset);
         }
@@ -666,7 +685,9 @@ where
     /// The data and FIN of `summary` were acknowledged: once all data and
     /// the FIN of a stream that was closed, and not reset, are, the part is
     /// done (RFC 9000 §3.1). A stream that was reset waits for its reset to
-    /// be acknowledged instead (RFC 9000 §13.3).
+    /// be acknowledged instead (RFC 9000 §13.3), and one reset at a reliable
+    /// size also for the data below it
+    /// ([`reset_settled`](Self::reset_settled)).
     fn stream_delivered(&mut self, summary: StreamSummary) {
         if let Some(range) = data_range(summary.offset, summary.len) {
             let _ = self.sender.on_data_acknowledged(range);
@@ -680,6 +701,52 @@ where
             let _ = self
                 .sender
                 .enter_terminal_state(SendTerminalState::DataRecvd);
+        }
+        self.reset_settled();
+    }
+
+    /// The reset frame of `summary` was acknowledged: it counts when it is
+    /// the frame of the target in effect, as written last, with its final
+    /// size and reliable size; an earlier frame with a larger reliable size
+    /// does not (draft-ietf-quic-reliable-stream-reset §5.3). Then the part
+    /// may be done ([`reset_settled`](Self::reset_settled)).
+    fn reset_delivered(&mut self, summary: ResetStreamSummary) {
+        let SendEndState::Reset { target, .. } = self.sender.end_state() else {
+            return;
+        };
+        if self.reset_written == Some(target)
+            && summary.final_size == target.final_size()
+            && summary.reliable_size == target.reliable_size()
+        {
+            self.reset_frame = EndFrameDelivery::Acknowledged;
+            self.reset_settled();
+        }
+    }
+
+    /// Once the reset frame of the target in effect is acknowledged, the
+    /// part reaches the state the target's acknowledgment leads to
+    /// ([`LocalResetTarget::acknowledged_state`]): "Reset Recvd" for
+    /// RESET_STREAM; for a reset that keeps a reliable size, "Data Recvd"
+    /// once every byte below that size is acknowledged too
+    /// (draft-ietf-quic-reliable-stream-reset §5.3).
+    fn reset_settled(&mut self) {
+        let SendEndState::Reset { target, .. } = self.sender.end_state() else {
+            return;
+        };
+        if self.reset_written != Some(target) || self.reset_frame != EndFrameDelivery::Acknowledged
+        {
+            return;
+        }
+        let state = target.acknowledged_state();
+        let reliable_size = target.reliable_size();
+        let prefix_acknowledged = self
+            .sender
+            .composition()
+            .buffer
+            .retained()
+            .all(|(offset, _)| offset >= reliable_size);
+        if state == SendTerminalState::ResetRecvd || prefix_acknowledged {
+            let _ = self.sender.enter_terminal_state(state);
         }
     }
 
@@ -1007,7 +1074,7 @@ struct StreamSetShare<Lc, K, Rs: StreamResets, P> {
     set: Mutex<SetState<Lc, K, Rs, P>>,
     connection_receive: Mutex<ConnectionReceive<K, P>>,
     connection_send: Arc<AtomicConnectionSendFlowController>,
-    facts: StreamSetFacts,
+    facts: StreamSetFacts<Rs::PeerSupport>,
     config: LockedStreamSetConfig,
 }
 
@@ -1120,7 +1187,7 @@ fn initial_max_streams(parameters: &FlowControlParameters) -> InitialMaxStreams 
     }
 }
 
-impl StreamSetFacts {
+impl<S> StreamSetFacts<S> {
     /// Whether this side opens `id`.
     fn opens(&self, id: StreamId) -> bool {
         id.initiator() == initiator(self.role)
@@ -1343,7 +1410,7 @@ where
     type Config = LockedStreamSetConfig;
     type SendParameters = P;
 
-    fn new(facts: StreamSetFacts, config: LockedStreamSetConfig) -> Self {
+    fn new(facts: StreamSetFacts<Rs::PeerSupport>, config: LockedStreamSetConfig) -> Self {
         let ledger = StreamIdLedger::new(
             facts.role,
             initial_max_streams(&facts.granted_by_peer),
@@ -1860,8 +1927,8 @@ where
         Supplied::Open(packet)
     }
 
-    /// The acknowledgment of a STREAM frame's data and FIN, or of a
-    /// RESET_STREAM, may make the sending part done; the others change
+    /// The acknowledgment of a STREAM frame's data and FIN, or of a reset
+    /// frame, may make the sending part done; the others change
     /// nothing but the STREAM_DATA_BLOCKED signal's record.
     fn on_frame_delivered<H>(&mut self, publish: &H, summary: StreamSetFrameSummary)
     where
@@ -1877,10 +1944,7 @@ where
             }
             StreamSetFrameSummary::ResetStream(summary) => {
                 self.shared.with_sender(summary.stream_id, publish, |end| {
-                    end.reset_frame = EndFrameDelivery::Acknowledged;
-                    let _ = end
-                        .sender
-                        .enter_terminal_state(SendTerminalState::ResetRecvd);
+                    end.reset_delivered(summary);
                     end.wake_writer();
                 });
             }

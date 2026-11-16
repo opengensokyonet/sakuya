@@ -18,7 +18,7 @@
 //! | Frame | Kind | Item | Summary |
 //! | --- | --- | --- | --- |
 //! | STREAM | [`StreamFrames`] | stream ID | [`StreamSummary`]: stream ID, offset, length, FIN |
-//! | RESET_STREAM | [`ResetStreamFrames`] | stream ID | [`ResetStreamSummary`]: stream ID, final size |
+//! | RESET_STREAM, or the reset frame of the reset kind | [`ResetStreamFrames`] | stream ID | [`ResetStreamSummary`]: stream ID, final size, reliable size |
 //! | STOP_SENDING | [`StopSendingFrames`] | stream ID | [`StopSendingSummary`]: stream ID, error code |
 //! | MAX_DATA | [`MaxDataFrames`] | — | [`MaxDataSummary`]: the limit |
 //! | MAX_STREAM_DATA | [`MaxStreamDataFrames`] | stream ID | [`MaxStreamDataSummary`]: stream ID, the limit |
@@ -325,13 +325,18 @@ pub struct StreamSummary {
     pub fin: bool,
 }
 
-/// The summary of a RESET_STREAM frame written into a packet.
+/// The summary of a reset frame written into a packet: the frame of the
+/// reset target the stream set's reset kind gives, RESET_STREAM or another
+/// kind's, such as RESET_STREAM_AT.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ResetStreamSummary {
     /// The stream.
     pub stream_id: StreamId,
     /// The final size the frame carried.
     pub final_size: VarInt,
+    /// The size up to which the frame kept the data's delivery: 0 for
+    /// RESET_STREAM, the Reliable Size of RESET_STREAM_AT.
+    pub reliable_size: VarInt,
 }
 
 /// The summary of a STOP_SENDING frame written into a packet.
@@ -649,7 +654,9 @@ stream_frame_kinds! {
         supply: |set, publish, stream_id, packet| set.supply_stream(publish, stream_id, packet),
         key: |stream_id| StreamIntentKey::Stream(stream_id),
     }
-    /// The streams' RESET_STREAM frames, as a kind of frame source.
+    /// The streams' reset frames, as a kind of frame source: RESET_STREAM,
+    /// or the frame of the reset target the set's reset kind gives, such as
+    /// RESET_STREAM_AT.
     ResetStreamFrames {
         item: StreamId,
         summary: ResetStreamSummary,

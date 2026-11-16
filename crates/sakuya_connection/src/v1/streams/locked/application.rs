@@ -119,7 +119,7 @@ where
     H: StreamIntentHandle<P, K>,
 {
     part: SendingPart<Lc, K, Rs, P>,
-    shared: Arc<StreamSetShare<Lc, K, Rs, P>>,
+    pub(super) shared: Arc<StreamSetShare<Lc, K, Rs, P>>,
     publish: H,
 }
 
@@ -191,7 +191,10 @@ where
 {
     /// Change the part with `change` under its lock, and bring its intents
     /// to what is due then.
-    fn with_part<R>(&self, change: impl FnOnce(&mut SendingEnd<Lc, K, Rs, P>) -> R) -> R {
+    pub(super) fn with_part<R>(
+        &self,
+        change: impl FnOnce(&mut SendingEnd<Lc, K, Rs, P>) -> R,
+    ) -> R {
         let mut end = self.part.lock();
         let result = change(&mut end);
         end.sync_intents(&self.publish);

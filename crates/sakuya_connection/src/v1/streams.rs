@@ -57,7 +57,9 @@ use sakuya_wire::{
 };
 use snafu::Snafu;
 
-use self::resets::{ResetStreamViolation, StreamResets, StreamResetsOf, StreamResetsOfParts};
+use self::resets::{
+    PeerResetSupportSlots, ResetStreamViolation, StreamResets, StreamResetsOf, StreamResetsOfParts,
+};
 use self::send::{
     DataBlockedSummary, MaxDataSummary, MaxStreamDataSummary, MaxStreamsSummary,
     ResetStreamSummary, StopSendingSummary, StreamDataBlockedSummary, StreamIntent,
@@ -125,8 +127,9 @@ pub trait StreamSet<Lc, K, X: StreamResets>: Sized {
     type SendParameters;
 
     /// The stream set of an established layer, from the facts of the
-    /// connection and the configuration.
-    fn new(facts: StreamSetFacts, config: Self::Config) -> Self;
+    /// connection, with what the peer allows the resets of the kind `X`,
+    /// and the configuration.
+    fn new(facts: StreamSetFacts<X::PeerSupport>, config: Self::Config) -> Self;
 
     /// A handle for the application.
     fn handle(&self) -> Self::Handle;
@@ -442,9 +445,11 @@ pub trait StreamSet<Lc, K, X: StreamResets>: Sized {
 }
 
 /// What a stream set is made from that the connection knows: this side's
-/// role and the flow control transport parameters of both sides.
+/// role, the flow control transport parameters of both sides, and what the
+/// peer's parameters allow the resets the set sends, `S`
+/// ([`StreamResets::PeerSupport`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StreamSetFacts {
+pub struct StreamSetFacts<S = ()> {
     /// The role of this side.
     pub role: Role,
     /// This side's transport parameters: the limits it grants the peer,
@@ -453,6 +458,9 @@ pub struct StreamSetFacts {
     /// The peer's transport parameters: the limits the peer grants this
     /// side, which set how much the streams send.
     pub granted_by_peer: FlowControlParameters,
+    /// What the peer's transport parameters allow the resets this side
+    /// sends; RFC 9000's resets need nothing (`()`).
+    pub peer_reset_support: S,
 }
 
 /// The transport parameters of one side that limit the streams and their
@@ -551,10 +559,12 @@ pub enum StreamSetFrameError<R = OnResetStreamError> {
         /// The broken rule.
         source: OnStreamFrameError,
     },
-    /// The receiving part of the stream rejected a RESET_STREAM frame: it
-    /// breaks a rule of final sizes or of flow control (RFC 9000 §4.1,
-    /// §4.5).
-    #[snafu(display("RESET_STREAM frame rejected"))]
+    /// The receiving part of the stream rejected a reset frame: it breaks a
+    /// rule of final sizes or of flow control (RFC 9000 §4.1, §4.5), or one
+    /// of the reset kind, as the reliable stream reset extension's rule on
+    /// error codes. The frame is RESET_STREAM, or the reset kind's own frame
+    /// taken through the part that defines it (RESET_STREAM_AT).
+    #[snafu(display("reset frame rejected"))]
     ResetStream {
         /// The broken rule.
         source: R,
@@ -615,14 +625,19 @@ pub struct ChosenStreamSet;
 /// layer another part asks for before takes this side's parameters as
 /// configured, and the peer's as absent: no stream and no data.
 ///
+/// What the peer allows the resets of the composition is taken from its
+/// parameters as received, as the peer's flow control parameters are
+/// ([`PeerResetSupportSlots`]); absent, what a peer whose parameters are not
+/// known allows.
+///
 /// When the layer ends, every stream hears that the connection closed, for
 /// the reason in the record of why the connection closed.
 ///
 /// The cell of the connection handle in the connection node is handed what
 /// the layer's handle holds when the layer is built, the set's handle and
 /// the send strategy's intake, and the layer's end when it ends.
-impl<T, L, X, Il, Ip, Ic, Ir, Ih, In, Jl, Jp>
-    Build<T, L, layer::Established, (ChosenStreamSet, (Il, Ip, Ic, Ir, Ih, In), (Jl, Jp))> for X
+impl<T, L, X, Il, Ip, Ic, Ir, Ih, In, Jl, Jp, Jr>
+    Build<T, L, layer::Established, (ChosenStreamSet, (Il, Ip, Ic, Ir, Ih, In), (Jl, Jp, Jr))> for X
 where
     T: Choices<Streams<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>, StreamResetsOfParts<L>> = X>,
     L: LineagePartList<T>
@@ -638,7 +653,8 @@ where
             Config = T::StreamSetConfig,
         >,
     TransportParameterSlots: FlowControlParameterSlots<Jl>,
-    TransportParameterSlots<L>: FlowControlParameterSlots<Jp>,
+    TransportParameterSlots<L>:
+        FlowControlParameterSlots<Jp> + PeerResetSupportSlots<StreamResetsOfParts<L>, Jr>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<LocalTransportParameters<TransportParameterSlots>, Il>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>
         + GetAt<StreamSetConfig<T::StreamSetConfig>, Ic>
@@ -656,10 +672,14 @@ where
                 LocalTransportParameters::Configured(configured) => configured,
             }
             .flow_control_parameters();
-        let granted_by_peer = parents
+        let peer = parents
             .get::<PeerTransportParameters<TransportParameterSlots<L>>, Ip>()
-            .known()
+            .known();
+        let granted_by_peer = peer
             .map(FlowControlParameterSlots::flow_control_parameters)
+            .unwrap_or_default();
+        let peer_reset_support = peer
+            .map(PeerResetSupportSlots::<StreamResetsOfParts<L>, Jr>::peer_reset_support)
             .unwrap_or_default();
         let config = parents
             .get::<StreamSetConfig<T::StreamSetConfig>, Ic>()
@@ -670,6 +690,7 @@ where
                 role: <T::Side as Side>::ROLE,
                 granted_to_peer,
                 granted_by_peer,
+                peer_reset_support,
             },
             config,
         );

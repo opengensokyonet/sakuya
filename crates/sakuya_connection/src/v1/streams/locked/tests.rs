@@ -124,6 +124,7 @@ fn client_set_with_connection_limit(initial_max_data: u32) -> TestSet {
             role: Role::Client,
             granted_to_peer,
             granted_by_peer,
+            peer_reset_support: (),
         },
         LockedStreamSetConfig::default(),
     )
@@ -528,6 +529,12 @@ enum Read {
         stream: StreamId,
         final_size: VarInt,
     },
+    #[cfg(feature = "reset_stream_at")]
+    ResetStreamAt {
+        stream: StreamId,
+        final_size: VarInt,
+        reliable_size: VarInt,
+    },
     MaxStreamData {
         stream: StreamId,
         limit: VarInt,
@@ -539,12 +546,14 @@ enum Read {
 ///
 /// `I1` to `I9` are the places of the summaries of the nine kinds of frames
 /// in the packet's summary; the compiler infers them.
-fn supply_key<W, Q, I1, I2, I3, I4, I5, I6, I7, I8, I9>(
-    set: &mut TestSet,
+fn supply_key<X, Rs, W, Q, I1, I2, I3, I4, I5, I6, I7, I8, I9>(
+    set: &mut X,
     key: StreamIntentKey,
     packet: OpenPacket<W, InFlightClass, Q>,
 ) -> Supplied<W, InFlightClass, Q>
 where
+    X: StreamSet<(), TestTicket, Rs, SendParameters = Urgency>,
+    Rs: StreamResets,
     W: PacketWriting,
     Q: PacketPosition,
     SummaryOf<W>: InjectSummary<StreamSummary, I1>
@@ -580,13 +589,17 @@ where
 /// What the peer reads of the 1-RTT packet the item `key` of `set` is
 /// written into, with `room` bytes for frames, the last packet of its
 /// datagram if `last`.
-fn written(set: &mut TestSet, key: StreamIntentKey, room: usize, last: bool) -> Vec<Read> {
+fn written<X, Rs>(set: &mut X, key: StreamIntentKey, room: usize, last: bool) -> Vec<Read>
+where
+    X: StreamSet<(), TestTicket, Rs, SendParameters = Urgency>,
+    Rs: StreamResets,
+{
     use core::{marker::PhantomData, num::NonZeroUsize};
 
     use bytes::BytesMut;
     use sakuya_recovery::send_journals::{DequeSendJournals, SendJournals as _};
     use sakuya_wire::{
-        parts::{CNil, Coproduct, HList},
+        parts::{CNil, Coproduct},
         v1::frame::{FrameRun, set::Frames},
     };
 
@@ -629,10 +642,26 @@ fn written(set: &mut TestSet, key: StreamIntentKey, room: usize, last: bool) -> 
     let (opened, _) =
         open_one_rtt(receiver.receive().unwrap(), None, &mut packet, 9, None).unwrap();
     let payload = &packet[opened.payload.clone()];
-    let frames = Frames::new(payload, PhantomData::<HList![sakuya_wire::v1::Part]>);
+    let frames = Frames::new(payload, PhantomData::<TestFrameSet>);
     let mut read = Vec::new();
     for run in frames {
-        read.push(match run.unwrap().extract() {
+        let run = run.unwrap();
+        #[cfg(feature = "reset_stream_at")]
+        let run = match run.uninject::<FrameRun<&[u8]>, _>() {
+            Ok(run) => run,
+            Err(other) => {
+                let frame: sakuya_wire::reset_stream_at::ResetStreamAtFrame = other.extract();
+                read.push(Read::ResetStreamAt {
+                    stream: frame.stream_id().get(),
+                    final_size: frame.final_size().get(),
+                    reliable_size: frame.reliable_size().get(),
+                });
+                continue;
+            }
+        };
+        #[cfg(not(feature = "reset_stream_at"))]
+        let run = run.extract();
+        read.push(match run {
             FrameRun::Padding(_) => continue,
             FrameRun::Stream(frame) => Read::Stream {
                 stream: frame.stream_id().get(),
@@ -653,6 +682,14 @@ fn written(set: &mut TestSet, key: StreamIntentKey, room: usize, last: bool) -> 
     }
     read
 }
+
+/// The frame set the tests read what the set wrote with: version 1's, and
+/// the reliable stream reset extension's where it is built.
+#[cfg(not(feature = "reset_stream_at"))]
+type TestFrameSet = sakuya_wire::parts::HList![sakuya_wire::v1::Part];
+#[cfg(feature = "reset_stream_at")]
+type TestFrameSet =
+    sakuya_wire::parts::HList![sakuya_wire::v1::Part, sakuya_wire::reset_stream_at::Part];
 
 fn options() -> SendOptions<Urgency, AnyActiveLinkPath> {
     SendOptions::new(Urgency::default(), AnyActiveLinkPath)
@@ -861,6 +898,7 @@ fn a_reset_is_sent_until_acknowledged() {
     let summary = ResetStreamSummary {
         stream_id: id(1),
         final_size: v(0),
+        reliable_size: v(0),
     };
     set.on_frame_lost(&publish(), StreamSetFrameSummary::ResetStream(summary));
     assert_eq!(
@@ -895,6 +933,7 @@ fn narrow_window_set() -> TestSet {
             role: Role::Client,
             granted_to_peer,
             granted_by_peer: FlowControlParameters::default(),
+            peer_reset_support: (),
         },
         LockedStreamSetConfig::default(),
     )
@@ -984,4 +1023,219 @@ fn nothing_is_written_once_the_layer_ended() {
         written(&mut set, StreamIntentKey::Stream(id(1)), 100, false),
         []
     );
+}
+
+/// The default set with the reliable stream reset extension.
+#[cfg(feature = "reset_stream_at")]
+mod reliable {
+    use sakuya_stream::{
+        reset_stream_at::{receive::OnResetStreamError, send::PeerResetStreamAtSupport},
+        stream_end::ResetCodeChangeError,
+    };
+    use sakuya_wire::reset_stream_at::{ResetStreamAt, ResetStreamAtFrame};
+
+    use super::*;
+    use crate::reset_stream_at::{ReliableStreamResets, ResetStreamAtSet};
+
+    type ReliableSet = LockedStreamSet<(), TestTicket, ReliableStreamResets>;
+
+    /// A client set as [`client_set`] is, whose peer allows RESET_STREAM_AT
+    /// if `peer_allows`.
+    fn reliable_client_set(peer_allows: bool) -> ReliableSet {
+        let flow = FlowControlParameters {
+            initial_max_data: InitialMaxData::new(v(1000)),
+            initial_max_stream_data_bidi_local: InitialMaxStreamDataBidiLocal::new(v(100)),
+            initial_max_stream_data_bidi_remote: InitialMaxStreamDataBidiRemote::new(v(100)),
+            initial_max_stream_data_uni: InitialMaxStreamDataUni::new(v(100)),
+            initial_max_streams_bidi: InitialMaxStreamsBidi::new(count(3)),
+            initial_max_streams_uni: InitialMaxStreamsUni::new(count(3)),
+        };
+        LockedStreamSet::new(
+            StreamSetFacts {
+                role: Role::Client,
+                granted_to_peer: flow,
+                granted_by_peer: flow,
+                peer_reset_support: peer_allows
+                    .then(|| PeerResetStreamAtSupport::from_peer_parameter(ResetStreamAt)),
+            },
+            LockedStreamSetConfig::default(),
+        )
+    }
+
+    fn reset_stream_at(
+        stream: u32,
+        code: u32,
+        final_size: u32,
+        reliable: u32,
+    ) -> ResetStreamAtFrame {
+        ResetStreamAtFrame::new(
+            field(stream),
+            VarIntField::shortest(ApplicationErrorCode::new(v(code))),
+            VarIntField::shortest(v(final_size)),
+            VarIntField::shortest(v(reliable)),
+        )
+        .expect("the reliable size is within the final size")
+    }
+
+    fn reset_stream_with_code(stream: u32, code: u32, final_size: u32) -> ResetStreamFrame {
+        ResetStreamFrame::new(
+            field(stream),
+            VarIntField::shortest(ApplicationErrorCode::new(v(code))),
+            VarIntField::shortest(v(final_size)),
+        )
+    }
+
+    /// RESET_STREAM_AT with code 1, then RESET_STREAM with code 2, on the
+    /// peer's stream: the second changes the error code, which the
+    /// extension makes a STREAM_STATE_ERROR (draft §5.2).
+    #[test]
+    fn a_reset_that_changes_the_code_of_a_reset_stream_at_is_a_stream_state_error() {
+        let mut set = reliable_client_set(true);
+        set.on_reset_stream_at(&publish(), reset_stream_at(1, 1, 10, 4))
+            .expect("the first reset of stream 1");
+        let error = set
+            .on_reset_stream(&publish(), reset_stream_with_code(1, 2, 10))
+            .expect_err("another code");
+        assert!(matches!(
+            error,
+            StreamSetFrameError::ResetStream {
+                source: OnResetStreamError::ResetCodeChanged {
+                    source: ResetCodeChangeError { .. }
+                }
+            }
+        ));
+        assert_eq!(
+            error.transport_error_code(),
+            TransportErrorCode::STREAM_STATE_ERROR
+        );
+        // the same code lowers the reliable size to zero, and is taken
+        set.on_reset_stream(&publish(), reset_stream_with_code(1, 1, 10))
+            .expect("the same code");
+    }
+
+    /// RESET_STREAM_AT names a stream as RESET_STREAM does: one of this
+    /// side's not opened yet is a STREAM_STATE_ERROR.
+    #[test]
+    fn a_reset_stream_at_of_a_stream_not_opened_is_a_stream_state_error() {
+        let mut set = reliable_client_set(true);
+        let error = set
+            .on_reset_stream_at(&publish(), reset_stream_at(0, 1, 10, 4))
+            .expect_err("stream 0 is not open");
+        assert!(matches!(
+            error,
+            StreamSetFrameError::ReceivingPartFrame { .. }
+        ));
+        assert_eq!(
+            error.transport_error_code(),
+            TransportErrorCode::STREAM_STATE_ERROR
+        );
+    }
+
+    /// Open the peer's stream 1 and write `len` bytes into its sending
+    /// part; the events of that are forgotten.
+    fn written_peer_stream(
+        set: &mut ReliableSet,
+        len: usize,
+    ) -> SendingPart<(), TestTicket, ReliableStreamResets, Urgency> {
+        set.on_stream_frame(
+            &publish(),
+            EncryptionLevel::OneRtt,
+            stream_frame(1, 1, false),
+        )
+        .expect("stream 1");
+        let part = lock(&set.shared.set)
+            .senders
+            .get(&id(1))
+            .cloned()
+            .expect("built");
+        {
+            let mut end = part.lock();
+            end.sender
+                .write(&mut Bytes::from(vec![9; len]), &options())
+                .expect("within the limits");
+            end.sync_intents(&publish());
+        }
+        events();
+        part
+    }
+
+    /// A reset at a reliable size writes RESET_STREAM_AT; its
+    /// acknowledgment and that of the data below the reliable size end the
+    /// sending part in "Data Recvd" (draft §5.3), and a later frame with a
+    /// lower reliable size has to be acknowledged in its turn.
+    #[test]
+    fn a_reset_at_a_reliable_size_ends_once_its_frame_and_prefix_are_acknowledged() {
+        let mut set = reliable_client_set(true);
+        let part = written_peer_stream(&mut set, 10);
+        let support = PeerResetStreamAtSupport::from_peer_parameter(ResetStreamAt);
+        {
+            let mut end = part.lock();
+            end.sender
+                .reset_at(support, ApplicationErrorCode::new(v(3)), v(6))
+                .expect("not done");
+            end.sync_intents(&publish());
+        }
+        events();
+        let reset = StreamIntentKey::ResetStream(id(1));
+        let data = StreamIntentKey::Stream(id(1));
+        assert_eq!(
+            written(&mut set, data, 100, false),
+            [Read::Stream {
+                stream: id(1),
+                offset: v(0),
+                len: 6,
+                fin: false,
+            }]
+        );
+        assert_eq!(
+            written(&mut set, reset, 100, false),
+            [Read::ResetStreamAt {
+                stream: id(1),
+                final_size: v(6),
+                reliable_size: v(6),
+            }]
+        );
+        // the reliable size is lowered before anything is acknowledged:
+        // its frame is due again
+        {
+            let mut end = part.lock();
+            end.sender
+                .reset_at(support, ApplicationErrorCode::new(v(3)), v(2))
+                .expect("lower");
+            end.sync_intents(&publish());
+        }
+        let summary = |reliable: u32| {
+            StreamSetFrameSummary::ResetStream(ResetStreamSummary {
+                stream_id: id(1),
+                final_size: v(6),
+                reliable_size: v(reliable),
+            })
+        };
+        set.on_frame_delivered(
+            &publish(),
+            StreamSetFrameSummary::Stream(StreamSummary {
+                stream_id: id(1),
+                offset: v(0),
+                len: 6,
+                fin: false,
+            }),
+        );
+        // the frame of the earlier, larger reliable size is not the one
+        // in effect
+        set.on_frame_delivered(&publish(), summary(6));
+        assert_eq!(part.lock().sender.terminal_state(), None);
+        assert_eq!(
+            written(&mut set, reset, 100, false),
+            [Read::ResetStreamAt {
+                stream: id(1),
+                final_size: v(6),
+                reliable_size: v(2),
+            }]
+        );
+        set.on_frame_delivered(&publish(), summary(2));
+        assert_eq!(
+            part.lock().sender.terminal_state(),
+            Some(SendTerminalState::DataRecvd)
+        );
+    }
 }

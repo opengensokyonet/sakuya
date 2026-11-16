@@ -9,7 +9,7 @@
 //! fold gives, and the failures of a RESET_STREAM frame are of that kind
 //! too.
 
-use core::{convert::Infallible, error::Error};
+use core::{convert::Infallible, error::Error, fmt};
 
 use sakuya_stream::{
     connection_receive_flow::ConnectionReceiveFlowController,
@@ -76,6 +76,12 @@ pub trait StreamResets: 'static {
     /// left, or whose peer sent STOP_SENDING.
     type SendTermination: SendTerminationPolicy<Self::Local, WriteLimitReason = Infallible>;
 
+    /// What the peer's transport parameters allow the sending parts beyond
+    /// RFC 9000's resets, taken when the stream set is made
+    /// ([`PeerResetSupportSlots`]); its default is what a peer whose
+    /// parameters are not known allows.
+    type PeerSupport: Copy + Default + fmt::Debug + Send + Sync + 'static;
+
     /// The termination policy that resets with `abandon_code` when the
     /// writer is abandoned and with `destination_exhausted_code` when data
     /// has no destination left.
@@ -127,6 +133,7 @@ impl StreamResets for Rfc9000StreamResets {
     type Remote = RemoteReset;
     type OnResetStreamError = OnResetStreamError;
     type SendTermination = ResetOnAbandonTermination;
+    type PeerSupport = ();
 
     fn send_termination(
         abandon_code: ApplicationErrorCode,
@@ -159,6 +166,20 @@ impl StreamResets for Rfc9000StreamResets {
     {
         sender.reset(error_code)
     }
+}
+
+/// The peer's transport parameter slots `Self`, from which the reset kind
+/// `X` takes what the peer allows its sending parts
+/// ([`StreamResets::PeerSupport`]); `I` is where the parameters it reads
+/// are, which the compiler infers.
+pub trait PeerResetSupportSlots<X: StreamResets, I> {
+    /// What the peer allows, as its parameters in these slots state.
+    fn peer_reset_support(&self) -> X::PeerSupport;
+}
+
+/// RFC 9000's resets need nothing of the peer's parameters.
+impl<S> PeerResetSupportSlots<Rfc9000StreamResets, ()> for S {
+    fn peer_reset_support(&self) {}
 }
 
 /// How a part changes the reset kind of the parts after it.

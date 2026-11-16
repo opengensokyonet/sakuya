@@ -865,6 +865,38 @@ fn client_capacities() -> CryptoReceiveCapacities {
     .expect("the least capacities the limits allow")
 }
 
+/// A connection of the parts `Parts` in scope, of the choices `$t`, whose
+/// first link path is over `$link`: version 1's facts `$args`, nothing for
+/// the watch, and `$rest` for the parts after it.
+macro_rules! connection {
+    ($t:ty, $args:expr, $link:expr $(, $rest:expr)*) => {
+        ConnectionDriver::<$t, Parts, _, _, _>::new(
+            TestClock,
+            frunk_core::hlist![$args, HNil $(, $rest)*],
+            LogicalPathArgs { path: PATH },
+            LinkPathArgs {
+                path: PATH,
+                link: TestLink($link),
+                role: LinkPathRole::Active,
+                peer_switched_local_id: false,
+            },
+        )
+    };
+}
+
+/// Whether `datagram` starts with an Initial packet.
+fn starts_with_initial(datagram: &[u8]) -> bool {
+    datagram
+        .first()
+        .is_some_and(|&byte| byte & 0x80 != 0 && (byte >> 4) & 0b11 == 0)
+}
+
+/// The harness of the runs for the parts `Parts` in scope: version 1's
+/// facts ([`args`]), what a run left ([`Run`]) and the run of a handshake
+/// ([`handshake`]); `$server` and `$client` are what each side's parts
+/// after the watch are given.
+macro_rules! harness {
+    (server: [$($server:expr),*], client: [$($client:expr),*]) => {
 /// Version 1's facts for a connection of the choices `T`.
 #[allow(clippy::too_many_arguments)]
 fn args<T>(
@@ -930,31 +962,6 @@ where
     }
 }
 
-/// A connection of version 1 and the watch, of the choices `$t`, whose
-/// first link path is over `$link`.
-macro_rules! connection {
-    ($t:ty, $args:expr, $link:expr) => {
-        ConnectionDriver::<$t, Parts, _, _, _>::new(
-            TestClock,
-            frunk_core::hlist![$args, HNil],
-            LogicalPathArgs { path: PATH },
-            LinkPathArgs {
-                path: PATH,
-                link: TestLink($link),
-                role: LinkPathRole::Active,
-                peer_switched_local_id: false,
-            },
-        )
-    };
-}
-
-/// Whether `datagram` starts with an Initial packet.
-fn starts_with_initial(datagram: &[u8]) -> bool {
-    datagram
-        .first()
-        .is_some_and(|&byte| byte & 0x80 != 0 && (byte >> 4) & 0b11 == 0)
-}
-
 /// What a run of a handshake left.
 struct Run {
     /// The datagrams the client sent, in order.
@@ -968,6 +975,7 @@ struct Run {
     /// The server's connection handle.
     server_handle: ConnectionHandle<ServerChoices, Parts>,
     /// The client's link.
+    #[allow(dead_code, reason = "not every harness's tests end the link")]
     client_link: LinkId<(), ()>,
 }
 
@@ -995,7 +1003,12 @@ fn handshake(
         first_local(&CLIENT_CID, 0xc1),
     );
     let client_handle = ConnectionHandle::new(&client_args);
-    let mut client = connection!(ClientChoices, client_args, client_link.clone());
+    let mut client = connection!(
+        ClientChoices,
+        client_args,
+        client_link.clone()
+        $(, $client)*
+    );
     let outer = Outer::new();
     assert!(outer.poll(&mut client).is_pending());
     let first: Vec<Bytes> = common::take_sent()
@@ -1021,7 +1034,12 @@ fn handshake(
         first_local(&SERVER_CID, 0x5e),
     );
     let server_handle = ConnectionHandle::new(&server_args);
-    let mut server = connection!(ServerChoices, server_args, server_link.clone());
+    let mut server = connection!(
+        ServerChoices,
+        server_args,
+        server_link.clone()
+        $(, $server)*
+    );
     let mut run = Run {
         client_sent: first_sent,
         server_ended: false,
@@ -1059,6 +1077,11 @@ fn handshake(
     }
     run
 }
+
+    };
+}
+
+harness!(server: [], client: []);
 
 fn tls_clock() -> Arc<ManualClock> {
     Arc::new(ManualClock::new(tls_now()))
@@ -1351,4 +1374,152 @@ fn a_client_whose_link_ends_reports_the_end_everywhere_and_sends_nothing_more() 
         ),
         "{error:?}"
     );
+}
+
+/// A client and a server whose compositions have the reliable stream reset
+/// extension, each announcing `reset_stream_at` or not.
+#[cfg(feature = "reset_stream_at")]
+mod reliable {
+    use std::cell::Cell;
+
+    use sakuya_connection::{
+        reset_stream_at::{self, ResetAtError},
+        v1::parameters::PartSlots,
+    };
+    use sakuya_stream::receive::read::ReadError;
+    use sakuya_wire::{
+        reset_stream_at::ResetStreamAt, v1::application_error::ApplicationErrorCode,
+    };
+
+    use super::*;
+
+    /// The parts of these connections: version 1, the watch, and the
+    /// extension.
+    type Parts = HList![v1::Part, watch::Part, reset_stream_at::Part];
+
+    thread_local! {
+        /// Whether each side announces `reset_stream_at`: the server's
+        /// first.
+        static ANNOUNCES: Cell<[bool; 2]> = const { Cell::new([true, true]) };
+    }
+
+    /// The extension's slots of the side of `role`, as the test set them.
+    fn slots(role: Role) -> PartSlots<reset_stream_at::Part> {
+        let announces = ANNOUNCES.with(|announces| announces.get()[index(role)]);
+        frunk_core::hlist![announces.then_some(ResetStreamAt)]
+    }
+
+    harness!(server: [slots(Role::Server)], client: [slots(Role::Client)]);
+
+    /// Run a handshake with the server announcing `reset_stream_at` if
+    /// `server` and the client if `client`, as [`handshake`] does.
+    fn run_announcing(
+        server: bool,
+        client: bool,
+        clock: &Arc<ManualClock>,
+        done: impl FnMut(&Run) -> bool,
+    ) -> Run {
+        ANNOUNCES.with(|announces| announces.set([server, client]));
+        handshake(client_engine(clock, 1), clock, done)
+    }
+
+    fn code(value: u32) -> ApplicationErrorCode {
+        ApplicationErrorCode::new(VarInt::from_u32(value))
+    }
+
+    /// The client writes 10 bytes on a stream and resets it at a reliable
+    /// size of 4: the server, which announced `reset_stream_at`, reads the
+    /// first 4 bytes and then the reset, with its code and reliable size
+    /// (draft-ietf-quic-reliable-stream-reset §4, §5). The client could
+    /// reset so only because the server's parameter reached it.
+    #[test]
+    fn a_reset_at_a_reliable_size_delivers_the_prefix_and_then_the_reset() {
+        let clock = tls_clock();
+        let mut client_stream = None;
+        let mut server_layer = None;
+        let mut server_stream = None;
+        let mut read = Vec::new();
+        let mut reset = None;
+        run_announcing(true, true, &clock, |run| {
+            if client_stream.is_none()
+                && let Poll::Ready(layer) = poll_now(run.client_handle.established())
+            {
+                let layer = layer.expect("the client's handshake completed");
+                let (mut writer, reader) = layer.try_open_bi().expect("the server grants streams");
+                ready(writer.write_all_unpin(Bytes::from_static(b"0123456789")))
+                    .expect("the data is written");
+                writer
+                    .reset_at(code(7), VarInt::from_u32(4))
+                    .expect("the server announced reset_stream_at");
+                client_stream = Some((writer, reader));
+            }
+            if server_layer.is_none()
+                && let Poll::Ready(layer) = poll_now(run.server_handle.established())
+            {
+                server_layer = Some(layer.expect("the server's handshake completed"));
+            }
+            if server_stream.is_none()
+                && let Some(layer) = &server_layer
+                && let Poll::Ready(stream) = poll_now(layer.accept_bi())
+            {
+                server_stream = Some(stream.expect("the client's stream is accepted"));
+            }
+            if let Some((_, reader)) = &mut server_stream
+                && reset.is_none()
+            {
+                let maximum = NonZeroUsize::new(64).expect("not zero");
+                loop {
+                    match poll_now(reader.read_chunk_unpin(maximum)) {
+                        Poll::Ready(Ok(Some(chunk))) => read.extend_from_slice(&chunk),
+                        Poll::Ready(Ok(None)) => panic!("the stream was reset, not ended"),
+                        Poll::Ready(Err(ReadError::Reset { reset: facts, .. })) => {
+                            reset = Some(facts);
+                            break;
+                        }
+                        Poll::Ready(Err(error)) => panic!("the stream is reset: {error:?}"),
+                        Poll::Pending => break,
+                    }
+                }
+            }
+            reset.is_some()
+        });
+        let reset = reset.expect("the server read the reset within 3 s");
+        assert_eq!(read, b"0123");
+        assert_eq!(reset.code(), code(7));
+        assert_eq!(reset.reliable_size(), VarInt::from_u32(4));
+        let (server, client) = (noted(Role::Server), noted(Role::Client));
+        assert_eq!(
+            server.record, None,
+            "the server's connection is not closing"
+        );
+        assert_eq!(
+            client.record, None,
+            "the client's connection is not closing"
+        );
+    }
+
+    /// A server that does not announce `reset_stream_at` takes no
+    /// RESET_STREAM_AT: the client's writer refuses to reset at a reliable
+    /// size, and the stream stays as it was (draft §3).
+    #[test]
+    fn a_reset_at_a_reliable_size_needs_the_peers_parameter() {
+        let clock = tls_clock();
+        let mut refused = None;
+        run_announcing(false, true, &clock, |run| {
+            if let Poll::Ready(layer) = poll_now(run.client_handle.established()) {
+                let layer = layer.expect("the client's handshake completed");
+                let (mut writer, _) = layer.try_open_bi().expect("the server grants streams");
+                ready(writer.write_all_unpin(Bytes::from_static(b"0123456789")))
+                    .expect("the data is written");
+                refused = Some(writer.reset_at(code(7), VarInt::from_u32(4)));
+                writer.reset(code(8)).expect("a plain reset is taken");
+                return true;
+            }
+            false
+        });
+        assert!(
+            matches!(refused, Some(Err(ResetAtError::NotSupportedByPeer))),
+            "{refused:?}"
+        );
+    }
 }

@@ -141,6 +141,7 @@ fn client_receiving(stream: u32, connection: u32, receive: u32) -> (Set, Layer, 
             role: Role::Client,
             granted_to_peer,
             granted_by_peer,
+            peer_reset_support: (),
         },
         LockedStreamSetConfig::default(),
     );

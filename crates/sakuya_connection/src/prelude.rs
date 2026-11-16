@@ -10,3 +10,6 @@ pub use crate::v1::application_handles::{
     established_layer::{AcceptStreams, AcceptStreamsOwned, OpenStreams, OpenStreamsOwned},
     stream::{StreamRead, StreamWrite},
 };
+
+#[cfg(feature = "reset_stream_at")]
+pub use crate::reset_stream_at::StreamResetAt;
