@@ -9,7 +9,9 @@
 //! are sealed: its error says which close it can become ([`TransportClose`]
 //! or [`ApplicationClose`]), and a policy ([`ImmediateClosePolicy`]) can
 //! adjust what goes out at each encryption level. The record keeps the
-//! reason, not the frames.
+//! reason, not the frames. The end of a link that leaves the connection no
+//! link path is this endpoint's reason too, and becomes no close: the
+//! connection ends at once, with nothing sent.
 use bytes::Bytes;
 use core::{error::Error, fmt};
 use sakuya_stream::connection::{
@@ -29,11 +31,13 @@ use sakuya_wire::{
 /// the whole chain of its sources.
 ///
 /// `E` is the connection's error, `H` the error of the handshake, `A` the
-/// application's own error type for closing. The close it becomes follows
-/// from the branch: a connection error and a handshake error become a
-/// transport close, an application close an application close.
+/// application's own error type for closing, `R` why a link ended (a
+/// link's `RecvError`). The close it becomes follows from the branch: a
+/// connection error and a handshake error become a transport close, an
+/// application close an application close; the end of a link becomes
+/// none.
 #[derive(Debug, PartialEq, Eq)]
-pub enum LocalCloseCause<E, H, A> {
+pub enum LocalCloseCause<E, H, A, R> {
     /// An error of the connection: of processing a packet, of a frame, of
     /// CRYPTO data.
     Connection(E),
@@ -41,38 +45,47 @@ pub enum LocalCloseCause<E, H, A> {
     Handshake(H),
     /// The application closed the connection.
     Application(A),
+    /// A link ended, for the reason it holds, and no link path of the
+    /// connection was left: the connection ended at once, with no close
+    /// sent.
+    LinkEnded(R),
 }
 
-impl<E: TransportClose, H: TransportClose, A: ApplicationClose> LocalCloseCause<E, H, A> {
+impl<E: TransportClose, H: TransportClose, A: ApplicationClose, R> LocalCloseCause<E, H, A, R> {
     /// The close this reason becomes, as its error gives it, before any
-    /// adjustment.
-    pub fn immediate_close(&self) -> ImmediateClose {
+    /// adjustment; `None` for the end of a link, which sends no close.
+    pub fn immediate_close(&self) -> Option<ImmediateClose> {
         match self {
-            Self::Connection(error) => error.immediate_close().into(),
-            Self::Handshake(error) => error.immediate_close().into(),
-            Self::Application(error) => error.immediate_close().into(),
+            Self::Connection(error) => Some(error.immediate_close().into()),
+            Self::Handshake(error) => Some(error.immediate_close().into()),
+            Self::Application(error) => Some(error.immediate_close().into()),
+            Self::LinkEnded(_) => None,
         }
     }
 }
 
 /// It shows as the error it holds.
-impl<E: fmt::Display, H: fmt::Display, A: fmt::Display> fmt::Display for LocalCloseCause<E, H, A> {
+impl<E: fmt::Display, H: fmt::Display, A: fmt::Display, R: fmt::Display> fmt::Display
+    for LocalCloseCause<E, H, A, R>
+{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Connection(error) => error.fmt(f),
             Self::Handshake(error) => error.fmt(f),
             Self::Application(error) => error.fmt(f),
+            Self::LinkEnded(error) => error.fmt(f),
         }
     }
 }
 
 /// Its source is the source of the error it holds.
-impl<E: Error, H: Error, A: Error> Error for LocalCloseCause<E, H, A> {
+impl<E: Error, H: Error, A: Error, R: Error> Error for LocalCloseCause<E, H, A, R> {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Connection(error) => error.source(),
             Self::Handshake(error) => error.source(),
             Self::Application(error) => error.source(),
+            Self::LinkEnded(error) => error.source(),
         }
     }
 }
@@ -213,7 +226,8 @@ pub trait ApplicationClose {
 /// When the close packets are sealed it is called once for each encryption
 /// level, with the reason, the level of the packet the frame goes in and the
 /// close the reason gives, and returns the close to send, error code
-/// included. What follows does not depend on it: in Initial and Handshake
+/// included. It is never called for the end of a link
+/// ([`LocalCloseCause::LinkEnded`]), which gives no close. What follows does not depend on it: in Initial and Handshake
 /// packets an application close becomes a transport close with
 /// APPLICATION_ERROR and no reason phrase (RFC 9000 §10.2.3), and a reason
 /// phrase that does not fit is truncated. The record keeps the reason as it
@@ -319,25 +333,44 @@ mod tests {
         }
     }
 
-    type Cause = LocalCloseCause<Violation, Violation, Done>;
+    /// Why a link of the tests ended.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Terminated;
+    impl fmt::Display for Terminated {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("the relay terminated the link")
+        }
+    }
+    impl Error for Terminated {}
+
+    type Cause = LocalCloseCause<Violation, Violation, Done, Terminated>;
 
     #[test]
     fn each_branch_becomes_its_kind_of_close() {
         assert_eq!(
             Cause::Connection(Violation).immediate_close(),
-            ImmediateClose::Transport(TransportImmediateClose {
+            Some(ImmediateClose::Transport(TransportImmediateClose {
                 code: TransportErrorCode::PROTOCOL_VIOLATION,
                 frame_type: Some(VarInt::from_u32(0x1e)),
                 reason_phrase: Bytes::new(),
-            })
+            }))
+        );
+        assert_eq!(
+            Cause::Handshake(Violation).immediate_close(),
+            Cause::Connection(Violation).immediate_close(),
         );
         assert_eq!(
             Cause::Application(Done).immediate_close(),
-            ImmediateClose::Application(ApplicationImmediateClose {
+            Some(ImmediateClose::Application(ApplicationImmediateClose {
                 code: ApplicationErrorCode::new(VarInt::from_u32(7)),
                 reason_phrase: Bytes::from_static(b"bye"),
-            })
+            }))
         );
+    }
+
+    #[test]
+    fn the_end_of_a_link_becomes_no_close() {
+        assert_eq!(Cause::LinkEnded(Terminated).immediate_close(), None);
     }
 
     #[test]
@@ -345,6 +378,10 @@ mod tests {
         assert_eq!(
             Cause::Handshake(Violation).to_string(),
             "frame of a wrong type"
+        );
+        assert_eq!(
+            Cause::LinkEnded(Terminated).to_string(),
+            "the relay terminated the link"
         );
     }
 
@@ -360,7 +397,9 @@ mod tests {
 
     #[test]
     fn passing_through_keeps_the_close() {
-        let close = Cause::Application(Done).immediate_close();
+        let close = Cause::Application(Done)
+            .immediate_close()
+            .expect("an application close");
         let mut policy = PassThroughImmediateClosePolicy;
         let adjusted = ImmediateClosePolicy::<Cause>::adjust(
             &mut policy,

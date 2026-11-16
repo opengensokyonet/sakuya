@@ -88,7 +88,10 @@ use sakuya_recovery::{
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces},
     receive_journals::MaxAckRanges,
 };
-use sakuya_stream::connection::{AbortCause, CloseReason, ImmediateClose, LayerEnd};
+use sakuya_stream::{
+    connection::{AbortCause, CloseReason, ImmediateClose, LayerEnd},
+    send::write::WriteError,
+};
 use sakuya_tls::{
     cipher_suite::CipherSuite,
     client::{
@@ -616,7 +619,9 @@ mod watch {
             let alert = match reason {
                 Some(CloseReason::Local(cause)) => match &**cause {
                     LocalCloseCause::Handshake(error) => error.alert().map(|alert| alert.get()),
-                    LocalCloseCause::Connection(_) | LocalCloseCause::Application(_) => None,
+                    LocalCloseCause::Connection(_)
+                    | LocalCloseCause::Application(_)
+                    | LocalCloseCause::LinkEnded(_) => None,
                 },
                 _ => None,
             };
@@ -958,6 +963,8 @@ struct Run {
     client_handle: ConnectionHandle<ClientChoices, Parts>,
     /// The server's connection handle.
     server_handle: ConnectionHandle<ServerChoices, Parts>,
+    /// The client's link.
+    client_link: LinkId<(), ()>,
 }
 
 /// Run a client of the engine `client` against a server until `done` says
@@ -1017,6 +1024,7 @@ fn handshake(
         client_ended: false,
         client_handle,
         server_handle,
+        client_link: client_link.clone(),
     };
     for millis in 0..3000 {
         advance_to(ms(millis));
@@ -1279,4 +1287,64 @@ fn a_client_and_a_server_exchange_a_request_and_its_answer_on_a_stream() {
     assert!(done, "the client read the answer's end within 3 s");
     assert_eq!(request, b"ping");
     assert_eq!(answer, b"pong");
+}
+
+/// Over the tests' in-memory link, a client completes the handshake and
+/// opens a stream; then its link ends. The connection ends at once, with
+/// the link's end as its reason, which the layer and the stream report
+/// too, and the client sends nothing more.
+#[test]
+fn a_client_whose_link_ends_reports_the_end_everywhere_and_sends_nothing_more() {
+    let clock = tls_clock();
+    let mut stream = None;
+    let mut layer = None;
+    let mut sent_before_end = None;
+    let run = handshake(client_engine(&clock, 1), &clock, |run| {
+        if stream.is_none()
+            && let Poll::Ready(established) = poll_now(run.client_handle.established())
+        {
+            let established = established.expect("the client's handshake completed");
+            stream = Some(
+                established
+                    .try_open_bi()
+                    .expect("the server grants streams"),
+            );
+            layer = Some(established);
+            sent_before_end = Some(run.client_sent.len());
+            common::end_link(&run.client_link);
+        }
+        run.client_ended
+    });
+    assert!(run.client_ended, "the client's connection ended");
+    assert_eq!(
+        Some(run.client_sent.len()),
+        sent_before_end,
+        "nothing is sent once the link ended"
+    );
+    let link_ended = |reason: &CloseReason<CloseCauseOf<ClientChoices, Parts>>| {
+        matches!(
+            reason,
+            CloseReason::Local(cause) if matches!(**cause, LocalCloseCause::LinkEnded(()))
+        )
+    };
+    let closed = ready(run.client_handle.closed());
+    assert!(link_ended(&closed), "{closed:?}");
+    let layer = layer.expect("the client's layer");
+    assert!(matches!(
+        ready(layer.ended()),
+        LayerEnd::ConnectionClosed(reason) if link_ended(&reason)
+    ));
+    let (mut writer, _) = stream.expect("the client's stream");
+    let Poll::Ready(Err(error)) = poll_now(writer.write_all_unpin(Bytes::from_static(b"late")))
+    else {
+        panic!("the write fails at once");
+    };
+    assert!(
+        matches!(
+            error.host_error(),
+            Some(WriteError::LayerEnded { source })
+                if matches!(source.end(), LayerEnd::ConnectionClosed(reason) if link_ended(reason))
+        ),
+        "{error:?}"
+    );
 }

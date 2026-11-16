@@ -65,6 +65,7 @@ pub mod key_update;
 pub mod keys;
 pub mod link;
 pub mod link_ceiling;
+pub mod link_end;
 pub mod loss_detection;
 pub mod packet_writer;
 pub mod parameters;
@@ -165,6 +166,7 @@ use self::{
     },
     link::{FirstLinkStart, LinkClone, LinkFacts},
     link_ceiling::LinkCeilingWatchingKind,
+    link_end::LinkEndWatchingKind,
     loss_detection::LossDetectionOf,
     parameters::{LocalTransportParameters, PeerTransportParameters},
     pto::ProbeTimeout,
@@ -187,6 +189,7 @@ use self::{
 use crate::connection_id::{DestinationConnectionIdStrategy, reset_token::ResetTokenRegistry};
 use crate::role::LinkPathRole;
 use bytes::Bytes;
+use sakuya_link::Link;
 use sakuya_recovery::{
     ack_obligation::AckObligation,
     factory::{LendCongestion, RecoveryFactory},
@@ -328,12 +331,13 @@ pub trait Choices: ConnectionChoices {
 
 /// This endpoint's reason for closing a connection of the choices `T` and
 /// the list of parts `L`: the connection's error, the handshake's error,
-/// which holds the alert failure of the side's handshake engine, or the
-/// application's error.
+/// which holds the alert failure of the side's handshake engine, the
+/// application's error, or why the choices' link ended.
 pub type CloseCauseOf<T, L> = LocalCloseCause<
     ConnectionErrorOf<L>,
     HandshakeError<<<T as Choices>::Side as Side>::AlertError, ConnectionErrorOf<L>>,
     <T as Choices>::ApplicationError,
+    <<T as ConnectionChoices>::Link as Link>::RecvError,
 >;
 
 /// What differs between the two sides of a connection: the handshake
@@ -593,6 +597,7 @@ where
         MaxAckRanges,
         HandshakeConfirmation,
         CloseReasonRecord<CloseCauseOf<T, L>>,
+        ConnectionHandleCellOf<T, L>,
         CloseRequestCell<T::ApplicationError>,
         DatagramAcceptance,
         InitialPathReceiver<T::Receiver>,
@@ -611,9 +616,10 @@ where
         <T::Side as Side>::Own,
         ConnectionExporter<<T::Side as Side>::Exporter>,
         StreamSetConfig<T::StreamSetConfig>,
-        ConnectionHandleCellOf<T, L>,
     ];
-    /// The core of the send strategy and its intake are made together.
+    /// The core of the send strategy and its intake are made together, and
+    /// so are the record of why the connection closed and the cell of the
+    /// connection handle.
     type Units = HList![
         HList![InitialKeys<T::Crypto>],
         HList![HandshakeKeys<T::Crypto>],
@@ -631,7 +637,7 @@ where
         HList![LossThresholds],
         HList![MaxAckRanges],
         HList![HandshakeConfirmation],
-        HList![CloseReasonRecord<CloseCauseOf<T, L>>],
+        HList![CloseReasonRecord<CloseCauseOf<T, L>>, ConnectionHandleCellOf<T, L>],
         HList![CloseRequestCell<T::ApplicationError>],
         HList![DatagramAcceptance],
         HList![InitialPathReceiver<T::Receiver>],
@@ -652,14 +658,13 @@ where
         HList![<T::Side as Side>::Own],
         HList![ConnectionExporter<<T::Side as Side>::Exporter>],
         HList![StreamSetConfig<T::StreamSetConfig>],
-        HList![ConnectionHandleCellOf<T, L>],
     ];
     type Calls = HList![<T::Side as Side>::Advancing];
     type Args = ConnectionArgs<T, L>;
 }
 impl<T: Choices, L> LayerShare<T, L, layer::LinkEntry> for Part {
     type Data = HList![LinkClone<T::Link>, LinkFacts, AntiAmplification];
-    type Calls = HList![LinkCeilingWatchingKind];
+    type Calls = HList![LinkCeilingWatchingKind, LinkEndWatchingKind];
 }
 impl<T: Choices, L: FeedbackSummariesOf + LogicalPathKeys + 'static>
     LayerShare<T, L, layer::LogicalPath> for Part
@@ -1316,20 +1321,6 @@ where
     }
 }
 impl PassiveDataComponent for HandshakeConfirmation {}
-
-/// No connection starts closing.
-impl<T: Choices, L: ConnectionErrorsOf> Build<T, L, layer::Connection, ()>
-    for CloseReasonRecord<CloseCauseOf<T, L>>
-where
-    L: LineagePartList<T>,
-{
-    fn build<'v>(
-        _: &mut ParentsOf<'v, T, L, layer::Connection>,
-        _: &mut ArgsOf<T, L, layer::Connection>,
-    ) -> Self {
-        CloseReasonRecord::new()
-    }
-}
 
 /// The record reads itself, which whoever finds a reason for closing
 /// writes, and the roles of the link paths. Once it is written, it asks for

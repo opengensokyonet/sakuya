@@ -1,6 +1,7 @@
 //! The call that follows the datagram size limit of a logical link.
 //!
-//! [`link_ceiling_watching`] is the call of each entry of a logical link.
+//! [`link_ceiling_watching`] is a call of each entry of a logical link,
+//! beside the one that follows the link's end ([`super::link_end`]).
 //! The link's limit ([`Link::max_datagram_size`]) is otherwise read only
 //! because something else happened: a link path's planner reads it when
 //! another component it reads changes, and the sending call where a

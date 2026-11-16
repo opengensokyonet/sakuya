@@ -23,8 +23,12 @@
 //! completed gives `Ok` also once the connection closed, and so does the
 //! established layer's handle, whose operations then report the end.
 //!
-//! When the connection's future is dropped, the cell takes the reason the
-//! record has then, [`CloseReason::Aborted`] unless one was written before.
+//! The cell is made together with the record, and takes the record's
+//! reason also when the connection node ends: a connection that ends at
+//! once where its reason is written ends before the cell reads the record
+//! again. When the connection's future is dropped, the cell takes the
+//! reason the record has then, [`CloseReason::Aborted`] unless one was
+//! written before.
 //! After a panic, no end action runs: the cell also ends the layer whose
 //! handle it gave, and the waits on that handle end; the streams' do not.
 
@@ -543,24 +547,51 @@ impl<T, L> fmt::Debug for ConnectionHandleCellSlot<T, L> {
 
 // ---- the cell in the connection node ----
 
-/// The connection node keeps a clone of the cell of the slot the
-/// connection was made with.
-impl<T, L, I> Build<T, L, layer::Connection, (I,)> for ConnectionHandleCellOf<T, L>
+/// The record of why the connection closed and the cell are made
+/// together: no connection starts closing, and the connection node keeps a
+/// clone of the cell of the slot the connection was made with.
+///
+/// When the connection node ends, the cell takes the record's reason. A
+/// connection that ends at once where its reason is written, as at the
+/// idle timeout, ends before the cell is read again; without this end the
+/// cell would never learn the reason, and every wait on it would wait
+/// forever.
+impl<T, L, I> Build<T, L, layer::Connection, (I,)>
+    for frunk_core::HList![
+        CloseReasonRecord<CloseCauseOf<T, L>>,
+        ConnectionHandleCellOf<T, L>
+    ]
 where
     T: Choices,
     L: LineagePartList<T> + ConnectionErrorsOf,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
-    Self: Send + Sync + 'static,
+    ConnectionHandleCellOf<T, L>: Send + Sync + 'static,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        Selector::<ConnectionArgs<T, L>, I>::get_mut(args)
+        let cell = Selector::<ConnectionArgs<T, L>, I>::get_mut(args)
             .connection_handle
-            .cell()
+            .cell();
+        frunk_core::hlist![CloseReasonRecord::new(), cell]
+    }
+
+    fn end<'v, B: CallBundle>(
+        self,
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        _: &mut OtherNodes<'v, T, L, B>,
+    ) {
+        let frunk_core::hlist_pat![record, cell] = self;
+        match record.reason() {
+            Some(reason) => cell.connection_closed(reason.clone()),
+            // invariant: the connection ends where its reason is written, or
+            // once the record that has one asks for it, and a dropped future
+            // writes it before any node ends
+            None => debug_assert!(false, "the connection ends without a reason"),
+        }
     }
 }
 

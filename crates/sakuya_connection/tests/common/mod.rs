@@ -47,6 +47,7 @@ thread_local! {
     static RELEASED: Cell<bool> = const { Cell::new(false) };
     static BATCHES: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static CEILINGS: RefCell<Vec<(TestLinkId, LinkCeiling)>> = const { RefCell::new(Vec::new()) };
+    static ENDS: RefCell<Vec<(TestLinkId, LinkEnd)>> = const { RefCell::new(Vec::new()) };
     static CLOSE_PHRASE: RefCell<Option<Bytes>> = const { RefCell::new(None) };
     static ADJUSTED: RefCell<Vec<sakuya_wire::v1::encryption_level::EncryptionLevel>> = const { RefCell::new(Vec::new()) };
 }
@@ -92,7 +93,8 @@ impl MonotonicClock for TestClock {
 /// gave up is kept for [`take_sent`] and [`take_given_up`]. Its datagram size
 /// limit is 1200 bytes unless [`set_link_ceilings`] or, for that link,
 /// [`set_link_ceiling`] says otherwise, and it reports a change only when
-/// [`report_link_ceiling_changed`] says so.
+/// [`report_link_ceiling_changed`] says so. It ends only when [`end_link`]
+/// says so.
 #[derive(Clone, Debug)]
 pub struct TestLink(pub TestLinkId);
 
@@ -149,6 +151,7 @@ pub fn set_link_ceilings(size: usize) {
 pub fn reset_links() {
     LINK_CEILING.with(|c| c.set(MIN_DATAGRAM_SIZE));
     CEILINGS.with(|ceilings| ceilings.borrow_mut().clear());
+    ENDS.with(|ends| ends.borrow_mut().clear());
     SEND_OUTCOMES.with(|o| o.borrow_mut().clear());
     SENT.with(|s| s.borrow_mut().clear());
     GIVEN_UP.with(|g| g.borrow_mut().clear());
@@ -212,7 +215,7 @@ impl Link for TestLink {
     type RecvError = ();
     type Recv<'a> =
         core::future::Pending<Result<sakuya_link::ReceivedDatagram<Self::Payload, Self>, ()>>;
-    type Ended = core::future::Pending<()>;
+    type Ended = TestLinkEnded;
     type Send<'a> = TestSend<'a>;
     type MaxDatagramSizeChanged = LinkCeilingChanged;
     fn id(&self) -> &TestLinkId {
@@ -229,7 +232,7 @@ impl Link for TestLink {
         core::future::pending()
     }
     fn ended(&self) -> Self::Ended {
-        core::future::pending()
+        TestLinkEnded(self.0.clone())
     }
     fn send<'a>(&self, batch: &'a [OutgoingDatagram]) -> Self::Send<'a> {
         assert!(!batch.is_empty(), "a batch is not empty");
@@ -309,6 +312,56 @@ impl Future for LinkCeilingChanged {
                 Poll::Ready(())
             } else {
                 ceiling.waiting.push(cx.waker().clone());
+                Poll::Pending
+            }
+        })
+    }
+}
+
+/// Whether one of the tests' links ended, and who waits for its end.
+#[derive(Default)]
+struct LinkEnd {
+    ended: bool,
+    waiting: Vec<Waker>,
+}
+
+fn with_end<R>(link: &TestLinkId, f: impl FnOnce(&mut LinkEnd) -> R) -> R {
+    ENDS.with(|ends| {
+        let mut ends = ends.borrow_mut();
+        let at = match ends.iter().position(|(id, _)| id == link) {
+            Some(at) => at,
+            None => {
+                ends.push((link.clone(), LinkEnd::default()));
+                ends.len() - 1
+            }
+        };
+        f(&mut ends[at].1)
+    })
+}
+
+/// End the test link `link`: the futures of its end are ready, with `()`
+/// as its reason.
+pub fn end_link(link: &TestLinkId) {
+    let waiting = with_end(link, |end| {
+        end.ended = true;
+        std::mem::take(&mut end.waiting)
+    });
+    for waker in waiting {
+        waker.wake();
+    }
+}
+
+/// Ready once [`end_link`] ended the test link.
+pub struct TestLinkEnded(TestLinkId);
+
+impl Future for TestLinkEnded {
+    type Output = ();
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        with_end(&self.0, |end| {
+            if end.ended {
+                Poll::Ready(())
+            } else {
+                end.waiting.push(cx.waker().clone());
                 Poll::Pending
             }
         })

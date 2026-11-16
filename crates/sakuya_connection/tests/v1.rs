@@ -42,6 +42,7 @@ use sakuya_connection::{
         self, CloseCauseOf,
         aead_usage::AeadUsage,
         amplification::{AddressValidation, AntiAmplification, AntiAmplificationFactor},
+        application_handles::connection::ConnectionHandle,
         close::{CloseReasonRecord, LocalCloseCause},
         close_request::CloseRequestCell,
         confirmation::HandshakeConfirmation,
@@ -2158,10 +2159,10 @@ impl SideCapacities for v1::Client<common::PendingClientEngine> {
 
 /// A connection of version 1 and the probe with the choices `$t`.
 macro_rules! connection {
-    ($t:ty, $validation:expr, $first:expr) => {
+    (@args $t:ty, $args:expr, $first:expr) => {
         ConnectionDriver::<$t, Parts, _, _, _>::new(
             TestClock,
-            frunk_core::hlist![args::<$t>($validation), HNil],
+            frunk_core::hlist![$args, HNil],
             LogicalPathArgs { path: PATH },
             LinkPathArgs {
                 path: PATH,
@@ -2171,6 +2172,18 @@ macro_rules! connection {
             },
         )
     };
+    ($t:ty, $validation:expr, $first:expr) => {
+        connection!(@args $t, args::<$t>($validation), $first)
+    };
+}
+
+/// A connection as [`connection!`] makes it, and its connection handle.
+macro_rules! handled_connection {
+    ($t:ty, $validation:expr, $first:expr) => {{
+        let args = args::<$t>($validation);
+        let handle = ConnectionHandle::new(&args);
+        (connection!(@args $t, args, $first), handle)
+    }};
 }
 
 #[test]
@@ -2291,6 +2304,37 @@ fn the_idle_timeout_follows_the_peer_and_ends_the_connection() {
     );
 }
 
+/// What `future` gives on its first poll.
+fn poll_now<F: core::future::Future>(future: F) -> core::task::Poll<F::Output> {
+    core::pin::pin!(future).poll(&mut core::task::Context::from_waker(
+        core::task::Waker::noop(),
+    ))
+}
+
+#[test]
+fn the_connection_handle_gives_the_idle_timeout_of_a_connection_that_ended_at_once() {
+    reset();
+    PEER_AT.with(|p| p.set(Some(ms(5))));
+    let (mut connection, handle) =
+        handled_connection!(Mine, AddressValidation::NotValidated, link());
+    let outer = Outer::new();
+    advance_to(ms(5));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert!(poll_now(handle.closed()).is_pending());
+    advance_to(ms(10_005));
+    assert!(outer.poll(&mut connection).is_ready(), "ended silently");
+    let closed = poll_now(handle.closed());
+    assert!(
+        matches!(closed, core::task::Poll::Ready(CloseReason::IdleTimeout)),
+        "{closed:?}"
+    );
+    assert!(matches!(
+        poll_now(handle.handshake_completed()),
+        core::task::Poll::Ready(Err(error))
+            if matches!(error.reason(), CloseReason::IdleTimeout)
+    ));
+}
+
 #[test]
 fn the_keys_go_once_every_link_path_drains() {
     reset();
@@ -2372,6 +2416,135 @@ fn a_close_of_this_side_closes_the_link_paths_and_ends_the_connection_after_them
             "entry ended"
         ]
     );
+}
+
+// ---- the end of a link ----
+
+#[test]
+fn the_end_of_the_last_link_ends_the_connection_at_once_with_nothing_sent() {
+    reset();
+    let first = link();
+    let (mut connection, handle) =
+        handled_connection!(Mine, AddressValidation::NotValidated, first.clone());
+    let outer = Outer::new();
+    assert!(outer.poll(&mut connection).is_pending());
+    take_log();
+    common::take_sent();
+    advance_to(ms(10));
+    common::end_link(&first);
+    assert!(outer.poll(&mut connection).is_ready(), "it ends at once");
+    assert_eq!(
+        take_log(),
+        [
+            "recovery ended",
+            "link path ended: Some(Local(LinkEnded(())))",
+            "entry ended"
+        ]
+    );
+    assert_eq!(common::take_sent(), [], "nothing goes out");
+    assert_eq!(
+        common::take_adjusted_levels(),
+        [],
+        "the close policy is not asked"
+    );
+    let closed = poll_now(handle.closed());
+    assert!(
+        matches!(
+            &closed,
+            core::task::Poll::Ready(CloseReason::Local(cause))
+                if matches!(**cause, LocalCloseCause::LinkEnded(()))
+        ),
+        "{closed:?}"
+    );
+}
+
+#[test]
+fn the_end_of_one_link_ends_its_link_paths_and_the_connection_goes_on() {
+    reset();
+    let (first, second) = (link(), link());
+    ADD.with(|a| a.set(Some((ms(10), second.clone()))));
+    let (mut connection, handle) =
+        handled_connection!(Mine, AddressValidation::NotValidated, first.clone());
+    let outer = Outer::new();
+    advance_to(ms(10));
+    assert!(outer.poll(&mut connection).is_pending());
+    take_log();
+    // the second link ends: its candidate goes, the first link stays
+    advance_to(ms(20));
+    common::end_link(&second);
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(take_log(), ["link path ended: None", "entry ended"]);
+    // the first link ends next: it was the last
+    advance_to(ms(30));
+    common::end_link(&first);
+    assert!(outer.poll(&mut connection).is_ready());
+    assert_eq!(
+        take_log(),
+        [
+            "recovery ended",
+            "link path ended: Some(Local(LinkEnded(())))",
+            "entry ended"
+        ]
+    );
+    assert!(matches!(
+        poll_now(handle.closed()),
+        core::task::Poll::Ready(CloseReason::Local(_))
+    ));
+}
+
+#[test]
+fn the_end_of_the_active_link_leaves_the_candidate_and_the_connection_open() {
+    reset();
+    let (first, second) = (link(), link());
+    ADD.with(|a| a.set(Some((ms(10), second))));
+    let (mut connection, handle) =
+        handled_connection!(Mine, AddressValidation::NotValidated, first.clone());
+    let outer = Outer::new();
+    advance_to(ms(10));
+    assert!(outer.poll(&mut connection).is_pending());
+    take_log();
+    advance_to(ms(20));
+    common::end_link(&first);
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(
+        take_log(),
+        ["recovery ended", "link path ended: None", "entry ended"]
+    );
+    assert!(
+        poll_now(handle.closed()).is_pending(),
+        "nothing is recorded"
+    );
+}
+
+#[test]
+fn a_link_that_ends_while_the_connection_closes_keeps_the_first_reason() {
+    reset();
+    let first = link();
+    CLOSER.with(|c| c.borrow_mut().push_back((ms(20), probe::CloserStep::Close)));
+    let (mut connection, handle) =
+        handled_connection!(Mine, AddressValidation::NotValidated, first.clone());
+    let outer = Outer::new();
+    assert!(outer.poll(&mut connection).is_pending());
+    advance_to(ms(20));
+    assert!(outer.poll(&mut connection).is_pending());
+    take_log();
+    // the link ends within the closing period: the link path ends, and the
+    // connection with it, for the reason written first
+    advance_to(ms(21));
+    common::end_link(&first);
+    assert!(outer.poll(&mut connection).is_ready());
+    assert_eq!(
+        take_log(),
+        [
+            "link path ended: Some(Local(Application(AppClose(7))))",
+            "entry ended"
+        ]
+    );
+    assert!(matches!(
+        poll_now(handle.closed()),
+        core::task::Poll::Ready(CloseReason::Local(cause))
+            if matches!(*cause, LocalCloseCause::Application(common::AppClose(7)))
+    ));
 }
 
 #[test]
@@ -7172,6 +7345,32 @@ fn a_client_whose_link_accepted_no_datagram_ends_at_once_with_nothing_sent() {
         lines_of(take_log(), &["link path ended"]),
         ["link path ended: Some(Local(Application(AppClose(9))))"]
     );
+}
+
+#[test]
+fn the_connection_handle_gives_the_close_of_a_client_that_ended_at_once() {
+    reset();
+    let (mut connection, handle) =
+        handled_connection!(ClientMine, AddressValidation::Validated, link());
+    handle.close(common::AppClose(9));
+    let outer = Outer::new();
+    assert!(outer.poll(&mut connection).is_ready(), "it ends at once");
+    let application_close = |reason: &CloseReason<CloseCauseOf<ClientMine, Parts>>| {
+        matches!(
+            reason,
+            CloseReason::Local(cause)
+                if matches!(**cause, LocalCloseCause::Application(common::AppClose(9)))
+        )
+    };
+    let closed = poll_now(handle.closed());
+    assert!(
+        matches!(&closed, core::task::Poll::Ready(reason) if application_close(reason)),
+        "{closed:?}"
+    );
+    assert!(matches!(
+        poll_now(handle.handshake_completed()),
+        core::task::Poll::Ready(Err(error)) if application_close(error.reason())
+    ));
 }
 
 #[test]

@@ -22,7 +22,9 @@
 //! datagram is at most as large as every path carries (RFC 9000 §14), and
 //! its reason phrases keep within the anti-amplification credit of the
 //! logical link; a client's datagram with an Initial packet is padded to
-//! 1200 bytes (§14.1).
+//! 1200 bytes (§14.1). A reason that gives no close, the end of a link
+//! ([`LocalCloseCause::LinkEnded`]), seals nothing: it ends the connection
+//! at once, and no link path closes for it.
 //!
 //! The destination connection ID is the first the link path is offered,
 //! chosen once. Each packet takes the next packet number of its space, past
@@ -563,6 +565,13 @@ where
             return None;
         };
         let cause = Arc::clone(cause);
+        let Some(close) = LocalCloseCause::immediate_close(&*cause) else {
+            // invariant: a reason that gives no close, the end of a link,
+            // is written only when it ends the connection at once, with no
+            // link path left to close
+            debug_assert!(false, "a link path closes for a reason without a close");
+            return None;
+        };
         let NodeKey::LinkPath(path, link) = others.here().clone() else {
             unreachable!("a link path's lend carries its key")
         };
@@ -618,7 +627,6 @@ where
                 Take::<SealTakes<T>, It>::take(lineage.reborrow());
             let (hlist_pat![initial, handshake, one_rtt, journals, numbers, confirmation], _) =
                 rest.take_read::<SealReads<T, L>, Iw>();
-            let close = LocalCloseCause::immediate_close(&*cause);
             let mut level_close = |level| {
                 close_at_level(
                     policy.policy_mut().adjust(&cause, level, close.clone()),
