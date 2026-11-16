@@ -735,6 +735,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "sakuya_interop"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "frunk_core",
+ "futures-util",
+ "nitori_crypto",
+ "nitori_crypto_aws_lc",
+ "nitori_io",
+ "rustls-pki-types",
+ "sakuya_clock_tokio",
+ "sakuya_connection",
+ "sakuya_datagram_routing",
+ "sakuya_endpoint",
+ "sakuya_packet_protection",
+ "sakuya_recovery",
+ "sakuya_stream",
+ "sakuya_test_support",
+ "sakuya_tls",
+ "sakuya_udp_tokio",
+ "sakuya_wire",
+ "snafu",
+ "tokio",
+]
+
+[[package]]
 name = "sakuya_link"
 version = "0.0.0"
 dependencies = [

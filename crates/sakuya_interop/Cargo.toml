@@ -1,0 +1,37 @@
+[package]
+name = "sakuya_interop"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "The hq-interop server and client of sakuya, for interoperability runs with other QUIC implementations"
+
+[[bin]]
+name = "sakuya-interop-server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "sakuya-interop-client"
+path = "src/bin/client.rs"
+
+[dependencies]
+bytes.workspace = true
+frunk_core.workspace = true
+futures-util.workspace = true
+nitori_crypto.workspace = true
+nitori_crypto_aws_lc.workspace = true
+nitori_io.workspace = true
+rustls-pki-types.workspace = true
+sakuya_clock_tokio.workspace = true
+sakuya_connection.workspace = true
+sakuya_datagram_routing.workspace = true
+sakuya_endpoint = { path = "../sakuya_endpoint" }
+sakuya_packet_protection = { workspace = true, features = ["ring"] }
+sakuya_recovery.workspace = true
+sakuya_stream.workspace = true
+sakuya_test_support = { path = "../sakuya_test_support" }
+sakuya_tls.workspace = true
+sakuya_udp_tokio.workspace = true
+sakuya_wire.workspace = true
+snafu.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
