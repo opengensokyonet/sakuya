@@ -548,6 +548,15 @@ fn a_client_and_a_server_endpoint_handshake_on_the_loopback_interface() {
         .await
         .expect("the server's handshake completed");
         assert!(labels.has(KeyLogLabel::ClientTrafficSecret0));
+        // The client's Initial and Handshake packets sent to the server's
+        // connection ID belong to the connection: none of them makes
+        // another incoming connection.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), incoming.next())
+                .await
+                .is_err(),
+            "the client's later packets make no other incoming connection"
+        );
 
         client_conn.close(AppClose(7));
         let CloseReason::Local(cause) = within("the client's close", client_conn.closed()).await

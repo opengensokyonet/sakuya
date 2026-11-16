@@ -28,10 +28,10 @@
 //!    side waits, holding the candidate; with them, the logical path takes
 //!    the datagram when a copy of the packet opens with them, and leaves it
 //!    to the other candidates otherwise (RFC 9001 §5.7). A long header is
-//!    left: telling one connection attempt from another under the same
-//!    Destination Connection ID takes the client's Source Connection ID,
-//!    which the connection does not keep yet, so such a datagram is lost to
-//!    this connection rather than taken from another.
+//!    taken when its Source Connection ID is the one the peer chose for the
+//!    handshake, and by a client before a packet from the peer opened
+//!    ([`long_header_belongs`]); it is left to the other candidates
+//!    otherwise.
 //! 3. The anti-amplification limit of the logical link the datagram arrived
 //!    over counts the whole datagram before any packet in it is read (RFC
 //!    9000 §8.1).
@@ -126,6 +126,7 @@ use super::{
     key_phase::KeyPhaseNumbers,
     keys::{HandshakeKeys, InitialKeys, OneRttKeys, OneRttReceiveKeys},
     link::LinkFacts,
+    long_header_claim::long_header_belongs,
     receive::{
         LevelReceiveKeys, PacketOutcome, ReceivedPacket, one_rtt_receive_keys, open_one_rtt,
         packet_number_offset, receive_keys, receive_packet,
@@ -730,10 +731,13 @@ where
         Self: 'v,
     {
         let lineage = &view.get_mut().lineage;
-        // a long header is judged by the client's Source Connection ID,
-        // which the connection does not keep yet
         let FirstPacketInterpretation::Short { dcid_len } = route.interpretation() else {
-            return DatagramClaimOutcome::Abandoned(());
+            let peer = lineage.get::<PeerHandshakeConnectionId, Iph>().get();
+            return if long_header_belongs(access.bytes(), peer.as_ref(), <T::Side as Side>::ROLE) {
+                DatagramClaimOutcome::Claimed(access.into_exclusive(), ())
+            } else {
+                DatagramClaimOutcome::Abandoned(())
+            };
         };
         let keys = match one_rtt_receive_keys::<T, L, Io>(lineage) {
             LevelReceiveKeys::Ready(keys) => keys,
