@@ -33,7 +33,7 @@ use crate::{
     clock::{ConnectionChoices, InstantOf},
     feedback::InjectSummary,
     send_strategy::{FrameSourceSet, PlannedPacketKind, SendIntentPart},
-    take::Lineage,
+    take::{AppendEach, Lineage, OptionalRefs},
     write::{
         ClassOfSource, FlightClassType, OpenPacket, PacketPosition, PacketWriting, SummaryOf,
         Supplied,
@@ -333,6 +333,15 @@ pub trait FeedFrameSources<T: ConnectionChoices, L, V, Pb, Hs>: FrameSourceKinds
         space: PacketNumberSpaceKind,
         summary: &Self::Summaries<InstantOf<T>>,
     );
+
+    /// The intent that `item` stands for was not fulfilled for `cause`;
+    /// see [`FrameSource::unfulfilled`].
+    fn unfulfilled(
+        lineage: &mut Lineage<'_, V>,
+        now: InstantOf<T>,
+        item: Self::Items<'_>,
+        cause: Unfulfilled,
+    );
 }
 
 impl<T: ConnectionChoices, L, V, Pb> FeedFrameSources<T, L, V, Pb, HNil> for HNil {
@@ -354,6 +363,10 @@ impl<T: ConnectionChoices, L, V, Pb> FeedFrameSources<T, L, V, Pb, HNil> for HNi
         summary: &CNil,
     ) {
         match *summary {}
+    }
+
+    fn unfulfilled(_: &mut Lineage<'_, V>, _: InstantOf<T>, item: CNil, _: Unfulfilled) {
+        match item {}
     }
 }
 
@@ -394,7 +407,67 @@ where
             Coproduct::Inr(rest) => Ks::lost(lineage, publish, now, space, rest),
         }
     }
+
+    fn unfulfilled(
+        lineage: &mut Lineage<'_, V>,
+        now: InstantOf<T>,
+        item: Self::Items<'_>,
+        cause: Unfulfilled,
+    ) {
+        match item {
+            Coproduct::Inl(item) => K::find(lineage, now).unfulfilled(item, cause),
+            Coproduct::Inr(rest) => Ks::unfulfilled(lineage, now, rest, cause),
+        }
+    }
 }
+
+// ---- what the frame sources find of the established layer ----
+
+/// The components of the established layer the part's frame sources find in
+/// a lineage (`EstablishedSourceComponentsPart`): a list of component
+/// types, `HNil` when they find none there.
+///
+/// The established layer is no node of a link path's or a logical path's
+/// lineage; a lend that hands frames or their summaries to frame sources
+/// borrows the components of the whole composition from it and appends
+/// them to the lineage, each as a borrow that is `None` while there is no
+/// such layer ([`OptionalRefs`]).
+///
+/// `T` is the choices of the composition, `L` the full list of parts.
+pub trait EstablishedSourceComponentsPart<T, L> {
+    /// The component types, in the order they are appended.
+    type Components;
+}
+
+/// The components of the established layer the frame sources of a list of
+/// parts find in a lineage: each part's, joined in the order of the list
+/// ([`EstablishedSourceComponentsPart`]). `L` is the full list of parts.
+///
+/// It is implemented for `HNil` and for `HCons<P, Ps>` of a part `P` and a
+/// list of parts `Ps`.
+pub trait EstablishedSourceComponentsOf<T, L> {
+    /// The component types, in the order they are appended.
+    type Components: OptionalRefs;
+}
+
+impl<T, L> EstablishedSourceComponentsOf<T, L> for HNil {
+    type Components = HNil;
+}
+
+impl<T, L, P, Ps> EstablishedSourceComponentsOf<T, L> for HCons<P, Ps>
+where
+    P: EstablishedSourceComponentsPart<T, L>,
+    Ps: EstablishedSourceComponentsOf<T, L>,
+    P::Components: AppendEach<Ps::Components>,
+    <P::Components as AppendEach<Ps::Components>>::Out: OptionalRefs,
+{
+    type Components = <P::Components as AppendEach<Ps::Components>>::Out;
+}
+
+/// The components of the established layer the frame sources of the list
+/// of parts `L` of the choices `T` find in a lineage.
+pub type EstablishedSourceComponentsOfParts<T, L> =
+    <L as EstablishedSourceComponentsOf<T, L>>::Components;
 
 // ---- kinds of packets ----
 

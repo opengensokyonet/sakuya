@@ -94,7 +94,7 @@ use super::{
     send::SendTypes,
     send_planning::IntakePublishOutcome,
     spaces::{DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
-    streams::{StreamsOf, send::StreamIntent},
+    streams::send::StreamIntent,
 };
 use crate::{
     call::CallBundle,
@@ -103,6 +103,7 @@ use crate::{
     dispatch::DispatchFacts,
     error::ConnectionErrorsOf,
     feedback::FeedbackSummariesOf,
+    frame_source::{EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts},
     layer::{self, LogicalPath, NodeKey},
     others::OtherNodes,
     send_strategy::AnyActiveLinkPath,
@@ -144,8 +145,9 @@ pub type AckRecoveryTakes<T, L, S, Ls> = HList![
 /// what [`AckRecoveryTakes`] lists in a recovery layer, and `Jx` and `Jr`
 /// of the stored part of congestion control and the RTT estimate there;
 /// `Hf` of the core and of each part's frame sources in the rest, for
-/// feedback, and `Is` of the stream set in the established layer, which
-/// the feedback borrows.
+/// feedback, and `Is` of the components of the established layer the frame
+/// sources find ([`EstablishedSourceComponentsOfParts`]), which the
+/// feedback borrows.
 ///
 /// # Errors
 ///
@@ -204,12 +206,14 @@ where
         + ReadEach<AckReads<L>, Ir>
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
         + GetAt<KeyPhaseNumbers, Ikp>,
-    for<'x> <L as LineageLists<'x, T>>::LogicalPath: CoreLentFeedback<T, L, StreamsOf<T, L>, Hf>,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath:
+        CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     L: ConnectionErrorsOf,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
-        TakeEach<'s, HList![StreamsOf<T, L>], Is>,
+        TakeEach<'s, EstablishedSourceComponentsOfParts<T, L>, Is>,
     for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![LinkClone<T::Link>], Il>,
@@ -419,15 +423,14 @@ where
     }
 
     // the feedback, once the whole frame is handled: delivered first, then
-    // lost; the stream set is borrowed for it, the established layer
-    // recorded as taken
-    let mut streams = others
-        .borrow_established::<HList![StreamsOf<T, L>], Is>()
-        .map(|hlist_pat![streams]| streams);
+    // lost; the components of the established layer the frame sources find
+    // are borrowed for it, the layer recorded as taken
+    let mut established =
+        others.borrow_established_optional::<EstablishedSourceComponentsOfParts<T, L>, Is>();
     for record in acknowledged {
-        CoreLentFeedback::<T, L, StreamsOf<T, L>, Hf>::delivered_each(
+        CoreLentFeedback::<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>::delivered_each(
             lineage,
-            streams.as_deref_mut(),
+            &mut established,
             at,
             space,
             record.summaries,
@@ -437,7 +440,7 @@ where
         hand_back_lost::<T, L, _, _, Hf>(
             &mut journals,
             lineage,
-            streams.as_deref_mut(),
+            &mut established,
             at,
             space,
             batch,

@@ -31,12 +31,13 @@
 //! composition's summary at its part's place, then at its own place in
 //! that part's sum ([`InjectSummary`]); the compiler infers both.
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
+use sakuya_stream::send_options::destination::Unfulfilled;
 use sakuya_wire::parts::{CNil, CoprodInjector, Coproduct, HCons, HNil};
 
 use crate::{
     clock::{ConnectionChoices, InstantOf},
     frame_source::{FeedFrameSources, FrameSourceKinds},
-    send_strategy::{InHead, InTail, SendIntentPart},
+    send_strategy::{InHead, InTail, SendIntentPart, SendIntentsOf},
     take::Lineage,
 };
 
@@ -97,7 +98,13 @@ where
 /// lineage where the feedback is given, `Pb` the publisher lent to the
 /// sources and `Hs` the positions of each part's impl. Each summary comes
 /// with the packet number space of the packet it was written into.
-pub trait PartsSendFeedback<T: ConnectionChoices, L, V, Pb, Hs>: FeedbackSummariesOf {
+///
+/// An intent not fulfilled goes back the same way, whatever kind of packet
+/// would have carried it: its part gives the item it stands for
+/// ([`SendIntentPart::intent_item`]).
+pub trait PartsSendFeedback<T: ConnectionChoices, L, V, Pb, Hs>:
+    FeedbackSummariesOf + SendIntentsOf
+{
     /// The packet the frame of `summary` was written into was acknowledged.
     fn delivered(
         lineage: &mut Lineage<'_, V>,
@@ -117,6 +124,16 @@ pub trait PartsSendFeedback<T: ConnectionChoices, L, V, Pb, Hs>: FeedbackSummari
         now: InstantOf<T>,
         space: PacketNumberSpaceKind,
         summary: &Self::FeedbackSummaries<InstantOf<T>>,
+    );
+
+    /// `intent` was not fulfilled for `cause`: the frame source it belongs
+    /// to takes it back
+    /// ([`FrameSource::unfulfilled`](crate::frame_source::FrameSource::unfulfilled)).
+    fn unfulfilled(
+        lineage: &mut Lineage<'_, V>,
+        now: InstantOf<T>,
+        intent: &Self::SendIntents,
+        cause: Unfulfilled,
     );
 }
 
@@ -139,6 +156,10 @@ impl<T: ConnectionChoices, L, V, Pb> PartsSendFeedback<T, L, V, Pb, HNil> for HN
         summary: &CNil,
     ) {
         match *summary {}
+    }
+
+    fn unfulfilled(_: &mut Lineage<'_, V>, _: InstantOf<T>, intent: &CNil, _: Unfulfilled) {
+        match *intent {}
     }
 }
 
@@ -180,6 +201,25 @@ where
                 );
             }
             Coproduct::Inr(summary) => Ps::lost(lineage, publish, now, space, summary),
+        }
+    }
+
+    fn unfulfilled(
+        lineage: &mut Lineage<'_, V>,
+        now: InstantOf<T>,
+        intent: &Self::SendIntents,
+        cause: Unfulfilled,
+    ) {
+        match intent {
+            Coproduct::Inl(intent) => {
+                <P::FrameSources as FeedFrameSources<T, L, V, Pb, H>>::unfulfilled(
+                    lineage,
+                    now,
+                    P::intent_item(intent),
+                    cause,
+                );
+            }
+            Coproduct::Inr(rest) => Ps::unfulfilled(lineage, now, rest, cause),
         }
     }
 }

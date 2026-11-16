@@ -491,3 +491,48 @@ fn a_withdrawal_racing_the_supply_takes_place_or_reports_the_datagram_consumed()
     }
     assert_eq!(withdrawn + consumed, 400);
 }
+
+/// An intent the strategy gave out but that was not fulfilled is published
+/// again at once, through the queues the DATAGRAM frame source finds in its
+/// lineage: the next plan carries the datagram, with no send in between.
+#[test]
+fn an_unfulfilled_datagram_is_published_again_at_once() {
+    let (mut queues, mut core, _handle, writer) =
+        sending(1200, bounds(1, 1000, DatagramOverflow::RejectNew));
+    let mut planner = planner(&mut core);
+    let publish = core
+        .intake()
+        .handle::<DatagramIntent<Urgency>, InHead<Here>>();
+    let ticket = writer.send(Bytes::from_static(b"again")).expect("taken");
+    let Poll::Ready(PlannedDatagram::Fill(mut plan)) =
+        planner.poll_plan(&mut core, &mut Context::from_waker(Waker::noop()))
+    else {
+        panic!("the datagram is planned")
+    };
+    let Some(PlannedPacket::OneRtt(mut cursor)) = plan.next_packet() else {
+        panic!("a 1-RTT packet is planned")
+    };
+    let item = FrameSourceCursor::<TestSources>::next(&mut cursor).expect("the datagram's item");
+    let out = Rc::new(RefCell::new(Written::default()));
+    let packet = OpenPacket::<_, ClassOfSource, NotLast>::new(SummaryWriter::new(1500, &out));
+    let mut taken = crate::take::TakenPositions::default();
+    let mut lineage = crate::take::Lineage::new(frunk_core::hlist![Some(&mut queues)], &mut taken);
+    let _ = item.supply(packet, |intent, open| {
+        // not written: the intent is not fulfilled instead
+        crate::datagram::send::LineageDatagramFrameSource::<_, Queues, (), _, Here>::new(
+            &mut lineage,
+            publish.clone(),
+        )
+        .unfulfilled(
+            intent,
+            sakuya_stream::send_options::destination::Unfulfilled::Ended,
+        );
+        Supplied::Open(open)
+    });
+    drop(plan);
+    assert_eq!(ticket.state(), DatagramState::Waiting);
+    let written = supply_next(&mut planner, &mut core, || {}).expect("planned again");
+    assert_eq!(written.bytes, [0x31, 0x05, b'a', b'g', b'a', b'i', b'n']);
+    assert_eq!(ticket.state(), DatagramState::Sent);
+    ticket.release();
+}

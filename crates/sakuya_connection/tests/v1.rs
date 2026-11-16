@@ -668,6 +668,14 @@ mod probe {
         type FrameSourceId = CNil;
         type SendIntents = CNil;
         type FrameSources = frunk_core::HList![Frames];
+
+        fn intent_item(intent: &CNil) -> Coproduct<core::convert::Infallible, CNil> {
+            match *intent {}
+        }
+    }
+    /// The probe's frame source finds nothing in the established layer.
+    impl<T, L> sakuya_connection::frame_source::EstablishedSourceComponentsPart<T, L> for Part {
+        type Components = HNil;
     }
     impl<K: sakuya_connection::frame_source::PacketKind>
         sakuya_connection::frame_source::FrameSourcePart<K> for Part

@@ -412,6 +412,13 @@ fn client_engine(clock: &Arc<ManualClock>, root_seed: u8) -> ClientEngine {
 
 macro_rules! choices {
     ($name:ident, $side:ty) => {
+        choices!(
+            $name,
+            $side,
+            sakuya_connection::send_strategy::ranked::RankedSendStrategy<I>
+        );
+    };
+    ($name:ident, $side:ty, $strategy:ty) => {
         struct $name;
         impl ConnectionChoices for $name {
             type Clock = TestClock;
@@ -429,8 +436,7 @@ macro_rules! choices {
                 sakuya_recovery::send_journals::DequeSendJournals<Duration, S, P>;
             type ApplicationError = common::AppClose;
             type Receiver = TestReceiver;
-            type SendStrategy<I: sakuya_connection::send_strategy::SendStrategyTypes> =
-                sakuya_connection::send_strategy::ranked::RankedSendStrategy<I>;
+            type SendStrategy<I: sakuya_connection::send_strategy::SendStrategyTypes> = $strategy;
             type DestinationConnectionIds = common::TestDestinationConnectionIds;
             type ResetTokenRegistry = common::TestResetTokenRegistry;
             type SendParameters = sakuya_stream::send_options::urgency::Urgency;
@@ -442,7 +448,13 @@ macro_rules! choices {
     };
 }
 choices!(ServerChoices, v1::Server<ServerEngine>);
-choices!(ClientChoices, v1::Client<ClientEngine>);
+// the client's strategy plans as the ranked one does, and ends the intents
+// a test marks when its link path's role next changes
+choices!(
+    ClientChoices,
+    v1::Client<ClientEngine>,
+    common::ending::IntentEndingSendStrategy<I>
+);
 
 /// The parts of the tests' connections: version 1, and the part that notes
 /// what the tests look at.
@@ -513,6 +525,13 @@ mod watch {
         type FrameSourceId = CNil;
         type SendIntents = CNil;
         type FrameSources = HNil;
+
+        fn intent_item(intent: &CNil) -> CNil {
+            match *intent {}
+        }
+    }
+    impl<T, L> sakuya_connection::frame_source::EstablishedSourceComponentsPart<T, L> for Part {
+        type Components = HNil;
     }
     impl<K: sakuya_connection::frame_source::PacketKind>
         sakuya_connection::frame_source::FrameSourcePart<K> for Part
@@ -740,6 +759,61 @@ mod watch {
         }
     }
 
+    /// The role a link path takes, as of the instant it takes it.
+    type RoleAt = fn(Duration) -> LinkPathRole<Duration>;
+
+    thread_local! {
+        /// The role the client's link path takes at the start of the next
+        /// poll.
+        static CLIENT_ROLE: core::cell::Cell<Option<RoleAt>> =
+            const { core::cell::Cell::new(None) };
+    }
+
+    /// Let the client's link path take the role `role` gives at the start
+    /// of its connection's next poll: as if the connection moved it to
+    /// another role and back, which the tests' link cannot make happen.
+    pub fn set_client_role(role: RoleAt) {
+        CLIENT_ROLE.with(|next| next.set(Some(role)));
+    }
+
+    /// In the link path: gives the client's link path the role
+    /// [`set_client_role`] asked for.
+    #[derive(Debug)]
+    pub struct RoleSetter;
+    impl<T: v1::Choices, L> Build<T, L, layer::LinkPath, ()> for RoleSetter
+    where
+        for<'v> L: LineageLists<'v, T>,
+    {
+        fn build<'v>(
+            _: &mut ParentsOf<'v, T, L, layer::LinkPath>,
+            _: &mut ArgsOf<T, L, layer::LinkPath>,
+        ) -> Self {
+            RoleSetter
+        }
+    }
+    impl<T, L, Ir> DataComponent<T, L, layer::LinkPath, (Ir,)> for RoleSetter
+    where
+        T: v1::Choices<Clock = TestClock>,
+        for<'v> L: LineageLists<'v, T>,
+        for<'v> <L as LineageLists<'v, T>>::LinkPath: GetAt<LinkPathRole<Duration>, Ir>,
+    {
+        const ACTS_BEFORE_CALLS: bool = true;
+
+        fn before_calls<'v, B: CallBundle>(
+            mut lineage: LineageOf<'v, T, L, layer::LinkPath>,
+            _: &mut OtherNodes<'v, T, L, B>,
+            now: Duration,
+            _: &Waker,
+        ) -> Option<RequestOf<T, L>> {
+            if <T::Side as Side>::ROLE == Role::Client
+                && let Some(role) = CLIENT_ROLE.with(core::cell::Cell::take)
+            {
+                *lineage.get_mut::<LinkPathRole<Duration>, Ir>() = role(now);
+            }
+            None
+        }
+    }
+
     macro_rules! none {
         ($($lv:ident),*) => {$(
             impl<T: v1::Choices, L> LayerShare<T, L, layer::$lv> for Part {
@@ -748,7 +822,11 @@ mod watch {
             }
         )*};
     }
-    none!(LinkEntry, LinkPath, Recovery);
+    none!(LinkEntry, Recovery);
+    impl<T: v1::Choices, L> LayerShare<T, L, layer::LinkPath> for Part {
+        type Data = HList![RoleSetter];
+        type Calls = HNil;
+    }
     impl<T: v1::Choices, L> LayerShare<T, L, layer::Established> for Part {
         type Data = HList![StreamsWatch];
         type Calls = HNil;
@@ -1326,6 +1404,72 @@ fn a_client_and_a_server_exchange_a_request_and_its_answer_on_a_stream() {
     assert_eq!(answer, b"pong");
 }
 
+/// The client's strategy ends the intent of a stream's data when the
+/// client's link path changes role: the intent goes back to the stream,
+/// whose destination falls back and publishes it again at once, and the
+/// data reaches the server. While the link path is settling the data waits
+/// with the strategy; it is the return to the active role that ends it.
+#[test]
+fn a_stream_intent_the_strategy_ends_is_published_again_and_its_data_arrives() {
+    let clock = tls_clock();
+    let mut step = 0;
+    let mut client_stream = None;
+    let mut published = (0, 0);
+    let mut server_layer = None;
+    let mut server_stream = None;
+    let mut read = Vec::new();
+    let mut done = false;
+    handshake(client_engine(&clock, 1), &clock, |run| {
+        let Poll::Ready(Ok(client)) = poll_now(run.client_handle.established()) else {
+            return false;
+        };
+        match step {
+            0 => watch::set_client_role(|now| LinkPathRole::Settling(now + ms(60_000))),
+            1 => {
+                common::ending::end_at_next_role_change("Stream {");
+                let (mut writer, reader) = client.try_open_bi().expect("the server grants streams");
+                ready(writer.write_all_unpin(Bytes::from_static(b"hello")))
+                    .expect("the data is written");
+                writer.close().expect("the stream ends");
+                client_stream = Some((writer, reader));
+                published.0 = common::ending::published("Stream {");
+                watch::set_client_role(|_| LinkPathRole::Active);
+            }
+            2 => published.1 = common::ending::published("Stream {"),
+            _ => {}
+        }
+        step += 1;
+        if server_layer.is_none()
+            && let Poll::Ready(layer) = poll_now(run.server_handle.established())
+        {
+            server_layer = Some(layer.expect("the server's handshake completed"));
+        }
+        if server_stream.is_none()
+            && let Some(layer) = &server_layer
+            && let Poll::Ready(stream) = poll_now(layer.accept_bi())
+        {
+            server_stream = Some(stream.expect("the client's stream is accepted"));
+        }
+        if let Some((_, reader)) = &mut server_stream
+            && !done
+        {
+            done = read_now!(reader, read);
+        }
+        done
+    });
+    assert!(
+        published.0 > 0,
+        "the data's intent is published while settling"
+    );
+    assert_eq!(
+        published.1,
+        2 * published.0,
+        "each intent ended is published again at once"
+    );
+    assert!(done, "the server read the stream's end within 3 s");
+    assert_eq!(read, b"hello");
+}
+
 /// Over the tests' in-memory link, the server answers with as much as the
 /// client lets it send on the stream at once. Once the server has processed
 /// a Handshake packet the client's address is validated (RFC 9000 §8.1), so
@@ -1752,6 +1896,74 @@ mod datagram {
     /// server, which reads it as not received in 0-RTT, answers with one;
     /// the client's ticket hears that its datagram was acknowledged
     /// (RFC 9221 §5.2).
+    /// The client's strategy ends a datagram's intent when the client's
+    /// link path changes role: the queues let its destination decide at
+    /// once, which publishes it again with the same ticket, before any
+    /// other send; the datagram then reaches the server and is
+    /// acknowledged.
+    #[test]
+    fn a_datagram_intent_the_strategy_ends_is_published_again_at_once() {
+        let clock = tls_clock();
+        let mut step = 0;
+        let mut ticket = None;
+        let mut published = (0, 0);
+        let mut state = None;
+        let mut received = None;
+        let mut settled = None;
+        run_announcing(65535, 65535, &clock, |run| {
+            let (Poll::Ready(Ok(client)), Poll::Ready(Ok(server))) = (
+                poll_now(run.client_handle.established()),
+                poll_now(run.server_handle.established()),
+            ) else {
+                return false;
+            };
+            match step {
+                0 => watch::set_client_role(|now| LinkPathRole::Settling(now + ms(60_000))),
+                1 => {
+                    common::ending::end_at_next_role_change("DatagramIntent");
+                    ticket = Some(
+                        Datagrams::datagram_writer(&client)
+                            .send(Bytes::from_static(b"ping"))
+                            .expect("the server announced support"),
+                    );
+                    published.0 = common::ending::published("DatagramIntent");
+                    watch::set_client_role(|_| LinkPathRole::Active);
+                }
+                2 => {
+                    published.1 = common::ending::published("DatagramIntent");
+                    state = ticket.as_ref().map(|ticket| ticket.state());
+                }
+                _ => {}
+            }
+            step += 1;
+            if received.is_none()
+                && let Poll::Ready(datagram) = poll_now(Datagrams::recv_datagram(&server))
+            {
+                let datagram: ServerReceivedDatagram = datagram.expect("the layer goes on");
+                received = Some(datagram.into_bytes());
+            }
+            if let Some(ticket) = &mut ticket
+                && settled.is_none()
+                && let Poll::Ready(settlement) = poll_now(ticket.settled())
+            {
+                settled = Some(settlement);
+            }
+            received.is_some() && settled.is_some()
+        });
+        assert_eq!(
+            published,
+            (1, 2),
+            "published again once, with no other send"
+        );
+        assert!(
+            matches!(state, Some(DatagramState::Waiting | DatagramState::Sent)),
+            "the ticket goes on: {state:?}"
+        );
+        assert_eq!(received, Some(Bytes::from_static(b"ping")));
+        assert_eq!(settled, Some(DatagramSettlement::Acknowledged));
+        ticket.expect("sent").release();
+    }
+
     #[test]
     fn a_client_and_a_server_exchange_datagrams() {
         let clock = tls_clock();

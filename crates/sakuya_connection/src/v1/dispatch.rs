@@ -89,6 +89,7 @@ use crate::{
     dispatch::{DispatchFacts, FrameDispatch},
     error::ConnectionErrorsOf,
     feedback::FeedbackSummariesOf,
+    frame_source::{EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts},
     layer::{self, LogicalPath},
     others::OtherNodes,
     send_strategy::{
@@ -212,6 +213,7 @@ impl<
     Jx,
     Jr,
     Hf,
+    Ies,
     Is,
     Ii,
     Idx,
@@ -229,6 +231,7 @@ impl<
                 (Ile, Ik),
                 (Jx, Jr),
                 Hf,
+                Ies,
             ),
         ),
     > for Part
@@ -254,7 +257,8 @@ where
         + ReadEach<AckReads<L>, Ird>
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
         + GetAt<KeyPhaseNumbers, Ikp>,
-    for<'x> <L as LineageLists<'x, T>>::LogicalPath: CoreLentFeedback<T, L, StreamsOf<T, L>, Hf>,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath:
+        CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![LinkClone<T::Link>], Ile>,
@@ -288,9 +292,10 @@ where
     StreamIntentHandleOf<T, L, Idx>:
         StreamIntentHandle<T::SendParameters, StreamIntentTicketOf<T, L>>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<SendStrategyIntake<IntakeOf<T, L>>, Ii>,
+    L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
-    for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
-        TakeEach<'s, HList![StreamsOf<T, L>], Is>,
+    for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out: TakeEach<'s, HList![StreamsOf<T, L>], Is>
+        + TakeEach<'s, EstablishedSourceComponentsOfParts<T, L>, Ies>,
 {
     fn dispatch<'v, B: CallBundle>(
         lineage: &mut LineageOf<'v, T, L, LogicalPath>,
@@ -319,7 +324,7 @@ where
                 Jx,
                 Jr,
                 Hf,
-                Is,
+                Ies,
             >(lineage, others, &frame, packet),
             FrameRun::Padding(_) | FrameRun::Ping(_) => Ok(()),
             FrameRun::Crypto(frame) => {

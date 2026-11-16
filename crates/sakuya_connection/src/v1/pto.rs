@@ -35,6 +35,7 @@ use crate::{
     },
     error::ConnectionErrorsOf,
     feedback::FeedbackSummariesOf,
+    frame_source::{EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts},
     layer,
     others::OtherNodes,
     send_strategy::{AnyActiveLinkPath, Publish, SendStrategy, SendStrategyTypes},
@@ -61,7 +62,7 @@ use super::{
         ProbePingTickets, SendStrategyOf,
     },
     spaces::{DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
-    streams::{StreamsOf, send::StreamIntent},
+    streams::send::StreamIntent,
 };
 use crate::role::LinkPathRole;
 
@@ -247,9 +248,10 @@ where
     T: Choices,
     L: LineagePartList<T> + FeedbackSummariesOf + ConnectionErrorsOf,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
-        TakeEach<'s, HList![StreamsOf<T, L>], Is>,
+        TakeEach<'s, EstablishedSourceComponentsOfParts<T, L>, Is>,
     L: ParametersOf<TransportParameterSpace>,
     S: 'static,
     Ls: Clone + 'static,
@@ -271,7 +273,7 @@ where
         'v,
         ProbeTimeoutTakes<T, L, S, Ls>,
         It,
-    >>::Rest: CoreLentFeedback<T, L, StreamsOf<T, L>, Hf>,
+    >>::Rest: CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out:
         Selector<&'a CongestionPartOf<T, L>, Jx> + Selector<&'a RttOf<T, L>, Jr>,
@@ -338,9 +340,8 @@ where
         if let Some(spaces) = probed {
             pings.probe::<_, Ip>(planner.planner_mut(), spaces.iter());
         }
-        let mut streams = others
-            .borrow_established::<HList![StreamsOf<T, L>], Is>()
-            .map(|frunk_core::hlist_pat![streams]| streams);
+        let mut established =
+        others.borrow_established_optional::<EstablishedSourceComponentsOfParts<T, L>, Is>();
         for (space, batch) in &batches {
             if batch.persistent {
                 rtt.on_persistent_congestion();
@@ -352,7 +353,7 @@ where
             hand_back_lost::<T, L, _, _, Hf>(
                 journals,
                 &mut rest,
-                streams.as_deref_mut(),
+                &mut established,
                 now,
                 *space,
                 batch,

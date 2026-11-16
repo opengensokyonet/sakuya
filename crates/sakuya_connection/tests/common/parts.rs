@@ -87,6 +87,10 @@ macro_rules! no_summaries {
             type FrameSourceId = sakuya_wire::parts::CNil;
             type SendIntents = sakuya_wire::parts::CNil;
             type FrameSources = HNil;
+
+            fn intent_item(intent: &sakuya_wire::parts::CNil) -> sakuya_wire::parts::CNil {
+                match *intent {}
+            }
         }
     )*};
 }

@@ -234,37 +234,91 @@ impl<X, H, T: GetOptionalAt<X, I>, I> GetOptionalAt<X, There<I>> for HCons<H, T>
     }
 }
 
-/// A list with one more element at its end (`AppendLast`).
-pub trait AppendLast<Y> {
-    /// The list with `Y` last.
+/// A list with the list `Ys` appended at its end (`AppendEach`).
+pub trait AppendEach<Ys> {
+    /// The list with the elements of `Ys` last, in their order.
     type Out;
-    /// Put `last` at the end.
-    fn append_last(self, last: Y) -> Self::Out;
+    /// Put the elements of `last` at the end.
+    fn append_each(self, last: Ys) -> Self::Out;
 }
-impl<Y> AppendLast<Y> for HNil {
-    type Out = HCons<Y, HNil>;
+impl<Ys> AppendEach<Ys> for HNil {
+    type Out = Ys;
     #[inline]
-    fn append_last(self, last: Y) -> Self::Out {
-        HCons {
-            head: last,
-            tail: HNil,
-        }
+    fn append_each(self, last: Ys) -> Ys {
+        last
     }
 }
-impl<Y, H, T: AppendLast<Y>> AppendLast<Y> for HCons<H, T> {
+impl<Ys, H, T: AppendEach<Ys>> AppendEach<Ys> for HCons<H, T> {
     type Out = HCons<H, T::Out>;
     #[inline]
-    fn append_last(self, last: Y) -> Self::Out {
+    fn append_each(self, last: Ys) -> Self::Out {
         HCons {
             head: self.head,
-            tail: self.tail.append_last(last),
+            tail: self.tail.append_each(last),
         }
     }
 }
 
-/// The lineage list `V` with the borrow `X`, which may be absent, appended
-/// last for `'s`.
-pub type WithOptional<'s, V, X> = <V as AppendLast<Option<&'s mut X>>>::Out;
+/// A list of component types whose mutable borrows are there together or
+/// not at all, each held as one that may be absent (`OptionalRefs`): the
+/// components of a node outside a lineage that a lend appends to it, such
+/// as those of the established layer, which are `None` while there is no
+/// such node.
+pub trait OptionalRefs: for<'a> RefsOf<'a> + 'static {
+    /// One `Option<&'a mut X>` for each component, in order.
+    type Optional<'a>;
+    /// Each borrow of `refs`, or `None` for each when there are none.
+    fn spread<'a>(refs: Option<<Self as RefsOf<'a>>::Out>) -> Self::Optional<'a>
+    where
+        Self: 'a;
+    /// Every borrow again for the shorter `'s`, positions kept: what a lend
+    /// that appends them for one frame after another passes on each time.
+    fn reborrow<'s, 'a: 's>(refs: &'s mut Self::Optional<'a>) -> Self::Optional<'s>;
+}
+impl OptionalRefs for HNil {
+    type Optional<'a> = HNil;
+    #[inline]
+    fn spread<'a>(_: Option<<Self as RefsOf<'a>>::Out>) -> HNil
+    where
+        Self: 'a,
+    {
+        HNil
+    }
+    #[inline]
+    fn reborrow<'s, 'a: 's>(_: &'s mut HNil) -> HNil {
+        HNil
+    }
+}
+impl<X: 'static, Xs: OptionalRefs> OptionalRefs for HCons<X, Xs> {
+    type Optional<'a> = HCons<Option<&'a mut X>, Xs::Optional<'a>>;
+    #[inline]
+    fn spread<'a>(refs: Option<<Self as RefsOf<'a>>::Out>) -> Self::Optional<'a>
+    where
+        Self: 'a,
+    {
+        match refs {
+            Some(HCons { head, tail }) => HCons {
+                head: Some(head),
+                tail: Xs::spread(Some(tail)),
+            },
+            None => HCons {
+                head: None,
+                tail: Xs::spread(None),
+            },
+        }
+    }
+    #[inline]
+    fn reborrow<'s, 'a: 's>(refs: &'s mut Self::Optional<'a>) -> Self::Optional<'s> {
+        HCons {
+            head: refs.head.as_deref_mut(),
+            tail: Xs::reborrow(&mut refs.tail),
+        }
+    }
+}
+
+/// The lineage list `V` with the borrows of the components `U` (a list of
+/// component types), each of which may be absent, appended last for `'s`.
+pub type WithOptionals<'s, V, U> = <V as AppendEach<<U as OptionalRefs>::Optional<'s>>>::Out;
 
 /// A list of borrows borrowed again for a shorter time, positions kept.
 ///
@@ -381,20 +435,20 @@ impl<'r, V> Lineage<'r, V> {
         self.list.get_optional_at_mut()
     }
 
-    /// This lineage with `last`, a borrow of a component of a node outside
-    /// it that may be absent, appended at its end: frame sources that are
-    /// found in another node take it from there
+    /// This lineage with `last`, the borrows of the components `U` of a node
+    /// outside it, each of which may be absent, appended at its end: frame
+    /// sources that are found in another node take them from there
     /// ([`get_optional_mut`](Self::get_optional_mut)).
     #[inline]
-    pub(crate) fn append_optional<'s, X>(
+    pub(crate) fn append_optionals<'s, U: OptionalRefs>(
         self,
-        last: Option<&'s mut X>,
-    ) -> Lineage<'r, WithOptional<'s, V, X>>
+        last: U::Optional<'s>,
+    ) -> Lineage<'r, WithOptionals<'s, V, U>>
     where
-        V: AppendLast<Option<&'s mut X>>,
+        V: AppendEach<U::Optional<'s>>,
     {
         Lineage {
-            list: self.list.append_last(last),
+            list: self.list.append_each(last),
             taken: self.taken,
         }
     }

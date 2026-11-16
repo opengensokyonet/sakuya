@@ -38,7 +38,7 @@ use sakuya_recovery::{
     send_journals::SendJournals,
 };
 
-use sakuya_stream::connection::CloseReason;
+use sakuya_stream::{connection::CloseReason, send_options::destination::Unfulfilled};
 use sakuya_tls::engine::CryptoLevel;
 
 use super::{
@@ -49,6 +49,7 @@ use super::{
     connection_ids::{ConnectionIdsOf, ResetTokenRegistrarOf},
     crypto::send::{CryptoSendBuffer, CryptoSender},
     error::{ConnectionError, V1ConnectionErrorOf},
+    feedback::CoreLentFeedback,
     keys::{HandshakeKeys, InitialKeys, OneRttKeys},
     link::{LinkClone, LinkFacts},
     parameters::PeerTransportParameters,
@@ -68,7 +69,9 @@ use crate::{
     connection_id::DestinationConnectionIdStrategy,
     error::ConnectionErrorsOf,
     feedback::FeedbackSummariesOf,
-    frame_source::PublishIntent,
+    frame_source::{
+        EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts, PublishIntent,
+    },
     layer::{self, NodeKey},
     others::OtherNodes,
     send_strategy::{
@@ -470,16 +473,26 @@ impl<P> LinkPathPlanner<P> {
 
 /// A link path's planner is made by the core when the link path is built,
 /// in the role its request gives it, and handed back to the core when the
-/// link path ends.
-impl<T: Choices, L, Ic> Build<T, L, layer::LinkPath, Ic>
+/// link path ends; the intents the planner ends then go back to their frame
+/// sources as not fulfilled, in the parents with the components of the
+/// established layer the frame sources find appended.
+///
+/// `Ic` is the place of the core among the parents, `Hf` that of the core
+/// and of each part's frame sources for handing intents back, and `Is` of
+/// the established layer's components the frame sources find.
+impl<T: Choices, L, Ic, Hf, Is> Build<T, L, layer::LinkPath, (Ic, Hf, Is)>
     for LinkPathPlanner<LinkPathSendPlannerOf<T, L>>
 where
-    L: LineagePartList<T> + LogicalPathKeys,
+    L: LineagePartList<T> + LogicalPathKeys + FeedbackSummariesOf,
     SendTypes<T, L>:
         SendStrategyTypes<LinkPathIdentifier = crate::share::LinkPathIdentifierOf<T, L>>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
-    for<'v> <L as LineageLists<'v, T>>::LinkPathParents:
-        GetAt<SendStrategyCore<SendStrategyOf<T, L>>, Ic>,
+    for<'v> <L as LineageLists<'v, T>>::LinkPathParents: GetAt<SendStrategyCore<SendStrategyOf<T, L>>, Ic>
+        + CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
+    L: EstablishedSourceComponentsOf<T, L>,
+    for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
+        TakeEach<'s, EstablishedSourceComponentsOfParts<T, L>, Is>,
 {
     fn build<'v>(
         parents: &mut ParentsOf<'v, T, L, layer::LinkPath>,
@@ -503,12 +516,27 @@ where
     fn end<'v, B: CallBundle>(
         self,
         parents: &mut ParentsOf<'v, T, L, layer::LinkPath>,
-        _: &mut OtherNodes<'v, T, L, B>,
+        others: &mut OtherNodes<'v, T, L, B>,
     ) {
+        let mut ended = Vec::new();
         self.planner.ended(
             parents
                 .get_mut::<SendStrategyCore<SendStrategyOf<T, L>>, Ic>()
                 .strategy_mut(),
+            &mut ended,
+        );
+        if ended.is_empty() {
+            return;
+        }
+        let now = others.now();
+        let mut established =
+            others.borrow_established_optional::<EstablishedSourceComponentsOfParts<T, L>, Is>();
+        CoreLentFeedback::<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>::unfulfilled_each(
+            parents,
+            &mut established,
+            now,
+            ended,
+            Unfulfilled::Ended,
         );
     }
 }
@@ -530,9 +558,30 @@ where
 /// last told, and none is a candidate still being validated, the
 /// connection closes with NO_VIABLE_PATH: the record of why it closed
 /// takes the error, unless a reason is there already.
-impl<T: Choices, L, Ip, Ir, It, Il, Io, Ipp, Jc, Js, Jm, Ic, Ier, Kr, Kp>
-    DataComponent<T, L, layer::LinkPath, (Ip, Ir, It, Il, Io, Ipp, (Jc, Js, Jm), (Ic, Ier, Kr, Kp))>
-    for LinkPathPlanner<LinkPathSendPlannerOf<T, L>>
+///
+/// The intents the planner ends when its role changes go back to their
+/// frame sources as not fulfilled, in the rest of the lineage with the
+/// components of the established layer the frame sources find appended:
+/// `Ik` is the place of the core there, `Hf` that of the core and of each
+/// part's frame sources for handing intents back, and `Is` of the
+/// established layer's components.
+impl<T: Choices, L, Ip, Ir, It, Il, Io, Ipp, Jc, Js, Jm, Ic, Ier, Kr, Kp, Ik, Hf, Is>
+    DataComponent<
+        T,
+        L,
+        layer::LinkPath,
+        (
+            Ip,
+            Ir,
+            It,
+            Il,
+            Io,
+            Ipp,
+            (Jc, Js, Jm),
+            (Ic, Ier, Kr, Kp),
+            (Ik, Hf, Is),
+        ),
+    > for LinkPathPlanner<LinkPathSendPlannerOf<T, L>>
 where
     L: LineagePartList<T> + FeedbackSummariesOf + ParametersOf<TransportParameterSpace>,
     L: ConnectionErrorsOf,
@@ -546,8 +595,15 @@ where
         + GetAt<LinkPathRole<InstantOf<T>>, Ir>
         + ReadEach<DatagramLimitsReads<T, L>, Il>
         + ReadEach<PacketOverheadsReads<T, L>, Io>
-        + TakeEach<'v, frunk_core::HList![Self, SendStrategyCore<SendStrategyOf<T, L>>], It>
+        + TakeEach<'v, frunk_core::HList![Self], It>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>,
+    for<'v> <<L as LineageLists<'v, T>>::LinkPath as TakeEach<'v, frunk_core::HList![Self], It>>::Rest:
+        GetAt<SendStrategyCore<SendStrategyOf<T, L>>, Ik>
+            + CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
+    L: EstablishedSourceComponentsOf<T, L>,
+    for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
+        TakeEach<'s, EstablishedSourceComponentsOfParts<T, L>, Is>,
     for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out: Selector<&'a CongestionPartOf<T, L>, Jc>
         + Selector<&'a LinkPathCongestionState<InstantOf<T>>, Js>
@@ -576,7 +632,7 @@ where
     fn reread<'v, B: CallBundle>(
         mut lineage: LineageOf<'v, T, L, layer::LinkPath>,
         others: &mut OtherNodes<'v, T, L, B>,
-        _: InstantOf<T>,
+        now: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
         let role = lineage.get::<LinkPathRole<InstantOf<T>>, Ir>().kind();
         let limits = read_datagram_limits::<T, L, B, Il, Ipp, Jc, Js, Jm>(&lineage, others);
@@ -606,13 +662,28 @@ where
         if told.role == role && told.limits == Some(limits) && told.overheads == Some(overheads) {
             return None;
         }
-        let (frunk_core::hlist_pat![planner, core], _) = Take::<
-            frunk_core::HList![Self, SendStrategyCore<SendStrategyOf<T, L>>],
-            It,
-        >::take(lineage);
+        let (frunk_core::hlist_pat![planner], mut rest) =
+            Take::<frunk_core::HList![Self], It>::take(lineage);
         if planner.role != role {
             planner.role = role;
-            planner.planner.role_changed(core.strategy_mut(), role);
+            let mut ended = Vec::new();
+            planner.planner.role_changed(
+                rest.get_mut::<SendStrategyCore<SendStrategyOf<T, L>>, Ik>()
+                    .strategy_mut(),
+                role,
+                &mut ended,
+            );
+            if !ended.is_empty() {
+                let mut established = others
+                    .borrow_established_optional::<EstablishedSourceComponentsOfParts<T, L>, Is>();
+                CoreLentFeedback::<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>::unfulfilled_each(
+                    &mut rest,
+                    &mut established,
+                    now,
+                    ended,
+                    Unfulfilled::Ended,
+                );
+            }
         }
         if planner.limits != Some(limits) {
             planner.limits = Some(limits);

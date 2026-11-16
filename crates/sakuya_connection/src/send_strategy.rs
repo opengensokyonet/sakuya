@@ -407,6 +407,13 @@ pub trait SendIntentPart {
     /// when it writes no frames. The part's items and summaries follow from
     /// it, and so does handing each to its source.
     type FrameSources: crate::frame_source::FrameSourceKinds;
+
+    /// The item of the part's frame sources that `intent` stands for,
+    /// whatever kind of packet would carry it: what an intent not fulfilled
+    /// is handed back to its frame source as.
+    fn intent_item(
+        intent: &Self::SendIntents,
+    ) -> <Self::FrameSources as crate::frame_source::FrameSourceKinds>::Items<'_>;
 }
 
 /// The intents and frame sources of a list of parts: at each part's
@@ -640,11 +647,20 @@ pub trait LinkPathSendPlanner<I: SendStrategyTypes>: Sized {
         cx: &mut Context<'_>,
     ) -> Poll<PlannedDatagram<Self::Plan<'a>>>;
 
-    /// The link path's role is now `role`.
-    fn role_changed(&mut self, core: &mut Self::Core, role: LinkPathRoleKind);
+    /// The link path's role is now `role`. The intents the planner ends for
+    /// it go to `ended`: the driver hands each back to its frame source as
+    /// not fulfilled
+    /// ([`Unfulfilled::Ended`](sakuya_stream::send_options::destination::Unfulfilled::Ended)).
+    fn role_changed(
+        &mut self,
+        core: &mut Self::Core,
+        role: LinkPathRoleKind,
+        ended: &mut impl Extend<I::SendIntents>,
+    );
 
-    /// The link path ended.
-    fn ended(self, core: &mut Self::Core);
+    /// The link path ended. The intents the planner ends with it go to
+    /// `ended`, as with [`role_changed`](Self::role_changed).
+    fn ended(self, core: &mut Self::Core, ended: &mut impl Extend<I::SendIntents>);
 }
 
 // ---- the plan of a datagram ----

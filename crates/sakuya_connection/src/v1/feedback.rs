@@ -27,6 +27,7 @@
 //! [`LineageStreamFrameSource`](super::streams::send::LineageStreamFrameSource)).
 use frunk_core::{HList, hlist_pat};
 use sakuya_recovery::{ack_obligation::AckDue, packet_number_space::PacketNumberSpaceKind};
+use sakuya_stream::send_options::destination::Unfulfilled;
 use sakuya_tls::engine::CryptoLevel;
 use sakuya_wire::{parts::Coproduct, v1::packet_number::PacketNumber, var_int::VarInt};
 
@@ -45,8 +46,8 @@ use super::{
 use crate::{
     clock::InstantOf,
     feedback::{FeedbackSummariesOf, FeedbackSummaryOf, PartsSendFeedback},
-    send_strategy::SendStrategyTypes,
-    take::{AppendLast, Lineage, Reborrow, Take, TakeEach, WithOptional},
+    send_strategy::{SendIntentsOf, SendStrategyTypes},
+    take::{AppendEach, Lineage, OptionalRefs, Reborrow, Take, TakeEach, WithOptionals},
     write::PaddingSummary,
 };
 
@@ -131,18 +132,21 @@ type WithoutCore<'s, T, L, V, Ic> =
 /// `V: CoreLentFeedback<T, L, X, H>`: the summaries of the composition of
 /// `T` and `L` go back to their frame sources in a lineage of `V`, with the
 /// core, which the lineage holds, lent to them to publish through, and the
-/// stream set `X` of the established layer, which is not in the lineage,
-/// appended to it for the frame sources of the streams; `None` when there
-/// is no established layer, and then those sources take nothing back.
+/// components `X` of the established layer (a list of component types,
+/// [`EstablishedSourceComponentsOfParts`](crate::frame_source::EstablishedSourceComponentsOfParts)),
+/// which are not in the lineage, borrowed again from `established` and
+/// appended to it for the frame sources that find them there; each `None`
+/// when there is no established layer, and then those sources take nothing
+/// back.
 ///
 /// `H` holds the place of the core and the positions of each part's
 /// frame sources in the rest of the lineage.
-pub trait CoreLentFeedback<T: Choices, L: FeedbackSummariesOf, X, H>: Sized {
+pub trait CoreLentFeedback<T: Choices, L: FeedbackSummariesOf, X: OptionalRefs, H>: Sized {
     /// The packets of `space` that the frames of `summaries` were written
     /// into were acknowledged.
     fn delivered_each(
         lineage: &mut Lineage<'_, Self>,
-        streams: Option<&mut X>,
+        established: &mut X::Optional<'_>,
         now: InstantOf<T>,
         space: PacketNumberSpaceKind,
         summaries: impl IntoIterator<Item = FeedbackSummaryOf<T, L>>,
@@ -153,39 +157,57 @@ pub trait CoreLentFeedback<T: Choices, L: FeedbackSummariesOf, X, H>: Sized {
     /// link path ended before they were settled.
     fn lost_each<'a>(
         lineage: &mut Lineage<'_, Self>,
-        streams: Option<&mut X>,
+        established: &mut X::Optional<'_>,
         now: InstantOf<T>,
         space: PacketNumberSpaceKind,
         summaries: impl IntoIterator<Item = &'a FeedbackSummaryOf<T, L>>,
     ) where
         FeedbackSummaryOf<T, L>: 'a;
+
+    /// The send strategy did not fulfil `intents`, for `cause`: each goes
+    /// back to the frame source it belongs to, whatever kind of packet
+    /// would have carried it.
+    fn unfulfilled_each(
+        lineage: &mut Lineage<'_, Self>,
+        established: &mut X::Optional<'_>,
+        now: InstantOf<T>,
+        intents: impl IntoIterator<Item = <SendTypes<T, L> as SendStrategyTypes>::SendIntents>,
+        cause: Unfulfilled,
+    ) where
+        SendTypes<T, L>: SendStrategyTypes;
 }
 
-/// The positions the driver records for the frame sources of the streams,
-/// past the components of the lineage's nodes, are ignored: whoever borrows
-/// the established layer to append its stream set records that layer as
-/// taken itself.
+/// The positions the driver records for the frame sources that find the
+/// components of the established layer, past the components of the
+/// lineage's nodes, are ignored: whoever borrows the established layer to
+/// append them records that layer as taken itself.
 impl<T, L, V, X, Ic, Hf> CoreLentFeedback<T, L, X, (Ic, Hf)> for V
 where
     T: Choices,
-    L: FeedbackSummariesOf,
-    SendTypes<T, L>: SendStrategyTypes,
+    L: FeedbackSummariesOf + SendIntentsOf,
+    SendTypes<T, L>: SendStrategyTypes<SendIntents = <L as SendIntentsOf>::SendIntents>,
     CoreOf<T, L>: 'static,
-    X: 'static,
+    X: OptionalRefs,
     for<'s> V: Reborrow<'s>,
     for<'s> <V as Reborrow<'s>>::Out: TakeEach<'s, CoreTakes<T, L>, Ic>,
-    for<'s> WithoutCore<'s, T, L, V, Ic>: AppendLast<Option<&'s mut X>>,
-    for<'s> L: PartsSendFeedback<T, L, WithOptional<'s, WithoutCore<'s, T, L, V, Ic>, X>, CoreOf<T, L>, Hf>,
+    for<'s> WithoutCore<'s, T, L, V, Ic>: AppendEach<X::Optional<'s>>,
+    for<'s> L: PartsSendFeedback<
+            T,
+            L,
+            WithOptionals<'s, WithoutCore<'s, T, L, V, Ic>, X>,
+            CoreOf<T, L>,
+            Hf,
+        >,
 {
     fn delivered_each(
         lineage: &mut Lineage<'_, V>,
-        streams: Option<&mut X>,
+        established: &mut X::Optional<'_>,
         now: InstantOf<T>,
         space: PacketNumberSpaceKind,
         summaries: impl IntoIterator<Item = FeedbackSummaryOf<T, L>>,
     ) {
         let (hlist_pat![core], rest) = Take::<CoreTakes<T, L>, Ic>::take(lineage.reborrow());
-        let mut rest = rest.append_optional(streams);
+        let mut rest = rest.append_optionals::<X>(X::reborrow(established));
         for summary in summaries {
             <L as PartsSendFeedback<T, L, _, _, Hf>>::delivered(
                 &mut rest, core, now, space, summary,
@@ -195,7 +217,7 @@ where
 
     fn lost_each<'a>(
         lineage: &mut Lineage<'_, V>,
-        streams: Option<&mut X>,
+        established: &mut X::Optional<'_>,
         now: InstantOf<T>,
         space: PacketNumberSpaceKind,
         summaries: impl IntoIterator<Item = &'a FeedbackSummaryOf<T, L>>,
@@ -203,9 +225,27 @@ where
         FeedbackSummaryOf<T, L>: 'a,
     {
         let (hlist_pat![core], rest) = Take::<CoreTakes<T, L>, Ic>::take(lineage.reborrow());
-        let mut rest = rest.append_optional(streams);
+        let mut rest = rest.append_optionals::<X>(X::reborrow(established));
         for summary in summaries {
             <L as PartsSendFeedback<T, L, _, _, Hf>>::lost(&mut rest, core, now, space, summary);
+        }
+    }
+
+    /// The core is taken out as for the summaries, so that the positions
+    /// are the same, though the frame sources publish nothing here.
+    fn unfulfilled_each(
+        lineage: &mut Lineage<'_, V>,
+        established: &mut X::Optional<'_>,
+        now: InstantOf<T>,
+        intents: impl IntoIterator<Item = <L as SendIntentsOf>::SendIntents>,
+        cause: Unfulfilled,
+    ) {
+        let (hlist_pat![_core], rest) = Take::<CoreTakes<T, L>, Ic>::take(lineage.reborrow());
+        let mut rest = rest.append_optionals::<X>(X::reborrow(established));
+        for intent in intents {
+            <L as PartsSendFeedback<T, L, _, CoreOf<T, L>, Hf>>::unfulfilled(
+                &mut rest, now, &intent, cause,
+            );
         }
     }
 }

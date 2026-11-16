@@ -408,3 +408,107 @@ fn an_unfulfilled_datagram_falls_back_as_its_destination_says() {
     );
     assert_eq!(ticket.withdraw(), WithdrawReport::Withdrawn);
 }
+
+/// Queues of the established layer whose datagrams have nothing to fall
+/// back to: what [`LineageDatagramFrameSource`] finds appended to its
+/// lineage.
+#[derive(Default)]
+struct ExhaustedQueues(Vec<Arc<DatagramCell<RecordingTicket, Nowhere, Urgency>>>);
+
+/// The share of [`ExhaustedQueues`]: no handle takes it.
+#[derive(Clone)]
+struct NoShare;
+
+impl crate::v1::application_handles::KeyedHandleShare for NoShare {
+    type Part = super::super::Part;
+}
+
+impl DatagramQueues<()> for ExhaustedQueues {
+    type Config = ();
+    type Handle = NoShare;
+    type StrategyTicket = RecordingTicket;
+
+    fn new(_: super::super::DatagramQueuesFacts, (): ()) -> Self {
+        Self::default()
+    }
+
+    fn handle(&self) -> NoShare {
+        NoShare
+    }
+
+    fn on_datagram_frame(
+        &mut self,
+        _: sakuya_wire::v1::encryption_level::EncryptionLevel,
+        _: DatagramFrame<Bytes>,
+    ) {
+    }
+
+    fn layer_ended(&mut self, _: sakuya_stream::connection::LayerEnd<()>) {}
+
+    fn resolve_unfulfilled<H>(&mut self, publish: &H)
+    where
+        H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = RecordingTicket>,
+    {
+        self.0.retain(|cell| {
+            cell.resolve_unfulfilled(publish);
+            cell.is_waiting()
+        });
+    }
+}
+
+/// The source found in a lineage resolves an intent not fulfilled at once,
+/// through the queues appended to the lineage: a datagram whose destination
+/// has nothing left is withdrawn before anything is sent again, and leaves
+/// its queue; without the queues the progress only keeps the cause.
+#[test]
+fn an_unfulfilled_datagram_is_resolved_at_once_through_the_lineage() {
+    let publish = CountingHandle::default();
+    let intent = super::DatagramIntent::new(
+        Bytes::from_static(b"exhausted"),
+        Urgency::default(),
+        DatagramProgress::new(),
+    );
+    let strategy = Arc::default();
+    let cell = DatagramCell::new(
+        intent.clone(),
+        RecordingTicket(Arc::clone(&strategy)),
+        Nowhere,
+    );
+    let mut ticket = DatagramTicket::new(Arc::clone(&cell));
+    let mut queues = ExhaustedQueues(vec![cell]);
+    let mut taken = crate::take::TakenPositions::default();
+    {
+        let mut lineage = Lineage::new(frunk_core::hlist![Some(&mut queues)], &mut taken);
+        let mut source = LineageDatagramFrameSource::<_, ExhaustedQueues, (), _, Here>::new(
+            &mut lineage,
+            publish.clone(),
+        );
+        source.unfulfilled(&intent, Unfulfilled::Rejected);
+    }
+    assert_eq!(
+        ticket.state(),
+        DatagramState::Withdrawn(DatagramWithdrawCause::DestinationExhausted)
+    );
+    assert_eq!(
+        poll_now(ticket.settled()),
+        Poll::Ready(DatagramSettlement::Withdrawn(
+            DatagramWithdrawCause::DestinationExhausted
+        ))
+    );
+    assert!(*lock(&strategy), "the strategy's ticket is withdrawn");
+    assert_eq!(*lock(&publish.0), 0, "not published again");
+    assert!(queues.0.is_empty(), "it leaves its queue");
+
+    // without the established layer the cause is only kept
+    let (ticket, intent, strategy) = ticket_of(b"no layer");
+    let mut lineage = Lineage::new(frunk_core::hlist![None::<&mut ExhaustedQueues>], &mut taken);
+    LineageDatagramFrameSource::<_, ExhaustedQueues, (), _, Here>::new(
+        &mut lineage,
+        publish.clone(),
+    )
+    .unfulfilled(&intent, Unfulfilled::Ended);
+    assert_eq!(ticket.state(), DatagramState::Waiting);
+    assert!(!*lock(&strategy));
+    assert_eq!(*lock(&publish.0), 0);
+    ticket.release();
+}

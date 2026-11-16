@@ -82,7 +82,7 @@ use crate::{
     component::{ArgsOf, Build, LineageOf, ParentsOf},
     dispatch::{DispatchFacts, FrameDispatch},
     error::{ConnectionErrorPart, ConnectionErrorsOf, TransportParameterValueErrorPart},
-    frame_source::{FrameSourcePart, PacketKind},
+    frame_source::{EstablishedSourceComponentsPart, FrameSourcePart, PacketKind},
     layer::{self, LogicalPath},
     others::OtherNodes,
     send_strategy::{
@@ -448,6 +448,15 @@ impl SendIntentPart for Part {
     type FrameSourceId = sakuya_wire::parts::CNil;
     type SendIntents = sakuya_wire::parts::CNil;
     type FrameSources = HNil;
+
+    fn intent_item(intent: &sakuya_wire::parts::CNil) -> sakuya_wire::parts::CNil {
+        match *intent {}
+    }
+}
+
+/// The extension has no frame source of its own.
+impl<T, L> EstablishedSourceComponentsPart<T, L> for Part {
+    type Components = HNil;
 }
 
 impl<K: PacketKind> FrameSourcePart<K> for Part {

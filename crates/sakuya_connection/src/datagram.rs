@@ -65,11 +65,14 @@ use crate::{
     component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, PassiveDataComponent},
     dispatch::{DispatchFacts, FrameDispatch},
     error::{ConnectionErrorPart, ConnectionErrorsOf, TransportParameterValueErrorPart},
-    frame_source::{FrameSourceItemsOf, FrameSourcePart, PacketKind},
+    frame_source::{
+        EstablishedSourceComponentsPart, FrameSourceItemsOf, FrameSourcePart, PacketKind,
+    },
     layer::{self, LogicalPath},
     others::OtherNodes,
     send_strategy::{
-        AnyActiveLinkPath, IntentTicketWithdraw, PlannedPacketKind, SendIntentPart, SendStrategy,
+        AnyActiveLinkPath, IntentTicketWithdraw, PlannedPacketKind, SendIntentHandle,
+        SendIntentIntake, SendIntentPart, SendStrategy,
     },
     share::{
         ConnectionArgsOf, FlatMut, LayerShare, LineageLists, LineagePartList, LinkPathIdentifierOf,
@@ -86,7 +89,7 @@ use crate::{
         close::{CloseReasonRecord, TransportClose},
         parameters::{LocalTransportParameters, PartSlots, PeerTransportParameters},
         send::SendTypes,
-        send_planning::{IntakePublishOutcome, SendStrategyOf},
+        send_planning::{IntakeOf, IntakePublishOutcome, SendStrategyOf},
         streams::resets::{StreamResets, StreamResetsOf, StreamResetsPart},
     },
 };
@@ -115,7 +118,7 @@ pub trait DatagramChoices: Choices<Side: DatagramSide> {
     /// parts), `K`, the ticket the send strategy's intake gives back for a
     /// datagram's intent ([`DatagramTicketOf`]), and `S`, the side, which
     /// gives what a datagram received is.
-    type DatagramQueues<Lc, K: IntentTicketWithdraw, S: DatagramSide>: DatagramQueues<Lc, Config = Self::DatagramQueuesConfig>;
+    type DatagramQueues<Lc, K: IntentTicketWithdraw, S: DatagramSide>: DatagramQueues<Lc, Config = Self::DatagramQueuesConfig, StrategyTicket = K>;
     /// What the composition configures the queues with; the connection
     /// node keeps it from the connection's making until the established
     /// layer is built.
@@ -126,6 +129,11 @@ pub trait DatagramChoices: Choices<Side: DatagramSide> {
 /// parts `L` gives back for a datagram's intent.
 pub type DatagramTicketOf<T, L> =
     <SendTypes<T, L> as IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>>::Outcome;
+
+/// The handle the intake of the choices `T` and the list of parts `L` gives
+/// for the datagrams' intents, at the place `Idx`.
+pub type DatagramIntentHandleOf<T, L, Idx> =
+    <IntakeOf<T, L> as SendIntentIntake<AnyActiveLinkPath>>::Handle<DatagramIntent<Urgency>, Idx>;
 
 /// The queues of the established layer of the choices `T` and the list of
 /// parts `L`.
@@ -231,6 +239,8 @@ pub trait DatagramQueues<Lc>: Sized {
     /// extension's share of an established layer's handle, which publishes
     /// the datagrams through the handle's intake.
     type Handle: Clone + KeyedHandleShare<Part = Part>;
+    /// The ticket the send strategy gives back for a datagram's intent.
+    type StrategyTicket;
 
     /// The queues of a layer just built, of the facts `facts` and
     /// configured by `config`.
@@ -247,6 +257,22 @@ pub trait DatagramQueues<Lc>: Sized {
     /// The established layer ended as `end`: what was received is still
     /// read first, then every read and send reports the end.
     fn layer_ended(&mut self, end: LayerEnd<Lc>);
+
+    /// The datagrams waiting whose intents were not fulfilled go on as
+    /// their destinations say, now: published again through `publish` while
+    /// the destination degrades, withdrawn once it has nothing left. What
+    /// was written or withdrawn meanwhile leaves the send queue.
+    ///
+    /// The DATAGRAM frame source calls it when an intent of it was not
+    /// fulfilled, so that the datagram's ticket does not wait for the next
+    /// send to hear of it.
+    fn resolve_unfulfilled<H>(&mut self, publish: &H)
+    where
+        H: SendIntentHandle<
+                DatagramIntent<Urgency>,
+                AnyActiveLinkPath,
+                Outcome = Self::StrategyTicket,
+            >;
 }
 
 /// What the queues of a layer are made from (`DatagramQueuesFacts`).
@@ -433,6 +459,13 @@ impl SendIntentPart for Part {
     type FrameSourceId = FrameSourceId;
     type SendIntents = Coprod![DatagramIntent<Urgency>];
     type FrameSources = HList![DatagramFrames];
+
+    fn intent_item(intent: &Coprod![DatagramIntent<Urgency>]) -> FrameSourceItemsOf<'_, Self> {
+        match intent {
+            Coproduct::Inl(intent) => Coproduct::Inl(intent),
+            Coproduct::Inr(never) => match *never {},
+        }
+    }
 }
 
 /// DATAGRAM frames go in 0-RTT and 1-RTT packets of an active link path,
@@ -440,14 +473,11 @@ impl SendIntentPart for Part {
 /// candidate's packets do not carry them.
 impl<K: PacketKind> FrameSourcePart<K> for Part {
     fn item(intent: &Coprod![DatagramIntent<Urgency>]) -> Option<FrameSourceItemsOf<'_, Self>> {
-        match intent {
-            Coproduct::Inl(intent) => matches!(
-                K::KIND,
-                PlannedPacketKind::ZeroRtt | PlannedPacketKind::OneRtt
-            )
-            .then_some(Coproduct::Inl(intent)),
-            Coproduct::Inr(never) => match *never {},
-        }
+        matches!(
+            K::KIND,
+            PlannedPacketKind::ZeroRtt | PlannedPacketKind::OneRtt
+        )
+        .then(|| <Self as SendIntentPart>::intent_item(intent))
     }
 
     fn source(item: &FrameSourceItemsOf<'_, Self>) -> FrameSourceId {
@@ -521,6 +551,15 @@ where
     DatagramTicketOf<T, L>: IntentTicketWithdraw,
 {
     type Share = <DatagramQueuesOf<T, L> as DatagramQueues<CloseCauseOf<T, L>>>::Handle;
+}
+
+/// The DATAGRAM frame source finds the queues of the established layer.
+impl<T: DatagramChoices, L: ConnectionErrorsOf> EstablishedSourceComponentsPart<T, L> for Part
+where
+    SendTypes<T, L>: IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>,
+    DatagramTicketOf<T, L>: IntentTicketWithdraw,
+{
+    type Components = HList![DatagramQueuesOf<T, L>];
 }
 
 macro_rules! no_share {

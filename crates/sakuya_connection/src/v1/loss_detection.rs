@@ -50,13 +50,14 @@ use crate::{
     component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
     error::ConnectionErrorsOf,
     feedback::{FeedbackSummariesOf, FeedbackSummaryOf},
+    frame_source::{EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts},
     layer,
     others::OtherNodes,
     send_strategy::AnyActiveLinkPath,
     share::{
         FlatMut, FlatRef, LineageLists, LineagePartList, LinkPathIdentifierOf, NodeData, PartList,
     },
-    take::{GetAt, Lineage, ReadEach, Take, TakeEach},
+    take::{GetAt, Lineage, OptionalRefs, ReadEach, Take, TakeEach},
 };
 
 use super::{
@@ -73,7 +74,7 @@ use super::{
     send::SendTypes,
     send_planning::IntakePublishOutcome,
     spaces::{DEFAULT_MAX_ACK_DELAY, SendJournalsOf, live_spaces, peer_max_ack_delay},
-    streams::{StreamsOf, send::StreamIntent},
+    streams::send::StreamIntent,
 };
 
 /// The loss detection states of a link path, one for each packet number
@@ -272,9 +273,10 @@ where
     T: Choices,
     L: LineagePartList<T> + FeedbackSummariesOf + ConnectionErrorsOf,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
-        TakeEach<'s, HList![StreamsOf<T, L>], Is>,
+        TakeEach<'s, EstablishedSourceComponentsOfParts<T, L>, Is>,
     L: ParametersOf<TransportParameterSpace>,
     S: 'static,
     Ls: Clone + 'static,
@@ -293,7 +295,7 @@ where
         + ReadEach<LossFactsReads<T, L>, If>
         + TakeEach<'v, LossTakes<T, L, Self>, It>,
     for<'v> <<L as LineageLists<'v, T>>::Recovery as TakeEach<'v, LossTakes<T, L, Self>, It>>::Rest:
-        CoreLentFeedback<T, L, StreamsOf<T, L>, Hf>,
+        CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out:
         Selector<&'a CongestionPartOf<T, L>, Jx> + Selector<&'a RttOf<T, L>, Jr>,
@@ -342,9 +344,8 @@ where
             }
             batches
         });
-        let mut streams = others
-            .borrow_established::<HList![StreamsOf<T, L>], Is>()
-            .map(|frunk_core::hlist_pat![streams]| streams);
+        let mut established =
+            others.borrow_established_optional::<EstablishedSourceComponentsOfParts<T, L>, Is>();
         for (space, batch) in &batches {
             if batch.persistent {
                 rtt.on_persistent_congestion();
@@ -356,7 +357,7 @@ where
             hand_back_lost::<T, L, _, _, Hf>(
                 journals,
                 &mut rest,
-                streams.as_deref_mut(),
+                &mut established,
                 now,
                 *space,
                 batch,
@@ -382,8 +383,8 @@ pub(super) type LossTakes<T, L, D> = HList![
 /// Hand the packets of `batch`, declared lost in `space`, back to the
 /// space's `journals`, which keep their records as declared lost until the
 /// batch's retention ends, and the summaries of their frames back to their
-/// frame sources as lost, in `lineage` with the stream set `streams` at
-/// `now`. A packet the journals do
+/// frame sources as lost, in `lineage` with the components of the
+/// established layer `established` appended, at `now`. A packet the journals do
 /// not have as sent, such as one whose record went with the end of its link
 /// path, gives nothing back.
 pub(super) fn hand_back_lost<T, L, V, X, Hf>(
@@ -392,26 +393,21 @@ pub(super) fn hand_back_lost<T, L, V, X, Hf>(
         LinkPathIdentifierOf<T, L>,
     >,
     lineage: &mut Lineage<'_, V>,
-    mut streams: Option<&mut X>,
+    established: &mut X::Optional<'_>,
     now: InstantOf<T>,
     space: PacketNumberSpaceKind,
     batch: &DeclaredBatch<InstantOf<T>>,
 ) where
     T: Choices,
     L: PartList<T> + FeedbackSummariesOf,
+    X: OptionalRefs,
     V: CoreLentFeedback<T, L, X, Hf>,
 {
     for &number in &batch.numbers {
         let Some(record) = journals.declare_lost(number, batch.retain_until) else {
             continue;
         };
-        V::lost_each(
-            lineage,
-            streams.as_deref_mut(),
-            now,
-            space,
-            &record.summaries,
-        );
+        V::lost_each(lineage, established, now, space, &record.summaries);
     }
 }
 

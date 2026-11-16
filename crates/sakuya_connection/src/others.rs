@@ -4,7 +4,7 @@ use crate::{
     clock::{ConnectionChoices, InstantOf, LinkIdOf},
     layer::{Established, LinkEntry, LinkPath, LogicalPath, NodeKey, NodeKeyOf, Recovery},
     share::{FlatMut, FlatRef, NodeData, PartList, PathKey},
-    take::{GetAt, RefsOf, TakeEach},
+    take::{GetAt, OptionalRefs, RefsOf, TakeEach},
     tree::{
         Around, EntryNode, EstablishedNode, LinkPathNodeOf, LogicalPathNode, NodeAddr, RecoveryNode,
     },
@@ -120,6 +120,20 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
             .flat_mut()
             .take_each(&mut Self::record(taken, NodeAddr::ESTABLISHED));
         Some(items)
+    }
+
+    /// Take components `U` of the established layer for as long as the
+    /// others are borrowed, each as a borrow that may be absent: all `None`
+    /// when [`borrow_established`](Self::borrow_established) gives `None`.
+    /// It is what a lend appends to a lineage for the frame sources that
+    /// find them there.
+    pub(crate) fn borrow_established_optional<'s, U, Is>(&'s mut self) -> U::Optional<'s>
+    where
+        NodeData<T, L, Established>: FlatMut<'s>,
+        <NodeData<T, L, Established> as FlatMut<'s>>::Out: TakeEach<'s, U, Is>,
+        U: OptionalRefs,
+    {
+        U::spread(self.borrow_established::<U, Is>())
     }
 
     /// Run `each` with components `U` of the established layer, `None` when

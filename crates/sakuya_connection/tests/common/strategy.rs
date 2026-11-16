@@ -343,13 +343,18 @@ where
         self.inner.poll_plan(&mut core.inner, cx)
     }
 
-    fn role_changed(&mut self, core: &mut Self::Core, role: LinkPathRoleKind) {
+    fn role_changed(
+        &mut self,
+        core: &mut Self::Core,
+        role: LinkPathRoleKind,
+        ended: &mut impl Extend<I::SendIntents>,
+    ) {
         record(format!("path {}: role {role:?}", self.index));
-        self.inner.role_changed(&mut core.inner, role);
+        self.inner.role_changed(&mut core.inner, role, ended);
     }
 
-    fn ended(self, core: &mut Self::Core) {
+    fn ended(self, core: &mut Self::Core, ended: &mut impl Extend<I::SendIntents>) {
         record(format!("path {}: ended", self.index));
-        self.inner.ended(&mut core.inner);
+        self.inner.ended(&mut core.inner, ended);
     }
 }

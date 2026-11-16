@@ -406,8 +406,17 @@ fn a_planner_out_of_the_active_role_refuses_and_ends_its_intents() {
     let ping = planner
         .publish(ProbePingIntent::new(ApplicationData))
         .unwrap();
-    planner.role_changed(&mut core, LinkPathRoleKind::Closing);
+    let mut ended = Vec::new();
+    planner.role_changed(&mut core, LinkPathRoleKind::Closing, &mut ended);
     assert!(!ping.is_waiting());
+    assert!(
+        matches!(
+            &ended[..],
+            [Coproduct::Inl(Coproduct::Inr(Coproduct::Inl(intent)))]
+                if *intent == ProbePingIntent::new(ApplicationData)
+        ),
+        "the ping is handed back"
+    );
     let refused = planner
         .publish(ProbePingIntent::new(ApplicationData))
         .unwrap_err();
@@ -416,6 +425,27 @@ fn a_planner_out_of_the_active_role_refuses_and_ends_its_intents() {
         &LinkPathPublishError::from(RoleNotAcceptingError::new(LinkPathRoleKind::Closing))
     );
     assert_eq!(refused.into_intent(), ProbePingIntent::new(ApplicationData));
+}
+
+#[test]
+fn an_ended_planner_hands_back_only_the_intents_still_waiting() {
+    let (mut core, mut planner) = setup(&ALL, 12_000);
+    let waiting = planner
+        .publish(ProbePingIntent::new(ApplicationData))
+        .unwrap();
+    // dropping its ticket withdraws it
+    drop(planner.publish(ProbePingIntent::new(Initial)).unwrap());
+    let mut ended = Vec::new();
+    planner.ended(&mut core, &mut ended);
+    assert!(!waiting.is_waiting());
+    assert!(
+        matches!(
+            &ended[..],
+            [Coproduct::Inl(Coproduct::Inr(Coproduct::Inl(intent)))]
+                if *intent == ProbePingIntent::new(ApplicationData)
+        ),
+        "only the waiting ping is handed back"
+    );
 }
 
 #[test]
@@ -479,7 +509,7 @@ fn resends(planner: &mut Planner, core: &mut Core, waker: &Waker) -> bool {
 #[test]
 fn a_closing_link_path_resends_once_sealed_and_for_powers_of_two_of_datagrams() {
     let (mut core, mut planner) = setup(&ALL, 12_000);
-    planner.role_changed(&mut core, LinkPathRoleKind::Closing);
+    planner.role_changed(&mut core, LinkPathRoleKind::Closing, &mut Vec::new());
     let (count, waker) = waker();
     assert!(!resends(&mut planner, &mut core, &waker), "nothing sealed");
     planner.publish(ResendCloseIntent::Sealed);
@@ -496,7 +526,7 @@ fn a_closing_link_path_resends_once_sealed_and_for_powers_of_two_of_datagrams() 
     assert_eq!(answered, [1, 2, 4, 8, 16]);
     // two datagrams before the call asks again are one resend
     let (_, mut planner) = setup(&ALL, 12_000);
-    planner.role_changed(&mut core, LinkPathRoleKind::Closing);
+    planner.role_changed(&mut core, LinkPathRoleKind::Closing, &mut Vec::new());
     planner.publish(ResendCloseIntent::DatagramReceived);
     planner.publish(ResendCloseIntent::DatagramReceived);
     assert!(resends(&mut planner, &mut core, &waker));
@@ -509,7 +539,7 @@ fn a_resend_published_before_the_closing_role_waits_for_it() {
     planner.publish(ResendCloseIntent::Sealed);
     let (count, waker) = waker();
     pending(&mut planner, &mut core, &waker);
-    planner.role_changed(&mut core, LinkPathRoleKind::Closing);
+    planner.role_changed(&mut core, LinkPathRoleKind::Closing, &mut Vec::new());
     assert_eq!(count.0.load(Ordering::SeqCst), 1, "woken by the role");
     assert!(resends(&mut planner, &mut core, &waker));
 }
@@ -517,9 +547,9 @@ fn a_resend_published_before_the_closing_role_waits_for_it() {
 #[test]
 fn a_draining_link_path_resends_nothing() {
     let (mut core, mut planner) = setup(&ALL, 12_000);
-    planner.role_changed(&mut core, LinkPathRoleKind::Closing);
+    planner.role_changed(&mut core, LinkPathRoleKind::Closing, &mut Vec::new());
     planner.publish(ResendCloseIntent::Sealed);
-    planner.role_changed(&mut core, LinkPathRoleKind::Draining);
+    planner.role_changed(&mut core, LinkPathRoleKind::Draining, &mut Vec::new());
     planner.publish(ResendCloseIntent::DatagramReceived);
     let (_, waker) = waker();
     assert!(!resends(&mut planner, &mut core, &waker));

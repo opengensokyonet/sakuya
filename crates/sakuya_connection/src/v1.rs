@@ -115,7 +115,10 @@ use crate::{
         TransportParameterValueErrorPart,
     },
     feedback::FeedbackSummariesOf,
-    frame_source::FrameSource,
+    frame_source::{
+        EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts,
+        EstablishedSourceComponentsPart, FrameSource,
+    },
     layer::{self, NodeKey},
     others::OtherNodes,
     request::StructureRequest,
@@ -736,6 +739,17 @@ where
         >,
 {
     type Share = application_handles::connection::StreamSetHandleOf<T, L>;
+}
+/// The frame sources of the streams find the stream set of the established
+/// layer.
+impl<T: Choices, L: ConnectionErrorsOf> EstablishedSourceComponentsPart<T, L> for Part
+where
+    SendTypes<T, L>: send_planning::IntakePublishOutcome<
+            streams::send::StreamIntent<T::SendParameters>,
+            AnyActiveLinkPath,
+        >,
+{
+    type Components = HList![StreamsOf<T, L>];
 }
 /// The loss detection state comes before the probe timeout: its time
 /// threshold is dispatched first (RFC 9002 §6.2.1, Appendix A.8).
@@ -1789,12 +1803,13 @@ where
             streams::send::StreamIntent<T::SendParameters>,
             AnyActiveLinkPath,
         >,
+    L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
-        crate::take::TakeEach<'s, HList![StreamsOf<T, L>], Is>,
+        crate::take::TakeEach<'s, EstablishedSourceComponentsOfParts<T, L>, Is>,
     for<'v> <L as LineageLists<'v, T>>::LinkPathParents: GetAt<SendJournalsOf<T, L>, Ij>,
     for<'v> <L as LineageLists<'v, T>>::LinkPathParents:
-        CoreLentFeedback<T, L, StreamsOf<T, L>, Hf>,
+        CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::LinkPath>,
@@ -1812,18 +1827,17 @@ where
         };
         let identifier = L::link_path_identifier(&path, &link);
         let now = others.now();
-        let mut streams = others
-            .borrow_established::<HList![StreamsOf<T, L>], Is>()
-            .map(|frunk_core::hlist_pat![streams]| streams);
+        let mut established =
+            others.borrow_established_optional::<EstablishedSourceComponentsOfParts<T, L>, Is>();
         for space in PacketNumberSpaceKind::ALL {
             let Some(journals) = parents.get_mut::<SendJournalsOf<T, L>, Ij>().get_mut(space)
             else {
                 continue;
             };
             let unsettled: Vec<_> = journals.take_link_path(&identifier).collect();
-            CoreLentFeedback::<T, L, StreamsOf<T, L>, Hf>::lost_each(
+            CoreLentFeedback::<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>::lost_each(
                 parents,
-                streams.as_deref_mut(),
+                &mut established,
                 now,
                 space,
                 unsettled.iter().flat_map(|record| &record.summaries),

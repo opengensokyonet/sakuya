@@ -248,18 +248,7 @@ impl<Lc, K: IntentTicketWithdraw, S: DatagramSide> QueuesShare<Lc, K, S> {
             // larger than the whole queue: no room can be made for it
             return Err(SendDatagramError::QueueFull);
         }
-        // what was written or withdrawn since leaves the queue; what was not
-        // fulfilled goes on as its destination says
-        let mut gone = 0;
-        state.waiting.retain(|cell| {
-            cell.resolve_unfulfilled(publish);
-            let waiting = cell.is_waiting();
-            if !waiting {
-                gone += cell.len();
-            }
-            waiting
-        });
-        state.waiting_bytes -= gone;
+        Self::resolve_waiting(&mut state, publish);
         let fits = |state: &QueuesState<Lc, K, S::Received>| {
             state.waiting.len() < bounds.datagrams.get()
                 && state.waiting_bytes.saturating_add(len) <= bounds.bytes
@@ -285,6 +274,25 @@ impl<Lc, K: IntentTicketWithdraw, S: DatagramSide> QueuesShare<Lc, K, S> {
         Ok(DatagramTicket::new(cell))
     }
 
+    /// What was written or withdrawn since leaves the send queue of
+    /// `state`; what was not fulfilled goes on as its destination says,
+    /// published again through `publish` or withdrawn.
+    fn resolve_waiting<H>(state: &mut QueuesState<Lc, K, S::Received>, publish: &H)
+    where
+        H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
+    {
+        let mut gone = 0;
+        state.waiting.retain(|cell| {
+            cell.resolve_unfulfilled(publish);
+            let waiting = cell.is_waiting();
+            if !waiting {
+                gone += cell.len();
+            }
+            waiting
+        });
+        state.waiting_bytes -= gone;
+    }
+
     fn limits(&self) -> DatagramFrameLimits {
         let limit = self.peer_limit.unwrap_or(0);
         DatagramFrameLimits {
@@ -301,6 +309,7 @@ where
 {
     type Config = LockedDatagramQueuesConfig;
     type Handle = LockedDatagramQueuesHandle<Lc, K, S>;
+    type StrategyTicket = K;
 
     fn new(facts: DatagramQueuesFacts, config: LockedDatagramQueuesConfig) -> Self {
         let peer_frame_limit = usize::try_from(facts.peer.get().get()).unwrap_or(usize::MAX);
@@ -335,6 +344,13 @@ where
 
     fn layer_ended(&mut self, end: LayerEnd<Lc>) {
         self.shared.end(end);
+    }
+
+    fn resolve_unfulfilled<H>(&mut self, publish: &H)
+    where
+        H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
+    {
+        QueuesShare::<Lc, K, S>::resolve_waiting(&mut lock(&self.shared.state), publish);
     }
 }
 

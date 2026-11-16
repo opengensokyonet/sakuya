@@ -20,6 +20,7 @@
 use core::{
     fmt,
     future::{Future, poll_fn},
+    marker::PhantomData,
     task::{Context, Poll, Waker},
 };
 use std::sync::{Arc, Mutex, Weak};
@@ -41,17 +42,27 @@ use sakuya_wire::{
     var_int::{VarInt, VarIntWidth},
 };
 
-use super::frame_len_with_length;
+use super::{
+    DatagramChoices, DatagramIntentHandleOf, DatagramQueues, DatagramQueuesOf, DatagramTicketOf,
+    frame_len_with_length,
+};
 use crate::{
-    clock::{ConnectionChoices, InstantOf},
+    clock::InstantOf,
+    error::ConnectionErrorsOf,
     feedback::InjectSummary,
     frame_source::{FindFrameSource, FrameSource, FrameSourceKind, NoIntent, PublishIntent},
     send_strategy::{
-        IntentTicketWithdraw, MinimumLengths, SendIntent, SendIntentHandle,
+        AnyActiveLinkPath, IntentTicketWithdraw, MinimumLengths, SendIntent, SendIntentHandle,
+        SendIntentIntake, SendStrategy, SharedPublishTo,
         ranked::{IntentTicket, RankedCoreIntent, RankedIntent, SendPriority, SendRank},
     },
-    take::Lineage,
+    take::{GetAt, GetOptionalAt, Lineage},
     v1::application_handles::connection::{keep_waker, lock, wake_all},
+    v1::{
+        CloseCauseOf,
+        send::SendTypes,
+        send_planning::{IntakeOf, IntakePublishOutcome, SendStrategyIntake, SendStrategyOf},
+    },
     write::{
         DelimitedFrame, InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf,
         Supplied, ToPacketEndFrame,
@@ -439,17 +450,139 @@ impl FrameSourceKind for DatagramFrames {
 }
 
 /// The frames are written from the intents themselves, and what comes of
-/// them goes to the progress the summaries hold: the source is in no
-/// lineage.
-impl<T: ConnectionChoices, L, V> FindFrameSource<T, L, V, ()> for DatagramFrames {
+/// them goes to the progress the summaries hold; an intent not fulfilled
+/// goes on as its destination says at once, through the queues of the
+/// established layer, which the lend appends to the lineage, publishing
+/// through the handle of the intake in the connection node.
+impl<T, L, V, Ii, Iq, Idx> FindFrameSource<T, L, V, (Ii, Iq, Idx)> for DatagramFrames
+where
+    T: DatagramChoices,
+    L: ConnectionErrorsOf,
+    SendTypes<T, L>: IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>,
+    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    DatagramTicketOf<T, L>: IntentTicketWithdraw,
+    IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
+        + SharedPublishTo<DatagramIntent<Urgency>, AnyActiveLinkPath, Idx>,
+    DatagramIntentHandleOf<T, L, Idx>: SendIntentHandle<
+            DatagramIntent<Urgency>,
+            AnyActiveLinkPath,
+            Outcome = DatagramTicketOf<T, L>,
+        >,
+    V: GetAt<SendStrategyIntake<IntakeOf<T, L>>, Ii> + GetOptionalAt<DatagramQueuesOf<T, L>, Iq>,
+{
     type Source<'l, 'r>
-        = DatagramFrameSource
+        = LineageDatagramFrameSource<
+        'l,
+        'r,
+        V,
+        DatagramQueuesOf<T, L>,
+        CloseCauseOf<T, L>,
+        DatagramIntentHandleOf<T, L, Idx>,
+        Iq,
+    >
     where
         V: 'l,
         'r: 'l;
 
-    fn find<'l, 'r>(_: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> DatagramFrameSource {
-        DatagramFrameSource
+    fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
+        let publish = lineage
+            .get::<SendStrategyIntake<IntakeOf<T, L>>, Ii>()
+            .intake()
+            .handle::<DatagramIntent<Urgency>, Idx>();
+        LineageDatagramFrameSource::new(lineage, publish)
+    }
+}
+
+/// The DATAGRAM frame source in a lineage `V`
+/// (`LineageDatagramFrameSource`): it writes as [`DatagramFrameSource`]
+/// does, and when an intent is not fulfilled it lets the queues `Q` of the
+/// established layer, which the lend appended to the lineage at the
+/// position `Iq`, resolve it at once, publishing again through the handle
+/// `P`. `Lc` is the queues' close cause.
+pub struct LineageDatagramFrameSource<'l, 'r, V, Q, Lc, P, Iq> {
+    lineage: &'l mut Lineage<'r, V>,
+    publish: P,
+    types: PhantomData<DatagramSourceTypes<Q, Lc, Iq>>,
+}
+
+/// What [`LineageDatagramFrameSource`] takes its components by.
+type DatagramSourceTypes<Q, Lc, Iq> = fn() -> (Q, Lc, Iq);
+
+impl<V, Q, Lc, P, Iq> fmt::Debug for LineageDatagramFrameSource<'_, '_, V, Q, Lc, P, Iq> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("LineageDatagramFrameSource")
+    }
+}
+
+impl<'l, 'r, V, Q, Lc, P, Iq> LineageDatagramFrameSource<'l, 'r, V, Q, Lc, P, Iq> {
+    /// The source in `lineage`, publishing through `publish`.
+    pub(crate) fn new(lineage: &'l mut Lineage<'r, V>, publish: P) -> Self {
+        Self {
+            lineage,
+            publish,
+            types: PhantomData,
+        }
+    }
+}
+
+/// Without the established layer an intent not fulfilled only keeps its
+/// cause: its queue ended with the layer and withdrew it.
+impl<V, Q, Lc, P, Iq> FrameSource for LineageDatagramFrameSource<'_, '_, V, Q, Lc, P, Iq>
+where
+    V: GetOptionalAt<Q, Iq>,
+    Q: DatagramQueues<Lc>,
+    P: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = Q::StrategyTicket>,
+{
+    type Summary = DatagramSummary;
+    type Class = InFlightClass;
+    type Item<'a> = &'a DatagramIntent<Urgency>;
+    /// A lost DATAGRAM is not sent again (RFC 9221 §5.1).
+    type Intent = NoIntent;
+
+    fn supply<W, R, Idx>(
+        &mut self,
+        intent: &DatagramIntent<Urgency>,
+        packet: OpenPacket<W, InFlightClass, R>,
+    ) -> Supplied<W, InFlightClass, R>
+    where
+        W: PacketWriting,
+        SummaryOf<W>: InjectSummary<DatagramSummary, Idx>,
+        R: PacketPosition,
+    {
+        DatagramFrameSource.supply::<W, R, Idx>(intent, packet)
+    }
+
+    fn delivered<Pb, Idx>(
+        &mut self,
+        publish: &mut Pb,
+        space: PacketNumberSpaceKind,
+        summary: DatagramSummary,
+    ) where
+        Pb: PublishIntent<NoIntent, Idx>,
+    {
+        DatagramFrameSource.delivered::<Pb, Idx>(publish, space, summary);
+    }
+
+    fn lost<Pb, Idx>(
+        &mut self,
+        publish: &mut Pb,
+        space: PacketNumberSpaceKind,
+        summary: &DatagramSummary,
+    ) where
+        Pb: PublishIntent<NoIntent, Idx>,
+    {
+        DatagramFrameSource.lost::<Pb, Idx>(publish, space, summary);
+    }
+
+    /// The datagram's progress keeps the cause, and the queues let its
+    /// destination decide at once: it is published again, with the same
+    /// ticket, while the destination degrades, and withdrawn once it has
+    /// nothing left.
+    fn unfulfilled(&mut self, intent: &DatagramIntent<Urgency>, cause: Unfulfilled) {
+        intent.progress.unfulfilled(cause);
+        if let Some(queues) = self.lineage.get_optional_mut::<Q, Iq>() {
+            queues.resolve_unfulfilled(&self.publish);
+        }
     }
 }
 

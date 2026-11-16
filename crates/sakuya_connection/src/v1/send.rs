@@ -434,12 +434,6 @@ pub type FrameSources = frunk_core::HList![
     StreamsBlockedFrames
 ];
 
-impl SendIntentPart for Part {
-    type FrameSourceId = FrameSourceId;
-    type SendIntents = SendIntents;
-    type FrameSources = FrameSources;
-}
-
 /// One planned item of version 1: an item of one of [`FrameSources`].
 /// PADDING is never planned; the ACK frames and the PING of a probe are
 /// planned for a packet number space.
@@ -530,28 +524,37 @@ fn stream_item(key: StreamIntentKey) -> SendItem {
     }
 }
 
-impl<K: PacketKind> FrameSourcePart<K> for Part {
-    fn item(intent: &SendIntents) -> Option<SendItem> {
+impl SendIntentPart for Part {
+    type FrameSourceId = FrameSourceId;
+    type SendIntents = SendIntents;
+    type FrameSources = FrameSources;
+
+    fn intent_item(intent: &SendIntents) -> SendItem {
         match intent {
-            place_pattern!([] ack) => {
-                carries(K::KIND, ack.space, true).then_some(at_place!([_] ack.space))
-            }
-            place_pattern!([_] ping) => {
-                carries(K::KIND, ping.space, false).then_some(at_place!([_ _] ping.space))
-            }
-            place_pattern!([_ _] retire) => {
-                (K::KIND == PlannedPacketKind::OneRtt).then_some(at_place!([_ _ _] retire.sequence))
-            }
-            place_pattern!([_ _ _] HandshakeDoneIntent) => {
-                (K::KIND == PlannedPacketKind::OneRtt).then_some(at_place!([_ _ _ _] ()))
-            }
-            place_pattern!([_ _ _ _] crypto) => (crypto_level(K::KIND) == Some(crypto.level))
-                .then_some(at_place!([_ _ _ _ _] crypto.level)),
-            place_pattern!([_ _ _ _ _] stream) => {
-                carries_streams(K::KIND).then(|| stream_item(stream.key()))
-            }
+            place_pattern!([] ack) => at_place!([_] ack.space),
+            place_pattern!([_] ping) => at_place!([_ _] ping.space),
+            place_pattern!([_ _] retire) => at_place!([_ _ _] retire.sequence),
+            place_pattern!([_ _ _] HandshakeDoneIntent) => at_place!([_ _ _ _] ()),
+            place_pattern!([_ _ _ _] crypto) => at_place!([_ _ _ _ _] crypto.level),
+            place_pattern!([_ _ _ _ _] stream) => stream_item(stream.key()),
             rest_pattern!([_ _ _ _ _ _] never) => match *never {},
         }
+    }
+}
+
+impl<K: PacketKind> FrameSourcePart<K> for Part {
+    fn item(intent: &SendIntents) -> Option<SendItem> {
+        let carried = match intent {
+            place_pattern!([] ack) => carries(K::KIND, ack.space, true),
+            place_pattern!([_] ping) => carries(K::KIND, ping.space, false),
+            place_pattern!([_ _] _) | place_pattern!([_ _ _] HandshakeDoneIntent) => {
+                K::KIND == PlannedPacketKind::OneRtt
+            }
+            place_pattern!([_ _ _ _] crypto) => crypto_level(K::KIND) == Some(crypto.level),
+            place_pattern!([_ _ _ _ _] _) => carries_streams(K::KIND),
+            rest_pattern!([_ _ _ _ _ _] never) => match *never {},
+        };
+        carried.then(|| <Self as SendIntentPart>::intent_item(intent))
     }
 
     fn source(item: &SendItem) -> FrameSourceId {

@@ -166,7 +166,7 @@ use super::{
         link_path_packet_overheads,
     },
     spaces::{DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
-    streams::{StreamsOf, send::StreamIntent},
+    streams::send::StreamIntent,
 };
 use crate::{
     call::{CallBundle, CallKind, NodeCallFamily, NodeLoan},
@@ -176,8 +176,9 @@ use crate::{
     error::ConnectionErrorsOf,
     feedback::{FeedbackSummariesOf, FeedbackSummaryOf},
     frame_source::{
-        HandshakePacket, InitialPacket, OneRttPacket, OneRttProbePacket, PacketKind,
-        PartsFrameSourceDispatch, PartsFrameSources, SettlingResponsePacket, ZeroRttPacket,
+        EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts, HandshakePacket,
+        InitialPacket, OneRttPacket, OneRttProbePacket, PacketKind, PartsFrameSourceDispatch,
+        PartsFrameSources, SettlingResponsePacket, ZeroRttPacket,
     },
     layer::{self, LinkPath, NodeKey},
     others::OtherNodes,
@@ -188,7 +189,9 @@ use crate::{
         PlannedDatagram, PlannedPacket, PlannedPacketKind, SendStrategy, SendStrategyTypes,
     },
     share::{FlatMut, FlatRef, LineageLists, LineagePartList, LinkPathIdentifierOf, NodeData},
-    take::{AppendLast, GetAt, Lineage, ReadEach, Reborrow, Take, TakeEach, WithOptional},
+    take::{
+        AppendEach, GetAt, Lineage, OptionalRefs, ReadEach, Reborrow, Take, TakeEach, WithOptionals,
+    },
     write::{
         ClassOfSource, FlightClass, Last, NotLast, OpenPacket, PacketWriting, PaddingSummary,
         Supplied,
@@ -327,11 +330,12 @@ pub type FillRest<'x, T, L, It, Iw> =
     <FillKeysRest<'x, T, L, It> as TakeEach<'x, FillReadTakes<T>, Iw>>::Rest;
 
 /// What is left of the link path's lineage once filling took
-/// [`FillTakes`] and [`FillReadTakes`], with the stream set of the
-/// established layer appended, if there is one: where the frame sources are
-/// found.
+/// [`FillTakes`] and [`FillReadTakes`], with the components of the
+/// established layer the frame sources find there appended
+/// ([`EstablishedSourceComponentsOfParts`]), each `None` while there is no
+/// such layer: where the frame sources are found.
 pub type FillStreamsRest<'x, T, L, It, Iw> =
-    WithOptional<'x, FillRest<'x, T, L, It, Iw>, StreamsOf<T, L>>;
+    WithOptionals<'x, FillRest<'x, T, L, It, Iw>, EstablishedSourceComponentsOfParts<T, L>>;
 
 /// What filling reads from what is left of the lineage at the start of
 /// each datagram: the link's clone and facts, the peer's transport
@@ -375,7 +379,8 @@ pub type SettleReads<T, L> = HList![
 /// journals, `If` of the recovery factory, `Iv` of [`SettleReads`], `Ie`
 /// of the idle timeout, `Iq` of [`SettleRecoveryTakes`], `Hf` of the
 /// core and each part's frame sources, for feedback, and `Ist` of the
-/// stream set in the established layer, which filling and feedback borrow; `Ipp` and `Ima` of
+/// components of the established layer the frame sources find
+/// ([`EstablishedSourceComponentsOfParts`]), which filling and feedback borrow; `Ipp` and `Ima` of
 /// the peer's `max_udp_payload_size` and `max_ack_delay`; `Jx`, `Jr` and `Jm` of the stored part of
 /// congestion control, the RTT estimate and the datagram size probing
 /// policy in a recovery layer; for 1-RTT key updates, `Iu` of the AEAD's
@@ -610,7 +615,8 @@ where
     L: ConnectionErrorsOf,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ier>,
     for<'x> FillKeysRest<'x, T, L, It>: TakeEach<'x, FillReadTakes<T>, Iw>,
-    for<'x> FillRest<'x, T, L, It, Iw>: AppendLast<Option<&'x mut StreamsOf<T, L>>>,
+    for<'x> FillRest<'x, T, L, It, Iw>:
+        AppendEach<<EstablishedSourceComponentsOfParts<T, L> as OptionalRefs>::Optional<'x>>,
     for<'x> FillStreamsRest<'x, T, L, It, Iw>:
         ReadEach<FillReads<T, L>, Ir> + GetAt<ConnectionIdsOf<T>, Ici>,
     for<'x> L: PartsFrameSourceDispatch<
@@ -656,11 +662,13 @@ where
             FeedbackSummaryOf<T, L>,
             Hs,
         >,
-    for<'x> <L as LineageLists<'x, T>>::LinkPath: CoreLentFeedback<T, L, StreamsOf<T, L>, Hf>,
+    for<'x> <L as LineageLists<'x, T>>::LinkPath:
+        CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
-        TakeEach<'s, HList![StreamsOf<T, L>], Ist>,
+        TakeEach<'s, EstablishedSourceComponentsOfParts<T, L>, Ist>,
     for<'x> NodeData<T, L, layer::Recovery>: FlatMut<'x>,
     for<'x> <NodeData<T, L, layer::Recovery> as FlatMut<'x>>::Out: TakeEach<'x, FillRecoveryTakes<T, L>, Ik>
         + TakeEach<'x, SettleRecoveryTakes<T, L, S, Ls>, Iq>
@@ -742,13 +750,14 @@ where
                 Poll::Ready(())
             };
         }
-        // the frame sources of the streams find the stream set appended to
-        // what is left of the lineage; the established layer is recorded as
+        // the frame sources find the components of the established layer
+        // appended to what is left of the lineage; the layer is recorded as
         // taken, and the positions recorded past the lineage's components
         // are ignored
-        let filled =
-            others.with_established::<HList![StreamsOf<T, L>], Ist, _>(|streams, others| {
-                let streams = streams.map(|hlist_pat![streams]| streams);
+        let filled = others.with_established::<EstablishedSourceComponentsOfParts<T, L>, Ist, _>(
+            |established, others| {
+                let mut established =
+                    EstablishedSourceComponentsOfParts::<T, L>::spread(established);
                 let (
                     hlist_pat![
                         core,
@@ -763,7 +772,9 @@ where
                 ) = Take::<FillTakes<T, L>, It>::take(lineage.reborrow());
                 let (hlist_pat![initial_keys, handshake_keys, one_rtt_keys], rest) =
                     rest.take_read::<FillReadTakes<T>, Iw>();
-                let mut rest = rest.append_optional(streams);
+                let mut rest = rest.append_optionals::<EstablishedSourceComponentsOfParts<T, L>>(
+                    EstablishedSourceComponentsOfParts::<T, L>::reborrow(&mut established),
+                );
                 others.with_own_recovery::<FillRecoveryTakes<T, L>, Ik, _>(
                     |hlist_pat![part, state], others| {
                         lend_congestion::<T, L, B, Jx, Jr, _>(
@@ -802,7 +813,8 @@ where
                         )
                     },
                 )
-            });
+            },
+        );
         let Some((initial_discarded, wake_itself)) = filled else {
             return no_layer;
         };
@@ -1597,11 +1609,13 @@ fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ist, Ipp, Ima, Jx, Jr, Jm>(
     for<'x> <L as LineageLists<'x, T>>::LinkPath: GetAt<SendJournalsOf<T, L>, Ij>
         + GetAt<RecoveryFactoryOf<T, L>, If>
         + ReadEach<SettleReads<T, L>, Iv>,
-    for<'x> <L as LineageLists<'x, T>>::LinkPath: CoreLentFeedback<T, L, StreamsOf<T, L>, Hf>,
+    for<'x> <L as LineageLists<'x, T>>::LinkPath:
+        CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
-        TakeEach<'s, HList![StreamsOf<T, L>], Ist>,
+        TakeEach<'s, EstablishedSourceComponentsOfParts<T, L>, Ist>,
     for<'x> NodeData<T, L, layer::Recovery>: FlatMut<'x>,
     for<'x> <NodeData<T, L, layer::Recovery> as FlatMut<'x>>::Out:
         TakeEach<'x, SettleRecoveryTakes<T, L, S, Ls>, Iq>,
@@ -1631,9 +1645,8 @@ fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ist, Ipp, Ima, Jx, Jr, Jm>(
     // meanwhile
     let mut journals = core::mem::take(lineage.get_mut::<SendJournalsOf<T, L>, Ij>());
     let mut removed = Vec::new();
-    let mut streams = others
-        .borrow_established::<HList![StreamsOf<T, L>], Ist>()
-        .map(|hlist_pat![streams]| streams);
+    let mut established =
+        others.borrow_established_optional::<EstablishedSourceComponentsOfParts<T, L>, Ist>();
     for datagram in datagrams {
         for (space, packet) in packets_of(datagram) {
             let BatchedPacket { sealed, in_flight } = packet;
@@ -1642,15 +1655,18 @@ fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ist, Ipp, Ima, Jx, Jr, Jm>(
                 continue;
             };
             let record = space_journals.send_result_unknown(sealed, retain_until(space));
-            CoreLentFeedback::<T, L, StreamsOf<T, L>, Hf>::lost_each(
+            CoreLentFeedback::<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>::lost_each(
                 lineage,
-                streams.as_deref_mut(),
+                &mut established,
                 now,
                 space,
                 &record.summaries,
             );
         }
     }
+    // the borrow of the established layer ends before the others are lent
+    // on
+    drop(established);
     *lineage.get_mut::<SendJournalsOf<T, L>, Ij>() = journals;
     remove_without_signal::<T, L, B, S, Ls, If, Iv, Iq, Ipp, Jx, Jr, Jm>(lineage, others, removed);
 }
@@ -1898,7 +1914,8 @@ where
     L: ConnectionErrorsOf,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ier>,
     for<'x> FillKeysRest<'x, T, L, It>: TakeEach<'x, FillReadTakes<T>, Iw>,
-    for<'x> FillRest<'x, T, L, It, Iw>: AppendLast<Option<&'x mut StreamsOf<T, L>>>,
+    for<'x> FillRest<'x, T, L, It, Iw>:
+        AppendEach<<EstablishedSourceComponentsOfParts<T, L> as OptionalRefs>::Optional<'x>>,
     for<'x> FillStreamsRest<'x, T, L, It, Iw>:
         ReadEach<FillReads<T, L>, Ir> + GetAt<ConnectionIdsOf<T>, Ici>,
     for<'x> L: PartsFrameSourceDispatch<
@@ -1944,11 +1961,13 @@ where
             FeedbackSummaryOf<T, L>,
             Hs,
         >,
-    for<'x> <L as LineageLists<'x, T>>::LinkPath: CoreLentFeedback<T, L, StreamsOf<T, L>, Hf>,
+    for<'x> <L as LineageLists<'x, T>>::LinkPath:
+        CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
-        TakeEach<'s, HList![StreamsOf<T, L>], Ist>,
+        TakeEach<'s, EstablishedSourceComponentsOfParts<T, L>, Ist>,
     for<'x> NodeData<T, L, layer::Recovery>: FlatMut<'x>,
     for<'x> <NodeData<T, L, layer::Recovery> as FlatMut<'x>>::Out: TakeEach<'x, FillRecoveryTakes<T, L>, Ik>
         + TakeEach<'x, SettleRecoveryTakes<T, L, S, Ls>, Iq>

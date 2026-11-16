@@ -1330,15 +1330,20 @@ where
         }
     }
 
-    fn role_changed(&mut self, _: &mut Self::Core, role: LinkPathRoleKind) {
+    /// A role other than `Active` ends the intents published on the planner;
+    /// those still waiting go to `ended`.
+    fn role_changed(
+        &mut self,
+        _: &mut Self::Core,
+        role: LinkPathRoleKind,
+        ended: &mut impl Extend<I::SendIntents>,
+    ) {
         if self.role == role {
             return;
         }
         self.role = role;
         if role != LinkPathRoleKind::Active {
-            for entry in self.intents.drain(..) {
-                entry.cell.leave_waiting(ENDED);
-            }
+            ended.extend(end_waiting(self.intents.drain(..)));
         }
         if role == LinkPathRoleKind::Draining {
             self.close_resends = CloseResends::default();
@@ -1346,15 +1351,24 @@ where
         self.wake();
     }
 
-    fn ended(self, core: &mut Self::Core) {
+    /// The intents published on the planner end; those still waiting go to
+    /// `ended`.
+    fn ended(self, core: &mut Self::Core, ended: &mut impl Extend<I::SendIntents>) {
         core.link_paths.retain(|entry| entry.id != self.id);
         lock(&self.zone.waits)
             .link_paths
             .retain(|wait| wait.serial != self.serial);
-        for entry in &self.intents {
-            entry.cell.leave_waiting(ENDED);
-        }
+        ended.extend(end_waiting(self.intents));
     }
+}
+
+/// End each of `entries` still waiting, giving its intent; one consumed or
+/// withdrawn meanwhile gives nothing.
+fn end_waiting<J>(entries: impl IntoIterator<Item = Entry<J>>) -> impl Iterator<Item = J> {
+    entries
+        .into_iter()
+        .filter(|entry| entry.cell.leave_waiting(ENDED))
+        .map(|entry| entry.intent)
 }
 
 // ---- the plan ----
