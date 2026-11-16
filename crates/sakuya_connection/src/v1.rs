@@ -71,6 +71,7 @@ pub mod long_header_claim;
 pub mod loss_detection;
 pub mod packet_writer;
 pub mod parameters;
+pub mod path_response;
 pub mod pto;
 pub mod receive;
 pub mod recovery;
@@ -138,6 +139,7 @@ use crate::{
 
 use std::sync::Arc;
 
+use self::path_response::{PathResponseIntent, PathResponsePublication};
 use self::{
     address_token::AddressTokenSink,
     advancing::{ClientAdvancingKind, ConnectionExporter, HandshakeStart, ServerAdvancingKind},
@@ -601,6 +603,12 @@ where
     }
 }
 
+/// What the planner of a link path gives back for a response to a
+/// PATH_CHALLENGE, which the link path keeps
+/// ([`PathResponsePublication`]).
+pub type PathResponseOutcomeOf<T, L> =
+    <LinkPathSendPlannerOf<T, L> as PublishOutcome<PathResponseIntent, PlannerLinkPath>>::Outcome;
+
 /// What version 1 needs to make the connection node, given once by whoever
 /// makes the connection.
 pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
@@ -808,12 +816,14 @@ impl<T: Choices, L> LayerShare<T, L, layer::LinkPath> for Part
 where
     SendTypes<T, L>: SendStrategyTypes,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    LinkPathSendPlannerOf<T, L>: PublishOutcome<PathResponseIntent, PlannerLinkPath>,
 {
     type Data = HList![
         LinkPathPlanner<LinkPathSendPlannerOf<T, L>>,
         LinkPathResetTokenRegistrar<ResetTokenRegistrarOf<T>>,
         LinkPathRole<InstantOf<T>>,
         ClosePacket,
+        PathResponsePublication<PathResponseOutcomeOf<T, L>>,
     ];
     type Calls = HList![LinkPathSendingKind];
 }

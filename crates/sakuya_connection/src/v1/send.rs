@@ -33,6 +33,7 @@ use super::{
     crypto::send::{CryptoSendBuffer, CryptoSender},
     feedback::{AckSummary, CryptoSummary, HandshakeDoneSummary, ProbePingSummary},
     key_phase::KeyPhaseNumbers,
+    path_response::{PathResponseFrames, PathResponseIntent},
     send_planning::{
         AckIntentTicketOf, AckIntentTickets, CorePublishOutcome, CryptoIntentTicketOf,
         CryptoIntentTickets,
@@ -105,6 +106,8 @@ pub enum FrameSourceId {
     StreamsBlocked,
     /// The NEW_CONNECTION_ID frames of the local connection ID strategy.
     NewConnectionId,
+    /// The PATH_RESPONSE frames to the peer's challenges.
+    PathResponse,
 }
 
 /// An ACK frame is due in a packet number space.
@@ -459,6 +462,7 @@ pub type SendIntents = frunk_core::Coprod!(
     CryptoIntent,
     StreamIntent<Urgency>,
     NewConnectionIdIntent,
+    PathResponseIntent,
 );
 
 /// The kinds of version 1's frame sources: PADDING, which the packet
@@ -466,8 +470,9 @@ pub type SendIntents = frunk_core::Coprod!(
 /// a probe timeout, the RETIRE_CONNECTION_ID frames of the destination
 /// connection ID strategy, a server's HANDSHAKE_DONE, the CRYPTO frames
 /// of each encryption level, the nine frames of the streams
-/// ([`streams::send`](super::streams::send)) and the NEW_CONNECTION_ID
-/// frames of the local connection ID strategy.
+/// ([`streams::send`](super::streams::send)), the NEW_CONNECTION_ID
+/// frames of the local connection ID strategy and the PATH_RESPONSE frames
+/// ([`path_response`](super::path_response)).
 pub type FrameSources = frunk_core::HList![
     PaddingFrames,
     AckFrames,
@@ -484,7 +489,8 @@ pub type FrameSources = frunk_core::HList![
     DataBlockedFrames,
     StreamDataBlockedFrames,
     StreamsBlockedFrames,
-    NewConnectionIdFrames
+    NewConnectionIdFrames,
+    PathResponseFrames
 ];
 
 /// One planned item of version 1: an item of one of [`FrameSources`].
@@ -509,8 +515,8 @@ fn crypto_level(kind: PlannedPacketKind) -> Option<CryptoLevel> {
 /// Whether a packet of `kind` carries content of `space` from a source of
 /// `ack`: ACK frames are not allowed in 0-RTT packets (RFC 9000 §12.4); a
 /// candidate's and a settling link path's packets carry neither.
-/// RETIRE_CONNECTION_ID and HANDSHAKE_DONE frames go in 1-RTT packets only
-/// (RFC 9000 §12.4, §12.5); NEW_CONNECTION_ID frames, as the frames of the
+/// RETIRE_CONNECTION_ID, HANDSHAKE_DONE and PATH_RESPONSE frames go in
+/// 1-RTT packets only (RFC 9000 §12.4, §12.5); NEW_CONNECTION_ID frames, as the frames of the
 /// streams, in 0-RTT and 1-RTT packets ([`carries_streams`]).
 fn carries(kind: PlannedPacketKind, space: PacketNumberSpaceKind, ack: bool) -> bool {
     match kind {
@@ -595,7 +601,10 @@ impl SendIntentPart for Part {
             place_pattern!([_ _ _ _ _ _] new) => {
                 at_place!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _] new.sequence())
             }
-            rest_pattern!([_ _ _ _ _ _ _] never) => match *never {},
+            place_pattern!([_ _ _ _ _ _ _] response) => {
+                at_place!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _] response.data())
+            }
+            rest_pattern!([_ _ _ _ _ _ _ _] never) => match *never {},
         }
     }
 }
@@ -612,7 +621,8 @@ impl<K: PacketKind> FrameSourcePart<K> for Part {
             place_pattern!([_ _ _ _ _] _) | place_pattern!([_ _ _ _ _ _] _) => {
                 carries_streams(K::KIND)
             }
-            rest_pattern!([_ _ _ _ _ _ _] never) => match *never {},
+            place_pattern!([_ _ _ _ _ _ _] _) => K::KIND == PlannedPacketKind::OneRtt,
+            rest_pattern!([_ _ _ _ _ _ _ _] never) => match *never {},
         };
         carried.then(|| <Self as SendIntentPart>::intent_item(intent))
     }
@@ -635,7 +645,8 @@ impl<K: PacketKind> FrameSourcePart<K> for Part {
             place_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _] _) => FrameSourceId::StreamDataBlocked,
             place_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _] _) => FrameSourceId::StreamsBlocked,
             place_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _] _) => FrameSourceId::NewConnectionId,
-            rest_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _] never) => match *never {},
+            place_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _] _) => FrameSourceId::PathResponse,
+            rest_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _] never) => match *never {},
         }
     }
 }

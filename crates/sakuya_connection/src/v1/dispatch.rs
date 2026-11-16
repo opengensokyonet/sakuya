@@ -12,6 +12,7 @@
 //! | Frame | Component |
 //! | --- | --- |
 //! | PADDING, PING | none: they only make a packet ack-eliciting or not |
+//! | PATH_CHALLENGE | the link path the packet arrived on: a PATH_RESPONSE with its data is published on its planner, and the link path keeps what the planner gave back ([`path_response`](super::path_response)) |
 //! | PATH_RESPONSE | none: this side sends no PATH_CHALLENGE yet, and a response that matches none is ignored |
 //! | CRYPTO | [`CryptoReceiver`], at the level of the packet |
 //! | NEW_TOKEN | the data only this side has ([`Side::on_new_token`]): a client hands the token over |
@@ -25,10 +26,7 @@
 //! A frame of streams or flow control that arrives without an established
 //! layer is ignored while the connection closes, and does not arrive
 //! otherwise ([`ConnectionError::NoEstablishedLayer`]).
-//!
-//! The components of the other frames are not in the connection yet; such a
-//! frame ends the connection with INTERNAL_ERROR
-//! ([`ConnectionError::UnhandledFrame`]).
+
 use core::convert::Infallible;
 
 use bytes::{Buf, Bytes};
@@ -61,7 +59,7 @@ use sakuya_wire::{
 use snafu::{ResultExt, Snafu, ensure};
 
 use super::{
-    Choices, CloseCauseOf, LinkPathRoleReads, Part, Side,
+    Choices, CloseCauseOf, LinkPathRoleReads, Part, PathResponseOutcomeOf, Side,
     ack::{AckReads, AckRecoveryTakes, receive_ack},
     close::CloseReasonRecord,
     confirmation::HandshakeConfirmation,
@@ -73,9 +71,13 @@ use super::{
     key_phase::KeyPhaseNumbers,
     keys::OneRttKeys,
     link::LinkClone,
+    path_response::{PathResponseIntent, PathResponsePublication},
     recovery::{CongestionPartOf, OthersOf, RecoveryFactoryOf, RttOf},
     send::SendTypes,
-    send_planning::{IntakeOf, IntakePublishOutcome, SendStrategyIntake, SendStrategyOf},
+    send_planning::{
+        IntakeOf, IntakePublishOutcome, LinkPathPlanner, LinkPathSendPlannerOf, SendStrategyIntake,
+        SendStrategyOf,
+    },
     spaces::SendJournalsOf,
     streams::{
         StreamSet, StreamSetFrameErrorOf, StreamsOf,
@@ -93,10 +95,10 @@ use crate::{
     error::ConnectionErrorsOf,
     feedback::FeedbackSummariesOf,
     frame_source::{EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts},
-    layer::{self, LogicalPath},
+    layer::{self, LogicalPath, NodeKey},
     others::OtherNodes,
     send_strategy::{
-        AnyActiveLinkPath, IntentTicketResize, IntentTicketWithdraw, SendIntentIntake,
+        AnyActiveLinkPath, IntentTicketResize, IntentTicketWithdraw, Publish, SendIntentIntake,
         SendStrategy, SendStrategyTypes, SharedPublishTo,
     },
     share::{FlatMut, FlatRef, LineageLists, LineagePartList, LinkPathIdentifierOf, NodeData},
@@ -200,6 +202,8 @@ impl<
     Ih,
     Icid,
     Iw,
+    Ipr,
+    Ipp2,
     Iv,
     Ima,
     Irt,
@@ -228,7 +232,7 @@ impl<
         T,
         L,
         (
-            (Ic, Ir, Ih, Icid, Iw),
+            (Ic, Ir, Ih, Icid, Iw, (Ipr, Ipp2)),
             (Iv, Ima, Irt),
             (Il, Is, Ii, Idx),
             (
@@ -279,6 +283,15 @@ where
         + GetAt<HandshakeConfirmation, Ih>
         + GetAt<<T::Side as Side>::Own, Iw>
         + ReadEach<LinkPathRoleReads<T, L>, Iv>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out: TakeEach<
+            's,
+            HList![
+                PathResponsePublication<PathResponseOutcomeOf<T, L>>,
+                LinkPathPlanner<LinkPathSendPlannerOf<T, L>>
+            ],
+            Ipr,
+        >,
+    LinkPathSendPlannerOf<T, L>: Publish<PathResponseIntent, Ipp2>,
     for<'s> NodeData<T, L, layer::Recovery>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Recovery> as FlatMut<'s>>::Out: GetAt<RttOf<T, L>, Irt>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
@@ -338,6 +351,27 @@ where
             // one; a response that matches none may be ignored (RFC 9000
             // §19.18, MAY close)
             FrameRun::PathResponse(_) => Ok(()),
+            FrameRun::PathChallenge(frame) => {
+                let NodeKey::LogicalPath(path) = others.here().clone() else {
+                    unreachable!("a logical path's lend carries its key")
+                };
+                others.each_link_path::<HList![
+                    PathResponsePublication<PathResponseOutcomeOf<T, L>>,
+                    LinkPathPlanner<LinkPathSendPlannerOf<T, L>>
+                ], Ipr>(|key, hlist_pat![publication, planner]| {
+                    let NodeKey::LinkPath(each, link) = key else {
+                        return;
+                    };
+                    if *each == path && L::link_path_identifier(each, link) == *packet.link_path() {
+                        let intent = PathResponseIntent::new(frame.data());
+                        publication.published(Publish::<PathResponseIntent, Ipp2>::publish(
+                            planner.planner_mut(),
+                            intent,
+                        ));
+                    }
+                });
+                Ok(())
+            }
             FrameRun::Crypto(frame) => {
                 let level = crypto_level(packet.level())?;
                 let offset = frame.offset().into_inner();
@@ -443,10 +477,6 @@ where
                 frame.type_value(),
                 |streams, publish| streams.on_streams_blocked(publish, frame),
             ),
-            other => error::UnhandledFrameSnafu {
-                kind: other.frame_type(),
-            }
-            .fail(),
         }
     }
 

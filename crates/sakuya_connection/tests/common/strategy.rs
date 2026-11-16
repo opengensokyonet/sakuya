@@ -16,7 +16,7 @@ use sakuya_connection::send_strategy::{
         RankedLinkPathSendPlanner, RankedSendIntake, RankedSendStrategy,
     },
 };
-use sakuya_connection::v1::send::ProbePingIntent;
+use sakuya_connection::v1::{path_response::PathResponseIntent, send::ProbePingIntent};
 use sakuya_stream::connection::CloseReason;
 use sakuya_wire::v1::encryption_level::EncryptionLevel;
 
@@ -259,6 +259,37 @@ where
         let owner = format!("path {}", self.index);
         let label = format!("{intent:?}");
         let ticket = <RankedLinkPathSendPlanner<I> as Publish<ProbePingIntent, Idx>>::publish(
+            &mut self.inner,
+            intent,
+        )?;
+        record(format!("{owner}: publish {label}"));
+        Ok(RecordedTicket {
+            owner,
+            intent: label,
+            inner: ticket,
+        })
+    }
+}
+
+impl<I: SendStrategyTypes> PublishOutcome<PathResponseIntent, PlannerLinkPath>
+    for EventLoggingPlanner<I>
+{
+    type Outcome =
+        Result<RecordedTicket<LinkPathIntentTicket>, IntentRejectedError<PathResponseIntent>>;
+}
+
+impl<I, Idx> Publish<PathResponseIntent, Idx> for EventLoggingPlanner<I>
+where
+    I: SendStrategyTypes,
+    I::SendIntents: InjectSendIntent<PathResponseIntent, Idx>,
+{
+    fn publish(
+        &mut self,
+        intent: PathResponseIntent,
+    ) -> Result<RecordedTicket<LinkPathIntentTicket>, IntentRejectedError<PathResponseIntent>> {
+        let owner = format!("path {}", self.index);
+        let label = format!("{intent:?}");
+        let ticket = <RankedLinkPathSendPlanner<I> as Publish<PathResponseIntent, Idx>>::publish(
             &mut self.inner,
             intent,
         )?;

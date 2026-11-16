@@ -14,6 +14,7 @@
 //! | STOP_SENDING | [`StopSendingSummary`]: the stream and the error code | nothing | the frame is sent again while the receiving part still needs it |
 //! | MAX_DATA, MAX_STREAM_DATA, MAX_STREAMS | [`MaxDataSummary`], [`MaxStreamDataSummary`], [`MaxStreamsSummary`]: the limit | nothing | the limit in effect, never lower than the one lost, is sent again while it is still advertised |
 //! | DATA_BLOCKED, STREAM_DATA_BLOCKED, STREAMS_BLOCKED | [`DataBlockedSummary`], [`StreamDataBlockedSummary`], [`StreamsBlockedSummary`]: the limit | nothing | the frame is sent again while the sender is still blocked at that limit |
+//! | PATH_RESPONSE | [`PathResponseSummary`]: nothing | nothing | nothing: a new challenge comes instead (RFC 9000 §13.3) |
 //! | NEW_CONNECTION_ID | [`NewConnectionIdSummary`]: the sequence number | the connection ID is disclosed and not sent again | the same frame is published again while the connection ID is neither acknowledged nor retired by the peer (RFC 9000 §13.3) |
 //!
 //! Each is the summary of one kind of version 1's frame sources
@@ -37,6 +38,7 @@ use sakuya_wire::{parts::Coproduct, v1::packet_number::PacketNumber, var_int::Va
 use super::send::FrameSources;
 use super::{
     Choices,
+    path_response::PathResponseSummary,
     send::{RetireConnectionIdSummary, SendTypes},
     send_planning::{SendStrategyCore, SendStrategyOf},
     streams::send::{
@@ -75,6 +77,7 @@ pub type FeedbackSummary<I> = frunk_core::Coprod!(
     StreamDataBlockedSummary,
     StreamsBlockedSummary,
     NewConnectionIdSummary,
+    PathResponseSummary,
 );
 
 /// The summary of a CRYPTO frame written into a packet: which bytes of

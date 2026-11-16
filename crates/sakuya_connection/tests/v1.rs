@@ -5504,6 +5504,39 @@ fn a_new_connection_id_frame_to_a_zero_length_handshake_connection_id_is_a_conne
 }
 
 #[test]
+fn a_path_challenge_is_answered_with_its_data_on_the_link_path_it_arrived_on() {
+    use probe::PacketStep::{InstallHandshakeKeys, InstallOneRttKeys, Receive};
+    reset();
+    let first = link();
+    let mut challenge = vec![0x1a];
+    challenge.extend_from_slice(&[0x77; 8]);
+    feed_packets([
+        (ms(6), InstallHandshakeKeys),
+        (ms(7), InstallOneRttKeys),
+        (
+            ms(9),
+            Receive(received(one_rtt_packet_of(0, 0, &challenge), &first, ms(9))),
+        ),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    deliver(client_initial(0), &first, ms(5));
+    let _ = settle(&mut connection, 5..=8);
+    common::take_sent();
+    let log = settle(&mut connection, 9..=10);
+    assert!(log.iter().all(|line| !line.starts_with("error")), "{log:?}");
+    let response = [&[0x1b][..], &[0x77; 8][..]].concat();
+    let answered: Vec<_> = common::take_sent()
+        .into_iter()
+        .filter(|(_, datagram)| datagram[0] & 0x80 == 0)
+        .map(|(_, datagram)| (datagram.len(), open_sent_one_rtt(&datagram).2))
+        .filter(|(_, payload)| payload.windows(response.len()).any(|w| w == response))
+        .collect();
+    assert_eq!(answered.len(), 1, "one PATH_RESPONSE with the data");
+    // a datagram with a PATH_RESPONSE is expanded (RFC 9000 §8.2.2)
+    assert!(answered[0].0 >= MIN_DATAGRAM_SIZE, "{}", answered[0].0);
+}
+
+#[test]
 fn a_path_response_that_answers_no_challenge_is_ignored() {
     use probe::PacketStep::{InstallOneRttKeys, Receive};
     reset();

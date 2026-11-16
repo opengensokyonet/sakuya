@@ -22,7 +22,7 @@ use sakuya_connection::send_strategy::{
         RankedSendIntake, RankedSendStrategy,
     },
 };
-use sakuya_connection::v1::send::ProbePingIntent;
+use sakuya_connection::v1::{path_response::PathResponseIntent, send::ProbePingIntent};
 use sakuya_stream::connection::CloseReason;
 use sakuya_wire::v1::encryption_level::EncryptionLevel;
 
@@ -215,6 +215,25 @@ where
 {
     fn publish(&mut self, intent: ProbePingIntent) -> Self::Outcome {
         <RankedLinkPathSendPlanner<I> as Publish<ProbePingIntent, Idx>>::publish(
+            &mut self.inner,
+            intent,
+        )
+    }
+}
+
+impl<I: SendStrategyTypes> PublishOutcome<PathResponseIntent, PlannerLinkPath>
+    for IntentEndingPlanner<I>
+{
+    type Outcome = Result<LinkPathIntentTicket, IntentRejectedError<PathResponseIntent>>;
+}
+
+impl<I, Idx> Publish<PathResponseIntent, Idx> for IntentEndingPlanner<I>
+where
+    I: SendStrategyTypes,
+    I::SendIntents: InjectSendIntent<PathResponseIntent, Idx>,
+{
+    fn publish(&mut self, intent: PathResponseIntent) -> Self::Outcome {
+        <RankedLinkPathSendPlanner<I> as Publish<PathResponseIntent, Idx>>::publish(
             &mut self.inner,
             intent,
         )
