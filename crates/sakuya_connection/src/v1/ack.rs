@@ -96,6 +96,7 @@ use super::{
     spaces::{DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
     streams::send::StreamIntent,
 };
+use crate::v1::SendParametersOf;
 use crate::{
     call::CallBundle,
     clock::{InstantOf, LinkIdOf},
@@ -209,7 +210,7 @@ where
     for<'x> <L as LineageLists<'x, T>>::LogicalPath:
         CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     L: ConnectionErrorsOf,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:

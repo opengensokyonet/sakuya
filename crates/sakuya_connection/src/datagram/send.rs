@@ -46,9 +46,10 @@ use sakuya_wire::{
 };
 
 use super::{
-    DatagramChoices, DatagramIntentHandleOf, DatagramQueues, DatagramQueuesOf, DatagramTicketOf,
-    frame_len_with_length,
+    DatagramChoices, DatagramIntentHandleOf, DatagramQueues, DatagramQueuesOf, DatagramSide,
+    DatagramTicketOf, frame_len_with_length,
 };
+use crate::v1::Choices;
 use crate::{
     clock::InstantOf,
     error::ConnectionErrorsOf,
@@ -500,7 +501,7 @@ impl FrameSourceKind for DatagramFrames {
 /// through the handle of the intake in the connection node.
 impl<T, L, V, Ii, Iq, Idx> FindFrameSource<T, L, V, (Ii, Iq, Idx)> for DatagramFrames
 where
-    T: DatagramChoices,
+    T: Choices<Side: DatagramSide, Host: DatagramChoices>,
     L: ConnectionErrorsOf,
     SendTypes<T, L>: IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,

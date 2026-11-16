@@ -79,6 +79,7 @@ use super::{
     send::SendTypes,
     send_planning::{IntakeOf, IntakePublishOutcome, SendStrategyIntake, SendStrategyOf},
 };
+use crate::v1::{HostChoices, SendParametersOf, StreamSetConfigOf, StreamSetFamilyOf};
 use crate::{
     call::CallBundle,
     component::{ArgsOf, Build, DataComponent, ParentsOf, PassiveDataComponent},
@@ -91,6 +92,24 @@ use crate::{
     take::GetAt,
     write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
+
+/// A kind of stream set: one stream set type for each `Lc`, `K` and `X`
+/// ([`StreamSet`]), which all take the same configuration and send with the
+/// same parameters. The host chooses the kind
+/// ([`HostChoices::Streams`](super::HostChoices::Streams)); the connection
+/// gives the three types, which follow from the list of parts.
+pub trait StreamSetFamily: 'static {
+    /// What the composition configures the stream set with; the connection
+    /// node keeps it from the connection's making until the established
+    /// layer is built.
+    type Config: Clone + Default + 'static;
+    /// The parameters application data is sent with.
+    type SendParameters: Clone + PartialEq + Default + 'static;
+    /// The stream set for `Lc`, this endpoint's reason for closing, `K`,
+    /// the ticket the send strategy's intake gives back for a stream
+    /// intent, and `X`, how the streams are reset.
+    type Set<Lc, K, X: StreamResets>: StreamSet<Lc, K, X, Config = Self::Config, SendParameters = Self::SendParameters>;
+}
 
 /// The set of a connection's streams in its established layer.
 ///
@@ -601,8 +620,11 @@ impl<R: ResetStreamViolation> StreamSetFrameError<R> {
 
 /// The stream set of the choices `T` and the list of parts `L`, which keeps
 /// the tickets the strategy's intake gives back for the stream intents.
-pub type StreamsOf<T, L> =
-    <T as Choices>::Streams<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>, StreamResetsOfParts<L>>;
+pub type StreamsOf<T, L> = <StreamSetFamilyOf<T> as StreamSetFamily>::Set<
+    CloseCauseOf<T, L>,
+    StreamIntentTicketOf<T, L>,
+    StreamResetsOfParts<L>,
+>;
 
 /// The configuration of the stream set, `C`, kept in the connection node
 /// until the established layer is built.
@@ -610,7 +632,8 @@ pub type StreamsOf<T, L> =
 pub struct StreamSetConfig<C>(pub C);
 
 /// The connection keeps the configuration it was made with.
-impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)> for StreamSetConfig<T::StreamSetConfig>
+impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)>
+    for StreamSetConfig<StreamSetConfigOf<T>>
 where
     L: LineagePartList<T>,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
@@ -654,27 +677,34 @@ impl<T, L, X, Il, Ip, Ic, Ir, Ih, In, Jl, Jp, Jr, Js>
     Build<T, L, layer::Established, (ChosenStreamSet, (Il, Ip, Ic, Ir, Ih, In), (Jl, Jp, Jr, Js))>
     for X
 where
-    T: Choices<Streams<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>, StreamResetsOfParts<L>> = X>,
+    T: Choices<
+        Host: HostChoices<
+            T,
+            Streams: StreamSetFamily<
+                Set<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>, StreamResetsOfParts<L>> = X,
+            >,
+        >,
+    >,
     L: LineagePartList<T>
         + ConnectionErrorsOf
         + StreamResetsOf
         + ParametersOf<TransportParameterSpace>
         + HandleShares<T, L, handle::EstablishedLayer>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     EstablishedLayerSharesOf<T, L>: FindHandleShare<super::Part, Js, Found = X::Handle>,
     X: StreamSet<
             CloseCauseOf<T, L>,
             StreamIntentTicketOf<T, L>,
             StreamResetsOfParts<L>,
-            Config = T::StreamSetConfig,
+            Config = StreamSetConfigOf<T>,
         >,
     TransportParameterSlots: FlowControlParameterSlots<Jl>,
     TransportParameterSlots<L>:
         FlowControlParameterSlots<Jp> + PeerResetSupportSlots<StreamResetsOfParts<L>, Jr>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<LocalTransportParameters<TransportParameterSlots>, Il>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>
-        + GetAt<StreamSetConfig<T::StreamSetConfig>, Ic>
+        + GetAt<StreamSetConfig<StreamSetConfigOf<T>>, Ic>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
         + GetAt<ConnectionHandleCellOf<T, L>, Ih>
         + GetAt<SendStrategyIntake<IntakeOf<T, L>>, In>,
@@ -699,7 +729,7 @@ where
             .map(PeerResetSupportSlots::<StreamResetsOfParts<L>, Jr>::peer_reset_support)
             .unwrap_or_default();
         let config = parents
-            .get::<StreamSetConfig<T::StreamSetConfig>, Ic>()
+            .get::<StreamSetConfig<StreamSetConfigOf<T>>, Ic>()
             .0
             .clone();
         let set = X::new(
@@ -751,8 +781,15 @@ where
 /// and the application change it.
 impl<T, L, X> DataComponent<T, L, layer::Established, ChosenStreamSet> for X
 where
-    T: Choices<Streams<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>, StreamResetsOfParts<L>> = X>,
+    T: Choices<
+        Host: HostChoices<
+            T,
+            Streams: StreamSetFamily<
+                Set<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>, StreamResetsOfParts<L>> = X,
+            >,
+        >,
+    >,
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
 {
 }

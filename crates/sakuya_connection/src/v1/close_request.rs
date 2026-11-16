@@ -41,6 +41,7 @@ use super::{
     close::{CloseReasonRecord, LocalCloseCause},
     sending::DatagramAcceptance,
 };
+use crate::v1::ApplicationErrorOf;
 use crate::{
     call::CallBundle,
     clock::InstantOf,
@@ -172,7 +173,7 @@ impl<A> fmt::Debug for CloseRequestCell<A> {
 /// The connection node keeps a clone of the cell the connection was made
 /// with.
 impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)>
-    for CloseRequestCell<T::ApplicationError>
+    for CloseRequestCell<ApplicationErrorOf<T>>
 where
     L: LineagePartList<T>,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
@@ -190,10 +191,10 @@ where
 /// [module documentation](self) says. It reads nothing and has no
 /// deadline; it takes the record mutably only to write it.
 impl<T: Choices, L, I, Ic, Ia> DataComponent<T, L, layer::Connection, (I, Ic, Ia)>
-    for CloseRequestCell<T::ApplicationError>
+    for CloseRequestCell<ApplicationErrorOf<T>>
 where
     L: LineagePartList<T> + ConnectionErrorsOf,
-    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<CloseRequestCell<T::ApplicationError>, I>
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<CloseRequestCell<ApplicationErrorOf<T>>, I>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
         + GetAt<DatagramAcceptance, Ia>,
 {
@@ -206,7 +207,7 @@ where
         waker: &Waker,
     ) -> Option<RequestOf<T, L>> {
         let Poll::Ready(error) = lineage
-            .get::<CloseRequestCell<T::ApplicationError>, I>()
+            .get::<CloseRequestCell<ApplicationErrorOf<T>>, I>()
             .poll_take(&mut Context::from_waker(waker))
         else {
             return None;

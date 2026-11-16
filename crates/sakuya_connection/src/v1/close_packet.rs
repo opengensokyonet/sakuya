@@ -83,6 +83,7 @@ use super::{
     spaces::SendJournalsOf,
 };
 use crate::role::LinkPathRole;
+use crate::v1::ImmediateClosePolicyOf;
 use crate::{
     call::CallBundle,
     clock::{InstantOf, LinkIdOf},
@@ -467,7 +468,7 @@ where
 /// What sealing takes out of the link path's lineage first, which nothing
 /// reads: the connection's close policy and the count of the AEAD's usage.
 type SealTakes<T> = HList![
-    ConnectionImmediateClosePolicy<<T as Choices>::ImmediateClosePolicy>,
+    ConnectionImmediateClosePolicy<ImmediateClosePolicyOf<T>>,
     AeadUsage,
 ];
 
@@ -476,13 +477,13 @@ type SealTakes<T> = HList![
 /// handshake is confirmed, and the data only this side has, which gives the
 /// token of its Initial packets.
 type SealReads<T, L> = HList![
-    InitialKeys<<T as Choices>::Crypto>,
-    HandshakeKeys<<T as Choices>::Crypto>,
-    OneRttKeys<<T as Choices>::Crypto, InstantOf<T>>,
+    InitialKeys<<T as crate::v1::MakerChoices>::Crypto>,
+    HandshakeKeys<<T as crate::v1::MakerChoices>::Crypto>,
+    OneRttKeys<<T as crate::v1::MakerChoices>::Crypto, InstantOf<T>>,
     SendJournalsOf<T, L>,
     PacketNumberSpaces<PacketNumberSpaceState>,
     HandshakeConfirmation,
-    <<T as Choices>::Side as Side>::Own,
+    <<T as crate::v1::MakerChoices>::Side as Side>::Own,
 ];
 
 /// What a sealed close packet takes then: itself, the connection IDs and
@@ -523,7 +524,7 @@ where
         + ParametersOf<TransportParameterSpace>
         + ConnectionErrorsOf,
     ConnectionErrorOf<L>: TransportClose,
-    T::ImmediateClosePolicy: ImmediateClosePolicy<CloseCauseOf<T, L>>,
+    ImmediateClosePolicyOf<T>: ImmediateClosePolicy<CloseCauseOf<T, L>>,
     TransportParameterSlots<L>: Selector<Option<MaxUdpPayloadSize>, Ipp>,
     SendTypes<T, L>: SendStrategyTypes,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,

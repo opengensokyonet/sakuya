@@ -13,6 +13,7 @@ use core::{fmt, marker::PhantomData, num::NonZeroUsize};
 use std::sync::Arc;
 
 use sakuya_connection::{
+    clock::ConnectionChoices,
     layer::Connection,
     share::{LayerShares, LogicalPathKeys, SoleLogicalPath},
     v1,
@@ -126,24 +127,14 @@ pub trait AcceptingServerRole<E: EndpointChoices>:
         >,
     >
 {
-    /// The choices of the role's connections.
-    type Choices: v1::Choices<
-            Clock = E::Clock,
-            Link = LinkOf<E>,
-            Crypto = E::Crypto,
-            Receiver = ConnectionDatagramReceiver<E>,
-            ResetTokenRegistry = ResetTokensOf<E>,
-            ConnectionIdIssuer = EndpointConnectionIdIssuer<E>,
+    /// The choices of the role's connections:
+    /// [`ServerConnectionChoices`] of the host's choices.
+    type Choices: EndpointConnectionChoices<
+            E,
             Side = v1::Server<<Self::Handshake as ServerHandshakeConfig>::Start>,
         >;
     /// The list of parts of the role's connections.
-    type Parts: PartConfigs<Self::Choices, Self::Parts>
-        + LayerShares<
-            Self::Choices,
-            Self::Parts,
-            Connection,
-            Args = <Self::Parts as PartConfigs<Self::Choices, Self::Parts>>::Args,
-        > + LogicalPathKeys<Key = SoleLogicalPath>;
+    type Parts: EndpointPartList<Self::Choices>;
     /// What starts the handshake of each connection.
     type Handshake: ServerHandshakeConfig;
     /// The address validation tokens.
@@ -175,24 +166,14 @@ pub trait ConnectingClientRole<E: EndpointChoices>:
         >,
     >
 {
-    /// The choices of the role's connections.
-    type Choices: v1::Choices<
-            Clock = E::Clock,
-            Link = LinkOf<E>,
-            Crypto = E::Crypto,
-            Receiver = ConnectionDatagramReceiver<E>,
-            ResetTokenRegistry = ResetTokensOf<E>,
-            ConnectionIdIssuer = EndpointConnectionIdIssuer<E>,
+    /// The choices of the role's connections:
+    /// [`ClientConnectionChoices`] of the host's choices.
+    type Choices: EndpointConnectionChoices<
+            E,
             Side = ConnectingClientSide<Self::Handshake, Self::AddressTokens, Self::RetryPolicy>,
         >;
     /// The list of parts of the role's connections.
-    type Parts: PartConfigs<Self::Choices, Self::Parts>
-        + LayerShares<
-            Self::Choices,
-            Self::Parts,
-            Connection,
-            Args = <Self::Parts as PartConfigs<Self::Choices, Self::Parts>>::Args,
-        > + LogicalPathKeys<Key = SoleLogicalPath>;
+    type Parts: EndpointPartList<Self::Choices>;
     /// What starts the handshake of each connection.
     type Handshake: ClientHandshakeConfig;
     /// Where the address validation tokens servers give are kept.
@@ -201,6 +182,143 @@ pub trait ConnectingClientRole<E: EndpointChoices>:
         + 'static;
     /// What decides whether a connection goes on after a valid Retry.
     type RetryPolicy: v1::retry::ClientRetryPolicy + Clone + 'static;
+}
+
+// ---- the choices of the roles' connections ----
+
+/// The choices of the connections of an endpoint of the choices `E`: what
+/// the endpoint fixes of version 1's choices, all but the side. Both roles'
+/// connection choices give it ([`ServerConnectionChoices`],
+/// [`ClientConnectionChoices`]).
+pub trait EndpointConnectionChoices<E: EndpointChoices>:
+    v1::Choices<
+        Clock = E::Clock,
+        Link = LinkOf<E>,
+        Crypto = E::Crypto,
+        Receiver = ConnectionDatagramReceiver<E>,
+        ResetTokenRegistry = ResetTokensOf<E>,
+        ConnectionIdIssuer = EndpointConnectionIdIssuer<E>,
+    >
+{
+}
+
+impl<E: EndpointChoices, T> EndpointConnectionChoices<E> for T where
+    T: v1::Choices<
+            Clock = E::Clock,
+            Link = LinkOf<E>,
+            Crypto = E::Crypto,
+            Receiver = ConnectionDatagramReceiver<E>,
+            ResetTokenRegistry = ResetTokensOf<E>,
+            ConnectionIdIssuer = EndpointConnectionIdIssuer<E>,
+        >
+{
+}
+
+/// A list of parts that an endpoint makes connections of the choices `T`
+/// with: each part has its configuration and its share of the connection
+/// node, and the connection has one logical path.
+pub trait EndpointPartList<T: v1::Choices>:
+    Sized
+    + PartConfigs<T, Self>
+    + LayerShares<T, Self, Connection, Args = <Self as PartConfigs<T, Self>>::Args>
+    + LogicalPathKeys<Key = SoleLogicalPath>
+    + 'static
+{
+}
+
+impl<T: v1::Choices, L> EndpointPartList<T> for L where
+    L: PartConfigs<T, L>
+        + LayerShares<T, L, Connection, Args = <L as PartConfigs<T, L>>::Args>
+        + LogicalPathKeys<Key = SoleLogicalPath>
+        + 'static
+{
+}
+
+/// The choices of the connections of a server role of an endpoint of the
+/// choices `E`: the host's choices are `U`, the handshakes start from `H`'s,
+/// and the endpoint fixes the rest.
+pub struct ServerConnectionChoices<E, U, H>(Marker<(E, U, H)>);
+
+impl<E, U, H> fmt::Debug for ServerConnectionChoices<E, U, H> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ServerConnectionChoices")
+    }
+}
+
+impl<E: EndpointChoices, U: 'static, H: ServerHandshakeConfig + 'static> ConnectionChoices
+    for ServerConnectionChoices<E, U, H>
+{
+    type Clock = E::Clock;
+    type Link = LinkOf<E>;
+}
+
+impl<E: EndpointChoices, U: 'static, H: ServerHandshakeConfig + 'static> v1::MakerChoices
+    for ServerConnectionChoices<E, U, H>
+{
+    type Crypto = E::Crypto;
+    type Side = v1::Server<H::Start>;
+    type Receiver = ConnectionDatagramReceiver<E>;
+    type ResetTokenRegistry = ResetTokensOf<E>;
+    type ConnectionIdIssuer = EndpointConnectionIdIssuer<E>;
+}
+
+impl<E, U, H> v1::Choices for ServerConnectionChoices<E, U, H>
+where
+    E: EndpointChoices,
+    U: v1::HostChoices<Self>,
+    H: ServerHandshakeConfig + 'static,
+{
+    type Host = U;
+}
+
+/// The choices of the connections of a client role of an endpoint of the
+/// choices `E`: the host's choices are `U`, the handshakes start from `H`'s,
+/// with the store `St` of address validation tokens and the Retry policy
+/// `Rp`, and the endpoint fixes the rest.
+pub struct ClientConnectionChoices<E, U, H, St, Rp>(Marker<(E, U, H, St, Rp)>);
+
+impl<E, U, H, St, Rp> fmt::Debug for ClientConnectionChoices<E, U, H, St, Rp> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ClientConnectionChoices")
+    }
+}
+
+impl<E, U, H, St, Rp> ConnectionChoices for ClientConnectionChoices<E, U, H, St, Rp>
+where
+    E: EndpointChoices,
+    U: 'static,
+    H: ClientHandshakeConfig + 'static,
+    St: 'static,
+    Rp: 'static,
+{
+    type Clock = E::Clock;
+    type Link = LinkOf<E>;
+}
+
+impl<E, U, H, St, Rp> v1::MakerChoices for ClientConnectionChoices<E, U, H, St, Rp>
+where
+    E: EndpointChoices,
+    U: 'static,
+    H: ClientHandshakeConfig + 'static,
+    St: AddressTokenStore<H::ServerName> + Clone + 'static,
+    Rp: v1::retry::ClientRetryPolicy + Clone + 'static,
+{
+    type Crypto = E::Crypto;
+    type Side = ConnectingClientSide<H, St, Rp>;
+    type Receiver = ConnectionDatagramReceiver<E>;
+    type ResetTokenRegistry = ResetTokensOf<E>;
+    type ConnectionIdIssuer = EndpointConnectionIdIssuer<E>;
+}
+
+impl<E, U, H, St, Rp> v1::Choices for ClientConnectionChoices<E, U, H, St, Rp>
+where
+    E: EndpointChoices,
+    U: v1::HostChoices<Self>,
+    H: ClientHandshakeConfig + 'static,
+    St: AddressTokenStore<H::ServerName> + Clone + 'static,
+    Rp: v1::retry::ClientRetryPolicy + Clone + 'static,
+{
+    type Host = U;
 }
 
 /// No server role: the endpoint takes no new connections and answers no
@@ -254,43 +372,33 @@ impl<E: EndpointChoices> ClientRole<E> for NoClient {
     }
 }
 
-/// The server role for connections of the choices `T` and the list of parts
-/// `L`, whose handshakes `H` starts, with the address validation tokens
-/// `Tk` and the stateless Retry policy `Rp`.
-pub struct AcceptingServer<T, L, H, Tk, Rp>(Marker<(T, L, H, Tk, Rp)>);
+/// The server role for connections whose host's choices are `U` and list
+/// of parts `L`, whose handshakes `H` starts, with the address validation
+/// tokens `Tk` and the stateless Retry policy `Rp`. Its connections' choices
+/// are [`ServerConnectionChoices`] of `U`.
+pub struct AcceptingServer<U, L, H, Tk, Rp>(Marker<(U, L, H, Tk, Rp)>);
 
 /// What a role type holds of its parameters: nothing.
 type Marker<T> = PhantomData<fn() -> T>;
 
-impl<T, L, H, Tk, Rp> fmt::Debug for AcceptingServer<T, L, H, Tk, Rp> {
+impl<U, L, H, Tk, Rp> fmt::Debug for AcceptingServer<U, L, H, Tk, Rp> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("AcceptingServer")
     }
 }
 
-impl<T, L, H, Tk, Rp> sealed::Sealed for AcceptingServer<T, L, H, Tk, Rp> {}
+impl<U, L, H, Tk, Rp> sealed::Sealed for AcceptingServer<U, L, H, Tk, Rp> {}
 
-impl<E, T, L, H, Tk, Rp> ServerRole<E> for AcceptingServer<T, L, H, Tk, Rp>
+impl<E, U, L, H, Tk, Rp> ServerRole<E> for AcceptingServer<U, L, H, Tk, Rp>
 where
     E: EndpointChoices,
-    T: v1::Choices<
-            Clock = E::Clock,
-            Link = LinkOf<E>,
-            Crypto = E::Crypto,
-            Receiver = ConnectionDatagramReceiver<E>,
-            ResetTokenRegistry = ResetTokensOf<E>,
-            ConnectionIdIssuer = EndpointConnectionIdIssuer<E>,
-            Side = v1::Server<H::Start>,
-        >,
-    L: PartConfigs<T, L>
-        + LayerShares<T, L, Connection, Args = <L as PartConfigs<T, L>>::Args>
-        + LogicalPathKeys<Key = SoleLogicalPath>
-        + 'static,
+    U: v1::HostChoices<ServerConnectionChoices<E, U, H>>,
+    L: EndpointPartList<ServerConnectionChoices<E, U, H>>,
     H: ServerHandshakeConfig + 'static,
     Tk: AddressTokens + TokenPeerAddress<PeerOf<E>> + Clone + 'static,
     Rp: StatelessRetryPolicy + Clone + 'static,
 {
-    type Config = ServerConfig<T, L, H, Tk, Rp>;
+    type Config = ServerConfig<ServerConnectionChoices<E, U, H>, L, H, Tk, Rp>;
     type Kept = Arc<IncomingShared<E, Self>>;
     type Reflow = ServerReflow<E, Self>;
 
@@ -328,68 +436,47 @@ where
     }
 }
 
-impl<E, T, L, H, Tk, Rp> AcceptingServerRole<E> for AcceptingServer<T, L, H, Tk, Rp>
+impl<E, U, L, H, Tk, Rp> AcceptingServerRole<E> for AcceptingServer<U, L, H, Tk, Rp>
 where
     E: EndpointChoices,
-    T: v1::Choices<
-            Clock = E::Clock,
-            Link = LinkOf<E>,
-            Crypto = E::Crypto,
-            Receiver = ConnectionDatagramReceiver<E>,
-            ResetTokenRegistry = ResetTokensOf<E>,
-            ConnectionIdIssuer = EndpointConnectionIdIssuer<E>,
-            Side = v1::Server<H::Start>,
-        >,
-    L: PartConfigs<T, L>
-        + LayerShares<T, L, Connection, Args = <L as PartConfigs<T, L>>::Args>
-        + LogicalPathKeys<Key = SoleLogicalPath>
-        + 'static,
+    U: v1::HostChoices<ServerConnectionChoices<E, U, H>>,
+    L: EndpointPartList<ServerConnectionChoices<E, U, H>>,
     H: ServerHandshakeConfig + 'static,
     Tk: AddressTokens + TokenPeerAddress<PeerOf<E>> + Clone + 'static,
     Rp: StatelessRetryPolicy + Clone + 'static,
 {
-    type Choices = T;
+    type Choices = ServerConnectionChoices<E, U, H>;
     type Parts = L;
     type Handshake = H;
     type Tokens = Tk;
     type RetryPolicy = Rp;
 }
 
-/// The client role for connections of the choices `T` and the list of parts
-/// `L`, whose handshakes `H` starts, with the store `St` of address
-/// validation tokens and the Retry policy `Rp`.
-pub struct ConnectingClient<T, L, H, St, Rp>(Marker<(T, L, H, St, Rp)>);
+/// The client role for connections whose host's choices are `U` and list
+/// of parts `L`, whose handshakes `H` starts, with the store `St` of address
+/// validation tokens and the Retry policy `Rp`. Its connections' choices
+/// are [`ClientConnectionChoices`] of `U`.
+pub struct ConnectingClient<U, L, H, St, Rp>(Marker<(U, L, H, St, Rp)>);
 
-impl<T, L, H, St, Rp> fmt::Debug for ConnectingClient<T, L, H, St, Rp> {
+impl<U, L, H, St, Rp> fmt::Debug for ConnectingClient<U, L, H, St, Rp> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("ConnectingClient")
     }
 }
 
-impl<T, L, H, St, Rp> sealed::Sealed for ConnectingClient<T, L, H, St, Rp> {}
+impl<U, L, H, St, Rp> sealed::Sealed for ConnectingClient<U, L, H, St, Rp> {}
 
-impl<E, T, L, H, St, Rp> ClientRole<E> for ConnectingClient<T, L, H, St, Rp>
+impl<E, U, L, H, St, Rp> ClientRole<E> for ConnectingClient<U, L, H, St, Rp>
 where
     E: EndpointChoices,
-    T: v1::Choices<
-            Clock = E::Clock,
-            Link = LinkOf<E>,
-            Crypto = E::Crypto,
-            Receiver = ConnectionDatagramReceiver<E>,
-            ResetTokenRegistry = ResetTokensOf<E>,
-            ConnectionIdIssuer = EndpointConnectionIdIssuer<E>,
-            Side = ConnectingClientSide<H, St, Rp>,
-        >,
-    L: PartConfigs<T, L>
-        + LayerShares<T, L, Connection, Args = <L as PartConfigs<T, L>>::Args>
-        + LogicalPathKeys<Key = SoleLogicalPath>
-        + 'static,
+    U: v1::HostChoices<ClientConnectionChoices<E, U, H, St, Rp>>,
+    L: EndpointPartList<ClientConnectionChoices<E, U, H, St, Rp>>,
     H: ClientHandshakeConfig + 'static,
     St: AddressTokenStore<H::ServerName> + Clone + 'static,
     Rp: v1::retry::ClientRetryPolicy + Clone + 'static,
 {
-    type Config = ClientConfig<T, L, H, St, Rp>;
-    type Kept = Arc<ClientConfig<T, L, H, St, Rp>>;
+    type Config = ClientConfig<ClientConnectionChoices<E, U, H, St, Rp>, L, H, St, Rp>;
+    type Kept = Arc<ClientConfig<ClientConnectionChoices<E, U, H, St, Rp>, L, H, St, Rp>>;
 
     fn start(
         mut config: Self::Config,
@@ -405,27 +492,16 @@ where
     }
 }
 
-impl<E, T, L, H, St, Rp> ConnectingClientRole<E> for ConnectingClient<T, L, H, St, Rp>
+impl<E, U, L, H, St, Rp> ConnectingClientRole<E> for ConnectingClient<U, L, H, St, Rp>
 where
     E: EndpointChoices,
-    T: v1::Choices<
-            Clock = E::Clock,
-            Link = LinkOf<E>,
-            Crypto = E::Crypto,
-            Receiver = ConnectionDatagramReceiver<E>,
-            ResetTokenRegistry = ResetTokensOf<E>,
-            ConnectionIdIssuer = EndpointConnectionIdIssuer<E>,
-            Side = ConnectingClientSide<H, St, Rp>,
-        >,
-    L: PartConfigs<T, L>
-        + LayerShares<T, L, Connection, Args = <L as PartConfigs<T, L>>::Args>
-        + LogicalPathKeys<Key = SoleLogicalPath>
-        + 'static,
+    U: v1::HostChoices<ClientConnectionChoices<E, U, H, St, Rp>>,
+    L: EndpointPartList<ClientConnectionChoices<E, U, H, St, Rp>>,
     H: ClientHandshakeConfig + 'static,
     St: AddressTokenStore<H::ServerName> + Clone + 'static,
     Rp: v1::retry::ClientRetryPolicy + Clone + 'static,
 {
-    type Choices = T;
+    type Choices = ClientConnectionChoices<E, U, H, St, Rp>;
     type Parts = L;
     type Handshake = H;
     type AddressTokens = St;

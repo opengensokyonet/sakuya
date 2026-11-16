@@ -44,6 +44,9 @@ use super::{
         StreamsBlockedFrames,
     },
 };
+use crate::v1::{
+    AckObligationOf, CryptoSendBufferOf, DestinationConnectionIdsOf, LocalConnectionIdsOf,
+};
 use crate::{
     clock::InstantOf,
     connection_id::local::{NewConnectionIdIntent, NewConnectionIdSummary},
@@ -870,7 +873,7 @@ where
             'r,
             V,
             InstantOf<T>,
-            T::AckObligation,
+            AckObligationOf<T>,
             AckIntentTicketOf<T, L>,
             (Ij, Ia, Ik, Ikp),
         >,
@@ -927,7 +930,7 @@ where
     V: GetAt<ConnectionIdsOf<T>, Ic>,
 {
     type Source<'l, 'r>
-        = &'l mut T::DestinationConnectionIds
+        = &'l mut DestinationConnectionIdsOf<T>
     where
         V: 'l,
         'r: 'l;
@@ -958,7 +961,7 @@ where
     V: GetAt<ConnectionIdsOf<T>, Ic>,
 {
     type Source<'l, 'r>
-        = &'l mut T::LocalConnectionIds
+        = &'l mut LocalConnectionIdsOf<T>
     where
         V: 'l,
         'r: 'l;
@@ -986,7 +989,7 @@ impl<T, L, V, Is, It> FindFrameSource<T, L, V, (Is, It)> for CryptoFrames
 where
     T: Choices,
     SendTypes<T, L>: CorePublishOutcome<CryptoIntent, AnyActiveLinkPath>,
-    V: GetAt<CryptoSender<T::CryptoSendBuffer>, Is>
+    V: GetAt<CryptoSender<CryptoSendBufferOf<T>>, Is>
         + GetAt<CryptoIntentTickets<CryptoIntentTicketOf<T, L>>, It>,
 {
     type Source<'l, 'r>
@@ -994,7 +997,7 @@ where
         'l,
         'r,
         V,
-        T::CryptoSendBuffer,
+        CryptoSendBufferOf<T>,
         CryptoIntentTicketOf<T, L>,
         (Is, It),
     >

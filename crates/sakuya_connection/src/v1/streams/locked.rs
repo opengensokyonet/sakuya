@@ -207,6 +207,27 @@ pub struct LockedStreamSet<Lc, K, Rs: StreamResets, P = Urgency> {
     shared: Arc<StreamSetShare<Lc, K, Rs, P>>,
 }
 
+/// The kind of [`LockedStreamSet`] whose data is sent with the parameters
+/// `P`, by default an [`Urgency`].
+pub struct LockedStreamSetFamily<P = Urgency>(core::marker::PhantomData<fn() -> P>);
+
+impl<P> fmt::Debug for LockedStreamSetFamily<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("LockedStreamSetFamily")
+    }
+}
+
+impl<P> super::StreamSetFamily for LockedStreamSetFamily<P>
+where
+    P: Clone + PartialEq + Default + SendUrgency + 'static,
+    OffsetMapStreamSendBuffer<Bytes, AtomicConnectionCreditReservation, MarkerOf<P>>:
+        StreamSendBuffer<Bytes, AtomicConnectionCreditReservation, MarkerOf<P>>,
+{
+    type Config = LockedStreamSetConfig;
+    type SendParameters = P;
+    type Set<Lc, K, X: StreamResets> = LockedStreamSet<Lc, K, X, P>;
+}
+
 /// The handle of a [`LockedStreamSet`]: it shares the set's state.
 pub struct LockedStreamSetHandle<Lc, K, Rs: StreamResets, P = Urgency> {
     shared: Arc<StreamSetShare<Lc, K, Rs, P>>,

@@ -2,6 +2,7 @@
 //! connection ID, making the issuer of the later ones and making the
 //! connection.
 
+use sakuya_connection::v1::SendParametersOf;
 use sakuya_connection::{
     error::ConnectionErrorsOf,
     layer::{Connection, LinkPathArgs, LogicalPathArgs},
@@ -133,7 +134,7 @@ where
         + LogicalPathKeys<Key = SoleLogicalPath>
         + ConnectionErrorsOf,
     <L as PartConfigs<T, L>>::Args: Selector<ConnectionArgs<T, L>, I>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     L: HandleShares<T, L, handle::EstablishedLayer>,
     ConnectionHandleCellOf<T, L>: Send + Sync + 'static,

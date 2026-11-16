@@ -24,31 +24,15 @@ use nitori_crypto::{NamedGroup, SignatureScheme, SigningKey as _};
 use nitori_crypto_aws_lc::{AwsLcBackend, Ed25519SigningKey};
 use sakuya_clock_tokio::TokioClock;
 use sakuya_connection::v1::retry::ContinueOnRetry;
-use sakuya_connection::{
-    clock::{ConnectionChoices, LinkIdOf},
-    connection_id::{
-        reset_token::PeerGroupedResetTokenRegistrar,
-        sequence_map::{
-            SequenceMapDestinationConnectionIdStrategy,
-            SequenceMapDestinationConnectionIdStrategyConfig,
-        },
-    },
-    send_strategy::{SendStrategyTypes, ranked::RankedSendStrategy},
-    v1::{
-        self,
-        amplification::AntiAmplificationFactor,
-        close::{LocalCloseCause, PassThroughImmediateClosePolicy},
-        crypto::{FragmentedCryptoReceiveBuffer, send::OffsetMapCryptoSendBuffer},
-        stateless_reset::StatelessResetSignal,
-    },
-};
+use sakuya_connection::v1::{self, close::LocalCloseCause};
 use sakuya_datagram_routing::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
+use sakuya_endpoint::role::{ClientConnectionChoices, ServerConnectionChoices};
 use sakuya_endpoint::{
     address_token::{
         AddressTokenKey, AddressTokenLifetimes, AddressTokens, AeadAddressTokens, TokenOutcome,
         TokenPeerAddress,
     },
-    choices::{ConnectionDatagramReceiver, EndpointChoices, PeerOf, ResetTokensOf},
+    choices::{EndpointChoices, PeerOf},
     client_token::BoundedAddressTokenStore,
     config::{
         BindingDeclarations, ClientConfig, ClientCryptoReceiveCapacities, EndpointConfig,
@@ -59,18 +43,12 @@ use sakuya_endpoint::{
     incoming::{Incoming, RetryError, TerminableIncoming},
     outgoing::StartOutgoingError,
     retry::{CapacityFraction, EncodeStatelessRetryError, LoadStatelessRetryPolicy},
-    role::{AcceptingServer, ConnectingClient, ConnectingClientSide, NoClient, NoServer},
+    role::{AcceptingServer, ConnectingClient, NoClient, NoServer},
     stateless_check::ReturnedToken,
 };
 use sakuya_link::{ConnectingLinkBinding as _, EcnMarking, Link as _, OutgoingDatagram};
 use sakuya_packet_protection::{backend::ring::RingBackend, retry::verify_retry_integrity_tag};
-use sakuya_recovery::{
-    ack_obligation::Rfc9000AckObligation,
-    factory::{NewRenoRecoveryFactory, NewRenoRecoveryFactoryConfig},
-    loss::{LossThresholds, PacketThreshold, RECOMMENDED_TIME_THRESHOLD},
-    receive_journals::MaxAckRanges,
-    send_journals::DequeSendJournals,
-};
+use sakuya_recovery::loss::{LossThresholds, PacketThreshold, RECOMMENDED_TIME_THRESHOLD};
 use sakuya_stream::connection::{CloseReason, ImmediateClose, TransportImmediateClose};
 use sakuya_tls::{
     cipher_suite::CipherSuite,
@@ -173,54 +151,24 @@ impl v1::close::ApplicationClose for AppClose {
     }
 }
 
-macro_rules! choices {
-    ($name:ident, $side:ty) => {
-        struct $name;
-        impl ConnectionChoices for $name {
-            type Clock = TokioClock;
-            type Link = sakuya_endpoint::choices::LinkOf<Udp>;
-        }
-        impl v1::Choices for $name {
-            type Crypto = RingBackend;
-            type Side = $side;
-            type CryptoReceiveBuffer = FragmentedCryptoReceiveBuffer;
-            type CryptoSendBuffer = OffsetMapCryptoSendBuffer;
-            type Recovery<V: Clone + Eq + fmt::Debug + 'static> = NewRenoRecoveryFactory<V>;
-            type AckObligation = Rfc9000AckObligation<std::time::Instant>;
-            type SendJournals<S: 'static, P: Clone + Eq + fmt::Debug + 'static> =
-                DequeSendJournals<std::time::Instant, S, P>;
-            type ApplicationError = AppClose;
-            type Receiver = ConnectionDatagramReceiver<Udp>;
-            type SendStrategy<I: SendStrategyTypes> = RankedSendStrategy<I>;
-            type DestinationConnectionIds = SequenceMapDestinationConnectionIdStrategy<
-                LinkIdOf<Self>,
-                PeerGroupedResetTokenRegistrar<PeerOf<Udp>, Arc<StatelessResetSignal>>,
-            >;
-            type ResetTokenRegistry = ResetTokensOf<Udp>;
-            type ConnectionIdIssuer = sakuya_endpoint::issuer::EndpointConnectionIdIssuer<Udp>;
-            type LocalConnectionIds =
-                sakuya_connection::connection_id::local::SequenceMapLocalConnectionIdStrategy<
-                    sakuya_connection::v1::connection_ids::LocalConnectionIdRegistrationOf<Self>,
-                    sakuya_connection::clock::InstantOf<Self>,
-                >;
-            type SendParameters = sakuya_stream::send_options::urgency::Urgency;
-            type Streams<Lc, K, X: sakuya_connection::v1::streams::resets::StreamResets> =
-                sakuya_connection::v1::streams::locked::LockedStreamSet<Lc, K, X>;
-            type StreamSetConfig = sakuya_connection::v1::streams::locked::LockedStreamSetConfig;
-            type ImmediateClosePolicy = PassThroughImmediateClosePolicy;
-        }
-    };
+/// What the tests choose of version 1: their application error, and the
+/// default of everything else; the endpoint fixes the rest.
+struct Mine;
+
+impl<T: v1::MakerChoices> v1::HostChoices<T> for Mine {
+    type ApplicationError = AppClose;
 }
-choices!(ServerChoices, v1::Server<ServerEngine>);
-choices!(
-    ClientChoices,
-    ConnectingClientSide<ClientStarts, ClientTokens, ContinueOnRetry>
-);
+
+/// The choices of the server's connections.
+type ServerChoices = ServerConnectionChoices<Udp, Mine, ServerStarts>;
+/// The choices of the client's connections.
+type ClientChoices =
+    ClientConnectionChoices<Udp, Mine, ClientStarts, ClientTokens, ContinueOnRetry>;
 
 type Parts = frunk_core::HList![v1::Part];
 
 type Server = AcceptingServer<
-    ServerChoices,
+    Mine,
     Parts,
     ServerStarts,
     AeadAddressTokens<AwsLcBackend>,
@@ -228,7 +176,7 @@ type Server = AcceptingServer<
 >;
 /// Where the client keeps the address validation tokens servers give it.
 type ClientTokens = BoundedAddressTokenStore<ServerTarget>;
-type Client = ConnectingClient<ClientChoices, Parts, ClientStarts, ClientTokens, ContinueOnRetry>;
+type Client = ConnectingClient<Mine, Parts, ClientStarts, ClientTokens, ContinueOnRetry>;
 
 // ---- the handshakes ----
 
@@ -376,15 +324,8 @@ macro_rules! v1_config {
         let mut parameters = TransportParameters::<Vec<u8>>::new();
         parameters.set(MaxIdleTimeout::new(VarInt::from_u32(30_000)));
         sakuya_endpoint::v1::ConnectionConfig::<$t, Parts> {
-            anti_amplification: AntiAmplificationFactor::new(3).unwrap(),
             transport_parameters: parameters.known,
-            recovery: NewRenoRecoveryFactoryConfig::recommended(Duration::from_millis(1)),
-            max_ack_ranges: MaxAckRanges::DEFAULT,
-            max_datagrams_per_poll: 16.try_into().unwrap(),
-            max_held_inputs: 16,
-            destination_connection_ids: SequenceMapDestinationConnectionIdStrategyConfig::new(8),
-            max_datagrams_per_send: 16.try_into().unwrap(),
-            immediate_close_policy: PassThroughImmediateClosePolicy,
+            ..Default::default()
         }
     }};
 }
@@ -1284,7 +1225,7 @@ impl<Peer> TokenPeerAddress<Peer> for NoSocketAddrTokens {
 }
 
 type ServerWithTokens<Tk> =
-    AcceptingServer<ServerChoices, Parts, ServerStarts, Tk, LoadStatelessRetryPolicy>;
+    AcceptingServer<Mine, Parts, ServerStarts, Tk, LoadStatelessRetryPolicy>;
 
 /// A server endpoint on `tokens`, and the incoming connection that a client's
 /// Initial makes on it; the endpoint and the client's link are kept alive

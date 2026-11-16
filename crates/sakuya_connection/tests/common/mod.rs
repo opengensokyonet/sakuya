@@ -479,28 +479,22 @@ impl ConnectionChoices for Mine {
     type Clock = TestClock;
     type Link = TestLink;
 }
-impl sakuya_connection::v1::Choices for Mine {
+impl sakuya_connection::v1::MakerChoices for Mine {
     type Crypto = sakuya_packet_protection::backend::ring::RingBackend;
     type Side = sakuya_connection::v1::Server<PendingServerEngine>;
-    type CryptoReceiveBuffer = sakuya_connection::v1::crypto::FragmentedCryptoReceiveBuffer;
-    type CryptoSendBuffer = sakuya_connection::v1::crypto::send::OffsetMapCryptoSendBuffer;
-    type Recovery<V: Clone + Eq + core::fmt::Debug + 'static> =
-        sakuya_recovery::factory::NewRenoRecoveryFactory<V>;
-    type AckObligation = sakuya_recovery::ack_obligation::Rfc9000AckObligation<Duration>;
-    type SendJournals<S: 'static, P: Clone + Eq + core::fmt::Debug + 'static> =
-        sakuya_recovery::send_journals::DequeSendJournals<Duration, S, P>;
-    type ApplicationError = AppClose;
     type Receiver = TestReceiver;
+    type ResetTokenRegistry = TestResetTokenRegistry;
+    type ConnectionIdIssuer = TestConnectionIdIssuer;
+}
+impl sakuya_connection::v1::Choices for Mine {
+    type Host = Self;
+}
+impl sakuya_connection::v1::HostChoices<Mine> for Mine {
+    type ApplicationError = AppClose;
     type SendStrategy<I: sakuya_connection::send_strategy::SendStrategyTypes> =
         strategy::EventLoggingSendStrategy<I>;
     type DestinationConnectionIds = TestDestinationConnectionIds;
-    type ResetTokenRegistry = TestResetTokenRegistry;
-    type ConnectionIdIssuer = TestConnectionIdIssuer;
     type LocalConnectionIds = TestLocalConnectionIds;
-    type SendParameters = sakuya_stream::send_options::urgency::Urgency;
-    type Streams<Lc, K, X: sakuya_connection::v1::streams::resets::StreamResets> =
-        sakuya_connection::v1::streams::locked::LockedStreamSet<Lc, K, X>;
-    type StreamSetConfig = sakuya_connection::v1::streams::locked::LockedStreamSetConfig;
     type ImmediateClosePolicy = TestImmediateClosePolicy;
 }
 

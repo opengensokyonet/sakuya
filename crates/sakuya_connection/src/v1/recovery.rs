@@ -36,6 +36,7 @@ use sakuya_wire::{
     },
 };
 
+use crate::v1::{HostChoices, HostOf};
 use crate::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf, LinkIdOf},
@@ -58,7 +59,8 @@ use super::{
 };
 
 /// The recovery factory of the choices `T` for the list of parts `L`.
-pub type RecoveryFactoryOf<T, L> = <T as Choices>::Recovery<LinkPathIdentifierOf<T, L>>;
+pub type RecoveryFactoryOf<T, L> =
+    <HostOf<T> as HostChoices<T>>::Recovery<LinkPathIdentifierOf<T, L>>;
 /// The configuration the recovery factory is made from.
 pub type RecoveryConfigOf<T, L> =
     <RecoveryFactoryOf<T, L> as RecoveryFactory<<T as ConnectionChoices>::Link>>::Config;
@@ -107,7 +109,7 @@ pub struct ChosenRecoveryParts;
 /// The factory is made from its configuration when the connection is.
 impl<T, L, X, I> Build<T, L, layer::Connection, (ChosenRecoveryFactory, I)> for X
 where
-    T: Choices<Recovery<LinkPathIdentifierOf<T, L>> = X>,
+    T: Choices<Host: HostChoices<T, Recovery<LinkPathIdentifierOf<T, L>> = X>>,
     L: LineagePartList<T>,
     X: RecoveryFactory<T::Link>,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
@@ -121,7 +123,7 @@ where
 }
 impl<T, L, X> DataComponent<T, L, layer::Connection, ChosenRecoveryFactory> for X
 where
-    T: Choices<Recovery<LinkPathIdentifierOf<T, L>> = X>,
+    T: Choices<Host: HostChoices<T, Recovery<LinkPathIdentifierOf<T, L>> = X>>,
     L: LineagePartList<T>,
 {
 }

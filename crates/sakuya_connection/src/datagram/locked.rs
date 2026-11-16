@@ -332,6 +332,15 @@ impl<Lc, K: IntentTicketWithdraw, S: DatagramSide> QueuesShare<Lc, K, S> {
     }
 }
 
+/// The kind of [`LockedDatagramQueues`].
+#[derive(Debug)]
+pub struct LockedDatagramQueuesFamily;
+
+impl super::DatagramQueuesFamily for LockedDatagramQueuesFamily {
+    type Config = LockedDatagramQueuesConfig;
+    type Queues<Lc, K: IntentTicketWithdraw, S: DatagramSide> = LockedDatagramQueues<Lc, K, S>;
+}
+
 impl<Lc, K, S> DatagramQueues<Lc> for LockedDatagramQueues<Lc, K, S>
 where
     K: IntentTicketWithdraw,

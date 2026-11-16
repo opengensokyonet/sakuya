@@ -20,6 +20,7 @@ use common::{
 };
 use frunk_core::coproduct::CoproductSelector;
 use frunk_core::hlist_pat;
+use sakuya_connection::v1::{HostChoices, HostOf};
 use sakuya_connection::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf},
@@ -343,28 +344,20 @@ impl ConnectionChoices for ClientMine {
     type Clock = TestClock;
     type Link = TestLink;
 }
-impl v1::Choices for ClientMine {
+impl v1::MakerChoices for ClientMine {
     type Crypto = RingBackend;
     type Side = v1::Client<common::PendingClientEngine, (), v1::retry::ContinueOnRetry>;
-    type CryptoReceiveBuffer = FragmentedCryptoReceiveBuffer;
-    type CryptoSendBuffer = OffsetMapCryptoSendBuffer;
-    type Recovery<V: Clone + Eq + Debug + 'static> =
-        sakuya_recovery::factory::NewRenoRecoveryFactory<V>;
-    type AckObligation = sakuya_recovery::ack_obligation::Rfc9000AckObligation<Duration>;
-    type SendJournals<S: 'static, P: Clone + Eq + Debug + 'static> =
-        sakuya_recovery::send_journals::DequeSendJournals<Duration, S, P>;
-    type ApplicationError = common::AppClose;
     type Receiver = TestReceiver;
-    type SendStrategy<I: sakuya_connection::send_strategy::SendStrategyTypes> =
-        sakuya_connection::send_strategy::ranked::RankedSendStrategy<I>;
-    type DestinationConnectionIds = common::TestDestinationConnectionIds;
     type ResetTokenRegistry = common::TestResetTokenRegistry;
     type ConnectionIdIssuer = common::TestConnectionIdIssuer;
+}
+impl v1::Choices for ClientMine {
+    type Host = Self;
+}
+impl v1::HostChoices<ClientMine> for ClientMine {
+    type ApplicationError = common::AppClose;
+    type DestinationConnectionIds = common::TestDestinationConnectionIds;
     type LocalConnectionIds = common::TestLocalConnectionIds;
-    type SendParameters = sakuya_stream::send_options::urgency::Urgency;
-    type Streams<Lc, K, X: sakuya_connection::v1::streams::resets::StreamResets> =
-        sakuya_connection::v1::streams::locked::LockedStreamSet<Lc, K, X>;
-    type StreamSetConfig = sakuya_connection::v1::streams::locked::LockedStreamSetConfig;
     type ImmediateClosePolicy = common::TestImmediateClosePolicy;
 }
 
@@ -375,27 +368,21 @@ impl ConnectionChoices for SpyMine {
     type Clock = TestClock;
     type Link = TestLink;
 }
-impl v1::Choices for SpyMine {
+impl v1::MakerChoices for SpyMine {
     type Crypto = RingBackend;
     type Side = v1::Server<common::PendingServerEngine>;
-    type CryptoReceiveBuffer = FragmentedCryptoReceiveBuffer;
-    type CryptoSendBuffer = OffsetMapCryptoSendBuffer;
-    type Recovery<V: Clone + Eq + Debug + 'static> = spy::SpyFactory<V>;
-    type AckObligation = sakuya_recovery::ack_obligation::Rfc9000AckObligation<Duration>;
-    type SendJournals<S: 'static, P: Clone + Eq + Debug + 'static> =
-        sakuya_recovery::send_journals::DequeSendJournals<Duration, S, P>;
-    type ApplicationError = common::AppClose;
     type Receiver = TestReceiver;
-    type SendStrategy<I: sakuya_connection::send_strategy::SendStrategyTypes> =
-        sakuya_connection::send_strategy::ranked::RankedSendStrategy<I>;
-    type DestinationConnectionIds = common::TestDestinationConnectionIds;
     type ResetTokenRegistry = common::TestResetTokenRegistry;
     type ConnectionIdIssuer = common::TestConnectionIdIssuer;
+}
+impl v1::Choices for SpyMine {
+    type Host = Self;
+}
+impl v1::HostChoices<SpyMine> for SpyMine {
+    type Recovery<V: Clone + Eq + Debug + 'static> = spy::SpyFactory<V>;
+    type ApplicationError = common::AppClose;
+    type DestinationConnectionIds = common::TestDestinationConnectionIds;
     type LocalConnectionIds = common::TestLocalConnectionIds;
-    type SendParameters = sakuya_stream::send_options::urgency::Urgency;
-    type Streams<Lc, K, X: sakuya_connection::v1::streams::resets::StreamResets> =
-        sakuya_connection::v1::streams::locked::LockedStreamSet<Lc, K, X>;
-    type StreamSetConfig = sakuya_connection::v1::streams::locked::LockedStreamSetConfig;
     type ImmediateClosePolicy = common::TestImmediateClosePolicy;
 }
 
@@ -1078,7 +1065,7 @@ mod probe {
                 Clock = TestClock,
                 Link = TestLink,
                 Crypto = RingBackend,
-                CryptoReceiveBuffer = FragmentedCryptoReceiveBuffer,
+                Host: v1::HostChoices<T, CryptoReceiveBuffer = FragmentedCryptoReceiveBuffer>,
             >,
         L: LineagePartList<T>
             + FrameSetDispatch<T, L, Hd>
@@ -2047,14 +2034,18 @@ where
             Crypto = RingBackend,
             Link = TestLink,
             Receiver = TestReceiver,
-            DestinationConnectionIds = common::TestDestinationConnectionIds,
             ResetTokenRegistry = common::TestResetTokenRegistry,
             ConnectionIdIssuer = common::TestConnectionIdIssuer,
-            ImmediateClosePolicy = common::TestImmediateClosePolicy,
-            ApplicationError = common::AppClose,
+            Host: v1::HostChoices<
+                T,
+                DestinationConnectionIds = common::TestDestinationConnectionIds,
+                ImmediateClosePolicy = common::TestImmediateClosePolicy,
+                ApplicationError = common::AppClose,
+            >,
         >,
     T::Side: SideCapacities,
-    T::Recovery<LinkId<(), ()>>: RecoveryFactory<TestLink, Config = NewRenoRecoveryFactoryConfig>,
+    <HostOf<T> as HostChoices<T>>::Recovery<LinkId<(), ()>>:
+        RecoveryFactory<TestLink, Config = NewRenoRecoveryFactoryConfig>,
 {
     let close_request = CloseRequestCell::new();
     CLOSE_REQUEST.with(|c| *c.borrow_mut() = Some(close_request.clone()));

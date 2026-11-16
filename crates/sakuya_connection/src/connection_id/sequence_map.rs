@@ -165,6 +165,15 @@ pub struct SequenceMapDestinationConnectionIdStrategyConfig {
     retirement_limit: usize,
 }
 
+/// Eight retirements wait at most. RFC 9000 §5.1.2 recommends at least
+/// twice the `active_connection_id_limit` this side sends, which is 2 by
+/// default; eight is enough for a limit of up to four.
+impl Default for SequenceMapDestinationConnectionIdStrategyConfig {
+    fn default() -> Self {
+        Self::new(8)
+    }
+}
+
 impl SequenceMapDestinationConnectionIdStrategyConfig {
     /// `retirement_limit` is how many retirements may wait for their
     /// RETIRE_CONNECTION_ID frame to be acknowledged before a

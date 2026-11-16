@@ -80,7 +80,7 @@ use crate::{
     },
     take::{GetAt, TakeEach},
     v1::{
-        Choices, Client, CloseCauseOf, Server, Side,
+        Choices, Client, CloseCauseOf, HostOf, Server, Side,
         application_handles::{
             DriverPanicHandleShare, FindHandleShare, HandleShare, HandleShares, KeyedHandleShare,
             connection::{ConnectionHandleCellOf, EstablishedLayerSharesOf},
@@ -110,20 +110,35 @@ pub struct Part;
 
 // ---- the choices ----
 
-/// What a composition with the extension chooses besides version 1's
-/// choices (`DatagramChoices`).
-pub trait DatagramChoices: Choices<Side: DatagramSide> {
-    /// The queues of the established layer, for `Lc`, this endpoint's
-    /// reason for closing ([`CloseCauseOf`] for the composition's list of
-    /// parts), `K`, the ticket the send strategy's intake gives back for a
-    /// datagram's intent ([`DatagramTicketOf`]), and `S`, the side, which
-    /// gives what a datagram received is.
-    type DatagramQueues<Lc, K: IntentTicketWithdraw, S: DatagramSide>: DatagramQueues<Lc, Config = Self::DatagramQueuesConfig, StrategyTicket = K>;
+/// What the host chooses for the extension, on its own type: the type
+/// that is its choices for version 1 ([`HostOf`]). A composition with the
+/// extension has choices `T` with `T: Choices<Side: DatagramSide, Host:
+/// DatagramChoices>`.
+pub trait DatagramChoices: 'static {
+    /// The kind of queues of the established layer.
+    type DatagramQueues: DatagramQueuesFamily = locked::LockedDatagramQueuesFamily;
+}
+
+/// A kind of queues of the established layer: one queues type for each
+/// `Lc`, this endpoint's reason for closing ([`CloseCauseOf`] for the
+/// composition's list of parts), `K`, the ticket the send strategy's intake
+/// gives back for a datagram's intent ([`DatagramTicketOf`]), and `S`, the
+/// side, which gives what a datagram received is; all take the same
+/// configuration.
+pub trait DatagramQueuesFamily: 'static {
     /// What the composition configures the queues with; the connection
     /// node keeps it from the connection's making until the established
     /// layer is built.
-    type DatagramQueuesConfig: Clone + Default + 'static;
+    type Config: Clone + Default + 'static;
+    /// The queues for `Lc`, `K` and `S`.
+    type Queues<Lc, K: IntentTicketWithdraw, S: DatagramSide>: DatagramQueues<Lc, Config = Self::Config, StrategyTicket = K>;
 }
+
+/// The kind of queues the host of the choices `T` chooses.
+pub type DatagramQueuesFamilyOf<T> = <HostOf<T> as DatagramChoices>::DatagramQueues;
+
+/// The configuration of the queues of the choices `T`.
+pub type DatagramQueuesConfigOf<T> = <DatagramQueuesFamilyOf<T> as DatagramQueuesFamily>::Config;
 
 /// The ticket the send strategy's intake of the choices `T` and the list of
 /// parts `L` gives back for a datagram's intent.
@@ -137,10 +152,10 @@ pub type DatagramIntentHandleOf<T, L, Idx> =
 
 /// The queues of the established layer of the choices `T` and the list of
 /// parts `L`.
-pub type DatagramQueuesOf<T, L> = <T as DatagramChoices>::DatagramQueues<
+pub type DatagramQueuesOf<T, L> = <DatagramQueuesFamilyOf<T> as DatagramQueuesFamily>::Queues<
     CloseCauseOf<T, L>,
     DatagramTicketOf<T, L>,
-    <T as Choices>::Side,
+    <T as crate::v1::MakerChoices>::Side,
 >;
 
 /// What one side reads of a datagram it received (`DatagramSide`): the
@@ -533,17 +548,20 @@ impl<C> PassiveDataComponent for DatagramQueuesConfig<C> {}
 /// The connection node keeps the extension's transport parameters as this
 /// side sends them, and the configuration of the queues, both from the
 /// part's `Args`.
-impl<T: DatagramChoices, L> LayerShare<T, L, layer::Connection> for Part {
+impl<T: Choices<Side: DatagramSide, Host: DatagramChoices>, L> LayerShare<T, L, layer::Connection>
+    for Part
+{
     type Data = HList![
         LocalTransportParameters<PartSlots<Part>>,
-        DatagramQueuesConfig<T::DatagramQueuesConfig>
+        DatagramQueuesConfig<DatagramQueuesConfigOf<T>>
     ];
     type Calls = HNil;
-    type Args = DatagramConnectionArgs<T::DatagramQueuesConfig>;
+    type Args = DatagramConnectionArgs<DatagramQueuesConfigOf<T>>;
 }
 
 /// The established layer holds the queues.
-impl<T: DatagramChoices, L: ConnectionErrorsOf> LayerShare<T, L, layer::Established> for Part
+impl<T: Choices<Side: DatagramSide, Host: DatagramChoices>, L: ConnectionErrorsOf>
+    LayerShare<T, L, layer::Established> for Part
 where
     SendTypes<T, L>: IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>,
     DatagramTicketOf<T, L>: IntentTicketWithdraw,
@@ -554,7 +572,8 @@ where
 
 /// The handle of an established layer holds the queues' handle, to send
 /// and receive datagrams with.
-impl<T: DatagramChoices, L: ConnectionErrorsOf> HandleShare<T, L, handle::EstablishedLayer> for Part
+impl<T: Choices<Side: DatagramSide, Host: DatagramChoices>, L: ConnectionErrorsOf>
+    HandleShare<T, L, handle::EstablishedLayer> for Part
 where
     SendTypes<T, L>: IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>,
     DatagramTicketOf<T, L>: IntentTicketWithdraw,
@@ -563,7 +582,8 @@ where
 }
 
 /// The DATAGRAM frame source finds the queues of the established layer.
-impl<T: DatagramChoices, L: ConnectionErrorsOf> EstablishedSourceComponentsPart<T, L> for Part
+impl<T: Choices<Side: DatagramSide, Host: DatagramChoices>, L: ConnectionErrorsOf>
+    EstablishedSourceComponentsPart<T, L> for Part
 where
     SendTypes<T, L>: IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>,
     DatagramTicketOf<T, L>: IntentTicketWithdraw,
@@ -584,33 +604,33 @@ no_share!(LinkEntry, LogicalPath, LinkPath, Recovery);
 
 /// The extension's transport parameters start as configured; the part
 /// marks where they are among the components, apart from version 1's.
-impl<T: DatagramChoices, L, I> Build<T, L, layer::Connection, (Part, I)>
-    for LocalTransportParameters<PartSlots<Part>>
+impl<T: Choices<Side: DatagramSide, Host: DatagramChoices>, L, I>
+    Build<T, L, layer::Connection, (Part, I)> for LocalTransportParameters<PartSlots<Part>>
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>: Selector<DatagramConnectionArgs<T::DatagramQueuesConfig>, I>,
+    ConnectionArgsOf<T, L>: Selector<DatagramConnectionArgs<DatagramQueuesConfigOf<T>>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        let args: &DatagramConnectionArgs<T::DatagramQueuesConfig> = Selector::get(args);
+        let args: &DatagramConnectionArgs<DatagramQueuesConfigOf<T>> = Selector::get(args);
         LocalTransportParameters::Configured(args.transport_parameters)
     }
 }
 
 /// The connection keeps the configuration it was made with.
-impl<T: DatagramChoices, L, I> Build<T, L, layer::Connection, (Part, I)>
-    for DatagramQueuesConfig<T::DatagramQueuesConfig>
+impl<T: Choices<Side: DatagramSide, Host: DatagramChoices>, L, I>
+    Build<T, L, layer::Connection, (Part, I)> for DatagramQueuesConfig<DatagramQueuesConfigOf<T>>
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>: Selector<DatagramConnectionArgs<T::DatagramQueuesConfig>, I>,
+    ConnectionArgsOf<T, L>: Selector<DatagramConnectionArgs<DatagramQueuesConfigOf<T>>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        let args: &DatagramConnectionArgs<T::DatagramQueuesConfig> = Selector::get(args);
+        let args: &DatagramConnectionArgs<DatagramQueuesConfigOf<T>> = Selector::get(args);
         DatagramQueuesConfig(args.queues.clone())
     }
 }
@@ -633,8 +653,13 @@ pub struct ChosenDatagramQueues;
 impl<T, L, X, Ip, Ic, Ir, Ih, Jm, Js>
     Build<T, L, layer::Established, (ChosenDatagramQueues, (Ip, Ic, Ir, Ih), (Jm, Js))> for X
 where
-    T: DatagramChoices<
-        DatagramQueues<CloseCauseOf<T, L>, DatagramTicketOf<T, L>, <T as Choices>::Side> = X,
+    T: Choices<
+        Side: DatagramSide,
+        Host: DatagramChoices<
+            DatagramQueues: DatagramQueuesFamily<
+                Queues<CloseCauseOf<T, L>, DatagramTicketOf<T, L>, <T as crate::v1::MakerChoices>::Side> = X,
+            >,
+        >,
     >,
     L: LineagePartList<T>
         + ConnectionErrorsOf
@@ -643,11 +668,11 @@ where
     SendTypes<T, L>: IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     DatagramTicketOf<T, L>: IntentTicketWithdraw,
-    X: DatagramQueues<CloseCauseOf<T, L>, Config = T::DatagramQueuesConfig>,
+    X: DatagramQueues<CloseCauseOf<T, L>, Config = DatagramQueuesConfigOf<T>>,
     TransportParameterSlots<L>: Selector<Option<MaxDatagramFrameSize>, Jm>,
     EstablishedLayerSharesOf<T, L>: FindHandleShare<Part, Js, Found = X::Handle>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>
-        + GetAt<DatagramQueuesConfig<T::DatagramQueuesConfig>, Ic>
+        + GetAt<DatagramQueuesConfig<DatagramQueuesConfigOf<T>>, Ic>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
         + GetAt<ConnectionHandleCellOf<T, L>, Ih>,
 {
@@ -661,7 +686,7 @@ where
             .and_then(|slots| *Selector::<Option<MaxDatagramFrameSize>, Jm>::get(slots))
             .unwrap_or_default();
         let config = parents
-            .get::<DatagramQueuesConfig<T::DatagramQueuesConfig>, Ic>()
+            .get::<DatagramQueuesConfig<DatagramQueuesConfigOf<T>>, Ic>()
             .0
             .clone();
         let queues = X::new(DatagramQueuesFacts { peer }, config);
@@ -693,8 +718,13 @@ where
 /// the application change them.
 impl<T, L, X> DataComponent<T, L, layer::Established, ChosenDatagramQueues> for X
 where
-    T: DatagramChoices<
-        DatagramQueues<CloseCauseOf<T, L>, DatagramTicketOf<T, L>, <T as Choices>::Side> = X,
+    T: Choices<
+        Side: DatagramSide,
+        Host: DatagramChoices<
+            DatagramQueues: DatagramQueuesFamily<
+                Queues<CloseCauseOf<T, L>, DatagramTicketOf<T, L>, <T as crate::v1::MakerChoices>::Side> = X,
+            >,
+        >,
     >,
     L: LineagePartList<T> + ConnectionErrorsOf,
     SendTypes<T, L>: IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>,
@@ -783,7 +813,7 @@ fn check_announced<D: Buf>(
 /// the connection closed is written, as version 1's frames of streams are.
 impl<T, L, Il, Ir, Iq> FrameDispatch<T, L, (Il, Ir, Iq)> for Part
 where
-    T: DatagramChoices,
+    T: Choices<Side: DatagramSide, Host: DatagramChoices>,
     L: LineagePartList<T> + ConnectionErrorsOf + StreamResetsOf,
     SendTypes<T, L>: IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>,
     DatagramTicketOf<T, L>: IntentTicketWithdraw,

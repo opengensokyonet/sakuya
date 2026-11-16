@@ -27,6 +27,7 @@ use sakuya_wire::{
     },
 };
 
+use crate::v1::{AckObligationOf, HostChoices, HostOf};
 use crate::{
     call::CallBundle,
     clock::InstantOf,
@@ -50,7 +51,7 @@ use super::{
 
 /// The ACK obligations of a logical path, of the type the choices `T`
 /// give.
-pub type AckObligationsOf<T> = PacketNumberSpaces<<T as Choices>::AckObligation>;
+pub type AckObligationsOf<T> = PacketNumberSpaces<AckObligationOf<T>>;
 
 /// Where the ACK obligations are among a logical path's components.
 #[derive(Debug)]
@@ -59,7 +60,10 @@ pub struct ChosenAckObligation;
 /// The send journals of a logical path, of the type the choices `T` give,
 /// for the summaries and the link paths of the list of parts `L`.
 pub type SendJournalsOf<T, L> = PacketNumberSpaces<
-    <T as Choices>::SendJournals<FeedbackSummaryOf<T, L>, LinkPathIdentifierOf<T, L>>,
+    <HostOf<T> as HostChoices<T>>::SendJournals<
+        FeedbackSummaryOf<T, L>,
+        LinkPathIdentifierOf<T, L>,
+    >,
 >;
 
 /// Where the send journals are among a logical path's components.
@@ -183,7 +187,7 @@ impl<T, L, X, Ii, Ih, Il, It, Is, If>
     Build<T, L, layer::LogicalPath, (ChosenAckObligation, (Ii, Ih, If), Il, It, Is)>
     for PacketNumberSpaces<X>
 where
-    T: Choices<AckObligation = X>,
+    T: Choices<Host: HostChoices<T, AckObligation = X>>,
     X: AckObligation<InstantOf<T>>,
     L: LineagePartList<T>,
     TransportParameterSlots: Selector<Option<MaxAckDelay>, Is>,
@@ -224,7 +228,7 @@ where
 impl<T, L, X, I> DataComponent<T, L, layer::LogicalPath, (ChosenAckObligation, I)>
     for PacketNumberSpaces<X>
 where
-    T: Choices<AckObligation = X>,
+    T: Choices<Host: HostChoices<T, AckObligation = X>>,
     X: AckObligation<InstantOf<T>> + 'static,
     L: LineagePartList<T>,
     for<'v> <L as LineageLists<'v, T>>::LogicalPath: GetAt<PacketNumberSpaces<X>, I>,
@@ -261,7 +265,9 @@ where
 impl<T, L, X, Ii, Ih> Build<T, L, layer::LogicalPath, ((ChosenSendJournals, Ii, Ih),)>
     for PacketNumberSpaces<X>
 where
-    T: Choices<SendJournals<FeedbackSummaryOf<T, L>, LinkPathIdentifierOf<T, L>> = X>,
+    T: Choices<
+        Host: HostChoices<T, SendJournals<FeedbackSummaryOf<T, L>, LinkPathIdentifierOf<T, L>> = X>,
+    >,
     X: Default,
     L: LineagePartList<T> + FeedbackSummariesOf,
     for<'v> <L as LineageLists<'v, T>>::Connection:
@@ -281,7 +287,9 @@ where
 /// kept only to recognize late acknowledgments).
 impl<T, L, X> DataComponent<T, L, layer::LogicalPath, ChosenSendJournals> for PacketNumberSpaces<X>
 where
-    T: Choices<SendJournals<FeedbackSummaryOf<T, L>, LinkPathIdentifierOf<T, L>> = X>,
+    T: Choices<
+        Host: HostChoices<T, SendJournals<FeedbackSummaryOf<T, L>, LinkPathIdentifierOf<T, L>> = X>,
+    >,
     L: LineagePartList<T> + FeedbackSummariesOf,
 {
 }

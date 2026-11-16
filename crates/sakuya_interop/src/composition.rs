@@ -15,29 +15,12 @@ use nitori_crypto::{NamedGroup, Random as _, SignatureScheme, SigningKey};
 use nitori_crypto_aws_lc::{AwsLcBackend, EcdsaSigningKey};
 use rustls_pki_types::{PrivateKeyDer, pem::PemObject as _};
 use sakuya_clock_tokio::TokioClock;
+use sakuya_connection::v1;
 use sakuya_connection::v1::retry::ContinueOnRetry;
-use sakuya_connection::{
-    clock::{ConnectionChoices, LinkIdOf},
-    connection_id::{
-        reset_token::PeerGroupedResetTokenRegistrar,
-        sequence_map::{
-            SequenceMapDestinationConnectionIdStrategy,
-            SequenceMapDestinationConnectionIdStrategyConfig,
-        },
-    },
-    send_strategy::{SendStrategyTypes, ranked::RankedSendStrategy},
-    v1::{
-        self,
-        amplification::AntiAmplificationFactor,
-        close::PassThroughImmediateClosePolicy,
-        crypto::{FragmentedCryptoReceiveBuffer, send::OffsetMapCryptoSendBuffer},
-        stateless_reset::StatelessResetSignal,
-    },
-};
 use sakuya_datagram_routing::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
 use sakuya_endpoint::{
     address_token::{AddressTokenKey, AddressTokenLifetimes, AeadAddressTokens},
-    choices::{ConnectionDatagramReceiver, EndpointChoices, PeerOf, ResetTokensOf},
+    choices::EndpointChoices,
     client_token::BoundedAddressTokenStore,
     config::{
         ClientConfig, ClientCryptoReceiveCapacities, EndpointConfig, ServerConfig,
@@ -47,16 +30,13 @@ use sakuya_endpoint::{
     retry::{
         LoadStatelessRetryPolicy, StatelessRetryDecision, StatelessRetryInput, StatelessRetryPolicy,
     },
-    role::{AcceptingServer, ClientRole, ConnectingClient, ConnectingClientSide, ServerRole},
+    role::{
+        AcceptingServer, ClientConnectionChoices, ClientRole, ConnectingClient,
+        ServerConnectionChoices, ServerRole,
+    },
 };
 use sakuya_packet_protection::backend::ring::RingBackend;
-use sakuya_recovery::{
-    ack_obligation::Rfc9000AckObligation,
-    factory::{NewRenoRecoveryFactory, NewRenoRecoveryFactoryConfig},
-    loss::LossThresholds,
-    receive_journals::MaxAckRanges,
-    send_journals::DequeSendJournals,
-};
+use sakuya_recovery::loss::LossThresholds;
 use sakuya_test_support::verify::{TestRootsVerifier, roots_from_pem, test_roots_verifier};
 use sakuya_tls::{
     cipher_suite::CipherSuite,
@@ -168,54 +148,25 @@ impl v1::close::ApplicationClose for HqClose {
     }
 }
 
-macro_rules! choices {
-    ($name:ident, $side:ty) => {
-        pub(crate) struct $name;
-        impl ConnectionChoices for $name {
-            type Clock = TokioClock;
-            type Link = sakuya_endpoint::choices::LinkOf<Udp>;
-        }
-        impl v1::Choices for $name {
-            type Crypto = RingBackend;
-            type Side = $side;
-            type CryptoReceiveBuffer = FragmentedCryptoReceiveBuffer;
-            type CryptoSendBuffer = OffsetMapCryptoSendBuffer;
-            type Recovery<V: Clone + Eq + fmt::Debug + 'static> = NewRenoRecoveryFactory<V>;
-            type AckObligation = Rfc9000AckObligation<std::time::Instant>;
-            type SendJournals<S: 'static, P: Clone + Eq + fmt::Debug + 'static> =
-                DequeSendJournals<std::time::Instant, S, P>;
-            type ApplicationError = HqClose;
-            type Receiver = ConnectionDatagramReceiver<Udp>;
-            type SendStrategy<I: SendStrategyTypes> = RankedSendStrategy<I>;
-            type DestinationConnectionIds = SequenceMapDestinationConnectionIdStrategy<
-                LinkIdOf<Self>,
-                PeerGroupedResetTokenRegistrar<PeerOf<Udp>, Arc<StatelessResetSignal>>,
-            >;
-            type ResetTokenRegistry = ResetTokensOf<Udp>;
-            type ConnectionIdIssuer = sakuya_endpoint::issuer::EndpointConnectionIdIssuer<Udp>;
-            type LocalConnectionIds =
-                sakuya_connection::connection_id::local::SequenceMapLocalConnectionIdStrategy<
-                    sakuya_connection::v1::connection_ids::LocalConnectionIdRegistrationOf<Self>,
-                    sakuya_connection::clock::InstantOf<Self>,
-                >;
-            type SendParameters = sakuya_stream::send_options::urgency::Urgency;
-            type Streams<Lc, K, X: sakuya_connection::v1::streams::resets::StreamResets> =
-                sakuya_connection::v1::streams::locked::LockedStreamSet<Lc, K, X>;
-            type StreamSetConfig = sakuya_connection::v1::streams::locked::LockedStreamSetConfig;
-            type ImmediateClosePolicy = PassThroughImmediateClosePolicy;
-        }
-    };
+/// What the programs choose of version 1: their application error, and the
+/// default of everything else. The endpoint fixes the rest
+/// ([`ServerChoices`], [`ClientChoices`]).
+pub(crate) struct InteropChoices;
+
+impl<T: v1::MakerChoices> v1::HostChoices<T> for InteropChoices {
+    type ApplicationError = HqClose;
 }
-choices!(ServerChoices, v1::Server<ServerEngine>);
-choices!(
-    ClientChoices,
-    ConnectingClientSide<ClientStarts, ClientTokens, ContinueOnRetry>
-);
+
+/// The choices of the server's connections.
+pub(crate) type ServerChoices = ServerConnectionChoices<Udp, InteropChoices, ServerStarts>;
+/// The choices of the client's connections.
+pub(crate) type ClientChoices =
+    ClientConnectionChoices<Udp, InteropChoices, ClientStarts, ClientTokens, ContinueOnRetry>;
 
 pub(crate) type Parts = frunk_core::HList![v1::Part];
 
 pub(crate) type Server = AcceptingServer<
-    ServerChoices,
+    InteropChoices,
     Parts,
     ServerStarts,
     AeadAddressTokens<AwsLcBackend>,
@@ -224,7 +175,7 @@ pub(crate) type Server = AcceptingServer<
 /// Where the client keeps the address validation tokens servers give it.
 pub(crate) type ClientTokens = BoundedAddressTokenStore<ServerTarget>;
 pub(crate) type Client =
-    ConnectingClient<ClientChoices, Parts, ClientStarts, ClientTokens, ContinueOnRetry>;
+    ConnectingClient<InteropChoices, Parts, ClientStarts, ClientTokens, ContinueOnRetry>;
 
 /// The stateless Retry policy of the server: always for the `retry` test
 /// case, otherwise under load.
@@ -520,9 +471,11 @@ impl ClientHandshakeConfig for ClientStarts {
 
 // ---- the configurations ----
 
-/// The transport parameters both sides send: room for the runner's files
-/// (up to 10 MB on a stream) and for many streams; the stream set raises
-/// the limits as the application reads.
+/// The configuration of version 1 for both sides: the default, with the
+/// transport parameters both sides send: room for the runner's files (up
+/// to 10 MB on a stream) and for many streams, and no unidirectional
+/// streams of the peer; the stream set raises the limits as the
+/// application reads.
 macro_rules! v1_config {
     ($t:ty) => {{
         let mut parameters = TransportParameters::<Vec<u8>>::new();
@@ -540,16 +493,8 @@ macro_rules! v1_config {
             StreamCount::new(100).expect("a stream count"),
         ));
         sakuya_endpoint::v1::ConnectionConfig::<$t, Parts> {
-            // invariant: 3 is not zero
-            anti_amplification: AntiAmplificationFactor::new(3).expect("a factor"),
             transport_parameters: parameters.known,
-            recovery: NewRenoRecoveryFactoryConfig::recommended(Duration::from_millis(1)),
-            max_ack_ranges: MaxAckRanges::DEFAULT,
-            max_datagrams_per_poll: 16.try_into().expect("not zero"),
-            max_held_inputs: 16,
-            destination_connection_ids: SequenceMapDestinationConnectionIdStrategyConfig::new(8),
-            max_datagrams_per_send: 16.try_into().expect("not zero"),
-            immediate_close_policy: PassThroughImmediateClosePolicy,
+            ..Default::default()
         }
     }};
 }

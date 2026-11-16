@@ -29,6 +29,7 @@ use nitori_crypto::{NamedGroup, SignatureScheme, SigningKey as _};
 use nitori_crypto_aws_lc::{AwsLcBackend, Ed25519SigningKey};
 use nitori_io::{ReadChunkHostExt as _, calls::WriteAllHostExt as _};
 use sakuya_connection::prelude::*;
+use sakuya_connection::v1::{HostChoices, HostOf, SendParametersOf};
 use sakuya_connection::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf},
@@ -56,9 +57,7 @@ use sakuya_connection::{
         close_request::CloseRequestCell,
         confirmation::HandshakeConfirmation,
         connection_ids::{ConnectionIdsOf, FirstLocalConnectionId},
-        crypto::{
-            CryptoReceiveCapacities, FragmentedCryptoReceiveBuffer, send::OffsetMapCryptoSendBuffer,
-        },
+        crypto::CryptoReceiveCapacities,
         first_flight::FirstFlight,
         handshake_done::ClientOnlyStart,
         input::InitialPathReceiver,
@@ -428,27 +427,21 @@ macro_rules! choices {
             type Clock = TestClock;
             type Link = TestLink;
         }
-        impl v1::Choices for $name {
+        impl v1::MakerChoices for $name {
             type Crypto = RingBackend;
             type Side = $side;
-            type CryptoReceiveBuffer = FragmentedCryptoReceiveBuffer;
-            type CryptoSendBuffer = OffsetMapCryptoSendBuffer;
-            type Recovery<V: Clone + Eq + Debug + 'static> =
-                sakuya_recovery::factory::NewRenoRecoveryFactory<V>;
-            type AckObligation = sakuya_recovery::ack_obligation::Rfc9000AckObligation<Duration>;
-            type SendJournals<S: 'static, P: Clone + Eq + Debug + 'static> =
-                sakuya_recovery::send_journals::DequeSendJournals<Duration, S, P>;
-            type ApplicationError = common::AppClose;
             type Receiver = TestReceiver;
-            type SendStrategy<I: sakuya_connection::send_strategy::SendStrategyTypes> = $strategy;
-            type DestinationConnectionIds = common::TestDestinationConnectionIds;
             type ResetTokenRegistry = common::TestResetTokenRegistry;
             type ConnectionIdIssuer = common::TestConnectionIdIssuer;
+        }
+        impl v1::Choices for $name {
+            type Host = Self;
+        }
+        impl v1::HostChoices<$name> for $name {
+            type ApplicationError = common::AppClose;
+            type SendStrategy<I: sakuya_connection::send_strategy::SendStrategyTypes> = $strategy;
+            type DestinationConnectionIds = common::TestDestinationConnectionIds;
             type LocalConnectionIds = common::TestLocalConnectionIds;
-            type SendParameters = sakuya_stream::send_options::urgency::Urgency;
-            type Streams<Lc, K, X: sakuya_connection::v1::streams::resets::StreamResets> =
-                sakuya_connection::v1::streams::locked::LockedStreamSet<Lc, K, X>;
-            type StreamSetConfig = sakuya_connection::v1::streams::locked::LockedStreamSetConfig;
             type ImmediateClosePolicy = common::TestImmediateClosePolicy;
         }
     };
@@ -759,8 +752,11 @@ mod watch {
         T: v1::Choices<
                 Clock = TestClock,
                 Link = TestLink,
-                DestinationConnectionIds = common::TestDestinationConnectionIds,
-                LocalConnectionIds = common::TestLocalConnectionIds,
+                Host: v1::HostChoices<
+                    T,
+                    DestinationConnectionIds = common::TestDestinationConnectionIds,
+                    LocalConnectionIds = common::TestLocalConnectionIds,
+                >,
             >,
         for<'v> L: LineageLists<'v, T>,
         for<'v> <L as LineageLists<'v, T>>::LogicalPath: GetAt<ConnectionIdsOf<T>, Ii>,
@@ -818,7 +814,7 @@ mod watch {
         T: v1::Choices<Clock = TestClock>,
         L: LineagePartList<T> + ConnectionErrorsOf,
         v1::send::SendTypes<T, L>: v1::send_planning::IntakePublishOutcome<
-                v1::streams::send::StreamIntent<T::SendParameters>,
+                v1::streams::send::StreamIntent<SendParametersOf<T>>,
                 sakuya_connection::send_strategy::AnyActiveLinkPath,
             >,
         for<'v> <L as LineageLists<'v, T>>::Established: GetAt<StreamsOf<T, L>, Is>,
@@ -1097,13 +1093,16 @@ where
             Crypto = RingBackend,
             Link = TestLink,
             Receiver = TestReceiver,
-            DestinationConnectionIds = common::TestDestinationConnectionIds,
             ResetTokenRegistry = common::TestResetTokenRegistry,
             ConnectionIdIssuer = common::TestConnectionIdIssuer,
-            ImmediateClosePolicy = common::TestImmediateClosePolicy,
-            ApplicationError = common::AppClose,
+            Host: v1::HostChoices<
+                T,
+                DestinationConnectionIds = common::TestDestinationConnectionIds,
+                ImmediateClosePolicy = common::TestImmediateClosePolicy,
+                ApplicationError = common::AppClose,
+            >,
         >,
-    T::Recovery<LinkId<(), ()>>:
+    <HostOf<T> as HostChoices<T>>::Recovery<LinkId<(), ()>>:
         sakuya_recovery::factory::RecoveryFactory<TestLink, Config = NewRenoRecoveryFactoryConfig>,
 {
     let mut parameters = TransportParameters::<Vec<u8>>::new();
@@ -2068,30 +2067,19 @@ mod reliable {
 mod datagram {
     use std::cell::Cell;
 
-    use sakuya_connection::{
-        datagram::{
-            self, DatagramChoices, DatagramConnectionArgs, DatagramSide, ServerReceivedDatagram,
-            application::SendDatagramError,
-            locked::{LockedDatagramQueues, LockedDatagramQueuesConfig},
-            send::{DatagramSettlement, DatagramState},
-        },
-        send_strategy::IntentTicketWithdraw,
+    use sakuya_connection::datagram::{
+        self, DatagramChoices, DatagramConnectionArgs, ServerReceivedDatagram,
+        application::SendDatagramError,
+        locked::LockedDatagramQueuesConfig,
+        send::{DatagramSettlement, DatagramState},
     };
     use sakuya_wire::datagram::MaxDatagramFrameSize;
 
     use super::*;
 
-    impl DatagramChoices for ServerChoices {
-        type DatagramQueues<Lc, K: IntentTicketWithdraw, S: DatagramSide> =
-            LockedDatagramQueues<Lc, K, S>;
-        type DatagramQueuesConfig = LockedDatagramQueuesConfig;
-    }
+    impl DatagramChoices for ServerChoices {}
 
-    impl DatagramChoices for ClientChoices {
-        type DatagramQueues<Lc, K: IntentTicketWithdraw, S: DatagramSide> =
-            LockedDatagramQueues<Lc, K, S>;
-        type DatagramQueuesConfig = LockedDatagramQueuesConfig;
-    }
+    impl DatagramChoices for ClientChoices {}
 
     /// The parts of these connections: version 1, the extension, and the
     /// watch; with the reliable stream reset extension too, the DATAGRAM

@@ -44,6 +44,7 @@ use sakuya_wire::{
     },
 };
 
+use crate::v1::{HostChoices, HostOf, SendParametersOf};
 use crate::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf},
@@ -272,7 +273,7 @@ impl<T, L, S, Ls, Id, In, If, Ipp, Ima, It, Jx, Jr, Hf, Is>
 where
     T: Choices,
     L: LineagePartList<T> + FeedbackSummariesOf + ConnectionErrorsOf,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
@@ -388,7 +389,7 @@ pub(super) type LossTakes<T, L, D> = HList![
 /// not have as sent, such as one whose record went with the end of its link
 /// path, gives nothing back.
 pub(super) fn hand_back_lost<T, L, V, X, Hf>(
-    journals: &mut <T as Choices>::SendJournals<
+    journals: &mut <HostOf<T> as HostChoices<T>>::SendJournals<
         FeedbackSummaryOf<T, L>,
         LinkPathIdentifierOf<T, L>,
     >,

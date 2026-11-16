@@ -27,6 +27,7 @@ use sakuya_wire::{
     },
 };
 
+use crate::v1::SendParametersOf;
 use crate::{
     call::CallBundle,
     clock::{CheckedAdd, InstantOf},
@@ -247,7 +248,7 @@ impl<T, L, S, Ls, Ipt, Ir, If, Ipp, Ima, It, Jx, Jr, Hf, Ip, Is>
 where
     T: Choices,
     L: LineagePartList<T> + FeedbackSummariesOf + ConnectionErrorsOf,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
@@ -406,7 +407,7 @@ type ProbeTimeoutReads<T, L, S, Ls> = HList![
     LinkPathRole<InstantOf<T>>,
     AntiAmplification,
     LinkFacts,
-    HandshakeKeys<<T as Choices>::Crypto>,
+    HandshakeKeys<<T as crate::v1::MakerChoices>::Crypto>,
     PacketNumberSpaces<PacketNumberSpaceState>
 ];
 

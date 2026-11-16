@@ -64,6 +64,7 @@ use super::{
     established_layer::{EstablishedLayerHandle, LayerShare},
     handle,
 };
+use crate::v1::{ApplicationErrorOf, SendParametersOf};
 use crate::{
     call::CallBundle,
     clock::InstantOf,
@@ -486,11 +487,11 @@ impl<C, F, X, Sh: HandleShareSlots, N, A> fmt::Debug for ConnectionHandleCell<C,
 // ---- the types of the choices ----
 
 /// The facts of the handshake of the side of the choices `T`.
-pub type HandshakeFactsOf<T> = <<T as Choices>::Side as Side>::HandshakeFacts;
+pub type HandshakeFactsOf<T> = <<T as crate::v1::MakerChoices>::Side as Side>::HandshakeFacts;
 
 /// What an established layer of the choices `T` runs with of the
 /// handshake's selection.
-pub type LayerSelectionOf<T> = <<T as Choices>::Side as Side>::LayerSelection;
+pub type LayerSelectionOf<T> = <<T as crate::v1::MakerChoices>::Side as Side>::LayerSelection;
 
 /// The handle the stream set of the choices `T` and the list of parts `L`
 /// gives the application: version 1's share of an established layer's
@@ -510,7 +511,7 @@ pub type EstablishedLayerSharesOf<T, L> = HandleSharesOf<T, L, handle::Establish
 pub type ConnectionHandleCellOf<T, L> = ConnectionHandleCell<
     CloseCauseOf<T, L>,
     HandshakeFactsOf<T>,
-    <<T as Choices>::Side as Side>::Exporter,
+    <<T as crate::v1::MakerChoices>::Side as Side>::Exporter,
     EstablishedLayerSharesOf<T, L>,
     IntakeOf<T, L>,
     LayerSelectionOf<T>,
@@ -556,7 +557,7 @@ impl<T, L> ConnectionHandleCellSlot<T, L>
 where
     T: Choices,
     L: ConnectionErrorsOf,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     L: HandleShares<T, L, handle::EstablishedLayer>,
     ConnectionHandleCellOf<T, L>: Send + Sync + 'static,
@@ -618,7 +619,7 @@ impl<T, L, I> Build<T, L, layer::Connection, (I,)>
 where
     T: Choices,
     L: LineagePartList<T> + ConnectionErrorsOf,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     L: HandleShares<T, L, handle::EstablishedLayer>,
     ConnectionHandleCellOf<T, L>: Send + Sync + 'static,
@@ -660,7 +661,7 @@ impl<T, L, I, Ic> DataComponent<T, L, layer::Connection, (I, Ic)> for Connection
 where
     T: Choices,
     L: LineagePartList<T> + ConnectionErrorsOf,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     L: HandleShares<T, L, handle::EstablishedLayer>,
     EstablishedLayerSharesOf<T, L>: DriverPanicHandleShare<CloseCauseOf<T, L>>,
@@ -715,19 +716,19 @@ pub struct ConnectionHandle<T, L>
 where
     T: Choices,
     L: ConnectionErrorsOf,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     L: HandleShares<T, L, handle::EstablishedLayer>,
 {
     cell: ConnectionHandleCellOf<T, L>,
-    close_request: CloseRequestCell<T::ApplicationError>,
+    close_request: CloseRequestCell<ApplicationErrorOf<T>>,
 }
 
 impl<T, L> ConnectionHandle<T, L>
 where
     T: Choices,
     L: LogicalPathKeys + ConnectionErrorsOf,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     L: HandleShares<T, L, handle::EstablishedLayer>,
     ConnectionHandleCellOf<T, L>: Send + Sync + 'static,
@@ -747,7 +748,7 @@ impl<T, L> ConnectionHandle<T, L>
 where
     T: Choices,
     L: ConnectionErrorsOf,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     L: HandleShares<T, L, handle::EstablishedLayer>,
 {
@@ -757,7 +758,7 @@ where
     /// the first request counts.
     ///
     /// [`closed`]: Self::closed
-    pub fn close(&self, error: T::ApplicationError) {
+    pub fn close(&self, error: ApplicationErrorOf<T>) {
         self.close_request.request(error);
     }
 
@@ -848,7 +849,7 @@ impl<T, L> Clone for ConnectionHandle<T, L>
 where
     T: Choices,
     L: ConnectionErrorsOf,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     L: HandleShares<T, L, handle::EstablishedLayer>,
 {
@@ -864,7 +865,7 @@ impl<T, L> fmt::Debug for ConnectionHandle<T, L>
 where
     T: Choices,
     L: ConnectionErrorsOf,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     L: HandleShares<T, L, handle::EstablishedLayer>,
 {

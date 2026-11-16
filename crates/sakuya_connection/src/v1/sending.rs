@@ -168,6 +168,7 @@ use super::{
     spaces::{DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
     streams::send::StreamIntent,
 };
+use crate::v1::{HostChoices, HostOf, SendParametersOf};
 use crate::{
     call::{CallBundle, CallKind, NodeCallFamily, NodeLoan},
     clock::{InstantOf, LinkIdOf},
@@ -224,7 +225,7 @@ pub enum DatagramAcceptance {
 
 /// The sealed packet of the send journals of the choices `T` and the list
 /// of parts `L`.
-pub type SealedPacketOf<T, L> = <<T as Choices>::SendJournals<
+pub type SealedPacketOf<T, L> = <<HostOf<T> as HostChoices<T>>::SendJournals<
     FeedbackSummaryOf<T, L>,
     LinkPathIdentifierOf<T, L>,
 > as SendJournals<
@@ -314,9 +315,9 @@ pub type ResendTakes<T, L> = HList![
 /// What filling takes out of what is left to read only: the keys of each
 /// level, which packets are sealed with while the frame sources write.
 pub type FillReadTakes<T> = HList![
-    InitialKeys<<T as Choices>::Crypto>,
-    HandshakeKeys<<T as Choices>::Crypto>,
-    OneRttKeys<<T as Choices>::Crypto, InstantOf<T>>,
+    InitialKeys<<T as crate::v1::MakerChoices>::Crypto>,
+    HandshakeKeys<<T as crate::v1::MakerChoices>::Crypto>,
+    OneRttKeys<<T as crate::v1::MakerChoices>::Crypto, InstantOf<T>>,
 ];
 
 /// What is left of the link path's lineage once filling took
@@ -346,7 +347,7 @@ pub type FillReads<T, L> = HList![
     LinkFacts,
     PeerTransportParameters<TransportParameterSlots<L>>,
     PacketNumberSpaces<PacketNumberSpaceState>,
-    <<T as Choices>::Side as Side>::Own,
+    <<T as crate::v1::MakerChoices>::Side as Side>::Own,
 ];
 
 /// What filling takes from the link path's recovery layer.
@@ -666,7 +667,7 @@ where
         >,
     for<'x> <L as LineageLists<'x, T>>::LinkPath:
         CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
@@ -1615,7 +1616,7 @@ fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ist, Ipp, Ima, Jx, Jr, Jm>(
         + ReadEach<SettleReads<T, L>, Iv>,
     for<'x> <L as LineageLists<'x, T>>::LinkPath:
         CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
@@ -1967,7 +1968,7 @@ where
         >,
     for<'x> <L as LineageLists<'x, T>>::LinkPath:
         CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:

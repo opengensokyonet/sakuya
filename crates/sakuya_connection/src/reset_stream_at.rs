@@ -76,6 +76,7 @@ use sakuya_wire::{
 };
 use snafu::{ResultExt, Snafu, ensure};
 
+use crate::v1::SendParametersOf;
 use crate::{
     call::CallBundle,
     clock::InstantOf,
@@ -584,19 +585,19 @@ where
     T: Choices,
     L: LineagePartList<T> + ConnectionErrorsOf,
     SendTypes<T, L>: SendStrategyTypes
-        + IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+        + IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     StreamsOf<T, L>: ResetStreamAtSet<
             CloseCauseOf<T, L>,
             StreamIntentTicketOf<T, L>,
             StreamResetsOfParts<L>,
-            SendParameters = T::SendParameters,
+            SendParameters = SendParametersOf<T>,
         > + 'static,
     StreamIntentTicketOf<T, L>: IntentTicketResize + IntentTicketWithdraw,
     IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
-        + SharedPublishTo<StreamIntent<T::SendParameters>, AnyActiveLinkPath, Idx>,
+        + SharedPublishTo<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath, Idx>,
     StreamIntentHandleOf<T, L, Idx>:
-        StreamIntentHandle<T::SendParameters, StreamIntentTicketOf<T, L>>,
+        StreamIntentHandle<SendParametersOf<T>, StreamIntentTicketOf<T, L>>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<LocalTransportParameters<PartSlots<Part>>, Il>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
         + GetAt<SendStrategyIntake<IntakeOf<T, L>>, Ii>,
@@ -628,7 +629,7 @@ where
         let publish = lineage
             .get::<SendStrategyIntake<IntakeOf<T, L>>, Ii>()
             .intake()
-            .handle::<StreamIntent<T::SendParameters>, Idx>();
+            .handle::<StreamIntent<SendParametersOf<T>>, Idx>();
         streams
             .on_reset_stream_at(&publish, run)
             .context(StreamSetSnafu)

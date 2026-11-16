@@ -181,7 +181,7 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
         ConnectionArgsOf<C::Choices, C::Parts>: Selector<ConnectionArgs<C::Choices, C::Parts>, I>,
         C::Parts: ConnectionErrorsOf,
         SendTypes<C::Choices, C::Parts>: IntakePublishOutcome<
-                StreamIntent<<C::Choices as connection::Choices>::SendParameters>,
+                StreamIntent<connection::SendParametersOf<C::Choices>>,
                 AnyActiveLinkPath,
             >,
         SendStrategyOf<C::Choices, C::Parts>: SendStrategy<SendTypes<C::Choices, C::Parts>>,

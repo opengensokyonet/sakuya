@@ -38,28 +38,12 @@ use nitori_io::{ReadChunkHostExt as _, calls::WriteAllHostExt as _};
 use sakuya_clock_tokio::TokioClock;
 use sakuya_connection::prelude::*;
 use sakuya_connection::v1::retry::ContinueOnRetry;
-use sakuya_connection::{
-    clock::{ConnectionChoices, LinkIdOf},
-    connection_id::{
-        reset_token::PeerGroupedResetTokenRegistrar,
-        sequence_map::{
-            SequenceMapDestinationConnectionIdStrategy,
-            SequenceMapDestinationConnectionIdStrategyConfig,
-        },
-    },
-    send_strategy::{SendStrategyTypes, ranked::RankedSendStrategy},
-    v1::{
-        self,
-        amplification::AntiAmplificationFactor,
-        close::PassThroughImmediateClosePolicy,
-        crypto::{FragmentedCryptoReceiveBuffer, send::OffsetMapCryptoSendBuffer},
-        stateless_reset::StatelessResetSignal,
-    },
-};
+use sakuya_connection::v1::{self};
 use sakuya_datagram_routing::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
+use sakuya_endpoint::role::{ClientConnectionChoices, ServerConnectionChoices};
 use sakuya_endpoint::{
     address_token::{AddressTokenKey, AddressTokenLifetimes, AeadAddressTokens},
-    choices::{ConnectionDatagramReceiver, EndpointChoices, PeerOf, ResetTokensOf},
+    choices::EndpointChoices,
     client_token::BoundedAddressTokenStore,
     config::{
         BindingDeclarations, ClientConfig, ClientCryptoReceiveCapacities, EndpointConfig,
@@ -69,16 +53,10 @@ use sakuya_endpoint::{
     handshake::{ClientHandshakeConfig, ServerHandshakeConfig},
     incoming::Incoming,
     retry::{CapacityFraction, LoadStatelessRetryPolicy},
-    role::{AcceptingServer, ConnectingClient, ConnectingClientSide, NoClient, NoServer},
+    role::{AcceptingServer, ConnectingClient, NoClient, NoServer},
 };
 use sakuya_packet_protection::backend::ring::RingBackend;
-use sakuya_recovery::{
-    ack_obligation::Rfc9000AckObligation,
-    factory::{NewRenoRecoveryFactory, NewRenoRecoveryFactoryConfig},
-    loss::LossThresholds,
-    receive_journals::MaxAckRanges,
-    send_journals::DequeSendJournals,
-};
+use sakuya_recovery::loss::LossThresholds;
 use sakuya_test_support::{
     measure::{
         AllocationCounts, Counted, CountingAllocator, WakeCountReader, WakeCounts,
@@ -192,54 +170,24 @@ impl v1::close::ApplicationClose for AppClose {
     }
 }
 
-macro_rules! choices {
-    ($name:ident, $side:ty) => {
-        struct $name;
-        impl ConnectionChoices for $name {
-            type Clock = TokioClock;
-            type Link = sakuya_endpoint::choices::LinkOf<Udp>;
-        }
-        impl v1::Choices for $name {
-            type Crypto = RingBackend;
-            type Side = $side;
-            type CryptoReceiveBuffer = FragmentedCryptoReceiveBuffer;
-            type CryptoSendBuffer = OffsetMapCryptoSendBuffer;
-            type Recovery<V: Clone + Eq + fmt::Debug + 'static> = NewRenoRecoveryFactory<V>;
-            type AckObligation = Rfc9000AckObligation<std::time::Instant>;
-            type SendJournals<S: 'static, P: Clone + Eq + fmt::Debug + 'static> =
-                DequeSendJournals<std::time::Instant, S, P>;
-            type ApplicationError = AppClose;
-            type Receiver = ConnectionDatagramReceiver<Udp>;
-            type SendStrategy<I: SendStrategyTypes> = RankedSendStrategy<I>;
-            type DestinationConnectionIds = SequenceMapDestinationConnectionIdStrategy<
-                LinkIdOf<Self>,
-                PeerGroupedResetTokenRegistrar<PeerOf<Udp>, Arc<StatelessResetSignal>>,
-            >;
-            type ResetTokenRegistry = ResetTokensOf<Udp>;
-            type ConnectionIdIssuer = sakuya_endpoint::issuer::EndpointConnectionIdIssuer<Udp>;
-            type LocalConnectionIds =
-                sakuya_connection::connection_id::local::SequenceMapLocalConnectionIdStrategy<
-                    sakuya_connection::v1::connection_ids::LocalConnectionIdRegistrationOf<Self>,
-                    sakuya_connection::clock::InstantOf<Self>,
-                >;
-            type SendParameters = sakuya_stream::send_options::urgency::Urgency;
-            type Streams<Lc, K, X: sakuya_connection::v1::streams::resets::StreamResets> =
-                sakuya_connection::v1::streams::locked::LockedStreamSet<Lc, K, X>;
-            type StreamSetConfig = sakuya_connection::v1::streams::locked::LockedStreamSetConfig;
-            type ImmediateClosePolicy = PassThroughImmediateClosePolicy;
-        }
-    };
+/// What the tests choose of version 1: their application error, and the
+/// default of everything else; the endpoint fixes the rest.
+struct Mine;
+
+impl<T: v1::MakerChoices> v1::HostChoices<T> for Mine {
+    type ApplicationError = AppClose;
 }
-choices!(ServerChoices, v1::Server<ServerEngine>);
-choices!(
-    ClientChoices,
-    ConnectingClientSide<ClientStarts, ClientTokens, ContinueOnRetry>
-);
+
+/// The choices of the server's connections.
+type ServerChoices = ServerConnectionChoices<Udp, Mine, ServerStarts>;
+/// The choices of the client's connections.
+type ClientChoices =
+    ClientConnectionChoices<Udp, Mine, ClientStarts, ClientTokens, ContinueOnRetry>;
 
 type Parts = frunk_core::HList![v1::Part];
 
 type Server = AcceptingServer<
-    ServerChoices,
+    Mine,
     Parts,
     ServerStarts,
     AeadAddressTokens<AwsLcBackend>,
@@ -247,7 +195,7 @@ type Server = AcceptingServer<
 >;
 /// Where the client keeps the address validation tokens servers give it.
 type ClientTokens = BoundedAddressTokenStore<ServerTarget>;
-type Client = ConnectingClient<ClientChoices, Parts, ClientStarts, ClientTokens, ContinueOnRetry>;
+type Client = ConnectingClient<Mine, Parts, ClientStarts, ClientTokens, ContinueOnRetry>;
 
 // ---- the handshakes ----
 
@@ -400,15 +348,8 @@ macro_rules! v1_config {
         )));
         parameters.set(InitialMaxStreamsBidi::new(StreamCount::new(4).unwrap()));
         sakuya_endpoint::v1::ConnectionConfig::<$t, Parts> {
-            anti_amplification: AntiAmplificationFactor::new(3).unwrap(),
             transport_parameters: parameters.known,
-            recovery: NewRenoRecoveryFactoryConfig::recommended(Duration::from_millis(1)),
-            max_ack_ranges: MaxAckRanges::DEFAULT,
-            max_datagrams_per_poll: 16.try_into().unwrap(),
-            max_held_inputs: 16,
-            destination_connection_ids: SequenceMapDestinationConnectionIdStrategyConfig::new(8),
-            max_datagrams_per_send: 16.try_into().unwrap(),
-            immediate_close_policy: PassThroughImmediateClosePolicy,
+            ..Default::default()
         }
     }};
 }

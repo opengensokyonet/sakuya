@@ -323,7 +323,7 @@ pub mod a {
         for<'v> L: LineageLists<'v, Mine>
     {
     }
-    impl<L, I> Build<Mine, L, layer::Established, I> for Streams
+    impl<L, I> Build<Mine, L, layer::Established, (I,)> for Streams
     where
         for<'v> L: LineageLists<'v, Mine>,
         for<'v> <L as LineageLists<'v, Mine>>::Connection: GetAt<Record, I>,

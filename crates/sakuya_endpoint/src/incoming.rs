@@ -244,7 +244,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
         ConnectionArgsOf<S::Choices, S::Parts>: Selector<ConnectionArgs<S::Choices, S::Parts>, I>,
         S::Parts: ConnectionErrorsOf,
         SendTypes<S::Choices, S::Parts>: IntakePublishOutcome<
-                StreamIntent<<S::Choices as connection::Choices>::SendParameters>,
+                StreamIntent<connection::SendParametersOf<S::Choices>>,
                 AnyActiveLinkPath,
             >,
         SendStrategyOf<S::Choices, S::Parts>: SendStrategy<SendTypes<S::Choices, S::Parts>>,

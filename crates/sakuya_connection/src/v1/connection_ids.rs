@@ -53,6 +53,7 @@ use super::{
     send_planning::{SendStrategyCore, SendStrategyOf},
     stateless_reset::StatelessResetSignal,
 };
+use crate::v1::{DestinationConnectionIdsOf, LocalConnectionIdsOf};
 use crate::{
     call::CallBundle,
     clock::{ConnectionChoices, InstantOf, LinkIdOf},
@@ -83,20 +84,21 @@ pub type PeerOf<T> = <<T as ConnectionChoices>::Link as Link>::Peer;
 
 /// The registrar each link path of the choices `T` makes from the
 /// connection's registry.
-pub type ResetTokenRegistrarOf<T> = <<T as Choices>::ResetTokenRegistry as ResetTokenRegistry<
-    PeerOf<T>,
-    Arc<StatelessResetSignal>,
->>::Registrar;
+pub type ResetTokenRegistrarOf<T> =
+    <<T as crate::v1::MakerChoices>::ResetTokenRegistry as ResetTokenRegistry<
+        PeerOf<T>,
+        Arc<StatelessResetSignal>,
+    >>::Registrar;
 
 /// What keeps a connection ID the issuer of the choices `T` issued
 /// registered with routing, until it is dropped.
 pub type LocalConnectionIdRegistrationOf<T> =
-    <<T as Choices>::ConnectionIdIssuer as ConnectionIdIssuer>::Registration;
+    <<T as crate::v1::MakerChoices>::ConnectionIdIssuer as ConnectionIdIssuer>::Registration;
 
 /// The configuration the destination connection ID strategy of the
 /// choices `T` is made from.
 pub type DestinationConnectionIdConfigOf<T> =
-    <<T as Choices>::DestinationConnectionIds as DestinationConnectionIdStrategy<
+    <DestinationConnectionIdsOf<T> as DestinationConnectionIdStrategy<
         LinkIdOf<T>,
         InstantOf<T>,
         ResetTokenRegistrarOf<T>,
@@ -480,8 +482,7 @@ impl<D, Lo> ConnectionIds<D, Lo> {
 }
 
 /// The connection IDs of a logical path of the choices `T`.
-pub type ConnectionIdsOf<T> =
-    ConnectionIds<<T as Choices>::DestinationConnectionIds, <T as Choices>::LocalConnectionIds>;
+pub type ConnectionIdsOf<T> = ConnectionIds<DestinationConnectionIdsOf<T>, LocalConnectionIdsOf<T>>;
 
 /// This side's connection ID is the one the connection was made with. The
 /// destination strategy is made with the `active_connection_id_limit` this
@@ -522,7 +523,7 @@ where
         let config = &parents
             .get::<DestinationConnectionIdConfig<DestinationConnectionIdConfigOf<T>>, Ic>()
             .0;
-        let destination = <T::DestinationConnectionIds as DestinationConnectionIdStrategy<
+        let destination = <DestinationConnectionIdsOf<T> as DestinationConnectionIdStrategy<
             LinkIdOf<T>,
             InstantOf<T>,
             ResetTokenRegistrarOf<T>,
@@ -542,7 +543,7 @@ where
             (FirstLocalConnectionId::Issued { .. }, None)
             | (FirstLocalConnectionId::ZeroLength, _) => None,
         };
-        let local_strategy = <T::LocalConnectionIds as LocalConnectionIdStrategy<
+        let local_strategy = <LocalConnectionIdsOf<T> as LocalConnectionIdStrategy<
             LinkIdOf<T>,
             InstantOf<T>,
             LocalConnectionIdRegistrationOf<T>,
@@ -594,7 +595,7 @@ type RetiringTakes<T, L> = HList![ConnectionIdsOf<T>, CoreOf<T, L>];
 type IssuingTakes<T, L> = HList![
     ConnectionIdsOf<T>,
     CoreOf<T, L>,
-    LocalConnectionIdIssuer<<T as Choices>::ConnectionIdIssuer>
+    LocalConnectionIdIssuer<<T as crate::v1::MakerChoices>::ConnectionIdIssuer>
 ];
 
 /// `V: CoreLentConnectionIdEvents<T, L, H>`: the events of the destination

@@ -54,6 +54,7 @@ use super::{
     spaces::SendJournalsOf,
     streams::send::StreamIntent,
 };
+use crate::v1::SendParametersOf;
 use crate::{
     call::CallBundle,
     clock::{InstantOf, LinkIdOf},
@@ -293,7 +294,7 @@ where
         + ConnectionErrorsOf
         + EstablishedSourceComponentsOf<T, L>,
     B: CallBundle,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     S: 'static,
     Ls: 'static,
     RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link>,

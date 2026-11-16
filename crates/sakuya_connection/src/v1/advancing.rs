@@ -123,6 +123,7 @@ use super::{
     send_planning::{IntakePublishOutcome, SendStrategyCore, SendStrategyOf},
     streams::send::StreamIntent,
 };
+use crate::v1::{CryptoReceiveBufferOf, CryptoSendBufferOf, SendParametersOf};
 use crate::{
     call::{CallBundle, CallKind, NodeCallFamily, NodeLoan},
     clock::InstantOf,
@@ -455,7 +456,7 @@ macro_rules! crypto_capabilities {
             L: LineagePartList<T> + ConnectionErrorsOf,
             B: CallBundle,
             for<'x> <L as LineageLists<'x, T>>::Connection:
-                GetAt<CryptoReceiver<T::CryptoReceiveBuffer>, Icr>,
+                GetAt<CryptoReceiver<CryptoReceiveBufferOf<T>>, Icr>,
         {
             type Error = ConnectionErrorOf<L>;
 
@@ -469,7 +470,7 @@ macro_rules! crypto_capabilities {
             {
                 host.get_mut()
                     .lineage
-                    .get_mut::<CryptoReceiver<T::CryptoReceiveBuffer>, Icr>()
+                    .get_mut::<CryptoReceiver<CryptoReceiveBufferOf<T>>, Icr>()
                     .poll_read(cx, destination)
                     .map(Ok)
             }
@@ -485,7 +486,7 @@ macro_rules! crypto_capabilities {
             B: CallBundle,
             <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
             for<'x> <L as LineageLists<'x, T>>::Connection:
-                GetAt<CryptoReceiver<T::CryptoReceiveBuffer>, Icr>,
+                GetAt<CryptoReceiver<CryptoReceiveBufferOf<T>>, Icr>,
         {
             type LevelError = ConnectionErrorOf<L>;
 
@@ -498,7 +499,7 @@ macro_rules! crypto_capabilities {
             {
                 view.get_mut()
                     .lineage
-                    .get_mut::<CryptoReceiver<T::CryptoReceiveBuffer>, Icr>()
+                    .get_mut::<CryptoReceiver<CryptoReceiveBufferOf<T>>, Icr>()
                     .move_input_to(level)
                     .map_err(|source| {
                         v1_error::<L, Iv>(ConnectionError::CryptoLevelMove { source })
@@ -517,7 +518,7 @@ macro_rules! crypto_capabilities {
             B: CallBundle,
             <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
             for<'x> <L as LineageLists<'x, T>>::Connection:
-                GetAt<CryptoSender<T::CryptoSendBuffer>, Ics>,
+                GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>,
         {
             type Error = ConnectionErrorOf<L>;
 
@@ -532,7 +533,7 @@ macro_rules! crypto_capabilities {
                 Poll::Ready(
                     host.get_mut()
                         .lineage
-                        .get_mut::<CryptoSender<T::CryptoSendBuffer>, Ics>()
+                        .get_mut::<CryptoSender<CryptoSendBufferOf<T>>, Ics>()
                         .write_from(input)
                         .map_err(|source| {
                             v1_error::<L, Iv>(ConnectionError::CryptoDataEnd { source })
@@ -550,7 +551,7 @@ macro_rules! crypto_capabilities {
             B: CallBundle,
             <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
             for<'x> <L as LineageLists<'x, T>>::Connection:
-                GetAt<CryptoSender<T::CryptoSendBuffer>, Ics>,
+                GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>,
         {
             fn move_output_to<'v>(view: Pin<&mut Self::ReceiverView<'v>>, level: CryptoLevel)
             where
@@ -558,7 +559,7 @@ macro_rules! crypto_capabilities {
             {
                 view.get_mut()
                     .lineage
-                    .get_mut::<CryptoSender<T::CryptoSendBuffer>, Ics>()
+                    .get_mut::<CryptoSender<CryptoSendBufferOf<T>>, Ics>()
                     .move_output_to(level);
             }
         }
@@ -895,11 +896,11 @@ where
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>,
     SendTypes<T, L>: SendStrategyTypes,
     SendStrategyCore<SendStrategyOf<T, L>>: PublishIntent<HandshakeDoneIntent, Idx>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>,
-    for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<T::CryptoReceiveBuffer>, Icr>
-        + GetAt<CryptoSender<T::CryptoSendBuffer>, Ics>
+    for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<CryptoReceiveBufferOf<T>>, Icr>
+        + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>
         + GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>
         + GetAt<FirstLocalConnectionId, Ifl>
@@ -1099,11 +1100,11 @@ where
     SendTypes<T, L>: SendStrategyTypes,
     SendStrategyCore<SendStrategyOf<T, L>>: PublishIntent<HandshakeDoneIntent, Idx>,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, Ia>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>,
-    for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<T::CryptoReceiveBuffer>, Icr>
-        + GetAt<CryptoSender<T::CryptoSendBuffer>, Ics>
+    for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<CryptoReceiveBufferOf<T>>, Icr>
+        + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>
         + GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>
         + GetAt<FirstLocalConnectionId, Ifl>
@@ -1355,11 +1356,11 @@ where
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>
         + Selector<Option<OriginalDestinationConnectionId>, Jo>
         + Selector<Option<RetrySourceConnectionId>, Jr>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>,
-    for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<T::CryptoReceiveBuffer>, Icr>
-        + GetAt<CryptoSender<T::CryptoSendBuffer>, Ics>
+    for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<CryptoReceiveBufferOf<T>>, Icr>
+        + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>
         + GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>
         + GetAt<FirstLocalConnectionId, Ifl>
@@ -1516,11 +1517,11 @@ where
         + Selector<Option<OriginalDestinationConnectionId>, Jo>
         + Selector<Option<RetrySourceConnectionId>, Jr>,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, Ia>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>,
-    for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<T::CryptoReceiveBuffer>, Icr>
-        + GetAt<CryptoSender<T::CryptoSendBuffer>, Ics>
+    for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<CryptoReceiveBufferOf<T>>, Icr>
+        + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>
         + GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>
         + GetAt<FirstLocalConnectionId, Ifl>

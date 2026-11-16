@@ -86,6 +86,7 @@ use super::{
     },
 };
 use crate::role::LinkPathRole;
+use crate::v1::{CryptoReceiveBufferOf, SendParametersOf};
 use crate::{
     call::CallBundle,
     clock::{CheckedAdd, InstantOf},
@@ -277,7 +278,7 @@ where
     for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out:
         Selector<&'a CongestionPartOf<T, L>, Jx> + Selector<&'a RttOf<T, L>, Jr>,
-    for<'v> <L as LineageLists<'v, T>>::LogicalPath: GetAt<CryptoReceiver<T::CryptoReceiveBuffer>, Ic>
+    for<'v> <L as LineageLists<'v, T>>::LogicalPath: GetAt<CryptoReceiver<CryptoReceiveBufferOf<T>>, Ic>
         + CoreLentConnectionIdEvents<T, L, Icid>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
         + GetAt<HandshakeConfirmation, Ih>
@@ -298,19 +299,19 @@ where
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![LinkPathRole<InstantOf<T>>], Il>,
     SendTypes<T, L>: SendStrategyTypes
-        + IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+        + IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     StreamsOf<T, L>: StreamSet<
             CloseCauseOf<T, L>,
             StreamIntentTicketOf<T, L>,
             StreamResetsOfParts<L>,
-            SendParameters = T::SendParameters,
+            SendParameters = SendParametersOf<T>,
         > + 'static,
     StreamIntentTicketOf<T, L>: IntentTicketResize + IntentTicketWithdraw,
     IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
-        + SharedPublishTo<StreamIntent<T::SendParameters>, AnyActiveLinkPath, Idx>,
+        + SharedPublishTo<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath, Idx>,
     StreamIntentHandleOf<T, L, Idx>:
-        StreamIntentHandle<T::SendParameters, StreamIntentTicketOf<T, L>>,
+        StreamIntentHandle<SendParametersOf<T>, StreamIntentTicketOf<T, L>>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<SendStrategyIntake<IntakeOf<T, L>>, Ii>,
     L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
@@ -376,7 +377,7 @@ where
                 let level = crypto_level(packet.level())?;
                 let offset = frame.offset().into_inner();
                 lineage
-                    .get_mut::<CryptoReceiver<T::CryptoReceiveBuffer>, Ic>()
+                    .get_mut::<CryptoReceiver<CryptoReceiveBufferOf<T>>, Ic>()
                     .receive_frame(level, offset, frame.into_data())
                     .context(error::CryptoSnafu)
             }
@@ -510,11 +511,11 @@ where
     L: LineagePartList<T> + ConnectionErrorsOf,
     B: CallBundle,
     SendTypes<T, L>: SendStrategyTypes
-        + IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+        + IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     StreamsOf<T, L>: 'static,
     IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
-        + SharedPublishTo<StreamIntent<T::SendParameters>, AnyActiveLinkPath, Idx>,
+        + SharedPublishTo<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath, Idx>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
         + GetAt<SendStrategyIntake<IntakeOf<T, L>>, Ii>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
@@ -541,7 +542,7 @@ where
     let publish = lineage
         .get::<SendStrategyIntake<IntakeOf<T, L>>, Ii>()
         .intake()
-        .handle::<StreamIntent<T::SendParameters>, Idx>();
+        .handle::<StreamIntent<SendParametersOf<T>>, Idx>();
     handle(streams, &publish).with_context(|_| error::StreamSetSnafu {
         frame_type: frame_type_value(type_value),
     })

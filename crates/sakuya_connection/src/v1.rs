@@ -197,7 +197,7 @@ use self::{
     spaces::{AckObligationsOf, DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
     stateless_reset::StatelessResetSignal,
     streams::{
-        StreamSet, StreamSetConfig, StreamsOf,
+        StreamSetConfig, StreamSetFamily, StreamsOf,
         resets::{StreamResets, StreamResetsOf, StreamResetsPart},
     },
 };
@@ -282,61 +282,17 @@ where
     }
 }
 
-/// What a composition chooses for version 1.
-pub trait Choices: ConnectionChoices {
+/// What the maker of a connection of version 1 fixes: the endpoint, or a
+/// test. The maker's type is the connection's choices ([`Choices`]); the
+/// host picks the rest ([`HostChoices`]).
+pub trait MakerChoices: ConnectionChoices {
     /// The cryptographic backend that derives the packet protection keys;
     /// the connection keeps a clone for the levels after Initial.
     type Crypto: CryptoBackend + Clone + 'static;
     /// Which side of the connection this side is.
     type Side: Side;
-    /// What stores the CRYPTO data of one encryption level until the
-    /// handshake engine reads it.
-    type CryptoReceiveBuffer: CryptoReceiveBuffer + Default + 'static;
-    /// What keeps the CRYPTO data of one encryption level that this side
-    /// sends, until the peer acknowledges it.
-    type CryptoSendBuffer: CryptoSendBuffer + Default + Unpin + 'static;
-    /// What makes the RTT estimate, the stored part of congestion control
-    /// and the datagram size probing policy of each link path, one for each
-    /// connection. `V` identifies a link path, as found from the list of
-    /// parts: the logical link when the connection supports version 1
-    /// alone.
-    type Recovery<V: Clone + Eq + Debug + 'static>: RecoveryFactory<Self::Link, Via = V> + 'static;
-    /// What decides when an ACK frame is due, one for each packet number
-    /// space of a logical path.
-    type AckObligation: AckObligation<InstantOf<Self>> + 'static;
-    /// What records the packets sent in one packet number space of a
-    /// logical path, one for each space; it starts empty. `S` is the
-    /// summary of a frame, as found from the list of parts, and `P`
-    /// identifies a link path, as the recovery factory's `V`.
-    type SendJournals<S: 'static, P: Clone + Eq + Debug + 'static>: SendJournals<S, InstantOf<Self>, P>
-        + Default
-        + 'static;
-    /// The application's own error type for closing the connection.
-    type ApplicationError: ApplicationClose + 'static;
-    /// What adjusts the close this endpoint sends at each encryption level:
-    /// an [`ImmediateClosePolicy`](close::ImmediateClosePolicy) of this
-    /// endpoint's reason for closing, [`CloseCauseOf`] for the composition's
-    /// list of parts. The connection keeps the one it was made with.
-    type ImmediateClosePolicy: Clone + 'static;
     /// The datagram receiver of a logical path.
     type Receiver: LogicalPathDatagramReceiver<Self::Link> + 'static;
-    /// The core of the send strategy, for the types `I` the composition
-    /// gives it; it starts as its default makes it.
-    type SendStrategy<I: SendStrategyTypes>: Default;
-    /// What decides which of the peer's connection IDs this side sends
-    /// with, one for each logical path; it registers reset tokens through
-    /// the registrars of [`ResetTokenRegistry`](Self::ResetTokenRegistry),
-    /// and writes the RETIRE_CONNECTION_ID frames that retire the peer's
-    /// connection IDs.
-    type DestinationConnectionIds: DestinationConnectionIdStrategy<
-            LinkIdOf<Self>,
-            InstantOf<Self>,
-            ResetTokenRegistrarOf<Self>,
-        > + for<'a> FrameSource<
-            Item<'a> = u64,
-            Summary = send::RetireConnectionIdSummary,
-            Intent = send::RetireConnectionIdIntent,
-        > + 'static;
     /// What the connection holds to register the reset tokens of the
     /// peer's connection IDs for detection: it makes the registrar of each
     /// link path, for its link's peer and its logical path's
@@ -349,35 +305,121 @@ pub trait Choices: ConnectionChoices {
     /// registers it with routing before it is disclosed.
     type ConnectionIdIssuer: crate::connection_id::local::ConnectionIdIssuer<Registration: 'static>
         + 'static;
+}
+
+/// What a composition chooses for version 1: what its maker fixes, and the
+/// host's choices ([`Host`](Self::Host)), read through the aliases
+/// [`AckObligationOf`] and the others.
+///
+/// The host's choices take only [`MakerChoices`]: were they to take
+/// `Choices`, a maker's type would be choices once the host's type is its
+/// host's choices, and the host's type that once the maker's type is
+/// choices.
+pub trait Choices: MakerChoices {
+    /// The host's type, which picks the rest.
+    type Host: HostChoices<Self>;
+}
+
+/// What the host picks for the connections of version 1 that the maker `T`
+/// makes. What has one implementation in sakuya has it as its default.
+pub trait HostChoices<T: MakerChoices + ?Sized>: 'static {
+    /// The application's own error type for closing the connection.
+    type ApplicationError: ApplicationClose + 'static;
+    /// What stores the CRYPTO data of one encryption level until the
+    /// handshake engine reads it.
+    type CryptoReceiveBuffer: CryptoReceiveBuffer + Default + 'static =
+        crypto::FragmentedCryptoReceiveBuffer;
+    /// What keeps the CRYPTO data of one encryption level that this side
+    /// sends, until the peer acknowledges it.
+    type CryptoSendBuffer: CryptoSendBuffer + Default + Unpin + 'static =
+        crypto::send::OffsetMapCryptoSendBuffer;
+    /// What makes the RTT estimate, the stored part of congestion control
+    /// and the datagram size probing policy of each link path, one for each
+    /// connection. `V` identifies a link path, as found from the list of
+    /// parts: the logical link when the connection supports version 1
+    /// alone.
+    type Recovery<V: Clone + Eq + Debug + 'static>: RecoveryFactory<T::Link, Via = V> + 'static =
+        sakuya_recovery::factory::NewRenoRecoveryFactory<V>;
+    /// What decides when an ACK frame is due, one for each packet number
+    /// space of a logical path.
+    type AckObligation: AckObligation<InstantOf<T>> + 'static =
+        sakuya_recovery::ack_obligation::Rfc9000AckObligation<InstantOf<T>>;
+    /// What records the packets sent in one packet number space of a
+    /// logical path, one for each space; it starts empty. `S` is the
+    /// summary of a frame, as found from the list of parts, and `P`
+    /// identifies a link path, as the recovery factory's `V`.
+    type SendJournals<S: 'static, P: Clone + Eq + Debug + 'static>: SendJournals<S, InstantOf<T>, P>
+        + Default
+        + 'static = sakuya_recovery::send_journals::DequeSendJournals<InstantOf<T>, S, P>;
+    /// What adjusts the close this endpoint sends at each encryption level:
+    /// an [`ImmediateClosePolicy`](close::ImmediateClosePolicy) of this
+    /// endpoint's reason for closing, [`CloseCauseOf`] for the composition's
+    /// list of parts. The connection keeps the one it was made with.
+    type ImmediateClosePolicy: Clone + 'static = close::PassThroughImmediateClosePolicy;
+    /// The core of the send strategy, for the types `I` the composition
+    /// gives it; it starts as its default makes it.
+    type SendStrategy<I: SendStrategyTypes>: Default =
+        crate::send_strategy::ranked::RankedSendStrategy<I>;
+    /// What decides which of the peer's connection IDs this side sends
+    /// with, one for each logical path; it registers reset tokens through
+    /// the registrars of the maker's
+    /// [`ResetTokenRegistry`](MakerChoices::ResetTokenRegistry), and writes
+    /// the RETIRE_CONNECTION_ID frames that retire the peer's connection
+    /// IDs.
+    type DestinationConnectionIds: DestinationConnectionIdStrategy<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>
+        + for<'a> FrameSource<
+            Item<'a> = u64,
+            Summary = send::RetireConnectionIdSummary,
+            Intent = send::RetireConnectionIdIntent,
+        > + 'static =
+        crate::connection_id::sequence_map::SequenceMapDestinationConnectionIdStrategy<
+            LinkIdOf<T>,
+            ResetTokenRegistrarOf<T>,
+        >;
     /// What decides how many of this side's connection IDs the peer holds
     /// and when they are issued and dropped, one for each logical path; it
-    /// issues them with the [`ConnectionIdIssuer`](Self::ConnectionIdIssuer),
-    /// keeps their registrations, and writes the NEW_CONNECTION_ID frames
-    /// that disclose them.
-    type LocalConnectionIds: LocalConnectionIdStrategy<
-            LinkIdOf<Self>,
-            InstantOf<Self>,
-            LocalConnectionIdRegistrationOf<Self>,
-        > + for<'a> FrameSource<
+    /// issues them with the maker's
+    /// [`ConnectionIdIssuer`](MakerChoices::ConnectionIdIssuer), keeps
+    /// their registrations, and writes the NEW_CONNECTION_ID frames that
+    /// disclose them.
+    type LocalConnectionIds: LocalConnectionIdStrategy<LinkIdOf<T>, InstantOf<T>, LocalConnectionIdRegistrationOf<T>>
+        + for<'a> FrameSource<
             Item<'a> = u64,
             Summary = NewConnectionIdSummary,
             Intent = NewConnectionIdIntent,
-        > + 'static;
-    /// The parameters application data is sent with; the send strategy
-    /// constrains them with a trait of its own.
-    type SendParameters: Clone + PartialEq + Default + 'static;
-    /// The set of the connection's streams in the established layer, for
-    /// `Lc`, this endpoint's reason for closing, [`CloseCauseOf`] for the
-    /// composition's list of parts, `K`, the ticket the send strategy's
-    /// intake gives back for a stream intent, and `X`, how the streams are
-    /// reset, [`StreamResetsOfParts`](streams::resets::StreamResetsOfParts)
-    /// of the list of parts ([`streams`]).
-    type Streams<Lc, K, X: StreamResets>: StreamSet<Lc, K, X, Config = Self::StreamSetConfig, SendParameters = Self::SendParameters>;
-    /// What the composition configures the stream set with; the connection
-    /// node keeps it from the connection's making until the established
-    /// layer is built.
-    type StreamSetConfig: Clone + Default + 'static;
+        > + 'static = crate::connection_id::local::SequenceMapLocalConnectionIdStrategy<
+        LocalConnectionIdRegistrationOf<T>,
+        InstantOf<T>,
+    >;
+    /// The kind of the connection's stream set in the established layer
+    /// ([`streams`]), which gives the set's configuration and the
+    /// parameters application data is sent with; the send strategy
+    /// constrains the parameters with a trait of its own.
+    type Streams: StreamSetFamily = streams::locked::LockedStreamSetFamily;
 }
+
+/// The host's choices of the choices `T`.
+pub type HostOf<T> = <T as Choices>::Host;
+/// The application's error type of the choices `T`.
+pub type ApplicationErrorOf<T> = <HostOf<T> as HostChoices<T>>::ApplicationError;
+/// The CRYPTO receive buffer of the choices `T`.
+pub type CryptoReceiveBufferOf<T> = <HostOf<T> as HostChoices<T>>::CryptoReceiveBuffer;
+/// The CRYPTO send buffer of the choices `T`.
+pub type CryptoSendBufferOf<T> = <HostOf<T> as HostChoices<T>>::CryptoSendBuffer;
+/// The ACK obligation of the choices `T`.
+pub type AckObligationOf<T> = <HostOf<T> as HostChoices<T>>::AckObligation;
+/// The close policy of the choices `T`.
+pub type ImmediateClosePolicyOf<T> = <HostOf<T> as HostChoices<T>>::ImmediateClosePolicy;
+/// The destination connection ID strategy of the choices `T`.
+pub type DestinationConnectionIdsOf<T> = <HostOf<T> as HostChoices<T>>::DestinationConnectionIds;
+/// The local connection ID strategy of the choices `T`.
+pub type LocalConnectionIdsOf<T> = <HostOf<T> as HostChoices<T>>::LocalConnectionIds;
+/// The kind of stream set of the choices `T`.
+pub type StreamSetFamilyOf<T> = <HostOf<T> as HostChoices<T>>::Streams;
+/// The parameters application data is sent with, of the choices `T`.
+pub type SendParametersOf<T> = <StreamSetFamilyOf<T> as StreamSetFamily>::SendParameters;
+/// The configuration of the stream set of the choices `T`.
+pub type StreamSetConfigOf<T> = <StreamSetFamilyOf<T> as StreamSetFamily>::Config;
 
 /// This endpoint's reason for closing a connection of the choices `T` and
 /// the list of parts `L`: the connection's error, the handshake's error,
@@ -385,8 +427,11 @@ pub trait Choices: ConnectionChoices {
 /// application's error, or why the choices' link ended.
 pub type CloseCauseOf<T, L> = LocalCloseCause<
     ConnectionErrorOf<L>,
-    HandshakeError<<<T as Choices>::Side as Side>::AlertError, ConnectionErrorOf<L>>,
-    <T as Choices>::ApplicationError,
+    HandshakeError<
+        <<T as crate::v1::MakerChoices>::Side as Side>::AlertError,
+        ConnectionErrorOf<L>,
+    >,
+    ApplicationErrorOf<T>,
     <<T as ConnectionChoices>::Link as Link>::RecvError,
 >;
 
@@ -677,14 +722,14 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
     /// at once at most.
     pub max_datagrams_per_send: NonZeroUsize,
     /// What adjusts the close this endpoint sends at each encryption level.
-    pub immediate_close_policy: T::ImmediateClosePolicy,
+    pub immediate_close_policy: ImmediateClosePolicyOf<T>,
     /// The cell the application's request to close the connection is put
     /// in; the connection node keeps a clone of it, and whoever lets the
     /// application ask keeps another.
-    pub close_request: CloseRequestCell<T::ApplicationError>,
+    pub close_request: CloseRequestCell<ApplicationErrorOf<T>>,
     /// What the stream set of the established layer is configured with;
     /// the connection node keeps it until the layer is built.
-    pub stream_set: T::StreamSetConfig,
+    pub stream_set: StreamSetConfigOf<T>,
     /// Where the cell the connection handle shares with the connection node
     /// is: the node takes a clone of the cell from it, and whoever gives the
     /// application its connection handle another
@@ -699,7 +744,7 @@ where
     SendTypes<T, L>: SendStrategyTypes
         + CorePublishOutcome<CryptoIntent, AnyActiveLinkPath>
         + send_planning::IntakePublishOutcome<
-            streams::send::StreamIntent<T::SendParameters>,
+            streams::send::StreamIntent<SendParametersOf<T>>,
             AnyActiveLinkPath,
         >,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
@@ -709,8 +754,8 @@ where
         HandshakeKeys<T::Crypto>,
         OneRttKeys<T::Crypto, InstantOf<T>>,
         AeadUsage,
-        CryptoReceiver<T::CryptoReceiveBuffer>,
-        CryptoSender<T::CryptoSendBuffer>,
+        CryptoReceiver<CryptoReceiveBufferOf<T>>,
+        CryptoSender<CryptoSendBufferOf<T>>,
         CryptoIntentTickets<CryptoIntentTicketOf<T, L>>,
         AntiAmplificationFactor,
         FirstLinkStart,
@@ -723,7 +768,7 @@ where
         HandshakeConfirmation,
         CloseReasonRecord<CloseCauseOf<T, L>>,
         ConnectionHandleCellOf<T, L>,
-        CloseRequestCell<T::ApplicationError>,
+        CloseRequestCell<ApplicationErrorOf<T>>,
         DatagramAcceptance,
         InitialPathReceiver<T::Receiver>,
         LogicalPathReceivingLimits,
@@ -738,10 +783,10 @@ where
         PeerHandshakeConnectionId,
         PacketProtectionBackend<T::Crypto>,
         LinkPathSendingLimits,
-        ConnectionImmediateClosePolicy<T::ImmediateClosePolicy>,
+        ConnectionImmediateClosePolicy<ImmediateClosePolicyOf<T>>,
         <T::Side as Side>::Own,
         ConnectionExporter<<T::Side as Side>::Exporter>,
-        StreamSetConfig<T::StreamSetConfig>,
+        StreamSetConfig<StreamSetConfigOf<T>>,
     ];
     /// The core of the send strategy and its intake are made together, and
     /// so are the record of why the connection closed and the cell of the
@@ -751,8 +796,8 @@ where
         HList![HandshakeKeys<T::Crypto>],
         HList![OneRttKeys<T::Crypto, InstantOf<T>>],
         HList![AeadUsage],
-        HList![CryptoReceiver<T::CryptoReceiveBuffer>],
-        HList![CryptoSender<T::CryptoSendBuffer>],
+        HList![CryptoReceiver<CryptoReceiveBufferOf<T>>],
+        HList![CryptoSender<CryptoSendBufferOf<T>>],
         HList![CryptoIntentTickets<CryptoIntentTicketOf<T, L>>],
         HList![AntiAmplificationFactor],
         HList![FirstLinkStart],
@@ -764,7 +809,7 @@ where
         HList![MaxAckRanges],
         HList![HandshakeConfirmation],
         HList![CloseReasonRecord<CloseCauseOf<T, L>>, ConnectionHandleCellOf<T, L>],
-        HList![CloseRequestCell<T::ApplicationError>],
+        HList![CloseRequestCell<ApplicationErrorOf<T>>],
         HList![DatagramAcceptance],
         HList![InitialPathReceiver<T::Receiver>],
         HList![LogicalPathReceivingLimits],
@@ -781,10 +826,10 @@ where
         HList![PeerHandshakeConnectionId],
         HList![PacketProtectionBackend<T::Crypto>],
         HList![LinkPathSendingLimits],
-        HList![ConnectionImmediateClosePolicy<T::ImmediateClosePolicy>],
+        HList![ConnectionImmediateClosePolicy<ImmediateClosePolicyOf<T>>],
         HList![<T::Side as Side>::Own],
         HList![ConnectionExporter<<T::Side as Side>::Exporter>],
-        HList![StreamSetConfig<T::StreamSetConfig>],
+        HList![StreamSetConfig<StreamSetConfigOf<T>>],
     ];
     type Calls = HList![<T::Side as Side>::Advancing];
     type Args = ConnectionArgs<T, L>;
@@ -831,7 +876,7 @@ where
 impl<T: Choices, L: ConnectionErrorsOf> LayerShare<T, L, layer::Established> for Part
 where
     SendTypes<T, L>: send_planning::IntakePublishOutcome<
-            streams::send::StreamIntent<T::SendParameters>,
+            streams::send::StreamIntent<SendParametersOf<T>>,
             AnyActiveLinkPath,
         >,
 {
@@ -844,7 +889,7 @@ impl<T: Choices, L: ConnectionErrorsOf>
     application_handles::HandleShare<T, L, application_handles::handle::EstablishedLayer> for Part
 where
     SendTypes<T, L>: send_planning::IntakePublishOutcome<
-            streams::send::StreamIntent<T::SendParameters>,
+            streams::send::StreamIntent<SendParametersOf<T>>,
             AnyActiveLinkPath,
         >,
 {
@@ -855,7 +900,7 @@ where
 impl<T: Choices, L: ConnectionErrorsOf> EstablishedSourceComponentsPart<T, L> for Part
 where
     SendTypes<T, L>: send_planning::IntakePublishOutcome<
-            streams::send::StreamIntent<T::SendParameters>,
+            streams::send::StreamIntent<SendParametersOf<T>>,
             AnyActiveLinkPath,
         >,
 {
@@ -1331,7 +1376,7 @@ type OneRttKeysReads<T, L> = HList![
 /// first flight read before the connection was made gives the receiver it
 /// was read into.
 impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)>
-    for CryptoReceiver<T::CryptoReceiveBuffer>
+    for CryptoReceiver<CryptoReceiveBufferOf<T>>
 where
     L: LineagePartList<T>,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
@@ -1351,7 +1396,7 @@ where
 impl<B> PassiveDataComponent for CryptoReceiver<B> {}
 
 /// Each level starts with nothing to send; the output writes Initial.
-impl<T: Choices, L> Build<T, L, layer::Connection, ()> for CryptoSender<T::CryptoSendBuffer>
+impl<T: Choices, L> Build<T, L, layer::Connection, ()> for CryptoSender<CryptoSendBufferOf<T>>
 where
     L: LineagePartList<T>,
 {
@@ -1366,10 +1411,10 @@ where
 /// The output reads the keys of each level: once a level's keys are
 /// discarded, its CRYPTO data goes with them (RFC 9001 §4.9).
 impl<T: Choices, L, I, Ii, Ih, Io> DataComponent<T, L, layer::Connection, (I, Ii, Ih, Io)>
-    for CryptoSender<T::CryptoSendBuffer>
+    for CryptoSender<CryptoSendBufferOf<T>>
 where
     L: LineagePartList<T>,
-    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<CryptoSender<T::CryptoSendBuffer>, I>
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<CryptoSender<CryptoSendBufferOf<T>>, I>
         + GetAt<InitialKeys<T::Crypto>, Ii>
         + GetAt<HandshakeKeys<T::Crypto>, Ih>
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>,
@@ -1413,11 +1458,11 @@ where
             // takes the output only to change it: it does not read itself
             if discarded
                 && !lineage
-                    .get::<CryptoSender<T::CryptoSendBuffer>, I>()
+                    .get::<CryptoSender<CryptoSendBufferOf<T>>, I>()
                     .is_discarded(level)
             {
                 lineage
-                    .get_mut::<CryptoSender<T::CryptoSendBuffer>, I>()
+                    .get_mut::<CryptoSender<CryptoSendBufferOf<T>>, I>()
                     .discard(level);
             }
         }
@@ -1608,7 +1653,7 @@ impl PassiveDataComponent for DatagramAcceptance {}
 
 /// The connection keeps the close policy it was made with.
 impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)>
-    for ConnectionImmediateClosePolicy<T::ImmediateClosePolicy>
+    for ConnectionImmediateClosePolicy<ImmediateClosePolicyOf<T>>
 where
     L: LineagePartList<T>,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
@@ -1910,7 +1955,7 @@ impl<T: Choices, L, Ij, Hf, Is> Build<T, L, layer::LinkPath, (Ij, Hf, Is)>
 where
     L: LineagePartList<T> + FeedbackSummariesOf + ConnectionErrorsOf,
     SendTypes<T, L>: send_planning::IntakePublishOutcome<
-            streams::send::StreamIntent<T::SendParameters>,
+            streams::send::StreamIntent<SendParametersOf<T>>,
             AnyActiveLinkPath,
         >,
     L: EstablishedSourceComponentsOf<T, L>,

@@ -59,6 +59,7 @@ use super::{
     spaces::SendJournalsOf,
 };
 use crate::role::LinkPathRole;
+use crate::v1::{CryptoSendBufferOf, HostChoices, HostOf};
 use crate::{
     call::CallBundle,
     clock::{InstantOf, LinkIdOf},
@@ -86,7 +87,7 @@ use crate::{
 
 /// The core of the send strategy of the choices `T` and the list of parts
 /// `L`.
-pub type SendStrategyOf<T, L> = <T as Choices>::SendStrategy<SendTypes<T, L>>;
+pub type SendStrategyOf<T, L> = <HostOf<T> as HostChoices<T>>::SendStrategy<SendTypes<T, L>>;
 
 /// The send planner of one link path, as the core of `T` and `L` makes it.
 pub type LinkPathSendPlannerOf<T, L> =
@@ -848,10 +849,10 @@ pub(super) type PacketOverheadsReads<T, L> = frunk_core::HList![
     ConnectionIdsOf<T>,
     PacketNumberSpaces<PacketNumberSpaceState>,
     SendJournalsOf<T, L>,
-    InitialKeys<<T as Choices>::Crypto>,
-    HandshakeKeys<<T as Choices>::Crypto>,
-    OneRttKeys<<T as Choices>::Crypto, InstantOf<T>>,
-    <<T as Choices>::Side as Side>::Own,
+    InitialKeys<<T as crate::v1::MakerChoices>::Crypto>,
+    HandshakeKeys<<T as crate::v1::MakerChoices>::Crypto>,
+    OneRttKeys<<T as crate::v1::MakerChoices>::Crypto, InstantOf<T>>,
+    <<T as crate::v1::MakerChoices>::Side as Side>::Own,
 ];
 
 /// Which levels have keys to send packets with now.
@@ -1325,7 +1326,7 @@ where
     L: LineagePartList<T>,
     SendTypes<T, L>:
         CorePublishTo<CryptoIntent, AnyActiveLinkPath, Idx, Core = SendStrategyOf<T, L>>,
-    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<CryptoSender<T::CryptoSendBuffer>, Ic>
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ic>
         + GetAt<InitialKeys<T::Crypto>, Ii>
         + GetAt<HandshakeKeys<T::Crypto>, Ih>
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
@@ -1334,7 +1335,7 @@ where
 {
     fn reads(reads: &mut ReadSet) {
         reads
-            .add::<CryptoSender<T::CryptoSendBuffer>>()
+            .add::<CryptoSender<CryptoSendBufferOf<T>>>()
             .add::<InitialKeys<T::Crypto>>()
             .add::<HandshakeKeys<T::Crypto>>()
             .add::<OneRttKeys<T::Crypto, InstantOf<T>>>();
@@ -1357,7 +1358,7 @@ where
                 .is_some(),
         ];
         let wanted = Self::wanted(
-            lineage.get::<CryptoSender<T::CryptoSendBuffer>, Ic>(),
+            lineage.get::<CryptoSender<CryptoSendBufferOf<T>>, Ic>(),
             can_send,
         );
         if !lineage.get::<Self, Is>().differ(&wanted) {

@@ -78,6 +78,7 @@ use super::{
     },
     streams::resets::StreamResetsOf,
 };
+use crate::v1::{AckObligationOf, CryptoReceiveBufferOf};
 use crate::{
     clock::{ConnectionChoices, InstantOf},
     dispatch::FrameSetDispatch,
@@ -89,7 +90,7 @@ use crate::{
 type DatagramOf<Lk> = ReceivedDatagram<<Lk as Link>::Payload, Lk>;
 
 /// The handoff of the routing domain of the choices `T`.
-type HandoffOf<T> = <<T as Choices>::Receiver as LogicalPathDatagramReceiver<
+type HandoffOf<T> = <<T as crate::v1::MakerChoices>::Receiver as LogicalPathDatagramReceiver<
     <T as ConnectionChoices>::Link,
 >>::Handoff;
 
@@ -115,7 +116,7 @@ impl<T: Choices> FirstFlight<T> {
     /// it is asked for; `None` afterwards, and when it was not read.
     pub(super) fn take_crypto_receiver(
         &mut self,
-    ) -> Option<CryptoReceiver<T::CryptoReceiveBuffer>> {
+    ) -> Option<CryptoReceiver<CryptoReceiveBufferOf<T>>> {
         match self {
             Self::Datagrams(_) => None,
             Self::Read(state) => state.crypto.take(),
@@ -184,7 +185,7 @@ impl<T: Choices> fmt::Debug for FirstFlight<T> {
 pub struct FirstFlightReadState<T: Choices> {
     // each is taken once while the connection node is built; until then
     // all are there
-    crypto: Option<CryptoReceiver<T::CryptoReceiveBuffer>>,
+    crypto: Option<CryptoReceiver<CryptoReceiveBufferOf<T>>>,
     keys: Option<InitialKeys<T::Crypto>>,
     start: FirstFlightStart<T>,
     max_ack_ranges: MaxAckRanges,
@@ -221,7 +222,7 @@ where
             start: FirstFlightStart {
                 journals: Some(ReceiveJournals::new()),
                 // the Initial space acknowledges at once (RFC 9000 §13.2.1)
-                ack: Some(T::AckObligation::new(None)),
+                ack: Some(<AckObligationOf<T>>::new(None)),
                 ..FirstFlightStart::empty(client_dcid.length())
             },
             max_ack_ranges,
@@ -261,7 +262,7 @@ pub struct FirstFlightStart<T: Choices> {
     dcid_len: ConnectionIdLength,
     held: Vec<HeldInputOf<T>>,
     journals: Option<ReceiveJournals<InstantOf<T>>>,
-    ack: Option<T::AckObligation>,
+    ack: Option<AckObligationOf<T>>,
     received_bytes: usize,
     first: Option<FirstClientHello>,
     handshake_connection_id: Option<ConnectionId>,
@@ -321,7 +322,7 @@ impl<T: Choices> FirstFlightStart<T> {
     /// The ACK obligation of the Initial space as read, the first time it
     /// is asked for; `None` afterwards, and when the first flight was not
     /// read.
-    pub fn take_initial_ack_obligation(&mut self) -> Option<T::AckObligation> {
+    pub fn take_initial_ack_obligation(&mut self) -> Option<AckObligationOf<T>> {
         self.ack.take()
     }
 
@@ -380,15 +381,17 @@ pub async fn read_first_flight<T, L, Ie, Hd, Iv, Tls>(
 ) -> Result<(), ReadFirstFlightError<ConnectionErrorOf<L>>>
 where
     T: Choices<Side = Server<Tls>>,
-    T::CryptoReceiveBuffer: Unpin,
+    CryptoReceiveBufferOf<T>: Unpin,
     <T::Link as Link>::Payload: SplitTo + AsRef<[u8]> + AsMut<[u8]> + Into<Bytes>,
     L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
     <L as FrameSet>::Run<Bytes>: CoproductTaker<FrameRun<Bytes>, Iv>,
 {
-    let mut reading = pin!(LentCall::<CryptoReceiver<T::CryptoReceiveBuffer>, _>::new(
-        ReadFirstClientHello::new(limits)
-    ));
+    let mut reading = pin!(
+        LentCall::<CryptoReceiver<CryptoReceiveBufferOf<T>>, _>::new(ReadFirstClientHello::new(
+            limits
+        ))
+    );
     poll_fn(|cx| {
         loop {
             // invariant: the CRYPTO receiver is taken only when the

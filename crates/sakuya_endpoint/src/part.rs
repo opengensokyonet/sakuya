@@ -12,6 +12,7 @@
 
 use core::fmt;
 
+use sakuya_connection::v1::ApplicationErrorOf;
 use sakuya_connection::{
     layer,
     share::LayerShare,
@@ -52,9 +53,14 @@ pub trait EndpointPart<T: v1::Choices, L>: LayerShare<T, L, layer::Connection> {
 #[cfg(feature = "datagram")]
 impl<T, L> EndpointPart<T, L> for sakuya_connection::datagram::Part
 where
-    T: sakuya_connection::datagram::DatagramChoices,
+    T: v1::Choices<
+            Side: sakuya_connection::datagram::DatagramSide,
+            Host: sakuya_connection::datagram::DatagramChoices,
+        >,
 {
-    type Config = sakuya_connection::datagram::DatagramConnectionArgs<T::DatagramQueuesConfig>;
+    type Config = sakuya_connection::datagram::DatagramConnectionArgs<
+        sakuya_connection::datagram::DatagramQueuesConfigOf<T>,
+    >;
 
     fn connection_args(config: Self::Config, _: &mut ConnectionFacts<T>) -> Self::Args {
         config
@@ -135,7 +141,7 @@ pub(crate) struct CoreFacts<T: v1::Choices> {
     pub(crate) reset_token_registry: T::ResetTokenRegistry,
     pub(crate) first_local_connection_id: FirstLocalConnectionId,
     pub(crate) local_connection_id_issuer: LocalConnectionIdIssuer<T::ConnectionIdIssuer>,
-    pub(crate) close_request: CloseRequestCell<T::ApplicationError>,
+    pub(crate) close_request: CloseRequestCell<ApplicationErrorOf<T>>,
 }
 
 impl<T: v1::Choices> ConnectionFacts<T> {

@@ -2,6 +2,7 @@
 
 use core::{fmt, num::NonZeroUsize};
 
+use sakuya_connection::v1::ImmediateClosePolicyOf;
 use sakuya_connection::{
     layer,
     share::{LayerShare, LogicalPathKeys},
@@ -11,7 +12,20 @@ use sakuya_connection::{
     },
 };
 use sakuya_recovery::receive_journals::MaxAckRanges;
-use sakuya_wire::v1::transport_parameters::TransportParameterSlots;
+use sakuya_wire::{
+    v1::{
+        stream_count::StreamCount,
+        transport_parameters::{
+            TransportParameterSlots, TransportParameters,
+            integer::{
+                InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
+                InitialMaxStreamDataUni, InitialMaxStreamsBidi, InitialMaxStreamsUni,
+                MaxIdleTimeout,
+            },
+        },
+    },
+    var_int::VarInt,
+};
 
 use crate::part::{ConnectionFacts, EndpointPart};
 
@@ -48,7 +62,7 @@ pub struct ConnectionConfig<T: connection::Choices, L: LogicalPathKeys> {
     pub max_datagrams_per_send: NonZeroUsize,
     /// What adjusts the close the connection sends at each encryption
     /// level.
-    pub immediate_close_policy: T::ImmediateClosePolicy,
+    pub immediate_close_policy: ImmediateClosePolicyOf<T>,
 }
 
 impl<T, L> Clone for ConnectionConfig<T, L>
@@ -72,6 +86,71 @@ where
         }
     }
 }
+
+/// The default configuration: transport parameters that let the peer open
+/// streams and send data at once, and the recommended values of the rest.
+///
+/// - The transport parameters: a maximum idle timeout of 30 s; 16 MiB of
+///   data on the connection; 4 MiB on each bidirectional stream, either
+///   side's, and 1 MiB on each unidirectional stream; 100 bidirectional
+///   and 100 unidirectional streams the peer may open.
+/// - The anti-amplification factor 3, the most RFC 9000 §8 allows.
+/// - [`MaxAckRanges::DEFAULT`] ranges in an ACK frame.
+/// - 16 datagrams handled in one poll of a logical path's receiving call,
+///   16 inputs held until their keys come, and 16 datagrams handed to a
+///   link at once.
+/// - The recovery factory's, the destination connection ID strategy's and
+///   the close policy's own defaults.
+impl<T, L> Default for ConnectionConfig<T, L>
+where
+    T: connection::Choices,
+    L: LogicalPathKeys,
+    RecoveryConfigOf<T, L>: Default,
+    DestinationConnectionIdConfigOf<T>: Default,
+    ImmediateClosePolicyOf<T>: Default,
+{
+    fn default() -> Self {
+        Self {
+            anti_amplification: AntiAmplificationFactor::MAX,
+            transport_parameters: default_transport_parameters(),
+            recovery: RecoveryConfigOf::<T, L>::default(),
+            max_ack_ranges: MaxAckRanges::DEFAULT,
+            max_datagrams_per_poll: SIXTEEN,
+            max_held_inputs: 16,
+            destination_connection_ids: DestinationConnectionIdConfigOf::<T>::default(),
+            max_datagrams_per_send: SIXTEEN,
+            immediate_close_policy: ImmediateClosePolicyOf::<T>::default(),
+        }
+    }
+}
+
+/// Sixteen, for the limits of the default configuration.
+// invariant: 16 is not zero
+const SIXTEEN: NonZeroUsize = NonZeroUsize::new(16).expect("16 is not zero");
+
+/// The transport parameters of the default configuration.
+fn default_transport_parameters() -> TransportParameterSlots {
+    let mut parameters = TransportParameters::<Vec<u8>>::new();
+    parameters.set(MaxIdleTimeout::new(VarInt::from_u32(30_000)));
+    parameters.set(InitialMaxData::new(VarInt::from_u32(16 << 20)));
+    parameters.set(InitialMaxStreamDataBidiLocal::new(VarInt::from_u32(
+        4 << 20,
+    )));
+    parameters.set(InitialMaxStreamDataBidiRemote::new(VarInt::from_u32(
+        4 << 20,
+    )));
+    parameters.set(InitialMaxStreamDataUni::new(VarInt::from_u32(1 << 20)));
+    parameters.set(InitialMaxStreamsBidi::new(HUNDRED_STREAMS));
+    parameters.set(InitialMaxStreamsUni::new(HUNDRED_STREAMS));
+    parameters.known
+}
+
+/// A hundred streams, for the default stream limits.
+// invariant: 100 is below 2^60
+const HUNDRED_STREAMS: StreamCount = match StreamCount::new(100) {
+    Ok(count) => count,
+    Err(_) => panic!("100 is a stream count"),
+};
 
 impl<T: connection::Choices, L: LogicalPathKeys> fmt::Debug for ConnectionConfig<T, L> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

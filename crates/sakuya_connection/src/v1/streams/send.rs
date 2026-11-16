@@ -44,6 +44,7 @@ use super::{
     StreamSet, StreamsOf,
     resets::{StreamResets, StreamResetsOf, StreamResetsOfParts},
 };
+use crate::v1::SendParametersOf;
 use crate::{
     clock::InstantOf,
     feedback::InjectSummary,
@@ -297,17 +298,15 @@ impl<H, S, K> StreamIntentHandle<S, K> for H where
 /// The ticket of a stream intent of the choices `T` and the list of parts
 /// `L`: what the intake gives back for it.
 pub type StreamIntentTicketOf<T, L> = <SendTypes<T, L> as IntakePublishOutcome<
-    StreamIntent<<T as Choices>::SendParameters>,
+    StreamIntent<SendParametersOf<T>>,
     AnyActiveLinkPath,
 >>::Outcome;
 
 /// The handle the intake of the choices `T` and the list of parts `L` gives
 /// for the stream intents at the place `Idx`.
-pub type StreamIntentHandleOf<T, L, Idx> =
-    <IntakeOf<T, L> as SendIntentIntake<AnyActiveLinkPath>>::Handle<
-        StreamIntent<<T as Choices>::SendParameters>,
-        Idx,
-    >;
+pub type StreamIntentHandleOf<T, L, Idx> = <IntakeOf<T, L> as SendIntentIntake<
+    AnyActiveLinkPath,
+>>::Handle<StreamIntent<SendParametersOf<T>>, Idx>;
 
 // ---- summaries ----
 
@@ -607,13 +606,13 @@ macro_rules! stream_frame_kinds {
             T: Choices,
             L: crate::error::ConnectionErrorsOf + StreamResetsOf,
             SendTypes<T, L>: SendStrategyTypes
-                + IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+                + IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
             SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
-            StreamsOf<T, L>: StreamSet<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>, StreamResetsOfParts<L>, SendParameters = T::SendParameters>,
+            StreamsOf<T, L>: StreamSet<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>, StreamResetsOfParts<L>, SendParameters = SendParametersOf<T>>,
             StreamIntentTicketOf<T, L>: IntentTicketResize + IntentTicketWithdraw,
             IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
-                + SharedPublishTo<StreamIntent<T::SendParameters>, AnyActiveLinkPath, Idx>,
-            StreamIntentHandleOf<T, L, Idx>: StreamIntentHandle<T::SendParameters, StreamIntentTicketOf<T, L>>,
+                + SharedPublishTo<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath, Idx>,
+            StreamIntentHandleOf<T, L, Idx>: StreamIntentHandle<SendParametersOf<T>, StreamIntentTicketOf<T, L>>,
             V: GetAt<SendStrategyIntake<IntakeOf<T, L>>, Ii> + GetOptionalAt<StreamsOf<T, L>, Is>,
         {
             type Source<'l, 'r>
@@ -637,7 +636,7 @@ macro_rules! stream_frame_kinds {
                 let publish = lineage
                     .get::<SendStrategyIntake<IntakeOf<T, L>>, Ii>()
                     .intake()
-                    .handle::<StreamIntent<T::SendParameters>, Idx>();
+                    .handle::<StreamIntent<SendParametersOf<T>>, Idx>();
                 LineageStreamFrameSource::new(lineage, publish)
             }
         }

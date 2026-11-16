@@ -153,6 +153,7 @@ use super::{
     version_negotiation::check_version_negotiation,
 };
 use crate::role::LinkPathRole;
+use crate::v1::SendParametersOf;
 use crate::{
     call::{CallBundle, CallKind, NodeCallFamily, NodeLoan},
     clock::{InstantOf, LinkIdOf},
@@ -638,7 +639,7 @@ where
     T: Choices,
     L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
     L: FeedbackSummariesOf + EstablishedSourceComponentsOf<T, L>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     S: 'static,
     Ls: 'static,
     RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link>
@@ -974,7 +975,7 @@ fn receive_owned<
     T: Choices,
     L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
     L: FeedbackSummariesOf + EstablishedSourceComponentsOf<T, L>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     S: 'static,
     Ls: 'static,
     RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link>
@@ -1181,7 +1182,7 @@ where
         TakeEach<'s, HList![LinkPathRole<InstantOf<T>>], Il>,
     for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
     L: FeedbackSummariesOf + EstablishedSourceComponentsOf<T, L>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     S: 'static,
     Ls: 'static,
     RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link>
@@ -1681,7 +1682,7 @@ where
     T: Choices,
     L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
     L: FeedbackSummariesOf + EstablishedSourceComponentsOf<T, L>,
-    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     S: 'static,
     Ls: 'static,
     RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link>

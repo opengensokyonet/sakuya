@@ -166,6 +166,16 @@ impl NewRenoRecoveryFactoryConfig {
     }
 }
 
+/// The values RFC 9002 recommends for a clock whose timers fire within
+/// 1 ms: RFC 9002 §6.1.2 recommends a timer granularity of 1 ms. A clock
+/// whose timers are coarser is given its own with
+/// [`recommended`](Self::recommended).
+impl Default for NewRenoRecoveryFactoryConfig {
+    fn default() -> Self {
+        Self::recommended(Duration::from_millis(1))
+    }
+}
+
 /// The initial windows of the pacer and of the congestion controller
 /// differ.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
