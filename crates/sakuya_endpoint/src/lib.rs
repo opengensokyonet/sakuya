@@ -68,6 +68,7 @@ pub mod endpoint;
 pub mod handshake;
 pub mod incoming;
 pub mod invalid_token;
+pub mod issuer;
 mod late_initial;
 pub mod link;
 mod make;

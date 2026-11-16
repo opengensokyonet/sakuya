@@ -15,7 +15,10 @@ use std::{
 };
 
 use sakuya_datagram_routing::{
-    claim::{delivery::ExclusiveDatagram, queue::DatagramDeliveryQueue},
+    claim::{
+        delivery::ExclusiveDatagram,
+        queue::{DatagramDeliveryPoster, DatagramDeliveryQueue},
+    },
     route::{
         acceptance::{
             InitialAcceptance, InitialDatagramReceiver, InitialReceiverFactory, PreparedReceiver,
@@ -168,9 +171,19 @@ impl<E: EndpointChoices> Domain<E> {
         association: MatchAssociation<LocalOf<E>>,
         receiver: &ConnectionDatagramReceiver<E>,
     ) -> RegistrationOf<E> {
+        self.register_posting(association, receiver.poster())
+    }
+
+    /// Registers `association` for the datagram receiver that `poster`
+    /// posts to, as [`register`](Self::register) does.
+    pub(crate) fn register_posting(
+        &self,
+        association: MatchAssociation<LocalOf<E>>,
+        poster: DatagramDeliveryPoster<DeliveryOf<E>>,
+    ) -> RegistrationOf<E> {
         self.router.index().register(
             RouteMatcher::new(association, PacketForms::ALL, Version::V1),
-            Arc::new(EndpointDeliverer::new(receiver.poster())),
+            Arc::new(EndpointDeliverer::new(poster)),
         )
     }
 }

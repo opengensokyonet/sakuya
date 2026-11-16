@@ -73,6 +73,7 @@ use sakuya_wire::{
 use crate::frame_source::{FrameSource, PublishIntent};
 
 pub mod datagram;
+pub mod local;
 pub mod reset_token;
 pub mod sequence_map;
 #[cfg(feature = "connection_id_strategy_checks")]
