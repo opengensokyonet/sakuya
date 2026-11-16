@@ -20,8 +20,12 @@ use sakuya_stream::send_options::destination::Unfulfilled;
 use sakuya_wire::{parts::Selector, v1::frame::handshake_done::HandshakeDoneFrame};
 
 use super::{
-    Choices, Client, ConnectionArgs, address_token::AddressTokenSink,
-    feedback::HandshakeDoneSummary, own_args, send::HandshakeDoneIntent,
+    Choices, Client, ConnectionArgs,
+    address_token::AddressTokenSink,
+    feedback::HandshakeDoneSummary,
+    own_args,
+    retry::{ClientRetryPolicy, ReceivedRetry, RetryDecision},
+    send::HandshakeDoneIntent,
 };
 use crate::{
     component::{ArgsOf, Build, ParentsOf, PassiveDataComponent},
@@ -183,6 +187,18 @@ impl<Tk, Rp> ClientOnlyState<Tk, Rp> {
     /// The Retry policy.
     pub fn retry_policy_mut(&mut self) -> &mut Rp {
         &mut self.retry_policy
+    }
+}
+
+impl<Tk, Rp: ClientRetryPolicy> ClientOnlyState<Tk, Rp> {
+    /// A valid Retry `retry` with `token` arrived: the policy decides, and
+    /// going on, the later Initial packets carry `token`.
+    pub(super) fn retry(&mut self, retry: &ReceivedRetry, token: Bytes) -> RetryDecision {
+        let decision = self.retry_policy.decide(retry);
+        if decision == RetryDecision::Continue {
+            self.initial_token = token;
+        }
+        decision
     }
 }
 

@@ -1216,8 +1216,9 @@ type ClientPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, 
 /// The server's `original_destination_connection_id` must state the
 /// Destination Connection ID of the client's first Initial packet, its
 /// `initial_source_connection_id` the Source Connection ID of its first
-/// Initial packet that opened, and without a Retry it must send no
-/// `retry_source_connection_id` (RFC 9000 §7.3). Once they pass, the
+/// Initial packet that opened, and its `retry_source_connection_id` the
+/// Source Connection ID of the Retry the client received, or be absent
+/// without one (RFC 9000 §7.3). Once they pass, the
 /// server's parameters are known.
 impl<
     T,
@@ -1289,11 +1290,9 @@ where
     {
         let lineage = &mut view.get_mut().lineage;
         let chosen = lineage.get::<PeerHandshakeConnectionId, Iph>().get();
-        let original = lineage
-            .get::<InitialDestinationConnectionIds, Iid>()
-            .original();
+        let initial = *lineage.get::<InitialDestinationConnectionIds, Iid>();
         let slots = read_peer::<L, Iv>(peer, Role::Server)?;
-        check_server_destination::<_, Jo, Jr>(&slots, original)
+        check_server_destination::<_, Jo, Jr>(&slots, initial.original(), initial.retry_source())
             .and_then(|()| check_initial_source::<_, Ja>(&slots, chosen))
             .map_err(|source| {
                 v1_error::<L, Iv>(ConnectionError::PeerTransportParameters { source })

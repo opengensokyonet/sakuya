@@ -53,9 +53,9 @@
 //!
 //! The inputs held, packets and candidates alike, are at most
 //! [`max_held_inputs`](LogicalPathReceivingLimits::max_held_inputs) for the
-//! logical path; past it the input that arrives is dropped. Retry and
-//! Version Negotiation packets are dropped: a client's handling of them is
-//! not here yet.
+//! logical path; past it the input that arrives is dropped. A server
+//! drops Retry and Version Negotiation packets; a client receives them as
+//! [`receive_unprotected`] says.
 //!
 //! [`logical_path_receiving`] is also the operation struct
 //! [`LogicalPathReceiving`], with `LogicalPathReceivingExt` on receiver
@@ -93,6 +93,7 @@ use sakuya_datagram_routing::{
 use sakuya_link::{Link, MIN_DATAGRAM_SIZE, ReceivedDatagram};
 use sakuya_packet_protection::backend::CryptoBackend;
 use sakuya_recovery::{
+    factory::{LendCongestion, RecoveryFactory},
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaces},
     receive_journals::{MaxAckRanges, ReceiveJournals},
 };
@@ -119,12 +120,17 @@ use super::{
     amplification::{AddressValidation, AntiAmplification},
     close::{CloseReasonRecord, LocalCloseCause},
     close_packet::ClosePacket,
-    connection_ids::{ConnectionIdsOf, PeerHandshakeConnectionId},
+    connection_ids::{
+        ConnectionIdsOf, InitialDestinationConnectionIds, PeerHandshakeConnectionId,
+        ResetTokenRegistrarOf,
+    },
     dispatch::drain_link_paths,
     error::V1ConnectionErrorOf,
+    feedback::CoreLentFeedback,
     idle::IdleTimeout,
     key_phase::KeyPhaseNumbers,
-    keys::{HandshakeKeys, InitialKeys, OneRttKeys, OneRttReceiveKeys},
+    keys::{HandshakeKeys, InitialKeys, OneRttKeys, OneRttReceiveKeys, PacketProtectionBackend},
+    link::LinkClone,
     link::LinkFacts,
     long_header_claim::long_header_belongs,
     receive::{
@@ -132,22 +138,35 @@ use super::{
         packet_number_offset, receive_keys, receive_packet,
     },
     recovery::RttOf,
+    recovery::{CongestionPartOf, OthersOf, RecoveryFactoryOf},
+    retry::{
+        RestartRecoveryTakes, RetryDecision, check_retry, restart_recovery, retry_initial_keys,
+    },
     send::SendTypes,
+    send_planning::IntakePublishOutcome,
     send_planning::{LinkPathPlanner, LinkPathSendPlannerOf, SendStrategyOf},
     spaces::AckObligationsOf,
+    spaces::SendJournalsOf,
     stateless_reset::StatelessResetSignal,
     streams::resets::StreamResetsOf,
+    streams::send::StreamIntent,
+    version_negotiation::check_version_negotiation,
 };
 use crate::role::LinkPathRole;
 use crate::{
     call::{CallBundle, CallKind, NodeCallFamily, NodeLoan},
     clock::{InstantOf, LinkIdOf},
     component::{ArgsOf, LineageOf, ReadSet},
+    connection_id::DestinationConnectionIdStrategy,
     dispatch::FrameSetDispatch,
     error::ConnectionErrorsOf,
+    feedback::FeedbackSummariesOf,
+    frame_source::{EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts},
     layer::{self, LogicalPath, NodeKey},
     others::OtherNodes,
-    send_strategy::{Publish, ResendCloseIntent, SendStrategy, SendStrategyTypes},
+    send_strategy::{
+        AnyActiveLinkPath, Publish, ResendCloseIntent, SendStrategy, SendStrategyTypes,
+    },
     share::{FlatMut, LineageLists, LineagePartList, NodeData},
     take::{GetAt, ReadEach, TakeEach},
 };
@@ -476,7 +495,8 @@ pub trait LogicalPathReceivingCapability: ReceiverFamily {
 /// drains the link paths by when a stateless reset was received: `Is` of
 /// the logical path's [`StatelessResetSignal`], and those of
 /// [`drain_link_paths`]; and `Icp` of a link path's close packet, `Ipl` of
-/// its planner and `Irc` of the resend among the planner's intents.
+/// its planner and `Irc` of the resend among the planner's intents; and
+/// those a client receives a Retry by ([`receive_unprotected`]).
 type Positions<
     Ip,
     Ic,
@@ -504,6 +524,17 @@ type Positions<
     Ima,
     Irt,
     Il,
+    Iid,
+    Ibk,
+    Iw,
+    Isj,
+    If,
+    Ile,
+    Ikr,
+    Hf,
+    Ies,
+    S,
+    Ls,
 > = (
     (Ip, Ic),
     (Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Icid, Iph),
@@ -511,6 +542,7 @@ type Positions<
     Ian,
     (Is, Iv, Ima, Irt, Il),
     (Icp, Ipl, Irc),
+    ((Iid, Ibk, Iw), (Isj, If, Ile, Ikr, Hf, Ies), (S, Ls)),
 );
 
 impl<
@@ -544,6 +576,17 @@ impl<
     Ima,
     Irt,
     Il,
+    Iid,
+    Ibk,
+    Iw,
+    Isj,
+    If,
+    Ile,
+    Ikr,
+    Hf,
+    Ies,
+    S,
+    Ls,
 > LogicalPathReceivingCapability
     for NodeCallFamily<
         T,
@@ -577,12 +620,49 @@ impl<
             Ima,
             Irt,
             Il,
+            Iid,
+            Ibk,
+            Iw,
+            Isj,
+            If,
+            Ile,
+            Ikr,
+            Hf,
+            Ies,
+            S,
+            Ls,
         >,
         B,
     >
 where
     T: Choices,
     L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
+    L: FeedbackSummariesOf + EstablishedSourceComponentsOf<T, L>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    S: 'static,
+    Ls: 'static,
+    RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link>
+        + for<'s> LendCongestion<
+            InstantOf<T>,
+            OthersOf<'s, T, L>,
+            Part = CongestionPartOf<T, L>,
+            SentState = S,
+            LossState = Ls,
+        >,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<InitialDestinationConnectionIds, Iid>
+        + GetAt<PacketProtectionBackend<T::Crypto>, Ibk>
+        + GetAt<<T::Side as Side>::Own, Iw>
+        + GetAt<SendJournalsOf<T, L>, Isj>
+        + GetAt<RecoveryFactoryOf<T, L>, If>
+        + CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
+    for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![LinkClone<T::Link>], Ile>,
+    for<'x> NodeData<T, L, layer::Recovery>: FlatMut<'x>,
+    for<'x> <NodeData<T, L, layer::Recovery> as FlatMut<'x>>::Out:
+        TakeEach<'x, RestartRecoveryTakes<T, L, S, Ls>, Ikr>,
+    for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
+        TakeEach<'s, EstablishedSourceComponentsOfParts<T, L>, Ies>,
     B: CallBundle,
     <T::Link as Link>::Payload: SplitTo + AsRef<[u8]> + AsMut<[u8]> + Into<Bytes>,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
@@ -702,6 +782,18 @@ where
                     Icp,
                     Ipl,
                     Irc,
+                    Il,
+                    Iid,
+                    Ibk,
+                    Iw,
+                    Isj,
+                    If,
+                    Ile,
+                    Ikr,
+                    Hf,
+                    Ies,
+                    S,
+                    Ls,
                 >(lineage, others, datagram, dcid_len);
                 continue;
             }
@@ -808,6 +900,18 @@ where
             Icp,
             Ipl,
             Irc,
+            Il,
+            Iid,
+            Ibk,
+            Iw,
+            Isj,
+            If,
+            Ile,
+            Ikr,
+            Hf,
+            Ies,
+            S,
+            Ls,
         >(
             lineage,
             others,
@@ -849,6 +953,18 @@ fn receive_owned<
     Icp,
     Ipl,
     Irc,
+    Il,
+    Iid,
+    Ibk,
+    Iw,
+    Isj,
+    If,
+    Ile,
+    Ikr,
+    Hf,
+    Ies,
+    S,
+    Ls,
 >(
     lineage: &mut LineageOf<'v, T, L, LogicalPath>,
     others: &mut OtherNodes<'v, T, L, B>,
@@ -857,6 +973,34 @@ fn receive_owned<
 ) where
     T: Choices,
     L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
+    L: FeedbackSummariesOf + EstablishedSourceComponentsOf<T, L>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    S: 'static,
+    Ls: 'static,
+    RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link>
+        + for<'s> LendCongestion<
+            InstantOf<T>,
+            OthersOf<'s, T, L>,
+            Part = CongestionPartOf<T, L>,
+            SentState = S,
+            LossState = Ls,
+        >,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<InitialDestinationConnectionIds, Iid>
+        + GetAt<PacketProtectionBackend<T::Crypto>, Ibk>
+        + GetAt<<T::Side as Side>::Own, Iw>
+        + GetAt<SendJournalsOf<T, L>, Isj>
+        + GetAt<RecoveryFactoryOf<T, L>, If>
+        + CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
+    for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![LinkClone<T::Link>], Ile>,
+    for<'x> NodeData<T, L, layer::Recovery>: FlatMut<'x>,
+    for<'x> <NodeData<T, L, layer::Recovery> as FlatMut<'x>>::Out:
+        TakeEach<'x, RestartRecoveryTakes<T, L, S, Ls>, Ikr>,
+    for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
+        TakeEach<'s, EstablishedSourceComponentsOfParts<T, L>, Ies>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![LinkPathRole<InstantOf<T>>], Il>,
     B: CallBundle,
     <T::Link as Link>::Payload: SplitTo + AsRef<[u8]> + AsMut<[u8]> + Into<Bytes>,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
@@ -903,8 +1047,35 @@ fn receive_owned<
         let packet = match packet {
             Ok(Packet::Protected(ProtectedPacket::Initial(..))) if !initial_allowed => continue,
             Ok(Packet::Protected(packet)) => packet,
-            // a client's handling of these is not here yet
-            Ok(Packet::Retry(..) | Packet::VersionNegotiation(..)) => continue,
+            Ok(packet @ (Packet::Retry(..) | Packet::VersionNegotiation(..))) => {
+                if <T::Side as Side>::ROLE == Role::Client
+                    && receive_unprotected::<
+                        T,
+                        L,
+                        B,
+                        Ic,
+                        Ii,
+                        Icid,
+                        Iph,
+                        Il,
+                        Iid,
+                        Ibk,
+                        Iw,
+                        Isj,
+                        If,
+                        Ile,
+                        Ikr,
+                        Hf,
+                        Ies,
+                        S,
+                        Ls,
+                    >(lineage, others, packet, &link)
+                    .is_break()
+                {
+                    break;
+                }
+                continue;
+            }
             Err(IntoPacketsError::DcidDiffersFromFirst) => continue,
             Err(IntoPacketsError::UnreadableBoundary { .. }) => break,
         };
@@ -937,6 +1108,175 @@ fn receive_owned<
     }
     validate_by_handshake::<T, L, B, Ii, Ian>(lineage, others, &link);
     close_packet_resend::<T, L, B, Ir, Icp, Ipl, Irc>(others, &link);
+}
+
+/// Receive, as a client, the Retry or Version Negotiation packet `packet`,
+/// which arrived over `link`; `Break` when it ends the connection
+/// attempt, and the rest of the datagram is dropped.
+///
+/// Each is checked first ([`check_retry`], [`check_version_negotiation`]),
+/// and one to drop is dropped. A valid Version Negotiation packet ends the
+/// attempt for [`CloseReason::VersionNegotiation`], with the versions the
+/// server listed. A valid Retry goes to the Retry policy, through the side
+/// ([`Side::on_retry`]), with how long ago the first Initial packet was
+/// sent; giving up ends the attempt for [`CloseReason::RetryAbandoned`].
+/// Going on, the recovery state of the link path starts over
+/// ([`restart_recovery`]), so that the ClientHello is sent again; the
+/// Initial keys are derived from the Retry's Source Connection ID, which
+/// the destination connection ID strategy sends to from now on and the
+/// connection node keeps as the Retry's
+/// ([`InitialDestinationConnectionIds`]); and the side keeps the token
+/// for every later Initial packet (RFC 9000 §17.2.5). An attempt that ends
+/// sends nothing: every link path drains at once, and the connection ends
+/// as at an idle timeout.
+///
+/// A packet from the server was processed once one opened, the first
+/// setting the [`PeerHandshakeConnectionId`], or a Retry was gone on
+/// after; a Version Negotiation packet that ends the attempt leaves no
+/// later packet to see.
+///
+/// The positions: `Iid` of the Destination Connection IDs of the first
+/// Initial packets, `Ibk` of the backend of packet protection and `Iw` of
+/// the side's own data in the logical path's lineage; `Il` of a link
+/// path's role; and those of [`restart_recovery`].
+#[allow(clippy::type_complexity)] // the positions of what it takes
+fn receive_unprotected<
+    'v,
+    T,
+    L,
+    B,
+    Ic,
+    Ii,
+    Icid,
+    Iph,
+    Il,
+    Iid,
+    Ibk,
+    Iw,
+    Isj,
+    If,
+    Ile,
+    Ikr,
+    Hf,
+    Ies,
+    S,
+    Ls,
+>(
+    lineage: &mut LineageOf<'v, T, L, LogicalPath>,
+    others: &mut OtherNodes<'v, T, L, B>,
+    packet: Packet<<T::Link as Link>::Payload>,
+    link: &LinkIdOf<T>,
+) -> ControlFlow<()>
+where
+    T: Choices,
+    L: LineagePartList<T> + ConnectionErrorsOf,
+    B: CallBundle,
+    <T::Link as Link>::Payload: AsRef<[u8]>,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
+        + GetAt<InitialKeys<T::Crypto>, Ii>
+        + GetAt<ConnectionIdsOf<T>, Icid>
+        + GetAt<PeerHandshakeConnectionId, Iph>,
+    for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![LinkPathRole<InstantOf<T>>], Il>,
+    for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
+    L: FeedbackSummariesOf + EstablishedSourceComponentsOf<T, L>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    S: 'static,
+    Ls: 'static,
+    RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link>
+        + for<'s> LendCongestion<
+            InstantOf<T>,
+            OthersOf<'s, T, L>,
+            Part = CongestionPartOf<T, L>,
+            SentState = S,
+            LossState = Ls,
+        >,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<InitialDestinationConnectionIds, Iid>
+        + GetAt<PacketProtectionBackend<T::Crypto>, Ibk>
+        + GetAt<<T::Side as Side>::Own, Iw>
+        + GetAt<SendJournalsOf<T, L>, Isj>
+        + GetAt<RecoveryFactoryOf<T, L>, If>
+        + CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
+    for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![LinkClone<T::Link>], Ile>,
+    for<'x> NodeData<T, L, layer::Recovery>: FlatMut<'x>,
+    for<'x> <NodeData<T, L, layer::Recovery> as FlatMut<'x>>::Out:
+        TakeEach<'x, RestartRecoveryTakes<T, L, S, Ls>, Ikr>,
+    for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
+        TakeEach<'s, EstablishedSourceComponentsOfParts<T, L>, Ies>,
+{
+    let ids = *lineage.get::<InitialDestinationConnectionIds, Iid>();
+    let answered = lineage
+        .get::<PeerHandshakeConnectionId, Iph>()
+        .get()
+        .is_some()
+        || ids.retry_source().is_some();
+    let reason = match packet {
+        Packet::VersionNegotiation(header, bytes) => {
+            match check_version_negotiation(&header, bytes.as_ref(), &ids.made_with(), answered) {
+                Ok(versions) => CloseReason::VersionNegotiation { versions },
+                Err(_) => return ControlFlow::Continue(()),
+            }
+        }
+        Packet::Retry(header, bytes) => {
+            let backend = &lineage.get::<PacketProtectionBackend<T::Crypto>, Ibk>().0;
+            let Ok(retry) =
+                check_retry(backend, &header, bytes.as_ref(), &ids.made_with(), answered)
+            else {
+                return ControlFlow::Continue(());
+            };
+            let now = others.now();
+            let went_on = restart_recovery::<T, L, B, S, Ls, Isj, If, Ile, Ikr, Hf, Ies>(
+                lineage,
+                others,
+                link,
+                now,
+                |lineage, since_first_initial| {
+                    <T::Side as Side>::on_retry(
+                        lineage.get_mut::<<T::Side as Side>::Own, Iw>(),
+                        &retry.received(since_first_initial),
+                        retry.token().clone(),
+                    ) == RetryDecision::Continue
+                },
+            );
+            if went_on {
+                let source = retry.source();
+                let keys = retry_initial_keys(
+                    &lineage.get::<PacketProtectionBackend<T::Crypto>, Ibk>().0,
+                    &source,
+                );
+                lineage
+                    .get_mut::<InitialKeys<T::Crypto>, Ii>()
+                    .replace(keys);
+                DestinationConnectionIdStrategy::<
+                    LinkIdOf<T>,
+                    InstantOf<T>,
+                    ResetTokenRegistrarOf<T>,
+                >::on_handshake_connection_id(
+                    lineage
+                        .get_mut::<ConnectionIdsOf<T>, Icid>()
+                        .destination_mut(),
+                    source,
+                );
+                lineage
+                    .get_mut::<InitialDestinationConnectionIds, Iid>()
+                    .retried(source);
+                return ControlFlow::Continue(());
+            }
+            CloseReason::RetryAbandoned
+        }
+        Packet::Protected(_) => unreachable!("only a Retry or a Version Negotiation packet"),
+    };
+    lineage
+        .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
+        .record(reason);
+    let now = others.now();
+    others.each_link_path::<HList![LinkPathRole<InstantOf<T>>], Il>(|_, hlist_pat![role]| {
+        role.drain(now);
+    });
+    ControlFlow::Break(())
 }
 
 /// A server that processed a Handshake packet from the peer, which it
@@ -1281,6 +1621,17 @@ impl<
     Ima,
     Irt,
     Il,
+    Iid,
+    Ibk,
+    Iw,
+    Isj,
+    If,
+    Ile,
+    Ikr,
+    Hf,
+    Ies,
+    S,
+    Ls,
 >
     CallKind<
         T,
@@ -1313,11 +1664,48 @@ impl<
             Ima,
             Irt,
             Il,
+            Iid,
+            Ibk,
+            Iw,
+            Isj,
+            If,
+            Ile,
+            Ikr,
+            Hf,
+            Ies,
+            S,
+            Ls,
         >,
     > for LogicalPathReceivingKind
 where
     T: Choices,
     L: LineagePartList<T> + FrameSetDispatch<T, L, Hd> + StreamResetsOf,
+    L: FeedbackSummariesOf + EstablishedSourceComponentsOf<T, L>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    S: 'static,
+    Ls: 'static,
+    RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link>
+        + for<'s> LendCongestion<
+            InstantOf<T>,
+            OthersOf<'s, T, L>,
+            Part = CongestionPartOf<T, L>,
+            SentState = S,
+            LossState = Ls,
+        >,
+    for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<InitialDestinationConnectionIds, Iid>
+        + GetAt<PacketProtectionBackend<T::Crypto>, Ibk>
+        + GetAt<<T::Side as Side>::Own, Iw>
+        + GetAt<SendJournalsOf<T, L>, Isj>
+        + GetAt<RecoveryFactoryOf<T, L>, If>
+        + CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
+    for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![LinkClone<T::Link>], Ile>,
+    for<'x> NodeData<T, L, layer::Recovery>: FlatMut<'x>,
+    for<'x> <NodeData<T, L, layer::Recovery> as FlatMut<'x>>::Out:
+        TakeEach<'x, RestartRecoveryTakes<T, L, S, Ls>, Ikr>,
+    for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
+        TakeEach<'s, EstablishedSourceComponentsOfParts<T, L>, Ies>,
     <T::Link as Link>::Payload: SplitTo + AsRef<[u8]> + AsMut<[u8]> + Into<Bytes>,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ie>,
     <L as FrameSet>::Kind: CoproductSelector<FrameType, Ik>,
@@ -1380,6 +1768,17 @@ where
         Ima,
         Irt,
         Il,
+        Iid,
+        Ibk,
+        Iw,
+        Isj,
+        If,
+        Ile,
+        Ikr,
+        Hf,
+        Ies,
+        S,
+        Ls,
     >: 'static,
 {
     type Call<B: CallBundle> = LentCall<
@@ -1415,6 +1814,17 @@ where
                 Ima,
                 Irt,
                 Il,
+                Iid,
+                Ibk,
+                Iw,
+                Isj,
+                If,
+                Ile,
+                Ikr,
+                Hf,
+                Ies,
+                S,
+                Ls,
             >,
             B,
         >,

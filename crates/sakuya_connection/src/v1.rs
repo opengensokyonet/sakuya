@@ -182,7 +182,7 @@ use self::{
         CongestionPartOf, LinkPathCongestionState, OthersOf, PmtuOf, RecoveryConfigOf,
         RecoveryFactoryOf, RttOf,
     },
-    retry::ClientRetryPolicy,
+    retry::{ClientRetryPolicy, ReceivedRetry, RetryDecision},
     send::{AckIntent, CryptoIntent, HandshakeDoneIntent, ProbePingIntent, SendTypes},
     send_planning::{
         AckIntentTicketOf, AckIntentTickets, CorePublishOutcome, CryptoIntentTicketOf,
@@ -432,6 +432,15 @@ pub trait Side: 'static {
     /// ([`FrameNotPermittedError::NotForRole`](dispatch::FrameNotPermittedError::NotForRole)).
     fn on_new_token(own: &mut Self::Own, token: Bytes);
 
+    /// A valid Retry `retry` with `token` arrived: whether the connection
+    /// attempt goes on, as the Retry policy `own` keeps decides. Going on,
+    /// `own` keeps `token` for every later Initial packet (RFC 9000
+    /// §17.2.5.3).
+    ///
+    /// Only a client receives a Retry: a server drops one, and never gets
+    /// here.
+    fn on_retry(own: &mut Self::Own, retry: &ReceivedRetry, token: Bytes) -> RetryDecision;
+
     /// The Initial secrets split into this side's sending and receiving
     /// secret, in that order (RFC 9001 §5.2).
     fn split_initial_secrets(secrets: InitialSecrets) -> (TrafficSecret, TrafficSecret);
@@ -494,6 +503,9 @@ where
         Bytes::new()
     }
     fn on_new_token(_: &mut HandshakeDoneSource, _: Bytes) {}
+    fn on_retry(_: &mut HandshakeDoneSource, _: &ReceivedRetry, _: Bytes) -> RetryDecision {
+        RetryDecision::Abandon
+    }
     fn split_initial_secrets(secrets: InitialSecrets) -> (TrafficSecret, TrafficSecret) {
         (secrets.server, secrets.client)
     }
@@ -543,6 +555,13 @@ where
     }
     fn on_new_token(own: &mut ClientOnlyState<Tk, Rp>, token: Bytes) {
         own.new_token(token);
+    }
+    fn on_retry(
+        own: &mut ClientOnlyState<Tk, Rp>,
+        retry: &ReceivedRetry,
+        token: Bytes,
+    ) -> RetryDecision {
+        own.retry(retry, token)
     }
     fn split_initial_secrets(secrets: InitialSecrets) -> (TrafficSecret, TrafficSecret) {
         (secrets.client, secrets.server)

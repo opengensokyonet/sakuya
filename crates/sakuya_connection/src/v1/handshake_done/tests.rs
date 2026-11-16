@@ -14,7 +14,7 @@ use sakuya_wire::{
 };
 
 use super::*;
-use crate::v1::retry::ContinueOnRetry;
+use crate::v1::retry::{ClientRetryPolicy, ContinueOnRetry, ReceivedRetry, RetryDecision};
 use crate::v1::{
     aead_usage::AeadUsage,
     datagram_batch::tests::{Accounts, Batch, one_rtt_keys},
@@ -159,4 +159,43 @@ fn a_client_hands_each_token_over_once() {
     assert_eq!(sink.0.borrow().len(), 7);
     // the Initial packets go on with the token they started with
     assert_eq!(own.initial_token(), &Bytes::from_static(b"token"));
+}
+
+/// Gives every Retry up.
+struct AbandonOnRetry;
+
+impl ClientRetryPolicy for AbandonOnRetry {
+    fn decide(&mut self, _: &ReceivedRetry) -> RetryDecision {
+        RetryDecision::Abandon
+    }
+}
+
+#[test]
+fn a_client_carries_the_token_of_a_retry_it_goes_on_after() {
+    let sink = RecordedTokens::default();
+    let retry = ReceivedRetry::new(
+        sakuya_wire::connection_id::ConnectionId::new(&[9; 8]).unwrap(),
+        5,
+        None,
+    );
+    let mut own = client_own(&sink);
+    assert_eq!(
+        own.retry(&retry, Bytes::from_static(b"retry")),
+        RetryDecision::Continue
+    );
+    assert_eq!(own.initial_token(), &Bytes::from_static(b"retry"));
+    // the token of a Retry is not one to keep for later connections
+    assert!(sink.0.borrow().is_empty());
+
+    let mut given_up = ClientOnlyState {
+        initial_token: Bytes::from_static(b"token"),
+        sink: &sink,
+        retry_policy: AbandonOnRetry,
+        received: VecDeque::new(),
+    };
+    assert_eq!(
+        given_up.retry(&retry, Bytes::from_static(b"retry")),
+        RetryDecision::Abandon
+    );
+    assert_eq!(given_up.initial_token(), &Bytes::from_static(b"token"));
 }

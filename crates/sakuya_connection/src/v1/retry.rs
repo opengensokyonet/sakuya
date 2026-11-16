@@ -246,7 +246,7 @@ pub fn retry_initial_keys<B: CryptoBackend>(backend: &B, source: &ConnectionId) 
 /// What starting over the recovery state takes from a link path's
 /// recovery layer, with the loss detection states of the controller's `S`
 /// and `Ls`.
-type RestartRecoveryTakes<T, L, S, Ls> = HList![
+pub(super) type RestartRecoveryTakes<T, L, S, Ls> = HList![
     RttOf<T, L>,
     CongestionPartOf<T, L>,
     PmtuOf<T, L>,
@@ -269,20 +269,23 @@ type RestartRecoveryTakes<T, L, S, Ls> = HList![
 /// nothing is in flight, no loss is pending and the probe timeout has no
 /// backoff. Packet numbers go on (RFC 9000 §17.2.5.3).
 ///
-/// Returns that interval, which the client's Retry policy sees too; `None`
-/// when nothing was left to measure it from.
+/// `go_on` decides in between, given the lineage and that interval, `None`
+/// when nothing was left to measure it from: the recovery layer is made
+/// anew only when it says so, and what `restart_recovery` returns. A
+/// client that gives up ends the connection, so what was taken from the
+/// journals is not missed.
 ///
 /// The positions: `Ij` of the send journals, `If` of the recovery factory,
 /// `Il` of the link's clone in an entry, `Ik` of what this takes from a
 /// recovery layer, `Hf` of the frame sources fed back and `Is` of the
 /// frame sources in an established layer.
-#[allow(dead_code)] // the receiving of a Retry calls it once wired
 pub(super) fn restart_recovery<'v, T, L, B, S, Ls, Ij, If, Il, Ik, Hf, Is>(
     lineage: &mut LineageOf<'v, T, L, LogicalPath>,
     others: &mut OtherNodes<'v, T, L, B>,
     link: &LinkIdOf<T>,
     now: InstantOf<T>,
-) -> Option<Duration>
+    go_on: impl FnOnce(&mut LineageOf<'v, T, L, LogicalPath>, Option<Duration>) -> bool,
+) -> bool
 where
     T: Choices,
     L: LineagePartList<T>
@@ -334,8 +337,11 @@ where
     }
     drop(established);
     let initial_rtt = earliest.map(|at| now - at).filter(|rtt| !rtt.is_zero());
+    if !go_on(lineage, initial_rtt) {
+        return false;
+    }
     let Some(hlist_pat![clone]) = others.link_entry::<HList![LinkClone<T::Link>], Il>(link) else {
-        return initial_rtt;
+        return true;
     };
     let clone = clone.0.clone();
     let factory = lineage.get_mut::<RecoveryFactoryOf<T, L>, If>();
@@ -354,7 +360,7 @@ where
             *pto = ProbeTimeout::new();
         },
     );
-    initial_rtt
+    true
 }
 
 #[cfg(test)]

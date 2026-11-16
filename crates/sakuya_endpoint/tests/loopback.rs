@@ -1021,6 +1021,172 @@ fn a_retried_connection_comes_back_with_its_token() {
 }
 
 #[test]
+fn a_client_goes_on_after_a_retry_and_completes_its_handshake() {
+    run(async {
+        let server = server();
+        let mut incoming = server.endpoint.incoming();
+
+        let labels = Arc::new(RecordedLabels::default());
+        let (client, client_reflow) =
+            Endpoint::<Udp, NoServer, Client>::new(endpoint_config((), client_config(&labels)))
+                .unwrap();
+        let client_reflow = tokio::task::spawn_local(client_reflow);
+        let (client_handle, client_driver) = client
+            .add_connect_only_binding(bind(), BindingDeclarations::default())
+            .unwrap();
+        let client_driver = tokio::task::spawn_local(client_driver);
+        let outgoing = within(
+            "the client takes a link",
+            client_handle.connect(
+                server.address,
+                ServerTarget::from_host_name("example.com").unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+        let (client_connection, client_conn) = outgoing.start().unwrap();
+        let client_connection = tokio::task::spawn_local(client_connection);
+
+        let Some(Incoming::Terminable(half)) =
+            within("an incoming connection", incoming.next()).await
+        else {
+            panic!("the server endpoint ends before a connection comes");
+        };
+        assert!(within("the Retry is sent", half.retry()).await.is_ok());
+        // The client sends its ClientHello again, to the Retry's source
+        // connection ID and with its token.
+        let Some(Incoming::Terminable(retried)) =
+            within("the retried connection", incoming.next()).await
+        else {
+            panic!("the server endpoint ends before the retried connection comes");
+        };
+        assert!(matches!(retried.facts().token, ReturnedToken::Retry { .. }));
+        let (server_connection, server_conn) = retried.accept().unwrap();
+        let server_connection = tokio::task::spawn_local(server_connection);
+
+        // The server's transport parameters state the Retry, which the
+        // client checks.
+        within(
+            "the client's handshake completes",
+            client_conn.handshake_completed(),
+        )
+        .await
+        .expect("the client's handshake completed");
+        within(
+            "the server's handshake completes",
+            server_conn.handshake_completed(),
+        )
+        .await
+        .expect("the server's handshake completed");
+
+        client_conn.close(AppClose(7));
+        within("the client's close", client_conn.closed()).await;
+        within("the server's close", server_conn.closed()).await;
+        within("the client's connection ends", client_connection)
+            .await
+            .unwrap();
+        within("the server's connection ends", server_connection)
+            .await
+            .unwrap();
+        drop(incoming);
+        server.endpoint.close();
+        client.close();
+        let (reflow, driver) = server.drivers;
+        within("the server's drivers end", async {
+            reflow.await.unwrap();
+            driver.await.unwrap();
+        })
+        .await;
+        within("the client's binding driver ends", client_driver)
+            .await
+            .unwrap();
+        within("the client's reflow driver ends", client_reflow)
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
+fn a_client_answered_by_version_negotiation_ends_with_the_versions_listed() {
+    run(async {
+        // a server of no version this client supports, on a plain socket
+        let socket = std::net::UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        socket.set_nonblocking(true).unwrap();
+        let address = socket.local_addr().unwrap();
+
+        let labels = Arc::new(RecordedLabels::default());
+        let (client, client_reflow) =
+            Endpoint::<Udp, NoServer, Client>::new(endpoint_config((), client_config(&labels)))
+                .unwrap();
+        let client_reflow = tokio::task::spawn_local(client_reflow);
+        let (client_handle, client_driver) = client
+            .add_connect_only_binding(bind(), BindingDeclarations::default())
+            .unwrap();
+        let client_driver = tokio::task::spawn_local(client_driver);
+        let outgoing = within(
+            "the client takes a link",
+            client_handle.connect(
+                address,
+                ServerTarget::from_host_name("example.com").unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+        let (client_connection, client_conn) = outgoing.start().unwrap();
+        let client_connection = tokio::task::spawn_local(client_connection);
+
+        let mut buffer = [0; 2048];
+        let (_, from) = within("the client's Initial", async {
+            loop {
+                match socket.recv_from(&mut buffer) {
+                    Ok(received) => break received,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            }
+        })
+        .await;
+        let dcid_len = usize::from(buffer[5]);
+        let dcid = buffer[6..6 + dcid_len].to_vec();
+        let scid_len = usize::from(buffer[6 + dcid_len]);
+        let scid = buffer[7 + dcid_len..7 + dcid_len + scid_len].to_vec();
+        // the connection IDs echoed (RFC 9000 §17.2.1), and two versions
+        // that are not 1
+        let mut answer = vec![0xc0, 0, 0, 0, 0, u8::try_from(scid_len).unwrap()];
+        answer.extend_from_slice(&scid);
+        answer.push(u8::try_from(dcid_len).unwrap());
+        answer.extend_from_slice(&dcid);
+        answer.extend_from_slice(&[0x6b, 0x33, 0x43, 0xcf, 0x0a, 0x1a, 0x2a, 0x3a]);
+        socket.send_to(&answer, from).unwrap();
+
+        let CloseReason::VersionNegotiation { versions } =
+            within("the client's end", client_conn.closed()).await
+        else {
+            panic!("the client ends for the Version Negotiation packet");
+        };
+        assert_eq!(
+            versions
+                .iter()
+                .map(|version| version.get())
+                .collect::<Vec<_>>(),
+            [0x6b33_43cf, 0x0a1a_2a3a]
+        );
+        within("the client's connection ends", client_connection)
+            .await
+            .unwrap();
+        client.close();
+        within("the client's binding driver ends", client_driver)
+            .await
+            .unwrap();
+        within("the client's reflow driver ends", client_reflow)
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
 fn a_connection_born_from_zero_rtt_is_retried_once_its_initial_arrived() {
     run(async {
         let server = server();

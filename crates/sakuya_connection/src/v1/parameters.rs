@@ -260,6 +260,17 @@ pub enum PeerTransportParametersError {
         /// The connection ID it states.
         received: ConnectionId,
     },
+    /// The client received a Retry, and the server sent no
+    /// `retry_source_connection_id`.
+    #[snafu(display("retry_source_connection_id absent after a Retry"))]
+    RetrySourceConnectionIdAbsent,
+    /// The server's `retry_source_connection_id` is not the Source
+    /// Connection ID of the Retry the client received.
+    #[snafu(display("retry_source_connection_id {received:?} is not the Retry's"))]
+    RetrySourceConnectionIdMismatch {
+        /// The connection ID it states.
+        received: ConnectionId,
+    },
 }
 
 /// The connection's error for the peer's transport parameters that could
@@ -307,12 +318,15 @@ where
     Ok(())
 }
 
-/// Check, as a client that received no Retry, that the server's
-/// `original_destination_connection_id` among `slots` states `original`,
-/// and that it sent no `retry_source_connection_id`.
+/// Check, as a client, that the server's `original_destination_connection_id`
+/// among `slots` states `original`, the Destination Connection ID of the
+/// client's first Initial packet, and that its `retry_source_connection_id`
+/// states `retry_source`, the Source Connection ID of the Retry the client
+/// received: absent when it received none (RFC 9000 §7.3).
 pub(super) fn check_server_destination<S, Io, Ir>(
     slots: &S,
     original: ConnectionId,
+    retry_source: Option<ConnectionId>,
 ) -> Result<(), PeerTransportParametersError>
 where
     S: Selector<Option<OriginalDestinationConnectionId>, Io>
@@ -325,13 +339,19 @@ where
         received == original,
         OriginalDestinationConnectionIdMismatchSnafu { received }
     );
-    if let Some(retry) = Selector::<Option<RetrySourceConnectionId>, Ir>::get(slots) {
-        return RetrySourceConnectionIdWithoutRetrySnafu {
-            received: retry.get(),
+    let stated = Selector::<Option<RetrySourceConnectionId>, Ir>::get(slots).map(|id| id.get());
+    match (retry_source, stated) {
+        (None, None) => Ok(()),
+        (None, Some(received)) => RetrySourceConnectionIdWithoutRetrySnafu { received }.fail(),
+        (Some(_), None) => Err(PeerTransportParametersError::RetrySourceConnectionIdAbsent),
+        (Some(retry), Some(received)) => {
+            ensure!(
+                received == retry,
+                RetrySourceConnectionIdMismatchSnafu { received }
+            );
+            Ok(())
         }
-        .fail();
     }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -536,21 +556,38 @@ mod tests {
     fn a_server_states_the_clients_first_destination_and_no_retry() {
         let mut parameters = TransportParameters::<&[u8]>::new();
         assert!(matches!(
-            check_server_destination::<_, _, _>(&parameters.known, id(1)),
+            check_server_destination::<_, _, _>(&parameters.known, id(1), None),
             Err(PeerTransportParametersError::OriginalDestinationConnectionIdAbsent)
         ));
         parameters.set(OriginalDestinationConnectionId::new(id(2)));
         assert!(matches!(
-            check_server_destination::<_, _, _>(&parameters.known, id(1)),
+            check_server_destination::<_, _, _>(&parameters.known, id(1), None),
             Err(PeerTransportParametersError::OriginalDestinationConnectionIdMismatch { received })
                 if received == id(2)
         ));
-        assert!(check_server_destination::<_, _, _>(&parameters.known, id(2)).is_ok());
+        assert!(check_server_destination::<_, _, _>(&parameters.known, id(2), None).is_ok());
         parameters.set(RetrySourceConnectionId::new(id(3)));
         assert!(matches!(
-            check_server_destination::<_, _, _>(&parameters.known, id(2)),
+            check_server_destination::<_, _, _>(&parameters.known, id(2), None),
             Err(PeerTransportParametersError::RetrySourceConnectionIdWithoutRetry { received })
                 if received == id(3)
         ));
+    }
+
+    #[test]
+    fn after_a_retry_a_server_states_the_retrys_source() {
+        let mut parameters = TransportParameters::<&[u8]>::new();
+        parameters.set(OriginalDestinationConnectionId::new(id(2)));
+        assert!(matches!(
+            check_server_destination::<_, _, _>(&parameters.known, id(2), Some(id(3))),
+            Err(PeerTransportParametersError::RetrySourceConnectionIdAbsent)
+        ));
+        parameters.set(RetrySourceConnectionId::new(id(4)));
+        assert!(matches!(
+            check_server_destination::<_, _, _>(&parameters.known, id(2), Some(id(3))),
+            Err(PeerTransportParametersError::RetrySourceConnectionIdMismatch { received })
+                if received == id(4)
+        ));
+        assert!(check_server_destination::<_, _, _>(&parameters.known, id(2), Some(id(4))).is_ok());
     }
 }

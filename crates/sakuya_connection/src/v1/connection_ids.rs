@@ -163,7 +163,9 @@ impl PassiveDataComponent for FirstLocalConnectionId {}
 
 /// The Destination Connection IDs of the client's first Initial packets,
 /// kept in the connection node: what the transport parameters state of
-/// them is checked against, or made from (RFC 9000 §7.3).
+/// them is checked against, or made from (RFC 9000 §7.3). A server knows
+/// them when the connection is made; a client learns the Retry's when it
+/// goes on after one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InitialDestinationConnectionIds {
     made_with: ConnectionId,
@@ -179,18 +181,27 @@ impl InitialDestinationConnectionIds {
     }
 
     /// The client's first one: the one before a Retry, when the server
-    /// sent one before the connection was made; the one the connection was
-    /// made with otherwise. It is the `original_destination_connection_id`
-    /// a server sends.
+    /// sent one before the connection was made or the client went on after
+    /// one; the one the connection was made with otherwise. It is the
+    /// `original_destination_connection_id` a server sends.
     pub fn original(&self) -> ConnectionId {
         self.before_retry.unwrap_or(self.made_with)
     }
 
-    /// The Source Connection ID of the Retry a server sent before the
-    /// connection was made, which is the one the connection was made with:
-    /// the `retry_source_connection_id` it sends. `None` without a Retry.
+    /// The Source Connection ID of the Retry: the one a server sent before
+    /// the connection was made, which is the one the connection was made
+    /// with, or the one a client went on after. It is the
+    /// `retry_source_connection_id` a server sends. `None` without a Retry.
     pub fn retry_source(&self) -> Option<ConnectionId> {
         self.before_retry.map(|_| self.made_with)
+    }
+
+    /// A client went on after a Retry whose Source Connection ID is
+    /// `source`: its Initial keys are derived from it now, and its first
+    /// one is the original (RFC 9000 §7.3).
+    pub(super) fn retried(&mut self, source: ConnectionId) {
+        self.before_retry = Some(self.made_with);
+        self.made_with = source;
     }
 }
 
