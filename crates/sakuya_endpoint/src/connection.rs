@@ -2,16 +2,25 @@
 //! connection ID and making the connection.
 
 use sakuya_connection::{
+    error::ConnectionErrorsOf,
     layer::{Connection, LinkPathArgs, LogicalPathArgs},
     role::LinkPathRole,
+    send_strategy::{AnyActiveLinkPath, SendStrategy},
     share::{LayerShares, LogicalPathKeys, SoleLogicalPath},
-    v1::{self, connection_ids::FirstLocalConnectionId},
+    v1::{
+        self, ConnectionArgs,
+        application_handles::connection::{ConnectionHandle, ConnectionHandleCellOf},
+        connection_ids::FirstLocalConnectionId,
+        send::SendTypes,
+        send_planning::{IntakePublishOutcome, SendStrategyOf},
+        streams::send::StreamIntent,
+    },
 };
 use sakuya_datagram_routing::route::{
     association::MatchAssociation, recognizer::ConnectionIdGenerator,
 };
 use sakuya_link::Link as _;
-use sakuya_wire::connection_id::NonEmptyCid;
+use sakuya_wire::{connection_id::NonEmptyCid, parts::Selector};
 
 use crate::{
     choices::{
@@ -71,23 +80,32 @@ pub(crate) fn register_first_local<E: EndpointChoices>(
 
 /// The connection of the choices `T` and the list of parts `L`, made from
 /// the configurations of its parts and the facts `core`, with its first
-/// link path over `link`.
-pub(crate) fn make_connection<T, L, D>(
+/// link path over `link`, and the connection's handle.
+///
+/// The handle shares the cells of version 1's start values, which `I`
+/// finds in the list of the parts' start values.
+pub(crate) fn make_connection<T, L, D, I>(
     clock: T::Clock,
     configs: <L as PartConfigs<T, L>>::Configs,
     core: CoreFacts<T>,
     link: T::Link,
-) -> D
+) -> (D, ConnectionHandle<T, L>)
 where
     T: v1::Choices,
     L: PartConfigs<T, L>
         + LayerShares<T, L, Connection, Args = <L as PartConfigs<T, L>>::Args>
-        + LogicalPathKeys<Key = SoleLogicalPath>,
+        + LogicalPathKeys<Key = SoleLogicalPath>
+        + ConnectionErrorsOf,
+    <L as PartConfigs<T, L>>::Args: Selector<ConnectionArgs<T, L>, I>,
+    SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
+    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    ConnectionHandleCellOf<T, L>: Send + Sync + 'static,
     D: MakeConnection<T, L>,
 {
     let mut facts = ConnectionFacts::new(core);
     let args = L::connection_args(configs, &mut facts);
-    D::make(
+    let handle = ConnectionHandle::new(Selector::<ConnectionArgs<T, L>, I>::get(&args));
+    let driver = D::make(
         clock,
         args,
         LogicalPathArgs {
@@ -99,5 +117,6 @@ where
             role: LinkPathRole::Active,
             peer_switched_local_id: false,
         },
-    )
+    );
+    (driver, handle)
 }

@@ -10,8 +10,8 @@
 //! [`binding::BindingDriver`]. A server takes [`incoming::Incoming`]
 //! connections and accepts or refuses them; a client connects through a
 //! binding handle and starts the [`outgoing::Outgoing`] connection. Both give
-//! the connection's future, which the host spawns, and a
-//! [`handle::ConnectionHandle`].
+//! the connection's future, which the host spawns, and its
+//! [`ConnectionHandle`](sakuya_connection::v1::application_handles::connection::ConnectionHandle).
 //!
 //! - [`choices`]: what an endpoint is composed with, and the types of its
 //!   routing domain, among them the datagram receiver of its connections.
@@ -22,9 +22,8 @@
 //!   handshake engine.
 //! - [`part`]: the configuration of each part of a connection, and how the
 //!   connection's start values are made from it; [`v1`] is QUIC version 1's.
-//! - [`endpoint`], [`reflow`], [`incoming`], [`outgoing`], [`handle`]: the
-//!   endpoint, its reflow driver, the incoming and outgoing connections and
-//!   the connection handle.
+//! - [`endpoint`], [`reflow`], [`incoming`], [`outgoing`]: the endpoint,
+//!   its reflow driver, and the incoming and outgoing connections.
 //! - [`domain`]: what the bindings, the reflow driver and the connections of
 //!   one endpoint share.
 //! - [`address_token`]: address validation tokens, issued in Retry packets and
@@ -66,7 +65,6 @@ mod connection;
 pub mod domain;
 pub mod dropped_input;
 pub mod endpoint;
-pub mod handle;
 pub mod handshake;
 pub mod incoming;
 pub mod invalid_token;

@@ -36,7 +36,7 @@ use sakuya_connection::{
     v1::{
         self,
         amplification::AntiAmplificationFactor,
-        close::PassThroughImmediateClosePolicy,
+        close::{LocalCloseCause, PassThroughImmediateClosePolicy},
         crypto::{FragmentedCryptoReceiveBuffer, send::OffsetMapCryptoSendBuffer},
         stateless_reset::StatelessResetSignal,
     },
@@ -69,7 +69,7 @@ use sakuya_recovery::{
     receive_journals::MaxAckRanges,
     send_journals::DequeSendJournals,
 };
-use sakuya_stream::connection::TransportImmediateClose;
+use sakuya_stream::connection::{CloseReason, ImmediateClose, TransportImmediateClose};
 use sakuya_tls::{
     cipher_suite::CipherSuite,
     client::{
@@ -529,22 +529,37 @@ fn a_client_and_a_server_endpoint_handshake_on_the_loopback_interface() {
             panic!("the server endpoint ends before a connection comes");
         };
         assert!(!half.facts().born_from_zero_rtt);
-        let (server_connection, _server_conn) = half.accept().unwrap();
+        let (server_connection, server_conn) = half.accept().unwrap();
         let server_connection = tokio::task::spawn_local(server_connection);
 
-        // The handshake completes for the client once it has the 1-RTT
-        // secrets: that is the completion under test, observed until a
-        // deadline.
-        let start = tokio::time::Instant::now();
-        while !labels.has(KeyLogLabel::ClientTrafficSecret0) {
-            assert!(
-                start.elapsed() < DEADLINE,
-                "the client's handshake completes"
-            );
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
+        // The connection handles the endpoint gave see the handshake
+        // complete on both sides.
+        within(
+            "the client's handshake completes",
+            client_conn.handshake_completed(),
+        )
+        .await
+        .expect("the client's handshake completed");
+        within(
+            "the server's handshake completes",
+            server_conn.handshake_completed(),
+        )
+        .await
+        .expect("the server's handshake completed");
+        assert!(labels.has(KeyLogLabel::ClientTrafficSecret0));
 
         client_conn.close(AppClose(7));
+        let CloseReason::Local(cause) = within("the client's close", client_conn.closed()).await
+        else {
+            panic!("the client closes for its own reason");
+        };
+        assert!(matches!(*cause, LocalCloseCause::Application(AppClose(7))));
+        let CloseReason::Peer(ImmediateClose::Application(close)) =
+            within("the server's close", server_conn.closed()).await
+        else {
+            panic!("the server closes for the client's reason");
+        };
+        assert_eq!(close.code.get(), VarInt::from_u32(7));
         within("the client's connection ends", client_connection)
             .await
             .unwrap();

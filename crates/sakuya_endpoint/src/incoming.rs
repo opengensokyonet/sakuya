@@ -33,11 +33,21 @@ use sakuya_connection::v1::input::LogicalPathDatagramReceiver as _;
 use sakuya_connection::{
     call::{CallPositions, TreeCalls},
     driver::ConnectionDriver,
-    share::LineageLists,
+    error::ConnectionErrorsOf,
+    send_strategy::{AnyActiveLinkPath, SendStrategy},
+    share::{ConnectionArgsOf, LineageLists},
     v1::{
-        self as connection, advancing::HandshakeStart, amplification::AddressValidation,
-        close_request::CloseRequestCell, first_flight::FirstFlight, input::InitialPathReceiver,
+        self as connection, ConnectionArgs,
+        advancing::HandshakeStart,
+        amplification::AddressValidation,
+        application_handles::connection::{ConnectionHandle, ConnectionHandleCellOf},
+        close_request::CloseRequestCell,
+        first_flight::FirstFlight,
+        input::InitialPathReceiver,
         link::LinkFacts,
+        send::SendTypes,
+        send_planning::{IntakePublishOutcome, SendStrategyOf},
+        streams::send::StreamIntent,
     },
 };
 use sakuya_datagram_routing::claim::{
@@ -50,7 +60,7 @@ use sakuya_recovery::loss::GranularityBelowClockError;
 use sakuya_stream::connection::TransportImmediateClose;
 use sakuya_tls::clock::Clock as _;
 use sakuya_wire::header::codec::ReadLongHeaderHostExt as _;
-use sakuya_wire::{connection_id::ConnectionId, version::Version};
+use sakuya_wire::{connection_id::ConnectionId, parts::Selector, version::Version};
 
 use crate::{
     address_token::{AddressTokens as _, NewTokenAddress, TokenPeerAddress as _},
@@ -60,7 +70,6 @@ use crate::{
     domain::{Born, Domain},
     dropped_input::DroppedInputCounts,
     endpoint::EndpointClosedError,
-    handle::ConnectionHandle,
     handshake::ServerHandshakeConfig as _,
     invalid_token::encode_initial_close,
     late_initial::LateInitials,
@@ -214,12 +223,12 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
         clippy::result_large_err,
         reason = "the error gives the incoming connection back by value"
     )]
-    pub fn accept<P, W, Bw>(
+    pub fn accept<P, W, Bw, I>(
         mut self,
     ) -> Result<
         (
             ConnectionDriver<S::Choices, S::Parts, P, W, Bw>,
-            ConnectionHandle<<S::Choices as connection::Choices>::ApplicationError>,
+            ConnectionHandle<S::Choices, S::Parts>,
         ),
         AcceptIncomingError<Self>,
     >
@@ -228,6 +237,14 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
         for<'v> S::Parts: LineageLists<'v, S::Choices>,
         P: CallPositions,
         ConnectionDriver<S::Choices, S::Parts, P, W, Bw>: MakeConnection<S::Choices, S::Parts>,
+        ConnectionArgsOf<S::Choices, S::Parts>: Selector<ConnectionArgs<S::Choices, S::Parts>, I>,
+        S::Parts: ConnectionErrorsOf,
+        SendTypes<S::Choices, S::Parts>: IntakePublishOutcome<
+                StreamIntent<<S::Choices as connection::Choices>::SendParameters>,
+                AnyActiveLinkPath,
+            >,
+        SendStrategyOf<S::Choices, S::Parts>: SendStrategy<SendTypes<S::Choices, S::Parts>>,
+        ConnectionHandleCellOf<S::Choices, S::Parts>: Send + Sync + 'static,
     {
         if self.domain.is_closed() {
             return Err(AcceptIncomingError::EndpointClosed {
@@ -280,7 +297,6 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             _ => (AddressValidation::NotValidated, None),
         };
         let handshake = config.handshake();
-        let close_request = CloseRequestCell::new();
         let core = CoreFacts {
             crypto: domain.crypto.clone(),
             handshake: HandshakeStart::new(handshake.start(), handshake.limits()),
@@ -293,15 +309,15 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             initial_receiver: InitialPathReceiver::new(receiver),
             reset_token_registry: domain.reset_tokens.clone(),
             first_local_connection_id,
-            close_request: close_request.clone(),
+            close_request: CloseRequestCell::new(),
         };
-        let driver = make_connection::<S::Choices, S::Parts, _>(
+        let (driver, handle) = make_connection::<S::Choices, S::Parts, _, I>(
             domain.clock.clone(),
             config.parts,
             core,
             link,
         );
-        Ok((driver, ConnectionHandle::new(close_request)))
+        Ok((driver, handle))
     }
 
     /// Waits until a datagram whose first packet is an Initial arrives for

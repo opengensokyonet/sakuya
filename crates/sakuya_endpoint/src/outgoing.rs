@@ -13,17 +13,27 @@ use sakuya_clock::MonotonicClock as _;
 use sakuya_connection::{
     call::{CallPositions, TreeCalls},
     driver::ConnectionDriver,
-    share::LineageLists,
+    error::ConnectionErrorsOf,
+    send_strategy::{AnyActiveLinkPath, SendStrategy},
+    share::{ConnectionArgsOf, LineageLists},
     v1::{
-        self as connection, advancing::HandshakeStart, amplification::AddressValidation,
-        close_request::CloseRequestCell, first_flight::FirstFlight, input::InitialPathReceiver,
+        self as connection, ConnectionArgs,
+        advancing::HandshakeStart,
+        amplification::AddressValidation,
+        application_handles::connection::{ConnectionHandle, ConnectionHandleCellOf},
+        close_request::CloseRequestCell,
+        first_flight::FirstFlight,
+        input::InitialPathReceiver,
         link::LinkFacts,
+        send::SendTypes,
+        send_planning::{IntakePublishOutcome, SendStrategyOf},
+        streams::send::StreamIntent,
     },
 };
 use sakuya_datagram_routing::claim::queue::DatagramDeliveryQueue;
 use sakuya_link::Link as _;
 use sakuya_recovery::loss::GranularityBelowClockError;
-use sakuya_wire::connection_id::ConnectionId;
+use sakuya_wire::{connection_id::ConnectionId, parts::Selector};
 #[cfg(any(test, feature = "test-util"))]
 use snafu::Snafu;
 
@@ -33,7 +43,6 @@ use crate::{
     connection::{make_connection, register_first_local},
     domain::Domain,
     endpoint::EndpointClosedError,
-    handle::ConnectionHandle,
     handshake::ClientHandshakeConfig,
     make::MakeConnection,
     part::CoreFacts,
@@ -138,12 +147,12 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
     /// replaced; when the endpoint's random source gives no destination
     /// connection ID, as the client must not choose a predictable one.
     #[expect(clippy::type_complexity, reason = "the driver's inferred positions")]
-    pub fn start<P, W, Bw>(
+    pub fn start<P, W, Bw, I>(
         mut self,
     ) -> Result<
         (
             ConnectionDriver<C::Choices, C::Parts, P, W, Bw>,
-            ConnectionHandle<<C::Choices as connection::Choices>::ApplicationError>,
+            ConnectionHandle<C::Choices, C::Parts>,
         ),
         StartOutgoingError<Self>,
     >
@@ -152,6 +161,14 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
         for<'v> C::Parts: LineageLists<'v, C::Choices>,
         P: CallPositions,
         ConnectionDriver<C::Choices, C::Parts, P, W, Bw>: MakeConnection<C::Choices, C::Parts>,
+        ConnectionArgsOf<C::Choices, C::Parts>: Selector<ConnectionArgs<C::Choices, C::Parts>, I>,
+        C::Parts: ConnectionErrorsOf,
+        SendTypes<C::Choices, C::Parts>: IntakePublishOutcome<
+                StreamIntent<<C::Choices as connection::Choices>::SendParameters>,
+                AnyActiveLinkPath,
+            >,
+        SendStrategyOf<C::Choices, C::Parts>: SendStrategy<SendTypes<C::Choices, C::Parts>>,
+        ConnectionHandleCellOf<C::Choices, C::Parts>: Send + Sync + 'static,
     {
         if self.domain.is_closed() {
             return Err(StartOutgoingError::EndpointClosed {
@@ -200,7 +217,6 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
             initial_dcid: _,
         } = self;
         let handshake = config.handshake();
-        let close_request = CloseRequestCell::new();
         let core = CoreFacts {
             crypto: domain.crypto.clone(),
             handshake: HandshakeStart::new(handshake.start(&server_name), handshake.limits()),
@@ -215,15 +231,15 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
             initial_receiver: InitialPathReceiver::new(receiver),
             reset_token_registry: domain.reset_tokens.clone(),
             first_local_connection_id,
-            close_request: close_request.clone(),
+            close_request: CloseRequestCell::new(),
         };
-        let driver = make_connection::<C::Choices, C::Parts, _>(
+        let (driver, handle) = make_connection::<C::Choices, C::Parts, _, I>(
             domain.clock.clone(),
             config.parts,
             core,
             link,
         );
-        Ok((driver, ConnectionHandle::new(close_request)))
+        Ok((driver, handle))
     }
 }
 
