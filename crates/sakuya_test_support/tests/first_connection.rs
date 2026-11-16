@@ -2,20 +2,25 @@
 //! loopback interface, composed as an application would, and measured.
 //!
 //! The client connects, the server accepts, the handshake completes, the
-//! client closes, and both endpoints shut down. Along the way the test
-//! counts the heap allocations of each phase and the polls and wakes of
-//! each task, and prints them; the numbers are read by the first
-//! connection's line, not asserted.
-//!
-//! The endpoint hands out a connection handle that can only close, so the
-//! stream that node 1 opens is not here yet.
+//! client opens a bidirectional stream and sends a request with its end,
+//! the server reads it and answers on the same stream, the client reads
+//! the answer and closes, and both endpoints shut down. Along the way the
+//! test counts the heap allocations, the datagrams and the polls and wakes
+//! of each task in each phase, and prints them; the numbers are read by
+//! the first connection's line, not asserted.
 //!
 //! The server presents an Ed25519 certificate for example.com, issued by a
 //! test root that the client's [`TestRootsVerifier`] trusts.
 
 #![cfg(target_os = "linux")]
 
-use core::{fmt, future::Future, net::SocketAddr, num::NonZeroU32, time::Duration};
+use core::{
+    fmt,
+    future::Future,
+    net::SocketAddr,
+    num::{NonZeroU32, NonZeroUsize},
+    time::Duration,
+};
 use std::{
     net::UdpSocket,
     sync::{
@@ -29,7 +34,9 @@ use frunk_core::{Coprod, hlist};
 use futures_util::StreamExt as _;
 use nitori_crypto::NamedGroup;
 use nitori_crypto_aws_lc::{AwsLcBackend, Ed25519SigningKey};
+use nitori_io::{ReadChunkHostExt as _, calls::WriteAllHostExt as _};
 use sakuya_clock_tokio::TokioClock;
+use sakuya_connection::prelude::*;
 use sakuya_connection::{
     clock::{ConnectionChoices, LinkIdOf},
     connection_id::{
@@ -71,7 +78,10 @@ use sakuya_recovery::{
     send_journals::DequeSendJournals,
 };
 use sakuya_test_support::{
-    measure::{AllocationCounts, Counted, CountingAllocator, WakeCountReader, allocation_counts},
+    measure::{
+        AllocationCounts, Counted, CountingAllocator, WakeCountReader, WakeCounts,
+        allocation_counts,
+    },
     pki,
     verify::{TestRootsVerifier, test_roots_verifier},
 };
@@ -102,7 +112,16 @@ use sakuya_tls::{
 use sakuya_udp_tokio::{UdpBinding, UdpBindingConfig, UdpLink};
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength, StatelessResetToken},
-    v1::transport_parameters::{TransportParameters, integer::MaxIdleTimeout},
+    v1::{
+        stream_count::StreamCount,
+        transport_parameters::{
+            TransportParameters,
+            integer::{
+                InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
+                InitialMaxStreamsBidi, MaxIdleTimeout,
+            },
+        },
+    },
     var_int::VarInt,
 };
 
@@ -358,6 +377,14 @@ macro_rules! v1_config {
     ($t:ty) => {{
         let mut parameters = TransportParameters::<Vec<u8>>::new();
         parameters.set(MaxIdleTimeout::new(VarInt::from_u32(30_000)));
+        // each side lets the other open a few bidirectional streams and
+        // send a little on them
+        parameters.set(InitialMaxData::new(VarInt::from_u32(65_536)));
+        parameters.set(InitialMaxStreamDataBidiLocal::new(VarInt::from_u32(16_384)));
+        parameters.set(InitialMaxStreamDataBidiRemote::new(VarInt::from_u32(
+            16_384,
+        )));
+        parameters.set(InitialMaxStreamsBidi::new(StreamCount::new(4).unwrap()));
         sakuya_endpoint::v1::ConnectionConfig::<$t, Parts> {
             anti_amplification: AntiAmplificationFactor::new(3).unwrap(),
             transport_parameters: parameters.known,
@@ -593,15 +620,12 @@ impl Tasks {
         tokio::task::spawn_local(counted)
     }
 
-    fn print(&self) {
-        println!("[first-connection] task polls wakes");
-        for (name, reader) in &self.0 {
-            let counts = reader.counts();
-            println!(
-                "[first-connection] {name} {} {}",
-                counts.polls, counts.wakes
-            );
-        }
+    /// The counts of each task so far, in the order spawned.
+    fn counts(&self) -> Vec<(&'static str, WakeCounts)> {
+        self.0
+            .iter()
+            .map(|(name, reader)| (*name, reader.counts()))
+            .collect()
     }
 }
 
@@ -612,6 +636,8 @@ type CrossedCounts = [(u64, u64); 2];
 /// The allocations of each phase of a run.
 struct Phases {
     last: AllocationCounts,
+    last_wakes: Vec<(&'static str, WakeCounts)>,
+    wakes: Vec<(&'static str, Vec<(&'static str, WakeCounts)>)>,
     last_crossed: CrossedCounts,
     done: Vec<(&'static str, AllocationCounts, CrossedCounts)>,
 }
@@ -620,14 +646,30 @@ impl Phases {
     fn start() -> Self {
         Self {
             last: allocation_counts(),
+            last_wakes: Vec::new(),
+            wakes: Vec::new(),
             last_crossed: [(0, 0); 2],
             done: Vec::new(),
         }
     }
 
     /// Ends the phase `name` now; `relay` tells what crossed it.
-    fn end(&mut self, name: &'static str, relay: Option<&Relay>) {
+    fn end(&mut self, name: &'static str, relay: Option<&Relay>, tasks: &Tasks) {
         let now = allocation_counts();
+        let wakes = tasks.counts();
+        let phase = wakes
+            .iter()
+            .map(|&(task, counts)| {
+                let earlier = self
+                    .last_wakes
+                    .iter()
+                    .find(|(t, _)| *t == task)
+                    .map_or(WakeCounts::default(), |&(_, c)| c);
+                (task, counts.since(earlier))
+            })
+            .collect();
+        self.wakes.push((name, phase));
+        self.last_wakes = wakes;
         let crossed = relay.map_or(self.last_crossed, Relay::crossed);
         let [(a, b), (c, d)] = self.last_crossed;
         let [(e, f), (g, h)] = crossed;
@@ -648,11 +690,30 @@ impl Phases {
                 c.allocations, c.reallocations, c.deallocations, c.bytes
             );
         }
+        println!("[first-connection] phase task polls wakes");
+        for (name, tasks) in &self.wakes {
+            for (task, counts) in tasks {
+                println!(
+                    "[first-connection] {name} {task} {} {}",
+                    counts.polls, counts.wakes
+                );
+            }
+        }
     }
 }
 
+/// What the client asks on its stream, and what the server answers.
+const REQUEST: &[u8] = b"ping";
+const ANSWER: &[u8] = b"pong";
+
+/// How long the run waits for the handshake's tail before the round trip,
+/// and for the round trip's acknowledgements after it: above the 25 ms
+/// default of max_ack_delay.
+const SETTLE: Duration = Duration::from_millis(60);
+
+/// Node 1, measured.
 #[test]
-fn a_client_and_a_server_endpoint_handshake_on_the_loopback_interface_measured() {
+fn a_client_and_a_server_exchange_a_request_and_its_answer_on_the_loopback_interface() {
     run(async {
         let mut tasks = Tasks::default();
         let mut phases = Phases::start();
@@ -677,7 +738,7 @@ fn a_client_and_a_server_endpoint_handshake_on_the_loopback_interface_measured()
             .add_connect_only_binding(bind(), BindingDeclarations::default())
             .unwrap();
         let client_driver = tasks.spawn("client-binding", client_driver);
-        phases.end("endpoints", None);
+        phases.end("endpoints", None, &tasks);
         let relay = Relay::new(server_address);
 
         let outgoing = within(
@@ -697,20 +758,86 @@ fn a_client_and_a_server_endpoint_handshake_on_the_loopback_interface_measured()
         else {
             panic!("the server endpoint ends before a connection comes");
         };
-        let (server_connection, _server_conn) = half.accept().unwrap();
+        let (server_connection, server_conn) = half.accept().unwrap();
         let server_connection = tasks.spawn("server-connection", server_connection);
 
-        // The handshake completes for the client once it has the 1-RTT
-        // secrets; the endpoint's handle cannot tell more yet.
-        let start = tokio::time::Instant::now();
-        while !labels.has(KeyLogLabel::ClientTrafficSecret0) {
-            assert!(
-                start.elapsed() < DEADLINE,
-                "the client's handshake completes"
-            );
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-        phases.end("connect-and-handshake", Some(&relay));
+        within(
+            "the client's handshake completes",
+            client_conn.handshake_completed(),
+        )
+        .await
+        .expect("the client's handshake completed");
+        within(
+            "the server's handshake completes",
+            server_conn.handshake_completed(),
+        )
+        .await
+        .expect("the server's handshake completed");
+        let client_layer = client_conn
+            .established()
+            .await
+            .expect("the client's handshake completed");
+        let server_layer = server_conn
+            .established()
+            .await
+            .expect("the server's handshake completed");
+        assert!(labels.has(KeyLogLabel::ClientTrafficSecret0));
+        phases.end("connect-and-handshake", Some(&relay), &tasks);
+
+        // The server's application waits for the stream on a task of its
+        // own. It is spawned before the round trip, which starts once the
+        // handshake's last datagrams and their acknowledgements have gone
+        // across, so that they stay out of its counts.
+        let server_application = tasks.spawn("server-application", async move {
+            let (mut writer, mut reader) = server_layer
+                .accept_bi()
+                .await
+                .expect("the client's stream is accepted");
+            let mut request = Vec::new();
+            while let Some(chunk) = reader
+                .read_chunk_unpin(NonZeroUsize::new(64).unwrap())
+                .await
+                .expect("the request is read")
+            {
+                request.extend_from_slice(&chunk);
+            }
+            writer
+                .write_all_unpin(Bytes::from_static(ANSWER))
+                .await
+                .expect("the answer is written");
+            writer.close().expect("the answer ends");
+            request
+        });
+        tokio::time::sleep(SETTLE).await;
+        phases.end("settle", Some(&relay), &tasks);
+
+        let (mut writer, mut reader) = client_layer
+            .try_open_bi()
+            .expect("the server grants streams");
+        writer
+            .write_all_unpin(Bytes::from_static(REQUEST))
+            .await
+            .expect("the request is written");
+        writer.close().expect("the request ends");
+        let mut answer = Vec::new();
+        within("the answer arrives", async {
+            while let Some(chunk) = reader
+                .read_chunk_unpin(NonZeroUsize::new(64).unwrap())
+                .await
+                .expect("the answer is read")
+            {
+                answer.extend_from_slice(&chunk);
+            }
+        })
+        .await;
+        phases.end("round-trip", Some(&relay), &tasks);
+        tokio::time::sleep(SETTLE).await;
+        phases.end("settle-after", Some(&relay), &tasks);
+        let request = within("the server's application ends", server_application)
+            .await
+            .unwrap();
+        assert_eq!(request, REQUEST);
+        assert_eq!(answer, ANSWER);
 
         client_conn.close(AppClose(7));
         within("the client's connection ends", client_connection)
@@ -719,7 +846,7 @@ fn a_client_and_a_server_endpoint_handshake_on_the_loopback_interface_measured()
         within("the server's connection ends", server_connection)
             .await
             .unwrap();
-        phases.end("close", Some(&relay));
+        phases.end("close", Some(&relay), &tasks);
 
         drop(incoming);
         server.close();
@@ -736,10 +863,9 @@ fn a_client_and_a_server_endpoint_handshake_on_the_loopback_interface_measured()
         within("the client's reflow driver ends", client_reflow)
             .await
             .unwrap();
-        phases.end("shutdown", Some(&relay));
+        phases.end("shutdown", Some(&relay), &tasks);
         relay.stop();
 
         phases.print();
-        tasks.print();
     });
 }

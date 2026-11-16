@@ -781,6 +781,7 @@ dependencies = [
  "futures-util",
  "nitori_crypto",
  "nitori_crypto_aws_lc",
+ "nitori_io",
  "rustls-pki-types",
  "sakuya_clock_tokio",
  "sakuya_connection",
