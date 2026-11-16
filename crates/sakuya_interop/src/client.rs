@@ -157,7 +157,10 @@ async fn fetch_all(starts: ClientStarts, batches: Vec<Vec<Url>>) -> ExitCode {
         let target = match ServerTarget::from_host_name(host) {
             Ok(target) => target,
             Err(error) => {
-                eprintln!("sakuya client: {host} is not a server name: {error:?}");
+                eprintln!(
+                    "sakuya client: {host} is not a server name: {}",
+                    crate::report(&error)
+                );
                 outcome = ExitCode::FAILURE;
                 break;
             }
@@ -194,7 +197,10 @@ async fn fetch_all(starts: ClientStarts, batches: Vec<Vec<Url>>) -> ExitCode {
         let layer = match tokio::time::timeout(STEP, handle.established()).await {
             Ok(Ok(layer)) => layer,
             Ok(Err(error)) => {
-                eprintln!("sakuya client: connection {number} is not established: {error:?}");
+                eprintln!(
+                    "sakuya client: connection {number} is not established: {}",
+                    crate::report(&error)
+                );
                 if let Ok(reason) = tokio::time::timeout(STEP, handle.closed()).await {
                     eprintln!("sakuya client: connection {number} closed: {reason:?}");
                 }
@@ -219,18 +225,18 @@ async fn fetch_all(starts: ClientStarts, batches: Vec<Vec<Url>>) -> ExitCode {
                 };
                 let path: PathBuf = Path::new(DOWNLOADS).join(name);
                 let (mut writer, mut reader) = layer.open_bi().await.map_err(|error| {
-                    eprintln!("sakuya client: no stream for {}: {error:?}", url.path);
+                    eprintln!("sakuya client: no stream for {}: {}", url.path, crate::report(&error));
                     Failed
                 })?;
                 writer
                     .write_all_unpin(Bytes::from(url.request()))
                     .await
                     .map_err(|error| {
-                        eprintln!("sakuya client: the request for {} cannot be sent: {error:?}", url.path);
+                        eprintln!("sakuya client: the request for {} cannot be sent: {}", url.path, crate::report(&error));
                         Failed
                     })?;
                 writer.close().map_err(|error| {
-                    eprintln!("sakuya client: the request for {} cannot end: {error:?}", url.path);
+                    eprintln!("sakuya client: the request for {} cannot end: {}", url.path, crate::report(&error));
                     Failed
                 })?;
                 if let Some(parent) = path.parent() {
@@ -256,8 +262,9 @@ async fn fetch_all(starts: ClientStarts, batches: Vec<Vec<Url>>) -> ExitCode {
                         Ok(None) => break,
                         Err(error) => {
                             eprintln!(
-                                "sakuya client: the answer for {} cannot be read after {received} bytes: {error:?}",
-                                url.path
+                                "sakuya client: the answer for {} cannot be read after {received} bytes: {}",
+                                url.path,
+                                crate::report(&error),
                             );
                             return Err(Failed);
                         }

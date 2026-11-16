@@ -155,7 +155,10 @@ async fn serve(starts: ServerStarts, always_retry: bool) -> ExitCode {
             let layer = match handle.established().await {
                 Ok(layer) => layer,
                 Err(error) => {
-                    eprintln!("sakuya server: connection {number} is not established: {error:?}");
+                    eprintln!(
+                        "sakuya server: connection {number} is not established: {}",
+                        crate::report(&error)
+                    );
                     return;
                 }
             };
@@ -187,7 +190,8 @@ async fn serve(starts: ServerStarts, always_retry: bool) -> ExitCode {
                                     Ok(None) => break,
                                     Err(error) => {
                                         eprintln!(
-                                            "sakuya server: connection {number}: a request cannot be read: {error:?}"
+                                            "sakuya server: connection {number}: a request cannot be read: {}",
+                                            crate::report(&error),
                                         );
                                         return;
                                     }
@@ -220,15 +224,17 @@ async fn serve(starts: ServerStarts, always_retry: bool) -> ExitCode {
                                 let chunk = rest.split_to(rest.len().min(CHUNK));
                                 if let Err(error) = writer.write_all_unpin(chunk).await {
                                     eprintln!(
-                                        "sakuya server: connection {number}: {} cannot be sent: {error:?}",
-                                        file.display()
+                                        "sakuya server: connection {number}: {} cannot be sent: {}",
+                                        file.display(),
+                                        crate::report(&error),
                                     );
                                     return;
                                 }
                             }
                             if let Err(error) = writer.close() {
                                 eprintln!(
-                                    "sakuya server: connection {number}: the answer cannot end: {error:?}"
+                                    "sakuya server: connection {number}: the answer cannot end: {}",
+                                    crate::report(&error),
                                 );
                             }
                         });
