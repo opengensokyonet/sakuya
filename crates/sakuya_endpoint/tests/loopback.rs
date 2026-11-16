@@ -575,6 +575,9 @@ fn a_client_and_a_server_endpoint_handshake_on_the_loopback_interface() {
             panic!("the client closes for its own reason");
         };
         assert!(matches!(*cause, LocalCloseCause::Application(AppClose(7))));
+        // the reasons of an endpoint's connections show as errors, the end
+        // of a link among them
+        let _: &dyn std::error::Error = &*cause;
         let CloseReason::Peer(ImmediateClose::Application(close)) =
             within("the server's close", server_conn.closed()).await
         else {

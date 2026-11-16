@@ -29,6 +29,7 @@ use std::sync::{
 
 use futures_util::task::AtomicWaker;
 use sakuya_link::{ArrivalFacts, Link, LinkId, OutgoingDatagram, ReceivedDatagram};
+use sakuya_wire::parts::PartsError;
 
 use self::sum::{Arrived, LinkSum};
 
@@ -200,12 +201,14 @@ impl<M: LinkSum> Link for EndpointLink<M> {
     type Peer = M::Peer;
     type Payload = M::Payload;
     type Instant = M::Instant;
-    type RecvError = M::RecvError;
+    /// The member's reason for ending, in the sum of the members'
+    /// reasons, wrapped to be one error.
+    type RecvError = PartsError<M::RecvError>;
     type Recv<'a>
-        = impl Future<Output = Result<ReceivedDatagram<M::Payload, Self>, M::RecvError>> + 'a
+        = impl Future<Output = Result<ReceivedDatagram<M::Payload, Self>, Self::RecvError>> + 'a
     where
         Self: 'a;
-    type Ended = M::Ended;
+    type Ended = impl Future<Output = Self::RecvError>;
     type MaxDatagramSizeError = M::MaxDatagramSizeError;
     type SendError = M::SendError;
     type Send<'a> = M::Send<'a>;
@@ -224,11 +227,13 @@ impl<M: LinkSum> Link for EndpointLink<M> {
     }
 
     fn recv(&self) -> Self::Recv<'_> {
-        self.core.recv()
+        let recv = self.core.recv();
+        async move { recv.await.map_err(PartsError) }
     }
 
-    fn ended(&self) -> M::Ended {
-        self.core.member.ended()
+    fn ended(&self) -> Self::Ended {
+        let ended = self.core.member.ended();
+        async move { PartsError(ended.await) }
     }
 
     fn send<'a>(&self, batch: &'a [OutgoingDatagram]) -> M::Send<'a> {

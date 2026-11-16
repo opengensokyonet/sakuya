@@ -17,6 +17,7 @@ use frunk_core::{
     coproduct::{CoprodInjector, Coproduct},
 };
 use sakuya_link::{BindingId, Link, LinkId};
+use sakuya_wire::parts::PartsError;
 
 use super::{EndpointLink, LinkCore};
 use crate::memory_link::MemoryLink;
@@ -112,7 +113,7 @@ fn the_end_of_a_member_is_injected() {
     let received = poll_once(pin!(link.recv()));
     assert!(matches!(
         received,
-        Poll::Ready(Err(Coproduct::Inr(Coproduct::Inl(()))))
+        Poll::Ready(Err(PartsError(Coproduct::Inr(Coproduct::Inl(())))))
     ));
 }
 
