@@ -10,6 +10,11 @@ description = "QUIC connections for sakuya: the tree of a connection's state and
 # Functions that check a destination connection ID strategy against the
 # protocol's contract: the `connection_id::strategy_checks` module.
 connection_id_strategy_checks = []
+# The DATAGRAM extension (RFC 9221) as a part: the `datagram` module.
+datagram = ["sakuya_wire/datagram"]
+# The reliable stream reset extension (RESET_STREAM_AT) as a part: the
+# `reset_stream_at` module.
+reset_stream_at = ["sakuya_wire/reset_stream_at", "sakuya_stream/reset_stream_at"]
 
 [dependencies]
 bytes.workspace = true
