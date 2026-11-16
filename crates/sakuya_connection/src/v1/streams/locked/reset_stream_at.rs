@@ -81,7 +81,8 @@ where
         let Some(support) = self.shared.facts.peer_reset_support else {
             return NotSupportedByPeerSnafu.fail();
         };
-        self.with_part(|end| end.sender.reset_at(support, code, reliable_size))?;
+        self.with_part(|end| end.sender.reset_at(support, code, reliable_size))
+            .map_err(sakuya_stream::reset_stream_at::send::ResetAtError::from)??;
         Ok(())
     }
 }

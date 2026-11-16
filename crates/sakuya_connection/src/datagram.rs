@@ -82,7 +82,7 @@ use crate::{
     v1::{
         Choices, Client, CloseCauseOf, Server, Side,
         application_handles::{
-            FindHandleShare, HandleShare, HandleShares, KeyedHandleShare,
+            DriverPanicHandleShare, FindHandleShare, HandleShare, HandleShares, KeyedHandleShare,
             connection::{ConnectionHandleCellOf, EstablishedLayerSharesOf},
             handle,
         },
@@ -238,7 +238,16 @@ pub trait DatagramQueues<Lc>: Sized {
     /// The share of the queues the application's handles hold: the
     /// extension's share of an established layer's handle, which publishes
     /// the datagrams through the handle's intake.
-    type Handle: Clone + KeyedHandleShare<Part = Part>;
+    ///
+    /// When the driver panicked, the connection handle's cell tells it the
+    /// layer's end ([`DriverPanicHandleShare::driver_panicked`]) instead of
+    /// [`layer_ended`](Self::layer_ended), which is never called then: it
+    /// only marks the end, where every receive and send and every ticket of
+    /// a datagram that waits to be sent looks first, and wakes who waits to
+    /// receive and who waits for those tickets to settle. It neither
+    /// withdraws the datagrams nor touches the strategy's tickets, as it may
+    /// run while the panic unwinds.
+    type Handle: Clone + KeyedHandleShare<Part = Part> + DriverPanicHandleShare<Lc>;
     /// The ticket the send strategy gives back for a datagram's intent.
     type StrategyTicket;
 

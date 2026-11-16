@@ -31,6 +31,7 @@ pub mod connection;
 pub mod established_layer;
 pub mod stream;
 
+use sakuya_stream::connection::LayerEnd;
 use sakuya_wire::parts::{HCons, HNil};
 
 use crate::take::{Here, There};
@@ -105,6 +106,43 @@ impl<S: KeyedHandleShare + Clone> HandleShareSlot for S {
 impl HandleShareSlot for HNil {
     fn collected(_: &Option<HNil>) -> Option<HNil> {
         Some(HNil)
+    }
+}
+
+/// What a share of a handle does when the connection's driver panicked
+/// (`DriverPanicHandleShare`): the share's part had its node dropped with
+/// the tree, and no end action ran, so the waits on the share hear of the
+/// end from here. `C` is this endpoint's reason for closing.
+///
+/// The connection handle's cell calls it on every share of the layer whose
+/// handle it gave, in the order of the shares; `HNil`, the share of a part
+/// that gives none, does nothing.
+pub trait DriverPanicHandleShare<C> {
+    /// The driver panicked, and the layer ended as `end`: every wait on the
+    /// share ends with it, and every later operation reports it.
+    ///
+    /// It only marks: it keeps `end` where the operations of the share look
+    /// first, and wakes every waker kept, but changes no state machine, as
+    /// it may run while the panic unwinds, where a second panic aborts the
+    /// process. It takes its locks whatever a holder that panicked left
+    /// of them.
+    fn driver_panicked(&self, end: LayerEnd<C>);
+}
+
+/// A part that gives no share has nothing to end.
+impl<C> DriverPanicHandleShare<C> for HNil {
+    fn driver_panicked(&self, _: LayerEnd<C>) {}
+}
+
+/// Each share in the order of the shares.
+impl<C, S, Ss> DriverPanicHandleShare<C> for HCons<S, Ss>
+where
+    S: DriverPanicHandleShare<C>,
+    Ss: DriverPanicHandleShare<C>,
+{
+    fn driver_panicked(&self, end: LayerEnd<C>) {
+        self.head.driver_panicked(end.clone());
+        self.tail.driver_panicked(end);
     }
 }
 

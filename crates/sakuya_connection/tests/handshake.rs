@@ -90,7 +90,8 @@ use sakuya_recovery::{
 };
 use sakuya_stream::{
     connection::{AbortCause, CloseReason, ImmediateClose, LayerEnd},
-    send::write::WriteError,
+    receive::read::ReadError,
+    send::{finish::CloseError, write::WriteError},
 };
 use sakuya_tls::{
     cipher_suite::CipherSuite,
@@ -776,8 +777,21 @@ mod watch {
         CLIENT_ROLE.with(|next| next.set(Some(role)));
     }
 
+    thread_local! {
+        /// Whether the client's connection panics at the start of its next
+        /// poll.
+        static CLIENT_PANICS: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+    }
+
+    /// Let the client's connection panic at the start of its next poll, in
+    /// the link path's call before the calls: a panic that unwinds through
+    /// the driver, which the harness catches before it drops the driver.
+    pub fn panic_client() {
+        CLIENT_PANICS.with(|next| next.set(true));
+    }
+
     /// In the link path: gives the client's link path the role
-    /// [`set_client_role`] asked for.
+    /// [`set_client_role`] asked for, or panics as [`panic_client`] asked.
     #[derive(Debug)]
     pub struct RoleSetter;
     impl<T: v1::Choices, L> Build<T, L, layer::LinkPath, ()> for RoleSetter
@@ -805,6 +819,10 @@ mod watch {
             now: Duration,
             _: &Waker,
         ) -> Option<RequestOf<T, L>> {
+            if <T::Side as Side>::ROLE == Role::Client && CLIENT_PANICS.with(core::cell::Cell::take)
+            {
+                panic!("the test's panic in the client's poll");
+            }
             if <T::Side as Side>::ROLE == Role::Client
                 && let Some(role) = CLIENT_ROLE.with(core::cell::Cell::take)
             {
@@ -1058,6 +1076,10 @@ struct Run {
     server_ended: bool,
     /// Whether the client's connection ended.
     client_ended: bool,
+    /// Whether a poll of the client's connection panicked; the harness
+    /// caught the panic, dropped the driver and polled it no more.
+    #[allow(dead_code, reason = "not every harness's tests make it panic")]
+    client_panicked: bool,
     /// The client's connection handle.
     client_handle: ConnectionHandle<ClientChoices, Parts>,
     /// The server's connection handle.
@@ -1091,14 +1113,14 @@ fn handshake(
         first_local(&CLIENT_CID, 0xc1),
     );
     let client_handle = ConnectionHandle::new(&client_args);
-    let mut client = connection!(
+    let mut client = Some(connection!(
         ClientChoices,
         client_args,
         client_link.clone()
         $(, $client)*
-    );
+    ));
     let outer = Outer::new();
-    assert!(outer.poll(&mut client).is_pending());
+    assert!(outer.poll(client.as_mut().expect("made")).is_pending());
     let first: Vec<Bytes> = common::take_sent()
         .into_iter()
         .map(|(_, datagram)| datagram)
@@ -1132,6 +1154,7 @@ fn handshake(
         client_sent: first_sent,
         server_ended: false,
         client_ended: false,
+        client_panicked: false,
         client_handle,
         server_handle,
         client_link: client_link.clone(),
@@ -1147,8 +1170,18 @@ fn handshake(
                 moved = true;
                 client_routing.deliver(datagram, &client_link);
             }
-            if !run.client_ended {
-                run.client_ended = outer.poll(&mut client).is_ready();
+            if !run.client_ended
+                && !run.client_panicked
+                && let Some(driver) = &mut client
+            {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| outer.poll(driver))) {
+                    Ok(polled) => run.client_ended = polled.is_ready(),
+                    Err(_) => {
+                        // the host caught the panic; it drops the driver
+                        run.client_panicked = true;
+                        client = None;
+                    }
+                }
             }
             for (_, datagram) in common::take_sent() {
                 moved = true;
@@ -1588,6 +1621,146 @@ fn a_client_whose_link_ends_reports_the_end_everywhere_and_sends_nothing_more() 
     );
 }
 
+/// A waker that counts how often it was woken.
+#[derive(Default)]
+struct Wakes(std::sync::atomic::AtomicUsize);
+
+impl std::task::Wake for Wakes {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A future kept across the harness's calls, polled with a waker of its
+/// own that counts its wakes.
+struct Waiting<F: Future> {
+    future: core::pin::Pin<Box<F>>,
+    wakes: Arc<Wakes>,
+}
+
+impl<F: Future> Waiting<F> {
+    fn new(future: F) -> Self {
+        Self {
+            future: Box::pin(future),
+            wakes: Arc::default(),
+        }
+    }
+
+    fn poll(&mut self) -> Poll<F::Output> {
+        let waker = Waker::from(Arc::clone(&self.wakes));
+        self.future.as_mut().poll(&mut Context::from_waker(&waker))
+    }
+
+    /// How often its waker was woken.
+    fn wakes(&self) -> usize {
+        self.wakes.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Whether `end` is the end of a layer whose driver panicked.
+fn panicked<C>(end: &LayerEnd<C>) -> bool {
+    matches!(
+        end,
+        LayerEnd::ConnectionClosed(CloseReason::Aborted(AbortCause::Panicked))
+    )
+}
+
+/// Over the tests' in-memory link, a client completes the handshake and
+/// waits on its layer: to read a stream, to write past the stream's limit,
+/// to open a stream past the server's limit, and to accept one. Then a
+/// poll of the client's connection panics, the host catches the panic and
+/// drops the driver, which runs no end action: every wait that was pending
+/// is woken and ends with the layer's end, the driver's panic.
+#[test]
+fn a_panic_in_the_clients_poll_ends_every_wait_on_its_streams() {
+    let clock = tls_clock();
+    let maximum = NonZeroUsize::new(64).expect("not zero");
+    let mut layer = None;
+    let mut read = None;
+    let mut write = None;
+    let mut open = None;
+    let mut accept = None;
+    let mut others = Vec::new();
+    let run = handshake(client_engine(&clock, 1), &clock, |run| {
+        if run.client_panicked {
+            return true;
+        }
+        if layer.is_some() {
+            return false;
+        }
+        let Poll::Ready(Ok(client)) = poll_now(run.client_handle.established()) else {
+            return false;
+        };
+        let (mut writer, mut reader) = client.try_open_bi().expect("the server grants streams");
+        // the server grants four bidirectional streams
+        for _ in 0..3 {
+            others.push(client.try_open_bi().expect("the server grants streams"));
+        }
+        let mut reading = Waiting::new(async move { reader.read_chunk_unpin(maximum).await });
+        // past the 16 KiB the server grants the stream
+        let mut writing =
+            Waiting::new(async move { writer.write_all_unpin(Bytes::from(vec![7; 20_000])).await });
+        let mut opening = Waiting::new(client.open_bi_owned());
+        let mut accepting = Waiting::new(client.accept_bi_owned());
+        assert!(reading.poll().is_pending(), "the server sent nothing");
+        assert!(writing.poll().is_pending(), "the stream's limit holds it");
+        assert!(opening.poll().is_pending(), "the server's limit holds it");
+        assert!(accepting.poll().is_pending(), "the server opened nothing");
+        watch::panic_client();
+        (read, write, open, accept) =
+            (Some(reading), Some(writing), Some(opening), Some(accepting));
+        layer = Some(client);
+        false
+    });
+    assert!(run.client_panicked, "the client's poll panicked");
+    let (mut read, mut write, mut open, mut accept) = (
+        read.expect("waits"),
+        write.expect("waits"),
+        open.expect("waits"),
+        accept.expect("waits"),
+    );
+    assert!(matches!(
+        ready(run.client_handle.closed()),
+        CloseReason::Aborted(AbortCause::Panicked)
+    ));
+    let layer = layer.expect("the client's layer");
+    assert!(panicked(&ready(layer.ended())));
+    for (wait, wakes) in [
+        ("read", read.wakes()),
+        ("write", write.wakes()),
+        ("open", open.wakes()),
+        ("accept", accept.wakes()),
+    ] {
+        assert!(wakes > 0, "the {wait} is woken");
+    }
+    let Poll::Ready(Err(error)) = read.poll() else {
+        panic!("the read ends");
+    };
+    assert!(
+        matches!(&error, ReadError::LayerEnded { source } if panicked(source.end())),
+        "{error:?}"
+    );
+    let Poll::Ready(Err(error)) = write.poll() else {
+        panic!("the write ends");
+    };
+    assert!(
+        matches!(error.host_error(), Some(WriteError::LayerEnded { source }) if panicked(source.end())),
+        "{error:?}"
+    );
+    assert!(matches!(open.poll(), Poll::Ready(Err(error)) if panicked(error.end())));
+    assert!(matches!(accept.poll(), Poll::Ready(Err(error)) if panicked(error.end())));
+    // every later operation reports the end at once
+    let (mut writer, _) = others.pop().expect("a stream");
+    assert!(matches!(
+        writer.close(),
+        Err(CloseError::LayerEnded { source }) if panicked(source.end())
+    ));
+    assert!(matches!(
+        layer.try_open_uni(),
+        Err(TryOpenStreamError::LayerEnded { source }) if panicked(source.end())
+    ));
+}
+
 /// A client and a server whose compositions have the reliable stream reset
 /// extension, each announcing `reset_stream_at` or not.
 #[cfg(feature = "reset_stream_at")]
@@ -1962,6 +2135,129 @@ mod datagram {
         assert_eq!(received, Some(Bytes::from_static(b"ping")));
         assert_eq!(settled, Some(DatagramSettlement::Acknowledged));
         ticket.expect("sent").release();
+    }
+
+    /// Over the tests' in-memory link, a client completes the handshake,
+    /// waits to receive a datagram, and sends one whose ticket waits to be
+    /// settled; before the datagram is written, a poll of the client's
+    /// connection panics, the host catches the panic and drops the driver.
+    /// Both waits are woken: the receive ends with the layer's end, the
+    /// driver's panic, and the ticket settles as withdrawn as the layer
+    /// ended.
+    #[test]
+    fn a_panic_in_the_clients_poll_ends_the_waits_on_its_datagrams() {
+        let clock = tls_clock();
+        let mut layer = None;
+        let mut receive = None;
+        let mut settle = None;
+        let run = run_announcing(65535, 65535, &clock, |run| {
+            if run.client_panicked {
+                return true;
+            }
+            if layer.is_some() {
+                return false;
+            }
+            let Poll::Ready(Ok(client)) = poll_now(run.client_handle.established()) else {
+                return false;
+            };
+            let mut receiving = Waiting::new(client.recv_datagram_owned());
+            let mut ticket = client
+                .datagram_writer()
+                .send(Bytes::from_static(b"ping"))
+                .expect("the server announced support");
+            assert_eq!(ticket.state(), DatagramState::Waiting);
+            let mut settling = Waiting::new(async move {
+                let settlement = ticket.settled().await;
+                (settlement, ticket)
+            });
+            assert!(receiving.poll().is_pending(), "the server sent nothing");
+            assert!(settling.poll().is_pending(), "the datagram waits");
+            watch::panic_client();
+            (receive, settle) = (Some(receiving), Some(settling));
+            layer = Some(client);
+            false
+        });
+        assert!(run.client_panicked, "the client's poll panicked");
+        let (mut receive, mut settle) = (receive.expect("waits"), settle.expect("waits"));
+        assert!(receive.wakes() > 0, "the receive is woken");
+        assert!(settle.wakes() > 0, "the ticket's wait is woken");
+        assert!(matches!(receive.poll(), Poll::Ready(Err(error)) if panicked(error.end())));
+        let Poll::Ready((settlement, ticket)) = settle.poll() else {
+            panic!("the ticket settles");
+        };
+        assert_eq!(
+            settlement,
+            DatagramSettlement::Withdrawn(datagram::send::DatagramWithdrawCause::LayerEnded)
+        );
+        assert_eq!(
+            ticket.state(),
+            DatagramState::Withdrawn(datagram::send::DatagramWithdrawCause::LayerEnded)
+        );
+        ticket.release();
+        let layer = layer.expect("the client's layer");
+        assert!(matches!(
+            layer.datagram_writer().send(Bytes::from_static(b"late")),
+            Err(SendDatagramError::LayerEnded { source }) if panicked(source.end())
+        ));
+    }
+
+    /// A datagram written into a packet whose acknowledgment has not come
+    /// when the client's poll panics settles as lost: its packet's fate is
+    /// never known. One more datagram sent after it moves it out of the
+    /// send queue first, so that it is woken from among those in flight.
+    #[test]
+    fn a_panic_in_the_clients_poll_settles_a_datagram_in_flight_as_lost() {
+        let clock = tls_clock();
+        let mut ticket = None;
+        let mut settle = None;
+        let mut later = None;
+        let run = run_announcing(65535, 65535, &clock, |run| {
+            if run.client_panicked {
+                return true;
+            }
+            if settle.is_some() {
+                return false;
+            }
+            let Poll::Ready(Ok(client)) = poll_now(run.client_handle.established()) else {
+                return false;
+            };
+            let ticket = ticket.get_or_insert_with(|| {
+                client
+                    .datagram_writer()
+                    .send(Bytes::from_static(b"ping"))
+                    .expect("the server announced support")
+            });
+            if ticket.state() != DatagramState::Sent {
+                return false;
+            }
+            let mut ticket = core::mem::replace(
+                ticket,
+                client
+                    .datagram_writer()
+                    .send(Bytes::from_static(b"pong"))
+                    .expect("the server announced support"),
+            );
+            let mut settling = Waiting::new(async move {
+                let settlement = ticket.settled().await;
+                (settlement, ticket)
+            });
+            assert!(settling.poll().is_pending(), "the datagram is in flight");
+            watch::panic_client();
+            settle = Some(settling);
+            later = Some(client);
+            false
+        });
+        assert!(run.client_panicked, "the client's poll panicked");
+        let mut settle = settle.expect("a datagram was in flight before an acknowledgment");
+        assert!(settle.wakes() > 0, "the ticket's wait is woken");
+        let Poll::Ready((settlement, sent)) = settle.poll() else {
+            panic!("the ticket settles");
+        };
+        assert_eq!(settlement, DatagramSettlement::Lost);
+        assert_eq!(sent.state(), DatagramState::Lost);
+        sent.release();
+        ticket.expect("sent").release();
+        drop(later);
     }
 
     #[test]

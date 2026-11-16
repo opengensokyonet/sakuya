@@ -33,6 +33,7 @@ use sakuya_wire::{
 use super::*;
 use crate::{
     send_strategy::{IntakeSendIntentHandle, MinimumLengths, PublishOutcome, SendIntent},
+    v1::application_handles::DriverPanicHandleShare,
     v1::streams::{
         FlowControlParameters, StreamSet, StreamSetFacts,
         locked::{LockedStreamSet, LockedStreamSetConfig},
@@ -633,4 +634,109 @@ fn a_servers_reader_tells_whether_its_stream_had_data_in_zero_rtt_packets() {
         .expect("data");
     assert_eq!(chunk, Bytes::from(vec![7; 5]), "the first frame's data");
     assert!(zero_rtt.received_zero_rtt(), "the mark stays");
+}
+
+#[test]
+fn the_drivers_panic_ends_every_wait_and_changes_no_stream() {
+    // each stream may take 10 bytes, the connection 15
+    let (set, layer, intake, _publish) = client(10, 15);
+    let (writer, mut reader) = layer.try_open_bi().expect("a stream");
+    let mut writer = writer.with_send_options(Urgency::default(), AnyActiveLinkPath);
+    let (second, _second_reader) = layer.try_open_bi().expect("the second of two");
+    let mut second = second.with_send_options(Urgency::default(), AnyActiveLinkPath);
+    let (wakes, waker) = counting();
+    let mut open = pin!(layer.open_bi());
+    let mut accept = pin!(layer.accept_uni());
+    let mut input = Bytes::from(vec![1; 20]);
+    assert_eq!(poll_write(&mut writer, &mut input, &waker), Poll::Ready(10));
+    assert!(
+        poll_write(&mut writer, &mut input, &waker).is_pending(),
+        "the stream's limit holds it"
+    );
+    let mut other = Bytes::from(vec![2; 20]);
+    assert_eq!(poll_write(&mut second, &mut other, &waker), Poll::Ready(5));
+    assert!(
+        poll_write(&mut second, &mut other, &waker).is_pending(),
+        "the connection's credit holds it"
+    );
+    let maximum = NonZeroUsize::new(64).expect("not zero");
+    let mut cx = Context::from_waker(&waker);
+    assert!(reader.share.poll_read_chunk(&mut cx, maximum).is_pending());
+    assert!(poll_once(open.as_mut(), &waker).is_pending());
+    assert!(poll_once(accept.as_mut(), &waker).is_pending());
+    intake.published();
+
+    layer.shares.driver_panicked(idle_end());
+    assert_eq!(
+        wakes.count(),
+        5,
+        "both writers, the reader, open and accept"
+    );
+    let expected = LayerEndedError::new(idle_end());
+    assert!(matches!(
+        poll_once(open.as_mut(), &waker),
+        Poll::Ready(Err(error)) if error == expected
+    ));
+    assert!(matches!(
+        poll_once(accept.as_mut(), &waker),
+        Poll::Ready(Err(error)) if error == expected
+    ));
+    for writer in [&mut writer, &mut second] {
+        let options = *writer.send_options_mut();
+        assert!(matches!(
+            writer.poll_write_with(&mut cx, &mut input, options.parameters(), options.destination()),
+            Poll::Ready(Err(WriteError::LayerEnded { source })) if source == expected
+        ));
+    }
+    assert!(matches!(
+        reader.share.poll_read_chunk(&mut cx, maximum),
+        Poll::Ready(Err(ReadError::LayerEnded { source })) if source == expected
+    ));
+    assert!(matches!(
+        now(writer.all_acknowledged()),
+        Err(AllAcknowledgedError::LayerEnded { source }) if source == expected
+    ));
+    assert!(matches!(
+        now(writer.flush()),
+        Err(FlushError::LayerEnded { source }) if source == expected
+    ));
+    assert!(matches!(
+        writer.close(),
+        Err(CloseError::LayerEnded { source }) if source == expected
+    ));
+    assert!(matches!(
+        writer.reset(ApplicationErrorCode::new(v(1))),
+        Err(ResetError::LayerEnded { source }) if source == expected
+    ));
+    assert!(matches!(
+        reader.stop(ApplicationErrorCode::new(v(1))),
+        Err(StopError::LayerEnded { source }) if source == expected
+    ));
+    assert!(matches!(
+        layer.try_open_uni(),
+        Err(TryOpenStreamError::LayerEnded { source }) if source == expected
+    ));
+
+    // the mark changed no state machine: the parts did not hear of the
+    // layer's end, the set did not end, and nothing was published
+    {
+        let end = writer.share.part.lock();
+        assert!(!end.sender.is_connection_closed());
+        assert!(matches!(
+            end.sender.end_state(),
+            sakuya_stream::send::SendEndState::Open
+        ));
+        assert_eq!(end.sender.written_end(), v(10));
+    }
+    assert!(lock(&set.shared.set).end.is_none());
+    assert!(!lock(&set.shared.connection_receive).ended);
+    drop((writer, reader));
+    assert_eq!(
+        intake.published(),
+        [],
+        "neither the operations nor dropping the handles published"
+    );
+    // a second panic's mark keeps the first end
+    layer.shares.driver_panicked(LayerEnd::ZeroRttRejected);
+    assert_eq!(set.shared.panic_end(), Some(&idle_end()));
 }

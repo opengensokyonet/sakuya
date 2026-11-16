@@ -27,6 +27,28 @@ impl KeyedHandleShare for SecondShare {
     type Part = Second;
 }
 
+std::thread_local! {
+    /// The shares told that the driver panicked, in order, with the end.
+    static TOLD: core::cell::RefCell<Vec<(&'static str, LayerEnd<()>)>> =
+        const { core::cell::RefCell::new(Vec::new()) };
+}
+
+fn told() -> Vec<(&'static str, LayerEnd<()>)> {
+    TOLD.with(|told| core::mem::take(&mut *told.borrow_mut()))
+}
+
+impl DriverPanicHandleShare<()> for FirstShare {
+    fn driver_panicked(&self, end: LayerEnd<()>) {
+        TOLD.with(|told| told.borrow_mut().push(("first", end)));
+    }
+}
+
+impl DriverPanicHandleShare<()> for SecondShare {
+    fn driver_panicked(&self, end: LayerEnd<()>) {
+        TOLD.with(|told| told.borrow_mut().push(("second", end)));
+    }
+}
+
 /// The shares of a layer's handle: of [`First`], of a part that gives
 /// none, and of [`Second`].
 type Shares = frunk_core::HList![FirstShare, sakuya_wire::parts::HNil, SecondShare];
@@ -248,4 +270,33 @@ fn a_layer_is_given_once_every_share_came_and_a_layer_built_again_collects_again
         &FirstShare(2)
     );
     assert!(!Arc::ptr_eq(&first.layer, &second.layer), "another layer");
+}
+
+#[test]
+fn the_drivers_panic_ends_the_latest_layer_and_tells_each_of_its_shares() {
+    let cell = TestCell::new();
+    let mut cx = Context::from_waker(Waker::noop());
+    cell.keep_selection(());
+    build_layer(&cell, 1);
+    cell.keep_selection(());
+    build_layer(&cell, 2);
+    let Poll::Ready(Ok(Some(first))) = cell.poll_early(&mut cx) else {
+        panic!("the first layer came before the handshake completed");
+    };
+    told();
+    let end = LayerEnd::ConnectionClosed(CloseReason::Aborted(AbortCause::Panicked));
+    cell.driver_panicked(end.clone());
+    assert_eq!(
+        told(),
+        [("first", end.clone()), ("second", end.clone())],
+        "each share of the latest layer, in order, the part without one skipped"
+    );
+    assert_eq!(
+        first.layer.poll_ended(&mut cx),
+        Poll::Pending,
+        "only the latest layer ends"
+    );
+    let latest = cell.state().layer.clone().expect("the latest layer");
+    assert_eq!(latest.shares.head, FirstShare(2));
+    assert_eq!(latest.layer.poll_ended(&mut cx), Poll::Ready(end));
 }

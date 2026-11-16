@@ -19,6 +19,13 @@
 //! - **The end of the layer.** What was received is still read; then
 //!   every read reports the end, and so does every send. The datagrams
 //!   still waiting are withdrawn.
+//! - **A panic of the driver.** The end is only marked
+//!   ([`DriverPanicHandleShare`]): who waits to receive and the tickets of
+//!   the datagrams in the send queue are woken; every receive and send then
+//!   reports the end at once, also before what was received, and those
+//!   tickets settle as withdrawn as the layer ended; the tickets of the
+//!   datagrams in flight are woken too and settle as lost. Nothing is withdrawn
+//!   and the strategy's tickets are left alone.
 //!
 //! Lock order: the queues' lock comes first; a datagram's progress and its
 //! route are taken under it, one at a time, and publishing or withdrawing an
@@ -34,7 +41,7 @@ use core::{
 };
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock, Weak},
 };
 
 use bytes::{Buf, Bytes};
@@ -55,7 +62,7 @@ use super::{
     frame_len_with_length, payload_limit,
     send::{
         DatagramCell, DatagramIntent, DatagramProgress, DatagramTicket, DatagramWithdrawCause,
-        Withdrawal,
+        DriverPanicFlag, Withdrawal,
     },
 };
 use crate::{
@@ -63,7 +70,7 @@ use crate::{
         IntentTicketWithdraw, PublishOutcome, SendIntentHandle, SendIntentIntake, SharedPublishTo,
     },
     v1::application_handles::{
-        FindHandleShare, KeyedHandleShare,
+        DriverPanicHandleShare, FindHandleShare, KeyedHandleShare,
         connection::{keep_waker, lock, wake_all},
         established_layer::EstablishedLayerHandle,
     },
@@ -128,6 +135,13 @@ struct QueuesShare<Lc, K, S: DatagramSide> {
     /// The peer's `max_datagram_frame_size`, counted as a frame length.
     peer_frame_limit: usize,
     config: LockedDatagramQueuesConfig,
+    /// How the layer ended, once the driver panicked: only marked, with
+    /// the queues left as the panic left them. Every receive and send looks
+    /// at it first, under the queues' lock.
+    panic_end: OnceLock<LayerEnd<Lc>>,
+    /// Whether the driver panicked, as the cells of the datagrams sent
+    /// read it.
+    panicked: Arc<DriverPanicFlag>,
     state: Mutex<QueuesState<Lc, K, S::Received>>,
 }
 
@@ -139,6 +153,11 @@ struct QueuesState<Lc, K, R> {
     receivers: Vec<Waker>,
     waiting: VecDeque<Arc<SendCell<K>>>,
     waiting_bytes: usize,
+    /// The datagrams that left the send queue written into a packet whose
+    /// fate is not known yet, while their tickets are held: what a panic of
+    /// the driver wakes the tickets of. Those settled or let go leave it
+    /// each time the send queue is resolved.
+    in_flight: Vec<Weak<SendCell<K>>>,
     /// How the layer ended, once it did.
     end: Option<LayerEnd<Lc>>,
 }
@@ -192,6 +211,9 @@ impl<Lc, K: IntentTicketWithdraw, S: DatagramSide> QueuesShare<Lc, K, S> {
     /// The next datagram received, or the layer's end once none is left.
     fn poll_receive(&self, cx: &mut Context<'_>) -> Poll<Result<S::Received, LayerEndedError<Lc>>> {
         let mut state = lock(&self.state);
+        if let Some(end) = self.panic_end.get() {
+            return Poll::Ready(Err(LayerEndedError::new(end.clone())));
+        }
         if let Some(datagram) = state.received.pop_front() {
             state.received_bytes -= datagram.remaining();
             return Poll::Ready(Ok(datagram));
@@ -241,7 +263,7 @@ impl<Lc, K: IntentTicketWithdraw, S: DatagramSide> QueuesShare<Lc, K, S> {
         }
         let bounds = self.config.send;
         let mut state = lock(&self.state);
-        if let Some(end) = &state.end {
+        if let Some(end) = self.panic_end.get().or(state.end.as_ref()) {
             return Err(LayerEndedError::new(end.clone()).into());
         }
         if len > bounds.bytes {
@@ -268,7 +290,7 @@ impl<Lc, K: IntentTicketWithdraw, S: DatagramSide> QueuesShare<Lc, K, S> {
         let progress = DatagramProgress::new();
         let intent = DatagramIntent::new(payload, parameters, progress);
         let ticket = publish.publish_to(intent.clone(), destination.current());
-        let cell = DatagramCell::new(intent, ticket, destination);
+        let cell = DatagramCell::new(intent, ticket, destination, Arc::clone(&self.panicked));
         state.waiting_bytes += len;
         state.waiting.push_back(Arc::clone(&cell));
         Ok(DatagramTicket::new(cell))
@@ -281,16 +303,24 @@ impl<Lc, K: IntentTicketWithdraw, S: DatagramSide> QueuesShare<Lc, K, S> {
     where
         H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
     {
+        state
+            .in_flight
+            .retain(|cell| cell.upgrade().is_some_and(|cell| cell.is_in_flight()));
         let mut gone = 0;
+        let mut sent = Vec::new();
         state.waiting.retain(|cell| {
             cell.resolve_unfulfilled(publish);
             let waiting = cell.is_waiting();
             if !waiting {
                 gone += cell.len();
+                if cell.is_in_flight() {
+                    sent.push(Arc::downgrade(cell));
+                }
             }
             waiting
         });
         state.waiting_bytes -= gone;
+        state.in_flight.extend(sent);
     }
 
     fn limits(&self) -> DatagramFrameLimits {
@@ -319,6 +349,8 @@ where
                 peer_limit,
                 peer_frame_limit,
                 config,
+                panic_end: OnceLock::new(),
+                panicked: Arc::default(),
                 state: Mutex::new(QueuesState {
                     received: VecDeque::new(),
                     received_bytes: 0,
@@ -326,6 +358,7 @@ where
                     receivers: Vec::new(),
                     waiting: VecDeque::new(),
                     waiting_bytes: 0,
+                    in_flight: Vec::new(),
                     end: None,
                 }),
             }),
@@ -373,6 +406,33 @@ impl<Lc, K, S: DatagramSide> Clone for LockedDatagramQueuesHandle<Lc, K, S> {
 /// The extension's share of an established layer's handle.
 impl<Lc, K, S: DatagramSide> KeyedHandleShare for LockedDatagramQueuesHandle<Lc, K, S> {
     type Part = super::Part;
+}
+
+/// The handle marks the end in what it shares with the queues and wakes
+/// who waits to receive and who waits for a datagram in the send queue, or
+/// one in flight, to settle; it withdraws nothing.
+impl<Lc, K, S: DatagramSide> DriverPanicHandleShare<Lc> for LockedDatagramQueuesHandle<Lc, K, S> {
+    fn driver_panicked(&self, end: LayerEnd<Lc>) {
+        let shared = &self.shared;
+        if shared.panic_end.set(end).is_err() {
+            return;
+        }
+        shared.panicked.set();
+        let waiting = {
+            let mut state = lock(&shared.state);
+            wake_all(&mut state.receivers);
+            let in_flight = state.in_flight.iter().filter_map(Weak::upgrade);
+            state
+                .waiting
+                .iter()
+                .cloned()
+                .chain(in_flight)
+                .collect::<Vec<_>>()
+        };
+        for cell in waiting {
+            cell.wake_settled_waiters();
+        }
+    }
 }
 
 impl<Lc, K, S: DatagramSide> fmt::Debug for LockedDatagramQueuesHandle<Lc, K, S> {

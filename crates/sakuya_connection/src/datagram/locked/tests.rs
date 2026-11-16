@@ -536,3 +536,90 @@ fn an_unfulfilled_datagram_is_published_again_at_once() {
     assert_eq!(ticket.state(), DatagramState::Sent);
     ticket.release();
 }
+
+/// The driver's panic only marks the end: who waits to receive and the
+/// ticket of a datagram waiting are woken, every receive and send reports
+/// the end, also before what was received, and the ticket settles as
+/// withdrawn as the layer ended; the queues neither withdraw the datagram
+/// nor end, and the strategy still holds its intent.
+#[test]
+fn the_drivers_panic_ends_the_waits_and_withdraws_nothing() {
+    let (queues, mut core, handle, writer) = sending(1200, DatagramQueueBounds::default());
+    let receive_wakes = Arc::new(CountingWake::default());
+    let receive_waker = Waker::from(Arc::clone(&receive_wakes));
+    let mut receive = pin!(Datagrams::<(Here, InHead<Here>)>::recv_datagram(&handle));
+    assert!(
+        receive
+            .as_mut()
+            .poll(&mut Context::from_waker(&receive_waker))
+            .is_pending()
+    );
+    let mut ticket = writer.send(Bytes::from_static(b"waiting")).expect("taken");
+    let settle_wakes = Arc::new(CountingWake::default());
+    let settle_waker = Waker::from(Arc::clone(&settle_wakes));
+    {
+        let mut settled = pin!(ticket.settled());
+        assert!(
+            settled
+                .as_mut()
+                .poll(&mut Context::from_waker(&settle_waker))
+                .is_pending()
+        );
+    }
+
+    handle.shares.driver_panicked(idle());
+    assert_eq!(receive_wakes.count(), 1, "the receive is woken");
+    assert_eq!(settle_wakes.count(), 1, "the ticket's wait is woken");
+    // a datagram received now is not read
+    lock(&queues.shared.state)
+        .received
+        .push_back(Bytes::from_static(b"late"));
+    assert!(matches!(
+        receive.as_mut().poll(&mut Context::from_waker(&receive_waker)),
+        Poll::Ready(Err(error)) if *error.end() == idle()
+    ));
+    assert_eq!(
+        poll_now(ticket.settled()),
+        Poll::Ready(DatagramSettlement::Withdrawn(
+            DatagramWithdrawCause::LayerEnded
+        ))
+    );
+    assert_eq!(
+        ticket.state(),
+        DatagramState::Withdrawn(DatagramWithdrawCause::LayerEnded)
+    );
+    assert!(matches!(
+        writer.send(Bytes::from_static(b"late")),
+        Err(SendDatagramError::LayerEnded { source }) if *source.end() == idle()
+    ));
+    assert_eq!(ticket.withdraw(), WithdrawReport::Withdrawn);
+    // the mark changed nothing: the queues did not end, the datagram
+    // still waits in the send queue, and the strategy still plans it
+    {
+        let state = lock(&queues.shared.state);
+        assert!(state.end.is_none());
+        assert_eq!(state.waiting.len(), 1);
+        assert!(state.waiting[0].is_waiting());
+    }
+    let mut planner = planner(&mut core);
+    assert!(
+        supply_next(&mut planner, &mut core, || {}).is_some(),
+        "the strategy's ticket was left alone"
+    );
+}
+
+/// A waker's wakes, counted.
+#[derive(Default)]
+struct CountingWake(std::sync::atomic::AtomicUsize);
+
+impl std::task::Wake for CountingWake {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl CountingWake {
+    fn count(&self) -> usize {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}

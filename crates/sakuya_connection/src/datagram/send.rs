@@ -23,7 +23,10 @@ use core::{
     marker::PhantomData,
     task::{Context, Poll, Waker},
 };
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{
+    Arc, Mutex, Weak,
+    atomic::{AtomicBool, Ordering},
+};
 
 use bytes::{Buf, Bytes, BytesMut};
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
@@ -342,6 +345,12 @@ impl DatagramProgress {
         lock(&self.state).stage.is_waiting()
     }
 
+    /// Whether the datagram was written into a packet whose fate is not
+    /// known yet.
+    fn is_in_flight(&self) -> bool {
+        lock(&self.state).stage == Stage::Sent
+    }
+
     /// The frame source is about to write the datagram: whether it may. It
     /// may only while the datagram waits, and the datagram counts as sent
     /// from then on.
@@ -400,10 +409,33 @@ impl DatagramProgress {
         }
     }
 
+    /// Wake who waits for the datagram to be settled, without moving it:
+    /// they look again.
+    fn wake_waiters(&self) {
+        wake_all(&mut lock(&self.state).wakers);
+    }
+
+    /// What withdrawing the datagram would report now, without withdrawing
+    /// it.
+    fn withdraw_report(&self) -> WithdrawReport {
+        match lock(&self.state).stage {
+            Stage::Waiting
+            | Stage::Unfulfilled(_)
+            | Stage::WithdrawnByHolder
+            | Stage::Withdrawn(_) => WithdrawReport::Withdrawn,
+            Stage::Sent | Stage::Acknowledged | Stage::Lost => WithdrawReport::Consumed,
+        }
+    }
+
     /// Where the datagram stands, for a holder of its ticket; `None` once
-    /// its holder withdrew it.
-    fn state(&self) -> Option<DatagramState> {
+    /// its holder withdrew it. Once `panicked` is set, a datagram that waits
+    /// counts as withdrawn as the layer ended, and one in flight as lost.
+    fn state(&self, panicked: &DriverPanicFlag) -> Option<DatagramState> {
         Some(match lock(&self.state).stage {
+            Stage::Waiting | Stage::Unfulfilled(_) if panicked.is_set() => {
+                DatagramState::Withdrawn(DatagramWithdrawCause::LayerEnded)
+            }
+            Stage::Sent if panicked.is_set() => DatagramState::Lost,
             Stage::Waiting | Stage::Unfulfilled(_) => DatagramState::Waiting,
             Stage::WithdrawnByHolder => return None,
             Stage::Withdrawn(cause) => DatagramState::Withdrawn(cause),
@@ -414,10 +446,22 @@ impl DatagramProgress {
     }
 
     /// The settlement of the datagram, once there is one; while there is
-    /// none, the waker of `cx` is kept and woken when there may be.
-    fn poll_settled(&self, cx: &mut Context<'_>) -> Poll<DatagramSettlement> {
+    /// none, the waker of `cx` is kept and woken when there may be. Once
+    /// `panicked` is set, looked at under the same lock, a datagram that
+    /// waits is settled as withdrawn as the layer ended, and one in flight
+    /// as lost: its packet's fate is never known, as when the link path it
+    /// went on ended before it was settled.
+    fn poll_settled(
+        &self,
+        cx: &mut Context<'_>,
+        panicked: &DriverPanicFlag,
+    ) -> Poll<DatagramSettlement> {
         let mut state = lock(&self.state);
         match state.stage {
+            Stage::Waiting | Stage::Unfulfilled(_) if panicked.is_set() => Poll::Ready(
+                DatagramSettlement::Withdrawn(DatagramWithdrawCause::LayerEnded),
+            ),
+            Stage::Sent if panicked.is_set() => Poll::Ready(DatagramSettlement::Lost),
             Stage::Acknowledged => Poll::Ready(DatagramSettlement::Acknowledged),
             Stage::Lost => Poll::Ready(DatagramSettlement::Lost),
             Stage::Withdrawn(cause) => Poll::Ready(DatagramSettlement::Withdrawn(cause)),
@@ -681,14 +725,34 @@ impl FrameSource for DatagramFrameSource {
 
 // ---- the datagram's cell and ticket ----
 
+/// Whether the driver of the queues a datagram went through panicked
+/// (`DriverPanicFlag`): set once, by the queues' handle, and read by the
+/// tickets of their datagrams, which nothing else tells of the layer's end
+/// then.
+#[derive(Debug, Default)]
+pub(crate) struct DriverPanicFlag(AtomicBool);
+
+impl DriverPanicFlag {
+    /// The driver panicked.
+    pub(crate) fn set(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the driver panicked.
+    pub(crate) fn is_set(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
 /// A datagram as its queue and its ticket hold it: its intent, which it is
 /// published again from, its progress, the ticket the strategy gave for its
-/// intent and its destination `D`. The strategy's ticket and the
-/// destination are under a lock of their own, taken under no other lock
-/// and taking none.
+/// intent and its destination `D`, and whether the driver of its queues
+/// panicked. The strategy's ticket and the destination are under a lock of
+/// their own, taken under no other lock and taking none.
 pub(crate) struct DatagramCell<K, D, P> {
     intent: DatagramIntent<P>,
     route: Mutex<Route<K, D>>,
+    panicked: Arc<DriverPanicFlag>,
 }
 
 /// Where a datagram's intent went: the strategy's ticket, while it holds
@@ -700,15 +764,40 @@ struct Route<K, D> {
 
 impl<K, D, P> DatagramCell<K, D, P> {
     /// The cell of `intent`, published for `destination` with the
-    /// strategy's `ticket`.
-    pub(crate) fn new(intent: DatagramIntent<P>, ticket: K, destination: D) -> Arc<Self> {
+    /// strategy's `ticket`, through queues whose driver panicked once
+    /// `panicked` is set.
+    pub(crate) fn new(
+        intent: DatagramIntent<P>,
+        ticket: K,
+        destination: D,
+        panicked: Arc<DriverPanicFlag>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             intent,
             route: Mutex::new(Route {
                 ticket: Some(ticket),
                 destination,
             }),
+            panicked,
         })
+    }
+
+    /// Wake who waits for the datagram to be settled, without moving it.
+    pub(crate) fn wake_settled_waiters(&self) {
+        self.intent.progress.wake_waiters();
+    }
+
+    /// Withdraw the datagram for its holder; once the driver panicked,
+    /// only what that would report, with nothing changed and the
+    /// strategy's ticket left alone.
+    fn withdraw_for_holder(&self) -> WithdrawReport
+    where
+        K: IntentTicketWithdraw,
+    {
+        if self.panicked.is_set() {
+            return self.intent.progress.withdraw_report();
+        }
+        self.withdraw(Withdrawal::Holder)
     }
 
     /// The length of the datagram's payload.
@@ -719,6 +808,12 @@ impl<K, D, P> DatagramCell<K, D, P> {
     /// Whether the datagram waits to be sent.
     pub(crate) fn is_waiting(&self) -> bool {
         self.intent.progress.is_waiting()
+    }
+
+    /// Whether the datagram was written into a packet whose fate is not
+    /// known yet.
+    pub(crate) fn is_in_flight(&self) -> bool {
+        self.intent.progress.is_in_flight()
     }
 
     /// Withdraw the datagram as `withdrawal` says; then the strategy's
@@ -825,9 +920,12 @@ impl<K: IntentTicketWithdraw, D, P> DatagramTicket<K, D, P> {
     /// [`WithdrawReport::Consumed`] if it was. A datagram withdrawn already,
     /// by its queue or as its destination had nothing left, reports
     /// `Withdrawn` as well.
+    ///
+    /// Once the driver of its queues panicked, it reports as it would, but
+    /// changes nothing.
     pub fn withdraw(mut self) -> WithdrawReport {
         self.withdraws_on_drop = false;
-        self.cell.withdraw(Withdrawal::Holder)
+        self.cell.withdraw_for_holder()
     }
 
     /// Let the datagram go without withdrawing it: it is still sent, and
@@ -843,23 +941,28 @@ impl<K: IntentTicketWithdraw, D, P> DatagramTicket<K, D, P> {
         self.cell
             .intent
             .progress
-            .state()
+            .state(&self.cell.panicked)
             .expect("a ticket that reads the state did not withdraw the datagram")
     }
 
     /// Done once the datagram was acknowledged, declared lost, or withdrawn
     /// without its holder asking; called again, the same at once, unless a
     /// late acknowledgment of a lost datagram came between.
+    ///
+    /// Once the driver of its queues panicked, a datagram that waits to be
+    /// sent is settled as withdrawn as the layer ended
+    /// ([`DatagramWithdrawCause::LayerEnded`]), one in flight as
+    /// [`Lost`](DatagramSettlement::Lost), and the wait ends.
     pub fn settled(&mut self) -> impl Future<Output = DatagramSettlement> + '_ {
-        let progress = &self.cell.intent.progress;
-        poll_fn(move |cx| progress.poll_settled(cx))
+        let cell = &self.cell;
+        poll_fn(move |cx| cell.intent.progress.poll_settled(cx, &cell.panicked))
     }
 }
 
 impl<K: IntentTicketWithdraw, D, P> Drop for DatagramTicket<K, D, P> {
     fn drop(&mut self) {
         if self.withdraws_on_drop {
-            self.cell.withdraw(Withdrawal::Holder);
+            self.cell.withdraw_for_holder();
         }
     }
 }

@@ -35,7 +35,11 @@
 //! reason the record has then, [`CloseReason::Aborted`] unless one was
 //! written before.
 //! After a panic, no end action runs: the cell also ends the layer whose
-//! handle it gave, and the waits on that handle end; the streams' do not.
+//! handle it gave, and tells each share of that handle that the driver
+//! panicked ([`DriverPanicHandleShare`]). The share only marks the end and
+//! wakes who waits, so every wait on the layer, its streams and its
+//! datagrams ends with it, and every later operation reports it; no state
+//! machine is touched while the panic may be unwinding.
 
 use core::{
     any::Any,
@@ -56,7 +60,7 @@ use sakuya_tls::{
 use sakuya_wire::parts::Selector;
 
 use super::{
-    FindHandleShare, HandleShareSlots, HandleShares, HandleSharesOf,
+    DriverPanicHandleShare, FindHandleShare, HandleShareSlots, HandleShares, HandleSharesOf,
     established_layer::{EstablishedLayerHandle, LayerShare},
     handle,
 };
@@ -358,6 +362,24 @@ impl<C, F, X, Sh: HandleShareSlots, N, A> ConnectionHandleCell<C, F, X, Sh, N, A
         }
     }
 
+    /// The driver panicked, and the latest established layer ended as
+    /// `end`: it ends as [`layer_ended`](Self::layer_ended) ends it, and
+    /// each share of its handle is told, in the order of the shares.
+    pub(crate) fn driver_panicked(&self, end: LayerEnd<C>)
+    where
+        Sh: DriverPanicHandleShare<C>,
+    {
+        let layer = self
+            .state()
+            .layer
+            .as_ref()
+            .map(|layer| (layer.share(), layer.shares.clone()));
+        if let Some((layer, shares)) = layer {
+            layer.end(end.clone());
+            shares.driver_panicked(end);
+        }
+    }
+
     // ---- what the application waits for ----
 
     fn poll_closed(&self, cx: &mut Context<'_>) -> Poll<CloseReason<C>> {
@@ -632,7 +654,8 @@ where
 /// reason once it is written. When the connection's future is dropped it
 /// takes the reason the record has then, or [`CloseReason::Aborted`] with
 /// the cause; after a panic, which runs no end action, it also ends the
-/// layer whose handle it gives.
+/// layer whose handle it gives and tells each share of that handle
+/// ([`DriverPanicHandleShare`]).
 impl<T, L, I, Ic> DataComponent<T, L, layer::Connection, (I, Ic)> for ConnectionHandleCellOf<T, L>
 where
     T: Choices,
@@ -640,6 +663,7 @@ where
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     L: HandleShares<T, L, handle::EstablishedLayer>,
+    EstablishedLayerSharesOf<T, L>: DriverPanicHandleShare<CloseCauseOf<T, L>>,
     for<'v> <L as LineageLists<'v, T>>::Connection:
         GetAt<Self, I> + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>,
 {
@@ -672,7 +696,7 @@ where
         let cell = lineage.get::<Self, I>();
         cell.connection_closed(reason.clone());
         if cause == AbortCause::Panicked {
-            cell.layer_ended(LayerEnd::ConnectionClosed(reason));
+            cell.driver_panicked(LayerEnd::ConnectionClosed(reason));
         }
     }
 }

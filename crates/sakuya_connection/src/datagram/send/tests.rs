@@ -181,7 +181,10 @@ fn the_last_frame_leaves_the_length_out() {
     let (writer, closed) = supply::<Last>(&last, 100);
     assert!(closed);
     assert_eq!(&writer.bytes[..], [0x30, b'l', b'a', b's', b't']);
-    assert_eq!(last.progress.state(), Some(DatagramState::Sent));
+    assert_eq!(
+        last.progress.state(&DriverPanicFlag::default()),
+        Some(DatagramState::Sent)
+    );
     let not_last = intent(b"more");
     let (writer, closed) = supply::<NotLast>(&not_last, 100);
     assert!(!closed);
@@ -200,7 +203,10 @@ fn a_datagram_withdrawn_or_too_large_is_not_written() {
     let large = intent(b"large");
     let (writer, _) = supply::<NotLast>(&large, 6);
     assert!(writer.bytes.is_empty());
-    assert_eq!(large.progress.state(), Some(DatagramState::Waiting));
+    assert_eq!(
+        large.progress.state(&DriverPanicFlag::default()),
+        Some(DatagramState::Waiting)
+    );
     let (writer, _) = supply::<NotLast>(&large, 7);
     assert_eq!(writer.bytes.len(), 7);
     let (writer, _) = supply::<NotLast>(&large, 7);
@@ -223,20 +229,29 @@ fn the_summary_settles_the_datagram() {
                 PacketNumberSpaceKind::ApplicationData,
                 summary,
             );
-            assert_eq!(sent.progress.state(), Some(DatagramState::Acknowledged));
+            assert_eq!(
+                sent.progress.state(&DriverPanicFlag::default()),
+                Some(DatagramState::Acknowledged)
+            );
         } else {
             DatagramFrameSource.lost::<_, crate::frame_source::Nowhere>(
                 &mut publish,
                 PacketNumberSpaceKind::ApplicationData,
                 &summary,
             );
-            assert_eq!(sent.progress.state(), Some(DatagramState::Lost));
+            assert_eq!(
+                sent.progress.state(&DriverPanicFlag::default()),
+                Some(DatagramState::Lost)
+            );
             DatagramFrameSource.delivered::<_, crate::frame_source::Nowhere>(
                 &mut publish,
                 PacketNumberSpaceKind::ApplicationData,
                 summary,
             );
-            assert_eq!(sent.progress.state(), Some(DatagramState::Acknowledged));
+            assert_eq!(
+                sent.progress.state(&DriverPanicFlag::default()),
+                Some(DatagramState::Acknowledged)
+            );
         }
     }
 }
@@ -269,6 +284,7 @@ fn ticket_of(payload: &'static [u8]) -> Recorded {
         intent.clone(),
         RecordingTicket(Arc::clone(&withdrawn)),
         AnyActiveLinkPath,
+        Arc::default(),
     );
     (DatagramTicket::new(cell), intent, withdrawn)
 }
@@ -390,6 +406,7 @@ fn an_unfulfilled_datagram_falls_back_as_its_destination_says() {
         intent.clone(),
         RecordingTicket(Arc::clone(&strategy)),
         Nowhere,
+        Arc::default(),
     );
     let mut ticket = DatagramTicket::new(cell);
     DatagramFrameSource.unfulfilled(&intent, Unfulfilled::Rejected);
@@ -421,6 +438,11 @@ struct NoShare;
 
 impl crate::v1::application_handles::KeyedHandleShare for NoShare {
     type Part = super::super::Part;
+}
+
+/// No handle takes it, so no wait is on it.
+impl<C> crate::v1::application_handles::DriverPanicHandleShare<C> for NoShare {
+    fn driver_panicked(&self, _: sakuya_stream::connection::LayerEnd<C>) {}
 }
 
 impl DatagramQueues<()> for ExhaustedQueues {
@@ -473,6 +495,7 @@ fn an_unfulfilled_datagram_is_resolved_at_once_through_the_lineage() {
         intent.clone(),
         RecordingTicket(Arc::clone(&strategy)),
         Nowhere,
+        Arc::default(),
     );
     let mut ticket = DatagramTicket::new(Arc::clone(&cell));
     let mut queues = ExhaustedQueues(vec![cell]);

@@ -19,12 +19,17 @@
 //! - Opening waits while the peer's limit allows no stream, and has
 //!   STREAMS_BLOCKED sent (RFC 9000 §4.6); accepting waits for the first
 //!   frame of a stream of the peer.
-//! - Everything waiting ends when the layer does.
+//! - Everything waiting ends when the layer does, and when the driver
+//!   panicked: every operation first looks whether the driver's panic
+//!   marked the layer's end, under the lock it keeps its waker under, and
+//!   then reports that end without changing the part, the set or the
+//!   intents.
 //!
 //! Dropping a share gives the part up: the writer's tells the sending part
 //! its writer was abandoned, the reader's that its reader was dropped; the
 //! parts' termination policies decide what follows (streams.md
-//! «方向句柄Drop与终结策略»).
+//! «方向句柄Drop与终结策略»). Once the driver panicked, dropping changes
+//! nothing.
 
 use core::{
     future::{Future, poll_fn, ready},
@@ -200,15 +205,19 @@ where
     H: StreamIntentHandle<P, K>,
 {
     /// Change the part with `change` under its lock, and bring its intents
-    /// to what is due then.
+    /// to what is due then; once the driver panicked, the end it marked,
+    /// and nothing changes.
     pub(super) fn with_part<R>(
         &self,
         change: impl FnOnce(&mut SendingEnd<Lc, K, Rs, P>) -> R,
-    ) -> R {
+    ) -> Result<R, LayerEndedError<Lc>> {
         let mut end = self.part.lock();
+        if let Some(marked) = self.shared.panic_end() {
+            return Err(LayerEndedError::new(marked.clone()));
+        }
         let result = change(&mut end);
         end.sync_intents(&self.publish);
-        result
+        Ok(result)
     }
 }
 
@@ -219,8 +228,10 @@ where
     P: Clone + PartialEq + Default + SendUrgency,
     H: StreamIntentHandle<P, K>,
 {
+    /// Once the driver panicked, nothing is given up: the part is not
+    /// changed any more.
     fn drop(&mut self) {
-        self.with_part(|end| {
+        let _ = self.with_part(|end| {
             end.sender.on_writer_abandoned();
             end.writer = None;
         });
@@ -251,16 +262,20 @@ where
         loop {
             let outcome = self.with_part(|end| {
                 let outcome = end.sender.write(input, &marker);
-                if let Ok(WriteOutcome::Wait(wait)) = &outcome
-                    && *wait != WriteWait::ConnectionCredit
-                {
+                if let Ok(WriteOutcome::Wait(_)) = &outcome {
                     // the stream's limit or its policy holds it back: a
                     // MAX_STREAM_DATA, a STOP_SENDING or the layer's end
-                    // wakes it, under this lock
+                    // wakes it, under this lock; held back by the
+                    // connection's credit, the layer's end wakes it here
+                    // too, and credit through the send flow controller
                     end.writer = Some(cx.waker().clone());
                 }
                 outcome
             });
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(ended) => return Poll::Ready(Err(ended.into())),
+            };
             match outcome {
                 Ok(WriteOutcome::Written(report)) => return Poll::Ready(Ok(report)),
                 Err(error) => return Poll::Ready(Err(error)),
@@ -272,6 +287,11 @@ where
             // set's is taken
             let connection = &self.shared.connection_send;
             connection.register_credit_waker(cx.waker());
+            // the strategy's intake is not used once the driver panicked;
+            // a panic marked after this wakes the writer's waker
+            if let Some(marked) = self.shared.panic_end() {
+                return Poll::Ready(Err(LayerEndedError::new(marked.clone()).into()));
+            }
             let limit = connection.limit();
             self.shared.with_set(&self.publish, |set| {
                 set.connection.data_blocked_signal.on_write_blocked(limit);
@@ -283,22 +303,29 @@ where
     }
 
     fn close(&mut self) -> Result<(), CloseError<Lc>> {
-        self.with_part(|end| end.sender.close())
+        self.with_part(|end| end.sender.close())?
     }
 
     fn reset(&mut self, code: ApplicationErrorCode) -> Result<(), ResetError<Lc>> {
-        self.with_part(|end| Rs::reset(&mut end.sender, code))
+        self.with_part(|end| Rs::reset(&mut end.sender, code))?
     }
 
     /// Writes go into the send buffer at once: nothing is held back, and it
     /// is done at once.
     fn flush(&mut self) -> impl Future<Output = Result<(), FlushError<Lc>>> {
-        ready(self.part.lock().sender.flush())
+        let end = self.part.lock();
+        ready(match self.shared.panic_end() {
+            Some(marked) => Err(LayerEndedError::new(marked.clone()).into()),
+            None => end.sender.flush(),
+        })
     }
 
     fn all_acknowledged(&mut self) -> impl Future<Output = Result<(), AllAcknowledgedError<Lc>>> {
         poll_fn(|cx| {
             let mut end = self.part.lock();
+            if let Some(marked) = self.shared.panic_end() {
+                return Poll::Ready(Err(LayerEndedError::new(marked.clone()).into()));
+            }
             match end.sender.terminal_state() {
                 Some(SendTerminalState::DataRecvd) => return Poll::Ready(Ok(())),
                 Some(SendTerminalState::ResetRecvd) => {
@@ -327,9 +354,16 @@ where
     /// Change the part with `change` under its lock; then, with the receive
     /// flow controller's lock taken under it, report what the stream
     /// released, and bring the intents of the connection's receiving and of
-    /// the part to what is due.
-    fn with_part<R>(&self, change: impl FnOnce(&mut ReceivingEnd<Lc, K, Rs, P>) -> R) -> R {
+    /// the part to what is due. Once the driver panicked, the end it
+    /// marked, and nothing changes.
+    fn with_part<R>(
+        &self,
+        change: impl FnOnce(&mut ReceivingEnd<Lc, K, Rs, P>) -> R,
+    ) -> Result<R, LayerEndedError<Lc>> {
         let mut end = self.part.lock();
+        if let Some(marked) = self.shared.panic_end() {
+            return Err(LayerEndedError::new(marked.clone()));
+        }
         let result = change(&mut end);
         {
             let mut connection = lock(&self.shared.connection_receive);
@@ -344,7 +378,7 @@ where
             connection.sync_intents(&self.publish);
         }
         end.sync_intents(self.stream_id, &self.publish);
-        result
+        Ok(result)
     }
 
     /// Read with `read`, which gives what the receiving part gives; keep
@@ -365,6 +399,7 @@ where
             }
             other => Poll::Ready(other),
         })
+        .unwrap_or_else(|ended| Poll::Ready(Err(ended.into())))
     }
 
     /// Read into `destination`; `Ok(0)` at the end of the stream or for no
@@ -404,8 +439,10 @@ where
     P: Clone + PartialEq + Default + SendUrgency,
     H: StreamIntentHandle<P, K>,
 {
+    /// Once the driver panicked, nothing is given up: the part is not
+    /// changed any more.
     fn drop(&mut self) {
-        self.with_part(|end| {
+        let _ = self.with_part(|end| {
             end.receiver.reader_dropped();
             end.reader = None;
         });
@@ -422,7 +459,7 @@ where
     type CloseCause = Lc;
 
     fn stop(&mut self, code: ApplicationErrorCode) -> Result<(), StopError<Lc>> {
-        self.with_part(|end| end.receiver.stop(code))
+        self.with_part(|end| end.receiver.stop(code))?
     }
 }
 
@@ -585,20 +622,22 @@ where
         publish: &H,
         waker: Option<&Waker>,
     ) -> Result<FoundStream<Lc, K, Rs, P>, OpenRefused<Lc>> {
-        self.with_set(publish, |set| {
-            if let Some(end) = &set.end {
-                return Err(OpenRefused::Ended(end.clone()));
-            }
-            match set.ledger.open_local(directionality) {
-                Ok(id) => Ok((id, self.create_local_stream(set, id))),
-                Err(_) => {
-                    if let Some(waker) = waker {
-                        keep_waker(set.open_wakers.get_mut(directionality), waker);
-                    }
-                    Err(OpenRefused::AtLimit)
+        let mut set = lock(&self.set);
+        // once the driver panicked, the set is not changed any more
+        if let Some(end) = self.panic_end().or(set.end.as_ref()) {
+            return Err(OpenRefused::Ended(end.clone()));
+        }
+        let opened = match set.ledger.open_local(directionality) {
+            Ok(id) => Ok((id, self.create_local_stream(&mut set, id))),
+            Err(_) => {
+                if let Some(waker) = waker {
+                    keep_waker(set.open_wakers.get_mut(directionality), waker);
                 }
+                Err(OpenRefused::AtLimit)
             }
-        })
+        };
+        set.sync_intents(publish);
+        opened
     }
 
     /// The next stream of `directionality` the peer opened, under the
@@ -611,7 +650,7 @@ where
         directionality: Directionality,
     ) -> Poll<Result<FoundStream<Lc, K, Rs, P>, LayerEnd<Lc>>> {
         let mut set = lock(&self.set);
-        if let Some(end) = &set.end {
+        if let Some(end) = self.panic_end().or(set.end.as_ref()) {
             return Poll::Ready(Err(end.clone()));
         }
         loop {

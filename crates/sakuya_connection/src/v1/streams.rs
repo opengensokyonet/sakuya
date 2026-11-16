@@ -69,7 +69,7 @@ use self::send::{
 use super::{
     Choices, CloseCauseOf, ConnectionArgs, Side,
     application_handles::{
-        FindHandleShare, HandleShares, KeyedHandleShare,
+        DriverPanicHandleShare, FindHandleShare, HandleShares, KeyedHandleShare,
         connection::{ConnectionHandleCellOf, EstablishedLayerSharesOf},
         handle,
     },
@@ -118,7 +118,16 @@ use crate::{
 pub trait StreamSet<Lc, K, X: StreamResets>: Sized {
     /// What the application opens and accepts streams through; the
     /// established layer's handle keeps one.
-    type Handle: Clone + KeyedHandleShare<Part = super::Part>;
+    ///
+    /// When the driver panicked, the connection handle's cell tells it the
+    /// layer's end ([`DriverPanicHandleShare::driver_panicked`]) instead of
+    /// [`layer_ended`](Self::layer_ended), which is never called then: it
+    /// only marks the end, where every operation of the application on the
+    /// set, its writers and its readers looks first, and wakes everything
+    /// waiting to open, accept, write or read. It does not touch the
+    /// streams' state machines or the intents' tickets, as it may run
+    /// while the panic unwinds.
+    type Handle: Clone + KeyedHandleShare<Part = super::Part> + DriverPanicHandleShare<Lc>;
 
     /// What the composition configures the stream set with; the connection
     /// node keeps it from the connection's making until the established

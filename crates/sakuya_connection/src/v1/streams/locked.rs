@@ -44,6 +44,14 @@
 //! application's operations all go through it. A stream's data and FIN have
 //! one intent for its one destination; the other frames, one each.
 //!
+//! When the driver panicked, the layer's end is only marked in what the
+//! set shares with its handles ([`DriverPanicHandleShare`]): the wakers
+//! kept under the set's lock and each part's lock are woken, and every
+//! operation of the application looks at the mark first, under the lock it
+//! keeps its waker under, and reports the end without changing anything.
+//! The streams' state machines and the intents' tickets stay as the panic
+//! left them.
+//!
 //! The streams of a type the peer opens below one a frame names are opened
 //! with it (RFC 9000 §3.2), but only the stream the frame names gets its
 //! parts; each of the others gets them when its own first frame arrives,
@@ -54,7 +62,7 @@ use core::task::Waker;
 use std::{
     collections::{HashMap, VecDeque},
     fmt,
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError},
 };
 
 use bytes::Bytes;
@@ -116,7 +124,7 @@ use super::{
 use crate::{
     feedback::InjectSummary,
     send_strategy::{IntentTicketResize, IntentTicketWithdraw, SendIntent},
-    v1::application_handles::connection::wake_all,
+    v1::application_handles::{DriverPanicHandleShare, connection::wake_all},
     write::{
         DelimitedFrame, InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf,
         Supplied,
@@ -217,6 +225,51 @@ impl<Lc, K, Rs: StreamResets, P> crate::v1::application_handles::KeyedHandleShar
     for LockedStreamSetHandle<Lc, K, Rs, P>
 {
     type Part = crate::v1::Part;
+}
+
+/// The handle marks the end in what it shares with the set and wakes who
+/// waits to open, accept, write or read; it takes the wakers out of the
+/// set's lock and each part's lock, one lock at a time, and changes
+/// nothing else under them.
+impl<Lc, K, Rs: StreamResets, P> DriverPanicHandleShare<Lc>
+    for LockedStreamSetHandle<Lc, K, Rs, P>
+{
+    fn driver_panicked(&self, end: LayerEnd<Lc>) {
+        let shared = &self.shared;
+        if shared.panic_end.set(end).is_err() {
+            return;
+        }
+        let (senders, receivers) = {
+            let mut set = lock(&shared.set);
+            for directionality in DIRECTIONALITIES {
+                wake_all(set.open_wakers.get_mut(directionality));
+                wake_all(set.accept_wakers.get_mut(directionality));
+            }
+            (
+                set.senders.values().cloned().collect::<Vec<_>>(),
+                set.receivers.values().cloned().collect::<Vec<_>>(),
+            )
+        };
+        for sender in senders {
+            let writer = sender.lock().writer.take();
+            if let Some(waker) = writer {
+                waker.wake();
+            }
+        }
+        for receiver in receivers {
+            let reader = receiver.lock().reader.take();
+            if let Some(waker) = reader {
+                waker.wake();
+            }
+        }
+    }
+}
+
+impl<Lc, K, Rs: StreamResets, P> StreamSetShare<Lc, K, Rs, P> {
+    /// How the layer ended, if the driver panicked.
+    fn panic_end(&self) -> Option<&LayerEnd<Lc>> {
+        self.panic_end.get()
+    }
 }
 
 impl<Lc, K, Rs: StreamResets, P> fmt::Debug for LockedStreamSetHandle<Lc, K, Rs, P> {
@@ -426,7 +479,9 @@ impl EndFrameDelivery {
 /// due again.
 ///
 /// The waker of the writer is woken when what it waits for may have come:
-/// room for its writes, or the end of the stream's sending.
+/// room for its writes, or the end of the stream's sending. A write held
+/// back by the connection's credit keeps it too, for the layer's end, and
+/// is woken for credit by the send flow controller.
 struct SendingEnd<Lc, K, Rs: StreamResets, P> {
     sender: SenderOf<Lc, Rs, P>,
     data: Option<Ticketed<K, P>>,
@@ -1078,6 +1133,11 @@ impl<K, P> Default for ConnectionIntents<K, P> {
 
 /// What the set and its handles share.
 struct StreamSetShare<Lc, K, Rs: StreamResets, P> {
+    /// How the layer ended, once the driver panicked: only marked, with
+    /// the state under the locks left as the panic left it. Every operation
+    /// of the application looks at it first, under the lock its waker is
+    /// kept under.
+    panic_end: OnceLock<LayerEnd<Lc>>,
     set: Mutex<SetState<Lc, K, Rs, P>>,
     connection_receive: Mutex<ConnectionReceive<K, P>>,
     connection_send: Arc<AtomicConnectionSendFlowController>,
@@ -1436,6 +1496,7 @@ where
         };
         Self {
             shared: Arc::new(StreamSetShare {
+                panic_end: OnceLock::new(),
                 set: Mutex::new(set),
                 connection_receive: Mutex::new(ConnectionReceive {
                     flow: ConnectionReceiveFlowController::new(
