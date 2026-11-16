@@ -40,7 +40,9 @@ impl ServerTestCase {
 /// A test case a client runs, by what it changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClientTestCase {
-    /// `handshake` and `transfer`: every request on one connection.
+    /// `handshake`, `transfer` and `retry`: every request on one
+    /// connection; under `retry` the server answers the first Initial with
+    /// a Retry, which the connection follows.
     OneConnection,
     /// `multiconnect`: a connection of its own for each request, one after
     /// the other.
@@ -55,7 +57,7 @@ impl ClientTestCase {
     /// support it.
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
-            "handshake" | "transfer" => Some(Self::OneConnection),
+            "handshake" | "transfer" | "retry" => Some(Self::OneConnection),
             "multiconnect" => Some(Self::ConnectionPerRequest),
             "chacha20" => Some(Self::ChaCha20),
             _ => None,
@@ -122,7 +124,7 @@ mod tests {
     fn unknown_test_cases_are_not_supported() {
         assert_eq!(ServerTestCase::from_name("zerortt"), None);
         assert_eq!(ServerTestCase::from_name("x7Kq2"), None);
-        assert_eq!(ClientTestCase::from_name("retry"), None);
+        assert_eq!(ClientTestCase::from_name("zerortt"), None);
         assert_eq!(ClientTestCase::from_name(""), None);
         assert_eq!(
             ServerTestCase::from_name("transfer"),
@@ -131,6 +133,10 @@ mod tests {
         assert_eq!(
             ClientTestCase::from_name("multiconnect"),
             Some(ClientTestCase::ConnectionPerRequest)
+        );
+        assert_eq!(
+            ClientTestCase::from_name("retry"),
+            Some(ClientTestCase::OneConnection)
         );
     }
 }
