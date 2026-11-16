@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 9a2731a15f143e03653892175ddf273141be775c0b0deddd16c38f804f4c9eb6 # shrinks to ops = [Register { assoc: Local(1), forms: 0, accept: false }, Register { assoc: Local(0), forms: 0, accept: false }, Route { kind: Initial { cid: Some(0), full: true }, end: 0 }]

@@ -21,6 +21,7 @@ use super::acceptance::{
     InitialAcceptance, InitialDatagramReceiver, InitialReceiverFactory, ReflowHandoff,
     ReflowProvider, UnclaimedWork,
 };
+use super::association::MatchAssociation;
 use super::index::{FrozenEntries, Lookup, OfferedRouteHistory, Recheck, RouteIndex};
 use super::interpretation::{FirstPacketInterpretation, RecognizedInitial};
 use super::recognizer::ConnectionIdRecognizer;
@@ -154,6 +155,12 @@ impl<Payload, Link: sakuya_link::Link, Target: ?Sized> sealed::AcceptanceMode<Pa
     }
 }
 
+/// An Initial that a local connection ID of an entry was found by goes to
+/// the entries found, the last candidate taking what the others left, and
+/// is never handed off: only the endpoint that issued the connection ID can
+/// have given it to the peer, so the datagram belongs to one of those
+/// connections and makes no new one. The others are handed off once every
+/// candidate left them, unless the factory does not admit them.
 impl<Payload, Link, Target, Factory, Provider> sealed::AcceptanceMode<Payload, Link, Target>
     for InitialAcceptance<Factory, Provider>
 where
@@ -176,7 +183,10 @@ where
         datagram: &ReceivedDatagram<Payload, Link>,
         frozen: &FrozenEntries<Target, Link::Local>,
     ) -> DatagramFinishPolicy<ReflowHandoff<Provider, Link::Local>> {
-        if !self.factory().admits(initial, datagram) {
+        let local = frozen
+            .iter()
+            .any(|(_, association, _)| matches!(association, MatchAssociation::LocalCid(_)));
+        if local || !self.factory().admits(initial, datagram) {
             return DatagramFinishPolicy::LastTakes;
         }
         let mut offered = OfferedRouteHistory::new();

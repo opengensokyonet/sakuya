@@ -136,7 +136,7 @@ fn unreadable_first_packet_is_released_without_guessing() {
 }
 
 #[test]
-fn acceptable_initial_competes_under_both_associations_and_reflows() {
+fn an_initial_found_by_a_local_connection_id_competes_and_is_not_handed_off() {
     let mut domain = Domain::new(&[8]);
     let end = local_end();
     let entries = entries(&domain, 1, &end);
@@ -146,16 +146,31 @@ fn acceptable_initial_competes_under_both_associations_and_reflows() {
         entries.local.interpretations(),
         [long_interpretation(LongPacketType::Initial)]
     );
-    // Both candidates exit; the datagram is handed off, not processed inline.
+    // Only the endpoint that issued the local connection ID can have given
+    // it, so the datagram makes no new connection: the last candidate takes
+    // what the first left, and nothing is handed off.
     assert!(entries.local.settle().is_empty());
+    assert_eq!(entries.initial.settle().len(), 1);
     assert!(domain.next_work().is_none());
-    assert!(entries.initial.settle().is_empty());
+}
+
+#[test]
+fn an_acceptable_initial_found_by_a_first_destination_only_reflows() {
+    let mut domain = Domain::new(&[8]);
+    let end = local_end();
+    let initial_entry = Recorder::new(2, Judging::Reject);
+    let _registration = register(
+        domain.index(),
+        MatchAssociation::InitialDcid(nonempty(&cid(1))),
+        &initial_entry,
+    );
+    domain.route(initial(&cid(1), &cid(9)), &link(&end));
+    assert!(initial_entry.settle().is_empty());
     let work = domain
         .next_work()
         .expect("the last exit hands the datagram off");
-    assert_eq!(work.offered_len(), 2);
+    assert_eq!(work.offered_len(), 1);
     assert_eq!(work.initial().dcid().as_bytes(), cid(1));
-    assert_eq!(work.initial().scid().as_bytes(), cid(9));
 }
 
 #[test]

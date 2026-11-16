@@ -318,6 +318,12 @@ impl Model {
                     .map(move |label| (label, interpretation))
             })
             .collect();
+        // an Initial found by a local connection ID is never handed off
+        let on_unclaimed = on_unclaimed
+            && !lookups.iter().any(|&(assoc, interpretation)| {
+                matches!(assoc, Assoc::Local(_))
+                    && !self.applicable(assoc, interpretation).is_empty()
+            });
         self.datagrams.insert(
             tag,
             ModelDatagram {

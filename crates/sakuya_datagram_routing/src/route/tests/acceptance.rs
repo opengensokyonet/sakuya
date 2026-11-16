@@ -422,7 +422,7 @@ fn cancelled_attempts_reflow_and_a_winner_that_drops_its_datagram_does_not() {
     );
     let _second = register(
         domain.index(),
-        MatchAssociation::LocalCid(nonempty(&cid(12))),
+        MatchAssociation::InitialDcid(nonempty(&cid(12))),
         &second,
     );
 
