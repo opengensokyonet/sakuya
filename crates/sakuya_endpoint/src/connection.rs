@@ -9,7 +9,11 @@ use sakuya_connection::{
     share::{LayerShares, LogicalPathKeys, SoleLogicalPath},
     v1::{
         self, ConnectionArgs,
-        application_handles::connection::{ConnectionHandle, ConnectionHandleCellOf},
+        application_handles::{
+            HandleShares,
+            connection::{ConnectionHandle, ConnectionHandleCellOf},
+            handle,
+        },
         connection_ids::FirstLocalConnectionId,
         send::SendTypes,
         send_planning::{IntakePublishOutcome, SendStrategyOf},
@@ -99,6 +103,7 @@ where
     <L as PartConfigs<T, L>>::Args: Selector<ConnectionArgs<T, L>, I>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<T::SendParameters>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    L: HandleShares<T, L, handle::EstablishedLayer>,
     ConnectionHandleCellOf<T, L>: Send + Sync + 'static,
     D: MakeConnection<T, L>,
 {

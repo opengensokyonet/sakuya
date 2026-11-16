@@ -40,7 +40,11 @@ use sakuya_connection::{
         self as connection, ConnectionArgs,
         advancing::HandshakeStart,
         amplification::AddressValidation,
-        application_handles::connection::{ConnectionHandle, ConnectionHandleCellOf},
+        application_handles::{
+            HandleShares,
+            connection::{ConnectionHandle, ConnectionHandleCellOf},
+            handle,
+        },
         close_request::CloseRequestCell,
         first_flight::FirstFlight,
         input::InitialPathReceiver,
@@ -244,6 +248,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
                 AnyActiveLinkPath,
             >,
         SendStrategyOf<S::Choices, S::Parts>: SendStrategy<SendTypes<S::Choices, S::Parts>>,
+        S::Parts: HandleShares<S::Choices, S::Parts, handle::EstablishedLayer>,
         ConnectionHandleCellOf<S::Choices, S::Parts>: Send + Sync + 'static,
     {
         if self.domain.is_closed() {

@@ -191,7 +191,8 @@ macro_rules! choices {
             >;
             type ResetTokenRegistry = ResetTokensOf<Udp>;
             type SendParameters = sakuya_stream::send_options::urgency::Urgency;
-            type Streams<Lc, K> = sakuya_connection::v1::streams::locked::LockedStreamSet<Lc, K>;
+            type Streams<Lc, K, X: sakuya_connection::v1::streams::resets::StreamResets> =
+                sakuya_connection::v1::streams::locked::LockedStreamSet<Lc, K, X>;
             type StreamSetConfig = sakuya_connection::v1::streams::locked::LockedStreamSetConfig;
             type ImmediateClosePolicy = PassThroughImmediateClosePolicy;
         }

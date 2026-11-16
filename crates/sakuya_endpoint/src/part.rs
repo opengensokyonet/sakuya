@@ -41,6 +41,33 @@ pub trait EndpointPart<T: v1::Choices, L>: LayerShare<T, L, layer::Connection> {
     fn connection_args(config: Self::Config, facts: &mut ConnectionFacts<T>) -> Self::Args;
 }
 
+/// The DATAGRAM extension is configured with what it is given when the
+/// connection node is built: what it announces and how its queues are
+/// bounded.
+#[cfg(feature = "datagram")]
+impl<T, L> EndpointPart<T, L> for sakuya_connection::datagram::Part
+where
+    T: sakuya_connection::datagram::DatagramChoices,
+{
+    type Config = sakuya_connection::datagram::DatagramConnectionArgs<T::DatagramQueuesConfig>;
+
+    fn connection_args(config: Self::Config, _: &mut ConnectionFacts<T>) -> Self::Args {
+        config
+    }
+}
+
+/// The reliable stream reset extension is configured with what it
+/// announces.
+#[cfg(feature = "reset_stream_at")]
+impl<T: v1::Choices, L> EndpointPart<T, L> for sakuya_connection::reset_stream_at::Part {
+    type Config =
+        sakuya_connection::v1::parameters::PartSlots<sakuya_connection::reset_stream_at::Part>;
+
+    fn connection_args(config: Self::Config, _: &mut ConnectionFacts<T>) -> Self::Args {
+        config
+    }
+}
+
 /// The configurations of a list of parts, and the start values made from
 /// them; `Whole` is the whole list.
 pub trait PartConfigs<T: v1::Choices, Whole> {
