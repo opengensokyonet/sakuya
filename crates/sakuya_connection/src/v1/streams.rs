@@ -2,8 +2,8 @@
 //! stream set ([`StreamSet`]), the facts it is made from, the failures of
 //! the frames it takes, and how version 1 builds and ends it.
 //!
-//! The established layer of version 1 holds one stream set, of the type the
-//! composition chooses ([`Choices::Streams`]). It is made when the layer is
+//! The established layer of version 1 holds one stream set, of the kind the
+//! host chooses ([`HostChoices::Streams`]). It is made when the layer is
 //! built, from the transport parameters of both sides and this side's role
 //! ([`StreamSetFacts`]) and from the configuration the connection was made
 //! with ([`StreamSetConfig`]); when the layer ends, every stream hears of it
@@ -96,7 +96,7 @@ use crate::{
 /// A kind of stream set: one stream set type for each `Lc`, `K` and `X`
 /// ([`StreamSet`]), which all take the same configuration and send with the
 /// same parameters. The host chooses the kind
-/// ([`HostChoices::Streams`](super::HostChoices::Streams)); the connection
+/// ([`HostChoices::Streams`]); the connection
 /// gives the three types, which follow from the list of parts.
 pub trait StreamSetFamily: 'static {
     /// What the composition configures the stream set with; the connection

@@ -455,7 +455,7 @@ pub struct RetireConnectionIdSummary {
 ///
 /// The intents of the streams are those of the default send parameters,
 /// [`Urgency`]: the list of parts does not depend on the choices, so a
-/// composition whose [`SendParameters`](super::Choices::SendParameters) are
+/// composition whose [`SendParameters`](super::StreamSetFamily::SendParameters) are
 /// others has no place for its stream intents yet.
 pub type SendIntents = frunk_core::Coprod!(
     AckIntent,

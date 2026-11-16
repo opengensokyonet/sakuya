@@ -123,7 +123,7 @@ impl<E: EndpointChoices> fmt::Debug for EndpointDeliverer<E> {
 }
 
 /// The datagram receiver of a connection of an endpoint of the choices `E`:
-/// the [`Receiver`](sakuya_connection::v1::Choices::Receiver) of its
+/// the [`Receiver`](sakuya_connection::v1::MakerChoices::Receiver) of its
 /// connections' choices.
 ///
 /// It is the delivery queue its route entries post to, and it holds some
