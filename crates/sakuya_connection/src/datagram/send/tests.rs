@@ -166,9 +166,8 @@ fn a_datagram_intent_needs_its_whole_frame() {
     );
     let longer = intent(&[0; 64]);
     assert_eq!(longer.min_lengths().with_length, 67);
-    // the progress of the datagram orders writing and withdrawing, so the
-    // strategy consumes the intent only once it was written
-    assert!(!longer.claimed_before_writing());
+    // the progress of the datagram orders writing and withdrawing; the
+    // strategy consumes the intent once it was written
     assert!(!longer.stays_after_writing());
     assert_eq!(longer.rank().priority, SendPriority::ApplicationData);
 }

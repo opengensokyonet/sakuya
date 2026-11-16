@@ -183,9 +183,10 @@ impl<P> SendIntent for DatagramIntent<P> {
 }
 
 /// A datagram is application data, by the urgency of its parameters; it
-/// does not hold its place, and it is consumed before its source is given
-/// it, as its content is fixed and no component's lock orders withdrawing
-/// it against writing it.
+/// does not hold its place. Withdrawing it and writing it race in its own
+/// progress, not in the strategy: its frame source writes it only once the
+/// progress moves it from waiting to sent (`start_writing`), which a
+/// withdrawal that came first keeps it from.
 impl<P: SendUrgency> RankedIntent for DatagramIntent<P> {
     fn rank(&self) -> SendRank {
         SendRank {

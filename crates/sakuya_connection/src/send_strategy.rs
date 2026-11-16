@@ -803,20 +803,9 @@ impl<'p, I: SendStrategyTypes, P: DatagramFillPlan<I> + ?Sized + 'p> fmt::Debug
     }
 }
 
-/// What a plan is told about an item it planned: whether the item may
-/// still be given to its frame source, and then how many bytes the source
-/// wrote, frames and frame headers included.
+/// What a plan is told about an item it planned: how many bytes its frame
+/// source wrote, frames and frame headers included.
 pub trait SupplyFeedback {
-    /// Claim the item, before it is given to its frame source: whether it
-    /// is still waiting to be sent. On `false` the item has stopped
-    /// waiting, as its holder withdrew it: it is not given to its source,
-    /// and it counts as having written 0 bytes. A plan whose items cannot
-    /// be withdrawn while it lasts claims nothing: every item is still
-    /// waiting.
-    fn claim(&mut self) -> bool {
-        true
-    }
-
     /// The item just supplied wrote `written` bytes.
     fn supplied(&mut self, written: usize);
 }
@@ -895,19 +884,11 @@ impl<'c, T, F: SupplyFeedback + ?Sized> PlannedItem<'c, T, F> {
     /// Give the item to its frame source: `source` writes it into `packet`
     /// and hands back what it holds afterwards. The bytes written, measured
     /// before and after, go back to the plan.
-    ///
-    /// The plan claims the item first ([`SupplyFeedback::claim`]): an item
-    /// that stopped waiting is not given to `source`, `packet` comes back
-    /// as it was, and the plan is told 0 bytes were written.
     pub fn supply<W: PacketWriting, P>(
         self,
         packet: OpenPacket<W, ClassOfSource, P>,
         source: impl FnOnce(T, OpenPacket<W, ClassOfSource, P>) -> Supplied<W, ClassOfSource, P>,
     ) -> Supplied<W, ClassOfSource, P> {
-        if !self.feedback.claim() {
-            self.feedback.supplied(0);
-            return Supplied::Open(packet);
-        }
         let before = packet.buffer_len();
         let supplied = source(self.item, packet);
         self.feedback

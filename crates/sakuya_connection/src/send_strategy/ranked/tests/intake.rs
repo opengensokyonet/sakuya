@@ -6,7 +6,7 @@ use core::{
 };
 use std::{
     rc::Rc,
-    sync::{Barrier, atomic::Ordering},
+    sync::atomic::Ordering,
 };
 
 use bytes::BytesMut;
@@ -103,12 +103,6 @@ impl RankedIntent for TestIntent {
 
     fn stays_after_writing(&self) -> bool {
         self.stays
-    }
-
-    /// The intents of these tests are claimed before writing, as a
-    /// DATAGRAM is, unless they stay.
-    fn claimed_before_writing(&self) -> bool {
-        true
     }
 }
 
@@ -234,12 +228,6 @@ fn next_datagram(
                 FrameSourceCursor::<TestSources>::next(&mut cursor)
         {
             ids.push(item.id);
-            // A supply that writes claims its item first, as
-            // `PlannedItem::supply` does; an item reported as writing
-            // nothing is not claimed, so it is left waiting.
-            if written > 0 {
-                assert!(feedback.claim());
-            }
             feedback.supplied(written);
         }
         if ids.len() == take {
@@ -495,7 +483,7 @@ fn application_data_that_does_not_fit_is_passed_over() {
     assert_eq!(all(&mut planner, &mut core, &waker), None);
 }
 
-// ---- supplying through the claim ----
+// ---- supplying ----
 
 /// A packet writer that keeps the bytes written, and hands them to `out`
 /// when the packet is concluded.
@@ -580,15 +568,16 @@ struct Filled {
 
 /// Fill the next datagram's items into one packet through
 /// [`PlannedItem::supply`], the frame source writing one [`IdFrame`] per
-/// intent; `before` and `after` are called with each item's id before it
-/// is supplied and after, while the plan lasts. `None` when nothing is
-/// planned.
+/// intent for which `writes` holds; `before` and `after` are called with
+/// each item's id before it is supplied and after, while the plan lasts.
+/// `None` when nothing is planned.
 fn supply_next(
     planner: &mut Planner,
     core: &mut Core,
     waker: &Waker,
     mut before: impl FnMut(u32),
     mut after: impl FnMut(u32),
+    writes: impl Fn(u32) -> bool,
 ) -> Option<Filled> {
     let Poll::Ready(PlannedDatagram::Fill(mut plan)) =
         planner.poll_plan(core, &mut Context::from_waker(waker))
@@ -611,8 +600,10 @@ fn supply_next(
             let supplied = item.supply(packet, |intent, open| {
                 given.push(intent.id);
                 let mut open = open.into_source_class::<InFlightClass>();
-                open.write_frame(IdFrame(u8::try_from(intent.id).unwrap()), ())
-                    .unwrap();
+                if writes(intent.id) {
+                    open.write_frame(IdFrame(u8::try_from(intent.id).unwrap()), ())
+                        .unwrap();
+                }
                 Supplied::Open(open).into_class_of_source()
             });
             let Supplied::Open(open) = supplied else {
@@ -629,10 +620,12 @@ fn supply_next(
 }
 
 /// Withdrawn after it was planned and before it is supplied, an intent is
-/// not given to its source: it counts as having written nothing, and what
-/// follows it goes into the same packet.
+/// still given to its source: the strategy does not order writing against
+/// withdrawing, the source does by its own state. Here the source writes
+/// nothing for it, as the DATAGRAM frames do for a datagram withdrawn
+/// first, and what follows goes into the same packet.
 #[test]
-fn an_intent_withdrawn_before_its_supply_stays_out_of_the_packet() {
+fn an_intent_withdrawn_before_its_supply_is_its_sources_to_leave_out() {
     let (mut core, mut planner, handle) = setup(12_000);
     let first = publish(&handle, data(1, 3));
     let mut second = Some(publish(&handle, data(2, 3)));
@@ -649,11 +642,12 @@ fn an_intent_withdrawn_before_its_supply_stays_out_of_the_packet() {
             }
         },
         |_| {},
+        |id| id != 2,
     );
     assert_eq!(
         filled,
         Some(Filled {
-            given: vec![1, 3],
+            given: vec![1, 2, 3],
             packet: vec![1, 3],
         })
     );
@@ -663,21 +657,14 @@ fn an_intent_withdrawn_before_its_supply_stays_out_of_the_packet() {
     assert_eq!(all(&mut planner, &mut core, &waker), None);
 }
 
-/// Written into the packet, an intent is consumed even while the plan
-/// lasts: withdrawing it then reports it consumed.
+/// An intent written into the packet is consumed once the plan ends:
+/// withdrawing it then reports it consumed.
 #[test]
-fn an_intent_withdrawn_after_its_supply_reports_it_consumed() {
+fn an_intent_withdrawn_after_its_plan_reports_it_consumed() {
     let (mut core, mut planner, handle) = setup(12_000);
-    let mut ticket = Some(publish(&handle, data(1, 3)));
-    let mut report = None;
+    let ticket = publish(&handle, data(1, 3));
     let (_, waker) = waker();
-    let filled = supply_next(
-        &mut planner,
-        &mut core,
-        &waker,
-        |_| {},
-        |_| report = ticket.take().map(IntentTicketWithdraw::withdraw),
-    );
+    let filled = supply_next(&mut planner, &mut core, &waker, |_| {}, |_| {}, |_| true);
     assert_eq!(
         filled,
         Some(Filled {
@@ -685,14 +672,13 @@ fn an_intent_withdrawn_after_its_supply_reports_it_consumed() {
             packet: vec![1],
         })
     );
-    assert_eq!(report, Some(IntentWithdrawReport::Consumed));
+    assert_eq!(ticket.withdraw(), IntentWithdrawReport::Consumed);
 }
 
-/// An intent that stays after writing is not claimed: it keeps waiting
-/// through the supply and after the plan, for its source to resize or
-/// withdraw it.
+/// An intent that stays after writing keeps waiting through the supply
+/// and after the plan, for its source to resize or withdraw it.
 #[test]
-fn an_intent_that_stays_after_writing_is_not_claimed() {
+fn an_intent_that_stays_after_writing_keeps_waiting() {
     let (mut core, mut planner, handle) = setup(12_000);
     let ticket = publish(
         &handle,
@@ -709,6 +695,7 @@ fn an_intent_that_stays_after_writing_is_not_claimed() {
         &waker,
         |_| {},
         |_| during = Some(ticket.state()),
+        |_| true,
     );
     assert_eq!(
         filled,
@@ -721,59 +708,10 @@ fn an_intent_that_stays_after_writing_is_not_claimed() {
     assert_eq!(ticket.state(), IntentState::Waiting);
     // planned again, as its source neither resized nor withdrew it here
     assert_eq!(
-        supply_next(&mut planner, &mut core, &waker, |_| {}, |_| {}).map(|filled| filled.given),
+        supply_next(&mut planner, &mut core, &waker, |_| {}, |_| {}, |_| true)
+            .map(|filled| filled.given),
         Some(vec![1])
     );
     assert_eq!(ticket.withdraw(), IntentWithdrawReport::Withdrawn);
     assert_eq!(all(&mut planner, &mut core, &waker), None);
-}
-
-/// Withdrawn on another thread just as the driver supplies it, each intent
-/// is either withdrawn and never given to its source, or written into the
-/// packet and reported consumed. The two threads meet once the intent is
-/// planned; the withdrawal is delayed by a different number of spins each
-/// time, so it falls on either side of the claim.
-#[test]
-fn a_withdrawal_racing_the_supply_takes_place_or_reports_the_intent_consumed() {
-    let (mut core, mut planner, handle) = setup(12_000);
-    let (_, waker) = waker();
-    for round in 0..400 {
-        let ticket = publish(&handle, data(1, 3));
-        let barrier = Barrier::new(2);
-        let (filled, report) = std::thread::scope(|scope| {
-            let barrier = &barrier;
-            let withdrawing = scope.spawn(move || {
-                barrier.wait();
-                for _ in 0..round % 40 {
-                    core::hint::spin_loop();
-                }
-                ticket.withdraw()
-            });
-            let filled = supply_next(
-                &mut planner,
-                &mut core,
-                &waker,
-                |_| {
-                    barrier.wait();
-                },
-                |_| {},
-            );
-            (filled, withdrawing.join().unwrap())
-        });
-        let filled = filled.expect("the intent is planned before it is withdrawn");
-        assert_eq!(
-            filled.packet,
-            filled
-                .given
-                .iter()
-                .map(|&id| u8::try_from(id).unwrap())
-                .collect::<Vec<_>>()
-        );
-        match report {
-            IntentWithdrawReport::Withdrawn => assert_eq!(filled.given, []),
-            IntentWithdrawReport::Consumed => assert_eq!(filled.given, [1]),
-            IntentWithdrawReport::Ended(error) => panic!("the connection did not close: {error:?}"),
-        }
-        assert_eq!(all(&mut planner, &mut core, &waker), None);
-    }
 }

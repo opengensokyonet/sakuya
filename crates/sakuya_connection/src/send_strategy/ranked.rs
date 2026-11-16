@@ -34,11 +34,10 @@
 //! A supply that writes something consumes its intent, except an intent
 //! that stays after writing ([`RankedIntent::stays_after_writing`]), such as
 //! a stream's data: its source wrote as much as it could and resized or
-//! withdrew it, and the next plan takes it by the room it needs then. An
-//! intent claimed before writing ([`RankedIntent::claimed_before_writing`]),
-//! such as a DATAGRAM, is consumed before its source is given it, so that
-//! withdrawing it on another thread either takes place first, and the
-//! source is not given it, or reports it consumed.
+//! withdrew it, and the next plan takes it by the room it needs then. The
+//! strategy does not order writing an intent against withdrawing it on
+//! another thread: a frame source whose intents can be withdrawn so, such
+//! as the DATAGRAM frames, orders the two by its own state.
 //!
 //! Intents published through the intake ([`RankedSendIntake`]), from the
 //! application's threads or from the driver while it holds the core, wait
@@ -134,17 +133,6 @@ pub trait RankedIntent {
     fn stays_after_writing(&self) -> bool {
         false
     }
-
-    /// Whether the intent is consumed before its source is given it, rather
-    /// than after its source wrote something: for an intent whose content
-    /// is fixed in it and whose withdrawing no component's lock orders
-    /// against its supply, such as a DATAGRAM. Withdrawing it on another
-    /// thread then either takes place before the supply, and its source is
-    /// not given it, or reports it consumed. Read only for an intent that
-    /// does not stay after writing. By default an intent is not.
-    fn claimed_before_writing(&self) -> bool {
-        false
-    }
 }
 
 impl RankedIntent for CNil {
@@ -157,10 +145,6 @@ impl RankedIntent for CNil {
     }
 
     fn stays_after_writing(&self) -> bool {
-        match *self {}
-    }
-
-    fn claimed_before_writing(&self) -> bool {
         match *self {}
     }
 }
@@ -184,13 +168,6 @@ impl<H: RankedIntent, T: RankedIntent> RankedIntent for Coproduct<H, T> {
         match self {
             Coproduct::Inl(intent) => intent.stays_after_writing(),
             Coproduct::Inr(rest) => rest.stays_after_writing(),
-        }
-    }
-
-    fn claimed_before_writing(&self) -> bool {
-        match self {
-            Coproduct::Inl(intent) => intent.claimed_before_writing(),
-            Coproduct::Inr(rest) => rest.claimed_before_writing(),
         }
     }
 }
@@ -309,10 +286,11 @@ impl<C> IntentTicketResize for IntentTicket<C> {
     }
 }
 
-/// Withdrawing and the supply's claim are ordered by the intent's state:
-/// only one of them takes place, so a withdrawal reported as having taken
-/// place leaves the intent out of every packet, and one that comes after
-/// the claim reports it consumed.
+/// Withdrawing and consuming are ordered by the intent's state: only one
+/// of them takes place. A withdrawal that takes place leaves the intent out
+/// of every plan made after it; one that comes after the plan that wrote
+/// the intent ended reports it consumed. Whether a supply under way writes
+/// the intent is its frame source's.
 impl<C> IntentTicketWithdraw for IntentTicket<C> {
     type Report = IntentWithdrawReport<ConnectionClosedError<C>>;
 
@@ -1096,10 +1074,6 @@ struct PlannedEntry {
     /// Whether the intent stays after a supply that wrote something
     /// ([`RankedIntent::stays_after_writing`]).
     stays: bool,
-    /// Whether the supply claims the intent before its source is given it
-    /// ([`RankedIntent::claimed_before_writing`]); never for one that
-    /// stays.
-    claimed: bool,
 }
 
 #[derive(Debug)]
@@ -1265,8 +1239,6 @@ where
                 class,
                 turn: application_data.then_some((urgency, order)),
                 stays: entry.intent.stays_after_writing(),
-                claimed: !entry.intent.stays_after_writing()
-                    && entry.intent.claimed_before_writing(),
             };
             match packets.last_mut() {
                 Some(packet) if packet.kind == kind => packet.items.push(planned),
@@ -1373,40 +1345,22 @@ fn end_waiting<J>(entries: impl IntoIterator<Item = Entry<J>>) -> impl Iterator<
 
 // ---- the plan ----
 
-/// The item a cursor gave out and that is not yet supplied.
-#[derive(Debug)]
-struct CurrentItem {
-    entry: PlannedEntry,
-    /// Its intent's state, which claiming it changes.
-    cell: Arc<IntentCell>,
-}
-
 /// What the ranked plan learns from each supply.
 #[derive(Debug, Default)]
 pub struct RankedFeedback {
-    current: Option<CurrentItem>,
+    /// The item a cursor gave out and that is not yet supplied.
+    current: Option<PlannedEntry>,
     /// The items supplied, in order, and whether each wrote anything.
     supplied: Vec<(PlannedEntry, bool)>,
     stopped: bool,
 }
 
-/// An item claimed before writing is consumed when it is claimed, before
-/// its source is given it: the plan found that it fits (its least room as
-/// the last frame), and what it is to write is fixed in the intent, so its
-/// source writes it; should the source write nothing, the intent is
-/// consumed all the same. Other items are not claimed: they are consumed
-/// once the plan ends, if they wrote anything and do not stay.
+/// The items are consumed once the plan ends, if they wrote anything and
+/// do not stay.
 impl SupplyFeedback for RankedFeedback {
-    fn claim(&mut self) -> bool {
-        match &self.current {
-            Some(current) if current.entry.claimed => current.cell.leave_waiting(CONSUMED),
-            _ => true,
-        }
-    }
-
     fn supplied(&mut self, written: usize) {
         if let Some(current) = self.current.take() {
-            self.supplied.push((current.entry, written > 0));
+            self.supplied.push((current, written > 0));
         }
     }
 }
@@ -1455,14 +1409,14 @@ impl<I: SendStrategyTypes> RankedPlan<'_, I> {
 
 /// The items supplied had their turn; those that wrote anything are
 /// consumed, unless they stay after writing, as their sources already
-/// resized or withdrew them, or they were consumed when they were claimed.
+/// resized or withdrew them.
 impl<I: SendStrategyTypes> Drop for RankedPlan<'_, I> {
     fn drop(&mut self) {
         for (entry, wrote) in self.feedback.supplied.drain(..) {
             if let Some((urgency, order)) = entry.turn {
                 self.planner.turns[urgency] = Some(order);
             }
-            if wrote && !entry.stays && !entry.claimed {
+            if wrote && !entry.stays {
                 let cell = match entry.held {
                     Held::Core(index) => &self.core.intents[index].cell,
                     Held::LinkPath(index) => &self.planner.intents[index].cell,
@@ -1588,10 +1542,7 @@ where
         };
         // The packet's kind was chosen because its set carries the intent.
         let item = S::item(&held.intent)?;
-        plan.feedback.current = Some(CurrentItem {
-            entry,
-            cell: Arc::clone(&held.cell),
-        });
+        plan.feedback.current = Some(entry);
         Some(PlannedItem::new(
             item,
             entry.min,
