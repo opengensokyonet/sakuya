@@ -27,6 +27,7 @@ use bytes::{Bytes, BytesMut};
 use common::{Outer, TestClock, TestLink, TestReceiver, advance_to, ms, now};
 use nitori_crypto::{NamedGroup, SignatureScheme, SigningKey as _};
 use nitori_crypto_aws_lc::{AwsLcBackend, Ed25519SigningKey};
+use nitori_io::{ReadChunkHostExt as _, calls::WriteAllHostExt as _};
 use sakuya_connection::prelude::*;
 use sakuya_connection::{
     call::CallBundle,
@@ -121,9 +122,14 @@ use sakuya_wire::{
     v1::{
         frame::set::{FrameSetPart, FrameTypeValues},
         role::Role,
+        stream_count::StreamCount,
         transport_error::TransportErrorCode,
         transport_parameters::{
-            TransportParameterSpace, TransportParameters, integer::MaxIdleTimeout,
+            TransportParameterSpace, TransportParameters,
+            integer::{
+                InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
+                InitialMaxStreamsBidi, MaxIdleTimeout,
+            },
         },
     },
     var_int::VarInt,
@@ -876,6 +882,16 @@ where
 {
     let mut parameters = TransportParameters::<Vec<u8>>::new();
     parameters.set(MaxIdleTimeout::new(VarInt::from_u32(30_000)));
+    // each side lets the other open a few bidirectional streams and send
+    // a little on them
+    parameters.set(InitialMaxData::new(VarInt::from_u32(65_536)));
+    parameters.set(InitialMaxStreamDataBidiLocal::new(VarInt::from_u32(16_384)));
+    parameters.set(InitialMaxStreamDataBidiRemote::new(VarInt::from_u32(
+        16_384,
+    )));
+    parameters.set(InitialMaxStreamsBidi::new(
+        StreamCount::new(4).expect("a stream count"),
+    ));
     v1::ConnectionArgs {
         crypto: RingBackend,
         handshake,
@@ -945,8 +961,14 @@ struct Run {
 }
 
 /// Run a client of the engine `client` against a server until `done` says
-/// so, or for at most 3 s of the tests' clock.
-fn handshake(client: ClientEngine, clock: &Arc<ManualClock>, done: impl Fn() -> bool) -> Run {
+/// so, or for at most 3 s of the tests' clock; `done` is called once every
+/// millisecond, after the datagrams of that millisecond went across, and
+/// may act on the connections' handles.
+fn handshake(
+    client: ClientEngine,
+    clock: &Arc<ManualClock>,
+    mut done: impl FnMut(&Run) -> bool,
+) -> Run {
     NOTED.with(|n| *n.borrow_mut() = [Noted::default(), Noted::default()]);
     common::reset_links();
     advance_to(ms(0));
@@ -1019,7 +1041,7 @@ fn handshake(client: ClientEngine, clock: &Arc<ManualClock>, done: impl Fn() -> 
                 break;
             }
         }
-        if done() {
+        if done(&run) {
             break;
         }
     }
@@ -1041,7 +1063,7 @@ fn a_client_and_a_server_complete_and_confirm_the_handshake() {
             && noted.handshake_keys == "Discarded"
             && noted.spaces == [PacketNumberSpaceKind::ApplicationData]
     };
-    let run = handshake(client_engine(&clock, 1), &clock, || {
+    let run = handshake(client_engine(&clock, 1), &clock, |_| {
         complete(&noted(Role::Server))
             && complete(&noted(Role::Client))
             && noted(Role::Server).own == "Delivered"
@@ -1145,7 +1167,7 @@ fn a_client_and_a_server_complete_and_confirm_the_handshake() {
 fn a_client_that_fails_to_verify_the_server_closes_with_the_alert() {
     let clock = tls_clock();
     // the client trusts another root than the server's certificate's
-    let run = handshake(client_engine(&clock, 3), &clock, || {
+    let run = handshake(client_engine(&clock, 3), &clock, |_| {
         noted(Role::Server).peer_close.is_some()
     });
     let client = noted(Role::Client);
@@ -1179,4 +1201,82 @@ fn a_client_that_fails_to_verify_the_server_closes_with_the_alert() {
         "a closed connection keeps no exporter"
     );
     assert!(!run.server_ended, "the server closes in its own time");
+}
+
+/// The output of `future` if it is ready on its first poll.
+fn poll_now<F: Future>(future: F) -> Poll<F::Output> {
+    pin!(future).poll(&mut Context::from_waker(Waker::noop()))
+}
+
+/// Read what the stream reader `$reader` has now into the `Vec<u8>`
+/// `$into`; whether it read the stream's end.
+macro_rules! read_now {
+    ($reader:expr, $into:expr) => {{
+        let maximum = NonZeroUsize::new(64).expect("not zero");
+        loop {
+            match poll_now($reader.read_chunk_unpin(maximum)) {
+                Poll::Ready(Ok(Some(chunk))) => $into.extend_from_slice(&chunk),
+                Poll::Ready(Ok(None)) => break true,
+                Poll::Ready(Err(error)) => panic!("the stream is read: {error:?}"),
+                Poll::Pending => break false,
+            }
+        }
+    }};
+}
+
+/// Node 1: over the tests' in-memory link, a client and a server complete
+/// the handshake, the client opens a bidirectional stream and sends a
+/// request with its end, and the server reads it and answers on the same
+/// stream.
+#[test]
+fn a_client_and_a_server_exchange_a_request_and_its_answer_on_a_stream() {
+    let clock = tls_clock();
+    let mut client_stream = None;
+    let mut server_layer = None;
+    let mut server_stream = None;
+    let (mut request, mut answer) = (Vec::new(), Vec::new());
+    let mut answered = false;
+    let mut done = false;
+    handshake(client_engine(&clock, 1), &clock, |run| {
+        if client_stream.is_none()
+            && let Poll::Ready(layer) = poll_now(run.client_handle.established())
+        {
+            let layer = layer.expect("the client's handshake completed");
+            let (mut writer, reader) = layer.try_open_bi().expect("the server grants streams");
+            ready(writer.write_all_unpin(Bytes::from_static(b"ping")))
+                .expect("the request is written");
+            writer.close().expect("the request ends");
+            client_stream = Some((writer, reader));
+        }
+        if server_layer.is_none()
+            && let Poll::Ready(layer) = poll_now(run.server_handle.established())
+        {
+            server_layer = Some(layer.expect("the server's handshake completed"));
+        }
+        if server_stream.is_none()
+            && let Some(layer) = &server_layer
+            && let Poll::Ready(stream) = poll_now(layer.accept_bi())
+        {
+            server_stream = Some(stream.expect("the client's stream is accepted"));
+        }
+        if let Some((writer, reader)) = &mut server_stream
+            && !answered
+            && read_now!(reader, request)
+        {
+            assert_eq!(request, b"ping");
+            ready(writer.write_all_unpin(Bytes::from_static(b"pong")))
+                .expect("the answer is written");
+            writer.close().expect("the answer ends");
+            answered = true;
+        }
+        if let Some((_, reader)) = &mut client_stream
+            && !done
+        {
+            done = read_now!(reader, answer);
+        }
+        done
+    });
+    assert!(done, "the client read the answer's end within 3 s");
+    assert_eq!(request, b"ping");
+    assert_eq!(answer, b"pong");
 }
