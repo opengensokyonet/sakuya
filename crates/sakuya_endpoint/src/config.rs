@@ -105,7 +105,10 @@ where
     /// connection's: replacing them in an incoming connection changes
     /// nothing.
     pub quotas: ServerQuotas,
-    /// The address validation tokens.
+    /// The address validation tokens. They are the endpoint's: it validates
+    /// the tokens clients return with them, and an incoming connection's
+    /// Retry issues its token with them, so replacing them in an incoming
+    /// connection changes nothing.
     pub tokens: Tk,
     /// When the endpoint answers a new Initial with a stateless Retry.
     pub retry_policy: Rp,

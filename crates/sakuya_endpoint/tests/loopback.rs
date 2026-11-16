@@ -43,7 +43,10 @@ use sakuya_connection::{
 };
 use sakuya_datagram_routing::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
 use sakuya_endpoint::{
-    address_token::{AddressTokenKey, AddressTokenLifetimes, AeadAddressTokens},
+    address_token::{
+        AddressTokenKey, AddressTokenLifetimes, AddressTokens, AeadAddressTokens, TokenOutcome,
+        TokenPeerAddress,
+    },
     choices::{ConnectionDatagramReceiver, EndpointChoices, PeerOf, ResetTokensOf},
     config::{
         BindingDeclarations, ClientConfig, ClientCryptoReceiveCapacities, EndpointConfig,
@@ -51,13 +54,14 @@ use sakuya_endpoint::{
     },
     endpoint::{AddBindingError, BindingHandleConnectError, Endpoint},
     handshake::{ClientHandshakeConfig, ServerHandshakeConfig},
-    incoming::Incoming,
+    incoming::{Incoming, RetryError},
     outgoing::StartOutgoingError,
     retry::{CapacityFraction, LoadStatelessRetryPolicy},
     role::{AcceptingServer, ConnectingClient, NoClient, NoServer},
+    stateless_check::ReturnedToken,
 };
 use sakuya_link::{ConnectingLinkBinding as _, EcnMarking, Link as _, OutgoingDatagram};
-use sakuya_packet_protection::backend::ring::RingBackend;
+use sakuya_packet_protection::{backend::ring::RingBackend, retry::verify_retry_integrity_tag};
 use sakuya_recovery::{
     ack_obligation::Rfc9000AckObligation,
     factory::{NewRenoRecoveryFactory, NewRenoRecoveryFactoryConfig},
@@ -389,6 +393,16 @@ where
     }
 }
 
+fn aead_tokens() -> AeadAddressTokens<AwsLcBackend> {
+    AeadAddressTokens::new(
+        AwsLcBackend,
+        AddressTokenKey::generate(&AwsLcBackend).unwrap(),
+        AddressTokenLifetimes::default(),
+        Default::default(),
+    )
+    .unwrap()
+}
+
 fn server_config() -> ServerConfig<
     ServerChoices,
     Parts,
@@ -396,13 +410,12 @@ fn server_config() -> ServerConfig<
     AeadAddressTokens<AwsLcBackend>,
     LoadStatelessRetryPolicy,
 > {
-    let tokens = AeadAddressTokens::new(
-        AwsLcBackend,
-        AddressTokenKey::generate(&AwsLcBackend).unwrap(),
-        AddressTokenLifetimes::default(),
-        Default::default(),
-    )
-    .unwrap();
+    server_config_with(aead_tokens())
+}
+
+fn server_config_with<Tk>(
+    tokens: Tk,
+) -> ServerConfig<ServerChoices, Parts, ServerStarts, Tk, LoadStatelessRetryPolicy> {
     ServerConfig::new(
         ServerStarts,
         ServerCryptoReceiveCapacities {
@@ -875,6 +888,224 @@ fn an_incoming_connection_born_from_zero_rtt_waits_for_its_initial() {
             0
         );
         drop((half, other));
+    });
+}
+
+/// A version 1 Initial that fills a datagram of `len` bytes and carries
+/// `token`; its protected fields are made up.
+fn initial_with_token(dcid: &[u8], scid: &[u8], token: &[u8], len: usize) -> Bytes {
+    let mut packet = vec![0xc0, 0, 0, 0, 1];
+    packet.push(dcid.len() as u8);
+    packet.extend_from_slice(dcid);
+    packet.push(scid.len() as u8);
+    packet.extend_from_slice(scid);
+    // A two-byte variable-length integer (RFC 9000 §16).
+    packet.extend([0x40 | (token.len() >> 8) as u8, token.len() as u8]);
+    packet.extend_from_slice(token);
+    let rest = len - packet.len() - 2;
+    packet.extend([0x40 | (rest >> 8) as u8, rest as u8]);
+    packet.resize(len, 0x2c);
+    Bytes::from(packet)
+}
+
+/// The destination and source connection IDs and the token of the Retry
+/// `packet`, whose integrity tag is checked against `original_dcid`.
+fn read_retry(packet: &[u8], original_dcid: &ConnectionId) -> (ConnectionId, ConnectionId, Bytes) {
+    use sakuya_wire::{
+        header::codec::ReadLongHeaderHostExt as _,
+        v1::header::{LongPacketType, TypeFields, codec::ReadLongPacketHostExt as _},
+    };
+    verify_retry_integrity_tag(&RingBackend, original_dcid, packet)
+        .expect("the integrity tag binds the original destination connection ID");
+    let mut input = packet;
+    let header = input.sync_read_long_header_unpin().unwrap();
+    let read = input.sync_read_long_packet_unpin(header).unwrap();
+    assert_eq!(read.packet_type(), LongPacketType::Retry);
+    let TypeFields::Retry { token, .. } = read.fields() else {
+        panic!("expected Retry fields, got {:?}", read.fields());
+    };
+    (*read.dcid(), *read.scid(), Bytes::copy_from_slice(token))
+}
+
+#[test]
+fn a_retried_connection_comes_back_with_its_token() {
+    run(async {
+        let server = server();
+        let mut incoming = server.endpoint.incoming();
+        let peer = bind();
+        let link = within("a link to the server", peer.connect(server.address))
+            .await
+            .unwrap();
+        let dcid = [0x0d; 8];
+        let original_dcid = ConnectionId::new(&dcid).unwrap();
+        send_on(&link, long_packet(true, &dcid, &[0x5c; 4], 1200)).await;
+        let Some(Incoming::Terminable(half)) =
+            within("an incoming connection", incoming.next()).await
+        else {
+            panic!("the server endpoint ends before a connection comes");
+        };
+        assert_eq!(half.facts().token, ReturnedToken::Absent);
+        assert!(within("the Retry is sent", half.retry()).await.is_ok());
+
+        let answer = within("the Retry arrives", link.recv()).await.unwrap();
+        let (retry_dcid, retry_scid, token) = read_retry(answer.payload(), &original_dcid);
+        assert_eq!(retry_dcid, ConnectionId::new(&[0x5c; 4]).unwrap());
+        assert_ne!(retry_scid, original_dcid);
+        assert!(!token.is_empty());
+
+        // The client's next Initial, to the Retry's source connection ID and
+        // with its token, makes another incoming connection.
+        send_on(
+            &link,
+            initial_with_token(retry_scid.as_bytes(), &[0x5c; 4], &token, 1200),
+        )
+        .await;
+        let Some(Incoming::Terminable(retried)) =
+            within("the retried connection", incoming.next()).await
+        else {
+            panic!("the server endpoint ends before the retried connection comes");
+        };
+        assert_eq!(
+            retried.facts().token,
+            ReturnedToken::Retry {
+                original_dcid,
+                retry_scid,
+            }
+        );
+        let Err(RetryError::AlreadyRetried(retried)) =
+            within("the second Retry is refused", retried.retry()).await
+        else {
+            panic!("a client that returned a Retry token is retried again");
+        };
+        drop(retried);
+    });
+}
+
+#[test]
+fn a_connection_born_from_zero_rtt_is_retried_once_its_initial_arrived() {
+    run(async {
+        let server = server();
+        let mut incoming = server.endpoint.incoming();
+        let peer = bind();
+        let link = within("a link to the server", peer.connect(server.address))
+            .await
+            .unwrap();
+        let dcid = [0x0d; 8];
+        // Three times this datagram is less than a Retry.
+        send_on(&link, long_packet(false, &dcid, &[0x5c; 4], 30)).await;
+        let Some(Incoming::Terminable(half)) =
+            within("an incoming connection", incoming.next()).await
+        else {
+            panic!("the server endpoint ends before a connection comes");
+        };
+        assert!(half.facts().born_from_zero_rtt);
+        let Err(RetryError::AmplificationLimited(half)) =
+            within("the Retry is refused", half.retry()).await
+        else {
+            panic!("a Retry beyond three times the bytes received is sent");
+        };
+
+        let arrived = half.initial_arrived();
+        send_on(&link, long_packet(true, &dcid, &[0x5c; 4], 1200)).await;
+        let half = within("the Initial arrives", arrived).await;
+        assert!(within("the Retry is sent", half.retry()).await.is_ok());
+        let answer = within("the Retry arrives", link.recv()).await.unwrap();
+        read_retry(answer.payload(), &ConnectionId::new(&dcid).unwrap());
+    });
+}
+
+#[test]
+fn a_closed_endpoint_sends_no_retry() {
+    run(async {
+        let server = server();
+        let mut incoming = server.endpoint.incoming();
+        let peer = bind();
+        let link = within("a link to the server", peer.connect(server.address))
+            .await
+            .unwrap();
+        send_on(&link, long_packet(true, &[0x0d; 8], &[0x5c; 4], 1200)).await;
+        let Some(Incoming::Terminable(half)) =
+            within("an incoming connection", incoming.next()).await
+        else {
+            panic!("the server endpoint ends before a connection comes");
+        };
+        server.endpoint.close();
+        assert!(matches!(
+            within("the Retry is refused", half.retry()).await,
+            Err(RetryError::EndpointClosed { .. })
+        ));
+    });
+}
+
+/// The tokens of [`aead_tokens`] on an endpoint whose peers they find no
+/// socket address in.
+#[derive(Clone)]
+struct NoSocketAddrTokens(AeadAddressTokens<AwsLcBackend>);
+
+impl AddressTokens for NoSocketAddrTokens {
+    type NewTokenIssuer = <AeadAddressTokens<AwsLcBackend> as AddressTokens>::NewTokenIssuer;
+
+    fn new_token_issuer(&self) -> Self::NewTokenIssuer {
+        self.0.new_token_issuer()
+    }
+
+    fn issue_retry(
+        &self,
+        peer: &SocketAddr,
+        original_dcid: &ConnectionId,
+        now: UtcDateTime,
+    ) -> Result<Bytes, nitori_crypto::RandomError> {
+        self.0.issue_retry(peer, original_dcid, now)
+    }
+
+    fn validate(&self, token: &[u8], peer: &SocketAddr, now: UtcDateTime) -> TokenOutcome {
+        self.0.validate(token, peer, now)
+    }
+}
+
+impl<Peer> TokenPeerAddress<Peer> for NoSocketAddrTokens {
+    fn peer_socket_addr<'p>(&self, _: &'p Peer) -> Option<&'p SocketAddr> {
+        None
+    }
+}
+
+type ServerWithoutAddresses = AcceptingServer<
+    ServerChoices,
+    Parts,
+    ServerStarts,
+    NoSocketAddrTokens,
+    LoadStatelessRetryPolicy,
+>;
+
+#[test]
+fn a_peer_that_is_not_a_socket_address_gets_no_retry() {
+    run(async {
+        let (endpoint, reflow) = Endpoint::<Udp, ServerWithoutAddresses, NoClient>::new(
+            endpoint_config(server_config_with(NoSocketAddrTokens(aead_tokens())), ()),
+        )
+        .unwrap();
+        let _reflow = tokio::task::spawn_local(reflow);
+        let socket = bind();
+        let address = socket.local_address();
+        let (_handle, driver) = endpoint
+            .add_accepting_binding(socket, BindingDeclarations::default())
+            .unwrap();
+        let _driver = tokio::task::spawn_local(driver);
+        let mut incoming = endpoint.incoming();
+        let peer = bind();
+        let link = within("a link to the server", peer.connect(address))
+            .await
+            .unwrap();
+        send_on(&link, long_packet(true, &[0x0d; 8], &[0x5c; 4], 1200)).await;
+        let Some(Incoming::Terminable(half)) =
+            within("an incoming connection", incoming.next()).await
+        else {
+            panic!("the server endpoint ends before a connection comes");
+        };
+        assert!(matches!(
+            within("the Retry is refused", half.retry()).await,
+            Err(RetryError::PeerNotSocketAddr(_))
+        ));
     });
 }
 

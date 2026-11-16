@@ -6,8 +6,9 @@
 //! receiver that already takes the client's later datagrams, the facts of
 //! the attempt and a clone of the server configuration. The application
 //! takes incoming connections from [`Endpoint::incoming`](crate::endpoint::Endpoint::incoming),
-//! may replace parts of their configuration, and accepts, refuses or drops
-//! each; dropping one refuses it silently and revokes its registration.
+//! may replace parts of their configuration, and accepts, retries, refuses
+//! or drops each; dropping one refuses it silently and revokes its
+//! registration.
 
 use core::{
     convert::Infallible,
@@ -26,6 +27,7 @@ use std::{
 
 use core::future::poll_fn;
 use futures_util::Stream;
+use nitori_crypto::RandomError;
 use sakuya_clock::MonotonicClock as _;
 use sakuya_connection::v1::input::LogicalPathDatagramReceiver as _;
 use sakuya_connection::{
@@ -46,11 +48,12 @@ use sakuya_link::MIN_DATAGRAM_SIZE;
 use sakuya_link::{EcnMarking, Link, OutgoingDatagram};
 use sakuya_recovery::loss::GranularityBelowClockError;
 use sakuya_stream::connection::TransportImmediateClose;
+use sakuya_tls::clock::Clock as _;
 use sakuya_wire::header::codec::ReadLongHeaderHostExt as _;
 use sakuya_wire::{connection_id::ConnectionId, version::Version};
 
 use crate::{
-    address_token::NewTokenAddress,
+    address_token::{AddressTokens as _, NewTokenAddress, TokenPeerAddress as _},
     choices::{ConnectionDatagramReceiver, DatagramOf, EndpointChoices, LinkOf, PeerOf},
     config::thresholds_against_clock,
     connection::{make_connection, register_first_local},
@@ -64,7 +67,7 @@ use crate::{
     make::MakeConnection,
     part::CoreFacts,
     reflow,
-    retry::generate_stateless_scid,
+    retry::{EncodeStatelessRetryError, encode_stateless_retry, generate_stateless_scid},
     role::AcceptingServerRole,
     stateless_check::{AdmittedDatagram, IncomingLoad, ReturnedToken},
     zero_length::{ZeroLengthLocalCidInUseError, ZeroLengthLocalOccupancy},
@@ -100,7 +103,7 @@ pub struct IncomingFacts<Peer> {
 }
 
 /// A new connection of a version the server terminates, before the
-/// application accepts it, refuses it or drops it.
+/// application accepts it, retries it, refuses it or drops it.
 ///
 /// Its registration under the client's first destination connection ID is
 /// published already: the client's later datagrams for it queue in its
@@ -122,6 +125,11 @@ pub struct TerminableIncoming<E: EndpointChoices, S: AcceptingServerRole<E>> {
     /// flight.
     has_initial: bool,
     late: Arc<LateInitials<E>>,
+    /// The endpoint's token component, which issues the token of a Retry
+    /// sent for this connection; the endpoint validates the token the
+    /// client returns with the same component, so the one in `config` is
+    /// not used.
+    tokens: S::Tokens,
 }
 
 impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
@@ -154,6 +162,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             zero_length: None,
             later: Vec::new(),
             late: Arc::clone(late),
+            tokens: config.tokens.clone(),
         }
     }
 
@@ -258,6 +267,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             later,
             has_initial: _,
             late: _,
+            tokens: _,
         } = self;
         let (validation, original_destination_connection_id) = match facts.token {
             ReturnedToken::Retry { original_dcid, .. } => {
@@ -353,6 +363,86 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
         self
     }
 
+    /// Retries the connection: sends a Retry packet with an address
+    /// validation token, without keeping any state, and waits until the link
+    /// took it (RFC 9000 §8.1.2).
+    ///
+    /// The client answers with a new Initial that carries the token. The
+    /// endpoint validates it as it does after a stateless Retry and gives
+    /// another incoming connection, whose [`facts`](Self::facts) hold
+    /// [`ReturnedToken::Retry`]; the connection made from it states the
+    /// `original_destination_connection_id` and `retry_source_connection_id`
+    /// transport parameters from it (RFC 9000 §7.3). This incoming connection
+    /// is dropped once the Retry is sent, and its registration revoked.
+    ///
+    /// # Errors
+    ///
+    /// [`RetryError`], which gives the incoming connection back as it was,
+    /// its registration kept, when no Retry was sent:
+    ///
+    /// - [`RetryError::PeerNotSocketAddr`] when the peer is not a socket
+    ///   address, against which a token cannot be checked;
+    /// - [`RetryError::AlreadyRetried`] when the client's Initial already
+    ///   returned a valid Retry token: a client accepts one Retry per
+    ///   connection attempt (RFC 9000 §17.2.5.2);
+    /// - [`RetryError::Random`] when the random source failed to issue the
+    ///   token;
+    /// - [`RetryError::Encode`] when the Retry cannot be encoded;
+    /// - [`RetryError::AmplificationLimited`] when the Retry is more than
+    ///   three times the bytes received from the client, as it may be for a
+    ///   connection born from 0-RTT before its Initial arrived;
+    /// - [`RetryError::EndpointClosed`] once the endpoint has been closed;
+    /// - [`RetryError::Send`] when the link failed to send.
+    #[expect(
+        clippy::result_large_err,
+        reason = "the error gives the incoming connection back by value"
+    )]
+    pub async fn retry(self) -> Result<(), RetryError<Self, <LinkOf<E> as Link>::SendError>> {
+        let Some(&peer) = self.tokens.peer_socket_addr(&self.facts.peer) else {
+            return Err(RetryError::PeerNotSocketAddr(self));
+        };
+        if matches!(self.facts.token, ReturnedToken::Retry { .. }) {
+            return Err(RetryError::AlreadyRetried(self));
+        }
+        let token =
+            match self
+                .tokens
+                .issue_retry(&peer, &self.client_dcid, self.domain.wall_clock.now())
+            {
+                Ok(token) => token,
+                Err(source) => return Err(RetryError::Random { half: self, source }),
+            };
+        let scid = generate_stateless_scid::<E::ConnectionIds>(&self.domain.connection_ids);
+        let packet = match encode_stateless_retry(
+            &self.domain.crypto,
+            &self.client_dcid,
+            &self.client_scid,
+            &scid,
+            &token,
+        ) {
+            Ok(packet) => packet,
+            Err(source) => return Err(RetryError::Encode { half: self, source }),
+        };
+        if packet.len() > self.received_bytes().saturating_mul(3) {
+            return Err(RetryError::AmplificationLimited(self));
+        }
+        if self.domain.is_closed() {
+            return Err(RetryError::EndpointClosed {
+                half: self,
+                source: EndpointClosedError,
+            });
+        }
+        let batch = [OutgoingDatagram {
+            payload: packet,
+            ecn: EcnMarking::NotEct,
+        }];
+        let link = self.first.link().clone();
+        match link.send(&batch).await {
+            Ok(_) => Ok(()),
+            Err(source) => Err(RetryError::Send { half: self, source }),
+        }
+    }
+
     /// Refuses the connection: sends an Initial packet that closes the
     /// attempt with `close`, without keeping any state, and waits until the
     /// link took it (RFC 9000 §5.2.2).
@@ -395,9 +485,20 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
         }
     }
 
-    /// How many bytes arrived from the client for this connection.
+    /// How many bytes arrived from the client's address for this
+    /// connection: the datagrams taken on the link of the first. Before the
+    /// address is validated, what the server sends there is at most three
+    /// times as much (RFC 9000 §8.1).
     fn received_bytes(&self) -> usize {
-        self.first.payload().as_ref().len()
+        let link = self.first.link().id();
+        core::iter::once(&self.first)
+            .chain(
+                self.later
+                    .iter()
+                    .filter(|datagram| datagram.link().id() == link),
+            )
+            .map(|datagram| datagram.payload().as_ref().len())
+            .sum()
     }
 }
 
@@ -488,6 +589,110 @@ impl<H, S> fmt::Display for RefuseError<H, S> {
 impl<H, S: core::error::Error + 'static> core::error::Error for RefuseError<H, S> {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         Some(&self.source)
+    }
+}
+
+/// The incoming connection `H` was not retried: no Retry was sent. It is
+/// given back as it was, its registration kept, for the application to
+/// accept, refuse, change or drop.
+pub enum RetryError<H, S> {
+    /// The peer is not a socket address, against which a token cannot be
+    /// checked.
+    PeerNotSocketAddr(H),
+    /// The client's Initial already returned a valid Retry token.
+    AlreadyRetried(H),
+    /// The Retry is more than three times the bytes received from the
+    /// client, whose address is not validated (RFC 9000 §8.1).
+    AmplificationLimited(H),
+    /// The endpoint has been closed.
+    EndpointClosed {
+        /// The incoming connection, as it was.
+        half: H,
+        /// The endpoint's closing.
+        source: EndpointClosedError,
+    },
+    /// The random source failed to issue the token.
+    Random {
+        /// The incoming connection, as it was.
+        half: H,
+        /// The random source's failure.
+        source: RandomError,
+    },
+    /// The Retry cannot be encoded.
+    Encode {
+        /// The incoming connection, as it was.
+        half: H,
+        /// Why the packet cannot be encoded.
+        source: EncodeStatelessRetryError,
+    },
+    /// The link failed to send the Retry.
+    Send {
+        /// The incoming connection, as it was.
+        half: H,
+        /// Why the link did not send.
+        source: S,
+    },
+}
+
+impl<H, S: fmt::Debug> fmt::Debug for RetryError<H, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PeerNotSocketAddr(_) => {
+                f.debug_tuple("PeerNotSocketAddr").finish_non_exhaustive()
+            }
+            Self::AlreadyRetried(_) => f.debug_tuple("AlreadyRetried").finish_non_exhaustive(),
+            Self::AmplificationLimited(_) => f
+                .debug_tuple("AmplificationLimited")
+                .finish_non_exhaustive(),
+            Self::EndpointClosed { source, .. } => f
+                .debug_struct("EndpointClosed")
+                .field("source", source)
+                .finish_non_exhaustive(),
+            Self::Random { source, .. } => f
+                .debug_struct("Random")
+                .field("source", source)
+                .finish_non_exhaustive(),
+            Self::Encode { source, .. } => f
+                .debug_struct("Encode")
+                .field("source", source)
+                .finish_non_exhaustive(),
+            Self::Send { source, .. } => f
+                .debug_struct("Send")
+                .field("source", source)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+impl<H, S> fmt::Display for RetryError<H, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::PeerNotSocketAddr(_) => {
+                "the Retry was not sent: the peer is not a socket address"
+            }
+            Self::AlreadyRetried(_) => "the Retry was not sent: the client was already retried",
+            Self::AmplificationLimited(_) => {
+                "the Retry was not sent: it exceeds the amplification limit"
+            }
+            Self::EndpointClosed { .. }
+            | Self::Random { .. }
+            | Self::Encode { .. }
+            | Self::Send { .. } => "the Retry was not sent",
+        })
+    }
+}
+
+impl<H, S: core::error::Error + 'static> core::error::Error for RetryError<H, S> {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::PeerNotSocketAddr(_)
+            | Self::AlreadyRetried(_)
+            | Self::AmplificationLimited(_) => None,
+            Self::EndpointClosed { source, .. } => Some(source),
+            Self::Random { source, .. } => Some(source),
+            Self::Encode { source, .. } => Some(source),
+            Self::Send { source, .. } => Some(source),
+        }
     }
 }
 
