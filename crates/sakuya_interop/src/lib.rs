@@ -38,6 +38,11 @@ fn report(error: &dyn std::error::Error) -> String {
     out
 }
 
+/// Holds at compile time that `value` is `Send`, so that the futures of the
+/// real compositions could run on a multi-threaded runtime as well; the
+/// programs still spawn them locally.
+fn assert_send<T: Send>(_value: &T) {}
+
 /// Runs `program` on a tokio runtime of the current thread, where the
 /// endpoints' and connections' futures are spawned locally.
 fn run_local(program: impl Future<Output = ExitCode>) -> ExitCode {

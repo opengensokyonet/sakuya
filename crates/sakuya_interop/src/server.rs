@@ -91,6 +91,7 @@ async fn serve(starts: ServerStarts, always_retry: bool) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    crate::assert_send(&reflow);
     tokio::task::spawn_local(reflow);
     let address = SocketAddr::from((core::net::Ipv6Addr::UNSPECIFIED, PORT));
     let socket = match bind(address) {
@@ -114,6 +115,7 @@ async fn serve(starts: ServerStarts, always_retry: bool) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
+    crate::assert_send(&driver);
     tokio::task::spawn_local(driver);
     eprintln!("sakuya server: listening on {address}");
     let www: Rc<Path> = Path::new(WWW).into();
@@ -135,6 +137,7 @@ async fn serve(starts: ServerStarts, always_retry: bool) -> ExitCode {
             }
         };
         eprintln!("sakuya server: connection {number}: {facts:?}");
+        crate::assert_send(&connection);
         let ended = tokio::task::spawn_local(connection);
         let watched = handle.clone();
         tokio::task::spawn_local(async move {

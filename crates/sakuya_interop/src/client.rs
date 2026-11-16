@@ -127,6 +127,7 @@ async fn fetch_all(starts: ClientStarts, batches: Vec<Vec<Url>>) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
+    crate::assert_send(&reflow);
     let reflow = tokio::task::spawn_local(reflow);
     let socket = match bind(local) {
         Ok(socket) => socket,
@@ -149,6 +150,7 @@ async fn fetch_all(starts: ClientStarts, batches: Vec<Vec<Url>>) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
+    crate::assert_send(&driver);
     let driver = tokio::task::spawn_local(driver);
     let mut outcome = ExitCode::SUCCESS;
     for (number, urls) in batches.iter().enumerate() {
@@ -192,6 +194,7 @@ async fn fetch_all(starts: ClientStarts, batches: Vec<Vec<Url>>) -> ExitCode {
                 break;
             }
         };
+        crate::assert_send(&connection);
         let mut connection = tokio::task::spawn_local(connection);
         eprintln!("sakuya client: connection {number} to {server} started");
         let layer = match tokio::time::timeout(STEP, handle.established()).await {
