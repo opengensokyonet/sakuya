@@ -81,7 +81,7 @@ use super::{
 use crate::{
     connection_id::{ConnectionId, ConnectionIdLengthError},
     header::{FORM_BIT, LongHeader},
-    source::{read_payload, read_payload_to_end},
+    source::read_payload,
     var_int::{VarInt, codec::read_var_int_with_width},
     version::Version,
 };
@@ -106,8 +106,8 @@ use snafu::{ResultExt, Snafu};
 /// - [`ReadLongPacketError::RetryIntegrityTag`] if the rest of a Retry
 ///   packet is too short for its integrity tag.
 ///
-/// The token of an Initial packet and the range of the Length field are
-/// pieces of the source.
+/// The token of an Initial or Retry packet and the range of the Length field
+/// are pieces of the source.
 pub fn read_long_packet<S: Buf + SplitTo>(
     src: &mut S,
     header: LongHeader,
@@ -141,13 +141,13 @@ pub fn read_long_packet<S: Buf + SplitTo>(
             TypeFields::Handshake { bounds, protected }
         }
         LongPacketType::Retry => {
-            let mut rest = read_payload_to_end(src);
-            let length = rest.remaining();
+            let length = src.remaining();
             let token_len = RetryIntegrityTagError::check(length)?;
-            // invariant: `rest` holds `token_len` bytes and the tag after them.
-            let token = rest.copy_to_bytes(token_len);
+            // invariant: the source holds `token_len` bytes and the tag after
+            // them.
+            let token = src.split_to(token_len).expect("the source holds the token");
             let mut integrity_tag = [0; RETRY_INTEGRITY_TAG_LEN];
-            rest.copy_to_slice(&mut integrity_tag);
+            src.copy_to_slice(&mut integrity_tag);
             TypeFields::Retry {
                 token,
                 integrity_tag,

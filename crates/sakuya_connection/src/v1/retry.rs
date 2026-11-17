@@ -206,6 +206,11 @@ pub enum RetryDropReason {
 /// # Errors
 ///
 /// The [`RetryDropReason`] the Retry is dropped for.
+///
+/// # Panics
+///
+/// If `packet` was not read from `packet_bytes` and its token lies outside
+/// them.
 pub fn check_retry<B: CryptoBackend>(
     backend: &B,
     packet: &LongPacket<Range<usize>>,
@@ -229,7 +234,9 @@ pub fn check_retry<B: CryptoBackend>(
         .map_err(|source| RetryDropReason::IntegrityTag { source })?;
     Ok(ValidRetry {
         source: *packet.scid(),
-        token: token.clone(),
+        // invariant: `packet` was read from `packet_bytes`, so its token lies
+        // within them.
+        token: Bytes::copy_from_slice(&packet_bytes[token.clone()]),
     })
 }
 

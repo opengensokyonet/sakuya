@@ -115,7 +115,7 @@ fn retry_tag_matches_rfc_9001_a_4() {
     else {
         panic!("{header:?}")
     };
-    assert_eq!(&token[..], b"token");
+    assert_eq!(&packet[token.clone()], b"token");
     assert_eq!(integrity_tag, tag);
     assert_eq!(*end, packet.len());
 }

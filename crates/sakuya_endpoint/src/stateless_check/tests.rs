@@ -187,7 +187,7 @@ fn retry_token(retry: &[u8]) -> Bytes {
     let TypeFields::Retry { token, .. } = packet.into_fields() else {
         panic!("not a Retry packet");
     };
-    token
+    Bytes::copy_from_slice(token)
 }
 
 #[test]

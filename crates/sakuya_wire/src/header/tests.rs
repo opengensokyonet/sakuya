@@ -205,7 +205,7 @@ fn rfc_retry() {
     else {
         panic!("expected Retry fields, got {:?}", packet.fields());
     };
-    assert_eq!(token, &b"token"[..]);
+    assert_eq!(*token, &b"token"[..]);
     assert_eq!(integrity_tag[..], hex("04a265ba2eff4d829058fb3f0f2496ba"));
     assert_eq!(*end, datagram.len());
     assert_eq!(packet.end(), datagram.len());
@@ -944,7 +944,7 @@ fn written_retry_packets_read_back_as_the_same_fields() {
         else {
             panic!("expected Retry fields, got {:?}", read.fields());
         };
-        assert_eq!(read_token, token);
+        assert_eq!(*read_token, token);
         assert_eq!(integrity_tag, &tag);
         assert_eq!(*end, packet.len());
     }

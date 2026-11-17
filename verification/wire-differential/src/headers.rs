@@ -167,7 +167,7 @@ pub fn long_packet_model<D>(packet: &LongPacket<D>, bytes: impl Fn(&D) -> Vec<u8
             ..
         } => {
             model.kind = Kind::Retry;
-            model.token = Some(token.to_vec());
+            model.token = Some(bytes(token));
             model.integrity_tag = Some(integrity_tag.to_vec());
         }
     }

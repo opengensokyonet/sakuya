@@ -360,7 +360,7 @@ fn a_retry_packet_alone_is_one_unprotected_packet() {
     else {
         panic!("not Retry fields")
     };
-    assert_eq!(&token[..], b"token");
+    assert_eq!(&bytes[token.clone()], b"token");
     assert_eq!(integrity_tag[..], retry[retry.len() - 16..]);
     assert_eq!(*end, retry.len());
     assert!(packets.next().is_none());

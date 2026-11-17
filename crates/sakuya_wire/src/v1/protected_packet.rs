@@ -124,9 +124,7 @@ impl<P> ProtectedPacket<P> {
 /// from.
 ///
 /// The header values hold ranges within the packet, as in
-/// [`ProtectedPacket`]. A Retry packet's token is a `Bytes` that shares the
-/// storage of a `Bytes` datagram and is copied otherwise, as
-/// [`TypeFields::Retry`](crate::v1::header::TypeFields::Retry) says.
+/// [`ProtectedPacket`], a Retry packet's token among them.
 ///
 /// [RFC 9000 §12.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.2
 #[derive(Clone, Debug, PartialEq, Eq)]

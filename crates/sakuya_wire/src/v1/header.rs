@@ -344,7 +344,7 @@ impl<D: Buf> LongPacket<D> {
     /// ranges within `bytes`, the packet as it was read.
     ///
     /// The ranges let the packet outlive the borrow of `bytes` that reading
-    /// it needed. A Retry packet keeps its token and integrity tag.
+    /// it needed. A Retry packet keeps its integrity tag.
     pub(in crate::v1) fn into_ranges(self, bytes: &[u8]) -> LongPacket<Range<usize>> {
         let fields = match self.fields {
             TypeFields::Initial {
@@ -380,11 +380,15 @@ impl<D: Buf> LongPacket<D> {
                 token,
                 integrity_tag,
                 end,
-            } => TypeFields::Retry {
-                token,
-                integrity_tag,
-                end,
-            },
+            } => {
+                // The token follows the connection IDs.
+                let token_start = self.header.version_specific_offset();
+                TypeFields::Retry {
+                    token: token_start..token_start + token.remaining(),
+                    integrity_tag,
+                    end,
+                }
+            }
         };
         LongPacket {
             header: self.header,
@@ -435,9 +439,8 @@ pub enum TypeFields<D> {
     Retry {
         /// The Retry Token: everything between the source connection ID and
         /// the integrity tag. It may be empty here; a client discards a Retry
-        /// packet with an empty token. It shares the source's storage when
-        /// the source is `Bytes` and is copied otherwise.
-        token: Bytes,
+        /// packet with an empty token.
+        token: D,
         /// The Retry Integrity Tag, the last 16 bytes of the source.
         integrity_tag: [u8; RETRY_INTEGRITY_TAG_LEN],
         /// The offset just past the packet.
