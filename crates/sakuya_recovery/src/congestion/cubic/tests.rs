@@ -1,4 +1,4 @@
-use super::{Cubic, CubicConfig, CubicConfigError, CubicCongestionEvent};
+use super::{Cubic, CubicConfig, CubicConfigError, CubicCongestionEvent, CubicSendSequence};
 use crate::{
     congestion::{
         CongestionContext, CongestionController, CongestionWindowConfig,
@@ -33,12 +33,12 @@ fn drained(now: u64) -> CongestionContext<Duration> {
     }
 }
 
-fn packet(sent: u64, bytes: usize) -> InFlightPacket<Duration, ()> {
+fn packet(sent: u64, bytes: usize) -> InFlightPacket<Duration, CubicSendSequence> {
     InFlightPacket {
         bytes,
         sent_at: ms(sent),
         app_limited: false,
-        sent_state: (),
+        sent_state: CubicSendSequence(0),
     }
 }
 
@@ -66,16 +66,28 @@ fn the_configuration_is_checked() {
     let window = CongestionWindowConfig::RECOMMENDED;
     for beta in [Ratio::literal(0, 10), Ratio::literal(10, 10)] {
         assert_eq!(
-            CubicConfig::new(window, beta, Ratio::literal(2, 5), true),
+            CubicConfig::new(window, beta, Ratio::literal(2, 5), true, true),
             Err(CubicConfigError::BetaOutOfRange { beta })
         );
     }
     assert_eq!(
-        CubicConfig::new(window, Ratio::literal(7, 10), Ratio::literal(0, 5), true),
+        CubicConfig::new(
+            window,
+            Ratio::literal(7, 10),
+            Ratio::literal(0, 5),
+            true,
+            true
+        ),
         Err(CubicConfigError::ZeroAggressiveness)
     );
     assert_eq!(
-        CubicConfig::new(window, Ratio::literal(7, 10), Ratio::literal(2, 5), true),
+        CubicConfig::new(
+            window,
+            Ratio::literal(7, 10),
+            Ratio::literal(2, 5),
+            true,
+            true
+        ),
         Ok(CubicConfig::RECOMMENDED)
     );
     assert_eq!(
@@ -142,6 +154,7 @@ fn fast_convergence_reduces_w_max_below_the_window() {
         Ratio::literal(7, 10),
         Ratio::literal(2, 5),
         false,
+        true,
     )
     .unwrap();
     let mut cubic = Cubic::<Duration>::new(config, 1200);
@@ -338,4 +351,91 @@ fn only_the_first_duplicate_initial_crypto_is_answered() {
     let mut cubic = controller();
     assert!(cubic.on_duplicate_initial_crypto());
     assert!(!cubic.on_duplicate_initial_crypto());
+}
+
+/// Drives a controller through two rounds of HyStart++ whose minimum RTT
+/// rises from 40 ms to 50 ms: it is then in Conservative Slow Start.
+fn in_conservative_slow_start() -> Cubic<Duration> {
+    let mut cubic = controller();
+    let mut now = 0;
+    for rtt in [40, 50] {
+        let sealed: Vec<_> = (0..8)
+            .map(|_| cubic.on_packet_sealed(100, false, ms(now)))
+            .collect();
+        for sent_state in sealed {
+            now += 1;
+            let mut context = context(now);
+            context.rtt.latest = ms(rtt);
+            let packet = InFlightPacket {
+                sent_state,
+                ..packet(now - 1, 100)
+            };
+            cubic.on_acked([packet].into_iter(), &context);
+        }
+    }
+    cubic
+}
+
+#[test]
+fn conservative_slow_start_grows_a_quarter_as_fast() {
+    let mut cubic = in_conservative_slow_start();
+    let window = cubic.window();
+    let sent_state = cubic.on_packet_sealed(1200, false, ms(100));
+    let packet = InFlightPacket {
+        sent_state,
+        ..packet(100, 1200)
+    };
+    cubic.on_acked([packet].into_iter(), &context(140));
+    assert_eq!(cubic.window(), window + 300);
+}
+
+#[test]
+fn hystart_plus_plus_ends_the_initial_slow_start_with_k_zero() {
+    let mut cubic = in_conservative_slow_start();
+    let mut now = 100;
+    // Five rounds of Conservative Slow Start, the partial one included.
+    for _ in 0..5 {
+        let sent_state = cubic.on_packet_sealed(100, false, ms(now));
+        now += 50;
+        let packet = InFlightPacket {
+            sent_state,
+            ..packet(now - 50, 100)
+        };
+        cubic.on_acked([packet].into_iter(), &context(now));
+    }
+    let window = cubic.window();
+    assert_eq!(cubic.slow_start_threshold(), window);
+    assert_eq!(cubic.window_prior, window);
+    let stage = cubic.stage.expect("congestion avoidance started");
+    assert_eq!(stage.k, 0.0);
+    assert_eq!(stage.start, ms(now));
+}
+
+#[test]
+fn without_hystart_plus_plus_slow_start_ignores_the_delay() {
+    let config = CubicConfig::new(
+        CongestionWindowConfig::RECOMMENDED,
+        Ratio::literal(7, 10),
+        Ratio::literal(2, 5),
+        true,
+        false,
+    )
+    .unwrap();
+    let mut cubic = Cubic::<Duration>::new(config, 1200);
+    let mut now = 0;
+    for rtt in [40, 50, 60, 70, 80, 90, 100] {
+        for _ in 0..8 {
+            let sent_state = cubic.on_packet_sealed(100, false, ms(now));
+            now += 1;
+            let mut context = context(now);
+            context.rtt.latest = ms(rtt);
+            let packet = InFlightPacket {
+                sent_state,
+                ..packet(now - 1, 100)
+            };
+            cubic.on_acked([packet].into_iter(), &context);
+        }
+    }
+    assert_eq!(cubic.window(), 12000 + 56 * 100);
+    assert_eq!(cubic.slow_start_threshold(), usize::MAX);
 }

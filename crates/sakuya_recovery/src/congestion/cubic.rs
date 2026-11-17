@@ -17,15 +17,19 @@
 //! turns out to have arrived, it restores the state from before that event
 //! (§4.9.2). Persistent congestion takes the window to the minimum window;
 //! the next congestion avoidance stage starts at that window with `K = 0`
-//! (§4.8). Slow start is Reno's (§4.10, MAY).
+//! (§4.8). The initial slow start ends early with HyStart++ (§4.10, SHOULD;
+//! [RFC 9406]), which can be turned off for Reno's slow start; later slow
+//! starts are Reno's (RFC 9406 §4.3).
 //!
 //! Windows are in bytes; `C` is in maximum datagrams per second cubed, as
 //! RFC 9438 states it in segments.
 //!
 //! [RFC 9438]: https://www.rfc-editor.org/rfc/rfc9438.html
+//! [RFC 9406]: https://www.rfc-editor.org/rfc/rfc9406.html
 use super::{
     CongestionContext, CongestionController, CongestionWindowConfig, InFlightPacket, RemovedPacket,
     SpuriouslyLostPacket,
+    hystart_plus_plus::{self, HyStartPlusPlus},
 };
 use crate::{
     checked_duration_since,
@@ -47,22 +51,25 @@ pub struct CubicConfig {
     beta: Ratio,
     aggressiveness: Ratio,
     fast_convergence: bool,
+    hystart_plus_plus: bool,
 }
 
 impl CubicConfig {
     /// The values RFC 9438 recommends: the windows of
     /// [`CongestionWindowConfig::RECOMMENDED`], `β_cubic` of 0.7 (§4.6),
-    /// `C` of 0.4 (§5.1), and fast convergence (§4.7).
+    /// `C` of 0.4 (§5.1), fast convergence (§4.7), and HyStart++ (§4.10).
     pub const RECOMMENDED: Self = Self {
         window: CongestionWindowConfig::RECOMMENDED,
         beta: Ratio::literal(7, 10),
         aggressiveness: Ratio::literal(2, 5),
         fast_convergence: true,
+        hystart_plus_plus: true,
     };
 
     /// The constants given: the windows, the multiplicative decrease
     /// factor `β_cubic`, the constant `C` that sets how fast the window
-    /// grows away from `W_max`, and whether fast convergence is on.
+    /// grows away from `W_max`, whether fast convergence is on, and whether
+    /// the initial slow start uses HyStart++.
     ///
     /// # Errors
     ///
@@ -75,6 +82,7 @@ impl CubicConfig {
         beta: Ratio,
         aggressiveness: Ratio,
         fast_convergence: bool,
+        hystart_plus_plus: bool,
     ) -> Result<Self, CubicConfigError> {
         ensure!(
             beta.numerator() > 0 && beta.is_below_one(),
@@ -86,6 +94,7 @@ impl CubicConfig {
             beta,
             aggressiveness,
             fast_convergence,
+            hystart_plus_plus,
         })
     }
 
@@ -108,6 +117,12 @@ impl CubicConfig {
     /// recommends it off for a network with a single CUBIC flow.
     pub const fn fast_convergence(&self) -> bool {
         self.fast_convergence
+    }
+
+    /// Whether the initial slow start uses HyStart++ (RFC 9438 §4.10,
+    /// SHOULD); without it, slow start is Reno's.
+    pub const fn hystart_plus_plus(&self) -> bool {
+        self.hystart_plus_plus
     }
 
     /// `α_cubic = 3 × (1 − β_cubic) / (1 + β_cubic)` (§4.3).
@@ -136,6 +151,12 @@ pub enum CubicConfigError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct CubicCongestionEvent(u64);
 
+/// The position of a packet in the order a [`Cubic`] saw packets sealed:
+/// what it keeps for each packet in flight, to count rounds for HyStart++.
+/// The default is the first packet's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CubicSendSequence(u64);
+
 /// The CUBIC congestion controller, with the default probe timeout and ECN
 /// policies, those of [`NewReno`](super::new_reno::NewReno).
 #[derive(Clone, Debug)]
@@ -161,6 +182,7 @@ pub struct Cubic<I> {
     /// Whether the latest event left nothing in flight, and no packet was
     /// sealed since.
     drained: bool,
+    slow_start: HyStartPlusPlus,
     duplicate_initial_crypto_answered: bool,
 }
 
@@ -223,6 +245,7 @@ struct Undo<I> {
     window_max: f64,
     stage: Option<AvoidanceStage<I>>,
     recovery_start: Option<I>,
+    slow_start: hystart_plus_plus::Phase,
 }
 
 impl<I> Cubic<I> {
@@ -244,6 +267,7 @@ impl<I> Cubic<I> {
             undo: None,
             events: 0,
             drained: false,
+            slow_start: HyStartPlusPlus::new(config.hystart_plus_plus),
             duplicate_initial_crypto_answered: false,
         }
     }
@@ -308,7 +332,9 @@ impl<I: Ord + Copy + Add<Duration, Output = I> + Sub<Output = Duration>> Cubic<I
             window_max: self.window_max,
             stage: self.stage,
             recovery_start: self.recovery_start,
+            slow_start: self.slow_start.phase(),
         });
+        self.slow_start.finish();
         let window = self.window as f64;
         self.window_max = if self.config.fast_convergence && window < self.window_max {
             window * (1.0 + ratio_value(self.config.beta)) / 2.0
@@ -387,7 +413,7 @@ fn ratio_value(ratio: Ratio) -> f64 {
 impl<I: Ord + Copy + Add<Duration, Output = I> + Sub<Output = Duration>> CongestionController<I>
     for Cubic<I>
 {
-    type SentState = ();
+    type SentState = CubicSendSequence;
     type LossState = CubicCongestionEvent;
 
     fn window(&self) -> usize {
@@ -396,12 +422,13 @@ impl<I: Ord + Copy + Add<Duration, Output = I> + Sub<Output = Duration>> Congest
 
     /// The first packet after nothing was in flight leaves the idle time
     /// out of the stage.
-    fn on_packet_sealed(&mut self, _bytes: usize, _app_limited: bool, now: I) {
+    fn on_packet_sealed(&mut self, _bytes: usize, _app_limited: bool, now: I) -> CubicSendSequence {
         if core::mem::take(&mut self.drained)
             && let Some(stage) = self.stage.as_mut()
         {
             stage.leave_out_until(now);
         }
+        CubicSendSequence(self.slow_start.on_sealed())
     }
 
     /// Restores the state from before the latest congestion event once
@@ -431,6 +458,7 @@ impl<I: Ord + Copy + Add<Duration, Output = I> + Sub<Output = Duration>> Congest
             self.window_max = undo.window_max;
             self.stage = undo.stage;
             self.recovery_start = undo.recovery_start;
+            self.slow_start.restore(undo.slow_start);
             self.growth_remainder = 0.0;
         }
     }
@@ -445,7 +473,7 @@ impl<I: Ord + Copy + Add<Duration, Output = I> + Sub<Output = Duration>> Congest
 
     fn on_lost(
         &mut self,
-        packets: impl Iterator<Item = InFlightPacket<I, ()>>,
+        packets: impl Iterator<Item = InFlightPacket<I, CubicSendSequence>>,
         context: &CongestionContext<I>,
     ) -> CubicCongestionEvent {
         // one event, for the last packet sent
@@ -472,12 +500,14 @@ impl<I: Ord + Copy + Add<Duration, Output = I> + Sub<Output = Duration>> Congest
 
     fn on_acked(
         &mut self,
-        packets: impl Iterator<Item = InFlightPacket<I, ()>>,
+        packets: impl Iterator<Item = InFlightPacket<I, CubicSendSequence>>,
         context: &CongestionContext<I>,
     ) {
         let now = context.now;
         let (mut grew, mut application_limited) = (false, false);
+        let mut largest = None;
         for packet in packets {
+            largest = largest.max(Some(packet.sent_state.0));
             if self.in_recovery(packet.sent_at) {
                 continue;
             }
@@ -487,9 +517,21 @@ impl<I: Ord + Copy + Add<Duration, Output = I> + Sub<Output = Duration>> Congest
             }
             grew = true;
             if self.window < self.slow_start_threshold {
-                self.window = self.window.saturating_add(packet.bytes);
+                let divisor = self.slow_start.growth_divisor();
+                self.grow(packet.bytes as f64 / divisor as f64);
             } else {
                 self.grow_in_avoidance(packet.bytes, now, context.rtt.smoothed);
+            }
+        }
+        if self.window < self.slow_start_threshold {
+            let sample = context.rtt_sampled.then_some(context.rtt.latest);
+            if self.slow_start.on_ack(largest, sample) {
+                // HyStart++ ends the initial slow start without a loss
+                // (RFC 9438 §4.10)
+                self.slow_start_threshold = self.window;
+                self.window_prior = self.window;
+                self.window_max = self.window as f64;
+                self.start_stage(now, self.window_max);
             }
         }
         if let Some(stage) = self.stage.as_mut() {
@@ -504,7 +546,7 @@ impl<I: Ord + Copy + Add<Duration, Output = I> + Sub<Output = Duration>> Congest
 
     fn on_removed(
         &mut self,
-        _packets: impl Iterator<Item = RemovedPacket<()>>,
+        _packets: impl Iterator<Item = RemovedPacket<CubicSendSequence>>,
         context: &CongestionContext<I>,
     ) {
         self.drained |= context.bytes_in_flight == 0;

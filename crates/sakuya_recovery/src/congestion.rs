@@ -51,6 +51,7 @@ use crate::rtt::RttEstimate;
 use snafu::{Snafu, ensure};
 
 pub mod cubic;
+mod hystart_plus_plus;
 pub mod new_reno;
 
 /// The congestion controller of a link path.

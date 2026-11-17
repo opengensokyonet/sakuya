@@ -1939,7 +1939,7 @@ mod probe {
                             let charge = InFlightCharge {
                                 bytes: 1200,
                                 app_limited: false,
-                                sent_state: (),
+                                sent_state: Default::default(),
                             };
                             let number = PacketNumber::new(number).ok()?;
                             detection.accept(number, now, true, Some(charge));
@@ -1980,7 +1980,7 @@ mod probe {
                             let charge = InFlightCharge {
                                 bytes: 1200,
                                 app_limited: false,
-                                sent_state: (),
+                                sent_state: Default::default(),
                             };
                             detection.accept(number, now, true, Some(charge));
                             state.add_in_flight(1200);
