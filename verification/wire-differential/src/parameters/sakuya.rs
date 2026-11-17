@@ -6,7 +6,7 @@
 //! written in the order of the list, then the unknown parameters in the
 //! order they were read, with their values as read.
 use super::{Params, Preferred};
-use core::{convert::Infallible, marker::PhantomData};
+use core::marker::PhantomData;
 use sakuya_wire::{
     datagram::{self, MaxDatagramFrameSize},
     parameters::ParametersOf,
@@ -18,8 +18,7 @@ use sakuya_wire::{
         transport_parameters::{
             TransportParameterSpace, TransportParameters,
             codec::{
-                ReadTransportParametersError, ReadTransportParametersHostExt as _,
-                WriteTransportParametersHostExt as _,
+                ReadTransportParametersError, read_transport_parameters, write_transport_parameters,
             },
             connection_id::{
                 InitialSourceConnectionId, OriginalDestinationConnectionId, RetrySourceConnectionId,
@@ -41,7 +40,7 @@ pub type V1 = HList![v1::Part];
 pub type Read<'a, Ps = Parts> = TransportParameters<&'a [u8], Ps>;
 
 /// The failure of reading from a byte slice with the parts `Ps`.
-pub type Error<Ps = Parts> = ReadTransportParametersError<Infallible, Ps>;
+pub type Error<Ps = Parts> = ReadTransportParametersError<Ps>;
 
 /// Reads `bytes` with the parts `Ps`, as parameters an endpoint in role
 /// `sender` sent.
@@ -50,7 +49,7 @@ where
     Ps: ParametersOf<TransportParameterSpace>,
 {
     let mut source = bytes;
-    source.sync_read_transport_parameters_unpin(sender, PhantomData::<Ps>)
+    read_transport_parameters(&mut source, sender, PhantomData::<Ps>)
 }
 
 /// Reads `bytes` with [`Parts`].
@@ -157,8 +156,7 @@ pub fn read_model(bytes: &[u8], sender: Role) -> Result<Params, Error> {
 pub fn write(parameters: Read<'_>, sender: Role) -> Vec<u8> {
     let expected = parameters.encoded_len();
     let mut output = Vec::new();
-    output
-        .sync_write_transport_parameters_unpin(parameters, sender)
+    write_transport_parameters(&mut output, parameters, sender)
         .expect("parameters that were read can be written");
     assert_eq!(output.len(), expected, "encoded_len");
     output

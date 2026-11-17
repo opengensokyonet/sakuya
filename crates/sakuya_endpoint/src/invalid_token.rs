@@ -25,11 +25,11 @@ use sakuya_wire::{
     v1::{
         frame::{
             connection_close::{
-                CloseErrorCode, ConnectionCloseFrame, codec::WriteConnectionCloseFrameHostExt as _,
+                CloseErrorCode, ConnectionCloseFrame, codec::write_connection_close_frame,
             },
-            padding::{PaddingRun, codec::WritePaddingRunHostExt as _},
+            padding::{PaddingRun, codec::write_padding_run},
         },
-        header::{LongPacketHeader, codec::WriteLongPacketHeaderHostExt as _},
+        header::{LongPacketHeader, codec::write_long_packet_header},
         packet_number::PacketNumber,
         transport_error::TransportErrorCode,
     },
@@ -177,19 +177,12 @@ fn encode_with_phrase<B: CryptoBackend>(
     let pn_offset = header.packet_number_offset();
 
     let mut packet = Vec::new();
-    // invariant: a `Vec` accepts every byte written to it.
-    packet
-        .sync_write_long_packet_header_unpin(header)
-        .expect("a Vec accepts every byte");
+    write_long_packet_header(&mut packet, header);
     packet.extend_from_slice(truncated.as_bytes());
     let header_len = packet.len();
-    packet
-        .sync_write_connection_close_frame_unpin(close)
-        .expect("a Vec accepts every byte");
+    write_connection_close_frame(&mut packet, close);
     if let Some(padding) = padding {
-        packet
-            .sync_write_padding_run_unpin(PaddingRun::new(padding))
-            .expect("a Vec accepts every byte");
+        write_padding_run(&mut packet, PaddingRun::new(padding));
     }
     packet.resize(packet.len() + AEAD_TAG_LEN, 0);
 
@@ -218,12 +211,12 @@ mod tests {
     };
     use sakuya_wire::{
         connection_id::ConnectionId,
-        header::codec::ReadLongHeaderHostExt as _,
+        header::codec::read_long_header,
         parts::HList,
         v1::{
             self,
             frame::{FrameRun, connection_close::CloseErrorCode, set::Frames},
-            header::{LongPacketType, TypeFields, codec::ReadLongPacketHostExt as _},
+            header::{LongPacketType, TypeFields, codec::read_long_packet},
             packet_number::PacketNumber,
             transport_error::TransportErrorCode,
         },
@@ -243,8 +236,8 @@ mod tests {
         client_dcid: &ConnectionId,
     ) -> (v1::header::LongPacket<&'a [u8]>, PacketNumber, Vec<u8>) {
         let mut input = datagram;
-        let header = input.sync_read_long_header_unpin().unwrap();
-        let packet = input.sync_read_long_packet_unpin(header).unwrap();
+        let header = read_long_header(&mut input).unwrap();
+        let packet = read_long_packet(&mut input, header).unwrap();
         assert!(input.is_empty(), "the datagram holds one packet");
         let TypeFields::Initial { bounds, .. } = packet.fields() else {
             panic!("expected an Initial packet, got {:?}", packet.fields());
@@ -321,8 +314,8 @@ mod tests {
 
         // Another connection's keys do not open it.
         let mut input = &datagram[..];
-        let header = input.sync_read_long_header_unpin().unwrap();
-        let read = input.sync_read_long_packet_unpin(header).unwrap();
+        let header = read_long_header(&mut input).unwrap();
+        let read = read_long_packet(&mut input, header).unwrap();
         let TypeFields::Initial { bounds, .. } = read.fields() else {
             unreachable!()
         };

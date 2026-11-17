@@ -15,12 +15,11 @@ use sakuya_link::{
     SendAcceptance,
 };
 use sakuya_wire::connection_id::ConnectionIdLength;
-use sakuya_wire::header::codec::{ReadLongHeaderHostExt as _, ReadShortHeaderHostExt as _};
+use sakuya_wire::header::codec::{read_long_header, read_short_header};
 use sakuya_wire::v1::header::{
-    self as v1, FIXED_BIT, LongPacketType, RETRY_INTEGRITY_TAG_LEN,
-    codec::ReadLongPacketHostExt as _,
+    self as v1, FIXED_BIT, LongPacketType, RETRY_INTEGRITY_TAG_LEN, codec::read_long_packet,
 };
-use sakuya_wire::var_int::{VarInt, codec::WriteVarIntHostExt as _};
+use sakuya_wire::var_int::{VarInt, codec::write_var_int};
 use sakuya_wire::version::Version;
 
 use crate::claim::candidate::DatagramClaimAttempt;
@@ -203,21 +202,20 @@ pub(super) fn long(
         }
         _ => {
             if packet_type == LongPacketType::Initial {
-                packet
-                    .sync_write_var_int_unpin(VarInt::from_u32(0))
-                    .unwrap();
+                write_var_int(&mut packet, VarInt::from_u32(0));
             }
             let length = 2 + payload;
-            packet
-                .sync_write_var_int_unpin(VarInt::from_u32(u32::try_from(length).unwrap()))
-                .unwrap();
+            write_var_int(
+                &mut packet,
+                VarInt::from_u32(u32::try_from(length).unwrap()),
+            );
             packet.extend(std::iter::repeat_n(0xa5, length));
         }
     }
     if dcid.len() <= 20 && scid.len() <= 20 {
         let mut input = packet.as_slice();
-        let header = input.sync_read_long_header_unpin().unwrap();
-        let parsed = input.sync_read_long_packet_unpin(header).unwrap();
+        let header = read_long_header(&mut input).unwrap();
+        let parsed = read_long_packet(&mut input, header).unwrap();
         assert_eq!(parsed.packet_type(), packet_type);
     }
     packet
@@ -235,9 +233,8 @@ pub(super) fn short(dcid: &[u8], rest: usize) -> Vec<u8> {
     packet.extend(dcid);
     packet.extend(std::iter::repeat_n(0x3c, rest));
     let mut input = packet.as_slice();
-    let header = input
-        .sync_read_short_header_unpin(ConnectionIdLength::new(dcid.len()).unwrap())
-        .unwrap();
+    let header =
+        read_short_header(&mut input, ConnectionIdLength::new(dcid.len()).unwrap()).unwrap();
     assert_eq!(header.dcid().as_bytes(), dcid);
     packet
 }

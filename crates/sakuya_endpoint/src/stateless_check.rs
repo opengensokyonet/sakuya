@@ -33,8 +33,8 @@ use sakuya_link::MIN_DATAGRAM_SIZE;
 use sakuya_packet_protection::backend::CryptoBackend;
 use sakuya_wire::{
     connection_id::ConnectionId,
-    header::codec::ReadLongHeaderHostExt as _,
-    v1::header::{TypeFields, codec::ReadLongPacketHostExt as _},
+    header::codec::read_long_header,
+    v1::header::{TypeFields, codec::read_long_packet},
 };
 use time::UtcDateTime;
 
@@ -376,8 +376,8 @@ struct FirstInitial {
 impl FirstPacket {
     fn read(datagram: &[u8]) -> Option<Self> {
         let mut input = datagram;
-        let header = input.sync_read_long_header_unpin().ok()?;
-        let packet = input.sync_read_long_packet_unpin(header).ok()?;
+        let header = read_long_header(&mut input).ok()?;
+        let packet = read_long_packet(&mut input, header).ok()?;
         let (dcid, scid) = (*packet.dcid(), *packet.scid());
         match packet.into_fields() {
             TypeFields::Initial { token, .. } => Some(Self::Initial(FirstInitial {

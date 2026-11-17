@@ -901,14 +901,14 @@ fn initial_with_token(dcid: &[u8], scid: &[u8], token: &[u8], len: usize) -> Byt
 /// `packet`, whose integrity tag is checked against `original_dcid`.
 fn read_retry(packet: &[u8], original_dcid: &ConnectionId) -> (ConnectionId, ConnectionId, Bytes) {
     use sakuya_wire::{
-        header::codec::ReadLongHeaderHostExt as _,
-        v1::header::{LongPacketType, TypeFields, codec::ReadLongPacketHostExt as _},
+        header::codec::read_long_header,
+        v1::header::{LongPacketType, TypeFields, codec::read_long_packet},
     };
     verify_retry_integrity_tag(&RingBackend, original_dcid, packet)
         .expect("the integrity tag binds the original destination connection ID");
     let mut input = packet;
-    let header = input.sync_read_long_header_unpin().unwrap();
-    let read = input.sync_read_long_packet_unpin(header).unwrap();
+    let header = read_long_header(&mut input).unwrap();
+    let read = read_long_packet(&mut input, header).unwrap();
     assert_eq!(read.packet_type(), LongPacketType::Retry);
     let TypeFields::Retry { token, .. } = read.fields() else {
         panic!("expected Retry fields, got {:?}", read.fields());

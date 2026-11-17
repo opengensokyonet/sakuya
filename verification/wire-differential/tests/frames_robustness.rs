@@ -1,28 +1,26 @@
 //! Frame reading and writing of sakuya alone: any input reads without panic
 //! to the errors the RFCs name, what is read writes back to the same bytes,
-//! frame sets read only the types of their parts, and every source and sink
-//! gives the results of byte slices.
+//! and frame sets read only the types of their parts.
 use bytes::Bytes;
 use either::Either;
-use nitori_io::{bridge::Std, calls::WriteAllError};
-use proptest::{collection::vec, prelude::*, sample::Index};
+use proptest::{collection::vec, prelude::*};
 use sakuya_wire::{
     connection_id::{NonEmptyCid, StatelessResetToken},
-    datagram::{DatagramFrame, codec::WriteDatagramFrameHostExt as _},
+    datagram::{DatagramFrame, codec::write_datagram_frame},
     parts::HList,
-    reset_stream_at::{ResetStreamAtFrame, codec::WriteResetStreamAtFrameHostExt as _},
+    reset_stream_at::{ResetStreamAtFrame, codec::write_reset_stream_at_frame},
     v1::{
         self,
         application_error::ApplicationErrorCode,
         frame::{
             Frame as V1Frame, FrameTypeValue,
             ack::{AckFrame, AckRange, AckRanges},
-            codec::{ReadFieldsHostExt as _, WriteFrameRunHostExt as _},
+            codec::{read_fields, write_frame_run},
             connection_close::{CloseErrorCode, ConnectionCloseFrame},
             crypto::CryptoFrame,
             new_connection_id::NewConnectionIdFrame,
             new_token::NewTokenFrame,
-            set::{FrameFieldsError, Frames, codec::ReadFrameTypeHostExt as _},
+            set::Frames,
             stream::StreamFrame,
         },
         packet_number::PacketNumber,
@@ -40,7 +38,6 @@ use wire_differential::{
         sakuya::{self, Failure, FailureKind, Full, Read, Run, V1Only},
         shortest_width,
     },
-    hosts::{Failing, OneByte, Waiting, WaitingSink, run},
     tally::hex,
 };
 
@@ -138,25 +135,6 @@ fn check_payload(payload: &[u8]) -> Result<(), TestCaseError> {
     Ok(())
 }
 
-/// Writes a [`Run`] to a host with the host methods of the operations, the
-/// synchronous ones or, with `async`, the asynchronous ones run to the end.
-macro_rules! write_run {
-    (@async $host:expr, $run:expr) => {
-        match $run {
-            Run::V1(item) => run($host.write_frame_run_unpin(item)),
-            Run::Datagram(item) => run($host.write_datagram_frame_unpin(item)),
-            Run::ResetStreamAt(item) => run($host.write_reset_stream_at_frame_unpin(item)),
-        }
-    };
-    ($host:expr, $run:expr) => {
-        match $run {
-            Run::V1(item) => $host.sync_write_frame_run_unpin(item),
-            Run::Datagram(item) => $host.sync_write_datagram_frame_unpin(item),
-            Run::ResetStreamAt(item) => $host.sync_write_reset_stream_at_frame_unpin(item),
-        }
-    };
-}
-
 proptest! {
     #![proptest_config(cases::config(100_000))]
 
@@ -249,120 +227,21 @@ proptest! {
         }
     }
 
-    /// Reading the Frame Type and the fields of version 1 frames from a
-    /// source that waits between bytes gives what a byte slice gives.
+    /// Every run writes `encoded_len` bytes to a growing buffer, and the
+    /// same bytes to a buffer with exactly that room.
     #[test]
-    fn frames_read_the_same_from_a_waiting_source(payload in payload()) {
-        let full = PhantomData::<Full>;
-        let v1 = PhantomData::<V1Only>;
-        let mut slice = payload.as_slice();
-        let mut source = Waiting::new(&payload);
-        while !slice.is_empty() {
-            let mut ahead = slice;
-            let expected = ahead.sync_read_frame_type_unpin(full);
-            let actual = run(Waiting::new(slice).read_frame_type_unpin(full));
-            match (&expected, &actual) {
-                (Ok(a), Ok(b)) => prop_assert_eq!(a, b),
-                (Err(a), Err(b)) => {
-                    prop_assert_eq!(a.is_incomplete(), b.is_incomplete());
-                    prop_assert_eq!(a.frame_type(), b.frame_type());
-                    prop_assert_eq!(a.transport_error_code(), b.transport_error_code());
-                }
-                (a, b) => prop_assert!(false, "{:?} {:?} on {}", a, b, hex(&payload)),
-            }
-            let expected = slice.sync_read_frame_type_unpin(v1);
-            let actual = run(source.read_frame_type_unpin(v1));
-            let frame_type: FrameTypeValue = match (expected, actual) {
-                (Ok(a), Ok(b)) => {
-                    prop_assert_eq!(a, b);
-                    a.extract()
-                }
-                (Err(a), Err(b)) => {
-                    prop_assert_eq!(a.is_incomplete(), b.is_incomplete());
-                    prop_assert_eq!(a.frame_type(), b.frame_type());
-                    prop_assert_eq!(a.transport_error_code(), b.transport_error_code());
-                    break;
-                }
-                (a, b) => {
-                    return Err(TestCaseError::fail(format!("{a:?} {b:?} on {}", hex(&payload))));
-                }
-            };
-            prop_assert_eq!(source.source, slice);
-            let expected = slice.sync_read_fields_unpin(frame_type);
-            let actual = run(source.read_fields_unpin(frame_type));
-            match (expected, actual) {
-                (Ok(a), Ok(b)) => {
-                    prop_assert_eq!(a, b);
-                    prop_assert_eq!(source.source, slice);
-                }
-                (Err(a), Err(b)) => {
-                    prop_assert_eq!(a.is_incomplete(), b.is_incomplete());
-                    prop_assert_eq!(a.frame_type(), b.frame_type());
-                    prop_assert_eq!(a.transport_error_code(), b.transport_error_code());
-                    break;
-                }
-                (a, b) => prop_assert!(false, "{:?} {:?} on {}", a, b, hex(&payload)),
-            }
-        }
-    }
-
-    /// A source that fails within a frame fails the read as that source, not
-    /// as a frame cut short.
-    #[test]
-    fn source_failures_are_not_truncations(payload in payload(), limit in 0usize..32) {
-        let v1 = PhantomData::<V1Only>;
-        let mut slice = payload.as_slice();
-        let Ok(frame_type) = slice.sync_read_frame_type_unpin(v1) else { return Ok(()) };
-        if slice.sync_read_fields_unpin(frame_type.extract()).is_err() {
-            return Ok(());
-        }
-        let consumed = payload.len() - slice.len();
-        if limit >= consumed {
-            return Ok(());
-        }
-        let mut source = Failing::new(&payload, limit);
-        match source.sync_read_frame_type_unpin(v1) {
-            Err(error) => {
-                prop_assert!(!error.is_incomplete(), "{}: {:?}", hex(&payload), error);
-            }
-            Ok(frame_type) => {
-                let error = source
-                    .sync_read_fields_unpin(frame_type.extract())
-                    .expect_err("the source failed within the frame");
-                prop_assert!(!error.is_incomplete(), "{}: {:?}", hex(&payload), error);
-            }
-        }
-    }
-
-    /// Every run writes the same bytes to a sink that takes one byte at a
-    /// time and to one that waits between bytes; a sink that fills up keeps
-    /// the bytes it took, and the error counts them.
-    #[test]
-    fn runs_write_the_same_to_every_sink(payload in payload(), room in any::<Index>()) {
+    fn runs_write_the_same_to_every_sink(payload in payload()) {
         for (_, item) in sakuya::read(&payload).runs {
             let direct = item.clone().to_bytes();
             prop_assert_eq!(direct.len(), item.encoded_len());
-            let mut slow = Std::new(OneByte::default());
-            write_run!(slow, item.clone()).expect("the sink takes every byte");
-            prop_assert_eq!(&slow.into_inner().0, &direct);
-            let mut waiting = WaitingSink::default();
-            write_run!(@async waiting, item.clone()).expect("the sink takes every byte");
-            prop_assert_eq!(&waiting.written, &direct);
-            let room = room.index(direct.len() + 1);
-            let mut storage = vec![0xee; room];
+            let mut storage = vec![0xee; direct.len()];
             let mut full = storage.as_mut_slice();
-            let result = write_run!(full, item);
-            if room < direct.len() {
-                match result {
-                    Err(WriteAllError::WriteZero { source }) => {
-                        prop_assert_eq!(source.completed, room);
-                    }
-                    other => prop_assert!(false, "{:?}", other),
-                }
-            } else {
-                prop_assert!(result.is_ok());
+            match item {
+                Run::V1(item) => write_frame_run(&mut full, item),
+                Run::Datagram(item) => write_datagram_frame(&mut full, item),
+                Run::ResetStreamAt(item) => write_reset_stream_at_frame(&mut full, item),
             }
-            prop_assert_eq!(&storage[..], &direct[..room]);
+            prop_assert_eq!(&storage, &direct);
         }
     }
 
@@ -535,7 +414,7 @@ fn field_widths_are_kept() {
     // same.
     let mut source = &payload[1..];
     let frame_type = FrameTypeValue::of(var(0x0e)).unwrap();
-    let V1Frame::Stream(alone) = source.sync_read_fields_unpin(frame_type).unwrap() else {
+    let V1Frame::Stream(alone) = read_fields(&mut source, frame_type).unwrap() else {
         panic!()
     };
     assert_eq!(&alone, frame);

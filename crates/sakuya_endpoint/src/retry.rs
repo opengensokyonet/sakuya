@@ -20,9 +20,7 @@ pub use policy::{
 use bytes::Bytes;
 use sakuya_datagram_routing::route::recognizer::ConnectionIdGenerator;
 use sakuya_packet_protection::{backend::CryptoBackend, retry::compute_retry_integrity_tag};
-use sakuya_wire::{
-    connection_id::ConnectionId, v1::header::codec::WriteRetryPacketWithoutTagHostExt as _,
-};
+use sakuya_wire::{connection_id::ConnectionId, v1::header::codec::write_retry_packet_without_tag};
 use snafu::{Snafu, ensure};
 
 /// The Unused field of the Retry packets this module encodes: all four bits
@@ -70,10 +68,7 @@ pub fn encode_stateless_retry<B: CryptoBackend>(
         encode_stateless_retry_error::EmptyTokenSnafu
     );
     let mut packet = Vec::new();
-    // invariant: a `Vec` accepts every byte written to it.
-    packet
-        .sync_write_retry_packet_without_tag_unpin(RETRY_UNUSED, *client_scid, *scid, token)
-        .expect("a Vec accepts every byte");
+    write_retry_packet_without_tag(&mut packet, RETRY_UNUSED, *client_scid, *scid, token);
     let tag = compute_retry_integrity_tag(backend, original_dcid, &packet);
     packet.extend_from_slice(&tag);
     Ok(Bytes::from(packet))
@@ -118,10 +113,10 @@ mod tests {
     };
     use sakuya_wire::{
         connection_id::{ConnectionId, StatelessResetToken},
-        header::codec::ReadLongHeaderHostExt as _,
+        header::codec::read_long_header,
         v1::header::{
             LongPacketType, RETRY_INTEGRITY_TAG_LEN, TypeFields,
-            codec::{ReadLongPacketHostExt as _, WriteRetryPacketWithoutTagHostExt as _},
+            codec::{read_long_packet, write_retry_packet_without_tag},
         },
     };
 
@@ -146,14 +141,13 @@ mod tests {
     #[test]
     fn the_written_packet_and_its_tag_are_the_appendix_packet() {
         let mut packet = Vec::new();
-        packet
-            .sync_write_retry_packet_without_tag_unpin(
-                0x0f,
-                ConnectionId::EMPTY,
-                cid(&RFC_SCID),
-                b"token",
-            )
-            .unwrap();
+        write_retry_packet_without_tag(
+            &mut packet,
+            0x0f,
+            ConnectionId::EMPTY,
+            cid(&RFC_SCID),
+            b"token",
+        );
         let tag = compute_retry_integrity_tag(&RingBackend, &cid(&RFC_ODCID), &packet);
         packet.extend_from_slice(&tag);
         assert_eq!(packet, RFC_RETRY);
@@ -186,8 +180,8 @@ mod tests {
         assert!(verify_retry_integrity_tag(&RingBackend, &client_scid, &packet).is_err());
 
         let mut input = &packet[..];
-        let header = input.sync_read_long_header_unpin().unwrap();
-        let read = input.sync_read_long_packet_unpin(header).unwrap();
+        let header = read_long_header(&mut input).unwrap();
+        let read = read_long_packet(&mut input, header).unwrap();
         assert_eq!(read.packet_type(), LongPacketType::Retry);
         assert_eq!(read.dcid(), &client_scid);
         assert_eq!(read.scid(), &scid);

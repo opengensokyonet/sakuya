@@ -14,15 +14,15 @@ use sakuya_packet_protection::packet_key::PacketKey;
 use sakuya_packet_protection::retry::verify_retry_integrity_tag;
 use sakuya_packet_protection::secret::TrafficSecret;
 use sakuya_wire::connection_id::{ConnectionId, ConnectionIdLength};
-use sakuya_wire::header::codec::{ReadLongHeaderHostExt as _, ReadShortHeaderHostExt as _};
+use sakuya_wire::header::codec::{read_long_header, read_short_header};
 use sakuya_wire::parts::HList;
-use sakuya_wire::v1::header::codec::ReadLongPacketHostExt as _;
+use sakuya_wire::v1::header::codec::read_long_packet;
 use sakuya_wire::v1::header::{LongPacketType, TypeFields};
 use sakuya_wire::v1::packet_number::PacketNumber;
 use sakuya_wire::v1::role::Role;
 use sakuya_wire::v1::stream_count::StreamCount;
 use sakuya_wire::v1::transport_parameters::{
-    codec::ReadTransportParametersHostExt as _,
+    codec::read_transport_parameters,
     connection_id::InitialSourceConnectionId,
     integer::{
         InitialMaxData, InitialMaxStreamDataBidiLocal, InitialMaxStreamDataBidiRemote,
@@ -61,8 +61,8 @@ const CLIENT_PACKET: &str = include_str!("data/rfc9001_a2_client_initial.hex");
 /// the keys of `secret`, returning the payload.
 fn open_initial(protected: &[u8], secret: &TrafficSecret, expected_pn: u64) -> Vec<u8> {
     let mut input = protected;
-    let header = input.sync_read_long_header_unpin().unwrap();
-    let packet = input.sync_read_long_packet_unpin(header).unwrap();
+    let header = read_long_header(&mut input).unwrap();
+    let packet = read_long_packet(&mut input, header).unwrap();
     assert_eq!(packet.packet_type(), LongPacketType::Initial);
     assert!(packet.fixed_bit());
     assert!(input.is_empty(), "the datagram holds one packet");
@@ -116,9 +116,9 @@ fn a2_client_initial_end_to_end() {
         [0, 0x39, 0, 0x32]
     );
     let mut input = extension;
-    let parameters = input
-        .sync_read_transport_parameters_unpin(Role::Client, PhantomData::<HList![v1::Part]>)
-        .unwrap();
+    let parameters =
+        read_transport_parameters(&mut input, Role::Client, PhantomData::<HList![v1::Part]>)
+            .unwrap();
     let initial_max_data = parameters.get::<InitialMaxData, _>().unwrap();
     assert_eq!(initial_max_data.get(), VarInt::MAX);
     let limit = VarInt::from(65535u16);
@@ -177,8 +177,8 @@ fn a4_retry_end_to_end() {
         ff000000010008f067a5502a4262b574 6f6b656e04a265ba2eff4d829058fb3f
         0f2496ba");
     let mut input = packet.as_slice();
-    let header = input.sync_read_long_header_unpin().unwrap();
-    let parsed = input.sync_read_long_packet_unpin(header).unwrap();
+    let header = read_long_header(&mut input).unwrap();
+    let parsed = read_long_packet(&mut input, header).unwrap();
     assert_eq!(parsed.packet_type(), LongPacketType::Retry);
     assert!(parsed.dcid().is_empty());
     assert_eq!(parsed.scid().as_bytes(), hex("f067a5502a4262b5"));
@@ -210,9 +210,7 @@ fn a5_short_header_end_to_end() {
     let hp = HeaderProtectionKey::derive(&RingBackend, aead, &secret);
 
     let mut input = protected.as_slice();
-    let header = input
-        .sync_read_short_header_unpin(ConnectionIdLength::ZERO)
-        .unwrap();
+    let header = read_short_header(&mut input, ConnectionIdLength::ZERO).unwrap();
     assert_eq!(header.packet_number_offset(), 1);
     assert_eq!(header.sample_offset(), 5);
     assert_eq!(header.end(), protected.len());

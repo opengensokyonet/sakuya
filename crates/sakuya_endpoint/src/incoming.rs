@@ -63,7 +63,7 @@ use sakuya_link::{EcnMarking, Link, OutgoingDatagram};
 use sakuya_recovery::loss::GranularityBelowClockError;
 use sakuya_stream::connection::TransportImmediateClose;
 use sakuya_tls::clock::Clock as _;
-use sakuya_wire::header::codec::ReadLongHeaderHostExt as _;
+use sakuya_wire::header::codec::read_long_header;
 use sakuya_wire::{connection_id::ConnectionId, parts::Selector, version::Version};
 
 use crate::{
@@ -982,7 +982,7 @@ fn initial_scid(mut bytes: &[u8]) -> Option<ConnectionId> {
     if first & 0x80 == 0 || (first >> 4) & 0b11 != 0 {
         return None;
     }
-    let header = bytes.sync_read_long_header_unpin().ok()?;
+    let header = read_long_header(&mut bytes).ok()?;
     if header.version() != Version::V1 {
         return None;
     }

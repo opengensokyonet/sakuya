@@ -13,7 +13,6 @@ description = "Differential and robustness checks of sakuya_wire and sakuya_pack
 [dependencies]
 bytes = "1.12.1"
 either = { version = "1.17.0", default-features = false }
-nitori_call = { git = "https://github.com/opengensokyonet/nitori", rev = "8d9a31362c81e575e37406219ff15d710f04dd6f" }
 nitori_io = { git = "https://github.com/opengensokyonet/nitori", rev = "8d9a31362c81e575e37406219ff15d710f04dd6f" }
 proptest = "1.12.0"
 quinn-proto = { version = "=0.11.19", default-features = false, features = ["rustls-ring"] }

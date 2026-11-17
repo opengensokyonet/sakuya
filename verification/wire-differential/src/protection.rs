@@ -22,7 +22,7 @@ use sakuya_packet_protection::{
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength},
     v1::{
-        header::{LongPacketHeader, TypeFields, codec::WriteLongPacketHeaderHostExt as _},
+        header::{LongPacketHeader, TypeFields, codec::write_long_packet_header},
         packet_number::PacketNumber,
         protected_packet::{Packet, ProtectedPacket, into_packets},
     },
@@ -94,7 +94,7 @@ impl Initial {
         )
         .unwrap();
         let mut bytes = Vec::new();
-        bytes.sync_write_long_packet_header_unpin(header).unwrap();
+        write_long_packet_header(&mut bytes, header);
         bytes[0] |= self.reserved_bits & 0x0c;
         let pn_offset = bytes.len();
         bytes.extend(truncated.as_bytes());

@@ -13,7 +13,7 @@ use futures_util::task::AtomicWaker;
 use sakuya_datagram_routing::route::router::VersionService;
 use sakuya_link::{Link, MIN_DATAGRAM_SIZE, ReceivedDatagram};
 use sakuya_wire::{
-    connection_id::RawConnectionId, header::codec::ReadLongHeaderHostExt as _, version::Version,
+    connection_id::RawConnectionId, header::codec::read_long_header, version::Version,
 };
 
 /// What the endpoint keeps of a datagram of an unsupported version to answer
@@ -93,7 +93,7 @@ impl<P: AsRef<[u8]>, L: Link> VersionService<P, L> for NegotiatingVersionService
         // The longest version-independent long header is 517 bytes, so a
         // datagram of at least 1200 bytes always holds one; the arm that
         // releases the datagram is not reached.
-        let Ok(header) = bytes.sync_read_long_header_unpin() else {
+        let Ok(header) = read_long_header(&mut bytes) else {
             return;
         };
         let pending = PendingVersionNegotiation {

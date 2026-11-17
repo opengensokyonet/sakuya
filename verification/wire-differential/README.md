@@ -60,8 +60,8 @@ Besides the comparisons, the tests check properties of sakuya alone: a frame
 read and written again gives the bytes it was read from; transport parameters
 written and read again give the same parameters; truncated input fails as
 incomplete; every failure reports the transport error code or TLS alert the
-RFCs name; sources and sinks that wait, take one byte at a time, fail or fill
-up give the results that byte slices give.
+RFCs name; a buffer with exactly the room a write takes receives the bytes a
+growing buffer gets.
 
 The comparisons cover what the implementations read from a packet payload, a
 transport parameter list, a datagram or a handshake message, what they write,

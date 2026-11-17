@@ -10,7 +10,6 @@ pub mod cases;
 pub mod frames;
 pub mod generate;
 pub mod headers;
-pub mod hosts;
 pub mod parameters;
 pub mod protection;
 pub mod tally;

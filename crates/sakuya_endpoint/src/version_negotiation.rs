@@ -17,8 +17,7 @@ mod service;
 use bytes::Bytes;
 use nitori_crypto::{Random, RandomError};
 use sakuya_wire::{
-    connection_id::RawConnectionId, header::codec::WriteVersionNegotiationHostExt as _,
-    version::Version,
+    connection_id::RawConnectionId, header::codec::write_version_negotiation, version::Version,
 };
 
 pub use service::{NegotiatingVersionService, PendingVersionNegotiation, VersionNegotiationQueue};
@@ -80,10 +79,7 @@ pub fn encode_version_negotiation<R: Random + ?Sized>(
     versions.extend_from_slice(offered);
     versions.push(reserved);
     let mut packet = Vec::new();
-    // invariant: a `Vec` accepts every byte written to it.
-    packet
-        .sync_write_version_negotiation_unpin(unused, client_scid, client_dcid, &versions)
-        .expect("a Vec accepts every byte");
+    write_version_negotiation(&mut packet, unused, client_scid, client_dcid, &versions);
     Ok(Bytes::from(packet))
 }
 
@@ -105,7 +101,7 @@ mod tests {
     use nitori_crypto::{Random, RandomError};
     use sakuya_wire::{
         connection_id::RawConnectionId,
-        header::codec::{ReadLongHeaderHostExt as _, ReadVersionNegotiationHostExt as _},
+        header::codec::{read_long_header, read_version_negotiation},
         version::Version,
     };
 
@@ -131,9 +127,9 @@ mod tests {
     /// byte, connection IDs and versions.
     fn read(packet: &[u8]) -> (u8, RawConnectionId, RawConnectionId, Vec<Version>) {
         let mut input = packet;
-        let header = input.sync_read_long_header_unpin().unwrap();
+        let header = read_long_header(&mut input).unwrap();
         assert_eq!(header.version(), Version::NEGOTIATION);
-        let negotiation = input.sync_read_version_negotiation_unpin(header).unwrap();
+        let negotiation = read_version_negotiation(&mut input, header).unwrap();
         assert!(input.is_empty());
         (
             header.first_byte(),

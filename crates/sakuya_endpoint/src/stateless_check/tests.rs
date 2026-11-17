@@ -6,11 +6,11 @@ use sakuya_datagram_routing::route::recognizer::ConnectionIdGenerator;
 use sakuya_packet_protection::{backend::ring::RingBackend, retry::verify_retry_integrity_tag};
 use sakuya_wire::{
     connection_id::{ConnectionId, StatelessResetToken},
-    header::codec::ReadLongHeaderHostExt as _,
+    header::codec::read_long_header,
     v1::{
         header::{
             LongPacketHeader, TypeFields,
-            codec::{ReadLongPacketHostExt as _, WriteLongPacketHeaderHostExt as _},
+            codec::{read_long_packet, write_long_packet_header},
         },
         packet_number::PacketNumberLength,
     },
@@ -109,14 +109,13 @@ const LOADED: IncomingLoad = IncomingLoad {
 fn datagram(header: impl Fn(VarIntField<VarInt>) -> LongPacketHeader, len: usize) -> Vec<u8> {
     let probe = header(VarIntField::new(VarInt::ZERO, VarIntWidth::Two).unwrap());
     let mut written = Vec::new();
-    written.sync_write_long_packet_header_unpin(probe).unwrap();
+    write_long_packet_header(&mut written, probe);
     let length = VarInt::try_from(len - written.len()).unwrap();
     let mut packet = Vec::new();
-    packet
-        .sync_write_long_packet_header_unpin(header(
-            VarIntField::new(length, VarIntWidth::Two).unwrap(),
-        ))
-        .unwrap();
+    write_long_packet_header(
+        &mut packet,
+        header(VarIntField::new(length, VarIntWidth::Two).unwrap()),
+    );
     packet.resize(len, 0);
     packet
 }
@@ -182,8 +181,8 @@ fn an_initial_without_a_token_is_admitted_when_idle() {
 /// The token of a Retry packet.
 fn retry_token(retry: &[u8]) -> Bytes {
     let mut input = retry;
-    let header = input.sync_read_long_header_unpin().unwrap();
-    let packet = input.sync_read_long_packet_unpin(header).unwrap();
+    let header = read_long_header(&mut input).unwrap();
+    let packet = read_long_packet(&mut input, header).unwrap();
     assert_eq!(*packet.scid(), server_cid());
     let TypeFields::Retry { token, .. } = packet.into_fields() else {
         panic!("not a Retry packet");

@@ -5,22 +5,21 @@ use super::{Decoded, Frame};
 use bytes::Buf;
 use core::{fmt::Display, marker::PhantomData, num::NonZeroUsize, ops::Range};
 use either::Either;
-use nitori_call::{Direct, Receiver};
-use nitori_io::ReadChunk;
+use nitori_io::SplitTo;
 use sakuya_wire::{
     assert_frame_types_disjoint,
     connection_id::{NonEmptyCid, StatelessResetToken},
-    datagram::{self, DatagramFrame, codec::WriteDatagramFrameHostExt as _},
+    datagram::{self, DatagramFrame, codec::write_datagram_frame},
     frame::NoLength,
     parts::HList,
-    reset_stream_at::{self, ResetStreamAtFrame, codec::WriteResetStreamAtFrameHostExt as _},
+    reset_stream_at::{self, ResetStreamAtFrame, codec::write_reset_stream_at_frame},
     v1::{
         self,
         application_error::ApplicationErrorCode,
         frame::{
             FrameRun,
             ack::{AckFrame, AckRange, AckRanges, EcnCounts},
-            codec::WriteFrameRunHostExt as _,
+            codec::write_frame_run,
             connection_close::{CloseErrorCode, ConnectionCloseFrame},
             crypto::CryptoFrame,
             data_blocked::DataBlockedFrame,
@@ -59,12 +58,6 @@ pub type V1Only = HList![v1::Part];
 
 assert_frame_types_disjoint!(Full);
 assert_frame_types_disjoint!(V1Only);
-
-/// The chunk type of payload fields read from `H`.
-pub type Chunk<H> = <Direct<H> as ReadChunk>::Chunk;
-
-/// The failure of the source `H`.
-pub type HostError<H> = <Direct<H> as nitori_io::Read>::Error;
 
 /// An item a frame set of sakuya gives, of any of the parts of [`Full`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,13 +130,12 @@ pub struct Read<D> {
 }
 
 /// Walks `payload` with the frame set `S`.
-pub fn read_with<S, H>(payload: H) -> Read<Chunk<H>>
+pub fn read_with<S, H>(payload: H) -> Read<H>
 where
     S: SakuyaSet,
-    H: Buf + Receiver<Family = Direct<H>> + Unpin,
-    Direct<H>: ReadChunk<Chunk: Default>,
-    S::FieldsError<HostError<H>>: FrameFieldsError,
-    ReadFrameError<HostError<H>, S::FieldsError<HostError<H>>>: Display,
+    H: Buf + SplitTo,
+    S::FieldsError: FrameFieldsError,
+    ReadFrameError<S::FieldsError>: Display,
 {
     let mut frames = Frames::new(payload, PhantomData::<S>);
     let mut runs = Vec::new();
@@ -181,9 +173,9 @@ pub fn read_v1(payload: &[u8]) -> Read<&[u8]> {
 }
 
 /// The summary of `error`, for a frame at `offset`.
-pub fn failure<E, C: FrameFieldsError>(error: &ReadFrameError<E, C>, offset: usize) -> Failure
+pub fn failure<C: FrameFieldsError>(error: &ReadFrameError<C>, offset: usize) -> Failure
 where
-    ReadFrameError<E, C>: Display,
+    ReadFrameError<C>: Display,
 {
     let kind = match error {
         ReadFrameError::FrameType { .. } => FailureKind::FrameType,
@@ -243,12 +235,11 @@ impl<D: Buf> Run<D> {
     /// The bytes the write operation of the run's type writes.
     pub fn to_bytes(self) -> Vec<u8> {
         let mut output = Vec::new();
-        let result = match self {
-            Self::V1(run) => output.sync_write_frame_run_unpin(run),
-            Self::Datagram(frame) => output.sync_write_datagram_frame_unpin(frame),
-            Self::ResetStreamAt(frame) => output.sync_write_reset_stream_at_frame_unpin(frame),
-        };
-        result.expect("a Vec takes every byte");
+        match self {
+            Self::V1(run) => write_frame_run(&mut output, run),
+            Self::Datagram(frame) => write_datagram_frame(&mut output, frame),
+            Self::ResetStreamAt(frame) => write_reset_stream_at_frame(&mut output, frame),
+        }
         output
     }
 }

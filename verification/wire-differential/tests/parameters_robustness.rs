@@ -1,25 +1,22 @@
 //! Properties of sakuya's transport parameter reader and writer on any
-//! input: no panic, one error code, the same results on every kind of
-//! source and sink, a writer that reproduces what was read, and the parts
-//! of a parameter list changing only the parameters they define.
+//! input: no panic, one error code, a writer that reproduces what was read,
+//! and the parts of a parameter list changing only the parameters they define.
 use core::marker::PhantomData;
-use nitori_io::{bridge::Std, calls::WriteAllError};
-use proptest::{prelude::*, sample::Index};
+use proptest::prelude::*;
 use sakuya_wire::{
     parameters::{UnknownParameter, codec::ReadParametersError},
     v1::{
         role::Role,
         transport_error::TransportErrorCode,
         transport_parameters::codec::{
-            ReadRememberedTransportParametersHostExt as _, ReadTransportParametersHostExt as _,
-            WriteTransportParametersError, WriteTransportParametersHostExt as _,
+            read_remembered_transport_parameters, read_transport_parameters,
+            write_transport_parameters,
         },
     },
     var_int::VarInt,
 };
 use wire_differential::{
     cases,
-    hosts::{Failing, OneByte, SourceFailed, Waiting, WaitingSink, run},
     parameters::{
         MAX_DATAGRAM_FRAME_SIZE, RESET_STREAM_AT, encode, entries,
         generate::parameters,
@@ -34,60 +31,21 @@ fn role() -> impl Strategy<Value = Role> {
     prop_oneof![Just(Role::Client), Just(Role::Server)]
 }
 
-/// The receiver's error of a failure, if it came from the receiver.
-fn host_error<E, A, C>(error: &ReadParametersError<E, A, C>) -> Option<&E> {
-    match error {
-        ReadParametersError::Id { source } | ReadParametersError::Length { source, .. } => {
-            source.host_error()
-        }
-        ReadParametersError::Value { source, .. } => source.host_error(),
-        _ => None,
-    }
-}
-
 proptest! {
     #![proptest_config(cases::config(20_000))]
 
     /// A failure is TRANSPORT_PARAMETER_ERROR and says something; a success
-    /// reads the whole input. A source that waits before every byte gives
-    /// the same result as the byte slice.
+    /// reads the whole input.
     #[test]
     fn parameters_read_any_input(bytes in parameters(), sender in role()) {
         let mut source = bytes.as_slice();
-        let direct = source.sync_read_transport_parameters_unpin(sender, PhantomData::<Parts>);
+        let direct = read_transport_parameters(&mut source, sender, PhantomData::<Parts>);
         match &direct {
             Ok(_) => prop_assert!(source.is_empty()),
             Err(error) => {
                 prop_assert_eq!(error.transport_error_code(), TransportErrorCode::TRANSPORT_PARAMETER_ERROR);
                 prop_assert!(!error.to_string().is_empty());
             }
-        }
-        let mut waiting = Waiting::new(&bytes);
-        let waited = run(waiting.read_transport_parameters_unpin(sender, PhantomData::<Parts>));
-        prop_assert_eq!(format!("{direct:?}"), format!("{waited:?}"), "{}", hex(&bytes));
-    }
-
-    /// A source that fails partway reports its own failure, or a failure
-    /// of the content before that point, never an incomplete input.
-    #[test]
-    fn failing_sources_report_their_failure(bytes in parameters(), sender in role(), limit in any::<Index>()) {
-        if bytes.is_empty() {
-            return Ok(());
-        }
-        let limit = limit.index(bytes.len());
-        let mut failing = Failing::new(&bytes, limit);
-        let error = run(failing.read_transport_parameters_unpin(sender, PhantomData::<Parts>))
-            .expect_err("the source fails before its end");
-        prop_assert!(!error.is_incomplete(), "{} at {}: {}", hex(&bytes), limit, error);
-        let mut prefix = &bytes[..limit];
-        let before = prefix.sync_read_transport_parameters_unpin(sender, PhantomData::<Parts>);
-        if host_error(&error) == Some(&SourceFailed) {
-            // The bytes before the failure are a sequence or end within a
-            // parameter.
-            prop_assert!(before.as_ref().map_or_else(|e| e.is_incomplete(), |_| true), "{}", hex(&bytes));
-        } else {
-            let whole = sakuya::read(&bytes, sender).expect_err("the content fails");
-            prop_assert_eq!(format!("{error:?}"), format!("{whole:?}"), "{}", hex(&bytes));
         }
     }
 
@@ -131,34 +89,15 @@ proptest! {
         }
     }
 
-    /// Sinks that wait or take one byte at a time receive the same bytes,
-    /// and a sink that fills up stops the writer with the bytes it took.
+    /// A buffer with exactly the room the parameters take receives the
+    /// bytes a growing buffer gets.
     #[test]
-    fn parameters_write_to_any_sink(bytes in parameters(), sender in role(), room in any::<Index>()) {
+    fn parameters_write_to_a_buffer_of_their_size(bytes in parameters(), sender in role()) {
         let Ok(parameters) = sakuya::read(&bytes, sender) else { return Ok(()) };
         let written = sakuya::write(parameters.clone(), sender);
-
-        let mut waiting = WaitingSink::default();
-        run(waiting.write_transport_parameters_unpin(parameters.clone(), sender)).unwrap();
-        prop_assert_eq!(&waiting.written, &written);
-
-        let mut one_byte = Std::new(OneByte::default());
-        one_byte.sync_write_transport_parameters_unpin(parameters.clone(), sender).unwrap();
-        prop_assert_eq!(&one_byte.get_ref().0, &written);
-
-        if written.is_empty() {
-            return Ok(());
-        }
-        let room = room.index(written.len());
-        let mut storage = vec![0u8; room];
-        let mut full = storage.as_mut_slice();
-        match full.sync_write_transport_parameters_unpin(parameters, sender) {
-            Err(WriteTransportParametersError::Write { source: WriteAllError::WriteZero { source } }) => {
-                prop_assert_eq!(source.completed, room);
-            }
-            other => prop_assert!(false, "{:?}", other),
-        }
-        prop_assert_eq!(&storage[..], &written[..room]);
+        let mut storage = vec![0u8; written.len()];
+        write_transport_parameters(&mut storage.as_mut_slice(), parameters, sender).unwrap();
+        prop_assert_eq!(&storage, &written);
     }
 
     /// The parameters remembered for 0-RTT are those a server sent, less
@@ -168,7 +107,7 @@ proptest! {
     #[test]
     fn remembered_parameters_keep_the_remembered_slots(bytes in parameters()) {
         let mut source = bytes.as_slice();
-        let remembered = source.sync_read_remembered_transport_parameters_unpin(PhantomData::<Parts>);
+        let remembered = read_remembered_transport_parameters(&mut source, PhantomData::<Parts>);
         match (remembered, sakuya::read(&bytes, Role::Server)) {
             (Ok(remembered), Ok(mut expected)) => {
                 sakuya::forget_for_zero_rtt(&mut expected);

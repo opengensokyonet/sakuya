@@ -6,10 +6,7 @@ use super::{
     generate::{LongHeaderInput, RetryInput, ShortHeaderInput, VersionNegotiationInput},
     read_quinn, read_s2n, read_sakuya,
 };
-use crate::{
-    hosts::{WaitingSink, run},
-    tally::{self, Comparison},
-};
+use crate::tally::{self, Comparison};
 use bytes::Bytes;
 use quinn_proto::{
     ConnectionId as QCid,
@@ -22,13 +19,12 @@ use s2n_quic_core::packet::{
 use sakuya_packet_protection::{backend::ring::RingBackend, retry::compute_retry_integrity_tag};
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength, RawConnectionId},
-    header::codec::WriteVersionNegotiationHostExt as _,
+    header::codec::write_version_negotiation,
     v1::{
         header::{
             KeyPhase, LongPacketHeader, ShortPacketHeader,
             codec::{
-                WriteLongPacketHeaderHostExt as _, WriteRetryPacketWithoutTagHostExt as _,
-                WriteShortPacketHeaderHostExt as _,
+                write_long_packet_header, write_retry_packet_without_tag, write_short_packet_header,
             },
         },
         packet_number::PacketNumberLength,
@@ -125,14 +121,7 @@ pub fn check_long(input: &LongHeaderInput) -> Result<(), String> {
     };
 
     let mut bytes = Vec::new();
-    bytes
-        .sync_write_long_packet_header_unpin(header.clone())
-        .unwrap();
-    let mut sink = WaitingSink::default();
-    run(sink.write_long_packet_header_unpin(header.clone())).unwrap();
-    if sink.written != bytes {
-        return Err("a waiting sink receives other bytes".into());
-    }
+    write_long_packet_header(&mut bytes, header.clone());
 
     // RFC 9000 §17.2: the form, the Fixed Bit, the type, zero reserved bits
     // and the packet number length.
@@ -224,12 +213,7 @@ pub fn check_short(input: &ShortHeaderInput) -> Result<(), String> {
         ConnectionId::new(&input.dcid).unwrap(),
     );
     let mut bytes = Vec::new();
-    bytes.sync_write_short_packet_header_unpin(header).unwrap();
-    let mut sink = WaitingSink::default();
-    run(sink.write_short_packet_header_unpin(header)).unwrap();
-    if sink.written != bytes {
-        return Err("a waiting sink receives other bytes".into());
-    }
+    write_short_packet_header(&mut bytes, header);
     // RFC 9000 §17.3.1: the Fixed Bit, the Spin Bit, zero reserved bits, the
     // Key Phase and the packet number length.
     let first = 0x40
@@ -278,14 +262,7 @@ pub fn check_retry(input: &RetryInput) -> Result<(), String> {
     let dcid = ConnectionId::new(&input.dcid).unwrap();
     let scid = ConnectionId::new(&input.scid).unwrap();
     let mut bytes = Vec::new();
-    bytes
-        .sync_write_retry_packet_without_tag_unpin(input.unused, dcid, scid, &input.token)
-        .unwrap();
-    let mut sink = WaitingSink::default();
-    run(sink.write_retry_packet_without_tag_unpin(input.unused, dcid, scid, &input.token)).unwrap();
-    if sink.written != bytes {
-        return Err("a waiting sink receives other bytes".into());
-    }
+    write_retry_packet_without_tag(&mut bytes, input.unused, dcid, scid, &input.token);
     // RFC 9000 §17.2.5: the form, the Fixed Bit, type 3 and the Unused bits.
     let first = 0xf0 | (input.unused & 0x0f);
     let header_len = 7 + input.dcid.len() + input.scid.len();
@@ -343,14 +320,7 @@ pub fn check_version_negotiation(input: &VersionNegotiationInput) -> Result<(), 
     let scid = RawConnectionId::new(&input.scid).unwrap();
     let versions: Vec<Version> = input.versions.iter().copied().map(Version::new).collect();
     let mut bytes = Vec::new();
-    bytes
-        .sync_write_version_negotiation_unpin(input.unused, &dcid, &scid, &versions)
-        .unwrap();
-    let mut sink = WaitingSink::default();
-    run(sink.write_version_negotiation_unpin(input.unused, &dcid, &scid, &versions)).unwrap();
-    if sink.written != bytes {
-        return Err("a waiting sink receives other bytes".into());
-    }
+    write_version_negotiation(&mut bytes, input.unused, &dcid, &scid, &versions);
     let list: Vec<u8> = input
         .versions
         .iter()

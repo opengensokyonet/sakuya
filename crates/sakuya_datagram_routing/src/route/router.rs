@@ -8,12 +8,10 @@ use sakuya_link::{LinkId, ReceivedDatagram};
 use sakuya_wire::connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken};
 use sakuya_wire::header::{
     HeaderForm,
-    codec::{
-        ReadLongHeaderHostExt as _, ReadShortHeaderHostExt as _, ReadVersionNegotiationHostExt as _,
-    },
+    codec::{read_long_header, read_short_header, read_version_negotiation},
 };
 use sakuya_wire::v1::header::LongPacketType;
-use sakuya_wire::v1::header::codec::ReadLongPacketHostExt as _;
+use sakuya_wire::v1::header::codec::read_long_packet;
 use sakuya_wire::version::Version;
 use smallvec::SmallVec;
 
@@ -561,7 +559,7 @@ fn classify<Local: Clone, Peer>(
             let mut nonempty_dcid = false;
             for dcid_len in recognizer.short_dcid_lengths(bytes, link) {
                 let mut input = bytes;
-                let Ok(short) = input.sync_read_short_header_unpin(dcid_len) else {
+                let Ok(short) = read_short_header(&mut input, dcid_len) else {
                     continue;
                 };
                 let Ok(dcid) = ConnectionId::try_from(*short.dcid()) else {
@@ -581,12 +579,12 @@ fn classify<Local: Clone, Peer>(
         }
         HeaderForm::Long => {
             let mut input = bytes;
-            let Ok(long) = input.sync_read_long_header_unpin() else {
+            let Ok(long) = read_long_header(&mut input) else {
                 return Classification::Release;
             };
             let version = long.version();
             if version == Version::NEGOTIATION {
-                let Ok(packet) = input.sync_read_version_negotiation_unpin(long) else {
+                let Ok(packet) = read_version_negotiation(&mut input, long) else {
                     return Classification::Release;
                 };
                 let Ok(dcid) = ConnectionId::try_from(*packet.dcid()) else {
@@ -601,7 +599,7 @@ fn classify<Local: Clone, Peer>(
             if version != Version::V1 {
                 return Classification::Unsupported(version);
             }
-            let Ok(packet) = input.sync_read_long_packet_unpin(long) else {
+            let Ok(packet) = read_long_packet(&mut input, long) else {
                 return Classification::Release;
             };
             let packet_type = packet.packet_type();

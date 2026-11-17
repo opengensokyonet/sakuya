@@ -22,18 +22,16 @@ use sakuya_wire::{
     header::{
         HeaderForm, LongHeader, ShortHeader, VersionNegotiation,
         codec::{
-            ReadLongHeaderError, ReadLongHeaderHostExt as _, ReadShortHeaderError,
-            ReadShortHeaderHostExt as _, ReadVersionNegotiationError,
-            ReadVersionNegotiationHostExt as _,
+            ReadLongHeaderError, ReadShortHeaderError, ReadVersionNegotiationError,
+            read_long_header, read_short_header, read_version_negotiation,
         },
     },
     v1::header::{
         self as v1, LongPacket, TypeFields,
-        codec::{ReadLongPacketError, ReadLongPacketHostExt as _},
+        codec::{ReadLongPacketError, read_long_packet},
     },
     version::Version,
 };
-use std::convert::Infallible;
 
 pub mod generate;
 pub mod split;
@@ -93,88 +91,53 @@ impl Packet {
     }
 }
 
-/// A host of a datagram that sakuya's header operations read from.
-///
-/// Byte slices read synchronously; [`crate::hosts::Waiting`] waits before
-/// every read. Both hand out chunks of the datagram, so the results have the
-/// same type.
+/// A source of a datagram that sakuya's header readers read from.
 pub trait Source<'a> {
-    fn long_header(&mut self) -> Result<LongHeader, ReadLongHeaderError<Infallible>>;
+    fn long_header(&mut self) -> Result<LongHeader, ReadLongHeaderError>;
     fn short_header(
         &mut self,
         dcid_len: ConnectionIdLength,
-    ) -> Result<ShortHeader<&'a [u8]>, ReadShortHeaderError<Infallible>>;
+    ) -> Result<ShortHeader<&'a [u8]>, ReadShortHeaderError>;
     fn version_negotiation(
         &mut self,
         header: LongHeader,
-    ) -> Result<VersionNegotiation<&'a [u8]>, ReadVersionNegotiationError<Infallible>>;
+    ) -> Result<VersionNegotiation<&'a [u8]>, ReadVersionNegotiationError>;
     fn long_packet(
         &mut self,
         header: LongHeader,
-    ) -> Result<LongPacket<&'a [u8]>, ReadLongPacketError<Infallible>>;
+    ) -> Result<LongPacket<&'a [u8]>, ReadLongPacketError>;
     /// The bytes not yet read.
     fn rest(&self) -> &'a [u8];
 }
 
 impl<'a> Source<'a> for &'a [u8] {
-    fn long_header(&mut self) -> Result<LongHeader, ReadLongHeaderError<Infallible>> {
-        self.sync_read_long_header_unpin()
+    fn long_header(&mut self) -> Result<LongHeader, ReadLongHeaderError> {
+        read_long_header(self)
     }
 
     fn short_header(
         &mut self,
         dcid_len: ConnectionIdLength,
-    ) -> Result<ShortHeader<&'a [u8]>, ReadShortHeaderError<Infallible>> {
-        self.sync_read_short_header_unpin(dcid_len)
+    ) -> Result<ShortHeader<&'a [u8]>, ReadShortHeaderError> {
+        read_short_header(self, dcid_len)
     }
 
     fn version_negotiation(
         &mut self,
         header: LongHeader,
-    ) -> Result<VersionNegotiation<&'a [u8]>, ReadVersionNegotiationError<Infallible>> {
-        self.sync_read_version_negotiation_unpin(header)
+    ) -> Result<VersionNegotiation<&'a [u8]>, ReadVersionNegotiationError> {
+        read_version_negotiation(self, header)
     }
 
     fn long_packet(
         &mut self,
         header: LongHeader,
-    ) -> Result<LongPacket<&'a [u8]>, ReadLongPacketError<Infallible>> {
-        self.sync_read_long_packet_unpin(header)
+    ) -> Result<LongPacket<&'a [u8]>, ReadLongPacketError> {
+        read_long_packet(self, header)
     }
 
     fn rest(&self) -> &'a [u8] {
         self
-    }
-}
-
-impl<'a> Source<'a> for crate::hosts::Waiting<'a> {
-    fn long_header(&mut self) -> Result<LongHeader, ReadLongHeaderError<Infallible>> {
-        crate::hosts::run(self.read_long_header_unpin())
-    }
-
-    fn short_header(
-        &mut self,
-        dcid_len: ConnectionIdLength,
-    ) -> Result<ShortHeader<&'a [u8]>, ReadShortHeaderError<Infallible>> {
-        crate::hosts::run(self.read_short_header_unpin(dcid_len))
-    }
-
-    fn version_negotiation(
-        &mut self,
-        header: LongHeader,
-    ) -> Result<VersionNegotiation<&'a [u8]>, ReadVersionNegotiationError<Infallible>> {
-        crate::hosts::run(self.read_version_negotiation_unpin(header))
-    }
-
-    fn long_packet(
-        &mut self,
-        header: LongHeader,
-    ) -> Result<LongPacket<&'a [u8]>, ReadLongPacketError<Infallible>> {
-        crate::hosts::run(self.read_long_packet_unpin(header))
-    }
-
-    fn rest(&self) -> &'a [u8] {
-        self.source
     }
 }
 

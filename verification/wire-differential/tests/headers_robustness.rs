@@ -7,17 +7,14 @@ use sakuya_wire::{
     header::{
         HeaderForm,
         codec::{
-            ReadLongHeaderHostExt as _, ReadShortHeaderHostExt as _,
-            ReadVersionNegotiationHostExt as _, WriteVersionNegotiationHostExt as _,
+            read_long_header, read_short_header, read_version_negotiation,
+            write_version_negotiation,
         },
     },
     v1::{
         header::{
             LongPacketType, VERSION,
-            codec::{
-                ReadLongPacketError, ReadLongPacketHostExt as _,
-                WriteRetryPacketWithoutTagHostExt as _,
-            },
+            codec::{ReadLongPacketError, read_long_packet, write_retry_packet_without_tag},
         },
         protected_packet::{IntoPacketsError, PacketBoundaryError, into_packets},
     },
@@ -27,10 +24,8 @@ use wire_differential::{
     cases,
     headers::{
         generate::{coalesced, datagram, retry_input, version_negotiation_input},
-        read_sakuya, read_sakuya_from,
         split::{Item, split_sakuya},
     },
-    hosts::{Failing, Waiting, run},
     tally::hex,
 };
 
@@ -65,7 +60,7 @@ proptest! {
     #[test]
     fn headers_read_any_input(bytes in any_input(), short_len in dcid_len()) {
         let mut input = bytes.as_slice();
-        match input.sync_read_short_header_unpin(short_len) {
+        match read_short_header(&mut input, short_len) {
             Ok(short) => {
                 prop_assert_eq!(short.end(), bytes.len());
                 prop_assert_eq!(short.packet_number_offset(), 1 + short_len.get());
@@ -77,19 +72,19 @@ proptest! {
             ),
         }
         let mut input = bytes.as_slice();
-        let Ok(header) = input.sync_read_long_header_unpin() else { return Ok(()) };
+        let Ok(header) = read_long_header(&mut input) else { return Ok(()) };
         prop_assert_eq!(header.version_specific_offset(), bytes.len() - input.len());
         let rest = input;
 
         let mut versions = rest;
-        let negotiation = versions.sync_read_version_negotiation_unpin(header);
+        let negotiation = read_version_negotiation(&mut versions, header);
         prop_assert_eq!(
             negotiation.is_ok(),
             header.version() == Version::NEGOTIATION && rest.len() % 4 == 0
         );
 
         let mut packet = rest;
-        match packet.sync_read_long_packet_unpin(header) {
+        match read_long_packet(&mut packet, header) {
             Ok(parsed) => {
                 prop_assert_eq!(parsed.end(), bytes.len() - packet.len(), "{}", hex(&bytes));
                 prop_assert_eq!(header.version(), VERSION);
@@ -114,9 +109,9 @@ proptest! {
     #[test]
     fn truncated_long_packets_are_incomplete(bytes in any_input()) {
         let mut input = bytes.as_slice();
-        let Ok(header) = input.sync_read_long_header_unpin() else { return Ok(()) };
+        let Ok(header) = read_long_header(&mut input) else { return Ok(()) };
         let mut rest = input;
-        let Ok(packet) = rest.sync_read_long_packet_unpin(header) else { return Ok(()) };
+        let Ok(packet) = read_long_packet(&mut rest, header) else { return Ok(()) };
         // A Retry packet extends to the end of the source: its prefixes
         // still holding the tag are shorter Retry packets.
         let end = if packet.packet_type() == LongPacketType::Retry {
@@ -127,10 +122,10 @@ proptest! {
         for cut in 0..end {
             let prefix = &bytes[..cut];
             let mut input = prefix;
-            match input.sync_read_long_header_unpin() {
+            match read_long_header(&mut input) {
                 Err(error) => prop_assert!(error.is_incomplete(), "cut {} of {}", cut, hex(&bytes)),
                 Ok(header) => {
-                    let error = input.sync_read_long_packet_unpin(header).unwrap_err();
+                    let error = read_long_packet(&mut input, header).unwrap_err();
                     prop_assert!(error.is_incomplete(), "cut {} of {}: {}", cut, hex(&bytes), error);
                 }
             }
@@ -138,52 +133,6 @@ proptest! {
                 let error = item.unwrap_err();
                 prop_assert!(boundary_incomplete(&error), "cut {} of {}: {}", cut, hex(&bytes), error);
             }
-        }
-    }
-
-    /// A source that waits before every byte reads as a byte slice does.
-    #[test]
-    fn headers_read_the_same_from_a_waiting_source(bytes in any_input(), short_len in dcid_len()) {
-        let mut slice = bytes.as_slice();
-        let mut waiting = Waiting::new(&bytes);
-        let expected = read_sakuya_from(&mut slice, short_len);
-        prop_assert_eq!(read_sakuya_from(&mut waiting, short_len), expected.clone());
-        if expected.is_some() {
-            prop_assert_eq!(waiting.source, slice);
-        }
-        prop_assert_eq!(read_sakuya(&bytes, short_len), expected);
-    }
-
-    /// A source that fails after `limit` bytes gives what a byte slice gives
-    /// while the reader needs no more; past that it reports its failure, not
-    /// an early end.
-    #[test]
-    fn receiver_failures_are_not_truncations(bytes in any_input(), limit in 0usize..48, short_len in dcid_len()) {
-        let mut slice = bytes.as_slice();
-        let expected = slice.sync_read_long_header_unpin();
-        let needed = bytes.len() - slice.len();
-        let mut failing = Failing::new(&bytes, limit);
-        let actual = run(failing.read_long_header_unpin());
-        match (&expected, &actual) {
-            (Ok(a), Ok(b)) => prop_assert!(a == b && needed <= limit),
-            (Ok(_), Err(error)) => prop_assert!(needed > limit && !error.is_incomplete(), "{}", error),
-            (Err(a), Err(b)) if bytes.len() < limit || (!a.is_incomplete() && limit > 0) => {
-                prop_assert_eq!(a.is_incomplete(), b.is_incomplete());
-            }
-            (Err(_), Err(error)) => prop_assert!(!error.is_incomplete(), "{}", error),
-            (Err(_), Ok(_)) => prop_assert!(false, "a failing source reads more"),
-        }
-
-        // A short header reads to the end of the source.
-        let mut slice = bytes.as_slice();
-        let expected = slice.sync_read_short_header_unpin(short_len);
-        let mut failing = Failing::new(&bytes, limit);
-        let actual = run(failing.read_short_header_unpin(short_len));
-        let long_form = bytes.first().is_some_and(|&first| HeaderForm::of(first) == HeaderForm::Long);
-        if bytes.len() < limit || (long_form && limit > 0) {
-            prop_assert_eq!(expected.map_err(|e| e.is_incomplete()), actual.map_err(|e| e.is_incomplete()));
-        } else {
-            prop_assert!(actual.is_err_and(|error| !error.is_incomplete()));
         }
     }
 
@@ -208,33 +157,27 @@ proptest! {
 proptest! {
     #![proptest_config(cases::config(20_000))]
 
-    /// Writing into a buffer with room for `room` bytes succeeds exactly when
-    /// the packet fits; otherwise it fails, and the bytes that fit are the
-    /// packet's first bytes.
+    /// Writing into a buffer with exactly the room the packet takes writes
+    /// the bytes a growing buffer gets.
     #[test]
     fn writes_fill_the_room_they_have(
         retry in retry_input(),
         negotiation in version_negotiation_input(),
-        room in 0usize..600,
     ) {
         let (dcid, scid) = (ConnectionId::new(&retry.dcid).unwrap(), ConnectionId::new(&retry.scid).unwrap());
         let mut expected = Vec::new();
-        expected.sync_write_retry_packet_without_tag_unpin(retry.unused, dcid, scid, &retry.token).unwrap();
-        let mut buffer = vec![0; room];
-        let result = (&mut buffer[..]).sync_write_retry_packet_without_tag_unpin(retry.unused, dcid, scid, &retry.token);
-        prop_assert_eq!(result.is_ok(), room >= expected.len());
-        let fitted = room.min(expected.len());
-        prop_assert_eq!(&buffer[..fitted], &expected[..fitted]);
+        write_retry_packet_without_tag(&mut expected, retry.unused, dcid, scid, &retry.token);
+        let mut buffer = vec![0; expected.len()];
+        write_retry_packet_without_tag(&mut &mut buffer[..], retry.unused, dcid, scid, &retry.token);
+        prop_assert_eq!(&buffer, &expected);
 
         let dcid = RawConnectionId::new(&negotiation.dcid).unwrap();
         let scid = RawConnectionId::new(&negotiation.scid).unwrap();
         let versions: Vec<Version> = negotiation.versions.iter().copied().map(Version::new).collect();
         let mut expected = Vec::new();
-        expected.sync_write_version_negotiation_unpin(negotiation.unused, &dcid, &scid, &versions).unwrap();
-        let mut buffer = vec![0; room];
-        let result = (&mut buffer[..]).sync_write_version_negotiation_unpin(negotiation.unused, &dcid, &scid, &versions);
-        prop_assert_eq!(result.is_ok(), room >= expected.len());
-        let fitted = room.min(expected.len());
-        prop_assert_eq!(&buffer[..fitted], &expected[..fitted]);
+        write_version_negotiation(&mut expected, negotiation.unused, &dcid, &scid, &versions);
+        let mut buffer = vec![0; expected.len()];
+        write_version_negotiation(&mut &mut buffer[..], negotiation.unused, &dcid, &scid, &versions);
+        prop_assert_eq!(&buffer, &expected);
     }
 }
