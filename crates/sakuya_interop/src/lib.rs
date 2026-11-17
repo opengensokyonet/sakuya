@@ -9,8 +9,8 @@
 //!
 //! A test case either program does not support ends it with exit code 127,
 //! as the runner requires. `QLOGDIR` is read, but no qlog is written yet.
-//! The client does not verify the server's certificate chain
-//! ([`verify`](crate::verify)): it takes the server's key from the leaf
+//! The client does not verify the server's certificate chain (the
+//! private `verify` module): it takes the server's key from the leaf
 //! certificate, which the handshake verifies CertificateVerify with;
 //! nothing here is for a production composition.
 
