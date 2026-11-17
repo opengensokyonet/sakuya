@@ -16,6 +16,10 @@ datagram = ["sakuya_connection/datagram"]
 # The reliable stream reset extension as a part of the connections an
 # endpoint makes.
 reset_stream_at = ["sakuya_connection/reset_stream_at"]
+# An experiment for the proof of concept of passthrough forwarding: an
+# incoming connection may be given the connection ID generator it is made
+# with.
+passthrough_experiment = []
 
 [dependencies]
 bytes.workspace = true
@@ -42,4 +46,8 @@ nitori_crypto_aws_lc.workspace = true
 sakuya_clock_tokio.workspace = true
 sakuya_packet_protection = { workspace = true, features = ["ring"] }
 sakuya_udp_tokio.workspace = true
-tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "net", "rt", "sync", "time"] }
+
+[[test]]
+name = "forwarding"
+required-features = ["passthrough_experiment"]

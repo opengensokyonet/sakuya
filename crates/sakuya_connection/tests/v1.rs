@@ -53,7 +53,8 @@ use sakuya_connection::{
         },
         feedback::AckSummary,
         first_flight::{
-            FirstFlight, FirstFlightReadState, ReadFirstFlightError, read_first_flight,
+            FirstFlight, FirstFlightReadState, PacketDigest, ReadFirstFlightError,
+            read_first_flight,
         },
         idle::IdleTimeout,
         input::{InitialPathReceiver, LogicalPathInput},
@@ -4334,6 +4335,7 @@ fn read_first(receiver: &mut TestReceiver) -> (FirstFlightReadState<Mine>, Resul
     let result = {
         let reading = core::pin::pin!(read_first_flight::<Mine, Parts, _, _, _, _>(
             &mut state,
+            [],
             receiver,
             MessageLimits::default(),
         ));
@@ -4425,6 +4427,91 @@ fn reading_the_first_flight_ends_with_the_first_client_hello() {
                 .to_owned(),
             format!("credit Some(Some({}))", 2 * size),
         ]
+    );
+}
+
+#[test]
+fn reading_the_first_flight_starts_with_the_datagrams_taken_and_keeps_a_digest() {
+    reset();
+    common::strategy::plan_nothing();
+    let first = link();
+    let mut receiver = test_receiver();
+    let hello = client_hello();
+    let one = padded(
+        &[],
+        |payload| long_packet(INITIAL, 0, payload),
+        &crypto_at(0, &hello[..20]),
+    );
+    let initial_two = padded(
+        &[],
+        |payload| long_packet(INITIAL, 1, payload),
+        &[&crypto_at(20, &hello[20..])[..], &ping()].concat(),
+    );
+    let two = coalesced([initial_two.clone(), long_packet(ZERO_RTT, 0, &ping())]);
+    let (one_len, two_len) = (one.len(), two.len());
+    // the first datagram was taken from the receiver already; the second
+    // comes through it
+    let taken = ReceivedDatagram::new(one, ArrivalFacts::new(TestLink(first.clone()), ms(1), None));
+    deliver(two, &first, ms(2));
+    let mut state = FirstFlightReadState::<Mine>::new(
+        &RingBackend,
+        &client_dcid(),
+        &<v1::Server<common::PendingServerEngine> as SideCapacities>::crypto_receive(),
+        MaxAckRanges::DEFAULT,
+        MAX_HELD.with(Cell::get),
+    );
+    state.keep_digest();
+    let read = {
+        let reading = core::pin::pin!(read_first_flight::<Mine, Parts, _, _, _, _>(
+            &mut state,
+            [taken],
+            &mut receiver,
+            MessageLimits::default(),
+        ));
+        reading.poll(&mut core::task::Context::from_waker(
+            core::task::Waker::noop(),
+        ))
+    };
+    assert!(matches!(read, core::task::Poll::Ready(Ok(()))));
+    assert_eq!(state.received_bytes(), one_len + two_len);
+    let digest = state.take_digest().expect("a digest was kept");
+    assert_eq!(digest.token().map(|token| token.len()), Some(0));
+    let datagrams = digest.datagrams();
+    assert_eq!(
+        datagrams
+            .iter()
+            .map(|datagram| datagram.size())
+            .collect::<Vec<_>>(),
+        [one_len, two_len]
+    );
+    let [PacketDigest::Initial(first_initial)] = datagrams[0].packets() else {
+        panic!("the first datagram holds one Initial packet: {datagrams:?}");
+    };
+    assert_eq!(first_initial.packet_number().get(), 0);
+    assert_eq!(first_initial.length(), one_len);
+    assert_eq!(first_initial.crypto().len(), 1);
+    assert_eq!(first_initial.crypto()[0], 0..20);
+    assert!(!first_initial.ping());
+    let [
+        PacketDigest::Initial(second_initial),
+        PacketDigest::ZeroRtt(0),
+    ] = datagrams[1].packets()
+    else {
+        panic!("the second datagram holds an Initial and a 0-RTT packet: {datagrams:?}");
+    };
+    assert_eq!(second_initial.packet_number().get(), 1);
+    assert_eq!(second_initial.length(), initial_two.len());
+    assert_eq!(second_initial.crypto().len(), 1);
+    assert_eq!(second_initial.crypto()[0], 20..hello.len() as u64);
+    assert!(second_initial.ping());
+    // the digest is given once; the 0-RTT packet it names is held
+    assert!(state.take_digest().is_none());
+    assert_eq!(state.take_held().len(), 1);
+    assert_eq!(
+        state
+            .take_first_client_hello()
+            .map(|first| first.encoded().encoded().to_vec()),
+        Some(hello)
     );
 }
 

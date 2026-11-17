@@ -24,6 +24,8 @@
 //!   connection's start values are made from it; [`v1`] is QUIC version 1's.
 //! - [`endpoint`], [`reflow`], [`incoming`], [`outgoing`]: the endpoint,
 //!   its reflow driver, and the incoming and outgoing connections.
+//! - [`passthrough`]: what an incoming connection hands off when the server
+//!   forwards its datagrams to another server instead of accepting it.
 //! - [`domain`]: what the bindings, the reflow driver and the connections of
 //!   one endpoint share.
 //! - [`address_token`]: address validation tokens, issued in Retry packets and
@@ -73,6 +75,7 @@ mod late_initial;
 pub mod link;
 pub mod outgoing;
 pub mod part;
+pub mod passthrough;
 pub mod quota;
 pub mod reflow;
 pub mod retry;

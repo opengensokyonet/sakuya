@@ -25,17 +25,21 @@ use std::{
     },
 };
 
+use bytes::Bytes;
 use core::future::poll_fn;
+use frunk_core::coproduct::CoproductTaker;
 use futures_util::Stream;
 use nitori_crypto::RandomError;
+use nitori_io::SplitTo;
 use sakuya_clock::MonotonicClock as _;
 use sakuya_connection::v1::input::LogicalPathDatagramReceiver as _;
 use sakuya_connection::{
-    error::ConnectionErrorsOf,
+    dispatch::FrameSetDispatch,
+    error::{ConnectionErrorOf, ConnectionErrorsOf},
     send_strategy::AnyActiveLinkPath,
-    share::ConnectionArgsOf,
+    share::{ConnectionArgsOf, LineagePartList},
     v1::{
-        self as connection, ConnectionArgs,
+        self as connection, ConnectionArgs, CryptoReceiveBufferOf,
         advancing::HandshakeStart,
         amplification::AddressValidation,
         application_handles::{
@@ -44,11 +48,15 @@ use sakuya_connection::{
             handle,
         },
         close_request::CloseRequestCell,
-        first_flight::FirstFlight,
-        input::InitialPathReceiver,
+        error::V1ConnectionErrorOf,
+        first_flight::{
+            FirstFlight, FirstFlightReadState, ReadFirstFlightError, read_first_flight,
+        },
+        input::{HeldInput, InitialPathReceiver},
         link::LinkFacts,
         send::SendTypes,
         send_planning::{HostSendStrategyTypes, IntakePublishOutcome},
+        streams::resets::StreamResetsOf,
         streams::send::StreamIntent,
     },
 };
@@ -60,13 +68,18 @@ use sakuya_link::MIN_DATAGRAM_SIZE;
 use sakuya_link::{EcnMarking, Link, OutgoingDatagram};
 use sakuya_recovery::loss::GranularityBelowClockError;
 use sakuya_stream::connection::TransportImmediateClose;
-use sakuya_tls::clock::Clock as _;
+use sakuya_tls::{clock::Clock as _, server::engine::FirstClientHello};
 use sakuya_wire::header::codec::read_long_header;
-use sakuya_wire::{connection_id::ConnectionId, parts::Selector, version::Version};
+use sakuya_wire::{
+    connection_id::ConnectionId,
+    parts::{CoprodInjector, Selector},
+    v1::frame::{FrameRun, set::FrameSet},
+    version::Version,
+};
 
 use crate::{
     address_token::{AddressTokens as _, NewTokenAddress, TokenPeerAddress as _},
-    choices::{ConnectionDatagramReceiver, DatagramOf, EndpointChoices, LinkOf, PeerOf},
+    choices::{ConnectionDatagramReceiver, DatagramOf, EndpointChoices, LinkOf, PayloadOf, PeerOf},
     config::thresholds_against_clock,
     connection::{make_connection, register_first_local},
     domain::{Born, Domain},
@@ -76,10 +89,13 @@ use crate::{
     invalid_token::encode_initial_close,
     late_initial::LateInitials,
     part::CoreFacts,
+    part::PartConfigs,
+    passthrough::{PassthroughHandoff, PassthroughReceiver},
     reflow,
     retry::{EncodeStatelessRetryError, encode_stateless_retry, generate_stateless_scid},
     role::AcceptingServerRole,
     stateless_check::{AdmittedDatagram, IncomingLoad, ReturnedToken},
+    v1::ConnectionConfig as V1ConnectionConfig,
     zero_length::{ZeroLengthLocalCidInUseError, ZeroLengthLocalOccupancy},
 };
 
@@ -122,15 +138,18 @@ pub struct TerminableIncoming<E: EndpointChoices, S: AcceptingServerRole<E>> {
     domain: Arc<Domain<E>>,
     config: S::Config,
     receiver: ConnectionDatagramReceiver<E>,
-    first: DatagramOf<E>,
+    /// The link the first datagram arrived on.
+    link: LinkOf<E>,
     facts: IncomingFacts<PeerOf<E>>,
     client_dcid: ConnectionId,
     client_scid: ConnectionId,
     transport_validated: bool,
     zero_length: Option<ZeroLengthLocalOccupancy<crate::choices::LocalOf<E>>>,
-    /// The datagrams taken from the receiver after the first, before the
-    /// connection is made: they follow it in the first flight.
-    later: Vec<DatagramOf<E>>,
+    /// The first flight so far.
+    flight: IncomingFlight<E, S>,
+    /// The connection ID generator the connection is made with, instead of
+    /// one made from the endpoint's configuration.
+    connection_ids: Option<E::ConnectionIds>,
     /// Whether a datagram whose first packet is an Initial is in the first
     /// flight.
     has_initial: bool,
@@ -140,6 +159,29 @@ pub struct TerminableIncoming<E: EndpointChoices, S: AcceptingServerRole<E>> {
     /// client returns with the same component, so the one in `config` is
     /// not used.
     tokens: S::Tokens,
+}
+
+/// The first flight of an incoming connection: the datagrams taken from its
+/// receiver, or what reading them left.
+enum IncomingFlight<E: EndpointChoices, S: AcceptingServerRole<E>> {
+    /// The datagrams taken, the first first: they come first in the first
+    /// flight, before what the receiver delivers.
+    Taken(Vec<DatagramOf<E>>),
+    /// What reading the first flight left, the first ClientHello in it;
+    /// boxed, as it is much larger than the datagrams.
+    Read(Box<FirstFlightReadState<S::Choices>>),
+}
+
+impl<E: EndpointChoices, S: AcceptingServerRole<E>> IncomingFlight<E, S> {
+    /// Takes `datagram` into the first flight, after those taken before.
+    fn take(&mut self, datagram: DatagramOf<E>) {
+        match self {
+            Self::Taken(datagrams) => datagrams.push(datagram),
+            // invariant: the first flight is read only once a datagram with
+            // an Initial was taken, and only those before it are taken here
+            Self::Read(_) => unreachable!("nothing is taken once the first flight was read"),
+        }
+    }
 }
 
 impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
@@ -166,11 +208,12 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             receiver: born.receiver,
             client_dcid: *born.initial.dcid(),
             client_scid: *born.initial.scid(),
-            first: born.datagram,
+            link: born.datagram.link().clone(),
+            flight: IncomingFlight::Taken(vec![born.datagram]),
+            connection_ids: None,
             has_initial: !admitted.born_from_zero_rtt,
             facts,
             zero_length: None,
-            later: Vec::new(),
             late: Arc::clone(late),
             tokens: config.tokens.clone(),
         }
@@ -202,10 +245,22 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
     /// that local end.
     pub fn use_zero_length_local_cid(&mut self) -> Result<(), ZeroLengthLocalCidInUseError> {
         if self.zero_length.is_none() {
-            let local = self.first.link().id().local.clone();
+            let local = self.link.id().local.clone();
             self.zero_length = Some(self.domain.zero_length.occupy(local)?);
         }
         Ok(())
+    }
+
+    /// Makes the connection generate its connection IDs with `generator`
+    /// instead of one made from the endpoint's configuration: its first
+    /// local connection ID when it is accepted, and those it issues later.
+    ///
+    /// It is an experiment, for a server behind a Relay that forwards
+    /// without encapsulation: the Relay must know each connection ID before
+    /// the server issues it.
+    #[cfg(feature = "passthrough_experiment")]
+    pub fn use_connection_ids(&mut self, generator: E::ConnectionIds) {
+        self.connection_ids = Some(generator);
     }
 
     /// Accepts the connection: generates and registers its first local
@@ -262,12 +317,13 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
                 return Err(AcceptIncomingError::TimerGranularity { half: self, source });
             }
         };
-        let link = self.first.link().clone();
+        let link = self.link.clone();
         let first_local = match register_first_local(
             &self.domain,
             &mut self.receiver,
             &link,
             &mut self.zero_length,
+            self.connection_ids.take(),
         ) {
             Ok(first_local) => first_local,
             Err(source) => return Err(AcceptIncomingError::EndpointClosed { half: self, source }),
@@ -276,13 +332,14 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             domain,
             config,
             receiver,
-            first,
+            link: _,
             facts,
             client_dcid,
             client_scid: _,
             transport_validated,
             zero_length: _,
-            later,
+            flight,
+            connection_ids: _,
             has_initial: _,
             late: _,
             tokens: _,
@@ -307,7 +364,10 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             first_link: LinkFacts { validation },
             crypto_receive: config.checked_crypto_receive(),
             loss_thresholds,
-            first_flight: FirstFlight::Datagrams(core::iter::once(first).chain(later).collect()),
+            first_flight: match flight {
+                IncomingFlight::Taken(datagrams) => FirstFlight::Datagrams(datagrams),
+                IncomingFlight::Read(state) => FirstFlight::Read(*state),
+            },
             initial_receiver: InitialPathReceiver::new(receiver),
             reset_token_registry: domain.reset_tokens.clone(),
             first_local_connection_id: first_local.id,
@@ -338,7 +398,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
     pub async fn initial_arrived(mut self) -> Self {
         while !self.has_initial {
             let delivery = poll_fn(|cx| self.receiver.poll_next(cx)).await;
-            let link = self.first.link().id().clone();
+            let link = self.link.id().clone();
             let scid = self.client_scid;
             let ours = move |datagram: &DatagramOf<E>| {
                 datagram.link().id() == &link
@@ -367,7 +427,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             };
             if initial_scid(datagram.payload().as_ref()).is_none() {
                 // More of the client's 0-RTT, before its Initial.
-                self.later.push(datagram);
+                self.flight.take(datagram);
                 continue;
             }
             if datagram.payload().as_ref().len() < MIN_DATAGRAM_SIZE {
@@ -375,11 +435,178 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             }
             if let Some((token, datagram)) = self.late.check(datagram).await {
                 self.facts.token = token;
-                self.later.push(datagram);
+                self.flight.take(datagram);
                 self.has_initial = true;
             }
         }
         self
+    }
+
+    /// Reads the client's first ClientHello without sending anything, and
+    /// gives it with the incoming connection, which the application then
+    /// accepts, retries, refuses, hands off or drops as it decides.
+    ///
+    /// An incoming connection born from 0-RTT first waits for its Initial,
+    /// as [`initial_arrived`](Self::initial_arrived) does. The datagrams of
+    /// the first flight are read as the connection would receive them, under
+    /// the message limits of the handshake and the limits of the
+    /// configuration of version 1 (`Ic` is its position among the
+    /// configurations of the parts; `Ie`, `Hd` and `Iv` are found as for
+    /// [`read_first_flight`]). What was read goes into the connection when it
+    /// is accepted: the ClientHello is not read again. When the
+    /// configuration [keeps a digest](crate::config::ServerConfig::keep_first_flight_digest),
+    /// the reading keeps one for [`into_passthrough_handoff`](Self::into_passthrough_handoff).
+    /// Once the ClientHello was read, it is given again at once. How long
+    /// to wait is the application's: dropping the future drops the incoming
+    /// connection.
+    ///
+    /// # Errors
+    ///
+    /// [`ReadClientHelloError`] when a packet of the first flight causes a
+    /// connection error, the client closed the attempt, or the ClientHello
+    /// does not read, as [`ReadFirstFlightError`] says. Nothing was sent;
+    /// the incoming connection comes back with what was read, for the
+    /// application to refuse or drop.
+    #[expect(
+        clippy::result_large_err,
+        reason = "the error gives the incoming connection back by value"
+    )]
+    pub async fn read_client_hello<Ic, Ie, Hd, Iv>(
+        mut self,
+    ) -> Result<(FirstClientHello, Self), ReadClientHelloError<Self, ConnectionErrorOf<S::Parts>>>
+    where
+        <S::Parts as PartConfigs<S::Choices, S::Parts>>::Configs:
+            Selector<V1ConnectionConfig<S::Choices, S::Parts>, Ic>,
+        CryptoReceiveBufferOf<S::Choices>: Unpin,
+        PayloadOf<E>: SplitTo + AsRef<[u8]> + AsMut<[u8]> + Into<Bytes>,
+        S::Parts: LineagePartList<S::Choices>
+            + FrameSetDispatch<S::Choices, S::Parts, Hd>
+            + StreamResetsOf,
+        <S::Parts as ConnectionErrorsOf>::ConnectionErrors:
+            CoprodInjector<V1ConnectionErrorOf<S::Parts>, Ie>,
+        <S::Parts as FrameSet>::Run<Bytes>: CoproductTaker<FrameRun<Bytes>, Iv>,
+    {
+        if !self.has_initial {
+            self = self.initial_arrived().await;
+        }
+        let flight = core::mem::replace(&mut self.flight, IncomingFlight::Taken(Vec::new()));
+        let (mut state, taken) = match flight {
+            IncomingFlight::Taken(datagrams) => {
+                let v1 = Selector::<V1ConnectionConfig<S::Choices, S::Parts>, Ic>::get(
+                    &self.config.parts,
+                );
+                let mut state = Box::new(FirstFlightReadState::new(
+                    &self.domain.crypto,
+                    &self.client_dcid,
+                    &self.config.checked_crypto_receive(),
+                    v1.max_ack_ranges,
+                    v1.max_held_inputs,
+                ));
+                if self.config.keep_first_flight_digest {
+                    state.keep_digest();
+                }
+                (state, datagrams)
+            }
+            IncomingFlight::Read(state) => {
+                if let Some(first) = state.first_client_hello() {
+                    let first = first.clone();
+                    self.flight = IncomingFlight::Read(state);
+                    return Ok((first, self));
+                }
+                (state, Vec::new())
+            }
+        };
+        let limits = self.config.handshake().limits();
+        let read = read_first_flight::<S::Choices, S::Parts, Ie, Hd, Iv, _>(
+            &mut state,
+            taken,
+            &mut self.receiver,
+            limits,
+        )
+        .await;
+        let first = state.first_client_hello().cloned();
+        self.flight = IncomingFlight::Read(state);
+        match (read, first) {
+            (Ok(()), Some(first)) => Ok((first, self)),
+            // invariant: the reading ends well only once it read the first
+            // ClientHello
+            (Ok(()), None) => unreachable!("the reading ends with the first ClientHello"),
+            (Err(source), _) => Err(ReadClientHelloError { half: self, source }),
+        }
+    }
+
+    /// Hands the connection off for passthrough forwarding instead of
+    /// accepting it: gives what forwarding its datagrams to another server
+    /// takes, after [`read_client_hello`](Self::read_client_hello) read the
+    /// first ClientHello with a digest kept. Nothing is sent.
+    ///
+    /// The receiver goes with it, under the client's first destination
+    /// connection ID: the client's later datagrams for the connection keep
+    /// coming to it, and make no other incoming connection; see
+    /// [`PassthroughReceiver::recv`] for which it takes.
+    ///
+    /// # Errors
+    ///
+    /// [`PassthroughHandoffError`], which gives the incoming connection back
+    /// as it was: [`NotRead`](PassthroughHandoffError::NotRead) before the
+    /// first ClientHello was read; [`NoDigest`](PassthroughHandoffError::NoDigest)
+    /// when the reading kept no digest.
+    #[expect(
+        clippy::result_large_err,
+        reason = "the error gives the incoming connection back by value"
+    )]
+    pub fn into_passthrough_handoff(
+        mut self,
+    ) -> Result<PassthroughHandoff<E>, PassthroughHandoffError<Self>> {
+        let digest = match &mut self.flight {
+            IncomingFlight::Read(state) if state.first_client_hello().is_some() => {
+                match state.take_digest() {
+                    Some(digest) => digest,
+                    None => return Err(PassthroughHandoffError::NoDigest(self)),
+                }
+            }
+            _ => return Err(PassthroughHandoffError::NotRead(self)),
+        };
+        let Self {
+            domain,
+            receiver,
+            link,
+            facts,
+            client_dcid,
+            client_scid,
+            flight,
+            ..
+        } = self;
+        // invariant: as matched above
+        let IncomingFlight::Read(mut state) = flight else {
+            unreachable!("the first flight was read")
+        };
+        let client = link.id().clone();
+        let client_hello = state
+            .take_first_client_hello()
+            .expect("the first ClientHello was read");
+        let zero_rtt = state
+            .take_held()
+            .into_iter()
+            .map(|held| match held {
+                HeldInput::Packet(packet) => packet.into_parts().0.into_bytes(),
+                // invariant: reading the first flight holds 0-RTT packets
+                // only
+                HeldInput::Candidate(_) => {
+                    unreachable!("reading the first flight holds no candidate")
+                }
+            })
+            .collect();
+        Ok(PassthroughHandoff {
+            link,
+            version: facts.version,
+            client_dcid,
+            client_scid,
+            client_hello,
+            digest,
+            zero_rtt,
+            receiver: PassthroughReceiver::new(domain, receiver, client, client_scid),
+        })
     }
 
     /// Retries the connection: sends a Retry packet with an address
@@ -455,7 +682,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             payload: packet,
             ecn: EcnMarking::NotEct,
         }];
-        let link = self.first.link().clone();
+        let link = self.link.clone();
         match link.send(&batch).await {
             Ok(_) => Ok(()),
             Err(source) => Err(RetryError::Send { half: self, source }),
@@ -497,7 +724,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             payload: packet,
             ecn: EcnMarking::NotEct,
         }];
-        let link = self.first.link().clone();
+        let link = self.link.clone();
         match link.send(&batch).await {
             Ok(_) => Ok(()),
             Err(source) => Err(RefuseError { half: self, source }),
@@ -508,16 +735,21 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
     /// connection: the datagrams taken on the link of the first. Before the
     /// address is validated, what the server sends there is at most three
     /// times as much (RFC 9000 §8.1).
+    ///
+    /// Once the first flight was read, it is the bytes the reading counted,
+    /// on whichever link they arrived.
     fn received_bytes(&self) -> usize {
-        let link = self.first.link().id();
-        core::iter::once(&self.first)
-            .chain(
-                self.later
+        match &self.flight {
+            IncomingFlight::Taken(datagrams) => {
+                let link = self.link.id();
+                datagrams
                     .iter()
-                    .filter(|datagram| datagram.link().id() == link),
-            )
-            .map(|datagram| datagram.payload().as_ref().len())
-            .sum()
+                    .filter(|datagram| datagram.link().id() == link)
+                    .map(|datagram| datagram.payload().as_ref().len())
+                    .sum()
+            }
+            IncomingFlight::Read(state) => state.received_bytes(),
+        }
     }
 }
 
@@ -610,6 +842,67 @@ impl<H, S: core::error::Error + 'static> core::error::Error for RefuseError<H, S
         Some(&self.source)
     }
 }
+
+/// The first ClientHello of the incoming connection `H` could not be read;
+/// `C` is the connection's error. Nothing was sent.
+pub struct ReadClientHelloError<H, C> {
+    /// The incoming connection, with what was read.
+    pub half: H,
+    /// Why the reading failed.
+    pub source: ReadFirstFlightError<C>,
+}
+
+impl<H, C: fmt::Debug> fmt::Debug for ReadClientHelloError<H, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReadClientHelloError")
+            .field("source", &self.source)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<H, C> fmt::Display for ReadClientHelloError<H, C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the first ClientHello of the incoming connection could not be read")
+    }
+}
+
+impl<H, C: core::error::Error + 'static> core::error::Error for ReadClientHelloError<H, C> {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// The incoming connection `H` could not be handed off for passthrough
+/// forwarding. It is given back as it was.
+pub enum PassthroughHandoffError<H> {
+    /// Its first ClientHello was not read.
+    NotRead(H),
+    /// Its first ClientHello was read without a digest of the first flight
+    /// kept.
+    NoDigest(H),
+}
+
+impl<H> fmt::Debug for PassthroughHandoffError<H> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotRead(_) => f.write_str("NotRead"),
+            Self::NoDigest(_) => f.write_str("NoDigest"),
+        }
+    }
+}
+
+impl<H> fmt::Display for PassthroughHandoffError<H> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::NotRead(_) => "the first ClientHello of the incoming connection was not read",
+            Self::NoDigest(_) => {
+                "the first flight of the incoming connection was read without a digest"
+            }
+        })
+    }
+}
+
+impl<H> core::error::Error for PassthroughHandoffError<H> {}
 
 /// The incoming connection `H` was not retried: no Retry was sent. It is
 /// given back as it was, its registration kept, for the application to

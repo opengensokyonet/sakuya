@@ -132,6 +132,17 @@ impl<E: EndpointChoices, S: ServerRole<E>, C: ClientRole<E>> Endpoint<E, S, C> {
         S::dropped_input_counts(&self.server)
     }
 
+    /// How many registrations the endpoint's routing holds now: the
+    /// connection IDs of its connections, and of the incoming connections
+    /// and those handed off for passthrough forwarding.
+    ///
+    /// It is an observation, for the experiment of passthrough forwarding:
+    /// registrations can be made or revoked right after it is read.
+    #[cfg(feature = "passthrough_experiment")]
+    pub fn registration_count(&self) -> usize {
+        self.domain.router.index().registration_count()
+    }
+
     /// Adds `binding`, whose new links the endpoint takes, with what the
     /// host declares about it; gives its handle, and its driver, which the
     /// host spawns.

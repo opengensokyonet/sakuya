@@ -57,8 +57,9 @@ pub(crate) struct RegisteredFirstLocal<E: EndpointChoices> {
 /// Generates and registers the first local connection ID of a connection
 /// over `link`, whose datagram receiver is `receiver`; with `zero_length`,
 /// the connection uses zero-length local connection IDs on that local end.
-/// The connection's generator, which generated it, goes into the issuer of
-/// the later ones, which registers them for the same receiver.
+/// The connection's generator, `generator` when given and otherwise one made
+/// from the endpoint's configuration, generates it and goes into the issuer
+/// of the later ones, which registers them for the same receiver.
 ///
 /// The entry is registered before the connection ID is disclosed. The entry
 /// of a connection ID that is not empty goes with the issuer, for the
@@ -74,11 +75,12 @@ pub(crate) fn register_first_local<E: EndpointChoices>(
     receiver: &mut ConnectionDatagramReceiver<E>,
     link: &LinkOf<E>,
     zero_length: &mut Option<ZeroLengthLocalOccupancy<LocalOf<E>>>,
+    generator: Option<E::ConnectionIds>,
 ) -> Result<RegisteredFirstLocal<E>, EndpointClosedError> {
     if domain.is_closed() {
         return Err(EndpointClosedError);
     }
-    let mut generator = E::ConnectionIds::new(&domain.connection_ids);
+    let mut generator = generator.unwrap_or_else(|| E::ConnectionIds::new(&domain.connection_ids));
     let local = || MatchAssociation::ZeroCid(link.id().local.clone());
     let (id, registration): (_, Option<RegistrationOf<E>>) = match zero_length.take() {
         Some(occupancy) => {

@@ -218,6 +218,7 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
             &mut receiver,
             &self.link,
             &mut self.zero_length,
+            None,
         ) {
             Ok(first_local) => first_local,
             Err(source) => return Err(StartOutgoingError::EndpointClosed { half: self, source }),
