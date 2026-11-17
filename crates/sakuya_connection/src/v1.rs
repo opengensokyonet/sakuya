@@ -1671,10 +1671,10 @@ where
     H: close::TransportClose,
     A: ApplicationClose,
 {
-    use events::{CloseTrigger, ConnectionClosed, Initiator};
+    use events::{CloseTrigger, ConnectionClosed, EventInitiator};
     let (initiator, close, trigger) = match reason {
         CloseReason::Local(cause) => (
-            Initiator::Local,
+            EventInitiator::Local,
             cause.immediate_close(),
             match &**cause {
                 LocalCloseCause::Connection(_) | LocalCloseCause::Handshake(_) => {
@@ -1685,17 +1685,17 @@ where
             },
         ),
         CloseReason::Peer(close) => (
-            Initiator::Remote,
+            EventInitiator::Remote,
             Some(close.clone()),
             CloseTrigger::PeerClose,
         ),
-        CloseReason::IdleTimeout => (Initiator::Local, None, CloseTrigger::IdleTimeout),
-        CloseReason::StatelessReset => (Initiator::Remote, None, CloseTrigger::StatelessReset),
+        CloseReason::IdleTimeout => (EventInitiator::Local, None, CloseTrigger::IdleTimeout),
+        CloseReason::StatelessReset => (EventInitiator::Remote, None, CloseTrigger::StatelessReset),
         CloseReason::VersionNegotiation { .. } => {
-            (Initiator::Remote, None, CloseTrigger::VersionMismatch)
+            (EventInitiator::Remote, None, CloseTrigger::VersionMismatch)
         }
-        CloseReason::RetryAbandoned => (Initiator::Local, None, CloseTrigger::RetryAbandoned),
-        CloseReason::Aborted(_) => (Initiator::Local, None, CloseTrigger::Aborted),
+        CloseReason::RetryAbandoned => (EventInitiator::Local, None, CloseTrigger::RetryAbandoned),
+        CloseReason::Aborted(_) => (EventInitiator::Local, None, CloseTrigger::Aborted),
     };
     ConnectionClosed {
         initiator,

@@ -113,7 +113,8 @@ use super::{
     crypto::{CryptoReceiver, send::CryptoSender},
     error::{ConnectionError, V1ConnectionErrorOf},
     events::{
-        ConnectionEventSink, ConnectionEvents, ConnectionState, Initiator, KeyChange, PacketEvents,
+        ConnectionEventSink, ConnectionEvents, ConnectionState, EventInitiator, KeyChange,
+        PacketEvents,
     },
     handshake_done::HandshakeDoneSource,
     keys::{DirectionKeys, HandshakeKeys, LevelKeys, OneRttKeys, PacketProtectionBackend},
@@ -825,7 +826,7 @@ where
             v1_error::<L, Iv>(ConnectionError::PeerTransportParameters { source })
         })?;
         give_events::<T, L, B, Iev>(lineage, others, |events, now| {
-            events.parameters_set(now, Initiator::Remote, &slots);
+            events.parameters_set(now, EventInitiator::Remote, &slots);
         });
         lineage
             .get_mut::<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>()
@@ -838,7 +839,7 @@ where
         });
         let local = L::send_local(lineage);
         give_events::<T, L, B, Iev>(lineage, others, |events, now| {
-            events.parameters_set(now, Initiator::Local, &local);
+            events.parameters_set(now, EventInitiator::Local, &local);
         });
         Ok(Negotiated {
             local: encode::<L>(local, Role::Server),
@@ -1338,7 +1339,7 @@ where
         let local = L::send_local(lineage);
         if first_time {
             give_events::<T, L, B, Iev>(lineage, others, |events, now| {
-                events.parameters_set(now, Initiator::Local, &local);
+                events.parameters_set(now, EventInitiator::Local, &local);
             });
         }
         encode::<L>(local, Role::Client)
@@ -1358,7 +1359,7 @@ where
                 v1_error::<L, Iv>(ConnectionError::PeerTransportParameters { source })
             })?;
         give_events::<T, L, B, Iev>(lineage, others, |events, now| {
-            events.parameters_set(now, Initiator::Remote, &slots);
+            events.parameters_set(now, EventInitiator::Remote, &slots);
         });
         lineage
             .get_mut::<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>()

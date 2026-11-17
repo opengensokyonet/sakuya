@@ -154,9 +154,7 @@ use crate::{
     send_strategy::{IntentTicketResize, IntentTicketWithdraw, SendIntent},
     v1::{
         application_handles::{DriverPanicHandleShare, connection::wake_all},
-        events::{
-            Initiator as EventInitiator, NoEvents, SharedEvents, StreamDataMoved, StreamStateChange,
-        },
+        events::{EventInitiator, NoEvents, SharedEvents, StreamDataMoved, StreamStateChange},
     },
     write::{
         DelimitedFrame, InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf,

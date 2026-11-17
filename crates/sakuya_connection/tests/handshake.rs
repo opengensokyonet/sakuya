@@ -30,7 +30,7 @@ use nitori_crypto::{NamedGroup, SignatureScheme, SigningKey as _};
 use nitori_crypto_aws_lc::{AwsLcBackend, Ed25519SigningKey};
 use nitori_io::{ReadChunkHostExt as _, calls::WriteAllHostExt as _};
 use sakuya_connection::prelude::*;
-use sakuya_connection::v1::events::{CloseTrigger, ConnectionState, Initiator, KeyChange};
+use sakuya_connection::v1::events::{CloseTrigger, ConnectionState, EventInitiator, KeyChange};
 use sakuya_connection::v1::{HostChoices, HostOf, SendParametersOf};
 use sakuya_connection::{
     call::CallBundle,
@@ -1407,12 +1407,12 @@ fn a_client_and_a_server_complete_and_confirm_the_handshake() {
         let count = |wanted: &Recorded| events.iter().filter(|event| *event == wanted).count();
         // this side's parameters and the peer's, once each
         assert_eq!(
-            count(&Recorded::Parameters(Initiator::Local)),
+            count(&Recorded::Parameters(EventInitiator::Local)),
             1,
             "{role:?}"
         );
         assert_eq!(
-            count(&Recorded::Parameters(Initiator::Remote)),
+            count(&Recorded::Parameters(EventInitiator::Remote)),
             1,
             "{role:?}"
         );
@@ -1678,14 +1678,14 @@ fn a_client_that_fails_to_verify_the_server_closes_with_the_alert() {
     assert_eq!(
         closed(Role::Client),
         [Recorded::Closed {
-            initiator: Initiator::Local,
+            initiator: EventInitiator::Local,
             trigger: CloseTrigger::Error,
         }]
     );
     assert_eq!(
         closed(Role::Server),
         [Recorded::Closed {
-            initiator: Initiator::Remote,
+            initiator: EventInitiator::Remote,
             trigger: CloseTrigger::PeerClose,
         }]
     );
@@ -1711,14 +1711,14 @@ fn an_application_close_is_an_event_on_both_sides() {
     assert_eq!(
         closed(Role::Client),
         [Recorded::Closed {
-            initiator: Initiator::Local,
+            initiator: EventInitiator::Local,
             trigger: CloseTrigger::Application,
         }]
     );
     assert_eq!(
         closed(Role::Server),
         [Recorded::Closed {
-            initiator: Initiator::Remote,
+            initiator: EventInitiator::Remote,
             trigger: CloseTrigger::PeerClose,
         }]
     );
@@ -1931,7 +1931,7 @@ fn both_sides_give_the_states_of_a_streams_parts_and_the_data_moved() {
 
     let client = shared_recorded(Role::Client);
     let server = shared_recorded(Role::Server);
-    let has = |recorded: &[SharedRecorded], change: StreamStateChange, trigger: Initiator| {
+    let has = |recorded: &[SharedRecorded], change: StreamStateChange, trigger: EventInitiator| {
         recorded.iter().any(|event| {
             matches!(
                 event,
@@ -1948,11 +1948,20 @@ fn both_sides_give_the_states_of_a_streams_parts_and_the_data_moved() {
         old: None,
         new: Some(ReceiveStreamState::Recv),
     };
-    assert!(has(&client, made_sending, Initiator::Local), "{client:?}");
-    assert!(has(&client, made_receiving, Initiator::Local), "{client:?}");
-    assert!(has(&server, made_sending, Initiator::Remote), "{server:?}");
     assert!(
-        has(&server, made_receiving, Initiator::Remote),
+        has(&client, made_sending, EventInitiator::Local),
+        "{client:?}"
+    );
+    assert!(
+        has(&client, made_receiving, EventInitiator::Local),
+        "{client:?}"
+    );
+    assert!(
+        has(&server, made_sending, EventInitiator::Remote),
+        "{server:?}"
+    );
+    assert!(
+        has(&server, made_receiving, EventInitiator::Remote),
         "{server:?}"
     );
     assert!(delivered(&client), "{client:?}");
@@ -1964,7 +1973,7 @@ fn both_sides_give_the_states_of_a_streams_parts_and_the_data_moved() {
                     new: Some(ReceiveStreamState::DataRead),
                     ..
                 },
-                trigger: Initiator::Local,
+                trigger: EventInitiator::Local,
                 ..
             }
         )),

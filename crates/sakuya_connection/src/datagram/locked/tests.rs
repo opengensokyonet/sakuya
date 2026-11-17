@@ -669,7 +669,7 @@ impl SharedEvents for Recording {
         &self,
         _: sakuya_wire::v1::stream_id::StreamId,
         _: crate::v1::events::StreamStateChange,
-        _: crate::v1::events::Initiator,
+        _: crate::v1::events::EventInitiator,
     ) {
         panic!("the datagram queues give no events of streams");
     }

@@ -25,7 +25,7 @@ use crate::{
     },
     send_strategy::{IntentTicketResize, IntentTicketWithdraw},
     v1::{
-        events::{Initiator as EventInitiator, SharedEvents},
+        events::{EventInitiator, SharedEvents},
         streams::send::StreamIntentHandle,
     },
 };

@@ -98,8 +98,8 @@ use crate::{
             stream::{AllAcknowledgedError, StreamRead, StreamReader, StreamWrite, StreamWriter},
         },
         events::{
-            DataLocation, DataMovedAdditionalInfo, Initiator as EventInitiator, NoEvents,
-            SharedEvents, StreamDataMoved,
+            DataLocation, DataMovedAdditionalInfo, EventInitiator, NoEvents, SharedEvents,
+            StreamDataMoved,
         },
         streams::{
             resets::StreamResets,

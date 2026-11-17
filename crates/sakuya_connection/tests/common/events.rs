@@ -6,8 +6,9 @@ use std::cell::RefCell;
 use sakuya_connection::v1::{
     events::{
         CloseTrigger, ConnectionClosed, ConnectionEvents, ConnectionState, DataLocation,
-        DatagramDropped, EventsStart, Initiator, KeyChange, LossTrigger, LostPacket, PacketEvents,
-        PlainPacket, RecoveryMetrics, SharedEvents, StreamDataMoved, StreamStateChange,
+        DatagramDropped, EventInitiator, EventsStart, KeyChange, LossTrigger, LostPacket,
+        PacketEvents, PlainPacket, RecoveryMetrics, SharedEvents, StreamDataMoved,
+        StreamStateChange,
     },
     receive::DropReason,
 };
@@ -53,7 +54,7 @@ pub enum Recorded {
         bytes_in_flight: usize,
     },
     Closed {
-        initiator: Initiator,
+        initiator: EventInitiator,
         trigger: CloseTrigger,
     },
     State(ConnectionState),
@@ -61,7 +62,7 @@ pub enum Recorded {
     KeyDiscarded(KeyChange),
     Version(Version),
     Alpn(Option<Vec<u8>>),
-    Parameters(Initiator),
+    Parameters(EventInitiator),
 }
 
 /// One event of the streams and datagrams, which the application's threads
@@ -71,7 +72,7 @@ pub enum SharedRecorded {
     StreamState {
         stream_id: StreamId,
         change: StreamStateChange,
-        trigger: Initiator,
+        trigger: EventInitiator,
     },
     StreamDataMoved(StreamDataMoved),
     DatagramDataMoved {
@@ -147,7 +148,12 @@ impl SharedEvents for RecordingShared {
     fn enabled(&self) -> bool {
         true
     }
-    fn stream_state(&self, stream_id: StreamId, change: StreamStateChange, trigger: Initiator) {
+    fn stream_state(
+        &self,
+        stream_id: StreamId,
+        change: StreamStateChange,
+        trigger: EventInitiator,
+    ) {
         self.push(SharedRecorded::StreamState {
             stream_id,
             change,
@@ -234,7 +240,7 @@ impl<I, L> PacketEvents<I, L> for RecordingEvents {
             whole: packet.header_len > 0 && !packet.payload().is_empty(),
         });
     }
-    fn parameters_set(&mut self, _: I, initiator: Initiator, _: &TransportParameterSlots<L>)
+    fn parameters_set(&mut self, _: I, initiator: EventInitiator, _: &TransportParameterSlots<L>)
     where
         L: ParametersOf<TransportParameterSpace>,
     {

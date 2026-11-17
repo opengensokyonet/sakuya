@@ -115,7 +115,7 @@ pub trait PacketEvents<I, L> {
     fn parameters_set(
         &mut self,
         at: I,
-        initiator: Initiator,
+        initiator: EventInitiator,
         parameters: &TransportParameterSlots<L>,
     ) where
         L: ParametersOf<TransportParameterSpace>;
@@ -159,7 +159,7 @@ pub trait SharedEvents {
 
     /// A part of the stream `stream_id` changed its state as `change` says,
     /// on the action of `trigger`.
-    fn stream_state(&self, stream_id: StreamId, change: StreamStateChange, trigger: Initiator);
+    fn stream_state(&self, stream_id: StreamId, change: StreamStateChange, trigger: EventInitiator);
 
     /// Data of a stream moved between the application and the transport.
     fn stream_data_moved(&self, moved: &StreamDataMoved);
@@ -326,7 +326,7 @@ pub struct RecoveryMetrics {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionClosed {
     /// Which side closed it.
-    pub initiator: Initiator,
+    pub initiator: EventInitiator,
     /// The close sent or received; `None` when none was.
     pub close: Option<ImmediateClose>,
     /// What closed it.
@@ -361,7 +361,7 @@ pub struct KeyChange {
 
 /// Which side something came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Initiator {
+pub enum EventInitiator {
     /// This side.
     Local,
     /// The peer.
@@ -437,7 +437,7 @@ impl<I, L> PacketEvents<I, L> for NoEvents {
     #[inline(always)]
     fn packet_sent(&mut self, _: I, _: &PlainPacket<'_>) {}
     #[inline(always)]
-    fn parameters_set(&mut self, _: I, _: Initiator, _: &TransportParameterSlots<L>)
+    fn parameters_set(&mut self, _: I, _: EventInitiator, _: &TransportParameterSlots<L>)
     where
         L: ParametersOf<TransportParameterSpace>,
     {
@@ -453,7 +453,7 @@ impl SharedEvents for NoEvents {
         false
     }
     #[inline(always)]
-    fn stream_state(&self, _: StreamId, _: StreamStateChange, _: Initiator) {}
+    fn stream_state(&self, _: StreamId, _: StreamStateChange, _: EventInitiator) {}
     #[inline(always)]
     fn stream_data_moved(&self, _: &StreamDataMoved) {}
     #[inline(always)]
