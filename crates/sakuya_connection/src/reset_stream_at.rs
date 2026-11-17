@@ -85,7 +85,7 @@ use crate::{
     others::OtherNodes,
     send_strategy::{
         AnyActiveLinkPath, IntentTicketResize, IntentTicketWithdraw, SendIntentIntake,
-        SendIntentPart, SendStrategy, SendStrategyTypes, SharedPublishTo,
+        SendIntentPart, SharedPublishTo,
     },
     share::{
         ConnectionArgsOf, FlatMut, LayerShare, LineageLists, LineagePartList, LinkPathIdentifierOf,
@@ -98,7 +98,9 @@ use crate::{
         close::{CloseReasonRecord, TransportClose},
         parameters::{LocalTransportParameters, PartSlots},
         send::SendTypes,
-        send_planning::{IntakeOf, IntakePublishOutcome, SendStrategyIntake, SendStrategyOf},
+        send_planning::{
+            HostSendStrategyTypes, IntakeOf, IntakePublishOutcome, SendStrategyIntake,
+        },
         streams::{
             StreamSet, StreamSetFrameError, StreamSetFrameErrorOf, StreamsOf,
             resets::{
@@ -579,9 +581,8 @@ impl<T, L, Il, Ir, Is, Ii, Idx> FrameDispatch<T, L, (Il, Ir, Is, Ii, Idx)> for P
 where
     T: Choices,
     L: LineagePartList<T> + ConnectionErrorsOf,
-    SendTypes<T, L>: SendStrategyTypes
+    SendTypes<T, L>: HostSendStrategyTypes
         + IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     StreamsOf<T, L>: ResetStreamAtSet<
             CloseCauseOf<T, L>,
             StreamIntentTicketOf<T, L>,

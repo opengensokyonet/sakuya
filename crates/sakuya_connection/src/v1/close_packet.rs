@@ -78,7 +78,8 @@ use super::{
     recovery::peer_max_udp_payload_size,
     send::SendTypes,
     send_planning::{
-        DatagramLimitsReads, NextPacketNumber, SendStrategyOf, datagram_limits, packet_overheads,
+        DatagramLimitsReads, HostSendStrategyTypes, NextPacketNumber, datagram_limits,
+        packet_overheads,
     },
     spaces::SendJournalsOf,
 };
@@ -93,7 +94,7 @@ use crate::{
     feedback::FeedbackSummariesOf,
     layer::{self, NodeKey},
     others::OtherNodes,
-    send_strategy::{PlannedPacketKind, SendStrategy, SendStrategyTypes},
+    send_strategy::PlannedPacketKind,
     share::{FlatMut, LineageLists, LineagePartList, NodeData},
     take::{GetAt, ReadEach, Reborrow, Take, TakeEach},
     write::{AckOnlyClass, PaddingSummary},
@@ -540,8 +541,7 @@ where
     ConnectionErrorOf<L>: TransportClose,
     ImmediateClosePolicyOf<T>: ImmediateClosePolicy<CloseCauseOf<T, L>>,
     TransportParameterSlots<L>: Selector<Option<MaxUdpPayloadSize>, Ipp>,
-    SendTypes<T, L>: SendStrategyTypes,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     for<'v, 's> <L as LineageLists<'v, T>>::LinkPath:
         Reborrow<'s, Out = <L as LineageLists<'s, T>>::LinkPath>,
     for<'x> <L as LineageLists<'x, T>>::LinkPath: GetAt<ClosePacket, Ip>

@@ -50,14 +50,16 @@ use crate::{
     frame_source::{FindFrameSource, FrameSource, FrameSourceKind},
     send_strategy::{
         AnyActiveLinkPath, IntentTicketResize, IntentTicketWithdraw, MinimumLengths, SendIntent,
-        SendIntentHandle, SendIntentIntake, SendStrategy, SendStrategyTypes, SharedPublishTo,
+        SendIntentHandle, SendIntentIntake, SharedPublishTo,
         ranked::{RankedIntent, SendPriority, SendRank},
     },
     take::{GetAt, GetOptionalAt, Lineage},
     v1::{
         Choices, CloseCauseOf,
         send::{FrameSourceId, SendTypes},
-        send_planning::{IntakeOf, IntakePublishOutcome, SendStrategyIntake, SendStrategyOf},
+        send_planning::{
+            HostSendStrategyTypes, IntakeOf, IntakePublishOutcome, SendStrategyIntake,
+        },
     },
     write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
@@ -591,9 +593,8 @@ macro_rules! stream_frame_kinds {
         where
             T: Choices,
             L: crate::error::ConnectionErrorsOf + StreamResetsOf,
-            SendTypes<T, L>: SendStrategyTypes
+            SendTypes<T, L>: HostSendStrategyTypes
                 + IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-            SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
             StreamsOf<T, L>: StreamSet<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>, StreamResetsOfParts<L>, SendParameters = SendParametersOf<T>>,
             StreamIntentTicketOf<T, L>: IntentTicketResize + IntentTicketWithdraw,
             IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>

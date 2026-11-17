@@ -8,7 +8,7 @@ use sakuya_connection::{
     error::ConnectionErrorsOf,
     layer::{Connection, LinkPathArgs, LogicalPathArgs},
     role::LinkPathRole,
-    send_strategy::{AnyActiveLinkPath, SendStrategy},
+    send_strategy::AnyActiveLinkPath,
     share::{LayerShares, LogicalPathKeys, SoleLogicalPath},
     v1::{
         self, ConnectionArgs,
@@ -19,7 +19,7 @@ use sakuya_connection::{
         },
         connection_ids::{FirstLocalConnectionId, LocalConnectionIdIssuer},
         send::SendTypes,
-        send_planning::{IntakePublishOutcome, SendStrategyOf},
+        send_planning::{HostSendStrategyTypes, IntakePublishOutcome},
         streams::send::StreamIntent,
     },
 };
@@ -138,7 +138,7 @@ where
         + ConnectionErrorsOf,
     <L as PartConfigs<T, L>>::Args: Selector<ConnectionArgs<T, L>, I>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     L: HandleShares<T, L, handle::EstablishedLayer>,
     ConnectionHandleCellOf<T, L>: Send + Sync + 'static,
     C: Composition<T, L>,

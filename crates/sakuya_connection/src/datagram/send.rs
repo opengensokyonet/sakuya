@@ -55,7 +55,7 @@ use crate::{
     frame_source::{FindFrameSource, FrameSource, FrameSourceKind},
     send_strategy::{
         AnyActiveLinkPath, IntentTicketWithdraw, MinimumLengths, SendIntent, SendIntentHandle,
-        SendIntentIntake, SendStrategy, SharedPublishTo,
+        SendIntentIntake, SharedPublishTo,
         ranked::{RankedIntent, SendPriority, SendRank},
     },
     take::{GetAt, GetOptionalAt, Lineage},
@@ -63,7 +63,9 @@ use crate::{
     v1::{
         CloseCauseOf,
         send::SendTypes,
-        send_planning::{IntakeOf, IntakePublishOutcome, SendStrategyIntake, SendStrategyOf},
+        send_planning::{
+            HostSendStrategyTypes, IntakeOf, IntakePublishOutcome, SendStrategyIntake,
+        },
     },
     write::{
         DelimitedFrame, InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf,
@@ -488,7 +490,7 @@ where
     T: Choices<Side: DatagramSide, Host: DatagramChoices>,
     L: ConnectionErrorsOf,
     SendTypes<T, L>: IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     DatagramTicketOf<T, L>: IntentTicketWithdraw,
     IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
         + SharedPublishTo<DatagramIntent<Urgency>, AnyActiveLinkPath, Idx>,

@@ -120,7 +120,7 @@ use super::{
     receive::v1_error,
     retry::ClientRetryPolicy,
     send::SendTypes,
-    send_planning::{IntakePublishOutcome, SendStrategyOf},
+    send_planning::{HostSendStrategyTypes, IntakePublishOutcome},
     streams::send::StreamIntent,
 };
 use crate::v1::{CryptoReceiveBufferOf, CryptoSendBufferOf, SendParametersOf};
@@ -132,7 +132,7 @@ use crate::{
     layer::{self, Connection, EstablishedArgs},
     others::OtherNodes,
     request::StructureRequest,
-    send_strategy::{AnyActiveLinkPath, SendStrategy, SendStrategyTypes},
+    send_strategy::AnyActiveLinkPath,
     share::{ConnectionArgsOf, LineageLists, LineagePartList},
     take::GetAt,
 };
@@ -829,9 +829,8 @@ where
     B: CallBundle,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>,
-    SendTypes<T, L>: SendStrategyTypes,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>,
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<CryptoReceiveBufferOf<T>>, Icr>
         + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>
@@ -1007,10 +1006,9 @@ where
     L: LineagePartList<T> + TransportParameterValueErrorsOf,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>,
-    SendTypes<T, L>: SendStrategyTypes,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, Ia>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>,
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<CryptoReceiveBufferOf<T>>, Icr>
         + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>
@@ -1244,7 +1242,7 @@ where
         + Selector<Option<OriginalDestinationConnectionId>, Jo>
         + Selector<Option<RetrySourceConnectionId>, Jr>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>,
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<CryptoReceiveBufferOf<T>>, Icr>
         + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>
@@ -1405,7 +1403,7 @@ where
         + Selector<Option<RetrySourceConnectionId>, Jr>,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, Ia>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>,
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<CryptoReceiveBufferOf<T>>, Icr>
         + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>

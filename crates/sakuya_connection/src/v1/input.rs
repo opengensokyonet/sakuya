@@ -116,7 +116,7 @@ use sakuya_wire::{
 };
 
 use super::{
-    Choices, CloseCauseOf, LinkPathRoleReads, Side,
+    Choices, CloseCauseOf, HostSendStrategyTypes, LinkPathRoleReads, Side,
     aead_usage::AeadUsage,
     amplification::{AddressValidation, AntiAmplification},
     close::{CloseReasonRecord, LocalCloseCause},
@@ -145,7 +145,6 @@ use super::{
     },
     send::SendTypes,
     send_planning::IntakePublishOutcome,
-    send_planning::SendStrategyOf,
     spaces::AckObligationsOf,
     spaces::SendJournalsOf,
     stateless_reset::StatelessResetSignal,
@@ -166,7 +165,7 @@ use crate::{
     frame_source::{EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts},
     layer::{self, LogicalPath, NodeKey},
     others::OtherNodes,
-    send_strategy::{AnyActiveLinkPath, SendStrategy, SendStrategyTypes},
+    send_strategy::AnyActiveLinkPath,
     share::{FlatMut, LineageLists, LineagePartList, NodeData},
     take::{GetAt, ReadEach, TakeEach},
 };
@@ -685,8 +684,7 @@ where
         TakeEach<'s, HList![AntiAmplification, LinkFacts], Ian>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<ClosePacket, Icp> + TakeEach<'s, HList![ClosePacket], Ipl>,
-    SendTypes<T, L>: SendStrategyTypes,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     L: ParametersOf<TransportParameterSpace>,
     TransportParameterSlots<L>: Selector<Option<MaxAckDelay>, Ima>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath:
@@ -1019,8 +1017,7 @@ fn receive_owned<
         TakeEach<'s, HList![AntiAmplification, LinkFacts], Ian>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<ClosePacket, Icp> + TakeEach<'s, HList![ClosePacket], Ipl>,
-    SendTypes<T, L>: SendStrategyTypes,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
 {
     let size = datagram.payload().as_ref().len();
     let link = datagram.link().id().clone();
@@ -1318,8 +1315,7 @@ fn close_packet_received<T, L, B, Ir, Icp, Ipl>(
     T: Choices,
     L: LineagePartList<T>,
     B: CallBundle,
-    SendTypes<T, L>: SendStrategyTypes,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out: GetAt<LinkPathRole<InstantOf<T>>, Ir>
         + GetAt<ClosePacket, Icp>
@@ -1715,8 +1711,7 @@ where
         TakeEach<'s, HList![AntiAmplification, LinkFacts], Ian>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<ClosePacket, Icp> + TakeEach<'s, HList![ClosePacket], Ipl>,
-    SendTypes<T, L>: SendStrategyTypes,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     L: ParametersOf<TransportParameterSpace>,
     TransportParameterSlots<L>: Selector<Option<MaxAckDelay>, Ima>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath:

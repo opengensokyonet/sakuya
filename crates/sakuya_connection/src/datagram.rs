@@ -69,7 +69,7 @@ use crate::{
     others::OtherNodes,
     send_strategy::{
         AnyActiveLinkPath, IntentTicketWithdraw, PlannedPacketKind, SendIntentHandle,
-        SendIntentIntake, SendIntentPart, SendStrategy,
+        SendIntentIntake, SendIntentPart,
     },
     share::{
         ConnectionArgsOf, FlatMut, LayerShare, LineageLists, LineagePartList, LinkPathIdentifierOf,
@@ -86,7 +86,7 @@ use crate::{
         close::{CloseReasonRecord, TransportClose},
         parameters::{LocalTransportParameters, PartSlots, PeerTransportParameters},
         send::SendTypes,
-        send_planning::{IntakeOf, IntakePublishOutcome, SendStrategyOf},
+        send_planning::{HostSendStrategyTypes, IntakeOf, IntakePublishOutcome},
         streams::resets::{StreamResets, StreamResetsOf, StreamResetsPart},
     },
 };
@@ -677,7 +677,7 @@ where
         + ParametersOf<TransportParameterSpace>
         + HandleShares<T, L, handle::EstablishedLayer>,
     SendTypes<T, L>: IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     DatagramTicketOf<T, L>: IntentTicketWithdraw,
     X: DatagramQueues<CloseCauseOf<T, L>, Config = DatagramQueuesConfigOf<T>>,
     TransportParameterSlots<L>: Selector<Option<MaxDatagramFrameSize>, Jm>,

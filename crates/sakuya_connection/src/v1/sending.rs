@@ -169,8 +169,8 @@ use super::{
     },
     send::SendTypes,
     send_planning::{
-        CongestionAllowance, IntakePublishOutcome, LinkPathPlannerOf, LinkPathSendPlannerOf,
-        SendKeyLevels, SendStrategyCore, SendStrategyOf, datagram_limits,
+        CongestionAllowance, HostSendStrategyTypes, IntakePublishOutcome, LinkPathPlannerOf,
+        LinkPathSendPlannerOf, SendKeyLevels, SendStrategyCore, SendStrategyOf, datagram_limits,
         link_path_packet_overheads,
     },
     spaces::{DEFAULT_MAX_ACK_DELAY, SendJournalsOf, peer_max_ack_delay},
@@ -196,7 +196,7 @@ use crate::{
         AnyActiveLinkPath, CloseResendFacts, DatagramFillPlan, DatagramLimits, FrameSourceCursor,
         FrameSourceSet, LeadingContent, LinkPathRoleKind, LinkPathSendPlanner, Observe,
         PacketOverheads, PlannedDatagram, PlannedPacket, PlannedPacketKind, SendIntentsOf,
-        SendStrategy, SendStrategyTypes,
+        SendStrategyTypes,
     },
     share::{FlatMut, FlatRef, LineageLists, LineagePartList, LinkPathIdentifierOf, NodeData},
     take::{
@@ -599,7 +599,7 @@ where
             ProbeFrameSources = PartsFrameSources<OneRttProbePacket, L>,
             SettlingFrameSources = PartsFrameSources<SettlingResponsePacket, L>,
         >,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     LinkPathSendPlannerOf<T, L>: Observe<DatagramLimits> + Observe<PacketOverheads>,
     RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link>
         + for<'s> LendCongestion<
@@ -952,8 +952,7 @@ struct Filling<'f, 'r, T, L, V, A, Ir, Ici, Ipp, Hs, Hd, Ipd>
 where
     T: Choices,
     L: LineagePartList<T> + FeedbackSummariesOf,
-    SendTypes<T, L>: SendStrategyTypes,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
 {
     now: InstantOf<T>,
     link: &'f LinkIdOf<T>,
@@ -999,7 +998,7 @@ where
             ProbeFrameSources = PartsFrameSources<OneRttProbePacket, L>,
             SettlingFrameSources = PartsFrameSources<SettlingResponsePacket, L>,
         >,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     LinkPathSendPlannerOf<T, L>: Observe<DatagramLimits> + Observe<PacketOverheads>,
     A: CongestionController<InstantOf<T>, SentState = S> + Pacer<InstantOf<T>>,
     TransportParameterSlots<L>: Selector<Option<MaxUdpPayloadSize>, Ipp>,
@@ -1355,8 +1354,7 @@ fn resend_close<'v, T, L, S, Ilf, Irs>(
 where
     T: Choices,
     L: LineagePartList<T> + FeedbackSummariesOf,
-    SendTypes<T, L>: SendStrategyTypes,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     for<'w, 's> <L as LineageLists<'w, T>>::LinkPath:
         Reborrow<'s, Out = <L as LineageLists<'s, T>>::LinkPath>,
     for<'x> <L as LineageLists<'x, T>>::LinkPath:
@@ -1986,7 +1984,7 @@ where
             ProbeFrameSources = PartsFrameSources<OneRttProbePacket, L>,
             SettlingFrameSources = PartsFrameSources<SettlingResponsePacket, L>,
         >,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     LinkPathSendPlannerOf<T, L>: Observe<DatagramLimits> + Observe<PacketOverheads>,
     RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link>
         + for<'s> LendCongestion<

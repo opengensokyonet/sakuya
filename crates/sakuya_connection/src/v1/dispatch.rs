@@ -71,7 +71,7 @@ use super::{
     path_response::PendingPathResponse,
     recovery::{CongestionPartOf, OthersOf, RecoveryFactoryOf, RttOf},
     send::SendTypes,
-    send_planning::{IntakeOf, IntakePublishOutcome, SendStrategyIntake, SendStrategyOf},
+    send_planning::{HostSendStrategyTypes, IntakeOf, IntakePublishOutcome, SendStrategyIntake},
     spaces::SendJournalsOf,
     streams::{
         StreamSet, StreamSetFrameErrorOf, StreamsOf,
@@ -94,7 +94,7 @@ use crate::{
     others::OtherNodes,
     send_strategy::{
         AnyActiveLinkPath, IntentTicketResize, IntentTicketWithdraw, SendIntentIntake,
-        SendStrategy, SendStrategyTypes, SharedPublishTo,
+        SharedPublishTo,
     },
     share::{FlatMut, FlatRef, LineageLists, LineagePartList, LinkPathIdentifierOf, NodeData},
     take::{GetAt, ReadEach, TakeEach},
@@ -277,9 +277,8 @@ where
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![LinkPathRole<InstantOf<T>>], Il>,
-    SendTypes<T, L>: SendStrategyTypes
+    SendTypes<T, L>: HostSendStrategyTypes
         + IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     StreamsOf<T, L>: StreamSet<
             CloseCauseOf<T, L>,
             StreamIntentTicketOf<T, L>,
@@ -486,9 +485,8 @@ where
     T: Choices,
     L: LineagePartList<T> + ConnectionErrorsOf,
     B: CallBundle,
-    SendTypes<T, L>: SendStrategyTypes
+    SendTypes<T, L>: HostSendStrategyTypes
         + IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     StreamsOf<T, L>: 'static,
     IntakeOf<T, L>: SendIntentIntake<AnyActiveLinkPath>
         + SharedPublishTo<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath, Idx>,

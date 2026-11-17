@@ -72,7 +72,7 @@ use crate::{
     error::ConnectionErrorsOf,
     layer,
     others::OtherNodes,
-    send_strategy::{AnyActiveLinkPath, SendStrategy},
+    send_strategy::AnyActiveLinkPath,
     share::{ConnectionArgsOf, LineageLists, LineagePartList, LogicalPathKeys},
     take::GetAt,
     v1::{
@@ -80,7 +80,7 @@ use crate::{
         close::CloseReasonRecord,
         close_request::CloseRequestCell,
         send::SendTypes,
-        send_planning::{IntakeOf, IntakePublishOutcome, SendStrategyOf},
+        send_planning::{HostSendStrategyTypes, IntakeOf, IntakePublishOutcome},
         streams::{
             StreamSet, StreamsOf,
             resets::StreamResetsOfParts,
@@ -558,7 +558,7 @@ where
     T: Choices,
     L: ConnectionErrorsOf,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     L: HandleShares<T, L, handle::EstablishedLayer>,
     ConnectionHandleCellOf<T, L>: Send + Sync + 'static,
 {
@@ -620,7 +620,7 @@ where
     T: Choices,
     L: LineagePartList<T> + ConnectionErrorsOf,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     L: HandleShares<T, L, handle::EstablishedLayer>,
     ConnectionHandleCellOf<T, L>: Send + Sync + 'static,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
@@ -662,7 +662,7 @@ where
     T: Choices,
     L: LineagePartList<T> + ConnectionErrorsOf,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     L: HandleShares<T, L, handle::EstablishedLayer>,
     EstablishedLayerSharesOf<T, L>: DriverPanicHandleShare<CloseCauseOf<T, L>>,
     for<'v> <L as LineageLists<'v, T>>::Connection:
@@ -717,7 +717,7 @@ where
     T: Choices,
     L: ConnectionErrorsOf,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     L: HandleShares<T, L, handle::EstablishedLayer>,
 {
     cell: ConnectionHandleCellOf<T, L>,
@@ -729,7 +729,7 @@ where
     T: Choices,
     L: LogicalPathKeys + ConnectionErrorsOf,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     L: HandleShares<T, L, handle::EstablishedLayer>,
     ConnectionHandleCellOf<T, L>: Send + Sync + 'static,
 {
@@ -749,7 +749,7 @@ where
     T: Choices,
     L: ConnectionErrorsOf,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     L: HandleShares<T, L, handle::EstablishedLayer>,
 {
     /// Ask to close the connection with `error`; the connection takes the
@@ -850,7 +850,7 @@ where
     T: Choices,
     L: ConnectionErrorsOf,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     L: HandleShares<T, L, handle::EstablishedLayer>,
 {
     fn clone(&self) -> Self {
@@ -866,7 +866,7 @@ where
     T: Choices,
     L: ConnectionErrorsOf,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     L: HandleShares<T, L, handle::EstablishedLayer>,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

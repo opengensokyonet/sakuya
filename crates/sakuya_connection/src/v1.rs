@@ -127,7 +127,7 @@ use crate::{
     layer::{self, NodeKey},
     others::OtherNodes,
     request::StructureRequest,
-    send_strategy::{AnyActiveLinkPath, SendStrategy, SendStrategyTypes},
+    send_strategy::{AnyActiveLinkPath, SendStrategyTypes},
     share::{
         ConnectionArgsOf, FlatMut, LayerShare, LineageLists, LineagePartList, LogicalPathKeyShare,
         LogicalPathKeys, NodeData,
@@ -186,7 +186,8 @@ use self::{
     retry::{ClientRetryPolicy, ReceivedRetry, RetryDecision},
     send::{PendingProbePings, SendTypes},
     send_planning::{
-        IntakeOf, LinkPathPlannerOf, SendStrategyCore, SendStrategyIntake, SendStrategyOf,
+        HostSendStrategyTypes, IntakeOf, LinkPathPlannerOf, SendStrategyCore, SendStrategyIntake,
+        SendStrategyOf,
     },
     sending::{DatagramAcceptance, LinkPathSendingKind, LinkPathSendingLimits},
     space_retirement::PacketNumberSpaceRetirement,
@@ -732,12 +733,11 @@ impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + Co
     LayerShare<T, L, layer::Connection> for Part
 where
     L: application_handles::HandleShares<T, L, application_handles::handle::EstablishedLayer>,
-    SendTypes<T, L>: SendStrategyTypes
+    SendTypes<T, L>: HostSendStrategyTypes
         + send_planning::IntakePublishOutcome<
             streams::send::StreamIntent<SendParametersOf<T>>,
             AnyActiveLinkPath,
         >,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
 {
     type Data = HList![
         InitialKeys<T::Crypto>,
@@ -844,8 +844,7 @@ impl<T: Choices, L: FeedbackSummariesOf + LogicalPathKeys + 'static>
 }
 impl<T: Choices, L> LayerShare<T, L, layer::LinkPath> for Part
 where
-    SendTypes<T, L>: SendStrategyTypes,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
 {
     type Data = HList![
         LinkPathPlannerOf<T, L>,

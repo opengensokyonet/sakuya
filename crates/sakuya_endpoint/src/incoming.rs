@@ -32,7 +32,7 @@ use sakuya_clock::MonotonicClock as _;
 use sakuya_connection::v1::input::LogicalPathDatagramReceiver as _;
 use sakuya_connection::{
     error::ConnectionErrorsOf,
-    send_strategy::{AnyActiveLinkPath, SendStrategy},
+    send_strategy::AnyActiveLinkPath,
     share::ConnectionArgsOf,
     v1::{
         self as connection, ConnectionArgs,
@@ -48,7 +48,7 @@ use sakuya_connection::{
         input::InitialPathReceiver,
         link::LinkFacts,
         send::SendTypes,
-        send_planning::{IntakePublishOutcome, SendStrategyOf},
+        send_planning::{HostSendStrategyTypes, IntakePublishOutcome},
         streams::send::StreamIntent,
     },
 };
@@ -243,7 +243,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
                 StreamIntent<connection::SendParametersOf<S::Choices>>,
                 AnyActiveLinkPath,
             >,
-        SendStrategyOf<S::Choices, S::Parts>: SendStrategy<SendTypes<S::Choices, S::Parts>>,
+        SendTypes<S::Choices, S::Parts>: HostSendStrategyTypes,
         S::Parts: HandleShares<S::Choices, S::Parts, handle::EstablishedLayer>,
         ConnectionHandleCellOf<S::Choices, S::Parts>: Send + Sync + 'static,
     {

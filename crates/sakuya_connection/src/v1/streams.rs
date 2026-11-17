@@ -77,7 +77,7 @@ use super::{
     own_args,
     parameters::{LocalTransportParameters, PeerTransportParameters},
     send::SendTypes,
-    send_planning::{IntakeOf, IntakePublishOutcome, SendStrategyIntake, SendStrategyOf},
+    send_planning::{HostSendStrategyTypes, IntakeOf, IntakePublishOutcome, SendStrategyIntake},
 };
 use crate::v1::{HostChoices, SendParametersOf, StreamSetConfigOf, StreamSetFamilyOf};
 use crate::{
@@ -87,7 +87,7 @@ use crate::{
     feedback::InjectSummary,
     layer,
     others::OtherNodes,
-    send_strategy::{AnyActiveLinkPath, IntentTicketResize, IntentTicketWithdraw, SendStrategy},
+    send_strategy::{AnyActiveLinkPath, IntentTicketResize, IntentTicketWithdraw},
     share::{ConnectionArgsOf, LineageLists, LineagePartList},
     take::GetAt,
     write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
@@ -691,7 +691,7 @@ where
         + ParametersOf<TransportParameterSpace>
         + HandleShares<T, L, handle::EstablishedLayer>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     EstablishedLayerSharesOf<T, L>: FindHandleShare<super::Part, Js, Found = X::Handle>,
     X: StreamSet<
             CloseCauseOf<T, L>,

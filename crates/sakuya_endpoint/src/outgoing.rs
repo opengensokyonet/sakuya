@@ -14,7 +14,7 @@ use nitori_crypto::{Random as _, RandomError};
 use sakuya_clock::MonotonicClock as _;
 use sakuya_connection::{
     error::ConnectionErrorsOf,
-    send_strategy::{AnyActiveLinkPath, SendStrategy},
+    send_strategy::AnyActiveLinkPath,
     share::ConnectionArgsOf,
     v1::{
         self as connection, ConnectionArgs,
@@ -32,7 +32,7 @@ use sakuya_connection::{
         input::InitialPathReceiver,
         link::LinkFacts,
         send::SendTypes,
-        send_planning::{IntakePublishOutcome, SendStrategyOf},
+        send_planning::{HostSendStrategyTypes, IntakePublishOutcome},
         streams::send::StreamIntent,
     },
 };
@@ -180,7 +180,7 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
                 StreamIntent<connection::SendParametersOf<C::Choices>>,
                 AnyActiveLinkPath,
             >,
-        SendStrategyOf<C::Choices, C::Parts>: SendStrategy<SendTypes<C::Choices, C::Parts>>,
+        SendTypes<C::Choices, C::Parts>: HostSendStrategyTypes,
         C::Parts: HandleShares<C::Choices, C::Parts, handle::EstablishedLayer>,
         ConnectionHandleCellOf<C::Choices, C::Parts>: Send + Sync + 'static,
     {

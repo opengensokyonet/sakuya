@@ -87,7 +87,24 @@ use crate::{
 
 /// The core of the send strategy of the choices `T` and the list of parts
 /// `L`.
-pub type SendStrategyOf<T, L> = <HostOf<T> as HostChoices<T>>::SendStrategy<SendTypes<T, L>>;
+pub type SendStrategyOf<T, L> = <SendTypes<T, L> as HostSendStrategyTypes>::Strategy;
+
+/// Send strategy types that the send strategy of the host's choices runs
+/// on: [`SendTypes<T, L>`] once the strategy of `T`'s host is a
+/// [`SendStrategy`] over them. One bound stands for both, where each would
+/// otherwise be stated.
+pub trait HostSendStrategyTypes: SendStrategyTypes + Sized {
+    /// The send strategy of the host's choices over these types.
+    type Strategy: SendStrategy<Self> + Default;
+}
+
+impl<T: Choices, L> HostSendStrategyTypes for SendTypes<T, L>
+where
+    Self: SendStrategyTypes,
+    <HostOf<T> as HostChoices<T>>::SendStrategy<Self>: SendStrategy<Self>,
+{
+    type Strategy = <HostOf<T> as HostChoices<T>>::SendStrategy<Self>;
+}
 
 /// The send planner of one link path, as the core of `T` and `L` makes it.
 pub type LinkPathSendPlannerOf<T, L> =
@@ -111,8 +128,7 @@ impl<T, L, J, D> IntakePublishOutcome<J, D> for SendTypes<T, L>
 where
     T: Choices,
     J: SendIntent,
-    Self: SendStrategyTypes,
-    SendStrategyOf<T, L>: SendStrategy<Self>,
+    Self: HostSendStrategyTypes,
     IntakeOf<T, L>: PublishOutcome<J, D>,
 {
     type Outcome = <IntakeOf<T, L> as PublishOutcome<J, D>>::Outcome;
@@ -147,8 +163,7 @@ impl<T: Choices, L> Build<T, L, layer::Connection, ()>
     ]
 where
     L: LineagePartList<T>,
-    SendTypes<T, L>: SendStrategyTypes,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
@@ -219,7 +234,7 @@ impl<T: Choices, L, I, Ii, Ih, Io, If, Ic>
 where
     L: LineagePartList<T> + LogicalPathKeys + crate::error::ConnectionErrorsOf,
     SendTypes<T, L>: SendStrategyTypes<CloseCause = CloseCauseOf<T, L>>,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<Self, I>
         + GetAt<InitialKeys<T::Crypto>, Ii>
         + GetAt<HandshakeKeys<T::Crypto>, Ih>
@@ -551,7 +566,7 @@ where
     L: LineagePartList<T> + LogicalPathKeys + FeedbackSummariesOf,
     SendTypes<T, L>:
         SendStrategyTypes<LinkPathIdentifier = crate::share::LinkPathIdentifierOf<T, L>>,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     for<'v> <L as LineageLists<'v, T>>::LinkPathParents: GetAt<SendStrategyCore<SendStrategyOf<T, L>>, Ic>
         + LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     L: EstablishedSourceComponentsOf<T, L>,
@@ -667,11 +682,10 @@ where
     L: LineagePartList<T> + FeedbackSummariesOf + ParametersOf<TransportParameterSpace>,
     L: ConnectionErrorsOf,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ier>,
-    SendTypes<T, L>: SendStrategyTypes,
     <SendTypes<T, L> as SendStrategyTypes>::SendIntents: From<<L as SendIntentsOf>::SendIntents>,
     <SendTypes<T, L> as SendStrategyTypes>::FrameSourceId: PartialEq,
     for<'v> L: DriverContentOf<T, L, <L as LineageLists<'v, T>>::LinkPath, Hd>,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     LinkPathSendPlannerOf<T, L>: Observe<DatagramLimits> + Observe<PacketOverheads>,
     TransportParameterSlots<L>: Selector<Option<MaxUdpPayloadSize>, Ipp>,
     CongestionPartOf<T, L>: CongestionController<InstantOf<T>> + Pacer<InstantOf<T>>,
@@ -824,8 +838,7 @@ where
     T: Choices,
     L: LineagePartList<T>,
     B: CallBundle,
-    SendTypes<T, L>: SendStrategyTypes,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
+    SendTypes<T, L>: HostSendStrategyTypes,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<LinkPathRole<InstantOf<T>>, Kr> + GetAt<LinkPathPlannerOf<T, L>, Kp>,
