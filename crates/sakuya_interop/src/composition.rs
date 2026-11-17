@@ -3,8 +3,10 @@
 //! engines with the runner's certificates, and the key log.
 //!
 //! It follows `sakuya_test_support`'s `tests/first_connection.rs`, with
-//! the hq-interop ALPN, the runner's ECDSA certificate on the server, the
-//! runner's root on the client, random connection IDs and larger limits.
+//! the hq-interop ALPN, the runner's ECDSA certificate on the server, a
+//! client that takes the server's key from its leaf certificate without
+//! verifying the chain ([`crate::verify`]), random connection IDs and
+//! larger limits.
 
 use core::{fmt, num::NonZeroU32, time::Duration};
 use std::{net::SocketAddr, path::Path, sync::Arc};
@@ -37,7 +39,6 @@ use sakuya_endpoint::{
 };
 use sakuya_packet_protection::backend::ring::RingBackend;
 use sakuya_recovery::loss::LossThresholds;
-use sakuya_test_support::verify::{TestRootsVerifier, roots_from_pem, test_roots_verifier};
 use sakuya_tls::{
     cipher_suite::CipherSuite,
     client::{
@@ -60,7 +61,6 @@ use sakuya_tls::{
         targets::SniTargets,
         ticket::ZeroRttOnceTicketTable,
     },
-    verify::AnchorStore,
 };
 use sakuya_udp_tokio::{UdpBinding, UdpBindingConfig, UdpLink};
 use sakuya_wire::{
@@ -80,7 +80,7 @@ use sakuya_wire::{
 };
 use snafu::{ResultExt as _, Snafu};
 
-use crate::{hq, key_log::KeyLogFile};
+use crate::{hq, key_log::KeyLogFile, verify::LeafKeyVerifier};
 
 // ---- the endpoint's choices ----
 
@@ -256,7 +256,7 @@ pub(crate) type ClientEngine = ClientHandshake<
     AwsLcBackend,
     PreferenceOffering,
     Arc<TakeOnceTicketMap<SystemClock>>,
-    TestRootsVerifier<AwsLcBackend, SystemClock>,
+    LeafKeyVerifier,
     NoClientCertificate,
     SystemClock,
     OptionalKeyLog,
@@ -321,12 +321,6 @@ pub enum CertificateError {
     Key {
         /// Why.
         source: nitori_crypto_aws_lc::EcdsaKeyDerError,
-    },
-    /// The roots cannot be read.
-    #[snafu(display("the root certificates cannot be read"))]
-    Roots {
-        /// Why.
-        source: sakuya_test_support::verify::RootsFromPemError,
     },
 }
 
@@ -405,28 +399,22 @@ impl ServerHandshakeConfig for ServerStarts {
     }
 }
 
-/// Makes each client connection's engine, trusting the runner's root.
+/// Makes each client connection's engine, which takes the server's key
+/// from its leaf certificate without verifying the chain
+/// ([`LeafKeyVerifier`]).
 #[derive(Clone)]
 pub(crate) struct ClientStarts {
-    roots_pem: Arc<[u8]>,
+    verifier: LeafKeyVerifier,
     cipher_suites: Vec<CipherSuite>,
     tickets: Arc<TakeOnceTicketMap<SystemClock>>,
     key_log: OptionalKeyLog,
 }
 
 impl ClientStarts {
-    /// The engines trusting the roots in `certs/ca.pem`.
-    pub(crate) fn load(
-        certs: &Path,
-        cipher_suites: Vec<CipherSuite>,
-        key_log: OptionalKeyLog,
-    ) -> Result<Self, CertificateError> {
-        let roots_pem: Arc<[u8]> = read(&certs.join("ca.pem"))?.into();
-        // read once here, so that a bad file fails the program and not
-        // each connection
-        roots_from_pem(&roots_pem).context(RootsSnafu)?;
-        Ok(Self {
-            roots_pem,
+    /// The engines offering `cipher_suites`, with `key_log`.
+    pub(crate) fn new(cipher_suites: Vec<CipherSuite>, key_log: OptionalKeyLog) -> Self {
+        Self {
+            verifier: LeafKeyVerifier::new(),
             cipher_suites,
             tickets: Arc::new(TakeOnceTicketMap::new(
                 SystemClock,
@@ -434,7 +422,7 @@ impl ClientStarts {
                 4,
             )),
             key_log,
-        })
+        }
     }
 }
 
@@ -443,8 +431,6 @@ impl ClientHandshakeConfig for ClientStarts {
     type Start = ClientEngine;
 
     fn start(&self, server_name: &ServerTarget) -> ClientEngine {
-        // invariant: `load` read the same text
-        let roots: AnchorStore = roots_from_pem(&self.roots_pem).expect("the roots");
         ClientHandshake::new(
             AwsLcBackend,
             // invariant: the key share group is one of the groups
@@ -455,7 +441,7 @@ impl ClientHandshakeConfig for ClientStarts {
             )
             .expect("an offering"),
             Arc::clone(&self.tickets),
-            test_roots_verifier(AwsLcBackend, roots, SystemClock),
+            self.verifier.clone(),
             NoClientCertificate,
             SystemClock,
             self.key_log.clone(),

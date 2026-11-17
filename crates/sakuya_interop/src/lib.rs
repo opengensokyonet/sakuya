@@ -9,9 +9,10 @@
 //!
 //! A test case either program does not support ends it with exit code 127,
 //! as the runner requires. `QLOGDIR` is read, but no qlog is written yet.
-//! The client trusts the root in `/certs/ca.pem` and skips Certificate
-//! Transparency, which the runner's certificates have none of; nothing here
-//! is for a production composition.
+//! The client does not verify the server's certificate chain
+//! ([`verify`](crate::verify)): it takes the server's key from the leaf
+//! certificate, which the handshake verifies CertificateVerify with;
+//! nothing here is for a production composition.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
@@ -22,6 +23,7 @@ pub mod environment;
 pub mod hq;
 pub mod key_log;
 pub mod server;
+mod verify;
 
 use core::future::Future;
 use std::process::ExitCode;

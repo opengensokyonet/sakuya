@@ -745,6 +745,7 @@ dependencies = [
  "nitori_crypto_aws_lc",
  "nitori_io",
  "rustls-pki-types",
+ "rustls-webpki",
  "sakuya_clock_tokio",
  "sakuya_connection",
  "sakuya_datagram_routing",

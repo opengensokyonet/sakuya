@@ -32,7 +32,6 @@ use crate::{
 /// Where the runner wants the files.
 const DOWNLOADS: &str = "/downloads";
 /// Where the runner puts the certificates.
-const CERTS: &str = "/certs";
 /// How long a connection may take for its handshake, and after its
 /// requests to end.
 const STEP: Duration = Duration::from_secs(10);
@@ -72,17 +71,10 @@ pub fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let starts = match ClientStarts::load(
-        Path::new(CERTS),
+    let starts = ClientStarts::new(
         cipher_suites(test_case == ClientTestCase::ChaCha20),
         key_log,
-    ) {
-        Ok(starts) => starts,
-        Err(error) => {
-            eprintln!("sakuya client: {}", crate::report(&error));
-            return ExitCode::FAILURE;
-        }
-    };
+    );
     let batches: Vec<Vec<Url>> = match test_case {
         ClientTestCase::ConnectionPerRequest => environment
             .requests
