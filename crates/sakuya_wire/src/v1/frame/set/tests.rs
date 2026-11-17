@@ -2,7 +2,7 @@
 //! claim, and reading frames of a set.
 use super::{
     FrameSet, FrameTypeValues, Frames,
-    codec::{ReadFrameError, ReadFrameTypeHostExt as _},
+    codec::{ReadFrameError, read_frame_type},
 };
 use crate::{
     parts::HList,
@@ -10,7 +10,7 @@ use crate::{
         self,
         frame::{
             Frame, FrameRun, FrameType,
-            codec::ReadFieldsHostExt as _,
+            codec::read_fields,
             padding::{PaddingFrame, PaddingRun},
             ping::PingFrame,
         },
@@ -110,12 +110,11 @@ fn consecutive_padding_is_one_run() {
 #[test]
 fn read_fields_reads_one_padding_frame() {
     let mut input = &[0, 0, 0, 0x01][..];
-    let type_value = input
-        .sync_read_frame_type_unpin(PhantomData::<HList![v1::Part]>)
+    let type_value = read_frame_type(&mut input, PhantomData::<HList![v1::Part]>)
         .unwrap()
         .extract();
     assert_eq!(type_value.kind(), FrameType::Padding);
-    let frame: Frame<&[u8]> = input.sync_read_fields_unpin(type_value).unwrap();
+    let frame: Frame<&[u8]> = read_fields(&mut input, type_value).unwrap();
     assert_eq!(frame, Frame::Padding(PaddingFrame));
     assert_eq!(input, [0, 0, 0x01]);
 }
@@ -219,7 +218,7 @@ mod three_parts {
             panic!("{error:?}")
         };
         assert!(matches!(
-            sum.get::<datagram::codec::ReadDatagramFrameError<_>, _>(),
+            sum.get::<datagram::codec::ReadDatagramFrameError, _>(),
             Some(datagram::codec::ReadDatagramFrameError::Data { .. })
         ));
         assert!(error.is_incomplete());
@@ -234,7 +233,7 @@ mod three_parts {
             panic!("{error:?}")
         };
         let source = sum
-            .get::<reset_stream_at::codec::ReadResetStreamAtFrameError<_>, _>()
+            .get::<reset_stream_at::codec::ReadResetStreamAtFrameError, _>()
             .unwrap();
         assert!(matches!(
             source,
@@ -254,7 +253,7 @@ mod three_parts {
             panic!("{error:?}")
         };
         assert!(matches!(
-            sum.get::<ReadFieldsError<_>, _>(),
+            sum.get::<ReadFieldsError, _>(),
             Some(ReadFieldsError::Crypto { .. })
         ));
         assert_eq!(error.frame_type(), Some(vi(0x06)));

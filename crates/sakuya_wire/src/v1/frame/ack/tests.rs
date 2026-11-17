@@ -5,7 +5,7 @@
 use super::{
     AckBelowZeroError, AckFrame, AckRange, AckRanges, EcnCounts, InvalidAckError,
     PacketRangesError, RangeCountError,
-    codec::{ReadAckFrameEcnError, ReadAckFrameError, WriteAckFrameHostExt as _},
+    codec::{ReadAckFrameEcnError, ReadAckFrameError, write_ack_frame},
 };
 use crate::parts::{Coprod, Coproduct, PartsError};
 use crate::v1::frame::codec::ReadFieldsError;
@@ -19,7 +19,7 @@ use crate::{
     v1::packet_number::PacketNumber,
     var_int::{VarInt, VarIntField, VarIntWidth},
 };
-use core::{convert::Infallible, num::NonZeroUsize, ops::RangeInclusive};
+use core::{num::NonZeroUsize, ops::RangeInclusive};
 
 fn pn(value: u64) -> PacketNumber {
     PacketNumber::new(value).unwrap()
@@ -55,11 +55,11 @@ fn ack(largest: u64, first: u64, ranges: Vec<AckRange>) -> Result<AckFrame, Inva
 /// Writes `frame` with [`codec::write_ack_frame`](super::codec::write_ack_frame).
 fn write(frame: AckFrame) -> Vec<u8> {
     let mut written = Vec::new();
-    written.sync_write_ack_frame_unpin(frame).unwrap();
+    write_ack_frame(&mut written, frame);
     written
 }
 
-type ReadError = ReadFrameError<Infallible, Coprod![ReadFieldsError<Infallible>]>;
+type ReadError = ReadFrameError<Coprod![ReadFieldsError]>;
 
 /// The failure of reading the ACK frame `encoding`, of either type, and what
 /// it left unread.
@@ -72,7 +72,7 @@ fn read_frame_error(encoding: &[u8]) -> (ReadError, &[u8]) {
 
 /// The failure of reading the ACK frame `encoding` before any ECN count,
 /// and what it left unread.
-fn read_error(encoding: &[u8]) -> (ReadAckFrameError<Infallible>, &[u8]) {
+fn read_error(encoding: &[u8]) -> (ReadAckFrameError, &[u8]) {
     let (error, input) = read_frame_error(encoding);
     match error {
         ReadFrameError::Fields {
@@ -260,7 +260,7 @@ fn reading_reports_the_field_that_is_cut_short() {
     ];
     // Each field is one byte; a cut before field `n` reports field `n`, in
     // the failure of the frame type that has the field.
-    let fields: [fn(&ReadAckFrameError<Infallible>) -> bool; 8] = [
+    let fields: [fn(&ReadAckFrameError) -> bool; 8] = [
         |error| matches!(error, ReadAckFrameError::LargestAcknowledged { .. }),
         |error| matches!(error, ReadAckFrameError::AckDelay { .. }),
         |error| matches!(error, ReadAckFrameError::AckRangeCount { .. }),
@@ -280,7 +280,7 @@ fn reading_reports_the_field_that_is_cut_short() {
             assert!(error.is_incomplete());
         }
     }
-    let ecn_fields: [fn(&ReadAckFrameEcnError<Infallible>) -> bool; 3] = [
+    let ecn_fields: [fn(&ReadAckFrameEcnError) -> bool; 3] = [
         |error| matches!(error, ReadAckFrameEcnError::Ect0Count { .. }),
         |error| matches!(error, ReadAckFrameEcnError::Ect1Count { .. }),
         |error| matches!(error, ReadAckFrameEcnError::EcnCeCount { .. }),

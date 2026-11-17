@@ -18,7 +18,7 @@ use bytes::Buf;
 /// [`VarInt::MAX`], and the Length field can state the length of the data.
 /// [`CryptoFrame::new`] checks both, so every value writes an encoding that reads
 /// back to the same value; the fields are read through methods of the same
-/// names. `D` holds the data: the source's chunk type for a frame that was
+/// names. `D` holds the data: the type of the source for a frame that was
 /// read, any [`Buf`] for one to write.
 ///
 /// [RFC 9000 §19.6]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.6
@@ -119,56 +119,40 @@ impl<D: Buf> CryptoFrame<D> {
 }
 
 pub mod codec {
-    //! Writing CRYPTO frames as a `nitori_call` operation; reading is done by
+    //! Writing CRYPTO frames; reading is done by
     //! [`Frames`](crate::v1::frame::set::Frames).
-    //!
-    //! [`write_crypto_frame`] is also the operation struct [`WriteCryptoFrame`], with
-    //! `WriteCryptoFrameExt` on receiver accesses and `WriteCryptoFrameHostExt` on call
-    //! executors.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
 
     use super::CryptoFrame;
     use crate::{
         frame::{DataEndError, InvalidDataError, read_field},
-        payload::{ReadPayloadError, read_payload},
-        var_int::{VarInt, VarIntField, codec::ReadVarIntError},
+        source::read_payload,
+        var_int::{VarInt, VarIntField},
     };
-    use bytes::Buf;
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{calls::WriteAllError, prelude::*};
+    use bytes::{Buf, BufMut};
+    use nitori_io::{SplitTo, error::IncompleteError};
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type, and the data as one
-    /// chunk of the source.
-    pub(in crate::v1) async fn read_crypto_frame<F, A>(
-        io: &mut A,
-    ) -> Result<CryptoFrame<F::Chunk>, ReadCryptoFrameError<F::Error>>
-    where
-        F: ReadChunk<Chunk: Default>,
-        A: ReceiverAccess<Family = F>,
-    {
-        let offset: VarIntField<VarInt> = read_field(io)
-            .await
-            .context(read_crypto_error::OffsetSnafu)?;
-        let length: VarIntField<VarInt> = read_field(io)
-            .await
-            .context(read_crypto_error::LengthSnafu)?;
+    /// piece of the source.
+    pub(in crate::v1) fn read_crypto_frame<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<CryptoFrame<S>, ReadCryptoFrameError> {
+        let offset: VarIntField<VarInt> =
+            read_field(src).context(read_crypto_error::OffsetSnafu)?;
+        let length: VarIntField<VarInt> =
+            read_field(src).context(read_crypto_error::LengthSnafu)?;
         // The end of the data follows from the fields, so a frame that
         // breaks the bound is rejected before its data is read.
         DataEndError::check(offset.get(), length.get().get())?;
         // The end check bounds the length by 2^62 - 1; where `usize` is
         // narrower, a saturated length exceeds every source.
         let data_len = usize::try_from(length.get().get()).unwrap_or(usize::MAX);
-        let data = read_payload(io, data_len)
-            .await
-            .context(read_crypto_error::DataSnafu)?;
+        let data = read_payload(src, data_len).context(read_crypto_error::DataSnafu)?;
         CryptoFrame::new(offset, length.width(), data).map_err(|error| match error {
             InvalidDataError::DataEnd { source } => ReadCryptoFrameError::DataEnd { source },
             // invariant: the Length field was read at this width, and
             // `read_payload` returns data of exactly the length it states: it
-            // fails on shorter data and panics on a longer chunk.
+            // fails on shorter data.
             InvalidDataError::Length { source } => unreachable!("{source}"),
         })
     }
@@ -176,18 +160,18 @@ pub mod codec {
     /// Failures of reading a CRYPTO frame.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_crypto_error), visibility(pub(in crate::v1)))]
-    pub enum ReadCryptoFrameError<E> {
+    pub enum ReadCryptoFrameError {
         /// The Offset field could not be read.
         #[snafu(display("CRYPTO Offset read failed"))]
         Offset {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The Length field could not be read.
         #[snafu(display("CRYPTO Length read failed"))]
         Length {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The data would end beyond 2<sup>62</sup> − 1.
         #[snafu(transparent)]
@@ -199,28 +183,19 @@ pub mod codec {
         #[snafu(display("CRYPTO data read failed"))]
         Data {
             /// The failure of reading the data.
-            source: ReadPayloadError<E>,
+            source: IncompleteError,
         },
     }
 
     /// Writes `frame`; [`CryptoFrame::new`] checked its limits.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_crypto_frame<F, A, D>(
-        io: &mut A,
-        frame: CryptoFrame<D>,
-    ) -> Result<(), WriteAllError<F::Error>>
-    where
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-        D: Buf,
-    {
+    /// If `dst` has no room for the frame, as [`BufMut`] does.
+    pub fn write_crypto_frame<D: Buf>(dst: &mut impl BufMut, frame: CryptoFrame<D>) {
         let head = frame.head();
-        io.write_all(head.as_slice().chain(frame.data)).await
+        dst.put_slice(head.as_slice());
+        dst.put(frame.data);
     }
 }
 

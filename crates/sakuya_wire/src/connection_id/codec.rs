@@ -1,5 +1,4 @@
-//! Reading and writing length-prefixed connection IDs as `nitori_call`
-//! operations.
+//! Reading and writing length-prefixed connection IDs.
 //!
 //! Long headers and NEW_CONNECTION_ID carry a connection ID as a one-byte
 //! length followed by that many bytes. [`read_raw_connection_id`] reads it
@@ -8,35 +7,25 @@
 //! rejects a longer length before reading the bytes. [`write_connection_id`]
 //! writes the same form.
 //!
-//! Each function is also an operation struct with `{Name}Ext` on receiver
-//! accesses inside other operations and `{Name}HostExt` on call executors,
-//! including the `sync_` methods for receivers that never wait.
-//!
 //! ```
 //! use sakuya_wire::connection_id::{
 //!     ConnectionId,
-//!     codec::{ReadConnectionIdHostExt as _, WriteConnectionIdHostExt as _},
+//!     codec::{read_connection_id, write_connection_id},
 //! };
 //!
 //! let id = ConnectionId::new(&[0x83, 0x94, 0xc8, 0xf0]).unwrap();
 //! let mut output = Vec::new();
-//! output.sync_write_connection_id_unpin(id).unwrap();
+//! write_connection_id(&mut output, id);
 //! assert_eq!(output, [4, 0x83, 0x94, 0xc8, 0xf0]);
 //!
 //! let mut input = output.as_slice();
-//! assert_eq!(input.sync_read_connection_id_unpin().unwrap(), id);
+//! assert_eq!(read_connection_id(&mut input).unwrap(), id);
 //! assert!(input.is_empty());
 //! ```
-// `#[call]` generates constructors, fields and extension traits without
-// documentation comments; the module documentation above describes them.
-#![allow(missing_docs)]
-
 use super::{ConnectionId, ConnectionIdLength, ConnectionIdLengthError, RawConnectionId};
-use nitori_call::{ReceiverAccess, call};
-use nitori_io::{
-    calls::{ReadArrayError, ReadExactError, WriteAllError},
-    prelude::*,
-};
+use crate::source::{incomplete, read_array};
+use bytes::{Buf, BufMut};
+use nitori_io::error::IncompleteError;
 use snafu::{ResultExt, Snafu};
 
 /// Reads a one-byte length and a connection ID of that length, at most 20
@@ -47,20 +36,11 @@ use snafu::{ResultExt, Snafu};
 /// [`ReadConnectionIdError::LengthField`] if the length cannot be read,
 /// [`ReadConnectionIdError::Length`] for a length above 20, before reading
 /// further, and [`ReadConnectionIdError::Bytes`] if the bytes cannot be read.
-#[call(sync)]
-pub async fn read_connection_id<F: Read, A: ReceiverAccess<Family = F>>(
-    io: &mut A,
-) -> Result<ConnectionId, ReadConnectionIdError<F::Error>> {
-    let [length] = io
-        .read_array::<1>()
-        .await
-        .context(read_connection_id_error::LengthFieldSnafu)?;
+pub fn read_connection_id(src: &mut impl Buf) -> Result<ConnectionId, ReadConnectionIdError> {
+    let [length] = read_array::<1>(src).context(read_connection_id_error::LengthFieldSnafu)?;
     let length = ConnectionIdLength::new(usize::from(length))?;
     let mut id = ConnectionId::EMPTY;
-    let mut destination = &mut id.bytes[..length.get()];
-    io.read_exact(&mut destination, length.get())
-        .await
-        .context(read_connection_id_error::BytesSnafu)?;
+    read_bytes(src, &mut id.bytes[..length.get()]).context(read_connection_id_error::BytesSnafu)?;
     id.len = u8::from(length);
     Ok(id)
 }
@@ -68,12 +48,12 @@ pub async fn read_connection_id<F: Read, A: ReceiverAccess<Family = F>>(
 /// Failures that [`read_connection_id`] can produce.
 #[derive(Debug, Snafu)]
 #[snafu(module(read_connection_id_error), visibility(pub(crate)))]
-pub enum ReadConnectionIdError<E> {
+pub enum ReadConnectionIdError {
     /// The length byte could not be read.
     #[snafu(display("connection ID length read failed"))]
     LengthField {
-        /// The failure of reading the length.
-        source: ReadArrayError<E>,
+        /// The shortfall: the source is empty.
+        source: IncompleteError,
     },
     /// The length exceeds the QUIC version 1 maximum.
     #[snafu(transparent)]
@@ -84,17 +64,16 @@ pub enum ReadConnectionIdError<E> {
     /// The bytes of the connection ID could not be read.
     #[snafu(display("connection ID read failed"))]
     Bytes {
-        /// The failure of reading the bytes.
-        source: ReadExactError<E>,
+        /// The shortfall, counted over the bytes of the connection ID.
+        source: IncompleteError,
     },
 }
 
-impl<E> ReadConnectionIdError<E> {
+impl ReadConnectionIdError {
     /// Whether the source ended within the connection ID.
     pub fn is_incomplete(&self) -> bool {
         match self {
-            Self::LengthField { source } => matches!(source, ReadArrayError::Incomplete { .. }),
-            Self::Bytes { source } => matches!(source, ReadExactError::Incomplete { .. }),
+            Self::LengthField { .. } | Self::Bytes { .. } => true,
             Self::Length { .. } => false,
         }
     }
@@ -107,66 +86,51 @@ impl<E> ReadConnectionIdError<E> {
 ///
 /// [`ReadRawConnectionIdError::LengthField`] if the length cannot be read and
 /// [`ReadRawConnectionIdError::Bytes`] if the bytes cannot be read.
-#[call(sync)]
-pub async fn read_raw_connection_id<F: Read, A: ReceiverAccess<Family = F>>(
-    io: &mut A,
-) -> Result<RawConnectionId, ReadRawConnectionIdError<F::Error>> {
-    let [length] = io
-        .read_array::<1>()
-        .await
-        .context(read_raw_connection_id_error::LengthFieldSnafu)?;
+pub fn read_raw_connection_id(
+    src: &mut impl Buf,
+) -> Result<RawConnectionId, ReadRawConnectionIdError> {
+    let [length] = read_array::<1>(src).context(read_raw_connection_id_error::LengthFieldSnafu)?;
     let length = usize::from(length);
     let mut id = RawConnectionId::EMPTY;
-    let mut destination = &mut id.bytes[..length];
-    io.read_exact(&mut destination, length)
-        .await
-        .context(read_raw_connection_id_error::BytesSnafu)?;
+    read_bytes(src, &mut id.bytes[..length]).context(read_raw_connection_id_error::BytesSnafu)?;
     id.len = length as u8;
     Ok(id)
 }
 
-/// Failures that [`read_raw_connection_id`] can produce.
+/// Failures that [`read_raw_connection_id`] can produce; in each the source
+/// ended early.
 #[derive(Debug, Snafu)]
 #[snafu(module(read_raw_connection_id_error), visibility(pub(crate)))]
-pub enum ReadRawConnectionIdError<E> {
+pub enum ReadRawConnectionIdError {
     /// The length byte could not be read.
     #[snafu(display("connection ID length read failed"))]
     LengthField {
-        /// The failure of reading the length.
-        source: ReadArrayError<E>,
+        /// The shortfall: the source is empty.
+        source: IncompleteError,
     },
     /// The bytes of the connection ID could not be read.
     #[snafu(display("connection ID read failed"))]
     Bytes {
-        /// The failure of reading the bytes.
-        source: ReadExactError<E>,
+        /// The shortfall, counted over the bytes of the connection ID.
+        source: IncompleteError,
     },
 }
 
-impl<E> ReadRawConnectionIdError<E> {
-    /// Whether the source ended within the connection ID.
-    pub fn is_incomplete(&self) -> bool {
-        match self {
-            Self::LengthField { source } => matches!(source, ReadArrayError::Incomplete { .. }),
-            Self::Bytes { source } => matches!(source, ReadExactError::Incomplete { .. }),
-        }
+/// Fills `destination` from `src`.
+fn read_bytes(src: &mut impl Buf, destination: &mut [u8]) -> Result<(), IncompleteError> {
+    if src.remaining() < destination.len() {
+        return Err(incomplete(src, destination.len(), 0));
     }
+    src.copy_to_slice(destination);
+    Ok(())
 }
 
 /// Writes the one-byte length of `id` and its bytes.
 ///
-/// Acceptance by the receiver does not imply flushing or delivery.
+/// # Panics
 ///
-/// # Errors
-///
-/// [`WriteAllError`] if the receiver stops accepting bytes or fails; bytes
-/// accepted before stay written.
-#[call(sync)]
-pub async fn write_connection_id<F: Write, A: ReceiverAccess<Family = F>>(
-    io: &mut A,
-    id: ConnectionId,
-) -> Result<(), WriteAllError<F::Error>> {
-    let length = [u8::from(id.length())];
-    io.write_all(bytes::Buf::chain(&length[..], id.as_bytes()))
-        .await
+/// If `dst` has no room for the connection ID, as [`BufMut`] does.
+pub fn write_connection_id(dst: &mut impl BufMut, id: ConnectionId) {
+    dst.put_u8(u8::from(id.length()));
+    dst.put_slice(id.as_bytes());
 }

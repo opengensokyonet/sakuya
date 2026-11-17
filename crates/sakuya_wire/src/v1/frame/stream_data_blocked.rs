@@ -65,65 +65,50 @@ impl StreamDataBlockedFrame {
 }
 
 pub mod codec {
-    //! Writing STREAM_DATA_BLOCKED as a `nitori_call` operation; reading is done by
+    //! Writing STREAM_DATA_BLOCKED; reading is done by
     //! [`Frames`](crate::v1::frame::set::Frames).
-    //!
-    //! [`write_stream_data_blocked_frame`] is also the operation struct [`WriteStreamDataBlockedFrame`], with
-    //! `WriteStreamDataBlockedFrameExt` on receiver accesses and `WriteStreamDataBlockedFrameHostExt` on call
-    //! executors.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
 
     use super::StreamDataBlockedFrame;
-    use crate::{frame::read_field, var_int::codec::ReadVarIntError};
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{calls::WriteAllError, prelude::*};
+    use crate::frame::read_field;
+    use bytes::{Buf, BufMut};
+    use nitori_io::error::IncompleteError;
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type.
-    pub(in crate::v1) async fn read_stream_data_blocked_frame<
-        F: Read,
-        A: ReceiverAccess<Family = F>,
-    >(
-        io: &mut A,
-    ) -> Result<StreamDataBlockedFrame, ReadStreamDataBlockedFrameError<F::Error>> {
+    pub(in crate::v1) fn read_stream_data_blocked_frame(
+        src: &mut impl Buf,
+    ) -> Result<StreamDataBlockedFrame, ReadStreamDataBlockedFrameError> {
         use read_stream_data_blocked_error::*;
-        let stream_id = read_field(io).await.context(StreamIdSnafu)?;
-        let maximum_stream_data = read_field(io).await.context(MaximumStreamDataSnafu)?;
+        let stream_id = read_field(src).context(StreamIdSnafu)?;
+        let maximum_stream_data = read_field(src).context(MaximumStreamDataSnafu)?;
         Ok(StreamDataBlockedFrame::new(stream_id, maximum_stream_data))
     }
 
     /// Failures of reading a STREAM_DATA_BLOCKED frame.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_stream_data_blocked_error), visibility(pub(in crate::v1)))]
-    pub enum ReadStreamDataBlockedFrameError<E> {
+    pub enum ReadStreamDataBlockedFrameError {
         /// The Stream ID field could not be read.
         #[snafu(display("STREAM_DATA_BLOCKED Stream ID read failed"))]
         StreamId {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The Maximum Stream Data field could not be read.
         #[snafu(display("STREAM_DATA_BLOCKED Maximum Stream Data read failed"))]
         MaximumStreamData {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
     }
 
     /// Writes the frame.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_stream_data_blocked_frame<F: Write, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-        frame: StreamDataBlockedFrame,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        io.write_all(frame.head().as_slice()).await
+    /// If `dst` has no room for the frame, as [`BufMut`] does.
+    pub fn write_stream_data_blocked_frame(dst: &mut impl BufMut, frame: StreamDataBlockedFrame) {
+        dst.put_slice(frame.head().as_slice());
     }
 }
 

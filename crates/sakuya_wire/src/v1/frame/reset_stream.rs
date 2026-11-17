@@ -75,32 +75,23 @@ impl ResetStreamFrame {
 }
 
 pub mod codec {
-    //! Writing RESET_STREAM as a `nitori_call` operation; reading is done by
+    //! Writing RESET_STREAM; reading is done by
     //! [`Frames`](crate::v1::frame::set::Frames).
-    //!
-    //! [`write_reset_stream_frame`] is also the operation struct [`WriteResetStreamFrame`], with
-    //! `WriteResetStreamFrameExt` on receiver accesses and `WriteResetStreamFrameHostExt` on call
-    //! executors.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
 
     use super::ResetStreamFrame;
-    use crate::{frame::read_field, var_int::codec::ReadVarIntError};
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{calls::WriteAllError, prelude::*};
+    use crate::frame::read_field;
+    use bytes::{Buf, BufMut};
+    use nitori_io::error::IncompleteError;
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type.
-    pub(in crate::v1) async fn read_reset_stream_frame<F: Read, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<ResetStreamFrame, ReadResetStreamFrameError<F::Error>> {
+    pub(in crate::v1) fn read_reset_stream_frame(
+        src: &mut impl Buf,
+    ) -> Result<ResetStreamFrame, ReadResetStreamFrameError> {
         use read_reset_stream_error::*;
-        let stream_id = read_field(io).await.context(StreamIdSnafu)?;
-        let application_error_code = read_field(io)
-            .await
-            .context(ApplicationProtocolErrorCodeSnafu)?;
-        let final_size = read_field(io).await.context(FinalSizeSnafu)?;
+        let stream_id = read_field(src).context(StreamIdSnafu)?;
+        let application_error_code = read_field(src).context(ApplicationProtocolErrorCodeSnafu)?;
+        let final_size = read_field(src).context(FinalSizeSnafu)?;
         Ok(ResetStreamFrame::new(
             stream_id,
             application_error_code,
@@ -111,39 +102,34 @@ pub mod codec {
     /// Failures of reading a RESET_STREAM frame.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_reset_stream_error), visibility(pub(in crate::v1)))]
-    pub enum ReadResetStreamFrameError<E> {
+    pub enum ReadResetStreamFrameError {
         /// The Stream ID field could not be read.
         #[snafu(display("RESET_STREAM Stream ID read failed"))]
         StreamId {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The Application Protocol Error Code field could not be read.
         #[snafu(display("RESET_STREAM Application Protocol Error Code read failed"))]
         ApplicationProtocolErrorCode {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The Final Size field could not be read.
         #[snafu(display("RESET_STREAM Final Size read failed"))]
         FinalSize {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
     }
 
     /// Writes the frame.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_reset_stream_frame<F: Write, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-        frame: ResetStreamFrame,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        io.write_all(frame.head().as_slice()).await
+    /// If `dst` has no room for the frame, as [`BufMut`] does.
+    pub fn write_reset_stream_frame(dst: &mut impl BufMut, frame: ResetStreamFrame) {
+        dst.put_slice(frame.head().as_slice());
     }
 }
 

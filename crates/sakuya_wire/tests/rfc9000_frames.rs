@@ -1,6 +1,6 @@
 //! The frames of RFC 9000 §19 at the edges of their fields, through the public
 //! interface.
-use core::{convert::Infallible, marker::PhantomData};
+use core::marker::PhantomData;
 use either::Either;
 use sakuya_wire::{
     parts::{Coprod, HList},
@@ -14,11 +14,11 @@ use sakuya_wire::{
             codec::ReadFieldsError,
             set::{
                 Frames,
-                codec::{ReadFrameError, ReadFrameTypeHostExt as _},
+                codec::{ReadFrameError, read_frame_type},
             },
         },
     },
-    var_int::{VarInt, VarIntField, VarIntWidth, codec::WriteVarIntHostExt as _},
+    var_int::{VarInt, VarIntField, VarIntWidth, codec::write_var_int},
 };
 
 const MAX: u64 = (1 << 62) - 1;
@@ -26,9 +26,7 @@ const MAX_STREAMS: u64 = 1 << 60;
 
 fn var(value: u64) -> Vec<u8> {
     let mut output = Vec::new();
-    output
-        .sync_write_var_int_unpin(VarInt::new(value).unwrap())
-        .unwrap();
+    write_var_int(&mut output, VarInt::new(value).unwrap());
     output
 }
 
@@ -36,14 +34,14 @@ fn frame(parts: &[&[u8]]) -> Vec<u8> {
     parts.concat()
 }
 
-type ReadError = ReadFrameError<Infallible, Coprod![ReadFieldsError<Infallible>]>;
+type ReadError = ReadFrameError<Coprod![ReadFieldsError]>;
 
 fn read(mut bytes: &[u8]) -> Result<(FrameRun<&[u8]>, usize), ReadError> {
     let set = PhantomData::<HList![v1::Part]>;
     let mut frames = Frames::new(bytes, set);
     let Some(run) = frames.next() else {
         // An empty payload has no item; the Frame Type is what is missing.
-        return Err(bytes.sync_read_frame_type_unpin(set).unwrap_err());
+        return Err(read_frame_type(&mut bytes, set).unwrap_err());
     };
     Ok((run?.extract(), bytes.len() - frames.remainder().len()))
 }

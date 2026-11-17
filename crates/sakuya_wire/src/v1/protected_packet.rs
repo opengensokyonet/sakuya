@@ -3,7 +3,7 @@
 //!
 //! A datagram can coalesce several QUIC packets. [`into_packets`] cuts one
 //! apart without copying: for each packet it reads the header with the
-//! `sakuya_wire` header operations to find where the packet ends, and splits
+//! `sakuya_wire` header readers to find where the packet ends, and splits
 //! those bytes off the datagram with [`SplitTo`]. Each item is a [`Packet`]:
 //! a [`ProtectedPacket`], or a Retry or Version Negotiation packet, which are
 //! not protected. Neither of those has a Length field, so each extends to the
@@ -42,24 +42,23 @@ use crate::{
     header::{
         HeaderForm, ShortHeader, VersionNegotiation,
         codec::{
-            ReadLongHeaderError, ReadLongHeaderHostExt as _, ReadShortHeaderError,
-            ReadShortHeaderHostExt as _, ReadVersionNegotiationError,
-            ReadVersionNegotiationHostExt as _,
+            ReadLongHeaderError, ReadShortHeaderError, ReadVersionNegotiationError,
+            read_long_header, read_short_header, read_version_negotiation,
         },
     },
     v1::encryption_level::EncryptionLevel,
     v1::header::{
         LongPacket, LongPacketType,
-        codec::{ReadLongPacketError, ReadLongPacketHostExt as _},
+        codec::{ReadLongPacketError, read_long_packet},
     },
 };
-use core::{convert::Infallible, iter::FusedIterator, ops::Range};
+use core::{iter::FusedIterator, ops::Range};
 use nitori_io::SplitTo;
 use snafu::Snafu;
 
 /// A packet cut from a datagram, with the protection still on.
 ///
-/// It holds what the header operations read and the bytes of the whole
+/// It holds what the header readers read and the bytes of the whole
 /// packet, which the removal of protection needs: the header protection
 /// sample and the additional data of the AEAD are taken from them
 /// ([RFC 9001 §5.3], [RFC 9001 §5.4]). `P` is the buffer the datagram was cut
@@ -218,8 +217,7 @@ impl<P: SplitTo + AsRef<[u8]>> IntoPackets<P> {
         match HeaderForm::of(bytes[0]) {
             HeaderForm::Short => {
                 let mut input = bytes;
-                let header = input
-                    .sync_read_short_header_unpin(self.short_dcid_len)
+                let header = read_short_header(&mut input, self.short_dcid_len)
                     .map_err(|source| PacketBoundaryError::ShortHeader { source })?;
                 let dcid = *header.dcid();
                 let packet_number_offset = header.packet_number_offset();
@@ -230,14 +228,12 @@ impl<P: SplitTo + AsRef<[u8]>> IntoPackets<P> {
             }
             HeaderForm::Long => {
                 let mut input = bytes;
-                let long = input
-                    .sync_read_long_header_unpin()
+                let long = read_long_header(&mut input)
                     .map_err(|source| PacketBoundaryError::LongHeader { source })?;
                 let dcid = *long.dcid();
                 if long.version() == Version::NEGOTIATION {
                     let versions_start = long.version_specific_offset();
-                    let packet = input
-                        .sync_read_version_negotiation_unpin(long)
+                    let packet = read_version_negotiation(&mut input, long)
                         .map_err(|source| PacketBoundaryError::VersionNegotiation { source })?;
                     // The list fills the rest of the datagram.
                     let end = bytes.len();
@@ -247,8 +243,7 @@ impl<P: SplitTo + AsRef<[u8]>> IntoPackets<P> {
                         dcid,
                     ));
                 }
-                let packet = input
-                    .sync_read_long_packet_unpin(long)
+                let packet = read_long_packet(&mut input, long)
                     .map_err(|source| PacketBoundaryError::LongPacket { source })?;
                 let kind = packet.packet_type();
                 let end = packet.end();
@@ -329,26 +324,26 @@ pub enum PacketBoundaryError {
     #[snafu(display("long header read failed"))]
     LongHeader {
         /// The failure of reading the fields.
-        source: ReadLongHeaderError<Infallible>,
+        source: ReadLongHeaderError,
     },
     /// The version 1 fields of a long header packet could not be read.
     #[snafu(display("long header packet read failed"))]
     LongPacket {
         /// The failure of reading the fields.
-        source: ReadLongPacketError<Infallible>,
+        source: ReadLongPacketError,
     },
     /// The supported version list of a Version Negotiation packet could not
     /// be read.
     #[snafu(display("version negotiation packet read failed"))]
     VersionNegotiation {
         /// The failure of reading the list.
-        source: ReadVersionNegotiationError<Infallible>,
+        source: ReadVersionNegotiationError,
     },
     /// A short header could not be read.
     #[snafu(display("short header read failed"))]
     ShortHeader {
         /// The failure of reading the header.
-        source: ReadShortHeaderError<Infallible>,
+        source: ReadShortHeaderError,
     },
 }
 

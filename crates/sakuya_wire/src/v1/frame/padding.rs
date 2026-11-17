@@ -86,74 +86,30 @@ impl From<PaddingFrame> for PaddingRun {
 }
 
 pub mod codec {
-    //! Writing PADDING as a `nitori_call` operation.
+    //! Writing PADDING.
     //!
     //! [`write_padding_frame`] writes one PADDING frame and
-    //! [`write_padding_run`] a run of them. Each is also an operation struct,
-    //! such as [`WritePaddingFrame`], with `{Name}Ext` on receiver accesses
-    //! and `{Name}HostExt` on call executors.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
+    //! [`write_padding_run`] a run of them.
 
     use super::{PaddingFrame, PaddingRun};
-    use bytes::Buf;
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{calls::WriteAllError, prelude::*};
+    use bytes::BufMut;
 
     /// Writes one PADDING frame: a zero byte.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_padding_frame<F, A>(
-        io: &mut A,
-        padding: PaddingFrame,
-    ) -> Result<(), WriteAllError<F::Error>>
-    where
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-    {
-        io.write_all(Zeros(padding.encoded_len())).await
+    /// If `dst` has no room for the frame, as [`BufMut`] does.
+    pub fn write_padding_frame(dst: &mut impl BufMut, padding: PaddingFrame) {
+        dst.put_bytes(0, padding.encoded_len());
     }
 
     /// Writes the PADDING frames of `padding`: a zero byte for each.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_padding_run<F, A>(
-        io: &mut A,
-        padding: PaddingRun,
-    ) -> Result<(), WriteAllError<F::Error>>
-    where
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-    {
-        io.write_all(Zeros(padding.encoded_len())).await
-    }
-
-    /// A run of zero bytes as a buffer.
-    struct Zeros(usize);
-
-    const ZEROS: [u8; 64] = [0; 64];
-
-    impl Buf for Zeros {
-        fn remaining(&self) -> usize {
-            self.0
-        }
-
-        fn chunk(&self) -> &[u8] {
-            &ZEROS[..self.0.min(ZEROS.len())]
-        }
-
-        fn advance(&mut self, count: usize) {
-            self.0 = self.0.saturating_sub(count);
-        }
+    /// If `dst` has no room for the frames, as [`BufMut`] does.
+    pub fn write_padding_run(dst: &mut impl BufMut, padding: PaddingRun) {
+        dst.put_bytes(0, padding.encoded_len());
     }
 }
 
@@ -161,16 +117,14 @@ pub mod codec {
 mod tests {
     use super::{
         PaddingFrame, PaddingRun,
-        codec::{WritePaddingFrameHostExt as _, WritePaddingRunHostExt as _},
+        codec::{write_padding_frame, write_padding_run},
     };
     use core::num::NonZeroUsize;
 
     #[test]
     fn a_frame_writes_one_zero_byte() {
         let mut written = Vec::new();
-        written
-            .sync_write_padding_frame_unpin(PaddingFrame)
-            .unwrap();
+        write_padding_frame(&mut written, PaddingFrame);
         assert_eq!(written, [0]);
         assert_eq!(PaddingFrame.encoded_len(), 1);
     }
@@ -179,7 +133,7 @@ mod tests {
     fn a_run_writes_its_zero_bytes() {
         let padding = PaddingRun::new(NonZeroUsize::new(200).unwrap());
         let mut written = Vec::new();
-        written.sync_write_padding_run_unpin(padding).unwrap();
+        write_padding_run(&mut written, padding);
         assert_eq!(written, [0; 200]);
         assert_eq!(padding.encoded_len(), 200);
         assert_eq!(padding.len().get(), 200);

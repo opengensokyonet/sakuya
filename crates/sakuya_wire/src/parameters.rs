@@ -41,11 +41,11 @@
 //! # Reading and writing
 //!
 //! [`codec::read_parameters`] reads a sequence to the end of its source. For
-//! each item it reads the ID and the Length and takes the value as one chunk
+//! each item it reads the ID and the Length and takes the value as one piece
 //! of the source. If a type of the list claims the ID, the slot of the type
 //! must be empty, or the parameter appears twice; the space is asked whether
 //! the parameter may appear ([`ParameterSpace::admit`]); and the type reads
-//! its value from the chunk ([`KeyedParameter::read_value`]), all of it. An
+//! its value from the piece ([`KeyedParameter::read_value`]), all of it. An
 //! ID that no type claims goes to [`Parameters::unknown`] with its value,
 //! unless it is there already. That includes the reserved IDs of the space,
 //! which no type can claim. [`codec::write_parameters`] writes the slots
@@ -92,9 +92,7 @@
 //! which is 31 × 0 + 27, in the space of the QUIC transport parameters:
 //!
 //! ```compile_fail
-//! use bytes::Buf;
-//! use nitori_call::ReceiverAccess;
-//! use nitori_io::{Write, calls::WriteAllError};
+//! use bytes::{Buf, BufMut};
 //! use sakuya_wire::{
 //!     assert_parameters_distinct,
 //!     parameters::{KeyedParameter, TrailingBytesError, ValueSource},
@@ -117,7 +115,7 @@
 //!         remembered_for_zero_rtt: RememberedForZeroRtt::Prohibited,
 //!     };
 //!
-//!     fn read_value<D: Buf + Unpin>(_: &mut ValueSource<D>) -> Result<Self, TrailingBytesError> {
+//!     fn read_value<D: Buf>(_: &mut ValueSource<D>) -> Result<Self, TrailingBytesError> {
 //!         Ok(Self)
 //!     }
 //!
@@ -125,13 +123,7 @@
 //!         0
 //!     }
 //!
-//!     async fn write_value<F, A>(&self, _: &mut A) -> Result<(), WriteAllError<F::Error>>
-//!     where
-//!         F: Write,
-//!         A: ReceiverAccess<Family = F>,
-//!     {
-//!         Ok(())
-//!     }
+//!     fn write_value<B: BufMut>(&self, _: &mut B) {}
 //! }
 //!
 //! assert_parameters_distinct!(TransportParameterSpace, HList![Reserved]);
@@ -144,18 +136,12 @@ use crate::{
 use bytes::{Buf, BufMut};
 use codec::ReadParametersError;
 use core::{
-    convert::Infallible,
     error::Error,
     fmt::{self, Debug},
-    future::Future,
     marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
     ops::Add,
-    pin::Pin,
-    task::{Context, Poll},
 };
-use nitori_call::ReceiverAccess;
-use nitori_io::{calls::WriteAllError, error::WriteZeroError, prelude::*};
 use snafu::{IntoError, ResultExt, Snafu};
 
 pub mod codec;
@@ -255,7 +241,7 @@ pub trait KeyedParameter: Sized {
     /// Why a value is not a value of this type: its content cannot be read
     /// or breaks a rule of the type, or bytes follow the content
     /// ([`TrailingBytesError`]). [`ReadValueError`] combines the two around
-    /// the failure of a read operation.
+    /// the failure of a read function.
     type ValueError: Error + From<TrailingBytesError> + 'static;
 
     /// The ID of the parameter.
@@ -267,8 +253,8 @@ pub trait KeyedParameter: Sized {
     /// Reads the parameter from `value`, the value of one item: the bytes
     /// that its Length counts.
     ///
-    /// An implementation reads with the synchronous host method of its own
-    /// read operation. It need not check that the value ends where the
+    /// An implementation reads with its own read function, as from any
+    /// [`Buf`]. It need not check that the value ends where the
     /// parameter does: whoever calls this checks it afterwards
     /// ([`ValueSource::finish`]) and reports bytes that are left as
     /// [`Self::ValueError`].
@@ -277,34 +263,28 @@ pub trait KeyedParameter: Sized {
     ///
     /// [`Self::ValueError`] if the content cannot be read or breaks a rule
     /// of the type.
-    fn read_value<D: Buf + Unpin>(value: &mut ValueSource<D>) -> Result<Self, Self::ValueError>;
+    fn read_value<D: Buf>(value: &mut ValueSource<D>) -> Result<Self, Self::ValueError>;
 
     /// The number of bytes [`write_value`](Self::write_value) writes.
     fn value_len(&self) -> usize;
 
     /// Writes the value of the parameter, without its ID and Length, with
-    /// the write operation of the type: exactly
+    /// the write function of the type: exactly
     /// [`value_len`](Self::value_len) bytes.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails,
-    /// counting the bytes of the value accepted before.
-    fn write_value<F, A>(
-        &self,
-        io: &mut A,
-    ) -> impl Future<Output = Result<(), WriteAllError<F::Error>>>
-    where
-        F: Write,
-        A: ReceiverAccess<Family = F>;
+    /// If `dst` has no room for the value, as [`BufMut`] does.
+    fn write_value<B: BufMut>(&self, dst: &mut B);
 }
 
 /// The value of one parameter as a source of its own, so that a parameter
-/// type reads its value with the same operations as any other source, within
+/// type reads its value with the same functions as any other source, within
 /// the length of the value.
 ///
-/// It never waits and never fails: a value that is shorter than what is read
-/// from it is an incomplete failure of the read operation.
+/// It is a [`Buf`] over the bytes of the value that have not been read: a
+/// value that is shorter than what is read from it is an incomplete failure
+/// of the read function.
 #[derive(Clone, Debug)]
 pub struct ValueSource<D> {
     value: D,
@@ -344,23 +324,18 @@ impl<D: Buf> ValueSource<D> {
     }
 }
 
-nitori_call::family_receiver!(impl [D: Buf + Unpin] for ValueSource<D>);
+/// The bytes of the value that have not been read.
+impl<D: Buf> Buf for ValueSource<D> {
+    fn remaining(&self) -> usize {
+        self.value.remaining()
+    }
 
-impl<D: Buf + Unpin> Read for ValueSource<D> {
-    type Error = Infallible;
+    fn chunk(&self) -> &[u8] {
+        self.value.chunk()
+    }
 
-    fn poll_read<'visit, Output: BufMut + ?Sized>(
-        host: Pin<&mut Self::ReceiverView<'visit>>,
-        _: &mut Context<'_>,
-        mut destination: &mut Output,
-    ) -> Poll<Result<usize, Self::Error>>
-    where
-        Self: 'visit,
-    {
-        let source = &mut host.get_pin_mut().get_mut().value;
-        let count = source.remaining().min(destination.remaining_mut());
-        BufMut::put(&mut destination, source.take(count));
-        Poll::Ready(Ok(count))
+    fn advance(&mut self, count: usize) {
+        self.value.advance(count);
     }
 }
 
@@ -389,9 +364,9 @@ impl TrailingBytesError {
     }
 }
 
-/// Failures of reading the value of a parameter with a read operation that
+/// Failures of reading the value of a parameter with a read function that
 /// fails with `R`: the [`KeyedParameter::ValueError`] of a type whose
-/// content is read by such an operation.
+/// content is read by such a function.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 #[snafu(module(read_value_error), visibility(pub(crate)))]
 pub enum ReadValueError<R> {
@@ -399,7 +374,7 @@ pub enum ReadValueError<R> {
     /// its type.
     #[snafu(display("parameter value content read failed"))]
     Content {
-        /// The failure of the read operation of the type.
+        /// The failure of the read function of the type.
         source: R,
     },
     /// Bytes follow the content.
@@ -442,7 +417,7 @@ impl ParameterIds {
 /// `HList![InitialMaxData, MaxAckDelay]`. The list is used as a type only;
 /// the values are in [`Self::Slots`].
 ///
-/// [`Parameters`] and the operations of [`codec`] work on a list through
+/// [`Parameters`] and the functions of [`codec`] work on a list through
 /// this trait; each of its functions handles the first type of the list and
 /// leaves the rest to the rest of the list.
 pub trait ParameterList<S: ParameterSpace> {
@@ -479,16 +454,15 @@ pub trait ParameterList<S: ParameterSpace> {
     /// already, [`ReadParametersError::NotAdmitted`] if the space does not
     /// admit the parameter, and [`ReadParametersError::InvalidValue`] if the
     /// type cannot read the value or does not read all of it; never the
-    /// other variants. `E` is the failure of the source of the parameters,
-    /// which this function does not read.
+    /// other variants.
     // The type spells out the failures of the space and of the list.
     #[allow(clippy::type_complexity)]
-    fn read_into<D: Buf + Unpin, E>(
+    fn read_into<D: Buf>(
         slots: &mut Self::Slots,
         id: VarInt,
         value: D,
         context: S::Context,
-    ) -> Result<Option<D>, ReadParametersError<E, S::AdmitError, Self::ValueErrors>>;
+    ) -> Result<Option<D>, ReadParametersError<S::AdmitError, Self::ValueErrors>>;
 
     /// Checks each slot that holds a parameter as
     /// [`Parameters::validate`] describes.
@@ -510,21 +484,12 @@ pub trait ParameterList<S: ParameterSpace> {
     fn encoded_len(slots: &Self::Slots) -> usize;
 
     /// Writes each slot that holds a parameter, in the order of the list:
-    /// the ID, the Length and the value. `written` counts the bytes of the
-    /// whole encoding accepted so far.
+    /// the ID, the Length and the value.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails; it
-    /// counts the bytes accepted before over the whole encoding.
-    fn write<F, A>(
-        slots: &Self::Slots,
-        io: &mut A,
-        written: &mut usize,
-    ) -> impl Future<Output = Result<(), WriteAllError<F::Error>>>
-    where
-        F: Write,
-        A: ReceiverAccess<Family = F>;
+    /// If `dst` has no room for the parameters, as [`BufMut`] does.
+    fn write<B: BufMut>(slots: &Self::Slots, dst: &mut B);
 }
 
 impl<S: ParameterSpace> ParameterList<S> for HNil {
@@ -539,12 +504,12 @@ impl<S: ParameterSpace> ParameterList<S> for HNil {
         HNil
     }
 
-    fn read_into<D: Buf + Unpin, E>(
+    fn read_into<D: Buf>(
         _slots: &mut HNil,
         _id: VarInt,
         value: D,
         _context: S::Context,
-    ) -> Result<Option<D>, ReadParametersError<E, S::AdmitError, CNil>> {
+    ) -> Result<Option<D>, ReadParametersError<S::AdmitError, CNil>> {
         Ok(Some(value))
     }
 
@@ -561,17 +526,7 @@ impl<S: ParameterSpace> ParameterList<S> for HNil {
         0
     }
 
-    async fn write<F, A>(
-        _slots: &HNil,
-        _io: &mut A,
-        _written: &mut usize,
-    ) -> Result<(), WriteAllError<F::Error>>
-    where
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-    {
-        Ok(())
-    }
+    fn write<B: BufMut>(_slots: &HNil, _dst: &mut B) {}
 }
 
 impl<S, H, T> ParameterList<S> for HCons<H, T>
@@ -595,12 +550,12 @@ where
         }
     }
 
-    fn read_into<D: Buf + Unpin, E>(
+    fn read_into<D: Buf>(
         slots: &mut Self::Slots,
         id: VarInt,
         value: D,
         context: S::Context,
-    ) -> Result<Option<D>, ReadParametersError<E, S::AdmitError, Self::ValueErrors>> {
+    ) -> Result<Option<D>, ReadParametersError<S::AdmitError, Self::ValueErrors>> {
         if id != H::ID {
             return T::read_into(&mut slots.tail, id, value, context)
                 .map_err(ReadParametersError::after);
@@ -649,26 +604,12 @@ where
         first.saturating_add(T::encoded_len(&slots.tail))
     }
 
-    async fn write<F, A>(
-        slots: &Self::Slots,
-        io: &mut A,
-        written: &mut usize,
-    ) -> Result<(), WriteAllError<F::Error>>
-    where
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-    {
+    fn write<B: BufMut>(slots: &Self::Slots, dst: &mut B) {
         if let Some(parameter) = &slots.head {
-            let length = parameter.value_len();
-            put(io, item_head(H::ID, length).as_slice(), written).await?;
-            let before = *written;
-            parameter
-                .write_value(io)
-                .await
-                .map_err(|error| after(error, before))?;
-            *written += length;
+            dst.put_slice(item_head(H::ID, parameter.value_len()).as_slice());
+            parameter.write_value(dst);
         }
-        T::write(&slots.tail, io, written).await
+        T::write(&slots.tail, dst);
     }
 }
 
@@ -683,38 +624,6 @@ fn item_head(id: VarInt, value_len: usize) -> Head<16> {
     // Validation bounds the length of each value by 2^62 - 1.
     let length = VarInt::try_from(value_len).unwrap_or(VarInt::MAX);
     Head::<16>::new(id).var_int(length)
-}
-
-/// Writes `bytes` completely, counting the progress of the whole encoding in
-/// `written`.
-async fn put<F: Write, A: ReceiverAccess<Family = F>, B: Buf>(
-    io: &mut A,
-    bytes: B,
-    written: &mut usize,
-) -> Result<(), WriteAllError<F::Error>> {
-    let length = bytes.remaining();
-    let before = *written;
-    io.write_all(bytes)
-        .await
-        .map_err(|error| after(error, before))?;
-    *written += length;
-    Ok(())
-}
-
-/// The failure `error` of a write that began after `before` bytes of the
-/// whole encoding, counted over the whole encoding.
-fn after<E>(error: WriteAllError<E>, before: usize) -> WriteAllError<E> {
-    match error {
-        WriteAllError::WriteZero { source } => WriteAllError::WriteZero {
-            source: WriteZeroError {
-                completed: before + source.completed,
-            },
-        },
-        WriteAllError::Receiver { source, completed } => WriteAllError::Receiver {
-            source,
-            completed: before + completed,
-        },
-    }
 }
 
 /// The parameter types of a part in the space `S`: what version 1 or one
@@ -802,7 +711,7 @@ impl<D> UnknownParameter<D> {
 /// The parameters of one endpoint in the space `S`: a slot for each type of
 /// the list `L`, and the parameters that no type of `L` claims.
 ///
-/// `D` holds the values of unknown parameters: the chunk type of the source
+/// `D` holds the values of unknown parameters: the type of the source
 /// for parameters that were read, any [`Buf`] for parameters to write.
 pub struct Parameters<S: ParameterSpace, L: ParameterList<S>, D> {
     /// One slot per type of the list, in the order of the list; `None` for a

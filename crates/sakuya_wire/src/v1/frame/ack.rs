@@ -257,7 +257,7 @@ impl AckFrame {
     /// with its width: Frame Type, Largest Acknowledged, ACK Delay, ACK Range
     /// Count, First ACK Range, the Gap and ACK Range Length of each ACK
     /// Range, and the ECN counts.
-    pub(in crate::v1) fn fields(&self) -> impl Iterator<Item = (VarInt, VarIntWidth)> + Clone {
+    pub(in crate::v1) fn fields(&self) -> impl Iterator<Item = (VarInt, VarIntWidth)> {
         fn pair<T: Copy + Into<VarInt> + TryFrom<VarInt>>(
             field: VarIntField<T>,
         ) -> (VarInt, VarIntWidth) {
@@ -526,25 +526,17 @@ pub enum PacketRangesError {
 }
 
 pub mod codec {
-    //! Writing ACK frames as a `nitori_call` operation; reading is done by
+    //! Writing ACK frames; reading is done by
     //! [`Frames`](crate::v1::frame::set::Frames).
-    //!
-    //! [`write_ack_frame`] is also the operation struct [`WriteAckFrame`], with
-    //! `WriteAckFrameExt` on receiver accesses and `WriteAckFrameHostExt` on call
-    //! executors.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
 
     use super::{AckBelowZeroError, AckFrame, AckRange, AckRanges, EcnCounts};
     use crate::{
         frame::read_field,
         v1::packet_number::PacketNumber,
-        var_int::{VarInt, VarIntField, VarIntWidth, codec::ReadVarIntError},
+        var_int::{VarInt, VarIntField, VarIntWidth},
     };
-    use bytes::Buf;
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{calls::WriteAllError, prelude::*};
+    use bytes::{Buf, BufMut};
+    use nitori_io::error::IncompleteError;
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type of an ACK frame of type
@@ -552,23 +544,21 @@ pub mod codec {
     ///
     /// Each range is checked as soon as its fields are read, so a range that
     /// extends below packet number 0 is reported before the rest is read.
-    pub(in crate::v1) async fn read_ack_frame<F: Read, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<AckFrame, ReadAckFrameError<F::Error>> {
-        Ok(read_ack_frame_fields(io).await?.into_ack(None))
+    pub(in crate::v1) fn read_ack_frame(src: &mut impl Buf) -> Result<AckFrame, ReadAckFrameError> {
+        Ok(read_ack_frame_fields(src)?.into_ack(None))
     }
 
     /// Reads the fields that follow the Frame Type of an ACK frame of type
     /// `0x03`, with ECN counts; ranges are checked as [`read_ack_frame`] does.
-    pub(in crate::v1) async fn read_ack_frame_ecn<F: Read, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<AckFrame, ReadAckFrameEcnError<F::Error>> {
+    pub(in crate::v1) fn read_ack_frame_ecn(
+        src: &mut impl Buf,
+    ) -> Result<AckFrame, ReadAckFrameEcnError> {
         use read_ack_ecn_error::*;
-        let fields = read_ack_frame_fields(io).await?;
+        let fields = read_ack_frame_fields(src)?;
         let ecn_counts = EcnCounts {
-            ect0: read_field(io).await.context(Ect0CountSnafu)?,
-            ect1: read_field(io).await.context(Ect1CountSnafu)?,
-            ce: read_field(io).await.context(EcnCeCountSnafu)?,
+            ect0: read_field(src).context(Ect0CountSnafu)?,
+            ect1: read_field(src).context(Ect1CountSnafu)?,
+            ce: read_field(src).context(EcnCeCountSnafu)?,
         };
         Ok(fields.into_ack(Some(ecn_counts)))
     }
@@ -604,16 +594,13 @@ pub mod codec {
 
     /// Reads the fields from Largest Acknowledged to the last ACK Range,
     /// checking each range as soon as its fields are read.
-    async fn read_ack_frame_fields<F: Read, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<AckFields, ReadAckFrameError<F::Error>> {
+    fn read_ack_frame_fields(src: &mut impl Buf) -> Result<AckFields, ReadAckFrameError> {
         use read_ack_error::*;
         let largest_acknowledged: VarIntField<PacketNumber> =
-            read_field(io).await.context(LargestAcknowledgedSnafu)?;
-        let ack_delay = read_field(io).await.context(AckDelaySnafu)?;
-        let count: VarIntField<VarInt> = read_field(io).await.context(AckRangeCountSnafu)?;
-        let first_ack_range: VarIntField<VarInt> =
-            read_field(io).await.context(FirstAckRangeSnafu)?;
+            read_field(src).context(LargestAcknowledgedSnafu)?;
+        let ack_delay = read_field(src).context(AckDelaySnafu)?;
+        let count: VarIntField<VarInt> = read_field(src).context(AckRangeCountSnafu)?;
+        let first_ack_range: VarIntField<VarInt> = read_field(src).context(FirstAckRangeSnafu)?;
         let mut smallest =
             AckBelowZeroError::check_first(largest_acknowledged.get(), first_ack_range.get())?;
         // The count is not trusted for the allocation; each range is read
@@ -622,10 +609,8 @@ pub mod codec {
         let mut ranges = Vec::with_capacity(count_value.min(16) as usize);
         while (ranges.len() as u64) < count_value {
             let index = ranges.len() + 1;
-            let gap = read_field(io).await.context(GapSnafu { index })?;
-            let ack_range_length = read_field(io)
-                .await
-                .context(AckRangeLengthSnafu { index })?;
+            let gap = read_field(src).context(GapSnafu { index })?;
+            let ack_range_length = read_field(src).context(AckRangeLengthSnafu { index })?;
             let range = AckRange {
                 gap,
                 ack_range_length,
@@ -646,30 +631,30 @@ pub mod codec {
     /// fields before the ECN counts of type `0x03`.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_ack_error), visibility(pub(in crate::v1)))]
-    pub enum ReadAckFrameError<E> {
+    pub enum ReadAckFrameError {
         /// The Largest Acknowledged field could not be read.
         #[snafu(display("ACK Largest Acknowledged read failed"))]
         LargestAcknowledged {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The ACK Delay field could not be read.
         #[snafu(display("ACK Delay read failed"))]
         AckDelay {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The ACK Range Count field could not be read.
         #[snafu(display("ACK Range Count read failed"))]
         AckRangeCount {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The First ACK Range field could not be read.
         #[snafu(display("First ACK Range read failed"))]
         FirstAckRange {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The Gap field of an ACK Range could not be read.
         #[snafu(display("Gap of ACK Range {index} read failed"))]
@@ -677,7 +662,7 @@ pub mod codec {
             /// The position of the ACK Range, from 1.
             index: usize,
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The ACK Range Length field of an ACK Range could not be read.
         #[snafu(display("ACK Range Length of ACK Range {index} read failed"))]
@@ -685,7 +670,7 @@ pub mod codec {
             /// The position of the ACK Range, from 1.
             index: usize,
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// A range extends below packet number 0.
         #[snafu(transparent)]
@@ -695,16 +680,16 @@ pub mod codec {
         },
     }
 
-    impl<E> ReadAckFrameError<E> {
+    impl ReadAckFrameError {
         /// Whether the source ended within the frame.
         pub(in crate::v1) fn is_incomplete(&self) -> bool {
             match self {
-                Self::LargestAcknowledged { source }
-                | Self::AckDelay { source }
-                | Self::AckRangeCount { source }
-                | Self::FirstAckRange { source }
-                | Self::Gap { source, .. }
-                | Self::AckRangeLength { source, .. } => source.is_incomplete(),
+                Self::LargestAcknowledged { .. }
+                | Self::AckDelay { .. }
+                | Self::AckRangeCount { .. }
+                | Self::FirstAckRange { .. }
+                | Self::Gap { .. }
+                | Self::AckRangeLength { .. } => true,
                 Self::BelowZero { .. } => false,
             }
         }
@@ -713,119 +698,53 @@ pub mod codec {
     /// Failures of reading an ACK frame of type `0x03`, with ECN counts.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_ack_ecn_error), visibility(pub(in crate::v1)))]
-    pub enum ReadAckFrameEcnError<E> {
+    pub enum ReadAckFrameEcnError {
         /// A field before the ECN counts could not be read, or a range
         /// extends below packet number 0.
         #[snafu(transparent)]
         Ack {
             /// The failure.
-            source: ReadAckFrameError<E>,
+            source: ReadAckFrameError,
         },
         /// The ECT0 Count field could not be read.
         #[snafu(display("ECT0 Count read failed"))]
         Ect0Count {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The ECT1 Count field could not be read.
         #[snafu(display("ECT1 Count read failed"))]
         Ect1Count {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The ECN-CE Count field could not be read.
         #[snafu(display("ECN-CE Count read failed"))]
         EcnCeCount {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
     }
 
-    impl<E> ReadAckFrameEcnError<E> {
+    impl ReadAckFrameEcnError {
         /// Whether the source ended within the frame.
         pub(in crate::v1) fn is_incomplete(&self) -> bool {
             match self {
                 Self::Ack { source } => source.is_incomplete(),
-                Self::Ect0Count { source }
-                | Self::Ect1Count { source }
-                | Self::EcnCeCount { source } => source.is_incomplete(),
+                Self::Ect0Count { .. } | Self::Ect1Count { .. } | Self::EcnCeCount { .. } => true,
             }
         }
     }
 
     /// Writes `frame`; [`AckFrame::new`] checked its rules.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_ack_frame<F: Write, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-        frame: AckFrame,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        io.write_all(VarInts::new(frame.fields())).await
-    }
-
-    /// The encodings of a sequence of variable-length integers, each of its
-    /// width, as one buffer.
-    struct VarInts<I> {
-        current: [u8; VarInt::MAX_ENCODED_LEN],
-        position: usize,
-        current_len: usize,
-        values: I,
-        remaining: usize,
-    }
-
-    impl<I: Iterator<Item = (VarInt, VarIntWidth)> + Clone> VarInts<I> {
-        fn new(values: I) -> Self {
-            let remaining = values.clone().map(|(_, width)| width.encoded_len()).sum();
-            let mut buffer = Self {
-                current: [0; VarInt::MAX_ENCODED_LEN],
-                position: 0,
-                current_len: 0,
-                values,
-                remaining,
-            };
-            buffer.load();
-            buffer
-        }
-
-        /// Moves to the next value once the current one is consumed.
-        fn load(&mut self) {
-            while self.position == self.current_len {
-                let Some((value, width)) = self.values.next() else {
-                    return;
-                };
-                (self.current, self.current_len) = value.to_encoding_of(width);
-                self.position = 0;
-            }
-        }
-    }
-
-    impl<I: Iterator<Item = (VarInt, VarIntWidth)> + Clone> Buf for VarInts<I> {
-        fn remaining(&self) -> usize {
-            self.remaining
-        }
-
-        fn chunk(&self) -> &[u8] {
-            &self.current[self.position..self.current_len]
-        }
-
-        fn advance(&mut self, mut count: usize) {
-            count = count.min(self.remaining);
-            self.remaining -= count;
-            while count > 0 {
-                let step = count.min(self.current_len - self.position);
-                if step == 0 {
-                    // `remaining` counts every byte of every value, so the
-                    // values do not run out before `count` does.
-                    break;
-                }
-                self.position += step;
-                count -= step;
-                self.load();
-            }
+    /// If `dst` has no room for the frame, as [`BufMut`] does.
+    pub fn write_ack_frame(dst: &mut impl BufMut, frame: AckFrame) {
+        for (value, width) in frame.fields() {
+            let (encoding, encoded_len) = value.to_encoding_of(width);
+            dst.put_slice(&encoding[..encoded_len]);
         }
     }
 }

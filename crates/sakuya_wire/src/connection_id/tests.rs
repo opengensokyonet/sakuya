@@ -2,8 +2,7 @@ use super::{
     ConnectionId, ConnectionIdLength, EmptyCidError, NonEmptyCid, NonEmptyCidError,
     RawConnectionId, StatelessResetToken,
     codec::{
-        ReadConnectionIdError, ReadConnectionIdHostExt as _, ReadRawConnectionIdHostExt as _,
-        WriteConnectionIdHostExt as _,
+        ReadConnectionIdError, read_connection_id, read_raw_connection_id, write_connection_id,
     },
 };
 use std::collections::{BTreeSet, HashSet};
@@ -183,14 +182,14 @@ fn length_prefixed_connection_ids_round_trip() {
     for length in [0, 1, 8, 20] {
         let id = ConnectionId::new(&vec![0xaa; length]).unwrap();
         let mut output = Vec::new();
-        output.sync_write_connection_id_unpin(id).unwrap();
+        write_connection_id(&mut output, id);
         assert_eq!(output.len(), 1 + length);
         assert_eq!(output[0] as usize, length);
         let mut input = output.as_slice();
-        assert_eq!(input.sync_read_connection_id_unpin().unwrap(), id);
+        assert_eq!(read_connection_id(&mut input).unwrap(), id);
         let mut input = output.as_slice();
         assert_eq!(
-            input.sync_read_raw_connection_id_unpin().unwrap(),
+            read_raw_connection_id(&mut input).unwrap(),
             RawConnectionId::from(id)
         );
     }
@@ -200,7 +199,7 @@ fn length_prefixed_connection_ids_round_trip() {
 fn length_prefixed_connection_id_limits() {
     // A version 1 connection ID is rejected at its length byte.
     let mut input = &[21, 0xaa, 0xbb][..];
-    let error = input.sync_read_connection_id_unpin().unwrap_err();
+    let error = read_connection_id(&mut input).unwrap_err();
     assert!(matches!(
         error,
         ReadConnectionIdError::Length { source } if source.length() == 21
@@ -210,25 +209,13 @@ fn length_prefixed_connection_id_limits() {
     let mut long = vec![255];
     long.extend([7; 255]);
     let mut input = long.as_slice();
-    assert_eq!(
-        input.sync_read_raw_connection_id_unpin().unwrap().len(),
-        255
-    );
+    assert_eq!(read_raw_connection_id(&mut input).unwrap().len(), 255);
 
     for encoding in [&[][..], &[4, 1, 2][..]] {
         let mut input = encoding;
-        assert!(
-            input
-                .sync_read_connection_id_unpin()
-                .unwrap_err()
-                .is_incomplete()
-        );
+        assert!(read_connection_id(&mut input).unwrap_err().is_incomplete());
+        // Every failure of the raw form is an incomplete one.
         let mut input = encoding;
-        assert!(
-            input
-                .sync_read_raw_connection_id_unpin()
-                .unwrap_err()
-                .is_incomplete()
-        );
+        assert!(read_raw_connection_id(&mut input).is_err());
     }
 }

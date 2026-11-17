@@ -4,13 +4,10 @@ use crate::{
     v1::encryption_level::EncryptionLevel,
     v1::header::{
         KeyPhase, LongPacketHeader, LongPacketType, ShortPacketHeader, TypeFields,
-        codec::{
-            ReadLongPacketError, WriteLongPacketHeaderHostExt as _,
-            WriteShortPacketHeaderHostExt as _,
-        },
+        codec::{ReadLongPacketError, write_long_packet_header, write_short_packet_header},
     },
     v1::packet_number::PacketNumberLength,
-    var_int::{VarInt, VarIntField, VarIntWidth, codec::WriteVarIntFieldHostExt as _},
+    var_int::{VarInt, VarIntField, VarIntWidth, codec::write_var_int_field},
 };
 use bytes::{Bytes, BytesMut};
 
@@ -33,18 +30,14 @@ fn reserved(width: VarIntWidth) -> VarIntField<VarInt> {
 /// `body` of packet number and payload are written.
 fn finish_long(header: &LongPacketHeader, body: &[u8]) -> Vec<u8> {
     let mut packet = Vec::new();
-    packet
-        .sync_write_long_packet_header_unpin(header.clone())
-        .unwrap();
+    write_long_packet_header(&mut packet, header.clone());
     packet.extend_from_slice(body);
     let length = VarIntField::new(
         VarInt::try_from(body.len()).unwrap(),
         header.length().width(),
     )
     .unwrap();
-    (&mut packet[header.length_offset()..])
-        .sync_write_var_int_field_unpin(length)
-        .unwrap();
+    write_var_int_field(&mut (&mut packet[header.length_offset()..]), length);
     packet
 }
 
@@ -83,14 +76,10 @@ fn zero_rtt(dcid: &[u8], body: &[u8]) -> Vec<u8> {
 
 fn one_rtt(dcid: &[u8], body: &[u8]) -> Vec<u8> {
     let mut packet = Vec::new();
-    packet
-        .sync_write_short_packet_header_unpin(ShortPacketHeader::new(
-            true,
-            KeyPhase::Zero,
-            PacketNumberLength::Two,
-            cid(dcid),
-        ))
-        .unwrap();
+    write_short_packet_header(
+        &mut packet,
+        ShortPacketHeader::new(true, KeyPhase::Zero, PacketNumberLength::Two, cid(dcid)),
+    );
     packet.extend_from_slice(body);
     packet
 }

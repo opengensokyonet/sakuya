@@ -268,7 +268,7 @@ impl LongPacketHeader {
 /// A QUIC version 1 long header packet, as far as its header states without
 /// protection ([RFC 9000 §17.2]).
 ///
-/// Offsets count from the first byte of the packet. `D` is the chunk type of
+/// Offsets count from the first byte of the packet. `D` is the type of
 /// the source the packet was read from; it holds the token and the protected
 /// packet number and payload.
 ///

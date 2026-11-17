@@ -1,20 +1,15 @@
 //! The `stateless_reset_token` transport parameter ([RFC 9000 §18.2]).
 //!
 //! [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
-use self::codec::{ReadStatelessResetTokenValueHostExt as _, write_stateless_reset_token_value};
+use self::codec::{read_stateless_reset_token_value, write_stateless_reset_token_value};
 use super::{RememberedForZeroRtt, SentBy, TransportParameterAttributes, TransportParameterSpace};
 use crate::{
     connection_id,
     parameters::{KeyedParameter, ReadValueError, ValueSource, read_value_error::ContentSnafu},
     var_int::VarInt,
 };
-use bytes::Buf;
-use core::convert::Infallible;
-use nitori_call::ReceiverAccess;
-use nitori_io::{
-    Write,
-    calls::{ReadArrayError, WriteAllError},
-};
+use bytes::{Buf, BufMut};
+use nitori_io::error::IncompleteError;
 use snafu::ResultExt;
 
 /// `stateless_reset_token`, `0x02`: the Stateless Reset Token of the
@@ -53,7 +48,7 @@ impl From<StatelessResetToken> for connection_id::StatelessResetToken {
 
 impl KeyedParameter for StatelessResetToken {
     type Space = TransportParameterSpace;
-    type ValueError = ReadValueError<ReadArrayError<Infallible>>;
+    type ValueError = ReadValueError<IncompleteError>;
 
     const ID: VarInt = VarInt::from_u32(0x02);
     const ATTRIBUTES: TransportParameterAttributes = TransportParameterAttributes {
@@ -61,9 +56,8 @@ impl KeyedParameter for StatelessResetToken {
         remembered_for_zero_rtt: RememberedForZeroRtt::Prohibited,
     };
 
-    fn read_value<D: Buf + Unpin>(value: &mut ValueSource<D>) -> Result<Self, Self::ValueError> {
-        value
-            .sync_read_stateless_reset_token_value_unpin()
+    fn read_value<D: Buf>(value: &mut ValueSource<D>) -> Result<Self, Self::ValueError> {
+        read_stateless_reset_token_value(value)
             .map(Self)
             .context(ContentSnafu)
     }
@@ -72,64 +66,40 @@ impl KeyedParameter for StatelessResetToken {
         connection_id::StatelessResetToken::LEN
     }
 
-    async fn write_value<F, A>(&self, io: &mut A) -> Result<(), WriteAllError<F::Error>>
-    where
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-    {
-        write_stateless_reset_token_value(io, self.0).await
+    fn write_value<B: BufMut>(&self, dst: &mut B) {
+        write_stateless_reset_token_value(dst, self.0);
     }
 }
 
 pub mod codec {
     //! Reading and writing the value of the `stateless_reset_token`
-    //! parameter as `nitori_call` operations.
+    //! parameter.
     //!
-    //! [`read_stateless_reset_token_value`] and
-    //! [`write_stateless_reset_token_value`] are also the operation structs
-    //! [`ReadStatelessResetTokenValue`] and [`WriteStatelessResetTokenValue`],
-    //! with `{Name}Ext` on receiver accesses and `{Name}HostExt` on call
-    //! executors. Reading the parameters reads this value from the bytes of
-    //! its parameter, which must hold nothing else.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
+    //! Reading the parameters reads this value from the bytes of its
+    //! parameter, which must hold nothing else.
 
-    use crate::connection_id::StatelessResetToken;
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{
-        calls::{ReadArrayError, WriteAllError},
-        prelude::*,
-    };
+    use crate::{connection_id::StatelessResetToken, source::read_array};
+    use bytes::{Buf, BufMut};
+    use nitori_io::error::IncompleteError;
 
     /// Reads the 16 bytes of a Stateless Reset Token, and nothing after
     /// them.
     ///
     /// # Errors
     ///
-    /// [`ReadArrayError`] if the bytes cannot be read; a source that ends
-    /// before the sixteenth byte is incomplete.
-    #[call(sync)]
-    pub async fn read_stateless_reset_token_value<F: Read, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<StatelessResetToken, ReadArrayError<F::Error>> {
-        io.read_array::<{ StatelessResetToken::LEN }>()
-            .await
-            .map(StatelessResetToken::new)
+    /// [`IncompleteError`] if the source ends before the sixteenth byte.
+    pub fn read_stateless_reset_token_value(
+        src: &mut impl Buf,
+    ) -> Result<StatelessResetToken, IncompleteError> {
+        read_array::<{ StatelessResetToken::LEN }>(src).map(StatelessResetToken::new)
     }
 
     /// Writes the 16 bytes of `token`.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_stateless_reset_token_value<F: Write, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-        token: StatelessResetToken,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        let bytes = *token.as_bytes();
-        io.write_all(&bytes[..]).await
+    /// If `dst` has no room for the token, as [`BufMut`] does.
+    pub fn write_stateless_reset_token_value(dst: &mut impl BufMut, token: StatelessResetToken) {
+        dst.put_slice(token.as_bytes());
     }
 }

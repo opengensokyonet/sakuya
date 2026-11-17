@@ -50,40 +50,28 @@ impl MaxDataFrame {
 }
 
 pub mod codec {
-    //! Writing MAX_DATA as a `nitori_call` operation; reading is done by
+    //! Writing MAX_DATA; reading is done by
     //! [`Frames`](crate::v1::frame::set::Frames).
-    //!
-    //! [`write_max_data_frame`] is also the operation struct [`WriteMaxDataFrame`], with
-    //! `WriteMaxDataFrameExt` on receiver accesses and `WriteMaxDataFrameHostExt` on call
-    //! executors.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
 
     use super::MaxDataFrame;
-    use crate::{frame::read_field, var_int::codec::ReadVarIntError};
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{calls::WriteAllError, prelude::*};
+    use crate::frame::read_field;
+    use bytes::{Buf, BufMut};
+    use nitori_io::error::IncompleteError;
 
     /// Reads the fields that follow the Frame Type.
-    pub(in crate::v1) async fn read_max_data_frame<F: Read, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<MaxDataFrame, ReadVarIntError<F::Error>> {
-        Ok(MaxDataFrame::new(read_field(io).await?))
+    pub(in crate::v1) fn read_max_data_frame(
+        src: &mut impl Buf,
+    ) -> Result<MaxDataFrame, IncompleteError> {
+        Ok(MaxDataFrame::new(read_field(src)?))
     }
 
     /// Writes the frame.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_max_data_frame<F: Write, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-        frame: MaxDataFrame,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        io.write_all(frame.head().as_slice()).await
+    /// If `dst` has no room for the frame, as [`BufMut`] does.
+    pub fn write_max_data_frame(dst: &mut impl BufMut, frame: MaxDataFrame) {
+        dst.put_slice(frame.head().as_slice());
     }
 }
 

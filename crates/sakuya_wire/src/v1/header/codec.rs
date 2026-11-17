@@ -1,22 +1,19 @@
 //! Reading the version 1 fields of a long header packet, and writing version 1
-//! headers, as `nitori_call` operations.
+//! headers.
 //!
 //! [`read_long_packet`] continues after [`read_long_header`] has read the
-//! version-independent fields. It is also the operation struct
-//! [`ReadLongPacket`], with `ReadLongPacketExt` on receiver accesses inside
-//! other operations and `ReadLongPacketHostExt` on call executors, including
-//! the `sync_` methods for receivers that never wait.
+//! version-independent fields.
 //!
 //! ```
-//! use sakuya_wire::header::codec::ReadLongHeaderHostExt as _;
-//! use sakuya_wire::v1::header::{TypeFields, codec::ReadLongPacketHostExt as _};
+//! use sakuya_wire::header::codec::read_long_header;
+//! use sakuya_wire::v1::header::{TypeFields, codec::read_long_packet};
 //!
 //! // A Handshake packet with an empty DCID and a 4-byte SCID, followed by
 //! // the first byte of a coalesced short header packet.
 //! let datagram = [0xe0, 0, 0, 0, 1, 0, 4, 9, 9, 9, 9, 3, 0xaa, 0xbb, 0xcc, 0x41];
 //! let mut input = &datagram[..];
-//! let header = input.sync_read_long_header_unpin().unwrap();
-//! let packet = input.sync_read_long_packet_unpin(header).unwrap();
+//! let header = read_long_header(&mut input).unwrap();
+//! let packet = read_long_packet(&mut input, header).unwrap();
 //! let TypeFields::Handshake { bounds, protected } = packet.fields() else { panic!() };
 //! assert_eq!((bounds.packet_number_offset(), bounds.end()), (12, 15));
 //! assert_eq!(*protected, [0xaa, 0xbb, 0xcc]);
@@ -27,16 +24,15 @@
 //! Handshake packet from the first byte to the Length field,
 //! [`write_short_packet_header`] the header of a 1-RTT packet up to its
 //! Packet Number field, and [`write_retry_packet_without_tag`] a Retry packet
-//! up to its integrity tag. Each is also an operation struct, such as
-//! [`WriteLongPacketHeader`], with `{Name}Ext` and `{Name}HostExt`.
+//! up to its integrity tag.
 //!
 //! ```
 //! use bytes::Bytes;
 //! use sakuya_wire::{
 //!     connection_id::ConnectionId,
-//!     v1::header::{LongPacketHeader, codec::WriteLongPacketHeaderHostExt as _},
+//!     v1::header::{LongPacketHeader, codec::write_long_packet_header},
 //!     v1::packet_number::PacketNumberLength,
-//!     var_int::{VarInt, VarIntField, VarIntWidth, codec::WriteVarIntFieldHostExt as _},
+//!     var_int::{VarInt, VarIntField, VarIntWidth, codec::write_var_int_field},
 //! };
 //!
 //! let dcid = ConnectionId::new(&[1, 2]).unwrap();
@@ -47,12 +43,12 @@
 //! ).unwrap();
 //!
 //! let mut packet = Vec::new();
-//! packet.sync_write_long_packet_header_unpin(header.clone()).unwrap();
+//! write_long_packet_header(&mut packet, header.clone());
 //! assert_eq!(packet.len(), header.packet_number_offset());
 //! packet.extend_from_slice(&[0xaa; 20]); // Packet Number and payload.
 //!
 //! let length = VarIntField::new(VarInt::from(20u8), VarIntWidth::Two).unwrap();
-//! (&mut packet[header.length_offset()..]).sync_write_var_int_field_unpin(length).unwrap();
+//! write_var_int_field(&mut &mut packet[header.length_offset()..], length);
 //! assert_eq!(packet[..8], [0xc1, 0, 0, 0, 1, 2, 1, 2]);
 //! assert_eq!(packet[8..13], [0, 0, 0x40, 20, 0xaa]);
 //! ```
@@ -65,14 +61,12 @@
 //! ```
 //! use sakuya_wire::{
 //!     connection_id::ConnectionId,
-//!     v1::header::codec::WriteRetryPacketWithoutTagHostExt as _,
+//!     v1::header::codec::write_retry_packet_without_tag,
 //! };
 //!
 //! let scid = ConnectionId::new(&[0xf0, 0x67, 0xa5, 0x50, 0x2a, 0x42, 0x62, 0xb5]).unwrap();
 //! let mut packet = Vec::new();
-//! packet
-//!     .sync_write_retry_packet_without_tag_unpin(0x0f, ConnectionId::EMPTY, scid, b"token")
-//!     .unwrap();
+//! write_retry_packet_without_tag(&mut packet, 0x0f, ConnectionId::EMPTY, scid, b"token");
 //! assert_eq!(packet[..7], [0xff, 0, 0, 0, 1, 0, 8]);
 //! assert_eq!(packet[15..], *b"token");
 //! // The 16-byte Retry Integrity Tag follows.
@@ -80,10 +74,6 @@
 //!
 //! [`read_long_header`]: crate::header::codec::read_long_header
 //! [RFC 9001 §5.8]: https://www.rfc-editor.org/rfc/rfc9001.html#section-5.8
-// `#[call]` generates constructors, fields and extension traits without
-// documentation comments; the module documentation above describes them.
-#![allow(missing_docs)]
-
 use super::{
     FIXED_BIT, LongPacket, LongPacketHeader, LongPacketType, PacketBounds, RETRY_INTEGRITY_TAG_LEN,
     ShortPacketHeader, TypeFields, VERSION, WrittenKind,
@@ -91,16 +81,12 @@ use super::{
 use crate::{
     connection_id::{ConnectionId, ConnectionIdLengthError},
     header::{FORM_BIT, LongHeader},
-    payload::{ReadPayloadError, read_payload, read_payload_to_end},
-    var_int::{
-        VarInt,
-        codec::{ReadVarIntError, read_var_int_counted},
-    },
+    source::{read_payload, read_payload_to_end},
+    var_int::{VarInt, codec::read_var_int_with_width},
     version::Version,
 };
-use bytes::{Buf, Bytes};
-use nitori_call::{ReceiverAccess, call};
-use nitori_io::{calls::WriteAllError, prelude::*};
+use bytes::{Buf, BufMut};
+use nitori_io::{SplitTo, error::IncompleteError};
 use snafu::{ResultExt, Snafu};
 
 /// Reads the version 1 fields that follow the version-independent fields of
@@ -117,23 +103,15 @@ use snafu::{ResultExt, Snafu};
 /// - [`ReadLongPacketError::Length`] if the Length field cannot be read, and
 ///   [`ReadLongPacketError::Protected`] if the source ends before the end of
 ///   its range;
-/// - [`ReadLongPacketError::Retry`] if the rest of a Retry packet cannot be
-///   read, and [`ReadLongPacketError::RetryIntegrityTag`] if it is too short
-///   for its integrity tag.
+/// - [`ReadLongPacketError::RetryIntegrityTag`] if the rest of a Retry
+///   packet is too short for its integrity tag.
 ///
-/// # Panics
-///
-/// If the receiver returns a chunk longer than requested, which breaks the
-/// `ReadChunk` contract of `nitori_io`; see [`payload`](crate::payload).
-#[call(sync)]
-pub async fn read_long_packet<F, A>(
-    io: &mut A,
+/// The token of an Initial packet and the range of the Length field are
+/// pieces of the source.
+pub fn read_long_packet<S: Buf + SplitTo>(
+    src: &mut S,
     header: LongHeader,
-) -> Result<LongPacket<F::Chunk>, ReadLongPacketError<F::Error>>
-where
-    F: ReadChunk<Chunk: Default>,
-    A: ReceiverAccess<Family = F>,
-{
+) -> Result<LongPacket<S>, ReadLongPacketError> {
     NotV1VersionError::check(header.version())?;
     let dcid =
         ConnectionId::try_from(*header.dcid()).context(read_long_packet_error::DcidLengthSnafu)?;
@@ -142,14 +120,12 @@ where
     let offset = header.version_specific_offset();
     let fields = match LongPacketType::of(header.first_byte()) {
         LongPacketType::Initial => {
-            let (token_len, token_len_len) = read_var_int_counted(io)
-                .await
-                .context(read_long_packet_error::TokenLengthSnafu)?;
+            let (token_len, token_len_width) =
+                read_var_int_with_width(src).context(read_long_packet_error::TokenLengthSnafu)?;
             let token_len = saturating_usize(token_len);
-            let token = read_payload(io, token_len)
-                .await
-                .context(read_long_packet_error::TokenSnafu)?;
-            let (bounds, protected) = read_bounded(io, offset + token_len_len + token_len).await?;
+            let token = read_payload(src, token_len).context(read_long_packet_error::TokenSnafu)?;
+            let (bounds, protected) =
+                read_bounded(src, offset + token_len_width.encoded_len() + token_len)?;
             TypeFields::Initial {
                 token,
                 bounds,
@@ -157,17 +133,15 @@ where
             }
         }
         LongPacketType::ZeroRtt => {
-            let (bounds, protected) = read_bounded(io, offset).await?;
+            let (bounds, protected) = read_bounded(src, offset)?;
             TypeFields::ZeroRtt { bounds, protected }
         }
         LongPacketType::Handshake => {
-            let (bounds, protected) = read_bounded(io, offset).await?;
+            let (bounds, protected) = read_bounded(src, offset)?;
             TypeFields::Handshake { bounds, protected }
         }
         LongPacketType::Retry => {
-            let mut rest = read_payload_to_end(io)
-                .await
-                .context(read_long_packet_error::RetrySnafu)?;
+            let mut rest = read_payload_to_end(src);
             let length = rest.remaining();
             let token_len = RetryIntegrityTagError::check(length)?;
             // invariant: `rest` holds `token_len` bytes and the tag after them.
@@ -190,21 +164,15 @@ where
 }
 
 /// Reads the Length field at `offset` and the range it covers.
-async fn read_bounded<F, A>(
-    io: &mut A,
+fn read_bounded<S: Buf + SplitTo>(
+    src: &mut S,
     offset: usize,
-) -> Result<(PacketBounds, F::Chunk), ReadLongPacketError<F::Error>>
-where
-    F: ReadChunk<Chunk: Default>,
-    A: ReceiverAccess<Family = F>,
-{
-    let (length, length_len) = read_var_int_counted(io)
-        .await
-        .context(read_long_packet_error::LengthSnafu)?;
-    let protected = read_payload(io, saturating_usize(length))
-        .await
+) -> Result<(PacketBounds, S), ReadLongPacketError> {
+    let (length, length_width) =
+        read_var_int_with_width(src).context(read_long_packet_error::LengthSnafu)?;
+    let protected = read_payload(src, saturating_usize(length))
         .context(read_long_packet_error::ProtectedSnafu { length })?;
-    let packet_number_offset = offset + length_len;
+    let packet_number_offset = offset + length_width.encoded_len();
     let bounds = PacketBounds {
         length,
         packet_number_offset,
@@ -222,7 +190,7 @@ fn saturating_usize(value: VarInt) -> usize {
 /// Failures that [`read_long_packet`] can produce.
 #[derive(Debug, Snafu)]
 #[snafu(module(read_long_packet_error), visibility(pub(in crate::v1)))]
-pub enum ReadLongPacketError<E> {
+pub enum ReadLongPacketError {
     /// The version is not QUIC version 1.
     #[snafu(transparent)]
     Version {
@@ -245,34 +213,28 @@ pub enum ReadLongPacketError<E> {
     #[snafu(display("the Token Length field read failed"))]
     TokenLength {
         /// The failure of reading the field.
-        source: ReadVarIntError<E>,
+        source: IncompleteError,
     },
     /// The token of an Initial packet could not be read.
     #[snafu(display("token read failed"))]
     Token {
         /// The failure of reading the token.
-        source: ReadPayloadError<E>,
+        source: IncompleteError,
     },
     /// The Length field could not be read.
     #[snafu(display("the Length field read failed"))]
     Length {
         /// The failure of reading the field.
-        source: ReadVarIntError<E>,
+        source: IncompleteError,
     },
-    /// The range of the Length field could not be read; when the source
-    /// ended within it, the packet's boundary is unknown.
+    /// The range of the Length field could not be read: the source ended
+    /// within it, so the packet's boundary is unknown.
     #[snafu(display("the Length field range of {length} bytes read failed"))]
     Protected {
         /// The value of the Length field.
         length: VarInt,
         /// The failure of reading the range.
-        source: ReadPayloadError<E>,
-    },
-    /// The rest of a Retry packet could not be read.
-    #[snafu(display("Retry packet read failed"))]
-    Retry {
-        /// The failure of reading the rest.
-        source: ReadPayloadError<E>,
+        source: IncompleteError,
     },
     /// A Retry packet is too short for its integrity tag.
     #[snafu(transparent)]
@@ -335,24 +297,19 @@ impl RetryIntegrityTagError {
     }
 }
 
-impl<E> ReadLongPacketError<E> {
+impl ReadLongPacketError {
     /// Whether the source ended within the packet.
     pub fn is_incomplete(&self) -> bool {
         match self {
-            Self::TokenLength { source } | Self::Length { source } => source.is_incomplete(),
-            Self::Token { source } | Self::Protected { source, .. } | Self::Retry { source } => {
-                source.is_incomplete()
-            }
-            Self::RetryIntegrityTag { .. } => true,
+            Self::TokenLength { .. }
+            | Self::Length { .. }
+            | Self::Token { .. }
+            | Self::Protected { .. }
+            | Self::RetryIntegrityTag { .. } => true,
             Self::Version { .. } | Self::DcidLength { .. } | Self::ScidLength { .. } => false,
         }
     }
 }
-
-/// The longest prefix of the header before the token and the Length field:
-/// the first byte, the version, two connection IDs with their length bytes
-/// and the longest Token Length field.
-const PREFIX_MAX: usize = 1 + 4 + 1 + ConnectionId::MAX_LEN + 1 + ConnectionId::MAX_LEN + 8;
 
 /// Writes `header` from the first byte to the end of the Length field, up to
 /// the Packet Number field.
@@ -360,65 +317,39 @@ const PREFIX_MAX: usize = 1 + 4 + 1 + ConnectionId::MAX_LEN + 1 + ConnectionId::
 /// The Length field is written with the value and the width the header
 /// states.
 ///
-/// Acceptance by the receiver does not imply flushing or delivery.
+/// # Panics
 ///
-/// # Errors
-///
-/// [`WriteAllError`] if the receiver stops accepting bytes or fails; bytes
-/// accepted before stay written.
-#[call(sync)]
-pub async fn write_long_packet_header<F: Write, A: ReceiverAccess<Family = F>>(
-    io: &mut A,
-    header: LongPacketHeader,
-) -> Result<(), WriteAllError<F::Error>> {
-    let mut prefix = [0; PREFIX_MAX];
-    let mut len = 0;
-    let mut put = |bytes: &[u8]| {
-        // invariant: `PREFIX_MAX` is the longest the pieces below add up to.
-        prefix[len..len + bytes.len()].copy_from_slice(bytes);
-        len += bytes.len();
-    };
-    put(&[header.first_byte()]);
-    put(&VERSION.to_be_bytes());
-    put(&[u8::from(header.dcid.length())]);
-    put(header.dcid.as_bytes());
-    put(&[u8::from(header.scid.length())]);
-    put(header.scid.as_bytes());
-    let token = match &header.kind {
-        WrittenKind::Initial(initial) => {
-            // Construction checked that the width holds the token length.
-            let token_len = VarInt::try_from(initial.token.len()).unwrap_or(VarInt::ZERO);
-            let (encoding, encoded_len) = token_len.to_encoding_of(initial.length_width);
-            put(&encoding[..encoded_len]);
-            initial.token.clone()
-        }
-        WrittenKind::ZeroRtt | WrittenKind::Handshake => Bytes::new(),
-    };
+/// If `dst` has no room for the header, as [`BufMut`] does.
+pub fn write_long_packet_header(dst: &mut impl BufMut, header: LongPacketHeader) {
+    dst.put_u8(header.first_byte());
+    dst.put_slice(&VERSION.to_be_bytes());
+    dst.put_u8(u8::from(header.dcid.length()));
+    dst.put_slice(header.dcid.as_bytes());
+    dst.put_u8(u8::from(header.scid.length()));
+    dst.put_slice(header.scid.as_bytes());
+    if let WrittenKind::Initial(initial) = &header.kind {
+        // Construction checked that the width holds the token length.
+        let token_len = VarInt::try_from(initial.token.len()).unwrap_or(VarInt::ZERO);
+        let (encoding, encoded_len) = token_len.to_encoding_of(initial.length_width);
+        dst.put_slice(&encoding[..encoded_len]);
+        dst.put_slice(&initial.token);
+    }
     let (length, length_len) = header
         .length
         .to_var_int()
         .to_encoding_of(header.length.width());
-    io.write_all(prefix[..len].chain(token).chain(&length[..length_len]))
-        .await
+    dst.put_slice(&length[..length_len]);
 }
 
 /// Writes the first byte and the destination connection ID of `header`, up to
 /// the Packet Number field.
 ///
-/// Acceptance by the receiver does not imply flushing or delivery.
+/// # Panics
 ///
-/// # Errors
-///
-/// [`WriteAllError`] if the receiver stops accepting bytes or fails; bytes
-/// accepted before stay written.
-#[call(sync)]
-pub async fn write_short_packet_header<F: Write, A: ReceiverAccess<Family = F>>(
-    io: &mut A,
-    header: ShortPacketHeader,
-) -> Result<(), WriteAllError<F::Error>> {
-    let first_byte = [header.first_byte()];
-    io.write_all(Buf::chain(&first_byte[..], header.dcid().as_bytes()))
-        .await
+/// If `dst` has no room for the header, as [`BufMut`] does.
+pub fn write_short_packet_header(dst: &mut impl BufMut, header: ShortPacketHeader) {
+    dst.put_u8(header.first_byte());
+    dst.put_slice(header.dcid().as_bytes());
 }
 
 /// The Long Packet Type bits of a Retry packet, `0b11`, in place in the
@@ -427,10 +358,6 @@ const RETRY_TYPE_BITS: u8 = 0b11 << 4;
 
 /// The bits of the first byte of a Retry packet that form its Unused field.
 const RETRY_UNUSED_MASK: u8 = 0x0f;
-
-/// The longest Retry packet before its token: the first byte, the version and
-/// two connection IDs with their length bytes.
-const RETRY_PREFIX_MAX: usize = 1 + 4 + 1 + ConnectionId::MAX_LEN + 1 + ConnectionId::MAX_LEN;
 
 /// Writes a Retry packet ([RFC 9000 §17.2.5]) from the first byte to the end
 /// of the Retry Token, up to the Retry Integrity Tag.
@@ -450,38 +377,26 @@ const RETRY_PREFIX_MAX: usize = 1 + 4 + 1 + ConnectionId::MAX_LEN + 1 + Connecti
 /// [`read_long_header`](crate::header::codec::read_long_header) and
 /// [`read_long_packet`] then reads as the same fields.
 ///
-/// Acceptance by the receiver does not imply flushing or delivery.
+/// # Panics
 ///
-/// # Errors
-///
-/// [`WriteAllError`] if the receiver stops accepting bytes or fails; bytes
-/// accepted before stay written.
+/// If `dst` has no room for the packet, as [`BufMut`] does.
 ///
 /// [RFC 9000 §17.2.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.2.5
 /// [RFC 9000 §17.2.5.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.2.5.1
 /// [RFC 9000 §17.2.5.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-17.2.5.2
 /// [RFC 9001 §5.8]: https://www.rfc-editor.org/rfc/rfc9001.html#section-5.8
-#[call(sync)]
-pub async fn write_retry_packet_without_tag<F: Write, A: ReceiverAccess<Family = F>>(
-    io: &mut A,
+pub fn write_retry_packet_without_tag(
+    dst: &mut impl BufMut,
     unused: u8,
     dcid: ConnectionId,
     scid: ConnectionId,
     token: &[u8],
-) -> Result<(), WriteAllError<F::Error>> {
-    let mut prefix = [0; RETRY_PREFIX_MAX];
-    let mut len = 0;
-    let mut put = |bytes: &[u8]| {
-        // invariant: `RETRY_PREFIX_MAX` is the longest the pieces below add
-        // up to.
-        prefix[len..len + bytes.len()].copy_from_slice(bytes);
-        len += bytes.len();
-    };
-    put(&[FORM_BIT | FIXED_BIT | RETRY_TYPE_BITS | (unused & RETRY_UNUSED_MASK)]);
-    put(&VERSION.to_be_bytes());
-    put(&[u8::from(dcid.length())]);
-    put(dcid.as_bytes());
-    put(&[u8::from(scid.length())]);
-    put(scid.as_bytes());
-    io.write_all(prefix[..len].chain(token)).await
+) {
+    dst.put_u8(FORM_BIT | FIXED_BIT | RETRY_TYPE_BITS | (unused & RETRY_UNUSED_MASK));
+    dst.put_slice(&VERSION.to_be_bytes());
+    dst.put_u8(u8::from(dcid.length()));
+    dst.put_slice(dcid.as_bytes());
+    dst.put_u8(u8::from(scid.length()));
+    dst.put_slice(scid.as_bytes());
+    dst.put_slice(token);
 }

@@ -50,40 +50,28 @@ impl DataBlockedFrame {
 }
 
 pub mod codec {
-    //! Writing DATA_BLOCKED as a `nitori_call` operation; reading is done by
+    //! Writing DATA_BLOCKED; reading is done by
     //! [`Frames`](crate::v1::frame::set::Frames).
-    //!
-    //! [`write_data_blocked_frame`] is also the operation struct [`WriteDataBlockedFrame`], with
-    //! `WriteDataBlockedFrameExt` on receiver accesses and `WriteDataBlockedFrameHostExt` on call
-    //! executors.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
 
     use super::DataBlockedFrame;
-    use crate::{frame::read_field, var_int::codec::ReadVarIntError};
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{calls::WriteAllError, prelude::*};
+    use crate::frame::read_field;
+    use bytes::{Buf, BufMut};
+    use nitori_io::error::IncompleteError;
 
     /// Reads the fields that follow the Frame Type.
-    pub(in crate::v1) async fn read_data_blocked_frame<F: Read, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<DataBlockedFrame, ReadVarIntError<F::Error>> {
-        Ok(DataBlockedFrame::new(read_field(io).await?))
+    pub(in crate::v1) fn read_data_blocked_frame(
+        src: &mut impl Buf,
+    ) -> Result<DataBlockedFrame, IncompleteError> {
+        Ok(DataBlockedFrame::new(read_field(src)?))
     }
 
     /// Writes the frame.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_data_blocked_frame<F: Write, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-        frame: DataBlockedFrame,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        io.write_all(frame.head().as_slice()).await
+    /// If `dst` has no room for the frame, as [`BufMut`] does.
+    pub fn write_data_blocked_frame(dst: &mut impl BufMut, frame: DataBlockedFrame) {
+        dst.put_slice(frame.head().as_slice());
     }
 }
 

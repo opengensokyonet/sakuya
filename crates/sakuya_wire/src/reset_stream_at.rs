@@ -45,7 +45,7 @@
 //!         role::Role,
 //!         transport_parameters::{
 //!             TransportParameterList, TransportParameterSpace,
-//!             codec::ReadTransportParametersHostExt as _,
+//!             codec::read_transport_parameters,
 //!         },
 //!     },
 //! };
@@ -55,22 +55,20 @@
 //!
 //! // reset_stream_at, with its empty value.
 //! let mut encoding = &[0x1d, 0x00][..];
-//! let parameters = encoding
-//!     .sync_read_transport_parameters_unpin(Role::Client, PhantomData::<Parts>)
-//!     .unwrap();
+//! let parameters =
+//!     read_transport_parameters(&mut encoding, Role::Client, PhantomData::<Parts>).unwrap();
 //! assert_eq!(parameters.get::<ResetStreamAt, _>(), Some(&ResetStreamAt));
 //!
 //! // A value with bytes is not a value of the parameter.
 //! let mut encoding = &[0x1d, 0x01, 0x00][..];
-//! let error = encoding
-//!     .sync_read_transport_parameters_unpin(Role::Client, PhantomData::<Parts>)
-//!     .unwrap_err();
+//! let error =
+//!     read_transport_parameters(&mut encoding, Role::Client, PhantomData::<Parts>).unwrap_err();
 //! assert_eq!(error.id(), Some(ResetStreamAt::ID));
 //! ```
 //!
 //! [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html#section-4
 //! [RFC 9000 §12.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.4
-use self::codec::ReadResetStreamAtFrameHostExt as _;
+use self::codec::read_reset_stream_at_frame;
 use crate::{
     frame::{Head, type_var_int},
     parameters::{KeyedParameter, ParametersPart, TrailingBytesError, ValueSource},
@@ -87,10 +85,9 @@ use crate::{
     },
     var_int::{VarInt, VarIntField},
 };
-use bytes::Buf;
+use bytes::{Buf, BufMut};
 use core::ops::RangeInclusive;
-use nitori_call::{Direct, Receiver, ReceiverAccess};
-use nitori_io::{Read, ReadChunk, Write, calls::WriteAllError};
+use nitori_io::SplitTo;
 use snafu::Snafu;
 
 /// The Frame Type value of RESET_STREAM_AT.
@@ -116,7 +113,7 @@ impl ParametersPart<TransportParameterSpace> for Part {
 /// The parameter states this by being present, and its value is empty: a
 /// value with bytes is a [`TrailingBytesError`], which the draft makes a
 /// TRANSPORT_PARAMETER_ERROR. Nothing is read from or written to the value,
-/// so the type has no read or write operation.
+/// so the type has no read or write function.
 ///
 /// Storing it for 0-RTT is mandatory: both endpoints remember whether the
 /// server sent it, so that RESET_STREAM_AT can be sent in 0-RTT packets,
@@ -136,7 +133,7 @@ impl KeyedParameter for ResetStreamAt {
         remembered_for_zero_rtt: RememberedForZeroRtt::Mandatory,
     };
 
-    fn read_value<D: Buf + Unpin>(_value: &mut ValueSource<D>) -> Result<Self, Self::ValueError> {
+    fn read_value<D: Buf>(_value: &mut ValueSource<D>) -> Result<Self, Self::ValueError> {
         Ok(Self)
     }
 
@@ -144,13 +141,7 @@ impl KeyedParameter for ResetStreamAt {
         0
     }
 
-    async fn write_value<F, A>(&self, _io: &mut A) -> Result<(), WriteAllError<F::Error>>
-    where
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-    {
-        Ok(())
-    }
+    fn write_value<B: BufMut>(&self, _dst: &mut B) {}
 }
 
 impl FrameSetPart for Part {
@@ -158,7 +149,7 @@ impl FrameSetPart for Part {
     type Kind = FrameType;
     /// The extension claims one Frame Type value, so its kind is the value.
     type TypeValue = FrameType;
-    type FieldsError<E> = codec::ReadResetStreamAtFrameError<E>;
+    type FieldsError = codec::ReadResetStreamAtFrameError;
 
     const FRAME_TYPE_VALUES: &'static FrameTypeValues =
         &FrameTypeValues::new(&[RangeInclusive::new(
@@ -178,15 +169,11 @@ impl FrameSetPart for Part {
         FrameType::ResetStreamAt
     }
 
-    fn read_run<H>(
-        source: &mut H,
+    fn read_run<S: Buf + SplitTo>(
+        source: &mut S,
         _type_value: FrameType,
-    ) -> Result<ResetStreamAtFrame, codec::ReadResetStreamAtFrameError<<Direct<H> as Read>::Error>>
-    where
-        H: Buf + Receiver<Family = Direct<H>> + Unpin,
-        Direct<H>: ReadChunk<Chunk: Default>,
-    {
-        source.sync_read_reset_stream_at_frame_unpin()
+    ) -> Result<ResetStreamAtFrame, codec::ReadResetStreamAtFrameError> {
+        read_reset_stream_at_frame(source)
     }
 }
 
@@ -353,39 +340,29 @@ impl ReliableSizeError {
 }
 
 pub mod codec {
-    //! Writing RESET_STREAM_AT frames as a `nitori_call` operation; reading
-    //! is part of [`Frames`](crate::v1::frame::set::Frames) over a frame set that
-    //! has [`Part`](super::Part).
-    //!
-    //! [`write_reset_stream_at_frame`] is also the operation struct
-    //! [`WriteResetStreamAtFrame`], with `WriteResetStreamAtFrameExt` on receiver
-    //! accesses and `WriteResetStreamAtFrameHostExt` on call executors.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
+    //! Writing RESET_STREAM_AT frames; reading is part of
+    //! [`Frames`](crate::v1::frame::set::Frames) over a frame set that has
+    //! [`Part`](super::Part).
 
     use super::{ReliableSizeError, ResetStreamAtFrame, TYPE_VALUE};
     use crate::{
         frame::{read_field, type_var_int},
         v1::{frame::set::FrameFieldsError, transport_error::TransportErrorCode},
-        var_int::{VarInt, codec::ReadVarIntError},
+        var_int::VarInt,
     };
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{calls::WriteAllError, prelude::*};
+    use bytes::{Buf, BufMut};
+    use nitori_io::error::IncompleteError;
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type.
-    #[call(sync)]
-    pub(super) async fn read_reset_stream_at_frame<F: Read, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<ResetStreamAtFrame, ReadResetStreamAtFrameError<F::Error>> {
+    pub(super) fn read_reset_stream_at_frame(
+        src: &mut impl Buf,
+    ) -> Result<ResetStreamAtFrame, ReadResetStreamAtFrameError> {
         use read_reset_stream_at_error::*;
-        let stream_id = read_field(io).await.context(StreamIdSnafu)?;
-        let application_error_code = read_field(io)
-            .await
-            .context(ApplicationProtocolErrorCodeSnafu)?;
-        let final_size = read_field(io).await.context(FinalSizeSnafu)?;
-        let reliable_size = read_field(io).await.context(ReliableSizeSnafu)?;
+        let stream_id = read_field(src).context(StreamIdSnafu)?;
+        let application_error_code = read_field(src).context(ApplicationProtocolErrorCodeSnafu)?;
+        let final_size = read_field(src).context(FinalSizeSnafu)?;
+        let reliable_size = read_field(src).context(ReliableSizeSnafu)?;
         let frame =
             ResetStreamAtFrame::new(stream_id, application_error_code, final_size, reliable_size)?;
         Ok(frame)
@@ -394,30 +371,30 @@ pub mod codec {
     /// Failures of reading a RESET_STREAM_AT frame.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_reset_stream_at_error))]
-    pub enum ReadResetStreamAtFrameError<E> {
+    pub enum ReadResetStreamAtFrameError {
         /// The Stream ID field could not be read.
         #[snafu(display("RESET_STREAM_AT Stream ID read failed"))]
         StreamId {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The Application Protocol Error Code field could not be read.
         #[snafu(display("RESET_STREAM_AT Application Protocol Error Code read failed"))]
         ApplicationProtocolErrorCode {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The Final Size field could not be read.
         #[snafu(display("RESET_STREAM_AT Final Size read failed"))]
         FinalSize {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The Reliable Size field could not be read.
         #[snafu(display("RESET_STREAM_AT Reliable Size read failed"))]
         ReliableSize {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The reliable size exceeds the final size.
         #[snafu(transparent)]
@@ -427,7 +404,7 @@ pub mod codec {
         },
     }
 
-    impl<E> FrameFieldsError for ReadResetStreamAtFrameError<E> {
+    impl FrameFieldsError for ReadResetStreamAtFrameError {
         /// `0x24`.
         fn frame_type(&self) -> VarInt {
             type_var_int(TYPE_VALUE)
@@ -435,10 +412,10 @@ pub mod codec {
 
         fn is_incomplete(&self) -> bool {
             match self {
-                Self::StreamId { source }
-                | Self::ApplicationProtocolErrorCode { source }
-                | Self::FinalSize { source }
-                | Self::ReliableSize { source } => source.is_incomplete(),
+                Self::StreamId { .. }
+                | Self::ApplicationProtocolErrorCode { .. }
+                | Self::FinalSize { .. }
+                | Self::ReliableSize { .. } => true,
                 Self::ReliableSizeAboveFinalSize { .. } => false,
             }
         }
@@ -453,16 +430,11 @@ pub mod codec {
 
     /// Writes `frame`; [`ResetStreamAtFrame::new`] checked its rule.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_reset_stream_at_frame<F: Write, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-        frame: ResetStreamAtFrame,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        io.write_all(frame.head().as_slice()).await
+    /// If `dst` has no room for the frame, as [`BufMut`] does.
+    pub fn write_reset_stream_at_frame(dst: &mut impl BufMut, frame: ResetStreamAtFrame) {
+        dst.put_slice(frame.head().as_slice());
     }
 }
 
@@ -470,7 +442,7 @@ pub mod codec {
 mod tests {
     use super::{
         FrameType, Part, ReliableSizeError, ResetStreamAtFrame,
-        codec::{ReadResetStreamAtFrameError, WriteResetStreamAtFrameHostExt as _},
+        codec::{ReadResetStreamAtFrameError, write_reset_stream_at_frame},
     };
     use crate::{
         parts::{Coprod, Coproduct, HList, PartsError},
@@ -487,9 +459,9 @@ mod tests {
         },
         var_int::{VarInt, VarIntField, VarIntWidth},
     };
-    use core::{convert::Infallible, marker::PhantomData};
+    use core::marker::PhantomData;
 
-    type ReadError = ReadFrameError<Infallible, Coprod![ReadResetStreamAtFrameError<Infallible>]>;
+    type ReadError = ReadFrameError<Coprod![ReadResetStreamAtFrameError]>;
 
     fn frame(final_size: u16, reliable_size: u16) -> Result<ResetStreamAtFrame, ReliableSizeError> {
         ResetStreamAtFrame::new(
@@ -509,9 +481,7 @@ mod tests {
 
     fn assert_round_trip(frame: ResetStreamAtFrame) {
         let mut written = Vec::new();
-        written
-            .sync_write_reset_stream_at_frame_unpin(frame)
-            .unwrap();
+        write_reset_stream_at_frame(&mut written, frame);
         assert_eq!(written.len(), frame.encoded_len());
         assert_eq!(written[0], 0x24);
         assert_eq!(read(&written).unwrap(), frame);
@@ -565,7 +535,7 @@ mod tests {
 
     #[test]
     fn each_field_has_its_own_failure() {
-        fn fields(encoding: &[u8]) -> ReadResetStreamAtFrameError<Infallible> {
+        fn fields(encoding: &[u8]) -> ReadResetStreamAtFrameError {
             match read(encoding) {
                 Err(ReadFrameError::Fields {
                     source: PartsError(Coproduct::Inl(source)),
@@ -580,19 +550,19 @@ mod tests {
         // A two-byte encoding cut short in each field.
         assert!(matches!(
             fields(&[0x24, 0x40]),
-            ReadResetStreamAtFrameError::StreamId { source } if source.is_incomplete()
+            ReadResetStreamAtFrameError::StreamId { .. }
         ));
         assert!(matches!(
             fields(&[0x24, 0x00, 0x40]),
-            ReadResetStreamAtFrameError::ApplicationProtocolErrorCode { source } if source.is_incomplete()
+            ReadResetStreamAtFrameError::ApplicationProtocolErrorCode { .. }
         ));
         assert!(matches!(
             fields(&[0x24, 0x00, 0x00, 0x40]),
-            ReadResetStreamAtFrameError::FinalSize { source } if source.is_incomplete()
+            ReadResetStreamAtFrameError::FinalSize { .. }
         ));
         assert!(matches!(
             fields(&[0x24, 0x00, 0x00, 0x05, 0x40]),
-            ReadResetStreamAtFrameError::ReliableSize { source } if source.is_incomplete()
+            ReadResetStreamAtFrameError::ReliableSize { .. }
         ));
     }
 
@@ -645,8 +615,8 @@ mod transport_parameter_tests {
             transport_parameters::{
                 TransportParameterList, TransportParameterSpace, TransportParameters,
                 codec::{
-                    ReadTransportParametersError, ReadTransportParametersHostExt as _,
-                    WriteTransportParametersHostExt as _,
+                    ReadTransportParametersError, read_transport_parameters,
+                    write_transport_parameters,
                 },
                 integer::InitialMaxData,
             },
@@ -672,9 +642,9 @@ mod transport_parameter_tests {
             ($parts:ty, $written:expr) => {{
                 // reset_stream_at, then initial_max_data 7.
                 let mut input = &[0x1d, 0x00, 0x04, 0x01, 0x07][..];
-                let parameters = input
-                    .sync_read_transport_parameters_unpin(Role::Client, PhantomData::<$parts>)
-                    .unwrap();
+                let parameters =
+                    read_transport_parameters(&mut input, Role::Client, PhantomData::<$parts>)
+                        .unwrap();
                 assert_eq!(parameters.get::<ResetStreamAt, _>(), Some(&ResetStreamAt));
                 assert_eq!(
                     parameters.get::<InitialMaxData, _>().unwrap().get(),
@@ -683,15 +653,13 @@ mod transport_parameter_tests {
                 assert!(parameters.unknown.is_empty());
                 assert_eq!(parameters.encoded_len(), 5);
                 let mut written = Vec::new();
-                written
-                    .sync_write_transport_parameters_unpin(parameters, Role::Client)
-                    .unwrap();
+                write_transport_parameters(&mut written, parameters, Role::Client).unwrap();
                 assert_eq!(written, $written);
 
                 let mut input = &[0x04, 0x01, 0x07][..];
-                let parameters = input
-                    .sync_read_transport_parameters_unpin(Role::Client, PhantomData::<$parts>)
-                    .unwrap();
+                let parameters =
+                    read_transport_parameters(&mut input, Role::Client, PhantomData::<$parts>)
+                        .unwrap();
                 assert!(parameters.get::<ResetStreamAt, _>().is_none());
             }};
         }
@@ -707,11 +675,9 @@ mod transport_parameter_tests {
     fn a_value_with_bytes_and_a_repeated_parameter_are_rejected() {
         fn read(
             mut input: &[u8],
-        ) -> Result<
-            TransportParameters<&[u8], V1First>,
-            ReadTransportParametersError<core::convert::Infallible, V1First>,
-        > {
-            input.sync_read_transport_parameters_unpin(Role::Server, PhantomData::<V1First>)
+        ) -> Result<TransportParameters<&[u8], V1First>, ReadTransportParametersError<V1First>>
+        {
+            read_transport_parameters(&mut input, Role::Server, PhantomData::<V1First>)
         }
         let error = read(&[0x1d, 0x02, 0x00, 0x00]).unwrap_err();
         let source = error.value_error::<ResetStreamAt>().unwrap();
@@ -727,9 +693,9 @@ mod transport_parameter_tests {
     #[test]
     fn without_the_part_the_parameter_is_unknown() {
         let mut input = &[0x1d, 0x00][..];
-        let parameters = input
-            .sync_read_transport_parameters_unpin(Role::Client, PhantomData::<HList![v1::Part]>)
-            .unwrap();
+        let parameters =
+            read_transport_parameters(&mut input, Role::Client, PhantomData::<HList![v1::Part]>)
+                .unwrap();
         assert_eq!(
             parameters.unknown,
             [UnknownParameter::new(ResetStreamAt::ID, &[][..])]

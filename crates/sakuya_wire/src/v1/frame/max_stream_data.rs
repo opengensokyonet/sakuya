@@ -65,65 +65,50 @@ impl MaxStreamDataFrame {
 }
 
 pub mod codec {
-    //! Writing MAX_STREAM_DATA as a `nitori_call` operation; reading is done by
+    //! Writing MAX_STREAM_DATA; reading is done by
     //! [`Frames`](crate::v1::frame::set::Frames).
-    //!
-    //! [`write_max_stream_data_frame`] is also the operation struct [`WriteMaxStreamDataFrame`], with
-    //! `WriteMaxStreamDataFrameExt` on receiver accesses and `WriteMaxStreamDataFrameHostExt` on call
-    //! executors.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
 
     use super::MaxStreamDataFrame;
-    use crate::{frame::read_field, var_int::codec::ReadVarIntError};
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{calls::WriteAllError, prelude::*};
+    use crate::frame::read_field;
+    use bytes::{Buf, BufMut};
+    use nitori_io::error::IncompleteError;
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type.
-    pub(in crate::v1) async fn read_max_stream_data_frame<
-        F: Read,
-        A: ReceiverAccess<Family = F>,
-    >(
-        io: &mut A,
-    ) -> Result<MaxStreamDataFrame, ReadMaxStreamDataFrameError<F::Error>> {
+    pub(in crate::v1) fn read_max_stream_data_frame(
+        src: &mut impl Buf,
+    ) -> Result<MaxStreamDataFrame, ReadMaxStreamDataFrameError> {
         use read_max_stream_data_error::*;
-        let stream_id = read_field(io).await.context(StreamIdSnafu)?;
-        let maximum_stream_data = read_field(io).await.context(MaximumStreamDataSnafu)?;
+        let stream_id = read_field(src).context(StreamIdSnafu)?;
+        let maximum_stream_data = read_field(src).context(MaximumStreamDataSnafu)?;
         Ok(MaxStreamDataFrame::new(stream_id, maximum_stream_data))
     }
 
     /// Failures of reading a MAX_STREAM_DATA frame.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_max_stream_data_error), visibility(pub(in crate::v1)))]
-    pub enum ReadMaxStreamDataFrameError<E> {
+    pub enum ReadMaxStreamDataFrameError {
         /// The Stream ID field could not be read.
         #[snafu(display("MAX_STREAM_DATA Stream ID read failed"))]
         StreamId {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The Maximum Stream Data field could not be read.
         #[snafu(display("MAX_STREAM_DATA Maximum Stream Data read failed"))]
         MaximumStreamData {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
     }
 
     /// Writes the frame.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_max_stream_data_frame<F: Write, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-        frame: MaxStreamDataFrame,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        io.write_all(frame.head().as_slice()).await
+    /// If `dst` has no room for the frame, as [`BufMut`] does.
+    pub fn write_max_stream_data_frame(dst: &mut impl BufMut, frame: MaxStreamDataFrame) {
+        dst.put_slice(frame.head().as_slice());
     }
 }
 

@@ -1,6 +1,6 @@
 use super::{
     Directionality, Initiator, StreamId,
-    codec::{ReadStreamIdHostExt as _, WriteStreamIdHostExt as _},
+    codec::{read_stream_id, write_stream_id},
 };
 use crate::var_int::VarInt;
 
@@ -65,17 +65,13 @@ fn reads_and_writes_as_a_variable_length_integer() {
     for value in [0, 63, 64, 1 << 20] {
         let id = stream_id(value);
         let mut output = Vec::new();
-        output.sync_write_stream_id_unpin(id).unwrap();
+        write_stream_id(&mut output, id);
         assert_eq!(output.len(), id.get().encoded_len());
         let mut input = output.as_slice();
-        assert_eq!(input.sync_read_stream_id_unpin().unwrap(), id);
+        assert_eq!(read_stream_id(&mut input).unwrap(), id);
         assert!(input.is_empty());
     }
     let mut input = &[0x40][..];
-    assert!(
-        input
-            .sync_read_stream_id_unpin()
-            .unwrap_err()
-            .is_incomplete()
-    );
+    let error = read_stream_id(&mut input).unwrap_err();
+    assert_eq!((error.expected(), error.completed()), (2, 1));
 }

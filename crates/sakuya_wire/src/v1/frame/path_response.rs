@@ -49,45 +49,29 @@ impl PathResponseFrame {
 }
 
 pub mod codec {
-    //! Writing PATH_RESPONSE as a `nitori_call` operation; reading is done by
+    //! Writing PATH_RESPONSE; reading is done by
     //! [`Frames`](crate::v1::frame::set::Frames).
-    //!
-    //! [`write_path_response_frame`] is also the operation struct [`WritePathResponseFrame`], with
-    //! `WritePathResponseFrameExt` on receiver accesses and `WritePathResponseFrameHostExt` on call
-    //! executors.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
 
     use super::PathResponseFrame;
+    use crate::source::read_array;
     use crate::v1::frame::PATH_DATA_LEN;
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{
-        calls::{ReadArrayError, WriteAllError},
-        prelude::*,
-    };
+    use bytes::{Buf, BufMut};
+    use nitori_io::error::IncompleteError;
 
     /// Reads the data that follows the Frame Type.
-    pub(in crate::v1) async fn read_path_response_frame<F: Read, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<PathResponseFrame, ReadArrayError<F::Error>> {
-        Ok(PathResponseFrame::new(
-            io.read_array::<PATH_DATA_LEN>().await?,
-        ))
+    pub(in crate::v1) fn read_path_response_frame(
+        src: &mut impl Buf,
+    ) -> Result<PathResponseFrame, IncompleteError> {
+        Ok(PathResponseFrame::new(read_array::<PATH_DATA_LEN>(src)?))
     }
 
     /// Writes the frame.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_path_response_frame<F: Write, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-        frame: PathResponseFrame,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        io.write_all(frame.head().as_slice()).await
+    /// If `dst` has no room for the frame, as [`BufMut`] does.
+    pub fn write_path_response_frame(dst: &mut impl BufMut, frame: PathResponseFrame) {
+        dst.put_slice(frame.head().as_slice());
     }
 }
 

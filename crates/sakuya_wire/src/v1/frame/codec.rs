@@ -1,5 +1,5 @@
 //! Reading the fields of version 1 frames and writing frames of any version 1
-//! type as `nitori_call` operations.
+//! type.
 //!
 //! [`read_fields`] reads one version 1 frame of any type from its fields on,
 //! once its Frame Type has been read
@@ -9,15 +9,8 @@
 //! [`Frames`](super::set::Frames) reads a frame set that has the part.
 //! [`write_frame`] writes any version 1 [`Frame`] and [`write_frame_run`]
 //! any [`FrameRun`]; the modules of the frame types also have write
-//! operations of their own, such as
+//! functions of their own, such as
 //! [`write_stream_frame`](super::stream::codec::write_stream_frame).
-//!
-//! [`read_fields`] is also the operation struct [`ReadFields`], with
-//! `ReadFieldsExt` on receiver accesses inside other operations and
-//! `ReadFieldsHostExt` on call executors, including the `sync_` methods for
-//! receivers that never wait; [`write_frame`] and [`write_frame_run`]
-//! likewise have [`WriteFrame`] and [`WriteFrameRun`]. Constructing an
-//! operation performs no IO.
 //!
 //! ```
 //! use core::marker::PhantomData;
@@ -27,7 +20,7 @@
 //!         self,
 //!         frame::{
 //!             Frame, FrameRun,
-//!             codec::{WriteFrameHostExt as _, WriteFrameRunHostExt as _},
+//!             codec::{write_frame, write_frame_run},
 //!             max_data::MaxDataFrame,
 //!             padding::PaddingRun,
 //!             set::Frames,
@@ -42,13 +35,13 @@
 //! let mut output = Vec::new();
 //! let maximum_data = VarIntField::shortest(VarInt::from(1_000_000u32));
 //! let max_data = Frame::<&[u8]>::MaxData(MaxDataFrame::new(maximum_data));
-//! output.sync_write_frame_unpin(max_data.clone()).unwrap();
+//! write_frame(&mut output, max_data.clone());
 //! let stream_id = VarIntField::shortest(StreamId::from_var_int(VarInt::from(4u8)));
 //! // A STREAM frame with a Length field. Reading gives `StreamFrame<D>`, which
 //! // states its Length field as `Either`; `into` converts to it.
 //! let stream = StreamFrame::with_length(stream_id, None, VarIntWidth::One, &b"hello"[..], true);
 //! let stream = Frame::Stream(stream.unwrap().into());
-//! output.sync_write_frame_unpin(stream.clone()).unwrap();
+//! write_frame(&mut output, stream.clone());
 //!
 //! // A STREAM frame checks its fields when it is constructed, so writing it
 //! // checks nothing: a one-byte Length field cannot state 64 bytes of data.
@@ -68,18 +61,15 @@
 //! let FrameRun::MaxData(max_data) = &run else { panic!() };
 //! assert_eq!(max_data.maximum_data().width(), VarIntWidth::Four);
 //! let mut output = Vec::new();
-//! output.sync_write_frame_run_unpin(run).unwrap();
+//! write_frame_run(&mut output, run);
 //! assert_eq!(output, input);
 //!
 //! // A run of PADDING frames is written as a zero byte for each.
 //! let padding = FrameRun::<&[u8]>::Padding(PaddingRun::new(3.try_into().unwrap()));
 //! let mut output = Vec::new();
-//! output.sync_write_frame_run_unpin(padding).unwrap();
+//! write_frame_run(&mut output, padding);
 //! assert_eq!(output, [0, 0, 0]);
 //! ```
-// `#[call]` generates constructors, fields and extension traits without
-// documentation comments; the module documentation above describes them.
-#![allow(missing_docs)]
 
 use super::{
     Frame, FrameRun, FrameType, FrameTypeValue,
@@ -113,18 +103,11 @@ use super::{
     type_value,
 };
 use crate::{
-    frame::type_var_int,
-    payload::ReadPayloadError,
-    v1::stream_id::Directionality,
-    v1::transport_error::TransportErrorCode,
-    var_int::{VarInt, codec::ReadVarIntError},
+    frame::type_var_int, v1::stream_id::Directionality, v1::transport_error::TransportErrorCode,
+    var_int::VarInt,
 };
-use bytes::Buf;
-use nitori_call::{ReceiverAccess, call};
-use nitori_io::{
-    calls::{ReadArrayError, WriteAllError},
-    prelude::*,
-};
+use bytes::{Buf, BufMut};
+use nitori_io::{SplitTo, error::IncompleteError};
 use snafu::{ResultExt, Snafu};
 
 /// Reads one version 1 frame from the fields that follow its Frame Type
@@ -136,7 +119,8 @@ use snafu::{ResultExt, Snafu};
 /// `frame_type` for the value that was read.
 ///
 /// The source is the rest of a packet payload: a STREAM frame without a
-/// Length field takes all of it. Payload fields are chunks of the source. A
+/// Length field takes all of it. Payload fields are pieces of the source,
+/// cut off with [`SplitTo`]. A
 /// PADDING frame has no fields: it is one byte, its Frame Type, and the
 /// PADDING frames that follow it stay unread, where
 /// [`Frames`](super::set::Frames) gives them as one run.
@@ -146,21 +130,10 @@ use snafu::{ResultExt, Snafu};
 /// The variant of [`ReadFieldsError`] named after the frame type if its
 /// fields cannot be read or break a limit of the encoding. Bytes read before
 /// a failure stay consumed.
-///
-/// # Panics
-///
-/// If the
-/// receiver returns a chunk longer than requested, which breaks the
-/// `ReadChunk` contract of `nitori_io`; see [`payload`](crate::payload).
-#[call(sync)]
-pub async fn read_fields<F, A>(
-    io: &mut A,
+pub fn read_fields<S: Buf + SplitTo>(
+    src: &mut S,
     frame_type: FrameTypeValue,
-) -> Result<Frame<F::Chunk>, ReadFieldsError<F::Error>>
-where
-    F: ReadChunk<Chunk: Default>,
-    A: ReceiverAccess<Family = F>,
-{
+) -> Result<Frame<S>, ReadFieldsError> {
     use read_fields_error::*;
     use type_value::*;
     let kind = frame_type.kind();
@@ -170,96 +143,67 @@ where
         FrameType::Padding => Frame::Padding(PaddingFrame),
         FrameType::Ping => Frame::Ping(PingFrame),
         FrameType::Ack if value == ACK_ECN => {
-            Frame::Ack(read_ack_frame_ecn(io).await.context(AckEcnSnafu)?)
+            Frame::Ack(read_ack_frame_ecn(src).context(AckEcnSnafu)?)
         }
-        FrameType::Ack => Frame::Ack(read_ack_frame(io).await.context(AckSnafu)?),
-        FrameType::ResetStream => Frame::ResetStream(
-            read_reset_stream_frame(io)
-                .await
-                .context(ResetStreamSnafu)?,
-        ),
-        FrameType::StopSending => Frame::StopSending(
-            read_stop_sending_frame(io)
-                .await
-                .context(StopSendingSnafu)?,
-        ),
-        FrameType::Crypto => Frame::Crypto(read_crypto_frame(io).await.context(CryptoSnafu)?),
-        FrameType::NewToken => {
-            Frame::NewToken(read_new_token_frame(io).await.context(NewTokenSnafu)?)
+        FrameType::Ack => Frame::Ack(read_ack_frame(src).context(AckSnafu)?),
+        FrameType::ResetStream => {
+            Frame::ResetStream(read_reset_stream_frame(src).context(ResetStreamSnafu)?)
         }
+        FrameType::StopSending => {
+            Frame::StopSending(read_stop_sending_frame(src).context(StopSendingSnafu)?)
+        }
+        FrameType::Crypto => Frame::Crypto(read_crypto_frame(src).context(CryptoSnafu)?),
+        FrameType::NewToken => Frame::NewToken(read_new_token_frame(src).context(NewTokenSnafu)?),
         FrameType::Stream => {
             let frame_type = StreamTypeValue::new(frame_type);
             // invariant: a `FrameTypeValue` has the kind `FrameType::of` gives
             // for its value, which is `Stream` for exactly the STREAM Frame
             // Type values.
             let frame_type = frame_type.unwrap_or_else(|| unreachable!("STREAM {value:#x}"));
-            Frame::Stream(
-                read_stream_frame(io, frame_type)
-                    .await
-                    .context(StreamSnafu { frame_type })?,
-            )
+            Frame::Stream(read_stream_frame(src, frame_type).context(StreamSnafu { frame_type })?)
         }
-        FrameType::MaxData => Frame::MaxData(read_max_data_frame(io).await.context(MaxDataSnafu)?),
-        FrameType::MaxStreamData => Frame::MaxStreamData(
-            read_max_stream_data_frame(io)
-                .await
-                .context(MaxStreamDataSnafu)?,
-        ),
+        FrameType::MaxData => Frame::MaxData(read_max_data_frame(src).context(MaxDataSnafu)?),
+        FrameType::MaxStreamData => {
+            Frame::MaxStreamData(read_max_stream_data_frame(src).context(MaxStreamDataSnafu)?)
+        }
         FrameType::MaxStreams => {
             let directionality = directionality(value == MAX_STREAMS_UNI);
             Frame::MaxStreams(
-                read_max_streams_frame(io, directionality)
-                    .await
+                read_max_streams_frame(src, directionality)
                     .context(MaxStreamsSnafu { directionality })?,
             )
         }
-        FrameType::DataBlocked => Frame::DataBlocked(
-            read_data_blocked_frame(io)
-                .await
-                .context(DataBlockedSnafu)?,
-        ),
+        FrameType::DataBlocked => {
+            Frame::DataBlocked(read_data_blocked_frame(src).context(DataBlockedSnafu)?)
+        }
         FrameType::StreamDataBlocked => Frame::StreamDataBlocked(
-            read_stream_data_blocked_frame(io)
-                .await
-                .context(StreamDataBlockedSnafu)?,
+            read_stream_data_blocked_frame(src).context(StreamDataBlockedSnafu)?,
         ),
         FrameType::StreamsBlocked => {
             let directionality = directionality(value == STREAMS_BLOCKED_UNI);
             Frame::StreamsBlocked(
-                read_streams_blocked_frame(io, directionality)
-                    .await
+                read_streams_blocked_frame(src, directionality)
                     .context(StreamsBlockedSnafu { directionality })?,
             )
         }
-        FrameType::NewConnectionId => Frame::NewConnectionId(
-            read_new_connection_id_frame(io)
-                .await
-                .context(NewConnectionIdSnafu)?,
-        ),
+        FrameType::NewConnectionId => {
+            Frame::NewConnectionId(read_new_connection_id_frame(src).context(NewConnectionIdSnafu)?)
+        }
         FrameType::RetireConnectionId => Frame::RetireConnectionId(
-            read_retire_connection_id_frame(io)
-                .await
-                .context(RetireConnectionIdSnafu)?,
+            read_retire_connection_id_frame(src).context(RetireConnectionIdSnafu)?,
         ),
-        FrameType::PathChallenge => Frame::PathChallenge(
-            read_path_challenge_frame(io)
-                .await
-                .context(PathChallengeSnafu)?,
-        ),
-        FrameType::PathResponse => Frame::PathResponse(
-            read_path_response_frame(io)
-                .await
-                .context(PathResponseSnafu)?,
-        ),
+        FrameType::PathChallenge => {
+            Frame::PathChallenge(read_path_challenge_frame(src).context(PathChallengeSnafu)?)
+        }
+        FrameType::PathResponse => {
+            Frame::PathResponse(read_path_response_frame(src).context(PathResponseSnafu)?)
+        }
         FrameType::ConnectionCloseApplication => Frame::ConnectionClose(
-            read_connection_close_frame_application(io)
-                .await
+            read_connection_close_frame_application(src)
                 .context(ConnectionCloseApplicationSnafu)?,
         ),
         FrameType::ConnectionCloseTransport => Frame::ConnectionClose(
-            read_connection_close_frame_transport(io)
-                .await
-                .context(ConnectionCloseTransportSnafu)?,
+            read_connection_close_frame_transport(src).context(ConnectionCloseTransportSnafu)?,
         ),
         FrameType::HandshakeDone => Frame::HandshakeDone(HandshakeDoneFrame),
     })
@@ -285,42 +229,42 @@ fn directionality(unidirectional: bool) -> Directionality {
 /// [RFC 9000 §12.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.4
 #[derive(Debug, Snafu)]
 #[snafu(module(read_fields_error), visibility(pub(in crate::v1)))]
-pub enum ReadFieldsError<E> {
+pub enum ReadFieldsError {
     /// An ACK frame of type `0x02`, without ECN counts, could not be read.
     #[snafu(display("ACK frame read failed"))]
     Ack {
         /// The failure.
-        source: ReadAckFrameError<E>,
+        source: ReadAckFrameError,
     },
     /// An ACK frame of type `0x03`, with ECN counts, could not be read.
     #[snafu(display("ACK frame with ECN counts read failed"))]
     AckEcn {
         /// The failure.
-        source: ReadAckFrameEcnError<E>,
+        source: ReadAckFrameEcnError,
     },
     /// A RESET_STREAM frame could not be read.
     #[snafu(display("RESET_STREAM frame read failed"))]
     ResetStream {
         /// The failure.
-        source: ReadResetStreamFrameError<E>,
+        source: ReadResetStreamFrameError,
     },
     /// A STOP_SENDING frame could not be read.
     #[snafu(display("STOP_SENDING frame read failed"))]
     StopSending {
         /// The failure.
-        source: ReadStopSendingFrameError<E>,
+        source: ReadStopSendingFrameError,
     },
     /// A CRYPTO frame could not be read.
     #[snafu(display("CRYPTO frame read failed"))]
     Crypto {
         /// The failure.
-        source: ReadCryptoFrameError<E>,
+        source: ReadCryptoFrameError,
     },
     /// A NEW_TOKEN frame could not be read.
     #[snafu(display("NEW_TOKEN frame read failed"))]
     NewToken {
         /// The failure.
-        source: ReadNewTokenFrameError<E>,
+        source: ReadNewTokenFrameError,
     },
     /// A STREAM frame could not be read.
     #[snafu(display("STREAM frame read failed"))]
@@ -328,19 +272,19 @@ pub enum ReadFieldsError<E> {
         /// The Frame Type.
         frame_type: StreamTypeValue,
         /// The failure.
-        source: ReadStreamFrameError<E>,
+        source: ReadStreamFrameError,
     },
     /// A MAX_DATA frame could not be read.
     #[snafu(display("MAX_DATA frame read failed"))]
     MaxData {
         /// The failure.
-        source: ReadVarIntError<E>,
+        source: IncompleteError,
     },
     /// A MAX_STREAM_DATA frame could not be read.
     #[snafu(display("MAX_STREAM_DATA frame read failed"))]
     MaxStreamData {
         /// The failure.
-        source: ReadMaxStreamDataFrameError<E>,
+        source: ReadMaxStreamDataFrameError,
     },
     /// A MAX_STREAMS frame could not be read.
     #[snafu(display("MAX_STREAMS frame read failed"))]
@@ -349,19 +293,19 @@ pub enum ReadFieldsError<E> {
         /// `0x13` for unidirectional streams.
         directionality: Directionality,
         /// The failure.
-        source: ReadMaxStreamsFrameError<E>,
+        source: ReadMaxStreamsFrameError,
     },
     /// A DATA_BLOCKED frame could not be read.
     #[snafu(display("DATA_BLOCKED frame read failed"))]
     DataBlocked {
         /// The failure.
-        source: ReadVarIntError<E>,
+        source: IncompleteError,
     },
     /// A STREAM_DATA_BLOCKED frame could not be read.
     #[snafu(display("STREAM_DATA_BLOCKED frame read failed"))]
     StreamDataBlocked {
         /// The failure.
-        source: ReadStreamDataBlockedFrameError<E>,
+        source: ReadStreamDataBlockedFrameError,
     },
     /// A STREAMS_BLOCKED frame could not be read.
     #[snafu(display("STREAMS_BLOCKED frame read failed"))]
@@ -370,49 +314,49 @@ pub enum ReadFieldsError<E> {
         /// `0x17` for unidirectional streams.
         directionality: Directionality,
         /// The failure.
-        source: ReadStreamsBlockedFrameError<E>,
+        source: ReadStreamsBlockedFrameError,
     },
     /// A NEW_CONNECTION_ID frame could not be read.
     #[snafu(display("NEW_CONNECTION_ID frame read failed"))]
     NewConnectionId {
         /// The failure.
-        source: ReadNewConnectionIdFrameError<E>,
+        source: ReadNewConnectionIdFrameError,
     },
     /// A RETIRE_CONNECTION_ID frame could not be read.
     #[snafu(display("RETIRE_CONNECTION_ID frame read failed"))]
     RetireConnectionId {
         /// The failure.
-        source: ReadVarIntError<E>,
+        source: IncompleteError,
     },
     /// A PATH_CHALLENGE frame could not be read.
     #[snafu(display("PATH_CHALLENGE frame read failed"))]
     PathChallenge {
         /// The failure.
-        source: ReadArrayError<E>,
+        source: IncompleteError,
     },
     /// A PATH_RESPONSE frame could not be read.
     #[snafu(display("PATH_RESPONSE frame read failed"))]
     PathResponse {
         /// The failure.
-        source: ReadArrayError<E>,
+        source: IncompleteError,
     },
     /// A CONNECTION_CLOSE frame of type `0x1c`, for a transport error,
     /// could not be read.
     #[snafu(display("CONNECTION_CLOSE frame read failed"))]
     ConnectionCloseTransport {
         /// The failure.
-        source: ReadConnectionCloseFrameTransportError<E>,
+        source: ReadConnectionCloseFrameTransportError,
     },
     /// A CONNECTION_CLOSE frame of type `0x1d`, for an application error,
     /// could not be read.
     #[snafu(display("application CONNECTION_CLOSE frame read failed"))]
     ConnectionCloseApplication {
         /// The failure.
-        source: ReadConnectionCloseFrameApplicationError<E>,
+        source: ReadConnectionCloseFrameApplicationError,
     },
 }
 
-impl<E> FrameFieldsError for ReadFieldsError<E> {
+impl FrameFieldsError for ReadFieldsError {
     fn frame_type(&self) -> VarInt {
         use super::{max_streams, streams_blocked};
         use type_value::*;
@@ -442,81 +386,52 @@ impl<E> FrameFieldsError for ReadFieldsError<E> {
     }
 
     fn is_incomplete(&self) -> bool {
-        use crate::v1::frame::{
-            crypto::codec::ReadCryptoFrameError as CryptoFrame,
-            stream::codec::ReadStreamFrameError as StreamFrame,
-        };
-        fn payload<E>(error: &ReadPayloadError<E>) -> bool {
-            error.is_incomplete()
-        }
-        fn array<E>(error: &ReadArrayError<E>) -> bool {
-            matches!(error, ReadArrayError::Incomplete { .. })
-        }
         match self {
-            Self::MaxData { source, .. }
-            | Self::DataBlocked { source, .. }
-            | Self::RetireConnectionId { source, .. } => source.is_incomplete(),
-            Self::ResetStream { source, .. } => match source {
-                ReadResetStreamFrameError::StreamId { source }
-                | ReadResetStreamFrameError::ApplicationProtocolErrorCode { source }
-                | ReadResetStreamFrameError::FinalSize { source } => source.is_incomplete(),
-            },
-            Self::StopSending { source, .. } => match source {
-                ReadStopSendingFrameError::StreamId { source }
-                | ReadStopSendingFrameError::ApplicationProtocolErrorCode { source } => {
-                    source.is_incomplete()
-                }
-            },
-            Self::MaxStreamData { source, .. } => match source {
-                ReadMaxStreamDataFrameError::StreamId { source }
-                | ReadMaxStreamDataFrameError::MaximumStreamData { source } => {
-                    source.is_incomplete()
-                }
-            },
-            Self::StreamDataBlocked { source, .. } => match source {
-                ReadStreamDataBlockedFrameError::StreamId { source }
-                | ReadStreamDataBlockedFrameError::MaximumStreamData { source } => {
-                    source.is_incomplete()
-                }
-            },
+            Self::MaxData { .. }
+            | Self::DataBlocked { .. }
+            | Self::RetireConnectionId { .. }
+            | Self::ResetStream { .. }
+            | Self::StopSending { .. }
+            | Self::MaxStreamData { .. }
+            | Self::StreamDataBlocked { .. }
+            | Self::PathChallenge { .. }
+            | Self::PathResponse { .. }
+            | Self::ConnectionCloseTransport { .. }
+            | Self::ConnectionCloseApplication { .. } => true,
             Self::Ack { source } => source.is_incomplete(),
             Self::AckEcn { source } => source.is_incomplete(),
             Self::Crypto { source, .. } => match source {
-                CryptoFrame::Offset { source } | CryptoFrame::Length { source } => {
-                    source.is_incomplete()
-                }
-                CryptoFrame::Data { source } => payload(source),
-                CryptoFrame::DataEnd { .. } => false,
+                ReadCryptoFrameError::Offset { .. }
+                | ReadCryptoFrameError::Length { .. }
+                | ReadCryptoFrameError::Data { .. } => true,
+                ReadCryptoFrameError::DataEnd { .. } => false,
             },
             Self::NewToken { source, .. } => match source {
-                ReadNewTokenFrameError::TokenLength { source } => source.is_incomplete(),
-                ReadNewTokenFrameError::Token { source } => payload(source),
+                ReadNewTokenFrameError::TokenLength { .. }
+                | ReadNewTokenFrameError::Token { .. } => true,
                 ReadNewTokenFrameError::Empty { .. } => false,
             },
             Self::Stream { source, .. } => match source {
-                StreamFrame::StreamId { source }
-                | StreamFrame::Offset { source }
-                | StreamFrame::Length { source } => source.is_incomplete(),
-                StreamFrame::Data { source } => payload(source),
-                StreamFrame::DataEnd { .. } => false,
+                ReadStreamFrameError::StreamId { .. }
+                | ReadStreamFrameError::Offset { .. }
+                | ReadStreamFrameError::Length { .. }
+                | ReadStreamFrameError::Data { .. } => true,
+                ReadStreamFrameError::DataEnd { .. } => false,
             },
             Self::MaxStreams { source, .. } => {
-                matches!(source, ReadMaxStreamsFrameError::Field { source } if source.is_incomplete())
+                matches!(source, ReadMaxStreamsFrameError::Field { .. })
             }
             Self::StreamsBlocked { source, .. } => {
-                matches!(source, ReadStreamsBlockedFrameError::Field { source } if source.is_incomplete())
+                matches!(source, ReadStreamsBlockedFrameError::Field { .. })
             }
             Self::NewConnectionId { source, .. } => match source {
-                ReadNewConnectionIdFrameError::SequenceNumber { source }
-                | ReadNewConnectionIdFrameError::RetirePriorTo { source } => source.is_incomplete(),
+                ReadNewConnectionIdFrameError::SequenceNumber { .. }
+                | ReadNewConnectionIdFrameError::RetirePriorTo { .. }
+                | ReadNewConnectionIdFrameError::StatelessResetToken { .. } => true,
                 ReadNewConnectionIdFrameError::ConnectionId { source } => source.is_incomplete(),
-                ReadNewConnectionIdFrameError::StatelessResetToken { source } => array(source),
                 ReadNewConnectionIdFrameError::EmptyConnectionId { .. }
                 | ReadNewConnectionIdFrameError::RetirePriorToAboveSequenceNumber { .. } => false,
             },
-            Self::PathChallenge { source, .. } | Self::PathResponse { source, .. } => array(source),
-            Self::ConnectionCloseTransport { source } => source.is_incomplete(),
-            Self::ConnectionCloseApplication { source } => source.is_incomplete(),
         }
     }
 
@@ -531,7 +446,7 @@ impl<E> FrameFieldsError for ReadFieldsError<E> {
 /// Writes the variants of `$frame`, a `$enum` (`Frame` or `FrameRun`), with
 /// `$write_padding` for PADDING.
 macro_rules! write_variants {
-    ($enum:ident, $io:ident, $frame:ident, $write_padding:path) => {{
+    ($enum:ident, $dst:ident, $frame:ident, $write_padding:path) => {{
         use $crate::v1::frame::{
             ack, connection_close, crypto, data_blocked, handshake_done, max_data, max_stream_data,
             max_streams, new_connection_id, new_token, path_challenge, path_response, ping,
@@ -539,105 +454,76 @@ macro_rules! write_variants {
             streams_blocked,
         };
         match $frame {
-            $enum::Padding(frame) => $write_padding($io, frame).await,
-            $enum::Ping(frame) => ping::codec::write_ping_frame($io, frame).await,
-            $enum::Ack(frame) => ack::codec::write_ack_frame($io, frame).await,
-            $enum::ResetStream(frame) => {
-                reset_stream::codec::write_reset_stream_frame($io, frame).await
-            }
-            $enum::StopSending(frame) => {
-                stop_sending::codec::write_stop_sending_frame($io, frame).await
-            }
-            $enum::Crypto(frame) => crypto::codec::write_crypto_frame($io, frame).await,
-            $enum::NewToken(frame) => new_token::codec::write_new_token_frame($io, frame).await,
-            $enum::Stream(frame) => stream::codec::write_stream_frame($io, frame).await,
-            $enum::MaxData(frame) => max_data::codec::write_max_data_frame($io, frame).await,
+            $enum::Padding(frame) => $write_padding($dst, frame),
+            $enum::Ping(frame) => ping::codec::write_ping_frame($dst, frame),
+            $enum::Ack(frame) => ack::codec::write_ack_frame($dst, frame),
+            $enum::ResetStream(frame) => reset_stream::codec::write_reset_stream_frame($dst, frame),
+            $enum::StopSending(frame) => stop_sending::codec::write_stop_sending_frame($dst, frame),
+            $enum::Crypto(frame) => crypto::codec::write_crypto_frame($dst, frame),
+            $enum::NewToken(frame) => new_token::codec::write_new_token_frame($dst, frame),
+            $enum::Stream(frame) => stream::codec::write_stream_frame($dst, frame),
+            $enum::MaxData(frame) => max_data::codec::write_max_data_frame($dst, frame),
             $enum::MaxStreamData(frame) => {
-                max_stream_data::codec::write_max_stream_data_frame($io, frame).await
+                max_stream_data::codec::write_max_stream_data_frame($dst, frame)
             }
-            $enum::MaxStreams(frame) => {
-                max_streams::codec::write_max_streams_frame($io, frame).await
-            }
-            $enum::DataBlocked(frame) => {
-                data_blocked::codec::write_data_blocked_frame($io, frame).await
-            }
+            $enum::MaxStreams(frame) => max_streams::codec::write_max_streams_frame($dst, frame),
+            $enum::DataBlocked(frame) => data_blocked::codec::write_data_blocked_frame($dst, frame),
             $enum::StreamDataBlocked(frame) => {
-                stream_data_blocked::codec::write_stream_data_blocked_frame($io, frame).await
+                stream_data_blocked::codec::write_stream_data_blocked_frame($dst, frame)
             }
             $enum::StreamsBlocked(frame) => {
-                streams_blocked::codec::write_streams_blocked_frame($io, frame).await
+                streams_blocked::codec::write_streams_blocked_frame($dst, frame)
             }
             $enum::NewConnectionId(frame) => {
-                new_connection_id::codec::write_new_connection_id_frame($io, frame).await
+                new_connection_id::codec::write_new_connection_id_frame($dst, frame)
             }
             $enum::RetireConnectionId(frame) => {
-                retire_connection_id::codec::write_retire_connection_id_frame($io, frame).await
+                retire_connection_id::codec::write_retire_connection_id_frame($dst, frame)
             }
             $enum::PathChallenge(frame) => {
-                path_challenge::codec::write_path_challenge_frame($io, frame).await
+                path_challenge::codec::write_path_challenge_frame($dst, frame)
             }
             $enum::PathResponse(frame) => {
-                path_response::codec::write_path_response_frame($io, frame).await
+                path_response::codec::write_path_response_frame($dst, frame)
             }
             $enum::ConnectionClose(frame) => {
-                connection_close::codec::write_connection_close_frame($io, frame).await
+                connection_close::codec::write_connection_close_frame($dst, frame)
             }
             $enum::HandshakeDone(frame) => {
-                handshake_done::codec::write_handshake_done_frame($io, frame).await
+                handshake_done::codec::write_handshake_done_frame($dst, frame)
             }
         }
     }};
 }
 
-/// Writes `frame` completely.
+/// Writes `frame`.
 ///
 /// Every frame type checks its limits when it is constructed, so nothing is
-/// checked here. Acceptance by the receiver does not imply flushing or
-/// delivery.
+/// checked here.
 ///
-/// # Errors
+/// # Panics
 ///
-/// [`WriteAllError`] if the receiver stops accepting bytes or fails; bytes
-/// accepted before stay written.
-#[call(sync)]
-pub async fn write_frame<F, A, D>(
-    io: &mut A,
-    frame: Frame<D>,
-) -> Result<(), WriteAllError<F::Error>>
-where
-    F: Write,
-    A: ReceiverAccess<Family = F>,
-    D: Buf,
-{
+/// If `dst` has no room for the frame, as [`BufMut`] does.
+pub fn write_frame<D: Buf>(dst: &mut impl BufMut, frame: Frame<D>) {
     write_variants!(
         Frame,
-        io,
+        dst,
         frame,
         crate::v1::frame::padding::codec::write_padding_frame
     )
 }
 
-/// Writes `run` completely: the PADDING frames of a
+/// Writes `run`: the PADDING frames of a
 /// [`PaddingRun`](super::padding::PaddingRun), or the one frame of any other
 /// type, as [`write_frame`] writes it.
 ///
-/// # Errors
+/// # Panics
 ///
-/// [`WriteAllError`] if the receiver stops accepting bytes or fails; bytes
-/// accepted before stay written.
-#[call(sync)]
-pub async fn write_frame_run<F, A, D>(
-    io: &mut A,
-    run: FrameRun<D>,
-) -> Result<(), WriteAllError<F::Error>>
-where
-    F: Write,
-    A: ReceiverAccess<Family = F>,
-    D: Buf,
-{
+/// If `dst` has no room for the frames, as [`BufMut`] does.
+pub fn write_frame_run<D: Buf>(dst: &mut impl BufMut, run: FrameRun<D>) {
     write_variants!(
         FrameRun,
-        io,
+        dst,
         run,
         crate::v1::frame::padding::codec::write_padding_run
     )

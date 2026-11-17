@@ -18,9 +18,9 @@
 //!    ([RFC 9000 §17.2]). For any other version, only the version-independent
 //!    fields of the [`LongHeader`] are known.
 //!
-//! Each layer is a `nitori_call` operation that continues where the previous
+//! Each layer is a function that continues where the previous
 //! one stopped. The source is a datagram, or the part of it starting at the
-//! packet to interpret, held by a host such as a byte slice or `Bytes`;
+//! packet to interpret, held by a buffer such as a byte slice or `Bytes`;
 //! offsets reported by the layers count from the first byte of the packet. A
 //! version 1 long packet with a Length field reads exactly its own bytes, so a
 //! datagram that coalesces several packets can be interpreted packet by
@@ -42,33 +42,30 @@
 //! ```
 //! use sakuya_wire::header::{
 //!     HeaderForm,
-//!     codec::{
-//!         ReadLongHeaderHostExt as _, ReadShortHeaderHostExt as _,
-//!         ReadVersionNegotiationHostExt as _,
-//!     },
+//!     codec::{read_long_header, read_short_header, read_version_negotiation},
 //! };
-//! use sakuya_wire::v1::header::{self as v1, codec::ReadLongPacketHostExt as _};
+//! use sakuya_wire::v1::header::{self as v1, codec::read_long_packet};
 //! use sakuya_wire::{connection_id::ConnectionIdLength, version::Version};
 //!
 //! fn describe(datagram: &[u8], short_dcid_len: ConnectionIdLength) -> String {
 //!     let Some(&first) = datagram.first() else { return "empty".into() };
 //!     let mut input = datagram;
 //!     match HeaderForm::of(first) {
-//!         HeaderForm::Short => match input.sync_read_short_header_unpin(short_dcid_len) {
+//!         HeaderForm::Short => match read_short_header(&mut input, short_dcid_len) {
 //!             Ok(short) => format!("short, packet number at {}", short.packet_number_offset()),
 //!             Err(error) => error.to_string(),
 //!         },
 //!         HeaderForm::Long => {
-//!             let long = match input.sync_read_long_header_unpin() {
+//!             let long = match read_long_header(&mut input) {
 //!                 Ok(long) => long,
 //!                 Err(error) => return error.to_string(),
 //!             };
 //!             match long.version() {
-//!                 Version::NEGOTIATION => match input.sync_read_version_negotiation_unpin(long) {
+//!                 Version::NEGOTIATION => match read_version_negotiation(&mut input, long) {
 //!                     Ok(packet) => format!("{} versions offered", packet.supported_versions().len()),
 //!                     Err(error) => error.to_string(),
 //!                 },
-//!                 v1::VERSION => match input.sync_read_long_packet_unpin(long) {
+//!                 v1::VERSION => match read_long_packet(&mut input, long) {
 //!                     Ok(packet) => format!("{:?} ending at {}", packet.packet_type(), packet.end()),
 //!                     Err(error) => error.to_string(),
 //!                 },
@@ -191,7 +188,7 @@ impl LongHeader {
 /// ID; the endpoint that chose the connection ID knows it. Different lengths
 /// give different interpretations of the same bytes, and the header itself
 /// cannot tell which is right. A short header packet extends to the end of the
-/// source; `D` is the source's chunk type, which holds the protected rest, or
+/// source; `D` is the type of the source, which holds the protected rest, or
 /// the range of those bytes within the packet when the header was located by
 /// [`into_packets`](crate::v1::protected_packet::into_packets).
 ///
@@ -264,7 +261,7 @@ impl<D: Buf> ShortHeader<D> {
 ///
 /// The connection IDs echo those of the packet that prompted it and may be up
 /// to 255 bytes long. The supported version list fills the rest of the
-/// source; `D` is the source's chunk type, which holds it. The other bits of
+/// source; `D` is the type of the source, which holds it. The other bits of
 /// the first byte are unused. Whether the packet answers a packet this
 /// endpoint sent is for the client that sent it to decide.
 ///
@@ -291,7 +288,7 @@ impl<D> VersionNegotiation<D> {
         self.header.scid()
     }
 
-    /// The supported version list, a whole number of versions: the chunk of
+    /// The supported version list, a whole number of versions: the piece of
     /// the source that holds it, or its range within the packet when the
     /// packet was located by [`into_packets`](crate::v1::protected_packet::into_packets).
     pub fn versions(&self) -> &D {

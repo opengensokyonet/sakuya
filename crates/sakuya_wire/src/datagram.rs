@@ -46,7 +46,7 @@
 //!         role::Role,
 //!         transport_parameters::{
 //!             TransportParameterList, TransportParameterSpace,
-//!             codec::ReadTransportParametersHostExt as _,
+//!             codec::read_transport_parameters,
 //!             integer::InitialMaxData,
 //!         },
 //!     },
@@ -58,9 +58,8 @@
 //!
 //! // initial_max_data 7, then max_datagram_frame_size 65535.
 //! let mut encoding = &[0x04, 0x01, 0x07, 0x20, 0x04, 0x80, 0x00, 0xff, 0xff][..];
-//! let parameters = encoding
-//!     .sync_read_transport_parameters_unpin(Role::Client, PhantomData::<Parts>)
-//!     .unwrap();
+//! let parameters =
+//!     read_transport_parameters(&mut encoding, Role::Client, PhantomData::<Parts>).unwrap();
 //! let size = parameters.get::<MaxDatagramFrameSize, _>().unwrap();
 //! assert_eq!(size.get(), VarInt::from(65535u16));
 //! assert_eq!(parameters.get::<InitialMaxData, _>().unwrap().get(), VarInt::from(7u8));
@@ -70,7 +69,7 @@
 //! [RFC 9221]: https://www.rfc-editor.org/rfc/rfc9221.html
 //! [RFC 9221 §3]: https://www.rfc-editor.org/rfc/rfc9221.html#section-3
 //! [RFC 9000 §12.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-12.4
-use self::codec::ReadDatagramFrameHostExt as _;
+use self::codec::read_datagram_frame;
 use crate::{
     frame::{Head, LengthError, LengthKind, NoLength, length_width, type_var_int},
     parameters::ParametersPart,
@@ -89,8 +88,7 @@ use crate::{
 use bytes::Buf;
 use core::ops::RangeInclusive;
 use either::Either;
-use nitori_call::{Direct, Receiver};
-use nitori_io::{Read, ReadChunk};
+use nitori_io::SplitTo;
 
 /// Frame Type values.
 mod type_value {
@@ -117,7 +115,7 @@ impl ParametersPart<TransportParameterSpace> for Part {
 ///
 /// A value other than 0 states that the endpoint supports receiving
 /// DATAGRAM frames. An absent parameter is 0: no support. Its value is one
-/// variable-length integer, read and written by the operations of
+/// variable-length integer, read and written by the functions of
 /// [`integer::codec`](crate::v1::transport_parameters::integer::codec).
 ///
 /// Storing it for 0-RTT is optional. A client that stores it can send
@@ -164,7 +162,7 @@ impl FrameSetPart for Part {
     type Run<D> = DatagramFrame<D>;
     type Kind = FrameType;
     type TypeValue = DatagramTypeValue;
-    type FieldsError<E> = codec::ReadDatagramFrameError<E>;
+    type FieldsError = codec::ReadDatagramFrameError;
 
     const FRAME_TYPE_VALUES: &'static FrameTypeValues =
         &FrameTypeValues::new(&[RangeInclusive::new(
@@ -184,18 +182,11 @@ impl FrameSetPart for Part {
         FrameType::Datagram
     }
 
-    fn read_run<H>(
-        source: &mut H,
+    fn read_run<S: Buf + SplitTo>(
+        source: &mut S,
         type_value: DatagramTypeValue,
-    ) -> Result<
-        DatagramFrame<<Direct<H> as ReadChunk>::Chunk>,
-        codec::ReadDatagramFrameError<<Direct<H> as Read>::Error>,
-    >
-    where
-        H: Buf + Receiver<Family = Direct<H>> + Unpin,
-        Direct<H>: ReadChunk<Chunk: Default>,
-    {
-        source.sync_read_datagram_frame_unpin(type_value)
+    ) -> Result<DatagramFrame<S>, codec::ReadDatagramFrameError> {
+        read_datagram_frame(source, type_value)
     }
 }
 
@@ -257,7 +248,7 @@ impl FrameKind for FrameType {
 /// there is one; [`without_length`](DatagramFrame::without_length) accepts any
 /// data. So every value writes an encoding that reads back to the same
 /// value; the fields are read through methods of the same names.
-/// `D` holds the data: the source's chunk type for a frame that was read,
+/// `D` holds the data: the type of the source for a frame that was read,
 /// any [`Buf`] for one to write.
 ///
 /// [RFC 9221 §4]: https://www.rfc-editor.org/rfc/rfc9221.html#section-4
@@ -312,7 +303,7 @@ impl<D, L> DatagramFrame<D, L> {
 }
 
 impl<D: Buf, L: LengthKind> DatagramFrame<D, L> {
-    /// The number of bytes the write operations of [`codec`] write.
+    /// The number of bytes the write functions of [`codec`] write.
     pub fn encoded_len(&self) -> usize {
         1 + length_width(self.length).map_or(0, VarIntWidth::encoded_len) + self.data.remaining()
     }
@@ -503,96 +494,81 @@ impl From<DatagramTypeValue> for VarInt {
 }
 
 pub mod codec {
-    //! Writing DATAGRAM frames as `nitori_call` operations; reading is part
-    //! of [`Frames`](crate::v1::frame::set::Frames) over a frame set that has
+    //! Writing DATAGRAM frames; reading is part of
+    //! [`Frames`](crate::v1::frame::set::Frames) over a frame set that has
     //! [`Part`](super::Part).
     //!
-    //! There is a write operation for each kind of Length field:
+    //! There is a write function for each kind of Length field:
     //! [`write_datagram_frame_with_length`] for `DatagramFrame<D, VarIntWidth>`,
     //! [`write_datagram_frame_without_length`] for `DatagramFrame<D, NoLength>`, and
     //! [`write_datagram_frame`] for `DatagramFrame<D>`, which writes as one of the two.
-    //! Each is also an operation struct, such as [`WriteDatagramFrame`], with
-    //! `{Name}Ext` on receiver accesses and `{Name}HostExt` on call
-    //! executors.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
 
     use super::{DatagramFrame, DatagramTypeValue, type_value};
     use crate::{
         frame::{NoLength, read_field, type_var_int},
-        payload::{ReadPayloadError, read_payload, read_payload_to_end},
+        source::{read_payload, read_payload_to_end},
         v1::{frame::set::FrameFieldsError, transport_error::TransportErrorCode},
-        var_int::{VarInt, VarIntField, VarIntWidth, codec::ReadVarIntError},
+        var_int::{VarInt, VarIntField, VarIntWidth},
     };
-    use bytes::Buf;
+    use bytes::{Buf, BufMut};
     use either::Either;
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{calls::WriteAllError, prelude::*};
+    use nitori_io::{SplitTo, error::IncompleteError};
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type `frame_type`, and the data
-    /// as one chunk of the source: of the Length field's length in type
+    /// as one piece of the source: of the Length field's length in type
     /// `0x31`, or to the end of the source.
-    #[call(sync)]
-    pub(super) async fn read_datagram_frame<F, A>(
-        io: &mut A,
+    pub(super) fn read_datagram_frame<S: Buf + SplitTo>(
+        src: &mut S,
         frame_type: DatagramTypeValue,
-    ) -> Result<DatagramFrame<F::Chunk>, ReadDatagramFrameError<F::Error>>
-    where
-        F: ReadChunk<Chunk: Default>,
-        A: ReceiverAccess<Family = F>,
-    {
+    ) -> Result<DatagramFrame<S>, ReadDatagramFrameError> {
         let (length, data) = if frame_type.has_length() {
-            let length: VarIntField<VarInt> = read_field(io)
-                .await
-                .context(read_datagram_error::LengthSnafu)?;
+            let length: VarIntField<VarInt> =
+                read_field(src).context(read_datagram_error::LengthSnafu)?;
             let data_len = usize::try_from(length.get().get()).unwrap_or(usize::MAX);
-            let data = read_payload(io, data_len).await;
+            let data = read_payload(src, data_len).context(read_datagram_error::DataSnafu)?;
             (Either::Right(length.width()), data)
         } else {
-            (Either::Left(NoLength), read_payload_to_end(io).await)
+            (Either::Left(NoLength), read_payload_to_end(src))
         };
-        let data = data.context(read_datagram_error::DataSnafu { frame_type })?;
         let frame = DatagramFrame::new(length, data);
         // invariant: the Length field, if any, was read at this width, and
         // `read_payload` returns data of exactly the length it states: it
-        // fails on shorter data and panics on a longer chunk.
+        // fails on shorter data.
         Ok(frame.unwrap_or_else(|error| unreachable!("{error}")))
     }
 
-    /// Failures of reading a DATAGRAM frame.
+    /// Failures of reading a DATAGRAM frame; both are of type `0x31`, with a
+    /// Length field.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_datagram_error))]
-    pub enum ReadDatagramFrameError<E> {
+    pub enum ReadDatagramFrameError {
         /// The Length field of type `0x31` could not be read.
         #[snafu(display("DATAGRAM Length read failed"))]
         Length {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
-        /// The data could not be read.
+        /// The data of type `0x31` could not be read.
         #[snafu(display("DATAGRAM data read failed"))]
         Data {
-            /// The Frame Type.
-            frame_type: DatagramTypeValue,
             /// The failure of reading the data.
-            source: ReadPayloadError<E>,
+            source: IncompleteError,
         },
     }
 
-    impl<E> FrameFieldsError for ReadDatagramFrameError<E> {
+    impl FrameFieldsError for ReadDatagramFrameError {
         fn frame_type(&self) -> VarInt {
             match self {
-                Self::Length { .. } => type_var_int(type_value::DATAGRAM_WITH_LENGTH),
-                Self::Data { frame_type, .. } => frame_type.get(),
+                Self::Length { .. } | Self::Data { .. } => {
+                    type_var_int(type_value::DATAGRAM_WITH_LENGTH)
+                }
             }
         }
 
         fn is_incomplete(&self) -> bool {
             match self {
-                Self::Length { source } => source.is_incomplete(),
-                Self::Data { source, .. } => source.is_incomplete(),
+                Self::Length { .. } | Self::Data { .. } => true,
             }
         }
 
@@ -611,26 +587,16 @@ pub mod codec {
     /// A frame without a Length field extends to the end of the packet;
     /// nothing may be written after it.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_datagram_frame<F, A, D>(
-        io: &mut A,
-        frame: DatagramFrame<D>,
-    ) -> Result<(), WriteAllError<F::Error>>
-    where
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-        D: Buf,
-    {
+    /// If `dst` has no room for the frame, as [`BufMut`] does.
+    pub fn write_datagram_frame<D: Buf>(dst: &mut impl BufMut, frame: DatagramFrame<D>) {
         match frame.length {
             Either::Left(length) => {
-                write_datagram_frame_without_length(io, frame.restate_length(length)).await
+                write_datagram_frame_without_length(dst, frame.restate_length(length));
             }
             Either::Right(length) => {
-                write_datagram_frame_with_length(io, frame.restate_length(length)).await
+                write_datagram_frame_with_length(dst, frame.restate_length(length));
             }
         }
     }
@@ -638,22 +604,15 @@ pub mod codec {
     /// Writes `frame`, which has a Length field;
     /// [`DatagramFrame::with_length`] checked its limits.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_datagram_frame_with_length<F, A, D>(
-        io: &mut A,
+    /// If `dst` has no room for the frame, as [`BufMut`] does.
+    pub fn write_datagram_frame_with_length<D: Buf>(
+        dst: &mut impl BufMut,
         frame: DatagramFrame<D, VarIntWidth>,
-    ) -> Result<(), WriteAllError<F::Error>>
-    where
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-        D: Buf,
-    {
-        let head = frame.head();
-        io.write_all(head.as_slice().chain(frame.data)).await
+    ) {
+        dst.put_slice(frame.head().as_slice());
+        dst.put(frame.data);
     }
 
     /// Writes `frame`, which has no Length field.
@@ -661,22 +620,15 @@ pub mod codec {
     /// The frame extends to the end of the packet; nothing may be written
     /// after it.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_datagram_frame_without_length<F, A, D>(
-        io: &mut A,
+    /// If `dst` has no room for the frame, as [`BufMut`] does.
+    pub fn write_datagram_frame_without_length<D: Buf>(
+        dst: &mut impl BufMut,
         frame: DatagramFrame<D, NoLength>,
-    ) -> Result<(), WriteAllError<F::Error>>
-    where
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-        D: Buf,
-    {
-        let head = frame.head();
-        io.write_all(head.as_slice().chain(frame.data)).await
+    ) {
+        dst.put_slice(frame.head().as_slice());
+        dst.put(frame.data);
     }
 }
 
@@ -685,8 +637,8 @@ mod tests {
     use super::{
         DatagramFrame,
         codec::{
-            WriteDatagramFrameHostExt as _, WriteDatagramFrameWithLengthHostExt as _,
-            WriteDatagramFrameWithoutLengthHostExt as _,
+            write_datagram_frame, write_datagram_frame_with_length,
+            write_datagram_frame_without_length,
         },
     };
     use crate::{
@@ -703,11 +655,10 @@ mod tests {
         var_int::{VarInt, VarIntWidth},
     };
     use bytes::Buf;
-    use core::{convert::Infallible, marker::PhantomData};
+    use core::marker::PhantomData;
     use either::Either;
 
-    type ReadError =
-        ReadFrameError<Infallible, Coprod![super::codec::ReadDatagramFrameError<Infallible>]>;
+    type ReadError = ReadFrameError<Coprod![super::codec::ReadDatagramFrameError]>;
 
     fn read<'a>(encoding: &mut &'a [u8]) -> Result<DatagramFrame<&'a [u8]>, ReadError> {
         let mut frames = Frames::new(*encoding, PhantomData::<HList![super::Part]>);
@@ -726,7 +677,7 @@ mod tests {
     /// Writes `frame`, reads it back and returns the encoding.
     fn assert_round_trip(frame: DatagramFrame<&[u8]>) -> Vec<u8> {
         let mut written = Vec::new();
-        written.sync_write_datagram_frame_unpin(frame).unwrap();
+        write_datagram_frame(&mut written, frame);
         assert_eq!(written.len(), frame.encoded_len());
         let mut input = written.as_slice();
         assert_eq!(read(&mut input).unwrap(), frame);
@@ -768,15 +719,11 @@ mod tests {
         assert_eq!(with.type_value(), VarInt::from(0x31u8));
         assert_eq!(without.type_value(), VarInt::from(0x30u8));
         let mut written = Vec::new();
-        written
-            .sync_write_datagram_frame_with_length_unpin(with)
-            .unwrap();
+        write_datagram_frame_with_length(&mut written, with);
         assert_eq!(written, [0x31, 0x40, 0x02, b'h', b'i']);
         assert_eq!(with.encoded_len(), written.len());
         let mut written = Vec::new();
-        written
-            .sync_write_datagram_frame_without_length_unpin(without)
-            .unwrap();
+        write_datagram_frame_without_length(&mut written, without);
         assert_eq!(written, [0x30, b'h', b'i']);
         assert_eq!(without.encoded_len(), written.len());
         // Both convert into the frame that reading gives, which writes the
@@ -788,7 +735,7 @@ mod tests {
             assert_eq!(frame.length(), length);
             assert_eq!(frame, DatagramFrame::new(length, &b"hi"[..]).unwrap());
             let mut written = Vec::new();
-            written.sync_write_datagram_frame_unpin(frame).unwrap();
+            write_datagram_frame(&mut written, frame);
             let mut input = written.as_slice();
             assert_eq!(read(&mut input).unwrap(), frame);
         }
@@ -941,8 +888,10 @@ mod tests {
         assert!(matches!(
             read(&mut input),
             Err(ReadFrameError::Fields {
-                source: PartsError(Coproduct::Inl(super::codec::ReadDatagramFrameError::Data { frame_type, .. })),
-            }) if frame_type.get() == VarInt::from(0x31u8)
+                source: PartsError(Coproduct::Inl(
+                    super::codec::ReadDatagramFrameError::Data { .. }
+                )),
+            })
         ));
         let mut input = &[0x31][..];
         let Err(ReadFrameError::Fields {
@@ -971,8 +920,8 @@ mod transport_parameter_tests {
                 TransportParameterList, TransportParameterSlots, TransportParameterSpace,
                 TransportParameters,
                 codec::{
-                    ReadTransportParametersError, ReadTransportParametersHostExt as _,
-                    WriteTransportParametersHostExt as _,
+                    ReadTransportParametersError, read_transport_parameters,
+                    write_transport_parameters,
                 },
                 integer::{InitialMaxData, MaxAckDelay},
             },
@@ -1010,8 +959,7 @@ mod transport_parameter_tests {
     {
         // The last byte is `disable_active_migration` without its length.
         let mut input = &ENCODING[..16];
-        let Ok(parameters) =
-            input.sync_read_transport_parameters_unpin(Role::Client, PhantomData::<Ps>)
+        let Ok(parameters) = read_transport_parameters(&mut input, Role::Client, PhantomData::<Ps>)
         else {
             panic!("the parameters are well formed")
         };
@@ -1038,9 +986,7 @@ mod transport_parameter_tests {
             VarInt::from(7u8)
         );
         let mut written = Vec::new();
-        written
-            .sync_write_transport_parameters_unpin(parameters, Role::Client)
-            .unwrap();
+        write_transport_parameters(&mut written, parameters, Role::Client).unwrap();
         written
     }
 
@@ -1068,9 +1014,9 @@ mod transport_parameter_tests {
     #[test]
     fn without_the_part_the_parameter_is_unknown() {
         let mut input = &ENCODING[..9];
-        let parameters = input
-            .sync_read_transport_parameters_unpin(Role::Client, PhantomData::<HList![v1::Part]>)
-            .unwrap();
+        let parameters =
+            read_transport_parameters(&mut input, Role::Client, PhantomData::<HList![v1::Part]>)
+                .unwrap();
         assert_eq!(
             parameters.unknown,
             [UnknownParameter::new(
@@ -1092,15 +1038,15 @@ mod transport_parameter_tests {
         );
         parameters.set(MaxDatagramFrameSize::default());
         let mut written = Vec::new();
-        written
-            .sync_write_transport_parameters_unpin(parameters.clone(), Role::Server)
-            .unwrap();
+        write_transport_parameters(&mut written, parameters.clone(), Role::Server).unwrap();
         assert_eq!(written, [0x20, 0x01, 0x00]);
         assert_eq!(written.len(), parameters.encoded_len());
-        let read = written
-            .as_slice()
-            .sync_read_transport_parameters_unpin(Role::Server, PhantomData::<V1First>)
-            .unwrap();
+        let read = read_transport_parameters(
+            &mut written.as_slice(),
+            Role::Server,
+            PhantomData::<V1First>,
+        )
+        .unwrap();
         assert_eq!(
             read.get::<MaxDatagramFrameSize, _>(),
             Some(&MaxDatagramFrameSize::new(VarInt::ZERO))
@@ -1114,9 +1060,9 @@ mod transport_parameter_tests {
             mut input: &[u8],
         ) -> Result<
             TransportParameters<&[u8], DatagramFirst>,
-            ReadTransportParametersError<core::convert::Infallible, DatagramFirst>,
+            ReadTransportParametersError<DatagramFirst>,
         > {
-            input.sync_read_transport_parameters_unpin(Role::Client, PhantomData::<DatagramFirst>)
+            read_transport_parameters(&mut input, Role::Client, PhantomData::<DatagramFirst>)
         }
         // An integer and a byte after it.
         let error = read(&[0x20, 0x02, 0x01, 0x00]).unwrap_err();
@@ -1146,9 +1092,8 @@ mod transport_parameter_tests {
         type Parts = HList![reset_stream_at::Part, v1::Part, super::Part];
         crate::assert_parameters_distinct!(TransportParameterSpace, TransportParameterList<Parts>);
         let mut input = &[0x20, 0x01, 0x05, 0x1d, 0x00, 0x04, 0x01, 0x07][..];
-        let parameters = input
-            .sync_read_transport_parameters_unpin(Role::Server, PhantomData::<Parts>)
-            .unwrap();
+        let parameters =
+            read_transport_parameters(&mut input, Role::Server, PhantomData::<Parts>).unwrap();
         assert_eq!(parameters.get::<ResetStreamAt, _>(), Some(&ResetStreamAt));
         assert_eq!(
             parameters.get::<MaxDatagramFrameSize, _>().unwrap().get(),
@@ -1160,9 +1105,7 @@ mod transport_parameter_tests {
         );
         assert!(parameters.unknown.is_empty());
         let mut written = Vec::new();
-        written
-            .sync_write_transport_parameters_unpin(parameters, Role::Server)
-            .unwrap();
+        write_transport_parameters(&mut written, parameters, Role::Server).unwrap();
         assert_eq!(written, [0x1d, 0x00, 0x04, 0x01, 0x07, 0x20, 0x01, 0x05]);
     }
 }

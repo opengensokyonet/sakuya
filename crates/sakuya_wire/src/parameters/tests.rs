@@ -3,20 +3,19 @@
 use super::{
     KeyedParameter, ParameterList, ParameterSpace, Parameters, ParametersOf, ParametersPart,
     ReadValueError, ReservedIds, TrailingBytesError, UnknownParameter, ValueSource,
-    codec::{ReadParametersError, ReadParametersHostExt as _, WriteParametersHostExt as _},
+    codec::{ReadParametersError, read_parameters, write_parameters},
     read_value_error::ContentSnafu,
 };
 use crate::{
     parts::{HList, HNil},
     var_int::{
         VarInt,
-        codec::{ReadVarIntError, ReadVarIntHostExt as _},
+        codec::{read_var_int, write_var_int},
     },
 };
-use bytes::Buf;
+use bytes::{Buf, BufMut};
 use core::{convert::Infallible, marker::PhantomData, num::NonZeroU64};
-use nitori_call::ReceiverAccess;
-use nitori_io::{calls::WriteAllError, prelude::*};
+use nitori_io::error::IncompleteError;
 use snafu::ResultExt;
 
 struct Space;
@@ -41,29 +40,21 @@ struct Size(VarInt);
 
 impl KeyedParameter for Size {
     type Space = Space;
-    type ValueError = ReadValueError<ReadVarIntError<Infallible>>;
+    type ValueError = ReadValueError<IncompleteError>;
 
     const ID: VarInt = VarInt::from_u32(0x06);
     const ATTRIBUTES: () = ();
 
-    fn read_value<D: Buf + Unpin>(value: &mut ValueSource<D>) -> Result<Self, Self::ValueError> {
-        value
-            .sync_read_var_int_unpin()
-            .map(Self)
-            .context(ContentSnafu)
+    fn read_value<D: Buf>(value: &mut ValueSource<D>) -> Result<Self, Self::ValueError> {
+        read_var_int(value).map(Self).context(ContentSnafu)
     }
 
     fn value_len(&self) -> usize {
         self.0.encoded_len()
     }
 
-    async fn write_value<F, A>(&self, io: &mut A) -> Result<(), WriteAllError<F::Error>>
-    where
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-    {
-        let (encoding, encoded_len) = self.0.to_encoding();
-        io.write_all(&encoding[..encoded_len]).await
+    fn write_value<B: BufMut>(&self, dst: &mut B) {
+        write_var_int(dst, self.0);
     }
 }
 
@@ -77,7 +68,7 @@ impl KeyedParameter for Flag {
     const ID: VarInt = VarInt::from_u32(0x08);
     const ATTRIBUTES: () = ();
 
-    fn read_value<D: Buf + Unpin>(_: &mut ValueSource<D>) -> Result<Self, TrailingBytesError> {
+    fn read_value<D: Buf>(_: &mut ValueSource<D>) -> Result<Self, TrailingBytesError> {
         Ok(Self)
     }
 
@@ -85,13 +76,7 @@ impl KeyedParameter for Flag {
         0
     }
 
-    async fn write_value<F, A>(&self, _: &mut A) -> Result<(), WriteAllError<F::Error>>
-    where
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-    {
-        Ok(())
-    }
+    fn write_value<B: BufMut>(&self, _: &mut B) {}
 }
 
 struct First;
@@ -115,9 +100,7 @@ fn a_space_of_its_own_reads_and_writes() {
     // Size 300, a reserved ID (0x1f * 1 + 0x21), then the flag.
     let encoding = [0x06, 0x02, 0x41, 0x2c, 0x40, 0x40, 0x01, 0xee, 0x08, 0x00];
     let mut input = &encoding[..];
-    let parameters = input
-        .sync_read_parameters_unpin((), PhantomData::<(Space, Both)>)
-        .unwrap();
+    let parameters = read_parameters(&mut input, (), PhantomData::<(Space, Both)>).unwrap();
     assert_eq!(
         parameters.get::<Size, _>(),
         Some(&Size(VarInt::from(300u16)))
@@ -129,9 +112,7 @@ fn a_space_of_its_own_reads_and_writes() {
     );
     assert_eq!(parameters.validate(()), Ok(()));
     let mut written = Vec::new();
-    written
-        .sync_write_parameters_unpin(parameters.clone(), ())
-        .unwrap();
+    write_parameters(&mut written, parameters.clone(), ()).unwrap();
     // The slots in the order of the list, the flag first, then the unknown.
     assert_eq!(
         written,
@@ -144,15 +125,11 @@ fn a_space_of_its_own_reads_and_writes() {
 #[test]
 fn the_empty_list_keeps_every_parameter_as_unknown() {
     let mut input = &[0x06, 0x01, 0x05, 0x08, 0x00][..];
-    let parameters = input
-        .sync_read_parameters_unpin((), PhantomData::<(Space, HNil)>)
-        .unwrap();
+    let parameters = read_parameters(&mut input, (), PhantomData::<(Space, HNil)>).unwrap();
     assert_eq!(parameters.known, HNil);
     assert_eq!(parameters.unknown.len(), 2);
     let mut input = &[0x06, 0x00, 0x06, 0x00][..];
-    let error = input
-        .sync_read_parameters_unpin((), PhantomData::<(Space, HNil)>)
-        .unwrap_err();
+    let error = read_parameters(&mut input, (), PhantomData::<(Space, HNil)>).unwrap_err();
     assert!(matches!(error, ReadParametersError::Duplicate { .. }));
 }
 
@@ -189,11 +166,22 @@ fn a_value_source_reports_what_is_left() {
 }
 
 #[test]
+fn a_value_source_reads_as_its_value() {
+    let mut value = ValueSource::new(&[0x01, 0x02, 0x03][..]);
+    assert_eq!(
+        (value.length(), value.chunk()),
+        (3, &[0x01, 0x02, 0x03][..])
+    );
+    assert_eq!(value.get_u8(), 0x01);
+    assert_eq!(value.finish().unwrap_err().unread().get(), 2);
+    value.advance(2);
+    assert_eq!(value.finish(), Ok(()));
+}
+
+#[test]
 fn retain_asks_once_per_type_and_empties_the_rejected_slots() {
     let mut input = &[0x06, 0x01, 0x05, 0x08, 0x00][..];
-    let mut parameters = input
-        .sync_read_parameters_unpin((), PhantomData::<(Space, Both)>)
-        .unwrap();
+    let mut parameters = read_parameters(&mut input, (), PhantomData::<(Space, Both)>).unwrap();
     let mut asked = 0;
     <Both as ParameterList<Space>>::retain(&mut parameters.known, &mut |()| {
         asked += 1;

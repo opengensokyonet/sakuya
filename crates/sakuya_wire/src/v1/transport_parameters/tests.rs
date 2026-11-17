@@ -3,8 +3,8 @@ use super::{
     ServerOnlyError, TransportParameterList, TransportParameterSlots, TransportParameterSpace,
     TransportParameters,
     codec::{
-        ReadRememberedTransportParametersHostExt as _, ReadTransportParametersError,
-        ReadTransportParametersHostExt as _, WriteTransportParametersHostExt as _,
+        ReadTransportParametersError, read_remembered_transport_parameters,
+        read_transport_parameters, write_transport_parameters,
     },
     connection_id::{
         InitialSourceConnectionId, OriginalDestinationConnectionId, RetrySourceConnectionId,
@@ -15,14 +15,11 @@ use super::{
         AckDelayExponent, ActiveConnectionIdLimit, InitialMaxData, InitialMaxStreamDataBidiLocal,
         InitialMaxStreamDataBidiRemote, InitialMaxStreamDataUni, InitialMaxStreamsBidi,
         InitialMaxStreamsUni, MaxAckDelay, MaxIdleTimeout, MaxUdpPayloadSize,
-        codec::{ReadIntegerValueHostExt as _, WriteIntegerValueHostExt as _},
+        codec::{read_integer_value, write_integer_value},
     },
     preferred_address::{
         PreferredAddress, PreferredAddressFamilies,
-        codec::{
-            ReadPreferredAddressError, ReadPreferredAddressHostExt as _,
-            WritePreferredAddressHostExt as _,
-        },
+        codec::{ReadPreferredAddressError, read_preferred_address, write_preferred_address},
     },
     stateless_reset_token,
 };
@@ -30,28 +27,25 @@ use crate::{
     connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken},
     parameters::{
         InvalidParametersError, KeyedParameter, ParameterList, ParameterSpace, ReadValueError,
-        UnknownParameter,
-        codec::{ReadParametersError, WriteParametersError},
+        UnknownParameter, codec::ReadParametersError,
     },
     parts::HList,
     v1::{self, role::Role, stream_count::StreamCount, transport_error::TransportErrorCode},
     var_int::{
         VarInt,
-        codec::{ReadVarIntFieldError, WriteVarIntHostExt as _},
+        codec::{ReadVarIntFieldError, write_var_int},
     },
 };
 use bytes::Bytes;
 use core::{
-    convert::Infallible,
     error::Error,
     marker::PhantomData,
     net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6},
 };
-use nitori_io::calls::ReadArrayError;
 
 type V1 = HList![v1::Part];
 type V1List = TransportParameterList<V1>;
-type ReadError = ReadTransportParametersError<Infallible>;
+type ReadError = ReadTransportParametersError;
 
 fn vi(value: u64) -> VarInt {
     VarInt::try_from(value).unwrap()
@@ -60,17 +54,15 @@ fn vi(value: u64) -> VarInt {
 /// Encodes one parameter.
 fn tlv(id: u64, value: &[u8]) -> Vec<u8> {
     let mut encoding = Vec::new();
-    encoding.sync_write_var_int_unpin(vi(id)).unwrap();
-    encoding
-        .sync_write_var_int_unpin(VarInt::try_from(value.len()).unwrap())
-        .unwrap();
+    write_var_int(&mut encoding, vi(id));
+    write_var_int(&mut encoding, VarInt::try_from(value.len()).unwrap());
     encoding.extend_from_slice(value);
     encoding
 }
 
 fn integer(value: u64) -> Vec<u8> {
     let mut encoding = Vec::new();
-    encoding.sync_write_var_int_unpin(vi(value)).unwrap();
+    write_var_int(&mut encoding, vi(value));
     encoding
 }
 
@@ -92,15 +84,13 @@ fn preferred_address() -> PreferredAddress {
 
 fn preferred_address_value() -> Vec<u8> {
     let mut value = Vec::new();
-    value
-        .sync_write_preferred_address_unpin(preferred_address())
-        .unwrap();
+    write_preferred_address(&mut value, preferred_address());
     value
 }
 
 fn read(encoding: &[u8], sender: Role) -> Result<TransportParameters<&[u8]>, ReadError> {
     let mut input = encoding;
-    let result = input.sync_read_transport_parameters_unpin(sender, PhantomData::<V1>);
+    let result = read_transport_parameters(&mut input, sender, PhantomData::<V1>);
     if result.is_ok() {
         assert!(input.is_empty());
     }
@@ -109,9 +99,7 @@ fn read(encoding: &[u8], sender: Role) -> Result<TransportParameters<&[u8]>, Rea
 
 fn write(parameters: TransportParameters<&[u8]>, sender: Role) -> Vec<u8> {
     let mut encoding = Vec::new();
-    encoding
-        .sync_write_transport_parameters_unpin(parameters, sender)
-        .unwrap();
+    write_transport_parameters(&mut encoding, parameters, sender).unwrap();
     encoding
 }
 
@@ -121,8 +109,8 @@ fn write_invalid(
 ) -> InvalidTransportParametersError {
     assert!(parameters.validate(sender).is_err());
     let mut buffer = Vec::new();
-    match buffer.sync_write_transport_parameters_unpin(parameters, sender) {
-        Err(WriteParametersError::Invalid { source }) => {
+    match write_transport_parameters(&mut buffer, parameters, sender) {
+        Err(source) => {
             assert!(buffer.is_empty());
             source
         }
@@ -271,36 +259,20 @@ fn all_parameters_round_trip() {
 
     // A `Bytes` source keeps unknown values in its own storage.
     let shared = Bytes::from(encoding.clone());
-    let from_bytes = shared
-        .clone()
-        .sync_read_transport_parameters_unpin(Role::Server, PhantomData::<V1>)
-        .unwrap();
+    let from_bytes =
+        read_transport_parameters(&mut shared.clone(), Role::Server, PhantomData::<V1>).unwrap();
     let grease = &from_bytes.unknown[0].value;
     assert_eq!(grease, &b"grease"[..]);
     let offset = grease.as_ptr() as usize - shared.as_ptr() as usize;
     assert_eq!(shared.slice(offset..offset + 6), *grease);
     assert_eq!(from_bytes.known, parameters.known);
 
-    // An exact slice takes it; a shorter one keeps the accepted prefix.
+    // An exact slice takes it.
     let mut exact = vec![0; encoding.len()];
     let mut sink = exact.as_mut_slice();
-    sink.sync_write_transport_parameters_unpin(parameters.clone(), Role::Server)
-        .unwrap();
+    write_transport_parameters(&mut sink, parameters.clone(), Role::Server).unwrap();
+    assert!(sink.is_empty());
     assert_eq!(exact, encoding);
-    // The cut falls in each part of the encoding in turn: within the head or
-    // the value of a parameter with a type, and within an unknown one.
-    for cut in [1, 5, 12, encoding.len() - 20, encoding.len() - 1] {
-        let mut short = vec![0xee; cut];
-        let mut sink = short.as_mut_slice();
-        let error = sink
-            .sync_write_transport_parameters_unpin(parameters.clone(), Role::Server)
-            .unwrap_err();
-        let WriteParametersError::Write { source } = &error else {
-            panic!("{error:?}")
-        };
-        assert_eq!(source.completed(), cut);
-        assert_eq!(short, encoding[..cut]);
-    }
 }
 
 /// Each parameter alone is written as its ID, the length of its value and
@@ -650,10 +622,8 @@ fn parameter_ids_senders_and_zero_rtt() {
 fn remembered_parameters_keep_only_the_remembered_slots() {
     let parameters = server_parameters();
     let encoding = write(parameters.clone(), Role::Server);
-    let remembered: TransportParameterSlots = encoding
-        .as_slice()
-        .sync_read_remembered_transport_parameters_unpin(PhantomData::<V1>)
-        .unwrap();
+    let remembered: TransportParameterSlots =
+        read_remembered_transport_parameters(&mut encoding.as_slice(), PhantomData::<V1>).unwrap();
     let mut expected = parameters.clone();
     expected.unknown.clear();
     *expected.slot_mut::<OriginalDestinationConnectionId, _>() = None;
@@ -681,15 +651,14 @@ fn remembered_parameters_keep_only_the_remembered_slots() {
 #[test]
 fn remembered_parameters_are_read_as_a_server_sent_them() {
     let encoding = tlv(0x02, &[0x22; 16]);
-    let remembered: TransportParameterSlots = encoding
-        .as_slice()
-        .sync_read_remembered_transport_parameters_unpin(PhantomData::<V1>)
-        .unwrap();
+    let remembered: TransportParameterSlots =
+        read_remembered_transport_parameters(&mut encoding.as_slice(), PhantomData::<V1>).unwrap();
     assert_eq!(remembered, TransportParameters::<&[u8]>::new().known);
-    let error = tlv(0x02, &[0x22; 3])
-        .as_slice()
-        .sync_read_remembered_transport_parameters_unpin(PhantomData::<V1>)
-        .unwrap_err();
+    let error = read_remembered_transport_parameters(
+        &mut tlv(0x02, &[0x22; 3]).as_slice(),
+        PhantomData::<V1>,
+    )
+    .unwrap_err();
     assert!(matches!(error, ReadParametersError::InvalidValue { .. }));
 }
 
@@ -781,7 +750,7 @@ fn values_out_of_range_are_rejected_by_parameter() {
     where
         P: KeyedParameter<
                 Space = TransportParameterSpace,
-                ValueError = ReadValueError<ReadVarIntFieldError<Infallible, V>>,
+                ValueError = ReadValueError<ReadVarIntFieldError<V>>,
             > + TryFrom<VarInt, Error = V>,
         V: Error + PartialEq + 'static,
     {
@@ -848,10 +817,8 @@ fn unknown_values_longer_than_a_length_field_states_are_rejected() {
     assert_eq!(source.id(), vi(0x40));
     assert_eq!(source.length(), usize::MAX);
     let mut buffer = Vec::new();
-    let error = buffer
-        .sync_write_transport_parameters_unpin(parameters, Role::Client)
-        .unwrap_err();
-    assert!(matches!(error, WriteParametersError::Invalid { .. }));
+    let error = write_transport_parameters(&mut buffer, parameters, Role::Client).unwrap_err();
+    assert!(matches!(error, InvalidParametersError::ValueLength { .. }));
     assert!(buffer.is_empty());
 }
 
@@ -863,7 +830,7 @@ fn malformed_values_name_their_parameter() {
     where
         P: KeyedParameter<
                 Space = TransportParameterSpace,
-                ValueError = ReadValueError<ReadVarIntFieldError<Infallible, V>>,
+                ValueError = ReadValueError<ReadVarIntFieldError<V>>,
             >,
         V: Error + 'static,
     {
@@ -884,7 +851,6 @@ fn malformed_values_name_their_parameter() {
             else {
                 panic!("{error:?}")
             };
-            assert!(source.is_incomplete());
             assert_eq!(source.completed(), value.len());
         }
     }
@@ -904,7 +870,7 @@ fn malformed_values_name_their_parameter() {
     where
         P: KeyedParameter<
                 Space = TransportParameterSpace,
-                ValueError = ReadValueError<ReadConnectionIdValueError<Infallible>>,
+                ValueError = ReadValueError<ReadConnectionIdValueError>,
             > + Into<ConnectionId>,
     {
         let error = read(&tlv(P::ID.get(), &[0; 21]), Role::Server).unwrap_err();
@@ -937,7 +903,7 @@ fn malformed_values_are_rejected_by_parameter() {
     let ReadValueError::Content { source } = value_error::<Token>(&error) else {
         panic!("{error:?}")
     };
-    assert!(matches!(source, ReadArrayError::Incomplete { .. }));
+    assert_eq!((source.expected(), source.completed()), (16, 15));
     let error = read(&tlv(0x02, &[0; 17]), Role::Server).unwrap_err();
     let ReadValueError::Trailing { source } = value_error::<Token>(&error) else {
         panic!("{error:?}")
@@ -983,20 +949,20 @@ fn malformed_values_are_rejected_by_parameter() {
     assert!(error.value_error::<DisableActiveMigration>().is_none());
 }
 
-/// The value operations of the integer parameters read one integer of any
+/// The value functions of the integer parameters read one integer of any
 /// width into the type and write its shortest encoding.
 #[test]
-fn integer_values_are_read_and_written_by_their_operations() {
+fn integer_values_are_read_and_written_by_their_functions() {
     let mut input = &[0x40, 0x19, 0xff][..];
-    let delay: MaxAckDelay = input.sync_read_integer_value_unpin().unwrap();
+    let delay: MaxAckDelay = read_integer_value(&mut input).unwrap();
     assert_eq!(delay.get(), vi(25));
     assert_eq!(input, [0xff]);
     let mut output = Vec::new();
-    output.sync_write_integer_value_unpin(delay).unwrap();
+    write_integer_value(&mut output, delay);
     assert_eq!(output, [0x19]);
     let mut input = &[0x01][..];
     assert!(matches!(
-        input.sync_read_integer_value_unpin::<ActiveConnectionIdLimit>(),
+        read_integer_value::<ActiveConnectionIdLimit>(&mut input),
         Err(ReadVarIntFieldError::Value { .. })
     ));
 }
@@ -1037,12 +1003,12 @@ fn preferred_address_families_round_trip() {
             ..preferred_address()
         };
         let mut value = Vec::new();
-        value.sync_write_preferred_address_unpin(address).unwrap();
+        write_preferred_address(&mut value, address);
         assert_eq!(value.len(), address.encoded_len());
         assert_eq!(value[..6] == unspecified_v4, !has_v4, "{addresses:?}");
         assert_eq!(value[6..24] == unspecified_v6, !has_v6, "{addresses:?}");
         let mut input = value.as_slice();
-        assert_eq!(input.sync_read_preferred_address_unpin().unwrap(), address);
+        assert_eq!(read_preferred_address(&mut input).unwrap(), address);
         assert!(input.is_empty());
         let encoding = tlv(0x0d, &value);
         let parameters = read(&encoding, Role::Server).unwrap();
@@ -1065,9 +1031,9 @@ fn preferred_address_with_a_zero_address_and_a_port_has_that_family() {
             ..preferred_address()
         };
         let mut value = Vec::new();
-        value.sync_write_preferred_address_unpin(address).unwrap();
+        write_preferred_address(&mut value, address);
         let mut input = value.as_slice();
-        assert_eq!(input.sync_read_preferred_address_unpin().unwrap(), address);
+        assert_eq!(read_preferred_address(&mut input).unwrap(), address);
     }
 }
 
@@ -1114,7 +1080,7 @@ fn truncated_input_is_rejected() {
 fn preferred_address_fields_cut_short_are_named() {
     use ReadPreferredAddressError as E;
     let value = preferred_address_value();
-    type Check = fn(&ReadPreferredAddressError<Infallible>) -> bool;
+    type Check = fn(&ReadPreferredAddressError) -> bool;
     // The value is cut within each fixed-length field.
     let cases: [(usize, Check); 6] = [
         (0, |error| matches!(error, E::Ipv4Address { .. })),
@@ -1128,7 +1094,7 @@ fn preferred_address_fields_cut_short_are_named() {
     ];
     for (cut, expected) in cases {
         let mut input = &value[..cut];
-        let error = input.sync_read_preferred_address_unpin().unwrap_err();
+        let error = read_preferred_address(&mut input).unwrap_err();
         assert!(expected(&error), "{cut}: {error:?}");
         // Inside the parameter, the same failure is reported.
         let error = read(&tlv(0x0d, &value[..cut]), Role::Server).unwrap_err();
@@ -1198,7 +1164,7 @@ fn preferred_address_layout() {
     assert_eq!(preferred_address().encoded_len(), value.len());
     let mut input = value.as_slice();
     assert_eq!(
-        input.sync_read_preferred_address_unpin().unwrap(),
+        read_preferred_address(&mut input).unwrap(),
         preferred_address()
     );
     assert!(input.is_empty());
@@ -1230,10 +1196,11 @@ fn remembered_parameters_of_extensions() {
 
     macro_rules! check {
         ($parts:ty) => {{
-            let remembered = encoding
-                .as_slice()
-                .sync_read_remembered_transport_parameters_unpin(PhantomData::<$parts>)
-                .unwrap();
+            let remembered = read_remembered_transport_parameters(
+                &mut encoding.as_slice(),
+                PhantomData::<$parts>,
+            )
+            .unwrap();
             assert_eq!(
                 remembered.get::<Option<ResetStreamAt>, _>(),
                 &Some(ResetStreamAt)

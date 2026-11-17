@@ -5,13 +5,13 @@ use sakuya_wire::{
     header::{
         HeaderForm,
         codec::{
-            ReadLongHeaderError, ReadLongHeaderHostExt as _, ReadShortHeaderError,
-            ReadShortHeaderHostExt as _, ReadVersionNegotiationHostExt as _,
+            ReadLongHeaderError, ReadShortHeaderError, read_long_header, read_short_header,
+            read_version_negotiation,
         },
     },
     v1::header::{
         self as v1,
-        codec::{ReadLongPacketError, ReadLongPacketHostExt as _},
+        codec::{ReadLongPacketError, read_long_packet},
     },
     version::Version,
 };
@@ -49,7 +49,7 @@ fn long_header_fields_do_not_depend_on_the_version_specific_bits() {
         for version in [0x6b33_43cf, 0x0a0a_0a0a, 0xffff_ffff, 2] {
             let bytes = long(first, version, &[1, 2, 3], &[4], &[0xee, 0xef]);
             let mut input = bytes.as_slice();
-            let header = input.sync_read_long_header_unpin().unwrap();
+            let header = read_long_header(&mut input).unwrap();
             assert_eq!(header.first_byte(), first);
             assert_eq!(header.version(), Version::new(version));
             assert_eq!(header.dcid().as_bytes(), [1, 2, 3]);
@@ -69,7 +69,7 @@ fn long_header_connection_ids_take_any_length_a_byte_states() {
             let scid = vec![0x50; scid_len];
             let bytes = long(0xc0, 0x6b33_43cf, &dcid, &scid, &[]);
             let mut input = bytes.as_slice();
-            let header = input.sync_read_long_header_unpin().unwrap();
+            let header = read_long_header(&mut input).unwrap();
             assert_eq!(header.dcid().as_bytes(), dcid);
             assert_eq!(header.scid().as_bytes(), scid);
             assert!(input.is_empty());
@@ -77,9 +77,9 @@ fn long_header_connection_ids_take_any_length_a_byte_states() {
             if dcid_len > 20 || scid_len > 20 {
                 let bytes = long(0xc0, 1, &dcid, &scid, &[]);
                 let mut input = bytes.as_slice();
-                let header = input.sync_read_long_header_unpin().unwrap();
+                let header = read_long_header(&mut input).unwrap();
                 assert!(matches!(
-                    input.sync_read_long_packet_unpin(header),
+                    read_long_packet(&mut input, header),
                     Err(ReadLongPacketError::DcidLength { .. }
                         | ReadLongPacketError::ScidLength { .. })
                 ));
@@ -96,23 +96,20 @@ fn short_headers_read_with_the_length_the_caller_knows() {
         let bytes = [first, 1, 2, 3, 4, 5];
         for length in 0..=5 {
             let mut input = bytes.as_slice();
-            let header = input
-                .sync_read_short_header_unpin(ConnectionIdLength::new(length).unwrap())
-                .unwrap();
+            let header =
+                read_short_header(&mut input, ConnectionIdLength::new(length).unwrap()).unwrap();
             assert_eq!(header.first_byte(), first);
             assert_eq!(header.dcid().len(), length);
             assert_eq!(header.packet_number_offset(), 1 + length);
             assert_eq!(header.end(), bytes.len());
         }
         let mut input = bytes.as_slice();
-        let error = input
-            .sync_read_short_header_unpin(ConnectionIdLength::new(6).unwrap())
-            .unwrap_err();
+        let error = read_short_header(&mut input, ConnectionIdLength::new(6).unwrap()).unwrap_err();
         assert!(error.is_incomplete());
     }
     let mut input = &[0x80, 0, 0][..];
     assert!(matches!(
-        input.sync_read_short_header_unpin(ConnectionIdLength::ZERO),
+        read_short_header(&mut input, ConnectionIdLength::ZERO),
         Err(ReadShortHeaderError::LongForm)
     ));
 }
@@ -125,9 +122,9 @@ fn version_negotiation_does_not_depend_on_the_first_byte() {
     for first in 0x80..=0xffu8 {
         let bytes = long(first, 0, &[1; 255], &[2; 255], &list);
         let mut input = bytes.as_slice();
-        let header = input.sync_read_long_header_unpin().unwrap();
+        let header = read_long_header(&mut input).unwrap();
         assert_eq!(header.version(), Version::NEGOTIATION);
-        let packet = input.sync_read_version_negotiation_unpin(header).unwrap();
+        let packet = read_version_negotiation(&mut input, header).unwrap();
         let versions: Vec<_> = packet.supported_versions().collect();
         assert_eq!(versions, [Version::V1, Version::new(0xfafa_fafa)]);
         assert!(versions[1].is_reserved());
@@ -141,8 +138,8 @@ fn version_negotiation_lists_are_whole_versions() {
     for length in 0..=9 {
         let bytes = long(0x80, 0, &[], &[], &vec![0xab; length]);
         let mut input = bytes.as_slice();
-        let header = input.sync_read_long_header_unpin().unwrap();
-        let result = input.sync_read_version_negotiation_unpin(header);
+        let header = read_long_header(&mut input).unwrap();
+        let result = read_version_negotiation(&mut input, header);
         assert_eq!(result.is_ok(), length % 4 == 0, "{length}");
         if let Ok(packet) = result {
             assert_eq!(packet.supported_versions().len(), length / 4);
@@ -156,10 +153,10 @@ fn version_1_layout_refuses_other_versions_without_reading() {
     for version in [0, 2, 0x6b33_43cf] {
         let bytes = long(0xc0, version, &[1], &[2], &[0xff; 8]);
         let mut input = bytes.as_slice();
-        let header = input.sync_read_long_header_unpin().unwrap();
+        let header = read_long_header(&mut input).unwrap();
         let before = input.len();
         assert!(matches!(
-            input.sync_read_long_packet_unpin(header),
+            read_long_packet(&mut input, header),
             Err(ReadLongPacketError::Version { .. })
         ));
         assert_eq!(input.len(), before);
@@ -173,12 +170,12 @@ fn every_prefix_of_the_long_header_fields_is_incomplete() {
     let bytes = long(0xc0, 1, &[1, 2], &[3, 4], &[]);
     for cut in 0..bytes.len() {
         let mut input = &bytes[..cut];
-        let error = input.sync_read_long_header_unpin().unwrap_err();
+        let error = read_long_header(&mut input).unwrap_err();
         assert!(error.is_incomplete(), "{cut}: {error}");
     }
     let mut input = &[0x40, 0, 0][..];
     assert!(matches!(
-        input.sync_read_long_header_unpin(),
+        read_long_header(&mut input),
         Err(ReadLongHeaderError::ShortForm)
     ));
 }

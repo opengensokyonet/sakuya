@@ -13,7 +13,7 @@
 //! [RFC 9000 §7.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-7.3
 //! [RFC 9000 §7.4.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-7.4.1
 use self::codec::{
-    ReadConnectionIdValueError, ReadConnectionIdValueHostExt as _, write_connection_id_value,
+    ReadConnectionIdValueError, read_connection_id_value, write_connection_id_value,
 };
 use super::{RememberedForZeroRtt, SentBy, TransportParameterAttributes, TransportParameterSpace};
 use crate::{
@@ -21,10 +21,7 @@ use crate::{
     parameters::{KeyedParameter, ReadValueError, ValueSource, read_value_error::ContentSnafu},
     var_int::VarInt,
 };
-use bytes::Buf;
-use core::convert::Infallible;
-use nitori_call::ReceiverAccess;
-use nitori_io::{Write, calls::WriteAllError};
+use bytes::{Buf, BufMut};
 use snafu::ResultExt;
 
 /// Defines a transport parameter that holds a connection ID.
@@ -60,7 +57,7 @@ macro_rules! connection_id {
 
         impl KeyedParameter for $name {
             type Space = TransportParameterSpace;
-            type ValueError = ReadValueError<ReadConnectionIdValueError<Infallible>>;
+            type ValueError = ReadValueError<ReadConnectionIdValueError>;
 
             const ID: VarInt = VarInt::from_u32($id);
             const ATTRIBUTES: TransportParameterAttributes = TransportParameterAttributes {
@@ -68,12 +65,9 @@ macro_rules! connection_id {
                 remembered_for_zero_rtt: RememberedForZeroRtt::Prohibited,
             };
 
-            fn read_value<D: Buf + Unpin>(
-                value: &mut ValueSource<D>,
-            ) -> Result<Self, Self::ValueError> {
+            fn read_value<D: Buf>(value: &mut ValueSource<D>) -> Result<Self, Self::ValueError> {
                 let length = value.remaining();
-                value
-                    .sync_read_connection_id_value_unpin(length)
+                read_connection_id_value(value, length)
                     .map(Self)
                     .context(ContentSnafu)
             }
@@ -82,12 +76,8 @@ macro_rules! connection_id {
                 self.0.len()
             }
 
-            async fn write_value<F, A>(&self, io: &mut A) -> Result<(), WriteAllError<F::Error>>
-            where
-                F: Write,
-                A: ReceiverAccess<Family = F>,
-            {
-                write_connection_id_value(io, self.0).await
+            fn write_value<B: BufMut>(&self, dst: &mut B) {
+                write_connection_id_value(dst, self.0);
             }
         }
     };
@@ -113,27 +103,19 @@ connection_id! {
 }
 
 pub mod codec {
-    //! Reading and writing the value of a parameter that is a connection ID
-    //! as `nitori_call` operations.
+    //! Reading and writing the value of a parameter that is a connection ID.
     //!
     //! The value holds the bytes of the connection ID and nothing else, so
     //! the length of the connection ID is the length of the value, which
-    //! [`read_connection_id_value`] takes. [`read_connection_id_value`] and
-    //! [`write_connection_id_value`] are also the operation structs
-    //! [`ReadConnectionIdValue`] and [`WriteConnectionIdValue`], with
-    //! `{Name}Ext` on receiver accesses and `{Name}HostExt` on call
-    //! executors.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
+    //! [`read_connection_id_value`] takes.
 
-    use crate::connection_id::{ConnectionId, ConnectionIdLength, ConnectionIdLengthError};
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{
-        calls::{ReadExactError, WriteAllError},
-        prelude::*,
+    use crate::{
+        connection_id::{ConnectionId, ConnectionIdLength, ConnectionIdLengthError},
+        source::incomplete,
     };
-    use snafu::{ResultExt, Snafu};
+    use bytes::{Buf, BufMut};
+    use nitori_io::error::IncompleteError;
+    use snafu::Snafu;
 
     /// Reads a connection ID of `length` bytes, the length of the value of
     /// its parameter, and nothing after it.
@@ -142,26 +124,25 @@ pub mod codec {
     ///
     /// [`ReadConnectionIdValueError::Length`] for a length above 20, before
     /// reading anything, and [`ReadConnectionIdValueError::Bytes`] if the
-    /// bytes cannot be read.
-    #[call(sync)]
-    pub async fn read_connection_id_value<F: Read, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
+    /// source ends within the bytes.
+    pub fn read_connection_id_value(
+        src: &mut impl Buf,
         length: usize,
-    ) -> Result<ConnectionId, ReadConnectionIdValueError<F::Error>> {
+    ) -> Result<ConnectionId, ReadConnectionIdValueError> {
         let length = ConnectionIdLength::new(length)?;
+        if src.remaining() < length.get() {
+            let source = incomplete(src, length.get(), 0);
+            return Err(ReadConnectionIdValueError::Bytes { source });
+        }
         let mut id = ConnectionId::EMPTY;
-        let mut destination = &mut id.bytes[..length.get()];
-        io.read_exact(&mut destination, length.get())
-            .await
-            .context(read_connection_id_value_error::BytesSnafu)?;
+        src.copy_to_slice(&mut id.bytes[..length.get()]);
         id.len = u8::from(length);
         Ok(id)
     }
 
     /// Failures that [`read_connection_id_value`] can produce.
     #[derive(Debug, Snafu)]
-    #[snafu(module(read_connection_id_value_error), visibility(pub(crate)))]
-    pub enum ReadConnectionIdValueError<E> {
+    pub enum ReadConnectionIdValueError {
         /// The value is longer than 20 bytes, the longest connection ID of
         /// QUIC version 1.
         #[snafu(transparent)]
@@ -172,22 +153,17 @@ pub mod codec {
         /// The bytes of the connection ID could not be read.
         #[snafu(display("connection ID read failed"))]
         Bytes {
-            /// The failure of reading the bytes.
-            source: ReadExactError<E>,
+            /// The shortfall, counted over the bytes of the connection ID.
+            source: IncompleteError,
         },
     }
 
     /// Writes the bytes of `id`, without a length.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_connection_id_value<F: Write, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-        id: ConnectionId,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        io.write_all(id.as_bytes()).await
+    /// If `dst` has no room for the connection ID, as [`BufMut`] does.
+    pub fn write_connection_id_value(dst: &mut impl BufMut, id: ConnectionId) {
+        dst.put_slice(id.as_bytes());
     }
 }

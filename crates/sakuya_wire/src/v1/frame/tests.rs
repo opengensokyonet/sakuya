@@ -3,9 +3,7 @@
 use super::{
     Frame, FrameRun, FrameType, FrameTypeValue,
     ack::{AckFrame, AckRange, AckRanges, EcnCounts},
-    codec::{
-        ReadFieldsError, ReadFieldsHostExt as _, WriteFrameHostExt as _, WriteFrameRunHostExt as _,
-    },
+    codec::{ReadFieldsError, read_fields, write_frame, write_frame_run},
     connection_close::{CloseErrorCode, ConnectionCloseFrame},
     crypto::CryptoFrame,
     data_blocked::DataBlockedFrame,
@@ -30,7 +28,7 @@ use crate::frame::{InvalidDataError, LengthError, length_width};
 use crate::parts::{Coprod, Coproduct, HList, PartsError};
 use crate::v1::frame::set::{
     FrameKind, FrameSetPart, Frames, OnlyPart as _,
-    codec::{LongerTypeEncodingError, ReadFrameError, ReadFrameTypeHostExt as _},
+    codec::{LongerTypeEncodingError, ReadFrameError, read_frame_type},
 };
 use crate::{
     connection_id::{NonEmptyCid, StatelessResetToken},
@@ -42,13 +40,12 @@ use crate::{
     v1::transport_error::TransportErrorCode,
     var_int::{
         VarInt, VarIntField, VarIntWidth,
-        codec::{ReadVarIntHostExt as _, WriteVarIntFieldHostExt as _},
+        codec::{read_var_int, write_var_int_field},
     },
 };
 use bytes::{Buf, Bytes};
 use core::{marker::PhantomData, num::NonZeroUsize};
-use nitori_call::{Direct, Receiver};
-use nitori_io::{Read, ReadChunk};
+use nitori_io::SplitTo;
 
 /// The frame set of version 1 alone.
 pub(in crate::v1) const V1: PhantomData<HList![crate::v1::Part]> = PhantomData;
@@ -56,42 +53,17 @@ pub(in crate::v1) const V1: PhantomData<HList![crate::v1::Part]> = PhantomData;
 /// Reading one frame of version 1 from a memory source: its Frame Type, then
 /// its fields with `read_fields`, which takes one PADDING frame at a time.
 pub(in crate::v1) trait ReadOneFrame: Sized {
-    /// The chunks of the payload fields of the frame.
-    type Chunk;
-
-    /// The failure of the source.
-    type Error;
-
     /// Reads one frame from the start of the source. Bytes read before a
     /// failure stay consumed.
-    #[allow(clippy::type_complexity)]
-    fn read_one_frame(
-        &mut self,
-    ) -> Result<
-        Frame<Self::Chunk>,
-        ReadFrameError<Self::Error, Coprod![ReadFieldsError<Self::Error>]>,
-    >;
+    fn read_one_frame(&mut self) -> Result<Frame<Self>, ReadFrameError<Coprod![ReadFieldsError]>>;
 }
 
-impl<H> ReadOneFrame for H
-where
-    H: Buf + Receiver<Family = Direct<H>> + Unpin,
-    Direct<H>: ReadChunk<Chunk: Default>,
-{
-    type Chunk = <Direct<H> as ReadChunk>::Chunk;
-    type Error = <Direct<H> as Read>::Error;
-
-    fn read_one_frame(
-        &mut self,
-    ) -> Result<
-        Frame<Self::Chunk>,
-        ReadFrameError<Self::Error, Coprod![ReadFieldsError<Self::Error>]>,
-    > {
-        let frame_type = self.sync_read_frame_type_unpin(V1)?.extract();
-        self.sync_read_fields_unpin(frame_type)
-            .map_err(|error| ReadFrameError::Fields {
-                source: PartsError(Coproduct::Inl(error)),
-            })
+impl<S: Buf + SplitTo> ReadOneFrame for S {
+    fn read_one_frame(&mut self) -> Result<Frame<Self>, ReadFrameError<Coprod![ReadFieldsError]>> {
+        let frame_type = read_frame_type(self, V1)?.extract();
+        read_fields(self, frame_type).map_err(|error| ReadFrameError::Fields {
+            source: PartsError(Coproduct::Inl(error)),
+        })
     }
 }
 
@@ -174,10 +146,10 @@ pub(in crate::v1) fn as_field<T: Copy + Into<VarInt> + TryFrom<VarInt>>(
 /// back unchanged, and reading then writing reproduces the bytes.
 pub(in crate::v1) fn assert_round_trip(frame: Frame<&[u8]>) -> Vec<u8> {
     let mut encoding = Vec::new();
-    encoding.sync_write_frame_unpin(frame.clone()).unwrap();
+    write_frame(&mut encoding, frame.clone());
     assert_eq!(encoding.len(), frame.encoded_len(), "{frame:?}");
     assert_eq!(
-        encoding.as_slice().sync_read_var_int_unpin().unwrap(),
+        read_var_int(&mut encoding.as_slice()).unwrap(),
         frame.type_value(),
         "{frame:?}"
     );
@@ -191,13 +163,13 @@ pub(in crate::v1) fn assert_round_trip(frame: Frame<&[u8]>) -> Vec<u8> {
     let from_bytes = input.read_one_frame().unwrap();
     assert!(input.is_empty());
     let mut rewritten = Vec::new();
-    rewritten.sync_write_frame_unpin(from_bytes).unwrap();
+    write_frame(&mut rewritten, from_bytes);
     assert_eq!(rewritten, encoding, "{frame:?}");
 
     // A slice of exactly the encoded length takes the frame.
     let mut exact = vec![0; encoding.len()];
     let mut sink = exact.as_mut_slice();
-    sink.sync_write_frame_unpin(frame).unwrap();
+    write_frame(&mut sink, frame);
     assert!(sink.is_empty());
     assert_eq!(exact, encoding);
     encoding
@@ -339,13 +311,13 @@ fn every_frame_round_trips() {
 fn every_frame_round_trips_as_a_run() {
     for frame in sample_frames() {
         let mut encoding = Vec::new();
-        encoding.sync_write_frame_unpin(frame.clone()).unwrap();
+        write_frame(&mut encoding, frame.clone());
         let run = FrameRun::from(frame.clone());
         assert_eq!(run.frame_type(), frame.frame_type());
         assert_eq!(run.type_value(), frame.type_value());
         assert_eq!(run.encoded_len(), encoding.len(), "{run:?}");
         let mut written = Vec::new();
-        written.sync_write_frame_run_unpin(run.clone()).unwrap();
+        write_frame_run(&mut written, run.clone());
         assert_eq!(written, encoding, "{run:?}");
         let mut frames = Frames::new(written.as_slice(), V1);
         let read = frames.next().only_part().unwrap().unwrap();
@@ -360,7 +332,7 @@ fn every_frame_round_trips_as_a_run() {
         assert_eq!(run.type_value(), VarInt::ZERO);
         assert_eq!(run.encoded_len(), len);
         let mut written = Vec::new();
-        written.sync_write_frame_run_unpin(run.clone()).unwrap();
+        write_frame_run(&mut written, run.clone());
         assert_eq!(written, vec![0; len]);
         let mut frames = Frames::new(written.as_slice(), V1);
         assert_eq!(
@@ -381,20 +353,6 @@ fn a_padding_frame_is_a_run_of_one() {
         FrameRun::from(frame),
         FrameRun::Padding(PaddingRun::new(NonZeroUsize::MIN))
     );
-}
-
-#[test]
-fn writing_into_a_short_slice_keeps_the_accepted_prefix() {
-    for frame in sample_frames() {
-        let required = frame.encoded_len();
-        let mut encoding = Vec::new();
-        encoding.sync_write_frame_unpin(frame.clone()).unwrap();
-        let mut buffer = vec![0xee; required - 1];
-        let mut sink = buffer.as_mut_slice();
-        let error = sink.sync_write_frame_unpin(frame.clone()).unwrap_err();
-        assert_eq!(error.completed(), required - 1, "{frame:?}");
-        assert_eq!(buffer, encoding[..required - 1], "{frame:?}");
-    }
 }
 
 #[test]
@@ -485,11 +443,10 @@ fn longer_frame_type_encodings_are_protocol_violations() {
     for value in (0..=0x31u8).chain([0x3f]) {
         for width in [VarIntWidth::Two, VarIntWidth::Four, VarIntWidth::Eight] {
             let mut encoding = Vec::new();
-            encoding
-                .sync_write_var_int_field_unpin(
-                    VarIntField::new(VarInt::from(value), width).unwrap(),
-                )
-                .unwrap();
+            write_var_int_field(
+                &mut encoding,
+                VarIntField::new(VarInt::from(value), width).unwrap(),
+            );
             // A field that would follow stays unread.
             encoding.push(0x01);
             {
@@ -545,7 +502,7 @@ fn unknown_types_and_those_of_extensions_are_rejected() {
     ];
     for encoding in cases {
         let mut input = encoding;
-        let frame_type = input.sync_read_var_int_unpin().unwrap();
+        let frame_type = read_var_int(&mut input).unwrap();
         let mut input = encoding;
         let error = input.read_one_frame().unwrap_err();
         assert!(
@@ -613,10 +570,7 @@ fn truncated_frames_are_terminal() {
 }
 
 /// The failure of reading `encoding`, which ends within a field.
-fn cut_short(
-    encoding: &[u8],
-) -> ReadFrameError<core::convert::Infallible, Coprod![ReadFieldsError<core::convert::Infallible>]>
-{
+fn cut_short(encoding: &[u8]) -> ReadFrameError<Coprod![ReadFieldsError]> {
     let mut input = encoding;
     let error = input.read_one_frame().unwrap_err();
     assert!(error.is_incomplete(), "{encoding:02x?}: {error:?}");
@@ -645,7 +599,7 @@ fn a_field_cut_short_is_named_by_its_variant() {
         stream_data_blocked::codec::ReadStreamDataBlockedFrameError as StreamDataBlockedFrame,
     };
     use ReadFieldsError as F;
-    type Check = fn(&ReadFieldsError<core::convert::Infallible>) -> bool;
+    type Check = fn(&ReadFieldsError) -> bool;
     let cases: [(&[u8], Check); 23] = [
         (&[0x04], |e| {
             matches!(

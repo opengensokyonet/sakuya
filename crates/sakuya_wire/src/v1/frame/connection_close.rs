@@ -18,7 +18,7 @@ use bytes::Buf;
 /// Reason Phrase Length field can state the length of the reason phrase, so
 /// every value writes an encoding that reads back to the same value; the
 /// fields are read through methods of the same names. `D` holds the reason
-/// phrase: the source's chunk type for a frame that was read, any [`Buf`]
+/// phrase: the type of the source for a frame that was read, any [`Buf`]
 /// for one to write.
 ///
 /// [RFC 9000 §19.19]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.19
@@ -145,79 +145,57 @@ pub(in crate::v1) const fn type_value_of(application: bool) -> VarInt {
 }
 
 pub mod codec {
-    //! Writing CONNECTION_CLOSE frames as a `nitori_call` operation; reading
+    //! Writing CONNECTION_CLOSE frames; reading
     //! is done by [`Frames`](crate::v1::frame::set::Frames).
-    //!
-    //! [`write_connection_close_frame`] is also the operation struct
-    //! [`WriteConnectionCloseFrame`], with `WriteConnectionCloseFrameExt` on receiver
-    //! accesses and `WriteConnectionCloseFrameHostExt` on call executors.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
 
     use super::{CloseErrorCode, ConnectionCloseFrame};
     use crate::{
         frame::read_field,
-        payload::{ReadPayloadError, read_payload},
-        var_int::{VarInt, VarIntField, VarIntWidth, codec::ReadVarIntError},
+        source::read_payload,
+        var_int::{VarInt, VarIntField, VarIntWidth},
     };
-    use bytes::Buf;
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{calls::WriteAllError, prelude::*};
+    use bytes::{Buf, BufMut};
+    use nitori_io::{SplitTo, error::IncompleteError};
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type of a transport
     /// CONNECTION_CLOSE frame, type `0x1c`, and the reason phrase as one
-    /// chunk of the source.
-    pub(in crate::v1) async fn read_connection_close_frame_transport<F, A>(
-        io: &mut A,
-    ) -> Result<ConnectionCloseFrame<F::Chunk>, ReadConnectionCloseFrameTransportError<F::Error>>
-    where
-        F: ReadChunk<Chunk: Default>,
-        A: ReceiverAccess<Family = F>,
-    {
+    /// piece of the source.
+    pub(in crate::v1) fn read_connection_close_frame_transport<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<ConnectionCloseFrame<S>, ReadConnectionCloseFrameTransportError> {
         use read_connection_close_transport_error::*;
         let error_code = CloseErrorCode::Transport {
-            code: read_field(io).await.context(ErrorCodeSnafu)?,
-            frame_type: read_field(io).await.context(FrameTypeSnafu)?,
+            code: read_field(src).context(ErrorCodeSnafu)?,
+            frame_type: read_field(src).context(FrameTypeSnafu)?,
         };
-        let (width, reason_phrase) = read_reason_phrase(io).await?;
+        let (width, reason_phrase) = read_reason_phrase(src)?;
         Ok(close(error_code, width, reason_phrase))
     }
 
     /// Reads the fields that follow the Frame Type of an application
     /// CONNECTION_CLOSE frame, type `0x1d`, and the reason phrase as one
-    /// chunk of the source.
-    pub(in crate::v1) async fn read_connection_close_frame_application<F, A>(
-        io: &mut A,
-    ) -> Result<ConnectionCloseFrame<F::Chunk>, ReadConnectionCloseFrameApplicationError<F::Error>>
-    where
-        F: ReadChunk<Chunk: Default>,
-        A: ReceiverAccess<Family = F>,
-    {
+    /// piece of the source.
+    pub(in crate::v1) fn read_connection_close_frame_application<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<ConnectionCloseFrame<S>, ReadConnectionCloseFrameApplicationError> {
         use read_connection_close_application_error::*;
         let error_code = CloseErrorCode::Application {
-            code: read_field(io).await.context(ErrorCodeSnafu)?,
+            code: read_field(src).context(ErrorCodeSnafu)?,
         };
-        let (width, reason_phrase) = read_reason_phrase(io).await?;
+        let (width, reason_phrase) = read_reason_phrase(src)?;
         Ok(close(error_code, width, reason_phrase))
     }
 
     /// Reads the Reason Phrase Length field and the reason phrase, and
     /// returns the width of the field and the reason phrase.
-    async fn read_reason_phrase<F, A>(
-        io: &mut A,
-    ) -> Result<(VarIntWidth, F::Chunk), ReadReasonPhraseError<F::Error>>
-    where
-        F: ReadChunk<Chunk: Default>,
-        A: ReceiverAccess<Family = F>,
-    {
+    fn read_reason_phrase<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<(VarIntWidth, S), ReadReasonPhraseError> {
         use read_reason_phrase_error::*;
-        let length: VarIntField<VarInt> = read_field(io).await.context(ReasonPhraseLengthSnafu)?;
+        let length: VarIntField<VarInt> = read_field(src).context(ReasonPhraseLengthSnafu)?;
         let reason_phrase_len = usize::try_from(length.get().get()).unwrap_or(usize::MAX);
-        let reason_phrase = read_payload(io, reason_phrase_len)
-            .await
-            .context(ReasonPhraseSnafu)?;
+        let reason_phrase = read_payload(src, reason_phrase_len).context(ReasonPhraseSnafu)?;
         Ok((length.width(), reason_phrase))
     }
 
@@ -230,43 +208,33 @@ pub mod codec {
         let frame = ConnectionCloseFrame::new(error_code, width, reason_phrase);
         // invariant: the Reason Phrase Length field was read at this width,
         // and `read_payload` returns a reason phrase of exactly the length it
-        // states: it fails on a shorter one and panics on a longer chunk.
+        // states: it fails on a shorter one.
         frame.unwrap_or_else(|error| unreachable!("{error}"))
     }
 
     /// Failures of reading a transport CONNECTION_CLOSE frame, type `0x1c`.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_connection_close_transport_error), visibility(pub(in crate::v1)))]
-    pub enum ReadConnectionCloseFrameTransportError<E> {
+    pub enum ReadConnectionCloseFrameTransportError {
         /// The Error Code field, a transport error code, could not be read.
         #[snafu(display("CONNECTION_CLOSE Error Code read failed"))]
         ErrorCode {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The Frame Type field could not be read.
         #[snafu(display("CONNECTION_CLOSE Frame Type read failed"))]
         FrameType {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The Reason Phrase Length field or the reason phrase could not be
         /// read.
         #[snafu(transparent)]
         ReasonPhrase {
             /// The failure.
-            source: ReadReasonPhraseError<E>,
+            source: ReadReasonPhraseError,
         },
-    }
-
-    impl<E> ReadConnectionCloseFrameTransportError<E> {
-        /// Whether the source ended within the frame.
-        pub(in crate::v1) fn is_incomplete(&self) -> bool {
-            match self {
-                Self::ErrorCode { source } | Self::FrameType { source } => source.is_incomplete(),
-                Self::ReasonPhrase { source } => source.is_incomplete(),
-            }
-        }
     }
 
     /// Failures of reading an application CONNECTION_CLOSE frame, type
@@ -276,81 +244,54 @@ pub mod codec {
         module(read_connection_close_application_error),
         visibility(pub(in crate::v1))
     )]
-    pub enum ReadConnectionCloseFrameApplicationError<E> {
+    pub enum ReadConnectionCloseFrameApplicationError {
         /// The Error Code field, an application protocol error code, could
         /// not be read.
         #[snafu(display("CONNECTION_CLOSE Error Code read failed"))]
         ErrorCode {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The Reason Phrase Length field or the reason phrase could not be
         /// read.
         #[snafu(transparent)]
         ReasonPhrase {
             /// The failure.
-            source: ReadReasonPhraseError<E>,
+            source: ReadReasonPhraseError,
         },
-    }
-
-    impl<E> ReadConnectionCloseFrameApplicationError<E> {
-        /// Whether the source ended within the frame.
-        pub(in crate::v1) fn is_incomplete(&self) -> bool {
-            match self {
-                Self::ErrorCode { source } => source.is_incomplete(),
-                Self::ReasonPhrase { source } => source.is_incomplete(),
-            }
-        }
     }
 
     /// Failures of reading the fields that both CONNECTION_CLOSE frame types
     /// end with: the Reason Phrase Length field and the reason phrase.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_reason_phrase_error), visibility(pub(in crate::v1)))]
-    pub enum ReadReasonPhraseError<E> {
+    pub enum ReadReasonPhraseError {
         /// The Reason Phrase Length field could not be read.
         #[snafu(display("CONNECTION_CLOSE Reason Phrase Length read failed"))]
         ReasonPhraseLength {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The reason phrase could not be read.
         #[snafu(display("CONNECTION_CLOSE reason phrase read failed"))]
         ReasonPhrase {
             /// The failure of reading the reason phrase.
-            source: ReadPayloadError<E>,
+            source: IncompleteError,
         },
-    }
-
-    impl<E> ReadReasonPhraseError<E> {
-        /// Whether the source ended within the frame.
-        pub(in crate::v1) fn is_incomplete(&self) -> bool {
-            match self {
-                Self::ReasonPhraseLength { source } => source.is_incomplete(),
-                Self::ReasonPhrase { source } => source.is_incomplete(),
-            }
-        }
     }
 
     /// Writes `frame`; [`ConnectionCloseFrame::new`] checked its limits.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_connection_close_frame<F, A, D>(
-        io: &mut A,
+    /// If `dst` has no room for the frame, as [`BufMut`] does.
+    pub fn write_connection_close_frame<D: Buf>(
+        dst: &mut impl BufMut,
         frame: ConnectionCloseFrame<D>,
-    ) -> Result<(), WriteAllError<F::Error>>
-    where
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-        D: Buf,
-    {
+    ) {
         let head = frame.head();
-        io.write_all(head.as_slice().chain(frame.reason_phrase))
-            .await
+        dst.put_slice(head.as_slice());
+        dst.put(frame.reason_phrase);
     }
 }
 

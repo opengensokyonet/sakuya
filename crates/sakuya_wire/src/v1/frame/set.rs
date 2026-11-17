@@ -67,10 +67,10 @@
 //! that claims it is known, that part reads the item from the source
 //! ([`FrameSetPart::read_run`]) and decides what it holds. For most parts a
 //! run is one frame; a part whose consecutive frames are better taken
-//! together may read them as one run. Payload fields are chunks of the
-//! source, of the type parameter `D` of the frames: subslices of a byte slice
-//! and `Bytes` that share the storage of a `Bytes` source, so reading copies
-//! no payload.
+//! together may read them as one run. Payload fields are pieces of the
+//! source, of the type parameter `D` of the frames, cut off with
+//! [`SplitTo`]: subslices of a byte slice and `Bytes` that share the storage
+//! of a `Bytes` source, so reading copies no payload.
 //!
 //! ```
 //! use core::marker::PhantomData;
@@ -108,8 +108,7 @@ use crate::{
 };
 use bytes::Buf;
 use core::{iter::FusedIterator, marker::PhantomData, ops::RangeInclusive};
-use nitori_call::{Direct, Receiver};
-use nitori_io::{Read, ReadChunk};
+use nitori_io::SplitTo;
 
 pub mod codec;
 
@@ -171,7 +170,7 @@ pub trait FrameSetPart {
 
     /// The failures of reading the fields after the Frame Type; each states
     /// the transport error it corresponds to ([`FrameFieldsError`]).
-    type FieldsError<E>;
+    type FieldsError;
 
     /// The Frame Type values this part claims.
     const FRAME_TYPE_VALUES: &'static FrameTypeValues;
@@ -190,22 +189,14 @@ pub trait FrameSetPart {
     /// Reads a run from `source`, a packet payload in memory from which the
     /// Frame Type `type_value` has just been read.
     ///
-    /// The source is the rest of a packet payload; payload fields are chunks
-    /// of it. A part may read several consecutive frames as one run. A part
-    /// whose run is one frame reads the fields of the frame with the
-    /// synchronous host method of its own read operation.
-    // The type spells out the chunks and the failure of the source `H`.
-    #[allow(clippy::type_complexity)]
-    fn read_run<H>(
-        source: &mut H,
+    /// The source is the rest of a packet payload; payload fields are pieces
+    /// of it, cut off with [`SplitTo`]. A part may read several consecutive
+    /// frames as one run. A part whose run is one frame reads the fields of
+    /// the frame with its own read function.
+    fn read_run<S: Buf + SplitTo>(
+        source: &mut S,
         type_value: Self::TypeValue,
-    ) -> Result<
-        Self::Run<<Direct<H> as ReadChunk>::Chunk>,
-        Self::FieldsError<<Direct<H> as Read>::Error>,
-    >
-    where
-        H: Buf + Receiver<Family = Direct<H>> + Unpin,
-        Direct<H>: ReadChunk<Chunk: Default>;
+    ) -> Result<Self::Run<S>, Self::FieldsError>;
 }
 
 /// A frame set: a list of parts, `HNil` or `HCons<P, Ps>` of parts `P` and
@@ -232,7 +223,7 @@ pub trait FrameSet {
 
     /// The failures of reading the fields after the Frame Type; each states
     /// the transport error it corresponds to ([`FrameFieldsError`]).
-    type FieldsError<E>;
+    type FieldsError;
 
     /// The Frame Type values the parts of this set claim.
     const FRAME_TYPE_VALUES: &'static FrameTypeValues;
@@ -255,25 +246,17 @@ pub trait FrameSet {
     /// Reads a run from `source`, a packet payload in memory from which the
     /// Frame Type `type_value` has just been read, as the part that claims it
     /// does ([`FrameSetPart::read_run`]).
-    // The type spells out the chunks and the failure of the source `H`.
-    #[allow(clippy::type_complexity)]
-    fn read_run<H>(
-        source: &mut H,
+    fn read_run<S: Buf + SplitTo>(
+        source: &mut S,
         type_value: Self::TypeValue,
-    ) -> Result<
-        Self::Run<<Direct<H> as ReadChunk>::Chunk>,
-        Self::FieldsError<<Direct<H> as Read>::Error>,
-    >
-    where
-        H: Buf + Receiver<Family = Direct<H>> + Unpin,
-        Direct<H>: ReadChunk<Chunk: Default>;
+    ) -> Result<Self::Run<S>, Self::FieldsError>;
 }
 
 impl FrameSet for HNil {
     type Run<D> = CNil;
     type Kind = CNil;
     type TypeValue = CNil;
-    type FieldsError<E> = CNil;
+    type FieldsError = CNil;
 
     const FRAME_TYPE_VALUES: &'static FrameTypeValues = &FrameTypeValues::new(&[]);
 
@@ -291,11 +274,7 @@ impl FrameSet for HNil {
         match *run {}
     }
 
-    fn read_run<H>(_source: &mut H, type_value: CNil) -> Result<CNil, CNil>
-    where
-        H: Buf + Receiver<Family = Direct<H>> + Unpin,
-        Direct<H>: ReadChunk<Chunk: Default>,
-    {
+    fn read_run<S: Buf + SplitTo>(_source: &mut S, type_value: CNil) -> Result<CNil, CNil> {
         match type_value {}
     }
 }
@@ -304,7 +283,7 @@ impl<P: FrameSetPart, Ps: FrameSet> FrameSet for HCons<P, Ps> {
     type Run<D> = Coproduct<P::Run<D>, Ps::Run<D>>;
     type Kind = Coproduct<P::Kind, Ps::Kind>;
     type TypeValue = Coproduct<P::TypeValue, Ps::TypeValue>;
-    type FieldsError<E> = Coproduct<P::FieldsError<E>, Ps::FieldsError<E>>;
+    type FieldsError = Coproduct<P::FieldsError, Ps::FieldsError>;
 
     const FRAME_TYPE_VALUES: &'static FrameTypeValues =
         &FrameTypeValues::join(P::FRAME_TYPE_VALUES, Ps::FRAME_TYPE_VALUES);
@@ -341,17 +320,10 @@ impl<P: FrameSetPart, Ps: FrameSet> FrameSet for HCons<P, Ps> {
         }
     }
 
-    fn read_run<H>(
-        source: &mut H,
+    fn read_run<S: Buf + SplitTo>(
+        source: &mut S,
         type_value: Self::TypeValue,
-    ) -> Result<
-        Self::Run<<Direct<H> as ReadChunk>::Chunk>,
-        Self::FieldsError<<Direct<H> as Read>::Error>,
-    >
-    where
-        H: Buf + Receiver<Family = Direct<H>> + Unpin,
-        Direct<H>: ReadChunk<Chunk: Default>,
-    {
+    ) -> Result<Self::Run<S>, Self::FieldsError> {
         match type_value {
             Coproduct::Inl(type_value) => P::read_run(source, type_value)
                 .map(Coproduct::Inl)
@@ -620,8 +592,8 @@ macro_rules! assert_frame_types_disjoint {
 /// iteration; after an error the iterator yields `None`. For each item, the
 /// iterator reads the Frame Type ([`codec::read_frame_type`]), and the part
 /// that claims it reads the run ([`FrameSet::read_run`]): one frame, or
-/// consecutive frames as one value. Payload fields are chunks of the source;
-/// see the [module documentation](self).
+/// consecutive frames as one value. Payload fields are pieces of the
+/// source; see the [module documentation](self).
 #[derive(Clone, Debug)]
 pub struct Frames<H, S> {
     source: H,
@@ -661,28 +633,17 @@ impl<H: Buf, S> Frames<H, S> {
     }
 }
 
-impl<H, S> Iterator for Frames<H, S>
-where
-    H: Buf + Receiver<Family = Direct<H>> + Unpin,
-    Direct<H>: ReadChunk<Chunk: Default>,
-    S: FrameSet,
-{
-    type Item = Result<
-        S::Run<<Direct<H> as ReadChunk>::Chunk>,
-        codec::ReadFrameError<
-            <Direct<H> as Read>::Error,
-            S::FieldsError<<Direct<H> as Read>::Error>,
-        >,
-    >;
+impl<H: Buf + SplitTo, S: FrameSet> Iterator for Frames<H, S> {
+    type Item = Result<S::Run<H>, codec::ReadFrameError<S::FieldsError>>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        use codec::{ReadFrameError, ReadFrameTypeHostExt as _};
+        use codec::{ReadFrameError, read_frame_type};
         if self.failed || !self.source.has_remaining() {
             return None;
         }
         self.start = self.consumed;
         let before = self.source.remaining();
-        let frame_type = self.source.sync_read_frame_type_unpin(self.part);
+        let frame_type = read_frame_type(&mut self.source, self.part);
         let result = frame_type.and_then(|type_value| {
             S::read_run(&mut self.source, type_value).map_err(|error| ReadFrameError::Fields {
                 source: PartsError(error),
@@ -698,10 +659,4 @@ where
     }
 }
 
-impl<H, S> FusedIterator for Frames<H, S>
-where
-    H: Buf + Receiver<Family = Direct<H>> + Unpin,
-    Direct<H>: ReadChunk<Chunk: Default>,
-    S: FrameSet,
-{
-}
+impl<H: Buf + SplitTo, S: FrameSet> FusedIterator for Frames<H, S> {}

@@ -75,56 +75,44 @@ pub(in crate::v1) const fn type_value_of(directionality: Directionality) -> VarI
 }
 
 pub mod codec {
-    //! Writing STREAMS_BLOCKED as a `nitori_call` operation; reading is done by
+    //! Writing STREAMS_BLOCKED; reading is done by
     //! [`Frames`](crate::v1::frame::set::Frames).
-    //!
-    //! [`write_streams_blocked_frame`] is also the operation struct [`WriteStreamsBlockedFrame`], with
-    //! `WriteStreamsBlockedFrameExt` on receiver accesses and `WriteStreamsBlockedFrameHostExt` on call
-    //! executors.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
 
     use super::StreamsBlockedFrame;
     use crate::{
         v1::stream_count::{StreamCount, StreamCountError},
         v1::stream_id::Directionality,
-        var_int::codec::{ReadVarIntError, ReadVarIntFieldError, read_var_int_field},
+        var_int::codec::{ReadVarIntFieldError, read_var_int_field},
     };
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{calls::WriteAllError, prelude::*};
+    use bytes::{Buf, BufMut};
+    use nitori_io::error::IncompleteError;
     use snafu::{IntoError, Snafu};
 
     /// Reads the count that follows the Frame Type of a frame for streams of
     /// `directionality`.
-    pub(in crate::v1) async fn read_streams_blocked_frame<
-        F: Read,
-        A: ReceiverAccess<Family = F>,
-    >(
-        io: &mut A,
+    pub(in crate::v1) fn read_streams_blocked_frame(
+        src: &mut impl Buf,
         directionality: Directionality,
-    ) -> Result<StreamsBlockedFrame, ReadStreamsBlockedFrameError<F::Error>> {
+    ) -> Result<StreamsBlockedFrame, ReadStreamsBlockedFrameError> {
         let maximum_streams =
-            read_var_int_field::<StreamCount, _, _>(io)
-                .await
-                .map_err(|error| match error {
-                    ReadVarIntFieldError::VarInt { source } => {
-                        read_streams_blocked_error::FieldSnafu.into_error(source)
-                    }
-                    ReadVarIntFieldError::Value { source, .. } => source.into(),
-                })?;
+            read_var_int_field::<StreamCount>(src).map_err(|error| match error {
+                ReadVarIntFieldError::VarInt { source } => {
+                    read_streams_blocked_error::FieldSnafu.into_error(source)
+                }
+                ReadVarIntFieldError::Value { source, .. } => source.into(),
+            })?;
         Ok(StreamsBlockedFrame::new(directionality, maximum_streams))
     }
 
     /// Failures of reading a STREAMS_BLOCKED frame.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_streams_blocked_error), visibility(pub(in crate::v1)))]
-    pub enum ReadStreamsBlockedFrameError<E> {
+    pub enum ReadStreamsBlockedFrameError {
         /// The count could not be read.
         #[snafu(display("STREAMS_BLOCKED field read failed"))]
         Field {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The count exceeds 2<sup>60</sup>.
         #[snafu(transparent)]
@@ -136,16 +124,11 @@ pub mod codec {
 
     /// Writes the frame.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_streams_blocked_frame<F: Write, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-        frame: StreamsBlockedFrame,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        io.write_all(frame.head().as_slice()).await
+    /// If `dst` has no room for the frame, as [`BufMut`] does.
+    pub fn write_streams_blocked_frame(dst: &mut impl BufMut, frame: StreamsBlockedFrame) {
+        dst.put_slice(frame.head().as_slice());
     }
 }
 

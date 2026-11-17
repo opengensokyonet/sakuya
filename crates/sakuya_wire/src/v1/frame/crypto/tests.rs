@@ -1,7 +1,4 @@
-use super::{
-    CryptoFrame,
-    codec::{ReadCryptoFrameError, WriteCryptoFrameHostExt as _},
-};
+use super::{CryptoFrame, codec::ReadCryptoFrameError};
 use crate::parts::{Coproduct, PartsError};
 use crate::v1::frame::codec::ReadFieldsError;
 use crate::v1::frame::set::codec::ReadFrameError;
@@ -77,16 +74,6 @@ fn narrow_length_fields_are_rejected() {
         expected.to_string(),
         "field of 64 bytes is longer than a 1-byte Length field can state"
     );
-}
-
-#[test]
-fn write_reports_progress_when_the_sink_fills() {
-    let frame = CryptoFrame::new(short(vi(1)), VarIntWidth::One, &b"0123456789"[..]).unwrap();
-    let mut buffer = [0u8; 5];
-    let mut sink = buffer.as_mut_slice();
-    let error = sink.sync_write_crypto_frame_unpin(frame).unwrap_err();
-    assert_eq!(error.completed(), 5);
-    assert_eq!(buffer, [0x06, 0x01, 0x0a, b'0', b'1']);
 }
 
 #[test]

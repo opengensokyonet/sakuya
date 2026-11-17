@@ -9,7 +9,7 @@
 //! holding a [`StreamCount`]. Every type implements [`Default`] with the
 //! value [RFC 9000 §18.2] gives an absent parameter.
 //!
-//! The values are read and written by the two operations of [`codec`],
+//! The values are read and written by the two functions of [`codec`],
 //! which any parameter type whose value is one variable-length integer can
 //! use, in this space or another.
 //!
@@ -31,7 +31,6 @@ macro_rules! integer_transport_parameter {
             type Space = $crate::v1::transport_parameters::TransportParameterSpace;
             type ValueError = $crate::parameters::ReadValueError<
                 $crate::var_int::codec::ReadVarIntFieldError<
-                    ::core::convert::Infallible,
                     <$name as ::core::convert::TryFrom<$crate::var_int::VarInt>>::Error,
                 >,
             >;
@@ -43,12 +42,11 @@ macro_rules! integer_transport_parameter {
                     remembered_for_zero_rtt: $remembered,
                 };
 
-            fn read_value<D: ::bytes::Buf + ::core::marker::Unpin>(
+            fn read_value<D: ::bytes::Buf>(
                 value: &mut $crate::parameters::ValueSource<D>,
             ) -> ::core::result::Result<Self, Self::ValueError> {
-                use $crate::v1::transport_parameters::integer::codec::ReadIntegerValueHostExt as _;
                 ::snafu::ResultExt::context(
-                    value.sync_read_integer_value_unpin(),
+                    $crate::v1::transport_parameters::integer::codec::read_integer_value(value),
                     $crate::parameters::read_value_error::ContentSnafu,
                 )
             }
@@ -57,16 +55,8 @@ macro_rules! integer_transport_parameter {
                 $crate::var_int::VarInt::from(*self).encoded_len()
             }
 
-            async fn write_value<F, A>(
-                &self,
-                io: &mut A,
-            ) -> ::core::result::Result<(), ::nitori_io::calls::WriteAllError<F::Error>>
-            where
-                F: ::nitori_io::Write,
-                A: ::nitori_call::ReceiverAccess<Family = F>,
-            {
-                $crate::v1::transport_parameters::integer::codec::write_integer_value(io, *self)
-                    .await
+            fn write_value<B: ::bytes::BufMut>(&self, dst: &mut B) {
+                $crate::v1::transport_parameters::integer::codec::write_integer_value(dst, *self);
             }
         }
     };
@@ -423,84 +413,62 @@ impl ActiveConnectionIdLimitError {
 
 pub mod codec {
     //! Reading and writing the value of a parameter that is one
-    //! variable-length integer as `nitori_call` operations.
+    //! variable-length integer.
     //!
     //! [`read_integer_value`] and [`write_integer_value`] are generic over
     //! the parameter type, which converts from and into a
-    //! [`VarInt`]. They are also the operation
-    //! structs [`ReadIntegerValue`] and [`WriteIntegerValue`], with
-    //! `{Name}Ext` on receiver accesses and `{Name}HostExt` on call
-    //! executors. Reading the parameters reads this value from the bytes of
+    //! [`VarInt`]. Reading the parameters reads this value from the bytes of
     //! its parameter, which must hold nothing else.
     //!
     //! ```
     //! use sakuya_wire::{
     //!     v1::transport_parameters::integer::{
     //!         MaxAckDelay,
-    //!         codec::{ReadIntegerValueHostExt as _, WriteIntegerValueHostExt as _},
+    //!         codec::{read_integer_value, write_integer_value},
     //!     },
     //!     var_int::VarInt,
     //! };
     //!
     //! let delay = MaxAckDelay::new(VarInt::from(100u8)).unwrap();
     //! let mut value = Vec::new();
-    //! value.sync_write_integer_value_unpin(delay).unwrap();
+    //! write_integer_value(&mut value, delay);
     //! assert_eq!(value, [0x40, 0x64]);
-    //! let read: MaxAckDelay = value.as_slice().sync_read_integer_value_unpin().unwrap();
+    //! let read: MaxAckDelay = read_integer_value(&mut value.as_slice()).unwrap();
     //! assert_eq!(read, delay);
     //!
     //! // 2^14 is out of range.
     //! let mut value = &[0x80, 0x00, 0x40, 0x00][..];
-    //! assert!(value.sync_read_integer_value_unpin::<MaxAckDelay>().is_err());
+    //! assert!(read_integer_value::<MaxAckDelay>(&mut value).is_err());
     //! ```
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
 
     use crate::var_int::{
         VarInt, VarIntField,
-        codec::{ReadVarIntFieldError, read_var_int_field},
+        codec::{ReadVarIntFieldError, read_var_int_field, write_var_int},
     };
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{calls::WriteAllError, prelude::*};
+    use bytes::{Buf, BufMut};
 
     /// Reads one variable-length integer, of any width, as a parameter of
     /// the type `T`, and nothing after it.
     ///
     /// # Errors
     ///
-    /// [`ReadVarIntFieldError::VarInt`] if the integer cannot be read, and
-    /// [`ReadVarIntFieldError::Value`] if `T` rejects it.
-    #[call(sync)]
-    pub async fn read_integer_value<T, F, A>(
-        io: &mut A,
-    ) -> Result<T, ReadVarIntFieldError<F::Error, <T as TryFrom<VarInt>>::Error>>
+    /// [`ReadVarIntFieldError::VarInt`] if the source ends within the
+    /// integer, and [`ReadVarIntFieldError::Value`] if `T` rejects it.
+    pub fn read_integer_value<T>(
+        src: &mut impl Buf,
+    ) -> Result<T, ReadVarIntFieldError<<T as TryFrom<VarInt>>::Error>>
     where
         T: Copy + Into<VarInt> + TryFrom<VarInt>,
-        F: Read,
-        A: ReceiverAccess<Family = F>,
     {
-        read_var_int_field(io).await.map(VarIntField::into_inner)
+        read_var_int_field(src).map(VarIntField::into_inner)
     }
 
-    /// Writes the shortest encoding of the integer of `parameter`
-    /// completely.
+    /// Writes the shortest encoding of the integer of `parameter`.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_integer_value<T, F, A>(
-        io: &mut A,
-        parameter: T,
-    ) -> Result<(), WriteAllError<F::Error>>
-    where
-        T: Into<VarInt>,
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-    {
-        let (encoding, encoded_len) = parameter.into().to_encoding();
-        io.write_all(&encoding[..encoded_len]).await
+    /// If `dst` has no room for the encoding, as [`BufMut`] does.
+    pub fn write_integer_value<T: Into<VarInt>>(dst: &mut impl BufMut, parameter: T) {
+        write_var_int(dst, parameter.into());
     }
 }

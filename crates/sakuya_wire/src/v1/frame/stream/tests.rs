@@ -1,8 +1,8 @@
 use super::{
     StreamFrame,
     codec::{
-        ReadStreamFrameError, WriteStreamFrameHostExt as _, WriteStreamFrameWithLengthHostExt as _,
-        WriteStreamFrameWithoutLengthHostExt as _,
+        ReadStreamFrameError, write_stream_frame, write_stream_frame_with_length,
+        write_stream_frame_without_length,
     },
 };
 use crate::parts::{Coproduct, PartsError};
@@ -51,7 +51,7 @@ fn type_bits() {
         );
         assert_eq!(stream.type_value(), vi(frame_type.into()));
         let mut rewritten = Vec::new();
-        rewritten.sync_write_stream_frame_unpin(stream).unwrap();
+        write_stream_frame(&mut rewritten, stream);
         assert_eq!(rewritten, encoding);
         assert_round_trip(frame);
 
@@ -64,9 +64,7 @@ fn type_bits() {
                     StreamFrame::without_length(short(sid(4)), offset, &b"ab"[..], fin).unwrap();
                 assert_eq!(frame.type_value(), vi(frame_type.into()));
                 assert_eq!(frame.encoded_len(), encoding.len());
-                written
-                    .sync_write_stream_frame_without_length_unpin(frame)
-                    .unwrap();
+                write_stream_frame_without_length(&mut written, frame);
                 frame.into()
             }
             Either::Right(width) => {
@@ -74,9 +72,7 @@ fn type_bits() {
                     .unwrap();
                 assert_eq!(frame.type_value(), vi(frame_type.into()));
                 assert_eq!(frame.encoded_len(), encoding.len());
-                written
-                    .sync_write_stream_frame_with_length_unpin(frame)
-                    .unwrap();
+                write_stream_frame_with_length(&mut written, frame);
                 frame.into()
             }
         };
@@ -231,9 +227,7 @@ fn undecided_length_is_decided_into_either_kind() {
                 .unwrap()
         );
         let mut written = Vec::new();
-        written
-            .sync_write_stream_frame_with_length_unpin(with)
-            .unwrap();
+        write_stream_frame_with_length(&mut written, with);
         assert_eq!(written.len(), with.encoded_len());
     }
 }

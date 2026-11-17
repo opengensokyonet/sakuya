@@ -136,54 +136,35 @@ impl RetirePriorToError {
 }
 
 pub mod codec {
-    //! Writing NEW_CONNECTION_ID frames as a `nitori_call` operation; reading
+    //! Writing NEW_CONNECTION_ID frames; reading
     //! is done by [`Frames`](crate::v1::frame::set::Frames).
-    //!
-    //! [`write_new_connection_id_frame`] is also the operation struct
-    //! [`WriteNewConnectionIdFrame`], with `WriteNewConnectionIdFrameExt` on receiver
-    //! accesses and `WriteNewConnectionIdFrameHostExt` on call executors.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
 
     use super::{NewConnectionIdFrame, RetirePriorToError};
     use crate::{
         connection_id::{
             EmptyCidError, NonEmptyCid, StatelessResetToken,
-            codec::{ReadConnectionIdError, ReadConnectionIdExt as _},
+            codec::{ReadConnectionIdError, read_connection_id},
         },
         frame::read_field,
-        var_int::codec::ReadVarIntError,
+        source::read_array,
     };
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{
-        calls::{ReadArrayError, WriteAllError},
-        prelude::*,
-    };
+    use bytes::{Buf, BufMut};
+    use nitori_io::error::IncompleteError;
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type.
-    pub(in crate::v1) async fn read_new_connection_id_frame<
-        F: Read,
-        A: ReceiverAccess<Family = F>,
-    >(
-        io: &mut A,
-    ) -> Result<NewConnectionIdFrame, ReadNewConnectionIdFrameError<F::Error>> {
-        let sequence_number = read_field(io)
-            .await
-            .context(read_new_connection_id_error::SequenceNumberSnafu)?;
-        let retire_prior_to = read_field(io)
-            .await
-            .context(read_new_connection_id_error::RetirePriorToSnafu)?;
-        let connection_id = io
-            .read_connection_id()
-            .await
-            .context(read_new_connection_id_error::ConnectionIdSnafu)?;
+    pub(in crate::v1) fn read_new_connection_id_frame(
+        src: &mut impl Buf,
+    ) -> Result<NewConnectionIdFrame, ReadNewConnectionIdFrameError> {
+        let sequence_number =
+            read_field(src).context(read_new_connection_id_error::SequenceNumberSnafu)?;
+        let retire_prior_to =
+            read_field(src).context(read_new_connection_id_error::RetirePriorToSnafu)?;
+        let connection_id =
+            read_connection_id(src).context(read_new_connection_id_error::ConnectionIdSnafu)?;
         let connection_id = NonEmptyCid::new(connection_id)
             .context(read_new_connection_id_error::EmptyConnectionIdSnafu)?;
-        let stateless_reset_token = io
-            .read_array::<{ StatelessResetToken::LEN }>()
-            .await
+        let stateless_reset_token = read_array::<{ StatelessResetToken::LEN }>(src)
             .context(read_new_connection_id_error::StatelessResetTokenSnafu)?;
         let frame = NewConnectionIdFrame::new(
             sequence_number,
@@ -197,24 +178,24 @@ pub mod codec {
     /// Failures of reading a NEW_CONNECTION_ID frame.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_new_connection_id_error), visibility(pub(in crate::v1)))]
-    pub enum ReadNewConnectionIdFrameError<E> {
+    pub enum ReadNewConnectionIdFrameError {
         /// The Sequence Number field could not be read.
         #[snafu(display("NEW_CONNECTION_ID Sequence Number read failed"))]
         SequenceNumber {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The Retire Prior To field could not be read.
         #[snafu(display("NEW_CONNECTION_ID Retire Prior To read failed"))]
         RetirePriorTo {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The connection ID could not be read, or its length exceeds 20.
         #[snafu(display("NEW_CONNECTION_ID connection ID read failed"))]
         ConnectionId {
             /// The failure of reading the connection ID.
-            source: ReadConnectionIdError<E>,
+            source: ReadConnectionIdError,
         },
         /// The connection ID is empty.
         #[snafu(display("NEW_CONNECTION_ID has an empty connection ID"))]
@@ -226,7 +207,7 @@ pub mod codec {
         #[snafu(display("NEW_CONNECTION_ID Stateless Reset Token read failed"))]
         StatelessResetToken {
             /// The failure of reading the token.
-            source: ReadArrayError<E>,
+            source: IncompleteError,
         },
         /// The frame retires sequence numbers beyond its own.
         #[snafu(transparent)]
@@ -238,16 +219,11 @@ pub mod codec {
 
     /// Writes `frame`; [`NewConnectionIdFrame::new`] checked its rule.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_new_connection_id_frame<F: Write, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-        frame: NewConnectionIdFrame,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        io.write_all(frame.head().as_slice()).await
+    /// If `dst` has no room for the frame, as [`BufMut`] does.
+    pub fn write_new_connection_id_frame(dst: &mut impl BufMut, frame: NewConnectionIdFrame) {
+        dst.put_slice(frame.head().as_slice());
     }
 }
 
@@ -288,7 +264,7 @@ mod tests {
         }
     }
 
-    fn read(encoding: &[u8]) -> ReadNewConnectionIdFrameError<core::convert::Infallible> {
+    fn read(encoding: &[u8]) -> ReadNewConnectionIdFrameError {
         let mut input = encoding;
         match input.read_one_frame() {
             Err(ReadFrameError::Fields {
@@ -339,11 +315,11 @@ mod tests {
         // A two-byte encoding cut short in each field.
         assert!(matches!(
             read(&[0x18, 0x40]),
-            ReadNewConnectionIdFrameError::SequenceNumber { source } if source.is_incomplete()
+            ReadNewConnectionIdFrameError::SequenceNumber { .. }
         ));
         assert!(matches!(
             read(&[0x18, 0x01, 0x40]),
-            ReadNewConnectionIdFrameError::RetirePriorTo { source } if source.is_incomplete()
+            ReadNewConnectionIdFrameError::RetirePriorTo { .. }
         ));
     }
 

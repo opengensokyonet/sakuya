@@ -19,7 +19,6 @@
 //! - [`var_int`]: variable-length integers ([`var_int::VarInt`]), the widths
 //!   of their encodings ([`var_int::VarIntWidth`]), and wire fields that hold
 //!   a value with the width it is encoded in ([`var_int::VarIntField`]).
-//! - [`payload`]: how variable-length payload fields are read.
 //! - [`frame`]: what the frames of every part share: the kinds of Length
 //!   field, and the errors of the limits that tie a payload to its length.
 //! - [`parts`]: the lists of parts that compose a frame set or a set of
@@ -37,13 +36,17 @@
 //!   Reliable Size to its Final Size.
 //! - `datagram`: the DATAGRAM frame of [RFC 9221].
 //!
-//! Every wire format is read and written through `nitori_call` operations, in
-//! the `codec` module of its type. They run on sources and sinks that may wait
-//! between bytes, and synchronously, through their `sync_` host methods, on
-//! byte slices, `Bytes` and other memory hosts; there a source that ends early
-//! is an incomplete failure. Payload fields are chunks of the source, so a
-//! byte slice yields subslices and `Bytes` yields `Bytes` that share its
-//! storage. `encoded_len` methods compute lengths without writing.
+//! Every format here is read and written whole in memory, by the functions in
+//! the `codec` module of its type: readers take a [`bytes::Buf`], writers a
+//! [`bytes::BufMut`]. A source that ends early is an incomplete failure
+//! ([`nitori_io::error::IncompleteError`]). Payload fields, such as the data of
+//! a STREAM frame, are pieces of the source cut off with
+//! [`nitori_io::SplitTo`], so a byte slice yields subslices and `Bytes` yields
+//! `Bytes` that share its storage. Writers have no failure: a `Vec` or
+//! `BytesMut` grows, and a fixed buffer without room panics, as `BufMut`
+//! does. `encoded_len` methods compute lengths without writing. Variable-length
+//! integers can also be read and written by `nitori_call` operations, for
+//! formats on byte streams ([`var_int::call`]).
 //!
 //! Nothing here interprets protected header fields (reserved bits, packet
 //! number length, Key Phase) or removes packet protection. The frame and
@@ -66,9 +69,9 @@ pub mod frame;
 pub mod header;
 pub mod parameters;
 pub mod parts;
-pub mod payload;
 #[cfg(feature = "reset_stream_at")]
 pub mod reset_stream_at;
+mod source;
 pub mod v1;
 
 pub mod var_int;

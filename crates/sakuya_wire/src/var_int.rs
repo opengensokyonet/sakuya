@@ -6,10 +6,11 @@
 //! network byte order. A value has an encoding of every width that can hold
 //! it; RFC 9000 permits encodings longer than necessary.
 //!
-//! [`codec::read_var_int`] and [`codec::write_var_int`] read and write the
-//! encoding as `nitori_call` operations, on sources and sinks that may wait
-//! between bytes as well as on byte slices, through the `sync_` host methods.
-//! They read a value of any width and write the shortest encoding.
+//! [`codec::read_var_int`] and [`codec::write_var_int`] read the encoding
+//! from a [`bytes::Buf`] and write it to a [`bytes::BufMut`]; they read a
+//! value of any width and write the shortest encoding. The operations of
+//! [`call`] read and write the same encoding as `nitori_call` operations, on
+//! sources and sinks that may wait between bytes, such as a stream.
 //!
 //! A [`VarIntField`] is a field of a wire format that holds a variable-length
 //! integer: a value together with the width of its encoding.
@@ -21,6 +22,7 @@
 use core::fmt;
 use snafu::Snafu;
 
+pub mod call;
 pub mod codec;
 
 /// A QUIC variable-length integer: an unsigned value of at most 62 bits.

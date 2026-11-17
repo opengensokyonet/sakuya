@@ -7,7 +7,7 @@
 //! types, FRAME_ENCODING_ERROR ([RFC 9000 §12.4]).
 //!
 //! Each frame type has its own module with its struct, the checks its
-//! encoding imposes, and its write operation. [`Frame`] holds any of them,
+//! encoding imposes, and its write function. [`Frame`] holds any of them,
 //! [`FrameRun`] holds any of them with PADDING as a run, and [`FrameType`]
 //! names their kinds.
 //!
@@ -46,9 +46,9 @@
 //!   `with_length`, one without by `without_length`, and a STREAM frame
 //!   whose Length field is not decided yet, of the type
 //!   [`UndecidedLength`](crate::frame::UndecidedLength)
-//!   that has no write operation, by `new`, followed by `into_with_length`
+//!   that has no write function, by `new`, followed by `into_with_length`
 //!   or `into_without_length`; each of the decided kinds has its own write
-//!   operation, so a writer that knows which kind it writes states it in the
+//!   function, so a writer that knows which kind it writes states it in the
 //!   type.
 //! - An ACK frame holds its fields as encoded, and owns its ACK Ranges in
 //!   [`ack::AckRanges`]; [`ack::AckFrame::packet_ranges`] computes the
@@ -82,7 +82,7 @@
 //! whose length is the number of PADDING frames. [`Frame`] is one frame as it
 //! is encoded, with a [`padding::PaddingFrame`] for PADDING; a [`Frame`]
 //! converts into a [`FrameRun`] with `From`, and a PADDING frame is a run of
-//! one. Payload fields are chunks of the source, of the type parameter `D`:
+//! one. Payload fields are pieces of the source, of the type parameter `D`:
 //! subslices of a byte slice and `Bytes` that share the storage of a `Bytes`
 //! source, so reading copies no payload. These are STREAM and CRYPTO data,
 //! NEW_TOKEN tokens and CONNECTION_CLOSE reason phrases. The ACK Ranges of an
@@ -146,15 +146,14 @@
 //!
 //! # Writing
 //!
-//! Every frame type has `encoded_len` and a write operation in its module's
+//! Every frame type has `encoded_len` and a write function in its module's
 //! `codec`, such as [`stream::codec::write_stream_frame`], and STREAM has
 //! one for each kind of Length field; [`codec::write_frame`] writes any
 //! [`Frame`] and [`codec::write_frame_run`] any [`FrameRun`]. Writing writes the encoding the value states and
 //! chooses nothing: the width of each field comes from the value. Every
 //! frame checked its limits when it was constructed, so writing checks
-//! nothing, and its only failure is that of the receiver: a sink that stops
-//! accepting bytes or fails keeps the bytes it accepted, and the
-//! `WriteAllError` counts them. `encoded_len`
+//! nothing, and has no failure: it writes to a [`bytes::BufMut`], and a
+//! destination without room panics, as `BufMut` does. `encoded_len`
 //! gives the length in advance, so that a packet encoder can choose frames
 //! and payload sizes before writing.
 //! The `max_data_len` of `StreamFrame<D, VarIntWidth>` and of
@@ -186,7 +185,6 @@
 //! [RFC 9000 §9.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-9.1
 //! [RFC 9002 §2]: https://www.rfc-editor.org/rfc/rfc9002.html#section-2
 use self::{
-    codec::ReadFieldsHostExt as _,
     padding::{PaddingFrame, PaddingRun},
     set::{FrameKind, FrameSetPart, FrameTypeValues},
 };
@@ -194,8 +192,7 @@ use super::{encryption_level::EncryptionLevel, role::Role};
 use crate::var_int::VarInt;
 use bytes::Buf;
 use core::{num::NonZeroUsize, ops::RangeInclusive};
-use nitori_call::{Direct, Receiver};
-use nitori_io::{Read, ReadChunk};
+use nitori_io::SplitTo;
 
 pub mod ack;
 pub mod codec;
@@ -474,7 +471,7 @@ impl FrameSetPart for super::Part {
     type Run<D> = FrameRun<D>;
     type Kind = FrameType;
     type TypeValue = FrameTypeValue;
-    type FieldsError<E> = codec::ReadFieldsError<E>;
+    type FieldsError = codec::ReadFieldsError;
 
     const FRAME_TYPE_VALUES: &'static FrameTypeValues =
         &FrameTypeValues::new(&[RangeInclusive::new(
@@ -496,32 +493,23 @@ impl FrameSetPart for super::Part {
 
     /// A PADDING frame and the PADDING frames that follow it are one run;
     /// every other frame is read as [`codec::read_fields`] reads it.
-    fn read_run<H>(
-        source: &mut H,
+    fn read_run<S: Buf + SplitTo>(
+        source: &mut S,
         type_value: FrameTypeValue,
-    ) -> Result<
-        FrameRun<<Direct<H> as ReadChunk>::Chunk>,
-        codec::ReadFieldsError<<Direct<H> as Read>::Error>,
-    >
-    where
-        H: Buf + Receiver<Family = Direct<H>> + Unpin,
-        Direct<H>: ReadChunk<Chunk: Default>,
-    {
+    ) -> Result<FrameRun<S>, codec::ReadFieldsError> {
         if type_value.kind() == FrameType::Padding {
             // The Frame Type that was read is the first frame of the run.
             let len = NonZeroUsize::MIN.saturating_add(skip_zeros(source));
             return Ok(FrameRun::Padding(PaddingRun::new(len)));
         }
-        source
-            .sync_read_fields_unpin(type_value)
-            .map(FrameRun::from)
+        codec::read_fields(source, type_value).map(FrameRun::from)
     }
 }
 
 /// A frame of version 1, of any type: one frame as it is encoded.
 ///
-/// `D` is the type of the payload fields: the chunk type of the source a
-/// frame was read from, or any [`Buf`] for a frame to write.
+/// `D` is the type of the payload fields: the type of the source a frame
+/// was read from, or any [`Buf`] for a frame to write.
 /// [`FrameRun`] holds the same frames, with PADDING as a run of them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Frame<D> {
@@ -669,7 +657,7 @@ macro_rules! frame_methods {
                 self.frame_type().counts_in_flight()
             }
 
-            /// The Frame Type value the write operation writes, for each frame
+            /// The Frame Type value the write function writes, for each frame
             /// of a run.
             pub fn type_value(&self) -> VarInt {
                 each_frame!($enum, self, frame => frame.type_value())
@@ -677,7 +665,7 @@ macro_rules! frame_methods {
         }
 
         impl<D: Buf> $enum<D> {
-            /// The number of bytes the write operation writes.
+            /// The number of bytes the write function writes.
             pub fn encoded_len(&self) -> usize {
                 each_frame!($enum, self, frame => frame.encoded_len())
             }

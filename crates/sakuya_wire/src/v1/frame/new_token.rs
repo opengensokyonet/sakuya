@@ -14,7 +14,7 @@ use snafu::Snafu;
 /// token is not empty and that the Token Length field can state its length,
 /// so every value writes an encoding that reads back to the same value; the
 /// fields are read through methods of the same names. `D` holds the token:
-/// the source's chunk type for a frame that was read, any [`Buf`] for one to
+/// the type of the source for a frame that was read, any [`Buf`] for one to
 /// write.
 ///
 /// [RFC 9000 §19.7]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.7
@@ -121,48 +121,33 @@ pub enum InvalidNewTokenError {
 }
 
 pub mod codec {
-    //! Writing NEW_TOKEN frames as a `nitori_call` operation; reading is done by
+    //! Writing NEW_TOKEN frames; reading is done by
     //! [`Frames`](crate::v1::frame::set::Frames).
-    //!
-    //! [`write_new_token_frame`] is also the operation struct [`WriteNewTokenFrame`],
-    //! with `WriteNewTokenFrameExt` on receiver accesses and `WriteNewTokenFrameHostExt`
-    //! on call executors.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
 
     use super::{EmptyTokenError, InvalidNewTokenError, NewTokenFrame};
     use crate::{
         frame::read_field,
-        payload::{ReadPayloadError, read_payload},
-        var_int::{VarInt, VarIntField, codec::ReadVarIntError},
+        source::read_payload,
+        var_int::{VarInt, VarIntField},
     };
-    use bytes::Buf;
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{calls::WriteAllError, prelude::*};
+    use bytes::{Buf, BufMut};
+    use nitori_io::{SplitTo, error::IncompleteError};
     use snafu::{ResultExt, Snafu};
 
     /// Reads the Token Length field that follows the Frame Type, and the
-    /// token as one chunk of the source.
-    pub(in crate::v1) async fn read_new_token_frame<F, A>(
-        io: &mut A,
-    ) -> Result<NewTokenFrame<F::Chunk>, ReadNewTokenFrameError<F::Error>>
-    where
-        F: ReadChunk<Chunk: Default>,
-        A: ReceiverAccess<Family = F>,
-    {
-        let length: VarIntField<VarInt> = read_field(io)
-            .await
-            .context(read_new_token_error::TokenLengthSnafu)?;
+    /// token as one piece of the source.
+    pub(in crate::v1) fn read_new_token_frame<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<NewTokenFrame<S>, ReadNewTokenFrameError> {
+        let length: VarIntField<VarInt> =
+            read_field(src).context(read_new_token_error::TokenLengthSnafu)?;
         let token_len = usize::try_from(length.get().get()).unwrap_or(usize::MAX);
-        let token = read_payload(io, token_len)
-            .await
-            .context(read_new_token_error::TokenSnafu)?;
+        let token = read_payload(src, token_len).context(read_new_token_error::TokenSnafu)?;
         NewTokenFrame::new(length.width(), token).map_err(|error| match error {
             InvalidNewTokenError::Empty { source } => ReadNewTokenFrameError::Empty { source },
             // invariant: the Token Length field was read at this width, and
             // `read_payload` returns a token of exactly the length it states:
-            // it fails on a shorter one and panics on a longer chunk.
+            // it fails on a shorter one.
             InvalidNewTokenError::Length { source } => unreachable!("{source}"),
         })
     }
@@ -170,12 +155,12 @@ pub mod codec {
     /// Failures of reading a NEW_TOKEN frame.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_new_token_error), visibility(pub(in crate::v1)))]
-    pub enum ReadNewTokenFrameError<E> {
+    pub enum ReadNewTokenFrameError {
         /// The Token Length field could not be read.
         #[snafu(display("NEW_TOKEN Token Length read failed"))]
         TokenLength {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The Token Length is zero.
         #[snafu(transparent)]
@@ -187,28 +172,19 @@ pub mod codec {
         #[snafu(display("NEW_TOKEN token read failed"))]
         Token {
             /// The failure of reading the token.
-            source: ReadPayloadError<E>,
+            source: IncompleteError,
         },
     }
 
     /// Writes `frame`; [`NewTokenFrame::new`] checked its rules.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_new_token_frame<F, A, D>(
-        io: &mut A,
-        frame: NewTokenFrame<D>,
-    ) -> Result<(), WriteAllError<F::Error>>
-    where
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-        D: Buf,
-    {
+    /// If `dst` has no room for the frame, as [`BufMut`] does.
+    pub fn write_new_token_frame<D: Buf>(dst: &mut impl BufMut, frame: NewTokenFrame<D>) {
         let head = frame.head();
-        io.write_all(head.as_slice().chain(frame.token)).await
+        dst.put_slice(head.as_slice());
+        dst.put(frame.token);
     }
 }
 

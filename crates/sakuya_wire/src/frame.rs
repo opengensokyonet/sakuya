@@ -15,15 +15,12 @@
 //! the packet; and [`Either<NoLength, VarIntWidth>`](Either) and
 //! [`Either<VarIntWidth, NoLength>`](Either), of the `either` crate, for
 //! either of the two. A STREAM frame whose Length field is not decided yet
-//! is of the type [`UndecidedLength`], which has no write operation.
-use crate::var_int::{
-    VarInt, VarIntField, VarIntWidth,
-    codec::{ReadVarIntError, read_var_int_field},
-};
+//! is of the type [`UndecidedLength`], which has no write function.
+use crate::var_int::{VarInt, VarIntField, VarIntWidth, codec::read_var_int_field};
+use bytes::Buf;
 use core::convert::Infallible;
 use either::Either;
-use nitori_call::ReceiverAccess;
-use nitori_io::Read;
+use nitori_io::error::IncompleteError;
 use snafu::Snafu;
 
 /// A Frame Type value below 2<sup>6</sup> as a variable-length integer.
@@ -39,7 +36,7 @@ pub struct NoLength;
 /// A STREAM frame whose Length field is not decided yet, as the type
 /// parameter `L` of [`StreamFrame`](crate::v1::frame::stream::StreamFrame).
 ///
-/// It is not a [`LengthKind`]: a frame of this kind has no write operation, so
+/// It is not a [`LengthKind`]: a frame of this kind has no write function, so
 /// the types stop a frame from being written before its Length field is
 /// decided. [`StreamFrame::into_with_length`](crate::v1::frame::stream::StreamFrame::into_with_length)
 /// and [`StreamFrame::into_without_length`](crate::v1::frame::stream::StreamFrame::into_without_length)
@@ -225,15 +222,11 @@ pub(crate) fn length_field_len(length: usize) -> usize {
 
 /// Reads a variable-length integer field of a type that every value
 /// converts into.
-pub(crate) async fn read_field<T, F, A>(
-    io: &mut A,
-) -> Result<VarIntField<T>, ReadVarIntError<F::Error>>
+pub(crate) fn read_field<T>(src: &mut impl Buf) -> Result<VarIntField<T>, IncompleteError>
 where
     T: Copy + Into<VarInt> + TryFrom<VarInt, Error = Infallible>,
-    F: Read,
-    A: ReceiverAccess<Family = F>,
 {
-    read_var_int_field(io).await.map_err(ReadVarIntError::from)
+    read_var_int_field(src).map_err(IncompleteError::from)
 }
 
 /// The largest `n` with `fixed + len(n) + n <= room` and `n <= limit`, where

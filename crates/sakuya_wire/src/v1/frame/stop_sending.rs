@@ -66,64 +66,50 @@ impl StopSendingFrame {
 }
 
 pub mod codec {
-    //! Writing STOP_SENDING as a `nitori_call` operation; reading is done by
+    //! Writing STOP_SENDING; reading is done by
     //! [`Frames`](crate::v1::frame::set::Frames).
-    //!
-    //! [`write_stop_sending_frame`] is also the operation struct [`WriteStopSendingFrame`], with
-    //! `WriteStopSendingFrameExt` on receiver accesses and `WriteStopSendingFrameHostExt` on call
-    //! executors.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
 
     use super::StopSendingFrame;
-    use crate::{frame::read_field, var_int::codec::ReadVarIntError};
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{calls::WriteAllError, prelude::*};
+    use crate::frame::read_field;
+    use bytes::{Buf, BufMut};
+    use nitori_io::error::IncompleteError;
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow the Frame Type.
-    pub(in crate::v1) async fn read_stop_sending_frame<F: Read, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<StopSendingFrame, ReadStopSendingFrameError<F::Error>> {
+    pub(in crate::v1) fn read_stop_sending_frame(
+        src: &mut impl Buf,
+    ) -> Result<StopSendingFrame, ReadStopSendingFrameError> {
         use read_stop_sending_error::*;
-        let stream_id = read_field(io).await.context(StreamIdSnafu)?;
-        let application_error_code = read_field(io)
-            .await
-            .context(ApplicationProtocolErrorCodeSnafu)?;
+        let stream_id = read_field(src).context(StreamIdSnafu)?;
+        let application_error_code = read_field(src).context(ApplicationProtocolErrorCodeSnafu)?;
         Ok(StopSendingFrame::new(stream_id, application_error_code))
     }
 
     /// Failures of reading a STOP_SENDING frame.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_stop_sending_error), visibility(pub(in crate::v1)))]
-    pub enum ReadStopSendingFrameError<E> {
+    pub enum ReadStopSendingFrameError {
         /// The Stream ID field could not be read.
         #[snafu(display("STOP_SENDING Stream ID read failed"))]
         StreamId {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The Application Protocol Error Code field could not be read.
         #[snafu(display("STOP_SENDING Application Protocol Error Code read failed"))]
         ApplicationProtocolErrorCode {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
     }
 
     /// Writes the frame.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_stop_sending_frame<F: Write, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-        frame: StopSendingFrame,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        io.write_all(frame.head().as_slice()).await
+    /// If `dst` has no room for the frame, as [`BufMut`] does.
+    pub fn write_stop_sending_frame(dst: &mut impl BufMut, frame: StopSendingFrame) {
+        dst.put_slice(frame.head().as_slice());
     }
 }
 

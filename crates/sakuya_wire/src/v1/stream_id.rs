@@ -6,8 +6,7 @@
 //! ([`Directionality`]), and the remaining bits number the streams of each
 //! of the four resulting types from zero ([`StreamId::index`]).
 //!
-//! The [`codec`] module reads and writes stream IDs as `nitori_call`
-//! operations.
+//! The [`codec`] module reads and writes stream IDs.
 //!
 //! [RFC 9000 §2.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-2.1
 use crate::var_int::VarInt;

@@ -53,7 +53,7 @@ pub(in crate::v1) mod bits {
 /// Length field not decided yet, check the limits that apply, so every
 /// value writes an encoding that reads back to the same value; the fields
 /// are read through methods of the same names. `D` holds
-/// the data: the source's chunk type for a frame that was read, any [`Buf`]
+/// the data: the type of the source for a frame that was read, any [`Buf`]
 /// for one to write.
 ///
 /// [RFC 9000 §19.8]: https://www.rfc-editor.org/rfc/rfc9000.html#section-19.8
@@ -147,7 +147,7 @@ impl<D, L> StreamFrame<D, L> {
 }
 
 impl<D: Buf, L: LengthKind> StreamFrame<D, L> {
-    /// The number of bytes the write operations of [`codec`] write.
+    /// The number of bytes the write functions of [`codec`] write.
     pub fn encoded_len(&self) -> usize {
         1 + self.stream_id.encoded_len()
             + self.offset.map_or(0, |offset| offset.encoded_len())
@@ -443,62 +443,51 @@ impl From<StreamTypeValue> for VarInt {
 }
 
 pub mod codec {
-    //! Writing STREAM frames as `nitori_call` operations; reading is done by
+    //! Writing STREAM frames; reading is done by
     //! [`Frames`](crate::v1::frame::set::Frames).
     //!
-    //! There is a write operation for each kind of Length field:
+    //! There is a write function for each kind of Length field:
     //! [`write_stream_frame_with_length`] for `StreamFrame<D, VarIntWidth>`,
     //! [`write_stream_frame_without_length`] for `StreamFrame<D, NoLength>`, and
     //! [`write_stream_frame`] for `StreamFrame<D>`, which writes as one of the two.
-    //! Each is also an operation struct, such as [`WriteStreamFrame`], with
-    //! `{Name}Ext` on receiver accesses and `{Name}HostExt` on call
-    //! executors.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
 
     use super::{StreamFrame, StreamTypeValue, bits};
     use crate::{
         frame::{DataEndError, NoLength, read_field},
-        payload::{ReadPayloadError, read_payload, read_payload_to_end},
-        var_int::{VarInt, VarIntField, VarIntWidth, codec::ReadVarIntError},
+        source::{read_payload, read_payload_to_end},
+        var_int::{VarInt, VarIntField, VarIntWidth},
     };
-    use bytes::Buf;
+    use bytes::{Buf, BufMut};
     use either::Either;
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{calls::WriteAllError, prelude::*};
+    use nitori_io::{SplitTo, error::IncompleteError};
     use snafu::{ResultExt, Snafu};
 
     /// Reads the fields that follow a STREAM Frame Type `frame_type`, and the
-    /// data as one chunk of the source: of the Length field's length, or to
+    /// data as one piece of the source: of the Length field's length, or to
     /// the end of the source without one.
-    pub(in crate::v1) async fn read_stream_frame<F, A>(
-        io: &mut A,
+    pub(in crate::v1) fn read_stream_frame<S: Buf + SplitTo>(
+        src: &mut S,
         frame_type: StreamTypeValue,
-    ) -> Result<StreamFrame<F::Chunk>, ReadStreamFrameError<F::Error>>
-    where
-        F: ReadChunk<Chunk: Default>,
-        A: ReceiverAccess<Family = F>,
-    {
+    ) -> Result<StreamFrame<S>, ReadStreamFrameError> {
         use read_stream_error::*;
-        let stream_id = read_field(io).await.context(StreamIdSnafu)?;
+        let stream_id = read_field(src).context(StreamIdSnafu)?;
         let offset = if frame_type.has(bits::OFF) {
-            Some(read_field(io).await.context(OffsetSnafu)?)
+            Some(read_field(src).context(OffsetSnafu)?)
         } else {
             None
         };
         let (length, data) = if frame_type.has(bits::LEN) {
-            let length: VarIntField<VarInt> = read_field(io).await.context(LengthSnafu)?;
+            let length: VarIntField<VarInt> = read_field(src).context(LengthSnafu)?;
             // The end of the data follows from the fields, so a frame that
             // breaks the bound is rejected before its data is read.
             DataEndError::check(super::start(offset), length.get().get())?;
             // The end check bounds the length by 2^62 - 1; where `usize` is
             // narrower, a saturated length exceeds every source.
             let data_len = usize::try_from(length.get().get()).unwrap_or(usize::MAX);
-            let data = read_payload(io, data_len).await.context(DataSnafu)?;
+            let data = read_payload(src, data_len).context(DataSnafu)?;
             (Either::Right(length.width()), data)
         } else {
-            let data = read_payload_to_end(io).await.context(DataSnafu)?;
+            let data = read_payload_to_end(src);
             (Either::Left(NoLength), data)
         };
         let fin = frame_type.has(bits::FIN);
@@ -507,7 +496,7 @@ pub mod codec {
             Either::Left(NoLength) => frame.into_without_length().into(),
             // invariant: the Length field was read at this width, and
             // `read_payload` returns data of exactly the length it states: it
-            // fails on shorter data and panics on a longer chunk.
+            // fails on shorter data.
             Either::Right(width) => frame
                 .into_with_length(width)
                 .unwrap_or_else(|error| unreachable!("{error}"))
@@ -518,24 +507,24 @@ pub mod codec {
     /// Failures of reading a STREAM frame.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_stream_error), visibility(pub(in crate::v1)))]
-    pub enum ReadStreamFrameError<E> {
+    pub enum ReadStreamFrameError {
         /// The Stream ID field could not be read.
         #[snafu(display("STREAM Stream ID read failed"))]
         StreamId {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The Offset field could not be read.
         #[snafu(display("STREAM Offset read failed"))]
         Offset {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The Length field could not be read.
         #[snafu(display("STREAM Length read failed"))]
         Length {
             /// The failure of reading the field.
-            source: ReadVarIntError<E>,
+            source: IncompleteError,
         },
         /// The data would end beyond 2<sup>62</sup> − 1.
         #[snafu(transparent)]
@@ -547,7 +536,7 @@ pub mod codec {
         #[snafu(display("STREAM data read failed"))]
         Data {
             /// The failure of reading the data.
-            source: ReadPayloadError<E>,
+            source: IncompleteError,
         },
     }
 
@@ -558,26 +547,16 @@ pub mod codec {
     /// A frame without a Length field extends to the end of the packet;
     /// nothing may be written after it.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_stream_frame<F, A, D>(
-        io: &mut A,
-        frame: StreamFrame<D>,
-    ) -> Result<(), WriteAllError<F::Error>>
-    where
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-        D: Buf,
-    {
+    /// If `dst` has no room for the frame, as [`BufMut`] does.
+    pub fn write_stream_frame<D: Buf>(dst: &mut impl BufMut, frame: StreamFrame<D>) {
         match frame.length {
             Either::Left(length) => {
-                write_stream_frame_without_length(io, frame.restate_length(length)).await
+                write_stream_frame_without_length(dst, frame.restate_length(length))
             }
             Either::Right(length) => {
-                write_stream_frame_with_length(io, frame.restate_length(length)).await
+                write_stream_frame_with_length(dst, frame.restate_length(length))
             }
         }
     }
@@ -585,22 +564,16 @@ pub mod codec {
     /// Writes `frame`, which has a Length field;
     /// [`StreamFrame::with_length`] checked its limits.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_stream_frame_with_length<F, A, D>(
-        io: &mut A,
+    /// If `dst` has no room for the frame, as [`BufMut`] does.
+    pub fn write_stream_frame_with_length<D: Buf>(
+        dst: &mut impl BufMut,
         frame: StreamFrame<D, VarIntWidth>,
-    ) -> Result<(), WriteAllError<F::Error>>
-    where
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-        D: Buf,
-    {
+    ) {
         let head = frame.head();
-        io.write_all(head.as_slice().chain(frame.data)).await
+        dst.put_slice(head.as_slice());
+        dst.put(frame.data);
     }
 
     /// Writes `frame`, which has no Length field;
@@ -609,22 +582,16 @@ pub mod codec {
     /// The frame extends to the end of the packet; nothing may be written
     /// after it.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_stream_frame_without_length<F, A, D>(
-        io: &mut A,
+    /// If `dst` has no room for the frame, as [`BufMut`] does.
+    pub fn write_stream_frame_without_length<D: Buf>(
+        dst: &mut impl BufMut,
         frame: StreamFrame<D, NoLength>,
-    ) -> Result<(), WriteAllError<F::Error>>
-    where
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-        D: Buf,
-    {
+    ) {
         let head = frame.head();
-        io.write_all(head.as_slice().chain(frame.data)).await
+        dst.put_slice(head.as_slice());
+        dst.put(frame.data);
     }
 }
 

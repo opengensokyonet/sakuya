@@ -1,20 +1,18 @@
 use super::{
     HeaderForm, LongHeader, SAMPLE_DISTANCE,
     codec::{
-        ReadLongHeaderError, ReadLongHeaderHostExt as _, ReadShortHeaderError,
-        ReadShortHeaderHostExt as _, ReadVersionNegotiationError,
-        ReadVersionNegotiationHostExt as _,
+        ReadLongHeaderError, ReadShortHeaderError, ReadVersionNegotiationError, read_long_header,
+        read_short_header, read_version_negotiation,
     },
 };
 use crate::v1::header::{
     self as v1, LongPacket, LongPacketType, TypeFields,
-    codec::{ReadLongPacketError, ReadLongPacketHostExt as _},
+    codec::{ReadLongPacketError, read_long_packet},
 };
 use crate::{
     connection_id::{ConnectionId, ConnectionIdLength},
-    payload::ReadPayloadError,
     v1::packet_number::PacketNumberLength,
-    var_int::{VarInt, codec::WriteVarIntHostExt as _},
+    var_int::{VarInt, codec::write_var_int},
     version::Version,
 };
 use bytes::Bytes;
@@ -107,33 +105,25 @@ fn long_packet(
     packet.push(scid.len() as u8);
     packet.extend_from_slice(scid);
     if let Some(token) = token {
-        packet
-            .sync_write_var_int_unpin(VarInt::try_from(token.len()).unwrap())
-            .unwrap();
+        write_var_int(&mut packet, VarInt::try_from(token.len()).unwrap());
         packet.extend_from_slice(token);
     }
-    packet
-        .sync_write_var_int_unpin(VarInt::try_from(rest.len()).unwrap())
-        .unwrap();
+    write_var_int(&mut packet, VarInt::try_from(rest.len()).unwrap());
     packet.extend_from_slice(rest);
     packet
 }
 
 fn long_header(input: &mut &[u8]) -> LongHeader {
-    input.sync_read_long_header_unpin().unwrap()
+    read_long_header(input).unwrap()
 }
 
 /// Reads a version 1 long packet from the start of `input`, advancing it.
-fn v1_packet<'a>(
-    input: &mut &'a [u8],
-) -> Result<LongPacket<&'a [u8]>, ReadLongPacketError<core::convert::Infallible>> {
+fn v1_packet<'a>(input: &mut &'a [u8]) -> Result<LongPacket<&'a [u8]>, ReadLongPacketError> {
     let header = long_header(input);
-    input.sync_read_long_packet_unpin(header)
+    read_long_packet(input, header)
 }
 
-fn v1_of(
-    packet: &[u8],
-) -> Result<LongPacket<&[u8]>, ReadLongPacketError<core::convert::Infallible>> {
+fn v1_of(packet: &[u8]) -> Result<LongPacket<&[u8]>, ReadLongPacketError> {
     let mut input = packet;
     v1_packet(&mut input)
 }
@@ -158,7 +148,7 @@ fn rfc_client_initial() {
     assert_eq!(header.version_specific_offset(), 15);
     assert_eq!(input.len(), datagram.len() - 15);
 
-    let packet = input.sync_read_long_packet_unpin(header).unwrap();
+    let packet = read_long_packet(&mut input, header).unwrap();
     assert_eq!(packet.packet_type(), LongPacketType::Initial);
     assert_eq!(packet.dcid(), &ConnectionId::new(&RFC_DCID).unwrap());
     assert_eq!(packet.scid(), &ConnectionId::EMPTY);
@@ -185,8 +175,8 @@ fn rfc_client_initial() {
 fn rfc_client_initial_from_bytes_shares_storage() {
     let datagram = Bytes::from(client_initial());
     let mut input = datagram.clone();
-    let header = input.sync_read_long_header_unpin().unwrap();
-    let packet = input.sync_read_long_packet_unpin(header).unwrap();
+    let header = read_long_header(&mut input).unwrap();
+    let packet = read_long_packet(&mut input, header).unwrap();
     let TypeFields::Initial { protected, .. } = packet.into_fields() else {
         panic!("expected Initial fields");
     };
@@ -203,7 +193,7 @@ fn rfc_retry() {
     assert!(header.dcid().is_empty());
     assert_eq!(header.scid().as_bytes(), hex("f067a5502a4262b5"));
 
-    let packet = input.sync_read_long_packet_unpin(header).unwrap();
+    let packet = read_long_packet(&mut input, header).unwrap();
     assert_eq!(packet.packet_type(), LongPacketType::Retry);
     assert_eq!(packet.dcid(), &ConnectionId::EMPTY);
     assert_eq!(packet.scid().as_bytes(), hex("f067a5502a4262b5"));
@@ -225,12 +215,10 @@ fn rfc_retry() {
 #[test]
 fn empty_input() {
     let mut input = &[][..];
-    let error = input.sync_read_long_header_unpin().unwrap_err();
+    let error = read_long_header(&mut input).unwrap_err();
     assert!(matches!(error, ReadLongHeaderError::FirstByte { .. }));
     assert!(error.is_incomplete());
-    let error = input
-        .sync_read_short_header_unpin(ConnectionIdLength::ZERO)
-        .unwrap_err();
+    let error = read_short_header(&mut input, ConnectionIdLength::ZERO).unwrap_err();
     assert!(matches!(error, ReadShortHeaderError::FirstByte { .. }));
     assert!(error.is_incomplete());
 }
@@ -239,12 +227,12 @@ fn empty_input() {
 fn wrong_header_form() {
     let mut input = &[0x40, 0, 0][..];
     assert!(matches!(
-        input.sync_read_long_header_unpin(),
+        read_long_header(&mut input),
         Err(ReadLongHeaderError::ShortForm)
     ));
     let mut input = &[0xc0, 0, 0][..];
     assert!(matches!(
-        input.sync_read_short_header_unpin(ConnectionIdLength::ZERO),
+        read_short_header(&mut input, ConnectionIdLength::ZERO),
         Err(ReadShortHeaderError::LongForm)
     ));
 }
@@ -255,7 +243,7 @@ fn truncated_version_independent_fields() {
     // First byte (0), version (1..5), DCID length (5), DCID (6..14), SCID length (14).
     for end in 1..15 {
         let mut input = &datagram[..end];
-        let error = input.sync_read_long_header_unpin().unwrap_err();
+        let error = read_long_header(&mut input).unwrap_err();
         assert!(error.is_incomplete(), "input of {end} bytes: {error:?}");
         let expected = match end {
             1..5 => matches!(error, ReadLongHeaderError::Version { .. }),
@@ -265,7 +253,7 @@ fn truncated_version_independent_fields() {
         assert!(expected, "input of {end} bytes: {error:?}");
     }
     let mut input = &datagram[..15];
-    assert!(input.sync_read_long_header_unpin().is_ok());
+    assert!(read_long_header(&mut input).is_ok());
 }
 
 #[test]
@@ -281,11 +269,7 @@ fn truncated_initial_fields() {
     assert!(matches!(error, ReadLongPacketError::Length { .. }));
     for end in [18, 19, 1199] {
         let error = v1_of(&datagram[..end]).unwrap_err();
-        let ReadLongPacketError::Protected {
-            length,
-            source: ReadPayloadError::Incomplete { source },
-        } = &error
-        else {
+        let ReadLongPacketError::Protected { length, source } = &error else {
             panic!("input of {end} bytes: {error:?}");
         };
         assert_eq!(*length, VarInt::from(1182u16));
@@ -308,10 +292,7 @@ fn initial_with_token() {
 
     // The token occupies bytes 15 to 17; the input ends within it.
     let error = v1_of(&packet[..17]).unwrap_err();
-    let ReadLongPacketError::Token {
-        source: ReadPayloadError::Incomplete { source },
-    } = &error
-    else {
+    let ReadLongPacketError::Token { source } = &error else {
         panic!("{error:?}");
     };
     assert_eq!((source.expected(), source.completed()), (3, 2));
@@ -354,7 +335,7 @@ fn connection_id_lengths() {
         let header = long_header(&mut input);
         assert_eq!(header.dcid().len(), dcid_len);
         assert!(matches!(
-            input.sync_read_long_packet_unpin(header),
+            read_long_packet(&mut input, header),
             Err(ReadLongPacketError::DcidLength { source }) if source.length() == dcid_len
         ));
     }
@@ -370,9 +351,7 @@ fn short_header_with_caller_supplied_lengths() {
     let datagram = [0x41, 1, 2, 3, 4, 5, 6, 7, 8, 0xee, 0xee, 0xee];
     for length in [0, 1, 8, 11] {
         let mut input = &datagram[..];
-        let header = input
-            .sync_read_short_header_unpin(dcid_len(length))
-            .unwrap();
+        let header = read_short_header(&mut input, dcid_len(length)).unwrap();
         let dcid_len = length;
         assert_eq!(header.first_byte(), 0x41);
         assert_eq!(header.dcid().as_bytes(), &datagram[1..1 + dcid_len]);
@@ -384,9 +363,7 @@ fn short_header_with_caller_supplied_lengths() {
     }
     for (input, length) in [(&datagram[..], 12), (&datagram[..1], 20)] {
         let mut input = input;
-        let error = input
-            .sync_read_short_header_unpin(dcid_len(length))
-            .unwrap_err();
+        let error = read_short_header(&mut input, dcid_len(length)).unwrap_err();
         assert!(
             matches!(error, ReadShortHeaderError::Dcid { .. }),
             "{error:?}"
@@ -414,7 +391,7 @@ fn version_negotiation() {
     let mut input = packet.as_slice();
     let header = long_header(&mut input);
     assert_eq!(header.version(), Version::NEGOTIATION);
-    let negotiation = input.sync_read_version_negotiation_unpin(header).unwrap();
+    let negotiation = read_version_negotiation(&mut input, header).unwrap();
     assert_eq!(negotiation.dcid().as_bytes(), [1; 5]);
     assert_eq!(negotiation.scid().as_bytes(), RFC_DCID);
     assert_eq!(negotiation.header(), &header);
@@ -429,7 +406,7 @@ fn version_negotiation() {
     let mut input = packet.as_slice();
     let header = long_header(&mut input);
     assert!(matches!(
-        input.sync_read_long_packet_unpin(header),
+        read_long_packet(&mut input, header),
         Err(ReadLongPacketError::Version { source }) if source.version() == Version::NEGOTIATION
     ));
 }
@@ -439,7 +416,7 @@ fn version_negotiation_reads_long_connection_ids() {
     let packet = version_negotiation_packet(&[1; 255], &[2; 255], &[0, 0, 0, 1]);
     let mut input = packet.as_slice();
     let header = long_header(&mut input);
-    let negotiation = input.sync_read_version_negotiation_unpin(header).unwrap();
+    let negotiation = read_version_negotiation(&mut input, header).unwrap();
     assert_eq!(negotiation.dcid().len(), 255);
     assert_eq!(negotiation.scid().len(), 255);
     assert_eq!(
@@ -453,14 +430,14 @@ fn version_negotiation_list_shapes() {
     let packet = version_negotiation_packet(&[], &[], &[]);
     let mut input = packet.as_slice();
     let header = long_header(&mut input);
-    let negotiation = input.sync_read_version_negotiation_unpin(header).unwrap();
+    let negotiation = read_version_negotiation(&mut input, header).unwrap();
     assert_eq!(negotiation.supported_versions().len(), 0);
 
     let packet = version_negotiation_packet(&[], &[], &[0, 0, 0, 1, 0, 0]);
     let mut input = packet.as_slice();
     let header = long_header(&mut input);
     assert!(matches!(
-        input.sync_read_version_negotiation_unpin(header),
+        read_version_negotiation(&mut input, header),
         Err(ReadVersionNegotiationError::VersionList { source }) if source.length() == 6
     ));
 }
@@ -477,8 +454,7 @@ fn unsupported_version_keeps_version_independent_fields() {
     assert_eq!(header.dcid().as_bytes(), [3; 30]);
     assert!(header.scid().is_empty());
     assert_eq!(input, [0xee; 40]);
-    let Err(ReadLongPacketError::Version { source }) = input.sync_read_long_packet_unpin(header)
-    else {
+    let Err(ReadLongPacketError::Version { source }) = read_long_packet(&mut input, header) else {
         panic!()
     };
     assert_eq!(source.version(), Version::new(0x6b33_43cf));
@@ -487,7 +463,7 @@ fn unsupported_version_keeps_version_independent_fields() {
         "version 0x6b3343cf is not QUIC version 1"
     );
     let Err(ReadVersionNegotiationError::Version { source }) =
-        input.sync_read_version_negotiation_unpin(header)
+        read_version_negotiation(&mut input, header)
     else {
         panic!()
     };
@@ -517,7 +493,7 @@ fn version_errors_hold_only_other_versions() {
         let mut input = packet.as_slice();
         let header = long_header(&mut input);
         let Err(ReadVersionNegotiationError::Version { source }) =
-            input.sync_read_version_negotiation_unpin(header)
+            read_version_negotiation(&mut input, header)
         else {
             panic!("{version}")
         };
@@ -528,8 +504,7 @@ fn version_errors_hold_only_other_versions() {
         let packet = packet_of(version);
         let mut input = packet.as_slice();
         let header = long_header(&mut input);
-        let Err(ReadLongPacketError::Version { source }) =
-            input.sync_read_long_packet_unpin(header)
+        let Err(ReadLongPacketError::Version { source }) = read_long_packet(&mut input, header)
         else {
             panic!("{version}")
         };
@@ -539,11 +514,11 @@ fn version_errors_hold_only_other_versions() {
     let packet = packet_of(Version::NEGOTIATION);
     let mut input = packet.as_slice();
     let header = long_header(&mut input);
-    assert!(input.sync_read_version_negotiation_unpin(header).is_ok());
+    assert!(read_version_negotiation(&mut input, header).is_ok());
     let packet = packet_of(Version::V1);
     let mut input = packet.as_slice();
     let header = long_header(&mut input);
-    assert!(input.sync_read_long_packet_unpin(header).is_ok());
+    assert!(read_long_packet(&mut input, header).is_ok());
 }
 
 #[test]
@@ -572,9 +547,7 @@ fn coalesced_packets() {
     assert_eq!(bounds.end(), handshake.len());
 
     assert_eq!(HeaderForm::of(input[0]), HeaderForm::Short);
-    let third = input
-        .sync_read_short_header_unpin(dcid_len(RFC_DCID.len()))
-        .unwrap();
+    let third = read_short_header(&mut input, dcid_len(RFC_DCID.len())).unwrap();
     assert_eq!(third.dcid().as_bytes(), RFC_DCID);
     assert_eq!(third.packet_number_offset(), 9);
     assert_eq!(third.end(), short.len());
@@ -592,11 +565,7 @@ fn coalesced_packet_with_a_corrupt_length() {
 
     v1_packet(&mut input).unwrap();
     let error = v1_packet(&mut input).unwrap_err();
-    let ReadLongPacketError::Protected {
-        length,
-        source: ReadPayloadError::Incomplete { source },
-    } = &error
-    else {
+    let ReadLongPacketError::Protected { length, source } = &error else {
         panic!("{error:?}");
     };
     assert_eq!(*length, VarInt::from(41u8));
@@ -630,7 +599,7 @@ fn retry_lengths() {
 fn errors_describe_the_layer() {
     let mut input = &[0xc0, 0, 0][..];
     assert_eq!(
-        input.sync_read_long_header_unpin().unwrap_err().to_string(),
+        read_long_header(&mut input).unwrap_err().to_string(),
         "version read failed"
     );
     let datagram = client_initial();
@@ -641,8 +610,7 @@ fn errors_describe_the_layer() {
     let mut input = &[0xaa, 0, 0, 0, 1, 0, 0][..];
     let header = long_header(&mut input);
     assert_eq!(
-        input
-            .sync_read_version_negotiation_unpin(header)
+        read_version_negotiation(&mut input, header)
             .unwrap_err()
             .to_string(),
         "version 0x00000001 is not version negotiation"
@@ -653,13 +621,11 @@ fn errors_describe_the_layer() {
 /// packet number and payload, and writes the final Length over the reserved
 /// field at the width the header chose.
 fn written_long_packet(header: &v1::LongPacketHeader, body: &[u8]) -> Vec<u8> {
-    use crate::var_int::{VarIntField, codec::WriteVarIntFieldHostExt as _};
-    use v1::codec::WriteLongPacketHeaderHostExt as _;
+    use crate::var_int::{VarIntField, codec::write_var_int_field};
+    use v1::codec::write_long_packet_header;
 
     let mut packet = Vec::new();
-    packet
-        .sync_write_long_packet_header_unpin(header.clone())
-        .unwrap();
+    write_long_packet_header(&mut packet, header.clone());
     assert_eq!(packet.len(), header.packet_number_offset());
     packet.extend_from_slice(body);
     let length = VarIntField::new(
@@ -667,9 +633,7 @@ fn written_long_packet(header: &v1::LongPacketHeader, body: &[u8]) -> Vec<u8> {
         header.length().width(),
     )
     .unwrap();
-    (&mut packet[header.length_offset()..])
-        .sync_write_var_int_field_unpin(length)
-        .unwrap();
+    write_var_int_field(&mut (&mut packet[header.length_offset()..]), length);
     packet
 }
 
@@ -697,8 +661,8 @@ fn rfc_client_initial_header_is_written_as_in_the_appendix() {
     assert_eq!(header.packet_number_offset(), 18);
     let mut written = Vec::new();
     {
-        use v1::codec::WriteLongPacketHeaderHostExt as _;
-        written.sync_write_long_packet_header_unpin(header).unwrap();
+        use v1::codec::write_long_packet_header;
+        write_long_packet_header(&mut written, header);
     }
     assert_eq!(written, hex("c300000001088394c8f03e5157080000449e"));
     // The protected packet starts with the same bytes but the first.
@@ -838,9 +802,7 @@ fn an_initial_header_checks_the_width_of_the_token_length() {
 
 #[test]
 fn written_short_headers_read_back_as_the_same_fields() {
-    use crate::v1::header::{
-        KeyPhase, ShortPacketHeader, codec::WriteShortPacketHeaderHostExt as _,
-    };
+    use crate::v1::header::{KeyPhase, ShortPacketHeader, codec::write_short_packet_header};
 
     let dcid = ConnectionId::new(&[7; 8]).unwrap();
     for spin in [false, true] {
@@ -861,11 +823,11 @@ fn written_short_headers_read_back_as_the_same_fields() {
                 assert_eq!(header.dcid(), &dcid);
                 assert_eq!(header.packet_number_offset(), 9);
                 let mut packet = Vec::new();
-                packet.sync_write_short_packet_header_unpin(header).unwrap();
+                write_short_packet_header(&mut packet, header);
                 assert_eq!(packet.len(), header.packet_number_offset());
                 packet.extend_from_slice(&[0x33; 30]);
                 let mut input = packet.as_slice();
-                let read = input.sync_read_short_header_unpin(dcid_len(8)).unwrap();
+                let read = read_short_header(&mut input, dcid_len(8)).unwrap();
                 assert_eq!(read.first_byte(), header.first_byte());
                 assert_eq!(read.dcid().as_bytes(), dcid.as_bytes());
                 assert_eq!(read.packet_number_offset(), header.packet_number_offset());
@@ -876,30 +838,8 @@ fn written_short_headers_read_back_as_the_same_fields() {
 }
 
 #[test]
-fn write_failures_report_the_receiver() {
-    use crate::v1::header::{
-        KeyPhase, ShortPacketHeader, codec::WriteShortPacketHeaderHostExt as _,
-    };
-    use nitori_io::calls::WriteAllError;
-
-    let header = ShortPacketHeader::new(
-        false,
-        KeyPhase::Zero,
-        PacketNumberLength::One,
-        ConnectionId::new(&[1, 2, 3]).unwrap(),
-    );
-    let mut room = [0; 2];
-    let mut sink = &mut room[..];
-    let error = sink
-        .sync_write_short_packet_header_unpin(header)
-        .unwrap_err();
-    assert!(matches!(error, WriteAllError::WriteZero { .. }));
-    assert_eq!(error.completed(), 2);
-}
-
-#[test]
 fn written_version_negotiation_reads_back_as_the_same_fields() {
-    use super::codec::WriteVersionNegotiationHostExt as _;
+    use super::codec::write_version_negotiation;
     use crate::connection_id::RawConnectionId;
 
     let long = RawConnectionId::new(&[3; 255]).unwrap();
@@ -915,9 +855,7 @@ fn written_version_negotiation_reads_back_as_the_same_fields() {
         (0x00, RawConnectionId::EMPTY, long, &[][..]),
     ] {
         let mut packet = Vec::new();
-        packet
-            .sync_write_version_negotiation_unpin(unused, &dcid, &scid, versions)
-            .unwrap();
+        write_version_negotiation(&mut packet, unused, &dcid, &scid, versions);
         assert_eq!(packet[0], 0x80 | unused);
         assert_eq!(
             packet.len(),
@@ -927,7 +865,7 @@ fn written_version_negotiation_reads_back_as_the_same_fields() {
         let header = long_header(&mut input);
         assert_eq!(header.first_byte(), 0x80 | unused);
         assert_eq!(header.version(), Version::NEGOTIATION);
-        let negotiation = input.sync_read_version_negotiation_unpin(header).unwrap();
+        let negotiation = read_version_negotiation(&mut input, header).unwrap();
         assert_eq!(negotiation.dcid(), &dcid);
         assert_eq!(negotiation.scid(), &scid);
         assert_eq!(
@@ -940,55 +878,34 @@ fn written_version_negotiation_reads_back_as_the_same_fields() {
 
 #[test]
 fn written_version_negotiation_keeps_the_header_form() {
-    use super::codec::WriteVersionNegotiationHostExt as _;
+    use super::codec::write_version_negotiation;
     use crate::connection_id::RawConnectionId;
 
     let mut packet = Vec::new();
-    packet
-        .sync_write_version_negotiation_unpin(
-            0xff,
-            &RawConnectionId::EMPTY,
-            &RawConnectionId::EMPTY,
-            &[Version::V1],
-        )
-        .unwrap();
+    write_version_negotiation(
+        &mut packet,
+        0xff,
+        &RawConnectionId::EMPTY,
+        &RawConnectionId::EMPTY,
+        &[Version::V1],
+    );
     assert_eq!(packet, [0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
 }
 
 #[test]
-fn version_negotiation_write_failures_count_the_bytes_accepted() {
-    use super::codec::WriteVersionNegotiationHostExt as _;
-    use crate::connection_id::RawConnectionId;
-    use nitori_io::calls::WriteAllError;
-
-    let dcid = RawConnectionId::new(&[1, 2]).unwrap();
-    let versions = [Version::V1, Version::new(0x1a2a_3a4a)];
-    // The header takes 9 bytes; the room ends within the second version.
-    let mut room = [0; 15];
-    let mut sink = &mut room[..];
-    let error = sink
-        .sync_write_version_negotiation_unpin(0x40, &dcid, &RawConnectionId::EMPTY, &versions)
-        .unwrap_err();
-    assert!(matches!(error, WriteAllError::WriteZero { .. }));
-    assert_eq!(error.completed(), 15);
-    assert_eq!(room, [0xc0, 0, 0, 0, 0, 2, 1, 2, 0, 0, 0, 0, 1, 0x1a, 0x2a]);
-}
-
-#[test]
 fn rfc_retry_is_written_as_in_the_appendix() {
-    use v1::codec::WriteRetryPacketWithoutTagHostExt as _;
+    use v1::codec::write_retry_packet_without_tag;
 
     let retry = hex(RETRY);
     let (without_tag, tag) = retry.split_at(retry.len() - v1::RETRY_INTEGRITY_TAG_LEN);
     let mut written = Vec::new();
-    written
-        .sync_write_retry_packet_without_tag_unpin(
-            0x0f,
-            ConnectionId::EMPTY,
-            ConnectionId::new(&hex("f067a5502a4262b5")).unwrap(),
-            b"token",
-        )
-        .unwrap();
+    write_retry_packet_without_tag(
+        &mut written,
+        0x0f,
+        ConnectionId::EMPTY,
+        ConnectionId::new(&hex("f067a5502a4262b5")).unwrap(),
+        b"token",
+    );
     assert_eq!(written, without_tag);
     // With the tag of the appendix appended, it reads back as that packet.
     written.extend_from_slice(tag);
@@ -998,7 +915,7 @@ fn rfc_retry_is_written_as_in_the_appendix() {
 
 #[test]
 fn written_retry_packets_read_back_as_the_same_fields() {
-    use v1::codec::WriteRetryPacketWithoutTagHostExt as _;
+    use v1::codec::write_retry_packet_without_tag;
 
     let dcid = ConnectionId::new(&[1, 2, 3]).unwrap();
     let scid = ConnectionId::new(&[9; 20]).unwrap();
@@ -1009,9 +926,7 @@ fn written_retry_packets_read_back_as_the_same_fields() {
         (0xf5, &[][..]),
     ] {
         let mut packet = Vec::new();
-        packet
-            .sync_write_retry_packet_without_tag_unpin(unused, dcid, scid, token)
-            .unwrap();
+        write_retry_packet_without_tag(&mut packet, unused, dcid, scid, token);
         // The high four bits of `unused` are ignored.
         assert_eq!(packet[0], 0xf0 | (unused & 0x0f));
         packet.extend_from_slice(&tag);

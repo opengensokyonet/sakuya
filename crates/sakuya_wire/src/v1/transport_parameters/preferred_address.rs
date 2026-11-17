@@ -1,22 +1,15 @@
 //! The `preferred_address` transport parameter ([RFC 9000 §18.2]).
 //!
 //! [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
-use self::codec::{
-    ReadPreferredAddressError, ReadPreferredAddressHostExt as _, write_preferred_address,
-};
+use self::codec::{ReadPreferredAddressError, read_preferred_address, write_preferred_address};
 use super::{RememberedForZeroRtt, SentBy, TransportParameterAttributes, TransportParameterSpace};
 use crate::{
     connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken},
     parameters::{KeyedParameter, ReadValueError, ValueSource, read_value_error::ContentSnafu},
     var_int::VarInt,
 };
-use bytes::Buf;
-use core::{
-    convert::Infallible,
-    net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6},
-};
-use nitori_call::ReceiverAccess;
-use nitori_io::{Write, calls::WriteAllError};
+use bytes::{Buf, BufMut};
+use core::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
 use snafu::ResultExt;
 
 /// `preferred_address`, `0x0d` ([RFC 9000 §18.2]): an address the server
@@ -128,7 +121,7 @@ impl PreferredAddress {
 
 impl KeyedParameter for PreferredAddress {
     type Space = TransportParameterSpace;
-    type ValueError = ReadValueError<ReadPreferredAddressError<Infallible>>;
+    type ValueError = ReadValueError<ReadPreferredAddressError>;
 
     const ID: VarInt = VarInt::from_u32(0x0d);
     const ATTRIBUTES: TransportParameterAttributes = TransportParameterAttributes {
@@ -136,49 +129,34 @@ impl KeyedParameter for PreferredAddress {
         remembered_for_zero_rtt: RememberedForZeroRtt::Prohibited,
     };
 
-    fn read_value<D: Buf + Unpin>(value: &mut ValueSource<D>) -> Result<Self, Self::ValueError> {
-        value
-            .sync_read_preferred_address_unpin()
-            .context(ContentSnafu)
+    fn read_value<D: Buf>(value: &mut ValueSource<D>) -> Result<Self, Self::ValueError> {
+        read_preferred_address(value).context(ContentSnafu)
     }
 
     fn value_len(&self) -> usize {
         self.encoded_len()
     }
 
-    async fn write_value<F, A>(&self, io: &mut A) -> Result<(), WriteAllError<F::Error>>
-    where
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-    {
-        write_preferred_address(io, *self).await
+    fn write_value<B: BufMut>(&self, dst: &mut B) {
+        write_preferred_address(dst, *self);
     }
 }
 
 pub mod codec {
-    //! Reading and writing the value of the `preferred_address` parameter as
-    //! `nitori_call` operations.
+    //! Reading and writing the value of the `preferred_address` parameter.
     //!
-    //! [`read_preferred_address`] and [`write_preferred_address`] are also
-    //! the operation structs [`ReadPreferredAddress`] and
-    //! [`WritePreferredAddress`], with `{Name}Ext` on receiver accesses and
-    //! `{Name}HostExt` on call executors. Reading the parameters reads this
-    //! value from the bytes of its parameter, which must hold nothing else.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
+    //! Reading the parameters reads this value from the bytes of its
+    //! parameter, which must hold nothing else.
 
     use super::{PreferredAddress, PreferredAddressFamilies};
     use crate::connection_id::{
         EmptyCidError, NonEmptyCid, StatelessResetToken,
-        codec::{ReadConnectionIdError, ReadConnectionIdExt as _},
+        codec::{ReadConnectionIdError, read_connection_id},
     };
+    use crate::source::read_array;
+    use bytes::{Buf, BufMut};
     use core::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{
-        calls::{ReadArrayError, WriteAllError},
-        prelude::*,
-    };
+    use nitori_io::error::IncompleteError;
     use snafu::{OptionExt, ResultExt, Snafu};
 
     /// Reads the fields of a preferred address, and nothing after them.
@@ -196,15 +174,14 @@ pub mod codec {
     /// [`ReadPreferredAddressError::ConnectionId`] if the connection ID
     /// cannot be read or is longer than 20 bytes, and
     /// [`ReadPreferredAddressError::EmptyConnectionId`] if it is empty.
-    #[call(sync)]
-    pub async fn read_preferred_address<F: Read, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<PreferredAddress, ReadPreferredAddressError<F::Error>> {
+    pub fn read_preferred_address(
+        src: &mut impl Buf,
+    ) -> Result<PreferredAddress, ReadPreferredAddressError> {
         use read_preferred_address_error::*;
-        let ipv4_address = io.read_array::<4>().await.context(Ipv4AddressSnafu)?;
-        let ipv4_port = io.read_array::<2>().await.context(Ipv4PortSnafu)?;
-        let ipv6_address = io.read_array::<16>().await.context(Ipv6AddressSnafu)?;
-        let ipv6_port = io.read_array::<2>().await.context(Ipv6PortSnafu)?;
+        let ipv4_address = read_array::<4>(src).context(Ipv4AddressSnafu)?;
+        let ipv4_port = read_array::<2>(src).context(Ipv4PortSnafu)?;
+        let ipv6_address = read_array::<16>(src).context(Ipv6AddressSnafu)?;
+        let ipv6_port = read_array::<2>(src).context(Ipv6PortSnafu)?;
         let ipv4 = SocketAddrV4::new(Ipv4Addr::from(ipv4_address), u16::from_be_bytes(ipv4_port));
         let ipv6 = SocketAddrV6::new(
             Ipv6Addr::from(ipv6_address),
@@ -214,12 +191,10 @@ pub mod codec {
         );
         let addresses =
             PreferredAddressFamilies::from_encoded(ipv4, ipv6).context(NoAddressSnafu)?;
-        let connection_id = io.read_connection_id().await.context(ConnectionIdSnafu)?;
+        let connection_id = read_connection_id(src).context(ConnectionIdSnafu)?;
         let connection_id = NonEmptyCid::new(connection_id).context(EmptyConnectionIdSnafu)?;
-        let stateless_reset_token = io
-            .read_array::<{ StatelessResetToken::LEN }>()
-            .await
-            .context(StatelessResetTokenSnafu)?;
+        let stateless_reset_token =
+            read_array::<{ StatelessResetToken::LEN }>(src).context(StatelessResetTokenSnafu)?;
         Ok(PreferredAddress {
             addresses,
             connection_id,
@@ -230,30 +205,30 @@ pub mod codec {
     /// Failures that [`read_preferred_address`] can produce.
     #[derive(Debug, Snafu)]
     #[snafu(module(read_preferred_address_error), visibility(pub(in crate::v1)))]
-    pub enum ReadPreferredAddressError<E> {
+    pub enum ReadPreferredAddressError {
         /// The IPv4 Address field could not be read.
         #[snafu(display("preferred address IPv4 Address read failed"))]
         Ipv4Address {
             /// The failure of reading the field.
-            source: ReadArrayError<E>,
+            source: IncompleteError,
         },
         /// The IPv4 Port field could not be read.
         #[snafu(display("preferred address IPv4 Port read failed"))]
         Ipv4Port {
             /// The failure of reading the field.
-            source: ReadArrayError<E>,
+            source: IncompleteError,
         },
         /// The IPv6 Address field could not be read.
         #[snafu(display("preferred address IPv6 Address read failed"))]
         Ipv6Address {
             /// The failure of reading the field.
-            source: ReadArrayError<E>,
+            source: IncompleteError,
         },
         /// The IPv6 Port field could not be read.
         #[snafu(display("preferred address IPv6 Port read failed"))]
         Ipv6Port {
             /// The failure of reading the field.
-            source: ReadArrayError<E>,
+            source: IncompleteError,
         },
         /// The addresses and ports of both families are all zeros
         /// ([RFC 9000 §18.2]): there is no address of either family.
@@ -265,7 +240,7 @@ pub mod codec {
         #[snafu(display("preferred address connection ID read failed"))]
         ConnectionId {
             /// The failure of reading the connection ID.
-            source: ReadConnectionIdError<E>,
+            source: ReadConnectionIdError,
         },
         /// The connection ID is empty.
         #[snafu(display("preferred address has an empty connection ID"))]
@@ -277,22 +252,17 @@ pub mod codec {
         #[snafu(display("preferred address Stateless Reset Token read failed"))]
         StatelessResetToken {
             /// The failure of reading the token.
-            source: ReadArrayError<E>,
+            source: IncompleteError,
         },
     }
 
     /// Writes the fields of `address`.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_preferred_address<F: Write, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-        address: PreferredAddress,
-    ) -> Result<(), WriteAllError<F::Error>> {
+    /// If `dst` has no room for the fields, as [`BufMut`] does.
+    pub fn write_preferred_address(dst: &mut impl BufMut, address: PreferredAddress) {
         let (encoding, length) = address.to_encoding();
-        io.write_all(&encoding[..length]).await
+        dst.put_slice(&encoding[..length]);
     }
 }

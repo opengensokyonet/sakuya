@@ -47,7 +47,7 @@
 //!         stream_count::StreamCount,
 //!         transport_parameters::{
 //!             TransportParameters,
-//!             codec::{ReadTransportParametersHostExt as _, WriteTransportParametersHostExt as _},
+//!             codec::{read_transport_parameters, write_transport_parameters},
 //!             integer::{InitialMaxData, InitialMaxStreamsBidi, MaxUdpPayloadSize},
 //!         },
 //!     },
@@ -59,14 +59,12 @@
 //! parameters.set(InitialMaxStreamsBidi::new(StreamCount::new(100).unwrap()));
 //!
 //! let mut encoding = Vec::new();
-//! encoding
-//!     .sync_write_transport_parameters_unpin(parameters.clone(), Role::Client)
-//!     .unwrap();
+//! write_transport_parameters(&mut encoding, parameters.clone(), Role::Client).unwrap();
 //! assert_eq!(encoding.len(), parameters.encoded_len());
 //!
-//! let decoded = encoding
-//!     .as_slice()
-//!     .sync_read_transport_parameters_unpin(Role::Client, PhantomData::<HList![v1::Part]>)
+//! let mut input = encoding.as_slice();
+//! let decoded =
+//!     read_transport_parameters(&mut input, Role::Client, PhantomData::<HList![v1::Part]>)
 //!     .unwrap();
 //! assert_eq!(decoded, parameters);
 //! assert_eq!(decoded.get::<InitialMaxData, _>().unwrap().get(), VarInt::from(1_048_576u32));
@@ -206,7 +204,7 @@ pub type TransportParameterList<Ps> = <Ps as ParametersOf<TransportParameterSpac
 /// parameter type of the list of parts `Ps`, of version 1 alone unless a
 /// list is given, and the parameters that none of them claims.
 ///
-/// `D` holds the values of unknown parameters: the chunk type of the source
+/// `D` holds the values of unknown parameters: the type of the source
 /// for parameters that were read, any `Buf` for parameters to write.
 pub type TransportParameters<D, Ps = HList![super::Part]> =
     Parameters<TransportParameterSpace, TransportParameterList<Ps>, D>;

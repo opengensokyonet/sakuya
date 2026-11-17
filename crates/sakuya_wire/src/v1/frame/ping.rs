@@ -29,30 +29,18 @@ impl PingFrame {
 }
 
 pub mod codec {
-    //! Writing PING as a `nitori_call` operation.
-    //!
-    //! [`write_ping_frame`] is also the operation struct [`WritePingFrame`], with
-    //! `WritePingFrameExt` on receiver accesses and `WritePingFrameHostExt` on
-    //! call executors.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
+    //! Writing PING.
 
     use super::PingFrame;
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{calls::WriteAllError, prelude::*};
+    use bytes::BufMut;
 
     /// Writes the frame.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails.
-    #[call(sync)]
-    pub async fn write_ping_frame<F: Write, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-        frame: PingFrame,
-    ) -> Result<(), WriteAllError<F::Error>> {
+    /// If `dst` has no room for the frame, as [`BufMut`] does.
+    pub fn write_ping_frame(dst: &mut impl BufMut, frame: PingFrame) {
         let (encoding, _) = frame.type_value().to_encoding();
-        io.write_all(&encoding[..1]).await
+        dst.put_slice(&encoding[..1]);
     }
 }
