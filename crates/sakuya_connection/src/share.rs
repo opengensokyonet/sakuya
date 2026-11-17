@@ -4,8 +4,8 @@
 //! Every part writes a [`LayerShare`] for every layer: the data components
 //! it keeps in each node of that layer and the kinds of calls it runs there,
 //! `HNil` where it has none. A node's data is the list of the parts' data in
-//! the order of the list; a lend sees it flat, together with the data of the
-//! nodes above ([`LineageLists`]).
+//! the order of the list; a lend sees it flat, after the data of the nodes
+//! above, each node's its own list ([`LineageLists`]).
 use core::{fmt::Debug, ops::Add};
 
 use frunk_core::traits::{ToMut, ToRef};
@@ -15,6 +15,7 @@ use crate::clock::LinkIdOf;
 use crate::layer::{
     Connection, Established, Layer, LinkEntry, LinkPath, LogicalPath, LogicalPathKey, Recovery,
 };
+use crate::take::{NodeCons, NodeNil};
 
 /// What the part `Self` holds in each node of the layer `Lv`.
 ///
@@ -265,8 +266,10 @@ impl<T, L> PartList<T> for L where
 {
 }
 
-/// The flat lists a lend of each layer sees: a node's data after the data of
-/// the nodes above it.
+/// The lists a lend of each layer sees: a node's data after the data of the
+/// nodes above it, one flat list for each node in [`NodeCons`] cells (the
+/// connection's alone is one flat list), so that the positions of the
+/// components of the nodes below do not count those of the nodes above.
 ///
 /// Implemented for every list of parts whose data can be borrowed flat.
 pub trait LineageLists<'v, T>: PartList<T> {
@@ -330,8 +333,6 @@ pub trait LineageLists<'v, T>: PartList<T> {
 pub trait LineagePartList<T>: for<'v> LineageLists<'v, T> {}
 impl<T, L> LineagePartList<T> for L where L: for<'v> LineageLists<'v, T> {}
 
-type Join<A, B> = <A as Add<B>>::Output;
-
 impl<'v, T, L: PartList<T>> LineageLists<'v, T> for L
 where
     NodeData<T, L, Connection>: FlatMut<'v> + 'v,
@@ -340,33 +341,45 @@ where
     NodeData<T, L, LinkPath>: FlatMut<'v> + 'v,
     NodeData<T, L, Established>: FlatMut<'v> + 'v,
     NodeData<T, L, Recovery>: FlatMut<'v> + 'v,
-    FlatData<'v, T, L, Connection>: Add<FlatData<'v, T, L, LinkEntry>>
-        + Add<FlatData<'v, T, L, LogicalPath>>
-        + Add<FlatData<'v, T, L, Established>>,
-    Join<FlatData<'v, T, L, Connection>, FlatData<'v, T, L, LinkEntry>>:
-        Add<FlatData<'v, T, L, LogicalPath>>,
-    Join<
-        Join<FlatData<'v, T, L, Connection>, FlatData<'v, T, L, LinkEntry>>,
-        FlatData<'v, T, L, LogicalPath>,
-    >: Add<FlatData<'v, T, L, LinkPath>>,
-    Join<
-        Join<
-            Join<FlatData<'v, T, L, Connection>, FlatData<'v, T, L, LinkEntry>>,
-            FlatData<'v, T, L, LogicalPath>,
-        >,
-        FlatData<'v, T, L, LinkPath>,
-    >: Add<FlatData<'v, T, L, Recovery>>,
 {
     type Connection = FlatData<'v, T, L, Connection>;
-    type LinkEntry = Join<FlatData<'v, T, L, Connection>, FlatData<'v, T, L, LinkEntry>>;
-    type LogicalPath = Join<FlatData<'v, T, L, Connection>, FlatData<'v, T, L, LogicalPath>>;
-    type LinkPathParents = Join<
-        Join<FlatData<'v, T, L, Connection>, FlatData<'v, T, L, LinkEntry>>,
-        FlatData<'v, T, L, LogicalPath>,
+    type LinkEntry =
+        NodeCons<FlatData<'v, T, L, Connection>, NodeCons<FlatData<'v, T, L, LinkEntry>, NodeNil>>;
+    type LogicalPath = NodeCons<
+        FlatData<'v, T, L, Connection>,
+        NodeCons<FlatData<'v, T, L, LogicalPath>, NodeNil>,
     >;
-    type LinkPath = Join<Self::LinkPathParents, FlatData<'v, T, L, LinkPath>>;
-    type Established = Join<FlatData<'v, T, L, Connection>, FlatData<'v, T, L, Established>>;
-    type Recovery = Join<Self::LinkPath, FlatData<'v, T, L, Recovery>>;
+    type LinkPathParents = NodeCons<
+        FlatData<'v, T, L, Connection>,
+        NodeCons<FlatData<'v, T, L, LinkEntry>, NodeCons<FlatData<'v, T, L, LogicalPath>, NodeNil>>,
+    >;
+    type LinkPath = NodeCons<
+        FlatData<'v, T, L, Connection>,
+        NodeCons<
+            FlatData<'v, T, L, LinkEntry>,
+            NodeCons<
+                FlatData<'v, T, L, LogicalPath>,
+                NodeCons<FlatData<'v, T, L, LinkPath>, NodeNil>,
+            >,
+        >,
+    >;
+    type Established = NodeCons<
+        FlatData<'v, T, L, Connection>,
+        NodeCons<FlatData<'v, T, L, Established>, NodeNil>,
+    >;
+    type Recovery = NodeCons<
+        FlatData<'v, T, L, Connection>,
+        NodeCons<
+            FlatData<'v, T, L, LinkEntry>,
+            NodeCons<
+                FlatData<'v, T, L, LogicalPath>,
+                NodeCons<
+                    FlatData<'v, T, L, LinkPath>,
+                    NodeCons<FlatData<'v, T, L, Recovery>, NodeNil>,
+                >,
+            >,
+        >,
+    >;
     #[inline]
     fn connection(c: &'v mut NodeData<T, L, Connection>) -> Self::Connection {
         c.flat_mut()
@@ -376,14 +389,14 @@ where
         c: &'v mut NodeData<T, L, Connection>,
         e: &'v mut NodeData<T, L, LinkEntry>,
     ) -> Self::LinkEntry {
-        c.flat_mut() + e.flat_mut()
+        two_nodes(c.flat_mut(), e.flat_mut())
     }
     #[inline]
     fn logical_path(
         c: &'v mut NodeData<T, L, Connection>,
         l: &'v mut NodeData<T, L, LogicalPath>,
     ) -> Self::LogicalPath {
-        c.flat_mut() + l.flat_mut()
+        two_nodes(c.flat_mut(), l.flat_mut())
     }
     #[inline]
     fn link_path_parents(
@@ -391,7 +404,10 @@ where
         e: &'v mut NodeData<T, L, LinkEntry>,
         l: &'v mut NodeData<T, L, LogicalPath>,
     ) -> Self::LinkPathParents {
-        c.flat_mut() + e.flat_mut() + l.flat_mut()
+        NodeCons {
+            head: c.flat_mut(),
+            tail: two_nodes(e.flat_mut(), l.flat_mut()),
+        }
     }
     #[inline]
     fn link_path(
@@ -400,14 +416,20 @@ where
         l: &'v mut NodeData<T, L, LogicalPath>,
         k: &'v mut NodeData<T, L, LinkPath>,
     ) -> Self::LinkPath {
-        c.flat_mut() + e.flat_mut() + l.flat_mut() + k.flat_mut()
+        NodeCons {
+            head: c.flat_mut(),
+            tail: NodeCons {
+                head: e.flat_mut(),
+                tail: two_nodes(l.flat_mut(), k.flat_mut()),
+            },
+        }
     }
     #[inline]
     fn established(
         c: &'v mut NodeData<T, L, Connection>,
         s: &'v mut NodeData<T, L, Established>,
     ) -> Self::Established {
-        c.flat_mut() + s.flat_mut()
+        two_nodes(c.flat_mut(), s.flat_mut())
     }
     #[inline]
     fn recovery(
@@ -417,7 +439,28 @@ where
         k: &'v mut NodeData<T, L, LinkPath>,
         r: &'v mut NodeData<T, L, Recovery>,
     ) -> Self::Recovery {
-        c.flat_mut() + e.flat_mut() + l.flat_mut() + k.flat_mut() + r.flat_mut()
+        NodeCons {
+            head: c.flat_mut(),
+            tail: NodeCons {
+                head: e.flat_mut(),
+                tail: NodeCons {
+                    head: l.flat_mut(),
+                    tail: two_nodes(k.flat_mut(), r.flat_mut()),
+                },
+            },
+        }
+    }
+}
+
+#[inline]
+/// The borrows of a lineage of two nodes.
+fn two_nodes<A, B>(a: A, b: B) -> NodeCons<A, NodeCons<B, NodeNil>> {
+    NodeCons {
+        head: a,
+        tail: NodeCons {
+            head: b,
+            tail: NodeNil,
+        },
     }
 }
 

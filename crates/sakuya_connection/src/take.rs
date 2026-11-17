@@ -1,7 +1,8 @@
 //! Taking components out of a view by type.
 //!
-//! A view is a flat list of mutable borrows, one for each component of the
-//! nodes it covers. Taking components moves their borrows out and leaves a
+//! A view is a list of mutable borrows, one for each component of the
+//! nodes it covers: one flat list for a node, and one flat list for each
+//! node, in [`NodeCons`] cells, for a lineage of several. Taking components moves their borrows out and leaves a
 //! [`TakenOut`] marker in their place, so the rest is a view again and keeps
 //! the position of every component: what a lend took is recorded by
 //! position, without looking at types at run time. Taking a component twice,
@@ -11,6 +12,7 @@
 //! list of parts is concrete; generic code passes them on as type
 //! parameters.
 
+use frunk_core::hlist::HList;
 pub use frunk_core::indices::{Here, There};
 use sakuya_wire::parts::{HCons, HNil};
 
@@ -371,8 +373,8 @@ impl<'s, T: Reborrow<'s>> Reborrow<'s> for HCons<TakenOut, T> {
     }
 }
 
-/// A node's data and the data of the nodes above it, flat: what a call, an
-/// expiry or a reread is lent first.
+/// A node's data and the data of the nodes above it, one list for each
+/// node: what a call, an expiry or a reread is lent first.
 ///
 /// For a link path it is the data of the connection, of the link path's
 /// logical link entry, of its logical path and of the link path itself.
@@ -530,6 +532,135 @@ impl<'r, 'a, V: TakeEach<'a, U, Is>, U: RefsOf<'a>, Is> Take<'a, U, Is> for Line
         let Lineage { list, taken } = self;
         let (items, rest) = list.take_each(&mut |at| taken.push(at));
         (items, Lineage { list: rest, taken })
+    }
+}
+
+/// The borrows of a lineage of several nodes, one flat list for each node,
+/// from the connection down: [`NodeCons`] cells ending in [`NodeNil`]. A
+/// position in it is the node's place among them ([`InHeadNode`],
+/// [`InTailNodes`]), then the component's place in that node's list, so
+/// that a position stays short however many components the nodes above
+/// hold; [`GetAt::AT`] and [`TakeAt::AT`] still count in the lineage as one
+/// flat list.
+#[derive(Debug)]
+pub struct NodeCons<H, T> {
+    /// The list of the first node.
+    pub(crate) head: H,
+    /// The lists of the nodes after it.
+    pub(crate) tail: T,
+}
+/// No more nodes after a [`NodeCons`].
+#[derive(Debug)]
+pub struct NodeNil;
+
+/// The position `I` in the first node's list of a [`NodeCons`].
+#[derive(Debug)]
+pub struct InHeadNode<I>(core::marker::PhantomData<I>);
+/// The position `I` among the nodes after the first of a [`NodeCons`].
+#[derive(Debug)]
+pub struct InTailNodes<I>(core::marker::PhantomData<I>);
+
+impl<'a, X: 'a, S: TakeAt<'a, X, I>, R, I> TakeAt<'a, X, InHeadNode<I>> for NodeCons<S, R> {
+    type Rest = NodeCons<S::Rest, R>;
+    const AT: usize = S::AT;
+    #[inline]
+    fn take_at(self) -> (&'a mut X, Self::Rest) {
+        let (item, head) = self.head.take_at();
+        (
+            item,
+            NodeCons {
+                head,
+                tail: self.tail,
+            },
+        )
+    }
+}
+impl<'a, X: 'a, S: HList, R: TakeAt<'a, X, I>, I> TakeAt<'a, X, InTailNodes<I>> for NodeCons<S, R> {
+    type Rest = NodeCons<S, R::Rest>;
+    const AT: usize = <S as HList>::LEN + R::AT;
+    #[inline]
+    fn take_at(self) -> (&'a mut X, Self::Rest) {
+        let (item, tail) = self.tail.take_at();
+        (
+            item,
+            NodeCons {
+                head: self.head,
+                tail,
+            },
+        )
+    }
+}
+impl<X, S: GetAt<X, I>, R, I> GetAt<X, InHeadNode<I>> for NodeCons<S, R> {
+    const AT: usize = S::AT;
+    #[inline]
+    fn get_at(&self) -> &X {
+        self.head.get_at()
+    }
+    #[inline]
+    fn get_at_mut(&mut self) -> &mut X {
+        self.head.get_at_mut()
+    }
+}
+impl<X, S: HList, R: GetAt<X, I>, I> GetAt<X, InTailNodes<I>> for NodeCons<S, R> {
+    const AT: usize = <S as HList>::LEN + R::AT;
+    #[inline]
+    fn get_at(&self) -> &X {
+        self.tail.get_at()
+    }
+    #[inline]
+    fn get_at_mut(&mut self) -> &mut X {
+        self.tail.get_at_mut()
+    }
+}
+impl<X, S: GetOptionalAt<X, I>, R, I> GetOptionalAt<X, InHeadNode<I>> for NodeCons<S, R> {
+    const AT: usize = S::AT;
+    #[inline]
+    fn get_optional_at_mut(&mut self) -> Option<&mut X> {
+        self.head.get_optional_at_mut()
+    }
+}
+impl<X, S: HList, R: GetOptionalAt<X, I>, I> GetOptionalAt<X, InTailNodes<I>> for NodeCons<S, R> {
+    const AT: usize = <S as HList>::LEN + R::AT;
+    #[inline]
+    fn get_optional_at_mut(&mut self) -> Option<&mut X> {
+        self.tail.get_optional_at_mut()
+    }
+}
+impl<Ys> AppendEach<Ys> for NodeNil {
+    type Out = NodeCons<Ys, NodeNil>;
+    #[inline]
+    fn append_each(self, last: Ys) -> Self::Out {
+        NodeCons {
+            head: last,
+            tail: NodeNil,
+        }
+    }
+}
+impl<Ys, S, R: AppendEach<Ys>> AppendEach<Ys> for NodeCons<S, R> {
+    type Out = NodeCons<S, R::Out>;
+    #[inline]
+    fn append_each(self, last: Ys) -> Self::Out {
+        NodeCons {
+            head: self.head,
+            tail: self.tail.append_each(last),
+        }
+    }
+}
+impl<'s> Reborrow<'s> for NodeNil {
+    type Out = NodeNil;
+    #[inline]
+    fn reborrow(&'s mut self) -> NodeNil {
+        NodeNil
+    }
+}
+impl<'s, S: Reborrow<'s>, R: Reborrow<'s>> Reborrow<'s> for NodeCons<S, R> {
+    type Out = NodeCons<S::Out, R::Out>;
+    #[inline]
+    fn reborrow(&'s mut self) -> Self::Out {
+        NodeCons {
+            head: self.head.reborrow(),
+            tail: self.tail.reborrow(),
+        }
     }
 }
 
