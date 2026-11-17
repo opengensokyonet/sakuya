@@ -32,7 +32,7 @@ use frunk_core::{HList, hlist_pat};
 use sakuya_recovery::{ack_obligation::AckDue, packet_number_space::PacketNumberSpaceKind};
 use sakuya_stream::send_options::destination::Unfulfilled;
 use sakuya_tls::engine::CryptoLevel;
-use sakuya_wire::{parts::Coproduct, v1::packet_number::PacketNumber, var_int::VarInt};
+use sakuya_wire::{v1::packet_number::PacketNumber, var_int::VarInt};
 
 #[cfg(doc)]
 use super::send::FrameSources;
@@ -114,14 +114,6 @@ pub struct AckSummary<I> {
     /// [`AckObligation::ack_written`](sakuya_recovery::ack_obligation::AckObligation::ack_written)
     /// gives it.
     pub before: AckDue<I>,
-}
-
-/// The packet writer puts PADDING into the sum of the summaries of a
-/// composition through version 1's, which comes first.
-impl<I, Rest> From<PaddingSummary> for Coproduct<FeedbackSummary<I>, Rest> {
-    fn from(summary: PaddingSummary) -> Self {
-        Coproduct::Inl(Coproduct::Inl(summary))
-    }
 }
 
 // ---- feedback with the core lent ----

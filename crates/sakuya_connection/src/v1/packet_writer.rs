@@ -54,9 +54,7 @@ use super::{
     datagram_batch::{DatagramState, SealedInDatagram},
     keys::{DirectionKeys, OneRttSendKeys},
 };
-use crate::write::{
-    FlightClass, NotLast, OpenPacket, PacketWriting, PaddingSummary, SummaryOf, sealed,
-};
+use crate::write::{FlightClass, NotLast, OpenPacket, PacketWriting, SummaryOf, sealed};
 
 /// The spin bit of every short header: nothing measures the RTT with it,
 /// and an endpoint that does not may set it to any value (RFC 9000
@@ -154,7 +152,6 @@ struct Written {
 pub struct PacketWriter<'d, A, B>
 where
     A: PacketSendAttempt,
-    A::Summary: From<PaddingSummary>,
     B: CryptoBackend,
 {
     buffer: &'d mut BytesMut,
@@ -176,12 +173,13 @@ where
     closed: bool,
     more_follow: bool,
     pmtu_probe: bool,
+    /// Makes the summary of PADDING in the attempt's sum of summaries.
+    padding: fn() -> A::Summary,
 }
 
 impl<A, B> fmt::Debug for PacketWriter<'_, A, B>
 where
     A: PacketSendAttempt,
-    A::Summary: From<PaddingSummary>,
     B: CryptoBackend,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -199,7 +197,6 @@ where
 impl<'d, A, B> PacketWriter<'d, A, B>
 where
     A: PacketSendAttempt,
-    A::Summary: From<PaddingSummary>,
     B: CryptoBackend,
 {
     /// Write the header of the packet `start` describes at the end of
@@ -212,6 +209,7 @@ where
         attempt: A,
         start: PacketStart<'d, B>,
         largest_acked: Option<PacketNumber>,
+        padding: fn() -> A::Summary,
     ) -> Result<Self, EncodePacketNumberError> {
         let number = attempt.packet_number();
         let truncated = TruncatedPacketNumber::encode(number, largest_acked)?;
@@ -306,6 +304,7 @@ where
             closed: false,
             more_follow: false,
             pmtu_probe: false,
+            padding,
         })
     }
 
@@ -395,7 +394,7 @@ where
         }
         if let Some(padding) = NonZeroUsize::new(sample + to_floor) {
             self.write_padding(padding);
-            attempt.record_frame(PaddingSummary.into(), false, true);
+            attempt.record_frame((self.padding)(), false, true);
             self.written.frame = true;
             self.written.in_flight = true;
         }
@@ -451,7 +450,6 @@ where
 impl<A, B> sealed::Writing for PacketWriter<'_, A, B>
 where
     A: PacketSendAttempt,
-    A::Summary: From<PaddingSummary>,
     B: CryptoBackend,
 {
 }
@@ -459,7 +457,6 @@ where
 impl<A, B> PacketWriting for PacketWriter<'_, A, B>
 where
     A: PacketSendAttempt,
-    A::Summary: From<PaddingSummary>,
     B: CryptoBackend,
 {
     type Attempt = A;
@@ -528,7 +525,6 @@ where
 impl<A, B> Drop for PacketWriter<'_, A, B>
 where
     A: PacketSendAttempt,
-    A::Summary: From<PaddingSummary>,
     B: CryptoBackend,
 {
     fn drop(&mut self) {

@@ -47,7 +47,7 @@ use super::{
     packet_writer::{PacketStart, PacketWriter},
     recovery::LinkPathCongestionState,
 };
-use crate::write::PaddingSummary;
+use crate::{feedback::InjectSummary, write::PaddingSummary};
 
 /// One sealed packet waiting in a [`DatagramBatch`]: the send journals'
 /// sealed packet `S` and, for a packet that counts in flight, what it was
@@ -411,7 +411,7 @@ where
     /// The datagram already has an Initial packet, or a packet with a short
     /// header: the filling writes one packet of each space, the short one
     /// last.
-    pub fn start_initial_packet<'d, A, B>(
+    pub fn start_initial_packet<'d, A, B, Ipd>(
         &'d mut self,
         attempt: A,
         keys: &'d DirectionKeys<B>,
@@ -421,7 +421,7 @@ where
     ) -> Result<PacketWriter<'d, A, B>, EncodePacketNumberError>
     where
         A: PacketSendAttempt<Sealed = Si>,
-        A::Summary: From<PaddingSummary>,
+        A::Summary: InjectSummary<PaddingSummary, Ipd>,
         B: CryptoBackend,
     {
         open_slot(&self.state, &self.initial);
@@ -432,6 +432,7 @@ where
             attempt,
             PacketStart::Initial { keys, scid, token },
             largest_acked,
+            || <A::Summary as InjectSummary<PaddingSummary, Ipd>>::inject_summary(PaddingSummary),
         )
     }
 
@@ -446,7 +447,7 @@ where
     ///
     /// The datagram already has a Handshake packet, or a packet with a
     /// short header.
-    pub fn start_handshake_packet<'d, A, B>(
+    pub fn start_handshake_packet<'d, A, B, Ipd>(
         &'d mut self,
         attempt: A,
         keys: &'d DirectionKeys<B>,
@@ -455,7 +456,7 @@ where
     ) -> Result<PacketWriter<'d, A, B>, EncodePacketNumberError>
     where
         A: PacketSendAttempt<Sealed = Sh>,
-        A::Summary: From<PaddingSummary>,
+        A::Summary: InjectSummary<PaddingSummary, Ipd>,
         B: CryptoBackend,
     {
         open_slot(&self.state, &self.handshake);
@@ -466,6 +467,7 @@ where
             attempt,
             PacketStart::Handshake { keys, scid },
             largest_acked,
+            || <A::Summary as InjectSummary<PaddingSummary, Ipd>>::inject_summary(PaddingSummary),
         )
     }
 
@@ -479,7 +481,7 @@ where
     /// # Panics
     ///
     /// The datagram already has a 0-RTT or 1-RTT packet.
-    pub fn start_zero_rtt_packet<'d, A, B>(
+    pub fn start_zero_rtt_packet<'d, A, B, Ipd>(
         &'d mut self,
         attempt: A,
         keys: &'d DirectionKeys<B>,
@@ -488,7 +490,7 @@ where
     ) -> Result<PacketWriter<'d, A, B>, EncodePacketNumberError>
     where
         A: PacketSendAttempt<Sealed = Sa>,
-        A::Summary: From<PaddingSummary>,
+        A::Summary: InjectSummary<PaddingSummary, Ipd>,
         B: CryptoBackend,
     {
         open_slot(&self.state, &self.application_data);
@@ -499,6 +501,7 @@ where
             attempt,
             PacketStart::ZeroRtt { keys, scid },
             largest_acked,
+            || <A::Summary as InjectSummary<PaddingSummary, Ipd>>::inject_summary(PaddingSummary),
         )
     }
 
@@ -514,7 +517,7 @@ where
     /// # Panics
     ///
     /// The datagram already has a 0-RTT or 1-RTT packet.
-    pub fn start_one_rtt_packet<'d, A, B>(
+    pub fn start_one_rtt_packet<'d, A, B, Ipd>(
         &'d mut self,
         attempt: A,
         keys: &'d OneRttSendKeys<B>,
@@ -523,7 +526,7 @@ where
     ) -> Result<PacketWriter<'d, A, B>, EncodePacketNumberError>
     where
         A: PacketSendAttempt<Sealed = Sa>,
-        A::Summary: From<PaddingSummary>,
+        A::Summary: InjectSummary<PaddingSummary, Ipd>,
         B: CryptoBackend,
     {
         open_slot(&self.state, &self.application_data);
@@ -534,6 +537,7 @@ where
             attempt,
             PacketStart::OneRtt { keys, usage },
             largest_acked,
+            || <A::Summary as InjectSummary<PaddingSummary, Ipd>>::inject_summary(PaddingSummary),
         )
     }
 }

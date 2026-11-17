@@ -443,6 +443,7 @@ fn write_close_datagram<B: CryptoBackend>(
             attempt,
             start,
             level.largest_acked,
+            || PaddingSummary,
         ) else {
             continue;
         };

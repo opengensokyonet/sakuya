@@ -48,8 +48,8 @@ enum Summary {
     Frame(&'static str),
 }
 
-impl From<PaddingSummary> for Summary {
-    fn from(_: PaddingSummary) -> Self {
+impl crate::feedback::InjectSummary<PaddingSummary, ()> for Summary {
+    fn inject_summary(_: PaddingSummary) -> Self {
         Self::Padding
     }
 }

@@ -1062,10 +1062,10 @@ fn client_capacities() -> CryptoReceiveCapacities {
 /// first link path is over `$link`: version 1's facts `$args`, nothing for
 /// the watch, and `$rest` for the parts after it.
 macro_rules! connection {
-    ($t:ty, $args:expr, $link:expr $(, $rest:expr)*) => {
+    ($t:ty, $args:expr, $link:expr, [$($before:expr),*] [$($after:expr),*]) => {
         ConnectionDriver::<$t, Parts, _, _, _>::new(
             TestClock,
-            frunk_core::hlist![$args $(, $rest)*],
+            frunk_core::hlist![$($before,)* $args $(, $after)*],
             LogicalPathArgs { path: PATH },
             LinkPathArgs {
                 path: PATH,
@@ -1090,6 +1090,12 @@ fn starts_with_initial(datagram: &[u8]) -> bool {
 /// after version 1 are given, in the order of `Parts`.
 macro_rules! harness {
     (server: [$($server:expr),*], client: [$($client:expr),*]) => {
+        harness!(server: [] [$($server),*], client: [] [$($client),*]);
+    };
+    (
+        server: [$($server_before:expr),*] [$($server:expr),*],
+        client: [$($client_before:expr),*] [$($client:expr),*]
+    ) => {
 /// Version 1's facts for a connection of the choices `T`.
 #[allow(clippy::too_many_arguments)]
 fn args<T>(
@@ -1216,8 +1222,8 @@ fn handshake(
     let mut client = Some(connection!(
         ClientChoices,
         client_args,
-        client_link.clone()
-        $(, $client)*
+        client_link.clone(),
+        [$($client_before),*] [$($client),*]
     ));
     let outer = Outer::new();
     assert!(outer.poll(client.as_mut().expect("made")).is_pending());
@@ -1248,8 +1254,8 @@ fn handshake(
     let mut server = connection!(
         ServerChoices,
         server_args,
-        server_link.clone()
-        $(, $server)*
+        server_link.clone(),
+        [$($server_before),*] [$($server),*]
     );
     let mut run = Run {
         client_sent: first_sent,
@@ -2096,17 +2102,17 @@ mod datagram {
     impl DatagramChoices for ClientChoices {}
 
     /// The parts of these connections: version 1, the extension, and the
-    /// watch; with the reliable stream reset extension too, the DATAGRAM
-    /// extension comes last, after it. Both orders run the same tests; one
-    /// binary with both harnesses would not link with its debug
-    /// information.
+    /// watch; with the reliable stream reset extension too, version 1 is
+    /// not first: the watch and that extension come before it, and the
+    /// DATAGRAM extension last. Both orders run the same tests; one binary
+    /// with both harnesses would not link with its debug information.
     #[cfg(not(feature = "reset_stream_at"))]
     type Parts = HList![v1::Part, datagram::Part, watch::Part];
     #[cfg(feature = "reset_stream_at")]
     type Parts = HList![
-        v1::Part,
         watch::Part,
         sakuya_connection::reset_stream_at::Part,
+        v1::Part,
         datagram::Part
     ];
 
@@ -2133,14 +2139,12 @@ mod datagram {
     harness!(
         server: [
             HNil,
-            frunk_core::hlist![Some(sakuya_wire::reset_stream_at::ResetStreamAt)],
-            datagram_args(Role::Server)
-        ],
+            frunk_core::hlist![Some(sakuya_wire::reset_stream_at::ResetStreamAt)]
+        ] [datagram_args(Role::Server)],
         client: [
             HNil,
-            frunk_core::hlist![Some(sakuya_wire::reset_stream_at::ResetStreamAt)],
-            datagram_args(Role::Client)
-        ]
+            frunk_core::hlist![Some(sakuya_wire::reset_stream_at::ResetStreamAt)]
+        ] [datagram_args(Role::Client)]
     );
 
     /// Run a handshake with the server announcing `server` and the client

@@ -175,7 +175,7 @@ use crate::{
     component::{ArgsOf, LineageOf, ReadSet},
     connection_id::{OfferedConnectionId, datagram::DatagramConnectionId},
     error::ConnectionErrorsOf,
-    feedback::{FeedbackSummariesOf, FeedbackSummaryOf},
+    feedback::{FeedbackSummariesOf, FeedbackSummaryOf, InjectSummary},
     frame_source::{
         DriverContentOf, EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts,
         HandshakePacket, InitialPacket, OneRttPacket, OneRttProbePacket, PacketKind,
@@ -379,7 +379,7 @@ pub type SettleReads<T, L> = HList![
 /// in what is left, `Ik` of
 /// [`FillRecoveryTakes`], `Hs` of
 /// each part's frame sources, `Hd` of what each part reads the driver's
-/// content by ([`DriverContentOf`]); for handing over, `Ii`, `Ih`, `Io` of the
+/// content by ([`DriverContentOf`]), `Ipd` of PADDING's summary in the sum of summaries; for handing over, `Ii`, `Ih`, `Io` of the
 /// keys and `Il` of the link's clone; for settling, `Ij` of the send
 /// journals, `If` of the recovery factory, `Iv` of [`SettleReads`], `Ie`
 /// of the idle timeout, `Iq` of [`SettleRecoveryTakes`], `Hf` of the
@@ -405,6 +405,7 @@ type Positions<
     Ik,
     Hs,
     Hd,
+    Ipd,
     Ii,
     Ih,
     Io,
@@ -434,7 +435,7 @@ type Positions<
     Idr,
 > = (
     Is,
-    (It, Iw, Ir, Ici, Ik, Hs, Hd),
+    (It, Iw, Ir, Ici, Ik, Hs, Hd, Ipd),
     (Ii, Ih, Io, Il),
     (Ij, If, Iv, Ie, Iq, Hf, Ist),
     (Ipp, Ima, Jx, Jr, Jm),
@@ -494,6 +495,7 @@ impl<
     Ik,
     Hs,
     Hd,
+    Ipd,
     Ii,
     Ih,
     Io,
@@ -536,6 +538,7 @@ impl<
             Ik,
             Hs,
             Hd,
+            Ipd,
             Ii,
             Ih,
             Io,
@@ -578,7 +581,7 @@ where
     PartsFrameSources<OneRttPacket, L>: FrameSourceSet,
     PartsFrameSources<OneRttProbePacket, L>: FrameSourceSet,
     PartsFrameSources<SettlingResponsePacket, L>: FrameSourceSet,
-    FeedbackSummaryOf<T, L>: From<PaddingSummary>,
+    FeedbackSummaryOf<T, L>: InjectSummary<PaddingSummary, Ipd>,
     SendTypes<T, L>: SendStrategyTypes<
             LinkPathIdentifier = LinkPathIdentifierOf<T, L>,
             InitialFrameSources = PartsFrameSources<InitialPacket, L>,
@@ -795,7 +798,7 @@ where
                             part,
                             others,
                             |mut access| {
-                                let mut filling = Filling::<T, L, _, _, Ir, Ici, Ipp, Hs, Hd> {
+                                let mut filling = Filling::<T, L, _, _, Ir, Ici, Ipp, Hs, Hd, Ipd> {
                                     now,
                                     link: &link,
                                     link_path: &link_path,
@@ -930,14 +933,14 @@ where
 // ---- filling ----
 
 /// What [`Filling`] reads its components and finds its frame sources by.
-type FillPositions<Ir, Ici, Ipp, Hs, Hd> = fn() -> (Ir, Ici, Ipp, Hs, Hd);
+type FillPositions<Ir, Ici, Ipp, Hs, Hd, Ipd> = fn() -> (Ir, Ici, Ipp, Hs, Hd, Ipd);
 
 /// What one poll fills with: the borrows of what it took, the instant of
 /// the poll and the link path it fills for.
 ///
 /// `V` is what is left of the lineage, where the connection IDs and the
 /// frame sources are found; `A` the congestion access lent for the poll.
-struct Filling<'f, 'r, T, L, V, A, Ir, Ici, Ipp, Hs, Hd>
+struct Filling<'f, 'r, T, L, V, A, Ir, Ici, Ipp, Hs, Hd, Ipd>
 where
     T: Choices,
     L: LineagePartList<T> + FeedbackSummariesOf,
@@ -964,10 +967,11 @@ where
     estimate: RttEstimate,
     pmtu_conclusion: usize,
     state: &'f mut LinkPathCongestionState<InstantOf<T>>,
-    positions: core::marker::PhantomData<FillPositions<Ir, Ici, Ipp, Hs, Hd>>,
+    positions: core::marker::PhantomData<FillPositions<Ir, Ici, Ipp, Hs, Hd, Ipd>>,
 }
 
-impl<T, L, V, A, S, Ir, Ici, Ipp, Hs, Hd> Filling<'_, '_, T, L, V, A, Ir, Ici, Ipp, Hs, Hd>
+impl<T, L, V, A, S, Ir, Ici, Ipp, Hs, Hd, Ipd>
+    Filling<'_, '_, T, L, V, A, Ir, Ici, Ipp, Hs, Hd, Ipd>
 where
     T: Choices,
     L: LineagePartList<T> + FeedbackSummariesOf + ParametersOf<TransportParameterSpace>,
@@ -977,7 +981,7 @@ where
     PartsFrameSources<OneRttPacket, L>: FrameSourceSet,
     PartsFrameSources<OneRttProbePacket, L>: FrameSourceSet,
     PartsFrameSources<SettlingResponsePacket, L>: FrameSourceSet,
-    FeedbackSummaryOf<T, L>: From<PaddingSummary>,
+    FeedbackSummaryOf<T, L>: InjectSummary<PaddingSummary, Ipd>,
     SendTypes<T, L>: SendStrategyTypes<
             LinkPathIdentifier = LinkPathIdentifierOf<T, L>,
             InitialFrameSources = PartsFrameSources<InitialPacket, L>,
@@ -1881,6 +1885,7 @@ impl<
     Ik,
     Hs,
     Hd,
+    Ipd,
     Ii,
     Ih,
     Io,
@@ -1922,6 +1927,7 @@ impl<
             Ik,
             Hs,
             Hd,
+            Ipd,
             Ii,
             Ih,
             Io,
@@ -1962,7 +1968,7 @@ where
     PartsFrameSources<OneRttPacket, L>: FrameSourceSet,
     PartsFrameSources<OneRttProbePacket, L>: FrameSourceSet,
     PartsFrameSources<SettlingResponsePacket, L>: FrameSourceSet,
-    FeedbackSummaryOf<T, L>: From<PaddingSummary>,
+    FeedbackSummaryOf<T, L>: InjectSummary<PaddingSummary, Ipd>,
     SendTypes<T, L>: SendStrategyTypes<
             LinkPathIdentifier = LinkPathIdentifierOf<T, L>,
             InitialFrameSources = PartsFrameSources<InitialPacket, L>,
@@ -2081,6 +2087,7 @@ where
         Ik,
         Hs,
         Hd,
+        Ipd,
         Ii,
         Ih,
         Io,
@@ -2126,6 +2133,7 @@ where
                 Ik,
                 Hs,
                 Hd,
+                Ipd,
                 Ii,
                 Ih,
                 Io,
