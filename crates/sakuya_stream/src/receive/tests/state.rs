@@ -24,6 +24,9 @@ fn data_reaches_size_known_data_recvd_and_data_read() {
     assert_eq!(read.len(), 100);
     assert_eq!(outcome, Ok(ReadOutcome::End));
     assert_eq!(receiver.receive_state(), State::DataRead);
+    // dropping the reader afterwards keeps what it read
+    receiver.reader_dropped();
+    assert_eq!(receiver.receive_state(), State::DataRead);
 }
 
 #[test]
@@ -41,6 +44,8 @@ fn a_reset_reaches_reset_recvd_and_reset_read() {
         matches!(outcome, Err(ReadError::Reset { .. })),
         "{outcome:?}"
     );
+    assert_eq!(receiver.receive_state(), State::ResetRead);
+    receiver.reader_dropped();
     assert_eq!(receiver.receive_state(), State::ResetRead);
 }
 

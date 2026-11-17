@@ -300,7 +300,7 @@ pub enum ReceiveStreamState {
     ///
     /// A stream that received all its data and then a reset that owes
     /// nothing stays here when it presents the reset as a normal end
-    /// ([`ResetPresentation::Suppress`](termination::ResetPresentation::Suppress)).
+    /// ([`ResetPresentation::Suppress`]).
     DataRecvd,
     /// A reset that owes nothing was received.
     ResetRecvd,
@@ -470,20 +470,38 @@ where
 
     /// The state of the receive direction ([`ReceiveStreamState`]).
     pub fn receive_state(&self) -> ReceiveStreamState {
-        let committed = match &self.reading {
-            Reading::Committed(committed) => Some(committed),
-            Reading::Open | Reading::ReaderDropped { .. } => None,
-        };
-        match committed {
-            Some(Committed::End) => return ReceiveStreamState::DataRead,
-            Some(Committed::Error(ReadError::Reset { reset, .. })) => {
+        match &self.reading {
+            Reading::Committed(Committed::End) => return ReceiveStreamState::DataRead,
+            Reading::Committed(Committed::Error(ReadError::Reset { reset, .. })) => {
                 return if reset.owed_end() > VarInt::ZERO {
                     ReceiveStreamState::DataRead
                 } else {
                     ReceiveStreamState::ResetRead
                 };
             }
-            Some(Committed::Error(_)) | None => {}
+            // the reader was dropped after a read committed a result, which
+            // is not kept: the end or the reset follows from the facts, as
+            // the read judged them
+            Reading::ReaderDropped {
+                result_committed: true,
+            } => match self.reset {
+                Some(reset)
+                    if reset.owed_end() > VarInt::ZERO
+                        || (self.fully_received()
+                            && self.reset_presentation == ResetPresentation::Suppress) =>
+                {
+                    return ReceiveStreamState::DataRead;
+                }
+                Some(_) => return ReceiveStreamState::ResetRead,
+                None if self.fully_received() => return ReceiveStreamState::DataRead,
+                // a local reason was committed
+                None => {}
+            },
+            Reading::Committed(Committed::Error(_))
+            | Reading::Open
+            | Reading::ReaderDropped {
+                result_committed: false,
+            } => {}
         }
         match self.reset {
             Some(reset) if reset.owed_end() > VarInt::ZERO => {
