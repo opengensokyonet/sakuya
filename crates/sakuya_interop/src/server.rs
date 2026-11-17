@@ -8,7 +8,9 @@
 use core::{net::SocketAddr, num::NonZeroUsize};
 use std::{path::Path, process::ExitCode, rc::Rc};
 
-use bytes::{Buf as _, Bytes};
+#[cfg(feature = "extensions")]
+use bytes::Buf as _;
+use bytes::Bytes;
 use futures_util::StreamExt as _;
 use nitori_io::{ReadChunkHostExt as _, calls::WriteAllHostExt as _};
 use sakuya_connection::prelude::*;
@@ -17,12 +19,14 @@ use sakuya_endpoint::{
 };
 use sakuya_wire::{v1::application_error::ApplicationErrorCode, var_int::VarInt};
 
+#[cfg(feature = "extensions")]
+use crate::environment::RESET_AT_CODE;
 use crate::{
     composition::{
         Extensions, OptionalKeyLog, Server, ServerStarts, bind, cipher_suites, endpoint_config,
         server_config,
     },
-    environment::{Environment, RESET_AT_CODE, ServerTestCase, UNSUPPORTED},
+    environment::{Environment, ServerTestCase, UNSUPPORTED},
     hq,
 };
 
@@ -87,6 +91,7 @@ async fn serve(starts: ServerStarts, test_case: ServerTestCase) -> ExitCode {
         datagram: test_case == ServerTestCase::Datagram,
         reset_stream_at: test_case == ServerTestCase::ResetStreamAt,
     };
+    #[cfg(feature = "extensions")]
     let reset_at = extensions.reset_stream_at;
     let (server, reflow) = match Endpoint::<_, Server, NoClient>::new(endpoint_config(
         server_config(starts, test_case == ServerTestCase::Retry, extensions),
@@ -176,6 +181,7 @@ async fn serve(starts: ServerStarts, test_case: ServerTestCase) -> ExitCode {
                 }
             };
             eprintln!("sakuya server: connection {number} is established");
+            #[cfg(feature = "extensions")]
             if extensions.datagram {
                 let layer = layer.clone();
                 tokio::task::spawn_local(async move {
@@ -260,6 +266,7 @@ async fn serve(starts: ServerStarts, test_case: ServerTestCase) -> ExitCode {
                                     return;
                                 }
                             };
+                            #[cfg(feature = "extensions")]
                             let len = content.len();
                             let mut rest = content;
                             while !rest.is_empty() {
@@ -273,6 +280,7 @@ async fn serve(starts: ServerStarts, test_case: ServerTestCase) -> ExitCode {
                                     return;
                                 }
                             }
+                            #[cfg(feature = "extensions")]
                             if reset_at {
                                 let reliable_size = (len / 2) as u64;
                                 // invariant: a file read into memory is
@@ -293,7 +301,9 @@ async fn serve(starts: ServerStarts, test_case: ServerTestCase) -> ExitCode {
                                         let _ = writer.reset(code(RESET_AT_CODE));
                                     }
                                 }
-                            } else if let Err(error) = writer.close() {
+                                return;
+                            }
+                            if let Err(error) = writer.close() {
                                 eprintln!(
                                     "sakuya server: connection {number}: the answer cannot end: {}",
                                     crate::report(&error),

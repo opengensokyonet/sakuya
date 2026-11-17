@@ -14,6 +14,21 @@ path = "src/bin/server.rs"
 name = "sakuya-interop-client"
 path = "src/bin/client.rs"
 
+[features]
+# The DATAGRAM and reliable stream reset extensions as parts of the
+# programs' connections, and the test cases `datagram` and `resetstreamat`
+# for them; without it, both end with exit code 127. Off by default, so
+# that building the workspace leaves the extensions of the other packages
+# off as well.
+extensions = [
+    "sakuya_connection/datagram",
+    "sakuya_connection/reset_stream_at",
+    "sakuya_endpoint/datagram",
+    "sakuya_endpoint/reset_stream_at",
+    "sakuya_wire/datagram",
+    "sakuya_wire/reset_stream_at",
+]
+
 [dependencies]
 bytes.workspace = true
 frunk_core.workspace = true
@@ -24,15 +39,15 @@ nitori_io.workspace = true
 rustls-pki-types.workspace = true
 rustls-webpki.workspace = true
 sakuya_clock_tokio.workspace = true
-sakuya_connection = { workspace = true, features = ["datagram", "reset_stream_at"] }
+sakuya_connection.workspace = true
 sakuya_datagram_routing.workspace = true
-sakuya_endpoint = { path = "../sakuya_endpoint", features = ["datagram", "reset_stream_at"] }
+sakuya_endpoint = { path = "../sakuya_endpoint" }
 sakuya_packet_protection = { workspace = true, features = ["ring"] }
 sakuya_recovery.workspace = true
 sakuya_stream.workspace = true
 sakuya_test_support = { path = "../sakuya_test_support" }
 sakuya_tls.workspace = true
 sakuya_udp_tokio.workspace = true
-sakuya_wire = { workspace = true, features = ["datagram", "reset_stream_at"] }
+sakuya_wire.workspace = true
 snafu.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time"] }

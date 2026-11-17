@@ -6,10 +6,11 @@
 //! the hq-interop ALPN, the runner's ECDSA certificate on the server, a
 //! client that takes the server's key from its leaf certificate without
 //! verifying the chain ([`crate::verify`]), random connection IDs and
-//! larger limits. The DATAGRAM and reliable stream reset extensions are
-//! parts of every connection; each announces its transport parameter only
-//! in the test case for it ([`Extensions`]), so that the runner's test
-//! cases run with the transport parameters of QUIC version 1 alone.
+//! larger limits. With the feature `extensions`, the DATAGRAM and
+//! reliable stream reset extensions are parts of every connection; each
+//! announces its transport parameter only in the test case for it
+//! ([`Extensions`]), so that the runner's test cases run with the
+//! transport parameters of QUIC version 1 alone.
 
 use core::{fmt, num::NonZeroU32, time::Duration};
 use std::{net::SocketAddr, path::Path, sync::Arc};
@@ -20,10 +21,12 @@ use nitori_crypto::{NamedGroup, Random as _, SignatureScheme, SigningKey};
 use nitori_crypto_aws_lc::{AwsLcBackend, EcdsaSigningKey};
 use rustls_pki_types::{PrivateKeyDer, pem::PemObject as _};
 use sakuya_clock_tokio::TokioClock;
+use sakuya_connection::v1;
 use sakuya_connection::v1::retry::ContinueOnRetry;
+#[cfg(feature = "extensions")]
 use sakuya_connection::{
     datagram::{self, DatagramChoices, DatagramConnectionArgs},
-    reset_stream_at, v1,
+    reset_stream_at,
 };
 use sakuya_datagram_routing::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
 use sakuya_endpoint::{
@@ -71,8 +74,6 @@ use sakuya_tls::{
 use sakuya_udp_tokio::{UdpBinding, UdpBindingConfig, UdpLink};
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength, StatelessResetToken},
-    datagram::MaxDatagramFrameSize,
-    reset_stream_at::ResetStreamAt,
     v1::{
         application_error::ApplicationErrorCode,
         stream_count::StreamCount,
@@ -166,6 +167,7 @@ impl<T: v1::MakerChoices> v1::HostChoices<T> for InteropChoices {
 }
 
 /// The default queues of the DATAGRAM extension.
+#[cfg(feature = "extensions")]
 impl DatagramChoices for InteropChoices {}
 
 /// The choices of the server's connections.
@@ -174,7 +176,14 @@ pub(crate) type ServerChoices = ServerConnectionChoices<Udp, InteropChoices, Ser
 pub(crate) type ClientChoices =
     ClientConnectionChoices<Udp, InteropChoices, ClientStarts, ClientTokens, ContinueOnRetry>;
 
+/// The parts of the connections: version 1, and the two extensions with
+/// the feature `extensions`.
+#[cfg(feature = "extensions")]
 pub(crate) type Parts = frunk_core::HList![v1::Part, datagram::Part, reset_stream_at::Part];
+/// The parts of the connections: version 1, and the two extensions with
+/// the feature `extensions`.
+#[cfg(not(feature = "extensions"))]
+pub(crate) type Parts = frunk_core::HList![v1::Part];
 sakuya_connection::composition!(impl Send for InteropChoices: ServerChoices, Parts);
 sakuya_connection::composition!(impl Send for InteropChoices: ClientChoices, Parts);
 
@@ -499,7 +508,10 @@ macro_rules! v1_config {
 }
 
 /// Which extensions a side announces: those of the test case it runs.
+/// Without the feature `extensions` both are false: no test case sets
+/// them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(not(feature = "extensions"), allow(dead_code))]
 pub(crate) struct Extensions {
     /// `max_datagram_frame_size`, the recommended 65535.
     pub(crate) datagram: bool,
@@ -507,14 +519,17 @@ pub(crate) struct Extensions {
     pub(crate) reset_stream_at: bool,
 }
 
+#[cfg(feature = "extensions")]
 impl Extensions {
     /// What the DATAGRAM extension is given: its parameter when it is
     /// announced, and the default queues.
     fn datagram<C: Default>(self) -> DatagramConnectionArgs<C> {
         DatagramConnectionArgs {
-            transport_parameters: hlist![self.datagram.then(|| MaxDatagramFrameSize::new(
-                VarInt::from(datagram::RECOMMENDED_MAX_DATAGRAM_FRAME_SIZE)
-            ))],
+            transport_parameters: hlist![self.datagram.then(|| {
+                sakuya_wire::datagram::MaxDatagramFrameSize::new(VarInt::from(
+                    datagram::RECOMMENDED_MAX_DATAGRAM_FRAME_SIZE,
+                ))
+            })],
             queues: C::default(),
         }
     }
@@ -522,8 +537,29 @@ impl Extensions {
     /// What the reliable stream reset extension is given: its parameter
     /// when it is announced.
     fn reset_stream_at(self) -> v1::parameters::PartSlots<reset_stream_at::Part> {
-        hlist![self.reset_stream_at.then_some(ResetStreamAt)]
+        hlist![
+            self.reset_stream_at
+                .then_some(sakuya_wire::reset_stream_at::ResetStreamAt)
+        ]
     }
+}
+
+/// The configurations of the parts ([`Parts`]): version 1's `$v1`, and
+/// the extensions' from `$extensions`.
+#[cfg(feature = "extensions")]
+macro_rules! part_configs {
+    ($v1:expr, $extensions:expr) => {
+        hlist![$v1, $extensions.datagram(), $extensions.reset_stream_at()]
+    };
+}
+/// The configurations of the parts ([`Parts`]): version 1's `$v1`, and
+/// the extensions' from `$extensions`.
+#[cfg(not(feature = "extensions"))]
+macro_rules! part_configs {
+    ($v1:expr, $extensions:expr) => {{
+        let _: Extensions = $extensions;
+        hlist![$v1]
+    }};
 }
 
 fn thresholds() -> LossThresholds {
@@ -582,11 +618,7 @@ pub(crate) fn server_config(
             handshake: 4096,
         },
         thresholds(),
-        hlist![
-            v1_config!(ServerChoices),
-            extensions.datagram(),
-            extensions.reset_stream_at()
-        ],
+        part_configs!(v1_config!(ServerChoices), extensions),
         tokens,
         RetryPolicy {
             always: always_retry,
@@ -610,11 +642,7 @@ pub(crate) fn client_config(
             one_rtt: 16 * 1024 + 4,
         },
         thresholds(),
-        hlist![
-            v1_config!(ClientChoices),
-            extensions.datagram(),
-            extensions.reset_stream_at()
-        ],
+        part_configs!(v1_config!(ClientChoices), extensions),
         ClientTokens::new(),
         ContinueOnRetry,
     )
