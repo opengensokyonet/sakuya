@@ -1179,6 +1179,7 @@ where
         close_request: CloseRequestCell::new(),
         stream_set: Default::default(),
         connection_handle: Default::default(),
+        events: Default::default(),
     }
 }
 

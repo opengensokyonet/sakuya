@@ -2210,6 +2210,7 @@ where
         close_request,
         stream_set: Default::default(),
         connection_handle: Default::default(),
+        events: Default::default(),
     }
 }
 

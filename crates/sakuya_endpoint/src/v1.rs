@@ -2,7 +2,7 @@
 
 use core::{fmt, num::NonZeroUsize};
 
-use sakuya_connection::v1::ImmediateClosePolicyOf;
+use sakuya_connection::v1::{EventsConfigOf, ImmediateClosePolicyOf};
 use sakuya_connection::{
     layer,
     share::{LayerShare, LogicalPathKeys},
@@ -63,6 +63,9 @@ pub struct ConnectionConfig<T: connection::Choices, L: LogicalPathKeys> {
     /// What adjusts the close the connection sends at each encryption
     /// level.
     pub immediate_close_policy: ImmediateClosePolicyOf<T>,
+    /// What the receiver of the connection's events is made from; the
+    /// default receiver records nothing.
+    pub events: EventsConfigOf<T, L>,
 }
 
 impl<T, L> Clone for ConnectionConfig<T, L>
@@ -83,6 +86,7 @@ where
             destination_connection_ids: self.destination_connection_ids.clone(),
             max_datagrams_per_send: self.max_datagrams_per_send,
             immediate_close_policy: self.immediate_close_policy.clone(),
+            events: self.events.clone(),
         }
     }
 }
@@ -99,8 +103,8 @@ where
 /// - 16 datagrams handled in one poll of a logical path's receiving call,
 ///   16 inputs held until their keys come, and 16 datagrams handed to a
 ///   link at once.
-/// - The recovery factory's, the destination connection ID strategy's and
-///   the close policy's own defaults.
+/// - The recovery factory's, the destination connection ID strategy's, the
+///   close policy's and the event receiver's own defaults.
 impl<T, L> Default for ConnectionConfig<T, L>
 where
     T: connection::Choices,
@@ -120,6 +124,7 @@ where
             destination_connection_ids: DestinationConnectionIdConfigOf::<T>::default(),
             max_datagrams_per_send: SIXTEEN,
             immediate_close_policy: ImmediateClosePolicyOf::<T>::default(),
+            events: EventsConfigOf::<T, L>::default(),
         }
     }
 }
@@ -206,6 +211,7 @@ where
             close_request: core.close_request,
             stream_set: Default::default(),
             connection_handle: Default::default(),
+            events: config.events,
         }
     }
 }

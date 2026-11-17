@@ -740,6 +740,10 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
     /// application its connection handle another
     /// ([`ConnectionHandle::new`](application_handles::connection::ConnectionHandle::new)).
     pub connection_handle: ConnectionHandleCellSlot<T, L>,
+    /// What the receiver of the connection's events is made from
+    /// ([`HostChoices::Events`]); its default records nothing for
+    /// [`NoEvents`](events::NoEvents).
+    pub events: EventsConfigOf<T, L>,
 }
 
 impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + ConnectionErrorsOf>
@@ -1534,12 +1538,9 @@ where
                 .original_destination_connection_id
                 .unwrap_or(args.client_dcid),
         };
-        // the arguments carry no configuration of the events yet: the
-        // receiver is made from its default
-        let config = EventsConfigOf::<T, L>::default();
         events::ConnectionEventSink::new(<EventsOf<T, L> as events::ConnectionEvents<
             InstantOf<T>,
-        >>::new(&config, &start))
+        >>::new(&args.events, &start))
     }
 }
 /// When the receiver records anything, the first poll starts the
