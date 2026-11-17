@@ -13,7 +13,7 @@ use sakuya_wire::{
 
 use crate::{
     feedback::InjectSummary,
-    frame_source::{FrameSource, NoIntent, PublishIntent},
+    frame_source::FrameSource,
     v1::send::{RetireConnectionIdIntent, RetireConnectionIdSummary},
     write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
@@ -224,7 +224,6 @@ impl<Id, R: ResetTokenRegistrar> FrameSource for SequenceMapDestinationConnectio
     type Summary = RetireConnectionIdSummary;
     type Class = InFlightClass;
     type Item<'a> = u64;
-    type Intent = NoIntent;
 
     /// The frame is written only while it waits to be sent; once written, it
     /// is in flight.
@@ -254,14 +253,7 @@ impl<Id, R: ResetTokenRegistrar> FrameSource for SequenceMapDestinationConnectio
         Supplied::Open(packet)
     }
 
-    fn delivered<Pb, Idx>(
-        &mut self,
-        _: &mut Pb,
-        _: PacketNumberSpaceKind,
-        summary: RetireConnectionIdSummary,
-    ) where
-        Pb: PublishIntent<NoIntent, Idx>,
-    {
+    fn delivered(&mut self, _: PacketNumberSpaceKind, summary: RetireConnectionIdSummary) {
         if let Some(retirements) = self.retirements() {
             retirements.unacknowledged.remove(&summary.sequence);
         }
@@ -269,14 +261,7 @@ impl<Id, R: ResetTokenRegistrar> FrameSource for SequenceMapDestinationConnectio
 
     /// A frame lost while its retirement waits for acknowledgment waits to
     /// be sent again.
-    fn lost<Pb, Idx>(
-        &mut self,
-        _: &mut Pb,
-        _: PacketNumberSpaceKind,
-        summary: &RetireConnectionIdSummary,
-    ) where
-        Pb: PublishIntent<NoIntent, Idx>,
-    {
+    fn lost(&mut self, _: PacketNumberSpaceKind, summary: &RetireConnectionIdSummary) {
         if let Some(frame) = self.retirement_frame(summary.sequence) {
             *frame = RetirementFrame::Waiting;
         }

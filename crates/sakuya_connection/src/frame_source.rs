@@ -5,10 +5,9 @@
 //! A frame source ([`FrameSource`]) gets one planned item at a time, with
 //! an open packet of its class, and hands back what it holds afterwards;
 //! each frame it writes leaves a summary in the packet's record, which
-//! comes back to it when the packet is delivered or lost. Then it may
-//! publish intents again through the publisher it is lent
-//! ([`PublishIntent`]). An intent of it that was refused, or that the
-//! strategy ended, comes back to it as unfulfilled.
+//! comes back to it when the packet is delivered or lost. An intent of it
+//! that was refused, or that the strategy ended, comes back to it as
+//! unfulfilled.
 //!
 //! What the driver's own components have to send is not published: each
 //! part says what its components in a lineage have to send now
@@ -58,10 +57,6 @@ pub trait FrameSource {
     type Class: FlightClassType;
     /// One planned item of it: which of its intents to supply.
     type Item<'a>;
-    /// What it publishes when a frame of it is acknowledged or declared
-    /// lost: intents sent and forgotten, with no ticket to keep;
-    /// [`NoIntent`] when it publishes nothing.
-    type Intent;
 
     /// Write content for `item` into `packet` and hand back what it holds
     /// afterwards.
@@ -84,27 +79,14 @@ pub trait FrameSource {
         P: PacketPosition;
 
     /// The packet of `space` that a frame of `summary` was written into was
-    /// acknowledged; `publish` takes what it publishes again.
-    fn delivered<Pb, Idx>(
-        &mut self,
-        publish: &mut Pb,
-        space: PacketNumberSpaceKind,
-        summary: Self::Summary,
-    ) where
-        Pb: PublishIntent<Self::Intent, Idx>;
+    /// acknowledged.
+    fn delivered(&mut self, space: PacketNumberSpaceKind, summary: Self::Summary);
 
     /// The packet of `space` that a frame of `summary` was written into was
     /// declared lost, or its send result is unknown, or its link path ended
-    /// before it was settled; `publish` takes what it publishes again.
-    /// `summary` stays in the packet's record while it is kept, for a late
-    /// acknowledgment.
-    fn lost<Pb, Idx>(
-        &mut self,
-        publish: &mut Pb,
-        space: PacketNumberSpaceKind,
-        summary: &Self::Summary,
-    ) where
-        Pb: PublishIntent<Self::Intent, Idx>;
+    /// before it was settled. `summary` stays in the packet's record while
+    /// it is kept, for a late acknowledgment.
+    fn lost(&mut self, space: PacketNumberSpaceKind, summary: &Self::Summary);
 
     /// An intent of this source, the one `item` stands for, was not
     /// fulfilled for `cause`: its publishing was refused, or the strategy
@@ -119,7 +101,6 @@ impl<S: FrameSource + ?Sized> FrameSource for &mut S {
     type Summary = S::Summary;
     type Class = S::Class;
     type Item<'a> = S::Item<'a>;
-    type Intent = S::Intent;
 
     fn supply<W, P, Idx>(
         &mut self,
@@ -134,26 +115,12 @@ impl<S: FrameSource + ?Sized> FrameSource for &mut S {
         (**self).supply::<W, P, Idx>(item, packet)
     }
 
-    fn delivered<Pb, Idx>(
-        &mut self,
-        publish: &mut Pb,
-        space: PacketNumberSpaceKind,
-        summary: Self::Summary,
-    ) where
-        Pb: PublishIntent<Self::Intent, Idx>,
-    {
-        (**self).delivered::<Pb, Idx>(publish, space, summary);
+    fn delivered(&mut self, space: PacketNumberSpaceKind, summary: Self::Summary) {
+        (**self).delivered(space, summary);
     }
 
-    fn lost<Pb, Idx>(
-        &mut self,
-        publish: &mut Pb,
-        space: PacketNumberSpaceKind,
-        summary: &Self::Summary,
-    ) where
-        Pb: PublishIntent<Self::Intent, Idx>,
-    {
-        (**self).lost::<Pb, Idx>(publish, space, summary);
+    fn lost(&mut self, space: PacketNumberSpaceKind, summary: &Self::Summary) {
+        (**self).lost(space, summary);
     }
 
     fn unfulfilled(&mut self, item: Self::Item<'_>, cause: Unfulfilled) {
@@ -161,37 +128,11 @@ impl<S: FrameSource + ?Sized> FrameSource for &mut S {
     }
 }
 
-/// `Pb: PublishIntent<J, Idx>`: what a frame source is lent when its frames
-/// come back takes intents `J`, sent and forgotten.
-///
-/// `Idx` is the place of `J` in the composition's sum of intents; the
-/// compiler infers it.
-pub trait PublishIntent<J, Idx> {
-    /// Publish `intent`.
-    fn publish(&mut self, intent: J);
-}
-
-/// The intents of a frame source that publishes nothing when its frames
-/// come back: there are none.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum NoIntent {}
-
-/// The place of [`NoIntent`] in any sum of intents: there is none.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Nowhere {}
-
-/// Anything takes the intents there are none of.
-impl<Pb: ?Sized> PublishIntent<NoIntent, Nowhere> for Pb {
-    fn publish(&mut self, intent: NoIntent) {
-        match intent {}
-    }
-}
-
 // ---- kinds of frame sources ----
 
 /// A kind of frame source, as a type: what a part lists for each of its
-/// frame sources. It gives the types of the source's items, summaries and
-/// intents, apart from where the source is.
+/// frame sources. It gives the types of the source's items and summaries,
+/// apart from where the source is.
 ///
 /// `I` in the summary is the type of instants of the composition's
 /// choices, so that a summary can hold a deadline.
@@ -200,8 +141,6 @@ pub trait FrameSourceKind {
     type Item<'a>;
     /// The summary of one frame of the source.
     type Summary<I>;
-    /// What the source publishes when its frames come back.
-    type Intent;
     /// The kind whose source the summaries and the unfulfilled intents of
     /// this kind go back to ([`FeedFrameSources`]): by default the kind
     /// itself. A kind whose source is found only in the lineages it writes
@@ -220,7 +159,6 @@ pub struct IgnoredFeedback<K>(PhantomData<fn() -> K>);
 impl<K: FrameSourceKind> FrameSourceKind for IgnoredFeedback<K> {
     type Item<'a> = K::Item<'a>;
     type Summary<I> = K::Summary<I>;
-    type Intent = K::Intent;
 }
 
 /// The source of [`IgnoredFeedback`]: it writes nothing, and nothing is
@@ -232,7 +170,6 @@ impl<K: FrameSourceKind, I> FrameSource for IgnoringFrameSource<K, I> {
     type Summary = K::Summary<I>;
     type Class = crate::write::InFlightClass;
     type Item<'a> = K::Item<'a>;
-    type Intent = K::Intent;
 
     fn supply<W, P, Idx>(
         &mut self,
@@ -247,17 +184,9 @@ impl<K: FrameSourceKind, I> FrameSource for IgnoringFrameSource<K, I> {
         Supplied::Open(packet)
     }
 
-    fn delivered<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, _: Self::Summary)
-    where
-        Pb: PublishIntent<Self::Intent, Idx>,
-    {
-    }
+    fn delivered(&mut self, _: PacketNumberSpaceKind, _: Self::Summary) {}
 
-    fn lost<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, _: &Self::Summary)
-    where
-        Pb: PublishIntent<Self::Intent, Idx>,
-    {
-    }
+    fn lost(&mut self, _: PacketNumberSpaceKind, _: &Self::Summary) {}
 
     fn unfulfilled(&mut self, _: Self::Item<'_>, _: Unfulfilled) {}
 }
@@ -284,11 +213,7 @@ impl<T: ConnectionChoices, L, V, K: FrameSourceKind> FindFrameSource<T, L, V, ()
 /// finds by.
 pub trait FindFrameSource<T: ConnectionChoices, L, V, H>: FrameSourceKind {
     /// The source, borrowing what it is made of from the lineage.
-    type Source<'l, 'r>: for<'a> FrameSource<
-            Item<'a> = Self::Item<'a>,
-            Summary = Self::Summary<InstantOf<T>>,
-            Intent = Self::Intent,
-        >
+    type Source<'l, 'r>: for<'a> FrameSource<Item<'a> = Self::Item<'a>, Summary = Self::Summary<InstantOf<T>>>
     where
         V: 'l,
         'r: 'l;
@@ -389,17 +314,14 @@ where
 }
 
 /// Handing a summary back to the frame source of its kind: implemented for
-/// every list of kinds that implement [`FindFrameSource`], with a publisher
-/// `Pb` that takes what each publishes.
+/// every list of kinds that implement [`FindFrameSource`].
 ///
-/// `Hs` holds, for each kind, the positions of its impl and the place of
-/// its intents.
-pub trait FeedFrameSources<T: ConnectionChoices, L, V, Pb, Hs>: FrameSourceKinds {
+/// `Hs` holds, for each kind, the positions of its impl.
+pub trait FeedFrameSources<T: ConnectionChoices, L, V, Hs>: FrameSourceKinds {
     /// The packet of `space` that the frame of `summary` was written into
     /// was acknowledged; see [`FrameSource::delivered`].
     fn delivered(
         lineage: &mut Lineage<'_, V>,
-        publish: &mut Pb,
         now: InstantOf<T>,
         space: PacketNumberSpaceKind,
         summary: Self::Summaries<InstantOf<T>>,
@@ -409,7 +331,6 @@ pub trait FeedFrameSources<T: ConnectionChoices, L, V, Pb, Hs>: FrameSourceKinds
     /// was declared lost; see [`FrameSource::lost`].
     fn lost(
         lineage: &mut Lineage<'_, V>,
-        publish: &mut Pb,
         now: InstantOf<T>,
         space: PacketNumberSpaceKind,
         summary: &Self::Summaries<InstantOf<T>>,
@@ -425,24 +346,12 @@ pub trait FeedFrameSources<T: ConnectionChoices, L, V, Pb, Hs>: FrameSourceKinds
     );
 }
 
-impl<T: ConnectionChoices, L, V, Pb> FeedFrameSources<T, L, V, Pb, HNil> for HNil {
-    fn delivered(
-        _: &mut Lineage<'_, V>,
-        _: &mut Pb,
-        _: InstantOf<T>,
-        _: PacketNumberSpaceKind,
-        summary: CNil,
-    ) {
+impl<T: ConnectionChoices, L, V> FeedFrameSources<T, L, V, HNil> for HNil {
+    fn delivered(_: &mut Lineage<'_, V>, _: InstantOf<T>, _: PacketNumberSpaceKind, summary: CNil) {
         match summary {}
     }
 
-    fn lost(
-        _: &mut Lineage<'_, V>,
-        _: &mut Pb,
-        _: InstantOf<T>,
-        _: PacketNumberSpaceKind,
-        summary: &CNil,
-    ) {
+    fn lost(_: &mut Lineage<'_, V>, _: InstantOf<T>, _: PacketNumberSpaceKind, summary: &CNil) {
         match *summary {}
     }
 
@@ -451,8 +360,7 @@ impl<T: ConnectionChoices, L, V, Pb> FeedFrameSources<T, L, V, Pb, HNil> for HNi
     }
 }
 
-impl<T, L, V, Pb, K, Ks, H, Idx, Hs> FeedFrameSources<T, L, V, Pb, HCons<(H, Idx), Hs>>
-    for HCons<K, Ks>
+impl<T, L, V, K, Ks, H, Hs> FeedFrameSources<T, L, V, HCons<H, Hs>> for HCons<K, Ks>
 where
     T: ConnectionChoices,
     K: FrameSourceKind,
@@ -463,38 +371,34 @@ where
             H,
             Item<'a> = K::Item<'a>,
             Summary<InstantOf<T>> = K::Summary<InstantOf<T>>,
-            Intent = K::Intent,
         >,
-    Ks: FeedFrameSources<T, L, V, Pb, Hs>,
-    Pb: PublishIntent<K::Intent, Idx>,
+    Ks: FeedFrameSources<T, L, V, Hs>,
 {
     fn delivered(
         lineage: &mut Lineage<'_, V>,
-        publish: &mut Pb,
         now: InstantOf<T>,
         space: PacketNumberSpaceKind,
         summary: Self::Summaries<InstantOf<T>>,
     ) {
         match summary {
             Coproduct::Inl(summary) => {
-                K::Feedback::find(lineage, now).delivered::<Pb, Idx>(publish, space, summary);
+                K::Feedback::find(lineage, now).delivered(space, summary);
             }
-            Coproduct::Inr(rest) => Ks::delivered(lineage, publish, now, space, rest),
+            Coproduct::Inr(rest) => Ks::delivered(lineage, now, space, rest),
         }
     }
 
     fn lost(
         lineage: &mut Lineage<'_, V>,
-        publish: &mut Pb,
         now: InstantOf<T>,
         space: PacketNumberSpaceKind,
         summary: &Self::Summaries<InstantOf<T>>,
     ) {
         match summary {
             Coproduct::Inl(summary) => {
-                K::Feedback::find(lineage, now).lost::<Pb, Idx>(publish, space, summary);
+                K::Feedback::find(lineage, now).lost(space, summary);
             }
-            Coproduct::Inr(rest) => Ks::lost(lineage, publish, now, space, rest),
+            Coproduct::Inr(rest) => Ks::lost(lineage, now, space, rest),
         }
     }
 

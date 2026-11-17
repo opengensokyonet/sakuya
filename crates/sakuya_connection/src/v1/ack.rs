@@ -78,7 +78,7 @@ use super::{
     Choices, Side,
     confirmation::HandshakeConfirmation,
     error::{KeyUpdateSnafu, UnsentPacketAcknowledgedSnafu, V1ConnectionErrorOf},
-    feedback::CoreLentFeedback,
+    feedback::LineageFeedback,
     key_phase::KeyPhaseNumbers,
     key_update::ack_received,
     keys::OneRttKeys,
@@ -145,10 +145,9 @@ pub type AckRecoveryTakes<T, L, S, Ls> = HList![
 /// the transport parameters; `Il` of the link's clone in an entry; `Ik` of
 /// what [`AckRecoveryTakes`] lists in a recovery layer, and `Jx` and `Jr`
 /// of the stored part of congestion control and the RTT estimate there;
-/// `Hf` of the core and of each part's frame sources in the rest, for
-/// feedback, and `Is` of the components of the established layer the frame
-/// sources find ([`EstablishedSourceComponentsOfParts`]), which the
-/// feedback borrows.
+/// `Hf` of each part's frame sources in the rest, for feedback, and `Is`
+/// of the components of the established layer the frame sources find
+/// ([`EstablishedSourceComponentsOfParts`]), which the feedback borrows.
 ///
 /// # Errors
 ///
@@ -208,7 +207,7 @@ where
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
         + GetAt<KeyPhaseNumbers, Ikp>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath:
-        CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
+        LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     L: ConnectionErrorsOf,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     L: EstablishedSourceComponentsOf<T, L>,
@@ -429,7 +428,7 @@ where
     let mut established =
         others.borrow_established_optional::<EstablishedSourceComponentsOfParts<T, L>, Is>();
     for record in acknowledged {
-        CoreLentFeedback::<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>::delivered_each(
+        LineageFeedback::<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>::delivered_each(
             lineage,
             &mut established,
             at,

@@ -56,9 +56,8 @@ use crate::{
     feedback::InjectSummary,
     frame_source::{
         DriverContentPart, FindFrameSource, FrameSource, FrameSourceItemsOf, FrameSourceKind,
-        FrameSourcePart, HandshakePacket, IgnoredFeedback, InitialPacket, NoIntent, OneRttPacket,
-        OneRttProbePacket, PacketKind, PartsFrameSources, PublishIntent, SettlingResponsePacket,
-        ZeroRttPacket,
+        FrameSourcePart, HandshakePacket, IgnoredFeedback, InitialPacket, OneRttPacket,
+        OneRttProbePacket, PacketKind, PartsFrameSources, SettlingResponsePacket, ZeroRttPacket,
     },
     layer,
     send_strategy::{
@@ -683,10 +682,6 @@ where
     type Summary = AckSummary<I>;
     type Class = AckOnlyClass;
     type Item<'b> = PacketNumberSpaceKind;
-    /// A lost ACK frame is not sent again as it was: the space's ACK
-    /// intent is gathered again from the obligation, as any other time an
-    /// ACK frame is due.
-    type Intent = NoIntent;
 
     fn supply<W, P, Idx>(
         &mut self,
@@ -742,17 +737,14 @@ where
         Supplied::Open(packet)
     }
 
-    fn delivered<Pb, Idx>(&mut self, _: &mut Pb, space: PacketNumberSpaceKind, ack: AckSummary<I>)
-    where
-        Pb: PublishIntent<NoIntent, Idx>,
-    {
+    fn delivered(&mut self, space: PacketNumberSpaceKind, ack: AckSummary<I>) {
         self.state.ack_delivered(space, ack.largest);
     }
 
-    fn lost<Pb, Idx>(&mut self, _: &mut Pb, space: PacketNumberSpaceKind, ack: &AckSummary<I>)
-    where
-        Pb: PublishIntent<NoIntent, Idx>,
-    {
+    /// A lost ACK frame is not sent again as it was: the space's ACK
+    /// intent is gathered again from the obligation, as any other time an
+    /// ACK frame is due.
+    fn lost(&mut self, space: PacketNumberSpaceKind, ack: &AckSummary<I>) {
         self.state.ack_lost(space, ack.before);
     }
 
@@ -806,7 +798,6 @@ impl FrameSource for PendingProbePings {
     type Summary = ProbePingSummary;
     type Class = InFlightClass;
     type Item<'b> = PacketNumberSpaceKind;
-    type Intent = NoIntent;
 
     fn supply<W, P, Idx>(
         &mut self,
@@ -829,17 +820,9 @@ impl FrameSource for PendingProbePings {
         Supplied::Open(packet)
     }
 
-    fn delivered<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, _: ProbePingSummary)
-    where
-        Pb: PublishIntent<NoIntent, Idx>,
-    {
-    }
+    fn delivered(&mut self, _: PacketNumberSpaceKind, _: ProbePingSummary) {}
 
-    fn lost<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, _: &ProbePingSummary)
-    where
-        Pb: PublishIntent<NoIntent, Idx>,
-    {
-    }
+    fn lost(&mut self, _: PacketNumberSpaceKind, _: &ProbePingSummary) {}
 
     /// A probe's PING is the driver's content, which no strategy ends; the
     /// next expiry of the probe timeout decides afresh.
@@ -872,7 +855,6 @@ pub enum AckFrames {}
 impl FrameSourceKind for AckFrames {
     type Item<'a> = PacketNumberSpaceKind;
     type Summary<I> = AckSummary<I>;
-    type Intent = NoIntent;
 }
 
 /// The ACK frames are made from the receive journals, ACK obligations and
@@ -905,7 +887,6 @@ pub enum ProbePingFrames {}
 impl FrameSourceKind for ProbePingFrames {
     type Item<'a> = PacketNumberSpaceKind;
     type Summary<I> = ProbePingSummary;
-    type Intent = NoIntent;
     /// Nothing is done when a frame comes back, and the source is found
     /// only in the link path's lineage.
     type Feedback = IgnoredFeedback<Self>;
@@ -936,7 +917,6 @@ pub enum RetireConnectionIdFrames {}
 impl FrameSourceKind for RetireConnectionIdFrames {
     type Item<'a> = u64;
     type Summary<I> = RetireConnectionIdSummary;
-    type Intent = NoIntent;
 }
 
 /// The RETIRE_CONNECTION_ID frames are written by the destination
@@ -967,7 +947,6 @@ pub enum NewConnectionIdFrames {}
 impl FrameSourceKind for NewConnectionIdFrames {
     type Item<'a> = u64;
     type Summary<I> = NewConnectionIdSummary;
-    type Intent = NoIntent;
 }
 
 /// The NEW_CONNECTION_ID frames are written by the local connection ID
@@ -997,7 +976,6 @@ pub enum CryptoFrames {}
 impl FrameSourceKind for CryptoFrames {
     type Item<'a> = CryptoLevel;
     type Summary<I> = CryptoSummary;
-    type Intent = NoIntent;
 }
 
 /// The CRYPTO frames are written from the connection's CRYPTO output.
@@ -1054,7 +1032,6 @@ where
     type Summary = CryptoSummary;
     type Class = InFlightClass;
     type Item<'b> = CryptoLevel;
-    type Intent = NoIntent;
 
     fn supply<W, P, Idx>(
         &mut self,
@@ -1072,10 +1049,7 @@ where
         Supplied::Open(packet)
     }
 
-    fn delivered<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, summary: CryptoSummary)
-    where
-        Pb: PublishIntent<NoIntent, Idx>,
-    {
+    fn delivered(&mut self, _: PacketNumberSpaceKind, summary: CryptoSummary) {
         self.lineage.get_mut::<CryptoSender<B>, Is>().acknowledged(
             summary.level,
             summary.offset,
@@ -1083,10 +1057,7 @@ where
         );
     }
 
-    fn lost<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, summary: &CryptoSummary)
-    where
-        Pb: PublishIntent<NoIntent, Idx>,
-    {
+    fn lost(&mut self, _: PacketNumberSpaceKind, summary: &CryptoSummary) {
         self.lineage.get_mut::<CryptoSender<B>, Is>().lost(
             summary.level,
             summary.offset,
@@ -1105,7 +1076,6 @@ pub enum HandshakeDoneFrames {}
 impl FrameSourceKind for HandshakeDoneFrames {
     type Item<'a> = ();
     type Summary<I> = HandshakeDoneSummary;
-    type Intent = NoIntent;
 }
 
 /// The HANDSHAKE_DONE frame is written by the [`Own`](Side::Own) data of

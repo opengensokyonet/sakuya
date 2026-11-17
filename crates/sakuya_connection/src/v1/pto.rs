@@ -48,7 +48,7 @@ use super::{
     Choices, Side,
     amplification::AntiAmplification,
     confirmation::HandshakeConfirmation,
-    feedback::CoreLentFeedback,
+    feedback::LineageFeedback,
     keys::HandshakeKeys,
     link::LinkFacts,
     loss_detection::{LossFactsReads, declare_lost, hand_back_lost, loss_facts},
@@ -272,7 +272,7 @@ where
         'v,
         ProbeTimeoutTakes<T, L, S, Ls>,
         It,
-    >>::Rest: CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
+    >>::Rest: LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out:
         Selector<&'a CongestionPartOf<T, L>, Jx> + Selector<&'a RttOf<T, L>, Jr>,
@@ -348,7 +348,7 @@ where
                     let Some(record) = journals.hand_back_oldest_ack_eliciting_content() else {
                         break;
                     };
-                    CoreLentFeedback::<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>::lost_each(
+                    LineageFeedback::<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>::lost_each(
                         &mut rest,
                         &mut established,
                         now,

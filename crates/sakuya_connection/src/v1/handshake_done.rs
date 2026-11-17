@@ -29,7 +29,7 @@ use super::{
 use crate::{
     component::{ArgsOf, Build, ParentsOf, PassiveDataComponent},
     feedback::InjectSummary,
-    frame_source::{FrameSource, NoIntent, PublishIntent},
+    frame_source::FrameSource,
     layer,
     share::{ConnectionArgsOf, LineagePartList},
     write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
@@ -71,7 +71,6 @@ impl FrameSource for HandshakeDoneSource {
     type Summary = HandshakeDoneSummary;
     type Class = InFlightClass;
     type Item<'a> = ();
-    type Intent = NoIntent;
 
     fn supply<W, P, Idx>(
         &mut self,
@@ -96,17 +95,11 @@ impl FrameSource for HandshakeDoneSource {
         Supplied::Open(packet)
     }
 
-    fn delivered<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, _: HandshakeDoneSummary)
-    where
-        Pb: PublishIntent<NoIntent, Idx>,
-    {
+    fn delivered(&mut self, _: PacketNumberSpaceKind, _: HandshakeDoneSummary) {
         *self = Self::Delivered;
     }
 
-    fn lost<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, _: &HandshakeDoneSummary)
-    where
-        Pb: PublishIntent<NoIntent, Idx>,
-    {
+    fn lost(&mut self, _: PacketNumberSpaceKind, _: &HandshakeDoneSummary) {
         if *self == Self::InFlight {
             *self = Self::Waiting;
         }
@@ -232,7 +225,6 @@ impl<Tk, Rp> FrameSource for ClientOnlyState<Tk, Rp> {
     type Summary = HandshakeDoneSummary;
     type Class = InFlightClass;
     type Item<'a> = ();
-    type Intent = NoIntent;
 
     fn supply<W, P, Idx>(
         &mut self,
@@ -247,17 +239,9 @@ impl<Tk, Rp> FrameSource for ClientOnlyState<Tk, Rp> {
         Supplied::Open(packet)
     }
 
-    fn delivered<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, _: HandshakeDoneSummary)
-    where
-        Pb: PublishIntent<NoIntent, Idx>,
-    {
-    }
+    fn delivered(&mut self, _: PacketNumberSpaceKind, _: HandshakeDoneSummary) {}
 
-    fn lost<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, _: &HandshakeDoneSummary)
-    where
-        Pb: PublishIntent<NoIntent, Idx>,
-    {
-    }
+    fn lost(&mut self, _: PacketNumberSpaceKind, _: &HandshakeDoneSummary) {}
 
     /// A client has no HANDSHAKE_DONE waiting, so none goes unfulfilled.
     fn unfulfilled(&mut self, (): (), _: Unfulfilled) {}

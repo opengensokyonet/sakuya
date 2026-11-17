@@ -48,7 +48,7 @@ use super::{
     connection_ids::{ConnectionIdsOf, ResetTokenRegistrarOf},
     crypto::send::CryptoSender,
     error::{ConnectionError, V1ConnectionErrorOf},
-    feedback::CoreLentFeedback,
+    feedback::LineageFeedback,
     keys::{HandshakeKeys, InitialKeys, OneRttKeys},
     link::{LinkClone, LinkFacts},
     parameters::PeerTransportParameters,
@@ -121,8 +121,8 @@ where
 /// The intake of the send strategy (`SendStrategyIntake`), in the
 /// connection node: a clone of what the core gives out, made with the core,
 /// so that what publishes while the core is lent elsewhere, such as the
-/// frame sources of the streams when the core is lent for feedback, finds
-/// it in its lineage and takes its handle there.
+/// frame sources of the streams while a sending call has the core to fill
+/// its packets, finds it in its lineage and takes its handle there.
 pub struct SendStrategyIntake<X>(X);
 
 impl<X> fmt::Debug for SendStrategyIntake<X> {
@@ -542,8 +542,8 @@ where
 /// sources as not fulfilled, in the parents with the components of the
 /// established layer the frame sources find appended.
 ///
-/// `Ic` is the place of the core among the parents, `Hf` that of the core
-/// and of each part's frame sources for handing intents back, and `Is` of
+/// `Ic` is the place of the core among the parents, `Hf` that of each
+/// part's frame sources for handing intents back, and `Is` of
 /// the established layer's components the frame sources find.
 impl<T: Choices, L, Ic, Hf, Is> Build<T, L, layer::LinkPath, (Ic, Hf, Is)>
     for LinkPathPlannerOf<T, L>
@@ -553,7 +553,7 @@ where
         SendStrategyTypes<LinkPathIdentifier = crate::share::LinkPathIdentifierOf<T, L>>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     for<'v> <L as LineageLists<'v, T>>::LinkPathParents: GetAt<SendStrategyCore<SendStrategyOf<T, L>>, Ic>
-        + CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
+        + LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
@@ -599,7 +599,7 @@ where
         let now = others.now();
         let mut established =
             others.borrow_established_optional::<EstablishedSourceComponentsOfParts<T, L>, Is>();
-        CoreLentFeedback::<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>::unfulfilled_each(
+        LineageFeedback::<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>::unfulfilled_each(
             parents,
             &mut established,
             now,
@@ -641,8 +641,8 @@ where
 /// The intents the planner ends when its role changes go back to their
 /// frame sources as not fulfilled, in the rest of the lineage with the
 /// components of the established layer the frame sources find appended:
-/// `Ik` is the place of the core there, `Hf` that of the core and of each
-/// part's frame sources for handing intents back, and `Is` of the
+/// `Ik` is the place of the core there, `Hf` that of each part's frame
+/// sources for handing intents back, and `Is` of the
 /// established layer's components; `Hd` holds the positions each part reads
 /// its content by.
 impl<T: Choices, L, Ip, Ir, It, Il, Io, Ipp, Jc, Js, Jm, Ic, Ier, Kr, Kp, Ik, Hf, Is, Hd>
@@ -683,7 +683,7 @@ where
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>,
     for<'v> <<L as LineageLists<'v, T>>::LinkPath as TakeEach<'v, frunk_core::HList![Self], It>>::Rest:
         GetAt<SendStrategyCore<SendStrategyOf<T, L>>, Ik>
-            + CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
+            + LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
@@ -794,7 +794,7 @@ where
             if !ended.is_empty() {
                 let mut established = others
                     .borrow_established_optional::<EstablishedSourceComponentsOfParts<T, L>, Is>();
-                CoreLentFeedback::<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>::unfulfilled_each(
+                LineageFeedback::<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>::unfulfilled_each(
                     &mut rest,
                     &mut established,
                     now,

@@ -63,7 +63,7 @@ use crate::{
 
 use super::{
     Choices,
-    feedback::CoreLentFeedback,
+    feedback::LineageFeedback,
     keys::{HandshakeKeys, InitialKeys},
     link::LinkClone,
     parameters::PeerTransportParameters,
@@ -296,7 +296,7 @@ where
         + ReadEach<LossFactsReads<T, L>, If>
         + TakeEach<'v, LossTakes<T, L, Self>, It>,
     for<'v> <<L as LineageLists<'v, T>>::Recovery as TakeEach<'v, LossTakes<T, L, Self>, It>>::Rest:
-        CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
+        LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out:
         Selector<&'a CongestionPartOf<T, L>, Jx> + Selector<&'a RttOf<T, L>, Jr>,
@@ -402,7 +402,7 @@ pub(super) fn hand_back_lost<T, L, V, X, Hf>(
     T: Choices,
     L: PartList<T> + FeedbackSummariesOf,
     X: OptionalRefs,
-    V: CoreLentFeedback<T, L, X, Hf>,
+    V: LineageFeedback<T, L, X, Hf>,
 {
     for &number in &batch.numbers {
         let Some(record) = journals.declare_lost(number, batch.retain_until) else {

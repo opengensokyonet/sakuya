@@ -221,32 +221,19 @@ fn the_summary_settles_the_datagram() {
         let sent = intent(b"data");
         let (mut writer, _) = supply::<NotLast>(&sent, 100);
         let summary = datagram_summary(writer.summaries.remove(0));
-        let mut publish = ();
         if delivered {
-            DatagramFrameSource.delivered::<_, crate::frame_source::Nowhere>(
-                &mut publish,
-                PacketNumberSpaceKind::ApplicationData,
-                summary,
-            );
+            DatagramFrameSource.delivered(PacketNumberSpaceKind::ApplicationData, summary);
             assert_eq!(
                 sent.progress.state(&DriverPanicFlag::default()),
                 Some(DatagramState::Acknowledged)
             );
         } else {
-            DatagramFrameSource.lost::<_, crate::frame_source::Nowhere>(
-                &mut publish,
-                PacketNumberSpaceKind::ApplicationData,
-                &summary,
-            );
+            DatagramFrameSource.lost(PacketNumberSpaceKind::ApplicationData, &summary);
             assert_eq!(
                 sent.progress.state(&DriverPanicFlag::default()),
                 Some(DatagramState::Lost)
             );
-            DatagramFrameSource.delivered::<_, crate::frame_source::Nowhere>(
-                &mut publish,
-                PacketNumberSpaceKind::ApplicationData,
-                summary,
-            );
+            DatagramFrameSource.delivered(PacketNumberSpaceKind::ApplicationData, summary);
             assert_eq!(
                 sent.progress.state(&DriverPanicFlag::default()),
                 Some(DatagramState::Acknowledged)
@@ -338,11 +325,7 @@ fn settled_waits_for_the_acknowledgment() {
         "sent is not settled"
     );
     let summary = datagram_summary(writer.summaries.remove(0));
-    DatagramFrameSource.delivered::<_, crate::frame_source::Nowhere>(
-        &mut (),
-        PacketNumberSpaceKind::ApplicationData,
-        summary,
-    );
+    DatagramFrameSource.delivered(PacketNumberSpaceKind::ApplicationData, summary);
     assert_eq!(
         poll_now(ticket.settled()),
         Poll::Ready(DatagramSettlement::Acknowledged)

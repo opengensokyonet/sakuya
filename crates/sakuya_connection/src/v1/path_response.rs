@@ -26,9 +26,7 @@ use crate::{
     clock::{ConnectionChoices, InstantOf},
     component::{ArgsOf, Build, ParentsOf, PassiveDataComponent},
     feedback::InjectSummary,
-    frame_source::{
-        FindFrameSource, FrameSource, FrameSourceKind, IgnoredFeedback, NoIntent, PublishIntent,
-    },
+    frame_source::{FindFrameSource, FrameSource, FrameSourceKind, IgnoredFeedback},
     layer,
     send_strategy::{
         MinimumLengths, SendIntent,
@@ -122,7 +120,6 @@ impl FrameSource for PendingPathResponse {
     type Summary = PathResponseSummary;
     type Class = InFlightClass;
     type Item<'a> = [u8; PATH_DATA_LEN];
-    type Intent = NoIntent;
 
     fn supply<W, P, Idx>(
         &mut self,
@@ -147,17 +144,9 @@ impl FrameSource for PendingPathResponse {
         Supplied::Open(packet)
     }
 
-    fn delivered<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, _: PathResponseSummary)
-    where
-        Pb: PublishIntent<NoIntent, Idx>,
-    {
-    }
+    fn delivered(&mut self, _: PacketNumberSpaceKind, _: PathResponseSummary) {}
 
-    fn lost<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, _: &PathResponseSummary)
-    where
-        Pb: PublishIntent<NoIntent, Idx>,
-    {
-    }
+    fn lost(&mut self, _: PacketNumberSpaceKind, _: &PathResponseSummary) {}
 
     /// The response is the driver's content, which no strategy ends.
     fn unfulfilled(&mut self, _: [u8; PATH_DATA_LEN], _: Unfulfilled) {}
@@ -170,7 +159,6 @@ pub enum PathResponseFrames {}
 impl FrameSourceKind for PathResponseFrames {
     type Item<'a> = [u8; PATH_DATA_LEN];
     type Summary<I> = PathResponseSummary;
-    type Intent = NoIntent;
     /// Nothing is done when a frame comes back, and the source is found
     /// only in the link path's lineage.
     type Feedback = IgnoredFeedback<Self>;

@@ -151,7 +151,6 @@ fn ended(strategy: &mut Strategy, link_path: u8) {
 fn retirement_delivered(strategy: &mut Strategy, sequence: u64) {
     FrameSource::delivered(
         strategy,
-        &mut (),
         ApplicationData,
         RetireConnectionIdSummary { sequence },
     );
@@ -162,7 +161,6 @@ fn retirement_delivered(strategy: &mut Strategy, sequence: u64) {
 fn retirement_lost(strategy: &mut Strategy, sequence: u64) {
     FrameSource::lost(
         strategy,
-        &mut (),
         ApplicationData,
         &RetireConnectionIdSummary { sequence },
     );

@@ -52,7 +52,7 @@ use crate::{
     clock::InstantOf,
     error::ConnectionErrorsOf,
     feedback::InjectSummary,
-    frame_source::{FindFrameSource, FrameSource, FrameSourceKind, NoIntent, PublishIntent},
+    frame_source::{FindFrameSource, FrameSource, FrameSourceKind},
     send_strategy::{
         AnyActiveLinkPath, IntentTicketWithdraw, MinimumLengths, SendIntent, SendIntentHandle,
         SendIntentIntake, SendStrategy, SharedPublishTo,
@@ -476,7 +476,6 @@ pub enum DatagramFrames {}
 impl FrameSourceKind for DatagramFrames {
     type Item<'a> = &'a DatagramIntent<Urgency>;
     type Summary<I> = DatagramSummary;
-    type Intent = NoIntent;
 }
 
 /// The frames are written from the intents themselves, and what comes of
@@ -566,8 +565,6 @@ where
     type Summary = DatagramSummary;
     type Class = InFlightClass;
     type Item<'a> = &'a DatagramIntent<Urgency>;
-    /// A lost DATAGRAM is not sent again (RFC 9221 §5.1).
-    type Intent = NoIntent;
 
     fn supply<W, R, Idx>(
         &mut self,
@@ -582,26 +579,13 @@ where
         DatagramFrameSource.supply::<W, R, Idx>(intent, packet)
     }
 
-    fn delivered<Pb, Idx>(
-        &mut self,
-        publish: &mut Pb,
-        space: PacketNumberSpaceKind,
-        summary: DatagramSummary,
-    ) where
-        Pb: PublishIntent<NoIntent, Idx>,
-    {
-        DatagramFrameSource.delivered::<Pb, Idx>(publish, space, summary);
+    fn delivered(&mut self, space: PacketNumberSpaceKind, summary: DatagramSummary) {
+        DatagramFrameSource.delivered(space, summary);
     }
 
-    fn lost<Pb, Idx>(
-        &mut self,
-        publish: &mut Pb,
-        space: PacketNumberSpaceKind,
-        summary: &DatagramSummary,
-    ) where
-        Pb: PublishIntent<NoIntent, Idx>,
-    {
-        DatagramFrameSource.lost::<Pb, Idx>(publish, space, summary);
+    /// A lost DATAGRAM is not sent again (RFC 9221 §5.1).
+    fn lost(&mut self, space: PacketNumberSpaceKind, summary: &DatagramSummary) {
+        DatagramFrameSource.lost(space, summary);
     }
 
     /// The datagram's progress keeps the cause, and the queues let its
@@ -625,8 +609,6 @@ impl FrameSource for DatagramFrameSource {
     type Summary = DatagramSummary;
     type Class = InFlightClass;
     type Item<'a> = &'a DatagramIntent<Urgency>;
-    /// A lost DATAGRAM is not sent again (RFC 9221 §5.1).
-    type Intent = NoIntent;
 
     /// The whole payload in one frame: without a Length field when the
     /// item has the last position, otherwise with one. Nothing is written
@@ -682,19 +664,14 @@ impl FrameSource for DatagramFrameSource {
         }
     }
 
-    fn delivered<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, summary: DatagramSummary)
-    where
-        Pb: PublishIntent<NoIntent, Idx>,
-    {
+    fn delivered(&mut self, _: PacketNumberSpaceKind, summary: DatagramSummary) {
         if let Some(progress) = summary.progress.upgrade() {
             progress.settle(true);
         }
     }
 
-    fn lost<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, summary: &DatagramSummary)
-    where
-        Pb: PublishIntent<NoIntent, Idx>,
-    {
+    /// A lost DATAGRAM is not sent again (RFC 9221 §5.1).
+    fn lost(&mut self, _: PacketNumberSpaceKind, summary: &DatagramSummary) {
         if let Some(progress) = summary.progress.upgrade() {
             progress.settle(false);
         }

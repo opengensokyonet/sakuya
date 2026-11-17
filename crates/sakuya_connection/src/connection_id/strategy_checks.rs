@@ -49,7 +49,7 @@ use super::{
     datagram::DatagramConnectionId,
 };
 use crate::{
-    frame_source::{FrameSource, NoIntent},
+    frame_source::FrameSource,
     v1::send::RetireConnectionIdSummary,
     write::{FlightClass, NotLast, OpenPacket, PacketWriting, Supplied, sealed},
 };
@@ -126,7 +126,7 @@ impl PacketSendAttempt for NoAttempt {
 fn write_waiting<I, Id, S>(strategy: &mut S) -> Vec<u64>
 where
     S: DestinationConnectionIdStrategy<Id, I, RecordingResetTokenRegistrar>
-        + for<'a> FrameSource<Item<'a> = u64, Summary = RetireConnectionIdSummary, Intent = NoIntent>,
+        + for<'a> FrameSource<Item<'a> = u64, Summary = RetireConnectionIdSummary>,
 {
     let waiting: Vec<u64> = strategy
         .waiting_retirements()
@@ -510,7 +510,7 @@ where
 pub fn check_retire_prior_to_leaves_retirements_waiting<I, Id, S, New>(new: New)
 where
     S: DestinationConnectionIdStrategy<Id, I, RecordingResetTokenRegistrar>
-        + for<'a> FrameSource<Item<'a> = u64, Summary = RetireConnectionIdSummary, Intent = NoIntent>,
+        + for<'a> FrameSource<Item<'a> = u64, Summary = RetireConnectionIdSummary>,
     New: Fn(ConnectionId, Option<StatelessResetToken>, ActiveConnectionIdLimit) -> S,
 {
     let mut strategy = new(connection_id(0), Some(reset_token(0)), limit(4));
@@ -551,7 +551,7 @@ where
 pub fn check_lost_retirement_waits_again<I, Id, S, New>(new: New)
 where
     S: DestinationConnectionIdStrategy<Id, I, RecordingResetTokenRegistrar>
-        + for<'a> FrameSource<Item<'a> = u64, Summary = RetireConnectionIdSummary, Intent = NoIntent>,
+        + for<'a> FrameSource<Item<'a> = u64, Summary = RetireConnectionIdSummary>,
     New: Fn(ConnectionId, Option<StatelessResetToken>, ActiveConnectionIdLimit) -> S,
 {
     let space = PacketNumberSpaceKind::ApplicationData;
@@ -565,14 +565,14 @@ where
     );
 
     let summary = RetireConnectionIdSummary { sequence: 0 };
-    strategy.lost(&mut (), space, &summary);
+    strategy.lost(space, &summary);
     assert_eq!(
         write_waiting(&mut strategy),
         [0],
         "a lost retirement waits again with the same sequence number"
     );
-    strategy.delivered(&mut (), space, summary);
-    strategy.lost(&mut (), space, &summary);
+    strategy.delivered(space, summary);
+    strategy.lost(space, &summary);
     assert_eq!(
         write_waiting(&mut strategy),
         [0u64; 0],

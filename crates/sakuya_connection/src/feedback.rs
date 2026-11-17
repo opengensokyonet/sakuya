@@ -16,8 +16,7 @@
 //! declared lost, each is lent to the source, and stays in the record kept
 //! for a late acknowledgment, which then delivers it. The list of parts
 //! hands each summary to the part it belongs to, and the part's list of
-//! kinds to the source of its kind ([`PartsSendFeedback`]), with the
-//! publisher the sources publish through.
+//! kinds to the source of its kind ([`PartsSendFeedback`]).
 //!
 //! Feedback is given where the packet is settled: in the dispatch of an
 //! ACK frame on a logical path, in an expiry of a link path's recovery
@@ -95,20 +94,19 @@ where
 ///
 /// It is implemented for every list whose parts' lists of frame sources
 /// implement [`FeedFrameSources`]; `L` is the whole composition, `V` the
-/// lineage where the feedback is given, `Pb` the publisher lent to the
-/// sources and `Hs` the positions of each part's impl. Each summary comes
-/// with the packet number space of the packet it was written into.
+/// lineage where the feedback is given and `Hs` the positions of each
+/// part's impl. Each summary comes with the packet number space of the
+/// packet it was written into.
 ///
 /// An intent not fulfilled goes back the same way, whatever kind of packet
 /// would have carried it: its part gives the item it stands for
 /// ([`SendIntentPart::intent_item`]).
-pub trait PartsSendFeedback<T: ConnectionChoices, L, V, Pb, Hs>:
+pub trait PartsSendFeedback<T: ConnectionChoices, L, V, Hs>:
     FeedbackSummariesOf + SendIntentsOf
 {
     /// The packet the frame of `summary` was written into was acknowledged.
     fn delivered(
         lineage: &mut Lineage<'_, V>,
-        publish: &mut Pb,
         now: InstantOf<T>,
         space: PacketNumberSpaceKind,
         summary: Self::FeedbackSummaries<InstantOf<T>>,
@@ -120,7 +118,6 @@ pub trait PartsSendFeedback<T: ConnectionChoices, L, V, Pb, Hs>:
     /// kept, for a late acknowledgment.
     fn lost(
         lineage: &mut Lineage<'_, V>,
-        publish: &mut Pb,
         now: InstantOf<T>,
         space: PacketNumberSpaceKind,
         summary: &Self::FeedbackSummaries<InstantOf<T>>,
@@ -137,24 +134,12 @@ pub trait PartsSendFeedback<T: ConnectionChoices, L, V, Pb, Hs>:
     );
 }
 
-impl<T: ConnectionChoices, L, V, Pb> PartsSendFeedback<T, L, V, Pb, HNil> for HNil {
-    fn delivered(
-        _: &mut Lineage<'_, V>,
-        _: &mut Pb,
-        _: InstantOf<T>,
-        _: PacketNumberSpaceKind,
-        summary: CNil,
-    ) {
+impl<T: ConnectionChoices, L, V> PartsSendFeedback<T, L, V, HNil> for HNil {
+    fn delivered(_: &mut Lineage<'_, V>, _: InstantOf<T>, _: PacketNumberSpaceKind, summary: CNil) {
         match summary {}
     }
 
-    fn lost(
-        _: &mut Lineage<'_, V>,
-        _: &mut Pb,
-        _: InstantOf<T>,
-        _: PacketNumberSpaceKind,
-        summary: &CNil,
-    ) {
+    fn lost(_: &mut Lineage<'_, V>, _: InstantOf<T>, _: PacketNumberSpaceKind, summary: &CNil) {
         match *summary {}
     }
 
@@ -163,44 +148,42 @@ impl<T: ConnectionChoices, L, V, Pb> PartsSendFeedback<T, L, V, Pb, HNil> for HN
     }
 }
 
-impl<T, L, V, Pb, P, Ps, H, Hs> PartsSendFeedback<T, L, V, Pb, HCons<H, Hs>> for HCons<P, Ps>
+impl<T, L, V, P, Ps, H, Hs> PartsSendFeedback<T, L, V, HCons<H, Hs>> for HCons<P, Ps>
 where
     T: ConnectionChoices,
     P: SendIntentPart,
-    P::FrameSources: FeedFrameSources<T, L, V, Pb, H>,
-    Ps: PartsSendFeedback<T, L, V, Pb, Hs>,
+    P::FrameSources: FeedFrameSources<T, L, V, H>,
+    Ps: PartsSendFeedback<T, L, V, Hs>,
 {
     fn delivered(
         lineage: &mut Lineage<'_, V>,
-        publish: &mut Pb,
         now: InstantOf<T>,
         space: PacketNumberSpaceKind,
         summary: Self::FeedbackSummaries<InstantOf<T>>,
     ) {
         match summary {
             Coproduct::Inl(summary) => {
-                <P::FrameSources as FeedFrameSources<T, L, V, Pb, H>>::delivered(
-                    lineage, publish, now, space, summary,
+                <P::FrameSources as FeedFrameSources<T, L, V, H>>::delivered(
+                    lineage, now, space, summary,
                 );
             }
-            Coproduct::Inr(summary) => Ps::delivered(lineage, publish, now, space, summary),
+            Coproduct::Inr(summary) => Ps::delivered(lineage, now, space, summary),
         }
     }
 
     fn lost(
         lineage: &mut Lineage<'_, V>,
-        publish: &mut Pb,
         now: InstantOf<T>,
         space: PacketNumberSpaceKind,
         summary: &Self::FeedbackSummaries<InstantOf<T>>,
     ) {
         match summary {
             Coproduct::Inl(summary) => {
-                <P::FrameSources as FeedFrameSources<T, L, V, Pb, H>>::lost(
-                    lineage, publish, now, space, summary,
+                <P::FrameSources as FeedFrameSources<T, L, V, H>>::lost(
+                    lineage, now, space, summary,
                 );
             }
-            Coproduct::Inr(summary) => Ps::lost(lineage, publish, now, space, summary),
+            Coproduct::Inr(summary) => Ps::lost(lineage, now, space, summary),
         }
     }
 
@@ -212,7 +195,7 @@ where
     ) {
         match intent {
             Coproduct::Inl(intent) => {
-                <P::FrameSources as FeedFrameSources<T, L, V, Pb, H>>::unfulfilled(
+                <P::FrameSources as FeedFrameSources<T, L, V, H>>::unfulfilled(
                     lineage,
                     now,
                     P::intent_item(intent),

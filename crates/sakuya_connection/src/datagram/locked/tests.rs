@@ -27,7 +27,7 @@ use crate::{
             tests::{SummaryWriter, Written, datagram_summary},
         },
     },
-    frame_source::{FrameSource, Nowhere},
+    frame_source::FrameSource,
     send_strategy::{
         DatagramFillPlan, DatagramLimits, FrameSourceCursor, FrameSourceSet, InHead,
         LinkPathRoleKind, LinkPathSendPlanner, MinimumLengths, Observe, PacketOverheads,
@@ -438,8 +438,7 @@ fn a_datagram_sent_through_the_strategy_is_written_and_acknowledged() {
     assert_eq!(written.bytes, [0x31, 0x04, b'p', b'i', b'n', b'g']);
     assert_eq!(ticket.state(), DatagramState::Sent);
     assert!(supply_next(&mut planner, &mut core, || {}).is_none());
-    DatagramFrameSource.delivered::<_, Nowhere>(
-        &mut (),
+    DatagramFrameSource.delivered(
         PacketNumberSpaceKind::ApplicationData,
         datagram_summary(written.summaries.remove(0)),
     );

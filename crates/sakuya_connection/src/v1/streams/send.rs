@@ -7,8 +7,7 @@
 //! application's threads and from the driver alike; the stream set keeps
 //! the tickets, under the lock of the component each frame is about, and
 //! resizes or withdraws them there. Publishing one gives back the ticket of
-//! the intake ([`StreamIntentHandle`]); the intents are none a frame source
-//! publishes when its frames come back ([`NoIntent`]).
+//! the intake ([`StreamIntentHandle`]).
 //!
 //! A frame source of the streams is found in the lineage through the
 //! stream set of the established layer, which the lend appends to it, and
@@ -48,7 +47,7 @@ use crate::v1::SendParametersOf;
 use crate::{
     clock::InstantOf,
     feedback::InjectSummary,
-    frame_source::{FindFrameSource, FrameSource, FrameSourceKind, NoIntent, PublishIntent},
+    frame_source::{FindFrameSource, FrameSource, FrameSourceKind},
     send_strategy::{
         AnyActiveLinkPath, IntentTicketResize, IntentTicketWithdraw, MinimumLengths, SendIntent,
         SendIntentHandle, SendIntentIntake, SendStrategy, SendStrategyTypes, SharedPublishTo,
@@ -421,7 +420,7 @@ pub enum StreamSetFrameSummary {
 /// One of the nine kinds of frame sources of the stream set
 /// (`StreamFrameKind`): how an item of it is supplied to the set, and how
 /// its items and summaries go back to the set.
-pub trait StreamFrameKind: FrameSourceKind<Intent = NoIntent> {
+pub trait StreamFrameKind: FrameSourceKind {
     /// The summary of a frame of the kind, as instants do not matter to it.
     type FrameSummary: Copy;
 
@@ -497,7 +496,6 @@ where
     type Summary = F::FrameSummary;
     type Class = InFlightClass;
     type Item<'b> = F::Item<'b>;
-    type Intent = NoIntent;
 
     fn supply<W, Q, Idx>(
         &mut self,
@@ -515,19 +513,13 @@ where
         }
     }
 
-    fn delivered<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, summary: F::FrameSummary)
-    where
-        Pb: PublishIntent<NoIntent, Idx>,
-    {
+    fn delivered(&mut self, _: PacketNumberSpaceKind, summary: F::FrameSummary) {
         if let Some(set) = self.lineage.get_optional_mut::<X, Is>() {
             set.on_frame_delivered(&self.publish, F::set_summary(summary));
         }
     }
 
-    fn lost<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, summary: &F::FrameSummary)
-    where
-        Pb: PublishIntent<NoIntent, Idx>,
-    {
+    fn lost(&mut self, _: PacketNumberSpaceKind, summary: &F::FrameSummary) {
         if let Some(set) = self.lineage.get_optional_mut::<X, Is>() {
             set.on_frame_lost(&self.publish, F::set_summary(*summary));
         }
@@ -560,7 +552,6 @@ macro_rules! stream_frame_kinds {
         impl FrameSourceKind for $kind {
             type Item<'a> = $item;
             type Summary<I> = $summary;
-            type Intent = NoIntent;
         }
 
         impl StreamFrameKind for $kind {

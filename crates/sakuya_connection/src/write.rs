@@ -33,7 +33,7 @@ use snafu::{Snafu, ensure};
 use crate::{
     clock::{ConnectionChoices, InstantOf},
     feedback::InjectSummary,
-    frame_source::{FindFrameSource, FrameSource, FrameSourceKind, NoIntent, PublishIntent},
+    frame_source::{FindFrameSource, FrameSource, FrameSourceKind},
     take::Lineage,
 };
 
@@ -51,7 +51,6 @@ pub enum PaddingFrames {}
 impl FrameSourceKind for PaddingFrames {
     type Item<'a> = Infallible;
     type Summary<I> = PaddingSummary;
-    type Intent = NoIntent;
 }
 
 /// What the summaries of PADDING go back to: it does nothing with them.
@@ -62,7 +61,6 @@ impl FrameSource for PaddingFrameSource {
     type Summary = PaddingSummary;
     type Class = InFlightClass;
     type Item<'a> = Infallible;
-    type Intent = NoIntent;
 
     fn supply<W, P, Idx>(
         &mut self,
@@ -77,17 +75,9 @@ impl FrameSource for PaddingFrameSource {
         match item {}
     }
 
-    fn delivered<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, _: PaddingSummary)
-    where
-        Pb: PublishIntent<NoIntent, Idx>,
-    {
-    }
+    fn delivered(&mut self, _: PacketNumberSpaceKind, _: PaddingSummary) {}
 
-    fn lost<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, _: &PaddingSummary)
-    where
-        Pb: PublishIntent<NoIntent, Idx>,
-    {
-    }
+    fn lost(&mut self, _: PacketNumberSpaceKind, _: &PaddingSummary) {}
 
     /// PADDING is never planned: it has no intents.
     fn unfulfilled(&mut self, item: Infallible, _: Unfulfilled) {

@@ -30,7 +30,7 @@ use sakuya_connection::{
     driver::ConnectionDriver,
     error::ConnectionErrorsOf,
     feedback::InjectSummary,
-    frame_source::{FindFrameSource, FrameSource, FrameSourceKind, NoIntent, PublishIntent},
+    frame_source::{FindFrameSource, FrameSource, FrameSourceKind},
     layer::{self, EstablishedArgs, LinkPathArgs, LogicalPathArgs, NodeKey},
     others::OtherNodes,
     request::StructureRequest,
@@ -646,7 +646,6 @@ mod probe {
     impl FrameSourceKind for Frames {
         type Item<'a> = FillerIntent;
         type Summary<I> = Summary;
-        type Intent = NoIntent;
     }
     /// The source of the probe's frames writes the fillers it is given and
     /// logs that it was given each, and what comes back of their summaries.
@@ -655,7 +654,6 @@ mod probe {
         type Summary = Summary;
         type Class = sakuya_connection::write::InFlightClass;
         type Item<'a> = FillerIntent;
-        type Intent = NoIntent;
         fn supply<W, P, Idx>(
             &mut self,
             filler: FillerIntent,
@@ -688,16 +686,10 @@ mod probe {
             }
             sakuya_connection::write::Supplied::Open(packet)
         }
-        fn delivered<Pb, Idx>(&mut self, _: &mut Pb, space: PacketNumberSpaceKind, summary: Summary)
-        where
-            Pb: PublishIntent<NoIntent, Idx>,
-        {
+        fn delivered(&mut self, space: PacketNumberSpaceKind, summary: Summary) {
             log(format!("delivered {space:?} {}", summary.0));
         }
-        fn lost<Pb, Idx>(&mut self, _: &mut Pb, space: PacketNumberSpaceKind, summary: &Summary)
-        where
-            Pb: PublishIntent<NoIntent, Idx>,
-        {
+        fn lost(&mut self, space: PacketNumberSpaceKind, summary: &Summary) {
             log(format!("lost {space:?} {}", summary.0));
         }
         fn unfulfilled(

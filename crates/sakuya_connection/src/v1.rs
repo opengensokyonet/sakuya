@@ -107,7 +107,7 @@ use sakuya_wire::{
     var_int::VarInt,
 };
 
-use self::feedback::CoreLentFeedback;
+use self::feedback::LineageFeedback;
 use crate::{
     call::CallBundle,
     clock::{CheckedAdd, ConnectionChoices, InstantOf, LinkIdOf},
@@ -122,7 +122,7 @@ use crate::{
     feedback::FeedbackSummariesOf,
     frame_source::{
         EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts,
-        EstablishedSourceComponentsPart, FrameSource, NoIntent,
+        EstablishedSourceComponentsPart, FrameSource,
     },
     layer::{self, NodeKey},
     others::OtherNodes,
@@ -363,15 +363,11 @@ pub trait HostChoices<T: MakerChoices + ?Sized>: 'static {
     /// the RETIRE_CONNECTION_ID frames that retire the peer's connection
     /// IDs.
     type DestinationConnectionIds: DestinationConnectionIdStrategy<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>
-        + for<'a> FrameSource<
-            Item<'a> = u64,
-            Summary = send::RetireConnectionIdSummary,
-            Intent = NoIntent,
-        > + 'static =
-        crate::connection_id::sequence_map::SequenceMapDestinationConnectionIdStrategy<
-            LinkIdOf<T>,
-            ResetTokenRegistrarOf<T>,
-        >;
+        + for<'a> FrameSource<Item<'a> = u64, Summary = send::RetireConnectionIdSummary>
+        + 'static = crate::connection_id::sequence_map::SequenceMapDestinationConnectionIdStrategy<
+        LinkIdOf<T>,
+        ResetTokenRegistrarOf<T>,
+    >;
     /// What decides how many of this side's connection IDs the peer holds
     /// and when they are issued and dropped, one for each logical path; it
     /// issues them with the maker's
@@ -379,7 +375,7 @@ pub trait HostChoices<T: MakerChoices + ?Sized>: 'static {
     /// their registrations, and writes the NEW_CONNECTION_ID frames that
     /// disclose them.
     type LocalConnectionIds: LocalConnectionIdStrategy<LinkIdOf<T>, InstantOf<T>, LocalConnectionIdRegistrationOf<T>>
-        + for<'a> FrameSource<Item<'a> = u64, Summary = NewConnectionIdSummary, Intent = NoIntent>
+        + for<'a> FrameSource<Item<'a> = u64, Summary = NewConnectionIdSummary>
         + 'static = crate::connection_id::local::SequenceMapLocalConnectionIdStrategy<
         LocalConnectionIdRegistrationOf<T>,
         InstantOf<T>,
@@ -472,8 +468,7 @@ pub trait Side: 'static {
     /// The HANDSHAKE_DONE frames of version 1 are found in it: a server's
     /// sends them; a client's never has one waiting and writes nothing (RFC
     /// 9000 §19.20).
-    type Own: for<'a> FrameSource<Item<'a> = (), Summary = HandshakeDoneSummary, Intent = NoIntent>
-        + 'static;
+    type Own: for<'a> FrameSource<Item<'a> = (), Summary = HandshakeDoneSummary> + 'static;
 
     /// Whether a HANDSHAKE_DONE frame waits to be sent now, as `own` keeps
     /// it: a server's from the completion of its handshake until it is
@@ -1949,7 +1944,7 @@ where
         crate::take::TakeEach<'s, EstablishedSourceComponentsOfParts<T, L>, Is>,
     for<'v> <L as LineageLists<'v, T>>::LinkPathParents: GetAt<SendJournalsOf<T, L>, Ij>,
     for<'v> <L as LineageLists<'v, T>>::LinkPathParents:
-        CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
+        LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::LinkPath>,
@@ -1975,7 +1970,7 @@ where
                 continue;
             };
             let unsettled: Vec<_> = journals.take_link_path(&identifier).collect();
-            CoreLentFeedback::<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>::lost_each(
+            LineageFeedback::<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>::lost_each(
                 parents,
                 &mut established,
                 now,

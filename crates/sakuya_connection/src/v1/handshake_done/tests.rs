@@ -40,13 +40,13 @@ fn a_lost_frame_waits_again_until_one_is_delivered() {
     let mut source = HandshakeDoneSource::Waiting;
     assert_eq!(frames_written(&mut source).0, ["HANDSHAKE_DONE"]);
     assert_eq!(source, HandshakeDoneSource::InFlight);
-    FrameSource::lost(&mut source, &mut (), SPACE, &HandshakeDoneSummary);
+    FrameSource::lost(&mut source, SPACE, &HandshakeDoneSummary);
     assert!(source.is_waiting());
     assert_eq!(frames_written(&mut source).0, ["HANDSHAKE_DONE"]);
-    FrameSource::delivered(&mut source, &mut (), SPACE, HandshakeDoneSummary);
+    FrameSource::delivered(&mut source, SPACE, HandshakeDoneSummary);
     assert_eq!(source, HandshakeDoneSource::Delivered);
     // another copy lost after one was delivered is not sent again
-    FrameSource::lost(&mut source, &mut (), SPACE, &HandshakeDoneSummary);
+    FrameSource::lost(&mut source, SPACE, &HandshakeDoneSummary);
     assert_eq!(source, HandshakeDoneSource::Delivered);
 }
 

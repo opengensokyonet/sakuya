@@ -44,7 +44,7 @@ use snafu::Snafu;
 
 use super::{
     Choices,
-    feedback::CoreLentFeedback,
+    feedback::LineageFeedback,
     keys::{DirectionKeys, LevelKeys},
     link::LinkClone,
     pto::ProbeTimeout,
@@ -300,7 +300,7 @@ where
     RecoveryFactoryOf<T, L>: RecoveryFactory<T::Link>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<SendJournalsOf<T, L>, Ij>
         + GetAt<RecoveryFactoryOf<T, L>, If>
-        + CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
+        + LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![LinkClone<T::Link>], Il>,
@@ -328,7 +328,7 @@ where
                 earliest = Some(earliest.map_or(at, |e| e.min(at)));
             }
         }
-        CoreLentFeedback::<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>::lost_each(
+        LineageFeedback::<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>::lost_each(
             lineage,
             &mut established,
             now,

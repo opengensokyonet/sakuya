@@ -154,7 +154,7 @@ use super::{
     connection_ids::{ConnectionIdsOf, LinkPathResetTokenRegistrar, ResetTokenRegistrarOf},
     datagram_batch::{BatchedDatagram, BatchedPacket, DatagramBatch},
     error::{ConnectionError, V1ConnectionErrorOf},
-    feedback::CoreLentFeedback,
+    feedback::LineageFeedback,
     idle::IdleTimeout,
     key_phase::KeyPhaseNumbers,
     key_update::prepare_one_rtt_packets,
@@ -390,8 +390,8 @@ pub type SettleReads<T, L> = HList![
 /// content by ([`DriverContentOf`]), `Ipd` of PADDING's summary in the sum of summaries; for handing over, `Ii`, `Ih`, `Io` of the
 /// keys and `Il` of the link's clone; for settling, `Ij` of the send
 /// journals, `If` of the recovery factory, `Iv` of [`SettleReads`], `Ie`
-/// of the idle timeout, `Iq` of [`SettleRecoveryTakes`], `Hf` of the
-/// core and each part's frame sources, for feedback, and `Ist` of the
+/// of the idle timeout, `Iq` of [`SettleRecoveryTakes`], `Hf` of
+/// each part's frame sources, for feedback, and `Ist` of the
 /// components of the established layer the frame sources find
 /// ([`EstablishedSourceComponentsOfParts`]), which filling and feedback borrow; `Ipp` and `Ima` of
 /// the peer's `max_udp_payload_size` and `max_ack_delay`; `Jx`, `Jr` and `Jm` of the stored part of
@@ -684,7 +684,7 @@ where
             Hs,
         >,
     for<'x> <L as LineageLists<'x, T>>::LinkPath:
-        CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
+        LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
@@ -1714,7 +1714,7 @@ fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ist, Ipp, Ima, Jx, Jr, Jm>(
         + GetAt<RecoveryFactoryOf<T, L>, If>
         + ReadEach<SettleReads<T, L>, Iv>,
     for<'x> <L as LineageLists<'x, T>>::LinkPath:
-        CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
+        LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,
@@ -1759,7 +1759,7 @@ fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ist, Ipp, Ima, Jx, Jr, Jm>(
                 continue;
             };
             let record = space_journals.send_result_unknown(sealed, retain_until(space));
-            CoreLentFeedback::<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>::lost_each(
+            LineageFeedback::<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>::lost_each(
                 lineage,
                 &mut established,
                 now,
@@ -2072,7 +2072,7 @@ where
             Hs,
         >,
     for<'x> <L as LineageLists<'x, T>>::LinkPath:
-        CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
+        LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     L: EstablishedSourceComponentsOf<T, L>,
     for<'s> NodeData<T, L, layer::Established>: FlatMut<'s>,

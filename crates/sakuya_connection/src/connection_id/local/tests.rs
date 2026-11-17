@@ -146,18 +146,15 @@ fn a_lost_frame_waits_again_until_acknowledged_or_retired() {
     let (mut strategy, mut issuer) = confirmed(8);
     assert_eq!(written(&mut strategy), [1, 2, 3]);
     strategy.lost(
-        &mut (),
         PacketNumberSpaceKind::ApplicationData,
         &NewConnectionIdSummary { sequence: 2 },
     );
     assert_eq!(written(&mut strategy), [2]);
     strategy.delivered(
-        &mut (),
         PacketNumberSpaceKind::ApplicationData,
         NewConnectionIdSummary { sequence: 2 },
     );
     strategy.lost(
-        &mut (),
         PacketNumberSpaceKind::ApplicationData,
         &NewConnectionIdSummary { sequence: 2 },
     );
@@ -173,7 +170,6 @@ fn a_lost_frame_waits_again_until_acknowledged_or_retired() {
         .unwrap();
     assert_eq!(written(&mut strategy), [4], "its replacement");
     strategy.lost(
-        &mut (),
         PacketNumberSpaceKind::ApplicationData,
         &NewConnectionIdSummary { sequence: 3 },
     );

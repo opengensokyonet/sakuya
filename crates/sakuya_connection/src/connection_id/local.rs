@@ -49,7 +49,7 @@ use sakuya_stream::send_options::destination::Unfulfilled;
 
 use crate::{
     feedback::InjectSummary,
-    frame_source::{FrameSource, NoIntent, PublishIntent},
+    frame_source::FrameSource,
     write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
 
@@ -419,7 +419,6 @@ impl<R, I> FrameSource for SequenceMapLocalConnectionIdStrategy<R, I> {
     type Summary = NewConnectionIdSummary;
     type Class = InFlightClass;
     type Item<'a> = u64;
-    type Intent = NoIntent;
 
     /// The frame is written only while it waits to be sent and the peer did
     /// not retire the connection ID; once written, it is in flight.
@@ -454,14 +453,7 @@ impl<R, I> FrameSource for SequenceMapLocalConnectionIdStrategy<R, I> {
         Supplied::Open(packet)
     }
 
-    fn delivered<Pb, Idx>(
-        &mut self,
-        _: &mut Pb,
-        _: PacketNumberSpaceKind,
-        summary: NewConnectionIdSummary,
-    ) where
-        Pb: PublishIntent<NoIntent, Idx>,
-    {
+    fn delivered(&mut self, _: PacketNumberSpaceKind, summary: NewConnectionIdSummary) {
         if let Some(issued) = self
             .issued
             .as_mut()
@@ -473,14 +465,7 @@ impl<R, I> FrameSource for SequenceMapLocalConnectionIdStrategy<R, I> {
 
     /// A frame lost while its connection ID is neither acknowledged nor
     /// retired waits to be sent again.
-    fn lost<Pb, Idx>(
-        &mut self,
-        _: &mut Pb,
-        _: PacketNumberSpaceKind,
-        summary: &NewConnectionIdSummary,
-    ) where
-        Pb: PublishIntent<NoIntent, Idx>,
-    {
+    fn lost(&mut self, _: PacketNumberSpaceKind, summary: &NewConnectionIdSummary) {
         if let Some(issued) = self
             .issued
             .as_mut()

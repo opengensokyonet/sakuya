@@ -127,7 +127,7 @@ use super::{
     },
     dispatch::drain_link_paths,
     error::V1ConnectionErrorOf,
-    feedback::CoreLentFeedback,
+    feedback::LineageFeedback,
     idle::IdleTimeout,
     key_phase::KeyPhaseNumbers,
     keys::{HandshakeKeys, InitialKeys, OneRttKeys, OneRttReceiveKeys, PacketProtectionBackend},
@@ -651,7 +651,7 @@ where
         + GetAt<<T::Side as Side>::Own, Iw>
         + GetAt<SendJournalsOf<T, L>, Isj>
         + GetAt<RecoveryFactoryOf<T, L>, If>
-        + CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
+        + LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![LinkClone<T::Link>], Ile>,
     for<'x> NodeData<T, L, layer::Recovery>: FlatMut<'x>,
@@ -983,7 +983,7 @@ fn receive_owned<
         + GetAt<<T::Side as Side>::Own, Iw>
         + GetAt<SendJournalsOf<T, L>, Isj>
         + GetAt<RecoveryFactoryOf<T, L>, If>
-        + CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
+        + LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![LinkClone<T::Link>], Ile>,
     for<'x> NodeData<T, L, layer::Recovery>: FlatMut<'x>,
@@ -1189,7 +1189,7 @@ where
         + GetAt<<T::Side as Side>::Own, Iw>
         + GetAt<SendJournalsOf<T, L>, Isj>
         + GetAt<RecoveryFactoryOf<T, L>, If>
-        + CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
+        + LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![LinkClone<T::Link>], Ile>,
     for<'x> NodeData<T, L, layer::Recovery>: FlatMut<'x>,
@@ -1682,7 +1682,7 @@ where
         + GetAt<<T::Side as Side>::Own, Iw>
         + GetAt<SendJournalsOf<T, L>, Isj>
         + GetAt<RecoveryFactoryOf<T, L>, If>
-        + CoreLentFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
+        + LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![LinkClone<T::Link>], Ile>,
     for<'x> NodeData<T, L, layer::Recovery>: FlatMut<'x>,
