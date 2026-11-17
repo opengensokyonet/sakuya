@@ -868,6 +868,185 @@ fn balanced(json: &str) -> bool {
     open.is_empty() && !in_string
 }
 
+/// Runs the scenario twice with `seed`, each run writing qlog into a new
+/// directory named after `name`, and checks that both runs met the same
+/// fates and wrote the same events, by name, in the same order; the first
+/// run's outcome and the second run's events of the client and the server.
+fn twice_logged(
+    seed: u64,
+    impairments: &Impairments,
+    name: &str,
+) -> (Outcome, Vec<QlogEvent>, Vec<QlogEvent>) {
+    let run = || {
+        // the client's first connection ID is random: each run its own file
+        let qlog = qlog_dir(name);
+        let outcome = exchange(seed, impairments.clone(), Change::None, Some(&qlog));
+        (
+            outcome,
+            qlog_events(&qlog, "client"),
+            qlog_events(&qlog, "server"),
+        )
+    };
+    let (first, first_client, first_server) = run();
+    let (second, client, server) = run();
+    assert_eq!(first, second, "the same seed meets the same fates");
+    let names = |events: &[QlogEvent]| {
+        events
+            .iter()
+            .map(|event| event.name.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(&first_client), names(&client), "the client's events");
+    assert_eq!(names(&first_server), names(&server), "the server's events");
+    summarize(seed, &first.to_server, &first.to_client);
+    (first, client, server)
+}
+
+/// The packet an event of `packet_sent`, `packet_received` or
+/// `packet_lost` is about: its type and number.
+fn packet_of(event: &QlogEvent) -> (String, u64) {
+    let header = between(&event.record, r#""header":{"#, "}");
+    let packet_type = between(header, r#""packet_type":""#, "\"").to_owned();
+    let key = r#""packet_number":"#;
+    let at = header.find(key).expect("a packet number") + key.len();
+    let number = header[at..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .expect("a packet number");
+    (packet_type, number)
+}
+
+/// The data a STREAM or CRYPTO frame carries: for a STREAM frame, its
+/// stream; the range of bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Carried {
+    Stream {
+        stream_id: u64,
+        range: core::ops::Range<u64>,
+    },
+    Crypto {
+        range: core::ops::Range<u64>,
+    },
+}
+
+/// The STREAM and CRYPTO frames of the packet event `event` that carry
+/// bytes, as this crate's qlog writes them.
+fn carried(event: &QlogEvent) -> Vec<Carried> {
+    let record = &event.record;
+    let number = |frame: &str, key: &str| {
+        frame.find(key).map(|at| {
+            let digits: String = frame[at + key.len()..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            digits.parse::<u64>().expect("a number")
+        })
+    };
+    let mut frames = Vec::new();
+    for kind in ["stream", "crypto"] {
+        let start = format!(r#"{{"frame_type":"{kind}""#);
+        let mut from = 0;
+        while let Some(at) = record[from..].find(&start) {
+            let at = from + at;
+            // the frame's object ends after its `raw` object
+            let end = at + record[at..].find("}}").expect("the frame ends") + 2;
+            let frame = &record[at..end];
+            from = end;
+            let offset = number(frame, r#""offset":"#).unwrap_or(0);
+            let length = number(frame, r#""length":"#).expect("a length");
+            if length == 0 {
+                continue;
+            }
+            let range = offset..offset + length;
+            frames.push(match kind {
+                "stream" => Carried::Stream {
+                    stream_id: number(frame, r#""stream_id":"#).expect("a stream"),
+                    range,
+                },
+                _ => Carried::Crypto { range },
+            });
+        }
+    }
+    frames
+}
+
+/// Whether `ranges` cover all of `range`.
+fn covered(range: &core::ops::Range<u64>, ranges: &[core::ops::Range<u64>]) -> bool {
+    let mut ranges = ranges.to_vec();
+    ranges.sort_by_key(|range| range.start);
+    let mut through = range.start;
+    for other in ranges {
+        if other.start > through {
+            break;
+        }
+        through = through.max(other.end);
+        if through >= range.end {
+            return true;
+        }
+    }
+    through >= range.end
+}
+
+/// For each packet `sender` declared lost that `receiver` never received,
+/// the stream and CRYPTO data it carried reached `receiver` in other
+/// packets: of the same stream, or for CRYPTO data of the same packet type
+/// (its packet number space). The other frames are not compared: PING is
+/// not sent again, and flow control frames are sent again with newer
+/// values (RFC 9000 §13.3). The number of the packets checked.
+fn lost_data_arrives(sender: &[QlogEvent], receiver: &[QlogEvent]) -> usize {
+    let received: Vec<((String, u64), Vec<Carried>)> = receiver
+        .iter()
+        .filter(|event| event.name == "quic:packet_received")
+        .map(|event| (packet_of(event), carried(event)))
+        .collect();
+    let mut checked = 0;
+    for lost in sender
+        .iter()
+        .filter(|event| event.name == "quic:packet_lost")
+    {
+        let packet = packet_of(lost);
+        let sent = sender
+            .iter()
+            .find(|event| event.name == "quic:packet_sent" && packet_of(event) == packet)
+            .unwrap_or_else(|| panic!("the lost packet {packet:?} was sent"));
+        if received.iter().any(|(other, _)| *other == packet) {
+            // declared lost, but it arrived
+            continue;
+        }
+        checked += 1;
+        for data in carried(sent) {
+            let mut elsewhere = Vec::new();
+            for ((packet_type, _), frames) in &received {
+                for frame in frames {
+                    match (&data, frame) {
+                        (
+                            Carried::Stream { stream_id, .. },
+                            Carried::Stream {
+                                stream_id: other,
+                                range,
+                            },
+                        ) if stream_id == other => elsewhere.push(range.clone()),
+                        (Carried::Crypto { .. }, Carried::Crypto { range })
+                            if *packet_type == packet.0 =>
+                        {
+                            elsewhere.push(range.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let (Carried::Stream { range, .. } | Carried::Crypto { range }) = &data;
+            assert!(
+                covered(range, &elsewhere),
+                "{data:?} of the lost packet {packet:?} arrives in other packets"
+            );
+        }
+    }
+    checked
+}
+
 // ==== the scenarios ====
 
 #[test]
@@ -885,8 +1064,12 @@ fn the_answer_arrives_when_three_in_ten_datagrams_are_lost_at_most_three_in_a_ro
         }),
         ..plain()
     });
-    let outcome = twice(42, &impairments, || Change::None);
+    let (outcome, client, server) = twice_logged(42, &impairments, "loss");
     assert!(dropped(&outcome.to_server) > 0 && dropped(&outcome.to_client) > 0);
+    // what the lost packets carried reaches the peer in others
+    let checked = lost_data_arrives(&client, &server) + lost_data_arrives(&server, &client);
+    println!("[impairment] seed 42: {checked} packets declared lost and never received");
+    assert!(checked > 0, "some packets declared lost were lost");
 }
 
 #[test]
@@ -928,9 +1111,44 @@ fn the_answer_arrives_when_datagrams_are_corrupted_near_their_start() {
         corrupt: Probability::percent(5),
         ..plain()
     });
-    let outcome = twice(11, &impairments, || Change::None);
+    let (outcome, client, server) = twice_logged(11, &impairments, "corruption");
     let all = || outcome.to_server.iter().chain(&outcome.to_client);
     assert!(all().any(|fate| fate.corrupted.is_some()));
+    // a corrupted packet does not open and is dropped, or a corrupted
+    // connection ID leaves its datagram to no connection; a packet fails to
+    // open only on a side some corrupted datagram went to, and neither side
+    // closes for an error
+    let failed = |events: &[QlogEvent]| {
+        events
+            .iter()
+            .filter(|event| {
+                event.name == "quic:packet_dropped"
+                    && event.has(r#""trigger":"decryption_failure""#)
+            })
+            .count()
+    };
+    let corrupted =
+        |fates: &[DatagramFate]| fates.iter().filter(|fate| fate.corrupted.is_some()).count();
+    for (side, events, toward) in [
+        ("client", &client, &outcome.to_client),
+        ("server", &server, &outcome.to_server),
+    ] {
+        assert!(
+            failed(events) == 0 || corrupted(toward) > 0,
+            "the {side} fails to open packets only when datagrams to it are corrupted"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.name == "quic:connection_closed"
+                    && event.has(r#""connection_error""#)),
+            "the {side} does not close for a transport error"
+        );
+    }
+    assert!(
+        failed(&client) + failed(&server) > 0,
+        "some corrupted packet does not open"
+    );
 }
 
 #[test]
