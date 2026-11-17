@@ -388,8 +388,9 @@ fn supply_next(
     core: &mut Core,
     mut before: impl FnMut(),
 ) -> Option<Written> {
+    let driver = crate::send_strategy::DriverContent::default();
     let Poll::Ready(PlannedDatagram::Fill(mut plan)) =
-        planner.poll_plan(core, &mut Context::from_waker(Waker::noop()))
+        planner.poll_plan(core, &driver, &mut Context::from_waker(Waker::noop()))
     else {
         return None;
     };
@@ -504,8 +505,9 @@ fn an_unfulfilled_datagram_is_published_again_at_once() {
         .intake()
         .handle::<DatagramIntent<Urgency>, InHead<Here>>();
     let ticket = writer.send(Bytes::from_static(b"again")).expect("taken");
+    let driver = crate::send_strategy::DriverContent::default();
     let Poll::Ready(PlannedDatagram::Fill(mut plan)) =
-        planner.poll_plan(&mut core, &mut Context::from_waker(Waker::noop()))
+        planner.poll_plan(&mut core, &driver, &mut Context::from_waker(Waker::noop()))
     else {
         panic!("the datagram is planned")
     };

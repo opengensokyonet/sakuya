@@ -13,16 +13,13 @@ use std::{
 };
 
 use sakuya_connection::send_strategy::{
-    AnyActiveLinkPath, DatagramLimits, InjectSendIntent, IntakeSendIntentHandle,
-    IntentRejectedError, LinkPathRoleKind, LinkPathSendPlanner, Observe, PacketOverheads,
-    PlannedDatagram, PlannerLinkPath, Publish, PublishOutcome, PublishTo, ResendCloseIntent,
-    SendIntent, SendIntentIntake, SendStrategy, SendStrategyTypes, SharedPublishTo,
+    AnyActiveLinkPath, DatagramLimits, DriverContent, InjectSendIntent, IntakeSendIntentHandle,
+    LinkPathRoleKind, LinkPathSendPlanner, Observe, PacketOverheads, PlannedDatagram,
+    PublishOutcome, SendIntent, SendIntentIntake, SendStrategy, SendStrategyTypes, SharedPublishTo,
     ranked::{
-        LinkPathIntentTicket, RankedCoreIntent, RankedIntent, RankedLinkPathSendPlanner,
-        RankedSendIntake, RankedSendStrategy,
+        IntentTicket, RankedIntent, RankedLinkPathSendPlanner, RankedSendIntake, RankedSendStrategy,
     },
 };
-use sakuya_connection::v1::{path_response::PathResponseIntent, send::ProbePingIntent};
 use sakuya_stream::connection::CloseReason;
 use sakuya_wire::v1::encryption_level::EncryptionLevel;
 
@@ -75,27 +72,6 @@ impl<I: SendStrategyTypes> Default for IntentEndingSendStrategy<I> {
     }
 }
 
-impl<I: SendStrategyTypes, J: RankedCoreIntent> PublishOutcome<J, AnyActiveLinkPath>
-    for IntentEndingSendStrategy<I>
-{
-    type Outcome = J::Outcome<I::CloseCause>;
-}
-
-impl<I, J, Idx> PublishTo<J, AnyActiveLinkPath, Idx> for IntentEndingSendStrategy<I>
-where
-    I: SendStrategyTypes,
-    J: RankedCoreIntent,
-    I::SendIntents: InjectSendIntent<J, Idx>,
-{
-    fn publish_to(&mut self, intent: J, destination: AnyActiveLinkPath) -> Self::Outcome {
-        <RankedSendStrategy<I> as PublishTo<J, AnyActiveLinkPath, Idx>>::publish_to(
-            &mut self.inner,
-            intent,
-            destination,
-        )
-    }
-}
-
 /// The ranked strategy's intake, keeping what is marked.
 pub struct KeepingSendIntake<I: SendStrategyTypes> {
     inner: RankedSendIntake<I>,
@@ -111,16 +87,16 @@ impl<I: SendStrategyTypes> Clone for KeepingSendIntake<I> {
     }
 }
 
-impl<I: SendStrategyTypes, J: RankedCoreIntent> PublishOutcome<J, AnyActiveLinkPath>
+impl<I: SendStrategyTypes, J: SendIntent> PublishOutcome<J, AnyActiveLinkPath>
     for KeepingSendIntake<I>
 {
-    type Outcome = J::Outcome<I::CloseCause>;
+    type Outcome = IntentTicket<I::CloseCause>;
 }
 
 impl<I, J, Idx> SharedPublishTo<J, AnyActiveLinkPath, Idx> for KeepingSendIntake<I>
 where
     I: SendStrategyTypes,
-    J: RankedCoreIntent + Clone + Debug,
+    J: SendIntent + Clone + Debug,
     I::SendIntents: InjectSendIntent<J, Idx>,
 {
     fn publish_to(&self, intent: J, destination: AnyActiveLinkPath) -> Self::Outcome {
@@ -202,59 +178,6 @@ pub struct IntentEndingPlanner<I: SendStrategyTypes> {
     kept: Kept<I::SendIntents>,
 }
 
-impl<I: SendStrategyTypes> PublishOutcome<ProbePingIntent, PlannerLinkPath>
-    for IntentEndingPlanner<I>
-{
-    type Outcome = Result<LinkPathIntentTicket, IntentRejectedError<ProbePingIntent>>;
-}
-
-impl<I, Idx> Publish<ProbePingIntent, Idx> for IntentEndingPlanner<I>
-where
-    I: SendStrategyTypes,
-    I::SendIntents: InjectSendIntent<ProbePingIntent, Idx>,
-{
-    fn publish(&mut self, intent: ProbePingIntent) -> Self::Outcome {
-        <RankedLinkPathSendPlanner<I> as Publish<ProbePingIntent, Idx>>::publish(
-            &mut self.inner,
-            intent,
-        )
-    }
-}
-
-impl<I: SendStrategyTypes> PublishOutcome<PathResponseIntent, PlannerLinkPath>
-    for IntentEndingPlanner<I>
-{
-    type Outcome = Result<LinkPathIntentTicket, IntentRejectedError<PathResponseIntent>>;
-}
-
-impl<I, Idx> Publish<PathResponseIntent, Idx> for IntentEndingPlanner<I>
-where
-    I: SendStrategyTypes,
-    I::SendIntents: InjectSendIntent<PathResponseIntent, Idx>,
-{
-    fn publish(&mut self, intent: PathResponseIntent) -> Self::Outcome {
-        <RankedLinkPathSendPlanner<I> as Publish<PathResponseIntent, Idx>>::publish(
-            &mut self.inner,
-            intent,
-        )
-    }
-}
-
-impl<I: SendStrategyTypes> PublishOutcome<ResendCloseIntent, PlannerLinkPath>
-    for IntentEndingPlanner<I>
-{
-    type Outcome = ();
-}
-
-impl<I: SendStrategyTypes> Publish<ResendCloseIntent, ()> for IntentEndingPlanner<I> {
-    fn publish(&mut self, intent: ResendCloseIntent) {
-        <RankedLinkPathSendPlanner<I> as Publish<ResendCloseIntent, ()>>::publish(
-            &mut self.inner,
-            intent,
-        );
-    }
-}
-
 impl<I: SendStrategyTypes> Observe<DatagramLimits> for IntentEndingPlanner<I> {
     fn observe(&mut self, change: DatagramLimits) {
         self.inner.observe(change);
@@ -282,9 +205,10 @@ where
     fn poll_plan<'a>(
         &'a mut self,
         core: &'a mut Self::Core,
+        driver: &'a DriverContent<I::SendIntents>,
         cx: &mut Context<'_>,
     ) -> Poll<PlannedDatagram<Self::Plan<'a>>> {
-        self.inner.poll_plan(&mut core.inner, cx)
+        self.inner.poll_plan(&mut core.inner, driver, cx)
     }
 
     /// What the ranked planner ends, and every intent kept.

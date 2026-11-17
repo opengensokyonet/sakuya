@@ -52,7 +52,7 @@ use crate::{
     send_strategy::{
         AnyActiveLinkPath, IntentTicketResize, IntentTicketWithdraw, MinimumLengths, SendIntent,
         SendIntentHandle, SendIntentIntake, SendStrategy, SendStrategyTypes, SharedPublishTo,
-        ranked::{IntentTicket, RankedCoreIntent, RankedIntent, SendPriority, SendRank},
+        ranked::{RankedIntent, SendPriority, SendRank},
     },
     take::{GetAt, GetOptionalAt, Lineage},
     v1::{
@@ -275,11 +275,6 @@ impl<P: SendUrgency> RankedIntent for StreamIntent<P> {
     fn stays_after_writing(&self) -> bool {
         matches!(self, Self::Stream { .. })
     }
-}
-
-/// The stream set keeps the tickets, one kind for the nine frames.
-impl<P> RankedCoreIntent for StreamIntent<P> {
-    type Outcome<C> = IntentTicket<C>;
 }
 
 /// A handle that publishes the intents of the streams, with the parameters

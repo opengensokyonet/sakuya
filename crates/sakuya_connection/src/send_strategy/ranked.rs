@@ -2,29 +2,37 @@
 //! validation, the handshake, control frames, path MTU probes and
 //! application data, and within a rank by encryption level.
 //!
-//! Content that does not fit holds its place: nothing ranked after it goes
-//! into the datagram, so it is not starved by what comes later, unless it
-//! does not hold its place (a path MTU probe, or content waiting for a
-//! larger datagram size). Content whose kind of packet the link path
-//! cannot send at all now, as its keys are gone or no connection ID is
-//! offered, is passed over: it holds no place and leaves no threshold, as
-//! no room would let it go. A datagram's packets go in increasing encryption
-//! level: content of a lower level than what is already planned yields, and
-//! with it everything after it, to the next datagram.
+//! A plan orders content; whether an item fits is found when it is
+//! written. Content that does not fit an empty datagram is not planned,
+//! and leaves the least room it needs as a threshold: when it holds its
+//! place, nothing ranked after it goes into the datagram, so it is not
+//! starved by what comes later, unless it does not hold its place (a path
+//! MTU probe, or content waiting for a larger datagram size). Each item
+//! says whether it holds its place ([`PlannedItem::holds_place`]): one that
+//! writes nothing ends the datagram when it does, and is passed over when it
+//! does not. Content whose kind of packet the link path cannot send at all
+//! now, as its keys are gone or no connection ID is offered, is passed over:
+//! it holds no place and leaves no threshold, as no room would let it go. A
+//! datagram's packets go in increasing encryption level: content of a lower
+//! level than what is already planned yields, and with it everything after
+//! it, to the next datagram.
 //!
-//! The core holds the intents the driver's components publish for any
-//! active link path; each link path's planner holds the intents bound to
+//! The core holds the intents published through the intake for any active
+//! link path; what the driver's own components have to send comes with each
+//! request for a plan ([`DriverContent`]), and the planner keeps none of
 //! it. A planner with nothing to plan keeps, for each flight class, the
 //! least room blocked content needs, and is woken when its observed
 //! conditions reach it, when content is published, or when the keys or its
-//! role change.
+//! role change; the driver wakes the sending call when its own content
+//! changes.
 //!
-//! A closing link path sends its close packet again ([`ResendCloseIntent`])
-//! when it is sealed, and then for the first, second, fourth, eighth and
-//! every further power of two among the datagrams it receives while it
-//! closes: the rate falls as the peer keeps sending (RFC 9000 §10.2.1).
-//! What was published before its planner was told of the closing role
-//! waits for it; a draining link path sends nothing.
+//! A closing link path sends its close packet again
+//! ([`PlannedDatagram::ResendClose`]) once it is sealed, and then for the
+//! first, second, fourth, eighth and every further power of two among the
+//! datagrams it received since ([`CloseResendFacts`]): the rate falls as the
+//! peer keeps sending (RFC 9000 §10.2.1). The planner keeps how many had
+//! arrived when it last sent the close packet again; a draining link path
+//! sends nothing.
 //!
 //! Application data goes by urgency ([`RankedIntent::urgency`]): a smaller
 //! urgency always before a larger one, and within one urgency in turns,
@@ -40,7 +48,7 @@
 //! as the DATAGRAM frames, orders the two by its own state.
 //!
 //! Intents published through the intake ([`RankedSendIntake`]), from the
-//! application's threads or from the driver while it holds the core, wait
+//! application's threads, wait
 //! in a zone the core shares with the intake and the tickets, under a lock
 //! nothing else is taken under: the core takes them in when a planner
 //! plans. A planner that waits for content leaves there, for its link
@@ -50,7 +58,10 @@
 //! only if nothing was published, resized or withdrawn there since it began
 //! to plan; otherwise it plans again, so no wake-up is lost. Withdrawing a
 //! waiting intent wakes the planners that something blocks, as the intent
-//! may have been what blocked them.
+//! may have been what blocked them. A planner that gives out a plan leaves
+//! its waker there as well, as one that something blocks: a sending call
+//! that could not fill the plan waits without asking again, and what is
+//! published after the plan wakes it.
 
 use core::{
     fmt,
@@ -70,13 +81,13 @@ use sakuya_wire::{
 };
 
 use super::{
-    AnyActiveLinkPath, DatagramFillPlan, DatagramLimits, FrameSourceCursor, FrameSourceSet,
-    InjectSendIntent, IntakeSendIntentHandle, IntentRejectedError, IntentState, IntentTicketResize,
-    IntentTicketState, IntentTicketWithdraw, IntentWithdrawReport, LeadingContent,
-    LinkPathPublishError, LinkPathRoleKind, LinkPathSendPlanner, MinimumLengths, Observe,
+    AnyActiveLinkPath, CloseResendFacts, DatagramFillPlan, DatagramLimits, DriverContent,
+    FrameSourceCursor, FrameSourceSet, InjectSendIntent, IntakeSendIntentHandle, IntentState,
+    IntentTicketResize, IntentTicketState, IntentTicketWithdraw, IntentWithdrawReport,
+    LeadingContent, LinkPathRoleKind, LinkPathSendPlanner, MinimumLengths, Observe,
     PacketOverheads, PlannedDatagram, PlannedItem, PlannedPacket, PlannedPacketKind,
-    PlannerLinkPath, Publish, PublishOutcome, PublishTo, ResendCloseIntent, RoleNotAcceptingError,
-    SendIntent, SendIntentIntake, SendStrategy, SendStrategyTypes, SharedPublishTo, SupplyFeedback,
+    PublishOutcome, SendIntent, SendIntentIntake, SendStrategy, SendStrategyTypes, SharedPublishTo,
+    SupplyFeedback,
 };
 use crate::write::FlightClass;
 
@@ -313,26 +324,6 @@ impl<C> Drop for IntentTicket<C> {
         if self.cell.leave_waiting(WITHDRAWN) {
             self.zone.content_changed(ContentChange::Withdrawn);
         }
-    }
-}
-
-/// The ticket of an intent published on a link path's planner: dropping it
-/// withdraws the intent.
-#[derive(Debug)]
-pub struct LinkPathIntentTicket {
-    cell: Arc<IntentCell>,
-}
-
-impl LinkPathIntentTicket {
-    /// Whether the intent is still waiting to be sent.
-    pub fn is_waiting(&self) -> bool {
-        self.cell.is_waiting()
-    }
-}
-
-impl Drop for LinkPathIntentTicket {
-    fn drop(&mut self) {
-        self.cell.leave_waiting(WITHDRAWN);
     }
 }
 
@@ -576,84 +567,6 @@ impl<I: SendStrategyTypes> RankedSendStrategy<I> {
                 }
             }));
     }
-
-    fn ticket(&self, cell: Arc<IntentCell>) -> IntentTicket<I::CloseCause> {
-        IntentTicket {
-            cell,
-            zone: Arc::clone(&self.zone),
-        }
-    }
-}
-
-/// What [`RankedSendStrategy`] gives back for an intent published to its
-/// core or its intake, by the type of the intent. The parts implement it
-/// for the intents their components publish there.
-pub trait RankedCoreIntent: SendIntent {
-    /// [`IntentTicket`] for an intent someone reads or withdraws; `()` for
-    /// one sent and forgotten, which only being supplied or the end of the
-    /// connection takes away. `C` is what this endpoint's reason to close
-    /// holds.
-    type Outcome<C>: RankedCoreOutcome<C>;
-}
-
-/// What the core of [`RankedSendStrategy`] can give back for an intent:
-/// [`IntentTicket`] or `()`.
-pub trait RankedCoreOutcome<C>: sealed::CoreOutcome<C> {}
-
-mod sealed {
-    use super::IntentTicket;
-
-    /// How the core gives back what it gives back for an intent, given how
-    /// to make the intent's ticket.
-    pub trait CoreOutcome<C> {
-        fn new(ticket: impl FnOnce() -> IntentTicket<C>) -> Self;
-    }
-
-    impl<C> CoreOutcome<C> for IntentTicket<C> {
-        fn new(ticket: impl FnOnce() -> IntentTicket<C>) -> Self {
-            ticket()
-        }
-    }
-
-    /// No ticket is made, so nothing withdraws the intent: its state stays
-    /// with the core only.
-    impl<C> CoreOutcome<C> for () {
-        fn new(_: impl FnOnce() -> IntentTicket<C>) -> Self {}
-    }
-}
-
-impl<C> RankedCoreOutcome<C> for IntentTicket<C> {}
-impl<C> RankedCoreOutcome<C> for () {}
-
-impl<I: SendStrategyTypes, J: RankedCoreIntent> PublishOutcome<J, AnyActiveLinkPath>
-    for RankedSendStrategy<I>
-{
-    type Outcome = J::Outcome<I::CloseCause>;
-}
-
-impl<I, J, Idx> PublishTo<J, AnyActiveLinkPath, Idx> for RankedSendStrategy<I>
-where
-    I: SendStrategyTypes,
-    J: RankedCoreIntent,
-    I::SendIntents: InjectSendIntent<J, Idx>,
-{
-    fn publish_to(&mut self, intent: J, _: AnyActiveLinkPath) -> J::Outcome<I::CloseCause> {
-        let intent = <I::SendIntents as InjectSendIntent<J, Idx>>::inject(intent);
-        let cell = IntentCell::new(I::min_lengths(&intent), I::flight_class(&intent));
-        if self.zone.closed.get().is_some() {
-            cell.leave_waiting(ENDED);
-        } else {
-            let order = self.next_order;
-            self.next_order += 1;
-            self.intents.push(Entry {
-                intent,
-                cell: Arc::clone(&cell),
-                order,
-            });
-            self.wake_all();
-        }
-        sealed::CoreOutcome::new(|| self.ticket(cell))
-    }
 }
 
 /// The intake of the ranked strategy: intents published through it wait in
@@ -679,19 +592,21 @@ impl<I: SendStrategyTypes> fmt::Debug for RankedSendIntake<I> {
     }
 }
 
-impl<I: SendStrategyTypes, J: RankedCoreIntent> PublishOutcome<J, AnyActiveLinkPath>
+/// Every intent published through the intake gives back its ticket: the
+/// application's content is read and withdrawn by its holder.
+impl<I: SendStrategyTypes, J: SendIntent> PublishOutcome<J, AnyActiveLinkPath>
     for RankedSendIntake<I>
 {
-    type Outcome = J::Outcome<I::CloseCause>;
+    type Outcome = IntentTicket<I::CloseCause>;
 }
 
 impl<I, J, Idx> SharedPublishTo<J, AnyActiveLinkPath, Idx> for RankedSendIntake<I>
 where
     I: SendStrategyTypes,
-    J: RankedCoreIntent,
+    J: SendIntent,
     I::SendIntents: InjectSendIntent<J, Idx>,
 {
-    fn publish_to(&self, intent: J, _: AnyActiveLinkPath) -> J::Outcome<I::CloseCause> {
+    fn publish_to(&self, intent: J, _: AnyActiveLinkPath) -> IntentTicket<I::CloseCause> {
         let intent = <I::SendIntents as InjectSendIntent<J, Idx>>::inject(intent);
         let min = I::min_lengths(&intent);
         let class = I::flight_class(&intent);
@@ -717,10 +632,10 @@ where
                 need: min.as_last,
             });
         }
-        sealed::CoreOutcome::new(|| IntentTicket {
+        IntentTicket {
             cell,
             zone: Arc::clone(&self.zone),
-        })
+        }
     }
 }
 
@@ -776,8 +691,6 @@ where
             role,
             limits: None,
             overheads: PacketOverheads::default(),
-            intents: Vec::new(),
-            next_order: 0,
             waker: None,
             thresholds: Thresholds::default(),
             turns: [None; URGENCIES],
@@ -839,25 +752,31 @@ impl Thresholds {
 }
 
 /// When a closing link path sends its close packet again: how many
-/// datagrams it received while closing, and whether a resend is due.
+/// datagrams it had received since the close packet was sealed when it last
+/// sent it again; `None` before the first.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct CloseResends {
-    received: u64,
-    due: bool,
+    sent_at: Option<u64>,
 }
 
 impl CloseResends {
-    /// What happened, as `intent` tells: a sealed close packet goes out;
-    /// of the datagrams received, those whose count is a power of two make
-    /// it go again.
-    fn note(&mut self, intent: ResendCloseIntent) {
-        match intent {
-            ResendCloseIntent::Sealed => self.due = true,
-            ResendCloseIntent::DatagramReceived => {
-                self.received = self.received.saturating_add(1);
-                self.due |= self.received.is_power_of_two();
-            }
+    /// Whether the close packet goes again, as `facts` tell: once it is
+    /// sealed, and then when the count of the datagrams received reaches a
+    /// power of two above the count at the last resend. A count below that
+    /// one is of a close packet sealed again: it goes as one just sealed.
+    fn due(&self, facts: CloseResendFacts) -> bool {
+        let received = facts.datagrams_received;
+        match self.sent_at {
+            None => true,
+            Some(sent) if received < sent => true,
+            Some(0) => received >= 1,
+            Some(sent) => received >= sent.saturating_add(1).next_power_of_two(),
         }
+    }
+
+    /// The close packet went again, with `facts` as they were.
+    fn sent(&mut self, facts: CloseResendFacts) {
+        self.sent_at = Some(facts.datagrams_received);
     }
 }
 
@@ -865,13 +784,13 @@ impl CloseResends {
 const URGENCIES: usize = 8;
 
 /// Where an intent stands among the intents of one rank, level and urgency
-/// when turns do not change it: the planner's own first, each holder's in
-/// the order they were taken in.
+/// when turns do not change it: the driver's content first, in the order it
+/// was gathered, then the core's, in the order they were taken in.
 type IntentOrder = (u8, u64);
 
 fn intent_order(held: Held, order: u64) -> IntentOrder {
     match held {
-        Held::LinkPath(_) => (0, order),
+        Held::Driver(_) => (0, order),
         Held::Core(_) => (1, order),
     }
 }
@@ -884,8 +803,6 @@ pub struct RankedLinkPathSendPlanner<I: SendStrategyTypes> {
     role: LinkPathRoleKind,
     limits: Option<DatagramLimits>,
     overheads: PacketOverheads,
-    intents: Vec<Entry<I::SendIntents>>,
-    next_order: u64,
     waker: Option<Waker>,
     thresholds: Thresholds,
     /// For each urgency of application data, the intent given its turn
@@ -901,7 +818,6 @@ impl<I: SendStrategyTypes> fmt::Debug for RankedLinkPathSendPlanner<I> {
             .field("role", &self.role)
             .field("limits", &self.limits)
             .field("overheads", &self.overheads)
-            .field("intents", &self.intents.len())
             .field("close_resends", &self.close_resends)
             .finish_non_exhaustive()
     }
@@ -954,6 +870,28 @@ impl<I: SendStrategyTypes> RankedLinkPathSendPlanner<I> {
         true
     }
 
+    /// A plan is given out with `waker`: what is published, resized or
+    /// withdrawn in the zone from now on wakes it as it wakes a waiting
+    /// planner, so that a sending call that could not fill the plan, and
+    /// waits without asking for another, is not left waiting by content
+    /// published after it. The next request for a plan takes the waker
+    /// back.
+    fn keep_waker_for_plan(&self, waker: &Waker) {
+        let mut waits = lock(&self.zone.waits);
+        if let Some(wait) = waits
+            .link_paths
+            .iter_mut()
+            .find(|wait| wait.serial == self.serial)
+        {
+            wait.waker = Some(waker.clone());
+            wait.accepts = self.role == LinkPathRoleKind::Active;
+            wait.room = self.limits.as_ref().map(Room::of);
+            wait.unplanned = Thresholds::default();
+            // what is withdrawn may be what kept the plan from being filled
+            wait.blocked = true;
+        }
+    }
+
     /// The link path is told `limits` while it may wait: its room in the
     /// zone follows, and whether content published meanwhile now fits.
     fn waiting_content_fits(&self, limits: &DatagramLimits) -> bool {
@@ -970,65 +908,6 @@ impl<I: SendStrategyTypes> RankedLinkPathSendPlanner<I> {
         }
         wait.room = Some(Room::of(limits));
         wait.unplanned.reached_by(limits)
-    }
-}
-
-/// A part's intent, which ranks, gives back its ticket, or itself when the
-/// role does not take it.
-impl<I: SendStrategyTypes, J: SendIntent + RankedIntent> PublishOutcome<J, PlannerLinkPath>
-    for RankedLinkPathSendPlanner<I>
-{
-    type Outcome = Result<LinkPathIntentTicket, IntentRejectedError<J>>;
-}
-
-/// A resend of the close packet gives back nothing.
-impl<I: SendStrategyTypes> PublishOutcome<ResendCloseIntent, PlannerLinkPath>
-    for RankedLinkPathSendPlanner<I>
-{
-    type Outcome = ();
-}
-
-/// Only an active link path takes a part's intents.
-impl<I, J, Idx> Publish<J, Idx> for RankedLinkPathSendPlanner<I>
-where
-    I: SendStrategyTypes,
-    J: SendIntent + RankedIntent,
-    I::SendIntents: InjectSendIntent<J, Idx>,
-{
-    fn publish(&mut self, intent: J) -> Result<LinkPathIntentTicket, IntentRejectedError<J>> {
-        if self.role != LinkPathRoleKind::Active {
-            return Err(IntentRejectedError::new(
-                intent,
-                LinkPathPublishError::from(RoleNotAcceptingError::new(self.role)),
-            ));
-        }
-        let intent = <I::SendIntents as InjectSendIntent<J, Idx>>::inject(intent);
-        let cell = IntentCell::new(I::min_lengths(&intent), I::flight_class(&intent));
-        let order = self.next_order;
-        self.next_order += 1;
-        self.intents.push(Entry {
-            intent,
-            cell: Arc::clone(&cell),
-            order,
-        });
-        self.wake();
-        Ok(LinkPathIntentTicket { cell })
-    }
-}
-
-/// The close packet of a link path that is not draining is sent again as
-/// the module documentation says; one published before the planner was
-/// told the link path closes waits until it is.
-impl<I: SendStrategyTypes> Publish<ResendCloseIntent, ()> for RankedLinkPathSendPlanner<I> {
-    fn publish(&mut self, intent: ResendCloseIntent) {
-        if self.role == LinkPathRoleKind::Draining {
-            return;
-        }
-        let due = self.close_resends.due;
-        self.close_resends.note(intent);
-        if self.close_resends.due && !due && self.role == LinkPathRoleKind::Closing {
-            self.wake();
-        }
     }
 }
 
@@ -1056,11 +935,12 @@ impl<I: SendStrategyTypes> Observe<PacketOverheads> for RankedLinkPathSendPlanne
     }
 }
 
-/// Where a planned intent is held.
+/// Where a planned intent is held: among the core's intents, or among the
+/// driver's content of the request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Held {
     Core(usize),
-    LinkPath(usize),
+    Driver(usize),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1068,6 +948,9 @@ struct PlannedEntry {
     held: Held,
     min: MinimumLengths,
     class: FlightClass,
+    /// Whether it holds its place when it writes nothing
+    /// ([`SendRank::holds_place`]).
+    holds_place: bool,
     /// For application data: its urgency and where it stands, to give the
     /// next turn after it once it is supplied.
     turn: Option<(usize, IntentOrder)>,
@@ -1121,7 +1004,9 @@ struct Candidate<'e, J> {
     order: IntentOrder,
     held: Held,
     kind: PlannedPacketKind,
-    entry: &'e Entry<J>,
+    intent: &'e J,
+    min: MinimumLengths,
+    class: FlightClass,
 }
 
 impl<I> RankedLinkPathSendPlanner<I>
@@ -1129,9 +1014,13 @@ where
     I: SendStrategyTypes,
     I::SendIntents: RankedIntent,
 {
-    /// The packets of the next datagram, and the thresholds of what does
-    /// not fit.
-    fn plan_packets(&self, core: &RankedSendStrategy<I>) -> (Vec<PacketPlan>, Thresholds) {
+    /// The packets of the next datagram, from the core's intents and the
+    /// driver's content `driver`, and the thresholds of what does not fit.
+    fn plan_packets(
+        &self,
+        core: &RankedSendStrategy<I>,
+        driver: &DriverContent<I::SendIntents>,
+    ) -> (Vec<PacketPlan>, Thresholds) {
         let mut thresholds = Thresholds::default();
         let Some(limits) = self.limits else {
             return (Vec::new(), thresholds);
@@ -1142,30 +1031,45 @@ where
             &[]
         };
         let mut candidates = Vec::new();
-        let held = from_core
+        let held = driver
+            .intents
             .iter()
             .enumerate()
-            .map(|(index, entry)| (Held::Core(index), entry))
+            .map(|(index, intent)| {
+                (
+                    Held::Driver(index),
+                    index as u64,
+                    intent,
+                    I::min_lengths(intent),
+                    I::flight_class(intent),
+                )
+            })
             .chain(
-                self.intents
+                from_core
                     .iter()
                     .enumerate()
-                    .map(|(index, entry)| (Held::LinkPath(index), entry)),
+                    .filter(|(_, entry)| entry.cell.is_waiting())
+                    .map(|(index, entry)| {
+                        (
+                            Held::Core(index),
+                            entry.order,
+                            &entry.intent,
+                            entry.cell.min(),
+                            entry.cell.class,
+                        )
+                    }),
             );
-        for (held, entry) in held {
-            if !entry.cell.is_waiting() {
-                continue;
-            }
+        for (held, order, intent, min, class) in held {
             let Some(&kind) = kinds_of(self.role)
                 .iter()
-                .find(|&&kind| core.can_send(kind) && carries::<I>(kind, &entry.intent))
+                .find(|&&kind| core.can_send(kind) && carries::<I>(kind, intent))
             else {
                 continue;
             };
-            let rank = entry.intent.rank();
-            let order = intent_order(held, entry.order);
+            let rank = intent.rank();
+            let order = intent_order(held, order);
             let (urgency, had_turn) = if rank.priority == SendPriority::ApplicationData {
-                let urgency = usize::from(entry.intent.urgency().get());
+                let urgency = usize::from(intent.urgency().get());
                 let had_turn = self.turns[urgency].is_some_and(|last| order <= last);
                 (urgency, had_turn)
             } else {
@@ -1179,7 +1083,9 @@ where
                 order,
                 held,
                 kind,
-                entry,
+                intent,
+                min,
+                class,
             });
         }
         candidates.sort_by_key(|candidate| {
@@ -1202,14 +1108,14 @@ where
                 order,
                 held,
                 kind,
-                entry,
+                intent,
+                min,
+                class,
                 ..
             } = candidate;
             if highest.is_some_and(|highest| level < highest) {
                 break;
             }
-            let min = entry.cell.min();
-            let class = entry.cell.class;
             // a kind of packet the link path cannot send now: no room
             // lets it go, so it holds no place and leaves no threshold
             let Some(overhead) = self.overheads.of(kind) else {
@@ -1224,6 +1130,8 @@ where
                 class_of_datagram = FlightClass::InFlight;
             }
             let application_data = rank.priority == SendPriority::ApplicationData;
+            // what does not fit an empty datagram is not planned; what does
+            // is the writing's to fit
             if need > limits.capacity_for(class_of_datagram) {
                 thresholds.add(class_of_datagram, need);
                 // application data that does not fit is passed over
@@ -1237,8 +1145,9 @@ where
                 held,
                 min,
                 class,
+                holds_place: rank.holds_place,
                 turn: application_data.then_some((urgency, order)),
-                stays: entry.intent.stays_after_writing(),
+                stays: intent.stays_after_writing(),
             };
             match packets.last_mut() {
                 Some(packet) if packet.kind == kind => packet.items.push(planned),
@@ -1267,10 +1176,14 @@ where
     fn poll_plan<'a>(
         &'a mut self,
         core: &'a mut Self::Core,
+        driver: &'a DriverContent<I::SendIntents>,
         cx: &mut Context<'_>,
     ) -> Poll<PlannedDatagram<Self::Plan<'a>>> {
         if self.role == LinkPathRoleKind::Closing {
-            if core::mem::take(&mut self.close_resends.due) {
+            if let Some(facts) = driver.close
+                && self.close_resends.due(facts)
+            {
+                self.close_resends.sent(facts);
                 return Poll::Ready(PlannedDatagram::ResendClose);
             }
             self.waker = Some(cx.waker().clone());
@@ -1278,14 +1191,15 @@ where
         }
         loop {
             let seen = self.begin(core);
-            self.intents.retain(|entry| entry.cell.is_waiting());
             core.intents.retain(|entry| entry.cell.is_waiting());
-            let (packets, thresholds) = self.plan_packets(core);
+            let (packets, thresholds) = self.plan_packets(core, driver);
             if !packets.is_empty() {
                 self.thresholds = Thresholds::default();
+                self.keep_waker_for_plan(cx.waker());
                 return Poll::Ready(PlannedDatagram::Fill(RankedPlan {
                     core,
                     planner: self,
+                    driver,
                     packets,
                     next_packet: 0,
                     feedback: RankedFeedback::default(),
@@ -1302,45 +1216,30 @@ where
         }
     }
 
-    /// A role other than `Active` ends the intents published on the planner;
-    /// those still waiting go to `ended`.
+    /// The planner holds no intents of its own: nothing ends with a role.
     fn role_changed(
         &mut self,
         _: &mut Self::Core,
         role: LinkPathRoleKind,
-        ended: &mut impl Extend<I::SendIntents>,
+        _: &mut impl Extend<I::SendIntents>,
     ) {
         if self.role == role {
             return;
         }
         self.role = role;
-        if role != LinkPathRoleKind::Active {
-            ended.extend(end_waiting(self.intents.drain(..)));
-        }
         if role == LinkPathRoleKind::Draining {
             self.close_resends = CloseResends::default();
         }
         self.wake();
     }
 
-    /// The intents published on the planner end; those still waiting go to
-    /// `ended`.
-    fn ended(self, core: &mut Self::Core, ended: &mut impl Extend<I::SendIntents>) {
+    /// The planner holds no intents of its own: nothing ends with it.
+    fn ended(self, core: &mut Self::Core, _: &mut impl Extend<I::SendIntents>) {
         core.link_paths.retain(|entry| entry.id != self.id);
         lock(&self.zone.waits)
             .link_paths
             .retain(|wait| wait.serial != self.serial);
-        ended.extend(end_waiting(self.intents));
     }
-}
-
-/// End each of `entries` still waiting, giving its intent; one consumed or
-/// withdrawn meanwhile gives nothing.
-fn end_waiting<J>(entries: impl IntoIterator<Item = Entry<J>>) -> impl Iterator<Item = J> {
-    entries
-        .into_iter()
-        .filter(|entry| entry.cell.leave_waiting(ENDED))
-        .map(|entry| entry.intent)
 }
 
 // ---- the plan ----
@@ -1352,7 +1251,6 @@ pub struct RankedFeedback {
     current: Option<PlannedEntry>,
     /// The items supplied, in order, and whether each wrote anything.
     supplied: Vec<(PlannedEntry, bool)>,
-    stopped: bool,
 }
 
 /// The items are consumed once the plan ends, if they wrote anything and
@@ -1369,6 +1267,7 @@ impl SupplyFeedback for RankedFeedback {
 pub struct RankedPlan<'a, I: SendStrategyTypes> {
     core: &'a mut RankedSendStrategy<I>,
     planner: &'a mut RankedLinkPathSendPlanner<I>,
+    driver: &'a DriverContent<I::SendIntents>,
     packets: Vec<PacketPlan>,
     next_packet: usize,
     feedback: RankedFeedback,
@@ -1388,14 +1287,11 @@ impl<I: SendStrategyTypes> RankedPlan<'_, I> {
     fn intent(&self, held: Held) -> &I::SendIntents {
         match held {
             Held::Core(index) => &self.core.intents[index].intent,
-            Held::LinkPath(index) => &self.planner.intents[index].intent,
+            Held::Driver(index) => &self.driver.intents[index],
         }
     }
 
     fn leading_of(&self, packet: usize) -> Option<LeadingContent<I::FrameSourceId>> {
-        if self.feedback.stopped {
-            return None;
-        }
         let packet = self.packets.get(packet)?;
         let first = packet.items.first()?;
         Some(LeadingContent {
@@ -1407,21 +1303,21 @@ impl<I: SendStrategyTypes> RankedPlan<'_, I> {
     }
 }
 
-/// The items supplied had their turn; those that wrote anything are
-/// consumed, unless they stay after writing, as their sources already
-/// resized or withdrew them.
+/// The items supplied had their turn; those of the core that wrote
+/// anything are consumed, unless they stay after writing, as their sources
+/// already resized or withdrew them. The driver's content has no state
+/// here: its sources changed their own when they wrote.
 impl<I: SendStrategyTypes> Drop for RankedPlan<'_, I> {
     fn drop(&mut self) {
         for (entry, wrote) in self.feedback.supplied.drain(..) {
             if let Some((urgency, order)) = entry.turn {
                 self.planner.turns[urgency] = Some(order);
             }
-            if wrote && !entry.stays {
-                let cell = match entry.held {
-                    Held::Core(index) => &self.core.intents[index].cell,
-                    Held::LinkPath(index) => &self.planner.intents[index].cell,
-                };
-                cell.leave_waiting(CONSUMED);
+            if let Held::Core(index) = entry.held
+                && wrote
+                && !entry.stays
+            {
+                self.core.intents[index].cell.leave_waiting(CONSUMED);
             }
         }
     }
@@ -1463,7 +1359,7 @@ impl<'a, I: SendStrategyTypes> DatagramFillPlan<I> for RankedPlan<'a, I> {
     }
 
     fn next_packet(&mut self) -> Option<PlannedPacket<'_, I, Self>> {
-        if self.feedback.stopped || self.next_packet >= self.packets.len() {
+        if self.next_packet >= self.packets.len() {
             return None;
         }
         let packet = self.next_packet;
@@ -1524,30 +1420,26 @@ where
 
     fn next(&mut self) -> Option<PlannedItem<'_, S::Item<'_>, RankedFeedback>> {
         let plan = &mut *self.plan;
-        if plan.feedback.current.take().is_some() {
-            // The last item was dropped without being supplied: it did not
-            // fit, and nothing after it goes into this datagram.
-            plan.feedback.stopped = true;
-        }
-        if plan.feedback.stopped {
-            return None;
-        }
+        // An item dropped without being supplied wrote nothing: whether the
+        // datagram goes on is the filling's, as the item tells it.
+        plan.feedback.current = None;
         let items = &plan.packets[self.packet].items;
         let entry = *items.get(self.next_item)?;
         self.next_item += 1;
         let last_in_packet = self.next_item == items.len();
-        let held = match entry.held {
-            Held::Core(index) => &plan.core.intents[index],
-            Held::LinkPath(index) => &plan.planner.intents[index],
+        let intent = match entry.held {
+            Held::Core(index) => &plan.core.intents[index].intent,
+            Held::Driver(index) => &plan.driver.intents[index],
         };
         // The packet's kind was chosen because its set carries the intent.
-        let item = S::item(&held.intent)?;
+        let item = S::item(intent)?;
         plan.feedback.current = Some(entry);
         Some(PlannedItem::new(
             item,
             entry.min,
             entry.class,
             last_in_packet,
+            entry.holds_place,
             &mut plan.feedback,
         ))
     }

@@ -21,6 +21,7 @@ use crate::{
         PartsFrameSources, SettlingResponsePacket, ZeroRttPacket,
     },
     send_strategy::SendIntentsOf,
+    send_strategy::{InjectSendIntent, SendIntentHandle},
     v1::{
         Part,
         send::{AckIntent, FrameSourceId, ProbePingIntent, SendItem},
@@ -107,8 +108,35 @@ fn setup(levels: &[EncryptionLevel], window: usize) -> (Core, Planner) {
     (core, planner)
 }
 
-fn ack(core: &mut Core, space: PacketNumberSpaceKind) -> IntentTicket<()> {
-    core.publish_to(AckIntent::new(space, 5), AnyActiveLinkPath)
+type Intents = <Parts as SendIntentsOf>::SendIntents;
+
+/// The driver's content of an ACK frame due in `space`.
+fn ack(space: PacketNumberSpaceKind) -> Intents {
+    <Intents as InjectSendIntent<_, _>>::inject(AckIntent::new(space, 5))
+}
+
+/// The driver's content of the PING of a probe of `space`.
+fn ping(space: PacketNumberSpaceKind) -> Intents {
+    <Intents as InjectSendIntent<_, _>>::inject(ProbePingIntent::new(space))
+}
+
+/// The driver's content of `intents`, with no close packet.
+fn driver(intents: impl IntoIterator<Item = Intents>) -> DriverContent<Intents> {
+    DriverContent {
+        intents: intents.into_iter().collect(),
+        close: None,
+    }
+}
+
+/// The driver's content of a sealed close packet, `received` datagrams
+/// after it was sealed.
+fn sealed(received: u64) -> DriverContent<Intents> {
+    DriverContent {
+        intents: Vec::new(),
+        close: Some(CloseResendFacts {
+            datagrams_received: received,
+        }),
+    }
 }
 
 const ALL: [EncryptionLevel; 3] = [
@@ -172,18 +200,19 @@ impl Head for frunk_core::coproduct::Coproduct<SendItem, sakuya_wire::parts::CNi
 fn ready<'a>(
     planner: &'a mut Planner,
     core: &'a mut Core,
+    driver: &'a DriverContent<Intents>,
     waker: &Waker,
 ) -> RankedPlan<'a, TestTypes> {
-    match planner.poll_plan(core, &mut Context::from_waker(waker)) {
+    match planner.poll_plan(core, driver, &mut Context::from_waker(waker)) {
         Poll::Ready(PlannedDatagram::Fill(plan)) => plan,
         Poll::Ready(PlannedDatagram::ResendClose) => panic!("no close packet is planned"),
         Poll::Pending => panic!("a plan was expected"),
     }
 }
 
-fn pending(planner: &mut Planner, core: &mut Core, waker: &Waker) {
+fn pending(planner: &mut Planner, core: &mut Core, driver: &DriverContent<Intents>, waker: &Waker) {
     assert!(matches!(
-        planner.poll_plan(core, &mut Context::from_waker(waker)),
+        planner.poll_plan(core, driver, &mut Context::from_waker(waker)),
         Poll::Pending
     ));
 }
@@ -191,16 +220,16 @@ fn pending(planner: &mut Planner, core: &mut Core, waker: &Waker) {
 #[test]
 fn acknowledgments_go_in_increasing_levels_and_lower_levels_yield() {
     let (mut core, mut planner) = setup(&ALL, 12_000);
-    let _acks = [
-        ack(&mut core, ApplicationData),
-        ack(&mut core, Initial),
-        ack(&mut core, Handshake),
-    ];
     // Ranked after the acknowledgments, the Handshake PING is of a lower
     // level than the 1-RTT ACK: it yields to the next datagram.
-    let _ping = planner.publish(ProbePingIntent::new(Handshake)).unwrap();
+    let content = driver([
+        ack(ApplicationData),
+        ack(Initial),
+        ack(Handshake),
+        ping(Handshake),
+    ]);
     let (_, waker) = waker();
-    let mut plan = ready(&mut planner, &mut core, &waker);
+    let mut plan = ready(&mut planner, &mut core, &content, &waker);
     let leading = plan.leading_content().unwrap();
     assert_eq!(leading.packet, PlannedPacketKind::Initial);
     assert_eq!(
@@ -225,8 +254,10 @@ fn acknowledgments_go_in_increasing_levels_and_lower_levels_yield() {
         ]
     );
     drop(plan);
-    // The acknowledgments were consumed; the PING is planned next.
-    let mut plan = ready(&mut planner, &mut core, &waker);
+    // The acknowledgments were written, and the driver no longer has them;
+    // the PING is planned next.
+    let content = driver([ping(Handshake)]);
+    let mut plan = ready(&mut planner, &mut core, &content, &waker);
     assert_eq!(
         walk(&mut plan, 1),
         [(
@@ -236,14 +267,14 @@ fn acknowledgments_go_in_increasing_levels_and_lower_levels_yield() {
     );
 }
 
+/// The planner keeps nothing of the driver's content: what the next
+/// request does not have is not planned.
 #[test]
-fn consumed_and_withdrawn_intents_leave_the_plan() {
+fn the_drivers_content_is_planned_as_each_request_gives_it() {
     let (mut core, mut planner) = setup(&ALL, 12_000);
-    let consumed = ack(&mut core, Initial);
-    let withdrawn = ack(&mut core, Handshake);
-    drop(withdrawn);
+    let content = driver([ack(Initial)]);
     let (_, waker) = waker();
-    let mut plan = ready(&mut planner, &mut core, &waker);
+    let mut plan = ready(&mut planner, &mut core, &content, &waker);
     assert_eq!(
         walk(&mut plan, 10),
         [(
@@ -252,8 +283,14 @@ fn consumed_and_withdrawn_intents_leave_the_plan() {
         )]
     );
     drop(plan);
-    assert_eq!(consumed.state(), IntentState::Consumed);
-    pending(&mut planner, &mut core, &waker);
+    let mut plan = ready(&mut planner, &mut core, &content, &waker);
+    assert_eq!(
+        walk(&mut plan, 0).len(),
+        1,
+        "planned again while it is there"
+    );
+    drop(plan);
+    pending(&mut planner, &mut core, &DriverContent::new(), &waker);
 }
 
 /// An intent that stays after writing is not consumed by a supply that
@@ -262,9 +299,12 @@ fn consumed_and_withdrawn_intents_leave_the_plan() {
 #[test]
 fn an_intent_that_stays_after_writing_is_planned_again() {
     let (mut core, mut planner) = setup(&ALL, 12_000);
+    let handle = core
+        .intake()
+        .handle::<StreamIntent<sakuya_stream::send_options::urgency::Urgency>, _>();
     let stream_id =
         sakuya_wire::v1::stream_id::StreamId::from(sakuya_wire::var_int::VarInt::from_u32(1));
-    let mut stream = core.publish_to(
+    let mut stream = handle.publish_to(
         StreamIntent::Stream {
             stream_id,
             parameters: sakuya_stream::send_options::urgency::Urgency::default(),
@@ -272,12 +312,10 @@ fn an_intent_that_stays_after_writing_is_planned_again() {
         },
         AnyActiveLinkPath,
     );
-    let max_data = core.publish_to(
-        StreamIntent::<sakuya_stream::send_options::urgency::Urgency>::MaxData { len: 2 },
-        AnyActiveLinkPath,
-    );
+    let max_data = handle.publish_to(StreamIntent::MaxData { len: 2 }, AnyActiveLinkPath);
     let (_, waker) = waker();
-    let mut plan = ready(&mut planner, &mut core, &waker);
+    let none = DriverContent::new();
+    let mut plan = ready(&mut planner, &mut core, &none, &waker);
     assert_eq!(
         walk(&mut plan, 10),
         [(
@@ -293,7 +331,7 @@ fn an_intent_that_stays_after_writing_is_planned_again() {
         with_length: 5,
         as_last: 4,
     });
-    let mut plan = ready(&mut planner, &mut core, &waker);
+    let mut plan = ready(&mut planner, &mut core, &none, &waker);
     assert_eq!(
         walk(&mut plan, 10),
         [(PlannedPacketKind::OneRtt, vec![FrameSourceId::Stream])]
@@ -302,43 +340,48 @@ fn an_intent_that_stays_after_writing_is_planned_again() {
     assert_eq!(stream.state(), IntentState::Waiting);
     // withdrawn once nothing is left: nothing more is planned
     let _ = stream.withdraw();
-    pending(&mut planner, &mut core, &waker);
+    pending(&mut planner, &mut core, &none, &waker);
 }
 
+/// An item dropped without being supplied wrote nothing: the plan goes on
+/// to the next item, and whether the datagram ends is the filling's, as
+/// the item tells whether it holds its place.
 #[test]
-fn an_item_dropped_without_being_supplied_ends_the_datagram() {
+fn an_item_dropped_without_being_supplied_leaves_the_plan_going_on() {
     let (mut core, mut planner) = setup(&ALL, 12_000);
-    let initial = ack(&mut core, Initial);
-    let _handshake = ack(&mut core, Handshake);
+    let content = driver([ack(ApplicationData), ping(ApplicationData), ack(Handshake)]);
     let (_, waker) = waker();
-    let mut plan = ready(&mut planner, &mut core, &waker);
-    let Some(PlannedPacket::Initial(mut cursor)) = plan.next_packet() else {
-        panic!("an Initial packet first")
+    let mut plan = ready(&mut planner, &mut core, &content, &waker);
+    let Some(PlannedPacket::Handshake(mut cursor)) = plan.next_packet() else {
+        panic!("a Handshake packet first")
+    };
+    let item = cursor.next().unwrap();
+    assert!(item.holds_place(), "an ACK holds its place");
+    assert!(item.last_in_packet());
+    drop(item);
+    assert!(cursor.next().is_none());
+    let Some(PlannedPacket::OneRtt(mut cursor)) = plan.next_packet() else {
+        panic!("then a 1-RTT packet")
     };
     // Not supplied: the item goes out of scope here.
     let _ = cursor.next().unwrap();
-    assert!(cursor.next().is_none());
-    assert!(plan.next_packet().is_none());
-    assert!(plan.peek_next_packet().is_none());
-    drop(plan);
-    assert_eq!(initial.state(), IntentState::Waiting);
+    let ping = cursor.next().expect("the item after it");
+    assert_eq!(ping.item.head(), FrameSourceId::ProbePing(ApplicationData));
 }
 
 #[test]
 fn content_that_does_not_fit_holds_its_place_until_the_window_opens() {
     // A server's Initial ACK needs no window; the PING of 1-RTT does.
     let (mut core, mut planner) = setup(&ALL, 0);
-    let _ping = planner
-        .publish(ProbePingIntent::new(ApplicationData))
-        .unwrap();
+    let content = driver([ping(ApplicationData)]);
     let (wakes, waker) = waker();
-    pending(&mut planner, &mut core, &waker);
+    pending(&mut planner, &mut core, &content, &waker);
     // A window still too small for the packet does not wake the planner.
     planner.observe(limits(20));
     assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
     planner.observe(limits(31));
     assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
-    let mut plan = ready(&mut planner, &mut core, &waker);
+    let mut plan = ready(&mut planner, &mut core, &content, &waker);
     assert_eq!(
         walk(&mut plan, 1),
         [(
@@ -355,12 +398,12 @@ fn a_client_initial_needs_room_for_the_whole_expanded_datagram() {
         expands_every_initial: true,
         ..overheads()
     });
-    let _ack = ack(&mut core, Initial);
+    let content = driver([ack(Initial)]);
     let (wakes, waker) = waker();
-    pending(&mut planner, &mut core, &waker);
+    pending(&mut planner, &mut core, &content, &waker);
     planner.observe(limits(1200));
     assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
-    let mut plan = ready(&mut planner, &mut core, &waker);
+    let mut plan = ready(&mut planner, &mut core, &content, &waker);
     assert_eq!(
         walk(&mut plan, 10),
         [(
@@ -371,17 +414,15 @@ fn a_client_initial_needs_room_for_the_whole_expanded_datagram() {
 }
 
 #[test]
-fn publishing_and_keys_wake_a_waiting_planner() {
+fn keys_wake_a_waiting_planner() {
     let (mut core, mut planner) = setup(&[EncryptionLevel::Initial], 12_000);
+    let content = driver([ack(Handshake)]);
     let (wakes, waker) = waker();
-    pending(&mut planner, &mut core, &waker);
-    let _ack = ack(&mut core, Handshake);
-    assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
     // Without Handshake keys there is nothing to plan.
-    pending(&mut planner, &mut core, &waker);
+    pending(&mut planner, &mut core, &content, &waker);
     core.send_keys_available(EncryptionLevel::Handshake);
-    assert_eq!(wakes.0.load(Ordering::SeqCst), 2);
-    let mut plan = ready(&mut planner, &mut core, &waker);
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+    let mut plan = ready(&mut planner, &mut core, &content, &waker);
     assert_eq!(
         walk(&mut plan, 10),
         [(
@@ -394,66 +435,41 @@ fn publishing_and_keys_wake_a_waiting_planner() {
 #[test]
 fn a_confirmed_handshake_stops_initial_and_handshake_content() {
     let (mut core, mut planner) = setup(&ALL, 12_000);
-    let _acks = [ack(&mut core, Initial), ack(&mut core, Handshake)];
+    let content = driver([ack(Initial), ack(Handshake)]);
     core.handshake_confirmed();
     let (_, waker) = waker();
-    pending(&mut planner, &mut core, &waker);
+    pending(&mut planner, &mut core, &content, &waker);
 }
 
+/// The planner holds no intents of its own: a role change and its end hand
+/// nothing back, and a link path that is not active plans none of the
+/// driver's content its packets cannot carry.
 #[test]
-fn a_planner_out_of_the_active_role_refuses_and_ends_its_intents() {
+fn a_planner_holds_nothing_to_end() {
     let (mut core, mut planner) = setup(&ALL, 12_000);
-    let ping = planner
-        .publish(ProbePingIntent::new(ApplicationData))
-        .unwrap();
     let mut ended = Vec::new();
-    planner.role_changed(&mut core, LinkPathRoleKind::Closing, &mut ended);
-    assert!(!ping.is_waiting());
-    assert!(
-        matches!(
-            &ended[..],
-            [Coproduct::Inl(Coproduct::Inr(Coproduct::Inl(intent)))]
-                if *intent == ProbePingIntent::new(ApplicationData)
-        ),
-        "the ping is handed back"
+    planner.role_changed(&mut core, LinkPathRoleKind::Candidate, &mut ended);
+    assert!(ended.is_empty());
+    let (_, waker) = waker();
+    pending(
+        &mut planner,
+        &mut core,
+        &driver([ack(ApplicationData), ping(ApplicationData)]),
+        &waker,
     );
-    let refused = planner
-        .publish(ProbePingIntent::new(ApplicationData))
-        .unwrap_err();
-    assert_eq!(
-        refused.error(),
-        &LinkPathPublishError::from(RoleNotAcceptingError::new(LinkPathRoleKind::Closing))
-    );
-    assert_eq!(refused.into_intent(), ProbePingIntent::new(ApplicationData));
-}
-
-#[test]
-fn an_ended_planner_hands_back_only_the_intents_still_waiting() {
-    let (mut core, mut planner) = setup(&ALL, 12_000);
-    let waiting = planner
-        .publish(ProbePingIntent::new(ApplicationData))
-        .unwrap();
-    // dropping its ticket withdraws it
-    drop(planner.publish(ProbePingIntent::new(Initial)).unwrap());
-    let mut ended = Vec::new();
     planner.ended(&mut core, &mut ended);
-    assert!(!waiting.is_waiting());
-    assert!(
-        matches!(
-            &ended[..],
-            [Coproduct::Inl(Coproduct::Inr(Coproduct::Inl(intent)))]
-                if *intent == ProbePingIntent::new(ApplicationData)
-        ),
-        "only the waiting ping is handed back"
-    );
+    assert!(ended.is_empty());
 }
 
 #[test]
 fn closing_ends_waiting_intents_and_later_ones_with_the_reason() {
     let (mut core, _planner) = setup(&ALL, 12_000);
-    let waiting = ack(&mut core, Initial);
+    let handle = core
+        .intake()
+        .handle::<StreamIntent<sakuya_stream::send_options::urgency::Urgency>, _>();
+    let waiting = handle.publish_to(StreamIntent::MaxData { len: 2 }, AnyActiveLinkPath);
     core.no_more_active_link_paths(CloseReason::IdleTimeout);
-    let later = ack(&mut core, Handshake);
+    let later = handle.publish_to(StreamIntent::MaxData { len: 3 }, AnyActiveLinkPath);
     for ticket in [waiting, later] {
         let IntentState::Ended(error) = ticket.state() else {
             panic!("the intent ended")
@@ -471,10 +487,9 @@ fn content_of_a_packet_the_link_path_cannot_send_holds_no_place() {
         initial: None,
         ..overheads()
     });
-    let initial = ack(&mut core, Initial);
-    let _handshake = ack(&mut core, Handshake);
+    let content = driver([ack(Initial), ack(Handshake)]);
     let (wakes, waker) = waker();
-    let mut plan = ready(&mut planner, &mut core, &waker);
+    let mut plan = ready(&mut planner, &mut core, &content, &waker);
     assert_eq!(
         walk(&mut plan, 10),
         [(
@@ -483,10 +498,9 @@ fn content_of_a_packet_the_link_path_cannot_send_holds_no_place() {
         )]
     );
     drop(plan);
-    assert_eq!(initial.state(), IntentState::Waiting);
     // With only the Initial ACK left, nothing is planned and no room is
     // waited for: a larger datagram does not wake the planner.
-    pending(&mut planner, &mut core, &waker);
+    pending(&mut planner, &mut core, &driver([ack(Initial)]), &waker);
     assert_eq!(planner.thresholds.ack_only, None);
     assert_eq!(planner.thresholds.in_flight, None);
     planner.observe(DatagramLimits {
@@ -497,9 +511,15 @@ fn content_of_a_packet_the_link_path_cannot_send_holds_no_place() {
     assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
 }
 
-/// Whether the planner gives the close packet to send again now.
-fn resends(planner: &mut Planner, core: &mut Core, waker: &Waker) -> bool {
-    match planner.poll_plan(core, &mut Context::from_waker(waker)) {
+/// Whether the planner gives the close packet to send again now, with
+/// `content` the driver's.
+fn resends(
+    planner: &mut Planner,
+    core: &mut Core,
+    content: &DriverContent<Intents>,
+    waker: &Waker,
+) -> bool {
+    match planner.poll_plan(core, content, &mut Context::from_waker(waker)) {
         Poll::Ready(PlannedDatagram::ResendClose) => true,
         Poll::Ready(PlannedDatagram::Fill(_)) => panic!("a closing link path fills nothing"),
         Poll::Pending => false,
@@ -510,49 +530,61 @@ fn resends(planner: &mut Planner, core: &mut Core, waker: &Waker) -> bool {
 fn a_closing_link_path_resends_once_sealed_and_for_powers_of_two_of_datagrams() {
     let (mut core, mut planner) = setup(&ALL, 12_000);
     planner.role_changed(&mut core, LinkPathRoleKind::Closing, &mut Vec::new());
-    let (count, waker) = waker();
-    assert!(!resends(&mut planner, &mut core, &waker), "nothing sealed");
-    planner.publish(ResendCloseIntent::Sealed);
-    assert_eq!(count.0.load(Ordering::SeqCst), 1, "woken");
-    assert!(resends(&mut planner, &mut core, &waker));
-    assert!(!resends(&mut planner, &mut core, &waker), "once");
+    let (_, waker) = waker();
+    assert!(
+        !resends(&mut planner, &mut core, &DriverContent::new(), &waker),
+        "nothing sealed"
+    );
+    assert!(resends(&mut planner, &mut core, &sealed(0), &waker));
+    assert!(
+        !resends(&mut planner, &mut core, &sealed(0), &waker),
+        "once"
+    );
     let mut answered = Vec::new();
     for datagram in 1..=17 {
-        planner.publish(ResendCloseIntent::DatagramReceived);
-        if resends(&mut planner, &mut core, &waker) {
+        if resends(&mut planner, &mut core, &sealed(datagram), &waker) {
             answered.push(datagram);
         }
     }
     assert_eq!(answered, [1, 2, 4, 8, 16]);
     // two datagrams before the call asks again are one resend
-    let (_, mut planner) = setup(&ALL, 12_000);
-    planner.role_changed(&mut core, LinkPathRoleKind::Closing, &mut Vec::new());
-    planner.publish(ResendCloseIntent::DatagramReceived);
-    planner.publish(ResendCloseIntent::DatagramReceived);
-    assert!(resends(&mut planner, &mut core, &waker));
-    assert!(!resends(&mut planner, &mut core, &waker));
+    let mut answered = Vec::new();
+    for datagram in [18, 20, 31, 33, 40] {
+        if resends(&mut planner, &mut core, &sealed(datagram), &waker) {
+            answered.push(datagram);
+        }
+    }
+    assert_eq!(answered, [33]);
 }
 
 #[test]
-fn a_resend_published_before_the_closing_role_waits_for_it() {
+fn a_close_packet_with_fewer_datagrams_than_at_the_last_resend_goes_as_one_just_sealed() {
     let (mut core, mut planner) = setup(&ALL, 12_000);
-    planner.publish(ResendCloseIntent::Sealed);
+    planner.role_changed(&mut core, LinkPathRoleKind::Closing, &mut Vec::new());
+    let (_, waker) = waker();
+    assert!(resends(&mut planner, &mut core, &sealed(5), &waker));
+    assert!(!resends(&mut planner, &mut core, &sealed(6), &waker));
+    assert!(resends(&mut planner, &mut core, &sealed(0), &waker));
+    assert!(resends(&mut planner, &mut core, &sealed(1), &waker));
+}
+
+#[test]
+fn a_close_packet_sealed_before_the_closing_role_waits_for_it() {
+    let (mut core, mut planner) = setup(&ALL, 12_000);
     let (count, waker) = waker();
-    pending(&mut planner, &mut core, &waker);
+    pending(&mut planner, &mut core, &sealed(0), &waker);
     planner.role_changed(&mut core, LinkPathRoleKind::Closing, &mut Vec::new());
     assert_eq!(count.0.load(Ordering::SeqCst), 1, "woken by the role");
-    assert!(resends(&mut planner, &mut core, &waker));
+    assert!(resends(&mut planner, &mut core, &sealed(0), &waker));
 }
 
 #[test]
 fn a_draining_link_path_resends_nothing() {
     let (mut core, mut planner) = setup(&ALL, 12_000);
     planner.role_changed(&mut core, LinkPathRoleKind::Closing, &mut Vec::new());
-    planner.publish(ResendCloseIntent::Sealed);
     planner.role_changed(&mut core, LinkPathRoleKind::Draining, &mut Vec::new());
-    planner.publish(ResendCloseIntent::DatagramReceived);
     let (_, waker) = waker();
-    assert!(!resends(&mut planner, &mut core, &waker));
+    assert!(!resends(&mut planner, &mut core, &sealed(1), &waker));
 }
 
 mod intake;

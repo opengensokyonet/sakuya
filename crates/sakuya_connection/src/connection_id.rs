@@ -37,10 +37,10 @@
 //!   only once the connection ID was used, and the registration is dropped
 //!   when the connection ID is retired or the link path is removed,
 //!   whichever comes first ([RFC 9000 §10.3.1]).
-//! - A connection ID retired has its frame published to send, and
-//!   published again with the same sequence number when that frame is
-//!   declared lost before the retirement is acknowledged
-//!   ([RFC 9000 §13.3]); once acknowledged, the retirement no longer waits.
+//! - A connection ID retired has its frame waiting to be sent, and waiting
+//!   again with the same sequence number when that frame is declared lost
+//!   before the retirement is acknowledged ([RFC 9000 §13.3]); once
+//!   acknowledged, the retirement no longer waits.
 //!
 //! [`ResetTokenRegistrar`] is the capability that registers a token; the
 //! sending call lends it to [`DestinationConnectionIdStrategy::on_used`].
@@ -70,7 +70,7 @@ use sakuya_wire::{
     },
 };
 
-use crate::frame_source::{FrameSource, PublishIntent};
+use crate::{frame_source::FrameSource, v1::send::RetireConnectionIdIntent};
 
 pub mod datagram;
 pub mod local;
@@ -156,10 +156,11 @@ impl From<&NewConnectionIdFrame> for NewConnectionId {
 ///
 /// The strategy is also the frame source of the frames that retire the
 /// peer's connection IDs ([`FrameSource`]): which frames they are, and so
-/// its items, summaries and intents, the composition says. An event that
-/// retires connection IDs publishes their frames through the publisher it
-/// is lent ([`PublishIntent`]); a frame declared lost is published again
-/// with the same sequence number while its retirement waits for
+/// its items and summaries, the composition says. An event that retires
+/// connection IDs leaves their frames waiting to be sent, which
+/// [`waiting_retirements`](Self::waiting_retirements) tells; writing a frame
+/// takes its retirement out of waiting, and a frame declared lost makes it
+/// wait again with the same sequence number while the retirement waits for
 /// acknowledgment ([RFC 9000 §13.3]).
 ///
 /// The [module documentation](self) lists the contract every implementation
@@ -232,21 +233,18 @@ pub trait DestinationConnectionIdStrategy<Id, I, R: ResetTokenRegistrar>:
 
     /// The peer issued `issued`, in a NEW_CONNECTION_ID frame or, with
     /// multipath, a PATH_NEW_CONNECTION_ID frame for this logical path. The
-    /// frames of the connection IDs its Retire Prior To retires go to
-    /// `retire`.
+    /// frames of the connection IDs its Retire Prior To retires wait to be
+    /// sent.
     ///
     /// # Errors
     ///
     /// [`NewConnectionIdViolationError`] if the frame violates a rule the
     /// strategy checks; the caller closes the connection with its
     /// [`transport_error_code`](NewConnectionIdViolationError::transport_error_code).
-    fn on_new_connection_id<Pb, Idx>(
+    fn on_new_connection_id(
         &mut self,
-        retire: &mut Pb,
         issued: NewConnectionId,
-    ) -> Result<(), NewConnectionIdViolationError>
-    where
-        Pb: PublishIntent<Self::Intent, Idx>;
+    ) -> Result<(), NewConnectionIdViolationError>;
 
     /// `link_path` was added. `peer_switched_local_id` tells whether the
     /// peer, on it, uses another of this side's connection IDs than on the
@@ -257,10 +255,8 @@ pub trait DestinationConnectionIdStrategy<Id, I, R: ResetTokenRegistrar>:
     fn on_link_path_added(&mut self, link_path: &Id, peer_switched_local_id: bool);
 
     /// `link_path` ended: its bindings and the registrations kept for it
-    /// go. The frames of the connection IDs it retires go to `retire`.
-    fn on_link_path_ended<Pb, Idx>(&mut self, retire: &mut Pb, link_path: &Id)
-    where
-        Pb: PublishIntent<Self::Intent, Idx>;
+    /// go. The frames of the connection IDs it retires wait to be sent.
+    fn on_link_path_ended(&mut self, link_path: &Id);
 
     /// The earliest instant the strategy wants [`on_deadline`](Self::on_deadline)
     /// called at; `None` when it has nothing to do in time.
@@ -269,10 +265,13 @@ pub trait DestinationConnectionIdStrategy<Id, I, R: ResetTokenRegistrar>:
     }
 
     /// Does everything due at or before `now`. The frames of the connection
-    /// IDs it retires go to `retire`.
-    fn on_deadline<Pb, Idx>(&mut self, _retire: &mut Pb, _now: I)
-    where
-        Pb: PublishIntent<Self::Intent, Idx>,
-    {
-    }
+    /// IDs it retires wait to be sent.
+    fn on_deadline(&mut self, _now: I) {}
+
+    /// The retirements whose RETIRE_CONNECTION_ID frame waits to be sent
+    /// now, each once: those retired and not
+    /// yet written, and those whose frame was declared lost while the
+    /// retirement waits for acknowledgment. Asking does not change the
+    /// strategy.
+    fn waiting_retirements(&self) -> impl Iterator<Item = RetireConnectionIdIntent> + '_;
 }

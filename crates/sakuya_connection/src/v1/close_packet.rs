@@ -31,10 +31,11 @@
 //! those the close packets of the other link paths of the logical path
 //! took, so that no packet number protects two packets; the close packet
 //! does not enter the send journals, and counts nothing in flight. Once it
-//! is sealed, a first resend of it is published on the link path's
-//! planner ([`ResendCloseIntent::Sealed`]); the keys of each level then
-//! keep only their receiving half, once every closing link path has
-//! sealed its own.
+//! is sealed, it counts the datagrams the link path receives, from none:
+//! the link path's planner decides by the count when it goes again
+//! ([`CloseResendFacts`](crate::send_strategy::CloseResendFacts)); the keys
+//! of each level then keep only their receiving half, once every closing
+//! link path has sealed its own.
 
 use core::fmt;
 use std::sync::Arc;
@@ -77,8 +78,7 @@ use super::{
     recovery::peer_max_udp_payload_size,
     send::SendTypes,
     send_planning::{
-        DatagramLimitsReads, LinkPathPlanner, LinkPathSendPlannerOf, NextPacketNumber,
-        SendStrategyOf, datagram_limits, packet_overheads,
+        DatagramLimitsReads, NextPacketNumber, SendStrategyOf, datagram_limits, packet_overheads,
     },
     spaces::SendJournalsOf,
 };
@@ -93,9 +93,7 @@ use crate::{
     feedback::FeedbackSummariesOf,
     layer::{self, NodeKey},
     others::OtherNodes,
-    send_strategy::{
-        PlannedPacketKind, Publish, ResendCloseIntent, SendStrategy, SendStrategyTypes,
-    },
+    send_strategy::{PlannedPacketKind, SendStrategy, SendStrategyTypes},
     share::{FlatMut, LineageLists, LineagePartList, NodeData},
     take::{GetAt, ReadEach, Reborrow, Take, TakeEach},
     write::{AckOnlyClass, PaddingSummary},
@@ -124,14 +122,24 @@ impl ClosePacket {
     pub fn is_sealed(&self) -> bool {
         matches!(self, Self::Sealed(_))
     }
+
+    /// A datagram arrived on the closing link path: a sealed close packet
+    /// counts it.
+    pub(super) fn datagram_received(&mut self) {
+        if let Self::Sealed(sealed) = self {
+            sealed.datagrams_received = sealed.datagrams_received.saturating_add(1);
+        }
+    }
 }
 
-/// A sealed close packet: the bytes of its datagram, and the packet number
-/// it took in each space it has a packet of.
+/// A sealed close packet: the bytes of its datagram, the packet number it
+/// took in each space it has a packet of, and how many datagrams the link
+/// path received since it was sealed.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SealedClosePacket {
     datagram: Bytes,
     packet_numbers: [Option<PacketNumber>; 3],
+    datagrams_received: u64,
 }
 
 impl SealedClosePacket {
@@ -144,6 +152,12 @@ impl SealedClosePacket {
     pub fn packet_number(&self, space: PacketNumberSpaceKind) -> Option<PacketNumber> {
         self.packet_numbers[space_index(space)]
     }
+
+    /// How many datagrams the link path received since the close packet
+    /// was sealed, while it closes.
+    pub fn datagrams_received(&self) -> u64 {
+        self.datagrams_received
+    }
 }
 
 impl fmt::Debug for SealedClosePacket {
@@ -151,6 +165,7 @@ impl fmt::Debug for SealedClosePacket {
         f.debug_struct("SealedClosePacket")
             .field("len", &self.datagram.len())
             .field("packet_numbers", &self.packet_numbers)
+            .field("datagrams_received", &self.datagrams_received)
             .finish()
     }
 }
@@ -447,6 +462,7 @@ fn write_close_datagram<B: CryptoBackend>(
     (state.packets > 0).then(|| SealedClosePacket {
         datagram: buffer.freeze(),
         packet_numbers,
+        datagrams_received: 0,
     })
 }
 
@@ -486,14 +502,13 @@ type SealReads<T, L> = HList![
     <<T as crate::v1::MakerChoices>::Side as Side>::Own,
 ];
 
-/// What a sealed close packet takes then: itself, the connection IDs and
-/// the registrar of the link path's reset tokens, which learn of the
-/// connection ID's use, and the planner it is published on.
-type SealedTakes<T, L> = HList![
+/// What a sealed close packet takes then: itself, and the connection IDs
+/// and the registrar of the link path's reset tokens, which learn of the
+/// connection ID's use.
+type SealedTakes<T> = HList![
     ClosePacket,
     ConnectionIdsOf<T>,
     LinkPathResetTokenRegistrar<ResetTokenRegistrarOf<T>>,
-    LinkPathPlanner<LinkPathSendPlannerOf<T, L>>,
 ];
 
 /// What is left of a link path's lineage once sealing took [`SealTakes`].
@@ -505,17 +520,15 @@ type SealRest<'x, T, L, It> =
 /// connection IDs, which it looks at first; `Il` of what the limits of a
 /// datagram are read from and `Ipp` of the peer's `max_udp_payload_size`;
 /// `It` of [`SealTakes`], `Iw` of [`SealReads`] in what is left and `Is` of
-/// [`SealedTakes`]; `Jc` of the close packet of every other link path; and
-/// `Irc` of the resend among the planner's intents.
-type Positions<Ip, Ir, Ic, Iid, Il, Ipp, It, Iw, Is, Jc, Irc> =
-    ((Ip, Ir, Ic, Iid), (Il, Ipp), (It, Iw, Is), Jc, Irc);
+/// [`SealedTakes`]; and `Jc` of the close packet of every other link path.
+type Positions<Ip, Ir, Ic, Iid, Il, Ipp, It, Iw, Is, Jc> =
+    ((Ip, Ir, Ic, Iid), (Il, Ipp), (It, Iw, Is), Jc);
 
 /// The close packet reads the link path's role and the connection IDs of
 /// its logical path: it is sealed once the role is `Closing` and the peer's
-/// connection ID is known, as the [module documentation](self) says, and
-/// then the first resend is published.
-impl<T, L, Ip, Ir, Ic, Iid, Il, Ipp, It, Iw, Is, Jc, Irc>
-    DataComponent<T, L, layer::LinkPath, Positions<Ip, Ir, Ic, Iid, Il, Ipp, It, Iw, Is, Jc, Irc>>
+/// connection ID is known, as the [module documentation](self) says.
+impl<T, L, Ip, Ir, Ic, Iid, Il, Ipp, It, Iw, Is, Jc>
+    DataComponent<T, L, layer::LinkPath, Positions<Ip, Ir, Ic, Iid, Il, Ipp, It, Iw, Is, Jc>>
     for ClosePacket
 where
     T: Choices,
@@ -528,7 +541,6 @@ where
     TransportParameterSlots<L>: Selector<Option<MaxUdpPayloadSize>, Ipp>,
     SendTypes<T, L>: SendStrategyTypes,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
-    LinkPathSendPlannerOf<T, L>: Publish<ResendCloseIntent, Irc>,
     for<'v, 's> <L as LineageLists<'v, T>>::LinkPath:
         Reborrow<'s, Out = <L as LineageLists<'s, T>>::LinkPath>,
     for<'x> <L as LineageLists<'x, T>>::LinkPath: GetAt<ClosePacket, Ip>
@@ -537,7 +549,7 @@ where
         + GetAt<ConnectionIdsOf<T>, Iid>
         + ReadEach<DatagramLimitsReads<T, L>, Il>
         + TakeEach<'x, SealTakes<T>, It>
-        + TakeEach<'x, SealedTakes<T, L>, Is>,
+        + TakeEach<'x, SealedTakes<T>, Is>,
     for<'x> SealRest<'x, T, L, It>: TakeEach<'x, SealReads<T, L>, Iw>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out: GetAt<ClosePacket, Jc>,
@@ -691,8 +703,7 @@ where
             write_close_datagram(levels, shape, usage)?
         };
 
-        let (hlist_pat![packet, ids, registrar, planner], _) =
-            Take::<SealedTakes<T, L>, Is>::take(lineage);
+        let (hlist_pat![packet, ids, registrar], _) = Take::<SealedTakes<T>, Is>::take(lineage);
         let chosen = DatagramConnectionId::<_, _, _, InstantOf<T>>::choose_first(
             ids.destination(),
             &link,
@@ -707,10 +718,6 @@ where
             );
         }
         *packet = ClosePacket::Sealed(sealed);
-        Publish::<ResendCloseIntent, Irc>::publish(
-            planner.planner_mut(),
-            ResendCloseIntent::Sealed,
-        );
         None
     }
 }

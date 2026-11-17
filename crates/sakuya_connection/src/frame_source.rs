@@ -10,6 +10,11 @@
 //! ([`PublishIntent`]). An intent of it that was refused, or that the
 //! strategy ended, comes back to it as unfulfilled.
 //!
+//! What the driver's own components have to send is not published: each
+//! part says what its components in a lineage have to send now
+//! ([`DriverContentPart`]), and the list of parts gathers it
+//! ([`DriverContentOf`]).
+//!
 //! A part lists the kinds of its frame sources ([`FrameSourceKind`], in
 //! [`SendIntentPart::FrameSources`]); each kind says how its source is
 //! found in a lineage ([`FindFrameSource`]). The items, the summaries and
@@ -32,7 +37,10 @@ use sakuya_wire::parts::{CNil, Coproduct, HCons, HNil};
 use crate::{
     clock::{ConnectionChoices, InstantOf},
     feedback::InjectSummary,
-    send_strategy::{FrameSourceSet, PlannedPacketKind, SendIntentPart},
+    send_strategy::{
+        DriverContent, FrameSourceSet, PlannedPacketKind, SendIntentPart, SendIntentsOf,
+    },
+    share::{LinkPathIdentifierOf, LogicalPathKeys},
     take::{AppendEach, Lineage, OptionalRefs},
     write::{
         ClassOfSource, FlightClassType, OpenPacket, PacketPosition, PacketWriting, SummaryOf,
@@ -59,8 +67,9 @@ pub trait FrameSource {
     /// afterwards.
     ///
     /// It is called only when the item's least room fits. Having written
-    /// nothing, it has already updated or withdrawn the intent, so that the
-    /// plan does not give it the same item again.
+    /// nothing, it has already updated or withdrawn the intent, or changed
+    /// its own state for content the driver gathers, so that the plan does
+    /// not give it the same item again.
     ///
     /// `Idx` is the place of [`Self::Summary`](FrameSource::Summary) in the
     /// composition's sum of summaries; the compiler infers it.
@@ -193,6 +202,78 @@ pub trait FrameSourceKind {
     type Summary<I>;
     /// What the source publishes when its frames come back.
     type Intent;
+    /// The kind whose source the summaries and the unfulfilled intents of
+    /// this kind go back to ([`FeedFrameSources`]): by default the kind
+    /// itself. A kind whose source is found only in the lineages it writes
+    /// in, and whose frames need nothing when they come back, names
+    /// [`IgnoredFeedback`] of itself, which is found in any lineage.
+    type Feedback: FrameSourceKind + ?Sized = Self;
+}
+
+/// The kind whose source takes the summaries and unfulfilled intents of
+/// the kind `K` and does nothing with them (`IgnoredFeedback`): the
+/// [`Feedback`](FrameSourceKind::Feedback) of a kind whose frames need
+/// nothing when they are acknowledged or lost, such as a probe's PING.
+#[derive(Debug)]
+pub struct IgnoredFeedback<K>(PhantomData<fn() -> K>);
+
+impl<K: FrameSourceKind> FrameSourceKind for IgnoredFeedback<K> {
+    type Item<'a> = K::Item<'a>;
+    type Summary<I> = K::Summary<I>;
+    type Intent = K::Intent;
+}
+
+/// The source of [`IgnoredFeedback`]: it writes nothing, and nothing is
+/// done when a frame of its kind comes back.
+#[derive(Debug)]
+pub struct IgnoringFrameSource<K, I>(PhantomData<fn() -> (K, I)>);
+
+impl<K: FrameSourceKind, I> FrameSource for IgnoringFrameSource<K, I> {
+    type Summary = K::Summary<I>;
+    type Class = crate::write::InFlightClass;
+    type Item<'a> = K::Item<'a>;
+    type Intent = K::Intent;
+
+    fn supply<W, P, Idx>(
+        &mut self,
+        _: Self::Item<'_>,
+        packet: OpenPacket<W, Self::Class, P>,
+    ) -> Supplied<W, Self::Class, P>
+    where
+        W: PacketWriting,
+        SummaryOf<W>: InjectSummary<Self::Summary, Idx>,
+        P: PacketPosition,
+    {
+        Supplied::Open(packet)
+    }
+
+    fn delivered<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, _: Self::Summary)
+    where
+        Pb: PublishIntent<Self::Intent, Idx>,
+    {
+    }
+
+    fn lost<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, _: &Self::Summary)
+    where
+        Pb: PublishIntent<Self::Intent, Idx>,
+    {
+    }
+
+    fn unfulfilled(&mut self, _: Self::Item<'_>, _: Unfulfilled) {}
+}
+
+impl<T: ConnectionChoices, L, V, K: FrameSourceKind> FindFrameSource<T, L, V, ()>
+    for IgnoredFeedback<K>
+{
+    type Source<'l, 'r>
+        = IgnoringFrameSource<K, InstantOf<T>>
+    where
+        V: 'l,
+        'r: 'l;
+
+    fn find<'l, 'r>(_: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
+        IgnoringFrameSource(PhantomData)
+    }
 }
 
 /// How a frame source of this kind is found in a lineage: implemented by
@@ -374,7 +455,16 @@ impl<T, L, V, Pb, K, Ks, H, Idx, Hs> FeedFrameSources<T, L, V, Pb, HCons<(H, Idx
     for HCons<K, Ks>
 where
     T: ConnectionChoices,
-    K: FindFrameSource<T, L, V, H>,
+    K: FrameSourceKind,
+    K::Feedback: for<'a> FindFrameSource<
+            T,
+            L,
+            V,
+            H,
+            Item<'a> = K::Item<'a>,
+            Summary<InstantOf<T>> = K::Summary<InstantOf<T>>,
+            Intent = K::Intent,
+        >,
     Ks: FeedFrameSources<T, L, V, Pb, Hs>,
     Pb: PublishIntent<K::Intent, Idx>,
 {
@@ -387,7 +477,7 @@ where
     ) {
         match summary {
             Coproduct::Inl(summary) => {
-                K::find(lineage, now).delivered::<Pb, Idx>(publish, space, summary);
+                K::Feedback::find(lineage, now).delivered::<Pb, Idx>(publish, space, summary);
             }
             Coproduct::Inr(rest) => Ks::delivered(lineage, publish, now, space, rest),
         }
@@ -402,7 +492,7 @@ where
     ) {
         match summary {
             Coproduct::Inl(summary) => {
-                K::find(lineage, now).lost::<Pb, Idx>(publish, space, summary);
+                K::Feedback::find(lineage, now).lost::<Pb, Idx>(publish, space, summary);
             }
             Coproduct::Inr(rest) => Ks::lost(lineage, publish, now, space, rest),
         }
@@ -415,9 +505,79 @@ where
         cause: Unfulfilled,
     ) {
         match item {
-            Coproduct::Inl(item) => K::find(lineage, now).unfulfilled(item, cause),
+            Coproduct::Inl(item) => K::Feedback::find(lineage, now).unfulfilled(item, cause),
             Coproduct::Inr(rest) => Ks::unfulfilled(lineage, now, rest, cause),
         }
+    }
+}
+
+// ---- what the driver's own components have to send ----
+
+/// What one part's own components have to send on a link path at this
+/// moment (`DriverContentPart`), read from a lineage: implemented by the
+/// marker type of the part. A part whose content is all published through
+/// the intake has none.
+///
+/// `T` is the choices, `L` the composition's list of parts, `V` the list
+/// of the lineage and `H` what the impl infers the positions of what it
+/// reads by.
+pub trait DriverContentPart<T: ConnectionChoices, L: LogicalPathKeys, V, H>:
+    SendIntentPart
+{
+    /// Put what the part's components in `lineage` have to send on
+    /// `link_path` now into `out`: each intent made a value of the
+    /// composition's sum by `inject`, and the facts of the link path's
+    /// sealed close packet if the part keeps it.
+    fn pending<J>(
+        lineage: &Lineage<'_, V>,
+        link_path: &LinkPathIdentifierOf<T, L>,
+        out: &mut DriverContent<J>,
+        inject: impl Fn(Self::SendIntents) -> J,
+    );
+}
+
+/// What the own components of a list of parts have to send on a link path
+/// at this moment, part by part ([`DriverContentPart`]); `Hs` holds, for
+/// each part, the positions of its impl.
+pub trait DriverContentOf<T: ConnectionChoices, L: LogicalPathKeys, V, Hs>: SendIntentsOf {
+    /// Put what every part's components in `lineage` have to send on
+    /// `link_path` now into `out`, each intent made a value of `J` by
+    /// `inject`.
+    fn pending<J>(
+        lineage: &Lineage<'_, V>,
+        link_path: &LinkPathIdentifierOf<T, L>,
+        out: &mut DriverContent<J>,
+        inject: impl Fn(Self::SendIntents) -> J,
+    );
+}
+
+impl<T: ConnectionChoices, L: LogicalPathKeys, V> DriverContentOf<T, L, V, HNil> for HNil {
+    fn pending<J>(
+        _: &Lineage<'_, V>,
+        _: &LinkPathIdentifierOf<T, L>,
+        _: &mut DriverContent<J>,
+        _: impl Fn(CNil) -> J,
+    ) {
+    }
+}
+
+impl<T, L, V, P, Ps, H, Hs> DriverContentOf<T, L, V, HCons<H, Hs>> for HCons<P, Ps>
+where
+    T: ConnectionChoices,
+    L: LogicalPathKeys,
+    P: DriverContentPart<T, L, V, H>,
+    Ps: DriverContentOf<T, L, V, Hs>,
+{
+    fn pending<J>(
+        lineage: &Lineage<'_, V>,
+        link_path: &LinkPathIdentifierOf<T, L>,
+        out: &mut DriverContent<J>,
+        inject: impl Fn(Self::SendIntents) -> J,
+    ) {
+        P::pending(lineage, link_path, out, |intent| {
+            inject(Coproduct::Inl(intent))
+        });
+        Ps::pending(lineage, link_path, out, |rest| inject(Coproduct::Inr(rest)));
     }
 }
 

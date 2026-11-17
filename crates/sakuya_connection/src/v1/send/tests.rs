@@ -19,7 +19,6 @@ fn pn(number: u64) -> PacketNumber {
 struct Components {
     journals: PacketNumberSpaces<ReceiveJournals<Instant>>,
     obligations: PacketNumberSpaces<Rfc9000AckObligation<Instant>>,
-    tickets: AckIntentTickets<()>,
     numbers: KeyPhaseNumbers,
 }
 
@@ -38,7 +37,6 @@ impl Components {
                 handshake: Some(Rfc9000AckObligation::new(None)),
                 application_data: Rfc9000AckObligation::new(Some(Instant::from_millis(25))),
             },
-            tickets: AckIntentTickets::default(),
             numbers,
         }
     }
@@ -48,18 +46,11 @@ impl Components {
     fn ack_written(&mut self, space: PacketNumberSpaceKind, largest: u64) {
         let mut taken = TakenPositions::default();
         let mut lineage = Lineage::new(
-            hlist![
-                &mut self.journals,
-                &mut self.obligations,
-                &mut self.tickets,
-                &mut self.numbers
-            ],
+            hlist![&mut self.journals, &mut self.obligations, &mut self.numbers],
             &mut taken,
         );
         let mut state =
-            LineageAckFrameState::<_, Instant, Rfc9000AckObligation<Instant>, (), _>::new(
-                &mut lineage,
-            );
+            LineageAckFrameState::<_, Instant, Rfc9000AckObligation<Instant>, _>::new(&mut lineage);
         state.ack_written(space, pn(largest));
     }
 }

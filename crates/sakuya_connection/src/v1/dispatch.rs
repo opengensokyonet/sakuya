@@ -12,7 +12,7 @@
 //! | Frame | Component |
 //! | --- | --- |
 //! | PADDING, PING | none: they only make a packet ack-eliciting or not |
-//! | PATH_CHALLENGE | the link path the packet arrived on: a PATH_RESPONSE with its data is published on its planner, and the link path keeps what the planner gave back ([`path_response`](super::path_response)) |
+//! | PATH_CHALLENGE | the link path the packet arrived on: it keeps the data, to answer with a PATH_RESPONSE ([`path_response`](super::path_response)) |
 //! | PATH_RESPONSE | none: this side sends no PATH_CHALLENGE yet, and a response that matches none is ignored |
 //! | CRYPTO | [`CryptoReceiver`], at the level of the packet |
 //! | NEW_TOKEN | the data only this side has ([`Side::on_new_token`]): a client hands the token over |
@@ -59,11 +59,11 @@ use sakuya_wire::{
 use snafu::{ResultExt, Snafu, ensure};
 
 use super::{
-    Choices, CloseCauseOf, LinkPathRoleReads, Part, PathResponseOutcomeOf, Side,
+    Choices, CloseCauseOf, LinkPathRoleReads, Part, Side,
     ack::{AckReads, AckRecoveryTakes, receive_ack},
     close::CloseReasonRecord,
     confirmation::HandshakeConfirmation,
-    connection_ids::CoreLentConnectionIdEvents,
+    connection_ids::LineageConnectionIdEvents,
     crypto::CryptoReceiver,
     current_probe_timeout,
     error::{self, ConnectionError, V1ConnectionErrorOf},
@@ -71,13 +71,10 @@ use super::{
     key_phase::KeyPhaseNumbers,
     keys::OneRttKeys,
     link::LinkClone,
-    path_response::{PathResponseIntent, PathResponsePublication},
+    path_response::PendingPathResponse,
     recovery::{CongestionPartOf, OthersOf, RecoveryFactoryOf, RttOf},
     send::SendTypes,
-    send_planning::{
-        IntakeOf, IntakePublishOutcome, LinkPathPlanner, LinkPathSendPlannerOf, SendStrategyIntake,
-        SendStrategyOf,
-    },
+    send_planning::{IntakeOf, IntakePublishOutcome, SendStrategyIntake, SendStrategyOf},
     spaces::SendJournalsOf,
     streams::{
         StreamSet, StreamSetFrameErrorOf, StreamsOf,
@@ -99,7 +96,7 @@ use crate::{
     layer::{self, LogicalPath, NodeKey},
     others::OtherNodes,
     send_strategy::{
-        AnyActiveLinkPath, IntentTicketResize, IntentTicketWithdraw, Publish, SendIntentIntake,
+        AnyActiveLinkPath, IntentTicketResize, IntentTicketWithdraw, SendIntentIntake,
         SendStrategy, SendStrategyTypes, SharedPublishTo,
     },
     share::{FlatMut, FlatRef, LineageLists, LineagePartList, LinkPathIdentifierOf, NodeData},
@@ -204,7 +201,6 @@ impl<
     Icid,
     Iw,
     Ipr,
-    Ipp2,
     Iv,
     Ima,
     Irt,
@@ -233,7 +229,7 @@ impl<
         T,
         L,
         (
-            (Ic, Ir, Ih, Icid, Iw, (Ipr, Ipp2)),
+            (Ic, Ir, Ih, Icid, Iw, Ipr),
             (Iv, Ima, Irt),
             (Il, Is, Ii, Idx),
             (
@@ -279,20 +275,13 @@ where
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out:
         Selector<&'a CongestionPartOf<T, L>, Jx> + Selector<&'a RttOf<T, L>, Jr>,
     for<'v> <L as LineageLists<'v, T>>::LogicalPath: GetAt<CryptoReceiver<CryptoReceiveBufferOf<T>>, Ic>
-        + CoreLentConnectionIdEvents<T, L, Icid>
+        + LineageConnectionIdEvents<T, L, Icid>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
         + GetAt<HandshakeConfirmation, Ih>
         + GetAt<<T::Side as Side>::Own, Iw>
         + ReadEach<LinkPathRoleReads<T, L>, Iv>,
-    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out: TakeEach<
-            's,
-            HList![
-                PathResponsePublication<PathResponseOutcomeOf<T, L>>,
-                LinkPathPlanner<LinkPathSendPlannerOf<T, L>>
-            ],
-            Ipr,
-        >,
-    LinkPathSendPlannerOf<T, L>: Publish<PathResponseIntent, Ipp2>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![PendingPathResponse], Ipr>,
     for<'s> NodeData<T, L, layer::Recovery>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Recovery> as FlatMut<'s>>::Out: GetAt<RttOf<T, L>, Irt>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
@@ -356,21 +345,18 @@ where
                 let NodeKey::LogicalPath(path) = others.here().clone() else {
                     unreachable!("a logical path's lend carries its key")
                 };
-                others.each_link_path::<HList![
-                    PathResponsePublication<PathResponseOutcomeOf<T, L>>,
-                    LinkPathPlanner<LinkPathSendPlannerOf<T, L>>
-                ], Ipr>(|key, hlist_pat![publication, planner]| {
-                    let NodeKey::LinkPath(each, link) = key else {
-                        return;
-                    };
-                    if *each == path && L::link_path_identifier(each, link) == *packet.link_path() {
-                        let intent = PathResponseIntent::new(frame.data());
-                        publication.published(Publish::<PathResponseIntent, Ipp2>::publish(
-                            planner.planner_mut(),
-                            intent,
-                        ));
-                    }
-                });
+                others.each_link_path::<HList![PendingPathResponse], Ipr>(
+                    |key, hlist_pat![pending]| {
+                        let NodeKey::LinkPath(each, link) = key else {
+                            return;
+                        };
+                        if *each == path
+                            && L::link_path_identifier(each, link) == *packet.link_path()
+                        {
+                            pending.challenged(frame.data());
+                        }
+                    },
+                );
                 Ok(())
             }
             FrameRun::Crypto(frame) => {
@@ -382,7 +368,7 @@ where
                     .context(error::CryptoSnafu)
             }
             FrameRun::NewConnectionId(frame) => {
-                CoreLentConnectionIdEvents::<T, L, Icid>::new_connection_id(
+                LineageConnectionIdEvents::<T, L, Icid>::new_connection_id(
                     lineage,
                     NewConnectionId::from(&frame),
                 )
@@ -394,7 +380,7 @@ where
                 let pto = current_probe_timeout::<T, L, B, Ima, Irt>(peer, thresholds, others)
                     // with no recovery layer, the last one the idle timeout took
                     .unwrap_or_else(|| idle.probe_timeout());
-                CoreLentConnectionIdEvents::<T, L, Icid>::retired_by_peer(
+                LineageConnectionIdEvents::<T, L, Icid>::retired_by_peer(
                     lineage,
                     frame.sequence_number().get().get(),
                     packet.destination(),

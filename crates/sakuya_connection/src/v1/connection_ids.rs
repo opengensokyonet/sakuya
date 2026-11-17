@@ -49,8 +49,6 @@ use super::{
     confirmation::HandshakeConfirmation,
     first_flight::FirstFlightStart,
     parameters::{LocalTransportParameters, PeerTransportParameters},
-    send::{RetireConnectionIdIntent, SendTypes},
-    send_planning::{SendStrategyCore, SendStrategyOf},
     stateless_reset::StatelessResetSignal,
 };
 use crate::v1::{DestinationConnectionIdsOf, LocalConnectionIdsOf};
@@ -65,15 +63,13 @@ use crate::{
         DestinationConnectionIdStrategy, NewConnectionId,
         local::{
             ConnectionIdIssuer, IssuedConnectionId, LocalConnectionIdStrategy,
-            NewConnectionIdIntent, RetiredByPeerViolationError,
+            RetiredByPeerViolationError,
         },
         reset_token::{ResetTokenRegistrar, ResetTokenRegistry},
         violation::NewConnectionIdViolationError,
     },
-    frame_source::PublishIntent,
     layer,
     others::OtherNodes,
-    send_strategy::SendStrategyTypes,
     share::{ConnectionArgsOf, LineageLists, LineagePartList},
     take::{GetAt, Lineage, Reborrow, Take, TakeEach},
 };
@@ -580,36 +576,26 @@ where
 
 // ---- the strategies' events that retire and issue connection IDs ----
 
-/// The core of the send strategy of the choices `T` and the list of parts
-/// `L`, as the connection node holds it.
-type CoreOf<T, L> = SendStrategyCore<SendStrategyOf<T, L>>;
-
-/// What an event of the destination connection ID strategy that may
-/// retire connection IDs takes out of a lineage: the logical path's
-/// connection IDs, and the core the frames are published to.
-type RetiringTakes<T, L> = HList![ConnectionIdsOf<T>, CoreOf<T, L>];
+/// What an event of the destination connection ID strategy takes out of a
+/// lineage: the logical path's connection IDs.
+type RetiringTakes<T> = HList![ConnectionIdsOf<T>];
 
 /// What an event of the local connection ID strategy takes out of a
-/// lineage: the logical path's connection IDs, the core the
-/// NEW_CONNECTION_ID frames are published to, and the connection's issuer.
-type IssuingTakes<T, L> = HList![
+/// lineage: the logical path's connection IDs and the connection's issuer.
+type IssuingTakes<T> = HList![
     ConnectionIdsOf<T>,
-    CoreOf<T, L>,
     LocalConnectionIdIssuer<<T as crate::v1::MakerChoices>::ConnectionIdIssuer>
 ];
 
-/// `V: CoreLentConnectionIdEvents<T, L, H>`: the events of the destination
+/// `V: LineageConnectionIdEvents<T, L, H>`: the events of the destination
 /// connection ID strategy that may retire connection IDs and those of the
-/// local connection ID strategy, in a lineage of `V`, with the core, which
-/// the lineage holds, lent to publish the frames of what they retire or
-/// issue, and the local strategy's events with the connection's issuer,
-/// which the lineage holds too.
+/// local connection ID strategy, in a lineage of `V`, the local strategy's
+/// with the connection's issuer, which the lineage holds too. What they
+/// retire or issue waits in the strategies to be sent.
 ///
-/// `H` holds the positions of what the destination strategy's events take
-/// and the place of [`RetireConnectionIdIntent`] among the composition's
-/// intents, then the positions of what the local strategy's events take
-/// and the place of [`NewConnectionIdIntent`].
-pub trait CoreLentConnectionIdEvents<T: Choices, L, H>: Sized {
+/// `H` holds the positions of what the destination strategy's events take,
+/// then those of what the local strategy's events take.
+pub trait LineageConnectionIdEvents<T: Choices, L, H>: Sized {
     /// The peer issued `issued`.
     ///
     /// # Errors
@@ -653,56 +639,46 @@ pub trait CoreLentConnectionIdEvents<T: Choices, L, H>: Sized {
 // TODO: the local strategy's `on_used_by_peer` is not told yet: version 1
 // has one logical path, and its receiving call does not yet tell which of
 // this side's connection IDs the peer switched to on a link path.
-impl<T, L, V, Is, Idx, Iu, Idn> CoreLentConnectionIdEvents<T, L, (Is, Idx, Iu, Idn)> for V
+impl<T, L, V, Is, Iu> LineageConnectionIdEvents<T, L, (Is, Iu)> for V
 where
     T: Choices,
-    SendTypes<T, L>: SendStrategyTypes,
-    CoreOf<T, L>: PublishIntent<RetireConnectionIdIntent, Idx>
-        + PublishIntent<NewConnectionIdIntent, Idn>
-        + 'static,
     for<'s> V: Reborrow<'s>,
     for<'s> <V as Reborrow<'s>>::Out:
-        TakeEach<'s, RetiringTakes<T, L>, Is> + TakeEach<'s, IssuingTakes<T, L>, Iu>,
+        TakeEach<'s, RetiringTakes<T>, Is> + TakeEach<'s, IssuingTakes<T>, Iu>,
 {
     fn new_connection_id(
         lineage: &mut Lineage<'_, V>,
         issued: NewConnectionId,
     ) -> Result<(), NewConnectionIdViolationError> {
-        let (hlist_pat![ids, core], _) = Take::<RetiringTakes<T, L>, Is>::take(lineage.reborrow());
-        DestinationConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>::on_new_connection_id::<_, Idx>(
+        let (hlist_pat![ids], _) = Take::<RetiringTakes<T>, Is>::take(lineage.reborrow());
+        DestinationConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>::on_new_connection_id(
             &mut ids.destination,
-            core,
             issued,
         )
     }
 
     fn link_path_ended(lineage: &mut Lineage<'_, V>, link_path: &LinkIdOf<T>) {
-        let (hlist_pat![ids, core], _) = Take::<RetiringTakes<T, L>, Is>::take(lineage.reborrow());
-        DestinationConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>::on_link_path_ended::<_, Idx>(
+        let (hlist_pat![ids], _) = Take::<RetiringTakes<T>, Is>::take(lineage.reborrow());
+        DestinationConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>::on_link_path_ended(
             &mut ids.destination,
-            core,
             link_path,
         );
     }
 
     fn issuable(lineage: &mut Lineage<'_, V>, peer_limit: u64) {
-        let (hlist_pat![ids, core, issuer], _) =
-            Take::<IssuingTakes<T, L>, Iu>::take(lineage.reborrow());
-        LocalConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, LocalConnectionIdRegistrationOf<T>>::on_issuable::<_, _, Idn>(
+        let (hlist_pat![ids, issuer], _) = Take::<IssuingTakes<T>, Iu>::take(lineage.reborrow());
+        LocalConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, LocalConnectionIdRegistrationOf<T>>::on_issuable(
             &mut ids.local_strategy,
             issuer.issuer_mut(),
-            core,
             peer_limit,
         );
     }
 
     fn handshake_confirmed(lineage: &mut Lineage<'_, V>) {
-        let (hlist_pat![ids, core, issuer], _) =
-            Take::<IssuingTakes<T, L>, Iu>::take(lineage.reborrow());
-        LocalConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, LocalConnectionIdRegistrationOf<T>>::on_handshake_confirmed::<_, _, Idn>(
+        let (hlist_pat![ids, issuer], _) = Take::<IssuingTakes<T>, Iu>::take(lineage.reborrow());
+        LocalConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, LocalConnectionIdRegistrationOf<T>>::on_handshake_confirmed(
             &mut ids.local_strategy,
             issuer.issuer_mut(),
-            core,
         );
     }
 
@@ -713,12 +689,10 @@ where
         now: InstantOf<T>,
         pto: Duration,
     ) -> Result<(), RetiredByPeerViolationError> {
-        let (hlist_pat![ids, core, issuer], _) =
-            Take::<IssuingTakes<T, L>, Iu>::take(lineage.reborrow());
-        LocalConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, LocalConnectionIdRegistrationOf<T>>::on_retired_by_peer::<_, _, Idn>(
+        let (hlist_pat![ids, issuer], _) = Take::<IssuingTakes<T>, Iu>::take(lineage.reborrow());
+        LocalConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, LocalConnectionIdRegistrationOf<T>>::on_retired_by_peer(
             &mut ids.local_strategy,
             issuer.issuer_mut(),
-            core,
             sequence,
             packet_destination,
             now,
@@ -727,18 +701,15 @@ where
     }
 
     fn deadline(lineage: &mut Lineage<'_, V>, now: InstantOf<T>) {
-        let (hlist_pat![ids, core], _) = Take::<RetiringTakes<T, L>, Is>::take(lineage.reborrow());
-        DestinationConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>::on_deadline::<_, Idx>(
+        let (hlist_pat![ids], _) = Take::<RetiringTakes<T>, Is>::take(lineage.reborrow());
+        DestinationConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>::on_deadline(
             &mut ids.destination,
-            core,
             now,
         );
-        let (hlist_pat![ids, core, issuer], _) =
-            Take::<IssuingTakes<T, L>, Iu>::take(lineage.reborrow());
-        LocalConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, LocalConnectionIdRegistrationOf<T>>::on_deadline::<_, _, Idn>(
+        let (hlist_pat![ids, issuer], _) = Take::<IssuingTakes<T>, Iu>::take(lineage.reborrow());
+        LocalConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, LocalConnectionIdRegistrationOf<T>>::on_deadline(
             &mut ids.local_strategy,
             issuer.issuer_mut(),
-            core,
             now,
         );
     }
@@ -746,7 +717,7 @@ where
 
 /// The connection IDs' deadline is the earlier of the two strategies'; they
 /// read themselves. When it comes, each strategy does what is due, and what
-/// they retire or issue is published to the core.
+/// they retire or issue waits in them to be sent.
 ///
 /// They also read whether the handshake is confirmed and the peer's
 /// transport parameters, to tell the local strategy once each: once the
@@ -768,7 +739,7 @@ where
     for<'v> <L as LineageLists<'v, T>>::LogicalPath: GetAt<Self, I>
         + GetAt<HandshakeConfirmation, If>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>
-        + CoreLentConnectionIdEvents<T, L, H>,
+        + LineageConnectionIdEvents<T, L, H>,
 {
     fn reads(reads: &mut ReadSet) {
         reads
@@ -798,7 +769,7 @@ where
         _: &mut OtherNodes<'v, T, L, B>,
         now: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
-        CoreLentConnectionIdEvents::<T, L, H>::deadline(&mut lineage, now);
+        LineageConnectionIdEvents::<T, L, H>::deadline(&mut lineage, now);
         None
     }
     fn reread<'v, B: CallBundle>(
@@ -834,11 +805,11 @@ where
                     ResetTokenRegistrarOf<T>,
                 >::on_handshake_reset_token(&mut ids.destination, token);
             }
-            CoreLentConnectionIdEvents::<T, L, H>::issuable(&mut lineage, limit);
+            LineageConnectionIdEvents::<T, L, H>::issuable(&mut lineage, limit);
         }
         if confirmed {
             lineage.get_mut::<Self, I>().confirmation_told = true;
-            CoreLentConnectionIdEvents::<T, L, H>::handshake_confirmed(&mut lineage);
+            LineageConnectionIdEvents::<T, L, H>::handshake_confirmed(&mut lineage);
         }
         None
     }
@@ -867,7 +838,7 @@ impl<R> LinkPathResetTokenRegistrar<R> {
 /// A link path makes its registrar and is added to its logical path's
 /// strategy when it is built, with whether the peer switched to another of
 /// this side's connection IDs on it as its request says, and ends there
-/// when it ends; what its end retires is published to the core.
+/// when it ends; what its end retires waits in the strategy to be sent.
 impl<T: Choices, L, Ir, Is, Ii, H> Build<T, L, layer::LinkPath, (Ir, Is, Ii, H)>
     for LinkPathResetTokenRegistrar<ResetTokenRegistrarOf<T>>
 where
@@ -875,7 +846,7 @@ where
     for<'v> <L as LineageLists<'v, T>>::LinkPathParents: GetAt<ConnectionResetTokenRegistry<T::ResetTokenRegistry>, Ir>
         + GetAt<Arc<StatelessResetSignal>, Is>
         + GetAt<ConnectionIdsOf<T>, Ii>
-        + CoreLentConnectionIdEvents<T, L, H>,
+        + LineageConnectionIdEvents<T, L, H>,
 {
     fn build<'v>(
         parents: &mut ParentsOf<'v, T, L, layer::LinkPath>,
@@ -903,7 +874,7 @@ where
         let crate::layer::NodeKey::LinkPath(_, link) = others.here() else {
             unreachable!("a link path's end carries its key")
         };
-        CoreLentConnectionIdEvents::<T, L, H>::link_path_ended(parents, link);
+        LineageConnectionIdEvents::<T, L, H>::link_path_ended(parents, link);
     }
 }
 impl<R> PassiveDataComponent for LinkPathResetTokenRegistrar<R> {}

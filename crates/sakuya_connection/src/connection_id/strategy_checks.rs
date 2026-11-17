@@ -12,12 +12,20 @@
 //!
 //! Connection IDs are chosen as the sending call chooses them, through
 //! [`DatagramConnectionId::choose_first`] with the first offered one, and
-//! a use is reported through [`DatagramConnectionId::used`]. What the
-//! strategy publishes to retire connection IDs goes to a
-//! [`RecordingPublisher`]; the checks of retirement take a strategy that
-//! writes the RETIRE_CONNECTION_ID frames of QUIC version 1.
+//! a use is reported through [`DatagramConnectionId::used`]. The checks of
+//! retirement read the retirements waiting to be sent
+//! ([`DestinationConnectionIdStrategy::waiting_retirements`]) and write
+//! their frames as the sending call would, into a packet of their own; they
+//! take a strategy that writes the RETIRE_CONNECTION_ID frames of QUIC
+//! version 1.
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    sync::{Arc, Mutex, PoisonError},
+};
+
+use bytes::BytesMut;
 
 use sakuya_wire::{
     connection_id::{ConnectionId, NonEmptyCid, StatelessResetToken},
@@ -28,47 +36,116 @@ use sakuya_wire::{
     var_int::{VarInt, VarIntField},
 };
 
-use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
+use sakuya_recovery::{
+    packet_number_space::PacketNumberSpaceKind, send_journals::PacketSendAttempt,
+};
+use sakuya_wire::{
+    parts::{CNil, Coproduct},
+    v1::packet_number::PacketNumber,
+};
 
 use super::{
     DestinationConnectionIdStrategy, NewConnectionId, OfferedConnectionId, ResetTokenRegistrar,
     datagram::DatagramConnectionId,
 };
 use crate::{
-    frame_source::{FrameSource, PublishIntent},
-    v1::send::{RetireConnectionIdIntent, RetireConnectionIdSummary},
+    frame_source::{FrameSource, NoIntent},
+    v1::send::RetireConnectionIdSummary,
+    write::{FlightClass, NotLast, OpenPacket, PacketWriting, Supplied, sealed},
 };
 
-/// A publisher that records the intents published through it, in order.
-#[derive(Debug)]
-pub struct RecordingPublisher<J> {
-    published: Vec<J>,
+// ---- writing the retirements ----
+
+/// The summary of the frames the checks write: a RETIRE_CONNECTION_ID
+/// frame's, in a sum as a composition's.
+type CheckSummary = Coproduct<Coproduct<RetireConnectionIdSummary, CNil>, CNil>;
+
+/// A packet writer with room for anything, that keeps nothing but the
+/// sequence numbers of the frames written, in `written`.
+#[derive(Debug, Default)]
+struct CheckWriter {
+    buffer: BytesMut,
+    written: Rc<RefCell<Vec<u64>>>,
 }
 
-impl<J> Default for RecordingPublisher<J> {
-    fn default() -> Self {
-        Self {
-            published: Vec::new(),
+impl sealed::Writing for CheckWriter {}
+
+impl PacketWriting for CheckWriter {
+    type Attempt = NoAttempt;
+
+    fn room(&self, _: FlightClass) -> usize {
+        usize::MAX
+    }
+
+    fn buffer(&mut self) -> &mut BytesMut {
+        &mut self.buffer
+    }
+
+    fn buffer_len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    fn frame_written(&mut self, summary: CheckSummary, _: bool, _: bool, _: bool) {
+        match summary {
+            Coproduct::Inl(Coproduct::Inl(summary)) => {
+                self.written.borrow_mut().push(summary.sequence);
+            }
+            Coproduct::Inl(Coproduct::Inr(never)) | Coproduct::Inr(never) => match never {},
         }
     }
+
+    fn close(&mut self) {}
+
+    fn conclude(&mut self, _: bool) {}
 }
 
-impl<J> RecordingPublisher<J> {
-    /// A publisher with nothing published.
-    pub fn new() -> Self {
-        Self::default()
+/// The send attempt of [`CheckWriter`]: nothing reads it.
+#[derive(Debug)]
+enum NoAttempt {}
+
+impl PacketSendAttempt for NoAttempt {
+    type Summary = CheckSummary;
+    type Sealed = ();
+
+    fn packet_number(&self) -> PacketNumber {
+        match *self {}
     }
 
-    /// The intents published since the last call, in order.
-    pub fn take(&mut self) -> Vec<J> {
-        core::mem::take(&mut self.published)
+    fn record_frame(&mut self, _: CheckSummary, _: bool, _: bool) {
+        match *self {}
+    }
+
+    fn seal(self, _: usize, _: bool) -> Option<()> {
+        match self {}
     }
 }
 
-impl<J> PublishIntent<J, ()> for RecordingPublisher<J> {
-    fn publish(&mut self, intent: J) {
-        self.published.push(intent);
+/// The sequence numbers of the retirements `strategy` has waiting, sorted,
+/// each then written into a packet as the sending call would write it: the
+/// frames the strategy wrote.
+fn write_waiting<I, Id, S>(strategy: &mut S) -> Vec<u64>
+where
+    S: DestinationConnectionIdStrategy<Id, I, RecordingResetTokenRegistrar>
+        + for<'a> FrameSource<Item<'a> = u64, Summary = RetireConnectionIdSummary, Intent = NoIntent>,
+{
+    let waiting: Vec<u64> = strategy
+        .waiting_retirements()
+        .map(|retirement| retirement.sequence())
+        .collect();
+    let written = Rc::default();
+    let mut packet = OpenPacket::<CheckWriter, S::Class, NotLast>::new(CheckWriter {
+        buffer: BytesMut::new(),
+        written: Rc::clone(&written),
+    });
+    for sequence in waiting {
+        packet = match strategy.supply(sequence, packet) {
+            Supplied::Open(packet) => packet,
+            Supplied::Closed(_) => panic!("a RETIRE_CONNECTION_ID frame closed its packet"),
+        };
     }
+    let mut written = written.take();
+    written.sort_unstable();
+    written
 }
 
 /// A registrar that records which tokens are registered through it and not
@@ -194,17 +271,7 @@ fn accept<I, Id, S>(strategy: &mut S, issued: NewConnectionId)
 where
     S: DestinationConnectionIdStrategy<Id, I, RecordingResetTokenRegistrar>,
 {
-    accept_retiring(strategy, &mut RecordingPublisher::new(), issued);
-}
-
-fn accept_retiring<I, Id, S>(
-    strategy: &mut S,
-    retire: &mut RecordingPublisher<S::Intent>,
-    issued: NewConnectionId,
-) where
-    S: DestinationConnectionIdStrategy<Id, I, RecordingResetTokenRegistrar>,
-{
-    if let Err(error) = strategy.on_new_connection_id::<_, ()>(retire, issued) {
+    if let Err(error) = strategy.on_new_connection_id(issued) {
         panic!("a valid NEW_CONNECTION_ID was rejected: {error}");
     }
 }
@@ -213,7 +280,7 @@ fn reject<I, Id, S>(strategy: &mut S, issued: NewConnectionId) -> TransportError
 where
     S: DestinationConnectionIdStrategy<Id, I, RecordingResetTokenRegistrar>,
 {
-    match strategy.on_new_connection_id::<_, ()>(&mut RecordingPublisher::new(), issued) {
+    match strategy.on_new_connection_id(issued) {
         Ok(()) => panic!("a violating NEW_CONNECTION_ID was accepted: {issued:?}"),
         Err(error) => error.transport_error_code(),
     }
@@ -422,7 +489,7 @@ where
     let first_token = reset_token(u8::try_from(on_first.sequence).expect("below 3"));
     let second_token = reset_token(u8::try_from(on_second.sequence).expect("below 3"));
 
-    strategy.on_link_path_ended::<_, ()>(&mut RecordingPublisher::new(), &first);
+    strategy.on_link_path_ended(&first);
     assert!(
         !first_registrar.is_registered(first_token),
         "the token registered for an ended link path is still registered"
@@ -433,81 +500,82 @@ where
     );
 }
 
-/// The sequence numbers of the RETIRE_CONNECTION_ID frames in `published`.
-fn retired(published: Vec<RetireConnectionIdIntent>) -> Vec<u64> {
-    let mut sequences: Vec<u64> = published
-        .iter()
-        .map(RetireConnectionIdIntent::sequence)
-        .collect();
-    sequences.sort_unstable();
-    sequences
-}
-
 /// Every connection ID that Retire Prior To retires has its
-/// RETIRE_CONNECTION_ID frame published once, a connection ID that arrives
-/// below Retire Prior To included (RFC 9000 §5.1.2, §19.15).
+/// RETIRE_CONNECTION_ID frame waiting to be sent once, a connection ID that
+/// arrives below Retire Prior To included (RFC 9000 §5.1.2, §19.15).
 ///
 /// # Panics
 ///
 /// Panics when the strategy breaks the contract.
-pub fn check_retire_prior_to_publishes_retirements<I, Id, S, New>(new: New)
+pub fn check_retire_prior_to_leaves_retirements_waiting<I, Id, S, New>(new: New)
 where
     S: DestinationConnectionIdStrategy<Id, I, RecordingResetTokenRegistrar>
-        + FrameSource<Intent = RetireConnectionIdIntent>,
+        + for<'a> FrameSource<Item<'a> = u64, Summary = RetireConnectionIdSummary, Intent = NoIntent>,
     New: Fn(ConnectionId, Option<StatelessResetToken>, ActiveConnectionIdLimit) -> S,
 {
-    let mut retire = RecordingPublisher::new();
     let mut strategy = new(connection_id(0), Some(reset_token(0)), limit(4));
-    accept_retiring(&mut strategy, &mut retire, new_connection_id(1, 0));
-    accept_retiring(&mut strategy, &mut retire, new_connection_id(2, 0));
-    assert_eq!(retired(retire.take()), [0u64; 0], "nothing is retired yet");
-
-    accept_retiring(&mut strategy, &mut retire, new_connection_id(3, 2));
+    accept(&mut strategy, new_connection_id(1, 0));
+    accept(&mut strategy, new_connection_id(2, 0));
     assert_eq!(
-        retired(retire.take()),
+        write_waiting(&mut strategy),
+        [0u64; 0],
+        "nothing is retired yet"
+    );
+
+    accept(&mut strategy, new_connection_id(3, 2));
+    assert_eq!(
+        write_waiting(&mut strategy),
         [0, 1],
         "Retire Prior To 2 retires the connection IDs numbered 0 and 1"
     );
-    accept_retiring(&mut strategy, &mut retire, new_connection_id(1, 0));
-    let late = retired(retire.take());
+    assert_eq!(
+        write_waiting(&mut strategy),
+        [0u64; 0],
+        "a retirement written no longer waits"
+    );
+    accept(&mut strategy, new_connection_id(1, 0));
+    let late = write_waiting(&mut strategy);
     assert!(
         late.iter().all(|&sequence| sequence == 1),
         "a connection ID below Retire Prior To is retired, and nothing else: {late:?}"
     );
 }
 
-/// A RETIRE_CONNECTION_ID frame declared lost is published again with the
-/// same sequence number while its retirement waits for acknowledgment, and
-/// not once a frame of it was acknowledged (RFC 9000 §13.3).
+/// A RETIRE_CONNECTION_ID frame declared lost waits to be sent again with
+/// the same sequence number while its retirement waits for acknowledgment,
+/// and not once a frame of it was acknowledged (RFC 9000 §13.3).
 ///
 /// # Panics
 ///
 /// Panics when the strategy breaks the contract.
-pub fn check_lost_retirement_published_again<I, Id, S, New>(new: New)
+pub fn check_lost_retirement_waits_again<I, Id, S, New>(new: New)
 where
     S: DestinationConnectionIdStrategy<Id, I, RecordingResetTokenRegistrar>
-        + FrameSource<Intent = RetireConnectionIdIntent, Summary = RetireConnectionIdSummary>,
+        + for<'a> FrameSource<Item<'a> = u64, Summary = RetireConnectionIdSummary, Intent = NoIntent>,
     New: Fn(ConnectionId, Option<StatelessResetToken>, ActiveConnectionIdLimit) -> S,
 {
     let space = PacketNumberSpaceKind::ApplicationData;
-    let mut retire = RecordingPublisher::new();
     let mut strategy = new(connection_id(0), Some(reset_token(0)), limit(4));
-    accept_retiring(&mut strategy, &mut retire, new_connection_id(1, 0));
-    accept_retiring(&mut strategy, &mut retire, new_connection_id(2, 1));
-    assert_eq!(retired(retire.take()), [0], "the connection ID numbered 0");
+    accept(&mut strategy, new_connection_id(1, 0));
+    accept(&mut strategy, new_connection_id(2, 1));
+    assert_eq!(
+        write_waiting(&mut strategy),
+        [0],
+        "the connection ID numbered 0"
+    );
 
     let summary = RetireConnectionIdSummary { sequence: 0 };
-    strategy.lost::<_, ()>(&mut retire, space, &summary);
+    strategy.lost(&mut (), space, &summary);
     assert_eq!(
-        retired(retire.take()),
+        write_waiting(&mut strategy),
         [0],
-        "a lost retirement is published again with the same sequence number"
+        "a lost retirement waits again with the same sequence number"
     );
-    strategy.delivered::<_, ()>(&mut retire, space, summary);
-    strategy.lost::<_, ()>(&mut retire, space, &summary);
+    strategy.delivered(&mut (), space, summary);
+    strategy.lost(&mut (), space, &summary);
     assert_eq!(
-        retired(retire.take()),
+        write_waiting(&mut strategy),
         [0u64; 0],
-        "an acknowledged retirement is not published again"
+        "an acknowledged retirement does not wait again"
     );
 }

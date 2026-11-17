@@ -664,6 +664,20 @@ mod probe {
             match *intent {}
         }
     }
+    impl<
+        T: sakuya_connection::clock::ConnectionChoices,
+        L: sakuya_connection::share::LogicalPathKeys,
+        V,
+    > sakuya_connection::frame_source::DriverContentPart<T, L, V, ()> for Part
+    {
+        fn pending<J>(
+            _: &sakuya_connection::take::Lineage<'_, V>,
+            _: &sakuya_connection::share::LinkPathIdentifierOf<T, L>,
+            _: &mut sakuya_connection::send_strategy::DriverContent<J>,
+            _: impl Fn(sakuya_wire::parts::CNil) -> J,
+        ) {
+        }
+    }
     /// The probe's frame source finds nothing in the established layer.
     impl<T, L> sakuya_connection::frame_source::EstablishedSourceComponentsPart<T, L> for Part {
         type Components = HNil;

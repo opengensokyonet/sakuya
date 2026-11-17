@@ -8,8 +8,8 @@
 //! [`ClientOnlyState`]: the token its Initial packets carry, where the
 //! tokens its server gives in NEW_TOKEN frames go, and its Retry policy.
 //! Both are where the HANDSHAKE_DONE frames of version 1 are found; a
-//! client never publishes one, and writes nothing if it is given one, as a
-//! client must not send the frame (RFC 9000 §19.20).
+//! client never has one waiting, and writes nothing if it is given one, as
+//! a client must not send the frame (RFC 9000 §19.20).
 
 use core::fmt;
 use std::collections::VecDeque;
@@ -25,12 +25,11 @@ use super::{
     feedback::HandshakeDoneSummary,
     own_args,
     retry::{ClientRetryPolicy, ReceivedRetry, RetryDecision},
-    send::HandshakeDoneIntent,
 };
 use crate::{
     component::{ArgsOf, Build, ParentsOf, PassiveDataComponent},
     feedback::InjectSummary,
-    frame_source::{FrameSource, PublishIntent},
+    frame_source::{FrameSource, NoIntent, PublishIntent},
     layer,
     share::{ConnectionArgsOf, LineagePartList},
     write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
@@ -42,35 +41,37 @@ pub enum HandshakeDoneSource {
     /// The handshake is not complete: nothing is to be sent.
     #[default]
     NotDue,
-    /// The frame is to be sent, or was sent and is not acknowledged yet.
-    Due,
+    /// The frame waits to be sent: the handshake completed, or a frame of
+    /// it was lost and none is acknowledged.
+    Waiting,
+    /// The frame was written into a packet whose fate is not known yet.
+    InFlight,
     /// A packet with the frame was acknowledged.
     Delivered,
 }
 
 impl HandshakeDoneSource {
-    /// The handshake is complete: the frame is due, and its intent is
-    /// published to `publish`. A frame due already, or delivered, stays as
-    /// it is.
-    pub(crate) fn due<Pb, Idx>(&mut self, publish: &mut Pb)
-    where
-        Pb: PublishIntent<HandshakeDoneIntent, Idx>,
-    {
+    /// The handshake is complete: the frame waits to be sent. A frame
+    /// waiting already, in flight or delivered stays as it is.
+    pub(crate) fn due(&mut self) {
         if *self == Self::NotDue {
-            *self = Self::Due;
-            publish.publish(HandshakeDoneIntent);
+            *self = Self::Waiting;
         }
+    }
+
+    /// Whether the frame waits to be sent.
+    pub fn is_waiting(&self) -> bool {
+        *self == Self::Waiting
     }
 }
 
-/// The frame is written whenever it is supplied, also after a copy of it
-/// was acknowledged: the intent was published, and writing nothing would
-/// leave it there. One frame more is harmless to the client.
+/// The frame is written only while it waits, and is then in flight; a
+/// frame lost while none is acknowledged waits again.
 impl FrameSource for HandshakeDoneSource {
     type Summary = HandshakeDoneSummary;
     type Class = InFlightClass;
     type Item<'a> = ();
-    type Intent = HandshakeDoneIntent;
+    type Intent = NoIntent;
 
     fn supply<W, P, Idx>(
         &mut self,
@@ -82,37 +83,36 @@ impl FrameSource for HandshakeDoneSource {
         SummaryOf<W>: InjectSummary<HandshakeDoneSummary, Idx>,
         P: PacketPosition,
     {
-        let written = packet.write_frame(
-            HandshakeDoneFrame,
-            <SummaryOf<W>>::inject_summary(HandshakeDoneSummary),
-        );
-        debug_assert!(written.is_ok(), "the intent asks room for the whole frame");
+        if self.is_waiting()
+            && packet
+                .write_frame(
+                    HandshakeDoneFrame,
+                    <SummaryOf<W>>::inject_summary(HandshakeDoneSummary),
+                )
+                .is_ok()
+        {
+            *self = Self::InFlight;
+        }
         Supplied::Open(packet)
     }
 
     fn delivered<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, _: HandshakeDoneSummary)
     where
-        Pb: PublishIntent<HandshakeDoneIntent, Idx>,
+        Pb: PublishIntent<NoIntent, Idx>,
     {
         *self = Self::Delivered;
     }
 
-    fn lost<Pb, Idx>(
-        &mut self,
-        publish: &mut Pb,
-        _: PacketNumberSpaceKind,
-        _: &HandshakeDoneSummary,
-    ) where
-        Pb: PublishIntent<HandshakeDoneIntent, Idx>,
+    fn lost<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, _: &HandshakeDoneSummary)
+    where
+        Pb: PublishIntent<NoIntent, Idx>,
     {
-        if *self != Self::Delivered {
-            publish.publish(HandshakeDoneIntent);
+        if *self == Self::InFlight {
+            *self = Self::Waiting;
         }
     }
 
-    /// The frame is sent and forgotten for any active link path: the
-    /// strategy ends it only once no link path will be active again, which
-    /// is the end of the connection, not an unfulfilled intent.
+    /// The frame is the driver's content, which no strategy ends.
     fn unfulfilled(&mut self, (): (), _: Unfulfilled) {}
 }
 
@@ -226,13 +226,13 @@ impl<Tk, Rp> fmt::Debug for ClientOnlyState<Tk, Rp> {
     }
 }
 
-/// A client sends no HANDSHAKE_DONE frame (RFC 9000 §19.20): it publishes
-/// no intent for one, and writes nothing when given one.
+/// A client sends no HANDSHAKE_DONE frame (RFC 9000 §19.20): it never has
+/// one waiting, and writes nothing when given one.
 impl<Tk, Rp> FrameSource for ClientOnlyState<Tk, Rp> {
     type Summary = HandshakeDoneSummary;
     type Class = InFlightClass;
     type Item<'a> = ();
-    type Intent = HandshakeDoneIntent;
+    type Intent = NoIntent;
 
     fn supply<W, P, Idx>(
         &mut self,
@@ -249,17 +249,17 @@ impl<Tk, Rp> FrameSource for ClientOnlyState<Tk, Rp> {
 
     fn delivered<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, _: HandshakeDoneSummary)
     where
-        Pb: PublishIntent<HandshakeDoneIntent, Idx>,
+        Pb: PublishIntent<NoIntent, Idx>,
     {
     }
 
     fn lost<Pb, Idx>(&mut self, _: &mut Pb, _: PacketNumberSpaceKind, _: &HandshakeDoneSummary)
     where
-        Pb: PublishIntent<HandshakeDoneIntent, Idx>,
+        Pb: PublishIntent<NoIntent, Idx>,
     {
     }
 
-    /// A client publishes no intent, so none goes unfulfilled.
+    /// A client has no HANDSHAKE_DONE waiting, so none goes unfulfilled.
     fn unfulfilled(&mut self, (): (), _: Unfulfilled) {}
 }
 

@@ -29,15 +29,12 @@ use sakuya_wire::{
 
 use super::{
     AckObligationsOf, Choices, CloseCauseOf, Part, Side,
+    close_packet::ClosePacket,
     connection_ids::ConnectionIdsOf,
     crypto::send::{CryptoSendBuffer, CryptoSender},
     feedback::{AckSummary, CryptoSummary, HandshakeDoneSummary, ProbePingSummary},
     key_phase::KeyPhaseNumbers,
-    path_response::{PathResponseFrames, PathResponseIntent},
-    send_planning::{
-        AckIntentTicketOf, AckIntentTickets, CorePublishOutcome, CryptoIntentTicketOf,
-        CryptoIntentTickets,
-    },
+    path_response::{PathResponseFrames, PathResponseIntent, PendingPathResponse},
     streams::send::{
         DataBlockedFrames, MaxDataFrames, MaxStreamDataFrames, MaxStreamsFrames, ResetStreamFrames,
         StopSendingFrames, StreamDataBlockedFrames, StreamFrames, StreamIntent, StreamIntentKey,
@@ -45,24 +42,30 @@ use super::{
     },
 };
 use crate::v1::{
-    AckObligationOf, CryptoSendBufferOf, DestinationConnectionIdsOf, LocalConnectionIdsOf,
+    AckObligationOf, CryptoSendBufferOf, DestinationConnectionIdsOf,
+    LocalConnectionIdRegistrationOf, LocalConnectionIdsOf,
 };
 use crate::{
-    clock::InstantOf,
-    connection_id::local::{NewConnectionIdIntent, NewConnectionIdSummary},
+    clock::{InstantOf, LinkIdOf},
+    component::{ArgsOf, Build, ParentsOf, PassiveDataComponent},
+    connection_id::{
+        DestinationConnectionIdStrategy,
+        local::{LocalConnectionIdStrategy, NewConnectionIdIntent, NewConnectionIdSummary},
+    },
     error::ConnectionErrorsOf,
     feedback::InjectSummary,
     frame_source::{
-        FindFrameSource, FrameSource, FrameSourceItemsOf, FrameSourceKind, FrameSourcePart,
-        HandshakePacket, InitialPacket, NoIntent, OneRttPacket, OneRttProbePacket, PacketKind,
-        PartsFrameSources, PublishIntent, SettlingResponsePacket, ZeroRttPacket,
+        DriverContentPart, FindFrameSource, FrameSource, IgnoredFeedback, FrameSourceItemsOf, FrameSourceKind,
+        FrameSourcePart, HandshakePacket, InitialPacket, NoIntent, OneRttPacket, OneRttProbePacket,
+        PacketKind, PartsFrameSources, PublishIntent, SettlingResponsePacket, ZeroRttPacket,
     },
+    layer,
     send_strategy::{
-        AnyActiveLinkPath, FrameSourceSet, MinimumLengths, PlannedPacketKind, SendIntent,
-        SendIntentPart, SendIntentsOf, SendStrategyTypes,
-        ranked::{IntentTicket, RankedCoreIntent, RankedIntent, SendPriority, SendRank},
+        CloseResendFacts, DriverContent, FrameSourceSet, MinimumLengths, PlannedPacketKind,
+        SendIntent, SendIntentPart, SendIntentsOf, SendStrategyTypes,
+        ranked::{RankedIntent, SendPriority, SendRank},
     },
-    share::{LinkPathIdentifierOf, LogicalPathKeys},
+    share::{LineagePartList, LinkPathIdentifierOf, LogicalPathKeys},
     take::{GetAt, Lineage},
     write::{
         AckOnlyClass, FlightClass, InFlightClass, OpenPacket, PacketPosition, PacketWriting,
@@ -182,12 +185,6 @@ impl RankedIntent for AckIntent {
     }
 }
 
-/// The ACK obligation's component keeps the ticket, to withdraw the intent
-/// once no ACK frame is due.
-impl RankedCoreIntent for AckIntent {
-    type Outcome<C> = IntentTicket<C>;
-}
-
 /// A probe timeout of a packet number space wants an ack-eliciting packet
 /// sent (RFC 9002 §6.2.4), and nothing else is there to send.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -235,8 +232,7 @@ impl RankedIntent for ProbePingIntent {
 /// A connection ID the peer issued is retired: a RETIRE_CONNECTION_ID
 /// frame with its sequence number is to be sent (RFC 9000 §19.16), and sent
 /// again with the same sequence number while its packets are lost
-/// (RFC 9000 §13.3). It is sent and forgotten: publishing it gives back
-/// nothing to keep.
+/// (RFC 9000 §13.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RetireConnectionIdIntent {
     sequence: u64,
@@ -285,12 +281,6 @@ impl RankedIntent for RetireConnectionIdIntent {
     }
 }
 
-/// Nothing keeps a retirement's intent: only its frame being written takes
-/// it away.
-impl RankedCoreIntent for RetireConnectionIdIntent {
-    type Outcome<C> = ();
-}
-
 impl SendIntent for NewConnectionIdIntent {
     type FrameSourceId = FrameSourceId;
     type Class = InFlightClass;
@@ -329,11 +319,6 @@ impl RankedIntent for NewConnectionIdIntent {
             holds_place: true,
         }
     }
-}
-
-/// Nothing keeps the intent: only its frame being written takes it away.
-impl RankedCoreIntent for NewConnectionIdIntent {
-    type Outcome<C> = ();
 }
 
 /// CRYPTO data of an encryption level is unsent (RFC 9000 §19.6), and the
@@ -398,16 +383,9 @@ impl RankedIntent for CryptoIntent {
     }
 }
 
-/// The CRYPTO intent tickets keep the ticket, to withdraw the intent once
-/// nothing of the level is unsent or its keys are gone.
-impl RankedCoreIntent for CryptoIntent {
-    type Outcome<C> = IntentTicket<C>;
-}
-
 /// The handshake is complete: a server's HANDSHAKE_DONE frame is to be
 /// sent (RFC 9000 §19.20), and sent again while its packets are lost (RFC
-/// 9000 §13.3). It is sent and forgotten: publishing it gives back nothing
-/// to keep.
+/// 9000 §13.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HandshakeDoneIntent;
 
@@ -436,11 +414,6 @@ impl RankedIntent for HandshakeDoneIntent {
             holds_place: true,
         }
     }
-}
-
-/// Nothing keeps the intent: only its frame being written takes it away.
-impl RankedCoreIntent for HandshakeDoneIntent {
-    type Outcome<C> = ();
 }
 
 /// The summary of a RETIRE_CONNECTION_ID frame written into a packet: the
@@ -676,7 +649,7 @@ pub trait AckFrameState<I> {
 
     /// An ACK frame of `space`, written when the obligation owed `before`,
     /// was lost: the obligation owes it again (RFC 9000 §13.2.1), and the
-    /// space's ACK intent is published again while an ACK frame is due. A
+    /// space's ACK intent is gathered again while an ACK frame is due. A
     /// space that is gone takes nothing.
     fn ack_lost(&mut self, space: PacketNumberSpaceKind, before: AckDue<I>);
 }
@@ -710,7 +683,7 @@ where
     type Class = AckOnlyClass;
     type Item<'b> = PacketNumberSpaceKind;
     /// A lost ACK frame is not sent again as it was: the space's ACK
-    /// intent is published again from the obligation, as any other time an
+    /// intent is gathered again from the obligation, as any other time an
     /// ACK frame is due.
     type Intent = NoIntent;
 
@@ -782,28 +755,53 @@ where
         self.state.ack_lost(space, ack.before);
     }
 
-    /// An ACK intent goes for any active link path: the strategy ends it
-    /// only once no link path will be active again, which is the end of the
-    /// connection, not an unfulfilled intent.
+    /// An ACK intent is the driver's content, which no strategy ends.
     fn unfulfilled(&mut self, _: PacketNumberSpaceKind, _: Unfulfilled) {}
 }
 
-/// The PING of a probe timeout: it makes the probe packet ack-eliciting.
-#[derive(Debug, Default)]
-pub struct ProbePingFrameSource<I> {
-    instants: PhantomData<fn() -> I>,
+/// The PINGs a link path's last probe timeout wants sent, by packet number
+/// space, in the link path's node (`PendingProbePings`): a PING makes the
+/// probe packet of its space ack-eliciting. The next expiry replaces them
+/// all, and writing one forgets its space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PendingProbePings {
+    spaces: [bool; 3],
 }
 
-impl<I> ProbePingFrameSource<I> {
-    /// The source.
-    pub fn new() -> Self {
-        Self {
-            instants: PhantomData,
+fn ping_space_index(space: PacketNumberSpaceKind) -> usize {
+    match space {
+        PacketNumberSpaceKind::Initial => 0,
+        PacketNumberSpaceKind::Handshake => 1,
+        PacketNumberSpaceKind::ApplicationData => 2,
+    }
+}
+
+impl PendingProbePings {
+    /// Whether a PING of `space` is to be sent.
+    pub fn is_pending(&self, space: PacketNumberSpaceKind) -> bool {
+        self.spaces[ping_space_index(space)]
+    }
+
+    /// The spaces a PING is to be sent in, in their order.
+    pub fn spaces(&self) -> impl Iterator<Item = PacketNumberSpaceKind> + '_ {
+        PacketNumberSpaceKind::ALL
+            .into_iter()
+            .filter(|&space| self.is_pending(space))
+    }
+
+    /// A probe timeout expired: a PING is to be sent in each of `spaces`,
+    /// and in no other.
+    pub(crate) fn probe(&mut self, spaces: impl IntoIterator<Item = PacketNumberSpaceKind>) {
+        self.spaces = [false; 3];
+        for space in spaces {
+            self.spaces[ping_space_index(space)] = true;
         }
     }
 }
 
-impl<I> FrameSource for ProbePingFrameSource<I> {
+/// A PING is written when its space has one to send, which it then no
+/// longer has; nothing is done when it is acknowledged or lost.
+impl FrameSource for PendingProbePings {
     type Summary = ProbePingSummary;
     type Class = InFlightClass;
     type Item<'b> = PacketNumberSpaceKind;
@@ -811,7 +809,7 @@ impl<I> FrameSource for ProbePingFrameSource<I> {
 
     fn supply<W, P, Idx>(
         &mut self,
-        _: PacketNumberSpaceKind,
+        space: PacketNumberSpaceKind,
         mut packet: OpenPacket<W, InFlightClass, P>,
     ) -> Supplied<W, InFlightClass, P>
     where
@@ -820,7 +818,13 @@ impl<I> FrameSource for ProbePingFrameSource<I> {
         P: PacketPosition,
     {
         // A PING that does not fit leaves the packet as it is.
-        let _ = packet.write_frame(PingFrame, <SummaryOf<W>>::inject_summary(ProbePingSummary));
+        if self.is_pending(space)
+            && packet
+                .write_frame(PingFrame, <SummaryOf<W>>::inject_summary(ProbePingSummary))
+                .is_ok()
+        {
+            self.spaces[ping_space_index(space)] = false;
+        }
         Supplied::Open(packet)
     }
 
@@ -836,11 +840,26 @@ impl<I> FrameSource for ProbePingFrameSource<I> {
     {
     }
 
-    /// A probe's PING goes on its link path's planner, which ends it when
-    /// the link path stops being active; the next expiry of the probe
-    /// timeout decides afresh, so nothing is kept for it.
+    /// A probe's PING is the driver's content, which no strategy ends; the
+    /// next expiry of the probe timeout decides afresh.
     fn unfulfilled(&mut self, _: PacketNumberSpaceKind, _: Unfulfilled) {}
 }
+
+/// A link path starts with no probe.
+impl<T: Choices, L> Build<T, L, layer::LinkPath, ()> for PendingProbePings
+where
+    L: LineagePartList<T>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::LinkPath>,
+        _: &mut ArgsOf<T, L, layer::LinkPath>,
+    ) -> Self {
+        Self::default()
+    }
+}
+/// It has no deadline and reads nothing; the probe timeout of the link
+/// path's recovery layer sets it, and the sending call writes it.
+impl PassiveDataComponent for PendingProbePings {}
 
 // ---- where the frame sources are ----
 
@@ -855,28 +874,18 @@ impl FrameSourceKind for AckFrames {
     type Intent = NoIntent;
 }
 
-/// The ACK frames are made from the receive journals, ACK obligations, ACK
-/// intents and key phase numbers of the logical path in the lineage.
-impl<T, L, V, Ij, Ia, Ik, Ikp> FindFrameSource<T, L, V, (Ij, Ia, Ik, Ikp)> for AckFrames
+/// The ACK frames are made from the receive journals, ACK obligations and
+/// key phase numbers of the logical path in the lineage.
+impl<T, L, V, Ij, Ia, Ikp> FindFrameSource<T, L, V, (Ij, Ia, Ikp)> for AckFrames
 where
     T: Choices,
-    SendTypes<T, L>: CorePublishOutcome<AckIntent, AnyActiveLinkPath>,
     V: GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
         + GetAt<AckObligationsOf<T>, Ia>
-        + GetAt<AckIntentTickets<AckIntentTicketOf<T, L>>, Ik>
         + GetAt<KeyPhaseNumbers, Ikp>,
 {
     type Source<'l, 'r>
         = AckFrameSource<
-        LineageAckFrameState<
-            'l,
-            'r,
-            V,
-            InstantOf<T>,
-            AckObligationOf<T>,
-            AckIntentTicketOf<T, L>,
-            (Ij, Ia, Ik, Ikp),
-        >,
+        LineageAckFrameState<'l, 'r, V, InstantOf<T>, AckObligationOf<T>, (Ij, Ia, Ikp)>,
         InstantOf<T>,
     >
     where
@@ -896,18 +905,25 @@ impl FrameSourceKind for ProbePingFrames {
     type Item<'a> = PacketNumberSpaceKind;
     type Summary<I> = ProbePingSummary;
     type Intent = NoIntent;
+    /// Nothing is done when a frame comes back, and the source is found
+    /// only in the link path's lineage.
+    type Feedback = IgnoredFeedback<Self>;
 }
 
-/// The PING of a probe timeout is in no lineage: it holds nothing.
-impl<T: Choices, L, V> FindFrameSource<T, L, V, ()> for ProbePingFrames {
+/// The PINGs are written by the link path's [`PendingProbePings`] in the
+/// lineage.
+impl<T: Choices, L, V, Ip> FindFrameSource<T, L, V, Ip> for ProbePingFrames
+where
+    V: GetAt<PendingProbePings, Ip>,
+{
     type Source<'l, 'r>
-        = ProbePingFrameSource<InstantOf<T>>
+        = &'l mut PendingProbePings
     where
         V: 'l,
         'r: 'l;
 
-    fn find<'l, 'r>(_: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
-        ProbePingFrameSource::new()
+    fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
+        lineage.get_mut::<PendingProbePings, Ip>()
     }
 }
 
@@ -919,7 +935,7 @@ pub enum RetireConnectionIdFrames {}
 impl FrameSourceKind for RetireConnectionIdFrames {
     type Item<'a> = u64;
     type Summary<I> = RetireConnectionIdSummary;
-    type Intent = RetireConnectionIdIntent;
+    type Intent = NoIntent;
 }
 
 /// The RETIRE_CONNECTION_ID frames are written by the destination
@@ -950,7 +966,7 @@ pub enum NewConnectionIdFrames {}
 impl FrameSourceKind for NewConnectionIdFrames {
     type Item<'a> = u64;
     type Summary<I> = NewConnectionIdSummary;
-    type Intent = NewConnectionIdIntent;
+    type Intent = NoIntent;
 }
 
 /// The NEW_CONNECTION_ID frames are written by the local connection ID
@@ -983,24 +999,14 @@ impl FrameSourceKind for CryptoFrames {
     type Intent = NoIntent;
 }
 
-/// The CRYPTO frames are written from the connection's CRYPTO output, and
-/// take the tickets of its intents.
-impl<T, L, V, Is, It> FindFrameSource<T, L, V, (Is, It)> for CryptoFrames
+/// The CRYPTO frames are written from the connection's CRYPTO output.
+impl<T, L, V, Is> FindFrameSource<T, L, V, Is> for CryptoFrames
 where
     T: Choices,
-    SendTypes<T, L>: CorePublishOutcome<CryptoIntent, AnyActiveLinkPath>,
-    V: GetAt<CryptoSender<CryptoSendBufferOf<T>>, Is>
-        + GetAt<CryptoIntentTickets<CryptoIntentTicketOf<T, L>>, It>,
+    V: GetAt<CryptoSender<CryptoSendBufferOf<T>>, Is>,
 {
     type Source<'l, 'r>
-        = LineageCryptoFrameSource<
-        'l,
-        'r,
-        V,
-        CryptoSendBufferOf<T>,
-        CryptoIntentTicketOf<T, L>,
-        (Is, It),
-    >
+        = LineageCryptoFrameSource<'l, 'r, V, CryptoSendBufferOf<T>, Is>
     where
         V: 'l,
         'r: 'l;
@@ -1011,31 +1017,26 @@ where
 }
 
 /// The CRYPTO frames of the connection's output, in a lineage: they are
-/// written from its [`CryptoSender`], and writing them takes the ticket
-/// of their level's intent from its [`CryptoIntentTickets`]. `B` is the
-/// buffer of a level, `K` what publishing a CRYPTO intent gave back, `H`
-/// the positions of the two components.
-///
-/// Supplying a level always drops its ticket: when a frame was written the
-/// plan consumed the intent, and when none was, nothing is unsent. The
-/// tickets publish the intent again while bytes of the level are unsent,
-/// also once a frame of it is lost.
-pub struct LineageCryptoFrameSource<'l, 'r, V, B, K, H> {
+/// written from its [`CryptoSender`], whose first unsent offset of each
+/// level is what the driver gathers as the level's intent, also once a
+/// frame of it is lost. `B` is the buffer of a level, `H` the position of
+/// the sender.
+pub struct LineageCryptoFrameSource<'l, 'r, V, B, H> {
     lineage: &'l mut Lineage<'r, V>,
-    types: PhantomData<SourceTypes<B, K, H>>,
+    types: PhantomData<SourceTypes<B, H>>,
 }
 
 /// What [`LineageCryptoFrameSource`] takes its components by: the buffer
-/// of a level, the tickets of the intents and the positions.
-type SourceTypes<B, K, H> = fn() -> (B, K, H);
+/// of a level and the position.
+type SourceTypes<B, H> = fn() -> (B, H);
 
-impl<V, B, K, H> core::fmt::Debug for LineageCryptoFrameSource<'_, '_, V, B, K, H> {
+impl<V, B, H> core::fmt::Debug for LineageCryptoFrameSource<'_, '_, V, B, H> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("LineageCryptoFrameSource")
     }
 }
 
-impl<'l, 'r, V, B, K, H> LineageCryptoFrameSource<'l, 'r, V, B, K, H> {
+impl<'l, 'r, V, B, H> LineageCryptoFrameSource<'l, 'r, V, B, H> {
     pub(crate) fn new(lineage: &'l mut Lineage<'r, V>) -> Self {
         Self {
             lineage,
@@ -1044,10 +1045,10 @@ impl<'l, 'r, V, B, K, H> LineageCryptoFrameSource<'l, 'r, V, B, K, H> {
     }
 }
 
-impl<V, B, K, Is, It> FrameSource for LineageCryptoFrameSource<'_, '_, V, B, K, (Is, It)>
+impl<V, B, Is> FrameSource for LineageCryptoFrameSource<'_, '_, V, B, Is>
 where
     B: CryptoSendBuffer,
-    V: GetAt<CryptoSender<B>, Is> + GetAt<CryptoIntentTickets<K>, It>,
+    V: GetAt<CryptoSender<B>, Is>,
 {
     type Summary = CryptoSummary;
     type Class = InFlightClass;
@@ -1067,9 +1068,6 @@ where
         self.lineage
             .get_mut::<CryptoSender<B>, Is>()
             .write_frames(level, &mut packet);
-        self.lineage
-            .get_mut::<CryptoIntentTickets<K>, It>()
-            .forget(level);
         Supplied::Open(packet)
     }
 
@@ -1095,9 +1093,7 @@ where
         );
     }
 
-    /// A CRYPTO intent goes for any active link path: the strategy ends it
-    /// only once no link path will be active again, which is the end of the
-    /// connection, not an unfulfilled intent.
+    /// A CRYPTO intent is the driver's content, which no strategy ends.
     fn unfulfilled(&mut self, _: CryptoLevel, _: Unfulfilled) {}
 }
 
@@ -1108,7 +1104,7 @@ pub enum HandshakeDoneFrames {}
 impl FrameSourceKind for HandshakeDoneFrames {
     type Item<'a> = ();
     type Summary<I> = HandshakeDoneSummary;
-    type Intent = HandshakeDoneIntent;
+    type Intent = NoIntent;
 }
 
 /// The HANDSHAKE_DONE frame is written by the [`Own`](Side::Own) data of
@@ -1133,24 +1129,23 @@ where
 /// The ACK frame state of a logical path, in a lineage. An ACK frame of
 /// the Application Data space is written in a 1-RTT packet, and the key
 /// phase numbers learn of it (RFC 9001 §6.2). `I` is the type of instants,
-/// `O` the ACK obligation of a space, `K` what publishing an ACK intent
-/// gave back, `H` the positions of the components.
-pub struct LineageAckFrameState<'l, 'r, V, I, O, K, H> {
+/// `O` the ACK obligation of a space, `H` the positions of the components.
+pub struct LineageAckFrameState<'l, 'r, V, I, O, H> {
     lineage: &'l mut Lineage<'r, V>,
-    types: PhantomData<StateTypes<I, O, K, H>>,
+    types: PhantomData<StateTypes<I, O, H>>,
 }
 
 /// What [`LineageAckFrameState`] takes its components by: the instants,
-/// the ACK obligations, the tickets of the ACK intents and the positions.
-type StateTypes<I, O, K, H> = fn() -> (I, O, K, H);
+/// the ACK obligations and the positions.
+type StateTypes<I, O, H> = fn() -> (I, O, H);
 
-impl<V, I, O, K, H> core::fmt::Debug for LineageAckFrameState<'_, '_, V, I, O, K, H> {
+impl<V, I, O, H> core::fmt::Debug for LineageAckFrameState<'_, '_, V, I, O, H> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("LineageAckFrameState")
     }
 }
 
-impl<'l, 'r, V, I, O, K, H> LineageAckFrameState<'l, 'r, V, I, O, K, H> {
+impl<'l, 'r, V, I, O, H> LineageAckFrameState<'l, 'r, V, I, O, H> {
     fn new(lineage: &'l mut Lineage<'r, V>) -> Self {
         Self {
             lineage,
@@ -1159,14 +1154,12 @@ impl<'l, 'r, V, I, O, K, H> LineageAckFrameState<'l, 'r, V, I, O, K, H> {
     }
 }
 
-impl<V, I, O, K, Ij, Ia, Ik, Ikp> AckFrameState<I>
-    for LineageAckFrameState<'_, '_, V, I, O, K, (Ij, Ia, Ik, Ikp)>
+impl<V, I, O, Ij, Ia, Ikp> AckFrameState<I> for LineageAckFrameState<'_, '_, V, I, O, (Ij, Ia, Ikp)>
 where
     I: Copy,
     O: AckObligation<I>,
     V: GetAt<PacketNumberSpaces<ReceiveJournals<I>>, Ij>
         + GetAt<PacketNumberSpaces<O>, Ia>
-        + GetAt<AckIntentTickets<K>, Ik>
         + GetAt<KeyPhaseNumbers, Ikp>,
 {
     fn journals(&self, space: PacketNumberSpaceKind) -> Option<&ReceiveJournals<I>> {
@@ -1204,10 +1197,6 @@ where
         }
     }
 
-    /// The lost frame also forgets the ticket of its space's ACK intent:
-    /// the frame consumed the intent, and when it was written and lost
-    /// before the tickets were read again, the ticket left looks like an
-    /// intent still waiting for the frame that is due again.
     fn ack_lost(&mut self, space: PacketNumberSpaceKind, before: AckDue<I>) {
         if let Some(obligation) = self
             .lineage
@@ -1216,9 +1205,109 @@ where
         {
             obligation.ack_lost(before);
         }
-        self.lineage
-            .get_mut::<AckIntentTickets<K>, Ik>()
-            .forget(space);
+    }
+}
+
+// ---- what the driver's components of version 1 have to send ----
+
+/// The encryption levels that carry CRYPTO frames, in their order.
+const CRYPTO_LEVELS: [CryptoLevel; 3] = [
+    CryptoLevel::Initial,
+    CryptoLevel::Handshake,
+    CryptoLevel::OneRtt,
+];
+
+/// Version 1's own components say what they have to send: for each packet
+/// number space where its ACK obligation says an ACK frame is due now, the
+/// shortest ACK frame its receive journals give; the PING of each space
+/// the link path's last probe timeout wants; the retirements the
+/// destination connection ID strategy has waiting; a server's
+/// HANDSHAKE_DONE while it waits; the CRYPTO data unsent at each level,
+/// from its first unsent offset, whether or not the level has keys to send
+/// with; the disclosures the local connection ID strategy has waiting; the
+/// response to the latest PATH_CHALLENGE that arrived on the link path; and
+/// the link path's sealed close packet, with the datagrams received since.
+///
+/// Not here: an ACK frame carried along when the obligation only wants one
+/// in a packet sent anyway.
+impl<T, L, V, Ia, Ij, Is, Io, Ic, Ipp, Ipr, Icp>
+    DriverContentPart<T, L, V, ((Ia, Ij), Is, Io, Ic, (Ipp, Ipr, Icp))> for Part
+where
+    T: Choices,
+    L: LogicalPathKeys,
+    V: GetAt<AckObligationsOf<T>, Ia>
+        + GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
+        + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Is>
+        + GetAt<<T::Side as Side>::Own, Io>
+        + GetAt<ConnectionIdsOf<T>, Ic>
+        + GetAt<PendingProbePings, Ipp>
+        + GetAt<PendingPathResponse, Ipr>
+        + GetAt<ClosePacket, Icp>,
+{
+    fn pending<J>(
+        lineage: &Lineage<'_, V>,
+        _: &LinkPathIdentifierOf<T, L>,
+        out: &mut DriverContent<J>,
+        inject: impl Fn(SendIntents) -> J,
+    ) {
+        let obligations = lineage.get::<AckObligationsOf<T>, Ia>();
+        let journals = lineage.get::<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>();
+        for space in PacketNumberSpaceKind::ALL {
+            let due = obligations
+                .get(space)
+                .is_some_and(|obligation| obligation.due() == AckDue::Now);
+            if let Some(shortest) = journals
+                .get(space)
+                .filter(|_| due)
+                .and_then(shortest_ack_frame)
+            {
+                out.intents
+                    .push(inject(Coproduct::inject(AckIntent::new(space, shortest))));
+            }
+        }
+        for space in lineage.get::<PendingProbePings, Ipp>().spaces() {
+            out.intents
+                .push(inject(Coproduct::inject(ProbePingIntent::new(space))));
+        }
+        let ids = lineage.get::<ConnectionIdsOf<T>, Ic>();
+        for retirement in DestinationConnectionIdStrategy::<
+            LinkIdOf<T>,
+            InstantOf<T>,
+            crate::v1::connection_ids::ResetTokenRegistrarOf<T>,
+        >::waiting_retirements(ids.destination())
+        {
+            out.intents.push(inject(Coproduct::inject(retirement)));
+        }
+        if <T::Side as Side>::handshake_done_waiting(lineage.get::<<T::Side as Side>::Own, Io>()) {
+            out.intents
+                .push(inject(Coproduct::inject(HandshakeDoneIntent)));
+        }
+        let sender = lineage.get::<CryptoSender<CryptoSendBufferOf<T>>, Is>();
+        for level in CRYPTO_LEVELS {
+            if let Some(first_unsent) = sender.first_unsent(level) {
+                out.intents.push(inject(Coproduct::inject(CryptoIntent::new(
+                    level,
+                    first_unsent,
+                ))));
+            }
+        }
+        for disclosure in LocalConnectionIdStrategy::<
+            LinkIdOf<T>,
+            InstantOf<T>,
+            LocalConnectionIdRegistrationOf<T>,
+        >::waiting_disclosures(ids.local_strategy())
+        {
+            out.intents.push(inject(Coproduct::inject(disclosure)));
+        }
+        if let Some(data) = lineage.get::<PendingPathResponse, Ipr>().data() {
+            out.intents
+                .push(inject(Coproduct::inject(PathResponseIntent::new(data))));
+        }
+        if let Some(sealed) = lineage.get::<ClosePacket, Icp>().sealed() {
+            out.close = Some(CloseResendFacts {
+                datagrams_received: sealed.datagrams_received(),
+            });
+        }
     }
 }
 

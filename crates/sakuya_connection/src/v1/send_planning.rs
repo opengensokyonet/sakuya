@@ -29,7 +29,6 @@ use sakuya_wire::{
 };
 
 use sakuya_recovery::{
-    ack_obligation::{AckDue, AckObligation},
     congestion::CongestionController,
     pacing::Pacer,
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces},
@@ -39,23 +38,24 @@ use sakuya_recovery::{
 };
 
 use sakuya_stream::{connection::CloseReason, send_options::destination::Unfulfilled};
-use sakuya_tls::engine::CryptoLevel;
 
 use super::{
     AckObligationsOf, Choices, CloseCauseOf, Side,
     amplification::AntiAmplification,
     close::{CloseReasonRecord, LocalCloseCause},
+    close_packet::ClosePacket,
     confirmation::HandshakeConfirmation,
     connection_ids::{ConnectionIdsOf, ResetTokenRegistrarOf},
-    crypto::send::{CryptoSendBuffer, CryptoSender},
+    crypto::send::CryptoSender,
     error::{ConnectionError, V1ConnectionErrorOf},
     feedback::CoreLentFeedback,
     keys::{HandshakeKeys, InitialKeys, OneRttKeys},
     link::{LinkClone, LinkFacts},
     parameters::PeerTransportParameters,
+    path_response::PendingPathResponse,
     receive::v1_error,
     recovery::{CongestionPartOf, LinkPathCongestionState, PmtuOf, peer_max_udp_payload_size},
-    send::{AckIntent, CryptoIntent, ProbePingIntent, SendTypes, shortest_ack_frame},
+    send::{PendingProbePings, SendTypes},
     spaces::SendJournalsOf,
 };
 use crate::role::LinkPathRole;
@@ -71,13 +71,13 @@ use crate::{
     error::ConnectionErrorsOf,
     feedback::FeedbackSummariesOf,
     frame_source::{
-        EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts, PublishIntent,
+        DriverContentOf, EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts,
     },
     layer::{self, NodeKey},
     others::OtherNodes,
     send_strategy::{
-        AnyActiveLinkPath, DatagramLimits, LinkPathRoleKind, LinkPathSendPlanner, Observe,
-        PacketOverheads, PlannerLinkPath, Publish, PublishOutcome, PublishTo, SendIntent,
+        DatagramLimits, DriverContent, FrameSourceSet, LinkPathRoleKind, LinkPathSendPlanner,
+        Observe, PacketOverheads, PlannedPacketKind, PublishOutcome, SendIntent, SendIntentsOf,
         SendStrategy, SendStrategyTypes,
     },
     share::{FlatMut, FlatRef, LineageLists, LineagePartList, LogicalPathKeys, NodeData},
@@ -93,64 +93,6 @@ pub type SendStrategyOf<T, L> = <HostOf<T> as HostChoices<T>>::SendStrategy<Send
 pub type LinkPathSendPlannerOf<T, L> =
     <SendStrategyOf<T, L> as SendStrategy<SendTypes<T, L>>>::LinkPathSendPlanner;
 
-/// `SendTypes<T, L>: CorePublishOutcome<J, D>`: the core of the choices `T`
-/// and the list of parts `L` takes intents `J` for the destination `D`, as
-/// its own destination converted from `D`, and gives back
-/// [`Outcome`](Self::Outcome). A component that keeps what it gets back
-/// names its type by this, without the place of `J`.
-///
-/// The choices' strategy is bound only by `Default`, as a strategy may be
-/// a [`SendStrategy`] only for the types whose intents it can rank; this
-/// trait and [`CorePublishTo`] state, once, that the core of a composition
-/// is one and takes `J` for `D`.
-pub trait CorePublishOutcome<J: SendIntent, D>: SendStrategyTypes {
-    /// What publishing gives back.
-    type Outcome;
-}
-
-/// `SendTypes<T, L>: CorePublishTo<J, D, Idx, Core = SendStrategyOf<T, L>>`:
-/// a component of `T` and `L` publishes intents `J` for the destination
-/// `D` to the core through [`publish_to`](Self::publish_to).
-///
-/// `Idx` is the place of `J` in the composition's sum of intents; the
-/// compiler infers it.
-pub trait CorePublishTo<J: SendIntent, D, Idx>: CorePublishOutcome<J, D> {
-    /// The core.
-    type Core;
-
-    /// Publish `intent` for `destination` to `core`.
-    fn publish_to(core: &mut Self::Core, intent: J, destination: D) -> Self::Outcome;
-}
-
-/// The core's destination of the choices `T` and the list of parts `L`.
-type CoreDestinationOf<T, L> = <SendStrategyOf<T, L> as SendStrategy<SendTypes<T, L>>>::Destination;
-
-impl<T, L, J, D> CorePublishOutcome<J, D> for SendTypes<T, L>
-where
-    T: Choices,
-    J: SendIntent,
-    Self: SendStrategyTypes,
-    SendStrategyOf<T, L>: SendStrategy<Self> + PublishOutcome<J, CoreDestinationOf<T, L>>,
-    CoreDestinationOf<T, L>: From<D>,
-{
-    type Outcome = <SendStrategyOf<T, L> as PublishOutcome<J, CoreDestinationOf<T, L>>>::Outcome;
-}
-
-impl<T, L, J, D, Idx> CorePublishTo<J, D, Idx> for SendTypes<T, L>
-where
-    T: Choices,
-    J: SendIntent,
-    Self: SendStrategyTypes,
-    SendStrategyOf<T, L>: SendStrategy<Self> + PublishTo<J, CoreDestinationOf<T, L>, Idx>,
-    CoreDestinationOf<T, L>: From<D>,
-{
-    type Core = SendStrategyOf<T, L>;
-
-    fn publish_to(core: &mut Self::Core, intent: J, destination: D) -> Self::Outcome {
-        core.publish_to(intent, destination.into())
-    }
-}
-
 /// The intake of the send strategy of the choices `T` and the list of
 /// parts `L`.
 pub type IntakeOf<T, L> = <SendStrategyOf<T, L> as SendStrategy<SendTypes<T, L>>>::Intake;
@@ -159,7 +101,7 @@ pub type IntakeOf<T, L> = <SendStrategyOf<T, L> as SendStrategy<SendTypes<T, L>>
 /// the choices `T` and the list of parts `L` takes intents `J` for the
 /// destination `D` and gives back [`Outcome`](Self::Outcome). A component
 /// that keeps what it gets back names its type by this, without the place
-/// of `J`, as [`CorePublishOutcome`] does for the core.
+/// of `J`.
 pub trait IntakePublishOutcome<J: SendIntent, D>: SendStrategyTypes {
     /// What publishing gives back.
     type Outcome;
@@ -268,19 +210,6 @@ impl<S> SendStrategyCore<S> {
     }
 }
 
-/// A frame source publishes what it sends again on feedback to the core,
-/// for any active link path: intents sent and forgotten, whose publishing
-/// gives back nothing to keep.
-impl<S, J, Idx> PublishIntent<J, Idx> for SendStrategyCore<S>
-where
-    J: SendIntent,
-    S: PublishTo<J, AnyActiveLinkPath, Idx> + PublishOutcome<J, AnyActiveLinkPath, Outcome = ()>,
-{
-    fn publish(&mut self, intent: J) {
-        self.strategy.publish_to(intent, AnyActiveLinkPath);
-    }
-}
-
 /// The core is told when the keys to send at a level are first in place,
 /// when the handshake is confirmed, and, in the poll the reason is
 /// recorded, that no link path will be active again.
@@ -374,15 +303,33 @@ where
 
 // ---- the planners ----
 
+/// The send planner of the link paths of the choices `T` and the list of
+/// parts `L`, as the link path's node holds it.
+pub type LinkPathPlannerOf<T, L> = LinkPathPlanner<
+    LinkPathSendPlannerOf<T, L>,
+    <SendTypes<T, L> as SendStrategyTypes>::SendIntents,
+>;
+
 /// The send planner of a link path, in the link path's node, with the
-/// role, the limits and the packet overheads it was last told, and how the
-/// sending call waits after a plan it could not fill.
-pub struct LinkPathPlanner<P> {
+/// role, the limits and the packet overheads it was last told, how the
+/// sending call waits after a plan it could not fill, and what the driver's
+/// own components have to send, of the sum of intents `J`: gathered for
+/// each plan, and as the sending call last saw it.
+pub struct LinkPathPlanner<P, J> {
     planner: P,
     role: LinkPathRoleKind,
     limits: Option<DatagramLimits>,
     overheads: Option<PacketOverheads>,
     blocked: BlockedFilling,
+    /// What the driver's components have to send, as last gathered; kept
+    /// for its room only.
+    driver: DriverContent<J>,
+    /// What the sending call last saw of the driver's content: what it
+    /// planned with last, or was woken for.
+    seen: DriverContent<J>,
+    /// The waker of the sending call, kept when its filling ended because
+    /// the planner had nothing to plan or the plan could not be filled.
+    waker: Option<Waker>,
 }
 
 /// Where the sending call of a link path stands after plans it could not
@@ -406,18 +353,19 @@ enum BlockedFilling {
     Waiting(Waker),
 }
 
-impl<P> fmt::Debug for LinkPathPlanner<P> {
+impl<P, J> fmt::Debug for LinkPathPlanner<P, J> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LinkPathPlanner")
             .field("role", &self.role)
             .field("limits", &self.limits)
             .field("overheads", &self.overheads)
             .field("blocked", &self.blocked)
+            .field("seen", &self.seen.intents.len())
             .finish_non_exhaustive()
     }
 }
 
-impl<P> LinkPathPlanner<P> {
+impl<P, J> LinkPathPlanner<P, J> {
     /// The planner.
     pub fn planner(&self) -> &P {
         &self.planner
@@ -436,17 +384,32 @@ impl<P> LinkPathPlanner<P> {
         self.planner.observe(overheads);
     }
 
-    /// The planner, to publish to, to tell of its send conditions or to
-    /// plan with.
+    /// The planner, to tell of its send conditions or to plan with.
     pub fn planner_mut(&mut self) -> &mut P {
         &mut self.planner
     }
 
+    /// The planner, to plan with, and the driver's content, cleared, for
+    /// the sending call to gather what the driver's components have to send
+    /// into before it asks for a plan.
+    pub(super) fn planner_and_driver_content(&mut self) -> (&mut P, &mut DriverContent<J>) {
+        self.driver.clear();
+        (&mut self.planner, &mut self.driver)
+    }
+
     /// A filling of the link path ended, `blocked` when by a plan it could
-    /// not fill and with nothing to hand over. Returns whether the sending
-    /// call wakes itself to plan again: the first time it is blocked; after
-    /// that it waits with `waker` until the planner is told something new.
-    pub(super) fn filling_ended(&mut self, blocked: bool, waker: &Waker) -> bool {
+    /// not fill and with nothing to hand over, `waits` when it waits for
+    /// content: the planner had nothing to plan, or the plan could not be
+    /// filled. The driver's content last gathered is what the sending call
+    /// saw; when it waits, its `waker` is kept, to wake it once that
+    /// content changes. Returns whether the sending call wakes itself to
+    /// plan again: the first time it is blocked; after that it waits with
+    /// `waker` until the planner is told something new.
+    pub(super) fn filling_ended(&mut self, blocked: bool, waits: bool, waker: &Waker) -> bool {
+        core::mem::swap(&mut self.driver, &mut self.seen);
+        if waits {
+            self.waker = Some(waker.clone());
+        }
         if !blocked {
             self.blocked = BlockedFilling::No;
             return false;
@@ -470,6 +433,107 @@ impl<P> LinkPathPlanner<P> {
             waker.wake();
         }
     }
+
+    /// What the driver's components have to send changed from what the
+    /// sending call saw, to `content`, in a way the call may send: it is
+    /// woken, and `content` is what it saw.
+    fn wake_for(&mut self, content: DriverContent<J>) {
+        self.seen = content;
+        if let Some(waker) = self.waker.take() {
+            waker.wake();
+        }
+    }
+}
+
+/// The kinds of packet a link path in `role` sends, as the send strategy
+/// sees them: the content of a role goes in packets of these kinds only.
+fn kinds_of(role: LinkPathRoleKind) -> &'static [PlannedPacketKind] {
+    match role {
+        LinkPathRoleKind::Active => &[
+            PlannedPacketKind::Initial,
+            PlannedPacketKind::Handshake,
+            PlannedPacketKind::OneRtt,
+            PlannedPacketKind::ZeroRtt,
+        ],
+        LinkPathRoleKind::Candidate => &[PlannedPacketKind::OneRttProbe],
+        LinkPathRoleKind::Settling => &[PlannedPacketKind::SettlingResponse],
+        LinkPathRoleKind::Closing | LinkPathRoleKind::Draining => &[],
+    }
+}
+
+/// Whether a packet of `kind` can carry `intent`.
+fn carries<I: SendStrategyTypes>(kind: PlannedPacketKind, intent: &I::SendIntents) -> bool {
+    match kind {
+        PlannedPacketKind::Initial => I::InitialFrameSources::item(intent).is_some(),
+        PlannedPacketKind::Handshake => I::HandshakeFrameSources::item(intent).is_some(),
+        PlannedPacketKind::ZeroRtt => I::ZeroRttFrameSources::item(intent).is_some(),
+        PlannedPacketKind::OneRtt => I::OneRttFrameSources::item(intent).is_some(),
+        PlannedPacketKind::OneRttProbe => I::ProbeFrameSources::item(intent).is_some(),
+        PlannedPacketKind::SettlingResponse => I::SettlingFrameSources::item(intent).is_some(),
+    }
+}
+
+/// Whether `intent`, by the least room it gives, fits an empty datagram of
+/// a link path in `role` that can send `limits`, with `overheads`: in the
+/// first kind of packet of the role that can carry it and that the link
+/// path can send now. Content that counts in flight in an Initial packet,
+/// and any in a client's, fills a datagram of 1200 bytes (RFC 9000 §14.1).
+fn fits_empty_datagram<I: SendStrategyTypes>(
+    intent: &I::SendIntents,
+    role: LinkPathRoleKind,
+    limits: &DatagramLimits,
+    overheads: &PacketOverheads,
+) -> bool {
+    let Some((kind, overhead)) = kinds_of(role)
+        .iter()
+        .filter(|&&kind| carries::<I>(kind, intent))
+        .find_map(|&kind| overheads.of(kind).map(|overhead| (kind, overhead)))
+    else {
+        return false;
+    };
+    let class = I::flight_class(intent);
+    let mut class_of_datagram = class;
+    let mut need = overhead + I::min_lengths(intent).as_last;
+    if kind == PlannedPacketKind::Initial
+        && (overheads.expands_every_initial || class == FlightClass::InFlight)
+    {
+        need = need.max(DatagramLimits::MINIMUM);
+        class_of_datagram = FlightClass::InFlight;
+    }
+    need <= limits.capacity_for(class_of_datagram)
+}
+
+/// Whether two intents are the same content to the sending call: of the
+/// same frame source, needing the same least room.
+fn same_content<I: SendStrategyTypes>(a: &I::SendIntents, b: &I::SendIntents) -> bool
+where
+    I::FrameSourceId: PartialEq,
+{
+    I::frame_source(a) == I::frame_source(b) && I::min_lengths(a) == I::min_lengths(b)
+}
+
+/// Whether the driver's content `now` wakes a sending call that saw `seen`:
+/// the facts of the close packet changed, or one of the intents, by its
+/// frame source and least room, is not among those seen and fits an empty
+/// datagram of the link path.
+fn driver_content_wakes<I: SendStrategyTypes>(
+    now: &DriverContent<I::SendIntents>,
+    seen: &DriverContent<I::SendIntents>,
+    role: LinkPathRoleKind,
+    limits: &DatagramLimits,
+    overheads: &PacketOverheads,
+) -> bool
+where
+    I::FrameSourceId: PartialEq,
+{
+    now.close != seen.close
+        || now.intents.iter().any(|intent| {
+            !seen
+                .intents
+                .iter()
+                .any(|seen| same_content::<I>(intent, seen))
+                && fits_empty_datagram::<I>(intent, role, limits, overheads)
+        })
 }
 
 /// A link path's planner is made by the core when the link path is built,
@@ -482,7 +546,7 @@ impl<P> LinkPathPlanner<P> {
 /// and of each part's frame sources for handing intents back, and `Is` of
 /// the established layer's components the frame sources find.
 impl<T: Choices, L, Ic, Hf, Is> Build<T, L, layer::LinkPath, (Ic, Hf, Is)>
-    for LinkPathPlanner<LinkPathSendPlannerOf<T, L>>
+    for LinkPathPlannerOf<T, L>
 where
     L: LineagePartList<T> + LogicalPathKeys + FeedbackSummariesOf,
     SendTypes<T, L>:
@@ -511,6 +575,9 @@ where
             limits: None,
             overheads: None,
             blocked: BlockedFilling::No,
+            driver: DriverContent::new(),
+            seen: DriverContent::new(),
+            waker: None,
         }
     }
 
@@ -553,6 +620,17 @@ where
 /// send journals of the spaces, and the keys of each level. All of it is
 /// only read here.
 ///
+/// It also reads what the driver's own components have to send on the link
+/// path ([`DriverContentOf`]): the ACK obligations and receive journals,
+/// the CRYPTO output, the data only this side has, which holds a server's
+/// HANDSHAKE_DONE, the connection IDs, the probe's PINGs, the response to a
+/// PATH_CHALLENGE and the close packet. When that content has an intent the
+/// sending call did not see last, by its frame source and least room, that
+/// fits an empty datagram as the link path can send now, or the close
+/// packet's facts changed, the sending call is woken; content that does not
+/// fit wakes it once the link path's conditions change so that it does, and
+/// content gone since is forgotten as seen.
+///
 /// An `Active` link path that does not carry 1200 bytes stops sending
 /// (RFC 9000 §14.2); when no other link path of the connection can send,
 /// that is, none is `Active` and carries 1200 bytes, as its planner was
@@ -565,8 +643,9 @@ where
 /// components of the established layer the frame sources find appended:
 /// `Ik` is the place of the core there, `Hf` that of the core and of each
 /// part's frame sources for handing intents back, and `Is` of the
-/// established layer's components.
-impl<T: Choices, L, Ip, Ir, It, Il, Io, Ipp, Jc, Js, Jm, Ic, Ier, Kr, Kp, Ik, Hf, Is>
+/// established layer's components; `Hd` holds the positions each part reads
+/// its content by.
+impl<T: Choices, L, Ip, Ir, It, Il, Io, Ipp, Jc, Js, Jm, Ic, Ier, Kr, Kp, Ik, Hf, Is, Hd>
     DataComponent<
         T,
         L,
@@ -581,13 +660,17 @@ impl<T: Choices, L, Ip, Ir, It, Il, Io, Ipp, Jc, Js, Jm, Ic, Ier, Kr, Kp, Ik, Hf
             (Jc, Js, Jm),
             (Ic, Ier, Kr, Kp),
             (Ik, Hf, Is),
+            Hd,
         ),
-    > for LinkPathPlanner<LinkPathSendPlannerOf<T, L>>
+    > for LinkPathPlannerOf<T, L>
 where
     L: LineagePartList<T> + FeedbackSummariesOf + ParametersOf<TransportParameterSpace>,
     L: ConnectionErrorsOf,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ier>,
     SendTypes<T, L>: SendStrategyTypes,
+    <SendTypes<T, L> as SendStrategyTypes>::SendIntents: From<<L as SendIntentsOf>::SendIntents>,
+    <SendTypes<T, L> as SendStrategyTypes>::FrameSourceId: PartialEq,
+    for<'v> L: DriverContentOf<T, L, <L as LineageLists<'v, T>>::LinkPath, Hd>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     LinkPathSendPlannerOf<T, L>: Observe<DatagramLimits> + Observe<PacketOverheads>,
     TransportParameterSlots<L>: Selector<Option<MaxUdpPayloadSize>, Ipp>,
@@ -628,6 +711,14 @@ where
         reads.add::<InitialKeys<T::Crypto>>();
         reads.add::<HandshakeKeys<T::Crypto>>();
         reads.add::<OneRttKeys<T::Crypto, InstantOf<T>>>();
+        // what the driver's content is read from
+        reads.add::<AckObligationsOf<T>>();
+        reads.add::<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>>();
+        reads.add::<CryptoSender<CryptoSendBufferOf<T>>>();
+        reads.add::<<T::Side as Side>::Own>();
+        reads.add::<PendingProbePings>();
+        reads.add::<PendingPathResponse>();
+        reads.add::<ClosePacket>();
     }
 
     fn reread<'v, B: CallBundle>(
@@ -651,14 +742,40 @@ where
                     error,
                 ))));
         }
-        let NodeKey::LinkPath(_, link) = others.here() else {
+        let NodeKey::LinkPath(path, link) = others.here() else {
             unreachable!("a link path's lend carries its key")
         };
+        let identifier = L::link_path_identifier(path, link);
         let overheads = read_packet_overheads::<T, L, Io>(
             &lineage,
             link,
             limits.capacity_for(FlightClass::AckOnly),
         );
+        // what the driver's components have to send, gathered with the
+        // room of the last gathering
+        let mut content = core::mem::take(&mut lineage.get_mut::<Self, Ip>().driver);
+        content.clear();
+        <L as DriverContentOf<T, L, _, Hd>>::pending(
+            &lineage,
+            &identifier,
+            &mut content,
+            From::from,
+        );
+        let told = lineage.get_mut::<Self, Ip>();
+        if driver_content_wakes::<SendTypes<T, L>>(&content, &told.seen, role, &limits, &overheads)
+        {
+            told.wake_for(content);
+        } else {
+            // what is gone was seen to go; what did not fit is not seen,
+            // so that it wakes the call once it fits
+            told.seen.intents.retain(|seen| {
+                content
+                    .intents
+                    .iter()
+                    .any(|now| same_content::<SendTypes<T, L>>(seen, now))
+            });
+            told.driver = content;
+        }
         let told = lineage.get::<Self, Ip>();
         if told.role == role && told.limits == Some(limits) && told.overheads == Some(overheads) {
             return None;
@@ -710,28 +827,26 @@ where
     SendTypes<T, L>: SendStrategyTypes,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
-    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out: GetAt<LinkPathRole<InstantOf<T>>, Kr>
-        + GetAt<LinkPathPlanner<LinkPathSendPlannerOf<T, L>>, Kp>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        GetAt<LinkPathRole<InstantOf<T>>, Kr> + GetAt<LinkPathPlannerOf<T, L>, Kp>,
 {
     let mut roles = Vec::new();
     others.each_link_path_read::<LinkPathRole<InstantOf<T>>, Kr>(|key, role| {
         roles.push((key.clone(), role.kind()));
     });
     let mut can = false;
-    others.each_link_path_read::<LinkPathPlanner<LinkPathSendPlannerOf<T, L>>, Kp>(
-        |key, planner| {
-            let Some((_, role)) = roles.iter().find(|(each, _)| each == key) else {
-                return;
-            };
-            can |= match role {
-                LinkPathRoleKind::Candidate => true,
-                LinkPathRoleKind::Active => planner
-                    .limits
-                    .is_some_and(|limits| limits.supports_minimum()),
-                _ => false,
-            };
-        },
-    );
+    others.each_link_path_read::<LinkPathPlannerOf<T, L>, Kp>(|key, planner| {
+        let Some((_, role)) = roles.iter().find(|(each, _)| each == key) else {
+            return;
+        };
+        can |= match role {
+            LinkPathRoleKind::Candidate => true,
+            LinkPathRoleKind::Active => planner
+                .limits
+                .is_some_and(|limits| limits.supports_minimum()),
+            _ => false,
+        };
+    });
     can
 }
 
@@ -1036,422 +1151,6 @@ pub(super) fn packet_overheads(
     }
 }
 
-// ---- the ACK intents ----
-
-/// What publishing an ACK intent for any active link path gives back in
-/// the core of `T` and `L`.
-pub type AckIntentTicketOf<T, L> =
-    <SendTypes<T, L> as CorePublishOutcome<AckIntent, AnyActiveLinkPath>>::Outcome;
-
-/// The ACK intents of a logical path: for each packet number space where
-/// an ACK frame is due now, what publishing its intent gave back, with the
-/// shortest frame the intent asked room for. Dropping an intent's ticket
-/// withdraws it.
-pub struct AckIntentTickets<K> {
-    published: [Option<(K, usize)>; 3],
-}
-
-impl<K> fmt::Debug for AckIntentTickets<K> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let shortest = self
-            .published
-            .each_ref()
-            .map(|published| published.as_ref().map(|(_, shortest)| *shortest));
-        f.debug_struct("AckIntentTickets")
-            .field("shortest", &shortest)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<K> Default for AckIntentTickets<K> {
-    fn default() -> Self {
-        Self {
-            published: [None, None, None],
-        }
-    }
-}
-
-fn space_index(space: PacketNumberSpaceKind) -> usize {
-    match space {
-        PacketNumberSpaceKind::Initial => 0,
-        PacketNumberSpaceKind::Handshake => 1,
-        PacketNumberSpaceKind::ApplicationData => 2,
-    }
-}
-
-impl<K> AckIntentTickets<K> {
-    /// Whether an ACK intent of `space` is published.
-    pub fn is_published(&self, space: PacketNumberSpaceKind) -> bool {
-        self.published[space_index(space)].is_some()
-    }
-
-    /// Drop the ticket of `space`, whose intent an ACK frame consumed and
-    /// that frame was lost: the intent is published again while an ACK
-    /// frame is due.
-    pub(crate) fn forget(&mut self, space: PacketNumberSpaceKind) {
-        self.published[space_index(space)] = None;
-    }
-}
-
-/// A logical path starts with no ACK frame due.
-impl<T: Choices, L> Build<T, L, layer::LogicalPath, ()>
-    for AckIntentTickets<AckIntentTicketOf<T, L>>
-where
-    L: LineagePartList<T>,
-    SendTypes<T, L>: CorePublishOutcome<AckIntent, AnyActiveLinkPath>,
-{
-    fn build<'v>(
-        _: &mut ParentsOf<'v, T, L, layer::LogicalPath>,
-        _: &mut ArgsOf<T, L, layer::LogicalPath>,
-    ) -> Self {
-        Self::default()
-    }
-}
-
-/// An ACK intent is published to the core for any active link path while
-/// a space's ACK obligation says an ACK frame is due now, and withdrawn
-/// when it no longer is or the space is gone. It asks room for the shortest
-/// frame the space's receive journals give, and is published again when
-/// that grows, so it is never planned for a packet its frame does not fit,
-/// and when an ACK frame of the space is lost, which drops its ticket.
-///
-/// Not here: an ACK frame carried along when the obligation only wants one
-/// in a packet sent anyway.
-impl<T: Choices, L, Ia, Ij, Is, It, Idx>
-    DataComponent<T, L, layer::LogicalPath, (Ia, Ij, Is, It, Idx)>
-    for AckIntentTickets<AckIntentTicketOf<T, L>>
-where
-    L: LineagePartList<T>,
-    SendTypes<T, L>: CorePublishTo<AckIntent, AnyActiveLinkPath, Idx, Core = SendStrategyOf<T, L>>,
-    for<'v> <L as LineageLists<'v, T>>::LogicalPath: GetAt<AckObligationsOf<T>, Ia>
-        + GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
-        + GetAt<Self, Is>
-        + TakeEach<'v, frunk_core::HList![Self, SendStrategyCore<SendStrategyOf<T, L>>], It>,
-{
-    fn reads(reads: &mut ReadSet) {
-        reads
-            .add::<AckObligationsOf<T>>()
-            .add::<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>>();
-    }
-
-    fn reread<'v, B: CallBundle>(
-        lineage: LineageOf<'v, T, L, layer::LogicalPath>,
-        _: &mut OtherNodes<'v, T, L, B>,
-        _: InstantOf<T>,
-    ) -> Option<RequestOf<T, L>> {
-        let wanted = PacketNumberSpaceKind::ALL.map(|space| {
-            let due = lineage
-                .get::<AckObligationsOf<T>, Ia>()
-                .get(space)
-                .is_some_and(|obligation| obligation.due() == AckDue::Now);
-            due.then(|| {
-                lineage
-                    .get::<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>()
-                    .get(space)
-                    .and_then(shortest_ack_frame)
-            })
-            .flatten()
-        });
-        let published = &lineage.get::<Self, Is>().published;
-        let unchanged = wanted.iter().zip(published).all(|(wanted, published)| {
-            *wanted == published.as_ref().map(|(_, shortest)| *shortest)
-        });
-        if unchanged {
-            return None;
-        }
-        let (frunk_core::hlist_pat![tickets, core], _) = Take::<
-            frunk_core::HList![Self, SendStrategyCore<SendStrategyOf<T, L>>],
-            It,
-        >::take(lineage);
-        for (space, wanted) in PacketNumberSpaceKind::ALL.into_iter().zip(wanted) {
-            let slot = &mut tickets.published[space_index(space)];
-            if slot.as_ref().map(|(_, shortest)| *shortest) == wanted {
-                continue;
-            }
-            // the old ticket goes after the new intent is in, so the space
-            // is never without one while an ACK frame is due
-            let old = slot.take();
-            if let Some(shortest) = wanted {
-                let ticket = <SendTypes<T, L> as CorePublishTo<_, _, Idx>>::publish_to(
-                    core.strategy_mut(),
-                    AckIntent::new(space, shortest),
-                    AnyActiveLinkPath,
-                );
-                *slot = Some((ticket, shortest));
-            }
-            drop(old);
-        }
-        None
-    }
-}
-
-// ---- the CRYPTO intents ----
-
-/// What publishing a CRYPTO intent for any active link path gives back in
-/// the core of `T` and `L`.
-pub type CryptoIntentTicketOf<T, L> =
-    <SendTypes<T, L> as CorePublishOutcome<CryptoIntent, AnyActiveLinkPath>>::Outcome;
-
-/// The encryption levels that carry CRYPTO frames, in their order.
-const CRYPTO_LEVELS: [CryptoLevel; 3] = [
-    CryptoLevel::Initial,
-    CryptoLevel::Handshake,
-    CryptoLevel::OneRtt,
-];
-
-fn crypto_level_index(level: CryptoLevel) -> usize {
-    match level {
-        CryptoLevel::Initial => 0,
-        CryptoLevel::Handshake => 1,
-        CryptoLevel::OneRtt => 2,
-    }
-}
-
-/// The CRYPTO intents of the connection: for each encryption level whose
-/// data is waiting to be sent, what publishing its intent gave back, with
-/// the shortest frame the intent asked room for. Dropping an intent's
-/// ticket withdraws it.
-pub struct CryptoIntentTickets<K> {
-    published: [Option<(K, usize)>; 3],
-}
-
-impl<K> fmt::Debug for CryptoIntentTickets<K> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let shortest = self
-            .published
-            .each_ref()
-            .map(|published| published.as_ref().map(|(_, shortest)| *shortest));
-        f.debug_struct("CryptoIntentTickets")
-            .field("shortest", &shortest)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<K> Default for CryptoIntentTickets<K> {
-    fn default() -> Self {
-        Self {
-            published: [None, None, None],
-        }
-    }
-}
-
-impl<K> CryptoIntentTickets<K> {
-    /// Whether a CRYPTO intent of `level` is published.
-    pub fn is_published(&self, level: CryptoLevel) -> bool {
-        self.published[crypto_level_index(level)].is_some()
-    }
-
-    /// Drop the ticket of `level`, whose frames were just supplied: the
-    /// intent is published again while data of the level is unsent.
-    pub(crate) fn forget(&mut self, level: CryptoLevel) {
-        self.published[crypto_level_index(level)] = None;
-    }
-
-    /// The intents each level wants, from `sender` and whether the level's
-    /// keys can send: one for a level that can send and has data unsent,
-    /// none otherwise.
-    fn wanted<B: CryptoSendBuffer>(
-        sender: &CryptoSender<B>,
-        can_send: [bool; 3],
-    ) -> [Option<CryptoIntent>; 3] {
-        CRYPTO_LEVELS.map(|level| {
-            if !can_send[crypto_level_index(level)] {
-                return None;
-            }
-            sender
-                .first_unsent(level)
-                .map(|offset| CryptoIntent::new(level, offset))
-        })
-    }
-
-    /// Whether the published intents differ from `wanted`.
-    fn differ(&self, wanted: &[Option<CryptoIntent>; 3]) -> bool {
-        wanted
-            .iter()
-            .zip(&self.published)
-            .any(|(wanted, published)| {
-                wanted.map(|intent| intent.shortest()) != published.as_ref().map(|(_, s)| *s)
-            })
-    }
-
-    /// Publish what `wanted` has and is not published as it is, through
-    /// `publish`, and drop the tickets of the levels that want nothing.
-    fn follow(
-        &mut self,
-        wanted: [Option<CryptoIntent>; 3],
-        mut publish: impl FnMut(CryptoIntent) -> K,
-    ) {
-        for (slot, wanted) in self.published.iter_mut().zip(wanted) {
-            if slot.as_ref().map(|(_, shortest)| *shortest) == wanted.map(|i| i.shortest()) {
-                continue;
-            }
-            // the old ticket goes after the new intent is in, so the level
-            // is never without one while it has data unsent
-            let old = slot.take();
-            if let Some(intent) = wanted {
-                *slot = Some((publish(intent), intent.shortest()));
-            }
-            drop(old);
-        }
-    }
-}
-
-/// A connection starts with no CRYPTO data to send.
-impl<T: Choices, L> Build<T, L, layer::Connection, ()>
-    for CryptoIntentTickets<CryptoIntentTicketOf<T, L>>
-where
-    L: LineagePartList<T>,
-    SendTypes<T, L>: CorePublishOutcome<CryptoIntent, AnyActiveLinkPath>,
-{
-    fn build<'v>(
-        _: &mut ParentsOf<'v, T, L, layer::Connection>,
-        _: &mut ArgsOf<T, L, layer::Connection>,
-    ) -> Self {
-        Self::default()
-    }
-}
-
-/// A CRYPTO intent is published to the core for any active link path
-/// while a level has data unsent and keys to send with, and withdrawn when
-/// it has none or its keys can no longer send. It asks room for the
-/// shortest frame at the level's first unsent offset, and is published
-/// again when that grows, so it is never planned for a packet its frame
-/// does not fit; and when the frames of the level were supplied, which
-/// drops its ticket, while data of the level is still unsent, as after a
-/// frame of it is lost.
-impl<T: Choices, L, Ic, Ii, Ih, Io, Is, It, Idx>
-    DataComponent<T, L, layer::Connection, (Ic, Ii, Ih, Io, Is, It, Idx)>
-    for CryptoIntentTickets<CryptoIntentTicketOf<T, L>>
-where
-    L: LineagePartList<T>,
-    SendTypes<T, L>:
-        CorePublishTo<CryptoIntent, AnyActiveLinkPath, Idx, Core = SendStrategyOf<T, L>>,
-    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ic>
-        + GetAt<InitialKeys<T::Crypto>, Ii>
-        + GetAt<HandshakeKeys<T::Crypto>, Ih>
-        + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
-        + GetAt<Self, Is>
-        + TakeEach<'v, frunk_core::HList![Self, SendStrategyCore<SendStrategyOf<T, L>>], It>,
-{
-    fn reads(reads: &mut ReadSet) {
-        reads
-            .add::<CryptoSender<CryptoSendBufferOf<T>>>()
-            .add::<InitialKeys<T::Crypto>>()
-            .add::<HandshakeKeys<T::Crypto>>()
-            .add::<OneRttKeys<T::Crypto, InstantOf<T>>>();
-    }
-
-    fn reread<'v, B: CallBundle>(
-        lineage: LineageOf<'v, T, L, layer::Connection>,
-        _: &mut OtherNodes<'v, T, L, B>,
-        _: InstantOf<T>,
-    ) -> Option<RequestOf<T, L>> {
-        let can_send = [
-            lineage.get::<InitialKeys<T::Crypto>, Ii>().send().is_some(),
-            lineage
-                .get::<HandshakeKeys<T::Crypto>, Ih>()
-                .send()
-                .is_some(),
-            lineage
-                .get::<OneRttKeys<T::Crypto, InstantOf<T>>, Io>()
-                .send()
-                .is_some(),
-        ];
-        let wanted = Self::wanted(
-            lineage.get::<CryptoSender<CryptoSendBufferOf<T>>, Ic>(),
-            can_send,
-        );
-        if !lineage.get::<Self, Is>().differ(&wanted) {
-            return None;
-        }
-        let (frunk_core::hlist_pat![tickets, core], _) = Take::<
-            frunk_core::HList![Self, SendStrategyCore<SendStrategyOf<T, L>>],
-            It,
-        >::take(lineage);
-        tickets.follow(wanted, |intent| {
-            <SendTypes<T, L> as CorePublishTo<_, _, Idx>>::publish_to(
-                core.strategy_mut(),
-                intent,
-                AnyActiveLinkPath,
-            )
-        });
-        None
-    }
-}
-
-// ---- the PING of a probe timeout ----
-
-/// What publishing a probe's PING on a link path's planner gives back for
-/// `T` and `L`.
-pub type ProbePingTicketOf<T, L> =
-    <LinkPathSendPlannerOf<T, L> as PublishOutcome<ProbePingIntent, PlannerLinkPath>>::Outcome;
-
-/// The PINGs a link path's last probe timeout published, in the link
-/// path's recovery layer: what publishing each gave back, by packet number
-/// space. The next probe timeout drops them before it publishes its own,
-/// and they go with the recovery layer.
-pub struct ProbePingTickets<K> {
-    published: [Option<K>; 3],
-}
-
-impl<K> fmt::Debug for ProbePingTickets<K> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let published = self.published.each_ref().map(Option::is_some);
-        f.debug_struct("ProbePingTickets")
-            .field("published", &published)
-            .finish()
-    }
-}
-
-impl<K> Default for ProbePingTickets<K> {
-    fn default() -> Self {
-        Self {
-            published: [None, None, None],
-        }
-    }
-}
-
-impl<K> ProbePingTickets<K> {
-    /// Whether a PING of `space` was published by the last probe timeout.
-    pub fn is_published(&self, space: PacketNumberSpaceKind) -> bool {
-        self.published[space_index(space)].is_some()
-    }
-
-    /// Drop the tickets of the last probe timeout and publish a PING in each
-    /// of `spaces` on `planner`.
-    pub(crate) fn probe<P, Idx>(
-        &mut self,
-        planner: &mut P,
-        spaces: impl IntoIterator<Item = PacketNumberSpaceKind>,
-    ) where
-        P: Publish<ProbePingIntent, Idx>
-            + PublishOutcome<ProbePingIntent, PlannerLinkPath, Outcome = K>,
-    {
-        self.published = [None, None, None];
-        for space in spaces {
-            self.published[space_index(space)] = Some(planner.publish(ProbePingIntent::new(space)));
-        }
-    }
-}
-
-/// A recovery layer starts with no probe.
-impl<T: Choices, L> Build<T, L, layer::Recovery, ()> for ProbePingTickets<ProbePingTicketOf<T, L>>
-where
-    L: LineagePartList<T>,
-    SendTypes<T, L>: SendStrategyTypes,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
-    LinkPathSendPlannerOf<T, L>: PublishOutcome<ProbePingIntent, PlannerLinkPath>,
-{
-    fn build<'v>(
-        _: &mut ParentsOf<'v, T, L, layer::Recovery>,
-        _: &mut ArgsOf<T, L, layer::Recovery>,
-    ) -> Self {
-        Self::default()
-    }
-}
-
-impl<K> PassiveDataComponent for ProbePingTickets<K> {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1579,260 +1278,5 @@ mod tests {
                 ..PacketOverheads::default()
             }
         );
-    }
-
-    // ---- the CRYPTO intents ----
-
-    use core::{cell::RefCell, num::NonZeroUsize};
-    use std::rc::Rc;
-
-    use bytes::Bytes;
-    use frunk_core::hlist;
-    use sakuya_recovery::send_journals::DequeSendJournals;
-    use sakuya_wire::parts::{CNil, Coproduct};
-
-    use crate::{
-        frame_source::FrameSource,
-        take::{Lineage, TakenPositions},
-        v1::{
-            aead_usage::AeadUsage,
-            crypto::send::OffsetMapCryptoSendBuffer,
-            datagram_batch::tests::{Accounts, Batch, one_rtt_keys},
-            feedback::{CryptoSummary, FeedbackSummary},
-            send::LineageCryptoFrameSource,
-        },
-        write::InFlightClass,
-    };
-
-    /// What became of the tickets: each published intent, and each ticket
-    /// dropped, by its level.
-    type TicketLog = Rc<RefCell<Vec<String>>>;
-
-    /// A ticket that notes when it is dropped.
-    struct NotedTicket(TicketLog, CryptoLevel);
-
-    impl Drop for NotedTicket {
-        fn drop(&mut self) {
-            self.0.borrow_mut().push(format!("dropped {:?}", self.1));
-        }
-    }
-
-    type Sender = CryptoSender<OffsetMapCryptoSendBuffer>;
-
-    /// The tickets follow `sender`, as their reread does with the levels
-    /// that `can_send`, publishing into `log`.
-    fn reread(
-        tickets: &mut CryptoIntentTickets<NotedTicket>,
-        sender: &Sender,
-        can_send: [bool; 3],
-        log: &TicketLog,
-    ) {
-        let wanted = CryptoIntentTickets::<NotedTicket>::wanted(sender, can_send);
-        if !tickets.differ(&wanted) {
-            return;
-        }
-        tickets.follow(wanted, |intent| {
-            log.borrow_mut().push(format!(
-                "publish {:?} {}",
-                intent.level(),
-                intent.shortest()
-            ));
-            NotedTicket(Rc::clone(log), intent.level())
-        });
-    }
-
-    fn take(log: &TicketLog) -> Vec<String> {
-        core::mem::take(&mut *log.borrow_mut())
-    }
-
-    fn v(value: u64) -> VarInt {
-        VarInt::try_from(value).unwrap()
-    }
-
-    const ALL: [bool; 3] = [true, true, true];
-
-    /// The frames of `level` supplied into a 1-RTT packet of a datagram of
-    /// at most `max_len` bytes, through the frame source the sending call
-    /// finds in a lineage of `sender` and `tickets`: their summaries.
-    fn supplied(
-        sender: &mut Sender,
-        tickets: &mut CryptoIntentTickets<NotedTicket>,
-        level: CryptoLevel,
-        max_len: usize,
-    ) -> Vec<CryptoSummary> {
-        let (keys, _) = one_rtt_keys();
-        let mut journals =
-            DequeSendJournals::<u64, Coproduct<FeedbackSummary<u64>, CNil>, ()>::new();
-        let mut usage = AeadUsage::new();
-        let mut accounts = Accounts::new();
-        let mut batch = Batch::new(NonZeroUsize::MIN);
-        let mut taken = TakenPositions::default();
-        let mut lineage = Lineage::new(hlist![sender, tickets], &mut taken);
-        let mut source =
-            LineageCryptoFrameSource::<_, OffsetMapCryptoSendBuffer, NotedTicket, _>::new(
-                &mut lineage,
-            );
-        {
-            let mut datagram = accounts.start(&mut batch, Role::Server, max_len, max_len, false);
-            let packet = datagram
-                .start_one_rtt_packet(
-                    journals.start_attempt(()),
-                    keys.send().unwrap(),
-                    &mut usage,
-                    None,
-                )
-                .unwrap();
-            let _ = source.supply(level, packet.open::<InFlightClass>());
-        }
-        journals
-            .take_link_path(&())
-            .flat_map(|record| record.summaries)
-            .filter_map(|summary| match summary {
-                Coproduct::Inl(summary) => summary.get::<CryptoSummary, _>().copied(),
-                Coproduct::Inr(never) => match never {},
-            })
-            .collect()
-    }
-
-    /// `summary` comes back to the frame source of `sender` and `tickets`,
-    /// delivered or lost.
-    fn settled(
-        sender: &mut Sender,
-        tickets: &mut CryptoIntentTickets<NotedTicket>,
-        summary: CryptoSummary,
-        delivered: bool,
-    ) {
-        let mut taken = TakenPositions::default();
-        let mut lineage = Lineage::new(hlist![sender, tickets], &mut taken);
-        let mut source =
-            LineageCryptoFrameSource::<_, OffsetMapCryptoSendBuffer, NotedTicket, _>::new(
-                &mut lineage,
-            );
-        let space = PacketNumberSpaceKind::ApplicationData;
-        if delivered {
-            source.delivered::<(), _>(&mut (), space, summary);
-        } else {
-            source.lost::<(), _>(&mut (), space, &summary);
-        }
-    }
-
-    #[test]
-    fn crypto_data_written_publishes_the_intent_of_its_level() {
-        let log = TicketLog::default();
-        let mut sender = Sender::new();
-        let mut tickets = CryptoIntentTickets::default();
-        reread(&mut tickets, &sender, ALL, &log);
-        assert!(take(&log).is_empty());
-        sender.write(Bytes::from_static(b"client hello")).unwrap();
-        reread(&mut tickets, &sender, ALL, &log);
-        // the shortest frame: type, offset 0, length, one byte
-        assert_eq!(take(&log), ["publish Initial 4"]);
-        assert!(tickets.is_published(CryptoLevel::Initial));
-        // more data at the same level changes nothing
-        sender.write(Bytes::from_static(b" more")).unwrap();
-        reread(&mut tickets, &sender, ALL, &log);
-        assert!(take(&log).is_empty());
-    }
-
-    #[test]
-    fn a_level_without_keys_to_send_holds_its_intent_back() {
-        let log = TicketLog::default();
-        let mut sender = Sender::new();
-        let mut tickets = CryptoIntentTickets::default();
-        sender.write(Bytes::from_static(b"server hello")).unwrap();
-        sender.move_output_to(CryptoLevel::Handshake);
-        sender.write(Bytes::from_static(b"finished")).unwrap();
-        reread(&mut tickets, &sender, [true, false, false], &log);
-        assert_eq!(take(&log), ["publish Initial 4"]);
-        reread(&mut tickets, &sender, [true, true, false], &log);
-        assert_eq!(take(&log), ["publish Handshake 4"]);
-        // the Initial keys go: the level's intent is withdrawn
-        reread(&mut tickets, &sender, [false, true, false], &log);
-        assert_eq!(take(&log), ["dropped Initial"]);
-    }
-
-    #[test]
-    fn a_discarded_level_drops_its_ticket() {
-        let log = TicketLog::default();
-        let mut sender = Sender::new();
-        let mut tickets = CryptoIntentTickets::default();
-        sender.write(Bytes::from_static(b"client hello")).unwrap();
-        reread(&mut tickets, &sender, ALL, &log);
-        take(&log);
-        sender.discard(CryptoLevel::Initial);
-        reread(&mut tickets, &sender, ALL, &log);
-        assert_eq!(take(&log), ["dropped Initial"]);
-        assert!(!tickets.is_published(CryptoLevel::Initial));
-    }
-
-    #[test]
-    fn supplying_takes_the_ticket_and_what_is_left_is_published_again() {
-        let log = TicketLog::default();
-        let mut sender = Sender::new();
-        let mut tickets = CryptoIntentTickets::default();
-        sender.move_output_to(CryptoLevel::OneRtt);
-        sender.write(Bytes::from(vec![7; 100])).unwrap();
-        reread(&mut tickets, &sender, ALL, &log);
-        assert_eq!(take(&log), ["publish OneRtt 4"]);
-        // a 1-RTT packet takes 26 bytes beyond its frames here
-        let first = supplied(&mut sender, &mut tickets, CryptoLevel::OneRtt, 26 + 60);
-        assert_eq!(
-            first,
-            [CryptoSummary {
-                level: CryptoLevel::OneRtt,
-                offset: v(0),
-                len: 57
-            }]
-        );
-        assert_eq!(take(&log), ["dropped OneRtt"]);
-        // the rest starts at 57, whose offset takes one byte still
-        reread(&mut tickets, &sender, ALL, &log);
-        assert_eq!(take(&log), ["publish OneRtt 4"]);
-        let second = supplied(&mut sender, &mut tickets, CryptoLevel::OneRtt, 1200);
-        assert_eq!(
-            second,
-            [CryptoSummary {
-                level: CryptoLevel::OneRtt,
-                offset: v(57),
-                len: 43
-            }]
-        );
-        assert_eq!(take(&log), ["dropped OneRtt"]);
-        reread(&mut tickets, &sender, ALL, &log);
-        assert!(take(&log).is_empty(), "nothing is left to send");
-
-        // the first frame is lost: its bytes are published and sent again
-        // as they were
-        settled(&mut sender, &mut tickets, first[0], false);
-        reread(&mut tickets, &sender, ALL, &log);
-        assert_eq!(take(&log), ["publish OneRtt 4"]);
-        let again = supplied(&mut sender, &mut tickets, CryptoLevel::OneRtt, 1200);
-        assert_eq!(again, first);
-        take(&log);
-        // once delivered, a late loss of the second frame's first copy
-        // sends nothing again
-        settled(&mut sender, &mut tickets, second[0], true);
-        settled(&mut sender, &mut tickets, second[0], false);
-        reread(&mut tickets, &sender, ALL, &log);
-        assert!(take(&log).is_empty());
-    }
-
-    #[test]
-    fn the_intent_is_published_again_when_its_shortest_frame_grows() {
-        let log = TicketLog::default();
-        let mut sender = Sender::new();
-        let mut tickets = CryptoIntentTickets::default();
-        sender.move_output_to(CryptoLevel::OneRtt);
-        sender.write(Bytes::from(vec![7; 100])).unwrap();
-        // 64 bytes in flight: the first unsent offset takes two bytes
-        let _ = supplied(&mut sender, &mut tickets, CryptoLevel::OneRtt, 26 + 68);
-        assert_eq!(sender.first_unsent(CryptoLevel::OneRtt), Some(v(64)));
-        reread(&mut tickets, &sender, ALL, &log);
-        assert_eq!(take(&log), ["publish OneRtt 5"]);
-        // a loss below it makes it shorter again; the old ticket goes after
-        // the new intent is in
-        sender.lost(CryptoLevel::OneRtt, v(0), 10);
-        reread(&mut tickets, &sender, ALL, &log);
-        assert_eq!(take(&log), ["publish OneRtt 4", "dropped OneRtt"]);
     }
 }

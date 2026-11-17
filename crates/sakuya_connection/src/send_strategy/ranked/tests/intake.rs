@@ -4,10 +4,7 @@ use core::{
     cell::RefCell,
     task::{Context, Poll, Waker},
 };
-use std::{
-    rc::Rc,
-    sync::atomic::Ordering,
-};
+use std::{rc::Rc, sync::atomic::Ordering};
 
 use bytes::BytesMut;
 use sakuya_recovery::send_journals::PacketSendAttempt;
@@ -104,10 +101,6 @@ impl RankedIntent for TestIntent {
     fn stays_after_writing(&self) -> bool {
         self.stays
     }
-}
-
-impl RankedCoreIntent for TestIntent {
-    type Outcome<C> = IntentTicket<C>;
 }
 
 type Intents = Coproduct<Coproduct<TestIntent, CNil>, CNil>;
@@ -213,8 +206,9 @@ fn next_datagram(
     take: usize,
     written: usize,
 ) -> Option<Vec<u32>> {
+    let driver = DriverContent::new();
     let Poll::Ready(PlannedDatagram::Fill(mut plan)) =
-        planner.poll_plan(core, &mut Context::from_waker(waker))
+        planner.poll_plan(core, &driver, &mut Context::from_waker(waker))
     else {
         return None;
     };
@@ -355,8 +349,9 @@ fn resizing_wakes_once_the_intent_fits() {
     assert_eq!(wakes(&count), 0, "800 bytes do not fit 500");
     ticket.resize(lengths(100));
     assert_eq!(wakes(&count), 1);
+    let driver = DriverContent::new();
     let Poll::Ready(PlannedDatagram::Fill(plan)) =
-        planner.poll_plan(&mut core, &mut Context::from_waker(&waker))
+        planner.poll_plan(&mut core, &driver, &mut Context::from_waker(&waker))
     else {
         panic!("a plan was expected")
     };
@@ -579,8 +574,9 @@ fn supply_next(
     mut after: impl FnMut(u32),
     writes: impl Fn(u32) -> bool,
 ) -> Option<Filled> {
+    let driver = DriverContent::new();
     let Poll::Ready(PlannedDatagram::Fill(mut plan)) =
-        planner.poll_plan(core, &mut Context::from_waker(waker))
+        planner.poll_plan(core, &driver, &mut Context::from_waker(waker))
     else {
         return None;
     };
@@ -714,4 +710,30 @@ fn an_intent_that_stays_after_writing_keeps_waiting() {
     );
     assert_eq!(ticket.withdraw(), IntentWithdrawReport::Withdrawn);
     assert_eq!(all(&mut planner, &mut core, &waker), None);
+}
+
+/// A sending call that could not fill a plan waits without asking for
+/// another: content published after the plan wakes it, as it wakes a
+/// planner that waits, and content that does not fit its room does not.
+#[test]
+fn a_publish_after_a_plan_that_was_not_filled_wakes_the_call() {
+    let (mut core, mut planner, handle) = setup(500);
+    let _first = publish(&handle, data(1, 3));
+    let (count, waker) = waker();
+    {
+        let driver = DriverContent::new();
+        let Poll::Ready(PlannedDatagram::Fill(plan)) =
+            planner.poll_plan(&mut core, &driver, &mut Context::from_waker(&waker))
+        else {
+            panic!("a plan was expected")
+        };
+        // the plan could not be filled: dropped as it came
+        drop(plan);
+    }
+    let _large = publish(&handle, sized(data(2, 3), 1000));
+    assert_eq!(wakes(&count), 0, "1000 bytes do not fit 500");
+    let _second = publish(&handle, data(3, 3));
+    assert_eq!(wakes(&count), 1);
+    let _third = publish(&handle, data(4, 3));
+    assert_eq!(wakes(&count), 1, "woken once");
 }

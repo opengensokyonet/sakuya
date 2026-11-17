@@ -455,6 +455,19 @@ impl SendIntentPart for Part {
     }
 }
 
+/// The extension has no content of its own to send.
+impl<T: crate::clock::ConnectionChoices, L: crate::share::LogicalPathKeys, V>
+    crate::frame_source::DriverContentPart<T, L, V, ()> for Part
+{
+    fn pending<J>(
+        _: &crate::take::Lineage<'_, V>,
+        _: &crate::share::LinkPathIdentifierOf<T, L>,
+        _: &mut crate::send_strategy::DriverContent<J>,
+        _: impl Fn(sakuya_wire::parts::CNil) -> J,
+    ) {
+    }
+}
+
 /// The extension has no frame source of its own.
 impl<T, L> EstablishedSourceComponentsPart<T, L> for Part {
     type Components = HNil;

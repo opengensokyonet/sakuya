@@ -13,8 +13,7 @@ use sakuya_wire::{
 
 use super::*;
 use crate::connection_id::{
-    NewConnectionId,
-    sequence_map::{RetiredSequences, SequenceMapDestinationConnectionIdStrategy},
+    NewConnectionId, sequence_map::SequenceMapDestinationConnectionIdStrategy,
 };
 
 type Instant = u64;
@@ -63,14 +62,17 @@ fn strategy() -> Strategy {
         StatelessResetToken::new([2; 16]),
     )
     .unwrap();
-    let mut retired = RetiredSequences::default();
-    DestinationConnectionIdStrategy::<u8, Instant, Registrar>::on_new_connection_id::<_, ()>(
+    DestinationConnectionIdStrategy::<u8, Instant, Registrar>::on_new_connection_id(
         &mut strategy,
-        &mut retired,
         NewConnectionId::from(&frame),
     )
     .unwrap();
-    assert_eq!(retired.0, [], "nothing is retired prior to 0");
+    assert_eq!(
+        DestinationConnectionIdStrategy::<u8, Instant, Registrar>::waiting_retirements(&strategy)
+            .count(),
+        0,
+        "nothing is retired prior to 0"
+    );
     strategy
 }
 

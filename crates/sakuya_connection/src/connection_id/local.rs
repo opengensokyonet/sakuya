@@ -21,9 +21,9 @@
 //! - A RETIRE_CONNECTION_ID frame with a sequence number never issued, or
 //!   one received with a zero-length local connection ID, is a
 //!   PROTOCOL_VIOLATION ([RFC 9000 §19.16]).
-//! - The NEW_CONNECTION_ID frame of a connection ID is published to send,
-//!   and published again while it is declared lost and the connection ID
-//!   is not retired ([RFC 9000 §13.3]).
+//! - The NEW_CONNECTION_ID frame of a connection ID waits to be sent, and
+//!   waits again when it is declared lost while the connection ID is not
+//!   retired ([RFC 9000 §13.3]).
 //!
 //! [`SequenceMapLocalConnectionIdStrategy`] is the strategy sakuya
 //! provides.
@@ -49,7 +49,7 @@ use sakuya_stream::send_options::destination::Unfulfilled;
 
 use crate::{
     feedback::InjectSummary,
-    frame_source::{FrameSource, PublishIntent},
+    frame_source::{FrameSource, NoIntent, PublishIntent},
     write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
 
@@ -140,8 +140,10 @@ impl RetiredByPeerViolationError {
 /// to each event registers with `R`.
 ///
 /// The value is also the frame source of the NEW_CONNECTION_ID frames
-/// (`Self: FrameSource<Intent = NewConnectionIdIntent>`); the events that
-/// issue publish them to `publish`.
+/// (`Self: FrameSource`); the events that issue leave their frames waiting
+/// to be sent, which [`waiting_disclosures`](Self::waiting_disclosures)
+/// tells; writing a frame takes it out of waiting, and a frame declared lost
+/// waits again while the connection ID is neither acknowledged nor retired.
 pub trait LocalConnectionIdStrategy<Id, I, R> {
     /// The strategy of a new logical path whose handshake connection ID,
     /// sequence number 0, is `first`, with its registration, which the
@@ -156,16 +158,14 @@ pub trait LocalConnectionIdStrategy<Id, I, R> {
     /// start, when the strategy is made, and this is called with the
     /// peer's `active_connection_id_limit` once 1-RTT packets can be sent
     /// (RFC 9000 §5.1.1, §18.2). It only grows.
-    fn on_issuable<C, Pb, Idx>(&mut self, issuer: &mut C, publish: &mut Pb, peer_limit: u64)
+    fn on_issuable<C>(&mut self, issuer: &mut C, peer_limit: u64)
     where
-        C: ConnectionIdIssuer<Registration = R>,
-        Pb: PublishIntent<NewConnectionIdIntent, Idx>;
+        C: ConnectionIdIssuer<Registration = R>;
 
     /// The handshake is confirmed.
-    fn on_handshake_confirmed<C, Pb, Idx>(&mut self, issuer: &mut C, publish: &mut Pb)
+    fn on_handshake_confirmed<C>(&mut self, issuer: &mut C)
     where
-        C: ConnectionIdIssuer<Registration = R>,
-        Pb: PublishIntent<NewConnectionIdIntent, Idx>;
+        C: ConnectionIdIssuer<Registration = R>;
 
     /// The peer retired `sequence` in a packet sent to `packet_destination`
     /// at `now`, on a link path whose probe timeout is `pto` then.
@@ -174,31 +174,22 @@ pub trait LocalConnectionIdStrategy<Id, I, R> {
     ///
     /// The [`RetiredByPeerViolationError`] the frame breaks the protocol
     /// with.
-    #[allow(clippy::too_many_arguments)]
-    fn on_retired_by_peer<C, Pb, Idx>(
+    fn on_retired_by_peer<C>(
         &mut self,
         issuer: &mut C,
-        publish: &mut Pb,
         sequence: u64,
         packet_destination: &ConnectionId,
         now: I,
         pto: Duration,
     ) -> Result<(), RetiredByPeerViolationError>
     where
-        C: ConnectionIdIssuer<Registration = R>,
-        Pb: PublishIntent<NewConnectionIdIntent, Idx>;
+        C: ConnectionIdIssuer<Registration = R>;
 
     /// The peer switched to `id` on `link_path`, the link path's first
     /// packet included.
-    fn on_used_by_peer<C, Pb, Idx>(
-        &mut self,
-        _issuer: &mut C,
-        _publish: &mut Pb,
-        _id: &ConnectionId,
-        _link_path: &Id,
-    ) where
+    fn on_used_by_peer<C>(&mut self, _issuer: &mut C, _id: &ConnectionId, _link_path: &Id)
+    where
         C: ConnectionIdIssuer<Registration = R>,
-        Pb: PublishIntent<NewConnectionIdIntent, Idx>,
     {
     }
 
@@ -208,12 +199,17 @@ pub trait LocalConnectionIdStrategy<Id, I, R> {
     }
 
     /// The deadline came at `now`: act on everything due by then.
-    fn on_deadline<C, Pb, Idx>(&mut self, _issuer: &mut C, _publish: &mut Pb, _now: I)
+    fn on_deadline<C>(&mut self, _issuer: &mut C, _now: I)
     where
         C: ConnectionIdIssuer<Registration = R>,
-        Pb: PublishIntent<NewConnectionIdIntent, Idx>,
     {
     }
+
+    /// The connection IDs whose NEW_CONNECTION_ID frame waits to be sent
+    /// now, each once: those issued and not yet written, and those whose
+    /// frame was declared lost while they are neither acknowledged nor
+    /// retired. Asking does not change the strategy.
+    fn waiting_disclosures(&self) -> impl Iterator<Item = NewConnectionIdIntent> + '_;
 }
 
 /// One connection ID the strategy issued.
@@ -226,7 +222,19 @@ struct Issued<R, I> {
     /// When the peer retired it: the registration is dropped at this
     /// instant.
     deregister_at: Option<I>,
-    acknowledged: bool,
+    disclosure: Disclosure,
+}
+
+/// Where the NEW_CONNECTION_ID frame of a connection ID issued stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Disclosure {
+    /// It waits to be sent.
+    Waiting,
+    /// It was written into a packet whose fate is not known yet.
+    InFlight,
+    /// A packet with it was acknowledged, or the handshake disclosed the
+    /// connection ID.
+    Acknowledged,
 }
 
 /// The local connection ID strategy sakuya provides.
@@ -267,10 +275,9 @@ impl<R, I: Ord + Copy + Add<Duration, Output = I>> SequenceMapLocalConnectionIdS
             .is_some_and(|issued| issued.contains_key(&sequence))
     }
 
-    fn top_up<C, Pb, Idx>(&mut self, issuer: &mut C, publish: &mut Pb)
+    fn top_up<C>(&mut self, issuer: &mut C)
     where
         C: ConnectionIdIssuer<Registration = R>,
-        Pb: PublishIntent<NewConnectionIdIntent, Idx>,
     {
         if !self.confirmed {
             return;
@@ -294,10 +301,9 @@ impl<R, I: Ord + Copy + Add<Duration, Output = I>> SequenceMapLocalConnectionIdS
                     token: new.token,
                     registration: new.registration,
                     deregister_at: None,
-                    acknowledged: false,
+                    disclosure: Disclosure::Waiting,
                 },
             );
-            publish.publish(NewConnectionIdIntent::new(sequence));
             active += 1;
         }
     }
@@ -318,7 +324,7 @@ where
                     token: first.token,
                     registration: first.registration,
                     deregister_at: None,
-                    acknowledged: true,
+                    disclosure: Disclosure::Acknowledged,
                 },
             )])
         });
@@ -330,28 +336,25 @@ where
         }
     }
 
-    fn on_issuable<C, Pb, Idx>(&mut self, issuer: &mut C, publish: &mut Pb, peer_limit: u64)
+    fn on_issuable<C>(&mut self, issuer: &mut C, peer_limit: u64)
     where
         C: ConnectionIdIssuer<Registration = R>,
-        Pb: PublishIntent<NewConnectionIdIntent, Idx>,
     {
         self.peer_limit = self.peer_limit.max(peer_limit);
-        self.top_up(issuer, publish);
+        self.top_up(issuer);
     }
 
-    fn on_handshake_confirmed<C, Pb, Idx>(&mut self, issuer: &mut C, publish: &mut Pb)
+    fn on_handshake_confirmed<C>(&mut self, issuer: &mut C)
     where
         C: ConnectionIdIssuer<Registration = R>,
-        Pb: PublishIntent<NewConnectionIdIntent, Idx>,
     {
         self.confirmed = true;
-        self.top_up(issuer, publish);
+        self.top_up(issuer);
     }
 
-    fn on_retired_by_peer<C, Pb, Idx>(
+    fn on_retired_by_peer<C>(
         &mut self,
         issuer: &mut C,
-        publish: &mut Pb,
         sequence: u64,
         packet_destination: &ConnectionId,
         now: I,
@@ -359,7 +362,6 @@ where
     ) -> Result<(), RetiredByPeerViolationError>
     where
         C: ConnectionIdIssuer<Registration = R>,
-        Pb: PublishIntent<NewConnectionIdIntent, Idx>,
     {
         let Some(issued) = self.issued.as_mut() else {
             return Err(RetiredByPeerViolationError::ZeroLength);
@@ -377,7 +379,7 @@ where
         }
         if entry.deregister_at.is_none() {
             entry.deregister_at = Some(now + pto.saturating_mul(3));
-            self.top_up(issuer, publish);
+            self.top_up(issuer);
         }
         Ok(())
     }
@@ -390,14 +392,24 @@ where
             .min()
     }
 
-    fn on_deadline<C, Pb, Idx>(&mut self, _: &mut C, _: &mut Pb, now: I)
+    fn on_deadline<C>(&mut self, _: &mut C, now: I)
     where
         C: ConnectionIdIssuer<Registration = R>,
-        Pb: PublishIntent<NewConnectionIdIntent, Idx>,
     {
         if let Some(issued) = self.issued.as_mut() {
             issued.retain(|_, each| each.deregister_at.is_none_or(|at| at > now));
         }
+    }
+
+    /// A connection ID the peer retired is not disclosed again.
+    fn waiting_disclosures(&self) -> impl Iterator<Item = NewConnectionIdIntent> + '_ {
+        self.issued
+            .iter()
+            .flatten()
+            .filter(|(_, issued)| {
+                issued.disclosure == Disclosure::Waiting && issued.deregister_at.is_none()
+            })
+            .map(|(&sequence, _)| NewConnectionIdIntent::new(sequence))
     }
 }
 
@@ -407,10 +419,10 @@ impl<R, I> FrameSource for SequenceMapLocalConnectionIdStrategy<R, I> {
     type Summary = NewConnectionIdSummary;
     type Class = InFlightClass;
     type Item<'a> = u64;
-    type Intent = NewConnectionIdIntent;
+    type Intent = NoIntent;
 
-    /// A connection ID the peer retired in the meantime is not disclosed
-    /// again.
+    /// The frame is written only while it waits to be sent and the peer did
+    /// not retire the connection ID; once written, it is in flight.
     fn supply<W, P, Idx>(
         &mut self,
         sequence: u64,
@@ -423,9 +435,11 @@ impl<R, I> FrameSource for SequenceMapLocalConnectionIdStrategy<R, I> {
     {
         let Some(issued) = self
             .issued
-            .as_ref()
-            .and_then(|issued| issued.get(&sequence))
-            .filter(|issued| issued.deregister_at.is_none())
+            .as_mut()
+            .and_then(|issued| issued.get_mut(&sequence))
+            .filter(|issued| {
+                issued.disclosure == Disclosure::Waiting && issued.deregister_at.is_none()
+            })
         else {
             return Supplied::Open(packet);
         };
@@ -434,7 +448,9 @@ impl<R, I> FrameSource for SequenceMapLocalConnectionIdStrategy<R, I> {
             frame,
             <SummaryOf<W>>::inject_summary(NewConnectionIdSummary { sequence }),
         );
-        debug_assert!(written.is_ok(), "the intent asks room for the whole frame");
+        if written.is_ok() {
+            issued.disclosure = Disclosure::InFlight;
+        }
         Supplied::Open(packet)
     }
 
@@ -444,37 +460,40 @@ impl<R, I> FrameSource for SequenceMapLocalConnectionIdStrategy<R, I> {
         _: PacketNumberSpaceKind,
         summary: NewConnectionIdSummary,
     ) where
-        Pb: PublishIntent<NewConnectionIdIntent, Idx>,
+        Pb: PublishIntent<NoIntent, Idx>,
     {
         if let Some(issued) = self
             .issued
             .as_mut()
             .and_then(|issued| issued.get_mut(&summary.sequence))
         {
-            issued.acknowledged = true;
+            issued.disclosure = Disclosure::Acknowledged;
         }
     }
 
+    /// A frame lost while its connection ID is neither acknowledged nor
+    /// retired waits to be sent again.
     fn lost<Pb, Idx>(
         &mut self,
-        publish: &mut Pb,
+        _: &mut Pb,
         _: PacketNumberSpaceKind,
         summary: &NewConnectionIdSummary,
     ) where
-        Pb: PublishIntent<NewConnectionIdIntent, Idx>,
+        Pb: PublishIntent<NoIntent, Idx>,
     {
-        let again = self
+        if let Some(issued) = self
             .issued
-            .as_ref()
-            .and_then(|issued| issued.get(&summary.sequence))
-            .is_some_and(|issued| !issued.acknowledged && issued.deregister_at.is_none());
-        if again {
-            publish.publish(NewConnectionIdIntent::new(summary.sequence));
+            .as_mut()
+            .and_then(|issued| issued.get_mut(&summary.sequence))
+            .filter(|issued| {
+                issued.disclosure == Disclosure::InFlight && issued.deregister_at.is_none()
+            })
+        {
+            issued.disclosure = Disclosure::Waiting;
         }
     }
 
-    /// A connection ID is disclosed on any active link path; one left
-    /// unsent when none will be active again goes with the connection.
+    /// A disclosure is the driver's content, which no strategy ends.
     fn unfulfilled(&mut self, _: u64, _: Unfulfilled) {}
 }
 

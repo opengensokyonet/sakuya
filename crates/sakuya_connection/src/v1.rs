@@ -122,14 +122,12 @@ use crate::{
     feedback::FeedbackSummariesOf,
     frame_source::{
         EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts,
-        EstablishedSourceComponentsPart, FrameSource,
+        EstablishedSourceComponentsPart, FrameSource, NoIntent,
     },
     layer::{self, NodeKey},
     others::OtherNodes,
     request::StructureRequest,
-    send_strategy::{
-        AnyActiveLinkPath, PlannerLinkPath, PublishOutcome, SendStrategy, SendStrategyTypes,
-    },
+    send_strategy::{AnyActiveLinkPath, SendStrategy, SendStrategyTypes},
     share::{
         ConnectionArgsOf, FlatMut, LayerShare, LineageLists, LineagePartList, LogicalPathKeyShare,
         LogicalPathKeys, NodeData,
@@ -139,7 +137,7 @@ use crate::{
 
 use std::sync::Arc;
 
-use self::path_response::{PathResponseIntent, PathResponsePublication};
+use self::path_response::PendingPathResponse;
 use self::{
     address_token::AddressTokenSink,
     advancing::{ClientAdvancingKind, ConnectionExporter, HandshakeStart, ServerAdvancingKind},
@@ -186,11 +184,9 @@ use self::{
         RecoveryFactoryOf, RttOf,
     },
     retry::{ClientRetryPolicy, ReceivedRetry, RetryDecision},
-    send::{AckIntent, CryptoIntent, HandshakeDoneIntent, ProbePingIntent, SendTypes},
+    send::{PendingProbePings, SendTypes},
     send_planning::{
-        AckIntentTicketOf, AckIntentTickets, CorePublishOutcome, CryptoIntentTicketOf,
-        CryptoIntentTickets, IntakeOf, LinkPathPlanner, LinkPathSendPlannerOf, ProbePingTicketOf,
-        ProbePingTickets, SendStrategyCore, SendStrategyIntake, SendStrategyOf,
+        IntakeOf, LinkPathPlannerOf, SendStrategyCore, SendStrategyIntake, SendStrategyOf,
     },
     sending::{DatagramAcceptance, LinkPathSendingKind, LinkPathSendingLimits},
     space_retirement::PacketNumberSpaceRetirement,
@@ -203,7 +199,7 @@ use self::{
 };
 use crate::connection_id::{
     DestinationConnectionIdStrategy,
-    local::{LocalConnectionIdStrategy, NewConnectionIdIntent, NewConnectionIdSummary},
+    local::{LocalConnectionIdStrategy, NewConnectionIdSummary},
     reset_token::ResetTokenRegistry,
 };
 use crate::role::LinkPathRole;
@@ -370,7 +366,7 @@ pub trait HostChoices<T: MakerChoices + ?Sized>: 'static {
         + for<'a> FrameSource<
             Item<'a> = u64,
             Summary = send::RetireConnectionIdSummary,
-            Intent = send::RetireConnectionIdIntent,
+            Intent = NoIntent,
         > + 'static =
         crate::connection_id::sequence_map::SequenceMapDestinationConnectionIdStrategy<
             LinkIdOf<T>,
@@ -383,11 +379,8 @@ pub trait HostChoices<T: MakerChoices + ?Sized>: 'static {
     /// their registrations, and writes the NEW_CONNECTION_ID frames that
     /// disclose them.
     type LocalConnectionIds: LocalConnectionIdStrategy<LinkIdOf<T>, InstantOf<T>, LocalConnectionIdRegistrationOf<T>>
-        + for<'a> FrameSource<
-            Item<'a> = u64,
-            Summary = NewConnectionIdSummary,
-            Intent = NewConnectionIdIntent,
-        > + 'static = crate::connection_id::local::SequenceMapLocalConnectionIdStrategy<
+        + for<'a> FrameSource<Item<'a> = u64, Summary = NewConnectionIdSummary, Intent = NoIntent>
+        + 'static = crate::connection_id::local::SequenceMapLocalConnectionIdStrategy<
         LocalConnectionIdRegistrationOf<T>,
         InstantOf<T>,
     >;
@@ -477,13 +470,16 @@ pub trait Side: 'static {
     /// The data component in the connection node that only this side has.
     ///
     /// The HANDSHAKE_DONE frames of version 1 are found in it: a server's
-    /// sends them; a client's never publishes one and writes nothing (RFC
+    /// sends them; a client's never has one waiting and writes nothing (RFC
     /// 9000 §19.20).
-    type Own: for<'a> FrameSource<
-            Item<'a> = (),
-            Summary = HandshakeDoneSummary,
-            Intent = HandshakeDoneIntent,
-        > + 'static;
+    type Own: for<'a> FrameSource<Item<'a> = (), Summary = HandshakeDoneSummary, Intent = NoIntent>
+        + 'static;
+
+    /// Whether a HANDSHAKE_DONE frame waits to be sent now, as `own` keeps
+    /// it: a server's from the completion of its handshake until it is
+    /// written, and again while a frame of it is lost and none is
+    /// acknowledged; never a client's.
+    fn handshake_done_waiting(own: &Self::Own) -> bool;
 
     /// The Token field of the Initial packets this side sends now, which
     /// `own` keeps.
@@ -570,6 +566,9 @@ where
     type AlertError = Tls::AlertError;
     type Start = ();
     type Own = HandshakeDoneSource;
+    fn handshake_done_waiting(own: &HandshakeDoneSource) -> bool {
+        own.is_waiting()
+    }
     fn initial_token(_: &HandshakeDoneSource) -> Bytes {
         Bytes::new()
     }
@@ -621,6 +620,9 @@ where
     type AlertError = Tls::AlertError;
     type Start = ClientOnlyStart<Tk, Rp>;
     type Own = ClientOnlyState<Tk, Rp>;
+    fn handshake_done_waiting(_: &ClientOnlyState<Tk, Rp>) -> bool {
+        false
+    }
     fn initial_token(own: &ClientOnlyState<Tk, Rp>) -> Bytes {
         own.initial_token().clone()
     }
@@ -647,12 +649,6 @@ where
         Some(client_dcid)
     }
 }
-
-/// What the planner of a link path gives back for a response to a
-/// PATH_CHALLENGE, which the link path keeps
-/// ([`PathResponsePublication`]).
-pub type PathResponseOutcomeOf<T, L> =
-    <LinkPathSendPlannerOf<T, L> as PublishOutcome<PathResponseIntent, PlannerLinkPath>>::Outcome;
 
 /// What version 1 needs to make the connection node, given once by whoever
 /// makes the connection.
@@ -742,7 +738,6 @@ impl<T: Choices, L: ParametersOf<TransportParameterSpace> + LogicalPathKeys + Co
 where
     L: application_handles::HandleShares<T, L, application_handles::handle::EstablishedLayer>,
     SendTypes<T, L>: SendStrategyTypes
-        + CorePublishOutcome<CryptoIntent, AnyActiveLinkPath>
         + send_planning::IntakePublishOutcome<
             streams::send::StreamIntent<SendParametersOf<T>>,
             AnyActiveLinkPath,
@@ -756,7 +751,6 @@ where
         AeadUsage,
         CryptoReceiver<CryptoReceiveBufferOf<T>>,
         CryptoSender<CryptoSendBufferOf<T>>,
-        CryptoIntentTickets<CryptoIntentTicketOf<T, L>>,
         AntiAmplificationFactor,
         FirstLinkStart,
         IdleTimeout<InstantOf<T>>,
@@ -798,7 +792,6 @@ where
         HList![AeadUsage],
         HList![CryptoReceiver<CryptoReceiveBufferOf<T>>],
         HList![CryptoSender<CryptoSendBufferOf<T>>],
-        HList![CryptoIntentTickets<CryptoIntentTicketOf<T, L>>],
         HList![AntiAmplificationFactor],
         HList![FirstLinkStart],
         HList![IdleTimeout<InstantOf<T>>],
@@ -840,8 +833,6 @@ impl<T: Choices, L> LayerShare<T, L, layer::LinkEntry> for Part {
 }
 impl<T: Choices, L: FeedbackSummariesOf + LogicalPathKeys + 'static>
     LayerShare<T, L, layer::LogicalPath> for Part
-where
-    SendTypes<T, L>: CorePublishOutcome<AckIntent, AnyActiveLinkPath>,
 {
     type Data = HList![
         PacketNumberSpaces<PacketNumberSpaceState>,
@@ -850,7 +841,6 @@ where
         SendJournalsOf<T, L>,
         LogicalPathInput<T::Link, T::Receiver>,
         KeyPhaseNumbers,
-        AckIntentTickets<AckIntentTicketOf<T, L>>,
         Arc<StatelessResetSignal>,
         ConnectionIdsOf<T>,
         PacketNumberSpaceRetirement,
@@ -861,14 +851,14 @@ impl<T: Choices, L> LayerShare<T, L, layer::LinkPath> for Part
 where
     SendTypes<T, L>: SendStrategyTypes,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
-    LinkPathSendPlannerOf<T, L>: PublishOutcome<PathResponseIntent, PlannerLinkPath>,
 {
     type Data = HList![
-        LinkPathPlanner<LinkPathSendPlannerOf<T, L>>,
+        LinkPathPlannerOf<T, L>,
         LinkPathResetTokenRegistrar<ResetTokenRegistrarOf<T>>,
         LinkPathRole<InstantOf<T>>,
         ClosePacket,
-        PathResponsePublication<PathResponseOutcomeOf<T, L>>,
+        PendingPathResponse,
+        PendingProbePings,
     ];
     type Calls = HList![LinkPathSendingKind];
 }
@@ -911,9 +901,6 @@ where
 impl<T: Choices, L: LogicalPathKeys> LayerShare<T, L, layer::Recovery> for Part
 where
     RecoveryFactoryOf<T, L>: for<'s> LendCongestion<InstantOf<T>, OthersOf<'s, T, L>>,
-    SendTypes<T, L>: SendStrategyTypes,
-    SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
-    LinkPathSendPlannerOf<T, L>: PublishOutcome<ProbePingIntent, PlannerLinkPath>,
 {
     type Data = HList![
         RttOf<T, L>,
@@ -922,7 +909,6 @@ where
         LinkPathCongestionState<InstantOf<T>>,
         LossDetectionOf<T, L>,
         ProbeTimeout<InstantOf<T>>,
-        ProbePingTickets<ProbePingTicketOf<T, L>>,
     ];
     /// The factory makes the first three together.
     type Units = HList![
@@ -930,7 +916,6 @@ where
         HList![LinkPathCongestionState<InstantOf<T>>],
         HList![LossDetectionOf<T, L>],
         HList![ProbeTimeout<InstantOf<T>>],
-        HList![ProbePingTickets<ProbePingTicketOf<T, L>>],
     ];
     type Calls = HNil;
 }

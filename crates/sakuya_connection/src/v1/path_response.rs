@@ -8,17 +8,14 @@
 //! carries it is expanded to at least 1200 bytes unless the
 //! anti-amplification limit holds it (§8.2.1, §8.2.2).
 //!
-//! The frame dispatch publishes a [`PathResponseIntent`] with the
-//! challenge's data on the planner of the link path the packet arrived on;
-//! the link path keeps the planner's outcome of the latest one
-//! ([`PathResponsePublication`]), so that a newer challenge withdraws the
-//! response to an older one before it is sent. The response goes in a 1-RTT
-//! packet only (§12.4, Table 3); a link path that does not take intents, one
-//! that is not active, sends none. The frame is written by
-//! [`PathResponseSource`], which needs nothing but the intent's data, and
-//! nothing is done when it is acknowledged or lost.
-
-use core::fmt;
+//! The frame dispatch keeps the challenge's data in the link path the
+//! packet arrived on ([`PendingPathResponse`]), replacing the data of an
+//! older challenge not answered yet, so that only the latest is answered;
+//! the sending call gathers it for the link path's planner as a
+//! [`PathResponseIntent`]. The response goes in a 1-RTT packet only (§12.4,
+//! Table 3); a link path that is not active sends none. The frame is
+//! written by the [`PendingPathResponse`] itself, which forgets the data once
+//! it is written, and nothing is done when it is acknowledged or lost.
 
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream::send_options::destination::Unfulfilled;
@@ -29,19 +26,19 @@ use crate::{
     clock::{ConnectionChoices, InstantOf},
     component::{ArgsOf, Build, ParentsOf, PassiveDataComponent},
     feedback::InjectSummary,
-    frame_source::{FindFrameSource, FrameSource, FrameSourceKind, NoIntent, PublishIntent},
+    frame_source::{FindFrameSource, FrameSource, FrameSourceKind, IgnoredFeedback, NoIntent, PublishIntent},
     layer,
     send_strategy::{
         MinimumLengths, SendIntent,
         ranked::{RankedIntent, SendPriority, SendRank},
     },
     share::LineagePartList,
-    take::Lineage,
+    take::{GetAt, Lineage},
     write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
 
 /// A PATH_RESPONSE frame that echoes `data`, the data of the peer's
-/// PATH_CHALLENGE, is to be sent on the link path it is published on.
+/// PATH_CHALLENGE, is to be sent on the link path whose content it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PathResponseIntent {
     data: [u8; PATH_DATA_LEN],
@@ -96,13 +93,30 @@ impl RankedIntent for PathResponseIntent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PathResponseSummary;
 
-/// Writes the PATH_RESPONSE frame of an intent from the intent's data.
+/// The data of the latest PATH_CHALLENGE that arrived on a link path and is
+/// not answered yet (`PendingPathResponse`), in the link path's node;
+/// `None` while there is none. A newer challenge replaces it (RFC 9000
+/// §8.2.2: only the latest is answered), and writing its response forgets
+/// it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct PathResponseSource;
+pub struct PendingPathResponse(Option<[u8; PATH_DATA_LEN]>);
 
-/// The frame is written whenever it is supplied; a lost one is not sent
-/// again (RFC 9000 §13.3).
-impl FrameSource for PathResponseSource {
+impl PendingPathResponse {
+    /// The data the response to send echoes, if one is to be sent.
+    pub fn data(&self) -> Option<[u8; PATH_DATA_LEN]> {
+        self.0
+    }
+
+    /// A PATH_CHALLENGE with `data` arrived: its response is the one to
+    /// send.
+    pub(super) fn challenged(&mut self, data: [u8; PATH_DATA_LEN]) {
+        self.0 = Some(data);
+    }
+}
+
+/// The frame is written when the item's data is the one waiting, which it
+/// then no longer is; a lost one is not sent again (RFC 9000 §13.3).
+impl FrameSource for PendingPathResponse {
     type Summary = PathResponseSummary;
     type Class = InFlightClass;
     type Item<'a> = [u8; PATH_DATA_LEN];
@@ -118,11 +132,16 @@ impl FrameSource for PathResponseSource {
         SummaryOf<W>: InjectSummary<PathResponseSummary, Idx>,
         P: PacketPosition,
     {
-        let written = packet.write_frame(
-            PathResponseFrame::new(data),
-            <SummaryOf<W>>::inject_summary(PathResponseSummary),
-        );
-        debug_assert!(written.is_ok(), "the intent asks room for the whole frame");
+        if self.0 == Some(data)
+            && packet
+                .write_frame(
+                    PathResponseFrame::new(data),
+                    <SummaryOf<W>>::inject_summary(PathResponseSummary),
+                )
+                .is_ok()
+        {
+            self.0 = None;
+        }
         Supplied::Open(packet)
     }
 
@@ -138,8 +157,7 @@ impl FrameSource for PathResponseSource {
     {
     }
 
-    /// A response the strategy ends is not sent: the peer challenges again
-    /// if it still needs one.
+    /// The response is the driver's content, which no strategy ends.
     fn unfulfilled(&mut self, _: [u8; PATH_DATA_LEN], _: Unfulfilled) {}
 }
 
@@ -151,44 +169,30 @@ impl FrameSourceKind for PathResponseFrames {
     type Item<'a> = [u8; PATH_DATA_LEN];
     type Summary<I> = PathResponseSummary;
     type Intent = NoIntent;
+    /// Nothing is done when a frame comes back, and the source is found
+    /// only in the link path's lineage.
+    type Feedback = IgnoredFeedback<Self>;
 }
 
-/// The frames are written from the intents alone, in any lineage.
-impl<T: ConnectionChoices, L, V> FindFrameSource<T, L, V, ()> for PathResponseFrames {
+/// The frames are written by the link path's [`PendingPathResponse`] in the
+/// lineage.
+impl<T: ConnectionChoices, L, V, Ip> FindFrameSource<T, L, V, Ip> for PathResponseFrames
+where
+    V: GetAt<PendingPathResponse, Ip>,
+{
     type Source<'l, 'r>
-        = PathResponseSource
+        = &'l mut PendingPathResponse
     where
         V: 'l,
         'r: 'l;
 
-    fn find<'l, 'r>(_: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> PathResponseSource {
-        PathResponseSource
+    fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
+        lineage.get_mut::<PendingPathResponse, Ip>()
     }
 }
 
-/// What the planner of a link path gave back for the response to the
-/// latest PATH_CHALLENGE that arrived on it, `O`; `None` before one did.
-/// Replacing it drops the outcome of the response before, which withdraws
-/// that response if it was not sent yet.
-pub struct PathResponsePublication<O>(Option<O>);
-
-impl<O> PathResponsePublication<O> {
-    /// The response to a newer challenge was published, with `outcome`.
-    pub(super) fn published(&mut self, outcome: O) {
-        self.0 = Some(outcome);
-    }
-}
-
-impl<O> fmt::Debug for PathResponsePublication<O> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("PathResponsePublication")
-            .field(&self.0.is_some())
-            .finish()
-    }
-}
-
-/// A link path starts with no challenge answered.
-impl<T: Choices, L, O> Build<T, L, layer::LinkPath, ()> for PathResponsePublication<O>
+/// A link path starts with no challenge to answer.
+impl<T: Choices, L> Build<T, L, layer::LinkPath, ()> for PendingPathResponse
 where
     L: LineagePartList<T>,
 {
@@ -196,8 +200,9 @@ where
         _: &mut ParentsOf<'v, T, L, layer::LinkPath>,
         _: &mut ArgsOf<T, L, layer::LinkPath>,
     ) -> Self {
-        Self(None)
+        Self::default()
     }
 }
-/// It has no deadline and reads nothing; the frame dispatch replaces it.
-impl<O> PassiveDataComponent for PathResponsePublication<O> {}
+/// It has no deadline and reads nothing; the frame dispatch sets it, and
+/// the sending call writes it.
+impl PassiveDataComponent for PendingPathResponse {}

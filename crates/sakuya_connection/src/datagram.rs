@@ -492,6 +492,20 @@ impl SendIntentPart for Part {
     }
 }
 
+/// The driver holds no datagram of its own: every one is published through
+/// the intake.
+impl<T: crate::clock::ConnectionChoices, L: crate::share::LogicalPathKeys, V>
+    crate::frame_source::DriverContentPart<T, L, V, ()> for Part
+{
+    fn pending<J>(
+        _: &crate::take::Lineage<'_, V>,
+        _: &crate::share::LinkPathIdentifierOf<T, L>,
+        _: &mut crate::send_strategy::DriverContent<J>,
+        _: impl Fn(Coprod![DatagramIntent<Urgency>]) -> J,
+    ) {
+    }
+}
+
 /// DATAGRAM frames go in 0-RTT and 1-RTT packets of an active link path,
 /// as the frames of streams do; they are not probing frames, so a
 /// candidate's packets do not carry them.

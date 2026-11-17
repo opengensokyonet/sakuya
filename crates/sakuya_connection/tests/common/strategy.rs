@@ -1,5 +1,6 @@
 //! A send strategy that plans as the ranked strategy does and records what
-//! the connection's components tell and publish to it.
+//! the connection's components tell it and what the driver's content holds
+//! when it is asked for a plan.
 use core::{
     cell::{Cell, RefCell},
     fmt::Debug,
@@ -8,15 +9,10 @@ use core::{
 use std::thread_local;
 
 use sakuya_connection::send_strategy::{
-    AnyActiveLinkPath, DatagramLimits, InjectSendIntent, IntentRejectedError, LinkPathRoleKind,
-    LinkPathSendPlanner, Observe, PacketOverheads, PlannedDatagram, PlannerLinkPath, Publish,
-    PublishOutcome, PublishTo, ResendCloseIntent, SendStrategy, SendStrategyTypes,
-    ranked::{
-        IntentTicket, LinkPathIntentTicket, RankedCoreIntent, RankedIntent,
-        RankedLinkPathSendPlanner, RankedSendIntake, RankedSendStrategy,
-    },
+    AnyActiveLinkPath, DatagramLimits, DriverContent, LinkPathRoleKind, LinkPathSendPlanner,
+    Observe, PacketOverheads, PlannedDatagram, SendStrategy, SendStrategyTypes,
+    ranked::{RankedIntent, RankedLinkPathSendPlanner, RankedSendIntake, RankedSendStrategy},
 };
-use sakuya_connection::v1::{path_response::PathResponseIntent, send::ProbePingIntent};
 use sakuya_stream::connection::CloseReason;
 use sakuya_wire::v1::encryption_level::EncryptionLevel;
 
@@ -71,12 +67,14 @@ fn record(event: impl Into<String>) {
 ///
 /// - `core: keys Initial`, `core: confirmed` and `core: closed <reason>`
 ///   for what the core was told;
-/// - `core: publish <intent>` and `core: drop <intent>` for an intent
-///   published for any active link path and for its ticket going;
 /// - `path N: added <role>`, `path N: role <role>` and `path N: ended` for
 ///   the planner of the Nth link path built;
-/// - `path N: publish <intent>` and `path N: drop <intent>` for an intent
-///   published on that planner and for its ticket going.
+/// - `path N: content <intent>` and `path N: gone <intent>` for an intent
+///   of the driver's content that the planner of the Nth link path is
+///   given and was not when it was last asked for a plan, and for one it
+///   was given then and no longer is, and `path N: close <count>` when the
+///   facts of its sealed close packet are new: the datagrams received since
+///   it was sealed.
 pub fn take_strategy_events() -> Vec<String> {
     EVENTS.with(|events| std::mem::take(&mut *events.borrow_mut()))
 }
@@ -93,25 +91,6 @@ pub fn observed_limits(path: usize) -> Option<DatagramLimits> {
 /// Each strategy made starts with none told.
 pub fn observed_overheads(path: usize) -> Option<PacketOverheads> {
     OVERHEADS.with(|overheads| overheads.borrow().get(path).copied().flatten())
-}
-
-/// A ticket that records when it goes.
-pub struct RecordedTicket<K> {
-    owner: String,
-    intent: String,
-    inner: K,
-}
-
-impl<K> RecordedTicket<K> {
-    pub fn inner(&self) -> &K {
-        &self.inner
-    }
-}
-
-impl<K> Drop for RecordedTicket<K> {
-    fn drop(&mut self) {
-        record(format!("{}: drop {}", self.owner, self.intent));
-    }
 }
 
 /// The ranked strategy's core, recording.
@@ -131,67 +110,10 @@ impl<I: SendStrategyTypes> Default for EventLoggingSendStrategy<I> {
     }
 }
 
-/// What the ranked core gives back, as the recording core gives it back: a
-/// ticket that records when it goes, or nothing for an intent sent and
-/// forgotten.
-pub trait RecordOutcome {
-    /// What the recording core gives back.
-    type Recorded;
-    /// The outcome of publishing `intent`, recorded.
-    fn recorded(self, intent: String) -> Self::Recorded;
-}
-
-impl<C> RecordOutcome for IntentTicket<C> {
-    type Recorded = RecordedTicket<IntentTicket<C>>;
-    fn recorded(self, intent: String) -> Self::Recorded {
-        RecordedTicket {
-            owner: "core".to_owned(),
-            intent,
-            inner: self,
-        }
-    }
-}
-
-impl RecordOutcome for () {
-    type Recorded = ();
-    fn recorded(self, _: String) {}
-}
-
-impl<I: SendStrategyTypes, J: RankedCoreIntent> PublishOutcome<J, AnyActiveLinkPath>
-    for EventLoggingSendStrategy<I>
-where
-    J::Outcome<I::CloseCause>: RecordOutcome,
-{
-    type Outcome = <J::Outcome<I::CloseCause> as RecordOutcome>::Recorded;
-}
-
-impl<I, J, Idx> PublishTo<J, AnyActiveLinkPath, Idx> for EventLoggingSendStrategy<I>
-where
-    I: SendStrategyTypes,
-    J: RankedCoreIntent + Debug,
-    J::Outcome<I::CloseCause>: RecordOutcome,
-    I::SendIntents: InjectSendIntent<J, Idx>,
-{
-    fn publish_to(
-        &mut self,
-        intent: J,
-        destination: AnyActiveLinkPath,
-    ) -> <J::Outcome<I::CloseCause> as RecordOutcome>::Recorded {
-        let label = format!("{intent:?}");
-        record(format!("core: publish {label}"));
-        <RankedSendStrategy<I> as PublishTo<J, AnyActiveLinkPath, Idx>>::publish_to(
-            &mut self.inner,
-            intent,
-            destination,
-        )
-        .recorded(label)
-    }
-}
-
 impl<I> SendStrategy<I> for EventLoggingSendStrategy<I>
 where
     I: SendStrategyTypes,
-    I::SendIntents: RankedIntent,
+    I::SendIntents: RankedIntent + Debug,
     I::LinkPathIdentifier: Clone + PartialEq,
     I::CloseCause: Debug,
 {
@@ -215,6 +137,8 @@ where
         EventLoggingPlanner {
             inner: self.inner.add_link_path(id, role),
             index,
+            content: Vec::new(),
+            close: None,
         }
     }
 
@@ -234,87 +158,62 @@ where
     }
 }
 
-/// The ranked strategy's planner of one link path, recording.
+/// The ranked strategy's planner of one link path, recording, with the
+/// driver's content it was given when it was last asked for a plan.
 pub struct EventLoggingPlanner<I: SendStrategyTypes> {
     inner: RankedLinkPathSendPlanner<I>,
     index: usize,
+    content: Vec<String>,
+    close: Option<u64>,
 }
 
-impl<I: SendStrategyTypes> PublishOutcome<ProbePingIntent, PlannerLinkPath>
-    for EventLoggingPlanner<I>
-{
-    type Outcome =
-        Result<RecordedTicket<LinkPathIntentTicket>, IntentRejectedError<ProbePingIntent>>;
-}
-
-impl<I, Idx> Publish<ProbePingIntent, Idx> for EventLoggingPlanner<I>
+impl<I: SendStrategyTypes> EventLoggingPlanner<I>
 where
-    I: SendStrategyTypes,
-    I::SendIntents: InjectSendIntent<ProbePingIntent, Idx>,
+    I::SendIntents: Debug,
 {
-    fn publish(
-        &mut self,
-        intent: ProbePingIntent,
-    ) -> Result<RecordedTicket<LinkPathIntentTicket>, IntentRejectedError<ProbePingIntent>> {
-        let owner = format!("path {}", self.index);
-        let label = format!("{intent:?}");
-        let ticket = <RankedLinkPathSendPlanner<I> as Publish<ProbePingIntent, Idx>>::publish(
-            &mut self.inner,
-            intent,
-        )?;
-        record(format!("{owner}: publish {label}"));
-        Ok(RecordedTicket {
-            owner,
-            intent: label,
-            inner: ticket,
-        })
+    /// Record what `driver` holds that it did not when last asked, and what
+    /// it no longer holds.
+    fn record_content(&mut self, driver: &DriverContent<I::SendIntents>) {
+        let now: Vec<String> = driver
+            .intents
+            .iter()
+            .map(|intent| intent_label(&format!("{intent:?}")))
+            .collect();
+        for label in &now {
+            if !self.content.contains(label) {
+                record(format!("path {}: content {label}", self.index));
+            }
+        }
+        for label in &self.content {
+            if !now.contains(label) {
+                record(format!("path {}: gone {label}", self.index));
+            }
+        }
+        self.content = now;
+        let close = driver.close.map(|facts| facts.datagrams_received);
+        if close != self.close {
+            if let Some(count) = close {
+                record(format!("path {}: close {count}", self.index));
+            }
+            self.close = close;
+        }
     }
 }
 
-impl<I: SendStrategyTypes> PublishOutcome<PathResponseIntent, PlannerLinkPath>
-    for EventLoggingPlanner<I>
-{
-    type Outcome =
-        Result<RecordedTicket<LinkPathIntentTicket>, IntentRejectedError<PathResponseIntent>>;
-}
-
-impl<I, Idx> Publish<PathResponseIntent, Idx> for EventLoggingPlanner<I>
-where
-    I: SendStrategyTypes,
-    I::SendIntents: InjectSendIntent<PathResponseIntent, Idx>,
-{
-    fn publish(
-        &mut self,
-        intent: PathResponseIntent,
-    ) -> Result<RecordedTicket<LinkPathIntentTicket>, IntentRejectedError<PathResponseIntent>> {
-        let owner = format!("path {}", self.index);
-        let label = format!("{intent:?}");
-        let ticket = <RankedLinkPathSendPlanner<I> as Publish<PathResponseIntent, Idx>>::publish(
-            &mut self.inner,
-            intent,
-        )?;
-        record(format!("{owner}: publish {label}"));
-        Ok(RecordedTicket {
-            owner,
-            intent: label,
-            inner: ticket,
-        })
-    }
-}
-
-impl<I: SendStrategyTypes> PublishOutcome<ResendCloseIntent, PlannerLinkPath>
-    for EventLoggingPlanner<I>
-{
-    type Outcome = ();
-}
-
-impl<I: SendStrategyTypes> Publish<ResendCloseIntent, ()> for EventLoggingPlanner<I> {
-    fn publish(&mut self, intent: ResendCloseIntent) {
-        record(format!("path {}: publish {intent:?}", self.index));
-        <RankedLinkPathSendPlanner<I> as Publish<ResendCloseIntent, ()>>::publish(
-            &mut self.inner,
-            intent,
-        );
+/// The intent a sum of intents holds, as its `Debug` form shows it inside
+/// the `Inl` and `Inr` of the sum.
+fn intent_label(debug: &str) -> String {
+    let mut label = debug;
+    loop {
+        if let Some(inner) = label
+            .strip_prefix("Inl(")
+            .or_else(|| label.strip_prefix("Inr("))
+            .and_then(|inner| inner.strip_suffix(')'))
+        {
+            label = inner;
+        } else {
+            return label.to_owned();
+        }
     }
 }
 
@@ -353,7 +252,7 @@ impl<I: SendStrategyTypes> Observe<PacketOverheads> for EventLoggingPlanner<I> {
 impl<I> LinkPathSendPlanner<I> for EventLoggingPlanner<I>
 where
     I: SendStrategyTypes,
-    I::SendIntents: RankedIntent,
+    I::SendIntents: RankedIntent + Debug,
     I::LinkPathIdentifier: Clone + PartialEq,
     I::CloseCause: Debug,
 {
@@ -366,12 +265,14 @@ where
     fn poll_plan<'a>(
         &'a mut self,
         core: &'a mut Self::Core,
+        driver: &'a DriverContent<I::SendIntents>,
         cx: &mut Context<'_>,
     ) -> Poll<PlannedDatagram<Self::Plan<'a>>> {
+        self.record_content(driver);
         if PLAN_NOTHING.with(Cell::get) {
             return Poll::Pending;
         }
-        self.inner.poll_plan(&mut core.inner, cx)
+        self.inner.poll_plan(&mut core.inner, driver, cx)
     }
 
     fn role_changed(

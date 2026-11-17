@@ -1,27 +1,30 @@
 //! The send strategy: where send intents go, in what order, whether they
 //! are admitted, and what one datagram carries.
 //!
-//! A frame source that has something to send publishes a send intent
-//! ([`SendIntent`]) and gets back what the strategy gives for that kind of
-//! intent: a ticket to resize or withdraw it, or nothing. On the driver's
-//! side the strategy is two kinds of values the driver holds and lends to
-//! calls: the core ([`SendStrategy`]), in the connection node, which takes
-//! intents whose destination is not fixed ([`PublishTo`]); and the send
+//! Content to send is a send intent ([`SendIntent`]). On the driver's side
+//! the strategy is two kinds of values the driver holds and lends to calls:
+//! the core ([`SendStrategy`]), in the connection node; and the send
 //! planner of each link path ([`LinkPathSendPlanner`]), in the link path's
-//! node, which takes intents bound to that link path ([`Publish`]) and the
-//! changes of its send conditions ([`Observe`]). The sending call of a link
-//! path asks its planner for the plan of the next datagram
-//! ([`LinkPathSendPlanner::poll_plan`]); the plan ([`DatagramFillPlan`])
-//! names the packets to write and, in each, the planned items in order; each
-//! item reaches its frame source only through [`PlannedItem::supply`], which
-//! hands back to the plan how much was written.
+//! node, which takes the changes of its send conditions ([`Observe`]). The
+//! sending call of a link path asks its planner for the plan of the next
+//! datagram ([`LinkPathSendPlanner::poll_plan`]); the plan
+//! ([`DatagramFillPlan`]) names the packets to write and, in each, the
+//! planned items in order; each item reaches its frame source only through
+//! [`PlannedItem::supply`], which hands back to the plan how much was
+//! written.
 //!
-//! Intents that the application's threads publish, and the driver's
-//! intents of the same kinds, go through the strategy's intake
-//! ([`SendIntentIntake`]) instead: each holder keeps a handle
-//! ([`SendIntentHandle`]) for its one kind of intent, and publishing through
-//! it ([`SharedPublishTo`]) touches only what the strategy shares for this,
-//! never the core, so it is safe while the driver holds the core.
+//! What the driver's own components have to send is not published: the
+//! sending call gathers it for each datagram as it stands then
+//! ([`DriverContent`]) and hands it to the planner with the request for the
+//! plan; a frame source that writes some of it changes its own state, so
+//! the next datagram's gathering no longer has it. Intents that the
+//! application's threads publish go through the strategy's intake
+//! ([`SendIntentIntake`]): each holder keeps a handle ([`SendIntentHandle`])
+//! for its one kind of intent, and publishing through it
+//! ([`SharedPublishTo`]) touches only what the strategy shares for this,
+//! never the core, so it is safe while the driver holds the core; it gives
+//! back what the strategy gives for that kind of intent, such as a ticket to
+//! resize or withdraw it.
 //!
 //! What a strategy may plan is held by structure where it can be: a packet
 //! of a kind gets a cursor over that kind's set of frame sources
@@ -40,12 +43,11 @@ use sakuya_wire::{
     parts::{CNil, CoprodInjector, Coproduct, HCons, HNil},
     v1::encryption_level::EncryptionLevel,
 };
-use snafu::Snafu;
 
 pub mod ranked;
 
 use crate::write::{
-    AckOnlyClass, ClassOfSource, FlightClass, FlightClassType, OpenPacket, PacketWriting, Supplied,
+    ClassOfSource, FlightClass, FlightClassType, OpenPacket, PacketWriting, Supplied,
 };
 
 // ---- intents and changes of send conditions ----
@@ -88,43 +90,18 @@ pub trait SendConditionChange {}
 
 /// `R: PublishOutcome<J, D>`: what `R` gives back for an intent `J`
 /// published for the destination `D`, wherever `J` is in the composition's
-/// sum of intents: a ticket for intents someone reads or withdraws, `()`
-/// for intents sent and forgotten, in a `Result` when the destination may
-/// refuse them. A component that keeps what it gets back names its type by
-/// this, without the place of `J`.
+/// sum of intents, such as a ticket for intents someone reads or withdraws.
+/// A component that keeps what it gets back names its type by this, without
+/// the place of `J`.
 pub trait PublishOutcome<J: SendIntent, D> {
     /// What publishing gives back.
     type Outcome;
 }
 
-/// The destination of an intent published on a link path's send planner:
-/// that link path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct PlannerLinkPath;
-
-/// `R: Publish<J, Idx>`: `R` takes intents `J` whose destination is the
-/// link path of `R`.
-///
-/// `Idx` is the place of `J` in the composition's sum of intents; the
-/// compiler infers it.
-pub trait Publish<J: SendIntent, Idx>: PublishOutcome<J, PlannerLinkPath> {
-    /// Publish `intent`.
-    fn publish(&mut self, intent: J) -> <Self as PublishOutcome<J, PlannerLinkPath>>::Outcome;
-}
-
-/// `R: PublishTo<J, D, Idx>`: `R` takes intents `J` for the destination
-/// `D`. The core of a strategy implements it for the intents the driver's
-/// components publish.
-pub trait PublishTo<J: SendIntent, D, Idx>: PublishOutcome<J, D> {
-    /// Publish `intent` for `destination`.
-    fn publish_to(&mut self, intent: J, destination: D) -> <Self as PublishOutcome<J, D>>::Outcome;
-}
-
 /// `R: SharedPublishTo<J, D, Idx>`: `R` takes intents `J` for the
 /// destination `D` through a shared reference. The intake of a strategy
 /// ([`SendStrategy::intake`]) implements it for the intents published from
-/// the application's threads, and for those the driver's components publish
-/// through it as well.
+/// the application's threads.
 ///
 /// `Idx` is the place of `J` in the composition's sum of intents; the
 /// compiler infers it. What a strategy does differently for each kind of
@@ -588,9 +565,8 @@ pub enum LinkPathRoleKind {
 }
 
 /// The core of a send strategy: held in the connection node; it takes the
-/// intents the driver's components publish whose destination is not fixed
-/// ([`PublishTo`]) and the connection's events, and gives out its intake
-/// ([`intake`](Self::intake)) for intents published without borrowing it.
+/// connection's events, and gives out its intake ([`intake`](Self::intake))
+/// for intents published without borrowing it.
 ///
 /// Dropping the core is the end of all sending.
 pub trait SendStrategy<I: SendStrategyTypes>: Sized {
@@ -601,8 +577,7 @@ pub trait SendStrategy<I: SendStrategyTypes>: Sized {
     /// The send planner of one link path.
     type LinkPathSendPlanner: LinkPathSendPlanner<I, Core = Self>;
     /// The intake: intents published through it reach the core without
-    /// the core being borrowed, from the application's threads or from the
-    /// driver while it holds the core.
+    /// the core being borrowed, from the application's threads.
     type Intake: SendIntentIntake<Self::Destination>;
 
     /// The intake of this core.
@@ -628,8 +603,9 @@ pub trait SendStrategy<I: SendStrategyTypes>: Sized {
 }
 
 /// The send planner of one link path: held in the link path's node; it
-/// takes the intents bound to that link path ([`Publish`]) and the changes
-/// of its send conditions ([`Observe`]), and plans each datagram.
+/// takes the changes of its send conditions ([`Observe`]), and plans each
+/// datagram from what the intake published and what the driver's own
+/// components have to send then ([`DriverContent`]).
 pub trait LinkPathSendPlanner<I: SendStrategyTypes>: Sized {
     /// The core it plans with.
     type Core;
@@ -639,11 +615,15 @@ pub trait LinkPathSendPlanner<I: SendStrategyTypes>: Sized {
         Self: 'a,
         Self::Core: 'a;
 
-    /// The plan of the next datagram, once there is one; while there is
-    /// none, the waker is kept and woken when there may be.
+    /// The plan of the next datagram, with `driver` what the driver's own
+    /// components have to send on the link path now, once there is one;
+    /// while there is none, the waker is kept and woken when there may be
+    /// through what the planner takes. The driver wakes the sending call
+    /// itself when what it has to send changes.
     fn poll_plan<'a>(
         &'a mut self,
         core: &'a mut Self::Core,
+        driver: &'a DriverContent<I::SendIntents>,
         cx: &mut Context<'_>,
     ) -> Poll<PlannedDatagram<Self::Plan<'a>>>;
 
@@ -675,37 +655,58 @@ pub enum PlannedDatagram<F> {
     ResendClose,
 }
 
-/// The sealed close packet of a link path may go out again: an intent
-/// published on the planner of a closing link path, which a plan answers
-/// with [`PlannedDatagram::ResendClose`] when the strategy sends it.
-///
-/// The intent holds only what happened; the close packet stays with the
-/// link path, and is sent as it was sealed. Whether and when it goes is
-/// the strategy's: an endpoint in the closing period should limit the rate
-/// at which it sends it (RFC 9000 §10.2.1). Publishing it gives back
-/// nothing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ResendCloseIntent {
-    /// The close packet was just sealed: it has not gone out yet.
-    Sealed,
-    /// A datagram arrived on the closing link path.
-    DatagramReceived,
+/// What the driver's own components have to send on one link path at one
+/// moment (`DriverContent`): the intents of the content they hold, such as
+/// the acknowledgments due and the CRYPTO data unsent, and the facts of the
+/// link path's sealed close packet. The sending call gathers it afresh for
+/// each datagram and hands it to the planner
+/// ([`LinkPathSendPlanner::poll_plan`]); none of it has a ticket, and a
+/// frame source that writes some of it changes its own state, so the next
+/// gathering no longer has it. Whether content fits is the writing's to
+/// find; the least room an intent gives only says when it may.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriverContent<J> {
+    /// The intents, in the order of the parts and of each part's content.
+    pub intents: Vec<J>,
+    /// The link path's close packet, once it is sealed.
+    pub close: Option<CloseResendFacts>,
 }
 
-/// No frame source supplies the close packet: it goes out as it was sealed,
-/// and counts nothing in flight.
-impl SendIntent for ResendCloseIntent {
-    type FrameSourceId = ();
-    type Class = AckOnlyClass;
-
-    fn frame_source(&self) {}
-
-    fn min_lengths(&self) -> MinimumLengths {
-        MinimumLengths {
-            with_length: 0,
-            as_last: 0,
+impl<J> DriverContent<J> {
+    /// No content.
+    pub const fn new() -> Self {
+        Self {
+            intents: Vec::new(),
+            close: None,
         }
     }
+
+    /// Forget all content, keeping the room of the intents for the next
+    /// gathering.
+    pub fn clear(&mut self) {
+        self.intents.clear();
+        self.close = None;
+    }
+}
+
+impl<J> Default for DriverContent<J> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// What a link path's sealed close packet gives a planner to decide
+/// whether it goes out again (`CloseResendFacts`): how many datagrams the
+/// link path received since it was sealed. The close packet stays with the
+/// link path, and is sent as it was sealed; whether and when it goes again
+/// is the strategy's, which a plan answers with
+/// [`PlannedDatagram::ResendClose`]: an endpoint in the closing period
+/// should limit the rate at which it sends it (RFC 9000 §10.2.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CloseResendFacts {
+    /// The datagrams received on the link path since the close packet was
+    /// sealed.
+    pub datagrams_received: u64,
 }
 
 /// The content planned first in a packet: the packet's kind, its frame
@@ -825,12 +826,14 @@ pub trait FrameSourceCursor<S: FrameSourceSet> {
 ///
 /// The item reaches its frame source only through [`supply`](Self::supply),
 /// which measures how much was written and hands it back to the plan.
-/// Dropped without being supplied, the item was not given to its source.
+/// Dropped without being supplied, the item was not given to its source,
+/// and wrote nothing.
 pub struct PlannedItem<'c, T, F: ?Sized> {
     item: T,
     min: MinimumLengths,
     class: FlightClass,
     last_in_packet: bool,
+    holds_place: bool,
     feedback: &'c mut F,
 }
 
@@ -841,19 +844,22 @@ impl<T: fmt::Debug, F: ?Sized> fmt::Debug for PlannedItem<'_, T, F> {
             .field("min", &self.min)
             .field("class", &self.class)
             .field("last_in_packet", &self.last_in_packet)
+            .field("holds_place", &self.holds_place)
             .finish_non_exhaustive()
     }
 }
 
 impl<'c, T, F: SupplyFeedback + ?Sized> PlannedItem<'c, T, F> {
     /// The planned item `item`, needing at least `min` of the room of
-    /// `class`, the last item of its packet if `last_in_packet`; what is
-    /// written for it goes back to `feedback`.
+    /// `class`, the last item of its packet if `last_in_packet`, ending the
+    /// datagram when it writes nothing if `holds_place`; what is written for
+    /// it goes back to `feedback`.
     pub fn new(
         item: T,
         min: MinimumLengths,
         class: FlightClass,
         last_in_packet: bool,
+        holds_place: bool,
         feedback: &'c mut F,
     ) -> Self {
         Self {
@@ -861,6 +867,7 @@ impl<'c, T, F: SupplyFeedback + ?Sized> PlannedItem<'c, T, F> {
             min,
             class,
             last_in_packet,
+            holds_place,
             feedback,
         }
     }
@@ -879,6 +886,14 @@ impl<'c, T, F: SupplyFeedback + ?Sized> PlannedItem<'c, T, F> {
     /// Whether the item is the last one planned for its packet.
     pub fn last_in_packet(&self) -> bool {
         self.last_in_packet
+    }
+
+    /// Whether the item holds its place: when it writes nothing, nothing
+    /// after it goes into the datagram, and the next datagram starts with
+    /// it. An item that does not hold its place and writes nothing is
+    /// passed over for the next one.
+    pub fn holds_place(&self) -> bool {
+        self.holds_place
     }
 
     /// Give the item to its frame source: `source` writes it into `packet`
@@ -915,81 +930,6 @@ pub trait FrameSourceSet {
 }
 
 // ---- how intents end ----
-
-/// The role a link path is in does not take the intent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Snafu)]
-#[snafu(display("the link path in its role {role:?} does not take this intent"))]
-pub struct RoleNotAcceptingError {
-    role: LinkPathRoleKind,
-}
-
-impl RoleNotAcceptingError {
-    /// The error for a link path in `role`.
-    pub fn new(role: LinkPathRoleKind) -> Self {
-        Self { role }
-    }
-
-    /// The role of the link path.
-    pub fn role(&self) -> LinkPathRoleKind {
-        self.role
-    }
-}
-
-/// The link path has ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Snafu)]
-#[snafu(display("the link path has ended"))]
-pub struct LinkPathEndedError;
-
-/// Why a link path did not take or keep an intent published on its
-/// planner.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Snafu)]
-pub enum LinkPathPublishError {
-    /// Its role does not take the intent.
-    #[snafu(transparent)]
-    RoleNotAccepting {
-        /// The failure.
-        source: RoleNotAcceptingError,
-    },
-    /// It has ended.
-    #[snafu(transparent)]
-    LinkPathEnded {
-        /// The failure.
-        source: LinkPathEndedError,
-    },
-}
-
-/// An intent a link path's planner refused, handed back.
-#[derive(Snafu)]
-#[snafu(display("the link path refused the intent"))]
-pub struct IntentRejectedError<J> {
-    intent: J,
-    source: LinkPathPublishError,
-}
-
-impl<J> fmt::Debug for IntentRejectedError<J> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("IntentRejectedError")
-            .field("source", &self.source)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<J> IntentRejectedError<J> {
-    /// `intent`, refused for `source`.
-    pub fn new(intent: J, source: LinkPathPublishError) -> Self {
-        Self { intent, source }
-    }
-
-    /// Why it was refused.
-    pub fn error(&self) -> &LinkPathPublishError {
-        &self.source
-    }
-
-    /// The intent back.
-    pub fn into_intent(self) -> J {
-        self.intent
-    }
-}
 
 /// Where an intent with a ticket stands; `End` is how it can end other
 /// than by being consumed or withdrawn, for the kind of ticket.

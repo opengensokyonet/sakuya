@@ -58,7 +58,7 @@ use crate::{
     send_strategy::{
         AnyActiveLinkPath, IntentTicketWithdraw, MinimumLengths, SendIntent, SendIntentHandle,
         SendIntentIntake, SendStrategy, SharedPublishTo,
-        ranked::{IntentTicket, RankedCoreIntent, RankedIntent, SendPriority, SendRank},
+        ranked::{RankedIntent, SendPriority, SendRank},
     },
     take::{GetAt, GetOptionalAt, Lineage},
     v1::application_handles::connection::{keep_waker, lock, wake_all},
@@ -198,12 +198,6 @@ impl<P: SendUrgency> RankedIntent for DatagramIntent<P> {
     fn urgency(&self) -> Urgency {
         self.parameters.urgency()
     }
-}
-
-/// The ticket of a datagram keeps the strategy's ticket, to withdraw the
-/// intent when the datagram is withdrawn.
-impl<P> RankedCoreIntent for DatagramIntent<P> {
-    type Outcome<C> = IntentTicket<C>;
 }
 
 // ---- the progress of a datagram ----

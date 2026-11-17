@@ -92,6 +92,17 @@ macro_rules! no_summaries {
                 match *intent {}
             }
         }
+        impl<T: sakuya_connection::clock::ConnectionChoices, L: sakuya_connection::share::LogicalPathKeys, V>
+            sakuya_connection::frame_source::DriverContentPart<T, L, V, ()> for $part
+        {
+            fn pending<J>(
+                _: &sakuya_connection::take::Lineage<'_, V>,
+                _: &sakuya_connection::share::LinkPathIdentifierOf<T, L>,
+                _: &mut sakuya_connection::send_strategy::DriverContent<J>,
+                _: impl Fn(sakuya_wire::parts::CNil) -> J,
+            ) {
+            }
+        }
     )*};
 }
 no_summaries!(a::Part, b::Part, c::Part);

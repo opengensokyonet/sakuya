@@ -1,5 +1,5 @@
-//! When a server's HANDSHAKE_DONE is published, written and sent again,
-//! and that a client's writes nothing.
+//! When a server's HANDSHAKE_DONE waits, is written and waits again, and
+//! that a client's writes nothing.
 
 use core::{marker::PhantomData, num::NonZeroUsize};
 
@@ -22,39 +22,43 @@ use crate::v1::{
     receive::open_one_rtt,
 };
 
-/// What the frame source publishes, in order.
-#[derive(Debug, Default)]
-struct Published(Vec<HandshakeDoneIntent>);
-
-impl PublishIntent<HandshakeDoneIntent, ()> for Published {
-    fn publish(&mut self, intent: HandshakeDoneIntent) {
-        self.0.push(intent);
-    }
-}
-
 const SPACE: PacketNumberSpaceKind = PacketNumberSpaceKind::ApplicationData;
 
 #[test]
-fn the_frame_is_published_once_when_it_becomes_due() {
+fn the_frame_waits_once_it_becomes_due() {
     let mut source = HandshakeDoneSource::NotDue;
-    let mut published = Published::default();
-    source.due::<_, ()>(&mut published);
-    source.due::<_, ()>(&mut published);
-    assert_eq!(source, HandshakeDoneSource::Due);
-    assert_eq!(published.0, [HandshakeDoneIntent]);
+    assert!(!source.is_waiting());
+    source.due();
+    assert!(source.is_waiting());
+    source = HandshakeDoneSource::InFlight;
+    source.due();
+    assert_eq!(source, HandshakeDoneSource::InFlight, "due once only");
 }
 
 #[test]
-fn a_lost_frame_is_published_again_until_one_is_delivered() {
-    let mut source = HandshakeDoneSource::Due;
-    let mut published = Published::default();
-    FrameSource::lost::<_, ()>(&mut source, &mut published, SPACE, &HandshakeDoneSummary);
-    assert_eq!(published.0, [HandshakeDoneIntent]);
-    FrameSource::delivered::<_, ()>(&mut source, &mut published, SPACE, HandshakeDoneSummary);
+fn a_lost_frame_waits_again_until_one_is_delivered() {
+    let mut source = HandshakeDoneSource::Waiting;
+    assert_eq!(frames_written(&mut source).0, ["HANDSHAKE_DONE"]);
+    assert_eq!(source, HandshakeDoneSource::InFlight);
+    FrameSource::lost(&mut source, &mut (), SPACE, &HandshakeDoneSummary);
+    assert!(source.is_waiting());
+    assert_eq!(frames_written(&mut source).0, ["HANDSHAKE_DONE"]);
+    FrameSource::delivered(&mut source, &mut (), SPACE, HandshakeDoneSummary);
     assert_eq!(source, HandshakeDoneSource::Delivered);
     // another copy lost after one was delivered is not sent again
-    FrameSource::lost::<_, ()>(&mut source, &mut published, SPACE, &HandshakeDoneSummary);
-    assert_eq!(published.0, [HandshakeDoneIntent]);
+    FrameSource::lost(&mut source, &mut (), SPACE, &HandshakeDoneSummary);
+    assert_eq!(source, HandshakeDoneSource::Delivered);
+}
+
+#[test]
+fn a_frame_that_does_not_wait_is_not_written() {
+    for mut source in [
+        HandshakeDoneSource::NotDue,
+        HandshakeDoneSource::InFlight,
+        HandshakeDoneSource::Delivered,
+    ] {
+        assert_eq!(frames_written(&mut source), (Vec::new(), 0));
+    }
 }
 
 /// The frames `source` writes into a 1-RTT packet, as the peer reads them,
@@ -108,7 +112,7 @@ where
 
 #[test]
 fn a_server_writes_the_frame_it_is_given() {
-    let mut source = HandshakeDoneSource::Due;
+    let mut source = HandshakeDoneSource::Waiting;
     assert_eq!(
         frames_written(&mut source),
         (vec!["HANDSHAKE_DONE".to_owned()], 1)

@@ -119,8 +119,8 @@ use super::{
     },
     receive::v1_error,
     retry::ClientRetryPolicy,
-    send::{HandshakeDoneIntent, SendTypes},
-    send_planning::{IntakePublishOutcome, SendStrategyCore, SendStrategyOf},
+    send::SendTypes,
+    send_planning::{IntakePublishOutcome, SendStrategyOf},
     streams::send::StreamIntent,
 };
 use crate::v1::{CryptoReceiveBufferOf, CryptoSendBufferOf, SendParametersOf};
@@ -129,7 +129,6 @@ use crate::{
     clock::InstantOf,
     component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
     error::{ConnectionErrorOf, ConnectionErrorsOf, TransportParameterValueErrorsOf},
-    frame_source::PublishIntent,
     layer::{self, Connection, EstablishedArgs},
     others::OtherNodes,
     request::StructureRequest,
@@ -685,36 +684,16 @@ fn send_local(
 /// `Iid` of the client's first Destination Connection IDs, `Iph` of the
 /// peer's handshake connection ID, `Ik` of the Handshake keys, `Io` of the
 /// 1-RTT keys, `Ib` of the backend, `Ic` of the confirmation, `Ihd` of the
-/// HANDSHAKE_DONE source, `Isc` of the core of the send strategy, `Ie` of
-/// the exporter and `Irc` of the record of why the connection closed;
-/// `Idx` of HANDSHAKE_DONE's intent among the composition's, `Ja` of
+/// HANDSHAKE_DONE source, `Ie` of the exporter and `Irc` of the record of
+/// why the connection closed; `Ja` of
 /// `initial_source_connection_id` among the slots of the peer's transport
 /// parameters, and `Ia` of what the call is started from in the facts of
 /// the connection node.
-type ServerPositions<
-    Ilt,
-    Ils,
-    Ipt,
-    Ifl,
-    Iid,
-    Iph,
-    Ik,
-    Io,
-    Ib,
-    Ic,
-    Ihd,
-    Isc,
-    Ie,
-    Irc,
-    Ih,
-    Idx,
-    Ja,
-    Ia,
-> = (
+type ServerPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ic, Ihd, Ie, Irc, Ih, Ja, Ia> = (
     (Ilt, Ils, Ipt, Ifl, Iid, Iph),
     (Ik, Io, Ib, Ic),
-    (Ihd, Isc, Ie, Irc, Ih),
-    (Idx, Ja, Ia),
+    (Ihd, Ie, Irc, Ih),
+    (Ja, Ia),
 );
 
 /// The server's side of the transport parameters: the client's are read
@@ -744,11 +723,9 @@ impl<
     Ib,
     Ic,
     Ihd,
-    Isc,
     Ie,
     Irc,
     Ih,
-    Idx,
     Ja,
     Ia,
 > ServerTransport<Target>
@@ -759,26 +736,7 @@ impl<
         ServerAdvancingKind<Tls>,
         (
             CryptoPositions<Icr, Ics, Iv>,
-            ServerPositions<
-                Ilt,
-                Ils,
-                Ipt,
-                Ifl,
-                Iid,
-                Iph,
-                Ik,
-                Io,
-                Ib,
-                Ic,
-                Ihd,
-                Isc,
-                Ie,
-                Irc,
-                Ih,
-                Idx,
-                Ja,
-                Ia,
-            >,
+            ServerPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ic, Ihd, Ie, Irc, Ih, Ja, Ia>,
         ),
         B,
     >
@@ -847,11 +805,9 @@ impl<
     Ib,
     Ic,
     Ihd,
-    Isc,
     Ie,
     Irc,
     Ih,
-    Idx,
     Ja,
     Ia,
 > ServerAdvancingCapability<Tls>
@@ -862,26 +818,7 @@ impl<
         ServerAdvancingKind<Tls>,
         (
             CryptoPositions<Icr, Ics, Iv>,
-            ServerPositions<
-                Ilt,
-                Ils,
-                Ipt,
-                Ifl,
-                Iid,
-                Iph,
-                Ik,
-                Io,
-                Ib,
-                Ic,
-                Ihd,
-                Isc,
-                Ie,
-                Irc,
-                Ih,
-                Idx,
-                Ja,
-                Ia,
-            >,
+            ServerPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ic, Ihd, Ie, Irc, Ih, Ja, Ia>,
         ),
         B,
     >
@@ -895,7 +832,6 @@ where
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>,
     SendTypes<T, L>: SendStrategyTypes,
-    SendStrategyCore<SendStrategyOf<T, L>>: PublishIntent<HandshakeDoneIntent, Idx>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>,
@@ -911,7 +847,6 @@ where
         + GetAt<PacketProtectionBackend<T::Crypto>, Ib>
         + GetAt<HandshakeConfirmation, Ic>
         + GetAt<HandshakeDoneSource, Ihd>
-        + GetAt<SendStrategyCore<SendStrategyOf<T, L>>, Isc>
         + GetAt<ConnectionExporter<Exporter<Tls::Crypto>>, Ie>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Irc>
         + GetAt<ConnectionHandleCellOf<T, L>, Ih>,
@@ -981,9 +916,7 @@ where
         // a server's handshake is confirmed when it completes (RFC 9001
         // §4.1.2); its Handshake keys go with the confirmation
         *lineage.get_mut::<HandshakeConfirmation, Ic>() = HandshakeConfirmation::Confirmed;
-        let mut source = *lineage.get::<HandshakeDoneSource, Ihd>();
-        source.due::<_, Idx>(lineage.get_mut::<SendStrategyCore<SendStrategyOf<T, L>>, Isc>());
-        *lineage.get_mut::<HandshakeDoneSource, Ihd>() = source;
+        lineage.get_mut::<HandshakeDoneSource, Ihd>().due();
         lineage
             .get_mut::<ConnectionExporter<Exporter<Tls::Crypto>>, Ie>()
             .hold(exporter);
@@ -1053,11 +986,9 @@ impl<
     Ib,
     Ic,
     Ihd,
-    Isc,
     Ie,
     Irc,
     Ih,
-    Idx,
     Ja,
     Ia,
 >
@@ -1067,26 +998,7 @@ impl<
         Connection,
         (
             CryptoPositions<Icr, Ics, Iv>,
-            ServerPositions<
-                Ilt,
-                Ils,
-                Ipt,
-                Ifl,
-                Iid,
-                Iph,
-                Ik,
-                Io,
-                Ib,
-                Ic,
-                Ihd,
-                Isc,
-                Ie,
-                Irc,
-                Ih,
-                Idx,
-                Ja,
-                Ia,
-            >,
+            ServerPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ic, Ihd, Ie, Irc, Ih, Ja, Ia>,
         ),
     > for ServerAdvancingKind<Tls>
 where
@@ -1098,7 +1010,6 @@ where
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>,
     SendTypes<T, L>: SendStrategyTypes,
-    SendStrategyCore<SendStrategyOf<T, L>>: PublishIntent<HandshakeDoneIntent, Idx>,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, Ia>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
@@ -1115,32 +1026,12 @@ where
         + GetAt<PacketProtectionBackend<T::Crypto>, Ib>
         + GetAt<HandshakeConfirmation, Ic>
         + GetAt<HandshakeDoneSource, Ihd>
-        + GetAt<SendStrategyCore<SendStrategyOf<T, L>>, Isc>
         + GetAt<ConnectionExporter<Exporter<Tls::Crypto>>, Ie>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Irc>
         + GetAt<ConnectionHandleCellOf<T, L>, Ih>,
     (
         CryptoPositions<Icr, Ics, Iv>,
-        ServerPositions<
-            Ilt,
-            Ils,
-            Ipt,
-            Ifl,
-            Iid,
-            Iph,
-            Ik,
-            Io,
-            Ib,
-            Ic,
-            Ihd,
-            Isc,
-            Ie,
-            Irc,
-            Ih,
-            Idx,
-            Ja,
-            Ia,
-        >,
+        ServerPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ic, Ihd, Ie, Irc, Ih, Ja, Ia>,
     ): 'static,
 {
     type Call<B: CallBundle> = LentCall<
@@ -1163,11 +1054,9 @@ where
                     Ib,
                     Ic,
                     Ihd,
-                    Isc,
                     Ie,
                     Irc,
                     Ih,
-                    Idx,
                     Ja,
                     Ia,
                 >,

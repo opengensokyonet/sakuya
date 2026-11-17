@@ -161,7 +161,7 @@ use super::{
     },
     send::SendTypes,
     send_planning::{
-        CongestionAllowance, IntakePublishOutcome, LinkPathPlanner, LinkPathSendPlannerOf,
+        CongestionAllowance, IntakePublishOutcome, LinkPathPlannerOf, LinkPathSendPlannerOf,
         SendKeyLevels, SendStrategyCore, SendStrategyOf, datagram_limits,
         link_path_packet_overheads,
     },
@@ -177,17 +177,18 @@ use crate::{
     error::ConnectionErrorsOf,
     feedback::{FeedbackSummariesOf, FeedbackSummaryOf},
     frame_source::{
-        EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts, HandshakePacket,
-        InitialPacket, OneRttPacket, OneRttProbePacket, PacketKind, PartsFrameSourceDispatch,
-        PartsFrameSources, SettlingResponsePacket, ZeroRttPacket,
+        DriverContentOf, EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts,
+        HandshakePacket, InitialPacket, OneRttPacket, OneRttProbePacket, PacketKind,
+        PartsFrameSourceDispatch, PartsFrameSources, SettlingResponsePacket, ZeroRttPacket,
     },
     layer::{self, LinkPath, NodeKey},
     others::OtherNodes,
     role::LinkPathRole,
     send_strategy::{
-        AnyActiveLinkPath, DatagramFillPlan, DatagramLimits, FrameSourceCursor, FrameSourceSet,
-        LeadingContent, LinkPathRoleKind, LinkPathSendPlanner, Observe, PacketOverheads,
-        PlannedDatagram, PlannedPacket, PlannedPacketKind, SendStrategy, SendStrategyTypes,
+        AnyActiveLinkPath, CloseResendFacts, DatagramFillPlan, DatagramLimits, FrameSourceCursor,
+        FrameSourceSet, LeadingContent, LinkPathRoleKind, LinkPathSendPlanner, Observe,
+        PacketOverheads, PlannedDatagram, PlannedPacket, PlannedPacketKind, SendIntentsOf,
+        SendStrategy, SendStrategyTypes,
     },
     share::{FlatMut, FlatRef, LineageLists, LineagePartList, LinkPathIdentifierOf, NodeData},
     take::{
@@ -295,7 +296,7 @@ pub trait LinkPathSendingCapability: ReceiverFamily {
 /// ID strategy of a use once a datagram is sealed with content.
 pub type FillTakes<T, L> = HList![
     SendStrategyCore<SendStrategyOf<T, L>>,
-    LinkPathPlanner<LinkPathSendPlannerOf<T, L>>,
+    LinkPathPlannerOf<T, L>,
     LinkPathResetTokenRegistrar<ResetTokenRegistrarOf<T>>,
     SendJournalsOf<T, L>,
     AeadUsage,
@@ -308,7 +309,7 @@ pub type FillTakes<T, L> = HList![
 /// anti-amplification limit of the logical link.
 pub type ResendTakes<T, L> = HList![
     SendStrategyCore<SendStrategyOf<T, L>>,
-    LinkPathPlanner<LinkPathSendPlannerOf<T, L>>,
+    LinkPathPlannerOf<T, L>,
     AntiAmplification,
 ];
 
@@ -377,7 +378,8 @@ pub type SettleReads<T, L> = HList![
 /// [`FillReadTakes`], `Ir` of [`FillReads`] and `Ici` of the connection IDs
 /// in what is left, `Ik` of
 /// [`FillRecoveryTakes`], `Hs` of
-/// each part's frame sources; for handing over, `Ii`, `Ih`, `Io` of the
+/// each part's frame sources, `Hd` of what each part reads the driver's
+/// content by ([`DriverContentOf`]); for handing over, `Ii`, `Ih`, `Io` of the
 /// keys and `Il` of the link's clone; for settling, `Ij` of the send
 /// journals, `If` of the recovery factory, `Iv` of [`SettleReads`], `Ie`
 /// of the idle timeout, `Iq` of [`SettleRecoveryTakes`], `Hf` of the
@@ -402,6 +404,7 @@ type Positions<
     Ici,
     Ik,
     Hs,
+    Hd,
     Ii,
     Ih,
     Io,
@@ -431,7 +434,7 @@ type Positions<
     Idr,
 > = (
     Is,
-    (It, Iw, Ir, Ici, Ik, Hs),
+    (It, Iw, Ir, Ici, Ik, Hs, Hd),
     (Ii, Ih, Io, Il),
     (Ij, If, Iv, Ie, Iq, Hf, Ist),
     (Ipp, Ima, Jx, Jr, Jm),
@@ -490,6 +493,7 @@ impl<
     Ici,
     Ik,
     Hs,
+    Hd,
     Ii,
     Ih,
     Io,
@@ -531,6 +535,7 @@ impl<
             Ici,
             Ik,
             Hs,
+            Hd,
             Ii,
             Ih,
             Io,
@@ -622,6 +627,8 @@ where
         AppendEach<<EstablishedSourceComponentsOfParts<T, L> as OptionalRefs>::Optional<'x>>,
     for<'x> FillStreamsRest<'x, T, L, It, Iw>:
         ReadEach<FillReads<T, L>, Ir> + GetAt<ConnectionIdsOf<T>, Ici>,
+    for<'x> L: DriverContentOf<T, L, FillStreamsRest<'x, T, L, It, Iw>, Hd>,
+    <SendTypes<T, L> as SendStrategyTypes>::SendIntents: From<<L as SendIntentsOf>::SendIntents>,
     for<'x> L: PartsFrameSourceDispatch<
             T,
             L,
@@ -704,12 +711,15 @@ where
             return Poll::Ready(());
         }
         let NodeLoan { lineage, others } = view.get_mut();
-        if let Some(datagram) = lineage
-            .get::<ClosePacket, Icp>()
-            .sealed()
-            .map(|sealed| sealed.datagram().clone())
-        {
-            return resend_close::<T, L, S, Ilf, Irs>(lineage, datagram, batch, cx);
+        if let Some((datagram, facts)) = lineage.get::<ClosePacket, Icp>().sealed().map(|sealed| {
+            (
+                sealed.datagram().clone(),
+                CloseResendFacts {
+                    datagrams_received: sealed.datagrams_received(),
+                },
+            )
+        }) {
+            return resend_close::<T, L, S, Ilf, Irs>(lineage, datagram, facts, batch, cx);
         }
         let NodeKey::LinkPath(path, link) = others.here().clone() else {
             unreachable!("a link path's lend carries its key")
@@ -785,7 +795,7 @@ where
                             part,
                             others,
                             |mut access| {
-                                let mut filling = Filling::<T, L, _, _, Ir, Ici, Ipp, Hs> {
+                                let mut filling = Filling::<T, L, _, _, Ir, Ici, Ipp, Hs, Hd> {
                                     now,
                                     link: &link,
                                     link_path: &link_path,
@@ -807,8 +817,11 @@ where
                                     positions: core::marker::PhantomData,
                                 };
                                 let end = filling.fill(batch, cx);
+                                let waits = batch.is_empty()
+                                    && matches!(end, FillEnd::NothingPlanned | FillEnd::Blocked);
                                 let wake_itself = filling.planner.filling_ended(
                                     end == FillEnd::Blocked && batch.is_empty(),
+                                    waits,
                                     cx.waker(),
                                 );
                                 (filling.initial_discarded, wake_itself)
@@ -917,14 +930,14 @@ where
 // ---- filling ----
 
 /// What [`Filling`] reads its components and finds its frame sources by.
-type FillPositions<Ir, Ici, Ipp, Hs> = fn() -> (Ir, Ici, Ipp, Hs);
+type FillPositions<Ir, Ici, Ipp, Hs, Hd> = fn() -> (Ir, Ici, Ipp, Hs, Hd);
 
 /// What one poll fills with: the borrows of what it took, the instant of
 /// the poll and the link path it fills for.
 ///
 /// `V` is what is left of the lineage, where the connection IDs and the
 /// frame sources are found; `A` the congestion access lent for the poll.
-struct Filling<'f, 'r, T, L, V, A, Ir, Ici, Ipp, Hs>
+struct Filling<'f, 'r, T, L, V, A, Ir, Ici, Ipp, Hs, Hd>
 where
     T: Choices,
     L: LineagePartList<T> + FeedbackSummariesOf,
@@ -935,7 +948,7 @@ where
     link: &'f LinkIdOf<T>,
     link_path: &'f LinkPathIdentifierOf<T, L>,
     core: &'f mut SendStrategyCore<SendStrategyOf<T, L>>,
-    planner: &'f mut LinkPathPlanner<LinkPathSendPlannerOf<T, L>>,
+    planner: &'f mut LinkPathPlannerOf<T, L>,
     registrar: &'f mut LinkPathResetTokenRegistrar<ResetTokenRegistrarOf<T>>,
     journals: &'f mut SendJournalsOf<T, L>,
     initial_keys: &'f InitialKeys<T::Crypto>,
@@ -951,10 +964,10 @@ where
     estimate: RttEstimate,
     pmtu_conclusion: usize,
     state: &'f mut LinkPathCongestionState<InstantOf<T>>,
-    positions: core::marker::PhantomData<FillPositions<Ir, Ici, Ipp, Hs>>,
+    positions: core::marker::PhantomData<FillPositions<Ir, Ici, Ipp, Hs, Hd>>,
 }
 
-impl<T, L, V, A, S, Ir, Ici, Ipp, Hs> Filling<'_, '_, T, L, V, A, Ir, Ici, Ipp, Hs>
+impl<T, L, V, A, S, Ir, Ici, Ipp, Hs, Hd> Filling<'_, '_, T, L, V, A, Ir, Ici, Ipp, Hs, Hd>
 where
     T: Choices,
     L: LineagePartList<T> + FeedbackSummariesOf + ParametersOf<TransportParameterSpace>,
@@ -984,7 +997,9 @@ where
         + PartsFrameSourceDispatch<T, L, ZeroRttPacket, V, FeedbackSummaryOf<T, L>, Hs>
         + PartsFrameSourceDispatch<T, L, OneRttPacket, V, FeedbackSummaryOf<T, L>, Hs>
         + PartsFrameSourceDispatch<T, L, OneRttProbePacket, V, FeedbackSummaryOf<T, L>, Hs>
-        + PartsFrameSourceDispatch<T, L, SettlingResponsePacket, V, FeedbackSummaryOf<T, L>, Hs>,
+        + PartsFrameSourceDispatch<T, L, SettlingResponsePacket, V, FeedbackSummaryOf<T, L>, Hs>
+        + DriverContentOf<T, L, V, Hd>,
+    <SendTypes<T, L> as SendStrategyTypes>::SendIntents: From<<L as SendIntentsOf>::SendIntents>,
 {
     /// Fill datagrams into `batch` until the batch is full or the plans
     /// stop.
@@ -1073,11 +1088,16 @@ where
         );
         self.planner.observe_conditions(limits, overheads);
 
-        let planned = match self
-            .planner
-            .planner_mut()
-            .poll_plan(self.core.strategy_mut(), cx)
-        {
+        // what the driver's components have to send now, gathered afresh:
+        // what was written for the last datagram is no longer there
+        let (planner, driver) = self.planner.planner_and_driver_content();
+        <L as DriverContentOf<T, L, V, Hd>>::pending(
+            &*self.rest,
+            self.link_path,
+            driver,
+            From::from,
+        );
+        let planned = match planner.poll_plan(self.core.strategy_mut(), driver, cx) {
             Poll::Pending => return DatagramEnd::End(FillEnd::NothingPlanned),
             Poll::Ready(planned) => planned,
         };
@@ -1184,7 +1204,7 @@ where
             let kind = packet.kind();
             // moved in here, so that the plan is free once the packet is
             // filled
-            let (supplied, item_skipped) = {
+            let (supplied, items) = {
                 let packet = packet;
                 match packet {
                     PlannedPacket::Initial(mut cursor) => {
@@ -1255,10 +1275,11 @@ where
                     }
                 }
             };
-            skipped |= item_skipped;
+            skipped |= items.unfit;
             // looking ahead: the packet is the last unless what the plan
-            // leads the next one with fits after it
-            let more = !item_skipped
+            // leads the next one with fits after it, and an item that holds
+            // its place and wrote nothing ends the datagram
+            let more = !items.held_place
                 && plan
                     .peek_next_packet()
                     .is_some_and(|next| next_fits(&next, &supplied, &overheads));
@@ -1302,18 +1323,20 @@ where
 }
 
 /// Fill `batch` with the sealed close packet `datagram` as often as the
-/// planner of the link path of `lineage` asks for it to go again, until
-/// the batch is full or the planner has nothing to plan. Each copy is
-/// charged to the anti-amplification limit of the logical link before it
-/// joins the batch; a copy the credit does not allow is not sent. A copy
-/// enters no send journal and counts nothing in flight. Ready once the
-/// batch holds a datagram.
+/// planner of the link path of `lineage`, given the close packet's `facts`
+/// as the driver's content, asks for it to go again, until the batch is
+/// full or the planner has nothing to plan. Each copy is charged to the
+/// anti-amplification limit of the logical link before it joins the batch;
+/// a copy the credit does not allow is not sent. A copy enters no send
+/// journal and counts nothing in flight. Ready once the batch holds a
+/// datagram.
 ///
 /// A plan to fill a datagram is dropped as it comes: a closing link path
-/// sends nothing else.
+/// sends nothing else, so the driver's content holds the close packet only.
 fn resend_close<'v, T, L, S, Ilf, Irs>(
     lineage: &mut LineageOf<'v, T, L, LinkPath>,
     datagram: Bytes,
+    facts: CloseResendFacts,
     batch: &mut DatagramBatchOf<T, L, S>,
     cx: &mut Context<'_>,
 ) -> Poll<()>
@@ -1330,9 +1353,15 @@ where
     let validation = lineage.get::<LinkFacts, Ilf>().validation;
     let (hlist_pat![core, planner, amplification], _) =
         Take::<ResendTakes<T, L>, Irs>::take(lineage.reborrow());
+    let mut waits = false;
+    let (send_planner, driver) = planner.planner_and_driver_content();
+    driver.close = Some(facts);
     while !batch.is_full() {
-        match planner.planner_mut().poll_plan(core.strategy_mut(), cx) {
-            Poll::Pending => break,
+        match send_planner.poll_plan(core.strategy_mut(), driver, cx) {
+            Poll::Pending => {
+                waits = true;
+                break;
+            }
             Poll::Ready(PlannedDatagram::Fill(plan)) => {
                 drop(plan);
                 break;
@@ -1349,6 +1378,7 @@ where
             }
         }
     }
+    planner.filling_ended(false, waits && batch.is_empty(), cx.waker());
     if batch.is_empty() {
         Poll::Pending
     } else {
@@ -1415,22 +1445,35 @@ fn next_fits<Id, W: PacketWriting, P>(
         .is_some_and(|overhead| current.room(next.class) >= overhead + next.min.as_last)
 }
 
+/// How the items of one packet went ([`fill_packet`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct PacketItems {
+    /// An item that holds its place wrote nothing: nothing after it goes
+    /// into the datagram.
+    held_place: bool,
+    /// An item was not given to its source because its least room did not
+    /// fit.
+    unfit: bool,
+}
+
 /// Fill the packet `open` of the kind `K` with the items of `cursor`, each
 /// given to its frame source among `rest` at `now`; what is left is the
 /// packet, last in its datagram until the look-ahead says otherwise, and
-/// whether an item was not given to its source because it did not fit.
+/// how its items went.
 ///
 /// An item is the last of the packet when the plan says so, or when what
 /// is left takes it as the last frame and no longer with a Length field;
-/// it then may close the packet, and no item after it is given a source.
-/// An item whose least room for its position does not fit is dropped
-/// unsupplied, and nothing after it goes into the datagram.
+/// it then may close the packet. An item whose least room for its position
+/// does not fit is not given to its source: it counts as having written
+/// nothing. An item that wrote nothing ends the datagram when it holds its
+/// place; one that does not is passed over, and the next goes where it
+/// would have, the last position included.
 fn fill_packet<T, L, K, V, Hs, C, W>(
     mut open: OpenPacket<W, ClassOfSource, NotLast>,
     cursor: &mut C,
     rest: &mut Lineage<'_, V>,
     now: InstantOf<T>,
-) -> (Supplied<W, ClassOfSource, Last>, bool)
+) -> (Supplied<W, ClassOfSource, Last>, PacketItems)
 where
     T: Choices,
     L: LineagePartList<T>
@@ -1442,36 +1485,80 @@ where
     W: PacketWriting,
     W::Attempt: PacketSendAttempt<Summary = FeedbackSummaryOf<T, L>>,
 {
+    let mut items = PacketItems::default();
     loop {
         let Some(item) = cursor.next() else {
-            return (Supplied::Open(open.make_last()), false);
+            return (Supplied::Open(open.make_last()), items);
         };
         let min = item.min();
+        let holds_place = item.holds_place();
         let room = open.room(item.class());
         let last = item.last_in_packet() || (room < min.with_length && room >= min.as_last);
-        let needed = if last { min.as_last } else { min.with_length };
-        if room < needed {
-            drop(item);
-            return (Supplied::Open(open.make_last()), true);
-        }
-        if last {
-            let supplied = item.supply(open.make_last(), |item, packet| {
+        if !last {
+            if room < min.with_length {
+                drop(item);
+                items.unfit = true;
+                if holds_place {
+                    items.held_place = true;
+                    return (Supplied::Open(open.make_last()), items);
+                }
+                continue;
+            }
+            let before = open.buffer_len();
+            let supplied = item.supply(open, |item, packet| {
                 <L as PartsFrameSourceDispatch<T, L, K, V, FeedbackSummaryOf<T, L>, Hs>>::supply(
                     rest, now, item, packet,
                 )
             });
-            return (supplied, false);
+            match supplied {
+                Supplied::Open(packet) => {
+                    let wrote = packet.buffer_len() > before;
+                    open = packet;
+                    if !wrote && holds_place {
+                        items.held_place = true;
+                        return (Supplied::Open(open.make_last()), items);
+                    }
+                }
+                // only a packet in the last position can be closed, so this
+                // is not reached; the closed packet is the last all the
+                // same
+                Supplied::Closed(packet) => return (Supplied::Closed(packet), items),
+            }
+            continue;
         }
-        let supplied = item.supply(open, |item, packet| {
-            <L as PartsFrameSourceDispatch<T, L, K, V, FeedbackSummaryOf<T, L>, Hs>>::supply(
-                rest, now, item, packet,
-            )
-        });
-        match supplied {
-            Supplied::Open(packet) => open = packet,
-            // only a packet in the last position can be closed, so this is
-            // not reached; the closed packet is the last all the same
-            Supplied::Closed(packet) => return (Supplied::Closed(packet), false),
+        // the last position: this item, and after it each next one while
+        // the one before wrote nothing and did not hold its place
+        let mut open = open.make_last();
+        let mut item = item;
+        loop {
+            let min = item.min();
+            let holds_place = item.holds_place();
+            if open.room(item.class()) >= min.as_last {
+                let before = open.buffer_len();
+                let supplied = item.supply(open, |item, packet| {
+                    <L as PartsFrameSourceDispatch<T, L, K, V, FeedbackSummaryOf<T, L>, Hs>>::supply(
+                        rest, now, item, packet,
+                    )
+                });
+                if supplied.buffer_len() > before {
+                    return (supplied, items);
+                }
+                open = match supplied {
+                    Supplied::Open(packet) => packet,
+                    Supplied::Closed(packet) => return (Supplied::Closed(packet), items),
+                };
+            } else {
+                drop(item);
+                items.unfit = true;
+            }
+            if holds_place {
+                items.held_place = true;
+                return (Supplied::Open(open), items);
+            }
+            let Some(next) = cursor.next() else {
+                return (Supplied::Open(open), items);
+            };
+            item = next;
         }
     }
 }
@@ -1793,6 +1880,7 @@ impl<
     Ici,
     Ik,
     Hs,
+    Hd,
     Ii,
     Ih,
     Io,
@@ -1833,6 +1921,7 @@ impl<
             Ici,
             Ik,
             Hs,
+            Hd,
             Ii,
             Ih,
             Io,
@@ -1923,6 +2012,8 @@ where
         AppendEach<<EstablishedSourceComponentsOfParts<T, L> as OptionalRefs>::Optional<'x>>,
     for<'x> FillStreamsRest<'x, T, L, It, Iw>:
         ReadEach<FillReads<T, L>, Ir> + GetAt<ConnectionIdsOf<T>, Ici>,
+    for<'x> L: DriverContentOf<T, L, FillStreamsRest<'x, T, L, It, Iw>, Hd>,
+    <SendTypes<T, L> as SendStrategyTypes>::SendIntents: From<<L as SendIntentsOf>::SendIntents>,
     for<'x> L: PartsFrameSourceDispatch<
             T,
             L,
@@ -1989,6 +2080,7 @@ where
         Ici,
         Ik,
         Hs,
+        Hd,
         Ii,
         Ih,
         Io,
@@ -2033,6 +2125,7 @@ where
                 Ici,
                 Ik,
                 Hs,
+                Hd,
                 Ii,
                 Ih,
                 Io,
