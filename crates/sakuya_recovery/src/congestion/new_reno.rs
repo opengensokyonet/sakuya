@@ -13,7 +13,7 @@
 //! [RFC 9002 §7]: https://www.rfc-editor.org/rfc/rfc9002.html#section-7
 use super::{
     CongestionContext, CongestionController, InFlightPacket, InitialWindow, RemovedPacket,
-    SpuriouslyLostPacket,
+    SealedPacket, SpuriouslyLostPacket,
 };
 use crate::{
     ecn::{EcnContext, EcnPolicy, ect0_testing_marking},
@@ -229,7 +229,7 @@ impl<I: Ord + Copy> CongestionController<I> for NewReno<I> {
         self.window
     }
 
-    fn on_packet_sealed(&mut self, _bytes: usize, _app_limited: bool, _now: I) {}
+    fn on_packet_sealed(&mut self, _packet: &SealedPacket<I>) {}
 
     fn on_spurious_loss(
         &mut self,

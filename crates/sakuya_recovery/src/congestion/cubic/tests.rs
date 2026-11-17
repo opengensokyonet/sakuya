@@ -2,7 +2,8 @@ use super::{Cubic, CubicConfig, CubicConfigError, CubicCongestionEvent, CubicSen
 use crate::{
     congestion::{
         CongestionContext, CongestionController, CongestionWindowConfig,
-        CongestionWindowConfigError, InFlightPacket, InitialWindow, SpuriouslyLostPacket,
+        CongestionWindowConfigError, InFlightPacket, InitialWindow, SealedPacket,
+        SpuriouslyLostPacket,
     },
     pto::PtoPolicy,
     ratio::Ratio,
@@ -39,6 +40,15 @@ fn packet(sent: u64, bytes: usize) -> InFlightPacket<Duration, CubicSendSequence
         sent_at: ms(sent),
         app_limited: false,
         sent_state: CubicSendSequence(0),
+    }
+}
+
+fn sealed(bytes: usize, now: Duration) -> SealedPacket<Duration> {
+    SealedPacket {
+        bytes,
+        app_limited: false,
+        bytes_in_flight: bytes,
+        now,
     }
 }
 
@@ -217,10 +227,10 @@ fn the_time_with_nothing_in_flight_is_left_out() {
     let mut cubic = after_one_loss();
     cubic.on_acked([packet(110, 1200)].into_iter(), &drained(200));
     // Idle from 200 ms to 5200 ms: the stage starts 5 s later.
-    cubic.on_packet_sealed(1200, false, ms(5200));
+    cubic.on_packet_sealed(&sealed(1200, ms(5200)));
     assert_eq!(cubic.stage.unwrap().start, ms(5100));
     // Only the first packet after the idle period moves it.
-    cubic.on_packet_sealed(1200, false, ms(5300));
+    cubic.on_packet_sealed(&sealed(1200, ms(5300)));
     assert_eq!(cubic.stage.unwrap().start, ms(5100));
 }
 
@@ -360,7 +370,7 @@ fn in_conservative_slow_start() -> Cubic<Duration> {
     let mut now = 0;
     for rtt in [40, 50] {
         let sealed: Vec<_> = (0..8)
-            .map(|_| cubic.on_packet_sealed(100, false, ms(now)))
+            .map(|_| cubic.on_packet_sealed(&sealed(100, ms(now))))
             .collect();
         for sent_state in sealed {
             now += 1;
@@ -380,7 +390,7 @@ fn in_conservative_slow_start() -> Cubic<Duration> {
 fn conservative_slow_start_grows_a_quarter_as_fast() {
     let mut cubic = in_conservative_slow_start();
     let window = cubic.window();
-    let sent_state = cubic.on_packet_sealed(1200, false, ms(100));
+    let sent_state = cubic.on_packet_sealed(&sealed(1200, ms(100)));
     let packet = InFlightPacket {
         sent_state,
         ..packet(100, 1200)
@@ -395,7 +405,7 @@ fn hystart_plus_plus_ends_the_initial_slow_start_with_k_zero() {
     let mut now = 100;
     // Five rounds of Conservative Slow Start, the partial one included.
     for _ in 0..5 {
-        let sent_state = cubic.on_packet_sealed(100, false, ms(now));
+        let sent_state = cubic.on_packet_sealed(&sealed(100, ms(now)));
         now += 50;
         let packet = InFlightPacket {
             sent_state,
@@ -425,7 +435,7 @@ fn without_hystart_plus_plus_slow_start_ignores_the_delay() {
     let mut now = 0;
     for rtt in [40, 50, 60, 70, 80, 90, 100] {
         for _ in 0..8 {
-            let sent_state = cubic.on_packet_sealed(100, false, ms(now));
+            let sent_state = cubic.on_packet_sealed(&sealed(100, ms(now)));
             now += 1;
             let mut context = context(now);
             context.rtt.latest = ms(rtt);

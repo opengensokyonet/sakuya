@@ -28,7 +28,7 @@
 //! [RFC 9406]: https://www.rfc-editor.org/rfc/rfc9406.html
 use super::{
     CongestionContext, CongestionController, CongestionWindowConfig, InFlightPacket, RemovedPacket,
-    SpuriouslyLostPacket,
+    SealedPacket, SpuriouslyLostPacket,
     hystart_plus_plus::{self, HyStartPlusPlus},
 };
 use crate::{
@@ -422,11 +422,11 @@ impl<I: Ord + Copy + Add<Duration, Output = I> + Sub<Output = Duration>> Congest
 
     /// The first packet after nothing was in flight leaves the idle time
     /// out of the stage.
-    fn on_packet_sealed(&mut self, _bytes: usize, _app_limited: bool, now: I) -> CubicSendSequence {
+    fn on_packet_sealed(&mut self, packet: &SealedPacket<I>) -> CubicSendSequence {
         if core::mem::take(&mut self.drained)
             && let Some(stage) = self.stage.as_mut()
         {
-            stage.leave_out_until(now);
+            stage.leave_out_until(packet.now);
         }
         CubicSendSequence(self.slow_start.on_sealed())
     }

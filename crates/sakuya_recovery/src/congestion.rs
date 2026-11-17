@@ -74,10 +74,8 @@ pub trait CongestionController<I> {
     /// The congestion window, in bytes.
     fn window(&self) -> usize;
 
-    /// A packet of `bytes` bytes that counts as in flight was sealed at
-    /// `now`, the instant of the poll; `app_limited` is whether the link
-    /// path was limited by the application then.
-    fn on_packet_sealed(&mut self, bytes: usize, app_limited: bool, now: I) -> Self::SentState;
+    /// A packet that counts as in flight was sealed.
+    fn on_packet_sealed(&mut self, packet: &SealedPacket<I>) -> Self::SentState;
 
     /// Packets of the batch that `loss` was given for were acknowledged
     /// after all.
@@ -140,8 +138,8 @@ impl<I, T: CongestionController<I> + ?Sized> CongestionController<I> for &mut T 
         (**self).window()
     }
 
-    fn on_packet_sealed(&mut self, bytes: usize, app_limited: bool, now: I) -> Self::SentState {
-        (**self).on_packet_sealed(bytes, app_limited, now)
+    fn on_packet_sealed(&mut self, packet: &SealedPacket<I>) -> Self::SentState {
+        (**self).on_packet_sealed(packet)
     }
 
     fn on_spurious_loss(
@@ -214,6 +212,20 @@ pub struct CongestionContext<I> {
     pub rtt_sampled: bool,
     /// The maximum datagram size in use.
     pub max_datagram_size: usize,
+}
+
+/// A packet that counts as in flight, as it was sealed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SealedPacket<I> {
+    /// Its size in bytes.
+    pub bytes: usize,
+    /// Whether the link path was limited by the application when it was
+    /// sealed.
+    pub app_limited: bool,
+    /// The bytes in flight once it is sealed, itself included.
+    pub bytes_in_flight: usize,
+    /// The instant of the poll it was sealed in.
+    pub now: I,
 }
 
 /// A packet that counted as in flight, acknowledged or declared lost.

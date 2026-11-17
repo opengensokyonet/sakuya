@@ -11,7 +11,7 @@ use sakuya_packet_protection::{
 };
 use sakuya_recovery::{
     congestion::{
-        CongestionContext, CongestionController, InFlightPacket, RemovedPacket,
+        CongestionContext, CongestionController, InFlightPacket, RemovedPacket, SealedPacket,
         SpuriouslyLostPacket,
     },
     pacing::{Pacer, PacingInput},
@@ -59,7 +59,8 @@ pub(in crate::v1) type Batch =
     DatagramBatch<DequeSealedPacket, DequeSealedPacket, DequeSealedPacket, usize>;
 
 /// A pacer that only counts what it is charged, and a congestion
-/// controller that gives each packet sealed its own size.
+/// controller that gives each packet sealed the bytes in flight it was told
+/// of.
 #[derive(Debug, Default)]
 pub(in crate::v1) struct Charged(usize);
 
@@ -69,8 +70,8 @@ impl CongestionController<u64> for Charged {
     fn window(&self) -> usize {
         usize::MAX
     }
-    fn on_packet_sealed(&mut self, bytes: usize, _: bool, _: u64) -> usize {
-        bytes
+    fn on_packet_sealed(&mut self, packet: &SealedPacket<u64>) -> usize {
+        packet.bytes_in_flight
     }
     fn on_spurious_loss(
         &mut self,
@@ -330,6 +331,22 @@ fn a_client_initial_and_a_handshake_packet_are_coalesced_and_padded_to_1200() {
             .as_ref()
             .map(|charge| charge.bytes),
         Some(second_len)
+    );
+    // and is told of the bytes in flight once it is sealed: those of the
+    // packets before it in the datagram, and its own
+    assert_eq!(
+        initial_packet
+            .in_flight
+            .as_ref()
+            .map(|charge| charge.sent_state),
+        Some(first_len)
+    );
+    assert_eq!(
+        handshake_packet
+            .in_flight
+            .as_ref()
+            .map(|charge| charge.sent_state),
+        Some(1200)
     );
     let initial_record = record(&mut initial, initial_packet.sealed);
     assert_eq!(initial_record.bytes, first_len);

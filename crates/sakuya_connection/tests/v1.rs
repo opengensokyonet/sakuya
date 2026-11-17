@@ -401,7 +401,7 @@ mod spy {
     use sakuya_link::EcnMarking;
     use sakuya_recovery::{
         congestion::{
-            CongestionContext, CongestionController, InFlightPacket, RemovedPacket,
+            CongestionContext, CongestionController, InFlightPacket, RemovedPacket, SealedPacket,
             SpuriouslyLostPacket,
         },
         ecn::{EcnContext, EcnPolicy},
@@ -466,8 +466,8 @@ mod spy {
         fn window(&self) -> usize {
             self.0.window()
         }
-        fn on_packet_sealed(&mut self, bytes: usize, app_limited: bool, now: Duration) {
-            self.0.on_packet_sealed(bytes, app_limited, now);
+        fn on_packet_sealed(&mut self, packet: &SealedPacket<Duration>) {
+            self.0.on_packet_sealed(packet);
         }
         fn on_spurious_loss(
             &mut self,

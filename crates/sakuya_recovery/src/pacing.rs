@@ -13,7 +13,7 @@ use crate::{
     checked_duration_since,
     congestion::{
         CongestionContext, CongestionController, InFlightPacket, InitialWindow, RemovedPacket,
-        SpuriouslyLostPacket,
+        SealedPacket, SpuriouslyLostPacket,
     },
     ecn::{EcnContext, EcnPolicy},
     pto::{PtoAction, PtoExpiry, PtoPolicy},
@@ -104,9 +104,8 @@ impl<I, C: CongestionController<I>, P> CongestionController<I> for PacedCongesti
         self.congestion_controller.window()
     }
 
-    fn on_packet_sealed(&mut self, bytes: usize, app_limited: bool, now: I) -> Self::SentState {
-        self.congestion_controller
-            .on_packet_sealed(bytes, app_limited, now)
+    fn on_packet_sealed(&mut self, packet: &SealedPacket<I>) -> Self::SentState {
+        self.congestion_controller.on_packet_sealed(packet)
     }
 
     fn on_spurious_loss(

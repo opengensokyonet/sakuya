@@ -4,8 +4,8 @@ use super::{
 };
 use crate::{
     congestion::{
-        CongestionContext, CongestionController, InFlightPacket, InitialWindow, cubic::CubicConfig,
-        new_reno::NewRenoConfig,
+        CongestionContext, CongestionController, InFlightPacket, InitialWindow, SealedPacket,
+        cubic::CubicConfig, new_reno::NewRenoConfig,
     },
     pacing::{Pacer, PacingInput, RECOMMENDED_PACING_GAIN, TokenBucketPacerConfig},
     pmtu::{BinarySearchPmtuPolicyConfig, PmtuPolicy},
@@ -171,7 +171,12 @@ fn a_cubic_link_path_part_is_lent_as_it_is() {
     assert_eq!(window_left(&mut factory, &mut part, &(), 4800), 7200);
     // A loss through the lent access reduces the part's window by 0.7.
     let access = LendCongestion::<Duration, ()>::lend(&mut factory, &mut part, &());
-    let sent_state = access.on_packet_sealed(1200, false, ms(10));
+    let sent_state = access.on_packet_sealed(&SealedPacket {
+        bytes: 1200,
+        app_limited: false,
+        bytes_in_flight: 1200,
+        now: ms(10),
+    });
     let packet = InFlightPacket {
         bytes: 1200,
         sent_at: ms(10),

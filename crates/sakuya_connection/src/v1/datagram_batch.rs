@@ -32,8 +32,11 @@ use bytes::{Bytes, BytesMut};
 use sakuya_link::{EcnMarking, OutgoingDatagram};
 use sakuya_packet_protection::{backend::CryptoBackend, packet_number::EncodePacketNumberError};
 use sakuya_recovery::{
-    congestion::CongestionController, loss_detection::InFlightCharge, pacing::Pacer,
-    packet_number_space::PacketNumberSpaceKind, send_journals::PacketSendAttempt,
+    congestion::{CongestionController, SealedPacket},
+    loss_detection::InFlightCharge,
+    pacing::Pacer,
+    packet_number_space::PacketNumberSpaceKind,
+    send_journals::PacketSendAttempt,
 };
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength},
@@ -626,10 +629,21 @@ where
         let len = self.len();
         let app_limited = self.congestion.app_limited();
         let (controller, now) = (&mut *self.controller, self.now);
-        let mut charge = |bytes: usize| InFlightCharge {
-            bytes,
-            app_limited,
-            sent_state: controller.on_packet_sealed(bytes, app_limited, now),
+        // the datagram's bytes come in flight when it is charged below;
+        // each packet is told of those sealed before it and of itself
+        let mut bytes_in_flight = self.congestion.bytes_in_flight();
+        let mut charge = |bytes: usize| {
+            bytes_in_flight = bytes_in_flight.saturating_add(bytes);
+            InFlightCharge {
+                bytes,
+                app_limited,
+                sent_state: controller.on_packet_sealed(&SealedPacket {
+                    bytes,
+                    app_limited,
+                    bytes_in_flight,
+                    now,
+                }),
+            }
         };
         let initial = self.initial.take().map(|packet| BatchedPacket {
             sealed: packet.sealed,
