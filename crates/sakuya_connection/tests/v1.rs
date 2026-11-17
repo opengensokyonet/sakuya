@@ -543,6 +543,9 @@ mod spy {
             handshake_confirmed: bool,
             context: &CongestionContext<Duration>,
         ) {
+            log(format!(
+                "size in use {new}, handshake confirmed {handshake_confirmed}"
+            ));
             self.0
                 .on_max_datagram_size_changed(new, handshake_confirmed, context);
         }
@@ -6508,6 +6511,37 @@ fn a_probe_goes_past_a_full_congestion_window_on_a_permit() {
         let packet = open_sent_initial(datagram);
         assert_eq!(packet.payload[0], 0x01, "a PING");
     }
+}
+
+#[test]
+fn the_controller_hears_of_the_size_in_use_at_the_first_datagram_and_not_again_while_it_stays() {
+    reset();
+    let first = link();
+    feed([(
+        ms(6),
+        probe::Step::Sent {
+            space: PacketNumberSpaceKind::Initial,
+            count: 1,
+        },
+    )]);
+    let mut connection = connection!(SpyMine, AddressValidation::NotValidated, first.clone());
+    deliver(
+        padded(
+            &[],
+            |payload| initial_from(&CLIENT_SCID, 0, payload),
+            &ping(),
+        ),
+        &first,
+        ms(5),
+    );
+    take_log();
+    let mut log = run(&mut connection, 5..=6);
+    assert_eq!(common::take_sent().len(), 1, "the ACK");
+    // the probe timeout's PING is the second datagram
+    log.extend(run(&mut connection, 1005..=1006));
+    assert_eq!(common::take_sent().len(), 1, "the probe");
+    let told = lines_of(log, &["size in use"]);
+    assert_eq!(told, ["size in use 1200, handshake confirmed false"]);
 }
 
 #[test]

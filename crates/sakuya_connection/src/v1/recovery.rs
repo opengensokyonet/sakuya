@@ -19,9 +19,9 @@
 //! [`OtherCongestionParts`], and uses what is lent.
 use core::{fmt, marker::PhantomData};
 
-use sakuya_link::{Link, MIN_DATAGRAM_SIZE};
+use sakuya_link::Link;
 use sakuya_recovery::{
-    congestion::CongestionController,
+    congestion::{CongestionContext, CongestionController},
     factory::{LendCongestion, RecoveryFactory},
     pacing::{Pacer, PacingInput},
     pmtu::PmtuPolicy,
@@ -54,8 +54,12 @@ use crate::{
 };
 
 use super::{
-    Choices, ConnectionArgs, link::LinkClone, loss_detection::LossFactsReads, own_args,
+    Choices, ConnectionArgs,
+    link::LinkClone,
+    loss_detection::LossFactsReads,
+    own_args,
     parameters::PeerTransportParameters,
+    send_planning::{CongestionAllowance, datagram_limits},
 };
 
 /// The recovery factory of the choices `T` for the list of parts `L`.
@@ -364,8 +368,9 @@ where
 
 /// What the protocol defines for a link path's congestion control, beside
 /// the controller: the bytes in flight, the permits to send datagrams past
-/// the window, whether sending is limited by the application, and the
-/// arrival of the first RTT sample.
+/// the window, whether sending is limited by the application, the arrival
+/// of the first RTT sample, and the maximum datagram size the controller
+/// was last told of.
 ///
 /// The controller is not in it; the methods take what the factory lends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -374,6 +379,8 @@ pub struct LinkPathCongestionState<I> {
     probe_permits: u8,
     app_limited: bool,
     first_rtt_sample_at: Option<I>,
+    /// `None` until the link path's first datagram.
+    max_datagram_size_told: Option<usize>,
 }
 
 impl<I> Default for LinkPathCongestionState<I> {
@@ -383,15 +390,34 @@ impl<I> Default for LinkPathCongestionState<I> {
             probe_permits: 0,
             app_limited: false,
             first_rtt_sample_at: None,
+            max_datagram_size_told: None,
         }
     }
 }
 
 impl<I: Copy> LinkPathCongestionState<I> {
     /// Nothing in flight, no permits, not limited by the application, no
-    /// sample yet.
+    /// sample yet, no maximum datagram size told.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A datagram starts with `size` as the maximum datagram size in use:
+    /// the controller hears of it when it is not the size the controller
+    /// was last told of, at the link path's first datagram too (RFC 9002
+    /// §7.2), with whether the handshake is confirmed and `context`.
+    pub fn on_max_datagram_size<C: CongestionController<I>>(
+        &mut self,
+        controller: &mut C,
+        size: usize,
+        handshake_confirmed: bool,
+        context: &CongestionContext<I>,
+    ) {
+        if self.max_datagram_size_told == Some(size) {
+            return;
+        }
+        self.max_datagram_size_told = Some(size);
+        controller.on_max_datagram_size_changed(size, handshake_confirmed, context);
     }
 
     /// The bytes in flight.
@@ -516,20 +542,32 @@ pub(super) fn refill<I, C: CongestionController<I> + Pacer<I>>(
     controller.refill(at, input);
 }
 
-/// The maximum datagram size a link path uses: the smallest of what its
-/// probing policy concluded, the peer's `max_udp_payload_size` once its
-/// transport parameters are known, and the link's limit raised to 1200
-/// (RFC 9000 §14). A link whose limit cannot be told gives 1200 only.
+/// The maximum datagram size a link path uses: what its
+/// [`DatagramLimits`](crate::send_strategy::DatagramLimits) give as
+/// [`max_udp_payload`](crate::send_strategy::DatagramLimits::max_udp_payload)
+/// from the same raw quantities. That is the smallest of what its probing
+/// policy concluded, the peer's `max_udp_payload_size` (its default 65527
+/// while the peer's transport parameters are not known) and the link's
+/// limit raised to 1200 (RFC 9000 §14); a link whose limit cannot be told
+/// leaves the first two.
 pub fn max_datagram_size_in_use(
     conclusion: usize,
     peer_limit: Option<usize>,
     link_limit: Option<usize>,
 ) -> usize {
-    let link = link_limit.unwrap_or(0).max(MIN_DATAGRAM_SIZE);
-    conclusion
-        .min(peer_limit.unwrap_or(usize::MAX))
-        .min(link)
-        .max(MIN_DATAGRAM_SIZE)
+    let nothing_allowed = CongestionAllowance {
+        window_left: 0,
+        pacing_allowance: 0,
+        pacing_release_pending: false,
+        probe_permits: 0,
+    };
+    datagram_limits(
+        link_limit,
+        peer_limit,
+        None,
+        Some((conclusion, nothing_allowed)),
+    )
+    .max_udp_payload()
 }
 
 /// The peer's `max_udp_payload_size`: its default 65527 when the peer left

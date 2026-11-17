@@ -353,20 +353,25 @@ pub type FillStreamsRest<'x, T, L, It, Iw> =
 
 /// What filling reads from what is left of the lineage at the start of
 /// each datagram: the link's clone and facts, the peer's transport
-/// parameters, the packet number states of the spaces, and the data only
-/// this side has, which gives the token of its Initial packets.
+/// parameters, the packet number states of the spaces, the data only this
+/// side has, which gives the token of its Initial packets, and whether the
+/// handshake is confirmed.
 pub type FillReads<T, L> = HList![
     LinkClone<<T as crate::clock::ConnectionChoices>::Link>,
     LinkFacts,
     PeerTransportParameters<TransportParameterSlots<L>>,
     PacketNumberSpaces<PacketNumberSpaceState>,
     <<T as crate::v1::MakerChoices>::Side as Side>::Own,
+    HandshakeConfirmation,
 ];
 
-/// What filling takes from the link path's recovery layer.
+/// What filling takes from the link path's recovery layer: the stored part
+/// of congestion control, the fixed state beside it, and the datagram size
+/// probing policy, which sees the start of each datagram.
 pub type FillRecoveryTakes<T, L> = HList![
     CongestionPartOf<T, L>,
     LinkPathCongestionState<InstantOf<T>>,
+    PmtuOf<T, L>,
 ];
 
 /// What settling takes from the link path's recovery layer, with the loss
@@ -745,8 +750,7 @@ where
         // what the layer only reads is read without taking it
         let read = others.recovery_ref().map(|flat| {
             let rtt: &&RttOf<T, L> = Selector::<_, Jr>::get(&flat);
-            let pmtu: &&PmtuOf<T, L> = Selector::<_, Jm>::get(&flat);
-            (rtt.estimate(), pmtu.conclusion())
+            rtt.estimate()
         });
         // woken when the layer is built
         let no_layer = if batch.is_empty() {
@@ -754,7 +758,7 @@ where
         } else {
             Poll::Ready(())
         };
-        let Some((estimate, pmtu_conclusion)) = read else {
+        let Some(estimate) = read else {
             return no_layer;
         };
         if let Err(source) =
@@ -806,7 +810,7 @@ where
                     EstablishedSourceComponentsOfParts::<T, L>::reborrow(&mut established),
                 );
                 others.with_own_recovery::<FillRecoveryTakes<T, L>, Ik, _>(
-                    |hlist_pat![part, state], others| {
+                    |hlist_pat![part, state, pmtu], others| {
                         lend_congestion::<T, L, B, Jx, Jr, _>(
                             factory,
                             part,
@@ -830,7 +834,7 @@ where
                                     rest: &mut rest,
                                     access: &mut access,
                                     estimate,
-                                    pmtu_conclusion,
+                                    pmtu,
                                     state,
                                     positions: core::marker::PhantomData,
                                 };
@@ -1014,7 +1018,8 @@ where
     rest: &'f mut Lineage<'r, V>,
     access: &'f mut A,
     estimate: RttEstimate,
-    pmtu_conclusion: usize,
+    /// Sees the start of each datagram, and gives the size it is sent at.
+    pmtu: &'f mut PmtuOf<T, L>,
     state: &'f mut LinkPathCongestionState<InstantOf<T>>,
     positions: core::marker::PhantomData<FillPositions<Ir, Ici, Ipp, Hs, Hd, Ipd>>,
 }
@@ -1093,27 +1098,44 @@ where
         cx: &mut Context<'_>,
     ) -> DatagramEnd {
         let role = <T::Side as Side>::ROLE;
-        // what the link path can send now, the pacer refilled first: it
-        // releases nothing before its first refill
-        let hlist_pat![link, facts, peer, numbers, own] =
+        let hlist_pat![link, facts, peer, numbers, own, confirmation] =
             Lineage::read_each::<FillReads<T, L>, Ir>(&*self.rest);
         let initial_token = <T::Side as Side>::initial_token(own);
         let link_ceiling = link.0.max_datagram_size().ok();
         let peer_max_udp_payload = peer_max_udp_payload_size::<L, Ipp>(peer);
         let validation = facts.validation;
         let numbers = numbers.clone();
-        refill(
+        // the probing policy sees the start of the datagram with the
+        // largest size a probe may try, and then gives its conclusion
+        let ceiling =
+            datagram_limits(link_ceiling, peer_max_udp_payload, None, None).probe_ceiling();
+        self.pmtu.on_datagram_start(&link.0, ceiling);
+        let pmtu_conclusion = self.pmtu.conclusion();
+        // the controller hears of the size in use before the pacer is
+        // refilled with its window
+        let size = max_datagram_size_in_use(pmtu_conclusion, peer_max_udp_payload, link_ceiling);
+        let context = CongestionContext {
+            now: self.now,
+            bytes_in_flight: self.state.bytes_in_flight(),
+            rtt: self.estimate,
+            rtt_sampled: false,
+            max_datagram_size: size,
+        };
+        self.state.on_max_datagram_size(
             &mut *self.access,
-            self.now,
-            &self.estimate,
-            max_datagram_size_in_use(self.pmtu_conclusion, peer_max_udp_payload, link_ceiling),
+            size,
+            *confirmation == HandshakeConfirmation::Confirmed,
+            &context,
         );
+        // what the link path can send now, the pacer refilled first: it
+        // releases nothing before its first refill
+        refill(&mut *self.access, self.now, &self.estimate, size);
         let limits = datagram_limits(
             link_ceiling,
             peer_max_udp_payload,
             self.amplification.credit(validation),
             Some((
-                self.pmtu_conclusion,
+                pmtu_conclusion,
                 CongestionAllowance {
                     window_left: self.state.window_left(&*self.access),
                     pacing_allowance: Pacer::allowance(&*self.access),

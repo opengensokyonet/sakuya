@@ -336,6 +336,7 @@ fn local_parameters_are_settled_when_sent() {
 
 mod recovery {
     use super::super::recovery::{LinkPathCongestionState, max_datagram_size_in_use};
+    use crate::send_strategy::DatagramLimits;
     use core::time::Duration;
     use sakuya_recovery::{
         congestion::{CongestionController, new_reno::NewReno, new_reno::NewRenoConfig},
@@ -344,14 +345,35 @@ mod recovery {
     };
 
     #[test]
-    fn the_size_in_use_is_the_smallest_limit_but_not_below_1200() {
+    fn the_size_in_use_is_what_the_datagram_limits_give() {
         // the conclusion, the peer's limit and the link's limit
         assert_eq!(max_datagram_size_in_use(1500, None, Some(1452)), 1452);
         assert_eq!(max_datagram_size_in_use(1400, Some(1350), Some(1452)), 1350);
         assert_eq!(max_datagram_size_in_use(1400, None, Some(9000)), 1400);
-        // a link below 1200 is raised to it; one that cannot tell gives 1200
+        // a link below 1200 is raised to it
         assert_eq!(max_datagram_size_in_use(1400, None, Some(1000)), 1200);
-        assert_eq!(max_datagram_size_in_use(1400, None, None), 1200);
+        // a link that cannot tell leaves the conclusion and the peer's
+        // limit, 65527 while the peer's is not known
+        assert_eq!(max_datagram_size_in_use(1400, None, None), 1400);
+        assert_eq!(max_datagram_size_in_use(70000, None, None), 65527);
+        assert_eq!(max_datagram_size_in_use(1400, Some(1300), None), 1300);
+        // a conclusion below 1200 is not raised
+        assert_eq!(max_datagram_size_in_use(1100, None, Some(1452)), 1100);
+        // the same as the limits of a datagram with the same raw quantities
+        let limits = DatagramLimits {
+            link_ceiling: Some(1452),
+            peer_max_udp_payload: 1350,
+            pmtu_conclusion: 1400,
+            anti_amplification_credit: None,
+            congestion_window_left: 0,
+            pacing_allowance: 0,
+            pacing_release_pending: false,
+            probe_permits: 0,
+        };
+        assert_eq!(
+            max_datagram_size_in_use(1400, Some(1350), Some(1452)),
+            limits.max_udp_payload()
+        );
     }
 
     #[test]
