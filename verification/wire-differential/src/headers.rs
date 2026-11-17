@@ -7,7 +7,8 @@
 //! it; [`compare_quinn`] and [`compare_s2n`] classify where the adapters
 //! disagree with sakuya.
 use crate::tally::{self, Comparison};
-use bytes::BytesMut;
+use bytes::{Buf, BytesMut};
+use nitori_io::SplitTo;
 use quinn_proto::{
     FixedLengthConnectionIdParser, LongType, PacketDecodeError, PartialDecode, ProtectedHeader,
 };
@@ -20,16 +21,10 @@ use s2n_quic_core::{
 use sakuya_wire::{
     connection_id::ConnectionIdLength,
     header::{
-        HeaderForm, LongHeader, ShortHeader, VersionNegotiation,
-        codec::{
-            ReadLongHeaderError, ReadShortHeaderError, ReadVersionNegotiationError,
-            read_long_header, read_short_header, read_version_negotiation,
-        },
+        HeaderForm,
+        codec::{read_long_header, read_short_header, read_version_negotiation},
     },
-    v1::header::{
-        self as v1, LongPacket, TypeFields,
-        codec::{ReadLongPacketError, read_long_packet},
-    },
+    v1::header::{self as v1, LongPacket, TypeFields, codec::read_long_packet},
     version::Version,
 };
 
@@ -91,56 +86,6 @@ impl Packet {
     }
 }
 
-/// A source of a datagram that sakuya's header readers read from.
-pub trait Source<'a> {
-    fn long_header(&mut self) -> Result<LongHeader, ReadLongHeaderError>;
-    fn short_header(
-        &mut self,
-        dcid_len: ConnectionIdLength,
-    ) -> Result<ShortHeader<&'a [u8]>, ReadShortHeaderError>;
-    fn version_negotiation(
-        &mut self,
-        header: LongHeader,
-    ) -> Result<VersionNegotiation<&'a [u8]>, ReadVersionNegotiationError>;
-    fn long_packet(
-        &mut self,
-        header: LongHeader,
-    ) -> Result<LongPacket<&'a [u8]>, ReadLongPacketError>;
-    /// The bytes not yet read.
-    fn rest(&self) -> &'a [u8];
-}
-
-impl<'a> Source<'a> for &'a [u8] {
-    fn long_header(&mut self) -> Result<LongHeader, ReadLongHeaderError> {
-        read_long_header(self)
-    }
-
-    fn short_header(
-        &mut self,
-        dcid_len: ConnectionIdLength,
-    ) -> Result<ShortHeader<&'a [u8]>, ReadShortHeaderError> {
-        read_short_header(self, dcid_len)
-    }
-
-    fn version_negotiation(
-        &mut self,
-        header: LongHeader,
-    ) -> Result<VersionNegotiation<&'a [u8]>, ReadVersionNegotiationError> {
-        read_version_negotiation(self, header)
-    }
-
-    fn long_packet(
-        &mut self,
-        header: LongHeader,
-    ) -> Result<LongPacket<&'a [u8]>, ReadLongPacketError> {
-        read_long_packet(self, header)
-    }
-
-    fn rest(&self) -> &'a [u8] {
-        self
-    }
-}
-
 /// The model of a version 1 long packet that sakuya read; `bytes` gives the
 /// bytes of a token that `D` holds.
 pub fn long_packet_model<D>(packet: &LongPacket<D>, bytes: impl Fn(&D) -> Vec<u8>) -> Packet {
@@ -176,27 +121,27 @@ pub fn long_packet_model<D>(packet: &LongPacket<D>, bytes: impl Fn(&D) -> Vec<u8
 
 /// Interprets the packet at the start of `source` with sakuya, layer by
 /// layer, leaving `source` after the packet.
-pub fn read_sakuya_from<'a>(
-    source: &mut impl Source<'a>,
-    short_dcid_len: ConnectionIdLength,
-) -> Option<Packet> {
-    let first = *source.rest().first()?;
+pub fn read_sakuya_from<S>(source: &mut S, short_dcid_len: ConnectionIdLength) -> Option<Packet>
+where
+    S: Buf + SplitTo + AsRef<[u8]> + Clone,
+{
+    let first = *source.as_ref().first()?;
     if HeaderForm::of(first) == HeaderForm::Short {
-        let short = source.short_header(short_dcid_len).ok()?;
+        let short = read_short_header(source, short_dcid_len).ok()?;
         let mut model = Packet::new(Kind::Short, short.dcid().as_bytes());
         model.pn_offset = Some(short.packet_number_offset());
         model.end = Some(short.end());
         return Some(model);
     }
-    let long = source.long_header().ok()?;
+    let long = read_long_header(source).ok()?;
     let mut model = Packet::new(Kind::OtherVersion, long.dcid().as_bytes());
     model.scid = Some(long.scid().as_bytes().to_vec());
     model.version = Some(long.version().get());
     match long.version() {
         Version::NEGOTIATION => {
             let start = long.version_specific_offset();
-            let negotiation = source.version_negotiation(long).ok()?;
-            let versions: &[u8] = negotiation.versions();
+            let negotiation = read_version_negotiation(source, long).ok()?;
+            let versions = negotiation.versions().as_ref();
             assert!(
                 negotiation
                     .supported_versions()
@@ -212,8 +157,8 @@ pub fn read_sakuya_from<'a>(
             Some(model)
         }
         v1::VERSION => {
-            let packet = source.long_packet(long).ok()?;
-            Some(long_packet_model(&packet, |token| token.to_vec()))
+            let packet = read_long_packet(source, long).ok()?;
+            Some(long_packet_model(&packet, |token| token.as_ref().to_vec()))
         }
         _ => Some(model),
     }

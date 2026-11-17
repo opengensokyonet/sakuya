@@ -61,7 +61,9 @@ read and written again gives the bytes it was read from; transport parameters
 written and read again give the same parameters; truncated input fails as
 incomplete; every failure reports the transport error code or TLS alert the
 RFCs name; a buffer with exactly the room a write takes receives the bytes a
-growing buffer gets.
+growing buffer gets; a source that hands out its bytes in chunks of a few
+bytes reads the variable-length integers, frames, transport parameters and
+packet headers a contiguous slice reads.
 
 The comparisons cover what the implementations read from a packet payload, a
 transport parameter list, a datagram or a handshake message, what they write,
