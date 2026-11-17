@@ -164,6 +164,8 @@ pub(crate) type ClientChoices =
     ClientConnectionChoices<Udp, InteropChoices, ClientStarts, ClientTokens, ContinueOnRetry>;
 
 pub(crate) type Parts = frunk_core::HList![v1::Part];
+sakuya_connection::composition!(impl Send for InteropChoices: ServerChoices, Parts);
+sakuya_connection::composition!(impl Send for InteropChoices: ClientChoices, Parts);
 
 pub(crate) type Server = AcceptingServer<
     InteropChoices,

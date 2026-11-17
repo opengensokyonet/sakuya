@@ -28,12 +28,22 @@
 //! advancing call of the connection, which runs the handshake, the
 //! receiving call of each logical path and the sending call of each link
 //! path.
-#![feature(associated_type_defaults, impl_trait_in_assoc_type, yield_expr)]
+#![feature(
+    allow_internal_unstable,
+    associated_type_defaults,
+    impl_trait_in_assoc_type,
+    yield_expr
+)]
+#![expect(
+    internal_features,
+    reason = "`composition!` writes opaque associated types for crates that do not enable them"
+)]
 #![warn(missing_docs)]
 
 pub mod call;
 pub mod clock;
 pub mod component;
+pub mod composition;
 pub mod connection_id;
 #[cfg(feature = "datagram")]
 pub mod datagram;

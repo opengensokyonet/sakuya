@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use sakuya_connection::{
     clock::ConnectionChoices,
+    composition::Composition,
     layer::Connection,
     share::{LayerShares, LogicalPathKeys, SoleLogicalPath},
     v1,
@@ -141,6 +142,8 @@ pub trait AcceptingServerRole<E: EndpointChoices>:
     type Tokens: AddressTokens + TokenPeerAddress<PeerOf<E>> + Clone;
     /// When to answer a new Initial with a stateless Retry.
     type RetryPolicy: StatelessRetryPolicy + Clone;
+    /// Where the positions of the role's connections are inferred.
+    type Composition: Composition<Self::Choices, Self::Parts>;
 }
 
 /// The side of the connections of a client role whose handshakes `H`
@@ -182,6 +185,8 @@ pub trait ConnectingClientRole<E: EndpointChoices>:
         + 'static;
     /// What decides whether a connection goes on after a valid Retry.
     type RetryPolicy: v1::retry::ClientRetryPolicy + Clone + 'static;
+    /// Where the positions of the role's connections are inferred.
+    type Composition: Composition<Self::Choices, Self::Parts>;
 }
 
 // ---- the choices of the roles' connections ----
@@ -392,7 +397,8 @@ impl<U, L, H, Tk, Rp> sealed::Sealed for AcceptingServer<U, L, H, Tk, Rp> {}
 impl<E, U, L, H, Tk, Rp> ServerRole<E> for AcceptingServer<U, L, H, Tk, Rp>
 where
     E: EndpointChoices,
-    U: v1::HostChoices<ServerConnectionChoices<E, U, H>>,
+    U: v1::HostChoices<ServerConnectionChoices<E, U, H>>
+        + Composition<ServerConnectionChoices<E, U, H>, L>,
     L: EndpointPartList<ServerConnectionChoices<E, U, H>>,
     H: ServerHandshakeConfig + 'static,
     Tk: AddressTokens + TokenPeerAddress<PeerOf<E>> + Clone + 'static,
@@ -439,7 +445,8 @@ where
 impl<E, U, L, H, Tk, Rp> AcceptingServerRole<E> for AcceptingServer<U, L, H, Tk, Rp>
 where
     E: EndpointChoices,
-    U: v1::HostChoices<ServerConnectionChoices<E, U, H>>,
+    U: v1::HostChoices<ServerConnectionChoices<E, U, H>>
+        + Composition<ServerConnectionChoices<E, U, H>, L>,
     L: EndpointPartList<ServerConnectionChoices<E, U, H>>,
     H: ServerHandshakeConfig + 'static,
     Tk: AddressTokens + TokenPeerAddress<PeerOf<E>> + Clone + 'static,
@@ -450,6 +457,7 @@ where
     type Handshake = H;
     type Tokens = Tk;
     type RetryPolicy = Rp;
+    type Composition = U;
 }
 
 /// The client role for connections whose host's choices are `U` and list
@@ -469,7 +477,8 @@ impl<U, L, H, St, Rp> sealed::Sealed for ConnectingClient<U, L, H, St, Rp> {}
 impl<E, U, L, H, St, Rp> ClientRole<E> for ConnectingClient<U, L, H, St, Rp>
 where
     E: EndpointChoices,
-    U: v1::HostChoices<ClientConnectionChoices<E, U, H, St, Rp>>,
+    U: v1::HostChoices<ClientConnectionChoices<E, U, H, St, Rp>>
+        + Composition<ClientConnectionChoices<E, U, H, St, Rp>, L>,
     L: EndpointPartList<ClientConnectionChoices<E, U, H, St, Rp>>,
     H: ClientHandshakeConfig + 'static,
     St: AddressTokenStore<H::ServerName> + Clone + 'static,
@@ -495,7 +504,8 @@ where
 impl<E, U, L, H, St, Rp> ConnectingClientRole<E> for ConnectingClient<U, L, H, St, Rp>
 where
     E: EndpointChoices,
-    U: v1::HostChoices<ClientConnectionChoices<E, U, H, St, Rp>>,
+    U: v1::HostChoices<ClientConnectionChoices<E, U, H, St, Rp>>
+        + Composition<ClientConnectionChoices<E, U, H, St, Rp>, L>,
     L: EndpointPartList<ClientConnectionChoices<E, U, H, St, Rp>>,
     H: ClientHandshakeConfig + 'static,
     St: AddressTokenStore<H::ServerName> + Clone + 'static,
@@ -506,6 +516,7 @@ where
     type Handshake = H;
     type AddressTokens = St;
     type RetryPolicy = Rp;
+    type Composition = U;
 }
 
 /// `thresholds` checked against the endpoint's clock.

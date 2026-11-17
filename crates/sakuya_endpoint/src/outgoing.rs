@@ -13,11 +13,9 @@ use std::sync::Arc;
 use nitori_crypto::{Random as _, RandomError};
 use sakuya_clock::MonotonicClock as _;
 use sakuya_connection::{
-    call::{CallPositions, TreeCalls},
-    driver::ConnectionDriver,
     error::ConnectionErrorsOf,
     send_strategy::{AnyActiveLinkPath, SendStrategy},
-    share::{ConnectionArgsOf, LineageLists},
+    share::ConnectionArgsOf,
     v1::{
         self as connection, ConnectionArgs,
         address_token::fits_initial_packet,
@@ -53,7 +51,6 @@ use crate::{
     domain::Domain,
     endpoint::EndpointClosedError,
     handshake::ClientHandshakeConfig,
-    make::MakeConnection,
     part::CoreFacts,
     role::ConnectingClientRole,
     zero_length::{ZeroLengthLocalCidInUseError, ZeroLengthLocalOccupancy},
@@ -163,21 +160,16 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
     /// the endpoint's clock, as it may be after its configuration was
     /// replaced; when the endpoint's random source gives no destination
     /// connection ID, as the client must not choose a predictable one.
-    #[expect(clippy::type_complexity, reason = "the driver's inferred positions")]
-    pub fn start<P, W, Bw, I>(
+    pub fn start<I>(
         mut self,
     ) -> Result<
         (
-            ConnectionDriver<C::Choices, C::Parts, P, W, Bw>,
+            impl Future<Output = ()> + Unpin + 'static,
             ConnectionHandle<C::Choices, C::Parts>,
         ),
         StartOutgoingError<Self>,
     >
     where
-        C::Parts: TreeCalls<C::Choices, P>,
-        for<'v> C::Parts: LineageLists<'v, C::Choices>,
-        P: CallPositions,
-        ConnectionDriver<C::Choices, C::Parts, P, W, Bw>: MakeConnection<C::Choices, C::Parts>,
         ConnectionArgsOf<C::Choices, C::Parts>: Selector<ConnectionArgs<C::Choices, C::Parts>, I>,
         C::Parts: ConnectionErrorsOf,
         SendTypes<C::Choices, C::Parts>: IntakePublishOutcome<
@@ -262,7 +254,7 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
             local_connection_id_issuer: first_local.issuer,
             close_request: CloseRequestCell::new(),
         };
-        let (driver, handle) = make_connection::<C::Choices, C::Parts, _, I>(
+        let (driver, handle) = make_connection::<C::Choices, C::Parts, C::Composition, I>(
             domain.clock.clone(),
             config.parts,
             core,

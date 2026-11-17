@@ -31,11 +31,9 @@ use nitori_crypto::RandomError;
 use sakuya_clock::MonotonicClock as _;
 use sakuya_connection::v1::input::LogicalPathDatagramReceiver as _;
 use sakuya_connection::{
-    call::{CallPositions, TreeCalls},
-    driver::ConnectionDriver,
     error::ConnectionErrorsOf,
     send_strategy::{AnyActiveLinkPath, SendStrategy},
-    share::{ConnectionArgsOf, LineageLists},
+    share::ConnectionArgsOf,
     v1::{
         self as connection, ConnectionArgs,
         advancing::HandshakeStart,
@@ -77,7 +75,6 @@ use crate::{
     handshake::ServerHandshakeConfig as _,
     invalid_token::encode_initial_close,
     late_initial::LateInitials,
-    make::MakeConnection,
     part::CoreFacts,
     reflow,
     retry::{EncodeStatelessRetryError, encode_stateless_retry, generate_stateless_scid},
@@ -222,25 +219,20 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
     /// refused; when the timer granularity of its loss detection thresholds
     /// is finer than the endpoint's clock, as it may be after its
     /// configuration was replaced.
-    #[expect(clippy::type_complexity, reason = "the driver's inferred positions")]
     #[expect(
         clippy::result_large_err,
         reason = "the error gives the incoming connection back by value"
     )]
-    pub fn accept<P, W, Bw, I>(
+    pub fn accept<I>(
         mut self,
     ) -> Result<
         (
-            ConnectionDriver<S::Choices, S::Parts, P, W, Bw>,
+            impl Future<Output = ()> + Unpin + 'static,
             ConnectionHandle<S::Choices, S::Parts>,
         ),
         AcceptIncomingError<Self>,
     >
     where
-        S::Parts: TreeCalls<S::Choices, P>,
-        for<'v> S::Parts: LineageLists<'v, S::Choices>,
-        P: CallPositions,
-        ConnectionDriver<S::Choices, S::Parts, P, W, Bw>: MakeConnection<S::Choices, S::Parts>,
         ConnectionArgsOf<S::Choices, S::Parts>: Selector<ConnectionArgs<S::Choices, S::Parts>, I>,
         S::Parts: ConnectionErrorsOf,
         SendTypes<S::Choices, S::Parts>: IntakePublishOutcome<
@@ -318,7 +310,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             local_connection_id_issuer: first_local.issuer,
             close_request: CloseRequestCell::new(),
         };
-        let (driver, handle) = make_connection::<S::Choices, S::Parts, _, I>(
+        let (driver, handle) = make_connection::<S::Choices, S::Parts, S::Composition, I>(
             domain.clock.clone(),
             config.parts,
             core,

@@ -4,6 +4,7 @@
 
 use sakuya_connection::v1::SendParametersOf;
 use sakuya_connection::{
+    composition::Composition,
     error::ConnectionErrorsOf,
     layer::{Connection, LinkPathArgs, LogicalPathArgs},
     role::LinkPathRole,
@@ -38,7 +39,6 @@ use crate::{
     domain::Domain,
     endpoint::EndpointClosedError,
     issuer::EndpointConnectionIdIssuer,
-    make::MakeConnection,
     part::{ConnectionFacts, CoreFacts, PartConfigs},
     zero_length::{ZeroLengthLocalOccupancy, ZeroLengthRegistration},
 };
@@ -121,12 +121,15 @@ pub(crate) fn register_first_local<E: EndpointChoices>(
 ///
 /// The handle shares the cells of version 1's start values, which `I`
 /// finds in the list of the parts' start values.
-pub(crate) fn make_connection<T, L, D, I>(
+pub(crate) fn make_connection<T, L, C, I>(
     clock: T::Clock,
     configs: <L as PartConfigs<T, L>>::Configs,
     core: CoreFacts<T>,
     link: T::Link,
-) -> (D, ConnectionHandle<T, L>)
+) -> (
+    impl Future<Output = ()> + Unpin + 'static,
+    ConnectionHandle<T, L>,
+)
 where
     T: v1::Choices,
     L: PartConfigs<T, L>
@@ -138,12 +141,12 @@ where
     SendStrategyOf<T, L>: SendStrategy<SendTypes<T, L>>,
     L: HandleShares<T, L, handle::EstablishedLayer>,
     ConnectionHandleCellOf<T, L>: Send + Sync + 'static,
-    D: MakeConnection<T, L>,
+    C: Composition<T, L>,
 {
     let mut facts = ConnectionFacts::new(core);
     let args = L::connection_args(configs, &mut facts);
     let handle = ConnectionHandle::new(Selector::<ConnectionArgs<T, L>, I>::get(&args));
-    let driver = D::make(
+    let (driver, _) = C::connection(
         clock,
         args,
         LogicalPathArgs {

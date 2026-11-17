@@ -36,7 +36,6 @@ use sakuya_connection::{
     component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
     connection_id::DestinationConnectionIdStrategy,
     dispatch::{DispatchFacts, FrameDispatch},
-    driver::ConnectionDriver,
     error::ConnectionErrorsOf,
     layer::{self, LinkPathArgs, LogicalPathArgs},
     others::OtherNodes,
@@ -458,6 +457,8 @@ choices!(
 /// The parts of the tests' connections: version 1, and the part that notes
 /// what the tests look at.
 type Parts = HList![v1::Part, watch::Part];
+sakuya_connection::composition!(impl for ServerChoices: ServerChoices, Parts);
+sakuya_connection::composition!(impl for ClientChoices: ClientChoices, Parts);
 
 // ---- what the tests look at ----
 
@@ -1062,7 +1063,7 @@ fn client_capacities() -> CryptoReceiveCapacities {
 /// the watch, and `$rest` for the parts after it.
 macro_rules! connection {
     ($t:ty, $args:expr, $link:expr, [$($before:expr),*] [$($after:expr),*]) => {
-        ConnectionDriver::<$t, Parts, _, _, _>::new(
+        <$t as sakuya_connection::composition::Composition<$t, Parts>>::connection(
             TestClock,
             frunk_core::hlist![$($before,)* $args $(, $after)*],
             LogicalPathArgs { path: PATH },
@@ -1073,6 +1074,7 @@ macro_rules! connection {
                 peer_switched_local_id: false,
             },
         )
+        .0
     };
 }
 
@@ -1950,6 +1952,8 @@ mod reliable {
     /// The parts of these connections: version 1, the watch, and the
     /// extension.
     type Parts = HList![v1::Part, watch::Part, reset_stream_at::Part];
+    sakuya_connection::composition!(impl for crate::ServerChoices: crate::ServerChoices, Parts);
+    sakuya_connection::composition!(impl for crate::ClientChoices: crate::ClientChoices, Parts);
 
     thread_local! {
         /// Whether each side announces `reset_stream_at`: the server's
@@ -2114,6 +2118,8 @@ mod datagram {
         v1::Part,
         datagram::Part
     ];
+    sakuya_connection::composition!(impl for crate::ServerChoices: crate::ServerChoices, Parts);
+    sakuya_connection::composition!(impl for crate::ClientChoices: crate::ClientChoices, Parts);
 
     thread_local! {
         /// The `max_datagram_frame_size` each side announces: the
