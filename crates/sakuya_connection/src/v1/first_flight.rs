@@ -29,7 +29,7 @@
 //! ClientHello from the CRYPTO receiver, which is all it is lent.
 //!
 //! A server that may hand the connection off for passthrough forwarding
-//! instead of accepting it asks the reading to keep a [`FirstFlightDigest`]
+//! instead of accepting it asks the reading to keep a [`FirstFlightLayout`]
 //! as well: the Initial packets are opened in place, so what was read is
 //! what it takes to build them again, not the datagrams as they arrived.
 
@@ -198,7 +198,7 @@ pub struct FirstFlightReadState<T: Choices> {
     start: FirstFlightStart<T>,
     max_ack_ranges: MaxAckRanges,
     max_held_inputs: usize,
-    digest: Option<FirstFlightDigest>,
+    layout: Option<FirstFlightLayout>,
 }
 
 impl<T, Tls> FirstFlightReadState<T>
@@ -236,14 +236,14 @@ where
             },
             max_ack_ranges,
             max_held_inputs,
-            digest: None,
+            layout: None,
         }
     }
 
-    /// Makes the reading keep a digest of the first flight from now on,
-    /// which [`take_digest`](Self::take_digest) gives.
-    pub fn keep_digest(&mut self) {
-        self.digest.get_or_insert_with(FirstFlightDigest::default);
+    /// Makes the reading keep a layout of the first flight from now on,
+    /// which [`layout`](Self::layout) gives.
+    pub fn keep_layout(&mut self) {
+        self.layout.get_or_insert_with(FirstFlightLayout::default);
     }
 }
 
@@ -253,28 +253,33 @@ impl<T: Choices> FirstFlightReadState<T> {
         self.start.first.as_ref()
     }
 
-    /// The first ClientHello, once it was read, the first time it is asked
-    /// for; `None` afterwards.
-    pub fn take_first_client_hello(&mut self) -> Option<FirstClientHello> {
-        self.start.first.take()
-    }
-
     /// The bytes the datagrams read so far held in all.
     pub fn received_bytes(&self) -> usize {
         self.start.received_bytes
     }
 
-    /// The 0-RTT packets held while the first flight was read, in the order
-    /// they arrived, the first time they are asked for; empty afterwards.
-    pub fn take_held(&mut self) -> Vec<HeldInputOf<T>> {
-        mem::take(&mut self.start.held)
+    /// The layout of the first flight read so far; `None` when the reading
+    /// was not asked to [keep one](Self::keep_layout).
+    pub fn layout(&self) -> Option<&FirstFlightLayout> {
+        self.layout.as_ref()
     }
 
-    /// The digest of the first flight read so far, the first time it is
-    /// asked for; `None` afterwards, and when the reading was not asked to
-    /// [keep one](Self::keep_digest).
-    pub fn take_digest(&mut self) -> Option<FirstFlightDigest> {
-        self.digest.take()
+    /// Ends the reading without making a connection of it, as a server that
+    /// hands the connection off does: gives the first ClientHello once it
+    /// was read, the 0-RTT packets held, in the order they arrived, and the
+    /// layout when one was kept. The rest is dropped.
+    ///
+    /// It takes the state by value: a connection made from what is left
+    /// would read the first ClientHello again from CRYPTO data already
+    /// read.
+    pub fn into_parts(
+        self,
+    ) -> (
+        Option<FirstClientHello>,
+        Vec<HeldInputOf<T>>,
+        Option<FirstFlightLayout>,
+    ) {
+        (self.start.first, self.start.held, self.layout)
     }
 }
 
@@ -284,7 +289,7 @@ impl<T: Choices> fmt::Debug for FirstFlightReadState<T> {
             .field("received_bytes", &self.start.received_bytes)
             .field("held", &self.start.held.len())
             .field("first_client_hello", &self.start.first.is_some())
-            .field("digest", &self.digest.is_some())
+            .field("layout", &self.layout.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -293,18 +298,18 @@ impl<T: Choices> fmt::Debug for FirstFlightReadState<T> {
 /// each datagram's size and, in order, the packets of it that were read.
 ///
 /// An Initial packet that opened and was not a duplicate is kept as an
-/// [`InitialPacketDigest`]; a 0-RTT packet that was held is kept as its
-/// place among the held packets ([`FirstFlightReadState::take_held`]).
+/// [`InitialPacketLayout`]; a 0-RTT packet that was held is kept as its
+/// place among the held packets ([`FirstFlightReadState::into_parts`]).
 /// Packets that did not open, were dropped or were not held are not kept.
 /// The CRYPTO data the Initial packets carried is not kept either: it is
 /// the first ClientHello, which the reading keeps.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct FirstFlightDigest {
+pub struct FirstFlightLayout {
     token: Option<Bytes>,
-    datagrams: Vec<DatagramDigest>,
+    datagrams: Vec<DatagramLayout>,
 }
 
-impl FirstFlightDigest {
+impl FirstFlightLayout {
     /// The Token field of the first Initial packet that opened, which the
     /// client repeats in every Initial packet of the attempt (RFC 9000
     /// §17.2.2); `None` when none opened.
@@ -313,45 +318,45 @@ impl FirstFlightDigest {
     }
 
     /// The datagrams read, in the order they arrived.
-    pub fn datagrams(&self) -> &[DatagramDigest] {
+    pub fn datagrams(&self) -> &[DatagramLayout] {
         &self.datagrams
     }
 }
 
-/// One datagram of a [`FirstFlightDigest`].
+/// One datagram of a [`FirstFlightLayout`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DatagramDigest {
+pub struct DatagramLayout {
     size: usize,
-    packets: Vec<PacketDigest>,
+    packets: Vec<PacketLayout>,
 }
 
-impl DatagramDigest {
+impl DatagramLayout {
     /// The size of the datagram as it arrived.
     pub fn size(&self) -> usize {
         self.size
     }
 
     /// The packets kept of it, in the order they were in it.
-    pub fn packets(&self) -> &[PacketDigest] {
+    pub fn packets(&self) -> &[PacketLayout] {
         &self.packets
     }
 }
 
-/// A packet of a [`DatagramDigest`].
+/// A packet of a [`DatagramLayout`].
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PacketDigest {
+pub enum PacketLayout {
     /// An Initial packet.
-    Initial(InitialPacketDigest),
+    Initial(InitialPacketLayout),
     /// A 0-RTT packet: the one at this index among the packets held.
     ZeroRtt(usize),
 }
 
-/// An Initial packet of a [`DatagramDigest`]: what it takes, with the
+/// An Initial packet of a [`DatagramLayout`]: what it takes, with the
 /// connection IDs of the attempt, the token and the first ClientHello, to
 /// build it again with the same packet number, the same size and the same
 /// CRYPTO data.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InitialPacketDigest {
+pub struct InitialPacketLayout {
     packet_number: PacketNumber,
     packet_number_length: PacketNumberLength,
     length: usize,
@@ -359,7 +364,7 @@ pub struct InitialPacketDigest {
     ping: bool,
 }
 
-impl InitialPacketDigest {
+impl InitialPacketLayout {
     /// The packet number.
     pub fn packet_number(&self) -> PacketNumber {
         self.packet_number
@@ -508,8 +513,8 @@ impl<T: Choices> fmt::Debug for FirstFlightStart<T> {
 /// competing delivery is left to the other candidates: its first packet is
 /// a long header, which takes the client's Source Connection ID to judge,
 /// or a 1-RTT packet. Failures to open do not count toward the integrity
-/// limit here. When `state` [keeps a digest](FirstFlightReadState::keep_digest),
-/// each datagram read and the packets kept of it go into the digest.
+/// limit here. When `state` [keeps a layout](FirstFlightReadState::keep_layout),
+/// each datagram read and the packets kept of it go into the layout.
 ///
 /// The positions are found from the composition `L` as for
 /// [`receive_packet`](super::receive::receive_packet): `Ie` of version 1's
@@ -598,8 +603,8 @@ where
 {
     let size = datagram.payload().as_ref().len();
     state.start.received_bytes = state.start.received_bytes.saturating_add(size);
-    if let Some(digest) = state.digest.as_mut() {
-        digest.datagrams.push(DatagramDigest {
+    if let Some(layout) = state.layout.as_mut() {
+        layout.datagrams.push(DatagramLayout {
             size,
             packets: Vec::new(),
         });
@@ -627,13 +632,13 @@ where
             EncryptionLevel::ZeroRtt => {
                 if state.start.held.len() < state.max_held_inputs {
                     if let Some(datagram) = state
-                        .digest
+                        .layout
                         .as_mut()
-                        .and_then(|digest| digest.datagrams.last_mut())
+                        .and_then(|layout| layout.datagrams.last_mut())
                     {
                         datagram
                             .packets
-                            .push(PacketDigest::ZeroRtt(state.start.held.len()));
+                            .push(PacketLayout::ZeroRtt(state.start.held.len()));
                     }
                     state.start.held.push(HeldInput::Packet(ReceivedPacket::new(
                         packet,
@@ -689,12 +694,12 @@ where
     };
     let mut bytes = packet.into_bytes();
     let length = bytes.as_mut().len();
-    // kept once, for the digest; the token is not protected, so it reads
+    // kept once, for the layout; the token is not protected, so it reads
     // the same before and after opening
     let token = state
-        .digest
+        .layout
         .as_ref()
-        .is_some_and(|digest| digest.token.is_none())
+        .is_some_and(|layout| layout.token.is_none())
         .then(|| Bytes::copy_from_slice(&bytes.as_mut()[token]));
     let Ok(opened) = open(&keys.receive, bytes.as_mut(), pn_offset, largest) else {
         return Ok(());
@@ -755,14 +760,14 @@ where
     if let Some(close) = closed {
         return Err(ReadFirstFlightError::PeerClosed { close });
     }
-    if let Some(digest) = state.digest.as_mut() {
+    if let Some(layout) = state.layout.as_mut() {
         if let Some(token) = token {
-            digest.token.get_or_insert(token);
+            layout.token.get_or_insert(token);
         }
-        if let Some(datagram) = digest.datagrams.last_mut() {
+        if let Some(datagram) = layout.datagrams.last_mut() {
             datagram
                 .packets
-                .push(PacketDigest::Initial(InitialPacketDigest {
+                .push(PacketLayout::Initial(InitialPacketLayout {
                     packet_number: opened.number,
                     packet_number_length: PacketNumberLength::from_first_byte(opened.first_byte),
                     length,

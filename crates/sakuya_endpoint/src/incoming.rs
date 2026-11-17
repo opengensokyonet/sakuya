@@ -454,7 +454,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
     /// configurations of the parts; `Ie`, `Hd` and `Iv` are found as for
     /// [`read_first_flight`]). What was read goes into the connection when it
     /// is accepted: the ClientHello is not read again. When the
-    /// configuration [keeps a digest](crate::config::ServerConfig::keep_first_flight_digest),
+    /// configuration [keeps a layout](crate::config::ServerConfig::keep_first_flight_layout),
     /// the reading keeps one for [`into_passthrough_handoff`](Self::into_passthrough_handoff).
     /// Once the ClientHello was read, it is given again at once. How long
     /// to wait is the application's: dropping the future drops the incoming
@@ -502,8 +502,8 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
                     v1.max_ack_ranges,
                     v1.max_held_inputs,
                 ));
-                if self.config.keep_first_flight_digest {
-                    state.keep_digest();
+                if self.config.keep_first_flight_layout {
+                    state.keep_layout();
                 }
                 (state, datagrams)
             }
@@ -538,7 +538,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
     /// Hands the connection off for passthrough forwarding instead of
     /// accepting it: gives what forwarding its datagrams to another server
     /// takes, after [`read_client_hello`](Self::read_client_hello) read the
-    /// first ClientHello with a digest kept. Nothing is sent.
+    /// first ClientHello with a layout kept. Nothing is sent.
     ///
     /// The receiver goes with it, under the client's first destination
     /// connection ID: the client's later datagrams for the connection keep
@@ -549,24 +549,23 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
     ///
     /// [`PassthroughHandoffError`], which gives the incoming connection back
     /// as it was: [`NotRead`](PassthroughHandoffError::NotRead) before the
-    /// first ClientHello was read; [`NoDigest`](PassthroughHandoffError::NoDigest)
-    /// when the reading kept no digest.
+    /// first ClientHello was read; [`NoLayout`](PassthroughHandoffError::NoLayout)
+    /// when the reading kept no layout.
     #[expect(
         clippy::result_large_err,
         reason = "the error gives the incoming connection back by value"
     )]
     pub fn into_passthrough_handoff(
-        mut self,
+        self,
     ) -> Result<PassthroughHandoff<E>, PassthroughHandoffError<Self>> {
-        let digest = match &mut self.flight {
+        match &self.flight {
             IncomingFlight::Read(state) if state.first_client_hello().is_some() => {
-                match state.take_digest() {
-                    Some(digest) => digest,
-                    None => return Err(PassthroughHandoffError::NoDigest(self)),
+                if state.layout().is_none() {
+                    return Err(PassthroughHandoffError::NoLayout(self));
                 }
             }
             _ => return Err(PassthroughHandoffError::NotRead(self)),
-        };
+        }
         let Self {
             domain,
             receiver,
@@ -578,15 +577,14 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             ..
         } = self;
         // invariant: as matched above
-        let IncomingFlight::Read(mut state) = flight else {
+        let IncomingFlight::Read(state) = flight else {
             unreachable!("the first flight was read")
         };
+        let (Some(client_hello), held, Some(layout)) = state.into_parts() else {
+            unreachable!("the first ClientHello was read with a layout kept")
+        };
         let client = link.id().clone();
-        let client_hello = state
-            .take_first_client_hello()
-            .expect("the first ClientHello was read");
-        let zero_rtt = state
-            .take_held()
+        let zero_rtt = held
             .into_iter()
             .map(|held| match held {
                 HeldInput::Packet(packet) => packet.into_parts().0.into_bytes(),
@@ -603,7 +601,7 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
             client_dcid,
             client_scid,
             client_hello,
-            digest,
+            layout,
             zero_rtt,
             receiver: PassthroughReceiver::new(domain, receiver, client, client_scid),
         })
@@ -877,16 +875,16 @@ impl<H, C: core::error::Error + 'static> core::error::Error for ReadClientHelloE
 pub enum PassthroughHandoffError<H> {
     /// Its first ClientHello was not read.
     NotRead(H),
-    /// Its first ClientHello was read without a digest of the first flight
+    /// Its first ClientHello was read without a layout of the first flight
     /// kept.
-    NoDigest(H),
+    NoLayout(H),
 }
 
 impl<H> fmt::Debug for PassthroughHandoffError<H> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotRead(_) => f.write_str("NotRead"),
-            Self::NoDigest(_) => f.write_str("NoDigest"),
+            Self::NoLayout(_) => f.write_str("NoLayout"),
         }
     }
 }
@@ -895,8 +893,8 @@ impl<H> fmt::Display for PassthroughHandoffError<H> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::NotRead(_) => "the first ClientHello of the incoming connection was not read",
-            Self::NoDigest(_) => {
-                "the first flight of the incoming connection was read without a digest"
+            Self::NoLayout(_) => {
+                "the first flight of the incoming connection was read without a layout"
             }
         })
     }

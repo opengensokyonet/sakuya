@@ -6,7 +6,7 @@
 //! anything. For the name it serves, a.example, it accepts the connection.
 //! For b.example it hands the connection off: it opens a UDP socket of its
 //! own to the backend for the connection, builds the first flight it read
-//! again from the digest, and from then on forwards the datagrams as they
+//! again from the layout, and from then on forwards the datagrams as they
 //! are, the client's to the backend from that socket and the backend's to
 //! the client from the Relay's socket. The client's handshake is with the
 //! backend, which presents a certificate for b.example only.
@@ -57,7 +57,7 @@ use sakuya_connection::prelude::*;
 use sakuya_connection::v1::{
     self,
     application_handles::connection::ConnectionHandle,
-    first_flight::{InitialPacketDigest, PacketDigest},
+    first_flight::{InitialPacketLayout, PacketLayout},
     retry::ContinueOnRetry,
 };
 use sakuya_datagram_routing::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
@@ -679,7 +679,7 @@ async fn control(listener: TcpListener, state: Rc<RelayState>) {
 }
 
 /// The datagrams of the first flight `handoff` read, built again from its
-/// digest: each Initial packet with its packet number, length and CRYPTO
+/// layout: each Initial packet with its packet number, length and CRYPTO
 /// data, each 0-RTT packet as it arrived.
 fn rebuild_first_flight(handoff: &PassthroughHandoff<Udp>) -> Vec<Vec<u8>> {
     let secrets = InitialSecrets::derive(&RingBackend, &handoff.client_dcid);
@@ -688,19 +688,19 @@ fn rebuild_first_flight(handoff: &PassthroughHandoff<Udp>) -> Vec<Vec<u8>> {
         HeaderProtectionKey::derive(&RingBackend, INITIAL_AEAD, &secrets.client),
     );
     let crypto = handoff.client_hello.encoded().encoded();
-    let token = handoff.digest.token().cloned().unwrap_or_default();
+    let token = handoff.layout.token().cloned().unwrap_or_default();
     handoff
-        .digest
+        .layout
         .datagrams()
         .iter()
         .map(|datagram| {
             let mut bytes = Vec::with_capacity(datagram.size());
             for packet in datagram.packets() {
                 match packet {
-                    PacketDigest::Initial(initial) => {
+                    PacketLayout::Initial(initial) => {
                         bytes.extend(rebuild_initial(handoff, &token, crypto, initial, &keys))
                     }
-                    PacketDigest::ZeroRtt(index) => {
+                    PacketLayout::ZeroRtt(index) => {
                         bytes.extend_from_slice(&handoff.zero_rtt[*index])
                     }
                 }
@@ -718,7 +718,7 @@ fn rebuild_initial(
     handoff: &PassthroughHandoff<Udp>,
     token: &Bytes,
     crypto: &Bytes,
-    initial: &InitialPacketDigest,
+    initial: &InitialPacketLayout,
     (packet_key, header_key): &(PacketKey<RingBackend>, HeaderProtectionKey<RingBackend>),
 ) -> Vec<u8> {
     let pn_length = initial.packet_number_length();
@@ -904,7 +904,7 @@ fn a_relay_serves_one_connection_and_forwards_another_on_the_same_socket() {
             name: "a.example",
             seed: 2,
         });
-        relay_config.keep_first_flight_digest = true;
+        relay_config.keep_first_flight_layout = true;
         let (relay_endpoint, relay_reflow) = Endpoint::<Udp, Server, NoClient>::new(
             endpoint_config(relay_config, (), 0xa000_0000_0000_0000),
         )

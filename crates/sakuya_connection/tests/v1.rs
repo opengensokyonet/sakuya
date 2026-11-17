@@ -53,7 +53,7 @@ use sakuya_connection::{
         },
         feedback::AckSummary,
         first_flight::{
-            FirstFlight, FirstFlightReadState, PacketDigest, ReadFirstFlightError,
+            FirstFlight, FirstFlightReadState, PacketLayout, ReadFirstFlightError,
             read_first_flight,
         },
         idle::IdleTimeout,
@@ -4431,7 +4431,7 @@ fn reading_the_first_flight_ends_with_the_first_client_hello() {
 }
 
 #[test]
-fn reading_the_first_flight_starts_with_the_datagrams_taken_and_keeps_a_digest() {
+fn reading_the_first_flight_starts_with_the_datagrams_taken_and_keeps_a_layout() {
     reset();
     common::strategy::plan_nothing();
     let first = link();
@@ -4460,7 +4460,7 @@ fn reading_the_first_flight_starts_with_the_datagrams_taken_and_keeps_a_digest()
         MaxAckRanges::DEFAULT,
         MAX_HELD.with(Cell::get),
     );
-    state.keep_digest();
+    state.keep_layout();
     let read = {
         let reading = core::pin::pin!(read_first_flight::<Mine, Parts, _, _, _, _>(
             &mut state,
@@ -4474,9 +4474,9 @@ fn reading_the_first_flight_starts_with_the_datagrams_taken_and_keeps_a_digest()
     };
     assert!(matches!(read, core::task::Poll::Ready(Ok(()))));
     assert_eq!(state.received_bytes(), one_len + two_len);
-    let digest = state.take_digest().expect("a digest was kept");
-    assert_eq!(digest.token().map(|token| token.len()), Some(0));
-    let datagrams = digest.datagrams();
+    let layout = state.layout().expect("a layout was kept").clone();
+    assert_eq!(layout.token().map(|token| token.len()), Some(0));
+    let datagrams = layout.datagrams();
     assert_eq!(
         datagrams
             .iter()
@@ -4484,7 +4484,7 @@ fn reading_the_first_flight_starts_with_the_datagrams_taken_and_keeps_a_digest()
             .collect::<Vec<_>>(),
         [one_len, two_len]
     );
-    let [PacketDigest::Initial(first_initial)] = datagrams[0].packets() else {
+    let [PacketLayout::Initial(first_initial)] = datagrams[0].packets() else {
         panic!("the first datagram holds one Initial packet: {datagrams:?}");
     };
     assert_eq!(first_initial.packet_number().get(), 0);
@@ -4493,8 +4493,8 @@ fn reading_the_first_flight_starts_with_the_datagrams_taken_and_keeps_a_digest()
     assert_eq!(first_initial.crypto()[0], 0..20);
     assert!(!first_initial.ping());
     let [
-        PacketDigest::Initial(second_initial),
-        PacketDigest::ZeroRtt(0),
+        PacketLayout::Initial(second_initial),
+        PacketLayout::ZeroRtt(0),
     ] = datagrams[1].packets()
     else {
         panic!("the second datagram holds an Initial and a 0-RTT packet: {datagrams:?}");
@@ -4504,13 +4504,12 @@ fn reading_the_first_flight_starts_with_the_datagrams_taken_and_keeps_a_digest()
     assert_eq!(second_initial.crypto().len(), 1);
     assert_eq!(second_initial.crypto()[0], 20..hello.len() as u64);
     assert!(second_initial.ping());
-    // the digest is given once; the 0-RTT packet it names is held
-    assert!(state.take_digest().is_none());
-    assert_eq!(state.take_held().len(), 1);
+    // the 0-RTT packet the layout names is held
+    let (first, held, kept) = state.into_parts();
+    assert_eq!(held.len(), 1);
+    assert_eq!(kept, Some(layout));
     assert_eq!(
-        state
-            .take_first_client_hello()
-            .map(|first| first.encoded().encoded().to_vec()),
+        first.map(|first| first.encoded().encoded().to_vec()),
         Some(hello)
     );
 }

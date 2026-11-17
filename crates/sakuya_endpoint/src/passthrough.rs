@@ -3,8 +3,8 @@
 //! datagrams to another server as they are.
 //!
 //! A server that may hand connections off reads each first ClientHello
-//! before deciding, with a digest of the first flight kept
-//! ([`keep_first_flight_digest`](crate::config::ServerConfig::keep_first_flight_digest)).
+//! before deciding, with a layout of the first flight kept
+//! ([`keep_first_flight_layout`](crate::config::ServerConfig::keep_first_flight_layout)).
 //! Reading opens the Initial packets in place, so the datagrams read are not
 //! kept: [`PassthroughHandoff`] gives what it takes to build them again
 //! instead, and the receiver that takes the client's later datagrams as
@@ -14,7 +14,7 @@ use core::{fmt, future::poll_fn};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use sakuya_connection::v1::{
-    first_flight::FirstFlightDigest, input::LogicalPathDatagramReceiver as _,
+    first_flight::FirstFlightLayout, input::LogicalPathDatagramReceiver as _,
 };
 use sakuya_datagram_routing::{
     claim::{
@@ -47,7 +47,7 @@ type LinkIdOf<E> = LinkId<LocalOf<E>, PeerOf<E>>;
 /// [`TerminableIncoming::into_passthrough_handoff`](crate::incoming::TerminableIncoming::into_passthrough_handoff).
 ///
 /// The first flight was read: its Initial packets are given as the
-/// [`digest`](Self::digest), with the first ClientHello their CRYPTO data
+/// [`layout`](Self::layout), with the first ClientHello their CRYPTO data
 /// was, and its 0-RTT packets as they arrived. With the connection IDs and
 /// the version, and the Initial keys derived from the client's first
 /// destination connection ID (RFC 9001 §5.2), each Initial packet can be
@@ -63,10 +63,10 @@ pub struct PassthroughHandoff<E: EndpointChoices> {
     pub client_scid: ConnectionId,
     /// The first ClientHello.
     pub client_hello: FirstClientHello,
-    /// The digest of the first flight.
-    pub digest: FirstFlightDigest,
+    /// The layout of the first flight.
+    pub layout: FirstFlightLayout,
     /// The 0-RTT packets of the first flight, as they arrived, in the order
-    /// the digest gives their indices in.
+    /// the layout gives their indices in.
     pub zero_rtt: Vec<PayloadOf<E>>,
     /// The receiver of the client's later datagrams.
     pub receiver: PassthroughReceiver<E>,
@@ -78,7 +78,7 @@ impl<E: EndpointChoices> fmt::Debug for PassthroughHandoff<E> {
             .field("version", &self.version)
             .field("client_dcid", &self.client_dcid)
             .field("client_scid", &self.client_scid)
-            .field("digest", &self.digest)
+            .field("layout", &self.layout)
             .field("zero_rtt", &self.zero_rtt.len())
             .finish_non_exhaustive()
     }
@@ -133,6 +133,12 @@ impl<E: EndpointChoices> PassthroughReceiver<E> {
     /// link and its first packet is a long header with the client's source
     /// connection ID, as the client's later Initial and 0-RTT packets are;
     /// others are left to the other candidates, and to a new connection.
+    ///
+    /// Dropping the future while it judges such a datagram leaves the
+    /// datagram to the other candidates too, so a receive is best kept
+    /// going across the host's other work. Registering more connection IDs
+    /// goes through the [`registrar`](Self::registrar), apart from the
+    /// receiver, so it need not stop a receive.
     pub async fn recv(&mut self) -> DatagramOf<E> {
         loop {
             let candidate = match poll_fn(|cx| self.receiver.poll_next(cx)).await {

@@ -120,11 +120,11 @@ where
     pub receive_queue_capacity: NonZeroUsize,
     /// Whether reading an incoming connection's first ClientHello
     /// ([`read_client_hello`](crate::incoming::TerminableIncoming::read_client_hello))
-    /// keeps a digest of the first flight, which an endpoint that hands
+    /// keeps a layout of the first flight, which an endpoint that hands
     /// connections off for passthrough forwarding
     /// ([`into_passthrough_handoff`](crate::incoming::TerminableIncoming::into_passthrough_handoff))
     /// needs; off by default.
-    pub keep_first_flight_digest: bool,
+    pub keep_first_flight_layout: bool,
 }
 
 impl<T, L, H, Tk, Rp> ServerConfig<T, L, H, Tk, Rp>
@@ -136,7 +136,7 @@ where
     /// The configuration with the given handshake, CRYPTO capacities, loss
     /// detection thresholds, configurations of the parts, tokens and Retry
     /// policy; the default quotas, the versions the endpoint supports to
-    /// offer, a receive queue of 64 deliveries, and no digest of the first
+    /// offer, a receive queue of 64 deliveries, and no layout of the first
     /// flight kept.
     ///
     /// # Errors
@@ -163,7 +163,7 @@ where
             retry_policy,
             offered_versions: vec![Version::V1],
             receive_queue_capacity: DEFAULT_RECEIVE_QUEUE_CAPACITY,
-            keep_first_flight_digest: false,
+            keep_first_flight_layout: false,
         })
     }
 
@@ -259,7 +259,7 @@ where
             retry_policy: self.retry_policy.clone(),
             offered_versions: self.offered_versions.clone(),
             receive_queue_capacity: self.receive_queue_capacity,
-            keep_first_flight_digest: self.keep_first_flight_digest,
+            keep_first_flight_layout: self.keep_first_flight_layout,
         }
     }
 }
@@ -276,7 +276,7 @@ where
             .field("quotas", &self.quotas)
             .field("offered_versions", &self.offered_versions)
             .field("receive_queue_capacity", &self.receive_queue_capacity)
-            .field("keep_first_flight_digest", &self.keep_first_flight_digest)
+            .field("keep_first_flight_layout", &self.keep_first_flight_layout)
             .finish_non_exhaustive()
     }
 }
