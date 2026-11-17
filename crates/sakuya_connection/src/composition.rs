@@ -106,8 +106,28 @@ impl<
 /// composition's positions by.
 #[doc(hidden)]
 #[allow(clippy::type_complexity)]
-pub fn infer<T, L, Pc, Pe, Pl, Pk, Ps, Pr, Hw, He, Hl, Hk, Hs, Hr, Bw, Be, Bl, Bk, Bs, Br>()
--> PhantomData<(
+pub fn infer_positions<
+    T,
+    L,
+    Pc,
+    Pe,
+    Pl,
+    Pk,
+    Ps,
+    Pr,
+    Hw,
+    He,
+    Hl,
+    Hk,
+    Hs,
+    Hr,
+    Bw,
+    Be,
+    Bl,
+    Bk,
+    Bs,
+    Br,
+>() -> PhantomData<(
     Pc,
     Pe,
     Pl,
@@ -184,7 +204,7 @@ macro_rules! composition {
                 $crate::composition::PositionsOf<Self, $t, $l>,
             ) {
                 let positions: $crate::composition::PositionsOf<Self, $t, $l> =
-                    $crate::composition::infer::<
+                    $crate::composition::infer_positions::<
                         $t,
                         $l,
                         _,
@@ -243,7 +263,7 @@ macro_rules! composition {
                 $crate::composition::PositionsOf<Self, $t, $l>,
             ) {
                 let positions: $crate::composition::PositionsOf<Self, $t, $l> =
-                    $crate::composition::infer::<
+                    $crate::composition::infer_positions::<
                         $t,
                         $l,
                         _,
