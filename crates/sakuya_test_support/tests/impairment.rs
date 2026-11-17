@@ -12,6 +12,10 @@
 //!
 //! The rebind scenario asserts what sakuya does today, without connection
 //! migration: see [`a_client_rebound_after_the_handshake_is_not_followed`].
+//!
+//! The connections' events are received by [`QlogWriter`]; the scenarios
+//! that read them give a directory under Cargo's directory for the tests'
+//! temporary files, the others none, which records nothing.
 
 use core::{
     fmt,
@@ -20,9 +24,12 @@ use core::{
     num::{NonZeroU32, NonZeroUsize},
     time::Duration,
 };
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
+use std::{
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use bytes::Bytes;
@@ -53,6 +60,7 @@ use sakuya_endpoint::{
     role::{AcceptingServer, ConnectingClient, NoClient, NoServer},
 };
 use sakuya_packet_protection::backend::ring::RingBackend;
+use sakuya_qlog::{QUIC_EVENT_SCHEMA, QlogConfig, QlogWriter};
 use sakuya_recovery::loss::LossThresholds;
 use sakuya_stream::connection::{CloseReason, ImmediateClose};
 use sakuya_test_support::{
@@ -183,12 +191,13 @@ impl v1::close::ApplicationClose for AppClose {
     }
 }
 
-/// What the tests choose of version 1: their application error, and the
-/// default of everything else.
+/// What the tests choose of version 1: their application error, qlog for
+/// the connections' events, and the default of everything else.
 struct Mine;
 
 impl<T: v1::MakerChoices> v1::HostChoices<T> for Mine {
     type ApplicationError = AppClose;
+    type Events<L> = QlogWriter<L, TokioClock>;
 }
 
 type ServerChoices = ServerConnectionChoices<InMemory, Mine, ServerStarts>;
@@ -317,8 +326,10 @@ impl ClientHandshakeConfig for ClientStarts {
     }
 }
 
+/// Version 1's configuration of the connections, which write qlog into
+/// `$qlog` when it is a directory.
 macro_rules! v1_config {
-    ($t:ty) => {{
+    ($t:ty, $qlog:expr) => {{
         let mut parameters = TransportParameters::<Vec<u8>>::new();
         let idle = u32::try_from(IDLE_TIMEOUT.as_millis()).unwrap();
         parameters.set(MaxIdleTimeout::new(VarInt::from_u32(idle)));
@@ -333,6 +344,10 @@ macro_rules! v1_config {
         parameters.set(InitialMaxStreamsBidi::new(StreamCount::new(4).unwrap()));
         sakuya_endpoint::v1::ConnectionConfig::<$t, Parts> {
             transport_parameters: parameters.known,
+            events: QlogConfig {
+                dir: $qlog,
+                clock: Some(TokioClock),
+            },
             ..Default::default()
         }
     }};
@@ -359,7 +374,9 @@ where
     }
 }
 
-fn server_config() -> ServerConfig<
+fn server_config(
+    qlog: Option<PathBuf>,
+) -> ServerConfig<
     ServerChoices,
     Parts,
     ServerStarts,
@@ -380,7 +397,7 @@ fn server_config() -> ServerConfig<
             handshake: 4096,
         },
         thresholds(),
-        hlist![v1_config!(ServerChoices)],
+        hlist![v1_config!(ServerChoices, qlog)],
         tokens,
         LoadStatelessRetryPolicy::new(
             CapacityFraction::new(1, NonZeroU32::new(2).unwrap()).unwrap(),
@@ -389,8 +406,9 @@ fn server_config() -> ServerConfig<
     .unwrap()
 }
 
-fn client_config() -> ClientConfig<ClientChoices, Parts, ClientStarts, ClientTokens, ContinueOnRetry>
-{
+fn client_config(
+    qlog: Option<PathBuf>,
+) -> ClientConfig<ClientChoices, Parts, ClientStarts, ClientTokens, ContinueOnRetry> {
     ClientConfig::new(
         ClientStarts {
             tickets: Arc::new(TakeOnceTicketMap::new(
@@ -405,7 +423,7 @@ fn client_config() -> ClientConfig<ClientChoices, Parts, ClientStarts, ClientTok
             one_rtt: 16 * 1024 + 4,
         },
         thresholds(),
-        hlist![v1_config!(ClientChoices)],
+        hlist![v1_config!(ClientChoices, qlog)],
         ClientTokens::new(),
         ContinueOnRetry,
     )
@@ -478,14 +496,17 @@ struct Pair {
 impl Pair {
     /// Two endpoints on a network whose fates follow from `seed`, impaired
     /// as `impairments` says, once their connection's handshake has
-    /// completed on both sides.
-    async fn connect(seed: u64, impairments: Impairments) -> Self {
+    /// completed on both sides; the connections write qlog into `qlog` when
+    /// it is a directory.
+    async fn connect(seed: u64, impairments: Impairments, qlog: Option<&Path>) -> Self {
         let network = MemoryNetwork::new(TokioClock, seed, server_address(), impairments);
         let mut drivers = Vec::new();
 
-        let (server, server_reflow) =
-            Endpoint::<InMemory, Server, NoClient>::new(endpoint_config(server_config(), ()))
-                .unwrap();
+        let (server, server_reflow) = Endpoint::<InMemory, Server, NoClient>::new(endpoint_config(
+            server_config(qlog.map(Path::to_path_buf)),
+            (),
+        ))
+        .unwrap();
         drivers.push(("the server's reflow driver", spawn_local(server_reflow)));
         let (_server_handle, server_driver) = server
             .add_accepting_binding(
@@ -496,9 +517,11 @@ impl Pair {
         drivers.push(("the server's binding driver", spawn_local(server_driver)));
         let mut incoming = server.incoming();
 
-        let (client, client_reflow) =
-            Endpoint::<InMemory, NoServer, Client>::new(endpoint_config((), client_config()))
-                .unwrap();
+        let (client, client_reflow) = Endpoint::<InMemory, NoServer, Client>::new(endpoint_config(
+            (),
+            client_config(qlog.map(Path::to_path_buf)),
+        ))
+        .unwrap();
         drivers.push(("the client's reflow driver", spawn_local(client_reflow)));
         let (client_handle, client_driver) = client
             .add_connect_only_binding(
@@ -576,10 +599,11 @@ impl Pair {
 }
 
 /// One run of a scenario: the request and the answer over `impairments`,
-/// with fates that follow from `seed`, changed as `change` says.
-fn exchange(seed: u64, impairments: Impairments, change: Change) -> Outcome {
+/// with fates that follow from `seed`, changed as `change` says; the
+/// connections write qlog into `qlog` when it is a directory.
+fn exchange(seed: u64, impairments: Impairments, change: Change, qlog: Option<&Path>) -> Outcome {
     run_paused(async move {
-        let pair = Pair::connect(seed, impairments).await;
+        let pair = Pair::connect(seed, impairments, qlog).await;
         let client_layer = pair.client_conn.established().await.expect("established");
         let server_layer = pair.server_conn.established().await.expect("established");
 
@@ -671,8 +695,8 @@ fn exchange(seed: u64, impairments: Impairments, change: Change) -> Outcome {
 /// Runs the scenario twice with `seed` and checks that both runs met the
 /// same fates; the first run's outcome.
 fn twice(seed: u64, impairments: &Impairments, change: impl Fn() -> Change) -> Outcome {
-    let first = exchange(seed, impairments.clone(), change());
-    let second = exchange(seed, impairments.clone(), change());
+    let first = exchange(seed, impairments.clone(), change(), None);
+    let second = exchange(seed, impairments.clone(), change(), None);
     assert_eq!(first, second, "the same seed meets the same fates");
     summarize(seed, &first.to_server, &first.to_client);
     first
@@ -714,6 +738,134 @@ fn after(fates: &[DatagramFate], from: u64) -> Vec<DatagramFate> {
         .filter(|fate| fate.number > from)
         .cloned()
         .collect()
+}
+
+// ==== reading qlog ====
+
+/// An empty directory for the qlog of the scenario `name`, under Cargo's
+/// directory for the tests' temporary files.
+fn qlog_dir(name: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join("qlog")
+        .join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("the qlog directory is made");
+    dir
+}
+
+/// One event of a qlog file: its time, its name and its whole record.
+#[derive(Debug)]
+struct QlogEvent {
+    time: f64,
+    name: String,
+    record: String,
+}
+
+impl QlogEvent {
+    fn has(&self, text: &str) -> bool {
+        self.record.contains(text)
+    }
+}
+
+/// The events of the one file of `dir` whose name ends in `suffix`,
+/// checked as JSON-SEQ records of qlog (main-schema §5, §11.2): each record
+/// starts with RS and ends with LF, is one object whose brackets balance
+/// outside its strings, the first is the header of a sequential file of
+/// the QUIC events of the vantage point `vantage`, and the events are in
+/// the order of their times.
+fn qlog_events(dir: &Path, vantage: &str) -> Vec<QlogEvent> {
+    let suffix = format!("_{vantage}.sqlog");
+    let mut paths = std::fs::read_dir(dir)
+        .expect("the qlog directory reads")
+        .map(|entry| entry.expect("an entry reads").path())
+        .filter(|path| path.to_str().is_some_and(|path| path.ends_with(&suffix)));
+    let path = paths
+        .next()
+        .unwrap_or_else(|| panic!("a file {suffix} in {dir:?}"));
+    assert!(paths.next().is_none(), "one file {suffix} in {dir:?}");
+    let text = String::from_utf8(std::fs::read(&path).expect("the file reads")).expect("UTF-8");
+    let mut records = text.split('\u{1e}');
+    assert_eq!(records.next(), Some(""), "the file starts with RS");
+    let records: Vec<&str> = records.collect();
+    for record in &records {
+        assert!(record.ends_with('\n'), "a record ends with LF: {record:?}");
+        let record = &record[..record.len() - 1];
+        assert!(
+            record.starts_with('{') && record.ends_with('}'),
+            "a record is an object: {record}"
+        );
+        assert!(balanced(record), "the brackets balance: {record}");
+    }
+    let (header, events) = records.split_first().expect("a header");
+    for member in [
+        r#""file_schema":"urn:ietf:params:qlog:file:sequential""#,
+        r#""serialization_format":"application/qlog+json-seq""#,
+        r#""time_format":"relative_to_epoch""#,
+        r#""clock_type":"monotonic","epoch":"unknown""#,
+    ] {
+        assert!(header.contains(member), "the header has {member}: {header}");
+    }
+    assert!(header.contains(&format!(r#""vantage_point":{{"type":"{vantage}"}}"#)));
+    assert!(header.contains(&format!(r#""event_schemas":["{QUIC_EVENT_SCHEMA}"]"#)));
+    let events: Vec<QlogEvent> = events
+        .iter()
+        .map(|record| {
+            let time = between(record, r#"{"time":"#, ",")
+                .parse()
+                .expect("the time is a number");
+            let name = between(record, r#","name":""#, "\"").to_owned();
+            QlogEvent {
+                time,
+                name,
+                record: (*record).to_owned(),
+            }
+        })
+        .collect();
+    for pair in events.windows(2) {
+        assert!(
+            pair[0].time <= pair[1].time,
+            "in the order of time: {pair:?}"
+        );
+    }
+    events
+}
+
+/// The text of `record` after the first `start` up to the next `end`.
+fn between<'a>(record: &'a str, start: &str, end: &str) -> &'a str {
+    let from = record
+        .find(start)
+        .unwrap_or_else(|| panic!("{start} in {record}"))
+        + start.len();
+    let to = record[from..]
+        .find(end)
+        .unwrap_or_else(|| panic!("{end} in {record}"));
+    &record[from..from + to]
+}
+
+/// Whether the brackets and braces of `json` balance, outside its strings.
+fn balanced(json: &str) -> bool {
+    let mut open = Vec::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for c in json.chars() {
+        if in_string {
+            match (escaped, c) {
+                (true, _) => escaped = false,
+                (false, '\\') => escaped = true,
+                (false, '"') => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' | '[' => open.push(c),
+            '}' if open.pop() != Some('{') => return false,
+            ']' if open.pop() != Some('[') => return false,
+            _ => {}
+        }
+    }
+    open.is_empty() && !in_string
 }
 
 // ==== the scenarios ====
@@ -839,7 +991,7 @@ fn the_answer_arrives_when_the_path_mtu_falls_without_a_word() {
 fn a_link_whose_limit_falls_below_1200_bytes_ends_the_connection_with_no_viable_path() {
     let run = || {
         run_paused(async {
-            let pair = Pair::connect(17, Impairments::both(plain())).await;
+            let pair = Pair::connect(17, Impairments::both(plain()), None).await;
             tokio::time::sleep(Duration::from_millis(200)).await;
             pair.network.set_max_datagram_size(server_address(), 1100);
             let server_closed = within("the server's close", pair.server_conn.closed()).await;
@@ -882,8 +1034,10 @@ fn a_link_whose_limit_falls_below_1200_bytes_ends_the_connection_with_no_viable_
 fn a_client_rebound_after_the_handshake_is_not_followed() {
     let rebound = SocketAddr::from(([10, 0, 0, 2], 50_001));
     let run = || {
+        // the client's first connection ID is random: each run its own file
+        let qlog = qlog_dir("rebind");
         run_paused(async move {
-            let pair = Pair::connect(13, Impairments::both(plain())).await;
+            let pair = Pair::connect(13, Impairments::both(plain()), Some(&qlog)).await;
             let client_layer = pair.client_conn.established().await.expect("established");
             // the handshake's last acknowledgements cross before the rebind
             tokio::time::sleep(Duration::from_millis(200)).await;
@@ -919,6 +1073,15 @@ fn a_client_rebound_after_the_handshake_is_not_followed() {
                 down.iter().all(|fate| fate.dropped.is_some()),
                 "nothing reaches the client's old address"
             );
+            // the server's connection drops them for want of a link path
+            let server = qlog_events(&qlog, "server");
+            assert!(
+                server
+                    .iter()
+                    .any(|event| event.name == "quic:packet_dropped"
+                        && event.has(r#""details":{"reason":"no_link_path"},"trigger":"general""#)),
+                "the server drops the packets of the new link: {server:?}"
+            );
             (to_server, to_client)
         })
     };
@@ -929,4 +1092,109 @@ fn a_client_rebound_after_the_handshake_is_not_followed() {
         "the same seed meets the same fates"
     );
     summarize(13, &to_server, &to_client);
+}
+
+/// The qlog of both sides of a run with losses: the header, and the events
+/// of each kind a run like this gives, in the order of time.
+#[test]
+fn both_sides_write_their_events_as_qlog() {
+    let qlog = qlog_dir("exchange");
+    let impairments = Impairments::both(DirectionImpairments {
+        loss: Some(RandomLoss {
+            rate: Probability::percent(10),
+            burst: 2,
+        }),
+        ..plain()
+    });
+    let outcome = exchange(21, impairments, Change::None, Some(&qlog));
+    assert!(dropped(&outcome.to_server) + dropped(&outcome.to_client) > 0);
+    let client = qlog_events(&qlog, "client");
+    let server = qlog_events(&qlog, "server");
+    for (side, events) in [("client", &client), ("server", &server)] {
+        let names = || events.iter().map(|event| event.name.as_str());
+        assert_eq!(names().next(), Some("quic:connection_started"), "{side}");
+        for name in [
+            "quic:version_information",
+            "quic:alpn_information",
+            "quic:parameters_set",
+            "quic:packet_sent",
+            "quic:packet_received",
+            "quic:recovery_metrics_updated",
+            "quic:connection_state_updated",
+            "quic:key_updated",
+            "quic:key_discarded",
+            "quic:stream_state_updated",
+            "quic:stream_data_moved",
+            "quic:connection_closed",
+        ] {
+            assert!(names().any(|n| n == name), "{side} writes {name}");
+        }
+        let any = |name: &str, text: &str| {
+            events
+                .iter()
+                .any(|event| event.name == name && event.has(text))
+        };
+        for initiator in ["local", "remote"] {
+            assert!(
+                any(
+                    "quic:parameters_set",
+                    &format!(r#""initiator":"{initiator}""#)
+                ),
+                "{side}'s {initiator} parameters"
+            );
+        }
+        assert!(
+            any("quic:alpn_information", r#""string_value":"h3""#),
+            "{side}"
+        );
+        assert!(
+            any(
+                "quic:connection_state_updated",
+                r#""new":"handshake_complete""#
+            ),
+            "{side}"
+        );
+        assert!(
+            any("quic:packet_sent", r#""frame_type":"stream""#),
+            "{side}"
+        );
+        assert!(
+            any("quic:packet_received", r#""frame_type":"ack""#),
+            "{side}"
+        );
+        for (from, to) in [("application", "transport"), ("transport", "network")] {
+            assert!(
+                any(
+                    "quic:stream_data_moved",
+                    &format!(r#""from":"{from}","to":"{to}""#)
+                ) || any(
+                    "quic:stream_data_moved",
+                    &format!(r#""from":"{to}","to":"{from}""#)
+                ),
+                "{side} moves stream data between {from} and {to}"
+            );
+        }
+    }
+    assert!(
+        client
+            .iter()
+            .chain(&server)
+            .any(|event| event.name == "quic:packet_lost"),
+        "a loss is declared"
+    );
+    let closed = |events: &[QlogEvent], text: &str| {
+        events
+            .iter()
+            .any(|event| event.name == "quic:connection_closed" && event.has(text))
+    };
+    assert!(closed(
+        &client,
+        r#""initiator":"local","application_error":"unknown","error_code":7"#
+    ));
+    assert!(
+        closed(
+            &server,
+            r#""initiator":"remote","application_error":"unknown","error_code":7"#
+        ) || closed(&server, r#""trigger":"idle_timeout""#)
+    );
 }
