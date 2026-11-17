@@ -6917,8 +6917,10 @@ fn a_link_path_that_ends_while_the_link_holds_its_batch_hands_back_its_packets()
         log.iter().any(|line| line.starts_with("link path ended")),
         "{log:?}"
     );
-    // the packet the probe recorded at 6 ms among them
-    assert_eq!(lines_of(log.clone(), &["lost"]), ["lost Initial 1"]);
+    // the packet the probe recorded at 6 ms was among them, but a probe
+    // timeout before handed its content back already, while it stayed in
+    // flight: it is not handed back twice
+    assert_eq!(lines_of(log.clone(), &["lost"]), Vec::<String>::new());
     // the packets of both datagrams left the send journals with the link
     // path, with those it sent before: the ACK frame of the Initial packet
     // sent at 6 ms is owed again, due now once the link path is gone. No
@@ -7998,6 +8000,12 @@ fn discarding_the_handshake_keys_retires_the_space_once_and_the_probe_timeout_re
             &["in flight", "congestion", "records", "lost", "delivered"]
         ),
         [
+            // the probe timeout of the Application Data space hands the
+            // content of its two oldest packets, one for each probe
+            // datagram, back to their frame sources as lost; the packets
+            // stay in flight and count no loss
+            "lost ApplicationData 0",
+            "lost ApplicationData 1",
             "in flight 2400, outstanding 2, lost [], permits 6, backoff 1",
             // the Handshake space's records are gone, and its frame
             // sources heard nothing; the Application Data space stays

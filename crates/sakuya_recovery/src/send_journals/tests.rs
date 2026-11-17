@@ -61,6 +61,7 @@ fn sealing_a_packet_with_frames_records_it_and_advances_the_number() {
             in_flight: true,
             pmtu_probe: true,
             summaries: vec!["crypto", "ack"],
+            content_handed_back: false,
         }
     );
 }
@@ -280,4 +281,42 @@ fn expired_lost_records_are_discarded_and_the_rest_stay() {
         numbers(journals2.take_acknowledged(&(pn(0)..=pn(9)))),
         [1, 2]
     );
+}
+
+#[test]
+fn the_oldest_ack_eliciting_content_in_flight_is_handed_back_once() {
+    let mut journals = Journals::new();
+    // 0: sealed, not accepted by the link yet
+    let sealed = seal(&mut journals, 1, "sealed");
+    // 1: only an ACK frame, not ack-eliciting
+    let mut attempt = journals.start_attempt(1);
+    attempt.record_frame("ack", false, false);
+    let ack_only = attempt.seal(1200, false).unwrap();
+    // 2, 3: sent, ack-eliciting
+    let second = seal(&mut journals, 1, "crypto");
+    let third = seal(&mut journals, 1, "stream");
+    // 4: sent and declared lost
+    let lost = seal(&mut journals, 1, "lost");
+    journals.sent(ack_only, ms(1));
+    journals.sent(second, ms(2));
+    journals.sent(third, ms(3));
+    journals.sent(lost, ms(4));
+    journals.declare_lost(pn(4), ms(100));
+
+    let record = journals.hand_back_oldest_ack_eliciting_content().unwrap();
+    assert_eq!(record.number, pn(2));
+    assert!(record.content_handed_back);
+    // still in flight
+    assert_eq!(record.state, SentPacketState::Sent(ms(2)));
+    let record = journals.hand_back_oldest_ack_eliciting_content().unwrap();
+    assert_eq!(record.number, pn(3));
+    // the sealed one, the ACK-only one and the lost one are never handed
+    // back this way, and none is handed back twice
+    assert_eq!(journals.hand_back_oldest_ack_eliciting_content(), None);
+    journals.sent(sealed, ms(5));
+    let record = journals.hand_back_oldest_ack_eliciting_content().unwrap();
+    assert_eq!(record.number, pn(0));
+    // declared lost after, the record keeps the mark
+    let record = journals.declare_lost(pn(2), ms(100)).unwrap();
+    assert!(record.content_handed_back);
 }

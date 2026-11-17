@@ -64,6 +64,13 @@ pub struct SentPacketRecord<I, S, P> {
     pub pmtu_probe: bool,
     /// The summary of each frame, in the order they were written.
     pub summaries: Vec<S>,
+    /// Whether the summaries were handed back to their frame sources as
+    /// lost while the packet stays in flight, as a probe timeout does
+    /// ([`SendJournals::hand_back_oldest_ack_eliciting_content`]): when the
+    /// packet is then declared lost, or its link path ends, its content is
+    /// not handed back again. An acknowledgment still hands them back as
+    /// delivered.
+    pub content_handed_back: bool,
 }
 
 /// One packet being written: what the send journals give for it.
@@ -147,6 +154,15 @@ pub trait SendJournals<S, I, P> {
     /// declared lost: the link path ends, and they are handed back as
     /// lost. The kept records of its lost packets are dropped.
     fn take_link_path(&mut self, link_path: &P) -> Self::LinkPathPackets<'_>;
+
+    /// The oldest record whose content can go back to its frame sources
+    /// ahead of its fate, marked as handed back
+    /// ([`SentPacketRecord::content_handed_back`]): the link accepted its
+    /// packet, which is neither acknowledged nor declared lost (`Sent`),
+    /// the packet is ack-eliciting, and its content was not handed back
+    /// yet. `None` if there is no such record. The record stays as it is
+    /// otherwise: the packet is still in flight.
+    fn hand_back_oldest_ack_eliciting_content(&mut self) -> Option<&SentPacketRecord<I, S, P>>;
 
     /// Drop the records of lost packets whose retention ended by `now`.
     fn discard_expired(&mut self, now: I);
@@ -236,6 +252,7 @@ impl<'a, I, S, P> PacketSendAttempt for DequeSendAttempt<'a, I, S, P> {
             in_flight: self.in_flight,
             pmtu_probe,
             summaries: self.summaries,
+            content_handed_back: false,
         });
         Some(DequeSealedPacket { number })
     }
@@ -345,6 +362,16 @@ impl<I: Ord + Copy, S, P: PartialEq> SendJournals<S, I, P> for DequeSendJournals
             sent_at: Some(sent_at),
             retain_until,
         };
+        Some(record)
+    }
+
+    fn hand_back_oldest_ack_eliciting_content(&mut self) -> Option<&SentPacketRecord<I, S, P>> {
+        let record = self.records.iter_mut().find(|record| {
+            matches!(record.state, SentPacketState::Sent(_))
+                && record.ack_eliciting
+                && !record.content_handed_back
+        })?;
+        record.content_handed_back = true;
         Some(record)
     }
 

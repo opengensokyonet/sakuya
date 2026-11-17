@@ -408,6 +408,11 @@ pub(super) fn hand_back_lost<T, L, V, X, Hf>(
         let Some(record) = journals.declare_lost(number, batch.retain_until) else {
             continue;
         };
+        // content a probe timeout handed back already is not handed back
+        // twice
+        if record.content_handed_back {
+            continue;
+        }
         V::lost_each(lineage, established, now, space, &record.summaries);
     }
 }

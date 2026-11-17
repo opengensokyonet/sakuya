@@ -333,7 +333,10 @@ where
             &mut established,
             now,
             space,
-            unsettled.iter().flat_map(|record| &record.summaries),
+            unsettled
+                .iter()
+                .filter(|record| !record.content_handed_back)
+                .flat_map(|record| &record.summaries),
         );
     }
     drop(established);

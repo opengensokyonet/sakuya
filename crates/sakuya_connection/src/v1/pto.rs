@@ -314,7 +314,7 @@ where
             match access.on_pto_expired(&expiry) {
                 PtoAction::Probe { datagrams, spaces } => {
                     state.grant_probe_permits(datagrams);
-                    probed = Some(spaces.with(expired_space));
+                    probed = Some((spaces.with(expired_space), datagrams.get()));
                 }
                 PtoAction::MarkInFlightLost => {
                     for (space, detection) in spaces.iter_mut() {
@@ -333,11 +333,33 @@ where
             }
             batches
         });
-        if let Some(spaces) = probed {
-            pings.probe(spaces.iter());
-        }
         let mut established =
         others.borrow_established_optional::<EstablishedSourceComponentsOfParts<T, L>, Is>();
+        if let Some((spaces, datagrams)) = probed {
+            // the oldest content still in flight, one packet's for each
+            // probe datagram, goes back to its frame sources as lost, for
+            // the probes to carry (RFC 9002 §6.2.4); the packets stay in
+            // flight and count no loss
+            for space in spaces.iter() {
+                let Some(journals) = journals.get_mut(space) else {
+                    continue;
+                };
+                for _ in 0..datagrams {
+                    let Some(record) = journals.hand_back_oldest_ack_eliciting_content() else {
+                        break;
+                    };
+                    CoreLentFeedback::<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>::lost_each(
+                        &mut rest,
+                        &mut established,
+                        now,
+                        space,
+                        &record.summaries,
+                    );
+                }
+            }
+            // a PING when nothing else is to be sent
+            pings.probe(spaces.iter());
+        }
         for (space, batch) in &batches {
             if batch.persistent {
                 rtt.on_persistent_congestion();
