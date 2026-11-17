@@ -195,15 +195,67 @@ type Sleeping<T> = (
 /// A link path node of a composition whose call positions are given by layer.
 type LinkNode<T, L, Q> = crate::tree::LinkPathNodeOf<T, L, PartsCallBundle<T, L, Q>>;
 
-/// Trial: every position the driver is generic over, as one named type
-/// without type parameters: the call positions of the six layers, and the
-/// data positions and the build positions of the six layers as tuples.
+/// Every position the driver takes, as one named type: the call positions
+/// of the six layers, and the data positions and the build positions of
+/// the six layers, each as a tuple of the six.
 pub trait DriverPositions: CallPositions {
     /// The data positions of the six layers.
     type Data: 'static;
     /// The build positions of the six layers.
     type Builds: 'static;
 }
+
+/// A tuple of one position for each of the six layers, read by layer: what
+/// the driver's impls take [`DriverPositions::Data`] and
+/// [`DriverPositions::Builds`] apart by, so that they are generic over the
+/// one named type of positions and not over each position, and the names
+/// of the functions and closures in them do not list every position.
+#[doc(hidden)]
+pub trait LayerPositions {
+    /// The position at the layer [`Connection`].
+    type Connection;
+    /// The position at the layer [`LinkEntry`].
+    type LinkEntry;
+    /// The position at the layer [`LogicalPath`].
+    type LogicalPath;
+    /// The position at the layer [`LinkPath`].
+    type LinkPath;
+    /// The position at the layer [`Established`].
+    type Established;
+    /// The position at the layer [`Recovery`].
+    type Recovery;
+}
+
+impl<A, B, C, D, E, F> LayerPositions for (A, B, C, D, E, F) {
+    type Connection = A;
+    type LinkEntry = B;
+    type LogicalPath = C;
+    type LinkPath = D;
+    type Established = E;
+    type Recovery = F;
+}
+
+/// The call positions of `Q` at each layer.
+type PcOf<Q> = <Q as CallPositions>::Connection;
+type PeOf<Q> = <Q as CallPositions>::LinkEntry;
+type PlOf<Q> = <Q as CallPositions>::LogicalPath;
+type PkOf<Q> = <Q as CallPositions>::LinkPath;
+type PsOf<Q> = <Q as CallPositions>::Established;
+type PrOf<Q> = <Q as CallPositions>::Recovery;
+/// The data positions of `Q` at each layer.
+type HwOf<Q> = <<Q as DriverPositions>::Data as LayerPositions>::Connection;
+type HeOf<Q> = <<Q as DriverPositions>::Data as LayerPositions>::LinkEntry;
+type HlOf<Q> = <<Q as DriverPositions>::Data as LayerPositions>::LogicalPath;
+type HkOf<Q> = <<Q as DriverPositions>::Data as LayerPositions>::LinkPath;
+type HsOf<Q> = <<Q as DriverPositions>::Data as LayerPositions>::Established;
+type HrOf<Q> = <<Q as DriverPositions>::Data as LayerPositions>::Recovery;
+/// The build positions of `Q` at each layer.
+type BwOf<Q> = <<Q as DriverPositions>::Builds as LayerPositions>::Connection;
+type BeOf<Q> = <<Q as DriverPositions>::Builds as LayerPositions>::LinkEntry;
+type BlOf<Q> = <<Q as DriverPositions>::Builds as LayerPositions>::LogicalPath;
+type BkOf<Q> = <<Q as DriverPositions>::Builds as LayerPositions>::LinkPath;
+type BsOf<Q> = <<Q as DriverPositions>::Builds as LayerPositions>::Established;
+type BrOf<Q> = <<Q as DriverPositions>::Builds as LayerPositions>::Recovery;
 
 /// A connection: the tree of its nodes and the driver of their calls, as
 /// one future that ends when the connection ends. Dropped before that, it
@@ -279,7 +331,7 @@ where
 /// `$b`) whose parent is the connection node, with the key `$key`: its
 /// parents are the connection's lend, with the other nodes.
 macro_rules! end_under_connection {
-    ($self:ident, $lv:ident, $b:ident, $data:expr, $key:expr, $now:expr) => {{
+    ($self:ident, $lv:ident, $b:ty, $data:expr, $key:expr, $now:expr) => {{
         let Self {
             tree,
             lineage_taken,
@@ -306,17 +358,27 @@ macro_rules! end_under_connection {
 macro_rules! by_layer {
     ($addr:expr, $go:ident) => {
         match $addr.layer {
-            0 => $go!(lend_connection(), Connection, Hw, Connection),
-            1 => $go!(lend_entry($addr.slot), LinkEntry, He, LinkEntry),
-            2 => $go!(lend_logical_path($addr.slot), LogicalPath, Hl, LogicalPath),
+            0 => $go!(lend_connection(), Connection, HwOf<Q>, Connection),
+            1 => $go!(lend_entry($addr.slot), LinkEntry, HeOf<Q>, LinkEntry),
+            2 => $go!(
+                lend_logical_path($addr.slot),
+                LogicalPath,
+                HlOf<Q>,
+                LogicalPath
+            ),
             3 => $go!(
                 lend_link_path($addr.slot, $addr.sub),
                 LinkPath,
-                Hk,
+                HkOf<Q>,
                 LinkPath
             ),
-            4 => $go!(lend_established(), Established, Hs, Established),
-            5 => $go!(lend_recovery($addr.slot, $addr.sub), Recovery, Hr, Recovery),
+            4 => $go!(lend_established(), Established, HsOf<Q>, Established),
+            5 => $go!(
+                lend_recovery($addr.slot, $addr.sub),
+                Recovery,
+                HrOf<Q>,
+                Recovery
+            ),
             _ => unreachable!("six layers"),
         }
     };
@@ -325,46 +387,36 @@ macro_rules! by_layer {
 /// The changes a lend or a structure request made: (node, position).
 type Changes = Vec<(NodeAddr, usize)>;
 
-impl<T, L, Q, Pc, Pe, Pl, Pk, Ps, Pr, Hw, He, Hl, Hk, Hs, Hr, Bw, Be, Bl, Bk, Bs, Br>
-    ConnectionDriver<T, L, Q>
+impl<T, L, Q> ConnectionDriver<T, L, Q>
 where
-    Q: DriverPositions<
-            Connection = Pc,
-            LinkEntry = Pe,
-            LogicalPath = Pl,
-            LinkPath = Pk,
-            Established = Ps,
-            Recovery = Pr,
-            Data = (Hw, He, Hl, Hk, Hs, Hr),
-            Builds = (Bw, Be, Bl, Bk, Bs, Br),
-        >,
+    Q: DriverPositions<Data: LayerPositions, Builds: LayerPositions>,
     T: ConnectionChoices,
     for<'v> L: LineageLists<'v, T>,
     L: TreeCalls<T, Q>
-        + NodeCalls<T, L, Connection, Pc>
-        + NodeCalls<T, L, LinkEntry, Pe>
-        + NodeCalls<T, L, LogicalPath, Pl>
-        + NodeCalls<T, L, LinkPath, Pk>
-        + NodeCalls<T, L, Established, Ps>
-        + NodeCalls<T, L, Recovery, Pr>
-        + BuildNode<T, L, Connection, Bw>
-        + BuildNode<T, L, LinkEntry, Be>
-        + BuildNode<T, L, LogicalPath, Bl>
-        + BuildNode<T, L, LinkPath, Bk>
-        + BuildNode<T, L, Established, Bs>
-        + BuildNode<T, L, Recovery, Br>,
-    Pc: 'static,
-    Pe: 'static,
-    Pl: 'static,
-    Pk: 'static,
-    Ps: 'static,
-    Pr: 'static,
-    NodeData<T, L, Connection>: NodePositions<T, L, Connection, Hw>,
-    NodeData<T, L, LinkEntry>: NodePositions<T, L, LinkEntry, He>,
-    NodeData<T, L, LogicalPath>: NodePositions<T, L, LogicalPath, Hl>,
-    NodeData<T, L, LinkPath>: NodePositions<T, L, LinkPath, Hk>,
-    NodeData<T, L, Established>: NodePositions<T, L, Established, Hs>,
-    NodeData<T, L, Recovery>: NodePositions<T, L, Recovery, Hr>,
+        + NodeCalls<T, L, Connection, PcOf<Q>>
+        + NodeCalls<T, L, LinkEntry, PeOf<Q>>
+        + NodeCalls<T, L, LogicalPath, PlOf<Q>>
+        + NodeCalls<T, L, LinkPath, PkOf<Q>>
+        + NodeCalls<T, L, Established, PsOf<Q>>
+        + NodeCalls<T, L, Recovery, PrOf<Q>>
+        + BuildNode<T, L, Connection, BwOf<Q>>
+        + BuildNode<T, L, LinkEntry, BeOf<Q>>
+        + BuildNode<T, L, LogicalPath, BlOf<Q>>
+        + BuildNode<T, L, LinkPath, BkOf<Q>>
+        + BuildNode<T, L, Established, BsOf<Q>>
+        + BuildNode<T, L, Recovery, BrOf<Q>>,
+    PcOf<Q>: 'static,
+    PeOf<Q>: 'static,
+    PlOf<Q>: 'static,
+    PkOf<Q>: 'static,
+    PsOf<Q>: 'static,
+    PrOf<Q>: 'static,
+    NodeData<T, L, Connection>: NodePositions<T, L, Connection, HwOf<Q>>,
+    NodeData<T, L, LinkEntry>: NodePositions<T, L, LinkEntry, HeOf<Q>>,
+    NodeData<T, L, LogicalPath>: NodePositions<T, L, LogicalPath, HlOf<Q>>,
+    NodeData<T, L, LinkPath>: NodePositions<T, L, LinkPath, HkOf<Q>>,
+    NodeData<T, L, Established>: NodePositions<T, L, Established, HsOf<Q>>,
+    NodeData<T, L, Recovery>: NodePositions<T, L, Recovery, HrOf<Q>>,
 {
     /// Make a connection with its first logical path and its first link
     /// path. Every call starts woken; every deadline is read.
@@ -383,7 +435,7 @@ where
         let mut call_reads: [Vec<ReadSet>; 6] = Default::default();
         let mut acts_before_calls: [Vec<bool>; 6] = Default::default();
         macro_rules! tables {
-            ($lend:ident($($a:expr),*), $lv:ident, $h:ident, $c:ident) => {{
+            ($lend:ident($($a:expr),*), $lv:ident, $h:ty, $c:ident) => {{
                 let l = <$lv as Layer>::INDEX;
                 <NodeData<T, L, $lv> as NodePositions<T, L, $lv, $h>>::types(&mut types[l]);
                 <NodeData<T, L, $lv> as NodePositions<T, L, $lv, $h>>::reads(&mut data_reads[l]);
@@ -619,7 +671,7 @@ where
             ..
         } = self;
         macro_rules! go {
-            ($lend:ident($($a:expr),*), $lv:ident, $h:ident, $c:ident) => {{
+            ($lend:ident($($a:expr),*), $lv:ident, $h:ty, $c:ident) => {{
                 let lent = tree.$lend($($a,)* Records { lineage: lineage_taken, nodes: nodes_taken, now });
                 <NodeData<T, L, $lv> as NodePositions<T, L, $lv, $h>>::deadline_from_end(&lent.lineage, r)
             }};
@@ -644,7 +696,7 @@ where
             ..
         } = self;
         macro_rules! go {
-            ($lend:ident($($a:expr),*), $lv:ident, $h:ident, $c:ident) => {{
+            ($lend:ident($($a:expr),*), $lv:ident, $h:ty, $c:ident) => {{
                 let mut lent = tree.$lend($($a,)* Records { lineage: lineage_taken, nodes: nodes_taken, now });
                 <NodeData<T, L, $lv> as NodePositions<T, L, $lv, $h>>::expire_from_end(lent.lineage, &mut lent.others, r, now)
             }};
@@ -666,7 +718,7 @@ where
             ..
         } = self;
         macro_rules! go {
-            ($lend:ident($($a:expr),*), $lv:ident, $h:ident, $c:ident) => {{
+            ($lend:ident($($a:expr),*), $lv:ident, $h:ty, $c:ident) => {{
                 let mut lent = tree.$lend($($a,)* Records { lineage: lineage_taken, nodes: nodes_taken, now });
                 <NodeData<T, L, $lv> as NodePositions<T, L, $lv, $h>>::reread_from_end(lent.lineage, &mut lent.others, r, now)
             }};
@@ -689,7 +741,7 @@ where
             ..
         } = self;
         macro_rules! go {
-            ($lend:ident($($a:expr),*), $lv:ident, $h:ident, $c:ident) => {{
+            ($lend:ident($($a:expr),*), $lv:ident, $h:ty, $c:ident) => {{
                 let mut lent = tree.$lend($($a,)* Records { lineage: lineage_taken, nodes: nodes_taken, now });
                 <NodeData<T, L, $lv> as NodePositions<T, L, $lv, $h>>::before_calls_from_end(lent.lineage, &mut lent.others, r, now, poll_waker)
             }};
@@ -713,7 +765,7 @@ where
             ..
         } = self;
         macro_rules! go {
-            ($lend:ident($($a:expr),*), $lv:ident, $h:ident, $c:ident) => {{
+            ($lend:ident($($a:expr),*), $lv:ident, $h:ty, $c:ident) => {{
                 let lent = tree.$lend($($a,)* Records { lineage: lineage_taken, nodes: nodes_taken, now });
                 let waker = lent.wakers[index].clone();
                 let mut cx = Context::from_waker(&waker);
@@ -826,13 +878,13 @@ where
         now: InstantOf<T>,
         changes: &mut Changes,
     ) {
-        let data = <L as BuildNode<T, L, Connection, Bw>>::build_node(
+        let data = <L as BuildNode<T, L, Connection, BwOf<Q>>>::build_node(
             &mut Lineage::new(HNil, &mut self.lineage_taken),
             args,
         );
         self.lineage_taken.clear();
         let calls =
-            crate::call::ConnectionCalls(<L as NodeCalls<T, L, Connection, Pc>>::start_all::<
+            crate::call::ConnectionCalls(<L as NodeCalls<T, L, Connection, PcOf<Q>>>::start_all::<
                 Bundle<T, L, Q>,
             >(args));
         let node = self.node(
@@ -879,11 +931,11 @@ where
             let connection = self.tree.connection.as_mut().expect("the connection node");
             let mut parents =
                 Lineage::new(L::connection(&mut connection.data), &mut self.lineage_taken);
-            <L as BuildNode<T, L, LinkEntry, Be>>::build_node(&mut parents, &mut args)
+            <L as BuildNode<T, L, LinkEntry, BeOf<Q>>>::build_node(&mut parents, &mut args)
         };
         changes.extend(self.recorded_for(&[NodeAddr::CONNECTION]));
         let calls =
-            crate::call::LinkEntryCalls(<L as NodeCalls<T, L, LinkEntry, Pe>>::start_all::<
+            crate::call::LinkEntryCalls(<L as NodeCalls<T, L, LinkEntry, PeOf<Q>>>::start_all::<
                 Bundle<T, L, Q>,
             >(&mut args));
         let addr = NodeAddr::entry(slot);
@@ -907,13 +959,12 @@ where
             let connection = self.tree.connection.as_mut().expect("the connection node");
             let mut parents =
                 Lineage::new(L::connection(&mut connection.data), &mut self.lineage_taken);
-            <L as BuildNode<T, L, LogicalPath, Bl>>::build_node(&mut parents, args)
+            <L as BuildNode<T, L, LogicalPath, BlOf<Q>>>::build_node(&mut parents, args)
         };
         changes.extend(self.recorded_for(&[NodeAddr::CONNECTION]));
-        let calls =
-            crate::call::LogicalPathCalls(<L as NodeCalls<T, L, LogicalPath, Pl>>::start_all::<
-                Bundle<T, L, Q>,
-            >(args));
+        let calls = crate::call::LogicalPathCalls(
+            <L as NodeCalls<T, L, LogicalPath, PlOf<Q>>>::start_all::<Bundle<T, L, Q>>(args),
+        );
         let addr = NodeAddr::logical_path(slot);
         let node = self.node(
             addr,
@@ -984,16 +1035,17 @@ where
                 ),
                 &mut self.lineage_taken,
             );
-            <L as BuildNode<T, L, LinkPath, Bk>>::build_node(&mut parents, &mut args)
+            <L as BuildNode<T, L, LinkPath, BkOf<Q>>>::build_node(&mut parents, &mut args)
         };
         changes.extend(self.recorded_for(&[
             NodeAddr::CONNECTION,
             NodeAddr::entry(entry),
             NodeAddr::logical_path(slot),
         ]));
-        let calls = crate::call::LinkPathCalls(<L as NodeCalls<T, L, LinkPath, Pk>>::start_all::<
-            Bundle<T, L, Q>,
-        >(&mut args));
+        let calls =
+            crate::call::LinkPathCalls(<L as NodeCalls<T, L, LinkPath, PkOf<Q>>>::start_all::<
+                Bundle<T, L, Q>,
+            >(&mut args));
         let addr = NodeAddr::link_path(slot, sub);
         let node = self.node(
             addr,
@@ -1023,13 +1075,12 @@ where
             let connection = self.tree.connection.as_mut().expect("the connection node");
             let mut parents =
                 Lineage::new(L::connection(&mut connection.data), &mut self.lineage_taken);
-            <L as BuildNode<T, L, Established, Bs>>::build_node(&mut parents, args)
+            <L as BuildNode<T, L, Established, BsOf<Q>>>::build_node(&mut parents, args)
         };
         changes.extend(self.recorded_for(&[NodeAddr::CONNECTION]));
-        let calls =
-            crate::call::EstablishedCalls(<L as NodeCalls<T, L, Established, Ps>>::start_all::<
-                Bundle<T, L, Q>,
-            >(args));
+        let calls = crate::call::EstablishedCalls(
+            <L as NodeCalls<T, L, Established, PsOf<Q>>>::start_all::<Bundle<T, L, Q>>(args),
+        );
         let node = self.node(
             NodeAddr::ESTABLISHED,
             NodeKey::Established,
@@ -1073,14 +1124,15 @@ where
                 ),
                 &mut self.lineage_taken,
             );
-            <L as BuildNode<T, L, Recovery, Br>>::build_node(&mut parents, args)
+            <L as BuildNode<T, L, Recovery, BrOf<Q>>>::build_node(&mut parents, args)
         };
         let mut lineage = self.ancestors(link);
         lineage.push(link);
         changes.extend(self.recorded_for(&lineage));
-        let calls = crate::call::RecoveryCalls(<L as NodeCalls<T, L, Recovery, Pr>>::start_all::<
-            Bundle<T, L, Q>,
-        >(args));
+        let calls =
+            crate::call::RecoveryCalls(<L as NodeCalls<T, L, Recovery, PrOf<Q>>>::start_all::<
+                Bundle<T, L, Q>,
+            >(args));
         let addr = NodeAddr::recovery(link.slot, link.sub);
         let key = NodeKey::Recovery(args.path.clone(), args.link.clone());
         let node = self.node(addr, key, 0, data, calls, ());
@@ -1132,7 +1184,11 @@ where
                 ..
             } = tree.lend_link_path(link.slot, link.sub, records);
             let mut others = others.ending(node.key);
-            <L as BuildNode<T, L, Recovery, Br>>::end_node(node.data, &mut lineage, &mut others);
+            <L as BuildNode<T, L, Recovery, BrOf<Q>>>::end_node(
+                node.data,
+                &mut lineage,
+                &mut others,
+            );
         }
         let mut lineage = self.ancestors(link);
         lineage.push(link);
@@ -1172,7 +1228,11 @@ where
             };
             let (mut parents, mut others) =
                 tree.end_link_path_view(link.slot, entry, node.key, records);
-            <L as BuildNode<T, L, LinkPath, Bk>>::end_node(node.data, &mut parents, &mut others);
+            <L as BuildNode<T, L, LinkPath, BkOf<Q>>>::end_node(
+                node.data,
+                &mut parents,
+                &mut others,
+            );
         }
         let changes = self.recorded_for(&[
             NodeAddr::CONNECTION,
@@ -1195,7 +1255,7 @@ where
         let addr = NodeAddr::entry(slot);
         self.ending(addr, todo);
         let node = self.tree.entries[slot].take().expect("alive");
-        end_under_connection!(self, LinkEntry, Be, node.data, node.key, now);
+        end_under_connection!(self, LinkEntry, BeOf<Q>, node.data, node.key, now);
         let changes = self.recorded_for(&[NodeAddr::CONNECTION]);
         self.readers(&changes, None, todo);
     }
@@ -1221,7 +1281,14 @@ where
         let addr = NodeAddr::logical_path(slot);
         self.ending(addr, todo);
         let path = self.tree.logical_paths[slot].take().expect("alive");
-        end_under_connection!(self, LogicalPath, Bl, path.node.data, path.node.key, now);
+        end_under_connection!(
+            self,
+            LogicalPath,
+            BlOf<Q>,
+            path.node.data,
+            path.node.key,
+            now
+        );
         let changes = self.recorded_for(&[NodeAddr::CONNECTION]);
         self.readers(&changes, None, todo);
     }
@@ -1232,7 +1299,7 @@ where
         }
         self.ending(NodeAddr::ESTABLISHED, todo);
         let node = self.tree.connection().child.take().expect("checked");
-        end_under_connection!(self, Established, Bs, node.data, node.key, now);
+        end_under_connection!(self, Established, BsOf<Q>, node.data, node.key, now);
         let changes = self.recorded_for(&[NodeAddr::CONNECTION]);
         self.readers(&changes, None, todo);
     }
@@ -1313,7 +1380,7 @@ where
                 node.key,
                 now,
             );
-            <L as BuildNode<T, L, Connection, Bw>>::end_node(
+            <L as BuildNode<T, L, Connection, BwOf<Q>>>::end_node(
                 node.data,
                 &mut Lineage::new(HNil, &mut self.lineage_taken),
                 &mut others,
@@ -1362,7 +1429,7 @@ where
                 ..
             } = self;
             macro_rules! go {
-                ($lend:ident($($a:expr),*), $lv:ident, $h:ident, $c:ident) => {{
+                ($lend:ident($($a:expr),*), $lv:ident, $h:ty, $c:ident) => {{
                     let mut lent = tree.$lend($($a,)* Records { lineage: lineage_taken, nodes: nodes_taken, now });
                     <NodeData<T, L, $lv> as NodePositions<T, L, $lv, $h>>::future_dropped_each(&mut lent.lineage, cause);
                 }};
@@ -1624,46 +1691,36 @@ where
     }
 }
 
-impl<T, L, Q, Pc, Pe, Pl, Pk, Ps, Pr, Hw, He, Hl, Hk, Hs, Hr, Bw, Be, Bl, Bk, Bs, Br> Future
-    for ConnectionDriver<T, L, Q>
+impl<T, L, Q> Future for ConnectionDriver<T, L, Q>
 where
-    Q: DriverPositions<
-            Connection = Pc,
-            LinkEntry = Pe,
-            LogicalPath = Pl,
-            LinkPath = Pk,
-            Established = Ps,
-            Recovery = Pr,
-            Data = (Hw, He, Hl, Hk, Hs, Hr),
-            Builds = (Bw, Be, Bl, Bk, Bs, Br),
-        >,
+    Q: DriverPositions<Data: LayerPositions, Builds: LayerPositions>,
     T: ConnectionChoices,
     for<'v> L: LineageLists<'v, T>,
     L: TreeCalls<T, Q>
-        + NodeCalls<T, L, Connection, Pc>
-        + NodeCalls<T, L, LinkEntry, Pe>
-        + NodeCalls<T, L, LogicalPath, Pl>
-        + NodeCalls<T, L, LinkPath, Pk>
-        + NodeCalls<T, L, Established, Ps>
-        + NodeCalls<T, L, Recovery, Pr>
-        + BuildNode<T, L, Connection, Bw>
-        + BuildNode<T, L, LinkEntry, Be>
-        + BuildNode<T, L, LogicalPath, Bl>
-        + BuildNode<T, L, LinkPath, Bk>
-        + BuildNode<T, L, Established, Bs>
-        + BuildNode<T, L, Recovery, Br>,
-    Pc: 'static,
-    Pe: 'static,
-    Pl: 'static,
-    Pk: 'static,
-    Ps: 'static,
-    Pr: 'static,
-    NodeData<T, L, Connection>: NodePositions<T, L, Connection, Hw>,
-    NodeData<T, L, LinkEntry>: NodePositions<T, L, LinkEntry, He>,
-    NodeData<T, L, LogicalPath>: NodePositions<T, L, LogicalPath, Hl>,
-    NodeData<T, L, LinkPath>: NodePositions<T, L, LinkPath, Hk>,
-    NodeData<T, L, Established>: NodePositions<T, L, Established, Hs>,
-    NodeData<T, L, Recovery>: NodePositions<T, L, Recovery, Hr>,
+        + NodeCalls<T, L, Connection, PcOf<Q>>
+        + NodeCalls<T, L, LinkEntry, PeOf<Q>>
+        + NodeCalls<T, L, LogicalPath, PlOf<Q>>
+        + NodeCalls<T, L, LinkPath, PkOf<Q>>
+        + NodeCalls<T, L, Established, PsOf<Q>>
+        + NodeCalls<T, L, Recovery, PrOf<Q>>
+        + BuildNode<T, L, Connection, BwOf<Q>>
+        + BuildNode<T, L, LinkEntry, BeOf<Q>>
+        + BuildNode<T, L, LogicalPath, BlOf<Q>>
+        + BuildNode<T, L, LinkPath, BkOf<Q>>
+        + BuildNode<T, L, Established, BsOf<Q>>
+        + BuildNode<T, L, Recovery, BrOf<Q>>,
+    PcOf<Q>: 'static,
+    PeOf<Q>: 'static,
+    PlOf<Q>: 'static,
+    PkOf<Q>: 'static,
+    PsOf<Q>: 'static,
+    PrOf<Q>: 'static,
+    NodeData<T, L, Connection>: NodePositions<T, L, Connection, HwOf<Q>>,
+    NodeData<T, L, LinkEntry>: NodePositions<T, L, LinkEntry, HeOf<Q>>,
+    NodeData<T, L, LogicalPath>: NodePositions<T, L, LogicalPath, HlOf<Q>>,
+    NodeData<T, L, LinkPath>: NodePositions<T, L, LinkPath, HkOf<Q>>,
+    NodeData<T, L, Established>: NodePositions<T, L, Established, HsOf<Q>>,
+    NodeData<T, L, Recovery>: NodePositions<T, L, Recovery, HrOf<Q>>,
 {
     type Output = ();
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
