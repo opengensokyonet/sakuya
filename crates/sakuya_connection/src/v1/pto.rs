@@ -358,7 +358,7 @@ where
                 }
             }
             // a PING when nothing else is to be sent
-            pings.probe(spaces.iter());
+            pings.probe(spaces.iter(), datagrams);
         }
         for (space, batch) in &batches {
             if batch.persistent {

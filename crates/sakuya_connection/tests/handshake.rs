@@ -13,7 +13,7 @@
 mod common;
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     fmt::Debug,
     future::Future,
     num::NonZeroUsize,
@@ -467,6 +467,10 @@ thread_local! {
     static NOTED: RefCell<[Noted; 2]> = RefCell::new([Noted::default(), Noted::default()]);
     /// The token the client of the next run starts with; empty for none.
     static CLIENT_TOKEN: RefCell<Bytes> = const { RefCell::new(Bytes::new()) };
+    /// How many of the first datagrams the client of the next run sends
+    /// the link loses, as the network would: they are sent and never
+    /// arrive.
+    static CLIENT_DATAGRAMS_LOST: Cell<usize> = const { Cell::new(0) };
 }
 
 /// What the watch of one side noted.
@@ -1234,30 +1238,38 @@ fn handshake(
         .collect();
     assert!(!first.is_empty(), "the client sends its first flight");
     let first_sent = first.clone();
-    // the server's connection is made once the first datagram arrives
+    // the server's connection is made once its first datagrams arrive: the
+    // first flight, or, when the link loses it, what the client sends
+    // later
     let (server_routing, server_receiver) = Routing::new(&[cid(&CLIENT_DCID), cid(&SERVER_CID)]);
     let server_args = args::<ServerChoices>(
         HandshakeStart::new(server_engine(clock), MessageLimits::default()),
         (),
         AddressValidation::NotValidated,
         server_capacities(),
-        FirstFlight::Datagrams(
-            first
-                .iter()
-                .map(|datagram| arrived(datagram.clone(), &server_link))
-                .collect(),
-        ),
+        FirstFlight::Datagrams(Vec::new()),
         server_receiver,
         &server_routing,
         first_local(&SERVER_CID, 0x5e),
     );
     let server_handle = ConnectionHandle::new(&server_args);
-    let mut server = connection!(
-        ServerChoices,
-        server_args,
-        server_link.clone(),
-        [$($server_before),*] [$($server),*]
-    );
+    let mut server_args = Some(server_args);
+    let mut server = None;
+    // the datagrams that arrive before the server's connection is made
+    let mut waiting: Vec<Bytes> = Vec::new();
+    let lose = |datagram: Bytes, waiting: &mut Vec<Bytes>| {
+        let lost = CLIENT_DATAGRAMS_LOST.with(|lost| {
+            let loses = lost.get() > 0;
+            lost.set(lost.get().saturating_sub(1));
+            loses
+        });
+        if !lost {
+            waiting.push(datagram);
+        }
+    };
+    for datagram in first {
+        lose(datagram, &mut waiting);
+    }
     let mut run = Run {
         client_sent: first_sent,
         server_ended: false,
@@ -1271,8 +1283,25 @@ fn handshake(
         advance_to(ms(millis));
         loop {
             let mut moved = false;
-            if !run.server_ended {
-                run.server_ended = outer.poll(&mut server).is_ready();
+            if server.is_none() && !waiting.is_empty() {
+                let mut args = server_args.take().expect("made once");
+                args.first_flight = FirstFlight::Datagrams(
+                    waiting
+                        .drain(..)
+                        .map(|datagram| arrived(datagram, &server_link))
+                        .collect(),
+                );
+                server = Some(connection!(
+                    ServerChoices,
+                    args,
+                    server_link.clone(),
+                    [$($server_before),*] [$($server),*]
+                ));
+            }
+            if !run.server_ended
+                && let Some(server) = &mut server
+            {
+                run.server_ended = outer.poll(server).is_ready();
             }
             for (_, datagram) in common::take_sent() {
                 moved = true;
@@ -1294,7 +1323,11 @@ fn handshake(
             for (_, datagram) in common::take_sent() {
                 moved = true;
                 run.client_sent.push(datagram.clone());
-                server_routing.deliver(datagram, &server_link);
+                if server.is_some() {
+                    server_routing.deliver(datagram, &server_link);
+                } else {
+                    lose(datagram, &mut waiting);
+                }
             }
             if !moved {
                 break;
@@ -1425,6 +1458,41 @@ fn a_client_and_a_server_complete_and_confirm_the_handshake() {
             datagram.len()
         );
     }
+}
+
+#[test]
+fn a_client_whose_first_initial_datagram_is_lost_sends_its_hello_again_and_the_handshake_completes()
+{
+    let clock = tls_clock();
+    // the link loses the client's first datagram; the server's connection
+    // is made when the first one that arrives does, after the client's
+    // probe timeout expired and handed the ClientHello, still in flight,
+    // back to be sent again
+    CLIENT_DATAGRAMS_LOST.with(|lost| lost.set(1));
+    let run = handshake(client_engine(&clock, 1), &clock, |_| {
+        noted(Role::Server).confirmed && noted(Role::Client).confirmed
+    });
+    CLIENT_DATAGRAMS_LOST.with(|lost| lost.set(0));
+    // nothing could happen before the probe timeout, which expires at
+    // 999 ms with the initial round trip time
+    assert!(now() >= ms(999), "confirmed at {:?}", now());
+    let (server, client) = (noted(Role::Server), noted(Role::Client));
+    assert!(client.confirmed, "the client's handshake is confirmed");
+    assert!(server.confirmed, "the server's handshake is confirmed");
+    ready(run.client_handle.handshake_completed()).expect("the client's handshake completed");
+    ready(run.server_handle.handshake_completed()).expect("the server's handshake completed");
+    // the first datagram was lost, and the ClientHello went again in the
+    // probe datagrams after it
+    let initials: Vec<_> = run
+        .client_sent
+        .iter()
+        .filter(|datagram| starts_with_initial(datagram))
+        .collect();
+    assert!(initials.len() >= 2, "{} Initial datagrams", initials.len());
+    for datagram in initials {
+        assert!(datagram.len() >= MIN_DATAGRAM_SIZE);
+    }
+    assert!(!run.server_ended && !run.client_ended);
 }
 
 #[test]

@@ -609,14 +609,17 @@ mod probe {
     }
 
     /// Content the probe has to send in Initial packets, as the driver's
-    /// own: `len` PING frames, which it needs room for in any position,
-    /// unless it `writes` nothing when it is given its turn. It ranks
+    /// own: `len` PING frames, which it needs room for in the last position
+    /// and `length_field` bytes more for any other (the Length field of a
+    /// frame that goes on to the end), unless it `writes` nothing when it
+    /// is given its turn. It ranks
     /// among the control frames, and holds its place when `holds_place`.
     /// Once given to its frame source it is gone.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct FillerIntent {
         pub id: u8,
         pub len: usize,
+        pub length_field: usize,
         pub holds_place: bool,
         pub writes: bool,
     }
@@ -628,7 +631,7 @@ mod probe {
         }
         fn min_lengths(&self) -> sakuya_connection::send_strategy::MinimumLengths {
             sakuya_connection::send_strategy::MinimumLengths {
-                with_length: self.len,
+                with_length: self.len + self.length_field,
                 as_last: self.len,
             }
         }
@@ -1062,6 +1065,10 @@ mod probe {
         /// packet number, the ranges and the ACK obligation of the Initial
         /// space; the idle timeout's deadline; and the reason for closing.
         Inspect,
+        /// Log the retirements the destination connection ID strategy has
+        /// waiting to be written, and the ACK obligation of the
+        /// Application Data space.
+        InspectOwed,
         /// Log how many inputs the logical path holds, and the largest
         /// packet number processed in the Handshake space.
         InspectHeld,
@@ -1333,6 +1340,20 @@ mod probe {
                         .link_entry::<HList![AntiAmplification], Ian>(&link)
                         .map(|hlist_pat![limit]| limit.credit(AddressValidation::NotValidated));
                     log(format!("credit {credit:?}"));
+                }
+                PacketStep::InspectOwed => {
+                    let retirements: Vec<_> = lineage
+                        .get::<v1::connection_ids::ConnectionIdsOf<T>, Icid>()
+                        .destination()
+                        .waiting_retirements()
+                        .collect();
+                    let due = lineage
+                        .get::<AckObligationsOf<T>, Ia>()
+                        .get(PacketNumberSpaceKind::ApplicationData)
+                        .map(|obligation| obligation.due());
+                    log(format!(
+                        "owed retirements {retirements:?}, Application Data ACK {due:?}"
+                    ));
                 }
                 PacketStep::InspectOffer(link) => {
                     let offered: Vec<_> = lineage
@@ -4904,7 +4925,9 @@ fn a_client_keeps_the_backoff_until_the_server_has_validated_its_address() {
                 &[],
                 &server_keys(),
                 number,
-                &ack_of(&[(0, 1)], false),
+                // packet 0, then the probe timeout's two probe datagrams,
+                // packets 1 and 2
+                &ack_of(&[(0, 2)], false),
             ),
             &first,
             ms(at),
@@ -5074,6 +5097,50 @@ fn the_strategy_core_is_told_of_each_send_key_and_the_confirmation_once() {
         assert!(outer.poll(&mut connection).is_pending());
         assert_eq!(strategy_events("core: "), told, "at {at} ms");
     }
+}
+
+#[test]
+fn the_new_connection_id_is_gathered_and_sent_once_the_handshake_is_confirmed() {
+    use probe::PacketStep::{HandshakeConnectionId, InstallHandshakeKeys, InstallOneRttKeys};
+    reset();
+    // a connection ID to send to (the overhead of a packet is known only
+    // with it), the 1-RTT keys (which `open_sent_one_rtt` opens with), and a validated address for
+    // the credit; the handshake is confirmed at 14 ms
+    feed_packets([
+        (
+            ms(11),
+            HandshakeConnectionId(ConnectionId::new(&CLIENT_SCID).expect("eight bytes")),
+        ),
+        (ms(12), InstallHandshakeKeys),
+        (ms(13), InstallOneRttKeys),
+    ]);
+    feed([(ms(14), probe::Step::Confirm)]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, link());
+    take_strategy_events();
+    // before the confirmation the local connection ID strategy has nothing
+    // to disclose
+    let _ = run(&mut connection, 11..=13);
+    assert_eq!(strategy_events("path 0: content"), Vec::<String>::new());
+    assert_eq!(common::take_sent(), []);
+    // once confirmed, the link path gathers the NEW_CONNECTION_ID of the
+    // connection ID the strategy issues, writes it and no longer finds it
+    let _ = run(&mut connection, 14..=16);
+    assert_eq!(
+        strategy_events("path 0: "),
+        [
+            "path 0: content NewConnectionIdIntent { sequence: 1 }",
+            "path 0: gone NewConnectionIdIntent { sequence: 1 }",
+        ]
+    );
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(short_header(&sent[0].1), "a 1-RTT packet");
+    let (_, _, payload) = open_sent_one_rtt(&sent[0].1);
+    // the frame type, then its sequence number
+    assert_eq!(payload[..2], [0x18, 0x01]);
+    // nothing is issued again
+    let _ = run(&mut connection, 17..=1000);
+    assert_eq!(strategy_events("path 0: content"), Vec::<String>::new());
 }
 
 #[test]
@@ -5432,9 +5499,52 @@ fn a_probe_timeout_has_its_link_path_gather_a_ping() {
             "path 0: gone ProbePingIntent { space: Initial }",
         ]
     );
+    // the expiry permits two probe datagrams (the default policy), and its
+    // space has a PING for each: the second probe is a second PING
     let sent = common::take_sent();
-    assert_eq!(sent.len(), 1, "{sent:?}");
-    assert_eq!(open_sent_initial(&sent[0].1).payload[0], 0x01, "the PING");
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    for (_, datagram) in &sent {
+        assert_eq!(open_sent_initial(datagram).payload[0], 0x01, "the PING");
+    }
+}
+
+#[test]
+fn a_probe_timeout_sends_two_probe_datagrams_each_with_a_ping_and_no_third() {
+    reset();
+    let first = link();
+    feed([(
+        ms(6),
+        probe::Step::Sent {
+            space: PacketNumberSpaceKind::Initial,
+            count: 1,
+        },
+    )]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    deliver(
+        padded(
+            &[],
+            |payload| initial_from(&CLIENT_SCID, 0, payload),
+            &ping(),
+        ),
+        &first,
+        ms(5),
+    );
+    let _ = run(&mut connection, 5..=6);
+    assert_eq!(common::take_sent().len(), 1, "the ACK");
+    let _ = run(&mut connection, 7..=1004);
+    assert_eq!(common::take_sent(), []);
+    // the expiry at 1005 ms permits two probe datagrams (the default
+    // policy), and puts a PING of its space, the Initial space, in each
+    let _ = run(&mut connection, 1005..=1006);
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    for (_, datagram) in &sent {
+        let packet = open_sent_initial(datagram);
+        assert_eq!(packet.payload[0], 0x01, "the PING");
+    }
+    // the permits are used up: no third until the next expiry, at 3005 ms
+    let _ = run(&mut connection, 1007..=3004);
+    assert_eq!(common::take_sent(), []);
 }
 
 #[test]
@@ -5458,10 +5568,11 @@ fn the_next_probe_timeout_has_its_link_path_gather_a_ping_again() {
         &first,
         ms(5),
     );
-    // the ACK at 6 ms; the probe timeout expires at 1005 ms and the PING
-    // goes at 1006 ms, its last
+    // the ACK at 6 ms; the probe timeout expires at 1005 ms and its two
+    // PINGs (one for each probe datagram it permits) go at 1006 ms, the
+    // last of them
     let _ = run(&mut connection, 5..=1006);
-    assert_eq!(common::take_sent().len(), 2, "the ACK and the PING");
+    assert_eq!(common::take_sent().len(), 3, "the ACK and the two PINGs");
     take_strategy_events();
     // the next one expires at 1006 ms + 2 × 999 ms and has a PING gathered
     // and written again
@@ -5475,9 +5586,12 @@ fn the_next_probe_timeout_has_its_link_path_gather_a_ping_again() {
             "path 0: gone ProbePingIntent { space: Initial }",
         ]
     );
+    // two probe datagrams again, a PING in each
     let sent = common::take_sent();
-    assert_eq!(sent.len(), 1, "{sent:?}");
-    assert_eq!(open_sent_initial(&sent[0].1).payload[0], 0x01, "the PING");
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    for (_, datagram) in &sent {
+        assert_eq!(open_sent_initial(datagram).payload[0], 0x01, "the PING");
+    }
 }
 
 #[test]
@@ -6015,6 +6129,7 @@ fn filler(id: u8, len: usize, holds_place: bool, writes: bool) -> probe::FillerI
     probe::FillerIntent {
         id,
         len,
+        length_field: 0,
         holds_place,
         writes,
     }
@@ -6099,6 +6214,56 @@ fn content_that_does_not_hold_its_place_and_writes_nothing_is_passed_over() {
         filler(3, 100, false, true),
     ]);
     assert_eq!(pings, [500]);
+    assert_eq!(
+        log,
+        ["filler 1 wrote", "filler 2 wrote nothing", "filler 3 wrote"]
+    );
+}
+
+/// Content of the probe's part, `id`, of `len` PING frames, which takes
+/// `length_field` bytes more of room unless it is in the last position.
+fn filler_with_length_field(
+    id: u8,
+    len: usize,
+    length_field: usize,
+    holds_place: bool,
+    writes: bool,
+) -> probe::FillerIntent {
+    probe::FillerIntent {
+        length_field,
+        ..filler(id, len, holds_place, writes)
+    }
+}
+
+#[test]
+fn content_that_does_not_hold_its_place_and_writes_nothing_in_the_last_position_lets_the_next_try_it()
+ {
+    // 752 bytes are left after the first: the second, which needs 800 with
+    // a Length field and 700 as the last, takes the last position, writes
+    // nothing and does not hold its place; the third then tries the last
+    // position, and writes
+    let (pings, log) = sent_with_fillers(&[
+        filler(1, 400, false, true),
+        filler_with_length_field(2, 700, 100, false, false),
+        filler(3, 100, false, true),
+    ]);
+    assert_eq!(pings, [500]);
+    assert_eq!(
+        log,
+        ["filler 1 wrote", "filler 2 wrote nothing", "filler 3 wrote"]
+    );
+}
+
+#[test]
+fn content_that_holds_its_place_and_writes_nothing_in_the_last_position_ends_the_datagram() {
+    // as above, but the second holds its place: the datagram ends with the
+    // first, and the third goes after the second in the next
+    let (pings, log) = sent_with_fillers(&[
+        filler(1, 400, false, true),
+        filler_with_length_field(2, 700, 100, true, false),
+        filler(3, 100, false, true),
+    ]);
+    assert_eq!(pings, [400, 100]);
     assert_eq!(
         log,
         ["filler 1 wrote", "filler 2 wrote nothing", "filler 3 wrote"]
@@ -6242,12 +6407,15 @@ fn a_probe_goes_past_a_full_congestion_window_on_a_permit() {
     let _ = run(&mut connection, 8..=1004);
     assert_eq!(common::take_sent(), []);
     let _ = run(&mut connection, 1005..=1006);
+    // the expiry permits two probe datagrams, each with a PING: both go
+    // past the window
     let sent = common::take_sent();
-    assert_eq!(sent.len(), 1, "{sent:?}");
-    let (_, datagram) = &sent[0];
-    assert_eq!(datagram.len(), MIN_DATAGRAM_SIZE);
-    let packet = open_sent_initial(datagram);
-    assert_eq!(packet.payload[0], 0x01, "a PING");
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    for (_, datagram) in &sent {
+        assert_eq!(datagram.len(), MIN_DATAGRAM_SIZE);
+        let packet = open_sent_initial(datagram);
+        assert_eq!(packet.payload[0], 0x01, "a PING");
+    }
 }
 
 #[test]
@@ -6316,25 +6484,31 @@ fn a_probe_timeout_sends_a_ping_padded_to_1200_bytes_as_the_credit_allows() {
         ms(6000),
     );
     let _ = run(&mut connection, 6000..=6001);
+    // the expiry's second PING, which the limit held back, goes now as well
+    // as the ACK: two probe datagrams
     let sent = common::take_sent();
-    assert_eq!(sent.len(), 1, "{sent:?}");
-    let (_, datagram) = &sent[0];
-    assert_eq!(datagram.len(), MIN_DATAGRAM_SIZE);
-    let packet = open_sent_initial(datagram);
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    for (_, datagram) in &sent {
+        assert_eq!(datagram.len(), MIN_DATAGRAM_SIZE);
+    }
+    let packet = open_sent_initial(&sent[0].1);
     // sent at 6001 ms, 1 ms after the packet 1 arrived: an ACK Delay of
     // 1000 µs at the default exponent 3, 125
     assert_eq!(
         packet.payload[..7],
         [0x02, 0x01, 0x40, 0x7d, 0x00, 0x01, 0x01]
     );
+    let packet = open_sent_initial(&sent[1].1);
+    assert_eq!(packet.payload[0], 0x01, "the held PING");
 }
 
-/// A server whose link path has, once polled at 1005 ms, two datagrams to
+/// A server whose link path has, once polled at 1005 ms, three datagrams to
 /// send in one batch: the ACK of two 1-RTT packets in a 1-RTT packet, and
-/// the probe timeout's PING, padded, in an Initial packet, which is of a
-/// lower level and goes after it. Before, it sent the ACK of the client's
+/// the probe timeout's two PINGs (it permits two probe datagrams), each
+/// padded in an Initial packet of its own, which is of a lower level and
+/// goes after it. Before, it sent the ACK of the client's
 /// Initial packet, which is taken.
-fn with_two_datagrams_at_1005_ms(
+fn with_the_ack_and_two_probes_at_1005_ms(
     first: &LinkId<(), ()>,
     later: impl IntoIterator<Item = (Duration, probe::PacketStep)>,
 ) -> impl Future<Output = ()> + Unpin {
@@ -6385,14 +6559,15 @@ fn with_two_datagrams_at_1005_ms(
 fn the_link_accepts_a_prefix_and_the_rest_is_handed_over_again_with_its_send_time() {
     reset();
     let first = link();
-    let mut connection = with_two_datagrams_at_1005_ms(&first, []);
+    let mut connection = with_the_ack_and_two_probes_at_1005_ms(&first, []);
     common::plan_sends([
         common::SendOutcome::Accept(1),
         common::SendOutcome::Hold(usize::MAX),
     ]);
     let _ = run(&mut connection, 1005..=1006);
-    // the ACK accepted; the PING handed over again, alone
-    assert_eq!(common::take_batch_sizes(), [2, 1]);
+    // the ACK accepted; the two PINGs (the expiry's two probe datagrams)
+    // handed over again, together
+    assert_eq!(common::take_batch_sizes(), [3, 2]);
     let sent = common::take_sent();
     assert_eq!(sent.len(), 1, "{sent:?}");
     assert!(short_header(&sent[0].1));
@@ -6401,10 +6576,12 @@ fn the_link_accepts_a_prefix_and_the_rest_is_handed_over_again_with_its_send_tim
     common::release_held_send();
     let _ = run(&mut connection, 1100..=1100);
     let sent = common::take_sent();
-    assert_eq!(sent.len(), 1, "{sent:?}");
-    assert_eq!(sent[0].0, ms(1100));
-    assert_eq!(open_sent_initial(&sent[0].1).payload[0], 0x01);
-    // the next probe timeout counts from when the PING was accepted, with
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    for (at, datagram) in &sent {
+        assert_eq!(*at, ms(1100));
+        assert_eq!(open_sent_initial(datagram).payload[0], 0x01);
+    }
+    // the next probe timeout counts from when the PINGs were accepted, with
     // the backoff doubled: 1100 ms + 2 × 999 ms
     let log = run(&mut connection, 1101..=3097);
     assert_eq!(lines_of(log, &["in flight"]), Vec::<String>::new());
@@ -6420,28 +6597,34 @@ fn the_link_accepts_a_prefix_and_the_rest_is_handed_over_again_with_its_send_tim
 fn a_datagram_the_link_gives_up_is_handed_back_as_lost_and_the_rest_is_sent() {
     reset();
     let first = link();
-    let mut connection = with_two_datagrams_at_1005_ms(&first, []);
+    let mut connection = with_the_ack_and_two_probes_at_1005_ms(&first, []);
     common::plan_sends([common::SendOutcome::GiveUp, common::SendOutcome::GiveUp]);
     let log = run(&mut connection, 1005..=1006);
-    // the first given up; the second handed over again, with the ACK the
-    // loss owes again gathered into a datagram after it, and given up too;
-    // then the ACK, accepted
-    assert_eq!(common::take_batch_sizes(), [2, 2, 1]);
+    // the first given up; the rest (the expiry's two PING datagrams) handed
+    // over again, with the ACK the loss owes again gathered into a datagram
+    // after them, and the first of them given up too; then the second PING
+    // and the ACK, accepted
+    assert_eq!(common::take_batch_sizes(), [3, 3, 2]);
     let given_up = common::take_given_up();
     assert_eq!(given_up.len(), 2);
     assert!(short_header(&given_up[0]), "the 1-RTT ACK");
     assert_eq!(open_sent_initial(&given_up[1]).payload[0], 0x01, "the PING");
     let sent = common::take_sent();
-    assert_eq!(sent.len(), 1, "{sent:?}");
-    assert!(short_header(&sent[0].1), "the 1-RTT ACK again");
-    // the PING left the bytes in flight, and was never accepted: only the
-    // packet sent at 6 ms is there; the ACK sent again counts nothing in
-    // flight
+    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert_eq!(
+        open_sent_initial(&sent[0].1).payload[0],
+        0x01,
+        "the 2nd PING"
+    );
+    assert!(short_header(&sent[1].1), "the 1-RTT ACK again");
+    // the first PING left the bytes in flight, and was never accepted: the
+    // packet sent at 6 ms is there, and the second PING, which was
+    // accepted; the ACK sent again counts nothing in flight
     let lines = lines_of(log, &["in flight"]);
     assert!(
         lines
             .last()
-            .is_some_and(|line| line.starts_with("in flight 1200, outstanding 3,")),
+            .is_some_and(|line| line.starts_with("in flight 2400, outstanding 4,")),
         "{lines:?}"
     );
 }
@@ -6451,13 +6634,15 @@ fn a_batch_holds_at_most_its_limit_of_datagrams() {
     reset();
     MAX_PER_SEND.with(|m| m.set(1));
     let first = link();
-    let mut connection = with_two_datagrams_at_1005_ms(&first, []);
+    let mut connection = with_the_ack_and_two_probes_at_1005_ms(&first, []);
     let _ = run(&mut connection, 1005..=1006);
-    assert_eq!(common::take_batch_sizes(), [1, 1]);
+    // the ACK and the expiry's two PING datagrams, one to a batch
+    assert_eq!(common::take_batch_sizes(), [1, 1, 1]);
     let sent = common::take_sent();
-    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert_eq!(sent.len(), 3, "{sent:?}");
     assert!(short_header(&sent[0].1));
     assert_eq!(open_sent_initial(&sent[1].1).payload[0], 0x01);
+    assert_eq!(open_sent_initial(&sent[2].1).payload[0], 0x01);
 }
 
 /// The bytes in flight of the last line of the recovery layer's feeder in
@@ -6477,7 +6662,7 @@ fn a_datagram_of_a_level_whose_keys_went_is_not_handed_over() {
     use probe::PacketStep::{InstallHandshakeKeys, Receive, TakeRecords};
     reset();
     let first = link();
-    let mut connection = with_two_datagrams_at_1005_ms(
+    let mut connection = with_the_ack_and_two_probes_at_1005_ms(
         &first,
         [
             (ms(1049), InstallHandshakeKeys),
@@ -6494,7 +6679,8 @@ fn a_datagram_of_a_level_whose_keys_went_is_not_handed_over() {
     );
     common::plan_sends([common::SendOutcome::Hold(1)]);
     let log = run(&mut connection, 1005..=1006);
-    assert_eq!(common::take_batch_sizes(), [2]);
+    // the ACK and the expiry's two PING datagrams
+    assert_eq!(common::take_batch_sizes(), [3]);
     let sealed = last_in_flight(log);
     // the Initial keys go with the first Handshake packet processed, while
     // the link keeps the batch
@@ -6504,7 +6690,7 @@ fn a_datagram_of_a_level_whose_keys_went_is_not_handed_over() {
     let log = run(&mut connection, 1060..=1061);
     let sent = common::take_sent();
     assert!(short_header(&sent[0].1), "the 1-RTT ACK accepted");
-    // the PING's datagram is left out of the next batch; what follows has
+    // the PINGs' datagrams are left out of the next batch; what follows has
     // no Initial packet
     assert!(
         sent[1..]
@@ -6514,9 +6700,9 @@ fn a_datagram_of_a_level_whose_keys_went_is_not_handed_over() {
     );
     assert_eq!(common::take_given_up(), [] as [bytes::Bytes; 0]);
     // the Initial space retired with the keys: the Initial packet accepted
-    // before left the bytes in flight then, and the PING, which the
-    // space's records no longer have, leaves them when it is left out
-    assert_eq!(sealed - last_in_flight(log), 2 * MIN_DATAGRAM_SIZE);
+    // before left the bytes in flight then, and the two PINGs, which the
+    // space's records no longer have, leave them when they are left out
+    assert_eq!(sealed - last_in_flight(log), 3 * MIN_DATAGRAM_SIZE);
     let log = run(&mut connection, 1062..=1062);
     assert_eq!(lines_of(log, &["records"]), [] as [String; 0]);
 }
@@ -6612,27 +6798,29 @@ fn a_client_sends_the_initial_packets_it_sealed_before_its_first_handshake_packe
     // Initial packet of a lower level, in a datagram of its own
     common::plan_sends([common::SendOutcome::Hold(1)]);
     let _ = run(&mut connection, 1005..=1006);
-    assert_eq!(common::take_batch_sizes(), [2]);
+    // the ACK and the expiry's two PING datagrams
+    assert_eq!(common::take_batch_sizes(), [3]);
     // while the link keeps them, an Initial and a Handshake packet arrive;
     // a client keeps its Initial keys until it sends a Handshake packet
     let _ = run(&mut connection, 1049..=1051);
     advance_to(ms(1060));
     common::release_held_send();
     let _ = run(&mut connection, 1060..=1061);
-    // the PING's datagram waits with the next one: the ACKs of an Initial
+    // the two PING datagrams wait with the next one: the ACKs of an Initial
     // and of a Handshake packet, coalesced; the first Handshake packet
-    // discards the Initial keys, and both go out
-    assert_eq!(common::take_batch_sizes(), [2]);
+    // discards the Initial keys, and all go out
+    assert_eq!(common::take_batch_sizes(), [3]);
     assert_eq!(common::take_given_up(), [] as [bytes::Bytes; 0]);
     let sent = common::take_sent();
-    assert_eq!(sent.len(), 3, "{sent:?}");
+    assert_eq!(sent.len(), 4, "{sent:?}");
     assert!(short_header(&sent[0].1), "the 1-RTT ACK");
-    let ping_datagram = &sent[1].1;
-    assert_eq!(ping_datagram.len(), MIN_DATAGRAM_SIZE);
-    let packet = open_initial(ping_datagram, &client_keys());
-    assert_eq!(packet.dcid, SERVER_CID);
-    assert_eq!(packet.payload[0], 0x01, "the PING");
-    let coalesced = &sent[2].1;
+    for (_, ping_datagram) in &sent[1..3] {
+        assert_eq!(ping_datagram.len(), MIN_DATAGRAM_SIZE);
+        let packet = open_initial(ping_datagram, &client_keys());
+        assert_eq!(packet.dcid, SERVER_CID);
+        assert_eq!(packet.payload[0], 0x01, "the PING");
+    }
+    let coalesced = &sent[3].1;
     assert_eq!(coalesced.len(), MIN_DATAGRAM_SIZE);
     let packet = open_initial(coalesced, &client_keys());
     assert_eq!(packet.payload[0], 0x02, "the Initial ACK");
@@ -6654,14 +6842,15 @@ fn a_client_sends_the_initial_packets_it_sealed_before_its_first_handshake_packe
 fn a_send_the_link_holds_wakes_the_connection_when_it_is_released() {
     reset();
     let first = link();
-    let mut connection = with_two_datagrams_at_1005_ms(&first, []);
+    let mut connection = with_the_ack_and_two_probes_at_1005_ms(&first, []);
     common::plan_sends([common::SendOutcome::Hold(usize::MAX)]);
     let outer = Outer::new();
     advance_to(ms(1005));
     for _ in 0..3 {
         assert!(outer.poll(&mut connection).is_pending());
     }
-    assert_eq!(common::take_batch_sizes(), [2]);
+    // the ACK and the expiry's two PING datagrams
+    assert_eq!(common::take_batch_sizes(), [3]);
     // nothing is left to do but wait for the link
     let wakes = outer.wakes();
     assert!(outer.poll(&mut connection).is_pending());
@@ -6669,7 +6858,7 @@ fn a_send_the_link_holds_wakes_the_connection_when_it_is_released() {
     common::release_held_send();
     assert_eq!(outer.wakes(), wakes + 1);
     assert!(outer.poll(&mut connection).is_pending());
-    assert_eq!(common::take_sent().len(), 2);
+    assert_eq!(common::take_sent().len(), 3);
 }
 
 #[test]
@@ -6785,7 +6974,7 @@ fn a_datagram_given_up_owes_its_ack_again_and_keeps_its_record() {
     use probe::PacketStep::TakeRecords;
     reset();
     let first = link();
-    let mut connection = with_two_datagrams_at_1005_ms(
+    let mut connection = with_the_ack_and_two_probes_at_1005_ms(
         &first,
         [(
             ms(1010),
@@ -6796,16 +6985,18 @@ fn a_datagram_given_up_owes_its_ack_again_and_keeps_its_record() {
     common::plan_sends([common::SendOutcome::GiveUp, common::SendOutcome::Accept(1)]);
     let _ = run(&mut connection, 1005..=1007);
     // the 1-RTT ACK given up; the ACK is owed again and gathered into a
-    // datagram after the PING, handed over with it; the PING accepted,
-    // then the ACK
+    // datagram after the two PINGs (the expiry's two probe datagrams),
+    // handed over with them; the first PING accepted, then the second PING
+    // and the ACK
     let given_up = common::take_given_up();
     assert_eq!(given_up.len(), 1);
     assert!(short_header(&given_up[0]));
-    assert_eq!(common::take_batch_sizes(), [2, 2, 1]);
+    assert_eq!(common::take_batch_sizes(), [3, 3, 2]);
     let sent = common::take_sent();
-    assert_eq!(sent.len(), 2, "{sent:?}");
+    assert_eq!(sent.len(), 3, "{sent:?}");
     assert_eq!(open_sent_initial(&sent[0].1).payload[0], 0x01, "the PING");
-    assert!(short_header(&sent[1].1), "the 1-RTT ACK again");
+    assert_eq!(open_sent_initial(&sent[1].1).payload[0], 0x01, "the PING");
+    assert!(short_header(&sent[2].1), "the 1-RTT ACK again");
     assert_eq!(
         strategy_events("path 0: "),
         [
@@ -6853,22 +7044,24 @@ fn a_probe_acknowledged_after_it_was_accepted_leaves_nothing_in_flight() {
     let _ = run(&mut connection, 5..=6);
     assert_eq!(common::take_sent().len(), 1, "the ACK");
     let log = run(&mut connection, 1005..=1006);
+    // the expiry's two PING datagrams
     let sent = common::take_sent();
-    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent.len(), 2, "{sent:?}");
     assert_eq!(open_sent_initial(&sent[0].1).number, 2, "the PING");
+    assert_eq!(open_sent_initial(&sent[1].1).number, 3, "the second PING");
     let lines = lines_of(log, &["in flight"]);
     assert!(
         lines
             .last()
-            .is_some_and(|line| line.starts_with("in flight 2400,") && line.ends_with("backoff 1")),
+            .is_some_and(|line| line.starts_with("in flight 3600,") && line.ends_with("backoff 1")),
         "{lines:?}"
     );
-    // the client acknowledges the ACK, the packet sent at 6 ms and the PING
+    // the client acknowledges the ACK, the packet sent at 6 ms and the PINGs
     deliver(
         padded(
             &[],
             |payload| initial_from(&CLIENT_SCID, 1, payload),
-            &ack_of(&[(0, 2)], false),
+            &ack_of(&[(0, 3)], false),
         ),
         &first,
         ms(1100),
@@ -6886,14 +7079,16 @@ fn a_probe_acknowledged_after_it_was_accepted_leaves_nothing_in_flight() {
 
 #[test]
 fn a_link_path_that_ends_while_the_link_holds_its_batch_hands_back_its_packets() {
-    use probe::PacketStep::{Inspect, TakeRecords};
+    use probe::PacketStep::{Inspect, InspectOwed, TakeRecords};
     reset();
     CLOSE_AT.with(|c| c.set(Some(ms(1010))));
     let first = link();
-    let mut connection = with_two_datagrams_at_1005_ms(
+    let mut connection = with_the_ack_and_two_probes_at_1005_ms(
         &first,
         [
             (ms(1007), Inspect),
+            (ms(1008), InspectOwed),
+            (ms(1498), InspectOwed),
             (ms(1499), Inspect),
             (ms(1500), TakeRecords(PacketNumberSpaceKind::Initial)),
             (
@@ -6904,7 +7099,8 @@ fn a_link_path_that_ends_while_the_link_holds_its_batch_hands_back_its_packets()
     );
     common::plan_sends([common::SendOutcome::Hold(usize::MAX)]);
     let _ = run(&mut connection, 1005..=1006);
-    assert_eq!(common::take_batch_sizes(), [2]);
+    // the ACK and the expiry's two PING datagrams
+    assert_eq!(common::take_batch_sizes(), [3]);
     take_strategy_events();
     let log = run(&mut connection, 1007..=1499);
     assert!(
@@ -6919,10 +7115,25 @@ fn a_link_path_that_ends_while_the_link_holds_its_batch_hands_back_its_packets()
     // path, with those it sent before: the ACK frame of the Initial packet
     // sent at 6 ms is owed again, due now once the link path is gone. No
     // link path is left to gather what is owed.
-    let inspected = lines_of(log, &["read"]);
+    let inspected = lines_of(log.clone(), &["read"]);
     assert_eq!(inspected.len(), 2, "{inspected:?}");
     assert!(inspected[0].contains("due Some(NotDue)"), "{inspected:?}");
     assert!(inspected[1].contains("due Some(Now)"), "{inspected:?}");
+    // so is the ACK frame of the 1-RTT packet in the batch, and the link
+    // path's end gives back the connection ID only it used for the
+    // retirement to be written again
+    let owed = lines_of(log, &["owed"]);
+    assert_eq!(
+        owed,
+        [
+            // before the link path ends, at 1008 ms
+            "owed retirements [], Application Data ACK Some(NotDue)",
+            // after, at 1498 ms
+            "owed retirements [RetireConnectionIdIntent { sequence: 0 }], \
+             Application Data ACK Some(Now)",
+        ],
+        "{owed:?}"
+    );
     assert_eq!(strategy_events("path 0: content"), Vec::<String>::new());
     common::release_held_send();
     let log = run(&mut connection, 1500..=1600);
@@ -8052,7 +8263,7 @@ fn an_initial_packet_the_link_accepts_after_the_space_retired_leaves_the_bytes_i
     use probe::PacketStep::{InstallHandshakeKeys, Receive, TakeRecords};
     reset();
     let first = link();
-    let mut connection = with_two_datagrams_at_1005_ms(
+    let mut connection = with_the_ack_and_two_probes_at_1005_ms(
         &first,
         [
             (ms(1049), InstallHandshakeKeys),
@@ -8069,7 +8280,8 @@ fn an_initial_packet_the_link_accepts_after_the_space_retired_leaves_the_bytes_i
     );
     common::plan_sends([common::SendOutcome::Hold(2)]);
     let log = run(&mut connection, 1005..=1006);
-    assert_eq!(common::take_batch_sizes(), [2]);
+    // the ACK and the expiry's two PING datagrams
+    assert_eq!(common::take_batch_sizes(), [3]);
     let sealed = last_in_flight(log);
     // the Initial keys go with the first Handshake packet processed, while
     // the link keeps the batch with the PING's datagram: the Initial packet
@@ -8083,9 +8295,11 @@ fn an_initial_packet_the_link_accepts_after_the_space_retired_leaves_the_bytes_i
     assert_eq!(sent.len(), 3, "{sent:?}");
     assert_eq!(sent[1].1[0] & 0xf0, 0xc0, "the PING's Initial packet");
     assert_eq!(sent[2].1[0] & 0xf0, 0xe0, "the ACK of the Handshake packet");
-    // the link accepts the PING, which the space's records no longer have:
-    // it leaves the bytes in flight at once
-    assert_eq!(sealed - last_in_flight(log), 2 * MIN_DATAGRAM_SIZE);
+    // the link accepts the first PING, which the space's records no longer
+    // have: it leaves the bytes in flight at once; the second PING (the
+    // expiry's second probe datagram), which the hold left out of what was
+    // accepted, is left out of the next batch and leaves them as well
+    assert_eq!(sealed - last_in_flight(log), 3 * MIN_DATAGRAM_SIZE);
     let log = run(&mut connection, 1062..=1062);
     assert_eq!(lines_of(log, &["records"]), [] as [String; 0]);
 }

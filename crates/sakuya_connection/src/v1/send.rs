@@ -754,11 +754,17 @@ where
 
 /// The PINGs a link path's last probe timeout wants sent, by packet number
 /// space, in the link path's node (`PendingProbePings`): a PING makes the
-/// probe packet of its space ack-eliciting. The next expiry replaces them
-/// all, and writing one forgets its space.
+/// probe packet of its space ack-eliciting. The expiry gives each of its
+/// spaces one PING for each probe datagram it permits, so that once a PING
+/// is written and a permit is left, another is due (RFC 9002 §6.2.4);
+/// the next expiry replaces them all, and writing one counts it off.
+///
+/// The count is not lowered when an ACK takes the permits back: one PING
+/// more than the permits left can then go, ack-eliciting as any probe and
+/// within the window, until the next expiry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PendingProbePings {
-    spaces: [bool; 3],
+    spaces: [u8; 3],
 }
 
 fn ping_space_index(space: PacketNumberSpaceKind) -> usize {
@@ -772,7 +778,7 @@ fn ping_space_index(space: PacketNumberSpaceKind) -> usize {
 impl PendingProbePings {
     /// Whether a PING of `space` is to be sent.
     pub fn is_pending(&self, space: PacketNumberSpaceKind) -> bool {
-        self.spaces[ping_space_index(space)]
+        self.spaces[ping_space_index(space)] > 0
     }
 
     /// The spaces a PING is to be sent in, in their order.
@@ -782,18 +788,24 @@ impl PendingProbePings {
             .filter(|&space| self.is_pending(space))
     }
 
-    /// A probe timeout expired: a PING is to be sent in each of `spaces`,
-    /// and in no other.
-    pub(crate) fn probe(&mut self, spaces: impl IntoIterator<Item = PacketNumberSpaceKind>) {
-        self.spaces = [false; 3];
+    /// A probe timeout expired, permitting `datagrams` probe datagrams: as
+    /// many PINGs are to be sent in each of `spaces`, one in each datagram,
+    /// and none in another space.
+    pub(crate) fn probe(
+        &mut self,
+        spaces: impl IntoIterator<Item = PacketNumberSpaceKind>,
+        datagrams: usize,
+    ) {
+        let count = u8::try_from(datagrams).unwrap_or(u8::MAX);
+        self.spaces = [0; 3];
         for space in spaces {
-            self.spaces[ping_space_index(space)] = true;
+            self.spaces[ping_space_index(space)] = count;
         }
     }
 }
 
-/// A PING is written when its space has one to send, which it then no
-/// longer has; nothing is done when it is acknowledged or lost.
+/// A PING is written when its space has one to send, which then has one
+/// fewer; nothing is done when it is acknowledged or lost.
 impl FrameSource for PendingProbePings {
     type Summary = ProbePingSummary;
     type Class = InFlightClass;
@@ -815,7 +827,8 @@ impl FrameSource for PendingProbePings {
                 .write_frame(PingFrame, <SummaryOf<W>>::inject_summary(ProbePingSummary))
                 .is_ok()
         {
-            self.spaces[ping_space_index(space)] = false;
+            let count = &mut self.spaces[ping_space_index(space)];
+            *count = count.saturating_sub(1);
         }
         Supplied::Open(packet)
     }
