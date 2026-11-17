@@ -779,6 +779,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sakuya_qlog"
+version = "0.0.0"
+dependencies = [
+ "sakuya_clock",
+ "sakuya_connection",
+ "sakuya_recovery",
+ "sakuya_stream",
+ "sakuya_wire",
+]
+
+[[package]]
 name = "sakuya_recovery"
 version = "0.0.0"
 dependencies = [
