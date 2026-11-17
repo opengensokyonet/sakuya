@@ -571,7 +571,7 @@ mod watch {
         type Run<D> = CNil;
         type Kind = CNil;
         type TypeValue = CNil;
-        type FieldsError<E> = CNil;
+        type FieldsError = CNil;
 
         const FRAME_TYPE_VALUES: &'static FrameTypeValues = &NO_FRAME_TYPES;
 
@@ -587,11 +587,10 @@ mod watch {
             match *run {}
         }
 
-        fn read_run<H>(_: &mut H, type_value: CNil) -> Result<CNil, CNil>
-        where
-            H: bytes::Buf + nitori_call::Receiver<Family = nitori_call::Direct<H>> + Unpin,
-            nitori_call::Direct<H>: nitori_io::ReadChunk<Chunk: Default>,
-        {
+        fn read_run<S: bytes::Buf + nitori_io::SplitTo>(
+            _: &mut S,
+            type_value: CNil,
+        ) -> Result<CNil, CNil> {
             match type_value {}
         }
     }

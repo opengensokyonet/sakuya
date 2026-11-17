@@ -278,7 +278,7 @@ pub enum PeerTransportParametersError {
 /// of the encoding as a whole, the error of the part whose type claims the
 /// parameter for a value that breaks a rule of the type.
 pub(super) fn read_transport_parameters_error<L, Iv>(
-    error: ReadTransportParametersError<Infallible, L>,
+    error: ReadTransportParametersError<L>,
 ) -> ConnectionErrorOf<L>
 where
     L: TransportParameterValueErrorsOf,
@@ -358,9 +358,7 @@ where
 mod tests {
     use core::marker::PhantomData;
 
-    use bytes::Buf;
-    use nitori_call::ReceiverAccess;
-    use nitori_io::{Write, calls::WriteAllError};
+    use bytes::{Buf, BufMut};
     use sakuya_wire::{
         parameters::{KeyedParameter, ParametersPart, TrailingBytesError, ValueSource},
         parts::{Coprod, Coproduct, HList},
@@ -369,8 +367,8 @@ mod tests {
             transport_error::TransportErrorCode,
             transport_parameters::{
                 RememberedForZeroRtt, SentBy, TransportParameterAttributes,
-                TransportParameterSpace, TransportParameters,
-                codec::ReadTransportParametersHostExt as _, integer::AckDelayExponent,
+                TransportParameterSpace, TransportParameters, codec::read_transport_parameters,
+                integer::AckDelayExponent,
             },
         },
         var_int::VarInt,
@@ -406,7 +404,7 @@ mod tests {
             remembered_for_zero_rtt: RememberedForZeroRtt::Prohibited,
         };
 
-        fn read_value<D: Buf + Unpin>(_: &mut ValueSource<D>) -> Result<Self, TrailingBytesError> {
+        fn read_value<D: Buf>(_: &mut ValueSource<D>) -> Result<Self, TrailingBytesError> {
             Ok(Self)
         }
 
@@ -414,13 +412,7 @@ mod tests {
             0
         }
 
-        async fn write_value<F, A>(&self, _: &mut A) -> Result<(), WriteAllError<F::Error>>
-        where
-            F: Write,
-            A: ReceiverAccess<Family = F>,
-        {
-            Ok(())
-        }
+        fn write_value<B: BufMut>(&self, _: &mut B) {}
     }
 
     /// An extension with a transport parameter of its own, after version 1.
@@ -464,7 +456,7 @@ mod tests {
         L::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
     {
         let mut source = encoding;
-        match source.sync_read_transport_parameters_unpin(Role::Server, PhantomData::<L>) {
+        match read_transport_parameters(&mut source, Role::Server, PhantomData::<L>) {
             Ok(_) => panic!("the transport parameters were read"),
             Err(error) => read_transport_parameters_error::<L, Iv>(error),
         }
@@ -474,7 +466,7 @@ mod tests {
     /// TRANSPORT_PARAMETER_ERROR.
     fn v1_read_failure<Rest>(
         error: PartsError<Coproduct<ConnectionError, Rest>>,
-    ) -> ReadTransportParametersError<Infallible> {
+    ) -> ReadTransportParametersError {
         let PartsError(Coproduct::Inl(error)) = error else {
             panic!("not version 1's error");
         };

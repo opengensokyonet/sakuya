@@ -27,12 +27,9 @@
 //! layer is ignored while the connection closes, and does not arrive
 //! otherwise ([`ConnectionError::NoEstablishedLayer`]).
 
-use core::convert::Infallible;
-
 use bytes::{Buf, Bytes};
 use frunk_core::hlist_pat;
-use nitori_call::{Direct, Receiver};
-use nitori_io::{Read, ReadChunk};
+use nitori_io::SplitTo;
 use sakuya_stream::connection::{
     ApplicationImmediateClose, CloseReason, ImmediateClose, TransportImmediateClose,
 };
@@ -112,7 +109,7 @@ impl FrameSetPart for Part {
     type Run<D> = FrameRun<D>;
     type Kind = FrameType;
     type TypeValue = FrameTypeValue;
-    type FieldsError<E> = ReadFieldsError<E>;
+    type FieldsError = ReadFieldsError;
 
     const FRAME_TYPE_VALUES: &'static FrameTypeValues =
         <sakuya_wire::v1::Part as FrameSetPart>::FRAME_TYPE_VALUES;
@@ -129,17 +126,10 @@ impl FrameSetPart for Part {
         <sakuya_wire::v1::Part as FrameSetPart>::run_kind(run)
     }
 
-    fn read_run<H>(
-        source: &mut H,
+    fn read_run<S: Buf + SplitTo>(
+        source: &mut S,
         type_value: FrameTypeValue,
-    ) -> Result<
-        FrameRun<<Direct<H> as ReadChunk>::Chunk>,
-        ReadFieldsError<<Direct<H> as Read>::Error>,
-    >
-    where
-        H: Buf + Receiver<Family = Direct<H>> + Unpin,
-        Direct<H>: ReadChunk<Chunk: Default>,
-    {
+    ) -> Result<FrameRun<S>, ReadFieldsError> {
         <sakuya_wire::v1::Part as FrameSetPart>::read_run(source, type_value)
     }
 }
@@ -467,7 +457,7 @@ where
         }
     }
 
-    fn fields_error(error: ReadFieldsError<Infallible>) -> V1ConnectionErrorOf<L> {
+    fn fields_error(error: ReadFieldsError) -> V1ConnectionErrorOf<L> {
         ConnectionError::ReadFrameFields { source: error }
     }
 }

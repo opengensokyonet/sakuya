@@ -86,7 +86,7 @@ use sakuya_wire::{
         role::Role,
         transport_parameters::{
             TransportParameterSlots, TransportParameterSpace, TransportParameters,
-            codec::{ReadTransportParametersHostExt as _, WriteTransportParametersHostExt as _},
+            codec::{read_transport_parameters, write_transport_parameters},
             connection_id::{
                 InitialSourceConnectionId, OriginalDestinationConnectionId, RetrySourceConnectionId,
             },
@@ -585,8 +585,7 @@ where
     L::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
 {
     let mut source = peer;
-    source
-        .sync_read_transport_parameters_unpin(sender, PhantomData::<L>)
+    read_transport_parameters(&mut source, sender, PhantomData::<L>)
         .map(|parameters| parameters.known)
         .map_err(read_transport_parameters_error::<L, Iv>)
 }
@@ -654,8 +653,7 @@ where
     // invariant: the slots hold only parameters the sender may send, as
     // `server_parameters` and `client_parameters` make them, and no unknown
     // ones, so they are valid; a vector takes every byte
-    encoded
-        .sync_write_transport_parameters_unpin(parameters, sender)
+    write_transport_parameters(&mut encoded, parameters, sender)
         .expect("the parameters a side settles are valid");
     // invariant: the parameters of version 1 and of the extensions are far
     // below 2^16 bytes

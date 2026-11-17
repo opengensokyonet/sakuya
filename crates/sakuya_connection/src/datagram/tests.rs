@@ -3,7 +3,7 @@ use core::marker::PhantomData;
 use sakuya_wire::{
     frame::NoLength,
     parameters::codec::ReadParametersError,
-    v1::{role::Role, transport_parameters::codec::ReadTransportParametersHostExt as _},
+    v1::{role::Role, transport_parameters::codec::read_transport_parameters},
 };
 
 use super::*;
@@ -98,9 +98,9 @@ fn a_peer_parameter_that_cannot_be_read_is_a_transport_parameter_error() {
     // byte after the integer
     for encoding in [&[0x20, 0x01, 0x40][..], &[0x20, 0x02, 0x01, 0x00][..]] {
         let mut encoding = encoding;
-        let error = encoding
-            .sync_read_transport_parameters_unpin(Role::Server, PhantomData::<WithExtension>)
-            .expect_err("a value that cannot be read");
+        let error =
+            read_transport_parameters(&mut encoding, Role::Server, PhantomData::<WithExtension>)
+                .expect_err("a value that cannot be read");
         let ReadParametersError::InvalidValue {
             id,
             source: PartsError(source),

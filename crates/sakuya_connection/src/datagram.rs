@@ -37,12 +37,9 @@ pub mod application;
 pub mod locked;
 pub mod send;
 
-use core::convert::Infallible;
-
 use bytes::{Buf, Bytes};
 use frunk_core::hlist_pat;
-use nitori_call::{Direct, Receiver};
-use nitori_io::{Read, ReadChunk};
+use nitori_io::SplitTo;
 use sakuya_stream::{connection::LayerEnd, send_options::urgency::Urgency};
 use sakuya_wire::{
     datagram::{DatagramFrame, DatagramTypeValue, FrameType, MaxDatagramFrameSize, codec},
@@ -384,7 +381,7 @@ pub enum ConnectionError {
     #[snafu(display("DATAGRAM frame fields read failed"))]
     ReadFrameFields {
         /// The failure.
-        source: codec::ReadDatagramFrameError<Infallible>,
+        source: codec::ReadDatagramFrameError,
     },
     /// A DATAGRAM frame arrived while the connection has no established
     /// layer and is not closing; the connection closes with INTERNAL_ERROR.
@@ -753,7 +750,7 @@ impl FrameSetPart for Part {
     type Run<D> = DatagramFrame<D>;
     type Kind = FrameType;
     type TypeValue = DatagramTypeValue;
-    type FieldsError<E> = codec::ReadDatagramFrameError<E>;
+    type FieldsError = codec::ReadDatagramFrameError;
 
     const FRAME_TYPE_VALUES: &'static FrameTypeValues =
         <sakuya_wire::datagram::Part as FrameSetPart>::FRAME_TYPE_VALUES;
@@ -770,17 +767,10 @@ impl FrameSetPart for Part {
         <sakuya_wire::datagram::Part as FrameSetPart>::run_kind::<D>(run)
     }
 
-    fn read_run<H>(
-        source: &mut H,
+    fn read_run<S: Buf + SplitTo>(
+        source: &mut S,
         type_value: DatagramTypeValue,
-    ) -> Result<
-        <Self as FrameSetPart>::Run<<Direct<H> as ReadChunk>::Chunk>,
-        <Self as FrameSetPart>::FieldsError<<Direct<H> as Read>::Error>,
-    >
-    where
-        H: Buf + Receiver<Family = Direct<H>> + Unpin,
-        Direct<H>: ReadChunk<Chunk: Default>,
-    {
+    ) -> Result<DatagramFrame<S>, codec::ReadDatagramFrameError> {
         <sakuya_wire::datagram::Part as FrameSetPart>::read_run(source, type_value)
     }
 }
@@ -868,7 +858,7 @@ where
         Ok(())
     }
 
-    fn fields_error(error: codec::ReadDatagramFrameError<Infallible>) -> ConnectionError {
+    fn fields_error(error: codec::ReadDatagramFrameError) -> ConnectionError {
         ConnectionError::ReadFrameFields { source: error }
     }
 }

@@ -1,6 +1,4 @@
 //! The error QUIC version 1 finds in a connection.
-use core::convert::Infallible;
-
 use bytes::Bytes;
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream::receive::violation::OnResetStreamError;
@@ -78,13 +76,13 @@ pub enum ConnectionError<R = OnResetStreamError> {
     #[snafu(display("frame read failed"))]
     ReadFrame {
         /// The failure.
-        source: ReadFrameError<Infallible, CNil>,
+        source: ReadFrameError<CNil>,
     },
     /// The fields of a frame of version 1 could not be read.
     #[snafu(display("frame fields read failed"))]
     ReadFrameFields {
         /// The failure.
-        source: ReadFieldsError<Infallible>,
+        source: ReadFieldsError,
     },
     /// A frame is in a packet type it cannot appear in, or reached an
     /// endpoint whose role does not receive it.
@@ -120,7 +118,7 @@ pub enum ConnectionError<R = OnResetStreamError> {
     #[snafu(display("transport parameters read failed"))]
     ReadTransportParameters {
         /// The failure.
-        source: ReadTransportParametersError<Infallible>,
+        source: ReadTransportParametersError,
     },
     /// The peer's transport parameters failed the checks of version 1 on
     /// the connection IDs (RFC 9000 §7.3).

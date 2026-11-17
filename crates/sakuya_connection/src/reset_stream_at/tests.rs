@@ -3,10 +3,7 @@ use core::marker::PhantomData;
 use sakuya_wire::{
     parameters::codec::ReadParametersError,
     parts::HList,
-    v1::{
-        role::Role, stream_id::StreamId,
-        transport_parameters::codec::ReadTransportParametersHostExt as _,
-    },
+    v1::{role::Role, stream_id::StreamId, transport_parameters::codec::read_transport_parameters},
     var_int::VarIntField,
 };
 
@@ -54,9 +51,9 @@ fn a_reset_stream_at_without_the_parameter_announced_is_a_frame_encoding_error()
 #[test]
 fn a_peer_parameter_with_a_value_is_a_transport_parameter_error() {
     let mut encoding = &[0x1d, 0x01, 0x00][..];
-    let error = encoding
-        .sync_read_transport_parameters_unpin(Role::Server, PhantomData::<WithExtension>)
-        .expect_err("a value with bytes");
+    let error =
+        read_transport_parameters(&mut encoding, Role::Server, PhantomData::<WithExtension>)
+            .expect_err("a value with bytes");
     let ReadParametersError::InvalidValue {
         id,
         source: PartsError(source),

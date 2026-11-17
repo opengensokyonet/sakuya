@@ -37,9 +37,7 @@ use sakuya_stream::send_options::{
 use sakuya_wire::{
     datagram::{
         DatagramFrame,
-        codec::{
-            WriteDatagramFrameWithLengthHostExt as _, WriteDatagramFrameWithoutLengthHostExt as _,
-        },
+        codec::{write_datagram_frame_with_length, write_datagram_frame_without_length},
     },
     frame::NoLength,
     var_int::{VarInt, VarIntWidth},
@@ -73,10 +71,6 @@ use crate::{
     },
 };
 
-/// The invariant of every write here: a `BytesMut` takes every byte, so
-/// writing into one does not fail.
-const TAKES_EVERY_BYTE: &str = "a BytesMut takes every byte";
-
 // ---- the frames written ----
 
 /// A DATAGRAM frame with a Length field may be followed by more frames.
@@ -89,9 +83,7 @@ impl<D: Buf> DelimitedFrame for DatagramFrame<D, VarIntWidth> {
     }
 
     fn write_to(self, buffer: &mut BytesMut) {
-        buffer
-            .sync_write_datagram_frame_with_length_unpin(self)
-            .expect(TAKES_EVERY_BYTE);
+        write_datagram_frame_with_length(buffer, self);
     }
 }
 
@@ -106,9 +98,7 @@ impl<D: Buf> ToPacketEndFrame for DatagramFrame<D, NoLength> {
     }
 
     fn write_to(self, buffer: &mut BytesMut) {
-        buffer
-            .sync_write_datagram_frame_without_length_unpin(self)
-            .expect(TAKES_EVERY_BYTE);
+        write_datagram_frame_without_length(buffer, self);
     }
 }
 

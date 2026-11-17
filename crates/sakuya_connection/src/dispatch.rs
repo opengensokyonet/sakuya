@@ -15,8 +15,6 @@
 //! What a packet comes to as a whole, such as whether it is ack-eliciting,
 //! is summed from the kinds of its frames alone ([`PacketFacts`]), and is
 //! used after every frame of the packet was handled.
-use core::convert::Infallible;
-
 use bytes::Bytes;
 use sakuya_wire::{
     connection_id::ConnectionId,
@@ -162,7 +160,7 @@ where
 
     /// The connection error that a failure of reading the fields of one of
     /// this part's frames is.
-    fn fields_error(error: Self::FieldsError<Infallible>) -> Self::ConnectionError;
+    fn fields_error(error: Self::FieldsError) -> Self::ConnectionError;
 }
 
 /// Dispatching a run to the part of a list that read it.
@@ -188,9 +186,7 @@ where
 
     /// The connection error that a failure of reading the fields of a frame
     /// is, as the part that claims the frame gives it.
-    fn fields_error(
-        error: Self::FieldsError<Infallible>,
-    ) -> <Self as ConnectionErrorsIn<L>>::ConnectionErrors;
+    fn fields_error(error: Self::FieldsError) -> <Self as ConnectionErrorsIn<L>>::ConnectionErrors;
 }
 
 impl<T: ConnectionChoices, L> FrameSetDispatch<T, L, HNil> for HNil
@@ -233,9 +229,7 @@ where
         }
     }
 
-    fn fields_error(
-        error: Self::FieldsError<Infallible>,
-    ) -> <Self as ConnectionErrorsIn<L>>::ConnectionErrors {
+    fn fields_error(error: Self::FieldsError) -> <Self as ConnectionErrorsIn<L>>::ConnectionErrors {
         match error {
             Coproduct::Inl(error) => Coproduct::Inl(P::fields_error(error)),
             Coproduct::Inr(error) => Coproduct::Inr(Ps::fields_error(error)),

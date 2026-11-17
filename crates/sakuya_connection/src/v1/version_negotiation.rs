@@ -18,7 +18,7 @@ use sakuya_wire::{
     connection_id::ConnectionId,
     header::{
         VersionNegotiation,
-        codec::{ReadLongHeaderHostExt as _, ReadVersionNegotiationHostExt as _},
+        codec::{read_long_header, read_version_negotiation},
     },
     v1::header::VERSION,
     version::Version,
@@ -70,10 +70,9 @@ pub fn check_version_negotiation(
     // the packet was read once when the datagram was cut; reading it again
     // from its own bytes gives the list as a chunk to read versions from
     let mut input = packet_bytes;
-    let read = input
-        .sync_read_long_header_unpin()
+    let read = read_long_header(&mut input)
         .ok()
-        .and_then(|header| input.sync_read_version_negotiation_unpin(header).ok());
+        .and_then(|header| read_version_negotiation(&mut input, header).ok());
     let Some(read) = read else {
         unreachable!("a Version Negotiation packet already cut reads again")
     };

@@ -32,12 +32,9 @@
 //!
 //! [draft-ietf-quic-reliable-stream-reset-11]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html
 
-use core::convert::Infallible;
-
 use bytes::{Buf, Bytes, BytesMut};
 use frunk_core::hlist_pat;
-use nitori_call::{Direct, Receiver};
-use nitori_io::{Read, ReadChunk};
+use nitori_io::SplitTo;
 use sakuya_stream::{
     connection_receive_flow::ConnectionReceiveFlowController,
     connection_send_credit::ConnectionSendFlowController,
@@ -61,12 +58,12 @@ use sakuya_wire::{
     parts::{Coprod, Coproduct, HList, HNil, PartsError, Selector},
     reset_stream_at::{
         FrameType, ResetStreamAt, ResetStreamAtFrame,
-        codec::{self, ReadResetStreamAtFrameError, WriteResetStreamAtFrameHostExt as _},
+        codec::{self, ReadResetStreamAtFrameError, write_reset_stream_at_frame},
     },
     v1::{
         application_error::ApplicationErrorCode,
         frame::{
-            reset_stream::{ResetStreamFrame, codec::WriteResetStreamFrameHostExt as _},
+            reset_stream::{ResetStreamFrame, codec::write_reset_stream_frame},
             set::{FrameFieldsError, FrameSetPart, FrameTypeValues},
         },
         transport_error::TransportErrorCode,
@@ -203,10 +200,6 @@ impl StreamResetsPart for Part {
 
 // ---- the frames written ----
 
-/// The invariant of every write here: a `BytesMut` takes every byte, so
-/// writing into one does not fail.
-const TAKES_EVERY_BYTE: &str = "a BytesMut takes every byte";
-
 /// RESET_STREAM_AT counts in flight and elicits an acknowledgment, as
 /// RESET_STREAM does.
 impl DelimitedFrame for ResetStreamAtFrame {
@@ -218,9 +211,7 @@ impl DelimitedFrame for ResetStreamAtFrame {
     }
 
     fn write_to(self, buffer: &mut BytesMut) {
-        buffer
-            .sync_write_reset_stream_at_frame_unpin(self)
-            .expect(TAKES_EVERY_BYTE);
+        write_reset_stream_at_frame(buffer, self);
     }
 }
 
@@ -238,9 +229,7 @@ impl DelimitedFrame for LocalResetAtFrame {
 
     fn write_to(self, buffer: &mut BytesMut) {
         match self {
-            Self::ResetStream(frame) => buffer
-                .sync_write_reset_stream_frame_unpin(frame)
-                .expect(TAKES_EVERY_BYTE),
+            Self::ResetStream(frame) => write_reset_stream_frame(buffer, frame),
             Self::ResetStreamAt(frame) => DelimitedFrame::write_to(frame, buffer),
         }
     }
@@ -350,7 +339,7 @@ pub enum ConnectionError<R = OnResetStreamError> {
     #[snafu(display("RESET_STREAM_AT frame fields read failed"))]
     ReadFrameFields {
         /// The failure.
-        source: ReadResetStreamAtFrameError<Infallible>,
+        source: ReadResetStreamAtFrameError,
     },
     /// The stream set rejected a RESET_STREAM_AT frame: it names a stream it
     /// must not, or the stream's receiving part rejected it.
@@ -536,7 +525,7 @@ impl FrameSetPart for Part {
     type Run<D> = ResetStreamAtFrame;
     type Kind = FrameType;
     type TypeValue = FrameType;
-    type FieldsError<E> = codec::ReadResetStreamAtFrameError<E>;
+    type FieldsError = codec::ReadResetStreamAtFrameError;
 
     const FRAME_TYPE_VALUES: &'static FrameTypeValues =
         <sakuya_wire::reset_stream_at::Part as FrameSetPart>::FRAME_TYPE_VALUES;
@@ -553,17 +542,10 @@ impl FrameSetPart for Part {
         <sakuya_wire::reset_stream_at::Part as FrameSetPart>::run_kind::<D>(run)
     }
 
-    fn read_run<H>(
-        source: &mut H,
+    fn read_run<S: Buf + SplitTo>(
+        source: &mut S,
         type_value: FrameType,
-    ) -> Result<
-        <Self as FrameSetPart>::Run<<Direct<H> as ReadChunk>::Chunk>,
-        <Self as FrameSetPart>::FieldsError<<Direct<H> as Read>::Error>,
-    >
-    where
-        H: Buf + Receiver<Family = Direct<H>> + Unpin,
-        Direct<H>: ReadChunk<Chunk: Default>,
-    {
+    ) -> Result<ResetStreamAtFrame, codec::ReadResetStreamAtFrameError> {
         <sakuya_wire::reset_stream_at::Part as FrameSetPart>::read_run(source, type_value)
     }
 }
@@ -648,9 +630,7 @@ where
             .context(StreamSetSnafu)
     }
 
-    fn fields_error(
-        error: ReadResetStreamAtFrameError<Infallible>,
-    ) -> ResetStreamAtConnectionErrorOf<L> {
+    fn fields_error(error: ReadResetStreamAtFrameError) -> ResetStreamAtConnectionErrorOf<L> {
         ConnectionError::ReadFrameFields { source: error }
     }
 }

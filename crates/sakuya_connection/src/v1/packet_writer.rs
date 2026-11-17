@@ -38,15 +38,15 @@ use sakuya_wire::{
     header::SAMPLE_DISTANCE,
     v1::{
         encryption_level::EncryptionLevel,
-        frame::padding::{PaddingRun, codec::WritePaddingRunHostExt as _},
+        frame::padding::{PaddingRun, codec::write_padding_run},
         header::{
             LongPacketHeader, ShortPacketHeader,
-            codec::{WriteLongPacketHeaderHostExt as _, WriteShortPacketHeaderHostExt as _},
+            codec::{write_long_packet_header, write_short_packet_header},
         },
         packet_number::PacketNumber,
         role::Role,
     },
-    var_int::{VarInt, VarIntField, VarIntWidth, codec::WriteVarIntFieldHostExt as _},
+    var_int::{VarInt, VarIntField, VarIntWidth, codec::write_var_int_field},
 };
 
 use super::{
@@ -66,10 +66,6 @@ const SPIN: bool = false;
 /// the peer sends in reply is shorter than a packet it could be taken for
 /// (RFC 9000 §10.3).
 const BEYOND_LOCAL_ID: usize = 22;
-
-/// The invariant of every write at the end of the buffer: a `BytesMut`
-/// takes every byte.
-const TAKES_EVERY_BYTE: &str = "a BytesMut takes every byte";
 
 /// What a packet starts with: its level, the keys it is protected with and
 /// what its header carries besides the datagram's connection ID.
@@ -230,9 +226,7 @@ where
                 width,
             };
             let pn_offset = header.packet_number_offset();
-            buffer
-                .sync_write_long_packet_header_unpin(header)
-                .expect(TAKES_EVERY_BYTE);
+            write_long_packet_header(buffer, header);
             (form, pn_offset)
         };
         let (level, keys, (form, pn_offset)) = match start {
@@ -275,9 +269,7 @@ where
             PacketStart::OneRtt { keys, usage } => {
                 let header = ShortPacketHeader::new(SPIN, keys.key_phase(), pn_length, dcid);
                 let pn_offset = header.packet_number_offset();
-                buffer
-                    .sync_write_short_packet_header_unpin(header)
-                    .expect(TAKES_EVERY_BYTE);
+                write_short_packet_header(buffer, header);
                 (
                     EncryptionLevel::OneRtt,
                     SealingKeys::OneRtt { keys, usage },
@@ -344,14 +336,10 @@ where
         let run = PaddingRun::new(len);
         if self.closed {
             let frames = self.buffer.split_off(self.start + self.header_len);
-            self.buffer
-                .sync_write_padding_run_unpin(run)
-                .expect(TAKES_EVERY_BYTE);
+            write_padding_run(&mut self.buffer, run);
             self.buffer.unsplit(frames);
         } else {
-            self.buffer
-                .sync_write_padding_run_unpin(run)
-                .expect(TAKES_EVERY_BYTE);
+            write_padding_run(&mut self.buffer, run);
         }
     }
 
@@ -411,9 +399,8 @@ where
                 .ok()
                 .and_then(|length| VarIntField::new(length, width).ok())
                 .expect("the reserved width holds the packet's length");
-            (&mut self.buffer[self.start + length_offset..])
-                .sync_write_var_int_field_unpin(length)
-                .expect("the reserved Length field lies inside the packet");
+            // invariant: the reserved Length field lies inside the packet
+            write_var_int_field(&mut &mut self.buffer[self.start + length_offset..], length);
         }
         let packet = &mut self.buffer[self.start..];
         // invariant: the tag has its room, and the payload is long enough

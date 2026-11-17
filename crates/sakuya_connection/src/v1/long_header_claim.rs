@@ -24,7 +24,7 @@
 
 use sakuya_wire::{
     connection_id::ConnectionId,
-    header::codec::ReadLongHeaderHostExt as _,
+    header::codec::read_long_header,
     v1::{header::VERSION, role::Role},
 };
 
@@ -37,7 +37,7 @@ pub fn long_header_belongs(
     role: Role,
 ) -> bool {
     let mut input = datagram;
-    let Ok(header) = input.sync_read_long_header_unpin() else {
+    let Ok(header) = read_long_header(&mut input) else {
         return false;
     };
     if header.version() != VERSION {

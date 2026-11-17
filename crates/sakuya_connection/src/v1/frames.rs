@@ -17,43 +17,33 @@ use bytes::{Buf, BytesMut};
 use sakuya_wire::{
     frame::NoLength,
     v1::frame::{
-        ack::{AckFrame, codec::WriteAckFrameHostExt as _},
-        connection_close::{ConnectionCloseFrame, codec::WriteConnectionCloseFrameHostExt as _},
-        crypto::{CryptoFrame, codec::WriteCryptoFrameHostExt as _},
-        data_blocked::{DataBlockedFrame, codec::WriteDataBlockedFrameHostExt as _},
-        handshake_done::{HandshakeDoneFrame, codec::WriteHandshakeDoneFrameHostExt as _},
-        max_data::{MaxDataFrame, codec::WriteMaxDataFrameHostExt as _},
-        max_stream_data::{MaxStreamDataFrame, codec::WriteMaxStreamDataFrameHostExt as _},
-        max_streams::{MaxStreamsFrame, codec::WriteMaxStreamsFrameHostExt as _},
-        new_connection_id::{NewConnectionIdFrame, codec::WriteNewConnectionIdFrameHostExt as _},
-        new_token::{NewTokenFrame, codec::WriteNewTokenFrameHostExt as _},
-        path_challenge::{PathChallengeFrame, codec::WritePathChallengeFrameHostExt as _},
-        path_response::{PathResponseFrame, codec::WritePathResponseFrameHostExt as _},
-        ping::{PingFrame, codec::WritePingFrameHostExt as _},
-        reset_stream::{ResetStreamFrame, codec::WriteResetStreamFrameHostExt as _},
-        retire_connection_id::{
-            RetireConnectionIdFrame, codec::WriteRetireConnectionIdFrameHostExt as _,
-        },
-        stop_sending::{StopSendingFrame, codec::WriteStopSendingFrameHostExt as _},
+        ack::{AckFrame, codec::write_ack_frame},
+        connection_close::{ConnectionCloseFrame, codec::write_connection_close_frame},
+        crypto::{CryptoFrame, codec::write_crypto_frame},
+        data_blocked::{DataBlockedFrame, codec::write_data_blocked_frame},
+        handshake_done::{HandshakeDoneFrame, codec::write_handshake_done_frame},
+        max_data::{MaxDataFrame, codec::write_max_data_frame},
+        max_stream_data::{MaxStreamDataFrame, codec::write_max_stream_data_frame},
+        max_streams::{MaxStreamsFrame, codec::write_max_streams_frame},
+        new_connection_id::{NewConnectionIdFrame, codec::write_new_connection_id_frame},
+        new_token::{NewTokenFrame, codec::write_new_token_frame},
+        path_challenge::{PathChallengeFrame, codec::write_path_challenge_frame},
+        path_response::{PathResponseFrame, codec::write_path_response_frame},
+        ping::{PingFrame, codec::write_ping_frame},
+        reset_stream::{ResetStreamFrame, codec::write_reset_stream_frame},
+        retire_connection_id::{RetireConnectionIdFrame, codec::write_retire_connection_id_frame},
+        stop_sending::{StopSendingFrame, codec::write_stop_sending_frame},
         stream::{
             StreamFrame,
-            codec::{
-                WriteStreamFrameWithLengthHostExt as _, WriteStreamFrameWithoutLengthHostExt as _,
-            },
+            codec::{write_stream_frame_with_length, write_stream_frame_without_length},
         },
-        stream_data_blocked::{
-            StreamDataBlockedFrame, codec::WriteStreamDataBlockedFrameHostExt as _,
-        },
-        streams_blocked::{StreamsBlockedFrame, codec::WriteStreamsBlockedFrameHostExt as _},
+        stream_data_blocked::{StreamDataBlockedFrame, codec::write_stream_data_blocked_frame},
+        streams_blocked::{StreamsBlockedFrame, codec::write_streams_blocked_frame},
     },
     var_int::VarIntWidth,
 };
 
 use crate::write::{AckOnlyClass, DelimitedFrame, InFlightClass, ToPacketEndFrame};
-
-/// The invariant of every write here: a `BytesMut` takes every byte, so
-/// writing into one does not fail.
-const TAKES_EVERY_BYTE: &str = "a BytesMut takes every byte";
 
 /// Implement [`DelimitedFrame`] for frames without a payload type.
 macro_rules! delimited {
@@ -68,28 +58,28 @@ macro_rules! delimited {
             }
 
             fn write_to(self, buffer: &mut BytesMut) {
-                buffer.$write(self).expect(TAKES_EVERY_BYTE);
+                $write(buffer, self);
             }
         }
     )*};
 }
 
 delimited! {
-    AckFrame => sync_write_ack_frame_unpin, AckOnlyClass, ack_eliciting = false;
-    PingFrame => sync_write_ping_frame_unpin, InFlightClass, ack_eliciting = true;
-    HandshakeDoneFrame => sync_write_handshake_done_frame_unpin, InFlightClass, ack_eliciting = true;
-    ResetStreamFrame => sync_write_reset_stream_frame_unpin, InFlightClass, ack_eliciting = true;
-    StopSendingFrame => sync_write_stop_sending_frame_unpin, InFlightClass, ack_eliciting = true;
-    MaxDataFrame => sync_write_max_data_frame_unpin, InFlightClass, ack_eliciting = true;
-    MaxStreamDataFrame => sync_write_max_stream_data_frame_unpin, InFlightClass, ack_eliciting = true;
-    MaxStreamsFrame => sync_write_max_streams_frame_unpin, InFlightClass, ack_eliciting = true;
-    DataBlockedFrame => sync_write_data_blocked_frame_unpin, InFlightClass, ack_eliciting = true;
-    StreamDataBlockedFrame => sync_write_stream_data_blocked_frame_unpin, InFlightClass, ack_eliciting = true;
-    StreamsBlockedFrame => sync_write_streams_blocked_frame_unpin, InFlightClass, ack_eliciting = true;
-    NewConnectionIdFrame => sync_write_new_connection_id_frame_unpin, InFlightClass, ack_eliciting = true;
-    RetireConnectionIdFrame => sync_write_retire_connection_id_frame_unpin, InFlightClass, ack_eliciting = true;
-    PathChallengeFrame => sync_write_path_challenge_frame_unpin, InFlightClass, ack_eliciting = true, expands = true;
-    PathResponseFrame => sync_write_path_response_frame_unpin, InFlightClass, ack_eliciting = true, expands = true;
+    AckFrame => write_ack_frame, AckOnlyClass, ack_eliciting = false;
+    PingFrame => write_ping_frame, InFlightClass, ack_eliciting = true;
+    HandshakeDoneFrame => write_handshake_done_frame, InFlightClass, ack_eliciting = true;
+    ResetStreamFrame => write_reset_stream_frame, InFlightClass, ack_eliciting = true;
+    StopSendingFrame => write_stop_sending_frame, InFlightClass, ack_eliciting = true;
+    MaxDataFrame => write_max_data_frame, InFlightClass, ack_eliciting = true;
+    MaxStreamDataFrame => write_max_stream_data_frame, InFlightClass, ack_eliciting = true;
+    MaxStreamsFrame => write_max_streams_frame, InFlightClass, ack_eliciting = true;
+    DataBlockedFrame => write_data_blocked_frame, InFlightClass, ack_eliciting = true;
+    StreamDataBlockedFrame => write_stream_data_blocked_frame, InFlightClass, ack_eliciting = true;
+    StreamsBlockedFrame => write_streams_blocked_frame, InFlightClass, ack_eliciting = true;
+    NewConnectionIdFrame => write_new_connection_id_frame, InFlightClass, ack_eliciting = true;
+    RetireConnectionIdFrame => write_retire_connection_id_frame, InFlightClass, ack_eliciting = true;
+    PathChallengeFrame => write_path_challenge_frame, InFlightClass, ack_eliciting = true, expands = true;
+    PathResponseFrame => write_path_response_frame, InFlightClass, ack_eliciting = true, expands = true;
 }
 
 impl<D: Buf> DelimitedFrame for CryptoFrame<D> {
@@ -101,9 +91,7 @@ impl<D: Buf> DelimitedFrame for CryptoFrame<D> {
     }
 
     fn write_to(self, buffer: &mut BytesMut) {
-        buffer
-            .sync_write_crypto_frame_unpin(self)
-            .expect(TAKES_EVERY_BYTE);
+        write_crypto_frame(buffer, self);
     }
 }
 
@@ -116,9 +104,7 @@ impl<D: Buf> DelimitedFrame for ConnectionCloseFrame<D> {
     }
 
     fn write_to(self, buffer: &mut BytesMut) {
-        buffer
-            .sync_write_connection_close_frame_unpin(self)
-            .expect(TAKES_EVERY_BYTE);
+        write_connection_close_frame(buffer, self);
     }
 }
 
@@ -131,9 +117,7 @@ impl<D: Buf> DelimitedFrame for NewTokenFrame<D> {
     }
 
     fn write_to(self, buffer: &mut BytesMut) {
-        buffer
-            .sync_write_new_token_frame_unpin(self)
-            .expect(TAKES_EVERY_BYTE);
+        write_new_token_frame(buffer, self);
     }
 }
 
@@ -146,9 +130,7 @@ impl<D: Buf> DelimitedFrame for StreamFrame<D, VarIntWidth> {
     }
 
     fn write_to(self, buffer: &mut BytesMut) {
-        buffer
-            .sync_write_stream_frame_with_length_unpin(self)
-            .expect(TAKES_EVERY_BYTE);
+        write_stream_frame_with_length(buffer, self);
     }
 }
 
@@ -161,9 +143,7 @@ impl<D: Buf> ToPacketEndFrame for StreamFrame<D, NoLength> {
     }
 
     fn write_to(self, buffer: &mut BytesMut) {
-        buffer
-            .sync_write_stream_frame_without_length_unpin(self)
-            .expect(TAKES_EVERY_BYTE);
+        write_stream_frame_without_length(buffer, self);
     }
 }
 

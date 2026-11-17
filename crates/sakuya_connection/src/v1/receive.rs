@@ -56,7 +56,7 @@
 //! caller's. Migration is decided per packet (RFC 9000 §9.3, §9.3.2): the
 //! outcome of a processed packet says whether it is non-probing and has the
 //! highest packet number of its space, for the caller to act on.
-use core::{convert::Infallible, fmt, marker::PhantomData, ops::Range};
+use core::{fmt, marker::PhantomData, ops::Range};
 
 use bytes::Bytes;
 use frunk_core::coproduct::CoproductSelector;
@@ -972,7 +972,7 @@ where
 /// for a Frame Type that failed, the part's that claims the frame for its
 /// fields.
 fn read_frame_error<T, L, Ie, Hd>(
-    error: ReadFrameError<Infallible, <L as FrameSet>::FieldsError<Infallible>>,
+    error: ReadFrameError<<L as FrameSet>::FieldsError>,
 ) -> ConnectionErrorOf<L>
 where
     T: Choices,
