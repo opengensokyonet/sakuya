@@ -86,7 +86,6 @@ use sakuya_datagram_routing::{
 use sakuya_link::{ArrivalFacts, BindingId, LinkId, MIN_DATAGRAM_SIZE, ReceivedDatagram};
 use sakuya_packet_protection::backend::ring::RingBackend;
 use sakuya_recovery::{
-    factory::NewRenoRecoveryFactoryConfig,
     loss::LossThresholds,
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces},
     receive_journals::MaxAckRanges,
@@ -1132,7 +1131,7 @@ where
             >,
         >,
     <HostOf<T> as HostChoices<T>>::Recovery<LinkId<(), ()>>:
-        sakuya_recovery::factory::RecoveryFactory<TestLink, Config = NewRenoRecoveryFactoryConfig>,
+        sakuya_recovery::factory::RecoveryFactory<TestLink, Config: Default>,
 {
     let mut parameters = TransportParameters::<Vec<u8>>::new();
     parameters.set(MaxIdleTimeout::new(VarInt::from_u32(30_000)));
@@ -1160,7 +1159,8 @@ where
         anti_amplification: AntiAmplificationFactor::new(3).expect("3 is a factor"),
         transport_parameters: parameters.known,
         first_link: LinkFacts { validation },
-        recovery: NewRenoRecoveryFactoryConfig::recommended(ms(1)),
+        // the recommended values for timers that fire to the millisecond
+        recovery: Default::default(),
         loss_thresholds: LossThresholds::recommended(ms(1))
             .expect("the test clock's timers fire to the millisecond"),
         max_ack_ranges: MaxAckRanges::DEFAULT,

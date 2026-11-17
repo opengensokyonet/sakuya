@@ -2160,7 +2160,7 @@ where
         >,
     T::Side: SideCapacities,
     <HostOf<T> as HostChoices<T>>::Recovery<LinkId<(), ()>>:
-        RecoveryFactory<TestLink, Config = NewRenoRecoveryFactoryConfig>,
+        RecoveryFactory<TestLink, Config: Default>,
 {
     let close_request = CloseRequestCell::new();
     CLOSE_REQUEST.with(|c| *c.borrow_mut() = Some(close_request.clone()));
@@ -2175,7 +2175,8 @@ where
         anti_amplification: AntiAmplificationFactor::new(2).expect("2 is a factor"),
         transport_parameters: parameters.known,
         first_link: LinkFacts { validation },
-        recovery: NewRenoRecoveryFactoryConfig::recommended(ms(1)),
+        // the recommended values for timers that fire to the millisecond
+        recovery: Default::default(),
         loss_thresholds: sakuya_recovery::loss::LossThresholds::recommended(ms(1))
             .expect("the test clock's timers fire to the millisecond"),
         max_ack_ranges: MAX_ACK_RANGES.with(Cell::get),

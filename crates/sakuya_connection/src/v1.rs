@@ -335,9 +335,11 @@ pub trait HostChoices<T: MakerChoices + ?Sized>: 'static {
     /// and the datagram size probing policy of each link path, one for each
     /// connection. `V` identifies a link path, as found from the list of
     /// parts: the logical link when the connection supports version 1
-    /// alone.
+    /// alone. The default's congestion controller is CUBIC; a host that
+    /// wants NewReno picks
+    /// [`NewRenoRecoveryFactory`](sakuya_recovery::factory::NewRenoRecoveryFactory).
     type Recovery<V: Clone + Eq + Debug + 'static>: RecoveryFactory<T::Link, Via = V> + 'static =
-        sakuya_recovery::factory::NewRenoRecoveryFactory<V>;
+        sakuya_recovery::factory::CubicRecoveryFactory<V>;
     /// What decides when an ACK frame is due, one for each packet number
     /// space of a logical path.
     type AckObligation: AckObligation<InstantOf<T>> + 'static =
