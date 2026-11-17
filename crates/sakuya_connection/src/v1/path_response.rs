@@ -26,7 +26,9 @@ use crate::{
     clock::{ConnectionChoices, InstantOf},
     component::{ArgsOf, Build, ParentsOf, PassiveDataComponent},
     feedback::InjectSummary,
-    frame_source::{FindFrameSource, FrameSource, FrameSourceKind, IgnoredFeedback, NoIntent, PublishIntent},
+    frame_source::{
+        FindFrameSource, FrameSource, FrameSourceKind, IgnoredFeedback, NoIntent, PublishIntent,
+    },
     layer,
     send_strategy::{
         MinimumLengths, SendIntent,
