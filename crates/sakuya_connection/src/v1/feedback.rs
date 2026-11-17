@@ -4,30 +4,34 @@
 //! | Frame | Summary | Delivered | Lost |
 //! | --- | --- | --- | --- |
 //! | PADDING | [`PaddingSummary`] | nothing | nothing |
-//! | ACK | [`AckSummary`]: the Largest Acknowledged and what was due before | the receive journals of the space stop reporting what lies below it (RFC 9000 §13.2.4) | the ACK obligation of the space owes again what it owed before (RFC 9000 §13.2.1), and the space's ACK intent is published again while an ACK frame is due |
+//! | ACK | [`AckSummary`]: the Largest Acknowledged and what was due before | the receive journals of the space stop reporting what lies below it (RFC 9000 §13.2.4) | the ACK obligation of the space owes again what it owed before (RFC 9000 §13.2.1), so the driver's content has the space's ACK again while an ACK frame is due |
 //! | PING of a probe timeout | [`ProbePingSummary`] | nothing | nothing: the next expiry of the probe timeout sends a new probe |
-//! | RETIRE_CONNECTION_ID | [`RetireConnectionIdSummary`]: the sequence number | the retirement no longer waits for acknowledgment | the same frame is published again while the retirement waits for acknowledgment (RFC 9000 §13.3) |
-//! | HANDSHAKE_DONE | [`HandshakeDoneSummary`] | the frame is delivered and not sent again | the frame is published again while no copy of it was acknowledged (RFC 9000 §13.3) |
-//! | CRYPTO | [`CryptoSummary`]: the level, the offset and the length of the data | the bytes are acknowledged, and their data can go | the bytes still in flight are unsent again, and the level's intent is published again (RFC 9000 §13.3) |
+//! | RETIRE_CONNECTION_ID | [`RetireConnectionIdSummary`]: the sequence number | the retirement no longer waits for acknowledgment | the retirement waits to be sent again while it waits for acknowledgment (RFC 9000 §13.3) |
+//! | HANDSHAKE_DONE | [`HandshakeDoneSummary`] | the frame is delivered and not sent again | the frame waits to be sent again while no copy of it was acknowledged (RFC 9000 §13.3) |
+//! | CRYPTO | [`CryptoSummary`]: the level, the offset and the length of the data | the bytes are acknowledged, and their data can go | the bytes still in flight are unsent again, so the driver's content has the level again (RFC 9000 §13.3) |
 //! | STREAM | [`StreamSummary`]: the stream, the offset and length of the data, the FIN | the data is acknowledged; with the FIN and all data acknowledged the sending part is done | the data waits to be sent again, and the FIN if the stream was not reset (RFC 9000 §13.3) |
 //! | RESET_STREAM | [`ResetStreamSummary`]: the stream and the final size | the sending part is done | the frame is sent again while the sending part is not done |
 //! | STOP_SENDING | [`StopSendingSummary`]: the stream and the error code | nothing | the frame is sent again while the receiving part still needs it |
 //! | MAX_DATA, MAX_STREAM_DATA, MAX_STREAMS | [`MaxDataSummary`], [`MaxStreamDataSummary`], [`MaxStreamsSummary`]: the limit | nothing | the limit in effect, never lower than the one lost, is sent again while it is still advertised |
 //! | DATA_BLOCKED, STREAM_DATA_BLOCKED, STREAMS_BLOCKED | [`DataBlockedSummary`], [`StreamDataBlockedSummary`], [`StreamsBlockedSummary`]: the limit | nothing | the frame is sent again while the sender is still blocked at that limit |
 //! | PATH_RESPONSE | [`PathResponseSummary`]: nothing | nothing | nothing: a new challenge comes instead (RFC 9000 §13.3) |
-//! | NEW_CONNECTION_ID | [`NewConnectionIdSummary`]: the sequence number | the connection ID is disclosed and not sent again | the same frame is published again while the connection ID is neither acknowledged nor retired by the peer (RFC 9000 §13.3) |
+//! | NEW_CONNECTION_ID | [`NewConnectionIdSummary`]: the sequence number | the connection ID is disclosed and not sent again | the same frame waits to be sent again while the connection ID is neither acknowledged nor retired by the peer (RFC 9000 §13.3) |
 //!
 //! Each is the summary of one kind of version 1's frame sources
 //! ([`FrameSources`]), and what comes of it is that source's
-//! ([`AckFrameSource`](super::send::AckFrameSource),
-//! [`ProbePingFrameSource`](super::send::ProbePingFrameSource), the
+//! ([`AckFrameSource`](super::send::AckFrameSource), the
 //! destination connection ID strategy,
 //! [`LineageCryptoFrameSource`](super::send::LineageCryptoFrameSource),
 //! the [`Own`](super::Side::Own) data of the side,
 //! [`PaddingFrameSource`](crate::write::PaddingFrameSource), for the
 //! streams' frames the stream set, through
 //! [`LineageStreamFrameSource`](super::streams::send::LineageStreamFrameSource),
-//! and the local connection ID strategy).
+//! and the local connection ID strategy). The PING of a probe and
+//! PATH_RESPONSE need nothing when they come back: their summaries go to
+//! [`IgnoringFrameSource`](crate::frame_source::IgnoringFrameSource), not
+//! to the pending frames of the link path that wrote them
+//! ([`PendingProbePings`](super::send::PendingProbePings),
+//! [`PendingPathResponse`](super::path_response::PendingPathResponse)).
 use frunk_core::{HList, hlist_pat};
 use sakuya_recovery::{ack_obligation::AckDue, packet_number_space::PacketNumberSpaceKind};
 use sakuya_stream::send_options::destination::Unfulfilled;

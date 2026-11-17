@@ -204,7 +204,7 @@ impl<S> SendStrategyCore<S> {
         &self.strategy
     }
 
-    /// The core, to publish to or to plan with.
+    /// The core, to plan with.
     pub fn strategy_mut(&mut self) -> &mut S {
         &mut self.strategy
     }

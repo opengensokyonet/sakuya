@@ -14,16 +14,23 @@
 //!    refilling the link path's pacer to the instant of the poll and
 //!    reading afresh what the link path can send ([`DatagramLimits`]) and
 //!    what each kind of packet takes beyond its frames ([`PacketOverheads`]),
-//!    which the planner is told before it is asked for the plan. The
-//!    connection ID is the first one offered for the link path with which
-//!    the content planned first fits, chosen by reading the destination
-//!    connection ID strategy only; each planned packet then gets a packet
-//!    of its kind, opened with the keys of its level, and each planned item
-//!    whose least room fits is given to its frame source, which finds its
+//!    which the planner is told before it is asked for the plan; the
+//!    request carries what the driver's own components have to send on the
+//!    link path then
+//!    ([`DriverContent`](crate::send_strategy::DriverContent)), gathered
+//!    afresh for each datagram. The connection ID is the first one offered for the link
+//!    path with which the content planned first fits, chosen by reading the
+//!    destination connection ID strategy only; each planned packet then
+//!    gets a packet of its kind, opened with the keys of its level, and its
+//!    planned items go in order to their frame sources, which find their
 //!    components in what filling left of the lineage, the logical path's
-//!    connection IDs among them; one datagram carries one connection ID
-//!    (RFC 9000 §12.2), and a 0-RTT packet is never written, as no keys to
-//!    send one with are kept. Once the datagram is sealed with content, the
+//!    connection IDs among them. Whether an item fits is what its source
+//!    writes: one whose least room does not fit is not given to its source
+//!    and counts as having written nothing. An item that wrote nothing ends
+//!    the datagram when it holds its place, and is passed over when it does
+//!    not. One datagram carries one connection ID (RFC 9000 §12.2), and a
+//!    0-RTT packet is never written, as no keys to send one with are kept.
+//!    Once the datagram is sealed with content, the
 //!    strategy is told that the connection ID was used, with the
 //!    datagram's size and the link path's reset token registrar; a datagram
 //!    left empty used nothing.
@@ -35,8 +42,9 @@
 //!    when the planner has nothing to plan or asks for the close packet
 //!    again before one is sealed, when the bound of empty datagrams is
 //!    reached, or when the plan names content that cannot go now: no
-//!    connection ID fits it, its level has no keys to send with, or it
-//!    does not fit its packet. With nothing in the batch the call then
+//!    connection ID fits it, its level has no keys to send with, or some of
+//!    it did not fit its packet and the datagram was left empty. With
+//!    nothing in the batch the call then
 //!    waits for the planner. In the last case it wakes itself first, so
 //!    that what the lend changed is reread before it plans again; blocked
 //!    again while nothing the planner is told has changed, it waits until
