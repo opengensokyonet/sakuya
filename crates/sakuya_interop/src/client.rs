@@ -32,9 +32,14 @@ use crate::{
 /// Where the runner wants the files.
 const DOWNLOADS: &str = "/downloads";
 /// Where the runner puts the certificates.
-/// How long a connection may take for its handshake, and after its
-/// requests to end.
+/// How long a connection may take to get a link, and how long the
+/// connections still closing and the drivers may take to end once every
+/// request is done.
 const STEP: Duration = Duration::from_secs(10);
+/// How long a connection may take for its handshake: longer than the idle
+/// timeout the client declares, so that while packets keep arriving under
+/// heavy loss the connection's own idle timeout decides, not this bound.
+const HANDSHAKE: Duration = Duration::from_secs(60);
 /// How long all of a connection's requests may take.
 const TRANSFER: Duration = Duration::from_secs(120);
 
@@ -145,6 +150,9 @@ async fn fetch_all(starts: ClientStarts, batches: Vec<Vec<Url>>) -> ExitCode {
     crate::assert_send(&driver);
     let driver = tokio::task::spawn_local(driver);
     let mut outcome = ExitCode::SUCCESS;
+    // connections that were asked to close: their closing periods run while
+    // the next connection is made, and are waited for at the end
+    let mut closing = Vec::new();
     for (number, urls) in batches.iter().enumerate() {
         let number = number + 1;
         let host = &urls[0].host;
@@ -189,7 +197,7 @@ async fn fetch_all(starts: ClientStarts, batches: Vec<Vec<Url>>) -> ExitCode {
         crate::assert_send(&connection);
         let mut connection = tokio::task::spawn_local(connection);
         eprintln!("sakuya client: connection {number} to {server} started");
-        let layer = match tokio::time::timeout(STEP, handle.established()).await {
+        let layer = match tokio::time::timeout(HANDSHAKE, handle.established()).await {
             Ok(Ok(layer)) => layer,
             Ok(Err(error)) => {
                 eprintln!(
@@ -203,7 +211,9 @@ async fn fetch_all(starts: ClientStarts, batches: Vec<Vec<Url>>) -> ExitCode {
                 break;
             }
             Err(_) => {
-                eprintln!("sakuya client: connection {number} is not established within {STEP:?}");
+                eprintln!(
+                    "sakuya client: connection {number} is not established within {HANDSHAKE:?}"
+                );
                 handle.close(HqClose(0));
                 outcome = ExitCode::FAILURE;
                 break;
@@ -286,18 +296,21 @@ async fn fetch_all(starts: ClientStarts, batches: Vec<Vec<Url>>) -> ExitCode {
             }
         };
         handle.close(HqClose(0));
-        match tokio::time::timeout(STEP, &mut connection).await {
-            Ok(_) => eprintln!("sakuya client: connection {number} ended"),
-            Err(_) => {
-                eprintln!("sakuya client: connection {number} does not end within {STEP:?}");
-                connection.abort();
+        closing.push(async move {
+            match tokio::time::timeout(STEP, &mut connection).await {
+                Ok(_) => eprintln!("sakuya client: connection {number} ended"),
+                Err(_) => {
+                    eprintln!("sakuya client: connection {number} does not end within {STEP:?}");
+                    connection.abort();
+                }
             }
-        }
+        });
         if !all_fetched {
             outcome = ExitCode::FAILURE;
             break;
         }
     }
+    join_all(closing).await;
     drop(binding);
     client.close();
     for (name, task) in [("binding driver", driver), ("reflow driver", reflow)] {
