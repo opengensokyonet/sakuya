@@ -10,8 +10,9 @@
 //! - [`rtt`]: the RTT estimate ([`rtt::RttEstimator`]) and the rules that
 //!   turn an acknowledgment into a sample ([`rtt::RttSample`]).
 //! - [`congestion`]: the congestion controller
-//!   ([`congestion::CongestionController`]) and NewReno
-//!   ([`congestion::new_reno::NewReno`]).
+//!   ([`congestion::CongestionController`]), NewReno
+//!   ([`congestion::new_reno::NewReno`]) and CUBIC
+//!   ([`congestion::cubic::Cubic`]).
 //! - [`pacing`]: the pacer ([`pacing::Pacer`]), the combinator that gives a
 //!   window-only controller a pacer, and a token bucket pacer.
 //! - [`pto`]: what to do when the probe timeout expires

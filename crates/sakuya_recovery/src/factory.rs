@@ -18,10 +18,13 @@
 //! alone lends the part as it is; a coupled one combines it with the
 //! others.
 //!
-//! [`NewRenoRecoveryFactory`] is the factory sakuya provides.
+//! sakuya provides two factories for QUIC version 1 alone, which differ
+//! in their congestion controller: [`CubicRecoveryFactory`] and
+//! [`NewRenoRecoveryFactory`].
 use crate::{
     congestion::{
         CongestionController, InitialWindow,
+        cubic::{Cubic, CubicConfig},
         new_reno::{NewReno, NewRenoConfig},
     },
     ecn::EcnPolicy,
@@ -272,6 +275,149 @@ where
     /// The next release of the pacer: the probe timeout policy of NewReno
     /// sets no instant of its own.
     fn next_deadline(&self, this: &PacedNewReno<I>) -> Option<I> {
+        Pacer::next_release(this)
+    }
+}
+
+/// The congestion control a [`CubicRecoveryFactory`] makes for each link
+/// path: CUBIC with a token bucket pacer.
+pub type PacedCubic<I> = PacedCongestionController<Cubic<I>, TokenBucketPacer<I>>;
+
+/// The configuration of a [`CubicRecoveryFactory`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CubicRecoveryFactoryConfig {
+    initial_rtt: Duration,
+    cubic: CubicConfig,
+    pacer: TokenBucketPacerConfig,
+    pmtu: BinarySearchPmtuPolicyConfig,
+}
+
+impl CubicRecoveryFactoryConfig {
+    /// The configuration given. `initial_rtt` is the RTT a link path starts
+    /// from when it has no measured initial RTT.
+    ///
+    /// # Errors
+    ///
+    /// [`PacerInitialWindowMismatchError`] if the pacer's initial window is
+    /// not CUBIC's: the pacer allows at least the controller's initial
+    /// window in a burst.
+    pub fn new(
+        initial_rtt: Duration,
+        cubic: CubicConfig,
+        pacer: TokenBucketPacerConfig,
+        pmtu: BinarySearchPmtuPolicyConfig,
+    ) -> Result<Self, PacerInitialWindowMismatchError> {
+        let congestion_controller = cubic.window().initial_window();
+        ensure!(
+            pacer.initial_window() == congestion_controller,
+            PacerInitialWindowMismatchSnafu {
+                pacer: pacer.initial_window(),
+                congestion_controller,
+            }
+        );
+        Ok(Self {
+            initial_rtt,
+            cubic,
+            pacer,
+            pmtu,
+        })
+    }
+
+    /// The values RFC 9002 and RFC 9438 recommend, with the defaults of the
+    /// pacer and of the probing policy, for a clock whose timers fire with
+    /// a precision of `timer_granularity`.
+    pub fn recommended(timer_granularity: Duration) -> Self {
+        Self {
+            initial_rtt: INITIAL_RTT,
+            cubic: CubicConfig::RECOMMENDED,
+            pacer: TokenBucketPacerConfig::recommended(timer_granularity),
+            pmtu: BinarySearchPmtuPolicyConfig::RECOMMENDED,
+        }
+    }
+}
+
+/// The recommended values for a clock whose timers fire within 1 ms, the
+/// timer granularity RFC 9002 §6.1.2 recommends. A clock whose timers are
+/// coarser is given its own with [`recommended`](Self::recommended).
+impl Default for CubicRecoveryFactoryConfig {
+    fn default() -> Self {
+        Self::recommended(Duration::from_millis(1))
+    }
+}
+
+/// A recovery factory for QUIC version 1 alone: RTT estimates as RFC 9002
+/// computes them ([`Rfc9002RttEstimator`]), CUBIC paced by a token bucket
+/// ([`PacedCubic`]), and binary search probing
+/// ([`BinarySearchPmtuPolicy`]).
+///
+/// It lends a link path's part as it is, whatever the other link paths
+/// are. CUBIC starts from the initial window of 1200-byte datagrams; the
+/// caller tells it the size in use at the first datagram.
+#[derive(Debug)]
+pub struct CubicRecoveryFactory<Via> {
+    config: CubicRecoveryFactoryConfig,
+    via: PhantomData<fn() -> Via>,
+}
+
+impl<L, Via> RecoveryFactory<L> for CubicRecoveryFactory<Via>
+where
+    L: Link,
+    L::Instant: Ord + Copy + Add<Duration, Output = L::Instant> + Sub<Output = Duration>,
+{
+    type Config = CubicRecoveryFactoryConfig;
+    type Via = Via;
+    type Rtt = Rfc9002RttEstimator<Via>;
+    type CongestionPart = PacedCubic<L::Instant>;
+    type Pmtu = BinarySearchPmtuPolicy<L::Instant, L::Local, L::Peer>;
+
+    fn new(config: &CubicRecoveryFactoryConfig) -> Self {
+        Self {
+            config: *config,
+            via: PhantomData,
+        }
+    }
+
+    fn create(
+        &mut self,
+        _link: &L,
+        initial_rtt: Option<Duration>,
+    ) -> (Self::Rtt, Self::CongestionPart, Self::Pmtu) {
+        let config = &self.config;
+        (
+            Rfc9002RttEstimator::new(initial_rtt.unwrap_or(config.initial_rtt)),
+            PacedCongestionController::new(
+                Cubic::new(config.cubic, MIN_DATAGRAM_SIZE),
+                TokenBucketPacer::new(config.pacer),
+            ),
+            BinarySearchPmtuPolicy::new(config.pmtu),
+        )
+    }
+}
+
+impl<I, Others, Via> LendCongestion<I, Others> for CubicRecoveryFactory<Via>
+where
+    I: Ord + Copy + Add<Duration, Output = I> + Sub<Output = Duration> + 'static,
+{
+    type Part = PacedCubic<I>;
+    type SentState = <PacedCubic<I> as CongestionController<I>>::SentState;
+    type LossState = <PacedCubic<I> as CongestionController<I>>::LossState;
+    type Access<'a>
+        = &'a mut PacedCubic<I>
+    where
+        Self: 'a,
+        Others: 'a;
+
+    fn lend<'a>(
+        &'a mut self,
+        this: &'a mut PacedCubic<I>,
+        _others: &'a Others,
+    ) -> Self::Access<'a> {
+        this
+    }
+
+    /// The next release of the pacer: the probe timeout policy of CUBIC
+    /// sets no instant of its own.
+    fn next_deadline(&self, this: &PacedCubic<I>) -> Option<I> {
         Pacer::next_release(this)
     }
 }

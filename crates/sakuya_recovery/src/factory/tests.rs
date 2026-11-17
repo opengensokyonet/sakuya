@@ -1,12 +1,16 @@
 use super::{
-    LendCongestion, NewRenoRecoveryFactory, NewRenoRecoveryFactoryConfig, PacedNewReno,
-    PacerInitialWindowMismatchError, RecoveryFactory,
+    CubicRecoveryFactory, CubicRecoveryFactoryConfig, LendCongestion, NewRenoRecoveryFactory,
+    NewRenoRecoveryFactoryConfig, PacedNewReno, PacerInitialWindowMismatchError, RecoveryFactory,
 };
 use crate::{
-    congestion::{CongestionController, InitialWindow, new_reno::NewRenoConfig},
+    congestion::{
+        CongestionContext, CongestionController, InFlightPacket, InitialWindow, cubic::CubicConfig,
+        new_reno::NewRenoConfig,
+    },
     pacing::{Pacer, PacingInput, RECOMMENDED_PACING_GAIN, TokenBucketPacerConfig},
     pmtu::{BinarySearchPmtuPolicyConfig, PmtuPolicy},
     pto::PtoPolicy,
+    rtt::RttEstimate,
     rtt::RttEstimator,
 };
 use core::{num::NonZeroUsize, time::Duration};
@@ -143,6 +147,63 @@ fn the_pacer_must_share_the_initial_window() {
     let result = NewRenoRecoveryFactoryConfig::new(
         ms(333),
         NewRenoConfig::RECOMMENDED,
+        pacer,
+        BinarySearchPmtuPolicyConfig::RECOMMENDED,
+    );
+    assert_eq!(
+        result,
+        Err(PacerInitialWindowMismatchError {
+            pacer: InitialWindow::new(20, 30000),
+            congestion_controller: InitialWindow::RECOMMENDED,
+        })
+    );
+}
+
+fn cubic_factory() -> CubicRecoveryFactory<LinkId<(), ()>> {
+    RecoveryFactory::<TestLink>::new(&CubicRecoveryFactoryConfig::default())
+}
+
+#[test]
+fn a_cubic_link_path_part_is_lent_as_it_is() {
+    let mut factory = cubic_factory();
+    let (rtt, mut part, _) = RecoveryFactory::<TestLink>::create(&mut factory, &link(), None);
+    assert_eq!(RttEstimator::<Duration>::estimate(&rtt).smoothed, ms(333));
+    assert_eq!(window_left(&mut factory, &mut part, &(), 4800), 7200);
+    // A loss through the lent access reduces the part's window by 0.7.
+    let access = LendCongestion::<Duration, ()>::lend(&mut factory, &mut part, &());
+    let packet = InFlightPacket {
+        bytes: 1200,
+        sent_at: ms(10),
+        app_limited: false,
+        sent_state: (),
+    };
+    let context = CongestionContext {
+        now: ms(50),
+        bytes_in_flight: 0,
+        rtt: RttEstimate::initial(ms(40)),
+        rtt_sampled: false,
+        max_datagram_size: 1200,
+    };
+    let _ = access.on_lost([packet].into_iter(), &context);
+    assert_eq!(CongestionController::<Duration>::window(&part), 8400);
+    assert_eq!(
+        LendCongestion::<Duration, ()>::next_deadline(&factory, &part),
+        None
+    );
+}
+
+#[test]
+fn the_cubic_pacer_must_share_the_initial_window() {
+    let pacer = TokenBucketPacerConfig::new(
+        ms(1),
+        InitialWindow::new(20, 30000),
+        NonZeroUsize::new(256).unwrap(),
+        RECOMMENDED_PACING_GAIN,
+    )
+    .unwrap();
+    let result = CubicRecoveryFactoryConfig::new(
+        ms(333),
+        CubicConfig::RECOMMENDED,
         pacer,
         BinarySearchPmtuPolicyConfig::RECOMMENDED,
     );

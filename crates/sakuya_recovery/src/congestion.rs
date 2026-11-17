@@ -4,7 +4,7 @@
 //! acknowledged, tests for persistent congestion, and lets probes exceed
 //! the window. What is replaceable is the [`CongestionController`]: the
 //! window and how it reacts to the events below. [`new_reno`] holds NewReno
-//! (RFC 9002 Appendix B).
+//! (RFC 9002 Appendix B), [`cubic`] holds CUBIC (RFC 9438).
 //!
 //! # Events of one ACK
 //!
@@ -48,7 +48,9 @@
 //! [`on_removed`]: CongestionController::on_removed
 //! [`wants_recovery_send`]: CongestionController::wants_recovery_send
 use crate::rtt::RttEstimate;
+use snafu::{Snafu, ensure};
 
+pub mod cubic;
 pub mod new_reno;
 
 /// The congestion controller of a link path.
@@ -281,6 +283,94 @@ impl InitialWindow {
             .saturating_mul(max_datagram_size)
             .min(self.limit.max(max_datagram_size.saturating_mul(2)))
     }
+}
+
+/// The initial and minimum congestion windows of a controller (RFC 9002
+/// §7.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CongestionWindowConfig {
+    initial_window: InitialWindow,
+    minimum_window_datagrams: usize,
+}
+
+impl CongestionWindowConfig {
+    /// The values RFC 9002 recommends: the initial window of
+    /// [`InitialWindow::RECOMMENDED`] and a minimum window of two
+    /// datagrams.
+    pub const RECOMMENDED: Self = Self {
+        initial_window: InitialWindow::RECOMMENDED,
+        minimum_window_datagrams: 2,
+    };
+
+    /// The windows given.
+    ///
+    /// # Errors
+    ///
+    /// - [`CongestionWindowConfigError::ZeroMinimumWindow`] if the minimum
+    ///   window is no datagram;
+    /// - [`CongestionWindowConfigError::InitialWindowBelowMinimum`] if the
+    ///   initial window has fewer datagrams than the minimum window.
+    pub fn new(
+        initial_window: InitialWindow,
+        minimum_window_datagrams: usize,
+    ) -> Result<Self, CongestionWindowConfigError> {
+        ensure!(minimum_window_datagrams > 0, ZeroMinimumWindowSnafu);
+        ensure!(
+            initial_window.datagrams() >= minimum_window_datagrams,
+            InitialWindowBelowMinimumSnafu {
+                initial_window_datagrams: initial_window.datagrams(),
+                minimum_window_datagrams,
+            }
+        );
+        Ok(Self {
+            initial_window,
+            minimum_window_datagrams,
+        })
+    }
+
+    /// The initial window.
+    pub const fn initial_window(&self) -> InitialWindow {
+        self.initial_window
+    }
+
+    /// The minimum window, in datagrams.
+    pub const fn minimum_window_datagrams(&self) -> usize {
+        self.minimum_window_datagrams
+    }
+
+    /// The minimum window in bytes for `max_datagram_size`.
+    pub fn minimum_bytes(&self, max_datagram_size: usize) -> usize {
+        self.minimum_window_datagrams
+            .saturating_mul(max_datagram_size)
+    }
+
+    /// The initial window in bytes for `max_datagram_size`, at least the
+    /// minimum window: for a large datagram the limit of two datagrams can
+    /// be below a minimum of more than two.
+    pub fn initial_bytes(&self, max_datagram_size: usize) -> usize {
+        self.initial_window
+            .bytes(max_datagram_size)
+            .max(self.minimum_bytes(max_datagram_size))
+    }
+}
+
+/// A [`CongestionWindowConfig`] breaks a rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+pub enum CongestionWindowConfigError {
+    /// The minimum window holds no datagram.
+    #[snafu(display("minimum window is zero datagrams"))]
+    ZeroMinimumWindow,
+    /// The initial window is smaller than the minimum window.
+    #[snafu(display(
+        "initial window of {initial_window_datagrams} datagrams is below the minimum of {minimum_window_datagrams}"
+    ))]
+    InitialWindowBelowMinimum {
+        /// The datagrams of the initial window.
+        initial_window_datagrams: usize,
+        /// The datagrams of the minimum window, above those of the initial
+        /// window.
+        minimum_window_datagrams: usize,
+    },
 }
 
 #[cfg(test)]
