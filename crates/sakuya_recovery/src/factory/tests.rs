@@ -1,11 +1,14 @@
 use super::{
-    CubicRecoveryFactory, CubicRecoveryFactoryConfig, LendCongestion, NewRenoRecoveryFactory,
-    NewRenoRecoveryFactoryConfig, PacedNewReno, PacerInitialWindowMismatchError, RecoveryFactory,
+    BbrRecoveryFactory, BbrRecoveryFactoryConfig, CubicRecoveryFactory, CubicRecoveryFactoryConfig,
+    LendCongestion, NewRenoRecoveryFactory, NewRenoRecoveryFactoryConfig, PacedNewReno,
+    PacerInitialWindowMismatchError, RecoveryFactory,
 };
 use crate::{
     congestion::{
         CongestionContext, CongestionController, InFlightPacket, InitialWindow, SealedPacket,
-        cubic::CubicConfig, new_reno::NewRenoConfig,
+        bbr::{Bbr, BbrState},
+        cubic::CubicConfig,
+        new_reno::NewRenoConfig,
     },
     pacing::{Pacer, PacingInput, RECOMMENDED_PACING_GAIN, TokenBucketPacerConfig},
     pmtu::{BinarySearchPmtuPolicyConfig, PmtuPolicy},
@@ -220,4 +223,60 @@ fn the_cubic_pacer_must_share_the_initial_window() {
             congestion_controller: InitialWindow::RECOMMENDED,
         })
     );
+}
+
+fn bbr_factory() -> BbrRecoveryFactory<LinkId<(), ()>> {
+    RecoveryFactory::<TestLink>::new(&BbrRecoveryFactoryConfig::default())
+}
+
+#[test]
+fn a_bbr_link_path_part_is_lent_as_it_is() {
+    let mut factory = bbr_factory();
+    let (rtt, mut part, _) = RecoveryFactory::<TestLink>::create(&mut factory, &link(), None);
+    assert_eq!(RttEstimator::<Duration>::estimate(&rtt).smoothed, ms(333));
+    assert_eq!(window_left(&mut factory, &mut part, &(), 4800), 7200);
+    // BBR paces itself: the refill through the lent access filled its
+    // bucket to the send quantum, 2.77 × 12000 bytes in 1 ms.
+    assert_eq!(Pacer::<Duration>::allowance(&part), 33240);
+    // A loss through the lent access starts a loss recovery in the part,
+    // without lowering the window.
+    let access = LendCongestion::<Duration, ()>::lend(&mut factory, &mut part, &());
+    let sent_state = access.on_packet_sealed(&SealedPacket {
+        bytes: 1200,
+        app_limited: false,
+        bytes_in_flight: 1200,
+        now: ms(10),
+    });
+    let packet = InFlightPacket {
+        bytes: 1200,
+        sent_at: ms(10),
+        app_limited: false,
+        sent_state,
+    };
+    let context = CongestionContext {
+        now: ms(50),
+        bytes_in_flight: 0,
+        rtt: RttEstimate::initial(ms(40)),
+        rtt_sampled: false,
+        max_datagram_size: 1200,
+    };
+    let _ = access.on_lost([packet].into_iter(), &context);
+    assert_eq!(CongestionController::<Duration>::window(&part), 12000);
+    assert_eq!(part.state(), BbrState::Startup);
+}
+
+#[test]
+fn the_deadline_of_a_bbr_part_is_its_next_release() {
+    let mut factory = bbr_factory();
+    let (_, mut part, _) = RecoveryFactory::<TestLink>::create(&mut factory, &link(), None);
+    let deadline = |factory: &BbrRecoveryFactory<LinkId<(), ()>>, part: &Bbr<Duration>| {
+        LendCongestion::<Duration, ()>::next_deadline(factory, part)
+    };
+    let _ = window_left(&mut factory, &mut part, &(), 0);
+    assert_eq!(deadline(&factory, &part), None);
+    let access = LendCongestion::<Duration, ()>::lend(&mut factory, &mut part, &());
+    access.on_charged(33240);
+    let release = deadline(&factory, &part).expect("a release after spending");
+    assert!(release > ms(0));
+    assert_eq!(Some(release), Pacer::<Duration>::next_release(&part));
 }

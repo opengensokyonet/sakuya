@@ -4,7 +4,8 @@
 //! acknowledged, tests for persistent congestion, and lets probes exceed
 //! the window. What is replaceable is the [`CongestionController`]: the
 //! window and how it reacts to the events below. [`new_reno`] holds NewReno
-//! (RFC 9002 Appendix B), [`cubic`] holds CUBIC (RFC 9438).
+//! (RFC 9002 Appendix B), [`cubic`] holds CUBIC (RFC 9438), and [`bbr`]
+//! holds BBRv3 (draft-ietf-ccwg-bbr-07), which is its own pacer.
 //!
 //! # Events of one ACK
 //!
@@ -50,7 +51,9 @@
 use crate::rtt::RttEstimate;
 use snafu::{Snafu, ensure};
 
+pub mod bbr;
 pub mod cubic;
+mod delivery_rate;
 mod hystart_plus_plus;
 pub mod new_reno;
 

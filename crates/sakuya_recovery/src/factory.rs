@@ -18,12 +18,13 @@
 //! alone lends the part as it is; a coupled one combines it with the
 //! others.
 //!
-//! sakuya provides two factories for QUIC version 1 alone, which differ
-//! in their congestion controller: [`CubicRecoveryFactory`] and
-//! [`NewRenoRecoveryFactory`].
+//! sakuya provides three factories for QUIC version 1 alone, which differ
+//! in their congestion controller: [`CubicRecoveryFactory`],
+//! [`NewRenoRecoveryFactory`] and [`BbrRecoveryFactory`].
 use crate::{
     congestion::{
         CongestionController, InitialWindow,
+        bbr::{Bbr, BbrConfig},
         cubic::{Cubic, CubicConfig},
         new_reno::{NewReno, NewRenoConfig},
     },
@@ -35,6 +36,7 @@ use crate::{
 };
 use core::{
     marker::PhantomData,
+    num::NonZeroU64,
     ops::{Add, Sub},
     time::Duration,
 };
@@ -418,6 +420,139 @@ where
     /// The next release of the pacer: the probe timeout policy of CUBIC
     /// sets no instant of its own.
     fn next_deadline(&self, this: &PacedCubic<I>) -> Option<I> {
+        Pacer::next_release(this)
+    }
+}
+
+/// The configuration of a [`BbrRecoveryFactory`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BbrRecoveryFactoryConfig {
+    initial_rtt: Duration,
+    bbr: BbrConfig,
+    pmtu: BinarySearchPmtuPolicyConfig,
+}
+
+impl BbrRecoveryFactoryConfig {
+    /// The configuration given. `initial_rtt` is the RTT a link path starts
+    /// from when it has no measured initial RTT; the seed of `bbr` starts
+    /// the sequence of seeds the link paths get.
+    pub const fn new(
+        initial_rtt: Duration,
+        bbr: BbrConfig,
+        pmtu: BinarySearchPmtuPolicyConfig,
+    ) -> Self {
+        Self {
+            initial_rtt,
+            bbr,
+            pmtu,
+        }
+    }
+
+    /// The values RFC 9002 recommends, with the defaults of BBR and of the
+    /// probing policy, for a clock whose timers fire with a precision of
+    /// `timer_granularity`.
+    pub const fn recommended(timer_granularity: Duration) -> Self {
+        Self {
+            initial_rtt: INITIAL_RTT,
+            bbr: BbrConfig::recommended(timer_granularity),
+            pmtu: BinarySearchPmtuPolicyConfig::RECOMMENDED,
+        }
+    }
+}
+
+/// The recommended values for a clock whose timers fire within 1 ms, the
+/// timer granularity RFC 9002 §6.1.2 recommends and the interval of the
+/// send quantum of draft-ietf-ccwg-bbr-07 §5.6.3. A clock whose timers are
+/// coarser is given its own with [`recommended`](Self::recommended).
+impl Default for BbrRecoveryFactoryConfig {
+    fn default() -> Self {
+        Self::recommended(Duration::from_millis(1))
+    }
+}
+
+/// A recovery factory for QUIC version 1 alone: RTT estimates as RFC 9002
+/// computes them ([`Rfc9002RttEstimator`]), BBRv3 as its own pacer
+/// ([`Bbr`]), and binary search probing ([`BinarySearchPmtuPolicy`]).
+///
+/// It lends a link path's part as it is, whatever the other link paths
+/// are. BBR starts from the initial window of 1200-byte datagrams; the
+/// caller tells it the size in use at the first datagram. Each link path
+/// gets its own seed for the random choices, the next of a sequence that
+/// starts from the configured seed.
+#[derive(Debug)]
+pub struct BbrRecoveryFactory<Via> {
+    config: BbrRecoveryFactoryConfig,
+    /// The state of the sequence of seeds (SplitMix64).
+    seeds: u64,
+    via: PhantomData<fn() -> Via>,
+}
+
+impl<Via> BbrRecoveryFactory<Via> {
+    /// The seed of the next link path: the next value of SplitMix64.
+    fn next_seed(&mut self) -> NonZeroU64 {
+        self.seeds = self.seeds.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.seeds;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^= z >> 31;
+        NonZeroU64::new(z).unwrap_or(NonZeroU64::MIN)
+    }
+}
+
+impl<L, Via> RecoveryFactory<L> for BbrRecoveryFactory<Via>
+where
+    L: Link,
+    L::Instant: Ord + Copy + Add<Duration, Output = L::Instant> + Sub<Output = Duration>,
+{
+    type Config = BbrRecoveryFactoryConfig;
+    type Via = Via;
+    type Rtt = Rfc9002RttEstimator<Via>;
+    type CongestionPart = Bbr<L::Instant>;
+    type Pmtu = BinarySearchPmtuPolicy<L::Instant, L::Local, L::Peer>;
+
+    fn new(config: &BbrRecoveryFactoryConfig) -> Self {
+        Self {
+            config: *config,
+            seeds: config.bbr.seed(),
+            via: PhantomData,
+        }
+    }
+
+    fn create(
+        &mut self,
+        _link: &L,
+        initial_rtt: Option<Duration>,
+    ) -> (Self::Rtt, Self::CongestionPart, Self::Pmtu) {
+        let seed = self.next_seed();
+        let config = &self.config;
+        (
+            Rfc9002RttEstimator::new(initial_rtt.unwrap_or(config.initial_rtt)),
+            Bbr::new(config.bbr.with_seed(seed), MIN_DATAGRAM_SIZE),
+            BinarySearchPmtuPolicy::new(config.pmtu),
+        )
+    }
+}
+
+impl<I, Others, Via> LendCongestion<I, Others> for BbrRecoveryFactory<Via>
+where
+    I: Ord + Copy + Add<Duration, Output = I> + Sub<Output = Duration> + 'static,
+{
+    type Part = Bbr<I>;
+    type SentState = <Bbr<I> as CongestionController<I>>::SentState;
+    type LossState = <Bbr<I> as CongestionController<I>>::LossState;
+    type Access<'a>
+        = &'a mut Bbr<I>
+    where
+        Self: 'a,
+        Others: 'a;
+
+    fn lend<'a>(&'a mut self, this: &'a mut Bbr<I>, _others: &'a Others) -> Self::Access<'a> {
+        this
+    }
+
+    /// The next release of BBR's pacer: its probe timeout policy sets no
+    /// instant of its own.
+    fn next_deadline(&self, this: &Bbr<I>) -> Option<I> {
         Pacer::next_release(this)
     }
 }

@@ -11,8 +11,9 @@
 //!   turn an acknowledgment into a sample ([`rtt::RttSample`]).
 //! - [`congestion`]: the congestion controller
 //!   ([`congestion::CongestionController`]), NewReno
-//!   ([`congestion::new_reno::NewReno`]) and CUBIC
-//!   ([`congestion::cubic::Cubic`]).
+//!   ([`congestion::new_reno::NewReno`]), CUBIC
+//!   ([`congestion::cubic::Cubic`]) and BBRv3
+//!   ([`congestion::bbr::Bbr`]), which is also its own pacer.
 //! - [`pacing`]: the pacer ([`pacing::Pacer`]), the combinator that gives a
 //!   window-only controller a pacer, and a token bucket pacer.
 //! - [`pto`]: what to do when the probe timeout expires
