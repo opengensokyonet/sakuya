@@ -7,10 +7,15 @@
 //! - [`pki`]: Ed25519 test roots and leaf certificates, built in memory.
 //! - [`measure`]: counters of heap allocations and of a task's polls and
 //!   wakes, for measuring a run.
+//! - [`network`]: a network in memory between a server and its clients,
+//!   with link bindings an endpoint takes and impairments (loss,
+//!   reordering, duplication, corruption, blackholes, path MTU changes,
+//!   rebinding) that follow from a seed.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod measure;
+pub mod network;
 pub mod pki;
 pub mod verify;
