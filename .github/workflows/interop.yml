@@ -1,0 +1,55 @@
+name: Interop
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  interop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      # The quic-go commit the interop programs are built from. The version
+      # in verification/interop/quic-go-ext-peer/go.mod is its pseudo-version.
+      QUIC_GO_COMMIT: ebcbd4bf2bfb0f3814d9969f95fe040ba0a8ff6a
+      SAKUYA_BIN_DIR: ${{ github.workspace }}/target/release
+      QUIC_GO_BIN_DIR: ${{ github.workspace }}/quic-go-bin
+      OUT: ${{ github.workspace }}/interop-out
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: verification/interop/quic-go-ext-peer/go.mod
+          cache: false
+      - name: Build the sakuya interop programs
+        run: cargo build --locked --release -p sakuya_interop --features extensions
+      - name: Check that go.mod pins the quic-go commit
+        run: grep -q "${QUIC_GO_COMMIT:0:12}" verification/interop/quic-go-ext-peer/go.mod
+      - name: Build quic-go's interop programs
+        run: |
+          git clone https://github.com/quic-go/quic-go.git "$RUNNER_TEMP/quic-go"
+          git -C "$RUNNER_TEMP/quic-go" checkout "$QUIC_GO_COMMIT"
+          mkdir -p "$QUIC_GO_BIN_DIR"
+          cd "$RUNNER_TEMP/quic-go"
+          go build -o "$QUIC_GO_BIN_DIR/server" ./interop/server
+          go build -o "$QUIC_GO_BIN_DIR/client" ./interop/client
+      - name: Build the quic-go extension peer
+        working-directory: verification/interop/quic-go-ext-peer
+        run: go build -o "$QUIC_GO_BIN_DIR/ext-peer" .
+      - name: Generate certificates
+        run: verification/interop/certs.sh "$OUT/certs"
+      - name: Run the interop matrix
+        run: verification/interop/matrix.sh
+      - name: Upload the run directory
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: interop-out
+          path: interop-out
+          if-no-files-found: ignore
