@@ -166,6 +166,8 @@ type ClientChoices =
     ClientConnectionChoices<Udp, Mine, ClientStarts, ClientTokens, ContinueOnRetry>;
 
 type Parts = frunk_core::HList![v1::Part];
+sakuya_connection::composition!(impl for Mine: ServerChoices, Parts);
+sakuya_connection::composition!(impl for Mine: ClientChoices, Parts);
 
 type Server = AcceptingServer<
     Mine,

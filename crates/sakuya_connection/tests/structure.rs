@@ -12,7 +12,6 @@ use common::{
     take_log,
 };
 use sakuya_connection::{
-    driver::ConnectionDriver,
     layer::{EstablishedArgs, LinkPathArgs, LogicalPathArgs, RecoveryArgs},
     request::StructureRequest,
     role::LinkPathRole,
@@ -30,7 +29,7 @@ fn link() -> LinkId<(), ()> {
 /// A connection of the parts `L` with one link path over `first`.
 macro_rules! connection {
     ($($part:ty),*; $first:expr) => {
-        ConnectionDriver::<Mine, HList![$($part),*], _, _, _>::new(
+        <Mine as sakuya_connection::composition::Composition<Mine, HList![$($part),*]>>::connection(
             TestClock,
             frunk_core::hlist![$(nothing::<$part>()),*],
             LogicalPathArgs { path: PATH },
@@ -41,8 +40,14 @@ macro_rules! connection {
                 peer_switched_local_id: false,
             },
         )
+        .0
     };
 }
+
+sakuya_connection::composition!(impl for Mine: Mine, HList![a::Part]);
+sakuya_connection::composition!(impl Send for Mine: Mine, HList![a::Part, b::Part]);
+sakuya_connection::composition!(impl for Mine: Mine, HList![b::Part, a::Part]);
+sakuya_connection::composition!(impl for Mine: Mine, HList![c::Part, a::Part]);
 
 fn reset() {
     take_log();

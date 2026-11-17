@@ -220,6 +220,10 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
     /// is finer than the endpoint's clock, as it may be after its
     /// configuration was replaced.
     #[expect(
+        clippy::type_complexity,
+        reason = "the future of the connection with its handle, or the half given back"
+    )]
+    #[expect(
         clippy::result_large_err,
         reason = "the error gives the incoming connection back by value"
     )]

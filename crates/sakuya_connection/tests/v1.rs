@@ -27,7 +27,6 @@ use sakuya_connection::{
     component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, ReadSet, RequestOf},
     connection_id::DestinationConnectionIdStrategy as _,
     dispatch::{DispatchFacts, FrameDispatch, FrameSetDispatch},
-    driver::ConnectionDriver,
     error::ConnectionErrorsOf,
     feedback::InjectSummary,
     frame_source::{FindFrameSource, FrameSource, FrameSourceKind},
@@ -191,6 +190,9 @@ thread_local! {
 
 /// The parts of the tests' connections.
 type Parts = HList![v1::Part, probe::Part];
+sakuya_connection::composition!(impl for Mine: Mine, Parts);
+sakuya_connection::composition!(impl for ClientMine: ClientMine, Parts);
+sakuya_connection::composition!(impl for SpyMine: SpyMine, Parts);
 
 fn link() -> LinkId<(), ()> {
     LinkId::new::<()>((), (), &BindingId::new())
@@ -2274,7 +2276,7 @@ impl SideCapacities for v1::Client<common::PendingClientEngine, (), v1::retry::C
 /// A connection of version 1 and the probe with the choices `$t`.
 macro_rules! connection {
     (@args $t:ty, $args:expr, $first:expr) => {
-        ConnectionDriver::<$t, Parts, _, _, _>::new(
+        <$t as sakuya_connection::composition::Composition<$t, Parts>>::connection(
             TestClock,
             frunk_core::hlist![$args, HNil],
             LogicalPathArgs { path: PATH },
@@ -2285,6 +2287,7 @@ macro_rules! connection {
                 peer_switched_local_id: false,
             },
         )
+        .0
     };
     ($t:ty, $validation:expr, $first:expr) => {
         connection!(@args $t, args::<$t>($validation), $first)

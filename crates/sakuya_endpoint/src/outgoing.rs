@@ -160,6 +160,10 @@ impl<E: EndpointChoices, C: ConnectingClientRole<E>> Outgoing<E, C> {
     /// the endpoint's clock, as it may be after its configuration was
     /// replaced; when the endpoint's random source gives no destination
     /// connection ID, as the client must not choose a predictable one.
+    #[expect(
+        clippy::type_complexity,
+        reason = "the future of the connection with its handle, or the half given back"
+    )]
     pub fn start<I>(
         mut self,
     ) -> Result<

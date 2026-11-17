@@ -196,6 +196,8 @@ type Server = AcceptingServer<
 /// Where the client keeps the address validation tokens servers give it.
 type ClientTokens = BoundedAddressTokenStore<ServerTarget>;
 type Client = ConnectingClient<Mine, Parts, ClientStarts, ClientTokens, ContinueOnRetry>;
+sakuya_connection::composition!(impl for Mine: ServerChoices, Parts);
+sakuya_connection::composition!(impl for Mine: ClientChoices, Parts);
 
 // ---- the handshakes ----
 

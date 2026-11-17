@@ -74,6 +74,7 @@ pub type PositionsOf<C, T, L> = PhantomData<(
 
 /// The positions of the composition `C` of the choices `T` and the list
 /// `L`, as one named type: what the driver and the knot of its calls carry.
+#[allow(clippy::type_complexity)] // a marker of three type parameters
 pub struct CompositionPositions<C, T, L>(PhantomData<fn() -> (C, T, L)>);
 
 impl<
