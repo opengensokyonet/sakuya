@@ -20,6 +20,7 @@ thread_local! {
     static EVENTS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static LIMITS: RefCell<Vec<Option<DatagramLimits>>> = const { RefCell::new(Vec::new()) };
     static OVERHEADS: RefCell<Vec<Option<PacketOverheads>>> = const { RefCell::new(Vec::new()) };
+    static ASKED: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static STALE_INITIAL: Cell<Option<usize>> = const { Cell::new(None) };
     static STALE_INITIAL_KEPT: Cell<Option<usize>> = const { Cell::new(None) };
     static PLAN_NOTHING: Cell<bool> = const { Cell::new(false) };
@@ -93,6 +94,19 @@ pub fn observed_overheads(path: usize) -> Option<PacketOverheads> {
     OVERHEADS.with(|overheads| overheads.borrow().get(path).copied().flatten())
 }
 
+/// How many times the planner of the Nth link path built was asked for a
+/// plan since the last call: each time its sending call filled. Each
+/// strategy made starts with none asked.
+pub fn take_plans_asked(path: usize) -> usize {
+    ASKED.with(|asked| {
+        asked
+            .borrow_mut()
+            .get_mut(path)
+            .map(std::mem::take)
+            .unwrap_or(0)
+    })
+}
+
 /// The ranked strategy's core, recording.
 pub struct EventLoggingSendStrategy<I: SendStrategyTypes> {
     inner: RankedSendStrategy<I>,
@@ -103,6 +117,7 @@ impl<I: SendStrategyTypes> Default for EventLoggingSendStrategy<I> {
     fn default() -> Self {
         LIMITS.with(|limits| limits.borrow_mut().clear());
         OVERHEADS.with(|overheads| overheads.borrow_mut().clear());
+        ASKED.with(|asked| asked.borrow_mut().clear());
         Self {
             inner: RankedSendStrategy::new(),
             link_paths: 0,
@@ -268,6 +283,13 @@ where
         driver: &'a DriverContent<I::SendIntents>,
         cx: &mut Context<'_>,
     ) -> Poll<PlannedDatagram<Self::Plan<'a>>> {
+        ASKED.with(|asked| {
+            let mut asked = asked.borrow_mut();
+            if asked.len() <= self.index {
+                asked.resize(self.index + 1, 0);
+            }
+            asked[self.index] += 1;
+        });
         self.record_content(driver);
         if PLAN_NOTHING.with(Cell::get) {
             return Poll::Pending;

@@ -184,6 +184,9 @@ thread_local! {
     /// The cell the application of the last connection made asks to close
     /// it through.
     static CLOSE_REQUEST: RefCell<Option<CloseRequestCell<common::AppClose>>> = const { RefCell::new(None) };
+    /// What the probe's part has to send, as the driver's own content, until
+    /// its frame source is given it.
+    static FILLERS: RefCell<Vec<probe::FillerIntent>> = const { RefCell::new(Vec::new()) };
 }
 
 /// The parts of the tests' connections.
@@ -220,6 +223,7 @@ fn reset() {
     ROUTING.with(|r| r.borrow_mut().take());
     LAST_STATUS.with(|l| l.borrow_mut().take());
     CLOSE_REQUEST.with(|c| c.borrow_mut().take());
+    FILLERS.with(|f| f.borrow_mut().clear());
     common::reset_links();
     common::reset_close_policy();
 }
@@ -595,33 +599,94 @@ mod probe {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Summary(pub u64);
 
-    /// The probe's frames, as a kind of frame source: none are planned,
-    /// and what comes back of their summaries is logged.
+    /// The probe's frame source, the only one of its part.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum FrameSourceId {
+        /// The frames the probe writes.
+        Frames,
+    }
+
+    /// Content the probe has to send in Initial packets, as the driver's
+    /// own: `len` PING frames, which it needs room for in any position,
+    /// unless it `writes` nothing when it is given its turn. It ranks
+    /// among the control frames, and holds its place when `holds_place`.
+    /// Once given to its frame source it is gone.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct FillerIntent {
+        pub id: u8,
+        pub len: usize,
+        pub holds_place: bool,
+        pub writes: bool,
+    }
+    impl sakuya_connection::send_strategy::SendIntent for FillerIntent {
+        type FrameSourceId = FrameSourceId;
+        type Class = sakuya_connection::write::InFlightClass;
+        fn frame_source(&self) -> FrameSourceId {
+            FrameSourceId::Frames
+        }
+        fn min_lengths(&self) -> sakuya_connection::send_strategy::MinimumLengths {
+            sakuya_connection::send_strategy::MinimumLengths {
+                with_length: self.len,
+                as_last: self.len,
+            }
+        }
+    }
+    impl sakuya_connection::send_strategy::ranked::RankedIntent for FillerIntent {
+        fn rank(&self) -> sakuya_connection::send_strategy::ranked::SendRank {
+            sakuya_connection::send_strategy::ranked::SendRank {
+                priority: sakuya_connection::send_strategy::ranked::SendPriority::Control,
+                holds_place: self.holds_place,
+            }
+        }
+    }
+
+    /// The probe's frames, as a kind of frame source: the fillers are
+    /// planned, and what comes back of their summaries is logged.
     pub enum Frames {}
     impl FrameSourceKind for Frames {
-        type Item<'a> = core::convert::Infallible;
+        type Item<'a> = FillerIntent;
         type Summary<I> = Summary;
         type Intent = NoIntent;
     }
-    /// The source of the probe's frames logs what comes back of their
-    /// summaries.
+    /// The source of the probe's frames writes the fillers it is given and
+    /// logs that it was given each, and what comes back of their summaries.
     pub struct LoggingSource;
     impl FrameSource for LoggingSource {
         type Summary = Summary;
         type Class = sakuya_connection::write::InFlightClass;
-        type Item<'a> = core::convert::Infallible;
+        type Item<'a> = FillerIntent;
         type Intent = NoIntent;
         fn supply<W, P, Idx>(
             &mut self,
-            item: core::convert::Infallible,
-            _: sakuya_connection::write::OpenPacket<W, sakuya_connection::write::InFlightClass, P>,
+            filler: FillerIntent,
+            mut packet: sakuya_connection::write::OpenPacket<
+                W,
+                sakuya_connection::write::InFlightClass,
+                P,
+            >,
         ) -> sakuya_connection::write::Supplied<W, sakuya_connection::write::InFlightClass, P>
         where
             W: sakuya_connection::write::PacketWriting,
             sakuya_connection::write::SummaryOf<W>: InjectSummary<Summary, Idx>,
             P: sakuya_connection::write::PacketPosition,
         {
-            match item {}
+            FILLERS.with(|f| f.borrow_mut().retain(|kept| kept.id != filler.id));
+            if filler.writes {
+                for _ in 0..filler.len {
+                    packet
+                        .write_frame(
+                            sakuya_wire::v1::frame::ping::PingFrame,
+                            <sakuya_connection::write::SummaryOf<W>>::inject_summary(Summary(
+                                u64::from(filler.id),
+                            )),
+                        )
+                        .expect("the filler was given the room it needs");
+                }
+                log(format!("filler {} wrote", filler.id));
+            } else {
+                log(format!("filler {} wrote nothing", filler.id));
+            }
+            sakuya_connection::write::Supplied::Open(packet)
         }
         fn delivered<Pb, Idx>(&mut self, _: &mut Pb, space: PacketNumberSpaceKind, summary: Summary)
         where
@@ -637,10 +702,9 @@ mod probe {
         }
         fn unfulfilled(
             &mut self,
-            item: core::convert::Infallible,
+            _: FillerIntent,
             _: sakuya_stream::send_options::destination::Unfulfilled,
         ) {
-            match item {}
         }
     }
     impl<T: ConnectionChoices, L, V> FindFrameSource<T, L, V, ()> for Frames {
@@ -654,16 +718,22 @@ mod probe {
         }
     }
 
-    /// The probe sends nothing through the send strategy.
+    /// The probe sends its fillers, and nothing through the intake.
     impl sakuya_connection::send_strategy::SendIntentPart for Part {
-        type FrameSourceId = CNil;
-        type SendIntents = CNil;
+        type FrameSourceId = FrameSourceId;
+        type SendIntents = frunk_core::Coprod![FillerIntent];
         type FrameSources = frunk_core::HList![Frames];
 
-        fn intent_item(intent: &CNil) -> Coproduct<core::convert::Infallible, CNil> {
-            match *intent {}
+        fn intent_item(
+            intent: &frunk_core::Coprod![FillerIntent],
+        ) -> Coproduct<FillerIntent, CNil> {
+            match intent {
+                Coproduct::Inl(filler) => Coproduct::Inl(*filler),
+                Coproduct::Inr(never) => match *never {},
+            }
         }
     }
+    /// The fillers wait for a link path in the order they were set.
     impl<
         T: sakuya_connection::clock::ConnectionChoices,
         L: sakuya_connection::share::LogicalPathKeys,
@@ -673,24 +743,36 @@ mod probe {
         fn pending<J>(
             _: &sakuya_connection::take::Lineage<'_, V>,
             _: &sakuya_connection::share::LinkPathIdentifierOf<T, L>,
-            _: &mut sakuya_connection::send_strategy::DriverContent<J>,
-            _: impl Fn(sakuya_wire::parts::CNil) -> J,
+            out: &mut sakuya_connection::send_strategy::DriverContent<J>,
+            inject: impl Fn(frunk_core::Coprod![FillerIntent]) -> J,
         ) {
+            FILLERS.with(|f| {
+                out.intents.extend(
+                    f.borrow()
+                        .iter()
+                        .map(|filler| inject(Coproduct::Inl(*filler))),
+                );
+            });
         }
     }
     /// The probe's frame source finds nothing in the established layer.
     impl<T, L> sakuya_connection::frame_source::EstablishedSourceComponentsPart<T, L> for Part {
         type Components = HNil;
     }
+    /// The fillers go in Initial packets only.
     impl<K: sakuya_connection::frame_source::PacketKind>
         sakuya_connection::frame_source::FrameSourcePart<K> for Part
     {
-        fn item(intent: &CNil) -> Option<Coproduct<core::convert::Infallible, CNil>> {
-            match *intent {}
+        fn item(
+            intent: &frunk_core::Coprod![FillerIntent],
+        ) -> Option<Coproduct<FillerIntent, CNil>> {
+            (K::KIND == sakuya_connection::send_strategy::PlannedPacketKind::Initial).then(|| {
+                <Self as sakuya_connection::send_strategy::SendIntentPart>::intent_item(intent)
+            })
         }
-        fn source(item: &Coproduct<core::convert::Infallible, CNil>) -> CNil {
+        fn source(item: &Coproduct<FillerIntent, CNil>) -> FrameSourceId {
             match item {
-                Coproduct::Inl(never) => match *never {},
+                Coproduct::Inl(_) => FrameSourceId::Frames,
                 Coproduct::Inr(never) => match *never {},
             }
         }
@@ -2777,7 +2859,20 @@ fn the_probe_timeout_backs_off_and_grants_probe_permits() {
 
 #[test]
 fn the_probe_timeout_leaves_out_application_data_until_the_handshake_is_confirmed() {
+    use probe::PacketStep::{HandshakeConnectionId, InstallOneRttSendKeys};
     reset();
+    // the strategy plans nothing: nothing is sent, and what is gathered
+    // stays
+    common::strategy::plan_nothing();
+    // a connection ID to send to and the 1-RTT keys to send with, so that
+    // a PING of the space can go once the handshake is confirmed
+    feed_packets([
+        (
+            ms(1200),
+            HandshakeConnectionId(ConnectionId::new(&CLIENT_SCID).expect("eight bytes")),
+        ),
+        (ms(1201), InstallOneRttSendKeys),
+    ]);
     feed([
         (
             ms(10),
@@ -2799,7 +2894,11 @@ fn the_probe_timeout_leaves_out_application_data_until_the_handshake_is_confirme
     advance_to(ms(1100));
     assert!(outer.poll(&mut connection).is_pending());
     assert_eq!(status(), None);
-    assert_eq!(strategy_events("path 0: publish"), Vec::<String>::new());
+    let _ = run(&mut connection, 1101..=1499);
+    assert_eq!(
+        strategy_events("path 0: content ProbePingIntent"),
+        Vec::<String>::new()
+    );
     // once confirmed it is past and expires at once
     advance_to(ms(1500));
     let mut lines = Vec::new();
@@ -2814,8 +2913,8 @@ fn the_probe_timeout_leaves_out_application_data_until_the_handshake_is_confirme
     );
     // the space is probed with a PING only once it is probed at all
     assert_eq!(
-        strategy_events("path 0: publish"),
-        ["path 0: publish ProbePingIntent { space: ApplicationData }"]
+        strategy_events("path 0: content ProbePingIntent"),
+        ["path 0: content ProbePingIntent { space: ApplicationData }"]
     );
 }
 
@@ -4964,19 +5063,14 @@ fn the_strategy_core_is_told_of_each_send_key_and_the_confirmation_once() {
         ["path 0: added Active", "core: keys Initial"]
     );
     let outer = Outer::new();
+    // the NEW_CONNECTION_ID the local connection ID strategy issues once the
+    // handshake is confirmed is the link path's to gather, not told to the
+    // core
     for (at, told) in [
         (11, &[][..]),
         (12, &["core: keys Handshake"][..]),
         (13, &["core: keys OneRtt"][..]),
-        // the local connection ID strategy issues once the handshake is
-        // confirmed, up to the protocol's minimum limit of 2
-        (
-            14,
-            &[
-                "core: confirmed",
-                "core: publish NewConnectionIdIntent { sequence: 1 }",
-            ][..],
-        ),
+        (14, &["core: confirmed"][..]),
         // nothing is told again as the connection is polled on
         (15, &[][..]),
         (500, &[][..]),
@@ -4984,7 +5078,7 @@ fn the_strategy_core_is_told_of_each_send_key_and_the_confirmation_once() {
     ] {
         advance_to(ms(at));
         assert!(outer.poll(&mut connection).is_pending());
-        assert_eq!(take_strategy_events(), told, "at {at} ms");
+        assert_eq!(strategy_events("core: "), told, "at {at} ms");
     }
 }
 
@@ -5068,7 +5162,7 @@ fn the_planner_is_told_when_its_link_path_drains() {
 }
 
 #[test]
-fn an_acknowledgment_due_now_is_published_asking_room_for_the_shortest_frame() {
+fn an_acknowledgment_due_now_is_gathered_asking_room_for_the_shortest_frame() {
     use probe::PacketStep::Receive;
     reset();
     // the strategy plans nothing: nothing is sent
@@ -5082,56 +5176,71 @@ fn an_acknowledgment_due_now_is_published_asking_room_for_the_shortest_frame() {
     take_strategy_events();
     let _ = run(&mut connection, 4..=4);
     assert_eq!(take_strategy_events(), Vec::<String>::new());
-    let _ = run(&mut connection, 5..=5);
+    // due once the packet is processed at 5 ms: the sending call it wakes
+    // gathers it at the next poll
+    let _ = run(&mut connection, 5..=6);
     // the frame's type, a Largest Acknowledged, an ACK Delay, an ACK Range
     // Count and a First ACK Range of one byte each
     assert_eq!(
         take_strategy_events(),
-        ["core: publish AckIntent { space: Initial, shortest: 5 }"]
+        ["path 0: content AckIntent { space: Initial, shortest: 5 }"]
     );
-    // it stays published while the acknowledgment is due
-    let _ = run(&mut connection, 6..=7);
+    // nothing it has changes while the acknowledgment is due
+    let _ = run(&mut connection, 7..=8);
     assert_eq!(take_strategy_events(), Vec::<String>::new());
 }
 
 #[test]
-fn an_acknowledgment_that_is_not_due_now_publishes_no_intent() {
+fn an_acknowledgment_that_is_not_due_now_is_not_gathered() {
     use probe::PacketStep::{InstallOneRttKeys, Receive};
     reset();
     let first = link();
     feed_packets([
-        (ms(5), InstallOneRttKeys),
+        (ms(4), InstallOneRttKeys),
+        // the client's Initial packet gives the server a connection ID to
+        // send to
         (
-            ms(6),
-            Receive(received(one_rtt_packet_of(0, 0, &ping()), &first, ms(6))),
+            ms(5),
+            Receive(received(
+                initial_from(&CLIENT_SCID, 0, &ping()),
+                &first,
+                ms(5),
+            )),
         ),
         (
-            ms(7),
-            Receive(received(one_rtt_packet_of(0, 1, &ping()), &first, ms(7))),
+            ms(10),
+            Receive(received(one_rtt_packet_of(0, 0, &ping()), &first, ms(10))),
+        ),
+        (
+            ms(11),
+            Receive(received(one_rtt_packet_of(0, 1, &ping()), &first, ms(11))),
         ),
     ]);
     let mut connection = connection!(Mine, AddressValidation::Validated, first);
     take_strategy_events();
+    let _ = run(&mut connection, 4..=9);
+    assert_eq!(
+        strategy_events("path 0: content"),
+        ["path 0: content AckIntent { space: Initial, shortest: 5 }"]
+    );
     // one ack-eliciting packet in the Application Data space waits for the
     // maximum ACK delay
-    let _ = run(&mut connection, 5..=6);
-    assert_eq!(strategy_events("core: publish"), Vec::<String>::new());
-    // a second is acknowledged at once
-    let _ = run(&mut connection, 7..=7);
+    let _ = run(&mut connection, 10..=10);
+    assert_eq!(strategy_events("path 0: content"), Vec::<String>::new());
+    // a second is acknowledged at once: the sending call it wakes gathers
+    // it at the next poll
+    let _ = run(&mut connection, 11..=12);
     assert_eq!(
-        strategy_events("core: publish"),
-        ["core: publish AckIntent { space: ApplicationData, shortest: 5 }"]
+        strategy_events("path 0: content"),
+        ["path 0: content AckIntent { space: ApplicationData, shortest: 5 }"]
     );
 }
 
 #[test]
-fn the_acknowledgment_intent_goes_when_the_acknowledgment_is_written() {
+fn the_acknowledgment_is_not_gathered_once_it_is_written() {
     use probe::PacketStep::Receive;
     reset();
-    // the strategy plans nothing: nothing is sent
-    common::strategy::plan_nothing();
     let first = link();
-    feed([(ms(8), probe::Step::SentAck(PacketNumberSpaceKind::Initial))]);
     feed_packets([
         (
             ms(5),
@@ -5144,27 +5253,110 @@ fn the_acknowledgment_intent_goes_when_the_acknowledgment_is_written() {
     ]);
     let mut connection = connection!(Mine, AddressValidation::Validated, first);
     take_strategy_events();
-    let _ = run(&mut connection, 5..=7);
+    // gathered for the first datagram and written there: the next datagram
+    // gathers nothing due
+    let _ = run(&mut connection, 5..=9);
     assert_eq!(
         take_strategy_events(),
-        ["core: publish AckIntent { space: Initial, shortest: 5 }"]
+        [
+            "path 0: content AckIntent { space: Initial, shortest: 5 }",
+            "path 0: gone AckIntent { space: Initial, shortest: 5 }",
+        ]
     );
-    // the ACK frame went out: nothing is due, and the ticket is dropped
-    let _ = run(&mut connection, 8..=9);
-    assert_eq!(
-        take_strategy_events(),
-        ["core: drop AckIntent { space: Initial, shortest: 5 }"]
-    );
+    assert_eq!(common::take_sent().len(), 1, "the ACK");
     // a new packet makes one due again
     let _ = run(&mut connection, 10..=11);
     assert_eq!(
         take_strategy_events(),
-        ["core: publish AckIntent { space: Initial, shortest: 5 }"]
+        [
+            "path 0: content AckIntent { space: Initial, shortest: 5 }",
+            "path 0: gone AckIntent { space: Initial, shortest: 5 }",
+        ]
+    );
+    assert_eq!(common::take_sent().len(), 1, "the ACK again");
+}
+
+#[test]
+fn the_sending_call_is_woken_for_driver_content_only_when_it_changes() {
+    use probe::PacketStep::Receive;
+    reset();
+    // the strategy plans nothing: the sending call waits for what the driver
+    // has to send
+    common::strategy::plan_nothing();
+    let first = link();
+    feed_packets([
+        (
+            ms(5),
+            Receive(received(long_packet(INITIAL, 0, &ping()), &first, ms(5))),
+        ),
+        // the acknowledgment's shortest frame stays as it was
+        (
+            ms(7),
+            Receive(received(long_packet(INITIAL, 1, &ping()), &first, ms(7))),
+        ),
+        // the Largest Acknowledged needs two bytes
+        (
+            ms(9),
+            Receive(received(long_packet(INITIAL, 100, &ping()), &first, ms(9))),
+        ),
+    ]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first);
+    take_strategy_events();
+    let _ = settle(&mut connection, 1..=4);
+    common::strategy::take_plans_asked(0);
+    // an acknowledgment due now that fits an empty datagram wakes the call,
+    // which gathers it
+    let _ = settle(&mut connection, 5..=5);
+    assert_eq!(common::strategy::take_plans_asked(0), 1);
+    assert_eq!(
+        take_strategy_events(),
+        ["path 0: content AckIntent { space: Initial, shortest: 5 }"]
+    );
+    // the same content does not wake it again
+    let _ = settle(&mut connection, 6..=8);
+    assert_eq!(common::strategy::take_plans_asked(0), 0);
+    // content that changed does
+    let _ = settle(&mut connection, 9..=9);
+    assert_eq!(common::strategy::take_plans_asked(0), 1);
+    assert_eq!(
+        take_strategy_events(),
+        [
+            "path 0: content AckIntent { space: Initial, shortest: 6 }",
+            "path 0: gone AckIntent { space: Initial, shortest: 5 }",
+        ]
     );
 }
 
 #[test]
-fn the_acknowledgment_intent_is_published_again_when_the_shortest_frame_grows() {
+fn driver_content_that_does_not_fit_an_empty_datagram_wakes_the_sending_call_once_it_does() {
+    reset();
+    let first = link();
+    CRYPTO_WRITE_AT.with(|c| c.set(Some(ms(4))));
+    let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    take_strategy_events();
+    let _ = settle(&mut connection, 1..=3);
+    common::strategy::take_plans_asked(0);
+    // with no connection ID to send to and no credit, the CRYPTO data the
+    // probe writes at 4 ms does not fit: the call is not woken for it
+    let _ = settle(&mut connection, 4..=4);
+    assert_eq!(common::strategy::take_plans_asked(0), 0);
+    // the client's Initial packet gives both: the call is woken, and
+    // gathers the data with the acknowledgment of the packet
+    deliver(client_initial(0), &first, ms(5));
+    let _ = settle(&mut connection, 5..=5);
+    assert!(common::strategy::take_plans_asked(0) > 0);
+    let events = strategy_events("path 0: content");
+    assert_eq!(
+        events,
+        [
+            "path 0: content AckIntent { space: Initial, shortest: 5 }",
+            "path 0: content CryptoIntent { level: Initial, shortest: 4 }",
+        ]
+    );
+}
+
+#[test]
+fn the_acknowledgment_is_gathered_anew_when_the_shortest_frame_grows() {
     use probe::PacketStep::Receive;
     reset();
     // the strategy plans nothing: nothing is sent
@@ -5188,84 +5380,110 @@ fn the_acknowledgment_intent_is_published_again_when_the_shortest_frame_grows() 
     ]);
     let mut connection = connection!(Mine, AddressValidation::Validated, first);
     take_strategy_events();
-    let _ = run(&mut connection, 5..=5);
+    // each packet is processed after the sending call is polled: what it
+    // makes due is gathered at the next poll
+    let _ = run(&mut connection, 5..=6);
     assert_eq!(
         take_strategy_events(),
-        ["core: publish AckIntent { space: Initial, shortest: 5 }"]
+        ["path 0: content AckIntent { space: Initial, shortest: 5 }"]
     );
-    // the new intent is in before the old ticket goes, so the space is never
-    // without one while an acknowledgment is due
-    let _ = run(&mut connection, 6..=6);
+    let _ = run(&mut connection, 7..=7);
     assert_eq!(
         take_strategy_events(),
         [
-            "core: publish AckIntent { space: Initial, shortest: 6 }",
-            "core: drop AckIntent { space: Initial, shortest: 5 }",
+            "path 0: content AckIntent { space: Initial, shortest: 6 }",
+            "path 0: gone AckIntent { space: Initial, shortest: 5 }",
         ]
     );
-    let _ = run(&mut connection, 7..=8);
+    // the frame needs no more room: the sending call is not woken for it
+    let _ = run(&mut connection, 8..=9);
     assert_eq!(take_strategy_events(), Vec::<String>::new());
 }
 
 #[test]
-fn a_probe_timeout_publishes_a_ping_on_the_planner_of_its_link_path() {
+fn a_probe_timeout_has_its_link_path_gather_a_ping() {
     reset();
+    let first = link();
     feed([(
-        ms(10),
-        probe::Step::Send {
+        ms(6),
+        probe::Step::Sent {
             space: PacketNumberSpaceKind::Initial,
-            numbers: vec![0],
-            acked: None,
+            count: 1,
         },
     )]);
-    let mut connection = connection!(Mine, AddressValidation::Validated, link());
-    let outer = Outer::new();
-    advance_to(ms(10));
-    assert!(outer.poll(&mut connection).is_pending());
-    assert_eq!(strategy_events("path 0: publish"), Vec::<String>::new());
-    advance_to(ms(1008));
-    assert!(outer.poll(&mut connection).is_pending());
-    assert_eq!(strategy_events("path 0: publish"), Vec::<String>::new());
-    // the probe timeout expires at 1009 ms
-    advance_to(ms(1009));
-    assert!(outer.poll(&mut connection).is_pending());
-    assert_eq!(
-        strategy_events("path 0: publish"),
-        ["path 0: publish ProbePingIntent { space: Initial }"]
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    // the client's Initial packet gives the server a connection ID to send
+    // to; its ACK goes at 6 ms
+    deliver(
+        padded(
+            &[],
+            |payload| initial_from(&CLIENT_SCID, 0, payload),
+            &ping(),
+        ),
+        &first,
+        ms(5),
     );
-}
-
-#[test]
-fn the_next_probe_timeout_drops_the_last_ping_before_it_publishes_its_own() {
-    reset();
-    feed([(
-        ms(10),
-        probe::Step::Send {
-            space: PacketNumberSpaceKind::Initial,
-            numbers: vec![0],
-            acked: None,
-        },
-    )]);
-    let mut connection = connection!(Mine, AddressValidation::Validated, link());
-    let outer = Outer::new();
-    for at in [10, 1009] {
-        advance_to(ms(at));
-        assert!(outer.poll(&mut connection).is_pending());
-    }
+    let _ = run(&mut connection, 5..=6);
+    assert_eq!(common::take_sent().len(), 1, "the ACK");
     take_strategy_events();
-    // the ticket stays until the next probe timeout, at 3007 ms
-    advance_to(ms(3006));
-    assert!(outer.poll(&mut connection).is_pending());
-    assert_eq!(take_strategy_events(), Vec::<String>::new());
-    advance_to(ms(3007));
-    assert!(outer.poll(&mut connection).is_pending());
+    let _ = run(&mut connection, 7..=1004);
+    assert_eq!(strategy_events("path 0: content"), Vec::<String>::new());
+    // the probe timeout expires at 1005 ms; the sending call it wakes
+    // gathers the PING, writes it, and no longer finds it
+    let _ = run(&mut connection, 1005..=1006);
     assert_eq!(
-        take_strategy_events(),
+        strategy_events("path 0: "),
         [
-            "path 0: drop ProbePingIntent { space: Initial }",
-            "path 0: publish ProbePingIntent { space: Initial }",
+            "path 0: content ProbePingIntent { space: Initial }",
+            "path 0: gone ProbePingIntent { space: Initial }",
         ]
     );
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(open_sent_initial(&sent[0].1).payload[0], 0x01, "the PING");
+}
+
+#[test]
+fn the_next_probe_timeout_has_its_link_path_gather_a_ping_again() {
+    reset();
+    let first = link();
+    feed([(
+        ms(6),
+        probe::Step::Sent {
+            space: PacketNumberSpaceKind::Initial,
+            count: 1,
+        },
+    )]);
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    deliver(
+        padded(
+            &[],
+            |payload| initial_from(&CLIENT_SCID, 0, payload),
+            &ping(),
+        ),
+        &first,
+        ms(5),
+    );
+    // the ACK at 6 ms; the probe timeout expires at 1005 ms and the PING
+    // goes at 1006 ms, its last
+    let _ = run(&mut connection, 5..=1006);
+    assert_eq!(common::take_sent().len(), 2, "the ACK and the PING");
+    take_strategy_events();
+    // the next one expires at 1006 ms + 2 × 999 ms and has a PING gathered
+    // and written again
+    let _ = run(&mut connection, 1007..=3004);
+    assert_eq!(strategy_events("path 0: "), Vec::<String>::new());
+    let _ = run(&mut connection, 3005..=3005);
+    assert_eq!(
+        strategy_events("path 0: "),
+        [
+            "path 0: content ProbePingIntent { space: Initial }",
+            "path 0: gone ProbePingIntent { space: Initial }",
+        ]
+    );
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(open_sent_initial(&sent[0].1).payload[0], 0x01, "the PING");
 }
 
 #[test]
@@ -5762,24 +5980,27 @@ fn a_server_answers_the_first_initial_packet_with_an_ack_in_an_initial_packet() 
 }
 
 #[test]
-fn crypto_data_written_is_published_and_sent_in_an_initial_packet() {
+fn crypto_data_written_is_gathered_and_sent_in_an_initial_packet() {
     reset();
     let first = link();
     CRYPTO_WRITE_AT.with(|c| c.set(Some(ms(4))));
     let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    take_strategy_events();
+    // nothing goes before the client's Initial packet gives the server a
+    // connection ID to send to and credit to send with: the data does not
+    // fit, and the sending call is not woken for it
     let _ = settle(&mut connection, 4..=4);
+    assert_eq!(strategy_events("path 0: content"), Vec::<String>::new());
+    assert_eq!(common::take_sent(), []);
+    deliver(client_initial(0), &first, ms(5));
+    let _ = settle(&mut connection, 5..=6);
     let events = take_strategy_events();
     assert!(
         events
             .iter()
-            .any(|event| event == "core: publish CryptoIntent { level: Initial, shortest: 4 }"),
+            .any(|event| event == "path 0: content CryptoIntent { level: Initial, shortest: 4 }"),
         "{events:?}"
     );
-    // nothing goes before the client's Initial packet gives the server a
-    // connection ID to send to and credit to send with
-    assert_eq!(common::take_sent(), []);
-    deliver(client_initial(0), &first, ms(5));
-    let _ = settle(&mut connection, 5..=6);
     let sent = common::take_sent();
     assert_eq!(sent.len(), 1, "{sent:?}");
     let packet = open_sent_initial(&sent[0].1);
@@ -5793,6 +6014,101 @@ fn crypto_data_written_is_published_and_sent_in_an_initial_packet() {
         })
         .collect();
     assert_eq!(crypto, [(0, b"server hello".to_vec())]);
+}
+
+/// Content of the probe's part, `id`, of `len` PING frames.
+fn filler(id: u8, len: usize, holds_place: bool, writes: bool) -> probe::FillerIntent {
+    probe::FillerIntent {
+        id,
+        len,
+        holds_place,
+        writes,
+    }
+}
+
+/// What a server sends once a client's Initial packet arrives, with
+/// `fillers` to send besides its ACK: the number of PING frames of each
+/// datagram, and what the fillers' frame source logged, in order.
+fn sent_with_fillers(fillers: &[probe::FillerIntent]) -> (Vec<usize>, Vec<String>) {
+    reset();
+    FILLERS.with(|f| f.borrow_mut().extend_from_slice(fillers));
+    let first = link();
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    deliver(
+        padded(
+            &[],
+            |payload| initial_from(&CLIENT_SCID, 0, payload),
+            &ping(),
+        ),
+        &first,
+        ms(5),
+    );
+    let log = settle(&mut connection, 5..=6);
+    let pings = common::take_sent()
+        .iter()
+        .map(|(_, datagram)| {
+            open_sent_initial(datagram)
+                .payload
+                .iter()
+                .filter(|byte| **byte == 0x01)
+                .count()
+        })
+        .collect();
+    (pings, lines_of(log, &["filler"]))
+}
+
+#[test]
+fn content_that_holds_its_place_and_does_not_fit_ends_the_datagram() {
+    // after the ACK and the first, the second does not fit what is left:
+    // the third, which would, goes after it in the next datagram
+    let (pings, log) = sent_with_fillers(&[
+        filler(1, 400, true, true),
+        filler(2, 900, true, true),
+        filler(3, 100, true, true),
+    ]);
+    assert_eq!(pings, [400, 1000]);
+    assert_eq!(log, ["filler 1 wrote", "filler 2 wrote", "filler 3 wrote"]);
+}
+
+#[test]
+fn content_that_does_not_hold_its_place_and_does_not_fit_is_passed_over() {
+    // the second is not given to its source; the third goes where it would
+    // have, and the second in the next datagram
+    let (pings, log) = sent_with_fillers(&[
+        filler(1, 400, false, true),
+        filler(2, 900, false, true),
+        filler(3, 100, false, true),
+    ]);
+    assert_eq!(pings, [500, 900]);
+    assert_eq!(log, ["filler 1 wrote", "filler 3 wrote", "filler 2 wrote"]);
+}
+
+#[test]
+fn content_that_holds_its_place_and_writes_nothing_ends_the_datagram() {
+    let (pings, log) = sent_with_fillers(&[
+        filler(1, 400, true, true),
+        filler(2, 10, true, false),
+        filler(3, 100, true, true),
+    ]);
+    assert_eq!(pings, [400, 100]);
+    assert_eq!(
+        log,
+        ["filler 1 wrote", "filler 2 wrote nothing", "filler 3 wrote"]
+    );
+}
+
+#[test]
+fn content_that_does_not_hold_its_place_and_writes_nothing_is_passed_over() {
+    let (pings, log) = sent_with_fillers(&[
+        filler(1, 400, false, true),
+        filler(2, 10, false, false),
+        filler(3, 100, false, true),
+    ]);
+    assert_eq!(pings, [500]);
+    assert_eq!(
+        log,
+        ["filler 1 wrote", "filler 2 wrote nothing", "filler 3 wrote"]
+    );
 }
 
 /// The frames of the packet payload `payload`, read as the receiving side
@@ -6113,20 +6429,25 @@ fn a_datagram_the_link_gives_up_is_handed_back_as_lost_and_the_rest_is_sent() {
     let mut connection = with_two_datagrams_at_1005_ms(&first, []);
     common::plan_sends([common::SendOutcome::GiveUp, common::SendOutcome::GiveUp]);
     let log = run(&mut connection, 1005..=1006);
-    // the first given up, the second handed over again and given up too
-    assert_eq!(common::take_batch_sizes(), [2, 1]);
+    // the first given up; the second handed over again, with the ACK the
+    // loss owes again gathered into a datagram after it, and given up too;
+    // then the ACK, accepted
+    assert_eq!(common::take_batch_sizes(), [2, 2, 1]);
     let given_up = common::take_given_up();
     assert_eq!(given_up.len(), 2);
     assert!(short_header(&given_up[0]), "the 1-RTT ACK");
     assert_eq!(open_sent_initial(&given_up[1]).payload[0], 0x01, "the PING");
-    assert_eq!(common::take_sent(), []);
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(short_header(&sent[0].1), "the 1-RTT ACK again");
     // the PING left the bytes in flight, and was never accepted: only the
-    // packet sent at 6 ms is there
+    // packet sent at 6 ms is there; the ACK sent again counts nothing in
+    // flight
     let lines = lines_of(log, &["in flight"]);
     assert!(
         lines
             .last()
-            .is_some_and(|line| line.starts_with("in flight 1200, outstanding 2,")),
+            .is_some_and(|line| line.starts_with("in flight 1200, outstanding 3,")),
         "{lines:?}"
     );
 }
@@ -6211,6 +6532,7 @@ fn an_ack_frame_the_link_gives_up_at_once_is_planned_again() {
     reset();
     let first = link();
     let mut connection = connection!(Mine, AddressValidation::NotValidated, first.clone());
+    take_strategy_events();
     deliver(
         padded(
             &[],
@@ -6222,25 +6544,28 @@ fn an_ack_frame_the_link_gives_up_at_once_is_planned_again() {
     );
     common::plan_sends([common::SendOutcome::GiveUp]);
     let _ = run(&mut connection, 5..=6);
-    // written and given up in one lend: the ACK frame consumed its intent,
-    // and its loss owes the frame again
+    // written and given up in one lend: the ACK frame took the
+    // acknowledgment off what is due, and its loss owes the frame again,
+    // which the next datagram of the same lend gathers
     let given_up = common::take_given_up();
     assert_eq!(given_up.len(), 1);
     assert_eq!(open_sent_initial(&given_up[0]).payload[0], 0x02);
     assert_eq!(
-        strategy_events("core: publish"),
+        strategy_events("path 0: "),
         [
-            "core: publish AckIntent { space: Initial, shortest: 5 }",
-            "core: publish AckIntent { space: Initial, shortest: 5 }",
+            "path 0: content AckIntent { space: Initial, shortest: 5 }",
+            "path 0: gone AckIntent { space: Initial, shortest: 5 }",
+            "path 0: content AckIntent { space: Initial, shortest: 5 }",
+            "path 0: gone AckIntent { space: Initial, shortest: 5 }",
         ]
     );
     let sent = common::take_sent();
     assert_eq!(sent.len(), 1, "{sent:?}");
     let packet = open_sent_initial(&sent[0].1);
     assert_eq!(packet.number, 1);
-    // sent again at 6 ms, 1 ms after the packet 0 arrived: an ACK Delay of
-    // 1000 µs at the default exponent 3, 125
-    assert_eq!(packet.payload, [0x02, 0x00, 0x40, 0x7d, 0x00, 0x00]);
+    // sent again at 5 ms, the instant the packet 0 arrived: no ACK Delay
+    assert_eq!(sent[0].0, ms(5));
+    assert_eq!(packet.payload, [0x02, 0x00, 0x00, 0x00, 0x00]);
 }
 
 #[test]
@@ -6476,21 +6801,26 @@ fn a_datagram_given_up_owes_its_ack_again_and_keeps_its_record() {
     take_strategy_events();
     common::plan_sends([common::SendOutcome::GiveUp, common::SendOutcome::Accept(1)]);
     let _ = run(&mut connection, 1005..=1007);
-    // the 1-RTT ACK given up, the PING handed over alone and accepted; the
-    // ACK is owed again and goes in the next datagram
+    // the 1-RTT ACK given up; the ACK is owed again and gathered into a
+    // datagram after the PING, handed over with it; the PING accepted,
+    // then the ACK
     let given_up = common::take_given_up();
     assert_eq!(given_up.len(), 1);
     assert!(short_header(&given_up[0]));
-    assert_eq!(common::take_batch_sizes(), [2, 1, 1]);
+    assert_eq!(common::take_batch_sizes(), [2, 2, 1]);
     let sent = common::take_sent();
     assert_eq!(sent.len(), 2, "{sent:?}");
     assert_eq!(open_sent_initial(&sent[0].1).payload[0], 0x01, "the PING");
     assert!(short_header(&sent[1].1), "the 1-RTT ACK again");
     assert_eq!(
-        strategy_events("core: publish"),
+        strategy_events("path 0: "),
         [
-            "core: publish AckIntent { space: ApplicationData, shortest: 5 }",
-            "core: publish AckIntent { space: ApplicationData, shortest: 5 }",
+            "path 0: content AckIntent { space: ApplicationData, shortest: 5 }",
+            "path 0: content ProbePingIntent { space: Initial }",
+            "path 0: gone AckIntent { space: ApplicationData, shortest: 5 }",
+            "path 0: gone ProbePingIntent { space: Initial }",
+            "path 0: content AckIntent { space: ApplicationData, shortest: 5 }",
+            "path 0: gone AckIntent { space: ApplicationData, shortest: 5 }",
         ]
     );
     // the given-up packet 0 is kept as one whose send result is unknown,
@@ -6562,13 +6892,15 @@ fn a_probe_acknowledged_after_it_was_accepted_leaves_nothing_in_flight() {
 
 #[test]
 fn a_link_path_that_ends_while_the_link_holds_its_batch_hands_back_its_packets() {
-    use probe::PacketStep::TakeRecords;
+    use probe::PacketStep::{Inspect, TakeRecords};
     reset();
     CLOSE_AT.with(|c| c.set(Some(ms(1010))));
     let first = link();
     let mut connection = with_two_datagrams_at_1005_ms(
         &first,
         [
+            (ms(1007), Inspect),
+            (ms(1499), Inspect),
             (ms(1500), TakeRecords(PacketNumberSpaceKind::Initial)),
             (
                 ms(1501),
@@ -6586,19 +6918,16 @@ fn a_link_path_that_ends_while_the_link_holds_its_batch_hands_back_its_packets()
         "{log:?}"
     );
     // the packet the probe recorded at 6 ms among them
-    assert_eq!(lines_of(log, &["lost"]), ["lost Initial 1"]);
-    // the link path's end retires the connection ID only it used; the
-    // packets of both datagrams left the send journals with the link path,
-    // with those it sent before: the ACK frames of the Initial packet sent
-    // at 5 ms and of the 1-RTT packet in the batch are owed again
-    assert_eq!(
-        strategy_events("core: publish"),
-        [
-            "core: publish RetireConnectionIdIntent { sequence: 0 }",
-            "core: publish AckIntent { space: Initial, shortest: 5 }",
-            "core: publish AckIntent { space: ApplicationData, shortest: 5 }",
-        ]
-    );
+    assert_eq!(lines_of(log.clone(), &["lost"]), ["lost Initial 1"]);
+    // the packets of both datagrams left the send journals with the link
+    // path, with those it sent before: the ACK frame of the Initial packet
+    // sent at 6 ms is owed again, due now once the link path is gone. No
+    // link path is left to gather what is owed.
+    let inspected = lines_of(log, &["read"]);
+    assert_eq!(inspected.len(), 2, "{inspected:?}");
+    assert!(inspected[0].contains("due Some(NotDue)"), "{inspected:?}");
+    assert!(inspected[1].contains("due Some(Now)"), "{inspected:?}");
+    assert_eq!(strategy_events("path 0: content"), Vec::<String>::new());
     common::release_held_send();
     let log = run(&mut connection, 1500..=1600);
     assert_eq!(
@@ -6995,12 +7324,13 @@ fn settle<F: Future + Unpin>(
     take_log()
 }
 
-/// The events the strategy recorded since the last call that publish a
-/// resend of the close packet.
+/// The events the strategy recorded since the last call that give a
+/// planner new facts of its link path's sealed close packet: the datagrams
+/// received since it was sealed.
 fn resend_events() -> Vec<String> {
     strategy_events("path ")
         .into_iter()
-        .filter(|event| event.contains("publish Sealed") || event.contains("DatagramReceived"))
+        .filter(|event| event.contains(": close "))
         .collect()
 }
 
@@ -7142,7 +7472,7 @@ fn a_server_closing_before_it_knows_the_client_s_connection_id_seals_once_it_doe
     assert_eq!(initial.payload, [0x1c, 0x0c, 0x00, 0x00]);
     // the datagram that gave the connection ID came before the close packet
     // was sealed: it is not one the close packet answers
-    assert_eq!(resend_events(), ["path 0: publish Sealed"]);
+    assert_eq!(resend_events(), ["path 0: close 0"]);
     assert!(
         log.iter()
             .any(|line| line == "keys: Initial receive, Handshake none, 1-RTT none"),
@@ -7161,11 +7491,19 @@ fn a_closing_link_path_answers_the_first_second_fourth_and_eighth_datagram() {
     let sent = common::take_sent();
     assert_eq!(sent.len(), 2, "the ACK and the close packet: {sent:?}");
     let close = sent[1].1.clone();
+    assert_eq!(resend_events(), ["path 0: close 0"]);
     let mut answered = Vec::new();
     for datagram in 1..=9 {
         let at = 10 + datagram;
         deliver(client_initial(datagram), &first, ms(at));
         let _ = settle(&mut connection, at..=at);
+        // the planner is given the count of datagrams received since the
+        // close packet was sealed, and decides by it
+        assert_eq!(
+            resend_events(),
+            [format!("path 0: close {datagram}")],
+            "at {at} ms"
+        );
         let sent = common::take_sent();
         if !sent.is_empty() {
             // the close packet as it was sealed
@@ -7494,7 +7832,8 @@ fn a_close_asked_for_before_the_first_flight_is_received_is_taken_in_first() {
     assert_eq!(initial.dcid, CLIENT_SCID);
     assert_eq!(initial.number, 0, "nothing was sent before");
     assert_eq!(initial.payload, [0x1c, 0x0c, 0x00, 0x00]);
-    assert_eq!(resend_events(), ["path 0: publish Sealed"]);
+    // the first flight came before the close packet was sealed
+    assert_eq!(resend_events(), ["path 0: close 0"]);
 }
 
 /// The steps of a client's packet feeder: the server's connection ID

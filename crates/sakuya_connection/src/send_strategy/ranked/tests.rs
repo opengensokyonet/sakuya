@@ -358,7 +358,7 @@ fn an_item_dropped_without_being_supplied_leaves_the_plan_going_on() {
     let item = cursor.next().unwrap();
     assert!(item.holds_place(), "an ACK holds its place");
     assert!(item.last_in_packet());
-    drop(item);
+    // Not supplied: the item is not used again.
     assert!(cursor.next().is_none());
     let Some(PlannedPacket::OneRtt(mut cursor)) = plan.next_packet() else {
         panic!("then a 1-RTT packet")
