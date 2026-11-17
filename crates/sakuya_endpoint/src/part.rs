@@ -48,8 +48,8 @@ pub trait EndpointPart<T: v1::Choices, L>: LayerShare<T, L, layer::Connection> {
 }
 
 /// The DATAGRAM extension is configured with what it is given when the
-/// connection node is built: what it announces and how its queues are
-/// bounded.
+/// connection node is built: what it announces, how its queues are bounded
+/// and its policy on resumption.
 #[cfg(feature = "datagram")]
 impl<T, L> EndpointPart<T, L> for sakuya_connection::datagram::Part
 where
@@ -60,6 +60,7 @@ where
 {
     type Config = sakuya_connection::datagram::DatagramConnectionArgs<
         sakuya_connection::datagram::DatagramQueuesConfigOf<T>,
+        sakuya_connection::datagram::DatagramResumedParametersPolicyOf<T>,
     >;
 
     fn connection_args(config: Self::Config, _: &mut ConnectionFacts<T>) -> Self::Args {
@@ -67,12 +68,17 @@ where
     }
 }
 
-/// The reliable stream reset extension is configured with what it
-/// announces.
+/// The reliable stream reset extension is configured with what it is
+/// given when the connection node is built: what it announces and its
+/// policy on resumption.
 #[cfg(feature = "reset_stream_at")]
-impl<T: v1::Choices, L> EndpointPart<T, L> for sakuya_connection::reset_stream_at::Part {
-    type Config =
-        sakuya_connection::v1::parameters::PartSlots<sakuya_connection::reset_stream_at::Part>;
+impl<T, L> EndpointPart<T, L> for sakuya_connection::reset_stream_at::Part
+where
+    T: v1::Choices<Host: sakuya_connection::reset_stream_at::ResetStreamAtChoices>,
+{
+    type Config = sakuya_connection::reset_stream_at::ResetStreamAtConnectionArgs<
+        sakuya_connection::reset_stream_at::ResetStreamAtResumedParametersPolicyOf<T>,
+    >;
 
     fn connection_args(config: Self::Config, _: &mut ConnectionFacts<T>) -> Self::Args {
         config

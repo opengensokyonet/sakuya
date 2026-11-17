@@ -33,8 +33,13 @@
 //! completed handshake is kept in [`ConnectionExporter`] until the
 //! connection closes.
 //!
-//! This version neither sends nor receives 0-RTT: a server accepts no
-//! early data, and 0-RTT secrets an engine gives are dropped.
+//! A server receives 0-RTT: when its handshake admits early data, it
+//! installs the 0-RTT keys to receive with in the same lend as the
+//! Handshake keys, before it yields [`EstablishedLayerReady`], and
+//! otherwise refuses 0-RTT, which drops the 0-RTT packets that wait. Whether
+//! its transport parameters admit 0-RTT is decided as they are settled
+//! ([`ResumeLocalTransportParameters`]). A client does not send 0-RTT yet:
+//! the 0-RTT secrets an engine gives it are dropped.
 //!
 //! A step that fails writes its error into the record of why the
 //! connection closed, and the call ends. Once the record is written the
@@ -69,7 +74,9 @@ use sakuya_tls::{
     engine::{CryptoInput, CryptoLevel, CryptoOutput, HandshakeError},
     extension::OpaqueData,
     message::MessageLimits,
-    schedule::{Exporter, HandshakeTrafficSecrets, OneRttSendTrafficSecret},
+    schedule::{
+        Exporter, HandshakeTrafficSecrets, OneRttSendTrafficSecret, ZeroRttReceiveTrafficSecret,
+    },
     server::{
         engine::{
             FirstClientHello, Negotiated, ServerHandshakeCapability, ServerHandshakeCompleted,
@@ -117,10 +124,14 @@ use super::{
         PacketEvents,
     },
     handshake_done::HandshakeDoneSource,
-    keys::{DirectionKeys, HandshakeKeys, LevelKeys, OneRttKeys, PacketProtectionBackend},
+    keys::{
+        DirectionKeys, HandshakeKeys, LevelKeys, OneRttKeys, PacketProtectionBackend,
+        ZeroRttReceiving,
+    },
     parameters::{
-        LocalTransportParameters, PeerTransportParameters, SendLocalTransportParameters,
-        check_initial_source, check_server_destination, read_transport_parameters_error,
+        LocalTransportParameters, PeerTransportParameters, ResumeLocalTransportParameters,
+        SendLocalTransportParameters, check_initial_source, check_server_destination,
+        read_transport_parameters_error,
     },
     receive::v1_error,
     retry::ClientRetryPolicy,
@@ -299,6 +310,17 @@ pub trait ServerAdvancingCapability<E: ServerHandshakeSteps>:
     ) where
         Self: 'v;
 
+    /// Decide on 0-RTT, as the ServerHello admitted it: with `secret`,
+    /// install the 0-RTT keys to receive with, derived from it for `aead`
+    /// (RFC 9001 §4.1.4); without one, refuse 0-RTT, and the 0-RTT packets
+    /// that wait are dropped (§4.6.2).
+    fn install_zero_rtt_receive<'v>(
+        view: Pin<&mut Self::ReceiverView<'v>>,
+        aead: AeadAlgorithm,
+        secret: Option<ZeroRttReceiveTrafficSecret>,
+    ) where
+        Self: 'v;
+
     /// Install the 1-RTT keys to send with, derived from `secret` for
     /// `aead`.
     fn install_one_rtt_send<'v>(
@@ -403,16 +425,18 @@ pub async fn server_advancing<W, E>(
         ),
     };
     let (written, state) = step!(host, W::close, tls.write_server_hello(first, host).await);
-    // this version does not receive 0-RTT: a secret for it is dropped
     let ServerHelloWritten {
         aead,
         secrets,
         selected,
-        ..
+        zero_rtt,
     } = written;
+    // in one lend with the request for the established layer: the driver
+    // builds the layer before any call reads a 0-RTT packet
     host.with(|mut view| {
         W::hello_written(view.as_pin(), selected);
         W::install_handshake(view.as_pin(), aead, secrets);
+        W::install_zero_rtt_receive(view.as_pin(), aead, zero_rtt);
     });
     yield EstablishedLayerReady;
     let (send, state) = step!(host, W::close, E::write_server_finished(state, host).await);
@@ -714,18 +738,40 @@ fn keys_installed<X: ConnectionEvents<I>, I: Copy>(events: &mut X, at: I, level:
 
 /// The positions a server's advancing call takes by, besides those of the
 /// CRYPTO data: in the connection node, `Ilt` of this side's transport
-/// parameters of version 1, `Ils` of every part's, `Ipt` of the peer's, `Ifl` of the first local connection ID,
-/// `Iid` of the client's first Destination Connection IDs, `Iph` of the
-/// peer's handshake connection ID, `Ik` of the Handshake keys, `Io` of the
-/// 1-RTT keys, `Ib` of the backend, `Ic` of the confirmation, `Ihd` of the
+/// parameters of version 1, `Ils` of every part's, `Irs` of every part's
+/// with its policy on resumption, `Ipt` of the peer's, `Ifl` of the first
+/// local connection ID, `Iid` of the client's first Destination Connection
+/// IDs, `Iph` of the peer's handshake connection ID, `Ik` of the Handshake
+/// keys, `Io` of the 1-RTT keys, `Iz` of the 0-RTT keys, `Ib` of the
+/// backend, `Ic` of the confirmation, `Ihd` of the
 /// HANDSHAKE_DONE source, `Ie` of the exporter and `Irc` of the record of
 /// why the connection closed; `Ja` of
 /// `initial_source_connection_id` among the slots of the peer's transport
 /// parameters, and `Ia` of what the call is started from in the facts of
 /// the connection node.
-type ServerPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ic, Ihd, Ie, Irc, Ih, Ja, Ia, Iev> = (
-    (Ilt, Ils, Ipt, Ifl, Iid, Iph),
-    (Ik, Io, Ib, Ic),
+type ServerPositions<
+    Ilt,
+    Ils,
+    Irs,
+    Ipt,
+    Ifl,
+    Iid,
+    Iph,
+    Ik,
+    Io,
+    Iz,
+    Ib,
+    Ic,
+    Ihd,
+    Ie,
+    Irc,
+    Ih,
+    Ja,
+    Ia,
+    Iev,
+> = (
+    (Ilt, Ils, Irs, Ipt, Ifl, Iid, Iph),
+    (Ik, Io, Iz, Ib, Ic),
     (Ihd, Ie, Irc, Ih),
     (Ja, Ia, Iev),
 );
@@ -736,7 +782,14 @@ type ServerPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ic, Ihd, Ie, Irc,
 /// The client's `initial_source_connection_id` must state the Source
 /// Connection ID of its first Initial packet that opened (RFC 9000 §7.3);
 /// a parameter only a server may send is a failure of reading. Once they
-/// pass, the client's parameters are known. This version accepts no 0-RTT.
+/// pass, the client's parameters are known.
+///
+/// When the client resumes with a ticket, every part settles its own
+/// parameters against those the ticket remembers, by its policy and the
+/// rules 0-RTT relies on ([`ResumeLocalTransportParameters`]): the
+/// connection accepts 0-RTT when every part does (RFC 9000 §7.4.1). Version
+/// 1 then fills its connection IDs into what it settled on, and every part's
+/// parameters are sent.
 impl<
     T,
     L,
@@ -748,12 +801,14 @@ impl<
     Iv,
     Ilt,
     Ils,
+    Irs,
     Ipt,
     Ifl,
     Iid,
     Iph,
     Ik,
     Io,
+    Iz,
     Ib,
     Ic,
     Ihd,
@@ -774,12 +829,14 @@ impl<
             ServerPositions<
                 Ilt,
                 Ils,
+                Irs,
                 Ipt,
                 Ifl,
                 Iid,
                 Iph,
                 Ik,
                 Io,
+                Iz,
                 Ib,
                 Ic,
                 Ihd,
@@ -800,7 +857,8 @@ where
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
     EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>,
-    for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>,
+    for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>
+        + ResumeLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Irs>,
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>
         + GetAt<FirstLocalConnectionId, Ifl>
@@ -813,8 +871,8 @@ where
     fn negotiate<'v>(
         view: Pin<&mut Self::ReceiverView<'v>>,
         peer: &[u8],
-        _: &SelectedTarget<Target>,
-        _: Option<&TicketState<Target>>,
+        selected: &SelectedTarget<Target>,
+        resumed: Option<&TicketState<Target>>,
     ) -> Result<Negotiated, Self::Error>
     where
         Self: 'v,
@@ -831,19 +889,29 @@ where
         lineage
             .get_mut::<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>()
             .set_known(slots);
+        // each part settles what it configured against what the ticket
+        // remembers before anything is sent; without a ticket nothing is
+        // decided, and 0-RTT is not looked at
+        let early_data = resumed.is_some_and(|resumed| {
+            <L as ResumeLocalTransportParameters<_, Irs>>::resume_local(
+                lineage,
+                &resumed.resumable.transport_parameters,
+                selected.application_protocol.as_ref(),
+            )
+        });
         let first = *lineage.get::<FirstLocalConnectionId, Ifl>();
         let destination = *lineage.get::<InitialDestinationConnectionIds, Iid>();
         let local = lineage.get_mut::<LocalTransportParameters<TransportParameterSlots>, Ilt>();
-        send_local(local, |configured| {
-            server_parameters(configured, first, destination)
+        send_local(local, |settled| {
+            server_parameters(settled, first, destination)
         });
-        let local = L::send_local(lineage);
+        let local = <L as SendLocalTransportParameters<_, Ils>>::send_local(lineage);
         give_events::<T, L, B, Iev>(lineage, others, |events, now| {
             events.parameters_set(now, EventInitiator::Local, &local);
         });
         Ok(Negotiated {
             local: encode::<L>(local, Role::Server),
-            early_data: false,
+            early_data,
         })
     }
 }
@@ -858,12 +926,14 @@ impl<
     Iv,
     Ilt,
     Ils,
+    Irs,
     Ipt,
     Ifl,
     Iid,
     Iph,
     Ik,
     Io,
+    Iz,
     Ib,
     Ic,
     Ihd,
@@ -884,12 +954,14 @@ impl<
             ServerPositions<
                 Ilt,
                 Ils,
+                Irs,
                 Ipt,
                 Ifl,
                 Iid,
                 Iph,
                 Ik,
                 Io,
+                Iz,
                 Ib,
                 Ic,
                 Ihd,
@@ -915,7 +987,8 @@ where
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     SendTypes<T, L>: HostSendStrategyTypes,
-    for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>,
+    for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>
+        + ResumeLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Irs>,
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<CryptoReceiveBufferOf<T>>, Icr>
         + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>
         + GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
@@ -926,6 +999,7 @@ where
         + GetAt<PeerHandshakeConnectionId, Iph>
         + GetAt<HandshakeKeys<T::Crypto>, Ik>
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
+        + GetAt<ZeroRttReceiving<T::Crypto, InstantOf<T>>, Iz>
         + GetAt<PacketProtectionBackend<T::Crypto>, Ib>
         + GetAt<HandshakeConfirmation, Ic>
         + GetAt<HandshakeDoneSource, Ihd>
@@ -963,6 +1037,38 @@ where
         give_events::<T, L, B, Iev>(lineage, others, |events, now| {
             keys_installed(events, now, EncryptionLevel::Handshake);
         });
+    }
+
+    fn install_zero_rtt_receive<'v>(
+        view: Pin<&mut Self::ReceiverView<'v>>,
+        aead: AeadAlgorithm,
+        secret: Option<ZeroRttReceiveTrafficSecret>,
+    ) where
+        Self: 'v,
+    {
+        let NodeLoan { lineage, others } = view.get_mut();
+        let Some(secret) = secret else {
+            lineage
+                .get_mut::<ZeroRttReceiving<T::Crypto, InstantOf<T>>, Iz>()
+                .refuse();
+            return;
+        };
+        let backend = lineage
+            .get::<PacketProtectionBackend<T::Crypto>, Ib>()
+            .0
+            .clone();
+        let keys = lineage.get_mut::<ZeroRttReceiving<T::Crypto, InstantOf<T>>, Iz>();
+        keys.open(DirectionKeys::derive(&backend, aead, &secret.0));
+        // a connection that closed already stays refused
+        if matches!(keys, ZeroRttReceiving::Open(_)) {
+            give_events::<T, L, B, Iev>(lineage, others, |events, now| {
+                let key = KeyChange {
+                    level: EncryptionLevel::ZeroRtt,
+                    sender: Role::Client,
+                };
+                events.key_updated(now, key);
+            });
+        }
     }
 
     fn install_one_rtt_send<'v>(
@@ -1080,12 +1186,14 @@ impl<
     Iv,
     Ilt,
     Ils,
+    Irs,
     Ipt,
     Ifl,
     Iid,
     Iph,
     Ik,
     Io,
+    Iz,
     Ib,
     Ic,
     Ihd,
@@ -1105,12 +1213,14 @@ impl<
             ServerPositions<
                 Ilt,
                 Ils,
+                Irs,
                 Ipt,
                 Ifl,
                 Iid,
                 Iph,
                 Ik,
                 Io,
+                Iz,
                 Ib,
                 Ic,
                 Ihd,
@@ -1135,7 +1245,8 @@ where
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, Ia>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     SendTypes<T, L>: HostSendStrategyTypes,
-    for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>,
+    for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>
+        + ResumeLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Irs>,
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CryptoReceiver<CryptoReceiveBufferOf<T>>, Icr>
         + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>
         + GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
@@ -1146,6 +1257,7 @@ where
         + GetAt<PeerHandshakeConnectionId, Iph>
         + GetAt<HandshakeKeys<T::Crypto>, Ik>
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
+        + GetAt<ZeroRttReceiving<T::Crypto, InstantOf<T>>, Iz>
         + GetAt<PacketProtectionBackend<T::Crypto>, Ib>
         + GetAt<HandshakeConfirmation, Ic>
         + GetAt<HandshakeDoneSource, Ihd>
@@ -1157,12 +1269,14 @@ where
         ServerPositions<
             Ilt,
             Ils,
+            Irs,
             Ipt,
             Ifl,
             Iid,
             Iph,
             Ik,
             Io,
+            Iz,
             Ib,
             Ic,
             Ihd,
@@ -1186,12 +1300,14 @@ where
                 ServerPositions<
                     Ilt,
                     Ils,
+                    Irs,
                     Ipt,
                     Ifl,
                     Iid,
                     Iph,
                     Ik,
                     Io,
+                    Iz,
                     Ib,
                     Ic,
                     Ihd,

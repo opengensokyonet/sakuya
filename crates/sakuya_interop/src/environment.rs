@@ -34,6 +34,9 @@ pub enum ServerTestCase {
     /// written, with a reset at a reliable size of half the file
     /// ([`RESET_AT_CODE`]).
     ResetStreamAt,
+    /// `zerortt`: as `resumption`, with session tickets that allow 0-RTT,
+    /// and accept the 0-RTT a client resumes with.
+    ZeroRtt,
 }
 
 /// The application error code the answers of `resetstreamat` are reset
@@ -48,6 +51,7 @@ impl ServerTestCase {
             "handshake" | "transfer" | "multiconnect" | "resumption" => Some(Self::Serve),
             "chacha20" => Some(Self::ChaCha20),
             "retry" => Some(Self::Retry),
+            "zerortt" => Some(Self::ZeroRtt),
             #[cfg(feature = "extensions")]
             "datagram" => Some(Self::Datagram),
             #[cfg(feature = "extensions")]
@@ -162,7 +166,6 @@ mod tests {
 
     #[test]
     fn unknown_test_cases_are_not_supported() {
-        assert_eq!(ServerTestCase::from_name("zerortt"), None);
         assert_eq!(ServerTestCase::from_name("x7Kq2"), None);
         assert_eq!(ClientTestCase::from_name("zerortt"), None);
         assert_eq!(ClientTestCase::from_name(""), None);
@@ -185,6 +188,10 @@ mod tests {
         assert_eq!(
             ClientTestCase::from_name("resumption"),
             Some(ClientTestCase::Resumption)
+        );
+        assert_eq!(
+            ServerTestCase::from_name("zerortt"),
+            Some(ServerTestCase::ZeroRtt)
         );
     }
 

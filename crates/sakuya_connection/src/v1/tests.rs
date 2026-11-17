@@ -16,7 +16,7 @@ use super::{
     idle::IdleTimeout,
     keys::{
         DirectionKeys, HandshakeKeys, InitialKeys, KeyGeneration, LevelKeys, OneRttKeys,
-        ZeroRttReceiving, ZeroRttSending,
+        ZeroRttReceiveKeys, ZeroRttReceiving, ZeroRttSending,
     },
     parameters::{LocalTransportParameters, PeerTransportParameters},
 };
@@ -179,15 +179,56 @@ fn a_promotion_after_this_side_initiated_keeps_the_send_generation() {
 
 #[test]
 fn zero_rtt_receive_keys_retire_once() {
-    let mut zero_rtt = ZeroRttReceiving::<RingBackend, u64>::None;
-    assert_eq!(zero_rtt.deadline(), None);
+    let mut zero_rtt = ZeroRttReceiving::<RingBackend, u64>::NotYet;
+    assert!(matches!(
+        zero_rtt.receive_keys(),
+        ZeroRttReceiveKeys::NotYet
+    ));
     zero_rtt.open(direction_keys());
-    zero_rtt.retire_at(30);
-    zero_rtt.retire_at(50);
+    assert!(matches!(
+        zero_rtt.receive_keys(),
+        ZeroRttReceiveKeys::Ready(_)
+    ));
+    assert!(!zero_rtt.awaits_deadline() && zero_rtt.deadline().is_none());
+    // a deadline is set only once the keys retire
+    zero_rtt.set_deadline(10);
+    assert_eq!(zero_rtt.deadline(), None);
+    zero_rtt.retire();
+    assert!(zero_rtt.awaits_deadline() && zero_rtt.deadline().is_none());
+    assert!(matches!(
+        zero_rtt.receive_keys(),
+        ZeroRttReceiveKeys::Ready(_)
+    ));
+    zero_rtt.set_deadline(30);
+    zero_rtt.set_deadline(50);
+    zero_rtt.retire();
     assert_eq!(zero_rtt.deadline(), Some(30));
-    assert!(zero_rtt.receive().is_some());
+    assert!(!zero_rtt.awaits_deadline());
+    assert!(matches!(
+        zero_rtt.receive_keys(),
+        ZeroRttReceiveKeys::Ready(_)
+    ));
     zero_rtt.discard();
-    assert!(zero_rtt.receive().is_none() && zero_rtt.deadline().is_none());
+    assert!(matches!(zero_rtt.receive_keys(), ZeroRttReceiveKeys::Gone));
+    assert!(zero_rtt.deadline().is_none());
+}
+
+#[test]
+fn zero_rtt_receive_keys_refused_stay_refused() {
+    let mut zero_rtt = ZeroRttReceiving::<RingBackend, u64>::NotYet;
+    zero_rtt.refuse();
+    assert!(matches!(zero_rtt, ZeroRttReceiving::None));
+    assert!(matches!(zero_rtt.receive_keys(), ZeroRttReceiveKeys::Gone));
+    // a connection that closed before it decided does not open later
+    zero_rtt.open(direction_keys());
+    assert!(matches!(zero_rtt, ZeroRttReceiving::None));
+    zero_rtt.retire();
+    assert!(matches!(zero_rtt, ZeroRttReceiving::None));
+    // refusing keys that are open leaves them open
+    let mut zero_rtt = ZeroRttReceiving::<RingBackend, u64>::NotYet;
+    zero_rtt.open(direction_keys());
+    zero_rtt.refuse();
+    assert!(matches!(zero_rtt, ZeroRttReceiving::Open(_)));
 }
 
 #[test]

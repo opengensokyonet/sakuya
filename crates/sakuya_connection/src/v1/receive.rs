@@ -14,12 +14,14 @@
 //!    from the peer opened, either side drops a long header packet from
 //!    another Source Connection ID: a client must (RFC 9000 §7.2), and a
 //!    server's comes from another connection attempt.
-//! 2. The receive keys of the packet's level. A Handshake packet before the
+//! 2. The receive keys of the packet's level. A 0-RTT packet before a
+//!    server decided whether it accepts 0-RTT, a Handshake packet before the
 //!    Handshake keys, or a 1-RTT packet before the 1-RTT receive keys, is
 //!    handed back to wait, unless the link path is closing: a closing link
 //!    path only has the receive keys it had, and no more come. A packet of
-//!    a level whose keys are gone, or of 0-RTT, which the connection does
-//!    not read yet, is dropped.
+//!    a level whose keys are gone is dropped, as is every 0-RTT packet a
+//!    client receives (RFC 9001 §5.6) and every one a server receives once
+//!    it rejected 0-RTT (§4.6.2).
 //! 3. Header protection and the AEAD are removed in place, with the packet
 //!    number decoded against the largest one processed in its space; a
 //!    packet that does not open is dropped (RFC 9001 §5.4.2, §5.5), and
@@ -29,7 +31,9 @@
 //!    packet number select, as [`key_phase`](super::key_phase) says. The
 //!    first Initial packet a server opens tells the logical path's
 //!    destination connection ID strategy the client's Source Connection
-//!    ID, which the server sends with (RFC 9000 §7.2).
+//!    ID, which the server sends with (RFC 9000 §7.2). The first 1-RTT
+//!    packet a server opens while it reads 0-RTT makes its 0-RTT keys
+//!    retire (RFC 9001 §4.9.3).
 //! 4. Reserved bits set once both layers are removed end the connection
 //!    (RFC 9000 §17.2, §17.3.1); a packet number already processed is
 //!    dropped (§12.3). A 1-RTT packet that is not dropped notes its number
@@ -88,7 +92,7 @@ use sakuya_wire::{
 };
 
 use super::{
-    Choices, EventsOf, Side,
+    Choices, EventsOf, OwnZeroRttKeysOf, Side,
     aead_usage::AeadUsage,
     connection_ids::{ConnectionIdsOf, PeerHandshakeConnectionId, ResetTokenRegistrarOf},
     dispatch::permitted,
@@ -97,7 +101,10 @@ use super::{
     idle::IdleTimeout,
     key_phase::KeyPhaseNumbers,
     key_update::check_peer_update,
-    keys::{DirectionKeys, HandshakeKeys, InitialKeys, OneRttKeys, OneRttReceiveKeys},
+    keys::{
+        DirectionKeys, HandshakeKeys, InitialKeys, OneRttKeys, OneRttReceiveKeys,
+        ZeroRttReceiveKeys,
+    },
     spaces::AckObligationsOf,
     streams::resets::StreamResetsOf,
 };
@@ -231,8 +238,8 @@ pub enum DropReason {
         scid: ConnectionId,
     },
     /// The packet's level has no keys to read it with, and none are to come:
-    /// they were discarded, the link path is closing, or, for 0-RTT, the
-    /// connection does not read the level.
+    /// they were discarded, the link path is closing, or, for 0-RTT, this
+    /// side is a client or rejected 0-RTT.
     NoReceiveKeys {
         /// The level of the packet.
         level: EncryptionLevel,
@@ -263,8 +270,8 @@ pub enum DropReason {
 /// Receive one packet on the logical path that `lineage` and `others` are
 /// the lend of; the steps are those of the [module documentation](self).
 ///
-/// The positions are found from the composition: `Ii`, `Ih`, `Io` of the
-/// keys of the three levels, `Ij` of the receive journals, `Im` of their
+/// The positions are found from the composition: `Ii`, `Ih`, `Io`, `Iz` of
+/// the keys of the four levels, `Ij` of the receive journals, `Im` of their
 /// maximum number of ACK ranges, `Ia` of the ACK obligations, `It` of the
 /// idle timeout, `Iu` of the AEAD usage and `Ikp` of the key phase numbers,
 /// among the components of the logical path's lineage; `Ir` of the role
@@ -289,6 +296,7 @@ pub fn receive_packet<
     Ii,
     Ih,
     Io,
+    Iz,
     Ij,
     Im,
     Ia,
@@ -317,6 +325,7 @@ where
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<InitialKeys<T::Crypto>, Ii>
         + GetAt<HandshakeKeys<T::Crypto>, Ih>
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
+        + GetAt<OwnZeroRttKeysOf<T>, Iz>
         + GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
         + GetAt<MaxAckRanges, Im>
         + GetAt<AckObligationsOf<T>, Ia>
@@ -352,7 +361,7 @@ where
     let space = space_of(level);
     let (packet, arrival) = packet.into_parts();
     let (opened, bytes, one_rtt, initial_scid, destination) = {
-        let keys = match receive_keys::<T, L, Ii, Ih, Io>(lineage, level) {
+        let keys = match receive_keys::<T, L, Ii, Ih, Io, Iz>(lineage, level) {
             LevelReceiveKeys::Ready(keys) => keys,
             // a closing link path gets no more keys than it has
             LevelReceiveKeys::NotYet if closing => {
@@ -426,6 +435,13 @@ where
             }
         }
     };
+    // the first 1-RTT packet a server opens while it reads 0-RTT makes the
+    // 0-RTT keys retire (RFC 9001 §4.9.3); taken only to change them
+    if one_rtt.is_some()
+        && <T::Side as Side>::zero_rtt_awaits_retirement(lineage.get::<OwnZeroRttKeysOf<T>, Iz>())
+    {
+        <T::Side as Side>::retire_zero_rtt(lineage.get_mut::<OwnZeroRttKeysOf<T>, Iz>());
+    }
     // the first Initial packet that opens sets the connection ID the peer
     // chose, which this side sends with (RFC 9000 §7.2)
     if let Some(scid) = initial_scid
@@ -735,8 +751,10 @@ pub(super) enum ReceiveKeys<'k, B: CryptoBackend, I> {
 ///
 /// A server's 1-RTT level that has only its sending half has not come for
 /// receiving: a 1-RTT packet is not read before the handshake completes
-/// (RFC 9001 §5.7).
-pub(super) fn receive_keys<'k, T, L, Ii, Ih, Io>(
+/// (RFC 9001 §5.7). The 0-RTT keys are the side's
+/// ([`Side::zero_rtt_receive_keys`]): a server's are not decided before
+/// its ServerHello is written, a client never has any.
+pub(super) fn receive_keys<'k, T, L, Ii, Ih, Io, Iz>(
     lineage: &'k LineageOf<'_, T, L, LogicalPath>,
     level: EncryptionLevel,
 ) -> LevelReceiveKeys<ReceiveKeys<'k, T::Crypto, InstantOf<T>>>
@@ -745,7 +763,8 @@ where
     L: LineagePartList<T>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<InitialKeys<T::Crypto>, Ii>
         + GetAt<HandshakeKeys<T::Crypto>, Ih>
-        + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>,
+        + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
+        + GetAt<OwnZeroRttKeysOf<T>, Iz>,
 {
     let level_keys = |keys: Option<_>| {
         keys.map_or(LevelReceiveKeys::Gone, |keys| {
@@ -756,9 +775,16 @@ where
         EncryptionLevel::Initial => {
             level_keys(lineage.get::<InitialKeys<T::Crypto>, Ii>().receive())
         }
-        // the connection reads no 0-RTT yet; a server may drop it (RFC 9001
-        // §4.6.1)
-        EncryptionLevel::ZeroRtt => LevelReceiveKeys::Gone,
+        EncryptionLevel::ZeroRtt => {
+            match <T::Side as Side>::zero_rtt_receive_keys(lineage.get::<OwnZeroRttKeysOf<T>, Iz>())
+            {
+                ZeroRttReceiveKeys::NotYet => LevelReceiveKeys::NotYet,
+                ZeroRttReceiveKeys::Ready(keys) => {
+                    LevelReceiveKeys::Ready(ReceiveKeys::Level(keys))
+                }
+                ZeroRttReceiveKeys::Gone => LevelReceiveKeys::Gone,
+            }
+        }
         EncryptionLevel::Handshake => match lineage.get::<HandshakeKeys<T::Crypto>, Ih>() {
             HandshakeKeys::NotYet => LevelReceiveKeys::NotYet,
             keys => level_keys(keys.receive()),

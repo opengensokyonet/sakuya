@@ -729,72 +729,129 @@ impl<B: CryptoBackend, I: Copy> OneRttKeys<B, I> {
     }
 }
 
+/// The 0-RTT keys a server reads with, as far as there are any.
+pub enum ZeroRttReceiveKeys<'k, B: CryptoBackend> {
+    /// Whether 0-RTT is accepted is not decided yet: a 0-RTT packet waits.
+    NotYet,
+    /// The keys to read a 0-RTT packet with.
+    Ready(&'k DirectionKeys<B>),
+    /// None are to come: 0-RTT was not accepted, the keys were dropped, or
+    /// this side is a client, which drops every 0-RTT packet (RFC 9001
+    /// §5.6).
+    Gone,
+}
+
+impl<B: CryptoBackend> fmt::Debug for ZeroRttReceiveKeys<'_, B> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::NotYet => "NotYet",
+            Self::Ready(_) => "Ready",
+            Self::Gone => "Gone",
+        })
+    }
+}
+
 /// A server's keys to read 0-RTT packets.
+///
+/// Whether 0-RTT is accepted is decided when the ServerHello is written;
+/// until then a 0-RTT packet waits (RFC 9001 §4.1.4). Once a 1-RTT packet
+/// has arrived the keys retire: 0-RTT packets that were reordered are still
+/// read for a while, then the keys are dropped (§4.9.3).
 ///
 /// `I` is the instant of the connection's clock.
 pub enum ZeroRttReceiving<B: CryptoBackend, I> {
+    /// Not decided yet: the connection is made, and the ServerHello is not
+    /// written.
+    NotYet,
+    /// 0-RTT was accepted and its packets are read.
+    Open(DirectionKeys<B>),
+    /// A 1-RTT packet has arrived: 0-RTT packets are still read until the
+    /// instant, `None` while it is not set yet, then the keys are dropped
+    /// (RFC 9001 §4.9.3).
+    Retiring(DirectionKeys<B>, Option<I>),
     /// No 0-RTT packets are read: the client offered none, the server
     /// rejected it, or the keys are gone.
     None,
-    /// 0-RTT was accepted and its packets are read.
-    Open(DirectionKeys<B>),
-    /// A 1-RTT packet has arrived: 0-RTT packets that were reordered are
-    /// still read until the instant, then the keys are dropped (RFC 9001
-    /// §4.9.3).
-    Retiring(DirectionKeys<B>, I),
 }
 
 impl<B: CryptoBackend, I> fmt::Debug for ZeroRttReceiving<B, I> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::None => "None",
+            Self::NotYet => "NotYet",
             Self::Open(_) => "Open",
             Self::Retiring(..) => "Retiring",
+            Self::None => "None",
         })
     }
 }
 
 impl<B: CryptoBackend, I: Copy + Ord> ZeroRttReceiving<B, I> {
-    /// The keys to read a 0-RTT packet with, while there are any.
-    pub fn receive(&self) -> Option<&DirectionKeys<B>> {
+    /// The keys to read a 0-RTT packet with: not decided yet before the
+    /// ServerHello is written, then the keys while they are kept.
+    pub fn receive_keys(&self) -> ZeroRttReceiveKeys<'_, B> {
         match self {
-            Self::Open(keys) | Self::Retiring(keys, _) => Some(keys),
-            Self::None => None,
+            Self::NotYet => ZeroRttReceiveKeys::NotYet,
+            Self::Open(keys) | Self::Retiring(keys, _) => ZeroRttReceiveKeys::Ready(keys),
+            Self::None => ZeroRttReceiveKeys::Gone,
         }
     }
 
-    /// Open the level with the keys of an accepted 0-RTT.
+    /// 0-RTT is accepted: open the level with its keys.
     ///
-    /// It must not have been open before.
+    /// It must not have been decided before. A level refused already, as
+    /// when the connection closed before the ServerHello was written, stays
+    /// refused.
     pub fn open(&mut self, keys: DirectionKeys<B>) {
-        debug_assert!(
-            matches!(self, Self::None),
-            "opening 0-RTT keys that are {self:?}"
-        );
-        *self = Self::Open(keys);
+        match self {
+            Self::NotYet => *self = Self::Open(keys),
+            Self::None => {}
+            Self::Open(_) | Self::Retiring(..) => {
+                debug_assert!(false, "opening 0-RTT keys that are {self:?}");
+            }
+        }
     }
 
-    /// A 1-RTT packet has arrived: keep the keys until `until`, three
-    /// probe timeouts from now by RFC 9001 §4.9.3. Keys that already retire
-    /// keep their instant.
-    pub fn retire_at(&mut self, until: I) {
+    /// 0-RTT is not accepted: no 0-RTT packet is read, and those that wait
+    /// are dropped (RFC 9001 §4.6.2). A level decided already stays as it
+    /// is.
+    pub fn refuse(&mut self) {
+        if let Self::NotYet = self {
+            *self = Self::None;
+        }
+    }
+
+    /// A 1-RTT packet has arrived: the keys retire, until an instant still
+    /// to be set (RFC 9001 §4.9.3). Keys that are not open stay as they are.
+    pub fn retire(&mut self) {
         if let Self::Open(_) = self {
             let Self::Open(keys) = core::mem::replace(self, Self::None) else {
                 unreachable!()
             };
-            *self = Self::Retiring(keys, until);
+            *self = Self::Retiring(keys, None);
         }
     }
 
-    /// The instant the keys are dropped, while they retire.
+    /// Whether the keys retire without an instant to drop them.
+    pub fn awaits_deadline(&self) -> bool {
+        matches!(self, Self::Retiring(_, None))
+    }
+
+    /// Drop the retiring keys at `at`; keys that have an instant keep it.
+    pub fn set_deadline(&mut self, at: I) {
+        if let Self::Retiring(_, deadline @ None) = self {
+            *deadline = Some(at);
+        }
+    }
+
+    /// The instant the keys are dropped, once it is set.
     pub fn deadline(&self) -> Option<I> {
         match self {
-            Self::Retiring(_, until) => Some(*until),
-            Self::None | Self::Open(_) => None,
+            Self::Retiring(_, deadline) => *deadline,
+            Self::NotYet | Self::Open(_) | Self::None => None,
         }
     }
 
-    /// Drop the keys.
+    /// Drop the keys; no 0-RTT packet is read any more.
     pub fn discard(&mut self) {
         *self = Self::None;
     }

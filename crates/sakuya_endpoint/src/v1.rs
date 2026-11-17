@@ -2,7 +2,7 @@
 
 use core::{fmt, num::NonZeroUsize};
 
-use sakuya_connection::v1::{EventsConfigOf, ImmediateClosePolicyOf};
+use sakuya_connection::v1::{EventsConfigOf, ImmediateClosePolicyOf, ResumedParametersPolicyOf};
 use sakuya_connection::{
     layer,
     share::{LayerShare, LogicalPathKeys},
@@ -63,6 +63,9 @@ pub struct ConnectionConfig<T: connection::Choices, L: LogicalPathKeys> {
     /// What adjusts the close the connection sends at each encryption
     /// level.
     pub immediate_close_policy: ImmediateClosePolicyOf<T>,
+    /// What decides how the transport parameters of version 1 go when a
+    /// server resumes a connection; a client does not use it.
+    pub resumed_parameters_policy: ResumedParametersPolicyOf<T>,
     /// What the receiver of the connection's events is made from; the
     /// default receiver records nothing.
     pub events: EventsConfigOf<T, L>,
@@ -86,6 +89,7 @@ where
             destination_connection_ids: self.destination_connection_ids.clone(),
             max_datagrams_per_send: self.max_datagrams_per_send,
             immediate_close_policy: self.immediate_close_policy.clone(),
+            resumed_parameters_policy: self.resumed_parameters_policy.clone(),
             events: self.events.clone(),
         }
     }
@@ -104,7 +108,8 @@ where
 ///   16 inputs held until their keys come, and 16 datagrams handed to a
 ///   link at once.
 /// - The recovery factory's, the destination connection ID strategy's, the
-///   close policy's and the event receiver's own defaults.
+///   close policy's, the policy on resumption's and the event receiver's
+///   own defaults.
 impl<T, L> Default for ConnectionConfig<T, L>
 where
     T: connection::Choices,
@@ -112,6 +117,7 @@ where
     RecoveryConfigOf<T, L>: Default,
     DestinationConnectionIdConfigOf<T>: Default,
     ImmediateClosePolicyOf<T>: Default,
+    ResumedParametersPolicyOf<T>: Default,
 {
     fn default() -> Self {
         Self {
@@ -124,6 +130,7 @@ where
             destination_connection_ids: DestinationConnectionIdConfigOf::<T>::default(),
             max_datagrams_per_send: SIXTEEN,
             immediate_close_policy: ImmediateClosePolicyOf::<T>::default(),
+            resumed_parameters_policy: ResumedParametersPolicyOf::<T>::default(),
             events: EventsConfigOf::<T, L>::default(),
         }
     }
@@ -208,6 +215,7 @@ where
             local_connection_id_issuer: core.local_connection_id_issuer,
             max_datagrams_per_send: config.max_datagrams_per_send,
             immediate_close_policy: config.immediate_close_policy,
+            resumed_parameters_policy: config.resumed_parameters_policy,
             close_request: core.close_request,
             stream_set: Default::default(),
             connection_handle: Default::default(),

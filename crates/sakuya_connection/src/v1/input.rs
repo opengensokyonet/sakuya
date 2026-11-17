@@ -116,7 +116,8 @@ use sakuya_wire::{
 };
 
 use super::{
-    Choices, CloseCauseOf, EventsOf, HostSendStrategyTypes, LinkPathRoleReads, Side,
+    Choices, CloseCauseOf, EventsOf, HostSendStrategyTypes, LinkPathRoleReads, OwnZeroRttKeysOf,
+    Side,
     aead_usage::AeadUsage,
     amplification::{AddressValidation, AntiAmplification},
     close::{CloseReasonRecord, LocalCloseCause},
@@ -214,8 +215,9 @@ impl<Lk: Link, H: UnclaimedHandoff<DatagramOf<Lk>>> LogicalPathDatagramReceiver<
 #[allow(clippy::large_enum_variant)]
 pub enum HeldInput<Lk: Link, H: UnclaimedHandoff<DatagramOf<Lk>>> {
     /// A packet cut from a datagram this logical path took, whose level has
-    /// no receive keys yet: a Handshake packet before the Handshake keys, a
-    /// 1-RTT packet before the 1-RTT receive keys.
+    /// no receive keys yet: a 0-RTT packet before a server decided on
+    /// 0-RTT, a Handshake packet before the Handshake keys, a 1-RTT packet
+    /// before the 1-RTT receive keys.
     Packet(ReceivedPacket<Lk::Payload, Lk>),
     /// A competing candidate whose first packet is a 1-RTT packet, which
     /// waits for the 1-RTT receive keys to be judged.
@@ -246,17 +248,18 @@ struct ReceivableLevels {
 
 impl ReceivableLevels {
     /// The levels as the keys in `lineage` stand now.
-    fn of<T, L, Ii, Ih, Io>(lineage: &LineageOf<'_, T, L, LogicalPath>) -> Self
+    fn of<T, L, Ii, Ih, Io, Iz>(lineage: &LineageOf<'_, T, L, LogicalPath>) -> Self
     where
         T: Choices,
         L: LineagePartList<T>,
         for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<InitialKeys<T::Crypto>, Ii>
             + GetAt<HandshakeKeys<T::Crypto>, Ih>
-            + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>,
+            + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
+            + GetAt<OwnZeroRttKeysOf<T>, Iz>,
     {
         let receivable = |level| {
             !matches!(
-                receive_keys::<T, L, Ii, Ih, Io>(lineage, level),
+                receive_keys::<T, L, Ii, Ih, Io, Iz>(lineage, level),
                 LevelReceiveKeys::NotYet
             )
         };
@@ -503,6 +506,7 @@ type Positions<
     Ii,
     Ih,
     Io,
+    Iz,
     Ij,
     Im,
     Ia,
@@ -537,7 +541,7 @@ type Positions<
     Ls,
 > = (
     (Ip, Ic),
-    (Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Icid, Iph, Iev),
+    (Ii, Ih, Io, Iz, Ij, Im, Ia, It, Iu, Ikp, Icid, Iph, Iev),
     (Ir, Ie, Ik, Hd),
     Ian,
     (Is, Iv, Ima, Irt, Il),
@@ -555,6 +559,7 @@ impl<
     Ii,
     Ih,
     Io,
+    Iz,
     Ij,
     Im,
     Ia,
@@ -599,6 +604,7 @@ impl<
             Ii,
             Ih,
             Io,
+            Iz,
             Ij,
             Im,
             Ia,
@@ -672,6 +678,7 @@ where
         + GetAt<InitialKeys<T::Crypto>, Ii>
         + GetAt<HandshakeKeys<T::Crypto>, Ih>
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
+        + GetAt<OwnZeroRttKeysOf<T>, Iz>
         + GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
         + GetAt<MaxAckRanges, Im>
         + GetAt<AckObligationsOf<T>, Ia>
@@ -713,7 +720,7 @@ where
         let NodeLoan { lineage, others } = view.get_mut();
         drain_on_stateless_reset::<T, L, B, Ic, Ir, Is, Iv, Ima, Irt, Il>(lineage, others, cx);
         loop {
-            let levels = ReceivableLevels::of::<T, L, Ii, Ih, Io>(lineage);
+            let levels = ReceivableLevels::of::<T, L, Ii, Ih, Io, Iz>(lineage);
             let input = lineage.get_mut::<LogicalPathInput<T::Link, T::Receiver>, Ip>();
             if input.yield_due() {
                 cx.waker().wake_by_ref();
@@ -737,6 +744,7 @@ where
                             Ii,
                             Ih,
                             Io,
+                            Iz,
                             Ij,
                             Im,
                             Ia,
@@ -767,6 +775,7 @@ where
                     Ii,
                     Ih,
                     Io,
+                    Iz,
                     Ij,
                     Im,
                     Ia,
@@ -885,6 +894,7 @@ where
             Ii,
             Ih,
             Io,
+            Iz,
             Ij,
             Im,
             Ia,
@@ -938,6 +948,7 @@ fn receive_owned<
     Ii,
     Ih,
     Io,
+    Iz,
     Ij,
     Im,
     Ia,
@@ -1011,6 +1022,7 @@ fn receive_owned<
         + GetAt<InitialKeys<T::Crypto>, Ii>
         + GetAt<HandshakeKeys<T::Crypto>, Ih>
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
+        + GetAt<OwnZeroRttKeysOf<T>, Iz>
         + GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
         + GetAt<MaxAckRanges, Im>
         + GetAt<AckObligationsOf<T>, Ia>
@@ -1091,6 +1103,7 @@ fn receive_owned<
             Ii,
             Ih,
             Io,
+            Iz,
             Ij,
             Im,
             Ia,
@@ -1373,6 +1386,7 @@ fn receive_one<
     Ii,
     Ih,
     Io,
+    Iz,
     Ij,
     Im,
     Ia,
@@ -1403,6 +1417,7 @@ where
         + GetAt<InitialKeys<T::Crypto>, Ii>
         + GetAt<HandshakeKeys<T::Crypto>, Ih>
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
+        + GetAt<OwnZeroRttKeysOf<T>, Iz>
         + GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
         + GetAt<MaxAckRanges, Im>
         + GetAt<AckObligationsOf<T>, Ia>
@@ -1427,6 +1442,7 @@ where
         Ii,
         Ih,
         Io,
+        Iz,
         Ij,
         Im,
         Ia,
@@ -1600,9 +1616,9 @@ pub async fn logical_path_receiving<W: LogicalPathReceivingCapability>(
     }
 }
 
-/// The kind of the receiving call of a logical path. It reads the
-/// Handshake and 1-RTT keys: once they are installed, the inputs held for
-/// them go.
+/// The kind of the receiving call of a logical path. It reads the 0-RTT,
+/// Handshake and 1-RTT keys: once they are installed, or a server decided
+/// on 0-RTT, the inputs held for them go.
 #[derive(Debug)]
 pub struct LogicalPathReceivingKind;
 
@@ -1614,6 +1630,7 @@ impl<
     Ii,
     Ih,
     Io,
+    Iz,
     Ij,
     Im,
     Ia,
@@ -1657,6 +1674,7 @@ impl<
             Ii,
             Ih,
             Io,
+            Iz,
             Ij,
             Im,
             Ia,
@@ -1728,6 +1746,7 @@ where
         + GetAt<InitialKeys<T::Crypto>, Ii>
         + GetAt<HandshakeKeys<T::Crypto>, Ih>
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
+        + GetAt<OwnZeroRttKeysOf<T>, Iz>
         + GetAt<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ij>
         + GetAt<MaxAckRanges, Im>
         + GetAt<AckObligationsOf<T>, Ia>
@@ -1761,6 +1780,7 @@ where
         Ii,
         Ih,
         Io,
+        Iz,
         Ij,
         Im,
         Ia,
@@ -1807,6 +1827,7 @@ where
                 Ii,
                 Ih,
                 Io,
+                Iz,
                 Ij,
                 Im,
                 Ia,
@@ -1849,6 +1870,7 @@ where
     }
     fn reads(reads: &mut ReadSet) {
         reads
+            .add::<OwnZeroRttKeysOf<T>>()
             .add::<HandshakeKeys<T::Crypto>>()
             .add::<OneRttKeys<T::Crypto, InstantOf<T>>>();
     }

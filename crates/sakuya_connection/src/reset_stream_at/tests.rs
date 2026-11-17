@@ -115,3 +115,34 @@ fn a_reset_frame_of_either_kind_writes_its_encoded_length() {
     assert_eq!(&buffer[..], [0x04, 0x04, 0x01, 0x09]);
     assert_eq!(len, buffer.len());
 }
+
+/// A server that resumes does not leave out `reset_stream_at` when it was
+/// remembered and it sends the configured parameters (§3).
+#[test]
+fn a_resumed_reset_stream_at_is_not_left_out() {
+    use crate::v1::parameters::{ResumedParametersDecision, resume_tests::*};
+
+    let announced = frunk_core::hlist![Some(ResetStreamAt)];
+    let left_out = frunk_core::hlist![None];
+    let cases = [
+        (announced, announced, true),
+        (announced, left_out, false),
+        (left_out, left_out, true),
+        (left_out, announced, true),
+    ];
+    for (remembered, configured, accepted) in cases {
+        let (outcome, settled, _) = resume::<Part, _>(
+            configured,
+            ResumedParametersDecision::UseConfigured,
+            &encoded::<Part>(remembered),
+        );
+        assert_eq!((outcome, settled), (accepted, configured));
+    }
+    let (accepted, settled, _) = resume::<Part, _>(
+        left_out,
+        ResumedParametersDecision::UseRemembered,
+        &encoded::<Part>(announced),
+    );
+    assert!(accepted);
+    assert_eq!(settled, announced);
+}

@@ -9,7 +9,10 @@
 //!   [`LocalTransportParameters`], made from the part's `Args`
 //!   ([`DatagramConnectionArgs`]); by default 65535, the value §3
 //!   recommends. A value of the peer's that cannot be read closes the
-//!   connection with TRANSPORT_PARAMETER_ERROR.
+//!   connection with TRANSPORT_PARAMETER_ERROR. A server that resumes a
+//!   connection settles it by the composition's policy
+//!   ([`DatagramChoices::ResumedParametersPolicy`]); accepting 0-RTT, it
+//!   sends no value lower than the one it remembers (§3).
 //! - **The queues.** The established layer holds the queues of the
 //!   composition's choice ([`DatagramChoices::DatagramQueues`]): what the
 //!   connection gives them is fixed ([`DatagramQueues`]): the frames
@@ -41,6 +44,7 @@ use bytes::{Buf, Bytes};
 use frunk_core::hlist_pat;
 use nitori_io::SplitTo;
 use sakuya_stream::{connection::LayerEnd, send_options::urgency::Urgency};
+use sakuya_tls::extension::alpn::ProtocolName;
 use sakuya_wire::{
     datagram::{DatagramFrame, DatagramTypeValue, FrameType, MaxDatagramFrameSize, codec},
     parameters::{KeyedParameter, ParametersOf, ParametersPart},
@@ -85,7 +89,11 @@ use crate::{
         },
         close::{CloseReasonRecord, TransportClose},
         events::{ConnectionEventSink, ConnectionEvents, SharedEvents},
-        parameters::{LocalTransportParameters, PartSlots, PeerTransportParameters},
+        parameters::{
+            InNode, LocalTransportParameters, PartResumedParametersPolicy, PartSlots,
+            PeerTransportParameters, ResumeLocalTransportParametersPart, ResumedParametersPolicy,
+            UseConfiguredParameters, not_lowered, resume_part,
+        },
         send::SendTypes,
         send_planning::{HostSendStrategyTypes, IntakeOf, IntakePublishOutcome},
         streams::resets::{StreamResets, StreamResetsOf, StreamResetsPart},
@@ -115,7 +123,17 @@ pub struct Part;
 pub trait DatagramChoices: 'static {
     /// The kind of queues of the established layer.
     type DatagramQueues: DatagramQueuesFamily = locked::LockedDatagramQueuesFamily;
+    /// What decides, for a connection a server resumes, how the
+    /// extension's transport parameter goes
+    /// ([`ResumedParametersPolicy`]); the default sends it as configured.
+    type ResumedParametersPolicy: ResumedParametersPolicy<PartSlots<Part>> + Clone + 'static =
+        UseConfiguredParameters;
 }
+
+/// The extension's policy of its transport parameter on resumption, of the
+/// choices `T`.
+pub type DatagramResumedParametersPolicyOf<T> =
+    <HostOf<T> as DatagramChoices>::ResumedParametersPolicy;
 
 /// A kind of queues of the established layer: one queues type for each
 /// `Lc`, this endpoint's reason for closing ([`CloseCauseOf`] for the
@@ -534,25 +552,31 @@ impl<K: PacketKind> FrameSourcePart<K> for Part {
 
 /// What the extension is given when the connection is made
 /// (`DatagramConnectionArgs`): its transport parameter as this side sends
-/// it, and the configuration `C` of the queues.
+/// it, the configuration `C` of the queues, and the policy `R` of the
+/// transport parameter on resumption.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DatagramConnectionArgs<C> {
+pub struct DatagramConnectionArgs<C, R = UseConfiguredParameters> {
     /// The slots of the extension's transport parameter:
     /// `hlist![Some(MaxDatagramFrameSize)]` announces it, `hlist![None]` or
     /// a size of 0 leaves the extension off for the peer.
     pub transport_parameters: PartSlots<Part>,
     /// What the queues of the established layer are configured with.
     pub queues: C,
+    /// What decides how the transport parameter goes when a server resumes
+    /// a connection; a client does not use it.
+    pub resumed_parameters_policy: R,
 }
 
-/// The recommended `max_datagram_frame_size`, and the default queues.
-impl<C: Default> Default for DatagramConnectionArgs<C> {
+/// The recommended `max_datagram_frame_size`, the default queues and the
+/// default policy.
+impl<C: Default, R: Default> Default for DatagramConnectionArgs<C, R> {
     fn default() -> Self {
         Self {
             transport_parameters: frunk_core::hlist![Some(MaxDatagramFrameSize::new(
                 VarInt::from(RECOMMENDED_MAX_DATAGRAM_FRAME_SIZE)
             ))],
             queues: C::default(),
+            resumed_parameters_policy: R::default(),
         }
     }
 }
@@ -573,10 +597,12 @@ impl<T: Choices<Side: DatagramSide, Host: DatagramChoices>, L> LayerShare<T, L, 
 {
     type Data = HList![
         LocalTransportParameters<PartSlots<Part>>,
+        PartResumedParametersPolicy<PartSlots<Part>, DatagramResumedParametersPolicyOf<T>>,
         DatagramQueuesConfig<DatagramQueuesConfigOf<T>>
     ];
     type Calls = HNil;
-    type Args = DatagramConnectionArgs<DatagramQueuesConfigOf<T>>;
+    type Args =
+        DatagramConnectionArgs<DatagramQueuesConfigOf<T>, DatagramResumedParametersPolicyOf<T>>;
 }
 
 /// The established layer holds the queues.
@@ -628,14 +654,73 @@ impl<T: Choices<Side: DatagramSide, Host: DatagramChoices>, L, I>
     Build<T, L, layer::Connection, (Part, I)> for LocalTransportParameters<PartSlots<Part>>
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>: Selector<DatagramConnectionArgs<DatagramQueuesConfigOf<T>>, I>,
+    ConnectionArgsOf<T, L>: Selector<
+            DatagramConnectionArgs<DatagramQueuesConfigOf<T>, DatagramResumedParametersPolicyOf<T>>,
+            I,
+        >,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        let args: &DatagramConnectionArgs<DatagramQueuesConfigOf<T>> = Selector::get(args);
+        let args: &DatagramConnectionArgs<
+            DatagramQueuesConfigOf<T>,
+            DatagramResumedParametersPolicyOf<T>,
+        > = Selector::get(args);
         LocalTransportParameters::Configured(args.transport_parameters)
+    }
+}
+
+/// The policy on resumption is the one the connection was made with.
+impl<T: Choices<Side: DatagramSide, Host: DatagramChoices>, L, I>
+    Build<T, L, layer::Connection, (Part, I)>
+    for PartResumedParametersPolicy<PartSlots<Part>, DatagramResumedParametersPolicyOf<T>>
+where
+    L: LineagePartList<T>,
+    ConnectionArgsOf<T, L>: Selector<
+            DatagramConnectionArgs<DatagramQueuesConfigOf<T>, DatagramResumedParametersPolicyOf<T>>,
+            I,
+        >,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        args: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        let args: &DatagramConnectionArgs<
+            DatagramQueuesConfigOf<T>,
+            DatagramResumedParametersPolicyOf<T>,
+        > = Selector::get(args);
+        PartResumedParametersPolicy::new(args.resumed_parameters_policy.clone())
+    }
+}
+
+/// Whether the `max_datagram_frame_size` in `sent` is not lower than the
+/// `remembered` one, each 0 when absent: a server that accepts 0-RTT must
+/// not lower it (RFC 9221 §3).
+fn datagram_limit_kept(remembered: &PartSlots<Part>, sent: &PartSlots<Part>) -> bool {
+    not_lowered(remembered.head, sent.head)
+}
+
+/// The extension holds to its `max_datagram_frame_size`: sending the
+/// configured one, it accepts 0-RTT only when that is not lower than the
+/// one remembered, each 0 when absent (RFC 9221 §3).
+impl<V, I, Ip, Pol> ResumeLocalTransportParametersPart<V, InNode<(I, Ip, Pol)>> for Part
+where
+    V: GetAt<LocalTransportParameters<PartSlots<Part>>, I>
+        + GetAt<PartResumedParametersPolicy<PartSlots<Part>, Pol>, Ip>,
+    Pol: ResumedParametersPolicy<PartSlots<Part>>,
+{
+    fn resume_local(
+        lineage: &mut crate::take::Lineage<'_, V>,
+        remembered: &Bytes,
+        application_protocol: Option<&ProtocolName<Bytes>>,
+    ) -> bool {
+        resume_part::<Self, V, I, Ip, Pol>(
+            lineage,
+            remembered,
+            application_protocol,
+            datagram_limit_kept,
+        )
     }
 }
 
@@ -644,13 +729,19 @@ impl<T: Choices<Side: DatagramSide, Host: DatagramChoices>, L, I>
     Build<T, L, layer::Connection, (Part, I)> for DatagramQueuesConfig<DatagramQueuesConfigOf<T>>
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>: Selector<DatagramConnectionArgs<DatagramQueuesConfigOf<T>>, I>,
+    ConnectionArgsOf<T, L>: Selector<
+            DatagramConnectionArgs<DatagramQueuesConfigOf<T>, DatagramResumedParametersPolicyOf<T>>,
+            I,
+        >,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        let args: &DatagramConnectionArgs<DatagramQueuesConfigOf<T>> = Selector::get(args);
+        let args: &DatagramConnectionArgs<
+            DatagramQueuesConfigOf<T>,
+            DatagramResumedParametersPolicyOf<T>,
+        > = Selector::get(args);
         DatagramQueuesConfig(args.queues.clone())
     }
 }

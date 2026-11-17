@@ -175,12 +175,16 @@ use self::{
     key_phase::KeyPhaseNumbers,
     keys::{
         DirectionKeys, HandshakeKeys, InitialKeys, LevelKeys, OneRttKeys, PacketProtectionBackend,
+        ZeroRttReceiveKeys, ZeroRttReceiving, ZeroRttSending,
     },
     link::{FirstLinkStart, LinkClone, LinkFacts},
     link_ceiling::LinkCeilingWatchingKind,
     link_end::LinkEndWatchingKind,
     loss_detection::LossDetectionOf,
-    parameters::{LocalTransportParameters, PeerTransportParameters},
+    parameters::{
+        LocalTransportParameters, PartResumedParametersPolicy, PeerTransportParameters,
+        ResumedParametersPolicy, UseConfiguredParameters,
+    },
     pto::ProbeTimeout,
     recovery::{
         CongestionPartOf, LinkPathCongestionState, OthersOf, PmtuOf, RecoveryConfigOf,
@@ -358,6 +362,12 @@ pub trait HostChoices<T: MakerChoices + ?Sized>: 'static {
     /// endpoint's reason for closing, [`CloseCauseOf`] for the composition's
     /// list of parts. The connection keeps the one it was made with.
     type ImmediateClosePolicy: Clone + 'static = close::PassThroughImmediateClosePolicy;
+    /// What decides, for a connection a server resumes, how version 1's
+    /// transport parameters go: reject 0-RTT, send those remembered, or
+    /// send those configured ([`ResumedParametersPolicy`]). The connection
+    /// keeps the one it was made with; the default sends those configured.
+    type ResumedParametersPolicy: ResumedParametersPolicy<TransportParameterSlots> + Clone + 'static =
+        UseConfiguredParameters;
     /// The core of the send strategy, for the types `I` the composition
     /// gives it; it starts as its default makes it.
     type SendStrategy<I: SendStrategyTypes>: Default =
@@ -411,6 +421,9 @@ pub type CryptoSendBufferOf<T> = <HostOf<T> as HostChoices<T>>::CryptoSendBuffer
 pub type AckObligationOf<T> = <HostOf<T> as HostChoices<T>>::AckObligation;
 /// The close policy of the choices `T`.
 pub type ImmediateClosePolicyOf<T> = <HostOf<T> as HostChoices<T>>::ImmediateClosePolicy;
+/// The policy of version 1's transport parameters on resumption, of the
+/// choices `T`.
+pub type ResumedParametersPolicyOf<T> = <HostOf<T> as HostChoices<T>>::ResumedParametersPolicy;
 /// The destination connection ID strategy of the choices `T`.
 pub type DestinationConnectionIdsOf<T> = <HostOf<T> as HostChoices<T>>::DestinationConnectionIds;
 /// The local connection ID strategy of the choices `T`.
@@ -431,6 +444,11 @@ pub type EventsConfigOf<T, L> = <EventsOf<T, L> as events::ConnectionEvents<Inst
 /// The handle the application's threads give the connection's events
 /// through, of the choices `T` and the list of parts `L`.
 pub type SharedEventsOf<T, L> = <EventsOf<T, L> as events::ConnectionEvents<InstantOf<T>>>::Shared;
+
+/// The 0-RTT keys of the side of the choices `T`
+/// ([`Side::OwnZeroRttKeys`]).
+pub(crate) type OwnZeroRttKeysOf<T> =
+    <<T as MakerChoices>::Side as Side>::OwnZeroRttKeys<<T as MakerChoices>::Crypto, InstantOf<T>>;
 
 /// This endpoint's reason for closing a connection of the choices `T` and
 /// the list of parts `L`: the connection's error, the handshake's error,
@@ -491,6 +509,41 @@ pub trait Side: 'static {
     /// sends them; a client's never has one waiting and writes nothing (RFC
     /// 9000 §19.20).
     type Own: for<'a> FrameSource<Item<'a> = (), Summary = HandshakeDoneSummary> + 'static;
+
+    /// The 0-RTT keys only this side has, a data component of the
+    /// connection node: a server's to read 0-RTT packets
+    /// ([`ZeroRttReceiving`]), a client's to send them ([`ZeroRttSending`]).
+    type OwnZeroRttKeys<B: CryptoBackend + 'static, I: Copy + Ord + 'static>: 'static;
+
+    /// The keys to read a 0-RTT packet with, as `keys` keeps them.
+    ///
+    /// A server's are not decided before its ServerHello is written, then
+    /// are there while it reads 0-RTT. A client never has any: it drops
+    /// every 0-RTT packet (RFC 9001 §5.6).
+    fn zero_rtt_receive_keys<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
+        keys: &Self::OwnZeroRttKeys<B, I>,
+    ) -> ZeroRttReceiveKeys<'_, B>;
+
+    /// The keys to send a 0-RTT packet with, as `keys` keeps them.
+    ///
+    /// A server never has any: only a client sends 0-RTT (RFC 9001 §4.6.1).
+    fn zero_rtt_send_keys<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
+        keys: &Self::OwnZeroRttKeys<B, I>,
+    ) -> Option<&DirectionKeys<B>>;
+
+    /// Whether `keys` start to retire with the next 1-RTT packet this side
+    /// processes: a server's while it reads 0-RTT and they do not retire
+    /// yet (RFC 9001 §4.9.3); never a client's.
+    fn zero_rtt_awaits_retirement<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
+        keys: &Self::OwnZeroRttKeys<B, I>,
+    ) -> bool;
+
+    /// A 1-RTT packet was processed: a server's open `keys` retire, to be
+    /// dropped a while later (RFC 9001 §4.9.3); a client's stay as they
+    /// are.
+    fn retire_zero_rtt<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
+        keys: &mut Self::OwnZeroRttKeys<B, I>,
+    );
 
     /// Whether a HANDSHAKE_DONE frame waits to be sent now, as `own` keeps
     /// it: a server's from the completion of its handshake until it is
@@ -583,6 +636,28 @@ where
     type AlertError = Tls::AlertError;
     type Start = ();
     type Own = HandshakeDoneSource;
+    type OwnZeroRttKeys<B: CryptoBackend + 'static, I: Copy + Ord + 'static> =
+        ZeroRttReceiving<B, I>;
+    fn zero_rtt_receive_keys<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
+        keys: &ZeroRttReceiving<B, I>,
+    ) -> ZeroRttReceiveKeys<'_, B> {
+        keys.receive_keys()
+    }
+    fn zero_rtt_send_keys<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
+        _: &ZeroRttReceiving<B, I>,
+    ) -> Option<&DirectionKeys<B>> {
+        None
+    }
+    fn zero_rtt_awaits_retirement<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
+        keys: &ZeroRttReceiving<B, I>,
+    ) -> bool {
+        matches!(keys, ZeroRttReceiving::Open(_))
+    }
+    fn retire_zero_rtt<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
+        keys: &mut ZeroRttReceiving<B, I>,
+    ) {
+        keys.retire();
+    }
     fn handshake_done_waiting(own: &HandshakeDoneSource) -> bool {
         own.is_waiting()
     }
@@ -637,6 +712,26 @@ where
     type AlertError = Tls::AlertError;
     type Start = ClientOnlyStart<Tk, Rp>;
     type Own = ClientOnlyState<Tk, Rp>;
+    type OwnZeroRttKeys<B: CryptoBackend + 'static, I: Copy + Ord + 'static> = ZeroRttSending<B>;
+    fn zero_rtt_receive_keys<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
+        _: &ZeroRttSending<B>,
+    ) -> ZeroRttReceiveKeys<'_, B> {
+        ZeroRttReceiveKeys::Gone
+    }
+    fn zero_rtt_send_keys<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
+        keys: &ZeroRttSending<B>,
+    ) -> Option<&DirectionKeys<B>> {
+        keys.send()
+    }
+    fn zero_rtt_awaits_retirement<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
+        _: &ZeroRttSending<B>,
+    ) -> bool {
+        false
+    }
+    fn retire_zero_rtt<B: CryptoBackend + 'static, I: Copy + Ord + 'static>(
+        _: &mut ZeroRttSending<B>,
+    ) {
+    }
     fn handshake_done_waiting(_: &ClientOnlyState<Tk, Rp>) -> bool {
         false
     }
@@ -736,6 +831,9 @@ pub struct ConnectionArgs<T: Choices, L: LogicalPathKeys> {
     pub max_datagrams_per_send: NonZeroUsize,
     /// What adjusts the close this endpoint sends at each encryption level.
     pub immediate_close_policy: ImmediateClosePolicyOf<T>,
+    /// What decides how version 1's transport parameters go when a server
+    /// resumes a connection; a client does not use it.
+    pub resumed_parameters_policy: ResumedParametersPolicyOf<T>,
     /// The cell the application's request to close the connection is put
     /// in; the connection node keeps a clone of it, and whoever lets the
     /// application ask keeps another.
@@ -768,6 +866,7 @@ where
         InitialKeys<T::Crypto>,
         HandshakeKeys<T::Crypto>,
         OneRttKeys<T::Crypto, InstantOf<T>>,
+        OwnZeroRttKeysOf<T>,
         AeadUsage,
         CryptoReceiver<CryptoReceiveBufferOf<T>>,
         CryptoSender<CryptoSendBufferOf<T>>,
@@ -775,6 +874,7 @@ where
         FirstLinkStart,
         IdleTimeout<InstantOf<T>>,
         LocalTransportParameters<TransportParameterSlots>,
+        PartResumedParametersPolicy<TransportParameterSlots, ResumedParametersPolicyOf<T>>,
         PeerTransportParameters<TransportParameterSlots<L>>,
         RecoveryFactoryOf<T, L>,
         LossThresholds,
@@ -810,6 +910,7 @@ where
         HList![InitialKeys<T::Crypto>],
         HList![HandshakeKeys<T::Crypto>],
         HList![OneRttKeys<T::Crypto, InstantOf<T>>],
+        HList![OwnZeroRttKeysOf<T>],
         HList![AeadUsage],
         HList![CryptoReceiver<CryptoReceiveBufferOf<T>>],
         HList![CryptoSender<CryptoSendBufferOf<T>>],
@@ -817,6 +918,10 @@ where
         HList![FirstLinkStart],
         HList![IdleTimeout<InstantOf<T>>],
         HList![LocalTransportParameters<TransportParameterSlots>],
+        HList![PartResumedParametersPolicy<
+            TransportParameterSlots,
+            ResumedParametersPolicyOf<T>,
+        >],
         HList![PeerTransportParameters<TransportParameterSlots<L>>],
         HList![RecoveryFactoryOf<T, L>],
         HList![LossThresholds],
@@ -1066,6 +1171,35 @@ where
         OneRttKeys::NotYet
     }
 }
+
+/// A server decides whether it accepts 0-RTT when it writes its
+/// ServerHello; until then 0-RTT packets wait.
+impl<T: Choices, L> Build<T, L, layer::Connection, ()> for ZeroRttReceiving<T::Crypto, InstantOf<T>>
+where
+    L: LineagePartList<T>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        _: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        ZeroRttReceiving::NotYet
+    }
+}
+
+/// This version's client offers no 0-RTT.
+impl<T: Choices, L> Build<T, L, layer::Connection, ()> for ZeroRttSending<T::Crypto>
+where
+    L: LineagePartList<T>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        _: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        ZeroRttSending::None
+    }
+}
+/// It has no deadline and reads nothing.
+impl<B: CryptoBackend> PassiveDataComponent for ZeroRttSending<B> {}
 
 /// Nothing is sealed or opened when the connection is made.
 impl<T: Choices, L> Build<T, L, layer::Connection, ()> for AeadUsage
@@ -1385,8 +1519,137 @@ where
     }
 }
 
-/// What the 1-RTT keys read to measure the current probe timeout, besides
-/// the RTT estimates; they are not reread when these change.
+/// A server's 0-RTT keys read the record of why the connection closed, the
+/// roles of the link paths and their close packets, as the keys of the
+/// other levels do: once every link path is `Draining` they are discarded
+/// (RFC 9000 §10.2.2); they only receive, so closing leaves them as they
+/// are. Whether 0-RTT is accepted is decided when the ServerHello is
+/// written: a connection whose reason for closing is written before that
+/// refuses it, and the 0-RTT packets that wait are dropped.
+///
+/// They also read themselves. Once a 1-RTT packet was processed they
+/// retire, and are kept for three current probe timeouts, as RFC 9001
+/// §4.9.3 recommends: the largest among the link paths with a recovery
+/// layer, as the idle timeout measures it, or the last one the idle timeout
+/// took when no link path has one, measured when the keys are looked at
+/// after they started to retire. That instant is their deadline; when it
+/// comes the keys are discarded.
+impl<T: Choices, L, I, Ic, J, Jc, Iv, Iev, Ima, Ir>
+    DataComponent<T, L, layer::Connection, ((I, Ic, J, Jc, Iv, Iev), (Ima, Ir))>
+    for ZeroRttReceiving<T::Crypto, InstantOf<T>>
+where
+    L: LineagePartList<T> + ConnectionErrorsOf,
+    L: ParametersOf<TransportParameterSpace>,
+    TransportParameterSlots<L>: Selector<Option<MaxAckDelay>, Ima>,
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ZeroRttReceiving<T::Crypto, InstantOf<T>>, I>
+        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
+        + ReadEach<OneRttKeysReads<T, L>, Iv>
+        + GetAt<events::ConnectionEventSink<EventsOf<T, L>>, Iev>,
+    for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        GetAt<LinkPathRole<InstantOf<T>>, J> + GetAt<ClosePacket, Jc>,
+    for<'s> NodeData<T, L, layer::Recovery>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::Recovery> as FlatMut<'s>>::Out: GetAt<RttOf<T, L>, Ir>,
+{
+    fn reads(reads: &mut ReadSet) {
+        reads
+            .add::<CloseReasonRecord<CloseCauseOf<T, L>>>()
+            .add::<LinkPathRole<InstantOf<T>>>()
+            .add::<ClosePacket>()
+            .add::<ZeroRttReceiving<T::Crypto, InstantOf<T>>>();
+    }
+    fn deadline<'v>(lineage: &LineageOf<'v, T, L, layer::Connection>) -> Option<InstantOf<T>> {
+        lineage
+            .get::<ZeroRttReceiving<T::Crypto, InstantOf<T>>, I>()
+            .deadline()
+    }
+    fn expire<'v, B: CallBundle>(
+        mut lineage: LineageOf<'v, T, L, layer::Connection>,
+        _: &mut OtherNodes<'v, T, L, B>,
+        now: InstantOf<T>,
+    ) -> Option<RequestOf<T, L>> {
+        discard_zero_rtt::<T, L, I, Iev>(&mut lineage, now);
+        None
+    }
+    fn reread<'v, B: CallBundle>(
+        mut lineage: LineageOf<'v, T, L, layer::Connection>,
+        others: &mut OtherNodes<'v, T, L, B>,
+        now: InstantOf<T>,
+    ) -> Option<RequestOf<T, L>> {
+        let keys = lineage.get::<ZeroRttReceiving<T::Crypto, InstantOf<T>>, I>();
+        if matches!(keys, ZeroRttReceiving::None) {
+            return None;
+        }
+        let not_yet = matches!(keys, ZeroRttReceiving::NotYet);
+        let written = lineage
+            .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
+            .is_written();
+        if closing_keys::<T, L, B, J, Jc>(written, others) == ClosingKeys::Discarded {
+            discard_zero_rtt::<T, L, I, Iev>(&mut lineage, now);
+            return None;
+        }
+        if written && not_yet {
+            lineage
+                .get_mut::<ZeroRttReceiving<T::Crypto, InstantOf<T>>, I>()
+                .refuse();
+            return None;
+        }
+        if lineage
+            .get::<ZeroRttReceiving<T::Crypto, InstantOf<T>>, I>()
+            .awaits_deadline()
+        {
+            let frunk_core::hlist_pat![peer, thresholds, idle] =
+                lineage.read_each::<OneRttKeysReads<T, L>, Iv>();
+            let pto = current_probe_timeout::<T, L, B, Ima, Ir>(peer, thresholds, others)
+                // with no recovery layer, the last one the idle timeout took
+                .unwrap_or_else(|| idle.probe_timeout());
+            // an instant beyond what the instant type represents is none:
+            // the keys go at once rather than never
+            let at = now.checked_add(pto.saturating_mul(3)).unwrap_or(now);
+            lineage
+                .get_mut::<ZeroRttReceiving<T::Crypto, InstantOf<T>>, I>()
+                .set_deadline(at);
+        }
+        None
+    }
+}
+
+/// Discard a server's 0-RTT keys at `now`; the connection's events hear of
+/// it when there were keys to discard.
+fn discard_zero_rtt<T, L, I, Iev>(
+    lineage: &mut LineageOf<'_, T, L, layer::Connection>,
+    now: InstantOf<T>,
+) where
+    T: Choices,
+    L: LineagePartList<T>,
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<ZeroRttReceiving<T::Crypto, InstantOf<T>>, I>
+        + GetAt<events::ConnectionEventSink<EventsOf<T, L>>, Iev>,
+{
+    let keys = lineage.get::<ZeroRttReceiving<T::Crypto, InstantOf<T>>, I>();
+    let had_keys = matches!(
+        keys,
+        ZeroRttReceiving::Open(_) | ZeroRttReceiving::Retiring(..)
+    );
+    lineage
+        .get_mut::<ZeroRttReceiving<T::Crypto, InstantOf<T>>, I>()
+        .discard();
+    if had_keys
+        && <EventsOf<T, L> as events::ConnectionEvents<InstantOf<T>>>::ENABLED
+        && let Some(receiver) = lineage
+            .get_mut::<events::ConnectionEventSink<EventsOf<T, L>>, Iev>()
+            .active::<InstantOf<T>>()
+    {
+        let key = events::KeyChange {
+            level: sakuya_wire::v1::encryption_level::EncryptionLevel::ZeroRtt,
+            sender: Role::Client,
+        };
+        events::ConnectionEvents::key_discarded(receiver, now, key);
+    }
+}
+
+/// What the 1-RTT keys and a server's 0-RTT keys read to measure the
+/// current probe timeout, besides the RTT estimates; they are not reread
+/// when these change.
 type OneRttKeysReads<T, L> = HList![
     PeerTransportParameters<TransportParameterSlots<L>>,
     LossThresholds,
@@ -1948,6 +2211,27 @@ where
     }
 }
 impl<S> PassiveDataComponent for LocalTransportParameters<S> {}
+
+/// The policy of version 1's transport parameters on resumption is the one
+/// the connection was made with.
+impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)>
+    for PartResumedParametersPolicy<TransportParameterSlots, ResumedParametersPolicyOf<T>>
+where
+    L: LineagePartList<T>,
+    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        args: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        PartResumedParametersPolicy::new(
+            own_args::<T, L, I>(args).resumed_parameters_policy.clone(),
+        )
+    }
+}
+/// It has no deadline and reads nothing; a server's advancing call asks it
+/// once, when it resumes.
+impl<S, Pol> PassiveDataComponent for PartResumedParametersPolicy<S, Pol> {}
 
 /// The peer's transport parameters are not known when the connection is
 /// made, even to a client that offers 0-RTT: the remembered ones are set

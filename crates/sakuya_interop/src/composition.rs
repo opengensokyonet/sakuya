@@ -178,6 +178,10 @@ impl<T: v1::MakerChoices> v1::HostChoices<T> for InteropChoices {
 #[cfg(feature = "extensions")]
 impl DatagramChoices for InteropChoices {}
 
+/// The default of the reliable stream reset extension.
+#[cfg(feature = "extensions")]
+impl reset_stream_at::ResetStreamAtChoices for InteropChoices {}
+
 /// The choices of the server's connections.
 pub(crate) type ServerChoices = ServerConnectionChoices<Udp, InteropChoices, ServerStarts>;
 /// The choices of the client's connections.
@@ -365,10 +369,12 @@ fn read(path: &Path) -> Result<Vec<u8>, CertificateError> {
 
 impl ServerStarts {
     /// The engines presenting the chain in `certs/cert.pem` with the key
-    /// in `certs/priv.key`.
+    /// in `certs/priv.key`, issuing session tickets that allow 0-RTT when
+    /// `early_data`.
     pub(crate) fn load(
         certs: &Path,
         cipher_suites: Vec<CipherSuite>,
+        early_data: bool,
         key_log: OptionalKeyLog,
     ) -> Result<Self, CertificateError> {
         let chain_pem = read(&certs.join("cert.pem"))?;
@@ -389,7 +395,7 @@ impl ServerStarts {
                 2,
                 // invariant: an hour is within a week
                 TicketLifetime::new(3600).expect("a ticket lifetime"),
-                false,
+                early_data,
                 1024,
             ),
             key_log,
@@ -582,16 +588,20 @@ impl Extensions {
                 ))
             })],
             queues: C::default(),
+            resumed_parameters_policy: v1::parameters::UseConfiguredParameters,
         }
     }
 
     /// What the reliable stream reset extension is given: its parameter
     /// when it is announced.
-    fn reset_stream_at(self) -> v1::parameters::PartSlots<reset_stream_at::Part> {
-        hlist![
-            self.reset_stream_at
-                .then_some(sakuya_wire::reset_stream_at::ResetStreamAt)
-        ]
+    fn reset_stream_at(self) -> reset_stream_at::ResetStreamAtConnectionArgs {
+        reset_stream_at::ResetStreamAtConnectionArgs {
+            transport_parameters: hlist![
+                self.reset_stream_at
+                    .then_some(sakuya_wire::reset_stream_at::ResetStreamAt)
+            ],
+            resumed_parameters_policy: v1::parameters::UseConfiguredParameters,
+        }
     }
 }
 

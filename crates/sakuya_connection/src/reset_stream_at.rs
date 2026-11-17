@@ -13,9 +13,13 @@
 //! - **Transport parameter.** The part sends `reset_stream_at` (§3) as it is
 //!   configured: its share of the connection node is its own
 //!   [`LocalTransportParameters`], made from the slots the part is given
-//!   when the connection is made (its `Args`, [`Part`]). A composition with
-//!   the part need not announce it. A value of the peer's that is not
-//!   empty closes the connection with TRANSPORT_PARAMETER_ERROR (§3).
+//!   when the connection is made (its `Args`,
+//!   [`ResetStreamAtConnectionArgs`]). A composition with the part need not
+//!   announce it. A value of the peer's that is not empty closes the
+//!   connection with TRANSPORT_PARAMETER_ERROR (§3). A server that resumes
+//!   a connection settles it by the composition's policy
+//!   ([`ResetStreamAtChoices::ResumedParametersPolicy`]); accepting 0-RTT,
+//!   it does not leave out a parameter it remembers (§3).
 //! - **Sending.** A stream writer resets at a reliable size only when the
 //!   peer announced the parameter: the stream set takes what the peer
 //!   allows from the peer's parameters when it is made
@@ -53,6 +57,7 @@ use sakuya_stream::{
     },
     send_buffer::{SendMarker, StreamSendBuffer},
 };
+use sakuya_tls::extension::alpn::ProtocolName;
 use sakuya_wire::{
     parameters::{ParametersPart, TrailingBytesError},
     parts::{Coprod, Coproduct, HList, HNil, PartsError, Selector},
@@ -93,10 +98,14 @@ use crate::{
     },
     take::{GetAt, TakeEach},
     v1::{
-        Choices, CloseCauseOf,
+        Choices, CloseCauseOf, HostOf,
         application_handles::stream::{StreamWrite, StreamWriter},
         close::{CloseReasonRecord, TransportClose},
-        parameters::{LocalTransportParameters, PartSlots},
+        parameters::{
+            InNode, LocalTransportParameters, PartResumedParametersPolicy, PartSlots,
+            ResumeLocalTransportParametersPart, ResumedParametersPolicy, UseConfiguredParameters,
+            resume_part,
+        },
         send::SendTypes,
         send_planning::{
             HostSendStrategyTypes, IntakeOf, IntakePublishOutcome, SendStrategyIntake,
@@ -115,12 +124,42 @@ use crate::{
 
 /// The reliable stream reset extension, one part of a composition.
 ///
-/// What the part is given when the connection is made, its `Args`, is the
-/// slots of its transport parameter, as it sends them: `hlist![Some(ResetStreamAt)]`
-/// announces `reset_stream_at`, which is what a composition with the part
-/// is for, and `hlist![None]` leaves it out.
+/// What the part is given when the connection is made, its `Args`, is a
+/// [`ResetStreamAtConnectionArgs`]: the slots of its transport parameter,
+/// as it sends them, and the policy of the parameter on resumption.
 #[derive(Debug)]
 pub struct Part;
+
+/// What the host chooses for the extension, on its own type: the type
+/// that is its choices for version 1 ([`HostOf`]). A composition with the
+/// extension has choices `T` with `T: Choices<Host: ResetStreamAtChoices>`.
+pub trait ResetStreamAtChoices: 'static {
+    /// What decides, for a connection a server resumes, how the
+    /// extension's transport parameter goes
+    /// ([`ResumedParametersPolicy`]); the default sends it as configured.
+    type ResumedParametersPolicy: ResumedParametersPolicy<PartSlots<Part>> + Clone + 'static =
+        UseConfiguredParameters;
+}
+
+/// The extension's policy of its transport parameter on resumption, of the
+/// choices `T`.
+pub type ResetStreamAtResumedParametersPolicyOf<T> =
+    <HostOf<T> as ResetStreamAtChoices>::ResumedParametersPolicy;
+
+/// What the extension is given when the connection is made
+/// (`ResetStreamAtConnectionArgs`): its transport parameter as this side
+/// sends it, and the policy `R` of the parameter on resumption.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResetStreamAtConnectionArgs<R = UseConfiguredParameters> {
+    /// The slots of the extension's transport parameter:
+    /// `hlist![Some(ResetStreamAt)]` announces `reset_stream_at`, which is
+    /// what a composition with the part is for, and `hlist![None]` leaves
+    /// it out.
+    pub transport_parameters: PartSlots<Part>,
+    /// What decides how the transport parameter goes when a server resumes
+    /// a connection; a client does not use it.
+    pub resumed_parameters_policy: R,
+}
 
 // ---- the reset kind ----
 
@@ -474,11 +513,15 @@ impl<K: PacketKind> FrameSourcePart<K> for Part {
 }
 
 /// The connection node keeps the extension's transport parameters as this
-/// side sends them, made from the part's `Args`.
-impl<T: Choices, L> LayerShare<T, L, layer::Connection> for Part {
-    type Data = HList![LocalTransportParameters<PartSlots<Part>>];
+/// side sends them and their policy on resumption, made from the part's
+/// `Args`.
+impl<T: Choices<Host: ResetStreamAtChoices>, L> LayerShare<T, L, layer::Connection> for Part {
+    type Data = HList![
+        LocalTransportParameters<PartSlots<Part>>,
+        PartResumedParametersPolicy<PartSlots<Part>, ResetStreamAtResumedParametersPolicyOf<T>>
+    ];
     type Calls = HNil;
-    type Args = PartSlots<Part>;
+    type Args = ResetStreamAtConnectionArgs<ResetStreamAtResumedParametersPolicyOf<T>>;
 }
 
 macro_rules! no_share {
@@ -506,17 +549,67 @@ impl<T: Choices, L>
 
 /// The extension's transport parameters start as configured; the part
 /// marks where they are among the components, apart from version 1's.
-impl<T: Choices, L, I> Build<T, L, layer::Connection, (Part, I)>
+impl<T: Choices<Host: ResetStreamAtChoices>, L, I> Build<T, L, layer::Connection, (Part, I)>
     for LocalTransportParameters<PartSlots<Part>>
 where
     L: LineagePartList<T>,
-    ConnectionArgsOf<T, L>: Selector<PartSlots<Part>, I>,
+    ConnectionArgsOf<T, L>:
+        Selector<ResetStreamAtConnectionArgs<ResetStreamAtResumedParametersPolicyOf<T>>, I>,
 {
     fn build<'v>(
         _: &mut ParentsOf<'v, T, L, layer::Connection>,
         args: &mut ArgsOf<T, L, layer::Connection>,
     ) -> Self {
-        LocalTransportParameters::Configured(*Selector::<PartSlots<Part>, I>::get(args))
+        let args: &ResetStreamAtConnectionArgs<ResetStreamAtResumedParametersPolicyOf<T>> =
+            Selector::get(args);
+        LocalTransportParameters::Configured(args.transport_parameters)
+    }
+}
+
+/// The policy on resumption is the one the connection was made with.
+impl<T: Choices<Host: ResetStreamAtChoices>, L, I> Build<T, L, layer::Connection, (Part, I)>
+    for PartResumedParametersPolicy<PartSlots<Part>, ResetStreamAtResumedParametersPolicyOf<T>>
+where
+    L: LineagePartList<T>,
+    ConnectionArgsOf<T, L>:
+        Selector<ResetStreamAtConnectionArgs<ResetStreamAtResumedParametersPolicyOf<T>>, I>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        args: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        let args: &ResetStreamAtConnectionArgs<ResetStreamAtResumedParametersPolicyOf<T>> =
+            Selector::get(args);
+        PartResumedParametersPolicy::new(args.resumed_parameters_policy.clone())
+    }
+}
+
+/// Whether `sent` keeps `reset_stream_at` when it is `remembered`: a
+/// server that accepts 0-RTT must not leave it out (§3).
+fn reset_stream_at_kept(remembered: &PartSlots<Part>, sent: &PartSlots<Part>) -> bool {
+    remembered.head.is_none() || sent.head.is_some()
+}
+
+/// The extension holds to its parameter: sending the configured one, it
+/// accepts 0-RTT only when it does not leave out a `reset_stream_at` that
+/// was remembered (§3).
+impl<V, I, Ip, Pol> ResumeLocalTransportParametersPart<V, InNode<(I, Ip, Pol)>> for Part
+where
+    V: GetAt<LocalTransportParameters<PartSlots<Part>>, I>
+        + GetAt<PartResumedParametersPolicy<PartSlots<Part>, Pol>, Ip>,
+    Pol: ResumedParametersPolicy<PartSlots<Part>>,
+{
+    fn resume_local(
+        lineage: &mut crate::take::Lineage<'_, V>,
+        remembered: &Bytes,
+        application_protocol: Option<&ProtocolName<Bytes>>,
+    ) -> bool {
+        resume_part::<Self, V, I, Ip, Pol>(
+            lineage,
+            remembered,
+            application_protocol,
+            reset_stream_at_kept,
+        )
     }
 }
 

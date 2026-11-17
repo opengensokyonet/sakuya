@@ -73,6 +73,7 @@ pub fn main() -> ExitCode {
     let starts = match ServerStarts::load(
         Path::new(CERTS),
         cipher_suites(test_case == ServerTestCase::ChaCha20),
+        test_case == ServerTestCase::ZeroRtt,
         key_log,
     ) {
         Ok(starts) => starts,

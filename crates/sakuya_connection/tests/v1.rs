@@ -1128,6 +1128,7 @@ mod probe {
         Ii,
         Ih,
         Io,
+        Iz,
         Ij,
         Im,
         Ia,
@@ -1155,7 +1156,7 @@ mod probe {
             layer::LogicalPath,
             (
                 I,
-                (Ii, Ih, Io),
+                (Ii, Ih, Io, Iz),
                 (Ij, Im, Ia, It, Iu, Ikp, Icid, Iph, Iev),
                 (Ir, Ie, Ik, Hd),
                 (Ic, Icr),
@@ -1182,6 +1183,7 @@ mod probe {
             + GetAt<InitialKeys<RingBackend>, Ii>
             + GetAt<HandshakeKeys<RingBackend>, Ih>
             + GetAt<OneRttKeys<RingBackend, Duration>, Io>
+            + GetAt<<T::Side as v1::Side>::OwnZeroRttKeys<RingBackend, Duration>, Iz>
             + GetAt<PacketNumberSpaces<ReceiveJournals<Duration>>, Ij>
             + GetAt<MaxAckRanges, Im>
             + GetAt<AckObligationsOf<T>, Ia>
@@ -1234,6 +1236,7 @@ mod probe {
                         Ii,
                         Ih,
                         Io,
+                        Iz,
                         Ij,
                         Im,
                         Ia,
@@ -2168,6 +2171,7 @@ where
                 T,
                 DestinationConnectionIds = common::TestDestinationConnectionIds,
                 ImmediateClosePolicy = common::TestImmediateClosePolicy,
+                ResumedParametersPolicy = v1::parameters::UseConfiguredParameters,
                 ApplicationError = common::AppClose,
             >,
         >,
@@ -2221,6 +2225,7 @@ where
         max_datagrams_per_send: NonZeroUsize::new(MAX_PER_SEND.with(Cell::get))
             .expect("the tests send at least one datagram at once"),
         immediate_close_policy: common::TestImmediateClosePolicy,
+        resumed_parameters_policy: v1::parameters::UseConfiguredParameters,
         close_request,
         stream_set: Default::default(),
         connection_handle: Default::default(),

@@ -150,3 +150,43 @@ fn a_server_datagram_tells_whether_it_came_in_0_rtt() {
     assert_eq!(late.chunk(), b"ame");
     assert_eq!(late.into_bytes(), Bytes::from_static(b"ame"));
 }
+
+/// A server that resumes keeps `max_datagram_frame_size` at least the one
+/// remembered when it sends the configured value, each 0 when absent (RFC
+/// 9221 §3); the remembered value goes over the configured one.
+#[test]
+fn a_resumed_max_datagram_frame_size_is_not_lowered() {
+    use crate::v1::parameters::{ResumedParametersDecision, resume_tests::*};
+
+    let remembered = encoded::<Part>(frunk_core::hlist![Some(size(1200))]);
+    let cases = [
+        (Some(size(1199)), false),
+        (None, false),
+        (Some(size(1200)), true),
+        (Some(size(65535)), true),
+    ];
+    for (configured, accepted) in cases {
+        let configured = frunk_core::hlist![configured];
+        let outcome = resume::<Part, _>(
+            configured,
+            ResumedParametersDecision::UseConfigured,
+            &remembered,
+        );
+        assert_eq!((outcome.0, outcome.1), (accepted, configured));
+    }
+    // nothing remembered: any value, or none, is not lower
+    let none = encoded::<Part>(frunk_core::hlist![None]);
+    for configured in [None, Some(size(0))] {
+        let configured = frunk_core::hlist![configured];
+        let (accepted, ..) =
+            resume::<Part, _>(configured, ResumedParametersDecision::UseConfigured, &none);
+        assert!(accepted);
+    }
+    let (accepted, settled, _) = resume::<Part, _>(
+        frunk_core::hlist![Some(size(100))],
+        ResumedParametersDecision::UseRemembered,
+        &remembered,
+    );
+    assert!(accepted);
+    assert_eq!(settled, frunk_core::hlist![Some(size(1200))]);
+}

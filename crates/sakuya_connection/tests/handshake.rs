@@ -1127,6 +1127,7 @@ where
                 T,
                 DestinationConnectionIds = common::TestDestinationConnectionIds,
                 ImmediateClosePolicy = common::TestImmediateClosePolicy,
+                ResumedParametersPolicy = v1::parameters::UseConfiguredParameters,
                 ApplicationError = common::AppClose,
             >,
         >,
@@ -1176,6 +1177,7 @@ where
         first_local_connection_id,
         max_datagrams_per_send: NonZeroUsize::new(16).expect("not zero"),
         immediate_close_policy: common::TestImmediateClosePolicy,
+        resumed_parameters_policy: v1::parameters::UseConfiguredParameters,
         close_request: CloseRequestCell::new(),
         stream_set: Default::default(),
         connection_handle: Default::default(),
@@ -2401,8 +2403,8 @@ mod reliable {
     use std::cell::Cell;
 
     use sakuya_connection::{
-        reset_stream_at::{self, ResetAtError},
-        v1::parameters::PartSlots,
+        reset_stream_at::{self, ResetAtError, ResetStreamAtChoices, ResetStreamAtConnectionArgs},
+        v1::parameters::UseConfiguredParameters,
     };
     use sakuya_stream::receive::read::ReadError;
     use sakuya_wire::{
@@ -2414,6 +2416,9 @@ mod reliable {
     /// The parts of these connections: version 1, the watch, and the
     /// extension.
     type Parts = HList![v1::Part, watch::Part, reset_stream_at::Part];
+    // the DATAGRAM extension's tests compose this extension too
+    impl ResetStreamAtChoices for ServerChoices {}
+    impl ResetStreamAtChoices for ClientChoices {}
     sakuya_connection::composition!(impl for crate::ServerChoices: crate::ServerChoices, Parts);
     sakuya_connection::composition!(impl for crate::ClientChoices: crate::ClientChoices, Parts);
 
@@ -2423,10 +2428,13 @@ mod reliable {
         static ANNOUNCES: Cell<[bool; 2]> = const { Cell::new([true, true]) };
     }
 
-    /// The extension's slots of the side of `role`, as the test set them.
-    fn slots(role: Role) -> PartSlots<reset_stream_at::Part> {
+    /// The extension's facts of the side of `role`, as the test set them.
+    fn slots(role: Role) -> ResetStreamAtConnectionArgs {
         let announces = ANNOUNCES.with(|announces| announces.get()[index(role)]);
-        frunk_core::hlist![announces.then_some(ResetStreamAt)]
+        ResetStreamAtConnectionArgs {
+            transport_parameters: frunk_core::hlist![announces.then_some(ResetStreamAt)],
+            resumed_parameters_policy: UseConfiguredParameters,
+        }
     }
 
     harness!(server: [HNil, slots(Role::Server)], client: [HNil, slots(Role::Client)]);
@@ -2597,6 +2605,7 @@ mod datagram {
                 (size > 0).then(|| MaxDatagramFrameSize::new(VarInt::from_u32(size)))
             ],
             queues: LockedDatagramQueuesConfig::default(),
+            resumed_parameters_policy: Default::default(),
         }
     }
 
@@ -2606,11 +2615,21 @@ mod datagram {
     harness!(
         server: [
             HNil,
-            frunk_core::hlist![Some(sakuya_wire::reset_stream_at::ResetStreamAt)]
+            sakuya_connection::reset_stream_at::ResetStreamAtConnectionArgs {
+                transport_parameters: frunk_core::hlist![Some(
+                    sakuya_wire::reset_stream_at::ResetStreamAt
+                )],
+                resumed_parameters_policy: Default::default(),
+            }
         ] [datagram_args(Role::Server)],
         client: [
             HNil,
-            frunk_core::hlist![Some(sakuya_wire::reset_stream_at::ResetStreamAt)]
+            sakuya_connection::reset_stream_at::ResetStreamAtConnectionArgs {
+                transport_parameters: frunk_core::hlist![Some(
+                    sakuya_wire::reset_stream_at::ResetStreamAt
+                )],
+                resumed_parameters_policy: Default::default(),
+            }
         ] [datagram_args(Role::Client)]
     );
 

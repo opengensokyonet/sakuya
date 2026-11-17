@@ -1,18 +1,32 @@
 //! Transport parameters in a connection: the peer's, and each part's own,
 //! the error of a failure of reading the peer's, and the checks of version
 //! 1 on the connection IDs the peer's state (RFC 9000 §7.3).
+//!
+//! A server that resumes a connection settles each part's own parameters
+//! against those the ticket remembers
+//! ([`ResumeLocalTransportParameters`]): each part's policy
+//! ([`ResumedParametersPolicy`]) picks one of the three ways RFC 9000
+//! §7.4.1 allows, and the part holds to the rules of its parameters that
+//! 0-RTT relies on.
 
-use core::{convert::Infallible, marker::PhantomData, ops::Add};
+use core::{convert::Infallible, fmt, marker::PhantomData, ops::Add};
 
+use bytes::Bytes;
+use sakuya_tls::extension::alpn::ProtocolName;
 use sakuya_wire::{
     connection_id::ConnectionId,
     parameters::{ParameterList, ParametersOf, ParametersPart, codec::ReadParametersError},
     parts::{CoprodInjector, HCons, HNil, PartsError, Selector},
     v1::transport_parameters::{
         TransportParameterSlots, TransportParameterSpace,
-        codec::ReadTransportParametersError,
+        codec::{ReadTransportParametersError, read_remembered_transport_parameters},
         connection_id::{
             InitialSourceConnectionId, OriginalDestinationConnectionId, RetrySourceConnectionId,
+        },
+        integer::{
+            ActiveConnectionIdLimit, InitialMaxData, InitialMaxStreamDataBidiLocal,
+            InitialMaxStreamDataBidiRemote, InitialMaxStreamDataUni, InitialMaxStreamsBidi,
+            InitialMaxStreamsUni,
         },
     },
 };
@@ -112,6 +126,15 @@ impl<P> LocalTransportParameters<P> {
         match self {
             Self::Configured(parameters) => Some(parameters),
             Self::Sent(_) => None,
+        }
+    }
+
+    /// The configured parameters become what `settle` makes of them, as a
+    /// server that resumes settles them; they are not sent yet. Parameters
+    /// already sent stay as they were.
+    pub(crate) fn settle_configured(&mut self, settle: impl FnOnce(&P) -> P) {
+        if let Self::Configured(configured) = self {
+            *configured = settle(configured);
         }
     }
 
@@ -218,6 +241,350 @@ where
     fn send_local(lineage: &mut Lineage<'_, V>) -> TransportParameterSlots<Self> {
         let own = P::send_local(lineage);
         own + Ps::send_local(lineage)
+    }
+}
+
+// ---- resumption ----
+
+/// What a part's [`ResumedParametersPolicy`] picks for the parameters a
+/// server sends on a connection it resumes: the three ways RFC 9000 §7.4.1
+/// allows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResumedParametersDecision {
+    /// Reject 0-RTT; the part sends its parameters as configured.
+    Reject,
+    /// Accept 0-RTT and send the values remembered: each parameter the
+    /// ticket remembers as remembered, the others as configured.
+    UseRemembered,
+    /// Accept 0-RTT and send the parameters as configured. When one of
+    /// them is lower than the remembered value of a limit 0-RTT relies on,
+    /// which RFC 9000 §7.4.1 forbids, the part rejects 0-RTT instead.
+    UseConfigured,
+}
+
+/// What decides, for one part and a connection a server resumes, how the
+/// part's own transport parameters `P` go: its slots
+/// ([`PartSlots`]).
+///
+/// It only picks; the part holds to the rules of its parameters: a pick of
+/// the configured values that lowers a limit 0-RTT relies on rejects 0-RTT,
+/// so that a policy cannot break the protocol. When any part rejects, the
+/// connection rejects 0-RTT. It is asked only when the client resumes with
+/// a ticket.
+///
+/// Its type is the part's choice, and its value is in the connection node,
+/// from what the connection was made with. It sees neither the other parts'
+/// parameters nor the ticket's age, the peer's address or whether a Retry
+/// came first: a type that implements the policies of several parts
+/// coordinates them, and one that holds a handle to outside state sees the
+/// load.
+pub trait ResumedParametersPolicy<P> {
+    /// Pick for `remembered`, the part's parameters as the ticket remembers
+    /// them (only those 0-RTT remembers), `configured`, as they are
+    /// configured now, and `application_protocol`, the one selected for
+    /// this connection.
+    fn decide(
+        &mut self,
+        remembered: &P,
+        configured: &P,
+        application_protocol: Option<&ProtocolName<Bytes>>,
+    ) -> ResumedParametersDecision;
+}
+
+/// The policy that always sends the parameters as configured
+/// ([`ResumedParametersDecision::UseConfigured`]): 0-RTT is accepted while
+/// they lower no limit 0-RTT relies on.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct UseConfiguredParameters;
+
+impl<P> ResumedParametersPolicy<P> for UseConfiguredParameters {
+    fn decide(
+        &mut self,
+        _: &P,
+        _: &P,
+        _: Option<&ProtocolName<Bytes>>,
+    ) -> ResumedParametersDecision {
+        ResumedParametersDecision::UseConfigured
+    }
+}
+
+/// A part's [`ResumedParametersPolicy`] `Pol` in the connection node: one
+/// configuration component of each part that defines transport parameters,
+/// made from the part's `Args`. `S` is the part's slots ([`PartSlots`]),
+/// which tells the parts' components apart.
+pub struct PartResumedParametersPolicy<S, Pol> {
+    policy: Pol,
+    slots: PhantomData<fn() -> S>,
+}
+
+impl<S, Pol> PartResumedParametersPolicy<S, Pol> {
+    /// The component that holds `policy`.
+    pub fn new(policy: Pol) -> Self {
+        Self {
+            policy,
+            slots: PhantomData,
+        }
+    }
+
+    /// The policy.
+    #[cfg(test)]
+    pub(crate) fn policy(&self) -> &Pol {
+        &self.policy
+    }
+}
+
+impl<S, Pol: fmt::Debug> fmt::Debug for PartResumedParametersPolicy<S, Pol> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("PartResumedParametersPolicy")
+            .field(&self.policy)
+            .finish()
+    }
+}
+
+/// A part's share of settling this side's transport parameters for a
+/// connection a server resumes, from its own
+/// [`LocalTransportParameters`] and [`PartResumedParametersPolicy`] in the
+/// connection node, whose components are `V`. `I` is where they are,
+/// [`InNode`] or [`NoParameters`]; the compiler infers it.
+///
+/// A part that defines parameters implements it with the rules of its
+/// parameters that 0-RTT relies on; one that defines none accepts at once.
+pub trait ResumeLocalTransportParametersPart<V, I>:
+    ParametersPart<TransportParameterSpace>
+{
+    /// Settle the part's configured parameters for the resumption, before
+    /// they are sent: read the part's own from `remembered`, the whole
+    /// encoding of the parameters this side sent on the connection the
+    /// ticket came from (the other parts' are ignored), let the policy pick
+    /// with `application_protocol`, the one selected, and hold to the
+    /// part's rules. Return whether the part accepts 0-RTT.
+    ///
+    /// Remembered parameters that do not read reject 0-RTT. Parameters sent
+    /// already stay as they were, and reject it.
+    fn resume_local(
+        lineage: &mut Lineage<'_, V>,
+        remembered: &Bytes,
+        application_protocol: Option<&ProtocolName<Bytes>>,
+    ) -> bool;
+}
+
+/// A part that defines no parameters has nothing to settle, and accepts.
+impl<P, V> ResumeLocalTransportParametersPart<V, NoParameters> for P
+where
+    P: ParametersPart<TransportParameterSpace, Parameters = HNil>,
+{
+    fn resume_local(_: &mut Lineage<'_, V>, _: &Bytes, _: Option<&ProtocolName<Bytes>>) -> bool {
+        true
+    }
+}
+
+/// Settling this side's transport parameters for a connection a server
+/// resumes, of a list of parts: each part's
+/// ([`ResumeLocalTransportParametersPart`]), in the order of the parts.
+/// `Is` holds the place of each part's; the compiler infers it.
+///
+/// The connection accepts 0-RTT when every part accepts. Every part settles
+/// its own even when another rejects: a part whose policy picked the
+/// remembered values sends them all the same, and they are valid values to
+/// send.
+pub trait ResumeLocalTransportParameters<V, Is>: ParametersOf<TransportParameterSpace> {
+    /// Settle every part's configured parameters, as
+    /// [`ResumeLocalTransportParametersPart::resume_local`] says; return
+    /// whether every part accepts 0-RTT.
+    fn resume_local(
+        lineage: &mut Lineage<'_, V>,
+        remembered: &Bytes,
+        application_protocol: Option<&ProtocolName<Bytes>>,
+    ) -> bool;
+}
+
+impl<V> ResumeLocalTransportParameters<V, HNil> for HNil {
+    fn resume_local(_: &mut Lineage<'_, V>, _: &Bytes, _: Option<&ProtocolName<Bytes>>) -> bool {
+        true
+    }
+}
+
+impl<P, Ps, V, I, Is> ResumeLocalTransportParameters<V, HCons<I, Is>> for HCons<P, Ps>
+where
+    P: ResumeLocalTransportParametersPart<V, I>,
+    Ps: ResumeLocalTransportParameters<V, Is>,
+    HCons<P, Ps>: ParametersOf<TransportParameterSpace>,
+{
+    fn resume_local(
+        lineage: &mut Lineage<'_, V>,
+        remembered: &Bytes,
+        application_protocol: Option<&ProtocolName<Bytes>>,
+    ) -> bool {
+        let own = P::resume_local(lineage, remembered, application_protocol);
+        // every part settles its own, whatever the others decide
+        let rest = Ps::resume_local(lineage, remembered, application_protocol);
+        own && rest
+    }
+}
+
+/// Slots that take, slot by slot, the parameter of other slots of the same
+/// types where those hold one.
+pub(crate) trait OverlaySlots {
+    /// Each slot of `over` that holds a parameter replaces this one's.
+    fn overlay(&mut self, over: &Self);
+}
+
+impl OverlaySlots for HNil {
+    fn overlay(&mut self, _: &HNil) {}
+}
+
+impl<H: Clone, T: OverlaySlots> OverlaySlots for HCons<Option<H>, T> {
+    fn overlay(&mut self, over: &Self) {
+        if let Some(parameter) = &over.head {
+            self.head = Some(parameter.clone());
+        }
+        self.tail.overlay(&over.tail);
+    }
+}
+
+/// What the part `P` settles its configured parameters to on a resumption,
+/// and whether it accepts 0-RTT, from `remembered`, its parameters as the
+/// ticket remembers them (`None` when they do not read), `configured` and
+/// what `policy` picks for `application_protocol`. `limits_kept` tells
+/// whether parameters sent keep the rules of the part's parameters that
+/// 0-RTT relies on against the remembered ones.
+pub(crate) fn settle_resumed<S, Pol>(
+    remembered: Option<&S>,
+    configured: &S,
+    policy: &mut Pol,
+    application_protocol: Option<&ProtocolName<Bytes>>,
+    limits_kept: impl FnOnce(&S, &S) -> bool,
+) -> (S, bool)
+where
+    S: Clone + OverlaySlots,
+    Pol: ResumedParametersPolicy<S>,
+{
+    let Some(remembered) = remembered else {
+        return (configured.clone(), false);
+    };
+    match policy.decide(remembered, configured, application_protocol) {
+        ResumedParametersDecision::Reject => (configured.clone(), false),
+        ResumedParametersDecision::UseRemembered => {
+            let mut sent = configured.clone();
+            sent.overlay(remembered);
+            (sent, true)
+        }
+        ResumedParametersDecision::UseConfigured => {
+            let kept = limits_kept(remembered, configured);
+            (configured.clone(), kept)
+        }
+    }
+}
+
+/// [`ResumeLocalTransportParametersPart::resume_local`] for the part `P`,
+/// whose configured parameters are at `I` and whose policy `Pol` is at
+/// `Ip` among the components `V`, with the rules `limits_kept` of its
+/// parameters ([`settle_resumed`]).
+pub(crate) fn resume_part<P, V, I, Ip, Pol>(
+    lineage: &mut Lineage<'_, V>,
+    remembered: &Bytes,
+    application_protocol: Option<&ProtocolName<Bytes>>,
+    limits_kept: impl FnOnce(&PartSlots<P>, &PartSlots<P>) -> bool,
+) -> bool
+where
+    P: ParametersPart<TransportParameterSpace>,
+    HCons<P, HNil>: ParametersOf<
+            TransportParameterSpace,
+            Parameters = <P as ParametersPart<TransportParameterSpace>>::Parameters,
+        >,
+    PartSlots<P>: Clone + OverlaySlots,
+    V: GetAt<LocalTransportParameters<PartSlots<P>>, I>
+        + GetAt<PartResumedParametersPolicy<PartSlots<P>, Pol>, Ip>,
+    Pol: ResumedParametersPolicy<PartSlots<P>>,
+{
+    let Some(configured) = lineage
+        .get::<LocalTransportParameters<PartSlots<P>>, I>()
+        .configured()
+        .cloned()
+    else {
+        return false;
+    };
+    // the part's own alone: the other parts' parameters are unknown to the
+    // list, and dropped
+    let mut source = remembered.clone();
+    let remembered =
+        read_remembered_transport_parameters::<HCons<P, HNil>, _>(&mut source, PhantomData).ok();
+    let policy = &mut lineage
+        .get_mut::<PartResumedParametersPolicy<PartSlots<P>, Pol>, Ip>()
+        .policy;
+    let (settled, accepted) = settle_resumed(
+        remembered.as_ref(),
+        &configured,
+        policy,
+        application_protocol,
+        limits_kept,
+    );
+    lineage
+        .get_mut::<LocalTransportParameters<PartSlots<P>>, I>()
+        .settle_configured(|_| settled);
+    accepted
+}
+
+/// Whether a limit `sent` is not lower than `remembered`, each its type's
+/// default when absent.
+pub(crate) fn not_lowered<P: Copy + Default + Ord>(remembered: Option<P>, sent: Option<P>) -> bool {
+    sent.unwrap_or_default() >= remembered.unwrap_or_default()
+}
+
+/// Whether version 1's parameters `sent` lower none of the seven limits
+/// 0-RTT relies on below the `remembered` ones: `active_connection_id_limit`,
+/// `initial_max_data`, the three `initial_max_stream_data_*` and the two
+/// `initial_max_streams_*`, each its default when absent, 2 for the first
+/// and 0 for the others (RFC 9000 §7.4.1, MUST NOT; §18.2).
+pub(crate) fn v1_limits_kept(
+    remembered: &TransportParameterSlots,
+    sent: &TransportParameterSlots,
+) -> bool {
+    fn kept<P: Copy + Default + Ord, I>(
+        remembered: &TransportParameterSlots,
+        sent: &TransportParameterSlots,
+    ) -> bool
+    where
+        TransportParameterSlots: Selector<Option<P>, I>,
+    {
+        not_lowered(
+            *Selector::<Option<P>, I>::get(remembered),
+            *Selector::<Option<P>, I>::get(sent),
+        )
+    }
+    kept::<ActiveConnectionIdLimit, _>(remembered, sent)
+        && kept::<InitialMaxData, _>(remembered, sent)
+        && kept::<InitialMaxStreamDataBidiLocal, _>(remembered, sent)
+        && kept::<InitialMaxStreamDataBidiRemote, _>(remembered, sent)
+        && kept::<InitialMaxStreamDataUni, _>(remembered, sent)
+        && kept::<InitialMaxStreamsBidi, _>(remembered, sent)
+        && kept::<InitialMaxStreamsUni, _>(remembered, sent)
+}
+
+/// Version 1 holds to the seven limits 0-RTT relies on: sending the
+/// configured parameters, it accepts 0-RTT only when none of
+/// `active_connection_id_limit`, `initial_max_data`, the three
+/// `initial_max_stream_data_*` and the two `initial_max_streams_*` is
+/// lower than the one remembered, each its default when absent (RFC 9000
+/// §7.4.1). Its connection IDs are not among the parameters 0-RTT
+/// remembers; they are filled in when the parameters are sent.
+impl<V, I, Ip, Pol> ResumeLocalTransportParametersPart<V, InNode<(I, Ip, Pol)>> for super::Part
+where
+    V: GetAt<LocalTransportParameters<TransportParameterSlots>, I>
+        + GetAt<PartResumedParametersPolicy<TransportParameterSlots, Pol>, Ip>,
+    Pol: ResumedParametersPolicy<TransportParameterSlots>,
+{
+    fn resume_local(
+        lineage: &mut Lineage<'_, V>,
+        remembered: &Bytes,
+        application_protocol: Option<&ProtocolName<Bytes>>,
+    ) -> bool {
+        resume_part::<Self, V, I, Ip, Pol>(
+            lineage,
+            remembered,
+            application_protocol,
+            v1_limits_kept,
+        )
     }
 }
 
@@ -351,6 +718,94 @@ where
             );
             Ok(())
         }
+    }
+}
+
+/// What the tests of each part's settling on resumption share.
+#[cfg(test)]
+pub(crate) mod resume_tests {
+    use bytes::Bytes;
+    use sakuya_wire::{
+        parameters::ParametersPart,
+        parts::HList,
+        v1::{
+            role::Role,
+            transport_parameters::{TransportParameterSpace, codec::write_transport_parameters},
+        },
+    };
+
+    use super::{
+        InNode, LocalTransportParameters, PartResumedParametersPolicy, PartSlots,
+        ResumeLocalTransportParametersPart, ResumedParametersDecision, ResumedParametersPolicy,
+    };
+    use crate::take::{Lineage, TakenPositions};
+
+    /// A policy that picks `0`, and keeps what it was asked with.
+    #[derive(Debug, Clone)]
+    pub(crate) struct Picks<S>(
+        pub(crate) ResumedParametersDecision,
+        pub(crate) Option<(S, S)>,
+    );
+
+    impl<S: Clone> ResumedParametersPolicy<S> for Picks<S> {
+        fn decide(
+            &mut self,
+            remembered: &S,
+            configured: &S,
+            _: Option<&sakuya_tls::extension::alpn::ProtocolName<Bytes>>,
+        ) -> ResumedParametersDecision {
+            self.1 = Some((remembered.clone(), configured.clone()));
+            self.0
+        }
+    }
+
+    /// The parameters `slots` of the part `P` alone, as a server sent them.
+    pub(crate) fn encoded<P>(slots: PartSlots<P>) -> Bytes
+    where
+        P: ParametersPart<TransportParameterSpace>,
+        HList![P]: sakuya_wire::parameters::ParametersOf<
+                TransportParameterSpace,
+                Parameters = <P as ParametersPart<TransportParameterSpace>>::Parameters,
+            >,
+    {
+        let mut parameters =
+            sakuya_wire::v1::transport_parameters::TransportParameters::<Bytes, HList![P]>::new();
+        parameters.known = slots;
+        let mut encoded = Vec::new();
+        write_transport_parameters(&mut encoded, parameters, Role::Server)
+            .expect("valid parameters");
+        Bytes::from(encoded)
+    }
+
+    /// What the part `P`, configured with `configured` and picking
+    /// `decision`, settles on against `remembered`: whether it accepts,
+    /// what it is to send, and what its policy was asked with.
+    #[allow(clippy::type_complexity)] // the outcome of a settling
+    pub(crate) fn resume<P, I>(
+        configured: PartSlots<P>,
+        decision: ResumedParametersDecision,
+        remembered: &Bytes,
+    ) -> (bool, PartSlots<P>, Option<(PartSlots<P>, PartSlots<P>)>)
+    where
+        P: ParametersPart<TransportParameterSpace>,
+        PartSlots<P>: Clone,
+        for<'a> P: ResumeLocalTransportParametersPart<
+                HList![
+                    &'a mut LocalTransportParameters<PartSlots<P>>,
+                    &'a mut PartResumedParametersPolicy<PartSlots<P>, Picks<PartSlots<P>>>
+                ],
+                InNode<I>,
+            >,
+    {
+        let mut local = LocalTransportParameters::Configured(configured);
+        let mut policy = PartResumedParametersPolicy::new(Picks(decision, None));
+        let mut taken = TakenPositions::default();
+        let accepted = {
+            let mut lineage = Lineage::new(frunk_core::hlist![&mut local, &mut policy], &mut taken);
+            P::resume_local(&mut lineage, remembered, None)
+        };
+        let settled = local.configured().expect("still configured").clone();
+        (accepted, settled, policy.policy().1.clone())
     }
 }
 
@@ -581,5 +1036,191 @@ mod tests {
                 if received == id(4)
         ));
         assert!(check_server_destination::<_, _, _>(&parameters.known, id(2), Some(id(4))).is_ok());
+    }
+
+    mod resumption {
+        use bytes::Bytes;
+        use sakuya_wire::{
+            v1::{
+                stream_count::StreamCount,
+                transport_parameters::{
+                    TransportParameters,
+                    integer::{
+                        ActiveConnectionIdLimit, InitialMaxData, InitialMaxStreamDataBidiLocal,
+                        InitialMaxStreamDataBidiRemote, InitialMaxStreamDataUni,
+                        InitialMaxStreamsBidi, InitialMaxStreamsUni, MaxAckDelay, MaxIdleTimeout,
+                    },
+                },
+            },
+            var_int::VarInt,
+        };
+
+        use super::super::{
+            ResumedParametersDecision, TransportParameterSlots, resume_tests::*, v1_limits_kept,
+        };
+        use crate::v1::Part;
+
+        /// Version 1's parameters with each of the seven limits 0-RTT
+        /// relies on at `value`, 2 more for `active_connection_id_limit`.
+        fn limits(value: u32) -> TransportParameters<Bytes> {
+            let mut parameters = TransportParameters::<Bytes>::new();
+            parameters.set(ActiveConnectionIdLimit::new(VarInt::from_u32(value + 2)).unwrap());
+            parameters.set(InitialMaxData::new(VarInt::from_u32(value)));
+            parameters.set(InitialMaxStreamDataBidiLocal::new(VarInt::from_u32(value)));
+            parameters.set(InitialMaxStreamDataBidiRemote::new(VarInt::from_u32(value)));
+            parameters.set(InitialMaxStreamDataUni::new(VarInt::from_u32(value)));
+            parameters.set(InitialMaxStreamsBidi::new(
+                StreamCount::new(u64::from(value)).unwrap(),
+            ));
+            parameters.set(InitialMaxStreamsUni::new(
+                StreamCount::new(u64::from(value)).unwrap(),
+            ));
+            parameters
+        }
+
+        /// Each of the seven, lowered by one below `limits(10)`.
+        fn each_lowered() -> Vec<TransportParameterSlots> {
+            let lowered: [fn(&mut TransportParameters<Bytes>); 7] = [
+                |p| {
+                    p.set(ActiveConnectionIdLimit::new(VarInt::from_u32(11)).unwrap());
+                },
+                |p| {
+                    p.set(InitialMaxData::new(VarInt::from_u32(9)));
+                },
+                |p| {
+                    p.set(InitialMaxStreamDataBidiLocal::new(VarInt::from_u32(9)));
+                },
+                |p| {
+                    p.set(InitialMaxStreamDataBidiRemote::new(VarInt::from_u32(9)));
+                },
+                |p| {
+                    p.set(InitialMaxStreamDataUni::new(VarInt::from_u32(9)));
+                },
+                |p| {
+                    p.set(InitialMaxStreamsBidi::new(StreamCount::new(9).unwrap()));
+                },
+                |p| {
+                    p.set(InitialMaxStreamsUni::new(StreamCount::new(9).unwrap()));
+                },
+            ];
+            lowered
+                .into_iter()
+                .map(|lower| {
+                    let mut parameters = limits(10);
+                    lower(&mut parameters);
+                    parameters.known
+                })
+                .collect()
+        }
+
+        #[test]
+        fn configured_values_that_lower_a_limit_reject_0_rtt() {
+            let remembered = encoded::<Part>(limits(10).known);
+            for configured in each_lowered() {
+                let (accepted, settled, _) = resume::<Part, _>(
+                    configured,
+                    ResumedParametersDecision::UseConfigured,
+                    &remembered,
+                );
+                assert!(!accepted);
+                // the configured values are sent all the same
+                assert_eq!(settled, configured);
+            }
+        }
+
+        #[test]
+        fn configured_values_that_lower_no_limit_accept_0_rtt() {
+            let remembered = encoded::<Part>(limits(10).known);
+            for configured in [limits(10).known, limits(20).known] {
+                let (accepted, settled, _) = resume::<Part, _>(
+                    configured,
+                    ResumedParametersDecision::UseConfigured,
+                    &remembered,
+                );
+                assert!(accepted);
+                assert_eq!(settled, configured);
+            }
+        }
+
+        #[test]
+        fn absent_limits_are_their_defaults() {
+            let none = TransportParameters::<Bytes>::new().known;
+            // nothing remembered: 2 and 0, which nothing lowers
+            assert!(v1_limits_kept(&none, &none));
+            let mut two = TransportParameters::<Bytes>::new();
+            two.set(ActiveConnectionIdLimit::new(VarInt::from_u32(2)).unwrap());
+            two.set(InitialMaxData::new(VarInt::from_u32(0)));
+            assert!(v1_limits_kept(&two.known, &none));
+            assert!(v1_limits_kept(&none, &two.known));
+            // a remembered limit above the default is lowered by its absence
+            assert!(!v1_limits_kept(&limits(10).known, &none));
+        }
+
+        #[test]
+        fn the_remembered_values_are_sent_over_those_configured() {
+            let mut remembered = limits(10);
+            // not remembered for 0-RTT: dropped when the ticket is read
+            remembered.set(MaxAckDelay::new(VarInt::from_u32(40)).unwrap());
+            let mut configured = limits(5);
+            configured.set(MaxIdleTimeout::new(VarInt::from_u32(30_000)));
+            configured.set(MaxAckDelay::new(VarInt::from_u32(20)).unwrap());
+            let (accepted, settled, asked) = resume::<Part, _>(
+                configured.known,
+                ResumedParametersDecision::UseRemembered,
+                &encoded::<Part>(remembered.known),
+            );
+            assert!(accepted);
+            let mut expected = limits(10);
+            expected.set(MaxIdleTimeout::new(VarInt::from_u32(30_000)));
+            expected.set(MaxAckDelay::new(VarInt::from_u32(20)).unwrap());
+            assert_eq!(settled, expected.known);
+            // the policy saw the remembered values 0-RTT keeps, and those
+            // configured
+            let (seen_remembered, seen_configured) = asked.expect("asked");
+            assert_eq!(seen_remembered, limits(10).known);
+            assert_eq!(seen_configured, configured.known);
+        }
+
+        #[test]
+        fn a_policy_that_rejects_sends_the_configured_values() {
+            let configured = limits(20).known;
+            let (accepted, settled, _) = resume::<Part, _>(
+                configured,
+                ResumedParametersDecision::Reject,
+                &encoded::<Part>(limits(10).known),
+            );
+            assert!(!accepted);
+            assert_eq!(settled, configured);
+        }
+
+        #[test]
+        fn remembered_parameters_that_do_not_read_reject_0_rtt() {
+            let configured = limits(20).known;
+            // max_idle_timeout twice
+            let broken = Bytes::from_static(&[0x01, 0x01, 0x05, 0x01, 0x01, 0x05]);
+            for decision in [
+                ResumedParametersDecision::UseConfigured,
+                ResumedParametersDecision::UseRemembered,
+            ] {
+                let (accepted, settled, asked) = resume::<Part, _>(configured, decision, &broken);
+                assert!(!accepted);
+                assert_eq!(settled, configured);
+                assert!(asked.is_none(), "the policy is not asked");
+            }
+        }
+
+        #[test]
+        fn the_parameters_of_other_parts_are_ignored() {
+            let mut encoding = encoded::<Part>(limits(10).known).to_vec();
+            // a parameter no type of version 1 claims
+            encoding.extend_from_slice(&[0x2a, 0x00]);
+            let (accepted, _, asked) = resume::<Part, _>(
+                limits(10).known,
+                ResumedParametersDecision::UseConfigured,
+                &Bytes::from(encoding),
+            );
+            assert!(accepted);
+            assert_eq!(asked.expect("asked").0, limits(10).known);
+        }
     }
 }
