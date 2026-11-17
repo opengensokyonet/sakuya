@@ -10,7 +10,7 @@ use crate::{
     pacing::{Pacer, PacingInput},
     rtt::RttEstimate,
 };
-use core::time::Duration;
+use core::{num::NonZeroUsize, time::Duration};
 use std::collections::VecDeque;
 
 fn ms(value: u64) -> Duration {
@@ -286,13 +286,23 @@ fn path() -> Path {
 #[test]
 fn the_configuration_is_checked() {
     let window = CongestionWindowConfig::RECOMMENDED;
+    let burst = NonZeroUsize::new(256).unwrap();
     assert_eq!(
-        BbrConfig::new(window, ms(1), 0),
+        BbrConfig::new(window, ms(1), burst, 0),
         Err(BbrConfigError::ZeroSeed)
     );
-    let config = BbrConfig::new(window, ms(1), 7).unwrap();
+    // The initial window is 10 datagrams.
+    assert_eq!(
+        BbrConfig::new(window, ms(1), NonZeroUsize::new(9).unwrap(), 7),
+        Err(BbrConfigError::MaxBurstBelowInitialWindow {
+            max_burst_datagrams: NonZeroUsize::new(9).unwrap(),
+            initial_window_datagrams: 10,
+        })
+    );
+    let config = BbrConfig::new(window, ms(1), NonZeroUsize::new(10).unwrap(), 7).unwrap();
     assert_eq!(config.seed(), 7);
     assert_eq!(config.timer_granularity(), ms(1));
+    assert_eq!(config.max_burst_datagrams().get(), 10);
 }
 
 #[test]
@@ -470,7 +480,8 @@ fn a_restart_after_idle_skips_probe_rtt() {
 #[test]
 fn startup_ends_on_high_loss() {
     let window = CongestionWindowConfig::new(InitialWindow::new(20, 24000), 2).unwrap();
-    let mut bbr = Bbr::new(BbrConfig::new(window, ms(1), 1).unwrap(), 1200);
+    let burst = NonZeroUsize::new(256).unwrap();
+    let mut bbr = Bbr::new(BbrConfig::new(window, ms(1), burst, 1).unwrap(), 1200);
     let mut packets: VecDeque<_> = (1..=20)
         .map(|n| seal(&mut bbr, 0, 1200 * n, false))
         .collect();
@@ -600,14 +611,14 @@ fn ce_marks_count_as_losses_of_the_round() {
 }
 
 #[test]
-fn the_pacer_refills_at_the_pacing_rate_up_to_the_send_quantum() {
+fn the_pacer_refills_at_the_pacing_rate_up_to_two_timer_granularities() {
     let mut bbr = bbr();
     assert_eq!(Pacer::<Duration>::next_release(&bbr), None);
     bbr.refill(Duration::ZERO, input());
-    // Full at the first refill: the send quantum of 33240 bytes.
-    assert_eq!(bbr.allowance(), 33240);
+    // Full at the first refill: 33.24 MB/s over 2 ms, 66480 bytes.
+    assert_eq!(bbr.allowance(), 66480);
     assert_eq!(Pacer::<Duration>::next_release(&bbr), None);
-    bbr.on_charged(33240);
+    bbr.on_charged(66480);
     // 1200 bytes at 33.24 MB/s: 36101.08 ns, rounded up.
     assert_eq!(
         Pacer::<Duration>::next_release(&bbr),
@@ -625,11 +636,28 @@ fn the_pacer_refills_at_the_pacing_rate_up_to_the_send_quantum() {
     bbr.refill(release, input());
     assert_eq!(bbr.allowance(), 1200);
     assert_eq!(Pacer::<Duration>::next_release(&bbr), None);
-    // Never more than the send quantum.
+    // Never more than two timer granularities' worth.
     bbr.refill(ms(100), input());
-    assert_eq!(bbr.allowance(), 33240);
-    bbr.on_charged(40000);
+    assert_eq!(bbr.allowance(), 66480);
+    bbr.on_charged(70000);
     assert_eq!(bbr.allowance(), 0);
+}
+
+#[test]
+fn the_pacers_burst_is_at_least_the_initial_window_and_at_most_the_configured_datagrams() {
+    let window = CongestionWindowConfig::RECOMMENDED;
+    // 33.24 MB/s over 2 × 100 µs is 6648 bytes, below the initial window.
+    let fine = BbrConfig::new(window, micros(100), NonZeroUsize::new(256).unwrap(), 1).unwrap();
+    let mut bbr = Bbr::new(fine, 1200);
+    bbr.refill(Duration::ZERO, input());
+    assert_eq!(bbr.allowance(), 12000);
+    // 33.24 MB/s over 2 × 10 ms is 664800 bytes, above 20 datagrams.
+    let coarse = BbrConfig::new(window, ms(10), NonZeroUsize::new(20).unwrap(), 1).unwrap();
+    let mut bbr = Bbr::new(coarse, 1200);
+    bbr.refill(Duration::ZERO, input());
+    assert_eq!(bbr.allowance(), 24000);
+    // The send quantum stays the draft's: 1 ms of the rate.
+    assert_eq!(bbr.send_quantum(), 33240);
 }
 
 #[test]

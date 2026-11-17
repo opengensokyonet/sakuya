@@ -236,8 +236,8 @@ fn a_bbr_link_path_part_is_lent_as_it_is() {
     assert_eq!(RttEstimator::<Duration>::estimate(&rtt).smoothed, ms(333));
     assert_eq!(window_left(&mut factory, &mut part, &(), 4800), 7200);
     // BBR paces itself: the refill through the lent access filled its
-    // bucket to the send quantum, 2.77 × 12000 bytes in 1 ms.
-    assert_eq!(Pacer::<Duration>::allowance(&part), 33240);
+    // bucket to two timer granularities of 2.77 × 12000 bytes per ms.
+    assert_eq!(Pacer::<Duration>::allowance(&part), 66480);
     // A loss through the lent access starts a loss recovery in the part,
     // without lowering the window.
     let access = LendCongestion::<Duration, ()>::lend(&mut factory, &mut part, &());
@@ -274,8 +274,9 @@ fn the_deadline_of_a_bbr_part_is_its_next_release() {
     };
     let _ = window_left(&mut factory, &mut part, &(), 0);
     assert_eq!(deadline(&factory, &part), None);
+    let allowance = Pacer::<Duration>::allowance(&part);
     let access = LendCongestion::<Duration, ()>::lend(&mut factory, &mut part, &());
-    access.on_charged(33240);
+    access.on_charged(allowance);
     let release = deadline(&factory, &part).expect("a release after spending");
     assert!(release > ms(0));
     assert_eq!(Some(release), Pacer::<Duration>::next_release(&part));

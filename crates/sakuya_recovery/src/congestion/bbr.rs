@@ -14,7 +14,12 @@
 //! 10 s.
 //!
 //! [`Bbr`] is its own pacer: it implements [`Pacer`] with its pacing rate
-//! and send quantum, and ignores the window and RTT of [`PacingInput`].
+//! and ignores the window and RTT of [`PacingInput`]. Its bucket holds what
+//! the pacing rate sends in two timer granularities, as
+//! [`TokenBucketPacer`](crate::pacing::TokenBucketPacer)'s does, not the
+//! send quantum: the draft's send quantum bounds one aggregate of a pacer
+//! that releases at any instant, and this one releases at most once per
+//! timer granularity.
 //!
 //! # The events of the trait
 //!
@@ -66,12 +71,12 @@ use crate::{
     pto::PtoPolicy,
 };
 use core::{
-    num::NonZeroU64,
+    num::{NonZeroU64, NonZeroUsize},
     ops::{Add, Sub},
     time::Duration,
 };
 use sakuya_link::EcnMarking;
-use snafu::{OptionExt, Snafu};
+use snafu::{OptionExt, Snafu, ensure};
 
 /// `BBR.StartupPacingGain`, about 4 × ln 2 (§2.5).
 const STARTUP_PACING_GAIN: f64 = 2.77;
@@ -111,6 +116,8 @@ const MIN_RTT_FILTER_LEN: Duration = Duration::from_secs(10);
 const PROBE_RTT_DURATION: Duration = Duration::from_millis(200);
 /// The upper bound of the send quantum (§5.6.3).
 const MAX_SEND_QUANTUM: usize = 64 * 1024;
+/// The interval of the send quantum (§5.6.3).
+const SEND_QUANTUM_INTERVAL: Duration = Duration::from_millis(1);
 /// The upper bound of the rounds of the Reno coexistence time scale
 /// (§5.3.3.8.3).
 const RENO_ROUNDS_BOUND: u64 = 63;
@@ -128,41 +135,59 @@ const RECOMMENDED_SEED: NonZeroU64 = NonZeroU64::new(0x9e37_79b9_7f4a_7c15).unwr
 pub struct BbrConfig {
     window: CongestionWindowConfig,
     timer_granularity: Duration,
+    max_burst_datagrams: NonZeroUsize,
     seed: NonZeroU64,
 }
 
 impl BbrConfig {
     /// The constants given: the initial and minimum windows, the precision
-    /// of the clock's timers, and the seed of the random choices.
+    /// of the clock's timers, the most datagrams the pacer lets go at once,
+    /// and the seed of the random choices.
     ///
-    /// The send quantum is what the pacing rate sends in one timer
-    /// granularity (§5.6.3 says 1 ms, and allows other choices), so that a
-    /// pacer released once per granularity keeps the rate.
+    /// The pacer's burst is what the pacing rate sends in two timer
+    /// granularities, at least the initial window and at most
+    /// `max_burst_datagrams` datagrams, the burst limit of
+    /// [`TokenBucketPacer`](crate::pacing::TokenBucketPacer).
     ///
     /// # Errors
     ///
-    /// [`BbrConfigError::ZeroSeed`] if `seed` is zero: the generator would
-    /// give only zeros.
+    /// - [`BbrConfigError::MaxBurstBelowInitialWindow`] if
+    ///   `max_burst_datagrams` is fewer datagrams than the initial window.
+    /// - [`BbrConfigError::ZeroSeed`] if `seed` is zero: the generator
+    ///   would give only zeros.
     pub fn new(
         window: CongestionWindowConfig,
         timer_granularity: Duration,
+        max_burst_datagrams: NonZeroUsize,
         seed: u64,
     ) -> Result<Self, BbrConfigError> {
+        let initial_window_datagrams = window.initial_window().datagrams();
+        ensure!(
+            max_burst_datagrams.get() >= initial_window_datagrams,
+            MaxBurstBelowInitialWindowSnafu {
+                max_burst_datagrams,
+                initial_window_datagrams,
+            }
+        );
         let seed = NonZeroU64::new(seed).context(ZeroSeedSnafu)?;
         Ok(Self {
             window,
             timer_granularity,
+            max_burst_datagrams,
             seed,
         })
     }
 
     /// The defaults for a clock whose timers fire with a precision of
     /// `timer_granularity`: the windows of
-    /// [`CongestionWindowConfig::RECOMMENDED`] and a fixed seed.
+    /// [`CongestionWindowConfig::RECOMMENDED`], a burst of at most
+    /// [`DEFAULT_MAX_BURST_DATAGRAMS`](crate::pacing::DEFAULT_MAX_BURST_DATAGRAMS)
+    /// and a fixed seed.
     pub const fn recommended(timer_granularity: Duration) -> Self {
         Self {
             window: CongestionWindowConfig::RECOMMENDED,
             timer_granularity,
+            max_burst_datagrams: crate::pacing::DEFAULT_MAX_BURST_DATAGRAMS,
             seed: RECOMMENDED_SEED,
         }
     }
@@ -175,6 +200,11 @@ impl BbrConfig {
     /// The precision of the clock's timers.
     pub const fn timer_granularity(&self) -> Duration {
         self.timer_granularity
+    }
+
+    /// The most datagrams the pacer lets go at once.
+    pub const fn max_burst_datagrams(&self) -> NonZeroUsize {
+        self.max_burst_datagrams
     }
 
     /// The seed of the random choices, above zero.
@@ -191,6 +221,16 @@ impl BbrConfig {
 /// A [`BbrConfig`] breaks a rule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
 pub enum BbrConfigError {
+    /// The burst limit holds fewer datagrams than the initial window.
+    #[snafu(display(
+        "burst limit of {max_burst_datagrams} datagrams is below the initial window of {initial_window_datagrams}"
+    ))]
+    MaxBurstBelowInitialWindow {
+        /// The rejected limit.
+        max_burst_datagrams: NonZeroUsize,
+        /// The datagrams of the initial window, above the limit.
+        initial_window_datagrams: usize,
+    },
     /// The seed of the random choices is zero.
     #[snafu(display("random seed is zero"))]
     ZeroSeed,
@@ -389,7 +429,7 @@ struct Ack<I> {
 }
 
 /// The bucket of the pacer: the bytes the pacing rate has earned, up to
-/// the send quantum.
+/// the burst limit.
 #[derive(Clone, Copy, Debug)]
 struct PacingBucket<I> {
     tokens: usize,
@@ -566,7 +606,9 @@ impl<I> Bbr<I> {
         self.pacing_rate
     }
 
-    /// The send quantum, in bytes: the most the pacer lets go at once.
+    /// The send quantum `C.send_quantum`, in bytes (§5.6.3): the offload
+    /// budget of the window's quantization budget. The pacer's burst limit
+    /// does not follow it.
     pub const fn send_quantum(&self) -> usize {
         self.send_quantum
     }
@@ -610,19 +652,31 @@ impl<I> Bbr<I> {
         }
     }
 
-    /// SetSendQuantum (§5.6.3), with the timer granularity in place of
-    /// 1 ms.
+    /// SetSendQuantum (§5.6.3).
     fn set_send_quantum(&mut self) {
-        let granularity = self.config.timer_granularity.as_secs_f64();
-        self.send_quantum = ((self.pacing_rate * granularity) as usize)
+        let interval = SEND_QUANTUM_INTERVAL.as_secs_f64();
+        self.send_quantum = ((self.pacing_rate * interval) as usize)
             .min(MAX_SEND_QUANTUM)
             .max(self.max_datagram_size.saturating_mul(2));
     }
 
-    /// The bucket's capacity, for a refill with `max_datagram_size`: the
-    /// send quantum, at least two datagrams.
+    /// The bucket's capacity, for a refill with `max_datagram_size`: what
+    /// the pacing rate sends in two timer granularities, at least the
+    /// initial window and at most the configured burst, as the burst limit
+    /// of [`TokenBucketPacer`](crate::pacing::TokenBucketPacer) (RFC 9002
+    /// §7.7: bursts SHOULD stay within the initial window, and MAY be
+    /// larger where the path is known to absorb them).
     fn bucket_capacity(&self, max_datagram_size: usize) -> usize {
-        self.send_quantum.max(max_datagram_size.saturating_mul(2))
+        let two_granularities = self.config.timer_granularity.saturating_mul(2);
+        let from_rate = (self.pacing_rate * two_granularities.as_secs_f64()) as usize;
+        from_rate
+            .max(self.config.window.initial_bytes(max_datagram_size))
+            .min(
+                self.config
+                    .max_burst_datagrams
+                    .get()
+                    .saturating_mul(max_datagram_size),
+            )
     }
 
     /// `C.is_cwnd_limited`.
@@ -1518,9 +1572,9 @@ impl<I: Ord + Copy + Add<Duration, Output = I> + Sub<Output = Duration>> Congest
     }
 }
 
-/// A token bucket refilled at the pacing rate up to the send quantum, at
-/// least two datagrams (§5.6.2, §5.6.3); the window and RTT of the input
-/// are not used.
+/// A token bucket refilled at the pacing rate (§5.6.2) up to the burst
+/// limit of [`BbrConfig::new`]; the window and RTT of the input are not
+/// used.
 ///
 /// The bucket is full at the first refill. A refill that earns less than a
 /// byte keeps the time it covered for the next one. It holds nothing back
