@@ -167,7 +167,7 @@ fn levels_fill_from_the_lowest_leaving_the_later_ones_their_error_codes() {
         level(ClosePacketKeys::Handshake(&keys), 0, transport(&long)),
     ];
     let mut usage = AeadUsage::new();
-    let sealed = write_close_datagram(levels, shape(Role::Server, 1200, 1200), &mut usage)
+    let sealed = write_close_datagram(levels, shape(Role::Server, 1200, 1200), &mut usage, &mut ())
         .expect("both fit");
     let datagram = sealed.datagram();
     assert!(datagram.len() <= 1200, "{}", datagram.len());
@@ -213,8 +213,8 @@ fn reason_phrases_keep_within_the_credit() {
         transport(&[b'a'; 2000]),
     )];
     let mut usage = AeadUsage::new();
-    let sealed =
-        write_close_datagram(levels, shape(Role::Server, 1200, 300), &mut usage).expect("it fits");
+    let sealed = write_close_datagram(levels, shape(Role::Server, 1200, 300), &mut usage, &mut ())
+        .expect("it fits");
     assert!(
         sealed.datagram().len() <= 300,
         "{}",
@@ -228,7 +228,7 @@ fn reason_phrases_keep_within_the_credit() {
         0,
         transport(&[b'a'; 2000]),
     )];
-    let sealed = write_close_datagram(levels, shape(Role::Server, 1200, 10), &mut usage)
+    let sealed = write_close_datagram(levels, shape(Role::Server, 1200, 10), &mut usage, &mut ())
         .expect("the error code goes");
     let (_, payload, _) = open_long(sealed.datagram(), &keys);
     assert_eq!(transport_phrase(&payload), b"");
@@ -242,13 +242,13 @@ fn a_client_pads_its_close_packet_with_an_initial_packet_to_1200_bytes() {
         level(ClosePacketKeys::Handshake(&keys), 0, transport(b"")),
     ];
     let mut usage = AeadUsage::new();
-    let sealed =
-        write_close_datagram(levels, shape(Role::Client, 1200, 1200), &mut usage).expect("it fits");
+    let sealed = write_close_datagram(levels, shape(Role::Client, 1200, 1200), &mut usage, &mut ())
+        .expect("it fits");
     assert_eq!(sealed.datagram().len(), MIN_DATAGRAM_SIZE);
     // a server's is not: CONNECTION_CLOSE elicits no acknowledgment
     let levels = vec![level(ClosePacketKeys::Initial(&keys), 3, transport(b""))];
-    let sealed =
-        write_close_datagram(levels, shape(Role::Server, 1200, 1200), &mut usage).expect("it fits");
+    let sealed = write_close_datagram(levels, shape(Role::Server, 1200, 1200), &mut usage, &mut ())
+        .expect("it fits");
     assert!(sealed.datagram().len() < 100);
 }
 
@@ -256,10 +256,11 @@ fn a_client_pads_its_close_packet_with_an_initial_packet_to_1200_bytes() {
 fn nothing_is_sealed_without_a_level() {
     let mut usage = AeadUsage::new();
     assert!(
-        write_close_datagram::<RingBackend>(
+        write_close_datagram::<RingBackend, ()>(
             Vec::new(),
             shape(Role::Server, 1200, 1200),
-            &mut usage
+            &mut usage,
+            &mut ()
         )
         .is_none()
     );

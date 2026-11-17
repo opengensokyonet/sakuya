@@ -43,6 +43,7 @@ use sakuya_wire::{
 use super::{
     aead_usage::AeadUsage,
     amplification::AntiAmplification,
+    events::SealObserver,
     keys::{DirectionKeys, OneRttSendKeys},
     packet_writer::{PacketStart, PacketWriter},
     recovery::LinkPathCongestionState,
@@ -245,6 +246,43 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
         K: CongestionController<I, SentState = C> + Pacer<I>,
         I: Copy,
     {
+        self.start_observed_datagram(
+            now,
+            dcid,
+            role,
+            local_id_length,
+            max_len,
+            in_flight_room,
+            probe,
+            congestion,
+            controller,
+            anti_amplification,
+            (),
+        )
+    }
+
+    /// Start a datagram as [`start_datagram`](Self::start_datagram) does,
+    /// whose packets `observer` sees in plaintext just before each is
+    /// sealed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_observed_datagram<'b, K, I, O>(
+        &'b mut self,
+        now: I,
+        dcid: ConnectionId,
+        role: Role,
+        local_id_length: ConnectionIdLength,
+        max_len: usize,
+        in_flight_room: usize,
+        probe: bool,
+        congestion: &'b mut LinkPathCongestionState<I>,
+        controller: &'b mut K,
+        anti_amplification: &'b mut AntiAmplification,
+        observer: O,
+    ) -> DatagramWriter<'b, Si, Sh, Sa, K, I, O>
+    where
+        K: CongestionController<I, SentState = C> + Pacer<I>,
+        I: Copy,
+    {
         // the buffer holds the datagram being written only: a sealed one
         // leaves it, and an empty one took its bytes back
         self.buffer.clear();
@@ -274,6 +312,7 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
             congestion,
             controller,
             anti_amplification,
+            observer,
         }
     }
 }
@@ -325,7 +364,7 @@ impl DatagramState {
 ///
 /// `C` is the congestion controller and pacer of the link path, `I` the
 /// type of instants.
-pub struct DatagramWriter<'b, Si, Sh, Sa, C, I>
+pub struct DatagramWriter<'b, Si, Sh, Sa, C, I, O = ()>
 where
     C: CongestionController<I> + Pacer<I>,
     I: Copy,
@@ -343,9 +382,11 @@ where
     congestion: &'b mut LinkPathCongestionState<I>,
     controller: &'b mut C,
     anti_amplification: &'b mut AntiAmplification,
+    /// Sees each packet just before it is sealed.
+    observer: O,
 }
 
-impl<Si, Sh, Sa, C, I> fmt::Debug for DatagramWriter<'_, Si, Sh, Sa, C, I>
+impl<Si, Sh, Sa, C, I, O> fmt::Debug for DatagramWriter<'_, Si, Sh, Sa, C, I, O>
 where
     C: CongestionController<I> + Pacer<I>,
     I: Copy,
@@ -358,7 +399,7 @@ where
     }
 }
 
-impl<Si, Sh, Sa, C, I> DatagramWriter<'_, Si, Sh, Sa, C, I>
+impl<Si, Sh, Sa, C, I, O> DatagramWriter<'_, Si, Sh, Sa, C, I, O>
 where
     C: CongestionController<I> + Pacer<I>,
     I: Copy,
@@ -418,8 +459,9 @@ where
         largest_acked: Option<PacketNumber>,
         scid: ConnectionId,
         token: Bytes,
-    ) -> Result<PacketWriter<'d, A, B>, EncodePacketNumberError>
+    ) -> Result<PacketWriter<'d, A, B, O>, EncodePacketNumberError>
     where
+        O: SealObserver,
         A: PacketSendAttempt<Sealed = Si>,
         A::Summary: InjectSummary<PaddingSummary, Ipd>,
         B: CryptoBackend,
@@ -433,6 +475,7 @@ where
             PacketStart::Initial { keys, scid, token },
             largest_acked,
             || <A::Summary as InjectSummary<PaddingSummary, Ipd>>::inject_summary(PaddingSummary),
+            &mut self.observer,
         )
     }
 
@@ -453,8 +496,9 @@ where
         keys: &'d DirectionKeys<B>,
         largest_acked: Option<PacketNumber>,
         scid: ConnectionId,
-    ) -> Result<PacketWriter<'d, A, B>, EncodePacketNumberError>
+    ) -> Result<PacketWriter<'d, A, B, O>, EncodePacketNumberError>
     where
+        O: SealObserver,
         A: PacketSendAttempt<Sealed = Sh>,
         A::Summary: InjectSummary<PaddingSummary, Ipd>,
         B: CryptoBackend,
@@ -468,6 +512,7 @@ where
             PacketStart::Handshake { keys, scid },
             largest_acked,
             || <A::Summary as InjectSummary<PaddingSummary, Ipd>>::inject_summary(PaddingSummary),
+            &mut self.observer,
         )
     }
 
@@ -487,8 +532,9 @@ where
         keys: &'d DirectionKeys<B>,
         largest_acked: Option<PacketNumber>,
         scid: ConnectionId,
-    ) -> Result<PacketWriter<'d, A, B>, EncodePacketNumberError>
+    ) -> Result<PacketWriter<'d, A, B, O>, EncodePacketNumberError>
     where
+        O: SealObserver,
         A: PacketSendAttempt<Sealed = Sa>,
         A::Summary: InjectSummary<PaddingSummary, Ipd>,
         B: CryptoBackend,
@@ -502,6 +548,7 @@ where
             PacketStart::ZeroRtt { keys, scid },
             largest_acked,
             || <A::Summary as InjectSummary<PaddingSummary, Ipd>>::inject_summary(PaddingSummary),
+            &mut self.observer,
         )
     }
 
@@ -523,8 +570,9 @@ where
         keys: &'d OneRttSendKeys<B>,
         usage: &'d mut AeadUsage,
         largest_acked: Option<PacketNumber>,
-    ) -> Result<PacketWriter<'d, A, B>, EncodePacketNumberError>
+    ) -> Result<PacketWriter<'d, A, B, O>, EncodePacketNumberError>
     where
+        O: SealObserver,
         A: PacketSendAttempt<Sealed = Sa>,
         A::Summary: InjectSummary<PaddingSummary, Ipd>,
         B: CryptoBackend,
@@ -538,6 +586,7 @@ where
             PacketStart::OneRtt { keys, usage },
             largest_acked,
             || <A::Summary as InjectSummary<PaddingSummary, Ipd>>::inject_summary(PaddingSummary),
+            &mut self.observer,
         )
     }
 }
@@ -554,7 +603,7 @@ fn open_slot<S>(state: &DatagramState, slot: &Option<S>) {
     );
 }
 
-impl<Si, Sh, Sa, C, I> DatagramWriter<'_, Si, Sh, Sa, C, I>
+impl<Si, Sh, Sa, C, I, O> DatagramWriter<'_, Si, Sh, Sa, C, I, O>
 where
     C: CongestionController<I> + Pacer<I>,
     I: Copy,
@@ -616,7 +665,7 @@ where
     }
 }
 
-impl<Si, Sh, Sa, C, I> Drop for DatagramWriter<'_, Si, Sh, Sa, C, I>
+impl<Si, Sh, Sa, C, I, O> Drop for DatagramWriter<'_, Si, Sh, Sa, C, I, O>
 where
     C: CongestionController<I> + Pacer<I>,
     I: Copy,

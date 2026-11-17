@@ -34,14 +34,16 @@ use sakuya_link::Link;
 use sakuya_stream::connection::CloseReason;
 
 use super::{
-    Choices, CloseCauseOf,
-    close::{CloseReasonRecord, LocalCloseCause},
+    Choices, CloseCauseOf, EventsOf,
+    close::{CloseReasonRecord, LocalCloseCause, TransportClose},
+    events::{ConnectionEventSink, ConnectionEvents},
     link::LinkClone,
 };
 use crate::{
     call::{CallBundle, CallKind, NodeCallFamily, NodeLoan},
+    clock::InstantOf,
     component::{ArgsOf, RequestOf},
-    error::ConnectionErrorsOf,
+    error::{ConnectionErrorOf, ConnectionErrorsOf},
     layer::{LinkEntry, NodeKey},
     request::StructureRequest,
     share::{LineageLists, LineagePartList},
@@ -74,14 +76,16 @@ pub trait LinkEndWatchingCapability: ReceiverFamily {
         Self: 'v;
 }
 
-impl<T, L, K, B, Il, Ir> LinkEndWatchingCapability
-    for NodeCallFamily<T, L, LinkEntry, K, (Il, Ir), B>
+impl<T, L, K, B, Il, Ir, Iev> LinkEndWatchingCapability
+    for NodeCallFamily<T, L, LinkEntry, K, (Il, Ir, Iev), B>
 where
     T: Choices,
     L: LineagePartList<T> + ConnectionErrorsOf,
+    ConnectionErrorOf<L>: TransportClose,
     B: CallBundle,
-    for<'x> <L as LineageLists<'x, T>>::LinkEntry:
-        GetAt<LinkClone<T::Link>, Il> + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>,
+    for<'x> <L as LineageLists<'x, T>>::LinkEntry: GetAt<LinkClone<T::Link>, Il>
+        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
 {
     type RecvError = <T::Link as Link>::RecvError;
     type Ended = <T::Link as Link>::Ended;
@@ -132,6 +136,20 @@ where
                 .record(CloseReason::Local(Arc::new(LocalCloseCause::LinkEnded(
                     reason.clone(),
                 ))));
+            // the connection ends at once, before the record is read again
+            if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED {
+                let closed = loan
+                    .lineage
+                    .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>()
+                    .reason()
+                    .map(super::connection_closed_event);
+                if let Some(closed) = closed {
+                    let now = loan.others.now();
+                    loan.lineage
+                        .get_mut::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
+                        .record_written(now, || closed);
+                }
+            }
             return Some(StructureRequest::EndConnection);
         }
         Some(StructureRequest::EndLinkPath { path, link })
@@ -158,17 +176,20 @@ pub async fn link_end_watching<W: LinkEndWatchingCapability>(
 #[derive(Debug)]
 pub struct LinkEndWatchingKind;
 
-impl<T, L, Il, Ir> CallKind<T, L, LinkEntry, (Il, Ir)> for LinkEndWatchingKind
+impl<T, L, Il, Ir, Iev> CallKind<T, L, LinkEntry, (Il, Ir, Iev)> for LinkEndWatchingKind
 where
     T: Choices,
     L: LineagePartList<T> + ConnectionErrorsOf,
-    for<'x> <L as LineageLists<'x, T>>::LinkEntry:
-        GetAt<LinkClone<T::Link>, Il> + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>,
+    ConnectionErrorOf<L>: TransportClose,
+    for<'x> <L as LineageLists<'x, T>>::LinkEntry: GetAt<LinkClone<T::Link>, Il>
+        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
     Il: 'static,
     Ir: 'static,
+    Iev: 'static,
 {
     type Call<B: CallBundle> = LentCall<
-        NodeCallFamily<T, L, LinkEntry, LinkEndWatchingKind, (Il, Ir), B>,
+        NodeCallFamily<T, L, LinkEntry, LinkEndWatchingKind, (Il, Ir, Iev), B>,
         LinkEndWatching,
     >;
     fn start<B: CallBundle>(_: &mut ArgsOf<T, L, LinkEntry>) -> Self::Call<B> {

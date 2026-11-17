@@ -145,7 +145,7 @@ use sakuya_wire::{
 };
 
 use super::{
-    Choices, CloseCauseOf, Side,
+    Choices, CloseCauseOf, EventsOf, Side,
     aead_usage::{AeadLimitReachedError, AeadUsage},
     amplification::AntiAmplification,
     close::{CloseReasonRecord, LocalCloseCause},
@@ -154,6 +154,9 @@ use super::{
     connection_ids::{ConnectionIdsOf, LinkPathResetTokenRegistrar, ResetTokenRegistrarOf},
     datagram_batch::{BatchedDatagram, BatchedPacket, DatagramBatch},
     error::{ConnectionError, V1ConnectionErrorOf},
+    events::{
+        ConnectionEventSink, ConnectionEvents, KeyChange, PacketEvents, PlainPacket, SealObserver,
+    },
     feedback::LineageFeedback,
     idle::IdleTimeout,
     key_phase::KeyPhaseNumbers,
@@ -310,6 +313,7 @@ pub type FillTakes<T, L> = HList![
     AeadUsage,
     RecoveryFactoryOf<T, L>,
     AntiAmplification,
+    ConnectionEventSink<EventsOf<T, L>>,
 ];
 
 /// What sending the close packet again takes out of the link path's
@@ -613,6 +617,7 @@ where
         Selector<Option<MaxUdpPayloadSize>, Ipp> + Selector<Option<MaxAckDelay>, Ima>,
     for<'v, 's> <L as LineageLists<'v, T>>::LinkPath:
         Reborrow<'s, Out = <L as LineageLists<'s, T>>::LinkPath>,
+    EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
     for<'x> <L as LineageLists<'x, T>>::LinkPath: GetAt<LinkPathSendingLimits, Is>
         + TakeEach<'x, FillTakes<T, L>, It>
         + GetAt<InitialKeys<T::Crypto>, Ii>
@@ -790,7 +795,8 @@ where
                         journals,
                         usage,
                         factory,
-                        amplification
+                        amplification,
+                        events
                     ],
                     rest,
                 ) = Take::<FillTakes<T, L>, It>::take(lineage.reborrow());
@@ -820,6 +826,7 @@ where
                                     initial_discarded: false,
                                     usage,
                                     amplification,
+                                    events,
                                     rest: &mut rest,
                                     access: &mut access,
                                     estimate,
@@ -848,6 +855,16 @@ where
         if initial_discarded {
             // the first Handshake packet sent (RFC 9001 §4.9.1)
             lineage.get_mut::<InitialKeys<T::Crypto>, Ii>().discard();
+            if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED {
+                let (hlist_pat![_, _, _, _, _, _, _, events], _) =
+                    Take::<FillTakes<T, L>, It>::take(lineage.reborrow());
+                if let Some(events) = events.active::<InstantOf<T>>() {
+                    for sender in [Role::Client, Role::Server] {
+                        let level = sakuya_wire::v1::encryption_level::EncryptionLevel::Initial;
+                        events.key_discarded(now, KeyChange { level, sender });
+                    }
+                }
+            }
         }
         if !batch.is_empty() {
             return Poll::Ready(());
@@ -940,6 +957,29 @@ where
 
 // ---- filling ----
 
+/// Gives the connection's events each packet a datagram writer seals, sent
+/// at `at`: nothing when they record nothing.
+struct PacketSent<'e, X, I, L> {
+    sink: &'e mut ConnectionEventSink<X>,
+    at: I,
+    list: core::marker::PhantomData<fn() -> L>,
+}
+
+impl<X, I, L> SealObserver for PacketSent<'_, X, I, L>
+where
+    X: ConnectionEvents<I> + PacketEvents<I, L>,
+    I: Copy,
+{
+    const ENABLED: bool = X::ENABLED;
+
+    fn sealing(&mut self, packet: &PlainPacket<'_>) {
+        if let Some(events) = self.sink.active::<I>() {
+            events.packet_sent(self.at, packet);
+        }
+        self.sink.packet_of_level(self.at, packet.level);
+    }
+}
+
 /// What [`Filling`] reads its components and finds its frame sources by.
 type FillPositions<Ir, Ici, Ipp, Hs, Hd, Ipd> = fn() -> (Ir, Ici, Ipp, Hs, Hd, Ipd);
 
@@ -969,6 +1009,8 @@ where
     initial_discarded: bool,
     usage: &'f mut AeadUsage,
     amplification: &'f mut AntiAmplification,
+    /// Sees each packet just before it is sealed.
+    events: &'f mut ConnectionEventSink<EventsOf<T, L>>,
     rest: &'f mut Lineage<'r, V>,
     access: &'f mut A,
     estimate: RttEstimate,
@@ -1011,6 +1053,7 @@ where
         + PartsFrameSourceDispatch<T, L, SettlingResponsePacket, V, FeedbackSummaryOf<T, L>, Hs>
         + DriverContentOf<T, L, V, Hd>,
     <SendTypes<T, L> as SendStrategyTypes>::SendIntents: From<<L as SendIntentsOf>::SendIntents>,
+    EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
 {
     /// Fill datagrams into `batch` until the batch is full or the plans
     /// stop.
@@ -1148,7 +1191,7 @@ where
         };
         let probe = limits.probe_permits > 0
             && limits.congestion_window_left.min(limits.pacing_allowance) < max_len;
-        let mut datagram = batch.start_datagram(
+        let mut datagram = batch.start_observed_datagram(
             self.now,
             chosen.connection_id(),
             role,
@@ -1159,6 +1202,11 @@ where
             &mut *self.state,
             &mut *self.access,
             &mut *self.amplification,
+            PacketSent::<_, _, L> {
+                sink: &mut *self.events,
+                at: self.now,
+                list: core::marker::PhantomData,
+            },
         );
 
         // the packets, in the order of the plan
@@ -1998,6 +2046,7 @@ where
         Selector<Option<MaxUdpPayloadSize>, Ipp> + Selector<Option<MaxAckDelay>, Ima>,
     for<'v, 's> <L as LineageLists<'v, T>>::LinkPath:
         Reborrow<'s, Out = <L as LineageLists<'s, T>>::LinkPath>,
+    EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
     for<'x> <L as LineageLists<'x, T>>::LinkPath: GetAt<LinkPathSendingLimits, Is>
         + TakeEach<'x, FillTakes<T, L>, It>
         + GetAt<InitialKeys<T::Crypto>, Ii>

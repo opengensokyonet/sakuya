@@ -93,7 +93,7 @@ use super::{
     connection_ids::{ConnectionIdsOf, PeerHandshakeConnectionId, ResetTokenRegistrarOf},
     dispatch::permitted,
     error::{ConnectionError, V1ConnectionErrorOf},
-    events::{ConnectionEventSink, ConnectionEvents, PacketEvents, PlainPacket},
+    events::{ConnectionEventSink, ConnectionEvents, KeyChange, PacketEvents, PlainPacket},
     idle::IdleTimeout,
     key_phase::KeyPhaseNumbers,
     key_update::check_peer_update,
@@ -494,8 +494,12 @@ where
             bytes: &bytes[..opened.payload.end],
             header_len: opened.payload.start,
             wire_len: bytes.len(),
+            pmtu_probe: false,
         };
         <EventsOf<T, L> as PacketEvents<InstantOf<T>, L>>::packet_received(events, at, &packet);
+        lineage
+            .get_mut::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
+            .packet_of_level(at, level);
     }
     match one_rtt {
         // taken only to change it
@@ -559,6 +563,16 @@ where
         )
     {
         lineage.get_mut::<InitialKeys<T::Crypto>, Ii>().discard();
+        if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
+            && let Some(events) = lineage
+                .get_mut::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
+                .active::<InstantOf<T>>()
+        {
+            for sender in [Role::Client, Role::Server] {
+                let level = EncryptionLevel::Initial;
+                events.key_discarded(at, KeyChange { level, sender });
+            }
+        }
     }
     Ok(PacketOutcome::Processed {
         highest_numbered,

@@ -30,7 +30,7 @@ use nitori_crypto::{NamedGroup, SignatureScheme, SigningKey as _};
 use nitori_crypto_aws_lc::{AwsLcBackend, Ed25519SigningKey};
 use nitori_io::{ReadChunkHostExt as _, calls::WriteAllHostExt as _};
 use sakuya_connection::prelude::*;
-use sakuya_connection::v1::events::{CloseTrigger, Initiator};
+use sakuya_connection::v1::events::{CloseTrigger, ConnectionState, Initiator, KeyChange};
 use sakuya_connection::v1::{HostChoices, HostOf, SendParametersOf};
 use sakuya_connection::{
     call::CallBundle,
@@ -1403,6 +1403,88 @@ fn a_client_and_a_server_complete_and_confirm_the_handshake() {
                     || matches!(event, Recorded::Dropped { reason, .. } if reason != "NoReceiveKeys")),
             "{role:?}: {events:#?}"
         );
+        let count = |wanted: &Recorded| events.iter().filter(|event| *event == wanted).count();
+        // this side's parameters and the peer's, once each
+        assert_eq!(
+            count(&Recorded::Parameters(Initiator::Local)),
+            1,
+            "{role:?}"
+        );
+        assert_eq!(
+            count(&Recorded::Parameters(Initiator::Remote)),
+            1,
+            "{role:?}"
+        );
+        assert_eq!(count(&Recorded::Version(Version::V1)), 1, "{role:?}");
+        assert_eq!(
+            count(&Recorded::State(ConnectionState::HandshakeComplete)),
+            1,
+            "{role:?}"
+        );
+        assert_eq!(
+            count(&Recorded::State(ConnectionState::HandshakeConfirmed)),
+            1,
+            "{role:?}"
+        );
+        for level in [EncryptionLevel::Initial, EncryptionLevel::Handshake] {
+            for sender in [Role::Client, Role::Server] {
+                let key = KeyChange { level, sender };
+                assert_eq!(count(&Recorded::KeyUpdated(key)), 1, "{role:?} {key:?}");
+                assert_eq!(count(&Recorded::KeyDiscarded(key)), 1, "{role:?} {key:?}");
+            }
+        }
+        for sender in [Role::Client, Role::Server] {
+            let key = KeyChange {
+                level: EncryptionLevel::OneRtt,
+                sender,
+            };
+            assert_eq!(count(&Recorded::KeyUpdated(key)), 1, "{role:?} {key:?}");
+        }
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, Recorded::Alpn(_)))
+                .count(),
+            1,
+            "{role:?}"
+        );
+    }
+    // every packet a side sealed is the one the other side opened: the
+    // same level and packet number, both whole
+    let sent_and_received = |sender: Role, receiver: Role| {
+        let sent: Vec<_> = common::events::recorded(sender)
+            .into_iter()
+            .filter_map(|event| match event {
+                Recorded::Sent {
+                    level,
+                    number,
+                    whole,
+                } => Some((level, number, whole)),
+                _ => None,
+            })
+            .collect();
+        let received: Vec<_> = common::events::recorded(receiver)
+            .into_iter()
+            .filter_map(|event| match event {
+                Recorded::Received {
+                    level,
+                    number,
+                    whole,
+                } => Some((level, number, whole)),
+                _ => None,
+            })
+            .collect();
+        (sent, received)
+    };
+    for (sender, receiver) in [(Role::Client, Role::Server), (Role::Server, Role::Client)] {
+        let (sent, received) = sent_and_received(sender, receiver);
+        assert!(!sent.is_empty() && sent.iter().all(|(_, _, whole)| *whole));
+        for packet in &received {
+            assert!(
+                sent.contains(packet),
+                "{receiver:?} opened {packet:?}, which {sender:?} sealed"
+            );
+        }
     }
     for (side, noted) in [("server", &server), ("client", &client)] {
         assert!(noted.confirmed, "the {side}'s handshake is confirmed");
@@ -1597,6 +1679,39 @@ fn a_client_that_fails_to_verify_the_server_closes_with_the_alert() {
         [Recorded::Closed {
             initiator: Initiator::Local,
             trigger: CloseTrigger::Error,
+        }]
+    );
+    assert_eq!(
+        closed(Role::Server),
+        [Recorded::Closed {
+            initiator: Initiator::Remote,
+            trigger: CloseTrigger::PeerClose,
+        }]
+    );
+}
+
+#[test]
+fn an_application_close_is_an_event_on_both_sides() {
+    let clock = tls_clock();
+    let mut asked = false;
+    let _run = handshake(client_engine(&clock, 1), &clock, |run| {
+        if !asked && noted(Role::Client).confirmed {
+            asked = true;
+            run.client_handle.close(common::AppClose(7));
+        }
+        noted(Role::Server).peer_close.is_some()
+    });
+    let closed = |role| {
+        common::events::recorded(role)
+            .into_iter()
+            .filter(|event| matches!(event, Recorded::Closed { .. }))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        closed(Role::Client),
+        [Recorded::Closed {
+            initiator: Initiator::Local,
+            trigger: CloseTrigger::Application,
         }]
     );
     assert_eq!(

@@ -64,7 +64,7 @@ use super::{
     crypto::CryptoReceiver,
     current_probe_timeout,
     error::{self, ConnectionError, V1ConnectionErrorOf},
-    events::ConnectionEventSink,
+    events::{ConnectionEventSink, ConnectionEvents, ConnectionState},
     feedback::LineageFeedback,
     key_phase::KeyPhaseNumbers,
     keys::OneRttKeys,
@@ -390,7 +390,18 @@ where
                 Ok(())
             }
             FrameRun::HandshakeDone(_) => {
-                *lineage.get_mut::<HandshakeConfirmation, Ih>() = HandshakeConfirmation::Confirmed;
+                let confirmation = lineage.get_mut::<HandshakeConfirmation, Ih>();
+                // looked at for the events only
+                let newly = <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
+                    && *confirmation != HandshakeConfirmation::Confirmed;
+                *confirmation = HandshakeConfirmation::Confirmed;
+                if newly
+                    && let Some(events) = lineage
+                        .get_mut::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
+                        .active::<InstantOf<T>>()
+                {
+                    events.connection_state(packet.at(), ConnectionState::HandshakeConfirmed);
+                }
                 Ok(())
             }
             FrameRun::ConnectionClose(frame) => {

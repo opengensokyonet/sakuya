@@ -5,18 +5,33 @@ use std::cell::RefCell;
 
 use sakuya_connection::v1::{
     events::{
-        CloseTrigger, ConnectionClosed, ConnectionEvents, EventsStart, Initiator, LossTrigger,
-        LostPacket, PacketEvents, PlainPacket, RecoveryMetrics, SharedEvents,
+        CloseTrigger, ConnectionClosed, ConnectionEvents, ConnectionState, EventsStart, Initiator,
+        KeyChange, LossTrigger, LostPacket, PacketEvents, PlainPacket, RecoveryMetrics,
+        SharedEvents,
     },
     receive::DropReason,
 };
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
-use sakuya_wire::v1::{encryption_level::EncryptionLevel, role::Role};
+use sakuya_wire::{
+    parameters::ParametersOf,
+    v1::{
+        encryption_level::EncryptionLevel,
+        role::Role,
+        transport_parameters::{TransportParameterSlots, TransportParameterSpace},
+    },
+    version::Version,
+};
 
 /// One event, with what the tests look at.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Recorded {
     Started,
+    Sent {
+        level: EncryptionLevel,
+        number: u64,
+        /// Whether the header and the payload were both there.
+        whole: bool,
+    },
     Received {
         level: EncryptionLevel,
         number: u64,
@@ -40,6 +55,12 @@ pub enum Recorded {
         initiator: Initiator,
         trigger: CloseTrigger,
     },
+    State(ConnectionState),
+    KeyUpdated(KeyChange),
+    KeyDiscarded(KeyChange),
+    Version(Version),
+    Alpn(Option<Vec<u8>>),
+    Parameters(Initiator),
 }
 
 thread_local! {
@@ -130,9 +151,37 @@ impl<I> ConnectionEvents<I> for RecordingEvents {
             trigger: closed.trigger,
         });
     }
+    fn connection_state(&mut self, _: I, state: ConnectionState) {
+        self.push(Recorded::State(state));
+    }
+    fn key_updated(&mut self, _: I, key: KeyChange) {
+        self.push(Recorded::KeyUpdated(key));
+    }
+    fn key_discarded(&mut self, _: I, key: KeyChange) {
+        self.push(Recorded::KeyDiscarded(key));
+    }
+    fn version_information(&mut self, _: I, _: &[Version], chosen: Version) {
+        self.push(Recorded::Version(chosen));
+    }
+    fn alpn_information(&mut self, _: I, chosen: Option<&[u8]>) {
+        self.push(Recorded::Alpn(chosen.map(<[u8]>::to_vec)));
+    }
 }
 
 impl<I, L> PacketEvents<I, L> for RecordingEvents {
+    fn packet_sent(&mut self, _: I, packet: &PlainPacket<'_>) {
+        self.push(Recorded::Sent {
+            level: packet.level,
+            number: packet.number,
+            whole: packet.header_len > 0 && !packet.payload().is_empty(),
+        });
+    }
+    fn parameters_set(&mut self, _: I, initiator: Initiator, _: &TransportParameterSlots<L>)
+    where
+        L: ParametersOf<TransportParameterSpace>,
+    {
+        self.push(Recorded::Parameters(initiator));
+    }
     fn packet_received(&mut self, _: I, packet: &PlainPacket<'_>) {
         self.push(Recorded::Received {
             level: packet.level,

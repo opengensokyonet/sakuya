@@ -49,6 +49,7 @@ use sakuya_wire::{
     var_int::{VarInt, VarIntField, VarIntWidth, codec::write_var_int_field},
 };
 
+use super::events::{PlainPacket, SealObserver};
 use super::{
     aead_usage::AeadUsage,
     datagram_batch::{DatagramState, SealedInDatagram},
@@ -145,10 +146,11 @@ struct Written {
 /// One packet being written into a datagram.
 ///
 /// `A` is its send attempt, `B` the crypto backend of its keys.
-pub struct PacketWriter<'d, A, B>
+pub struct PacketWriter<'d, A, B, O = ()>
 where
     A: PacketSendAttempt,
     B: CryptoBackend,
+    O: SealObserver,
 {
     buffer: &'d mut BytesMut,
     datagram: &'d mut DatagramState,
@@ -171,12 +173,15 @@ where
     pmtu_probe: bool,
     /// Makes the summary of PADDING in the attempt's sum of summaries.
     padding: fn() -> A::Summary,
+    /// Sees the packet in plaintext just before it is sealed.
+    observer: &'d mut O,
 }
 
-impl<A, B> fmt::Debug for PacketWriter<'_, A, B>
+impl<A, B, O> fmt::Debug for PacketWriter<'_, A, B, O>
 where
     A: PacketSendAttempt,
     B: CryptoBackend,
+    O: SealObserver,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PacketWriter")
@@ -190,14 +195,17 @@ where
     }
 }
 
-impl<'d, A, B> PacketWriter<'d, A, B>
+impl<'d, A, B, O> PacketWriter<'d, A, B, O>
 where
     A: PacketSendAttempt,
     B: CryptoBackend,
+    O: SealObserver,
 {
     /// Write the header of the packet `start` describes at the end of
     /// `buffer`, in the datagram of `datagram`, for `attempt`, whose sealed
-    /// packet goes into `slot`.
+    /// packet goes into `slot`; `observer` sees it just before it is
+    /// sealed.
+    #[allow(clippy::too_many_arguments)] // the borrows of the datagram writer's parts
     pub(super) fn start(
         buffer: &'d mut BytesMut,
         datagram: &'d mut DatagramState,
@@ -206,6 +214,7 @@ where
         start: PacketStart<'d, B>,
         largest_acked: Option<PacketNumber>,
         padding: fn() -> A::Summary,
+        observer: &'d mut O,
     ) -> Result<Self, EncodePacketNumberError> {
         let number = attempt.packet_number();
         let truncated = TruncatedPacketNumber::encode(number, largest_acked)?;
@@ -297,6 +306,7 @@ where
             more_follow: false,
             pmtu_probe: false,
             padding,
+            observer,
         })
     }
 
@@ -403,6 +413,16 @@ where
             write_var_int_field(&mut &mut self.buffer[self.start + length_offset..], length);
         }
         let packet = &mut self.buffer[self.start..];
+        if O::ENABLED {
+            self.observer.sealing(&PlainPacket {
+                level: self.level,
+                number: self.number.get(),
+                bytes: &packet[..packet_len - AEAD_TAG_LEN],
+                header_len: self.header_len,
+                wire_len: packet_len,
+                pmtu_probe: self.pmtu_probe,
+            });
+        }
         // invariant: the tag has its room, and the payload is long enough
         // to sample
         self.keys
@@ -434,17 +454,19 @@ where
     }
 }
 
-impl<A, B> sealed::Writing for PacketWriter<'_, A, B>
+impl<A, B, O> sealed::Writing for PacketWriter<'_, A, B, O>
 where
     A: PacketSendAttempt,
     B: CryptoBackend,
+    O: SealObserver,
 {
 }
 
-impl<A, B> PacketWriting for PacketWriter<'_, A, B>
+impl<A, B, O> PacketWriting for PacketWriter<'_, A, B, O>
 where
     A: PacketSendAttempt,
     B: CryptoBackend,
+    O: SealObserver,
 {
     type Attempt = A;
 
@@ -509,10 +531,11 @@ where
     }
 }
 
-impl<A, B> Drop for PacketWriter<'_, A, B>
+impl<A, B, O> Drop for PacketWriter<'_, A, B, O>
 where
     A: PacketSendAttempt,
     B: CryptoBackend,
+    O: SealObserver,
 {
     fn drop(&mut self) {
         // a panic ends the whole connection: no packet number is used

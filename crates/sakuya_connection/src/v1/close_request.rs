@@ -37,8 +37,9 @@ use sakuya_stream::connection::CloseReason;
 use sakuya_wire::{parts::Selector, v1::role::Role};
 
 use super::{
-    Choices, CloseCauseOf, ConnectionArgs, Side,
-    close::{CloseReasonRecord, LocalCloseCause},
+    Choices, CloseCauseOf, ConnectionArgs, EventsOf, Side,
+    close::{CloseReasonRecord, LocalCloseCause, TransportClose},
+    events::ConnectionEventSink,
     sending::DatagramAcceptance,
 };
 use crate::v1::ApplicationErrorOf;
@@ -46,7 +47,7 @@ use crate::{
     call::CallBundle,
     clock::InstantOf,
     component::{ArgsOf, Build, DataComponent, LineageOf, ParentsOf, RequestOf},
-    error::ConnectionErrorsOf,
+    error::{ConnectionErrorOf, ConnectionErrorsOf},
     layer,
     others::OtherNodes,
     request::StructureRequest,
@@ -190,20 +191,22 @@ where
 /// writes it into the record of why the connection closed, as the
 /// [module documentation](self) says. It reads nothing and has no
 /// deadline; it takes the record mutably only to write it.
-impl<T: Choices, L, I, Ic, Ia> DataComponent<T, L, layer::Connection, (I, Ic, Ia)>
+impl<T: Choices, L, I, Ic, Ia, Iev> DataComponent<T, L, layer::Connection, (I, Ic, Ia, Iev)>
     for CloseRequestCell<ApplicationErrorOf<T>>
 where
     L: LineagePartList<T> + ConnectionErrorsOf,
+    ConnectionErrorOf<L>: TransportClose,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<CloseRequestCell<ApplicationErrorOf<T>>, I>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
-        + GetAt<DatagramAcceptance, Ia>,
+        + GetAt<DatagramAcceptance, Ia>
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
 {
     const ACTS_BEFORE_CALLS: bool = true;
 
     fn before_calls<'v, B: CallBundle>(
         mut lineage: LineageOf<'v, T, L, layer::Connection>,
         _: &mut OtherNodes<'v, T, L, B>,
-        _: InstantOf<T>,
+        now: InstantOf<T>,
         waker: &Waker,
     ) -> Option<RequestOf<T, L>> {
         let Poll::Ready(error) = lineage
@@ -227,7 +230,11 @@ where
                 error,
             ))));
         // the peer cannot know of a connection whose client handed it no
-        // datagram: it ends with nothing sent, with the same reason
+        // datagram: it ends with nothing sent, with the same reason, before
+        // the record is read again
+        if unknown_to_peer {
+            super::connection_closed_into_events::<T, L, Ic, Iev>(&mut lineage, now);
+        }
         unknown_to_peer.then_some(StructureRequest::EndConnection)
     }
 }

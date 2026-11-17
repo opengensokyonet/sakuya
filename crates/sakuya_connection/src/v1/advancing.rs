@@ -83,6 +83,7 @@ use sakuya_wire::{
     parameters::ParametersOf,
     parts::{CoprodInjector, Selector},
     v1::{
+        encryption_level::EncryptionLevel,
         role::Role,
         transport_parameters::{
             TransportParameterSlots, TransportParameterSpace, TransportParameters,
@@ -97,7 +98,7 @@ use sakuya_wire::{
 };
 
 use super::{
-    Choices, Client, CloseCauseOf, ConnectionArgs, Server,
+    Choices, Client, CloseCauseOf, ConnectionArgs, EventsOf, Server,
     address_token::AddressTokenSink,
     application_handles::{
         HandleShares,
@@ -111,6 +112,9 @@ use super::{
     },
     crypto::{CryptoReceiver, send::CryptoSender},
     error::{ConnectionError, V1ConnectionErrorOf},
+    events::{
+        ConnectionEventSink, ConnectionEvents, ConnectionState, Initiator, KeyChange, PacketEvents,
+    },
     handshake_done::HandshakeDoneSource,
     keys::{DirectionKeys, HandshakeKeys, LevelKeys, OneRttKeys, PacketProtectionBackend},
     parameters::{
@@ -674,6 +678,37 @@ fn send_local(
     }
 }
 
+/// Give the connection's events what `give` gives, at the instant of this
+/// poll from `others`, when they record this connection; with a receiver
+/// that records nothing, nothing of it is compiled in.
+fn give_events<'v, T, L, B, Iev>(
+    lineage: &mut LineageOf<'v, T, L, Connection>,
+    others: &OtherNodes<'v, T, L, B>,
+    give: impl FnOnce(&mut EventsOf<T, L>, InstantOf<T>),
+) where
+    T: Choices,
+    L: LineagePartList<T>,
+    B: CallBundle,
+    for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
+{
+    if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED {
+        let now = others.now();
+        if let Some(events) = lineage
+            .get_mut::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
+            .active::<InstantOf<T>>()
+        {
+            give(events, now);
+        }
+    }
+}
+
+/// Both directions of the keys of `level` were installed.
+fn keys_installed<X: ConnectionEvents<I>, I: Copy>(events: &mut X, at: I, level: EncryptionLevel) {
+    for sender in [Role::Client, Role::Server] {
+        events.key_updated(at, KeyChange { level, sender });
+    }
+}
+
 // ---- the server ----
 
 /// The positions a server's advancing call takes by, besides those of the
@@ -687,11 +722,11 @@ fn send_local(
 /// `initial_source_connection_id` among the slots of the peer's transport
 /// parameters, and `Ia` of what the call is started from in the facts of
 /// the connection node.
-type ServerPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ic, Ihd, Ie, Irc, Ih, Ja, Ia> = (
+type ServerPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ic, Ihd, Ie, Irc, Ih, Ja, Ia, Iev> = (
     (Ilt, Ils, Ipt, Ifl, Iid, Iph),
     (Ik, Io, Ib, Ic),
     (Ihd, Ie, Irc, Ih),
-    (Ja, Ia),
+    (Ja, Ia, Iev),
 );
 
 /// The server's side of the transport parameters: the client's are read
@@ -726,6 +761,7 @@ impl<
     Ih,
     Ja,
     Ia,
+    Iev,
 > ServerTransport<Target>
     for NodeCallFamily<
         T,
@@ -734,7 +770,25 @@ impl<
         ServerAdvancingKind<Tls>,
         (
             CryptoPositions<Icr, Ics, Iv>,
-            ServerPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ic, Ihd, Ie, Irc, Ih, Ja, Ia>,
+            ServerPositions<
+                Ilt,
+                Ils,
+                Ipt,
+                Ifl,
+                Iid,
+                Iph,
+                Ik,
+                Io,
+                Ib,
+                Ic,
+                Ihd,
+                Ie,
+                Irc,
+                Ih,
+                Ja,
+                Ia,
+                Iev,
+            >,
         ),
         B,
     >
@@ -743,11 +797,13 @@ where
     L: LineagePartList<T> + TransportParameterValueErrorsOf,
     B: CallBundle,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
+    EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>,
     for<'x> L: SendLocalTransportParameters<<L as LineageLists<'x, T>>::Connection, Ils>,
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>
         + GetAt<FirstLocalConnectionId, Ifl>
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>
         + GetAt<InitialDestinationConnectionIds, Iid>
         + GetAt<PeerHandshakeConnectionId, Iph>,
 {
@@ -762,12 +818,15 @@ where
     where
         Self: 'v,
     {
-        let NodeLoan { lineage, .. } = view.get_mut();
+        let NodeLoan { lineage, others } = view.get_mut();
         let chosen = lineage.get::<PeerHandshakeConnectionId, Iph>().get();
         let slots = read_peer::<L, Iv>(peer, Role::Client)?;
         check_initial_source::<_, Ja>(&slots, chosen).map_err(|source| {
             v1_error::<L, Iv>(ConnectionError::PeerTransportParameters { source })
         })?;
+        give_events::<T, L, B, Iev>(lineage, others, |events, now| {
+            events.parameters_set(now, Initiator::Remote, &slots);
+        });
         lineage
             .get_mut::<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>()
             .set_known(slots);
@@ -777,8 +836,12 @@ where
         send_local(local, |configured| {
             server_parameters(configured, first, destination)
         });
+        let local = L::send_local(lineage);
+        give_events::<T, L, B, Iev>(lineage, others, |events, now| {
+            events.parameters_set(now, Initiator::Local, &local);
+        });
         Ok(Negotiated {
-            local: encode::<L>(L::send_local(lineage), Role::Server),
+            local: encode::<L>(local, Role::Server),
             early_data: false,
         })
     }
@@ -808,6 +871,7 @@ impl<
     Ih,
     Ja,
     Ia,
+    Iev,
 > ServerAdvancingCapability<Tls>
     for NodeCallFamily<
         T,
@@ -816,7 +880,25 @@ impl<
         ServerAdvancingKind<Tls>,
         (
             CryptoPositions<Icr, Ics, Iv>,
-            ServerPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ic, Ihd, Ie, Irc, Ih, Ja, Ia>,
+            ServerPositions<
+                Ilt,
+                Ils,
+                Ipt,
+                Ifl,
+                Iid,
+                Iph,
+                Ik,
+                Io,
+                Ib,
+                Ic,
+                Ihd,
+                Ie,
+                Irc,
+                Ih,
+                Ja,
+                Ia,
+                Iev,
+            >,
         ),
         B,
     >
@@ -828,6 +910,7 @@ where
     L: LineagePartList<T> + TransportParameterValueErrorsOf,
     B: CallBundle,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
+    EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
     SendTypes<T, L>: HostSendStrategyTypes,
@@ -837,6 +920,7 @@ where
         + GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>
         + GetAt<FirstLocalConnectionId, Ifl>
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>
         + GetAt<InitialDestinationConnectionIds, Iid>
         + GetAt<PeerHandshakeConnectionId, Iph>
         + GetAt<HandshakeKeys<T::Crypto>, Ik>
@@ -867,7 +951,7 @@ where
     ) where
         Self: 'v,
     {
-        let lineage = &mut view.get_mut().lineage;
+        let NodeLoan { lineage, others } = view.get_mut();
         let backend = lineage
             .get::<PacketProtectionBackend<T::Crypto>, Ib>()
             .0
@@ -875,6 +959,9 @@ where
         lineage
             .get_mut::<HandshakeKeys<T::Crypto>, Ik>()
             .install(level_keys(&backend, aead, &secrets));
+        give_events::<T, L, B, Iev>(lineage, others, |events, now| {
+            keys_installed(events, now, EncryptionLevel::Handshake);
+        });
     }
 
     fn install_one_rtt_send<'v>(
@@ -884,7 +971,7 @@ where
     ) where
         Self: 'v,
     {
-        let lineage = &mut view.get_mut().lineage;
+        let NodeLoan { lineage, others } = view.get_mut();
         let backend = lineage
             .get::<PacketProtectionBackend<T::Crypto>, Ib>()
             .0
@@ -892,6 +979,13 @@ where
         lineage
             .get_mut::<OneRttKeys<T::Crypto, InstantOf<T>>, Io>()
             .install_send(backend, aead, secret.0);
+        give_events::<T, L, B, Iev>(lineage, others, |events, now| {
+            let key = KeyChange {
+                level: EncryptionLevel::OneRtt,
+                sender: Role::Server,
+            };
+            events.key_updated(now, key);
+        });
     }
 
     fn complete<'v>(
@@ -900,7 +994,7 @@ where
     ) where
         Self: 'v,
     {
-        let lineage = &mut view.get_mut().lineage;
+        let NodeLoan { lineage, others } = view.get_mut();
         let ServerHandshakeCompleted {
             one_rtt_receive,
             exporter,
@@ -910,6 +1004,17 @@ where
         lineage
             .get_mut::<OneRttKeys<T::Crypto, InstantOf<T>>, Io>()
             .install_receive(one_rtt_receive.0);
+        give_events::<T, L, B, Iev>(lineage, others, |events, now| {
+            let key = KeyChange {
+                level: EncryptionLevel::OneRtt,
+                sender: Role::Client,
+            };
+            events.key_updated(now, key);
+            let chosen = selected.application_protocol.as_ref();
+            events.alpn_information(now, chosen.map(|name| name.name().as_ref()));
+            events.connection_state(now, ConnectionState::HandshakeComplete);
+            events.connection_state(now, ConnectionState::HandshakeConfirmed);
+        });
         // a server's handshake is confirmed when it completes (RFC 9001
         // §4.1.2); its Handshake keys go with the confirmation
         *lineage.get_mut::<HandshakeConfirmation, Ic>() = HandshakeConfirmation::Confirmed;
@@ -988,6 +1093,7 @@ impl<
     Ih,
     Ja,
     Ia,
+    Iev,
 >
     CallKind<
         T,
@@ -995,7 +1101,25 @@ impl<
         Connection,
         (
             CryptoPositions<Icr, Ics, Iv>,
-            ServerPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ic, Ihd, Ie, Irc, Ih, Ja, Ia>,
+            ServerPositions<
+                Ilt,
+                Ils,
+                Ipt,
+                Ifl,
+                Iid,
+                Iph,
+                Ik,
+                Io,
+                Ib,
+                Ic,
+                Ihd,
+                Ie,
+                Irc,
+                Ih,
+                Ja,
+                Ia,
+                Iev,
+            >,
         ),
     > for ServerAdvancingKind<Tls>
 where
@@ -1005,6 +1129,7 @@ where
     Tls::AlertError: 'static,
     L: LineagePartList<T> + TransportParameterValueErrorsOf,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
+    EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>,
     ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, Ia>,
     SendTypes<T, L>: IntakePublishOutcome<StreamIntent<SendParametersOf<T>>, AnyActiveLinkPath>,
@@ -1015,6 +1140,7 @@ where
         + GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>
         + GetAt<FirstLocalConnectionId, Ifl>
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>
         + GetAt<InitialDestinationConnectionIds, Iid>
         + GetAt<PeerHandshakeConnectionId, Iph>
         + GetAt<HandshakeKeys<T::Crypto>, Ik>
@@ -1027,7 +1153,25 @@ where
         + GetAt<ConnectionHandleCellOf<T, L>, Ih>,
     (
         CryptoPositions<Icr, Ics, Iv>,
-        ServerPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ic, Ihd, Ie, Irc, Ih, Ja, Ia>,
+        ServerPositions<
+            Ilt,
+            Ils,
+            Ipt,
+            Ifl,
+            Iid,
+            Iph,
+            Ik,
+            Io,
+            Ib,
+            Ic,
+            Ihd,
+            Ie,
+            Irc,
+            Ih,
+            Ja,
+            Ia,
+            Iev,
+        >,
     ): 'static,
 {
     type Call<B: CallBundle> = LentCall<
@@ -1055,6 +1199,7 @@ where
                     Ih,
                     Ja,
                     Ia,
+                    Iev,
                 >,
             ),
             B,
@@ -1089,11 +1234,11 @@ where
 /// of `original_destination_connection_id` and `Jr` of
 /// `retry_source_connection_id` among the slots of the peer's transport
 /// parameters.
-type ClientPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia> = (
+type ClientPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia, Iev> = (
     (Ilt, Ils, Ipt, Ifl, Iid, Iph),
     (Ik, Io, Ib),
     (Ie, Irc, Ih),
-    (Ja, Jo, Jr, Ia),
+    (Ja, Jo, Jr, Ia, Iev),
 );
 
 /// The client's side of the transport parameters: this side's are settled
@@ -1130,6 +1275,7 @@ impl<
     Jo,
     Jr,
     Ia,
+    Iev,
 > ClientTransport
     for NodeCallFamily<
         T,
@@ -1138,7 +1284,25 @@ impl<
         ClientAdvancingKind<Tls>,
         (
             CryptoPositions<Icr, Ics, Iv>,
-            ClientPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia>,
+            ClientPositions<
+                Ilt,
+                Ils,
+                Ipt,
+                Ifl,
+                Iid,
+                Iph,
+                Ik,
+                Io,
+                Ib,
+                Ie,
+                Irc,
+                Ih,
+                Ja,
+                Jo,
+                Jr,
+                Ia,
+                Iev,
+            >,
         ),
         B,
     >
@@ -1147,6 +1311,7 @@ where
     L: LineagePartList<T> + TransportParameterValueErrorsOf,
     B: CallBundle,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
+    EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>
         + Selector<Option<OriginalDestinationConnectionId>, Jo>
         + Selector<Option<RetrySourceConnectionId>, Jr>,
@@ -1154,6 +1319,7 @@ where
     for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>
         + GetAt<FirstLocalConnectionId, Ifl>
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>
         + GetAt<InitialDestinationConnectionIds, Iid>
         + GetAt<PeerHandshakeConnectionId, Iph>,
 {
@@ -1163,18 +1329,26 @@ where
     where
         Self: 'v,
     {
-        let lineage = &mut view.get_mut().lineage;
+        let NodeLoan { lineage, others } = view.get_mut();
         let first = *lineage.get::<FirstLocalConnectionId, Ifl>();
         let local = lineage.get_mut::<LocalTransportParameters<TransportParameterSlots>, Ilt>();
+        // the first time only: a ClientHello written again sends the same
+        let first_time = local.sent().is_none();
         send_local(local, |configured| client_parameters(configured, first));
-        encode::<L>(L::send_local(lineage), Role::Client)
+        let local = L::send_local(lineage);
+        if first_time {
+            give_events::<T, L, B, Iev>(lineage, others, |events, now| {
+                events.parameters_set(now, Initiator::Local, &local);
+            });
+        }
+        encode::<L>(local, Role::Client)
     }
 
     fn peer<'v>(view: Pin<&mut Self::ReceiverView<'v>>, peer: &[u8]) -> Result<(), Self::Error>
     where
         Self: 'v,
     {
-        let lineage = &mut view.get_mut().lineage;
+        let NodeLoan { lineage, others } = view.get_mut();
         let chosen = lineage.get::<PeerHandshakeConnectionId, Iph>().get();
         let initial = *lineage.get::<InitialDestinationConnectionIds, Iid>();
         let slots = read_peer::<L, Iv>(peer, Role::Server)?;
@@ -1183,6 +1357,9 @@ where
             .map_err(|source| {
                 v1_error::<L, Iv>(ConnectionError::PeerTransportParameters { source })
             })?;
+        give_events::<T, L, B, Iev>(lineage, others, |events, now| {
+            events.parameters_set(now, Initiator::Remote, &slots);
+        });
         lineage
             .get_mut::<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>()
             .set_known(slots);
@@ -1216,6 +1393,7 @@ impl<
     Jo,
     Jr,
     Ia,
+    Iev,
 > ClientAdvancingCapability<Tls>
     for NodeCallFamily<
         T,
@@ -1224,7 +1402,25 @@ impl<
         ClientAdvancingKind<Tls>,
         (
             CryptoPositions<Icr, Ics, Iv>,
-            ClientPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia>,
+            ClientPositions<
+                Ilt,
+                Ils,
+                Ipt,
+                Ifl,
+                Iid,
+                Iph,
+                Ik,
+                Io,
+                Ib,
+                Ie,
+                Irc,
+                Ih,
+                Ja,
+                Jo,
+                Jr,
+                Ia,
+                Iev,
+            >,
         ),
         B,
     >
@@ -1238,6 +1434,7 @@ where
     L: LineagePartList<T> + TransportParameterValueErrorsOf,
     B: CallBundle,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
+    EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>
         + Selector<Option<OriginalDestinationConnectionId>, Jo>
         + Selector<Option<RetrySourceConnectionId>, Jr>,
@@ -1249,6 +1446,7 @@ where
         + GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>
         + GetAt<FirstLocalConnectionId, Ifl>
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>
         + GetAt<InitialDestinationConnectionIds, Iid>
         + GetAt<PeerHandshakeConnectionId, Iph>
         + GetAt<HandshakeKeys<T::Crypto>, Ik>
@@ -1275,7 +1473,7 @@ where
     ) where
         Self: 'v,
     {
-        let lineage = &mut view.get_mut().lineage;
+        let NodeLoan { lineage, others } = view.get_mut();
         let backend = lineage
             .get::<PacketProtectionBackend<T::Crypto>, Ib>()
             .0
@@ -1283,6 +1481,9 @@ where
         lineage
             .get_mut::<HandshakeKeys<T::Crypto>, Ik>()
             .install(level_keys(&backend, aead, &secrets));
+        give_events::<T, L, B, Iev>(lineage, others, |events, now| {
+            keys_installed(events, now, EncryptionLevel::Handshake);
+        });
     }
 
     fn complete<'v>(
@@ -1292,7 +1493,7 @@ where
     ) where
         Self: 'v,
     {
-        let lineage = &mut view.get_mut().lineage;
+        let NodeLoan { lineage, others } = view.get_mut();
         let ClientHandshakeCompleted {
             secrets,
             exporter,
@@ -1307,6 +1508,12 @@ where
         lineage
             .get_mut::<OneRttKeys<T::Crypto, InstantOf<T>>, Io>()
             .install(backend, aead, secrets.send, secrets.receive);
+        give_events::<T, L, B, Iev>(lineage, others, |events, now| {
+            keys_installed(events, now, EncryptionLevel::OneRtt);
+            let chosen = application_protocol.as_ref();
+            events.alpn_information(now, chosen.map(|name| name.name().as_ref()));
+            events.connection_state(now, ConnectionState::HandshakeComplete);
+        });
         lineage
             .get_mut::<ConnectionExporter<Exporter<Tls::Crypto>>, Ie>()
             .hold(exporter);
@@ -1379,6 +1586,7 @@ impl<
     Jo,
     Jr,
     Ia,
+    Iev,
 >
     CallKind<
         T,
@@ -1386,7 +1594,25 @@ impl<
         Connection,
         (
             CryptoPositions<Icr, Ics, Iv>,
-            ClientPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia>,
+            ClientPositions<
+                Ilt,
+                Ils,
+                Ipt,
+                Ifl,
+                Iid,
+                Iph,
+                Ik,
+                Io,
+                Ib,
+                Ie,
+                Irc,
+                Ih,
+                Ja,
+                Jo,
+                Jr,
+                Ia,
+                Iev,
+            >,
         ),
     > for ClientAdvancingKind<Tls>
 where
@@ -1398,6 +1624,7 @@ where
     Rp: ClientRetryPolicy + 'static,
     L: LineagePartList<T> + TransportParameterValueErrorsOf,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Iv>,
+    EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
     TransportParameterSlots<L>: Selector<Option<InitialSourceConnectionId>, Ja>
         + Selector<Option<OriginalDestinationConnectionId>, Jo>
         + Selector<Option<RetrySourceConnectionId>, Jr>,
@@ -1410,6 +1637,7 @@ where
         + GetAt<LocalTransportParameters<TransportParameterSlots>, Ilt>
         + GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ipt>
         + GetAt<FirstLocalConnectionId, Ifl>
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>
         + GetAt<InitialDestinationConnectionIds, Iid>
         + GetAt<PeerHandshakeConnectionId, Iph>
         + GetAt<HandshakeKeys<T::Crypto>, Ik>
@@ -1420,7 +1648,7 @@ where
         + GetAt<ConnectionHandleCellOf<T, L>, Ih>,
     (
         CryptoPositions<Icr, Ics, Iv>,
-        ClientPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia>,
+        ClientPositions<Ilt, Ils, Ipt, Ifl, Iid, Iph, Ik, Io, Ib, Ie, Irc, Ih, Ja, Jo, Jr, Ia, Iev>,
     ): 'static,
 {
     type Call<B: CallBundle> = LentCall<
@@ -1448,6 +1676,7 @@ where
                     Jo,
                     Jr,
                     Ia,
+                    Iev,
                 >,
             ),
             B,

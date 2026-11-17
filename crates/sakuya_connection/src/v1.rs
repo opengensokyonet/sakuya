@@ -1207,13 +1207,14 @@ kept_while_closing!(InitialKeys);
 /// roles of the link paths and their close packets, as the Initial keys
 /// do; and whether the handshake is confirmed: once it is, they are
 /// discarded (RFC 9001 §4.9.2).
-impl<T: Choices, L, I, Ic, J, Jc, If> DataComponent<T, L, layer::Connection, (I, Ic, J, Jc, If)>
-    for HandshakeKeys<T::Crypto>
+impl<T: Choices, L, I, Ic, J, Jc, If, Iev>
+    DataComponent<T, L, layer::Connection, (I, Ic, J, Jc, If, Iev)> for HandshakeKeys<T::Crypto>
 where
     L: LineagePartList<T> + ConnectionErrorsOf,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<HandshakeKeys<T::Crypto>, I>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
-        + GetAt<HandshakeConfirmation, If>,
+        + GetAt<HandshakeConfirmation, If>
+        + GetAt<events::ConnectionEventSink<EventsOf<T, L>>, Iev>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<LinkPathRole<InstantOf<T>>, J> + GetAt<ClosePacket, Jc>,
@@ -1228,7 +1229,7 @@ where
     fn reread<'v, B: CallBundle>(
         mut lineage: LineageOf<'v, T, L, layer::Connection>,
         others: &mut OtherNodes<'v, T, L, B>,
-        _: InstantOf<T>,
+        now: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
         let keys = lineage.get::<HandshakeKeys<T::Crypto>, I>();
         if matches!(keys, HandshakeKeys::Discarded) {
@@ -1236,6 +1237,20 @@ where
         }
         if *lineage.get::<HandshakeConfirmation, If>() == HandshakeConfirmation::Confirmed {
             lineage.get_mut::<HandshakeKeys<T::Crypto>, I>().discard();
+            if <EventsOf<T, L> as events::ConnectionEvents<InstantOf<T>>>::ENABLED
+                && let Some(receiver) = lineage
+                    .get_mut::<events::ConnectionEventSink<EventsOf<T, L>>, Iev>()
+                    .active::<InstantOf<T>>()
+            {
+                for sender in [Role::Client, Role::Server] {
+                    let level = sakuya_wire::v1::encryption_level::EncryptionLevel::Handshake;
+                    events::ConnectionEvents::key_discarded(
+                        receiver,
+                        now,
+                        events::KeyChange { level, sender },
+                    );
+                }
+            }
             return None;
         }
         let receive_only = matches!(keys, HandshakeKeys::ReceiveOnly(_));

@@ -37,7 +37,7 @@
 //! of each level then keep only their receiving half, once every closing
 //! link path has sealed its own.
 
-use core::fmt;
+use core::{fmt, marker::PhantomData};
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
@@ -67,12 +67,13 @@ use sakuya_wire::{
 };
 
 use super::{
-    Choices, CloseCauseOf, Side,
+    Choices, CloseCauseOf, EventsOf, Side,
     aead_usage::AeadUsage,
     close::{CloseReasonRecord, ImmediateClosePolicy, LocalCloseCause, TransportClose},
     confirmation::HandshakeConfirmation,
     connection_ids::{ConnectionIdsOf, LinkPathResetTokenRegistrar, ResetTokenRegistrarOf},
     datagram_batch::{DatagramState, SealedInDatagram},
+    events::{ConnectionEventSink, ConnectionEvents, PacketEvents, PlainPacket, SealObserver},
     keys::{DirectionKeys, HandshakeKeys, InitialKeys, OneRttKeys, OneRttSendKeys},
     packet_writer::{PacketStart, PacketWriter},
     recovery::peer_max_udp_payload_size,
@@ -360,12 +361,51 @@ struct ClosePacketShape {
     budget: usize,
 }
 
+/// The close packets as they were sealed, in plaintext, for the
+/// connection's events `X` at instants `I`: kept only when they record
+/// anything, to be given once the sealing let the lineage go.
+struct SealedCopies<X, I> {
+    /// Whether this connection's events are recorded: nothing is copied
+    /// otherwise.
+    record: bool,
+    packets: Vec<CopiedPacket>,
+    events: PhantomData<fn() -> (X, I)>,
+}
+
+/// A copy of what a [`PlainPacket`] holds.
+struct CopiedPacket {
+    level: EncryptionLevel,
+    number: u64,
+    bytes: Vec<u8>,
+    header_len: usize,
+    wire_len: usize,
+}
+
+impl<X: ConnectionEvents<I>, I> SealObserver for SealedCopies<X, I> {
+    const ENABLED: bool = X::ENABLED;
+
+    fn sealing(&mut self, packet: &PlainPacket<'_>) {
+        if !self.record {
+            return;
+        }
+        self.packets.push(CopiedPacket {
+            level: packet.level,
+            number: packet.number,
+            bytes: packet.bytes.to_vec(),
+            header_len: packet.header_len,
+            wire_len: packet.wire_len,
+        });
+    }
+}
+
 /// Write `levels`, in increasing level, into one datagram of `shape`, the
-/// use of 1-RTT keys counted in `usage`; `None` when no packet fits.
-fn write_close_datagram<B: CryptoBackend>(
+/// use of 1-RTT keys counted in `usage`, each packet seen by `observer` as
+/// it is sealed; `None` when no packet fits.
+fn write_close_datagram<B: CryptoBackend, O: SealObserver>(
     levels: Vec<ClosePacketLevel<'_, B>>,
     shape: ClosePacketShape,
     usage: &mut AeadUsage,
+    observer: &mut O,
 ) -> Option<SealedClosePacket> {
     let next = |kind| {
         levels
@@ -445,6 +485,7 @@ fn write_close_datagram<B: CryptoBackend>(
             start,
             level.largest_acked,
             || PaddingSummary,
+            &mut *observer,
         ) else {
             continue;
         };
@@ -523,14 +564,14 @@ type SealRest<'x, T, L, It> =
 /// datagram are read from and `Ipp` of the peer's `max_udp_payload_size`;
 /// `It` of [`SealTakes`], `Iw` of [`SealReads`] in what is left and `Is` of
 /// [`SealedTakes`]; and `Jc` of the close packet of every other link path.
-type Positions<Ip, Ir, Ic, Iid, Il, Ipp, It, Iw, Is, Jc> =
-    ((Ip, Ir, Ic, Iid), (Il, Ipp), (It, Iw, Is), Jc);
+type Positions<Ip, Ir, Ic, Iid, Il, Ipp, It, Iw, Is, Jc, Iev> =
+    ((Ip, Ir, Ic, Iid), (Il, Ipp), (It, Iw, Is), Jc, Iev);
 
 /// The close packet reads the link path's role and the connection IDs of
 /// its logical path: it is sealed once the role is `Closing` and the peer's
 /// connection ID is known, as the [module documentation](self) says.
-impl<T, L, Ip, Ir, Ic, Iid, Il, Ipp, It, Iw, Is, Jc>
-    DataComponent<T, L, layer::LinkPath, Positions<Ip, Ir, Ic, Iid, Il, Ipp, It, Iw, Is, Jc>>
+impl<T, L, Ip, Ir, Ic, Iid, Il, Ipp, It, Iw, Is, Jc, Iev>
+    DataComponent<T, L, layer::LinkPath, Positions<Ip, Ir, Ic, Iid, Il, Ipp, It, Iw, Is, Jc, Iev>>
     for ClosePacket
 where
     T: Choices,
@@ -550,7 +591,9 @@ where
         + GetAt<ConnectionIdsOf<T>, Iid>
         + ReadEach<DatagramLimitsReads<T, L>, Il>
         + TakeEach<'x, SealTakes<T>, It>
-        + TakeEach<'x, SealedTakes<T>, Is>,
+        + TakeEach<'x, SealedTakes<T>, Is>
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
+    EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
     for<'x> SealRest<'x, T, L, It>: TakeEach<'x, SealReads<T, L>, Iw>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out: GetAt<ClosePacket, Jc>,
@@ -564,7 +607,7 @@ where
     fn reread<'v, B: CallBundle>(
         mut lineage: LineageOf<'v, T, L, layer::LinkPath>,
         others: &mut OtherNodes<'v, T, L, B>,
-        _: InstantOf<T>,
+        now: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
         if lineage.get::<ClosePacket, Ip>().is_sealed()
             || !matches!(
@@ -641,6 +684,16 @@ where
             budget,
         };
 
+        let record = <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
+            && lineage
+                .get_mut::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
+                .active::<InstantOf<T>>()
+                .is_some();
+        let mut copies = SealedCopies::<EventsOf<T, L>, InstantOf<T>> {
+            record,
+            packets: Vec::new(),
+            events: PhantomData,
+        };
         let sealed = {
             let (hlist_pat![policy, usage], rest) =
                 Take::<SealTakes<T>, It>::take(lineage.reborrow());
@@ -701,8 +754,27 @@ where
                     close: level_close(level),
                 });
             }
-            write_close_datagram(levels, shape, usage)?
+            write_close_datagram(levels, shape, usage, &mut copies)?
         };
+        if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
+            && let Some(events) = lineage
+                .get_mut::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
+                .active::<InstantOf<T>>()
+        {
+            for packet in &copies.packets {
+                events.packet_sent(
+                    now,
+                    &PlainPacket {
+                        level: packet.level,
+                        number: packet.number,
+                        bytes: &packet.bytes,
+                        header_len: packet.header_len,
+                        wire_len: packet.wire_len,
+                        pmtu_probe: false,
+                    },
+                );
+            }
+        }
 
         let (hlist_pat![packet, ids, registrar], _) = Take::<SealedTakes<T>, Is>::take(lineage);
         let chosen = DatagramConnectionId::<_, _, _, InstantOf<T>>::choose_first(

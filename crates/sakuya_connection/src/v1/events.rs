@@ -29,7 +29,13 @@ use core::time::Duration;
 use sakuya_stream::connection::ImmediateClose;
 use sakuya_wire::{
     connection_id::ConnectionId,
-    v1::{encryption_level::EncryptionLevel, role::Role},
+    parameters::ParametersOf,
+    v1::{
+        encryption_level::EncryptionLevel,
+        role::Role,
+        transport_parameters::{TransportParameterSlots, TransportParameterSpace},
+    },
+    version::Version,
 };
 
 use super::receive::DropReason;
@@ -74,15 +80,64 @@ pub trait ConnectionEvents<I>: Sized {
 
     /// The record of why the connection closed was written.
     fn connection_closed(&mut self, at: I, closed: &ConnectionClosed);
+
+    /// The connection reached `state`.
+    fn connection_state(&mut self, at: I, state: ConnectionState);
+
+    /// The keys of one level and direction were installed.
+    fn key_updated(&mut self, at: I, key: KeyChange);
+
+    /// The keys of one level and direction were discarded.
+    fn key_discarded(&mut self, at: I, key: KeyChange);
+
+    /// The QUIC version the connection uses is `chosen`, of those this side
+    /// offers or accepts, `local`.
+    fn version_information(&mut self, at: I, local: &[Version], chosen: Version);
+
+    /// The handshake chose the application protocol `chosen`; `None` when
+    /// none was negotiated.
+    fn alpn_information(&mut self, at: I, chosen: Option<&[u8]>);
 }
 
 /// What receives the events of one connection that carry packets, whose
 /// frames are read with the frame set of the list of parts `L`, at instants
 /// `I`.
 pub trait PacketEvents<I, L> {
+    /// A packet was sealed, to go out in the datagram being written.
+    fn packet_sent(&mut self, at: I, packet: &PlainPacket<'_>);
+
+    /// The transport parameters of `initiator`, every part's, are
+    /// `parameters`: this side's as it sends them, or the peer's once they
+    /// passed their checks.
+    fn parameters_set(
+        &mut self,
+        at: I,
+        initiator: Initiator,
+        parameters: &TransportParameterSlots<L>,
+    ) where
+        L: ParametersOf<TransportParameterSpace>;
+
     /// A packet was received and opened, and is not a duplicate; its frames
     /// are not processed yet.
     fn packet_received(&mut self, at: I, packet: &PlainPacket<'_>);
+}
+
+/// What sees each packet a datagram writer seals, in plaintext, just before
+/// it is sealed.
+///
+/// `()` sees nothing: with it, nothing of this is compiled in.
+pub trait SealObserver {
+    /// Whether it sees anything; `false` compiles the call away.
+    const ENABLED: bool;
+
+    /// The packet `packet` is about to be sealed.
+    fn sealing(&mut self, packet: &PlainPacket<'_>);
+}
+
+impl SealObserver for () {
+    const ENABLED: bool = false;
+    #[inline(always)]
+    fn sealing(&mut self, _: &PlainPacket<'_>) {}
 }
 
 /// What the application's threads give their events through.
@@ -113,8 +168,11 @@ pub struct PlainPacket<'a> {
     pub bytes: &'a [u8],
     /// Where the payload starts in `bytes`.
     pub header_len: usize,
-    /// The size of the packet as it went over the link, with its AEAD tag.
+    /// The size of the packet as it goes over the link, with its AEAD tag.
     pub wire_len: usize,
+    /// Whether it is a probe of a larger datagram size; never for a packet
+    /// received.
+    pub pmtu_probe: bool,
 }
 
 impl<'a> PlainPacket<'a> {
@@ -175,6 +233,32 @@ pub struct ConnectionClosed {
     pub close: Option<ImmediateClose>,
     /// What closed it.
     pub trigger: CloseTrigger,
+}
+
+/// A state the connection reached, of those qlog logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionState {
+    /// An Initial packet was sent or received: the connection started.
+    Attempted,
+    /// The first Handshake packet was sent or received.
+    HandshakeStarted,
+    /// The handshake completed (RFC 9001 §4.1.1).
+    HandshakeComplete,
+    /// The handshake was confirmed (RFC 9001 §4.1.2).
+    HandshakeConfirmed,
+    /// The record of why the connection closed was written: it closes,
+    /// drains or ended.
+    Closed,
+}
+
+/// The keys of one encryption level and one direction: those `sender`
+/// protects packets with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyChange {
+    /// The encryption level.
+    pub level: EncryptionLevel,
+    /// The side that protects packets with them.
+    pub sender: Role,
 }
 
 /// Which side something came from.
@@ -239,9 +323,27 @@ impl<I> ConnectionEvents<I> for NoEvents {
     fn recovery_metrics(&mut self, _: I, _: &RecoveryMetrics) {}
     #[inline(always)]
     fn connection_closed(&mut self, _: I, _: &ConnectionClosed) {}
+    #[inline(always)]
+    fn connection_state(&mut self, _: I, _: ConnectionState) {}
+    #[inline(always)]
+    fn key_updated(&mut self, _: I, _: KeyChange) {}
+    #[inline(always)]
+    fn key_discarded(&mut self, _: I, _: KeyChange) {}
+    #[inline(always)]
+    fn version_information(&mut self, _: I, _: &[Version], _: Version) {}
+    #[inline(always)]
+    fn alpn_information(&mut self, _: I, _: Option<&[u8]>) {}
 }
 
 impl<I, L> PacketEvents<I, L> for NoEvents {
+    #[inline(always)]
+    fn packet_sent(&mut self, _: I, _: &PlainPacket<'_>) {}
+    #[inline(always)]
+    fn parameters_set(&mut self, _: I, _: Initiator, _: &TransportParameterSlots<L>)
+    where
+        L: ParametersOf<TransportParameterSpace>,
+    {
+    }
     #[inline(always)]
     fn packet_received(&mut self, _: I, _: &PlainPacket<'_>) {}
 }
@@ -258,6 +360,7 @@ impl SharedEvents for NoEvents {
 pub struct ConnectionEventSink<X> {
     events: X,
     started: bool,
+    handshake_started: bool,
     closed: bool,
 }
 
@@ -267,6 +370,7 @@ impl<X> ConnectionEventSink<X> {
         Self {
             events,
             started: false,
+            handshake_started: false,
             closed: false,
         }
     }
@@ -286,7 +390,7 @@ impl<X> ConnectionEventSink<X> {
     }
 
     /// A poll began at `now`: the first one starts the connection.
-    pub(super) fn poll_began<I>(&mut self, now: I)
+    pub(super) fn poll_began<I: Copy>(&mut self, now: I)
     where
         X: ConnectionEvents<I>,
     {
@@ -294,20 +398,46 @@ impl<X> ConnectionEventSink<X> {
             self.started = true;
             if let Some(events) = self.active::<I>() {
                 events.connection_started(now);
+                events.connection_state(now, ConnectionState::Attempted);
+                // this version speaks QUIC version 1 alone
+                events.version_information(now, &[Version::V1], Version::V1);
+                // the Initial keys are there from the start
+                for sender in [Role::Client, Role::Server] {
+                    let level = EncryptionLevel::Initial;
+                    events.key_updated(now, KeyChange { level, sender });
+                }
             }
         }
     }
 
     /// The record of why the connection closed was written, as `closed`
     /// makes it: the first time only.
-    pub(super) fn record_written<I>(&mut self, at: I, closed: impl FnOnce() -> ConnectionClosed)
-    where
+    pub(super) fn record_written<I: Copy>(
+        &mut self,
+        at: I,
+        closed: impl FnOnce() -> ConnectionClosed,
+    ) where
         X: ConnectionEvents<I>,
     {
         if !self.closed {
             self.closed = true;
             if let Some(events) = self.active::<I>() {
                 events.connection_closed(at, &closed());
+                events.connection_state(at, ConnectionState::Closed);
+            }
+        }
+    }
+
+    /// A packet of `level` was sent or received at `at`: the first of the
+    /// Handshake level starts the handshake.
+    pub(super) fn packet_of_level<I: Copy>(&mut self, at: I, level: EncryptionLevel)
+    where
+        X: ConnectionEvents<I>,
+    {
+        if level == EncryptionLevel::Handshake && !self.handshake_started {
+            self.handshake_started = true;
+            if let Some(events) = self.active::<I>() {
+                events.connection_state(at, ConnectionState::HandshakeStarted);
             }
         }
     }
