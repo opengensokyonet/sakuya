@@ -62,7 +62,8 @@ use crate::{
 };
 
 use super::{
-    Choices,
+    Choices, EventsOf,
+    events::{self, ConnectionEventSink, ConnectionEvents},
     feedback::LineageFeedback,
     keys::{HandshakeKeys, InitialKeys},
     link::LinkClone,
@@ -267,8 +268,8 @@ where
 /// the loss steps only; then its packets go back to the send journals of
 /// the logical path, which drop what is past its retention first, and the
 /// summaries of their frames go back to their frame sources as lost.
-impl<T, L, S, Ls, Id, In, If, Ipp, Ima, It, Jx, Jr, Hf, Is>
-    DataComponent<T, L, layer::Recovery, ((Id, In, If), (Ipp, Ima), It, (Jx, Jr), Hf, Is)>
+impl<T, L, S, Ls, Id, In, If, Ipp, Ima, It, Jx, Jr, Hf, Is, Iev>
+    DataComponent<T, L, layer::Recovery, ((Id, In, If), (Ipp, Ima), It, (Jx, Jr), Hf, Is, Iev)>
     for PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>
 where
     T: Choices,
@@ -296,7 +297,8 @@ where
         + ReadEach<LossFactsReads<T, L>, If>
         + TakeEach<'v, LossTakes<T, L, Self>, It>,
     for<'v> <<L as LineageLists<'v, T>>::Recovery as TakeEach<'v, LossTakes<T, L, Self>, It>>::Rest:
-        LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
+        LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>
+            + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
     for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out:
         Selector<&'a CongestionPartOf<T, L>, Jx> + Selector<&'a RttOf<T, L>, Jr>,
@@ -324,27 +326,62 @@ where
             Take::<LossTakes<T, L, Self>, It>::take(lineage);
         let delay = loss_delay(&facts.rtt, &facts.thresholds);
         let threshold = facts.thresholds.packet_threshold();
-        let batches = lend_congestion::<T, L, B, Jx, Jr, _>(factory, part, others, |mut access| {
-            let mut batches = Vec::new();
-            for (space, detection) in spaces.iter_mut() {
-                if detection.loss_time().is_none_or(|at| at > now) {
-                    continue;
+        let (batches, window) =
+            lend_congestion::<T, L, B, Jx, Jr, _>(factory, part, others, |mut access| {
+                let mut batches = Vec::new();
+                for (space, detection) in spaces.iter_mut() {
+                    if detection.loss_time().is_none_or(|at| at > now) {
+                        continue;
+                    }
+                    let numbers = numbers.get(space);
+                    // with nothing acknowledged nothing is eligible, and the loss
+                    // time goes
+                    let largest = numbers
+                        .and_then(PacketNumberSpaceState::largest_acked)
+                        .unwrap_or(PacketNumber::ZERO);
+                    detection.discard_expired(now);
+                    let lost = detection.detect_lost(now, largest, delay, threshold);
+                    batches.push((
+                        space,
+                        declare_lost(space, lost, numbers, state, &mut access, &facts),
+                    ));
                 }
-                let numbers = numbers.get(space);
-                // with nothing acknowledged nothing is eligible, and the loss
-                // time goes
-                let largest = numbers
-                    .and_then(PacketNumberSpaceState::largest_acked)
-                    .unwrap_or(PacketNumber::ZERO);
-                detection.discard_expired(now);
-                let lost = detection.detect_lost(now, largest, delay, threshold);
-                batches.push((
-                    space,
-                    declare_lost(space, lost, numbers, state, &mut access, &facts),
-                ));
+                // read only for the events
+                let window = <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
+                    .then(|| access.window());
+                (batches, window)
+            });
+        if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
+            && let Some(events) = rest
+                .get_mut::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
+                .active::<InstantOf<T>>()
+        {
+            for (space, batch) in &batches {
+                for &number in &batch.numbers {
+                    events.packet_lost(
+                        now,
+                        &events::LostPacket {
+                            space: *space,
+                            number: number.get(),
+                            trigger: Some(events::LossTrigger::TimeThreshold),
+                        },
+                    );
+                }
             }
-            batches
-        });
+            let estimate = rtt.estimate();
+            events.recovery_metrics(
+                now,
+                &events::RecoveryMetrics {
+                    min_rtt: estimate.min,
+                    smoothed_rtt: estimate.smoothed,
+                    latest_rtt: estimate.latest,
+                    rtt_variance: estimate.variation,
+                    // invariant: read whenever the events are enabled
+                    congestion_window: window.expect("read for the events"),
+                    bytes_in_flight: state.bytes_in_flight(),
+                },
+            );
+        }
         let mut established =
             others.borrow_established_optional::<EstablishedSourceComponentsOfParts<T, L>, Is>();
         for (space, batch) in &batches {

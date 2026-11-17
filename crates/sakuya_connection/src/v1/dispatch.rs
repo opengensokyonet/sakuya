@@ -56,7 +56,7 @@ use sakuya_wire::{
 use snafu::{ResultExt, Snafu, ensure};
 
 use super::{
-    Choices, CloseCauseOf, LinkPathRoleReads, Part, Side,
+    Choices, CloseCauseOf, EventsOf, LinkPathRoleReads, Part, Side,
     ack::{AckReads, AckRecoveryTakes, receive_ack},
     close::CloseReasonRecord,
     confirmation::HandshakeConfirmation,
@@ -64,6 +64,7 @@ use super::{
     crypto::CryptoReceiver,
     current_probe_timeout,
     error::{self, ConnectionError, V1ConnectionErrorOf},
+    events::ConnectionEventSink,
     feedback::LineageFeedback,
     key_phase::KeyPhaseNumbers,
     keys::OneRttKeys,
@@ -203,6 +204,7 @@ impl<
     Ird,
     Io,
     Ikp,
+    Iev,
     Ide,
     Ipp,
     Ile,
@@ -223,7 +225,7 @@ impl<
             (Iv, Ima, Irt),
             (Il, Is, Ii, Idx),
             (
-                (Ij, In, If, Ird, Io, Ikp),
+                (Ij, In, If, Ird, Io, Ikp, Iev),
                 (Ide, Ipp),
                 (Ile, Ik),
                 (Jx, Jr),
@@ -253,7 +255,8 @@ where
         + GetAt<RecoveryFactoryOf<T, L>, If>
         + ReadEach<AckReads<L>, Ird>
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
-        + GetAt<KeyPhaseNumbers, Ikp>,
+        + GetAt<KeyPhaseNumbers, Ikp>
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath:
         LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
@@ -315,6 +318,7 @@ where
                 Ird,
                 Io,
                 Ikp,
+                Iev,
                 Ide,
                 Ima,
                 Ipp,

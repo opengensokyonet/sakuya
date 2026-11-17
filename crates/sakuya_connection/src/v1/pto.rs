@@ -45,9 +45,10 @@ use crate::{
 };
 
 use super::{
-    Choices, Side,
+    Choices, EventsOf, Side,
     amplification::AntiAmplification,
     confirmation::HandshakeConfirmation,
+    events::{self, ConnectionEventSink, ConnectionEvents},
     feedback::LineageFeedback,
     keys::HandshakeKeys,
     link::LinkFacts,
@@ -240,8 +241,8 @@ where
 ///
 /// Not here yet: declaring the packets in flight lost without asking the
 /// policy while the link path cannot send 1200 bytes.
-impl<T, L, S, Ls, Ipt, Ir, If, Ipp, Ima, It, Jx, Jr, Hf, Is>
-    DataComponent<T, L, layer::Recovery, ((Ipt, Ir, If), (Ipp, Ima), It, (Jx, Jr), Hf, Is)>
+impl<T, L, S, Ls, Ipt, Ir, If, Ipp, Ima, It, Jx, Jr, Hf, Is, Iev>
+    DataComponent<T, L, layer::Recovery, ((Ipt, Ir, If), (Ipp, Ima), It, (Jx, Jr), Hf, Is, Iev)>
     for ProbeTimeout<InstantOf<T>>
 where
     T: Choices,
@@ -272,7 +273,8 @@ where
         'v,
         ProbeTimeoutTakes<T, L, S, Ls>,
         It,
-    >>::Rest: LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
+    >>::Rest: LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
     for<'a> NodeData<T, L, layer::Recovery>: FlatRef<'a>,
     for<'a> <NodeData<T, L, layer::Recovery> as FlatRef<'a>>::Out:
         Selector<&'a CongestionPartOf<T, L>, Jx> + Selector<&'a RttOf<T, L>, Jr>,
@@ -309,7 +311,8 @@ where
             rtt: facts.rtt,
         };
         let mut probed = None;
-        let batches = lend_congestion::<T, L, B, Jx, Jr, _>(factory, part, others, |mut access| {
+        let (batches, window) =
+            lend_congestion::<T, L, B, Jx, Jr, _>(factory, part, others, |mut access| {
             let mut batches = Vec::new();
             match access.on_pto_expired(&expiry) {
                 PtoAction::Probe { datagrams, spaces } => {
@@ -331,8 +334,42 @@ where
                     }
                 }
             }
-            batches
+            // read only for the events
+            let window = <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
+                .then(|| sakuya_recovery::congestion::CongestionController::window(&access));
+            (batches, window)
         });
+        if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
+            && let Some(events) = rest
+                .get_mut::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
+                .active::<InstantOf<T>>()
+        {
+            for (space, batch) in &batches {
+                for &number in &batch.numbers {
+                    events.packet_lost(
+                        now,
+                        &events::LostPacket {
+                            space: *space,
+                            number: number.get(),
+                            trigger: Some(events::LossTrigger::ProbeTimeout),
+                        },
+                    );
+                }
+            }
+            let estimate = rtt.estimate();
+            events.recovery_metrics(
+                now,
+                &events::RecoveryMetrics {
+                    min_rtt: estimate.min,
+                    smoothed_rtt: estimate.smoothed,
+                    latest_rtt: estimate.latest,
+                    rtt_variance: estimate.variation,
+                    // invariant: read whenever the events are enabled
+                    congestion_window: window.expect("read for the events"),
+                    bytes_in_flight: state.bytes_in_flight(),
+                },
+            );
+        }
         let mut established =
         others.borrow_established_optional::<EstablishedSourceComponentsOfParts<T, L>, Is>();
         if let Some((spaces, datagrams)) = probed {

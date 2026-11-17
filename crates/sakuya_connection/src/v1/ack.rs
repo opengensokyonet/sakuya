@@ -75,9 +75,10 @@ use sakuya_wire::{
 use snafu::{ResultExt as _, ensure};
 
 use super::{
-    Choices, Side,
+    Choices, EventsOf, Side,
     confirmation::HandshakeConfirmation,
     error::{KeyUpdateSnafu, UnsentPacketAcknowledgedSnafu, V1ConnectionErrorOf},
+    events::{ConnectionEventSink, ConnectionEvents, LostPacket, RecoveryMetrics},
     feedback::LineageFeedback,
     key_phase::KeyPhaseNumbers,
     key_update::ack_received,
@@ -173,6 +174,7 @@ pub fn receive_ack<
     Ir,
     Io,
     Ikp,
+    Iev,
     Ide,
     Ima,
     Ipp,
@@ -210,7 +212,8 @@ where
         + GetAt<RecoveryFactoryOf<T, L>, If>
         + ReadEach<AckReads<L>, Ir>
         + GetAt<OneRttKeys<T::Crypto, InstantOf<T>>, Io>
-        + GetAt<KeyPhaseNumbers, Ikp>,
+        + GetAt<KeyPhaseNumbers, Ikp>
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
     for<'x> <L as LineageLists<'x, T>>::LogicalPath:
         LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
     L: ConnectionErrorsOf,
@@ -374,7 +377,7 @@ where
                     rtt_sampled,
                 };
                 let newly_acked = !acked.is_empty();
-                let batch =
+                let (batch, window) =
                     lend_congestion::<T, L, B, Jx, Jr, _>(factory, part, rest, |mut access| {
                         let context = |bytes_in_flight| CongestionContext {
                             now: at,
@@ -410,7 +413,10 @@ where
                                 .on_acked(acked.into_iter().filter_map(in_flight_packet), &context);
                         }
                         refill(&mut access, at, &estimate, max_datagram_size);
-                        batch
+                        // read only for the events, after the window's last change
+                        let window = <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
+                            .then(|| access.window());
+                        (batch, window)
                     });
                 if batch.as_ref().is_some_and(|batch| batch.persistent) {
                     rtt.on_persistent_congestion();
@@ -421,10 +427,46 @@ where
                     }
                     state.clear_probe_permits();
                 }
-                batch
+                // as the acknowledgment left them, persistent congestion
+                // included
+                let metrics = window.map(|congestion_window| {
+                    let estimate = rtt.estimate();
+                    RecoveryMetrics {
+                        min_rtt: estimate.min,
+                        smoothed_rtt: estimate.smoothed,
+                        latest_rtt: estimate.latest,
+                        rtt_variance: estimate.variation,
+                        congestion_window,
+                        bytes_in_flight: state.bytes_in_flight(),
+                    }
+                });
+                Some((batch, metrics))
             },
         );
-        declared.extend(batch.flatten());
+        let Some((batch, metrics)) = batch.flatten() else {
+            continue;
+        };
+        if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
+            && let Some(events) = lineage
+                .get_mut::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
+                .active::<InstantOf<T>>()
+        {
+            for &number in batch.iter().flat_map(|batch| &batch.numbers) {
+                events.packet_lost(
+                    at,
+                    &LostPacket {
+                        space,
+                        number: number.get(),
+                        // the packet and time thresholds are not told apart here
+                        trigger: None,
+                    },
+                );
+            }
+            if let Some(metrics) = &metrics {
+                events.recovery_metrics(at, metrics);
+            }
+        }
+        declared.extend(batch);
     }
 
     // the feedback, once the whole frame is handled: delivered first, then

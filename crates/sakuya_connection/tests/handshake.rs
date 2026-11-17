@@ -24,11 +24,13 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
+use common::events::Recorded;
 use common::{Outer, TestClock, TestLink, TestReceiver, advance_to, ms, now};
 use nitori_crypto::{NamedGroup, SignatureScheme, SigningKey as _};
 use nitori_crypto_aws_lc::{AwsLcBackend, Ed25519SigningKey};
 use nitori_io::{ReadChunkHostExt as _, calls::WriteAllHostExt as _};
 use sakuya_connection::prelude::*;
+use sakuya_connection::v1::events::{CloseTrigger, Initiator};
 use sakuya_connection::v1::{HostChoices, HostOf, SendParametersOf};
 use sakuya_connection::{
     call::CallBundle,
@@ -120,6 +122,7 @@ use sakuya_tls::{
         transparency::{EmbeddedSctPolicy, LogList, StaleLogListAction},
     },
 };
+use sakuya_wire::v1::encryption_level::EncryptionLevel;
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength, NonEmptyCid, StatelessResetToken},
     parameters::ParametersPart,
@@ -442,6 +445,7 @@ macro_rules! choices {
             type DestinationConnectionIds = common::TestDestinationConnectionIds;
             type LocalConnectionIds = common::TestLocalConnectionIds;
             type ImmediateClosePolicy = common::TestImmediateClosePolicy;
+            type Events<L> = common::events::RecordingEvents;
         }
     };
 }
@@ -1209,6 +1213,7 @@ fn handshake(
     mut done: impl FnMut(&Run) -> bool,
 ) -> Run {
     NOTED.with(|n| *n.borrow_mut() = [Noted::default(), Noted::default()]);
+    common::events::reset();
     common::reset_links();
     advance_to(ms(0));
     let (client_link, server_link) = (link(), link());
@@ -1366,6 +1371,39 @@ fn a_client_and_a_server_complete_and_confirm_the_handshake() {
             && noted(Role::Server).own == "Delivered"
     });
     let (server, client) = (noted(Role::Server), noted(Role::Client));
+    // each side's events: the connection starts first, packets of every
+    // level arrive whole, the recovery state is reported, nothing is lost,
+    // and only packets of a level whose keys are gone are dropped
+    for role in [Role::Server, Role::Client] {
+        let events = common::events::recorded(role);
+        assert_eq!(events.first(), Some(&Recorded::Started), "{role:?}");
+        for level in [
+            EncryptionLevel::Initial,
+            EncryptionLevel::Handshake,
+            EncryptionLevel::OneRtt,
+        ] {
+            assert!(
+                events.iter().any(|event| matches!(
+                    event,
+                    Recorded::Received { level: received, whole: true, .. } if *received == level
+                )),
+                "{role:?} received a packet of {level:?}: {events:#?}"
+            );
+        }
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Recorded::Metrics { .. })),
+            "{role:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Recorded::Lost { .. })
+                    || matches!(event, Recorded::Dropped { reason, .. } if reason != "NoReceiveKeys")),
+            "{role:?}: {events:#?}"
+        );
+    }
     for (side, noted) in [("server", &server), ("client", &client)] {
         assert!(noted.confirmed, "the {side}'s handshake is confirmed");
         assert_eq!(noted.initial_keys, "Discarded", "the {side}'s Initial keys");
@@ -1473,6 +1511,20 @@ fn a_client_whose_first_initial_datagram_is_lost_sends_its_hello_again_and_the_h
         noted(Role::Server).confirmed && noted(Role::Client).confirmed
     });
     CLIENT_DATAGRAMS_LOST.with(|lost| lost.set(0));
+    // the client's events: the first Initial packet, never acknowledged
+    // while later ones are, was declared lost on an acknowledgment
+    let events = common::events::recorded(Role::Client);
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            Recorded::Lost {
+                space: PacketNumberSpaceKind::Initial,
+                number: 0,
+                ..
+            }
+        )),
+        "{events:#?}"
+    );
     // nothing could happen before the probe timeout, which expires at
     // 999 ms with the initial round trip time
     assert!(now() >= ms(999), "confirmed at {:?}", now());
@@ -1533,6 +1585,27 @@ fn a_client_that_fails_to_verify_the_server_closes_with_the_alert() {
         "a closed connection keeps no exporter"
     );
     assert!(!run.server_ended, "the server closes in its own time");
+    // each side's events say who closed and why, once
+    let closed = |role| {
+        common::events::recorded(role)
+            .into_iter()
+            .filter(|event| matches!(event, Recorded::Closed { .. }))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        closed(Role::Client),
+        [Recorded::Closed {
+            initiator: Initiator::Local,
+            trigger: CloseTrigger::Error,
+        }]
+    );
+    assert_eq!(
+        closed(Role::Server),
+        [Recorded::Closed {
+            initiator: Initiator::Remote,
+            trigger: CloseTrigger::PeerClose,
+        }]
+    );
 }
 
 /// The output of `future` if it is ready on its first poll.

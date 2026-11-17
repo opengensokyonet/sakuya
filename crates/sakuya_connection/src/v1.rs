@@ -55,6 +55,7 @@ pub mod crypto;
 pub mod datagram_batch;
 pub mod dispatch;
 pub mod error;
+pub mod events;
 pub mod feedback;
 pub mod first_flight;
 pub mod frames;
@@ -386,6 +387,12 @@ pub trait HostChoices<T: MakerChoices + ?Sized>: 'static {
     /// parameters application data is sent with; the send strategy
     /// constrains the parameters with a trait of its own.
     type Streams: StreamSetFamily = streams::locked::LockedStreamSetFamily;
+    /// What receives the connection's events ([`events`]), one for each
+    /// connection, kept in the connection node; `L` is the composition's
+    /// list of parts. The events that carry packets need
+    /// [`PacketEvents`](events::PacketEvents) for that list besides, which
+    /// the composition proves; the default records nothing, for any list.
+    type Events<L>: events::ConnectionEvents<InstantOf<T>> = events::NoEvents;
 }
 
 /// The host's choices of the choices `T`.
@@ -410,6 +417,12 @@ pub type StreamSetFamilyOf<T> = <HostOf<T> as HostChoices<T>>::Streams;
 pub type SendParametersOf<T> = <StreamSetFamilyOf<T> as StreamSetFamily>::SendParameters;
 /// The configuration of the stream set of the choices `T`.
 pub type StreamSetConfigOf<T> = <StreamSetFamilyOf<T> as StreamSetFamily>::Config;
+/// The receiver of the connection's events, of the choices `T` and the list
+/// of parts `L`.
+pub type EventsOf<T, L> = <HostOf<T> as HostChoices<T>>::Events<L>;
+/// What the receiver of the connection's events is made from, of the
+/// choices `T` and the list of parts `L`.
+pub type EventsConfigOf<T, L> = <EventsOf<T, L> as events::ConnectionEvents<InstantOf<T>>>::Config;
 
 /// This endpoint's reason for closing a connection of the choices `T` and
 /// the list of parts `L`: the connection's error, the handshake's error,
@@ -776,6 +789,7 @@ where
         <T::Side as Side>::Own,
         ConnectionExporter<<T::Side as Side>::Exporter>,
         StreamSetConfig<StreamSetConfigOf<T>>,
+        events::ConnectionEventSink<EventsOf<T, L>>,
     ];
     /// The core of the send strategy and its intake are made together, and
     /// so are the record of why the connection closed and the cell of the
@@ -818,6 +832,7 @@ where
         HList![<T::Side as Side>::Own],
         HList![ConnectionExporter<<T::Side as Side>::Exporter>],
         HList![StreamSetConfig<StreamSetConfigOf<T>>],
+        HList![events::ConnectionEventSink<EventsOf<T, L>>],
     ];
     type Calls = HList![<T::Side as Side>::Advancing];
     type Args = ConnectionArgs<T, L>;
@@ -1484,6 +1499,58 @@ macro_rules! configured {
 }
 configured!(LossThresholds.loss_thresholds, MaxAckRanges.max_ack_ranges);
 
+/// The receiver of the connection's events is made when the connection is,
+/// from the default of its configuration, named by the client's very first
+/// Destination Connection ID.
+impl<T: Choices, L, I> Build<T, L, layer::Connection, (I,)>
+    for events::ConnectionEventSink<EventsOf<T, L>>
+where
+    L: LineagePartList<T>,
+    ConnectionArgsOf<T, L>: Selector<ConnectionArgs<T, L>, I>,
+{
+    fn build<'v>(
+        _: &mut ParentsOf<'v, T, L, layer::Connection>,
+        args: &mut ArgsOf<T, L, layer::Connection>,
+    ) -> Self {
+        let args = own_args::<T, L, I>(args);
+        let start = events::EventsStart {
+            role: <T::Side as Side>::ROLE,
+            original_destination_connection_id: args
+                .original_destination_connection_id
+                .unwrap_or(args.client_dcid),
+        };
+        // the arguments carry no configuration of the events yet: the
+        // receiver is made from its default
+        let config = EventsConfigOf::<T, L>::default();
+        events::ConnectionEventSink::new(<EventsOf<T, L> as events::ConnectionEvents<
+            InstantOf<T>,
+        >>::new(&config, &start))
+    }
+}
+/// When the receiver records anything, the first poll starts the
+/// connection.
+impl<T: Choices, L, I> DataComponent<T, L, layer::Connection, (I,)>
+    for events::ConnectionEventSink<EventsOf<T, L>>
+where
+    L: LineagePartList<T>,
+    for<'v> <L as LineageLists<'v, T>>::Connection:
+        GetAt<events::ConnectionEventSink<EventsOf<T, L>>, I>,
+{
+    const ACTS_BEFORE_CALLS: bool =
+        <EventsOf<T, L> as events::ConnectionEvents<InstantOf<T>>>::ENABLED;
+    fn before_calls<'v, B: CallBundle>(
+        mut lineage: LineageOf<'v, T, L, layer::Connection>,
+        _: &mut OtherNodes<'v, T, L, B>,
+        now: InstantOf<T>,
+        _: &core::task::Waker,
+    ) -> Option<RequestOf<T, L>> {
+        lineage
+            .get_mut::<events::ConnectionEventSink<EventsOf<T, L>>, I>()
+            .poll_began(now);
+        None
+    }
+}
+
 /// No connection starts confirmed: the advancing call confirms it.
 impl<T: Choices, L> Build<T, L, layer::Connection, ()> for HandshakeConfirmation
 where
@@ -1509,11 +1576,13 @@ impl PassiveDataComponent for HandshakeConfirmation {}
 /// end actions read it: [`AbortCause::DriverDropped`]. When a panic
 /// unwound through the future it becomes [`AbortCause::Panicked`], and no
 /// end action runs.
-impl<T: Choices, L: ConnectionErrorsOf, I> DataComponent<T, L, layer::Connection, (I,)>
+impl<T: Choices, L: ConnectionErrorsOf, I, Iev> DataComponent<T, L, layer::Connection, (I, Iev)>
     for CloseReasonRecord<CloseCauseOf<T, L>>
 where
     L: LineagePartList<T>,
-    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, I>,
+    ConnectionErrorOf<L>: close::TransportClose,
+    for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, I>
+        + GetAt<events::ConnectionEventSink<EventsOf<T, L>>, Iev>,
 {
     fn reads(reads: &mut ReadSet) {
         reads
@@ -1521,9 +1590,9 @@ where
             .add::<LinkPathRole<InstantOf<T>>>();
     }
     fn reread<'v, B: CallBundle>(
-        lineage: LineageOf<'v, T, L, layer::Connection>,
+        mut lineage: LineageOf<'v, T, L, layer::Connection>,
         others: &mut OtherNodes<'v, T, L, B>,
-        _: InstantOf<T>,
+        now: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
         if !lineage
             .get::<CloseReasonRecord<CloseCauseOf<T, L>>, I>()
@@ -1531,6 +1600,7 @@ where
         {
             return None;
         }
+        connection_closed_into_events::<T, L, I, Iev>(&mut lineage, now);
         if others.link_path_keys().next().is_none() {
             Some(StructureRequest::EndConnection)
         } else if others.has_established() {
@@ -1543,6 +1613,74 @@ where
         lineage
             .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, I>()
             .record(CloseReason::Aborted(cause));
+    }
+}
+
+/// Give the connection's events the record of why it closed, once it is
+/// written, at `now`; the sink keeps only the first.
+fn connection_closed_into_events<'v, T, L, Ic, Iev>(
+    lineage: &mut LineageOf<'v, T, L, layer::Connection>,
+    now: InstantOf<T>,
+) where
+    T: Choices,
+    L: LineagePartList<T> + ConnectionErrorsOf,
+    ConnectionErrorOf<L>: close::TransportClose,
+    for<'x> <L as LineageLists<'x, T>>::Connection: GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
+        + GetAt<events::ConnectionEventSink<EventsOf<T, L>>, Iev>,
+{
+    if <EventsOf<T, L> as events::ConnectionEvents<InstantOf<T>>>::ENABLED {
+        let closed = lineage
+            .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
+            .reason()
+            .map(connection_closed_event);
+        if let Some(closed) = closed {
+            lineage
+                .get_mut::<events::ConnectionEventSink<EventsOf<T, L>>, Iev>()
+                .record_written(now, || closed);
+        }
+    }
+}
+
+/// What the connection's events say of `reason`, this endpoint's reason
+/// for closing or the peer's.
+pub(crate) fn connection_closed_event<E, H, A, R>(
+    reason: &CloseReason<LocalCloseCause<E, H, A, R>>,
+) -> events::ConnectionClosed
+where
+    E: close::TransportClose,
+    H: close::TransportClose,
+    A: ApplicationClose,
+{
+    use events::{CloseTrigger, ConnectionClosed, Initiator};
+    let (initiator, close, trigger) = match reason {
+        CloseReason::Local(cause) => (
+            Initiator::Local,
+            cause.immediate_close(),
+            match &**cause {
+                LocalCloseCause::Connection(_) | LocalCloseCause::Handshake(_) => {
+                    CloseTrigger::Error
+                }
+                LocalCloseCause::Application(_) => CloseTrigger::Application,
+                LocalCloseCause::LinkEnded(_) => CloseTrigger::LinkEnded,
+            },
+        ),
+        CloseReason::Peer(close) => (
+            Initiator::Remote,
+            Some(close.clone()),
+            CloseTrigger::PeerClose,
+        ),
+        CloseReason::IdleTimeout => (Initiator::Local, None, CloseTrigger::IdleTimeout),
+        CloseReason::StatelessReset => (Initiator::Remote, None, CloseTrigger::StatelessReset),
+        CloseReason::VersionNegotiation { .. } => {
+            (Initiator::Remote, None, CloseTrigger::VersionMismatch)
+        }
+        CloseReason::RetryAbandoned => (Initiator::Local, None, CloseTrigger::RetryAbandoned),
+        CloseReason::Aborted(_) => (Initiator::Local, None, CloseTrigger::Aborted),
+    };
+    ConnectionClosed {
+        initiator,
+        close,
+        trigger,
     }
 }
 
@@ -1696,12 +1834,15 @@ where
 /// it expires the connection ends at once, without a closing period (RFC
 /// 9000 §10.1), and the reason goes into the record of why the connection
 /// closed; a reason already there stays.
-impl<T: Choices, L, Ii, Iv, Ic, Is, Ima, Ir>
-    DataComponent<T, L, layer::Connection, ((Ii, Iv, Ic), (Is, Ima, Ir))>
+impl<T: Choices, L, Ii, Iv, Ic, Is, Ima, Ir, Iev>
+    DataComponent<T, L, layer::Connection, ((Ii, Iv, Ic), (Is, Ima, Ir), Iev)>
     for IdleTimeout<InstantOf<T>>
 where
     L: LineagePartList<T>,
     L: ParametersOf<TransportParameterSpace> + ConnectionErrorsOf,
+    ConnectionErrorOf<L>: close::TransportClose,
+    for<'v> <L as LineageLists<'v, T>>::Connection:
+        GetAt<events::ConnectionEventSink<EventsOf<T, L>>, Iev>,
     TransportParameterSlots<L>:
         Selector<Option<MaxIdleTimeout>, Is> + Selector<Option<MaxAckDelay>, Ima>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<IdleTimeout<InstantOf<T>>, Ii>
@@ -1722,11 +1863,13 @@ where
     fn expire<'v, B: CallBundle>(
         mut lineage: LineageOf<'v, T, L, layer::Connection>,
         _: &mut OtherNodes<'v, T, L, B>,
-        _: InstantOf<T>,
+        now: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
         lineage
             .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
             .record(CloseReason::IdleTimeout);
+        // the connection ends at once, before the record's reread
+        connection_closed_into_events::<T, L, Ic, Iev>(&mut lineage, now);
         Some(StructureRequest::EndConnection)
     }
     fn reread<'v, B: CallBundle>(

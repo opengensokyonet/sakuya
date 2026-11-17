@@ -1140,6 +1140,7 @@ mod probe {
         Ian,
         Icid,
         Iph,
+        Iev,
         Isj,
         Irg,
         Ilr,
@@ -1151,7 +1152,7 @@ mod probe {
             (
                 I,
                 (Ii, Ih, Io),
-                (Ij, Im, Ia, It, Iu, Ikp, Icid, Iph),
+                (Ij, Im, Ia, It, Iu, Ikp, Icid, Iph, Iev),
                 (Ir, Ie, Ik, Hd),
                 (Ic, Icr),
                 (Ip, Ian, Isj, Irg, Ilr),
@@ -1172,6 +1173,7 @@ mod probe {
         <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<v1::error::V1ConnectionErrorOf<L>, Ie>
             + CoprodUninjector<v1::error::V1ConnectionErrorOf<L>, Ie>,
         <L as FrameSet>::Kind: CoproductSelector<FrameType, Ik>,
+        v1::EventsOf<T, L>: v1::events::PacketEvents<Duration, L>,
         for<'v> <L as LineageLists<'v, T>>::LogicalPath: GetAt<PacketFeeder, I>
             + GetAt<InitialKeys<RingBackend>, Ii>
             + GetAt<HandshakeKeys<RingBackend>, Ih>
@@ -1184,6 +1186,7 @@ mod probe {
             + GetAt<KeyPhaseNumbers, Ikp>
             + GetAt<v1::connection_ids::ConnectionIdsOf<T>, Icid>
             + GetAt<v1::connection_ids::PeerHandshakeConnectionId, Iph>
+            + GetAt<v1::events::ConnectionEventSink<v1::EventsOf<T, L>>, Iev>
             + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
             + GetAt<CryptoReceiver<FragmentedCryptoReceiveBuffer>, Icr>
             + GetAt<LogicalPathInput<TestLink, T::Receiver>, Ip>
@@ -1239,6 +1242,7 @@ mod probe {
                         Hd,
                         Icid,
                         Iph,
+                        Iev,
                     >(&mut lineage, others, packet);
                     log(describe::<L, Ie>(outcome));
                 }

@@ -88,11 +88,12 @@ use sakuya_wire::{
 };
 
 use super::{
-    Choices, Side,
+    Choices, EventsOf, Side,
     aead_usage::AeadUsage,
     connection_ids::{ConnectionIdsOf, PeerHandshakeConnectionId, ResetTokenRegistrarOf},
     dispatch::permitted,
     error::{ConnectionError, V1ConnectionErrorOf},
+    events::{ConnectionEventSink, ConnectionEvents, PacketEvents, PlainPacket},
     idle::IdleTimeout,
     key_phase::KeyPhaseNumbers,
     key_update::check_peer_update,
@@ -300,6 +301,7 @@ pub fn receive_packet<
     Hd,
     Icid,
     Iph,
+    Iev,
 >(
     lineage: &mut LineageOf<'v, T, L, LogicalPath>,
     others: &mut OtherNodes<'v, T, L, B>,
@@ -322,7 +324,9 @@ where
         + GetAt<AeadUsage, Iu>
         + GetAt<KeyPhaseNumbers, Ikp>
         + GetAt<ConnectionIdsOf<T>, Icid>
-        + GetAt<PeerHandshakeConnectionId, Iph>,
+        + GetAt<PeerHandshakeConnectionId, Iph>
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
+    EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<LinkPathRole<InstantOf<T>>, Ir>,
@@ -437,7 +441,8 @@ where
             .get_mut::<ConnectionIdsOf<T>, Icid>()
             .handshake_connection_id::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>(scid);
     }
-    let payload = bytes.into().slice(opened.payload);
+    let bytes: Bytes = bytes.into();
+    let payload = bytes.slice(opened.payload.clone());
     let at = arrival.at();
     let NodeKey::LogicalPath(path) = others.here() else {
         unreachable!("a logical path's lend carries its key")
@@ -478,6 +483,20 @@ where
     let Some(admission) = admission else {
         return Ok(PacketOutcome::Dropped(DropReason::Duplicate { number }));
     };
+    if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
+        && let Some(events) = lineage
+            .get_mut::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
+            .active::<InstantOf<T>>()
+    {
+        let packet = PlainPacket {
+            level,
+            number: number.get(),
+            bytes: &bytes[..opened.payload.end],
+            header_len: opened.payload.start,
+            wire_len: bytes.len(),
+        };
+        <EventsOf<T, L> as PacketEvents<InstantOf<T>, L>>::packet_received(events, at, &packet);
+    }
     match one_rtt {
         // taken only to change it
         Some((ReceiveGeneration::Current, current, lowest))

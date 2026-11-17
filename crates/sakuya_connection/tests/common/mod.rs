@@ -33,6 +33,7 @@ use sakuya_tls::{
 };
 
 pub mod ending;
+pub mod events;
 pub mod parts;
 pub mod strategy;
 

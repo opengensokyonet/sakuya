@@ -116,7 +116,7 @@ use sakuya_wire::{
 };
 
 use super::{
-    Choices, CloseCauseOf, HostSendStrategyTypes, LinkPathRoleReads, Side,
+    Choices, CloseCauseOf, EventsOf, HostSendStrategyTypes, LinkPathRoleReads, Side,
     aead_usage::AeadUsage,
     amplification::{AddressValidation, AntiAmplification},
     close::{CloseReasonRecord, LocalCloseCause},
@@ -127,6 +127,7 @@ use super::{
     },
     dispatch::drain_link_paths,
     error::V1ConnectionErrorOf,
+    events::{ConnectionEventSink, ConnectionEvents, PacketEvents},
     feedback::LineageFeedback,
     idle::IdleTimeout,
     key_phase::KeyPhaseNumbers,
@@ -515,6 +516,7 @@ type Positions<
     Ian,
     Icid,
     Iph,
+    Iev,
     Icp,
     Ipl,
     Is,
@@ -535,7 +537,7 @@ type Positions<
     Ls,
 > = (
     (Ip, Ic),
-    (Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Icid, Iph),
+    (Ii, Ih, Io, Ij, Im, Ia, It, Iu, Ikp, Icid, Iph, Iev),
     (Ir, Ie, Ik, Hd),
     Ian,
     (Is, Iv, Ima, Irt, Il),
@@ -566,6 +568,7 @@ impl<
     Ian,
     Icid,
     Iph,
+    Iev,
     Icp,
     Ipl,
     Is,
@@ -609,6 +612,7 @@ impl<
             Ian,
             Icid,
             Iph,
+            Iev,
             Icp,
             Ipl,
             Is,
@@ -675,7 +679,9 @@ where
         + GetAt<AeadUsage, Iu>
         + GetAt<KeyPhaseNumbers, Ikp>
         + GetAt<ConnectionIdsOf<T>, Icid>
-        + GetAt<PeerHandshakeConnectionId, Iph>,
+        + GetAt<PeerHandshakeConnectionId, Iph>
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
+    EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<LinkPathRole<InstantOf<T>>, Ir>,
@@ -743,6 +749,7 @@ where
                             Hd,
                             Icid,
                             Iph,
+                            Iev,
                         >(lineage, others, packet);
                         continue;
                     }
@@ -773,6 +780,7 @@ where
                     Ian,
                     Icid,
                     Iph,
+                    Iev,
                     Icp,
                     Ipl,
                     Il,
@@ -890,6 +898,7 @@ where
             Ian,
             Icid,
             Iph,
+            Iev,
             Icp,
             Ipl,
             Il,
@@ -942,6 +951,7 @@ fn receive_owned<
     Ian,
     Icid,
     Iph,
+    Iev,
     Icp,
     Ipl,
     Il,
@@ -1008,7 +1018,9 @@ fn receive_owned<
         + GetAt<AeadUsage, Iu>
         + GetAt<KeyPhaseNumbers, Ikp>
         + GetAt<ConnectionIdsOf<T>, Icid>
-        + GetAt<PeerHandshakeConnectionId, Iph>,
+        + GetAt<PeerHandshakeConnectionId, Iph>
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
+    EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<LinkPathRole<InstantOf<T>>, Ir>,
@@ -1046,6 +1058,7 @@ fn receive_owned<
                         Ii,
                         Icid,
                         Iph,
+                        Iev,
                         Il,
                         Iid,
                         Ibk,
@@ -1090,6 +1103,7 @@ fn receive_owned<
             Hd,
             Icid,
             Iph,
+            Iev,
         >(lineage, others, packet);
         if next.is_break() {
             break;
@@ -1138,6 +1152,7 @@ fn receive_unprotected<
     Ii,
     Icid,
     Iph,
+    Iev,
     Il,
     Iid,
     Ibk,
@@ -1164,7 +1179,9 @@ where
     for<'x> <L as LineageLists<'x, T>>::LogicalPath: GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
         + GetAt<InitialKeys<T::Crypto>, Ii>
         + GetAt<ConnectionIdsOf<T>, Icid>
-        + GetAt<PeerHandshakeConnectionId, Iph>,
+        + GetAt<PeerHandshakeConnectionId, Iph>
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
+    EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![LinkPathRole<InstantOf<T>>], Il>,
@@ -1368,6 +1385,7 @@ fn receive_one<
     Hd,
     Icid,
     Iph,
+    Iev,
 >(
     lineage: &mut LineageOf<'v, T, L, LogicalPath>,
     others: &mut OtherNodes<'v, T, L, B>,
@@ -1392,11 +1410,15 @@ where
         + GetAt<AeadUsage, Iu>
         + GetAt<KeyPhaseNumbers, Ikp>
         + GetAt<ConnectionIdsOf<T>, Icid>
-        + GetAt<PeerHandshakeConnectionId, Iph>,
+        + GetAt<PeerHandshakeConnectionId, Iph>
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
+    EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<LinkPathRole<InstantOf<T>>, Ir>,
 {
+    let level = packet.packet().level();
+    let at = packet.arrival().at();
     let outcome = receive_packet::<
         T,
         L,
@@ -1417,13 +1439,22 @@ where
         Hd,
         Icid,
         Iph,
+        Iev,
     >(lineage, others, packet);
     match outcome {
         // what a processed packet tells of migration is acted on with
         // migration
-        Ok(
-            PacketOutcome::Processed { .. } | PacketOutcome::Closing | PacketOutcome::Dropped(_),
-        ) => ControlFlow::Continue(()),
+        Ok(PacketOutcome::Processed { .. } | PacketOutcome::Closing) => ControlFlow::Continue(()),
+        Ok(PacketOutcome::Dropped(reason)) => {
+            if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
+                && let Some(events) = lineage
+                    .get_mut::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
+                    .active::<InstantOf<T>>()
+            {
+                events.packet_dropped(at, Some(level), &reason);
+            }
+            ControlFlow::Continue(())
+        }
         Ok(PacketOutcome::Held(packet)) => {
             lineage
                 .get_mut::<LogicalPathInput<T::Link, T::Receiver>, Ip>()
@@ -1596,6 +1627,7 @@ impl<
     Ian,
     Icid,
     Iph,
+    Iev,
     Icp,
     Ipl,
     Is,
@@ -1638,6 +1670,7 @@ impl<
             Ian,
             Icid,
             Iph,
+            Iev,
             Icp,
             Ipl,
             Is,
@@ -1702,7 +1735,9 @@ where
         + GetAt<AeadUsage, Iu>
         + GetAt<KeyPhaseNumbers, Ikp>
         + GetAt<ConnectionIdsOf<T>, Icid>
-        + GetAt<PeerHandshakeConnectionId, Iph>,
+        + GetAt<PeerHandshakeConnectionId, Iph>
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
+    EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
         GetAt<LinkPathRole<InstantOf<T>>, Ir>,
@@ -1739,6 +1774,7 @@ where
         Ian,
         Icid,
         Iph,
+        Iev,
         Icp,
         Ipl,
         Is,
@@ -1784,6 +1820,7 @@ where
                 Ian,
                 Icid,
                 Iph,
+                Iev,
                 Icp,
                 Ipl,
                 Is,
