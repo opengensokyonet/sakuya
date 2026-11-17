@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      # Incremental artifacts are never reused on a fresh runner and only
+      # inflate target/.
+      CARGO_INCREMENTAL: 0
+      # The runner has roughly 14 GB of free disk and a full check of this
+      # workspace produces a very large target/. Drop debug info for the dev
+      # profile; per-package profile.dev.package overrides in Cargo.toml still
+      # apply.
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show the pinned toolchain and build tools
+        run: |
+          rustup show
+          rustc --version --verbose
+          cmake --version
+          python3 --version
+      - name: Fetch dependencies
+        run: cargo fetch --locked
+      - name: Verify git dependency sources
+        run: |
+          cargo metadata --locked --format-version 1 > "$RUNNER_TEMP/metadata.json"
+          python3 - "$RUNNER_TEMP/metadata.json" <<'PY'
+          import json
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          dependencies = tomllib.loads(Path("Cargo.toml").read_text())["workspace"]["dependencies"]
+          packages = json.loads(Path(sys.argv[1]).read_text())["packages"]
+
+          def check(dependency_name, package_names):
+              dependency = dependencies[dependency_name]
+              expected = f'git+{dependency["git"]}?rev={dependency["rev"]}#{dependency["rev"]}'
+              for name in package_names:
+                  matches = [package for package in packages if package["name"] == name]
+                  assert len(matches) == 1 and matches[0]["source"] == expected, (name, matches)
+
+          check("snafu", ("snafu", "snafu-derive"))
+          for name in ("nitori_call", "nitori_crypto", "nitori_crypto_aws_lc", "nitori_id", "nitori_io"):
+              check(name, (name,))
+          PY
+      - name: Report disk usage after fetch and verification
+        if: always()
+        run: |
+          df -h /
+          du -sh target 2>/dev/null || true
+      - name: Format and lint
+        run: |
+          cargo fmt --all --check
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+          cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - name: Report disk usage after format and lint
+        if: always()
+        run: |
+          df -h /
+          du -sh target 2>/dev/null || true
+      - name: Test
+        run: |
+          cargo test --locked --workspace --all-targets
+          cargo test --locked --workspace --all-targets --all-features
+          cargo test --locked --workspace --doc
+      - name: Report disk usage after test
+        if: always()
+        run: |
+          df -h /
+          du -sh target 2>/dev/null || true
+      - name: Documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --workspace --all-features --no-deps
+      - name: Report disk usage after documentation
+        if: always()
+        run: |
+          df -h /
+          du -sh target 2>/dev/null || true
