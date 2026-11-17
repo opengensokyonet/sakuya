@@ -55,7 +55,7 @@ use sakuya_tls::{
         engine::{ClientHandshake, ClientHandshakeSettings},
         identity::NoClientCertificate,
         offering::PreferenceOffering,
-        ticket::TakeOnceTicketMap,
+        ticket::{ClientTicketStore, StoredTicket, TakeOnceTicketMap},
     },
     clock::SystemClock,
     extension::alpn::{ProtocolName, ProtocolNameList},
@@ -88,6 +88,7 @@ use sakuya_wire::{
     var_int::VarInt,
 };
 use snafu::{ResultExt as _, Snafu};
+use tokio::sync::watch;
 
 use crate::{hq, key_log::KeyLogFile, verify::LeafKeyVerifier};
 
@@ -260,10 +261,14 @@ impl SigningKey for SharedKey {
     }
 }
 
+/// The server's session tickets, in memory; every connection's engine
+/// holds a clone, and clones share the table.
+type ServerTickets = ZeroRttOnceTicketTable<&'static str, AwsLcBackend, SystemClock>;
+
 pub(crate) type ServerEngine = ServerHandshake<
     AwsLcBackend,
     PreferenceTable,
-    ZeroRttOnceTicketTable<&'static str, AwsLcBackend, SystemClock>,
+    ServerTickets,
     PassThroughLayers,
     SniTargets<&'static str>,
     CertifiedKey<SharedKey>,
@@ -275,7 +280,7 @@ pub(crate) type ServerEngine = ServerHandshake<
 pub(crate) type ClientEngine = ClientHandshake<
     AwsLcBackend,
     PreferenceOffering,
-    Arc<TakeOnceTicketMap<SystemClock>>,
+    Arc<WatchedTicketStore>,
     LeafKeyVerifier,
     NoClientCertificate,
     SystemClock,
@@ -310,6 +315,7 @@ pub(crate) struct ServerStarts {
     chain: Vec<Bytes>,
     key: SharedKey,
     cipher_suites: Vec<CipherSuite>,
+    tickets: ServerTickets,
     key_log: OptionalKeyLog,
 }
 
@@ -370,6 +376,15 @@ impl ServerStarts {
             chain,
             key: SharedKey(Arc::new(key)),
             cipher_suites,
+            tickets: ZeroRttOnceTicketTable::new(
+                AwsLcBackend,
+                SystemClock,
+                2,
+                // invariant: an hour is within a week
+                TicketLifetime::new(3600).expect("a ticket lifetime"),
+                false,
+                1024,
+            ),
             key_log,
         })
     }
@@ -390,15 +405,7 @@ impl ServerHandshakeConfig for ServerStarts {
                 groups(),
                 GroupPreference::KeyShareFirst,
             ),
-            ZeroRttOnceTicketTable::new(
-                AwsLcBackend,
-                SystemClock,
-                2,
-                // invariant: an hour is within a week
-                TicketLifetime::new(3600).expect("a ticket lifetime"),
-                false,
-                16,
-            ),
+            self.tickets.clone(),
             PassThroughLayers,
             targets,
             // invariant: `load` read at least one certificate
@@ -426,7 +433,7 @@ impl ServerHandshakeConfig for ServerStarts {
 pub(crate) struct ClientStarts {
     verifier: LeafKeyVerifier,
     cipher_suites: Vec<CipherSuite>,
-    tickets: Arc<TakeOnceTicketMap<SystemClock>>,
+    tickets: Arc<WatchedTicketStore>,
     key_log: OptionalKeyLog,
 }
 
@@ -436,13 +443,46 @@ impl ClientStarts {
         Self {
             verifier: LeafKeyVerifier::new(),
             cipher_suites,
-            tickets: Arc::new(TakeOnceTicketMap::new(
+            tickets: Arc::new(WatchedTicketStore::new(TakeOnceTicketMap::new(
                 SystemClock,
                 Duration::from_secs(86_400),
                 4,
-            )),
+            ))),
             key_log,
         }
+    }
+
+    /// The number of tickets the engines have stored so far, which changes
+    /// with each one a server sends.
+    pub(crate) fn tickets_stored(&self) -> watch::Receiver<usize> {
+        self.tickets.stored.subscribe()
+    }
+}
+
+/// The client's tickets, in memory, counting the ones stored: a connection
+/// that is to be resumed waits for a ticket before it closes.
+pub(crate) struct WatchedTicketStore {
+    tickets: TakeOnceTicketMap<SystemClock>,
+    stored: watch::Sender<usize>,
+}
+
+impl WatchedTicketStore {
+    fn new(tickets: TakeOnceTicketMap<SystemClock>) -> Self {
+        Self {
+            tickets,
+            stored: watch::Sender::new(0),
+        }
+    }
+}
+
+impl ClientTicketStore for WatchedTicketStore {
+    fn take(&self, target: &ServerTarget) -> Option<StoredTicket> {
+        self.tickets.take(target)
+    }
+
+    fn store(&self, target: &ServerTarget, ticket: StoredTicket) {
+        self.tickets.store(target, ticket);
+        self.stored.send_modify(|stored| *stored += 1);
     }
 }
 

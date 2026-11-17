@@ -13,7 +13,8 @@ pub const UNSUPPORTED: u8 = 127;
 /// A test case a server runs, by what it changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServerTestCase {
-    /// `handshake`, `transfer` and `multiconnect`: serve with the defaults.
+    /// `handshake`, `transfer`, `multiconnect` and `resumption`: serve with
+    /// the defaults, which issue session tickets.
     /// The runner also hands `transfer` to the server of `multiplexing`,
     /// `blackhole`, `keyupdate`, `amplificationlimit` and the others that
     /// differ only in the network or the client.
@@ -44,7 +45,7 @@ impl ServerTestCase {
     /// support it.
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
-            "handshake" | "transfer" | "multiconnect" => Some(Self::Serve),
+            "handshake" | "transfer" | "multiconnect" | "resumption" => Some(Self::Serve),
             "chacha20" => Some(Self::ChaCha20),
             "retry" => Some(Self::Retry),
             #[cfg(feature = "extensions")]
@@ -69,6 +70,10 @@ pub enum ClientTestCase {
     /// `chacha20`: as `transfer`, offering TLS_CHACHA20_POLY1305_SHA256
     /// alone.
     ChaCha20,
+    /// `resumption`: the first request on one connection, which waits for a
+    /// session ticket before it closes, and the others on a second
+    /// connection, which resumes with that ticket.
+    Resumption,
     /// `datagram`, not a test case of the runner, with the feature
     /// `extensions` only: announce
     /// `max_datagram_frame_size`, send datagrams to the server of the
@@ -90,6 +95,7 @@ impl ClientTestCase {
             "handshake" | "transfer" | "retry" => Some(Self::OneConnection),
             "multiconnect" => Some(Self::ConnectionPerRequest),
             "chacha20" => Some(Self::ChaCha20),
+            "resumption" => Some(Self::Resumption),
             #[cfg(feature = "extensions")]
             "datagram" => Some(Self::Datagram),
             #[cfg(feature = "extensions")]
@@ -171,6 +177,14 @@ mod tests {
         assert_eq!(
             ClientTestCase::from_name("retry"),
             Some(ClientTestCase::OneConnection)
+        );
+        assert_eq!(
+            ServerTestCase::from_name("resumption"),
+            Some(ServerTestCase::Serve)
+        );
+        assert_eq!(
+            ClientTestCase::from_name("resumption"),
+            Some(ClientTestCase::Resumption)
         );
     }
 

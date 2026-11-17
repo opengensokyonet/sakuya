@@ -142,6 +142,14 @@ pub fn main() -> ExitCode {
             .into_iter()
             .map(|url| vec![url])
             .collect(),
+        ClientTestCase::Resumption => {
+            let mut requests = environment.requests;
+            let rest = requests.split_off(1);
+            [requests, rest]
+                .into_iter()
+                .filter(|batch| !batch.is_empty())
+                .collect()
+        }
         ClientTestCase::Datagram => vec![environment.requests.into_iter().take(1).collect()],
         ClientTestCase::OneConnection
         | ClientTestCase::ChaCha20
@@ -163,6 +171,7 @@ async fn fetch_all(
         reset_stream_at: test_case == ClientTestCase::ResetStreamAt,
     };
     let reset_at = extensions.reset_stream_at;
+    let mut tickets_stored = starts.tickets_stored();
     let first = &batches[0][0];
     let server = match (first.host.as_str(), first.port).to_socket_addrs() {
         Ok(mut addresses) => match addresses.next() {
@@ -383,6 +392,18 @@ async fn fetch_all(
                 }
             }
         };
+        // the connection to resume from closes once a ticket is kept, which
+        // the server sends after its handshake, before any answer
+        if test_case == ClientTestCase::Resumption && number < batches.len() && all_fetched {
+            let kept = tokio::time::timeout(STEP, tickets_stored.wait_for(|stored| *stored > 0));
+            if !matches!(kept.await, Ok(Ok(_))) {
+                eprintln!("sakuya client: connection {number} keeps no ticket within {STEP:?}");
+                handle.close(HqClose(0));
+                outcome = ExitCode::FAILURE;
+                break;
+            }
+            eprintln!("sakuya client: connection {number} kept a ticket");
+        }
         handle.close(HqClose(0));
         closing.push(async move {
             match tokio::time::timeout(STEP, &mut connection).await {
