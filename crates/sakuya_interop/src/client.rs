@@ -115,12 +115,6 @@ pub fn main() -> ExitCode {
         );
         return ExitCode::from(UNSUPPORTED);
     };
-    if let Some(dir) = &environment.qlog_dir {
-        eprintln!(
-            "sakuya client: QLOGDIR {} is set; no qlog is written yet",
-            dir.display()
-        );
-    }
     if environment.requests.is_empty() {
         eprintln!("sakuya client: REQUESTS is empty");
         return ExitCode::FAILURE;
@@ -155,7 +149,7 @@ pub fn main() -> ExitCode {
         | ClientTestCase::ChaCha20
         | ClientTestCase::ResetStreamAt => vec![environment.requests],
     };
-    crate::run_local(fetch_all(starts, test_case, batches))
+    crate::run_local(fetch_all(starts, test_case, batches, environment.qlog_dir))
 }
 
 /// A failure of the client, already reported.
@@ -165,6 +159,7 @@ async fn fetch_all(
     starts: ClientStarts,
     test_case: ClientTestCase,
     batches: Vec<Vec<Url>>,
+    qlog_dir: Option<PathBuf>,
 ) -> ExitCode {
     let extensions = Extensions {
         datagram: test_case == ClientTestCase::Datagram,
@@ -192,7 +187,7 @@ async fn fetch_all(
     };
     let (client, reflow) = match Endpoint::<_, NoServer, Client>::new(endpoint_config(
         (),
-        client_config(starts, extensions),
+        client_config(starts, extensions, qlog_dir),
     )) {
         Ok(made) => made,
         Err(error) => {

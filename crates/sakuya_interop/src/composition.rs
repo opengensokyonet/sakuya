@@ -13,7 +13,11 @@
 //! transport parameters of QUIC version 1 alone.
 
 use core::{fmt, num::NonZeroU32, time::Duration};
-use std::{net::SocketAddr, path::Path, sync::Arc};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use bytes::Bytes;
 use frunk_core::{Coprod, hlist};
@@ -47,6 +51,7 @@ use sakuya_endpoint::{
     },
 };
 use sakuya_packet_protection::backend::ring::RingBackend;
+use sakuya_qlog::{QlogConfig, QlogWriter};
 use sakuya_recovery::loss::LossThresholds;
 use sakuya_tls::{
     cipher_suite::CipherSuite,
@@ -158,13 +163,15 @@ impl v1::close::ApplicationClose for HqClose {
     }
 }
 
-/// What the programs choose of version 1: their application error, and the
+/// What the programs choose of version 1: their application error, qlog
+/// for the connections' events, written where `QLOGDIR` says, and the
 /// default of everything else. The endpoint fixes the rest
 /// ([`ServerChoices`], [`ClientChoices`]).
 pub(crate) struct InteropChoices;
 
 impl<T: v1::MakerChoices> v1::HostChoices<T> for InteropChoices {
     type ApplicationError = HqClose;
+    type Events<L> = QlogWriter<L, TokioClock>;
 }
 
 /// The default queues of the DATAGRAM extension.
@@ -525,7 +532,7 @@ impl ClientHandshakeConfig for ClientStarts {
 /// streams of the peer; the stream set raises the limits as the
 /// application reads.
 macro_rules! v1_config {
-    ($t:ty) => {{
+    ($t:ty, $qlog:expr) => {{
         let mut parameters = TransportParameters::<Vec<u8>>::new();
         parameters.set(MaxIdleTimeout::new(VarInt::from_u32(30_000)));
         parameters.set(InitialMaxData::new(VarInt::from_u32(16 << 20)));
@@ -542,6 +549,10 @@ macro_rules! v1_config {
         ));
         sakuya_endpoint::v1::ConnectionConfig::<$t, Parts> {
             transport_parameters: parameters.known,
+            events: QlogConfig {
+                dir: $qlog,
+                clock: Some(TokioClock),
+            },
             ..Default::default()
         }
     }};
@@ -636,6 +647,7 @@ pub(crate) fn server_config(
     starts: ServerStarts,
     always_retry: bool,
     extensions: Extensions,
+    qlog_dir: Option<PathBuf>,
 ) -> ServerConfig<ServerChoices, Parts, ServerStarts, AeadAddressTokens<AwsLcBackend>, RetryPolicy>
 {
     // invariant: the system's generator gives a key, and the defaults are
@@ -658,7 +670,7 @@ pub(crate) fn server_config(
             handshake: 4096,
         },
         thresholds(),
-        part_configs!(v1_config!(ServerChoices), extensions),
+        part_configs!(v1_config!(ServerChoices, qlog_dir), extensions),
         tokens,
         RetryPolicy {
             always: always_retry,
@@ -672,6 +684,7 @@ pub(crate) fn server_config(
 pub(crate) fn client_config(
     starts: ClientStarts,
     extensions: Extensions,
+    qlog_dir: Option<PathBuf>,
 ) -> ClientConfig<ClientChoices, Parts, ClientStarts, ClientTokens, ContinueOnRetry> {
     ClientConfig::new(
         starts,
@@ -682,7 +695,7 @@ pub(crate) fn client_config(
             one_rtt: 16 * 1024 + 4,
         },
         thresholds(),
-        part_configs!(v1_config!(ClientChoices), extensions),
+        part_configs!(v1_config!(ClientChoices, qlog_dir), extensions),
         ClientTokens::new(),
         ContinueOnRetry,
     )

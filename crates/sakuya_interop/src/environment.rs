@@ -114,7 +114,7 @@ pub struct Environment {
     pub requests: Vec<Url>,
     /// `SSLKEYLOGFILE`, where to write the key log.
     pub key_log: Option<PathBuf>,
-    /// `QLOGDIR`. It is read, but no qlog is written yet.
+    /// `QLOGDIR`, where each connection writes its qlog.
     pub qlog_dir: Option<PathBuf>,
 }
 

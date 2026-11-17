@@ -6,7 +6,11 @@
 //! reliable size of half the file instead of the end of the stream.
 
 use core::{net::SocketAddr, num::NonZeroUsize};
-use std::{path::Path, process::ExitCode, rc::Rc};
+use std::{
+    path::{Path, PathBuf},
+    process::ExitCode,
+    rc::Rc,
+};
 
 #[cfg(feature = "extensions")]
 use bytes::Buf as _;
@@ -59,12 +63,6 @@ pub fn main() -> ExitCode {
         );
         return ExitCode::from(UNSUPPORTED);
     };
-    if let Some(dir) = &environment.qlog_dir {
-        eprintln!(
-            "sakuya server: QLOGDIR {} is set; no qlog is written yet",
-            dir.display()
-        );
-    }
     let key_log = match OptionalKeyLog::open(environment.key_log.as_deref()) {
         Ok(key_log) => key_log,
         Err(error) => {
@@ -83,10 +81,14 @@ pub fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    crate::run_local(serve(starts, test_case))
+    crate::run_local(serve(starts, test_case, environment.qlog_dir))
 }
 
-async fn serve(starts: ServerStarts, test_case: ServerTestCase) -> ExitCode {
+async fn serve(
+    starts: ServerStarts,
+    test_case: ServerTestCase,
+    qlog_dir: Option<PathBuf>,
+) -> ExitCode {
     let extensions = Extensions {
         datagram: test_case == ServerTestCase::Datagram,
         reset_stream_at: test_case == ServerTestCase::ResetStreamAt,
@@ -94,7 +96,12 @@ async fn serve(starts: ServerStarts, test_case: ServerTestCase) -> ExitCode {
     #[cfg(feature = "extensions")]
     let reset_at = extensions.reset_stream_at;
     let (server, reflow) = match Endpoint::<_, Server, NoClient>::new(endpoint_config(
-        server_config(starts, test_case == ServerTestCase::Retry, extensions),
+        server_config(
+            starts,
+            test_case == ServerTestCase::Retry,
+            extensions,
+            qlog_dir,
+        ),
         (),
     )) {
         Ok(made) => made,

@@ -25,6 +25,8 @@ extensions = [
     "sakuya_connection/reset_stream_at",
     "sakuya_endpoint/datagram",
     "sakuya_endpoint/reset_stream_at",
+    "sakuya_qlog/datagram",
+    "sakuya_qlog/reset_stream_at",
     "sakuya_wire/datagram",
     "sakuya_wire/reset_stream_at",
 ]
@@ -43,6 +45,7 @@ sakuya_connection.workspace = true
 sakuya_datagram_routing.workspace = true
 sakuya_endpoint = { path = "../sakuya_endpoint" }
 sakuya_packet_protection = { workspace = true, features = ["ring"] }
+sakuya_qlog.workspace = true
 sakuya_recovery.workspace = true
 sakuya_stream.workspace = true
 sakuya_test_support = { path = "../sakuya_test_support" }
