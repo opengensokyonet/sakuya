@@ -1048,3 +1048,41 @@ fn default_termination_resets_on_stop_sending() {
         }
     ));
 }
+
+// ---------------------------------------------------------------------------
+// States (draft §5.3)
+
+/// A `RESET_STREAM_AT` leads to Data Sent, as a FIN does; a `RESET_STREAM`
+/// that follows leads to Reset Sent.
+#[test]
+fn reset_stream_at_is_data_sent_and_reset_stream_reset_sent() {
+    use crate::send::SendStreamState as State;
+    let connection = new_connection(1000);
+    let mut sender = test_sender(&connection, 1000);
+    write_all(&mut sender, 100);
+    assert_eq!(sender.send_state(), State::Ready);
+    expose(&mut sender, 40);
+    assert_eq!(sender.send_state(), State::Send);
+    sender.reset_at(SUPPORT, CODE, v(40)).unwrap();
+    assert_eq!(sender.send_state(), State::Send, "not sent yet");
+    assert!(is_reset_stream_at(send_end(&mut sender)));
+    assert_eq!(sender.send_state(), State::DataSent);
+    sender
+        .enter_terminal_state(SendTerminalState::DataRecvd)
+        .unwrap();
+    assert_eq!(sender.send_state(), State::DataRecvd);
+
+    let mut sender = test_sender(&connection, 1000);
+    write_all(&mut sender, 100);
+    sender.reset_at(SUPPORT, CODE, v(40)).unwrap();
+    expose(&mut sender, 40);
+    assert!(is_reset_stream_at(send_end(&mut sender)));
+    sender.reset(CODE).unwrap();
+    assert_eq!(sender.send_state(), State::DataSent);
+    assert!(is_reset_stream(send_end(&mut sender)));
+    assert_eq!(sender.send_state(), State::ResetSent);
+    sender
+        .enter_terminal_state(SendTerminalState::ResetRecvd)
+        .unwrap();
+    assert_eq!(sender.send_state(), State::ResetRecvd);
+}

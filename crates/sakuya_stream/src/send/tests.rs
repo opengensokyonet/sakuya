@@ -1711,3 +1711,64 @@ fn an_exhausted_unfulfilled_intent_resets_once() {
         TerminationAction::Keep
     );
 }
+
+// ---------------------------------------------------------------------------
+// States (RFC 9000 §3.1)
+
+/// Ready, Send, Data Sent and Data Recvd; a FIN without data leads from
+/// Ready to Data Sent.
+#[test]
+fn a_close_reaches_data_sent_and_data_recvd() {
+    let connection = new_connection(1000);
+    let mut sender = test_sender(&connection, 1000);
+    assert_eq!(sender.send_state(), SendStreamState::Ready);
+    write_all(&mut sender, 100);
+    assert_eq!(
+        sender.send_state(),
+        SendStreamState::Ready,
+        "nothing exposed"
+    );
+    expose(&mut sender, 100);
+    assert_eq!(sender.send_state(), SendStreamState::Send);
+    sender.close().unwrap();
+    assert_eq!(sender.send_state(), SendStreamState::Send, "FIN not sent");
+    assert!(matches!(send_end(&mut sender), StreamEndFrame::Fin(_)));
+    assert_eq!(sender.send_state(), SendStreamState::DataSent);
+    sender
+        .enter_terminal_state(SendTerminalState::DataRecvd)
+        .unwrap();
+    assert_eq!(sender.send_state(), SendStreamState::DataRecvd);
+
+    let mut sender = test_sender(&connection, 1000);
+    sender.close().unwrap();
+    assert_eq!(sender.send_state(), SendStreamState::Ready);
+    assert!(matches!(send_end(&mut sender), StreamEndFrame::Fin(_)));
+    assert_eq!(sender.send_state(), SendStreamState::DataSent);
+}
+
+/// A reset leads to Reset Sent once its frame was sent, also from Data Sent,
+/// and to Reset Recvd once acknowledged.
+#[test]
+fn a_reset_reaches_reset_sent_and_reset_recvd() {
+    let connection = new_connection(1000);
+    let mut sender = test_sender(&connection, 1000);
+    write_all(&mut sender, 100);
+    expose(&mut sender, 50);
+    sender.reset(CODE).unwrap();
+    assert_eq!(sender.send_state(), SendStreamState::Send, "not sent yet");
+    assert!(matches!(send_end(&mut sender), StreamEndFrame::Reset(_)));
+    assert_eq!(sender.send_state(), SendStreamState::ResetSent);
+    sender
+        .enter_terminal_state(SendTerminalState::ResetRecvd)
+        .unwrap();
+    assert_eq!(sender.send_state(), SendStreamState::ResetRecvd);
+
+    let mut sender = test_sender(&connection, 1000);
+    write_all(&mut sender, 10);
+    sender.close().unwrap();
+    assert!(matches!(send_end(&mut sender), StreamEndFrame::Fin(_)));
+    sender.reset(CODE).unwrap();
+    assert_eq!(sender.send_state(), SendStreamState::DataSent);
+    assert!(matches!(send_end(&mut sender), StreamEndFrame::Reset(_)));
+    assert_eq!(sender.send_state(), SendStreamState::ResetSent);
+}

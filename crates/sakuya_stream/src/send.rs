@@ -253,6 +253,37 @@ impl<T: LocalResetTarget> SendEndState<T> {
     }
 }
 
+/// The state of a stream's send direction ([RFC 9000 §3.1]), as far as the
+/// stream sender knows it.
+///
+/// It follows from the committed end, the end frames exposed so far, the
+/// exposure end and the terminal state; it is read, never kept, and no
+/// operation acts on it. A `RESET_STREAM_AT` of the reliable stream reset
+/// extension leads to Data Sent, as a FIN does
+/// ([draft-ietf-quic-reliable-stream-reset-11 §5.3]).
+///
+/// [RFC 9000 §3.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-3.1
+/// [draft-ietf-quic-reliable-stream-reset-11 §5.3]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html#section-5.3
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SendStreamState {
+    /// Nothing of the stream was exposed yet.
+    ///
+    /// A sender that sent only `STREAM_DATA_BLOCKED` frames is still read as
+    /// Ready: it does not keep whether one was sent.
+    Ready,
+    /// Data was exposed, and no end frame yet.
+    Send,
+    /// The FIN, or a reset frame whose acknowledgement leads to Data Recvd
+    /// (a `RESET_STREAM_AT`), was exposed last among the end frames.
+    DataSent,
+    /// A `RESET_STREAM` was exposed last among the reset frames.
+    ResetSent,
+    /// All data and the final size were acknowledged.
+    DataRecvd,
+    /// The reset was acknowledged.
+    ResetRecvd,
+}
+
 /// Who committed an end state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EndSource {
@@ -375,6 +406,30 @@ where
     /// The exposure end (`exposure_end`), as the send buffer keeps it.
     pub fn exposure_end(&self) -> VarInt {
         self.composition.exposure_end()
+    }
+
+    /// The state of the send direction ([`SendStreamState`]).
+    pub fn send_state(&self) -> SendStreamState {
+        let sent = match &self.end {
+            EndPhase::Ended {
+                terminal: Some(state),
+                ..
+            } => {
+                return match state {
+                    SendTerminalState::DataRecvd => SendStreamState::DataRecvd,
+                    SendTerminalState::ResetRecvd => SendStreamState::ResetRecvd,
+                };
+            }
+            EndPhase::Ended { sent, .. } => *sent,
+            EndPhase::Open => SentEndFrames::none(),
+        };
+        match sent.last_reset.map(|target| target.acknowledged_state()) {
+            Some(SendTerminalState::ResetRecvd) => SendStreamState::ResetSent,
+            Some(SendTerminalState::DataRecvd) => SendStreamState::DataSent,
+            None if sent.fin => SendStreamState::DataSent,
+            None if self.exposure_end() > VarInt::ZERO => SendStreamState::Send,
+            None => SendStreamState::Ready,
+        }
     }
 
     /// The reliable size (`reliable_size`): the end up to which data must

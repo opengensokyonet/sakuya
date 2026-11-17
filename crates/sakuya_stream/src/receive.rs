@@ -269,6 +269,48 @@ enum Committed<R, Lc, F: RemoteResetFacts> {
     Error(ReadError<R, Lc, F>),
 }
 
+/// The state of a stream's receive direction ([RFC 9000 §3.2]), as far as
+/// the stream receiver knows it.
+///
+/// It follows from the final size, the ranges received, the reset facts and
+/// the read result the application has; it is read, never kept, and no
+/// operation acts on it. A reset that still owes a prefix, a
+/// `RESET_STREAM_AT` of the reliable stream reset extension, acts as a FIN
+/// does: it leads to Size Known, and Data Recvd once the prefix it owes was
+/// received ([draft-ietf-quic-reliable-stream-reset-11 §5.3]). A reset that
+/// owes nothing leads to Reset Recvd: the reset facts keep no kind of frame,
+/// so a `RESET_STREAM_AT` with a reliable size of zero reads as the
+/// `RESET_STREAM` it is equivalent to for data delivery (§5 of the draft).
+///
+/// What only this side decides, a STOP request, a reader dropped, a buffer
+/// the receive termination policy destroyed or the end of the layer, is no
+/// state of its own: the state stays where the peer's frames put it.
+///
+/// [RFC 9000 §3.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-3.2
+/// [draft-ietf-quic-reliable-stream-reset-11 §5.3]: https://www.ietf.org/archive/id/draft-ietf-quic-reliable-stream-reset-11.html#section-5.3
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ReceiveStreamState {
+    /// The final size is not known.
+    Recv,
+    /// The final size is known and data below it, or below the prefix a reset
+    /// owes, is missing.
+    SizeKnown,
+    /// Every byte below the final size, or below the prefix a reset owes, was
+    /// received.
+    ///
+    /// A stream that received all its data and then a reset that owes
+    /// nothing stays here when it presents the reset as a normal end
+    /// ([`ResetPresentation::Suppress`](termination::ResetPresentation::Suppress)).
+    DataRecvd,
+    /// A reset that owes nothing was received.
+    ResetRecvd,
+    /// A read gave the application the end of the stream, or the reset after
+    /// the whole prefix it owed.
+    DataRead,
+    /// A read gave the application a reset that owed nothing.
+    ResetRead,
+}
+
 /// The receive direction of one stream.
 ///
 /// `C` implements the receive buffer, the receive flow control policy and
@@ -424,6 +466,44 @@ where
     /// a stream the layer's end interrupted is not terminal.
     pub fn is_terminal(&self) -> bool {
         self.stop_not_needed().is_some() && (self.is_result_committed() || self.is_reader_dropped())
+    }
+
+    /// The state of the receive direction ([`ReceiveStreamState`]).
+    pub fn receive_state(&self) -> ReceiveStreamState {
+        let committed = match &self.reading {
+            Reading::Committed(committed) => Some(committed),
+            Reading::Open | Reading::ReaderDropped { .. } => None,
+        };
+        match committed {
+            Some(Committed::End) => return ReceiveStreamState::DataRead,
+            Some(Committed::Error(ReadError::Reset { reset, .. })) => {
+                return if reset.owed_end() > VarInt::ZERO {
+                    ReceiveStreamState::DataRead
+                } else {
+                    ReceiveStreamState::ResetRead
+                };
+            }
+            Some(Committed::Error(_)) | None => {}
+        }
+        match self.reset {
+            Some(reset) if reset.owed_end() > VarInt::ZERO => {
+                if self.received.covers(VarInt::ZERO..reset.owed_end()) {
+                    ReceiveStreamState::DataRecvd
+                } else {
+                    ReceiveStreamState::SizeKnown
+                }
+            }
+            Some(_)
+                if self.fully_received()
+                    && self.reset_presentation == ResetPresentation::Suppress =>
+            {
+                ReceiveStreamState::DataRecvd
+            }
+            Some(_) => ReceiveStreamState::ResetRecvd,
+            None if self.fully_received() => ReceiveStreamState::DataRecvd,
+            None if self.parts.final_size().is_some() => ReceiveStreamState::SizeKnown,
+            None => ReceiveStreamState::Recv,
+        }
     }
 
     /// Whether the stream still takes frames: no violation was returned and

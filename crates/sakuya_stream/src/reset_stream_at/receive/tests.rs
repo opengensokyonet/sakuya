@@ -1112,3 +1112,48 @@ mod terminal {
         assert!(receiver.is_terminal());
     }
 }
+
+// ---------------------------------------------------------------------------
+// States (draft §5.3)
+
+/// A `RESET_STREAM_AT` acts as a FIN: Size Known, Data Recvd once the prefix
+/// it owes was received, and Data Read once the application read up to the
+/// reset.
+#[test]
+fn reset_stream_at_reaches_size_known_data_recvd_and_data_read() {
+    use crate::receive::ReceiveStreamState as State;
+    let (mut receiver, mut connection) = new_receiver(keep_all());
+    receiver
+        .on_stream_frame(stream(0, 20, false), &mut connection)
+        .unwrap();
+    receiver
+        .on_reset_stream_at(reset_at(4, 100, 40), &mut connection)
+        .unwrap();
+    assert_eq!(receiver.receive_state(), State::SizeKnown);
+    receiver
+        .on_stream_frame(stream(20, 20, false), &mut connection)
+        .unwrap();
+    assert_eq!(receiver.receive_state(), State::DataRecvd);
+    let (read, outcome) = read_all(&mut receiver);
+    assert_eq!(read.len(), 40);
+    assert_eq!(outcome, reset_error(4, 100, 40, false));
+    assert_eq!(receiver.receive_state(), State::DataRead);
+}
+
+/// A `RESET_STREAM` after a `RESET_STREAM_AT` owes nothing: Reset Recvd.
+#[test]
+fn reset_stream_after_reset_stream_at_reaches_reset_recvd() {
+    use crate::receive::ReceiveStreamState as State;
+    let (mut receiver, mut connection) = new_receiver(keep_all());
+    receiver
+        .on_reset_stream_at(reset_at(4, 100, 40), &mut connection)
+        .unwrap();
+    assert_eq!(receiver.receive_state(), State::SizeKnown);
+    receiver
+        .on_reset_stream(reset(4, 100), &mut connection)
+        .unwrap();
+    assert_eq!(receiver.receive_state(), State::ResetRecvd);
+    let (_, outcome) = read_all(&mut receiver);
+    assert_eq!(outcome, reset_error(4, 100, 0, false));
+    assert_eq!(receiver.receive_state(), State::ResetRead);
+}
