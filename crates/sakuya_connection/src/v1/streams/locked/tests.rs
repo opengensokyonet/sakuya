@@ -127,6 +127,7 @@ fn client_set_with_connection_limit(initial_max_data: u32) -> TestSet {
             peer_reset_support: (),
         },
         LockedStreamSetConfig::default(),
+        NoEvents,
     )
 }
 
@@ -518,7 +519,7 @@ fn every_part_hears_the_same_end_of_the_layer() {
 
 /// A frame as the peer reads it from a packet the set wrote.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Read {
+pub(super) enum Read {
     Stream {
         stream: StreamId,
         offset: VarInt,
@@ -546,18 +547,23 @@ enum Read {
     Other,
 }
 
-/// Give the item `key` to `set` with `packet`.
+/// Give the item `key` to `set` with `packet`, publishing through
+/// `publish`.
 ///
 /// `I1` to `I9` are the places of the summaries of the nine kinds of frames
 /// in the packet's summary; the compiler infers them.
-fn supply_key<X, Rs, W, Q, I1, I2, I3, I4, I5, I6, I7, I8, I9>(
+#[allow(clippy::too_many_arguments)] // the places of the nine summaries
+fn supply_key<X, K, Rs, H, W, Q, I1, I2, I3, I4, I5, I6, I7, I8, I9>(
     set: &mut X,
+    publish: &H,
     key: StreamIntentKey,
     packet: OpenPacket<W, InFlightClass, Q>,
 ) -> Supplied<W, InFlightClass, Q>
 where
-    X: StreamSet<(), TestTicket, Rs, SendParameters = Urgency>,
+    X: StreamSet<(), K, Rs, SendParameters = Urgency>,
+    K: IntentTicketResize + IntentTicketWithdraw,
     Rs: StreamResets,
+    H: StreamIntentHandle<Urgency, K>,
     W: PacketWriting,
     Q: PacketPosition,
     SummaryOf<W>: InjectSummary<StreamSummary, I1>
@@ -570,22 +576,21 @@ where
         + InjectSummary<StreamDataBlockedSummary, I8>
         + InjectSummary<StreamsBlockedSummary, I9>,
 {
-    let publish = publish();
     match key {
-        StreamIntentKey::Stream(id) => set.supply_stream(&publish, id, packet),
-        StreamIntentKey::ResetStream(id) => set.supply_reset_stream(&publish, id, packet),
-        StreamIntentKey::StopSending(id) => set.supply_stop_sending(&publish, id, packet),
-        StreamIntentKey::MaxData => set.supply_max_data(&publish, packet),
-        StreamIntentKey::MaxStreamData(id) => set.supply_max_stream_data(&publish, id, packet),
+        StreamIntentKey::Stream(id) => set.supply_stream(publish, id, packet),
+        StreamIntentKey::ResetStream(id) => set.supply_reset_stream(publish, id, packet),
+        StreamIntentKey::StopSending(id) => set.supply_stop_sending(publish, id, packet),
+        StreamIntentKey::MaxData => set.supply_max_data(publish, packet),
+        StreamIntentKey::MaxStreamData(id) => set.supply_max_stream_data(publish, id, packet),
         StreamIntentKey::MaxStreams(directionality) => {
-            set.supply_max_streams(&publish, directionality, packet)
+            set.supply_max_streams(publish, directionality, packet)
         }
-        StreamIntentKey::DataBlocked => set.supply_data_blocked(&publish, packet),
+        StreamIntentKey::DataBlocked => set.supply_data_blocked(publish, packet),
         StreamIntentKey::StreamDataBlocked(id) => {
-            set.supply_stream_data_blocked(&publish, id, packet)
+            set.supply_stream_data_blocked(publish, id, packet)
         }
         StreamIntentKey::StreamsBlocked(directionality) => {
-            set.supply_streams_blocked(&publish, directionality, packet)
+            set.supply_streams_blocked(publish, directionality, packet)
         }
     }
 }
@@ -597,6 +602,24 @@ fn written<X, Rs>(set: &mut X, key: StreamIntentKey, room: usize, last: bool) ->
 where
     X: StreamSet<(), TestTicket, Rs, SendParameters = Urgency>,
     Rs: StreamResets,
+{
+    written_with(set, &publish(), key, room, last)
+}
+
+/// What [`written`] reads, of a set whose intents are published through
+/// `publish`.
+pub(super) fn written_with<X, K, Rs, H>(
+    set: &mut X,
+    publish: &H,
+    key: StreamIntentKey,
+    room: usize,
+    last: bool,
+) -> Vec<Read>
+where
+    X: StreamSet<(), K, Rs, SendParameters = Urgency>,
+    K: IntentTicketResize + IntentTicketWithdraw,
+    Rs: StreamResets,
+    H: StreamIntentHandle<Urgency, K>,
 {
     use core::{marker::PhantomData, num::NonZeroUsize};
 
@@ -634,9 +657,9 @@ where
         let open = packet.open::<InFlightClass>();
         assert_eq!(open.remaining(), room);
         if last {
-            let _ = supply_key(set, key, open.make_last());
+            let _ = supply_key(set, publish, key, open.make_last());
         } else {
-            let _ = supply_key(set, key, open);
+            let _ = supply_key(set, publish, key, open);
         }
     }
     let Some(datagram) = batch.datagrams().next() else {
@@ -944,6 +967,7 @@ fn narrow_window_set() -> TestSet {
             peer_reset_support: (),
         },
         LockedStreamSetConfig::default(),
+        NoEvents,
     )
 }
 
@@ -1364,6 +1388,7 @@ mod reliable {
                     .then(|| PeerResetStreamAtSupport::from_peer_parameter(ResetStreamAt)),
             },
             LockedStreamSetConfig::default(),
+            NoEvents,
         )
     }
 

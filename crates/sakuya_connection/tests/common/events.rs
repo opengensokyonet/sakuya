@@ -5,9 +5,9 @@ use std::cell::RefCell;
 
 use sakuya_connection::v1::{
     events::{
-        CloseTrigger, ConnectionClosed, ConnectionEvents, ConnectionState, EventsStart, Initiator,
-        KeyChange, LossTrigger, LostPacket, PacketEvents, PlainPacket, RecoveryMetrics,
-        SharedEvents,
+        CloseTrigger, ConnectionClosed, ConnectionEvents, ConnectionState, DataLocation,
+        DatagramDropped, EventsStart, Initiator, KeyChange, LossTrigger, LostPacket, PacketEvents,
+        PlainPacket, RecoveryMetrics, SharedEvents, StreamDataMoved, StreamStateChange,
     },
     receive::DropReason,
 };
@@ -17,6 +17,7 @@ use sakuya_wire::{
     v1::{
         encryption_level::EncryptionLevel,
         role::Role,
+        stream_id::StreamId,
         transport_parameters::{TransportParameterSlots, TransportParameterSpace},
     },
     version::Version,
@@ -63,9 +64,33 @@ pub enum Recorded {
     Parameters(Initiator),
 }
 
+/// One event of the streams and datagrams, which the application's threads
+/// and the driver give through the shared handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SharedRecorded {
+    StreamState {
+        stream_id: StreamId,
+        change: StreamStateChange,
+        trigger: Initiator,
+    },
+    StreamDataMoved(StreamDataMoved),
+    DatagramDataMoved {
+        length: usize,
+        from: DataLocation,
+        to: DataLocation,
+    },
+    DatagramDropped {
+        length: usize,
+        dropped: DatagramDropped,
+    },
+}
+
 thread_local! {
     /// What each side recorded: the server's first.
     static RECORDED: RefCell<[Vec<Recorded>; 2]> = const { RefCell::new([Vec::new(), Vec::new()]) };
+    /// What each side's shared handle recorded, apart: the server's first.
+    static SHARED: RefCell<[Vec<SharedRecorded>; 2]> =
+        const { RefCell::new([Vec::new(), Vec::new()]) };
 }
 
 fn index(role: Role) -> usize {
@@ -78,11 +103,18 @@ fn index(role: Role) -> usize {
 /// Forget what both sides recorded.
 pub fn reset() {
     RECORDED.with(|r| *r.borrow_mut() = [Vec::new(), Vec::new()]);
+    SHARED.with(|r| *r.borrow_mut() = [Vec::new(), Vec::new()]);
 }
 
 /// What the side `role` recorded so far.
 pub fn recorded(role: Role) -> Vec<Recorded> {
     RECORDED.with(|r| r.borrow()[index(role)].clone())
+}
+
+/// What the shared handle of the side `role` recorded so far, on the test's
+/// thread.
+pub fn shared_recorded(role: Role) -> Vec<SharedRecorded> {
+    SHARED.with(|r| r.borrow()[index(role)].clone())
 }
 
 /// Records every connection's events, for every list of parts.
@@ -97,13 +129,39 @@ impl RecordingEvents {
     }
 }
 
-/// The handle of the application's threads records nothing yet.
+/// The handle of the application's threads: records what is given through
+/// it on the thread it is given on, apart from the connection's events.
 #[derive(Debug, Clone)]
-pub struct RecordingShared;
+pub struct RecordingShared {
+    role: Role,
+}
+
+impl RecordingShared {
+    fn push(&self, event: SharedRecorded) {
+        SHARED.with(|r| r.borrow_mut()[index(self.role)].push(event));
+    }
+}
 
 impl SharedEvents for RecordingShared {
+    const ENABLED: bool = true;
     fn enabled(&self) -> bool {
         true
+    }
+    fn stream_state(&self, stream_id: StreamId, change: StreamStateChange, trigger: Initiator) {
+        self.push(SharedRecorded::StreamState {
+            stream_id,
+            change,
+            trigger,
+        });
+    }
+    fn stream_data_moved(&self, moved: &StreamDataMoved) {
+        self.push(SharedRecorded::StreamDataMoved(*moved));
+    }
+    fn datagram_data_moved(&self, length: usize, from: DataLocation, to: DataLocation) {
+        self.push(SharedRecorded::DatagramDataMoved { length, from, to });
+    }
+    fn datagram_dropped(&self, length: usize, dropped: DatagramDropped) {
+        self.push(SharedRecorded::DatagramDropped { length, dropped });
     }
 }
 
@@ -118,7 +176,7 @@ impl<I> ConnectionEvents<I> for RecordingEvents {
         true
     }
     fn shared(&self) -> RecordingShared {
-        RecordingShared
+        RecordingShared { role: self.role }
     }
     fn connection_started(&mut self, _: I) {
         self.push(Recorded::Started);

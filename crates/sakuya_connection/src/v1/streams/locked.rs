@@ -74,6 +74,14 @@
 //! handles of a reclaimed stream keep their parts, which hold only their
 //! last result. Nothing is reclaimed once the layer ended or the driver
 //! panicked.
+//!
+//! The events of the streams keep the same order. A part's state is read
+//! under its own lock before and after each change, and its change given
+//! there; a part made is given under the set's lock, before anyone else
+//! has it. A reclaim that records events takes the parts out of the tables
+//! under the set's lock and gives each one's last state once that lock is
+//! let go, under the part's lock; one that records none lets them go under
+//! the set's lock, as before.
 
 use core::task::Waker;
 use std::{
@@ -93,10 +101,10 @@ use sakuya_stream::{
         AtomicConnectionCreditReservation, AtomicConnectionSendFlowController,
         ConnectionSendFlowController, data_blocked::DataBlockedSignal,
     },
-    receive::{StreamReceiver, composition::DefaultReceiveComposition},
+    receive::{ReceiveStreamState, StreamReceiver, composition::DefaultReceiveComposition},
     receive_buffer::StreamReceiveBuffer,
     send::{
-        SendEndState, SendTerminalState, StreamEndFrame, StreamSender,
+        SendEndState, SendStreamState, SendTerminalState, StreamEndFrame, StreamSender,
         composition::SendComposition, flow_control::DefaultSendFlowControlPolicy,
         local_reset::LocalResetTarget,
     },
@@ -144,7 +152,12 @@ use super::{
 use crate::{
     feedback::InjectSummary,
     send_strategy::{IntentTicketResize, IntentTicketWithdraw, SendIntent},
-    v1::application_handles::{DriverPanicHandleShare, connection::wake_all},
+    v1::{
+        application_handles::{DriverPanicHandleShare, connection::wake_all},
+        events::{
+            Initiator as EventInitiator, NoEvents, SharedEvents, StreamDataMoved, StreamStateChange,
+        },
+    },
     write::{
         DelimitedFrame, InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf,
         Supplied,
@@ -223,8 +236,15 @@ fn lock<X>(mutex: &Mutex<X>) -> MutexGuard<'_, X> {
 /// Of the peer's resets it takes RESET_STREAM, and RESET_STREAM_AT where
 /// its streams reset reliably (`reset_stream_at::ResetStreamAtSet`, with
 /// the feature `reset_stream_at`).
-pub struct LockedStreamSet<Lc, K, Rs: StreamResets, P = Urgency> {
-    shared: Arc<StreamSetShare<Lc, K, Rs, P>>,
+///
+/// `E` is the handle the events of its streams are given through, by
+/// default [`NoEvents`]: a part's state when it is made, each change of
+/// its state, and its last state when it is reclaimed, and the data the
+/// application writes and reads (see [`SharedEvents`]). Each is given under
+/// the lock of the part it is of, or, for a reclaim, under the part's lock
+/// once the set's lock is let go.
+pub struct LockedStreamSet<Lc, K, Rs: StreamResets, P = Urgency, E = NoEvents> {
+    shared: Arc<StreamSetShare<Lc, K, Rs, P, E>>,
 }
 
 /// The kind of [`LockedStreamSet`] whose data is sent with the parameters
@@ -245,15 +265,16 @@ where
 {
     type Config = LockedStreamSetConfig;
     type SendParameters = P;
-    type Set<Lc, K, X: StreamResets> = LockedStreamSet<Lc, K, X, P>;
+    type Set<Lc, K, X: StreamResets, E: SharedEvents + Clone + 'static> =
+        LockedStreamSet<Lc, K, X, P, E>;
 }
 
 /// The handle of a [`LockedStreamSet`]: it shares the set's state.
-pub struct LockedStreamSetHandle<Lc, K, Rs: StreamResets, P = Urgency> {
-    shared: Arc<StreamSetShare<Lc, K, Rs, P>>,
+pub struct LockedStreamSetHandle<Lc, K, Rs: StreamResets, P = Urgency, E = NoEvents> {
+    shared: Arc<StreamSetShare<Lc, K, Rs, P, E>>,
 }
 
-impl<Lc, K, Rs: StreamResets, P> Clone for LockedStreamSetHandle<Lc, K, Rs, P> {
+impl<Lc, K, Rs: StreamResets, P, E> Clone for LockedStreamSetHandle<Lc, K, Rs, P, E> {
     fn clone(&self) -> Self {
         Self {
             shared: Arc::clone(&self.shared),
@@ -262,8 +283,8 @@ impl<Lc, K, Rs: StreamResets, P> Clone for LockedStreamSetHandle<Lc, K, Rs, P> {
 }
 
 /// Version 1's share of an established layer's handle.
-impl<Lc, K, Rs: StreamResets, P> crate::v1::application_handles::KeyedHandleShare
-    for LockedStreamSetHandle<Lc, K, Rs, P>
+impl<Lc, K, Rs: StreamResets, P, E> crate::v1::application_handles::KeyedHandleShare
+    for LockedStreamSetHandle<Lc, K, Rs, P, E>
 {
     type Part = crate::v1::Part;
 }
@@ -272,8 +293,8 @@ impl<Lc, K, Rs: StreamResets, P> crate::v1::application_handles::KeyedHandleShar
 /// waits to open, accept, write or read; it takes the wakers out of the
 /// set's lock and each part's lock, one lock at a time, and changes
 /// nothing else under them.
-impl<Lc, K, Rs: StreamResets, P> DriverPanicHandleShare<Lc>
-    for LockedStreamSetHandle<Lc, K, Rs, P>
+impl<Lc, K, Rs: StreamResets, P, E> DriverPanicHandleShare<Lc>
+    for LockedStreamSetHandle<Lc, K, Rs, P, E>
 {
     fn driver_panicked(&self, end: LayerEnd<Lc>) {
         let shared = &self.shared;
@@ -306,21 +327,21 @@ impl<Lc, K, Rs: StreamResets, P> DriverPanicHandleShare<Lc>
     }
 }
 
-impl<Lc, K, Rs: StreamResets, P> StreamSetShare<Lc, K, Rs, P> {
+impl<Lc, K, Rs: StreamResets, P, E> StreamSetShare<Lc, K, Rs, P, E> {
     /// How the layer ended, if the driver panicked.
     fn panic_end(&self) -> Option<&LayerEnd<Lc>> {
         self.panic_end.get()
     }
 }
 
-impl<Lc, K, Rs: StreamResets, P> fmt::Debug for LockedStreamSetHandle<Lc, K, Rs, P> {
+impl<Lc, K, Rs: StreamResets, P, E> fmt::Debug for LockedStreamSetHandle<Lc, K, Rs, P, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LockedStreamSetHandle")
             .finish_non_exhaustive()
     }
 }
 
-impl<Lc, K, Rs: StreamResets, P> fmt::Debug for LockedStreamSet<Lc, K, Rs, P> {
+impl<Lc, K, Rs: StreamResets, P, E> fmt::Debug for LockedStreamSet<Lc, K, Rs, P, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LockedStreamSet").finish_non_exhaustive()
     }
@@ -393,6 +414,19 @@ impl<X> LockedStreamEnd<X> {
 trait PartDone {
     /// Whether the part is done.
     fn is_done(&self) -> bool;
+}
+
+/// A part of a stream whose state the events give: its state machine's
+/// state (RFC 9000 §3.1, §3.2).
+trait PartState {
+    /// The states of the part.
+    type State: Copy + PartialEq;
+
+    /// The state the part is in.
+    fn state(&self) -> Self::State;
+
+    /// The change of a part of this kind from `old` to `new`.
+    fn change(old: Option<Self::State>, new: Option<Self::State>) -> StreamStateChange;
 }
 
 impl<X> fmt::Debug for LockedStreamEnd<X> {
@@ -905,6 +939,22 @@ impl<Lc, K, Rs: StreamResets, P> PartDone for SendingEnd<Lc, K, Rs, P> {
     }
 }
 
+/// A sending part is in its sender's state.
+impl<Lc, K, Rs: StreamResets, P> PartState for SendingEnd<Lc, K, Rs, P>
+where
+    P: Clone + PartialEq + Default + SendUrgency,
+{
+    type State = SendStreamState;
+
+    fn state(&self) -> SendStreamState {
+        self.sender.send_state()
+    }
+
+    fn change(old: Option<SendStreamState>, new: Option<SendStreamState>) -> StreamStateChange {
+        StreamStateChange::Sending { old, new }
+    }
+}
+
 /// The STREAM_DATA_BLOCKED frame of `stream_id` at `limit`.
 fn stream_data_blocked_frame(stream_id: StreamId, limit: VarInt) -> StreamDataBlockedFrame {
     StreamDataBlockedFrame::new(
@@ -1091,6 +1141,22 @@ impl<Lc, K, Rs: StreamResets, P> PartDone for ReceivingEnd<Lc, K, Rs, P> {
     }
 }
 
+/// A receiving part is in its receiver's state.
+impl<Lc, K, Rs: StreamResets, P> PartState for ReceivingEnd<Lc, K, Rs, P> {
+    type State = ReceiveStreamState;
+
+    fn state(&self) -> ReceiveStreamState {
+        self.receiver.receive_state()
+    }
+
+    fn change(
+        old: Option<ReceiveStreamState>,
+        new: Option<ReceiveStreamState>,
+    ) -> StreamStateChange {
+        StreamStateChange::Receiving { old, new }
+    }
+}
+
 fn stop_sending_frame(stream_id: StreamId, code: ApplicationErrorCode) -> StopSendingFrame {
     StopSendingFrame::new(
         VarIntField::shortest(stream_id),
@@ -1222,7 +1288,7 @@ impl<K, P> Default for ConnectionIntents<K, P> {
 // ---- the set ----
 
 /// What the set and its handles share.
-struct StreamSetShare<Lc, K, Rs: StreamResets, P> {
+struct StreamSetShare<Lc, K, Rs: StreamResets, P, E> {
     /// How the layer ended, once the driver panicked: only marked, with
     /// the state under the locks left as the panic left it. Every operation
     /// of the application looks at it first, under the lock its waker is
@@ -1233,6 +1299,8 @@ struct StreamSetShare<Lc, K, Rs: StreamResets, P> {
     connection_send: Arc<AtomicConnectionSendFlowController>,
     facts: StreamSetFacts<Rs::PeerSupport>,
     config: LockedStreamSetConfig,
+    /// The handle the events of the streams are given through.
+    events: E,
 }
 
 /// What the set's lock holds.
@@ -1296,10 +1364,10 @@ where
     /// Whether a part is done is read from the mark beside its lock
     /// ([`LockedStreamEnd::is_done`]), without taking the lock. Nothing is
     /// reclaimed once the layer ended, nor a stream reclaimed already.
-    /// Whether it was reclaimed now.
-    fn reclaim_if_done(&mut self, id: StreamId) -> bool {
+    /// The parts taken out of the tables, if it was reclaimed now.
+    fn reclaim_if_done(&mut self, id: StreamId) -> Option<ReclaimedParts<Lc, K, Rs, P>> {
         if self.end.is_some() {
-            return false;
+            return None;
         }
         let sending = self.senders.get(&id);
         let receiving = self.receivers.get(&id);
@@ -1312,15 +1380,14 @@ where
         );
         if sending.is_none() && receiving.is_none() {
             // reclaimed already, by whoever saw both parts done first
-            return false;
+            return None;
         }
         if !sending.is_none_or(|part| part.is_done())
             || !receiving.is_none_or(|part| part.is_done())
         {
-            return false;
+            return None;
         }
-        self.senders.remove(&id);
-        self.receivers.remove(&id);
+        let parts = (self.senders.remove(&id), self.receivers.remove(&id));
         let reclaimed = self.ledger.reclaim(id);
         // invariant: a stream in the tables was opened and created, and is
         // reclaimed only here, when it leaves them
@@ -1328,7 +1395,7 @@ where
             reclaimed.is_ok(),
             "stream {id} is reclaimed once: {reclaimed:?}"
         );
-        true
+        Some(parts)
     }
 
     /// Bring the intents of the connection's frames under the set's lock
@@ -1366,6 +1433,14 @@ where
         sync_ticket(&mut self.connection.data_blocked, wanted, publish);
     }
 }
+
+/// The parts of a stream as reclaiming takes them out of the tables: the
+/// sending part, unless the peer opened it unidirectional; the receiving
+/// part, unless this side opened it unidirectional.
+type ReclaimedParts<Lc, K, Rs, P> = (
+    Option<SendingPart<Lc, K, Rs, P>>,
+    Option<ReceivingPart<Lc, K, Rs, P>>,
+);
 
 /// The initiator of the streams an endpoint in `role` opens.
 fn initiator(role: Role) -> Initiator {
@@ -1432,14 +1507,16 @@ impl<S> StreamSetFacts<S> {
     }
 }
 
-impl<Lc, K, Rs: StreamResets, P> StreamSetShare<Lc, K, Rs, P>
+impl<Lc, K, Rs: StreamResets, P, E> StreamSetShare<Lc, K, Rs, P, E>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
+    E: SharedEvents,
 {
     /// Make the parts of `id`, a stream the peer opened that a frame just
     /// created, and queue it to be accepted. A bidirectional stream gets
-    /// both parts, a unidirectional one its receiving part.
+    /// both parts, a unidirectional one its receiving part. Each part made
+    /// is an event of the peer's.
     fn create_peer_stream(&self, set: &mut SetState<Lc, K, Rs, P>, id: StreamId) {
         let window = self.facts.receive_window(id);
         let receiver = StreamReceiver::new(
@@ -1449,10 +1526,10 @@ where
             ),
             window,
         );
-        set.receivers.insert(
-            id,
-            Arc::new(LockedStreamEnd::new(ReceivingEnd::new(receiver))),
-        );
+        let receiving = ReceivingEnd::new(receiver);
+        self.part_made(id, &receiving, EventInitiator::Remote);
+        set.receivers
+            .insert(id, Arc::new(LockedStreamEnd::new(receiving)));
         match id.directionality() {
             Directionality::Bidirectional => {
                 let sender = StreamSender::new(
@@ -1461,8 +1538,10 @@ where
                     send_composition::<Rs, P>(&self.config),
                     Arc::clone(&self.connection_send),
                 );
+                let sending = SendingEnd::new(sender);
+                self.part_made(id, &sending, EventInitiator::Remote);
                 set.senders
-                    .insert(id, Arc::new(LockedStreamEnd::new(SendingEnd::new(sender))));
+                    .insert(id, Arc::new(LockedStreamEnd::new(sending)));
                 set.accept_bidirectional.push_back(id);
             }
             Directionality::Unidirectional => set.accept_unidirectional.push_back(id),
@@ -1540,24 +1619,18 @@ where
         lock(&self.set).receivers.get(&id).cloned()
     }
 
-    /// Change the sending part of `id` with `change`, under its own lock,
-    /// and bring its intents to what is due then; with the lock let go,
-    /// reclaim the stream if it is done
-    /// ([`reclaim_if_done`](Self::reclaim_if_done)).
+    /// Change the sending part of `id` with `change`, on the action of
+    /// `trigger`, as [`change_sender`](Self::change_sender) does; nothing
+    /// once the part left the table.
     fn with_sender<H: StreamIntentHandle<P, K>>(
         &self,
         id: StreamId,
         publish: &H,
+        trigger: EventInitiator,
         change: impl FnOnce(&mut SendingEnd<Lc, K, Rs, P>),
     ) {
         if let Some(part) = self.sender_of(id) {
-            {
-                let mut end = part.lock();
-                change(&mut end);
-                end.sync_intents(publish);
-                part.note_done(&end);
-            }
-            self.reclaim_if_done(&part, id, publish);
+            self.change_sender(&part, id, publish, trigger, change);
         }
     }
 
@@ -1567,17 +1640,60 @@ where
         &self,
         id: StreamId,
         publish: &H,
+        trigger: EventInitiator,
         change: impl FnOnce(&mut ReceivingEnd<Lc, K, Rs, P>),
     ) {
         if let Some(part) = self.receiver_of(id) {
-            {
-                let mut end = part.lock();
-                change(&mut end);
-                end.sync_intents(id, publish);
-                part.note_done(&end);
-            }
-            self.reclaim_if_done(&part, id, publish);
+            self.change_receiver(&part, id, publish, trigger, change);
         }
+    }
+
+    /// Change `part`, the sending part of `id`, with `change`, under its own
+    /// lock, bring its intents to what is due then, and give the change of
+    /// its state, on the action of `trigger`; with the lock let go, reclaim
+    /// the stream if it is done ([`reclaim_if_done`](Self::reclaim_if_done)).
+    fn change_sender<H: StreamIntentHandle<P, K>, R>(
+        &self,
+        part: &SendingPart<Lc, K, Rs, P>,
+        id: StreamId,
+        publish: &H,
+        trigger: EventInitiator,
+        change: impl FnOnce(&mut SendingEnd<Lc, K, Rs, P>) -> R,
+    ) -> R {
+        let result = {
+            let mut end = part.lock();
+            let before = self.state_before(&*end);
+            let result = change(&mut end);
+            end.sync_intents(publish);
+            part.note_done(&end);
+            self.state_after(id, before, &*end, trigger);
+            result
+        };
+        self.reclaim_if_done(part, id, publish);
+        result
+    }
+
+    /// Change `part`, the receiving part of `id`, as
+    /// [`change_sender`](Self::change_sender) the sending part.
+    fn change_receiver<H: StreamIntentHandle<P, K>, R>(
+        &self,
+        part: &ReceivingPart<Lc, K, Rs, P>,
+        id: StreamId,
+        publish: &H,
+        trigger: EventInitiator,
+        change: impl FnOnce(&mut ReceivingEnd<Lc, K, Rs, P>) -> R,
+    ) -> R {
+        let result = {
+            let mut end = part.lock();
+            let before = self.state_before(&*end);
+            let result = change(&mut end);
+            end.sync_intents(id, publish);
+            part.note_done(&end);
+            self.state_after(id, before, &*end, trigger);
+            result
+        };
+        self.reclaim_if_done(part, id, publish);
+        result
     }
 
     /// Reclaim the stream `id` if each part it has is done, `changed` being
@@ -1593,6 +1709,11 @@ where
     /// lock later finds both done: each part's mark is set before its
     /// changer takes the set's lock, and the set's lock orders the two.
     /// Once the driver panicked, nothing is reclaimed.
+    ///
+    /// When the events are recorded, the parts taken out of the tables come
+    /// back here, and each gives its last state once the set's lock is let
+    /// go, under its own lock; otherwise they are let go under the set's
+    /// lock.
     fn reclaim_if_done<X, H>(&self, changed: &LockedStreamEnd<X>, id: StreamId, publish: &H)
     where
         H: StreamIntentHandle<P, K>,
@@ -1600,9 +1721,82 @@ where
         if !changed.is_done() || self.panic_end().is_some() {
             return;
         }
-        self.with_set(publish, |set| {
-            set.reclaim_if_done(id);
-        });
+        if self.events().is_some() {
+            let reclaimed = self.with_set(publish, |set| set.reclaim_if_done(id));
+            if let Some((sending, receiving)) = reclaimed {
+                if let Some(part) = sending {
+                    self.part_reclaimed(id, &part);
+                }
+                if let Some(part) = receiving {
+                    self.part_reclaimed(id, &part);
+                }
+            }
+        } else {
+            self.with_set(publish, |set| {
+                set.reclaim_if_done(id);
+            });
+        }
+    }
+
+    // ---- the events of the streams ----
+
+    /// The handle for the events of the streams, when they are recorded.
+    #[inline(always)]
+    fn events(&self) -> Option<&E> {
+        (E::ENABLED && self.events.enabled()).then_some(&self.events)
+    }
+
+    /// The part `end` of `id` was just made, on the action of `trigger`:
+    /// it leaves idle for the state it starts in.
+    fn part_made<X: PartState>(&self, id: StreamId, end: &X, trigger: EventInitiator) {
+        if let Some(events) = self.events() {
+            events.stream_state(id, X::change(None, Some(end.state())), trigger);
+        }
+    }
+
+    /// The state of `end` before a change, read only when the events are
+    /// recorded; called under the part's lock.
+    #[inline(always)]
+    fn state_before<X: PartState>(&self, end: &X) -> Option<X::State> {
+        self.events().map(|_| end.state())
+    }
+
+    /// After a change of the part `end` of `id`, on the action of
+    /// `trigger`, still under its lock: its state change, if its state
+    /// differs from `before`, what [`state_before`](Self::state_before)
+    /// read.
+    #[inline(always)]
+    fn state_after<X: PartState>(
+        &self,
+        id: StreamId,
+        before: Option<X::State>,
+        end: &X,
+        trigger: EventInitiator,
+    ) {
+        if let Some(events) = self.events()
+            && let Some(old) = before
+        {
+            let new = end.state();
+            if new != old {
+                events.stream_state(id, X::change(Some(old), Some(new)), trigger);
+            }
+        }
+    }
+
+    /// Data of a stream moved as `moved` says.
+    fn data_moved(&self, moved: &StreamDataMoved) {
+        if let Some(events) = self.events() {
+            events.stream_data_moved(moved);
+        }
+    }
+
+    /// The part `part` of `id` was reclaimed: its last state, read under its
+    /// lock, which is taken here, under no lock of the set.
+    fn part_reclaimed<X: PartState>(&self, id: StreamId, part: &LockedStreamEnd<X>) {
+        if let Some(events) = self.events() {
+            let last = part.lock().state();
+            events.stream_state(id, X::change(Some(last), None), EventInitiator::Local);
+        }
     }
 
     /// Change what the set's lock holds with `change`, and bring the
@@ -1632,18 +1826,27 @@ where
     }
 }
 
-/// `P` is a send parameter the default send buffer orders data by.
-impl<Lc, K, Rs: StreamResets, P> StreamSet<Lc, K, Rs> for LockedStreamSet<Lc, K, Rs, P>
+/// `P` is a send parameter the default send buffer orders data by. The
+/// peer's frames and the acknowledgments of what this side sent are the
+/// peer's actions on a part; what this side writes, the losses it declares
+/// and the ends of the strategy's intents are this side's.
+impl<Lc, K, Rs: StreamResets, P, E> StreamSet<Lc, K, Rs> for LockedStreamSet<Lc, K, Rs, P, E>
 where
     P: Clone + PartialEq + Default + SendUrgency,
+    E: SharedEvents,
     OffsetMapStreamSendBuffer<Bytes, AtomicConnectionCreditReservation, MarkerOf<P>>:
         StreamSendBuffer<Bytes, AtomicConnectionCreditReservation, MarkerOf<P>>,
 {
-    type Handle = LockedStreamSetHandle<Lc, K, Rs, P>;
+    type Handle = LockedStreamSetHandle<Lc, K, Rs, P, E>;
     type Config = LockedStreamSetConfig;
     type SendParameters = P;
+    type Events = E;
 
-    fn new(facts: StreamSetFacts<Rs::PeerSupport>, config: LockedStreamSetConfig) -> Self {
+    fn new(
+        facts: StreamSetFacts<Rs::PeerSupport>,
+        config: LockedStreamSetConfig,
+        events: E,
+    ) -> Self {
         let ledger = StreamIdLedger::new(
             facts.role,
             initial_max_streams(&facts.granted_by_peer),
@@ -1677,11 +1880,12 @@ where
                 )),
                 facts,
                 config,
+                events,
             }),
         }
     }
 
-    fn handle(&self) -> LockedStreamSetHandle<Lc, K, Rs, P> {
+    fn handle(&self) -> LockedStreamSetHandle<Lc, K, Rs, P, E> {
         LockedStreamSetHandle {
             shared: Arc::clone(&self.shared),
         }
@@ -1707,6 +1911,7 @@ where
             return Ok(());
         };
         let mut end = part.lock();
+        let before = self.shared.state_before(&*end);
         {
             let mut connection = lock(&self.shared.connection_receive);
             end.receiver
@@ -1719,6 +1924,8 @@ where
         end.sync_intents(id, publish);
         end.wake_reader();
         part.note_done(&end);
+        self.shared
+            .state_after(id, before, &*end, EventInitiator::Remote);
         drop(end);
         self.shared.reclaim_if_done(&part, id, publish);
         Ok(())
@@ -1741,6 +1948,7 @@ where
             return Ok(());
         };
         let mut end = part.lock();
+        let before = self.shared.state_before(&*end);
         {
             let mut connection = lock(&self.shared.connection_receive);
             Rs::on_reset_stream(&mut end.receiver, frame, &mut connection.flow)
@@ -1749,6 +1957,8 @@ where
         end.sync_intents(id, publish);
         end.wake_reader();
         part.note_done(&end);
+        self.shared
+            .state_after(id, before, &*end, EventInitiator::Remote);
         drop(end);
         self.shared.reclaim_if_done(&part, id, publish);
         Ok(())
@@ -1769,11 +1979,14 @@ where
             .sending_part(id, SendingPartFrameType::StopSending)?
         {
             let mut end = part.lock();
+            let before = self.shared.state_before(&*end);
             end.sender
                 .on_stop_sending(frame.application_error_code().get());
             end.sync_intents(publish);
             end.wake_writer();
             part.note_done(&end);
+            self.shared
+                .state_after(id, before, &*end, EventInitiator::Remote);
             drop(end);
             self.shared.reclaim_if_done(&part, id, publish);
         }
@@ -1815,11 +2028,14 @@ where
             .sending_part(id, SendingPartFrameType::MaxStreamData)?
         {
             let mut end = part.lock();
+            let before = self.shared.state_before(&*end);
             end.sender
                 .on_max_stream_data(frame.maximum_stream_data().get());
             end.sync_intents(publish);
             end.wake_writer();
             part.note_done(&end);
+            self.shared
+                .state_after(id, before, &*end, EventInitiator::Remote);
             drop(end);
             self.shared.reclaim_if_done(&part, id, publish);
         }
@@ -1875,13 +2091,11 @@ where
             .shared
             .receiving_part(id, ReceivingPartFrameType::StreamDataBlocked)?
         {
-            let mut end = part.lock();
-            end.receiver
-                .on_stream_data_blocked(frame.maximum_stream_data().get());
-            end.sync_intents(id, publish);
-            part.note_done(&end);
-            drop(end);
-            self.shared.reclaim_if_done(&part, id, publish);
+            self.shared
+                .change_receiver(&part, id, publish, EventInitiator::Remote, |end| {
+                    end.receiver
+                        .on_stream_data_blocked(frame.maximum_stream_data().get());
+                });
         }
         Ok(())
     }
@@ -1960,13 +2174,10 @@ where
         let Some(part) = self.shared.sender_of(stream_id) else {
             return Supplied::Open(packet);
         };
-        let mut end = part.lock();
-        let supplied = end.write_stream(packet);
-        end.sync_intents(publish);
-        part.note_done(&end);
-        drop(end);
-        self.shared.reclaim_if_done(&part, stream_id, publish);
-        supplied
+        self.shared
+            .change_sender(&part, stream_id, publish, EventInitiator::Local, |end| {
+                end.write_stream(packet)
+            })
     }
 
     fn supply_reset_stream<H, W, Q, Idx>(
@@ -1985,13 +2196,10 @@ where
         let Some(part) = self.shared.sender_of(stream_id) else {
             return Supplied::Open(packet);
         };
-        let mut end = part.lock();
-        let supplied = end.write_reset_stream(packet);
-        end.sync_intents(publish);
-        part.note_done(&end);
-        drop(end);
-        self.shared.reclaim_if_done(&part, stream_id, publish);
-        supplied
+        self.shared
+            .change_sender(&part, stream_id, publish, EventInitiator::Local, |end| {
+                end.write_reset_stream(packet)
+            })
     }
 
     fn supply_stop_sending<H, W, Q, Idx>(
@@ -2010,13 +2218,10 @@ where
         let Some(part) = self.shared.receiver_of(stream_id) else {
             return Supplied::Open(packet);
         };
-        let mut end = part.lock();
-        let supplied = end.write_stop_sending(stream_id, packet);
-        end.sync_intents(stream_id, publish);
-        part.note_done(&end);
-        drop(end);
-        self.shared.reclaim_if_done(&part, stream_id, publish);
-        supplied
+        self.shared
+            .change_receiver(&part, stream_id, publish, EventInitiator::Local, |end| {
+                end.write_stop_sending(stream_id, packet)
+            })
     }
 
     fn supply_max_data<H, W, Q, Idx>(
@@ -2063,13 +2268,10 @@ where
         let Some(part) = self.shared.receiver_of(stream_id) else {
             return Supplied::Open(packet);
         };
-        let mut end = part.lock();
-        let supplied = end.write_max_stream_data(stream_id, packet);
-        end.sync_intents(stream_id, publish);
-        part.note_done(&end);
-        drop(end);
-        self.shared.reclaim_if_done(&part, stream_id, publish);
-        supplied
+        self.shared
+            .change_receiver(&part, stream_id, publish, EventInitiator::Local, |end| {
+                end.write_max_stream_data(stream_id, packet)
+            })
     }
 
     fn supply_max_streams<H, W, Q, Idx>(
@@ -2149,13 +2351,10 @@ where
         let Some(part) = self.shared.sender_of(stream_id) else {
             return Supplied::Open(packet);
         };
-        let mut end = part.lock();
-        let supplied = end.write_stream_data_blocked(packet);
-        end.sync_intents(publish);
-        part.note_done(&end);
-        drop(end);
-        self.shared.reclaim_if_done(&part, stream_id, publish);
-        supplied
+        self.shared
+            .change_sender(&part, stream_id, publish, EventInitiator::Local, |end| {
+                end.write_stream_data_blocked(packet)
+            })
     }
 
     fn supply_streams_blocked<H, W, Q, Idx>(
@@ -2201,22 +2400,33 @@ where
     {
         match summary {
             StreamSetFrameSummary::Stream(summary) => {
-                self.shared.with_sender(summary.stream_id, publish, |end| {
-                    end.stream_delivered(summary);
-                    end.wake_writer();
-                })
+                self.shared
+                    .with_sender(summary.stream_id, publish, EventInitiator::Remote, |end| {
+                        end.stream_delivered(summary);
+                        end.wake_writer();
+                    })
             }
             StreamSetFrameSummary::ResetStream(summary) => {
-                self.shared.with_sender(summary.stream_id, publish, |end| {
-                    end.reset_delivered(summary);
-                    end.wake_writer();
-                });
+                self.shared.with_sender(
+                    summary.stream_id,
+                    publish,
+                    EventInitiator::Remote,
+                    |end| {
+                        end.reset_delivered(summary);
+                        end.wake_writer();
+                    },
+                );
             }
             StreamSetFrameSummary::StreamDataBlocked(summary) => {
-                self.shared.with_sender(summary.stream_id, publish, |end| {
-                    end.sender
-                        .on_stream_data_blocked_acknowledged(summary.maximum_stream_data);
-                });
+                self.shared.with_sender(
+                    summary.stream_id,
+                    publish,
+                    EventInitiator::Remote,
+                    |end| {
+                        end.sender
+                            .on_stream_data_blocked_acknowledged(summary.maximum_stream_data);
+                    },
+                );
             }
             StreamSetFrameSummary::StopSending(_)
             | StreamSetFrameSummary::MaxData(_)
@@ -2242,31 +2452,42 @@ where
         match summary {
             StreamSetFrameSummary::Stream(summary) => {
                 self.shared
-                    .with_sender(summary.stream_id, publish, |end| end.stream_lost(summary))
+                    .with_sender(summary.stream_id, publish, EventInitiator::Local, |end| {
+                        end.stream_lost(summary)
+                    })
             }
             StreamSetFrameSummary::ResetStream(summary) => {
                 self.shared
-                    .with_sender(summary.stream_id, publish, |end| end.reset_frame.lost());
-            }
-            StreamSetFrameSummary::StreamDataBlocked(summary) => {
-                self.shared.with_sender(summary.stream_id, publish, |end| {
-                    end.sender
-                        .on_stream_data_blocked_lost(summary.maximum_stream_data);
-                });
-            }
-            StreamSetFrameSummary::StopSending(summary) => {
-                self.shared
-                    .with_receiver(summary.stream_id, publish, |end| {
-                        end.receiver.on_stop_lost()
+                    .with_sender(summary.stream_id, publish, EventInitiator::Local, |end| {
+                        end.reset_frame.lost()
                     });
             }
-            StreamSetFrameSummary::MaxStreamData(summary) => {
+            StreamSetFrameSummary::StreamDataBlocked(summary) => {
                 self.shared
-                    .with_receiver(summary.stream_id, publish, |end| {
+                    .with_sender(summary.stream_id, publish, EventInitiator::Local, |end| {
+                        end.sender
+                            .on_stream_data_blocked_lost(summary.maximum_stream_data);
+                    });
+            }
+            StreamSetFrameSummary::StopSending(summary) => {
+                self.shared.with_receiver(
+                    summary.stream_id,
+                    publish,
+                    EventInitiator::Local,
+                    |end| end.receiver.on_stop_lost(),
+                );
+            }
+            StreamSetFrameSummary::MaxStreamData(summary) => {
+                self.shared.with_receiver(
+                    summary.stream_id,
+                    publish,
+                    EventInitiator::Local,
+                    |end| {
                         if end.receiver.opened_limit() >= summary.maximum_stream_data {
                             end.max_stream_data_lost = true;
                         }
-                    });
+                    },
+                );
             }
             StreamSetFrameSummary::MaxData(summary) => {
                 self.shared.with_connection_receive(publish, |connection| {
@@ -2308,24 +2529,39 @@ where
         K: IntentTicketResize + IntentTicketWithdraw,
     {
         match key {
-            StreamIntentKey::Stream(id) => self.shared.with_sender(id, publish, |end| {
-                forget_ticket(&mut end.data);
-                let _ = end.sender.on_unfulfilled(&AnyActiveLinkPath, cause);
-                // a destination left without fallback may end the stream
-                end.wake_writer();
-            }),
-            StreamIntentKey::ResetStream(id) => self
-                .shared
-                .with_sender(id, publish, |end| forget_ticket(&mut end.reset)),
-            StreamIntentKey::StreamDataBlocked(id) => self
-                .shared
-                .with_sender(id, publish, |end| forget_ticket(&mut end.blocked)),
-            StreamIntentKey::StopSending(id) => self
-                .shared
-                .with_receiver(id, publish, |end| forget_ticket(&mut end.stop)),
-            StreamIntentKey::MaxStreamData(id) => self
-                .shared
-                .with_receiver(id, publish, |end| forget_ticket(&mut end.max_stream_data)),
+            StreamIntentKey::Stream(id) => {
+                self.shared
+                    .with_sender(id, publish, EventInitiator::Local, |end| {
+                        forget_ticket(&mut end.data);
+                        let _ = end.sender.on_unfulfilled(&AnyActiveLinkPath, cause);
+                        // a destination left without fallback may end the stream
+                        end.wake_writer();
+                    })
+            }
+            StreamIntentKey::ResetStream(id) => {
+                self.shared
+                    .with_sender(id, publish, EventInitiator::Local, |end| {
+                        forget_ticket(&mut end.reset)
+                    })
+            }
+            StreamIntentKey::StreamDataBlocked(id) => {
+                self.shared
+                    .with_sender(id, publish, EventInitiator::Local, |end| {
+                        forget_ticket(&mut end.blocked)
+                    })
+            }
+            StreamIntentKey::StopSending(id) => {
+                self.shared
+                    .with_receiver(id, publish, EventInitiator::Local, |end| {
+                        forget_ticket(&mut end.stop)
+                    })
+            }
+            StreamIntentKey::MaxStreamData(id) => {
+                self.shared
+                    .with_receiver(id, publish, EventInitiator::Local, |end| {
+                        forget_ticket(&mut end.max_stream_data)
+                    })
+            }
             StreamIntentKey::MaxData => {
                 self.shared.with_connection_receive(publish, |connection| {
                     forget_ticket(&mut connection.max_data);

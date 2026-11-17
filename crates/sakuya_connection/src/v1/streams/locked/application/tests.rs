@@ -31,6 +31,7 @@ use sakuya_wire::{
 };
 
 use super::*;
+use crate::v1::events::StreamStateChange;
 use crate::{
     send_strategy::{IntakeSendIntentHandle, MinimumLengths, PublishOutcome, SendIntent},
     v1::application_handles::DriverPanicHandleShare,
@@ -38,9 +39,10 @@ use crate::{
         FlowControlParameters, StreamSet, StreamSetFacts,
         locked::{LockedStreamSet, LockedStreamSetConfig},
         resets::Rfc9000StreamResets,
-        send::{StreamIntentKey, StreamSetFrameSummary},
+        send::{StreamIntentKey, StreamSetFrameSummary, StreamSummary},
     },
 };
+use sakuya_stream::send::SendStreamState;
 
 // ---- an intake that records what is published ----
 
@@ -100,15 +102,19 @@ impl SendIntentIntake<AnyActiveLinkPath> for Intake {
     }
 }
 
-type Set = LockedStreamSet<(), Ticket, Rfc9000StreamResets>;
-/// The handle of a layer whose one share is the set's handle, running with
-/// the selection `A`.
-type LayerOf<A> = EstablishedLayerHandle<
-    frunk_core::HList![LockedStreamSetHandle<(), Ticket, Rfc9000StreamResets, Urgency>],
+/// The set that gives its events through `E`.
+type SetOf<E> = LockedStreamSet<(), Ticket, Rfc9000StreamResets, Urgency, E>;
+type Set = SetOf<NoEvents>;
+/// The handle of a layer whose one share is the handle of a set that gives
+/// its events through `E`, running with the selection `A`.
+type LayerWith<A, E> = EstablishedLayerHandle<
+    frunk_core::HList![LockedStreamSetHandle<(), Ticket, Rfc9000StreamResets, Urgency, E>],
     Intake,
     A,
     (),
 >;
+/// The handle of a layer of a set that gives no events.
+type LayerOf<A> = LayerWith<A, NoEvents>;
 /// The handle of a client's layer.
 type Layer = LayerOf<Option<sakuya_tls::extension::alpn::ProtocolName<Bytes>>>;
 /// The handle of a server's layer.
@@ -149,6 +155,18 @@ fn made<A>(
     connection: u32,
     receive: u32,
 ) -> (Set, LayerOf<A>, Intake, Publish) {
+    made_with(role, selection, stream, connection, receive, NoEvents)
+}
+
+/// As [`made`], with a set that gives its events through `events`.
+fn made_with<A, E: SharedEvents + Clone + 'static>(
+    role: Role,
+    selection: A,
+    stream: u32,
+    connection: u32,
+    receive: u32,
+    events: E,
+) -> (SetOf<E>, LayerWith<A, E>, Intake, Publish) {
     let granted_to_peer = FlowControlParameters {
         initial_max_data: InitialMaxData::new(v(receive)),
         initial_max_stream_data_bidi_local: InitialMaxStreamDataBidiLocal::new(v(receive)),
@@ -165,7 +183,7 @@ fn made<A>(
         initial_max_streams_bidi: InitialMaxStreamsBidi::new(count(2)),
         initial_max_streams_uni: InitialMaxStreamsUni::new(count(2)),
     };
-    let set = Set::new(
+    let set = SetOf::<E>::new(
         StreamSetFacts {
             role,
             granted_to_peer,
@@ -173,6 +191,7 @@ fn made<A>(
             peer_reset_support: (),
         },
         LockedStreamSetConfig::default(),
+        events,
     );
     let intake = Intake::default();
     let layer =
@@ -775,7 +794,7 @@ fn send_and_acknowledge<O>(
 
 /// Whether `stream` was reclaimed: the ledger records it, and its parts
 /// left the tables.
-fn is_reclaimed(set: &Set, stream: u32) -> bool {
+fn is_reclaimed<E>(set: &SetOf<E>, stream: u32) -> bool {
     let state = lock(&set.shared.set);
     let reclaimed = state.ledger.is_reclaimed(id(stream));
     let in_tables =
@@ -903,4 +922,318 @@ fn dropping_the_reader_of_a_received_stream_reclaims_it() {
     );
     drop(writer);
     assert_eq!(intake.published(), [], "the done writer gives nothing up");
+}
+
+// ---- the events of the streams ----
+
+/// One event of the streams, as [`Recording`] keeps it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StreamEvent {
+    State(StreamId, StreamStateChange, EventInitiator),
+    Moved(StreamDataMoved),
+}
+
+/// A handle that records the events of the streams; its clones share the
+/// record.
+#[derive(Debug, Clone, Default)]
+struct Recording(Arc<Mutex<Vec<StreamEvent>>>);
+
+impl Recording {
+    /// The events since the last call.
+    fn taken(&self) -> Vec<StreamEvent> {
+        core::mem::take(&mut *self.0.lock().expect("not poisoned"))
+    }
+
+    fn push(&self, event: StreamEvent) {
+        self.0.lock().expect("not poisoned").push(event);
+    }
+}
+
+impl SharedEvents for Recording {
+    const ENABLED: bool = true;
+    fn enabled(&self) -> bool {
+        true
+    }
+    fn stream_state(
+        &self,
+        stream_id: StreamId,
+        change: StreamStateChange,
+        trigger: EventInitiator,
+    ) {
+        self.push(StreamEvent::State(stream_id, change, trigger));
+    }
+    fn stream_data_moved(&self, moved: &StreamDataMoved) {
+        self.push(StreamEvent::Moved(*moved));
+    }
+    fn datagram_data_moved(&self, _: usize, _: DataLocation, _: DataLocation) {
+        panic!("a stream set gives no events of datagrams");
+    }
+    fn datagram_dropped(&self, _: usize, _: crate::v1::events::DatagramDropped) {
+        panic!("a stream set gives no events of datagrams");
+    }
+}
+
+fn sending(
+    stream: u32,
+    old: Option<SendStreamState>,
+    new: Option<SendStreamState>,
+    trigger: EventInitiator,
+) -> StreamEvent {
+    StreamEvent::State(id(stream), StreamStateChange::Sending { old, new }, trigger)
+}
+
+fn receiving(
+    stream: u32,
+    old: Option<ReceiveStreamState>,
+    new: Option<ReceiveStreamState>,
+    trigger: EventInitiator,
+) -> StreamEvent {
+    StreamEvent::State(
+        id(stream),
+        StreamStateChange::Receiving { old, new },
+        trigger,
+    )
+}
+
+/// `length` bytes of `stream` at `offset` moved from `from` to `to`, with
+/// `additional_info`.
+fn moved(
+    stream: u32,
+    offset: u64,
+    length: u64,
+    from: DataLocation,
+    additional_info: Option<DataMovedAdditionalInfo>,
+) -> StreamEvent {
+    let to = match from {
+        DataLocation::Application => DataLocation::Transport,
+        DataLocation::Transport | DataLocation::Network => DataLocation::Application,
+    };
+    StreamEvent::Moved(StreamDataMoved {
+        stream_id: id(stream),
+        offset,
+        length,
+        from,
+        to,
+        additional_info,
+    })
+}
+
+/// What the driver writes of `stream`'s data and FIN into one packet, as
+/// the summaries of its acknowledgment.
+fn supplied<E: SharedEvents>(
+    set: &mut SetOf<E>,
+    publish: &Publish,
+    stream: u32,
+) -> Vec<StreamSummary> {
+    let read = super::super::tests::written_with(
+        set,
+        publish,
+        StreamIntentKey::Stream(id(stream)),
+        100,
+        false,
+    );
+    read.into_iter()
+        .map(|read| match read {
+            super::super::tests::Read::Stream {
+                stream,
+                offset,
+                len,
+                fin,
+            } => StreamSummary {
+                stream_id: stream,
+                offset,
+                len,
+                fin,
+            },
+            other => panic!("a STREAM frame is written: {other:?}"),
+        })
+        .collect()
+}
+
+/// The client's stream 0, from its opening to its reclaim: each part leaves
+/// idle as this side's; the write and the close move the data and the end
+/// to the transport; the first supply sends the data, the second the FIN,
+/// and the acknowledgment of the FIN, the peer's, receives it all. The
+/// peer's answer and its FIN arrive at once; the read of the data moves it
+/// to the application, the read of the end reads the part, and the stream
+/// is reclaimed with both parts' last states.
+#[test]
+fn a_stream_of_this_side_gives_each_change_of_its_parts_and_its_data() {
+    use DataLocation::{Application, Transport};
+    use EventInitiator::{Local, Remote};
+    use ReceiveStreamState as R;
+    use SendStreamState as S;
+
+    let events = Recording::default();
+    let (mut set, layer, _intake, publish) = made_with(
+        Role::Client,
+        None::<sakuya_tls::extension::alpn::ProtocolName<Bytes>>,
+        100,
+        1000,
+        1000,
+        events.clone(),
+    );
+    let (mut writer, mut reader) = layer.try_open_bi().expect("a stream");
+    assert_eq!(
+        events.taken(),
+        [
+            sending(0, None, Some(S::Ready), Local),
+            receiving(0, None, Some(R::Recv), Local),
+        ]
+    );
+    now(writer.write_all_unpin(Bytes::from_static(b"ping"))).expect("written");
+    assert_eq!(events.taken(), [moved(0, 0, 4, Application, None)]);
+
+    let data = supplied(&mut set, &publish, 0);
+    assert_eq!(
+        events.taken(),
+        [sending(0, Some(S::Ready), Some(S::Send), Local)]
+    );
+    writer.close().expect("open");
+    assert_eq!(
+        events.taken(),
+        [moved(
+            0,
+            4,
+            0,
+            Application,
+            Some(DataMovedAdditionalInfo::FinSet)
+        )]
+    );
+    writer.close().expect("closed already");
+    assert_eq!(events.taken(), [], "a second close moves nothing");
+    let fin = supplied(&mut set, &publish, 0);
+    assert_eq!(fin.len(), 1);
+    assert!(fin[0].fin);
+    assert_eq!(
+        events.taken(),
+        [sending(0, Some(S::Send), Some(S::DataSent), Local)]
+    );
+    for summary in data.into_iter().chain(fin) {
+        set.on_frame_delivered(&publish, StreamSetFrameSummary::Stream(summary));
+    }
+    assert_eq!(
+        events.taken(),
+        [sending(0, Some(S::DataSent), Some(S::DataRecvd), Remote)]
+    );
+
+    set.on_stream_frame(&publish, EncryptionLevel::OneRtt, fin_frame(0, 0, 3))
+        .expect("the answer");
+    assert_eq!(
+        events.taken(),
+        [receiving(0, Some(R::Recv), Some(R::DataRecvd), Remote)]
+    );
+    let maximum = NonZeroUsize::new(64).expect("not zero");
+    now(reader.read_chunk_unpin(maximum))
+        .expect("read")
+        .expect("data");
+    assert_eq!(events.taken(), [moved(0, 0, 3, Transport, None)]);
+    assert_eq!(now(reader.read_chunk_unpin(maximum)).expect("read"), None);
+    assert_eq!(
+        events.taken(),
+        [
+            receiving(0, Some(R::DataRecvd), Some(R::DataRead), Local),
+            sending(0, Some(S::DataRecvd), None, Local),
+            receiving(0, Some(R::DataRead), None, Local),
+        ],
+        "the read of the end gives no move, and reclaims the stream"
+    );
+    assert!(is_reclaimed(&set, 0));
+    drop(writer);
+    assert_eq!(events.taken(), [], "the done writer gives nothing up");
+    drop(reader);
+}
+
+/// The peer's stream 1: its first frame makes both parts as the peer's;
+/// reads move the data from where the earlier ones ended; the peer's reset
+/// moves to the application with the read that first gives it, and a read
+/// that gives it again moves nothing.
+#[test]
+fn a_stream_of_the_peer_gives_its_parts_as_the_peers_and_its_reset_once() {
+    use DataLocation::Transport;
+    use EventInitiator::{Local, Remote};
+    use ReceiveStreamState as R;
+    use SendStreamState as S;
+
+    let events = Recording::default();
+    let (mut set, layer, _intake, publish) = made_with(
+        Role::Client,
+        None::<sakuya_tls::extension::alpn::ProtocolName<Bytes>>,
+        100,
+        1000,
+        1000,
+        events.clone(),
+    );
+    set.on_stream_frame(&publish, EncryptionLevel::OneRtt, stream_frame(1, 0, 6))
+        .expect("taken");
+    assert_eq!(
+        events.taken(),
+        [
+            receiving(1, None, Some(R::Recv), Remote),
+            sending(1, None, Some(S::Ready), Remote),
+        ]
+    );
+    let (_writer, mut reader) = now(layer.accept_bi()).expect("stream 1");
+    let four = NonZeroUsize::new(4).expect("not zero");
+    now(reader.read_chunk_unpin(four))
+        .expect("read")
+        .expect("data");
+    now(reader.read_chunk_unpin(four))
+        .expect("read")
+        .expect("data");
+    assert_eq!(
+        events.taken(),
+        [
+            moved(1, 0, 4, Transport, None),
+            moved(1, 4, 2, Transport, None)
+        ]
+    );
+
+    let reset = sakuya_wire::v1::frame::reset_stream::ResetStreamFrame::new(
+        VarIntField::shortest(id(1)),
+        VarIntField::shortest(ApplicationErrorCode::new(v(2))),
+        VarIntField::shortest(v(10)),
+    );
+    set.on_reset_stream(&publish, reset).expect("taken");
+    assert_eq!(
+        events.taken(),
+        [receiving(1, Some(R::Recv), Some(R::ResetRecvd), Remote)]
+    );
+    let maximum = NonZeroUsize::new(64).expect("not zero");
+    assert!(matches!(
+        now(reader.read_chunk_unpin(maximum)),
+        Err(ReadError::Reset { .. })
+    ));
+    assert_eq!(
+        events.taken(),
+        [
+            moved(
+                1,
+                6,
+                0,
+                Transport,
+                Some(DataMovedAdditionalInfo::StreamReset)
+            ),
+            receiving(1, Some(R::ResetRecvd), Some(R::ResetRead), Local),
+        ]
+    );
+    assert!(matches!(
+        now(reader.read_chunk_unpin(maximum)),
+        Err(ReadError::Reset { .. })
+    ));
+    assert_eq!(events.taken(), [], "the same reset again moves nothing");
+}
+
+/// With the default handle, which records nothing, the set gives nothing
+/// and works as it does with one that records.
+#[test]
+fn a_set_without_events_reclaims_as_one_with_them() {
+    let (mut set, layer, _intake, publish) = client(100, 1000);
+    let mut writer = layer.try_open_uni().expect("a stream");
+    now(writer.write_all_unpin(Bytes::from_static(b"data"))).expect("written");
+    writer.close().expect("open");
+    for summary in supplied(&mut set, &publish, 2) {
+        set.on_frame_delivered(&publish, StreamSetFrameSummary::Stream(summary));
+    }
+    assert!(is_reclaimed(&set, 2));
 }

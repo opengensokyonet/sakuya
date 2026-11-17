@@ -31,7 +31,8 @@
 //! route are taken under it, one at a time, and publishing or withdrawing an
 //! intent takes the send strategy's lock under it. The DATAGRAM frame
 //! source takes no lock of the queues: it writes from the intent, and the
-//! queue counts a datagram written as gone the next time it looks.
+//! queue counts a datagram written as gone the next time it looks. The
+//! events of the datagrams are given under the queues' lock.
 
 use core::{
     fmt,
@@ -69,10 +70,13 @@ use crate::{
     send_strategy::{
         IntentTicketWithdraw, PublishOutcome, SendIntentHandle, SendIntentIntake, SharedPublishTo,
     },
-    v1::application_handles::{
-        DriverPanicHandleShare, FindHandleShare, KeyedHandleShare,
-        connection::{keep_waker, lock, wake_all},
-        established_layer::EstablishedLayerHandle,
+    v1::{
+        application_handles::{
+            DriverPanicHandleShare, FindHandleShare, KeyedHandleShare,
+            connection::{keep_waker, lock, wake_all},
+            established_layer::EstablishedLayerHandle,
+        },
+        events::{DataLocation, DatagramDropped, NoEvents, SharedEvents},
     },
 };
 
@@ -115,20 +119,24 @@ pub struct LockedDatagramQueuesConfig {
 ///
 /// `Lc` is this endpoint's reason for closing, `K` the ticket the send
 /// strategy gives back for a datagram's intent, `S` the side, which gives
-/// what a datagram received is. Datagrams are sent with an [`Urgency`], to
-/// any active link path.
-pub struct LockedDatagramQueues<Lc, K, S: DatagramSide> {
-    shared: Arc<QueuesShare<Lc, K, S>>,
+/// what a datagram received is, and `E` the handle the events of the
+/// datagrams are given through, by default [`NoEvents`]: a datagram the
+/// send queue takes and one a read gives the application move between the
+/// application and the transport, and each one a queue drops for its bounds
+/// is dropped ([`SharedEvents`]); each is given under the queues' lock.
+/// Datagrams are sent with an [`Urgency`], to any active link path.
+pub struct LockedDatagramQueues<Lc, K, S: DatagramSide, E = NoEvents> {
+    shared: Arc<QueuesShare<Lc, K, S, E>>,
 }
 
 /// The default queues of the established layer.
-pub type DefaultDatagramQueues<Lc, K, S> = LockedDatagramQueues<Lc, K, S>;
+pub type DefaultDatagramQueues<Lc, K, S, E = NoEvents> = LockedDatagramQueues<Lc, K, S, E>;
 
 /// A datagram to send, as the send queue holds it.
 type SendCell<K> = DatagramCell<K, AnyActiveLinkPath, Urgency>;
 
 /// What the queues and their handles share.
-struct QueuesShare<Lc, K, S: DatagramSide> {
+struct QueuesShare<Lc, K, S: DatagramSide, E> {
     /// The largest payload the peer takes; `None` when it takes no
     /// DATAGRAM frames.
     peer_limit: Option<usize>,
@@ -143,6 +151,8 @@ struct QueuesShare<Lc, K, S: DatagramSide> {
     /// read it.
     panicked: Arc<DriverPanicFlag>,
     state: Mutex<QueuesState<Lc, K, S::Received>>,
+    /// The handle the events of the datagrams are given through.
+    events: E,
 }
 
 struct QueuesState<Lc, K, R> {
@@ -162,7 +172,7 @@ struct QueuesState<Lc, K, R> {
     end: Option<LayerEnd<Lc>>,
 }
 
-impl<Lc, K, S: DatagramSide> fmt::Debug for LockedDatagramQueues<Lc, K, S> {
+impl<Lc, K, S: DatagramSide, E> fmt::Debug for LockedDatagramQueues<Lc, K, S, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LockedDatagramQueues")
             .field("config", &self.shared.config)
@@ -170,7 +180,7 @@ impl<Lc, K, S: DatagramSide> fmt::Debug for LockedDatagramQueues<Lc, K, S> {
     }
 }
 
-impl<Lc, K: IntentTicketWithdraw, S: DatagramSide> QueuesShare<Lc, K, S> {
+impl<Lc, K: IntentTicketWithdraw, S: DatagramSide, E: SharedEvents> QueuesShare<Lc, K, S, E> {
     /// A datagram of `level` and `frame` arrived: kept, or dropped as the
     /// receive queue's bounds say.
     fn receive(&self, level: EncryptionLevel, frame: DatagramFrame<Bytes>) {
@@ -184,6 +194,7 @@ impl<Lc, K: IntentTicketWithdraw, S: DatagramSide> QueuesShare<Lc, K, S> {
         if len > bounds.bytes {
             // larger than the whole queue: dropped, the others kept
             state.dropped += 1;
+            self.dropped(len, DatagramDropped::ReceiveQueueFull);
             return;
         }
         let fits = |state: &QueuesState<Lc, K, S::Received>| {
@@ -198,10 +209,12 @@ impl<Lc, K: IntentTicketWithdraw, S: DatagramSide> QueuesShare<Lc, K, S> {
             let Some(oldest) = oldest else {
                 // the new one is dropped
                 state.dropped += 1;
+                self.dropped(len, DatagramDropped::ReceiveQueueFull);
                 return;
             };
             state.received_bytes -= oldest.remaining();
             state.dropped += 1;
+            self.dropped(oldest.remaining(), DatagramDropped::ReceiveQueueFull);
         }
         state.received_bytes += len;
         state.received.push_back(datagram);
@@ -216,6 +229,10 @@ impl<Lc, K: IntentTicketWithdraw, S: DatagramSide> QueuesShare<Lc, K, S> {
         }
         if let Some(datagram) = state.received.pop_front() {
             state.received_bytes -= datagram.remaining();
+            if let Some(events) = self.events() {
+                let len = datagram.remaining();
+                events.datagram_data_moved(len, DataLocation::Transport, DataLocation::Application);
+            }
             return Poll::Ready(Ok(datagram));
         }
         match &state.end {
@@ -284,6 +301,7 @@ impl<Lc, K: IntentTicketWithdraw, S: DatagramSide> QueuesShare<Lc, K, S> {
                 return Err(SendDatagramError::QueueFull);
             };
             state.waiting_bytes -= oldest.len();
+            self.dropped(oldest.len(), DatagramDropped::SendQueueFull);
             // written meanwhile, it leaves the queue all the same
             oldest.withdraw(Withdrawal::Cause(DatagramWithdrawCause::DroppedOldest));
         }
@@ -293,6 +311,9 @@ impl<Lc, K: IntentTicketWithdraw, S: DatagramSide> QueuesShare<Lc, K, S> {
         let cell = DatagramCell::new(intent, ticket, destination, Arc::clone(&self.panicked));
         state.waiting_bytes += len;
         state.waiting.push_back(Arc::clone(&cell));
+        if let Some(events) = self.events() {
+            events.datagram_data_moved(len, DataLocation::Application, DataLocation::Transport);
+        }
         Ok(DatagramTicket::new(cell))
     }
 
@@ -323,6 +344,20 @@ impl<Lc, K: IntentTicketWithdraw, S: DatagramSide> QueuesShare<Lc, K, S> {
         state.in_flight.extend(sent);
     }
 
+    /// The handle for the events of the datagrams, when they are recorded.
+    #[inline(always)]
+    fn events(&self) -> Option<&E> {
+        (E::ENABLED && self.events.enabled()).then_some(&self.events)
+    }
+
+    /// A datagram of `length` bytes of payload was dropped as `dropped`
+    /// says; under the queues' lock.
+    fn dropped(&self, length: usize, dropped: DatagramDropped) {
+        if let Some(events) = self.events() {
+            events.datagram_dropped(length, dropped);
+        }
+    }
+
     fn limits(&self) -> DatagramFrameLimits {
         let limit = self.peer_limit.unwrap_or(0);
         DatagramFrameLimits {
@@ -338,19 +373,22 @@ pub struct LockedDatagramQueuesFamily;
 
 impl super::DatagramQueuesFamily for LockedDatagramQueuesFamily {
     type Config = LockedDatagramQueuesConfig;
-    type Queues<Lc, K: IntentTicketWithdraw, S: DatagramSide> = LockedDatagramQueues<Lc, K, S>;
+    type Queues<Lc, K: IntentTicketWithdraw, S: DatagramSide, E: SharedEvents + Clone + 'static> =
+        LockedDatagramQueues<Lc, K, S, E>;
 }
 
-impl<Lc, K, S> DatagramQueues<Lc> for LockedDatagramQueues<Lc, K, S>
+impl<Lc, K, S, E> DatagramQueues<Lc> for LockedDatagramQueues<Lc, K, S, E>
 where
     K: IntentTicketWithdraw,
     S: DatagramSide,
+    E: SharedEvents,
 {
     type Config = LockedDatagramQueuesConfig;
-    type Handle = LockedDatagramQueuesHandle<Lc, K, S>;
+    type Handle = LockedDatagramQueuesHandle<Lc, K, S, E>;
     type StrategyTicket = K;
+    type Events = E;
 
-    fn new(facts: DatagramQueuesFacts, config: LockedDatagramQueuesConfig) -> Self {
+    fn new(facts: DatagramQueuesFacts, config: LockedDatagramQueuesConfig, events: E) -> Self {
         let peer_frame_limit = usize::try_from(facts.peer.get().get()).unwrap_or(usize::MAX);
         let peer_limit = (peer_frame_limit > 0).then(|| payload_limit(facts.peer).unwrap_or(0));
         Self {
@@ -370,11 +408,12 @@ where
                     in_flight: Vec::new(),
                     end: None,
                 }),
+                events,
             }),
         }
     }
 
-    fn handle(&self) -> LockedDatagramQueuesHandle<Lc, K, S> {
+    fn handle(&self) -> LockedDatagramQueuesHandle<Lc, K, S, E> {
         LockedDatagramQueuesHandle {
             shared: Arc::clone(&self.shared),
         }
@@ -392,7 +431,7 @@ where
     where
         H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
     {
-        QueuesShare::<Lc, K, S>::resolve_waiting(&mut lock(&self.shared.state), publish);
+        QueuesShare::<Lc, K, S, E>::resolve_waiting(&mut lock(&self.shared.state), publish);
     }
 }
 
@@ -400,11 +439,11 @@ where
 /// it shares the queues' state. It is the extension's share of an
 /// established layer's handle, which publishes the datagrams through its
 /// intake. A clone is the same handle.
-pub struct LockedDatagramQueuesHandle<Lc, K, S: DatagramSide> {
-    shared: Arc<QueuesShare<Lc, K, S>>,
+pub struct LockedDatagramQueuesHandle<Lc, K, S: DatagramSide, E = NoEvents> {
+    shared: Arc<QueuesShare<Lc, K, S, E>>,
 }
 
-impl<Lc, K, S: DatagramSide> Clone for LockedDatagramQueuesHandle<Lc, K, S> {
+impl<Lc, K, S: DatagramSide, E> Clone for LockedDatagramQueuesHandle<Lc, K, S, E> {
     fn clone(&self) -> Self {
         Self {
             shared: Arc::clone(&self.shared),
@@ -413,14 +452,16 @@ impl<Lc, K, S: DatagramSide> Clone for LockedDatagramQueuesHandle<Lc, K, S> {
 }
 
 /// The extension's share of an established layer's handle.
-impl<Lc, K, S: DatagramSide> KeyedHandleShare for LockedDatagramQueuesHandle<Lc, K, S> {
+impl<Lc, K, S: DatagramSide, E> KeyedHandleShare for LockedDatagramQueuesHandle<Lc, K, S, E> {
     type Part = super::Part;
 }
 
 /// The handle marks the end in what it shares with the queues and wakes
 /// who waits to receive and who waits for a datagram in the send queue, or
 /// one in flight, to settle; it withdraws nothing.
-impl<Lc, K, S: DatagramSide> DriverPanicHandleShare<Lc> for LockedDatagramQueuesHandle<Lc, K, S> {
+impl<Lc, K, S: DatagramSide, E> DriverPanicHandleShare<Lc>
+    for LockedDatagramQueuesHandle<Lc, K, S, E>
+{
     fn driver_panicked(&self, end: LayerEnd<Lc>) {
         let shared = &self.shared;
         if shared.panic_end.set(end).is_err() {
@@ -444,14 +485,14 @@ impl<Lc, K, S: DatagramSide> DriverPanicHandleShare<Lc> for LockedDatagramQueues
     }
 }
 
-impl<Lc, K, S: DatagramSide> fmt::Debug for LockedDatagramQueuesHandle<Lc, K, S> {
+impl<Lc, K, S: DatagramSide, E> fmt::Debug for LockedDatagramQueuesHandle<Lc, K, S, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LockedDatagramQueuesHandle")
             .finish_non_exhaustive()
     }
 }
 
-impl<Lc, K, S: DatagramSide> LockedDatagramQueuesHandle<Lc, K, S> {
+impl<Lc, K, S: DatagramSide, E> LockedDatagramQueuesHandle<Lc, K, S, E> {
     /// How many datagrams received were dropped because the receive queue
     /// was full; it only grows.
     pub fn dropped_datagrams(&self) -> u64 {
@@ -467,9 +508,9 @@ impl<Sh, N, A, Lc> EstablishedLayerHandle<Sh, N, A, Lc> {
     /// ([`LockedDatagramQueuesHandle::dropped_datagrams`]); `Iq` is where
     /// the queues' handle is among the shares `Sh`, which the compiler
     /// infers.
-    pub fn dropped_datagrams<Iq, K, S>(&self) -> u64
+    pub fn dropped_datagrams<Iq, K, S, E>(&self) -> u64
     where
-        Sh: FindHandleShare<super::Part, Iq, Found = LockedDatagramQueuesHandle<Lc, K, S>>,
+        Sh: FindHandleShare<super::Part, Iq, Found = LockedDatagramQueuesHandle<Lc, K, S, E>>,
         S: DatagramSide,
     {
         self.shares.find().dropped_datagrams()
@@ -480,17 +521,18 @@ impl<Sh, N, A, Lc> EstablishedLayerHandle<Sh, N, A, Lc> {
 /// whose shares `Sh` hold the queues' handle at the place `Iq`: the writer
 /// publishes through the intake's handle for the datagram intents at the
 /// place `I`.
-impl<Sh, Lc, K, S, N, A, Iq, I> Datagrams<(Iq, I)> for EstablishedLayerHandle<Sh, N, A, Lc>
+impl<Sh, Lc, K, S, E, N, A, Iq, I> Datagrams<(Iq, I)> for EstablishedLayerHandle<Sh, N, A, Lc>
 where
-    Sh: FindHandleShare<super::Part, Iq, Found = LockedDatagramQueuesHandle<Lc, K, S>>,
+    Sh: FindHandleShare<super::Part, Iq, Found = LockedDatagramQueuesHandle<Lc, K, S, E>>,
     K: IntentTicketWithdraw,
     S: DatagramSide,
+    E: SharedEvents,
     N: SendIntentIntake<AnyActiveLinkPath>
         + SharedPublishTo<DatagramIntent<Urgency>, AnyActiveLinkPath, I>
         + PublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
 {
     type Received = S::Received;
-    type SendShare = LockedDatagramSendShare<Lc, K, S, N::Handle<DatagramIntent<Urgency>, I>>;
+    type SendShare = LockedDatagramSendShare<Lc, K, S, N::Handle<DatagramIntent<Urgency>, I>, E>;
     type CloseCause = Lc;
 
     fn datagram_writer(
@@ -510,12 +552,12 @@ where
 
 /// This side's share of the send queue of a [`LockedDatagramQueues`]
 /// (`LockedDatagramSendShare`), with the handle `H` it publishes through.
-pub struct LockedDatagramSendShare<Lc, K, S: DatagramSide, H> {
-    shared: Arc<QueuesShare<Lc, K, S>>,
+pub struct LockedDatagramSendShare<Lc, K, S: DatagramSide, H, E = NoEvents> {
+    shared: Arc<QueuesShare<Lc, K, S, E>>,
     publish: H,
 }
 
-impl<Lc, K, S: DatagramSide, H: Clone> Clone for LockedDatagramSendShare<Lc, K, S, H> {
+impl<Lc, K, S: DatagramSide, H: Clone, E> Clone for LockedDatagramSendShare<Lc, K, S, H, E> {
     fn clone(&self) -> Self {
         Self {
             shared: Arc::clone(&self.shared),
@@ -524,7 +566,7 @@ impl<Lc, K, S: DatagramSide, H: Clone> Clone for LockedDatagramSendShare<Lc, K, 
     }
 }
 
-impl<Lc, K, S: DatagramSide, H> fmt::Debug for LockedDatagramSendShare<Lc, K, S, H> {
+impl<Lc, K, S: DatagramSide, H, E> fmt::Debug for LockedDatagramSendShare<Lc, K, S, H, E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LockedDatagramSendShare")
             .finish_non_exhaustive()
@@ -532,10 +574,11 @@ impl<Lc, K, S: DatagramSide, H> fmt::Debug for LockedDatagramSendShare<Lc, K, S,
 }
 
 /// Datagrams are sent with an urgency, to any active link path.
-impl<Lc, K, S, H> DatagramSend for LockedDatagramSendShare<Lc, K, S, H>
+impl<Lc, K, S, H, E> DatagramSend for LockedDatagramSendShare<Lc, K, S, H, E>
 where
     K: IntentTicketWithdraw,
     S: DatagramSide,
+    E: SharedEvents,
     H: SendIntentHandle<DatagramIntent<Urgency>, AnyActiveLinkPath, Outcome = K>,
 {
     type Parameters = Urgency;

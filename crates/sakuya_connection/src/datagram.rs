@@ -77,13 +77,14 @@ use crate::{
     },
     take::{GetAt, TakeEach},
     v1::{
-        Choices, Client, CloseCauseOf, HostOf, Server, Side,
+        Choices, Client, CloseCauseOf, EventsOf, HostOf, Server, SharedEventsOf, Side,
         application_handles::{
             DriverPanicHandleShare, FindHandleShare, HandleShare, HandleShares, KeyedHandleShare,
             connection::{ConnectionHandleCellOf, EstablishedLayerSharesOf},
             handle,
         },
         close::{CloseReasonRecord, TransportClose},
+        events::{ConnectionEventSink, ConnectionEvents, SharedEvents},
         parameters::{LocalTransportParameters, PartSlots, PeerTransportParameters},
         send::SendTypes,
         send_planning::{HostSendStrategyTypes, IntakeOf, IntakePublishOutcome},
@@ -119,16 +120,19 @@ pub trait DatagramChoices: 'static {
 /// A kind of queues of the established layer: one queues type for each
 /// `Lc`, this endpoint's reason for closing ([`CloseCauseOf`] for the
 /// composition's list of parts), `K`, the ticket the send strategy's intake
-/// gives back for a datagram's intent ([`DatagramTicketOf`]), and `S`, the
-/// side, which gives what a datagram received is; all take the same
-/// configuration.
+/// gives back for a datagram's intent ([`DatagramTicketOf`]), `S`, the
+/// side, which gives what a datagram received is, and `E`, the handle the
+/// events of the datagrams are given through
+/// ([`ConnectionEvents::Shared`]);
+/// all take the same configuration.
 pub trait DatagramQueuesFamily: 'static {
     /// What the composition configures the queues with; the connection
     /// node keeps it from the connection's making until the established
     /// layer is built.
     type Config: Clone + Default + 'static;
-    /// The queues for `Lc`, `K` and `S`.
-    type Queues<Lc, K: IntentTicketWithdraw, S: DatagramSide>: DatagramQueues<Lc, Config = Self::Config, StrategyTicket = K>;
+    /// The queues for `Lc`, `K`, `S` and `E`; queues that give no events
+    /// may drop the handle.
+    type Queues<Lc, K: IntentTicketWithdraw, S: DatagramSide, E: SharedEvents + Clone + 'static>: DatagramQueues<Lc, Config = Self::Config, StrategyTicket = K, Events = E>;
 }
 
 /// The kind of queues the host of the choices `T` chooses.
@@ -153,6 +157,7 @@ pub type DatagramQueuesOf<T, L> = <DatagramQueuesFamilyOf<T> as DatagramQueuesFa
     CloseCauseOf<T, L>,
     DatagramTicketOf<T, L>,
     <T as crate::v1::MakerChoices>::Side,
+    SharedEventsOf<T, L>,
 >;
 
 /// What one side reads of a datagram it received (`DatagramSide`): the
@@ -262,10 +267,14 @@ pub trait DatagramQueues<Lc>: Sized {
     type Handle: Clone + KeyedHandleShare<Part = Part> + DriverPanicHandleShare<Lc>;
     /// The ticket the send strategy gives back for a datagram's intent.
     type StrategyTicket;
+    /// The handle the queues give the events of the datagrams through: the
+    /// connection's
+    /// ([`ConnectionEvents::Shared`]).
+    type Events;
 
-    /// The queues of a layer just built, of the facts `facts` and
-    /// configured by `config`.
-    fn new(facts: DatagramQueuesFacts, config: Self::Config) -> Self;
+    /// The queues of a layer just built, of the facts `facts`, configured by
+    /// `config`, with the handle for the events of the datagrams.
+    fn new(facts: DatagramQueuesFacts, config: Self::Config, events: Self::Events) -> Self;
 
     /// The share of the queues.
     fn handle(&self) -> Self::Handle;
@@ -661,14 +670,19 @@ pub struct ChosenDatagramQueues;
 ///
 /// When the layer ends, the queues hear that the connection closed, for the
 /// reason in the record of why the connection closed.
-impl<T, L, X, Ip, Ic, Ir, Ih, Jm, Js>
-    Build<T, L, layer::Established, (ChosenDatagramQueues, (Ip, Ic, Ir, Ih), (Jm, Js))> for X
+impl<T, L, X, Ip, Ic, Ir, Ih, Iev, Jm, Js>
+    Build<T, L, layer::Established, (ChosenDatagramQueues, (Ip, Ic, Ir, Ih, Iev), (Jm, Js))> for X
 where
     T: Choices<
         Side: DatagramSide,
         Host: DatagramChoices<
             DatagramQueues: DatagramQueuesFamily<
-                Queues<CloseCauseOf<T, L>, DatagramTicketOf<T, L>, <T as crate::v1::MakerChoices>::Side> = X,
+                Queues<
+                    CloseCauseOf<T, L>,
+                    DatagramTicketOf<T, L>,
+                    <T as crate::v1::MakerChoices>::Side,
+                    SharedEventsOf<T, L>,
+                > = X,
             >,
         >,
     >,
@@ -679,13 +693,18 @@ where
     SendTypes<T, L>: IntakePublishOutcome<DatagramIntent<Urgency>, AnyActiveLinkPath>,
     SendTypes<T, L>: HostSendStrategyTypes,
     DatagramTicketOf<T, L>: IntentTicketWithdraw,
-    X: DatagramQueues<CloseCauseOf<T, L>, Config = DatagramQueuesConfigOf<T>>,
+    X: DatagramQueues<
+            CloseCauseOf<T, L>,
+            Config = DatagramQueuesConfigOf<T>,
+            Events = SharedEventsOf<T, L>,
+        >,
     TransportParameterSlots<L>: Selector<Option<MaxDatagramFrameSize>, Jm>,
     EstablishedLayerSharesOf<T, L>: FindHandleShare<Part, Js, Found = X::Handle>,
     for<'v> <L as LineageLists<'v, T>>::Connection: GetAt<PeerTransportParameters<TransportParameterSlots<L>>, Ip>
         + GetAt<DatagramQueuesConfig<DatagramQueuesConfigOf<T>>, Ic>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
-        + GetAt<ConnectionHandleCellOf<T, L>, Ih>,
+        + GetAt<ConnectionHandleCellOf<T, L>, Ih>
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
 {
     fn build<'v>(
         parents: &mut ParentsOf<'v, T, L, layer::Established>,
@@ -700,7 +719,11 @@ where
             .get::<DatagramQueuesConfig<DatagramQueuesConfigOf<T>>, Ic>()
             .0
             .clone();
-        let queues = X::new(DatagramQueuesFacts { peer }, config);
+        let events = parents
+            .get::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
+            .events()
+            .shared();
+        let queues = X::new(DatagramQueuesFacts { peer }, config, events);
         parents
             .get::<ConnectionHandleCellOf<T, L>, Ih>()
             .share_built::<Part, Js>(queues.handle());
@@ -733,7 +756,12 @@ where
         Side: DatagramSide,
         Host: DatagramChoices<
             DatagramQueues: DatagramQueuesFamily<
-                Queues<CloseCauseOf<T, L>, DatagramTicketOf<T, L>, <T as crate::v1::MakerChoices>::Side> = X,
+                Queues<
+                    CloseCauseOf<T, L>,
+                    DatagramTicketOf<T, L>,
+                    <T as crate::v1::MakerChoices>::Side,
+                    SharedEventsOf<T, L>,
+                > = X,
             >,
         >,
     >,

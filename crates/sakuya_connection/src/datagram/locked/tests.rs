@@ -107,14 +107,18 @@ impl SendStrategyTypes for TestTypes {
 
 type Core = RankedSendStrategy<TestTypes>;
 type Planner = RankedLinkPathSendPlanner<TestTypes>;
-type Queues = LockedDatagramQueues<(), IntentTicket<()>, TestSide>;
-/// The handle of a layer whose one share is the queues' handle.
-type Handle = EstablishedLayerHandle<
-    frunk_core::HList![LockedDatagramQueuesHandle<(), IntentTicket<()>, TestSide>],
+/// The queues that give their events through `E`.
+type QueuesOf<E> = LockedDatagramQueues<(), IntentTicket<()>, TestSide, E>;
+type Queues = QueuesOf<NoEvents>;
+/// The handle of a layer whose one share is the handle of queues that give
+/// their events through `E`.
+type HandleOf<E> = EstablishedLayerHandle<
+    frunk_core::HList![LockedDatagramQueuesHandle<(), IntentTicket<()>, TestSide, E>],
     RankedSendIntake<TestTypes>,
     (),
     (),
 >;
+type Handle = HandleOf<NoEvents>;
 type Writer = DatagramWriter<
     <Handle as Datagrams<(Here, InHead<Here>)>>::SendShare,
     sakuya_stream::send_options::NoSendOptions,
@@ -129,11 +133,21 @@ fn bounds(datagrams: usize, bytes: usize, overflow: DatagramOverflow) -> Datagra
 }
 
 fn queues(peer: u32, config: LockedDatagramQueuesConfig) -> (Queues, Core, Handle) {
-    let queues = Queues::new(
+    queues_with(peer, config, NoEvents)
+}
+
+/// As [`queues`], with queues that give their events through `events`.
+fn queues_with<E: SharedEvents + Clone + 'static>(
+    peer: u32,
+    config: LockedDatagramQueuesConfig,
+    events: E,
+) -> (QueuesOf<E>, Core, HandleOf<E>) {
+    let queues = QueuesOf::<E>::new(
         DatagramQueuesFacts {
             peer: MaxDatagramFrameSize::new(VarInt::from_u32(peer)),
         },
         config,
+        events,
     );
     let mut core = Core::new();
     core.send_keys_available(sakuya_wire::v1::encryption_level::EncryptionLevel::OneRtt);
@@ -172,11 +186,11 @@ fn poll_now<F: core::future::Future>(future: F) -> Poll<F::Output> {
     pin!(future).poll(&mut Context::from_waker(Waker::noop()))
 }
 
-fn recv(handle: &Handle) -> Poll<Result<Bytes, LayerEndedError<()>>> {
+fn recv<E: SharedEvents>(handle: &HandleOf<E>) -> Poll<Result<Bytes, LayerEndedError<()>>> {
     poll_now(Datagrams::<(Here, InHead<Here>)>::recv_datagram(handle))
 }
 
-fn received(handle: &Handle) -> Vec<Bytes> {
+fn received<E: SharedEvents>(handle: &HandleOf<E>) -> Vec<Bytes> {
     let mut all = Vec::new();
     while let Poll::Ready(Ok(datagram)) = recv(handle) {
         all.push(datagram);
@@ -623,4 +637,155 @@ impl CountingWake {
     fn count(&self) -> usize {
         self.0.load(std::sync::atomic::Ordering::SeqCst)
     }
+}
+
+// ---- the events of the datagrams ----
+
+/// One event of the datagrams, as [`Recording`] keeps it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DatagramEvent {
+    Moved(usize, DataLocation, DataLocation),
+    Dropped(usize, DatagramDropped),
+}
+
+/// A handle that records the events of the datagrams; its clones share the
+/// record.
+#[derive(Debug, Clone, Default)]
+struct Recording(Arc<Mutex<Vec<DatagramEvent>>>);
+
+impl Recording {
+    /// The events since the last call.
+    fn taken(&self) -> Vec<DatagramEvent> {
+        core::mem::take(&mut *lock(&self.0))
+    }
+}
+
+impl SharedEvents for Recording {
+    const ENABLED: bool = true;
+    fn enabled(&self) -> bool {
+        true
+    }
+    fn stream_state(
+        &self,
+        _: sakuya_wire::v1::stream_id::StreamId,
+        _: crate::v1::events::StreamStateChange,
+        _: crate::v1::events::Initiator,
+    ) {
+        panic!("the datagram queues give no events of streams");
+    }
+    fn stream_data_moved(&self, _: &crate::v1::events::StreamDataMoved) {
+        panic!("the datagram queues give no events of streams");
+    }
+    fn datagram_data_moved(&self, length: usize, from: DataLocation, to: DataLocation) {
+        lock(&self.0).push(DatagramEvent::Moved(length, from, to));
+    }
+    fn datagram_dropped(&self, length: usize, dropped: DatagramDropped) {
+        lock(&self.0).push(DatagramEvent::Dropped(length, dropped));
+    }
+}
+
+/// A datagram the send queue takes moves to the transport; one a full
+/// send queue that drops the oldest drops is dropped as the send queue's,
+/// with its own length; one refused gives nothing, as the send fails.
+#[test]
+fn the_send_queue_gives_what_it_takes_and_what_it_drops() {
+    use DataLocation::{Application, Transport};
+
+    let events = Recording::default();
+    let (_queues, _core, handle) = queues_with(
+        1200,
+        LockedDatagramQueuesConfig {
+            send: bounds(1, 1000, DatagramOverflow::DropOldest),
+            ..LockedDatagramQueuesConfig::default()
+        },
+        events.clone(),
+    );
+    let writer = Datagrams::<(Here, InHead<Here>)>::datagram_writer(&handle);
+    let first = writer.send(Bytes::from_static(b"one")).expect("taken");
+    assert_eq!(
+        events.taken(),
+        [DatagramEvent::Moved(3, Application, Transport)]
+    );
+    let second = writer.send(Bytes::from_static(b"second")).expect("taken");
+    assert_eq!(
+        events.taken(),
+        [
+            DatagramEvent::Dropped(3, DatagramDropped::SendQueueFull),
+            DatagramEvent::Moved(6, Application, Transport),
+        ]
+    );
+    drop((first, second));
+
+    let (_queues, _core, handle) = queues_with(
+        1200,
+        LockedDatagramQueuesConfig {
+            send: bounds(1, 1000, DatagramOverflow::RejectNew),
+            ..LockedDatagramQueuesConfig::default()
+        },
+        events.clone(),
+    );
+    let writer = Datagrams::<(Here, InHead<Here>)>::datagram_writer(&handle);
+    let kept = writer.send(Bytes::from_static(b"one")).expect("taken");
+    events.taken();
+    assert!(matches!(
+        writer.send(Bytes::from_static(b"two")),
+        Err(SendDatagramError::QueueFull)
+    ));
+    assert_eq!(events.taken(), [], "the refused send tells the application");
+    drop(kept);
+}
+
+/// A full receive queue drops a new datagram, or the oldest, or one larger
+/// than the whole queue, each as the receive queue's with its own length;
+/// a datagram taken gives nothing until a read moves it to the application.
+#[test]
+fn the_receive_queue_gives_what_it_drops_and_what_is_read() {
+    use DataLocation::{Application, Transport};
+    use DatagramDropped::ReceiveQueueFull;
+
+    let events = Recording::default();
+    let (mut queues, _core, handle) = queues_with(
+        1200,
+        LockedDatagramQueuesConfig {
+            receive: bounds(1, 10, DatagramOverflow::RejectNew),
+            ..LockedDatagramQueuesConfig::default()
+        },
+        events.clone(),
+    );
+    queues.on_datagram_frame(EncryptionLevel::OneRtt, frame(b"one"));
+    assert_eq!(events.taken(), [], "network to transport is the frame's");
+    queues.on_datagram_frame(EncryptionLevel::OneRtt, frame(b"two!"));
+    queues.on_datagram_frame(EncryptionLevel::OneRtt, frame(b"eleven-byte"));
+    assert_eq!(
+        events.taken(),
+        [
+            DatagramEvent::Dropped(4, ReceiveQueueFull),
+            DatagramEvent::Dropped(11, ReceiveQueueFull),
+        ]
+    );
+    assert_eq!(received(&handle), [&b"one"[..]]);
+    assert_eq!(
+        events.taken(),
+        [DatagramEvent::Moved(3, Transport, Application)]
+    );
+
+    let (mut queues, _core, handle) = queues_with(
+        1200,
+        LockedDatagramQueuesConfig {
+            receive: bounds(1, 10, DatagramOverflow::DropOldest),
+            ..LockedDatagramQueuesConfig::default()
+        },
+        events.clone(),
+    );
+    queues.on_datagram_frame(EncryptionLevel::OneRtt, frame(b"one"));
+    queues.on_datagram_frame(EncryptionLevel::OneRtt, frame(b"two!"));
+    assert_eq!(
+        events.taken(),
+        [DatagramEvent::Dropped(3, ReceiveQueueFull)]
+    );
+    assert_eq!(received(&handle), [&b"two!"[..]]);
+    assert_eq!(
+        events.taken(),
+        [DatagramEvent::Moved(4, Transport, Application)]
+    );
 }

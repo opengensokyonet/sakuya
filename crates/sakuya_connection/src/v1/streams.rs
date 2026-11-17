@@ -74,12 +74,15 @@ use super::{
         handle,
     },
     close::CloseReasonRecord,
+    events::{ConnectionEventSink, ConnectionEvents, SharedEvents},
     own_args,
     parameters::{LocalTransportParameters, PeerTransportParameters},
     send::SendTypes,
     send_planning::{HostSendStrategyTypes, IntakeOf, IntakePublishOutcome, SendStrategyIntake},
 };
-use crate::v1::{HostChoices, SendParametersOf, StreamSetConfigOf, StreamSetFamilyOf};
+use crate::v1::{
+    EventsOf, HostChoices, SendParametersOf, SharedEventsOf, StreamSetConfigOf, StreamSetFamilyOf,
+};
 use crate::{
     call::CallBundle,
     component::{ArgsOf, Build, DataComponent, ParentsOf, PassiveDataComponent},
@@ -93,7 +96,7 @@ use crate::{
     write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
 
-/// A kind of stream set: one stream set type for each `Lc`, `K` and `X`
+/// A kind of stream set: one stream set type for each `Lc`, `K`, `X` and `E`
 /// ([`StreamSet`]), which all take the same configuration and send with the
 /// same parameters. The host chooses the kind
 /// ([`HostChoices::Streams`]); the connection
@@ -107,8 +110,18 @@ pub trait StreamSetFamily: 'static {
     type SendParameters: Clone + PartialEq + Default + 'static;
     /// The stream set for `Lc`, this endpoint's reason for closing, `K`,
     /// the ticket the send strategy's intake gives back for a stream
-    /// intent, and `X`, how the streams are reset.
-    type Set<Lc, K, X: StreamResets>: StreamSet<Lc, K, X, Config = Self::Config, SendParameters = Self::SendParameters>;
+    /// intent, `X`, how the streams are reset, and `E`, the handle the
+    /// events of the streams are given through
+    /// ([`ConnectionEvents::Shared`]); a set that gives no events may drop
+    /// it.
+    type Set<Lc, K, X: StreamResets, E: SharedEvents + Clone + 'static>: StreamSet<
+            Lc,
+            K,
+            X,
+            Config = Self::Config,
+            SendParameters = Self::SendParameters,
+            Events = E,
+        >;
 }
 
 /// The set of a connection's streams in its established layer.
@@ -158,10 +171,18 @@ pub trait StreamSet<Lc, K, X: StreamResets>: Sized {
     /// intents of the data carry.
     type SendParameters;
 
+    /// The handle the set gives the events of its streams through: the
+    /// connection's ([`ConnectionEvents::Shared`]).
+    type Events;
+
     /// The stream set of an established layer, from the facts of the
     /// connection, with what the peer allows the resets of the kind `X`,
-    /// and the configuration.
-    fn new(facts: StreamSetFacts<X::PeerSupport>, config: Self::Config) -> Self;
+    /// the configuration, and the handle for the events of its streams.
+    fn new(
+        facts: StreamSetFacts<X::PeerSupport>,
+        config: Self::Config,
+        events: Self::Events,
+    ) -> Self;
 
     /// A handle for the application.
     fn handle(&self) -> Self::Handle;
@@ -624,6 +645,7 @@ pub type StreamsOf<T, L> = <StreamSetFamilyOf<T> as StreamSetFamily>::Set<
     CloseCauseOf<T, L>,
     StreamIntentTicketOf<T, L>,
     StreamResetsOfParts<L>,
+    SharedEventsOf<T, L>,
 >;
 
 /// The configuration of the stream set, `C`, kept in the connection node
@@ -666,6 +688,9 @@ pub struct ChosenStreamSet;
 /// ([`PeerResetSupportSlots`]); absent, what a peer whose parameters are not
 /// known allows.
 ///
+/// The set gives the events of its streams through the handle of the
+/// connection's event receiver ([`ConnectionEvents::shared`]).
+///
 /// When the layer ends, every stream hears that the connection closed, for
 /// the reason in the record of why the connection closed.
 ///
@@ -673,15 +698,24 @@ pub struct ChosenStreamSet;
 /// version 1's share of the layer's handle when the layer is built, the
 /// set's handle, together with the send strategy's intake, which every
 /// layer's handle publishes through; and the layer's end when it ends.
-impl<T, L, X, Il, Ip, Ic, Ir, Ih, In, Jl, Jp, Jr, Js>
-    Build<T, L, layer::Established, (ChosenStreamSet, (Il, Ip, Ic, Ir, Ih, In), (Jl, Jp, Jr, Js))>
-    for X
+impl<T, L, X, Il, Ip, Ic, Ir, Ih, In, Iev, Jl, Jp, Jr, Js>
+    Build<
+        T,
+        L,
+        layer::Established,
+        (ChosenStreamSet, (Il, Ip, Ic, Ir, Ih, In, Iev), (Jl, Jp, Jr, Js)),
+    > for X
 where
     T: Choices<
         Host: HostChoices<
             T,
             Streams: StreamSetFamily<
-                Set<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>, StreamResetsOfParts<L>> = X,
+                Set<
+                    CloseCauseOf<T, L>,
+                    StreamIntentTicketOf<T, L>,
+                    StreamResetsOfParts<L>,
+                    SharedEventsOf<T, L>,
+                > = X,
             >,
         >,
     >,
@@ -698,6 +732,7 @@ where
             StreamIntentTicketOf<T, L>,
             StreamResetsOfParts<L>,
             Config = StreamSetConfigOf<T>,
+            Events = SharedEventsOf<T, L>,
         >,
     TransportParameterSlots: FlowControlParameterSlots<Jl>,
     TransportParameterSlots<L>:
@@ -707,7 +742,8 @@ where
         + GetAt<StreamSetConfig<StreamSetConfigOf<T>>, Ic>
         + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>
         + GetAt<ConnectionHandleCellOf<T, L>, Ih>
-        + GetAt<SendStrategyIntake<IntakeOf<T, L>>, In>,
+        + GetAt<SendStrategyIntake<IntakeOf<T, L>>, In>
+        + GetAt<ConnectionEventSink<EventsOf<T, L>>, Iev>,
 {
     fn build<'v>(
         parents: &mut ParentsOf<'v, T, L, layer::Established>,
@@ -732,6 +768,10 @@ where
             .get::<StreamSetConfig<StreamSetConfigOf<T>>, Ic>()
             .0
             .clone();
+        let events = parents
+            .get::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
+            .events()
+            .shared();
         let set = X::new(
             StreamSetFacts {
                 role: <T::Side as Side>::ROLE,
@@ -740,6 +780,7 @@ where
                 peer_reset_support,
             },
             config,
+            events,
         );
         let intake = parents
             .get::<SendStrategyIntake<IntakeOf<T, L>>, In>()
@@ -785,7 +826,12 @@ where
         Host: HostChoices<
             T,
             Streams: StreamSetFamily<
-                Set<CloseCauseOf<T, L>, StreamIntentTicketOf<T, L>, StreamResetsOfParts<L>> = X,
+                Set<
+                    CloseCauseOf<T, L>,
+                    StreamIntentTicketOf<T, L>,
+                    StreamResetsOfParts<L>,
+                    SharedEventsOf<T, L>,
+                > = X,
             >,
         >,
     >,

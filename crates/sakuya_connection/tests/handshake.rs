@@ -1865,6 +1865,133 @@ fn a_client_and_a_server_exchange_a_request_and_its_answer_on_a_stream() {
     assert_eq!(answer, b"pong");
 }
 
+/// The events of a stream on both sides: the client opens a bidirectional
+/// stream, writes a request and ends it; the server reads it to its end.
+/// Each side's parts leave idle, as this side's on the client and as the
+/// peer's on the server; the client's sending part ends in "Data Recvd" once
+/// the server acknowledged everything, the server's receiving part in "Data
+/// Read"; the bytes the client's writer moved to its transport are those the
+/// server's reader took from its own.
+#[test]
+fn both_sides_give_the_states_of_a_streams_parts_and_the_data_moved() {
+    use common::events::{SharedRecorded, shared_recorded};
+    use sakuya_connection::v1::events::{DataLocation, StreamStateChange};
+    use sakuya_stream::{receive::ReceiveStreamState, send::SendStreamState};
+
+    let clock = tls_clock();
+    let mut server_layer = None;
+    let mut client_stream = None;
+    let mut server_stream = None;
+    let mut request = Vec::new();
+    let mut read_end = false;
+    let delivered = |recorded: &[SharedRecorded]| {
+        recorded.iter().any(|event| {
+            matches!(
+                event,
+                SharedRecorded::StreamState {
+                    change: StreamStateChange::Sending {
+                        new: Some(SendStreamState::DataRecvd),
+                        ..
+                    },
+                    ..
+                }
+            )
+        })
+    };
+    handshake(client_engine(&clock, 1), &clock, |run| {
+        if client_stream.is_none()
+            && let Poll::Ready(layer) = poll_now(run.client_handle.established())
+        {
+            let layer = layer.expect("the client's handshake completed");
+            let (mut writer, reader) = layer.try_open_bi().expect("the server grants streams");
+            ready(writer.write_all_unpin(Bytes::from_static(b"request")))
+                .expect("the request is written");
+            writer.close().expect("the request ends");
+            client_stream = Some((writer, reader));
+        }
+        if server_layer.is_none()
+            && let Poll::Ready(layer) = poll_now(run.server_handle.established())
+        {
+            server_layer = Some(layer.expect("the server's handshake completed"));
+        }
+        if server_stream.is_none()
+            && let Some(layer) = &server_layer
+            && let Poll::Ready(stream) = poll_now(layer.accept_bi())
+        {
+            server_stream = Some(stream.expect("the client's stream is accepted"));
+        }
+        if let Some((_, reader)) = &mut server_stream
+            && !read_end
+        {
+            read_end = read_now!(reader, request);
+        }
+        read_end && delivered(&shared_recorded(Role::Client))
+    });
+    assert_eq!(request, b"request");
+
+    let client = shared_recorded(Role::Client);
+    let server = shared_recorded(Role::Server);
+    let has = |recorded: &[SharedRecorded], change: StreamStateChange, trigger: Initiator| {
+        recorded.iter().any(|event| {
+            matches!(
+                event,
+                SharedRecorded::StreamState { change: c, trigger: t, .. }
+                    if *c == change && *t == trigger
+            )
+        })
+    };
+    let made_sending = StreamStateChange::Sending {
+        old: None,
+        new: Some(SendStreamState::Ready),
+    };
+    let made_receiving = StreamStateChange::Receiving {
+        old: None,
+        new: Some(ReceiveStreamState::Recv),
+    };
+    assert!(has(&client, made_sending, Initiator::Local), "{client:?}");
+    assert!(has(&client, made_receiving, Initiator::Local), "{client:?}");
+    assert!(has(&server, made_sending, Initiator::Remote), "{server:?}");
+    assert!(
+        has(&server, made_receiving, Initiator::Remote),
+        "{server:?}"
+    );
+    assert!(delivered(&client), "{client:?}");
+    assert!(
+        server.iter().any(|event| matches!(
+            event,
+            SharedRecorded::StreamState {
+                change: StreamStateChange::Receiving {
+                    new: Some(ReceiveStreamState::DataRead),
+                    ..
+                },
+                trigger: Initiator::Local,
+                ..
+            }
+        )),
+        "{server:?}"
+    );
+    let moved = |recorded: &[SharedRecorded], from: DataLocation, to: DataLocation| -> u64 {
+        recorded
+            .iter()
+            .filter_map(|event| match event {
+                SharedRecorded::StreamDataMoved(moved) if moved.from == from && moved.to == to => {
+                    Some(moved.length)
+                }
+                _ => None,
+            })
+            .sum()
+    };
+    let length = b"request".len() as u64;
+    assert_eq!(
+        moved(&client, DataLocation::Application, DataLocation::Transport),
+        length
+    );
+    assert_eq!(
+        moved(&server, DataLocation::Transport, DataLocation::Application),
+        length
+    );
+}
+
 /// The client's strategy ends the intent of a stream's data when the
 /// client's link path changes role: the intent goes back to the stream,
 /// whose destination falls back and publishes it again at once, and the

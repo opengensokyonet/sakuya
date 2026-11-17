@@ -431,8 +431,9 @@ impl DatagramQueues<()> for ExhaustedQueues {
     type Config = ();
     type Handle = NoShare;
     type StrategyTicket = RecordingTicket;
+    type Events = crate::v1::events::NoEvents;
 
-    fn new(_: super::super::DatagramQueuesFacts, (): ()) -> Self {
+    fn new(_: super::super::DatagramQueuesFacts, (): (), _: crate::v1::events::NoEvents) -> Self {
         Self::default()
     }
 

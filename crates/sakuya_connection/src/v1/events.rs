@@ -26,13 +26,16 @@
 
 use core::time::Duration;
 
-use sakuya_stream::connection::ImmediateClose;
+use sakuya_stream::{
+    connection::ImmediateClose, receive::ReceiveStreamState, send::SendStreamState,
+};
 use sakuya_wire::{
     connection_id::ConnectionId,
     parameters::ParametersOf,
     v1::{
         encryption_level::EncryptionLevel,
         role::Role,
+        stream_id::StreamId,
         transport_parameters::{TransportParameterSlots, TransportParameterSpace},
     },
     version::Version,
@@ -53,7 +56,7 @@ pub trait ConnectionEvents<I>: Sized {
     type Config: Clone + Default + 'static;
 
     /// The handle the application's threads give their events through.
-    type Shared: SharedEvents + Clone;
+    type Shared: SharedEvents + Clone + 'static;
 
     /// The receiver of a connection that starts as `start` says, made from
     /// `config`. It is made with the connection and cannot fail: a receiver
@@ -140,10 +143,105 @@ impl SealObserver for () {
     fn sealing(&mut self, _: &PlainPacket<'_>) {}
 }
 
-/// What the application's threads give their events through.
+/// What the application's threads, and the driver where it changes what
+/// they share, give the events of streams and datagrams through.
+///
+/// Its methods take `&self`: the handle is cloned into the stream set and
+/// the datagram queues, and called under their locks. It reads the time of
+/// each event itself.
 pub trait SharedEvents {
+    /// Whether the handle records anything at all; `false` makes every
+    /// place that gives an event through it compile to nothing.
+    const ENABLED: bool;
+
     /// Whether the events are recorded.
     fn enabled(&self) -> bool;
+
+    /// A part of the stream `stream_id` changed its state as `change` says,
+    /// on the action of `trigger`.
+    fn stream_state(&self, stream_id: StreamId, change: StreamStateChange, trigger: Initiator);
+
+    /// Data of a stream moved between the application and the transport.
+    fn stream_data_moved(&self, moved: &StreamDataMoved);
+
+    /// The payload of a datagram, `length` bytes, moved from `from` to `to`.
+    fn datagram_data_moved(&self, length: usize, from: DataLocation, to: DataLocation);
+
+    /// The payload of a datagram, `length` bytes, was dropped as `dropped`
+    /// says.
+    fn datagram_dropped(&self, length: usize, dropped: DatagramDropped);
+}
+
+/// How a part of a stream changed its state ([`SharedEvents::stream_state`]).
+///
+/// `old` is `None` for a part just made, which was idle; `new` is `None` for
+/// a part whose state was reclaimed (qlog's `destroyed`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamStateChange {
+    /// The sending part.
+    Sending {
+        /// The state before.
+        old: Option<SendStreamState>,
+        /// The state after.
+        new: Option<SendStreamState>,
+    },
+    /// The receiving part.
+    Receiving {
+        /// The state before.
+        old: Option<ReceiveStreamState>,
+        /// The state after.
+        new: Option<ReceiveStreamState>,
+    },
+}
+
+/// Data of a stream that moved between the application and the transport
+/// ([`SharedEvents::stream_data_moved`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamDataMoved {
+    /// The stream.
+    pub stream_id: StreamId,
+    /// Where in the stream the data starts.
+    pub offset: u64,
+    /// How many bytes moved; zero for an end alone.
+    pub length: u64,
+    /// Where they were.
+    pub from: DataLocation,
+    /// Where they went.
+    pub to: DataLocation,
+    /// What ended with the move, if anything.
+    pub additional_info: Option<DataMovedAdditionalInfo>,
+}
+
+/// Where data of a stream or a datagram is (qlog's `DataLocation`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataLocation {
+    /// The application, above the connection.
+    Application,
+    /// The connection: its buffers and queues.
+    Transport,
+    /// The network: in packets sent or received.
+    Network,
+}
+
+/// What ended together with a move of stream data (qlog's
+/// `DataMovedAdditionalInfo`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataMovedAdditionalInfo {
+    /// The application ended the stream: its end moved to the transport.
+    FinSet,
+    /// The transport gave the application the peer's reset.
+    StreamReset,
+}
+
+/// Why the payload of a datagram was dropped
+/// ([`SharedEvents::datagram_dropped`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatagramDropped {
+    /// The send queue was full; it was dropped before it was sent.
+    SendQueueFull,
+    /// The receive queue was full, or the datagram larger than all of it;
+    /// it was dropped before the application read it.
+    ReceiveQueueFull,
 }
 
 /// What a connection's event receiver is made with.
@@ -349,10 +447,19 @@ impl<I, L> PacketEvents<I, L> for NoEvents {
 }
 
 impl SharedEvents for NoEvents {
+    const ENABLED: bool = false;
     #[inline(always)]
     fn enabled(&self) -> bool {
         false
     }
+    #[inline(always)]
+    fn stream_state(&self, _: StreamId, _: StreamStateChange, _: Initiator) {}
+    #[inline(always)]
+    fn stream_data_moved(&self, _: &StreamDataMoved) {}
+    #[inline(always)]
+    fn datagram_data_moved(&self, _: usize, _: DataLocation, _: DataLocation) {}
+    #[inline(always)]
+    fn datagram_dropped(&self, _: usize, _: DatagramDropped) {}
 }
 
 /// The connection node's component that keeps the event receiver `X`.

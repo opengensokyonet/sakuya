@@ -24,15 +24,19 @@ use crate::{
         StreamResetAt,
     },
     send_strategy::{IntentTicketResize, IntentTicketWithdraw},
-    v1::streams::send::StreamIntentHandle,
+    v1::{
+        events::{Initiator as EventInitiator, SharedEvents},
+        streams::send::StreamIntentHandle,
+    },
 };
 
 /// A RESET_STREAM_AT frame passes the checks of the streams' identity as
 /// RESET_STREAM does, and goes to the stream's receiving part.
-impl<Lc, K, P> ResetStreamAtSet<Lc, K, ReliableStreamResets>
-    for LockedStreamSet<Lc, K, ReliableStreamResets, P>
+impl<Lc, K, P, E> ResetStreamAtSet<Lc, K, ReliableStreamResets>
+    for LockedStreamSet<Lc, K, ReliableStreamResets, P, E>
 where
     P: Clone + PartialEq + Default + SendUrgency,
+    E: SharedEvents,
     OffsetMapStreamSendBuffer<Bytes, AtomicConnectionCreditReservation, MarkerOf<P>>:
         StreamSendBuffer<Bytes, AtomicConnectionCreditReservation, MarkerOf<P>>,
 {
@@ -53,6 +57,7 @@ where
             return Ok(());
         };
         let mut end = part.lock();
+        let before = self.shared.state_before(&*end);
         {
             let mut connection = lock(&self.shared.connection_receive);
             end.receiver
@@ -62,6 +67,8 @@ where
         end.sync_intents(id, publish);
         end.wake_reader();
         part.note_done(&end);
+        self.shared
+            .state_after(id, before, &*end, EventInitiator::Remote);
         drop(end);
         self.shared.reclaim_if_done(&part, id, publish);
         Ok(())
@@ -70,11 +77,12 @@ where
 
 /// A writer resets at a reliable size with what the peer's parameters
 /// allowed when the set was made.
-impl<Lc, K, P, H> StreamResetAt for LockedStreamSendShare<Lc, K, ReliableStreamResets, P, H>
+impl<Lc, K, P, H, E> StreamResetAt for LockedStreamSendShare<Lc, K, ReliableStreamResets, P, H, E>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
     H: StreamIntentHandle<P, K>,
+    E: SharedEvents,
 {
     fn reset_at(
         &mut self,

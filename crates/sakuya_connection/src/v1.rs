@@ -424,6 +424,10 @@ pub type EventsOf<T, L> = <HostOf<T> as HostChoices<T>>::Events<L>;
 /// choices `T` and the list of parts `L`.
 pub type EventsConfigOf<T, L> = <EventsOf<T, L> as events::ConnectionEvents<InstantOf<T>>>::Config;
 
+/// The handle the application's threads give the connection's events
+/// through, of the choices `T` and the list of parts `L`.
+pub type SharedEventsOf<T, L> = <EventsOf<T, L> as events::ConnectionEvents<InstantOf<T>>>::Shared;
+
 /// This endpoint's reason for closing a connection of the choices `T` and
 /// the list of parts `L`: the connection's error, the handshake's error,
 /// which holds the alert failure of the side's handshake engine, the

@@ -31,6 +31,14 @@
 //! «方向句柄Drop与终结策略»). Once the driver panicked, dropping changes
 //! nothing.
 //!
+//! The events of the streams ([`SharedEvents`]) are given here as on the
+//! driver's side: every operation, and dropping a share, gives the change of
+//! its part's state as this side's, under the part's lock. A write gives
+//! the data it took, a close the end of the stream, and a read the data it
+//! gave the application and, the first time, the peer's reset, as moves
+//! between the application and the transport; opening a stream gives its
+//! parts as made by this side.
+//!
 //! An operation, or dropping a share, that leaves the part done may
 //! reclaim the stream, as the driver's side does (see the [parent module's
 //! documentation](super)): the share keeps its part after that, and the
@@ -51,10 +59,11 @@ use nitori_io::{Read, ReadChunk};
 use sakuya_stream::{
     connection::{LayerEnd, LayerEndedError},
     receive::{
-        read::ReadError, read::ReadOutcome, stop::StopError, termination::ReceiveTerminationPolicy,
+        ReceiveStreamState, read::ReadError, read::ReadOutcome, stop::StopError,
+        termination::ReceiveTerminationPolicy,
     },
     send::{
-        SendTerminalState, StreamResetError,
+        SendEndState, SendTerminalState, StreamResetError,
         finish::{CloseError, ResetError},
         termination::SendTerminationPolicy,
         write::{FlushError, WriteError, WriteOutcome, WriteReport, WriteWait},
@@ -88,6 +97,10 @@ use crate::{
             },
             stream::{AllAcknowledgedError, StreamRead, StreamReader, StreamWrite, StreamWriter},
         },
+        events::{
+            DataLocation, DataMovedAdditionalInfo, Initiator as EventInitiator, NoEvents,
+            SharedEvents, StreamDataMoved,
+        },
         streams::{
             resets::StreamResets,
             send::{StreamIntent, StreamIntentHandle},
@@ -96,7 +109,7 @@ use crate::{
 };
 use sakuya_stream::{
     connection_send_credit::ConnectionSendFlowController,
-    receive::composition::DefaultReceiveComposition,
+    receive::composition::DefaultReceiveComposition, receive_buffer::StreamReceiveBuffer,
 };
 
 #[cfg(test)]
@@ -127,14 +140,15 @@ type ChunkOf =
 /// through. It cannot be cloned.
 ///
 /// [`LockedStreamSet`]: super::LockedStreamSet
-pub struct LockedStreamSendShare<Lc, K, Rs: StreamResets, P, H>
+pub struct LockedStreamSendShare<Lc, K, Rs: StreamResets, P, H, E = NoEvents>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
     H: StreamIntentHandle<P, K>,
+    E: SharedEvents,
 {
     part: SendingPart<Lc, K, Rs, P>,
-    pub(super) shared: Arc<StreamSetShare<Lc, K, Rs, P>>,
+    pub(super) shared: Arc<StreamSetShare<Lc, K, Rs, P, E>>,
     publish: H,
 }
 
@@ -147,42 +161,48 @@ where
 /// packets ([`StreamReader::received_zero_rtt`]).
 ///
 /// [`LockedStreamSet`]: super::LockedStreamSet
-pub struct LockedStreamReceiveShare<Lc, K, Rs: StreamResets, P, H, Ro>
+pub struct LockedStreamReceiveShare<Lc, K, Rs: StreamResets, P, H, Ro, E = NoEvents>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
     H: StreamIntentHandle<P, K>,
+    E: SharedEvents,
 {
     part: ReceivingPart<Lc, K, Rs, P>,
     stream_id: StreamId,
-    shared: Arc<StreamSetShare<Lc, K, Rs, P>>,
+    shared: Arc<StreamSetShare<Lc, K, Rs, P, E>>,
     publish: H,
     role: PhantomData<fn() -> Ro>,
 }
 
 /// Nothing of a share is pinned.
-impl<Lc, K, Rs: StreamResets, P, H> Unpin for LockedStreamSendShare<Lc, K, Rs, P, H>
+impl<Lc, K, Rs: StreamResets, P, H, E> Unpin for LockedStreamSendShare<Lc, K, Rs, P, H, E>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
     H: StreamIntentHandle<P, K>,
+    E: SharedEvents,
 {
 }
 
 /// Nothing of a share is pinned.
-impl<Lc, K, Rs: StreamResets, P, H, Ro> Unpin for LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro>
+impl<Lc, K, Rs: StreamResets, P, H, Ro, E> Unpin
+    for LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro, E>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
     H: StreamIntentHandle<P, K>,
+    E: SharedEvents,
 {
 }
 
-impl<Lc, K, Rs: StreamResets, P, H> core::fmt::Debug for LockedStreamSendShare<Lc, K, Rs, P, H>
+impl<Lc, K, Rs: StreamResets, P, H, E> core::fmt::Debug
+    for LockedStreamSendShare<Lc, K, Rs, P, H, E>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
     H: StreamIntentHandle<P, K>,
+    E: SharedEvents,
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("LockedStreamSendShare")
@@ -190,12 +210,13 @@ where
     }
 }
 
-impl<Lc, K, Rs: StreamResets, P, H, Ro> core::fmt::Debug
-    for LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro>
+impl<Lc, K, Rs: StreamResets, P, H, Ro, E> core::fmt::Debug
+    for LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro, E>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
     H: StreamIntentHandle<P, K>,
+    E: SharedEvents,
 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("LockedStreamReceiveShare")
@@ -204,11 +225,12 @@ where
     }
 }
 
-impl<Lc, K, Rs: StreamResets, P, H> LockedStreamSendShare<Lc, K, Rs, P, H>
+impl<Lc, K, Rs: StreamResets, P, H, E> LockedStreamSendShare<Lc, K, Rs, P, H, E>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
     H: StreamIntentHandle<P, K>,
+    E: SharedEvents,
 {
     /// Change the part with `change` under its lock, and bring its intents
     /// to what is due then; with the lock let go, reclaim the stream if it
@@ -223,10 +245,14 @@ where
             if let Some(marked) = self.shared.panic_end() {
                 return Err(LayerEndedError::new(marked.clone()));
             }
+            let before = self.shared.state_before(&*end);
             let result = change(&mut end);
             end.sync_intents(&self.publish);
             self.part.note_done(&end);
-            (result, end.sender.stream_id())
+            let id = end.sender.stream_id();
+            self.shared
+                .state_after(id, before, &*end, EventInitiator::Local);
+            (result, id)
         };
         self.shared.reclaim_if_done(&self.part, id, &self.publish);
         Ok(result)
@@ -234,11 +260,12 @@ where
 }
 
 /// The writer gives the stream up when it is dropped.
-impl<Lc, K, Rs: StreamResets, P, H> Drop for LockedStreamSendShare<Lc, K, Rs, P, H>
+impl<Lc, K, Rs: StreamResets, P, H, E> Drop for LockedStreamSendShare<Lc, K, Rs, P, H, E>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
     H: StreamIntentHandle<P, K>,
+    E: SharedEvents,
 {
     /// Once the driver panicked, nothing is given up: the part is not
     /// changed any more.
@@ -252,11 +279,12 @@ where
 
 /// The sending part's operations, under its lock; see the
 /// [module documentation](self).
-impl<Lc, K, Rs: StreamResets, P, H> StreamWrite for LockedStreamSendShare<Lc, K, Rs, P, H>
+impl<Lc, K, Rs: StreamResets, P, H, E> StreamWrite for LockedStreamSendShare<Lc, K, Rs, P, H, E>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
     H: StreamIntentHandle<P, K>,
+    E: SharedEvents,
 {
     type Parameters = P;
     type Destination = AnyActiveLinkPath;
@@ -273,7 +301,21 @@ where
         let marker = SendOptions::new(parameters.clone(), *destination);
         loop {
             let outcome = self.with_part(|end| {
+                let offset = self.shared.events().map(|_| end.sender.written_end());
                 let outcome = end.sender.write(input, &marker);
+                if let Some(offset) = offset
+                    && let Ok(WriteOutcome::Written(report)) = &outcome
+                    && report.new_bytes > VarInt::ZERO
+                {
+                    self.shared.data_moved(&StreamDataMoved {
+                        stream_id: end.sender.stream_id(),
+                        offset: offset.get(),
+                        length: report.new_bytes.get(),
+                        from: DataLocation::Application,
+                        to: DataLocation::Transport,
+                        additional_info: None,
+                    });
+                }
                 if let Ok(WriteOutcome::Wait(_)) = &outcome {
                     // the stream's limit or its policy holds it back: a
                     // MAX_STREAM_DATA, a STOP_SENDING or the layer's end
@@ -314,8 +356,30 @@ where
         }
     }
 
+    /// The end moves to the transport when the close ends a stream that
+    /// was open; closing again moves nothing.
     fn close(&mut self) -> Result<(), CloseError<Lc>> {
-        self.with_part(|end| end.sender.close())?
+        self.with_part(|end| {
+            let was_open = self
+                .shared
+                .events()
+                .map(|_| matches!(end.sender.end_state(), SendEndState::Open));
+            let closed = end.sender.close();
+            if was_open == Some(true)
+                && closed.is_ok()
+                && let SendEndState::Closed { final_size, .. } = end.sender.end_state()
+            {
+                self.shared.data_moved(&StreamDataMoved {
+                    stream_id: end.sender.stream_id(),
+                    offset: final_size.get(),
+                    length: 0,
+                    from: DataLocation::Application,
+                    to: DataLocation::Transport,
+                    additional_info: Some(DataMovedAdditionalInfo::FinSet),
+                });
+            }
+            closed
+        })?
     }
 
     fn reset(&mut self, code: ApplicationErrorCode) -> Result<(), ResetError<Lc>> {
@@ -357,11 +421,12 @@ where
     }
 }
 
-impl<Lc, K, Rs: StreamResets, P, H, Ro> LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro>
+impl<Lc, K, Rs: StreamResets, P, H, Ro, E> LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro, E>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
     H: StreamIntentHandle<P, K>,
+    E: SharedEvents,
 {
     /// Change the part with `change` under its lock; then, with the receive
     /// flow controller's lock taken under it, report what the stream
@@ -390,6 +455,7 @@ where
         if let Some(marked) = self.shared.panic_end() {
             return Err(LayerEndedError::new(marked.clone()));
         }
+        let before = self.shared.state_before(&*end);
         let result = change(&mut end);
         {
             let mut connection = lock(&self.shared.connection_receive);
@@ -405,11 +471,17 @@ where
         }
         end.sync_intents(self.stream_id, &self.publish);
         self.part.note_done(&end);
+        self.shared
+            .state_after(self.stream_id, before, &*end, EventInitiator::Local);
         Ok(result)
     }
 
     /// Read with `read`, which gives what the receiving part gives; keep
     /// the waker of `cx` when it has to wait.
+    ///
+    /// The data read moves from the transport to the application, from
+    /// where the reads had come; so does the peer's reset the first time a
+    /// read gives it, as it leaves the part in a state that keeps it.
     fn poll_read_with<R>(
         &mut self,
         cx: &mut Context<'_>,
@@ -417,16 +489,65 @@ where
             &mut ReceivingEnd<Lc, K, Rs, P>,
         ) -> Result<ReadOutcome<R>, ReadErrorOf<Lc, Rs>>,
     ) -> Poll<Result<ReadOutcome<R>, ReadErrorOf<Lc, Rs>>> {
-        self.with_part(|end| match read(end) {
-            Ok(ReadOutcome::Wait) => {
-                // a STREAM or RESET_STREAM frame, or the layer's end, wakes
-                // it, under this lock
-                end.reader = Some(cx.waker().clone());
-                Poll::Pending
+        self.with_part(|end| {
+            let before = self.read_start(end);
+            let result = read(end);
+            self.read_moved(end, before, &result);
+            match result {
+                Ok(ReadOutcome::Wait) => {
+                    // a STREAM or RESET_STREAM frame, or the layer's end,
+                    // wakes it, under this lock
+                    end.reader = Some(cx.waker().clone());
+                    Poll::Pending
+                }
+                other => Poll::Ready(other),
             }
-            other => Poll::Ready(other),
         })
         .unwrap_or_else(|ended| Poll::Ready(Err(ended.into())))
+    }
+
+    /// Where a read of `end` starts, and the state it starts in, read only
+    /// when the events are recorded; under the part's lock.
+    fn read_start(&self, end: &ReceivingEnd<Lc, K, Rs, P>) -> Option<(VarInt, ReceiveStreamState)> {
+        self.shared.events().map(|_| {
+            (
+                end.receiver.parts().delivered_end(),
+                end.receiver.receive_state(),
+            )
+        })
+    }
+
+    /// What a read of `end` that started as `before` says
+    /// ([`read_start`](Self::read_start)) and gave `result` moved to the
+    /// application: the data it delivered, or the peer's reset the first
+    /// time, when the read left the part in the state that keeps it.
+    fn read_moved<R>(
+        &self,
+        end: &ReceivingEnd<Lc, K, Rs, P>,
+        before: Option<(VarInt, ReceiveStreamState)>,
+        result: &Result<ReadOutcome<R>, ReadErrorOf<Lc, Rs>>,
+    ) {
+        let Some((offset, state)) = before else {
+            return;
+        };
+        let (length, additional_info) = match result {
+            Ok(ReadOutcome::Data(_)) => {
+                let delivered = end.receiver.parts().delivered_end();
+                (delivered.get().saturating_sub(offset.get()), None)
+            }
+            Err(ReadError::Reset { .. }) if end.receiver.receive_state() != state => {
+                (0, Some(DataMovedAdditionalInfo::StreamReset))
+            }
+            Ok(_) | Err(_) => return,
+        };
+        self.shared.data_moved(&StreamDataMoved {
+            stream_id: self.stream_id,
+            offset: offset.get(),
+            length,
+            from: DataLocation::Transport,
+            to: DataLocation::Application,
+            additional_info,
+        });
     }
 
     /// Read into `destination`; `Ok(0)` at the end of the stream or for no
@@ -460,11 +581,12 @@ where
 }
 
 /// The reader gives the reading up when it is dropped.
-impl<Lc, K, Rs: StreamResets, P, H, Ro> Drop for LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro>
+impl<Lc, K, Rs: StreamResets, P, H, Ro, E> Drop for LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro, E>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
     H: StreamIntentHandle<P, K>,
+    E: SharedEvents,
 {
     /// Once the driver panicked, nothing is given up: the part is not
     /// changed any more.
@@ -477,11 +599,13 @@ where
 }
 
 /// The receiving part's STOP, under its lock.
-impl<Lc, K, Rs: StreamResets, P, H, Ro> StreamRead for LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro>
+impl<Lc, K, Rs: StreamResets, P, H, Ro, E> StreamRead
+    for LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro, E>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
     H: StreamIntentHandle<P, K>,
+    E: SharedEvents,
 {
     type CloseCause = Lc;
 
@@ -491,12 +615,13 @@ where
 }
 
 /// A reader of the default set reads its receiving part.
-impl<Lc, K, Rs: StreamResets, P, H, Ro> Read
-    for StreamReader<LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro>>
+impl<Lc, K, Rs: StreamResets, P, H, Ro, E> Read
+    for StreamReader<LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro, E>>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
     H: StreamIntentHandle<P, K>,
+    E: SharedEvents,
 {
     type Error = ReadErrorOf<Lc, Rs>;
 
@@ -517,12 +642,13 @@ where
 
 /// A reader of the default set reads blocks of its receiving part, cut at
 /// the maximum.
-impl<Lc, K, Rs: StreamResets, P, H, Ro> ReadChunk
-    for StreamReader<LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro>>
+impl<Lc, K, Rs: StreamResets, P, H, Ro, E> ReadChunk
+    for StreamReader<LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro, E>>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
     H: StreamIntentHandle<P, K>,
+    E: SharedEvents,
 {
     type Chunk = ChunkOf;
 
@@ -564,12 +690,13 @@ where
 ///     reader.received_zero_rtt()
 /// }
 /// ```
-impl<Lc, K, Rs: StreamResets, P, H>
-    StreamReader<LockedStreamReceiveShare<Lc, K, Rs, P, H, role::Server>>
+impl<Lc, K, Rs: StreamResets, P, H, E>
+    StreamReader<LockedStreamReceiveShare<Lc, K, Rs, P, H, role::Server, E>>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
     H: StreamIntentHandle<P, K>,
+    E: SharedEvents,
 {
     /// Whether a STREAM frame of the stream arrived in a 0-RTT packet and
     /// was taken: data the client sent in 0-RTT, which an attacker may
@@ -604,13 +731,15 @@ enum OpenRefused<Lc> {
     Ended(LayerEnd<Lc>),
 }
 
-impl<Lc, K, Rs: StreamResets, P> StreamSetShare<Lc, K, Rs, P>
+impl<Lc, K, Rs: StreamResets, P, E> StreamSetShare<Lc, K, Rs, P, E>
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
+    E: SharedEvents,
 {
     /// Make the parts of `id`, a stream this side opens: a bidirectional
-    /// one gets both, a unidirectional one its sending part.
+    /// one gets both, a unidirectional one its sending part. Each part made
+    /// is an event of this side's.
     fn create_local_stream(
         &self,
         set: &mut SetState<Lc, K, Rs, P>,
@@ -622,7 +751,9 @@ where
             send_composition::<Rs, P>(&self.config),
             Arc::clone(&self.connection_send),
         );
-        let sending = Arc::new(LockedStreamEnd::new(SendingEnd::new(sender)));
+        let sending = SendingEnd::new(sender);
+        self.part_made(id, &sending, EventInitiator::Local);
+        let sending = Arc::new(LockedStreamEnd::new(sending));
         set.senders.insert(id, Arc::clone(&sending));
         let receiving = (id.directionality() == Directionality::Bidirectional).then(|| {
             let window = self.facts.receive_window(id);
@@ -633,7 +764,9 @@ where
                 ),
                 window,
             );
-            let receiving = Arc::new(LockedStreamEnd::new(ReceivingEnd::new(receiver)));
+            let receiving = ReceivingEnd::new(receiver);
+            self.part_made(id, &receiving, EventInitiator::Local);
+            let receiving = Arc::new(LockedStreamEnd::new(receiving));
             set.receivers.insert(id, Arc::clone(&receiving));
             receiving
         });
@@ -710,19 +843,20 @@ where
 /// The writer and reader of the parts `parts` of `id`, sharing `shared`
 /// and publishing through `publish`.
 #[allow(clippy::type_complexity)]
-fn handles<Lc, K, Rs: StreamResets, P, H, Ro>(
-    shared: &Arc<StreamSetShare<Lc, K, Rs, P>>,
+fn handles<Lc, K, Rs: StreamResets, P, H, Ro, E>(
+    shared: &Arc<StreamSetShare<Lc, K, Rs, P, E>>,
     publish: &H,
     id: StreamId,
     parts: FoundParts<Lc, K, Rs, P>,
 ) -> (
-    Option<StreamWriter<LockedStreamSendShare<Lc, K, Rs, P, H>, NoSendOptions>>,
-    Option<StreamReader<LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro>>>,
+    Option<StreamWriter<LockedStreamSendShare<Lc, K, Rs, P, H, E>, NoSendOptions>>,
+    Option<StreamReader<LockedStreamReceiveShare<Lc, K, Rs, P, H, Ro, E>>>,
 )
 where
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
     H: StreamIntentHandle<P, K>,
+    E: SharedEvents,
 {
     let (sending, receiving) = parts;
     let writer = sending.map(|part| {
@@ -746,23 +880,25 @@ where
 
 /// The share of a stream's sending part an established layer of the
 /// default set gives, publishing at the place `I` through the intake `N`.
-type SendShareOf<Lc, K, Rs, P, N, I> = LockedStreamSendShare<
+type SendShareOf<Lc, K, Rs, P, E, N, I> = LockedStreamSendShare<
     Lc,
     K,
     Rs,
     P,
     <N as SendIntentIntake<AnyActiveLinkPath>>::Handle<StreamIntent<P>, I>,
+    E,
 >;
 
 /// The share of a stream's receiving part, as [`SendShareOf`], on the side
 /// of the layer's selection `A`.
-type ReceiveShareOf<Lc, K, Rs, P, N, I, A> = LockedStreamReceiveShare<
+type ReceiveShareOf<Lc, K, Rs, P, E, N, I, A> = LockedStreamReceiveShare<
     Lc,
     K,
     Rs,
     P,
     <N as SendIntentIntake<AnyActiveLinkPath>>::Handle<StreamIntent<P>, I>,
     <A as LayerSelection>::Role,
+    E,
 >;
 
 /// Opening needs both parts of a bidirectional stream and the sending part
@@ -778,18 +914,19 @@ fn expect_part<X>(part: Option<X>) -> X {
 /// side's streams through the set's handle, version 1's share at the place
 /// `Is` among the shares `Sh`, and publishes their intents at the place `I`
 /// through the intake `N`.
-impl<Sh, Lc, K, Rs: StreamResets, P, N, A, Is, I> OpenStreams<(Is, I)>
+impl<Sh, Lc, K, Rs: StreamResets, P, E, N, A, Is, I> OpenStreams<(Is, I)>
     for EstablishedLayerHandle<Sh, N, A, Lc>
 where
-    Sh: FindHandleShare<crate::v1::Part, Is, Found = LockedStreamSetHandle<Lc, K, Rs, P>>,
+    Sh: FindHandleShare<crate::v1::Part, Is, Found = LockedStreamSetHandle<Lc, K, Rs, P, E>>,
+    E: SharedEvents,
     A: LayerSelection,
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
     N: SendIntentIntake<AnyActiveLinkPath> + SharedPublishTo<StreamIntent<P>, AnyActiveLinkPath, I>,
     N::Handle<StreamIntent<P>, I>: StreamIntentHandle<P, K>,
 {
-    type SendShare = SendShareOf<Lc, K, Rs, P, N, I>;
-    type ReceiveShare = ReceiveShareOf<Lc, K, Rs, P, N, I, A>;
+    type SendShare = SendShareOf<Lc, K, Rs, P, E, N, I>;
+    type ReceiveShare = ReceiveShareOf<Lc, K, Rs, P, E, N, I, A>;
     type CloseCause = Lc;
 
     fn open_bi(
@@ -829,7 +966,7 @@ where
             match shared.open_local(Directionality::Unidirectional, &publish, Some(cx.waker())) {
                 Ok((id, parts)) => {
                     let (writer, _) =
-                        handles::<_, _, _, _, _, A::Role>(shared, &publish, id, parts);
+                        handles::<_, _, _, _, _, A::Role, _>(shared, &publish, id, parts);
                     Poll::Ready(Ok(expect_part(writer)))
                 }
                 Err(OpenRefused::AtLimit) => Poll::Pending,
@@ -866,7 +1003,7 @@ where
         let shared = &self.shares.find().shared;
         match shared.open_local(Directionality::Unidirectional, &publish, None) {
             Ok((id, parts)) => {
-                let (writer, _) = handles::<_, _, _, _, _, A::Role>(shared, &publish, id, parts);
+                let (writer, _) = handles::<_, _, _, _, _, A::Role, _>(shared, &publish, id, parts);
                 Ok(expect_part(writer))
             }
             Err(OpenRefused::AtLimit) => Err(TryOpenStreamError::AtLimit),
@@ -878,18 +1015,19 @@ where
 /// The handle of an established layer of the default set accepts the
 /// peer's streams from the set's queues, in the order their first frames
 /// arrived; the places are as for opening.
-impl<Sh, Lc, K, Rs: StreamResets, P, N, A, Is, I> AcceptStreams<(Is, I)>
+impl<Sh, Lc, K, Rs: StreamResets, P, E, N, A, Is, I> AcceptStreams<(Is, I)>
     for EstablishedLayerHandle<Sh, N, A, Lc>
 where
-    Sh: FindHandleShare<crate::v1::Part, Is, Found = LockedStreamSetHandle<Lc, K, Rs, P>>,
+    Sh: FindHandleShare<crate::v1::Part, Is, Found = LockedStreamSetHandle<Lc, K, Rs, P, E>>,
+    E: SharedEvents,
     A: LayerSelection,
     K: IntentTicketResize + IntentTicketWithdraw,
     P: Clone + PartialEq + Default + SendUrgency,
     N: SendIntentIntake<AnyActiveLinkPath> + SharedPublishTo<StreamIntent<P>, AnyActiveLinkPath, I>,
     N::Handle<StreamIntent<P>, I>: StreamIntentHandle<P, K>,
 {
-    type SendShare = SendShareOf<Lc, K, Rs, P, N, I>;
-    type ReceiveShare = ReceiveShareOf<Lc, K, Rs, P, N, I, A>;
+    type SendShare = SendShareOf<Lc, K, Rs, P, E, N, I>;
+    type ReceiveShare = ReceiveShareOf<Lc, K, Rs, P, E, N, I, A>;
     type CloseCause = Lc;
 
     fn accept_bi(
