@@ -1742,6 +1742,75 @@ fn a_stream_intent_the_strategy_ends_is_published_again_and_its_data_arrives() {
     assert_eq!(read, b"hello");
 }
 
+/// Over the tests' in-memory link, the server grants the client four
+/// bidirectional streams, and the client opens ten, one after the other,
+/// each with a request and its end, each answered with its end. A stream
+/// the server read to its end and whose answer the client acknowledged is
+/// reclaimed, and the server's MAX_STREAMS lets the client open the next
+/// (RFC 9000 §4.6): without it, the fifth would wait for good.
+#[test]
+fn a_client_opens_more_streams_than_first_granted_as_the_server_reclaims_finished_ones() {
+    const STREAMS: usize = 10;
+    let clock = tls_clock();
+    let mut server_layer = None;
+    let mut client_stream = None;
+    let mut server_streams = Vec::new();
+    let mut finished = 0;
+    handshake(client_engine(&clock, 1), &clock, |run| {
+        let Poll::Ready(Ok(client)) = poll_now(run.client_handle.established()) else {
+            return false;
+        };
+        if server_layer.is_none()
+            && let Poll::Ready(layer) = poll_now(run.server_handle.established())
+        {
+            server_layer = Some(layer.expect("the server's handshake completed"));
+        }
+        if client_stream.is_none() && finished < STREAMS {
+            match client.try_open_bi() {
+                Ok((mut writer, reader)) => {
+                    ready(writer.write_all_unpin(Bytes::from_static(b"ping")))
+                        .expect("the request is written");
+                    writer.close().expect("the request ends");
+                    client_stream = Some((writer, reader, Vec::new()));
+                }
+                // the server has not granted more yet
+                Err(TryOpenStreamError::AtLimit) => {}
+                Err(error) => panic!("the client opens a stream: {error:?}"),
+            }
+        }
+        if let Some(layer) = &server_layer {
+            while let Poll::Ready(stream) = poll_now(layer.accept_bi()) {
+                let (writer, reader) = stream.expect("the client's stream is accepted");
+                server_streams.push((writer, reader, Vec::new(), false));
+            }
+        }
+        for (writer, reader, request, answered) in &mut server_streams {
+            if !*answered && read_now!(reader, *request) {
+                assert_eq!(request, b"ping");
+                ready(writer.write_all_unpin(Bytes::from_static(b"pong")))
+                    .expect("the answer is written");
+                writer.close().expect("the answer ends");
+                *answered = true;
+            }
+        }
+        let answered = match &mut client_stream {
+            Some((_, reader, answer)) => read_now!(reader, *answer),
+            None => false,
+        };
+        if answered {
+            let (_, _, answer) = client_stream.take().expect("a stream");
+            assert_eq!(answer, b"pong");
+            finished += 1;
+        }
+        finished == STREAMS
+    });
+    assert_eq!(
+        finished, STREAMS,
+        "the client finished every stream within 3 s"
+    );
+    assert_eq!(server_streams.len(), STREAMS);
+}
+
 /// Over the tests' in-memory link, the server answers with as much as the
 /// client lets it send on the stream at once. Once the server has processed
 /// a Handshake packet the client's address is validated (RFC 9000 §8.1), so

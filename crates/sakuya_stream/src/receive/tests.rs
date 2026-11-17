@@ -38,6 +38,7 @@ mod completion;
 mod order;
 mod read;
 mod stop;
+mod terminal;
 mod violation;
 
 /// A termination policy that answers each event with a closure.

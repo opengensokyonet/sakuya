@@ -30,6 +30,12 @@
 //! parts' termination policies decide what follows (streams.md
 //! «方向句柄Drop与终结策略»). Once the driver panicked, dropping changes
 //! nothing.
+//!
+//! An operation, or dropping a share, that leaves the part done may
+//! reclaim the stream, as the driver's side does (see the [parent module's
+//! documentation](super)): the share keeps its part after that, and the
+//! part keeps only its last result — a reader returns the same end or
+//! error again, a writer reports that the stream was closed or reset.
 
 use core::{
     future::{Future, poll_fn, ready},
@@ -205,18 +211,24 @@ where
     H: StreamIntentHandle<P, K>,
 {
     /// Change the part with `change` under its lock, and bring its intents
-    /// to what is due then; once the driver panicked, the end it marked,
-    /// and nothing changes.
+    /// to what is due then; with the lock let go, reclaim the stream if it
+    /// is done (`StreamSetShare::reclaim_if_done`). Once the driver
+    /// panicked, the end it marked, and nothing changes.
     pub(super) fn with_part<R>(
         &self,
         change: impl FnOnce(&mut SendingEnd<Lc, K, Rs, P>) -> R,
     ) -> Result<R, LayerEndedError<Lc>> {
-        let mut end = self.part.lock();
-        if let Some(marked) = self.shared.panic_end() {
-            return Err(LayerEndedError::new(marked.clone()));
-        }
-        let result = change(&mut end);
-        end.sync_intents(&self.publish);
+        let (result, id) = {
+            let mut end = self.part.lock();
+            if let Some(marked) = self.shared.panic_end() {
+                return Err(LayerEndedError::new(marked.clone()));
+            }
+            let result = change(&mut end);
+            end.sync_intents(&self.publish);
+            self.part.note_done(&end);
+            (result, end.sender.stream_id())
+        };
+        self.shared.reclaim_if_done(&self.part, id, &self.publish);
         Ok(result)
     }
 }
@@ -354,9 +366,23 @@ where
     /// Change the part with `change` under its lock; then, with the receive
     /// flow controller's lock taken under it, report what the stream
     /// released, and bring the intents of the connection's receiving and of
-    /// the part to what is due. Once the driver panicked, the end it
-    /// marked, and nothing changes.
+    /// the part to what is due. With both locks let go, reclaim the stream
+    /// if it is done (`StreamSetShare::reclaim_if_done`). Once the driver
+    /// panicked, the end it marked, and nothing changes.
     fn with_part<R>(
+        &self,
+        change: impl FnOnce(&mut ReceivingEnd<Lc, K, Rs, P>) -> R,
+    ) -> Result<R, LayerEndedError<Lc>> {
+        let result = self.change_part(change)?;
+        self.shared
+            .reclaim_if_done(&self.part, self.stream_id, &self.publish);
+        Ok(result)
+    }
+
+    /// What [`with_part`](Self::with_part) does under the part's lock: the
+    /// change, the report of what was released, the intents, and the mark
+    /// of whether the part is done.
+    fn change_part<R>(
         &self,
         change: impl FnOnce(&mut ReceivingEnd<Lc, K, Rs, P>) -> R,
     ) -> Result<R, LayerEndedError<Lc>> {
@@ -378,6 +404,7 @@ where
             connection.sync_intents(&self.publish);
         }
         end.sync_intents(self.stream_id, &self.publish);
+        self.part.note_done(&end);
         Ok(result)
     }
 

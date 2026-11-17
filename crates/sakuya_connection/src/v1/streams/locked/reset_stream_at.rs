@@ -61,6 +61,9 @@ where
         }
         end.sync_intents(id, publish);
         end.wake_reader();
+        part.note_done(&end);
+        drop(end);
+        self.shared.reclaim_if_done(&part, id, publish);
         Ok(())
     }
 }

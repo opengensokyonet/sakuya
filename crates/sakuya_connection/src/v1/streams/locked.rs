@@ -57,12 +57,32 @@
 //! parts; each of the others gets them when its own first frame arrives,
 //! and then enters the queue of streams to accept. A late frame of a stream
 //! whose state was reclaimed is ignored.
+//!
+//! A stream is reclaimed once each part it has is done: its sending part is
+//! in "Data Recvd" or "Reset Recvd", and its receiving part owes the
+//! protocol nothing more and its reader read the end or the reset, or was
+//! dropped ([`StreamReceiver::is_terminal`]); a unidirectional stream has
+//! one part only. Whoever changes a part — the driver's side with a frame,
+//! a supply, an acknowledgment or a loss, the application's with an
+//! operation or by dropping its handle — records under the part's lock
+//! whether it is done, in a mark beside the lock that only turns from false
+//! to true; with the part's lock let go, it takes the set's lock and, if
+//! the marks of every part of the stream are set, takes the parts out of
+//! the tables and records the reclaim with the ledger, which makes a
+//! MAX_STREAMS due for a stream of the peer (RFC 9000 §4.6). The set's
+//! lock only reads the marks, so it still takes no part's lock. The
+//! handles of a reclaimed stream keep their parts, which hold only their
+//! last result. Nothing is reclaimed once the layer ended or the driver
+//! panicked.
 
 use core::task::Waker;
 use std::{
     collections::{HashMap, VecDeque},
     fmt,
-    sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError},
+    sync::{
+        Arc, Mutex, MutexGuard, OnceLock, PoisonError,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use bytes::Bytes;
@@ -324,14 +344,22 @@ pub struct LockedStreamSetConfig {
 
 /// One part of one stream, under a lock of its own; `X` is the sending or
 /// the receiving part, with the tickets of the intents of its frames.
+///
+/// Beside the lock it keeps whether the part was found done — its protocol
+/// duties over and the application's last result taken or given up — which
+/// only turns from false to true: whoever changes the part records it under
+/// the part's lock, and the set reads it under the set's lock without
+/// taking the part's.
 pub struct LockedStreamEnd<X> {
     end: Mutex<X>,
+    done: AtomicBool,
 }
 
 impl<X> LockedStreamEnd<X> {
     fn new(end: X) -> Self {
         Self {
             end: Mutex::new(end),
+            done: AtomicBool::new(false),
         }
     }
 
@@ -341,6 +369,30 @@ impl<X> LockedStreamEnd<X> {
     pub fn lock(&self) -> MutexGuard<'_, X> {
         lock(&self.end)
     }
+
+    /// Whether the part was found done; read without the part's lock.
+    fn is_done(&self) -> bool {
+        self.done.load(Ordering::Acquire)
+    }
+
+    /// Record whether the part is done, `end` being what its lock holds:
+    /// called under that lock after a change, before the lock is let go.
+    fn note_done(&self, end: &X)
+    where
+        X: PartDone,
+    {
+        if end.is_done() {
+            self.done.store(true, Ordering::Release);
+        }
+    }
+}
+
+/// A part of a stream that tells whether it is done: its protocol duties
+/// are over and the application has its last result of it, or gave it up.
+/// Once done, a part stays done, and none of its frames is due any more.
+trait PartDone {
+    /// Whether the part is done.
+    fn is_done(&self) -> bool;
 }
 
 impl<X> fmt::Debug for LockedStreamEnd<X> {
@@ -845,6 +897,14 @@ where
     }
 }
 
+/// A sending part is done in "Data Recvd" or "Reset Recvd" (RFC 9000
+/// §3.1): what it sent, its FIN or its reset, was acknowledged.
+impl<Lc, K, Rs: StreamResets, P> PartDone for SendingEnd<Lc, K, Rs, P> {
+    fn is_done(&self) -> bool {
+        self.sender.terminal_state().is_some()
+    }
+}
+
 /// The STREAM_DATA_BLOCKED frame of `stream_id` at `limit`.
 fn stream_data_blocked_frame(stream_id: StreamId, limit: VarInt) -> StreamDataBlockedFrame {
     StreamDataBlockedFrame::new(
@@ -1019,6 +1079,15 @@ where
             forget_ticket(&mut self.max_stream_data);
         }
         Supplied::Open(packet)
+    }
+}
+
+/// A receiving part is done when its receiver is terminal
+/// ([`StreamReceiver::is_terminal`]): everything the peer owes was received,
+/// and its reader read the end or the reset, or was dropped.
+impl<Lc, K, Rs: StreamResets, P> PartDone for ReceivingEnd<Lc, K, Rs, P> {
+    fn is_done(&self) -> bool {
+        self.receiver.is_terminal()
     }
 }
 
@@ -1219,6 +1288,47 @@ where
             .is_none()
             .then(|| self.connection.data_blocked_signal.wanted())
             .flatten()
+    }
+
+    /// Reclaim the stream `id` if each part it has is done: its parts
+    /// leave the tables and the ledger records the reclaim, which lets the
+    /// peer open one more stream of the type when the stream is the peer's.
+    /// Whether a part is done is read from the mark beside its lock
+    /// ([`LockedStreamEnd::is_done`]), without taking the lock. Nothing is
+    /// reclaimed once the layer ended, nor a stream reclaimed already.
+    /// Whether it was reclaimed now.
+    fn reclaim_if_done(&mut self, id: StreamId) -> bool {
+        if self.end.is_some() {
+            return false;
+        }
+        let sending = self.senders.get(&id);
+        let receiving = self.receivers.get(&id);
+        // invariant: a stream gets every part it has when it is created, and
+        // the parts leave the tables together
+        debug_assert!(
+            id.directionality() == Directionality::Unidirectional
+                || sending.is_some() == receiving.is_some(),
+            "a bidirectional stream {id} has one part in the tables"
+        );
+        if sending.is_none() && receiving.is_none() {
+            // reclaimed already, by whoever saw both parts done first
+            return false;
+        }
+        if !sending.is_none_or(|part| part.is_done())
+            || !receiving.is_none_or(|part| part.is_done())
+        {
+            return false;
+        }
+        self.senders.remove(&id);
+        self.receivers.remove(&id);
+        let reclaimed = self.ledger.reclaim(id);
+        // invariant: a stream in the tables was opened and created, and is
+        // reclaimed only here, when it leaves them
+        debug_assert!(
+            reclaimed.is_ok(),
+            "stream {id} is reclaimed once: {reclaimed:?}"
+        );
+        true
     }
 
     /// Bring the intents of the connection's frames under the set's lock
@@ -1431,7 +1541,9 @@ where
     }
 
     /// Change the sending part of `id` with `change`, under its own lock,
-    /// and bring its intents to what is due then.
+    /// and bring its intents to what is due then; with the lock let go,
+    /// reclaim the stream if it is done
+    /// ([`reclaim_if_done`](Self::reclaim_if_done)).
     fn with_sender<H: StreamIntentHandle<P, K>>(
         &self,
         id: StreamId,
@@ -1439,9 +1551,13 @@ where
         change: impl FnOnce(&mut SendingEnd<Lc, K, Rs, P>),
     ) {
         if let Some(part) = self.sender_of(id) {
-            let mut end = part.lock();
-            change(&mut end);
-            end.sync_intents(publish);
+            {
+                let mut end = part.lock();
+                change(&mut end);
+                end.sync_intents(publish);
+                part.note_done(&end);
+            }
+            self.reclaim_if_done(&part, id, publish);
         }
     }
 
@@ -1454,10 +1570,39 @@ where
         change: impl FnOnce(&mut ReceivingEnd<Lc, K, Rs, P>),
     ) {
         if let Some(part) = self.receiver_of(id) {
-            let mut end = part.lock();
-            change(&mut end);
-            end.sync_intents(id, publish);
+            {
+                let mut end = part.lock();
+                change(&mut end);
+                end.sync_intents(id, publish);
+                part.note_done(&end);
+            }
+            self.reclaim_if_done(&part, id, publish);
         }
+    }
+
+    /// Reclaim the stream `id` if each part it has is done, `changed` being
+    /// the part of it just changed; under the set's lock, taken here, and
+    /// with the MAX_STREAMS it makes due published.
+    ///
+    /// Called by whoever changed a part of the stream, the driver's side or
+    /// the application's, once it let the part's lock go and recorded
+    /// whether the part is done ([`LockedStreamEnd::note_done`]): the set's
+    /// lock is not taken while `changed` is not done, as the stream cannot
+    /// be reclaimed then. When both parts of a stream become done, by two
+    /// changes that may run at once, whichever of the two takes the set's
+    /// lock later finds both done: each part's mark is set before its
+    /// changer takes the set's lock, and the set's lock orders the two.
+    /// Once the driver panicked, nothing is reclaimed.
+    fn reclaim_if_done<X, H>(&self, changed: &LockedStreamEnd<X>, id: StreamId, publish: &H)
+    where
+        H: StreamIntentHandle<P, K>,
+    {
+        if !changed.is_done() || self.panic_end().is_some() {
+            return;
+        }
+        self.with_set(publish, |set| {
+            set.reclaim_if_done(id);
+        });
     }
 
     /// Change what the set's lock holds with `change`, and bring the
@@ -1573,6 +1718,9 @@ where
         }
         end.sync_intents(id, publish);
         end.wake_reader();
+        part.note_done(&end);
+        drop(end);
+        self.shared.reclaim_if_done(&part, id, publish);
         Ok(())
     }
 
@@ -1600,6 +1748,9 @@ where
         }
         end.sync_intents(id, publish);
         end.wake_reader();
+        part.note_done(&end);
+        drop(end);
+        self.shared.reclaim_if_done(&part, id, publish);
         Ok(())
     }
 
@@ -1622,6 +1773,9 @@ where
                 .on_stop_sending(frame.application_error_code().get());
             end.sync_intents(publish);
             end.wake_writer();
+            part.note_done(&end);
+            drop(end);
+            self.shared.reclaim_if_done(&part, id, publish);
         }
         Ok(())
     }
@@ -1665,6 +1819,9 @@ where
                 .on_max_stream_data(frame.maximum_stream_data().get());
             end.sync_intents(publish);
             end.wake_writer();
+            part.note_done(&end);
+            drop(end);
+            self.shared.reclaim_if_done(&part, id, publish);
         }
         Ok(())
     }
@@ -1722,6 +1879,9 @@ where
             end.receiver
                 .on_stream_data_blocked(frame.maximum_stream_data().get());
             end.sync_intents(id, publish);
+            part.note_done(&end);
+            drop(end);
+            self.shared.reclaim_if_done(&part, id, publish);
         }
         Ok(())
     }
@@ -1803,6 +1963,9 @@ where
         let mut end = part.lock();
         let supplied = end.write_stream(packet);
         end.sync_intents(publish);
+        part.note_done(&end);
+        drop(end);
+        self.shared.reclaim_if_done(&part, stream_id, publish);
         supplied
     }
 
@@ -1825,6 +1988,9 @@ where
         let mut end = part.lock();
         let supplied = end.write_reset_stream(packet);
         end.sync_intents(publish);
+        part.note_done(&end);
+        drop(end);
+        self.shared.reclaim_if_done(&part, stream_id, publish);
         supplied
     }
 
@@ -1847,6 +2013,9 @@ where
         let mut end = part.lock();
         let supplied = end.write_stop_sending(stream_id, packet);
         end.sync_intents(stream_id, publish);
+        part.note_done(&end);
+        drop(end);
+        self.shared.reclaim_if_done(&part, stream_id, publish);
         supplied
     }
 
@@ -1897,6 +2066,9 @@ where
         let mut end = part.lock();
         let supplied = end.write_max_stream_data(stream_id, packet);
         end.sync_intents(stream_id, publish);
+        part.note_done(&end);
+        drop(end);
+        self.shared.reclaim_if_done(&part, stream_id, publish);
         supplied
     }
 
@@ -1980,6 +2152,9 @@ where
         let mut end = part.lock();
         let supplied = end.write_stream_data_blocked(packet);
         end.sync_intents(publish);
+        part.note_done(&end);
+        drop(end);
+        self.shared.reclaim_if_done(&part, stream_id, publish);
         supplied
     }
 

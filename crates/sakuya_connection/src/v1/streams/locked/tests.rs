@@ -539,6 +539,10 @@ enum Read {
         stream: StreamId,
         limit: VarInt,
     },
+    MaxStreams {
+        directionality: Directionality,
+        limit: StreamCount,
+    },
     Other,
 }
 
@@ -676,6 +680,10 @@ where
             FrameRun::MaxStreamData(frame) => Read::MaxStreamData {
                 stream: frame.stream_id().get(),
                 limit: frame.maximum_stream_data().get(),
+            },
+            FrameRun::MaxStreams(frame) => Read::MaxStreams {
+                directionality: frame.directionality(),
+                limit: frame.maximum_streams().get(),
             },
             _ => Read::Other,
         });
@@ -1022,6 +1030,303 @@ fn nothing_is_written_once_the_layer_ended() {
     assert_eq!(
         written(&mut set, StreamIntentKey::Stream(id(1)), 100, false),
         []
+    );
+}
+
+// ---- reclaiming a stream ----
+
+impl<Lc, K, Rs: StreamResets, P> SendingEnd<Lc, K, Rs, P>
+where
+    K: IntentTicketResize + IntentTicketWithdraw,
+    P: Clone + PartialEq + Default + SendUrgency,
+{
+    /// Send the data waiting and the FIN, if due, as `write_stream` writes
+    /// them into packets, but without packets; the summaries of what was
+    /// sent, for a test to acknowledge.
+    pub(in crate::v1::streams::locked) fn send_all(&mut self) -> Vec<StreamSummary> {
+        let stream_id = self.sender.stream_id();
+        let mut sent = Vec::new();
+        while let Some(selected) = self.sender.select(&AnyActiveLinkPath, usize::MAX) {
+            let len = selected.bytes.len();
+            let end = VarInt::try_from(selected.offset.get() + len as u64).expect("a short stream");
+            let fin = self.fin_due() == Some(end);
+            self.sender
+                .expose_usage_through(end)
+                .expect("selected data is exposed");
+            if fin {
+                self.fin_exposed();
+            }
+            sent.push(StreamSummary {
+                stream_id,
+                offset: selected.offset,
+                len,
+                fin,
+            });
+        }
+        if let Some(final_size) = self.fin_due() {
+            self.fin_exposed();
+            sent.push(StreamSummary {
+                stream_id,
+                offset: final_size,
+                len: 0,
+                fin: true,
+            });
+        }
+        sent
+    }
+}
+
+/// Change the receiving part of `stream` as the application's reader does:
+/// under the part's lock, bring its intents up to date and mark whether it
+/// is done; with the lock let go, reclaim the stream if it is done.
+fn as_reader(
+    set: &TestSet,
+    stream: u32,
+    change: impl FnOnce(&mut ReceivingEnd<(), TestTicket, Rfc9000StreamResets, Urgency>),
+) {
+    let part = receiver(set, stream).expect("built");
+    {
+        let mut end = part.lock();
+        change(&mut end);
+        end.sync_intents(id(stream), &publish());
+        part.note_done(&end);
+    }
+    set.shared.reclaim_if_done(&part, id(stream), &publish());
+}
+
+/// Change the sending part of `stream` as the application's writer does, as
+/// [`as_reader`] the receiving part.
+fn as_writer(
+    set: &TestSet,
+    stream: u32,
+    change: impl FnOnce(&mut SendingEnd<(), TestTicket, Rfc9000StreamResets, Urgency>),
+) {
+    let part = sender(set, stream).expect("built");
+    {
+        let mut end = part.lock();
+        change(&mut end);
+        end.sync_intents(&publish());
+        part.note_done(&end);
+    }
+    set.shared.reclaim_if_done(&part, id(stream), &publish());
+}
+
+/// Read `stream` to its end, as the application's reader does.
+fn read_to_end(set: &TestSet, stream: u32) {
+    as_reader(set, stream, |end| {
+        loop {
+            match end.receiver.read_chunk(core::num::NonZeroUsize::MAX) {
+                Ok(sakuya_stream::receive::read::ReadOutcome::Data(_)) => {}
+                Ok(sakuya_stream::receive::read::ReadOutcome::End) => break,
+                other => panic!("the stream is read to its end: {other:?}"),
+            }
+        }
+    });
+}
+
+/// Accept the peer's stream `stream`: it leaves the queue to accept.
+fn accept(set: &TestSet, stream: u32) {
+    let mut state = lock(&set.shared.set);
+    state
+        .accept_bidirectional
+        .retain(|&queued| queued != id(stream));
+    state
+        .accept_unidirectional
+        .retain(|&queued| queued != id(stream));
+}
+
+/// Write `len` bytes into `stream` and close it, as the application's
+/// writer does, and send them and the FIN; the summaries of what was sent.
+fn answer(set: &TestSet, stream: u32, len: usize) -> Vec<StreamSummary> {
+    as_writer(set, stream, |end| {
+        end.sender
+            .write(&mut Bytes::from(vec![9; len]), &options())
+            .expect("within the limits");
+        end.sender.close().expect("open");
+    });
+    let part = sender(set, stream).expect("built");
+    let mut end = part.lock();
+    let sent = end.send_all();
+    end.sync_intents(&publish());
+    sent
+}
+
+/// Acknowledge what `sent` summarizes, as the driver does.
+fn acknowledge(set: &mut TestSet, sent: Vec<StreamSummary>) {
+    for summary in sent {
+        set.on_frame_delivered(&publish(), StreamSetFrameSummary::Stream(summary));
+    }
+}
+
+fn is_reclaimed(set: &TestSet, stream: u32) -> bool {
+    let reclaimed = lock(&set.shared.set).ledger.is_reclaimed(id(stream));
+    let in_tables = receiver(set, stream).is_some() || sender(set, stream).is_some();
+    assert_eq!(
+        reclaimed, !in_tables,
+        "stream {stream} leaves the tables when it is reclaimed"
+    );
+    reclaimed
+}
+
+/// The intent of the MAX_STREAMS frame of `directionality` at `limit`.
+fn max_streams_intent(directionality: Directionality, limit: u64) -> Event {
+    Event::Published(StreamIntent::MaxStreams {
+        directionality,
+        len: max_streams_frame(directionality, count(limit)).encoded_len(),
+    })
+}
+
+/// The peer's bidirectional stream 1 carries a request with its end and an
+/// answer with its end: once the request is read and the answer
+/// acknowledged, the stream is reclaimed, and the peer may open one stream
+/// more than the three it was granted (RFC 9000 §4.6). Late frames of the
+/// stream are ignored.
+#[test]
+fn a_peer_stream_is_reclaimed_once_its_request_is_read_and_its_answer_acknowledged() {
+    let mut set = client_set();
+    set.on_stream_frame(
+        &publish(),
+        EncryptionLevel::OneRtt,
+        stream_frame(1, 4, true),
+    )
+    .expect("stream 1");
+    accept(&set, 1);
+    read_to_end(&set, 1);
+    assert!(!is_reclaimed(&set, 1), "the answer is not acknowledged");
+    let sent = answer(&set, 1, 5);
+    events();
+    acknowledge(&mut set, sent);
+    assert!(is_reclaimed(&set, 1));
+    let directionality = Directionality::Bidirectional;
+    assert_eq!(events(), [max_streams_intent(directionality, 4)]);
+    assert_eq!(
+        written(
+            &mut set,
+            StreamIntentKey::MaxStreams(directionality),
+            100,
+            false
+        ),
+        [Read::MaxStreams {
+            directionality,
+            limit: count(4),
+        }]
+    );
+    events();
+
+    set.on_stream_frame(
+        &publish(),
+        EncryptionLevel::OneRtt,
+        stream_frame(1, 4, true),
+    )
+    .expect("ignored");
+    set.on_stop_sending(&publish(), stop_sending(1))
+        .expect("ignored");
+    acknowledge(
+        &mut set,
+        vec![StreamSummary {
+            stream_id: id(1),
+            offset: v(0),
+            len: 5,
+            fin: true,
+        }],
+    );
+    assert!(is_reclaimed(&set, 1));
+    assert_eq!(events(), []);
+    assert!(to_accept(&set, Directionality::Bidirectional).is_empty());
+}
+
+/// The other order: the answer is acknowledged first, and the reader's
+/// read of the request's end reclaims the stream.
+#[test]
+fn reading_the_end_after_the_answer_is_acknowledged_reclaims_the_stream() {
+    let mut set = client_set();
+    set.on_stream_frame(
+        &publish(),
+        EncryptionLevel::OneRtt,
+        stream_frame(1, 4, true),
+    )
+    .expect("stream 1");
+    accept(&set, 1);
+    let sent = answer(&set, 1, 5);
+    acknowledge(&mut set, sent);
+    assert_eq!(
+        sender(&set, 1)
+            .expect("built")
+            .lock()
+            .sender
+            .terminal_state(),
+        Some(SendTerminalState::DataRecvd)
+    );
+    assert!(
+        !is_reclaimed(&set, 1),
+        "the request was received but not read"
+    );
+    events();
+    read_to_end(&set, 1);
+    assert!(is_reclaimed(&set, 1));
+    assert_eq!(
+        events(),
+        [max_streams_intent(Directionality::Bidirectional, 4)]
+    );
+}
+
+/// A dropped reader leaves the stream in the tables while its final size
+/// is unknown; the frame with the FIN reclaims it.
+#[test]
+fn a_dropped_reader_waits_for_the_final_size_to_reclaim_the_stream() {
+    let mut set = client_set();
+    set.on_stream_frame(
+        &publish(),
+        EncryptionLevel::OneRtt,
+        stream_frame(1, 4, false),
+    )
+    .expect("stream 1");
+    accept(&set, 1);
+    let sent = answer(&set, 1, 0);
+    acknowledge(&mut set, sent);
+    as_reader(&set, 1, |end| end.receiver.reader_dropped());
+    assert!(
+        !is_reclaimed(&set, 1),
+        "the peer may still send: the final size is unknown"
+    );
+    events();
+    set.on_stream_frame(
+        &publish(),
+        EncryptionLevel::OneRtt,
+        stream_frame(1, 4, true),
+    )
+    .expect("the end of stream 1");
+    assert!(is_reclaimed(&set, 1));
+    assert!(
+        events().contains(&max_streams_intent(Directionality::Bidirectional, 4)),
+        "the peer may open one more stream"
+    );
+}
+
+/// A unidirectional stream of the peer has only its receiving part: read
+/// to its end, it is reclaimed.
+#[test]
+fn a_peer_unidirectional_stream_read_to_its_end_is_reclaimed() {
+    let mut set = client_set();
+    set.on_stream_frame(
+        &publish(),
+        EncryptionLevel::OneRtt,
+        stream_frame(3, 4, true),
+    )
+    .expect("stream 3");
+    accept(&set, 3);
+    events();
+    read_to_end(&set, 3);
+    assert!(is_reclaimed(&set, 3));
+    assert_eq!(
+        events(),
+        [max_streams_intent(Directionality::Unidirectional, 4)]
+    );
+    assert_eq!(
+        lock(&set.shared.set)
+            .ledger
+            .max_streams(Directionality::Bidirectional),
+        None
     );
 }
 

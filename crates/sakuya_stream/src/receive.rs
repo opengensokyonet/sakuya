@@ -407,6 +407,25 @@ where
         self.delivery.mode()
     }
 
+    /// Whether the receive direction is in a terminal state: it owes the
+    /// protocol nothing more, and the application has its last result.
+    ///
+    /// The protocol part is done once the final size is known and either
+    /// every byte below it has been received, or the peer reset the stream
+    /// and every byte of the prefix it still owes
+    /// ([`RemoteResetFacts::owed_end`]) has been received — the condition
+    /// under which no STOP request is needed either. No frame can then change
+    /// the final size or the stream's share of the connection's flow
+    /// control, and no `MAX_STREAM_DATA` or `STOP_SENDING` is due. The
+    /// application part is done once a read committed the end of the stream
+    /// or a terminal error, or the reader was dropped.
+    ///
+    /// Once true, it stays true. The end of the layer does not make it true:
+    /// a stream the layer's end interrupted is not terminal.
+    pub fn is_terminal(&self) -> bool {
+        self.stop_not_needed().is_some() && (self.is_result_committed() || self.is_reader_dropped())
+    }
+
     /// Whether the stream still takes frames: no violation was returned and
     /// the connection has not closed.
     fn takes_frames(&self) -> bool {

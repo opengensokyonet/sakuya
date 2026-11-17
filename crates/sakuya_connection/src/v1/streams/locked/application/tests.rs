@@ -38,7 +38,7 @@ use crate::{
         FlowControlParameters, StreamSet, StreamSetFacts,
         locked::{LockedStreamSet, LockedStreamSetConfig},
         resets::Rfc9000StreamResets,
-        send::StreamIntentKey,
+        send::{StreamIntentKey, StreamSetFrameSummary},
     },
 };
 
@@ -739,4 +739,168 @@ fn the_drivers_panic_ends_every_wait_and_changes_no_stream() {
     // a second panic's mark keeps the first end
     layer.shares.driver_panicked(LayerEnd::ZeroRttRejected);
     assert_eq!(set.shared.panic_end(), Some(&idle_end()));
+}
+
+// ---- reclaiming a stream ----
+
+/// A STREAM frame of `stream` with `len` bytes at `offset` and the FIN.
+fn fin_frame(stream: u32, offset: u32, len: usize) -> StreamFrame<Bytes> {
+    let offset = (offset > 0).then(|| VarIntField::shortest(v(offset)));
+    StreamFrame::new(
+        VarIntField::shortest(id(stream)),
+        offset,
+        Bytes::from(vec![7; len]),
+        true,
+    )
+    .expect("a short frame")
+    .into_without_length()
+    .into()
+}
+
+/// Send what `writer` wrote and its FIN, and acknowledge it all, as the
+/// driver does.
+fn send_and_acknowledge<O>(
+    set: &mut Set,
+    publish: &Publish,
+    writer: &StreamWriter<
+        LockedStreamSendShare<(), Ticket, Rfc9000StreamResets, Urgency, Publish>,
+        O,
+    >,
+) {
+    let sent = writer.share.part.lock().send_all();
+    for summary in sent {
+        set.on_frame_delivered(publish, StreamSetFrameSummary::Stream(summary));
+    }
+}
+
+/// Whether `stream` was reclaimed: the ledger records it, and its parts
+/// left the tables.
+fn is_reclaimed(set: &Set, stream: u32) -> bool {
+    let state = lock(&set.shared.set);
+    let reclaimed = state.ledger.is_reclaimed(id(stream));
+    let in_tables =
+        state.senders.contains_key(&id(stream)) || state.receivers.contains_key(&id(stream));
+    assert_eq!(
+        reclaimed, !in_tables,
+        "stream {stream} leaves the tables when it is reclaimed"
+    );
+    reclaimed
+}
+
+/// The client's bidirectional stream 0: its request is acknowledged, and
+/// the reader's read of the answer's end reclaims it while the application
+/// still holds both handles. The reader then returns the same end again,
+/// and a write reports that the stream was closed. A stream of this side
+/// lets the peer open no more streams.
+#[test]
+fn a_reclaimed_stream_leaves_its_handles_with_their_last_results() {
+    let (mut set, layer, intake, publish) = client(100, 1000);
+    let (mut writer, mut reader) = layer.try_open_bi().expect("a stream");
+    now(writer.write_all_unpin(Bytes::from_static(b"ping"))).expect("written");
+    writer.close().expect("open");
+    send_and_acknowledge(&mut set, &publish, &writer);
+    assert_eq!(
+        writer.share.part.lock().sender.terminal_state(),
+        Some(SendTerminalState::DataRecvd)
+    );
+    assert!(!is_reclaimed(&set, 0), "the answer was not read");
+    set.on_stream_frame(&publish, EncryptionLevel::OneRtt, fin_frame(0, 0, 4))
+        .expect("the answer");
+    intake.published();
+    let maximum = NonZeroUsize::new(64).expect("not zero");
+    let chunk = now(reader.read_chunk_unpin(maximum))
+        .expect("read")
+        .expect("data");
+    assert_eq!(chunk, Bytes::from(vec![7; 4]));
+    assert!(!is_reclaimed(&set, 0), "the end was not read");
+    assert_eq!(now(reader.read_chunk_unpin(maximum)).expect("read"), None);
+    assert!(is_reclaimed(&set, 0));
+    assert!(
+        !intake
+            .published()
+            .iter()
+            .any(|key| matches!(key, StreamIntentKey::MaxStreams(_))),
+        "a stream of this side gives the peer no more streams"
+    );
+
+    // what the handles hold is only the last result
+    assert_eq!(now(reader.read_chunk_unpin(maximum)).expect("read"), None);
+    let mut writer = writer.with_send_options(Urgency::default(), AnyActiveLinkPath);
+    let options = *writer.send_options_mut();
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(matches!(
+        writer.poll_write_with(
+            &mut cx,
+            &mut Bytes::from_static(b"more"),
+            options.parameters(),
+            options.destination()
+        ),
+        Poll::Ready(Err(WriteError::Closed))
+    ));
+    assert!(matches!(now(writer.all_acknowledged()), Ok(())));
+    // a late frame of the stream is ignored
+    set.on_stream_frame(&publish, EncryptionLevel::OneRtt, fin_frame(0, 0, 4))
+        .expect("ignored");
+    assert!(is_reclaimed(&set, 0));
+    drop((writer, reader));
+    assert!(is_reclaimed(&set, 0));
+    assert_eq!(intake.published(), []);
+}
+
+/// A unidirectional stream of this side has only its sending part: once
+/// its data and FIN are acknowledged, it is reclaimed, and the peer gets no
+/// more streams for it.
+#[test]
+fn a_unidirectional_stream_of_this_side_is_reclaimed_once_acknowledged() {
+    let (mut set, layer, intake, publish) = client(100, 1000);
+    let mut writer = layer.try_open_uni().expect("a stream");
+    now(writer.write_all_unpin(Bytes::from_static(b"data"))).expect("written");
+    writer.close().expect("open");
+    intake.published();
+    send_and_acknowledge(&mut set, &publish, &writer);
+    assert!(is_reclaimed(&set, 2));
+    for directionality in [
+        Directionality::Bidirectional,
+        Directionality::Unidirectional,
+    ] {
+        assert_eq!(
+            lock(&set.shared.set).ledger.max_streams(directionality),
+            None
+        );
+    }
+    assert!(
+        !intake
+            .published()
+            .iter()
+            .any(|key| matches!(key, StreamIntentKey::MaxStreams(_)))
+    );
+}
+
+/// The peer's stream 1 with its final size known and the answer
+/// acknowledged: dropping the reader without reading reclaims it, and the
+/// peer may open one more stream.
+#[test]
+fn dropping_the_reader_of_a_received_stream_reclaims_it() {
+    let (mut set, layer, intake, publish) = client(100, 1000);
+    set.on_stream_frame(&publish, EncryptionLevel::OneRtt, fin_frame(1, 0, 5))
+        .expect("taken");
+    let (mut writer, reader) = now(layer.accept_bi()).expect("stream 1");
+    writer.close().expect("open");
+    send_and_acknowledge(&mut set, &publish, &writer);
+    assert!(!is_reclaimed(&set, 1), "the reader is still there");
+    intake.published();
+    drop(reader);
+    assert!(is_reclaimed(&set, 1));
+    assert_eq!(
+        intake.published(),
+        [StreamIntentKey::MaxStreams(Directionality::Bidirectional)]
+    );
+    assert_eq!(
+        lock(&set.shared.set)
+            .ledger
+            .max_streams(Directionality::Bidirectional),
+        Some(count(4))
+    );
+    drop(writer);
+    assert_eq!(intake.published(), [], "the done writer gives nothing up");
 }

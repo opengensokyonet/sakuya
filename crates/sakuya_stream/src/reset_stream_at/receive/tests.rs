@@ -1061,3 +1061,54 @@ mod violation {
         );
     }
 }
+
+/// When the receive direction is terminal with a reliable prefix: the
+/// protocol is done once the prefix the peer still owes has been received.
+mod terminal {
+    use super::*;
+
+    #[test]
+    fn reading_the_reset_after_the_reliable_prefix_is_terminal() {
+        let (mut receiver, mut connection) = new_receiver(keep_all());
+        receiver
+            .on_reset_stream_at(reset_at(4, 1000, 500), &mut connection)
+            .unwrap();
+        receiver
+            .on_stream_frame(stream(0, 200, false), &mut connection)
+            .unwrap();
+        let (_, outcome) = read_all(&mut receiver);
+        assert_eq!(outcome, Ok(ReadOutcome::Wait));
+        assert!(!receiver.is_terminal(), "[200, 500) is still owed");
+        receiver
+            .on_stream_frame(stream(200, 300, false), &mut connection)
+            .unwrap();
+        assert!(
+            !receiver.is_terminal(),
+            "the prefix arrived, but the application has not read the reset"
+        );
+        let (read, outcome) = read_all(&mut receiver);
+        assert_eq!(read, data(200, 300));
+        assert_eq!(outcome, reset_error(4, 1000, 500, false));
+        assert!(receiver.is_terminal());
+    }
+
+    #[test]
+    fn a_dropped_reader_is_terminal_once_the_reliable_prefix_is_received() {
+        let (mut receiver, mut connection) = new_receiver(FollowingTermination::new(c(9)));
+        receiver
+            .on_stream_frame(stream(0, 200, false), &mut connection)
+            .unwrap();
+        receiver.reader_dropped();
+        receiver
+            .on_reset_stream_at(reset_at(4, 1000, 500), &mut connection)
+            .unwrap();
+        assert!(
+            !receiver.is_terminal(),
+            "the final size is known, but [200, 500) is still owed"
+        );
+        receiver
+            .on_stream_frame(stream(200, 300, false), &mut connection)
+            .unwrap();
+        assert!(receiver.is_terminal());
+    }
+}
