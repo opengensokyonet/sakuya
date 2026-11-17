@@ -56,7 +56,7 @@
 //! [`max_held_inputs`](LogicalPathReceivingLimits::max_held_inputs) for the
 //! logical path; past it the input that arrives is dropped. A server
 //! drops Retry and Version Negotiation packets; a client receives them as
-//! [`receive_unprotected`] says.
+//! `receive_unprotected` says.
 //!
 //! [`logical_path_receiving`] is also the operation struct
 //! [`LogicalPathReceiving`], with `LogicalPathReceivingExt` on receiver

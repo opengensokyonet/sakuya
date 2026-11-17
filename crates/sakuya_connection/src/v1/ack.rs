@@ -151,10 +151,15 @@ pub type AckRecoveryTakes<T, L, S, Ls> = HList![
 ///
 /// # Errors
 ///
-/// [`ConnectionError::UnsentPacketAcknowledged`]: the frame acknowledges a
-/// packet not sent yet. [`ConnectionError::KeyUpdate`]: a frame in a packet
-/// protected with older 1-RTT keys acknowledges a packet sealed with newer
-/// ones. Nothing is settled then.
+/// - [`ConnectionError::UnsentPacketAcknowledged`]: the frame acknowledges
+///   a packet not sent yet.
+/// - [`ConnectionError::KeyUpdate`]: a frame in a packet protected with
+///   older 1-RTT keys acknowledges a packet sealed with newer ones.
+///
+/// Nothing is settled then.
+///
+/// [`ConnectionError::UnsentPacketAcknowledged`]: super::error::ConnectionError::UnsentPacketAcknowledged
+/// [`ConnectionError::KeyUpdate`]: super::error::ConnectionError::KeyUpdate
 pub fn receive_ack<
     'v,
     T,

@@ -3,7 +3,7 @@
 //! The component keeps the backoff count only; its deadline is computed
 //! when it is read, from the link path's RTT estimate, its loss detection
 //! state and the facts of the connection. What to send when it expires is
-//! the lent [`PtoPolicy`](sakuya_recovery::pto::PtoPolicy)'s choice.
+//! the lent [`PtoPolicy`]'s choice.
 
 use core::{ops::Add, time::Duration};
 

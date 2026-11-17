@@ -15,14 +15,14 @@
 //! AEAD_LIMIT_REACHED.
 //!
 //! The sending call of a link path makes the check before each filling
-//! ([`prepare_one_rtt_packets`]), which also notes the number of the next
+//! (`prepare_one_rtt_packets`), which also notes the number of the next
 //! packet of the Application Data space as sent with the generation the
 //! 1-RTT packets from it on are sealed with, for the logical path; the
 //! filling stops at a 1-RTT packet that would leave only the closing one,
 //! and the next filling checks again. An ACK
 //! frame of the Application Data space whose Largest Acknowledged is at
 //! least the lowest number the logical path sent with the current sending
-//! generation confirms that generation ([`ack_received`]).
+//! generation confirms that generation (`ack_received`).
 //!
 //! Two rules of §6.2 that an endpoint may enforce close the connection with
 //! KEY_UPDATE_ERROR ([`KeyUpdateError`]): the peer updates a second time
