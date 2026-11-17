@@ -7,6 +7,10 @@
 //! - [`client::main`] fetches the URLs of `REQUESTS` into `/downloads`.
 //! - [`key_log::KeyLogFile`] writes the TLS key log `SSLKEYLOGFILE` names.
 //!
+//! Besides the runner's test cases, both programs run two of their own,
+//! for the extensions the runner does not test: `datagram` (RFC 9221) and
+//! `resetstreamat` (draft-ietf-quic-reliable-stream-reset); see
+//! [`environment::ServerTestCase`] and [`environment::ClientTestCase`].
 //! A test case either program does not support ends it with exit code 127,
 //! as the runner requires. `QLOGDIR` is read, but no qlog is written yet.
 //! The client does not verify the server's certificate chain (the

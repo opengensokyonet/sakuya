@@ -22,7 +22,20 @@ pub enum ServerTestCase {
     ChaCha20,
     /// `retry`: answer every Initial without a token with a Retry.
     Retry,
+    /// `datagram`, not a test case of the runner: announce
+    /// `max_datagram_frame_size` and send every datagram received back
+    /// as it came.
+    Datagram,
+    /// `resetstreamat`, not a test case of the runner: announce
+    /// `reset_stream_at`, and end each answer, once the whole file is
+    /// written, with a reset at a reliable size of half the file
+    /// ([`RESET_AT_CODE`]).
+    ResetStreamAt,
 }
+
+/// The application error code the answers of `resetstreamat` are reset
+/// with.
+pub const RESET_AT_CODE: u32 = 0x52;
 
 impl ServerTestCase {
     /// The test case named `name`, or `None` when the server does not
@@ -32,6 +45,8 @@ impl ServerTestCase {
             "handshake" | "transfer" | "multiconnect" => Some(Self::Serve),
             "chacha20" => Some(Self::ChaCha20),
             "retry" => Some(Self::Retry),
+            "datagram" => Some(Self::Datagram),
+            "resetstreamat" => Some(Self::ResetStreamAt),
             _ => None,
         }
     }
@@ -50,6 +65,15 @@ pub enum ClientTestCase {
     /// `chacha20`: as `transfer`, offering TLS_CHACHA20_POLY1305_SHA256
     /// alone.
     ChaCha20,
+    /// `datagram`, not a test case of the runner: announce
+    /// `max_datagram_frame_size`, send datagrams to the server of the
+    /// first URL on one connection and wait for each to come back; the
+    /// paths of the URLs are not fetched.
+    Datagram,
+    /// `resetstreamat`, not a test case of the runner: as `transfer`,
+    /// announcing `reset_stream_at`; an answer the server resets is saved
+    /// as far as it was read, and how it ended is written next to it.
+    ResetStreamAt,
 }
 
 impl ClientTestCase {
@@ -60,6 +84,8 @@ impl ClientTestCase {
             "handshake" | "transfer" | "retry" => Some(Self::OneConnection),
             "multiconnect" => Some(Self::ConnectionPerRequest),
             "chacha20" => Some(Self::ChaCha20),
+            "datagram" => Some(Self::Datagram),
+            "resetstreamat" => Some(Self::ResetStreamAt),
             _ => None,
         }
     }
@@ -137,6 +163,14 @@ mod tests {
         assert_eq!(
             ClientTestCase::from_name("retry"),
             Some(ClientTestCase::OneConnection)
+        );
+        assert_eq!(
+            ServerTestCase::from_name("resetstreamat"),
+            Some(ServerTestCase::ResetStreamAt)
+        );
+        assert_eq!(
+            ClientTestCase::from_name("datagram"),
+            Some(ClientTestCase::Datagram)
         );
     }
 }

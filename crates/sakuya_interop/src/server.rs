@@ -1,10 +1,14 @@
 //! The hq-interop server: serves the files under `/www` on port 443 until
 //! it is stopped.
+//!
+//! Under `datagram` it also sends every datagram received back on its
+//! connection; under `resetstreamat` it ends each answer with a reset at a
+//! reliable size of half the file instead of the end of the stream.
 
 use core::{net::SocketAddr, num::NonZeroUsize};
 use std::{path::Path, process::ExitCode, rc::Rc};
 
-use bytes::Bytes;
+use bytes::{Buf as _, Bytes};
 use futures_util::StreamExt as _;
 use nitori_io::{ReadChunkHostExt as _, calls::WriteAllHostExt as _};
 use sakuya_connection::prelude::*;
@@ -15,9 +19,10 @@ use sakuya_wire::{v1::application_error::ApplicationErrorCode, var_int::VarInt};
 
 use crate::{
     composition::{
-        OptionalKeyLog, Server, ServerStarts, bind, cipher_suites, endpoint_config, server_config,
+        Extensions, OptionalKeyLog, Server, ServerStarts, bind, cipher_suites, endpoint_config,
+        server_config,
     },
-    environment::{Environment, ServerTestCase, UNSUPPORTED},
+    environment::{Environment, RESET_AT_CODE, ServerTestCase, UNSUPPORTED},
     hq,
 };
 
@@ -74,12 +79,17 @@ pub fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    crate::run_local(serve(starts, test_case == ServerTestCase::Retry))
+    crate::run_local(serve(starts, test_case))
 }
 
-async fn serve(starts: ServerStarts, always_retry: bool) -> ExitCode {
+async fn serve(starts: ServerStarts, test_case: ServerTestCase) -> ExitCode {
+    let extensions = Extensions {
+        datagram: test_case == ServerTestCase::Datagram,
+        reset_stream_at: test_case == ServerTestCase::ResetStreamAt,
+    };
+    let reset_at = extensions.reset_stream_at;
     let (server, reflow) = match Endpoint::<_, Server, NoClient>::new(endpoint_config(
-        server_config(starts, always_retry),
+        server_config(starts, test_case == ServerTestCase::Retry, extensions),
         (),
     )) {
         Ok(made) => made,
@@ -166,6 +176,34 @@ async fn serve(starts: ServerStarts, always_retry: bool) -> ExitCode {
                 }
             };
             eprintln!("sakuya server: connection {number} is established");
+            if extensions.datagram {
+                let layer = layer.clone();
+                tokio::task::spawn_local(async move {
+                    let writer = layer.datagram_writer();
+                    let mut echoed = 0_u64;
+                    let end = loop {
+                        let mut datagram = match layer.recv_datagram().await {
+                            Ok(datagram) => datagram,
+                            Err(end) => break end,
+                        };
+                        let payload = datagram.copy_to_bytes(datagram.remaining());
+                        let size = payload.len();
+                        match writer.send(payload) {
+                            Ok(ticket) => {
+                                ticket.release();
+                                echoed += 1;
+                            }
+                            Err(error) => eprintln!(
+                                "sakuya server: connection {number}: a datagram of {size} bytes is not sent back: {}",
+                                crate::report(&error)
+                            ),
+                        }
+                    };
+                    eprintln!(
+                        "sakuya server: connection {number} sent back {echoed} datagrams; {end:?}"
+                    );
+                });
+            }
             let reason = loop {
                 match layer.accept_bi().await {
                     Ok((writer, reader)) => {
@@ -222,6 +260,7 @@ async fn serve(starts: ServerStarts, always_retry: bool) -> ExitCode {
                                     return;
                                 }
                             };
+                            let len = content.len();
                             let mut rest = content;
                             while !rest.is_empty() {
                                 let chunk = rest.split_to(rest.len().min(CHUNK));
@@ -234,7 +273,27 @@ async fn serve(starts: ServerStarts, always_retry: bool) -> ExitCode {
                                     return;
                                 }
                             }
-                            if let Err(error) = writer.close() {
+                            if reset_at {
+                                let reliable_size = (len / 2) as u64;
+                                // invariant: a file read into memory is
+                                // shorter than 2^62 bytes
+                                let reliable = VarInt::new(reliable_size).expect("a size");
+                                match writer.reset_at(code(RESET_AT_CODE), reliable) {
+                                    Ok(()) => eprintln!(
+                                        "sakuya server: connection {number}: {} reset at {reliable_size} of {len} bytes",
+                                        file.display()
+                                    ),
+                                    Err(error) => {
+                                        // a plain reset, so that the
+                                        // answer still ends
+                                        eprintln!(
+                                            "sakuya server: connection {number}: the answer cannot be reset at {reliable_size}, and is reset: {}",
+                                            crate::report(&error),
+                                        );
+                                        let _ = writer.reset(code(RESET_AT_CODE));
+                                    }
+                                }
+                            } else if let Err(error) = writer.close() {
                                 eprintln!(
                                     "sakuya server: connection {number}: the answer cannot end: {}",
                                     crate::report(&error),

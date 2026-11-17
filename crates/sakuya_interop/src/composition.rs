@@ -6,7 +6,10 @@
 //! the hq-interop ALPN, the runner's ECDSA certificate on the server, a
 //! client that takes the server's key from its leaf certificate without
 //! verifying the chain ([`crate::verify`]), random connection IDs and
-//! larger limits.
+//! larger limits. The DATAGRAM and reliable stream reset extensions are
+//! parts of every connection; each announces its transport parameter only
+//! in the test case for it ([`Extensions`]), so that the runner's test
+//! cases run with the transport parameters of QUIC version 1 alone.
 
 use core::{fmt, num::NonZeroU32, time::Duration};
 use std::{net::SocketAddr, path::Path, sync::Arc};
@@ -17,8 +20,11 @@ use nitori_crypto::{NamedGroup, Random as _, SignatureScheme, SigningKey};
 use nitori_crypto_aws_lc::{AwsLcBackend, EcdsaSigningKey};
 use rustls_pki_types::{PrivateKeyDer, pem::PemObject as _};
 use sakuya_clock_tokio::TokioClock;
-use sakuya_connection::v1;
 use sakuya_connection::v1::retry::ContinueOnRetry;
+use sakuya_connection::{
+    datagram::{self, DatagramChoices, DatagramConnectionArgs},
+    reset_stream_at, v1,
+};
 use sakuya_datagram_routing::route::recognizer::{ConnectionIdGenerator, ConnectionIdLengths};
 use sakuya_endpoint::{
     address_token::{AddressTokenKey, AddressTokenLifetimes, AeadAddressTokens},
@@ -65,6 +71,8 @@ use sakuya_tls::{
 use sakuya_udp_tokio::{UdpBinding, UdpBindingConfig, UdpLink};
 use sakuya_wire::{
     connection_id::{ConnectionId, ConnectionIdLength, StatelessResetToken},
+    datagram::MaxDatagramFrameSize,
+    reset_stream_at::ResetStreamAt,
     v1::{
         application_error::ApplicationErrorCode,
         stream_count::StreamCount,
@@ -157,13 +165,16 @@ impl<T: v1::MakerChoices> v1::HostChoices<T> for InteropChoices {
     type ApplicationError = HqClose;
 }
 
+/// The default queues of the DATAGRAM extension.
+impl DatagramChoices for InteropChoices {}
+
 /// The choices of the server's connections.
 pub(crate) type ServerChoices = ServerConnectionChoices<Udp, InteropChoices, ServerStarts>;
 /// The choices of the client's connections.
 pub(crate) type ClientChoices =
     ClientConnectionChoices<Udp, InteropChoices, ClientStarts, ClientTokens, ContinueOnRetry>;
 
-pub(crate) type Parts = frunk_core::HList![v1::Part];
+pub(crate) type Parts = frunk_core::HList![v1::Part, datagram::Part, reset_stream_at::Part];
 sakuya_connection::composition!(impl Send for InteropChoices: ServerChoices, Parts);
 sakuya_connection::composition!(impl Send for InteropChoices: ClientChoices, Parts);
 
@@ -487,6 +498,34 @@ macro_rules! v1_config {
     }};
 }
 
+/// Which extensions a side announces: those of the test case it runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Extensions {
+    /// `max_datagram_frame_size`, the recommended 65535.
+    pub(crate) datagram: bool,
+    /// `reset_stream_at`.
+    pub(crate) reset_stream_at: bool,
+}
+
+impl Extensions {
+    /// What the DATAGRAM extension is given: its parameter when it is
+    /// announced, and the default queues.
+    fn datagram<C: Default>(self) -> DatagramConnectionArgs<C> {
+        DatagramConnectionArgs {
+            transport_parameters: hlist![self.datagram.then(|| MaxDatagramFrameSize::new(
+                VarInt::from(datagram::RECOMMENDED_MAX_DATAGRAM_FRAME_SIZE)
+            ))],
+            queues: C::default(),
+        }
+    }
+
+    /// What the reliable stream reset extension is given: its parameter
+    /// when it is announced.
+    fn reset_stream_at(self) -> v1::parameters::PartSlots<reset_stream_at::Part> {
+        hlist![self.reset_stream_at.then_some(ResetStreamAt)]
+    }
+}
+
 fn thresholds() -> LossThresholds {
     // invariant: the recommended thresholds hold for a granularity of 1 ms
     LossThresholds::recommended(Duration::from_millis(1)).expect("thresholds")
@@ -520,6 +559,7 @@ where
 pub(crate) fn server_config(
     starts: ServerStarts,
     always_retry: bool,
+    extensions: Extensions,
 ) -> ServerConfig<ServerChoices, Parts, ServerStarts, AeadAddressTokens<AwsLcBackend>, RetryPolicy>
 {
     // invariant: the system's generator gives a key, and the defaults are
@@ -542,7 +582,11 @@ pub(crate) fn server_config(
             handshake: 4096,
         },
         thresholds(),
-        hlist![v1_config!(ServerChoices)],
+        hlist![
+            v1_config!(ServerChoices),
+            extensions.datagram(),
+            extensions.reset_stream_at()
+        ],
         tokens,
         RetryPolicy {
             always: always_retry,
@@ -555,6 +599,7 @@ pub(crate) fn server_config(
 /// The client role's configuration.
 pub(crate) fn client_config(
     starts: ClientStarts,
+    extensions: Extensions,
 ) -> ClientConfig<ClientChoices, Parts, ClientStarts, ClientTokens, ContinueOnRetry> {
     ClientConfig::new(
         starts,
@@ -565,7 +610,11 @@ pub(crate) fn client_config(
             one_rtt: 16 * 1024 + 4,
         },
         thresholds(),
-        hlist![v1_config!(ClientChoices)],
+        hlist![
+            v1_config!(ClientChoices),
+            extensions.datagram(),
+            extensions.reset_stream_at()
+        ],
         ClientTokens::new(),
         ContinueOnRetry,
     )
