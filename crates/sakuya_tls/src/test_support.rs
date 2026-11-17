@@ -76,16 +76,12 @@ pub(crate) fn received_client_hello(
     crate::message::client_hello::ClientHello<bytes::Bytes>,
 ) {
     use crate::message::{
-        MessageLimits, client_hello::codec::ReadClientHelloHostExt as _,
+        MessageLimits, client_hello::codec::read_client_hello,
         codec::ReadHandshakeMessageHostExt as _,
     };
     let message = { bytes }
         .sync_read_handshake_message_unpin(MessageLimits::default(), None)
         .unwrap();
-    let hello = message
-        .encoded()
-        .clone()
-        .sync_read_client_hello_unpin()
-        .unwrap();
+    let hello = read_client_hello(&mut message.encoded().clone()).unwrap();
     (message, hello)
 }

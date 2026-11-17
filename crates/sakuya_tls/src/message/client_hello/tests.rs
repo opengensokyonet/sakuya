@@ -1,6 +1,6 @@
 use super::{
     ClientHello, ClientHelloExtension, InvalidClientHelloError,
-    codec::{ReadClientHelloError, ReadClientHelloHostExt as _, WriteClientHelloHostExt as _},
+    codec::{ReadClientHelloError, read_client_hello, write_client_hello},
 };
 use crate::{
     alert::AlertDescription,
@@ -20,7 +20,7 @@ use crate::{
 
 fn read(bytes: &[u8]) -> Result<ClientHello<&[u8]>, ReadClientHelloError> {
     let mut input = bytes;
-    input.sync_read_client_hello_unpin()
+    read_client_hello(&mut input)
 }
 
 fn versions() -> Vec<u8> {
@@ -33,7 +33,7 @@ fn a_minimal_hello_reads_and_writes_back() {
     let hello = read(&bytes).unwrap();
     assert_eq!(hello.extensions().len(), 1);
     let mut output = Vec::new();
-    output.sync_write_client_hello_unpin(&hello).unwrap();
+    write_client_hello(&mut output, &hello);
     assert_eq!(output, bytes);
 }
 

@@ -85,30 +85,25 @@ use crate::{
         HandshakeMessage, HandshakeType, HelloRandom, LegacySessionId, MessageLimits,
         certificate::{
             Certificate, CertificateFormat, CertificateList,
-            codec::{
-                ReadCertificateError, ReadCertificateHostExt as _, WriteCertificateHostExt as _,
-            },
+            codec::{ReadCertificateError, read_certificate, write_certificate},
         },
-        certificate_request::codec::{
-            ReadCertificateRequestError, ReadCertificateRequestHostExt as _,
-        },
-        certificate_verify::codec::ReadCertificateVerifyHostExt as _,
+        certificate_request::codec::{ReadCertificateRequestError, read_certificate_request},
+        certificate_verify::codec::read_certificate_verify,
         client_hello::{
-            ClientHello, ClientHelloExtension, InvalidClientHelloError,
-            codec::WriteClientHelloHostExt as _,
+            ClientHello, ClientHelloExtension, InvalidClientHelloError, codec::write_client_hello,
         },
         codec::{ReadHandshakeMessageError, ReadHandshakeMessageExt as _},
         encrypted_extensions::{
             EncryptedExtensionsExtension,
-            codec::{ReadEncryptedExtensionsError, ReadEncryptedExtensionsHostExt as _},
+            codec::{ReadEncryptedExtensionsError, read_encrypted_extensions},
         },
         new_session_ticket::{
             NewSessionTicketExtension,
-            codec::{ReadNewSessionTicketError, ReadNewSessionTicketHostExt as _},
+            codec::{ReadNewSessionTicketError, read_new_session_ticket},
         },
         server_hello::{
             HelloRetryRequestExtension, ServerHelloMessage,
-            codec::{ReadServerHelloMessageError, ReadServerHelloMessageHostExt as _},
+            codec::{ReadServerHelloMessageError, read_server_hello_message},
         },
     },
     role::Client,
@@ -949,9 +944,7 @@ fn bind<C: TlsCrypto + Clone>(
     transcript: Transcript<Client, C>,
     ticket: Option<&OfferedTicket<C>>,
 ) -> (Bytes, HelloChain<C>) {
-    let encoded = encode(hello.encoded_len(), |sink| {
-        sink.sync_write_client_hello_unpin(hello)
-    });
+    let encoded = encode(hello.encoded_len(), |sink| write_client_hello(sink, hello));
     let Some(ticket) = ticket else {
         let transcript = transcript.add(&encoded);
         return (encoded, HelloChain::Plain(transcript));
@@ -1220,9 +1213,7 @@ where
                 )
             }
             None => (
-                encode(hello.encoded_len(), |sink| {
-                    sink.sync_write_client_hello_unpin(&hello)
-                }),
+                encode(hello.encoded_len(), |sink| write_client_hello(sink, &hello)),
                 None,
             ),
         };
@@ -1290,10 +1281,7 @@ where
         } = state;
         let (server_hello, encoded_server_hello) = loop {
             let message = read_message::<W, _>(host, limits, None).await?;
-            let reply = message
-                .encoded()
-                .clone()
-                .sync_read_server_hello_message_unpin()
+            let reply = read_server_hello_message(&mut message.encoded().clone())
                 .map_err(|source| alert(ClientAlertError::ServerHello { source }))?;
             let retry = match reply {
                 ServerHelloMessage::ServerHello(server_hello) => {
@@ -1492,10 +1480,7 @@ where
 
         // EncryptedExtensions.
         let message = read_message::<W, _>(host, limits, hash).await?;
-        let extensions = message
-            .encoded()
-            .clone()
-            .sync_read_encrypted_extensions_unpin()
+        let extensions = read_encrypted_extensions(&mut message.encoded().clone())
             .map_err(|source| alert(ClientAlertError::EncryptedExtensions { source }))?;
         let peer_parameters = extensions
             .quic_transport_parameters()
@@ -1556,10 +1541,7 @@ where
                 let mut message = read_message::<W, _>(host, limits, hash).await?;
                 let mut requested = None;
                 if message.handshake_type() == HandshakeType::CERTIFICATE_REQUEST {
-                    let request = message
-                        .encoded()
-                        .clone()
-                        .sync_read_certificate_request_unpin()
+                    let request = read_certificate_request(&mut message.encoded().clone())
                         .map_err(|source| alert(ClientAlertError::CertificateRequest { source }))?;
                     if let Some(never) = certificates.select(&target, &request) {
                         match never {}
@@ -1568,22 +1550,17 @@ where
                     authentication = authentication.add(message.encoded());
                     message = read_message::<W, _>(host, limits, hash).await?;
                 }
-                let certificate = message
-                    .encoded()
-                    .clone()
-                    .sync_read_certificate_unpin(CertificateFormat::X509)
-                    .map_err(|source| alert(ClientAlertError::Certificate { source }))?;
+                let certificate =
+                    read_certificate(&mut message.encoded().clone(), CertificateFormat::X509)
+                        .map_err(|source| alert(ClientAlertError::Certificate { source }))?;
                 let leaf = verifier
                     .verify(&target, certificate.certificates().entries())
                     .await
                     .map_err(|source| alert(ClientAlertError::Verify { source }))?;
                 let authentication = authentication.add(message.encoded());
                 let message = read_message::<W, _>(host, limits, hash).await?;
-                let verify = message
-                    .encoded()
-                    .clone()
-                    .sync_read_certificate_verify_unpin()
-                    .map_err(|source| {
+                let verify =
+                    read_certificate_verify(&mut message.encoded().clone()).map_err(|source| {
                         alert(ClientAlertError::CertificateVerify {
                             source: CertificateVerifyError::Read { source },
                         })
@@ -1640,7 +1617,7 @@ where
                 // invariant: a context read from a CertificateRequest fits.
                 .expect("an empty Certificate");
             let encoded = encode(certificate.encoded_len(), |sink| {
-                sink.sync_write_certificate_unpin(&certificate)
+                write_certificate(sink, &certificate)
             });
             write_message::<W, _>(host, &encoded).await?;
             master = master.add(&encoded);
@@ -1693,10 +1670,7 @@ where
         // The tickets the server sends.
         loop {
             let message = read_message::<W, _>(host, limits, hash).await?;
-            let received = message
-                .encoded()
-                .clone()
-                .sync_read_new_session_ticket_unpin()
+            let received = read_new_session_ticket(&mut message.encoded().clone())
                 .map_err(|source| alert(ClientAlertError::NewSessionTicket { source }))?;
             let early_data =
                 match received

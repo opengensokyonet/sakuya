@@ -40,12 +40,12 @@ use crate::{
     extension::pre_shared_key::PskIndex,
     message::{
         HandshakeMessage,
-        certificate_verify::codec::ReadCertificateVerifyHostExt as _,
+        certificate_verify::codec::read_certificate_verify,
         finished::{
             Finished,
-            codec::{ReadFinishedError, ReadFinishedHostExt as _, WriteFinishedHostExt as _},
+            codec::{ReadFinishedError, read_finished, write_finished},
         },
-        message_hash::{MessageHash, codec::WriteMessageHashHostExt as _},
+        message_hash::{MessageHash, codec::write_message_hash},
         new_session_ticket::TicketNonce,
     },
     role::{Client, HandshakeRole, Server},
@@ -168,14 +168,7 @@ impl<C: TlsCrypto> Chain<C> {
     fn write_finished(&mut self, base: &Secret) -> HandshakeMessage {
         let finished = Finished::new(self.verify_data(base));
         let mut encoded = Vec::with_capacity(finished.encoded_len());
-        match encoded.sync_write_finished_unpin(&finished) {
-            Ok(()) => {}
-            Err(error) => match error.host_error() {
-                Some(never) => match *never {},
-                // invariant: a vector accepts every byte.
-                None => unreachable!("{error}"),
-            },
-        }
+        write_finished(&mut encoded, &finished);
         self.add(&encoded);
         HandshakeMessage::from_encoded(Bytes::from(encoded))
     }
@@ -188,9 +181,8 @@ impl<C: TlsCrypto> Chain<C> {
         received: &HandshakeMessage,
     ) -> Result<(), FinishedError> {
         let encoded = received.encoded().as_ref();
-        let finished = { encoded }
-            .sync_read_finished_unpin(self.algorithm())
-            .context(finished_error::ReadSnafu)?;
+        let finished =
+            read_finished(&mut { encoded }, self.algorithm()).context(finished_error::ReadSnafu)?;
         self.check_verify_data(base, finished.verify_data().as_bytes())
             .map_err(|TagMismatchError| FinishedError::Mismatch)?;
         self.add(encoded);
@@ -280,15 +272,9 @@ impl<R: HandshakeRole, C: TlsCrypto + Clone> Transcript<R, C> {
     pub fn retry(mut self, hello_retry_request: &[u8]) -> Self {
         let message = MessageHash::new(self.chain.current());
         let mut buffer = [0; 4 + 48];
-        let mut sink = &mut buffer[..];
-        match sink.sync_write_message_hash_unpin(&message) {
-            Ok(()) => {}
-            Err(error) => match error.host_error() {
-                Some(never) => match *never {},
-                // invariant: the buffer holds the longest hash.
-                None => unreachable!("{error}"),
-            },
-        }
+        // invariant: the buffer holds the longest hash, so it has room for
+        // the message.
+        write_message_hash(&mut &mut buffer[..], &message);
         let mut transcript = Hash::start(&self.chain.backend, self.chain.hash);
         transcript.update(&buffer[..message.encoded_len()]);
         transcript.update(hello_retry_request);
@@ -902,9 +888,7 @@ fn verify_server_signature<C: TlsCrypto>(
 ) -> Result<(), CertificateVerifyError> {
     use client::certificate_verify_error::*;
     let encoded = certificate_verify.encoded().as_ref();
-    let message = { encoded }
-        .sync_read_certificate_verify_unpin()
-        .context(ReadSnafu)?;
+    let message = read_certificate_verify(&mut { encoded }).context(ReadSnafu)?;
     let scheme = message.algorithm();
     let Some(supported) = chain.backend.signature_scheme(scheme) else {
         return UnsupportedSchemeSnafu { scheme }.fail();

@@ -32,25 +32,17 @@ impl MessageHash {
 }
 
 pub mod codec {
-    //! Reading and writing message_hash messages as `nitori_call`
-    //! operations.
-    //!
-    //! [`read_message_hash`] and [`write_message_hash`] are also operation
-    //! structs, with `{Name}Ext` on receiver accesses and `{Name}HostExt` on
-    //! call executors, including the `sync_` methods.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
+    //! Reading and writing message_hash messages.
 
     use super::MessageHash;
     use crate::{
         alert::AlertDescription,
-        message::{HandshakeType, MessageSource, ReadHeaderError, read_body},
-        vector::Out,
+        message::{HandshakeType, ReadHeaderError, read_body},
+        vector::write_header,
     };
-    use nitori_call::{ReceiverAccess, call};
+    use bytes::{Buf, BufMut};
     use nitori_crypto::{Digest, DigestLengthMismatchError, HashAlgorithm};
-    use nitori_io::{Write, calls::WriteAllError};
+    use nitori_io::SplitTo;
     use snafu::{ResultExt, Snafu};
 
     /// Reads a message_hash message, header included, whose body is a hash
@@ -59,12 +51,11 @@ pub mod codec {
     /// # Errors
     ///
     /// [`ReadMessageHashError`].
-    #[call(sync)]
-    pub async fn read_message_hash<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
+    pub fn read_message_hash<S: Buf + SplitTo + AsRef<[u8]>>(
+        src: &mut S,
         hash: HashAlgorithm,
     ) -> Result<MessageHash, ReadMessageHashError> {
-        let body = read_body(io, HandshakeType::MESSAGE_HASH).await?;
+        let body = read_body(src, HandshakeType::MESSAGE_HASH)?;
         let hash = Digest::new(hash, body.as_ref()).context(read_message_hash_error::HashSnafu)?;
         Ok(MessageHash { hash })
     }
@@ -100,18 +91,12 @@ pub mod codec {
 
     /// Writes `message`, header included.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_message_hash<F: Write, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-        message: &MessageHash,
-    ) -> Result<(), WriteAllError<F::Error>> {
+    /// If `dst` has no room for what it writes, as [`BufMut`] does.
+    pub fn write_message_hash(dst: &mut impl BufMut, message: &MessageHash) {
         let hash = message.hash.as_bytes();
-        let mut out = Out::new(io);
-        out.header(HandshakeType::MESSAGE_HASH, hash.len()).await?;
-        out.put(hash).await
+        write_header(dst, HandshakeType::MESSAGE_HASH, hash.len());
+        dst.put_slice(hash)
     }
 }

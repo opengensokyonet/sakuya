@@ -95,21 +95,16 @@ impl ProtocolsNotSingleError {
 }
 
 pub mod codec {
-    //! Reading and writing protocol name lists as `nitori_call` operations.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
+    //! Reading and writing protocol name lists.
 
     use super::{ProtocolName, ProtocolNameList, ProtocolsNotSingleError};
     use crate::{
         alert::AlertDescription,
-        message::MessageSource,
-        vector::{Out, ReadBoundedVectorError, read_bounded_vector},
+        vector::{ReadBoundedVectorError, read_bounded_vector, write_length, write_vector},
         width::Width,
     };
-    use bytes::Buf;
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{Write, calls::WriteAllError};
+    use bytes::{Buf, BufMut};
+    use nitori_io::SplitTo;
     use snafu::{ResultExt, Snafu};
 
     /// Reads a protocol name list.
@@ -117,27 +112,23 @@ pub mod codec {
     /// # Errors
     ///
     /// [`ReadProtocolNameListError`].
-    #[call(sync)]
-    pub async fn read_protocol_name_list<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<ProtocolNameList<F::Bytes>, ReadProtocolNameListError> {
+    pub fn read_protocol_name_list<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<ProtocolNameList<S>, ReadProtocolNameListError> {
         use read_protocol_name_list_error::*;
-        let mut list = read_bounded_vector(io, Width::U16, 2..=Width::U16.max())
-            .await
-            .context(ListSnafu)?;
+        let mut list =
+            read_bounded_vector(src, Width::U16, 2..=Width::U16.max()).context(ListSnafu)?;
         let mut names = Vec::new();
         while list.has_remaining() {
-            names.push(list.sync_read_protocol_name_unpin()?);
+            names.push(read_protocol_name(&mut list)?);
         }
         Ok(ProtocolNameList { names })
     }
 
-    #[call(sync)]
-    async fn read_protocol_name<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<ProtocolName<F::Bytes>, ReadProtocolNameListError> {
-        let name = read_bounded_vector(io, Width::U8, 1..=Width::U8.max())
-            .await
+    fn read_protocol_name<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<ProtocolName<S>, ReadProtocolNameListError> {
+        let name = read_bounded_vector(src, Width::U8, 1..=Width::U8.max())
             .context(read_protocol_name_list_error::NameSnafu)?;
         Ok(ProtocolName { name })
     }
@@ -169,19 +160,14 @@ pub mod codec {
 
     /// Writes a protocol name list.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails.
-    #[call(sync)]
-    pub async fn write_protocol_name_list<
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-        C: AsRef<[u8]>,
-    >(
-        io: &mut A,
+    /// If `dst` has no room for what it writes, as [`BufMut`] does.
+    pub fn write_protocol_name_list<C: AsRef<[u8]>>(
+        dst: &mut impl BufMut,
         list: &ProtocolNameList<C>,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        list.encode(&mut Out::new(io)).await
+    ) {
+        list.encode(dst)
     }
 
     /// Reads a protocol name list of exactly one name, as EncryptedExtensions
@@ -190,11 +176,10 @@ pub mod codec {
     /// # Errors
     ///
     /// [`ReadSelectedProtocolError`].
-    #[call(sync)]
-    pub async fn read_selected_protocol<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<ProtocolName<F::Bytes>, ReadSelectedProtocolError> {
-        let mut list = read_protocol_name_list(io).await?;
+    pub fn read_selected_protocol<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<ProtocolName<S>, ReadSelectedProtocolError> {
+        let mut list = read_protocol_name_list(src)?;
         if list.names.len() != 1 {
             let count = list.names.len();
             return Err(ProtocolsNotSingleError { count }.into());
@@ -234,41 +219,29 @@ pub mod codec {
 
     /// Writes a protocol name list of the one name `protocol`.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails.
-    #[call(sync)]
-    pub async fn write_selected_protocol<
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-        C: AsRef<[u8]>,
-    >(
-        io: &mut A,
+    /// If `dst` has no room for what it writes, as [`BufMut`] does.
+    pub fn write_selected_protocol<C: AsRef<[u8]>>(
+        dst: &mut impl BufMut,
         protocol: &ProtocolName<C>,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        protocol.encode_selected(&mut Out::new(io)).await
+    ) {
+        protocol.encode_selected(dst)
     }
 
     impl<C: AsRef<[u8]>> ProtocolName<C> {
-        pub(crate) async fn encode_selected<F: Write, A: ReceiverAccess<Family = F>>(
-            &self,
-            out: &mut Out<'_, A>,
-        ) -> Result<(), WriteAllError<F::Error>> {
-            out.length(Width::U16, self.entry_len()).await?;
-            out.vector(Width::U8, self.name.as_ref()).await
+        pub(crate) fn encode_selected(&self, dst: &mut impl BufMut) {
+            write_length(dst, Width::U16, self.entry_len());
+            write_vector(dst, Width::U8, self.name.as_ref())
         }
     }
 
     impl<C: AsRef<[u8]>> ProtocolNameList<C> {
-        pub(crate) async fn encode<F: Write, A: ReceiverAccess<Family = F>>(
-            &self,
-            out: &mut Out<'_, A>,
-        ) -> Result<(), WriteAllError<F::Error>> {
-            out.length(Width::U16, self.encoded_len() - 2).await?;
+        pub(crate) fn encode(&self, dst: &mut impl BufMut) {
+            write_length(dst, Width::U16, self.encoded_len() - 2);
             for name in &self.names {
-                out.vector(Width::U8, name.name.as_ref()).await?;
+                write_vector(dst, Width::U8, name.name.as_ref());
             }
-            Ok(())
         }
     }
 }

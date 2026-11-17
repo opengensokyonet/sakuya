@@ -49,21 +49,16 @@ impl<C> SignedCertificateTimestampList<C> {
 }
 
 pub mod codec {
-    //! Reading and writing SCT lists as `nitori_call` operations.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
+    //! Reading and writing SCT lists.
 
     use super::SignedCertificateTimestampList;
     use crate::{
         alert::AlertDescription,
-        message::MessageSource,
-        vector::{Out, ReadBoundedVectorError, read_bounded_vector},
+        vector::{ReadBoundedVectorError, read_bounded_vector, write_length, write_vector},
         width::Width,
     };
-    use bytes::Buf;
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{Write, calls::WriteAllError};
+    use bytes::{Buf, BufMut};
+    use nitori_io::SplitTo;
     use snafu::{ResultExt, Snafu};
 
     /// Reads the SCT list of a certificate entry.
@@ -71,32 +66,23 @@ pub mod codec {
     /// # Errors
     ///
     /// [`ReadSignedCertificateTimestampListError`].
-    #[call(sync)]
-    pub async fn read_signed_certificate_timestamp_list<
-        F: MessageSource,
-        A: ReceiverAccess<Family = F>,
-    >(
-        io: &mut A,
-    ) -> Result<SignedCertificateTimestampList<F::Bytes>, ReadSignedCertificateTimestampListError>
-    {
+    pub fn read_signed_certificate_timestamp_list<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<SignedCertificateTimestampList<S>, ReadSignedCertificateTimestampListError> {
         use read_signed_certificate_timestamp_list_error::*;
         let range = 1..=Width::U16.max();
-        let mut list = read_bounded_vector(io, Width::U16, range.clone())
-            .await
-            .context(ListSnafu)?;
+        let mut list = read_bounded_vector(src, Width::U16, range.clone()).context(ListSnafu)?;
         let mut timestamps = Vec::new();
         while list.has_remaining() {
-            timestamps.push(list.sync_read_serialized_sct_unpin()?);
+            timestamps.push(read_serialized_sct(&mut list)?);
         }
         Ok(SignedCertificateTimestampList { timestamps })
     }
 
-    #[call(sync)]
-    async fn read_serialized_sct<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<F::Bytes, ReadSignedCertificateTimestampListError> {
-        read_bounded_vector(io, Width::U16, 1..=Width::U16.max())
-            .await
+    fn read_serialized_sct<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<S, ReadSignedCertificateTimestampListError> {
+        read_bounded_vector(src, Width::U16, 1..=Width::U16.max())
             .context(read_signed_certificate_timestamp_list_error::TimestampSnafu)
     }
 
@@ -130,31 +116,22 @@ pub mod codec {
 
     /// Writes the SCT list of a certificate entry.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails.
-    #[call(sync)]
-    pub async fn write_signed_certificate_timestamp_list<
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-        C: AsRef<[u8]>,
-    >(
-        io: &mut A,
+    /// If `dst` has no room for what it writes, as [`BufMut`] does.
+    pub fn write_signed_certificate_timestamp_list<C: AsRef<[u8]>>(
+        dst: &mut impl BufMut,
         list: &SignedCertificateTimestampList<C>,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        list.encode(&mut Out::new(io)).await
+    ) {
+        list.encode(dst)
     }
 
     impl<C: AsRef<[u8]>> SignedCertificateTimestampList<C> {
-        pub(crate) async fn encode<F: Write, A: ReceiverAccess<Family = F>>(
-            &self,
-            out: &mut Out<'_, A>,
-        ) -> Result<(), WriteAllError<F::Error>> {
-            out.length(Width::U16, self.encoded_len() - 2).await?;
+        pub(crate) fn encode(&self, dst: &mut impl BufMut) {
+            write_length(dst, Width::U16, self.encoded_len() - 2);
             for timestamp in &self.timestamps {
-                out.vector(Width::U16, timestamp.as_ref()).await?;
+                write_vector(dst, Width::U16, timestamp.as_ref());
             }
-            Ok(())
         }
     }
 }

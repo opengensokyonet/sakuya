@@ -261,7 +261,7 @@ mod tests {
     };
     use crate::{
         cipher_suite::CipherSuite,
-        message::client_hello::codec::ReadClientHelloHostExt as _,
+        message::client_hello::codec::read_client_hello,
         server::targets::SelectedTarget,
         test_support::{client_hello, concat, extension, vector},
     };
@@ -357,7 +357,7 @@ mod tests {
             &extension(43, crate::test_support::VERSIONS),
             &extension(51, &shares),
         ]));
-        let hello = { &bytes[..] }.sync_read_client_hello_unpin().unwrap();
+        let hello = read_client_hello(&mut &bytes[..]).unwrap();
         let offer = ClientOffer::from_client_hello(&hello);
         assert_eq!(
             offer.cipher_suites(),

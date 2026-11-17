@@ -1,9 +1,6 @@
 use super::{
     EncryptedExtensionsExtension,
-    codec::{
-        ReadEncryptedExtensionsError, ReadEncryptedExtensionsHostExt as _,
-        WriteEncryptedExtensionsHostExt as _,
-    },
+    codec::{ReadEncryptedExtensionsError, read_encrypted_extensions, write_encrypted_extensions},
 };
 use crate::{
     alert::AlertDescription,
@@ -16,11 +13,9 @@ fn read(
 ) -> Result<super::EncryptedExtensions<Vec<u8>>, ReadEncryptedExtensionsError> {
     let bytes = message(8, &vector(2, extensions));
     let mut input = bytes.as_slice();
-    input.sync_read_encrypted_extensions_unpin().map(|message| {
+    read_encrypted_extensions(&mut input).map(|message| {
         let mut output = Vec::new();
-        output
-            .sync_write_encrypted_extensions_unpin(&message)
-            .unwrap();
+        write_encrypted_extensions(&mut output, &message);
         assert_eq!(output, bytes);
         super::EncryptedExtensions {
             extensions: message

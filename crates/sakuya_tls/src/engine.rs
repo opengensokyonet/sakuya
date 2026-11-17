@@ -296,19 +296,9 @@ pub(crate) fn split_write<E>(error: WriteAllError<E>) -> Result<WriteZeroError, 
 }
 
 /// Encodes a message with a synchronous writer on a vector.
-pub(crate) fn encode(
-    len: usize,
-    write: impl FnOnce(&mut Vec<u8>) -> Result<(), WriteAllError<Infallible>>,
-) -> bytes::Bytes {
+pub(crate) fn encode(len: usize, write: impl FnOnce(&mut Vec<u8>)) -> bytes::Bytes {
     let mut encoded = Vec::with_capacity(len);
-    match write(&mut encoded) {
-        Ok(()) => {}
-        Err(error) => match error.host_error() {
-            Some(never) => match *never {},
-            // invariant: a vector accepts every byte.
-            None => unreachable!("{error}"),
-        },
-    }
+    write(&mut encoded);
     debug_assert_eq!(encoded.len(), len);
     bytes::Bytes::from(encoded)
 }

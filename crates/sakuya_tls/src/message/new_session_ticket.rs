@@ -240,15 +240,7 @@ extension_subset! {
 }
 
 pub mod codec {
-    //! Reading and writing NewSessionTicket messages as `nitori_call`
-    //! operations.
-    //!
-    //! [`read_new_session_ticket`] and [`write_new_session_ticket`] are also
-    //! operation structs, with `{Name}Ext` on receiver accesses and
-    //! `{Name}HostExt` on call executors, including the `sync_` methods.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
+    //! Reading and writing NewSessionTicket messages.
 
     use super::{
         BLOCK, NewSessionTicket, NewSessionTicketDisallowedExtension, NewSessionTicketExtension,
@@ -261,16 +253,16 @@ pub mod codec {
             RestrictedExtension, UnknownExtension, early_data::MaxEarlyDataSize, not_allowed,
             read_extension_block,
         },
-        message::{HandshakeType, MessageSource, ReadHeaderError, read_body},
+        message::{HandshakeType, ReadHeaderError, read_body},
+        source::read_u32,
         vector::{
-            ExcessBytesError, LengthOutOfRangeError, Out, ReadBoundedVectorError, ReadVectorError,
-            read_bounded_vector, read_u32, read_vector,
+            ExcessBytesError, LengthOutOfRangeError, ReadBoundedVectorError, ReadVectorError,
+            read_bounded_vector, read_vector, write_header, write_length, write_vector,
         },
         width::Width,
     };
-    use bytes::Buf;
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{Write, calls::WriteAllError, error::IncompleteError};
+    use bytes::{Buf, BufMut};
+    use nitori_io::{SplitTo, error::IncompleteError};
     use snafu::{ResultExt, Snafu};
 
     /// Reads a NewSessionTicket message, header included.
@@ -278,30 +270,27 @@ pub mod codec {
     /// # Errors
     ///
     /// [`ReadNewSessionTicketError`].
-    #[call(sync)]
-    pub async fn read_new_session_ticket<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<NewSessionTicket<F::Bytes>, ReadNewSessionTicketError> {
-        let mut body = read_body(io, HandshakeType::NEW_SESSION_TICKET).await?;
-        let ticket = body.sync_read_new_session_ticket_body_unpin()?;
+    pub fn read_new_session_ticket<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<NewSessionTicket<S>, ReadNewSessionTicketError> {
+        let mut body = read_body(src, HandshakeType::NEW_SESSION_TICKET)?;
+        let ticket = read_new_session_ticket_body(&mut body)?;
         ExcessBytesError::check(body.remaining())
             .context(read_new_session_ticket_error::ExcessSnafu)?;
         Ok(ticket)
     }
 
-    #[call(sync)]
-    async fn read_new_session_ticket_body<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<NewSessionTicket<F::Bytes>, ReadNewSessionTicketError> {
+    fn read_new_session_ticket_body<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<NewSessionTicket<S>, ReadNewSessionTicketError> {
         use read_new_session_ticket_error::*;
-        let ticket_lifetime = TicketLifetime::new(read_u32(io).await.context(LifetimeSnafu)?)?;
-        let ticket_age_add = read_u32(io).await.context(AgeAddSnafu)?;
-        let nonce = read_vector(io, Width::U8).await.context(NonceSnafu)?;
+        let ticket_lifetime = TicketLifetime::new(read_u32(src).context(LifetimeSnafu)?)?;
+        let ticket_age_add = read_u32(src).context(AgeAddSnafu)?;
+        let nonce = read_vector(src, Width::U8).context(NonceSnafu)?;
         let ticket_nonce = TicketNonce { nonce };
-        let ticket = read_bounded_vector(io, Width::U16, 1..=Width::U16.max())
-            .await
-            .context(TicketSnafu)?;
-        let block = read_extension_block(io).await.context(ExtensionsSnafu)?;
+        let ticket =
+            read_bounded_vector(src, Width::U16, 1..=Width::U16.max()).context(TicketSnafu)?;
+        let block = read_extension_block(src).context(ExtensionsSnafu)?;
         LengthOutOfRangeError::check(block.remaining(), BLOCK).context(ExtensionsLengthSnafu)?;
         let mut block = BlockReader::new(block);
         let mut extensions = Vec::new();
@@ -314,12 +303,9 @@ pub mod codec {
                 continue;
             };
             extensions.push(match restricted {
-                RestrictedExtension::EarlyData => {
-                    NewSessionTicketExtension::EarlyData(MaxEarlyDataSize::new(
-                        data.sync_read_max_early_data_size_unpin()
-                            .context(EarlyDataSnafu)?,
-                    ))
-                }
+                RestrictedExtension::EarlyData => NewSessionTicketExtension::EarlyData(
+                    MaxEarlyDataSize::new(read_u32(&mut data).context(EarlyDataSnafu)?),
+                ),
                 other => {
                     return Err(not_allowed(other, NewSessionTicketDisallowedExtension::of).into());
                 }
@@ -335,13 +321,6 @@ pub mod codec {
             ticket,
             extensions,
         })
-    }
-
-    #[call(sync)]
-    async fn read_max_early_data_size<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<u32, IncompleteError> {
-        read_u32(io).await
     }
 
     /// Failures that [`read_new_session_ticket`] can produce.
@@ -448,40 +427,29 @@ pub mod codec {
 
     /// Writes `ticket`, header included.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written, and the error counts them over the
-    /// whole message.
-    #[call(sync)]
-    pub async fn write_new_session_ticket<
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-        C: AsRef<[u8]>,
-    >(
-        io: &mut A,
+    /// If `dst` has no room for what it writes, as [`BufMut`] does.
+    pub fn write_new_session_ticket<C: AsRef<[u8]>>(
+        dst: &mut impl BufMut,
         ticket: &NewSessionTicket<C>,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        let mut out = Out::new(io);
-        out.header(HandshakeType::NEW_SESSION_TICKET, ticket.body_len())
-            .await?;
-        out.u32(ticket.ticket_lifetime.seconds()).await?;
-        out.u32(ticket.ticket_age_add).await?;
-        out.vector(Width::U8, ticket.ticket_nonce.nonce.as_ref())
-            .await?;
-        out.vector(Width::U16, ticket.ticket.as_ref()).await?;
-        out.length(Width::U16, ticket.block_len()).await?;
+    ) {
+        write_header(dst, HandshakeType::NEW_SESSION_TICKET, ticket.body_len());
+        dst.put_u32(ticket.ticket_lifetime.seconds());
+        dst.put_u32(ticket.ticket_age_add);
+        write_vector(dst, Width::U8, ticket.ticket_nonce.nonce.as_ref());
+        write_vector(dst, Width::U16, ticket.ticket.as_ref());
+        write_length(dst, Width::U16, ticket.block_len());
         for extension in &ticket.extensions {
-            out.u16(extension.extension_type().get()).await?;
-            out.length(Width::U16, extension.data_len()).await?;
+            dst.put_u16(extension.extension_type().get());
+            write_length(dst, Width::U16, extension.data_len());
             match extension {
-                NewSessionTicketExtension::EarlyData(size) => out.u32(size.get()).await?,
+                NewSessionTicketExtension::EarlyData(size) => dst.put_u32(size.get()),
                 NewSessionTicketExtension::Unknown(extension) => {
-                    out.put(extension.data().as_ref()).await?
+                    dst.put_slice(extension.data().as_ref())
                 }
             }
         }
-        Ok(())
     }
 }
 
@@ -489,7 +457,7 @@ pub mod codec {
 mod tests {
     use super::{
         NewSessionTicketExtension, TicketLifetime,
-        codec::{ReadNewSessionTicketError, ReadNewSessionTicketHostExt as _},
+        codec::{ReadNewSessionTicketError, read_new_session_ticket},
     };
     use crate::{
         alert::AlertDescription,
@@ -513,46 +481,35 @@ mod tests {
     #[test]
     fn ticket_rules() {
         let bytes = ticket(604_800, &[1], &extension(42, &[0xff, 0xff, 0xff, 0xff]));
-        let read = bytes
-            .as_slice()
-            .sync_read_new_session_ticket_unpin()
-            .unwrap();
+        let read = read_new_session_ticket(&mut bytes.as_slice()).unwrap();
         assert_eq!(read.ticket_lifetime(), TicketLifetime::MAX);
         assert!(matches!(
             read.extensions(),
             [NewSessionTicketExtension::EarlyData(MaxEarlyDataSize::QUIC)]
         ));
-        let error = ticket(604_801, &[1], &[])
-            .as_slice()
-            .sync_read_new_session_ticket_unpin()
-            .unwrap_err();
+        let error =
+            read_new_session_ticket(&mut ticket(604_801, &[1], &[]).as_slice()).unwrap_err();
         let ReadNewSessionTicketError::LifetimeTooLong { source } = &error else {
             panic!("{error:?}")
         };
         assert_eq!(source.seconds(), 604_801);
         assert_eq!(error.alert(), AlertDescription::ILLEGAL_PARAMETER);
-        let error = ticket(1, &[], &[])
-            .as_slice()
-            .sync_read_new_session_ticket_unpin()
-            .unwrap_err();
+        let error = read_new_session_ticket(&mut ticket(1, &[], &[]).as_slice()).unwrap_err();
         assert!(matches!(error, ReadNewSessionTicketError::Ticket { .. }));
-        let error = ticket(1, &[1], &extension(42, &[0xff]))
-            .as_slice()
-            .sync_read_new_session_ticket_unpin()
-            .unwrap_err();
+        let error =
+            read_new_session_ticket(&mut ticket(1, &[1], &extension(42, &[0xff])).as_slice())
+                .unwrap_err();
         assert!(matches!(error, ReadNewSessionTicketError::EarlyData { .. }));
-        let error = ticket(1, &[1], &extension(42, &[0xff; 5]))
-            .as_slice()
-            .sync_read_new_session_ticket_unpin()
-            .unwrap_err();
+        let error =
+            read_new_session_ticket(&mut ticket(1, &[1], &extension(42, &[0xff; 5])).as_slice())
+                .unwrap_err();
         assert!(matches!(
             error,
             ReadNewSessionTicketError::EarlyDataExcess { .. }
         ));
-        let error = ticket(1, &[1], &extension(41, &[0, 0]))
-            .as_slice()
-            .sync_read_new_session_ticket_unpin()
-            .unwrap_err();
+        let error =
+            read_new_session_ticket(&mut ticket(1, &[1], &extension(41, &[0, 0])).as_slice())
+                .unwrap_err();
         assert!(matches!(
             error,
             ReadNewSessionTicketError::ExtensionNotAllowed { .. }

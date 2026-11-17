@@ -323,14 +323,7 @@ extension_subset! {
 }
 
 pub mod codec {
-    //! Reading and writing ClientHello messages as `nitori_call` operations.
-    //!
-    //! [`read_client_hello`] and [`write_client_hello`] are also operation
-    //! structs, with `{Name}Ext` on receiver accesses and `{Name}HostExt` on
-    //! call executors, including the `sync_` methods.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
+    //! Reading and writing ClientHello messages.
 
     use super::{BLOCK, ClientHello, ClientHelloExtension, ClientHelloStructuredExtension};
     use crate::{
@@ -338,6 +331,7 @@ pub mod codec {
         cipher_suite::CipherSuite,
         code_point::codec::{
             ReadByteCodePointListError, ReadCodePointListError, read_code_point_list,
+            write_byte_code_point_list, write_code_point_list,
         },
         extension::{
             BlockEntry as _, BlockReader, ReadExtensionBlockError, RestrictedExtension,
@@ -345,17 +339,17 @@ pub mod codec {
             key_share::codec::ReadClientSharesError, pre_shared_key::codec::ReadOfferedPsksError,
             read_extension_block, server_name::codec::ReadServerNameError,
         },
-        message::{HandshakeType, MessageSource, ReadHeaderError, read_body, read_session_id},
+        message::{HandshakeType, ReadHeaderError, read_body, read_session_id},
+        source::{read_array, read_u16, take_rest},
         vector::{
-            ExcessBytesError, LengthOutOfRangeError, Out, ReadBoundedVectorError, read_array,
-            read_bounded_vector, read_u16,
+            ExcessBytesError, LengthOutOfRangeError, ReadBoundedVectorError, read_bounded_vector,
+            write_header, write_length, write_vector,
         },
         version::ProtocolVersion,
         width::Width,
     };
-    use bytes::Buf;
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{Write, calls::WriteAllError, error::IncompleteError};
+    use bytes::{Buf, BufMut};
+    use nitori_io::{SplitTo, error::IncompleteError};
     use snafu::{ResultExt, Snafu};
 
     /// Reads a ClientHello message, header included.
@@ -363,34 +357,30 @@ pub mod codec {
     /// # Errors
     ///
     /// [`ReadClientHelloError`].
-    #[call(sync)]
-    pub async fn read_client_hello<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<ClientHello<F::Bytes>, ReadClientHelloError> {
-        let mut body = read_body(io, HandshakeType::CLIENT_HELLO).await?;
-        let hello = body.sync_read_client_hello_body_unpin()?;
+    pub fn read_client_hello<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<ClientHello<S>, ReadClientHelloError> {
+        let mut body = read_body(src, HandshakeType::CLIENT_HELLO)?;
+        let hello = read_client_hello_body(&mut body)?;
         ExcessBytesError::check(body.remaining()).context(read_client_hello_error::ExcessSnafu)?;
         Ok(hello)
     }
 
-    #[call(sync)]
-    async fn read_client_hello_body<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<ClientHello<F::Bytes>, ReadClientHelloError> {
+    fn read_client_hello_body<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<ClientHello<S>, ReadClientHelloError> {
         use read_client_hello_error::*;
-        let legacy_version = ProtocolVersion::new(read_u16(io).await.context(LegacyVersionSnafu)?);
-        let random = super::HelloRandom(read_array(io).await.context(RandomSnafu)?);
-        let legacy_session_id = read_session_id(io).await.context(SessionIdSnafu)?;
-        let cipher_suites = read_code_point_list::<CipherSuite, _, _>(io)
-            .await
-            .context(CipherSuitesSnafu)?;
-        let compression = read_bounded_vector(io, Width::U8, 1..=Width::U8.max())
-            .await
+        let legacy_version = ProtocolVersion::new(read_u16(src).context(LegacyVersionSnafu)?);
+        let random = super::HelloRandom(read_array(src).context(RandomSnafu)?);
+        let legacy_session_id = read_session_id(src).context(SessionIdSnafu)?;
+        let cipher_suites =
+            read_code_point_list::<CipherSuite, _>(src).context(CipherSuitesSnafu)?;
+        let mut compression = read_bounded_vector(src, Width::U8, 1..=Width::U8.max())
             .context(CompressionMethodsSnafu)?;
-        if compression.as_ref() != [0] {
+        if compression.remaining() != 1 || compression.get_u8() != 0 {
             return CompressionMethodsNotNullSnafu.fail();
         }
-        let block = read_extension_block(io).await.context(ExtensionsSnafu)?;
+        let block = read_extension_block(src).context(ExtensionsSnafu)?;
         LengthOutOfRangeError::check(block.remaining(), BLOCK).context(ExtensionsLengthSnafu)?;
         let mut block = BlockReader::new(block);
         let mut extensions = Vec::new();
@@ -433,74 +423,55 @@ pub mod codec {
         data: &mut B,
     ) -> Result<ClientHelloExtension<B>, ReadClientHelloError>
     where
-        B: Buf + nitori_call::Receiver<Family: MessageSource<Bytes = B>> + Unpin + Default,
+        B: Buf + SplitTo,
     {
         use crate::{
-            code_point::codec::{ReadByteCodePointListHostExt as _, ReadCodePointListHostExt as _},
+            code_point::codec::{read_byte_code_point_list, read_code_point_list},
             extension::{
-                alpn::codec::ReadProtocolNameListHostExt as _,
-                cookie::codec::ReadCookieHostExt as _,
-                key_share::codec::ReadClientSharesHostExt as _,
-                pre_shared_key::codec::ReadOfferedPsksHostExt as _,
-                server_name::codec::ReadServerNameHostExt as _,
+                alpn::codec::read_protocol_name_list, cookie::codec::read_cookie,
+                key_share::codec::read_client_shares, pre_shared_key::codec::read_offered_psks,
+                server_name::codec::read_server_name,
             },
         };
         use ClientHelloExtension as X;
         use RestrictedExtension as R;
         use read_client_hello_error::*;
         Ok(match extension {
-            R::ServerName => X::ServerName(
-                data.sync_read_server_name_unpin()
-                    .context(ServerNameSnafu)?,
-            ),
-            R::SupportedGroups => X::SupportedGroups(
-                data.sync_read_code_point_list_unpin()
-                    .context(SupportedGroupsSnafu)?,
-            ),
+            R::ServerName => X::ServerName(read_server_name(data).context(ServerNameSnafu)?),
+            R::SupportedGroups => {
+                X::SupportedGroups(read_code_point_list(data).context(SupportedGroupsSnafu)?)
+            }
             R::SignatureAlgorithms => X::SignatureAlgorithms(
-                data.sync_read_code_point_list_unpin()
-                    .context(SignatureAlgorithmsSnafu)?,
+                read_code_point_list(data).context(SignatureAlgorithmsSnafu)?,
             ),
             R::ApplicationLayerProtocolNegotiation => X::ApplicationLayerProtocolNegotiation(
-                data.sync_read_protocol_name_list_unpin()
-                    .context(ApplicationLayerProtocolNegotiationSnafu)?,
+                read_protocol_name_list(data).context(ApplicationLayerProtocolNegotiationSnafu)?,
             ),
             R::SignedCertificateTimestamp => X::SignedCertificateTimestamp,
             R::ClientCertificateType => X::ClientCertificateType(
-                data.sync_read_byte_code_point_list_unpin()
-                    .context(ClientCertificateTypeSnafu)?,
+                read_byte_code_point_list(data).context(ClientCertificateTypeSnafu)?,
             ),
             R::ServerCertificateType => X::ServerCertificateType(
-                data.sync_read_byte_code_point_list_unpin()
-                    .context(ServerCertificateTypeSnafu)?,
+                read_byte_code_point_list(data).context(ServerCertificateTypeSnafu)?,
             ),
-            R::PreSharedKey => X::PreSharedKey(
-                data.sync_read_offered_psks_unpin()
-                    .context(PreSharedKeySnafu)?,
-            ),
+            R::PreSharedKey => X::PreSharedKey(read_offered_psks(data).context(PreSharedKeySnafu)?),
             R::EarlyData => X::EarlyData,
-            R::SupportedVersions => X::SupportedVersions(
-                data.sync_read_code_point_list_unpin()
-                    .context(SupportedVersionsSnafu)?,
-            ),
-            R::Cookie => X::Cookie(data.sync_read_cookie_unpin().context(CookieSnafu)?),
+            R::SupportedVersions => {
+                X::SupportedVersions(read_code_point_list(data).context(SupportedVersionsSnafu)?)
+            }
+            R::Cookie => X::Cookie(read_cookie(data).context(CookieSnafu)?),
             R::PskKeyExchangeModes => X::PskKeyExchangeModes(
-                data.sync_read_byte_code_point_list_unpin()
-                    .context(PskKeyExchangeModesSnafu)?,
+                read_byte_code_point_list(data).context(PskKeyExchangeModesSnafu)?,
             ),
             R::SignatureAlgorithmsCert => X::SignatureAlgorithmsCert(
-                data.sync_read_code_point_list_unpin()
-                    .context(SignatureAlgorithmsCertSnafu)?,
+                read_code_point_list(data).context(SignatureAlgorithmsCertSnafu)?,
             ),
-            R::KeyShare => X::KeyShare(
-                data.sync_read_client_shares_unpin()
-                    .context(KeyShareSnafu)?,
-            ),
-            R::QuicTransportParameters => X::QuicTransportParameters(
-                crate::extension::OpaqueData::read(core::mem::take(data)),
-            ),
+            R::KeyShare => X::KeyShare(read_client_shares(data).context(KeyShareSnafu)?),
+            R::QuicTransportParameters => {
+                X::QuicTransportParameters(crate::extension::OpaqueData::read(take_rest(data)))
+            }
             R::EncryptedClientHello => {
-                X::EncryptedClientHello(crate::extension::OpaqueData::read(core::mem::take(data)))
+                X::EncryptedClientHello(crate::extension::OpaqueData::read(take_rest(data)))
             }
         })
     }
@@ -693,60 +664,47 @@ pub mod codec {
 
     /// Writes `hello`, header included.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written, and the error counts them over the
-    /// whole message.
-    #[call(sync)]
-    pub async fn write_client_hello<F: Write, A: ReceiverAccess<Family = F>, C: AsRef<[u8]>>(
-        io: &mut A,
-        hello: &ClientHello<C>,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        let mut out = Out::new(io);
-        out.header(HandshakeType::CLIENT_HELLO, hello.body_len())
-            .await?;
-        out.u16(hello.legacy_version.get()).await?;
-        out.put(&hello.random.0[..]).await?;
-        out.vector(Width::U8, hello.legacy_session_id.as_bytes())
-            .await?;
-        out.code_point_list(&hello.cipher_suites).await?;
-        out.put(&[1, 0][..]).await?;
-        out.length(Width::U16, hello.block_len()).await?;
+    /// If `dst` has no room for what it writes, as [`BufMut`] does.
+    pub fn write_client_hello<C: AsRef<[u8]>>(dst: &mut impl BufMut, hello: &ClientHello<C>) {
+        write_header(dst, HandshakeType::CLIENT_HELLO, hello.body_len());
+        dst.put_u16(hello.legacy_version.get());
+        dst.put_slice(&hello.random.0[..]);
+        write_vector(dst, Width::U8, hello.legacy_session_id.as_bytes());
+        write_code_point_list(dst, &hello.cipher_suites);
+        dst.put_slice(&[1, 0][..]);
+        write_length(dst, Width::U16, hello.block_len());
         for extension in &hello.extensions {
-            out.u16(extension.extension_type().get()).await?;
-            out.length(Width::U16, extension.data_len()).await?;
-            write_extension(&mut out, extension).await?;
+            dst.put_u16(extension.extension_type().get());
+            write_length(dst, Width::U16, extension.data_len());
+            write_extension(dst, extension);
         }
-        Ok(())
     }
 
     /// Writes the data of `extension`.
-    async fn write_extension<F: Write, A: ReceiverAccess<Family = F>, C: AsRef<[u8]>>(
-        out: &mut Out<'_, A>,
-        extension: &ClientHelloExtension<C>,
-    ) -> Result<(), WriteAllError<F::Error>> {
+    fn write_extension<C: AsRef<[u8]>>(dst: &mut impl BufMut, extension: &ClientHelloExtension<C>) {
         use ClientHelloExtension as X;
         match extension {
-            X::ServerName(name) => name.encode(out).await,
-            X::SupportedGroups(list) => out.code_point_list(list).await,
+            X::ServerName(name) => name.encode(dst),
+            X::SupportedGroups(list) => write_code_point_list(dst, list),
             X::SignatureAlgorithms(list) | X::SignatureAlgorithmsCert(list) => {
-                out.code_point_list(list).await
+                write_code_point_list(dst, list)
             }
-            X::ApplicationLayerProtocolNegotiation(list) => list.encode(out).await,
-            X::SignedCertificateTimestamp | X::EarlyData => Ok(()),
+            X::ApplicationLayerProtocolNegotiation(list) => list.encode(dst),
+            X::SignedCertificateTimestamp | X::EarlyData => {}
             X::ClientCertificateType(list) | X::ServerCertificateType(list) => {
-                out.byte_code_point_list(list).await
+                write_byte_code_point_list(dst, list)
             }
-            X::PreSharedKey(offered) => offered.encode(out).await,
-            X::SupportedVersions(list) => out.code_point_list(list).await,
-            X::Cookie(cookie) => cookie.encode(out).await,
-            X::PskKeyExchangeModes(list) => out.byte_code_point_list(list).await,
-            X::KeyShare(shares) => shares.encode(out).await,
+            X::PreSharedKey(offered) => offered.encode(dst),
+            X::SupportedVersions(list) => write_code_point_list(dst, list),
+            X::Cookie(cookie) => cookie.encode(dst),
+            X::PskKeyExchangeModes(list) => write_byte_code_point_list(dst, list),
+            X::KeyShare(shares) => shares.encode(dst),
             X::QuicTransportParameters(data) | X::EncryptedClientHello(data) => {
-                out.put(data.data().as_ref()).await
+                dst.put_slice(data.data().as_ref())
             }
-            X::Unknown(extension) => out.put(extension.data().as_ref()).await,
+            X::Unknown(extension) => dst.put_slice(extension.data().as_ref()),
         }
     }
 }

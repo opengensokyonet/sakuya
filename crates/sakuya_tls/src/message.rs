@@ -7,10 +7,12 @@
 //! [`codec::read_handshake_message`] collects one whole message from that
 //! stream into a [`HandshakeMessage`], refusing a length above the
 //! [`MessageLimits`] for its type before reading the body. Each message type
-//! then has its own module with a reader and a writer that run on the bytes
-//! of one message: a reader takes a [`MessageSource`], `&[u8]` or `Bytes`,
-//! and its variable-length fields are subslices or `Bytes` of that source,
-//! without copying. A reader checks the encoding and the rules of RFC 9846
+//! then has its own module with a reader and a writer, synchronous functions
+//! that run on the bytes of one message: a reader takes a source that is a
+//! [`Buf`] and splits with [`SplitTo`], such as `&[u8]`
+//! or `Bytes`, and its variable-length fields are pieces of that source,
+//! subslices or `Bytes`, without copying; a writer takes a
+//! [`BufMut`](bytes::BufMut). A reader checks the encoding and the rules of RFC 9846
 //! that one message states by itself; rules that relate a message to others,
 //! or to what an endpoint offered, are for the handshake to check.
 //!
@@ -32,17 +34,13 @@
 use crate::{
     alert::AlertDescription,
     code_point::code_point,
-    vector::{
-        LengthOutOfRangeError, ReadBoundedVectorError, read_bounded_vector, read_bytes, read_u8,
-        read_u24,
-    },
+    source::{read_bytes, read_u8, read_u24},
+    vector::{LengthOutOfRangeError, ReadBoundedVectorError, read_bounded_vector},
     width::Width,
 };
 use bytes::{Buf, Bytes};
-use core::convert::Infallible;
-use nitori_call::{Direct, Receiver, ReceiverAccess};
 use nitori_crypto::HashAlgorithm;
-use nitori_io::{ReadChunk, error::IncompleteError};
+use nitori_io::{SplitTo, error::IncompleteError};
 use snafu::{ResultExt, Snafu};
 
 pub mod certificate;
@@ -82,38 +80,6 @@ code_point! {
     KEY_UPDATE = 24 => "key_update",
     /// message_hash, which appears only in the transcript.
     MESSAGE_HASH = 254 => "message_hash",
-}
-
-mod sealed {
-    pub trait Sealed {}
-}
-
-/// The family of a source that the message readers run on: `&[u8]` or
-/// `Bytes`, holding the bytes of one message or of part of one.
-///
-/// Such a source never waits and never fails, and it hands out what is left
-/// of its bytes, up to the requested length, as one chunk of type
-/// [`MessageSource::Bytes`], itself a source of the same family. A reader
-/// therefore reads a variable-length field as one chunk and reads the
-/// structure inside it from that chunk, so that it cannot read past the
-/// field; a source that ends early is an [`IncompleteError`] failure.
-pub trait MessageSource:
-    ReadChunk<Error = Infallible, Chunk = <Self as MessageSource>::Bytes> + sealed::Sealed
-{
-    /// The chunks of the source: `&[u8]` or `Bytes`.
-    type Bytes: Buf + AsRef<[u8]> + Default + Unpin + Receiver<Family = Self>;
-}
-
-impl sealed::Sealed for Direct<&[u8]> {}
-
-impl<'a> MessageSource for Direct<&'a [u8]> {
-    type Bytes = &'a [u8];
-}
-
-impl sealed::Sealed for Direct<Bytes> {}
-
-impl MessageSource for Direct<Bytes> {
-    type Bytes = Bytes;
 }
 
 /// Failures of reading the header of a handshake message of a given type
@@ -176,17 +142,17 @@ impl UnexpectedTypeError {
 }
 
 /// Reads the header of a message of type `expected` and returns its body.
-pub(crate) async fn read_body<F: MessageSource, A: ReceiverAccess<Family = F>>(
-    io: &mut A,
+pub(crate) fn read_body<S: Buf + SplitTo>(
+    src: &mut S,
     expected: HandshakeType,
-) -> Result<F::Bytes, ReadHeaderError> {
+) -> Result<S, ReadHeaderError> {
     use read_header_error::*;
-    let found = HandshakeType(read_u8(io).await.context(TypeSnafu)?);
+    let found = HandshakeType(read_u8(src).context(TypeSnafu)?);
     if found != expected {
         return Err(UnexpectedTypeError { found }.into());
     }
-    let len = read_u24(io).await.context(LengthSnafu)?;
-    read_bytes(io, len as usize).await.context(BodySnafu)
+    let len = read_u24(src).context(LengthSnafu)?;
+    read_bytes(src, len as usize).context(BodySnafu)
 }
 
 /// The random field of a ClientHello or ServerHello: 32 bytes.
@@ -249,12 +215,16 @@ impl core::fmt::Debug for LegacySessionId {
 }
 
 /// Reads a session ID with its one-byte length.
-pub(crate) async fn read_session_id<F: MessageSource, A: ReceiverAccess<Family = F>>(
-    io: &mut A,
+pub(crate) fn read_session_id<S: Buf + SplitTo>(
+    src: &mut S,
 ) -> Result<LegacySessionId, ReadBoundedVectorError> {
-    let bytes = read_bounded_vector(io, Width::U8, 0..=LegacySessionId::MAX_LEN).await?;
+    let mut bytes = read_bounded_vector(src, Width::U8, 0..=LegacySessionId::MAX_LEN)?;
+    let len = bytes.remaining();
+    let mut id = LegacySessionId::EMPTY;
+    bytes.copy_to_slice(&mut id.bytes[..len]);
     // invariant: the range was checked.
-    Ok(LegacySessionId::new(bytes.as_ref()).expect("at most 32 bytes"))
+    id.len = len as u8;
+    Ok(id)
 }
 
 /// The largest body a handshake message of one type may have, in bytes,

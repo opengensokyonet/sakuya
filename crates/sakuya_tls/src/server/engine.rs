@@ -85,25 +85,24 @@ use crate::{
         HandshakeMessage, HelloRandom, MessageLimits,
         certificate::{
             Certificate, CertificateEntry, CertificateList, InvalidCertificateEntryError,
-            InvalidCertificateError, codec::WriteCertificateHostExt as _,
+            InvalidCertificateError, codec::write_certificate,
         },
-        certificate_verify::{CertificateVerify, codec::WriteCertificateVerifyHostExt as _},
+        certificate_verify::{CertificateVerify, codec::write_certificate_verify},
         client_hello::{
             ClientHello, ClientHelloExtension,
-            codec::{ReadClientHelloError, ReadClientHelloHostExt as _},
+            codec::{ReadClientHelloError, read_client_hello},
         },
         codec::{ReadHandshakeMessageError, ReadHandshakeMessageExt as _},
         encrypted_extensions::{
-            EncryptedExtensions, EncryptedExtensionsExtension,
-            codec::WriteEncryptedExtensionsHostExt as _,
+            EncryptedExtensions, EncryptedExtensionsExtension, codec::write_encrypted_extensions,
         },
         new_session_ticket::{
             NewSessionTicket, NewSessionTicketExtension, TicketNonce,
-            codec::WriteNewSessionTicketHostExt as _,
+            codec::write_new_session_ticket,
         },
         server_hello::{
             HelloRetryRequest, HelloRetryRequestExtension, ServerHello, ServerHelloExtension,
-            codec::{WriteHelloRetryRequestHostExt as _, WriteServerHelloHostExt as _},
+            codec::{write_hello_retry_request, write_server_hello},
         },
     },
     role::Server,
@@ -325,10 +324,7 @@ pub async fn read_first_client_hello<W: CryptoInput>(
                 Ok(source) => alert(ReadFirstClientHelloError::Message { source }),
                 Err(source) => HandshakeError::Transport { source },
             })?;
-    let client_hello = encoded
-        .encoded()
-        .clone()
-        .sync_read_client_hello_unpin()
+    let client_hello = read_client_hello(&mut encoded.encoded().clone())
         .map_err(|source| alert(ReadFirstClientHelloError::ClientHello { source }))?;
     check_session_id(&client_hello)?;
     Ok(FirstClientHello {
@@ -840,10 +836,7 @@ where
 fn read_hello<L, S, G, K>(
     message: &HandshakeMessage,
 ) -> Result<ClientHello<Bytes>, ServerAlertError<L, S, G, K>> {
-    message
-        .encoded()
-        .clone()
-        .sync_read_client_hello_unpin()
+    read_client_hello(&mut message.encoded().clone())
         .map_err(|source| ServerAlertError::ClientHello { source })
 }
 
@@ -1117,7 +1110,7 @@ where
             // invariant: two short extensions fit the block.
             .expect("a HelloRetryRequest of two extensions");
             let encoded = encode(retry.encoded_len(), |sink| {
-                sink.sync_write_hello_retry_request_unpin(&retry)
+                write_hello_retry_request(sink, &retry)
             });
             write_message::<S::Target, W, _, _, _, _>(host, &encoded).await?;
             let transcript = Transcript::<Server, B>::new(&backend, suite.hash())
@@ -1276,7 +1269,7 @@ where
         // that of a HelloRetryRequest is a broken backend.
         .expect("a ServerHello of three extensions");
         let encoded_hello = encode(server_hello.encoded_len(), |sink| {
-            sink.sync_write_server_hello_unpin(&server_hello)
+            write_server_hello(sink, &server_hello)
         });
         write_message::<S::Target, W, _, _, _, _>(host, &encoded_hello).await?;
         let (handshake, secrets) = match early {
@@ -1365,7 +1358,7 @@ where
         let encrypted = EncryptedExtensions::new(extensions)
             .map_err(|source| alert(ServerAlertError::EncryptedExtensions { source }))?;
         let encoded = encode(encrypted.encoded_len(), |sink| {
-            sink.sync_write_encrypted_extensions_unpin(&encrypted)
+            write_encrypted_extensions(sink, &encrypted)
         });
         write_message::<S::Target, W, _, _, _, _>(host, &encoded).await?;
         let mut handshake = handshake.add(&encoded);
@@ -1393,7 +1386,7 @@ where
             let certificate = Certificate::new(Bytes::new(), CertificateList::X509(entries))
                 .map_err(|source| alert(ServerAlertError::Certificate { source }))?;
             let encoded = encode(certificate.encoded_len(), |sink| {
-                sink.sync_write_certificate_unpin(&certificate)
+                write_certificate(sink, &certificate)
             });
             write_message::<S::Target, W, _, _, _, _>(host, &encoded).await?;
             handshake = handshake.add(&encoded);
@@ -1408,7 +1401,7 @@ where
             )
             .map_err(|source| alert(ServerAlertError::SignatureLength { source }))?;
             let encoded = encode(verify.encoded_len(), |sink| {
-                sink.sync_write_certificate_verify_unpin(&verify)
+                write_certificate_verify(sink, &verify)
             });
             write_message::<S::Target, W, _, _, _, _>(host, &encoded).await?;
             handshake = handshake.add(&encoded);
@@ -1540,7 +1533,7 @@ where
             // the block.
             .expect("a NewSessionTicket of a ticket");
             let encoded = encode(message.encoded_len(), |sink| {
-                sink.sync_write_new_session_ticket_unpin(&message)
+                write_new_session_ticket(sink, &message)
             });
             write_message::<S::Target, W, _, _, _, _>(host, &encoded).await?;
         }

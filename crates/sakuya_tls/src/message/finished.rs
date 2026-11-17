@@ -30,24 +30,17 @@ impl Finished {
 }
 
 pub mod codec {
-    //! Reading and writing Finished messages as `nitori_call` operations.
-    //!
-    //! [`read_finished`] and [`write_finished`] are also operation structs,
-    //! with `{Name}Ext` on receiver accesses and `{Name}HostExt` on call
-    //! executors, including the `sync_` methods.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
+    //! Reading and writing Finished messages.
 
     use super::Finished;
     use crate::{
         alert::AlertDescription,
-        message::{HandshakeType, MessageSource, ReadHeaderError, read_body},
-        vector::Out,
+        message::{HandshakeType, ReadHeaderError, read_body},
+        vector::write_header,
     };
-    use nitori_call::{ReceiverAccess, call};
+    use bytes::{Buf, BufMut};
     use nitori_crypto::{Digest, DigestLengthMismatchError, HashAlgorithm};
-    use nitori_io::{Write, calls::WriteAllError};
+    use nitori_io::SplitTo;
     use snafu::{ResultExt, Snafu};
 
     /// Reads a Finished message, header included, whose verify_data is as
@@ -56,12 +49,11 @@ pub mod codec {
     /// # Errors
     ///
     /// [`ReadFinishedError`].
-    #[call(sync)]
-    pub async fn read_finished<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
+    pub fn read_finished<S: Buf + SplitTo + AsRef<[u8]>>(
+        src: &mut S,
         hash: HashAlgorithm,
     ) -> Result<Finished, ReadFinishedError> {
-        let body = read_body(io, HandshakeType::FINISHED).await?;
+        let body = read_body(src, HandshakeType::FINISHED)?;
         let verify_data =
             Digest::new(hash, body.as_ref()).context(read_finished_error::VerifyDataSnafu)?;
         Ok(Finished { verify_data })
@@ -98,36 +90,26 @@ pub mod codec {
 
     /// Writes `finished`, header included.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written.
-    #[call(sync)]
-    pub async fn write_finished<F: Write, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-        finished: &Finished,
-    ) -> Result<(), WriteAllError<F::Error>> {
+    /// If `dst` has no room for what it writes, as [`BufMut`] does.
+    pub fn write_finished(dst: &mut impl BufMut, finished: &Finished) {
         let verify_data = finished.verify_data.as_bytes();
-        let mut out = Out::new(io);
-        out.header(HandshakeType::FINISHED, verify_data.len())
-            .await?;
-        out.put(verify_data).await
+        write_header(dst, HandshakeType::FINISHED, verify_data.len());
+        dst.put_slice(verify_data)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::codec::{ReadFinishedError, ReadFinishedHostExt as _};
+    use super::codec::{ReadFinishedError, read_finished};
     use crate::{alert::AlertDescription, test_support::message};
     use nitori_crypto::HashAlgorithm;
 
     #[test]
     fn verify_data_is_as_long_as_the_hash() {
         let bytes = message(20, &[0; 32]);
-        let error = bytes
-            .as_slice()
-            .sync_read_finished_unpin(HashAlgorithm::Sha384)
-            .unwrap_err();
+        let error = read_finished(&mut bytes.as_slice(), HashAlgorithm::Sha384).unwrap_err();
         let ReadFinishedError::VerifyData { source } = &error else {
             panic!("{error:?}")
         };

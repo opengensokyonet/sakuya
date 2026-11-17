@@ -35,30 +35,19 @@ use sakuya_tls::{
         HandshakeType, MessageLimit, MessageLimits, ReceivedMessageType,
         certificate::{
             CertificateFormat, CertificateList,
-            codec::{ReadCertificateHostExt as _, WriteCertificateHostExt as _},
+            codec::{read_certificate, write_certificate},
         },
-        certificate_request::codec::{
-            ReadCertificateRequestHostExt as _, WriteCertificateRequestHostExt as _,
-        },
-        certificate_verify::codec::{
-            ReadCertificateVerifyHostExt as _, WriteCertificateVerifyHostExt as _,
-        },
-        client_hello::codec::{ReadClientHelloHostExt as _, WriteClientHelloHostExt as _},
+        certificate_request::codec::{read_certificate_request, write_certificate_request},
+        certificate_verify::codec::{read_certificate_verify, write_certificate_verify},
+        client_hello::codec::{read_client_hello, write_client_hello},
         codec::{ReadHandshakeMessageError, ReadHandshakeMessageHostExt as _},
-        encrypted_extensions::codec::{
-            ReadEncryptedExtensionsHostExt as _, WriteEncryptedExtensionsHostExt as _,
-        },
-        finished::codec::{ReadFinishedHostExt as _, WriteFinishedHostExt as _},
-        message_hash::codec::{ReadMessageHashHostExt as _, WriteMessageHashHostExt as _},
-        new_session_ticket::codec::{
-            ReadNewSessionTicketHostExt as _, WriteNewSessionTicketHostExt as _,
-        },
+        encrypted_extensions::codec::{read_encrypted_extensions, write_encrypted_extensions},
+        finished::codec::{read_finished, write_finished},
+        message_hash::codec::{read_message_hash, write_message_hash},
+        new_session_ticket::codec::{read_new_session_ticket, write_new_session_ticket},
         server_hello::{
             ServerHelloMessage,
-            codec::{
-                ReadServerHelloMessageHostExt as _, WriteHelloRetryRequestHostExt as _,
-                WriteServerHelloHostExt as _,
-            },
+            codec::{read_server_hello_message, write_hello_retry_request, write_server_hello},
         },
     },
 };
@@ -102,9 +91,9 @@ macro_rules! read_both {
     ) => {{
         let input: &[u8] = $input;
         let mut borrowed_source = input;
-        let borrowed = borrowed_source.$read($($argument),*);
+        let borrowed = $read(&mut borrowed_source $(, $argument)*);
         let mut shared_source = Bytes::copy_from_slice(input);
-        let shared = shared_source.$read($($argument),*);
+        let shared = $read(&mut shared_source $(, $argument)*);
         let outcome: Outcome = match (borrowed, shared) {
             (Ok(borrowed), Ok(shared)) => {
                 let taken = input.len() - borrowed_source.len();
@@ -134,19 +123,16 @@ macro_rules! read_both {
                 // sources; the value read from `Bytes` reads back from a
                 // slice as the value read from the slice.
                 let mut again = borrowed_written.as_slice();
-                let reread = again
-                    .$read($($argument),*)
+                let reread = $read(&mut again $(, $argument)*)
                     .expect("a written message reads back");
                 assert!(again.is_empty(), "a written message reads back whole");
                 assert_eq!(reread, borrowed);
                 let mut again = shared_written.as_slice();
-                let reread = again
-                    .$read($($argument),*)
+                let reread = $read(&mut again $(, $argument)*)
                     .expect("a written message reads back");
                 assert_eq!(reread, borrowed, "sources read different values");
                 let mut again = Bytes::from(shared_written);
-                let reread = again
-                    .$read($($argument),*)
+                let reread = $read(&mut again $(, $argument)*)
                     .expect("a written message reads back");
                 assert!(again.is_empty(), "a written message reads back whole");
                 assert_eq!(reread, shared);
@@ -172,66 +158,50 @@ macro_rules! read_both {
 }
 
 fn client_hello(input: &[u8]) -> Outcome {
-    read_both!(input, sync_read_client_hello_unpin(), |out, hello| {
-        out.sync_write_client_hello_unpin(hello).unwrap();
+    read_both!(input, read_client_hello(), |out, hello| {
+        write_client_hello(out, hello);
         hello.encoded_len()
     })
 }
 
 fn server_hello(input: &[u8]) -> Outcome {
-    read_both!(
-        input,
-        sync_read_server_hello_message_unpin(),
-        |out, hello| {
-            match hello {
-                ServerHelloMessage::ServerHello(hello) => {
-                    out.sync_write_server_hello_unpin(hello).unwrap();
-                    hello.encoded_len()
-                }
-                ServerHelloMessage::HelloRetryRequest(retry) => {
-                    out.sync_write_hello_retry_request_unpin(retry).unwrap();
-                    retry.encoded_len()
-                }
+    read_both!(input, read_server_hello_message(), |out, hello| {
+        match hello {
+            ServerHelloMessage::ServerHello(hello) => {
+                write_server_hello(out, hello);
+                hello.encoded_len()
+            }
+            ServerHelloMessage::HelloRetryRequest(retry) => {
+                write_hello_retry_request(out, retry);
+                retry.encoded_len()
             }
         }
-    )
+    })
 }
 
 fn encrypted_extensions(input: &[u8]) -> Outcome {
-    read_both!(
-        input,
-        sync_read_encrypted_extensions_unpin(),
-        |out, message| {
-            out.sync_write_encrypted_extensions_unpin(message).unwrap();
-            message.encoded_len()
-        }
-    )
+    read_both!(input, read_encrypted_extensions(), |out, message| {
+        write_encrypted_extensions(out, message);
+        message.encoded_len()
+    })
 }
 
 fn certificate_request(input: &[u8]) -> Outcome {
-    read_both!(
-        input,
-        sync_read_certificate_request_unpin(),
-        |out, request| {
-            out.sync_write_certificate_request_unpin(request).unwrap();
-            request.encoded_len()
-        }
-    )
+    read_both!(input, read_certificate_request(), |out, request| {
+        write_certificate_request(out, request);
+        request.encoded_len()
+    })
 }
 
 fn certificate(input: &[u8], format: CertificateFormat) -> Outcome {
-    read_both!(
-        input,
-        sync_read_certificate_unpin(format),
-        |out, certificate| {
-            assert_eq!(certificate.certificates().format(), format);
-            if let CertificateList::RawPublicKey(_) = certificate.certificates() {
-                assert!(certificate.certificates().entries().len() <= 1);
-            }
-            out.sync_write_certificate_unpin(certificate).unwrap();
-            certificate.encoded_len()
+    read_both!(input, read_certificate(format), |out, certificate| {
+        assert_eq!(certificate.certificates().format(), format);
+        if let CertificateList::RawPublicKey(_) = certificate.certificates() {
+            assert!(certificate.certificates().entries().len() <= 1);
         }
-    )
+        write_certificate(out, certificate);
+        certificate.encoded_len()
+    })
 }
 
 /// Reads a Certificate in both forms. The forms differ only in that a raw
@@ -244,9 +214,7 @@ fn certificates(input: &[u8]) -> [Outcome; 2] {
         (Ok(_), Err(alert)) => {
             assert_eq!(alert, AlertDescription::ILLEGAL_PARAMETER);
             let mut source = input;
-            let read = source
-                .sync_read_certificate_unpin(CertificateFormat::X509)
-                .unwrap();
+            let read = read_certificate(&mut source, CertificateFormat::X509).unwrap();
             assert!(read.certificates().entries().len() > 1);
         }
         (Err(_), Ok(_)) => panic!("a raw public key reads where X.509 does not"),
@@ -256,25 +224,21 @@ fn certificates(input: &[u8]) -> [Outcome; 2] {
 }
 
 fn certificate_verify(input: &[u8]) -> Outcome {
-    read_both!(
-        input,
-        sync_read_certificate_verify_unpin(),
-        |out, verify| {
-            out.sync_write_certificate_verify_unpin(verify).unwrap();
-            verify.encoded_len()
-        }
-    )
+    read_both!(input, read_certificate_verify(), |out, verify| {
+        write_certificate_verify(out, verify);
+        verify.encoded_len()
+    })
 }
 
 /// Reads a Finished whose verify_data is as long as the hash of `suite`.
 fn finished(input: &[u8], suite: CipherSuite) -> Outcome {
     let hash = suite.hash().unwrap();
-    let outcome = read_both!(input, sync_read_finished_unpin(hash), |out, finished| {
+    let outcome = read_both!(input, read_finished(hash), |out, finished| {
         assert_eq!(
             finished.verify_data().as_bytes(),
             &input[4..][..hash.output_len()]
         );
-        out.sync_write_finished_unpin(finished).unwrap();
+        write_finished(out, finished);
         finished.encoded_len()
     });
     check_fixed(input, HandshakeType::FINISHED, hash.output_len(), outcome);
@@ -282,22 +246,18 @@ fn finished(input: &[u8], suite: CipherSuite) -> Outcome {
 }
 
 fn new_session_ticket(input: &[u8]) -> Outcome {
-    read_both!(
-        input,
-        sync_read_new_session_ticket_unpin(),
-        |out, ticket| {
-            out.sync_write_new_session_ticket_unpin(ticket).unwrap();
-            ticket.encoded_len()
-        }
-    )
+    read_both!(input, read_new_session_ticket(), |out, ticket| {
+        write_new_session_ticket(out, ticket);
+        ticket.encoded_len()
+    })
 }
 
 /// Reads a message_hash whose body is a hash of the hash of `suite`.
 fn message_hash(input: &[u8], suite: CipherSuite) -> Outcome {
     let hash = suite.hash().unwrap();
-    let outcome = read_both!(input, sync_read_message_hash_unpin(hash), |out, message| {
+    let outcome = read_both!(input, read_message_hash(hash), |out, message| {
         assert_eq!(message.hash().as_bytes(), &input[4..][..hash.output_len()]);
-        out.sync_write_message_hash_unpin(message).unwrap();
+        write_message_hash(out, message);
         message.encoded_len()
     });
     check_fixed(

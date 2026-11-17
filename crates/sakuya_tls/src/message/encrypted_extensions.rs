@@ -148,36 +148,28 @@ extension_subset! {
 }
 
 pub mod codec {
-    //! Reading and writing EncryptedExtensions messages as `nitori_call`
-    //! operations.
-    //!
-    //! [`read_encrypted_extensions`] and [`write_encrypted_extensions`] are
-    //! also operation structs, with `{Name}Ext` on receiver accesses and
-    //! `{Name}HostExt` on call executors, including the `sync_` methods.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
+    //! Reading and writing EncryptedExtensions messages.
 
     use super::{
         EncryptedExtensions, EncryptedExtensionsDisallowedExtension, EncryptedExtensionsExtension,
     };
     use crate::{
         alert::AlertDescription,
-        code_point::codec::{ReadCodePointListError, ReadCodePointListHostExt as _},
+        code_point::codec::{ReadCodePointListError, read_code_point_list, write_code_point_list},
         extension::{
             BlockEntry as _, BlockReader, ExtensionNotAllowedError, ReadExtensionBlockError,
-            ReadExtensionBlockHostExt as _, RestrictedExtension, UnknownExtension,
-            alpn::codec::{ReadSelectedProtocolError, ReadSelectedProtocolHostExt as _},
+            RestrictedExtension, UnknownExtension,
+            alpn::codec::{ReadSelectedProtocolError, read_selected_protocol},
             certificate_type::CertificateType,
-            excess, not_allowed,
+            excess, not_allowed, read_extension_block,
         },
-        message::{HandshakeType, MessageSource, ReadHeaderError, read_body},
-        vector::{ExcessBytesError, Out, read_u8},
+        message::{HandshakeType, ReadHeaderError, read_body},
+        source::{read_u8, take_rest},
+        vector::{ExcessBytesError, write_header, write_length},
         width::Width,
     };
-    use bytes::Buf;
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{Write, calls::WriteAllError, error::IncompleteError};
+    use bytes::{Buf, BufMut};
+    use nitori_io::{SplitTo, error::IncompleteError};
     use snafu::{ResultExt, Snafu};
 
     /// Reads an EncryptedExtensions message, header included.
@@ -185,15 +177,12 @@ pub mod codec {
     /// # Errors
     ///
     /// [`ReadEncryptedExtensionsError`].
-    #[call(sync)]
-    pub async fn read_encrypted_extensions<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<EncryptedExtensions<F::Bytes>, ReadEncryptedExtensionsError> {
+    pub fn read_encrypted_extensions<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<EncryptedExtensions<S>, ReadEncryptedExtensionsError> {
         use read_encrypted_extensions_error::*;
-        let mut body = read_body(io, HandshakeType::ENCRYPTED_EXTENSIONS).await?;
-        let block = body
-            .sync_read_extension_block_unpin()
-            .context(ExtensionsSnafu)?;
+        let mut body = read_body(src, HandshakeType::ENCRYPTED_EXTENSIONS)?;
+        let block = read_extension_block(&mut body).context(ExtensionsSnafu)?;
         ExcessBytesError::check(body.remaining()).context(ExcessSnafu)?;
         let mut block = BlockReader::new(block);
         let mut extensions = Vec::new();
@@ -218,47 +207,36 @@ pub mod codec {
         data: &mut B,
     ) -> Result<EncryptedExtensionsExtension<B>, ReadEncryptedExtensionsError>
     where
-        B: Buf + nitori_call::Receiver<Family: MessageSource<Bytes = B>> + Unpin + Default,
+        B: Buf + SplitTo,
     {
         use EncryptedExtensionsExtension as X;
         use RestrictedExtension as R;
         use read_encrypted_extensions_error::*;
         Ok(match extension {
             R::ServerName => X::ServerName,
-            R::SupportedGroups => X::SupportedGroups(
-                data.sync_read_code_point_list_unpin()
-                    .context(SupportedGroupsSnafu)?,
-            ),
+            R::SupportedGroups => {
+                X::SupportedGroups(read_code_point_list(data).context(SupportedGroupsSnafu)?)
+            }
             R::ApplicationLayerProtocolNegotiation => X::ApplicationLayerProtocolNegotiation(
-                data.sync_read_selected_protocol_unpin()
-                    .context(ApplicationLayerProtocolNegotiationSnafu)?,
+                read_selected_protocol(data).context(ApplicationLayerProtocolNegotiationSnafu)?,
             ),
             R::ClientCertificateType => X::ClientCertificateType(CertificateType::new(
-                data.sync_read_certificate_type_unpin()
-                    .context(ClientCertificateTypeSnafu)?,
+                read_u8(data).context(ClientCertificateTypeSnafu)?,
             )),
             R::ServerCertificateType => X::ServerCertificateType(CertificateType::new(
-                data.sync_read_certificate_type_unpin()
-                    .context(ServerCertificateTypeSnafu)?,
+                read_u8(data).context(ServerCertificateTypeSnafu)?,
             )),
             R::EarlyData => X::EarlyData,
-            R::QuicTransportParameters => X::QuicTransportParameters(
-                crate::extension::OpaqueData::read(core::mem::take(data)),
-            ),
+            R::QuicTransportParameters => {
+                X::QuicTransportParameters(crate::extension::OpaqueData::read(take_rest(data)))
+            }
             R::EncryptedClientHello => {
-                X::EncryptedClientHello(crate::extension::OpaqueData::read(core::mem::take(data)))
+                X::EncryptedClientHello(crate::extension::OpaqueData::read(take_rest(data)))
             }
             other => {
                 return Err(not_allowed(other, EncryptedExtensionsDisallowedExtension::of).into());
             }
         })
-    }
-
-    #[call(sync)]
-    async fn read_certificate_type<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<u8, IncompleteError> {
-        read_u8(io).await
     }
 
     /// Failures that [`read_encrypted_extensions`] can produce.
@@ -348,45 +326,33 @@ pub mod codec {
 
     /// Writes `message`, header included.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written, and the error counts them over the
-    /// whole message.
-    #[call(sync)]
-    pub async fn write_encrypted_extensions<
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-        C: AsRef<[u8]>,
-    >(
-        io: &mut A,
+    /// If `dst` has no room for what it writes, as [`BufMut`] does.
+    pub fn write_encrypted_extensions<C: AsRef<[u8]>>(
+        dst: &mut impl BufMut,
         message: &EncryptedExtensions<C>,
-    ) -> Result<(), WriteAllError<F::Error>> {
+    ) {
         use EncryptedExtensionsExtension as X;
-        let mut out = Out::new(io);
         let block_len = message.block_len();
-        out.header(HandshakeType::ENCRYPTED_EXTENSIONS, 2 + block_len)
-            .await?;
-        out.length(Width::U16, block_len).await?;
+        write_header(dst, HandshakeType::ENCRYPTED_EXTENSIONS, 2 + block_len);
+        write_length(dst, Width::U16, block_len);
         for extension in &message.extensions {
-            out.u16(extension.extension_type().get()).await?;
-            out.length(Width::U16, extension.data_len()).await?;
+            dst.put_u16(extension.extension_type().get());
+            write_length(dst, Width::U16, extension.data_len());
             match extension {
                 X::ServerName | X::EarlyData => {}
-                X::SupportedGroups(list) => out.code_point_list(list).await?,
-                X::ApplicationLayerProtocolNegotiation(name) => {
-                    name.encode_selected(&mut out).await?
-                }
+                X::SupportedGroups(list) => write_code_point_list(dst, list),
+                X::ApplicationLayerProtocolNegotiation(name) => name.encode_selected(dst),
                 X::ClientCertificateType(kind) | X::ServerCertificateType(kind) => {
-                    out.u8(kind.get()).await?
+                    dst.put_u8(kind.get())
                 }
                 X::QuicTransportParameters(data) | X::EncryptedClientHello(data) => {
-                    out.put(data.data().as_ref()).await?
+                    dst.put_slice(data.data().as_ref())
                 }
-                X::Unknown(extension) => out.put(extension.data().as_ref()).await?,
+                X::Unknown(extension) => dst.put_slice(extension.data().as_ref()),
             }
         }
-        Ok(())
     }
 }
 

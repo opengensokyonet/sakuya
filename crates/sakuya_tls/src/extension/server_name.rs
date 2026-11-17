@@ -59,21 +59,17 @@ impl UnknownNameTypeError {
 }
 
 pub mod codec {
-    //! Reading and writing `server_name` data as `nitori_call` operations.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
+    //! Reading and writing `server_name` data.
 
     use super::{HOST_NAME, ServerName, UnknownNameTypeError};
     use crate::{
         alert::AlertDescription,
-        message::MessageSource,
-        vector::{Out, ReadBoundedVectorError, read_bounded_vector, read_u8},
+        source::read_u8,
+        vector::{ReadBoundedVectorError, read_bounded_vector, write_length, write_vector},
         width::Width,
     };
-    use bytes::Buf;
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{Write, calls::WriteAllError, error::IncompleteError};
+    use bytes::{Buf, BufMut};
+    use nitori_io::{SplitTo, error::IncompleteError};
     use snafu::{ResultExt, Snafu};
 
     /// Reads the data of a `server_name` extension in a ClientHello.
@@ -81,18 +77,15 @@ pub mod codec {
     /// # Errors
     ///
     /// [`ReadServerNameError`].
-    #[call(sync)]
-    pub async fn read_server_name<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<ServerName<F::Bytes>, ReadServerNameError> {
+    pub fn read_server_name<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<ServerName<S>, ReadServerNameError> {
         use read_server_name_error::*;
         let range = 1..=Width::U16.max();
-        let mut list = read_bounded_vector(io, Width::U16, range.clone())
-            .await
-            .context(ListSnafu)?;
+        let mut list = read_bounded_vector(src, Width::U16, range.clone()).context(ListSnafu)?;
         let mut host_name = None;
         while list.has_remaining() {
-            let name = list.sync_read_server_name_entry_unpin()?;
+            let name = read_server_name_entry(&mut list)?;
             if host_name.replace(name).is_some() {
                 return DuplicateHostNameSnafu.fail();
             }
@@ -104,18 +97,13 @@ pub mod codec {
     }
 
     /// Reads one name of a server name list, which must be a host_name.
-    #[call(sync)]
-    async fn read_server_name_entry<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<F::Bytes, ReadServerNameError> {
+    fn read_server_name_entry<S: Buf + SplitTo>(src: &mut S) -> Result<S, ReadServerNameError> {
         use read_server_name_error::*;
-        let name_type = read_u8(io).await.context(NameTypeSnafu)?;
+        let name_type = read_u8(src).context(NameTypeSnafu)?;
         if name_type != HOST_NAME {
             return Err(UnknownNameTypeError { name_type }.into());
         }
-        read_bounded_vector(io, Width::U16, 1..=Width::U16.max())
-            .await
-            .context(HostNameSnafu)
+        read_bounded_vector(src, Width::U16, 1..=Width::U16.max()).context(HostNameSnafu)
     }
 
     /// Failures that [`read_server_name`] can produce.
@@ -164,26 +152,19 @@ pub mod codec {
 
     /// Writes the data of a `server_name` extension in a ClientHello.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails.
-    #[call(sync)]
-    pub async fn write_server_name<F: Write, A: ReceiverAccess<Family = F>, C: AsRef<[u8]>>(
-        io: &mut A,
-        name: &ServerName<C>,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        name.encode(&mut Out::new(io)).await
+    /// If `dst` has no room for what it writes, as [`BufMut`] does.
+    pub fn write_server_name<C: AsRef<[u8]>>(dst: &mut impl BufMut, name: &ServerName<C>) {
+        name.encode(dst)
     }
 
     impl<C: AsRef<[u8]>> ServerName<C> {
-        pub(crate) async fn encode<F: Write, A: ReceiverAccess<Family = F>>(
-            &self,
-            out: &mut Out<'_, A>,
-        ) -> Result<(), WriteAllError<F::Error>> {
+        pub(crate) fn encode(&self, dst: &mut impl BufMut) {
             let host_name = self.host_name.as_ref();
-            out.length(Width::U16, 3 + host_name.len()).await?;
-            out.u8(HOST_NAME).await?;
-            out.vector(Width::U16, host_name).await
+            write_length(dst, Width::U16, 3 + host_name.len());
+            dst.put_u8(HOST_NAME);
+            write_vector(dst, Width::U16, host_name)
         }
     }
 }

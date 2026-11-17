@@ -34,19 +34,15 @@ impl<C> Cookie<C> {
 }
 
 pub mod codec {
-    //! Reading and writing cookies as `nitori_call` operations.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
+    //! Reading and writing cookies.
 
     use super::Cookie;
     use crate::{
-        message::MessageSource,
-        vector::{Out, ReadBoundedVectorError, read_bounded_vector},
+        vector::{ReadBoundedVectorError, read_bounded_vector, write_vector},
         width::Width,
     };
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{Write, calls::WriteAllError};
+    use bytes::{Buf, BufMut};
+    use nitori_io::SplitTo;
 
     /// Reads the data of a `cookie` extension.
     ///
@@ -54,33 +50,23 @@ pub mod codec {
     ///
     /// [`ReadBoundedVectorError`], for a cookie that is empty or not all
     /// there.
-    #[call(sync)]
-    pub async fn read_cookie<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<Cookie<F::Bytes>, ReadBoundedVectorError> {
-        let cookie = read_bounded_vector(io, Width::U16, 1..=Width::U16.max()).await?;
+    pub fn read_cookie<S: Buf + SplitTo>(src: &mut S) -> Result<Cookie<S>, ReadBoundedVectorError> {
+        let cookie = read_bounded_vector(src, Width::U16, 1..=Width::U16.max())?;
         Ok(Cookie { cookie })
     }
 
     /// Writes the data of a `cookie` extension.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails.
-    #[call(sync)]
-    pub async fn write_cookie<F: Write, A: ReceiverAccess<Family = F>, C: AsRef<[u8]>>(
-        io: &mut A,
-        cookie: &Cookie<C>,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        cookie.encode(&mut Out::new(io)).await
+    /// If `dst` has no room for what it writes, as [`BufMut`] does.
+    pub fn write_cookie<C: AsRef<[u8]>>(dst: &mut impl BufMut, cookie: &Cookie<C>) {
+        cookie.encode(dst)
     }
 
     impl<C: AsRef<[u8]>> Cookie<C> {
-        pub(crate) async fn encode<F: Write, A: ReceiverAccess<Family = F>>(
-            &self,
-            out: &mut Out<'_, A>,
-        ) -> Result<(), WriteAllError<F::Error>> {
-            out.vector(Width::U16, self.cookie.as_ref()).await
+        pub(crate) fn encode(&self, dst: &mut impl BufMut) {
+            write_vector(dst, Width::U16, self.cookie.as_ref())
         }
     }
 }

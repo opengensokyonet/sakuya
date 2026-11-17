@@ -48,27 +48,19 @@ impl<C> CertificateVerify<C> {
 }
 
 pub mod codec {
-    //! Reading and writing CertificateVerify messages as `nitori_call`
-    //! operations.
-    //!
-    //! [`read_certificate_verify`] and [`write_certificate_verify`] are also
-    //! operation structs, with `{Name}Ext` on receiver accesses and
-    //! `{Name}HostExt` on call executors, including the `sync_` methods.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
+    //! Reading and writing CertificateVerify messages.
 
     use super::CertificateVerify;
     use crate::{
         alert::AlertDescription,
-        message::{HandshakeType, MessageSource, ReadHeaderError, read_body},
-        vector::{ExcessBytesError, Out, ReadVectorError, read_u16, read_vector},
+        message::{HandshakeType, ReadHeaderError, read_body},
+        source::read_u16,
+        vector::{ExcessBytesError, ReadVectorError, read_vector, write_header, write_vector},
         width::Width,
     };
-    use bytes::Buf;
-    use nitori_call::{ReceiverAccess, call};
+    use bytes::{Buf, BufMut};
     use nitori_crypto::SignatureScheme;
-    use nitori_io::{Write, calls::WriteAllError, error::IncompleteError};
+    use nitori_io::{SplitTo, error::IncompleteError};
     use snafu::{ResultExt, Snafu};
 
     /// Reads a CertificateVerify message, header included.
@@ -76,24 +68,22 @@ pub mod codec {
     /// # Errors
     ///
     /// [`ReadCertificateVerifyError`].
-    #[call(sync)]
-    pub async fn read_certificate_verify<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<CertificateVerify<F::Bytes>, ReadCertificateVerifyError> {
-        let mut body = read_body(io, HandshakeType::CERTIFICATE_VERIFY).await?;
-        let verify = body.sync_read_certificate_verify_body_unpin()?;
+    pub fn read_certificate_verify<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<CertificateVerify<S>, ReadCertificateVerifyError> {
+        let mut body = read_body(src, HandshakeType::CERTIFICATE_VERIFY)?;
+        let verify = read_certificate_verify_body(&mut body)?;
         ExcessBytesError::check(body.remaining())
             .context(read_certificate_verify_error::ExcessSnafu)?;
         Ok(verify)
     }
 
-    #[call(sync)]
-    async fn read_certificate_verify_body<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<CertificateVerify<F::Bytes>, ReadCertificateVerifyError> {
+    fn read_certificate_verify_body<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<CertificateVerify<S>, ReadCertificateVerifyError> {
         use read_certificate_verify_error::*;
-        let algorithm = SignatureScheme::new(read_u16(io).await.context(AlgorithmSnafu)?);
-        let signature = read_vector(io, Width::U16).await.context(SignatureSnafu)?;
+        let algorithm = SignatureScheme::new(read_u16(src).context(AlgorithmSnafu)?);
+        let signature = read_vector(src, Width::U16).context(SignatureSnafu)?;
         Ok(CertificateVerify {
             algorithm,
             signature,
@@ -145,50 +135,35 @@ pub mod codec {
 
     /// Writes `verify`, header included.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written, and the error counts them over the
-    /// whole message.
-    #[call(sync)]
-    pub async fn write_certificate_verify<
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-        C: AsRef<[u8]>,
-    >(
-        io: &mut A,
+    /// If `dst` has no room for what it writes, as [`BufMut`] does.
+    pub fn write_certificate_verify<C: AsRef<[u8]>>(
+        dst: &mut impl BufMut,
         verify: &CertificateVerify<C>,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        let mut out = Out::new(io);
-        out.header(HandshakeType::CERTIFICATE_VERIFY, verify.body_len())
-            .await?;
-        out.u16(verify.algorithm.get()).await?;
-        out.vector(Width::U16, verify.signature.as_ref()).await
+    ) {
+        write_header(dst, HandshakeType::CERTIFICATE_VERIFY, verify.body_len());
+        dst.put_u16(verify.algorithm.get());
+        write_vector(dst, Width::U16, verify.signature.as_ref())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::codec::{ReadCertificateVerifyError, ReadCertificateVerifyHostExt as _};
+    use super::codec::{ReadCertificateVerifyError, read_certificate_verify};
     use crate::{alert::AlertDescription, test_support::message};
 
     #[test]
     fn the_signature_fills_the_body() {
         let short = message(15, &[0x08, 0x04, 0x00, 0x03, 1, 2]);
-        let error = short
-            .as_slice()
-            .sync_read_certificate_verify_unpin()
-            .unwrap_err();
+        let error = read_certificate_verify(&mut short.as_slice()).unwrap_err();
         assert!(matches!(
             error,
             ReadCertificateVerifyError::Signature { .. }
         ));
         assert_eq!(error.alert(), AlertDescription::DECODE_ERROR);
         let long = message(15, &[0x08, 0x04, 0x00, 0x01, 1, 2]);
-        let error = long
-            .as_slice()
-            .sync_read_certificate_verify_unpin()
-            .unwrap_err();
+        let error = read_certificate_verify(&mut long.as_slice()).unwrap_err();
         assert!(matches!(error, ReadCertificateVerifyError::Excess { .. }));
     }
 }

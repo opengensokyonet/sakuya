@@ -76,9 +76,9 @@ use sakuya_tls::{
     },
     message::{
         HandshakeMessage, HelloRandom, LegacySessionId, MessageLimits,
-        client_hello::{ClientHello, ClientHelloExtension, codec::WriteClientHelloHostExt as _},
+        client_hello::{ClientHello, ClientHelloExtension, codec::write_client_hello},
         codec::ReadHandshakeMessageHostExt as _,
-        server_hello::{ServerHelloMessage, codec::ReadServerHelloMessageHostExt as _},
+        server_hello::{ServerHelloMessage, codec::read_server_hello_message},
     },
     role::Client,
     schedule::{Authentication, HandshakeSecret, Transcript},
@@ -1251,7 +1251,7 @@ impl ScriptedClient {
                 let exchange = KeyExchange::start(&backend, group).unwrap();
                 let hello = self.hello(exchange.share().as_bytes());
                 let mut encoded = Vec::new();
-                encoded.sync_write_client_hello_unpin(&hello).unwrap();
+                write_client_hello(&mut encoded, &hello);
                 wire.client.output.levels[index(CryptoLevel::Initial)].extend_from_slice(&encoded);
                 let hash = backend.hash_algorithm(HashAlgorithm::Sha256).unwrap();
                 let transcript = Transcript::new(&backend, hash).add(&encoded);
@@ -1265,10 +1265,8 @@ impl ScriptedClient {
                     self.step = ScriptedStep::ServerHello(transcript, exchange);
                     return Poll::Pending;
                 };
-                let ServerHelloMessage::ServerHello(reply) = server_hello
-                    .as_slice()
-                    .sync_read_server_hello_message_unpin()
-                    .unwrap()
+                let ServerHelloMessage::ServerHello(reply) =
+                    read_server_hello_message(&mut server_hello.as_slice()).unwrap()
                 else {
                     panic!("a HelloRetryRequest for the one group offered");
                 };

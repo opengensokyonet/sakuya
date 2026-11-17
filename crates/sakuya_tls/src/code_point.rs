@@ -242,25 +242,17 @@ impl OddLengthError {
 }
 
 pub mod codec {
-    //! Reading and writing code point lists as `nitori_call` operations.
-    //!
-    //! Each function is also an operation struct with `{Name}Ext` on
-    //! receiver accesses inside other operations and `{Name}HostExt` on call
-    //! executors, including the `sync_` methods.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
+    //! Reading and writing code point lists.
 
     use super::{ByteCodePoint, ByteCodePointList, CodePoint, CodePointList, OddLengthError};
     use crate::{
         alert::AlertDescription,
-        message::MessageSource,
-        vector::{Out, read_bytes, read_length},
+        source::read_bytes,
+        vector::{read_length, write_length},
         width::Width,
     };
-    use bytes::Buf;
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{Write, calls::WriteAllError, error::IncompleteError};
+    use bytes::{Buf, BufMut};
+    use nitori_io::{SplitTo, error::IncompleteError};
     use snafu::{ResultExt, Snafu};
 
     /// Reads a nonempty list of two-byte code points.
@@ -268,22 +260,16 @@ pub mod codec {
     /// # Errors
     ///
     /// [`ReadCodePointListError`].
-    #[call(sync)]
-    pub async fn read_code_point_list<T, F, A>(
-        io: &mut A,
-    ) -> Result<CodePointList<T>, ReadCodePointListError>
-    where
-        T: CodePoint,
-        F: MessageSource,
-        A: ReceiverAccess<Family = F>,
-    {
+    pub fn read_code_point_list<T: CodePoint, S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<CodePointList<T>, ReadCodePointListError> {
         use read_code_point_list_error::*;
-        let len = read_length(io, T::LIST_LENGTH).await.context(LengthSnafu)?;
+        let len = read_length(src, T::LIST_LENGTH).context(LengthSnafu)?;
         if len == 0 {
             return EmptySnafu.fail();
         }
         OddLengthError::check(len)?;
-        let mut items = read_bytes(io, len).await.context(ItemsSnafu)?;
+        let mut items = read_bytes(src, len).context(ItemsSnafu)?;
         let mut list = Vec::with_capacity(len / 2);
         while items.has_remaining() {
             list.push(T::from_value(items.get_u16()));
@@ -327,20 +313,15 @@ pub mod codec {
 
     /// Writes `list` with its length field.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails.
-    #[call(sync)]
-    pub async fn write_code_point_list<T, F, A>(
-        io: &mut A,
-        list: &CodePointList<T>,
-    ) -> Result<(), WriteAllError<F::Error>>
-    where
-        T: CodePoint,
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-    {
-        Out::new(io).code_point_list(list).await
+    /// If `dst` has no room for the list, as [`BufMut`] does.
+    pub fn write_code_point_list<T: CodePoint>(dst: &mut impl BufMut, list: &CodePointList<T>) {
+        let items = list.as_slice();
+        write_length(dst, T::LIST_LENGTH, 2 * items.len());
+        for item in items {
+            dst.put_u16(item.value());
+        }
     }
 
     /// Reads a nonempty list of one-byte code points.
@@ -348,25 +329,20 @@ pub mod codec {
     /// # Errors
     ///
     /// [`ReadByteCodePointListError`].
-    #[call(sync)]
-    pub async fn read_byte_code_point_list<T, F, A>(
-        io: &mut A,
-    ) -> Result<ByteCodePointList<T>, ReadByteCodePointListError>
-    where
-        T: ByteCodePoint,
-        F: MessageSource,
-        A: ReceiverAccess<Family = F>,
-    {
+    pub fn read_byte_code_point_list<T: ByteCodePoint, S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<ByteCodePointList<T>, ReadByteCodePointListError> {
         use read_byte_code_point_list_error::*;
-        let len = read_length(io, Width::U8).await.context(LengthSnafu)?;
+        let len = read_length(src, Width::U8).context(LengthSnafu)?;
         if len == 0 {
             return EmptySnafu.fail();
         }
-        let items = read_bytes(io, len).await.context(ItemsSnafu)?;
-        let list = items.as_ref().iter().map(|&value| T::from_value(value));
-        Ok(ByteCodePointList {
-            items: list.collect(),
-        })
+        let mut items = read_bytes(src, len).context(ItemsSnafu)?;
+        let mut list = Vec::with_capacity(len);
+        while items.has_remaining() {
+            list.push(T::from_value(items.get_u8()));
+        }
+        Ok(ByteCodePointList { items: list })
     }
 
     /// Failures that [`read_byte_code_point_list`] can produce.
@@ -399,20 +375,18 @@ pub mod codec {
 
     /// Writes `list` with its one-byte length field.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails.
-    #[call(sync)]
-    pub async fn write_byte_code_point_list<T, F, A>(
-        io: &mut A,
+    /// If `dst` has no room for the list, as [`BufMut`] does.
+    pub fn write_byte_code_point_list<T: ByteCodePoint>(
+        dst: &mut impl BufMut,
         list: &ByteCodePointList<T>,
-    ) -> Result<(), WriteAllError<F::Error>>
-    where
-        T: ByteCodePoint,
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-    {
-        Out::new(io).byte_code_point_list(list).await
+    ) {
+        let items = list.as_slice();
+        write_length(dst, Width::U8, items.len());
+        for item in items {
+            dst.put_u8(item.value());
+        }
     }
 }
 
@@ -420,29 +394,23 @@ pub mod codec {
 mod tests {
     use super::{
         CodePointList, OddLengthError,
-        codec::{ReadCodePointListError, ReadCodePointListHostExt as _},
+        codec::{ReadCodePointListError, read_code_point_list},
     };
     use crate::cipher_suite::CipherSuite;
 
     #[test]
     fn lists_must_hold_whole_code_points() {
         let mut input = &[0x00, 0x03, 0x13, 0x01, 0x13][..];
-        let error = input
-            .sync_read_code_point_list_unpin::<CipherSuite>()
-            .unwrap_err();
+        let error = read_code_point_list::<CipherSuite, _>(&mut input).unwrap_err();
         assert!(matches!(
             error,
             ReadCodePointListError::OddLength { source } if source == OddLengthError { len: 3 }
         ));
         let mut input = &[0x00, 0x00][..];
-        let error = input
-            .sync_read_code_point_list_unpin::<CipherSuite>()
-            .unwrap_err();
+        let error = read_code_point_list::<CipherSuite, _>(&mut input).unwrap_err();
         assert!(matches!(error, ReadCodePointListError::Empty));
         let mut input = &[0x00, 0x04, 0x13, 0x01][..];
-        let error = input
-            .sync_read_code_point_list_unpin::<CipherSuite>()
-            .unwrap_err();
+        let error = read_code_point_list::<CipherSuite, _>(&mut input).unwrap_err();
         assert!(matches!(error, ReadCodePointListError::Items { .. }));
     }
 

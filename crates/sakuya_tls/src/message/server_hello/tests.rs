@@ -1,6 +1,6 @@
 use super::{
     HELLO_RETRY_REQUEST_RANDOM, InvalidServerHelloError, ServerHello, ServerHelloMessage,
-    codec::{ReadServerHelloMessageError, ReadServerHelloMessageHostExt as _},
+    codec::{ReadServerHelloMessageError, read_server_hello_message},
 };
 use crate::{
     alert::AlertDescription,
@@ -25,7 +25,7 @@ fn server_hello(random: &[u8; 32], compression: u8, extensions: &[u8]) -> Vec<u8
 }
 
 fn read(bytes: Vec<u8>) -> Result<ServerHelloMessage<bytes::Bytes>, ReadServerHelloMessageError> {
-    bytes::Bytes::from(bytes).sync_read_server_hello_message_unpin()
+    read_server_hello_message(&mut bytes::Bytes::from(bytes))
 }
 
 const VERSION: &[u8] = &[0x00, 0x2b, 0x00, 0x02, 0x03, 0x04];

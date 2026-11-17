@@ -393,16 +393,7 @@ extension_subset! {
 }
 
 pub mod codec {
-    //! Reading and writing server_hello messages as `nitori_call`
-    //! operations.
-    //!
-    //! [`read_server_hello_message`], [`write_server_hello`] and
-    //! [`write_hello_retry_request`] are also operation structs, with
-    //! `{Name}Ext` on receiver accesses and `{Name}HostExt` on call
-    //! executors, including the `sync_` methods.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
+    //! Reading and writing server_hello messages.
 
     use super::{
         BLOCK, HELLO_RETRY_REQUEST_RANDOM, HelloRetryRequest, HelloRetryRequestDisallowedExtension,
@@ -415,27 +406,25 @@ pub mod codec {
         extension::{
             BlockEntry as _, BlockReader, ExtensionNotAllowedError, ReadExtensionBlockError,
             RestrictedExtension, UnknownExtension,
-            cookie::codec::ReadCookieHostExt as _,
+            cookie::codec::read_cookie,
             excess,
-            key_share::codec::{ReadKeyShareEntryError, ReadKeyShareEntryHostExt as _},
+            key_share::codec::{ReadKeyShareEntryError, read_key_share_entry},
             not_allowed,
             pre_shared_key::PskIndex,
             read_extension_block,
         },
-        message::{
-            HandshakeType, HelloRandom, MessageSource, ReadHeaderError, read_body, read_session_id,
-        },
+        message::{HandshakeType, HelloRandom, ReadHeaderError, read_body, read_session_id},
+        source::{read_array, read_u8, read_u16, take_rest},
         vector::{
-            ExcessBytesError, LengthOutOfRangeError, Out, ReadBoundedVectorError, read_array,
-            read_u8, read_u16,
+            ExcessBytesError, LengthOutOfRangeError, ReadBoundedVectorError, write_header,
+            write_length, write_vector,
         },
         version::ProtocolVersion,
         width::Width,
     };
-    use bytes::Buf;
-    use nitori_call::{ReceiverAccess, call};
+    use bytes::{Buf, BufMut};
     use nitori_crypto::NamedGroup;
-    use nitori_io::{Write, calls::WriteAllError, error::IncompleteError};
+    use nitori_io::{SplitTo, error::IncompleteError};
     use snafu::{ResultExt, Snafu};
 
     /// Reads a server_hello message, header included: a ServerHello, or a
@@ -444,30 +433,28 @@ pub mod codec {
     /// # Errors
     ///
     /// [`ReadServerHelloMessageError`].
-    #[call(sync)]
-    pub async fn read_server_hello_message<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<ServerHelloMessage<F::Bytes>, ReadServerHelloMessageError> {
-        let mut body = read_body(io, HandshakeType::SERVER_HELLO).await?;
-        let hello = body.sync_read_server_hello_message_body_unpin()?;
+    pub fn read_server_hello_message<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<ServerHelloMessage<S>, ReadServerHelloMessageError> {
+        let mut body = read_body(src, HandshakeType::SERVER_HELLO)?;
+        let hello = read_server_hello_message_body(&mut body)?;
         ExcessBytesError::check(body.remaining())
             .context(read_server_hello_message_error::ExcessSnafu)?;
         Ok(hello)
     }
 
-    #[call(sync)]
-    async fn read_server_hello_message_body<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<ServerHelloMessage<F::Bytes>, ReadServerHelloMessageError> {
+    fn read_server_hello_message_body<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<ServerHelloMessage<S>, ReadServerHelloMessageError> {
         use read_server_hello_message_error::*;
-        let legacy_version = ProtocolVersion::new(read_u16(io).await.context(LegacyVersionSnafu)?);
-        let random = HelloRandom(read_array(io).await.context(RandomSnafu)?);
-        let legacy_session_id_echo = read_session_id(io).await.context(SessionIdSnafu)?;
-        let cipher_suite = CipherSuite::new(read_u16(io).await.context(CipherSuiteSnafu)?);
-        if read_u8(io).await.context(CompressionMethodSnafu)? != 0 {
+        let legacy_version = ProtocolVersion::new(read_u16(src).context(LegacyVersionSnafu)?);
+        let random = HelloRandom(read_array(src).context(RandomSnafu)?);
+        let legacy_session_id_echo = read_session_id(src).context(SessionIdSnafu)?;
+        let cipher_suite = CipherSuite::new(read_u16(src).context(CipherSuiteSnafu)?);
+        if read_u8(src).context(CompressionMethodSnafu)? != 0 {
             return CompressionMethodNotNullSnafu.fail();
         }
-        let block = read_extension_block(io).await.context(ExtensionsSnafu)?;
+        let block = read_extension_block(src).context(ExtensionsSnafu)?;
         LengthOutOfRangeError::check(block.remaining(), BLOCK).context(ExtensionsLengthSnafu)?;
         let mut block = BlockReader::new(block);
         let retry = random == HELLO_RETRY_REQUEST_RANDOM;
@@ -530,22 +517,19 @@ pub mod codec {
         data: &mut B,
     ) -> Result<ServerHelloExtension<B>, ReadServerHelloMessageError>
     where
-        B: Buf + nitori_call::Receiver<Family: MessageSource<Bytes = B>> + Unpin,
+        B: Buf + SplitTo,
     {
         use RestrictedExtension as R;
         use read_server_hello_message_error::*;
         Ok(match extension {
-            R::KeyShare => ServerHelloExtension::KeyShare(
-                data.sync_read_key_share_entry_unpin()
-                    .context(KeyShareSnafu)?,
-            ),
+            R::KeyShare => {
+                ServerHelloExtension::KeyShare(read_key_share_entry(data).context(KeyShareSnafu)?)
+            }
             R::PreSharedKey => ServerHelloExtension::PreSharedKey(PskIndex::new(
-                data.sync_read_selected_u16_unpin()
-                    .context(SelectedIdentitySnafu)?,
+                read_u16(data).context(SelectedIdentitySnafu)?,
             )),
             R::SupportedVersions => ServerHelloExtension::SupportedVersions(ProtocolVersion::new(
-                data.sync_read_selected_u16_unpin()
-                    .context(SelectedVersionSnafu)?,
+                read_u16(data).context(SelectedVersionSnafu)?,
             )),
             other => return Err(not_allowed(other, ServerHelloDisallowedExtension::of).into()),
         })
@@ -557,39 +541,27 @@ pub mod codec {
         data: &mut B,
     ) -> Result<HelloRetryRequestExtension<B>, ReadServerHelloMessageError>
     where
-        B: Buf + nitori_call::Receiver<Family: MessageSource<Bytes = B>> + Unpin + Default,
+        B: Buf + SplitTo,
     {
         use RestrictedExtension as R;
         use read_server_hello_message_error::*;
         Ok(match extension {
             R::KeyShare => HelloRetryRequestExtension::KeyShare(NamedGroup::new(
-                data.sync_read_selected_u16_unpin()
-                    .context(SelectedGroupSnafu)?,
+                read_u16(data).context(SelectedGroupSnafu)?,
             )),
-            R::Cookie => HelloRetryRequestExtension::Cookie(
-                data.sync_read_cookie_unpin().context(CookieSnafu)?,
-            ),
-            R::SupportedVersions => {
-                HelloRetryRequestExtension::SupportedVersions(ProtocolVersion::new(
-                    data.sync_read_selected_u16_unpin()
-                        .context(SelectedVersionSnafu)?,
-                ))
+            R::Cookie => {
+                HelloRetryRequestExtension::Cookie(read_cookie(data).context(CookieSnafu)?)
             }
+            R::SupportedVersions => HelloRetryRequestExtension::SupportedVersions(
+                ProtocolVersion::new(read_u16(data).context(SelectedVersionSnafu)?),
+            ),
             R::EncryptedClientHello => HelloRetryRequestExtension::EncryptedClientHello(
-                crate::extension::OpaqueData::read(core::mem::take(data)),
+                crate::extension::OpaqueData::read(take_rest(data)),
             ),
             other => {
                 return Err(not_allowed(other, HelloRetryRequestDisallowedExtension::of).into());
             }
         })
-    }
-
-    /// Reads the two-byte value that is the whole data of some extensions.
-    #[call(sync)]
-    async fn read_selected_u16<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<u16, IncompleteError> {
-        read_u16(io).await
     }
 
     /// Failures that [`read_server_hello_message`] can produce.
@@ -750,107 +722,88 @@ pub mod codec {
 
     /// Writes `hello`, header included.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written, and the error counts them over the
-    /// whole message.
-    #[call(sync)]
-    pub async fn write_server_hello<F: Write, A: ReceiverAccess<Family = F>, C: AsRef<[u8]>>(
-        io: &mut A,
-        hello: &ServerHello<C>,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        let mut out = Out::new(io);
+    /// If `dst` has no room for what it writes, as [`BufMut`] does.
+    pub fn write_server_hello<C: AsRef<[u8]>>(dst: &mut impl BufMut, hello: &ServerHello<C>) {
         write_fields(
-            &mut out,
+            dst,
             hello.body_len(),
             hello.legacy_version,
             &hello.random,
             hello.legacy_session_id_echo.as_bytes(),
             hello.cipher_suite,
             hello.block_len(),
-        )
-        .await?;
+        );
         for extension in &hello.extensions {
-            out.u16(extension.extension_type().get()).await?;
-            out.length(Width::U16, extension.data_len()).await?;
+            dst.put_u16(extension.extension_type().get());
+            write_length(dst, Width::U16, extension.data_len());
             match extension {
-                ServerHelloExtension::KeyShare(entry) => entry.encode(&mut out).await?,
-                ServerHelloExtension::PreSharedKey(index) => out.u16(index.get()).await?,
-                ServerHelloExtension::SupportedVersions(version) => out.u16(version.get()).await?,
+                ServerHelloExtension::KeyShare(entry) => entry.encode(dst),
+                ServerHelloExtension::PreSharedKey(index) => dst.put_u16(index.get()),
+                ServerHelloExtension::SupportedVersions(version) => dst.put_u16(version.get()),
                 ServerHelloExtension::Unknown(extension) => {
-                    out.put(extension.data().as_ref()).await?
+                    dst.put_slice(extension.data().as_ref())
                 }
             }
         }
-        Ok(())
     }
 
     /// Writes `retry`, header included.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written, and the error counts them over the
-    /// whole message.
-    #[call(sync)]
-    pub async fn write_hello_retry_request<
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-        C: AsRef<[u8]>,
-    >(
-        io: &mut A,
+    /// If `dst` has no room for what it writes, as [`BufMut`] does.
+    pub fn write_hello_retry_request<C: AsRef<[u8]>>(
+        dst: &mut impl BufMut,
         retry: &HelloRetryRequest<C>,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        let mut out = Out::new(io);
+    ) {
         write_fields(
-            &mut out,
+            dst,
             retry.body_len(),
             retry.legacy_version,
             &HELLO_RETRY_REQUEST_RANDOM,
             retry.legacy_session_id_echo.as_bytes(),
             retry.cipher_suite,
             retry.block_len(),
-        )
-        .await?;
+        );
         for extension in &retry.extensions {
-            out.u16(extension.extension_type().get()).await?;
-            out.length(Width::U16, extension.data_len()).await?;
+            dst.put_u16(extension.extension_type().get());
+            write_length(dst, Width::U16, extension.data_len());
             match extension {
-                HelloRetryRequestExtension::KeyShare(group) => out.u16(group.get()).await?,
-                HelloRetryRequestExtension::Cookie(cookie) => cookie.encode(&mut out).await?,
+                HelloRetryRequestExtension::KeyShare(group) => dst.put_u16(group.get()),
+                HelloRetryRequestExtension::Cookie(cookie) => cookie.encode(dst),
                 HelloRetryRequestExtension::SupportedVersions(version) => {
-                    out.u16(version.get()).await?
+                    dst.put_u16(version.get())
                 }
                 HelloRetryRequestExtension::EncryptedClientHello(data) => {
-                    out.put(data.data().as_ref()).await?
+                    dst.put_slice(data.data().as_ref())
                 }
                 HelloRetryRequestExtension::Unknown(extension) => {
-                    out.put(extension.data().as_ref()).await?
+                    dst.put_slice(extension.data().as_ref())
                 }
             }
         }
-        Ok(())
     }
 
     /// Writes the header and the fields before the extensions, and the
     /// length of the extension block.
-    async fn write_fields<F: Write, A: ReceiverAccess<Family = F>>(
-        out: &mut Out<'_, A>,
+    fn write_fields(
+        dst: &mut impl BufMut,
         body_len: usize,
         legacy_version: ProtocolVersion,
         random: &HelloRandom,
         session_id: &[u8],
         cipher_suite: CipherSuite,
         block_len: usize,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        out.header(HandshakeType::SERVER_HELLO, body_len).await?;
-        out.u16(legacy_version.get()).await?;
-        out.put(&random.0[..]).await?;
-        out.vector(Width::U8, session_id).await?;
-        out.u16(cipher_suite.get()).await?;
-        out.u8(0).await?;
-        out.length(Width::U16, block_len).await
+    ) {
+        write_header(dst, HandshakeType::SERVER_HELLO, body_len);
+        dst.put_u16(legacy_version.get());
+        dst.put_slice(&random.0[..]);
+        write_vector(dst, Width::U8, session_id);
+        dst.put_u16(cipher_suite.get());
+        dst.put_u8(0);
+        write_length(dst, Width::U16, block_len)
     }
 }
 

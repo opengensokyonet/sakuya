@@ -9,18 +9,13 @@
 
 use crate::{
     alert::AlertDescription,
-    code_point::{ByteCodePoint, ByteCodePointList, CodePoint, CodePointList},
-    message::{HandshakeType, MessageSource},
+    message::HandshakeType,
+    source::{read_bytes, read_u8, read_u16, read_u24},
     width::Width,
 };
-use bytes::Buf;
-use core::{convert::Infallible, num::NonZeroUsize, ops::RangeInclusive};
-use nitori_call::ReceiverAccess;
-use nitori_io::{
-    ReadChunkExt as _, Write,
-    calls::{ReadArrayError, ReadArrayExt as _, WriteAllError, WriteAllExt as _},
-    error::{IncompleteError, WriteZeroError},
-};
+use bytes::{Buf, BufMut};
+use core::{num::NonZeroUsize, ops::RangeInclusive};
+use nitori_io::{SplitTo, error::IncompleteError};
 use snafu::{ResultExt, Snafu};
 
 /// A length lies outside the range its field allows.
@@ -146,220 +141,55 @@ impl ReadBoundedVectorError {
     }
 }
 
-/// The shortfall of a fixed-size read from a source that cannot fail.
-fn incomplete(error: ReadArrayError<Infallible>) -> IncompleteError {
-    match error {
-        ReadArrayError::Incomplete { source } => source,
-        ReadArrayError::Receiver { source, .. } => match source {},
-    }
-}
-
-/// Reads `N` bytes.
-pub(crate) async fn read_array<const N: usize, F, A>(io: &mut A) -> Result<[u8; N], IncompleteError>
-where
-    F: MessageSource,
-    A: ReceiverAccess<Family = F>,
-{
-    io.read_array::<N>().await.map_err(incomplete)
-}
-
-/// Reads one byte.
-pub(crate) async fn read_u8<F: MessageSource, A: ReceiverAccess<Family = F>>(
-    io: &mut A,
-) -> Result<u8, IncompleteError> {
-    let [byte] = read_array(io).await?;
-    Ok(byte)
-}
-
-/// Reads a two-byte integer.
-pub(crate) async fn read_u16<F: MessageSource, A: ReceiverAccess<Family = F>>(
-    io: &mut A,
-) -> Result<u16, IncompleteError> {
-    Ok(u16::from_be_bytes(read_array(io).await?))
-}
-
-/// Reads a three-byte integer.
-pub(crate) async fn read_u24<F: MessageSource, A: ReceiverAccess<Family = F>>(
-    io: &mut A,
-) -> Result<u32, IncompleteError> {
-    let [a, b, c] = read_array(io).await?;
-    Ok(u32::from_be_bytes([0, a, b, c]))
-}
-
-/// Reads a four-byte integer.
-pub(crate) async fn read_u32<F: MessageSource, A: ReceiverAccess<Family = F>>(
-    io: &mut A,
-) -> Result<u32, IncompleteError> {
-    Ok(u32::from_be_bytes(read_array(io).await?))
-}
-
 /// Reads a length field of `width`.
-pub(crate) async fn read_length<F: MessageSource, A: ReceiverAccess<Family = F>>(
-    io: &mut A,
-    width: Width,
-) -> Result<usize, IncompleteError> {
+pub(crate) fn read_length(src: &mut impl Buf, width: Width) -> Result<usize, IncompleteError> {
     Ok(match width {
-        Width::U8 => usize::from(read_u8(io).await?),
-        Width::U16 => usize::from(read_u16(io).await?),
-        Width::U24 => read_u24(io).await? as usize,
+        Width::U8 => usize::from(read_u8(src)?),
+        Width::U16 => usize::from(read_u16(src)?),
+        Width::U24 => read_u24(src)? as usize,
     })
 }
 
-/// Reads `len` bytes as one chunk of the source.
-pub(crate) async fn read_bytes<F: MessageSource, A: ReceiverAccess<Family = F>>(
-    io: &mut A,
-    len: usize,
-) -> Result<F::Bytes, IncompleteError> {
-    let Some(maximum) = NonZeroUsize::new(len) else {
-        return Ok(F::Bytes::default());
-    };
-    let chunk = match io.read_chunk(maximum).await {
-        Ok(chunk) => chunk,
-        Err(error) => match error {},
-    };
-    // A message source hands out what is left of its bytes, up to the
-    // maximum, in one chunk; a shorter chunk means the bytes end.
-    let completed = chunk.as_ref().map_or(0, Buf::remaining);
-    match chunk {
-        Some(chunk) if completed == len => Ok(chunk),
-        // invariant: `len` is not zero, and the chunk holds at most `len`
-        // bytes by the `ReadChunk` contract, so `completed` is below `len`:
-        // it is zero without a chunk and differs from `len` otherwise.
-        _ => Err(IncompleteError::new(len, completed).expect("`completed` is below `len`")),
-    }
-}
-
-/// Reads a length field of `width` and that many bytes.
-pub(crate) async fn read_vector<F: MessageSource, A: ReceiverAccess<Family = F>>(
-    io: &mut A,
+/// Reads a length field of `width` and that many bytes, as a piece of the
+/// source.
+pub(crate) fn read_vector<S: Buf + SplitTo>(
+    src: &mut S,
     width: Width,
-) -> Result<F::Bytes, ReadVectorError> {
-    let len = read_length(io, width)
-        .await
-        .context(read_vector_error::LengthSnafu)?;
-    read_bytes(io, len)
-        .await
-        .context(read_vector_error::BytesSnafu)
+) -> Result<S, ReadVectorError> {
+    let len = read_length(src, width).context(read_vector_error::LengthSnafu)?;
+    read_bytes(src, len).context(read_vector_error::BytesSnafu)
 }
 
 /// Reads a length field of `width`, checks that the length lies in `range`
-/// and reads that many bytes.
-pub(crate) async fn read_bounded_vector<F: MessageSource, A: ReceiverAccess<Family = F>>(
-    io: &mut A,
+/// and reads that many bytes, as a piece of the source.
+pub(crate) fn read_bounded_vector<S: Buf + SplitTo>(
+    src: &mut S,
     width: Width,
     range: RangeInclusive<usize>,
-) -> Result<F::Bytes, ReadBoundedVectorError> {
-    let len = read_length(io, width)
-        .await
-        .context(read_bounded_vector_error::LengthSnafu)?;
+) -> Result<S, ReadBoundedVectorError> {
+    let len = read_length(src, width).context(read_bounded_vector_error::LengthSnafu)?;
     LengthOutOfRangeError::check(len, range)?;
-    read_bytes(io, len)
-        .await
-        .context(read_bounded_vector_error::BytesSnafu)
+    read_bytes(src, len).context(read_bounded_vector_error::BytesSnafu)
 }
 
-/// A sink that counts the bytes it accepted over a whole encoding, so that a
-/// failure reports them.
-pub(crate) struct Out<'a, A> {
-    io: &'a mut A,
-    written: usize,
+/// Writes a length field of `width`.
+///
+/// The caller has checked that `len` fits the width.
+pub(crate) fn write_length(dst: &mut impl BufMut, width: Width, len: usize) {
+    debug_assert!(len <= width.max());
+    let bytes = (len as u32).to_be_bytes();
+    dst.put_slice(&bytes[4 - width.len()..]);
 }
 
-impl<'a, F: Write, A: ReceiverAccess<Family = F>> Out<'a, A> {
-    pub(crate) fn new(io: &'a mut A) -> Self {
-        Self { io, written: 0 }
-    }
+/// Writes a length field of `width` and `bytes`.
+pub(crate) fn write_vector(dst: &mut impl BufMut, width: Width, bytes: &[u8]) {
+    write_length(dst, width, bytes.len());
+    dst.put_slice(bytes);
+}
 
-    /// Writes `bytes` completely.
-    pub(crate) async fn put(&mut self, bytes: impl Buf) -> Result<(), WriteAllError<F::Error>> {
-        let len = bytes.remaining();
-        let before = self.written;
-        match self.io.write_all(bytes).await {
-            Ok(()) => {
-                self.written += len;
-                Ok(())
-            }
-            Err(WriteAllError::WriteZero { source }) => Err(WriteAllError::WriteZero {
-                source: WriteZeroError {
-                    completed: before + source.completed,
-                },
-            }),
-            Err(WriteAllError::Receiver { source, completed }) => Err(WriteAllError::Receiver {
-                source,
-                completed: before + completed,
-            }),
-        }
-    }
-
-    pub(crate) async fn u8(&mut self, value: u8) -> Result<(), WriteAllError<F::Error>> {
-        self.put(&[value][..]).await
-    }
-
-    pub(crate) async fn u16(&mut self, value: u16) -> Result<(), WriteAllError<F::Error>> {
-        self.put(&value.to_be_bytes()[..]).await
-    }
-
-    pub(crate) async fn u32(&mut self, value: u32) -> Result<(), WriteAllError<F::Error>> {
-        self.put(&value.to_be_bytes()[..]).await
-    }
-
-    /// Writes a length field of `width`.
-    ///
-    /// The caller has checked that `len` fits the width.
-    pub(crate) async fn length(
-        &mut self,
-        width: Width,
-        len: usize,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        debug_assert!(len <= width.max());
-        let bytes = (len as u32).to_be_bytes();
-        self.put(&bytes[4 - width.len()..]).await
-    }
-
-    /// Writes a length field of `width` and `bytes`.
-    pub(crate) async fn vector(
-        &mut self,
-        width: Width,
-        bytes: &[u8],
-    ) -> Result<(), WriteAllError<F::Error>> {
-        self.length(width, bytes.len()).await?;
-        self.put(bytes).await
-    }
-
-    /// Writes the header of a handshake message whose body is `body_len`
-    /// bytes long.
-    pub(crate) async fn header(
-        &mut self,
-        message: HandshakeType,
-        body_len: usize,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        self.u8(message.get()).await?;
-        self.length(Width::U24, body_len).await
-    }
-
-    /// Writes a list of two-byte code points with its length field.
-    pub(crate) async fn code_point_list<T: CodePoint>(
-        &mut self,
-        list: &CodePointList<T>,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        let items = list.as_slice();
-        self.length(T::LIST_LENGTH, 2 * items.len()).await?;
-        for item in items {
-            self.u16(item.value()).await?;
-        }
-        Ok(())
-    }
-
-    /// Writes a list of one-byte code points with its length field.
-    pub(crate) async fn byte_code_point_list<T: ByteCodePoint>(
-        &mut self,
-        list: &ByteCodePointList<T>,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        let items = list.as_slice();
-        self.length(Width::U8, items.len()).await?;
-        for item in items {
-            self.u8(item.value()).await?;
-        }
-        Ok(())
-    }
+/// Writes the header of a handshake message whose body is `body_len` bytes
+/// long.
+pub(crate) fn write_header(dst: &mut impl BufMut, message: HandshakeType, body_len: usize) {
+    dst.put_u8(message.get());
+    write_length(dst, Width::U24, body_len);
 }

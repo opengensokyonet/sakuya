@@ -141,25 +141,21 @@ pub enum InvalidClientSharesError {
 }
 
 pub mod codec {
-    //! Reading and writing key shares as `nitori_call` operations.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
+    //! Reading and writing key shares.
 
     use super::{ClientShares, DuplicateGroupError, KeyShareEntry, check_groups};
     use crate::{
         alert::AlertDescription,
-        message::MessageSource,
+        source::read_u16,
         vector::{
-            Out, ReadBoundedVectorError, ReadVectorError, read_bounded_vector, read_u16,
-            read_vector,
+            ReadBoundedVectorError, ReadVectorError, read_bounded_vector, read_vector,
+            write_length, write_vector,
         },
         width::Width,
     };
-    use bytes::Buf;
-    use nitori_call::{ReceiverAccess, call};
+    use bytes::{Buf, BufMut};
     use nitori_crypto::NamedGroup;
-    use nitori_io::{Write, calls::WriteAllError, error::IncompleteError};
+    use nitori_io::{SplitTo, error::IncompleteError};
     use snafu::{ResultExt, Snafu};
 
     /// Reads one key share entry.
@@ -167,15 +163,13 @@ pub mod codec {
     /// # Errors
     ///
     /// [`ReadKeyShareEntryError`].
-    #[call(sync)]
-    pub async fn read_key_share_entry<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<KeyShareEntry<F::Bytes>, ReadKeyShareEntryError> {
+    pub fn read_key_share_entry<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<KeyShareEntry<S>, ReadKeyShareEntryError> {
         use read_key_share_entry_error::*;
-        let group = NamedGroup::new(read_u16(io).await.context(GroupSnafu)?);
-        let key_exchange = read_bounded_vector(io, Width::U16, 1..=Width::U16.max())
-            .await
-            .context(KeyExchangeSnafu)?;
+        let group = NamedGroup::new(read_u16(src).context(GroupSnafu)?);
+        let key_exchange =
+            read_bounded_vector(src, Width::U16, 1..=Width::U16.max()).context(KeyExchangeSnafu)?;
         Ok(KeyShareEntry {
             group,
             key_exchange,
@@ -209,15 +203,11 @@ pub mod codec {
 
     /// Writes one key share entry.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails.
-    #[call(sync)]
-    pub async fn write_key_share_entry<F: Write, A: ReceiverAccess<Family = F>, C: AsRef<[u8]>>(
-        io: &mut A,
-        entry: &KeyShareEntry<C>,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        entry.encode(&mut Out::new(io)).await
+    /// If `dst` has no room for what it writes, as [`BufMut`] does.
+    pub fn write_key_share_entry<C: AsRef<[u8]>>(dst: &mut impl BufMut, entry: &KeyShareEntry<C>) {
+        entry.encode(dst)
     }
 
     /// Reads the shares of a ClientHello.
@@ -225,15 +215,14 @@ pub mod codec {
     /// # Errors
     ///
     /// [`ReadClientSharesError`].
-    #[call(sync)]
-    pub async fn read_client_shares<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<ClientShares<F::Bytes>, ReadClientSharesError> {
+    pub fn read_client_shares<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<ClientShares<S>, ReadClientSharesError> {
         use read_client_shares_error::*;
-        let mut list = read_vector(io, Width::U16).await.context(ListSnafu)?;
+        let mut list = read_vector(src, Width::U16).context(ListSnafu)?;
         let mut entries = Vec::new();
         while list.has_remaining() {
-            entries.push(list.sync_read_key_share_entry_unpin().context(EntrySnafu)?);
+            entries.push(read_key_share_entry(&mut list).context(EntrySnafu)?);
         }
         check_groups(&entries)?;
         Ok(ClientShares { entries })
@@ -277,37 +266,26 @@ pub mod codec {
 
     /// Writes the shares of a ClientHello.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails.
-    #[call(sync)]
-    pub async fn write_client_shares<F: Write, A: ReceiverAccess<Family = F>, C: AsRef<[u8]>>(
-        io: &mut A,
-        shares: &ClientShares<C>,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        shares.encode(&mut Out::new(io)).await
+    /// If `dst` has no room for what it writes, as [`BufMut`] does.
+    pub fn write_client_shares<C: AsRef<[u8]>>(dst: &mut impl BufMut, shares: &ClientShares<C>) {
+        shares.encode(dst)
     }
 
     impl<C: AsRef<[u8]>> KeyShareEntry<C> {
-        pub(crate) async fn encode<F: Write, A: ReceiverAccess<Family = F>>(
-            &self,
-            out: &mut Out<'_, A>,
-        ) -> Result<(), WriteAllError<F::Error>> {
-            out.u16(self.group.get()).await?;
-            out.vector(Width::U16, self.key_exchange.as_ref()).await
+        pub(crate) fn encode(&self, dst: &mut impl BufMut) {
+            dst.put_u16(self.group.get());
+            write_vector(dst, Width::U16, self.key_exchange.as_ref())
         }
     }
 
     impl<C: AsRef<[u8]>> ClientShares<C> {
-        pub(crate) async fn encode<F: Write, A: ReceiverAccess<Family = F>>(
-            &self,
-            out: &mut Out<'_, A>,
-        ) -> Result<(), WriteAllError<F::Error>> {
-            out.length(Width::U16, self.encoded_len() - 2).await?;
+        pub(crate) fn encode(&self, dst: &mut impl BufMut) {
+            write_length(dst, Width::U16, self.encoded_len() - 2);
             for entry in &self.entries {
-                entry.encode(out).await?;
+                entry.encode(dst);
             }
-            Ok(())
         }
     }
 }

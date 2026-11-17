@@ -15,36 +15,27 @@ use sakuya_tls::{
     message::{
         certificate::{
             CertificateFormat, CertificateList,
-            codec::{ReadCertificateHostExt as _, WriteCertificateHostExt as _},
+            codec::{read_certificate, write_certificate},
         },
-        certificate_request::codec::{
-            ReadCertificateRequestHostExt as _, WriteCertificateRequestHostExt as _,
-        },
-        certificate_verify::codec::{
-            ReadCertificateVerifyHostExt as _, WriteCertificateVerifyHostExt as _,
-        },
+        certificate_request::codec::{read_certificate_request, write_certificate_request},
+        certificate_verify::codec::{read_certificate_verify, write_certificate_verify},
         client_hello::{
             ClientHelloExtension,
-            codec::{ReadClientHelloHostExt as _, WriteClientHelloHostExt as _},
+            codec::{read_client_hello, write_client_hello},
         },
         encrypted_extensions::{
             EncryptedExtensionsExtension,
-            codec::{ReadEncryptedExtensionsHostExt as _, WriteEncryptedExtensionsHostExt as _},
+            codec::{read_encrypted_extensions, write_encrypted_extensions},
         },
-        finished::codec::{ReadFinishedHostExt as _, WriteFinishedHostExt as _},
+        finished::codec::{read_finished, write_finished},
         message_hash::{
             MessageHash,
-            codec::{ReadMessageHashHostExt as _, WriteMessageHashHostExt as _},
+            codec::{read_message_hash, write_message_hash},
         },
-        new_session_ticket::codec::{
-            ReadNewSessionTicketHostExt as _, WriteNewSessionTicketHostExt as _,
-        },
+        new_session_ticket::codec::{read_new_session_ticket, write_new_session_ticket},
         server_hello::{
             ServerHelloMessage,
-            codec::{
-                ReadServerHelloMessageHostExt as _, WriteHelloRetryRequestHostExt as _,
-                WriteServerHelloHostExt as _,
-            },
+            codec::{read_server_hello_message, write_hello_retry_request, write_server_hello},
         },
     },
     version::ProtocolVersion,
@@ -57,16 +48,16 @@ macro_rules! round_trip {
     ($message:expr, $read:ident, $write:ident $(, $argument:expr)*) => {{
         let bytes = hex($message);
         let mut input = bytes.as_slice();
-        let borrowed = input.$read($($argument),*).unwrap();
+        let borrowed = $read(&mut input $(, $argument)*).unwrap();
         assert!(input.is_empty());
         let mut output = Vec::new();
-        output.$write(&borrowed).unwrap();
+        $write(&mut output, &borrowed);
         assert_eq!(output, bytes);
         let mut input = Bytes::from(bytes.clone());
-        let shared = input.$read($($argument),*).unwrap();
+        let shared = $read(&mut input $(, $argument)*).unwrap();
         assert!(input.is_empty());
         let mut output = Vec::new();
-        output.$write(&shared).unwrap();
+        $write(&mut output, &shared);
         assert_eq!(output, bytes);
         assert_eq!(shared.encoded_len(), bytes.len());
         shared
@@ -81,21 +72,13 @@ fn client_hellos() {
         s5::CLIENT_HELLO_1,
         s5::CLIENT_HELLO_2,
     ] {
-        round_trip!(
-            message,
-            sync_read_client_hello_unpin,
-            sync_write_client_hello_unpin
-        );
+        round_trip!(message, read_client_hello, write_client_hello);
     }
 }
 
 #[test]
 fn client_hello_fields() {
-    let hello = round_trip!(
-        s3::CLIENT_HELLO,
-        sync_read_client_hello_unpin,
-        sync_write_client_hello_unpin
-    );
+    let hello = round_trip!(s3::CLIENT_HELLO, read_client_hello, write_client_hello);
     assert_eq!(hello.legacy_version(), ProtocolVersion::TLS_1_2);
     assert!(hello.legacy_session_id().as_bytes().is_empty());
     assert_eq!(
@@ -146,11 +129,7 @@ fn client_hello_fields() {
 
 #[test]
 fn client_hello_binders() {
-    let hello = round_trip!(
-        s4::CLIENT_HELLO,
-        sync_read_client_hello_unpin,
-        sync_write_client_hello_unpin
-    );
+    let hello = round_trip!(s4::CLIENT_HELLO, read_client_hello, write_client_hello);
     let offered = hello.pre_shared_key().unwrap();
     assert_eq!(offered.identities().len(), 1);
     assert_eq!(offered.identities()[0].obfuscated_ticket_age(), 0xfad6aacb);
@@ -177,27 +156,20 @@ fn server_hellos() {
     ] {
         let bytes = hex(message);
         for value in [
-            bytes
-                .as_slice()
-                .sync_read_server_hello_message_unpin()
-                .map(|_| ()),
-            Bytes::from(bytes.clone())
-                .sync_read_server_hello_message_unpin()
-                .map(|_| ()),
+            read_server_hello_message(&mut bytes.as_slice()).map(|_| ()),
+            read_server_hello_message(&mut Bytes::from(bytes.clone())).map(|_| ()),
         ] {
             value.unwrap();
         }
-        let hello = Bytes::from(bytes.clone())
-            .sync_read_server_hello_message_unpin()
-            .unwrap();
+        let hello = read_server_hello_message(&mut Bytes::from(bytes.clone())).unwrap();
         let mut output = Vec::new();
         match &hello {
             ServerHelloMessage::ServerHello(hello) => {
-                output.sync_write_server_hello_unpin(hello).unwrap();
+                write_server_hello(&mut output, hello);
                 assert_eq!(hello.encoded_len(), bytes.len());
             }
             ServerHelloMessage::HelloRetryRequest(retry) => {
-                output.sync_write_hello_retry_request_unpin(retry).unwrap();
+                write_hello_retry_request(&mut output, retry);
                 assert_eq!(retry.encoded_len(), bytes.len());
             }
         }
@@ -207,9 +179,7 @@ fn server_hellos() {
 
 #[test]
 fn server_hello_fields() {
-    let hello = hex(s3::SERVER_HELLO)
-        .as_slice()
-        .sync_read_server_hello_message_unpin()
+    let hello = read_server_hello_message(&mut hex(s3::SERVER_HELLO).as_slice())
         .map(|hello| match hello {
             ServerHelloMessage::ServerHello(hello) => (
                 hello.cipher_suite(),
@@ -229,16 +199,12 @@ fn server_hello_fields() {
             hex(s3::SERVER_PUBLIC)
         )
     );
-    let resumed = Bytes::from(hex(s4::SERVER_HELLO))
-        .sync_read_server_hello_message_unpin()
-        .unwrap();
+    let resumed = read_server_hello_message(&mut Bytes::from(hex(s4::SERVER_HELLO))).unwrap();
     let ServerHelloMessage::ServerHello(resumed) = resumed else {
         panic!()
     };
     assert_eq!(resumed.pre_shared_key().map(|index| index.get()), Some(0));
-    let retry = Bytes::from(hex(s5::HELLO_RETRY_REQUEST))
-        .sync_read_server_hello_message_unpin()
-        .unwrap();
+    let retry = read_server_hello_message(&mut Bytes::from(hex(s5::HELLO_RETRY_REQUEST))).unwrap();
     let ServerHelloMessage::HelloRetryRequest(retry) = retry else {
         panic!()
     };
@@ -255,14 +221,14 @@ fn encrypted_extensions() {
     ] {
         round_trip!(
             message,
-            sync_read_encrypted_extensions_unpin,
-            sync_write_encrypted_extensions_unpin
+            read_encrypted_extensions,
+            write_encrypted_extensions
         );
     }
     let message = round_trip!(
         s4::ENCRYPTED_EXTENSIONS,
-        sync_read_encrypted_extensions_unpin,
-        sync_write_encrypted_extensions_unpin
+        read_encrypted_extensions,
+        write_encrypted_extensions
     );
     assert!(
         message
@@ -283,8 +249,8 @@ fn certificates() {
     for message in [s3::CERTIFICATE, s5::CERTIFICATE] {
         let certificate = round_trip!(
             message,
-            sync_read_certificate_unpin,
-            sync_write_certificate_unpin,
+            read_certificate,
+            write_certificate,
             CertificateFormat::X509
         );
         let CertificateList::X509(entries) = certificate.certificates() else {
@@ -300,11 +266,7 @@ fn certificates() {
 #[test]
 fn certificate_verifies() {
     for message in [s3::CERTIFICATE_VERIFY, s5::CERTIFICATE_VERIFY] {
-        let verify = round_trip!(
-            message,
-            sync_read_certificate_verify_unpin,
-            sync_write_certificate_verify_unpin
-        );
+        let verify = round_trip!(message, read_certificate_verify, write_certificate_verify);
         assert_eq!(
             verify.algorithm(),
             nitori_crypto::SignatureScheme::RSA_PSS_RSAE_SHA256
@@ -325,15 +287,16 @@ fn finished_messages() {
     ] {
         round_trip!(
             message,
-            sync_read_finished_unpin,
-            sync_write_finished_unpin,
+            read_finished,
+            write_finished,
             HashAlgorithm::Sha256
         );
     }
-    let finished = hex(s3::SERVER_FINISHED)
-        .as_slice()
-        .sync_read_finished_unpin(HashAlgorithm::Sha256)
-        .unwrap();
+    let finished = read_finished(
+        &mut hex(s3::SERVER_FINISHED).as_slice(),
+        HashAlgorithm::Sha256,
+    )
+    .unwrap();
     assert_eq!(
         finished.verify_data().as_bytes(),
         hex(s3::SERVER_VERIFY_DATA)
@@ -344,8 +307,8 @@ fn finished_messages() {
 fn new_session_ticket() {
     let ticket = round_trip!(
         s3::NEW_SESSION_TICKET,
-        sync_read_new_session_ticket_unpin,
-        sync_write_new_session_ticket_unpin
+        read_new_session_ticket,
+        write_new_session_ticket
     );
     assert_eq!(ticket.ticket_lifetime().seconds(), 30);
     assert_eq!(ticket.ticket_nonce().nonce().as_ref(), [0, 0]);
@@ -357,8 +320,8 @@ fn new_session_ticket() {
 fn certificate_request() {
     let request = round_trip!(
         s6::CERTIFICATE_REQUEST,
-        sync_read_certificate_request_unpin,
-        sync_write_certificate_request_unpin
+        read_certificate_request,
+        write_certificate_request
     );
     assert!(request.certificate_request_context().is_empty());
     assert_eq!(request.extensions().len(), 1);
@@ -372,13 +335,10 @@ fn message_hash() {
     hash.update(&hex(s5::CLIENT_HELLO_1));
     let message = MessageHash::new(hash.finish());
     let mut output = Vec::new();
-    output.sync_write_message_hash_unpin(&message).unwrap();
+    write_message_hash(&mut output, &message);
     assert_eq!(output[..4], [254, 0, 0, 32]);
     assert_eq!(output.len(), message.encoded_len());
-    let read = output
-        .as_slice()
-        .sync_read_message_hash_unpin(HashAlgorithm::Sha256)
-        .unwrap();
+    let read = read_message_hash(&mut output.as_slice(), HashAlgorithm::Sha256).unwrap();
     assert_eq!(read, message);
     let _: &Digest = read.hash();
 }

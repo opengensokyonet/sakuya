@@ -28,10 +28,13 @@
 //! - [`engine`]: what the two engines share: the CRYPTO streams they read
 //!   and write at the current encryption level, and how a handshake fails.
 //!
-//! Every wire format is read and written through `nitori_call` operations,
-//! in the `codec` module of its type. The readers run on the bytes of a
-//! whole message, `&[u8]` or `Bytes`, and their variable-length fields are
-//! chunks of those bytes, without copying. `encoded_len` methods compute
+//! The contents of each message, once [`message::codec::read_handshake_message`]
+//! has collected it whole from its CRYPTO stream, are read and written by
+//! synchronous functions in the `codec` module of their type. The readers
+//! run on the bytes of a whole message, a [`bytes::Buf`] that splits with
+//! [`nitori_io::SplitTo`] such as `&[u8]` or `Bytes`, and their
+//! variable-length fields are pieces of those bytes, without copying; the
+//! writers write into a [`bytes::BufMut`]. `encoded_len` methods compute
 //! lengths without writing. Each read failure answers the TLS alert it calls
 //! for through `alert`.
 //!
@@ -54,6 +57,7 @@ pub mod message;
 pub mod role;
 pub mod schedule;
 pub mod server;
+mod source;
 #[cfg(test)]
 mod test_support;
 pub mod vector;

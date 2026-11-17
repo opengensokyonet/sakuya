@@ -160,15 +160,7 @@ extension_subset! {
 }
 
 pub mod codec {
-    //! Reading and writing CertificateRequest messages as `nitori_call`
-    //! operations.
-    //!
-    //! [`read_certificate_request`] and [`write_certificate_request`] are
-    //! also operation structs, with `{Name}Ext` on receiver accesses and
-    //! `{Name}HostExt` on call executors, including the `sync_` methods.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
+    //! Reading and writing CertificateRequest messages.
 
     use super::{
         BLOCK, CertificateRequest, CertificateRequestDisallowedExtension,
@@ -176,18 +168,20 @@ pub mod codec {
     };
     use crate::{
         alert::AlertDescription,
-        code_point::codec::{ReadCodePointListError, ReadCodePointListHostExt as _},
+        code_point::codec::{ReadCodePointListError, read_code_point_list, write_code_point_list},
         extension::{
             BlockEntry as _, BlockReader, ExtensionNotAllowedError, ReadExtensionBlockError,
             RestrictedExtension, UnknownExtension, excess, not_allowed, read_extension_block,
         },
-        message::{HandshakeType, MessageSource, ReadHeaderError, read_body},
-        vector::{ExcessBytesError, LengthOutOfRangeError, Out, ReadVectorError, read_vector},
+        message::{HandshakeType, ReadHeaderError, read_body},
+        vector::{
+            ExcessBytesError, LengthOutOfRangeError, ReadVectorError, read_vector, write_header,
+            write_length, write_vector,
+        },
         width::Width,
     };
-    use bytes::Buf;
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{Write, calls::WriteAllError};
+    use bytes::{Buf, BufMut};
+    use nitori_io::SplitTo;
     use snafu::{ResultExt, Snafu};
 
     /// Reads a CertificateRequest message, header included.
@@ -195,26 +189,24 @@ pub mod codec {
     /// # Errors
     ///
     /// [`ReadCertificateRequestError`].
-    #[call(sync)]
-    pub async fn read_certificate_request<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<CertificateRequest<F::Bytes>, ReadCertificateRequestError> {
-        let mut body = read_body(io, HandshakeType::CERTIFICATE_REQUEST).await?;
-        let request = body.sync_read_certificate_request_body_unpin()?;
+    pub fn read_certificate_request<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<CertificateRequest<S>, ReadCertificateRequestError> {
+        let mut body = read_body(src, HandshakeType::CERTIFICATE_REQUEST)?;
+        let request = read_certificate_request_body(&mut body)?;
         ExcessBytesError::check(body.remaining())
             .context(read_certificate_request_error::ExcessSnafu)?;
         Ok(request)
     }
 
-    #[call(sync)]
-    async fn read_certificate_request_body<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<CertificateRequest<F::Bytes>, ReadCertificateRequestError> {
+    fn read_certificate_request_body<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<CertificateRequest<S>, ReadCertificateRequestError> {
         use CertificateRequestExtension as X;
         use RestrictedExtension as R;
         use read_certificate_request_error::*;
-        let certificate_request_context = read_vector(io, Width::U8).await.context(ContextSnafu)?;
-        let block = read_extension_block(io).await.context(ExtensionsSnafu)?;
+        let certificate_request_context = read_vector(src, Width::U8).context(ContextSnafu)?;
+        let block = read_extension_block(src).context(ExtensionsSnafu)?;
         LengthOutOfRangeError::check(block.remaining(), BLOCK).context(ExtensionsLengthSnafu)?;
         let mut block = BlockReader::new(block);
         let mut extensions = Vec::new();
@@ -225,12 +217,10 @@ pub mod codec {
             };
             extensions.push(match restricted {
                 R::SignatureAlgorithms => X::SignatureAlgorithms(
-                    data.sync_read_code_point_list_unpin()
-                        .context(SignatureAlgorithmsSnafu)?,
+                    read_code_point_list(&mut data).context(SignatureAlgorithmsSnafu)?,
                 ),
                 R::SignatureAlgorithmsCert => X::SignatureAlgorithmsCert(
-                    data.sync_read_code_point_list_unpin()
-                        .context(SignatureAlgorithmsCertSnafu)?,
+                    read_code_point_list(&mut data).context(SignatureAlgorithmsCertSnafu)?,
                 ),
                 R::SignedCertificateTimestamp => X::SignedCertificateTimestamp,
                 other => {
@@ -333,45 +323,34 @@ pub mod codec {
 
     /// Writes `request`, header included.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails;
-    /// bytes accepted before stay written, and the error counts them over the
-    /// whole message.
-    #[call(sync)]
-    pub async fn write_certificate_request<
-        F: Write,
-        A: ReceiverAccess<Family = F>,
-        C: AsRef<[u8]>,
-    >(
-        io: &mut A,
+    /// If `dst` has no room for what it writes, as [`BufMut`] does.
+    pub fn write_certificate_request<C: AsRef<[u8]>>(
+        dst: &mut impl BufMut,
         request: &CertificateRequest<C>,
-    ) -> Result<(), WriteAllError<F::Error>> {
+    ) {
         use CertificateRequestExtension as X;
-        let mut out = Out::new(io);
-        out.header(HandshakeType::CERTIFICATE_REQUEST, request.body_len())
-            .await?;
-        out.vector(Width::U8, request.certificate_request_context.as_ref())
-            .await?;
-        out.length(Width::U16, request.block_len()).await?;
+        write_header(dst, HandshakeType::CERTIFICATE_REQUEST, request.body_len());
+        write_vector(dst, Width::U8, request.certificate_request_context.as_ref());
+        write_length(dst, Width::U16, request.block_len());
         for extension in &request.extensions {
-            out.u16(extension.extension_type().get()).await?;
-            out.length(Width::U16, extension.data_len()).await?;
+            dst.put_u16(extension.extension_type().get());
+            write_length(dst, Width::U16, extension.data_len());
             match extension {
                 X::SignatureAlgorithms(list) | X::SignatureAlgorithmsCert(list) => {
-                    out.code_point_list(list).await?
+                    write_code_point_list(dst, list)
                 }
                 X::SignedCertificateTimestamp => {}
-                X::Unknown(extension) => out.put(extension.data().as_ref()).await?,
+                X::Unknown(extension) => dst.put_slice(extension.data().as_ref()),
             }
         }
-        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::codec::{ReadCertificateRequestError, ReadCertificateRequestHostExt as _};
+    use super::codec::{ReadCertificateRequestError, read_certificate_request};
     use crate::{
         alert::AlertDescription,
         test_support::{concat, extension, message, vector},
@@ -379,10 +358,7 @@ mod tests {
 
     fn read(extensions: &[u8]) -> Result<(), ReadCertificateRequestError> {
         let bytes = message(13, &concat(&[&[0], &vector(2, extensions)]));
-        bytes
-            .as_slice()
-            .sync_read_certificate_request_unpin()
-            .map(|_| ())
+        read_certificate_request(&mut bytes.as_slice()).map(|_| ())
     }
 
     #[test]

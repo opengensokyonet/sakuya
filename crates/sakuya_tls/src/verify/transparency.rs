@@ -16,7 +16,7 @@ use super::{
 };
 use crate::clock::elapsed;
 use crate::extension::signed_certificate_timestamp::codec::{
-    ReadSignedCertificateTimestampListError, ReadSignedCertificateTimestampListHostExt as _,
+    ReadSignedCertificateTimestampListError, read_signed_certificate_timestamp_list,
 };
 use nitori_crypto::{Hash, HashAlgorithm, RunningHash, SignatureScheme, SignatureVerify};
 use snafu::{ResultExt, Snafu};
@@ -285,8 +285,7 @@ impl<C: Hash + SignatureVerify> super::Transparency<C> for EmbeddedSctPolicy {
         let issuer_key_hash = issuer_key_hash.finish();
         let mut counted: Vec<&CtLog> = Vec::new();
         if let Some(list_bytes) = leaf.timestamps {
-            let timestamps = { list_bytes }
-                .sync_read_signed_certificate_timestamp_list_unpin()
+            let timestamps = read_signed_certificate_timestamp_list(&mut { list_bytes })
                 .context(MalformedTimestampListSnafu)?;
             for serialized in timestamps.timestamps() {
                 let Some(sct) = Sct::parse(serialized) else {

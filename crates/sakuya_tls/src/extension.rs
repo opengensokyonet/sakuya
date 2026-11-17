@@ -29,13 +29,12 @@
 use crate::{
     alert::AlertDescription,
     code_point::code_point,
-    message::MessageSource,
-    vector::{ExcessBytesError, LengthOutOfRangeError, ReadVectorError, read_u16, read_vector},
+    source::read_u16,
+    vector::{ExcessBytesError, LengthOutOfRangeError, ReadVectorError, read_vector},
     width::Width,
 };
 use bytes::Buf;
-use nitori_call::{ReceiverAccess, call};
-use nitori_io::error::IncompleteError;
+use nitori_io::{SplitTo, error::IncompleteError};
 use smallvec::SmallVec;
 use snafu::{ResultExt, Snafu};
 
@@ -545,25 +544,19 @@ impl Seen {
 }
 
 /// Reads the two-byte length of an extension block and the block.
-#[call(sync)]
-pub(crate) async fn read_extension_block<F: MessageSource, A: ReceiverAccess<Family = F>>(
-    io: &mut A,
-) -> Result<F::Bytes, ReadExtensionBlockError> {
-    read_vector(io, Width::U16)
-        .await
-        .context(read_extension_block_error::BlockSnafu)
+pub(crate) fn read_extension_block<S: Buf + SplitTo>(
+    src: &mut S,
+) -> Result<S, ReadExtensionBlockError> {
+    read_vector(src, Width::U16).context(read_extension_block_error::BlockSnafu)
 }
 
 /// Reads the type and data of the next extension of a block.
-#[call(sync)]
-pub(crate) async fn read_extension_entry<F: MessageSource, A: ReceiverAccess<Family = F>>(
-    io: &mut A,
-) -> Result<(ExtensionType, F::Bytes), ReadExtensionBlockError> {
+pub(crate) fn read_extension_entry<S: Buf + SplitTo>(
+    src: &mut S,
+) -> Result<(ExtensionType, S), ReadExtensionBlockError> {
     use read_extension_block_error::*;
-    let extension = ExtensionType(read_u16(io).await.context(TypeSnafu)?);
-    let data = read_vector(io, Width::U16)
-        .await
-        .context(DataSnafu { extension })?;
+    let extension = ExtensionType(read_u16(src).context(TypeSnafu)?);
+    let data = read_vector(src, Width::U16).context(DataSnafu { extension })?;
     Ok((extension, data))
 }
 
@@ -574,7 +567,7 @@ pub(crate) struct BlockReader<B> {
     seen: Seen,
 }
 
-impl<B: Buf + nitori_call::Receiver<Family: MessageSource<Bytes = B>> + Unpin> BlockReader<B> {
+impl<B: Buf + SplitTo> BlockReader<B> {
     pub(crate) fn new(block: B) -> Self {
         Self {
             block,
@@ -588,7 +581,7 @@ impl<B: Buf + nitori_call::Receiver<Family: MessageSource<Bytes = B>> + Unpin> B
         if !self.block.has_remaining() {
             return Ok(None);
         }
-        let (extension, data) = self.block.sync_read_extension_entry_unpin()?;
+        let (extension, data) = read_extension_entry(&mut self.block)?;
         self.seen.insert(extension)?;
         Ok(Some((extension, data)))
     }

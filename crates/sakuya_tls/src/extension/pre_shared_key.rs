@@ -209,21 +209,17 @@ pub enum InvalidOfferedPsksError {
 }
 
 pub mod codec {
-    //! Reading and writing offered PSKs as `nitori_call` operations.
-    // `#[call]` generates constructors, fields and extension traits without
-    // documentation comments; the module documentation above describes them.
-    #![allow(missing_docs)]
+    //! Reading and writing offered PSKs.
 
     use super::{OfferedPsks, PskBinderEntry, PskCountMismatchError, PskIdentity};
     use crate::{
         alert::AlertDescription,
-        message::MessageSource,
-        vector::{Out, ReadBoundedVectorError, read_bounded_vector, read_u32},
+        source::read_u32,
+        vector::{ReadBoundedVectorError, read_bounded_vector, write_length, write_vector},
         width::Width,
     };
-    use bytes::Buf;
-    use nitori_call::{ReceiverAccess, call};
-    use nitori_io::{Write, calls::WriteAllError, error::IncompleteError};
+    use bytes::{Buf, BufMut};
+    use nitori_io::{SplitTo, error::IncompleteError};
     use snafu::{ResultExt, Snafu};
 
     /// Reads the data of a `pre_shared_key` extension in a ClientHello.
@@ -231,24 +227,21 @@ pub mod codec {
     /// # Errors
     ///
     /// [`ReadOfferedPsksError`].
-    #[call(sync)]
-    pub async fn read_offered_psks<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<OfferedPsks<F::Bytes>, ReadOfferedPsksError> {
+    pub fn read_offered_psks<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<OfferedPsks<S>, ReadOfferedPsksError> {
         use read_offered_psks_error::*;
-        let mut list = read_bounded_vector(io, Width::U16, 7..=Width::U16.max())
-            .await
-            .context(IdentitiesSnafu)?;
+        let mut list =
+            read_bounded_vector(src, Width::U16, 7..=Width::U16.max()).context(IdentitiesSnafu)?;
         let mut identities = Vec::new();
         while list.has_remaining() {
-            identities.push(list.sync_read_psk_identity_unpin()?);
+            identities.push(read_psk_identity(&mut list)?);
         }
-        let mut list = read_bounded_vector(io, Width::U16, 33..=Width::U16.max())
-            .await
-            .context(BindersSnafu)?;
+        let mut list =
+            read_bounded_vector(src, Width::U16, 33..=Width::U16.max()).context(BindersSnafu)?;
         let mut binders = Vec::new();
         while list.has_remaining() {
-            binders.push(list.sync_read_psk_binder_entry_unpin()?);
+            binders.push(read_psk_binder_entry(&mut list)?);
         }
         PskCountMismatchError::check(identities.len(), binders.len())?;
         Ok(OfferedPsks {
@@ -257,27 +250,23 @@ pub mod codec {
         })
     }
 
-    #[call(sync)]
-    async fn read_psk_identity<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<PskIdentity<F::Bytes>, ReadOfferedPsksError> {
+    fn read_psk_identity<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<PskIdentity<S>, ReadOfferedPsksError> {
         use read_offered_psks_error::*;
-        let identity = read_bounded_vector(io, Width::U16, 1..=Width::U16.max())
-            .await
-            .context(IdentitySnafu)?;
-        let obfuscated_ticket_age = read_u32(io).await.context(TicketAgeSnafu)?;
+        let identity =
+            read_bounded_vector(src, Width::U16, 1..=Width::U16.max()).context(IdentitySnafu)?;
+        let obfuscated_ticket_age = read_u32(src).context(TicketAgeSnafu)?;
         Ok(PskIdentity {
             identity,
             obfuscated_ticket_age,
         })
     }
 
-    #[call(sync)]
-    async fn read_psk_binder_entry<F: MessageSource, A: ReceiverAccess<Family = F>>(
-        io: &mut A,
-    ) -> Result<PskBinderEntry<F::Bytes>, ReadOfferedPsksError> {
-        let binder = read_bounded_vector(io, Width::U8, 32..=Width::U8.max())
-            .await
+    fn read_psk_binder_entry<S: Buf + SplitTo>(
+        src: &mut S,
+    ) -> Result<PskBinderEntry<S>, ReadOfferedPsksError> {
+        let binder = read_bounded_vector(src, Width::U8, 32..=Width::U8.max())
             .context(read_offered_psks_error::BinderSnafu)?;
         Ok(PskBinderEntry { binder })
     }
@@ -337,33 +326,25 @@ pub mod codec {
 
     /// Writes the data of a `pre_shared_key` extension in a ClientHello.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// [`WriteAllError`] if the receiver stops accepting bytes or fails.
-    #[call(sync)]
-    pub async fn write_offered_psks<F: Write, A: ReceiverAccess<Family = F>, C: AsRef<[u8]>>(
-        io: &mut A,
-        offered: &OfferedPsks<C>,
-    ) -> Result<(), WriteAllError<F::Error>> {
-        offered.encode(&mut Out::new(io)).await
+    /// If `dst` has no room for what it writes, as [`BufMut`] does.
+    pub fn write_offered_psks<C: AsRef<[u8]>>(dst: &mut impl BufMut, offered: &OfferedPsks<C>) {
+        offered.encode(dst)
     }
 
     impl<C: AsRef<[u8]>> OfferedPsks<C> {
-        pub(crate) async fn encode<F: Write, A: ReceiverAccess<Family = F>>(
-            &self,
-            out: &mut Out<'_, A>,
-        ) -> Result<(), WriteAllError<F::Error>> {
+        pub(crate) fn encode(&self, dst: &mut impl BufMut) {
             let identities: usize = self.identities.iter().map(PskIdentity::entry_len).sum();
-            out.length(Width::U16, identities).await?;
+            write_length(dst, Width::U16, identities);
             for identity in &self.identities {
-                out.vector(Width::U16, identity.identity.as_ref()).await?;
-                out.u32(identity.obfuscated_ticket_age).await?;
+                write_vector(dst, Width::U16, identity.identity.as_ref());
+                dst.put_u32(identity.obfuscated_ticket_age);
             }
-            out.length(Width::U16, self.binders_len() - 2).await?;
+            write_length(dst, Width::U16, self.binders_len() - 2);
             for binder in &self.binders {
-                out.vector(Width::U8, binder.binder.as_ref()).await?;
+                write_vector(dst, Width::U8, binder.binder.as_ref());
             }
-            Ok(())
         }
     }
 }
