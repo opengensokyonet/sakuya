@@ -696,10 +696,11 @@ fn pacing_gives_a_whole_datagram_the_first_supply_then_allows_stream() {
                 urgency,
                 DatagramProgress::new(),
             );
-            let content = driver([
-                stream(1),
-                <Intents as InjectSendIntent<_, _>>::inject(datagram),
-            ]);
+            let ticket = core
+                .intake()
+                .handle::<DatagramIntent<Urgency>, _>()
+                .publish_to(datagram, AnyActiveLinkPath);
+            let content = driver([stream(1)]);
             let mut plan = ready(&mut planner, &mut core, &content, &waker);
             assert!(matches!(
                 plan.leading_content().unwrap().source,
@@ -710,6 +711,9 @@ fn pacing_gives_a_whole_datagram_the_first_supply_then_allows_stream() {
             };
             let item = cursor.next().unwrap();
             assert!(matches!(item.item, Inr(Inl(_))));
+            if wrote == 0 {
+                assert_eq!(ticket.withdraw(), IntentWithdrawReport::Withdrawn);
+            }
             item.feedback.supplied(wrote);
             if wrote > 0 {
                 let item = cursor.next().unwrap();
@@ -719,8 +723,14 @@ fn pacing_gives_a_whole_datagram_the_first_supply_then_allows_stream() {
             assert!(cursor.next().is_none());
             drop(plan);
             if wrote == 0 {
+                let before_release = calls.0.load(Ordering::SeqCst);
                 planner.observe(limits(12_000));
-                assert_eq!(calls.0.load(Ordering::SeqCst), 1);
+                assert_eq!(calls.0.load(Ordering::SeqCst), before_release + 1);
+                let mut plan = ready(&mut planner, &mut core, &content, &waker);
+                assert_eq!(
+                    walk(&mut plan, 10),
+                    [(PlannedPacketKind::OneRtt, vec![FrameSourceId::Stream])]
+                );
             }
         }
     }

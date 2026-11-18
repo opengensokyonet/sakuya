@@ -39,6 +39,12 @@
 //! each datagram starting after the intent that was given its turn last on
 //! the link path. Application data that does not fit is passed over.
 //!
+//! An ordinary 1-RTT STREAM waits to open a datagram while pacing alone
+//! limits its size and the pacer has a release scheduled. The target is
+//! the smaller of the path capacity and the available congestion window.
+//! A probe permit lifts the wait. Another eligible source may open the
+//! datagram first, after which the STREAM can use the remaining room.
+//!
 //! A supply that writes something consumes its intent, except an intent
 //! that stays after writing ([`RankedIntent::stays_after_writing`]), such as
 //! a stream's data: its source wrote as much as it could and resized or
