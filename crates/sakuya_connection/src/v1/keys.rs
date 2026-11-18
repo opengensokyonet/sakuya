@@ -814,7 +814,8 @@ impl<B: CryptoBackend> fmt::Debug for ZeroRttReceiveKeys<'_, B> {
 /// Whether 0-RTT is accepted is decided when the ServerHello is written;
 /// until then a 0-RTT packet waits (RFC 9001 §4.1.4). Once a 1-RTT packet
 /// has arrived the keys retire: 0-RTT packets that were reordered are still
-/// read for a while, then the keys are dropped (§4.9.3).
+/// read for a while, then the keys are dropped (§4.9.3). The keys are
+/// boxed, as the Initial keys are.
 ///
 /// `I` is the instant of the connection's clock.
 pub enum ZeroRttReceiving<B: CryptoBackend, I> {
@@ -822,11 +823,11 @@ pub enum ZeroRttReceiving<B: CryptoBackend, I> {
     /// written.
     NotYet,
     /// 0-RTT was accepted and its packets are read.
-    Open(DirectionKeys<B>),
+    Open(Box<DirectionKeys<B>>),
     /// A 1-RTT packet has arrived: 0-RTT packets are still read until the
     /// instant, `None` while it is not set yet, then the keys are dropped
     /// (RFC 9001 §4.9.3).
-    Retiring(DirectionKeys<B>, Option<I>),
+    Retiring(Box<DirectionKeys<B>>, Option<I>),
     /// No 0-RTT packets are read: the client offered none, the server
     /// rejected it, or the keys are gone.
     None,
@@ -863,7 +864,7 @@ impl<B: CryptoBackend, I: Copy + Ord> ZeroRttReceiving<B, I> {
     pub fn open(&mut self, keys: DirectionKeys<B>) -> Option<Happened<KeysInstalled<ZeroRtt>>> {
         match self {
             Self::NotYet => {
-                *self = Self::Open(keys);
+                *self = Self::Open(Box::new(keys));
                 Some(Happened::new())
             }
             Self::None => None,
@@ -932,12 +933,13 @@ impl<B: CryptoBackend, I: Copy + Ord> ZeroRttReceiving<B, I> {
     }
 }
 
-/// A client's keys to send 0-RTT packets.
+/// A client's keys to send 0-RTT packets. The keys are boxed, as the
+/// Initial keys are.
 pub enum ZeroRttSending<B: CryptoBackend> {
     /// The client offered no 0-RTT.
     None,
     /// 0-RTT is offered and its packets are sent.
-    Open(DirectionKeys<B>),
+    Open(Box<DirectionKeys<B>>),
     /// No more 0-RTT packets are sent: the handshake has completed (RFC
     /// 9001 §4.9.3), the server rejected 0-RTT, or the connection closes.
     Closed,
@@ -961,7 +963,7 @@ impl<B: CryptoBackend> ZeroRttSending<B> {
             matches!(self, Self::None),
             "opening 0-RTT keys that are {self:?}"
         );
-        *self = Self::Open(keys);
+        *self = Self::Open(Box::new(keys));
         Happened::new()
     }
 
