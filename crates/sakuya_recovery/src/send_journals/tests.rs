@@ -60,7 +60,7 @@ fn sealing_a_packet_with_frames_records_it_and_advances_the_number() {
             ack_eliciting: true,
             in_flight: true,
             pmtu_probe: true,
-            summaries: vec!["crypto", "ack"],
+            summaries: SentPacketSummaries::from_slice(&["crypto", "ack"]),
             content_handed_back: false,
         }
     );

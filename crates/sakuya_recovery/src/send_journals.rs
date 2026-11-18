@@ -20,6 +20,7 @@ use core::ops::RangeInclusive;
 use std::{collections::VecDeque, vec};
 
 use sakuya_wire::v1::packet_number::PacketNumber;
+use smallvec::SmallVec;
 
 /// Where a sent packet stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,6 +40,11 @@ pub enum SentPacketState<I> {
         retain_until: I,
     },
 }
+
+/// The summaries of the frames of one sent packet, in the order they were
+/// written: two inline, as a packet usually carries few frames; more go to
+/// the heap.
+pub type SentPacketSummaries<S> = SmallVec<[S; 2]>;
 
 /// The record of one sent packet.
 ///
@@ -63,7 +69,7 @@ pub struct SentPacketRecord<I, S, P> {
     /// (RFC 9000 §14.4).
     pub pmtu_probe: bool,
     /// The summary of each frame, in the order they were written.
-    pub summaries: Vec<S>,
+    pub summaries: SentPacketSummaries<S>,
     /// Whether the summaries were handed back to their frame sources as
     /// lost while the packet stays in flight, as a probe timeout does
     /// ([`SendJournals::hand_back_oldest_ack_eliciting_content`]): when the
@@ -211,7 +217,7 @@ pub struct DequeSendAttempt<'a, I, S, P> {
     link_path: P,
     ack_eliciting: bool,
     in_flight: bool,
-    summaries: Vec<S>,
+    summaries: SentPacketSummaries<S>,
 }
 
 /// A packet sealed into [`DequeSendJournals`].
@@ -292,7 +298,7 @@ impl<I: Ord + Copy, S, P: PartialEq> SendJournals<S, I, P> for DequeSendJournals
             link_path,
             ack_eliciting: false,
             in_flight: false,
-            summaries: Vec::new(),
+            summaries: SentPacketSummaries::new(),
         }
     }
 

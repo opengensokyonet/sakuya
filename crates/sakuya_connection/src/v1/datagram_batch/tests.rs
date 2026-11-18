@@ -356,12 +356,12 @@ fn a_client_initial_and_a_handshake_packet_are_coalesced_and_padded_to_1200() {
     );
     let initial_record = record(&mut initial, initial_packet.sealed);
     assert_eq!(initial_record.bytes, first_len);
-    assert_eq!(initial_record.summaries, [Summary::Frame("crypto")]);
+    assert_eq!(initial_record.summaries[..], [Summary::Frame("crypto")]);
     assert!(initial_record.ack_eliciting && initial_record.in_flight);
     let handshake_record = record(&mut handshake, handshake_packet.sealed);
     assert_eq!(handshake_record.bytes, second_len);
     assert_eq!(
-        handshake_record.summaries,
+        handshake_record.summaries[..],
         [Summary::Frame("ping"), Summary::Padding]
     );
     assert!(entry.application_data.is_none());
@@ -402,7 +402,10 @@ fn a_short_packet_is_padded_for_the_header_protection_sample() {
     let entry = batch.take_first().unwrap();
     let record = record(&mut application, entry.application_data.unwrap().sealed);
     assert!(record.pmtu_probe);
-    assert_eq!(record.summaries, [Summary::Frame("ping"), Summary::Padding]);
+    assert_eq!(
+        record.summaries[..],
+        [Summary::Frame("ping"), Summary::Padding]
+    );
 }
 
 #[test]
@@ -549,7 +552,7 @@ fn padding_goes_before_the_frames_of_a_closed_packet() {
         batch.take_first().unwrap().application_data.unwrap().sealed,
     );
     assert_eq!(
-        record.summaries,
+        record.summaries[..],
         [
             Summary::Frame("path response"),
             Summary::Frame("stream"),
@@ -655,7 +658,7 @@ fn ack_only_content_is_not_limited_by_what_may_go_in_flight() {
     assert!(packet.in_flight.is_none());
     let record = record(&mut handshake, packet.sealed);
     assert!(!record.ack_eliciting && !record.in_flight);
-    assert_eq!(record.summaries, [Summary::Frame("ack")]);
+    assert_eq!(record.summaries[..], [Summary::Frame("ack")]);
 }
 
 #[test]
@@ -711,7 +714,7 @@ fn a_packet_of_padding_alone_brings_the_datagram_to_its_floor() {
         &mut handshake,
         batch.take_first().unwrap().handshake.unwrap().sealed,
     );
-    assert_eq!(record.summaries, [Summary::Padding]);
+    assert_eq!(record.summaries[..], [Summary::Padding]);
     assert!(!record.ack_eliciting && record.in_flight);
 }
 
