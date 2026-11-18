@@ -901,8 +901,8 @@ where
         });
         let first = *lineage.get::<FirstLocalConnectionId, Ifl>();
         let destination = *lineage.get::<InitialDestinationConnectionIds, Iid>();
-        let local = lineage.get_mut::<LocalTransportParameters<TransportParameterSlots>, Ilt>();
-        send_local(local, |settled| {
+        let mut local = lineage.get_mut::<LocalTransportParameters<TransportParameterSlots>, Ilt>();
+        send_local(&mut local, |settled| {
             server_parameters(settled, first, destination)
         });
         let local = <L as SendLocalTransportParameters<_, Ils>>::send_local(lineage);
@@ -1057,10 +1057,10 @@ where
             .get::<PacketProtectionBackend<T::Crypto>, Ib>()
             .0
             .clone();
-        let keys = lineage.get_mut::<ZeroRttReceiving<T::Crypto, InstantOf<T>>, Iz>();
+        let mut keys = lineage.get_mut::<ZeroRttReceiving<T::Crypto, InstantOf<T>>, Iz>();
         keys.open(DirectionKeys::derive(&backend, aead, &secret.0));
         // a connection that closed already stays refused
-        if matches!(keys, ZeroRttReceiving::Open(_)) {
+        if matches!(*keys, ZeroRttReceiving::Open(_)) {
             give_events::<T, L, B, Iev>(lineage, others, |events, now| {
                 let key = KeyChange {
                     level: EncryptionLevel::ZeroRtt,
@@ -1448,10 +1448,12 @@ where
     {
         let NodeLoan { lineage, others } = view.get_mut();
         let first = *lineage.get::<FirstLocalConnectionId, Ifl>();
-        let local = lineage.get_mut::<LocalTransportParameters<TransportParameterSlots>, Ilt>();
+        let mut local = lineage.get_mut::<LocalTransportParameters<TransportParameterSlots>, Ilt>();
         // the first time only: a ClientHello written again sends the same
         let first_time = local.sent().is_none();
-        send_local(local, |configured| client_parameters(configured, first));
+        send_local(&mut local, |configured| {
+            client_parameters(configured, first)
+        });
         let local = L::send_local(lineage);
         if first_time {
             give_events::<T, L, B, Iev>(lineage, others, |events, now| {

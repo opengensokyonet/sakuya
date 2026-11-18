@@ -193,7 +193,7 @@ where
     V: GetAt<LocalTransportParameters<PartSlots<P>>, I>,
 {
     fn send_local(lineage: &mut Lineage<'_, V>) -> PartSlots<P> {
-        let local = lineage.get_mut::<LocalTransportParameters<PartSlots<P>>, I>();
+        let mut local = lineage.get_mut::<LocalTransportParameters<PartSlots<P>>, I>();
         if local.sent().is_none() {
             local.send_with(Clone::clone);
         }
@@ -799,9 +799,9 @@ pub(crate) mod resume_tests {
     {
         let mut local = LocalTransportParameters::Configured(configured);
         let mut policy = PartResumedParametersPolicy::new(Picks(decision, None));
-        let mut taken = TakenPositions::default();
+        let taken = TakenPositions::default();
         let accepted = {
-            let mut lineage = Lineage::new(frunk_core::hlist![&mut local, &mut policy], &mut taken);
+            let mut lineage = Lineage::new(frunk_core::hlist![&mut local, &mut policy], &taken);
             P::resume_local(&mut lineage, remembered, None)
         };
         let settled = local.configured().expect("still configured").clone();

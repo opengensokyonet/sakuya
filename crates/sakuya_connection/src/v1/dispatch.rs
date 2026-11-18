@@ -339,7 +339,7 @@ where
                     unreachable!("a logical path's lend carries its key")
                 };
                 others.each_link_path::<HList![PendingPathResponse], Ipr>(
-                    |key, hlist_pat![pending]| {
+                    |key, hlist_pat![mut pending]| {
                         let NodeKey::LinkPath(each, link) = key else {
                             return;
                         };
@@ -384,13 +384,13 @@ where
             }
             FrameRun::NewToken(frame) => {
                 <T::Side as Side>::on_new_token(
-                    lineage.get_mut::<<T::Side as Side>::Own, Iw>(),
+                    &mut *lineage.get_mut::<<T::Side as Side>::Own, Iw>(),
                     frame.into_token(),
                 );
                 Ok(())
             }
             FrameRun::HandshakeDone(_) => {
-                let confirmation = lineage.get_mut::<HandshakeConfirmation, Ih>();
+                let mut confirmation = lineage.get_mut::<HandshakeConfirmation, Ih>();
                 // looked at for the events only
                 let newly = <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
                     && *confirmation != HandshakeConfirmation::Confirmed;
@@ -511,7 +511,7 @@ where
     for<'s> <NodeData<T, L, layer::Established> as FlatMut<'s>>::Out:
         TakeEach<'s, HList![StreamsOf<T, L>], Is>,
 {
-    let Some(hlist_pat![streams]) = others.borrow_established::<HList![StreamsOf<T, L>], Is>()
+    let Some(hlist_pat![mut streams]) = others.borrow_established::<HList![StreamsOf<T, L>], Is>()
     else {
         if lineage
             .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>()
@@ -532,7 +532,7 @@ where
         .get::<SendStrategyIntake<IntakeOf<T, L>>, Ii>()
         .intake()
         .handle::<StreamIntent<SendParametersOf<T>>, Idx>();
-    handle(streams, &publish).with_context(|_| error::StreamSetSnafu {
+    handle(&mut *streams, &publish).with_context(|_| error::StreamSetSnafu {
         frame_type: frame_type_value(type_value),
     })
 }
@@ -574,7 +574,7 @@ pub(super) fn drain_link_paths<'v, T, L, B, Iv, Ima, Irt, Il>(
     // an end beyond what the instant type represents is none: the draining
     // period is cut short rather than kept forever
     let end = now.checked_add(pto.saturating_mul(3)).unwrap_or(now);
-    others.each_link_path::<HList![LinkPathRole<InstantOf<T>>], Il>(|_, hlist_pat![role]| {
+    others.each_link_path::<HList![LinkPathRole<InstantOf<T>>], Il>(|_, hlist_pat![mut role]| {
         role.drain(end)
     });
 }

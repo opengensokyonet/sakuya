@@ -251,7 +251,7 @@ where
             .is_some_and(|lowest| largest >= lowest),
         _ => false,
     };
-    if confirms && let OneRttKeys::Live(keys) = lineage.get_mut::<OneRttKeys<B, I>, Io>() {
+    if confirms && let OneRttKeys::Live(keys) = &mut *lineage.get_mut::<OneRttKeys<B, I>, Io>() {
         keys.send_confirmed(at);
     }
     Ok(())

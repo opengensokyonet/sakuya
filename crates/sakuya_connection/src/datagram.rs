@@ -958,7 +958,7 @@ where
             &run,
         )?;
         let has_length = run.length().is_right();
-        let Some(hlist_pat![queues]) =
+        let Some(hlist_pat![mut queues]) =
             others.borrow_established::<HList![DatagramQueuesOf<T, L>], Iq>()
         else {
             if lineage

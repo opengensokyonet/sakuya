@@ -517,25 +517,25 @@ where
         Q: PacketPosition,
     {
         match self.lineage.get_optional_mut::<X, Is>() {
-            Some(set) => F::supply(set, &self.publish, item, packet),
+            Some(mut set) => F::supply(&mut *set, &self.publish, item, packet),
             None => Supplied::Open(packet),
         }
     }
 
     fn delivered(&mut self, _: PacketNumberSpaceKind, summary: F::FrameSummary) {
-        if let Some(set) = self.lineage.get_optional_mut::<X, Is>() {
+        if let Some(mut set) = self.lineage.get_optional_mut::<X, Is>() {
             set.on_frame_delivered(&self.publish, F::set_summary(summary));
         }
     }
 
     fn lost(&mut self, _: PacketNumberSpaceKind, summary: &F::FrameSummary) {
-        if let Some(set) = self.lineage.get_optional_mut::<X, Is>() {
+        if let Some(mut set) = self.lineage.get_optional_mut::<X, Is>() {
             set.on_frame_lost(&self.publish, F::set_summary(*summary));
         }
     }
 
     fn unfulfilled(&mut self, item: F::Item<'_>, cause: Unfulfilled) {
-        if let Some(set) = self.lineage.get_optional_mut::<X, Is>() {
+        if let Some(mut set) = self.lineage.get_optional_mut::<X, Is>() {
             set.on_intent_unfulfilled(&self.publish, F::key(item), cause);
         }
     }

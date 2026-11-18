@@ -34,7 +34,7 @@ use crate::{
         ranked::{RankedIntent, SendPriority, SendRank},
     },
     share::LineagePartList,
-    take::{GetAt, Lineage},
+    take::{ComponentMut, GetAt, Lineage},
     write::{InFlightClass, OpenPacket, PacketPosition, PacketWriting, SummaryOf, Supplied},
 };
 
@@ -190,7 +190,7 @@ where
         'r: 'l;
 
     fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
-        lineage.get_mut::<PendingPmtuProbe, Ip>()
+        ComponentMut::into_mut(lineage.get_mut::<PendingPmtuProbe, Ip>())
     }
 }
 

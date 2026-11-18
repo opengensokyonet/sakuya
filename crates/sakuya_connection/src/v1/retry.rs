@@ -326,7 +326,8 @@ where
     let mut established =
         others.borrow_established_optional::<EstablishedSourceComponentsOfParts<T, L>, Is>();
     for space in PacketNumberSpaceKind::ALL {
-        let Some(journals) = lineage.get_mut::<SendJournalsOf<T, L>, Ij>().get_mut(space) else {
+        let mut all_journals = lineage.get_mut::<SendJournalsOf<T, L>, Ij>();
+        let Some(journals) = all_journals.get_mut(space) else {
             continue;
         };
         let unsettled: Vec<_> = journals.take_link_path(&identifier).collect();
@@ -355,11 +356,19 @@ where
         return true;
     };
     let clone = clone.0.clone();
-    let factory = lineage.get_mut::<RecoveryFactoryOf<T, L>, If>();
+    let mut factory = lineage.get_mut::<RecoveryFactoryOf<T, L>, If>();
     others.with_recovery_at::<RestartRecoveryTakes<T, L, S, Ls>, Ik, _>(
         &path,
         link,
-        |hlist_pat![rtt, part, pmtu, state, detections, pto], _| {
+        |hlist_pat![
+            mut rtt,
+            mut part,
+            mut pmtu,
+            mut state,
+            mut detections,
+            mut pto
+        ],
+         _| {
             let (new_rtt, new_part, new_pmtu) = factory.create(&clone, initial_rtt);
             *rtt = new_rtt;
             *part = new_part;

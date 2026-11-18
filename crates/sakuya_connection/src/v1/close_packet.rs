@@ -695,7 +695,7 @@ where
             events: PhantomData,
         };
         let sealed = {
-            let (hlist_pat![policy, usage], rest) =
+            let (hlist_pat![mut policy, mut usage], rest) =
                 Take::<SealTakes<T>, It>::take(lineage.reborrow());
             let (
                 hlist_pat![
@@ -754,7 +754,7 @@ where
                     close: level_close(level),
                 });
             }
-            write_close_datagram(levels, shape, usage, &mut copies)?
+            write_close_datagram(levels, shape, &mut usage, &mut copies)?
         };
         if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
             && let Some(events) = lineage
@@ -776,7 +776,8 @@ where
             }
         }
 
-        let (hlist_pat![packet, ids, registrar], _) = Take::<SealedTakes<T>, Is>::take(lineage);
+        let (hlist_pat![mut packet, mut ids, mut registrar], _) =
+            Take::<SealedTakes<T>, Is>::take(lineage);
         let chosen = DatagramConnectionId::<_, _, _, InstantOf<T>>::choose_first(
             ids.destination(),
             &link,

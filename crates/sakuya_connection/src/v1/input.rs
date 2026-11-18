@@ -721,7 +721,7 @@ where
         drain_on_stateless_reset::<T, L, B, Ic, Ir, Is, Iv, Ima, Irt, Il>(lineage, others, cx);
         loop {
             let levels = ReceivableLevels::of::<T, L, Ii, Ih, Io, Iz>(lineage);
-            let input = lineage.get_mut::<LogicalPathInput<T::Link, T::Receiver>, Ip>();
+            let mut input = lineage.get_mut::<LogicalPathInput<T::Link, T::Receiver>, Ip>();
             if input.yield_due() {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
@@ -1047,7 +1047,7 @@ fn receive_owned<
     let link = datagram.link().id().clone();
     // the entry of a logical link no link path is over yet does not
     // exist; there is nothing to count
-    if let Some(hlist_pat![limit, _]) =
+    if let Some(hlist_pat![mut limit, _]) =
         others.link_entry::<HList![AntiAmplification, LinkFacts], Ian>(datagram.link().id())
     {
         limit.received(size);
@@ -1254,7 +1254,7 @@ where
                 now,
                 |lineage, since_first_initial| {
                     <T::Side as Side>::on_retry(
-                        lineage.get_mut::<<T::Side as Side>::Own, Iw>(),
+                        &mut *lineage.get_mut::<<T::Side as Side>::Own, Iw>(),
                         &retry.received(since_first_initial),
                         retry.token().clone(),
                     ) == RetryDecision::Continue
@@ -1292,7 +1292,7 @@ where
         .get_mut::<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>()
         .record(reason);
     let now = others.now();
-    others.each_link_path::<HList![LinkPathRole<InstantOf<T>>], Il>(|_, hlist_pat![role]| {
+    others.each_link_path::<HList![LinkPathRole<InstantOf<T>>], Il>(|_, hlist_pat![mut role]| {
         role.drain(now);
     });
     ControlFlow::Break(())
@@ -1323,7 +1323,7 @@ fn validate_by_handshake<T, L, B, Ii, Ian>(
     {
         return;
     }
-    if let Some(hlist_pat![limit, facts]) =
+    if let Some(hlist_pat![mut limit, mut facts]) =
         others.link_entry::<HList![AntiAmplification, LinkFacts], Ian>(link)
         && facts.validation == AddressValidation::NotValidated
     {
@@ -1366,7 +1366,8 @@ fn close_packet_received<T, L, B, Ir, Icp, Ipl>(
     if !(closing && sealed) {
         return;
     }
-    if let Some(hlist_pat![packet]) = others.link_path::<HList![ClosePacket], Ipl>(&path, link) {
+    if let Some(hlist_pat![mut packet]) = others.link_path::<HList![ClosePacket], Ipl>(&path, link)
+    {
         packet.datagram_received();
     }
 }

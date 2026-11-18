@@ -235,9 +235,9 @@ where
             peer_max_udp_payload_size::<L, Ipp>(peer),
             link.0.max_datagram_size().ok(),
         );
-        let (frunk_core::hlist_pat![factory, part], _) =
+        let (frunk_core::hlist_pat![mut factory, mut part], _) =
             Take::<HList![RecoveryFactoryOf<T, L>, X], It>::take(lineage);
-        lend_congestion::<T, L, B, Jx, Jr, _>(factory, part, others, |mut access| {
+        lend_congestion::<T, L, B, Jx, Jr, _>(&mut *factory, &mut *part, others, |mut access| {
             refill(&mut access, now, &rtt, size);
         });
         None

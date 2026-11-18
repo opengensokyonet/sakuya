@@ -16,7 +16,11 @@ use frunk_core::hlist::HList;
 pub use frunk_core::indices::{Here, There};
 use sakuya_wire::parts::{HCons, HNil};
 
-use core::any::TypeId;
+use core::{
+    any::TypeId,
+    cell::{Cell, RefCell},
+    ops::{Deref, DerefMut},
+};
 
 use smallvec::SmallVec;
 
@@ -24,6 +28,7 @@ use crate::{
     component::ComponentTypeList,
     component_event::{ComponentEvent, Happened},
     layer::Layer,
+    tree::NodeAddr,
 };
 
 /// What is left in a view where a component was taken out.
@@ -47,28 +52,30 @@ impl<I: Position> Position for There<I> {
 /// lineage's nodes, which the driver ignores anyway.
 const RECORDED_WORDS: usize = 5;
 
-/// What one lend of a lineage records: the positions taken, and the
+/// What one lend of a lineage records: the positions written, and the
 /// component events published, each with the index of its layer.
 ///
-/// It is filled by the takes and the publications of a [`Lineage`] and
-/// read by the driver after the lend.
+/// It is filled through the borrows a lineage's takes give
+/// ([`ComponentMut`]) and by its publications, and read by the driver
+/// after the lend.
 #[derive(Debug, Default)]
 pub struct TakenPositions {
-    positions: [u64; RECORDED_WORDS],
-    events: SmallVec<[(usize, TypeId); 4]>,
+    positions: [Cell<u64>; RECORDED_WORDS],
+    events: RefCell<SmallVec<[(usize, TypeId); 4]>>,
 }
 
 impl TakenPositions {
-    pub(crate) fn push(&mut self, position: usize) {
-        if let Some(word) = self.positions.get_mut(position / 64) {
-            *word |= 1 << (position % 64);
+    #[inline]
+    pub(crate) fn push(&self, position: usize) {
+        if let Some(word) = self.positions.get(position / 64) {
+            word.set(word.get() | 1 << (position % 64));
         }
     }
-    /// The positions taken, in order, each once; the record of them is
+    /// The positions written, in order, each once; the record of them is
     /// cleared.
     pub(crate) fn drain(&mut self) -> impl Iterator<Item = usize> + '_ {
         self.positions.iter_mut().enumerate().flat_map(|(w, word)| {
-            let mut bits = core::mem::take(word);
+            let mut bits = core::mem::take(word.get_mut());
             core::iter::from_fn(move || {
                 (bits != 0).then(|| {
                     let at = bits.trailing_zeros() as usize;
@@ -78,30 +85,139 @@ impl TakenPositions {
             })
         })
     }
-    pub(crate) fn publish(&mut self, layer: usize, event: TypeId) {
-        self.events.push((layer, event));
+    pub(crate) fn publish(&self, layer: usize, event: TypeId) {
+        self.events.borrow_mut().push((layer, event));
     }
     /// The events published, with their layers; the record of them is
     /// cleared.
     pub(crate) fn take_events(&mut self) -> SmallVec<[(usize, TypeId); 4]> {
-        core::mem::take(&mut self.events)
+        core::mem::take(self.events.get_mut())
     }
     pub(crate) fn clear(&mut self) {
-        self.positions = [0; RECORDED_WORDS];
-        self.events = SmallVec::new();
+        *self = Self::default();
     }
 }
 
-/// The mutable borrows, for `'a`, of a list of component types.
+/// What a lend records of the nodes other than the lineage's: the
+/// positions written, as (node, position), each once.
+#[derive(Debug, Default)]
+pub(crate) struct NodesWritten(RefCell<SmallVec<[(NodeAddr, usize); 8]>>);
+
+impl NodesWritten {
+    #[inline]
+    fn push(&self, addr: NodeAddr, position: usize) {
+        let mut written = self.0.borrow_mut();
+        if !written.contains(&(addr, position)) {
+            written.push((addr, position));
+        }
+    }
+    /// The positions written; the record of them is cleared.
+    pub(crate) fn take(&mut self) -> SmallVec<[(NodeAddr, usize); 8]> {
+        core::mem::take(self.0.get_mut())
+    }
+}
+
+/// Where the borrows of a take record their writes: the positions of a
+/// lineage, the positions of another node, or nowhere, for a take that only
+/// reads.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Sink<'a> {
+    Lineage(&'a TakenPositions),
+    Node(&'a NodesWritten, NodeAddr),
+    Nowhere,
+}
+
+impl Sink<'_> {
+    #[inline]
+    fn record(self, at: usize) {
+        match self {
+            Sink::Lineage(taken) => taken.push(at),
+            Sink::Node(written, addr) => written.push(addr, at),
+            Sink::Nowhere => {}
+        }
+    }
+}
+
+/// A component taken to change it: reading it through the borrow records
+/// nothing; the first change through [`DerefMut`] records that the
+/// component was written, by which the driver reads its deadline again.
+/// What every mutable take gives.
+pub struct ComponentMut<'a, X: ?Sized> {
+    value: &'a mut X,
+    sink: Sink<'a>,
+    at: usize,
+    written: bool,
+}
+
+impl<'a, X: ?Sized> ComponentMut<'a, X> {
+    #[inline]
+    pub(crate) fn new(value: &'a mut X, sink: Sink<'a>, at: usize) -> Self {
+        Self {
+            value,
+            sink,
+            at,
+            written: false,
+        }
+    }
+    #[inline]
+    fn write(this: &mut Self) {
+        if !this.written {
+            this.written = true;
+            this.sink.record(this.at);
+        }
+    }
+    /// The borrow for all of `'a`, recorded as written.
+    #[inline]
+    pub fn into_mut(mut this: Self) -> &'a mut X {
+        Self::write(&mut this);
+        this.value
+    }
+    /// The same component for a shorter time; what is written through it is
+    /// recorded as through this.
+    #[inline]
+    pub fn reborrow(this: &mut Self) -> ComponentMut<'_, X> {
+        ComponentMut {
+            value: &mut *this.value,
+            sink: this.sink,
+            at: this.at,
+            written: this.written,
+        }
+    }
+}
+
+impl<X: ?Sized> Deref for ComponentMut<'_, X> {
+    type Target = X;
+    #[inline]
+    fn deref(&self) -> &X {
+        self.value
+    }
+}
+
+impl<X: ?Sized> DerefMut for ComponentMut<'_, X> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut X {
+        Self::write(self);
+        self.value
+    }
+}
+
+impl<X: ?Sized + core::fmt::Debug> core::fmt::Debug for ComponentMut<'_, X> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.value.fmt(f)
+    }
+}
+
+/// The mutable borrows, for `'a`, of a list of component types, each as a
+/// [`ComponentMut`].
 pub trait RefsOf<'a> {
-    /// One `&'a mut` for each component, in order.
+    /// One `ComponentMut<'a, _>` for each component, in order.
     type Out;
 }
 impl<'a> RefsOf<'a> for HNil {
     type Out = HNil;
 }
 impl<'a, X: 'a, Xs: RefsOf<'a>> RefsOf<'a> for HCons<X, Xs> {
-    type Out = HCons<&'a mut X, Xs::Out>;
+    type Out = HCons<ComponentMut<'a, X>, Xs::Out>;
 }
 
 /// A list from which the component `X` can be taken for `'a`, at position
@@ -154,14 +270,17 @@ impl<'a, X: 'a, H, T: TakeAt<'a, X, I>, I> TakeAt<'a, X, There<I>> for HCons<H, 
 pub trait TakeEach<'a, U: RefsOf<'a>, Is> {
     /// The list with [`TakenOut`] in their places.
     type Rest;
-    /// Move the borrows out, in the order of `U`; `at` is told the position
-    /// of each.
-    fn take_each(self, at: &mut impl FnMut(usize)) -> (U::Out, Self::Rest);
+    /// Move the borrows out, in the order of `U`, each recording its
+    /// writes into `sink`.
+    #[doc(hidden)]
+    #[allow(private_interfaces)]
+    fn take_each(self, sink: Sink<'a>) -> (U::Out, Self::Rest);
 }
 impl<'a, V> TakeEach<'a, HNil, HNil> for V {
     type Rest = V;
     #[inline]
-    fn take_each(self, _: &mut impl FnMut(usize)) -> (HNil, V) {
+    #[allow(private_interfaces)]
+    fn take_each(self, _: Sink<'a>) -> (HNil, V) {
         (HNil, self)
     }
 }
@@ -172,10 +291,11 @@ where
 {
     type Rest = <V::Rest as TakeEach<'a, Us, Is>>::Rest;
     #[inline]
-    fn take_each(self, at: &mut impl FnMut(usize)) -> (HCons<&'a mut X, Us::Out>, Self::Rest) {
+    #[allow(private_interfaces)]
+    fn take_each(self, sink: Sink<'a>) -> (HCons<ComponentMut<'a, X>, Us::Out>, Self::Rest) {
         let (head, rest) = self.take_at();
-        at(V::AT);
-        let (tail, rest) = rest.take_each(at);
+        let head = ComponentMut::new(head, sink, V::AT);
+        let (tail, rest) = rest.take_each(sink);
         (HCons { head, tail }, rest)
     }
 }
@@ -258,19 +378,19 @@ pub trait GetOptionalAt<X, I> {
     /// Where `X` is in the list.
     const AT: usize;
     /// Change `X`, if it is there.
-    fn get_optional_at_mut(&mut self) -> Option<&mut X>;
+    fn get_optional_at_mut(&mut self) -> Option<ComponentMut<'_, X>>;
 }
-impl<X, T> GetOptionalAt<X, Here> for HCons<Option<&mut X>, T> {
+impl<X, T> GetOptionalAt<X, Here> for HCons<Option<ComponentMut<'_, X>>, T> {
     const AT: usize = 0;
     #[inline]
-    fn get_optional_at_mut(&mut self) -> Option<&mut X> {
-        self.head.as_deref_mut()
+    fn get_optional_at_mut(&mut self) -> Option<ComponentMut<'_, X>> {
+        self.head.as_mut().map(ComponentMut::reborrow)
     }
 }
 impl<X, H, T: GetOptionalAt<X, I>, I> GetOptionalAt<X, There<I>> for HCons<H, T> {
     const AT: usize = 1 + T::AT;
     #[inline]
-    fn get_optional_at_mut(&mut self) -> Option<&mut X> {
+    fn get_optional_at_mut(&mut self) -> Option<ComponentMut<'_, X>> {
         self.tail.get_optional_at_mut()
     }
 }
@@ -306,7 +426,7 @@ impl<Ys, H, T: AppendEach<Ys>> AppendEach<Ys> for HCons<H, T> {
 /// as those of the established layer, which are `None` while there is no
 /// such node.
 pub trait OptionalRefs: for<'a> RefsOf<'a> + 'static {
-    /// One `Option<&'a mut X>` for each component, in order.
+    /// One `Option<ComponentMut<'a, X>>` for each component, in order.
     type Optional<'a>;
     /// Each borrow of `refs`, or `None` for each when there are none.
     fn spread<'a>(refs: Option<<Self as RefsOf<'a>>::Out>) -> Self::Optional<'a>
@@ -331,7 +451,7 @@ impl OptionalRefs for HNil {
     }
 }
 impl<X: 'static, Xs: OptionalRefs> OptionalRefs for HCons<X, Xs> {
-    type Optional<'a> = HCons<Option<&'a mut X>, Xs::Optional<'a>>;
+    type Optional<'a> = HCons<Option<ComponentMut<'a, X>>, Xs::Optional<'a>>;
     #[inline]
     fn spread<'a>(refs: Option<<Self as RefsOf<'a>>::Out>) -> Self::Optional<'a>
     where
@@ -351,7 +471,7 @@ impl<X: 'static, Xs: OptionalRefs> OptionalRefs for HCons<X, Xs> {
     #[inline]
     fn reborrow<'s, 'a: 's>(refs: &'s mut Self::Optional<'a>) -> Self::Optional<'s> {
         HCons {
-            head: refs.head.as_deref_mut(),
+            head: refs.head.as_mut().map(ComponentMut::reborrow),
             tail: Xs::reborrow(&mut refs.tail),
         }
     }
@@ -391,12 +511,12 @@ impl<'s, X: 's, T: Reborrow<'s>> Reborrow<'s> for HCons<&mut X, T> {
         }
     }
 }
-impl<'s, X: 's, T: Reborrow<'s>> Reborrow<'s> for HCons<Option<&mut X>, T> {
-    type Out = HCons<Option<&'s mut X>, T::Out>;
+impl<'s, X: 's, T: Reborrow<'s>> Reborrow<'s> for HCons<Option<ComponentMut<'_, X>>, T> {
+    type Out = HCons<Option<ComponentMut<'s, X>>, T::Out>;
     #[inline]
     fn reborrow(&'s mut self) -> Self::Out {
         HCons {
-            head: self.head.as_deref_mut(),
+            head: self.head.as_mut().map(ComponentMut::reborrow),
             tail: self.tail.reborrow(),
         }
     }
@@ -422,11 +542,11 @@ impl<'s, T: Reborrow<'s>> Reborrow<'s> for HCons<TakenOut, T> {
 /// driver rereads what reads the components taken.
 pub struct Lineage<'r, V> {
     list: V,
-    taken: &'r mut TakenPositions,
+    taken: &'r TakenPositions,
 }
 
 impl<'r, V> Lineage<'r, V> {
-    pub(crate) fn new(list: V, taken: &'r mut TakenPositions) -> Self {
+    pub(crate) fn new(list: V, taken: &'r TakenPositions) -> Self {
         Self { list, taken }
     }
 
@@ -449,30 +569,23 @@ impl<'r, V> Lineage<'r, V> {
         self.list.read_each()
     }
 
-    /// Change the component `X` in place, without taking it out; the change
-    /// is recorded like a take.
+    /// Change the component `X` in place, without taking it out; a change
+    /// through the borrow is recorded as through a take.
     #[inline]
-    pub fn get_mut<X, I>(&mut self) -> &mut X
+    pub fn get_mut<X, I>(&mut self) -> ComponentMut<'_, X>
     where
         V: GetAt<X, I>,
     {
-        self.taken.push(V::AT);
-        self.list.get_at_mut()
+        ComponentMut::new(self.list.get_at_mut(), Sink::Lineage(self.taken), V::AT)
     }
 
-    /// Change the component `X` appended to the lineage, if it is there; the
-    /// change is recorded like a take.
-    ///
-    /// The position recorded lies past the components of the lineage's
-    /// nodes, which the driver ignores when it rereads after the lend:
-    /// whoever appends a component from another node records the take of
-    /// that node itself.
+    /// Change the component `X` appended to the lineage, if it is there; a
+    /// change is recorded in the node it was taken from.
     #[inline]
-    pub fn get_optional_mut<X, I>(&mut self) -> Option<&mut X>
+    pub fn get_optional_mut<X, I>(&mut self) -> Option<ComponentMut<'_, X>>
     where
         V: GetOptionalAt<X, I>,
     {
-        self.taken.push(V::AT);
         self.list.get_optional_at_mut()
     }
 
@@ -515,7 +628,7 @@ impl<'r, V> Lineage<'r, V> {
     {
         Lineage {
             list: self.list.reborrow(),
-            taken: &mut *self.taken,
+            taken: self.taken,
         }
     }
 }
@@ -534,12 +647,12 @@ impl ShareEach for HNil {
         HNil
     }
 }
-impl<'a, X, T: ShareEach> ShareEach for HCons<&'a mut X, T> {
+impl<'a, X, T: ShareEach> ShareEach for HCons<ComponentMut<'a, X>, T> {
     type Out = HCons<&'a X, T::Out>;
     #[inline]
     fn share_each(self) -> Self::Out {
         HCons {
-            head: &*self.head,
+            head: &*self.head.value,
             tail: self.tail.share_each(),
         }
     }
@@ -560,7 +673,7 @@ impl<'r, V> Lineage<'r, V> {
         U::Out: ShareEach,
     {
         let Lineage { list, taken } = self;
-        let (items, rest) = list.take_each(&mut |_| {});
+        let (items, rest) = list.take_each(Sink::Nowhere);
         (items.share_each(), Lineage { list: rest, taken })
     }
 }
@@ -576,12 +689,12 @@ pub trait Take<'a, U: RefsOf<'a>, Is>: Sized {
     /// Take the components.
     fn take(self) -> (U::Out, Self::Rest);
 }
-impl<'r, 'a, V: TakeEach<'a, U, Is>, U: RefsOf<'a>, Is> Take<'a, U, Is> for Lineage<'r, V> {
+impl<'r: 'a, 'a, V: TakeEach<'a, U, Is>, U: RefsOf<'a>, Is> Take<'a, U, Is> for Lineage<'r, V> {
     type Rest = Lineage<'r, V::Rest>;
     #[inline]
     fn take(self) -> (U::Out, Lineage<'r, V::Rest>) {
         let Lineage { list, taken } = self;
-        let (items, rest) = list.take_each(&mut |at| taken.push(at));
+        let (items, rest) = list.take_each(Sink::Lineage(taken));
         (items, Lineage { list: rest, taken })
     }
 }
@@ -666,14 +779,14 @@ impl<X, S: HList, R: GetAt<X, I>, I> GetAt<X, InTailNodes<I>> for NodeCons<S, R>
 impl<X, S: GetOptionalAt<X, I>, R, I> GetOptionalAt<X, InHeadNode<I>> for NodeCons<S, R> {
     const AT: usize = S::AT;
     #[inline]
-    fn get_optional_at_mut(&mut self) -> Option<&mut X> {
+    fn get_optional_at_mut(&mut self) -> Option<ComponentMut<'_, X>> {
         self.head.get_optional_at_mut()
     }
 }
 impl<X, S: HList, R: GetOptionalAt<X, I>, I> GetOptionalAt<X, InTailNodes<I>> for NodeCons<S, R> {
     const AT: usize = <S as HList>::LEN + R::AT;
     #[inline]
-    fn get_optional_at_mut(&mut self) -> Option<&mut X> {
+    fn get_optional_at_mut(&mut self) -> Option<ComponentMut<'_, X>> {
         self.tail.get_optional_at_mut()
     }
 }
@@ -726,9 +839,9 @@ mod tests {
     fn a_reborrowed_lineage_is_there_again_after_a_take() {
         let (mut a, mut b) = (1u8, 2u16);
         let mut taken = TakenPositions::default();
-        let mut lineage = Lineage::new(hlist![&mut a, &mut b], &mut taken);
+        let mut lineage = Lineage::new(hlist![&mut a, &mut b], &taken);
         {
-            let (hlist_pat![b], _) = Take::<HList![u16], _>::take(lineage.reborrow());
+            let (hlist_pat![mut b], _) = Take::<HList![u16], _>::take(lineage.reborrow());
             *b += 1;
         }
         *lineage.get_mut::<u8, _>() += 1;

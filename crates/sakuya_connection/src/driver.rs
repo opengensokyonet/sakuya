@@ -823,7 +823,7 @@ where
     /// layer, the other nodes' takes and their events by key.
     fn recorded_for(&mut self, lineage: &[NodeAddr]) -> Recorded {
         let mut out = Recorded {
-            changes: core::mem::take(&mut self.nodes_taken.taken),
+            changes: self.nodes_taken.taken.take(),
             events: SmallVec::new(),
         };
         for at in self.lineage_taken.drain() {
@@ -1141,7 +1141,7 @@ where
         recorded: &mut Recorded,
     ) {
         let data = <L as BuildNode<T, L, Connection, BwOf<Q>>>::build_node(
-            &mut Lineage::new(HNil, &mut self.lineage_taken),
+            &mut Lineage::new(HNil, &self.lineage_taken),
             args,
         );
         self.lineage_taken.clear();
@@ -1192,7 +1192,7 @@ where
         let data = {
             let connection = self.tree.connection.as_mut().expect("the connection node");
             let mut parents =
-                Lineage::new(L::connection(&mut connection.data), &mut self.lineage_taken);
+                Lineage::new(L::connection(&mut connection.data), &self.lineage_taken);
             <L as BuildNode<T, L, LinkEntry, BeOf<Q>>>::build_node(&mut parents, &mut args)
         };
         recorded.extend(self.recorded_for(&[NodeAddr::CONNECTION]));
@@ -1220,7 +1220,7 @@ where
         let data = {
             let connection = self.tree.connection.as_mut().expect("the connection node");
             let mut parents =
-                Lineage::new(L::connection(&mut connection.data), &mut self.lineage_taken);
+                Lineage::new(L::connection(&mut connection.data), &self.lineage_taken);
             <L as BuildNode<T, L, LogicalPath, BlOf<Q>>>::build_node(&mut parents, args)
         };
         recorded.extend(self.recorded_for(&[NodeAddr::CONNECTION]));
@@ -1295,7 +1295,7 @@ where
                     &mut entry_node.data,
                     &mut path.node.data,
                 ),
-                &mut self.lineage_taken,
+                &self.lineage_taken,
             );
             <L as BuildNode<T, L, LinkPath, BkOf<Q>>>::build_node(&mut parents, &mut args)
         };
@@ -1336,7 +1336,7 @@ where
         let data = {
             let connection = self.tree.connection.as_mut().expect("the connection node");
             let mut parents =
-                Lineage::new(L::connection(&mut connection.data), &mut self.lineage_taken);
+                Lineage::new(L::connection(&mut connection.data), &self.lineage_taken);
             <L as BuildNode<T, L, Established, BsOf<Q>>>::build_node(&mut parents, args)
         };
         recorded.extend(self.recorded_for(&[NodeAddr::CONNECTION]));
@@ -1384,7 +1384,7 @@ where
                     &mut path.node.data,
                     &mut link_node.data,
                 ),
-                &mut self.lineage_taken,
+                &self.lineage_taken,
             );
             <L as BuildNode<T, L, Recovery, BrOf<Q>>>::build_node(&mut parents, args)
         };
@@ -1621,7 +1621,7 @@ where
             );
             <L as BuildNode<T, L, Connection, BwOf<Q>>>::end_node(
                 node.data,
-                &mut Lineage::new(HNil, &mut self.lineage_taken),
+                &mut Lineage::new(HNil, &self.lineage_taken),
                 &mut others,
             );
         }

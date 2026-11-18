@@ -9,25 +9,25 @@ use crate::{
     component_event::{ComponentEvent, Happened},
     layer::{Established, Layer, LinkEntry, LinkPath, LogicalPath, NodeKey, NodeKeyOf, Recovery},
     share::{FlatMut, FlatRef, NodeData, PartList, PathKey},
-    take::{GetAt, OptionalRefs, RefsOf, TakeEach},
+    take::{GetAt, NodesWritten, OptionalRefs, RefsOf, Sink, TakeEach},
     tree::{
         Around, EntryNode, EstablishedNode, LinkPathNodeOf, LogicalPathNode, NodeAddr, RecoveryNode,
     },
 };
 
 /// What one lend records of the nodes other than the lineage's: the
-/// positions taken, as (node, position), and the component events
+/// positions written, as (node, position), and the component events
 /// published, by the key of their node.
 #[derive(Debug)]
 pub(crate) struct NodeRecords<K> {
-    pub(crate) taken: SmallVec<[(NodeAddr, usize); 8]>,
+    pub(crate) taken: NodesWritten,
     pub(crate) events: SmallVec<[(K, TypeId); 2]>,
 }
 
 impl<K> Default for NodeRecords<K> {
     fn default() -> Self {
         Self {
-            taken: SmallVec::new(),
+            taken: NodesWritten::default(),
             events: SmallVec::new(),
         }
     }
@@ -52,7 +52,8 @@ pub struct OtherNodes<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> {
     here_path: Option<(usize, Option<usize>)>,
     established: Option<&'v mut EstablishedNode<T, L, B>>,
     here_recovery: Option<&'v mut RecoveryNode<T, L, B>>,
-    taken: &'v mut NodeRecords<NodeKeyOf<T, L>>,
+    taken: &'v NodesWritten,
+    events: &'v mut SmallVec<[(NodeKeyOf<T, L>, TypeId); 2]>,
     here: NodeKeyOf<T, L>,
     now: InstantOf<T>,
 }
@@ -66,10 +67,11 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
         here_path: Option<(usize, Option<usize>)>,
         established: Option<&'v mut EstablishedNode<T, L, B>>,
         here_recovery: Option<&'v mut RecoveryNode<T, L, B>>,
-        taken: &'v mut NodeRecords<NodeKeyOf<T, L>>,
+        records: &'v mut NodeRecords<NodeKeyOf<T, L>>,
         here: NodeKeyOf<T, L>,
         now: InstantOf<T>,
     ) -> Self {
+        let NodeRecords { taken, events } = records;
         Self {
             entries,
             logical_paths,
@@ -78,6 +80,7 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
             established,
             here_recovery,
             taken,
+            events,
             here,
             now,
         }
@@ -101,8 +104,8 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
         self.now
     }
 
-    fn record(taken: &mut NodeRecords<NodeKeyOf<T, L>>, addr: NodeAddr) -> impl FnMut(usize) + '_ {
-        move |at| taken.taken.push((addr, at))
+    fn record(taken: &NodesWritten, addr: NodeAddr) -> Sink<'_> {
+        Sink::Node(taken, addr)
     }
 
     /// Publish what happened at the node of the key `at`, one of the other
@@ -122,7 +125,7 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
             *at != self.here,
             "the lent node publishes through its lineage"
         );
-        self.taken.events.push((at.clone(), TypeId::of::<E>()));
+        self.events.push((at.clone(), TypeId::of::<E>()));
     }
 
     /// Whether the connection has its established layer (when the lent node
@@ -143,7 +146,7 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
         let (items, _) = node
             .data
             .flat_mut()
-            .take_each(&mut Self::record(self.taken, NodeAddr::ESTABLISHED));
+            .take_each(Self::record(self.taken, NodeAddr::ESTABLISHED));
         Some(items)
     }
 
@@ -167,7 +170,7 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
         let (items, _) = node
             .data
             .flat_mut()
-            .take_each(&mut Self::record(taken, NodeAddr::ESTABLISHED));
+            .take_each(Self::record(taken, NodeAddr::ESTABLISHED));
         Some(items)
     }
 
@@ -209,7 +212,7 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
         let items = node.as_deref_mut().map(|node| {
             node.data
                 .flat_mut()
-                .take_each(&mut Self::record(self.taken, NodeAddr::ESTABLISHED))
+                .take_each(Self::record(self.taken, NodeAddr::ESTABLISHED))
                 .0
         });
         let result = each(items, self);
@@ -238,7 +241,7 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
         let (items, _) = node
             .data
             .flat_mut()
-            .take_each(&mut Self::record(self.taken, addr));
+            .take_each(Self::record(self.taken, addr));
         Some(items)
     }
 
@@ -267,7 +270,7 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
         let (items, _) = node
             .data
             .flat_mut()
-            .take_each(&mut Self::record(self.taken, addr));
+            .take_each(Self::record(self.taken, addr));
         let result = each(items, &*self);
         self.here_recovery = Some(node);
         Some(result)
@@ -298,7 +301,7 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
         let (items, _) = node
             .data
             .flat_mut()
-            .take_each(&mut Self::record(taken, NodeAddr::entry(slot)));
+            .take_each(Self::record(taken, NodeAddr::entry(slot)));
         Some(items)
     }
 
@@ -325,7 +328,7 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
             .node
             .data
             .flat_mut()
-            .take_each(&mut Self::record(taken, addr));
+            .take_each(Self::record(taken, addr));
         Some(items)
     }
 
@@ -365,10 +368,7 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
                 (NodeAddr::link_path(slot, sub), node)
             }
         };
-        let (items, _) = node
-            .data
-            .flat_mut()
-            .take_each(&mut Self::record(taken, addr));
+        let (items, _) = node.data.flat_mut().take_each(Self::record(taken, addr));
         Some(items)
     }
 
@@ -427,7 +427,7 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
         let (items, _) = layer
             .data
             .flat_mut()
-            .take_each(&mut Self::record(self.taken, addr));
+            .take_each(Self::record(self.taken, addr));
         let result = each(items, &*self);
         let (_, node) = self
             .find_link_path(path, link)
@@ -485,7 +485,7 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
                 let (items, _) = node
                     .data
                     .flat_mut()
-                    .take_each(&mut Self::record(taken, NodeAddr::link_path(slot, sub)));
+                    .take_each(Self::record(taken, NodeAddr::link_path(slot, sub)));
                 each(&node.key, items);
             }
         }
@@ -495,7 +495,7 @@ impl<'v, T: ConnectionChoices, L: PartList<T>, B: CallBundle> OtherNodes<'v, T, 
                 let (items, _) = node
                     .data
                     .flat_mut()
-                    .take_each(&mut Self::record(taken, NodeAddr::link_path(slot, sub)));
+                    .take_each(Self::record(taken, NodeAddr::link_path(slot, sub)));
                 each(&node.key, items);
             }
         }

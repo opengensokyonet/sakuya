@@ -299,7 +299,7 @@ where
         let facts = loss_facts::<T, L, Ipp, Ima, _, If>(&lineage, now);
         let (
             frunk_core::hlist_pat![
-                pto, factory, part, rtt, spaces, state, journals, pings, pmtu
+                mut pto, mut factory, mut part, mut rtt, mut spaces, mut state, mut journals, mut pings, mut pmtu
             ],
             mut rest,
         ) = Take::<ProbeTimeoutTakes<T, L, S, Ls>, It>::take(lineage);
@@ -307,13 +307,13 @@ where
         let expiry = PtoExpiry {
             at: now,
             expired_space,
-            in_flight_spaces: in_flight_spaces(spaces),
+            in_flight_spaces: in_flight_spaces(&*spaces),
             backoff: pto.backoff(),
             rtt: facts.rtt,
         };
         let mut probed = None;
         let (batches, window) =
-            lend_congestion::<T, L, B, Jx, Jr, _>(factory, part, others, |mut access| {
+            lend_congestion::<T, L, B, Jx, Jr, _>(&mut *factory, &mut *part, others, |mut access| {
             let mut batches = Vec::new();
             let action = if facts.limits.supports_minimum() {
                 access.on_pto_expired(&expiry)
@@ -332,7 +332,7 @@ where
                             space,
                             detection.take_all(),
                             numbers.get(space),
-                            state,
+                            &mut *state,
                             &mut access,
                             &facts,
                             |size| pmtu.on_probe_failed(size, PmtuProbeFailure::Lost, now),

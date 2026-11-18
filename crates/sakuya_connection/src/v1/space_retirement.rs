@@ -273,14 +273,14 @@ fn retire<'v, T, L, B, S, Ls, In, Ir, Ia, Ij, If, Ip, Ipp, Il, Ik, Jx, Jr>(
         let link_limit = others
             .link_entry::<HList![LinkClone<T::Link>], Il>(&link)
             .and_then(|hlist_pat![clone]| clone.0.max_datagram_size().ok());
-        let factory = lineage.get_mut::<RecoveryFactoryOf<T, L>, If>();
+        let mut factory = lineage.get_mut::<RecoveryFactoryOf<T, L>, If>();
         others.with_recovery_at::<RetirementRecoveryTakes<T, L, S, Ls>, Ik, _>(
             &path,
             &link,
-            |hlist_pat![rtt, part, pmtu, state, detections, pto], rest| {
+            |hlist_pat![rtt, mut part, pmtu, mut state, mut detections, mut pto], rest| {
                 // Appendix A.11 resets the backoff whatever was in flight
                 pto.reset_backoff();
-                let Some(mut detection) = space.take(detections) else {
+                let Some(mut detection) = space.take(&mut *detections) else {
                     return;
                 };
                 let removed: Vec<RemovedPacket<S>> = detection
@@ -310,14 +310,19 @@ fn retire<'v, T, L, B, S, Ls, In, Ir, Ia, Ij, If, Ip, Ipp, Il, Ik, Jx, Jr>(
                         link_limit,
                     ),
                 };
-                lend_congestion::<T, L, B, Jx, Jr, _>(factory, part, rest, |mut access| {
-                    access.on_removed(removed.into_iter(), &context);
-                });
+                lend_congestion::<T, L, B, Jx, Jr, _>(
+                    &mut *factory,
+                    &mut *part,
+                    rest,
+                    |mut access| {
+                        access.on_removed(removed.into_iter(), &context);
+                    },
+                );
             },
         );
     }
-    space.take(lineage.get_mut::<PacketNumberSpaces<PacketNumberSpaceState>, In>());
-    space.take(lineage.get_mut::<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ir>());
-    space.take(lineage.get_mut::<AckObligationsOf<T>, Ia>());
-    space.take(lineage.get_mut::<SendJournalsOf<T, L>, Ij>());
+    space.take(&mut *lineage.get_mut::<PacketNumberSpaces<PacketNumberSpaceState>, In>());
+    space.take(&mut *lineage.get_mut::<PacketNumberSpaces<ReceiveJournals<InstantOf<T>>>, Ir>());
+    space.take(&mut *lineage.get_mut::<AckObligationsOf<T>, Ia>());
+    space.take(&mut *lineage.get_mut::<SendJournalsOf<T, L>, Ij>());
 }

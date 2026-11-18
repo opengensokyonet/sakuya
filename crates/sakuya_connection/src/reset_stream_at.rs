@@ -701,7 +701,8 @@ where
         _: &DispatchFacts<InstantOf<T>, LinkPathIdentifierOf<T, L>>,
     ) -> Result<(), ResetStreamAtConnectionErrorOf<L>> {
         check_announced(lineage.get::<LocalTransportParameters<PartSlots<Part>>, Il>())?;
-        let Some(hlist_pat![streams]) = others.borrow_established::<HList![StreamsOf<T, L>], Is>()
+        let Some(hlist_pat![mut streams]) =
+            others.borrow_established::<HList![StreamsOf<T, L>], Is>()
         else {
             if lineage
                 .get::<CloseReasonRecord<CloseCauseOf<T, L>>, Ir>()

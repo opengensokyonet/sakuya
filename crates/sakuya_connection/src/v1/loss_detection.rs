@@ -308,12 +308,25 @@ where
         let numbers = lineage
             .get::<PacketNumberSpaces<PacketNumberSpaceState>, In>()
             .clone();
-        let (frunk_core::hlist_pat![factory, part, rtt, spaces, state, journals, pmtu], mut rest) =
-            Take::<LossTakes<T, L, Self>, It>::take(lineage);
+        let (
+            frunk_core::hlist_pat![
+                mut factory,
+                mut part,
+                mut rtt,
+                mut spaces,
+                mut state,
+                mut journals,
+                mut pmtu
+            ],
+            mut rest,
+        ) = Take::<LossTakes<T, L, Self>, It>::take(lineage);
         let delay = loss_delay(&facts.rtt, &facts.thresholds);
         let threshold = facts.thresholds.packet_threshold();
-        let (batches, window) =
-            lend_congestion::<T, L, B, Jx, Jr, _>(factory, part, others, |mut access| {
+        let (batches, window) = lend_congestion::<T, L, B, Jx, Jr, _>(
+            &mut *factory,
+            &mut *part,
+            others,
+            |mut access| {
                 let mut batches = Vec::new();
                 for (space, detection) in spaces.iter_mut() {
                     if detection.loss_time().is_none_or(|at| at > now) {
@@ -329,16 +342,25 @@ where
                     let lost = detection.detect_lost(now, largest, delay, threshold);
                     batches.push((
                         space,
-                        declare_lost(space, lost, numbers, state, &mut access, &facts, |size| {
-                            pmtu.on_probe_failed(size, PmtuProbeFailure::Lost, now);
-                        }),
+                        declare_lost(
+                            space,
+                            lost,
+                            numbers,
+                            &mut *state,
+                            &mut access,
+                            &facts,
+                            |size| {
+                                pmtu.on_probe_failed(size, PmtuProbeFailure::Lost, now);
+                            },
+                        ),
                     ));
                 }
                 // read only for the events
                 let window = <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
                     .then(|| access.window());
                 (batches, window)
-            });
+            },
+        );
         if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
             && let Some(events) = rest
                 .get_mut::<ConnectionEventSink<EventsOf<T, L>>, Iev>()

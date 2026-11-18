@@ -809,14 +809,14 @@ where
                     EstablishedSourceComponentsOfParts::<T, L>::spread(established);
                 let (
                     hlist_pat![
-                        core,
-                        planner,
-                        registrar,
-                        journals,
-                        usage,
-                        factory,
-                        amplification,
-                        events
+                        mut core,
+                        mut planner,
+                        mut registrar,
+                        mut journals,
+                        mut usage,
+                        mut factory,
+                        mut amplification,
+                        mut events
                     ],
                     rest,
                 ) = Take::<FillTakes<T, L>, It>::take(lineage.reborrow());
@@ -826,10 +826,10 @@ where
                     EstablishedSourceComponentsOfParts::<T, L>::reborrow(&mut established),
                 );
                 others.with_own_recovery::<FillRecoveryTakes<T, L>, Ik, _>(
-                    |hlist_pat![part, state, pmtu], others| {
+                    |hlist_pat![mut part, mut state, mut pmtu], others| {
                         lend_congestion::<T, L, B, Jx, Jr, _>(
-                            factory,
-                            part,
+                            &mut *factory,
+                            &mut *part,
                             others,
                             |mut access| {
                                 let mut filling =
@@ -837,22 +837,22 @@ where
                                         now,
                                         link: &link,
                                         link_path: &link_path,
-                                        core,
-                                        planner,
-                                        registrar,
-                                        journals,
+                                        core: &mut *core,
+                                        planner: &mut *planner,
+                                        registrar: &mut *registrar,
+                                        journals: &mut *journals,
                                         initial_keys,
                                         handshake_keys,
                                         one_rtt_keys,
                                         initial_discarded: false,
-                                        usage,
-                                        amplification,
-                                        events,
+                                        usage: &mut usage,
+                                        amplification: &mut amplification,
+                                        events: &mut *events,
                                         rest: &mut rest,
                                         access: &mut access,
                                         estimate,
-                                        pmtu,
-                                        state,
+                                        pmtu: &mut *pmtu,
+                                        state: &mut *state,
                                         positions: core::marker::PhantomData,
                                     };
                                 let end = filling.fill(batch, cx);
@@ -877,7 +877,7 @@ where
             // the first Handshake packet sent (RFC 9001 §4.9.1)
             lineage.get_mut::<InitialKeys<T::Crypto>, Ii>().discard();
             if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED {
-                let (hlist_pat![_, _, _, _, _, _, _, events], _) =
+                let (hlist_pat![_, _, _, _, _, _, _, mut events], _) =
                     Take::<FillTakes<T, L>, It>::take(lineage.reborrow());
                 if let Some(events) = events.active::<InstantOf<T>>() {
                     for sender in [Role::Client, Role::Server] {
@@ -1536,7 +1536,7 @@ where
         GetAt<LinkFacts, Ilf> + TakeEach<'x, ResendTakes<T, L>, Irs>,
 {
     let validation = lineage.get::<LinkFacts, Ilf>().validation;
-    let (hlist_pat![core, planner, amplification], _) =
+    let (hlist_pat![mut core, mut planner, mut amplification], _) =
         Take::<ResendTakes<T, L>, Irs>::take(lineage.reborrow());
     let mut waits = false;
     let (send_planner, driver) = planner.planner_and_driver_content();
@@ -1805,7 +1805,7 @@ where
         TakeEach<'x, SettleRecoveryTakes<T, L, S, Ls>, Iq>,
 {
     let accepted: Vec<_> = accepted.collect();
-    let journals = lineage.get_mut::<SendJournalsOf<T, L>, Ij>();
+    let mut journals = lineage.get_mut::<SendJournalsOf<T, L>, Ij>();
     let mut ack_eliciting = false;
     let mut retired = Vec::new();
     let mut mark = Some(
@@ -1837,9 +1837,9 @@ where
         },
     );
     let marked = others.with_own_recovery::<SettleRecoveryTakes<T, L, S, Ls>, Iq, _>(
-        |hlist_pat![_, _, detections, _], _| {
+        |hlist_pat![_, _, mut detections, _], _| {
             if let Some(mark) = mark.take() {
-                mark(Some(detections));
+                mark(Some(&mut *detections));
             }
         },
     );
@@ -1933,7 +1933,7 @@ fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ist, Ipp, Ima, Jx, Jr, Jm>(
     // out of the lineage while the summaries go back to the frame sources
     // beside it; the empty journals left in their place take nothing
     // meanwhile
-    let mut journals = core::mem::take(lineage.get_mut::<SendJournalsOf<T, L>, Ij>());
+    let mut journals = core::mem::take(&mut *lineage.get_mut::<SendJournalsOf<T, L>, Ij>());
     let mut removed = Vec::new();
     let mut unsent_probes = Vec::new();
     let mut established =
@@ -1964,7 +1964,7 @@ fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ist, Ipp, Ima, Jx, Jr, Jm>(
     *lineage.get_mut::<SendJournalsOf<T, L>, Ij>() = journals;
     if !unsent_probes.is_empty() {
         others.with_own_recovery::<SettleRecoveryTakes<T, L, S, Ls>, Iq, _>(
-            |hlist_pat![_, state, _, pmtu], _| {
+            |hlist_pat![_, mut state, _, mut pmtu], _| {
                 for size in unsent_probes {
                     state.on_pmtu_probe_settled();
                     pmtu.on_probe_failed(size, PmtuProbeFailure::Unsent, now);
@@ -2022,9 +2022,9 @@ fn remove_without_signal<'v, T, L, B, S, Ls, If, Iv, Iq, Ipp, Jx, Jr, Jm>(
     }) else {
         return;
     };
-    let factory = lineage.get_mut::<RecoveryFactoryOf<T, L>, If>();
+    let mut factory = lineage.get_mut::<RecoveryFactoryOf<T, L>, If>();
     others.with_own_recovery::<SettleRecoveryTakes<T, L, S, Ls>, Iq, _>(
-        |hlist_pat![part, state, _, _], others| {
+        |hlist_pat![mut part, mut state, _, _], others| {
             for packet in &removed {
                 state.remove_in_flight(packet.bytes);
             }
@@ -2039,9 +2039,14 @@ fn remove_without_signal<'v, T, L, B, S, Ls, If, Iv, Iq, Ipp, Jx, Jr, Jm>(
                     link_ceiling,
                 ),
             };
-            lend_congestion::<T, L, B, Jx, Jr, _>(factory, part, others, |mut access| {
-                access.on_removed(removed.into_iter(), &context);
-            });
+            lend_congestion::<T, L, B, Jx, Jr, _>(
+                &mut *factory,
+                &mut *part,
+                others,
+                |mut access| {
+                    access.on_removed(removed.into_iter(), &context);
+                },
+            );
         },
     );
 }

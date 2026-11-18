@@ -222,7 +222,7 @@ pub mod a {
             _: &mut OtherNodes<'v, Mine, L, B>,
             now: Duration,
         ) -> Option<RequestOf<Mine, L>> {
-            let (hlist_pat![idle, record], mut rest) =
+            let (hlist_pat![mut idle, mut record], mut rest) =
                 Take::<HList![Idle, Record], J>::take(lineage);
             idle.0 = None;
             if let Some(written) = record.write("idle") {
@@ -329,7 +329,7 @@ pub mod a {
             if lineage.get::<Record, J>().0.is_none() || *lineage.get::<Role, I>() != Role::Active {
                 return None;
             }
-            let (hlist_pat![role], mut rest) = Take::<HList![Role], K>::take(lineage);
+            let (hlist_pat![mut role], mut rest) = Take::<HList![Role], K>::take(lineage);
             *role = Role::Draining(now + ms(30));
             rest.publish(Happened::<RoleChanged>::new());
             let NodeKey::LinkPath(path, link) = others.here().clone() else {
@@ -624,7 +624,7 @@ pub mod b {
             _: Duration,
         ) -> Option<RequestOf<Mine, L>> {
             let reason = lineage.get::<super::a::Record, I>().0;
-            let (hlist_pat![seen], _) = Take::<HList![Seen], J>::take(lineage);
+            let (hlist_pat![mut seen], _) = Take::<HList![Seen], J>::take(lineage);
             seen.0 += 1;
             log(format!("b saw the record: {reason:?}"));
             None
@@ -697,7 +697,7 @@ pub mod c {
             _: &mut OtherNodes<'v, Mine, L, B>,
             _: Duration,
         ) -> Option<RequestOf<Mine, L>> {
-            let (hlist_pat![ping], mut rest) = Take::<HList![Ping], J>::take(lineage);
+            let (hlist_pat![mut ping], mut rest) = Take::<HList![Ping], J>::take(lineage);
             ping.0 += 1;
             rest.publish(Happened::<Pinged>::new());
             None
@@ -717,7 +717,7 @@ pub mod c {
             _: &mut OtherNodes<'v, Mine, L, B>,
             _: Duration,
         ) -> Option<RequestOf<Mine, L>> {
-            let (hlist_pat![pong], mut rest) = Take::<HList![Pong], J>::take(lineage);
+            let (hlist_pat![mut pong], mut rest) = Take::<HList![Pong], J>::take(lineage);
             pong.0 += 1;
             rest.publish(Happened::<Ponged>::new());
             None

@@ -440,7 +440,7 @@ where
     if one_rtt.is_some()
         && <T::Side as Side>::zero_rtt_awaits_retirement(lineage.get::<OwnZeroRttKeysOf<T>, Iz>())
     {
-        <T::Side as Side>::retire_zero_rtt(lineage.get_mut::<OwnZeroRttKeysOf<T>, Iz>());
+        <T::Side as Side>::retire_zero_rtt(&mut *lineage.get_mut::<OwnZeroRttKeysOf<T>, Iz>());
     }
     // the first Initial packet that opens sets the connection ID the peer
     // chose, which this side sends with (RFC 9000 §7.2)

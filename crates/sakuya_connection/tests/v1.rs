@@ -862,7 +862,7 @@ mod probe {
             _: &mut OtherNodes<'v, T, L, B>,
             _: Duration,
         ) -> Option<RequestOf<T, L>> {
-            let (hlist_pat![adder], _) = Take::<HList![Adder], K>::take(lineage);
+            let (hlist_pat![mut adder], _) = Take::<HList![Adder], K>::take(lineage);
             let (_, second) = adder.0.take()?;
             Some(StructureRequest::AddLinkPath {
                 args: LinkPathArgs {
@@ -922,7 +922,7 @@ mod probe {
             _: &mut OtherNodes<'v, Mine, Parts, B>,
             now: Duration,
         ) -> Option<RequestOf<Mine, Parts>> {
-            let (hlist_pat![setter, peer, idle], _) = Take::<
+            let (hlist_pat![mut setter, mut peer, mut idle], _) = Take::<
                 HList![
                     PeerSetter,
                     PeerTransportParameters<TransportParameterSlots<Parts>>,
@@ -970,7 +970,7 @@ mod probe {
             _: &mut OtherNodes<'v, Mine, Parts, B>,
             _: Duration,
         ) -> Option<RequestOf<Mine, Parts>> {
-            let (hlist_pat![feeder, receiver], _) = Take::<
+            let (hlist_pat![mut feeder, mut receiver], _) = Take::<
                 HList![CryptoFeeder, CryptoReceiver<FragmentedCryptoReceiveBuffer>],
                 K,
             >::take(lineage);
@@ -1021,7 +1021,7 @@ mod probe {
             _: &mut OtherNodes<'v, Mine, Parts, B>,
             _: Duration,
         ) -> Option<RequestOf<Mine, Parts>> {
-            let (hlist_pat![writer, sender], _) = Take::<
+            let (hlist_pat![mut writer, mut sender], _) = Take::<
                 HList![CryptoWriter, CryptoSender<OffsetMapCryptoSendBuffer>],
                 K,
             >::take(lineage);
@@ -1326,7 +1326,7 @@ mod probe {
                         .sent(generation, PacketNumber::new(number).unwrap());
                 }
                 PacketStep::Seal(count) => {
-                    let usage = lineage.get_mut::<AeadUsage, Iu>();
+                    let mut usage = lineage.get_mut::<AeadUsage, Iu>();
                     for _ in 0..count {
                         usage.sealed();
                     }
@@ -1383,9 +1383,8 @@ mod probe {
                         .on_handshake_connection_id(id);
                 }
                 PacketStep::TakeRecords(space) => {
-                    let journals = lineage
-                        .get_mut::<SendJournalsOf<T, L>, Isj>()
-                        .get_mut(space)?;
+                    let mut all_journals = lineage.get_mut::<SendJournalsOf<T, L>, Isj>();
+                    let journals = all_journals.get_mut(space)?;
                     let all = PacketNumber::ZERO..=PacketNumber::new(1 << 20).unwrap();
                     let records: Vec<_> = journals
                         .take_acknowledged(&all)
@@ -1403,14 +1402,14 @@ mod probe {
                     log(format!("records {space:?}: {records:?}"));
                 }
                 PacketStep::UseConnectionId(link, sequence) => {
-                    let ids = lineage
-                        .get_mut::<v1::connection_ids::ConnectionIdsOf<T>, Icid>()
-                        .destination_mut();
+                    let mut all_ids =
+                        lineage.get_mut::<v1::connection_ids::ConnectionIdsOf<T>, Icid>();
+                    let ids = all_ids.destination_mut();
                     others.each_link_path::<HList![
                         v1::connection_ids::LinkPathResetTokenRegistrar<
                             v1::connection_ids::ResetTokenRegistrarOf<T>,
                         >
-                    ], Irg>(|_, hlist_pat![registrar]| {
+                    ], Irg>(|_, hlist_pat![mut registrar]| {
                         ids.on_used(
                             registrar.registrar_mut(),
                             sequence,
@@ -1441,7 +1440,7 @@ mod probe {
                     let NodeKey::LogicalPath(path) = others.here().clone() else {
                         unreachable!("a logical path's lend carries its key")
                     };
-                    let hlist_pat![role] =
+                    let hlist_pat![mut role] =
                         others.link_path::<HList![LinkPathRole<Duration>], Ilr>(&path, &link)?;
                     *role = LinkPathRole::Active;
                 }
@@ -1563,7 +1562,7 @@ mod probe {
             others: &mut OtherNodes<'v, Mine, Parts, B>,
             _: Duration,
         ) -> Option<RequestOf<Mine, Parts>> {
-            let (hlist_pat![closer, record], _) = Take::<
+            let (hlist_pat![mut closer, mut record], _) = Take::<
                 HList![Closer, CloseReasonRecord<CloseCauseOf<Mine, Parts>>],
                 K,
             >::take(lineage);
@@ -1622,7 +1621,7 @@ mod probe {
             others: &mut OtherNodes<'v, SpyMine, Parts, B>,
             now: Duration,
         ) -> Option<RequestOf<SpyMine, Parts>> {
-            let (hlist_pat![lender, factory], _) =
+            let (hlist_pat![mut lender, mut factory], _) =
                 Take::<HList![Lender, RecoveryFactoryOf<SpyMine, Parts>], K>::take(lineage);
             let (_, lend) = lender.0?;
             if now < lend {
@@ -1634,7 +1633,7 @@ mod probe {
                     }
                 });
                 let second = candidate?;
-                let hlist_pat![role] =
+                let hlist_pat![mut role] =
                     others.link_path::<HList![LinkPathRole<Duration>], Kl>(&PATH, &second)?;
                 *role = LinkPathRole::Active;
                 lender.1 = Some(second);
@@ -1650,10 +1649,10 @@ mod probe {
             others.with_recovery_at::<HList![CongestionPartOf<SpyMine, Parts>], Ir, _>(
                 &PATH,
                 &first,
-                |hlist_pat![part], rest| {
+                |hlist_pat![mut part], rest| {
                     lend_congestion::<SpyMine, Parts, B, Ji, Jr, _>(
-                        factory,
-                        part,
+                        &mut *factory,
+                        &mut *part,
                         rest,
                         |mut access| {
                             // refilled as a datagram would start, then spent,
@@ -1754,7 +1753,7 @@ mod probe {
             _: &mut OtherNodes<'v, T, L, B>,
             now: Duration,
         ) -> Option<RequestOf<T, L>> {
-            let (hlist_pat![watcher, role], _) =
+            let (hlist_pat![mut watcher, mut role], _) =
                 Take::<HList![Watcher, LinkPathRole<Duration>], N>::take(lineage);
             watcher.0 = None;
             if DRAIN.with(Cell::get) {
@@ -1926,15 +1925,15 @@ mod probe {
                 let thresholds = *lineage.get::<LossThresholds, Ith>();
                 let (
                     hlist_pat![
-                        feeder,
-                        spaces,
-                        state,
-                        numbers,
-                        confirmation,
-                        rtt,
-                        journals,
-                        obligations,
-                        received,
+                        mut feeder,
+                        mut spaces,
+                        mut state,
+                        mut numbers,
+                        mut confirmation,
+                        mut rtt,
+                        mut journals,
+                        mut obligations,
+                        mut received,
                         part,
                         pto
                     ],
@@ -1968,7 +1967,7 @@ mod probe {
                                 state.remove_in_flight(charge.bytes);
                             }
                         }
-                        let delay = loss_delay(&RttEstimator::<Duration>::estimate(rtt), &thresholds);
+                        let delay = loss_delay(&RttEstimator::<Duration>::estimate(&*rtt), &thresholds);
                         let lost = detection
                             .detect_lost(now, acked, delay, thresholds.packet_threshold())
                             .count();
@@ -2016,13 +2015,13 @@ mod probe {
                         spaces.get_mut(space)?.accept(number, now, false, false, None);
                     }
                     Step::Inspect => {
-                        let estimate = RttEstimator::<Duration>::estimate(rtt);
+                        let estimate = RttEstimator::<Duration>::estimate(&*rtt);
                         log(format!(
                             "rtt latest {:?}, smoothed {:?}, window {}, in flight {}, permits {}, \
                              backoff {}, first sample {:?}",
                             estimate.latest,
                             estimate.smoothed,
-                            CongestionController::<Duration>::window(part),
+                            CongestionController::<Duration>::window(&*part),
                             state.bytes_in_flight(),
                             state.probe_permits(),
                             pto.backoff(),

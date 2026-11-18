@@ -67,7 +67,7 @@ use crate::{
         ranked::{RankedIntent, SendPriority, SendRank},
     },
     share::{LineagePartList, LinkPathIdentifierOf, LogicalPathKeys},
-    take::{GetAt, Lineage},
+    take::{ComponentMut, GetAt, Lineage},
     write::{
         AckOnlyClass, FlightClass, InFlightClass, OpenPacket, PacketPosition, PacketWriting,
         PaddingFrames, SummaryOf, Supplied,
@@ -932,7 +932,7 @@ where
         'r: 'l;
 
     fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
-        lineage.get_mut::<PendingProbePings, Ip>()
+        ComponentMut::into_mut(lineage.get_mut::<PendingProbePings, Ip>())
     }
 }
 
@@ -960,9 +960,7 @@ where
         'r: 'l;
 
     fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
-        lineage
-            .get_mut::<ConnectionIdsOf<T>, Ic>()
-            .destination_mut()
+        ComponentMut::into_mut(lineage.get_mut::<ConnectionIdsOf<T>, Ic>()).destination_mut()
     }
 }
 
@@ -990,9 +988,7 @@ where
         'r: 'l;
 
     fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
-        lineage
-            .get_mut::<ConnectionIdsOf<T>, Ic>()
-            .local_strategy_mut()
+        ComponentMut::into_mut(lineage.get_mut::<ConnectionIdsOf<T>, Ic>()).local_strategy_mut()
     }
 }
 
@@ -1120,7 +1116,7 @@ where
         'r: 'l;
 
     fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
-        lineage.get_mut::<<T::Side as Side>::Own, Io>()
+        ComponentMut::into_mut(lineage.get_mut::<<T::Side as Side>::Own, Io>())
     }
 }
 

@@ -1486,9 +1486,9 @@ where
             ClosingKeys::Kept => {}
             ClosingKeys::ReceiveOnly if receive_only => {}
             ClosingKeys::ReceiveOnly => {
-                let keys = lineage.get_mut::<OneRttKeys<T::Crypto, InstantOf<T>>, I>();
+                let mut keys = lineage.get_mut::<OneRttKeys<T::Crypto, InstantOf<T>>, I>();
                 keys.keep_receive_only();
-                if matches!(keys, OneRttKeys::Discarded) {
+                if matches!(*keys, OneRttKeys::Discarded) {
                     return None;
                 }
             }
@@ -2179,7 +2179,7 @@ where
         // with no recovery layer the last probe timeout stays
         let pto = pto.unwrap_or(idle.probe_timeout());
         if (idle.local(), idle.peer(), idle.probe_timeout()) != (local, peer, pto) {
-            let idle = lineage.get_mut::<IdleTimeout<InstantOf<T>>, Ii>();
+            let mut idle = lineage.get_mut::<IdleTimeout<InstantOf<T>>, Ii>();
             idle.set_local(local);
             idle.set_peer(peer);
             idle.set_probe_timeout(pto);
@@ -2272,7 +2272,7 @@ where
         let receiver = parents
             .get_mut::<InitialPathReceiver<T::Receiver>, I>()
             .take();
-        let start = parents.get_mut::<FirstFlightStart<T>, Ik>();
+        let mut start = parents.get_mut::<FirstFlightStart<T>, Ik>();
         let mut input = LogicalPathInput::new(receiver, limits);
         input.start_with(start.take_datagrams(), start.dcid_len(), start.take_held());
         input
@@ -2416,8 +2416,8 @@ where
         let mut established =
             others.borrow_established_optional::<EstablishedSourceComponentsOfParts<T, L>, Is>();
         for space in PacketNumberSpaceKind::ALL {
-            let Some(journals) = parents.get_mut::<SendJournalsOf<T, L>, Ij>().get_mut(space)
-            else {
+            let mut all_journals = parents.get_mut::<SendJournalsOf<T, L>, Ij>();
+            let Some(journals) = all_journals.get_mut(space) else {
                 continue;
             };
             let unsettled: Vec<_> = journals.take_link_path(&identifier).collect();

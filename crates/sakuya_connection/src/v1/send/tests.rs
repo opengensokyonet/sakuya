@@ -44,10 +44,10 @@ impl Components {
     /// Write an ACK frame up to `largest` in `space`, through the state
     /// the frame source of a sending call is given.
     fn ack_written(&mut self, space: PacketNumberSpaceKind, largest: u64) {
-        let mut taken = TakenPositions::default();
+        let taken = TakenPositions::default();
         let mut lineage = Lineage::new(
             hlist![&mut self.journals, &mut self.obligations, &mut self.numbers],
-            &mut taken,
+            &taken,
         );
         let mut state =
             LineageAckFrameState::<_, Instant, Rfc9000AckObligation<Instant>, _>::new(&mut lineage);

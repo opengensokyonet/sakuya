@@ -83,7 +83,7 @@ impl Sending {
                     &mut self.confirmation,
                     &mut self.numbers
                 ],
-                &mut taken,
+                &taken,
             );
             prepare_one_rtt_packets::<RingBackend, _, _, _, _, _, _, _>(
                 &mut lineage,
@@ -101,8 +101,8 @@ impl Sending {
     /// An ACK frame up to `largest` arrived at `at` in a packet opened with
     /// `opened_with`.
     fn ack(&mut self, opened_with: u64, largest: u64, at: Duration) -> Result<(), KeyUpdateError> {
-        let mut taken = TakenPositions::default();
-        let mut lineage = Lineage::new(hlist![&mut self.keys, &mut self.numbers], &mut taken);
+        let taken = TakenPositions::default();
+        let mut lineage = Lineage::new(hlist![&mut self.keys, &mut self.numbers], &taken);
         ack_received::<RingBackend, _, _, _, _>(&mut lineage, opened_with, pn(largest), at)
     }
 

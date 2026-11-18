@@ -287,7 +287,7 @@ where
                 .reason()
                 .cloned()
         });
-        let core = lineage.get_mut::<Self, I>();
+        let mut core = lineage.get_mut::<Self, I>();
         core.told = now;
         let strategy = &mut core.strategy;
         for (was, is, level) in [
@@ -805,7 +805,7 @@ where
             &mut content,
             From::from,
         );
-        let told = lineage.get_mut::<Self, Ip>();
+        let mut told = lineage.get_mut::<Self, Ip>();
         if driver_content_wakes::<SendTypes<T, L>>(&content, &told.seen, role, &limits, &overheads)
         {
             told.wake_for(content);
@@ -824,7 +824,7 @@ where
         if told.role == role && told.limits == Some(limits) && told.overheads == Some(overheads) {
             return None;
         }
-        let (frunk_core::hlist_pat![planner], mut rest) =
+        let (frunk_core::hlist_pat![mut planner], mut rest) =
             Take::<frunk_core::HList![Self], It>::take(lineage);
         if planner.role != role {
             planner.role = role;

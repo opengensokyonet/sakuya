@@ -70,11 +70,13 @@ where
     where
         Self: 'v,
     {
-        view.get_mut()
-            .lineage
-            .get_mut::<LinkClone<T::Link>, I>()
-            .0
-            .max_datagram_size_changed()
+        // taken as written, for what reads the clone, until the call
+        // publishes that the ceiling changed
+        crate::take::ComponentMut::into_mut(
+            view.get_mut().lineage.get_mut::<LinkClone<T::Link>, I>(),
+        )
+        .0
+        .max_datagram_size_changed()
     }
 }
 

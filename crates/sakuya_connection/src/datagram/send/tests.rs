@@ -482,9 +482,16 @@ fn an_unfulfilled_datagram_is_resolved_at_once_through_the_lineage() {
     );
     let mut ticket = DatagramTicket::new(Arc::clone(&cell));
     let mut queues = ExhaustedQueues(vec![cell]);
-    let mut taken = crate::take::TakenPositions::default();
+    let taken = crate::take::TakenPositions::default();
     {
-        let mut lineage = Lineage::new(frunk_core::hlist![Some(&mut queues)], &mut taken);
+        let mut lineage = Lineage::new(
+            frunk_core::hlist![Some(crate::take::ComponentMut::new(
+                &mut queues,
+                crate::take::Sink::Nowhere,
+                0
+            ))],
+            &taken,
+        );
         let mut source = LineageDatagramFrameSource::<_, ExhaustedQueues, (), _, Here>::new(
             &mut lineage,
             publish.clone(),
@@ -507,7 +514,10 @@ fn an_unfulfilled_datagram_is_resolved_at_once_through_the_lineage() {
 
     // without the established layer the cause is only kept
     let (ticket, intent, strategy) = ticket_of(b"no layer");
-    let mut lineage = Lineage::new(frunk_core::hlist![None::<&mut ExhaustedQueues>], &mut taken);
+    let mut lineage = Lineage::new(
+        frunk_core::hlist![None::<crate::take::ComponentMut<'_, ExhaustedQueues>>],
+        &taken,
+    );
     LineageDatagramFrameSource::<_, ExhaustedQueues, (), _, Here>::new(
         &mut lineage,
         publish.clone(),

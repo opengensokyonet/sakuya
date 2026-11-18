@@ -650,7 +650,7 @@ where
         lineage: &mut Lineage<'_, V>,
         issued: NewConnectionId,
     ) -> Result<(), NewConnectionIdViolationError> {
-        let (hlist_pat![ids], _) = Take::<RetiringTakes<T>, Is>::take(lineage.reborrow());
+        let (hlist_pat![mut ids], _) = Take::<RetiringTakes<T>, Is>::take(lineage.reborrow());
         DestinationConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>::on_new_connection_id(
             &mut ids.destination,
             issued,
@@ -658,7 +658,7 @@ where
     }
 
     fn link_path_ended(lineage: &mut Lineage<'_, V>, link_path: &LinkIdOf<T>) {
-        let (hlist_pat![ids], _) = Take::<RetiringTakes<T>, Is>::take(lineage.reborrow());
+        let (hlist_pat![mut ids], _) = Take::<RetiringTakes<T>, Is>::take(lineage.reborrow());
         DestinationConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>::on_link_path_ended(
             &mut ids.destination,
             link_path,
@@ -666,7 +666,8 @@ where
     }
 
     fn issuable(lineage: &mut Lineage<'_, V>, peer_limit: u64) {
-        let (hlist_pat![ids, issuer], _) = Take::<IssuingTakes<T>, Iu>::take(lineage.reborrow());
+        let (hlist_pat![mut ids, mut issuer], _) =
+            Take::<IssuingTakes<T>, Iu>::take(lineage.reborrow());
         LocalConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, LocalConnectionIdRegistrationOf<T>>::on_issuable(
             &mut ids.local_strategy,
             issuer.issuer_mut(),
@@ -675,7 +676,8 @@ where
     }
 
     fn handshake_confirmed(lineage: &mut Lineage<'_, V>) {
-        let (hlist_pat![ids, issuer], _) = Take::<IssuingTakes<T>, Iu>::take(lineage.reborrow());
+        let (hlist_pat![mut ids, mut issuer], _) =
+            Take::<IssuingTakes<T>, Iu>::take(lineage.reborrow());
         LocalConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, LocalConnectionIdRegistrationOf<T>>::on_handshake_confirmed(
             &mut ids.local_strategy,
             issuer.issuer_mut(),
@@ -689,7 +691,8 @@ where
         now: InstantOf<T>,
         pto: Duration,
     ) -> Result<(), RetiredByPeerViolationError> {
-        let (hlist_pat![ids, issuer], _) = Take::<IssuingTakes<T>, Iu>::take(lineage.reborrow());
+        let (hlist_pat![mut ids, mut issuer], _) =
+            Take::<IssuingTakes<T>, Iu>::take(lineage.reborrow());
         LocalConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, LocalConnectionIdRegistrationOf<T>>::on_retired_by_peer(
             &mut ids.local_strategy,
             issuer.issuer_mut(),
@@ -701,12 +704,13 @@ where
     }
 
     fn deadline(lineage: &mut Lineage<'_, V>, now: InstantOf<T>) {
-        let (hlist_pat![ids], _) = Take::<RetiringTakes<T>, Is>::take(lineage.reborrow());
+        let (hlist_pat![mut ids], _) = Take::<RetiringTakes<T>, Is>::take(lineage.reborrow());
         DestinationConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, ResetTokenRegistrarOf<T>>::on_deadline(
             &mut ids.destination,
             now,
         );
-        let (hlist_pat![ids, issuer], _) = Take::<IssuingTakes<T>, Iu>::take(lineage.reborrow());
+        let (hlist_pat![mut ids, mut issuer], _) =
+            Take::<IssuingTakes<T>, Iu>::take(lineage.reborrow());
         LocalConnectionIdStrategy::<LinkIdOf<T>, InstantOf<T>, LocalConnectionIdRegistrationOf<T>>::on_deadline(
             &mut ids.local_strategy,
             issuer.issuer_mut(),
@@ -796,7 +800,7 @@ where
         let confirmed = !confirmation_told
             && *lineage.get::<HandshakeConfirmation, If>() == HandshakeConfirmation::Confirmed;
         if let Some((limit, token)) = known {
-            let ids = lineage.get_mut::<Self, I>();
+            let mut ids = lineage.get_mut::<Self, I>();
             ids.peer_limit_told = true;
             if let Some(token) = token {
                 DestinationConnectionIdStrategy::<

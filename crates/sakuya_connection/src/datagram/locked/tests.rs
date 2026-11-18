@@ -562,8 +562,15 @@ fn an_unfulfilled_datagram_is_published_again_at_once() {
     let item = FrameSourceCursor::<TestSources>::next(&mut cursor).expect("the datagram's item");
     let out = Rc::new(RefCell::new(Written::default()));
     let packet = OpenPacket::<_, ClassOfSource, NotLast>::new(SummaryWriter::new(1500, &out));
-    let mut taken = crate::take::TakenPositions::default();
-    let mut lineage = crate::take::Lineage::new(frunk_core::hlist![Some(&mut queues)], &mut taken);
+    let taken = crate::take::TakenPositions::default();
+    let mut lineage = crate::take::Lineage::new(
+        frunk_core::hlist![Some(crate::take::ComponentMut::new(
+            &mut queues,
+            crate::take::Sink::Nowhere,
+            0
+        ))],
+        &taken,
+    );
     let _ = item.supply(packet, |intent, open| {
         // not written: the intent is not fulfilled instead
         crate::datagram::send::LineageDatagramFrameSource::<_, Queues, (), _, Here>::new(

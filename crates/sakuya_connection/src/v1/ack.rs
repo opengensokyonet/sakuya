@@ -265,7 +265,8 @@ where
     // Out of the lineage while the frame is handled, so that the summaries
     // of the packets declared lost can be lent to the frame sources beside
     // it; the empty journals left in their place take nothing meanwhile.
-    let Some(journals) = lineage.get_mut::<SendJournalsOf<T, L>, Ij>().get_mut(space) else {
+    let mut all_journals = lineage.get_mut::<SendJournalsOf<T, L>, Ij>();
+    let Some(journals) = all_journals.get_mut(space) else {
         // invariant: the space was there above, and nothing since takes a
         // space away
         unreachable!("the space was there above")
@@ -343,11 +344,19 @@ where
             .as_ref()
             .filter(|(of, _)| eliciting && *of == identifier)
             .map(|(_, sent_at)| *sent_at);
-        let factory = lineage.get_mut::<RecoveryFactoryOf<T, L>, If>();
+        let mut factory = lineage.get_mut::<RecoveryFactoryOf<T, L>, If>();
         let batch = others.with_recovery_at::<AckRecoveryTakes<T, L, S, Ls>, Ik, _>(
             &path,
             &link,
-            |hlist_pat![rtt, part, pmtu, state, detections, pto], rest| {
+            |hlist_pat![
+                mut rtt,
+                mut part,
+                mut pmtu,
+                mut state,
+                mut detections,
+                mut pto
+            ],
+             rest| {
                 let detection = detections.get_mut(space)?;
                 detection.discard_expired(at);
                 let mut acked = Vec::new();
@@ -377,8 +386,11 @@ where
                     rtt_sampled,
                 };
                 let newly_acked = !acked.is_empty();
-                let (batch, window) =
-                    lend_congestion::<T, L, B, Jx, Jr, _>(factory, part, rest, |mut access| {
+                let (batch, window) = lend_congestion::<T, L, B, Jx, Jr, _>(
+                    &mut *factory,
+                    &mut *part,
+                    rest,
+                    |mut access| {
                         let context = |bytes_in_flight| CongestionContext {
                             now: at,
                             bytes_in_flight,
@@ -409,13 +421,13 @@ where
                                 space,
                                 lost,
                                 numbers.as_ref(),
-                                state,
+                                &mut *state,
                                 &mut access,
                                 &facts,
                                 |size| pmtu.on_probe_failed(size, PmtuProbeFailure::Lost, at),
                             )
                         });
-                        if acked_in_flight(&acked, state) {
+                        if acked_in_flight(&acked, &mut *state) {
                             let context = context(state.bytes_in_flight());
                             access
                                 .on_acked(acked.into_iter().filter_map(in_flight_packet), &context);
@@ -425,7 +437,8 @@ where
                         let window = <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
                             .then(|| access.window());
                         (batch, window)
-                    });
+                    },
+                );
                 if batch.as_ref().is_some_and(|batch| batch.persistent) {
                     rtt.on_persistent_congestion();
                 }
@@ -528,7 +541,7 @@ where
         others.with_recovery_at::<AckRecoveryTakes<T, L, S, Ls>, Ik, _>(
             &path,
             &link,
-            |hlist_pat![_, _, pmtu, _, _, _], _| {
+            |hlist_pat![_, _, mut pmtu, _, _, _], _| {
                 pmtu.on_packets(acked_sizes.into_iter(), lost_sizes.into_iter(), at);
             },
         );

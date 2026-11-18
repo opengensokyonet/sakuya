@@ -596,7 +596,7 @@ where
     /// nothing left.
     fn unfulfilled(&mut self, intent: &DatagramIntent<Urgency>, cause: Unfulfilled) {
         intent.progress.unfulfilled(cause);
-        if let Some(queues) = self.lineage.get_optional_mut::<Q, Iq>() {
+        if let Some(mut queues) = self.lineage.get_optional_mut::<Q, Iq>() {
             queues.resolve_unfulfilled(&self.publish);
         }
     }
