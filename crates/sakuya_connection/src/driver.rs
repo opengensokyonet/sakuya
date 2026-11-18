@@ -387,6 +387,37 @@ macro_rules! by_layer {
 /// The changes a lend or a structure request made: (node, position).
 type Changes = Vec<(NodeAddr, usize)>;
 
+/// A node and the nodes above it, from the connection down, or only the
+/// nodes above it: at most five, on the stack.
+#[derive(Clone, Copy)]
+struct Lineal {
+    addrs: [NodeAddr; 5],
+    len: usize,
+}
+
+impl Default for Lineal {
+    fn default() -> Self {
+        Self {
+            addrs: [NodeAddr::CONNECTION; 5],
+            len: 0,
+        }
+    }
+}
+
+impl Lineal {
+    fn push(&mut self, addr: NodeAddr) {
+        self.addrs[self.len] = addr;
+        self.len += 1;
+    }
+}
+
+impl core::ops::Deref for Lineal {
+    type Target = [NodeAddr];
+    fn deref(&self) -> &[NodeAddr] {
+        &self.addrs[..self.len]
+    }
+}
+
 impl<T, L, Q> ConnectionDriver<T, L, Q>
 where
     Q: DriverPositions<Data: LayerPositions, Builds: LayerPositions>,
@@ -528,64 +559,85 @@ where
     }
 
     /// The nodes above a node, from the connection down.
-    fn ancestors(&self, addr: NodeAddr) -> Vec<NodeAddr> {
-        let link = |out: &mut Vec<NodeAddr>| {
-            if let Some(node) = self.link_node(addr) {
-                out.push(NodeAddr::entry(node.entry));
-                out.push(NodeAddr::logical_path(addr.slot));
-            }
-        };
-        let mut out = vec![NodeAddr::CONNECTION];
-        match addr.layer {
-            0 => out.clear(),
-            3 => link(&mut out),
-            5 => {
-                link(&mut out);
+    fn ancestors(&self, addr: NodeAddr) -> Lineal {
+        let mut out = Lineal::default();
+        if addr.layer == Connection::INDEX {
+            return out;
+        }
+        out.push(NodeAddr::CONNECTION);
+        if matches!(addr.layer, 3 | 5)
+            && let Some(node) = self.link_node(addr)
+        {
+            out.push(NodeAddr::entry(node.entry));
+            out.push(NodeAddr::logical_path(addr.slot));
+            if addr.layer == Recovery::INDEX {
                 out.push(NodeAddr::link_path(addr.slot, addr.sub));
             }
-            _ => {}
         }
         out
     }
 
-    /// Every node.
-    fn live(&self) -> Vec<NodeAddr> {
-        let mut out = Vec::new();
-        let Some(connection) = self.tree.connection.as_ref() else {
-            return out;
-        };
-        out.push(NodeAddr::CONNECTION);
-        if connection.child.is_some() {
-            out.push(NodeAddr::ESTABLISHED);
-        }
-        for (slot, entry) in self.tree.entries.iter().enumerate() {
-            if entry.is_some() {
-                out.push(NodeAddr::entry(slot));
-            }
-        }
-        for (slot, path) in self.tree.logical_paths.iter().enumerate() {
-            let Some(path) = path else { continue };
-            out.push(NodeAddr::logical_path(slot));
-            for (sub, link) in path.link_paths.iter().enumerate() {
-                let Some(link) = link else { continue };
-                out.push(NodeAddr::link_path(slot, sub));
-                if link.child.is_some() {
-                    out.push(NodeAddr::recovery(slot, sub));
-                }
-            }
-        }
+    /// A node and the nodes above it, from the connection down: the nodes
+    /// of its lineage.
+    fn lineal(&self, addr: NodeAddr) -> Lineal {
+        let mut out = self.ancestors(addr);
+        out.push(addr);
         out
+    }
+
+    /// Every node, the connection first, then its established layer, the
+    /// entries, and each logical path followed by its link paths, each
+    /// followed by its recovery layer.
+    fn live(&self) -> impl Iterator<Item = NodeAddr> + '_ {
+        let connection = self.tree.connection.as_ref();
+        let top = connection.into_iter().flat_map(|c| {
+            core::iter::once(NodeAddr::CONNECTION)
+                .chain(c.child.is_some().then_some(NodeAddr::ESTABLISHED))
+        });
+        let entries = self
+            .tree
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.is_some())
+            .map(|(slot, _)| NodeAddr::entry(slot));
+        let paths = self
+            .tree
+            .logical_paths
+            .iter()
+            .enumerate()
+            .flat_map(|(slot, path)| {
+                path.iter().flat_map(move |path| {
+                    core::iter::once(NodeAddr::logical_path(slot)).chain(
+                        path.link_paths
+                            .iter()
+                            .enumerate()
+                            .flat_map(move |(sub, link)| {
+                                link.iter().flat_map(move |link| {
+                                    core::iter::once(NodeAddr::link_path(slot, sub)).chain(
+                                        link.child
+                                            .is_some()
+                                            .then_some(NodeAddr::recovery(slot, sub)),
+                                    )
+                                })
+                            }),
+                    )
+                })
+            });
+        // the nodes below the connection are there only with it
+        let with_connection = connection.is_some();
+        top.chain(entries.chain(paths).filter(move |_| with_connection))
     }
 
     /// The nodes of `layer` that a change in `addr` concerns: the node
     /// itself, the one above it, or those below it.
-    fn scope(&self, addr: NodeAddr, layer: usize, out: &mut Vec<NodeAddr>) {
+    fn scope(&self, addr: NodeAddr, layer: usize, mut each: impl FnMut(NodeAddr)) {
         if layer == addr.layer {
-            out.push(addr);
+            each(addr);
             return;
         }
-        if let Some(above) = self.ancestors(addr).into_iter().find(|a| a.layer == layer) {
-            out.push(above);
+        if let Some(&above) = self.ancestors(addr).iter().find(|a| a.layer == layer) {
+            each(above);
             return;
         }
         let under = |a: &NodeAddr, entry: Option<usize>| match addr.layer {
@@ -595,15 +647,12 @@ where
             3 => a.slot == addr.slot && a.sub == addr.sub,
             _ => false,
         };
-        for a in self.live() {
-            if a.layer != layer {
-                continue;
-            }
+        for a in self.live().filter(|a| a.layer == layer) {
             let entry = matches!(a.layer, 3 | 5)
                 .then(|| self.link_node(a).map(|n| n.entry))
                 .flatten();
             if under(&a, entry) {
-                out.push(a);
+                each(a);
             }
         }
     }
@@ -616,16 +665,13 @@ where
         skip: Option<(NodeAddr, usize)>,
         out: &mut Vec<(NodeAddr, usize)>,
     ) {
-        let mut nodes = Vec::new();
         for &(addr, position) in changes {
             for &(layer, reader) in &self.tables.readers[addr.layer][position] {
-                nodes.clear();
-                self.scope(addr, layer, &mut nodes);
-                for &node in &nodes {
+                self.scope(addr, layer, |node| {
                     if skip != Some((node, reader)) {
                         out.push((node, reader));
                     }
-                }
+                });
             }
         }
     }
@@ -633,8 +679,7 @@ where
     /// The changes recorded by the lend of `addr`: the lineage's takes by
     /// position, the other nodes' takes.
     fn recorded(&mut self, addr: NodeAddr) -> Changes {
-        let mut lineage = self.ancestors(addr);
-        lineage.push(addr);
+        let lineage = self.lineal(addr);
         self.recorded_for(&lineage)
     }
 
@@ -652,6 +697,8 @@ where
                 at -= len;
             }
         }
+        out.sort_unstable();
+        out.dedup();
         out
     }
 
@@ -866,6 +913,8 @@ where
         match slots.iter().position(Option::is_none) {
             Some(slot) => slot,
             None => {
+                // one slot more at a time: a connection rarely has many
+                slots.reserve_exact(1);
                 slots.push(None);
                 slots.len() - 1
             }
@@ -1126,8 +1175,7 @@ where
             );
             <L as BuildNode<T, L, Recovery, BrOf<Q>>>::build_node(&mut parents, args)
         };
-        let mut lineage = self.ancestors(link);
-        lineage.push(link);
+        let lineage = self.lineal(link);
         changes.extend(self.recorded_for(&lineage));
         let calls =
             crate::call::RecoveryCalls(<L as NodeCalls<T, L, Recovery, PrOf<Q>>>::start_all::<
@@ -1190,8 +1238,7 @@ where
                 &mut others,
             );
         }
-        let mut lineage = self.ancestors(link);
-        lineage.push(link);
+        let lineage = self.lineal(link);
         let changes = self.recorded_for(&lineage);
         self.readers(&changes, None, todo);
     }
@@ -1412,8 +1459,8 @@ where
         // a panic can have left records of a lend it unwound through
         self.lineage_taken.clear();
         self.nodes_taken.clear();
-        let told = if !panicked {
-            self.live()
+        let told: Vec<NodeAddr> = if !panicked {
+            self.live().collect()
         } else if self.tree.connection.is_some() {
             // lending the connection node needs nothing of the nodes below
             // it, whatever the panic left of them
@@ -1508,7 +1555,7 @@ where
             todo.dedup();
             round += 1;
             debug_assert!(
-                round <= self.tables.positions * (self.live().len() + 1) + 1,
+                round <= self.tables.positions * (self.live().count() + 1) + 1,
                 "rereads did not settle"
             );
             let mut next = Vec::new();
@@ -1561,12 +1608,10 @@ where
             if self.tables.before_calls[layer].is_empty() {
                 continue;
             }
-            let nodes: Vec<NodeAddr> = self
-                .live()
-                .into_iter()
-                .filter(|addr| addr.layer == layer)
-                .collect();
-            for addr in nodes {
+            // the actions can make and end nodes: go from one node to the
+            // next one alive after it
+            let mut next = self.live().find(|addr| addr.layer == layer);
+            while let Some(addr) = next {
                 for at in 0..self.tables.before_calls[layer].len() {
                     if self.ended || !self.alive(addr) {
                         break;
@@ -1575,13 +1620,18 @@ where
                     let request = self.before_calls_action(addr, position, now);
                     self.after_lend(addr, None, request, now);
                 }
+                if self.ended {
+                    return;
+                }
+                next = self.live().find(|a| a.layer == layer && *a > addr);
             }
         }
     }
 
     #[cfg(debug_assertions)]
     fn check_deadlines(&mut self, now: InstantOf<T>) {
-        for addr in self.live() {
+        let live: Vec<NodeAddr> = self.live().collect();
+        for addr in live {
             for position in 0..self.tables.data[addr.layer] {
                 let at = self.deadline(addr, position, now);
                 debug_assert_eq!(
