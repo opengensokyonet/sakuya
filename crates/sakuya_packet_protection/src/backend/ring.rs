@@ -1,7 +1,10 @@
 //! A [`CryptoBackend`] implemented with `ring`.
 
-use ::ring::{aead, hkdf, hmac};
-use nitori_crypto::{AeadAlgorithm, HashAlgorithm};
+use ::ring::{
+    aead, hkdf, hmac,
+    rand::{SecureRandom, SystemRandom},
+};
+use nitori_crypto::{AeadAlgorithm, HashAlgorithm, Random, RandomError};
 use snafu::{OptionExt, ResultExt, ensure};
 
 use super::{
@@ -32,6 +35,19 @@ const CHACHA20_POLY1305_MAX_INPUT_LEN: u64 = ((1 << 32) - 1) * 64;
 /// checks the length against the limit of each algorithm before calling it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RingBackend;
+
+/// Random bytes from the operating system's generator, as `ring` draws
+/// them.
+impl Random for RingBackend {
+    fn random<const N: usize>(&self) -> Result<[u8; N], RandomError> {
+        let mut out = [0; N];
+        // ring reports no detail beyond the failure itself
+        SystemRandom::new()
+            .fill(&mut out)
+            .map_err(|_| RandomError)?;
+        Ok(out)
+    }
+}
 
 impl CryptoBackend for RingBackend {
     type AeadKey = RingAeadKey;
