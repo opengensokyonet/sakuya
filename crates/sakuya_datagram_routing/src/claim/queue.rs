@@ -19,9 +19,12 @@
 //! not do that.
 //!
 //! The items lie in a deque that grows as they come, up to the capacity;
-//! nothing is set aside in advance. Once the receiver has taken every item,
-//! a deque grown past four slots shrinks back to four, so a receiver that
-//! saw a burst does not keep the room for it.
+//! nothing is set aside in advance. Each time the receiver has taken every
+//! item, the deque shrinks to the room the stretch just taken needed: its
+//! deepest length rounded up to a power of two, and at least four slots.
+//! A steady stream keeps its room instead of growing it again after every
+//! stretch, and once the bursts end, the next shallow stretch gives the
+//! room back.
 //!
 //! A deliverer built on this module, and a receiver that judges the queued
 //! candidates itself:
@@ -90,8 +93,8 @@ use std::task::{Context, Poll, Waker};
 use snafu::{Snafu, ensure};
 use tokio::sync::Semaphore;
 
-/// The slots a queue keeps once the receiver has taken every item.
-const SLOTS_KEPT_WHEN_EMPTY: usize = 4;
+/// The fewest slots a queue keeps once the receiver has taken every item.
+const MIN_SLOTS_KEPT_WHEN_EMPTY: usize = 4;
 
 /// What the queue and its posters share: the items, behind one lock.
 struct Shared<T> {
@@ -101,6 +104,8 @@ struct Shared<T> {
 
 struct State<T> {
     items: VecDeque<T>,
+    /// The most items queued at once since the deque was last emptied.
+    deepest: usize,
     /// The queue was dropped: nothing is queued any more.
     closed: bool,
     /// The receiver waiting for an item.
@@ -122,6 +127,7 @@ impl<T> Shared<T> {
                 return Err(item);
             }
             state.items.push_back(item);
+            state.deepest = state.deepest.max(state.items.len());
             state.waker.take()
         };
         if let Some(waker) = waker {
@@ -132,12 +138,20 @@ impl<T> Shared<T> {
 }
 
 impl<T> State<T> {
-    /// Takes the next item; once the last is taken, a deque grown past
-    /// [`SLOTS_KEPT_WHEN_EMPTY`] shrinks back.
+    /// Takes the next item; once the last is taken, the deque shrinks to
+    /// the room the stretch just taken needed.
     fn take(&mut self) -> Option<T> {
         let item = self.items.pop_front();
-        if self.items.is_empty() && self.items.capacity() > SLOTS_KEPT_WHEN_EMPTY {
-            self.items.shrink_to(SLOTS_KEPT_WHEN_EMPTY);
+        if item.is_some() && self.items.is_empty() {
+            let needed = self
+                .deepest
+                .checked_next_power_of_two()
+                .unwrap_or(usize::MAX)
+                .max(MIN_SLOTS_KEPT_WHEN_EMPTY);
+            if self.items.capacity() > needed {
+                self.items.shrink_to(needed);
+            }
+            self.deepest = 0;
         }
         item
     }
@@ -170,6 +184,7 @@ impl<T> DatagramDeliveryQueue<T> {
             shared: Arc::new(Shared {
                 state: Mutex::new(State {
                     items: VecDeque::new(),
+                    deepest: 0,
                     closed: false,
                     waker: None,
                 }),
@@ -375,22 +390,29 @@ mod tests {
     }
 
     #[test]
-    fn the_queue_grows_as_items_come_and_keeps_four_slots_once_emptied() {
+    fn an_emptied_queue_keeps_the_room_its_last_stretch_needed() {
         let mut queue = with_capacity(64);
         assert_eq!(queue.shared.lock().items.capacity(), 0);
         let poster = queue.poster();
-        for item in 0..32 {
-            poster.post(item);
-        }
-        assert!(queue.shared.lock().items.capacity() >= 32);
-        for item in 0..32 {
-            assert_eq!(queue.try_recv(), Some(item));
-        }
-        assert_eq!(queue.shared.lock().items.capacity(), 4);
-        // a queue that never grew past four keeps what it has
-        poster.post(0);
-        assert_eq!(queue.try_recv(), Some(0));
-        assert_eq!(queue.shared.lock().items.capacity(), 4);
+        let stretch = |queue: &mut DatagramDeliveryQueue<usize>, depth: usize| {
+            for item in 0..depth {
+                poster.post(item);
+            }
+            for item in 0..depth {
+                assert_eq!(queue.try_recv(), Some(item));
+            }
+            assert_eq!(queue.try_recv(), None);
+            queue.shared.lock().items.capacity()
+        };
+        // a deep stretch keeps its room for the next one
+        assert!(stretch(&mut queue, 20) >= 32);
+        assert!(stretch(&mut queue, 30) >= 32);
+        // a shallow stretch gives it back, down to four slots
+        assert_eq!(stretch(&mut queue, 1), 4);
+        assert_eq!(stretch(&mut queue, 3), 4);
+        // between four and eight, eight
+        assert_eq!(stretch(&mut queue, 6), 8);
+        assert_eq!(stretch(&mut queue, 2), 4);
     }
 
     #[test]
