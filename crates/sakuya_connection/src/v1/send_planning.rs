@@ -47,9 +47,9 @@ use super::{
         CloseReasonWritten, CongestionChanged, CryptoOutputChanged,
         DestinationConnectionIdsChanged, HandshakeConfirmed, HandshakeDonePendingChanged,
         KeysDiscarded, KeysInstalled, LinkCeilingChanged, LinkPathRoleChanged,
-        LocalConnectionIdsChanged, PacketsSent, PathResponsePendingChanged,
-        PeerTransportParametersKnown, PmtuConcluded, PmtuProbePendingChanged, ProbePingsChanged,
-        RetryReceived, SpaceRetired, level,
+        LocalConnectionIdsChanged, PacketsSent, PathChallengePendingChanged,
+        PathResponsePendingChanged, PeerTransportParametersKnown, PmtuConcluded,
+        PmtuProbePendingChanged, ProbePingsChanged, RetryReceived, SpaceRetired, level,
     },
     confirmation::HandshakeConfirmation,
     connection_ids::{ConnectionIdsOf, ResetTokenRegistrarOf},
@@ -656,8 +656,8 @@ where
 /// It also subscribes to what the driver's own components have to send on
 /// the link path changed ([`DriverContentOf`]): the ACK frames, the CRYPTO
 /// output, a server's HANDSHAKE_DONE, the connection IDs, the probe's
-/// PINGs, the response to a PATH_CHALLENGE, the datagram size probe and the
-/// close packet. When that content has an intent the sending call did not
+/// PINGs, the response to a PATH_CHALLENGE, the datagram size probe, the
+/// link path's PATH_CHALLENGE and the close packet. When that content has an intent the sending call did not
 /// see last, by its frame source and least room, that fits an empty
 /// datagram as the link path can send now, or the close packet's facts
 /// changed, the sending call is woken; content that does not fit wakes it
@@ -761,6 +761,7 @@ where
             .add::<LocalConnectionIdsChanged>()
             .add::<ProbePingsChanged>()
             .add::<PathResponsePendingChanged>()
+            .add::<PathChallengePendingChanged>()
             .add::<ClosePacketChanged>()
             .add::<PmtuProbePendingChanged>();
         // what the datagram size probe to send is copied from
@@ -774,7 +775,7 @@ where
         now: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
         let role = lineage.get::<LinkPathRole<InstantOf<T>>, Ir>().kind();
-        let limits = read_datagram_limits::<T, L, B, Il, Ipp, Jc, Js, Jm>(&lineage, others);
+        let limits = read_datagram_limits::<T, L, B, Il, Ipp, Jc, Js, Jm>(&lineage, others, role);
         if role == LinkPathRoleKind::Active
             && !limits.supports_minimum()
             && !lineage
@@ -929,6 +930,19 @@ pub(super) struct CongestionAllowance {
     pub(super) probe_permits: u8,
 }
 
+impl CongestionAllowance {
+    /// What a candidate without a recovery layer is allowed: its probes
+    /// count in no congestion control (RFC 9000 §9.4), the
+    /// anti-amplification limit holds what it sends, and path validation
+    /// times its challenges.
+    pub(super) const UNCONTROLLED: Self = Self {
+        window_left: usize::MAX,
+        pacing_allowance: usize::MAX,
+        pacing_release_pending: false,
+        probe_permits: 0,
+    };
+}
+
 /// The peer's `max_udp_payload_size` when it left it out (RFC 9000 §18.2),
 /// taken too while its transport parameters are not known.
 const DEFAULT_PEER_MAX_UDP_PAYLOAD: usize = 65527;
@@ -942,7 +956,8 @@ const DEFAULT_PEER_MAX_UDP_PAYLOAD: usize = 65527;
 ///
 /// A link path without a recovery layer has no congestion window: it
 /// sends nothing that counts in flight, and its datagrams are of the
-/// least size every path supports (RFC 9000 §14).
+/// least size every path supports (RFC 9000 §14); a candidate's caller
+/// gives it [`CongestionAllowance::UNCONTROLLED`] instead.
 pub(super) fn datagram_limits(
     link_ceiling: Option<usize>,
     peer_max_udp_payload: Option<usize>,
@@ -980,12 +995,15 @@ pub(super) type DatagramLimitsReads<T, L> = frunk_core::HList![
     PeerTransportParameters<TransportParameterSlots<L>>,
 ];
 
-/// What a link path can send in its next new datagram, read from the link
-/// path's lend without taking anything: the pacer is not refilled, so its
-/// allowance is what its last refill left.
+/// What a link path in `role` can send in its next new datagram, read from
+/// the link path's lend without taking anything: the pacer is not
+/// refilled, so its allowance is what its last refill left. A candidate
+/// without a recovery layer sends datagrams of 1200 bytes, held by the
+/// anti-amplification limit alone ([`CongestionAllowance::UNCONTROLLED`]).
 fn read_datagram_limits<'v, T, L, B, Il, Ipp, Jc, Js, Jm>(
     lineage: &LineageOf<'v, T, L, layer::LinkPath>,
     others: &OtherNodes<'v, T, L, B>,
+    role: LinkPathRoleKind,
 ) -> DatagramLimits
 where
     T: Choices,
@@ -1014,6 +1032,10 @@ where
                 probe_permits: state.probe_permits(),
             },
         )
+    });
+    let recovery = recovery.or_else(|| {
+        (role == LinkPathRoleKind::Candidate)
+            .then_some((DatagramLimits::MINIMUM, CongestionAllowance::UNCONTROLLED))
     });
     datagram_limits(
         link.0.max_datagram_size().ok(),

@@ -17,6 +17,7 @@
 //! | PATH_RESPONSE | [`PathResponseSummary`]: nothing | nothing | nothing: a new challenge comes instead (RFC 9000 §13.3) |
 //! | PING of a datagram size probe | [`PmtuProbeSummary`]: nothing | nothing | nothing: the probe's result goes to the probing policy from the packet's record |
 //! | NEW_CONNECTION_ID | [`NewConnectionIdSummary`]: the sequence number | the connection ID is disclosed and not sent again | the same frame waits to be sent again while the connection ID is neither acknowledged nor retired by the peer (RFC 9000 §13.3) |
+//! | PATH_CHALLENGE | [`PathChallengeSummary`]: nothing | nothing: an acknowledgment validates nothing (RFC 9000 §8.2.3) | nothing: the next challenge goes when it is due |
 //!
 //! Each is the summary of one kind of version 1's frame sources
 //! ([`FrameSources`]), and what comes of it is that source's
@@ -28,13 +29,14 @@
 //! streams' frames the stream set, through
 //! [`LineageStreamFrameSource`](super::streams::send::LineageStreamFrameSource),
 //! and the local connection ID strategy). The PING of a probe,
-//! PATH_RESPONSE and the PING of a datagram size probe need nothing when
-//! they come back: their summaries go to
+//! PATH_RESPONSE, the PING of a datagram size probe and PATH_CHALLENGE need
+//! nothing when they come back: their summaries go to
 //! [`IgnoringFrameSource`](crate::frame_source::IgnoringFrameSource), not
 //! to the pending frames of the link path that wrote them
 //! ([`PendingProbePings`](super::send::PendingProbePings),
 //! [`PendingPathResponse`](super::path_response::PendingPathResponse),
-//! [`PendingPmtuProbe`](super::pmtu_probe::PendingPmtuProbe)).
+//! [`PendingPmtuProbe`](super::pmtu_probe::PendingPmtuProbe),
+//! [`PathValidation`](super::path_validation::PathValidation)).
 use nitori_tls::engine::CryptoLevel;
 use sakuya_recovery::{ack_obligation::AckDue, packet_number_space::PacketNumberSpaceKind};
 use sakuya_stream::send_options::destination::Unfulfilled;
@@ -45,6 +47,7 @@ use super::send::FrameSources;
 use super::{
     Choices,
     path_response::PathResponseSummary,
+    path_validation::PathChallengeSummary,
     pmtu_probe::PmtuProbeSummary,
     send::{RetireConnectionIdSummary, SendTypes},
     streams::send::{
@@ -85,6 +88,7 @@ pub type FeedbackSummary<I> = frunk_core::Coprod!(
     NewConnectionIdSummary,
     PathResponseSummary,
     PmtuProbeSummary,
+    PathChallengeSummary,
 );
 
 /// The summary of a CRYPTO frame written into a packet: which bytes of

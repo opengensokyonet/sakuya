@@ -25,16 +25,25 @@
 //! gives the datagram's size, for the use of its connection ID. Finished or
 //! dropped empty, nothing happened. Dropped while a panic unwinds, it does
 //! nothing at all.
+//!
+//! A candidate without a recovery layer writes uncharged datagrams
+//! ([`DatagramBatch::start_uncharged_datagram`]): their packets count in no
+//! congestion control and nothing in flight (RFC 9000 §9.4), and only the
+//! anti-amplification limit is charged; [`UnchargedCongestion`] stands in
+//! for the controller they are charged to none of.
 
-use core::{fmt, num::NonZeroUsize};
+use core::{fmt, marker::PhantomData, num::NonZeroUsize};
 
 use bytes::{Bytes, BytesMut};
 use sakuya_link::{EcnMarking, OutgoingDatagram};
 use sakuya_packet_protection::{backend::CryptoBackend, packet_number::EncodePacketNumberError};
 use sakuya_recovery::{
-    congestion::{CongestionController, SealedPacket},
+    congestion::{
+        CongestionContext, CongestionController, InFlightPacket, RemovedPacket, SealedPacket,
+        SpuriouslyLostPacket,
+    },
     loss_detection::InFlightCharge,
-    pacing::Pacer,
+    pacing::{Pacer, PacingInput},
     packet_number_space::PacketNumberSpaceKind,
     send_journals::PacketSendAttempt,
 };
@@ -300,6 +309,82 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
         K: CongestionController<I, SentState = C> + Pacer<I>,
         I: Copy,
     {
+        self.start_charged(
+            now,
+            dcid,
+            role,
+            local_id_length,
+            max_len,
+            in_flight_room,
+            probe,
+            congestion,
+            controller,
+            anti_amplification,
+            observer,
+            true,
+        )
+    }
+
+    /// Start an uncharged datagram, of a candidate without a recovery
+    /// layer, as [`start_observed_datagram`](Self::start_observed_datagram)
+    /// does: when it is sealed its packets count nothing in flight, and
+    /// `congestion` and `controller` hear of nothing; only
+    /// `anti_amplification` is charged. It may go past nothing: it uses no
+    /// probe permit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_uncharged_datagram<'b, K, I, O>(
+        &'b mut self,
+        now: I,
+        dcid: ConnectionId,
+        role: Role,
+        local_id_length: ConnectionIdLength,
+        max_len: usize,
+        congestion: &'b mut LinkPathCongestionState<I>,
+        controller: &'b mut K,
+        anti_amplification: &'b mut AntiAmplification,
+        observer: O,
+    ) -> DatagramWriter<'b, Si, Sh, Sa, K, I, O>
+    where
+        K: CongestionController<I, SentState = C> + Pacer<I>,
+        I: Copy,
+    {
+        self.start_charged(
+            now,
+            dcid,
+            role,
+            local_id_length,
+            max_len,
+            max_len,
+            false,
+            congestion,
+            controller,
+            anti_amplification,
+            observer,
+            false,
+        )
+    }
+
+    /// Start a datagram, `charged` to congestion control or not.
+    #[allow(clippy::too_many_arguments)]
+    fn start_charged<'b, K, I, O>(
+        &'b mut self,
+        now: I,
+        dcid: ConnectionId,
+        role: Role,
+        local_id_length: ConnectionIdLength,
+        max_len: usize,
+        in_flight_room: usize,
+        probe: bool,
+        congestion: &'b mut LinkPathCongestionState<I>,
+        controller: &'b mut K,
+        anti_amplification: &'b mut AntiAmplification,
+        observer: O,
+        charged: bool,
+    ) -> DatagramWriter<'b, Si, Sh, Sa, K, I, O>
+    where
+        K: CongestionController<I, SentState = C> + Pacer<I>,
+        I: Copy,
+    {
         // the buffer holds the datagram being written only: a sealed one
         // leaves it, and an empty one took its bytes back
         self.buffer.clear();
@@ -345,6 +430,7 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
             initial_goes_out: false,
             now,
             probe,
+            charged,
             congestion,
             controller,
             anti_amplification,
@@ -417,6 +503,9 @@ where
     initial_goes_out: bool,
     now: I,
     probe: bool,
+    /// Whether its packets are charged to congestion control: those of an
+    /// uncharged datagram count nothing in flight.
+    charged: bool,
     congestion: &'b mut LinkPathCongestionState<I>,
     controller: &'b mut C,
     anti_amplification: &'b mut AntiAmplification,
@@ -682,6 +771,9 @@ where
             return None;
         }
         let len = self.len();
+        if !self.charged {
+            return Some(self.batch_uncharged(len));
+        }
         let app_limited = self.congestion.app_limited();
         let (controller, now) = (&mut *self.controller, self.now);
         // the datagram's bytes come in flight when it is charged below;
@@ -732,6 +824,129 @@ where
         self.state.packets = 0;
         Some(len)
     }
+}
+
+impl<Si, Sh, Sa, C, I, O> DatagramWriter<'_, Si, Sh, Sa, C, I, O>
+where
+    C: CongestionController<I> + Pacer<I>,
+    I: Copy,
+{
+    /// Move the uncharged datagram of `len` bytes into the batch, charged
+    /// to the anti-amplification limit only.
+    fn batch_uncharged(&mut self, len: usize) -> usize {
+        let initial = self.initial.take().map(uncharged);
+        let handshake = self.handshake.take().map(uncharged);
+        let application_data = self.application_data.take().map(uncharged);
+        self.anti_amplification.sent(len);
+        self.outgoing.push(OutgoingDatagram {
+            payload: self.buffer.split_to(len).freeze(),
+            ecn: EcnMarking::NotEct,
+        });
+        self.datagrams.push(BatchedDatagram {
+            len,
+            initial_goes_out: self.initial_goes_out,
+            initial,
+            handshake,
+            application_data,
+        });
+        self.state.packets = 0;
+        len
+    }
+}
+
+/// The packet of an uncharged datagram, which counts nothing in flight.
+fn uncharged<S, C>(packet: SealedInDatagram<S>) -> BatchedPacket<S, C> {
+    BatchedPacket {
+        sealed: packet.sealed,
+        in_flight: None,
+    }
+}
+
+/// What an uncharged datagram is written with in place of a link path's
+/// congestion controller and pacer: a window and an allowance without
+/// bounds, and nothing to hear. `S` is what the link path's controller
+/// would keep for a packet in flight, which an uncharged datagram has none
+/// of.
+pub struct UnchargedCongestion<S>(PhantomData<fn() -> S>);
+
+impl<S> UnchargedCongestion<S> {
+    /// The stand-in.
+    pub fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<S> Default for UnchargedCongestion<S> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<S> fmt::Debug for UnchargedCongestion<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("UnchargedCongestion")
+    }
+}
+
+impl<I, S> CongestionController<I> for UnchargedCongestion<S> {
+    type SentState = S;
+    type LossState = ();
+
+    fn window(&self) -> usize {
+        usize::MAX
+    }
+
+    fn on_packet_sealed(&mut self, _: &SealedPacket<I>) -> S {
+        // invariant: only an uncharged datagram is written with it, and its
+        // packets are sealed without a charge
+        unreachable!("an uncharged datagram charges no packet")
+    }
+
+    fn on_spurious_loss(
+        &mut self,
+        (): (),
+        _: impl Iterator<Item = SpuriouslyLostPacket<I>>,
+        _: &CongestionContext<I>,
+    ) {
+    }
+
+    fn on_ce(&mut self, _: u64, _: I, _: &CongestionContext<I>) {}
+
+    fn on_lost(&mut self, _: impl Iterator<Item = InFlightPacket<I, S>>, _: &CongestionContext<I>) {
+    }
+
+    fn on_persistent_congestion(&mut self, _: &CongestionContext<I>) {}
+
+    fn wants_recovery_send(&mut self) -> bool {
+        false
+    }
+
+    fn on_acked(
+        &mut self,
+        _: impl Iterator<Item = InFlightPacket<I, S>>,
+        _: &CongestionContext<I>,
+    ) {
+    }
+
+    fn on_removed(&mut self, _: impl Iterator<Item = RemovedPacket<S>>, _: &CongestionContext<I>) {}
+
+    fn on_max_datagram_size_changed(&mut self, _: usize, _: bool, _: &CongestionContext<I>) {}
+}
+
+impl<I, S> Pacer<I> for UnchargedCongestion<S> {
+    fn next_release(&self) -> Option<I> {
+        None
+    }
+
+    fn allowance(&self) -> usize {
+        usize::MAX
+    }
+
+    fn refill(&mut self, _: I, _: PacingInput) -> bool {
+        false
+    }
+
+    fn on_charged(&mut self, _: usize) {}
 }
 
 impl<Si, Sh, Sa, C, I, O> Drop for DatagramWriter<'_, Si, Sh, Sa, C, I, O>

@@ -1,9 +1,11 @@
 //! What QUIC version 1 sends through the send strategy: acknowledgments of
 //! each packet number space, the PING of a probe timeout, the retirement of
 //! the peer's connection IDs, the CRYPTO data of each encryption level, a
-//! server's HANDSHAKE_DONE, the frames of the streams and the disclosure of
-//! this side's connection IDs, as send intents, the items a packet of each
-//! kind may carry, and the frame sources that write them.
+//! server's HANDSHAKE_DONE, the frames of the streams, the disclosure of
+//! this side's connection IDs, the response to the peer's PATH_CHALLENGE,
+//! the datagram size probe and this side's PATH_CHALLENGE, as send intents,
+//! the items a packet of each kind may carry, and the frame sources that
+//! write them.
 
 use core::{marker::PhantomData, time::Duration};
 
@@ -39,6 +41,7 @@ use super::{
     feedback::{AckSummary, CryptoSummary, HandshakeDoneSummary, ProbePingSummary},
     key_phase::KeyPhaseNumbers,
     path_response::{PathResponseFrames, PathResponseIntent, PendingPathResponse},
+    path_validation::{PathChallengeFrames, PathChallengeIntent, PathValidationOf},
     pmtu_probe::{PendingPmtuProbe, PmtuProbeFrames, PmtuProbeIntent},
     streams::send::{
         DataBlockedFrames, MaxDataFrames, MaxStreamDataFrames, MaxStreamsFrames, ResetStreamFrames,
@@ -122,6 +125,8 @@ pub enum FrameSourceId {
     PathResponse,
     /// The PING of a link path's datagram size probe.
     PmtuProbe,
+    /// The PATH_CHALLENGE frames of a link path's path validation.
+    PathChallenge,
 }
 
 /// An ACK frame is due in a packet number space.
@@ -448,6 +453,7 @@ pub type SendIntents = frunk_core::Coprod!(
     NewConnectionIdIntent,
     PathResponseIntent,
     PmtuProbeIntent,
+    PathChallengeIntent,
 );
 
 /// The kinds of version 1's frame sources: PADDING, which the packet
@@ -457,8 +463,9 @@ pub type SendIntents = frunk_core::Coprod!(
 /// of each encryption level, the nine frames of the streams
 /// ([`streams::send`](super::streams::send)), the NEW_CONNECTION_ID
 /// frames of the local connection ID strategy, the PATH_RESPONSE frames
-/// ([`path_response`](super::path_response)) and the PING of a datagram
-/// size probe ([`pmtu_probe`](super::pmtu_probe)).
+/// ([`path_response`](super::path_response)), the PING of a datagram
+/// size probe ([`pmtu_probe`](super::pmtu_probe)) and the PATH_CHALLENGE
+/// frames ([`path_validation`](super::path_validation)).
 pub type FrameSources = frunk_core::HList![
     PaddingFrames,
     AckFrames,
@@ -477,7 +484,8 @@ pub type FrameSources = frunk_core::HList![
     StreamsBlockedFrames,
     NewConnectionIdFrames,
     PathResponseFrames,
-    PmtuProbeFrames
+    PmtuProbeFrames,
+    PathChallengeFrames
 ];
 
 /// One planned item of version 1: an item of one of [`FrameSources`].
@@ -502,11 +510,12 @@ fn crypto_level(kind: PlannedPacketKind) -> Option<CryptoLevel> {
 /// Whether a packet of `kind` carries content of `space` from a source of
 /// `ack`: ACK frames are not allowed in 0-RTT packets (RFC 9000 §12.4); a
 /// candidate's and a settling link path's packets carry neither.
-/// RETIRE_CONNECTION_ID, HANDSHAKE_DONE and PATH_RESPONSE frames go in
-/// 1-RTT packets only (RFC 9000 §12.4, §12.5), and so does the PING of a
+/// RETIRE_CONNECTION_ID and HANDSHAKE_DONE frames go in 1-RTT packets of an
+/// active link path only (RFC 9000 §12.4, §12.5), and so does the PING of a
 /// datagram size probe, which needs the 1-RTT keys of a confirmed
 /// handshake; NEW_CONNECTION_ID frames, as the frames of the
-/// streams, in 0-RTT and 1-RTT packets ([`carries_streams`]).
+/// streams, in 0-RTT and 1-RTT packets ([`carries_streams`]); PATH_RESPONSE
+/// and PATH_CHALLENGE frames in any 1-RTT packet ([`carries_path_frames`]).
 fn carries(kind: PlannedPacketKind, space: PacketNumberSpaceKind, ack: bool) -> bool {
     match kind {
         PlannedPacketKind::Initial => space == PacketNumberSpaceKind::Initial,
@@ -522,6 +531,19 @@ fn carries(kind: PlannedPacketKind, space: PacketNumberSpaceKind, ack: bool) -> 
 /// (RFC 9000 §12.4, Table 3).
 fn carries_streams(kind: PlannedPacketKind) -> bool {
     matches!(kind, PlannedPacketKind::ZeroRtt | PlannedPacketKind::OneRtt)
+}
+
+/// Whether a packet of `kind` carries PATH_RESPONSE and PATH_CHALLENGE
+/// frames: every 1-RTT packet (RFC 9000 §12.4, Table 3), a candidate's probe
+/// and a settling link path's packet among them, as these are what such a
+/// link path sends (RFC 9000 §9.3.3, §9.6.3).
+fn carries_path_frames(kind: PlannedPacketKind) -> bool {
+    matches!(
+        kind,
+        PlannedPacketKind::OneRtt
+            | PlannedPacketKind::OneRttProbe
+            | PlannedPacketKind::SettlingResponse
+    )
 }
 
 /// A value at the place a list of `_` counts in a sum: as many `Inr` as
@@ -596,7 +618,10 @@ impl SendIntentPart for Part {
             place_pattern!([_ _ _ _ _ _ _ _] probe) => {
                 at_place!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _] probe.size())
             }
-            rest_pattern!([_ _ _ _ _ _ _ _ _] never) => match *never {},
+            place_pattern!([_ _ _ _ _ _ _ _ _] PathChallengeIntent) => {
+                at_place!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _] ())
+            }
+            rest_pattern!([_ _ _ _ _ _ _ _ _ _] never) => match *never {},
         }
     }
 }
@@ -613,10 +638,11 @@ impl<K: PacketKind> FrameSourcePart<K> for Part {
             place_pattern!([_ _ _ _ _] _) | place_pattern!([_ _ _ _ _ _] _) => {
                 carries_streams(K::KIND)
             }
-            place_pattern!([_ _ _ _ _ _ _] _) | place_pattern!([_ _ _ _ _ _ _ _] _) => {
-                K::KIND == PlannedPacketKind::OneRtt
+            place_pattern!([_ _ _ _ _ _ _] _) | place_pattern!([_ _ _ _ _ _ _ _ _] _) => {
+                carries_path_frames(K::KIND)
             }
-            rest_pattern!([_ _ _ _ _ _ _ _ _] never) => match *never {},
+            place_pattern!([_ _ _ _ _ _ _ _] _) => K::KIND == PlannedPacketKind::OneRtt,
+            rest_pattern!([_ _ _ _ _ _ _ _ _ _] never) => match *never {},
         };
         carried.then(|| <Self as SendIntentPart>::intent_item(intent))
     }
@@ -641,7 +667,10 @@ impl<K: PacketKind> FrameSourcePart<K> for Part {
             place_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _] _) => FrameSourceId::NewConnectionId,
             place_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _] _) => FrameSourceId::PathResponse,
             place_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _] _) => FrameSourceId::PmtuProbe,
-            rest_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _] never) => match *never {},
+            place_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _] ()) => {
+                FrameSourceId::PathChallenge
+            }
+            rest_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _] never) => match *never {},
         }
     }
 }
@@ -1259,13 +1288,14 @@ const CRYPTO_LEVELS: [CryptoLevel; 3] = [
 /// from its first unsent offset, whether or not the level has keys to send
 /// with; the disclosures the local connection ID strategy has waiting; the
 /// response to the latest PATH_CHALLENGE that arrived on the link path; the
-/// link path's datagram size probe to send; and the link path's sealed
-/// close packet, with the datagrams received since.
+/// link path's datagram size probe to send; the link path's PATH_CHALLENGE
+/// while one is due; and the link path's sealed close packet, with the
+/// datagrams received since.
 ///
 /// Not here: an ACK frame carried along when the obligation only wants one
 /// in a packet sent anyway.
-impl<T, L, V, Ia, Ij, Is, Io, Ic, Ipp, Ipr, Icp, Ipm>
-    DriverContentPart<T, L, V, ((Ia, Ij), Is, Io, Ic, (Ipp, Ipr, Icp, Ipm))> for Part
+impl<T, L, V, Ia, Ij, Is, Io, Ic, Ipp, Ipr, Icp, Ipm, Ipv>
+    DriverContentPart<T, L, V, ((Ia, Ij), Is, Io, Ic, (Ipp, Ipr, Icp, Ipm, Ipv))> for Part
 where
     T: Choices,
     L: LogicalPathKeys,
@@ -1277,7 +1307,8 @@ where
         + GetAt<PendingProbePings, Ipp>
         + GetAt<PendingPathResponse, Ipr>
         + GetAt<ClosePacket, Icp>
-        + GetAt<PendingPmtuProbe, Ipm>,
+        + GetAt<PendingPmtuProbe, Ipm>
+        + GetAt<PathValidationOf<T>, Ipv>,
 {
     fn pending<J>(
         lineage: &Lineage<'_, V>,
@@ -1341,6 +1372,10 @@ where
         if let Some(size) = lineage.get::<PendingPmtuProbe, Ipm>().size() {
             out.intents
                 .push(inject(Coproduct::inject(PmtuProbeIntent::new(size))));
+        }
+        if lineage.get::<PathValidationOf<T>, Ipv>().is_due() {
+            out.intents
+                .push(inject(Coproduct::inject(PathChallengeIntent)));
         }
         if let Some(sealed) = lineage.get::<ClosePacket, Icp>().sealed() {
             out.close = Some(CloseResendFacts {

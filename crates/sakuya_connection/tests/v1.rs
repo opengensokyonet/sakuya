@@ -9119,3 +9119,323 @@ fn a_moved_recovery_layer_keeps_the_datagram_size_probe_that_awaits_its_result()
         ]
     );
 }
+
+// ---- path validation ----
+
+/// The data of the PATH_CHALLENGE frame in `payload`, if it has one.
+fn challenge_data(payload: &[u8]) -> Option<[u8; 8]> {
+    // the frames before it in these packets are an ACK frame and a
+    // PATH_RESPONSE, neither of which has a byte 0x1a where a frame starts
+    // in the tests
+    payload
+        .windows(9)
+        .position(|w| w[0] == 0x1a)
+        .map(|at| payload[at + 1..at + 9].try_into().unwrap())
+}
+
+/// The 1-RTT datagrams the test links accepted since the last call,
+/// opened: the size of each and its payload.
+fn sent_payloads() -> Vec<(usize, Vec<u8>)> {
+    common::take_sent()
+        .into_iter()
+        .filter(|(_, datagram)| datagram[0] & 0x80 == 0)
+        .map(|(_, datagram)| (datagram.len(), open_sent_one_rtt(&datagram).2))
+        .collect()
+}
+
+/// A server connection over `first` that received the client's Initial
+/// packet at 5 ms, its 1-RTT keys at 6 ms and a second connection ID of the
+/// client's at 7 ms, and plans as the ranked strategy does; what it logged
+/// and sent until then is taken. `steps` follow.
+fn validating_server(
+    first: &LinkId<(), ()>,
+    steps: impl IntoIterator<Item = (Duration, probe::PacketStep)>,
+) -> impl Future<Output = ()> + Unpin {
+    use probe::PacketStep::{InstallOneRttKeys, Receive};
+    feed_packets(
+        [
+            (
+                ms(5),
+                Receive(received(initial_from(&[0xaa; 8], 0, &ping()), first, ms(5))),
+            ),
+            (ms(6), InstallOneRttKeys),
+            (
+                ms(7),
+                Receive(received(
+                    one_rtt_packet_of(0, 0, &new_connection_id(1)),
+                    first,
+                    ms(7),
+                )),
+            ),
+        ]
+        .into_iter()
+        .chain(steps),
+    );
+    let mut connection = connection!(Mine, AddressValidation::Validated, first.clone());
+    run(&mut connection, 5..=9);
+    take_log();
+    common::take_sent();
+    connection
+}
+
+#[test]
+fn a_candidate_answers_and_challenges_in_a_probe_the_anti_amplification_limit_holds() {
+    reset();
+    let (first, second) = (link(), link());
+    let mut connection = validating_server(&first, []);
+    let probe = one_rtt_packet_of(0, 3, &path_challenge());
+    let len = probe.len();
+    deliver(probe, &second, ms(10));
+    run(&mut connection, 10..=12);
+    let response = [&[0x1b][..], &[7; 8][..]].concat();
+    let sent: Vec<_> = sent_payloads()
+        .into_iter()
+        .filter(|(_, payload)| payload.windows(9).any(|w| w == response))
+        .collect();
+    // one datagram, with the response and the candidate's own challenge,
+    // padded as far as the factor 2 of the tests lets it
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    let (size, payload) = &sent[0];
+    assert_eq!(*size, 2 * len);
+    assert!(challenge_data(payload).is_some(), "{payload:?}");
+    // a candidate's response is not followed by a PING
+    assert!(
+        !payload
+            .windows(10)
+            .any(|w| w[..9] == response[..] && w[9] == 0x01),
+        "{payload:?}"
+    );
+}
+
+#[test]
+fn the_active_link_path_follows_its_response_with_a_ping() {
+    reset();
+    let first = link();
+    let mut connection = validating_server(&first, []);
+    deliver(one_rtt_packet_of(0, 3, &path_challenge()), &first, ms(10));
+    run(&mut connection, 10..=12);
+    let answer = [&[0x1b][..], &[7; 8][..], &[0x01]].concat();
+    assert!(
+        sent_payloads()
+            .iter()
+            .any(|(_, payload)| payload.windows(10).any(|w| w == answer)),
+        "a PATH_RESPONSE, then a PING"
+    );
+}
+
+#[test]
+fn a_response_over_another_link_path_validates_the_candidate_and_lifts_the_limit() {
+    reset();
+    let (first, second) = (link(), link());
+    let mut connection = validating_server(&first, []);
+    deliver(one_rtt_packet_of(0, 3, &path_challenge()), &second, ms(10));
+    run(&mut connection, 10..=11);
+    let data = sent_payloads()
+        .iter()
+        .find_map(|(_, payload)| challenge_data(payload))
+        .expect("the candidate challenges");
+    // the response comes back over the first link
+    let response = [&[0x1b][..], &data[..], &[0; 20]].concat();
+    deliver(one_rtt_packet_of(0, 4, &response), &first, ms(12));
+    run(&mut connection, 12..=13);
+    // the candidate's address is validated: its second challenge, for the
+    // 1200 bytes, is no longer held by the limit
+    let again: Vec<_> = sent_payloads()
+        .iter()
+        .filter_map(|(size, payload)| challenge_data(payload).map(|_| *size))
+        .collect();
+    assert_eq!(again, [MIN_DATAGRAM_SIZE]);
+}
+
+#[test]
+fn a_challenge_the_limit_held_is_followed_by_one_of_1200_bytes_once_answered() {
+    reset();
+    let (first, second) = (link(), link());
+    let mut connection = validating_server(&first, []);
+    deliver(one_rtt_packet_of(0, 3, &path_challenge()), &second, ms(10));
+    run(&mut connection, 10..=11);
+    let (size, data) = sent_payloads()
+        .iter()
+        .find_map(|(size, payload)| challenge_data(payload).map(|data| (*size, data)))
+        .expect("the candidate challenges");
+    assert!(size < MIN_DATAGRAM_SIZE, "{size}");
+    let response = [&[0x1b][..], &data[..], &[0; 20]].concat();
+    deliver(one_rtt_packet_of(0, 4, &response), &second, ms(12));
+    run(&mut connection, 12..=13);
+    // the address is validated, the path's 1200 bytes not yet: a second
+    // challenge goes, expanded now that the limit lifted
+    let again: Vec<_> = sent_payloads()
+        .iter()
+        .filter_map(|(size, payload)| challenge_data(payload).map(|data| (*size, data)))
+        .collect();
+    assert_eq!(again.len(), 1, "{again:?}");
+    assert_eq!(again[0].0, MIN_DATAGRAM_SIZE);
+    assert_ne!(again[0].1, data);
+}
+
+#[test]
+fn a_challenge_goes_again_after_the_probe_timeout_and_the_candidate_ends_when_it_gives_up() {
+    reset();
+    let (first, second) = (link(), link());
+    let mut connection = validating_server(&first, []);
+    // credit enough for a few challenges
+    let probe = padded(
+        &[],
+        |payload| one_rtt_packet_of(0, 3, payload),
+        &path_challenge(),
+    );
+    deliver(probe, &second, ms(10));
+    run(&mut connection, 10..=11);
+    let challenges = |sent: Vec<(usize, Vec<u8>)>| {
+        sent.iter()
+            .filter(|(_, payload)| challenge_data(payload).is_some())
+            .count()
+    };
+    assert_eq!(challenges(sent_payloads()), 1);
+    // the test policy waits the probe timeout of a new path, about a
+    // second, and the fixed part no less
+    run(&mut connection, 12..=1000);
+    assert_eq!(challenges(sent_payloads()), 0);
+    run(&mut connection, 1001..=1100);
+    assert_eq!(challenges(sent_payloads()), 1);
+    take_log();
+    // three times the probe timeout of a new path after the first: it
+    // gives up, and the candidate ends
+    let log = run(&mut connection, 1101..=3200);
+    assert!(
+        log.iter().any(|line| line == "link path ended: None"),
+        "{log:?}"
+    );
+}
+
+/// The challenges of the 1-RTT datagrams the test links accepted since the
+/// last call: the size of each datagram that carries one and its data.
+fn sent_challenges() -> Vec<(usize, [u8; 8])> {
+    sent_payloads()
+        .iter()
+        .filter_map(|(size, payload)| challenge_data(payload).map(|data| (*size, data)))
+        .collect()
+}
+
+/// A PATH_RESPONSE with `data`, then PADDING.
+fn path_response(data: [u8; 8]) -> Vec<u8> {
+    [&[0x1b][..], &data[..], &[0; 20]].concat()
+}
+
+#[test]
+fn a_switch_to_an_address_not_validated_challenges_both_link_paths() {
+    reset();
+    let (first, second) = (link(), link());
+    let mut connection = validating_server(&first, []);
+    deliver(one_rtt_packet_of(0, 3, &ping()), &second, ms(10));
+    let log = run(&mut connection, 10..=12);
+    assert!(
+        log.iter().any(|line| line.starts_with("Settling")),
+        "{log:?}"
+    );
+    // the new active link path's, held by the limit, and the settling one's,
+    // which its own congestion control lets go (RFC 9000 §9.3.3)
+    let mut sizes: Vec<_> = sent_challenges().iter().map(|(size, _)| *size).collect();
+    sizes.sort_unstable();
+    assert_eq!(sizes.len(), 2, "{sizes:?}");
+    assert!(sizes[0] < MIN_DATAGRAM_SIZE);
+    assert_eq!(sizes[1], MIN_DATAGRAM_SIZE);
+}
+
+#[test]
+fn a_validation_of_the_active_link_path_that_gives_up_reverts_to_the_settling_fallback() {
+    reset();
+    let (first, second) = (link(), link());
+    let mut connection = validating_server(&first, []);
+    // a copy of the client's packet arrives from elsewhere first
+    deliver(one_rtt_packet_of(0, 3, &ping()), &second, ms(10));
+    run(&mut connection, 10..=12);
+    // the client, still where it was, answers the challenge of its old path
+    let settling = sent_challenges()
+        .into_iter()
+        .find(|(size, _)| *size == MIN_DATAGRAM_SIZE)
+        .expect("the settling link path challenges")
+        .1;
+    deliver(
+        one_rtt_packet_of(0, 4, &path_response(settling)),
+        &first,
+        ms(13),
+    );
+    run(&mut connection, 13..=14);
+    take_log();
+    // nothing answers the new link path's: it gives up three probe
+    // timeouts of a new path after its first challenge, and the settling
+    // link path, validated, is active again
+    let log = run(&mut connection, 15..=3200);
+    assert!(
+        log.iter()
+            .any(|line| line == "Active, Validated, credit None"),
+        "{log:?}"
+    );
+    assert!(
+        log.iter().any(|line| line == "link path ended: None"),
+        "{log:?}"
+    );
+    assert!(
+        !log.iter().any(|line| line.starts_with("recovery built")),
+        "the fallback keeps its recovery layer: {log:?}"
+    );
+}
+
+#[test]
+fn a_switch_that_waits_for_validation_starts_with_the_rtt_of_the_challenge() {
+    reset();
+    common::set_migration(
+        common::TestAdmission::Accept,
+        v1::migration::SwitchTiming::AfterValidation,
+    );
+    let (first, second) = (link(), link());
+    let mut connection = validating_server(&first, []);
+    deliver(one_rtt_packet_of(0, 3, &ping()), &second, ms(10));
+    run(&mut connection, 10..=13);
+    // the candidate's, accepted at 11 ms, and the active link path's (RFC
+    // 9000 §9.3.3)
+    let challenges = sent_challenges();
+    assert_eq!(challenges.len(), 2, "{challenges:?}");
+    let candidate = challenges
+        .iter()
+        .find(|(size, _)| *size < MIN_DATAGRAM_SIZE)
+        .expect("the candidate's is held by the limit")
+        .1;
+    take_log();
+    // answered over the candidate 4 ms after it was sent
+    deliver(
+        one_rtt_packet_of(0, 4, &path_response(candidate)),
+        &second,
+        ms(15),
+    );
+    let log = run(&mut connection, 15..=17);
+    assert!(
+        log.iter()
+            .any(|line| line == "recovery built, initial RTT Some(4ms)"),
+        "{log:?}"
+    );
+    assert!(
+        log.iter().any(|line| line.starts_with("Settling")),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn a_challenge_goes_again_no_sooner_than_the_probe_timeout_whatever_the_policy_says() {
+    reset();
+    common::set_challenge_resend(Some(ms(1)));
+    let (first, second) = (link(), link());
+    let mut connection = validating_server(&first, []);
+    let probe = padded(
+        &[],
+        |payload| one_rtt_packet_of(0, 3, payload),
+        &path_challenge(),
+    );
+    deliver(probe, &second, ms(10));
+    run(&mut connection, 10..=11);
+    assert_eq!(sent_challenges().len(), 1);
+    // the probe timeout of a new path, about a second, holds the next
+    run(&mut connection, 12..=1000);
+    assert_eq!(sent_challenges().len(), 0);
+}

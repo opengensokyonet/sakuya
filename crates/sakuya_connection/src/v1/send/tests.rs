@@ -296,3 +296,18 @@ fn a_sealed_datagram_counts_one_probe_off_in_each_space_it_carries_ack_eliciting
     drop(pings.probe([ApplicationData], 1));
     assert_eq!(pings.spaces().collect::<Vec<_>>(), [ApplicationData]);
 }
+
+#[test]
+fn path_challenge_and_path_response_go_in_every_one_rtt_packet() {
+    use crate::v1::{path_response::PathResponseIntent, path_validation::PathChallengeIntent};
+    let challenge = Some(FrameSourceId::PathChallenge);
+    assert_eq!(
+        carried_by_each(SendIntents::inject(PathChallengeIntent)),
+        [None, None, None, challenge, challenge, challenge]
+    );
+    let response = Some(FrameSourceId::PathResponse);
+    assert_eq!(
+        carried_by_each(SendIntents::inject(PathResponseIntent::new([1; 8]))),
+        [None, None, None, response, response, response]
+    );
+}

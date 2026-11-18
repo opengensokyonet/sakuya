@@ -150,6 +150,12 @@ component_events! {
     /// The response to a PATH_CHALLENGE to send changed: a PATH_CHALLENGE
     /// was received, or the response was written.
     PathResponsePendingChanged: LinkPath;
+    /// Whether a PATH_CHALLENGE is to be sent changed: one became due, or
+    /// was written.
+    PathChallengePendingChanged: LinkPath;
+    /// The link path's path validation concluded, validated or failed, and
+    /// the conclusion waits for the rules of connection migration.
+    PathValidationConcluded: LinkPath;
     /// The close packet changed: it was sealed, or a datagram was received
     /// after it was sealed.
     ClosePacketChanged: LinkPath;

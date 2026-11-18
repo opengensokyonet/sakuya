@@ -88,8 +88,14 @@
 //! first in an Initial packet that counts in flight is taken to elicit one.
 //! Every datagram is marked Not-ECT.
 //!
-//! A link path without a recovery layer sends nothing new: the call is
-//! woken when its layer is built.
+//! A link path without a recovery layer sends nothing new, and its call is
+//! woken when its layer is built, except a candidate's: it sends its
+//! probes in uncharged datagrams of 1200 bytes, which count in no
+//! congestion control and nothing in flight (RFC 9000 §9.4), held by the
+//! anti-amplification limit alone, with no datagram size probing; path
+//! validation times its challenges. A datagram sealed with
+//! a PATH_CHALLENGE tells the link path's path validation whether it was
+//! expanded to 1200 bytes.
 //!
 //! Once the link path's close packet is sealed, the call fills nothing:
 //! each time the planner asks for the close packet to go again, the sealed
@@ -129,7 +135,7 @@ use sakuya_recovery::{
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces},
     pmtu::{PmtuPolicy, PmtuProbeFailure},
     pto::probe_timeout,
-    rtt::{RttEstimate, RttEstimator},
+    rtt::{INITIAL_RTT, RttEstimate, RttEstimator},
     send_journals::{PacketSendAttempt, SendJournals},
 };
 use sakuya_stream::connection::CloseReason;
@@ -158,7 +164,7 @@ use super::{
     confirmation::HandshakeConfirmation,
     connection_ids::{ConnectionIdsOf, LinkPathResetTokenRegistrar, ResetTokenRegistrarOf},
     crypto::send::CryptoSender,
-    datagram_batch::{BatchedDatagram, BatchedPacket, DatagramBatch},
+    datagram_batch::{BatchedDatagram, BatchedPacket, DatagramBatch, UnchargedCongestion},
     error::{ConnectionError, V1ConnectionErrorOf},
     events::{
         ConnectionEventSink, ConnectionEvents, KeyChange, PacketEvents, PlainPacket, SealObserver,
@@ -171,6 +177,7 @@ use super::{
     largest_probe_timeout,
     link::{LinkClone, LinkFacts},
     parameters::PeerTransportParameters,
+    path_validation::PathValidationOf,
     pmtu_probe::PendingPmtuProbe,
     receive::v1_error,
     recovery::{
@@ -440,6 +447,7 @@ type Positions<
     Ipm,
     Ipb,
     Ics,
+    Ipv,
     Ifs,
     Ii,
     Ih,
@@ -470,7 +478,7 @@ type Positions<
     Idr,
 > = (
     Is,
-    (It, Iw, Ir, Ici, Ik, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ifs),
+    (It, Iw, Ir, Ici, Ik, Hs, Hd, Ipd, (Ipm, Ipv), Ipb, Ics, Ifs),
     (Ii, Ih, Io, Il),
     (Ij, If, Iv, Ie, Iq, Hf, Ist),
     (Ipp, Ima, Jx, Jr, Jm),
@@ -534,6 +542,7 @@ impl<
     Ipm,
     Ipb,
     Ics,
+    Ipv,
     Ifs,
     Ii,
     Ih,
@@ -581,6 +590,7 @@ impl<
             Ipm,
             Ipb,
             Ics,
+            Ipv,
             Ifs,
             Ii,
             Ih,
@@ -666,7 +676,8 @@ where
         + GetAt<ClosePacket, Icp>
         + GetAt<LinkFacts, Ilf>
         + GetAt<DatagramAcceptance, Ida>
-        + TakeEach<'x, ResendTakes<T, L>, Irs>,
+        + TakeEach<'x, ResendTakes<T, L>, Irs>
+        + GetAt<LinkPathRole<InstantOf<T>>, Idr>,
     L: ConnectionErrorsOf,
     <L as ConnectionErrorsOf>::ConnectionErrors: CoprodInjector<V1ConnectionErrorOf<L>, Ier>,
     for<'x> FillKeysRest<'x, T, L, It>: TakeEach<'x, FillReadTakes<T>, Iw>,
@@ -676,7 +687,8 @@ where
         + GetAt<ConnectionIdsOf<T>, Ici>
         + GetAt<PendingPmtuProbe, Ipm>
         + GetAt<PendingProbePings, Ipb>
-        + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>,
+        + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>
+        + GetAt<PathValidationOf<T>, Ipv>,
     <SendTypes<T, L> as SendStrategyTypes>::FrameSourceId:
         CoprodInjector<FrameSourceId, Ifs> + PartialEq,
     <PartsFrameSources<OneRttPacket, L> as FrameSourceSet>::FrameSourceId:
@@ -791,9 +803,14 @@ where
         } else {
             Poll::Ready(())
         };
-        let Some(estimate) = read else {
+        // a candidate without a recovery layer still sends its probes,
+        // charged to no congestion control
+        let uncharged = read.is_none()
+            && lineage.get::<LinkPathRole<InstantOf<T>>, Idr>().kind()
+                == LinkPathRoleKind::Candidate;
+        if read.is_none() && !uncharged {
             return no_layer;
-        };
+        }
         if let Err(source) =
             prepare_key_update::<T, L, B, Ij, Iv, Ima, Io, Iu, Ihc, Ikp, Irt>(lineage, others, now)
         {
@@ -845,70 +862,72 @@ where
                 let mut rest = rest.append_optionals::<EstablishedSourceComponentsOfParts<T, L>>(
                     EstablishedSourceComponentsOfParts::<T, L>::reborrow(&mut established),
                 );
-                others.with_own_recovery::<FillRecoveryTakes<T, L>, Ik, _>(
-                    |hlist_pat![mut part, mut state, mut pmtu], others| {
-                        lend_congestion::<T, L, B, Jx, Jr, _>(
-                            &mut *factory,
-                            &mut *part,
-                            others,
-                            |mut access| {
-                                let mut filling = Filling::<
-                                    T,
-                                    L,
-                                    _,
-                                    _,
-                                    Ir,
-                                    Ici,
-                                    Ipp,
-                                    Hs,
-                                    Hd,
-                                    Ipd,
-                                    Ipm,
-                                    Ipb,
-                                    Ics,
-                                    Ifs,
-                                > {
-                                    now,
-                                    link: &link,
-                                    link_path: &link_path,
-                                    core: &mut *core,
-                                    planner: &mut *planner,
-                                    registrar: &mut *registrar,
-                                    journals: &mut *journals,
-                                    initial_keys,
-                                    handshake_keys,
-                                    one_rtt_keys,
-                                    initial_discarded: false,
-                                    usage: &mut usage,
-                                    amplification: &mut amplification,
-                                    events: &mut *events,
-                                    rest: &mut rest,
-                                    access: &mut access,
-                                    estimate,
-                                    pmtu: &mut *pmtu,
-                                    pmtu_concluded: false,
-                                    congestion_changed: false,
-                                    state: &mut *state,
-                                    positions: core::marker::PhantomData,
-                                };
-                                let end = filling.fill(batch, cx);
-                                let waits = batch.is_empty()
-                                    && matches!(end, FillEnd::NothingPlanned | FillEnd::Blocked);
-                                let wake_itself = filling.planner.filling_ended(
-                                    end == FillEnd::Blocked && batch.is_empty(),
-                                    waits,
-                                    cx.waker(),
-                                );
-                                (
-                                    filling.initial_discarded,
-                                    filling.pmtu_concluded,
-                                    filling.congestion_changed,
-                                    wake_itself,
-                                )
-                            },
+                // a filling of this poll, with the link path's congestion
+                // access, RTT estimate, probing policy and fixed state
+                macro_rules! filling {
+                    ($access:expr, $estimate:expr, $pmtu:expr, $state:expr, $charged:expr) => {
+                        Filling::<T, L, _, _, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ipv, Ifs> {
+                            now,
+                            link: &link,
+                            link_path: &link_path,
+                            core: &mut *core,
+                            planner: &mut *planner,
+                            registrar: &mut *registrar,
+                            journals: &mut *journals,
+                            initial_keys,
+                            handshake_keys,
+                            one_rtt_keys,
+                            initial_discarded: false,
+                            usage: &mut usage,
+                            amplification: &mut amplification,
+                            events: &mut *events,
+                            rest: &mut rest,
+                            access: $access,
+                            estimate: $estimate,
+                            pmtu: $pmtu,
+                            pmtu_concluded: false,
+                            congestion_changed: false,
+                            state: $state,
+                            charged: $charged,
+                            positions: core::marker::PhantomData,
+                        }
+                    };
+                }
+                match read {
+                    Some(estimate) => others.with_own_recovery::<FillRecoveryTakes<T, L>, Ik, _>(
+                        |hlist_pat![mut part, mut state, mut pmtu], others| {
+                            lend_congestion::<T, L, B, Jx, Jr, _>(
+                                &mut *factory,
+                                &mut *part,
+                                others,
+                                |mut access| {
+                                    filling!(
+                                        &mut access,
+                                        estimate,
+                                        Some(&mut *pmtu),
+                                        &mut *state,
+                                        true
+                                    )
+                                    .fill_round(batch, cx)
+                                },
+                            )
+                        },
+                    ),
+                    None => {
+                        let mut state = LinkPathCongestionState::new();
+                        let mut access = UnchargedCongestion::<S>::new();
+                        Some(
+                            filling!(
+                                &mut access,
+                                RttEstimate::initial(INITIAL_RTT),
+                                None,
+                                &mut state,
+                                false
+                            )
+                            .fill_round(batch, cx),
                         )
-                    },
-                )
+                    }
+                }
             },
         );
         let Some((initial_discarded, pmtu_concluded, congestion_changed, wake_itself)) = filled
@@ -916,7 +935,7 @@ where
             return no_layer;
         };
         let recovery = NodeKey::Recovery(path, link);
-        if congestion_changed {
+        if congestion_changed && !uncharged {
             others.publish_at(&recovery, Happened::<CongestionChanged>::new());
         }
         if pmtu_concluded {
@@ -1054,15 +1073,15 @@ where
 }
 
 /// What [`Filling`] reads its components and finds its frame sources by.
-type FillPositions<Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ifs> =
-    core::marker::PhantomData<fn() -> (Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ifs)>;
+type FillPositions<Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ipv, Ifs> =
+    core::marker::PhantomData<fn() -> (Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ipv, Ifs)>;
 
 /// What one poll fills with: the borrows of what it took, the instant of
 /// the poll and the link path it fills for.
 ///
 /// `V` is what is left of the lineage, where the connection IDs and the
 /// frame sources are found; `A` the congestion access lent for the poll.
-struct Filling<'f, 'r, T, L, V, A, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ifs>
+struct Filling<'f, 'r, T, L, V, A, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ipv, Ifs>
 where
     T: Choices,
     L: LineagePartList<T> + FeedbackSummariesOf,
@@ -1088,8 +1107,9 @@ where
     rest: &'f mut Lineage<'r, V>,
     access: &'f mut A,
     estimate: RttEstimate,
-    /// Sees the start of each datagram, and gives the size it is sent at.
-    pmtu: &'f mut PmtuOf<T, L>,
+    /// Sees the start of each datagram, and gives the size it is sent at;
+    /// `None` without a recovery layer, which sends at 1200 bytes.
+    pmtu: Option<&'f mut PmtuOf<T, L>>,
     /// Whether the probing policy reported that its conclusion changed, to
     /// be published once the filling is over.
     pmtu_concluded: bool,
@@ -1099,11 +1119,14 @@ where
     /// over.
     congestion_changed: bool,
     state: &'f mut LinkPathCongestionState<InstantOf<T>>,
-    positions: FillPositions<Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ifs>,
+    /// Whether the datagrams are charged to congestion control: those of a
+    /// candidate without a recovery layer are not.
+    charged: bool,
+    positions: FillPositions<Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ipv, Ifs>,
 }
 
-impl<T, L, V, A, S, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ifs>
-    Filling<'_, '_, T, L, V, A, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ifs>
+impl<T, L, V, A, S, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ipv, Ifs>
+    Filling<'_, '_, T, L, V, A, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ipb, Ics, Ipv, Ifs>
 where
     T: Choices,
     L: LineagePartList<T> + FeedbackSummariesOf + ParametersOf<TransportParameterSpace>,
@@ -1131,7 +1154,8 @@ where
         + GetAt<ConnectionIdsOf<T>, Ici>
         + GetAt<PendingPmtuProbe, Ipm>
         + GetAt<PendingProbePings, Ipb>
-        + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>,
+        + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>
+        + GetAt<PathValidationOf<T>, Ipv>,
     <SendTypes<T, L> as SendStrategyTypes>::FrameSourceId:
         CoprodInjector<FrameSourceId, Ifs> + PartialEq,
     <PartsFrameSources<OneRttPacket, L> as FrameSourceSet>::FrameSourceId:
@@ -1146,6 +1170,30 @@ where
     <SendTypes<T, L> as SendStrategyTypes>::SendIntents: From<<L as SendIntentsOf>::SendIntents>,
     EventsOf<T, L>: PacketEvents<InstantOf<T>, L>,
 {
+    /// Fill datagrams into `batch` as [`fill`](Self::fill) does, and tell the
+    /// planner how it ended: whether this side discarded its Initial keys,
+    /// the probing policy's conclusion changed, what congestion control
+    /// allows changed, and the call is to wake itself.
+    fn fill_round(
+        &mut self,
+        batch: &mut DatagramBatchOf<T, L, S>,
+        cx: &mut Context<'_>,
+    ) -> (bool, bool, bool, bool) {
+        let end = self.fill(batch, cx);
+        let waits = batch.is_empty() && matches!(end, FillEnd::NothingPlanned | FillEnd::Blocked);
+        let wake_itself = self.planner.filling_ended(
+            end == FillEnd::Blocked && batch.is_empty(),
+            waits,
+            cx.waker(),
+        );
+        (
+            self.initial_discarded,
+            self.pmtu_concluded,
+            self.congestion_changed,
+            wake_itself,
+        )
+    }
+
     /// Fill datagrams into `batch` until the batch is full or the plans
     /// stop.
     fn fill(&mut self, batch: &mut DatagramBatchOf<T, L, S>, cx: &mut Context<'_>) -> FillEnd {
@@ -1205,21 +1253,27 @@ where
         // the probe to send
         let ceiling =
             datagram_limits(link_ceiling, peer_max_udp_payload, None, None).probe_ceiling();
-        self.pmtu_concluded |= self.pmtu.on_datagram_start(&link.0, ceiling);
-        let pmtu_conclusion = self.pmtu.conclusion();
-        let wanted = PendingPmtuProbe::wanted(
-            link_path_role,
-            confirmation,
-            || {
-                let size = self.pmtu.probe_size();
-                debug_assert!(
-                    size.is_none_or(|size| ceiling.is_some_and(|limit| size <= limit)),
-                    "the PMTU policy requested a probe above the datagram ceiling"
+        let (pmtu_conclusion, wanted) = match self.pmtu.as_deref_mut() {
+            Some(pmtu) => {
+                self.pmtu_concluded |= pmtu.on_datagram_start(&link.0, ceiling);
+                let wanted = PendingPmtuProbe::wanted(
+                    link_path_role,
+                    confirmation,
+                    || {
+                        let size = pmtu.probe_size();
+                        debug_assert!(
+                            size.is_none_or(|size| ceiling.is_some_and(|limit| size <= limit)),
+                            "the PMTU policy requested a probe above the datagram ceiling"
+                        );
+                        size
+                    },
+                    self.state.pmtu_probe_awaited(),
                 );
-                size
-            },
-            self.state.pmtu_probe_awaited(),
-        );
+                (pmtu.conclusion(), wanted)
+            }
+            // a candidate without a recovery layer probes nothing
+            None => (DatagramLimits::MINIMUM, None),
+        };
         if self.rest.get::<PendingPmtuProbe, Ipm>().size() != wanted {
             let changed = self.rest.get_mut::<PendingPmtuProbe, Ipm>().set(wanted);
             self.rest.publish(changed);
@@ -1349,23 +1403,38 @@ where
         let probe = pmtu_probe.is_none()
             && limits.probe_permits > 0
             && limits.congestion_window_left.min(limits.pacing_allowance) < max_len;
-        let mut datagram = batch.start_observed_datagram(
-            self.now,
-            chosen.connection_id(),
-            role,
-            scid.length(),
-            max_len,
-            in_flight_room,
-            probe,
-            &mut *self.state,
-            &mut *self.access,
-            &mut *self.amplification,
-            PacketSent::<_, _, L> {
-                sink: &mut *self.events,
-                at: self.now,
-                list: core::marker::PhantomData,
-            },
-        );
+        let observer = PacketSent::<_, _, L> {
+            sink: &mut *self.events,
+            at: self.now,
+            list: core::marker::PhantomData,
+        };
+        let mut datagram = if self.charged {
+            batch.start_observed_datagram(
+                self.now,
+                chosen.connection_id(),
+                role,
+                scid.length(),
+                max_len,
+                in_flight_room,
+                probe,
+                &mut *self.state,
+                &mut *self.access,
+                &mut *self.amplification,
+                observer,
+            )
+        } else {
+            batch.start_uncharged_datagram(
+                self.now,
+                chosen.connection_id(),
+                role,
+                scid.length(),
+                max_len.min(in_flight_room),
+                &mut *self.state,
+                &mut *self.access,
+                &mut *self.amplification,
+                observer,
+            )
+        };
         if let Some(size) = pmtu_probe {
             // its 1-RTT packet is padded to the whole size
             datagram.raise_floor(size);
@@ -1584,11 +1653,17 @@ where
         if let (Some(size), Some(_)) = (pmtu_probe, sealed) {
             self.state.on_pmtu_probe_sealed(size);
         }
+        if let Some(len) = sealed {
+            // a challenge it carries is expanded or not by its size
+            self.rest
+                .get_mut::<PathValidationOf<T>, Ipv>()
+                .datagram_sealed(len);
+        }
         // a datagram with content used its connection ID; for one left
         // empty, the choice is dropped and nothing happened
         if let Some(len) = sealed {
             // charged to congestion control and pacing
-            self.congestion_changed = true;
+            self.congestion_changed |= self.charged;
             let changed = chosen.used(
                 self.rest
                     .get_mut::<ConnectionIdsOf<T>, Ici>()
@@ -1688,7 +1763,8 @@ where
 /// when one is due and may be initiated, and note the next packet number of
 /// the Application Data space as sent with the current sending generation
 /// ([`prepare_one_rtt_packets`]). The probe timeout waited after an
-/// acknowledgment is the largest among the link paths.
+/// acknowledgment is the largest among the link paths, or the one of a new
+/// path while none has a recovery layer.
 ///
 /// # Errors
 ///
@@ -1724,8 +1800,17 @@ where
     let granularity = thresholds.granularity();
     prepare_one_rtt_packets::<T::Crypto, _, _, _, Io, Iu, Ihc, Ikp>(lineage, next, now, || {
         largest_probe_timeout::<T, L, B, Irt>(peer_max_ack_delay, granularity, others)
-            // invariant: the link path that fills has a recovery layer
-            .unwrap_or_else(|| unreachable!("the filling link path has a recovery layer"))
+            // a candidate fills while no link path has a recovery layer:
+            // the probe timeout of a new path
+            .unwrap_or_else(|| {
+                probe_timeout(
+                    &RttEstimate::initial(INITIAL_RTT),
+                    granularity,
+                    PacketNumberSpaceKind::ApplicationData,
+                    peer_max_ack_delay,
+                    0,
+                )
+            })
     })
 }
 
@@ -2228,6 +2313,7 @@ impl<
     Ipm,
     Ipb,
     Ics,
+    Ipv,
     Ifs,
     Ii,
     Ih,
@@ -2274,6 +2360,7 @@ impl<
             Ipm,
             Ipb,
             Ics,
+            Ipv,
             Ifs,
             Ii,
             Ih,
@@ -2368,7 +2455,8 @@ where
         + GetAt<ConnectionIdsOf<T>, Ici>
         + GetAt<PendingPmtuProbe, Ipm>
         + GetAt<PendingProbePings, Ipb>
-        + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>,
+        + GetAt<CryptoSender<CryptoSendBufferOf<T>>, Ics>
+        + GetAt<PathValidationOf<T>, Ipv>,
     <SendTypes<T, L> as SendStrategyTypes>::FrameSourceId:
         CoprodInjector<FrameSourceId, Ifs> + PartialEq,
     <PartsFrameSources<OneRttPacket, L> as FrameSourceSet>::FrameSourceId:
@@ -2446,6 +2534,7 @@ where
         Ipm,
         Ipb,
         Ics,
+        Ipv,
         Ifs,
         Ii,
         Ih,
@@ -2496,6 +2585,7 @@ where
                 Ipm,
                 Ipb,
                 Ics,
+                Ipv,
                 Ifs,
                 Ii,
                 Ih,

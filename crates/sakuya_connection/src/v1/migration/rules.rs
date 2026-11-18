@@ -12,9 +12,17 @@
 //! Path validation calls the two rules of its results: a link path
 //! validated ([`MigrationRules::validated`]), with the RTT of its
 //! challenge when the response came back over it, and a path validation
-//! that gave up ([`MigrationRules::validation_failed`]). When the active
-//! link path's validation sets the instant it gives up at, the fallback in
-//! `Settling` keeps at least until then ([`hold_fallback`]).
+//! that gave up ([`MigrationRules::validation_failed`]); the logical path's
+//! receiving call applies them to what the link paths concluded
+//! ([`MigrationRules::concluded`]). When the active link path's validation
+//! sets the instant it gives up at, the fallback in `Settling` keeps at
+//! least until then ([`hold_fallback`]).
+//!
+//! A switch to a link path whose address is not validated makes a
+//! PATH_CHALLENGE due on it and on the link path it took over from (RFC
+//! 9000 §9.3, §9.3.3), and so does a switch that waits for the validation of
+//! its link path, on the active one; a switch back to a validated address
+//! challenges neither.
 use core::time::Duration;
 
 use frunk_core::hlist_pat;
@@ -55,6 +63,7 @@ use crate::{
         connection_ids::{ConnectionIdsOf, LineageConnectionIdEvents, LocalConnectionIdUsedByPeer},
         link::LinkFacts,
         parameters::LocalTransportParameters,
+        path_validation::{PathValidationConclusion, PathValidationOf},
         recovery::RttOf,
         spaces::{DEFAULT_MAX_ACK_DELAY, peer_max_ack_delay},
     },
@@ -501,14 +510,28 @@ pub trait MigrationRules<T: Choices, H>: LineagePartList<T> + Sized {
         now: InstantOf<T>,
         requests: &mut Vec<MigrationRequest<LinkIdOf<T>>>,
     ) -> bool;
+
+    /// The path validations of the logical path's link paths that
+    /// concluded since: each validated link path goes to
+    /// [`validated`](Self::validated), each failed one to
+    /// [`validation_failed`](Self::validation_failed). `false` when an
+    /// active one failed with no fallback.
+    fn concluded<'v, B: CallBundle>(
+        lineage: &mut LineageOf<'v, T, Self, layer::LogicalPath>,
+        others: &mut OtherNodes<'v, T, Self, B>,
+        now: InstantOf<T>,
+        requests: &mut Vec<MigrationRequest<LinkIdOf<T>>>,
+    ) -> bool;
 }
 
 /// What the rules change of a link path: its role, its record of
-/// migration and the local connection ID the peer last used on it.
+/// migration, the local connection ID the peer last used on it, and its
+/// path validation.
 type LinkPathTakes<T> = HList![
     LinkPathRole<InstantOf<T>>,
     LinkPathMigrationOf<T>,
-    LocalConnectionIdUsedByPeer
+    LocalConnectionIdUsedByPeer,
+    PathValidationOf<T>
 ];
 
 impl<T, L, Imig, Ilt, Ida, Icid, Hc, Iv, Ima, Ir, Ilm, Icu, Ix, Ian, Irt>
@@ -607,7 +630,7 @@ where
         // last and either does not move the peer or arrives on the active
         // link path: nothing changes, and the link paths are not gathered
         let zero = zero_length::<T, L, Icid>(lineage);
-        if let Some(hlist_pat![role, _, used]) =
+        if let Some(hlist_pat![role, _, used, _]) =
             others.link_path::<LinkPathTakes<T>, Ix>(&path, link)
         {
             let same_id = zero || used.get() == Some(*destination);
@@ -628,7 +651,7 @@ where
             let previous = gathered[arrival]
                 .used
                 .or_else(|| active.and_then(|active| gathered[active].used));
-            if let Some(hlist_pat![_, _, mut used]) =
+            if let Some(hlist_pat![_, _, mut used, _]) =
                 others.link_path::<LinkPathTakes<T>, Ix>(&path, link)
             {
                 used.set(*destination);
@@ -643,6 +666,7 @@ where
             && active.is_none_or(|active| gathered[active].used != gathered[arrival].used);
         let arrival_state = gathered[arrival].state();
         let active_state = active.map(|active| gathered[active].state());
+        let challenge = !arrival_state.validated();
         let step = lineage
             .get_mut::<ConnectionMigrationOf<T>, Imig>()
             .on_processed(
@@ -653,7 +677,18 @@ where
                 peer_switched_local_id,
                 now,
             );
-        apply_step::<T, L, B, Ix>(others, &path, link, step, now, requests);
+        let fallback = lineage
+            .get::<ConnectionMigrationOf<T>, Imig>()
+            .fallback()
+            .cloned();
+        let hlist_pat![_, thresholds, _] = (*lineage).read_each::<LinkPathRoleReads<T, L>, Iv>();
+        let effects = SwitchEffects {
+            challenge,
+            active: active.map(|active| gathered[active].link.clone()),
+            fallback,
+            granularity: thresholds.granularity(),
+        };
+        apply_step::<T, L, B, Ix>(others, &path, link, step, now, requests, &effects);
     }
 
     fn validated<'v, B: CallBundle>(
@@ -678,7 +713,7 @@ where
         let awaiting = others
             .link_path::<LinkPathTakes<T>, Ix>(&path, link)
             .and_then(|taken| {
-                let hlist_pat![_, mut migration, _] = taken;
+                let hlist_pat![_, mut migration, _, _] = taken;
                 migration.take_awaiting()
             });
         let validated_state = gathered[validated].state();
@@ -692,7 +727,18 @@ where
                 initial_rtt,
                 now,
             );
-        apply_step::<T, L, B, Ix>(others, &path, link, step, now, requests);
+        let fallback = lineage
+            .get::<ConnectionMigrationOf<T>, Imig>()
+            .fallback()
+            .cloned();
+        // the address is validated: a switch to it challenges nothing
+        let effects = SwitchEffects {
+            challenge: false,
+            active: None,
+            fallback,
+            granularity: Duration::ZERO,
+        };
+        apply_step::<T, L, B, Ix>(others, &path, link, step, now, requests, &effects);
     }
 
     fn validation_failed<'v, B: CallBundle>(
@@ -724,12 +770,53 @@ where
                 true
             }
             FailedValidation::Revert { switch, end } => {
-                apply_switch::<T, L, B, Ix>(others, &path, switch, now, requests);
+                // back to the validated fallback, which challenges nothing
+                let effects = SwitchEffects {
+                    challenge: false,
+                    active: None,
+                    fallback: None,
+                    granularity: Duration::ZERO,
+                };
+                apply_switch::<T, L, B, Ix>(others, &path, switch, now, requests, &effects);
                 requests.push(MigrationRequest::EndLinkPath { link: end });
                 true
             }
             FailedValidation::NoFallback => false,
         }
+    }
+
+    fn concluded<'v, B: CallBundle>(
+        lineage: &mut LineageOf<'v, T, L, layer::LogicalPath>,
+        others: &mut OtherNodes<'v, T, L, B>,
+        now: InstantOf<T>,
+        requests: &mut Vec<MigrationRequest<LinkIdOf<T>>>,
+    ) -> bool {
+        let NodeKey::LogicalPath(path) = others.here().clone() else {
+            unreachable!("a logical path's lend carries its key")
+        };
+        let mut concluded = Vec::new();
+        others.each_link_path::<LinkPathTakes<T>, Ix>(
+            |key, hlist_pat![_, _, _, mut validation]| {
+                if let NodeKey::LinkPath(each, link) = key
+                    && *each == path
+                    && let Some(conclusion) = validation.take_conclusion()
+                {
+                    concluded.push((link.clone(), conclusion));
+                }
+            },
+        );
+        let mut kept = true;
+        for (link, conclusion) in concluded {
+            match conclusion {
+                PathValidationConclusion::Validated { initial_rtt } => {
+                    Self::validated(lineage, others, &link, initial_rtt, now, requests);
+                }
+                PathValidationConclusion::Failed => {
+                    kept &= Self::validation_failed(lineage, others, &link, now, requests);
+                }
+            }
+        }
+        kept
     }
 }
 
@@ -830,7 +917,22 @@ where
     gathered
 }
 
-/// Apply `step`, of the link path over `link` of the logical path `path`.
+/// What else a step of the rules does besides the roles and the recovery
+/// layer: whether its link path's address is not validated, so that a
+/// PATH_CHALLENGE becomes due on it and on the active link path (RFC 9000
+/// §9.3, §9.3.3); the active link path, unless it is the step's; and the
+/// fallback once the step is decided.
+struct SwitchEffects<Id> {
+    challenge: bool,
+    active: Option<Id>,
+    fallback: Option<Id>,
+    /// The timer granularity: how much longer than the instant the new
+    /// active link path's validation gives up at the fallback keeps.
+    granularity: Duration,
+}
+
+/// Apply `step`, of the link path over `link` of the logical path `path`,
+/// with its `effects`.
 fn apply_step<T, L, B, Ix>(
     others: &mut OtherNodes<'_, T, L, B>,
     path: &crate::share::PathKey<L>,
@@ -838,6 +940,7 @@ fn apply_step<T, L, B, Ix>(
     step: MigrationStep<LocalOf<T>, PeerOf<T>, InstantOf<T>>,
     now: InstantOf<T>,
     requests: &mut Vec<MigrationRequest<LinkIdOf<T>>>,
+    effects: &SwitchEffects<LinkIdOf<T>>,
 ) where
     T: Choices,
     L: LineagePartList<T>,
@@ -849,26 +952,38 @@ fn apply_step<T, L, B, Ix>(
     match step {
         MigrationStep::Stay => {}
         MigrationStep::Await(recovery) => {
-            if let Some(hlist_pat![_, mut migration, _]) =
+            if let Some(hlist_pat![_, mut migration, _, _]) =
                 others.link_path::<LinkPathTakes<T>, Ix>(path, link)
             {
                 migration.await_validation(recovery);
             }
+            if effects.challenge {
+                challenge::<T, L, B, Ix>(others, path, link);
+                if let Some(active) = &effects.active {
+                    challenge::<T, L, B, Ix>(others, path, active);
+                }
+            }
         }
         MigrationStep::Switch(switch) => {
-            apply_switch::<T, L, B, Ix>(others, path, switch, now, requests);
+            apply_switch::<T, L, B, Ix>(others, path, switch, now, requests, effects);
         }
     }
 }
 
 /// Apply `switch` in the logical path `path`: each link path takes its
-/// role, entered at `now`, and the recovery layer follows.
+/// role, entered at `now`, and the recovery layer follows. With
+/// `effects.challenge`, a PATH_CHALLENGE becomes due on both; the former
+/// active link path, when it settles as the fallback, keeps until one
+/// timer granularity past the instant the new one's validation gives up at,
+/// once that has one, so that the failure, which the logical path's
+/// receiving call acts on, finds it still there.
 fn apply_switch<T, L, B, Ix>(
     others: &mut OtherNodes<'_, T, L, B>,
     path: &crate::share::PathKey<L>,
     switch: Switch<LocalOf<T>, PeerOf<T>, InstantOf<T>>,
     now: InstantOf<T>,
     requests: &mut Vec<MigrationRequest<LinkIdOf<T>>>,
+    effects: &SwitchEffects<LinkIdOf<T>>,
 ) where
     T: Choices,
     L: LineagePartList<T>,
@@ -881,6 +996,28 @@ fn apply_switch<T, L, B, Ix>(
     enter::<T, L, B, Ix>(others, path, &to, LinkPathRole::Active, now);
     if let Some((from, role)) = &from {
         enter::<T, L, B, Ix>(others, path, from, *role, now);
+    }
+    if effects.challenge {
+        challenge::<T, L, B, Ix>(others, path, &to);
+        if let Some((from, _)) = &from {
+            challenge::<T, L, B, Ix>(others, path, from);
+        }
+    }
+    if let Some((from, LinkPathRole::Settling(_))) = &from
+        && effects.fallback.as_ref() == Some(from)
+    {
+        let until = others
+            .link_path::<LinkPathTakes<T>, Ix>(path, &to)
+            .and_then(|hlist_pat![_, _, _, validation]| validation.abandon_at())
+            .and_then(|at| at.checked_add(effects.granularity));
+        let held = until.and_then(|until| {
+            others
+                .link_path::<LinkPathTakes<T>, Ix>(path, from)
+                .and_then(|hlist_pat![mut role, _, _, _]| hold_fallback(&mut *role, until))
+        });
+        if let Some(held) = held {
+            others.publish_at(&NodeKey::LinkPath(path.clone(), from.clone()), held);
+        }
     }
     match (layer, from) {
         (SwitchLayer::Keep, _) => {}
@@ -915,7 +1052,7 @@ fn enter<T, L, B, Ix>(
         TakeEach<'s, LinkPathTakes<T>, Ix>,
 {
     {
-        let Some(hlist_pat![mut current, mut migration, _]) =
+        let Some(hlist_pat![mut current, mut migration, _, _]) =
             others.link_path::<LinkPathTakes<T>, Ix>(path, link)
         else {
             return;
@@ -927,6 +1064,28 @@ fn enter<T, L, B, Ix>(
         &NodeKey::LinkPath(path.clone(), link.clone()),
         Happened::<LinkPathRoleChanged>::new(),
     );
+}
+
+/// A PATH_CHALLENGE becomes due on the link path over `link` of the
+/// logical path `path`; the change is published at the link path.
+fn challenge<T, L, B, Ix>(
+    others: &mut OtherNodes<'_, T, L, B>,
+    path: &crate::share::PathKey<L>,
+    link: &LinkIdOf<T>,
+) where
+    T: Choices,
+    L: LineagePartList<T>,
+    B: CallBundle,
+    for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        TakeEach<'s, LinkPathTakes<T>, Ix>,
+{
+    let due = others
+        .link_path::<LinkPathTakes<T>, Ix>(path, link)
+        .map(|hlist_pat![_, _, _, mut validation]| validation.challenge_due());
+    if let Some(due) = due {
+        others.publish_at(&NodeKey::LinkPath(path.clone(), link.clone()), due);
+    }
 }
 
 // ---- the components ----

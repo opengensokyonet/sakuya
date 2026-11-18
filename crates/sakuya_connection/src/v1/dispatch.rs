@@ -13,7 +13,7 @@
 //! | --- | --- |
 //! | PADDING, PING | none: they only make a packet ack-eliciting or not |
 //! | PATH_CHALLENGE | the link path the packet arrived on: it keeps the data, to answer with a PATH_RESPONSE ([`path_response`](super::path_response)) |
-//! | PATH_RESPONSE | none: this side sends no PATH_CHALLENGE yet, and a response that matches none is ignored |
+//! | PATH_RESPONSE | the link path that sent the PATH_CHALLENGE it echoes, whichever link path it arrives on ([`path_validation`](super::path_validation)): the address of its logical link is validated; a response that matches none is ignored |
 //! | CRYPTO | [`CryptoReceiver`], at the level of the packet |
 //! | NEW_TOKEN | the data only this side has ([`Side::on_new_token`]): a client hands the token over |
 //! | HANDSHAKE_DONE | [`HandshakeConfirmation`]: the handshake is confirmed |
@@ -58,7 +58,11 @@ use snafu::{ResultExt, Snafu, ensure};
 use super::{
     Choices, CloseCauseOf, EventsOf, LinkPathRoleReads, Part, Side,
     ack::{AckReads, AckRecoveryTakes, receive_ack},
+    amplification::{AddressValidation, AntiAmplification},
     close::CloseReasonRecord,
+    component_events::{
+        AmplificationCreditChanged, PathChallengePendingChanged, PathValidationConcluded,
+    },
     confirmation::HandshakeConfirmation,
     connection_ids::LineageConnectionIdEvents,
     crypto::CryptoReceiver,
@@ -69,7 +73,9 @@ use super::{
     key_phase::KeyPhaseNumbers,
     keys::OneRttKeys,
     link::LinkClone,
+    link::LinkFacts,
     path_response::PendingPathResponse,
+    path_validation::PathValidationOf,
     recovery::{CongestionPartOf, OthersOf, RecoveryFactoryOf, RttOf},
     send::SendTypes,
     send_planning::{HostSendStrategyTypes, IntakeOf, IntakePublishOutcome, SendStrategyIntake},
@@ -86,6 +92,7 @@ use crate::{
     call::CallBundle,
     clock::{CheckedAdd, InstantOf},
     component::LineageOf,
+    component_event::Happened,
     connection_id::NewConnectionId,
     dispatch::{DispatchFacts, FrameDispatch},
     error::ConnectionErrorsOf,
@@ -192,6 +199,8 @@ impl<
     Icid,
     Iw,
     Ipr,
+    Ipv,
+    Ian,
     Iv,
     Ima,
     Irt,
@@ -221,7 +230,7 @@ impl<
         T,
         L,
         (
-            (Ic, Ir, Ih, Icid, Iw, Ipr),
+            (Ic, Ir, Ih, Icid, Iw, (Ipr, Ipv, Ian)),
             (Iv, Ima, Irt),
             (Il, Is, Ii, Idx),
             (
@@ -273,8 +282,10 @@ where
         + GetAt<HandshakeConfirmation, Ih>
         + GetAt<<T::Side as Side>::Own, Iw>
         + ReadEach<LinkPathRoleReads<T, L>, Iv>,
-    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
-        TakeEach<'s, HList![PendingPathResponse], Ipr>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out: TakeEach<'s, HList![PendingPathResponse], Ipr>
+        + TakeEach<'s, HList![PathValidationOf<T>], Ipv>,
+    for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![AntiAmplification, LinkFacts], Ian>,
     for<'s> NodeData<T, L, layer::Recovery>: FlatMut<'s>,
     for<'s> <NodeData<T, L, layer::Recovery> as FlatMut<'s>>::Out: GetAt<RttOf<T, L>, Irt>,
     for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
@@ -330,10 +341,10 @@ where
                 Ies,
             >(lineage, others, &frame, packet),
             FrameRun::Padding(_) | FrameRun::Ping(_) => Ok(()),
-            // this side sends no PATH_CHALLENGE yet, so no response matches
-            // one; a response that matches none may be ignored (RFC 9000
-            // §19.18, MAY close)
-            FrameRun::PathResponse(_) => Ok(()),
+            FrameRun::PathResponse(frame) => {
+                receive_path_response::<T, L, B, Ipv, Ian>(others, frame.data(), packet);
+                Ok(())
+            }
             FrameRun::PathChallenge(frame) => {
                 let NodeKey::LogicalPath(path) = others.here().clone() else {
                     unreachable!("a logical path's lend carries its key")
@@ -638,6 +649,70 @@ pub(super) fn immediate_close(frame: ConnectionCloseFrame<Bytes>) -> ImmediateCl
             reason_phrase: frame.into_reason_phrase(),
         }
         .into(),
+    }
+}
+
+/// A PATH_RESPONSE with `data` arrived in `packet`: the link path of the
+/// logical path of this lend that sent the PATH_CHALLENGE it echoes, over
+/// whichever link path it arrived (RFC 9000 §8.2.2, §8.2.3), concludes its
+/// path validation as its [`PathValidation`](super::path_validation::PathValidation)
+/// says. When that validates the address, the entry of its logical link
+/// counts it validated, and the anti-amplification limit lifts (§8.1). A
+/// response that echoes no challenge is ignored (§19.18, MAY close).
+fn receive_path_response<T, L, B, Ipv, Ian>(
+    others: &mut OtherNodes<'_, T, L, B>,
+    data: [u8; sakuya_wire::v1::frame::PATH_DATA_LEN],
+    packet: &DispatchFacts<InstantOf<T>, LinkPathIdentifierOf<T, L>>,
+) where
+    T: Choices,
+    L: LineagePartList<T>,
+    B: CallBundle,
+    for<'s> NodeData<T, L, layer::LinkPath>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkPath> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![PathValidationOf<T>], Ipv>,
+    for<'s> NodeData<T, L, layer::LinkEntry>: FlatMut<'s>,
+    for<'s> <NodeData<T, L, layer::LinkEntry> as FlatMut<'s>>::Out:
+        TakeEach<'s, HList![AntiAmplification, LinkFacts], Ian>,
+{
+    let NodeKey::LogicalPath(path) = others.here().clone() else {
+        unreachable!("a logical path's lend carries its key")
+    };
+    let mut validated = None;
+    others.each_link_path::<HList![PathValidationOf<T>], Ipv>(|key, hlist_pat![mut validation]| {
+        let NodeKey::LinkPath(each, link) = key else {
+            return;
+        };
+        if validated.is_some() || *each != path {
+            return;
+        }
+        let here = L::link_path_identifier(each, link) == *packet.link_path();
+        if validation.responded(data, here, packet.at()).is_some() {
+            validated = Some((key.clone(), link.clone(), validation.is_due()));
+        }
+    });
+    let Some((key, link, due)) = validated else {
+        return;
+    };
+    others.publish_at(&key, Happened::<PathValidationConcluded>::new());
+    if due {
+        // the second validation, of the path's 1200 bytes
+        others.publish_at(&key, Happened::<PathChallengePendingChanged>::new());
+    }
+    let lifted = others
+        .link_entry::<HList![AntiAmplification, LinkFacts], Ian>(&link)
+        .is_some_and(|hlist_pat![mut limit, mut facts]| {
+            let lifted = facts.validation == AddressValidation::NotValidated;
+            if lifted {
+                facts.validation = AddressValidation::Validated;
+                limit.validated();
+            }
+            lifted
+        });
+    if lifted {
+        others.publish_at(
+            &NodeKey::LinkEntry(link),
+            Happened::<AmplificationCreditChanged>::new(),
+        );
     }
 }
 

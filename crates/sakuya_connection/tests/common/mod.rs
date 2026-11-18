@@ -56,6 +56,7 @@ thread_local! {
     static ADMISSION: Cell<TestAdmission> = const { Cell::new(TestAdmission::Accept) };
     static SWITCH: Cell<sakuya_connection::v1::migration::SwitchTiming> =
         const { Cell::new(sakuya_connection::v1::migration::SwitchTiming::Now) };
+    static RESEND_AFTER: Cell<Option<Duration>> = const { Cell::new(None) };
 }
 
 /// The test's clock: time moves only when the test says so.
@@ -882,7 +883,10 @@ pub fn set_migration(
 /// it is asked, and answers as [`set_migration`] says, accepting and
 /// switching at once unless told otherwise. The ends of the tests' links are
 /// `()`, which state no network address: it always gets a new recovery
-/// layer. A `Settling` link path keeps for three probe timeouts.
+/// layer. A PATH_CHALLENGE goes again after the link path's probe timeout,
+/// unless [`set_challenge_resend`] says otherwise, and validation gives up
+/// after three probe timeouts of a new path. A `Settling` link path keeps
+/// for three probe timeouts.
 #[derive(Debug, Default)]
 pub struct TestMigrationPolicy;
 
@@ -948,7 +952,9 @@ impl<Lo: Clone, P: Clone, I: Copy + core::fmt::Debug>
         cx: &sakuya_connection::v1::migration::PathChallengeContext,
     ) -> sakuya_connection::v1::migration::PathChallengeTiming {
         sakuya_connection::v1::migration::PathChallengeTiming {
-            resend_after: cx.path_pto.unwrap_or(cx.initial_pto),
+            resend_after: RESEND_AFTER
+                .with(Cell::get)
+                .unwrap_or_else(|| cx.path_pto.unwrap_or(cx.initial_pto)),
             abandon_after: cx.initial_pto.saturating_mul(3),
         }
     }
@@ -959,8 +965,15 @@ impl<Lo: Clone, P: Clone, I: Copy + core::fmt::Debug>
     }
 }
 
+/// The time to the next PATH_CHALLENGE the tests' migration policy answers
+/// from now on: `after`, or the link path's probe timeout when `None`.
+pub fn set_challenge_resend(after: Option<Duration>) {
+    RESEND_AFTER.with(|r| r.set(after));
+}
+
 /// Forget what the tests' migration policy was told to answer.
 pub fn reset_migration() {
+    set_challenge_resend(None);
     set_migration(
         TestAdmission::Accept,
         sakuya_connection::v1::migration::SwitchTiming::Now,

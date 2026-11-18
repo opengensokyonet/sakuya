@@ -60,7 +60,11 @@
 //!    strategy hears when the peer switched connection IDs, and the active
 //!    link path may switch; receiving stops again for the requests that
 //!    follow from it, such as moving a recovery layer, which the call
-//!    yields in order before anything else.
+//!    yields in order before anything else. What the path validations of
+//!    the link paths concluded goes to connection migration the same way
+//!    ([`MigrationRules::concluded`]): after each packet processed, for
+//!    the PATH_RESPONSE frames it carried, and before the next input, for
+//!    a validation that gave up at its deadline, which wakes the call.
 //! 5. When the link path the datagram arrived on is still closing once
 //!    its packets were received, and its close packet is sealed, the
 //!    datagram is one more the close packet may answer: the close packet
@@ -139,7 +143,7 @@ use super::{
     close_packet::ClosePacket,
     component_events::{
         AmplificationCreditChanged, DestinationConnectionIdsChanged, KeysDiscarded, KeysInstalled,
-        RetryReceived, level,
+        PathValidationConcluded, RetryReceived, level,
     },
     connection_ids::{
         ConnectionIdsOf, InitialDestinationConnectionIds, PeerHandshakeConnectionId,
@@ -828,6 +832,17 @@ where
     {
         let NodeLoan { lineage, others } = view.get_mut();
         drain_on_stateless_reset::<T, L, B, Ic, Ir, Is, Iv, Ima, Irt, Il>(lineage, others, cx);
+        // what path validation concluded since, by a deadline, is acted on
+        // first
+        let mut requests = Vec::new();
+        let now = others.now();
+        let _kept = <L as MigrationRules<T, Hm>>::concluded(lineage, others, now, &mut requests);
+        if !requests.is_empty() {
+            lineage
+                .get_mut::<LogicalPathInput<T::Link, T::Receiver>, Ip>()
+                .requests
+                .extend(requests.into_iter().map(ReceiveRequest::Migration));
+        }
         loop {
             let levels = ReceivableLevels::of::<T, L, Ii, Ih, Io, Iz>(lineage);
             let mut input = lineage.get_mut::<LogicalPathInput<T::Link, T::Receiver>, Ip>();
@@ -1996,6 +2011,8 @@ where
                 at,
                 &mut requests,
             );
+            // what the packet's PATH_RESPONSE concluded
+            let _kept = <L as MigrationRules<T, Hm>>::concluded(lineage, others, at, &mut requests);
             if requests.is_empty() {
                 return Received::Next;
             }
@@ -2458,7 +2475,8 @@ where
         LentCall::new(LogicalPathReceiving::new())
     }
     fn subscribes(out: &mut EventSubscriptions) {
-        out.add::<KeysInstalled<level::ZeroRtt>>()
+        out.add::<PathValidationConcluded>()
+            .add::<KeysInstalled<level::ZeroRtt>>()
             .add::<KeysDiscarded<level::ZeroRtt>>()
             .add::<KeysInstalled<level::Handshake>>()
             .add::<KeysDiscarded<level::Handshake>>()

@@ -13,13 +13,19 @@
 //! older challenge not answered yet, so that only the latest is answered;
 //! the sending call gathers it for the link path's planner as a
 //! [`PathResponseIntent`]. The response goes in a 1-RTT packet only (§12.4,
-//! Table 3); a link path that is not active sends none. The frame is
-//! written by the [`PendingPathResponse`] itself, which forgets the data once
-//! it is written, and nothing is done when it is acknowledged or lost.
+//! Table 3), whatever the link path's role: a candidate sends it in its
+//! probes, a `Settling` link path in its own packets. The frame is written
+//! from the [`PendingPathResponse`], which forgets the data once it is
+//! written, and nothing is done when it is acknowledged or lost.
+//!
+//! On the active link path the response is followed by a PING, which makes
+//! its packet a non-probing one (§9.1): a peer that took a copied packet
+//! from elsewhere for a migration and challenges its old path from there
+//! switches back once it receives it (§9.3.3, SHOULD).
 
 use sakuya_recovery::packet_number_space::PacketNumberSpaceKind;
 use sakuya_stream::send_options::destination::Unfulfilled;
-use sakuya_wire::v1::frame::{PATH_DATA_LEN, path_response::PathResponseFrame};
+use sakuya_wire::v1::frame::{PATH_DATA_LEN, path_response::PathResponseFrame, ping::PingFrame};
 
 use super::{Choices, component_events::PathResponsePendingChanged, send::FrameSourceId};
 use crate::{
@@ -29,6 +35,7 @@ use crate::{
     feedback::InjectSummary,
     frame_source::{FindFrameSource, FrameSource, FrameSourceKind, IgnoredFeedback},
     layer,
+    role::LinkPathRole,
     send_strategy::{
         MinimumLengths, SendIntent,
         ranked::{RankedIntent, SendPriority, SendRank},
@@ -119,9 +126,19 @@ impl PendingPathResponse {
     }
 }
 
+/// The response to send of a link path, as the frame source that writes it:
+/// with a PING after it on the active link path.
+#[derive(Debug)]
+pub struct PathResponseSource<'l> {
+    pending: &'l mut PendingPathResponse,
+    /// Whether a PING follows the response.
+    ping: bool,
+}
+
 /// The frame is written when the item's data is the one waiting, which it
-/// then no longer is; a lost one is not sent again (RFC 9000 §13.3).
-impl FrameSource for PendingPathResponse {
+/// then no longer is; a lost one is not sent again (RFC 9000 §13.3). A PING
+/// that does not fit after it is left out.
+impl FrameSource for PathResponseSource<'_> {
     type Summary = PathResponseSummary;
     type Class = InFlightClass;
     type Item<'a> = [u8; PATH_DATA_LEN];
@@ -136,7 +153,7 @@ impl FrameSource for PendingPathResponse {
         SummaryOf<W>: InjectSummary<PathResponseSummary, Idx>,
         P: PacketPosition,
     {
-        if self.0 == Some(data)
+        if self.pending.0 == Some(data)
             && packet
                 .write_frame(
                     PathResponseFrame::new(data),
@@ -144,7 +161,14 @@ impl FrameSource for PendingPathResponse {
                 )
                 .is_ok()
         {
-            self.0 = None;
+            self.pending.0 = None;
+            if self.ping {
+                // remembered by nothing either
+                let _ = packet.write_frame(
+                    PingFrame,
+                    <SummaryOf<W>>::inject_summary(PathResponseSummary),
+                );
+            }
         }
         Supplied::Open(packet)
     }
@@ -169,22 +193,26 @@ impl FrameSourceKind for PathResponseFrames {
     type Feedback = IgnoredFeedback<Self>;
 }
 
-/// The frames are written by the link path's [`PendingPathResponse`] in the
-/// lineage.
-impl<T: ConnectionChoices, L, V, Ip> FindFrameSource<T, L, V, Ip> for PathResponseFrames
+/// The frames are written from the link path's [`PendingPathResponse`] in
+/// the lineage, with a PING when its role is `Active`.
+impl<T: ConnectionChoices, L, V, Ip, Ir> FindFrameSource<T, L, V, (Ip, Ir)> for PathResponseFrames
 where
-    V: GetAt<PendingPathResponse, Ip>,
+    V: GetAt<PendingPathResponse, Ip> + GetAt<LinkPathRole<InstantOf<T>>, Ir>,
 {
     type Source<'l, 'r>
-        = &'l mut PendingPathResponse
+        = PathResponseSource<'l>
     where
         V: 'l,
         'r: 'l;
 
     fn find<'l, 'r>(lineage: &'l mut Lineage<'r, V>, _: InstantOf<T>) -> Self::Source<'l, 'r> {
+        let ping = *lineage.get::<LinkPathRole<InstantOf<T>>, Ir>() == LinkPathRole::Active;
         // found to write the response, which then waits no more
         lineage.publish(Happened::<PathResponsePendingChanged>::new());
-        ComponentMut::into_mut(lineage.get_mut::<PendingPathResponse, Ip>())
+        PathResponseSource {
+            pending: ComponentMut::into_mut(lineage.get_mut::<PendingPathResponse, Ip>()),
+            ping,
+        }
     }
 }
 

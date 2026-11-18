@@ -1349,19 +1349,16 @@ fn a_link_whose_limit_falls_below_1200_bytes_ends_the_connection_with_no_viable_
 }
 
 /// A client whose datagrams come from a new port after the handshake is
-/// followed before its new address is validated, as connection migration
-/// stands before path validation: the server's binding takes a new link
-/// for that address; the server's connection builds a candidate link path
-/// for the client's request, which is a non-probing packet, and switches to
-/// it at once, the recovery layer moving with it as only the port changed
-/// (RFC 9000 §9.3, §9.4). What the server sends goes to the new address,
-/// held by the anti-amplification limit, which nothing validates yet: no
-/// PATH_CHALLENGE is sent. The server's application does not answer here,
-/// and both sides end at their idle timeout, neither for a protocol error.
-///
-/// Once path validation is in, this test asserts that the migration
-/// succeeds: the PATH_CHALLENGE on the new path is answered and the answer
-/// arrives over the new address.
+/// followed before its new address is validated: the server's binding takes
+/// a new link for that address; the server's connection builds a candidate
+/// link path for the client's request, which is a non-probing packet, and
+/// switches to it at once, the recovery layer moving with it as only the
+/// port changed (RFC 9000 §9.3, §9.4). The server validates both paths
+/// with PATH_CHALLENGE (§9.3, §9.3.3): the one to the old address is
+/// dropped, as the client is not there any more; everything else the
+/// server sends goes to the new address. The server's application does not
+/// answer here, and both sides end at their idle timeout, neither for a
+/// protocol error.
 #[test]
 fn a_client_rebound_after_the_handshake_is_followed_before_its_address_is_validated() {
     let rebound = SocketAddr::from(([10, 0, 0, 2], 50_001));
@@ -1403,11 +1400,14 @@ fn a_client_rebound_after_the_handshake_is_followed_before_its_address_is_valida
             let down = after(&to_client, before.1);
             assert!(!up.is_empty() && up.iter().all(|fate| fate.dropped.is_none()));
             assert!(
-                !down.is_empty() && down.iter().all(|fate| fate.dropped.is_none()),
-                "the server follows the client to its new address"
+                down.iter().any(|fate| fate.dropped.is_none())
+                    && down
+                        .iter()
+                        .all(|fate| matches!(fate.dropped, None | Some(DropCause::NoDestination))),
+                "the server follows the client to its new address: {down:?}"
             );
             // the server's connection takes the packets of the new link,
-            // and validates nothing yet
+            // and challenges the paths
             let server = qlog_events(&qlog, "server");
             assert!(
                 !server
@@ -1417,9 +1417,9 @@ fn a_client_rebound_after_the_handshake_is_followed_before_its_address_is_valida
                 "the server takes the packets of the new link: {server:?}"
             );
             assert!(
-                !server.iter().any(|event| event.name == "quic:packet_sent"
+                server.iter().any(|event| event.name == "quic:packet_sent"
                     && event.has(r#""frame_type":"path_challenge""#)),
-                "no path validation yet"
+                "the server validates the new path"
             );
             (to_server, to_client)
         })

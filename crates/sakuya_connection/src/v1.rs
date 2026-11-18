@@ -78,6 +78,7 @@ pub mod migration;
 pub mod packet_writer;
 pub mod parameters;
 pub mod path_response;
+pub mod path_validation;
 pub mod pmtu_probe;
 pub mod pto;
 pub mod receive;
@@ -1012,6 +1013,7 @@ where
         PendingPmtuProbe,
         migration::rules::LinkPathMigrationOf<T>,
         connection_ids::LocalConnectionIdUsedByPeer,
+        path_validation::PathValidationOf<T>,
     ];
     type Calls = HList![LinkPathSendingKind];
 }

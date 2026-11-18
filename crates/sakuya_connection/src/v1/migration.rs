@@ -49,6 +49,13 @@
 //!   recovery layer moved away, and `Settling` otherwise, for as long as
 //!   the policy says; while it is the fallback, the path validation of the
 //!   new active link path holds it until that validation gives up.
+//! - A switch to a link path whose address is not validated validates both
+//!   link paths: a PATH_CHALLENGE becomes due on the new active one and on
+//!   the one it took over from (RFC 9000 §9.3, §9.3.3), and so it does on
+//!   the active one when the switch waits for validation. A candidate
+//!   challenges its address as soon as it is built (§9.6.3). What path
+//!   validation concludes comes back to these rules
+//!   ([`path_validation`](super::path_validation)).
 //!
 //! The policy's own events are only these calls: what follows from them,
 //! validation, reverting and switching back, the fixed part does, and the
