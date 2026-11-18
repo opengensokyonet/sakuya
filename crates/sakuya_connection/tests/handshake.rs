@@ -869,12 +869,27 @@ mod watch {
     /// another role and back, which the tests' link cannot make happen.
     pub fn set_client_role(role: RoleAt) {
         CLIENT_ROLE.with(|next| next.set(Some(role)));
+        wake_client_setter();
     }
 
     thread_local! {
         /// Whether the client's connection panics at the start of its next
         /// poll.
         static CLIENT_PANICS: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+        /// The waker of the client's role setter, which runs only once it
+        /// is called.
+        static CLIENT_SETTER: core::cell::RefCell<Option<Waker>> =
+            const { core::cell::RefCell::new(None) };
+    }
+
+    /// Wake the client's role setter, so that it runs at the start of the
+    /// next poll.
+    fn wake_client_setter() {
+        CLIENT_SETTER.with(|waker| {
+            if let Some(waker) = waker.borrow().as_ref() {
+                waker.wake_by_ref();
+            }
+        });
     }
 
     /// Let the client's connection panic at the start of its next poll, in
@@ -882,6 +897,7 @@ mod watch {
     /// the driver, which the harness catches before it drops the driver.
     pub fn panic_client() {
         CLIENT_PANICS.with(|next| next.set(true));
+        wake_client_setter();
     }
 
     /// In the link path: gives the client's link path the role
@@ -911,8 +927,11 @@ mod watch {
             mut lineage: LineageOf<'v, T, L, layer::LinkPath>,
             _: &mut OtherNodes<'v, T, L, B>,
             now: Duration,
-            _: &Waker,
+            waker: &Waker,
         ) -> Option<RequestOf<T, L>> {
+            if <T::Side as Side>::ROLE == Role::Client {
+                CLIENT_SETTER.with(|setter| *setter.borrow_mut() = Some(waker.clone()));
+            }
             if <T::Side as Side>::ROLE == Role::Client && CLIENT_PANICS.with(core::cell::Cell::take)
             {
                 panic!("the test's panic in the client's poll");

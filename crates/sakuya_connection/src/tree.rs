@@ -39,6 +39,10 @@ impl WakeMarks {
         self.queued.store(false, Ordering::SeqCst);
         self.bits.swap(0, Ordering::SeqCst)
     }
+    /// Take the marks of `mask` only, and leave the node queued as it is.
+    pub(crate) fn take_some(&self, mask: u64) -> u64 {
+        self.bits.fetch_and(!mask, Ordering::SeqCst) & mask
+    }
 }
 
 /// Where a node is: its layer, its slot, and for a link path or a recovery

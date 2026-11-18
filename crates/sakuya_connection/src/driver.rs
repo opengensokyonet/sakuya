@@ -2,9 +2,11 @@
 //!
 //! Each call has a waker that only marks the call's position in its node's
 //! head; a node enters the ready queue at its first mark, and the outer
-//! waker is called at the first wake since the poll began. A poll first
-//! runs the actions of the data components that act before the calls, then
-//! goes once through the nodes queued until then, polls each marked call,
+//! waker is called at the first wake since the poll began. A data component
+//! that acts before the calls has a waker of its own, which marks its
+//! position the same way. A poll first runs the actions before the calls
+//! whose positions are marked, then goes once through the nodes queued
+//! until then, polls each marked call,
 //! and after each lend applies the request it handed over and rereads what
 //! reads the components it took mutably, round after round; then it runs
 //! the expiries that are due, and sleeps until the earliest deadline.
@@ -51,15 +53,6 @@ struct Shared {
 }
 
 impl Shared {
-    /// Call the outer waker if it was not called since this poll began.
-    fn notify(&self) {
-        if self.closed.load(Ordering::SeqCst) {
-            return;
-        }
-        if !self.notified.swap(true, Ordering::SeqCst) {
-            self.outer.wake();
-        }
-    }
     fn new() -> Arc<Self> {
         Arc::new(Self {
             ready: Mutex::new(VecDeque::new()),
@@ -89,7 +82,8 @@ impl Shared {
     }
 }
 
-/// The waker of one call: it marks the call's position in its node.
+/// The waker of one call, or of a data component that acts before the
+/// calls: it marks the position in its node.
 struct PositionWaker {
     shared: Arc<Shared>,
     marks: Arc<WakeMarks>,
@@ -106,22 +100,6 @@ impl Wake for PositionWaker {
     }
 }
 
-/// The waker the actions before the calls are given: it marks no call and
-/// only calls the outer waker, since those actions run at the start of
-/// every poll.
-struct PollWaker {
-    shared: Arc<Shared>,
-}
-
-impl Wake for PollWaker {
-    fn wake(self: Arc<Self>) {
-        self.wake_by_ref();
-    }
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.shared.notify();
-    }
-}
-
 /// The driver's tables, made once from the list of parts.
 struct Tables {
     /// How many data components a node of each layer has.
@@ -132,6 +110,8 @@ struct Tables {
     readers: [Vec<Vec<(usize, usize)>>; 6],
     /// For each layer: the data positions that act before the calls.
     before_calls: [Vec<usize>; 6],
+    /// For each layer: those positions as marks.
+    before_calls_marks: [u64; 6],
     /// An upper bound of the rounds of rereads.
     positions: usize,
 }
@@ -180,6 +160,13 @@ impl Tables {
                     .enumerate()
                     .filter_map(|(position, &acts)| acts.then_some(position))
                     .collect()
+            }),
+            before_calls_marks: core::array::from_fn(|l| {
+                acts_before_calls[l]
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &acts)| acts)
+                    .fold(0, |marks, (position, _)| marks | 1 << position)
             }),
             positions: (0..6).map(|l| types[l].len() + call_reads[l].len()).sum(),
         }
@@ -270,8 +257,6 @@ where
 {
     tree: ConnectionTree<T, L, Bundle<T, L, Q>>,
     shared: Arc<Shared>,
-    /// What the actions before the calls are given to wake the future.
-    poll_waker: Waker,
     clock: T::Clock,
     sleep: Option<Sleeping<T>>,
     timers: BTreeSet<(InstantOf<T>, NodeAddr, usize)>,
@@ -487,9 +472,6 @@ where
         let tables = Tables::new(types, data_reads, call_reads, acts_before_calls);
         let now = clock.now();
         let shared = Shared::new();
-        let poll_waker = Waker::from(Arc::new(PollWaker {
-            shared: shared.clone(),
-        }));
         let mut driver = Self {
             tree: ConnectionTree {
                 connection: None,
@@ -497,7 +479,6 @@ where
                 logical_paths: Vec::new(),
             },
             shared,
-            poll_waker,
             clock,
             sleep: None,
             timers: BTreeSet::new(),
@@ -773,24 +754,29 @@ where
         by_layer!(addr, go)
     }
 
+    /// The action before the calls of the `at`-th position of the layer
+    /// that acts before them, at `position`.
     fn before_calls_action(
         &mut self,
         addr: NodeAddr,
+        at: usize,
         position: usize,
         now: InstantOf<T>,
     ) -> Option<RequestOf<T, L>> {
         let r = self.tables.data[addr.layer] - 1 - position;
+        // the waker of an action before the calls follows the calls' own
+        let waker = self.tables.calls[addr.layer] + at;
         let Self {
             tree,
             lineage_taken,
             nodes_taken,
-            poll_waker,
             ..
         } = self;
         macro_rules! go {
             ($lend:ident($($a:expr),*), $lv:ident, $h:ty, $c:ident) => {{
                 let mut lent = tree.$lend($($a,)* Records { lineage: lineage_taken, nodes: nodes_taken, now });
-                <NodeData<T, L, $lv> as NodePositions<T, L, $lv, $h>>::before_calls_from_end(lent.lineage, &mut lent.others, r, now, poll_waker)
+                let waker = &lent.wakers[waker];
+                <NodeData<T, L, $lv> as NodePositions<T, L, $lv, $h>>::before_calls_from_end(lent.lineage, &mut lent.others, r, now, waker)
             }};
         }
         by_layer!(addr, go)
@@ -848,15 +834,20 @@ where
 
     // ---- nodes come and go ----
 
+    /// The wakers of a node: one for each call, then one for each data
+    /// position that acts before the calls.
     fn wakers(&self, addr: NodeAddr, marks: &Arc<WakeMarks>) -> Vec<Waker> {
         let data = self.tables.data[addr.layer];
-        (0..self.tables.calls[addr.layer])
-            .map(|index| {
+        let calls = (0..self.tables.calls[addr.layer]).map(|index| data + index);
+        let actors = self.tables.before_calls[addr.layer].iter().copied();
+        calls
+            .chain(actors)
+            .map(|position| {
                 Waker::from(Arc::new(PositionWaker {
                     shared: self.shared.clone(),
                     marks: marks.clone(),
                     addr,
-                    position: data + index,
+                    position,
                 }))
             })
             .collect()
@@ -884,14 +875,15 @@ where
         }
     }
 
-    /// A new node: its calls start woken, its deadlines are read, and every
-    /// one of its components counts as changed.
+    /// A new node: its calls and its actions before the calls start woken,
+    /// its deadlines are read, and every one of its components counts as
+    /// changed.
     fn started(&mut self, addr: NodeAddr, now: InstantOf<T>, changes: &mut Changes) {
         let (data, calls) = (self.tables.data[addr.layer], self.tables.calls[addr.layer]);
-        if calls > 0 {
+        let woken = ((1u64 << calls) - 1) << data | self.tables.before_calls_marks[addr.layer];
+        if woken != 0 {
             let marks = self.marks_at(addr).expect("a node just made");
-            self.shared
-                .wake(&marks, addr, ((1u64 << calls) - 1) << data);
+            self.shared.wake(&marks, addr, woken);
         }
         for position in 0..data {
             self.read_deadline(addr, position, now);
@@ -1600,24 +1592,32 @@ where
         self.settle(todo, now);
     }
 
-    /// Run the actions before the calls: for each layer with components
-    /// that act before them, the nodes above a node first, each node's in
-    /// order, each followed by what follows a lend.
+    /// Run the actions before the calls whose positions are marked: for
+    /// each layer with components that act before them, the nodes above a
+    /// node first, each node's in order, each followed by what follows a
+    /// lend.
     fn run_before_calls(&mut self, now: InstantOf<T>) {
         for layer in 0..6 {
-            if self.tables.before_calls[layer].is_empty() {
+            let mask = self.tables.before_calls_marks[layer];
+            if mask == 0 {
                 continue;
             }
             // the actions can make and end nodes: go from one node to the
             // next one alive after it
             let mut next = self.live().find(|addr| addr.layer == layer);
             while let Some(addr) = next {
+                let marks = self.marks_at(addr).expect("alive");
+                // the node stays queued for its calls, if it is
+                let woken = marks.take_some(mask);
                 for at in 0..self.tables.before_calls[layer].len() {
                     if self.ended || !self.alive(addr) {
                         break;
                     }
                     let position = self.tables.before_calls[layer][at];
-                    let request = self.before_calls_action(addr, position, now);
+                    if woken & 1 << position == 0 {
+                        continue;
+                    }
+                    let request = self.before_calls_action(addr, at, position, now);
                     self.after_lend(addr, None, request, now);
                 }
                 if self.ended {
@@ -1664,6 +1664,13 @@ where
                 continue;
             };
             let mut bits = marks.take();
+            // an action before the calls woken since they ran runs at the
+            // start of the next poll
+            let actors = bits & self.tables.before_calls_marks[addr.layer];
+            if actors != 0 {
+                self.shared.wake(&marks, addr, actors);
+                bits &= !actors;
+            }
             while bits != 0 {
                 let position = bits.trailing_zeros() as usize;
                 bits &= bits - 1;

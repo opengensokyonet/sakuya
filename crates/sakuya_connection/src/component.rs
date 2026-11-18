@@ -7,8 +7,10 @@
 //! states which component types it reads; after a lend took one of them
 //! mutably, the driver reads its deadline again and runs its reread. A
 //! component that takes in what reaches the connection from outside its
-//! tree states that it acts before the calls: the driver runs that action
-//! at the start of every poll, before any call.
+//! tree states that it acts before the calls: it is given a waker of its
+//! own, and the driver runs that action at the start of a poll, before any
+//! call, once the waker was called, and at the first poll after its node
+//! was built.
 use core::any::TypeId;
 use core::ops::Add;
 use core::task::Waker;
@@ -85,9 +87,8 @@ where
 {
     /// The component types its deadline and its reread read.
     fn reads(_reads: &mut ReadSet) {}
-    /// Whether the driver runs its [`before_calls`](Self::before_calls) at
-    /// the start of every poll. By default not, and a component that does
-    /// not costs a poll nothing.
+    /// Whether it has a [`before_calls`](Self::before_calls) the driver runs
+    /// at the start of a poll once it was woken. By default not.
     const ACTS_BEFORE_CALLS: bool = false;
     /// Its earliest deadline, read from the lent node and the nodes above.
     fn deadline<'v>(_lineage: &LineageOf<'v, T, L, Lv>) -> Option<InstantOf<T>> {
@@ -120,14 +121,15 @@ where
     /// A poll of the connection begins: take in what reached the
     /// connection from outside its tree.
     ///
-    /// The driver calls it at the start of every poll, before any call and
-    /// any expiry, for every node of the layer, the nodes above a node
-    /// first, when [`ACTS_BEFORE_CALLS`](Self::ACTS_BEFORE_CALLS) is set.
-    /// What it takes mutably is reread and the request it returns applied
-    /// as after a lend, before the calls are polled. `waker` wakes the
-    /// connection's future: the component leaves it with whatever outside
-    /// the tree it waits on, so that the next poll begins once something
-    /// came. By default nothing.
+    /// When [`ACTS_BEFORE_CALLS`](Self::ACTS_BEFORE_CALLS) is set, the
+    /// driver calls it at the start of the first poll after the node was
+    /// built and of every poll after `waker` was called, before any call
+    /// and any expiry, the nodes above a node first. What it takes mutably
+    /// is reread and the request it returns applied as after a lend, before
+    /// the calls are polled. `waker` is the component's own: it leaves it
+    /// with whatever outside the tree it waits on, so that it runs again
+    /// once something came; the same waker comes every time. By default
+    /// nothing.
     fn before_calls<'v, B: CallBundle>(
         _lineage: LineageOf<'v, T, L, Lv>,
         _others: &mut OtherNodes<'v, T, L, B>,
