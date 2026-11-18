@@ -271,3 +271,46 @@ fn a_new_logical_link_gets_the_conclusion() {
     assert_eq!(new.datagram_size_conclusion(), 1452);
     assert_eq!(conclusion(&policy), 1452);
 }
+
+#[test]
+fn the_methods_report_whether_the_queries_changed() {
+    let link = SharingLink::new();
+    let mut policy = policy();
+    assert!(PmtuPolicy::<SharingLink>::on_datagram_start(
+        &mut policy,
+        &link,
+        Some(1452)
+    ));
+    assert!(
+        !PmtuPolicy::<SharingLink>::on_datagram_start(&mut policy, &link, Some(1452)),
+        "nothing differs the second time"
+    );
+    assert_eq!(probe(&policy), Some(1326));
+    assert!(
+        !PmtuPolicy::<SharingLink>::on_probe_failed(
+            &mut policy,
+            1326,
+            PmtuProbeFailure::Unsent,
+            secs(1)
+        ),
+        "an unsent probe says nothing"
+    );
+    assert!(PmtuPolicy::<SharingLink>::on_probe_acked(
+        &mut policy,
+        1326,
+        secs(2)
+    ));
+    assert!(
+        !PmtuPolicy::<SharingLink>::on_packets(
+            &mut policy,
+            [1200].into_iter(),
+            core::iter::empty(),
+            secs(3)
+        ),
+        "a small acknowledged packet changes nothing"
+    );
+    assert!(
+        !PmtuPolicy::<SharingLink>::on_deadline(&mut policy, secs(4)),
+        "no deadline was due"
+    );
+}

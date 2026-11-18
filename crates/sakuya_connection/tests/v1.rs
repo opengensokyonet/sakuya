@@ -557,8 +557,8 @@ mod spy {
         fn allowance(&self) -> usize {
             self.0.allowance()
         }
-        fn refill(&mut self, at: Duration, input: PacingInput) {
-            self.0.refill(at, input);
+        fn refill(&mut self, at: Duration, input: PacingInput) -> bool {
+            self.0.refill(at, input)
         }
         fn on_charged(&mut self, bytes: usize) {
             self.0.on_charged(bytes);

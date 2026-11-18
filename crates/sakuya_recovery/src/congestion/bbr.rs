@@ -1597,8 +1597,10 @@ impl<I: Ord + Copy + Add<Duration, Output = I> + Sub<Output = Duration>> Pacer<I
         self.bucket.tokens
     }
 
-    fn refill(&mut self, at: I, input: PacingInput) {
+    fn refill(&mut self, at: I, input: PacingInput) -> bool {
+        let before = (self.bucket.tokens, self.next_release());
         self.earn(at, input.max_datagram_size);
+        before != (self.bucket.tokens, self.next_release())
     }
 
     fn on_charged(&mut self, bytes: usize) {

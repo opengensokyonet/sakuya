@@ -144,6 +144,12 @@ impl RetiredByPeerViolationError {
 /// to be sent, which [`waiting_disclosures`](Self::waiting_disclosures)
 /// tells; writing a frame takes it out of waiting, and a frame declared lost
 /// waits again while the connection ID is neither acknowledged nor retired.
+///
+/// The methods that change the strategy return whether the answer of
+/// [`waiting_disclosures`](Self::waiting_disclosures) or
+/// [`next_deadline`](Self::next_deadline) may have changed. An
+/// implementation may return `true` when neither did, but never `false`
+/// when one did.
 pub trait LocalConnectionIdStrategy<Id, I, R> {
     /// The strategy of a new logical path whose handshake connection ID,
     /// sequence number 0, is `first`, with its registration, which the
@@ -158,12 +164,12 @@ pub trait LocalConnectionIdStrategy<Id, I, R> {
     /// start, when the strategy is made, and this is called with the
     /// peer's `active_connection_id_limit` once 1-RTT packets can be sent
     /// (RFC 9000 §5.1.1, §18.2). It only grows.
-    fn on_issuable<C>(&mut self, issuer: &mut C, peer_limit: u64)
+    fn on_issuable<C>(&mut self, issuer: &mut C, peer_limit: u64) -> bool
     where
         C: ConnectionIdIssuer<Registration = R>;
 
     /// The handshake is confirmed.
-    fn on_handshake_confirmed<C>(&mut self, issuer: &mut C)
+    fn on_handshake_confirmed<C>(&mut self, issuer: &mut C) -> bool
     where
         C: ConnectionIdIssuer<Registration = R>;
 
@@ -181,16 +187,17 @@ pub trait LocalConnectionIdStrategy<Id, I, R> {
         packet_destination: &ConnectionId,
         now: I,
         pto: Duration,
-    ) -> Result<(), RetiredByPeerViolationError>
+    ) -> Result<bool, RetiredByPeerViolationError>
     where
         C: ConnectionIdIssuer<Registration = R>;
 
     /// The peer switched to `id` on `link_path`, the link path's first
     /// packet included.
-    fn on_used_by_peer<C>(&mut self, _issuer: &mut C, _id: &ConnectionId, _link_path: &Id)
+    fn on_used_by_peer<C>(&mut self, _issuer: &mut C, _id: &ConnectionId, _link_path: &Id) -> bool
     where
         C: ConnectionIdIssuer<Registration = R>,
     {
+        false
     }
 
     /// The next instant the strategy acts at by itself.
@@ -199,10 +206,11 @@ pub trait LocalConnectionIdStrategy<Id, I, R> {
     }
 
     /// The deadline came at `now`: act on everything due by then.
-    fn on_deadline<C>(&mut self, _issuer: &mut C, _now: I)
+    fn on_deadline<C>(&mut self, _issuer: &mut C, _now: I) -> bool
     where
         C: ConnectionIdIssuer<Registration = R>,
     {
+        false
     }
 
     /// The connection IDs whose NEW_CONNECTION_ID frame waits to be sent
@@ -275,21 +283,23 @@ impl<R, I: Ord + Copy + Add<Duration, Output = I>> SequenceMapLocalConnectionIdS
             .is_some_and(|issued| issued.contains_key(&sequence))
     }
 
-    fn top_up<C>(&mut self, issuer: &mut C)
+    /// Issues up to the target; whether it issued any.
+    fn top_up<C>(&mut self, issuer: &mut C) -> bool
     where
         C: ConnectionIdIssuer<Registration = R>,
     {
         if !self.confirmed {
-            return;
+            return false;
         }
         let target = self.peer_limit.min(Self::DEFAULT_ACTIVE_LIMIT);
         let Some(issued) = self.issued.as_mut() else {
-            return;
+            return false;
         };
         let mut active = issued
             .values()
             .filter(|each| each.deregister_at.is_none())
             .count() as u64;
+        let before = active;
         while active < target {
             let new = issuer.issue();
             let sequence = self.next_sequence;
@@ -306,6 +316,7 @@ impl<R, I: Ord + Copy + Add<Duration, Output = I>> SequenceMapLocalConnectionIdS
             );
             active += 1;
         }
+        active != before
     }
 }
 
@@ -336,20 +347,20 @@ where
         }
     }
 
-    fn on_issuable<C>(&mut self, issuer: &mut C, peer_limit: u64)
+    fn on_issuable<C>(&mut self, issuer: &mut C, peer_limit: u64) -> bool
     where
         C: ConnectionIdIssuer<Registration = R>,
     {
         self.peer_limit = self.peer_limit.max(peer_limit);
-        self.top_up(issuer);
+        self.top_up(issuer)
     }
 
-    fn on_handshake_confirmed<C>(&mut self, issuer: &mut C)
+    fn on_handshake_confirmed<C>(&mut self, issuer: &mut C) -> bool
     where
         C: ConnectionIdIssuer<Registration = R>,
     {
         self.confirmed = true;
-        self.top_up(issuer);
+        self.top_up(issuer)
     }
 
     fn on_retired_by_peer<C>(
@@ -359,7 +370,7 @@ where
         packet_destination: &ConnectionId,
         now: I,
         pto: Duration,
-    ) -> Result<(), RetiredByPeerViolationError>
+    ) -> Result<bool, RetiredByPeerViolationError>
     where
         C: ConnectionIdIssuer<Registration = R>,
     {
@@ -372,7 +383,7 @@ where
         // a sequence number no longer in the map was retired before and
         // its registration dropped: a repeated frame
         let Some(entry) = issued.get_mut(&sequence) else {
-            return Ok(());
+            return Ok(false);
         };
         if entry.id.as_bytes() == packet_destination.as_bytes() {
             return Err(RetiredByPeerViolationError::RetiresItsPacketsDestination { sequence });
@@ -380,8 +391,9 @@ where
         if entry.deregister_at.is_none() {
             entry.deregister_at = Some(now + pto.saturating_mul(3));
             self.top_up(issuer);
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     fn next_deadline(&self) -> Option<I> {
@@ -392,13 +404,16 @@ where
             .min()
     }
 
-    fn on_deadline<C>(&mut self, _: &mut C, now: I)
+    fn on_deadline<C>(&mut self, _: &mut C, now: I) -> bool
     where
         C: ConnectionIdIssuer<Registration = R>,
     {
-        if let Some(issued) = self.issued.as_mut() {
-            issued.retain(|_, each| each.deregister_at.is_none_or(|at| at > now));
-        }
+        let Some(issued) = self.issued.as_mut() else {
+            return false;
+        };
+        let before = issued.len();
+        issued.retain(|_, each| each.deregister_at.is_none_or(|at| at > now));
+        issued.len() != before
     }
 
     /// A connection ID the peer retired is not disclosed again.

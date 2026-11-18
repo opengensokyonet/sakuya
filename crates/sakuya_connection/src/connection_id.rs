@@ -163,6 +163,12 @@ impl From<&NewConnectionIdFrame> for NewConnectionId {
 /// wait again with the same sequence number while the retirement waits for
 /// acknowledgment ([RFC 9000 §13.3]).
 ///
+/// The methods that change the strategy return whether the answer of
+/// [`offer`](Self::offer), [`waiting_retirements`](Self::waiting_retirements)
+/// or [`next_deadline`](Self::next_deadline) may have changed. An
+/// implementation may return `true` when none did, but never `false` when
+/// one did.
+///
 /// The [module documentation](self) lists the contract every implementation
 /// keeps.
 ///
@@ -195,7 +201,7 @@ pub trait DestinationConnectionIdStrategy<Id, I, R: ResetTokenRegistrar>:
     ///
     /// [RFC 9000 §5.1.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-5.1.1
     /// [RFC 9000 §7.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-7.2
-    fn on_handshake_connection_id(&mut self, id: ConnectionId);
+    fn on_handshake_connection_id(&mut self, id: ConnectionId) -> bool;
 
     /// The stateless reset token of the connection ID numbered 0 is
     /// `token`: the `stateless_reset_token` of the server's transport
@@ -209,7 +215,9 @@ pub trait DestinationConnectionIdStrategy<Id, I, R: ResetTokenRegistrar>:
     ///
     /// [RFC 9000 §10.3.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-10.3.1
     /// [RFC 9000 §18.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-18.2
-    fn on_handshake_reset_token(&mut self, _token: StatelessResetToken) {}
+    fn on_handshake_reset_token(&mut self, _token: StatelessResetToken) -> bool {
+        false
+    }
 
     /// The connection IDs this side is willing to send with on
     /// `link_path` at this moment, most preferred first.
@@ -229,7 +237,13 @@ pub trait DestinationConnectionIdStrategy<Id, I, R: ResetTokenRegistrar>:
     ///
     /// [RFC 9000 §9.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-9.5
     /// [RFC 9000 §10.3.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-10.3.1
-    fn on_used(&mut self, registrar: &mut R, sequence: u64, link_path: &Id, datagram_len: usize);
+    fn on_used(
+        &mut self,
+        registrar: &mut R,
+        sequence: u64,
+        link_path: &Id,
+        datagram_len: usize,
+    ) -> bool;
 
     /// The peer issued `issued`, in a NEW_CONNECTION_ID frame or, with
     /// multipath, a PATH_NEW_CONNECTION_ID frame for this logical path. The
@@ -244,7 +258,7 @@ pub trait DestinationConnectionIdStrategy<Id, I, R: ResetTokenRegistrar>:
     fn on_new_connection_id(
         &mut self,
         issued: NewConnectionId,
-    ) -> Result<(), NewConnectionIdViolationError>;
+    ) -> Result<bool, NewConnectionIdViolationError>;
 
     /// `link_path` was added. `peer_switched_local_id` tells whether the
     /// peer, on it, uses another of this side's connection IDs than on the
@@ -252,11 +266,11 @@ pub trait DestinationConnectionIdStrategy<Id, I, R: ResetTokenRegistrar>:
     /// side keep its current connection ID towards the new remote address.
     ///
     /// [RFC 9000 §9.5]: https://www.rfc-editor.org/rfc/rfc9000.html#section-9.5
-    fn on_link_path_added(&mut self, link_path: &Id, peer_switched_local_id: bool);
+    fn on_link_path_added(&mut self, link_path: &Id, peer_switched_local_id: bool) -> bool;
 
     /// `link_path` ended: its bindings and the registrations kept for it
     /// go. The frames of the connection IDs it retires wait to be sent.
-    fn on_link_path_ended(&mut self, link_path: &Id);
+    fn on_link_path_ended(&mut self, link_path: &Id) -> bool;
 
     /// The earliest instant the strategy wants [`on_deadline`](Self::on_deadline)
     /// called at; `None` when it has nothing to do in time.
@@ -266,7 +280,9 @@ pub trait DestinationConnectionIdStrategy<Id, I, R: ResetTokenRegistrar>:
 
     /// Does everything due at or before `now`. The frames of the connection
     /// IDs it retires wait to be sent.
-    fn on_deadline(&mut self, _now: I) {}
+    fn on_deadline(&mut self, _now: I) -> bool {
+        false
+    }
 
     /// The retirements whose RETIRE_CONNECTION_ID frame waits to be sent
     /// now, each once: those retired and not

@@ -119,7 +119,9 @@ impl Pacer<u64> for Charged {
     fn allowance(&self) -> usize {
         usize::MAX
     }
-    fn refill(&mut self, _: u64, _: PacingInput) {}
+    fn refill(&mut self, _: u64, _: PacingInput) -> bool {
+        false
+    }
     fn on_charged(&mut self, bytes: usize) {
         self.0 += bytes;
     }

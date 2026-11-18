@@ -681,3 +681,19 @@ fn a_duplicate_initial_crypto_is_answered_once() {
     ));
     assert!(!bbr.wants_recovery_send());
 }
+
+#[test]
+fn the_pacer_refill_reports_whether_the_bucket_changed() {
+    let mut bbr = bbr();
+    assert!(
+        bbr.refill(Duration::ZERO, input()),
+        "the first refill fills it"
+    );
+    assert!(
+        !bbr.refill(micros(10), input()),
+        "full, and nothing to wait for"
+    );
+    bbr.on_charged(66480);
+    assert!(bbr.refill(micros(20), input()), "332 bytes earned");
+    assert!(!bbr.refill(micros(20), input()), "no time passed");
+}

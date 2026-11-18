@@ -116,6 +116,7 @@ fn receive(
         strategy,
         NewConnectionId::from(&frame),
     )
+    .map(|_| ())
 }
 
 fn offer(strategy: &Strategy, link_path: u8) -> Vec<u64> {
@@ -623,4 +624,63 @@ fn a_new_handshake_connection_id_replaces_the_one_numbered_0() {
             .collect();
     assert_eq!(offered, [(0, cid(9))]);
     assert_eq!(published(&mut strategy), NONE);
+}
+
+#[test]
+fn the_events_report_whether_the_queries_changed() {
+    let mut registrar = Registrar::default();
+    let mut strategy = strategy(4, 8);
+    assert_eq!(
+        DestinationConnectionIdStrategy::<u8, Instant, Registrar>::on_new_connection_id(
+            &mut strategy,
+            NewConnectionId::from(&frame(1, 0))
+        ),
+        Ok(true)
+    );
+    assert_eq!(
+        DestinationConnectionIdStrategy::<u8, Instant, Registrar>::on_new_connection_id(
+            &mut strategy,
+            NewConnectionId::from(&frame(1, 0))
+        ),
+        Ok(false),
+        "a repeated frame"
+    );
+    assert!(
+        DestinationConnectionIdStrategy::<u8, Instant, Registrar>::on_used(
+            &mut strategy,
+            &mut registrar,
+            1,
+            &1,
+            1200
+        )
+    );
+    assert!(
+        !DestinationConnectionIdStrategy::<u8, Instant, Registrar>::on_used(
+            &mut strategy,
+            &mut registrar,
+            1,
+            &1,
+            1200
+        ),
+        "already bound"
+    );
+    assert!(
+        DestinationConnectionIdStrategy::<u8, Instant, Registrar>::on_link_path_ended(
+            &mut strategy,
+            &1
+        )
+    );
+    assert!(
+        !DestinationConnectionIdStrategy::<u8, Instant, Registrar>::on_link_path_ended(
+            &mut strategy,
+            &1
+        ),
+        "nothing was bound to it"
+    );
+    assert!(
+        DestinationConnectionIdStrategy::<u8, Instant, Registrar>::on_handshake_connection_id(
+            &mut strategy,
+            cid(9)
+        )
+    );
 }

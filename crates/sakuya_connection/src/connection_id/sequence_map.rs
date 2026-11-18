@@ -319,7 +319,7 @@ where
         }
     }
 
-    fn on_handshake_connection_id(&mut self, id: ConnectionId) {
+    fn on_handshake_connection_id(&mut self, id: ConnectionId) -> bool {
         match (&self.issuance, id.is_empty()) {
             (Issuance::Sequenced(_), true) => self.issuance = Issuance::ZeroLength,
             (Issuance::ZeroLength, false) => {
@@ -336,17 +336,20 @@ where
                 bindings: Vec::new(),
             },
         );
+        true
     }
 
     /// A zero-length handshake connection ID has no token: it is ignored
-    /// then, as it is once the token is known.
-    fn on_handshake_reset_token(&mut self, token: StatelessResetToken) {
+    /// then, as it is once the token is known. The token is in none of the
+    /// queries, so this never reports a change.
+    fn on_handshake_reset_token(&mut self, token: StatelessResetToken) -> bool {
         if let Some(entry) = self.active.get_mut(&0)
             && !entry.id.is_empty()
             && entry.token.is_none()
         {
             entry.token = Some(token);
         }
+        false
     }
 
     fn offer(&self, link_path: &Id) -> Self::Offer<'_> {
@@ -358,9 +361,17 @@ where
         }
     }
 
-    fn on_used(&mut self, registrar: &mut R, sequence: u64, link_path: &Id, _datagram_len: usize) {
+    /// Only a new binding changes the offer; the registration of a binding
+    /// made before the token was known does not.
+    fn on_used(
+        &mut self,
+        registrar: &mut R,
+        sequence: u64,
+        link_path: &Id,
+        _datagram_len: usize,
+    ) -> bool {
         let Some(entry) = self.active.get_mut(&sequence) else {
-            return;
+            return false;
         };
         let token = entry.token;
         if let Some(binding) = entry
@@ -373,19 +384,20 @@ where
             if binding.registration.is_none() {
                 binding.registration = token.map(|token| registrar.register(token));
             }
-            return;
+            return false;
         }
         let registration = token.map(|token| registrar.register(token));
         entry.bindings.push(LinkPathBinding {
             link_path: link_path.clone(),
             registration,
         });
+        true
     }
 
     fn on_new_connection_id(
         &mut self,
         issued: NewConnectionId,
-    ) -> Result<(), NewConnectionIdViolationError> {
+    ) -> Result<bool, NewConnectionIdViolationError> {
         let sequence = issued.sequence();
         let retire_prior_to = issued.retire_prior_to();
         let id = issued.id().get();
@@ -396,7 +408,9 @@ where
         let repeated = check_against_active(&self.active, sequence, id, token)?;
 
         // Retire first, then add (RFC 9000 §5.1.2).
+        let mut changed = false;
         if retire_prior_to > retirements.retire_prior_to {
+            changed = true;
             let kept = self.active.split_off(&retire_prior_to);
             let passed = core::mem::replace(&mut self.active, kept);
             retirements.retire_prior_to = retire_prior_to;
@@ -409,7 +423,9 @@ where
             // Retire a connection ID that arrives below Retire Prior To
             // (RFC 9000 §19.15).
             retirements.retire(sequence);
+            changed = true;
         } else if !repeated && !retirements.is_retired(sequence) {
+            changed = true;
             self.active.insert(
                 sequence,
                 PeerConnectionId {
@@ -422,28 +438,37 @@ where
 
         ActiveConnectionIdLimitExceededError::check(self.active.len(), self.active_limit)?;
         RetirementLimitExceededError::check(retirements.unacknowledged.len(), retirements.limit)?;
-        Ok(())
+        Ok(changed)
     }
 
-    fn on_link_path_added(&mut self, _link_path: &Id, _peer_switched_local_id: bool) {}
+    fn on_link_path_added(&mut self, _link_path: &Id, _peer_switched_local_id: bool) -> bool {
+        false
+    }
 
-    fn on_link_path_ended(&mut self, link_path: &Id) {
+    /// With zero-length connection IDs the offer ignores the bindings, so
+    /// nothing changes; otherwise a change is a binding dropped.
+    fn on_link_path_ended(&mut self, link_path: &Id) -> bool {
         match &mut self.issuance {
             Issuance::ZeroLength => {
                 for entry in self.active.values_mut() {
                     entry.unbind(link_path);
                 }
+                false
             }
             Issuance::Sequenced(retirements) => {
                 // A connection ID no longer used on any link path is
                 // retired (RFC 9000 §5.1.2, SHOULD).
+                let mut changed = false;
                 self.active.retain(|&sequence, entry| {
-                    let unused = entry.unbind(link_path) && entry.bindings.is_empty();
+                    let unbound = entry.unbind(link_path);
+                    changed |= unbound;
+                    let unused = unbound && entry.bindings.is_empty();
                     if unused {
                         retirements.retire(sequence);
                     }
                     !unused
                 });
+                changed
             }
         }
     }

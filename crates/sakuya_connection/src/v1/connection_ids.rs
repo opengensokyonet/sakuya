@@ -655,6 +655,7 @@ where
             &mut ids.destination,
             issued,
         )
+        .map(|_| ())
     }
 
     fn link_path_ended(lineage: &mut Lineage<'_, V>, link_path: &LinkIdOf<T>) {
@@ -701,6 +702,7 @@ where
             now,
             pto,
         )
+        .map(|_| ())
     }
 
     fn deadline(lineage: &mut Lineage<'_, V>, now: InstantOf<T>) {

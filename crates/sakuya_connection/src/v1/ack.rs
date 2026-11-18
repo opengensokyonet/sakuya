@@ -424,7 +424,9 @@ where
                                 &mut *state,
                                 &mut access,
                                 &facts,
-                                |size| pmtu.on_probe_failed(size, PmtuProbeFailure::Lost, at),
+                                |size| {
+                                    pmtu.on_probe_failed(size, PmtuProbeFailure::Lost, at);
+                                },
                             )
                         });
                         if acked_in_flight(&acked, &mut *state) {

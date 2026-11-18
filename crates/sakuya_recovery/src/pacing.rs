@@ -37,8 +37,11 @@ pub trait Pacer<I> {
     /// The bytes that may go out, as of the latest refill.
     fn allowance(&self) -> usize;
 
-    /// Refills up to `at`.
-    fn refill(&mut self, at: I, input: PacingInput);
+    /// Refills up to `at`. It returns whether the answer of
+    /// [`allowance`](Pacer::allowance) or [`next_release`](Pacer::next_release)
+    /// may have changed; an implementation may return `true` when neither
+    /// did, but never `false` when one did.
+    fn refill(&mut self, at: I, input: PacingInput) -> bool;
 
     /// A datagram ended with `bytes` that count as in flight; probes are
     /// charged too.
@@ -54,8 +57,8 @@ impl<I, T: Pacer<I> + ?Sized> Pacer<I> for &mut T {
         (**self).allowance()
     }
 
-    fn refill(&mut self, at: I, input: PacingInput) {
-        (**self).refill(at, input);
+    fn refill(&mut self, at: I, input: PacingInput) -> bool {
+        (**self).refill(at, input)
     }
 
     fn on_charged(&mut self, bytes: usize) {
@@ -175,8 +178,8 @@ impl<I, C, P: Pacer<I>> Pacer<I> for PacedCongestionController<C, P> {
         self.pacer.allowance()
     }
 
-    fn refill(&mut self, at: I, input: PacingInput) {
-        self.pacer.refill(at, input);
+    fn refill(&mut self, at: I, input: PacingInput) -> bool {
+        self.pacer.refill(at, input)
     }
 
     fn on_charged(&mut self, bytes: usize) {
@@ -373,7 +376,22 @@ where
         self.tokens
     }
 
-    fn refill(&mut self, at: I, input: PacingInput) {
+    fn refill(&mut self, at: I, input: PacingInput) -> bool {
+        let before = (self.tokens, self.next_release());
+        self.refill_inner(at, input);
+        before != (self.tokens, self.next_release())
+    }
+
+    fn on_charged(&mut self, bytes: usize) {
+        self.tokens = self.tokens.saturating_sub(bytes);
+    }
+}
+
+impl<I> TokenBucketPacer<I>
+where
+    I: Ord + Copy + Add<Duration, Output = I> + Sub<Output = Duration>,
+{
+    fn refill_inner(&mut self, at: I, input: PacingInput) {
         let capacity = self.config.burst_limit(&input);
         let Some((refilled_at, _)) = self.refilled else {
             self.tokens = capacity;
@@ -396,10 +414,6 @@ where
         }
         self.tokens = self.tokens.saturating_add(earned).min(capacity);
         self.refilled = Some((at, input));
-    }
-
-    fn on_charged(&mut self, bytes: usize) {
-        self.tokens = self.tokens.saturating_sub(bytes);
     }
 }
 

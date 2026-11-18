@@ -335,7 +335,9 @@ where
                             &mut *state,
                             &mut access,
                             &facts,
-                            |size| pmtu.on_probe_failed(size, PmtuProbeFailure::Lost, now),
+                            |size| {
+                                pmtu.on_probe_failed(size, PmtuProbeFailure::Lost, now);
+                            },
                         );
                         batches.push((space, batch));
                     }

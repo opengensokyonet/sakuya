@@ -281,7 +281,7 @@ where
     S: DestinationConnectionIdStrategy<Id, I, RecordingResetTokenRegistrar>,
 {
     match strategy.on_new_connection_id(issued) {
-        Ok(()) => panic!("a violating NEW_CONNECTION_ID was accepted: {issued:?}"),
+        Ok(_) => panic!("a violating NEW_CONNECTION_ID was accepted: {issued:?}"),
         Err(error) => error.transport_error_code(),
     }
 }

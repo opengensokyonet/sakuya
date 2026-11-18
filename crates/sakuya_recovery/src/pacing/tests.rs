@@ -171,3 +171,23 @@ fn a_paced_controller_answers_for_both() {
     paced.on_charged(1200);
     assert_eq!(Pacer::<Duration>::allowance(&paced), 10800);
 }
+
+#[test]
+fn a_refill_reports_whether_the_bucket_changed() {
+    let mut pacer = pacer();
+    assert!(pacer.refill(ms(0), input()), "the first refill fills it");
+    assert!(
+        !pacer.refill(ms(5), input()),
+        "full, and nothing to wait for"
+    );
+    pacer.on_charged(12000);
+    assert!(pacer.refill(ms(6), input()), "375 bytes earned");
+    assert!(
+        !pacer.refill(ms(6), input()),
+        "no time passed: the same allowance and release"
+    );
+    assert!(
+        !pacer.refill(ms(1), input()),
+        "an earlier instant earns nothing"
+    );
+}

@@ -183,3 +183,32 @@ fn the_frame_carries_the_issued_values_and_retire_prior_to_zero() {
     assert_eq!(frame.sequence_number().get().get(), 3);
     assert_eq!(frame.retire_prior_to().get().get(), 0);
 }
+
+#[test]
+fn the_events_report_whether_the_queries_changed() {
+    let mut strategy = made(first());
+    let mut issuer = CountingIssuer::default();
+    assert!(
+        !local(&mut strategy).on_issuable(&mut issuer, 8),
+        "nothing is issued before the handshake is confirmed"
+    );
+    assert!(local(&mut strategy).on_handshake_confirmed(&mut issuer));
+    assert!(
+        !local(&mut strategy).on_issuable(&mut issuer, 8),
+        "already issued up to the limit"
+    );
+    let pto = Duration::from_millis(100);
+    let now = Duration::from_secs(1);
+    let other = ConnectionId::new(&[2; 8]).unwrap();
+    assert_eq!(
+        local(&mut strategy).on_retired_by_peer(&mut issuer, 1, &other, now, pto),
+        Ok(true)
+    );
+    assert_eq!(
+        local(&mut strategy).on_retired_by_peer(&mut issuer, 1, &other, now, pto),
+        Ok(false),
+        "a repeated frame"
+    );
+    assert!(!local(&mut strategy).on_deadline(&mut issuer, now));
+    assert!(local(&mut strategy).on_deadline(&mut issuer, now + pto * 3));
+}

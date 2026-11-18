@@ -18,6 +18,12 @@ use snafu::{Snafu, ensure};
 
 /// The datagram size probing policy of a link path.
 ///
+/// The methods that change the policy return whether the answer of
+/// [`conclusion`](Self::conclusion), [`probe_size`](Self::probe_size) or
+/// [`next_deadline`](Self::next_deadline) may have changed. An
+/// implementation may return `true` when none did, but never `false` when
+/// one did.
+///
 /// It sees the sizes and results of the packets of its link path, the
 /// link's limit and shared conclusion, and the peer's limit through the
 /// ceiling; it does not see the congestion state or other link paths.
@@ -31,7 +37,7 @@ pub trait PmtuPolicy<L: Link> {
     ///
     /// It is the only place the policy gets the link, so a conclusion
     /// reached on an ACK reaches the link at the next datagram.
-    fn on_datagram_start(&mut self, link: &L, ceiling: Option<usize>);
+    fn on_datagram_start(&mut self, link: &L, ceiling: Option<usize>) -> bool;
 
     /// The size of the datagram size probe to send, if any; read right
     /// after [`on_datagram_start`](Self::on_datagram_start), once the
@@ -41,10 +47,10 @@ pub trait PmtuPolicy<L: Link> {
 
     /// A probe of `size` bytes was acknowledged, also after it was declared
     /// lost.
-    fn on_probe_acked(&mut self, size: usize, now: L::Instant);
+    fn on_probe_acked(&mut self, size: usize, now: L::Instant) -> bool;
 
     /// A probe of `size` bytes was not acknowledged.
-    fn on_probe_failed(&mut self, size: usize, cause: PmtuProbeFailure, now: L::Instant);
+    fn on_probe_failed(&mut self, size: usize, cause: PmtuProbeFailure, now: L::Instant) -> bool;
 
     /// The sizes of the other packets an ACK acknowledged and declared
     /// lost, for detecting that the current size stopped getting through.
@@ -53,7 +59,7 @@ pub trait PmtuPolicy<L: Link> {
         acked: impl Iterator<Item = usize>,
         lost: impl Iterator<Item = usize>,
         now: L::Instant,
-    );
+    ) -> bool;
 
     /// The policy's own deadline. After [`on_deadline`](Self::on_deadline)
     /// at `now`, it is `None` or later than `now`.
@@ -62,8 +68,9 @@ pub trait PmtuPolicy<L: Link> {
     }
 
     /// The deadline passed.
-    fn on_deadline(&mut self, now: L::Instant) {
+    fn on_deadline(&mut self, now: L::Instant) -> bool {
         let _ = now;
+        false
     }
 }
 
@@ -300,7 +307,70 @@ where
         self.conclusion
     }
 
-    fn on_datagram_start(&mut self, link: &L, ceiling: Option<usize>) {
+    fn on_datagram_start(&mut self, link: &L, ceiling: Option<usize>) -> bool {
+        let before = self.snapshot();
+        self.datagram_start(link, ceiling);
+        before != self.snapshot()
+    }
+
+    fn probe_size(&self) -> Option<usize> {
+        self.candidate()
+    }
+
+    fn on_probe_acked(&mut self, size: usize, now: L::Instant) -> bool {
+        let before = self.snapshot();
+        self.probe_acked(size, now);
+        before != self.snapshot()
+    }
+
+    fn on_probe_failed(&mut self, size: usize, cause: PmtuProbeFailure, now: L::Instant) -> bool {
+        let before = self.snapshot();
+        self.probe_failed(size, cause, now);
+        before != self.snapshot()
+    }
+
+    fn on_packets(
+        &mut self,
+        acked: impl Iterator<Item = usize>,
+        lost: impl Iterator<Item = usize>,
+        now: L::Instant,
+    ) -> bool {
+        let before = self.snapshot();
+        self.packets(acked, lost, now);
+        before != self.snapshot()
+    }
+
+    fn next_deadline(&self) -> Option<L::Instant> {
+        match self.search {
+            Search::Ended { raise_at, .. } => raise_at,
+            Search::Running { .. } => None,
+        }
+    }
+
+    fn on_deadline(&mut self, now: L::Instant) -> bool {
+        let before = self.snapshot();
+        self.deadline(now);
+        before != self.snapshot()
+    }
+}
+
+/// The state changes of the trait methods; the trait methods report whether
+/// the queries changed around them.
+impl<I: Copy + Add<Duration, Output = I>, Local: Clone, Peer: Clone>
+    BinarySearchPmtuPolicy<I, Local, Peer>
+{
+    fn snapshot(&self) -> (usize, Option<usize>, Option<I>) {
+        let deadline = match self.search {
+            Search::Ended { raise_at, .. } => raise_at,
+            Search::Running { .. } => None,
+        };
+        (self.conclusion, self.candidate(), deadline)
+    }
+
+    fn datagram_start<L>(&mut self, link: &L, ceiling: Option<usize>)
+    where
+        L: Link<Instant = I, Local = Local, Peer = Peer>,
+    {
         let raised = match (self.ceiling, ceiling) {
             (_, None) => false,
             (None, Some(_)) => true,
@@ -346,11 +416,7 @@ where
         self.link = Some((link.id().clone(), link.datagram_size_conclusion()));
     }
 
-    fn probe_size(&self) -> Option<usize> {
-        self.candidate()
-    }
-
-    fn on_probe_acked(&mut self, size: usize, now: L::Instant) {
+    fn probe_acked(&mut self, size: usize, now: I) {
         self.black_hole_batches = 0;
         if size > self.conclusion {
             self.conclusion = size;
@@ -364,7 +430,7 @@ where
         self.settle(now);
     }
 
-    fn on_probe_failed(&mut self, size: usize, cause: PmtuProbeFailure, now: L::Instant) {
+    fn probe_failed(&mut self, size: usize, cause: PmtuProbeFailure, now: I) {
         if cause == PmtuProbeFailure::Unsent {
             return;
         }
@@ -384,11 +450,11 @@ where
         self.settle(now);
     }
 
-    fn on_packets(
+    fn packets(
         &mut self,
         mut acked: impl Iterator<Item = usize>,
         mut lost: impl Iterator<Item = usize>,
-        now: L::Instant,
+        now: I,
     ) {
         if acked.any(|size| size > MIN_DATAGRAM_SIZE) {
             self.black_hole_batches = 0;
@@ -406,14 +472,7 @@ where
         self.settle(now);
     }
 
-    fn next_deadline(&self) -> Option<L::Instant> {
-        match self.search {
-            Search::Ended { raise_at, .. } => raise_at,
-            Search::Running { .. } => None,
-        }
-    }
-
-    fn on_deadline(&mut self, _now: L::Instant) {
+    fn deadline(&mut self, _now: I) {
         if let Search::Ended { .. } = self.search {
             self.search = Search::START;
         }
