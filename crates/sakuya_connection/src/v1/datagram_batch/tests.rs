@@ -928,16 +928,18 @@ fn a_round_asks_for_room_as_it_goes_and_lets_it_go_once_handed_over() {
     assert_eq!(batch.datagrams.capacity(), 0);
     assert_eq!(batch.outgoing.capacity(), 0);
 
-    // the first datagram of the round asks for room for one
+    // the first datagram of the round asks for room for one, in the buffer
+    // and in both lists
     send_ack(&mut batch);
     let first = batch.outgoing[0].payload.len();
     assert_eq!(batch.buffer.capacity() + first, 1500);
-    assert!(batch.datagrams.capacity() >= 4 && batch.outgoing.capacity() >= 4);
+    assert!(batch.datagrams.capacity() < 4 && batch.outgoing.capacity() < 4);
 
     // the second asks for the three the round may still take
     send_ack(&mut batch);
     let second = batch.outgoing[1].payload.len();
     assert!(batch.buffer.capacity() + second >= 3 * 1500);
+    assert!(batch.datagrams.capacity() >= 4 && batch.outgoing.capacity() >= 4);
 
     // a part handed over keeps the round going
     assert_eq!(batch.take_accepted(1).count(), 1);

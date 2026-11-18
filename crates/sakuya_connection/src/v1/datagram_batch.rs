@@ -111,8 +111,9 @@ impl<Si, Sh, Sa, C> BatchedDatagram<Si, Sh, Sa, C> {
 /// bytes leave the buffer as the payload of its outgoing datagram.
 ///
 /// A batch holds no memory until its first datagram starts. The first
-/// datagram of a round asks for room for itself; the second asks at once
-/// for room for every datagram the round may still take. Once the link
+/// datagram of a round asks for room for itself, in the buffer and in both
+/// lists; the second asks at once for room for every datagram the round may
+/// still take. Once the link
 /// accepts the whole batch, the round ends and the batch lets its memory
 /// go: an idle link path keeps none.
 #[derive(Debug)]
@@ -302,22 +303,24 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
         // the buffer holds the datagram being written only: a sealed one
         // leaves it, and an empty one took its bytes back
         self.buffer.clear();
+        // the first datagram of a round asks for itself; a second asks for
+        // the rest of the round at once
+        let datagrams = if self.datagrams.is_empty() {
+            1
+        } else {
+            self.max_datagrams
+                .get()
+                .saturating_sub(self.datagrams.len())
+                .max(1)
+        };
         if self.buffer.capacity() < max_len {
-            // the first datagram of a round asks for itself; a second asks
-            // for the rest of the round at once
-            let datagrams = if self.datagrams.is_empty() {
-                1
-            } else {
-                self.max_datagrams
-                    .get()
-                    .saturating_sub(self.datagrams.len())
-                    .max(1)
-            };
             self.buffer = BytesMut::with_capacity(max_len.saturating_mul(datagrams));
         }
-        if self.datagrams.capacity() == 0 {
-            self.datagrams.reserve_exact(self.max_datagrams.get());
-            self.outgoing.reserve_exact(self.max_datagrams.get());
+        if self.datagrams.len() == self.datagrams.capacity() {
+            self.datagrams.reserve_exact(datagrams);
+        }
+        if self.outgoing.len() == self.outgoing.capacity() {
+            self.outgoing.reserve_exact(datagrams);
         }
         let state = DatagramState {
             dcid,
