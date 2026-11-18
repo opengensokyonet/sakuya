@@ -109,6 +109,12 @@ impl<Si, Sh, Sa, C> BatchedDatagram<Si, Sh, Sa, C> {
 ///
 /// The datagram being written lies in one buffer; once it is sealed, its
 /// bytes leave the buffer as the payload of its outgoing datagram.
+///
+/// A batch holds no memory until its first datagram starts. The first
+/// datagram of a round asks for room for itself; the second asks at once
+/// for room for every datagram the round may still take. Once the link
+/// accepts the whole batch, the round ends and the batch lets its memory
+/// go: an idle link path keeps none.
 #[derive(Debug)]
 pub struct DatagramBatch<Si, Sh, Sa, C> {
     buffer: BytesMut,
@@ -122,8 +128,8 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
     pub fn new(max_datagrams: NonZeroUsize) -> Self {
         Self {
             buffer: BytesMut::new(),
-            outgoing: Vec::with_capacity(max_datagrams.get()),
-            datagrams: Vec::with_capacity(max_datagrams.get()),
+            outgoing: Vec::new(),
+            datagrams: Vec::new(),
             max_datagrams,
         }
     }
@@ -185,14 +191,21 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
     }
 
     /// Take out the first `count` datagrams, or all if fewer wait: the
-    /// link accepted them.
+    /// link accepted them. Taking them all ends the round, and the batch
+    /// lets its memory go.
     pub fn take_accepted(
         &mut self,
         count: usize,
     ) -> impl Iterator<Item = BatchedDatagram<Si, Sh, Sa, C>> + '_ {
-        let count = count.min(self.datagrams.len());
+        if count >= self.datagrams.len() {
+            self.buffer = BytesMut::new();
+            self.outgoing = Vec::new();
+            return core::mem::take(&mut self.datagrams).into_iter();
+        }
+        // the link took a part: the rest stays for the next hand-over
         self.outgoing.drain(..count);
-        self.datagrams.drain(..count)
+        let rest = self.datagrams.split_off(count);
+        core::mem::replace(&mut self.datagrams, rest).into_iter()
     }
 
     /// Take out the first datagram, if any: the link gave it up.
@@ -289,6 +302,23 @@ impl<Si, Sh, Sa, C> DatagramBatch<Si, Sh, Sa, C> {
         // the buffer holds the datagram being written only: a sealed one
         // leaves it, and an empty one took its bytes back
         self.buffer.clear();
+        if self.buffer.capacity() < max_len {
+            // the first datagram of a round asks for itself; a second asks
+            // for the rest of the round at once
+            let datagrams = if self.datagrams.is_empty() {
+                1
+            } else {
+                self.max_datagrams
+                    .get()
+                    .saturating_sub(self.datagrams.len())
+                    .max(1)
+            };
+            self.buffer = BytesMut::with_capacity(max_len.saturating_mul(datagrams));
+        }
+        if self.datagrams.capacity() == 0 {
+            self.datagrams.reserve_exact(self.max_datagrams.get());
+            self.outgoing.reserve_exact(self.max_datagrams.get());
+        }
         let state = DatagramState {
             dcid,
             role,

@@ -900,3 +900,54 @@ fn a_datagram_taken_out_takes_its_bytes_with_it() {
     assert_eq!(batch.outgoing()[0].payload[..], later[..]);
     assert_eq!(batch.entries().next().unwrap().len(), 1200);
 }
+
+#[test]
+fn a_round_asks_for_room_as_it_goes_and_lets_it_go_once_handed_over() {
+    let ik = initial_keys();
+    let mut initial = Journals::new();
+    let mut accounts = Accounts::new();
+    let mut batch = Batch::new(NonZeroUsize::new(4).unwrap());
+    let ack = || {
+        AckFrame::from_packet_ranges(
+            [PacketNumber::ZERO..=PacketNumber::ZERO],
+            VarIntField::shortest(VarInt::ZERO),
+            None,
+        )
+        .unwrap()
+    };
+    let mut send_ack = |batch: &mut Batch| {
+        let mut datagram = accounts.start(batch, Role::Server, 1500, 1500, false);
+        let packet = datagram
+            .start_initial_packet(initial.start_attempt(()), &ik, None, scid(), Bytes::new())
+            .unwrap();
+        let mut open = packet.open::<AckOnlyClass>();
+        open.write_frame(ack(), Summary::Frame("ack")).unwrap();
+    };
+    // a new batch holds nothing
+    assert_eq!(batch.buffer.capacity(), 0);
+    assert_eq!(batch.datagrams.capacity(), 0);
+    assert_eq!(batch.outgoing.capacity(), 0);
+
+    // the first datagram of the round asks for room for one
+    send_ack(&mut batch);
+    let first = batch.outgoing[0].payload.len();
+    assert_eq!(batch.buffer.capacity() + first, 1500);
+    assert!(batch.datagrams.capacity() >= 4 && batch.outgoing.capacity() >= 4);
+
+    // the second asks for the three the round may still take
+    send_ack(&mut batch);
+    let second = batch.outgoing[1].payload.len();
+    assert!(batch.buffer.capacity() + second >= 3 * 1500);
+
+    // a part handed over keeps the round going
+    assert_eq!(batch.take_accepted(1).count(), 1);
+    assert_eq!(batch.len(), 1);
+    assert!(batch.buffer.capacity() > 0);
+
+    // the rest handed over ends it: nothing is kept
+    assert_eq!(batch.take_accepted(1).count(), 1);
+    assert!(batch.is_empty());
+    assert_eq!(batch.buffer.capacity(), 0);
+    assert_eq!(batch.datagrams.capacity(), 0);
+    assert_eq!(batch.outgoing.capacity(), 0);
+}
