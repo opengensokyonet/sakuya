@@ -27,7 +27,7 @@ use sakuya_recovery::{
     persistent_congestion::{
         LostPacket, establishes_persistent_congestion, persistent_congestion_duration,
     },
-    pmtu::PmtuPolicy,
+    pmtu::{PmtuPolicy, PmtuProbeFailure},
     pto::{ProbeCount, probe_timeout},
     rtt::{RttEstimate, RttEstimator},
     send_journals::SendJournals,
@@ -127,7 +127,8 @@ pub(super) struct DeclaredBatch<I> {
 /// A loss of the Handshake or Application Data space below every packet
 /// number acknowledged in it, or before any was, does not count for
 /// congestion (RFC 9002 §7.4, MAY): the peer may not have had the keys yet.
-/// The packets are handed out oldest first, so these come first.
+/// Path MTU probes anywhere in the batch also leave without a signal
+/// (RFC 9000 §14.4); their sizes go to the probing policy.
 pub(super) fn declare_lost<I, S, Ls, A>(
     space: PacketNumberSpaceKind,
     mut lost: LostBatch<'_, I, S, Ls>,
@@ -135,6 +136,7 @@ pub(super) fn declare_lost<I, S, Ls, A>(
     state: &mut LinkPathCongestionState<I>,
     access: &mut A,
     facts: &LossFacts<I>,
+    mut probe_lost: impl FnMut(usize),
 ) -> DeclaredBatch<I>
 where
     I: Ord + Copy + Add<Duration, Output = I> + Sub<Output = Duration>,
@@ -142,8 +144,9 @@ where
     A: CongestionController<I, SentState = S, LossState = Ls>,
 {
     let ignored = |p: &Outstanding<I, S>| {
-        space != PacketNumberSpaceKind::Initial
-            && numbers.is_none_or(|n| n.loss_may_ignore_congestion(p.number))
+        p.pmtu_probe
+            || (space != PacketNumberSpaceKind::Initial
+                && numbers.is_none_or(|n| n.loss_may_ignore_congestion(p.number)))
     };
     let granularity = facts.thresholds.granularity();
     let pto = probe_timeout(
@@ -154,34 +157,46 @@ where
         0,
     );
     let retain_until = facts.now + pto.saturating_mul(3);
-    // look at the batch before handing it out: its packet numbers, what
-    // leaves the bytes in flight, and whether the packets that count
-    // establish persistent congestion
-    let numbers = lost.packets().map(|p| p.number).collect();
-    let (mut any_ignored, mut any_counted) = (false, false);
-    for packet in lost.packets() {
-        let Some(charge) = &packet.in_flight else {
+    let persistent = establishes_persistent_congestion(
+        lost.packets()
+            .filter(|p| p.in_flight.is_some() && !ignored(p))
+            .map(|p| LostPacket {
+                seq: p.seq,
+                sent_at: p.sent_at,
+                ack_eliciting: p.ack_eliciting,
+            }),
+        persistent_congestion_duration(&facts.rtt, granularity, facts.peer_max_ack_delay),
+        state.first_rtt_sample_at(),
+    );
+    let mut numbers = Vec::with_capacity(lost.len());
+    let mut removed = Vec::new();
+    let mut counted = Vec::new();
+    while let Some(packet) = lost.next() {
+        numbers.push(packet.number);
+        let without_signal = ignored(&packet);
+        let Some(charge) = packet.in_flight else {
             continue;
         };
         state.remove_in_flight(charge.bytes);
-        if ignored(packet) {
-            any_ignored = true;
+        if packet.pmtu_probe {
+            state.on_pmtu_probe_settled();
+            probe_lost(charge.bytes);
+        }
+        if without_signal {
+            removed.push(RemovedPacket {
+                bytes: charge.bytes,
+                sent_state: charge.sent_state,
+            });
         } else {
-            any_counted = true;
+            lost.keep(packet.number, packet.sent_at, charge.bytes);
+            counted.push(InFlightPacket {
+                bytes: charge.bytes,
+                sent_at: packet.sent_at,
+                app_limited: charge.app_limited,
+                sent_state: charge.sent_state,
+            });
         }
     }
-    let persistent = any_counted
-        && establishes_persistent_congestion(
-            lost.packets()
-                .filter(|p| p.in_flight.is_some() && !ignored(p))
-                .map(|p| LostPacket {
-                    seq: p.seq,
-                    sent_at: p.sent_at,
-                    ack_eliciting: p.ack_eliciting,
-                }),
-            persistent_congestion_duration(&facts.rtt, granularity, facts.peer_max_ack_delay),
-            state.first_rtt_sample_at(),
-        );
     let context = CongestionContext {
         now: facts.now,
         bytes_in_flight: state.bytes_in_flight(),
@@ -189,46 +204,17 @@ where
         rtt_sampled: facts.rtt_sampled,
         max_datagram_size: facts.max_datagram_size,
     };
-    if any_ignored {
-        access.on_removed(
-            core::iter::from_fn(|| {
-                loop {
-                    let packet = lost.next_if(ignored)?;
-                    if let Some(charge) = packet.in_flight {
-                        return Some(RemovedPacket {
-                            bytes: charge.bytes,
-                            sent_state: charge.sent_state,
-                        });
-                    }
-                }
-            }),
-            &context,
-        );
+    if !removed.is_empty() {
+        access.on_removed(removed.into_iter(), &context);
     }
-    if !any_counted {
+    if counted.is_empty() {
         return DeclaredBatch {
             numbers,
             retain_until,
-            persistent: false,
+            persistent,
         };
     }
-    let loss = access.on_lost(
-        core::iter::from_fn(|| {
-            loop {
-                let packet = lost.next()?;
-                if let Some(charge) = packet.in_flight {
-                    lost.keep(packet.number, packet.sent_at, charge.bytes);
-                    return Some(InFlightPacket {
-                        bytes: charge.bytes,
-                        sent_at: packet.sent_at,
-                        app_limited: charge.app_limited,
-                        sent_state: charge.sent_state,
-                    });
-                }
-            }
-        }),
-        &context,
-    );
+    let loss = access.on_lost(counted.into_iter(), &context);
     if persistent {
         access.on_persistent_congestion(&context);
     }
@@ -322,7 +308,7 @@ where
         let numbers = lineage
             .get::<PacketNumberSpaces<PacketNumberSpaceState>, In>()
             .clone();
-        let (frunk_core::hlist_pat![factory, part, rtt, spaces, state, journals], mut rest) =
+        let (frunk_core::hlist_pat![factory, part, rtt, spaces, state, journals, pmtu], mut rest) =
             Take::<LossTakes<T, L, Self>, It>::take(lineage);
         let delay = loss_delay(&facts.rtt, &facts.thresholds);
         let threshold = facts.thresholds.packet_threshold();
@@ -343,7 +329,9 @@ where
                     let lost = detection.detect_lost(now, largest, delay, threshold);
                     batches.push((
                         space,
-                        declare_lost(space, lost, numbers, state, &mut access, &facts),
+                        declare_lost(space, lost, numbers, state, &mut access, &facts, |size| {
+                            pmtu.on_probe_failed(size, PmtuProbeFailure::Lost, now);
+                        }),
                     ));
                 }
                 // read only for the events
@@ -384,6 +372,7 @@ where
         }
         let mut established =
             others.borrow_established_optional::<EstablishedSourceComponentsOfParts<T, L>, Is>();
+        let mut lost_sizes = Vec::new();
         for (space, batch) in &batches {
             if batch.persistent {
                 rtt.on_persistent_congestion();
@@ -399,7 +388,11 @@ where
                 now,
                 *space,
                 batch,
+                &mut lost_sizes,
             );
+        }
+        if !lost_sizes.is_empty() {
+            pmtu.on_packets(core::iter::empty(), lost_sizes.into_iter(), now);
         }
         None
     }
@@ -415,7 +408,8 @@ pub(super) type LossTakes<T, L, D> = HList![
     RttOf<T, L>,
     D,
     LinkPathCongestionState<InstantOf<T>>,
-    SendJournalsOf<T, L>
+    SendJournalsOf<T, L>,
+    PmtuOf<T, L>
 ];
 
 /// Hand the packets of `batch`, declared lost in `space`, back to the
@@ -424,7 +418,8 @@ pub(super) type LossTakes<T, L, D> = HList![
 /// frame sources as lost, in `lineage` with the components of the
 /// established layer `established` appended, at `now`. A packet the journals do
 /// not have as sent, such as one whose record went with the end of its link
-/// path, gives nothing back.
+/// path, gives nothing back. The sizes of ordinary packets, including
+/// ACK-only packets, are appended to `lost_sizes` for the probing policy.
 pub(super) fn hand_back_lost<T, L, V, X, Hf>(
     journals: &mut <HostOf<T> as HostChoices<T>>::SendJournals<
         FeedbackSummaryOf<T, L>,
@@ -435,6 +430,7 @@ pub(super) fn hand_back_lost<T, L, V, X, Hf>(
     now: InstantOf<T>,
     space: PacketNumberSpaceKind,
     batch: &DeclaredBatch<InstantOf<T>>,
+    lost_sizes: &mut Vec<usize>,
 ) where
     T: Choices,
     L: PartList<T> + FeedbackSummariesOf,
@@ -445,6 +441,9 @@ pub(super) fn hand_back_lost<T, L, V, X, Hf>(
         let Some(record) = journals.declare_lost(number, batch.retain_until) else {
             continue;
         };
+        if !record.pmtu_probe {
+            lost_sizes.push(record.bytes);
+        }
         // content a probe timeout handed back already is not handed back
         // twice
         if record.content_handed_back {

@@ -1945,7 +1945,7 @@ mod probe {
                                 sent_state: Default::default(),
                             };
                             let number = PacketNumber::new(number).ok()?;
-                            detection.accept(number, now, true, Some(charge));
+                            detection.accept(number, now, true, false, Some(charge));
                             state.add_in_flight(1200);
                         }
                         let acked = PacketNumber::new(acked?).ok()?;
@@ -1985,7 +1985,7 @@ mod probe {
                                 app_limited: false,
                                 sent_state: Default::default(),
                             };
-                            detection.accept(number, now, true, Some(charge));
+                            detection.accept(number, now, true, false, Some(charge));
                             state.add_in_flight(1200);
                         }
                     }
@@ -2000,7 +2000,7 @@ mod probe {
                         attempt.record_frame(InjectSummary::inject_summary(AckSummary { largest, before }), false, false);
                         let sealed = attempt.seal(50, false)?;
                         journals.sent(sealed, now);
-                        spaces.get_mut(space)?.accept(number, now, false, None);
+                        spaces.get_mut(space)?.accept(number, now, false, false, None);
                     }
                     Step::Inspect => {
                         let estimate = RttEstimator::<Duration>::estimate(rtt);

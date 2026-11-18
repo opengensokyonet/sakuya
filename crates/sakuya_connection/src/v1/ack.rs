@@ -43,8 +43,8 @@
 //! counts of a frame are not looked at yet.
 //!
 //! Not here yet: an acknowledgment of a packet number the send journals
-//! skipped, which they cannot tell yet; ECN validation and the congestion
-//! events of ECN-CE; and the PMTU probes among the packets settled.
+//! skipped, which they cannot tell yet; and ECN validation and the congestion
+//! events of ECN-CE.
 use core::{ops::RangeInclusive, time::Duration};
 
 use frunk_core::hlist_pat;
@@ -55,7 +55,7 @@ use sakuya_recovery::{
     loss::{LossThresholds, loss_delay},
     loss_detection::{LossDetectionState, Outstanding},
     packet_number_space::{PacketNumberSpaceState, PacketNumberSpaces},
-    pmtu::PmtuPolicy,
+    pmtu::{PmtuPolicy, PmtuProbeFailure},
     rtt::{RttEstimator, RttSample, effective_ack_delay},
     send_journals::{SendJournals, SentPacketState},
 };
@@ -405,7 +405,15 @@ where
                                 loss_delay(&estimate, &thresholds),
                                 thresholds.packet_threshold(),
                             );
-                            declare_lost(space, lost, numbers.as_ref(), state, &mut access, &facts)
+                            declare_lost(
+                                space,
+                                lost,
+                                numbers.as_ref(),
+                                state,
+                                &mut access,
+                                &facts,
+                                |size| pmtu.on_probe_failed(size, PmtuProbeFailure::Lost, at),
+                            )
                         });
                         if acked_in_flight(&acked, state) {
                             let context = context(state.bytes_in_flight());
@@ -440,10 +448,27 @@ where
                         bytes_in_flight: state.bytes_in_flight(),
                     }
                 });
-                Some((batch, metrics))
+                let on_link = acknowledged.iter().filter(|r| r.link_path == identifier);
+                for probe in on_link.clone().filter(|r| r.pmtu_probe) {
+                    state.on_pmtu_probe_settled();
+                    pmtu.on_probe_acked(probe.bytes, at);
+                }
+                let sizes = on_link.filter(|r| !r.pmtu_probe).map(|r| r.bytes);
+                // Lost sizes come from the journals when their frames go
+                // back to their sources, including packets with only ACKs.
+                let deferred = match batch {
+                    Some(batch) if !batch.numbers.is_empty() => {
+                        Some((batch, sizes.collect::<Vec<_>>()))
+                    }
+                    _ => {
+                        pmtu.on_packets(sizes, core::iter::empty(), at);
+                        None
+                    }
+                };
+                Some((deferred, metrics))
             },
         );
-        let Some((batch, metrics)) = batch.flatten() else {
+        let Some((deferred, metrics)) = batch.flatten() else {
             continue;
         };
         if <EventsOf<T, L> as ConnectionEvents<InstantOf<T>>>::ENABLED
@@ -451,7 +476,7 @@ where
                 .get_mut::<ConnectionEventSink<EventsOf<T, L>>, Iev>()
                 .active::<InstantOf<T>>()
         {
-            for &number in batch.iter().flat_map(|batch| &batch.numbers) {
+            for &number in deferred.iter().flat_map(|(batch, _)| &batch.numbers) {
                 events.packet_lost(
                     at,
                     &LostPacket {
@@ -466,7 +491,9 @@ where
                 events.recovery_metrics(at, metrics);
             }
         }
-        declared.extend(batch);
+        if let Some((batch, acked_sizes)) = deferred {
+            declared.push((link, batch, acked_sizes));
+        }
     }
 
     // the feedback, once the whole frame is handled: delivered first, then
@@ -483,14 +510,27 @@ where
             record.summaries,
         );
     }
-    for batch in &declared {
+    drop(established);
+    for (link, batch, acked_sizes) in declared {
+        let mut established =
+            others.borrow_established_optional::<EstablishedSourceComponentsOfParts<T, L>, Is>();
+        let mut lost_sizes = Vec::new();
         hand_back_lost::<T, L, _, _, Hf>(
             &mut journals,
             lineage,
             &mut established,
             at,
             space,
-            batch,
+            &batch,
+            &mut lost_sizes,
+        );
+        drop(established);
+        others.with_recovery_at::<AckRecoveryTakes<T, L, S, Ls>, Ik, _>(
+            &path,
+            &link,
+            |hlist_pat![_, _, pmtu, _, _, _], _| {
+                pmtu.on_packets(acked_sizes.into_iter(), lost_sizes.into_iter(), at);
+            },
         );
     }
     if let Some(slot) = lineage.get_mut::<SendJournalsOf<T, L>, Ij>().get_mut(space) {

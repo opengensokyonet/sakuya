@@ -52,6 +52,8 @@ pub struct Outstanding<I, S> {
     pub sent_at: I,
     /// Whether it is ack-eliciting.
     pub ack_eliciting: bool,
+    /// Whether it probes the path MTU, so its loss gives no congestion signal.
+    pub pmtu_probe: bool,
     /// What it counts in the bytes in flight; `None` for a packet with only
     /// ACK frames, which does not count.
     pub in_flight: Option<InFlightCharge<S>>,
@@ -156,6 +158,7 @@ impl<I: Ord + Copy + Add<Duration, Output = I>, S, Ls> LossDetectionState<I, S, 
         number: PacketNumber,
         sent_at: I,
         ack_eliciting: bool,
+        pmtu_probe: bool,
         in_flight: Option<InFlightCharge<S>>,
     ) {
         debug_assert!(
@@ -169,6 +172,7 @@ impl<I: Ord + Copy + Add<Duration, Output = I>, S, Ls> LossDetectionState<I, S, 
             number,
             sent_at,
             ack_eliciting,
+            pmtu_probe,
             in_flight,
         });
         self.next_seq += 1;

@@ -14,6 +14,7 @@ use sakuya_recovery::{
     packet_number_space::{
         PacketNumberSpaceKind, PacketNumberSpaceSet, PacketNumberSpaceState, PacketNumberSpaces,
     },
+    pmtu::{PmtuPolicy, PmtuProbeFailure},
     pto::{PtoAction, PtoExpiry, PtoPolicy, probe_timeout},
     rtt::{RttEstimate, RttEstimator},
     send_journals::SendJournals,
@@ -39,7 +40,7 @@ use crate::{
     frame_source::{EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts},
     layer,
     others::OtherNodes,
-    send_strategy::AnyActiveLinkPath,
+    send_strategy::{AnyActiveLinkPath, DatagramLimits},
     share::{FlatMut, FlatRef, LineageLists, LineagePartList, NodeData},
     take::{GetAt, ReadEach, Take, TakeEach},
 };
@@ -55,7 +56,7 @@ use super::{
     loss_detection::{LossFactsReads, declare_lost, hand_back_lost, loss_facts},
     parameters::PeerTransportParameters,
     recovery::{
-        CongestionPartOf, LinkPathCongestionState, OthersOf, RecoveryFactoryOf, RttOf,
+        CongestionPartOf, LinkPathCongestionState, OthersOf, PmtuOf, RecoveryFactoryOf, RttOf,
         lend_congestion,
     },
     send::{PendingProbePings, SendTypes},
@@ -239,8 +240,8 @@ where
 /// each space, as the time threshold's, handed back to the send journals
 /// and the parts as the time threshold's is.
 ///
-/// Not here yet: declaring the packets in flight lost without asking the
-/// policy while the link path cannot send 1200 bytes.
+/// When the link path cannot send 1200 bytes, expiry declares the packets
+/// in flight lost directly.
 impl<T, L, S, Ls, Ipt, Ir, If, Ipp, Ima, It, Jx, Jr, Hf, Is, Iev>
     DataComponent<T, L, layer::Recovery, ((Ipt, Ir, If), (Ipp, Ima), It, (Jx, Jr), Hf, Is, Iev)>
     for ProbeTimeout<InstantOf<T>>
@@ -298,7 +299,7 @@ where
         let facts = loss_facts::<T, L, Ipp, Ima, _, If>(&lineage, now);
         let (
             frunk_core::hlist_pat![
-                pto, factory, part, rtt, spaces, state, journals, pings
+                pto, factory, part, rtt, spaces, state, journals, pings, pmtu
             ],
             mut rest,
         ) = Take::<ProbeTimeoutTakes<T, L, S, Ls>, It>::take(lineage);
@@ -314,7 +315,15 @@ where
         let (batches, window) =
             lend_congestion::<T, L, B, Jx, Jr, _>(factory, part, others, |mut access| {
             let mut batches = Vec::new();
-            match access.on_pto_expired(&expiry) {
+            // The peer's limit is at least 1200. A smaller size in use
+            // therefore means the link ceiling or the conclusion prevents
+            // ordinary sending, including a PTO probe.
+            let action = if facts.max_datagram_size < DatagramLimits::MINIMUM {
+                PtoAction::MarkInFlightLost
+            } else {
+                access.on_pto_expired(&expiry)
+            };
+            match action {
                 PtoAction::Probe { datagrams, spaces } => {
                     state.grant_probe_permits(datagrams);
                     probed = Some((spaces.with(expired_space), datagrams.get()));
@@ -329,6 +338,7 @@ where
                             state,
                             &mut access,
                             &facts,
+                            |size| pmtu.on_probe_failed(size, PmtuProbeFailure::Lost, now),
                         );
                         batches.push((space, batch));
                     }
@@ -397,6 +407,7 @@ where
             // a PING when nothing else is to be sent
             pings.probe(spaces.iter(), datagrams);
         }
+        let mut lost_sizes = Vec::new();
         for (space, batch) in &batches {
             if batch.persistent {
                 rtt.on_persistent_congestion();
@@ -412,7 +423,11 @@ where
                 now,
                 *space,
                 batch,
+                &mut lost_sizes,
             );
+        }
+        if !lost_sizes.is_empty() {
+            pmtu.on_packets(core::iter::empty(), lost_sizes.into_iter(), now);
         }
         None
     }
@@ -445,7 +460,8 @@ type ProbeTimeoutTakes<T, L, S, Ls> = HList![
     PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>,
     LinkPathCongestionState<InstantOf<T>>,
     SendJournalsOf<T, L>,
-    PendingProbePings
+    PendingProbePings,
+    PmtuOf<T, L>
 ];
 
 /// What the probe timeout reads: its deadline and its reread look at these,

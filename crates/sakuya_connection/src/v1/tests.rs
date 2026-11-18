@@ -427,6 +427,7 @@ mod probe_timeout {
             PacketNumber::new(0).unwrap(),
             Duration::from_millis(10),
             true,
+            false,
             Some(charge),
         );
         spaces

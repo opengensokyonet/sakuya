@@ -27,7 +27,7 @@ fn charge(bytes: usize) -> Option<InFlightCharge<()>> {
 fn state_with(count: u64) -> State {
     let mut state = State::new();
     for n in 0..count {
-        state.accept(pn(n), ms(n * 10), true, charge(1200));
+        state.accept(pn(n), ms(n * 10), true, false, charge(1200));
     }
     state
 }
@@ -44,7 +44,7 @@ fn drained(batch: impl Iterator<Item = Outstanding<Duration, ()>>) -> Vec<u64> {
 /// as one batch, keep every one and finish the batch with `loss`.
 fn lose(state: &mut State, numbers: &[u64], loss: u32, retain_until: u64) {
     for &n in numbers {
-        state.accept(pn(n), ms(n), true, charge(1200));
+        state.accept(pn(n), ms(n), true, false, charge(1200));
     }
     let mut batch = state.take_all();
     while let Some(packet) = batch.next() {
@@ -67,9 +67,9 @@ fn kept(state: &State) -> Vec<(u64, u64, u32)> {
 fn accepted_packets_get_consecutive_sequence_numbers() {
     let mut state = State::new();
     // the packet numbers skip, the sequence numbers do not
-    state.accept(pn(2), ms(0), true, charge(1200));
-    state.accept(pn(5), ms(1), false, None);
-    state.accept(pn(9), ms(2), true, charge(1200));
+    state.accept(pn(2), ms(0), true, false, charge(1200));
+    state.accept(pn(5), ms(1), false, false, None);
+    state.accept(pn(9), ms(2), true, false, charge(1200));
     let seqs: Vec<_> = state.outstanding().map(|p| p.seq).collect();
     assert_eq!(seqs, [0, 1, 2]);
     assert_eq!(numbers(state.outstanding()), [2, 5, 9]);
@@ -81,11 +81,11 @@ fn ack_eliciting_packets_are_counted_and_the_last_send_time_kept() {
     let mut state = State::new();
     assert!(!state.has_ack_eliciting_outstanding());
     assert_eq!(state.last_ack_eliciting_sent_at(), None);
-    state.accept(pn(0), ms(5), false, None);
+    state.accept(pn(0), ms(5), false, false, None);
     assert!(!state.has_ack_eliciting_outstanding());
     assert_eq!(state.last_ack_eliciting_sent_at(), None);
-    state.accept(pn(1), ms(6), true, charge(100));
-    state.accept(pn(2), ms(7), false, None);
+    state.accept(pn(1), ms(6), true, false, charge(100));
+    state.accept(pn(2), ms(7), false, false, None);
     assert!(state.has_ack_eliciting_outstanding());
     assert_eq!(state.last_ack_eliciting_sent_at(), Some(ms(6)));
 }
@@ -129,9 +129,9 @@ fn acknowledging_records_the_largest_acknowledged_sequence_number() {
 #[test]
 fn acknowledging_lowers_the_ack_eliciting_count() {
     let mut state = State::new();
-    state.accept(pn(0), ms(0), true, charge(1));
-    state.accept(pn(1), ms(1), false, None);
-    state.accept(pn(2), ms(2), true, charge(1));
+    state.accept(pn(0), ms(0), true, false, charge(1));
+    state.accept(pn(1), ms(1), false, false, None);
+    state.accept(pn(2), ms(2), true, false, charge(1));
     drained(state.take_acknowledged(&(pn(0)..=pn(1))));
     assert!(state.has_ack_eliciting_outstanding());
     drained(state.take_acknowledged(&(pn(2)..=pn(2))));
@@ -153,7 +153,7 @@ fn the_packet_threshold_counts_sequence_numbers_not_packet_numbers() {
     let mut state = State::new();
     // packet numbers 0, 10, 11, 12: the gap of numbers does not count
     for (n, at) in [(0, 0), (10, 1), (11, 2), (12, 3)] {
-        state.accept(pn(n), ms(at), true, charge(1));
+        state.accept(pn(n), ms(at), true, false, charge(1));
     }
     drained(state.take_acknowledged(&(pn(12)..=pn(12))));
     // seq 3 acknowledged; seq 0 is lost, seq 1 is only two behind
@@ -219,9 +219,9 @@ fn detecting_again_recomputes_the_loss_time_from_nothing() {
 #[test]
 fn losses_lower_the_ack_eliciting_count() {
     let mut state = State::new();
-    state.accept(pn(0), ms(0), true, charge(1));
-    state.accept(pn(1), ms(1), false, None);
-    state.accept(pn(2), ms(2), false, None);
+    state.accept(pn(0), ms(0), true, false, charge(1));
+    state.accept(pn(1), ms(1), false, false, None);
+    state.accept(pn(2), ms(2), false, false, None);
     let lost = drained(state.detect_lost(ms(100), pn(2), ms(10), threshold()));
     assert_eq!(lost, [0, 1]);
     assert!(!state.has_ack_eliciting_outstanding());
@@ -243,7 +243,7 @@ fn taking_all_empties_the_state_and_clears_the_loss_time() {
 fn sequence_numbers_continue_after_packets_were_taken() {
     let mut state = state_with(2);
     drained(state.take_all());
-    state.accept(pn(2), ms(50), true, charge(1));
+    state.accept(pn(2), ms(50), true, false, charge(1));
     assert_eq!(state.outstanding().next().unwrap().seq, 2);
 }
 

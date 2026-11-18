@@ -126,7 +126,7 @@ use sakuya_recovery::{
     loss_detection::{InFlightCharge, LossDetectionState},
     pacing::Pacer,
     packet_number_space::{PacketNumberSpaceKind, PacketNumberSpaceState, PacketNumberSpaces},
-    pmtu::PmtuPolicy,
+    pmtu::{PmtuPolicy, PmtuProbeFailure},
     pto::probe_timeout,
     rtt::{RttEstimate, RttEstimator},
     send_journals::{PacketSendAttempt, SendJournals},
@@ -382,6 +382,7 @@ pub type SettleRecoveryTakes<T, L, S, Ls> = HList![
     CongestionPartOf<T, L>,
     LinkPathCongestionState<InstantOf<T>>,
     PacketNumberSpaces<LossDetectionState<InstantOf<T>, S, Ls>>,
+    PmtuOf<T, L>,
 ];
 
 /// What settling reads from the link path's lineage: the link's clone, the
@@ -1811,14 +1812,20 @@ where
                         .as_mut()
                         .and_then(|detections| detections.get_mut(space))
                     {
-                        detection.accept(record.number, at, record.ack_eliciting, packet.in_flight);
+                        detection.accept(
+                            record.number,
+                            at,
+                            record.ack_eliciting,
+                            record.pmtu_probe,
+                            packet.in_flight,
+                        );
                     }
                 }
             }
         },
     );
     let marked = others.with_own_recovery::<SettleRecoveryTakes<T, L, S, Ls>, Iq, _>(
-        |hlist_pat![_, _, detections], _| {
+        |hlist_pat![_, _, detections, _], _| {
             if let Some(mark) = mark.take() {
                 mark(Some(detections));
             }
@@ -1916,6 +1923,7 @@ fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ist, Ipp, Ima, Jx, Jr, Jm>(
     // meanwhile
     let mut journals = core::mem::take(lineage.get_mut::<SendJournalsOf<T, L>, Ij>());
     let mut removed = Vec::new();
+    let mut unsent_probes = Vec::new();
     let mut established =
         others.borrow_established_optional::<EstablishedSourceComponentsOfParts<T, L>, Ist>();
     for datagram in datagrams {
@@ -1926,6 +1934,9 @@ fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ist, Ipp, Ima, Jx, Jr, Jm>(
                 continue;
             };
             let record = space_journals.send_result_unknown(sealed, retain_until(space));
+            if record.pmtu_probe {
+                unsent_probes.push(record.bytes);
+            }
             LineageFeedback::<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>::lost_each(
                 lineage,
                 &mut established,
@@ -1939,6 +1950,16 @@ fn give_up<'v, T, L, B, S, Ls, Ij, If, Iv, Iq, Hf, Ist, Ipp, Ima, Jx, Jr, Jm>(
     // on
     drop(established);
     *lineage.get_mut::<SendJournalsOf<T, L>, Ij>() = journals;
+    if !unsent_probes.is_empty() {
+        others.with_own_recovery::<SettleRecoveryTakes<T, L, S, Ls>, Iq, _>(
+            |hlist_pat![_, state, _, pmtu], _| {
+                for size in unsent_probes {
+                    state.on_pmtu_probe_settled();
+                    pmtu.on_probe_failed(size, PmtuProbeFailure::Unsent, now);
+                }
+            },
+        );
+    }
     remove_without_signal::<T, L, B, S, Ls, If, Iv, Iq, Ipp, Jx, Jr, Jm>(lineage, others, removed);
 }
 
@@ -1991,7 +2012,7 @@ fn remove_without_signal<'v, T, L, B, S, Ls, If, Iv, Iq, Ipp, Jx, Jr, Jm>(
     };
     let factory = lineage.get_mut::<RecoveryFactoryOf<T, L>, If>();
     others.with_own_recovery::<SettleRecoveryTakes<T, L, S, Ls>, Iq, _>(
-        |hlist_pat![part, state, _], others| {
+        |hlist_pat![part, state, _, _], others| {
             for packet in &removed {
                 state.remove_in_flight(packet.bytes);
             }
