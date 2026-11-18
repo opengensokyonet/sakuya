@@ -1,7 +1,7 @@
 //! What a peer's address says about its network, and its bytes.
 
 use core::fmt;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 use bytes::{Buf, BufMut};
 use frunk_core::coproduct::{CNil, Coproduct};
@@ -171,50 +171,65 @@ const IPV4: u8 = 4;
 /// The family byte of an IPv6 address.
 const IPV6: u8 = 6;
 
-/// The bytes of a socket address: a family byte, the IP address, and the
-/// port in network order.
+/// The bytes of a socket address: a family byte, the IP address, the port,
+/// and for IPv6 the flow information and the scope ID, all in network order.
+///
+/// The IPv6 scope ID is kept because a UDP link keeps it: link-local
+/// addresses on different interfaces are different peers, and an address
+/// must read back equal.
 impl PeerAddressCodec for SocketAddr {
     fn write_peer(&self, dst: &mut impl BufMut) {
-        match self.ip() {
-            IpAddr::V4(ip) => {
+        match self {
+            SocketAddr::V4(address) => {
                 dst.put_u8(IPV4);
-                dst.put_slice(&ip.octets());
+                dst.put_slice(&address.ip().octets());
+                dst.put_u16(address.port());
             }
-            IpAddr::V6(ip) => {
+            SocketAddr::V6(address) => {
                 dst.put_u8(IPV6);
-                dst.put_slice(&ip.octets());
+                dst.put_slice(&address.ip().octets());
+                dst.put_u16(address.port());
+                dst.put_u32(address.flowinfo());
+                dst.put_u32(address.scope_id());
             }
         }
-        dst.put_u16(self.port());
     }
 
     fn read_peer<S: Buf + SplitTo>(src: &mut S) -> Result<Self, PeerAddressReadError> {
         if !src.has_remaining() {
             return Err(PeerAddressReadError::Incomplete);
         }
-        let ip = match src.get_u8() {
+        match src.get_u8() {
             IPV4 => {
-                if src.remaining() < 4 {
+                if src.remaining() < 4 + 2 {
                     return Err(PeerAddressReadError::Incomplete);
                 }
                 let mut octets = [0; 4];
                 src.copy_to_slice(&mut octets);
-                IpAddr::V4(Ipv4Addr::from(octets))
+                let port = src.get_u16();
+                Ok(SocketAddr::V4(SocketAddrV4::new(
+                    Ipv4Addr::from(octets),
+                    port,
+                )))
             }
             IPV6 => {
-                if src.remaining() < 16 {
+                if src.remaining() < 16 + 2 + 4 + 4 {
                     return Err(PeerAddressReadError::Incomplete);
                 }
                 let mut octets = [0; 16];
                 src.copy_to_slice(&mut octets);
-                IpAddr::V6(Ipv6Addr::from(octets))
+                let port = src.get_u16();
+                let flowinfo = src.get_u32();
+                let scope_id = src.get_u32();
+                Ok(SocketAddr::V6(SocketAddrV6::new(
+                    Ipv6Addr::from(octets),
+                    port,
+                    flowinfo,
+                    scope_id,
+                )))
             }
-            _ => return Err(PeerAddressReadError::UnknownFamily),
-        };
-        if src.remaining() < 2 {
-            return Err(PeerAddressReadError::Incomplete);
+            _ => Err(PeerAddressReadError::UnknownFamily),
         }
-        Ok(SocketAddr::new(ip, src.get_u16()))
     }
 }
 
@@ -274,7 +289,7 @@ mod tests {
 
     #[test]
     fn socket_addresses_and_sums_read_back_what_they_wrote() {
-        for text in ["198.51.100.7:50000", "[2001:db8::1]:443"] {
+        for text in ["198.51.100.7:50000", "[2001:db8::1]:443", "[fe80::1%3]:443"] {
             let mut bytes = Vec::new();
             addr(text).write_peer(&mut bytes);
             let mut src = &bytes[..];
