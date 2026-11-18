@@ -480,7 +480,7 @@ fn an_event_reaches_the_nodes_above_and_below_its_node_and_not_those_beside() {
         log.iter().any(|l| l == "path watch: started"),
         "the second link path started: {log:?}"
     );
-    parts::command(Command::Sample(first));
+    parts::command(Command::Sample(first.clone()));
     assert!(outer.poll(&mut connection).is_pending());
     // published at the first link path's recovery layer: the connection
     // above it and the first link path above it get it, the second link
@@ -489,6 +489,20 @@ fn an_event_reaches_the_nodes_above_and_below_its_node_and_not_those_beside() {
     assert_eq!(
         take_log(),
         [
+            "watch polled",
+            "watch polled",
+            "hub: sampled true, record false",
+            "path watch: sampled",
+        ]
+    );
+    // published twice in one lend, handled once
+    parts::command(Command::Sample(first.clone()));
+    parts::command(Command::Sample(first));
+    assert!(outer.poll(&mut connection).is_pending());
+    assert_eq!(
+        take_log(),
+        [
+            "watch polled",
             "watch polled",
             "watch polled",
             "hub: sampled true, record false",
