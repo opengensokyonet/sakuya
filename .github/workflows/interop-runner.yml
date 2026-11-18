@@ -63,6 +63,34 @@ jobs:
           path: ${{ runner.temp }}/sakuya-image.tar.zst
           retention-days: 1
           if-no-files-found: error
+      # The runner needs Wireshark 4.5.0 or newer; Ubuntu 24.04 has 4.2. The
+      # packages come from the Wireshark PPA once, here, and every runner job
+      # installs these files: Launchpad answers many of sixteen jobs fetching
+      # at once with 503.
+      - name: Fetch tshark's packages
+        run: |
+          sudo apt-get clean
+          for attempt in 1 2 3 4; do
+            if sudo add-apt-repository -y ppa:wireshark-dev/stable \
+              && sudo apt-get update -o Acquire::Retries=5 \
+              && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                --download-only -o Acquire::Retries=5 tshark; then
+              break
+            fi
+            if [ "$attempt" = 4 ]; then
+              exit 1
+            fi
+            sleep $((attempt * 60))
+          done
+          mkdir "$RUNNER_TEMP/tshark-debs"
+          cp /var/cache/apt/archives/*.deb "$RUNNER_TEMP/tshark-debs/"
+          ls "$RUNNER_TEMP/tshark-debs"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tshark-debs
+          path: ${{ runner.temp }}/tshark-debs
+          retention-days: 1
+          if-no-files-found: error
 
   runner:
     needs: image
@@ -91,24 +119,14 @@ jobs:
           version: version=v28.3.0
       - name: Load the kernel module for the IPv6 networks of the runner
         run: sudo modprobe ip6table_filter
-      # The runner needs Wireshark 4.5.0 or newer; Ubuntu 24.04 has 4.2.
+      - uses: actions/download-artifact@v8
+        with:
+          name: tshark-debs
+          path: ${{ runner.temp }}/tshark-debs
       - name: Install tshark
         run: |
-          sudo add-apt-repository -y ppa:wireshark-dev/stable
-          sudo apt-get update
-          # The PPA sometimes answers a download with 503 when several jobs
-          # fetch from it at once; apt retries each file, and the whole
-          # install is tried again after a pause.
-          for attempt in 1 2 3; do
-            if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-              -o Acquire::Retries=5 tshark; then
-              break
-            fi
-            if [ "$attempt" = 3 ]; then
-              exit 1
-            fi
-            sleep $((attempt * 30))
-          done
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            -o Acquire::Retries=5 "$RUNNER_TEMP"/tshark-debs/*.deb
           tshark --version | head -n 1
           tshark --version | head -n 1 | python3 -c '
           import re, sys
@@ -229,7 +247,10 @@ jobs:
   # results of the earlier runs that the site lists.
   deploy:
     needs: summary
-    if: github.ref == 'refs/heads/main'
+    # A runner job that failed leaves its peer without results in the matrix;
+    # the pages are still published. Without a status function here, a failed
+    # runner job would skip this job too.
+    if: ${{ !cancelled() && needs.summary.result == 'success' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:

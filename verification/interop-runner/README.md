@@ -140,7 +140,12 @@ The jobs run on `ubuntu-24.04`, as the runner's own workflow does:
   grants and the hosted runners allow.
 - tshark comes from the Wireshark stable PPA, which carries only its latest
   release, so its version is not pinned; the job checks that it is 4.5.0 or
-  newer.
+  newer. The `image` job fetches its packages from the PPA once, retrying
+  when Launchpad answers 503, and hands them to the runner jobs as the
+  artifact `tshark-debs`; sixteen jobs fetching from the PPA at once had half
+  of them refused.
+- A runner job that fails leaves its peer without results in the matrix; the
+  summary and the web pages are still made from the other jobs.
 - The peers run in parallel jobs, at most eight at once (`max-parallel`),
   so that the other workflows keep some of the 20 jobs a public repository
   on the Free plan can run at once; with sakuya against itself there are
