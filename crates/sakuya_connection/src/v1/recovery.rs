@@ -578,6 +578,15 @@ pub fn max_datagram_size_in_use(
     peer_limit: Option<usize>,
     link_limit: Option<usize>,
 ) -> usize {
+    datagram_size_limits(conclusion, peer_limit, link_limit).max_udp_payload()
+}
+
+/// The size limits for recovery, independent of the current send allowances.
+pub(super) fn datagram_size_limits(
+    conclusion: usize,
+    peer_limit: Option<usize>,
+    link_limit: Option<usize>,
+) -> crate::send_strategy::DatagramLimits {
     let nothing_allowed = CongestionAllowance {
         window_left: 0,
         pacing_allowance: 0,
@@ -590,7 +599,6 @@ pub fn max_datagram_size_in_use(
         None,
         Some((conclusion, nothing_allowed)),
     )
-    .max_udp_payload()
 }
 
 /// The peer's `max_udp_payload_size`: its default 65527 when the peer left

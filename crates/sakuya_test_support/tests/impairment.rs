@@ -59,14 +59,15 @@ use sakuya_endpoint::{
     retry::{CapacityFraction, LoadStatelessRetryPolicy},
     role::{AcceptingServer, ConnectingClient, NoClient, NoServer},
 };
+use sakuya_link::{ConnectingLinkBinding as _, Link as _};
 use sakuya_packet_protection::backend::ring::RingBackend;
 use sakuya_qlog::{QUIC_EVENT_SCHEMA, QlogConfig, QlogWriter};
 use sakuya_recovery::loss::LossThresholds;
 use sakuya_stream::connection::{CloseReason, ImmediateClose};
 use sakuya_test_support::{
     network::{
-        Blackhole, DatagramFate, Direction, DirectionImpairments, Impairments, MemoryLink,
-        MemoryNetwork, Probability, RandomLoss, Reorder,
+        Blackhole, DatagramFate, Direction, DirectionImpairments, DropCause, Impairments,
+        MemoryLink, MemoryNetwork, Probability, RandomLoss, Reorder,
     },
     pki,
     verify::{TestRootsVerifier, test_roots_verifier},
@@ -457,6 +458,7 @@ fn answer() -> Vec<u8> {
 }
 
 /// When the network changes during a run.
+#[derive(Clone, Copy)]
 enum Change {
     /// Nothing changes.
     None,
@@ -477,12 +479,15 @@ struct Outcome {
     /// How many datagrams had been numbered in each direction when the
     /// network changed.
     changed_at: Option<(u64, u64)>,
+    /// The size confirmed on the server link before the client closed.
+    server_conclusion: usize,
 }
 
 /// Two endpoints on a network in memory, with a connection between them
 /// whose handshake has completed on both sides.
 struct Pair {
     network: MemoryNetwork<TokioClock>,
+    server_link: Link,
     server: Endpoint<InMemory, Server, NoClient>,
     client: Endpoint<InMemory, NoServer, Client>,
     incoming: IncomingStream<InMemory, Server>,
@@ -508,11 +513,9 @@ impl Pair {
         ))
         .unwrap();
         drivers.push(("the server's reflow driver", spawn_local(server_reflow)));
+        let server_binding = network.bind(server_address());
         let (_server_handle, server_driver) = server
-            .add_accepting_binding(
-                network.bind(server_address()),
-                BindingDeclarations::default(),
-            )
+            .add_accepting_binding(server_binding.clone(), BindingDeclarations::default())
             .unwrap();
         drivers.push(("the server's binding driver", spawn_local(server_driver)));
         let mut incoming = server.incoming();
@@ -557,8 +560,11 @@ impl Pair {
         within("the server's handshake", server_conn.handshake_completed())
             .await
             .expect("the server's handshake completes");
+        // The binding returns the live link with this peer.
+        let server_link = server_binding.connect(client_address()).await.unwrap();
         Self {
             network,
+            server_link,
             server,
             client,
             incoming,
@@ -607,6 +613,15 @@ fn exchange(seed: u64, impairments: Impairments, change: Change, qlog: Option<&P
         let client_layer = pair.client_conn.established().await.expect("established");
         let server_layer = pair.server_conn.established().await.expect("established");
 
+        if let Change::LinkLimit(limit) | Change::PathMtu(limit) = change {
+            // Change a path whose larger size has already been confirmed.
+            within("a larger size confirmed on the server link", async {
+                while pair.server_link.datagram_size_conclusion() <= limit {
+                    tokio::time::sleep(DELAY).await;
+                }
+            })
+            .await;
+        }
         let changed_at = match change {
             Change::None => None,
             Change::LinkLimit(size) => {
@@ -634,10 +649,24 @@ fn exchange(seed: u64, impairments: Impairments, change: Change, qlog: Option<&P
             {
                 request.extend_from_slice(&chunk);
             }
-            writer
-                .write_all_unpin(Bytes::from(answer()))
-                .await
-                .expect("the answer is written");
+            let mut data = Bytes::from(answer());
+            if matches!(change, Change::PathMtu(_)) {
+                // Send a full packet and a short tail in successive flights.
+                // The tails still elicit ACKs when the large packets disappear.
+                while !data.is_empty() {
+                    let chunk = data.split_to(1800.min(data.len()));
+                    writer
+                        .write_all_unpin(chunk)
+                        .await
+                        .expect("the answer is written");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            } else {
+                writer
+                    .write_all_unpin(data)
+                    .await
+                    .expect("the answer is written");
+            }
             writer.close().expect("the answer ends");
             request
         });
@@ -651,7 +680,7 @@ fn exchange(seed: u64, impairments: Impairments, change: Change, qlog: Option<&P
             .expect("the request is written");
         writer.close().expect("the request ends");
         let mut received = Vec::new();
-        within("the answer arrives", async {
+        let read_answer = async {
             while let Some(chunk) = reader
                 .read_chunk_unpin(NonZeroUsize::new(4096).unwrap())
                 .await
@@ -659,14 +688,33 @@ fn exchange(seed: u64, impairments: Impairments, change: Change, qlog: Option<&P
             {
                 received.extend_from_slice(&chunk);
             }
-        })
-        .await;
+        };
+        if let Change::PathMtu(limit) = change {
+            // Watch the shared conclusion during the transfer. Loss of large
+            // packets takes it back to 1200, then smaller probes succeed.
+            let reprobe = async {
+                while pair.server_link.datagram_size_conclusion() != 1200 {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                while !(1201..=limit).contains(&pair.server_link.datagram_size_conclusion()) {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            };
+            futures_util::future::join(
+                within("the answer arrives", read_answer),
+                within("black hole detection and a new confirmed size", reprobe),
+            )
+            .await;
+        } else {
+            within("the answer arrives", read_answer).await;
+        }
         let request = within("the server's application ends", server_application)
             .await
             .unwrap();
         assert_eq!(request, REQUEST);
         assert!(received == answer(), "the whole answer arrives in order");
 
+        let server_conclusion = pair.server_link.datagram_size_conclusion();
         pair.client_conn.close(AppClose(7));
         let CloseReason::Local(cause) =
             within("the client's close", pair.client_conn.closed()).await
@@ -688,6 +736,7 @@ fn exchange(seed: u64, impairments: Impairments, change: Change, qlog: Option<&P
             to_server,
             to_client,
             changed_at,
+            server_conclusion,
         }
     })
 }
@@ -1166,40 +1215,100 @@ fn the_answer_arrives_across_a_blackhole() {
     assert!(dropped(&outcome.to_server) + dropped(&outcome.to_client) > 0);
 }
 
-/// sakuya does not probe for datagram sizes above 1200 bytes yet (the
-/// policy's probe size is not read by the connection), so no datagram is
-/// larger than 1200 bytes and a limit above it changes nothing today; the
-/// assertion holds once probing is wired.
+#[test]
+fn a_memory_link_accepts_the_prefix_before_an_oversized_datagram() {
+    use sakuya_link::{EcnMarking, OutgoingDatagram};
+
+    run_paused(async {
+        let network =
+            MemoryNetwork::new(TokioClock, 0, server_address(), Impairments::both(plain()));
+        let binding = network.bind(client_address());
+        let link = binding.connect(server_address()).await.unwrap();
+        network.set_max_datagram_size(client_address(), 1280);
+        let batch = [1280, 1281, 1200].map(|size| OutgoingDatagram {
+            payload: Bytes::from(vec![0; size]),
+            ecn: EcnMarking::NotEct,
+        });
+        assert_eq!(link.send(&batch).await.unwrap().count.get(), 1);
+        assert!(link.send(&batch[1..]).await.is_err());
+        assert_eq!(link.send(&batch[2..]).await.unwrap().count.get(), 1);
+        let lengths: Vec<_> = network
+            .fates(Direction::ToServer)
+            .iter()
+            .map(|fate| fate.len)
+            .collect();
+        assert_eq!(lengths, [1280, 1200]);
+    });
+}
+
+/// The server uses a size confirmed by a marked probe to carry stream
+/// data, within the memory link's 1452-byte limit.
+#[test]
+fn a_confirmed_datagram_size_probe_raises_the_size_used_for_the_answer() {
+    let (outcome, _, server) = twice_logged(23, &Impairments::both(plain()), "pmtu");
+    let size = outcome.server_conclusion;
+    assert!((1201..=1452).contains(&size));
+    let packet_length = format!(r#"],"raw":{{"length":{size},"#);
+    assert!(server.iter().any(|event| {
+        event.name == "quic:packet_sent"
+            && event.has(r#""is_mtu_probe_packet":true"#)
+            && event.has(&packet_length)
+    }));
+    let largest_stream_packet = server
+        .iter()
+        .filter(|event| event.name == "quic:packet_sent" && event.has(r#""frame_type":"stream""#))
+        .map(|event| {
+            between(&event.record, r#"],"raw":{"length":"#, ",")
+                .parse::<usize>()
+                .unwrap()
+        })
+        .max()
+        .expect("stream data was sent");
+    assert!((1201..=size).contains(&largest_stream_packet));
+    assert!(outcome.to_client.iter().all(|fate| fate.len <= 1452));
+}
+
 #[test]
 fn after_the_links_report_a_lower_limit_no_larger_datagram_is_sent() {
     const LIMIT: usize = 1280;
     let outcome = twice(5, &Impairments::both(plain()), || Change::LinkLimit(LIMIT));
     let (to_server, to_client) = outcome.changed_at.expect("the network changed");
-    // what was already being sent when the limit changed may be larger: a
-    // few datagrams of slack
-    const SLACK: u64 = 8;
+    assert!(
+        outcome
+            .to_client
+            .iter()
+            .any(|fate| fate.number <= to_client && fate.len > LIMIT)
+    );
     for (fates, from) in [
         (&outcome.to_server, to_server),
         (&outcome.to_client, to_client),
     ] {
-        for fate in after(fates, from + SLACK) {
-            assert!(
-                fate.len <= LIMIT,
-                "datagram {} of {} bytes after the limit fell to {LIMIT}",
-                fate.number,
-                fate.len
-            );
-        }
+        let after = after(fates, from);
+        assert!(!after.is_empty());
+        assert!(after.iter().all(|fate| fate.len <= LIMIT));
     }
 }
 
-/// As above, nothing is larger than 1200 bytes today, so a path MTU that
-/// falls to 1250 bytes drops nothing; once probing is wired this exercises
-/// the policy's black hole detection.
 #[test]
 fn the_answer_arrives_when_the_path_mtu_falls_without_a_word() {
-    let outcome = twice(9, &Impairments::both(plain()), || Change::PathMtu(1250));
-    let _ = outcome;
+    const MTU: usize = 1250;
+    let outcome = twice(9, &Impairments::both(plain()), || Change::PathMtu(MTU));
+    let (_, changed) = outcome.changed_at.expect("the path MTU changed");
+    let after = after(&outcome.to_client, changed);
+    assert!(
+        after
+            .iter()
+            .any(|fate| fate.dropped == Some(DropCause::PathMtu))
+    );
+    // Every larger datagram sent after the change is dropped before it
+    // reaches the peer, so none can be acknowledged.
+    assert!(
+        after
+            .iter()
+            .filter(|fate| fate.len > MTU)
+            .all(|fate| fate.dropped == Some(DropCause::PathMtu))
+    );
+    assert!((1201..=MTU).contains(&outcome.server_conclusion));
 }
 
 /// A link whose limit falls below 1200 bytes cannot carry QUIC (RFC 9000

@@ -40,7 +40,7 @@ use crate::{
     frame_source::{EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts},
     layer,
     others::OtherNodes,
-    send_strategy::{AnyActiveLinkPath, DatagramLimits},
+    send_strategy::AnyActiveLinkPath,
     share::{FlatMut, FlatRef, LineageLists, LineagePartList, NodeData},
     take::{GetAt, ReadEach, Take, TakeEach},
 };
@@ -315,13 +315,10 @@ where
         let (batches, window) =
             lend_congestion::<T, L, B, Jx, Jr, _>(factory, part, others, |mut access| {
             let mut batches = Vec::new();
-            // The peer's limit is at least 1200. A smaller size in use
-            // therefore means the link ceiling or the conclusion prevents
-            // ordinary sending, including a PTO probe.
-            let action = if facts.max_datagram_size < DatagramLimits::MINIMUM {
-                PtoAction::MarkInFlightLost
-            } else {
+            let action = if facts.limits.supports_minimum() {
                 access.on_pto_expired(&expiry)
+            } else {
+                PtoAction::MarkInFlightLost
             };
             match action {
                 PtoAction::Probe { datagrams, spaces } => {

@@ -97,7 +97,7 @@ pub struct PmtuProbeSummary;
 /// The size of the datagram size probe a link path is to send now
 /// (`PendingPmtuProbe`), in the link path's node; `None` while there is
 /// none. It is set anew after each event of the link path's probing policy
-/// ([`wanted`](Self::wanted)), and writing the probe's PING forgets it.
+/// and cleared when its PING is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PendingPmtuProbe(Option<usize>);
 

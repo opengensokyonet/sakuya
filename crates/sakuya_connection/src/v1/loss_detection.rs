@@ -54,7 +54,7 @@ use crate::{
     frame_source::{EstablishedSourceComponentsOf, EstablishedSourceComponentsOfParts},
     layer,
     others::OtherNodes,
-    send_strategy::AnyActiveLinkPath,
+    send_strategy::{AnyActiveLinkPath, DatagramLimits},
     share::{
         FlatMut, FlatRef, LineageLists, LineagePartList, LinkPathIdentifierOf, NodeData, PartList,
     },
@@ -70,7 +70,7 @@ use super::{
     parameters::PeerTransportParameters,
     recovery::{
         CongestionPartOf, LinkPathCongestionState, LossStateOf, OthersOf, PmtuOf,
-        RecoveryFactoryOf, RttOf, SentStateOf, lend_congestion, max_datagram_size_in_use,
+        RecoveryFactoryOf, RttOf, SentStateOf, datagram_size_limits, lend_congestion,
         peer_max_udp_payload_size,
     },
     send::SendTypes,
@@ -95,8 +95,8 @@ pub(super) struct LossFacts<I> {
     pub(super) thresholds: LossThresholds,
     /// The peer's `max_ack_delay`, `None` while it is not known.
     pub(super) peer_max_ack_delay: Option<Duration>,
-    /// The maximum datagram size the link path uses.
-    pub(super) max_datagram_size: usize,
+    /// The size limits in effect when loss detection runs.
+    pub(super) limits: DatagramLimits,
     /// Whether an ACK frame that declares the batch gave the link path a new
     /// RTT sample; never at an expiry.
     pub(super) rtt_sampled: bool,
@@ -202,7 +202,7 @@ where
         bytes_in_flight: state.bytes_in_flight(),
         rtt: facts.rtt,
         rtt_sampled: facts.rtt_sampled,
-        max_datagram_size: facts.max_datagram_size,
+        max_datagram_size: facts.limits.max_udp_payload(),
     };
     if !removed.is_empty() {
         access.on_removed(removed.into_iter(), &context);
@@ -477,7 +477,7 @@ where
 {
     let frunk_core::hlist_pat![thresholds, rtt, pmtu, peer, link] =
         lineage.read_each::<LossFactsReads<T, L>, If>();
-    let max_datagram_size = max_datagram_size_in_use(
+    let limits = datagram_size_limits(
         pmtu.conclusion(),
         peer_max_udp_payload_size::<L, Ipp>(peer),
         link.0.max_datagram_size().ok(),
@@ -487,7 +487,7 @@ where
         rtt: rtt.estimate(),
         thresholds: *thresholds,
         peer_max_ack_delay: peer_max_ack_delay::<L, Ima>(peer),
-        max_datagram_size,
+        limits,
         rtt_sampled: false,
     }
 }

@@ -19,7 +19,8 @@
 //! client's datagrams come from, as a NAT that rebinds
 //! ([`rebind`](MemoryNetwork::rebind)).
 //!
-//! Links never end, never mark ECN and accept every datagram at once.
+//! Links never end or mark ECN. A link accepts the prefix of a batch
+//! within its size limit and gives up a datagram over that limit.
 
 mod impairment;
 mod random;
@@ -502,8 +503,8 @@ impl<C: MonotonicClock + 'static> Link for MemoryLink<C> {
         Self: 'a;
     type Ended = core::future::Pending<Infallible>;
     type MaxDatagramSizeError = Infallible;
-    type SendError = Infallible;
-    type Send<'a> = Ready<Result<SendAcceptance<C::Instant>, Infallible>>;
+    type SendError = ();
+    type Send<'a> = Ready<Result<SendAcceptance<C::Instant>, Self::SendError>>;
     type MaxDatagramSizeChanged = MemoryLimitChanged<C>;
 
     fn id(&self) -> &LinkId<SocketAddr, SocketAddr> {
@@ -531,12 +532,17 @@ impl<C: MonotonicClock + 'static> Link for MemoryLink<C> {
 
     fn send<'a>(&self, batch: &'a [OutgoingDatagram]) -> Self::Send<'a> {
         let peer = self.shared.id.peer;
-        for datagram in batch {
+        let limit = lock(&self.shared.state).max_datagram_size;
+        let accepted = batch.iter().take_while(|d| d.payload.len() <= limit);
+        let mut count = 0;
+        for datagram in accepted {
+            count += 1;
             self.network
                 .transmit(self.shared.local, peer, &datagram.payload);
         }
-        // invariant: a batch is not empty
-        let count = NonZeroUsize::new(batch.len()).expect("a batch is not empty");
+        let Some(count) = NonZeroUsize::new(count) else {
+            return core::future::ready(Err(()));
+        };
         core::future::ready(Ok(SendAcceptance {
             count,
             at: self.network.clock.now(),

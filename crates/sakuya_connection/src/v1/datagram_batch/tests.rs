@@ -54,6 +54,12 @@ impl crate::feedback::InjectSummary<PaddingSummary, ()> for Summary {
     }
 }
 
+impl crate::feedback::InjectSummary<crate::v1::pmtu_probe::PmtuProbeSummary, ()> for Summary {
+    fn inject_summary(_: crate::v1::pmtu_probe::PmtuProbeSummary) -> Self {
+        Self::Frame("ping")
+    }
+}
+
 type Journals = DequeSendJournals<u64, Summary, ()>;
 pub(in crate::v1) type Batch =
     DatagramBatch<DequeSealedPacket, DequeSealedPacket, DequeSealedPacket, usize>;
@@ -397,6 +403,41 @@ fn a_short_packet_is_padded_for_the_header_protection_sample() {
     let record = record(&mut application, entry.application_data.unwrap().sealed);
     assert!(record.pmtu_probe);
     assert_eq!(record.summaries, [Summary::Frame("ping"), Summary::Padding]);
+}
+
+#[test]
+fn a_stale_probe_size_writes_nothing_even_with_the_probe_floor_and_mark() {
+    use crate::{frame_source::FrameSource, v1::pmtu_probe::PendingPmtuProbe};
+
+    let (sender, _) = one_rtt_keys();
+    let mut application = Journals::new();
+    let mut usage = AeadUsage::new();
+    let mut accounts = Accounts::new();
+    let mut batch = Batch::new(NonZeroUsize::MIN);
+    let mut pending = PendingPmtuProbe::default();
+    pending.set(Some(1326));
+    {
+        let mut datagram = accounts.start(&mut batch, Role::Server, 1326, 1326, false);
+        datagram.raise_floor(1326);
+        let mut packet = datagram
+            .start_one_rtt_packet(
+                application.start_attempt(()),
+                sender.send().unwrap(),
+                &mut usage,
+                None,
+            )
+            .unwrap();
+        packet.mark_pmtu_probe();
+        let open = packet.open::<InFlightClass>();
+        let before = open.buffer_len();
+        let supplied = pending.supply(1389, open);
+        assert_eq!(supplied.buffer_len(), before);
+        supplied.conclude(false);
+    }
+    assert_eq!(pending.size(), Some(1326));
+    assert!(batch.is_empty());
+    assert_eq!(application.next_packet_number(), PacketNumber::ZERO);
+    assert_eq!(usage.sealed_with_current(), 0);
 }
 
 #[test]

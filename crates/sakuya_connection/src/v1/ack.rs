@@ -90,7 +90,7 @@ use super::{
     receive::space_of,
     recovery::{
         CongestionPartOf, LinkPathCongestionState, OthersOf, PmtuOf, RecoveryFactoryOf, RttOf,
-        lend_congestion, max_datagram_size_in_use, peer_max_udp_payload_size, refill,
+        datagram_size_limits, lend_congestion, peer_max_udp_payload_size, refill,
     },
     send::SendTypes,
     send_planning::IntakePublishOutcome,
@@ -366,14 +366,14 @@ where
                     }
                 }
                 let estimate = rtt.estimate();
-                let max_datagram_size =
-                    max_datagram_size_in_use(pmtu.conclusion(), peer_udp, link_limit);
+                let limits = datagram_size_limits(pmtu.conclusion(), peer_udp, link_limit);
+                let max_datagram_size = limits.max_udp_payload();
                 let facts = LossFacts {
                     now: at,
                     rtt: estimate,
                     thresholds,
                     peer_max_ack_delay,
-                    max_datagram_size,
+                    limits,
                     rtt_sampled,
                 };
                 let newly_acked = !acked.is_empty();

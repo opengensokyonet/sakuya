@@ -566,6 +566,7 @@ mod spy {
     }
     impl PtoPolicy<Duration> for Logged<'_> {
         fn on_pto_expired(&mut self, expiry: &PtoExpiry<Duration>) -> PtoAction {
+            log("PTO policy consulted");
             self.0.on_pto_expired(expiry)
         }
         fn on_duplicate_initial_crypto(&mut self) -> bool {
@@ -1385,7 +1386,16 @@ mod probe {
                     let all = PacketNumber::ZERO..=PacketNumber::new(1 << 20).unwrap();
                     let records: Vec<_> = journals
                         .take_acknowledged(&all)
-                        .map(|record| (record.number.get(), format!("{:?}", record.state)))
+                        .map(|record| {
+                            if record.pmtu_probe {
+                                log(format!(
+                                    "probe record {} bytes, packet {}",
+                                    record.bytes,
+                                    record.number.get()
+                                ));
+                            }
+                            (record.number.get(), format!("{:?}", record.state))
+                        })
                         .collect();
                     log(format!("records {space:?}: {records:?}"));
                 }
@@ -5258,6 +5268,10 @@ fn prepare_pmtu_handshake() {
 fn a_confirmed_link_path_sends_one_padded_ping_of_the_probe_size_and_waits_for_its_result() {
     reset();
     prepare_pmtu_handshake();
+    feed_packets([(
+        ms(100),
+        probe::PacketStep::TakeRecords(PacketNumberSpaceKind::ApplicationData),
+    )]);
     let mut connection = connection!(SpyMine, AddressValidation::Validated, link());
     let _ = settle(&mut connection, 11..=13);
     assert!(common::take_sent().is_empty());
@@ -5277,11 +5291,123 @@ fn a_confirmed_link_path_sends_one_padded_ping_of_the_probe_size_and_waits_for_i
     assert_eq!(payload[0], 0x01, "PING");
     assert!(payload[1..].iter().all(|byte| *byte == 0), "PADDING");
 
-    let _ = settle(&mut connection, 17..=100);
+    let log = settle(&mut connection, 17..=100);
+    assert_eq!(
+        lines_of(log, &["probe record"]),
+        ["probe record 1326 bytes, packet 1"]
+    );
     assert!(
         common::take_sent().is_empty(),
         "the probe is still outstanding"
     );
+}
+
+/// An Application Data ACK from the client.
+fn one_rtt_ack_received(
+    number: u64,
+    ranges: &[(u8, u8)],
+    link: &LinkId<(), ()>,
+    at: Duration,
+) -> probe::PacketStep {
+    probe::PacketStep::Receive(received(
+        one_rtt_packet_of(0, number, &ack_of(ranges, false)),
+        link,
+        at,
+    ))
+}
+
+#[test]
+fn losing_a_size_probe_removes_its_bytes_and_a_late_ack_raises_the_size_in_use() {
+    reset();
+    let first = link();
+    prepare_pmtu_handshake();
+    // Packets 0 and 1 carry the connection ID and the probe. An ACK of 4
+    // puts only the probe past the packet threshold. It also acknowledges
+    // 0, so the probe is above the smallest acknowledged number.
+    feed([(
+        ms(20),
+        probe::Step::Sent {
+            space: PacketNumberSpaceKind::ApplicationData,
+            count: 3,
+        },
+    )]);
+    feed_packets([
+        (
+            ms(30),
+            one_rtt_ack_received(0, &[(4, 4), (0, 0)], &first, ms(30)),
+        ),
+        (ms(31), one_rtt_ack_received(1, &[(1, 1)], &first, ms(31))),
+    ]);
+    let mut connection = connection!(SpyMine, AddressValidation::Validated, first);
+    let _ = settle(&mut connection, 11..=29);
+    assert_eq!(common::take_sent().len(), 2);
+    let log = settle(&mut connection, 30..=30);
+    assert!(
+        log.iter()
+            .any(|line| line.starts_with("congestion: removed 1326 bytes")),
+        "{log:?}"
+    );
+    assert!(lines_of(log, &["congestion: lost", "congestion: persistent"]).is_empty());
+    let sent = common::take_sent();
+    assert_eq!(
+        sent.iter().map(|(_, d)| d.len()).collect::<Vec<_>>(),
+        [1326],
+        "retry"
+    );
+    let log = settle(&mut connection, 31..=31);
+    assert_eq!(
+        lines_of(log, &["size in use", "congestion:"]),
+        ["size in use 1326, handshake confirmed true"]
+    );
+    let sent = common::take_sent();
+    assert_eq!(
+        sent.iter().map(|(_, d)| d.len()).collect::<Vec<_>>(),
+        [1389],
+        "the next probe"
+    );
+}
+
+#[test]
+fn giving_up_a_size_probe_three_times_retries_its_size() {
+    use common::SendOutcome::{Accept, GiveUp};
+    reset();
+    prepare_pmtu_handshake();
+    // First the connection ID goes. Giving up the next three probes
+    // must not count toward the three network losses that lower the size.
+    common::plan_sends([Accept(1), GiveUp, GiveUp, GiveUp]);
+    let mut connection = connection!(SpyMine, AddressValidation::Validated, link());
+    let log = settle(&mut connection, 11..=100);
+    let given_up = common::take_given_up();
+    assert_eq!(
+        given_up.iter().map(|d| d.len()).collect::<Vec<_>>(),
+        [1326; 3]
+    );
+    let sent = common::take_sent();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[1].1.len(), 1326);
+    assert!(lines_of(log, &["congestion: lost", "congestion: persistent"]).is_empty());
+}
+
+#[test]
+fn a_link_below_the_minimum_declares_the_probe_lost_without_asking_the_pto_policy() {
+    reset();
+    let first = link();
+    prepare_pmtu_handshake();
+    // A candidate can still be validated, so losing the first link's
+    // minimum does not end the connection with NO_VIABLE_PATH.
+    ADD.with(|adder| adder.set(Some((ms(18), link()))));
+    feed_packets([(ms(20), one_rtt_ack_received(0, &[(0, 0)], &first, ms(20)))]);
+    let mut connection = connection!(SpyMine, AddressValidation::Validated, first.clone());
+    let _ = settle(&mut connection, 11..=20);
+    assert_eq!(common::take_sent().len(), 2);
+    common::set_link_ceiling(&first, 1172);
+    common::report_link_ceiling_changed(&first);
+    let log = settle(&mut connection, 21..=100);
+    assert_eq!(
+        lines_of(log, &["congestion:", "PTO policy consulted"]),
+        ["congestion: removed 1326 bytes, 0 in flight"]
+    );
+    assert!(common::take_sent().is_empty());
 }
 
 #[test]

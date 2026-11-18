@@ -1148,7 +1148,14 @@ where
         let wanted = PendingPmtuProbe::wanted(
             link_path_role,
             confirmation,
-            || self.pmtu.probe_size(),
+            || {
+                let size = self.pmtu.probe_size();
+                debug_assert!(
+                    size.is_none_or(|size| ceiling.is_some_and(|limit| size <= limit)),
+                    "the PMTU policy requested a probe above the datagram ceiling"
+                );
+                size
+            },
             self.state.pmtu_probe_awaited(),
         );
         if self.rest.get::<PendingPmtuProbe, Ipm>().size() != wanted {
@@ -1324,6 +1331,7 @@ where
                     allowed == (*source == source_id),
                     "the send strategy must report a datagram size probe as its leading item and place it first"
                 );
+                allowed
             };
         // a 1-RTT packet of the kind `$kind`, filled from `$cursor`, its
         // items' frame sources seen by `$check`; the filling of the
@@ -1405,7 +1413,7 @@ where
                             &mut cursor,
                             self.rest,
                             self.now,
-                            |_| {},
+                            |_| false,
                         )
                     }
                     PlannedPacket::Handshake(mut cursor) => {
@@ -1430,7 +1438,7 @@ where
                             &mut cursor,
                             self.rest,
                             self.now,
-                            |_| {},
+                            |_| false,
                         )
                     }
                     // no keys to send 0-RTT packets with are kept
@@ -1443,10 +1451,10 @@ where
                         one_rtt_packet!(cursor, OneRttPacket, &mut check_one_rtt)
                     }
                     PlannedPacket::OneRttProbe(mut cursor) => {
-                        one_rtt_packet!(cursor, OneRttProbePacket, |_| {})
+                        one_rtt_packet!(cursor, OneRttProbePacket, |_| false)
                     }
                     PlannedPacket::SettlingResponse(mut cursor) => {
-                        one_rtt_packet!(cursor, SettlingResponsePacket, |_| {})
+                        one_rtt_packet!(cursor, SettlingResponsePacket, |_| false)
                     }
                 }
             };
@@ -1650,7 +1658,9 @@ fn fill_packet<T, L, K, V, Hs, C, W>(
     cursor: &mut C,
     rest: &mut Lineage<'_, V>,
     now: InstantOf<T>,
-    mut check: impl FnMut(&<PartsFrameSources<K, L> as FrameSourceSet>::FrameSourceId),
+    mut requires_leading_probe: impl FnMut(
+        &<PartsFrameSources<K, L> as FrameSourceSet>::FrameSourceId,
+    ) -> bool,
 ) -> (Supplied<W, ClassOfSource, Last>, PacketItems)
 where
     T: Choices,
@@ -1668,9 +1678,11 @@ where
         let Some(item) = cursor.next() else {
             return (Supplied::Open(open.make_last()), items);
         };
-        check(&PartsFrameSources::<K, L>::source(item.item()));
+        // If the leading probe writes nothing, neither later content nor
+        // padding may be mistaken for a probe of this size.
+        let mut probe = requires_leading_probe(&PartsFrameSources::<K, L>::source(item.item()));
         let min = item.min();
-        let holds_place = item.holds_place();
+        let holds_place = probe || item.holds_place();
         let room = open.room(item.class());
         let last = item.last_in_packet() || (room < min.with_length && room >= min.as_last);
         if !last {
@@ -1711,11 +1723,11 @@ where
         let mut item = item;
         loop {
             let min = item.min();
-            let holds_place = item.holds_place();
+            let holds_place = probe || item.holds_place();
             if open.room(item.class()) >= min.as_last {
                 let before = open.buffer_len();
                 let supplied = item.supply(open, |item, packet| {
-                        <L as PartsFrameSourceDispatch<T, L, K, V, FeedbackSummaryOf<T, L>, Hs>>::supply(
+                    <L as PartsFrameSourceDispatch<T, L, K, V, FeedbackSummaryOf<T, L>, Hs>>::supply(
                         rest, now, item, packet,
                     )
                 });
@@ -1737,7 +1749,7 @@ where
             let Some(next) = cursor.next() else {
                 return (Supplied::Open(open), items);
             };
-            check(&PartsFrameSources::<K, L>::source(next.item()));
+            probe = requires_leading_probe(&PartsFrameSources::<K, L>::source(next.item()));
             item = next;
         }
     }
