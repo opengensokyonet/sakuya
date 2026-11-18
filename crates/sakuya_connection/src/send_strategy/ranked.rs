@@ -87,7 +87,7 @@ use core::{
 };
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
-use smallvec::{SmallVec, smallvec};
+use smallvec::SmallVec;
 
 use sakuya_stream::{
     connection::{CloseReason, ConnectionClosedError},
@@ -1044,27 +1044,36 @@ struct PlannedEntry {
     stays: bool,
 }
 
+/// The items planned for one datagram, packet after packet: usually one or
+/// two, inline, as the plan moves whole from the planner to the filling;
+/// more go to the heap.
+type PlannedEntries = SmallVec<[PlannedEntry; 2]>;
+
 /// The packets planned for one datagram: at most one of each packet number
 /// space, so at most three, inline.
 type PacketPlans = SmallVec<[PacketPlan; 3]>;
 
-#[derive(Debug)]
+/// One packet of a datagram's plan: its kind and where its items lie among
+/// the datagram's.
+#[derive(Debug, Clone, Copy)]
 struct PacketPlan {
     kind: PlannedPacketKind,
-    /// Usually a few, inline; more go to the heap.
-    items: SmallVec<[PlannedEntry; 4]>,
+    start: usize,
+    end: usize,
 }
 
 impl PacketPlan {
-    /// The next eligible item in rank order. If the datagram is still
-    /// empty, a deferred STREAM gives the next independent source the
-    /// opportunity to open it.
-    fn next_item(&self, from: usize, has_content: bool) -> Option<usize> {
-        let first = self.items.get(from)?;
+    /// The next eligible item in rank order, counted from the packet's
+    /// first, among the datagram's `items`. If the datagram is still empty,
+    /// a deferred STREAM gives the next independent source the opportunity
+    /// to open it.
+    fn next_item(&self, items: &[PlannedEntry], from: usize, has_content: bool) -> Option<usize> {
+        let items = &items[self.start..self.end];
+        let first = items.get(from)?;
         if has_content || !first.needs_companion {
             return Some(from);
         }
-        self.items[from + 1..]
+        items[from + 1..]
             .iter()
             .position(|item| !item.needs_companion)
             .map(|offset| from + 1 + offset)
@@ -1128,18 +1137,18 @@ where
         &self,
         core: &RankedSendStrategy<I>,
         driver: &DriverContent<I::SendIntents>,
-    ) -> (PacketPlans, Thresholds) {
+    ) -> (PacketPlans, PlannedEntries, Thresholds) {
         let mut thresholds = Thresholds::default();
         let Some(limits) = self.limits else {
-            return (PacketPlans::new(), thresholds);
+            return (PacketPlans::new(), PlannedEntries::new(), thresholds);
         };
         let from_core = if self.role == LinkPathRoleKind::Active {
             core.intents.as_slice()
         } else {
             &[]
         };
-        // usually a few, inline; more go to the heap
-        let mut candidates: SmallVec<[Candidate<'_, _>; 8]> = SmallVec::new();
+        // usually one or two, inline; more go to the heap
+        let mut candidates: SmallVec<[Candidate<'_, _>; 2]> = SmallVec::new();
         let held = driver
             .intents
             .iter()
@@ -1213,6 +1222,7 @@ where
 
         let pace_stream = pacing_limits_stream(&limits);
         let mut packets = PacketPlans::new();
+        let mut items = PlannedEntries::new();
         let mut highest: Option<EncryptionLevel> = None;
         for candidate in candidates {
             let Candidate {
@@ -1250,17 +1260,19 @@ where
                     }
                     continue;
                 }
+                items.push(PlannedEntry {
+                    held,
+                    needs_companion: false,
+                    min,
+                    class,
+                    holds_place: rank.holds_place,
+                    turn: None,
+                    stays: intent.stays_after_writing(),
+                });
                 packets.push(PacketPlan {
                     kind,
-                    items: smallvec![PlannedEntry {
-                        held,
-                        needs_companion: false,
-                        min,
-                        class,
-                        holds_place: rank.holds_place,
-                        turn: None,
-                        stays: intent.stays_after_writing(),
-                    }],
+                    start: 0,
+                    end: 1,
                 });
                 break;
             }
@@ -1298,24 +1310,32 @@ where
                 stays: intent.stays_after_writing(),
             };
             thresholds.stream_waits_for_pacing |= planned.needs_companion;
+            items.push(planned);
             match packets.last_mut() {
-                Some(packet) if packet.kind == kind => packet.items.push(planned),
+                Some(packet) if packet.kind == kind => packet.end = items.len(),
                 _ => packets.push(PacketPlan {
                     kind,
-                    items: smallvec![planned],
+                    start: items.len() - 1,
+                    end: items.len(),
                 }),
             }
         }
         if pace_stream {
             let skipped = packets
                 .iter()
-                .take_while(|p| p.next_item(0, false).is_none())
+                .take_while(|p| p.next_item(&items, 0, false).is_none())
                 .count();
             if skipped > 0 {
+                let gone = packets[skipped - 1].end;
                 packets.drain(..skipped);
+                items.drain(..gone);
+                for packet in &mut packets {
+                    packet.start -= gone;
+                    packet.end -= gone;
+                }
             }
         }
-        (packets, thresholds)
+        (packets, items, thresholds)
     }
 }
 
@@ -1350,7 +1370,7 @@ where
         loop {
             let seen = self.begin(core);
             core.intents.retain(|entry| entry.cell.is_waiting());
-            let (packets, thresholds) = self.plan_packets(core, driver);
+            let (packets, items, thresholds) = self.plan_packets(core, driver);
             if !packets.is_empty() {
                 // A companion can disappear or supply zero. The sender then waits
                 // without polling for a new plan. Keep the pacing wake armed.
@@ -1367,6 +1387,7 @@ where
                     planner: self,
                     driver,
                     packets,
+                    items,
                     next_packet: 0,
                     feedback: RankedFeedback::default(),
                 }));
@@ -1413,13 +1434,14 @@ where
 /// What the ranked plan learns from each supply.
 #[derive(Debug, Default)]
 pub struct RankedFeedback {
-    /// The item a cursor gave out and that is not yet supplied.
-    current: Option<PlannedEntry>,
+    /// Where the item a cursor gave out and that is not yet supplied lies
+    /// among the plan's items.
+    current: Option<usize>,
     /// At least one source has written to this datagram.
     has_content: bool,
-    /// The items supplied, in order, and whether each wrote anything;
-    /// usually a few, inline.
-    supplied: SmallVec<[(PlannedEntry, bool); 8]>,
+    /// Where the items supplied lie among the plan's, in order, and whether
+    /// each wrote anything; usually one or two, inline.
+    supplied: SmallVec<[(usize, bool); 2]>,
 }
 
 /// The items are consumed once the plan ends, if they wrote anything and
@@ -1439,6 +1461,7 @@ pub struct RankedPlan<'a, I: SendStrategyTypes> {
     planner: &'a mut RankedLinkPathSendPlanner<I>,
     driver: &'a DriverContent<I::SendIntents>,
     packets: PacketPlans,
+    items: PlannedEntries,
     next_packet: usize,
     feedback: RankedFeedback,
 }
@@ -1447,6 +1470,7 @@ impl<I: SendStrategyTypes> fmt::Debug for RankedPlan<'_, I> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RankedPlan")
             .field("packets", &self.packets)
+            .field("items", &self.items)
             .field("next_packet", &self.next_packet)
             .field("feedback", &self.feedback)
             .finish_non_exhaustive()
@@ -1463,9 +1487,8 @@ impl<I: SendStrategyTypes> RankedPlan<'_, I> {
 
     fn leading_of(&self, packet: usize) -> Option<LeadingContent<I::FrameSourceId>> {
         let packet = self.packets.get(packet)?;
-        let first = packet
-            .items
-            .get(packet.next_item(0, self.feedback.has_content)?)?;
+        let first = &self.items
+            [packet.start + packet.next_item(&self.items, 0, self.feedback.has_content)?];
         Some(LeadingContent {
             packet: packet.kind,
             source: I::frame_source(self.intent(first.held)),
@@ -1481,7 +1504,8 @@ impl<I: SendStrategyTypes> RankedPlan<'_, I> {
 /// here: its sources changed their own when they wrote.
 impl<I: SendStrategyTypes> Drop for RankedPlan<'_, I> {
     fn drop(&mut self) {
-        for (entry, wrote) in self.feedback.supplied.drain(..) {
+        for (index, wrote) in self.feedback.supplied.drain(..) {
+            let entry = self.items[index];
             if let Some((urgency, order)) = entry.turn {
                 self.planner.turns[urgency] = Some(order);
             }
@@ -1595,12 +1619,13 @@ where
         // An item dropped without being supplied wrote nothing: whether the
         // datagram goes on is the filling's, as the item tells it.
         plan.feedback.current = None;
-        let packet = &mut plan.packets[self.packet];
-        let next = packet.next_item(self.next_item, plan.feedback.has_content)?;
-        let items = &mut packet.items;
+        let packet = plan.packets[self.packet];
+        let next = packet.next_item(&plan.items, self.next_item, plan.feedback.has_content)?;
+        let items = &mut plan.items[packet.start..packet.end];
         if next > self.next_item {
             items[self.next_item..=next].rotate_right(1);
         }
+        let index = packet.start + self.next_item;
         let entry = items[self.next_item];
         self.next_item += 1;
         let last_in_packet = self.next_item == items.len();
@@ -1610,7 +1635,7 @@ where
         };
         // The packet's kind was chosen because its set carries the intent.
         let item = S::item(intent)?;
-        plan.feedback.current = Some(entry);
+        plan.feedback.current = Some(index);
         Some(PlannedItem::new(
             item,
             entry.min,
