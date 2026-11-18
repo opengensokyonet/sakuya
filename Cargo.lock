@@ -688,6 +688,7 @@ dependencies = [
  "sakuya_stream",
  "sakuya_tls",
  "sakuya_wire",
+ "smallvec",
  "snafu",
  "time",
 ]

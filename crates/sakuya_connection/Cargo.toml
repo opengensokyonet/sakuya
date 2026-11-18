@@ -30,6 +30,7 @@ sakuya_recovery.workspace = true
 sakuya_stream.workspace = true
 sakuya_tls.workspace = true
 sakuya_wire.workspace = true
+smallvec.workspace = true
 snafu.workspace = true
 
 [dev-dependencies]

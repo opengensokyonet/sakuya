@@ -87,6 +87,8 @@ use core::{
 };
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
+use smallvec::{SmallVec, smallvec};
+
 use sakuya_stream::{
     connection::{CloseReason, ConnectionClosedError},
     send_options::urgency::Urgency,
@@ -1042,10 +1044,15 @@ struct PlannedEntry {
     stays: bool,
 }
 
+/// The packets planned for one datagram: at most one of each packet number
+/// space, so at most three, inline.
+type PacketPlans = SmallVec<[PacketPlan; 3]>;
+
 #[derive(Debug)]
 struct PacketPlan {
     kind: PlannedPacketKind,
-    items: Vec<PlannedEntry>,
+    /// Usually a few, inline; more go to the heap.
+    items: SmallVec<[PlannedEntry; 4]>,
 }
 
 impl PacketPlan {
@@ -1121,17 +1128,18 @@ where
         &self,
         core: &RankedSendStrategy<I>,
         driver: &DriverContent<I::SendIntents>,
-    ) -> (Vec<PacketPlan>, Thresholds) {
+    ) -> (PacketPlans, Thresholds) {
         let mut thresholds = Thresholds::default();
         let Some(limits) = self.limits else {
-            return (Vec::new(), thresholds);
+            return (PacketPlans::new(), thresholds);
         };
         let from_core = if self.role == LinkPathRoleKind::Active {
             core.intents.as_slice()
         } else {
             &[]
         };
-        let mut candidates = Vec::new();
+        // usually a few, inline; more go to the heap
+        let mut candidates: SmallVec<[Candidate<'_, _>; 8]> = SmallVec::new();
         let held = driver
             .intents
             .iter()
@@ -1204,7 +1212,7 @@ where
         });
 
         let pace_stream = pacing_limits_stream(&limits);
-        let mut packets: Vec<PacketPlan> = Vec::new();
+        let mut packets = PacketPlans::new();
         let mut highest: Option<EncryptionLevel> = None;
         for candidate in candidates {
             let Candidate {
@@ -1244,7 +1252,7 @@ where
                 }
                 packets.push(PacketPlan {
                     kind,
-                    items: vec![PlannedEntry {
+                    items: smallvec![PlannedEntry {
                         held,
                         needs_companion: false,
                         min,
@@ -1294,7 +1302,7 @@ where
                 Some(packet) if packet.kind == kind => packet.items.push(planned),
                 _ => packets.push(PacketPlan {
                     kind,
-                    items: vec![planned],
+                    items: smallvec![planned],
                 }),
             }
         }
@@ -1409,8 +1417,9 @@ pub struct RankedFeedback {
     current: Option<PlannedEntry>,
     /// At least one source has written to this datagram.
     has_content: bool,
-    /// The items supplied, in order, and whether each wrote anything.
-    supplied: Vec<(PlannedEntry, bool)>,
+    /// The items supplied, in order, and whether each wrote anything;
+    /// usually a few, inline.
+    supplied: SmallVec<[(PlannedEntry, bool); 8]>,
 }
 
 /// The items are consumed once the plan ends, if they wrote anything and
@@ -1429,7 +1438,7 @@ pub struct RankedPlan<'a, I: SendStrategyTypes> {
     core: &'a mut RankedSendStrategy<I>,
     planner: &'a mut RankedLinkPathSendPlanner<I>,
     driver: &'a DriverContent<I::SendIntents>,
-    packets: Vec<PacketPlan>,
+    packets: PacketPlans,
     next_packet: usize,
     feedback: RankedFeedback,
 }
