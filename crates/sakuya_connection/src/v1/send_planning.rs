@@ -53,6 +53,7 @@ use super::{
     link::{LinkClone, LinkFacts},
     parameters::PeerTransportParameters,
     path_response::PendingPathResponse,
+    pmtu_probe::PendingPmtuProbe,
     receive::v1_error,
     recovery::{CongestionPartOf, LinkPathCongestionState, PmtuOf, peer_max_udp_payload_size},
     send::{PendingProbePings, SendTypes},
@@ -635,11 +636,18 @@ where
 /// send journals of the spaces, and the keys of each level. All of it is
 /// only read here.
 ///
+/// Before it gathers the driver's content, it copies the datagram size probe
+/// to send ([`PendingPmtuProbe`]) from the probing policy, which it reads:
+/// the policy's probe on an `Active` link path once the handshake, which it
+/// reads too, is confirmed, unless a probe of that size awaits its result
+/// in the fixed congestion state. It changes the component only when the
+/// probe to send changes.
+///
 /// It also reads what the driver's own components have to send on the link
 /// path ([`DriverContentOf`]): the ACK obligations and receive journals,
 /// the CRYPTO output, the data only this side has, which holds a server's
 /// HANDSHAKE_DONE, the connection IDs, the probe's PINGs, the response to a
-/// PATH_CHALLENGE and the close packet. When that content has an intent the
+/// PATH_CHALLENGE, the datagram size probe and the close packet. When that content has an intent the
 /// sending call did not see last, by its frame source and least room, that
 /// fits an empty datagram as the link path can send now, or the close
 /// packet's facts changed, the sending call is woken; content that does not
@@ -660,7 +668,7 @@ where
 /// sources for handing intents back, and `Is` of the
 /// established layer's components; `Hd` holds the positions each part reads
 /// its content by.
-impl<T: Choices, L, Ip, Ir, It, Il, Io, Ipp, Jc, Js, Jm, Ic, Ier, Kr, Kp, Ik, Hf, Is, Hd>
+impl<T: Choices, L, Ip, Ir, It, Il, Io, Ipp, Jc, Js, Jm, Ic, Ier, Kr, Kp, Ik, Hf, Is, Hd, Ipm, Ihc>
     DataComponent<
         T,
         L,
@@ -676,6 +684,7 @@ impl<T: Choices, L, Ip, Ir, It, Il, Io, Ipp, Jc, Js, Jm, Ic, Ier, Kr, Kp, Ik, Hf
             (Ic, Ier, Kr, Kp),
             (Ik, Hf, Is),
             Hd,
+            (Ipm, Ihc),
         ),
     > for LinkPathPlannerOf<T, L>
 where
@@ -694,7 +703,9 @@ where
         + ReadEach<DatagramLimitsReads<T, L>, Il>
         + ReadEach<PacketOverheadsReads<T, L>, Io>
         + TakeEach<'v, frunk_core::HList![Self], It>
-        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>,
+        + GetAt<CloseReasonRecord<CloseCauseOf<T, L>>, Ic>
+        + GetAt<PendingPmtuProbe, Ipm>
+        + GetAt<HandshakeConfirmation, Ihc>,
     for<'v> <<L as LineageLists<'v, T>>::LinkPath as TakeEach<'v, frunk_core::HList![Self], It>>::Rest:
         GetAt<SendStrategyCore<SendStrategyOf<T, L>>, Ik>
             + LineageFeedback<T, L, EstablishedSourceComponentsOfParts<T, L>, Hf>,
@@ -733,6 +744,9 @@ where
         reads.add::<PendingProbePings>();
         reads.add::<PendingPathResponse>();
         reads.add::<ClosePacket>();
+        // what the datagram size probe to send is copied from
+        reads.add::<HandshakeConfirmation>();
+        reads.add::<PendingPmtuProbe>();
     }
 
     fn reread<'v, B: CallBundle>(
@@ -760,6 +774,22 @@ where
             unreachable!("a link path's lend carries its key")
         };
         let identifier = L::link_path_identifier(path, link);
+        // the datagram size probe to send, copied from the probing policy
+        // after its events
+        let confirmation = *lineage.get::<HandshakeConfirmation, Ihc>();
+        let wanted = others.recovery_ref().and_then(|flat| {
+            let state: &&LinkPathCongestionState<InstantOf<T>> = Selector::<_, Js>::get(&flat);
+            let pmtu: &&PmtuOf<T, L> = Selector::<_, Jm>::get(&flat);
+            PendingPmtuProbe::wanted(
+                role,
+                confirmation,
+                || pmtu.probe_size(),
+                state.pmtu_probe_awaited(),
+            )
+        });
+        if lineage.get::<PendingPmtuProbe, Ipm>().size() != wanted {
+            lineage.get_mut::<PendingPmtuProbe, Ipm>().set(wanted);
+        }
         let overheads = read_packet_overheads::<T, L, Io>(
             &lineage,
             link,

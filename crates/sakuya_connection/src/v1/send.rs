@@ -35,6 +35,7 @@ use super::{
     feedback::{AckSummary, CryptoSummary, HandshakeDoneSummary, ProbePingSummary},
     key_phase::KeyPhaseNumbers,
     path_response::{PathResponseFrames, PathResponseIntent, PendingPathResponse},
+    pmtu_probe::{PendingPmtuProbe, PmtuProbeFrames, PmtuProbeIntent},
     streams::send::{
         DataBlockedFrames, MaxDataFrames, MaxStreamDataFrames, MaxStreamsFrames, ResetStreamFrames,
         StopSendingFrames, StreamDataBlockedFrames, StreamFrames, StreamIntent, StreamIntentKey,
@@ -114,6 +115,8 @@ pub enum FrameSourceId {
     NewConnectionId,
     /// The PATH_RESPONSE frames to the peer's challenges.
     PathResponse,
+    /// The PING of a link path's datagram size probe.
+    PmtuProbe,
 }
 
 /// An ACK frame is due in a packet number space.
@@ -439,6 +442,7 @@ pub type SendIntents = frunk_core::Coprod!(
     StreamIntent<Urgency>,
     NewConnectionIdIntent,
     PathResponseIntent,
+    PmtuProbeIntent,
 );
 
 /// The kinds of version 1's frame sources: PADDING, which the packet
@@ -447,8 +451,9 @@ pub type SendIntents = frunk_core::Coprod!(
 /// connection ID strategy, a server's HANDSHAKE_DONE, the CRYPTO frames
 /// of each encryption level, the nine frames of the streams
 /// ([`streams::send`](super::streams::send)), the NEW_CONNECTION_ID
-/// frames of the local connection ID strategy and the PATH_RESPONSE frames
-/// ([`path_response`](super::path_response)).
+/// frames of the local connection ID strategy, the PATH_RESPONSE frames
+/// ([`path_response`](super::path_response)) and the PING of a datagram
+/// size probe ([`pmtu_probe`](super::pmtu_probe)).
 pub type FrameSources = frunk_core::HList![
     PaddingFrames,
     AckFrames,
@@ -466,7 +471,8 @@ pub type FrameSources = frunk_core::HList![
     StreamDataBlockedFrames,
     StreamsBlockedFrames,
     NewConnectionIdFrames,
-    PathResponseFrames
+    PathResponseFrames,
+    PmtuProbeFrames
 ];
 
 /// One planned item of version 1: an item of one of [`FrameSources`].
@@ -492,7 +498,9 @@ fn crypto_level(kind: PlannedPacketKind) -> Option<CryptoLevel> {
 /// `ack`: ACK frames are not allowed in 0-RTT packets (RFC 9000 §12.4); a
 /// candidate's and a settling link path's packets carry neither.
 /// RETIRE_CONNECTION_ID, HANDSHAKE_DONE and PATH_RESPONSE frames go in
-/// 1-RTT packets only (RFC 9000 §12.4, §12.5); NEW_CONNECTION_ID frames, as the frames of the
+/// 1-RTT packets only (RFC 9000 §12.4, §12.5), and so does the PING of a
+/// datagram size probe, which needs the 1-RTT keys of a confirmed
+/// handshake; NEW_CONNECTION_ID frames, as the frames of the
 /// streams, in 0-RTT and 1-RTT packets ([`carries_streams`]).
 fn carries(kind: PlannedPacketKind, space: PacketNumberSpaceKind, ack: bool) -> bool {
     match kind {
@@ -580,7 +588,10 @@ impl SendIntentPart for Part {
             place_pattern!([_ _ _ _ _ _ _] response) => {
                 at_place!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _] response.data())
             }
-            rest_pattern!([_ _ _ _ _ _ _ _] never) => match *never {},
+            place_pattern!([_ _ _ _ _ _ _ _] probe) => {
+                at_place!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _] probe.size())
+            }
+            rest_pattern!([_ _ _ _ _ _ _ _ _] never) => match *never {},
         }
     }
 }
@@ -597,8 +608,10 @@ impl<K: PacketKind> FrameSourcePart<K> for Part {
             place_pattern!([_ _ _ _ _] _) | place_pattern!([_ _ _ _ _ _] _) => {
                 carries_streams(K::KIND)
             }
-            place_pattern!([_ _ _ _ _ _ _] _) => K::KIND == PlannedPacketKind::OneRtt,
-            rest_pattern!([_ _ _ _ _ _ _ _] never) => match *never {},
+            place_pattern!([_ _ _ _ _ _ _] _) | place_pattern!([_ _ _ _ _ _ _ _] _) => {
+                K::KIND == PlannedPacketKind::OneRtt
+            }
+            rest_pattern!([_ _ _ _ _ _ _ _ _] never) => match *never {},
         };
         carried.then(|| <Self as SendIntentPart>::intent_item(intent))
     }
@@ -622,7 +635,8 @@ impl<K: PacketKind> FrameSourcePart<K> for Part {
             place_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _] _) => FrameSourceId::StreamsBlocked,
             place_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _] _) => FrameSourceId::NewConnectionId,
             place_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _] _) => FrameSourceId::PathResponse,
-            rest_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _] never) => match *never {},
+            place_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _] _) => FrameSourceId::PmtuProbe,
+            rest_pattern!([_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _] never) => match *never {},
         }
     }
 }
@@ -1209,13 +1223,14 @@ const CRYPTO_LEVELS: [CryptoLevel; 3] = [
 /// HANDSHAKE_DONE while it waits; the CRYPTO data unsent at each level,
 /// from its first unsent offset, whether or not the level has keys to send
 /// with; the disclosures the local connection ID strategy has waiting; the
-/// response to the latest PATH_CHALLENGE that arrived on the link path; and
-/// the link path's sealed close packet, with the datagrams received since.
+/// response to the latest PATH_CHALLENGE that arrived on the link path; the
+/// link path's datagram size probe to send; and the link path's sealed
+/// close packet, with the datagrams received since.
 ///
 /// Not here: an ACK frame carried along when the obligation only wants one
 /// in a packet sent anyway.
-impl<T, L, V, Ia, Ij, Is, Io, Ic, Ipp, Ipr, Icp>
-    DriverContentPart<T, L, V, ((Ia, Ij), Is, Io, Ic, (Ipp, Ipr, Icp))> for Part
+impl<T, L, V, Ia, Ij, Is, Io, Ic, Ipp, Ipr, Icp, Ipm>
+    DriverContentPart<T, L, V, ((Ia, Ij), Is, Io, Ic, (Ipp, Ipr, Icp, Ipm))> for Part
 where
     T: Choices,
     L: LogicalPathKeys,
@@ -1226,7 +1241,8 @@ where
         + GetAt<ConnectionIdsOf<T>, Ic>
         + GetAt<PendingProbePings, Ipp>
         + GetAt<PendingPathResponse, Ipr>
-        + GetAt<ClosePacket, Icp>,
+        + GetAt<ClosePacket, Icp>
+        + GetAt<PendingPmtuProbe, Ipm>,
 {
     fn pending<J>(
         lineage: &Lineage<'_, V>,
@@ -1286,6 +1302,10 @@ where
         if let Some(data) = lineage.get::<PendingPathResponse, Ipr>().data() {
             out.intents
                 .push(inject(Coproduct::inject(PathResponseIntent::new(data))));
+        }
+        if let Some(size) = lineage.get::<PendingPmtuProbe, Ipm>().size() {
+            out.intents
+                .push(inject(Coproduct::inject(PmtuProbeIntent::new(size))));
         }
         if let Some(sealed) = lineage.get::<ClosePacket, Icp>().sealed() {
             out.close = Some(CloseResendFacts {

@@ -45,6 +45,16 @@
 //! A probe permit lifts the wait. Another eligible source may open the
 //! datagram first, after which the STREAM can use the remaining room.
 //!
+//! A path MTU probe ([`RankedIntent::exact_datagram_size`]) leads a
+//! datagram of exactly its size, and nothing is planned after it: the
+//! datagram carries its PING and the PADDING that brings it to the size.
+//! Ranked after other content, it waits for a datagram that starts with
+//! it; it goes when the whole size can go now
+//! ([`DatagramLimits::pmtu_probe_capacity`]), past no permit, also while
+//! the link path does not carry 1200 bytes and nothing else goes, and
+//! leaves its size as a threshold when it cannot. While nothing else goes,
+//! content that holds its place does not hold it against a probe.
+//!
 //! A supply that writes something consumes its intent, except an intent
 //! that stays after writing ([`RankedIntent::stays_after_writing`]), such as
 //! a stream's data: its source wrote as much as it could and resized or
@@ -157,6 +167,17 @@ pub trait RankedIntent {
     fn stays_after_writing(&self) -> bool {
         false
     }
+
+    /// The size of the whole datagram the intent goes in, if it is one of
+    /// exactly that size, as a path MTU probe's
+    /// ([`SendPriority::PathMtuProbe`]): it then leads its datagram, goes
+    /// only when the link path can send a datagram of that size now
+    /// ([`DatagramLimits::pmtu_probe_capacity`]), and nothing is planned
+    /// after it. Other ranks do not read it. By default an intent takes
+    /// what room the datagram has.
+    fn exact_datagram_size(&self) -> Option<usize> {
+        None
+    }
 }
 
 impl RankedIntent for CNil {
@@ -169,6 +190,10 @@ impl RankedIntent for CNil {
     }
 
     fn stays_after_writing(&self) -> bool {
+        match *self {}
+    }
+
+    fn exact_datagram_size(&self) -> Option<usize> {
         match *self {}
     }
 }
@@ -199,6 +224,13 @@ impl<H: RankedIntent, T: RankedIntent> RankedIntent for Coproduct<H, T> {
         match self {
             Coproduct::Inl(intent) => intent.stays_after_writing(),
             Coproduct::Inr(rest) => rest.stays_after_writing(),
+        }
+    }
+
+    fn exact_datagram_size(&self) -> Option<usize> {
+        match self {
+            Coproduct::Inl(intent) => intent.exact_datagram_size(),
+            Coproduct::Inr(rest) => rest.exact_datagram_size(),
         }
     }
 }
@@ -742,12 +774,18 @@ where
 
 // ---- the planner ----
 
-/// The least room blocked content needs, for each flight class.
+/// The least room blocked content needs, for each flight class, and the
+/// least size of a blocked path MTU probe.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Thresholds {
     stream_waits_for_pacing: bool,
     ack_only: Option<usize>,
     in_flight: Option<usize>,
+    pmtu_probe: Option<usize>,
+}
+
+fn add_least(slot: &mut Option<usize>, need: usize) {
+    *slot = Some(slot.map_or(need, |least| least.min(need)));
 }
 
 impl Thresholds {
@@ -756,11 +794,18 @@ impl Thresholds {
             FlightClass::AckOnly => &mut self.ack_only,
             FlightClass::InFlight => &mut self.in_flight,
         };
-        *slot = Some(slot.map_or(need, |least| least.min(need)));
+        add_least(slot, need);
+    }
+
+    fn add_pmtu_probe(&mut self, size: usize) {
+        add_least(&mut self.pmtu_probe, size);
     }
 
     fn is_empty(&self) -> bool {
-        !self.stream_waits_for_pacing && self.ack_only.is_none() && self.in_flight.is_none()
+        !self.stream_waits_for_pacing
+            && self.ack_only.is_none()
+            && self.in_flight.is_none()
+            && self.pmtu_probe.is_none()
     }
 
     fn reached_by(&self, limits: &DatagramLimits) -> bool {
@@ -771,6 +816,9 @@ impl Thresholds {
             || self
                 .in_flight
                 .is_some_and(|need| limits.capacity_for(FlightClass::InFlight) >= need)
+            || self
+                .pmtu_probe
+                .is_some_and(|size| limits.pmtu_probe_capacity() >= size)
     }
 }
 
@@ -1058,6 +1106,8 @@ struct Candidate<'e, J> {
     intent: &'e J,
     min: MinimumLengths,
     class: FlightClass,
+    /// The size of the datagram of a path MTU probe.
+    exact: Option<usize>,
 }
 
 impl<I> RankedLinkPathSendPlanner<I>
@@ -1118,6 +1168,9 @@ where
                 continue;
             };
             let rank = intent.rank();
+            let exact = (rank.priority == SendPriority::PathMtuProbe)
+                .then(|| intent.exact_datagram_size())
+                .flatten();
             let order = intent_order(held, order);
             let (urgency, had_turn) = if rank.priority == SendPriority::ApplicationData {
                 let urgency = usize::from(intent.urgency().get());
@@ -1137,6 +1190,7 @@ where
                 intent,
                 min,
                 class,
+                exact,
             });
         }
         candidates.sort_by_key(|candidate| {
@@ -1163,6 +1217,7 @@ where
                 intent,
                 min,
                 class,
+                exact,
                 ..
             } = candidate;
             if highest.is_some_and(|highest| level < highest) {
@@ -1173,6 +1228,34 @@ where
             let Some(overhead) = self.overheads.of(kind) else {
                 continue;
             };
+            if let Some(size) = exact {
+                // a path MTU probe leads a datagram of its own: after other
+                // content it waits for the next datagram, and it is planned
+                // only when its whole size can go now; nothing follows it
+                if !packets.is_empty() || size < overhead + min.as_last {
+                    continue;
+                }
+                if size > limits.pmtu_probe_capacity() {
+                    thresholds.add_pmtu_probe(size);
+                    if rank.holds_place {
+                        break;
+                    }
+                    continue;
+                }
+                packets.push(PacketPlan {
+                    kind,
+                    items: vec![PlannedEntry {
+                        held,
+                        needs_companion: false,
+                        min,
+                        class,
+                        holds_place: rank.holds_place,
+                        turn: None,
+                        stays: intent.stays_after_writing(),
+                    }],
+                });
+                break;
+            }
             let mut class_of_datagram = class;
             let mut need = overhead + min.as_last;
             if kind == PlannedPacketKind::Initial
@@ -1186,8 +1269,10 @@ where
             // is the writing's to fit
             if need > limits.capacity_for(class_of_datagram) {
                 thresholds.add(class_of_datagram, need);
-                // application data that does not fit is passed over
-                if rank.holds_place && !application_data {
+                // application data that does not fit is passed over, and
+                // so is all content while the link path does not carry
+                // 1200 bytes: a datagram size probe may still go
+                if rank.holds_place && !application_data && limits.supports_minimum() {
                     break;
                 }
                 continue;

@@ -73,6 +73,7 @@ pub mod loss_detection;
 pub mod packet_writer;
 pub mod parameters;
 pub mod path_response;
+pub mod pmtu_probe;
 pub mod pto;
 pub mod receive;
 pub mod recovery;
@@ -139,6 +140,7 @@ use crate::{
 use std::sync::Arc;
 
 use self::path_response::PendingPathResponse;
+use self::pmtu_probe::PendingPmtuProbe;
 use self::{
     address_token::AddressTokenSink,
     advancing::{ClientAdvancingKind, ConnectionExporter, HandshakeStart, ServerAdvancingKind},
@@ -878,6 +880,7 @@ where
         ClosePacket,
         PendingPathResponse,
         PendingProbePings,
+        PendingPmtuProbe,
     ];
     type Calls = HList![LinkPathSendingKind];
 }

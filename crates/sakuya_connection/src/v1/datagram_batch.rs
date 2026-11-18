@@ -422,6 +422,13 @@ where
         self.state.floor
     }
 
+    /// The last packet pads the datagram to at least `floor` bytes, as far
+    /// as the datagram can grow: as a datagram size probe is padded to its
+    /// size.
+    pub fn raise_floor(&mut self, floor: usize) {
+        self.state.raise_floor(floor);
+    }
+
     /// Whether a packet of `space` is sealed in the datagram.
     pub fn carries(&self, space: PacketNumberSpaceKind) -> bool {
         match space {

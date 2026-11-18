@@ -15,6 +15,7 @@
 //! | MAX_DATA, MAX_STREAM_DATA, MAX_STREAMS | [`MaxDataSummary`], [`MaxStreamDataSummary`], [`MaxStreamsSummary`]: the limit | nothing | the limit in effect, never lower than the one lost, is sent again while it is still advertised |
 //! | DATA_BLOCKED, STREAM_DATA_BLOCKED, STREAMS_BLOCKED | [`DataBlockedSummary`], [`StreamDataBlockedSummary`], [`StreamsBlockedSummary`]: the limit | nothing | the frame is sent again while the sender is still blocked at that limit |
 //! | PATH_RESPONSE | [`PathResponseSummary`]: nothing | nothing | nothing: a new challenge comes instead (RFC 9000 §13.3) |
+//! | PING of a datagram size probe | [`PmtuProbeSummary`]: nothing | nothing | nothing: the probe's result goes to the probing policy from the packet's record |
 //! | NEW_CONNECTION_ID | [`NewConnectionIdSummary`]: the sequence number | the connection ID is disclosed and not sent again | the same frame waits to be sent again while the connection ID is neither acknowledged nor retired by the peer (RFC 9000 §13.3) |
 //!
 //! Each is the summary of one kind of version 1's frame sources
@@ -26,12 +27,14 @@
 //! [`PaddingFrameSource`](crate::write::PaddingFrameSource), for the
 //! streams' frames the stream set, through
 //! [`LineageStreamFrameSource`](super::streams::send::LineageStreamFrameSource),
-//! and the local connection ID strategy). The PING of a probe and
-//! PATH_RESPONSE need nothing when they come back: their summaries go to
+//! and the local connection ID strategy). The PING of a probe,
+//! PATH_RESPONSE and the PING of a datagram size probe need nothing when
+//! they come back: their summaries go to
 //! [`IgnoringFrameSource`](crate::frame_source::IgnoringFrameSource), not
 //! to the pending frames of the link path that wrote them
 //! ([`PendingProbePings`](super::send::PendingProbePings),
-//! [`PendingPathResponse`](super::path_response::PendingPathResponse)).
+//! [`PendingPathResponse`](super::path_response::PendingPathResponse),
+//! [`PendingPmtuProbe`](super::pmtu_probe::PendingPmtuProbe)).
 use sakuya_recovery::{ack_obligation::AckDue, packet_number_space::PacketNumberSpaceKind};
 use sakuya_stream::send_options::destination::Unfulfilled;
 use sakuya_tls::engine::CryptoLevel;
@@ -42,6 +45,7 @@ use super::send::FrameSources;
 use super::{
     Choices,
     path_response::PathResponseSummary,
+    pmtu_probe::PmtuProbeSummary,
     send::{RetireConnectionIdSummary, SendTypes},
     streams::send::{
         DataBlockedSummary, MaxDataSummary, MaxStreamDataSummary, MaxStreamsSummary,
@@ -80,6 +84,7 @@ pub type FeedbackSummary<I> = frunk_core::Coprod!(
     StreamsBlockedSummary,
     NewConnectionIdSummary,
     PathResponseSummary,
+    PmtuProbeSummary,
 );
 
 /// The summary of a CRYPTO frame written into a packet: which bytes of

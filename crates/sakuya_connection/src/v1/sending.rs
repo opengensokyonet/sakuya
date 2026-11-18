@@ -165,12 +165,13 @@ use super::{
     largest_probe_timeout,
     link::{LinkClone, LinkFacts},
     parameters::PeerTransportParameters,
+    pmtu_probe::PendingPmtuProbe,
     receive::v1_error,
     recovery::{
         CongestionPartOf, LinkPathCongestionState, OthersOf, PmtuOf, RecoveryFactoryOf, RttOf,
         lend_congestion, max_datagram_size_in_use, peer_max_udp_payload_size, refill,
     },
-    send::SendTypes,
+    send::{FrameSourceId, SendTypes},
     send_planning::{
         CongestionAllowance, HostSendStrategyTypes, IntakePublishOutcome, LinkPathPlannerOf,
         LinkPathSendPlannerOf, SendKeyLevels, SendStrategyCore, SendStrategyOf, datagram_limits,
@@ -354,8 +355,8 @@ pub type FillStreamsRest<'x, T, L, It, Iw> =
 /// What filling reads from what is left of the lineage at the start of
 /// each datagram: the link's clone and facts, the peer's transport
 /// parameters, the packet number states of the spaces, the data only this
-/// side has, which gives the token of its Initial packets, and whether the
-/// handshake is confirmed.
+/// side has, which gives the token of its Initial packets, whether the
+/// handshake is confirmed, and the link path's role.
 pub type FillReads<T, L> = HList![
     LinkClone<<T as crate::clock::ConnectionChoices>::Link>,
     LinkFacts,
@@ -363,6 +364,7 @@ pub type FillReads<T, L> = HList![
     PacketNumberSpaces<PacketNumberSpaceState>,
     <<T as crate::v1::MakerChoices>::Side as Side>::Own,
     HandshakeConfirmation,
+    LinkPathRole<InstantOf<T>>,
 ];
 
 /// What filling takes from the link path's recovery layer: the stored part
@@ -396,7 +398,9 @@ pub type SettleReads<T, L> = HList![
 /// in what is left, `Ik` of
 /// [`FillRecoveryTakes`], `Hs` of
 /// each part's frame sources, `Hd` of what each part reads the driver's
-/// content by ([`DriverContentOf`]), `Ipd` of PADDING's summary in the sum of summaries; for handing over, `Ii`, `Ih`, `Io` of the
+/// content by ([`DriverContentOf`]), `Ipd` of PADDING's summary in the sum of summaries, `Ipm` of
+/// the link path's [`PendingPmtuProbe`] in what is left and `Ifs` of
+/// version 1's frame sources among the composition's; for handing over, `Ii`, `Ih`, `Io` of the
 /// keys and `Il` of the link's clone; for settling, `Ij` of the send
 /// journals, `If` of the recovery factory, `Iv` of [`SettleReads`], `Ie`
 /// of the idle timeout, `Iq` of [`SettleRecoveryTakes`], `Hf` of
@@ -423,6 +427,8 @@ type Positions<
     Hs,
     Hd,
     Ipd,
+    Ipm,
+    Ifs,
     Ii,
     Ih,
     Io,
@@ -452,7 +458,7 @@ type Positions<
     Idr,
 > = (
     Is,
-    (It, Iw, Ir, Ici, Ik, Hs, Hd, Ipd),
+    (It, Iw, Ir, Ici, Ik, Hs, Hd, Ipd, Ipm, Ifs),
     (Ii, Ih, Io, Il),
     (Ij, If, Iv, Ie, Iq, Hf, Ist),
     (Ipp, Ima, Jx, Jr, Jm),
@@ -513,6 +519,8 @@ impl<
     Hs,
     Hd,
     Ipd,
+    Ipm,
+    Ifs,
     Ii,
     Ih,
     Io,
@@ -556,6 +564,8 @@ impl<
             Hs,
             Hd,
             Ipd,
+            Ipm,
+            Ifs,
             Ii,
             Ih,
             Io,
@@ -646,8 +656,13 @@ where
     for<'x> FillKeysRest<'x, T, L, It>: TakeEach<'x, FillReadTakes<T>, Iw>,
     for<'x> FillRest<'x, T, L, It, Iw>:
         AppendEach<<EstablishedSourceComponentsOfParts<T, L> as OptionalRefs>::Optional<'x>>,
-    for<'x> FillStreamsRest<'x, T, L, It, Iw>:
-        ReadEach<FillReads<T, L>, Ir> + GetAt<ConnectionIdsOf<T>, Ici>,
+    for<'x> FillStreamsRest<'x, T, L, It, Iw>: ReadEach<FillReads<T, L>, Ir>
+        + GetAt<ConnectionIdsOf<T>, Ici>
+        + GetAt<PendingPmtuProbe, Ipm>,
+    <SendTypes<T, L> as SendStrategyTypes>::FrameSourceId:
+        CoprodInjector<FrameSourceId, Ifs> + PartialEq,
+    <PartsFrameSources<OneRttPacket, L> as FrameSourceSet>::FrameSourceId:
+        CoprodInjector<FrameSourceId, Ifs> + PartialEq,
     for<'x> L: DriverContentOf<T, L, FillStreamsRest<'x, T, L, It, Iw>, Hd>,
     <SendTypes<T, L> as SendStrategyTypes>::SendIntents: From<<L as SendIntentsOf>::SendIntents>,
     for<'x> L: PartsFrameSourceDispatch<
@@ -816,28 +831,29 @@ where
                             part,
                             others,
                             |mut access| {
-                                let mut filling = Filling::<T, L, _, _, Ir, Ici, Ipp, Hs, Hd, Ipd> {
-                                    now,
-                                    link: &link,
-                                    link_path: &link_path,
-                                    core,
-                                    planner,
-                                    registrar,
-                                    journals,
-                                    initial_keys,
-                                    handshake_keys,
-                                    one_rtt_keys,
-                                    initial_discarded: false,
-                                    usage,
-                                    amplification,
-                                    events,
-                                    rest: &mut rest,
-                                    access: &mut access,
-                                    estimate,
-                                    pmtu,
-                                    state,
-                                    positions: core::marker::PhantomData,
-                                };
+                                let mut filling =
+                                    Filling::<T, L, _, _, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ifs> {
+                                        now,
+                                        link: &link,
+                                        link_path: &link_path,
+                                        core,
+                                        planner,
+                                        registrar,
+                                        journals,
+                                        initial_keys,
+                                        handshake_keys,
+                                        one_rtt_keys,
+                                        initial_discarded: false,
+                                        usage,
+                                        amplification,
+                                        events,
+                                        rest: &mut rest,
+                                        access: &mut access,
+                                        estimate,
+                                        pmtu,
+                                        state,
+                                        positions: core::marker::PhantomData,
+                                    };
                                 let end = filling.fill(batch, cx);
                                 let waits = batch.is_empty()
                                     && matches!(end, FillEnd::NothingPlanned | FillEnd::Blocked);
@@ -985,14 +1001,15 @@ where
 }
 
 /// What [`Filling`] reads its components and finds its frame sources by.
-type FillPositions<Ir, Ici, Ipp, Hs, Hd, Ipd> = fn() -> (Ir, Ici, Ipp, Hs, Hd, Ipd);
+type FillPositions<Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ifs> =
+    core::marker::PhantomData<fn() -> (Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ifs)>;
 
 /// What one poll fills with: the borrows of what it took, the instant of
 /// the poll and the link path it fills for.
 ///
 /// `V` is what is left of the lineage, where the connection IDs and the
 /// frame sources are found; `A` the congestion access lent for the poll.
-struct Filling<'f, 'r, T, L, V, A, Ir, Ici, Ipp, Hs, Hd, Ipd>
+struct Filling<'f, 'r, T, L, V, A, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ifs>
 where
     T: Choices,
     L: LineagePartList<T> + FeedbackSummariesOf,
@@ -1021,11 +1038,11 @@ where
     /// Sees the start of each datagram, and gives the size it is sent at.
     pmtu: &'f mut PmtuOf<T, L>,
     state: &'f mut LinkPathCongestionState<InstantOf<T>>,
-    positions: core::marker::PhantomData<FillPositions<Ir, Ici, Ipp, Hs, Hd, Ipd>>,
+    positions: FillPositions<Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ifs>,
 }
 
-impl<T, L, V, A, S, Ir, Ici, Ipp, Hs, Hd, Ipd>
-    Filling<'_, '_, T, L, V, A, Ir, Ici, Ipp, Hs, Hd, Ipd>
+impl<T, L, V, A, S, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ifs>
+    Filling<'_, '_, T, L, V, A, Ir, Ici, Ipp, Hs, Hd, Ipd, Ipm, Ifs>
 where
     T: Choices,
     L: LineagePartList<T> + FeedbackSummariesOf + ParametersOf<TransportParameterSpace>,
@@ -1049,7 +1066,13 @@ where
     LinkPathSendPlannerOf<T, L>: Observe<DatagramLimits> + Observe<PacketOverheads>,
     A: CongestionController<InstantOf<T>, SentState = S> + Pacer<InstantOf<T>>,
     TransportParameterSlots<L>: Selector<Option<MaxUdpPayloadSize>, Ipp>,
-    V: ReadEach<FillReads<T, L>, Ir> + GetAt<ConnectionIdsOf<T>, Ici>,
+    V: ReadEach<FillReads<T, L>, Ir>
+        + GetAt<ConnectionIdsOf<T>, Ici>
+        + GetAt<PendingPmtuProbe, Ipm>,
+    <SendTypes<T, L> as SendStrategyTypes>::FrameSourceId:
+        CoprodInjector<FrameSourceId, Ifs> + PartialEq,
+    <PartsFrameSources<OneRttPacket, L> as FrameSourceSet>::FrameSourceId:
+        CoprodInjector<FrameSourceId, Ifs> + PartialEq,
     L: PartsFrameSourceDispatch<T, L, InitialPacket, V, FeedbackSummaryOf<T, L>, Hs>
         + PartsFrameSourceDispatch<T, L, HandshakePacket, V, FeedbackSummaryOf<T, L>, Hs>
         + PartsFrameSourceDispatch<T, L, ZeroRttPacket, V, FeedbackSummaryOf<T, L>, Hs>
@@ -1098,19 +1121,38 @@ where
         cx: &mut Context<'_>,
     ) -> DatagramEnd {
         let role = <T::Side as Side>::ROLE;
-        let hlist_pat![link, facts, peer, numbers, own, confirmation] =
-            Lineage::read_each::<FillReads<T, L>, Ir>(&*self.rest);
+        let hlist_pat![
+            link,
+            facts,
+            peer,
+            numbers,
+            own,
+            confirmation,
+            link_path_role
+        ] = Lineage::read_each::<FillReads<T, L>, Ir>(&*self.rest);
         let initial_token = <T::Side as Side>::initial_token(own);
         let link_ceiling = link.0.max_datagram_size().ok();
         let peer_max_udp_payload = peer_max_udp_payload_size::<L, Ipp>(peer);
         let validation = facts.validation;
         let numbers = numbers.clone();
+        let confirmation = *confirmation;
+        let link_path_role = link_path_role.kind();
         // the probing policy sees the start of the datagram with the
-        // largest size a probe may try, and then gives its conclusion
+        // largest size a probe may try, and then gives its conclusion and
+        // the probe to send
         let ceiling =
             datagram_limits(link_ceiling, peer_max_udp_payload, None, None).probe_ceiling();
         self.pmtu.on_datagram_start(&link.0, ceiling);
         let pmtu_conclusion = self.pmtu.conclusion();
+        let wanted = PendingPmtuProbe::wanted(
+            link_path_role,
+            confirmation,
+            || self.pmtu.probe_size(),
+            self.state.pmtu_probe_awaited(),
+        );
+        if self.rest.get::<PendingPmtuProbe, Ipm>().size() != wanted {
+            self.rest.get_mut::<PendingPmtuProbe, Ipm>().set(wanted);
+        }
         // the controller hears of the size in use before the pacer is
         // refilled with its window
         let size = max_datagram_size_in_use(pmtu_conclusion, peer_max_udp_payload, link_ceiling);
@@ -1124,7 +1166,7 @@ where
         self.state.on_max_datagram_size(
             &mut *self.access,
             size,
-            *confirmation == HandshakeConfirmation::Confirmed,
+            confirmation == HandshakeConfirmation::Confirmed,
             &context,
         );
         // what the link path can send now, the pacer refilled first: it
@@ -1191,6 +1233,26 @@ where
         let Some(leading_overhead) = overheads.of(leading.packet) else {
             return DatagramEnd::End(FillEnd::Blocked);
         };
+        // a datagram size probe led by its PING is a datagram of exactly
+        // its size, the size the link path keeps; it goes only when that
+        // size can go now, as the strategy judged
+        let probe_source =
+            <<SendTypes<T, L> as SendStrategyTypes>::FrameSourceId as CoprodInjector<
+                FrameSourceId,
+                Ifs,
+            >>::inject(FrameSourceId::PmtuProbe);
+        let pmtu_probe = if leading.source == probe_source {
+            match self.rest.get::<PendingPmtuProbe, Ipm>().size() {
+                Some(size) if size <= limits.pmtu_probe_capacity() => Some(size),
+                _ => return DatagramEnd::End(FillEnd::Blocked),
+            }
+        } else {
+            None
+        };
+        let (max_len, in_flight_room) = match pmtu_probe {
+            Some(size) => (size, size),
+            None => (max_len, in_flight_room),
+        };
 
         // the connection ID: the first offered with which the content
         // planned first fits; where it goes in its packet is not known yet,
@@ -1199,7 +1261,7 @@ where
         let shortest = shortest.unwrap_or(0);
         let padded = leading.packet == PlannedPacketKind::Initial
             && (overheads.expands_every_initial || leading.class == FlightClass::InFlight);
-        let capacity = limits.capacity_for(leading.class);
+        let capacity = pmtu_probe.unwrap_or_else(|| limits.capacity_for(leading.class));
         let fits = |offered: &OfferedConnectionId| {
             let overhead = leading_overhead + offered.id.len().saturating_sub(shortest);
             (!padded || in_flight_room >= MIN_DATAGRAM_SIZE)
@@ -1212,7 +1274,9 @@ where
         ) else {
             return DatagramEnd::End(FillEnd::Blocked);
         };
-        let probe = limits.probe_permits > 0
+        // a datagram size probe goes within the window: it uses no permit
+        let probe = pmtu_probe.is_none()
+            && limits.probe_permits > 0
             && limits.congestion_window_left.min(limits.pacing_allowance) < max_len;
         let mut datagram = batch.start_observed_datagram(
             self.now,
@@ -1231,6 +1295,10 @@ where
                 list: core::marker::PhantomData,
             },
         );
+        if let Some(size) = pmtu_probe {
+            // its 1-RTT packet is padded to the whole size
+            datagram.raise_floor(size);
+        }
 
         // the packets, in the order of the plan
         let largest = |space| {
@@ -1240,10 +1308,27 @@ where
         };
         let mut blocked = false;
         let mut skipped = false;
-        // a 1-RTT packet of the kind `$kind`, filled from `$cursor`; the
-        // filling of the datagram ends without keys to send it with
+        // only the PING planned first in a datagram size probe is the
+        // probe's: a strategy that plans it anywhere else broke its
+        // contract
+        let mut leading_item = pmtu_probe.is_some();
+        let source_id = <<PartsFrameSources<OneRttPacket, L> as FrameSourceSet>::FrameSourceId as CoprodInjector<
+                FrameSourceId,
+                Ifs,
+            >>::inject(FrameSourceId::PmtuProbe);
+        let mut check_one_rtt =
+            |source: &<PartsFrameSources<OneRttPacket, L> as FrameSourceSet>::FrameSourceId| {
+                let allowed = core::mem::replace(&mut leading_item, false);
+                assert!(
+                    allowed == (*source == source_id),
+                    "the send strategy must report a datagram size probe as its leading item and place it first"
+                );
+            };
+        // a 1-RTT packet of the kind `$kind`, filled from `$cursor`, its
+        // items' frame sources seen by `$check`; the filling of the
+        // datagram ends without keys to send it with
         macro_rules! one_rtt_packet {
-            ($cursor:ident, $kind:ty) => {{
+            ($cursor:ident, $kind:ty, $check:expr) => {{
                 let Some(keys) = self.one_rtt_keys.send() else {
                     blocked = true;
                     break;
@@ -1262,7 +1347,7 @@ where
                     .journals
                     .application_data
                     .start_attempt(self.link_path.clone());
-                let Ok(writer) = datagram.start_one_rtt_packet(
+                let Ok(mut writer) = datagram.start_one_rtt_packet(
                     attempt,
                     keys,
                     &mut *self.usage,
@@ -1271,11 +1356,16 @@ where
                     blocked = true;
                     break;
                 };
+                if pmtu_probe.is_some() {
+                    // its loss is no congestion signal (RFC 9000 §14.4)
+                    writer.mark_pmtu_probe();
+                }
                 fill_packet::<T, L, $kind, V, Hs, _, _>(
                     writer.open(),
                     &mut $cursor,
                     self.rest,
                     self.now,
+                    $check,
                 )
             }};
         }
@@ -1314,6 +1404,7 @@ where
                             &mut cursor,
                             self.rest,
                             self.now,
+                            |_| {},
                         )
                     }
                     PlannedPacket::Handshake(mut cursor) => {
@@ -1338,6 +1429,7 @@ where
                             &mut cursor,
                             self.rest,
                             self.now,
+                            |_| {},
                         )
                     }
                     // no keys to send 0-RTT packets with are kept
@@ -1347,13 +1439,13 @@ where
                         break;
                     }
                     PlannedPacket::OneRtt(mut cursor) => {
-                        one_rtt_packet!(cursor, OneRttPacket)
+                        one_rtt_packet!(cursor, OneRttPacket, &mut check_one_rtt)
                     }
                     PlannedPacket::OneRttProbe(mut cursor) => {
-                        one_rtt_packet!(cursor, OneRttProbePacket)
+                        one_rtt_packet!(cursor, OneRttProbePacket, |_| {})
                     }
                     PlannedPacket::SettlingResponse(mut cursor) => {
-                        one_rtt_packet!(cursor, SettlingResponsePacket)
+                        one_rtt_packet!(cursor, SettlingResponsePacket, |_| {})
                     }
                 }
             };
@@ -1383,6 +1475,9 @@ where
         }
         let sealed = datagram.finish();
         drop(plan);
+        if let (Some(size), Some(_)) = (pmtu_probe, sealed) {
+            self.state.on_pmtu_probe_sealed(size);
+        }
         // a datagram with content used its connection ID; for one left
         // empty, the choice is dropped and nothing happened
         if let Some(len) = sealed {
@@ -1554,6 +1649,7 @@ fn fill_packet<T, L, K, V, Hs, C, W>(
     cursor: &mut C,
     rest: &mut Lineage<'_, V>,
     now: InstantOf<T>,
+    mut check: impl FnMut(&<PartsFrameSources<K, L> as FrameSourceSet>::FrameSourceId),
 ) -> (Supplied<W, ClassOfSource, Last>, PacketItems)
 where
     T: Choices,
@@ -1571,6 +1667,7 @@ where
         let Some(item) = cursor.next() else {
             return (Supplied::Open(open.make_last()), items);
         };
+        check(&PartsFrameSources::<K, L>::source(item.item()));
         let min = item.min();
         let holds_place = item.holds_place();
         let room = open.room(item.class());
@@ -1617,7 +1714,7 @@ where
             if open.room(item.class()) >= min.as_last {
                 let before = open.buffer_len();
                 let supplied = item.supply(open, |item, packet| {
-                    <L as PartsFrameSourceDispatch<T, L, K, V, FeedbackSummaryOf<T, L>, Hs>>::supply(
+                        <L as PartsFrameSourceDispatch<T, L, K, V, FeedbackSummaryOf<T, L>, Hs>>::supply(
                         rest, now, item, packet,
                     )
                 });
@@ -1639,6 +1736,7 @@ where
             let Some(next) = cursor.next() else {
                 return (Supplied::Open(open), items);
             };
+            check(&PartsFrameSources::<K, L>::source(next.item()));
             item = next;
         }
     }
@@ -1938,7 +2036,8 @@ pub async fn link_path_sending<W: LinkPathSendingCapability>(
 /// The kind of the sending call of a link path. It reads the datagram size
 /// probing policy of the link path's recovery layer: the call is woken when
 /// the layer is built, and when the policy changes what the link path
-/// sends at; and the link path's close packet, once it is sealed.
+/// sends at; the datagram size probe to send, whose datagram may go when
+/// nothing else does; and the link path's close packet, once it is sealed.
 /// Everything else that lets it send more is the send planner's to wake it
 /// for.
 ///
@@ -1963,6 +2062,8 @@ impl<
     Hs,
     Hd,
     Ipd,
+    Ipm,
+    Ifs,
     Ii,
     Ih,
     Io,
@@ -2005,6 +2106,8 @@ impl<
             Hs,
             Hd,
             Ipd,
+            Ipm,
+            Ifs,
             Ii,
             Ih,
             Io,
@@ -2094,8 +2197,13 @@ where
     for<'x> FillKeysRest<'x, T, L, It>: TakeEach<'x, FillReadTakes<T>, Iw>,
     for<'x> FillRest<'x, T, L, It, Iw>:
         AppendEach<<EstablishedSourceComponentsOfParts<T, L> as OptionalRefs>::Optional<'x>>,
-    for<'x> FillStreamsRest<'x, T, L, It, Iw>:
-        ReadEach<FillReads<T, L>, Ir> + GetAt<ConnectionIdsOf<T>, Ici>,
+    for<'x> FillStreamsRest<'x, T, L, It, Iw>: ReadEach<FillReads<T, L>, Ir>
+        + GetAt<ConnectionIdsOf<T>, Ici>
+        + GetAt<PendingPmtuProbe, Ipm>,
+    <SendTypes<T, L> as SendStrategyTypes>::FrameSourceId:
+        CoprodInjector<FrameSourceId, Ifs> + PartialEq,
+    <PartsFrameSources<OneRttPacket, L> as FrameSourceSet>::FrameSourceId:
+        CoprodInjector<FrameSourceId, Ifs> + PartialEq,
     for<'x> L: DriverContentOf<T, L, FillStreamsRest<'x, T, L, It, Iw>, Hd>,
     <SendTypes<T, L> as SendStrategyTypes>::SendIntents: From<<L as SendIntentsOf>::SendIntents>,
     for<'x> L: PartsFrameSourceDispatch<
@@ -2166,6 +2274,8 @@ where
         Hs,
         Hd,
         Ipd,
+        Ipm,
+        Ifs,
         Ii,
         Ih,
         Io,
@@ -2212,6 +2322,8 @@ where
                 Hs,
                 Hd,
                 Ipd,
+                Ipm,
+                Ifs,
                 Ii,
                 Ih,
                 Io,
@@ -2250,6 +2362,7 @@ where
     fn reads(reads: &mut ReadSet) {
         reads
             .add::<PmtuOf<T, L>>()
+            .add::<PendingPmtuProbe>()
             .add::<ClosePacket>()
             .add::<LinkPathRole<InstantOf<T>>>();
     }

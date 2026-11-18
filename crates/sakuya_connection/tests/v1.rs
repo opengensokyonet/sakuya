@@ -5238,6 +5238,52 @@ fn the_new_connection_id_is_gathered_and_sent_once_the_handshake_is_confirmed() 
     assert_eq!(strategy_events("path 0: content"), Vec::<String>::new());
 }
 
+/// The validated server has a destination connection ID and 1-RTT keys
+/// before it confirms the handshake at 14 ms.
+fn prepare_pmtu_handshake() {
+    use probe::PacketStep::{HandshakeConnectionId, InstallHandshakeKeys, InstallOneRttKeys};
+    common::set_link_ceilings(1452);
+    feed_packets([
+        (
+            ms(11),
+            HandshakeConnectionId(ConnectionId::new(&CLIENT_SCID).expect("eight bytes")),
+        ),
+        (ms(12), InstallHandshakeKeys),
+        (ms(13), InstallOneRttKeys),
+    ]);
+    feed([(ms(14), probe::Step::Confirm)]);
+}
+
+#[test]
+fn a_confirmed_link_path_sends_one_padded_ping_of_the_probe_size_and_waits_for_its_result() {
+    reset();
+    prepare_pmtu_handshake();
+    let mut connection = connection!(SpyMine, AddressValidation::Validated, link());
+    let _ = settle(&mut connection, 11..=13);
+    assert!(common::take_sent().is_empty());
+
+    let _ = settle(&mut connection, 14..=16);
+    let sent = common::take_sent();
+    let [(_, disclosure), (_, probe)] = sent.as_slice() else {
+        panic!(
+            "expected a connection ID and a datagram size probe, got {} datagrams",
+            sent.len()
+        );
+    };
+    let (_, _, disclosure) = open_sent_one_rtt(disclosure);
+    assert_eq!(disclosure[..2], [0x18, 0x01], "NEW_CONNECTION_ID");
+    assert_eq!(probe.len(), 1326);
+    let (_, _, payload) = open_sent_one_rtt(probe);
+    assert_eq!(payload[0], 0x01, "PING");
+    assert!(payload[1..].iter().all(|byte| *byte == 0), "PADDING");
+
+    let _ = settle(&mut connection, 17..=100);
+    assert!(
+        common::take_sent().is_empty(),
+        "the probe is still outstanding"
+    );
+}
+
 #[test]
 fn the_strategy_core_is_told_once_the_close_reason_is_recorded_that_no_link_path_is_active() {
     reset();

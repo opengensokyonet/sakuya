@@ -24,6 +24,7 @@ use crate::{
     send_strategy::{InjectSendIntent, SendIntentHandle},
     v1::{
         Part,
+        pmtu_probe::PmtuProbeIntent,
         send::{AckIntent, FrameSourceId, ProbePingIntent, SendItem},
         streams::send::{StreamIntent, shortest_stream_frame},
     },
@@ -122,6 +123,11 @@ fn ack(space: PacketNumberSpaceKind) -> Intents {
 /// The driver's content of the PING of a probe of `space`.
 fn ping(space: PacketNumberSpaceKind) -> Intents {
     <Intents as InjectSendIntent<_, _>>::inject(ProbePingIntent::new(space))
+}
+
+/// The driver's content of a datagram size probe of `size` bytes.
+fn pmtu_probe(size: usize) -> Intents {
+    <Intents as InjectSendIntent<_, _>>::inject(PmtuProbeIntent::new(size))
 }
 
 /// The driver's content of `intents`, with no close packet.
@@ -733,5 +739,130 @@ fn pacing_gives_a_whole_datagram_the_first_supply_then_allows_stream() {
                 );
             }
         }
+    }
+}
+
+/// A datagram size probe leads a datagram of its own: after content ranked
+/// before it, it waits for the next datagram, and nothing ranked after it
+/// joins it.
+#[test]
+fn a_path_mtu_probe_leads_a_datagram_and_nothing_follows_it() {
+    let (mut core, mut planner) = setup(&ALL, 12_000);
+    let handle = core
+        .intake()
+        .handle::<StreamIntent<sakuya_stream::send_options::urgency::Urgency>, _>();
+    let stream_id =
+        sakuya_wire::v1::stream_id::StreamId::from(sakuya_wire::var_int::VarInt::from_u32(1));
+    let _stream = handle.publish_to(
+        StreamIntent::Stream {
+            stream_id,
+            parameters: sakuya_stream::send_options::urgency::Urgency::default(),
+            min: shortest_stream_frame(stream_id, sakuya_wire::var_int::VarInt::ZERO, true),
+        },
+        AnyActiveLinkPath,
+    );
+    let (_, waker) = waker();
+    let content = driver([ack(ApplicationData), pmtu_probe(1400)]);
+    let mut plan = ready(&mut planner, &mut core, &content, &waker);
+    assert_eq!(
+        walk(&mut plan, 10),
+        [(
+            PlannedPacketKind::OneRtt,
+            vec![FrameSourceId::Ack(ApplicationData), FrameSourceId::Stream]
+        )]
+    );
+    drop(plan);
+    let content = driver([pmtu_probe(1400)]);
+    let mut plan = ready(&mut planner, &mut core, &content, &waker);
+    let leading = plan.leading_content().unwrap();
+    assert_eq!(
+        leading.source,
+        frunk_core::coproduct::Coproduct::Inl(FrameSourceId::PmtuProbe)
+    );
+    assert_eq!(
+        walk(&mut plan, 1),
+        [(PlannedPacketKind::OneRtt, vec![FrameSourceId::PmtuProbe])]
+    );
+}
+
+/// A datagram size probe goes only when its whole size can go within the
+/// window, past no permit; until then it leaves its size as a threshold,
+/// which a larger window reaches.
+#[test]
+fn a_path_mtu_probe_waits_until_its_whole_size_fits_the_window() {
+    let (mut core, mut planner) = setup(&ALL, 1399);
+    planner.observe(DatagramLimits {
+        probe_permits: 1,
+        ..limits(1399)
+    });
+    let content = driver([pmtu_probe(1400)]);
+    let (wakes, waker) = waker();
+    pending(&mut planner, &mut core, &content, &waker);
+    assert_eq!(planner.thresholds.pmtu_probe, Some(1400));
+    // above the ceiling it does not go either
+    planner.observe(DatagramLimits {
+        link_ceiling: Some(1399),
+        ..limits(12_000)
+    });
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 0);
+    planner.observe(limits(1400));
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+    let mut plan = ready(&mut planner, &mut core, &content, &waker);
+    assert_eq!(
+        walk(&mut plan, 1),
+        [(PlannedPacketKind::OneRtt, vec![FrameSourceId::PmtuProbe])]
+    );
+}
+
+/// A link path that does not carry 1200 bytes sends nothing but a datagram
+/// size probe.
+#[test]
+fn a_path_mtu_probe_goes_while_the_link_path_does_not_carry_1200_bytes() {
+    let (mut core, mut planner) = setup(&ALL, 12_000);
+    planner.observe(DatagramLimits {
+        pmtu_conclusion: 1100,
+        ..limits(12_000)
+    });
+    let (_, waker) = waker();
+    pending(
+        &mut planner,
+        &mut core,
+        &driver([ack(ApplicationData)]),
+        &waker,
+    );
+    let content = driver([ack(ApplicationData), pmtu_probe(1300)]);
+    let mut plan = ready(&mut planner, &mut core, &content, &waker);
+    assert_eq!(
+        walk(&mut plan, 1),
+        [(PlannedPacketKind::OneRtt, vec![FrameSourceId::PmtuProbe])]
+    );
+}
+
+/// While pacing holds back a 1-RTT STREAM, a datagram size probe waits for
+/// pacing to release its whole size; each wait is woken on its own, and
+/// the STREAM does not join the probe's datagram.
+#[test]
+fn a_path_mtu_probe_and_a_stream_held_back_by_pacing_wait_each_for_their_own_release() {
+    for (allowance, expected) in [
+        (1250, FrameSourceId::Stream),
+        (1300, FrameSourceId::PmtuProbe),
+    ] {
+        let (mut core, mut planner) = setup(&ALL, 12_000);
+        let (wakes, waker) = waker();
+        let content = driver([stream(1), pmtu_probe(1300)]);
+        planner.observe(gated_limits());
+        pending(&mut planner, &mut core, &content, &waker);
+        assert!(planner.thresholds.stream_waits_for_pacing);
+        assert_eq!(planner.thresholds.pmtu_probe, Some(1300));
+        planner.observe(DatagramLimits {
+            pacing_allowance: allowance,
+            ..gated_limits()
+        });
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+        let mut plan = ready(&mut planner, &mut core, &content, &waker);
+        assert_eq!(
+            walk(&mut plan, 10),
+            [(PlannedPacketKind::OneRtt, vec![expected])]
+        );
     }
 }

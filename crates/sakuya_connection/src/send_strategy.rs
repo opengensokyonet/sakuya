@@ -267,10 +267,7 @@ impl DatagramLimits {
         if !self.supports_minimum() {
             return 0;
         }
-        let credit = self.anti_amplification_credit.map_or(usize::MAX, |credit| {
-            usize::try_from(credit).unwrap_or(usize::MAX)
-        });
-        let any = self.max_udp_payload().min(credit);
+        let any = self.max_udp_payload().min(self.credit());
         match class {
             FlightClass::AckOnly => any,
             FlightClass::InFlight if self.probe_permits > 0 => any,
@@ -278,6 +275,26 @@ impl DatagramLimits {
                 .min(self.congestion_window_left)
                 .min(self.pacing_allowance),
         }
+    }
+
+    /// The largest datagram a path MTU probe may be now: within the
+    /// [`probe_ceiling`](Self::probe_ceiling), the anti-amplification
+    /// credit, the congestion window and pacing, without the permits past
+    /// them, whether or not the link path carries 1200 bytes; 0 without the
+    /// ceiling. A probe of a size goes when this is not below it.
+    pub fn pmtu_probe_capacity(&self) -> usize {
+        self.probe_ceiling()
+            .unwrap_or(0)
+            .min(self.credit())
+            .min(self.congestion_window_left)
+            .min(self.pacing_allowance)
+    }
+
+    /// What the anti-amplification limit allows, as bytes.
+    fn credit(&self) -> usize {
+        self.anti_amplification_credit.map_or(usize::MAX, |credit| {
+            usize::try_from(credit).unwrap_or(usize::MAX)
+        })
     }
 }
 
@@ -872,6 +889,10 @@ impl<'c, T, F: SupplyFeedback + ?Sized> PlannedItem<'c, T, F> {
             holds_place,
             feedback,
         }
+    }
+
+    pub(crate) fn item(&self) -> &T {
+        &self.item
     }
 
     /// The least room the item needs.

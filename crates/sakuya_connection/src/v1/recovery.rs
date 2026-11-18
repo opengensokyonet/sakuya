@@ -369,8 +369,9 @@ where
 /// What the protocol defines for a link path's congestion control, beside
 /// the controller: the bytes in flight, the permits to send datagrams past
 /// the window, whether sending is limited by the application, the arrival
-/// of the first RTT sample, and the maximum datagram size the controller
-/// was last told of.
+/// of the first RTT sample, the maximum datagram size the controller was
+/// last told of, and the size of the datagram size probe sent that awaits
+/// its result.
 ///
 /// The controller is not in it; the methods take what the factory lends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -381,6 +382,7 @@ pub struct LinkPathCongestionState<I> {
     first_rtt_sample_at: Option<I>,
     /// `None` until the link path's first datagram.
     max_datagram_size_told: Option<usize>,
+    pmtu_probe_awaited: Option<usize>,
 }
 
 impl<I> Default for LinkPathCongestionState<I> {
@@ -391,13 +393,15 @@ impl<I> Default for LinkPathCongestionState<I> {
             app_limited: false,
             first_rtt_sample_at: None,
             max_datagram_size_told: None,
+            pmtu_probe_awaited: None,
         }
     }
 }
 
 impl<I: Copy> LinkPathCongestionState<I> {
     /// Nothing in flight, no permits, not limited by the application, no
-    /// sample yet, no maximum datagram size told.
+    /// sample yet, no maximum datagram size told, no probe awaiting its
+    /// result.
     pub fn new() -> Self {
         Self::default()
     }
@@ -418,6 +422,25 @@ impl<I: Copy> LinkPathCongestionState<I> {
         }
         self.max_datagram_size_told = Some(size);
         controller.on_max_datagram_size_changed(size, handshake_confirmed, context);
+    }
+
+    /// The size of the datagram size probe sent on the link path that
+    /// awaits its result, if one does.
+    pub fn pmtu_probe_awaited(&self) -> Option<usize> {
+        self.pmtu_probe_awaited
+    }
+
+    /// A datagram size probe of `size` bytes was sealed: it awaits its
+    /// result, and no probe of that size is sent until it has one.
+    pub fn on_pmtu_probe_sealed(&mut self, size: usize) {
+        self.pmtu_probe_awaited = Some(size);
+    }
+
+    /// A datagram size probe sent on the link path has its result:
+    /// acknowledged, declared lost, or its send result unknown. None
+    /// awaits its result any more.
+    pub fn on_pmtu_probe_settled(&mut self) {
+        self.pmtu_probe_awaited = None;
     }
 
     /// The bytes in flight.
