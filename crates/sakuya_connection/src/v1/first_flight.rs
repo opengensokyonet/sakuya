@@ -224,10 +224,10 @@ where
             <T::Side as Side>::split_initial_secrets(InitialSecrets::derive(crypto, client_dcid));
         Self {
             crypto: Some(CryptoReceiver::new(capacities)),
-            keys: Some(InitialKeys::Live(LevelKeys {
+            keys: Some(InitialKeys::Live(Box::new(LevelKeys {
                 send: DirectionKeys::derive(crypto, INITIAL_AEAD, &send),
                 receive: DirectionKeys::derive(crypto, INITIAL_AEAD, &receive),
-            })),
+            }))),
             start: FirstFlightStart {
                 journals: Some(ReceiveJournals::new()),
                 // the Initial space acknowledges at once (RFC 9000 §13.2.1)

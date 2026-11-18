@@ -59,7 +59,7 @@ fn one_rtt_keys() -> OneRttKeys<RingBackend, Duration> {
 
 #[test]
 fn initial_keys_lose_the_sending_half_then_go() {
-    let mut initial = InitialKeys::Live(level_keys());
+    let mut initial = InitialKeys::Live(Box::new(level_keys()));
     assert!(initial.send().is_some() && initial.receive().is_some());
     drop(initial.keep_receive_only());
     assert!(initial.send().is_none() && initial.receive().is_some());

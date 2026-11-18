@@ -1142,10 +1142,10 @@ where
         }
         let secrets = InitialSecrets::derive(&args.crypto, &args.client_dcid);
         let (send, receive) = T::Side::split_initial_secrets(secrets);
-        InitialKeys::Live(LevelKeys {
+        InitialKeys::Live(Box::new(LevelKeys {
             send: DirectionKeys::derive(&args.crypto, INITIAL_AEAD, &send),
             receive: DirectionKeys::derive(&args.crypto, INITIAL_AEAD, &receive),
-        })
+        }))
     }
 }
 

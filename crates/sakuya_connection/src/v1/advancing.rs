@@ -457,13 +457,24 @@ where
     E: ClientHandshakeSteps,
     W: ClientAdvancingCapability<E>,
 {
+    // The three steps of the handshake are boxed, each until it is
+    // awaited: the call's future keeps no room for the largest of them for
+    // as long as the connection lasts.
     // this version does not send 0-RTT: what an offer gives is dropped
-    let (_, state) = step!(host, W::close, tls.write_client_hello(host).await);
+    let (_, state) = step!(host, W::close, Box::pin(tls.write_client_hello(host)).await);
     host.with(|mut view| W::hello_written(view.as_pin()));
-    let (read, state) = step!(host, W::close, E::read_server_hello(state, host).await);
+    let (read, state) = step!(
+        host,
+        W::close,
+        Box::pin(E::read_server_hello(state, host)).await
+    );
     let aead = read.aead;
     host.with(|mut view| W::install_handshake(view.as_pin(), aead, read.secrets));
-    let (completed, state) = step!(host, W::close, E::read_server_finished(state, host).await);
+    let (completed, state) = step!(
+        host,
+        W::close,
+        Box::pin(E::read_server_finished(state, host)).await
+    );
     host.with(|mut view| W::complete(view.as_pin(), aead, completed));
     yield EstablishedLayerReady;
     // the tickets are read until the connection ends: the step only fails

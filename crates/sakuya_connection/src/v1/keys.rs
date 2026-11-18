@@ -107,13 +107,15 @@ macro_rules! state_debug {
 /// The keys of the Initial level.
 ///
 /// They exist from the start: they are derived from the version and the
-/// Destination Connection ID of the client's first Initial packet.
+/// Destination Connection ID of the client's first Initial packet. The
+/// keys are boxed, so that the connection node does not keep their room
+/// once they are gone.
 pub enum InitialKeys<B: CryptoBackend> {
     /// Both directions.
-    Live(LevelKeys<B>),
+    Live(Box<LevelKeys<B>>),
     /// The connection is closing: only packets from the peer are read, to
     /// see whether it closes too.
-    ReceiveOnly(DirectionKeys<B>),
+    ReceiveOnly(Box<DirectionKeys<B>>),
     /// Gone: a server has processed a Handshake packet, a client has sent
     /// one (RFC 9001 §4.9.1), or the connection is draining.
     Discarded,
@@ -147,7 +149,7 @@ impl<B: CryptoBackend> InitialKeys<B> {
             matches!(self, Self::Live(_)),
             "replacing Initial keys that are {self:?}"
         );
-        *self = Self::Live(keys);
+        *self = Self::Live(Box::new(keys));
         Happened::new()
     }
 
@@ -161,7 +163,7 @@ impl<B: CryptoBackend> InitialKeys<B> {
         let Self::Live(keys) = core::mem::replace(self, Self::Discarded) else {
             unreachable!()
         };
-        *self = Self::ReceiveOnly(keys.receive);
+        *self = Self::ReceiveOnly(Box::new(keys.receive));
         Some(Happened::new())
     }
 
@@ -174,14 +176,15 @@ impl<B: CryptoBackend> InitialKeys<B> {
     }
 }
 
-/// The keys of the Handshake level.
+/// The keys of the Handshake level. The keys are boxed, as the Initial
+/// keys are.
 pub enum HandshakeKeys<B: CryptoBackend> {
     /// The handshake has not produced them yet.
     NotYet,
     /// Both directions.
-    Live(LevelKeys<B>),
+    Live(Box<LevelKeys<B>>),
     /// The connection is closing: only packets from the peer are read.
-    ReceiveOnly(DirectionKeys<B>),
+    ReceiveOnly(Box<DirectionKeys<B>>),
     /// Gone: the handshake is confirmed (RFC 9001 §4.9.2), or the
     /// connection is draining or closed before they came.
     Discarded,
@@ -214,7 +217,7 @@ impl<B: CryptoBackend> HandshakeKeys<B> {
             matches!(self, Self::NotYet),
             "installing Handshake keys that are {self:?}"
         );
-        *self = Self::Live(keys);
+        *self = Self::Live(Box::new(keys));
         Happened::new()
     }
 
@@ -225,7 +228,7 @@ impl<B: CryptoBackend> HandshakeKeys<B> {
     pub fn keep_receive_only(&mut self) -> Option<Happened<KeysDiscarded<Handshake>>> {
         match core::mem::replace(self, Self::Discarded) {
             Self::Live(keys) => {
-                *self = Self::ReceiveOnly(keys.receive);
+                *self = Self::ReceiveOnly(Box::new(keys.receive));
                 Some(Happened::new())
             }
             Self::ReceiveOnly(keys) => {

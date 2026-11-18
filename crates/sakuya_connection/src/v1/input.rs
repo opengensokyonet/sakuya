@@ -414,10 +414,15 @@ impl<Lk: Link, R: LogicalPathDatagramReceiver<Lk>> LogicalPathInput<Lk, R> {
     }
 
     /// The first held input, in the order of arrival, that `levels`
-    /// release.
+    /// release. Once the last one is released, the hold lets its room go:
+    /// inputs are held only while the handshake's keys come.
     fn release(&mut self, levels: ReceivableLevels) -> Option<HeldInput<Lk, R::Handoff>> {
         let at = self.held.iter().position(|input| input.released(levels))?;
-        self.held.remove(at)
+        let input = self.held.remove(at);
+        if self.held.is_empty() {
+            self.held = VecDeque::new();
+        }
+        input
     }
 
     /// Whether this poll has handled as many inputs as it may; if so, the
