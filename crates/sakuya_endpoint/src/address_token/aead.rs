@@ -1,17 +1,11 @@
-use core::marker::PhantomData;
-use std::{
-    fmt,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    sync::Arc,
-    time::Duration,
-};
+use std::{fmt, sync::Arc, time::Duration};
 
-use bytes::Bytes;
-use frunk_core::{coproduct::CoproductSelector, indices::Here};
+use bytes::{Buf, Bytes};
 use nitori_crypto::{
     Aead, AeadAlgorithm, AeadKey, ExpandLength, HashAlgorithm, Hkdf, Random, RandomError, Secret,
     Supported,
 };
+use sakuya_link::{PeerAddressCodec, same_network_address};
 use sakuya_wire::connection_id::ConnectionId;
 use snafu::Snafu;
 use time::UtcDateTime;
@@ -19,7 +13,7 @@ use time::UtcDateTime;
 use super::{
     AddressTokens, DEFAULT_NEW_TOKEN_LIFETIME, DEFAULT_RETRY_TOKEN_LIFETIME,
     ExactTokenAddressPolicy, NewTokenAddress, NewTokenId, NewTokenIssuer, TokenAddressPolicy,
-    TokenKind, TokenOutcome, TokenPeerAddress, ValidNewToken,
+    TokenKind, TokenOutcome, ValidNewToken,
 };
 
 /// The secret key that seals an endpoint's address validation tokens.
@@ -98,25 +92,21 @@ impl Default for AddressTokenLifetimes {
 ///
 /// [RFC 9000 §8.1.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-8.1.3
 /// [RFC 9000 §8.1.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-8.1.4
-pub struct AeadAddressTokens<C: Aead + Hkdf, P = ExactTokenAddressPolicy, I = Here> {
+pub struct AeadAddressTokens<C: Aead + Hkdf, P = ExactTokenAddressPolicy> {
     sealer: Arc<Sealer<C>>,
     policy: P,
-    /// Which member of the sum of the endpoint's peers is the socket
-    /// address.
-    index: PhantomData<fn() -> I>,
 }
 
-impl<C: Aead + Hkdf, P: Clone, I> Clone for AeadAddressTokens<C, P, I> {
+impl<C: Aead + Hkdf, P: Clone> Clone for AeadAddressTokens<C, P> {
     fn clone(&self) -> Self {
         Self {
             sealer: Arc::clone(&self.sealer),
             policy: self.policy.clone(),
-            index: PhantomData,
         }
     }
 }
 
-impl<C: Aead + Hkdf, P: fmt::Debug, I> fmt::Debug for AeadAddressTokens<C, P, I> {
+impl<C: Aead + Hkdf, P: fmt::Debug> fmt::Debug for AeadAddressTokens<C, P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AeadAddressTokens")
             .field("lifetimes", &self.sealer.lifetimes)
@@ -125,7 +115,7 @@ impl<C: Aead + Hkdf, P: fmt::Debug, I> fmt::Debug for AeadAddressTokens<C, P, I>
     }
 }
 
-impl<C: Aead + Hkdf + Random, P: TokenAddressPolicy, I> AeadAddressTokens<C, P, I> {
+impl<C: Aead + Hkdf + Random, P> AeadAddressTokens<C, P> {
     /// Tokens sealed by `backend` under `key`, accepted for `lifetimes`, with
     /// addresses compared by `policy`.
     ///
@@ -153,7 +143,6 @@ impl<C: Aead + Hkdf + Random, P: TokenAddressPolicy, I> AeadAddressTokens<C, P, 
                 lifetimes,
             }),
             policy,
-            index: PhantomData,
         })
     }
 }
@@ -169,22 +158,15 @@ pub enum AeadAddressTokensError {
     HashUnsupported,
 }
 
-/// The socket address is the member `I` of the sum of the endpoint's peers;
-/// the first member when `I` is left to its default.
-impl<C, P, I, Peer> TokenPeerAddress<Peer> for AeadAddressTokens<C, P, I>
-where
-    C: Aead + Hkdf,
-    Peer: CoproductSelector<SocketAddr, I>,
-{
-    fn peer_socket_addr<'p>(&self, peer: &'p Peer) -> Option<&'p SocketAddr> {
-        peer.get()
-    }
-}
-
-impl<C, P, I> AddressTokens for AeadAddressTokens<C, P, I>
+/// Binds a token to the peer's address ([`PeerAddressCodec`] gives the bytes
+/// of it that the token holds): to any peer whose network address can be
+/// stated. For UDP that is every peer; for a peer reached through a relay,
+/// none.
+impl<C, P, Peer> AddressTokens<Peer> for AeadAddressTokens<C, P>
 where
     C: Aead + Hkdf + Random,
-    P: TokenAddressPolicy,
+    P: TokenAddressPolicy<Peer>,
+    Peer: PeerAddressCodec + Eq,
 {
     type NewTokenIssuer = AeadNewTokenIssuer<C>;
 
@@ -194,9 +176,13 @@ where
         }
     }
 
+    fn binds(&self, peer: &Peer) -> bool {
+        peer.network_address().is_some()
+    }
+
     fn issue_retry(
         &self,
-        peer: &SocketAddr,
+        peer: &Peer,
         original_dcid: &ConnectionId,
         now: UtcDateTime,
     ) -> Result<Bytes, RandomError> {
@@ -204,7 +190,7 @@ where
             .issue(TokenKind::Retry, peer, Some(original_dcid), now)
     }
 
-    fn validate(&self, token: &[u8], peer: &SocketAddr, now: UtcDateTime) -> TokenOutcome {
+    fn validate(&self, token: &[u8], peer: &Peer, now: UtcDateTime) -> TokenOutcome {
         let kind = match token.first() {
             Some(&RETRY_MARKER) => TokenKind::Retry,
             Some(&NEW_TOKEN_MARKER) => TokenKind::NewToken,
@@ -214,7 +200,7 @@ where
             TokenKind::Retry => TokenOutcome::InvalidRetry,
             TokenKind::NewToken => TokenOutcome::InvalidNewToken,
         };
-        let Some(opened) = self.sealer.open(kind, token) else {
+        let Some(opened) = self.sealer.open::<Peer>(kind, token) else {
             return invalid;
         };
         let lifetime = match kind {
@@ -228,7 +214,7 @@ where
         match (kind, opened.original_dcid) {
             (TokenKind::Retry, Some(original_dcid)) => TokenOutcome::Retry { original_dcid },
             (TokenKind::NewToken, None) => TokenOutcome::NewToken(ValidNewToken {
-                address: if opened.address.ip() == peer.ip() {
+                address: if same_network_address(&opened.address, peer) {
                     NewTokenAddress::Validated
                 } else {
                     NewTokenAddress::LooselyMatched
@@ -264,8 +250,10 @@ impl<C: Aead + Hkdf> fmt::Debug for AeadNewTokenIssuer<C> {
     }
 }
 
-impl<C: Aead + Hkdf + Random> NewTokenIssuer for AeadNewTokenIssuer<C> {
-    fn issue(&self, peer: &SocketAddr, now: UtcDateTime) -> Result<Bytes, RandomError> {
+impl<C: Aead + Hkdf + Random, Peer: PeerAddressCodec> NewTokenIssuer<Peer>
+    for AeadNewTokenIssuer<C>
+{
+    fn issue(&self, peer: &Peer, now: UtcDateTime) -> Result<Bytes, RandomError> {
         self.sealer.issue(TokenKind::NewToken, peer, None, now)
     }
 }
@@ -304,20 +292,20 @@ struct Sealer<C: Aead + Hkdf> {
 }
 
 /// The sealed contents of a token, opened.
-struct Opened {
+struct Opened<Peer> {
     salt: [u8; SALT_LEN],
     issued_at: UtcDateTime,
-    address: SocketAddr,
+    address: Peer,
     original_dcid: Option<ConnectionId>,
 }
 
 impl<C: Aead + Hkdf + Random> Sealer<C> {
     /// A token of `kind` for `peer`, carrying `original_dcid` for a Retry
     /// token.
-    fn issue(
+    fn issue<Peer: PeerAddressCodec>(
         &self,
         kind: TokenKind,
-        peer: &SocketAddr,
+        peer: &Peer,
         original_dcid: Option<&ConnectionId>,
         now: UtcDateTime,
     ) -> Result<Bytes, RandomError> {
@@ -327,7 +315,7 @@ impl<C: Aead + Hkdf + Random> Sealer<C> {
         token.push(marker);
         token.extend_from_slice(&salt);
         token.extend_from_slice(&unix_millis(now).to_be_bytes());
-        put_address(&mut token, peer);
+        peer.write_peer(&mut token);
         if let Some(original_dcid) = original_dcid {
             // invariant: a connection ID is at most 20 bytes.
             token.push(original_dcid.as_bytes().len() as u8);
@@ -347,7 +335,7 @@ impl<C: Aead + Hkdf + Random> Sealer<C> {
 impl<C: Aead + Hkdf> Sealer<C> {
     /// Opens a token whose first byte says it is of `kind`; `None` when it is
     /// not authentic or not laid out as one.
-    fn open(&self, kind: TokenKind, token: &[u8]) -> Option<Opened> {
+    fn open<Peer: PeerAddressCodec>(&self, kind: TokenKind, token: &[u8]) -> Option<Opened<Peer>> {
         let (prefix, rest) = token.split_at_checked(PREFIX_LEN)?;
         let (sealed, tag) = rest.split_last_chunk::<{ AeadAlgorithm::TAG_LEN }>()?;
         let marker = prefix[0];
@@ -356,18 +344,24 @@ impl<C: Aead + Hkdf> Sealer<C> {
         self.token_key(marker, &salt)
             .open_in_place(&NONCE, &[marker], &mut contents, tag)
             .ok()?;
-        let (issued_at, contents) = contents.split_first_chunk::<8>()?;
-        let issued_at = from_unix_millis(i64::from_be_bytes(*issued_at))?;
-        let (address, contents) = take_address(contents)?;
+        let mut contents = Bytes::from(contents);
+        if contents.remaining() < 8 {
+            return None;
+        }
+        let issued_at = from_unix_millis(contents.get_i64())?;
+        let address = Peer::read_peer(&mut contents).ok()?;
         let original_dcid = match kind {
             TokenKind::Retry => {
-                let (&len, cid) = contents.split_first()?;
-                if cid.len() != usize::from(len) {
+                if !contents.has_remaining() {
                     return None;
                 }
-                Some(ConnectionId::new(cid).ok()?)
+                let len = usize::from(contents.get_u8());
+                if contents.remaining() != len {
+                    return None;
+                }
+                Some(ConnectionId::new(&contents).ok()?)
             }
-            TokenKind::NewToken => contents.is_empty().then_some(None)?,
+            TokenKind::NewToken => (!contents.has_remaining()).then_some(None)?,
         };
         Some(Opened {
             salt,
@@ -414,43 +408,6 @@ fn unix_millis(time: UtcDateTime) -> i64 {
 
 fn from_unix_millis(millis: i64) -> Option<UtcDateTime> {
     UtcDateTime::from_unix_timestamp_nanos(i128::from(millis) * 1_000_000).ok()
-}
-
-/// The family byte of an IPv4 address.
-const IPV4: u8 = 4;
-
-/// The family byte of an IPv6 address.
-const IPV6: u8 = 6;
-
-fn put_address(out: &mut Vec<u8>, address: &SocketAddr) {
-    match address.ip() {
-        IpAddr::V4(ip) => {
-            out.push(IPV4);
-            out.extend_from_slice(&ip.octets());
-        }
-        IpAddr::V6(ip) => {
-            out.push(IPV6);
-            out.extend_from_slice(&ip.octets());
-        }
-    }
-    out.extend_from_slice(&address.port().to_be_bytes());
-}
-
-fn take_address(input: &[u8]) -> Option<(SocketAddr, &[u8])> {
-    let (&family, rest) = input.split_first()?;
-    let (ip, rest) = match family {
-        IPV4 => {
-            let (octets, rest) = rest.split_first_chunk::<4>()?;
-            (IpAddr::V4(Ipv4Addr::from(*octets)), rest)
-        }
-        IPV6 => {
-            let (octets, rest) = rest.split_first_chunk::<16>()?;
-            (IpAddr::V6(Ipv6Addr::from(*octets)), rest)
-        }
-        _ => return None,
-    };
-    let (port, rest) = rest.split_first_chunk::<2>()?;
-    Some((SocketAddr::new(ip, u16::from_be_bytes(*port)), rest))
 }
 
 #[cfg(test)]

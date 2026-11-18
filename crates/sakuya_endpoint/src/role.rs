@@ -23,7 +23,7 @@ use sakuya_recovery::loss::LossThresholds;
 use sakuya_wire::version::Version;
 
 use crate::{
-    address_token::{AddressTokens, TokenPeerAddress},
+    address_token::AddressTokens,
     choices::{ConnectionDatagramReceiver, EndpointChoices, LinkOf, PeerOf, ResetTokensOf},
     client_token::{AddressTokenStore, KeyedAddressTokenSink},
     config::{ClientConfig, InvalidEndpointConfigError, ServerConfig},
@@ -139,9 +139,9 @@ pub trait AcceptingServerRole<E: EndpointChoices>:
     /// What starts the handshake of each connection.
     type Handshake: ServerHandshakeConfig;
     /// The address validation tokens.
-    type Tokens: AddressTokens + TokenPeerAddress<PeerOf<E>> + Clone;
+    type Tokens: AddressTokens<PeerOf<E>> + Clone;
     /// When to answer a new Initial with a stateless Retry.
-    type RetryPolicy: StatelessRetryPolicy + Clone;
+    type RetryPolicy: StatelessRetryPolicy<PeerOf<E>> + Clone;
     /// Where the positions of the role's connections are inferred.
     type Composition: Composition<Self::Choices, Self::Parts>;
 }
@@ -401,8 +401,8 @@ where
         + Composition<ServerConnectionChoices<E, U, H>, L>,
     L: EndpointPartList<ServerConnectionChoices<E, U, H>>,
     H: ServerHandshakeConfig + 'static,
-    Tk: AddressTokens + TokenPeerAddress<PeerOf<E>> + Clone + 'static,
-    Rp: StatelessRetryPolicy + Clone + 'static,
+    Tk: AddressTokens<PeerOf<E>> + Clone + 'static,
+    Rp: StatelessRetryPolicy<PeerOf<E>> + Clone + 'static,
 {
     type Config = ServerConfig<ServerConnectionChoices<E, U, H>, L, H, Tk, Rp>;
     type Kept = Arc<IncomingShared<E, Self>>;
@@ -449,8 +449,8 @@ where
         + Composition<ServerConnectionChoices<E, U, H>, L>,
     L: EndpointPartList<ServerConnectionChoices<E, U, H>>,
     H: ServerHandshakeConfig + 'static,
-    Tk: AddressTokens + TokenPeerAddress<PeerOf<E>> + Clone + 'static,
-    Rp: StatelessRetryPolicy + Clone + 'static,
+    Tk: AddressTokens<PeerOf<E>> + Clone + 'static,
+    Rp: StatelessRetryPolicy<PeerOf<E>> + Clone + 'static,
 {
     type Choices = ServerConnectionChoices<E, U, H>;
     type Parts = L;

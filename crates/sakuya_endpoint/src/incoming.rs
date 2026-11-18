@@ -78,7 +78,7 @@ use sakuya_wire::{
 };
 
 use crate::{
-    address_token::{AddressTokens as _, NewTokenAddress, TokenPeerAddress as _},
+    address_token::{AddressTokens as _, NewTokenAddress},
     choices::{ConnectionDatagramReceiver, DatagramOf, EndpointChoices, LinkOf, PayloadOf, PeerOf},
     config::thresholds_against_clock,
     connection::{make_connection, register_first_local},
@@ -624,8 +624,9 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
     /// [`RetryError`], which gives the incoming connection back as it was,
     /// its registration kept, when no Retry was sent:
     ///
-    /// - [`RetryError::PeerNotSocketAddr`] when the peer is not a socket
-    ///   address, against which a token cannot be checked;
+    /// - [`RetryError::UnbindablePeer`] when the token component cannot bind
+    ///   a token to the peer ([`AddressTokens::binds`](crate::address_token::AddressTokens::binds)), so a token cannot be
+    ///   checked against it;
     /// - [`RetryError::AlreadyRetried`] when the client's Initial already
     ///   returned a valid Retry token: a client accepts one Retry per
     ///   connection attempt (RFC 9000 §17.2.5.2);
@@ -642,20 +643,20 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> TerminableIncoming<E, S> {
         reason = "the error gives the incoming connection back by value"
     )]
     pub async fn retry(self) -> Result<(), RetryError<Self, <LinkOf<E> as Link>::SendError>> {
-        let Some(&peer) = self.tokens.peer_socket_addr(&self.facts.peer) else {
-            return Err(RetryError::PeerNotSocketAddr(self));
-        };
+        if !self.tokens.binds(&self.facts.peer) {
+            return Err(RetryError::UnbindablePeer(self));
+        }
         if matches!(self.facts.token, ReturnedToken::Retry { .. }) {
             return Err(RetryError::AlreadyRetried(self));
         }
-        let token =
-            match self
-                .tokens
-                .issue_retry(&peer, &self.client_dcid, self.domain.wall_clock.now())
-            {
-                Ok(token) => token,
-                Err(source) => return Err(RetryError::Random { half: self, source }),
-            };
+        let token = match self.tokens.issue_retry(
+            &self.facts.peer,
+            &self.client_dcid,
+            self.domain.wall_clock.now(),
+        ) {
+            Ok(token) => token,
+            Err(source) => return Err(RetryError::Random { half: self, source }),
+        };
         let scid = generate_stateless_scid::<E::ConnectionIds>(&self.domain.connection_ids);
         let packet = match encode_stateless_retry(
             &self.domain.crypto,
@@ -906,9 +907,9 @@ impl<H> core::error::Error for PassthroughHandoffError<H> {}
 /// given back as it was, its registration kept, for the application to
 /// accept, refuse, change or drop.
 pub enum RetryError<H, S> {
-    /// The peer is not a socket address, against which a token cannot be
-    /// checked.
-    PeerNotSocketAddr(H),
+    /// The token component cannot bind a token to the peer, so a token
+    /// cannot be checked against it.
+    UnbindablePeer(H),
     /// The client's Initial already returned a valid Retry token.
     AlreadyRetried(H),
     /// The Retry is more than three times the bytes received from the
@@ -947,9 +948,7 @@ pub enum RetryError<H, S> {
 impl<H, S: fmt::Debug> fmt::Debug for RetryError<H, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::PeerNotSocketAddr(_) => {
-                f.debug_tuple("PeerNotSocketAddr").finish_non_exhaustive()
-            }
+            Self::UnbindablePeer(_) => f.debug_tuple("UnbindablePeer").finish_non_exhaustive(),
             Self::AlreadyRetried(_) => f.debug_tuple("AlreadyRetried").finish_non_exhaustive(),
             Self::AmplificationLimited(_) => f
                 .debug_tuple("AmplificationLimited")
@@ -977,9 +976,7 @@ impl<H, S: fmt::Debug> fmt::Debug for RetryError<H, S> {
 impl<H, S> fmt::Display for RetryError<H, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::PeerNotSocketAddr(_) => {
-                "the Retry was not sent: the peer is not a socket address"
-            }
+            Self::UnbindablePeer(_) => "the Retry was not sent: no token can be bound to the peer",
             Self::AlreadyRetried(_) => "the Retry was not sent: the client was already retried",
             Self::AmplificationLimited(_) => {
                 "the Retry was not sent: it exceeds the amplification limit"
@@ -995,9 +992,9 @@ impl<H, S> fmt::Display for RetryError<H, S> {
 impl<H, S: core::error::Error + 'static> core::error::Error for RetryError<H, S> {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
-            Self::PeerNotSocketAddr(_)
-            | Self::AlreadyRetried(_)
-            | Self::AmplificationLimited(_) => None,
+            Self::UnbindablePeer(_) | Self::AlreadyRetried(_) | Self::AmplificationLimited(_) => {
+                None
+            }
             Self::EndpointClosed { source, .. } => Some(source),
             Self::Random { source, .. } => Some(source),
             Self::Encode { source, .. } => Some(source),

@@ -769,7 +769,9 @@ name = "sakuya_link"
 version = "0.0.0"
 dependencies = [
  "bytes",
+ "frunk_core",
  "nitori_id",
+ "nitori_io",
 ]
 
 [[package]]

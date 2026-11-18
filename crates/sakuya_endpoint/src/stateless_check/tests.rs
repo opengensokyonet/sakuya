@@ -248,9 +248,7 @@ fn an_invalid_retry_token_closes_the_attempt() {
 #[test]
 fn a_new_token_is_accepted_once() {
     let mut check = check();
-    let token = check
-        .tokens()
-        .new_token_issuer()
+    let token = AddressTokens::<SocketAddr>::new_token_issuer(check.tokens())
         .issue(&peer(), now())
         .unwrap();
     let datagram = initial(client_dcid(), &token, 1200);
@@ -275,14 +273,17 @@ fn a_new_token_is_accepted_once() {
 }
 
 #[test]
-fn a_peer_that_is_not_a_socket_address_gets_no_retry() {
+fn a_peer_a_token_cannot_be_bound_to_gets_no_retry() {
     let mut check = check();
-    let token = check
-        .tokens()
-        .new_token_issuer()
+    let token = AddressTokens::<SocketAddr>::new_token_issuer(check.tokens())
         .issue(&peer(), now())
         .unwrap();
-    let outcome = check.first_datagram(&initial(client_dcid(), &token, 1200), None, LOADED, now());
+    let outcome = check.first_datagram::<SocketAddr>(
+        &initial(client_dcid(), &token, 1200),
+        None,
+        LOADED,
+        now(),
+    );
     let FirstDatagramOutcome::Admit(admitted) = outcome else {
         panic!("not admitted: {outcome:?}");
     };

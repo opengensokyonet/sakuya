@@ -1,10 +1,16 @@
 use std::{net::SocketAddr, time::Duration};
 
+use bytes::{Buf, BufMut};
+use frunk_core::coproduct::{CNil, Coproduct};
 use nitori_crypto_aws_lc::AwsLcBackend;
+use nitori_io::SplitTo;
+use sakuya_link::{PeerAddress, PeerAddressCodec, PeerAddressReadError};
 use sakuya_wire::connection_id::ConnectionId;
 use time::UtcDateTime;
 
-use super::{AddressTokenKey, AddressTokenLifetimes, AeadAddressTokens, PREFIX_LEN};
+use super::{
+    AddressTokenKey, AddressTokenLifetimes, AeadAddressTokens, AeadNewTokenIssuer, PREFIX_LEN,
+};
 use crate::address_token::{
     AddressTokens, ExactTokenAddressPolicy, NewTokenAddress, NewTokenIssuer, TokenAddressPolicy,
     TokenKind, TokenOutcome,
@@ -18,7 +24,7 @@ fn tokens() -> AeadAddressTokens<AwsLcBackend> {
     tokens_with(ExactTokenAddressPolicy)
 }
 
-fn tokens_with<P: TokenAddressPolicy>(policy: P) -> AeadAddressTokens<AwsLcBackend, P> {
+fn tokens_with<P: TokenAddressPolicy<SocketAddr>>(policy: P) -> AeadAddressTokens<AwsLcBackend, P> {
     AeadAddressTokens::new(
         AwsLcBackend,
         AddressTokenKey::from_bytes(&[7; AddressTokenKey::LEN]),
@@ -26,6 +32,12 @@ fn tokens_with<P: TokenAddressPolicy>(policy: P) -> AeadAddressTokens<AwsLcBacke
         policy,
     )
     .unwrap()
+}
+
+fn issuer(
+    tokens: &AeadAddressTokens<AwsLcBackend, impl TokenAddressPolicy<SocketAddr>>,
+) -> AeadNewTokenIssuer<AwsLcBackend> {
+    AddressTokens::<SocketAddr>::new_token_issuer(tokens)
 }
 
 fn peer() -> SocketAddr {
@@ -109,7 +121,7 @@ fn another_key_does_not_open_a_token() {
 #[test]
 fn a_new_token_from_the_same_ip_validates_the_address() {
     let tokens = tokens();
-    let token = tokens.new_token_issuer().issue(&peer(), start()).unwrap();
+    let token = issuer(&tokens).issue(&peer(), start()).unwrap();
     let new_port: SocketAddr = "192.0.2.1:5000".parse().unwrap();
     let later = start() + Duration::from_secs(13 * 24 * 60 * 60);
     let TokenOutcome::NewToken(valid) = tokens.validate(&token, &new_port, later) else {
@@ -126,7 +138,7 @@ fn a_new_token_from_the_same_ip_validates_the_address() {
 #[test]
 fn a_new_token_from_another_ip_is_invalid_by_default() {
     let tokens = tokens();
-    let token = tokens.new_token_issuer().issue(&peer(), start()).unwrap();
+    let token = issuer(&tokens).issue(&peer(), start()).unwrap();
     let other: SocketAddr = "192.0.2.2:4433".parse().unwrap();
     assert_eq!(
         tokens.validate(&token, &other, start()),
@@ -137,7 +149,7 @@ fn a_new_token_from_another_ip_is_invalid_by_default() {
 /// Accepts any address of the same /24.
 struct SameSubnet;
 
-impl TokenAddressPolicy for SameSubnet {
+impl TokenAddressPolicy<SocketAddr> for SameSubnet {
     fn matches(&self, _: TokenKind, issued: &SocketAddr, current: &SocketAddr) -> bool {
         match (issued, current) {
             (SocketAddr::V4(issued), SocketAddr::V4(current)) => {
@@ -151,7 +163,7 @@ impl TokenAddressPolicy for SameSubnet {
 #[test]
 fn a_looser_policy_never_validates_another_ip() {
     let tokens = tokens_with(SameSubnet);
-    let token = tokens.new_token_issuer().issue(&peer(), start()).unwrap();
+    let token = issuer(&tokens).issue(&peer(), start()).unwrap();
     let other: SocketAddr = "192.0.2.2:4433".parse().unwrap();
     let TokenOutcome::NewToken(valid) = tokens.validate(&token, &other, start()) else {
         panic!("not a valid NEW_TOKEN token");
@@ -162,7 +174,7 @@ fn a_looser_policy_never_validates_another_ip() {
 #[test]
 fn tokens_differ_and_are_told_apart_by_their_first_byte() {
     let tokens = tokens();
-    let issuer = tokens.new_token_issuer();
+    let issuer = issuer(&tokens);
     let first = issuer.issue(&peer(), start()).unwrap();
     let second = issuer.issue(&peer(), start()).unwrap();
     assert_ne!(first, second);
@@ -198,4 +210,95 @@ fn an_ipv6_address_round_trips() {
         tokens.validate(&token, &peer, start()),
         TokenOutcome::Retry { .. }
     ));
+}
+
+/// A peer address sum of two socket-address transports.
+type Two = Coproduct<SocketAddr, Coproduct<SocketAddr, CNil>>;
+
+fn first(text: &str) -> Two {
+    Coproduct::Inl(text.parse().unwrap())
+}
+
+fn second(text: &str) -> Two {
+    Coproduct::Inr(Coproduct::Inl(text.parse().unwrap()))
+}
+
+#[test]
+fn a_retry_token_for_a_member_of_a_sum_checks_the_whole_peer() {
+    let tokens = tokens();
+    let token = tokens
+        .issue_retry(&second("192.0.2.1:4433"), &odcid(), start())
+        .unwrap();
+    assert!(matches!(
+        tokens.validate(&token, &second("192.0.2.1:4433"), start()),
+        TokenOutcome::Retry { .. }
+    ));
+    // Another port, and another member with the same socket address.
+    assert_eq!(
+        tokens.validate(&token, &second("192.0.2.1:4434"), start()),
+        TokenOutcome::InvalidRetry
+    );
+    assert_eq!(
+        tokens.validate(&token, &first("192.0.2.1:4433"), start()),
+        TokenOutcome::InvalidRetry
+    );
+}
+
+#[test]
+fn a_new_token_for_a_member_of_a_sum_validates_only_its_own_network_address() {
+    let tokens = tokens();
+    let token = issuer(&tokens)
+        .issue(&first("192.0.2.1:4433"), start())
+        .unwrap();
+    let TokenOutcome::NewToken(valid) = tokens.validate(&token, &first("192.0.2.1:5000"), start())
+    else {
+        panic!("not a valid NEW_TOKEN token");
+    };
+    assert_eq!(valid.address, NewTokenAddress::Validated);
+    for other in [first("192.0.2.2:4433"), second("192.0.2.1:4433")] {
+        assert_eq!(
+            tokens.validate(&token, &other, start()),
+            TokenOutcome::InvalidNewToken
+        );
+    }
+}
+
+/// A peer reached through a relay: it has no network address, and its bytes
+/// are never written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Relayed(u64);
+
+impl PeerAddress for Relayed {
+    type NetworkAddress = std::convert::Infallible;
+
+    fn network_address(&self) -> Option<Self::NetworkAddress> {
+        None
+    }
+}
+
+impl PeerAddressCodec for Relayed {
+    fn write_peer(&self, _: &mut impl BufMut) {}
+
+    fn read_peer<S: Buf + SplitTo>(_: &mut S) -> Result<Self, PeerAddressReadError> {
+        Err(PeerAddressReadError::UnknownMember)
+    }
+}
+
+#[test]
+fn a_mixed_endpoint_binds_its_udp_member_and_not_its_relayed_one() {
+    type Mixed = Coproduct<SocketAddr, Coproduct<Relayed, CNil>>;
+    let tokens = tokens();
+    let udp: Mixed = Coproduct::Inl(peer());
+    let relayed: Mixed = Coproduct::Inr(Coproduct::Inl(Relayed(7)));
+    assert!(AddressTokens::<Mixed>::binds(&tokens, &udp));
+    assert!(!AddressTokens::<Mixed>::binds(&tokens, &relayed));
+    let token = tokens.issue_retry(&udp, &odcid(), start()).unwrap();
+    assert!(matches!(
+        tokens.validate(&token, &udp, start()),
+        TokenOutcome::Retry { .. }
+    ));
+    assert_eq!(
+        tokens.validate(&token, &relayed, start()),
+        TokenOutcome::InvalidRetry
+    );
 }

@@ -58,7 +58,6 @@ use sakuya_endpoint::role::{ClientConnectionChoices, ServerConnectionChoices};
 use sakuya_endpoint::{
     address_token::{
         AddressTokenKey, AddressTokenLifetimes, AddressTokens, AeadAddressTokens, TokenOutcome,
-        TokenPeerAddress,
     },
     choices::{EndpointChoices, PeerOf},
     client_token::BoundedAddressTokenStore,
@@ -74,7 +73,9 @@ use sakuya_endpoint::{
     role::{AcceptingServer, ConnectingClient, NoClient, NoServer},
     stateless_check::ReturnedToken,
 };
-use sakuya_link::{ConnectingLinkBinding as _, EcnMarking, Link as _, OutgoingDatagram};
+use sakuya_link::{
+    ConnectingLinkBinding as _, EcnMarking, Link as _, OutgoingDatagram, PeerAddressCodec,
+};
 use sakuya_packet_protection::{backend::ring::RingBackend, retry::verify_retry_integrity_tag};
 use sakuya_recovery::loss::{LossThresholds, PacketThreshold, RECOMMENDED_TIME_THRESHOLD};
 use sakuya_stream::connection::{CloseReason, ImmediateClose, TransportImmediateClose};
@@ -1194,35 +1195,33 @@ fn a_closed_endpoint_sends_no_retry() {
     });
 }
 
-/// The tokens of [`aead_tokens`] on an endpoint whose peers they find no
-/// socket address in.
+/// The tokens of [`aead_tokens`] on an endpoint whose peers they cannot bind
+/// a token to.
 #[derive(Clone)]
-struct NoSocketAddrTokens(AeadAddressTokens<AwsLcBackend>);
+struct UnbindingTokens(AeadAddressTokens<AwsLcBackend>);
 
-impl AddressTokens for NoSocketAddrTokens {
-    type NewTokenIssuer = <AeadAddressTokens<AwsLcBackend> as AddressTokens>::NewTokenIssuer;
+impl<Peer: PeerAddressCodec + Eq> AddressTokens<Peer> for UnbindingTokens {
+    type NewTokenIssuer = <AeadAddressTokens<AwsLcBackend> as AddressTokens<Peer>>::NewTokenIssuer;
 
     fn new_token_issuer(&self) -> Self::NewTokenIssuer {
-        self.0.new_token_issuer()
+        AddressTokens::<Peer>::new_token_issuer(&self.0)
+    }
+
+    fn binds(&self, _: &Peer) -> bool {
+        false
     }
 
     fn issue_retry(
         &self,
-        peer: &SocketAddr,
+        peer: &Peer,
         original_dcid: &ConnectionId,
         now: UtcDateTime,
     ) -> Result<Bytes, nitori_crypto::RandomError> {
         self.0.issue_retry(peer, original_dcid, now)
     }
 
-    fn validate(&self, token: &[u8], peer: &SocketAddr, now: UtcDateTime) -> TokenOutcome {
+    fn validate(&self, token: &[u8], peer: &Peer, now: UtcDateTime) -> TokenOutcome {
         self.0.validate(token, peer, now)
-    }
-}
-
-impl<Peer> TokenPeerAddress<Peer> for NoSocketAddrTokens {
-    fn peer_socket_addr<'p>(&self, _: &'p Peer) -> Option<&'p SocketAddr> {
-        None
     }
 }
 
@@ -1240,7 +1239,7 @@ async fn incoming_on<Tk>(
     TerminableIncoming<Udp, ServerWithTokens<Tk>>,
 )
 where
-    Tk: AddressTokens + TokenPeerAddress<PeerOf<Udp>> + Clone + 'static,
+    Tk: AddressTokens<PeerOf<Udp>> + Clone + 'static,
 {
     let (endpoint, reflow) = Endpoint::<Udp, ServerWithTokens<Tk>, NoClient>::new(endpoint_config(
         server_config_with(tokens),
@@ -1270,7 +1269,7 @@ where
 /// Refuses `half`, which shows that its registration is still there.
 async fn assert_refusable<Tk>(half: TerminableIncoming<Udp, ServerWithTokens<Tk>>)
 where
-    Tk: AddressTokens + TokenPeerAddress<PeerOf<Udp>> + Clone + 'static,
+    Tk: AddressTokens<PeerOf<Udp>> + Clone + 'static,
 {
     let refused = half.refuse(TransportImmediateClose {
         code: TransportErrorCode::CONNECTION_REFUSED,
@@ -1281,12 +1280,12 @@ where
 }
 
 #[test]
-fn a_peer_that_is_not_a_socket_address_gets_no_retry() {
+fn a_peer_a_token_cannot_be_bound_to_gets_no_retry() {
     run(async {
-        let (_endpoint, _link, half) = incoming_on(NoSocketAddrTokens(aead_tokens())).await;
+        let (_endpoint, _link, half) = incoming_on(UnbindingTokens(aead_tokens())).await;
         assert!(matches!(
             within("the Retry is refused", half.retry()).await,
-            Err(RetryError::PeerNotSocketAddr(_))
+            Err(RetryError::UnbindablePeer(_))
         ));
     });
 }
@@ -1308,16 +1307,21 @@ struct FaultyTokens {
     fault: Fault,
 }
 
-impl AddressTokens for FaultyTokens {
-    type NewTokenIssuer = <AeadAddressTokens<AwsLcBackend> as AddressTokens>::NewTokenIssuer;
+impl AddressTokens<PeerOf<Udp>> for FaultyTokens {
+    type NewTokenIssuer =
+        <AeadAddressTokens<AwsLcBackend> as AddressTokens<PeerOf<Udp>>>::NewTokenIssuer;
 
     fn new_token_issuer(&self) -> Self::NewTokenIssuer {
-        self.inner.new_token_issuer()
+        AddressTokens::<PeerOf<Udp>>::new_token_issuer(&self.inner)
+    }
+
+    fn binds(&self, peer: &PeerOf<Udp>) -> bool {
+        self.inner.binds(peer)
     }
 
     fn issue_retry(
         &self,
-        _: &SocketAddr,
+        _: &PeerOf<Udp>,
         _: &ConnectionId,
         _: UtcDateTime,
     ) -> Result<Bytes, nitori_crypto::RandomError> {
@@ -1327,14 +1331,8 @@ impl AddressTokens for FaultyTokens {
         }
     }
 
-    fn validate(&self, token: &[u8], peer: &SocketAddr, now: UtcDateTime) -> TokenOutcome {
+    fn validate(&self, token: &[u8], peer: &PeerOf<Udp>, now: UtcDateTime) -> TokenOutcome {
         self.inner.validate(token, peer, now)
-    }
-}
-
-impl TokenPeerAddress<PeerOf<Udp>> for FaultyTokens {
-    fn peer_socket_addr<'p>(&self, peer: &'p PeerOf<Udp>) -> Option<&'p SocketAddr> {
-        self.inner.peer_socket_addr(peer)
     }
 }
 

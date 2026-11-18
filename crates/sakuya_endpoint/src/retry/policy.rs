@@ -1,7 +1,9 @@
-use std::{net::SocketAddr, num::NonZeroU32, num::NonZeroUsize, sync::Arc};
+use std::{num::NonZeroU32, num::NonZeroUsize, sync::Arc};
 
 use snafu::{Snafu, ensure};
 
+#[cfg(doc)]
+use crate::address_token::AddressTokens;
 use crate::address_token::NewTokenAddress;
 
 /// Decides whether an endpoint answers an Initial packet with a stateless
@@ -10,38 +12,46 @@ use crate::address_token::NewTokenAddress;
 /// The endpoint asks the policy only when the protocol allows a Retry: the
 /// packet carries no valid Retry token (a client accepts one Retry per
 /// attempt, RFC 9000 §17.2.5.2), the first packet of the datagram is an
-/// Initial rather than a 0-RTT packet, and the peer is a [`SocketAddr`], so
-/// that a Retry token can be checked against it. The policy does not check
+/// Initial rather than a 0-RTT packet, and a Retry token can be bound to the
+/// peer ([`AddressTokens::binds`]). The policy does not check
 /// these conditions; it only chooses within them.
-pub trait StatelessRetryPolicy {
+pub trait StatelessRetryPolicy<Peer> {
     /// Whether to send a Retry for `input`.
-    fn decide(&self, input: &StatelessRetryInput<'_>) -> StatelessRetryDecision;
+    fn decide(&self, input: &StatelessRetryInput<'_, Peer>) -> StatelessRetryDecision;
 }
 
-impl<P: StatelessRetryPolicy + ?Sized> StatelessRetryPolicy for &P {
-    fn decide(&self, input: &StatelessRetryInput<'_>) -> StatelessRetryDecision {
+impl<Peer, P: StatelessRetryPolicy<Peer> + ?Sized> StatelessRetryPolicy<Peer> for &P {
+    fn decide(&self, input: &StatelessRetryInput<'_, Peer>) -> StatelessRetryDecision {
         (**self).decide(input)
     }
 }
 
-impl<P: StatelessRetryPolicy + ?Sized> StatelessRetryPolicy for Arc<P> {
-    fn decide(&self, input: &StatelessRetryInput<'_>) -> StatelessRetryDecision {
+impl<Peer, P: StatelessRetryPolicy<Peer> + ?Sized> StatelessRetryPolicy<Peer> for Arc<P> {
+    fn decide(&self, input: &StatelessRetryInput<'_, Peer>) -> StatelessRetryDecision {
         (**self).decide(input)
     }
 }
 
 /// What a [`StatelessRetryPolicy`] sees of an Initial packet that may get a Retry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StatelessRetryInput<'a> {
+#[derive(Debug, PartialEq, Eq)]
+pub struct StatelessRetryInput<'a, Peer> {
     /// The token the packet carries.
     pub token: PresentedToken,
     /// The address the packet came from.
-    pub peer: &'a SocketAddr,
+    pub peer: &'a Peer,
     /// How many incoming connections wait for the application to take them.
     pub waiting_incoming: usize,
     /// How many incoming connections can wait at most.
     pub incoming_capacity: NonZeroUsize,
 }
+
+impl<Peer> Clone for StatelessRetryInput<'_, Peer> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<Peer> Copy for StatelessRetryInput<'_, Peer> {}
 
 /// The token an Initial packet that may get a Retry carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -104,8 +114,8 @@ impl Default for LoadStatelessRetryPolicy {
     }
 }
 
-impl StatelessRetryPolicy for LoadStatelessRetryPolicy {
-    fn decide(&self, input: &StatelessRetryInput<'_>) -> StatelessRetryDecision {
+impl<Peer> StatelessRetryPolicy<Peer> for LoadStatelessRetryPolicy {
+    fn decide(&self, input: &StatelessRetryInput<'_, Peer>) -> StatelessRetryDecision {
         let validated = input.token == PresentedToken::NewToken(NewTokenAddress::Validated);
         if !validated
             && self
@@ -209,6 +219,8 @@ mod tests {
         CapacityFraction, LoadStatelessRetryPolicy, PresentedToken, StatelessRetryDecision,
         StatelessRetryInput, StatelessRetryPolicy,
     };
+    #[cfg(doc)]
+    use crate::address_token::AddressTokens;
     use crate::address_token::NewTokenAddress;
     use std::{
         net::{Ipv4Addr, SocketAddr},
@@ -228,7 +240,7 @@ mod tests {
         token: PresentedToken,
         waiting: usize,
         capacity: usize,
-    ) -> StatelessRetryInput<'static> {
+    ) -> StatelessRetryInput<'static, SocketAddr> {
         StatelessRetryInput {
             token,
             peer: &PEER,
@@ -318,7 +330,7 @@ mod tests {
 
     #[test]
     fn references_and_arcs_forward() {
-        fn decide(policy: impl StatelessRetryPolicy) -> StatelessRetryDecision {
+        fn decide(policy: impl StatelessRetryPolicy<SocketAddr>) -> StatelessRetryDecision {
             policy.decide(&input(PresentedToken::Absent, 8, 8))
         }
         let policy = LoadStatelessRetryPolicy::default();

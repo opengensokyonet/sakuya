@@ -12,8 +12,8 @@
 //!   token that does not validate closes the attempt with INVALID_TOKEN
 //!   ([RFC 9000 §8.1.2]); a NEW_TOKEN token is accepted once.
 //! - It asks the [`StatelessRetryPolicy`] whether to answer with a stateless
-//!   Retry, unless the Initial carries a valid Retry token or the peer is not
-//!   a [`SocketAddr`].
+//!   Retry, unless the Initial carries a valid Retry token or no token can be
+//!   bound to the peer.
 //! - For a datagram whose first packet is 0-RTT, it checks the destination
 //!   connection ID length and the bound on incoming connections born from
 //!   0-RTT, and never sends a Retry.
@@ -25,7 +25,7 @@
 //! [RFC 9000 §8.1.2]: https://www.rfc-editor.org/rfc/rfc9000.html#section-8.1.2
 //! [RFC 9000 §14.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-14.1
 
-use std::{fmt, marker::PhantomData, net::SocketAddr, num::NonZeroUsize};
+use std::{fmt, marker::PhantomData, num::NonZeroUsize};
 
 use bytes::Bytes;
 use sakuya_datagram_routing::route::recognizer::ConnectionIdGenerator;
@@ -75,8 +75,6 @@ pub struct StatelessCheck<T, P, B, G: ConnectionIdGenerator> {
 
 impl<T, P, B, G> StatelessCheck<T, P, B, G>
 where
-    T: AddressTokens,
-    P: StatelessRetryPolicy,
     B: CryptoBackend,
     G: ConnectionIdGenerator,
 {
@@ -110,16 +108,21 @@ where
     /// start one, arriving from `peer` while `load` describes the incoming
     /// connections waiting for the application.
     ///
-    /// `peer` is `None` when the link's peer is not a [`SocketAddr`]: a token
-    /// cannot be checked against it, so tokens count as invalid NEW_TOKEN
+    /// `peer` is `None` when the token component cannot bind a token to the
+    /// link's peer ([`AddressTokens::binds`]): a token cannot be checked
+    /// against it, so tokens count as invalid NEW_TOKEN
     /// tokens and no Retry is sent.
-    pub fn first_datagram(
+    pub fn first_datagram<Peer>(
         &mut self,
         datagram: &[u8],
-        peer: Option<&SocketAddr>,
+        peer: Option<&Peer>,
         load: IncomingLoad,
         now: UtcDateTime,
-    ) -> FirstDatagramOutcome {
+    ) -> FirstDatagramOutcome
+    where
+        T: AddressTokens<Peer>,
+        P: StatelessRetryPolicy<Peer>,
+    {
         let Some(packet) = FirstPacket::read(datagram) else {
             return FirstDatagramOutcome::Release(ReleaseReason::Unreadable);
         };
@@ -164,12 +167,15 @@ where
     /// The incoming connection already exists, so no stateless Retry is
     /// sent; the application can still send a Retry from the incoming
     /// connection.
-    pub fn late_initial(
+    pub fn late_initial<Peer>(
         &mut self,
         datagram: &[u8],
-        peer: Option<&SocketAddr>,
+        peer: Option<&Peer>,
         now: UtcDateTime,
-    ) -> LateInitialOutcome {
+    ) -> LateInitialOutcome
+    where
+        T: AddressTokens<Peer>,
+    {
         let Some(FirstPacket::Initial(initial)) = FirstPacket::read(datagram) else {
             return LateInitialOutcome::Release(ReleaseReason::Unreadable);
         };
@@ -199,12 +205,15 @@ where
 
     /// The token the Initial returned, or the INVALID_TOKEN close to send
     /// when it is a Retry token that does not validate.
-    fn returned_token(
+    fn returned_token<Peer>(
         &mut self,
         initial: &FirstInitial,
-        peer: Option<&SocketAddr>,
+        peer: Option<&Peer>,
         now: UtcDateTime,
-    ) -> Result<ReturnedToken, Bytes> {
+    ) -> Result<ReturnedToken, Bytes>
+    where
+        T: AddressTokens<Peer>,
+    {
         if initial.token.is_empty() {
             return Ok(ReturnedToken::Absent);
         }
@@ -237,7 +246,10 @@ where
     /// The stateless Retry for `initial`, or `None` when none can be made:
     /// the random source failed, or the generated source connection ID
     /// equals the Initial's destination connection ID.
-    fn retry(&self, initial: &FirstInitial, peer: &SocketAddr, now: UtcDateTime) -> Option<Bytes> {
+    fn retry<Peer>(&self, initial: &FirstInitial, peer: &Peer, now: UtcDateTime) -> Option<Bytes>
+    where
+        T: AddressTokens<Peer>,
+    {
         let token = self.tokens.issue_retry(peer, &initial.dcid, now).ok()?;
         let scid = generate_stateless_scid::<G>(&self.generator);
         encode_stateless_retry(&self.backend, &initial.dcid, &initial.scid, &scid, &token).ok()

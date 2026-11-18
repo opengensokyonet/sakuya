@@ -16,10 +16,11 @@
 //! [RFC 9000 §8.1]: https://www.rfc-editor.org/rfc/rfc9000.html#section-8.1
 //! [RFC 9000 §8.1.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-8.1.4
 
-use std::{net::SocketAddr, time::Duration};
+use std::time::Duration;
 
 use bytes::Bytes;
 use nitori_crypto::RandomError;
+use sakuya_link::{PeerAddress, same_network_address};
 use sakuya_wire::connection_id::ConnectionId;
 use time::UtcDateTime;
 
@@ -40,17 +41,26 @@ pub const DEFAULT_RETRY_TOKEN_LIFETIME: Duration = Duration::from_secs(15);
 /// endpoint is configured otherwise: two weeks.
 pub const DEFAULT_NEW_TOKEN_LIFETIME: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 
-/// The token component on the endpoint's side.
+/// The token component on the endpoint's side, for links whose peers are
+/// `Peer`.
 ///
 /// Issuing and validating are synchronous: the endpoint calls them while it
 /// decides what to do with an Initial packet, before any connection state
 /// exists.
-pub trait AddressTokens {
+pub trait AddressTokens<Peer> {
     /// What a connection holds to issue NEW_TOKEN tokens.
-    type NewTokenIssuer: NewTokenIssuer;
+    type NewTokenIssuer: NewTokenIssuer<Peer>;
 
     /// The issuer a new connection holds.
     fn new_token_issuer(&self) -> Self::NewTokenIssuer;
+
+    /// Whether a token can be bound to `peer`. When it cannot, the endpoint
+    /// issues no token and sends no Retry on that peer's links, and a token
+    /// that arrives from it counts as an invalid NEW_TOKEN token. A component
+    /// that issues no tokens answers `false` for every peer.
+    ///
+    /// The other methods are called only for a peer it binds.
+    fn binds(&self, peer: &Peer) -> bool;
 
     /// A token for a Retry packet sent to `peer` in response to an Initial
     /// packet whose Destination Connection ID was `original_dcid`.
@@ -66,7 +76,7 @@ pub trait AddressTokens {
     /// [RFC 9000 §7.3]: https://www.rfc-editor.org/rfc/rfc9000.html#section-7.3
     fn issue_retry(
         &self,
-        peer: &SocketAddr,
+        peer: &Peer,
         original_dcid: &ConnectionId,
         now: UtcDateTime,
     ) -> Result<Bytes, RandomError>;
@@ -74,30 +84,18 @@ pub trait AddressTokens {
     /// What the token in an Initial packet from `peer` is.
     ///
     /// `token` is the non-empty Token field of the packet.
-    fn validate(&self, token: &[u8], peer: &SocketAddr, now: UtcDateTime) -> TokenOutcome;
+    fn validate(&self, token: &[u8], peer: &Peer, now: UtcDateTime) -> TokenOutcome;
 }
 
 /// The token component on a connection's side: it issues the tokens a
 /// server sends in NEW_TOKEN frames.
-pub trait NewTokenIssuer {
+pub trait NewTokenIssuer<Peer> {
     /// A token for a NEW_TOKEN frame sent to `peer`.
     ///
     /// # Errors
     ///
     /// Fails when the random source fails; no NEW_TOKEN frame is sent then.
-    fn issue(&self, peer: &SocketAddr, now: UtcDateTime) -> Result<Bytes, RandomError>;
-}
-
-/// Where a token component finds the socket address of a link's peer `Peer`,
-/// which its tokens are bound to.
-///
-/// The requirement on `Peer` follows the component: one that issues tokens
-/// requires a peer that can be a [`SocketAddr`].
-pub trait TokenPeerAddress<Peer> {
-    /// The socket address of `peer`, when it is one; `None` for a peer of
-    /// another kind, on whose links the endpoint issues no tokens and sends
-    /// no Retry.
-    fn peer_socket_addr<'p>(&self, peer: &'p Peer) -> Option<&'p SocketAddr>;
+    fn issue(&self, peer: &Peer, now: UtcDateTime) -> Result<Bytes, RandomError>;
 }
 
 /// What the token in an Initial packet is.
@@ -146,11 +144,12 @@ pub struct ValidNewToken {
 /// of the client that returned it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NewTokenAddress {
-    /// The address policy accepts the client's address and the IP address is
-    /// the one the token was issued to: the client's address is validated.
+    /// The address policy accepts the client's address and its network
+    /// address (the IP address for UDP) is the one the token was issued to:
+    /// the client's address is validated.
     Validated,
-    /// The address policy accepts the client's address but the IP address
-    /// changed. The address is not validated, since a server must then keep
+    /// The address policy accepts the client's address but its network
+    /// address changed or cannot be stated. The address is not validated, since a server must then keep
     /// to the amplification limit ([RFC 9000 §8.1.4]); the endpoint may still
     /// weigh the match when it decides whether to send a Retry.
     ///
@@ -174,31 +173,33 @@ pub enum TokenKind {
 /// Decides whether the address a token was issued to matches the address of
 /// the client that returned it.
 ///
-/// For a NEW_TOKEN token, a match with a different IP address never counts
-/// as a validated address: [`NewTokenAddress::LooselyMatched`] reports it.
-pub trait TokenAddressPolicy {
+/// For a NEW_TOKEN token, a match with a different network address never
+/// counts as a validated address: [`NewTokenAddress::LooselyMatched`]
+/// reports it.
+pub trait TokenAddressPolicy<Peer> {
     /// Whether `current` matches `issued` for a token of `kind`.
-    fn matches(&self, kind: TokenKind, issued: &SocketAddr, current: &SocketAddr) -> bool;
+    fn matches(&self, kind: TokenKind, issued: &Peer, current: &Peer) -> bool;
 }
 
-/// Matches the IP address and port for a Retry token and the IP address for
-/// a NEW_TOKEN token, the checks [RFC 9000 §8.1.4] describes.
+/// Matches the whole peer address for a Retry token and the network address
+/// for a NEW_TOKEN token, the checks [RFC 9000 §8.1.4] describes: for UDP,
+/// the IP address and port, and the IP address.
 ///
 /// [RFC 9000 §8.1.4]: https://www.rfc-editor.org/rfc/rfc9000.html#section-8.1.4
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ExactTokenAddressPolicy;
 
-impl TokenAddressPolicy for ExactTokenAddressPolicy {
-    fn matches(&self, kind: TokenKind, issued: &SocketAddr, current: &SocketAddr) -> bool {
+impl<Peer: PeerAddress + Eq> TokenAddressPolicy<Peer> for ExactTokenAddressPolicy {
+    fn matches(&self, kind: TokenKind, issued: &Peer, current: &Peer) -> bool {
         match kind {
             TokenKind::Retry => issued == current,
-            TokenKind::NewToken => issued.ip() == current.ip(),
+            TokenKind::NewToken => same_network_address(issued, current),
         }
     }
 }
 
-impl<P: TokenAddressPolicy + ?Sized> TokenAddressPolicy for &P {
-    fn matches(&self, kind: TokenKind, issued: &SocketAddr, current: &SocketAddr) -> bool {
+impl<Peer, P: TokenAddressPolicy<Peer> + ?Sized> TokenAddressPolicy<Peer> for &P {
+    fn matches(&self, kind: TokenKind, issued: &Peer, current: &Peer) -> bool {
         (**self).matches(kind, issued, current)
     }
 }

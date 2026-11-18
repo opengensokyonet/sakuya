@@ -84,10 +84,14 @@ use nitori_id::{Identity, UniqueId};
 
 mod binding;
 mod link;
+mod peer_address;
 pub use binding::{AcceptingLinkBinding, ConnectingLinkBinding, LinkBinding};
 pub use link::{
     ArrivalFacts, EcnCodepoint, EcnMarking, Link, MIN_DATAGRAM_SIZE, OutgoingDatagram,
     ReceivedDatagram, SendAcceptance,
+};
+pub use peer_address::{
+    PeerAddress, PeerAddressCodec, PeerAddressReadError, PeerAddressTailCodec, same_network_address,
 };
 
 /// The identity of a link binding: unique within the process, opaque.

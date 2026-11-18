@@ -16,7 +16,7 @@ use sakuya_datagram_routing::claim::queue::DatagramDeliveryQueue;
 use sakuya_link::{EcnMarking, Link, OutgoingDatagram};
 
 use crate::{
-    address_token::TokenPeerAddress,
+    address_token::AddressTokens as _,
     choices::{EndpointChoices, LinkOf, WorkOf},
     domain::Domain,
     incoming::{IncomingShared, TerminableIncoming},
@@ -223,10 +223,8 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> ServerReflow<E, S> {
             return;
         }
         let datagram = work.datagram();
-        let peer = self
-            .check
-            .tokens()
-            .peer_socket_addr(&datagram.link().id().peer);
+        let peer = &datagram.link().id().peer;
+        let peer = self.check.tokens().binds(peer).then_some(peer);
         let load = self.shared.load();
         let outcome = self.check.first_datagram(
             datagram.payload().as_ref(),
@@ -277,10 +275,8 @@ impl<E: EndpointChoices, S: AcceptingServerRole<E>> ServerReflow<E, S> {
     /// from 0-RTT.
     fn late_initial(&mut self, domain: &Arc<Domain<E>>, late: LateInitial<E>) {
         let LateInitial { datagram, reply } = late;
-        let peer = self
-            .check
-            .tokens()
-            .peer_socket_addr(&datagram.link().id().peer);
+        let peer = &datagram.link().id().peer;
+        let peer = self.check.tokens().binds(peer).then_some(peer);
         match self
             .check
             .late_initial(datagram.payload().as_ref(), peer, domain.wall_clock.now())

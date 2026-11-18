@@ -219,8 +219,8 @@ pub(crate) struct RetryPolicy {
     load: LoadStatelessRetryPolicy,
 }
 
-impl StatelessRetryPolicy for RetryPolicy {
-    fn decide(&self, input: &StatelessRetryInput<'_>) -> StatelessRetryDecision {
+impl<Peer> StatelessRetryPolicy<Peer> for RetryPolicy {
+    fn decide(&self, input: &StatelessRetryInput<'_, Peer>) -> StatelessRetryDecision {
         if self.always {
             StatelessRetryDecision::SendRetry
         } else {
