@@ -3,6 +3,7 @@
 use super::{StreamDataInput, StreamReceiveBuffer, offset_add, span};
 use bytes::{BufMut, Bytes};
 use sakuya_wire::var_int::VarInt;
+use smallvec::SmallVec;
 use std::collections::BTreeMap;
 
 /// A [`StreamReceiveBuffer`] that holds received data as fragments keyed by offset.
@@ -89,7 +90,8 @@ fn insert(
     if start >= end {
         return;
     }
-    let mut pieces = Vec::new();
+    // the gaps the payload fills: usually a few, inline
+    let mut pieces: SmallVec<[(VarInt, VarInt); 4]> = SmallVec::new();
     let mut cursor = start;
     for (&key, fragment) in fragments.range(start..end) {
         if key > cursor {

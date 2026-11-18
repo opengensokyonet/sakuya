@@ -15,6 +15,7 @@ use core::fmt;
 use core::ops::Range;
 use nitori_io::SplitTo;
 use sakuya_wire::var_int::VarInt;
+use smallvec::SmallVec;
 use snafu::{IntoError, ResultExt};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -258,8 +259,9 @@ where
         self.pieces.insert(at, tail);
     }
 
-    /// The offsets of the pieces that start in `range`.
-    fn offsets_in(&self, range: &Range<VarInt>) -> Vec<VarInt> {
+    /// The offsets of the pieces that start in `range`: usually a few,
+    /// inline.
+    fn offsets_in(&self, range: &Range<VarInt>) -> SmallVec<[VarInt; 8]> {
         self.pieces
             .range(range.clone())
             .map(|(&offset, _)| offset)

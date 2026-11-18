@@ -809,6 +809,7 @@ dependencies = [
  "nitori_io",
  "proptest",
  "sakuya_wire",
+ "smallvec",
  "snafu",
 ]
 
