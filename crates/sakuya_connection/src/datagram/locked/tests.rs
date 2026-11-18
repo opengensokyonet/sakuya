@@ -436,6 +436,35 @@ fn supply_next(
     )
 }
 
+#[test]
+fn pacing_can_release_a_single_datagram_smaller_than_the_path_maximum() {
+    let (_queues, mut core, _handle, writer) = sending(1200, DatagramQueueBounds::default());
+    let mut planner = planner(&mut core);
+    let ticket = writer
+        .with_send_options(Urgency::default(), AnyActiveLinkPath)
+        .send(Bytes::from_static(b"ping"))
+        .expect("taken");
+    let driver = crate::send_strategy::DriverContent::default();
+    let mut cx = Context::from_waker(Waker::noop());
+
+    // A 30-byte packet overhead, a one-byte frame type, and four bytes of
+    // payload. The only frame can omit its Length.
+    planner.observe(DatagramLimits {
+        pacing_allowance: 34,
+        ..limits()
+    });
+    assert!(planner.poll_plan(&mut core, &driver, &mut cx).is_pending());
+    assert_eq!(ticket.state(), DatagramState::Waiting);
+    planner.observe(DatagramLimits {
+        pacing_allowance: 35,
+        ..limits()
+    });
+    assert!(matches!(
+        planner.poll_plan(&mut core, &driver, &mut cx),
+        Poll::Ready(PlannedDatagram::Fill(_))
+    ));
+}
+
 /// Sent through the strategy, a datagram is written by the frame source,
 /// and its acknowledgment settles its ticket; a datagram is planned once
 /// only, and its queue counts it as gone once written.
