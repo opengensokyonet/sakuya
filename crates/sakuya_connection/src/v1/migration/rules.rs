@@ -603,6 +603,19 @@ where
         let NodeKey::LogicalPath(path) = others.here().clone() else {
             unreachable!("a logical path's lend carries its key")
         };
+        // nearly every packet comes with the connection ID its link path saw
+        // last and either does not move the peer or arrives on the active
+        // link path: nothing changes, and the link paths are not gathered
+        let zero = zero_length::<T, L, Icid>(lineage);
+        if let Some(hlist_pat![role, _, used]) =
+            others.link_path::<LinkPathTakes<T>, Ix>(&path, link)
+        {
+            let same_id = zero || used.get() == Some(*destination);
+            let may_switch = matches!(*role, LinkPathRole::Candidate | LinkPathRole::Settling(_));
+            if same_id && !(moves && may_switch) {
+                return;
+            }
+        }
         let mut gathered = gather::<T, L, B, Iv, Ima, Ir, Ilm, Icu, Ian, Irt>(lineage, others);
         let Some(arrival) = gathered.iter().position(|each| each.link == *link) else {
             return;
