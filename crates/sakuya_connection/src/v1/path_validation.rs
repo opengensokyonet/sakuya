@@ -676,7 +676,7 @@ where
                 NodeKey::Recovery(each, over) if *each == path && *over == link => {
                     path_pto = Some(pto);
                 }
-                NodeKey::LinkPath(each, over) if *each == path && actives.contains(over) => {
+                NodeKey::Recovery(each, over) if *each == path && actives.contains(over) => {
                     active_pto = Some(pto);
                 }
                 _ => {}
